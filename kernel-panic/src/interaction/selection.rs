@@ -2,7 +2,7 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::UnitType;
+use crate::units::components::{SelectionVolume, UnitType};
 
 use super::movement::MoveTarget;
 
@@ -29,6 +29,7 @@ pub fn handle_selection(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
     unit_q: Query<Entity, With<UnitType>>,
+    volume_q: Query<&ChildOf, With<SelectionVolume>>,
     selected_q: Query<Entity, With<Selected>>,
     ring_q: Query<Entity, With<SelectionRing>>,
     mut commands: Commands,
@@ -42,7 +43,20 @@ pub fn handle_selection(
     };
 
     let hits = ray_cast.cast_ray(ray, &default());
-    let clicked_unit = hits.iter().find(|(entity, _)| unit_q.contains(*entity));
+
+    // Resolve hit: either a direct unit hit, or a SelectionVolume child → parent unit.
+    let clicked_unit = hits.iter().find_map(|(entity, _)| {
+        if unit_q.contains(*entity) {
+            return Some(*entity);
+        }
+        if let Ok(child_of) = volume_q.get(*entity) {
+            let parent = child_of.parent();
+            if unit_q.contains(parent) {
+                return Some(parent);
+            }
+        }
+        None
+    });
 
     // Clear previous selection.
     for entity in &selected_q {
@@ -52,7 +66,7 @@ pub fn handle_selection(
         commands.entity(entity).despawn();
     }
 
-    if let Some(&(entity, _)) = clicked_unit {
+    if let Some(entity) = clicked_unit {
         commands.entity(entity).insert(Selected);
     }
 }

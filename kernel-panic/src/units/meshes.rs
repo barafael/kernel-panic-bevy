@@ -105,6 +105,14 @@ pub fn unit_mesh(
     meshes.add(mesh)
 }
 
+/// Get the bounding radius of a unit's s3o model (in elmos), or a fallback.
+pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache) -> f32 {
+    let unit_stats = stats(kind);
+    load_s3o_cached(unit_stats.model, cache)
+        .map(|m| m.radius)
+        .unwrap_or(20.0)
+}
+
 // ---------------------------------------------------------------------------
 // Model / texture loading with shared disk-read helper
 // ---------------------------------------------------------------------------

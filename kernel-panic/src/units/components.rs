@@ -56,3 +56,8 @@ impl Health {
 /// Which team/player owns this unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
 pub struct TeamId(pub u8);
+
+/// Invisible child mesh used as a click target for unit selection.
+/// The parent entity is the actual unit.
+#[derive(Component)]
+pub struct SelectionVolume;
