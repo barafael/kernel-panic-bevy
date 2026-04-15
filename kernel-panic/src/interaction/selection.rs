@@ -178,7 +178,20 @@ pub fn handle_selection(
     }
 }
 
-/// Right-click: issue a move command to selected units.
+/// Minimum distance between sampled path points (world units).
+const PATH_SAMPLE_MIN_DISTANCE: f32 = 20.0;
+
+/// Tracks right-click drag path for move commands.
+#[derive(Resource, Default)]
+pub struct RightDragPath {
+    /// World-space points sampled along the drag path.
+    points: Vec<Vec3>,
+    /// Whether we're actively dragging.
+    active: bool,
+}
+
+/// Right-click: single click moves all selected to one point.
+/// Right-drag: sample a path, distribute selected units along it on release.
 pub fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -186,24 +199,115 @@ pub fn handle_right_click(
     mut ray_cast: MeshRayCast,
     selected_q: Query<Entity, With<Selected>>,
     mut commands: Commands,
+    mut drag_path: ResMut<RightDragPath>,
 ) {
-    if !mouse.just_pressed(MouseButton::Right) {
-        return;
+    // --- Right press: start path ---
+    if mouse.just_pressed(MouseButton::Right) {
+        drag_path.points.clear();
+        drag_path.active = true;
+
+        if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
+            drag_path.points.push(point);
+        }
     }
 
-    let Some(ray) = cursor_ray(&windows, &camera_q) else {
-        return;
-    };
+    // --- While held: sample path points ---
+    if mouse.pressed(MouseButton::Right) && drag_path.active {
+        if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
+            // Only add if far enough from the last point.
+            let dominated = drag_path
+                .points
+                .last()
+                .is_some_and(|last| last.distance(point) < PATH_SAMPLE_MIN_DISTANCE);
+            if !dominated {
+                drag_path.points.push(point);
+            }
+        }
+    }
 
+    // --- Right release: issue commands ---
+    if mouse.just_released(MouseButton::Right) && drag_path.active {
+        drag_path.active = false;
+
+        let units: Vec<Entity> = selected_q.iter().collect();
+        if units.is_empty() || drag_path.points.is_empty() {
+            return;
+        }
+
+        if drag_path.points.len() == 1 {
+            // Single click: all units move to the same point.
+            let target = drag_path.points[0];
+            for entity in &units {
+                commands.entity(*entity).insert(MoveTarget(target));
+            }
+        } else {
+            // Drag path: distribute units evenly along it.
+            let targets = sample_path_evenly(&drag_path.points, units.len());
+            for (entity, target) in units.iter().zip(targets.iter()) {
+                commands.entity(*entity).insert(MoveTarget(*target));
+            }
+        }
+
+        drag_path.points.clear();
+    }
+}
+
+/// Cast a ray from the cursor to the ground and return the hit point.
+fn ground_hit(
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    ray_cast: &mut MeshRayCast,
+) -> Option<Vec3> {
+    let ray = cursor_ray(windows, camera_q)?;
     let hits = ray_cast.cast_ray(ray, &default());
+    hits.first().map(|(_, hit)| hit.point)
+}
 
-    let Some((_, hit)) = hits.first() else {
-        return;
-    };
-
-    for entity in &selected_q {
-        commands.entity(entity).insert(MoveTarget(hit.point));
+/// Sample `count` points evenly distributed along a polyline path.
+fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
+    if count == 0 || path.is_empty() {
+        return vec![];
     }
+    if count == 1 {
+        // Single unit: place at the end of the path.
+        return vec![*path.last().unwrap()];
+    }
+
+    // Compute cumulative distances along the path.
+    let mut cumulative = vec![0.0f32];
+    for i in 1..path.len() {
+        let prev = cumulative[i - 1];
+        cumulative.push(prev + path[i - 1].distance(path[i]));
+    }
+    let total_length = *cumulative.last().unwrap();
+
+    if total_length < 0.01 {
+        return vec![path[0]; count];
+    }
+
+    // Sample `count` equidistant points along the path.
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let target_dist = (i as f32 / (count - 1) as f32) * total_length;
+
+        // Find the segment containing this distance.
+        let seg = cumulative
+            .windows(2)
+            .position(|w| w[0] <= target_dist && target_dist <= w[1])
+            .unwrap_or(path.len() - 2);
+
+        let seg_start_dist = cumulative[seg];
+        let seg_length = cumulative[seg + 1] - seg_start_dist;
+        let t = if seg_length > 0.0 {
+            (target_dist - seg_start_dist) / seg_length
+        } else {
+            0.0
+        };
+
+        result.push(path[seg].lerp(path[seg + 1], t));
+    }
+
+    result
 }
 
 /// Spawn a visual ring under newly-selected units.
