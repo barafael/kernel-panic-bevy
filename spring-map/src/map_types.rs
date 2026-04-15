@@ -201,7 +201,7 @@ pub struct MapFeature {
 }
 
 impl MapFeature {
-    pub(crate) fn new(
+    pub fn new(
         feature_type: FeatureType,
         x: f32,
         y: f32,
