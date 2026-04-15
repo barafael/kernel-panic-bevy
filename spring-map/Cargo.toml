@@ -1,0 +1,11 @@
+[package]
+name = "spring-map"
+version = "0.1.0"
+edition = "2024"
+description = "Parser for Spring RTS engine map files (.smf/.smt/.sd7)"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+sevenz-rust = { workspace = true }
+zip = { workspace = true }
