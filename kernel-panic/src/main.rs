@@ -111,10 +111,10 @@ fn cycle_map_on_keypress(
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
 ) {
-    let changed = if keys.just_pressed(KeyCode::Slash) {
+    let changed = if keys.just_pressed(KeyCode::BracketRight) {
         catalog.current = (catalog.current + 1) % catalog.maps.len();
         true
-    } else if keys.just_pressed(KeyCode::Backslash) {
+    } else if keys.just_pressed(KeyCode::BracketLeft) {
         catalog.current = (catalog.current + catalog.maps.len() - 1) % catalog.maps.len();
         true
     } else {
@@ -209,10 +209,17 @@ fn load_map_at_index(
 
     setup_camera(parsed, camera_query, map_bounds);
 
-    if parsed.header.min_height == parsed.header.max_height {
+    // Check actual height variance, not header values (gadgets may have modified the terrain).
+    let min_actual = parsed.heights.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_actual = parsed
+        .heights
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+    if (max_actual - min_actual) < 1.0 {
         warn!(
-            "  Flat terrain (min=max={}). Lua heightmap gadget not supported yet.",
-            parsed.header.min_height
+            "  Terrain is effectively flat (height range: {:.1})",
+            max_actual - min_actual
         );
     }
 

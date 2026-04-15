@@ -11,6 +11,9 @@ pub struct ExtractedMap {
     pub smt_data: Option<Vec<u8>>,
     /// Raw text of the .smd metadata file (if found).
     pub smd_text: Option<String>,
+    /// Lua files found in the archive: `(path, content)` pairs.
+    /// Includes gadgets, mapinfo.lua, featureplacer scripts, etc.
+    pub lua_files: Vec<(String, String)>,
 }
 
 /// Load map data from a .sd7, .sdz, or raw .smf file.
@@ -47,6 +50,7 @@ pub fn load_map_archive(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                 smf_name: name,
                 smt_data,
                 smd_text,
+                lua_files: vec![],
             })
         }
         other => Err(ArchiveError::UnsupportedFormat(other.to_string())),
@@ -63,6 +67,7 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     let mut smf_data: Option<Vec<u8>> = None;
     let mut smt_data: Option<Vec<u8>> = None;
     let mut smd_text: Option<String> = None;
+    let mut lua_files: Vec<(String, String)> = Vec::new();
     let mut smf_name = String::new();
 
     archive
@@ -82,9 +87,12 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                 let mut buf = Vec::new();
                 reader.read_to_end(&mut buf)?;
                 smd_text = Some(String::from_utf8_lossy(&buf).into_owned());
+            } else if lower.ends_with(".lua") {
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf)?;
+                lua_files.push((name, String::from_utf8_lossy(&buf).into_owned()));
             }
-            let have_all = smf_data.is_some() && smt_data.is_some() && smd_text.is_some();
-            Ok(!have_all)
+            Ok(true) // always continue — Lua files can be anywhere
         })
         .map_err(|e| ArchiveError::SevenZ(e.to_string()))?;
 
@@ -94,6 +102,7 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             smf_name,
             smt_data,
             smd_text,
+            lua_files,
         }),
         None => Err(ArchiveError::NoSmfFound),
     }
@@ -106,6 +115,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     let mut smf_data: Option<Vec<u8>> = None;
     let mut smt_data: Option<Vec<u8>> = None;
     let mut smd_text: Option<String> = None;
+    let mut lua_files: Vec<(String, String)> = Vec::new();
     let mut smf_name = String::new();
 
     for i in 0..archive.len() {
@@ -125,9 +135,10 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             smd_text = Some(String::from_utf8_lossy(&buf).into_owned());
-        }
-        if smf_data.is_some() && smt_data.is_some() && smd_text.is_some() {
-            break;
+        } else if lower.ends_with(".lua") {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            lua_files.push((name, String::from_utf8_lossy(&buf).into_owned()));
         }
     }
 
@@ -137,6 +148,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             smf_name,
             smt_data,
             smd_text,
+            lua_files,
         }),
         None => Err(ArchiveError::NoSmfFound),
     }

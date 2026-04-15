@@ -1,0 +1,260 @@
+/// Execute Lua heightmap gadgets against a parsed map's height array.
+///
+/// This stubs the minimal Spring API surface needed for heightmap gadgets
+/// like Palladium's `PalladiumHeight.lua` to modify the terrain during
+/// their `Initialize()` call.
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use mlua::prelude::*;
+
+use crate::map_types::{ParsedMap, SQUARE_SIZE};
+
+/// Find and execute any heightmap gadgets from the extracted Lua files.
+///
+/// Modifies `map.heights` in place. Returns the number of gadgets executed.
+pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[(String, String)]) -> usize {
+    let gadgets: Vec<&(String, String)> = lua_files
+        .iter()
+        .filter(|(path, _)| {
+            let lower = path.to_ascii_lowercase();
+            lower.contains("luarules/gadgets") && lower.ends_with(".lua")
+        })
+        .collect();
+
+    if gadgets.is_empty() {
+        return 0;
+    }
+
+    let mut executed = 0;
+
+    for (path, source) in &gadgets {
+        // Only execute gadgets that look like they modify the heightmap.
+        let lower_source = source.to_ascii_lowercase();
+        if !lower_source.contains("setheightmap") {
+            continue;
+        }
+
+        match execute_heightmap_gadget(map, source) {
+            Ok(()) => {
+                eprintln!("Executed heightmap gadget: {path}");
+                executed += 1;
+            }
+            Err(err) => {
+                eprintln!("Failed to execute heightmap gadget {path}: {err}");
+            }
+        }
+    }
+
+    executed
+}
+
+fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), LuaError> {
+    let lua = Lua::new();
+
+    let heightmap_w = map.header.heightmap_width();
+    let heightmap_h = map.header.heightmap_height();
+    let world_size_x = (map.header.map_x * SQUARE_SIZE) as f32;
+    let world_size_z = (map.header.map_y * SQUARE_SIZE) as f32;
+
+    // Shared mutable reference to the heights array via Rc<RefCell>.
+    let heights = Rc::new(RefCell::new(std::mem::take(&mut map.heights)));
+
+    // --- Stub the Spring table ---
+    let spring_table = lua.create_table()?;
+
+    // Spring.SetHeightMap(x, z, height)
+    {
+        let heights_ref = Rc::clone(&heights);
+        let set_height_map = lua.create_function(move |_, (x, z, height): (f32, f32, f32)| {
+            let hx = (x / SQUARE_SIZE as f32).round() as usize;
+            let hz = (z / SQUARE_SIZE as f32).round() as usize;
+            let mut h = heights_ref.borrow_mut();
+            if hx < heightmap_w && hz < heightmap_h {
+                h[hz * heightmap_w + hx] = height;
+            }
+            Ok(())
+        })?;
+        spring_table.set("SetHeightMap", set_height_map)?;
+    }
+
+    // Spring.SetHeightMapFunc(func) — calls the function once
+    {
+        let set_height_map_func = lua.create_function(|_, func: LuaFunction| {
+            func.call::<()>(())?;
+            Ok(())
+        })?;
+        spring_table.set("SetHeightMapFunc", set_height_map_func)?;
+    }
+
+    // Spring.GetGroundHeight(x, z)
+    {
+        let heights_ref = Rc::clone(&heights);
+        let get_ground_height = lua.create_function(move |_, (x, z): (f32, f32)| {
+            let hx = (x / SQUARE_SIZE as f32).round() as usize;
+            let hz = (z / SQUARE_SIZE as f32).round() as usize;
+            let h = heights_ref.borrow();
+            if hx < heightmap_w && hz < heightmap_h {
+                Ok(h[hz * heightmap_w + hx])
+            } else {
+                Ok(0.0)
+            }
+        })?;
+        spring_table.set("GetGroundHeight", get_ground_height)?;
+    }
+
+    // Spring.GetMapOptions() — return empty table (defaults)
+    spring_table.set(
+        "GetMapOptions",
+        lua.create_function(|lua, ()| lua.create_table())?,
+    )?;
+
+    // Spring.Echo(msg)
+    spring_table.set(
+        "Echo",
+        lua.create_function(|_, msg: String| {
+            eprintln!("[Lua] {msg}");
+            Ok(())
+        })?,
+    )?;
+
+    // Boolean stubs
+    spring_table.set("IsCheatingEnabled", lua.create_function(|_, ()| Ok(false))?)?;
+    spring_table.set("IsDevLuaEnabled", lua.create_function(|_, ()| Ok(false))?)?;
+    spring_table.set("IsGodModeEnabled", lua.create_function(|_, ()| Ok(false))?)?;
+
+    // Feature stubs (return empty results)
+    spring_table.set(
+        "GetAllFeatures",
+        lua.create_function(|lua, ()| lua.create_table())?,
+    )?;
+
+    lua.globals().set("Spring", spring_table)?;
+
+    // --- Stub the Game table ---
+    let game_table = lua.create_table()?;
+    game_table.set("mapSizeX", world_size_x as i32)?;
+    game_table.set("mapSizeZ", world_size_z as i32)?;
+    lua.globals().set("Game", game_table)?;
+
+    // --- Stub gadgetHandler ---
+    let gadget_handler = lua.create_table()?;
+    gadget_handler.set("IsSyncedCode", lua.create_function(|_, ()| Ok(true))?)?;
+    lua.globals().set("gadgetHandler", gadget_handler)?;
+
+    // --- Load the gadget source ---
+    // Spring gadgets use `function gadget:GetInfo()` and `function gadget:Initialize()`.
+    // We need to provide a `gadget` table, load the source, then call Initialize.
+    let gadget_table = lua.create_table()?;
+    lua.globals().set("gadget", &gadget_table)?;
+
+    // Execute the gadget source in the global scope.
+    lua.load(source).exec()?;
+
+    // Call gadget:Initialize() if it exists.
+    if let Ok(init_fn) = gadget_table.get::<LuaFunction>("Initialize") {
+        init_fn.call::<()>(gadget_table)?;
+    }
+
+    // Drop the Lua VM to release all Rc references before unwrapping.
+    drop(lua);
+
+    // Retrieve the modified heights.
+    map.heights = Rc::try_unwrap(heights)
+        .expect("all Lua references should be dropped after Lua VM drop")
+        .into_inner();
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map_types::SmfHeader;
+
+    #[test]
+    fn simple_lua_heightmap() {
+        let header = SmfHeader::new_flat(128, 128, 0.0, 100.0);
+        let heightmap_len = header.heightmap_len();
+        let mut map = ParsedMap {
+            header,
+            heights: vec![50.0; heightmap_len],
+            features: vec![],
+            metalmap: vec![0; 64 * 64],
+        };
+
+        let gadget_source = r#"
+            function gadget:GetInfo()
+                return { name = "test", desc = "test", author = "test", date = "", license = "", layer = 0, enabled = true }
+            end
+            function gadget:Initialize()
+                Spring.SetHeightMapFunc(function()
+                    for z = 0, 128, 8 do
+                        for x = 0, 128, 8 do
+                            Spring.SetHeightMap(x, z, 200)
+                        end
+                    end
+                end)
+            end
+        "#;
+
+        let lua_files = vec![(
+            "LuaRules/Gadgets/test.lua".to_string(),
+            gadget_source.to_string(),
+        )];
+
+        let executed = apply_lua_heightmap_gadgets(&mut map, &lua_files);
+        assert_eq!(executed, 1);
+
+        // The gadget set all accessible heights to 200.
+        assert!((map.heights[0] - 200.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn palladium_gadget() {
+        let sd7_path = [
+            "kernel-panic/assets/maps/Palladium_0.5_(beta).sd7",
+            "assets/maps/Palladium_0.5_(beta).sd7",
+        ]
+        .iter()
+        .map(std::path::Path::new)
+        .find(|p| p.exists());
+        let Some(sd7_path) = sd7_path else {
+            eprintln!("Skipping: Palladium not found");
+            return;
+        };
+
+        let extracted = crate::sd7_archive::load_map_archive(sd7_path).unwrap();
+        let mut parsed = crate::smf_parser::parse_smf(&extracted.smf_data).unwrap();
+
+        // Before gadget: all heights should be the same (flat map).
+        let initial_height = parsed.heights[0];
+        assert!(
+            parsed
+                .heights
+                .iter()
+                .all(|&h| (h - initial_height).abs() < 0.01),
+            "Palladium should be flat before gadget execution"
+        );
+
+        let executed = apply_lua_heightmap_gadgets(&mut parsed, &extracted.lua_files);
+        assert_eq!(executed, 1, "Should execute exactly one heightmap gadget");
+
+        // After gadget: heights should vary (platforms at different levels).
+        let min_height = parsed.heights.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max_height = parsed
+            .heights
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
+        let height_range = max_height - min_height;
+
+        eprintln!(
+            "Palladium after gadget: height range {min_height:.0}..{max_height:.0} (delta={height_range:.0})"
+        );
+        assert!(
+            height_range > 10.0,
+            "Height range should be significant after gadget: got {height_range}"
+        );
+    }
+}
