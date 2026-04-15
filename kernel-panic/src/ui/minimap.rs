@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 
-use crate::rendering::camera::RtsCameraState;
 use crate::units::components::Faction;
 
 /// Minimap display size in logical pixels.
@@ -113,8 +112,9 @@ fn update_minimap(
     time: Res<Time>,
     mut state: ResMut<MinimapState>,
     mut images: ResMut<Assets<Image>>,
-    camera_query: Query<&RtsCameraState>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<crate::rendering::camera::RtsCamera>>,
     unit_query: Query<(&Transform, &Faction)>,
+    windows: Query<&Window>,
 ) {
     state.timer.tick(time.delta());
     if !state.timer.just_finished() {
@@ -156,71 +156,65 @@ fn update_minimap(
         }
     }
 
-    // Draw viewport trapezoid based on camera angle.
-    if let Ok(cam_state) = camera_query.single() {
-        let focus = cam_state.focus;
-        let dist = cam_state.distance;
-        let pitch = cam_state.pitch;
-        let yaw = cam_state.yaw;
+    // Draw viewport by casting rays from the four screen corners to the
+    // ground plane (Y = avg terrain height) and connecting the hit points.
+    if let (Ok((camera, camera_global)), Ok(window)) = (camera_query.single(), windows.single()) {
+        let screen_w = window.width();
+        let screen_h = window.height();
 
-        // The camera sits at height `dist * sin(pitch)` above the focus,
-        // looking down. A ~60° vertical FOV means the ground plane is cut
-        // by two rays: one hitting near the camera, one hitting far away.
-        // The far edge is wider because the same angular FOV spans more
-        // ground at greater distance.
-        let camera_height = dist * pitch.sin();
-        let horizontal_dist = dist * pitch.cos();
-
-        // Distances from focus to near/far ground edges along the view axis.
-        let depth_near = horizontal_dist * 0.3;
-        let depth_far = horizontal_dist * 0.9;
-
-        // Half-widths at near and far edges (perspective: farther = wider).
-        let near_dist_from_cam = (camera_height.powi(2) + depth_near.powi(2)).sqrt();
-        let far_dist_from_cam = (camera_height.powi(2) + depth_far.powi(2)).sqrt();
-        let half_width_near = near_dist_from_cam * 0.5;
-        let half_width_far = far_dist_from_cam * 0.7;
-
-        let sin_yaw = yaw.sin();
-        let cos_yaw = yaw.cos();
-
-        // Four corners: near-left, near-right, far-right, far-left.
-        let corners = [
-            (
-                focus.x + (-half_width_near * cos_yaw - depth_near * sin_yaw),
-                focus.z + (half_width_near * sin_yaw - depth_near * cos_yaw),
-            ),
-            (
-                focus.x + (half_width_near * cos_yaw - depth_near * sin_yaw),
-                focus.z + (-half_width_near * sin_yaw - depth_near * cos_yaw),
-            ),
-            (
-                focus.x + (half_width_far * cos_yaw + depth_far * sin_yaw),
-                focus.z + (-half_width_far * sin_yaw + depth_far * cos_yaw),
-            ),
-            (
-                focus.x + (-half_width_far * cos_yaw + depth_far * sin_yaw),
-                focus.z + (half_width_far * sin_yaw + depth_far * cos_yaw),
-            ),
+        let screen_corners = [
+            Vec2::new(0.0, 0.0),           // top-left
+            Vec2::new(screen_w, 0.0),      // top-right
+            Vec2::new(screen_w, screen_h), // bottom-right
+            Vec2::new(0.0, screen_h),      // bottom-left
         ];
 
-        // Convert to minimap pixel coordinates and draw lines between corners.
-        let mm_corners: Vec<(i32, i32)> = corners
-            .iter()
-            .map(|(wx, wz)| {
-                let mx = (wx / state.world_width * mm_w as f32) as i32;
-                let mz = (wz / state.world_depth * mm_h as f32) as i32;
-                (mx, mz)
-            })
-            .collect();
+        let mut ground_hits: Vec<(i32, i32)> = Vec::new();
 
-        let white = [255, 255, 255, 200];
-        for i in 0..4 {
-            let (x0, y0) = mm_corners[i];
-            let (x1, y1) = mm_corners[(i + 1) % 4];
-            draw_line(pixels, mm_w, mm_h, x0, y0, x1, y1, white);
+        for screen_pos in &screen_corners {
+            if let Ok(ray) = camera.viewport_to_world(camera_global, *screen_pos) {
+                // Intersect ray with the ground plane Y = focus_y.
+                // Ray: P = origin + t * direction
+                // Solve for t where P.y = ground_y
+                if let Some(world_point) = ray_ground_intersect(&ray) {
+                    let mx = (world_point.x / state.world_width * mm_w as f32) as i32;
+                    let mz = (world_point.z / state.world_depth * mm_h as f32) as i32;
+                    ground_hits.push((mx, mz));
+                }
+            }
+        }
+
+        if ground_hits.len() == 4 {
+            let white = [255, 255, 255, 200];
+            for i in 0..4 {
+                let (x0, y0) = ground_hits[i];
+                let (x1, y1) = ground_hits[(i + 1) % 4];
+                draw_line(pixels, mm_w, mm_h, x0, y0, x1, y1, white);
+            }
         }
     }
+}
+
+/// Intersect a ray with the ground plane (Y = 0).
+/// Returns the world-space hit point, or `None` if the ray is parallel or pointing away.
+fn ray_ground_intersect(ray: &Ray3d) -> Option<Vec3> {
+    let origin = ray.origin;
+    let dir = *ray.direction;
+
+    // Ground plane: Y = 0. Solve origin.y + t * dir.y = 0.
+    if dir.y.abs() < 1e-6 {
+        return None; // Ray parallel to ground.
+    }
+
+    let t = -origin.y / dir.y;
+    if t < 0.0 {
+        return None; // Hit is behind camera.
+    }
+
+    // Clamp t to avoid extremely distant intersections for near-horizontal rays.
+    let t = t.min(50000.0);
+
+    Some(origin + dir * t)
 }
 
 /// Bresenham line drawing between two points.
