@@ -55,29 +55,126 @@ pub fn update_hover(
     }
 }
 
-/// Left-click: select a unit (or deselect by clicking terrain).
+/// Minimum drag distance in pixels before it counts as a box-select.
+const DRAG_THRESHOLD: f32 = 8.0;
+
+/// Tracks drag state for box selection.
+#[derive(Resource, Default)]
+pub struct DragState {
+    /// Screen position where left mouse was pressed.
+    start: Option<Vec2>,
+    /// Whether we're actively dragging (past threshold).
+    dragging: bool,
+}
+
+/// Visual overlay for the selection box.
+#[derive(Component)]
+pub struct SelectionBoxNode;
+
+/// Handle left-click and drag-box selection.
 pub fn handle_selection(
     mouse: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     hovered_q: Query<Entity, With<Hovered>>,
     selected_q: Query<Entity, With<Selected>>,
     ring_q: Query<Entity, With<SelectionRing>>,
+    unit_q: Query<(Entity, &GlobalTransform), With<UnitType>>,
+    box_nodes: Query<Entity, With<SelectionBoxNode>>,
+    mut drag_state: ResMut<DragState>,
     mut commands: Commands,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) {
-        return;
+    let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
+
+    // --- Left press: start tracking ---
+    if mouse.just_pressed(MouseButton::Left) {
+        drag_state.start = cursor_pos;
+        drag_state.dragging = false;
     }
 
-    // Clear previous selection.
-    for entity in &selected_q {
-        commands.entity(entity).remove::<Selected>();
-    }
-    for entity in &ring_q {
-        commands.entity(entity).despawn();
+    // --- While held: update box if past threshold ---
+    if mouse.pressed(MouseButton::Left) {
+        if let (Some(start), Some(current)) = (drag_state.start, cursor_pos) {
+            let distance = (current - start).length();
+            if distance > DRAG_THRESHOLD {
+                drag_state.dragging = true;
+
+                // Update or spawn the selection box UI node.
+                let min_x = start.x.min(current.x);
+                let min_y = start.y.min(current.y);
+                let width = (current.x - start.x).abs();
+                let height = (current.y - start.y).abs();
+
+                // Remove old box node.
+                for entity in &box_nodes {
+                    commands.entity(entity).despawn();
+                }
+
+                commands.spawn((
+                    SelectionBoxNode,
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(min_x),
+                        top: Val::Px(min_y),
+                        width: Val::Px(width),
+                        height: Val::Px(height),
+                        border: UiRect::all(Val::Px(1.0)),
+                        ..default()
+                    },
+                    BorderColor::all(Color::linear_rgb(0.0, 1.0, 0.0)),
+                    BackgroundColor(Color::srgba(0.0, 1.0, 0.0, 0.08)),
+                ));
+            }
+        }
     }
 
-    // Select whatever is currently hovered.
-    if let Some(entity) = hovered_q.iter().next() {
-        commands.entity(entity).insert(Selected);
+    // --- Left release ---
+    if mouse.just_released(MouseButton::Left) {
+        // Remove selection box visual.
+        for entity in &box_nodes {
+            commands.entity(entity).despawn();
+        }
+
+        // Clear previous selection.
+        for entity in &selected_q {
+            commands.entity(entity).remove::<Selected>();
+        }
+        for entity in &ring_q {
+            commands.entity(entity).despawn();
+        }
+
+        if drag_state.dragging {
+            // Box select: find all units whose screen position is inside the box.
+            if let (Some(start), Some(end)) = (drag_state.start, cursor_pos) {
+                let min_screen = Vec2::new(start.x.min(end.x), start.y.min(end.y));
+                let max_screen = Vec2::new(start.x.max(end.x), start.y.max(end.y));
+
+                if let Ok((camera, camera_transform)) = camera_q.single() {
+                    for (entity, global_transform) in &unit_q {
+                        let Ok(screen_pos) = camera
+                            .world_to_viewport(camera_transform, global_transform.translation())
+                        else {
+                            continue;
+                        };
+                        if screen_pos.x >= min_screen.x
+                            && screen_pos.x <= max_screen.x
+                            && screen_pos.y >= min_screen.y
+                            && screen_pos.y <= max_screen.y
+                        {
+                            commands.entity(entity).insert(Selected);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Click select: pick the hovered unit.
+            if let Some(entity) = hovered_q.iter().next() {
+                commands.entity(entity).insert(Selected);
+            }
+        }
+
+        drag_state.start = None;
+        drag_state.dragging = false;
     }
 }
 

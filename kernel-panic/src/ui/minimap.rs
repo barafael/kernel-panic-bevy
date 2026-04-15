@@ -156,53 +156,100 @@ fn update_minimap(
         }
     }
 
-    // Draw viewport rectangle.
+    // Draw viewport trapezoid based on camera angle.
     if let Ok(cam_state) = camera_query.single() {
         let focus = cam_state.focus;
+        let dist = cam_state.distance;
+        let pitch = cam_state.pitch;
+        let yaw = cam_state.yaw;
 
-        // Approximate viewport extent based on camera distance and pitch.
-        let half_extent = cam_state.distance * 0.5;
+        // The camera looks at `focus` from a distance. The ground footprint
+        // depends on pitch: steeper pitch → narrower depth, shallower → wider.
+        // Width is roughly proportional to distance * cos(pitch) (horizontal spread).
+        let half_width = dist * pitch.cos() * 0.6;
+        // Depth is stretched by pitch — near edge is closer, far edge farther.
+        let depth_near = dist * pitch.sin() * 0.2;
+        let depth_far = dist * pitch.cos() * 0.8;
 
-        let x1 = ((focus.x - half_extent) / state.world_width * mm_w as f32)
-            .clamp(0.0, (mm_w - 1) as f32) as usize;
-        let x2 = ((focus.x + half_extent) / state.world_width * mm_w as f32)
-            .clamp(0.0, (mm_w - 1) as f32) as usize;
-        let z1 = ((focus.z - half_extent) / state.world_depth * mm_h as f32)
-            .clamp(0.0, (mm_h - 1) as f32) as usize;
-        let z2 = ((focus.z + half_extent) / state.world_depth * mm_h as f32)
-            .clamp(0.0, (mm_h - 1) as f32) as usize;
+        // Four corners of the viewport footprint on the ground, rotated by yaw.
+        let sin_yaw = yaw.sin();
+        let cos_yaw = yaw.cos();
 
-        // Draw rectangle outline in white.
-        draw_rect_outline(pixels, mm_w, mm_h, x1, z1, x2, z2, [255, 255, 255, 255]);
+        let corners = [
+            // Near-left, near-right, far-right, far-left
+            (
+                focus.x + (-half_width * cos_yaw - depth_near * sin_yaw),
+                focus.z + (half_width * sin_yaw - depth_near * cos_yaw),
+            ),
+            (
+                focus.x + (half_width * cos_yaw - depth_near * sin_yaw),
+                focus.z + (-half_width * sin_yaw - depth_near * cos_yaw),
+            ),
+            (
+                focus.x + (half_width * cos_yaw + depth_far * sin_yaw),
+                focus.z + (-half_width * sin_yaw + depth_far * cos_yaw),
+            ),
+            (
+                focus.x + (-half_width * cos_yaw + depth_far * sin_yaw),
+                focus.z + (half_width * sin_yaw + depth_far * cos_yaw),
+            ),
+        ];
+
+        // Convert to minimap pixel coordinates and draw lines between corners.
+        let mm_corners: Vec<(i32, i32)> = corners
+            .iter()
+            .map(|(wx, wz)| {
+                let mx = (wx / state.world_width * mm_w as f32) as i32;
+                let mz = (wz / state.world_depth * mm_h as f32) as i32;
+                (mx, mz)
+            })
+            .collect();
+
+        let white = [255, 255, 255, 200];
+        for i in 0..4 {
+            let (x0, y0) = mm_corners[i];
+            let (x1, y1) = mm_corners[(i + 1) % 4];
+            draw_line(pixels, mm_w, mm_h, x0, y0, x1, y1, white);
+        }
     }
 }
 
-fn draw_rect_outline(
+/// Bresenham line drawing between two points.
+fn draw_line(
     pixels: &mut [u8],
     width: usize,
     height: usize,
-    x1: usize,
-    y1: usize,
-    x2: usize,
-    y2: usize,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
     color: [u8; 4],
 ) {
-    // Top and bottom edges.
-    for x in x1..=x2.min(width - 1) {
-        set_pixel(pixels, width, height, x, y1, color);
-        set_pixel(pixels, width, height, x, y2, color);
-    }
-    // Left and right edges.
-    for y in y1..=y2.min(height - 1) {
-        set_pixel(pixels, width, height, x1, y, color);
-        set_pixel(pixels, width, height, x2, y, color);
-    }
-}
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let mut x = x0;
+    let mut y = y0;
 
-fn set_pixel(pixels: &mut [u8], width: usize, height: usize, x: usize, y: usize, color: [u8; 4]) {
-    if x < width && y < height {
-        let idx = (y * width + x) * 4;
-        pixels[idx..idx + 4].copy_from_slice(&color);
+    loop {
+        if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
+            let idx = (y as usize * width + x as usize) * 4;
+            pixels[idx..idx + 4].copy_from_slice(&color);
+        }
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
     }
 }
 
