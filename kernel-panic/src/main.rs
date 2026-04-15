@@ -1,3 +1,4 @@
+mod interaction;
 mod rendering;
 mod terrain;
 mod units;
@@ -37,6 +38,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(RenderingPlugin)
+        .add_plugins(interaction::InteractionPlugin)
         .init_resource::<S3OModelCache>()
         .add_systems(
             Startup,
