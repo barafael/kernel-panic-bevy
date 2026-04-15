@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use super::animation::CobAnimator;
-use super::components::{Faction, Health, UnitType};
-use super::definitions::stats;
+use super::components::{Faction, Health, TeamId, UnitType};
+use super::definitions::{UnitKind, stats};
 use super::weapon_fx::{AttackEvent, PendingAttacks};
 use super::weapons::WeaponRegistry;
 
@@ -22,9 +22,29 @@ pub struct Dying {
 /// Maximum time to wait for a death animation before force-despawning (seconds).
 const DEATH_ANIM_TIMEOUT: f32 = 2.0;
 
+/// Marks a unit as infected by a Worm or Virus attack. If the unit dies
+/// while this component is present, a Virus spawns at the death location
+/// for the attacker's team.
+#[derive(Component)]
+pub struct Infected {
+    /// Remaining seconds before the infection expires.
+    pub timer: f32,
+    /// The faction that will own the spawned Virus.
+    pub attacker_faction: Faction,
+    /// The team ID that will own the spawned Virus.
+    pub attacker_team: u8,
+}
+
+/// How long (seconds) a Worm/Virus infection lasts before expiring.
+const INFECTION_DURATION: f32 = 6.0;
+
+/// Queued virus spawns from infected unit deaths (position, faction, team).
+#[derive(Resource, Default)]
+pub struct VirusSpawnQueue(pub Vec<(Vec3, Faction, u8)>);
+
 /// Pending damage to apply after combat resolution.
 #[derive(Resource, Default)]
-pub struct DamageQueue(Vec<(Entity, f32)>);
+pub struct DamageQueue(Vec<(Entity, f32, Entity)>);
 
 /// System: armed units auto-attack the nearest enemy in range.
 pub fn combat_system(
@@ -87,7 +107,7 @@ pub fn combat_system(
         }
 
         if let Some((target_entity, target_pos, _)) = best {
-            damage_queue.0.push((target_entity, damage));
+            damage_queue.0.push((target_entity, damage, entity));
             commands.entity(entity).insert(AttackCooldown {
                 remaining: cooldown,
             });
@@ -102,31 +122,85 @@ pub fn combat_system(
     }
 }
 
-/// System: apply queued damage from combat.
-pub fn apply_damage(mut damage_queue: ResMut<DamageQueue>, mut health_q: Query<&mut Health>) {
-    for &(target, damage) in &damage_queue.0 {
+/// System: apply queued damage and mark targets as infected when hit by
+/// Worm or Virus weapons.
+pub fn apply_damage(
+    mut damage_queue: ResMut<DamageQueue>,
+    mut health_q: Query<&mut Health>,
+    attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
+    target_unit_q: Query<&UnitType>,
+    mut commands: Commands,
+) {
+    for &(target, damage, attacker) in &damage_queue.0 {
         if let Ok(mut health) = health_q.get_mut(target) {
             health.current -= damage;
+        }
+
+        // Apply infection: Worm and Virus attacks infect non-Virus targets.
+        if let Ok((attacker_type, attacker_faction, attacker_team)) = attacker_q.get(attacker) {
+            let is_infecting =
+                attacker_type.0 == UnitKind::Worm || attacker_type.0 == UnitKind::Virus;
+            let target_is_virus = target_unit_q
+                .get(target)
+                .is_ok_and(|ut| ut.0 == UnitKind::Virus);
+
+            if is_infecting && !target_is_virus {
+                commands.entity(target).insert(Infected {
+                    timer: INFECTION_DURATION,
+                    attacker_faction: *attacker_faction,
+                    attacker_team: attacker_team.0,
+                });
+            }
         }
     }
     damage_queue.0.clear();
 }
 
-/// System: when a unit reaches 0 HP, start the Killed() COB script and mark it
-/// as `Dying` instead of despawning immediately.
-pub fn death_system(
-    query: Query<(Entity, &Health), (With<UnitType>, Without<Dying>)>,
-    mut animators: Query<&mut CobAnimator>,
+/// System: tick infection timers and remove expired infections.
+pub fn tick_infections(
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut Infected)>,
     mut commands: Commands,
 ) {
-    for (entity, health) in &query {
+    let dt = time.delta_secs();
+    for (entity, mut infected) in &mut query {
+        infected.timer -= dt;
+        if infected.timer <= 0.0 {
+            commands.entity(entity).remove::<Infected>();
+        }
+    }
+}
+
+/// System: when a unit reaches 0 HP, start the Killed() COB script and mark it
+/// as `Dying`. If the unit was infected, queue a Virus spawn.
+pub fn death_system(
+    query: Query<
+        (Entity, &Health, &GlobalTransform, Option<&Infected>),
+        (With<UnitType>, Without<Dying>),
+    >,
+    mut animators: Query<&mut CobAnimator>,
+    mut virus_spawns: ResMut<VirusSpawnQueue>,
+    mut commands: Commands,
+) {
+    for (entity, health, gtf, infected) in &query {
         if health.current <= 0.0 {
             // Start the COB Killed() callback if the unit has an animator.
             if let Ok(mut animator) = animators.get_mut(entity) {
                 let cob = animator.cob.clone();
                 animator.vm.start_script(&cob, "Killed", &[0, 0]);
             }
-            commands.entity(entity).insert(Dying {
+
+            // If the dying unit was infected, queue a Virus spawn for the
+            // attacker's team at the death location.
+            if let Some(infected) = infected {
+                virus_spawns.0.push((
+                    gtf.translation(),
+                    infected.attacker_faction,
+                    infected.attacker_team,
+                ));
+            }
+
+            commands.entity(entity).remove::<Infected>().insert(Dying {
                 timer: DEATH_ANIM_TIMEOUT,
             });
         }

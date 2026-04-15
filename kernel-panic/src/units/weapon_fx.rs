@@ -56,7 +56,9 @@ impl BeamMaterialCache {
             1.0,
         );
         for (cached_color, handle) in &self.materials {
-            if (*cached_color - quantized).length_squared() < 0.01 {
+            let diff = *cached_color - quantized;
+            let dist_sq = diff.red * diff.red + diff.green * diff.green + diff.blue * diff.blue;
+            if dist_sq < 0.01 {
                 return handle.clone();
             }
         }
@@ -83,13 +85,6 @@ pub struct ProjectileVisual {
     pub progress: f32,
     pub gravity: f32,
     pub arc_height: f32,
-}
-
-/// Shared mesh + material for projectiles.
-#[derive(Resource)]
-pub struct ProjectileAssets {
-    pub mesh: Handle<Mesh>,
-    pub material: Handle<StandardMaterial>,
 }
 
 // ── Systems ─────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-mod movement;
+pub mod movement;
 mod selection;
 
 use bevy::prelude::*;

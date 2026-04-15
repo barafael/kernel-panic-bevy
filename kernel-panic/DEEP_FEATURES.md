@@ -272,35 +272,54 @@ Viruses.
 
 **Faction:** System  
 **Role:** Special building (air strike launcher)  
-**Upstream file:** `terminal.fbi`  
+**Upstream files:** `terminal.fbi`, `signal.fbi`, `airstrike.lua`  
 **Built by:** Assembler (on datavents)
 
 ### Terminal Stats
 | Stat | Value |
 |------|-------|
 | HP | 15,000 |
-| Build time | 8,000 |
+| Build time | 3,840 |
 | DamageModifier | 4× |
+| canAttack | 0 (no direct weapon) |
+| MetalMake | 30 (acts as a minor production booster) |
 
-### Mechanic
-The Terminal doesn't have a traditional weapon. Instead, it spawns a **SIGTERM
-bomber** (via gadget) on a 90-second cooldown:
+### Mechanic (two-stage airstrike)
+The Terminal has a custom **SIGTERM command** (implemented in `airstrike.lua`).
+When the player clicks the command and targets a map location:
 
-### SIGTERM Bomber
+1. The gadget **spawns a "signal" flying unit** at the Terminal's position
+2. The signal unit is given an ATTACK order to the target location
+3. The signal flies there and **drops an AircraftBomb** (`sigterm.s3o` model)
+4. The bomb falls with `myGravity=0.3` and detonates on impact
+
+The signal unit is non-selectable (`SetUnitNoSelect`), so the player experience
+is closer to "the Terminal launches a strike" than micromanaging a bomber. The
+cooldown is **~90 seconds** (displayed as countdown text on the command button).
+
+### Signal (SIGTERM Bomber) Stats
 | Stat | Value |
 |------|-------|
 | HP | 600 |
-| Speed | 8 (very fast) |
-| Type | Air unit, uncounterable |
+| Speed | 8 |
+| Cruise altitude | 200 |
+| Category | NUKE VTOL |
+| Selectable | No (auto-controlled) |
+| Model | `signal.s3o` |
 
-### SIGTERM Bomb
+### SigTerm Bomb (AircraftBomb weapon)
 | Stat | Value |
 |------|-------|
 | Damage | 10,000 |
-| AoE | 900 diameter |
+| AoE | 900 |
 | Edge effectiveness | 0.8 |
+| Gravity | 0.3 |
+| Reload | 4s (irrelevant — bomber is one-shot) |
+| Friendly fire collision | No (`collidefriendly=0`) |
+| Explosion | `custom:system_sigterm` |
 
 ### Area Denial After Detonation
+Via `areadenial.lua`:
 - Radius 350 fire zone
 - 2,000 total damage over ~3.3 seconds
 - **Damages friendlies** — must be aimed carefully

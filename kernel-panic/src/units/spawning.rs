@@ -241,6 +241,46 @@ fn piece_to_mesh(piece: &S3OPiece) -> Mesh {
     mesh
 }
 
+/// System: drain the `VirusSpawnQueue` and spawn Virus units at the queued
+/// positions. Runs after the death system so kills in a given frame produce
+/// Viruses on the next.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_queued_viruses(
+    mut virus_spawns: ResMut<super::combat::VirusSpawnQueue>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
+    mut cob_cache: ResMut<CobFileCache>,
+    sel_mat: Option<Res<SelectionVolumeMaterial>>,
+) {
+    if virus_spawns.0.is_empty() {
+        return;
+    }
+
+    let invisible_mat = match sel_mat {
+        Some(m) => m.clone(),
+        None => get_or_create_invisible_material(&mut commands, &mut materials),
+    };
+
+    for (pos, faction, team) in virus_spawns.0.drain(..) {
+        spawn_unit(
+            UnitKind::Virus,
+            faction,
+            team,
+            pos,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &mut model_cache,
+            &mut cob_cache,
+            &invisible_mat,
+        );
+    }
+}
+
 fn get_or_create_invisible_material(
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,

@@ -3298,6 +3298,7 @@ dependencies = [
  "bevy",
  "spring-cob",
  "spring-map",
+ "spring-pathfinding",
  "spring-tdf",
  "spring-unit-mesh",
  "thiserror 2.0.18",

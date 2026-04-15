@@ -8,5 +8,6 @@ spring-tdf = { path = "../spring-tdf" }
 spring-map = { path = "../spring-map" }
 spring-unit-mesh = { path = "../spring-unit-mesh" }
 spring-cob = { path = "../spring-cob" }
+spring-pathfinding = { path = "../spring-pathfinding" }
 bevy = { version = "0.18", features = ["serialize", "debug"] }
 thiserror = { workspace = true }

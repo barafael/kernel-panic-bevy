@@ -45,6 +45,7 @@ fn main() {
         .init_resource::<units::animation::CobFileCache>()
         .insert_resource(units::weapons::WeaponRegistry::load())
         .init_resource::<units::combat::DamageQueue>()
+        .init_resource::<units::combat::VirusSpawnQueue>()
         .init_resource::<units::weapon_fx::PendingAttacks>()
         .init_resource::<units::weapon_fx::BeamMaterialCache>()
         .init_resource::<units::game_over::GameState>()
@@ -64,7 +65,9 @@ fn main() {
                 units::production::production_system,
                 units::combat::combat_system,
                 units::combat::apply_damage.after(units::combat::combat_system),
+                units::combat::tick_infections,
                 units::combat::death_system.after(units::combat::apply_damage),
+                units::spawning::spawn_queued_viruses.after(units::combat::death_system),
                 units::game_over::check_game_over.after(units::combat::death_system),
                 units::animation::animation_system.after(units::combat::death_system),
                 units::combat::cleanup_dying.after(units::animation::animation_system),
@@ -264,6 +267,25 @@ fn load_map_at_index(
     }
 
     spawn_terrain(parsed, terrain_material, commands, meshes, std_materials);
+
+    // Build pathfinding grid from heightmap.
+    {
+        let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
+            &parsed.heights,
+            parsed.header.heightmap_width() as u32,
+            parsed.header.heightmap_height() as u32,
+            0.8,  // max_slope: KP kbot units can handle moderate slopes
+            40.0, // slope_mod: Spring default
+        );
+        let node_layer = spring_pathfinding::NodeLayer::new(&speed_map);
+        info!(
+            "  Nav grid: {} leaf nodes from {}x{} speed map",
+            node_layer.leaf_count(),
+            speed_map.width,
+            speed_map.height,
+        );
+        commands.insert_resource(interaction::movement::NavGrid(node_layer));
+    }
 
     // Setup minimap from ground texture.
     {

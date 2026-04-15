@@ -4,7 +4,7 @@ use bevy::prelude::*;
 use crate::rendering::camera::RtsCamera;
 use crate::units::components::{Faction, Health, SelectionVolume, UnitType};
 
-use super::movement::MoveTarget;
+use super::movement::{MovePath, MoveTarget};
 
 /// Marker for temporary move-target indicators on the ground.
 #[derive(Component)]
@@ -288,13 +288,19 @@ pub fn handle_right_click(
         if drag_path.points.len() == 1 {
             let target = drag_path.points[0];
             for entity in &units {
-                commands.entity(*entity).insert(MoveTarget(target));
+                commands
+                    .entity(*entity)
+                    .insert(MoveTarget(target))
+                    .remove::<MovePath>();
             }
             pending.targets.push(target);
         } else {
             let targets = sample_path_evenly(&drag_path.points, units.len());
             for (entity, target) in units.iter().zip(targets.iter()) {
-                commands.entity(*entity).insert(MoveTarget(*target));
+                commands
+                    .entity(*entity)
+                    .insert(MoveTarget(*target))
+                    .remove::<MovePath>();
             }
             pending.targets.extend(targets);
         }
