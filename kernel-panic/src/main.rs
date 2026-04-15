@@ -40,6 +40,7 @@ fn main() {
         }))
         .add_plugins(RenderingPlugin)
         .add_plugins(interaction::InteractionPlugin)
+        .add_plugins(ui::UiPlugin)
         .init_resource::<S3OModelCache>()
         .init_resource::<units::combat::DamageQueue>()
         .init_resource::<units::game_over::GameState>()
