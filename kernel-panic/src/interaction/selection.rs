@@ -14,28 +14,15 @@ pub struct Selected;
 #[derive(Component)]
 pub struct SelectionRing;
 
-/// Shared mesh and material for selection rings so we don't reallocate per click.
+/// Shared mesh and material for selection rings.
 #[derive(Resource, Clone)]
 pub(crate) struct SelectionRingAssets {
     mesh: Handle<Mesh>,
     material: Handle<StandardMaterial>,
 }
 
-impl SelectionRingAssets {
-    fn init(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
-        Self {
-            mesh: meshes.add(Torus::new(18.0, 22.0)),
-            material: materials.add(StandardMaterial {
-                base_color: Color::srgba(1.0, 1.0, 1.0, 0.5),
-                emissive: LinearRgba::new(1.0, 1.0, 1.0, 1.0) * 3.0,
-                unlit: true,
-                alpha_mode: AlphaMode::Blend,
-                ..default()
-            }),
-        }
-    }
-}
-
+/// Left-click: select a unit (or deselect by clicking terrain).
+/// Does NOT access Assets<Mesh> — avoids conflict with MeshRayCast.
 pub fn handle_selection(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -45,9 +32,6 @@ pub fn handle_selection(
     selected_q: Query<Entity, With<Selected>>,
     ring_q: Query<Entity, With<SelectionRing>>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    ring_assets: Option<Res<SelectionRingAssets>>,
 ) {
     if !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -58,7 +42,6 @@ pub fn handle_selection(
     };
 
     let hits = ray_cast.cast_ray(ray, &default());
-
     let clicked_unit = hits.iter().find(|(entity, _)| unit_q.contains(*entity));
 
     // Clear previous selection.
@@ -71,28 +54,52 @@ pub fn handle_selection(
 
     if let Some(&(entity, _)) = clicked_unit {
         commands.entity(entity).insert(Selected);
+    }
+}
 
-        // Lazily initialize shared ring assets on first selection.
-        let assets = match ring_assets {
-            Some(res) => res.into_inner().clone(),
-            None => {
-                let a = SelectionRingAssets::init(&mut meshes, &mut materials);
-                let cloned = a.clone();
-                commands.insert_resource(a);
-                cloned
-            }
-        };
+/// Spawn a visual ring under newly-selected units (reacts to Added<Selected>).
+pub fn spawn_selection_rings(
+    new_selections: Query<Entity, Added<Selected>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    ring_assets: Option<Res<SelectionRingAssets>>,
+) {
+    if new_selections.is_empty() {
+        return;
+    }
 
+    let assets = match ring_assets {
+        Some(res) => res.into_inner().clone(),
+        None => {
+            let a = SelectionRingAssets {
+                mesh: meshes.add(Torus::new(18.0, 22.0)),
+                material: materials.add(StandardMaterial {
+                    base_color: Color::srgba(1.0, 1.0, 1.0, 0.5),
+                    emissive: LinearRgba::new(1.0, 1.0, 1.0, 1.0) * 3.0,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    ..default()
+                }),
+            };
+            let cloned = a.clone();
+            commands.insert_resource(a);
+            cloned
+        }
+    };
+
+    for entity in &new_selections {
         commands.entity(entity).with_child((
             SelectionRing,
-            Mesh3d(assets.mesh),
-            MeshMaterial3d(assets.material),
+            Mesh3d(assets.mesh.clone()),
+            MeshMaterial3d(assets.material.clone()),
             Transform::from_xyz(0.0, -1.0, 0.0)
                 .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
         ));
     }
 }
 
+/// Right-click: issue a move command to selected units.
 pub fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
