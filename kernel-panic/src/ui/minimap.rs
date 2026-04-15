@@ -163,35 +163,44 @@ fn update_minimap(
         let pitch = cam_state.pitch;
         let yaw = cam_state.yaw;
 
-        // The camera looks at `focus` from a distance. The ground footprint
-        // depends on pitch: steeper pitch → narrower depth, shallower → wider.
-        // Width is roughly proportional to distance * cos(pitch) (horizontal spread).
-        let half_width = dist * pitch.cos() * 0.6;
-        // Depth is stretched by pitch — near edge is closer, far edge farther.
-        let depth_near = dist * pitch.sin() * 0.2;
-        let depth_far = dist * pitch.cos() * 0.8;
+        // The camera sits at height `dist * sin(pitch)` above the focus,
+        // looking down. A ~60° vertical FOV means the ground plane is cut
+        // by two rays: one hitting near the camera, one hitting far away.
+        // The far edge is wider because the same angular FOV spans more
+        // ground at greater distance.
+        let camera_height = dist * pitch.sin();
+        let horizontal_dist = dist * pitch.cos();
 
-        // Four corners of the viewport footprint on the ground, rotated by yaw.
+        // Distances from focus to near/far ground edges along the view axis.
+        let depth_near = horizontal_dist * 0.3;
+        let depth_far = horizontal_dist * 0.9;
+
+        // Half-widths at near and far edges (perspective: farther = wider).
+        let near_dist_from_cam = (camera_height.powi(2) + depth_near.powi(2)).sqrt();
+        let far_dist_from_cam = (camera_height.powi(2) + depth_far.powi(2)).sqrt();
+        let half_width_near = near_dist_from_cam * 0.5;
+        let half_width_far = far_dist_from_cam * 0.7;
+
         let sin_yaw = yaw.sin();
         let cos_yaw = yaw.cos();
 
+        // Four corners: near-left, near-right, far-right, far-left.
         let corners = [
-            // Near-left, near-right, far-right, far-left
             (
-                focus.x + (-half_width * cos_yaw - depth_near * sin_yaw),
-                focus.z + (half_width * sin_yaw - depth_near * cos_yaw),
+                focus.x + (-half_width_near * cos_yaw - depth_near * sin_yaw),
+                focus.z + (half_width_near * sin_yaw - depth_near * cos_yaw),
             ),
             (
-                focus.x + (half_width * cos_yaw - depth_near * sin_yaw),
-                focus.z + (-half_width * sin_yaw - depth_near * cos_yaw),
+                focus.x + (half_width_near * cos_yaw - depth_near * sin_yaw),
+                focus.z + (-half_width_near * sin_yaw - depth_near * cos_yaw),
             ),
             (
-                focus.x + (half_width * cos_yaw + depth_far * sin_yaw),
-                focus.z + (-half_width * sin_yaw + depth_far * cos_yaw),
+                focus.x + (half_width_far * cos_yaw + depth_far * sin_yaw),
+                focus.z + (-half_width_far * sin_yaw + depth_far * cos_yaw),
             ),
             (
-                focus.x + (-half_width * cos_yaw + depth_far * sin_yaw),
-                focus.z + (half_width * sin_yaw + depth_far * cos_yaw),
+                focus.x + (-half_width_far * cos_yaw + depth_far * sin_yaw),
+                focus.z + (half_width_far * sin_yaw + depth_far * cos_yaw),
             ),
         ];
 
