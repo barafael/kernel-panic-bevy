@@ -9,6 +9,8 @@ pub struct ExtractedMap {
     pub smf_data: Vec<u8>,
     pub smf_name: String,
     pub smt_data: Option<Vec<u8>>,
+    /// Raw text of the .smd metadata file (if found).
+    pub smd_text: Option<String>,
 }
 
 /// Load map data from a .sd7, .sdz, or raw .smf file.
@@ -38,10 +40,13 @@ pub fn load_map_archive(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                     );
                 })
                 .ok();
+            let smd_path = path.with_extension("smd");
+            let smd_text = std::fs::read_to_string(&smd_path).ok();
             Ok(ExtractedMap {
                 smf_data: data,
                 smf_name: name,
                 smt_data,
+                smd_text,
             })
         }
         other => Err(ArchiveError::UnsupportedFormat(other.to_string())),
@@ -57,6 +62,7 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
 
     let mut smf_data: Option<Vec<u8>> = None;
     let mut smt_data: Option<Vec<u8>> = None;
+    let mut smd_text: Option<String> = None;
     let mut smf_name = String::new();
 
     archive
@@ -72,9 +78,13 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                 let mut buf = Vec::new();
                 reader.read_to_end(&mut buf)?;
                 smt_data = Some(buf);
+            } else if lower.ends_with(".smd") && smd_text.is_none() {
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf)?;
+                smd_text = Some(String::from_utf8_lossy(&buf).into_owned());
             }
-            // Stop once we have both files.
-            Ok(smf_data.is_none() || smt_data.is_none())
+            let have_all = smf_data.is_some() && smt_data.is_some() && smd_text.is_some();
+            Ok(!have_all)
         })
         .map_err(|e| ArchiveError::SevenZ(e.to_string()))?;
 
@@ -83,6 +93,7 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             smf_data: data,
             smf_name,
             smt_data,
+            smd_text,
         }),
         None => Err(ArchiveError::NoSmfFound),
     }
@@ -94,6 +105,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
 
     let mut smf_data: Option<Vec<u8>> = None;
     let mut smt_data: Option<Vec<u8>> = None;
+    let mut smd_text: Option<String> = None;
     let mut smf_name = String::new();
 
     for i in 0..archive.len() {
@@ -109,8 +121,12 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             let mut buf = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut buf)?;
             smt_data = Some(buf);
+        } else if lower.ends_with(".smd") && smd_text.is_none() {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            smd_text = Some(String::from_utf8_lossy(&buf).into_owned());
         }
-        if smf_data.is_some() && smt_data.is_some() {
+        if smf_data.is_some() && smt_data.is_some() && smd_text.is_some() {
             break;
         }
     }
@@ -120,6 +136,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             smf_data: data,
             smf_name,
             smt_data,
+            smd_text,
         }),
         None => Err(ArchiveError::NoSmfFound),
     }

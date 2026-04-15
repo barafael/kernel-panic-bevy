@@ -9,6 +9,7 @@ use rendering::RenderingPlugin;
 use rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use spring_map::SpringMap;
 use spring_map::map_types::{GroundTexture, ParsedMap, SQUARE_SIZE};
+use spring_map::smd_parser::MapInfo;
 use terrain::material::{create_datavent_material, create_terrain_material};
 use terrain::mesh::generate_terrain_chunks;
 
@@ -101,6 +102,22 @@ fn load_and_spawn_terrain(
         &mut meshes,
         &mut std_materials,
     );
+
+    if let Some(map_info) = &spring_map.map_info {
+        apply_atmosphere(map_info, &mut commands);
+        spawn_start_position_markers(
+            parsed,
+            map_info,
+            &mut commands,
+            &mut meshes,
+            &mut std_materials,
+        );
+        info!(
+            "Map info: {} start positions, gravity={}",
+            map_info.start_positions.len(),
+            map_info.gravity,
+        );
+    }
 }
 
 fn setup_camera(
@@ -244,6 +261,90 @@ fn spawn_datavent_markers(
     } else {
         warn!("No GeoVent features found in map");
     }
+}
+
+/// Apply atmosphere settings from the .smd: clear color, directional light, fog.
+fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
+    let sky = map_info.atmosphere.sky_color;
+    commands.insert_resource(ClearColor(Color::linear_rgb(sky[0], sky[1], sky[2])));
+
+    let sun = map_info.lighting.ground_sun_color;
+    let ambient = map_info.lighting.ground_ambient;
+    let dir = map_info.lighting.sun_dir;
+
+    // Normalize sun direction.
+    let sun_dir =
+        Vec3::new(dir[0], dir[1], dir[2]).normalize_or(Vec3::new(0.0, 1.0, 0.5).normalize());
+
+    commands.spawn((
+        DirectionalLight {
+            color: Color::linear_rgb(sun[0], sun[1], sun[2]),
+            illuminance: 8000.0,
+            shadows_enabled: false,
+            ..default()
+        },
+        Transform::default().looking_to(-sun_dir, Vec3::Y),
+    ));
+
+    commands.insert_resource(bevy::light::GlobalAmbientLight {
+        color: Color::linear_rgb(ambient[0], ambient[1], ambient[2]),
+        brightness: 200.0,
+        ..default()
+    });
+}
+
+/// Render start position markers as colored cylinders on the terrain.
+fn spawn_start_position_markers(
+    parsed: &ParsedMap,
+    map_info: &MapInfo,
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
+) {
+    let marker_mesh = meshes.add(Cylinder::new(12.0, 4.0));
+
+    // Assign distinct colors to each start position.
+    let team_colors = [
+        Color::linear_rgb(0.0, 0.8, 0.0), // green
+        Color::linear_rgb(0.8, 0.0, 0.0), // red
+        Color::linear_rgb(0.0, 0.4, 1.0), // blue
+        Color::linear_rgb(1.0, 1.0, 0.0), // yellow
+        Color::linear_rgb(1.0, 0.0, 1.0), // magenta
+        Color::linear_rgb(0.0, 1.0, 1.0), // cyan
+        Color::linear_rgb(1.0, 0.5, 0.0), // orange
+        Color::linear_rgb(0.5, 0.0, 1.0), // purple
+    ];
+
+    let square_size = SQUARE_SIZE as f32;
+
+    for start_pos in &map_info.start_positions {
+        let color = team_colors[start_pos.team as usize % team_colors.len()];
+        let marker_material = materials.add(StandardMaterial {
+            base_color: color,
+            emissive: LinearRgba::from(color) * 2.0,
+            unlit: false,
+            ..default()
+        });
+
+        // Sample terrain height at start position.
+        let heightmap_w = parsed.header.heightmap_width();
+        let heightmap_x = (start_pos.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
+        let heightmap_z = (start_pos.z / square_size)
+            .clamp(0.0, (parsed.header.heightmap_height() - 1) as f32)
+            as usize;
+        let height = parsed.heights[heightmap_z * heightmap_w + heightmap_x];
+
+        commands.spawn((
+            Mesh3d(marker_mesh.clone()),
+            MeshMaterial3d(marker_material),
+            Transform::from_xyz(start_pos.x, height + 3.0, start_pos.z),
+        ));
+    }
+
+    info!(
+        "Placed {} start position markers",
+        map_info.start_positions.len()
+    );
 }
 
 fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32) {
