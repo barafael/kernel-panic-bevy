@@ -8,16 +8,16 @@ use std::rc::Rc;
 
 use mlua::prelude::*;
 
-use crate::map_types::{ParsedMap, SQUARE_SIZE};
+use crate::map_types::{LuaFile, ParsedMap, SQUARE_SIZE};
 
 /// Find and execute any heightmap gadgets from the extracted Lua files.
 ///
 /// Modifies `map.heights` in place. Returns the number of gadgets executed.
-pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[(String, String)]) -> usize {
-    let gadgets: Vec<&(String, String)> = lua_files
+pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -> usize {
+    let gadgets: Vec<&LuaFile> = lua_files
         .iter()
-        .filter(|(path, _)| {
-            let lower = path.to_ascii_lowercase();
+        .filter(|f| {
+            let lower = f.path.to_ascii_lowercase();
             lower.contains("luarules/gadgets") && lower.ends_with(".lua")
         })
         .collect();
@@ -28,20 +28,20 @@ pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[(String, St
 
     let mut executed = 0;
 
-    for (path, source) in &gadgets {
+    for gadget in &gadgets {
         // Only execute gadgets that look like they modify the heightmap.
-        let lower_source = source.to_ascii_lowercase();
+        let lower_source = gadget.content.to_ascii_lowercase();
         if !lower_source.contains("setheightmap") {
             continue;
         }
 
-        match execute_heightmap_gadget(map, source) {
+        match execute_heightmap_gadget(map, &gadget.content) {
             Ok(()) => {
-                eprintln!("Executed heightmap gadget: {path}");
+                eprintln!("Executed heightmap gadget: {}", gadget.path);
                 executed += 1;
             }
             Err(err) => {
-                eprintln!("Failed to execute heightmap gadget {path}: {err}");
+                eprintln!("Failed to execute heightmap gadget {}: {err}", gadget.path);
             }
         }
     }
@@ -198,10 +198,10 @@ mod tests {
             end
         "#;
 
-        let lua_files = vec![(
-            "LuaRules/Gadgets/test.lua".to_string(),
-            gadget_source.to_string(),
-        )];
+        let lua_files = vec![LuaFile {
+            path: "LuaRules/Gadgets/test.lua".to_string(),
+            content: gadget_source.to_string(),
+        }];
 
         let executed = apply_lua_heightmap_gadgets(&mut map, &lua_files);
         assert_eq!(executed, 1);

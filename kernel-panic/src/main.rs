@@ -8,7 +8,7 @@ use bevy::prelude::*;
 
 use rendering::RenderingPlugin;
 use rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
-use spring_map::map_types::{GroundTexture, ParsedMap, SQUARE_SIZE};
+use spring_map::map_types::{GroundTexture, MipmapData, ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 use terrain::material::{create_datavent_material, create_terrain_material};
 use terrain::mesh::generate_terrain_chunks;
@@ -272,7 +272,10 @@ fn build_terrain_material_from_texture(
     images: &mut ResMut<Assets<Image>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> Handle<StandardMaterial> {
-    let (all_pixels, mip_levels) = generate_mipmaps(&ground.pixels, ground.width, ground.height);
+    let MipmapData {
+        pixels: mipmap_pixels,
+        level_count: mip_levels,
+    } = generate_mipmaps(&ground.pixels, ground.width, ground.height);
 
     let size = bevy::render::render_resource::Extent3d {
         width: ground.width as u32,
@@ -289,7 +292,7 @@ fn build_terrain_material_from_texture(
         format,
         usage,
     );
-    image.data = Some(all_pixels);
+    image.data = Some(mipmap_pixels);
     image.texture_descriptor.mip_level_count = mip_levels;
     image.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
         min_filter: bevy::image::ImageFilterMode::Linear,
@@ -398,7 +401,7 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
     });
 }
 
-fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32) {
+fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> MipmapData {
     let mut all_data = Vec::with_capacity(pixels.len() * 4 / 3);
     all_data.extend_from_slice(pixels);
     let mut levels = 1u32;
@@ -442,5 +445,8 @@ fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32
         current_h = next_h;
     }
 
-    (all_data, levels)
+    MipmapData {
+        pixels: all_data,
+        level_count: levels,
+    }
 }

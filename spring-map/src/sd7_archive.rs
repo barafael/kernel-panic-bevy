@@ -1,7 +1,7 @@
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use crate::map_types::ArchiveError;
+use crate::map_types::{ArchiveError, LuaFile};
 
 /// Extracted map data from an archive.
 #[derive(Debug)]
@@ -11,9 +11,8 @@ pub struct ExtractedMap {
     pub smt_data: Option<Vec<u8>>,
     /// Raw text of the .smd metadata file (if found).
     pub smd_text: Option<String>,
-    /// Lua files found in the archive: `(path, content)` pairs.
-    /// Includes gadgets, mapinfo.lua, featureplacer scripts, etc.
-    pub lua_files: Vec<(String, String)>,
+    /// Lua files found in the archive (gadgets, mapinfo.lua, featureplacer scripts, etc.).
+    pub lua_files: Vec<LuaFile>,
 }
 
 /// Load map data from a .sd7, .sdz, or raw .smf file.
@@ -67,7 +66,7 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     let mut smf_data: Option<Vec<u8>> = None;
     let mut smt_data: Option<Vec<u8>> = None;
     let mut smd_text: Option<String> = None;
-    let mut lua_files: Vec<(String, String)> = Vec::new();
+    let mut lua_files: Vec<LuaFile> = Vec::new();
     let mut smf_name = String::new();
 
     archive
@@ -90,7 +89,10 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             } else if lower.ends_with(".lua") {
                 let mut buf = Vec::new();
                 reader.read_to_end(&mut buf)?;
-                lua_files.push((name, String::from_utf8_lossy(&buf).into_owned()));
+                lua_files.push(LuaFile {
+                    path: name,
+                    content: String::from_utf8_lossy(&buf).into_owned(),
+                });
             }
             Ok(true) // always continue — Lua files can be anywhere
         })
@@ -115,7 +117,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     let mut smf_data: Option<Vec<u8>> = None;
     let mut smt_data: Option<Vec<u8>> = None;
     let mut smd_text: Option<String> = None;
-    let mut lua_files: Vec<(String, String)> = Vec::new();
+    let mut lua_files: Vec<LuaFile> = Vec::new();
     let mut smf_name = String::new();
 
     for i in 0..archive.len() {
@@ -138,7 +140,10 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
         } else if lower.ends_with(".lua") {
             let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
-            lua_files.push((name, String::from_utf8_lossy(&buf).into_owned()));
+            lua_files.push(LuaFile {
+                path: name,
+                content: String::from_utf8_lossy(&buf).into_owned(),
+            });
         }
     }
 

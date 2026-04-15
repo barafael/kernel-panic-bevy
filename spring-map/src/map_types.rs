@@ -248,6 +248,36 @@ impl Tile {
     pub const SIZE: usize = Self::WIDTH * Self::HEIGHT * 4;
 }
 
+/// A 2D grid of tile indices referencing tiles in the SMT file.
+#[derive(Debug, Clone)]
+pub struct TileMap {
+    pub width: usize,
+    pub height: usize,
+    pub indices: Vec<u32>,
+}
+
+impl TileMap {
+    /// Look up the tile index at grid position `(x, y)`.
+    pub fn get(&self, x: usize, y: usize) -> u32 {
+        self.indices[y * self.width + x]
+    }
+}
+
+/// A named Lua file extracted from a map archive.
+#[derive(Debug, Clone)]
+pub struct LuaFile {
+    pub path: String,
+    pub content: String,
+}
+
+/// Pre-computed mipmap chain for a texture.
+pub struct MipmapData {
+    /// Concatenated pixel data for all mip levels (level 0 first).
+    pub pixels: Vec<u8>,
+    /// Total number of mip levels (including level 0).
+    pub level_count: u32,
+}
+
 /// Assembled ground texture from tiled SMT data.
 #[derive(Debug)]
 pub struct GroundTexture {

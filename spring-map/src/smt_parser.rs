@@ -2,18 +2,15 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::map_types::{GroundTexture, ParsedMap, SMT_MAGIC, SmfParseError, SmtParseError, Tile};
+use crate::map_types::{
+    GroundTexture, ParsedMap, SMT_MAGIC, SmfParseError, SmtParseError, Tile, TileMap,
+};
 
 const TILE_BYTES: usize = 680;
 const TILE_BASE_BYTES: usize = 512;
 
 /// Parse the tilemap from SMF data using the already-parsed header.
-///
-/// Returns `(tilemap_width, tilemap_height, tile_indices)`.
-pub(crate) fn parse_tilemap(
-    smf_data: &[u8],
-    map: &ParsedMap,
-) -> Result<(usize, usize, Vec<u32>), SmfParseError> {
+pub(crate) fn parse_tilemap(smf_data: &[u8], map: &ParsedMap) -> Result<TileMap, SmfParseError> {
     let mut cursor = Cursor::new(smf_data);
     cursor.seek(SeekFrom::Start(map.header.tiles_ptr as u64))?;
 
@@ -29,15 +26,19 @@ pub(crate) fn parse_tilemap(
         }
     }
 
-    let tilemap_w = (map.header.map_x / 4) as usize;
-    let tilemap_h = (map.header.map_y / 4) as usize;
-    let count = tilemap_w * tilemap_h;
+    let width = (map.header.map_x / 4) as usize;
+    let height = (map.header.map_y / 4) as usize;
+    let count = width * height;
     let mut indices = Vec::with_capacity(count);
     for _ in 0..count {
         indices.push(cursor.read_u32::<LittleEndian>()?);
     }
 
-    Ok((tilemap_w, tilemap_h, indices))
+    Ok(TileMap {
+        width,
+        height,
+        indices,
+    })
 }
 
 /// Parse all tiles from an SMT file's raw bytes.
@@ -74,15 +75,15 @@ pub fn assemble_ground_texture(
     map: &ParsedMap,
     tiles: &[Tile],
 ) -> Result<GroundTexture, SmfParseError> {
-    let (tilemap_w, tilemap_h, tilemap) = parse_tilemap(smf_data, map)?;
+    let tilemap = parse_tilemap(smf_data, map)?;
 
-    let tex_w = tilemap_w * Tile::WIDTH;
-    let tex_h = tilemap_h * Tile::HEIGHT;
+    let tex_w = tilemap.width * Tile::WIDTH;
+    let tex_h = tilemap.height * Tile::HEIGHT;
     let mut pixels = vec![0u8; tex_w * tex_h * 4];
 
-    for tile_y in 0..tilemap_h {
-        for tile_x in 0..tilemap_w {
-            let tile_idx = tilemap[tile_y * tilemap_w + tile_x] as usize;
+    for tile_y in 0..tilemap.height {
+        for tile_x in 0..tilemap.width {
+            let tile_idx = tilemap.get(tile_x, tile_y) as usize;
             if tile_idx >= tiles.len() {
                 continue;
             }
