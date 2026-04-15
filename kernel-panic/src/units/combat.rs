@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use super::animation::CobAnimator;
 use super::components::{Faction, Health, UnitType};
 use super::definitions::stats;
+use super::weapon_fx::{AttackEvent, PendingAttacks};
 use super::weapons::WeaponRegistry;
 
 /// Tracks time until the unit can fire again.
@@ -34,6 +35,7 @@ pub fn combat_system(
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     weapon_registry: Res<WeaponRegistry>,
+    mut pending_attacks: ResMut<PendingAttacks>,
 ) {
     let dt = time.delta_secs();
 
@@ -72,22 +74,30 @@ pub fn combat_system(
         let range_sq = range * range;
 
         // Find nearest living enemy in range.
-        let mut best: Option<(Entity, f32)> = None;
+        let mut best: Option<(Entity, Vec3, f32)> = None;
         for (target_entity, target_faction, target_gtf, target_health) in &potential_targets {
             if target_faction == attacker_faction || target_health.current <= 0.0 {
                 continue;
             }
-            let dist_sq = attacker_pos.distance_squared(target_gtf.translation());
-            if dist_sq <= range_sq && best.map_or(true, |(_, d)| dist_sq < d) {
-                best = Some((target_entity, dist_sq));
+            let target_pos = target_gtf.translation();
+            let dist_sq = attacker_pos.distance_squared(target_pos);
+            if dist_sq <= range_sq && best.map_or(true, |(_, _, d)| dist_sq < d) {
+                best = Some((target_entity, target_pos, dist_sq));
             }
         }
 
-        if let Some((target_entity, _)) = best {
+        if let Some((target_entity, target_pos, _)) = best {
             damage_queue.0.push((target_entity, damage));
             commands.entity(entity).insert(AttackCooldown {
                 remaining: cooldown,
             });
+            if !unit_stats.weapon.is_empty() {
+                pending_attacks.events.push(AttackEvent {
+                    attacker_pos,
+                    target_pos,
+                    weapon_name: unit_stats.weapon,
+                });
+            }
         }
     }
 }

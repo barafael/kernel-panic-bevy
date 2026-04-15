@@ -45,6 +45,8 @@ fn main() {
         .init_resource::<units::animation::CobFileCache>()
         .insert_resource(units::weapons::WeaponRegistry::load())
         .init_resource::<units::combat::DamageQueue>()
+        .init_resource::<units::weapon_fx::PendingAttacks>()
+        .init_resource::<units::weapon_fx::BeamMaterialCache>()
         .init_resource::<units::game_over::GameState>()
         .init_resource::<units::game_over::PlayerTeam>()
         .add_systems(
@@ -67,6 +69,8 @@ fn main() {
                 units::animation::animation_system.after(units::combat::death_system),
                 units::combat::cleanup_dying.after(units::animation::animation_system),
                 units::animation::decay_death_particles,
+                units::weapon_fx::spawn_beam_visuals.after(units::combat::combat_system),
+                units::weapon_fx::tick_weapon_fx.after(units::weapon_fx::spawn_beam_visuals),
             ),
         )
         .run();

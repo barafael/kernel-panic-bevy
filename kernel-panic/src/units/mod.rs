@@ -6,4 +6,5 @@ pub mod game_over;
 pub mod meshes;
 pub mod production;
 pub mod spawning;
+pub mod weapon_fx;
 pub mod weapons;

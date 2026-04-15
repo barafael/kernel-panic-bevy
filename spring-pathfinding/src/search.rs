@@ -382,10 +382,115 @@ fn trace_path(layer: &NodeLayer, src: [f32; 2], dst: [f32; 2], target_node: Node
 
     points.reverse();
 
+    // Refine: reroute segments that cross blocked cells.
+    refine_path(
+        &mut points,
+        &layer.nodes,
+        layer.width,
+        layer.height,
+        |x, z| {
+            if x < layer.width && z < layer.height {
+                let idx = layer.grid[(z * layer.width + x) as usize];
+                if idx != INVALID_INDEX {
+                    return layer.nodes[idx as usize].is_passable();
+                }
+            }
+            false
+        },
+    );
+
     // Simple smoothing: remove collinear waypoints.
     smooth_path(&mut points);
 
     Path { points }
+}
+
+/// Refine a coarse path by checking each segment against the grid.
+/// If a segment crosses a blocked cell, insert a detour waypoint that
+/// avoids the blocked area.
+fn refine_path(
+    points: &mut Vec<[f32; 2]>,
+    _nodes: &[crate::node::QTNode],
+    grid_width: u32,
+    grid_height: u32,
+    is_passable: impl Fn(u32, u32) -> bool,
+) {
+    let mut i = 0;
+    let mut safety = 0;
+    while i + 1 < points.len() && safety < 5000 {
+        safety += 1;
+        let p0 = points[i];
+        let p1 = points[i + 1];
+
+        if let Some(blocked_cell) =
+            find_blocked_cell_on_segment(p0, p1, grid_width, grid_height, &is_passable)
+        {
+            // Find a passable cell adjacent to the blocked one to route around.
+            if let Some(detour) = find_detour(blocked_cell, grid_width, grid_height, &is_passable) {
+                let detour_world = [
+                    (detour.0 as f32 + 0.5) * SQUARE_SIZE,
+                    (detour.1 as f32 + 0.5) * SQUARE_SIZE,
+                ];
+                points.insert(i + 1, detour_world);
+                // Don't advance i — re-check the segment to p0→detour.
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Walk a line from p0 to p1 at cell resolution. Return the first blocked cell, if any.
+fn find_blocked_cell_on_segment(
+    p0: [f32; 2],
+    p1: [f32; 2],
+    grid_width: u32,
+    grid_height: u32,
+    is_passable: &impl Fn(u32, u32) -> bool,
+) -> Option<(u32, u32)> {
+    let steps = ((distance(p0, p1) / SQUARE_SIZE) as u32).max(1).min(500);
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let wx = p0[0] + (p1[0] - p0[0]) * t;
+        let wz = p0[1] + (p1[1] - p0[1]) * t;
+        let gx = (wx / SQUARE_SIZE) as u32;
+        let gz = (wz / SQUARE_SIZE) as u32;
+        if gx < grid_width && gz < grid_height && !is_passable(gx, gz) {
+            return Some((gx, gz));
+        }
+    }
+    None
+}
+
+/// Find a passable cell adjacent to a blocked cell (simple 8-directional search).
+fn find_detour(
+    blocked: (u32, u32),
+    grid_width: u32,
+    grid_height: u32,
+    is_passable: &impl Fn(u32, u32) -> bool,
+) -> Option<(u32, u32)> {
+    let offsets: [(i32, i32); 8] = [
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (1, -1),
+        (-1, 1),
+        (1, 1),
+    ];
+    for (dx, dz) in &offsets {
+        let nx = blocked.0 as i32 + dx;
+        let nz = blocked.1 as i32 + dz;
+        if nx >= 0 && nx < grid_width as i32 && nz >= 0 && nz < grid_height as i32 {
+            let nx = nx as u32;
+            let nz = nz as u32;
+            if is_passable(nx, nz) {
+                return Some((nx, nz));
+            }
+        }
+    }
+    None
 }
 
 /// Remove waypoints that are nearly collinear with their neighbors.
