@@ -1,5 +1,6 @@
 mod rendering;
 mod terrain;
+mod units;
 
 use std::path::PathBuf;
 
@@ -11,6 +12,7 @@ use spring_map::map_types::{GroundTexture, ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 use terrain::material::{create_datavent_material, create_terrain_material};
 use terrain::mesh::generate_terrain_chunks;
+use units::spawning::spawn_homebases;
 
 /// Marker component for all entities spawned by map loading.
 /// Used to despawn everything when switching maps.
@@ -227,7 +229,7 @@ fn load_map_at_index(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, commands);
-        spawn_start_position_markers(parsed, map_info, commands, meshes, std_materials);
+        spawn_homebases(parsed, map_info, commands, meshes, std_materials);
         info!(
             "  {} start positions, gravity={}",
             map_info.start_positions.len(),
@@ -403,55 +405,6 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
         brightness: 200.0,
         ..default()
     });
-}
-
-fn spawn_start_position_markers(
-    parsed: &ParsedMap,
-    map_info: &MapInfo,
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
-    let marker_mesh = meshes.add(Cylinder::new(12.0, 4.0));
-
-    let team_colors = [
-        Color::linear_rgb(0.0, 0.8, 0.0),
-        Color::linear_rgb(0.8, 0.0, 0.0),
-        Color::linear_rgb(0.0, 0.4, 1.0),
-        Color::linear_rgb(1.0, 1.0, 0.0),
-        Color::linear_rgb(1.0, 0.0, 1.0),
-        Color::linear_rgb(0.0, 1.0, 1.0),
-        Color::linear_rgb(1.0, 0.5, 0.0),
-        Color::linear_rgb(0.5, 0.0, 1.0),
-    ];
-
-    let square_size = SQUARE_SIZE as f32;
-
-    for start_pos in &map_info.start_positions {
-        let color = team_colors[start_pos.team as usize % team_colors.len()];
-        let marker_material = materials.add(StandardMaterial {
-            base_color: color,
-            emissive: LinearRgba::from(color) * 2.0,
-            unlit: false,
-            ..default()
-        });
-
-        let heightmap_w = parsed.header.heightmap_width();
-        let heightmap_x = (start_pos.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-        let heightmap_z = (start_pos.z / square_size)
-            .clamp(0.0, (parsed.header.heightmap_height() - 1) as f32)
-            as usize;
-        let height = parsed.heights[heightmap_z * heightmap_w + heightmap_x];
-
-        commands.spawn((
-            MapEntity,
-            Mesh3d(marker_mesh.clone()),
-            MeshMaterial3d(marker_material),
-            Transform::from_xyz(start_pos.x, height + 3.0, start_pos.z),
-        ));
-    }
-
-    info!("  {} start positions", map_info.start_positions.len());
 }
 
 fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32) {
