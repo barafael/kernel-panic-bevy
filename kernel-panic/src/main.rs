@@ -215,7 +215,7 @@ fn spawn_datavent_markers(
     let mut datavent_count = 0u32;
 
     for feature in &map.features {
-        if feature.type_name.eq_ignore_ascii_case("GeoVent") {
+        if feature.feature_type.is_geovent() {
             let heightmap_w = map.header.heightmap_width();
             let square_size = SQUARE_SIZE as f32;
             let heightmap_x =

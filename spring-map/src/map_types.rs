@@ -138,22 +138,73 @@ impl SmfHeader {
     }
 }
 
+/// Standard feature types defined by the Spring engine.
+///
+/// The engine hardcodes two categories: geothermal vents and trees.
+/// All other feature types are mod-specific and captured by `Other`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum FeatureType {
+    /// Geothermal vent — used by Kernel Panic as datavent (factory placement site).
+    GeoVent,
+    /// One of the 20 default tree types (index 0–19).
+    Tree(u8),
+    /// Mod-specific or unknown feature type.
+    Other(String),
+}
+
+impl FeatureType {
+    /// Parse a feature type name string into the enum.
+    pub fn from_name(name: &str) -> Self {
+        if name.eq_ignore_ascii_case("geovent") {
+            return Self::GeoVent;
+        }
+        if let Some(suffix) = name
+            .to_ascii_lowercase()
+            .strip_prefix("treetype")
+            .map(String::from)
+        {
+            if let Ok(index) = suffix.parse::<u8>() {
+                if index <= 19 {
+                    return Self::Tree(index);
+                }
+            }
+        }
+        Self::Other(name.to_string())
+    }
+
+    pub fn is_geovent(&self) -> bool {
+        matches!(self, Self::GeoVent)
+    }
+
+    pub fn is_tree(&self) -> bool {
+        matches!(self, Self::Tree(_))
+    }
+}
+
+impl std::fmt::Display for FeatureType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GeoVent => write!(f, "GeoVent"),
+            Self::Tree(index) => write!(f, "TreeType{index}"),
+            Self::Other(name) => write!(f, "{name}"),
+        }
+    }
+}
+
 /// A single feature placement on the map.
 #[derive(Debug, Clone)]
 pub struct MapFeature {
-    /// Resolved type name (e.g., "GeoVent", "TreeType0").
-    pub type_name: String,
+    pub feature_type: FeatureType,
     pub x: f32,
     pub y: f32,
     pub z: f32,
-    /// Raw encoded rotation value from the SMF.
     raw_rotation: f32,
     pub relative_size: f32,
 }
 
 impl MapFeature {
     pub(crate) fn new(
-        type_name: String,
+        feature_type: FeatureType,
         x: f32,
         y: f32,
         z: f32,
@@ -161,7 +212,7 @@ impl MapFeature {
         relative_size: f32,
     ) -> Self {
         Self {
-            type_name,
+            feature_type,
             x,
             y,
             z,

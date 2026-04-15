@@ -2,7 +2,9 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::map_types::{MapFeature, ParsedMap, SMF_MAGIC, SMF_VERSION, SmfHeader, SmfParseError};
+use crate::map_types::{
+    FeatureType, MapFeature, ParsedMap, SMF_MAGIC, SMF_VERSION, SmfHeader, SmfParseError,
+};
 
 /// Parse a complete SMF file from raw bytes.
 pub fn parse_smf(data: &[u8]) -> Result<ParsedMap, SmfParseError> {
@@ -132,12 +134,20 @@ fn read_features(
             .read_f32::<LittleEndian>()
             .map_err(|_| SmfParseError::FeatureTruncated)?;
 
-        let type_name = type_names
+        let raw_name = type_names
             .get(type_index)
-            .cloned()
-            .unwrap_or_else(|| format!("Unknown({type_index})"));
+            .map(String::as_str)
+            .unwrap_or("Unknown");
+        let feature_type = FeatureType::from_name(raw_name);
 
-        features.push(MapFeature::new(type_name, x, y, z, rotation, relative_size));
+        features.push(MapFeature::new(
+            feature_type,
+            x,
+            y,
+            z,
+            rotation,
+            relative_size,
+        ));
     }
 
     Ok(features)
@@ -260,7 +270,7 @@ mod tests {
     fn parse_features_with_resolved_names() {
         let parsed = parse_smf(&build_test_smf()).unwrap();
         assert_eq!(parsed.features.len(), 1);
-        assert_eq!(parsed.features[0].type_name, "GeoVent");
+        assert!(parsed.features[0].feature_type.is_geovent());
         assert!((parsed.features[0].x - 512.0).abs() < 0.01);
     }
 
@@ -311,7 +321,7 @@ mod tests {
         let geovents: Vec<_> = parsed
             .features
             .iter()
-            .filter(|f| f.type_name == "GeoVent")
+            .filter(|f| f.feature_type.is_geovent())
             .collect();
         assert!(!geovents.is_empty(), "should have GeoVent features");
     }
