@@ -1,0 +1,15 @@
+[package]
+name = "spring-cob"
+version = "0.1.0"
+edition = "2024"
+description = "Parser and virtual machine for Spring RTS engine COB animation scripts"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lib]
+doctest = false

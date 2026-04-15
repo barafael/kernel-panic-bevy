@@ -1,5 +1,5 @@
 [workspace]
-members = ["spring-map", "spring-unit-mesh", "kernel-panic"]
+members = ["spring-map", "spring-unit-mesh", "spring-cob", "kernel-panic"]
 resolver = "3"
 
 [workspace.dependencies]
