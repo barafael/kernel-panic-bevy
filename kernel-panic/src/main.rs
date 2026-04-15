@@ -7,11 +7,22 @@ use bevy::prelude::*;
 
 use rendering::RenderingPlugin;
 use rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
-use spring_map::SpringMap;
 use spring_map::map_types::{GroundTexture, ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 use terrain::material::{create_datavent_material, create_terrain_material};
 use terrain::mesh::generate_terrain_chunks;
+
+/// Marker component for all entities spawned by map loading.
+/// Used to despawn everything when switching maps.
+#[derive(Component)]
+struct MapEntity;
+
+/// Tracks available maps and the current selection.
+#[derive(Resource)]
+struct MapCatalog {
+    maps: Vec<PathBuf>,
+    current: usize,
+}
 
 fn main() {
     App::new()
@@ -25,12 +36,74 @@ fn main() {
         .add_plugins(RenderingPlugin)
         .add_systems(
             Startup,
-            load_and_spawn_terrain.after(rendering::camera::spawn_camera),
+            (
+                discover_maps,
+                load_current_map.after(rendering::camera::spawn_camera),
+            )
+                .chain(),
         )
+        .add_systems(Update, cycle_map_on_keypress)
         .run();
 }
 
-fn load_and_spawn_terrain(
+/// Discover all .sd7/.sdz map files and pick the initial one.
+fn discover_maps(mut commands: Commands) {
+    let candidates = [
+        PathBuf::from("kernel-panic/assets/maps"),
+        PathBuf::from("assets/maps"),
+    ];
+    let maps_dir = candidates.iter().find(|p| p.is_dir());
+
+    let mut maps: Vec<PathBuf> = Vec::new();
+
+    if let Some(dir) = maps_dir {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if ext == "sd7" || ext == "sdz" {
+                    maps.push(path);
+                }
+            }
+        }
+    }
+
+    maps.sort();
+
+    // If a CLI arg was given, find it in the list and set as current.
+    let initial = std::env::args()
+        .nth(1)
+        .and_then(|arg| {
+            let arg_path = PathBuf::from(&arg);
+            maps.iter().position(|p| p == &arg_path)
+        })
+        .unwrap_or(0);
+
+    if maps.is_empty() {
+        error!("No map files found. Place .sd7/.sdz files in assets/maps/");
+        std::process::exit(1);
+    }
+
+    info!(
+        "Found {} maps, starting with: {}",
+        maps.len(),
+        maps[initial].display()
+    );
+    commands.insert_resource(MapCatalog {
+        maps,
+        current: initial,
+    });
+}
+
+/// Watch for `/` (next map) and `\` (previous map) keypresses.
+fn cycle_map_on_keypress(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut catalog: ResMut<MapCatalog>,
+    map_entities: Query<Entity, With<MapEntity>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
@@ -38,36 +111,87 @@ fn load_and_spawn_terrain(
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
 ) {
-    let map_path = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let workspace_path = PathBuf::from("kernel-panic/assets/maps/Marble_Madness_Map.sd7");
-            if workspace_path.exists() {
-                workspace_path
-            } else {
-                PathBuf::from("assets/maps/Marble_Madness_Map.sd7")
-            }
-        });
+    let changed = if keys.just_pressed(KeyCode::Slash) {
+        catalog.current = (catalog.current + 1) % catalog.maps.len();
+        true
+    } else if keys.just_pressed(KeyCode::Backslash) {
+        catalog.current = (catalog.current + catalog.maps.len() - 1) % catalog.maps.len();
+        true
+    } else {
+        false
+    };
 
-    if !map_path.exists() {
-        error!("Map file not found: {}", map_path.display());
-        info!("Usage: kernel-panic <path-to-map.sd7>");
-        std::process::exit(1);
+    if !changed {
+        return;
     }
 
-    let spring_map = match spring_map::load_map(&map_path) {
+    // Despawn all existing map entities.
+    for entity in &map_entities {
+        commands.entity(entity).despawn();
+    }
+
+    load_map_at_index(
+        &catalog,
+        &mut commands,
+        &mut meshes,
+        &mut std_materials,
+        &mut images,
+        &mut camera_query,
+        &mut map_bounds,
+    );
+}
+
+/// Initial map load at startup.
+fn load_current_map(
+    catalog: Res<MapCatalog>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    mut map_bounds: ResMut<MapBounds>,
+) {
+    load_map_at_index(
+        &catalog,
+        &mut commands,
+        &mut meshes,
+        &mut std_materials,
+        &mut images,
+        &mut camera_query,
+        &mut map_bounds,
+    );
+}
+
+fn load_map_at_index(
+    catalog: &MapCatalog,
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    std_materials: &mut ResMut<Assets<StandardMaterial>>,
+    images: &mut ResMut<Assets<Image>>,
+    camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    map_bounds: &mut ResMut<MapBounds>,
+) {
+    let map_path = &catalog.maps[catalog.current];
+    let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
+
+    info!(
+        "Loading map [{}/{}]: {map_name}",
+        catalog.current + 1,
+        catalog.maps.len()
+    );
+
+    let spring_map = match spring_map::load_map(map_path) {
         Ok(m) => m,
         Err(err) => {
-            error!("Failed to parse map {}: {err}", map_path.display());
-            std::process::exit(1);
+            error!("Failed to load {}: {err}", map_path.display());
+            return;
         }
     };
 
     let parsed = &spring_map.parsed;
 
     info!(
-        "Loaded map: {}x{} (heightmap {}x{}), {} features",
+        "  {}x{} (heightmap {}x{}), {} features",
         parsed.header.map_x,
         parsed.header.map_y,
         parsed.header.heightmap_width(),
@@ -76,49 +200,41 @@ fn load_and_spawn_terrain(
     );
 
     let terrain_material = match &spring_map.ground_texture {
-        Some(ground) => {
-            build_terrain_material_from_texture(ground, &mut images, &mut std_materials)
-        }
+        Some(ground) => build_terrain_material_from_texture(ground, images, std_materials),
         None => {
-            warn!("No ground texture available — using fallback material");
-            dark_fallback_material(&mut std_materials)
+            warn!("No ground texture — using fallback");
+            dark_fallback_material(std_materials)
         }
     };
 
-    setup_camera(parsed, &mut camera_query, &mut map_bounds);
+    setup_camera(parsed, camera_query, map_bounds);
 
     if parsed.header.min_height == parsed.header.max_height {
         warn!(
-            "Map has min_height == max_height ({}) — terrain will be flat. \
-             This map likely uses a Lua gadget to deform the heightmap at runtime.",
+            "  Flat terrain (min=max={}). Lua heightmap gadget not supported yet.",
             parsed.header.min_height
         );
     }
 
-    spawn_terrain(
-        parsed,
-        terrain_material,
-        &mut commands,
-        &mut meshes,
-        &mut std_materials,
-    );
+    spawn_terrain(parsed, terrain_material, commands, meshes, std_materials);
 
     if let Some(map_info) = &spring_map.map_info {
-        apply_atmosphere(map_info, &mut commands);
-        spawn_start_position_markers(
-            parsed,
-            map_info,
-            &mut commands,
-            &mut meshes,
-            &mut std_materials,
-        );
+        apply_atmosphere(map_info, commands);
+        spawn_start_position_markers(parsed, map_info, commands, meshes, std_materials);
         info!(
-            "Map info: {} start positions, gravity={}",
+            "  {} start positions, gravity={}",
             map_info.start_positions.len(),
             map_info.gravity,
         );
     }
+
+    // Update window title.
+    commands.insert_resource(WindowTitle(map_name.into_owned()));
 }
+
+/// Resource to defer window title update (applied by a system).
+#[derive(Resource)]
+struct WindowTitle(String);
 
 fn setup_camera(
     parsed: &ParsedMap,
@@ -138,11 +254,8 @@ fn setup_camera(
     if let Ok((mut cam_state, mut cam_transform)) = camera_query.single_mut() {
         let focus = Vec3::new(world_w / 2.0, center_height, world_d / 2.0);
         let distance = map_extent * 0.5;
-        info!("Camera → focus={focus}, distance={distance:.0}");
         cam_state.snap_to(focus, distance);
         *cam_transform = rendering::camera::compute_transform_from_state(&cam_state);
-    } else {
-        warn!("Camera entity not found — could not center on map");
     }
 }
 
@@ -159,13 +272,6 @@ fn build_terrain_material_from_texture(
     images: &mut ResMut<Assets<Image>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> Handle<StandardMaterial> {
-    info!(
-        "Ground texture: {}x{} ({:.1} MB)",
-        ground.width,
-        ground.height,
-        ground.pixels.len() as f64 / 1_048_576.0,
-    );
-
     let (all_pixels, mip_levels) = generate_mipmaps(&ground.pixels, ground.width, ground.height);
 
     let size = bevy::render::render_resource::Extent3d {
@@ -194,8 +300,8 @@ fn build_terrain_material_from_texture(
     });
 
     info!(
-        "Texture: {}x{}, {mip_levels} mip levels, 16x aniso",
-        ground.width, ground.height
+        "  Texture: {}x{}, {mip_levels} mip levels",
+        ground.width, ground.height,
     );
 
     let texture_handle = images.add(image);
@@ -210,11 +316,12 @@ fn spawn_terrain(
     std_materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
     let chunks = generate_terrain_chunks(map);
-    info!("Spawning {} terrain chunks", chunks.len());
+    info!("  Spawning {} terrain chunks", chunks.len());
 
     for chunk in chunks {
         let mesh_handle = meshes.add(chunk.mesh);
         commands.spawn((
+            MapEntity,
             Mesh3d(mesh_handle),
             MeshMaterial3d(terrain_material.clone()),
             Transform::from_translation(chunk.translation),
@@ -247,6 +354,7 @@ fn spawn_datavent_markers(
             let height = map.heights[heightmap_z * heightmap_w + heightmap_x];
 
             commands.spawn((
+                MapEntity,
                 Mesh3d(marker_mesh.clone()),
                 MeshMaterial3d(marker_material.clone()),
                 Transform::from_xyz(feature.x, height + 2.0, feature.z),
@@ -257,13 +365,10 @@ fn spawn_datavent_markers(
     }
 
     if datavent_count > 0 {
-        info!("Placed {datavent_count} datavents (GeoVent features)");
-    } else {
-        warn!("No GeoVent features found in map");
+        info!("  {datavent_count} datavents");
     }
 }
 
-/// Apply atmosphere settings from the .smd: clear color, directional light, fog.
 fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
     let sky = map_info.atmosphere.sky_color;
     commands.insert_resource(ClearColor(Color::linear_rgb(sky[0], sky[1], sky[2])));
@@ -272,11 +377,11 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
     let ambient = map_info.lighting.ground_ambient;
     let dir = map_info.lighting.sun_dir;
 
-    // Normalize sun direction.
     let sun_dir =
         Vec3::new(dir[0], dir[1], dir[2]).normalize_or(Vec3::new(0.0, 1.0, 0.5).normalize());
 
     commands.spawn((
+        MapEntity,
         DirectionalLight {
             color: Color::linear_rgb(sun[0], sun[1], sun[2]),
             illuminance: 8000.0,
@@ -293,7 +398,6 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
     });
 }
 
-/// Render start position markers as colored cylinders on the terrain.
 fn spawn_start_position_markers(
     parsed: &ParsedMap,
     map_info: &MapInfo,
@@ -303,16 +407,15 @@ fn spawn_start_position_markers(
 ) {
     let marker_mesh = meshes.add(Cylinder::new(12.0, 4.0));
 
-    // Assign distinct colors to each start position.
     let team_colors = [
-        Color::linear_rgb(0.0, 0.8, 0.0), // green
-        Color::linear_rgb(0.8, 0.0, 0.0), // red
-        Color::linear_rgb(0.0, 0.4, 1.0), // blue
-        Color::linear_rgb(1.0, 1.0, 0.0), // yellow
-        Color::linear_rgb(1.0, 0.0, 1.0), // magenta
-        Color::linear_rgb(0.0, 1.0, 1.0), // cyan
-        Color::linear_rgb(1.0, 0.5, 0.0), // orange
-        Color::linear_rgb(0.5, 0.0, 1.0), // purple
+        Color::linear_rgb(0.0, 0.8, 0.0),
+        Color::linear_rgb(0.8, 0.0, 0.0),
+        Color::linear_rgb(0.0, 0.4, 1.0),
+        Color::linear_rgb(1.0, 1.0, 0.0),
+        Color::linear_rgb(1.0, 0.0, 1.0),
+        Color::linear_rgb(0.0, 1.0, 1.0),
+        Color::linear_rgb(1.0, 0.5, 0.0),
+        Color::linear_rgb(0.5, 0.0, 1.0),
     ];
 
     let square_size = SQUARE_SIZE as f32;
@@ -326,7 +429,6 @@ fn spawn_start_position_markers(
             ..default()
         });
 
-        // Sample terrain height at start position.
         let heightmap_w = parsed.header.heightmap_width();
         let heightmap_x = (start_pos.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
         let heightmap_z = (start_pos.z / square_size)
@@ -335,16 +437,14 @@ fn spawn_start_position_markers(
         let height = parsed.heights[heightmap_z * heightmap_w + heightmap_x];
 
         commands.spawn((
+            MapEntity,
             Mesh3d(marker_mesh.clone()),
             MeshMaterial3d(marker_material),
             Transform::from_xyz(start_pos.x, height + 3.0, start_pos.z),
         ));
     }
 
-    info!(
-        "Placed {} start position markers",
-        map_info.start_positions.len()
-    );
+    info!("  {} start positions", map_info.start_positions.len());
 }
 
 fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32) {
