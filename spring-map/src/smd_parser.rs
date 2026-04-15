@@ -73,10 +73,12 @@ pub fn parse_smd(text: &str) -> MapInfo {
             continue;
         }
 
-        // Section open: [SECTIONNAME]
-        if line.starts_with('[') && line.ends_with(']') {
-            let name = line[1..line.len() - 1].to_string();
+        // Section open: [SECTIONNAME] or [SECTIONNAME] {
+        if line.starts_with('[') {
+            let bracket_end = line.find(']').unwrap_or(line.len());
+            let name = line[1..bracket_end].to_string();
             current_section.push(name);
+            // If the opening brace is on the same line, consume it.
             continue;
         }
 

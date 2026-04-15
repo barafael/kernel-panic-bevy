@@ -57,3 +57,145 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         smf_data: extracted.smf_data,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn maps_dir() -> Option<PathBuf> {
+        // Try relative paths from both workspace root and crate root,
+        // plus an absolute path derived from CARGO_MANIFEST_DIR.
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent().unwrap_or(&manifest_dir);
+
+        [
+            workspace_root.join("kernel-panic/assets/maps"),
+            PathBuf::from("kernel-panic/assets/maps"),
+            PathBuf::from("assets/maps"),
+        ]
+        .into_iter()
+        .find(|p| p.is_dir())
+    }
+
+    /// Load every .sd7/.sdz map through the full pipeline and verify
+    /// the output is sane: heightmap has data, features parsed, texture
+    /// assembled, .smd metadata present.
+    #[test]
+    fn load_all_maps_end_to_end() {
+        let Some(dir) = maps_dir() else {
+            eprintln!("Skipping: maps directory not found");
+            return;
+        };
+
+        let mut count = 0;
+        let mut failures: Vec<String> = Vec::new();
+
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext != "sd7" && ext != "sdz" {
+                continue;
+            }
+
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+
+            match load_map(&path) {
+                Ok(spring_map) => {
+                    let p = &spring_map.parsed;
+
+                    // Heightmap should have the right number of samples.
+                    assert_eq!(
+                        p.heights.len(),
+                        p.header.heightmap_len(),
+                        "{name}: heightmap length mismatch"
+                    );
+
+                    // Metalmap should have the right size.
+                    assert_eq!(
+                        p.metalmap.len(),
+                        p.header.metalmap_width() * p.header.metalmap_height(),
+                        "{name}: metalmap length mismatch"
+                    );
+
+                    // Should have at least one feature (all KP maps have geovents).
+                    assert!(
+                        !p.features.is_empty(),
+                        "{name}: expected at least one feature"
+                    );
+
+                    // Ground texture should be present and correctly sized.
+                    if let Some(ground) = &spring_map.ground_texture {
+                        assert_eq!(
+                            ground.pixels.len(),
+                            ground.width * ground.height * 4,
+                            "{name}: ground texture pixel count mismatch"
+                        );
+                        assert!(ground.width > 0 && ground.height > 0);
+                    }
+
+                    // .smd metadata should be present (all KP maps have it).
+                    let map_info = spring_map
+                        .map_info
+                        .as_ref()
+                        .unwrap_or_else(|| panic!("{name}: missing .smd metadata"));
+
+                    // Should have at least 2 start positions.
+                    assert!(
+                        map_info.start_positions.len() >= 2,
+                        "{name}: expected at least 2 start positions, got {}",
+                        map_info.start_positions.len()
+                    );
+
+                    // Start positions should be within map bounds.
+                    let world_w = p.header.world_width();
+                    let world_d = p.header.world_depth();
+                    for sp in &map_info.start_positions {
+                        assert!(
+                            sp.x >= 0.0 && sp.x <= world_w && sp.z >= 0.0 && sp.z <= world_d,
+                            "{name}: start position team {} at ({}, {}) is out of bounds ({}x{})",
+                            sp.team,
+                            sp.x,
+                            sp.z,
+                            world_w,
+                            world_d
+                        );
+                    }
+
+                    eprintln!(
+                        "  OK: {name} — {}x{}, {} features, {} starts, texture {}",
+                        p.header.map_x,
+                        p.header.map_y,
+                        p.features.len(),
+                        map_info.start_positions.len(),
+                        spring_map
+                            .ground_texture
+                            .as_ref()
+                            .map(|g| format!("{}x{}", g.width, g.height))
+                            .unwrap_or_else(|| "none".into()),
+                    );
+
+                    count += 1;
+                }
+                Err(err) => {
+                    failures.push(format!("{name}: {err}"));
+                }
+            }
+        }
+
+        if !failures.is_empty() {
+            panic!(
+                "{} map(s) failed to load:\n  {}",
+                failures.len(),
+                failures.join("\n  ")
+            );
+        }
+
+        eprintln!("All {count} maps loaded successfully");
+        assert!(count >= 13, "expected at least 13 KP maps, got {count}");
+    }
+}
