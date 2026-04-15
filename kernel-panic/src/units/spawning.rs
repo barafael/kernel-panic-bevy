@@ -6,6 +6,7 @@ use spring_map::smd_parser::MapInfo;
 use super::components::{Faction, Health, SelectionVolume, TeamId, UnitType};
 use super::definitions::{UnitKind, stats};
 use super::meshes::{S3OModelCache, unit_material, unit_mesh, unit_radius};
+use super::production::default_production;
 use crate::MapEntity;
 
 /// Assign factions to teams in a round-robin pattern.
@@ -13,7 +14,7 @@ const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::
 
 /// Shared invisible material for all selection volumes.
 #[derive(Resource, Clone)]
-pub struct SelectionVolumeMaterial(Handle<StandardMaterial>);
+pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
 
 /// Spawn a homebase for each start position defined in the map info.
 pub fn spawn_homebases(
@@ -77,23 +78,27 @@ pub fn spawn_unit(
 
     let selection_sphere = meshes.add(Sphere::new(radius).mesh().ico(3).unwrap());
 
-    commands
-        .spawn((
-            MapEntity,
-            UnitType(kind),
-            faction,
-            TeamId(team),
-            Health::full(unit_stats.max_health),
-            Mesh3d(mesh),
-            MeshMaterial3d(material),
-            Transform::from_translation(position),
-        ))
-        .with_child((
-            SelectionVolume,
-            Mesh3d(selection_sphere),
-            MeshMaterial3d(invisible_mat.0.clone()),
-            Transform::from_xyz(0.0, radius * 0.5, 0.0),
-        ));
+    let mut entity_commands = commands.spawn((
+        MapEntity,
+        UnitType(kind),
+        faction,
+        TeamId(team),
+        Health::full(unit_stats.max_health),
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(position),
+    ));
+
+    if let Some(producer) = default_production(kind) {
+        entity_commands.insert(producer);
+    }
+
+    entity_commands.with_child((
+        SelectionVolume,
+        Mesh3d(selection_sphere),
+        MeshMaterial3d(invisible_mat.0.clone()),
+        Transform::from_xyz(0.0, radius * 0.5, 0.0),
+    ));
 }
 
 fn get_or_create_invisible_material(

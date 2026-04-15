@@ -48,7 +48,10 @@ fn main() {
             )
                 .chain(),
         )
-        .add_systems(Update, cycle_map_on_keypress)
+        .add_systems(
+            Update,
+            (cycle_map_on_keypress, units::production::production_system),
+        )
         .run();
 }
 
