@@ -48,9 +48,16 @@ fn main() {
             )
                 .chain(),
         )
+        .init_resource::<units::combat::DamageQueue>()
         .add_systems(
             Update,
-            (cycle_map_on_keypress, units::production::production_system),
+            (
+                cycle_map_on_keypress,
+                units::production::production_system,
+                units::combat::combat_system,
+                units::combat::apply_damage.after(units::combat::combat_system),
+                units::combat::death_system.after(units::combat::apply_damage),
+            ),
         )
         .run();
 }

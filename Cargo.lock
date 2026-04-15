@@ -4954,7 +4954,6 @@ name = "spring-unit-mesh"
 version = "0.1.0"
 dependencies = [
  "byteorder",
- "proptest",
  "thiserror 2.0.18",
 ]
 

@@ -8,5 +8,5 @@ description = "Parser for Spring RTS engine unit models (.s3o)"
 byteorder = { workspace = true }
 thiserror = { workspace = true }
 
-[dev-dependencies]
-proptest = { workspace = true }
+[lib]
+doctest = false

@@ -13,3 +13,6 @@ mlua = { version = "0.11", features = ["lua51", "vendored"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
+
+[lib]
+doctest = false
