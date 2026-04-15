@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use rendering::RenderingPlugin;
 use rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use spring_map::SpringMap;
-use spring_map::map_types::{GroundTexture, ParsedMap, SQUARE_SIZE, SmfHeader};
+use spring_map::map_types::{GroundTexture, ParsedMap, SQUARE_SIZE};
 use terrain::material::{create_datavent_material, create_terrain_material};
 use terrain::mesh::generate_terrain_chunks;
 
@@ -49,13 +49,17 @@ fn load_and_spawn_terrain(
             }
         });
 
+    if !map_path.exists() {
+        error!("Map file not found: {}", map_path.display());
+        info!("Usage: kernel-panic <path-to-map.sd7>");
+        std::process::exit(1);
+    }
+
     let spring_map = match spring_map::load_map(&map_path) {
         Ok(m) => m,
         Err(err) => {
-            error!("Failed to load map from {}: {err}", map_path.display());
-            info!("Usage: kernel-panic <path-to-map.sd7>");
-            spawn_test_terrain(&mut commands, &mut meshes, &mut std_materials);
-            return;
+            error!("Failed to parse map {}: {err}", map_path.display());
+            std::process::exit(1);
         }
     };
 
@@ -239,60 +243,6 @@ fn spawn_datavent_markers(
         info!("Placed {datavent_count} datavents (GeoVent features)");
     } else {
         warn!("No GeoVent features found in map");
-    }
-}
-
-fn spawn_test_terrain(
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut Assets<StandardMaterial>,
-) {
-    info!("Generating test terrain");
-
-    let terrain_material = dark_fallback_material(materials);
-    let map = build_test_map();
-    let chunks = generate_terrain_chunks(&map);
-
-    for chunk in chunks {
-        let mesh_handle = meshes.add(chunk.mesh);
-        commands.spawn((
-            Mesh3d(mesh_handle),
-            MeshMaterial3d(terrain_material.clone()),
-            Transform::from_translation(chunk.translation),
-        ));
-    }
-
-    commands.spawn(DirectionalLight {
-        illuminance: 500.0,
-        shadows_enabled: false,
-        ..default()
-    });
-}
-
-fn build_test_map() -> ParsedMap {
-    let header = SmfHeader::new_flat(256, 256, -20.0, 80.0);
-
-    let heightmap_w = header.heightmap_width();
-    let heightmap_h = header.heightmap_height();
-
-    let mut heights = Vec::with_capacity(heightmap_w * heightmap_h);
-    for grid_z in 0..heightmap_h {
-        for grid_x in 0..heightmap_w {
-            let frac_x = grid_x as f32 / heightmap_w as f32;
-            let frac_z = grid_z as f32 / heightmap_h as f32;
-            let height = 10.0 * (frac_x * std::f32::consts::TAU * 2.0).sin()
-                + 8.0 * (frac_z * std::f32::consts::TAU * 3.0).sin()
-                + 5.0 * ((frac_x + frac_z) * std::f32::consts::TAU * 1.5).cos()
-                + 15.0;
-            heights.push(height);
-        }
-    }
-
-    ParsedMap {
-        header,
-        heights,
-        features: vec![],
-        metalmap: vec![0; 256 / 2 * 256 / 2],
     }
 }
 
