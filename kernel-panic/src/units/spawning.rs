@@ -3,7 +3,7 @@ use bevy::prelude::*;
 use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 
-use super::components::{Faction, Health, SelectionVolume, TeamId, UnitType};
+use super::components::{Faction, Health, Homebase, SelectionVolume, TeamId, UnitType};
 use super::definitions::{UnitKind, stats};
 use super::meshes::{S3OModelCache, unit_material, unit_mesh, unit_radius};
 use super::production::default_production;
@@ -91,6 +91,13 @@ pub fn spawn_unit(
 
     if let Some(producer) = default_production(kind) {
         entity_commands.insert(producer);
+    }
+
+    if matches!(
+        kind,
+        UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection
+    ) {
+        entity_commands.insert(Homebase);
     }
 
     entity_commands.with_child((

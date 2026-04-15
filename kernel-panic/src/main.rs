@@ -1,6 +1,7 @@
 mod interaction;
 mod rendering;
 mod terrain;
+mod ui;
 mod units;
 
 use std::path::PathBuf;
@@ -40,6 +41,9 @@ fn main() {
         .add_plugins(RenderingPlugin)
         .add_plugins(interaction::InteractionPlugin)
         .init_resource::<S3OModelCache>()
+        .init_resource::<units::combat::DamageQueue>()
+        .init_resource::<units::game_over::GameState>()
+        .init_resource::<units::game_over::PlayerTeam>()
         .add_systems(
             Startup,
             (
@@ -48,7 +52,6 @@ fn main() {
             )
                 .chain(),
         )
-        .init_resource::<units::combat::DamageQueue>()
         .add_systems(
             Update,
             (
@@ -57,6 +60,7 @@ fn main() {
                 units::combat::combat_system,
                 units::combat::apply_damage.after(units::combat::combat_system),
                 units::combat::death_system.after(units::combat::apply_damage),
+                units::game_over::check_game_over.after(units::combat::death_system),
             ),
         )
         .run();
@@ -245,6 +249,23 @@ fn load_map_at_index(
     }
 
     spawn_terrain(parsed, terrain_material, commands, meshes, std_materials);
+
+    // Setup minimap from ground texture.
+    {
+        let (gp, gw, gh) = match &spring_map.ground_texture {
+            Some(g) => (Some(g.pixels.as_slice()), g.width, g.height),
+            None => (None, 0, 0),
+        };
+        ui::minimap::setup_minimap(
+            commands,
+            images,
+            gp,
+            gw,
+            gh,
+            parsed.header.world_width(),
+            parsed.header.world_depth(),
+        );
+    }
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, commands);

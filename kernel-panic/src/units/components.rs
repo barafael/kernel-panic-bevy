@@ -61,3 +61,8 @@ pub struct TeamId(pub u8);
 /// The parent entity is the actual unit.
 #[derive(Component)]
 pub struct SelectionVolume;
+
+/// Marks a unit as a homebase (Kernel/Hole/Connection).
+/// Losing all homebases means defeat.
+#[derive(Component)]
+pub struct Homebase;
