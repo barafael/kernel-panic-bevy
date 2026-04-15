@@ -64,7 +64,9 @@ fn main() {
                 units::combat::apply_damage.after(units::combat::combat_system),
                 units::combat::death_system.after(units::combat::apply_damage),
                 units::game_over::check_game_over.after(units::combat::death_system),
-                units::animation::animation_system,
+                units::animation::animation_system.after(units::combat::death_system),
+                units::combat::cleanup_dying.after(units::animation::animation_system),
+                units::animation::decay_death_particles,
             ),
         )
         .run();

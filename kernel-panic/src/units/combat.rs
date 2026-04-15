@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use super::animation::CobAnimator;
 use super::components::{Faction, Health, UnitType};
 use super::definitions::stats;
 use super::weapons::WeaponRegistry;
@@ -10,6 +11,16 @@ pub struct AttackCooldown {
     pub remaining: f32,
 }
 
+/// Marks a unit that has reached 0 HP and is playing its death animation.
+/// The entity will be despawned once the animation finishes or the timer expires.
+#[derive(Component)]
+pub struct Dying {
+    pub timer: f32,
+}
+
+/// Maximum time to wait for a death animation before force-despawning (seconds).
+const DEATH_ANIM_TIMEOUT: f32 = 2.0;
+
 /// Pending damage to apply after combat resolution.
 #[derive(Resource, Default)]
 pub struct DamageQueue(Vec<(Entity, f32)>);
@@ -18,7 +29,7 @@ pub struct DamageQueue(Vec<(Entity, f32)>);
 pub fn combat_system(
     time: Res<Time>,
     mut cooldowns: Query<&mut AttackCooldown>,
-    attackers: Query<(Entity, &UnitType, &Faction, &GlobalTransform)>,
+    attackers: Query<(Entity, &UnitType, &Faction, &GlobalTransform), Without<Dying>>,
     potential_targets: Query<(Entity, &Faction, &GlobalTransform, &Health), With<UnitType>>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
@@ -91,10 +102,40 @@ pub fn apply_damage(mut damage_queue: ResMut<DamageQueue>, mut health_q: Query<&
     damage_queue.0.clear();
 }
 
-/// System: despawn units whose health drops to zero or below.
-pub fn death_system(query: Query<(Entity, &Health), With<UnitType>>, mut commands: Commands) {
+/// System: when a unit reaches 0 HP, start the Killed() COB script and mark it
+/// as `Dying` instead of despawning immediately.
+pub fn death_system(
+    query: Query<(Entity, &Health), (With<UnitType>, Without<Dying>)>,
+    mut animators: Query<&mut CobAnimator>,
+    mut commands: Commands,
+) {
     for (entity, health) in &query {
         if health.current <= 0.0 {
+            // Start the COB Killed() callback if the unit has an animator.
+            if let Ok(mut animator) = animators.get_mut(entity) {
+                let cob = animator.cob.clone();
+                animator.vm.start_script(&cob, "Killed", &[0, 0]);
+            }
+            commands.entity(entity).insert(Dying {
+                timer: DEATH_ANIM_TIMEOUT,
+            });
+        }
+    }
+}
+
+/// System: despawn dying units once their death animation finishes or the
+/// timeout expires.
+pub fn cleanup_dying(
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut Dying, Option<&CobAnimator>)>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut dying, animator) in &mut query {
+        dying.timer -= dt;
+
+        let anim_done = animator.map_or(true, |a| !a.vm.has_active_threads());
+        if anim_done || dying.timer <= 0.0 {
             commands.entity(entity).despawn();
         }
     }

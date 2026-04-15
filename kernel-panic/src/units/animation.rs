@@ -6,7 +6,15 @@ use bevy::prelude::*;
 
 use spring_cob::{AnimCommand, CobFile, CobVm, parse_cob};
 
+use super::components::Faction;
 use super::meshes::load_asset_from_disk;
+
+/// Brief particle burst spawned when a piece explodes.
+#[derive(Component)]
+pub struct DeathParticle {
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+}
 
 /// Component holding per-unit animation state.
 #[derive(Component)]
@@ -62,15 +70,19 @@ fn spring_linear_to_elmos(val: i32) -> f32 {
 }
 
 /// System: tick all CobAnimator VMs and apply piece transforms.
+#[allow(clippy::too_many_arguments)]
 pub fn animation_system(
     time: Res<Time>,
-    mut animators: Query<(&mut CobAnimator, &Children)>,
-    mut transforms: Query<&mut Transform, With<PieceIndex>>,
+    mut animators: Query<(&mut CobAnimator, &Children, &Faction, &GlobalTransform)>,
+    mut transforms: Query<(&mut Transform, &mut Visibility), With<PieceIndex>>,
+    mut spawn_commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
     let dt_ms = (dt * 1000.0) as i32;
 
-    for (mut animator, _children) in &mut animators {
+    for (mut animator, _children, faction, unit_gtf) in &mut animators {
         // Tick the COB VM.
         let cob = animator.cob.clone();
         let commands = animator.vm.tick(&cob, dt_ms);
@@ -148,7 +160,46 @@ pub fn animation_system(
                         animator.spin_speeds[p][a] = 0.0;
                     }
                 }
-                // Show/Hide/EmitSfx/Explode/SetValue — handled elsewhere or ignored for now.
+                AnimCommand::Show { piece } => {
+                    let p = *piece as usize;
+                    if p < animator.piece_entities.len() {
+                        if let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p]) {
+                            *vis = Visibility::Inherited;
+                        }
+                    }
+                }
+                AnimCommand::Hide { piece } => {
+                    let p = *piece as usize;
+                    if p < animator.piece_entities.len() {
+                        if let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p]) {
+                            *vis = Visibility::Hidden;
+                        }
+                    }
+                }
+                AnimCommand::Explode { piece, .. } => {
+                    let p = *piece as usize;
+                    if p < animator.piece_entities.len() {
+                        // Hide the original piece.
+                        if let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p]) {
+                            *vis = Visibility::Hidden;
+                        }
+                        // Spawn a brief explosion burst at the piece's world position.
+                        let piece_world_pos =
+                            if let Ok((tf, _)) = transforms.get(animator.piece_entities[p]) {
+                                unit_gtf.translation() + tf.translation
+                            } else {
+                                unit_gtf.translation()
+                            };
+                        spawn_death_particle(
+                            piece_world_pos,
+                            *faction,
+                            &mut spawn_commands,
+                            &mut meshes,
+                            &mut materials,
+                        );
+                    }
+                }
+                // EmitSfx/SetValue — not yet implemented.
                 _ => {}
             }
         }
@@ -201,7 +252,7 @@ pub fn animation_system(
             // Apply to Bevy transform.
             if p < animator.piece_entities.len() {
                 let entity = animator.piece_entities[p];
-                if let Ok(mut tf) = transforms.get_mut(entity) {
+                if let Ok((mut tf, _)) = transforms.get_mut(entity) {
                     let r = animator.piece_rotations[p];
                     let t = animator.piece_translations[p];
                     tf.rotation = Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]);
@@ -220,6 +271,74 @@ pub fn animation_system(
             animator
                 .vm
                 .anim_finished(spring_cob::AnimType::Move, piece, axis);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Death particle effects
+// ---------------------------------------------------------------------------
+
+/// Spawn a brief expanding, fading burst at `pos` in the unit's faction color.
+fn spawn_death_particle(
+    pos: Vec3,
+    faction: Faction,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let color = LinearRgba::from(faction.color());
+    let material = materials.add(StandardMaterial {
+        base_color: Color::from(color),
+        emissive: color * 6.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    let mesh = meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap());
+
+    commands.spawn((
+        DeathParticle {
+            lifetime: 0.0,
+            max_lifetime: 0.5,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(pos).with_scale(Vec3::splat(2.0)),
+    ));
+}
+
+/// System: expand and fade death particles, then despawn them.
+pub fn decay_death_particles(
+    time: Res<Time>,
+    mut query: Query<(
+        Entity,
+        &mut DeathParticle,
+        &mut Transform,
+        &MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut particle, mut transform, mat_handle) in &mut query {
+        particle.lifetime += dt;
+        let t = (particle.lifetime / particle.max_lifetime).clamp(0.0, 1.0);
+
+        if t >= 1.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+
+        // Expand rapidly then slow down.
+        let scale = 2.0 + t * 20.0;
+        transform.scale = Vec3::splat(scale);
+
+        // Fade out alpha and emissive.
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            let alpha = 1.0 - t;
+            mat.base_color = mat.base_color.with_alpha(alpha);
+            mat.emissive = mat.emissive * (1.0 - t * 0.8);
         }
     }
 }

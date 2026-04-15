@@ -4962,6 +4962,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "spring-pathfinding"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "spring-tdf"
 version = "0.1.0"
 dependencies = [

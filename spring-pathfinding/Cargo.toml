@@ -1,0 +1,13 @@
+[package]
+name = "spring-pathfinding"
+version = "0.1.0"
+edition = "2024"
+description = "QTPFS (Quad-Tree Path Finding System) for Spring RTS engine maps"
+
+[dependencies]
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lib]
+doctest = false

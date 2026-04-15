@@ -236,9 +236,16 @@ pub struct RightDragPath {
     active: bool,
 }
 
+/// Buffered indicator targets written by `handle_right_click`, consumed by
+/// `spawn_move_indicator_visuals`. Separated into two systems because
+/// `MeshRayCast` holds `Res<Assets<Mesh>>` which conflicts with `ResMut`.
+#[derive(Resource, Default)]
+pub struct PendingMoveIndicators {
+    pub targets: Vec<Vec3>,
+}
+
 /// Right-click: single click moves all selected to one point.
 /// Right-drag: sample a path, distribute selected units along it on release.
-#[allow(clippy::too_many_arguments)]
 pub fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -246,9 +253,8 @@ pub fn handle_right_click(
     mut ray_cast: MeshRayCast,
     selected_q: Query<Entity, With<Selected>>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
     mut drag_path: ResMut<RightDragPath>,
+    mut pending: ResMut<PendingMoveIndicators>,
 ) {
     if mouse.just_pressed(MouseButton::Right) {
         drag_path.points.clear();
@@ -279,37 +285,38 @@ pub fn handle_right_click(
             return;
         }
 
-        let assigned_targets = if drag_path.points.len() == 1 {
+        if drag_path.points.len() == 1 {
             let target = drag_path.points[0];
             for entity in &units {
                 commands.entity(*entity).insert(MoveTarget(target));
             }
-            vec![target]
+            pending.targets.push(target);
         } else {
             let targets = sample_path_evenly(&drag_path.points, units.len());
             for (entity, target) in units.iter().zip(targets.iter()) {
                 commands.entity(*entity).insert(MoveTarget(*target));
             }
-            targets
-        };
-
-        spawn_move_indicators(
-            &assigned_targets,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-        );
+            pending.targets.extend(targets);
+        }
 
         drag_path.points.clear();
     }
 }
 
-fn spawn_move_indicators(
-    targets: &[Vec3],
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
+/// Drains `PendingMoveIndicators` and creates torus visuals.
+///
+/// Separated from `handle_right_click` because `MeshRayCast` holds an
+/// immutable `Res<Assets<Mesh>>` that conflicts with `ResMut<Assets<Mesh>>`.
+pub fn spawn_move_indicator_visuals(
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    if pending.targets.is_empty() {
+        return;
+    }
+
     let mesh = meshes.add(Torus::new(2.0, 4.0));
     let material = materials.add(StandardMaterial {
         base_color: Color::srgba(0.0, 1.0, 0.3, 0.6),
@@ -319,14 +326,14 @@ fn spawn_move_indicators(
         ..default()
     });
 
-    for target in targets {
+    for target in pending.targets.drain(..) {
         commands.spawn((
             MoveIndicator {
                 lifetime: Timer::from_seconds(1.5, TimerMode::Once),
             },
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material.clone()),
-            Transform::from_translation(*target + Vec3::Y * 1.0)
+            Transform::from_translation(target + Vec3::Y * 1.0)
                 .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
         ));
     }
