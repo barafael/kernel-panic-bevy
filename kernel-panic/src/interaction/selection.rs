@@ -6,6 +6,26 @@ use crate::units::components::{SelectionVolume, UnitType};
 
 use super::movement::MoveTarget;
 
+/// Marker for temporary move-target indicators on the ground.
+#[derive(Component)]
+pub struct MoveIndicator {
+    pub lifetime: Timer,
+}
+
+/// Despawn move indicators after their lifetime expires.
+pub fn decay_move_indicators(
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut MoveIndicator)>,
+    mut commands: Commands,
+) {
+    for (entity, mut indicator) in &mut query {
+        indicator.lifetime.tick(time.delta());
+        if indicator.lifetime.is_finished() {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 /// Marks a unit as selected by the player.
 #[derive(Component)]
 pub struct Selected;
@@ -72,13 +92,20 @@ pub struct DragState {
 pub struct SelectionBoxNode;
 
 /// Handle left-click and drag-box selection.
+///
+/// Modifier behaviour (matches original Kernel Panic):
+/// - **Plain click/drag** — replace the current selection.
+/// - **Shift+click/drag** — add to the current selection.
+/// - **Ctrl+click** — toggle the clicked unit in/out of the selection.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_selection(
     mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     hovered_q: Query<Entity, With<Hovered>>,
     selected_q: Query<Entity, With<Selected>>,
-    ring_q: Query<Entity, With<SelectionRing>>,
+    ring_q: Query<(Entity, &ChildOf), With<SelectionRing>>,
     unit_q: Query<(Entity, &GlobalTransform), With<UnitType>>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
     mut drag_state: ResMut<DragState>,
@@ -121,8 +148,8 @@ pub fn handle_selection(
                         border: UiRect::all(Val::Px(1.0)),
                         ..default()
                     },
-                    BorderColor::all(Color::linear_rgb(0.0, 1.0, 0.0)),
-                    BackgroundColor(Color::srgba(0.0, 1.0, 0.0, 0.08)),
+                    BorderColor::all(Color::WHITE),
+                    BackgroundColor(Color::NONE),
                 ));
             }
         }
@@ -135,12 +162,18 @@ pub fn handle_selection(
             commands.entity(entity).despawn();
         }
 
-        // Clear previous selection.
-        for entity in &selected_q {
-            commands.entity(entity).remove::<Selected>();
-        }
-        for entity in &ring_q {
-            commands.entity(entity).despawn();
+        let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+        let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        let additive = shift || ctrl;
+
+        // Unless Shift/Ctrl is held, clear previous selection first.
+        if !additive {
+            for entity in &selected_q {
+                commands.entity(entity).remove::<Selected>();
+            }
+            for (entity, _) in &ring_q {
+                commands.entity(entity).despawn();
+            }
         }
 
         if drag_state.dragging {
@@ -166,8 +199,19 @@ pub fn handle_selection(
                     }
                 }
             }
+        } else if ctrl {
+            // Ctrl+click: toggle the hovered unit.
+            if let Some(entity) = hovered_q.iter().next() {
+                if selected_q.contains(entity) {
+                    commands.entity(entity).remove::<Selected>();
+                    // Despawn the selection ring that is a child of this entity.
+                    despawn_ring_for(&ring_q, entity, &mut commands);
+                } else {
+                    commands.entity(entity).insert(Selected);
+                }
+            }
         } else {
-            // Click select: pick the hovered unit.
+            // Plain click or Shift+click: select the hovered unit (additive keeps existing).
             if let Some(entity) = hovered_q.iter().next() {
                 commands.entity(entity).insert(Selected);
             }
@@ -175,6 +219,19 @@ pub fn handle_selection(
 
         drag_state.start = None;
         drag_state.dragging = false;
+    }
+}
+
+/// Despawn any `SelectionRing` that is a child of `unit`.
+fn despawn_ring_for(
+    ring_q: &Query<(Entity, &ChildOf), With<SelectionRing>>,
+    unit: Entity,
+    commands: &mut Commands,
+) {
+    for (ring, child_of) in ring_q.iter() {
+        if child_of.parent() == unit {
+            commands.entity(ring).despawn();
+        }
     }
 }
 
@@ -190,6 +247,22 @@ pub struct RightDragPath {
     active: bool,
 }
 
+/// Event requesting move indicator visuals at specific world positions.
+#[derive(Message)]
+pub struct SpawnMoveIndicatorsEvent(pub Vec<Vec3>);
+
+/// Spawn move indicator meshes from events (separate system to avoid resource conflicts).
+pub fn spawn_move_indicator_visuals(
+    mut events: MessageReader<SpawnMoveIndicatorsEvent>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for event in events.read() {
+        spawn_move_indicators(&event.0, &mut commands, &mut meshes, &mut materials);
+    }
+}
+
 /// Right-click: single click moves all selected to one point.
 /// Right-drag: sample a path, distribute selected units along it on release.
 pub fn handle_right_click(
@@ -199,6 +272,7 @@ pub fn handle_right_click(
     mut ray_cast: MeshRayCast,
     selected_q: Query<Entity, With<Selected>>,
     mut commands: Commands,
+    mut indicator_events: MessageWriter<SpawnMoveIndicatorsEvent>,
     mut drag_path: ResMut<RightDragPath>,
 ) {
     // --- Right press: start path ---
@@ -214,7 +288,6 @@ pub fn handle_right_click(
     // --- While held: sample path points ---
     if mouse.pressed(MouseButton::Right) && drag_path.active {
         if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
-            // Only add if far enough from the last point.
             let dominated = drag_path
                 .points
                 .last()
@@ -234,21 +307,53 @@ pub fn handle_right_click(
             return;
         }
 
-        if drag_path.points.len() == 1 {
-            // Single click: all units move to the same point.
+        let assigned_targets = if drag_path.points.len() == 1 {
             let target = drag_path.points[0];
             for entity in &units {
                 commands.entity(*entity).insert(MoveTarget(target));
             }
+            vec![target]
         } else {
-            // Drag path: distribute units evenly along it.
             let targets = sample_path_evenly(&drag_path.points, units.len());
             for (entity, target) in units.iter().zip(targets.iter()) {
                 commands.entity(*entity).insert(MoveTarget(*target));
             }
-        }
+            targets
+        };
+
+        // Emit event for visual indicator spawning (handled by separate system).
+        indicator_events.write(SpawnMoveIndicatorsEvent(assigned_targets));
 
         drag_path.points.clear();
+    }
+}
+
+/// Spawn small glowing markers at each target point that fade after 1.5 seconds.
+fn spawn_move_indicators(
+    targets: &[Vec3],
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let mesh = meshes.add(Torus::new(2.0, 4.0));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.0, 1.0, 0.3, 0.6),
+        emissive: LinearRgba::new(0.0, 1.0, 0.3, 1.0) * 2.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+
+    for target in targets {
+        commands.spawn((
+            MoveIndicator {
+                lifetime: Timer::from_seconds(1.5, TimerMode::Once),
+            },
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_translation(*target + Vec3::Y * 1.0)
+                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        ));
     }
 }
 

@@ -4938,6 +4938,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "spring-cob"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "proptest",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "spring-map"
 version = "0.1.0"
 dependencies = [
