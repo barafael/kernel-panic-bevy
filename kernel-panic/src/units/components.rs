@@ -36,6 +36,7 @@ pub struct UnitType(pub UnitKind);
 
 /// Current health.
 #[derive(Debug, Clone, Component)]
+#[allow(dead_code)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
@@ -46,6 +47,7 @@ impl Health {
         Self { current: max, max }
     }
 
+    #[allow(dead_code)]
     pub fn fraction(&self) -> f32 {
         self.current / self.max
     }

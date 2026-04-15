@@ -1,8 +1,8 @@
-/// Parser for Spring Map Definition (.smd) files.
-///
-/// The .smd format is a TDF (Tag Definition Format) with nested
-/// `[SECTION] { key=value; }` blocks. It predates `mapinfo.lua` and
-/// is used by all legacy Spring maps including the Kernel Panic set.
+//! Parser for Spring Map Definition (.smd) files.
+//!
+//! The .smd format is a TDF (Tag Definition Format) with nested
+//! `[SECTION] { key=value; }` blocks. It predates `mapinfo.lua` and
+//! is used by all legacy Spring maps including the Kernel Panic set.
 
 /// Parsed map metadata from an .smd file.
 #[derive(Debug, Clone, Default)]
@@ -121,7 +121,7 @@ fn parse_f32(value: &str) -> f32 {
 }
 
 fn parse_color3(value: &str) -> [f32; 3] {
-    let parts: Vec<f32> = value.split_whitespace().map(|s| parse_f32(s)).collect();
+    let parts: Vec<f32> = value.split_whitespace().map(parse_f32).collect();
     [
         parts.first().copied().unwrap_or(0.0),
         parts.get(1).copied().unwrap_or(0.0),
@@ -132,35 +132,35 @@ fn parse_color3(value: &str) -> [f32; 3] {
 fn apply_value(info: &mut MapInfo, section: &str, key: &str, value: &str) {
     // Handle TEAM sections: "MAP.TEAM0", "MAP.TEAM1", etc.
     let section_upper = section.to_ascii_uppercase();
-    if let Some(team_part) = section_upper.strip_prefix("MAP.TEAM") {
-        if let Ok(team_num) = team_part.parse::<u32>() {
-            // Find or create this team's start position entry.
-            let entry = info
-                .start_positions
-                .iter_mut()
-                .find(|sp| sp.team == team_num);
-            match entry {
-                Some(sp) => match key {
+    if let Some(team_num) = section_upper
+        .strip_prefix("MAP.TEAM")
+        .and_then(|s| s.parse::<u32>().ok())
+    {
+        let entry = info
+            .start_positions
+            .iter_mut()
+            .find(|sp| sp.team == team_num);
+        match entry {
+            Some(sp) => match key {
+                "startposx" => sp.x = parse_f32(value),
+                "startposz" => sp.z = parse_f32(value),
+                _ => {}
+            },
+            None => {
+                let mut sp = StartPosition {
+                    team: team_num,
+                    x: 0.0,
+                    z: 0.0,
+                };
+                match key {
                     "startposx" => sp.x = parse_f32(value),
                     "startposz" => sp.z = parse_f32(value),
                     _ => {}
-                },
-                None => {
-                    let mut sp = StartPosition {
-                        team: team_num,
-                        x: 0.0,
-                        z: 0.0,
-                    };
-                    match key {
-                        "startposx" => sp.x = parse_f32(value),
-                        "startposz" => sp.z = parse_f32(value),
-                        _ => {}
-                    }
-                    info.start_positions.push(sp);
                 }
+                info.start_positions.push(sp);
             }
-            return;
         }
+        return;
     }
 
     match (section_upper.as_str(), key) {

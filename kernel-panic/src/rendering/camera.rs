@@ -158,6 +158,7 @@ fn right_ground(state: &RtsCameraState) -> Vec3 {
 // Systems
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub fn camera_control(
     time: Res<Time>,
     keys: Res<ButtonInput<KeyCode>>,

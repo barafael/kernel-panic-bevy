@@ -4,7 +4,7 @@ use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 
 use super::components::{Faction, Health, TeamId, UnitType};
-use super::definitions::{UnitKind, stats};
+use super::definitions::stats;
 use super::meshes::{unit_material, unit_mesh};
 use crate::MapEntity;
 
@@ -52,23 +52,5 @@ pub fn spawn_homebases(
         ));
     }
 
-    info!(
-        "Spawned {} homebases ({} System, {} Hacker, {} Network)",
-        map_info.start_positions.len(),
-        map_info
-            .start_positions
-            .iter()
-            .filter(|s| s.team as usize % 3 == 0)
-            .count(),
-        map_info
-            .start_positions
-            .iter()
-            .filter(|s| s.team as usize % 3 == 1)
-            .count(),
-        map_info
-            .start_positions
-            .iter()
-            .filter(|s| s.team as usize % 3 == 2)
-            .count(),
-    );
+    info!("Spawned {} homebases", map_info.start_positions.len());
 }

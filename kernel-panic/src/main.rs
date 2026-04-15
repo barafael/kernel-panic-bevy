@@ -58,18 +58,16 @@ fn discover_maps(mut commands: Commands) {
 
     let mut maps: Vec<PathBuf> = Vec::new();
 
-    if let Some(dir) = maps_dir {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let ext = path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
-                if ext == "sd7" || ext == "sdz" {
-                    maps.push(path);
-                }
+    if let Some(Ok(entries)) = maps_dir.map(std::fs::read_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if ext == "sd7" || ext == "sdz" {
+                maps.push(path);
             }
         }
     }
@@ -101,7 +99,7 @@ fn discover_maps(mut commands: Commands) {
     });
 }
 
-/// Watch for `/` (next map) and `\` (previous map) keypresses.
+#[allow(clippy::too_many_arguments)]
 fn cycle_map_on_keypress(
     keys: Res<ButtonInput<KeyCode>>,
     mut catalog: ResMut<MapCatalog>,
@@ -236,14 +234,7 @@ fn load_map_at_index(
             map_info.gravity,
         );
     }
-
-    // Update window title.
-    commands.insert_resource(WindowTitle(map_name.into_owned()));
 }
-
-/// Resource to defer window title update (applied by a system).
-#[derive(Resource)]
-struct WindowTitle(String);
 
 fn setup_camera(
     parsed: &ParsedMap,

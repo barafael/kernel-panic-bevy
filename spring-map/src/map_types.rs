@@ -68,6 +68,7 @@ pub enum ArchiveError {
 ///
 /// File-offset pointers are internal to the parser and not exposed.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // File-offset fields are part of the binary format
 pub struct SmfHeader {
     pub map_id: i32,
     pub map_x: i32,
@@ -158,16 +159,13 @@ impl FeatureType {
         if name.eq_ignore_ascii_case("geovent") {
             return Self::GeoVent;
         }
-        if let Some(suffix) = name
+        if let Some(index) = name
             .to_ascii_lowercase()
             .strip_prefix("treetype")
-            .map(String::from)
+            .and_then(|s| s.parse::<u8>().ok())
+            .filter(|&i| i <= 19)
         {
-            if let Ok(index) = suffix.parse::<u8>() {
-                if index <= 19 {
-                    return Self::Tree(index);
-                }
-            }
+            return Self::Tree(index);
         }
         Self::Other(name.to_string())
     }

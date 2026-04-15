@@ -28,6 +28,7 @@ pub enum UnitKind {
 }
 
 /// Static stats for a unit type.
+#[allow(dead_code)]
 pub struct UnitStats {
     pub kind: UnitKind,
     pub name: &'static str,
