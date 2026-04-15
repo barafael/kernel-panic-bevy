@@ -43,14 +43,14 @@ pub fn unit_material(
 
     let tex1_name = load_s3o_cached(unit_stats.model, cache).map(|model| model.texture1.clone());
 
-    if let Some(tex1_name) = tex1_name {
-        if let Some(handle) = build_faction_texture(&tex1_name, faction, images, cache) {
-            return materials.add(StandardMaterial {
-                base_color_texture: Some(handle),
-                unlit: true,
-                ..default()
-            });
-        }
+    if let Some(tex1_name) = tex1_name
+        && let Some(handle) = build_faction_texture(&tex1_name, faction, images, cache)
+    {
+        return materials.add(StandardMaterial {
+            base_color_texture: Some(handle),
+            unlit: true,
+            ..default()
+        });
     }
 
     let color = faction.color();
@@ -124,7 +124,7 @@ fn load_s3o_cached<'a>(
     cache
         .models
         .entry(filename)
-        .or_insert_with(|| load_asset_from_disk(filename, |data| spring_unit_mesh::parse_s3o(data)))
+        .or_insert_with(|| load_asset_from_disk(filename, spring_unit_mesh::parse_s3o))
         .as_ref()
 }
 
@@ -133,7 +133,7 @@ fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Opti
     cache
         .raw_textures
         .entry(key)
-        .or_insert_with(|| load_asset_from_disk(tex_name, |data| spring_unit_mesh::parse_tga(data)))
+        .or_insert_with(|| load_asset_from_disk(tex_name, spring_unit_mesh::parse_tga))
         .as_ref()
 }
 
