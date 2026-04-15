@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 spring-map = { path = "../spring-map" }
+spring-unit-mesh = { path = "../spring-unit-mesh" }
 bevy = { version = "0.18", features = ["serialize"] }

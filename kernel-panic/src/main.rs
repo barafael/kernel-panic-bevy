@@ -12,6 +12,7 @@ use spring_map::map_types::{GroundTexture, MipmapData, ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 use terrain::material::{create_datavent_material, create_terrain_material};
 use terrain::mesh::generate_terrain_chunks;
+use units::meshes::S3OModelCache;
 use units::spawning::spawn_homebases;
 
 /// Marker component for all entities spawned by map loading.
@@ -36,6 +37,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(RenderingPlugin)
+        .init_resource::<S3OModelCache>()
         .add_systems(
             Startup,
             (
@@ -110,6 +112,7 @@ fn cycle_map_on_keypress(
     mut images: ResMut<Assets<Image>>,
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
+    mut model_cache: ResMut<S3OModelCache>,
 ) {
     let changed = if keys.just_pressed(KeyCode::BracketRight) {
         catalog.current = (catalog.current + 1) % catalog.maps.len();
@@ -138,10 +141,12 @@ fn cycle_map_on_keypress(
         &mut images,
         &mut camera_query,
         &mut map_bounds,
+        &mut model_cache,
     );
 }
 
 /// Initial map load at startup.
+#[allow(clippy::too_many_arguments)]
 fn load_current_map(
     catalog: Res<MapCatalog>,
     mut commands: Commands,
@@ -150,6 +155,7 @@ fn load_current_map(
     mut images: ResMut<Assets<Image>>,
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
+    mut model_cache: ResMut<S3OModelCache>,
 ) {
     load_map_at_index(
         &catalog,
@@ -159,9 +165,11 @@ fn load_current_map(
         &mut images,
         &mut camera_query,
         &mut map_bounds,
+        &mut model_cache,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn load_map_at_index(
     catalog: &MapCatalog,
     commands: &mut Commands,
@@ -170,6 +178,7 @@ fn load_map_at_index(
     images: &mut ResMut<Assets<Image>>,
     camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     map_bounds: &mut ResMut<MapBounds>,
+    model_cache: &mut ResMut<S3OModelCache>,
 ) {
     let map_path = &catalog.maps[catalog.current];
     let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
@@ -227,7 +236,15 @@ fn load_map_at_index(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, commands);
-        spawn_homebases(parsed, map_info, commands, meshes, std_materials);
+        spawn_homebases(
+            parsed,
+            map_info,
+            commands,
+            meshes,
+            std_materials,
+            images,
+            model_cache,
+        );
         info!(
             "  {} start positions, gravity={}",
             map_info.start_positions.len(),

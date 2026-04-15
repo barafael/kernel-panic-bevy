@@ -1,0 +1,12 @@
+[package]
+name = "spring-unit-mesh"
+version = "0.1.0"
+edition = "2024"
+description = "Parser for Spring RTS engine unit models (.s3o)"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -95,7 +95,7 @@ proptest! {
 
     #[test]
     fn smf_parser_doesnt_panic_on_truncated_header(len in 0usize..80) {
-        let mut data = vec![0u8; 80];
+        let mut data = [0u8; 80];
         data[..16].copy_from_slice(b"spring map file\0");
         data[16..20].copy_from_slice(&1i32.to_le_bytes()); // version
         let _ = smf_parser::parse_smf(&data[..len]);

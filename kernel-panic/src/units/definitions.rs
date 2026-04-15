@@ -38,6 +38,8 @@ pub struct UnitStats {
     pub is_building: bool,
     /// Mesh scale relative to default (1.0 = normal).
     pub mesh_scale: f32,
+    /// s3o model filename from upstream (e.g. "kernel.s3o").
+    pub model: &'static str,
 }
 
 pub fn stats(kind: UnitKind) -> &'static UnitStats {
@@ -57,6 +59,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 0.0,
         is_building: true,
         mesh_scale: 3.0,
+        model: "kernel.s3o",
     },
     UnitStats {
         kind: UnitKind::Assembler,
@@ -66,6 +69,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 15.0,
         is_building: false,
         mesh_scale: 1.2,
+        model: "assembler.s3o",
     },
     UnitStats {
         kind: UnitKind::Bit,
@@ -75,6 +79,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 3.0,
         is_building: false,
         mesh_scale: 0.5,
+        model: "ball.s3o",
     },
     UnitStats {
         kind: UnitKind::Byte,
@@ -84,6 +89,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 30.0,
         is_building: false,
         mesh_scale: 2.0,
+        model: "octaeder.s3o",
     },
     UnitStats {
         kind: UnitKind::Pointer,
@@ -93,6 +99,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 25.0,
         is_building: false,
         mesh_scale: 1.5,
+        model: "cube.s3o",
     },
     UnitStats {
         kind: UnitKind::Socket,
@@ -102,6 +109,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 20.0,
         is_building: true,
         mesh_scale: 2.0,
+        model: "socket.s3o",
     },
     UnitStats {
         kind: UnitKind::Firewall,
@@ -111,6 +119,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 15.0,
         is_building: true,
         mesh_scale: 1.5,
+        model: "network_super.s3o",
     },
     // --- Hacker ---
     UnitStats {
@@ -121,6 +130,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 0.0,
         is_building: true,
         mesh_scale: 3.0,
+        model: "holeNEW.s3o",
     },
     UnitStats {
         kind: UnitKind::Bug,
@@ -130,6 +140,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 3.0,
         is_building: false,
         mesh_scale: 0.5,
+        model: "bugNEW.s3o",
     },
     UnitStats {
         kind: UnitKind::Exploit,
@@ -139,6 +150,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 0.0,
         is_building: true,
         mesh_scale: 1.5,
+        model: "bugNEW.s3o",
     },
     UnitStats {
         kind: UnitKind::Worm,
@@ -148,6 +160,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 20.0,
         is_building: false,
         mesh_scale: 1.5,
+        model: "wormNEW.s3o",
     },
     UnitStats {
         kind: UnitKind::Virus,
@@ -157,6 +170,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 0.0,
         is_building: false,
         mesh_scale: 0.6,
+        model: "virus.s3o",
     },
     UnitStats {
         kind: UnitKind::Dos,
@@ -166,6 +180,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 15.0,
         is_building: false,
         mesh_scale: 1.3,
+        model: "dos.s3o",
     },
     UnitStats {
         kind: UnitKind::Window,
@@ -175,6 +190,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 20.0,
         is_building: true,
         mesh_scale: 2.0,
+        model: "window.s3o",
     },
     UnitStats {
         kind: UnitKind::LogicBomb,
@@ -184,6 +200,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 10.0,
         is_building: false,
         mesh_scale: 0.8,
+        model: "logic_bomb.s3o",
     },
     // --- Network ---
     UnitStats {
@@ -194,6 +211,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 0.0,
         is_building: true,
         mesh_scale: 3.0,
+        model: "network_big.s3o",
     },
     UnitStats {
         kind: UnitKind::Port,
@@ -203,6 +221,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 20.0,
         is_building: true,
         mesh_scale: 2.0,
+        model: "network_minifac.s3o",
     },
     UnitStats {
         kind: UnitKind::Packet,
@@ -212,6 +231,7 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 4.0,
         is_building: false,
         mesh_scale: 0.6,
+        model: "network_spam.s3o",
     },
     UnitStats {
         kind: UnitKind::Signal,
@@ -221,5 +241,6 @@ static UNIT_STATS: &[UnitStats] = &[
         build_time: 5.0,
         is_building: false,
         mesh_scale: 0.4,
+        model: "signal.s3o",
     },
 ];

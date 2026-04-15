@@ -3297,6 +3297,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "spring-map",
+ "spring-unit-mesh",
 ]
 
 [[package]]
@@ -4946,6 +4947,15 @@ dependencies = [
  "sevenz-rust",
  "thiserror 2.0.18",
  "zip",
+]
+
+[[package]]
+name = "spring-unit-mesh"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "proptest",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

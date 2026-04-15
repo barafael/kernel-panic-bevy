@@ -5,7 +5,7 @@ use spring_map::smd_parser::MapInfo;
 
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::stats;
-use super::meshes::{unit_material, unit_mesh};
+use super::meshes::{S3OModelCache, unit_material, unit_mesh};
 use crate::MapEntity;
 
 /// Assign factions to teams in a round-robin pattern.
@@ -18,6 +18,8 @@ pub fn spawn_homebases(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
 ) {
     let square_size = SQUARE_SIZE as f32;
 
@@ -26,8 +28,8 @@ pub fn spawn_homebases(
         let kind = faction.homebase();
         let unit_stats = stats(kind);
 
-        let mesh = unit_mesh(kind, meshes);
-        let material = unit_material(faction, materials);
+        let mesh = unit_mesh(kind, meshes, model_cache);
+        let material = unit_material(kind, faction, materials, images, model_cache);
 
         // Sample terrain height at start position.
         let heightmap_w = parsed.header.heightmap_width();
@@ -37,9 +39,8 @@ pub fn spawn_homebases(
             as usize;
         let height = parsed.heights[heightmap_z * heightmap_w + heightmap_x];
 
-        // Place the unit on the terrain surface.
-        let mesh_half_height = 6.0 * unit_stats.mesh_scale;
-
+        // Place the unit on the terrain surface. Spring models have Y=0 at
+        // their base, so placing at terrain height is sufficient.
         commands.spawn((
             MapEntity,
             UnitType(kind),
@@ -48,7 +49,7 @@ pub fn spawn_homebases(
             Health::full(unit_stats.max_health),
             Mesh3d(mesh),
             MeshMaterial3d(material),
-            Transform::from_xyz(start_pos.x, height + mesh_half_height, start_pos.z),
+            Transform::from_xyz(start_pos.x, height, start_pos.z),
         ));
     }
 
