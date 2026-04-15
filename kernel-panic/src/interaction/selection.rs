@@ -2,7 +2,7 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::{SelectionVolume, UnitType};
+use crate::units::components::{Faction, Health, SelectionVolume, UnitType};
 
 use super::movement::MoveTarget;
 
@@ -34,21 +34,36 @@ pub struct Selected;
 #[derive(Component)]
 pub struct Hovered;
 
-/// Visual ring shown under selected units.
+/// Stores the unit's original (un-brightened) material handle so we can
+/// restore it when the unit is no longer hovered or selected.
 #[derive(Component)]
-pub struct SelectionRing;
+pub struct OriginalMaterial(pub Handle<StandardMaterial>);
 
-/// Visual ring shown under the hovered unit.
+/// Health bar background child entity.
 #[derive(Component)]
-pub struct HoverRing;
+pub struct HealthBarBg;
 
-/// Shared mesh and material assets for selection/hover rings.
+/// Health bar foreground (colored) child entity.
+#[derive(Component)]
+pub struct HealthBarFg;
+
+/// Shared mesh and material assets for health bars.
 #[derive(Resource, Clone)]
-pub(crate) struct RingAssets {
-    mesh: Handle<Mesh>,
-    selection_material: Handle<StandardMaterial>,
-    hover_material: Handle<StandardMaterial>,
+pub(crate) struct HealthBarAssets {
+    bar_mesh: Handle<Mesh>,
+    bg_material: Handle<StandardMaterial>,
 }
+
+/// Emissive boost multiplier for hovered units.
+const HOVER_BRIGHTNESS: f32 = 1.5;
+/// Emissive boost multiplier for selected units.
+const SELECTED_BRIGHTNESS: f32 = 2.5;
+
+/// Health bar dimensions (world-space units).
+const HEALTH_BAR_WIDTH: f32 = 20.0;
+const HEALTH_BAR_HEIGHT: f32 = 2.0;
+/// Vertical offset above the unit's origin.
+const HEALTH_BAR_Y_OFFSET: f32 = 30.0;
 
 /// Update `Hovered` component each frame based on cursor position.
 pub fn update_hover(
@@ -94,9 +109,9 @@ pub struct SelectionBoxNode;
 /// Handle left-click and drag-box selection.
 ///
 /// Modifier behaviour (matches original Kernel Panic):
-/// - **Plain click/drag** — replace the current selection.
-/// - **Shift+click/drag** — add to the current selection.
-/// - **Ctrl+click** — toggle the clicked unit in/out of the selection.
+/// - **Plain click/drag** -- replace the current selection.
+/// - **Shift+click/drag** -- add to the current selection.
+/// - **Ctrl+click** -- toggle the clicked unit in/out of the selection.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_selection(
     mouse: Res<ButtonInput<MouseButton>>,
@@ -105,7 +120,6 @@ pub fn handle_selection(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     hovered_q: Query<Entity, With<Hovered>>,
     selected_q: Query<Entity, With<Selected>>,
-    ring_q: Query<(Entity, &ChildOf), With<SelectionRing>>,
     unit_q: Query<(Entity, &GlobalTransform), With<UnitType>>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
     mut drag_state: ResMut<DragState>,
@@ -126,13 +140,11 @@ pub fn handle_selection(
             if distance > DRAG_THRESHOLD {
                 drag_state.dragging = true;
 
-                // Update or spawn the selection box UI node.
                 let min_x = start.x.min(current.x);
                 let min_y = start.y.min(current.y);
                 let width = (current.x - start.x).abs();
                 let height = (current.y - start.y).abs();
 
-                // Remove old box node.
                 for entity in &box_nodes {
                     commands.entity(entity).despawn();
                 }
@@ -157,7 +169,6 @@ pub fn handle_selection(
 
     // --- Left release ---
     if mouse.just_released(MouseButton::Left) {
-        // Remove selection box visual.
         for entity in &box_nodes {
             commands.entity(entity).despawn();
         }
@@ -166,18 +177,13 @@ pub fn handle_selection(
         let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
         let additive = shift || ctrl;
 
-        // Unless Shift/Ctrl is held, clear previous selection first.
         if !additive {
             for entity in &selected_q {
                 commands.entity(entity).remove::<Selected>();
             }
-            for (entity, _) in &ring_q {
-                commands.entity(entity).despawn();
-            }
         }
 
         if drag_state.dragging {
-            // Box select: find all units whose screen position is inside the box.
             if let (Some(start), Some(end)) = (drag_state.start, cursor_pos) {
                 let min_screen = Vec2::new(start.x.min(end.x), start.y.min(end.y));
                 let max_screen = Vec2::new(start.x.max(end.x), start.y.max(end.y));
@@ -200,18 +206,14 @@ pub fn handle_selection(
                 }
             }
         } else if ctrl {
-            // Ctrl+click: toggle the hovered unit.
             if let Some(entity) = hovered_q.iter().next() {
                 if selected_q.contains(entity) {
                     commands.entity(entity).remove::<Selected>();
-                    // Despawn the selection ring that is a child of this entity.
-                    despawn_ring_for(&ring_q, entity, &mut commands);
                 } else {
                     commands.entity(entity).insert(Selected);
                 }
             }
         } else {
-            // Plain click or Shift+click: select the hovered unit (additive keeps existing).
             if let Some(entity) = hovered_q.iter().next() {
                 commands.entity(entity).insert(Selected);
             }
@@ -219,19 +221,6 @@ pub fn handle_selection(
 
         drag_state.start = None;
         drag_state.dragging = false;
-    }
-}
-
-/// Despawn any `SelectionRing` that is a child of `unit`.
-fn despawn_ring_for(
-    ring_q: &Query<(Entity, &ChildOf), With<SelectionRing>>,
-    unit: Entity,
-    commands: &mut Commands,
-) {
-    for (ring, child_of) in ring_q.iter() {
-        if child_of.parent() == unit {
-            commands.entity(ring).despawn();
-        }
     }
 }
 
@@ -247,24 +236,9 @@ pub struct RightDragPath {
     active: bool,
 }
 
-/// Event requesting move indicator visuals at specific world positions.
-#[derive(Message)]
-pub struct SpawnMoveIndicatorsEvent(pub Vec<Vec3>);
-
-/// Spawn move indicator meshes from events (separate system to avoid resource conflicts).
-pub fn spawn_move_indicator_visuals(
-    mut events: MessageReader<SpawnMoveIndicatorsEvent>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    for event in events.read() {
-        spawn_move_indicators(&event.0, &mut commands, &mut meshes, &mut materials);
-    }
-}
-
 /// Right-click: single click moves all selected to one point.
 /// Right-drag: sample a path, distribute selected units along it on release.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -272,10 +246,10 @@ pub fn handle_right_click(
     mut ray_cast: MeshRayCast,
     selected_q: Query<Entity, With<Selected>>,
     mut commands: Commands,
-    mut indicator_events: MessageWriter<SpawnMoveIndicatorsEvent>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
     mut drag_path: ResMut<RightDragPath>,
 ) {
-    // --- Right press: start path ---
     if mouse.just_pressed(MouseButton::Right) {
         drag_path.points.clear();
         drag_path.active = true;
@@ -285,7 +259,6 @@ pub fn handle_right_click(
         }
     }
 
-    // --- While held: sample path points ---
     if mouse.pressed(MouseButton::Right) && drag_path.active {
         if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
             let dominated = drag_path
@@ -298,7 +271,6 @@ pub fn handle_right_click(
         }
     }
 
-    // --- Right release: issue commands ---
     if mouse.just_released(MouseButton::Right) && drag_path.active {
         drag_path.active = false;
 
@@ -321,14 +293,17 @@ pub fn handle_right_click(
             targets
         };
 
-        // Emit event for visual indicator spawning (handled by separate system).
-        indicator_events.write(SpawnMoveIndicatorsEvent(assigned_targets));
+        spawn_move_indicators(
+            &assigned_targets,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+        );
 
         drag_path.points.clear();
     }
 }
 
-/// Spawn small glowing markers at each target point that fade after 1.5 seconds.
 fn spawn_move_indicators(
     targets: &[Vec3],
     commands: &mut Commands,
@@ -357,7 +332,6 @@ fn spawn_move_indicators(
     }
 }
 
-/// Cast a ray from the cursor to the ground and return the hit point.
 fn ground_hit(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
@@ -368,17 +342,14 @@ fn ground_hit(
     hits.first().map(|(_, hit)| hit.point)
 }
 
-/// Sample `count` points evenly distributed along a polyline path.
 fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
     if count == 0 || path.is_empty() {
         return vec![];
     }
     if count == 1 {
-        // Single unit: place at the end of the path.
         return vec![*path.last().unwrap()];
     }
 
-    // Compute cumulative distances along the path.
     let mut cumulative = vec![0.0f32];
     for i in 1..path.len() {
         let prev = cumulative[i - 1];
@@ -390,12 +361,10 @@ fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
         return vec![path[0]; count];
     }
 
-    // Sample `count` equidistant points along the path.
     let mut result = Vec::with_capacity(count);
     for i in 0..count {
         let target_dist = (i as f32 / (count - 1) as f32) * total_length;
 
-        // Find the segment containing this distance.
         let seg = cumulative
             .windows(2)
             .position(|w| w[0] <= target_dist && target_dist <= w[1])
@@ -415,66 +384,220 @@ fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
     result
 }
 
-/// Spawn a visual ring under newly-selected units.
-pub fn spawn_selection_rings(
+// ---------------------------------------------------------------------------
+// Material brightening for hover / selection
+// ---------------------------------------------------------------------------
+
+/// Brighten the unit's material when it becomes hovered or selected.
+/// Creates a per-unit clone of the shared material with boosted emissive.
+pub fn update_unit_highlight(
+    hovered_q: Query<
+        (Entity, &MeshMaterial3d<StandardMaterial>, &Faction),
+        (With<Hovered>, Without<Selected>, With<UnitType>),
+    >,
+    selected_q: Query<
+        (Entity, &MeshMaterial3d<StandardMaterial>, &Faction),
+        (With<Selected>, With<UnitType>),
+    >,
+    unhighlighted_q: Query<
+        (Entity, &OriginalMaterial),
+        (Without<Hovered>, Without<Selected>, With<UnitType>),
+    >,
+    original_q: Query<&OriginalMaterial>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    // Restore material on units that are no longer hovered or selected.
+    for (entity, original) in &unhighlighted_q {
+        commands
+            .entity(entity)
+            .insert(MeshMaterial3d(original.0.clone()))
+            .remove::<OriginalMaterial>();
+    }
+
+    // Apply hover brightness (only if not also selected).
+    for (entity, current_mat, faction) in &hovered_q {
+        apply_brightness(
+            entity,
+            &current_mat.0,
+            faction,
+            HOVER_BRIGHTNESS,
+            &original_q,
+            &mut materials,
+            &mut commands,
+        );
+    }
+
+    // Apply selection brightness (takes priority over hover).
+    for (entity, current_mat, faction) in &selected_q {
+        apply_brightness(
+            entity,
+            &current_mat.0,
+            faction,
+            SELECTED_BRIGHTNESS,
+            &original_q,
+            &mut materials,
+            &mut commands,
+        );
+    }
+}
+
+fn apply_brightness(
+    entity: Entity,
+    current_handle: &Handle<StandardMaterial>,
+    faction: &Faction,
+    factor: f32,
+    original_q: &Query<&OriginalMaterial>,
+    materials: &mut Assets<StandardMaterial>,
+    commands: &mut Commands,
+) {
+    let source_handle = if let Ok(orig) = original_q.get(entity) {
+        orig.0.clone()
+    } else {
+        let h = current_handle.clone();
+        commands.entity(entity).insert(OriginalMaterial(h.clone()));
+        h
+    };
+
+    let Some(source) = materials.get(&source_handle) else {
+        return;
+    };
+
+    let mut bright = source.clone();
+    let color = LinearRgba::from(faction.color());
+    bright.emissive = color * factor;
+    let handle = materials.add(bright);
+    commands.entity(entity).insert(MeshMaterial3d(handle));
+}
+
+// ---------------------------------------------------------------------------
+// Health bars for selected units
+// ---------------------------------------------------------------------------
+
+/// Spawn health bar child entities on newly-selected units.
+pub fn spawn_health_bars(
     new_selections: Query<Entity, Added<Selected>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    ring_assets: Option<Res<RingAssets>>,
+    bar_assets: Option<Res<HealthBarAssets>>,
 ) {
     if new_selections.is_empty() {
         return;
     }
 
-    let assets = get_or_init_ring_assets(ring_assets, &mut commands, &mut meshes, &mut materials);
+    let assets = get_or_init_bar_assets(bar_assets, &mut commands, &mut meshes, &mut materials);
 
     for entity in &new_selections {
         commands.entity(entity).with_child((
-            SelectionRing,
-            Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(assets.selection_material.clone()),
-            Transform::from_xyz(0.0, -1.0, 0.0)
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            HealthBarBg,
+            Mesh3d(assets.bar_mesh.clone()),
+            MeshMaterial3d(assets.bg_material.clone()),
+            Transform::from_xyz(0.0, HEALTH_BAR_Y_OFFSET, 0.0).with_scale(Vec3::new(
+                HEALTH_BAR_WIDTH,
+                1.0,
+                HEALTH_BAR_HEIGHT,
+            )),
+        ));
+
+        let fg_material = materials.add(StandardMaterial {
+            base_color: Color::linear_rgb(0.0, 1.0, 0.0),
+            emissive: LinearRgba::new(0.0, 1.0, 0.0, 1.0) * 2.0,
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            ..default()
+        });
+
+        commands.entity(entity).with_child((
+            HealthBarFg,
+            Mesh3d(assets.bar_mesh.clone()),
+            MeshMaterial3d(fg_material),
+            Transform::from_xyz(0.0, HEALTH_BAR_Y_OFFSET + 0.1, 0.0).with_scale(Vec3::new(
+                HEALTH_BAR_WIDTH,
+                1.0,
+                HEALTH_BAR_HEIGHT,
+            )),
         ));
     }
 }
 
-/// Spawn a dim ring under the newly-hovered unit, remove when unhovered.
-pub fn update_hover_ring(
-    new_hovers: Query<Entity, Added<Hovered>>,
-    selected_q: Query<&Selected>,
-    hover_rings: Query<Entity, With<HoverRing>>,
+/// Remove health bar children from units that are no longer selected.
+pub fn despawn_health_bars(
+    mut removed_selections: RemovedComponents<Selected>,
+    bg_bars: Query<(Entity, &ChildOf), With<HealthBarBg>>,
+    fg_bars: Query<(Entity, &ChildOf), With<HealthBarFg>>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    ring_assets: Option<Res<RingAssets>>,
 ) {
-    // Remove old hover rings.
-    for entity in &hover_rings {
-        commands.entity(entity).despawn();
-    }
-
-    // Only proceed if there is a non-selected hovered unit.
-    let needs_ring = new_hovers.iter().any(|e| !selected_q.contains(e));
-    if !needs_ring {
-        return;
-    }
-
-    let assets = get_or_init_ring_assets(ring_assets, &mut commands, &mut meshes, &mut materials);
-
-    for entity in &new_hovers {
-        if selected_q.contains(entity) {
-            continue;
+    for unit in removed_selections.read() {
+        for (bar_entity, child_of) in bg_bars.iter().chain(fg_bars.iter()) {
+            if child_of.parent() == unit {
+                commands.entity(bar_entity).despawn();
+            }
         }
+    }
+}
 
-        commands.entity(entity).with_child((
-            HoverRing,
-            Mesh3d(assets.mesh.clone()),
-            MeshMaterial3d(assets.hover_material.clone()),
-            Transform::from_xyz(0.0, -1.0, 0.0)
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
-        ));
+/// Update health bar scale and color each frame for selected units.
+pub fn update_health_bars(
+    selected_units: Query<&Health, With<Selected>>,
+    mut fg_bars: Query<
+        (&ChildOf, &mut Transform, &MeshMaterial3d<StandardMaterial>),
+        With<HealthBarFg>,
+    >,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (child_of, mut transform, mat_handle) in &mut fg_bars {
+        let Ok(health) = selected_units.get(child_of.parent()) else {
+            continue;
+        };
+
+        let frac = health.fraction().clamp(0.0, 1.0);
+
+        transform.scale.x = HEALTH_BAR_WIDTH * frac;
+        transform.translation.x = -HEALTH_BAR_WIDTH * (1.0 - frac) * 0.5;
+
+        let color = health_color(frac);
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            mat.base_color = color;
+            mat.emissive = LinearRgba::from(color) * 2.0;
+        }
+    }
+}
+
+/// Make health bars always face the camera (billboard).
+pub fn billboard_health_bars(
+    camera_q: Query<&GlobalTransform, With<RtsCamera>>,
+    parents: Query<&GlobalTransform, With<UnitType>>,
+    mut bars: Query<(&ChildOf, &mut Transform), Or<(With<HealthBarBg>, With<HealthBarFg>)>>,
+) {
+    let Ok(cam_gt) = camera_q.single() else {
+        return;
+    };
+
+    for (child_of, mut transform) in &mut bars {
+        let Ok(parent_gt) = parents.get(child_of.parent()) else {
+            continue;
+        };
+
+        let bar_world_pos = parent_gt.translation() + Vec3::Y * transform.translation.y;
+        let to_camera = cam_gt.translation() - bar_world_pos;
+        let yaw = to_camera.x.atan2(to_camera.z);
+
+        let parent_rot_inv = parent_gt.to_scale_rotation_translation().1.inverse();
+        let world_rot =
+            Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+        transform.rotation = parent_rot_inv * world_rot;
+    }
+}
+
+/// Interpolate health fraction to a color: red (0%) -> yellow (50%) -> green (100%).
+fn health_color(frac: f32) -> Color {
+    if frac > 0.5 {
+        let t = (frac - 0.5) * 2.0;
+        Color::linear_rgb(1.0 - t, 1.0, 0.0)
+    } else {
+        let t = frac * 2.0;
+        Color::linear_rgb(1.0, t, 0.0)
     }
 }
 
@@ -511,28 +634,21 @@ fn cursor_ray(
     camera.viewport_to_world(camera_transform, cursor_pos).ok()
 }
 
-fn get_or_init_ring_assets(
-    existing: Option<Res<RingAssets>>,
+fn get_or_init_bar_assets(
+    existing: Option<Res<HealthBarAssets>>,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-) -> RingAssets {
+) -> HealthBarAssets {
     if let Some(res) = existing {
         return res.into_inner().clone();
     }
 
-    let assets = RingAssets {
-        mesh: meshes.add(Torus::new(18.0, 22.0)),
-        selection_material: materials.add(StandardMaterial {
-            base_color: Color::srgba(1.0, 1.0, 1.0, 0.5),
-            emissive: LinearRgba::new(1.0, 1.0, 1.0, 1.0) * 3.0,
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            ..default()
-        }),
-        hover_material: materials.add(StandardMaterial {
-            base_color: Color::srgba(1.0, 1.0, 1.0, 0.2),
-            emissive: LinearRgba::new(1.0, 1.0, 1.0, 1.0),
+    let assets = HealthBarAssets {
+        bar_mesh: meshes.add(Plane3d::new(Vec3::Z, Vec2::new(0.5, 0.5))),
+        bg_material: materials.add(StandardMaterial {
+            base_color: Color::srgba(0.0, 0.0, 0.0, 0.6),
+            emissive: LinearRgba::NONE,
             unlit: true,
             alpha_mode: AlphaMode::Blend,
             ..default()

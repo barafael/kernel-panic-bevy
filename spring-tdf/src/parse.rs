@@ -42,7 +42,9 @@ impl Tdf {
 impl Section {
     /// Look up a value by key (case-insensitive).
     pub fn get(&self, key: &str) -> Option<&str> {
-        self.entries.get(&key.to_ascii_lowercase()).map(|s| s.as_str())
+        self.entries
+            .get(&key.to_ascii_lowercase())
+            .map(|s| s.as_str())
     }
 
     /// Look up a child section by name (case-insensitive).
@@ -63,6 +65,27 @@ impl Section {
     /// Parse a value as `bool` (Spring convention: `1` = true, anything else = false).
     pub fn bool(&self, key: &str) -> bool {
         self.get(key).is_some_and(|v| v.trim() == "1")
+    }
+
+    /// Get a value as an owned `String`, returning `""` for missing keys.
+    pub fn string(&self, key: &str) -> String {
+        self.get(key).unwrap_or_default().to_string()
+    }
+
+    /// Parse a space-separated RGB triplet (e.g. `"128 0 0"` or `"0.8 1 0.8"`).
+    ///
+    /// Missing or malformed components default to `0.0`.
+    pub fn color3(&self, key: &str) -> [f32; 3] {
+        let value = self.get(key).unwrap_or_default();
+        let parts: Vec<f32> = value
+            .split_whitespace()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        [
+            parts.first().copied().unwrap_or(0.0),
+            parts.get(1).copied().unwrap_or(0.0),
+            parts.get(2).copied().unwrap_or(0.0),
+        ]
     }
 }
 
@@ -117,11 +140,7 @@ impl<'a> Parser<'a> {
         Ok(Tdf { sections })
     }
 
-    fn parse_section(
-        &mut self,
-        name: String,
-        open_line: usize,
-    ) -> Result<Section, ParseError> {
+    fn parse_section(&mut self, name: String, open_line: usize) -> Result<Section, ParseError> {
         // Expect `{` on the next non-empty line.
         if let Some((_, line)) = self.peek() {
             if line == "{" {

@@ -40,12 +40,16 @@ pub struct UnitStats {
     pub mesh_scale: f32,
     /// s3o model filename from upstream (e.g. "kernel.s3o").
     pub model: &'static str,
-    /// Weapon range in elmos (0 = no weapon).
+    /// TDF weapon section name (e.g. "Rock", "BugShot"), or `""` for unarmed units.
+    pub weapon: &'static str,
+    /// Weapon range in elmos (0 = no weapon). Fallback when TDF is unavailable.
     pub attack_range: f32,
-    /// Damage per hit.
+    /// Damage per hit. Fallback when TDF is unavailable.
     pub attack_damage: f32,
-    /// Seconds between attacks.
+    /// Seconds between attacks. Fallback when TDF is unavailable.
     pub attack_cooldown: f32,
+    /// COB animation script filename (e.g. "kernel.cob").
+    pub script: &'static str,
 }
 
 pub fn stats(kind: UnitKind) -> &'static UnitStats {
@@ -55,7 +59,7 @@ pub fn stats(kind: UnitKind) -> &'static UnitStats {
         .expect("missing unit stats")
 }
 
-static UNIT_STATS: &[UnitStats] = &[
+pub static UNIT_STATS: &[UnitStats] = &[
     // --- System ---
     UnitStats {
         kind: UnitKind::Kernel,
@@ -66,9 +70,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 3.0,
         model: "kernel.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "kernel.cob",
     },
     UnitStats {
         kind: UnitKind::Assembler,
@@ -79,9 +85,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 1.2,
         model: "assembler.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "assembler.cob",
     },
     UnitStats {
         kind: UnitKind::Bit,
@@ -92,9 +100,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 0.5,
         model: "ball.s3o",
+        weapon: "Line",
         attack_range: 256.0,
         attack_damage: 80.0,
         attack_cooldown: 0.5,
+        script: "bit.cob",
     },
     UnitStats {
         kind: UnitKind::Byte,
@@ -105,9 +115,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 2.0,
         model: "octaeder.s3o",
+        weapon: "MegaBeam",
         attack_range: 512.0,
         attack_damage: 200.0,
         attack_cooldown: 2.0,
+        script: "byte.cob",
     },
     UnitStats {
         kind: UnitKind::Pointer,
@@ -118,9 +130,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 1.5,
         model: "cube.s3o",
+        weapon: "Geometric",
         attack_range: 1400.0,
         attack_damage: 4000.0,
         attack_cooldown: 4.0,
+        script: "pointer.cob",
     },
     UnitStats {
         kind: UnitKind::Socket,
@@ -131,9 +145,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 2.0,
         model: "socket.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "socket.cob",
     },
     UnitStats {
         kind: UnitKind::Firewall,
@@ -144,9 +160,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 1.5,
         model: "network_super.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "firewall.cob",
     },
     // --- Hacker ---
     UnitStats {
@@ -158,9 +176,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 3.0,
         model: "holeNEW.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "hole.cob",
     },
     UnitStats {
         kind: UnitKind::Bug,
@@ -171,9 +191,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 0.5,
         model: "bugNEW.s3o",
+        weapon: "BugShot",
         attack_range: 256.0,
         attack_damage: 80.0,
         attack_cooldown: 0.5,
+        script: "bug.cob",
     },
     UnitStats {
         kind: UnitKind::Exploit,
@@ -184,9 +206,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 1.5,
         model: "bugNEW.s3o",
+        weapon: "BugCannon",
         attack_range: 512.0,
         attack_damage: 200.0,
         attack_cooldown: 2.0,
+        script: "exploit.cob",
     },
     UnitStats {
         kind: UnitKind::Worm,
@@ -197,9 +221,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 1.5,
         model: "wormNEW.s3o",
+        weapon: "Wormbite",
         attack_range: 5.0,
         attack_damage: 1500.0,
         attack_cooldown: 2.0,
+        script: "worm.cob",
     },
     UnitStats {
         kind: UnitKind::Virus,
@@ -210,9 +236,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 0.6,
         model: "virus.s3o",
+        weapon: "VirusDeath",
         attack_range: 256.0,
         attack_damage: 80.0,
         attack_cooldown: 0.5,
+        script: "virus.cob",
     },
     UnitStats {
         kind: UnitKind::Dos,
@@ -223,9 +251,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 1.3,
         model: "dos.s3o",
+        weapon: "DOS_Beam",
         attack_range: 256.0,
         attack_damage: 50.0,
         attack_cooldown: 1.0,
+        script: "dos.cob",
     },
     UnitStats {
         kind: UnitKind::Window,
@@ -236,9 +266,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 2.0,
         model: "window.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "window.cob",
     },
     UnitStats {
         kind: UnitKind::LogicBomb,
@@ -249,9 +281,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 0.8,
         model: "logic_bomb.s3o",
+        weapon: "logic_bomb",
         attack_range: 5.0,
         attack_damage: 2000.0,
         attack_cooldown: 0.0, // suicide unit — single use
+        script: "logic_bomb.cob",
     },
     // --- Network ---
     UnitStats {
@@ -263,9 +297,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 3.0,
         model: "network_big.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "connection.cob",
     },
     UnitStats {
         kind: UnitKind::Port,
@@ -276,9 +312,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: true,
         mesh_scale: 2.0,
         model: "network_minifac.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0,
+        script: "port.cob",
     },
     UnitStats {
         kind: UnitKind::Packet,
@@ -289,9 +327,11 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 0.6,
         model: "network_spam.s3o",
+        weapon: "PacketBeam",
         attack_range: 250.0,
         attack_damage: 130.0,
         attack_cooldown: 0.75,
+        script: "packet.cob",
     },
     UnitStats {
         kind: UnitKind::Signal,
@@ -302,8 +342,10 @@ static UNIT_STATS: &[UnitStats] = &[
         is_building: false,
         mesh_scale: 0.4,
         model: "signal.s3o",
+        weapon: "",
         attack_range: 0.0,
         attack_damage: 0.0,
         attack_cooldown: 0.0, // scout, no weapon
+        script: "signal.cob",
     },
 ];

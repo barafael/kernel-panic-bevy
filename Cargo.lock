@@ -3296,8 +3296,11 @@ name = "kernel-panic"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "spring-cob",
  "spring-map",
+ "spring-tdf",
  "spring-unit-mesh",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4956,6 +4959,14 @@ dependencies = [
  "sevenz-rust",
  "thiserror 2.0.18",
  "zip",
+]
+
+[[package]]
+name = "spring-tdf"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

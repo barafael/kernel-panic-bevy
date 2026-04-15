@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use super::animation::CobFileCache;
 use super::components::{Faction, TeamId, UnitType};
 use super::definitions::UnitKind;
 use super::meshes::S3OModelCache;
@@ -8,11 +9,8 @@ use super::spawning::{SelectionVolumeMaterial, spawn_unit};
 /// Attached to factories/homebases. Continuously produces units.
 #[derive(Component)]
 pub struct Producer {
-    /// What unit type this factory produces.
     produces: UnitKind,
-    /// Seconds to build one unit.
     build_time: f32,
-    /// Seconds accumulated toward the next unit.
     progress: f32,
 }
 
@@ -26,26 +24,18 @@ impl Producer {
     }
 }
 
-/// What a factory type auto-produces and how long it takes.
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
     match kind {
-        // Homebases produce their faction's swarm unit.
-        // Spring: BuildTime / WorkerTime → seconds at 30fps.
-        // Kernel: WorkerTime=128, Bit BuildTime=240 → 240/128 ≈ 1.9s
         UnitKind::Kernel => Some(Producer::new(UnitKind::Bit, 2.0)),
         UnitKind::Hole => Some(Producer::new(UnitKind::Bug, 2.2)),
         UnitKind::Connection => Some(Producer::new(UnitKind::Packet, 2.0)),
-
-        // Secondary factories (Sockets/Windows/Ports) also produce swarm units.
         UnitKind::Socket => Some(Producer::new(UnitKind::Bit, 2.0)),
         UnitKind::Window => Some(Producer::new(UnitKind::Bug, 2.2)),
         UnitKind::Port => Some(Producer::new(UnitKind::Packet, 2.0)),
-
         _ => None,
     }
 }
 
-/// Tick production timers and spawn completed units.
 #[allow(clippy::too_many_arguments)]
 pub fn production_system(
     time: Res<Time>,
@@ -55,10 +45,10 @@ pub fn production_system(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
+    mut cob_cache: ResMut<CobFileCache>,
     invisible_mat: Option<Res<SelectionVolumeMaterial>>,
     existing_units: Query<(), With<UnitType>>,
 ) {
-    // Cap total units to prevent runaway spawning.
     let unit_count = existing_units.iter().count();
     if unit_count > 500 {
         return;
@@ -77,7 +67,6 @@ pub fn production_system(
         if producer.progress >= producer.build_time {
             producer.progress -= producer.build_time;
 
-            // Spawn the produced unit offset from the factory.
             let factory_pos = global_tf.translation();
             let offset = Vec3::new(40.0, 0.0, 40.0);
             let spawn_pos = factory_pos + offset;
@@ -98,6 +87,7 @@ pub fn production_system(
             &mut materials,
             &mut images,
             &mut model_cache,
+            &mut cob_cache,
             &invisible_mat_ref,
         );
     }

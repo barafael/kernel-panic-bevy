@@ -42,6 +42,8 @@ fn main() {
         .add_plugins(interaction::InteractionPlugin)
         .add_plugins(ui::UiPlugin)
         .init_resource::<S3OModelCache>()
+        .init_resource::<units::animation::CobFileCache>()
+        .insert_resource(units::weapons::WeaponRegistry::load())
         .init_resource::<units::combat::DamageQueue>()
         .init_resource::<units::game_over::GameState>()
         .init_resource::<units::game_over::PlayerTeam>()
@@ -62,6 +64,7 @@ fn main() {
                 units::combat::apply_damage.after(units::combat::combat_system),
                 units::combat::death_system.after(units::combat::apply_damage),
                 units::game_over::check_game_over.after(units::combat::death_system),
+                units::animation::animation_system,
             ),
         )
         .run();
@@ -130,6 +133,7 @@ fn cycle_map_on_keypress(
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
     mut model_cache: ResMut<S3OModelCache>,
+    mut cob_cache: ResMut<units::animation::CobFileCache>,
 ) {
     let changed = if keys.just_pressed(KeyCode::BracketRight) {
         catalog.current = (catalog.current + 1) % catalog.maps.len();
@@ -159,6 +163,7 @@ fn cycle_map_on_keypress(
         &mut camera_query,
         &mut map_bounds,
         &mut model_cache,
+        &mut cob_cache,
     );
 }
 
@@ -173,6 +178,7 @@ fn load_current_map(
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
     mut model_cache: ResMut<S3OModelCache>,
+    mut cob_cache: ResMut<units::animation::CobFileCache>,
 ) {
     load_map_at_index(
         &catalog,
@@ -183,6 +189,7 @@ fn load_current_map(
         &mut camera_query,
         &mut map_bounds,
         &mut model_cache,
+        &mut cob_cache,
     );
 }
 
@@ -196,6 +203,7 @@ fn load_map_at_index(
     camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     map_bounds: &mut ResMut<MapBounds>,
     model_cache: &mut ResMut<S3OModelCache>,
+    cob_cache: &mut ResMut<units::animation::CobFileCache>,
 ) {
     let map_path = &catalog.maps[catalog.current];
     let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
@@ -278,6 +286,7 @@ fn load_map_at_index(
             std_materials,
             images,
             model_cache,
+            cob_cache,
         );
         info!(
             "  {} start positions, gravity={}",

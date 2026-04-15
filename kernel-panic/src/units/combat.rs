@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 use super::components::{Faction, Health, UnitType};
 use super::definitions::stats;
+use super::weapons::WeaponRegistry;
 
 /// Tracks time until the unit can fire again.
 #[derive(Component)]
@@ -21,6 +22,7 @@ pub fn combat_system(
     potential_targets: Query<(Entity, &Faction, &GlobalTransform, &Health), With<UnitType>>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
+    weapon_registry: Res<WeaponRegistry>,
 ) {
     let dt = time.delta_secs();
 
@@ -33,7 +35,18 @@ pub fn combat_system(
 
     for (entity, unit_type, attacker_faction, attacker_gtf) in &attackers {
         let unit_stats = stats(unit_type.0);
-        if unit_stats.attack_range == 0.0 {
+
+        // Resolve weapon stats from the TDF registry, falling back to hardcoded values.
+        let weapon_def = if unit_stats.weapon.is_empty() {
+            None
+        } else {
+            weapon_registry.get(unit_stats.weapon)
+        };
+        let range = weapon_def.map_or(unit_stats.attack_range, |w| w.range);
+        let damage = weapon_def.map_or(unit_stats.attack_damage, |w| w.damage.default);
+        let cooldown = weapon_def.map_or(unit_stats.attack_cooldown, |w| w.reload_time);
+
+        if range == 0.0 {
             continue;
         }
 
@@ -45,7 +58,7 @@ pub fn combat_system(
         }
 
         let attacker_pos = attacker_gtf.translation();
-        let range_sq = unit_stats.attack_range * unit_stats.attack_range;
+        let range_sq = range * range;
 
         // Find nearest living enemy in range.
         let mut best: Option<(Entity, f32)> = None;
@@ -60,11 +73,9 @@ pub fn combat_system(
         }
 
         if let Some((target_entity, _)) = best {
-            damage_queue
-                .0
-                .push((target_entity, unit_stats.attack_damage));
+            damage_queue.0.push((target_entity, damage));
             commands.entity(entity).insert(AttackCooldown {
-                remaining: unit_stats.attack_cooldown,
+                remaining: cooldown,
             });
         }
     }

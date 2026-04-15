@@ -105,6 +105,11 @@ pub fn unit_mesh(
     meshes.add(mesh)
 }
 
+/// Load and return a clone of the s3o model for a given filename.
+pub fn load_s3o_model(filename: &'static str, cache: &mut S3OModelCache) -> Option<S3OModel> {
+    load_s3o_cached(filename, cache).cloned()
+}
+
 /// Get the bounding radius of a unit's s3o model (in elmos), or a fallback.
 pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache) -> f32 {
     let unit_stats = stats(kind);
@@ -139,7 +144,7 @@ fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Opti
 
 /// Try each candidate path, read the file, and parse it. Returns `None` with
 /// a warning if no path succeeds.
-fn load_asset_from_disk<T, E: fmt::Display>(
+pub fn load_asset_from_disk<T, E: fmt::Display>(
     filename: &str,
     parse: impl Fn(&[u8]) -> Result<T, E>,
 ) -> Option<T> {
@@ -271,8 +276,10 @@ fn create_rgba8_image(width: u32, height: u32, pixels: Vec<u8>) -> Image {
 const ASSET_DIRS: &[&str] = &[
     "upstream/Kernel-Panic/objects3d",
     "upstream/Kernel-Panic/unittextures",
+    "upstream/Kernel-Panic/scripts",
     "kernel-panic/upstream/Kernel-Panic/objects3d",
     "kernel-panic/upstream/Kernel-Panic/unittextures",
+    "kernel-panic/upstream/Kernel-Panic/scripts",
 ];
 
 /// Lazily find the first existing asset path for a filename.
