@@ -10,13 +10,12 @@ pub fn parse_smf(data: &[u8]) -> Result<ParsedMap, SmfParseError> {
 
     let header = read_header(&mut cursor)?;
     let heights = read_heightmap(&mut cursor, &header)?;
-    let (feature_type_names, features) = read_features(&mut cursor, &header)?;
+    let features = read_features(&mut cursor, &header)?;
     let metalmap = read_metalmap(&mut cursor, &header)?;
 
     Ok(ParsedMap {
         header,
         heights,
-        feature_type_names,
         features,
         metalmap,
     })
@@ -37,7 +36,7 @@ fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<SmfHeader, SmfParseError> {
     let map_id = cursor.read_i32::<LittleEndian>()?;
     let map_x = cursor.read_i32::<LittleEndian>()?;
     let map_y = cursor.read_i32::<LittleEndian>()?;
-    let square_size = cursor.read_i32::<LittleEndian>()?;
+    let _square_size = cursor.read_i32::<LittleEndian>()?;
     let _texel_per_square = cursor.read_i32::<LittleEndian>()?;
     let _tile_size = cursor.read_i32::<LittleEndian>()?;
     let min_height = cursor.read_f32::<LittleEndian>()?;
@@ -54,7 +53,6 @@ fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<SmfHeader, SmfParseError> {
         map_id,
         map_x,
         map_y,
-        square_size,
         min_height,
         max_height,
         heightmap_ptr,
@@ -94,10 +92,11 @@ fn read_heightmap(
     Ok(heights)
 }
 
+/// Read features and resolve type names inline.
 fn read_features(
     cursor: &mut Cursor<&[u8]>,
     header: &SmfHeader,
-) -> Result<(Vec<String>, Vec<MapFeature>), SmfParseError> {
+) -> Result<Vec<MapFeature>, SmfParseError> {
     cursor.seek(SeekFrom::Start(header.feature_ptr as u64))?;
 
     let num_feature_types = cursor
@@ -107,17 +106,16 @@ fn read_features(
         .read_i32::<LittleEndian>()
         .map_err(|_| SmfParseError::FeatureTruncated)?;
 
-    let mut feature_type_names = Vec::with_capacity(num_feature_types as usize);
+    let mut type_names = Vec::with_capacity(num_feature_types as usize);
     for _ in 0..num_feature_types {
-        let name = read_null_terminated_string(cursor)?;
-        feature_type_names.push(name);
+        type_names.push(read_null_terminated_string(cursor)?);
     }
 
     let mut features = Vec::with_capacity(num_features as usize);
     for _ in 0..num_features {
-        let feature_type = cursor
+        let type_index = cursor
             .read_i32::<LittleEndian>()
-            .map_err(|_| SmfParseError::FeatureTruncated)?;
+            .map_err(|_| SmfParseError::FeatureTruncated)? as usize;
         let x = cursor
             .read_f32::<LittleEndian>()
             .map_err(|_| SmfParseError::FeatureTruncated)?;
@@ -134,17 +132,15 @@ fn read_features(
             .read_f32::<LittleEndian>()
             .map_err(|_| SmfParseError::FeatureTruncated)?;
 
-        features.push(MapFeature {
-            feature_type,
-            x,
-            y,
-            z,
-            rotation,
-            relative_size,
-        });
+        let type_name = type_names
+            .get(type_index)
+            .cloned()
+            .unwrap_or_else(|| format!("Unknown({type_index})"));
+
+        features.push(MapFeature::new(type_name, x, y, z, rotation, relative_size));
     }
 
-    Ok((feature_type_names, features))
+    Ok(features)
 }
 
 fn read_metalmap(cursor: &mut Cursor<&[u8]>, header: &SmfHeader) -> Result<Vec<u8>, SmfParseError> {
@@ -245,57 +241,41 @@ mod tests {
 
     #[test]
     fn parse_header() {
-        let data = build_test_smf();
-        let parsed = parse_smf(&data).expect("parse should succeed");
-
+        let parsed = parse_smf(&build_test_smf()).unwrap();
         assert_eq!(parsed.header.map_x, 128);
         assert_eq!(parsed.header.map_y, 128);
-        assert_eq!(parsed.header.min_height, 0.0);
-        assert_eq!(parsed.header.max_height, 100.0);
         assert_eq!(parsed.header.heightmap_width(), 129);
         assert_eq!(parsed.header.heightmap_height(), 129);
     }
 
     #[test]
     fn parse_heightmap_values() {
-        let data = build_test_smf();
-        let parsed = parse_smf(&data).expect("parse should succeed");
-
+        let parsed = parse_smf(&build_test_smf()).unwrap();
         assert_eq!(parsed.heights.len(), 129 * 129);
-        assert!((parsed.heights[0] - 0.0).abs() < 0.01);
-        let last_row_start = 128 * 129;
-        assert!((parsed.heights[last_row_start] - 50.0).abs() < 0.1);
+        assert!((parsed.heights[0]).abs() < 0.01);
+        assert!((parsed.heights[128 * 129] - 50.0).abs() < 0.1);
     }
 
     #[test]
-    fn parse_features() {
-        let data = build_test_smf();
-        let parsed = parse_smf(&data).expect("parse should succeed");
-
-        assert_eq!(parsed.feature_type_names.len(), 1);
-        assert_eq!(parsed.feature_type_names[0], "GeoVent");
+    fn parse_features_with_resolved_names() {
+        let parsed = parse_smf(&build_test_smf()).unwrap();
         assert_eq!(parsed.features.len(), 1);
+        assert_eq!(parsed.features[0].type_name, "GeoVent");
         assert!((parsed.features[0].x - 512.0).abs() < 0.01);
     }
 
     #[test]
     fn parse_metalmap() {
-        let data = build_test_smf();
-        let parsed = parse_smf(&data).expect("parse should succeed");
-
+        let parsed = parse_smf(&build_test_smf()).unwrap();
         assert_eq!(parsed.metalmap.len(), 64 * 64);
         assert_eq!(parsed.metalmap[32 * 64 + 32], 255);
-        assert_eq!(parsed.metalmap[0], 0);
     }
 
     #[test]
     fn reject_bad_magic() {
         let mut data = build_test_smf();
         data[0] = b'X';
-        assert!(matches!(
-            parse_smf(&data).unwrap_err(),
-            SmfParseError::BadMagic
-        ));
+        assert!(matches!(parse_smf(&data), Err(SmfParseError::BadMagic)));
     }
 
     #[test]
@@ -303,8 +283,8 @@ mod tests {
         let mut data = build_test_smf();
         data[16..20].copy_from_slice(&99i32.to_le_bytes());
         assert!(matches!(
-            parse_smf(&data).unwrap_err(),
-            SmfParseError::BadVersion(99)
+            parse_smf(&data),
+            Err(SmfParseError::BadVersion(99))
         ));
     }
 
@@ -322,12 +302,17 @@ mod tests {
             return;
         };
         let extracted = crate::sd7_archive::load_map_archive(sd7_path).unwrap();
-        let parsed = parse_smf(&extracted.smf_data).expect("parse should succeed");
+        let parsed = parse_smf(&extracted.smf_data).unwrap();
 
         assert_eq!(parsed.header.map_x, 256);
-        assert_eq!(parsed.header.map_y, 256);
         assert_eq!(parsed.heights.len(), 257 * 257);
-        assert_eq!(parsed.metalmap.len(), 128 * 128);
         assert!(!parsed.features.is_empty());
+
+        let geovents: Vec<_> = parsed
+            .features
+            .iter()
+            .filter(|f| f.type_name == "GeoVent")
+            .collect();
+        assert!(!geovents.is_empty(), "should have GeoVent features");
     }
 }

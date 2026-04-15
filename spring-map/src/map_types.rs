@@ -1,97 +1,24 @@
 use thiserror::Error;
 
-pub const SMF_MAGIC: &[u8; 16] = b"spring map file\0";
-pub const SMT_MAGIC: &[u8; 16] = b"spring tilefile\0";
-pub const SMF_VERSION: i32 = 1;
+pub(crate) const SMF_MAGIC: &[u8; 16] = b"spring map file\0";
+pub(crate) const SMT_MAGIC: &[u8; 16] = b"spring tilefile\0";
+pub(crate) const SMF_VERSION: i32 = 1;
 pub const SQUARE_SIZE: i32 = 8;
 
-/// The main SMF file header.
-///
-/// All integer fields are little-endian. Pointer fields are absolute byte
-/// offsets into the file. Fields that are always constant (`square_size` = 8,
-/// `texel_per_square` = 8, `tile_size` = 32) are validated during parsing
-/// but not stored.
-#[derive(Debug, Clone)]
-pub struct SmfHeader {
-    pub map_id: i32,
-    /// Map width in Spring map-squares. Always divisible by 128.
-    pub map_x: i32,
-    /// Map depth in Spring map-squares. Always divisible by 128.
-    pub map_y: i32,
-    pub square_size: i32,
-    pub min_height: f32,
-    pub max_height: f32,
-
-    // File-offset pointers (internal to parsing, but kept public for tilemap access)
-    pub heightmap_ptr: i32,
-    pub type_map_ptr: i32,
-    pub tiles_ptr: i32,
-    pub minimap_ptr: i32,
-    pub metalmap_ptr: i32,
-    pub feature_ptr: i32,
-    pub num_extra_headers: i32,
-}
-
-impl SmfHeader {
-    pub fn heightmap_width(&self) -> usize {
-        (self.map_x + 1) as usize
-    }
-
-    pub fn heightmap_height(&self) -> usize {
-        (self.map_y + 1) as usize
-    }
-
-    pub fn heightmap_len(&self) -> usize {
-        self.heightmap_width() * self.heightmap_height()
-    }
-
-    pub fn sample_to_world_height(&self, raw: i16) -> f32 {
-        let unsigned = raw as u16;
-        self.min_height + (unsigned as f32 / 65535.0) * (self.max_height - self.min_height)
-    }
-
-    pub fn world_width(&self) -> f32 {
-        (self.map_x * self.square_size) as f32
-    }
-
-    pub fn world_depth(&self) -> f32 {
-        (self.map_y * self.square_size) as f32
-    }
-
-    pub fn metalmap_width(&self) -> usize {
-        (self.map_x / 2) as usize
-    }
-
-    pub fn metalmap_height(&self) -> usize {
-        (self.map_y / 2) as usize
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MapFeature {
-    pub feature_type: i32,
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-    /// Encoded rotation. Decode as: `degrees = -32767 + (rotation / 65535) * 360`.
-    pub rotation: f32,
-    pub relative_size: f32,
-}
-
-/// Fully parsed SMF map data.
-#[derive(Debug, Clone)]
-pub struct ParsedMap {
-    pub header: SmfHeader,
-    /// Row-major heightmap, already converted to world-space heights.
-    pub heights: Vec<f32>,
-    pub feature_type_names: Vec<String>,
-    pub features: Vec<MapFeature>,
-    pub metalmap: Vec<u8>,
-}
-
 // ---------------------------------------------------------------------------
-// Errors — one per parser module, colocated with the types they describe
+// Error hierarchy
 // ---------------------------------------------------------------------------
+
+/// Top-level error for loading a Spring map end-to-end.
+#[derive(Debug, Error)]
+pub enum MapError {
+    #[error("archive error: {0}")]
+    Archive(#[from] ArchiveError),
+    #[error("SMF parse error: {0}")]
+    Smf(#[from] SmfParseError),
+    #[error("SMT parse error: {0}")]
+    Smt(#[from] SmtParseError),
+}
 
 #[derive(Debug, Error)]
 pub enum SmfParseError {
@@ -131,4 +58,152 @@ pub enum ArchiveError {
     NoSmtFound,
     #[error("unsupported archive format: {0}")]
     UnsupportedFormat(String),
+}
+
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
+
+/// Parsed SMF file header.
+///
+/// File-offset pointers are internal to the parser and not exposed.
+#[derive(Debug, Clone)]
+pub struct SmfHeader {
+    pub map_id: i32,
+    pub map_x: i32,
+    pub map_y: i32,
+    pub min_height: f32,
+    pub max_height: f32,
+
+    // Internal — used by the parser / tilemap reader.
+    pub(crate) heightmap_ptr: i32,
+    pub(crate) type_map_ptr: i32,
+    pub(crate) tiles_ptr: i32,
+    pub(crate) minimap_ptr: i32,
+    pub(crate) metalmap_ptr: i32,
+    pub(crate) feature_ptr: i32,
+    pub(crate) num_extra_headers: i32,
+}
+
+impl SmfHeader {
+    /// Create a synthetic header for test/fallback maps.
+    pub fn new_flat(map_x: i32, map_y: i32, min_height: f32, max_height: f32) -> Self {
+        Self {
+            map_id: 0,
+            map_x,
+            map_y,
+            min_height,
+            max_height,
+            heightmap_ptr: 0,
+            type_map_ptr: 0,
+            tiles_ptr: 0,
+            minimap_ptr: 0,
+            metalmap_ptr: 0,
+            feature_ptr: 0,
+            num_extra_headers: 0,
+        }
+    }
+
+    pub fn heightmap_width(&self) -> usize {
+        (self.map_x + 1) as usize
+    }
+
+    pub fn heightmap_height(&self) -> usize {
+        (self.map_y + 1) as usize
+    }
+
+    pub fn heightmap_len(&self) -> usize {
+        self.heightmap_width() * self.heightmap_height()
+    }
+
+    pub fn sample_to_world_height(&self, raw: i16) -> f32 {
+        let unsigned = raw as u16;
+        self.min_height + (unsigned as f32 / 65535.0) * (self.max_height - self.min_height)
+    }
+
+    pub fn world_width(&self) -> f32 {
+        (self.map_x * SQUARE_SIZE) as f32
+    }
+
+    pub fn world_depth(&self) -> f32 {
+        (self.map_y * SQUARE_SIZE) as f32
+    }
+
+    pub fn metalmap_width(&self) -> usize {
+        (self.map_x / 2) as usize
+    }
+
+    pub fn metalmap_height(&self) -> usize {
+        (self.map_y / 2) as usize
+    }
+}
+
+/// A single feature placement on the map.
+#[derive(Debug, Clone)]
+pub struct MapFeature {
+    /// Resolved type name (e.g., "GeoVent", "TreeType0").
+    pub type_name: String,
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    /// Raw encoded rotation value from the SMF.
+    raw_rotation: f32,
+    pub relative_size: f32,
+}
+
+impl MapFeature {
+    pub(crate) fn new(
+        type_name: String,
+        x: f32,
+        y: f32,
+        z: f32,
+        raw_rotation: f32,
+        relative_size: f32,
+    ) -> Self {
+        Self {
+            type_name,
+            x,
+            y,
+            z,
+            raw_rotation,
+            relative_size,
+        }
+    }
+
+    /// Decoded rotation in degrees.
+    pub fn rotation_degrees(&self) -> f32 {
+        -32767.0 + (self.raw_rotation / 65535.0) * 360.0
+    }
+}
+
+/// Fully parsed SMF map data.
+#[derive(Debug, Clone)]
+pub struct ParsedMap {
+    pub header: SmfHeader,
+    /// Row-major heightmap, already converted to world-space heights.
+    pub heights: Vec<f32>,
+    pub features: Vec<MapFeature>,
+    pub metalmap: Vec<u8>,
+}
+
+/// A decoded 32x32 RGBA tile from an SMT file.
+#[derive(Debug, Clone)]
+pub struct Tile {
+    /// 32×32×4 = 4096 bytes of RGBA pixel data.
+    pub pixels: [u8; Self::SIZE],
+}
+
+impl Tile {
+    pub const WIDTH: usize = 32;
+    pub const HEIGHT: usize = 32;
+    pub const SIZE: usize = Self::WIDTH * Self::HEIGHT * 4;
+}
+
+/// Assembled ground texture from tiled SMT data.
+#[derive(Debug)]
+pub struct GroundTexture {
+    pub width: usize,
+    pub height: usize,
+    /// RGBA8 pixel data, row-major, `width * height * 4` bytes.
+    pub pixels: Vec<u8>,
 }

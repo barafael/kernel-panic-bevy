@@ -2,21 +2,20 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::map_types::{SMT_MAGIC, SmfHeader, SmfParseError, SmtParseError};
+use crate::map_types::{GroundTexture, ParsedMap, SMT_MAGIC, SmfParseError, SmtParseError, Tile};
 
 const TILE_BYTES: usize = 680;
 const TILE_BASE_BYTES: usize = 512;
-const TILE_PX: usize = 32;
 
-/// Parse the tilemap from the SMF binary data.
+/// Parse the tilemap from SMF data using the already-parsed header.
 ///
 /// Returns `(tilemap_width, tilemap_height, tile_indices)`.
-pub fn parse_tilemap(
+pub(crate) fn parse_tilemap(
     smf_data: &[u8],
-    header: &SmfHeader,
+    map: &ParsedMap,
 ) -> Result<(usize, usize, Vec<u32>), SmfParseError> {
     let mut cursor = Cursor::new(smf_data);
-    cursor.seek(SeekFrom::Start(header.tiles_ptr as u64))?;
+    cursor.seek(SeekFrom::Start(map.header.tiles_ptr as u64))?;
 
     let num_tile_files = cursor.read_i32::<LittleEndian>()?;
     let _num_tiles_total = cursor.read_i32::<LittleEndian>()?;
@@ -30,21 +29,19 @@ pub fn parse_tilemap(
         }
     }
 
-    let tm_w = (header.map_x / 4) as usize;
-    let tm_h = (header.map_y / 4) as usize;
-    let count = tm_w * tm_h;
+    let tilemap_w = (map.header.map_x / 4) as usize;
+    let tilemap_h = (map.header.map_y / 4) as usize;
+    let count = tilemap_w * tilemap_h;
     let mut indices = Vec::with_capacity(count);
     for _ in 0..count {
         indices.push(cursor.read_u32::<LittleEndian>()?);
     }
 
-    Ok((tm_w, tm_h, indices))
+    Ok((tilemap_w, tilemap_h, indices))
 }
 
 /// Parse all tiles from an SMT file's raw bytes.
-///
-/// Returns a vec of tiles, each tile is 32x32 RGBA pixels.
-pub fn parse_smt_tiles(smt_data: &[u8]) -> Result<Vec<[u8; TILE_PX * TILE_PX * 4]>, SmtParseError> {
+pub fn parse_smt_tiles(smt_data: &[u8]) -> Result<Vec<Tile>, SmtParseError> {
     let mut cursor = Cursor::new(smt_data);
 
     let mut magic = [0u8; 16];
@@ -63,62 +60,62 @@ pub fn parse_smt_tiles(smt_data: &[u8]) -> Result<Vec<[u8; TILE_PX * TILE_PX * 4
 
     for _ in 0..num_tiles {
         cursor.read_exact(&mut tile_buf)?;
-        let rgba = decode_dxt1_block_image(&tile_buf[..TILE_BASE_BYTES], TILE_PX, TILE_PX);
-        tiles.push(rgba);
+        let pixels =
+            decode_dxt1_block_image(&tile_buf[..TILE_BASE_BYTES], Tile::WIDTH, Tile::HEIGHT);
+        tiles.push(Tile { pixels });
     }
 
     Ok(tiles)
 }
 
-/// Assemble the full ground texture from tiles and tilemap.
-///
-/// Returns `(width, height, rgba_pixels)`.
+/// Assemble the full ground texture from tiles and a parsed map.
 pub fn assemble_ground_texture(
-    tiles: &[[u8; TILE_PX * TILE_PX * 4]],
-    tilemap: &[u32],
-    tm_w: usize,
-    tm_h: usize,
-) -> (usize, usize, Vec<u8>) {
-    let tex_w = tm_w * TILE_PX;
-    let tex_h = tm_h * TILE_PX;
+    smf_data: &[u8],
+    map: &ParsedMap,
+    tiles: &[Tile],
+) -> Result<GroundTexture, SmfParseError> {
+    let (tilemap_w, tilemap_h, tilemap) = parse_tilemap(smf_data, map)?;
+
+    let tex_w = tilemap_w * Tile::WIDTH;
+    let tex_h = tilemap_h * Tile::HEIGHT;
     let mut pixels = vec![0u8; tex_w * tex_h * 4];
 
-    for ty in 0..tm_h {
-        for tx in 0..tm_w {
-            let tile_idx = tilemap[ty * tm_w + tx] as usize;
+    for tile_y in 0..tilemap_h {
+        for tile_x in 0..tilemap_w {
+            let tile_idx = tilemap[tile_y * tilemap_w + tile_x] as usize;
             if tile_idx >= tiles.len() {
                 continue;
             }
             let tile = &tiles[tile_idx];
 
-            let dst_x = tx * TILE_PX;
-            let dst_y = ty * TILE_PX;
-            for row in 0..TILE_PX {
-                let src_offset = row * TILE_PX * 4;
+            let dst_x = tile_x * Tile::WIDTH;
+            let dst_y = tile_y * Tile::HEIGHT;
+            for row in 0..Tile::HEIGHT {
+                let src_offset = row * Tile::WIDTH * 4;
                 let dst_offset = ((dst_y + row) * tex_w + dst_x) * 4;
-                pixels[dst_offset..dst_offset + TILE_PX * 4]
-                    .copy_from_slice(&tile[src_offset..src_offset + TILE_PX * 4]);
+                pixels[dst_offset..dst_offset + Tile::WIDTH * 4]
+                    .copy_from_slice(&tile.pixels[src_offset..src_offset + Tile::WIDTH * 4]);
             }
         }
     }
 
-    (tex_w, tex_h, pixels)
+    Ok(GroundTexture {
+        width: tex_w,
+        height: tex_h,
+        pixels,
+    })
 }
 
-fn decode_dxt1_block_image(
-    data: &[u8],
-    width: usize,
-    height: usize,
-) -> [u8; TILE_PX * TILE_PX * 4] {
-    let mut output = [255u8; TILE_PX * TILE_PX * 4];
+fn decode_dxt1_block_image(data: &[u8], width: usize, height: usize) -> [u8; Tile::SIZE] {
+    let mut output = [255u8; Tile::SIZE];
     let blocks_x = width / 4;
     let blocks_y = height / 4;
 
-    for by in 0..blocks_y {
-        for bx in 0..blocks_x {
-            let block_offset = (by * blocks_x + bx) * 8;
+    for block_y in 0..blocks_y {
+        for block_x in 0..blocks_x {
+            let block_offset = (block_y * blocks_x + block_x) * 8;
             let block = &data[block_offset..block_offset + 8];
-            decode_dxt1_block(block, &mut output, width, bx * 4, by * 4);
+            decode_dxt1_block(block, &mut output, width, block_x * 4, block_y * 4);
         }
     }
 
@@ -201,19 +198,15 @@ mod tests {
         };
 
         let extracted = crate::sd7_archive::load_map_archive(sd7_path).unwrap();
-        let smf_header = crate::smf_parser::parse_smf(&extracted.smf_data).unwrap();
+        let parsed = crate::smf_parser::parse_smf(&extracted.smf_data).unwrap();
 
-        let (tm_w, tm_h, tilemap) = parse_tilemap(&extracted.smf_data, &smf_header.header).unwrap();
-        assert_eq!(tm_w, 64);
-        assert_eq!(tm_h, 64);
-
-        let smt_data = crate::sd7_archive::load_smt_from_archive(sd7_path).unwrap();
+        let smt_data = extracted.smt_data.expect("should have SMT data");
         let tiles = parse_smt_tiles(&smt_data).unwrap();
         assert!(!tiles.is_empty());
 
-        let (tex_w, tex_h, pixels) = assemble_ground_texture(&tiles, &tilemap, tm_w, tm_h);
-        assert_eq!(tex_w, 2048);
-        assert_eq!(tex_h, 2048);
-        assert_eq!(pixels.len(), 2048 * 2048 * 4);
+        let ground = assemble_ground_texture(&extracted.smf_data, &parsed, &tiles).unwrap();
+        assert_eq!(ground.width, 2048);
+        assert_eq!(ground.height, 2048);
+        assert_eq!(ground.pixels.len(), 2048 * 2048 * 4);
     }
 }

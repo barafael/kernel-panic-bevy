@@ -6,4 +6,3 @@ edition = "2024"
 [dependencies]
 spring-map = { path = "../spring-map" }
 bevy = { version = "0.18", features = ["serialize"] }
-anyhow = "1"

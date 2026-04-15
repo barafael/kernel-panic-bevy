@@ -172,7 +172,7 @@ pub fn camera_control(
         return;
     };
 
-    let dt = time.delta_secs();
+    let delta_time = time.delta_secs();
 
     // --- Pan (WASD / arrows) — A/D inverted per user request ---
     let fwd = fwd_ground(&state);
@@ -194,7 +194,7 @@ pub fn camera_control(
 
     if pan != Vec3::ZERO {
         let speed = settings.pan_speed * (state.distance / 500.0).max(0.3);
-        state.focus += pan.normalize() * speed * dt;
+        state.focus += pan.normalize() * speed * delta_time;
     }
 
     state.focus = bounds.clamp_focus(state.focus);
@@ -225,14 +225,14 @@ pub fn camera_control(
 
     // --- Q/E rotate shortcuts ---
     if keys.pressed(KeyCode::KeyQ) {
-        state.yaw += settings.rotate_speed_keys * dt;
+        state.yaw += settings.rotate_speed_keys * delta_time;
     }
     if keys.pressed(KeyCode::KeyE) {
-        state.yaw -= settings.rotate_speed_keys * dt;
+        state.yaw -= settings.rotate_speed_keys * delta_time;
     }
 
     // --- Smooth interpolation ---
-    let t = (settings.smoothing * dt).min(1.0);
+    let t = (settings.smoothing * delta_time).min(1.0);
     state.smooth_focus = state.smooth_focus.lerp(state.focus, t);
     state.smooth_distance = state.smooth_distance.lerp(state.distance, t);
     state.smooth_yaw = state.smooth_yaw.lerp(state.yaw, t);

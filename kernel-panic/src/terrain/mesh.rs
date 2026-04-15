@@ -35,7 +35,7 @@ pub fn generate_terrain_chunks(map: &ParsedMap) -> Vec<TerrainChunk> {
 fn build_chunk(map: &ParsedMap, cx: usize, cz: usize) -> TerrainChunk {
     let hm_w = map.header.heightmap_width();
     let hm_h = map.header.heightmap_height();
-    let sq_size = map.header.square_size as f32;
+    let sq_size = spring_map::map_types::SQUARE_SIZE as f32;
 
     let vx_start = cx * CHUNK_SIZE;
     let vz_start = cz * CHUNK_SIZE;
@@ -52,16 +52,16 @@ fn build_chunk(map: &ParsedMap, cx: usize, cz: usize) -> TerrainChunk {
     let origin_x = vx_start as f32 * sq_size;
     let origin_z = vz_start as f32 * sq_size;
 
-    for lz in 0..local_h {
-        for lx in 0..local_w {
-            let gx = vx_start + lx;
-            let gz = vz_start + lz;
+    for local_z in 0..local_h {
+        for local_x in 0..local_w {
+            let global_x = vx_start + local_x;
+            let global_z = vz_start + local_z;
 
-            let height = map.heights[gz * hm_w + gx];
-            positions.push([lx as f32 * sq_size, height, lz as f32 * sq_size]);
+            let height = map.heights[global_z * hm_w + global_x];
+            positions.push([local_x as f32 * sq_size, height, local_z as f32 * sq_size]);
 
-            let u = gx as f32 / (hm_w - 1) as f32;
-            let v = gz as f32 / (hm_h - 1) as f32;
+            let u = global_x as f32 / (hm_w - 1) as f32;
+            let v = global_z as f32 / (hm_h - 1) as f32;
             uvs.push([u, v]);
 
             normals.push([0.0, 1.0, 0.0]);
@@ -74,34 +74,41 @@ fn build_chunk(map: &ParsedMap, cx: usize, cz: usize) -> TerrainChunk {
     let quads_h = local_h.saturating_sub(1);
     let mut indices = Vec::with_capacity(quads_w * quads_h * 6);
 
-    for qz in 0..quads_h {
-        for qx in 0..quads_w {
-            let tl = (qz * local_w + qx) as u32;
-            let tr = tl + 1;
-            let bl = ((qz + 1) * local_w + qx) as u32;
-            let br = bl + 1;
+    for quad_z in 0..quads_h {
+        for quad_x in 0..quads_w {
+            let top_left = (quad_z * local_w + quad_x) as u32;
+            let top_right = top_left + 1;
+            let bottom_left = ((quad_z + 1) * local_w + quad_x) as u32;
+            let bottom_right = bottom_left + 1;
 
-            indices.extend_from_slice(&[tl, bl, tr, tr, bl, br]);
+            indices.extend_from_slice(&[
+                top_left,
+                bottom_left,
+                top_right,
+                top_right,
+                bottom_left,
+                bottom_right,
+            ]);
 
-            let p_tl = Vec3::from(positions[tl as usize]);
-            let p_bl = Vec3::from(positions[bl as usize]);
-            let p_tr = Vec3::from(positions[tr as usize]);
-            let p_br = Vec3::from(positions[br as usize]);
+            let pos_tl = Vec3::from(positions[top_left as usize]);
+            let pos_bl = Vec3::from(positions[bottom_left as usize]);
+            let pos_tr = Vec3::from(positions[top_right as usize]);
+            let pos_br = Vec3::from(positions[bottom_right as usize]);
 
-            let n1 = (p_bl - p_tl).cross(p_tr - p_tl);
-            let n2 = (p_bl - p_tr).cross(p_br - p_tr);
+            let normal_1 = (pos_bl - pos_tl).cross(pos_tr - pos_tl);
+            let normal_2 = (pos_bl - pos_tr).cross(pos_br - pos_tr);
 
-            for &idx in &[tl, bl, tr] {
-                let n = &mut normals[idx as usize];
-                n[0] += n1.x;
-                n[1] += n1.y;
-                n[2] += n1.z;
+            for &idx in &[top_left, bottom_left, top_right] {
+                let normal = &mut normals[idx as usize];
+                normal[0] += normal_1.x;
+                normal[1] += normal_1.y;
+                normal[2] += normal_1.z;
             }
-            for &idx in &[tr, bl, br] {
-                let n = &mut normals[idx as usize];
-                n[0] += n2.x;
-                n[1] += n2.y;
-                n[2] += n2.z;
+            for &idx in &[top_right, bottom_left, bottom_right] {
+                let normal = &mut normals[idx as usize];
+                normal[0] += normal_2.x;
+                normal[1] += normal_2.y;
+                normal[2] += normal_2.z;
             }
         }
     }
