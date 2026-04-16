@@ -498,7 +498,7 @@ mod proptests {
             prop_assert_eq!(&p.name, &parent);
             let c = p.children.iter().find(|c| c.name == child);
             prop_assert!(c.is_some(), "child section '{}' missing", child);
-            prop_assert_eq!(c.unwrap().get(&"x".to_string()), Some(val.as_str()));
+            prop_assert_eq!(c.unwrap().get("x"), Some(val.as_str()));
         }
     }
 }

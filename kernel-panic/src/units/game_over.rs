@@ -12,14 +12,8 @@ pub enum GameState {
 }
 
 /// The player's team ID (team 0 by default).
-#[derive(Resource)]
+#[derive(Resource, Default)]
 pub struct PlayerTeam(pub u8);
-
-impl Default for PlayerTeam {
-    fn default() -> Self {
-        Self(0)
-    }
-}
 
 /// UI entity for the game-over overlay.
 #[derive(Component)]

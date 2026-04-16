@@ -1,6 +1,6 @@
 //! Integration tests for the COB virtual machine using real KP animation scripts.
 
-use spring_cob::{AnimCommand, CobVm, ThreadState, parse_cob};
+use spring_cob::{AnimCommand, CobVm, parse_cob};
 use std::path::PathBuf;
 
 fn scripts_dir() -> Option<PathBuf> {
@@ -210,7 +210,7 @@ fn sleep_suspends_and_resumes_thread() {
     };
 
     let mut vm = CobVm::new(&cob);
-    let tid = vm.start_script(&cob, "Create", &[]).unwrap();
+    let _tid = vm.start_script(&cob, "Create", &[]).unwrap();
 
     // First tick should hit a sleep and suspend.
     vm.tick(&cob, 0);

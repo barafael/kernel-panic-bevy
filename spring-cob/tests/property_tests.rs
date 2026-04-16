@@ -13,7 +13,7 @@ proptest! {
     /// Truncated valid-looking headers should not panic.
     #[test]
     fn cob_parser_doesnt_panic_on_truncated_header(len in 0usize..100) {
-        let mut data = vec![0u8; 100];
+        let mut data = [0u8; 100];
         // Set version to 4 (valid).
         data[0..4].copy_from_slice(&4i32.to_le_bytes());
         // Set NumberOfScripts to 1.

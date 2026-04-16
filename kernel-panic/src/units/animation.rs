@@ -56,7 +56,7 @@ pub fn load_cob_cached(script: &'static str, cache: &mut CobFileCache) -> Option
     cache
         .files
         .entry(script)
-        .or_insert_with(|| load_asset_from_disk(script, |data| parse_cob(data)).map(Arc::new))
+        .or_insert_with(|| load_asset_from_disk(script, parse_cob).map(Arc::new))
         .clone()
 }
 
@@ -164,18 +164,18 @@ pub fn animation_system(
                 }
                 AnimCommand::Show { piece } => {
                     let p = *piece as usize;
-                    if p < animator.piece_entities.len() {
-                        if let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p]) {
-                            *vis = Visibility::Inherited;
-                        }
+                    if p < animator.piece_entities.len()
+                        && let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p])
+                    {
+                        *vis = Visibility::Inherited;
                     }
                 }
                 AnimCommand::Hide { piece } => {
                     let p = *piece as usize;
-                    if p < animator.piece_entities.len() {
-                        if let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p]) {
-                            *vis = Visibility::Hidden;
-                        }
+                    if p < animator.piece_entities.len()
+                        && let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p])
+                    {
+                        *vis = Visibility::Hidden;
                     }
                 }
                 AnimCommand::Explode { piece, .. } => {
@@ -341,7 +341,7 @@ pub fn decay_death_particles(
         if let Some(mat) = materials.get_mut(&mat_handle.0) {
             let alpha = 1.0 - t;
             mat.base_color = mat.base_color.with_alpha(alpha);
-            mat.emissive = mat.emissive * (1.0 - t * 0.8);
+            mat.emissive *= (1.0 - t * 0.8);
         }
     }
 }

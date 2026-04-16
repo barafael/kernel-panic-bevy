@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
@@ -137,7 +135,7 @@ pub fn spawn_unit(
         // Spawn piece entities.
         for (idx, parent_idx) in piece_parents.iter().enumerate() {
             let piece = get_piece_by_index(&model.root_piece, idx);
-            let has_geometry = piece.map_or(false, |p| !p.vertices.is_empty());
+            let has_geometry = piece.is_some_and(|p| !p.vertices.is_empty());
             let offset = piece_offsets[idx];
 
             let piece_cmd = if has_geometry {

@@ -44,14 +44,14 @@ pub fn movement_system(
         }
 
         // If we have a MoveTarget but no MovePath, compute the path.
-        if let Some(target) = move_target {
-            if move_path.is_none() {
-                let path = compute_path(nav_grid.as_deref_mut(), transform.translation, target.0);
-                commands.entity(entity).insert(MovePath {
-                    waypoints: path,
-                    current: 0,
-                });
-            }
+        if let Some(target) = move_target
+            && move_path.is_none()
+        {
+            let path = compute_path(nav_grid.as_deref_mut(), transform.translation, target.0);
+            commands.entity(entity).insert(MovePath {
+                waypoints: path,
+                current: 0,
+            });
         }
 
         // Follow the path waypoint by waypoint.

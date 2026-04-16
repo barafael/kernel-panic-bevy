@@ -142,12 +142,12 @@ impl<'a> Parser<'a> {
 
     fn parse_section(&mut self, name: String, open_line: usize) -> Result<Section, ParseError> {
         // Expect `{` on the next non-empty line.
-        if let Some((_, line)) = self.peek() {
-            if line == "{" {
-                self.advance();
-            }
-            // Some files put `{` on the same line as `[Name]` — already consumed.
+        if let Some((_, line)) = self.peek()
+            && line == "{"
+        {
+            self.advance();
         }
+        // Some files put `{` on the same line as `[Name]` — already consumed.
 
         let mut entries = BTreeMap::new();
         let mut children = Vec::new();

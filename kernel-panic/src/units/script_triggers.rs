@@ -8,7 +8,7 @@ use std::f32::consts::PI;
 use bevy::prelude::*;
 
 use super::animation::CobAnimator;
-use super::combat::{AttackCooldown, Dying};
+use super::combat::Dying;
 use super::production::Producer;
 use crate::interaction::movement::{MovePath, MoveTarget};
 
@@ -38,7 +38,7 @@ pub fn trigger_movement_scripts(
     for (entity, mut animator, move_target, move_path, movement_state) in &mut query {
         let is_moving = move_target.is_some() || move_path.is_some();
 
-        let was_moving = movement_state.as_ref().map_or(false, |s| s.was_moving);
+        let was_moving = movement_state.as_ref().is_some_and(|s| s.was_moving);
 
         if is_moving && !was_moving {
             let cob = animator.cob.clone();
@@ -74,7 +74,7 @@ pub fn trigger_production_scripts(
         // production is continuous, but will matter when build queues can be paused).
         let is_active = producer.progress_fraction() > 0.0;
 
-        let was_active = production_state.as_ref().map_or(false, |s| s.was_active);
+        let was_active = production_state.as_ref().is_some_and(|s| s.was_active);
 
         if is_active && !was_active {
             let cob = animator.cob.clone();

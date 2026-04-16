@@ -134,36 +134,36 @@ pub fn handle_selection(
     }
 
     // --- While held: update box if past threshold ---
-    if mouse.pressed(MouseButton::Left) {
-        if let (Some(start), Some(current)) = (drag_state.start, cursor_pos) {
-            let distance = (current - start).length();
-            if distance > DRAG_THRESHOLD {
-                drag_state.dragging = true;
+    if mouse.pressed(MouseButton::Left)
+        && let (Some(start), Some(current)) = (drag_state.start, cursor_pos)
+    {
+        let distance = (current - start).length();
+        if distance > DRAG_THRESHOLD {
+            drag_state.dragging = true;
 
-                let min_x = start.x.min(current.x);
-                let min_y = start.y.min(current.y);
-                let width = (current.x - start.x).abs();
-                let height = (current.y - start.y).abs();
+            let min_x = start.x.min(current.x);
+            let min_y = start.y.min(current.y);
+            let width = (current.x - start.x).abs();
+            let height = (current.y - start.y).abs();
 
-                for entity in &box_nodes {
-                    commands.entity(entity).despawn();
-                }
-
-                commands.spawn((
-                    SelectionBoxNode,
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(min_x),
-                        top: Val::Px(min_y),
-                        width: Val::Px(width),
-                        height: Val::Px(height),
-                        border: UiRect::all(Val::Px(1.0)),
-                        ..default()
-                    },
-                    BorderColor::all(Color::WHITE),
-                    BackgroundColor(Color::NONE),
-                ));
+            for entity in &box_nodes {
+                commands.entity(entity).despawn();
             }
+
+            commands.spawn((
+                SelectionBoxNode,
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(min_x),
+                    top: Val::Px(min_y),
+                    width: Val::Px(width),
+                    height: Val::Px(height),
+                    border: UiRect::all(Val::Px(1.0)),
+                    ..default()
+                },
+                BorderColor::all(Color::WHITE),
+                BackgroundColor(Color::NONE),
+            ));
         }
     }
 
@@ -265,15 +265,16 @@ pub fn handle_right_click(
         }
     }
 
-    if mouse.pressed(MouseButton::Right) && drag_path.active {
-        if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
-            let dominated = drag_path
-                .points
-                .last()
-                .is_some_and(|last| last.distance(point) < PATH_SAMPLE_MIN_DISTANCE);
-            if !dominated {
-                drag_path.points.push(point);
-            }
+    if mouse.pressed(MouseButton::Right)
+        && drag_path.active
+        && let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast)
+    {
+        let dominated = drag_path
+            .points
+            .last()
+            .is_some_and(|last| last.distance(point) < PATH_SAMPLE_MIN_DISTANCE);
+        if !dominated {
+            drag_path.points.push(point);
         }
     }
 

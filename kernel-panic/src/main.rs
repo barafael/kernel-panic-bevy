@@ -138,6 +138,8 @@ fn cycle_map_on_keypress(
     keys: Res<ButtonInput<KeyCode>>,
     mut catalog: ResMut<MapCatalog>,
     map_entities: Query<Entity, With<MapEntity>>,
+    game_over_ui: Query<Entity, With<units::game_over::GameOverUi>>,
+    mut game_state: ResMut<units::game_over::GameState>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
@@ -163,6 +165,12 @@ fn cycle_map_on_keypress(
 
     // Despawn all existing map entities.
     for entity in &map_entities {
+        commands.entity(entity).despawn();
+    }
+
+    // Reset game state so the new map starts fresh.
+    *game_state = units::game_over::GameState::Playing;
+    for entity in &game_over_ui {
         commands.entity(entity).despawn();
     }
 

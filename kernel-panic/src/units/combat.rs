@@ -85,10 +85,10 @@ pub fn combat_system(
         }
 
         // Skip if still on cooldown.
-        if let Ok(cd) = cooldowns.get(entity) {
-            if cd.remaining > 0.0 {
-                continue;
-            }
+        if let Ok(cd) = cooldowns.get(entity)
+            && cd.remaining > 0.0
+        {
+            continue;
         }
 
         let attacker_pos = attacker_gtf.translation();
@@ -102,7 +102,7 @@ pub fn combat_system(
             }
             let target_pos = target_gtf.translation();
             let dist_sq = attacker_pos.distance_squared(target_pos);
-            if dist_sq <= range_sq && best.map_or(true, |(_, _, d)| dist_sq < d) {
+            if dist_sq <= range_sq && best.is_none_or(|(_, _, d)| dist_sq < d) {
                 best = Some((target_entity, target_pos, dist_sq));
             }
         }
@@ -222,7 +222,7 @@ pub fn cleanup_dying(
     for (entity, mut dying, animator) in &mut query {
         dying.timer -= dt;
 
-        let anim_done = animator.map_or(true, |a| !a.vm.has_active_threads());
+        let anim_done = animator.is_none_or(|a| !a.vm.has_active_threads());
         if anim_done || dying.timer <= 0.0 {
             commands.entity(entity).despawn();
         }

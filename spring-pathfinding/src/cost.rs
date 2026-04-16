@@ -131,6 +131,6 @@ mod tests {
     #[test]
     fn bin_midrange() {
         let bin = SpeedMap::speed_to_bin(0.5);
-        assert!(bin >= 1 && bin <= NUM_SPEEDMOD_BINS - 1);
+        assert!((1..=NUM_SPEEDMOD_BINS - 1).contains(&bin));
     }
 }

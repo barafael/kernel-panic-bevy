@@ -27,6 +27,8 @@ pub enum ThreadState {
 /// A single call stack frame.
 #[derive(Debug, Clone, Copy, Default)]
 struct CallFrame {
+    /// Stored for future VM introspection (e.g. GET_UNIT_VALUE).
+    #[allow(dead_code)]
     function_id: usize,
     return_addr: i32,
     stack_top: usize,
@@ -82,10 +84,6 @@ impl CobThread {
 
     fn local_return_addr(&self) -> i32 {
         self.call_stack.last().map_or(-1, |f| f.return_addr)
-    }
-
-    fn local_function_id(&self) -> usize {
-        self.call_stack.last().map_or(0, |f| f.function_id)
     }
 
     fn read_code(&mut self, code: &[i32]) -> i32 {
@@ -202,12 +200,11 @@ impl CobVm {
         // Tick until this thread finishes or yields.
         let mut commands = Vec::new();
         self.tick_thread(cob, thread_id, &mut commands);
-        let ret = self
-            .threads
+
+        self.threads
             .iter()
             .find(|t| t.id == thread_id)
-            .map(|t| t.ret_code);
-        ret
+            .map(|t| t.ret_code)
     }
 
     /// Advance time by `dt_ms` milliseconds and tick all runnable threads.
@@ -500,16 +497,17 @@ impl CobVm {
                     let func_id = thread.read_code(&cob.code) as usize;
                     let arg_count = thread.read_code(&cob.code) as usize;
 
-                    if func_id < cob.script_lengths.len() && cob.script_lengths[func_id] > 0 {
-                        if thread.call_stack.len() < MAX_CALL_STACK {
-                            thread.call_stack.push(CallFrame {
-                                function_id: func_id,
-                                return_addr: thread.pc as i32,
-                                stack_top: thread.data_stack.len() - arg_count,
-                            });
-                            thread.param_count = arg_count;
-                            thread.pc = cob.script_offsets[func_id];
-                        }
+                    if func_id < cob.script_lengths.len()
+                        && cob.script_lengths[func_id] > 0
+                        && thread.call_stack.len() < MAX_CALL_STACK
+                    {
+                        thread.call_stack.push(CallFrame {
+                            function_id: func_id,
+                            return_addr: thread.pc as i32,
+                            stack_top: thread.data_stack.len() - arg_count,
+                        });
+                        thread.param_count = arg_count;
+                        thread.pc = cob.script_offsets[func_id];
                     }
                 }
                 LUA_CALL => {
