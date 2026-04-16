@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use spring_pathfinding::{NodeLayer, Path, find_path};
+use spring_pathfinding::{NodeLayer, find_path};
 
 use crate::units::components::UnitType;
 use crate::units::definitions::stats;

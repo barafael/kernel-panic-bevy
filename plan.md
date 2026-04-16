@@ -145,11 +145,47 @@ Files: `kernel-panic/src/units/abilities.rs` (new)
 
 ## Technical Debt
 
+### Architecture
+- [ ] `selection.rs` is a 660-line god file handling 6 concerns: hover, click/drag selection, right-click move commands, material highlighting, 3D health bars, and move indicator visuals — split into `interaction/health_bars.rs`, `interaction/highlight.rs`, etc.
+- [ ] `spawn_unit` takes 11 parameters — group asset params into a `SpawnContext` struct or make it a Bevy command
+- [ ] `buildable_units()` in `hud.rs` and `default_production()` in `production.rs` encode overlapping "what can X build?" data with no shared source — consolidate into a `buildable: &[UnitKind]` field on `UnitStats`
 - [ ] `movement.rs` uses `Option<ResMut<NavGrid>>` — consider making NavGrid always present
+- [ ] `load_map_at_index` has too many parameters (9) — consider a `MapLoadContext` struct
+- [ ] Empty stub directories: `kernel-panic/src/game/`, `kernel-panic/src/ai/` — remove or populate
+
+### Performance
+- [ ] HUD systems (`update_info_panel`, `update_build_menu`, `update_order_palette`) despawn+respawn their entire UI tree every frame (~30-50 entities) — use change detection (`Changed<Selected>`, `Changed<Health>`, `Changed<Producer>`) to update in-place
+- [ ] `update_unit_highlight` clones and re-adds a `StandardMaterial` per selected/hovered unit every frame, leaking orphaned material handles — cache per-entity or per-faction+brightness and only create on `Added<Selected>`/`Added<Hovered>`
+- [ ] `despawn_health_bars` is O(n*m) — for each deselected unit, iterates all bar entities; use a `HashSet` of removed units or query children directly
+- [ ] Melee flash and projectile materials in `weapon_fx.rs` are created per-attack instead of cached like beam materials — extend `BeamMaterialCache` to cover all weapon FX
+- [ ] Animation system allocates `Vec<(i32, i32)>` per animator per frame — use `SmallVec` or `Local<Vec<...>>`
+
+### Gameplay Bugs
 - [ ] No unit collision avoidance — units overlap when crowded
 - [ ] Terrain height not sampled during unit movement (units float/sink on hills)
-- [ ] No delivery point for factories (right-click on factory should set rally point)
-- [ ] Map cycling doesn't clean up NavGrid/MinimapState properly on switch
-- [ ] `load_map_at_index` has too many parameters — consider a `MapLoadContext` struct
-- [ ] COB VM doesn't implement all opcodes yet
-- [ ] Weapon definitions are hardcoded — should come from unit data files
+- [ ] No rally point / delivery point for factories
+- [ ] `GameState` not reset on map cycling — win/lose persists across map switches
+- [ ] Attack-move command (`A` hotkey) is wired through UI but handler is empty (TODO in hud.rs:849)
+- [ ] Feature rotation (`MapFeature.rotation_degrees()`) parsed but never applied when rendering
+
+### Resource Leaks / Cleanup
+- [ ] Map cycling: old minimap image handle leaks when `MinimapState` is overwritten
+- [ ] `SelectionVolumeMaterial` recreated on every spawn instead of truly cached
+- [ ] `Selected`/`Hovered` components on units may cause brief query mismatches during despawn frame
+
+### Incomplete Implementations
+- [ ] COB VM: `EmitSfx` and `SetValue` opcodes unimplemented (catch-all `_ => {}`)
+- [ ] Atmosphere: `fog_start`, `fog_color`, `cloud_density` parsed from .smd but never applied
+- [ ] `PieceIndex` component: inner value set but never read (only used as marker)
+
+### Dead Code
+- [ ] `load_smt_from_archive()` in sd7_archive.rs — public function, never called
+- [ ] `CobThread::local_function_id()` in spring-cob vm.rs — never used
+- [ ] `_vertical` param in `walk_edge()` — unused
+- [ ] `_nodes` param in `refine_path()` — unused
+- [ ] `_weapon` param in `spawn_melee_flash()` — unused
+
+### Compiler Warnings
+- [ ] Unused import `Path` in movement.rs
+- [ ] Unused import `Arc` in spawning.rs
+- [ ] `CallFrame::function_id` never read in spring-cob

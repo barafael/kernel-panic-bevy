@@ -159,12 +159,6 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     }
 }
 
-/// Extract only the SMT data from an archive.
-pub fn load_smt_from_archive(path: &Path) -> Result<Vec<u8>, ArchiveError> {
-    let extracted = load_map_archive(path)?;
-    extracted.smt_data.ok_or(ArchiveError::NoSmtFound)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

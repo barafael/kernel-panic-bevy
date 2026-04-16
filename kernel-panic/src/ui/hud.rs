@@ -1,8 +1,8 @@
 use bevy::prelude::*;
 
 use crate::interaction::Selected;
-use crate::units::components::{Faction, Health, TeamId, UnitType};
-use crate::units::definitions::{self, UnitKind, UnitStats};
+use crate::units::components::{Faction, Health, TeamId, UnitType, health_color};
+use crate::units::definitions::{self, UNIT_STATS, UnitKind, UnitStats};
 use crate::units::game_over::PlayerTeam;
 use crate::units::production::Producer;
 
@@ -72,14 +72,6 @@ struct BuildIcon(UnitKind);
 #[derive(Component)]
 struct OrderButton(UnitOrder);
 
-/// Build progress bar foreground node.
-#[derive(Component)]
-struct BuildProgressBar;
-
-/// Build queue text node.
-#[derive(Component)]
-struct BuildQueueText;
-
 // ---------------------------------------------------------------------------
 // Unit preview textures
 // ---------------------------------------------------------------------------
@@ -96,57 +88,25 @@ impl UnitPreviews {
     }
 }
 
-/// Generate simple procedural preview images for each unit kind.
-/// These are small colored squares with the faction color, since we don't have
-/// a way to render 3D models to texture without a second camera pipeline.
 fn generate_unit_previews(mut previews: ResMut<UnitPreviews>, mut images: ResMut<Assets<Image>>) {
-    let all_kinds = [
-        // System
-        UnitKind::Kernel,
-        UnitKind::Assembler,
-        UnitKind::Bit,
-        UnitKind::Byte,
-        UnitKind::Pointer,
-        UnitKind::Socket,
-        UnitKind::Firewall,
-        // Hacker
-        UnitKind::Hole,
-        UnitKind::Bug,
-        UnitKind::Exploit,
-        UnitKind::Worm,
-        UnitKind::Virus,
-        UnitKind::Dos,
-        UnitKind::Window,
-        UnitKind::LogicBomb,
-        // Network
-        UnitKind::Connection,
-        UnitKind::Port,
-        UnitKind::Packet,
-        UnitKind::Signal,
-    ];
-
-    for kind in all_kinds {
-        let faction_color = faction_for_kind(kind).color();
-        let image = generate_preview_image(kind, faction_color);
+    for unit in &UNIT_STATS {
+        let image = generate_preview_image(unit);
         let handle = images.add(image);
-        previews.images.push((kind, handle));
+        previews.images.push((unit.kind, handle));
     }
 }
 
 /// Create a 48x48 RGBA preview image for a unit kind.
-fn generate_preview_image(kind: UnitKind, faction_color: Color) -> Image {
+fn generate_preview_image(stats: &UnitStats) -> Image {
     const SIZE: u32 = 48;
 
-    let srgba = Srgba::from(faction_color);
+    let srgba = Srgba::from(stats.faction.color());
     let r = (srgba.red * 255.0) as u8;
     let g = (srgba.green * 255.0) as u8;
     let b = (srgba.blue * 255.0) as u8;
 
     let mut pixels = vec![0u8; (SIZE * SIZE * 4) as usize];
 
-    let stats = definitions::stats(kind);
-
-    // Draw a shape based on the unit type: circle for mobile, diamond for buildings.
     let center = SIZE as f32 / 2.0;
     let radius = center - 4.0;
 
@@ -156,52 +116,25 @@ fn generate_preview_image(kind: UnitKind, faction_color: Color) -> Image {
             let dy = y as f32 - center;
             let idx = ((y * SIZE + x) * 4) as usize;
 
-            let inside = if stats.is_building {
-                // Diamond shape for buildings.
-                dx.abs() + dy.abs() < radius
+            let dist = if stats.is_building {
+                dx.abs() + dy.abs()
             } else {
-                // Circle for mobile units.
-                dx * dx + dy * dy < radius * radius
+                (dx * dx + dy * dy).sqrt()
             };
 
-            if inside {
-                // Brighter center, darker edges.
-                let dist = if stats.is_building {
-                    (dx.abs() + dy.abs()) / radius
-                } else {
-                    (dx * dx + dy * dy).sqrt() / radius
-                };
-                let brightness = 1.0 - dist * 0.6;
-                pixels[idx] = (r as f32 * brightness) as u8;
-                pixels[idx + 1] = (g as f32 * brightness) as u8;
-                pixels[idx + 2] = (b as f32 * brightness) as u8;
-                pixels[idx + 3] = 220;
-            } else {
-                pixels[idx + 3] = 0;
-            }
-        }
-    }
-
-    // Draw a 1px border in brighter faction color.
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let dx = x as f32 - center;
-            let dy = y as f32 - center;
-            let idx = ((y * SIZE + x) * 4) as usize;
-
-            let on_border = if stats.is_building {
-                let d = dx.abs() + dy.abs();
-                d >= radius - 1.5 && d < radius + 0.5
-            } else {
-                let d = (dx * dx + dy * dy).sqrt();
-                d >= radius - 1.5 && d < radius + 0.5
-            };
-
-            if on_border {
+            if dist >= radius - 1.5 && dist < radius + 0.5 {
+                // Border
                 pixels[idx] = r.saturating_add(40);
                 pixels[idx + 1] = g.saturating_add(40);
                 pixels[idx + 2] = b.saturating_add(40);
                 pixels[idx + 3] = 255;
+            } else if dist < radius {
+                // Interior with gradient
+                let brightness = 1.0 - (dist / radius) * 0.6;
+                pixels[idx] = (r as f32 * brightness) as u8;
+                pixels[idx + 1] = (g as f32 * brightness) as u8;
+                pixels[idx + 2] = (b as f32 * brightness) as u8;
+                pixels[idx + 3] = 220;
             }
         }
     }
@@ -219,31 +152,6 @@ fn generate_preview_image(kind: UnitKind, faction_color: Color) -> Image {
     )
 }
 
-fn faction_for_kind(kind: UnitKind) -> Faction {
-    match kind {
-        UnitKind::Kernel
-        | UnitKind::Assembler
-        | UnitKind::Bit
-        | UnitKind::Byte
-        | UnitKind::Pointer
-        | UnitKind::Socket
-        | UnitKind::Firewall => Faction::System,
-
-        UnitKind::Hole
-        | UnitKind::Bug
-        | UnitKind::Exploit
-        | UnitKind::Worm
-        | UnitKind::Virus
-        | UnitKind::Dos
-        | UnitKind::Window
-        | UnitKind::LogicBomb => Faction::Hacker,
-
-        UnitKind::Connection | UnitKind::Port | UnitKind::Packet | UnitKind::Signal => {
-            Faction::Network
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -252,9 +160,6 @@ const UI_BORDER_COLOR: Color = Color::linear_rgb(0.0, 0.7, 0.2);
 const UI_BG_COLOR: Color = Color::srgba(0.0, 0.05, 0.0, 0.75);
 const UI_TEXT_COLOR: Color = Color::linear_rgb(0.0, 1.0, 0.3);
 const UI_TEXT_DIM: Color = Color::linear_rgb(0.0, 0.5, 0.15);
-const UI_HEALTH_GREEN: Color = Color::linear_rgb(0.0, 1.0, 0.2);
-const UI_HEALTH_YELLOW: Color = Color::linear_rgb(1.0, 1.0, 0.0);
-const UI_HEALTH_RED: Color = Color::linear_rgb(1.0, 0.0, 0.0);
 const UI_PROGRESS_COLOR: Color = Color::linear_rgb(0.0, 0.8, 0.3);
 
 const FONT_SIZE_TITLE: f32 = 18.0;
@@ -331,7 +236,7 @@ fn spawn_single_unit_info(
 
     // Health bar
     let health_fraction = health.fraction();
-    let bar_color = health_bar_color(health_fraction);
+    let bar_color = health_color(health_fraction);
 
     let bar_container = commands
         .spawn(Node {
@@ -467,16 +372,6 @@ fn spawn_multi_unit_info(
     }
 }
 
-fn health_bar_color(fraction: f32) -> Color {
-    if fraction > 0.5 {
-        UI_HEALTH_GREEN
-    } else if fraction > 0.25 {
-        UI_HEALTH_YELLOW
-    } else {
-        UI_HEALTH_RED
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Build menu (left side)
 // ---------------------------------------------------------------------------
@@ -602,7 +497,6 @@ fn update_build_menu(
 
         let bar_fg = commands
             .spawn((
-                BuildProgressBar,
                 Node {
                     width: Val::Percent(progress * 100.0),
                     height: Val::Percent(100.0),
@@ -652,7 +546,6 @@ fn update_build_menu(
             let queue_str = format!("Queue: {}", queue_parts.join(", "));
             let queue_node = commands
                 .spawn((
-                    BuildQueueText,
                     Text::new(queue_str),
                     TextFont {
                         font_size: FONT_SIZE_SMALL,

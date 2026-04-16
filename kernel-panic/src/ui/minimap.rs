@@ -257,11 +257,12 @@ fn draw_line(
 }
 
 fn faction_rgb(faction: &Faction) -> (u8, u8, u8) {
-    match faction {
-        Faction::System => (0, 255, 80),    // green
-        Faction::Hacker => (255, 50, 50),   // red
-        Faction::Network => (50, 130, 255), // blue
-    }
+    let srgba = Srgba::from(faction.color());
+    (
+        (srgba.red * 255.0) as u8,
+        (srgba.green * 255.0) as u8,
+        (srgba.blue * 255.0) as u8,
+    )
 }
 
 /// Downsample a large ground texture to minimap resolution using box filtering.

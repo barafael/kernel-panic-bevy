@@ -2,7 +2,7 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::{Faction, Health, SelectionVolume, UnitType};
+use crate::units::components::{Faction, Health, SelectionVolume, UnitType, health_color};
 
 use super::movement::{MovePath, MoveTarget};
 
@@ -600,17 +600,6 @@ pub fn billboard_health_bars(
         let world_rot =
             Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
         transform.rotation = parent_rot_inv * world_rot;
-    }
-}
-
-/// Interpolate health fraction to a color: red (0%) -> yellow (50%) -> green (100%).
-fn health_color(frac: f32) -> Color {
-    if frac > 0.5 {
-        let t = (frac - 0.5) * 2.0;
-        Color::linear_rgb(1.0 - t, 1.0, 0.0)
-    } else {
-        let t = frac * 2.0;
-        Color::linear_rgb(1.0, t, 0.0)
     }
 }
 

@@ -219,7 +219,6 @@ fn build_neighbors_for(layer: &mut NodeLayer, node_index: NodeIndex) {
             xmin - 1,
             zmin,
             zmax,
-            true,
             &mut neighbors,
             &mut netpoints,
             xmin,
@@ -234,7 +233,6 @@ fn build_neighbors_for(layer: &mut NodeLayer, node_index: NodeIndex) {
             xmax,
             zmin,
             zmax,
-            true,
             &mut neighbors,
             &mut netpoints,
             xmax,
@@ -283,7 +281,6 @@ fn walk_edge(
     edge_x: u32,
     zmin: u32,
     zmax: u32,
-    _vertical: bool,
     neighbors: &mut Vec<NodeIndex>,
     netpoints: &mut Vec<[f32; 2]>,
     boundary_x: u32,
@@ -383,21 +380,15 @@ fn trace_path(layer: &NodeLayer, src: [f32; 2], dst: [f32; 2], target_node: Node
     points.reverse();
 
     // Refine: reroute segments that cross blocked cells.
-    refine_path(
-        &mut points,
-        &layer.nodes,
-        layer.width,
-        layer.height,
-        |x, z| {
-            if x < layer.width && z < layer.height {
-                let idx = layer.grid[(z * layer.width + x) as usize];
-                if idx != INVALID_INDEX {
-                    return layer.nodes[idx as usize].is_passable();
-                }
+    refine_path(&mut points, layer.width, layer.height, |x, z| {
+        if x < layer.width && z < layer.height {
+            let idx = layer.grid[(z * layer.width + x) as usize];
+            if idx != INVALID_INDEX {
+                return layer.nodes[idx as usize].is_passable();
             }
-            false
-        },
-    );
+        }
+        false
+    });
 
     // Simple smoothing: remove collinear waypoints.
     smooth_path(&mut points);
@@ -410,7 +401,6 @@ fn trace_path(layer: &NodeLayer, src: [f32; 2], dst: [f32; 2], target_node: Node
 /// avoids the blocked area.
 fn refine_path(
     points: &mut Vec<[f32; 2]>,
-    _nodes: &[crate::node::QTNode],
     grid_width: u32,
     grid_height: u32,
     is_passable: impl Fn(u32, u32) -> bool,
