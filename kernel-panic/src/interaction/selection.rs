@@ -12,6 +12,10 @@ pub struct MoveIndicator {
     pub lifetime: Timer,
 }
 
+/// Marker for ephemeral formation preview dots shown during right-drag.
+#[derive(Component)]
+pub struct FormationPreview;
+
 /// Despawn move indicators after their lifetime expires.
 pub fn decay_move_indicators(
     time: Res<Time>,
@@ -347,6 +351,67 @@ pub fn spawn_move_indicator_visuals(
     }
 }
 
+/// Shared assets for formation preview indicators.
+#[derive(Resource, Clone)]
+pub(crate) struct FormationPreviewAssets {
+    mesh: Handle<Mesh>,
+    material: Handle<StandardMaterial>,
+}
+
+/// Show/update/remove preview dots during a right-drag formation draw.
+pub fn update_formation_preview(
+    drag_path: Res<RightDragPath>,
+    selected_q: Query<Entity, With<Selected>>,
+    preview_q: Query<Entity, With<FormationPreview>>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    assets: Option<Res<FormationPreviewAssets>>,
+) {
+    // If drag is not active or path has fewer than 2 points, despawn any existing previews.
+    let unit_count = selected_q.iter().count();
+    if !drag_path.active || drag_path.points.len() < 2 || unit_count == 0 {
+        for entity in &preview_q {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+
+    // Lazy-init shared assets.
+    let preview_assets = if let Some(a) = assets {
+        a.clone()
+    } else {
+        let a = FormationPreviewAssets {
+            mesh: meshes.add(Torus::new(1.5, 3.0)),
+            material: materials.add(StandardMaterial {
+                base_color: Color::srgba(1.0, 1.0, 0.3, 0.4),
+                emissive: LinearRgba::new(1.0, 1.0, 0.3, 1.0) * 1.5,
+                unlit: true,
+                alpha_mode: AlphaMode::Blend,
+                ..default()
+            }),
+        };
+        commands.insert_resource(a.clone());
+        a
+    };
+
+    let targets = sample_path_evenly(&drag_path.points, unit_count);
+
+    // Despawn old previews and spawn fresh ones.
+    for entity in &preview_q {
+        commands.entity(entity).despawn();
+    }
+    for target in &targets {
+        commands.spawn((
+            FormationPreview,
+            Mesh3d(preview_assets.mesh.clone()),
+            MeshMaterial3d(preview_assets.material.clone()),
+            Transform::from_translation(*target + Vec3::Y * 1.0)
+                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+        ));
+    }
+}
+
 fn ground_hit(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
@@ -403,58 +468,162 @@ fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
 // Material brightening for hover / selection
 // ---------------------------------------------------------------------------
 
-/// Brighten the unit's material when it becomes hovered or selected.
-/// Creates a per-unit clone of the shared material with boosted emissive.
-#[allow(clippy::type_complexity)]
+/// Brighten a unit's materials when it becomes hovered or selected.
+/// Works on both the root entity and its piece children (S3O models).
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_unit_highlight(
-    hovered_q: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>, &Faction),
-        (With<Hovered>, Without<Selected>, With<UnitType>),
-    >,
-    selected_q: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>, &Faction),
-        (With<Selected>, With<UnitType>),
-    >,
+    hovered_q: Query<(Entity, &Faction), (With<Hovered>, Without<Selected>, With<UnitType>)>,
+    selected_q: Query<(Entity, &Faction), (With<Selected>, With<UnitType>)>,
     unhighlighted_q: Query<
-        (Entity, &OriginalMaterial),
-        (Without<Hovered>, Without<Selected>, With<UnitType>),
+        Entity,
+        (
+            Without<Hovered>,
+            Without<Selected>,
+            With<UnitType>,
+            With<Highlighted>,
+        ),
     >,
+    children_q: Query<&Children>,
+    mesh_mat_q: Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
     original_q: Query<&OriginalMaterial>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    // Restore material on units that are no longer hovered or selected.
-    for (entity, original) in &unhighlighted_q {
-        commands
-            .entity(entity)
-            .insert(MeshMaterial3d(original.0.clone()))
-            .remove::<OriginalMaterial>();
+    // Restore materials on units that are no longer hovered or selected.
+    for unit_entity in &unhighlighted_q {
+        restore_unit_materials(
+            unit_entity,
+            &children_q,
+            &mesh_mat_q,
+            &original_q,
+            &mut commands,
+        );
+        commands.entity(unit_entity).try_remove::<Highlighted>();
     }
 
     // Apply hover brightness (only if not also selected).
-    for (entity, current_mat, faction) in &hovered_q {
-        apply_brightness(
-            entity,
-            &current_mat.0,
+    for (unit_entity, faction) in &hovered_q {
+        brighten_unit(
+            unit_entity,
             faction,
             HOVER_BRIGHTNESS,
+            &children_q,
+            &mesh_mat_q,
             &original_q,
             &mut materials,
             &mut commands,
         );
+        commands.entity(unit_entity).insert(Highlighted);
     }
 
     // Apply selection brightness (takes priority over hover).
-    for (entity, current_mat, faction) in &selected_q {
-        apply_brightness(
-            entity,
-            &current_mat.0,
+    for (unit_entity, faction) in &selected_q {
+        brighten_unit(
+            unit_entity,
             faction,
             SELECTED_BRIGHTNESS,
+            &children_q,
+            &mesh_mat_q,
             &original_q,
             &mut materials,
             &mut commands,
         );
+        commands.entity(unit_entity).insert(Highlighted);
+    }
+}
+
+/// Marker to track that a unit currently has brightened materials.
+#[derive(Component)]
+pub(crate) struct Highlighted;
+
+/// Brighten all mesh materials on a unit entity and its children.
+#[allow(clippy::too_many_arguments)]
+fn brighten_unit(
+    unit_entity: Entity,
+    faction: &Faction,
+    factor: f32,
+    children_q: &Query<&Children>,
+    mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    original_q: &Query<&OriginalMaterial>,
+    materials: &mut Assets<StandardMaterial>,
+    commands: &mut Commands,
+) {
+    // Collect all entities to brighten: the unit itself + all descendants with meshes.
+    let mut targets = Vec::new();
+    if mesh_mat_q.contains(unit_entity) {
+        targets.push(unit_entity);
+    }
+    collect_mesh_descendants(unit_entity, children_q, mesh_mat_q, &mut targets);
+
+    for entity in targets {
+        let Ok((_, current_mat)) = mesh_mat_q.get(entity) else {
+            continue;
+        };
+        apply_brightness(
+            entity,
+            &current_mat.0,
+            faction,
+            factor,
+            original_q,
+            materials,
+            commands,
+        );
+    }
+}
+
+/// Restore original materials on a unit and all its descendants.
+fn restore_unit_materials(
+    unit_entity: Entity,
+    children_q: &Query<&Children>,
+    _mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    original_q: &Query<&OriginalMaterial>,
+    commands: &mut Commands,
+) {
+    let mut targets = Vec::new();
+    if original_q.contains(unit_entity) {
+        targets.push(unit_entity);
+    }
+    collect_original_descendants(unit_entity, children_q, original_q, &mut targets);
+
+    for entity in targets {
+        if let Ok(original) = original_q.get(entity) {
+            commands
+                .entity(entity)
+                .try_insert(MeshMaterial3d(original.0.clone()))
+                .try_remove::<OriginalMaterial>();
+        }
+    }
+}
+
+fn collect_mesh_descendants(
+    entity: Entity,
+    children_q: &Query<&Children>,
+    mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    targets: &mut Vec<Entity>,
+) {
+    if let Ok(children) = children_q.get(entity) {
+        for child in children.iter() {
+            if mesh_mat_q.contains(child) {
+                targets.push(child);
+            }
+            collect_mesh_descendants(child, children_q, mesh_mat_q, targets);
+        }
+    }
+}
+
+fn collect_original_descendants(
+    entity: Entity,
+    children_q: &Query<&Children>,
+    original_q: &Query<&OriginalMaterial>,
+    targets: &mut Vec<Entity>,
+) {
+    if let Ok(children) = children_q.get(entity) {
+        for child in children.iter() {
+            if original_q.contains(child) {
+                targets.push(child);
+            }
+            collect_original_descendants(child, children_q, original_q, targets);
+        }
     }
 }
 
@@ -471,7 +640,9 @@ fn apply_brightness(
         orig.0.clone()
     } else {
         let h = current_handle.clone();
-        commands.entity(entity).insert(OriginalMaterial(h.clone()));
+        commands
+            .entity(entity)
+            .try_insert(OriginalMaterial(h.clone()));
         h
     };
 
@@ -483,7 +654,7 @@ fn apply_brightness(
     let color = LinearRgba::from(faction.color());
     bright.emissive = color * factor;
     let handle = materials.add(bright);
-    commands.entity(entity).insert(MeshMaterial3d(handle));
+    commands.entity(entity).try_insert(MeshMaterial3d(handle));
 }
 
 // ---------------------------------------------------------------------------
@@ -505,14 +676,16 @@ pub fn spawn_health_bars(
     let assets = get_or_init_bar_assets(bar_assets, &mut commands, &mut meshes, &mut materials);
 
     for entity in &new_selections {
+        // Background bar (dark).
+        // The Plane3d mesh is 1x1 in XY with Z normal. Scale X=width, Y=height.
         commands.entity(entity).with_child((
             HealthBarBg,
             Mesh3d(assets.bar_mesh.clone()),
             MeshMaterial3d(assets.bg_material.clone()),
             Transform::from_xyz(0.0, HEALTH_BAR_Y_OFFSET, 0.0).with_scale(Vec3::new(
                 HEALTH_BAR_WIDTH,
-                1.0,
                 HEALTH_BAR_HEIGHT,
+                1.0,
             )),
         ));
 
@@ -524,14 +697,15 @@ pub fn spawn_health_bars(
             ..default()
         });
 
+        // Foreground bar (colored, sits slightly in front of background).
         commands.entity(entity).with_child((
             HealthBarFg,
             Mesh3d(assets.bar_mesh.clone()),
             MeshMaterial3d(fg_material),
-            Transform::from_xyz(0.0, HEALTH_BAR_Y_OFFSET + 0.1, 0.0).with_scale(Vec3::new(
+            Transform::from_xyz(0.0, HEALTH_BAR_Y_OFFSET, 0.0).with_scale(Vec3::new(
                 HEALTH_BAR_WIDTH,
-                1.0,
                 HEALTH_BAR_HEIGHT,
+                1.0,
             )),
         ));
     }
@@ -581,29 +755,43 @@ pub fn update_health_bars(
 }
 
 /// Make health bars always face the camera (billboard).
+///
+/// The bar mesh is a Plane3d in XY with normal along +Z. We rotate so that
+/// +Z points toward the camera, keeping the bar upright (Y stays world-up).
 #[allow(clippy::type_complexity)]
 pub fn billboard_health_bars(
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
     parents: Query<&GlobalTransform, With<UnitType>>,
-    mut bars: Query<(&ChildOf, &mut Transform), Or<(With<HealthBarBg>, With<HealthBarFg>)>>,
+    mut bars: Query<
+        (&ChildOf, &mut Transform, Option<&HealthBarFg>),
+        Or<(With<HealthBarBg>, With<HealthBarFg>)>,
+    >,
 ) {
     let Ok(cam_gt) = camera_q.single() else {
         return;
     };
 
-    for (child_of, mut transform) in &mut bars {
+    for (child_of, mut transform, is_fg) in &mut bars {
         let Ok(parent_gt) = parents.get(child_of.parent()) else {
             continue;
         };
 
-        let bar_world_pos = parent_gt.translation() + Vec3::Y * transform.translation.y;
-        let to_camera = cam_gt.translation() - bar_world_pos;
-        let yaw = to_camera.x.atan2(to_camera.z);
+        let bar_world_pos = parent_gt.translation() + Vec3::Y * HEALTH_BAR_Y_OFFSET;
+        let to_camera = (cam_gt.translation() - bar_world_pos).normalize_or(Vec3::Z);
 
+        // Compute a world-space rotation that faces +Z toward the camera,
+        // keeping Y as the up direction.
+        let world_rot = Quat::from_rotation_arc(Vec3::Z, to_camera);
+
+        // Convert to parent-local rotation.
         let parent_rot_inv = parent_gt.to_scale_rotation_translation().1.inverse();
-        let world_rot =
-            Quat::from_rotation_y(yaw) * Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
         transform.rotation = parent_rot_inv * world_rot;
+
+        // Push foreground bar slightly toward the camera to avoid z-fighting.
+        if is_fg.is_some() {
+            transform.translation =
+                Vec3::new(0.0, HEALTH_BAR_Y_OFFSET, 0.0) + (parent_rot_inv * to_camera) * 0.2;
+        }
     }
 }
 

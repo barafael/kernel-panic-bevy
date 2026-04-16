@@ -573,10 +573,12 @@ impl CobVm {
                     break;
                 }
 
-                // Animation commands
+                // Animation commands.
+                // Spring stack convention for MOVE/TURN: compiler pushes speed
+                // first then destination, so top of stack is destination.
                 TURN => {
-                    let speed = thread.pop();
                     let dest = thread.pop();
+                    let speed = thread.pop();
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
                     commands.push(AnimCommand::Turn {
@@ -599,8 +601,8 @@ impl CobVm {
                 MOVE => {
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
-                    let speed = thread.pop();
                     let dest = thread.pop();
+                    let speed = thread.pop();
                     commands.push(AnimCommand::Move {
                         piece,
                         axis,

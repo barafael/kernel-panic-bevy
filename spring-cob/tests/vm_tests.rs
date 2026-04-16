@@ -154,6 +154,235 @@ fn kernel_create_emits_initial_animations() {
     );
 }
 
+/// Diagnostic: after the sleep 400, the moves for pillars/heads should be emitted.
+/// This validates that the script flow proceeds past SLEEP to the second batch of moves.
+#[test]
+fn kernel_create_emits_pillar_moves_after_sleep() {
+    let Some(cob) = load_cob("kernel.cob") else {
+        return;
+    };
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Create", &[]);
+
+    let pid = |n: &str| {
+        cob.piece_names
+            .iter()
+            .position(|p| p == n)
+            .unwrap_or_else(|| panic!("piece {n} not found")) as i32
+    };
+    let pillar0 = pid("pillar0");
+    let head0 = pid("head0");
+
+    // Tick past the sleep 400 with realistic frame intervals.
+    let mut all = Vec::new();
+    for _ in 0..30 {
+        all.extend(vm.tick(&cob, 33));
+    }
+
+    let pillar_dest = -16 * 163840;
+    let pillar_speed = 24 * 163840;
+    let head_dest = -12 * 163840;
+    let head_speed = 16 * 163840;
+
+    let pillar_move = all.iter().any(|c| {
+        matches!(
+            c,
+            AnimCommand::Move {
+                piece, axis: 1, destination, speed
+            } if *piece == pillar0 && *destination == pillar_dest && *speed == pillar_speed
+        )
+    });
+    let head_move = all.iter().any(|c| {
+        matches!(
+            c,
+            AnimCommand::Move {
+                piece, axis: 1, destination, speed
+            } if *piece == head0 && *destination == head_dest && *speed == head_speed
+        )
+    });
+
+    assert!(
+        pillar_move,
+        "pillar0 should get a Move command after sleep; got {} cmds",
+        all.len()
+    );
+    assert!(head_move, "head0 should get a Move command after sleep");
+}
+
+/// kernel.bos Create() emits a precise sequence of TurnNow/MoveNow before any sleep.
+/// Constants in the compiled .cob: angular constant 182 (cau/deg), linear constant
+/// 163840 from the .bos comment ("Scriptor linear constant must be changed 163840").
+/// The .bos source explicitly does:
+///   turn pillar0 to y-axis <45> now;        // <45> -> 45*182 = 8190
+///   turn pillar1 to y-axis <135> now;       // 24570
+///   turn pillar2 to y-axis <-45> now;       // -8190
+///   turn pillar3 to y-axis <-135> now;      // -24570
+///   move base{0..3} to y-axis [-8] now;     // [-8] -> -8 * 163840 = -1310720
+///   move pillar{0..3} to y-axis [-32] now;  // -32 * 163840 = -5242880
+///   move head{0..3} to y-axis [-32] now;
+///   move base{0..3} to y-axis [0] speed [12]; // dest=0, speed = 12 * 163840 = 1966080
+///   sleep 400;
+#[test]
+fn kernel_create_emits_correct_initial_animation_sequence() {
+    let Some(cob) = load_cob("kernel.cob") else {
+        eprintln!("Skipping: kernel.cob not found");
+        return;
+    };
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Create", &[]);
+
+    // Single tick(0) — should run until first SLEEP (sleep 400).
+    let cmds = vm.tick(&cob, 0);
+
+    // Filter out commands from sub-threads (ManageONS, TurnTowardBarycenter).
+    // ManageONS calls into Lua which we stub to 0. TurnTowardBarycenter does sleep 1
+    // immediately so it won't emit on this tick.
+    let turn_now: Vec<_> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            AnimCommand::TurnNow {
+                piece,
+                axis,
+                destination,
+            } => Some((*piece, *axis, *destination)),
+            _ => None,
+        })
+        .collect();
+    let move_now: Vec<_> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            AnimCommand::MoveNow {
+                piece,
+                axis,
+                destination,
+            } => Some((*piece, *axis, *destination)),
+            _ => None,
+        })
+        .collect();
+    let moves: Vec<_> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            AnimCommand::Move {
+                piece,
+                axis,
+                destination,
+                speed,
+            } => Some((*piece, *axis, *destination, *speed)),
+            _ => None,
+        })
+        .collect();
+
+    // Look up piece IDs by name.
+    let pid = |n: &str| {
+        cob.piece_names
+            .iter()
+            .position(|p| p == n)
+            .unwrap_or_else(|| panic!("piece {n} not found")) as i32
+    };
+    let pillar0 = pid("pillar0");
+    let pillar1 = pid("pillar1");
+    let pillar2 = pid("pillar2");
+    let pillar3 = pid("pillar3");
+    let base0 = pid("base0");
+    let base1 = pid("base1");
+    let base2 = pid("base2");
+    let base3 = pid("base3");
+    let head0 = pid("head0");
+    let head1 = pid("head1");
+    let head2 = pid("head2");
+    let head3 = pid("head3");
+
+    const Y: i32 = 1; // y-axis
+
+    // The four pillar TurnNow calls (45*182 = 8190).
+    assert!(
+        turn_now.contains(&(pillar0, Y, 8190)),
+        "expected TurnNow pillar0 y +45deg (8190), got {turn_now:?}"
+    );
+    assert!(
+        turn_now.contains(&(pillar1, Y, 24570)),
+        "expected TurnNow pillar1 y +135deg (24570), got {turn_now:?}"
+    );
+    assert!(
+        turn_now.contains(&(pillar2, Y, -8190)),
+        "expected TurnNow pillar2 y -45deg (-8190), got {turn_now:?}"
+    );
+    assert!(
+        turn_now.contains(&(pillar3, Y, -24570)),
+        "expected TurnNow pillar3 y -135deg (-24570), got {turn_now:?}"
+    );
+
+    // The bases all jump to y=-8 ([-8] = -1310720).
+    for &b in &[base0, base1, base2, base3] {
+        assert!(
+            move_now.contains(&(b, Y, -1310720)),
+            "expected MoveNow base{} y to -8 ([-8]=-1310720), got {move_now:?}",
+            b - base0
+        );
+    }
+    // Pillars and heads jump to y=-32 ([-32] = -5242880).
+    for &p in &[pillar0, pillar1, pillar2, pillar3] {
+        assert!(
+            move_now.contains(&(p, Y, -5242880)),
+            "expected MoveNow pillar y to -32, got {move_now:?}"
+        );
+    }
+    for &h in &[head0, head1, head2, head3] {
+        assert!(
+            move_now.contains(&(h, Y, -5242880)),
+            "expected MoveNow head y to -32, got {move_now:?}"
+        );
+    }
+
+    // The four bases then animate from -8 to 0 at speed [12] = 1966080.
+    for &b in &[base0, base1, base2, base3] {
+        assert!(
+            moves.contains(&(b, Y, 0, 1966080)),
+            "expected Move base{} y dest=0 speed=1966080, got {moves:?}",
+            b - base0
+        );
+    }
+
+    // After sleep 400, the script does:
+    //   move pillar0..3 to y-axis [-16] speed [24];   // dest=-16*163840, speed=24*163840
+    //   move head0..3   to y-axis [-12] speed [16];   // dest=-12*163840, speed=16*163840
+    //   wait-for-move pillar0 along y-axis;
+    // Run additional ticks to cross the sleep boundary and verify those moves.
+    let mut later_cmds = Vec::new();
+    for _ in 0..20 {
+        later_cmds.extend(vm.tick(&cob, 50));
+    }
+    let later_moves: Vec<_> = later_cmds
+        .iter()
+        .filter_map(|c| match c {
+            AnimCommand::Move {
+                piece,
+                axis,
+                destination,
+                speed,
+            } => Some((*piece, *axis, *destination, *speed)),
+            _ => None,
+        })
+        .collect();
+
+    let pillar_dest = -16 * 163840;
+    let pillar_speed = 24 * 163840;
+    let head_dest = -12 * 163840;
+    let head_speed = 16 * 163840;
+    for &p in &[pillar0, pillar1, pillar2, pillar3] {
+        assert!(
+            later_moves.contains(&(p, Y, pillar_dest, pillar_speed)),
+            "expected Move pillar y dest={pillar_dest} speed={pillar_speed}, got {later_moves:?}"
+        );
+    }
+    for &h in &[head0, head1, head2, head3] {
+        assert!(
+            later_moves.contains(&(h, Y, head_dest, head_speed)),
+            "expected Move head y dest={head_dest} speed={head_speed}, got {later_moves:?}"
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // All COB files: Create doesn't crash
 // ---------------------------------------------------------------------------

@@ -1,10 +1,10 @@
 use bevy::prelude::*;
 
 use crate::interaction::Selected;
-use crate::units::components::{Faction, Health, TeamId, UnitType, health_color};
-use crate::units::definitions::{self, UNIT_STATS, UnitKind, UnitStats};
-use crate::units::game_over::PlayerTeam;
+use crate::units::components::{Faction, Health, UnitType, health_color};
+use crate::units::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::units::production::Producer;
+use crate::units::unit_registry::UnitRegistry;
 
 pub struct HudPlugin;
 
@@ -13,7 +13,7 @@ impl Plugin for HudPlugin {
         app.add_message::<BuildOrderEvent>()
             .add_message::<UnitOrderEvent>()
             .init_resource::<UnitPreviews>()
-            .add_systems(Startup, generate_unit_previews)
+            .add_systems(Startup, load_unit_previews)
             .add_systems(
                 Update,
                 (
@@ -88,19 +88,59 @@ impl UnitPreviews {
     }
 }
 
-fn generate_unit_previews(mut previews: ResMut<UnitPreviews>, mut images: ResMut<Assets<Image>>) {
-    for unit in &UNIT_STATS {
-        let image = generate_preview_image(unit);
-        let handle = images.add(image);
-        previews.images.push((unit.kind, handle));
+/// Load one buildpic per unit from `assets/unitpics/`, falling back to a
+/// procedurally-generated faction-coloured shape when the PNG is missing.
+///
+/// This mirrors the classic TA/Spring approach: each unit ships a small
+/// pre-rendered bitmap (`BuildPic=...` in the FBI) displayed flat in the
+/// build menu. Source `.pcx`/`.tga` files are converted to `.png` at
+/// asset-cook time so Bevy's default image loader can read them.
+fn load_unit_previews(
+    mut previews: ResMut<UnitPreviews>,
+    mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
+    unit_registry: Res<UnitRegistry>,
+) {
+    let assets_root = std::path::Path::new("kernel-panic/assets/unitpics");
+    let assets_root_alt = std::path::Path::new("assets/unitpics");
+
+    for kind in ALL_UNIT_KINDS {
+        let declared = unit_registry.build_pic(kind);
+        let stem = if declared.is_empty() {
+            kind.unitname().to_string()
+        } else {
+            // Strip extension (.pcx/.tga/.png) and lowercase to match
+            // the cooked filename convention.
+            std::path::Path::new(declared)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_else(|| kind.unitname().to_string())
+        };
+        let relative = format!("unitpics/{stem}.png");
+
+        let exists = assets_root.join(format!("{stem}.png")).is_file()
+            || assets_root_alt.join(format!("{stem}.png")).is_file();
+
+        let handle = if exists {
+            asset_server.load(&relative)
+        } else {
+            warn!(
+                "No buildpic for {:?} (looked for {}), falling back to procedural preview",
+                kind, relative
+            );
+            let faction = kind.faction();
+            let is_building = unit_registry.is_building(kind);
+            images.add(generate_preview_image(faction, is_building))
+        };
+        previews.images.push((kind, handle));
     }
 }
 
 /// Create a 48x48 RGBA preview image for a unit kind.
-fn generate_preview_image(stats: &UnitStats) -> Image {
+fn generate_preview_image(faction: Faction, is_building: bool) -> Image {
     const SIZE: u32 = 48;
 
-    let srgba = Srgba::from(stats.faction.color());
+    let srgba = Srgba::from(faction.color());
     let r = (srgba.red * 255.0) as u8;
     let g = (srgba.green * 255.0) as u8;
     let b = (srgba.blue * 255.0) as u8;
@@ -116,7 +156,7 @@ fn generate_preview_image(stats: &UnitStats) -> Image {
             let dy = y as f32 - center;
             let idx = ((y * SIZE + x) * 4) as usize;
 
-            let dist = if stats.is_building {
+            let dist = if is_building {
                 dx.abs() + dy.abs()
             } else {
                 (dx * dx + dy * dy).sqrt()
@@ -176,6 +216,7 @@ fn update_info_panel(
     selected_q: Query<(&UnitType, &Health, &Faction), With<Selected>>,
     existing: Query<Entity, With<InfoPanel>>,
     mut commands: Commands,
+    unit_registry: Res<UnitRegistry>,
 ) {
     for entity in &existing {
         commands.entity(entity).despawn();
@@ -207,24 +248,31 @@ fn update_info_panel(
 
     if selected.len() == 1 {
         let (unit_type, health, faction) = selected[0];
-        let stats = definitions::stats(unit_type.0);
-        spawn_single_unit_info(&mut commands, panel, stats, health, faction);
+        spawn_single_unit_info(
+            &mut commands,
+            panel,
+            unit_type.0,
+            health,
+            faction,
+            &unit_registry,
+        );
     } else {
-        spawn_multi_unit_info(&mut commands, panel, &selected);
+        spawn_multi_unit_info(&mut commands, panel, &selected, &unit_registry);
     }
 }
 
 fn spawn_single_unit_info(
     commands: &mut Commands,
     parent: Entity,
-    stats: &UnitStats,
+    kind: UnitKind,
     health: &Health,
     faction: &Faction,
+    unit_registry: &UnitRegistry,
 ) {
     // Unit name
     let name_node = commands
         .spawn((
-            Text::new(stats.name),
+            Text::new(unit_registry.name(kind)),
             TextFont {
                 font_size: FONT_SIZE_TITLE,
                 ..default()
@@ -289,11 +337,9 @@ fn spawn_single_unit_info(
     commands.entity(parent).add_child(hp_node);
 
     // Weapon info
-    if !stats.weapon.is_empty() {
-        let weapon_text = format!(
-            "DMG {:.0}  RNG {:.0}",
-            stats.attack_damage, stats.attack_range,
-        );
+    let weapon_name = unit_registry.weapon(kind);
+    if !weapon_name.is_empty() {
+        let weapon_text = format!("WPN {weapon_name}");
         let weapon_node = commands
             .spawn((
                 Text::new(weapon_text),
@@ -308,8 +354,9 @@ fn spawn_single_unit_info(
     }
 
     // Speed
-    if stats.speed > 0.0 {
-        let speed_text = format!("SPD {:.0}", stats.speed);
+    let speed = unit_registry.speed(kind);
+    if speed > 0.0 {
+        let speed_text = format!("SPD {speed:.0}");
         let speed_node = commands
             .spawn((
                 Text::new(speed_text),
@@ -328,6 +375,7 @@ fn spawn_multi_unit_info(
     commands: &mut Commands,
     parent: Entity,
     selected: &[(&UnitType, &Health, &Faction)],
+    unit_registry: &UnitRegistry,
 ) {
     let mut counts: Vec<(UnitKind, u32)> = Vec::new();
     for (unit_type, _, _) in selected {
@@ -352,11 +400,11 @@ fn spawn_multi_unit_info(
     commands.entity(parent).add_child(header_node);
 
     for (kind, count) in &counts {
-        let stats = definitions::stats(*kind);
+        let name = unit_registry.name(*kind);
         let line = if *count > 1 {
-            format!("{}x {}", count, stats.name)
+            format!("{}x {}", count, name)
         } else {
-            stats.name.to_string()
+            name.to_string()
         };
         let line_node = commands
             .spawn((
@@ -376,6 +424,8 @@ fn spawn_multi_unit_info(
 // Build menu (left side)
 // ---------------------------------------------------------------------------
 
+/// Build options per factory/constructor type.
+/// Hardcoded from upstream sidedata.lua — acceptable for KP's fixed unit roster.
 fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
     match kind {
         UnitKind::Kernel => &[
@@ -406,6 +456,7 @@ fn update_build_menu(
     existing: Query<Entity, With<BuildMenu>>,
     previews: Res<UnitPreviews>,
     mut commands: Commands,
+    unit_registry: Res<UnitRegistry>,
 ) {
     for entity in &existing {
         commands.entity(entity).despawn();
@@ -452,17 +503,15 @@ fn update_build_menu(
         .id();
     commands.entity(menu).add_child(title);
 
-    // Build progress (if this unit is a producer)
-    if let Some((producer, _)) = producer_q.iter().next() {
-        let producing_stats = definitions::stats(producer.current_production());
-        let progress = producer.progress_fraction();
+    // Build progress (if this unit is a producer and has something queued)
+    if let Some((producer, _)) = producer_q.iter().next()
+        && let Some(current_kind) = producer.current_production()
+    {
+        let producing_name = unit_registry.name(current_kind);
+        let progress = producer.progress_fraction(&unit_registry);
 
         // "Building: Bit (75%)"
-        let progress_text = format!(
-            "Building: {} ({:.0}%)",
-            producing_stats.name,
-            progress * 100.0
-        );
+        let progress_text = format!("Building: {} ({:.0}%)", producing_name, progress * 100.0);
         let progress_label = commands
             .spawn((
                 Text::new(progress_text),
@@ -523,7 +572,7 @@ fn update_build_menu(
                     count += 1;
                 } else {
                     if let Some(pk) = prev_kind {
-                        let name = definitions::stats(pk).name;
+                        let name = unit_registry.name(pk);
                         if count > 1 {
                             queue_parts.push(format!("{count}x {name}"));
                         } else {
@@ -535,7 +584,7 @@ fn update_build_menu(
                 }
             }
             if let Some(pk) = prev_kind {
-                let name = definitions::stats(pk).name;
+                let name = unit_registry.name(pk);
                 if count > 1 {
                     queue_parts.push(format!("{count}x {name}"));
                 } else {
@@ -571,16 +620,16 @@ fn update_build_menu(
     commands.entity(menu).add_child(grid);
 
     for kind in options {
-        let stats = definitions::stats(*kind);
+        let name = unit_registry.name(*kind);
         let preview = previews.get(*kind).cloned();
-        let icon = spawn_build_icon(&mut commands, stats, faction, *kind, preview);
+        let icon = spawn_build_icon(&mut commands, name, faction, *kind, preview);
         commands.entity(grid).add_child(icon);
     }
 }
 
 fn spawn_build_icon(
     commands: &mut Commands,
-    stats: &UnitStats,
+    name: &str,
     faction: &Faction,
     kind: UnitKind,
     preview: Option<Handle<Image>>,
@@ -620,9 +669,9 @@ fn spawn_build_icon(
     }
 
     // Unit name
-    let name = commands
+    let name_label = commands
         .spawn((
-            Text::new(stats.name),
+            Text::new(name),
             TextFont {
                 font_size: FONT_SIZE_SMALL,
                 ..default()
@@ -631,7 +680,7 @@ fn spawn_build_icon(
             TextLayout::new_with_justify(Justify::Center),
         ))
         .id();
-    commands.entity(icon).add_child(name);
+    commands.entity(icon).add_child(name_label);
 
     icon
 }
@@ -653,16 +702,12 @@ fn handle_build_clicks(
 
 fn apply_build_orders(
     mut ev_build: MessageReader<BuildOrderEvent>,
-    mut producers: Query<(&mut Producer, &TeamId), With<Selected>>,
-    player_team: Res<PlayerTeam>,
+    mut producers: Query<&mut Producer, With<Selected>>,
 ) {
     for event in ev_build.read() {
-        // Enqueue on the first selected producer that belongs to the player.
-        for (mut producer, team) in &mut producers {
-            if team.0 == player_team.0 {
-                producer.enqueue(event.kind);
-                break;
-            }
+        // Enqueue on the first selected producer.
+        if let Some(mut producer) = producers.iter_mut().next() {
+            producer.enqueue(event.kind);
         }
     }
 }
@@ -680,6 +725,7 @@ fn update_order_palette(
     selected_q: Query<&UnitType, With<Selected>>,
     existing: Query<Entity, With<OrderPalette>>,
     mut commands: Commands,
+    unit_registry: Res<UnitRegistry>,
 ) {
     for entity in &existing {
         commands.entity(entity).despawn();
@@ -689,10 +735,7 @@ fn update_order_palette(
         return;
     }
 
-    let has_mobile = selected_q.iter().any(|ut| {
-        let stats = definitions::stats(ut.0);
-        stats.speed > 0.0
-    });
+    let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
 
     if !has_mobile {
         return;
