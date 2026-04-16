@@ -53,11 +53,11 @@ pub struct CobFileCache {
 
 /// Load a COB file from disk, cached.
 pub fn load_cob_cached(script: &str, cache: &mut CobFileCache) -> Option<Arc<CobFile>> {
-    if !cache.files.contains_key(script) {
-        let cob = load_asset_from_disk(script, parse_cob).map(Arc::new);
-        cache.files.insert(script.to_string(), cob);
-    }
-    cache.files.get(script).and_then(|c| c.clone())
+    cache
+        .files
+        .entry(script.to_string())
+        .or_insert_with(|| load_asset_from_disk(script, parse_cob).map(Arc::new))
+        .clone()
 }
 
 /// Spring uses "angular units" where 65536 = 360°. Convert to radians.
@@ -68,6 +68,18 @@ fn spring_angle_to_radians(angle: i32) -> f32 {
 /// Spring linear units: `1.0 / COBSCALE` per elmo (`COBSCALE = 65536`).
 fn spring_linear_to_elmos(val: i32) -> f32 {
     val as f32 / 65536.0
+}
+
+/// Spring's `CCobInstance::Move` / `MoveNow` negate destinations on the X axis
+/// to translate left-handed COB piece coords into world coords.
+fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
+    if axis == 0 { -value } else { value }
+}
+
+/// Spring's `CCobInstance::Turn` / `TurnNow` / `Spin` negate values on the Z
+/// axis for the same handedness conversion.
+fn cobwtf_turn_axis(axis: i32, value: i32) -> i32 {
+    if axis == 2 { -value } else { value }
 }
 
 /// System: tick all CobAnimator VMs and apply piece transforms.
@@ -99,9 +111,7 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_rotations.len() && a < 3 {
-                        // COBWTF: Spring negates Z-axis turn destinations.
-                        let raw = if a == 2 { -*destination } else { *destination };
-                        let angle = spring_angle_to_radians(raw);
+                        let angle = spring_angle_to_radians(cobwtf_turn_axis(*axis, *destination));
                         animator.piece_rotations[p][a] = angle;
                         animator.target_rotations[p][a] = angle;
                         animator.turn_speeds[p][a] = 0.0;
@@ -116,8 +126,8 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_rotations.len() && a < 3 {
-                        let raw = if a == 2 { -*destination } else { *destination };
-                        animator.target_rotations[p][a] = spring_angle_to_radians(raw);
+                        animator.target_rotations[p][a] =
+                            spring_angle_to_radians(cobwtf_turn_axis(*axis, *destination));
                         animator.turn_speeds[p][a] = spring_angle_to_radians(speed.abs());
                     }
                 }
@@ -129,9 +139,7 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        // COBWTF: Spring negates X-axis move destinations.
-                        let raw = if a == 0 { -*destination } else { *destination };
-                        let pos = spring_linear_to_elmos(raw);
+                        let pos = spring_linear_to_elmos(cobwtf_move_axis(*axis, *destination));
                         animator.piece_translations[p][a] = pos;
                         animator.target_translations[p][a] = pos;
                         animator.move_speeds[p][a] = 0.0;
@@ -146,8 +154,8 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        let raw = if a == 0 { -*destination } else { *destination };
-                        animator.target_translations[p][a] = spring_linear_to_elmos(raw);
+                        animator.target_translations[p][a] =
+                            spring_linear_to_elmos(cobwtf_move_axis(*axis, *destination));
                         animator.move_speeds[p][a] = spring_linear_to_elmos(speed.abs());
                     }
                 }
@@ -157,9 +165,8 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.spin_speeds.len() && a < 3 {
-                        // COBWTF: Spring negates Z-axis spin speeds.
-                        let raw = if a == 2 { -*speed } else { *speed };
-                        animator.spin_speeds[p][a] = spring_angle_to_radians(raw);
+                        animator.spin_speeds[p][a] =
+                            spring_angle_to_radians(cobwtf_turn_axis(*axis, *speed));
                     }
                 }
                 AnimCommand::StopSpin { piece, axis, .. } => {

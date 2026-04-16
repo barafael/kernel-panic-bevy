@@ -491,13 +491,7 @@ pub fn update_unit_highlight(
 ) {
     // Restore materials on units that are no longer hovered or selected.
     for unit_entity in &unhighlighted_q {
-        restore_unit_materials(
-            unit_entity,
-            &children_q,
-            &mesh_mat_q,
-            &original_q,
-            &mut commands,
-        );
+        restore_unit_materials(unit_entity, &children_q, &original_q, &mut commands);
         commands.entity(unit_entity).try_remove::<Highlighted>();
     }
 
@@ -575,7 +569,6 @@ fn brighten_unit(
 fn restore_unit_materials(
     unit_entity: Entity,
     children_q: &Query<&Children>,
-    _mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
     original_q: &Query<&OriginalMaterial>,
     commands: &mut Commands,
 ) {

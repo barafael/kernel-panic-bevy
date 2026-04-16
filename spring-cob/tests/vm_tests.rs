@@ -1,7 +1,11 @@
 //! Integration tests for the COB virtual machine using real KP animation scripts.
 
-use spring_cob::{AnimCommand, CobVm, parse_cob};
+use spring_cob::{AnimCommand, CobFile, CobVm, parse_cob};
 use std::path::PathBuf;
+
+/// kernel.bos was compiled with Scriptor's linear constant set to 163840
+/// (per the source comment), so each `[1]` in BOS becomes 163840 raw.
+const KP_LINEAR: i32 = 163840;
 
 fn scripts_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -14,10 +18,17 @@ fn scripts_dir() -> Option<PathBuf> {
     .find(|p| p.is_dir())
 }
 
-fn load_cob(name: &str) -> Option<spring_cob::CobFile> {
+fn load_cob(name: &str) -> Option<CobFile> {
     let dir = scripts_dir()?;
     let data = std::fs::read(dir.join(name)).ok()?;
     parse_cob(&data).ok()
+}
+
+fn piece_id(cob: &CobFile, name: &str) -> i32 {
+    cob.piece_names
+        .iter()
+        .position(|p| p == name)
+        .unwrap_or_else(|| panic!("piece {name} not found")) as i32
 }
 
 // ---------------------------------------------------------------------------
@@ -154,8 +165,8 @@ fn kernel_create_emits_initial_animations() {
     );
 }
 
-/// Diagnostic: after the sleep 400, the moves for pillars/heads should be emitted.
-/// This validates that the script flow proceeds past SLEEP to the second batch of moves.
+/// After the sleep 400, the moves for pillars/heads should be emitted.
+/// Validates that the script flow proceeds past SLEEP to the second batch of moves.
 #[test]
 fn kernel_create_emits_pillar_moves_after_sleep() {
     let Some(cob) = load_cob("kernel.cob") else {
@@ -164,14 +175,8 @@ fn kernel_create_emits_pillar_moves_after_sleep() {
     let mut vm = CobVm::new(&cob);
     vm.start_script(&cob, "Create", &[]);
 
-    let pid = |n: &str| {
-        cob.piece_names
-            .iter()
-            .position(|p| p == n)
-            .unwrap_or_else(|| panic!("piece {n} not found")) as i32
-    };
-    let pillar0 = pid("pillar0");
-    let head0 = pid("head0");
+    let pillar0 = piece_id(&cob, "pillar0");
+    let head0 = piece_id(&cob, "head0");
 
     // Tick past the sleep 400 with realistic frame intervals.
     let mut all = Vec::new();
@@ -179,10 +184,10 @@ fn kernel_create_emits_pillar_moves_after_sleep() {
         all.extend(vm.tick(&cob, 33));
     }
 
-    let pillar_dest = -16 * 163840;
-    let pillar_speed = 24 * 163840;
-    let head_dest = -12 * 163840;
-    let head_speed = 16 * 163840;
+    let pillar_dest = -16 * KP_LINEAR;
+    let pillar_speed = 24 * KP_LINEAR;
+    let head_dest = -12 * KP_LINEAR;
+    let head_speed = 16 * KP_LINEAR;
 
     let pillar_move = all.iter().any(|c| {
         matches!(
@@ -272,82 +277,64 @@ fn kernel_create_emits_correct_initial_animation_sequence() {
         })
         .collect();
 
-    // Look up piece IDs by name.
-    let pid = |n: &str| {
-        cob.piece_names
-            .iter()
-            .position(|p| p == n)
-            .unwrap_or_else(|| panic!("piece {n} not found")) as i32
-    };
-    let pillar0 = pid("pillar0");
-    let pillar1 = pid("pillar1");
-    let pillar2 = pid("pillar2");
-    let pillar3 = pid("pillar3");
-    let base0 = pid("base0");
-    let base1 = pid("base1");
-    let base2 = pid("base2");
-    let base3 = pid("base3");
-    let head0 = pid("head0");
-    let head1 = pid("head1");
-    let head2 = pid("head2");
-    let head3 = pid("head3");
+    let pillars = [
+        piece_id(&cob, "pillar0"),
+        piece_id(&cob, "pillar1"),
+        piece_id(&cob, "pillar2"),
+        piece_id(&cob, "pillar3"),
+    ];
+    let bases = [
+        piece_id(&cob, "base0"),
+        piece_id(&cob, "base1"),
+        piece_id(&cob, "base2"),
+        piece_id(&cob, "base3"),
+    ];
+    let heads = [
+        piece_id(&cob, "head0"),
+        piece_id(&cob, "head1"),
+        piece_id(&cob, "head2"),
+        piece_id(&cob, "head3"),
+    ];
 
     const Y: i32 = 1; // y-axis
 
     // The four pillar TurnNow calls (45*182 = 8190).
-    assert!(
-        turn_now.contains(&(pillar0, Y, 8190)),
-        "expected TurnNow pillar0 y +45deg (8190), got {turn_now:?}"
-    );
-    assert!(
-        turn_now.contains(&(pillar1, Y, 24570)),
-        "expected TurnNow pillar1 y +135deg (24570), got {turn_now:?}"
-    );
-    assert!(
-        turn_now.contains(&(pillar2, Y, -8190)),
-        "expected TurnNow pillar2 y -45deg (-8190), got {turn_now:?}"
-    );
-    assert!(
-        turn_now.contains(&(pillar3, Y, -24570)),
-        "expected TurnNow pillar3 y -135deg (-24570), got {turn_now:?}"
-    );
-
-    // The bases all jump to y=-8 ([-8] = -1310720).
-    for &b in &[base0, base1, base2, base3] {
+    for (pillar, expected) in pillars.iter().zip([8190, 24570, -8190, -24570]) {
         assert!(
-            move_now.contains(&(b, Y, -1310720)),
-            "expected MoveNow base{} y to -8 ([-8]=-1310720), got {move_now:?}",
-            b - base0
-        );
-    }
-    // Pillars and heads jump to y=-32 ([-32] = -5242880).
-    for &p in &[pillar0, pillar1, pillar2, pillar3] {
-        assert!(
-            move_now.contains(&(p, Y, -5242880)),
-            "expected MoveNow pillar y to -32, got {move_now:?}"
-        );
-    }
-    for &h in &[head0, head1, head2, head3] {
-        assert!(
-            move_now.contains(&(h, Y, -5242880)),
-            "expected MoveNow head y to -32, got {move_now:?}"
+            turn_now.contains(&(*pillar, Y, expected)),
+            "expected TurnNow pillar y {expected}, got {turn_now:?}"
         );
     }
 
-    // The four bases then animate from -8 to 0 at speed [12] = 1966080.
-    for &b in &[base0, base1, base2, base3] {
+    // The bases all jump to y=[-8] = -8 * KP_LINEAR.
+    let base_jump = -8 * KP_LINEAR;
+    for &b in &bases {
         assert!(
-            moves.contains(&(b, Y, 0, 1966080)),
-            "expected Move base{} y dest=0 speed=1966080, got {moves:?}",
-            b - base0
+            move_now.contains(&(b, Y, base_jump)),
+            "expected MoveNow base{} y to {base_jump}, got {move_now:?}",
+            b - bases[0]
+        );
+    }
+    // Pillars and heads jump to y=[-32].
+    let pillar_jump = -32 * KP_LINEAR;
+    for &p in pillars.iter().chain(heads.iter()) {
+        assert!(
+            move_now.contains(&(p, Y, pillar_jump)),
+            "expected MoveNow piece {p} y to {pillar_jump}, got {move_now:?}"
         );
     }
 
-    // After sleep 400, the script does:
-    //   move pillar0..3 to y-axis [-16] speed [24];   // dest=-16*163840, speed=24*163840
-    //   move head0..3   to y-axis [-12] speed [16];   // dest=-12*163840, speed=16*163840
-    //   wait-for-move pillar0 along y-axis;
-    // Run additional ticks to cross the sleep boundary and verify those moves.
+    // The four bases then animate from -8 to 0 at speed [12].
+    let base_speed = 12 * KP_LINEAR;
+    for &b in &bases {
+        assert!(
+            moves.contains(&(b, Y, 0, base_speed)),
+            "expected Move base{} y dest=0 speed={base_speed}, got {moves:?}",
+            b - bases[0]
+        );
+    }
+
+    // After sleep 400, the script animates pillars to [-16]@[24] and heads to [-12]@[16].
     let mut later_cmds = Vec::new();
     for _ in 0..20 {
         later_cmds.extend(vm.tick(&cob, 50));
@@ -365,17 +352,17 @@ fn kernel_create_emits_correct_initial_animation_sequence() {
         })
         .collect();
 
-    let pillar_dest = -16 * 163840;
-    let pillar_speed = 24 * 163840;
-    let head_dest = -12 * 163840;
-    let head_speed = 16 * 163840;
-    for &p in &[pillar0, pillar1, pillar2, pillar3] {
+    let pillar_dest = -16 * KP_LINEAR;
+    let pillar_speed = 24 * KP_LINEAR;
+    let head_dest = -12 * KP_LINEAR;
+    let head_speed = 16 * KP_LINEAR;
+    for &p in &pillars {
         assert!(
             later_moves.contains(&(p, Y, pillar_dest, pillar_speed)),
             "expected Move pillar y dest={pillar_dest} speed={pillar_speed}, got {later_moves:?}"
         );
     }
-    for &h in &[head0, head1, head2, head3] {
+    for &h in &heads {
         assert!(
             later_moves.contains(&(h, Y, head_dest, head_speed)),
             "expected Move head y dest={head_dest} speed={head_speed}, got {later_moves:?}"
