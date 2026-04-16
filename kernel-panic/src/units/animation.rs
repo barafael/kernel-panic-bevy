@@ -23,6 +23,8 @@ pub struct CobAnimator {
     pub cob: Arc<CobFile>,
     /// Maps COB piece index → Bevy child entity.
     pub piece_entities: Vec<Entity>,
+    /// Static base offsets from the s3o model (never modified by animation).
+    pub piece_base_offsets: Vec<[f32; 3]>,
     /// Current animated rotation per piece (radians, [x,y,z]).
     pub piece_rotations: Vec<[f32; 3]>,
     /// Current animated translation offset per piece (elmos, [x,y,z]).
@@ -249,14 +251,15 @@ pub fn animation_system(
                 }
             }
 
-            // Apply to Bevy transform.
+            // Apply to Bevy transform: base offset + animated translation.
             if p < animator.piece_entities.len() {
                 let entity = animator.piece_entities[p];
                 if let Ok((mut tf, _)) = transforms.get_mut(entity) {
                     let r = animator.piece_rotations[p];
                     let t = animator.piece_translations[p];
+                    let base = animator.piece_base_offsets[p];
                     tf.rotation = Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]);
-                    tf.translation = Vec3::new(t[0], t[1], t[2]);
+                    tf.translation = Vec3::new(base[0] + t[0], base[1] + t[1], base[2] + t[2]);
                 }
             }
         }

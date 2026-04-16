@@ -126,14 +126,21 @@ pub fn spawn_unit(
         // Flatten the piece tree into a list, spawning each as a child entity.
         let mut piece_entities = Vec::new();
         let mut piece_parents: Vec<Option<usize>> = Vec::new();
-        flatten_pieces(&model.root_piece, None, &mut piece_parents);
+        let mut piece_offsets: Vec<[f32; 3]> = Vec::new();
+        flatten_pieces(
+            &model.root_piece,
+            None,
+            &mut piece_parents,
+            &mut piece_offsets,
+        );
 
         // Spawn piece entities.
         for (idx, parent_idx) in piece_parents.iter().enumerate() {
             let piece = get_piece_by_index(&model.root_piece, idx);
             let has_geometry = piece.map_or(false, |p| !p.vertices.is_empty());
+            let offset = piece_offsets[idx];
 
-            let mut piece_cmd = if has_geometry {
+            let piece_cmd = if has_geometry {
                 let piece = piece.unwrap();
                 let mesh = piece_to_mesh(piece);
                 let mesh_handle = meshes.add(mesh);
@@ -141,23 +148,19 @@ pub fn spawn_unit(
                     PieceIndex(idx),
                     Mesh3d(mesh_handle),
                     MeshMaterial3d(material.clone()),
-                    Transform::from_xyz(piece.offset[0], piece.offset[1], piece.offset[2]),
+                    Transform::from_xyz(offset[0], offset[1], offset[2]),
                     Visibility::default(),
                 ))
             } else {
-                let offset = piece.map_or(Vec3::ZERO, |p| {
-                    Vec3::new(p.offset[0], p.offset[1], p.offset[2])
-                });
                 commands.spawn((
                     PieceIndex(idx),
-                    Transform::from_translation(offset),
+                    Transform::from_xyz(offset[0], offset[1], offset[2]),
                     Visibility::default(),
                 ))
             };
             let piece_entity = piece_cmd.id();
             piece_entities.push(piece_entity);
 
-            // Parent to the unit or to the parent piece.
             let bevy_parent = match parent_idx {
                 Some(pi) => piece_entities[*pi],
                 None => unit_entity,
@@ -165,7 +168,7 @@ pub fn spawn_unit(
             commands.entity(bevy_parent).add_child(piece_entity);
         }
 
-        // Attach CobAnimator.
+        // Attach CobAnimator with base offsets.
         if let Some(cob) = load_cob_cached(unit_stats.script, cob_cache) {
             let num_pieces = piece_entities.len();
             let mut vm = CobVm::new(&cob);
@@ -175,6 +178,7 @@ pub fn spawn_unit(
                 vm,
                 cob,
                 piece_entities: piece_entities.clone(),
+                piece_base_offsets: piece_offsets,
                 piece_rotations: vec![[0.0; 3]; num_pieces],
                 piece_translations: vec![[0.0; 3]; num_pieces],
                 target_rotations: vec![[0.0; 3]; num_pieces],
@@ -194,11 +198,17 @@ pub fn spawn_unit(
 }
 
 /// Flatten the piece tree depth-first, recording each piece's parent index.
-fn flatten_pieces(piece: &S3OPiece, parent_idx: Option<usize>, result: &mut Vec<Option<usize>>) {
+fn flatten_pieces(
+    piece: &S3OPiece,
+    parent_idx: Option<usize>,
+    result: &mut Vec<Option<usize>>,
+    offsets: &mut Vec<[f32; 3]>,
+) {
     let my_idx = result.len();
     result.push(parent_idx);
+    offsets.push(piece.offset);
     for child in &piece.children {
-        flatten_pieces(child, Some(my_idx), result);
+        flatten_pieces(child, Some(my_idx), result, offsets);
     }
 }
 
