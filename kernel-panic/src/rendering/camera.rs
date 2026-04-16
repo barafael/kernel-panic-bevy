@@ -175,22 +175,22 @@ pub fn camera_control(
 
     let delta_time = time.delta_secs();
 
-    // --- Pan (WASD / arrows) — A/D inverted per user request ---
+    // --- Pan (arrow keys only — WASD reserved for hotkeys) ---
     let fwd = fwd_ground(&state);
     let right = right_ground(&state);
 
     let mut pan = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) || keys.pressed(KeyCode::ArrowUp) {
+    if keys.pressed(KeyCode::ArrowUp) {
         pan += fwd;
     }
-    if keys.pressed(KeyCode::KeyS) || keys.pressed(KeyCode::ArrowDown) {
+    if keys.pressed(KeyCode::ArrowDown) {
         pan -= fwd;
     }
-    if keys.pressed(KeyCode::KeyA) || keys.pressed(KeyCode::ArrowLeft) {
-        pan += right; // inverted: A goes right
+    if keys.pressed(KeyCode::ArrowLeft) {
+        pan += right;
     }
-    if keys.pressed(KeyCode::KeyD) || keys.pressed(KeyCode::ArrowRight) {
-        pan -= right; // inverted: D goes left
+    if keys.pressed(KeyCode::ArrowRight) {
+        pan -= right;
     }
 
     if pan != Vec3::ZERO {
