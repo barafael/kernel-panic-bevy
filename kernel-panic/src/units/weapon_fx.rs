@@ -369,6 +369,7 @@ fn spawn_melee_flash(
 
 // ── Tick system ─────────────────────────────────────────────────────
 
+#[allow(clippy::type_complexity)]
 pub fn tick_weapon_fx(
     time: Res<Time>,
     mut beams: Query<(Entity, &mut BeamVisual, &mut Transform), Without<ProjectileVisual>>,

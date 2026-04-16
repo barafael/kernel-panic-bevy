@@ -246,6 +246,7 @@ pub struct PendingMoveIndicators {
 
 /// Right-click: single click moves all selected to one point.
 /// Right-drag: sample a path, distribute selected units along it on release.
+#[allow(clippy::too_many_arguments)]
 pub fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window>,
@@ -404,6 +405,7 @@ fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
 
 /// Brighten the unit's material when it becomes hovered or selected.
 /// Creates a per-unit clone of the shared material with boosted emissive.
+#[allow(clippy::type_complexity)]
 pub fn update_unit_highlight(
     hovered_q: Query<
         (Entity, &MeshMaterial3d<StandardMaterial>, &Faction),
@@ -579,6 +581,7 @@ pub fn update_health_bars(
 }
 
 /// Make health bars always face the camera (billboard).
+#[allow(clippy::type_complexity)]
 pub fn billboard_health_bars(
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
     parents: Query<&GlobalTransform, With<UnitType>>,

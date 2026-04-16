@@ -48,6 +48,7 @@ pub struct VirusSpawnQueue(pub Vec<(Vec3, Faction, u8)>);
 pub struct DamageQueue(Vec<(Entity, f32, Entity)>);
 
 /// System: armed units auto-attack the nearest enemy in range.
+#[allow(clippy::too_many_arguments)]
 pub fn combat_system(
     time: Res<Time>,
     mut cooldowns: Query<&mut AttackCooldown>,
@@ -177,6 +178,7 @@ pub fn tick_infections(
 
 /// System: when a unit reaches 0 HP, start the Killed() COB script and mark it
 /// as `Dying`. If the unit was infected, queue a Virus spawn.
+#[allow(clippy::type_complexity)]
 pub fn death_system(
     query: Query<
         (Entity, &Health, &GlobalTransform, Option<&Infected>),

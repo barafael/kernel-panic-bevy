@@ -251,11 +251,10 @@ impl CobVm {
             if !matches {
                 continue;
             }
-            let wake = match (thread.state, anim_type) {
-                (ThreadState::WaitTurn, AnimType::Turn) => true,
-                (ThreadState::WaitMove, AnimType::Move) => true,
-                _ => false,
-            };
+            let wake = matches!(
+                (thread.state, anim_type),
+                (ThreadState::WaitTurn, AnimType::Turn) | (ThreadState::WaitMove, AnimType::Move)
+            );
             if wake {
                 thread.state = ThreadState::Run;
                 thread.wait_piece = -1;

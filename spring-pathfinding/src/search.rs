@@ -438,7 +438,7 @@ fn find_blocked_cell_on_segment(
     grid_height: u32,
     is_passable: &impl Fn(u32, u32) -> bool,
 ) -> Option<(u32, u32)> {
-    let steps = ((distance(p0, p1) / SQUARE_SIZE) as u32).max(1).min(500);
+    let steps = ((distance(p0, p1) / SQUARE_SIZE) as u32).clamp(1, 500);
     for step in 0..=steps {
         let t = step as f32 / steps as f32;
         let wx = p0[0] + (p1[0] - p0[0]) * t;

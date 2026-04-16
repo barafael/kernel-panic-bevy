@@ -25,6 +25,7 @@ pub struct ProductionState {
 }
 
 /// Detect movement start/stop and fire StartMoving/StopMoving COB scripts.
+#[allow(clippy::type_complexity)]
 pub fn trigger_movement_scripts(
     mut query: Query<(
         Entity,

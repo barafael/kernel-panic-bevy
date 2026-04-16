@@ -218,6 +218,7 @@ fn ray_ground_intersect(ray: &Ray3d) -> Option<Vec3> {
 }
 
 /// Bresenham line drawing between two points.
+#[allow(clippy::too_many_arguments)]
 fn draw_line(
     pixels: &mut [u8],
     width: usize,

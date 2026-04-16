@@ -43,7 +43,7 @@ pub struct CobAnimator {
 
 /// Marks a Bevy entity as an animated piece child.
 #[derive(Component)]
-pub struct PieceIndex(pub usize);
+pub struct PieceIndex(#[allow(dead_code)] pub usize);
 
 /// Cached parsed COB files, keyed by script filename.
 #[derive(Resource, Default)]
@@ -341,7 +341,7 @@ pub fn decay_death_particles(
         if let Some(mat) = materials.get_mut(&mat_handle.0) {
             let alpha = 1.0 - t;
             mat.base_color = mat.base_color.with_alpha(alpha);
-            mat.emissive *= (1.0 - t * 0.8);
+            mat.emissive *= 1.0 - t * 0.8;
         }
     }
 }

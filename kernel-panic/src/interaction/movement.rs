@@ -21,7 +21,7 @@ pub struct MovePath {
 #[derive(Resource)]
 pub struct NavGrid(pub NodeLayer);
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn movement_system(
     mut commands: Commands,
     time: Res<Time>,
