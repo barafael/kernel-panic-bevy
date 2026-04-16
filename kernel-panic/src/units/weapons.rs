@@ -80,7 +80,7 @@ impl WeaponRegistry {
 
     /// Warn at startup if any unit references a weapon name not in the registry.
     fn validate_unit_weapon_bindings(&self) {
-        for unit in UNIT_STATS {
+        for unit in &UNIT_STATS {
             if !unit.weapon.is_empty() && self.defs.get(unit.weapon).is_none() {
                 warn!(
                     "Unit '{}' references weapon '{}' which is not in the TDF registry \

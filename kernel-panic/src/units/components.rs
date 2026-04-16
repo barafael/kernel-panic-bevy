@@ -36,7 +36,6 @@ pub struct UnitType(pub UnitKind);
 
 /// Current health.
 #[derive(Debug, Clone, Component)]
-#[allow(dead_code)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
@@ -47,9 +46,19 @@ impl Health {
         Self { current: max, max }
     }
 
-    #[allow(dead_code)]
     pub fn fraction(&self) -> f32 {
         self.current / self.max
+    }
+}
+
+/// Map a 0.0..1.0 health fraction to a red→yellow→green color.
+pub fn health_color(frac: f32) -> Color {
+    if frac > 0.5 {
+        let t = (frac - 0.5) * 2.0;
+        Color::linear_rgb(1.0 - t, 1.0, 0.0)
+    } else {
+        let t = frac * 2.0;
+        Color::linear_rgb(1.0, t, 0.0)
     }
 }
 

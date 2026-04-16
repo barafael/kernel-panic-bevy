@@ -5,6 +5,7 @@ pub mod definitions;
 pub mod game_over;
 pub mod meshes;
 pub mod production;
+pub mod script_triggers;
 pub mod spawning;
 pub mod weapon_fx;
 pub mod weapons;

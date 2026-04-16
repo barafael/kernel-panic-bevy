@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use super::animation::CobAnimator;
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::{UnitKind, stats};
+use super::script_triggers::JustFired;
 use super::weapon_fx::{AttackEvent, PendingAttacks};
 use super::weapons::WeaponRegistry;
 
@@ -108,9 +109,12 @@ pub fn combat_system(
 
         if let Some((target_entity, target_pos, _)) = best {
             damage_queue.0.push((target_entity, damage, entity));
-            commands.entity(entity).insert(AttackCooldown {
-                remaining: cooldown,
-            });
+            commands.entity(entity).insert((
+                AttackCooldown {
+                    remaining: cooldown,
+                },
+                JustFired { target_pos },
+            ));
             if !unit_stats.weapon.is_empty() {
                 pending_attacks.events.push(AttackEvent {
                     attacker_pos,

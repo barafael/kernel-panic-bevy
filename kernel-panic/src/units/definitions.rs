@@ -27,10 +27,12 @@ pub enum UnitKind {
     Signal,     // scout unit
 }
 
+use super::components::Faction;
+
 /// Static stats for a unit type.
-#[allow(dead_code)]
 pub struct UnitStats {
     pub kind: UnitKind,
+    pub faction: Faction,
     pub name: &'static str,
     pub max_health: f32,
     pub speed: f32,
@@ -53,16 +55,18 @@ pub struct UnitStats {
 }
 
 pub fn stats(kind: UnitKind) -> &'static UnitStats {
-    UNIT_STATS
-        .iter()
-        .find(|s| s.kind == kind)
-        .expect("missing unit stats")
+    &UNIT_STATS[kind as usize]
 }
 
-pub static UNIT_STATS: &[UnitStats] = &[
+/// Number of unit kinds — must match the enum variant count.
+pub const UNIT_COUNT: usize = 19;
+
+/// Indexed by `UnitKind as usize`. Order must match the enum declaration.
+pub static UNIT_STATS: [UnitStats; UNIT_COUNT] = [
     // --- System ---
     UnitStats {
         kind: UnitKind::Kernel,
+        faction: Faction::System,
         name: "Kernel",
         max_health: 10000.0,
         speed: 0.0,
@@ -78,6 +82,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Assembler,
+        faction: Faction::System,
         name: "Assembler",
         max_health: 1000.0,
         speed: 60.0,
@@ -93,6 +98,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Bit,
+        faction: Faction::System,
         name: "Bit",
         max_health: 150.0,
         speed: 90.0,
@@ -108,6 +114,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Byte,
+        faction: Faction::System,
         name: "Byte",
         max_health: 15000.0,
         speed: 30.0,
@@ -123,6 +130,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Pointer,
+        faction: Faction::System,
         name: "Pointer",
         max_health: 2000.0,
         speed: 40.0,
@@ -138,6 +146,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Socket,
+        faction: Faction::System,
         name: "Socket",
         max_health: 5000.0,
         speed: 0.0,
@@ -153,6 +162,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Firewall,
+        faction: Faction::System,
         name: "Firewall",
         max_health: 8000.0,
         speed: 0.0,
@@ -169,6 +179,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     // --- Hacker ---
     UnitStats {
         kind: UnitKind::Hole,
+        faction: Faction::Hacker,
         name: "Hole",
         max_health: 10000.0,
         speed: 0.0,
@@ -184,6 +195,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Bug,
+        faction: Faction::Hacker,
         name: "Bug",
         max_health: 150.0,
         speed: 90.0,
@@ -199,6 +211,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Exploit,
+        faction: Faction::Hacker,
         name: "Exploit",
         max_health: 3000.0,
         speed: 0.0,
@@ -214,6 +227,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Worm,
+        faction: Faction::Hacker,
         name: "Worm",
         max_health: 2500.0,
         speed: 70.0,
@@ -229,6 +243,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Virus,
+        faction: Faction::Hacker,
         name: "Virus",
         max_health: 200.0,
         speed: 80.0,
@@ -244,6 +259,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Dos,
+        faction: Faction::Hacker,
         name: "DOS",
         max_health: 1500.0,
         speed: 50.0,
@@ -259,6 +275,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Window,
+        faction: Faction::Hacker,
         name: "Window",
         max_health: 5000.0,
         speed: 0.0,
@@ -274,6 +291,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::LogicBomb,
+        faction: Faction::Hacker,
         name: "Logic Bomb",
         max_health: 500.0,
         speed: 100.0,
@@ -290,6 +308,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     // --- Network ---
     UnitStats {
         kind: UnitKind::Connection,
+        faction: Faction::Network,
         name: "Connection",
         max_health: 10000.0,
         speed: 0.0,
@@ -305,6 +324,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Port,
+        faction: Faction::Network,
         name: "Port",
         max_health: 5000.0,
         speed: 0.0,
@@ -320,6 +340,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Packet,
+        faction: Faction::Network,
         name: "Packet",
         max_health: 300.0,
         speed: 80.0,
@@ -335,6 +356,7 @@ pub static UNIT_STATS: &[UnitStats] = &[
     },
     UnitStats {
         kind: UnitKind::Signal,
+        faction: Faction::Network,
         name: "Signal",
         max_health: 100.0,
         speed: 120.0,
