@@ -1,12 +1,9 @@
 //! Weapon visual effects — beams, projectiles, and impact flashes.
 //!
 //! The combat system pushes [`AttackEvent`]s into a [`PendingAttacks`] buffer.
-//! Two systems consume them each frame:
-//!
-//! - [`spawn_beam_visuals`] — short-lived line entities for beam/laser weapons
-//! - [`spawn_projectile_visuals`] — traveling entities for ballistic weapons
-//!
-//! A third system [`tick_weapon_fx`] fades/moves/despawns the visuals over time.
+//! [`spawn_weapon_visuals`] drains the buffer, looks up the weapon in the TDF
+//! registry, and spawns the appropriate effect entity.
+//! [`tick_weapon_fx`] fades/moves/despawns the visuals over time.
 
 use bevy::prelude::*;
 
@@ -27,54 +24,14 @@ pub struct PendingAttacks {
     pub events: Vec<AttackEvent>,
 }
 
-// ── Beam effect ─────────────────────────────────────────────────────
+// ── Effect components ───────────────────────────────────────────────
 
-/// Marker for a beam visual entity.
+/// A beam visual that fades over its lifetime.
 #[derive(Component)]
 pub struct BeamVisual {
     pub lifetime: f32,
     pub max_lifetime: f32,
 }
-
-/// Shared material cache so we don't create one per beam per frame.
-#[derive(Resource, Default)]
-pub struct BeamMaterialCache {
-    materials: Vec<(LinearRgba, Handle<StandardMaterial>)>,
-}
-
-impl BeamMaterialCache {
-    fn get_or_create(
-        &mut self,
-        color: LinearRgba,
-        materials: &mut Assets<StandardMaterial>,
-    ) -> Handle<StandardMaterial> {
-        // Reuse a material with similar color (quantized to avoid explosion).
-        let quantized = LinearRgba::new(
-            (color.red * 4.0).round() / 4.0,
-            (color.green * 4.0).round() / 4.0,
-            (color.blue * 4.0).round() / 4.0,
-            1.0,
-        );
-        for (cached_color, handle) in &self.materials {
-            let diff = *cached_color - quantized;
-            let dist_sq = diff.red * diff.red + diff.green * diff.green + diff.blue * diff.blue;
-            if dist_sq < 0.01 {
-                return handle.clone();
-            }
-        }
-        let handle = materials.add(StandardMaterial {
-            base_color: Color::LinearRgba(quantized),
-            emissive: quantized * 8.0,
-            unlit: true,
-            alpha_mode: AlphaMode::Add,
-            ..default()
-        });
-        self.materials.push((quantized, handle.clone()));
-        handle
-    }
-}
-
-// ── Projectile effect ───────────────────────────────────────────────
 
 /// A projectile traveling from origin to target.
 #[derive(Component)]
@@ -83,63 +40,145 @@ pub struct ProjectileVisual {
     pub target: Vec3,
     pub speed: f32,
     pub progress: f32,
-    pub gravity: f32,
     pub arc_height: f32,
 }
 
-// ── Systems ─────────────────────────────────────────────────────────
+/// A burst of multiple small beam segments (spray weapons like PacketBeam).
+#[derive(Component)]
+pub struct BurstSegment {
+    pub lifetime: f32,
+}
 
-/// Spawn beam visuals from pending attacks.
-pub fn spawn_beam_visuals(
+/// Shared material cache to avoid per-frame allocations.
+#[derive(Resource, Default)]
+pub struct BeamMaterialCache {
+    entries: Vec<CachedMaterial>,
+}
+
+struct CachedMaterial {
+    key: MaterialKey,
+    handle: Handle<StandardMaterial>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct MaterialKey {
+    r: u8,
+    g: u8,
+    b: u8,
+    additive: bool,
+}
+
+impl BeamMaterialCache {
+    fn get_or_create(
+        &mut self,
+        color: LinearRgba,
+        additive: bool,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let key = MaterialKey {
+            r: (color.red.clamp(0.0, 1.0) * 15.0).round() as u8,
+            g: (color.green.clamp(0.0, 1.0) * 15.0).round() as u8,
+            b: (color.blue.clamp(0.0, 1.0) * 15.0).round() as u8,
+            additive,
+        };
+        for entry in &self.entries {
+            if entry.key == key {
+                return entry.handle.clone();
+            }
+        }
+        let alpha_mode = if additive {
+            AlphaMode::Add
+        } else {
+            AlphaMode::Blend
+        };
+        let handle = materials.add(StandardMaterial {
+            base_color: Color::LinearRgba(color),
+            emissive: color * 8.0,
+            unlit: true,
+            alpha_mode,
+            ..default()
+        });
+        self.entries.push(CachedMaterial {
+            key,
+            handle: handle.clone(),
+        });
+        handle
+    }
+}
+
+// ── Color helper ────────────────────────────────────────────────────
+
+/// TDF stores RGB either 0-255 or 0-1. Normalize to LinearRgba 0-1.
+fn tdf_color(rgb: [f32; 3]) -> LinearRgba {
+    let [r, g, b] = rgb;
+    if r > 2.0 || g > 2.0 || b > 2.0 {
+        LinearRgba::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
+    } else if r == 0.0 && g == 0.0 && b == 0.0 {
+        LinearRgba::new(0.7, 0.7, 0.7, 1.0)
+    } else {
+        LinearRgba::new(r, g, b, 1.0)
+    }
+}
+
+// ── Main spawn system ───────────────────────────────────────────────
+
+pub fn spawn_weapon_visuals(
     mut pending: ResMut<PendingAttacks>,
     weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut beam_cache: ResMut<BeamMaterialCache>,
+    mut cache: ResMut<BeamMaterialCache>,
 ) {
     for event in pending.events.drain(..) {
         let Some(weapon) = weapon_registry.get(event.weapon_name) else {
             continue;
         };
 
-        // Determine if this is a beam or a projectile.
-        let is_beam = weapon.beam_weapon
-            || weapon.beam_laser
-            || weapon.weapon_type == "BeamLaser"
-            || weapon.weapon_type == "Melee";
-        let is_projectile = weapon.ballistic
-            || !weapon.model.is_empty()
-            || weapon.weapon_type == "MissileLauncher"
-            || weapon.weapon_type == "StarburstLauncher"
-            || weapon.weapon_type == "Cannon"
-            || weapon.weapon_type == "LaserCannon"
-            || weapon.weapon_type == "AircraftBomb";
+        let dir = event.target_pos - event.attacker_pos;
+        let length = dir.length();
+        if length < 0.1 {
+            continue;
+        }
 
-        if is_beam {
-            spawn_beam(
-                &event,
-                weapon,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut beam_cache,
-            );
+        // Classify weapon by its TDF properties.
+        let is_projectile = weapon.ballistic
+            || matches!(
+                weapon.weapon_type.as_str(),
+                "MissileLauncher" | "StarburstLauncher" | "Cannon" | "AircraftBomb"
+            )
+            || (!weapon.model.is_empty() && weapon.model != ";");
+
+        let is_burst_beam = weapon.beam_burst || weapon.spray_angle > 100.0;
+        let is_melee = weapon.weapon_type == "Melee";
+
+        if is_melee {
+            spawn_melee_flash(&event, weapon, &mut commands, &mut meshes, &mut materials);
         } else if is_projectile {
             spawn_projectile(&event, weapon, &mut commands, &mut meshes, &mut materials);
+        } else if is_burst_beam {
+            spawn_burst_beam(
+                &event,
+                weapon,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+            );
         } else {
-            // Default: treat as beam.
             spawn_beam(
                 &event,
                 weapon,
                 &mut commands,
                 &mut meshes,
                 &mut materials,
-                &mut beam_cache,
+                &mut cache,
             );
         }
     }
 }
+
+// ── Beam (Line, MegaBeam, BugShot, DOS_Beam, VirusBeam, GaussCannon) ───
 
 fn spawn_beam(
     event: &AttackEvent,
@@ -147,52 +186,111 @@ fn spawn_beam(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
-    beam_cache: &mut BeamMaterialCache,
+    cache: &mut BeamMaterialCache,
 ) {
     let dir = event.target_pos - event.attacker_pos;
     let length = dir.length();
-    if length < 0.1 {
-        return;
-    }
     let midpoint = (event.attacker_pos + event.target_pos) / 2.0;
+    let color = tdf_color(weapon.rgb_color);
 
-    // Weapon color — TDF stores RGB 0-255 or 0-1 scale.
-    let [r, g, b] = weapon.rgb_color;
-    let color = if r > 2.0 || g > 2.0 || b > 2.0 {
-        // 0-255 scale
-        LinearRgba::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
-    } else {
-        // 0-1 scale
-        LinearRgba::new(r, g, b, 1.0)
-    };
+    // Thickness from TDF, clamped for visibility.
+    let thickness = (weapon.thickness * 0.25).clamp(0.3, 6.0);
 
-    let thickness = (weapon.thickness * 0.3).max(0.5).min(4.0);
-
-    let beam_material = beam_cache.get_or_create(color, materials);
-
-    // Beam duration from TDF, with fallback.
-    let duration = if weapon.duration > 0.0 {
-        weapon.duration
-    } else if weapon.beam_time > 0.0 {
+    // Duration from TDF fields.
+    let duration = if weapon.beam_time > 0.0 {
         weapon.beam_time
+    } else if weapon.duration > 0.0 {
+        weapon.duration
     } else {
         0.15
     };
 
-    let mesh = meshes.add(Cuboid::new(thickness, thickness, length));
-
+    let mat = cache.get_or_create(color, true, materials);
     let rotation = Quat::from_rotation_arc(Vec3::Z, dir.normalize());
 
+    // The Byte's MegaBeam fires in bursts of 4 thick rectangles.
+    // The Line weapon has corethickness=1 which gives a thinner core + thicker outer.
+    // Most beam weapons: single cuboid from A to B.
+    let core = weapon.core_thickness * 0.25;
+    if core > 0.1 && thickness > 1.0 {
+        // Two-layer beam: bright thin core + dimmer outer.
+        let core_mat = cache.get_or_create(LinearRgba::WHITE, true, materials);
+        let core_mesh = meshes.add(Cuboid::new(core, core, length));
+        commands.spawn((
+            BeamVisual {
+                lifetime: duration,
+                max_lifetime: duration,
+            },
+            Mesh3d(core_mesh),
+            MeshMaterial3d(core_mat),
+            Transform::from_translation(midpoint + Vec3::Y * 0.1).with_rotation(rotation),
+        ));
+    }
+
+    let mesh = meshes.add(Cuboid::new(thickness, thickness, length));
     commands.spawn((
         BeamVisual {
             lifetime: duration,
             max_lifetime: duration,
         },
         Mesh3d(mesh),
-        MeshMaterial3d(beam_material),
+        MeshMaterial3d(mat),
         Transform::from_translation(midpoint).with_rotation(rotation),
     ));
 }
+
+// ── Burst beam (PacketBeam — multiple small beams with spray) ───────
+
+fn spawn_burst_beam(
+    event: &AttackEvent,
+    weapon: &spring_tdf::WeaponDef,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
+) {
+    let color = tdf_color(weapon.rgb_color);
+    let mat = cache.get_or_create(color, true, materials);
+
+    let dir = event.target_pos - event.attacker_pos;
+    let length = dir.length();
+    let base_dir = dir.normalize();
+
+    // Number of burst segments.
+    let count = if weapon.burst > 1.0 {
+        weapon.burst as usize
+    } else {
+        3
+    };
+
+    let spray_rad = (weapon.spray_angle / 65536.0) * std::f32::consts::TAU;
+    let thickness = (weapon.thickness * 0.2).clamp(0.3, 2.0);
+
+    let ttl = if weapon.beam_ttl > 0.0 {
+        weapon.beam_ttl / 30.0 // beam_ttl is in frames (30fps)
+    } else {
+        0.12
+    };
+
+    let mesh = meshes.add(Cuboid::new(thickness, thickness, length));
+
+    for i in 0..count {
+        let angle = spray_rad * (i as f32 / count as f32 - 0.5);
+        let perturbed = Quat::from_rotation_y(angle) * base_dir;
+        let end = event.attacker_pos + perturbed * length;
+        let mid = (event.attacker_pos + end) / 2.0;
+        let rotation = Quat::from_rotation_arc(Vec3::Z, perturbed);
+
+        commands.spawn((
+            BurstSegment { lifetime: ttl },
+            Mesh3d(mesh.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_translation(mid).with_rotation(rotation),
+        ));
+    }
+}
+
+// ── Projectile (Geometric, BugCannon, end_game_logic_bomb) ──────────
 
 fn spawn_projectile(
     event: &AttackEvent,
@@ -201,15 +299,7 @@ fn spawn_projectile(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let [r, g, b] = weapon.rgb_color;
-    let color = if r > 2.0 || g > 2.0 || b > 2.0 {
-        LinearRgba::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
-    } else if r == 0.0 && g == 0.0 && b == 0.0 {
-        // No color specified — use a neutral bright color.
-        LinearRgba::new(0.8, 0.8, 0.4, 1.0)
-    } else {
-        LinearRgba::new(r, g, b, 1.0)
-    };
+    let color = tdf_color(weapon.rgb_color);
 
     let speed = if weapon.weapon_velocity > 0.0 {
         weapon.weapon_velocity
@@ -217,11 +307,16 @@ fn spawn_projectile(
         400.0
     };
 
-    let arc_height = weapon.trajectory_height * 0.5;
-    let gravity = weapon.my_gravity;
+    let arc_height = weapon.trajectory_height * 0.4;
+    let proj_size = (weapon.size * 0.4).clamp(1.5, 6.0);
 
-    let proj_size = (weapon.size * 0.5).max(2.0).min(8.0);
-    let mesh = meshes.add(Sphere::new(proj_size));
+    // Geometric uses an octahedron model — approximate with a small cube.
+    let mesh = if !weapon.model.is_empty() && weapon.model != ";" {
+        meshes.add(Cuboid::new(proj_size, proj_size, proj_size))
+    } else {
+        meshes.add(Sphere::new(proj_size))
+    };
+
     let material = materials.add(StandardMaterial {
         base_color: Color::LinearRgba(color),
         emissive: color * 6.0,
@@ -235,7 +330,6 @@ fn spawn_projectile(
             target: event.target_pos,
             speed,
             progress: 0.0,
-            gravity,
             arc_height,
         },
         Mesh3d(mesh),
@@ -244,32 +338,68 @@ fn spawn_projectile(
     ));
 }
 
-/// Tick beam lifetimes (fade out) and projectile movement, despawning when done.
+// ── Melee flash (Wormbite) ──────────────────────────────────────────
+
+fn spawn_melee_flash(
+    event: &AttackEvent,
+    _weapon: &spring_tdf::WeaponDef,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+) {
+    let flash_pos = (event.attacker_pos + event.target_pos) / 2.0;
+    let mesh = meshes.add(Sphere::new(8.0));
+    let material = materials.add(StandardMaterial {
+        base_color: Color::srgba(1.0, 0.3, 0.0, 0.8),
+        emissive: LinearRgba::new(1.0, 0.3, 0.0, 1.0) * 4.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Add,
+        ..default()
+    });
+    commands.spawn((
+        BeamVisual {
+            lifetime: 0.15,
+            max_lifetime: 0.15,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(flash_pos),
+    ));
+}
+
+// ── Tick system ─────────────────────────────────────────────────────
+
 pub fn tick_weapon_fx(
     time: Res<Time>,
-    mut beams: Query<(Entity, &mut BeamVisual, &mut Transform)>,
-    mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform), Without<BeamVisual>>,
+    mut beams: Query<(Entity, &mut BeamVisual, &mut Transform), Without<ProjectileVisual>>,
+    mut bursts: Query<
+        (Entity, &mut BurstSegment),
+        (Without<BeamVisual>, Without<ProjectileVisual>),
+    >,
+    mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
 
-    // Beams: count down lifetime, scale down Y to fade.
     for (entity, mut beam, mut transform) in &mut beams {
         beam.lifetime -= dt;
         if beam.lifetime <= 0.0 {
             commands.entity(entity).despawn();
             continue;
         }
-        let fade = beam.lifetime / beam.max_lifetime;
-        let current_scale = transform.scale;
-        transform.scale = Vec3::new(
-            current_scale.x * fade.sqrt(),
-            current_scale.y * fade.sqrt(),
-            current_scale.z,
-        );
+        // Fade by shrinking cross-section while keeping length.
+        let fade = (beam.lifetime / beam.max_lifetime).sqrt();
+        let s = transform.scale;
+        transform.scale = Vec3::new(s.x.min(1.0) * fade, s.y.min(1.0) * fade, s.z);
     }
 
-    // Projectiles: move along path, despawn on arrival.
+    for (entity, mut burst) in &mut bursts {
+        burst.lifetime -= dt;
+        if burst.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+        }
+    }
+
     for (entity, mut proj, mut transform) in &mut projectiles {
         let total_dist = proj.origin.distance(proj.target);
         if total_dist < 0.1 {
@@ -277,7 +407,6 @@ pub fn tick_weapon_fx(
             continue;
         }
         proj.progress += (proj.speed * dt) / total_dist;
-
         if proj.progress >= 1.0 {
             commands.entity(entity).despawn();
             continue;
@@ -285,16 +414,10 @@ pub fn tick_weapon_fx(
 
         let t = proj.progress;
         let mut pos = proj.origin.lerp(proj.target, t);
-
-        // Arc: parabolic offset peaking at t=0.5.
-        if proj.arc_height > 0.0 || proj.gravity > 0.0 {
+        if proj.arc_height > 0.0 {
             let arc = 4.0 * t * (1.0 - t);
-            let height_offset = proj.arc_height * total_dist * arc;
-            // Gravity pulls downward over time.
-            let gravity_offset = 0.5 * proj.gravity * total_dist * t * t;
-            pos.y += height_offset - gravity_offset;
+            pos.y += proj.arc_height * total_dist * arc;
         }
-
         transform.translation = pos;
     }
 }

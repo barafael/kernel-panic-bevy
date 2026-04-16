@@ -72,8 +72,8 @@ fn main() {
                 units::animation::animation_system.after(units::combat::death_system),
                 units::combat::cleanup_dying.after(units::animation::animation_system),
                 units::animation::decay_death_particles,
-                units::weapon_fx::spawn_beam_visuals.after(units::combat::combat_system),
-                units::weapon_fx::tick_weapon_fx.after(units::weapon_fx::spawn_beam_visuals),
+                units::weapon_fx::spawn_weapon_visuals.after(units::combat::combat_system),
+                units::weapon_fx::tick_weapon_fx.after(units::weapon_fx::spawn_weapon_visuals),
             ),
         )
         .run();

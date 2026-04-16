@@ -2,16 +2,24 @@ use bevy::prelude::*;
 
 use super::animation::CobFileCache;
 use super::components::{Faction, TeamId, UnitType};
-use super::definitions::UnitKind;
+use super::definitions::{self, UnitKind};
 use super::meshes::S3OModelCache;
 use super::spawning::{SelectionVolumeMaterial, spawn_unit};
 
 /// Attached to factories/homebases. Continuously produces units.
+///
+/// The factory always builds the front of its `queue`. When the queue is empty
+/// it falls back to its default `produces` kind (infinite auto-production).
 #[derive(Component)]
 pub struct Producer {
+    /// Default unit produced when the queue is empty.
     produces: UnitKind,
+    /// Seconds to build one unit of the *current* type.
     build_time: f32,
+    /// Seconds accumulated toward the current unit.
     progress: f32,
+    /// Player-enqueued build orders (FIFO). Takes priority over `produces`.
+    queue: Vec<UnitKind>,
 }
 
 impl Producer {
@@ -20,7 +28,32 @@ impl Producer {
             produces,
             build_time,
             progress: 0.0,
+            queue: Vec::new(),
         }
+    }
+
+    /// What is currently being built.
+    pub fn current_production(&self) -> UnitKind {
+        self.queue.first().copied().unwrap_or(self.produces)
+    }
+
+    /// Build progress as a fraction 0.0..1.0.
+    pub fn progress_fraction(&self) -> f32 {
+        if self.build_time > 0.0 {
+            (self.progress / self.build_time).clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// The queued build orders (not including the auto-produced default).
+    pub fn queue(&self) -> &[UnitKind] {
+        &self.queue
+    }
+
+    /// Enqueue a unit to be built.
+    pub fn enqueue(&mut self, kind: UnitKind) {
+        self.queue.push(kind);
     }
 }
 
@@ -62,16 +95,27 @@ pub fn production_system(
     let mut spawns: Vec<(UnitKind, Faction, u8, Vec3)> = Vec::new();
 
     for (mut producer, faction, team, global_tf) in &mut producers {
+        let current_kind = producer.current_production();
+        let current_build_time = definitions::stats(current_kind)
+            .build_time
+            .max(producer.build_time);
+
+        producer.build_time = current_build_time;
         producer.progress += dt;
 
-        if producer.progress >= producer.build_time {
-            producer.progress -= producer.build_time;
+        if producer.progress >= current_build_time {
+            producer.progress -= current_build_time;
 
             let factory_pos = global_tf.translation();
             let offset = Vec3::new(40.0, 0.0, 40.0);
             let spawn_pos = factory_pos + offset;
 
-            spawns.push((producer.produces, *faction, team.0, spawn_pos));
+            spawns.push((current_kind, *faction, team.0, spawn_pos));
+
+            // Pop from queue if this was a queued order.
+            if !producer.queue.is_empty() {
+                producer.queue.remove(0);
+            }
         }
     }
 

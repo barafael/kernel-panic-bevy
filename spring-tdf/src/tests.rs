@@ -472,11 +472,15 @@ mod proptests {
 
             let tdf = Tdf::parse(&doc).unwrap();
             let section = &tdf.sections[0];
+            // Duplicate keys: last value wins (TDF semantics). Build
+            // a map of the expected last-wins values to compare.
+            let mut expected = std::collections::HashMap::new();
             for (k, v) in &entries {
+                expected.insert(k.to_ascii_lowercase(), v.trim().to_string());
+            }
+            for (k, v) in &expected {
                 let stored = section.get(k).unwrap_or("");
-                // Values are trimmed; our generator shouldn't produce
-                // leading/trailing whitespace, so this is exact.
-                prop_assert_eq!(stored, v.trim());
+                prop_assert_eq!(stored, v.as_str());
             }
         }
 
