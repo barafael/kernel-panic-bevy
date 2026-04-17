@@ -75,21 +75,24 @@ Wires Byte's 400 HP/s after 20s, Worm's 300 HP/s after ~13s, homebase regen, etc
 
 ## 2. Missing Units & Stat Corrections
 
-### 2.1 New Unit Types (High — Partial)
+### 2.1 New Unit Types — ✅ DONE
 
-Flow and Gateway landed. 6 units still referenced by faction mechanics but absent from
-`UnitKind`:
+All roster gaps closed. SIGTERM turned out to be a weapon (fired by Signal /
+Terminal air-strike) rather than a standalone unit, so the final additions are:
 
 | Unit | Faction | Role |
 |------|---------|------|
-| ~~Flow~~ | Network | ✅ Added; flying flag wired to skip-navgrid |
-| ~~Gateway~~ | Network | ✅ Added as armed mobile constructor |
-| Trojan | Hacker | Mobile constructor, radar 768 |
+| Flow | Network | Air assault (added earlier) |
+| Gateway | Network | Armed mobile constructor (added earlier) |
+| Trojan | Hacker | Mobile constructor |
 | Terminal | System | Special building, launches SIGTERM air strikes |
 | Obelisk | Hacker | Special building, infection gas artillery |
-| Sigterm | System | Air bomber spawned by Terminal (not directly built) |
-| Debug | Shared | One-shot mine/wall clearer |
-| BadBlock | Shared | Cheap destructible wall (100 HP) |
+| Debug | Shared | One-shot mine/wall clearer (FBI `mineblaster`) |
+| BadBlock | Shared | Cheap destructible wall |
+
+Constructor build lists updated per `SIDEDATA.TDF`. Terminal / Obelisk / Debug /
+BadBlock still need art and ability wiring — that lives under §3.5 (command-fire)
+and §4.3 (explosion effects).
 
 ### 2.2 Stat Corrections — ✅ DONE
 
@@ -238,14 +241,18 @@ Firewall all have shield weapons (Connection does not).
 
 ## 5. AI Opponent
 
-### 5.1 Basic AI (High — single-player requires this)
+### 5.1 Basic AI — ✅ Partial
 
-State machine: Expand → Build → Attack → Defend.
+Build + Attack phases land (`ai_brain` ticks once/second per non-player team):
 
-- Expand: find nearest unoccupied datavent, send constructor to build factory
-- Build: let factories auto-produce, accumulate army
-- Attack: when army size > threshold, send all to nearest enemy homebase
-- Defend: if homebase under attack, recall units
+- **Build**: keep each homebase's production queue topped up (≤3 items) with the
+  faction's basic combat unit (Bit / Bug / Packet).
+- **Attack**: when the team has ≥8 idle combat units, send every idle unit toward
+  the nearest enemy homebase.
+
+Deferred: **Expand** (send constructors to datavents to build secondary factories)
+and **Defend** (recall units when homebase is under attack). Both layer cleanly on
+the existing tick without restructuring.
 
 ### 5.2 Difficulty Levels (Low)
 
@@ -300,31 +307,29 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ## Recommended Implementation Order
 
-Done since last plan: all of §1 (armor classes, AoE splash, burst fire, command-fire
-gating, DOS stun, damage modifiers, auto-heal), §2.2 stat corrections, §3.1 factory
-building on datavents, partial §2.1 (Flow + Gateway), partial §3.8 (flying skips nav
-grid).
+Done since last plan: all of §1 (combat mechanics), §2.1 (roster), §2.2 (stat
+corrections), §3.1 (factory building on datavents), §5.1 AI Build+Attack, partial
+§3.8 (flying skips nav grid).
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
-| 2 | Basic AI | 5.1 | Single-player becomes possible now that factory building works |
-| 3 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
-| 4 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
-| 5 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
-| 6 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
-| 7 | Network buffer + dispatch | 3.2 | Network faction identity |
-| 8 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
-| 9 | Firewall reflector shield | 3.5 | Network defensive ability |
-| 10 | Kernel Boost | 3.7 | Snowball mechanic |
-| 11 | Mines & walls | 3.9 | Tactical depth |
-| 12 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 13 | Shield system | 4.7 | Homebase/factory shields |
-| 14 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 15 | Fog of war | 6 | Full visibility system |
-| 16 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 17 | Audio | 7 | Weapon sounds highest priority |
-| 18 | Multiplayer | 9 | Endgame feature |
+| 1 | AI Expand + Defend | 5.1 | Round out the basic AI once play-tested |
+| 2 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
+| 3 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
+| 4 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
+| 5 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
+| 6 | Network buffer + dispatch | 3.2 | Network faction identity |
+| 7 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
+| 8 | Firewall reflector shield | 3.5 | Network defensive ability |
+| 9 | Kernel Boost | 3.7 | Snowball mechanic |
+| 10 | Mines & walls | 3.9 | Tactical depth |
+| 11 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 12 | Shield system | 4.7 | Homebase/factory shields |
+| 13 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 14 | Fog of war | 6 | Full visibility system |
+| 15 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 16 | Audio | 7 | Weapon sounds highest priority |
+| 17 | Multiplayer | 9 | Endgame feature |
 
 ---
 
