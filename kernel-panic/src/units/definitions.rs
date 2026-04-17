@@ -16,6 +16,8 @@ pub enum UnitKind {
     Socket, // secondary factory on datavents, auto-produces Bits
     #[strum(serialize = "firewall")]
     Firewall, // defensive structure (Network faction — listed here to preserve index order)
+    #[strum(serialize = "terminal")]
+    Terminal, // System special building — launches SIGTERM air strikes
 
     // --- Hacker ---
     #[strum(serialize = "hole")]
@@ -36,6 +38,8 @@ pub enum UnitKind {
     LogicBomb, // suicide unit
     #[strum(serialize = "trojan")]
     Trojan, // mobile builder, places Hacker structures on datavents
+    #[strum(serialize = "obelisk")]
+    Obelisk, // Hacker special building — infection gas artillery
 
     // --- Network ---
     #[strum(serialize = "connection")]
@@ -50,12 +54,18 @@ pub enum UnitKind {
     Gateway, // mobile builder, places Network structures on datavents
     #[strum(serialize = "flow")]
     Flow, // airborne assault, speed scales with team small-building count
+
+    // --- Shared (buildable by every faction's constructor) ---
+    #[strum(serialize = "mineblaster")]
+    Debug, // one-shot mine/wall clearer (FBI unitname=mineblaster, display "Debug")
+    #[strum(serialize = "badblock")]
+    BadBlock, // cheap destructible wall, blocks movement not projectiles
 }
 
 use super::components::Faction;
 
 /// All `UnitKind` variants in declaration order.
-pub const ALL_UNIT_KINDS: [UnitKind; 22] = [
+pub const ALL_UNIT_KINDS: [UnitKind; 26] = [
     UnitKind::Kernel,
     UnitKind::Assembler,
     UnitKind::Bit,
@@ -63,6 +73,7 @@ pub const ALL_UNIT_KINDS: [UnitKind; 22] = [
     UnitKind::Pointer,
     UnitKind::Socket,
     UnitKind::Firewall,
+    UnitKind::Terminal,
     UnitKind::Hole,
     UnitKind::Bug,
     UnitKind::Exploit,
@@ -72,12 +83,15 @@ pub const ALL_UNIT_KINDS: [UnitKind; 22] = [
     UnitKind::Window,
     UnitKind::LogicBomb,
     UnitKind::Trojan,
+    UnitKind::Obelisk,
     UnitKind::Connection,
     UnitKind::Port,
     UnitKind::Packet,
     UnitKind::Signal,
     UnitKind::Gateway,
     UnitKind::Flow,
+    UnitKind::Debug,
+    UnitKind::BadBlock,
 ];
 
 impl UnitKind {
@@ -86,7 +100,10 @@ impl UnitKind {
         self.into()
     }
 
-    /// Faction for this unit kind.
+    /// Default faction for this unit kind. Used as the spawn-faction when
+    /// the caller has no builder context (e.g. the showcase map). Shared
+    /// units (Debug, BadBlock) default to System but are spawned with the
+    /// builder's faction in real gameplay.
     pub fn faction(self) -> Faction {
         match self {
             UnitKind::Kernel
@@ -94,7 +111,10 @@ impl UnitKind {
             | UnitKind::Bit
             | UnitKind::Byte
             | UnitKind::Pointer
-            | UnitKind::Socket => Faction::System,
+            | UnitKind::Socket
+            | UnitKind::Terminal
+            | UnitKind::Debug
+            | UnitKind::BadBlock => Faction::System,
 
             UnitKind::Hole
             | UnitKind::Bug
@@ -104,7 +124,8 @@ impl UnitKind {
             | UnitKind::Dos
             | UnitKind::Window
             | UnitKind::LogicBomb
-            | UnitKind::Trojan => Faction::Hacker,
+            | UnitKind::Trojan
+            | UnitKind::Obelisk => Faction::Hacker,
 
             UnitKind::Firewall
             | UnitKind::Connection
@@ -120,12 +141,15 @@ impl UnitKind {
     pub fn mesh_scale(self) -> f32 {
         match self {
             UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection => 3.0,
+            UnitKind::Terminal | UnitKind::Obelisk => 2.5,
             UnitKind::Socket | UnitKind::Window | UnitKind::Port => 2.0,
             UnitKind::Byte => 2.0,
             UnitKind::Firewall | UnitKind::Exploit | UnitKind::Pointer | UnitKind::Worm => 1.5,
             UnitKind::Dos => 1.3,
             UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway | UnitKind::Flow => 1.2,
+            UnitKind::BadBlock => 1.0,
             UnitKind::LogicBomb => 0.8,
+            UnitKind::Debug => 0.8,
             UnitKind::Virus | UnitKind::Packet => 0.6,
             UnitKind::Bit | UnitKind::Bug => 0.5,
             UnitKind::Signal => 0.4,
@@ -171,8 +195,11 @@ impl UnitKind {
             | UnitKind::Hole
             | UnitKind::Window
             | UnitKind::Port
-            | UnitKind::Firewall => ArmorClass::Building,
-            UnitKind::LogicBomb => ArmorClass::Mine,
+            | UnitKind::Firewall
+            | UnitKind::Terminal
+            | UnitKind::Obelisk
+            | UnitKind::BadBlock => ArmorClass::Building,
+            UnitKind::LogicBomb | UnitKind::Debug => ArmorClass::Mine,
             UnitKind::Virus => ArmorClass::Infectious,
             UnitKind::Signal => ArmorClass::Spam,
         }

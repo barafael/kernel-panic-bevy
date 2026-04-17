@@ -95,6 +95,8 @@ pub fn unit_mesh(
             Cylinder::new(15.0 * scale, 6.0 * scale)
         }
         UnitKind::Firewall | UnitKind::Exploit => Cylinder::new(10.0 * scale, 8.0 * scale),
+        UnitKind::Terminal | UnitKind::Obelisk => Cylinder::new(18.0 * scale, 10.0 * scale),
+        UnitKind::BadBlock => Cylinder::new(8.0 * scale, 8.0 * scale),
         UnitKind::Bit | UnitKind::Bug | UnitKind::Packet | UnitKind::Virus | UnitKind::Signal => {
             Cylinder::new(3.0 * scale, 4.0 * scale)
         }
@@ -105,7 +107,8 @@ pub fn unit_mesh(
         | UnitKind::Worm
         | UnitKind::Dos
         | UnitKind::Pointer
-        | UnitKind::LogicBomb => Cylinder::new(6.0 * scale, 6.0 * scale),
+        | UnitKind::LogicBomb
+        | UnitKind::Debug => Cylinder::new(6.0 * scale, 6.0 * scale),
         UnitKind::Byte => Cylinder::new(12.0 * scale, 10.0 * scale),
     };
     meshes.add(mesh)

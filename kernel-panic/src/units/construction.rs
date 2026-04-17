@@ -54,13 +54,30 @@ pub fn is_constructor(kind: UnitKind) -> bool {
 }
 
 /// Buildings the constructor `kind` can erect on a datavent. Pulled from
-/// upstream `[CANBUILD]` in `SIDEDATA.TDF`, trimmed to the units we have
-/// in our roster (we lack Badblock / Mineblaster / Obelisk).
+/// upstream `[CANBUILD]` in `SIDEDATA.TDF`.
 pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
     match kind {
-        UnitKind::Assembler => &[UnitKind::Socket, UnitKind::LogicBomb],
-        UnitKind::Trojan => &[UnitKind::Window, UnitKind::LogicBomb],
-        UnitKind::Gateway => &[UnitKind::Port, UnitKind::Firewall, UnitKind::LogicBomb],
+        UnitKind::Assembler => &[
+            UnitKind::Socket,
+            UnitKind::BadBlock,
+            UnitKind::LogicBomb,
+            UnitKind::Debug,
+            UnitKind::Terminal,
+        ],
+        UnitKind::Trojan => &[
+            UnitKind::Window,
+            UnitKind::BadBlock,
+            UnitKind::LogicBomb,
+            UnitKind::Debug,
+            UnitKind::Obelisk,
+        ],
+        UnitKind::Gateway => &[
+            UnitKind::Port,
+            UnitKind::Firewall,
+            UnitKind::BadBlock,
+            UnitKind::Debug,
+            UnitKind::LogicBomb,
+        ],
         _ => &[],
     }
 }
