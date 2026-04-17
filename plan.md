@@ -123,32 +123,32 @@ with emerge lead-time (Rise for factories, Fade for infantry) → optional
 Remaining: Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
 (Command-Fire Framework).
 
-### 3.2 Network Packet Buffer & Teleportation (High — faction identity)
+### 3.2 Network Packet Buffer & Teleportation — ✅ DONE
 
-Network's core mechanic: Ports fill a shared buffer instead of spawning units directly.
+`PacketBuffer` resource holds per-team counters. Ports top up every ~5.5s; Port no
+longer has a direct production queue. `T` hotkey with a teleporter (Port or
+Connection) selected dispatches up to 12 Packets in a ring around it toward the
+cursor. `R` hotkey with Packets selected absorbs any within 150 elmos of a friendly
+teleporter back into the buffer. Freshly-dispatched Packets carry a 6s
+`PacketSpawnStun` blocking re-entry.
 
-- `PacketBuffer` resource: per-team counter incremented every 5.5s per Port
-- **Dispatch**: select Port/Connection, press hotkey → spawn up to 12 Packets from buffer
-- **Enter**: select Packets near Port/Connection, press hotkey → despawn Packets, refill buffer
-- 6s cooldown on freshly dispatched Packets before re-entry
-- HUD counter for buffer when playing Network
+Deferred: HUD buffer counter + dispatch command button (mechanic is live via hotkey).
 
-### 3.3 Cloaking (Medium — Hacker identity)
+### 3.3 Cloaking — ✅ DONE
 
-- `Cloaked` marker: unit invisible to enemies unless within `Detector` range
-- Worms: permanently cloaked, briefly revealed when attacking
-- Logic Bombs: cloaked until detonation
-- Detectors: Assembler (500), Trojan (768), Gateway (500)
-- Full implementation needs fog of war (§6), but basic cloaking can toggle visibility
+`Cloaked` marker on Worm and Logic Bomb; `update_cloak_visibility` toggles
+`Visibility::Hidden` for enemy-owned cloaked units unless a detector (Assembler/
+Trojan/Gateway's FBI `RadarDistance`) is within range. Friendly cloaked units stay
+visible so players can manage their own Worms. Full per-team vision is deferred to
+§6.
 
-### 3.4 Bug ↔ Exploit Morph (Medium)
+### 3.4 Bug ↔ Exploit Morph — ✅ DONE
 
-Deploy hotkey transforms Bug into stationary Exploit (artillery) with proportional HP
-transfer. Undeploy reverses.
-
-- Exploit dynamic damage: `damage * (dist / 700.0)` — farther = more damage
-- Exploit target preference: prioritize distant enemies (`proximityPriority=-5`)
-- Needs `dynDamageExp`, `dynDamageRange`, `proximityPriority` added to `WeaponDef`
+`E` hotkey transforms Bug↔Exploit in place with proportional HP. `WeaponDef` gained
+`dyn_damage_exp/dyn_damage_range/dyn_damage_inverted/proximity_priority`;
+BugCannon's Inverted=1/Range=700 scales damage linearly with distance. Target
+selection picks the *farthest* enemy when `proximity_priority < 0`, matching
+Exploit's anti-push role.
 
 ### 3.5 Command-Fire & Area Denial Framework — ✅ Partial
 
@@ -166,12 +166,13 @@ cursor.
 | Firewall | Reflector Shield | needs shield system (§4.7) |
 | Byte | Mine Launcher | needs HP-cost + Logic-Bomb volley |
 
-### 3.6 Infection Chain Refinement (Medium)
+### 3.6 Infection Chain Refinement — ✅ DONE
 
-Currently all infections use the same 6s `INFECTION_DURATION`. Upstream has per-weapon
-windows: VirusBeam 90f, VirusDeath 180f, Wormsplash 200f, Obelisk 30f.
-
-- Virus death should also infect (chain spread via VirusDeath weapon, AoE 90)
+`weapon_infection_duration()` maps the four infecting weapons to their upstream
+frame-count windows. `apply_damage` keys infection on the weapon name (not the
+attacker unit kind) so only Wormsplash / VirusBeam / VirusDeath / Infection trigger
+it — direct Wormbite no longer infects, matching upstream. `death_system` sprays
+VirusDeath at a dying Virus's corpse so the infection chain spreads via AoE.
 
 ### 3.7 Kernel Boost / Production Scaling (Low)
 
@@ -307,28 +308,24 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ## Recommended Implementation Order
 
-Done since last plan: all of §1 (combat mechanics), §2.1 (roster), §2.2 (stat
-corrections), §3.1 (factory building on datavents), §3.5 command-fire framework
-(NX Flag + Infection), §5.1 AI Build+Attack, partial §3.8 (flying skips nav grid).
+Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit morph,
+§3.5 command-fire (NX Flag + Infection), §3.6 infection refinement, plus earlier
+§1/§2/§5.1 work.
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | AI Expand + Defend | 5.1 | Round out the basic AI once play-tested |
-| 2 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
-| 3 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
-| 4 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
-| 5 | Network buffer + dispatch | 3.2 | Network faction identity |
-| 6 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
-| 7 | Firewall reflector shield | 3.5 | Needs shield system first |
-| 8 | Kernel Boost | 3.7 | Snowball mechanic |
-| 9 | Mines & walls | 3.9 | Tactical depth |
-| 10 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 11 | Shield system | 4.7 | Homebase/factory shields + Firewall reflector |
-| 12 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 13 | Fog of war | 6 | Full visibility system |
-| 14 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 15 | Audio | 7 | Weapon sounds highest priority |
-| 16 | Multiplayer | 9 | Endgame feature |
+| 1 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
+| 2 | AI Expand + Defend | 5.1 | Round out the basic AI once play-tested |
+| 3 | Shield system | 4.7 | Unblocks Firewall reflector, homebase/factory shields |
+| 4 | Firewall reflector shield | 3.5 | Network defensive ability |
+| 5 | Kernel Boost | 3.7 | Snowball mechanic |
+| 6 | Mines & walls | 3.9 | Tactical depth |
+| 7 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 8 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 9 | Fog of war | 6 | Full visibility system |
+| 10 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 11 | Audio | 7 | Weapon sounds highest priority |
+| 12 | Multiplayer | 9 | Endgame feature |
 
 ---
 
