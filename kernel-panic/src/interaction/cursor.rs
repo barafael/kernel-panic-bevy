@@ -193,8 +193,8 @@ fn load_cursor_frames(asset_server: Res<AssetServer>, mut state: ResMut<CursorSt
     }
 }
 
-/// ~12 fps animation — matches the Spring default cadence closely enough.
-const FRAME_PERIOD_SECS: f32 = 1.0 / 12.0;
+/// ~5 fps animation — slower than Spring's default for a calmer feel.
+const FRAME_PERIOD_SECS: f32 = 1.0 / 5.0;
 
 fn frame_advance(time: Res<Time>, mut state: ResMut<CursorState>) {
     state.timer.tick(time.delta());

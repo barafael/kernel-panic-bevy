@@ -1,6 +1,7 @@
 pub mod animation;
 pub mod combat;
 pub mod components;
+pub mod construction;
 pub mod definitions;
 pub mod game_over;
 pub mod meshes;
@@ -61,12 +62,18 @@ impl Plugin for UnitsPlugin {
             .add_systems(
                 Update,
                 (
-                    (production::production_system, spawning::emerge_system)
+                    (
+                        production::production_system,
+                        construction::start_construction,
+                        construction::tick_construction,
+                        spawning::emerge_system,
+                    )
                         .chain()
                         .in_set(GameplaySet::Produce),
                     (
                         combat::tick_deploy_state,
                         combat::combat_system,
+                        combat::aim_weapons_system,
                         combat::tick_infections,
                         script_triggers::trigger_movement_scripts,
                         script_triggers::trigger_production_scripts,

@@ -191,12 +191,22 @@ pub(crate) fn apply_ordered_command(
             });
     } else {
         // Replace (or enqueue with no active order): install as active order,
-        // reset the queue, and invalidate any computed path.
-        commands
-            .entity(entity)
-            .insert(MoveTarget(cmd.position()))
+        // reset the queue, and invalidate any computed path. For BuildAt
+        // orders we also stamp PendingBuild so the construction system can
+        // pick the unit up once it has arrived at the site. Any stale
+        // PendingBuild from a previous order is cleared on plain moves.
+        let mut ec = commands.entity(entity);
+        ec.insert(MoveTarget(cmd.position()))
             .insert(CommandQueue::default())
             .remove::<MovePath>();
+        match cmd {
+            QueuedCommand::BuildAt { kind, site } => {
+                ec.insert(crate::units::construction::PendingBuild { kind, site });
+            }
+            QueuedCommand::Move(_) => {
+                ec.remove::<crate::units::construction::PendingBuild>();
+            }
+        }
     }
 }
 

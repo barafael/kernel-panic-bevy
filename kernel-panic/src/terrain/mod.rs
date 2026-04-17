@@ -1,4 +1,5 @@
 pub mod geovent;
+pub mod heightmap;
 pub mod material;
 pub mod mesh;
 

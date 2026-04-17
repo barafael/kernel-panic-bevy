@@ -18,10 +18,11 @@
 
 use bevy::prelude::*;
 
-use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
+use spring_map::map_types::ParsedMap;
 
 use crate::map_loading::MapEntity;
 use crate::rendering::camera::RtsCamera;
+use crate::terrain::heightmap::Heightmap;
 
 /// Emits smoke puffs from a single geovent.
 #[derive(Component)]
@@ -77,6 +78,7 @@ const SPAWN_Y_OFFSET: f32 = -10.0;
 
 pub fn spawn_geovent_smokers(
     map: &ParsedMap,
+    heightmap: &Heightmap,
     commands: &mut Commands,
     assets: &mut GeoventAssets,
     meshes: &mut Assets<Mesh>,
@@ -86,17 +88,12 @@ pub fn spawn_geovent_smokers(
     ensure_assets(assets, meshes, materials, images);
 
     let mut count = 0u32;
-    let heightmap_w = map.header.heightmap_width();
-    let heightmap_h = map.header.heightmap_height();
-    let square_size = SQUARE_SIZE as f32;
 
     for feature in &map.features {
         if !feature.feature_type.is_geovent() {
             continue;
         }
-        let hx = (feature.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-        let hz = (feature.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
-        let height = map.heights[hz * heightmap_w + hx];
+        let pos = heightmap.place(feature.x, feature.z);
 
         // Seed the per-smoker PRNG deterministically from feature coords so
         // identical maps produce identical jitter across runs.
@@ -107,11 +104,11 @@ pub fn spawn_geovent_smokers(
         commands.spawn((
             MapEntity,
             GeoventSmoker {
-                pos: Vec3::new(feature.x, height, feature.z),
+                pos,
                 emit_timer: initial_timer,
                 rng,
             },
-            Transform::from_xyz(feature.x, height, feature.z),
+            Transform::from_translation(pos),
             Visibility::default(),
         ));
         count += 1;

@@ -1,6 +1,6 @@
 pub mod cursor;
 pub mod movement;
-mod selection;
+pub(crate) mod selection;
 
 use bevy::prelude::*;
 

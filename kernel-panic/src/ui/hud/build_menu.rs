@@ -1,5 +1,7 @@
-//! Top-left build menu: shows buildable units for the selected factory and
-//! its current production progress/queue. Clicking an icon enqueues a unit.
+//! Top-left build menu: shows buildable units for the selected factory
+//! and its current production progress/queue. Clicking an icon enqueues a
+//! unit on a stationary factory, or enters datavent placement mode on a
+//! mobile constructor (Assembler / Trojan / Gateway).
 
 use bevy::prelude::*;
 
@@ -10,6 +12,7 @@ use super::style::{
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, UnitType};
+use crate::units::construction::{buildings_for, is_constructor};
 use crate::units::definitions::UnitKind;
 use crate::units::production::Producer;
 use crate::units::unit_registry::UnitRegistry;
@@ -18,17 +21,29 @@ pub struct BuildMenuPlugin;
 
 impl Plugin for BuildMenuPlugin {
     fn build(&self, app: &mut App) {
-        app.add_message::<BuildOrderEvent>().add_systems(
-            Update,
-            (update_build_menu, handle_build_clicks, apply_build_orders),
-        );
+        app.add_message::<BuildOrderEvent>()
+            .add_message::<BeginPlacementEvent>()
+            .add_systems(
+                Update,
+                (update_build_menu, handle_build_clicks, apply_build_orders),
+            );
     }
 }
 
-/// Fired when the player clicks a build icon.
+/// Fired when the player clicks a build icon on a stationary factory.
 #[derive(Message)]
 struct BuildOrderEvent {
     kind: UnitKind,
+}
+
+/// Fired when the player clicks a build icon on a mobile constructor.
+/// The placement module (`placement.rs`) picks this up, spawns a ghost
+/// preview of the building, and waits for a left-click on a datavent
+/// before issuing a `BuildAt` command (shift-queued if shift is held).
+#[derive(Message)]
+pub struct BeginPlacementEvent {
+    pub builder: Entity,
+    pub kind: UnitKind,
 }
 
 #[derive(Component)]
@@ -39,7 +54,13 @@ struct BuildMenu;
 struct BuildIcon(UnitKind);
 
 /// Build options per factory/constructor type.
-/// Hardcoded from upstream sidedata.lua — acceptable for KP's fixed unit roster.
+///
+/// Matches upstream `SIDEDATA.TDF` with one game-design rule overlaid:
+/// **homebases (Kernel / Hole / Connection) build only mobile units**;
+/// static structures (Socket, Window, Port, Firewall, LogicBomb, …) are
+/// produced by the mobile builder line (Assembler / Trojan / Gateway),
+/// which requires placing the building on a datavent. Construction unit
+/// build lists live in `construction::buildings_for`.
 fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
     match kind {
         UnitKind::Kernel => &[
@@ -47,19 +68,18 @@ fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
             UnitKind::Assembler,
             UnitKind::Byte,
             UnitKind::Pointer,
-            UnitKind::Firewall,
         ],
         UnitKind::Socket => &[UnitKind::Bit],
         UnitKind::Hole => &[
             UnitKind::Bug,
             UnitKind::Worm,
             UnitKind::Dos,
-            UnitKind::LogicBomb,
+            UnitKind::Trojan,
         ],
         UnitKind::Window => &[UnitKind::Bug],
-        UnitKind::Connection => &[UnitKind::Packet, UnitKind::Signal],
+        UnitKind::Connection => &[UnitKind::Packet, UnitKind::Signal, UnitKind::Gateway],
         UnitKind::Port => &[UnitKind::Packet],
-        UnitKind::Assembler => &[UnitKind::Socket, UnitKind::Firewall],
+        kind if is_constructor(kind) => buildings_for(kind),
         _ => &[],
     }
 }
@@ -310,10 +330,30 @@ fn spawn_build_icon(
 
 fn handle_build_clicks(
     interaction_q: Query<(&Interaction, &BuildIcon), Changed<Interaction>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
     mut ev_build: MessageWriter<BuildOrderEvent>,
+    mut ev_placement: MessageWriter<BeginPlacementEvent>,
 ) {
     for (interaction, build_icon) in &interaction_q {
-        if *interaction == Interaction::Pressed {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        // Route the click based on what the first selected unit is: a
+        // mobile constructor enters placement mode, a stationary factory
+        // just enqueues. If nothing that can build is selected, drop the
+        // click — the icons shouldn't be visible in that case anyway.
+        let Some((builder_entity, ut)) = selected_q
+            .iter()
+            .find(|(_, ut)| is_constructor(ut.0) || !buildable_units(ut.0).is_empty())
+        else {
+            continue;
+        };
+        if is_constructor(ut.0) {
+            ev_placement.write(BeginPlacementEvent {
+                builder: builder_entity,
+                kind: build_icon.0,
+            });
+        } else {
             ev_build.write(BuildOrderEvent { kind: build_icon.0 });
         }
     }

@@ -4,7 +4,6 @@ use bevy::prelude::*;
 use spring_cob::CobVm;
 use spring_unit_mesh::S3OPiece;
 
-use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 
 use super::animation::{CobAnimator, CobFileCache, PieceIndex, load_cob_cached};
@@ -15,6 +14,7 @@ use super::meshes::{S3OModelCache, unit_material, unit_radius};
 use super::production::default_production;
 use super::unit_registry::UnitRegistry;
 use crate::map_loading::MapEntity;
+use crate::terrain::heightmap::Heightmap;
 
 const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
 
@@ -94,7 +94,7 @@ pub const EMERGE_DURATION: f32 = 0.6;
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_homebases(
-    parsed: &ParsedMap,
+    heightmap: &Heightmap,
     map_info: &MapInfo,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -105,19 +105,12 @@ pub fn spawn_homebases(
     unit_registry: &UnitRegistry,
 ) {
     let invisible_mat = get_or_create_invisible_material(commands, materials);
-    let square_size = SQUARE_SIZE as f32;
 
     for start_pos in &map_info.start_positions {
         let faction = FACTION_ORDER[start_pos.team as usize % FACTION_ORDER.len()];
         let kind = faction.homebase();
 
-        let heightmap_w = parsed.header.heightmap_width();
-        let heightmap_x = (start_pos.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-        let heightmap_z = (start_pos.z / square_size)
-            .clamp(0.0, (parsed.header.heightmap_height() - 1) as f32)
-            as usize;
-        let height = parsed.heights[heightmap_z * heightmap_w + heightmap_x];
-        let position = Vec3::new(start_pos.x, height, start_pos.z);
+        let position = heightmap.place(start_pos.x, start_pos.z);
 
         spawn_unit(
             kind,
@@ -149,9 +142,11 @@ const SHOWCASE_KINDS: &[UnitKind] = &[
     UnitKind::Bug,
     UnitKind::Worm,
     UnitKind::Dos,
+    UnitKind::Trojan,
     UnitKind::Virus,
     UnitKind::Packet,
     UnitKind::Signal,
+    UnitKind::Gateway,
 ];
 
 /// Spawn one of each mobile unit at the map's start positions, instead of
@@ -159,7 +154,7 @@ const SHOWCASE_KINDS: &[UnitKind] = &[
 /// inspection of unit models / animations / pathing in isolation.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_showcase(
-    parsed: &ParsedMap,
+    heightmap: &Heightmap,
     map_info: &MapInfo,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -170,9 +165,6 @@ pub fn spawn_showcase(
     unit_registry: &UnitRegistry,
 ) {
     let invisible_mat = get_or_create_invisible_material(commands, materials);
-    let square_size = SQUARE_SIZE as f32;
-    let heightmap_w = parsed.header.heightmap_width();
-    let heightmap_h = parsed.header.heightmap_height();
 
     let mut showcase_positions: Vec<(UnitKind, Vec3)> = Vec::new();
 
@@ -180,10 +172,7 @@ pub fn spawn_showcase(
         let Some(&kind) = SHOWCASE_KINDS.get(slot) else {
             break;
         };
-        let hx = (start_pos.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-        let hz = (start_pos.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
-        let height = parsed.heights[hz * heightmap_w + hx];
-        let position = Vec3::new(start_pos.x, height, start_pos.z);
+        let position = heightmap.place(start_pos.x, start_pos.z);
         showcase_positions.push((kind, position));
 
         // All showcase units share team 0 so they never engage each other
@@ -222,10 +211,7 @@ pub fn spawn_showcase(
         };
         let offset = Vec3::new(220.0, 0.0, 0.0);
         let target_xz = *position + offset;
-        let hx = (target_xz.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-        let hz = (target_xz.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
-        let height = parsed.heights[hz * heightmap_w + hx];
-        let target_pos = Vec3::new(target_xz.x, height, target_xz.z);
+        let target_pos = heightmap.place(target_xz.x, target_xz.z);
         spawn_unit(
             target_kind,
             target_kind.faction(),

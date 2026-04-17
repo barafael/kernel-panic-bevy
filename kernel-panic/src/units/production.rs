@@ -70,6 +70,10 @@ impl Producer {
 
 /// Which units are factories and what they produce by default.
 /// Hardcoded from upstream sidedata.lua — acceptable for KP's fixed unit roster.
+///
+/// Mobile builders (Assembler / Trojan / Gateway) are *not* listed here —
+/// they use the `construction` pipeline (walk to datavent, erect on site)
+/// rather than the factory-style progress-and-emerge flow.
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
     match kind {
         UnitKind::Kernel => Some(Producer::new(UnitKind::Bit)),

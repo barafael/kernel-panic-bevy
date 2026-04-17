@@ -6,6 +6,7 @@
 mod build_menu;
 mod info_panel;
 mod order_palette;
+mod placement;
 mod previews;
 mod style;
 
@@ -14,6 +15,7 @@ use bevy::prelude::*;
 use build_menu::BuildMenuPlugin;
 use info_panel::InfoPanelPlugin;
 use order_palette::OrderPalettePlugin;
+use placement::PlacementPlugin;
 use previews::PreviewsPlugin;
 
 pub struct HudPlugin;
@@ -25,6 +27,7 @@ impl Plugin for HudPlugin {
             InfoPanelPlugin,
             BuildMenuPlugin,
             OrderPalettePlugin,
+            PlacementPlugin,
         ));
     }
 }

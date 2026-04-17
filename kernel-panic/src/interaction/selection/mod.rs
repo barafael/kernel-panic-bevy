@@ -11,6 +11,8 @@ use bevy::prelude::*;
 
 pub(super) use self::core::Hovered;
 pub use self::core::Selected;
+pub(crate) use self::core::SelectionSet;
+pub(crate) use self::right_click::apply_ordered_command;
 
 use self::core::SelectionCorePlugin;
 use health_bars::HealthBarsPlugin;

@@ -99,6 +99,8 @@ pub fn unit_mesh(
             Cylinder::new(3.0 * scale, 4.0 * scale)
         }
         UnitKind::Assembler
+        | UnitKind::Trojan
+        | UnitKind::Gateway
         | UnitKind::Worm
         | UnitKind::Dos
         | UnitKind::Pointer

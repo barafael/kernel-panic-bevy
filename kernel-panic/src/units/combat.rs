@@ -68,6 +68,24 @@ pub struct Deployable {
     pub timer: f32,
 }
 
+/// Stamped by `combat_system` each frame an armed unit has picked a target
+/// it wants to fire at. Read by `aim_weapons_system` to rotate the body /
+/// tilt the gun before combat actually commits the shot. Removed in
+/// frames where the unit has no viable target so aim systems don't keep
+/// steering toward a stale position.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct AimTarget {
+    pub pos: Vec3,
+    /// Arc height for ballistic weapons (passed through from the
+    /// WeaponDef so the gun elevates for the lob, not the direct line).
+    pub arc_height: f32,
+}
+
+/// Max heading error (radians) at which a Deployable is allowed to fire.
+/// ~5° — tight enough that the gun is visibly pointed at the target, loose
+/// enough that the Pointer doesn't get stuck oscillating.
+pub const AIM_HEADING_TOLERANCE: f32 = 0.09;
+
 /// Open/Close animation length in seconds, matching the upstream COB
 /// script timings (legs move over 0.5s, gun extends over another 1.0s).
 pub const DEPLOY_DURATION: f32 = 1.5;
@@ -172,12 +190,10 @@ pub fn combat_system(
 
     for (entity, unit_type, attacker_faction, attacker_team, attacker_gtf, deployable) in &attackers
     {
-        // Deployable units (Pointer) can only fire while fully open.
-        if let Some(d) = deployable
-            && d.state != DeployState::Open
-        {
-            continue;
-        }
+        // Deployable units (Pointer) can only fire while fully open. They
+        // can still *aim* while opening (so the gun is pointed when Open
+        // completes), but firing is gated on the open state.
+        let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
 
         let weapon_name = unit_registry.weapon(unit_type.0);
 
@@ -192,13 +208,7 @@ pub fn combat_system(
         let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
 
         if range == 0.0 {
-            continue;
-        }
-
-        // Skip if still on cooldown.
-        if let Ok(cd) = cooldowns.get(entity)
-            && cd.remaining > 0.0
-        {
+            commands.entity(entity).remove::<AimTarget>();
             continue;
         }
 
@@ -225,25 +235,166 @@ pub fn combat_system(
             }
         }
 
-        if let Some((target_entity, target_pos, _)) = best {
-            damage_queue.0.push((target_entity, damage, entity));
-            let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
-            commands.entity(entity).insert((
-                AttackCooldown {
-                    remaining: cooldown,
-                },
-                JustFired {
-                    target_pos,
-                    arc_height,
-                },
-            ));
-            if !weapon_name.is_empty() {
-                pending_attacks.events.push(AttackEvent {
-                    attacker_pos,
-                    target_pos,
-                    weapon_name: weapon_name.to_string(),
-                });
+        let Some((target_entity, target_pos, _)) = best else {
+            commands.entity(entity).remove::<AimTarget>();
+            continue;
+        };
+
+        let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
+
+        // Always stamp the aim target while we have a candidate — that
+        // lets `aim_weapons_system` keep steering the body/gun even
+        // while we're still on cooldown or still opening, so the weapon
+        // is already on-target when it's allowed to fire.
+        commands.entity(entity).insert(AimTarget {
+            pos: target_pos,
+            arc_height,
+        });
+
+        if fire_blocked_by_deploy {
+            continue;
+        }
+
+        // Skip if still on cooldown.
+        if let Ok(cd) = cooldowns.get(entity)
+            && cd.remaining > 0.0
+        {
+            continue;
+        }
+
+        // For Deployable units, only fire when the body is actually
+        // pointed at the target. The aim system will have been steering
+        // us all along; this just delays the shot until the steering
+        // has caught up, preventing the Pointer from firing off-axis.
+        if deployable.is_some() {
+            let forward = attacker_gtf.forward().as_vec3();
+            let to_target = Vec3::new(
+                target_pos.x - attacker_pos.x,
+                0.0,
+                target_pos.z - attacker_pos.z,
+            );
+            let to_target_len_sq = to_target.length_squared();
+            if to_target_len_sq > 1e-6 {
+                let to_target_n = to_target / to_target_len_sq.sqrt();
+                let forward_xz = {
+                    let f = Vec3::new(forward.x, 0.0, forward.z);
+                    if f.length_squared() < 1e-6 {
+                        Vec3::Z
+                    } else {
+                        f.normalize()
+                    }
+                };
+                let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
+                if align.acos() > AIM_HEADING_TOLERANCE {
+                    continue;
+                }
             }
+        }
+
+        damage_queue.0.push((target_entity, damage, entity));
+        commands.entity(entity).insert((
+            AttackCooldown {
+                remaining: cooldown,
+            },
+            JustFired {
+                target_pos,
+                arc_height,
+            },
+        ));
+        if !weapon_name.is_empty() {
+            pending_attacks.events.push(AttackEvent {
+                attacker_pos,
+                target_pos,
+                weapon_name: weapon_name.to_string(),
+            });
+        }
+    }
+}
+
+/// System: steer Deployable units to face their current `AimTarget` at
+/// the unit's FBI TurnRate, and tilt the `gunbase` piece by the pitch
+/// required to sight the target (accounting for ballistic arc height).
+/// The rotation is written directly into the CobAnimator's `piece_rotations`
+/// for gunbase, bypassing the COB AimWeapon1 script — our VM doesn't
+/// currently route HEADING reads/writes back to the unit transform, so
+/// the upstream .bos aim loop is inert. Doing this host-side keeps the
+/// animated gun lined up with whatever the unit is actually shooting at.
+pub fn aim_weapons_system(
+    time: Res<Time>,
+    mut query: Query<(
+        &mut Transform,
+        &GlobalTransform,
+        &UnitType,
+        &AimTarget,
+        &mut CobAnimator,
+        &Deployable,
+    )>,
+    unit_registry: Res<UnitRegistry>,
+) {
+    let dt = time.delta_secs();
+    for (mut transform, gtf, unit_type, aim, mut animator, _deploy) in &mut query {
+        let attacker_pos = gtf.translation();
+        let to_target = Vec3::new(aim.pos.x - attacker_pos.x, 0.0, aim.pos.z - attacker_pos.z);
+        let horizontal_dist = to_target.length();
+        if horizontal_dist < 1e-4 {
+            continue;
+        }
+
+        // Body heading: rotate toward the target at the unit's TurnRate.
+        let desired_forward = to_target / horizontal_dist;
+        let forward_vec = transform.forward().as_vec3();
+        let current_xz = {
+            let f = Vec3::new(forward_vec.x, 0.0, forward_vec.z);
+            if f.length_squared() < 1e-6 {
+                Vec3::Z
+            } else {
+                f.normalize()
+            }
+        };
+        let turn_rate = unit_registry.turn_rate(unit_type.0);
+        let max_turn = if turn_rate > 0.0 {
+            turn_rate * dt
+        } else {
+            std::f32::consts::TAU
+        };
+        let new_forward =
+            crate::interaction::movement::rotate_toward_xz(current_xz, desired_forward, max_turn);
+        if new_forward.length_squared() > 1e-6 {
+            transform.look_to(new_forward, Vec3::Y);
+        }
+
+        // Gunbase pitch: elevate the barrel. For a ballistic lob of peak
+        // height h over distance d, the launch angle above horizontal is
+        // roughly atan(4h/d); add that to the direct line-of-sight pitch
+        // so mortar-type shots arc onto the target.
+        let dy = aim.pos.y - attacker_pos.y;
+        let direct_pitch = (dy).atan2(horizontal_dist);
+        let arc_pitch = if aim.arc_height > 0.0 && horizontal_dist > 1.0 {
+            (4.0 * aim.arc_height / horizontal_dist).atan()
+        } else {
+            0.0
+        };
+        let pitch = direct_pitch + arc_pitch;
+
+        // pointer.bos sets gunbase's rest rotation to x-axis π/2 in Create
+        // (so the barrel folds flat). AimWeapon1 rewrites it to (π/2 − p),
+        // which is the same convention: higher pitch = smaller X rotation.
+        // Since our VM doesn't actually run the aim loop, mirror it here.
+        let gunbase_idx = animator
+            .cob
+            .piece_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case("gunbase"));
+        if let Some(idx) = gunbase_idx
+            && idx < animator.piece_rotations.len()
+        {
+            let target_x = std::f32::consts::FRAC_PI_2 - pitch;
+            animator.target_rotations[idx][0] = target_x;
+            // Reasonable pitch rate (~90°/sec) so the barrel visibly
+            // swings instead of snapping. The COB script uses speed <50>
+            // (50 ang-units/frame ≈ 8.2°/sec) which feels too sluggish
+            // for a responsive host-driven aim; we split the difference.
+            animator.turn_speeds[idx][0] = std::f32::consts::PI * 0.5;
         }
     }
 }

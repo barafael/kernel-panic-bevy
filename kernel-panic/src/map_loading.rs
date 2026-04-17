@@ -18,6 +18,7 @@ use crate::rendering::camera::{
     MapBounds, RtsCamera, RtsCameraState, compute_transform_from_state,
 };
 use crate::terrain::geovent::{GeoventAssets, spawn_geovent_smokers};
+use crate::terrain::heightmap::Heightmap;
 use crate::terrain::material::create_terrain_material;
 use crate::terrain::mesh::generate_terrain_chunks;
 use crate::ui;
@@ -280,8 +281,11 @@ fn load_map_at_index(
         );
     }
 
+    let heightmap = Heightmap::from_parsed(parsed);
+
     spawn_terrain(
         parsed,
+        &heightmap,
         terrain_material,
         commands,
         meshes,
@@ -296,8 +300,17 @@ fn load_map_at_index(
             &parsed.heights,
             parsed.header.heightmap_width() as u32,
             parsed.header.heightmap_height() as u32,
-            0.8,  // max_slope: KP kbot units can handle moderate slopes
-            40.0, // slope_mod: Spring default
+            // max_slope = rise/run above which terrain is impassable. 3.0
+            // (~72°) only blocks near-vertical cliffs, leaving all climbable
+            // hills open. Keeps `0.8` (the previous value) from detouring
+            // around every modest rise.
+            3.0,
+            // slope_mod = how much slope slows travel. Spring's default is
+            // 40, which leaves cliff-edge shortcuts cheaper than long flat
+            // detours. Bumping heavily so the pathfinder prefers gentle
+            // routes when they exist but still crosses a cliff if that's
+            // the only way.
+            400.0,
         );
         let node_layer = spring_pathfinding::NodeLayer::new(&speed_map);
         info!(
@@ -331,7 +344,7 @@ fn load_map_at_index(
         apply_fog(map_info, parsed, commands);
         if map_name.eq_ignore_ascii_case("Showcase") {
             spawn_showcase(
-                parsed,
+                &heightmap,
                 map_info,
                 commands,
                 meshes,
@@ -343,7 +356,7 @@ fn load_map_at_index(
             );
         } else {
             spawn_homebases(
-                parsed,
+                &heightmap,
                 map_info,
                 commands,
                 meshes,
@@ -360,6 +373,8 @@ fn load_map_at_index(
             map_info.gravity,
         );
     }
+
+    commands.insert_resource(heightmap);
 }
 
 fn setup_camera(
@@ -439,6 +454,7 @@ fn build_terrain_material_from_texture(
 
 fn spawn_terrain(
     map: &ParsedMap,
+    heightmap: &Heightmap,
     terrain_material: Handle<StandardMaterial>,
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
@@ -459,7 +475,15 @@ fn spawn_terrain(
         ));
     }
 
-    spawn_geovent_smokers(map, commands, geovent_assets, meshes, std_materials, images);
+    spawn_geovent_smokers(
+        map,
+        heightmap,
+        commands,
+        geovent_assets,
+        meshes,
+        std_materials,
+        images,
+    );
 }
 
 fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {

@@ -102,6 +102,18 @@ fn cobwtf_spin_axis(axis: i32, value: i32) -> i32 {
     }
 }
 
+/// Move destinations on the X axis are mirrored between Spring and Bevy.
+/// Spring's engine flips the sign of a piece's X offset when loading s3o
+/// (so `move left to x-axis [10]` sends the piece to world x=-10), but
+/// our parser keeps authored offsets verbatim. The COB `left` piece on
+/// the Pointer sits at geometric x∈[-16..0]; Open() sends it to [10],
+/// which should slide it OUTWARD (more negative X), not toward center.
+/// Flipping X here reproduces Spring's behavior so Open parts the halves
+/// and Close brings them back together. Y and Z map 1:1.
+fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
+    if axis == 0 { -value } else { value }
+}
+
 /// System: tick all CobAnimator VMs and apply piece transforms.
 #[allow(clippy::too_many_arguments)]
 pub fn animation_system(
@@ -159,11 +171,10 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        // Move destinations map 1:1 — the COB "left" piece sits
-                        // at local -X and sliding it to +X visibly moves it
-                        // outward, which is what the Pointer Open animation
-                        // wants.
-                        let pos = spring_linear_to_elmos(*destination, animator.linear_constant);
+                        let pos = spring_linear_to_elmos(
+                            cobwtf_move_axis(*axis, *destination),
+                            animator.linear_constant,
+                        );
                         animator.piece_translations[p][a] = pos;
                         animator.target_translations[p][a] = pos;
                         animator.move_speeds[p][a] = 0.0;
@@ -178,8 +189,10 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        animator.target_translations[p][a] =
-                            spring_linear_to_elmos(*destination, animator.linear_constant);
+                        animator.target_translations[p][a] = spring_linear_to_elmos(
+                            cobwtf_move_axis(*axis, *destination),
+                            animator.linear_constant,
+                        );
                         animator.move_speeds[p][a] =
                             spring_linear_to_elmos(speed.abs(), animator.linear_constant);
                     }

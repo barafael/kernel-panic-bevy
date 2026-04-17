@@ -78,6 +78,19 @@ impl UnitRegistry {
             .map_or(0.0, |d| d.max_velocity * SPRING_SIM_FPS)
     }
 
+    /// Maximum turn speed in radians per second. Spring's FBI `TurnRate` is
+    /// in 16-bit heading units per sim frame (65536 = 360°, 30 fps), so
+    /// `rad/sec = TurnRate / 65536 * 2π * 30`. A TurnRate of 0 means the
+    /// unit can't rotate (buildings); our movement system treats that as
+    /// "snap instantly" so the face-target step is still coherent but
+    /// doesn't produce a divide-by-zero.
+    pub fn turn_rate(&self, kind: UnitKind) -> f32 {
+        const SPRING_ANGLE_UNITS_PER_REV: f32 = 65536.0;
+        self.def(kind).map_or(0.0, |d| {
+            d.turn_rate / SPRING_ANGLE_UNITS_PER_REV * std::f32::consts::TAU * SPRING_SIM_FPS
+        })
+    }
+
     /// Approximate collision radius in world units (elmos) derived from the
     /// FBI footprint. Spring's `FootprintX` / `FootprintZ` are in map squares
     /// (1 square = 8 elmos), so half the larger dimension is a reasonable

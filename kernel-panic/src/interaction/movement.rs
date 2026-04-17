@@ -3,13 +3,27 @@ use bevy::prelude::*;
 use spring_pathfinding::{NodeLayer, find_path};
 
 use super::selection::Selected;
+use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{DeployState, Deployable};
 use crate::units::components::UnitType;
+use crate::units::definitions::UnitKind;
 use crate::units::unit_registry::UnitRegistry;
+
+/// Rate at which the pitch/roll component of a unit's rotation relaxes
+/// toward the slope-aligned target. Higher = snappier tilt, lower = more
+/// sluggish. Yaw is set directly (unaffected by this constant).
+const TILT_SMOOTH_RATE: f32 = 8.0;
 
 /// When present, the unit will move toward this world position.
 #[derive(Component)]
 pub struct MoveTarget(pub Vec3);
+
+/// Per-unit slope tilt, smoothed across frames. Kept as a component rather
+/// than extracted from `Transform::rotation` each frame because tilt rotates
+/// the forward vector off the XZ plane, and re-reading it would leak into
+/// yaw on the next steering pass.
+#[derive(Component, Default)]
+pub struct SlopeTilt(pub Quat);
 
 /// A computed path the unit follows waypoint-by-waypoint.
 #[derive(Component)]
@@ -24,12 +38,20 @@ pub struct MovePath {
 #[derive(Clone, Copy, Debug)]
 pub enum QueuedCommand {
     Move(Vec3),
+    /// Walk to `site`, then erect a building of `kind` there. Used by
+    /// constructor units (Assembler / Trojan / Gateway) after the player
+    /// picks a building in the build menu and clicks on a datavent.
+    BuildAt {
+        kind: UnitKind,
+        site: Vec3,
+    },
 }
 
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
             QueuedCommand::Move(p) => *p,
+            QueuedCommand::BuildAt { site, .. } => *site,
         }
     }
 }
@@ -71,6 +93,7 @@ pub fn movement_system(
     mut commands: Commands,
     time: Res<Time>,
     mut nav_grid: Option<ResMut<NavGrid>>,
+    heightmap: Option<Res<Heightmap>>,
     mut query: Query<(
         Entity,
         &UnitType,
@@ -79,6 +102,7 @@ pub fn movement_system(
         Option<&mut MovePath>,
         Option<&mut CommandQueue>,
         Option<&Deployable>,
+        Option<&mut SlopeTilt>,
     )>,
     unit_registry: Res<UnitRegistry>,
 ) {
@@ -90,7 +114,7 @@ pub fn movement_system(
     // "already at its goal".
     let snapshot: Vec<UnitSnapshot> = query
         .iter()
-        .map(|(e, ut, tf, target, _, _, _)| UnitSnapshot {
+        .map(|(e, ut, tf, target, _, _, _, _)| UnitSnapshot {
             entity: e,
             pos: tf.translation,
             radius: unit_registry.collision_radius(ut.0),
@@ -99,8 +123,16 @@ pub fn movement_system(
         })
         .collect();
 
-    for (entity, unit_type, mut transform, move_target, move_path, mut queue, deployable) in
-        &mut query
+    for (
+        entity,
+        unit_type,
+        mut transform,
+        move_target,
+        move_path,
+        mut queue,
+        deployable,
+        mut slope_tilt,
+    ) in &mut query
     {
         let speed = unit_registry.speed(unit_type.0);
         if speed == 0.0 {
@@ -150,11 +182,23 @@ pub fn movement_system(
             });
             match next {
                 Some(QueuedCommand::Move(pos)) => {
-                    commands.entity(entity).insert(MoveTarget(pos));
+                    commands
+                        .entity(entity)
+                        .insert(MoveTarget(pos))
+                        .remove::<crate::units::construction::PendingBuild>();
+                }
+                Some(QueuedCommand::BuildAt { kind, site }) => {
+                    commands
+                        .entity(entity)
+                        .insert(MoveTarget(site))
+                        .insert(crate::units::construction::PendingBuild { kind, site });
                 }
                 None => {
                     commands.entity(entity).remove::<MoveTarget>();
                     commands.entity(entity).remove::<CommandQueue>();
+                    commands
+                        .entity(entity)
+                        .remove::<crate::units::construction::PendingBuild>();
                 }
             }
             continue;
@@ -184,8 +228,49 @@ pub fn movement_system(
         }
 
         let direction = diff / distance;
-        let step = speed * time.delta_secs();
-        let desired = direction * step.min(distance);
+        let dt = time.delta_secs();
+
+        // Rotate toward the desired heading at the unit's FBI TurnRate.
+        // Spring ties forward motion to facing: while the unit is still
+        // swinging around, it moves at reduced speed (falling to zero for a
+        // full-reverse heading). We reproduce that with a cos(error) gate
+        // so high-TurnRate units snap-and-drive and clunky ones (Pointer,
+        // Worm, Dos) visibly pivot before committing to the new heading.
+        let desired_forward = Vec3::new(direction.x, 0.0, direction.z);
+        let current_forward = transform.forward().as_vec3();
+        let current_xz = {
+            let mut f = Vec3::new(current_forward.x, 0.0, current_forward.z);
+            if f.length_squared() < 1e-6 {
+                f = Vec3::Z;
+            }
+            f.normalize()
+        };
+
+        let turn_rate = unit_registry.turn_rate(unit_type.0);
+        let max_turn = if turn_rate > 0.0 {
+            turn_rate * dt
+        } else {
+            // TurnRate=0 means "no rotation delay in the FBI" — snap.
+            std::f32::consts::TAU
+        };
+        let new_forward = rotate_toward_xz(current_xz, desired_forward, max_turn);
+
+        // Facing-gated forward speed. A unit that's pointed at its goal
+        // runs full speed; one pivoting toward it still creeps forward so
+        // it isn't frozen in place — the previous zero-floor meant slow-
+        // turning units went completely static for long heading changes
+        // (and never arrived at waypoints behind them). Minimum gate is
+        // 30% of full speed; anything above that scales with cos(err).
+        const PIVOT_SPEED_FLOOR: f32 = 0.3;
+        let align = new_forward
+            .dot(desired_forward)
+            .clamp(0.0, 1.0)
+            .max(PIVOT_SPEED_FLOOR);
+        let step = speed * dt * align;
+        if step < 1e-4 {
+            continue;
+        }
+        let desired = new_forward * step.min(distance);
 
         // Resolve desired motion against every other unit. Spring-style:
         // units push each other with radial + lateral slide, weighted by
@@ -194,16 +279,77 @@ pub fn movement_system(
 
         transform.translation += resolved;
 
-        // Face the direction we actually moved (post-slide), falling back
-        // to the intended direction if we barely moved so idle-jitter
-        // doesn't flip the unit's facing around.
-        let resolved_xz = Vec3::new(resolved.x, 0.0, resolved.z);
-        if resolved_xz.length_squared() > 0.5 {
-            transform.look_to(resolved_xz.normalize(), Vec3::Y);
-        } else if desired.length_squared() > 0.0001 {
-            transform.look_to(Vec3::new(direction.x, 0.0, direction.z), Vec3::Y);
+        // Ride the terrain. The step itself is planar, so without this the
+        // unit's Y would be frozen at its spawn height and it'd walk into
+        // hills as the ground rises beneath it.
+        if let Some(ref hm) = heightmap {
+            transform.translation.y = hm.sample(transform.translation.x, transform.translation.z);
+        }
+
+        // Yaw set fresh from new_forward. Tilt computed in body-space as
+        // pure pitch (rotation about body-right) + roll (about body-forward),
+        // then smoothed in a dedicated component. Keeping tilt purely
+        // pitch+roll means it can't bleed into the next frame's yaw read
+        // of transform.forward().
+        if new_forward.length_squared() > 1e-6 {
+            let yaw_only = Transform::default()
+                .looking_to(new_forward, Vec3::Y)
+                .rotation;
+            let target_tilt = match heightmap.as_deref() {
+                Some(hm) => {
+                    let normal = hm.normal(transform.translation.x, transform.translation.z);
+                    // Body axes: forward = new_forward (XZ), right = right-hand
+                    // perpendicular in XZ, up = world Y before tilt.
+                    let body_right = Vec3::new(new_forward.z, 0.0, -new_forward.x);
+                    // Slope angles. `pitch` = how much the ground rises ahead
+                    // (positive = nose up). `roll` = how much it rises to the
+                    // right (positive = right side up). `normal.y` is always
+                    // positive on valid terrain; we divide by it to get tan.
+                    let pitch = (-new_forward.dot(normal) / normal.y.max(1e-4)).atan();
+                    let roll = (-body_right.dot(normal) / normal.y.max(1e-4)).atan();
+                    // Pitch around body-right (local X), roll around body-
+                    // forward (local -Z in Bevy). Composing them in body
+                    // space keeps yaw exactly zero.
+                    Quat::from_axis_angle(Vec3::X, pitch) * Quat::from_axis_angle(Vec3::Z, roll)
+                }
+                None => Quat::IDENTITY,
+            };
+            let blend = 1.0 - (-TILT_SMOOTH_RATE * dt).exp();
+            let smoothed_tilt = match slope_tilt.as_deref_mut() {
+                Some(t) => {
+                    t.0 = t.0.slerp(target_tilt, blend);
+                    t.0
+                }
+                None => {
+                    let t = Quat::IDENTITY.slerp(target_tilt, blend);
+                    commands.entity(entity).insert(SlopeTilt(t));
+                    t
+                }
+            };
+            transform.rotation = yaw_only * smoothed_tilt;
         }
     }
+}
+
+/// Rotate `from` (normalized, XZ plane) toward `to` by at most `max_turn`
+/// radians. If `to` is nearly zero we keep the current heading.
+pub fn rotate_toward_xz(from: Vec3, to: Vec3, max_turn: f32) -> Vec3 {
+    let to_len_sq = to.length_squared();
+    if to_len_sq < 1e-6 {
+        return from;
+    }
+    let to_n = to / to_len_sq.sqrt();
+    let dot = from.dot(to_n).clamp(-1.0, 1.0);
+    let angle = dot.acos();
+    if angle <= max_turn || angle < 1e-4 {
+        return to_n;
+    }
+    // Signed turn direction: y component of `from × to_n` gives us the
+    // left/right sense in the XZ plane (Y is up, right-handed).
+    let cross_y = from.x * to_n.z - from.z * to_n.x;
+    let sign = if cross_y >= 0.0 { -1.0 } else { 1.0 };
+    let rot = Quat::from_axis_angle(Vec3::Y, sign * max_turn);
+    (rot * from).normalize()
 }
 
 /// Resolve `desired` motion against neighbouring units using a Spring-style
@@ -341,6 +487,7 @@ pub fn unit_separation_system(
     mut units: Query<(Entity, &mut Transform, &UnitType)>,
     time: Res<Time>,
     unit_registry: Res<UnitRegistry>,
+    heightmap: Option<Res<Heightmap>>,
 ) {
     let dt = time.delta_secs();
     let push_strength = 30.0_f32;
@@ -388,6 +535,9 @@ pub fn unit_separation_system(
     for (entity, push) in pushes {
         if let Ok((_, mut tf, _)) = units.get_mut(entity) {
             tf.translation += push * push_strength * dt;
+            if let Some(ref hm) = heightmap {
+                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z);
+            }
         }
     }
 }
@@ -421,6 +571,7 @@ pub fn draw_selected_command_lines(
 ) {
     let y = 2.0;
     let move_color = Color::srgb(0.2, 1.0, 0.3);
+    let build_color = Color::srgb(1.0, 0.8, 0.2);
 
     for (transform, target, queue) in &query {
         let Some(current) = target else {
@@ -437,6 +588,7 @@ pub fn draw_selected_command_lines(
                 let to = Vec3::new(pos.x, y, pos.z);
                 let color = match cmd {
                     QueuedCommand::Move(_) => move_color,
+                    QueuedCommand::BuildAt { .. } => build_color,
                 };
                 gizmos.line(prev, to, color);
                 prev = to;
