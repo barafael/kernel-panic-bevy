@@ -514,15 +514,17 @@ fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
 /// System: apply queued damage and mark targets as infected when hit by
 /// Worm or Virus weapons. Weapons with `area_of_effect > AOE_SPLASH_THRESHOLD`
 /// also damage other units in radius, with linear falloff from the
-/// weapon's `edge_effectiveness`.
+/// weapon's `edge_effectiveness`. `avoidfriendly=1` and `noselfdamage=1`
+/// filter the splash set so allies / the attacker don't eat stray AoE.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_damage(
     mut damage_queue: ResMut<DamageQueue>,
     mut health_q: Query<&mut Health>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
-    splash_q: Query<(Entity, &UnitType, &GlobalTransform), With<Health>>,
+    splash_q: Query<(Entity, &UnitType, &Faction, &TeamId, &GlobalTransform), With<Health>>,
     weapon_registry: Res<WeaponRegistry>,
+    unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
 ) {
     for pending in damage_queue.0.drain(..) {
@@ -531,7 +533,11 @@ pub fn apply_damage(
             continue;
         };
 
-        let base = |kind: UnitKind| weapon_def.damage.for_type(kind.armor_class().key());
+        let base = |kind: UnitKind| {
+            weapon_def.damage.for_type(kind.armor_class().key())
+                * unit_registry.damage_modifier(kind)
+        };
+        let attacker_info = attacker_q.get(pending.attacker).ok();
 
         let primary_damage = match target_unit_q.get(pending.target) {
             Ok(unit) => base(unit.0),
@@ -545,8 +551,19 @@ pub fn apply_damage(
         if aoe > AOE_SPLASH_THRESHOLD {
             let aoe_sq = aoe * aoe;
             let edge_mult = weapon_def.edge_effectiveness;
-            for (entity, unit, gtf) in &splash_q {
+            let avoid_friendly = weapon_def.avoid_friendly;
+            let no_self_damage = weapon_def.no_self_damage;
+            for (entity, unit, faction, team, gtf) in &splash_q {
                 if entity == pending.target {
+                    continue;
+                }
+                if no_self_damage && entity == pending.attacker {
+                    continue;
+                }
+                if avoid_friendly
+                    && let Some((_, a_faction, a_team)) = attacker_info
+                    && (team == a_team || faction == a_faction)
+                {
                     continue;
                 }
                 let d_sq = gtf.translation().distance_squared(pending.impact_pos);
@@ -561,9 +578,7 @@ pub fn apply_damage(
         }
 
         // Apply infection: Worm and Virus attacks infect non-Virus targets.
-        if let Ok((attacker_type, attacker_faction, attacker_team)) =
-            attacker_q.get(pending.attacker)
-        {
+        if let Some((attacker_type, attacker_faction, attacker_team)) = attacker_info {
             let is_infecting =
                 attacker_type.0 == UnitKind::Worm || attacker_type.0 == UnitKind::Virus;
             let target_is_virus = target_unit_q

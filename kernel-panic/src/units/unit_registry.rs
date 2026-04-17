@@ -151,6 +151,14 @@ impl UnitRegistry {
         self.def(kind).map_or("", |d| &d.build_pic)
     }
 
+    /// Incoming-damage multiplier from the FBI `DamageModifier` field. Flat
+    /// scalar applied to every damage event: secondary factories and the
+    /// Firewall use `4` (fragile), homebases and Byte use near-zero values
+    /// that approach immunity. Defaults to `1.0` when the field is absent.
+    pub fn damage_modifier(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(1.0, |d| d.damage_modifier)
+    }
+
     /// Primary weapon TDF section name, or `""` if unarmed / only has BuildLaser.
     pub fn weapon(&self, kind: UnitKind) -> &str {
         self.def(kind).map_or("", |d| {
