@@ -1,9 +1,9 @@
 //! Generate a flat showcase map for visually inspecting every mobile unit.
 //!
-//! The map is a 6144×6144 elmo featureless plain. It declares 10 start
-//! positions arranged in a 4×3 grid (one slot left empty), spaced ~1500
-//! elmos apart so units are well outside each other's max sight range
-//! (~768 elmos). The kernel-panic game maps these positions to a
+//! The map is a large featureless plain with 10 start positions spread
+//! across the full area — a 4×3 grid (one slot left empty) whose cells
+//! are several thousand elmos wide, far beyond any unit's sight range
+//! (max 768 elmos). The kernel-panic game maps these positions to a
 //! showcase-mode spawn that places one of each mobile UnitKind instead
 //! of the usual homebases.
 //!
@@ -16,20 +16,29 @@ use std::path::{Path, PathBuf};
 use spring_map_gen::{Rgba, SmdBuilder, SmfBuilder, SmtBuilder, package_sdz};
 
 const MAP_NAME: &str = "Showcase";
-/// 768 SMUs × 8 elmos = 6144 elmos per side (multiple of 128, comfortably > sight ranges).
-const MAP_SMU: i32 = 768;
+/// 1536 SMUs × 8 elmos = 12288 elmos per side (multiple of 128). Large
+/// enough to space 10 units out by ~3000 elmos in every direction.
+const MAP_SMU: i32 = 1536;
+/// World size in elmos (derived from `MAP_SMU`).
+const WORLD_SIZE: f32 = (MAP_SMU * 8) as f32;
 
-/// 10 start positions in a 4×3 grid (one empty slot at the bottom-right corner).
-/// Spacing is ~1500 elmos between adjacent positions — well above the 768-elmo
-/// max sight range of any mobile unit, so spawned units stay invisible to each
-/// other and never engage.
+/// 10 start positions spread across the full map: 4 columns × 3 rows with
+/// one slot left empty. Cells are evenly distributed with ~10% inset from
+/// the edges, giving roughly 3000 elmos between neighbouring positions on
+/// the long axis and 4000 on the short — safely above the 768-elmo max
+/// sight range so units stay invisible to each other.
 fn start_grid() -> Vec<(f32, f32)> {
-    let xs = [800.0, 2300.0, 3800.0, 5300.0];
-    let zs = [800.0, 2800.0, 4800.0];
+    const COLS: usize = 4;
+    const ROWS: usize = 3;
+    const MARGIN: f32 = 0.1;
+    let usable = WORLD_SIZE * (1.0 - 2.0 * MARGIN);
+    let step_x = usable / (COLS - 1) as f32;
+    let step_z = usable / (ROWS - 1) as f32;
+    let origin = WORLD_SIZE * MARGIN;
     let mut out = Vec::with_capacity(10);
-    for &z in &zs {
-        for &x in &xs {
-            out.push((x, z));
+    for row in 0..ROWS {
+        for col in 0..COLS {
+            out.push((origin + col as f32 * step_x, origin + row as f32 * step_z));
             if out.len() == 10 {
                 return out;
             }
