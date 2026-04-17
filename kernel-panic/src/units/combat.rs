@@ -45,9 +45,19 @@ const INFECTION_DURATION: f32 = 6.0;
 #[derive(Resource, Default)]
 pub struct VirusSpawnQueue(pub Vec<(Vec3, Faction, u8)>);
 
+/// A pending damage event. Damage is resolved at apply-time so the
+/// target's armor class can pick the right entry from the weapon's
+/// `[DAMAGE]` table.
+#[derive(Debug, Clone)]
+pub struct PendingDamage {
+    pub target: Entity,
+    pub attacker: Entity,
+    pub weapon: String,
+}
+
 /// Pending damage to apply after combat resolution.
 #[derive(Resource, Default)]
-pub struct DamageQueue(Vec<(Entity, f32, Entity)>);
+pub struct DamageQueue(Vec<PendingDamage>);
 
 /// Deploy cycle for units that must unfold before firing (e.g. Pointer).
 /// The COB script animates the legs/gun; this component gates combat so
@@ -204,7 +214,6 @@ pub fn combat_system(
             weapon_registry.get(weapon_name)
         };
         let range = weapon_def.map_or(0.0, |w| w.range);
-        let damage = weapon_def.map_or(0.0, |w| w.damage.default);
         let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
 
         if range == 0.0 {
@@ -291,7 +300,11 @@ pub fn combat_system(
             }
         }
 
-        damage_queue.0.push((target_entity, damage, entity));
+        damage_queue.0.push(PendingDamage {
+            target: target_entity,
+            attacker: entity,
+            weapon: weapon_name.to_string(),
+        });
         commands.entity(entity).insert((
             AttackCooldown {
                 remaining: cooldown,
@@ -406,23 +419,36 @@ pub fn apply_damage(
     mut health_q: Query<&mut Health>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
+    weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
 ) {
-    for &(target, damage, attacker) in &damage_queue.0 {
-        if let Ok(mut health) = health_q.get_mut(target) {
+    for pending in damage_queue.0.drain(..) {
+        let Some(weapon_def) = weapon_registry.get(&pending.weapon) else {
+            warn!("apply_damage: weapon {:?} not in registry", pending.weapon);
+            continue;
+        };
+
+        let damage = match target_unit_q.get(pending.target) {
+            Ok(unit) => weapon_def.damage.for_type(unit.0.armor_class().key()),
+            Err(_) => weapon_def.damage.default,
+        };
+
+        if let Ok(mut health) = health_q.get_mut(pending.target) {
             health.current -= damage;
         }
 
         // Apply infection: Worm and Virus attacks infect non-Virus targets.
-        if let Ok((attacker_type, attacker_faction, attacker_team)) = attacker_q.get(attacker) {
+        if let Ok((attacker_type, attacker_faction, attacker_team)) =
+            attacker_q.get(pending.attacker)
+        {
             let is_infecting =
                 attacker_type.0 == UnitKind::Worm || attacker_type.0 == UnitKind::Virus;
             let target_is_virus = target_unit_q
-                .get(target)
+                .get(pending.target)
                 .is_ok_and(|ut| ut.0 == UnitKind::Virus);
 
             if is_infecting && !target_is_virus {
-                commands.entity(target).insert(Infected {
+                commands.entity(pending.target).insert(Infected {
                     timer: INFECTION_DURATION,
                     attacker_faction: *attacker_faction,
                     attacker_team: attacker_team.0,
@@ -430,7 +456,6 @@ pub fn apply_damage(
             }
         }
     }
-    damage_queue.0.clear();
 }
 
 /// System: tick infection timers and remove expired infections.

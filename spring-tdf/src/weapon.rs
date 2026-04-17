@@ -120,11 +120,12 @@ impl WeaponDefs {
 
 impl DamageMap {
     /// Get damage for a specific armor type, falling back to `default`.
+    ///
+    /// `armor_type` must be lowercase; the TDF parser already lowercases
+    /// keys at storage time, so callers should pass canonical keys to
+    /// avoid allocating a lowercase copy on the combat hot path.
     pub fn for_type(&self, armor_type: &str) -> f32 {
-        self.types
-            .get(&armor_type.to_ascii_lowercase())
-            .copied()
-            .unwrap_or(self.default)
+        self.types.get(armor_type).copied().unwrap_or(self.default)
     }
 }
 

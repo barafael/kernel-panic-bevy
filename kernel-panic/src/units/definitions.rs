@@ -153,4 +153,88 @@ impl UnitKind {
             _ => 163840.0,
         }
     }
+
+    /// Armor class used to look up this unit's entry in a weapon's
+    /// `[DAMAGE]` table. Mirrors upstream `armor.txt`.
+    pub fn armor_class(self) -> ArmorClass {
+        match self {
+            UnitKind::Bit | UnitKind::Bug | UnitKind::Exploit | UnitKind::Packet => {
+                ArmorClass::Spam
+            }
+            UnitKind::Pointer | UnitKind::Dos => ArmorClass::Arty,
+            UnitKind::Flow => ArmorClass::Flyer,
+            UnitKind::Byte | UnitKind::Connection => ArmorClass::Heavy,
+            UnitKind::Worm => ArmorClass::Subterranean,
+            UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway => ArmorClass::Constructor,
+            UnitKind::Kernel
+            | UnitKind::Socket
+            | UnitKind::Hole
+            | UnitKind::Window
+            | UnitKind::Port
+            | UnitKind::Firewall => ArmorClass::Building,
+            UnitKind::LogicBomb => ArmorClass::Mine,
+            UnitKind::Virus => ArmorClass::Infectious,
+            UnitKind::Signal => ArmorClass::Spam,
+        }
+    }
+}
+
+/// Armor classes used to look up damage multipliers in weapon damage
+/// tables. Each variant serializes to the lowercase key found in
+/// upstream `armor.txt` and in `[DAMAGE]` blocks of `.tdf` weapons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]
+pub enum ArmorClass {
+    #[strum(serialize = "spam")]
+    Spam,
+    #[strum(serialize = "arty")]
+    Arty,
+    #[strum(serialize = "flyer")]
+    Flyer,
+    #[strum(serialize = "heavy")]
+    Heavy,
+    #[strum(serialize = "subterranean")]
+    Subterranean,
+    #[strum(serialize = "constructor")]
+    Constructor,
+    #[strum(serialize = "building")]
+    Building,
+    #[strum(serialize = "mine")]
+    Mine,
+    #[strum(serialize = "infectious")]
+    Infectious,
+}
+
+impl ArmorClass {
+    /// Lowercase key matching the `[DAMAGE]` entries in weapon TDFs.
+    pub fn key(self) -> &'static str {
+        self.into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn armor_class_matches_upstream_armor_txt() {
+        assert_eq!(UnitKind::Worm.armor_class(), ArmorClass::Subterranean);
+        assert_eq!(UnitKind::LogicBomb.armor_class(), ArmorClass::Mine);
+        assert_eq!(UnitKind::Byte.armor_class(), ArmorClass::Heavy);
+        assert_eq!(UnitKind::Connection.armor_class(), ArmorClass::Heavy);
+        assert_eq!(UnitKind::Pointer.armor_class(), ArmorClass::Arty);
+        assert_eq!(UnitKind::Dos.armor_class(), ArmorClass::Arty);
+        assert_eq!(UnitKind::Flow.armor_class(), ArmorClass::Flyer);
+        assert_eq!(UnitKind::Bit.armor_class(), ArmorClass::Spam);
+        assert_eq!(UnitKind::Virus.armor_class(), ArmorClass::Infectious);
+        assert_eq!(UnitKind::Assembler.armor_class(), ArmorClass::Constructor);
+        assert_eq!(UnitKind::Kernel.armor_class(), ArmorClass::Building);
+    }
+
+    #[test]
+    fn armor_class_key_matches_damage_table_keys() {
+        assert_eq!(ArmorClass::Spam.key(), "spam");
+        assert_eq!(ArmorClass::Subterranean.key(), "subterranean");
+        assert_eq!(ArmorClass::Mine.key(), "mine");
+        assert_eq!(ArmorClass::Infectious.key(), "infectious");
+    }
 }
