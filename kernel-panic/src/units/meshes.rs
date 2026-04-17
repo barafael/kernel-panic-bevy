@@ -101,6 +101,7 @@ pub fn unit_mesh(
         UnitKind::Assembler
         | UnitKind::Trojan
         | UnitKind::Gateway
+        | UnitKind::Flow
         | UnitKind::Worm
         | UnitKind::Dos
         | UnitKind::Pointer

@@ -172,6 +172,11 @@ pub struct CobVm {
     static_vars: Vec<i32>,
     next_thread_id: u32,
     current_time: i32,
+    /// Host-supplied state the VM exposes through `Opcode::Get`. Keys are
+    /// the well-known Spring COB value indices (see `cob_values`); the
+    /// host updates them each tick (e.g. `BUILD_PERCENT_LEFT`,
+    /// `INBUILDSTANCE`). Anything not set reads as 0.
+    unit_values: smallvec::SmallVec<[(i32, i32); 8]>,
 }
 
 impl CobVm {
@@ -183,7 +188,29 @@ impl CobVm {
             static_vars: vec![0; cob.num_static_vars],
             next_thread_id: 1,
             current_time: 0,
+            unit_values: smallvec::SmallVec::new(),
         }
+    }
+
+    /// Update (or insert) the value the VM should return for COB
+    /// `Opcode::Get(key)`. Used by the host to publish state like
+    /// `BUILD_PERCENT_LEFT` so unit `Create()` scripts that animate the
+    /// build emerge actually do something.
+    pub fn set_unit_value(&mut self, key: i32, value: i32) {
+        if let Some(slot) = self.unit_values.iter_mut().find(|(k, _)| *k == key) {
+            slot.1 = value;
+        } else {
+            self.unit_values.push((key, value));
+        }
+    }
+
+    /// Read a host-published unit value, or 0 if none was set.
+    pub fn get_unit_value(&self, key: i32) -> i32 {
+        self.unit_values
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| *v)
+            .unwrap_or(0)
     }
 
     /// Start a script function by name. Returns the thread ID, or None if
@@ -704,18 +731,31 @@ impl CobVm {
                     commands.push(AnimCommand::Explode { piece, severity });
                 }
 
-                // Get/Set unit values — return 0 for now (game integration point).
+                // Get/Set unit values — host publishes the readable ones
+                // via `set_unit_value`; everything else reads as 0.
                 Opcode::GetUnitValue => {
-                    let _key = thread.pop();
-                    thread.push(0);
+                    let key = thread.pop();
+                    let value = self
+                        .unit_values
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0);
+                    thread.push(value);
                 }
                 Opcode::Get => {
                     let _p5 = thread.pop();
                     let _p4 = thread.pop();
                     let _p3 = thread.pop();
                     let _p2 = thread.pop();
-                    let _key = thread.pop();
-                    thread.push(0);
+                    let key = thread.pop();
+                    let value = self
+                        .unit_values
+                        .iter()
+                        .find(|(k, _)| *k == key)
+                        .map(|(_, v)| *v)
+                        .unwrap_or(0);
+                    thread.push(value);
                 }
                 Opcode::Set => {
                     let value = thread.pop();

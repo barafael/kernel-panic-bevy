@@ -64,6 +64,8 @@ impl Plugin for UnitsPlugin {
                 (
                     (
                         production::production_system,
+                        production::install_fade_materials,
+                        production::animate_connection_hatch,
                         construction::start_construction,
                         construction::tick_construction,
                         spawning::emerge_system,
@@ -90,9 +92,11 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Resolve),
                     (
+                        animation::publish_unit_values,
                         animation::animation_system,
                         animation::decay_death_particles,
                     )
+                        .chain()
                         .in_set(GameplaySet::Animate),
                     combat::cleanup_dying.in_set(GameplaySet::Cleanup),
                 ),

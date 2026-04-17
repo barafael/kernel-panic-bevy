@@ -114,6 +114,29 @@ fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
     if axis == 0 { -value } else { value }
 }
 
+/// System: push host-tracked unit values (BUILD_PERCENT_LEFT today,
+/// more later) into each unit's COB VM so its `Create()` script can
+/// drive its own emerge animation. Runs before `animation_system` so
+/// the values are visible to scripts on this tick.
+///
+/// Spring's BUILD_PERCENT_LEFT goes 100 (just spawned) → 0 (finished).
+/// We map from `Emerging.remaining / total` so the unit's `Create()`
+/// loop ticks down naturally over the rise window. Units without
+/// `Emerging` get 0 (already built).
+pub fn publish_unit_values(
+    mut animators: Query<(&mut CobAnimator, Option<&super::spawning::Emerging>)>,
+) {
+    for (mut animator, emerging) in &mut animators {
+        let percent = match emerging {
+            Some(e) if e.total > 0.0 => ((e.remaining / e.total) * 100.0).round() as i32,
+            _ => 0,
+        };
+        animator
+            .vm
+            .set_unit_value(spring_cob::unit_values::BUILD_PERCENT_LEFT, percent);
+    }
+}
+
 /// System: tick all CobAnimator VMs and apply piece transforms.
 #[allow(clippy::too_many_arguments)]
 pub fn animation_system(

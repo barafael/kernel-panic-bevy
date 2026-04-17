@@ -11,6 +11,7 @@
 
 pub mod cob_file;
 pub mod opcodes;
+pub mod unit_values;
 pub mod vm;
 
 pub use cob_file::{CobFile, CobParseError, parse_cob};

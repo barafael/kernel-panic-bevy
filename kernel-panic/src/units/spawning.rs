@@ -21,10 +21,9 @@ const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::
 #[derive(Resource, Clone)]
 pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
 
-/// Marks a freshly-built unit that's rising up through its construction hole.
-/// The `emerge_system` lerps the entity's Y coordinate from below ground up
-/// to `target_y` over `total` seconds, then strips the component (and gives
-/// the unit its post-emergence rally order, if any).
+/// Marks a freshly-built unit that hasn't finished emerging from its
+/// construction site. `emerge_system` ticks `remaining` toward 0 over
+/// `total` seconds; how the visible model arrives depends on `style`.
 #[derive(Component)]
 pub struct Emerging {
     /// Final Y coordinate the unit should reach when fully emerged.
@@ -36,43 +35,119 @@ pub struct Emerging {
     /// World point the unit should walk to once it has emerged. `None` for
     /// stationary units that don't need to clear the factory.
     pub rally_point: Option<Vec3>,
+    /// How the model becomes visible during the rise window.
+    pub style: EmergeStyle,
+}
+
+/// Per-faction emergence visual.
+///
+/// - `Rise` — System units (Kernel-built). Spawn underground at
+///   `target_y - EMERGE_DEPTH` and lerp Y up to surface, with their own
+///   COB `Create()` script also moving the `base` piece up via
+///   `BUILD_PERCENT_LEFT`.
+/// - `Fade` — Hacker / Network units (Hole, Connection, Window, Port).
+///   Spawn at surface but materialize via an alpha ramp on a per-unit
+///   cloned material. Mirrors upstream's `lua_SetAlphaThreshold(255 → 0)`
+///   pattern in bug.bos / packet.bos / connection.bos.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmergeStyle {
+    Rise,
+    Fade,
+}
+
+/// Per-piece original-material handles, restored when an entity finishes
+/// fading in. Spawned alongside `Emerging { Fade }` so the per-unit
+/// alpha ramp doesn't bleed into the shared faction-colored material.
+#[derive(Component)]
+pub struct FadeMaterials {
+    /// (piece_entity, faded_clone, original) tuples.
+    pub overrides: Vec<(Entity, Handle<StandardMaterial>, Handle<StandardMaterial>)>,
 }
 
 /// Cached piece-index lookup for animated factories. Set once when a
 /// producer spawns; lets the production system pull the live world
-/// position of script-driven pieces (the `nanoemitter` that orbits the
-/// build hole, and the `pad` that defines the emergence point) without
-/// rescanning the model every frame.
+/// position of script-driven pieces without rescanning the model every
+/// frame.
 ///
-/// Falls back to `None` for either field if the model doesn't have the
-/// expected piece — the production system then uses the factory's root
-/// transform instead.
+/// `emitters` is the list of pieces that draw a build laser to `pad`
+/// while the factory is constructing something. The set is faction-
+/// specific:
+/// - **kernel** has `tip0..tip3` on its 4 pillars (4 rays).
+/// - **socket** has `blaser0`/`blaser1` (2 rays).
+/// - **hole**/**window**/**connection**/**port** have a single
+///   `nanoemitter` (or fall back to a root offset).
+/// - **carrier** has `mover` (the lifting hatch — emits from its raised
+///   position).
+///
+/// `pad` is the build target / emergence point. Both fields fall back
+/// to `None` when the model doesn't have the expected pieces, in which
+/// case the production system uses the factory's root transform.
 #[derive(Component, Default)]
 pub struct FactoryPieces {
-    pub nanoemitter: Option<usize>,
+    pub emitters: Vec<usize>,
     pub pad: Option<usize>,
 }
 
-/// Lifts `Emerging` units smoothly upward through the build hole. When the
-/// animation completes, the component is removed and the unit is given its
-/// rally-walk command (if any).
+/// Tick `Emerging` units forward — either lerping Y upward (Rise style)
+/// or ramping per-piece alpha (Fade style). When the timer expires the
+/// component is removed, faded materials are restored to the shared
+/// originals, and the unit gets its rally-walk command if any.
 pub fn emerge_system(
     time: Res<Time>,
     mut commands: Commands,
-    mut q: Query<(Entity, &mut Transform, &mut Emerging)>,
+    mut q: Query<(
+        Entity,
+        &mut Transform,
+        &mut Emerging,
+        Option<&FadeMaterials>,
+    )>,
+    piece_mats: Query<&MeshMaterial3d<StandardMaterial>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut transform, mut emerging) in &mut q {
+    for (entity, mut transform, mut emerging, fade) in &mut q {
         emerging.remaining = (emerging.remaining - dt).max(0.0);
-        // t goes 0 → 1 over the duration; ease-out so the unit decelerates
-        // as it reaches the surface (more "machine settling into place").
-        let raw = 1.0 - (emerging.remaining / emerging.total).clamp(0.0, 1.0);
-        let eased = 1.0 - (1.0 - raw).powi(2);
-        let start_y = emerging.target_y - EMERGE_DEPTH;
-        transform.translation.y = start_y + (emerging.target_y - start_y) * eased;
+        // t goes 0 → 1 over the duration.
+        let t = (1.0 - emerging.remaining / emerging.total).clamp(0.0, 1.0);
+
+        match emerging.style {
+            EmergeStyle::Rise => {
+                // Ease-out so the unit decelerates as it reaches the surface
+                // (reads as "machine settling into place").
+                let eased = 1.0 - (1.0 - t).powi(2);
+                let start_y = emerging.target_y - EMERGE_DEPTH;
+                transform.translation.y = start_y + (emerging.target_y - start_y) * eased;
+            }
+            EmergeStyle::Fade => {
+                // Linear alpha ramp; pieces stay at surface y throughout.
+                if let Some(fade) = fade {
+                    for (_, faded_handle, _) in &fade.overrides {
+                        if let Some(mat) = materials.get_mut(faded_handle) {
+                            mat.base_color = mat.base_color.with_alpha(t);
+                        }
+                    }
+                }
+            }
+        }
 
         if emerging.remaining <= 0.0 {
-            transform.translation.y = emerging.target_y;
+            if matches!(emerging.style, EmergeStyle::Rise) {
+                transform.translation.y = emerging.target_y;
+            }
+            // Restore the shared faction material on every piece we
+            // overrode, so future asset swaps / faction recolors take
+            // effect on this unit too. The cloned faded handle leaks
+            // into the assets pool until despawn — fine, it's small.
+            if let Some(fade) = fade {
+                for (piece_entity, _, original) in &fade.overrides {
+                    if piece_mats.get(*piece_entity).is_ok() {
+                        commands
+                            .entity(*piece_entity)
+                            .insert(MeshMaterial3d(original.clone()));
+                    }
+                }
+                commands.entity(entity).remove::<FadeMaterials>();
+            }
             let rally = emerging.rally_point;
             commands.entity(entity).remove::<Emerging>();
             if let Some(target) = rally {
@@ -89,8 +164,12 @@ pub fn emerge_system(
 /// `emerge_system` lifts it back up by this much. Roughly the height of a
 /// typical unit so the model is fully hidden underground at t=0.
 pub const EMERGE_DEPTH: f32 = 40.0;
-/// Seconds the emerge animation takes from below-ground to fully out.
-pub const EMERGE_DURATION: f32 = 0.6;
+/// How long before the build cycle completes the unit appears underground
+/// and starts rising. Picked so the rise feels like part of the build
+/// rather than an after-effect — the player sees ~1.5s of "the laser
+/// drew this thing into being". Clamped against `build_time` so very
+/// short cycles still finish naturally.
+pub const EMERGE_LEAD_TIME: f32 = 1.5;
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_homebases(
@@ -147,6 +226,7 @@ const SHOWCASE_KINDS: &[UnitKind] = &[
     UnitKind::Packet,
     UnitKind::Signal,
     UnitKind::Gateway,
+    UnitKind::Flow,
 ];
 
 /// Spawn one of each mobile unit at the map's start positions, instead of
@@ -421,8 +501,25 @@ pub fn spawn_unit(
                         .position(|p| p.eq_ignore_ascii_case(name))
                 })
             };
+            // Faction-specific emitter piece names, in the order they
+            // appear in the upstream .bos for each factory. Pieces that
+            // don't exist on this model resolve to None and are filtered
+            // out, so unknown factories naturally fall through to the
+            // single-nanoemitter case (or to the synthetic-offset
+            // fallback in production_system if even that's missing).
+            //
+            // Note: upstream's Network homebase is Carrier (with `mover`
+            // hatch); we use Connection instead, which has no production
+            // pieces in its .bos at all. Connection therefore falls
+            // through to the nanoemitter case → synthetic offset.
+            let emitter_names: &[&str] = match kind {
+                UnitKind::Kernel => &["tip0", "tip1", "tip2", "tip3"],
+                UnitKind::Socket => &["blaser0", "blaser1"],
+                _ => &["nanoemitter"],
+            };
+            let emitters: Vec<usize> = emitter_names.iter().filter_map(|n| cob_index(n)).collect();
             commands.entity(unit_entity).insert(FactoryPieces {
-                nanoemitter: cob_index("nanoemitter"),
+                emitters,
                 pad: cob_index("pad"),
             });
         }

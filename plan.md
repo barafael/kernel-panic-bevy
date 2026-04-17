@@ -2,15 +2,21 @@
 
 ## Current State (April 2026)
 
-**6 crates, ~13k lines, 129 tests, all passing.**
+**6 crates, ~20.4k lines, 133 tests, all passing.**
 
-Working: map loading (13 maps), original textures, S3O models, 3 factions (19 unit types),
-FBI-loaded unit stats (no hardcoded values), TDF-loaded weapon stats, unit production with
-build queues, selection with material-brightened highlight and world-space health bars,
-movement with QTPFS pathfinding, basic combat with infection/virus spawning, death
-animations (COB `Killed()` + particle bursts), win/loss detection, COB script integration
-(movement/production/weapon callbacks), weapon FX (beams, projectiles, melee flashes),
-minimap, HUD with build menu, RTS camera, Lua heightmap gadgets, map cycling.
+Working: map loading (14 maps including Showcase), original textures, S3O models, 3
+factions (21 unit types — Flow/Gateway added), FBI-loaded unit stats (no hardcoded
+values), TDF-loaded weapon stats, unit production with build queues and multi-emitter
+build rays per faction, two-phase spawn with emerge lead-time (Rise/Fade), factory
+building on datavents via mobile constructors (BeginPlacementEvent → PlacementMode ghost
+→ PendingBuild → Constructing → spawn), selection with material-brightened highlight and
+world-space health bars, movement with QTPFS pathfinding + flying-unit skip-navgrid +
+ground terrain clamping, basic combat with infection/virus spawning, death animations
+(COB `Killed()` + particle bursts), win/loss detection with GameState reset on map cycle,
+COB script integration (movement/production/weapon/open-close callbacks, Scriptor linear
+constants, piece remap by name, empty signal mask on start-script threads), weapon FX
+(beams, projectiles, melee flashes), minimap, HUD with build menu, RTS camera with
+map-sized fog/far-plane, Lua heightmap gadgets, map cycling.
 
 ---
 
@@ -57,7 +63,8 @@ activation (`commandfire=1`). Skip auto-fire in `combat_system` for these weapon
 
 ### 1.6 Damage Modifiers (Important)
 
-Several damage modifier fields are parsed but not applied:
+Infection is implemented (`Infected` component, `VirusSpawnQueue`). Several damage
+modifier fields are still parsed but not applied:
 
 | Modifier | Description |
 |----------|-------------|
@@ -75,14 +82,15 @@ have auto-heal in upstream but no `AutoHeal` component exists.
 
 ## 2. Missing Units & Stat Corrections
 
-### 2.1 New Unit Types (High)
+### 2.1 New Unit Types (High — Partial)
 
-8 units referenced by faction mechanics but absent from `UnitKind`:
+Flow and Gateway landed. 6 units still referenced by faction mechanics but absent from
+`UnitKind`:
 
 | Unit | Faction | Role |
 |------|---------|------|
-| Flow | Network | Air assault, speed scales with team building count |
-| Gateway | Network | Armed mobile constructor (100 dmg, range 350) |
+| ~~Flow~~ | Network | ✅ Added; flying flag wired to skip-navgrid |
+| ~~Gateway~~ | Network | ✅ Added as armed mobile constructor |
 | Trojan | Hacker | Mobile constructor, radar 768 |
 | Terminal | System | Special building, launches SIGTERM air strikes |
 | Obelisk | Hacker | Special building, infection gas artillery |
@@ -108,14 +116,16 @@ Remaining stat-adjacent work:
 
 ## 3. Faction Mechanics
 
-### 3.1 Factory Building on Datavents (High — core loop)
+### 3.1 Factory Building on Datavents — ✅ DONE
 
-Constructors (Assembler/Trojan/Gateway) build secondary factories on GeoVent positions
-(datavents). Currently no building placement exists.
+Full pipeline landed: `BeginPlacementEvent` → `PlacementMode` ghost preview →
+`BuildAt` queued command → `PendingBuild` → constructor walks to site and emits
+build-laser rays from multi-emitter factory pieces → `Constructing` → two-phase spawn
+with emerge lead-time (Rise for factories, Fade for infantry) → optional
+`Emerging.rally_point` drives post-emerge movement.
 
-- Build UI: select constructor → right-click datavent → ghost preview → build timer
-- Factories auto-produce once built (Socket/Window/Port)
-- Terminal/Obelisk/Firewall are special buildings with activated abilities
+Remaining: Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
+(Command-Fire Framework).
 
 ### 3.2 Network Packet Buffer & Teleportation (High — faction identity)
 
@@ -171,11 +181,12 @@ windows: VirusBeam 90f, VirusDeath 180f, Wormsplash 200f, Obelisk 30f.
 
 Homebases get +20% production speed per small building owned by team. Snowball mechanic.
 
-### 3.8 Flow Dynamic Speed & Air Movement (Low)
+### 3.8 Flow Dynamic Speed & Air Movement (Low — Partial)
 
-- Flow speed = base + (team small building count × 30)
-- Air movement system: fly at altitude 200, ignore ground pathfinding
-- Ground units with `NoChaseCategory=VTOL` won't pursue Flows
+- ✅ Flying flag + `can_fly()` / `cruise_alt()` on `UnitRegistry`; flying units skip nav
+  grid in `movement.rs`
+- Flow speed scaling = base + (team small building count × 30) — not done
+- Ground units with `NoChaseCategory=VTOL` won't pursue Flows — not done
 
 ### 3.9 Mines & Walls (Low)
 
@@ -296,30 +307,32 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ## Recommended Implementation Order
 
+Done since last plan: §2.2 stat corrections, §3.1 factory building on datavents, partial
+§2.1 (Flow + Gateway), partial §3.8 (flying skips nav grid).
+
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
 | 1 | Armor classes + AOE + burst fire + command-fire gating | 1.1–1.4 | Balance is broken without these |
 | 2 | Damage modifiers + auto-heal | 1.6–1.7 | Building vulnerability, Byte armor |
 | 3 | Stun (DoS) | 1.5 | Stun system needed by later features |
-| 4 | Stat corrections + missing units | 2.1–2.2 | Prerequisites for faction mechanics |
-| 5 | Factory building on datavents | 3.1 | Completes core gameplay loop |
-| 6 | Basic AI | 5.1 | Single-player becomes possible |
-| 7 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
-| 8 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
-| 9 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
-| 10 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
-| 11 | Network buffer + dispatch | 3.2 | Network faction identity |
-| 12 | Flow speed + air movement | 3.8 | Network late-game |
-| 13 | Firewall reflector shield | 3.5 | Network defensive ability |
-| 14 | Kernel Boost | 3.7 | Snowball mechanic |
-| 15 | Mines & walls | 3.9 | Tactical depth |
-| 16 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 17 | Shield system | 4.7 | Homebase/factory shields |
-| 18 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 19 | Fog of war | 6 | Full visibility system |
-| 20 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 21 | Audio | 7 | Weapon sounds highest priority |
-| 22 | Multiplayer | 9 | Endgame feature |
+| 4 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
+| 5 | Basic AI | 5.1 | Single-player becomes possible now that factory building works |
+| 6 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
+| 7 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
+| 8 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
+| 9 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
+| 10 | Network buffer + dispatch | 3.2 | Network faction identity |
+| 11 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
+| 12 | Firewall reflector shield | 3.5 | Network defensive ability |
+| 13 | Kernel Boost | 3.7 | Snowball mechanic |
+| 14 | Mines & walls | 3.9 | Tactical depth |
+| 15 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 16 | Shield system | 4.7 | Homebase/factory shields |
+| 17 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 18 | Fog of war | 6 | Full visibility system |
+| 19 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 20 | Audio | 7 | Weapon sounds highest priority |
+| 21 | Multiplayer | 9 | Endgame feature |
 
 ---
 
@@ -385,26 +398,29 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ### Gameplay Bugs
 
-- [ ] No unit collision avoidance — units overlap when crowded
-- [ ] Terrain height not sampled during movement — units float/sink on hills
-- [ ] No rally point / delivery point for factories
-- [ ] `GameState` not reset on map cycling — win/lose persists across map switches (confirmed:
-  `cycle_map_on_keypress` despawns entities but never resets `GameState`)
+- [x] ~~`GameState` not reset on map cycling~~ — fixed in a50fe8b
+- [x] ~~Rally point / delivery point for factories~~ — `Emerging.rally_point` wired
+- [x] ~~Terrain height not sampled during movement~~ — ground clamping in recent walking
+  improvements (5046fd2) + spawn clamp (6e043ba)
+- [ ] No unit collision avoidance — units overlap when crowded (partial: walking improvements
+  address some cases, revisit)
 - [ ] Attack-move (`A` hotkey) is wired in HUD but handler is empty (TODO at `hud.rs:849`)
 - [ ] Feature rotation (`MapFeature.rotation_degrees()`) parsed but never applied when
   rendering map features
 - [ ] Weapons ignore line-of-sight — `lineofsight=1` parsed but units fire through terrain
 - [ ] Weapons never miss — `tolerance` parsed but ignored; perfect accuracy on all weapons
-- [ ] Factory spawn offset hardcoded to `Vec3::new(40.0, 0.0, 40.0)` in `production.rs` —
-  should use COB `QueryBuildInfo` callback for correct build-pad position
+- [ ] Factory spawn offset hardcoded in `production.rs` — should use COB `QueryBuildInfo`
+  callback for correct build-pad position
 
 ### Incomplete COB VM
 
-- [ ] `GET` / `GET_UNIT_VALUE` always return 0 — `BUILD_PERCENT_LEFT` returning 0 makes
-  every unit's `Create()` build-up animation skip instantly
-- [ ] `springdefs.h` constants (`ARMORED=20`, `BUILD_PERCENT_LEFT=17`, `YARD_OPEN=18`, etc.)
-  not mapped — VM can't translate these to real game state
-- [ ] `EmitSfx` and `SetValue` opcodes unimplemented (catch-all `_ => {}`)
+- [x] ~~Scriptor linear constant per unit~~ — fixed in 5ffd072
+- [x] ~~Start-script threads inherit signal mask~~ — fixed in 855d506 (empty mask)
+- [x] ~~Piece remap by name at spawn~~ — added in 9f8553f
+- [x] ~~`BUILD_PERCENT_LEFT` bridge from CobVm to Create()~~ — wired through production
+- [ ] `GET` / `GET_UNIT_VALUE` still return 0 for most values — only select `springdefs.h`
+  constants mapped; expand as needed
+- [ ] `EmitSfx` and `SetValue` opcodes still largely unimplemented
 - [ ] `PieceIndex` component: inner value set but never read (only used as marker)
 
 ### Visual Gaps
@@ -431,12 +447,14 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ### Dead Code
 
-- [ ] `CobThread::local_function_id()` in spring-cob `vm.rs` — never called
+- [x] ~~`CobThread::local_function_id()` in spring-cob `vm.rs`~~ — removed in 745c22d
+- [x] ~~`load_smt_from_archive()`~~ — removed in 745c22d
 - [ ] `CallFrame::function_id` in spring-cob — never read
 - [ ] `_weapon` param in `spawn_melee_flash()` — unused
 
 ### Compiler Warnings
 
+- [x] ~~clippy warnings across workspace~~ — fixed in e23c987
 - [ ] `PieceIndex` field `.0` never read
 
 ### Naming

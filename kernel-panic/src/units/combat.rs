@@ -167,11 +167,11 @@ pub fn combat_system(
             &GlobalTransform,
             Option<&Deployable>,
         ),
-        Without<Dying>,
+        (Without<Dying>, Without<super::spawning::Emerging>),
     >,
     potential_targets: Query<
         (Entity, &Faction, &TeamId, &GlobalTransform, &Health),
-        With<UnitType>,
+        (With<UnitType>, Without<super::spawning::Emerging>),
     >,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,

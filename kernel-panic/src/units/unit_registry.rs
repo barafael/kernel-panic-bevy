@@ -84,11 +84,33 @@ impl UnitRegistry {
     /// unit can't rotate (buildings); our movement system treats that as
     /// "snap instantly" so the face-target step is still coherent but
     /// doesn't produce a divide-by-zero.
+    ///
+    /// Multiplied by `TURN_RATE_MULT` to make units feel responsive: raw
+    /// Spring values assumed a 30 Hz sim tick and engine-level heading
+    /// interpolation we don't reproduce, which left modest TurnRates
+    /// (200-500) visibly sluggish at 60 fps.
     pub fn turn_rate(&self, kind: UnitKind) -> f32 {
         const SPRING_ANGLE_UNITS_PER_REV: f32 = 65536.0;
+        const TURN_RATE_MULT: f32 = 3.0;
         self.def(kind).map_or(0.0, |d| {
-            d.turn_rate / SPRING_ANGLE_UNITS_PER_REV * std::f32::consts::TAU * SPRING_SIM_FPS
+            d.turn_rate / SPRING_ANGLE_UNITS_PER_REV
+                * std::f32::consts::TAU
+                * SPRING_SIM_FPS
+                * TURN_RATE_MULT
         })
+    }
+
+    /// Whether this unit flies (FBI `canFly=1`). Flying units ignore the
+    /// terrain-Y snap in the movement system and hold `cruise_alt` above
+    /// the ground instead.
+    pub fn can_fly(&self, kind: UnitKind) -> bool {
+        self.def(kind).is_some_and(|d| d.can_fly)
+    }
+
+    /// Cruise altitude in elmos above the terrain for flying units. 0 for
+    /// ground units; only consulted when `can_fly` is true.
+    pub fn cruise_alt(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.cruise_alt)
     }
 
     /// Approximate collision radius in world units (elmos) derived from the

@@ -77,7 +77,12 @@ fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
             UnitKind::Trojan,
         ],
         UnitKind::Window => &[UnitKind::Bug],
-        UnitKind::Connection => &[UnitKind::Packet, UnitKind::Signal, UnitKind::Gateway],
+        UnitKind::Connection => &[
+            UnitKind::Packet,
+            UnitKind::Signal,
+            UnitKind::Gateway,
+            UnitKind::Flow,
+        ],
         UnitKind::Port => &[UnitKind::Packet],
         kind if is_constructor(kind) => buildings_for(kind),
         _ => &[],

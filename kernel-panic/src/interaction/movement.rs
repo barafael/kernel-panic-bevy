@@ -14,6 +14,11 @@ use crate::units::unit_registry::UnitRegistry;
 /// sluggish. Yaw is set directly (unaffected by this constant).
 const TILT_SMOOTH_RATE: f32 = 8.0;
 
+/// Dedicated gizmo config for command-line overlays so the dashed path
+/// renders thinner than the default 2-px gizmo width used elsewhere.
+#[derive(Default, Reflect, GizmoConfigGroup)]
+pub struct CommandLineGizmos;
+
 /// When present, the unit will move toward this world position.
 #[derive(Component)]
 pub struct MoveTarget(pub Vec3);
@@ -82,6 +87,9 @@ struct UnitSnapshot {
     radius: f32,
     /// Whether this unit kind is capable of moving (speed > 0).
     mobile: bool,
+    /// Flying units pass over ground units without pushing or being pushed
+    /// in the XZ plane, so the collision resolver skips air↔ground pairs.
+    flying: bool,
     /// Whether this specific unit has no active move order right now — i.e.
     /// it has reached its goal (or never had one). Used by the deadlock
     /// breaker to skip waypoints that a stationary unit is standing on.
@@ -119,6 +127,7 @@ pub fn movement_system(
             pos: tf.translation,
             radius: unit_registry.collision_radius(ut.0),
             mobile: unit_registry.speed(ut.0) > 0.0,
+            flying: unit_registry.can_fly(ut.0),
             stationary: target.is_none(),
         })
         .collect();
@@ -154,11 +163,20 @@ pub fn movement_system(
             continue;
         }
 
+        let flying = unit_registry.can_fly(unit_type.0);
+
         // If we have a MoveTarget but no MovePath, compute the path.
+        // Flying units skip the nav grid entirely and take a straight XZ
+        // line to the target — they can cross any terrain, so routing
+        // around cliffs would only add noise.
         if let Some(target) = move_target
             && move_path.is_none()
         {
-            let path = compute_path(nav_grid.as_deref_mut(), transform.translation, target.0);
+            let path = if flying {
+                vec![Vec3::new(target.0.x, 0.0, target.0.z)]
+            } else {
+                compute_path(nav_grid.as_deref_mut(), transform.translation, target.0)
+            };
             commands.entity(entity).insert(MovePath {
                 waypoints: path,
                 current: 0,
@@ -255,42 +273,10 @@ pub fn movement_system(
         };
         let new_forward = rotate_toward_xz(current_xz, desired_forward, max_turn);
 
-        // Facing-gated forward speed. A unit that's pointed at its goal
-        // runs full speed; one pivoting toward it still creeps forward so
-        // it isn't frozen in place — the previous zero-floor meant slow-
-        // turning units went completely static for long heading changes
-        // (and never arrived at waypoints behind them). Minimum gate is
-        // 30% of full speed; anything above that scales with cos(err).
-        const PIVOT_SPEED_FLOOR: f32 = 0.3;
-        let align = new_forward
-            .dot(desired_forward)
-            .clamp(0.0, 1.0)
-            .max(PIVOT_SPEED_FLOOR);
-        let step = speed * dt * align;
-        if step < 1e-4 {
-            continue;
-        }
-        let desired = new_forward * step.min(distance);
-
-        // Resolve desired motion against every other unit. Spring-style:
-        // units push each other with radial + lateral slide, weighted by
-        // mass/speed/head-on factor. See `resolve_motion`.
-        let resolved = resolve_motion(entity, current, desired, self_radius, speed, &snapshot);
-
-        transform.translation += resolved;
-
-        // Ride the terrain. The step itself is planar, so without this the
-        // unit's Y would be frozen at its spawn height and it'd walk into
-        // hills as the ground rises beneath it.
-        if let Some(ref hm) = heightmap {
-            transform.translation.y = hm.sample(transform.translation.x, transform.translation.z);
-        }
-
-        // Yaw set fresh from new_forward. Tilt computed in body-space as
-        // pure pitch (rotation about body-right) + roll (about body-forward),
-        // then smoothed in a dedicated component. Keeping tilt purely
-        // pitch+roll means it can't bleed into the next frame's yaw read
-        // of transform.forward().
+        // Apply the rotation before considering whether the unit translates.
+        // Sharp turns (cos_err < 0.5 below) skip translation entirely so the
+        // unit pivots in place; if we gated the rotation behind translation
+        // too, the unit would freeze and never finish the turn.
         if new_forward.length_squared() > 1e-6 {
             let yaw_only = Transform::default()
                 .looking_to(new_forward, Vec3::Y)
@@ -327,6 +313,43 @@ pub fn movement_system(
                 }
             };
             transform.rotation = yaw_only * smoothed_tilt;
+        }
+
+        // Facing-gated forward speed. Within ~60° of the target heading,
+        // drive at cos(err); beyond that, pivot in place (no translation)
+        // so the unit doesn't arc wide during sharp turns.
+        let cos_err = new_forward.dot(desired_forward);
+        let align = if cos_err > 0.5 { cos_err } else { 0.0 };
+        let step = speed * dt * align;
+        if step < 1e-4 {
+            continue;
+        }
+        let desired = new_forward * step.min(distance);
+
+        // Resolve desired motion against every other unit. Spring-style:
+        // units push each other with radial + lateral slide, weighted by
+        // mass/speed/head-on factor. See `resolve_motion`. Flying units
+        // skip collision entirely — nothing on the ground obstructs them,
+        // and they pass over each other freely too.
+        let resolved = if flying {
+            desired
+        } else {
+            resolve_motion(entity, current, desired, self_radius, speed, &snapshot)
+        };
+
+        transform.translation += resolved;
+
+        // Altitude: ground units hug the terrain; flying units hover at
+        // their FBI `cruiseAlt` above it, so hills/cliffs pass underneath
+        // without colliding. Ground is sampled either way so air units
+        // rise over rolling terrain instead of staying at a fixed world Y.
+        if let Some(ref hm) = heightmap {
+            let ground = hm.sample(transform.translation.x, transform.translation.z);
+            transform.translation.y = if flying {
+                ground + unit_registry.cruise_alt(unit_type.0)
+            } else {
+                ground
+            };
         }
     }
 }
@@ -384,7 +407,10 @@ fn resolve_motion(
     let mut push = Vec3::ZERO;
 
     for other in snapshot {
-        if other.entity == self_entity {
+        if other.entity == self_entity || other.flying {
+            // Skip self and any airborne unit: the caller only invokes
+            // this for ground units (fliers bypass collision entirely),
+            // and a flier overhead shouldn't obstruct a walker below.
             continue;
         }
         let sum_r = self_radius + other.radius;
@@ -484,7 +510,10 @@ fn waypoint_blocked_by_arrived_unit(
 /// does the primary hard-collision work, so this only needs to correct
 /// residual overlap with a gentle nudge — not drive the main separation.
 pub fn unit_separation_system(
-    mut units: Query<(Entity, &mut Transform, &UnitType)>,
+    mut units: Query<
+        (Entity, &mut Transform, &UnitType),
+        Without<crate::units::spawning::Emerging>,
+    >,
     time: Res<Time>,
     unit_registry: Res<UnitRegistry>,
     heightmap: Option<Res<Heightmap>>,
@@ -492,8 +521,8 @@ pub fn unit_separation_system(
     let dt = time.delta_secs();
     let push_strength = 30.0_f32;
 
-    // Snapshot position, radius, mobility.
-    let snapshot: Vec<(Entity, Vec3, f32, bool)> = units
+    // Snapshot position, radius, mobility, flying.
+    let snapshot: Vec<(Entity, Vec3, f32, bool, bool)> = units
         .iter()
         .map(|(e, tf, ut)| {
             (
@@ -501,19 +530,22 @@ pub fn unit_separation_system(
                 tf.translation,
                 unit_registry.collision_radius(ut.0),
                 unit_registry.speed(ut.0) > 0.0,
+                unit_registry.can_fly(ut.0),
             )
         })
         .collect();
 
     let mut pushes: Vec<(Entity, Vec3)> = Vec::new();
     for i in 0..snapshot.len() {
-        if !snapshot[i].3 {
-            continue; // buildings don't get pushed
+        if !snapshot[i].3 || snapshot[i].4 {
+            // Skip buildings (can't move) and flying units (separation
+            // is a ground-only concern; fliers don't occupy XZ space).
+            continue;
         }
         let mut push = Vec3::ZERO;
         for j in 0..snapshot.len() {
-            if i == j {
-                continue;
+            if i == j || snapshot[j].4 {
+                continue; // ignore flyers overhead
             }
             let sum_r = snapshot[i].2 + snapshot[j].2;
             let diff = Vec3::new(
@@ -562,36 +594,143 @@ fn compute_path(nav_grid: Option<&mut NavGrid>, from: Vec3, to: Vec3) -> Vec<Vec
     vec![to]
 }
 
-/// Draw straight lines from each selected unit to its current move target,
-/// then through any queued move/attack-move destinations.
+/// Dash-pattern segment lengths (long dash, gap, short dot, gap), in elmos.
+/// Drawn back-to-back they form a repeating `-.-.` run.
+const DASH_PATTERN: [(f32, bool); 4] = [(16.0, true), (6.0, false), (4.0, true), (6.0, false)];
+
+/// Draw the path each selected unit is walking (actual waypoint polyline,
+/// hugging the terrain) plus a disc marker at each pending destination —
+/// current `MoveTarget` and every `QueuedCommand`. The line follows the
+/// computed `MovePath` when one exists, falling back to unit→target when
+/// pathfinding hasn't run yet. Mimics Spring's green move-order overlay.
 #[allow(clippy::type_complexity)]
 pub fn draw_selected_command_lines(
-    mut gizmos: Gizmos,
-    query: Query<(&Transform, Option<&MoveTarget>, Option<&CommandQueue>), With<Selected>>,
+    mut gizmos: Gizmos<CommandLineGizmos>,
+    query: Query<
+        (
+            &Transform,
+            Option<&MoveTarget>,
+            Option<&MovePath>,
+            Option<&CommandQueue>,
+        ),
+        With<Selected>,
+    >,
+    heightmap: Option<Res<Heightmap>>,
 ) {
-    let y = 2.0;
-    let move_color = Color::srgb(0.2, 1.0, 0.3);
-    let build_color = Color::srgb(1.0, 0.8, 0.2);
+    const MOVE_COLOR: Color = Color::srgb(0.2, 1.0, 0.3);
+    const BUILD_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
+    const LIFT: f32 = 1.5;
+    const DISC_RADIUS: f32 = 6.0;
 
-    for (transform, target, queue) in &query {
+    let hm = heightmap.as_deref();
+
+    // Place `(x, z)` on terrain with a small lift so the line/disc hovers
+    // just above the surface instead of z-fighting with it.
+    let at_ground = |x: f32, z: f32| -> Vec3 {
+        let y = hm.map(|h| h.sample(x, z)).unwrap_or(0.0);
+        Vec3::new(x, y + LIFT, z)
+    };
+
+    for (transform, target, path, queue) in &query {
         let Some(current) = target else {
             continue;
         };
-        let mut prev = Vec3::new(transform.translation.x, y, transform.translation.z);
-        let next = Vec3::new(current.0.x, y, current.0.z);
-        gizmos.line(prev, next, move_color);
-        prev = next;
 
+        // Collect the sequence of polyline vertices: unit → remaining
+        // waypoints. If no path exists yet (freshly-issued order), fall
+        // back to unit → current target so the player sees something.
+        let mut points: Vec<Vec3> =
+            vec![at_ground(transform.translation.x, transform.translation.z)];
+        if let Some(path) = path
+            && path.current < path.waypoints.len()
+        {
+            for wp in &path.waypoints[path.current..] {
+                points.push(at_ground(wp.x, wp.z));
+            }
+        } else {
+            points.push(at_ground(current.0.x, current.0.z));
+        }
+
+        draw_dashed_polyline(&mut gizmos, &points, MOVE_COLOR, at_ground);
+
+        // Ring at the final point of the active order.
+        let end = *points.last().unwrap();
+        gizmos.circle(
+            Isometry3d::new(end, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
+            DISC_RADIUS,
+            MOVE_COLOR,
+        );
+
+        // Queued follow-ups: straight dashed segments between successive
+        // targets plus a ring at each.
         if let Some(queue) = queue {
+            let mut prev = end;
             for cmd in &queue.commands {
                 let pos = cmd.position();
-                let to = Vec3::new(pos.x, y, pos.z);
+                let to = at_ground(pos.x, pos.z);
                 let color = match cmd {
-                    QueuedCommand::Move(_) => move_color,
-                    QueuedCommand::BuildAt { .. } => build_color,
+                    QueuedCommand::Move(_) => MOVE_COLOR,
+                    QueuedCommand::BuildAt { .. } => BUILD_COLOR,
                 };
-                gizmos.line(prev, to, color);
+                draw_dashed_polyline(&mut gizmos, &[prev, to], color, at_ground);
+                gizmos.circle(
+                    Isometry3d::new(to, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
+                    DISC_RADIUS,
+                    color,
+                );
                 prev = to;
+            }
+        }
+    }
+}
+
+/// Draw a polyline in world space as a repeating `-.-.` dash pattern,
+/// re-sampling Y from the terrain at each dash endpoint so the line hugs
+/// the ground instead of cutting straight through hills.
+fn draw_dashed_polyline(
+    gizmos: &mut Gizmos<CommandLineGizmos>,
+    points: &[Vec3],
+    color: Color,
+    at_ground: impl Fn(f32, f32) -> Vec3,
+) {
+    // Pattern walker: `cursor` is how far into the current pattern entry
+    // we've consumed. Persisting across segments keeps the `-.-.` rhythm
+    // continuous through waypoint corners.
+    let mut pattern_idx = 0usize;
+    let mut cursor = 0.0f32;
+
+    for pair in points.windows(2) {
+        let start = pair[0];
+        let end = pair[1];
+        let dx = end.x - start.x;
+        let dz = end.z - start.z;
+        let seg_len = (dx * dx + dz * dz).sqrt();
+        if seg_len < 1e-4 {
+            continue;
+        }
+        let step_x = dx / seg_len;
+        let step_z = dz / seg_len;
+
+        let mut t = 0.0f32;
+        while t < seg_len {
+            let (entry_len, visible) = DASH_PATTERN[pattern_idx];
+            let remaining = entry_len - cursor;
+            let advance = remaining.min(seg_len - t);
+
+            if visible {
+                let a = at_ground(start.x + step_x * t, start.z + step_z * t);
+                let b = at_ground(
+                    start.x + step_x * (t + advance),
+                    start.z + step_z * (t + advance),
+                );
+                gizmos.line(a, b, color);
+            }
+
+            t += advance;
+            cursor += advance;
+            if cursor >= entry_len - 1e-4 {
+                cursor = 0.0;
+                pattern_idx = (pattern_idx + 1) % DASH_PATTERN.len();
             }
         }
     }

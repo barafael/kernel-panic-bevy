@@ -48,12 +48,14 @@ pub enum UnitKind {
     Signal, // scout unit
     #[strum(serialize = "gateway")]
     Gateway, // mobile builder, places Network structures on datavents
+    #[strum(serialize = "flow")]
+    Flow, // airborne assault, speed scales with team small-building count
 }
 
 use super::components::Faction;
 
 /// All `UnitKind` variants in declaration order.
-pub const ALL_UNIT_KINDS: [UnitKind; 21] = [
+pub const ALL_UNIT_KINDS: [UnitKind; 22] = [
     UnitKind::Kernel,
     UnitKind::Assembler,
     UnitKind::Bit,
@@ -75,6 +77,7 @@ pub const ALL_UNIT_KINDS: [UnitKind; 21] = [
     UnitKind::Packet,
     UnitKind::Signal,
     UnitKind::Gateway,
+    UnitKind::Flow,
 ];
 
 impl UnitKind {
@@ -108,7 +111,8 @@ impl UnitKind {
             | UnitKind::Port
             | UnitKind::Packet
             | UnitKind::Signal
-            | UnitKind::Gateway => Faction::Network,
+            | UnitKind::Gateway
+            | UnitKind::Flow => Faction::Network,
         }
     }
 
@@ -120,7 +124,7 @@ impl UnitKind {
             UnitKind::Byte => 2.0,
             UnitKind::Firewall | UnitKind::Exploit | UnitKind::Pointer | UnitKind::Worm => 1.5,
             UnitKind::Dos => 1.3,
-            UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway => 1.2,
+            UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway | UnitKind::Flow => 1.2,
             UnitKind::LogicBomb => 0.8,
             UnitKind::Virus | UnitKind::Packet => 0.6,
             UnitKind::Bit | UnitKind::Bug => 0.5,
