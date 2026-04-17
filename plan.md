@@ -338,6 +338,54 @@ Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit m
 
 ---
 
+## 10. UX / Polish Backlog
+
+Collected from the in-flight todo list. Not blocking; each is its own
+focused chunk when we're ready.
+
+### 10.1 Selection / input
+
+- Double-click to select every visible unit of the same kind.
+- Unit groups: `Ctrl-1..9` to assign, `1..9` to recall (and center camera
+  on the group).
+- Builder placement UX pass — match the original Kernel Panic cursor
+  behaviour when picking a datavent.
+
+### 10.2 Visual polish
+
+- Dedicated UI pass: match the original KP layout / styling as closely as
+  possible (extends §4 work that's been pragmatic so far).
+- Fix the skybox to match original KP.
+- Audit the post-processing pipeline vs. Spring / upstream KP — identify
+  what we're missing and what's cheap to add.
+- Decide `glyph_zero` / `glyph_one`: keep the procedural baseline or
+  ship a sprite asset. Benchmark first.
+
+### 10.3 Fog-of-war clarification
+
+§6 covers the full fog system; the MVP the original uses is simpler —
+the entire map is always visible, but buildings / units are only
+revealed when they've been built (i.e. no Line-of-Sight; it's a
+"memory" system, not per-frame vision). Worth implementing that
+cheaper variant first before the full per-team vision grid.
+
+### 10.4 Profiling / performance
+
+- Run `cargo-flamegraph` against a 3-team full map for 30 seconds;
+  chase anything >0.5% of Update-phase time.
+- Survey "what performance tweaks does Spring get away with that we
+  can apply?" — engine comparison pass.
+- General Bevy perf pass: archetype churn, command flush cost, render
+  node count.
+
+### 10.5 Testing
+
+- Run `cargo llvm-cov` across the workspace and fill coverage gaps that
+  would be high-value (weapon category / damage resolution edge cases,
+  AI phase transitions, shield soak + Protected interactions).
+
+---
+
 ## Crate Structure
 
 ```text
@@ -352,18 +400,11 @@ spring-pathfinding/    (lib — QTPFS quad-tree pathfinding)
 Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game. The
 `spring-*` crates have zero Bevy dependency and are independently testable.
 
-**Issues:**
+**Issue:**
 
-- [ ] `spring-pathfinding` is misnamed — the other `spring-*` crates parse Spring file formats,
-  but pathfinding is runtime game logic, not a format parser. Consider renaming to `qtpfs` or
-  moving into `kernel-panic`
-- [ ] `spring-map` smd_parser duplicates ~40 lines of TDF parsing logic that now lives in
-  `spring-tdf` — refactor to depend on `spring-tdf::Tdf::parse()` instead
-- [ ] `kernel-panic` is a monolith — as AI, networking, audio, and fog of war are added, the
-  single binary crate will become unwieldy. The `units/` module already houses combat,
-  production, animation, spawning, and weapon FX. Bevy plugins are the natural splitting point
 - [ ] No shared types crate — if `spring-tdf`'s `DamageMap` ever needs to understand
-  `kernel-panic`'s `ArmorClass`, a shared types crate (or trait-based bridge) will be needed
+  `kernel-panic`'s `ArmorClass`, a shared types crate (or trait-based bridge) will be needed.
+  (Remaining crate-structure issues moved to Technical Debt → Architecture.)
 
 ---
 
@@ -374,10 +415,19 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] `selection.rs` is 662 lines handling 6+ concerns (hover, click/drag, right-click
   commands, material highlight, health bars, move indicators) — split into focused modules
 - [ ] `spawn_unit` takes 12 parameters — group into a Bevy `SystemParam` bundle
+  that can be re-used by `map_loading::load_map`, `morph::process_morph`,
+  `network_buffer::process_dispatch`, and the placement systems (they all
+  thread the same 6–7 asset/cache resources)
 - [ ] `buildable_units()` in `hud.rs` and `default_production()` in `production.rs` encode
   overlapping "what can X build?" data — consolidate into a shared source
-- [ ] `load_map_at_index` takes 9 parameters — consider a `MapLoadContext` struct
 - [ ] `movement.rs` uses `Option<ResMut<NavGrid>>` — consider making NavGrid always present
+- [ ] `spring-pathfinding` is runtime game logic, not a format parser —
+  rename to `qtpfs` or fold into `kernel-panic`
+- [ ] `spring-map::smd_parser` duplicates ~40 lines of TDF parsing that
+  now lives in `spring-tdf` — refactor to depend on `spring-tdf::Tdf::parse()`
+- [ ] `kernel-panic` is a monolith — as AI, networking, audio, and fog
+  of war land, the single binary crate will become unwieldy. Bevy
+  plugins are the natural splitting point.
 
 ### Performance
 
@@ -397,6 +447,16 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] `UnitRegistry::weapon()` returns raw TDF section name strings — return
   `Option<&WeaponDef>` directly so callers never see string keys, eliminating empty-string
   checks in combat.rs and hud.rs
+
+### Testing & Tooling
+
+- [ ] Run `cargo llvm-cov` workspace-wide; fill high-value coverage gaps
+  (weapon category / damage resolution edge cases, AI phase transitions,
+  shield soak + Protected interactions).
+- [ ] Flamegraph a 3-team full map for 30s; chase anything >0.5% of
+  Update-phase time.
+- [ ] Survey which performance tricks Spring / upstream KP apply that
+  we could adopt.
 
 ### Gameplay Bugs
 
