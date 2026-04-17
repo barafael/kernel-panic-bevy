@@ -1,13 +1,10 @@
-//! Map loading: catalog discovery, hotkey cycling, and per-map spawn of
-//! terrain, atmosphere, fog, nav grid, minimap, and homebases/showcase units.
+//! Map loading: pick a map archive from `assets/maps/` and spawn its
+//! terrain, atmosphere, fog, nav grid, minimap, and homebases (or
+//! showcase units) at startup.
 //!
-//! Exposes [`MapLoadingPlugin`], which:
-//! - Discovers `.sd7` / `.sdz` archives in `assets/maps/` at Startup.
-//! - Loads the initial map (honoring an optional CLI positional arg).
-//! - Cycles through maps on `]` / `[` at runtime, despawning the previous
-//!   map's entities first.
-//! - Runs an `apply_pending_fog` Update system that copies the map's fog
-//!   settings onto the camera once it exists.
+//! Exposes [`MapLoadingPlugin`], which loads the CLI-selected map at
+//! Startup and runs an `apply_pending_fog` Update system that copies
+//! the map's fog settings onto the camera once it exists.
 
 use std::path::PathBuf;
 
@@ -25,7 +22,6 @@ use crate::{
     ui,
     units::{
         animation::CobFileCache,
-        game_over::{GameOverUi, GameState},
         meshes::S3OModelCache,
         spawning::{spawn_homebases, spawn_showcase},
         unit_registry::UnitRegistry,
@@ -43,29 +39,28 @@ impl Plugin for MapLoadingPlugin {
         app.add_systems(
             Startup,
             (
-                discover_maps,
-                load_current_map.after(crate::rendering::camera::spawn_camera),
+                pick_map,
+                load_map.after(crate::rendering::camera::spawn_camera),
             )
                 .chain(),
         )
-        .add_systems(Update, (cycle_map_on_keypress, apply_pending_fog));
+        .add_systems(Update, apply_pending_fog);
     }
 }
 
 /// Marker component for all entities spawned by map loading.
-/// Used to despawn everything when switching maps.
+/// Retained for parity with existing spawn code even though we no
+/// longer bulk-despawn on map switch.
 #[derive(Component)]
 pub struct MapEntity;
 
-/// Tracks available maps and the current selection.
+/// Path to the map archive loaded for this session.
 #[derive(Resource)]
-struct MapCatalog {
-    maps: Vec<PathBuf>,
-    current: usize,
-}
+struct SelectedMap(PathBuf);
 
-/// Discover all .sd7/.sdz map files and pick the initial one.
-fn discover_maps(mut commands: Commands) {
+/// Discover the map archives in `assets/maps/` and pick the one named
+/// by the CLI arg (or the first alphabetically).
+fn pick_map(mut commands: Commands) {
     let candidates = [
         PathBuf::from("kernel-panic/assets/maps"),
         PathBuf::from("assets/maps"),
@@ -118,28 +113,17 @@ fn discover_maps(mut commands: Commands) {
         .unwrap_or(0);
 
     if maps.is_empty() {
-        error!("No map files found. Place .sd7/.sdz files in assets/maps/");
-        std::process::exit(1);
+        panic!("No map files found. Place .sd7/.sdz files in assets/maps/");
     }
 
-    info!(
-        "Found {} maps, starting with: {}",
-        maps.len(),
-        maps[initial].display()
-    );
-    commands.insert_resource(MapCatalog {
-        maps,
-        current: initial,
-    });
+    let selected = maps.into_iter().nth(initial).unwrap();
+    info!("Loading map: {}", selected.display());
+    commands.insert_resource(SelectedMap(selected));
 }
 
 #[allow(clippy::too_many_arguments)]
-fn cycle_map_on_keypress(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut catalog: ResMut<MapCatalog>,
-    map_entities: Query<Entity, With<MapEntity>>,
-    game_over_ui: Query<Entity, With<GameOverUi>>,
-    mut next_game_state: ResMut<NextState<GameState>>,
+fn load_map(
+    selected: Res<SelectedMap>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
@@ -151,98 +135,10 @@ fn cycle_map_on_keypress(
     mut geovent_assets: ResMut<GeoventAssets>,
     unit_registry: Res<UnitRegistry>,
 ) {
-    let changed = if keys.just_pressed(KeyCode::BracketRight) {
-        catalog.current = (catalog.current + 1) % catalog.maps.len();
-        true
-    } else if keys.just_pressed(KeyCode::BracketLeft) {
-        catalog.current = (catalog.current + catalog.maps.len() - 1) % catalog.maps.len();
-        true
-    } else {
-        false
-    };
-
-    if !changed {
-        return;
-    }
-
-    // Despawn all existing map entities.
-    for entity in &map_entities {
-        commands.entity(entity).despawn();
-    }
-
-    // Reset game state so the new map starts fresh.
-    next_game_state.set(GameState::Playing);
-    for entity in &game_over_ui {
-        commands.entity(entity).despawn();
-    }
-
-    load_map_at_index(
-        &catalog,
-        &mut commands,
-        &mut meshes,
-        &mut std_materials,
-        &mut images,
-        &mut camera_query,
-        &mut map_bounds,
-        &mut model_cache,
-        &mut cob_cache,
-        &mut geovent_assets,
-        &unit_registry,
-    );
-}
-
-/// Initial map load at startup.
-#[allow(clippy::too_many_arguments)]
-fn load_current_map(
-    catalog: Res<MapCatalog>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
-    mut map_bounds: ResMut<MapBounds>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut cob_cache: ResMut<CobFileCache>,
-    mut geovent_assets: ResMut<GeoventAssets>,
-    unit_registry: Res<UnitRegistry>,
-) {
-    load_map_at_index(
-        &catalog,
-        &mut commands,
-        &mut meshes,
-        &mut std_materials,
-        &mut images,
-        &mut camera_query,
-        &mut map_bounds,
-        &mut model_cache,
-        &mut cob_cache,
-        &mut geovent_assets,
-        &unit_registry,
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn load_map_at_index(
-    catalog: &MapCatalog,
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    std_materials: &mut ResMut<Assets<StandardMaterial>>,
-    images: &mut ResMut<Assets<Image>>,
-    camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
-    map_bounds: &mut ResMut<MapBounds>,
-    model_cache: &mut ResMut<S3OModelCache>,
-    cob_cache: &mut ResMut<CobFileCache>,
-    geovent_assets: &mut GeoventAssets,
-    unit_registry: &UnitRegistry,
-) {
-    let map_path = &catalog.maps[catalog.current];
+    let map_path = &selected.0;
     let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
 
-    info!(
-        "Loading map [{}/{}]: {map_name}",
-        catalog.current + 1,
-        catalog.maps.len()
-    );
+    info!("Loading map: {map_name}");
 
     let spring_map = match spring_map::load_map(map_path) {
         Ok(m) => m,
@@ -264,14 +160,16 @@ fn load_map_at_index(
     );
 
     let terrain_material = match &spring_map.ground_texture {
-        Some(ground) => build_terrain_material_from_texture(ground, images, std_materials),
+        Some(ground) => {
+            build_terrain_material_from_texture(ground, &mut images, &mut std_materials)
+        }
         None => {
             warn!("No ground texture — using fallback");
-            dark_fallback_material(std_materials)
+            dark_fallback_material(&mut std_materials)
         }
     };
 
-    setup_camera(parsed, camera_query, map_bounds);
+    setup_camera(parsed, &mut camera_query, &mut map_bounds);
 
     // Check actual height variance, not header values (gadgets may have modified the terrain).
     let min_actual = parsed.heights.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -293,11 +191,11 @@ fn load_map_at_index(
         parsed,
         &heightmap,
         terrain_material,
-        commands,
-        meshes,
-        std_materials,
-        images,
-        geovent_assets,
+        &mut commands,
+        &mut meshes,
+        &mut std_materials,
+        &mut images,
+        &mut geovent_assets,
     );
 
     // Build pathfinding grid from heightmap.
@@ -335,8 +233,8 @@ fn load_map_at_index(
             None => (None, 0, 0),
         };
         ui::minimap::setup_minimap(
-            commands,
-            images,
+            &mut commands,
+            &mut images,
             gp,
             gw,
             gh,
@@ -346,31 +244,31 @@ fn load_map_at_index(
     }
 
     if let Some(map_info) = &spring_map.map_info {
-        apply_atmosphere(map_info, commands);
-        apply_fog(map_info, parsed, commands);
+        apply_atmosphere(map_info, &mut commands);
+        apply_fog(map_info, parsed, &mut commands);
         if map_name.eq_ignore_ascii_case("Showcase") {
             spawn_showcase(
                 &heightmap,
                 map_info,
-                commands,
-                meshes,
-                std_materials,
-                images,
-                model_cache,
-                cob_cache,
-                unit_registry,
+                &mut commands,
+                &mut meshes,
+                &mut std_materials,
+                &mut images,
+                &mut model_cache,
+                &mut cob_cache,
+                &unit_registry,
             );
         } else {
             spawn_homebases(
                 &heightmap,
                 map_info,
-                commands,
-                meshes,
-                std_materials,
-                images,
-                model_cache,
-                cob_cache,
-                unit_registry,
+                &mut commands,
+                &mut meshes,
+                &mut std_materials,
+                &mut images,
+                &mut model_cache,
+                &mut cob_cache,
+                &unit_registry,
             );
         }
         info!(
@@ -386,7 +284,7 @@ fn load_map_at_index(
 fn setup_camera(
     parsed: &ParsedMap,
     camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
-    map_bounds: &mut ResMut<MapBounds>,
+    map_bounds: &mut MapBounds,
 ) {
     let world_w = parsed.header.world_width();
     let world_d = parsed.header.world_depth();
@@ -394,7 +292,7 @@ fn setup_camera(
     let heightmap_h = parsed.header.heightmap_height();
     let center_height = parsed.heights[(heightmap_h / 2) * heightmap_w + heightmap_w / 2];
 
-    **map_bounds =
+    *map_bounds =
         MapBounds::from_map_extents(Vec3::new(0.0, 0.0, 0.0), Vec3::new(world_w, 0.0, world_d));
 
     let map_extent = world_w.max(world_d);
