@@ -217,10 +217,13 @@ cuboids.
 `model=octashot.s3o` (Pointer), `model=network_medium_missile.s3o` (Flow) exist but code
 renders placeholder cubes in `spawn_projectile`.
 
-### 4.3 Explosion / Impact Effects (Important)
+### 4.3 Explosion / Impact Effects — ✅ Partial
 
-Every weapon has `explosiongenerator=custom:...` but nothing is spawned on hit. ~40
-explosion TDFs in `upstream/Kernel-Panic/gamedata/explosions/` are never loaded.
+`ImpactBurst` spawns a color-coded sphere at every hit, sized by the weapon's
+`area_of_effect` and tinted by its `rgb_color`. Covers beams, projectiles, burst-beams,
+and AoE splashes with a single code path; a pragmatic substitute for the full CEG
+particle system. The ~40 upstream explosion TDFs are still not parsed (full per-weapon
+CEG emitter stacks remain deferred).
 
 ### 4.4 Projectile Trails & Smoke (Low)
 
@@ -320,19 +323,18 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit morph,
 §3.5 command-fire (NX Flag + Infection + Firewall), §3.6 infection refinement,
-§3.7 Kernel Boost, §3.8 Flow speed, §3.9 Logic Bomb detonation, §4.7 shields,
-§5.1 AI Expand + Defend.
+§3.7 Kernel Boost, §3.8 Flow speed, §3.9 Logic Bomb detonation, §4.3 impact bursts,
+§4.7 shields, §5.1 AI Expand + Defend.
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
 | 1 | Terminal SIGTERM + Byte MineLauncher | 3.5 | Last command-fire gaps |
 | 2 | Debug (Minekiller) placement | 3.9 | Last mine-kit gap |
-| 3 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 4 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 5 | Fog of war | 6 | Full visibility system |
-| 6 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 7 | Audio | 7 | Weapon sounds highest priority |
-| 8 | Multiplayer | 9 | Endgame feature |
+| 3 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 4 | Fog of war | 6 | Full visibility system |
+| 5 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 6 | Audio | 7 | Weapon sounds highest priority |
+| 7 | Multiplayer | 9 | Endgame feature |
 
 ---
 
