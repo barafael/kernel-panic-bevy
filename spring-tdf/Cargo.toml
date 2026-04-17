@@ -5,6 +5,7 @@ edition = "2024"
 description = "Parser for Spring RTS engine TDF (Tag Definition Format) files"
 
 [dependencies]
+better_default = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

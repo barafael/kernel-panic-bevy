@@ -21,44 +21,28 @@ pub struct StartPosition {
     pub z: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, better_default::Default)]
 pub struct Atmosphere {
     pub fog_color: [f32; 3],
+    #[default(0.999)]
     pub fog_start: f32,
+    #[default([0.01, 0.01, 0.01])]
     pub sky_color: [f32; 3],
+    #[default([1.0, 1.0, 1.0])]
     pub sun_color: [f32; 3],
     pub cloud_density: f32,
 }
 
-impl Default for Atmosphere {
-    fn default() -> Self {
-        Self {
-            fog_color: [0.0, 0.0, 0.0],
-            fog_start: 0.999,
-            sky_color: [0.01, 0.01, 0.01],
-            sun_color: [1.0, 1.0, 1.0],
-            cloud_density: 0.0,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, better_default::Default)]
 pub struct Lighting {
+    #[default([0.0, 1.0, 1.0])]
     pub sun_dir: [f32; 3],
+    #[default([0.5, 0.5, 0.5])]
     pub ground_ambient: [f32; 3],
+    #[default([0.5, 0.5, 0.5])]
     pub ground_sun_color: [f32; 3],
+    #[default(1.0)]
     pub ground_shadow_density: f32,
-}
-
-impl Default for Lighting {
-    fn default() -> Self {
-        Self {
-            sun_dir: [0.0, 1.0, 1.0],
-            ground_ambient: [0.5, 0.5, 0.5],
-            ground_sun_color: [0.5, 0.5, 0.5],
-            ground_shadow_density: 1.0,
-        }
-    }
 }
 
 /// Parse an .smd file from its raw text content.

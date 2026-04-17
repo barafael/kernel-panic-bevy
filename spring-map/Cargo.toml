@@ -5,6 +5,7 @@ edition = "2024"
 description = "Parser for Spring RTS engine map files (.smf/.smt/.sd7)"
 
 [dependencies]
+better_default = { workspace = true }
 byteorder = { workspace = true }
 thiserror = { workspace = true }
 sevenz-rust = { workspace = true }

@@ -24,6 +24,10 @@ pub struct RtsCameraState {
 }
 
 impl Default for RtsCameraState {
+    // Manual impl (not `better_default`): each `smooth_*` field must
+    // mirror its non-smoothed counterpart so the camera doesn't lerp
+    // from an arbitrary origin on the first frame. `better_default`
+    // doesn't let a field default reference another field.
     fn default() -> Self {
         let focus = Vec3::new(1024.0, 0.0, 1024.0);
         let distance = 800.0;
@@ -83,33 +87,29 @@ impl MapBounds {
     }
 }
 
-#[derive(Resource)]
+#[derive(Resource, better_default::Default)]
 pub struct CameraSettings {
+    #[default(800.0)]
     pub pan_speed: f32,
+    #[default(0.8)]
     pub rotate_speed_keys: f32,
+    #[default(0.003)]
     pub rotate_speed_mouse: f32,
+    #[default(150.0)]
     pub min_distance: f32,
+    #[default(3000.0)]
     pub max_distance: f32,
+    /// Lowest pitch the camera accepts, ~14°.
+    #[default(0.25)]
     pub min_pitch: f32,
+    /// Highest pitch the camera accepts, ~85° (just below straight-down
+    /// so the RTS orbit never flips past vertical).
+    #[default(std::f32::consts::FRAC_PI_2 - 0.05)]
     pub max_pitch: f32,
     /// How fast the smooth values chase the targets (higher = snappier).
     /// 10 is responsive, 4 is cinematic.
+    #[default(8.0)]
     pub smoothing: f32,
-}
-
-impl Default for CameraSettings {
-    fn default() -> Self {
-        Self {
-            pan_speed: 800.0,
-            rotate_speed_keys: 0.8,
-            rotate_speed_mouse: 0.003,
-            min_distance: 150.0,
-            max_distance: 3000.0,
-            min_pitch: 0.25,                               // ~14°
-            max_pitch: std::f32::consts::FRAC_PI_2 - 0.05, // ~85°
-            smoothing: 8.0,
-        }
-    }
 }
 
 pub fn spawn_camera(mut commands: Commands) {

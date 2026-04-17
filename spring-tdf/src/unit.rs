@@ -15,8 +15,9 @@ pub struct UnitDefs {
 
 /// A single unit definition parsed from an FBI file.
 ///
-/// Fields that don't appear in the TDF default to `0.0` / `false` / `""`.
-#[derive(Debug, Clone)]
+/// Fields that don't appear in the TDF default to `0.0` / `false` / `""`,
+/// except `damage_modifier` which defaults to 1.0 (no scaling).
+#[derive(Debug, Clone, better_default::Default)]
 pub struct UnitDef {
     /// Display name from `Name=`.
     pub name: String,
@@ -82,6 +83,7 @@ pub struct UnitDef {
     /// Build distance for constructors.
     pub build_distance: f32,
     /// Damage modifier (multiplier on incoming damage).
+    #[default(1.0)]
     pub damage_modifier: f32,
     /// Is a kamikaze / suicide unit.
     pub kamikaze: bool,
@@ -119,53 +121,6 @@ pub struct UnitDef {
     pub max_slope: f32,
     /// Initial cloaked state.
     pub init_cloaked: bool,
-}
-
-impl Default for UnitDef {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            id: String::new(),
-            description: String::new(),
-            side: String::new(),
-            max_health: 0.0,
-            build_cost_metal: 0.0,
-            build_time: 0.0,
-            max_velocity: 0.0,
-            can_move: false,
-            movement_class: String::new(),
-            acceleration: 0.0,
-            brake_rate: 0.0,
-            turn_rate: 0.0,
-            footprint_x: 0.0,
-            footprint_z: 0.0,
-            object_name: String::new(),
-            build_pic: String::new(),
-            weapon1: String::new(),
-            weapon2: String::new(),
-            weapon3: String::new(),
-            builder: false,
-            commander: false,
-            can_attack: false,
-            worker_time: 0.0,
-            build_distance: 0.0,
-            damage_modifier: 1.0,
-            kamikaze: false,
-            kamikaze_distance: 0.0,
-            sight_distance: 0.0,
-            radar_distance: 0.0,
-            seismic_distance: 0.0,
-            category: String::new(),
-            explode_as: String::new(),
-            self_destruct_as: String::new(),
-            can_fly: false,
-            cruise_alt: 0.0,
-            idle_auto_heal: 0.0,
-            idle_time: 0.0,
-            max_slope: 0.0,
-            init_cloaked: false,
-        }
-    }
 }
 
 impl UnitDefs {

@@ -1,8 +1,19 @@
 [workspace]
-members = ["spring-tdf", "spring-map", "spring-map-gen", "spring-unit-mesh", "spring-cob", "spring-pathfinding", "kernel-panic"]
+
 resolver = "3"
 
+members = [
+    "spring-tdf",
+    "spring-map",
+    "spring-map-gen",
+    "spring-unit-mesh",
+    "spring-cob",
+    "spring-pathfinding",
+    "kernel-panic",
+]
+
 [workspace.dependencies]
+better_default = "1"
 bevy = { version = "0.18", features = ["serialize"] }
 byteorder = "1.5"
 thiserror = "2"

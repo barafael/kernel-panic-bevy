@@ -418,6 +418,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "better_default"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b9a5040dce49a7642c97ccb1ae59567098967b5d52c29773f1299a42d23bb39"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "bevy"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3427,6 +3438,7 @@ dependencies = [
 name = "kernel-panic"
 version = "0.1.0"
 dependencies = [
+ "better_default",
  "bevy",
  "spring-cob",
  "spring-map",
@@ -5091,7 +5103,6 @@ name = "spring-cob"
 version = "0.1.0"
 dependencies = [
  "binrw",
- "byteorder",
  "proptest",
  "smallvec",
  "strum",
@@ -5102,6 +5113,7 @@ dependencies = [
 name = "spring-map"
 version = "0.1.0"
 dependencies = [
+ "better_default",
  "binrw",
  "byteorder",
  "mlua",
@@ -5118,7 +5130,6 @@ dependencies = [
  "bevy",
  "byteorder",
  "clap",
- "proptest",
  "spring-cob",
  "spring-map",
  "spring-tdf",
@@ -5139,6 +5150,7 @@ dependencies = [
 name = "spring-tdf"
 version = "0.1.0"
 dependencies = [
+ "better_default",
  "proptest",
  "thiserror 2.0.18",
 ]
@@ -5148,7 +5160,6 @@ name = "spring-unit-mesh"
 version = "0.1.0"
 dependencies = [
  "binrw",
- "byteorder",
  "thiserror 2.0.18",
 ]
 
