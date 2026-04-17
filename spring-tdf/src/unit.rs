@@ -85,6 +85,8 @@ pub struct UnitDef {
     pub damage_modifier: f32,
     /// Is a kamikaze / suicide unit.
     pub kamikaze: bool,
+    /// Proximity trigger distance in elmos for kamikaze units.
+    pub kamikaze_distance: f32,
 
     // --- Sight ---
     /// Line-of-sight range (`SightDistance=`).
@@ -149,6 +151,7 @@ impl Default for UnitDef {
             build_distance: 0.0,
             damage_modifier: 1.0,
             kamikaze: false,
+            kamikaze_distance: 0.0,
             sight_distance: 0.0,
             radar_distance: 0.0,
             seismic_distance: 0.0,
@@ -235,6 +238,7 @@ impl UnitDef {
                 if v == 0.0 { 1.0 } else { v }
             },
             kamikaze: s.bool("kamikaze"),
+            kamikaze_distance: s.f32("kamikazedistance"),
 
             sight_distance: s.f32("sightdistance"),
             radar_distance: s.f32("radardistance"),

@@ -151,6 +151,14 @@ impl UnitRegistry {
         self.def(kind).map_or("", |d| &d.build_pic)
     }
 
+    /// Proximity trigger radius (elmos) for kamikaze units. A non-zero
+    /// value implies this unit detonates when an enemy enters the
+    /// circle; returns 0.0 for everything else.
+    pub fn kamikaze_distance(&self, kind: UnitKind) -> f32 {
+        self.def(kind)
+            .map_or(0.0, |d| if d.kamikaze { d.kamikaze_distance } else { 0.0 })
+    }
+
     /// Detector radius (elmos) — a unit can reveal cloaked enemies within
     /// this range. Maps to the FBI `RadarDistance` field; zero means this
     /// unit kind does not detect cloaked targets.

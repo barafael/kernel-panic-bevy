@@ -96,6 +96,7 @@ impl Plugin for UnitsPlugin {
                     (
                         ai::ai_brain,
                         combat::tick_deploy_state,
+                        combat::tick_kamikaze,
                         combat::combat_system,
                         combat::tick_burst_fire,
                         combat::aim_weapons_system,
