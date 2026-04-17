@@ -50,7 +50,7 @@ impl WeaponRegistry {
         &self,
         unit_registry: &super::unit_registry::UnitRegistry,
     ) {
-        for kind in ALL_UNIT_KINDS {
+        for &kind in ALL_UNIT_KINDS {
             let weapon = unit_registry.weapon(kind);
             if !weapon.is_empty() && self.defs.get(weapon).is_none() {
                 warn!(

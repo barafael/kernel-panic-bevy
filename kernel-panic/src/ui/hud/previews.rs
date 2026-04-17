@@ -47,7 +47,7 @@ fn load_unit_previews(
     let assets_root = std::path::Path::new("kernel-panic/assets/unitpics");
     let assets_root_alt = std::path::Path::new("assets/unitpics");
 
-    for kind in ALL_UNIT_KINDS {
+    for &kind in ALL_UNIT_KINDS {
         let declared = unit_registry.build_pic(kind);
         let stem = if declared.is_empty() {
             kind.unitname().to_string()

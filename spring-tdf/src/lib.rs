@@ -29,7 +29,7 @@ pub use explosion::{
 };
 pub use parse::{ParseError, Section, Tdf};
 pub use unit::{UnitDef, UnitDefs};
-pub use weapon::{DamageMap, WeaponDef, WeaponDefs};
+pub use weapon::{DamageMap, WeaponCategory, WeaponDef, WeaponDefs};
 
 #[cfg(test)]
 mod tests;

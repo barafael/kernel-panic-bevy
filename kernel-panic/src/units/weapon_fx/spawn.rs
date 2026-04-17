@@ -41,15 +41,9 @@ pub(super) fn spawn_weapon_visuals(
         }
 
         // Classify weapon by its TDF properties.
-        let is_projectile = weapon.ballistic
-            || matches!(
-                weapon.weapon_type.as_str(),
-                "MissileLauncher" | "StarburstLauncher" | "Cannon" | "AircraftBomb"
-            )
-            || (!weapon.model.is_empty() && weapon.model != ";");
-
+        let is_projectile = weapon.is_projectile();
         let is_burst_beam = weapon.beam_burst || weapon.spray_angle > 100.0;
-        let is_melee = weapon.weapon_type == "Melee";
+        let is_melee = weapon.category() == spring_tdf::WeaponCategory::Melee;
 
         if is_melee {
             spawn_melee_flash(&event, weapon, &mut commands, &mut meshes, &mut materials);

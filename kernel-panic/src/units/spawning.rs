@@ -211,24 +211,18 @@ pub fn spawn_homebases(
     info!("Spawned {} homebases", map_info.start_positions.len());
 }
 
-/// Mobile unit kinds, in display order — one per slot on the showcase map.
-/// Excludes stationary units (LogicBomb, Exploit) and units that only spawn
-/// dynamically (Virus, which is created from Worm kills).
-const SHOWCASE_KINDS: &[UnitKind] = &[
-    UnitKind::Assembler,
-    UnitKind::Bit,
-    UnitKind::Byte,
-    UnitKind::Pointer,
-    UnitKind::Bug,
-    UnitKind::Worm,
-    UnitKind::Dos,
-    UnitKind::Trojan,
-    UnitKind::Virus,
-    UnitKind::Packet,
-    UnitKind::Signal,
-    UnitKind::Gateway,
-    UnitKind::Flow,
-];
+/// Mobile unit kinds shown on the Showcase map — everything that can
+/// walk or fly around for visual inspection. Derived from
+/// `ALL_UNIT_KINDS` via `UnitKind::is_showcase_candidate`, so new
+/// variants only need to set that flag (and the registry must know
+/// them) to appear here.
+fn showcase_kinds() -> Vec<UnitKind> {
+    super::definitions::ALL_UNIT_KINDS
+        .iter()
+        .copied()
+        .filter(|k| k.is_showcase_candidate())
+        .collect()
+}
 
 /// Spawn one of each mobile unit at the map's start positions, instead of
 /// the usual three-faction homebases. Used by the `Showcase` map for visual
@@ -248,9 +242,10 @@ pub fn spawn_showcase(
     let invisible_mat = get_or_create_invisible_material(commands, materials);
 
     let mut showcase_positions: Vec<(UnitKind, Vec3)> = Vec::new();
+    let kinds = showcase_kinds();
 
     for (slot, start_pos) in map_info.start_positions.iter().enumerate() {
-        let Some(&kind) = SHOWCASE_KINDS.get(slot) else {
+        let Some(&kind) = kinds.get(slot) else {
             break;
         };
         let position = heightmap.place(start_pos.x, start_pos.z);

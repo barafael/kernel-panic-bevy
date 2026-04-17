@@ -151,7 +151,54 @@ impl DamageMap {
     }
 }
 
+/// Canonical classification of a weapon's rendering / behaviour
+/// category, derived from the TDF `weaponType=` string. Upstream KP
+/// uses only the five variants below; anything else falls through to
+/// `Other`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponCategory {
+    Melee,
+    Shield,
+    BeamLaser,
+    MissileLauncher,
+    StarburstLauncher,
+    Cannon,
+    AircraftBomb,
+    Other,
+}
+
 impl WeaponDef {
+    /// Parse `weapon_type` into [`WeaponCategory`]. Used by the game
+    /// to classify a weapon without re-matching string literals at
+    /// every call site.
+    pub fn category(&self) -> WeaponCategory {
+        match self.weapon_type.as_str() {
+            "Melee" => WeaponCategory::Melee,
+            "Shield" => WeaponCategory::Shield,
+            "BeamLaser" => WeaponCategory::BeamLaser,
+            "MissileLauncher" => WeaponCategory::MissileLauncher,
+            "StarburstLauncher" => WeaponCategory::StarburstLauncher,
+            "Cannon" => WeaponCategory::Cannon,
+            "AircraftBomb" => WeaponCategory::AircraftBomb,
+            _ => WeaponCategory::Other,
+        }
+    }
+
+    /// True for any weapon whose projectile class launches an actual
+    /// model, rather than a hitscan beam. Used by weapon-fx to decide
+    /// whether to spawn a moving `ProjectileVisual` vs a beam cuboid.
+    pub fn is_projectile(&self) -> bool {
+        self.ballistic
+            || matches!(
+                self.category(),
+                WeaponCategory::MissileLauncher
+                    | WeaponCategory::StarburstLauncher
+                    | WeaponCategory::Cannon
+                    | WeaponCategory::AircraftBomb,
+            )
+            || (!self.model.is_empty() && self.model != ";")
+    }
+
     /// Multiplier for dynamic-damage weapons (BugCannon) given the
     /// distance from attacker to target. Returns 1.0 for weapons that
     /// don't set `dyn_damage_exp` — i.e. most weapons keep flat damage.

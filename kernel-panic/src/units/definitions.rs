@@ -1,98 +1,124 @@
 /// All unit types across the three factions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::VariantArray)]
 pub enum UnitKind {
     // --- System ---
+    /// Homebase + primary factory.
     #[strum(serialize = "kernel")]
-    Kernel, // homebase + primary factory
+    Kernel,
+
+    /// Mobile constructor, builds Sockets on datavents.
     #[strum(serialize = "assembler")]
-    Assembler, // mobile constructor, builds Sockets on datavents
+    Assembler,
+
+    /// Basic swarm unit.
     #[strum(serialize = "bit")]
-    Bit, // basic swarm unit
+    Bit,
+
+    /// Heavy defensive unit with 70% damage reduction when closed.
     #[strum(serialize = "byte")]
-    Byte, // heavy defensive unit, 70% damage reduction when closed
+    Byte,
+
+    /// Deployable artillery with the NX Flag ability.
     #[strum(serialize = "pointer")]
-    Pointer, // deployable artillery + NX Flag ability
+    Pointer,
+
+    /// Secondary factory on datavents, auto-produces Bits.
     #[strum(serialize = "socket")]
-    Socket, // secondary factory on datavents, auto-produces Bits
+    Socket,
+
+    /// Defensive structure. Listed here (under System) to preserve
+    /// declaration order — it's actually a Network-faction building.
     #[strum(serialize = "firewall")]
-    Firewall, // defensive structure (Network faction — listed here to preserve index order)
+    Firewall,
+
+    /// System special building — launches SIGTERM air strikes.
     #[strum(serialize = "terminal")]
-    Terminal, // System special building — launches SIGTERM air strikes
+    Terminal,
 
     // --- Hacker ---
+    /// Homebase.
     #[strum(serialize = "hole")]
-    Hole, // homebase
+    Hole,
+
+    /// Basic swarm unit, can morph into Exploit.
     #[strum(serialize = "bug")]
-    Bug, // basic swarm unit, can morph into Exploit
+    Bug,
+
+    /// Stationary artillery whose damage scales with target distance.
     #[strum(serialize = "exploit")]
-    Exploit, // stationary artillery (increasing damage at range)
+    Exploit,
+
+    /// Cloaked ambusher; kills convert the victim into a Virus.
     #[strum(serialize = "worm")]
-    Worm, // cloaked ambusher, kills convert to Viruses
+    Worm,
+
+    /// Spawned from Worm kills — not directly buildable.
     #[strum(serialize = "virus")]
-    Virus, // spawned from Worm kills, not directly buildable
+    Virus,
+
+    /// Stuns / paralyzes enemies.
     #[strum(serialize = "dos")]
-    Dos, // stuns/paralyzes enemies
+    Dos,
+
+    /// Secondary factory on datavents.
     #[strum(serialize = "window")]
-    Window, // secondary factory on datavents
+    Window,
+
+    /// Cloaked suicide mine.
     #[strum(serialize = "logic_bomb")]
-    LogicBomb, // suicide unit
+    LogicBomb,
+
+    /// Mobile builder, places Hacker structures on datavents.
     #[strum(serialize = "trojan")]
-    Trojan, // mobile builder, places Hacker structures on datavents
+    Trojan,
+
+    /// Hacker special building — infection-gas artillery.
     #[strum(serialize = "obelisk")]
-    Obelisk, // Hacker special building — infection gas artillery
+    Obelisk,
 
     // --- Network ---
+    /// Homebase + teleporter.
     #[strum(serialize = "connection")]
-    Connection, // homebase + teleporter
+    Connection,
+
+    /// Factory on datavents — increments the team's packet buffer.
     #[strum(serialize = "port")]
-    Port, // factory on datavents, increments Buffer
+    Port,
+
+    /// Main combat unit, materialized from the packet buffer.
     #[strum(serialize = "packet")]
-    Packet, // main combat unit, materialized from Buffer
+    Packet,
+
+    /// Scout unit.
     #[strum(serialize = "signal")]
-    Signal, // scout unit
+    Signal,
+
+    /// Mobile builder, places Network structures on datavents.
     #[strum(serialize = "gateway")]
-    Gateway, // mobile builder, places Network structures on datavents
+    Gateway,
+
+    /// Airborne assault — speed scales with team small-building count.
     #[strum(serialize = "flow")]
-    Flow, // airborne assault, speed scales with team small-building count
+    Flow,
 
     // --- Shared (buildable by every faction's constructor) ---
+    /// One-shot mine/wall clearer. FBI `unitname=mineblaster`,
+    /// displayed as "Debug".
     #[strum(serialize = "mineblaster")]
-    Debug, // one-shot mine/wall clearer (FBI unitname=mineblaster, display "Debug")
+    Debug,
+
+    /// Cheap destructible wall. Blocks movement but not projectiles.
     #[strum(serialize = "badblock")]
-    BadBlock, // cheap destructible wall, blocks movement not projectiles
+    BadBlock,
 }
 
 use super::components::Faction;
+use strum::VariantArray;
 
-/// All `UnitKind` variants in declaration order.
-pub const ALL_UNIT_KINDS: [UnitKind; 26] = [
-    UnitKind::Kernel,
-    UnitKind::Assembler,
-    UnitKind::Bit,
-    UnitKind::Byte,
-    UnitKind::Pointer,
-    UnitKind::Socket,
-    UnitKind::Firewall,
-    UnitKind::Terminal,
-    UnitKind::Hole,
-    UnitKind::Bug,
-    UnitKind::Exploit,
-    UnitKind::Worm,
-    UnitKind::Virus,
-    UnitKind::Dos,
-    UnitKind::Window,
-    UnitKind::LogicBomb,
-    UnitKind::Trojan,
-    UnitKind::Obelisk,
-    UnitKind::Connection,
-    UnitKind::Port,
-    UnitKind::Packet,
-    UnitKind::Signal,
-    UnitKind::Gateway,
-    UnitKind::Flow,
-    UnitKind::Debug,
-    UnitKind::BadBlock,
-];
+/// All `UnitKind` variants in declaration order. Re-exported from
+/// `strum::VariantArray::VARIANTS` so that every added variant
+/// automatically appears here without a second edit.
+pub const ALL_UNIT_KINDS: &[UnitKind] = UnitKind::VARIANTS;
 
 impl UnitKind {
     /// The FBI `unitname` key for this kind (used to look up stats in the registry).
@@ -176,6 +202,32 @@ impl UnitKind {
             UnitKind::Pointer | UnitKind::Hole => 65536.0,
             _ => 163840.0,
         }
+    }
+
+    /// Whether this kind should be spawned on the Showcase map. True
+    /// for every mobile unit that's directly buildable in normal play;
+    /// false for homebases (stationary, would never appear mid-game),
+    /// secondary factories, Firewall / Terminal / Obelisk buildings,
+    /// BadBlock / LogicBomb (stationary tactical pieces), and Debug
+    /// (one-shot mine).
+    pub fn is_showcase_candidate(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Assembler
+                | UnitKind::Bit
+                | UnitKind::Byte
+                | UnitKind::Pointer
+                | UnitKind::Bug
+                | UnitKind::Exploit
+                | UnitKind::Worm
+                | UnitKind::Virus
+                | UnitKind::Dos
+                | UnitKind::Trojan
+                | UnitKind::Packet
+                | UnitKind::Signal
+                | UnitKind::Gateway
+                | UnitKind::Flow
+        )
     }
 
     /// "Small building" per upstream `kpunittypes.lua`: the on-datavent

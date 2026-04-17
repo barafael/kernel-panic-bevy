@@ -199,7 +199,7 @@ impl UnitRegistry {
     }
 
     fn validate_unit_bindings(&self) {
-        for kind in ALL_UNIT_KINDS {
+        for &kind in ALL_UNIT_KINDS {
             if self.def(kind).is_none() {
                 warn!(
                     "Unit kind {:?} (unitname='{}') not found in FBI files",
