@@ -2,10 +2,12 @@ use bevy::prelude::*;
 
 use super::animation::CobAnimator;
 use super::components::{Faction, Health, TeamId, UnitType};
-use super::definitions::{UnitKind, stats};
+use super::definitions::UnitKind;
 use super::script_triggers::JustFired;
+use super::unit_registry::UnitRegistry;
 use super::weapon_fx::{AttackEvent, PendingAttacks};
 use super::weapons::WeaponRegistry;
+use crate::interaction::movement::{MovePath, MoveTarget};
 
 /// Tracks time until the unit can fire again.
 #[derive(Component)]
@@ -47,17 +49,101 @@ pub struct VirusSpawnQueue(pub Vec<(Vec3, Faction, u8)>);
 #[derive(Resource, Default)]
 pub struct DamageQueue(Vec<(Entity, f32, Entity)>);
 
+/// Deploy cycle for units that must unfold before firing (e.g. Pointer).
+/// The COB script animates the legs/gun; this component gates combat so
+/// the unit can only fire while `Open`, matching upstream Kernel Panic.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeployState {
+    Closed,
+    Opening,
+    Open,
+    Closing,
+}
+
+/// Attached to units with a deploy cycle. `timer` counts down through
+/// transition states; the duration is the animation length in seconds.
+#[derive(Component)]
+pub struct Deployable {
+    pub state: DeployState,
+    pub timer: f32,
+}
+
+/// Open/Close animation length in seconds, matching the upstream COB
+/// script timings (legs move over 0.5s, gun extends over another 1.0s).
+pub const DEPLOY_DURATION: f32 = 1.5;
+
+impl Deployable {
+    /// Pointer's `Create()` hides the gun and calls `Open()` after the
+    /// build finishes — so a freshly spawned Pointer begins deploying.
+    pub fn initial() -> Self {
+        Self {
+            state: DeployState::Opening,
+            timer: DEPLOY_DURATION,
+        }
+    }
+}
+
+/// System: drive the deploy state machine from movement state.
+/// Movement forces the unit to close; stopping re-opens it.
+#[allow(clippy::type_complexity)]
+pub fn tick_deploy_state(
+    time: Res<Time>,
+    mut query: Query<(&mut Deployable, Option<&MoveTarget>, Option<&MovePath>), Without<Dying>>,
+) {
+    let dt = time.delta_secs();
+    for (mut deployable, move_target, move_path) in &mut query {
+        let is_moving = move_target.is_some() || move_path.is_some();
+
+        if deployable.timer > 0.0 {
+            deployable.timer = (deployable.timer - dt).max(0.0);
+            if deployable.timer == 0.0 {
+                deployable.state = match deployable.state {
+                    DeployState::Opening => DeployState::Open,
+                    DeployState::Closing => DeployState::Closed,
+                    other => other,
+                };
+            }
+        }
+
+        match (deployable.state, is_moving) {
+            (DeployState::Open, true) | (DeployState::Opening, true) => {
+                deployable.state = DeployState::Closing;
+                deployable.timer = DEPLOY_DURATION;
+            }
+            (DeployState::Closed, false) | (DeployState::Closing, false) => {
+                deployable.state = DeployState::Opening;
+                deployable.timer = DEPLOY_DURATION;
+            }
+            _ => {}
+        }
+    }
+}
+
 /// System: armed units auto-attack the nearest enemy in range.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn combat_system(
     time: Res<Time>,
     mut cooldowns: Query<&mut AttackCooldown>,
-    attackers: Query<(Entity, &UnitType, &Faction, &GlobalTransform), Without<Dying>>,
-    potential_targets: Query<(Entity, &Faction, &GlobalTransform, &Health), With<UnitType>>,
+    attackers: Query<
+        (
+            Entity,
+            &UnitType,
+            &Faction,
+            &TeamId,
+            &GlobalTransform,
+            Option<&Deployable>,
+        ),
+        Without<Dying>,
+    >,
+    potential_targets: Query<
+        (Entity, &Faction, &TeamId, &GlobalTransform, &Health),
+        With<UnitType>,
+    >,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     weapon_registry: Res<WeaponRegistry>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    unit_registry: Res<UnitRegistry>,
 ) {
     let dt = time.delta_secs();
 
@@ -68,18 +154,26 @@ pub fn combat_system(
 
     damage_queue.0.clear();
 
-    for (entity, unit_type, attacker_faction, attacker_gtf) in &attackers {
-        let unit_stats = stats(unit_type.0);
+    for (entity, unit_type, attacker_faction, attacker_team, attacker_gtf, deployable) in &attackers
+    {
+        // Deployable units (Pointer) can only fire while fully open.
+        if let Some(d) = deployable
+            && d.state != DeployState::Open
+        {
+            continue;
+        }
 
-        // Resolve weapon stats from the TDF registry, falling back to hardcoded values.
-        let weapon_def = if unit_stats.weapon.is_empty() {
+        let weapon_name = unit_registry.weapon(unit_type.0);
+
+        // Resolve weapon stats from the TDF registry.
+        let weapon_def = if weapon_name.is_empty() {
             None
         } else {
-            weapon_registry.get(unit_stats.weapon)
+            weapon_registry.get(weapon_name)
         };
-        let range = weapon_def.map_or(unit_stats.attack_range, |w| w.range);
-        let damage = weapon_def.map_or(unit_stats.attack_damage, |w| w.damage.default);
-        let cooldown = weapon_def.map_or(unit_stats.attack_cooldown, |w| w.reload_time);
+        let range = weapon_def.map_or(0.0, |w| w.range);
+        let damage = weapon_def.map_or(0.0, |w| w.damage.default);
+        let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
 
         if range == 0.0 {
             continue;
@@ -95,10 +189,17 @@ pub fn combat_system(
         let attacker_pos = attacker_gtf.translation();
         let range_sq = range * range;
 
-        // Find nearest living enemy in range.
+        // Find nearest living enemy in range. Shared team = ally regardless
+        // of faction (showcase spawns mixed-faction units on team 0 and
+        // expects them to ignore each other).
         let mut best: Option<(Entity, Vec3, f32)> = None;
-        for (target_entity, target_faction, target_gtf, target_health) in &potential_targets {
-            if target_faction == attacker_faction || target_health.current <= 0.0 {
+        for (target_entity, target_faction, target_team, target_gtf, target_health) in
+            &potential_targets
+        {
+            if target_team == attacker_team
+                || target_faction == attacker_faction
+                || target_health.current <= 0.0
+            {
                 continue;
             }
             let target_pos = target_gtf.translation();
@@ -116,11 +217,11 @@ pub fn combat_system(
                 },
                 JustFired { target_pos },
             ));
-            if !unit_stats.weapon.is_empty() {
+            if !weapon_name.is_empty() {
                 pending_attacks.events.push(AttackEvent {
                     attacker_pos,
                     target_pos,
-                    weapon_name: unit_stats.weapon,
+                    weapon_name: weapon_name.to_string(),
                 });
             }
         }
