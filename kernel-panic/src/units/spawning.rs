@@ -183,10 +183,12 @@ pub fn spawn_showcase(
         let height = parsed.heights[hz * heightmap_w + hx];
         let position = Vec3::new(start_pos.x, height, start_pos.z);
 
+        // All showcase units share team 0 so they never engage each other
+        // — the goal is visual inspection, not gameplay.
         spawn_unit(
             kind,
             kind.faction(),
-            slot as u8,
+            0,
             position,
             commands,
             meshes,

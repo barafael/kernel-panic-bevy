@@ -18,25 +18,23 @@ use std::path::{Path, PathBuf};
 use spring_map_gen::{Rgba, SmdBuilder, SmfBuilder, SmtBuilder, package_sdz};
 
 const MAP_NAME: &str = "Showcase";
-/// 1536 SMUs × 8 elmos = 12288 elmos per side (multiple of 128). Large
-/// enough to space 10 units out by ~3000 elmos in every direction.
-const MAP_SMU: i32 = 1536;
+/// 384 SMUs × 8 elmos = 3072 elmos per side (multiple of 128). Small
+/// enough that the whole map fits in a typical zoomed-out RTS camera
+/// view, while still giving each of the 10 unit slots its own ~1000-elmo
+/// cell with clear space around the mesh.
+const MAP_SMU: i32 = 384;
 /// World size in elmos (derived from `MAP_SMU`).
 const WORLD_SIZE: f32 = (MAP_SMU * 8) as f32;
 
-/// Per-unit positional jitter around the grid anchor, in elmos. Small
-/// enough that neighbouring cells still can't see each other (max sight
-/// 768), large enough that the unit visibly sits off the ideal center.
-const JITTER_RADIUS: f32 = 200.0;
+/// Per-unit positional jitter around the grid anchor, in elmos. Keeps
+/// units from all sitting on the exact same coordinate multiple, but small
+/// relative to the cell size so adjacent slots don't collide.
+const JITTER_RADIUS: f32 = 80.0;
 
-/// 10 start positions spread across the full map: 4 columns × 3 rows with
-/// one slot left empty. Cells are evenly distributed with ~10% inset from
-/// the edges, giving roughly 3000 elmos between neighbouring positions on
-/// the long axis and 4000 on the short — safely above the 768-elmo max
-/// sight range so units stay invisible to each other.
-///
-/// Each anchor is then jittered by a deterministic per-slot offset so the
-/// units don't sit exactly at the grid corners.
+/// 10 start positions in a 4×3 grid (one slot left empty), evenly
+/// distributed with a 10% edge margin. Each anchor is jittered by a
+/// deterministic per-slot offset so the units don't sit exactly on grid
+/// corners.
 fn start_grid() -> Vec<(f32, f32)> {
     const COLS: usize = 4;
     const ROWS: usize = 3;
@@ -103,16 +101,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let smf_data = smf.build()?;
 
     // ---- SMD: start positions for the showcase grid ----
-    // `fog_start` is a fraction of `fog_end` (the game sizes fog_end to the
-    // map diagonal in `apply_fog`), so 0.95 pushes fog haze almost to the
-    // map edge — haze is basically cosmetic on the showcase map.
+    // `fog_start=1.0` pushes the fog start to the fog end itself, making
+    // distance fog invisible. Combined with the small map size, the whole
+    // plain stays crisply rendered from any zoom level.
     let mut smd = SmdBuilder::new()
         .description("Showcase — one of every mobile unit on a flat plain")
         .gravity(50.0)
         .sky_color([0.02, 0.04, 0.08])
         .sun_color([1.0, 1.0, 1.0])
         .fog_color([0.05, 0.1, 0.15])
-        .fog_start(0.95)
+        .fog_start(1.0)
         .sun_dir([0.3, 1.0, 0.4])
         .ground_ambient([0.7, 0.75, 0.85])
         .ground_sun_color([1.0, 1.0, 1.0]);
