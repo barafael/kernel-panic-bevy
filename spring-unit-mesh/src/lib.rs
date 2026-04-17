@@ -11,52 +11,76 @@ pub mod tga;
 pub use s3o_types::{S3OModel, S3OParseError, S3OPiece, S3OVertex};
 pub use tga::{TgaImage, TgaParseError, parse_tga};
 
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::Cursor;
 
-use byteorder::{LittleEndian, ReadBytesExt};
+use binrw::BinRead;
 use s3o_types::PrimitiveType;
 
-const S3O_MAGIC: &[u8; 12] = b"Spring unit\0";
+/// `.s3o` file header — fixed 44-byte layout at file start.
+#[derive(Debug, Clone, BinRead)]
+#[br(little, magic = b"Spring unit\0")]
+struct S3OHeader {
+    version: u32,
+    _radius: f32,
+    _height: f32,
+    _midpoint: [f32; 3],
+    root_piece_offset: u32,
+    _collision_data_offset: u32,
+    texture1_offset: u32,
+    texture2_offset: u32,
+}
+
+/// Per-piece header, read from `root_piece_offset` / child offsets.
+#[derive(Debug, Clone, BinRead)]
+#[br(little)]
+struct S3OPieceHeader {
+    name_offset: u32,
+    num_children: u32,
+    children_offset: u32,
+    num_verts: u32,
+    verts_offset: u32,
+    _vert_type: u32,
+    primitive_type_raw: u32,
+    vert_table_size: u32,
+    vert_table_offset: u32,
+    _collision_offset: u32,
+    offset: [f32; 3],
+}
+
+/// Fixed 32-byte vertex struct.
+#[derive(Debug, Clone, Copy, BinRead)]
+#[br(little)]
+struct RawVertex {
+    position: [f32; 3],
+    normal: [f32; 3],
+    texcoord: [f32; 2],
+}
+
+impl From<RawVertex> for S3OVertex {
+    fn from(v: RawVertex) -> Self {
+        S3OVertex {
+            position: v.position,
+            normal: v.normal,
+            texcoord: v.texcoord,
+        }
+    }
+}
 
 /// Parse an `.s3o` model from raw file bytes.
 pub fn parse_s3o(data: &[u8]) -> Result<S3OModel, S3OParseError> {
-    let mut cursor = Cursor::new(data);
-
-    // --- Header (44 bytes) ---
-    let mut magic = [0u8; 12];
-    cursor.read_exact(&mut magic)?;
-    if magic != *S3O_MAGIC {
-        return Err(S3OParseError::BadMagic);
+    let header = S3OHeader::read(&mut Cursor::new(data)).map_err(map_binrw_err)?;
+    if header.version != 0 {
+        return Err(S3OParseError::BadVersion(header.version));
     }
 
-    let version = cursor.read_u32::<LittleEndian>()?;
-    if version != 0 {
-        return Err(S3OParseError::BadVersion(version));
-    }
-
-    let radius = cursor.read_f32::<LittleEndian>()?;
-    let height = cursor.read_f32::<LittleEndian>()?;
-    let midpoint = [
-        cursor.read_f32::<LittleEndian>()?,
-        cursor.read_f32::<LittleEndian>()?,
-        cursor.read_f32::<LittleEndian>()?,
-    ];
-    let root_piece_offset = cursor.read_u32::<LittleEndian>()?;
-    let _collision_data_offset = cursor.read_u32::<LittleEndian>()?;
-    let texture1_offset = cursor.read_u32::<LittleEndian>()?;
-    let texture2_offset = cursor.read_u32::<LittleEndian>()?;
-
-    // --- Texture names ---
-    let texture1 = read_null_terminated_string(data, texture1_offset as usize)?;
-    let texture2 = read_null_terminated_string(data, texture2_offset as usize)?;
-
-    // --- Piece tree ---
-    let root_piece = parse_piece(data, root_piece_offset as usize)?;
+    let texture1 = read_null_terminated_string(data, header.texture1_offset as usize)?;
+    let texture2 = read_null_terminated_string(data, header.texture2_offset as usize)?;
+    let root_piece = parse_piece(data, header.root_piece_offset as usize)?;
 
     Ok(S3OModel {
-        radius,
-        height,
-        midpoint,
+        radius: header._radius,
+        height: header._height,
+        midpoint: header._midpoint,
         texture1,
         texture2,
         root_piece,
@@ -64,47 +88,31 @@ pub fn parse_s3o(data: &[u8]) -> Result<S3OModel, S3OParseError> {
 }
 
 fn parse_piece(data: &[u8], offset: usize) -> Result<S3OPiece, S3OParseError> {
-    if offset + 52 > data.len() {
-        return Err(S3OParseError::PieceTruncated);
-    }
+    let tail = data.get(offset..).ok_or(S3OParseError::PieceTruncated)?;
+    let header = S3OPieceHeader::read(&mut Cursor::new(tail)).map_err(map_binrw_err)?;
+    let primitive_type = PrimitiveType::from_u32(header.primitive_type_raw)?;
 
-    let mut cursor = Cursor::new(data);
-    cursor.seek(SeekFrom::Start(offset as u64))?;
-
-    let name_offset = cursor.read_u32::<LittleEndian>()? as usize;
-    let num_children = cursor.read_u32::<LittleEndian>()? as usize;
-    let children_offset = cursor.read_u32::<LittleEndian>()? as usize;
-    let num_verts = cursor.read_u32::<LittleEndian>()? as usize;
-    let verts_offset = cursor.read_u32::<LittleEndian>()? as usize;
-    let _vert_type = cursor.read_u32::<LittleEndian>()?;
-    let primitive_type_raw = cursor.read_u32::<LittleEndian>()?;
-    let vert_table_size = cursor.read_u32::<LittleEndian>()? as usize;
-    let vert_table_offset = cursor.read_u32::<LittleEndian>()? as usize;
-    let _collision_offset = cursor.read_u32::<LittleEndian>()?;
-    let piece_offset = [
-        cursor.read_f32::<LittleEndian>()?,
-        cursor.read_f32::<LittleEndian>()?,
-        cursor.read_f32::<LittleEndian>()?,
-    ];
-
-    let primitive_type = PrimitiveType::from_u32(primitive_type_raw)?;
-
-    let name = read_null_terminated_string(data, name_offset)?;
-
-    // --- Vertices ---
-    let vertices = parse_vertices(data, verts_offset, num_verts)?;
-
-    // --- Indices ---
-    let raw_indices = parse_indices(data, vert_table_offset, vert_table_size)?;
-
+    let name = read_null_terminated_string(data, header.name_offset as usize)?;
+    let vertices = parse_vertices(
+        data,
+        header.verts_offset as usize,
+        header.num_verts as usize,
+    )?;
+    let raw_indices = parse_indices(
+        data,
+        header.vert_table_offset as usize,
+        header.vert_table_size as usize,
+    )?;
     let indices = to_triangle_indices(raw_indices, primitive_type)?;
-
-    // --- Children ---
-    let children = parse_children(data, children_offset, num_children)?;
+    let children = parse_children(
+        data,
+        header.children_offset as usize,
+        header.num_children as usize,
+    )?;
 
     Ok(S3OPiece {
         name,
-        offset: piece_offset,
+        offset: header.offset,
         vertices,
         indices,
         children,
@@ -117,58 +125,34 @@ fn parse_vertices(
     count: usize,
 ) -> Result<Vec<S3OVertex>, S3OParseError> {
     let byte_len = count * 32;
-    if offset + byte_len > data.len() {
-        return Err(S3OParseError::VertexDataTruncated {
+    let slice = data
+        .get(offset..offset + byte_len)
+        .ok_or(S3OParseError::VertexDataTruncated {
             expected: byte_len,
             available: data.len().saturating_sub(offset),
-        });
-    }
+        })?;
 
-    let mut cursor = Cursor::new(data);
-    cursor.seek(SeekFrom::Start(offset as u64))?;
-
+    let mut cursor = Cursor::new(slice);
     let mut vertices = Vec::with_capacity(count);
     for _ in 0..count {
-        let position = [
-            cursor.read_f32::<LittleEndian>()?,
-            cursor.read_f32::<LittleEndian>()?,
-            cursor.read_f32::<LittleEndian>()?,
-        ];
-        let normal = [
-            cursor.read_f32::<LittleEndian>()?,
-            cursor.read_f32::<LittleEndian>()?,
-            cursor.read_f32::<LittleEndian>()?,
-        ];
-        let texcoord = [
-            cursor.read_f32::<LittleEndian>()?,
-            cursor.read_f32::<LittleEndian>()?,
-        ];
-        vertices.push(S3OVertex {
-            position,
-            normal,
-            texcoord,
-        });
+        vertices.push(RawVertex::read(&mut cursor).map_err(map_binrw_err)?.into());
     }
     Ok(vertices)
 }
 
 fn parse_indices(data: &[u8], offset: usize, count: usize) -> Result<Vec<u32>, S3OParseError> {
     let byte_len = count * 4;
-    if offset + byte_len > data.len() {
-        return Err(S3OParseError::IndexDataTruncated {
+    let slice = data
+        .get(offset..offset + byte_len)
+        .ok_or(S3OParseError::IndexDataTruncated {
             expected: byte_len,
             available: data.len().saturating_sub(offset),
-        });
-    }
+        })?;
 
-    let mut cursor = Cursor::new(data);
-    cursor.seek(SeekFrom::Start(offset as u64))?;
-
-    let mut indices = Vec::with_capacity(count);
-    for _ in 0..count {
-        indices.push(cursor.read_u32::<LittleEndian>()?);
-    }
-    Ok(indices)
+    Ok(slice
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect())
 }
 
 /// Convert raw indices into a plain triangle list regardless of the source
@@ -229,34 +213,36 @@ fn parse_children(
     }
 
     let byte_len = count * 4;
-    if offset + byte_len > data.len() {
-        return Err(S3OParseError::PieceTruncated);
-    }
+    let slice = data
+        .get(offset..offset + byte_len)
+        .ok_or(S3OParseError::PieceTruncated)?;
 
-    let mut cursor = Cursor::new(data);
-    cursor.seek(SeekFrom::Start(offset as u64))?;
+    let child_offsets: Vec<usize> = slice
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize)
+        .collect();
 
-    let mut child_offsets = Vec::with_capacity(count);
-    for _ in 0..count {
-        child_offsets.push(cursor.read_u32::<LittleEndian>()? as usize);
-    }
-
-    let mut children = Vec::with_capacity(count);
-    for child_offset in child_offsets {
-        children.push(parse_piece(data, child_offset)?);
-    }
-    Ok(children)
+    child_offsets
+        .into_iter()
+        .map(|o| parse_piece(data, o))
+        .collect()
 }
 
 fn read_null_terminated_string(data: &[u8], offset: usize) -> Result<String, S3OParseError> {
-    if offset >= data.len() {
-        return Err(S3OParseError::StringOutOfBounds { offset });
-    }
-    let slice = &data[offset..];
+    let slice = data
+        .get(offset..)
+        .ok_or(S3OParseError::StringOutOfBounds { offset })?;
     let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
     Ok(String::from_utf8_lossy(&slice[..end]).into_owned())
 }
 
+fn map_binrw_err(err: binrw::Error) -> S3OParseError {
+    match err {
+        binrw::Error::BadMagic { .. } => S3OParseError::BadMagic,
+        binrw::Error::Io(io) => S3OParseError::Io(io),
+        other => S3OParseError::Io(std::io::Error::other(other.to_string())),
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

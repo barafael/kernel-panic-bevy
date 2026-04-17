@@ -1,5 +1,5 @@
 [workspace]
-members = ["spring-tdf", "spring-map", "spring-unit-mesh", "spring-cob", "spring-pathfinding", "kernel-panic"]
+members = ["spring-tdf", "spring-map", "spring-map-gen", "spring-unit-mesh", "spring-cob", "spring-pathfinding", "kernel-panic"]
 resolver = "3"
 
 [workspace.dependencies]

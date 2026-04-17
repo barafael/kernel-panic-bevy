@@ -5,7 +5,10 @@ edition = "2024"
 description = "Parser and virtual machine for Spring RTS engine COB animation scripts"
 
 [dependencies]
+binrw = "0.15.1"
 byteorder = { workspace = true }
+smallvec = "1.15.1"
+strum = { version = "0.28.0", features = ["derive"] }
 thiserror = { workspace = true }
 
 [dev-dependencies]

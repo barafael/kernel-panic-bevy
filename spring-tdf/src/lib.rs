@@ -18,10 +18,17 @@
 //! - [`Tdf`]: a generic tree of sections and key-value pairs
 //! - [`WeaponDefs`] / [`WeaponDef`]: typed weapon definitions parsed from TDF
 
+mod explosion;
 mod parse;
+mod unit;
 mod weapon;
 
+pub use explosion::{
+    EffectClass, EffectLayer, EffectProperties, ExplosionDef, ExplosionDefs, FlameProperties,
+    GroundFlash, ParticleProperties, SpawnerProperties,
+};
 pub use parse::{ParseError, Section, Tdf};
+pub use unit::{UnitDef, UnitDefs};
 pub use weapon::{DamageMap, WeaponDef, WeaponDefs};
 
 #[cfg(test)]

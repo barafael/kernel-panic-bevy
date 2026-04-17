@@ -5,8 +5,10 @@ use std::cmp::Ordering;
 /// Uses netpoints (transition points on shared edges) for accurate cost calculation.
 use std::collections::BinaryHeap;
 
+use smallvec::SmallVec;
+
 use crate::cost::SQUARE_SIZE;
-use crate::node::{INVALID_INDEX, NETPOINTS_PER_EDGE, NodeIndex};
+use crate::node::{INVALID_INDEX, NETPOINTS_PER_EDGE, NeighborVec, NetpointVec, NodeIndex};
 use crate::node_layer::NodeLayer;
 use crate::path::Path;
 
@@ -102,18 +104,25 @@ pub fn find_path(layer: &mut NodeLayer, src: [f32; 2], dst: [f32; 2]) -> Path {
             best_node = cur;
         }
 
-        // Iterate neighbors.
-        let neighbors: Vec<(NodeIndex, Vec<[f32; 2]>)> = {
+        // Snapshot neighbors + their netpoints so we can release the borrow on
+        // `layer.nodes` before we start mutating neighbor entries below. The
+        // inline capacity matches `NeighborVec` (≤8) so this stays on the stack
+        // for typical leaf nodes.
+        type NeighborSnapshot =
+            SmallVec<[(NodeIndex, SmallVec<[[f32; 2]; NETPOINTS_PER_EDGE]>); 8]>;
+        let neighbors: NeighborSnapshot = {
             let node = &layer.nodes[cur as usize];
-            let num_neighbors = node.neighbors.len();
-            let mut result = Vec::with_capacity(num_neighbors);
-            for (i, &ngb_idx) in node.neighbors.iter().enumerate() {
-                let start = i * NETPOINTS_PER_EDGE;
-                let end = (start + NETPOINTS_PER_EDGE).min(node.netpoints.len());
-                let pts: Vec<[f32; 2]> = node.netpoints[start..end].to_vec();
-                result.push((ngb_idx, pts));
-            }
-            result
+            node.neighbors
+                .iter()
+                .enumerate()
+                .map(|(i, &ngb_idx)| {
+                    let start = i * NETPOINTS_PER_EDGE;
+                    let end = (start + NETPOINTS_PER_EDGE).min(node.netpoints.len());
+                    let pts: SmallVec<[[f32; 2]; NETPOINTS_PER_EDGE]> =
+                        SmallVec::from_slice(&node.netpoints[start..end]);
+                    (ngb_idx, pts)
+                })
+                .collect()
         };
 
         let cur_entry = layer.node(cur).entry_point;
@@ -209,8 +218,8 @@ fn build_neighbors_for(layer: &mut NodeLayer, node_index: NodeIndex) {
     let zmin = node.zmin;
     let zmax = node.zmax;
 
-    let mut neighbors: Vec<NodeIndex> = Vec::new();
-    let mut netpoints: Vec<[f32; 2]> = Vec::new();
+    let mut neighbors = NeighborVec::new();
+    let mut netpoints = NetpointVec::new();
 
     // West edge (x = xmin - 1)
     if xmin > 0 {
@@ -281,8 +290,8 @@ fn walk_edge(
     edge_x: u32,
     zmin: u32,
     zmax: u32,
-    neighbors: &mut Vec<NodeIndex>,
-    netpoints: &mut Vec<[f32; 2]>,
+    neighbors: &mut NeighborVec,
+    netpoints: &mut NetpointVec,
     boundary_x: u32,
     node_zmin: u32,
     node_zmax: u32,
@@ -324,8 +333,8 @@ fn walk_edge_h(
     edge_z: u32,
     xmin: u32,
     xmax: u32,
-    neighbors: &mut Vec<NodeIndex>,
-    netpoints: &mut Vec<[f32; 2]>,
+    neighbors: &mut NeighborVec,
+    netpoints: &mut NetpointVec,
     node_xmin: u32,
     node_xmax: u32,
     boundary_z: u32,

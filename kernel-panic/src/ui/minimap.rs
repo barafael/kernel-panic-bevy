@@ -81,7 +81,7 @@ pub fn setup_minimap(
     // Spawn UI node in bottom-right corner.
     commands.spawn((
         MinimapNode,
-        crate::MapEntity,
+        crate::map_loading::MapEntity,
         Node {
             position_type: PositionType::Absolute,
             right: Val::Px(MINIMAP_MARGIN),

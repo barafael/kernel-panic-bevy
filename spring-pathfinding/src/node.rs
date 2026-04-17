@@ -2,6 +2,8 @@
 //!
 //! Leaf nodes are used in the A* graph. Internal nodes subdivide into 4 children.
 
+use smallvec::SmallVec;
+
 /// Index into the node pool.
 pub type NodeIndex = u32;
 
@@ -9,6 +11,15 @@ pub const INVALID_INDEX: NodeIndex = u32::MAX;
 
 /// Maximum transition points per neighbor edge.
 pub const NETPOINTS_PER_EDGE: usize = 3;
+
+/// Typical leaf nodes have ≤8 neighbors; most have 4–6. Inline that many
+/// to avoid a heap allocation per leaf node.
+pub type NeighborVec = SmallVec<[NodeIndex; 8]>;
+
+/// One netpoint per neighbor edge slot: 8 neighbors × 3 netpoints = 24
+/// `[f32; 2]`s inline. That's 192 bytes of stack per leaf, which is the
+/// break-even against a heap Vec.
+pub type NetpointVec = SmallVec<[[f32; 2]; 24]>;
 
 #[derive(Clone, Debug)]
 pub struct QTNode {
@@ -32,10 +43,10 @@ pub struct QTNode {
     pub index: NodeIndex,
 
     // --- Neighbor cache (leaf nodes only) ---
-    pub neighbors: Vec<NodeIndex>,
+    pub neighbors: NeighborVec,
     /// Transition points for each neighbor. For neighbor `i`, the netpoints
     /// are at indices `i * NETPOINTS_PER_EDGE .. (i+1) * NETPOINTS_PER_EDGE`.
-    pub netpoints: Vec<[f32; 2]>,
+    pub netpoints: NetpointVec,
 
     // --- A* search state ---
     pub g_cost: f32,
@@ -63,8 +74,8 @@ impl QTNode {
             move_cost: f32::INFINITY,
             child_base: INVALID_INDEX,
             index,
-            neighbors: Vec::new(),
-            netpoints: Vec::new(),
+            neighbors: NeighborVec::new(),
+            netpoints: NetpointVec::new(),
             g_cost: f32::INFINITY,
             h_cost: f32::INFINITY,
             prev_node: INVALID_INDEX,

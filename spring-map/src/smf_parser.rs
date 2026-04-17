@@ -1,10 +1,9 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use binrw::BinRead;
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::map_types::{
-    FeatureType, MapFeature, ParsedMap, SMF_MAGIC, SMF_VERSION, SmfHeader, SmfParseError,
-};
+use crate::map_types::{FeatureType, MapFeature, ParsedMap, SMF_VERSION, SmfHeader, SmfParseError};
 
 /// Parse a complete SMF file from raw bytes.
 pub fn parse_smf(data: &[u8]) -> Result<ParsedMap, SmfParseError> {
@@ -24,47 +23,15 @@ pub fn parse_smf(data: &[u8]) -> Result<ParsedMap, SmfParseError> {
 }
 
 fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<SmfHeader, SmfParseError> {
-    let mut magic = [0u8; 16];
-    cursor.read_exact(&mut magic)?;
-    if magic != *SMF_MAGIC {
-        return Err(SmfParseError::BadMagic);
+    let header = SmfHeader::read(cursor).map_err(|err| match err {
+        binrw::Error::BadMagic { .. } => SmfParseError::BadMagic,
+        binrw::Error::Io(io) => SmfParseError::Io(io),
+        other => SmfParseError::Io(std::io::Error::other(other.to_string())),
+    })?;
+    if header.version != SMF_VERSION {
+        return Err(SmfParseError::BadVersion(header.version));
     }
-
-    let version = cursor.read_i32::<LittleEndian>()?;
-    if version != SMF_VERSION {
-        return Err(SmfParseError::BadVersion(version));
-    }
-
-    let map_id = cursor.read_i32::<LittleEndian>()?;
-    let map_x = cursor.read_i32::<LittleEndian>()?;
-    let map_y = cursor.read_i32::<LittleEndian>()?;
-    let _square_size = cursor.read_i32::<LittleEndian>()?;
-    let _texel_per_square = cursor.read_i32::<LittleEndian>()?;
-    let _tile_size = cursor.read_i32::<LittleEndian>()?;
-    let min_height = cursor.read_f32::<LittleEndian>()?;
-    let max_height = cursor.read_f32::<LittleEndian>()?;
-    let heightmap_ptr = cursor.read_i32::<LittleEndian>()?;
-    let type_map_ptr = cursor.read_i32::<LittleEndian>()?;
-    let tiles_ptr = cursor.read_i32::<LittleEndian>()?;
-    let minimap_ptr = cursor.read_i32::<LittleEndian>()?;
-    let metalmap_ptr = cursor.read_i32::<LittleEndian>()?;
-    let feature_ptr = cursor.read_i32::<LittleEndian>()?;
-    let num_extra_headers = cursor.read_i32::<LittleEndian>()?;
-
-    Ok(SmfHeader {
-        map_id,
-        map_x,
-        map_y,
-        min_height,
-        max_height,
-        heightmap_ptr,
-        type_map_ptr,
-        tiles_ptr,
-        minimap_ptr,
-        metalmap_ptr,
-        feature_ptr,
-        num_extra_headers,
-    })
+    Ok(header)
 }
 
 fn read_heightmap(
@@ -108,16 +75,24 @@ fn read_features(
         .read_i32::<LittleEndian>()
         .map_err(|_| SmfParseError::FeatureTruncated)?;
 
-    let mut type_names = Vec::with_capacity(num_feature_types as usize);
+    let num_feature_types =
+        usize::try_from(num_feature_types).map_err(|_| SmfParseError::FeatureTruncated)?;
+    let num_features =
+        usize::try_from(num_features).map_err(|_| SmfParseError::FeatureTruncated)?;
+
+    // No `with_capacity` on attacker-controlled counts: a 2GB claim would OOM before
+    // we discover the file is truncated. Let the Vec grow on demand.
+    let mut type_names = Vec::new();
     for _ in 0..num_feature_types {
         type_names.push(read_null_terminated_string(cursor)?);
     }
 
-    let mut features = Vec::with_capacity(num_features as usize);
+    let mut features = Vec::new();
     for _ in 0..num_features {
-        let type_index = cursor
+        let type_index_raw = cursor
             .read_i32::<LittleEndian>()
-            .map_err(|_| SmfParseError::FeatureTruncated)? as usize;
+            .map_err(|_| SmfParseError::FeatureTruncated)?;
+        let type_index = usize::try_from(type_index_raw).unwrap_or(usize::MAX);
         let x = cursor
             .read_f32::<LittleEndian>()
             .map_err(|_| SmfParseError::FeatureTruncated)?;

@@ -1,7 +1,8 @@
+use binrw::binread;
 use thiserror::Error;
 
+#[cfg(test)]
 pub(crate) const SMF_MAGIC: &[u8; 16] = b"spring map file\0";
-pub(crate) const SMT_MAGIC: &[u8; 16] = b"spring tilefile\0";
 pub(crate) const SMF_VERSION: i32 = 1;
 pub const SQUARE_SIZE: i32 = 8;
 
@@ -67,12 +68,21 @@ pub enum ArchiveError {
 /// Parsed SMF file header.
 ///
 /// File-offset pointers are internal to the parser and not exposed.
+#[binread]
 #[derive(Debug, Clone)]
+#[br(little, magic = b"spring map file\0")]
 #[allow(dead_code)] // File-offset fields are part of the binary format
 pub struct SmfHeader {
+    pub(crate) version: i32,
     pub map_id: i32,
     pub map_x: i32,
     pub map_y: i32,
+    #[br(temp)]
+    _square_size: i32,
+    #[br(temp)]
+    _texel_per_square: i32,
+    #[br(temp)]
+    _tile_size: i32,
     pub min_height: f32,
     pub max_height: f32,
 
@@ -90,6 +100,7 @@ impl SmfHeader {
     /// Create a synthetic header for test/fallback maps.
     pub fn new_flat(map_x: i32, map_y: i32, min_height: f32, max_height: f32) -> Self {
         Self {
+            version: SMF_VERSION,
             map_id: 0,
             map_x,
             map_y,

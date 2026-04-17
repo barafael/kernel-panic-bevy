@@ -1,13 +1,23 @@
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::num::NonZeroU16;
 
+use binrw::BinRead;
 use byteorder::{LittleEndian, ReadBytesExt};
 
-use crate::map_types::{
-    GroundTexture, ParsedMap, SMT_MAGIC, SmfParseError, SmtParseError, Tile, TileMap,
-};
+use crate::map_types::{GroundTexture, ParsedMap, SmfParseError, SmtParseError, Tile, TileMap};
 
 const TILE_BYTES: usize = 680;
 const TILE_BASE_BYTES: usize = 512;
+
+/// 32-byte SMT file header.
+#[derive(Debug, Clone, BinRead)]
+#[br(little, magic = b"spring tilefile\0")]
+struct SmtHeader {
+    _version: i32,
+    num_tiles: i32,
+    _tile_size: i32,
+    _compression_type: i32,
+}
 
 /// Parse the tilemap from SMF data using the already-parsed header.
 pub(crate) fn parse_tilemap(smf_data: &[u8], map: &ParsedMap) -> Result<TileMap, SmfParseError> {
@@ -45,16 +55,12 @@ pub(crate) fn parse_tilemap(smf_data: &[u8], map: &ParsedMap) -> Result<TileMap,
 pub fn parse_smt_tiles(smt_data: &[u8]) -> Result<Vec<Tile>, SmtParseError> {
     let mut cursor = Cursor::new(smt_data);
 
-    let mut magic = [0u8; 16];
-    cursor.read_exact(&mut magic)?;
-    if magic != *SMT_MAGIC {
-        return Err(SmtParseError::BadMagic);
-    }
-
-    let _version = cursor.read_i32::<LittleEndian>()?;
-    let num_tiles = cursor.read_i32::<LittleEndian>()? as usize;
-    let _tile_size = cursor.read_i32::<LittleEndian>()?;
-    let _compression_type = cursor.read_i32::<LittleEndian>()?;
+    let header = SmtHeader::read(&mut cursor).map_err(|err| match err {
+        binrw::Error::BadMagic { .. } => SmtParseError::BadMagic,
+        binrw::Error::Io(io) => SmtParseError::Io(io),
+        other => SmtParseError::Io(std::io::Error::other(other.to_string())),
+    })?;
+    let num_tiles = usize::try_from(header.num_tiles).unwrap_or(0);
 
     let mut tiles = Vec::with_capacity(num_tiles);
     let mut tile_buf = [0u8; TILE_BYTES];
@@ -115,7 +121,10 @@ fn decode_dxt1_block_image(data: &[u8], width: usize, height: usize) -> [u8; Til
     for block_y in 0..blocks_y {
         for block_x in 0..blocks_x {
             let block_offset = (block_y * blocks_x + block_x) * 8;
-            let block = &data[block_offset..block_offset + 8];
+            let Some(block) = data.get(block_offset..block_offset + 8) else {
+                // Truncated tile data: leave remaining pixels as the default fill.
+                return output;
+            };
             decode_dxt1_block(block, &mut output, width, block_x * 4, block_y * 4);
         }
     }
@@ -130,10 +139,19 @@ fn decode_dxt1_block(block: &[u8], output: &mut [u8], stride: usize, px: usize, 
     let c0 = rgb565_to_rgba(c0_raw);
     let c1 = rgb565_to_rgba(c1_raw);
 
+    // Weights are compile-time constants from the DXT1 spec, so `NonZeroU16::new(..).unwrap()`
+    // is evaluated once and never fails.
+    let two = NonZeroU16::new(2).unwrap();
+    let one = NonZeroU16::new(1).unwrap();
     let palette = if c0_raw > c1_raw {
-        [c0, c1, lerp_color(c0, c1, 2, 1), lerp_color(c0, c1, 1, 2)]
+        [
+            c0,
+            c1,
+            lerp_color(c0, c1, two, one),
+            lerp_color(c0, c1, one, two),
+        ]
     } else {
-        [c0, c1, lerp_color(c0, c1, 1, 1), [0, 0, 0, 0]]
+        [c0, c1, lerp_color(c0, c1, one, one), [0, 0, 0, 0]]
     };
 
     let lookup = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
@@ -160,7 +178,10 @@ fn rgb565_to_rgba(c: u16) -> [u8; 4] {
     ]
 }
 
-fn lerp_color(a: [u8; 4], b: [u8; 4], w0: u16, w1: u16) -> [u8; 4] {
+fn lerp_color(a: [u8; 4], b: [u8; 4], w0: NonZeroU16, w1: NonZeroU16) -> [u8; 4] {
+    let w0 = w0.get();
+    let w1 = w1.get();
+    // Sum is non-zero because both inputs are non-zero; division is therefore safe.
     let total = w0 + w1;
     [
         ((a[0] as u16 * w0 + b[0] as u16 * w1) / total) as u8,

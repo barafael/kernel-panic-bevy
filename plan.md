@@ -2,15 +2,15 @@
 
 ## Current State (April 2026)
 
-**6 crates, ~12k lines, 115 tests, all passing.**
+**6 crates, ~13k lines, 129 tests, all passing.**
 
 Working: map loading (13 maps), original textures, S3O models, 3 factions (19 unit types),
-unit production with build queues, selection with material-brightened highlight and
-world-space health bars, movement with QTPFS pathfinding, basic combat with
-infection/virus spawning, death animations (COB `Killed()` + particle bursts), win/loss
-detection, COB script integration (movement/production/weapon callbacks), weapon FX (beams,
-projectiles, melee flashes), minimap, HUD with build menu, RTS camera, Lua heightmap
-gadgets, map cycling.
+FBI-loaded unit stats (no hardcoded values), TDF-loaded weapon stats, unit production with
+build queues, selection with material-brightened highlight and world-space health bars,
+movement with QTPFS pathfinding, basic combat with infection/virus spawning, death
+animations (COB `Killed()` + particle bursts), win/loss detection, COB script integration
+(movement/production/weapon callbacks), weapon FX (beams, projectiles, melee flashes),
+minimap, HUD with build menu, RTS camera, Lua heightmap gadgets, map cycling.
 
 ---
 
@@ -90,24 +90,19 @@ have auto-heal in upstream but no `AutoHeal` component exists.
 | Debug | Shared | One-shot mine/wall clearer |
 | BadBlock | Shared | Cheap destructible wall (100 HP) |
 
-### 2.2 Stat Corrections (High)
+### 2.2 Stat Corrections — ✅ DONE
 
-Current `definitions.rs` stats diverge significantly from upstream `sidedata.tdf`. Key
-discrepancies (current → upstream):
+Unit stats are now loaded at runtime from upstream `.fbi` files via `UnitRegistry`. The
+hardcoded `UNIT_STATS` array has been removed. All HP, speed, build time, weapon binding,
+and model filename values now come from FBI data. `spring-tdf` has a `UnitDef`/`UnitDefs`
+parser, and `kernel-panic` has a `UnitRegistry` resource (parallel to `WeaponRegistry`).
 
-- **Homebases** (Kernel/Hole/Connection): 10k → 40k HP
-- **Bit**: 150 → 600 HP
-- **Bug**: 150 → 400 HP, 80 → 130 dmg
-- **Worm**: 2.5k → 12k HP, 1.5k → 3.2k dmg
-- **Exploit**: 3k → 100 HP, 200 → 130 dmg, 512 → 1,200 range
-- **Virus**: 200 → 300 HP
-- **DoS**: 1.5k → 1.7k HP, 256 → 768 range
-- **Pointer**: 2k → 1k HP
-- **Factories** (Socket/Window/Port): 5k → 20k HP
-- **Logic Bomb**: 500 → 300 HP
-- **Firewall**: reassign from System to **Network**, 8k → 20k HP
+Remaining stat-adjacent work:
 
-See `DEEP_FEATURES.md` §16 for the full table.
+- Connection HP reads 15k from FBI (it's a mobile unit in KP), not 40k — verify if this
+  is correct or if sidedata.tdf overrides it
+- `mesh_scale` and `buildable_units()` build menus are still hardcoded in game code (not
+  in FBI files)
 
 ---
 
@@ -332,7 +327,7 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ```text
 kernel-panic/          (binary — Bevy game app)
-spring-tdf/            (lib — TDF format parser)
+spring-tdf/            (lib — TDF format parser: weapons, units/FBI, generic sections)
 spring-map/            (lib — SMF/SMT/SD7 map loader)
 spring-unit-mesh/      (lib — S3O model parser)
 spring-cob/            (lib — COB bytecode VM)
@@ -363,7 +358,7 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 - [ ] `selection.rs` is 662 lines handling 6+ concerns (hover, click/drag, right-click
   commands, material highlight, health bars, move indicators) — split into focused modules
-- [ ] `spawn_unit` takes 11 parameters — group into a `SpawnContext` struct or Bevy command
+- [ ] `spawn_unit` takes 12 parameters — group into a Bevy `SystemParam` bundle
 - [ ] `buildable_units()` in `hud.rs` and `default_production()` in `production.rs` encode
   overlapping "what can X build?" data — consolidate into a shared source
 - [ ] `load_map_at_index` takes 9 parameters — consider a `MapLoadContext` struct
@@ -379,6 +374,14 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] Melee flash and projectile materials created per-attack instead of cached — extend
   `BeamMaterialCache` to cover all weapon FX
 - [ ] Animation system allocates `Vec<(i32, i32)>` per animator per frame — use `SmallVec`
+- [ ] Per-frame `UnitRegistry` lookups for immutable data (speed, weapon name) — cache as
+  ECS components at spawn time (e.g. `Speed(f32)`, `WeaponBinding(&str)`)
+- [ ] `AttackEvent::weapon_name` is `String` (heap alloc per attack) — introduce a `WeaponId`
+  newtype (interned string or index into `WeaponRegistry`) so attack events carry a cheap
+  `Copy` identifier
+- [ ] `UnitRegistry::weapon()` returns raw TDF section name strings — return
+  `Option<&WeaponDef>` directly so callers never see string keys, eliminating empty-string
+  checks in combat.rs and hud.rs
 
 ### Gameplay Bugs
 
@@ -434,8 +437,6 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ### Compiler Warnings
 
-- [ ] Unused import `Arc` in `spawning.rs`
-- [ ] Unused import `AttackCooldown` in `script_triggers.rs`
 - [ ] `PieceIndex` field `.0` never read
 
 ### Naming

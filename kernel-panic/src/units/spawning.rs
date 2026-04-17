@@ -220,7 +220,7 @@ pub fn spawn_showcase(
             Faction::System => UnitKind::Bug,
             Faction::Hacker | Faction::Network => UnitKind::Bit,
         };
-        let offset = Vec3::new(120.0, 0.0, 0.0);
+        let offset = Vec3::new(220.0, 0.0, 0.0);
         let target_xz = *position + offset;
         let hx = (target_xz.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
         let hz = (target_xz.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;

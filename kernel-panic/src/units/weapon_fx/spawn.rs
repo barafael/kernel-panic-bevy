@@ -1,137 +1,35 @@
-//! Weapon visual effects — beams, projectiles, and impact flashes.
-//!
-//! The combat system pushes [`AttackEvent`]s into a [`PendingAttacks`] buffer.
-//! [`spawn_weapon_visuals`] drains the buffer, looks up the weapon in the TDF
-//! registry, and spawns the appropriate effect entity.
-//! [`tick_weapon_fx`] fades/moves/despawns the visuals over time.
+//! Spawning side of weapon visuals: drains `PendingAttacks` and routes each
+//! event to the appropriate effect spawner (beam, burst, projectile, melee,
+//! plus the bonus nanoframe sparkle for build lasers).
 
 use bevy::prelude::*;
 
-use super::weapons::WeaponRegistry;
+use super::shared::{
+    AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, BurstSegment,
+    PendingAttacks, ProjectileVisual, tdf_color,
+};
+use crate::units::weapons::WeaponRegistry;
 
-// ── Shared types ────────────────────────────────────────────────────
-
-/// Describes a single attack for the visual system.
-pub struct AttackEvent {
-    pub attacker_pos: Vec3,
-    pub target_pos: Vec3,
-    pub weapon_name: &'static str,
+/// True for `BuildLaser` (the upstream build-laser weapon name). The
+/// `BuildLaserNoEffect` variant intentionally suppresses the impact particles,
+/// so only the bare-name version triggers `BuildSparkle` spawn.
+fn is_build_laser(weapon_name: &str) -> bool {
+    weapon_name == "BuildLaser"
 }
 
-/// Buffer written by the combat system, drained by visual systems.
-#[derive(Resource, Default)]
-pub struct PendingAttacks {
-    pub events: Vec<AttackEvent>,
-}
-
-// ── Effect components ───────────────────────────────────────────────
-
-/// A beam visual that fades over its lifetime.
-#[derive(Component)]
-pub struct BeamVisual {
-    pub lifetime: f32,
-    pub max_lifetime: f32,
-}
-
-/// A projectile traveling from origin to target.
-#[derive(Component)]
-pub struct ProjectileVisual {
-    pub origin: Vec3,
-    pub target: Vec3,
-    pub speed: f32,
-    pub progress: f32,
-    pub arc_height: f32,
-}
-
-/// A burst of multiple small beam segments (spray weapons like PacketBeam).
-#[derive(Component)]
-pub struct BurstSegment {
-    pub lifetime: f32,
-}
-
-/// Shared material cache to avoid per-frame allocations.
-#[derive(Resource, Default)]
-pub struct BeamMaterialCache {
-    entries: Vec<CachedMaterial>,
-}
-
-struct CachedMaterial {
-    key: MaterialKey,
-    handle: Handle<StandardMaterial>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-struct MaterialKey {
-    r: u8,
-    g: u8,
-    b: u8,
-    additive: bool,
-}
-
-impl BeamMaterialCache {
-    fn get_or_create(
-        &mut self,
-        color: LinearRgba,
-        additive: bool,
-        materials: &mut Assets<StandardMaterial>,
-    ) -> Handle<StandardMaterial> {
-        let key = MaterialKey {
-            r: (color.red.clamp(0.0, 1.0) * 15.0).round() as u8,
-            g: (color.green.clamp(0.0, 1.0) * 15.0).round() as u8,
-            b: (color.blue.clamp(0.0, 1.0) * 15.0).round() as u8,
-            additive,
-        };
-        for entry in &self.entries {
-            if entry.key == key {
-                return entry.handle.clone();
-            }
-        }
-        let alpha_mode = if additive {
-            AlphaMode::Add
-        } else {
-            AlphaMode::Blend
-        };
-        let handle = materials.add(StandardMaterial {
-            base_color: Color::LinearRgba(color),
-            emissive: color * 8.0,
-            unlit: true,
-            alpha_mode,
-            ..default()
-        });
-        self.entries.push(CachedMaterial {
-            key,
-            handle: handle.clone(),
-        });
-        handle
-    }
-}
-
-// ── Color helper ────────────────────────────────────────────────────
-
-/// TDF stores RGB either 0-255 or 0-1. Normalize to LinearRgba 0-1.
-fn tdf_color(rgb: [f32; 3]) -> LinearRgba {
-    let [r, g, b] = rgb;
-    if r > 2.0 || g > 2.0 || b > 2.0 {
-        LinearRgba::new(r / 255.0, g / 255.0, b / 255.0, 1.0)
-    } else if r == 0.0 && g == 0.0 && b == 0.0 {
-        LinearRgba::new(0.7, 0.7, 0.7, 1.0)
-    } else {
-        LinearRgba::new(r, g, b, 1.0)
-    }
-}
-
-// ── Main spawn system ───────────────────────────────────────────────
-
-pub fn spawn_weapon_visuals(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_weapon_visuals(
     mut pending: ResMut<PendingAttacks>,
     weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: ResMut<BeamMaterialCache>,
+    mut sparkle_assets: ResMut<BuildSparkleAssets>,
+    asset_server: Res<AssetServer>,
 ) {
     for event in pending.events.drain(..) {
-        let Some(weapon) = weapon_registry.get(event.weapon_name) else {
+        let Some(weapon) = weapon_registry.get(&event.weapon_name) else {
             continue;
         };
 
@@ -175,11 +73,88 @@ pub fn spawn_weapon_visuals(
                 &mut cache,
             );
         }
+
+        // Build lasers also drop a short-lived "nanoframe pixel" sprite at
+        // the target end (upstream `oldskool_build` CEG). The NoEffect variant
+        // intentionally skips this.
+        if is_build_laser(&event.weapon_name) {
+            spawn_build_sparkle(
+                event.target_pos,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut sparkle_assets,
+                &asset_server,
+            );
+        }
     }
 }
 
-// ── Beam (Line, MegaBeam, BugShot, DOS_Beam, VirusBeam, GaussCannon) ───
+/// Mirrors the upstream CEG params:
+///   particleLife=16 ± 8 frames @ 30 fps      → 0.27–0.80 s
+///   particleSize=3 ± 4                       → ~world units across
+///   particleSpeed=2 ± .1, emitVector=(0,1,0) → slight upward drift
+///   airdrag=1                                → kills velocity fast
+///   colorMap=white, white, transparent black → fade to nothing
+fn spawn_build_sparkle(
+    target_pos: Vec3,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    sparkle_assets: &mut BuildSparkleAssets,
+    asset_server: &AssetServer,
+) {
+    let mesh = sparkle_assets
+        .mesh
+        .get_or_insert_with(|| meshes.add(Rectangle::new(1.0, 1.0)))
+        .clone();
+    let material = sparkle_assets
+        .material
+        .get_or_insert_with(|| {
+            materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: Some(asset_server.load("sfx/hollowsquare.png")),
+                emissive: LinearRgba::WHITE * 4.0,
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                cull_mode: None,
+                ..default()
+            })
+        })
+        .clone();
 
+    // Cheap deterministic-ish jitter: hash position bits + frame for variety
+    // without pulling in `rand`. Stable enough for the eye.
+    let h = (target_pos.x.to_bits() ^ target_pos.z.to_bits().rotate_left(13)) as f32;
+    let r0 = (h * 0.000_000_2).fract();
+    let r1 = ((h * 0.000_001_3).fract() * 7.0).fract();
+    let r2 = ((h * 0.000_011_1).fract() * 13.0).fract();
+    let r3 = ((h * 0.000_111_1).fract() * 17.0).fract();
+
+    // particleSize=3 ± 4 → roughly 1..7 world units. Clamp so we don't get tiny invisible specks.
+    let size = (3.0 + (r0 - 0.5) * 4.0).clamp(1.5, 7.0);
+    // particleLife=16 ± 8 frames @ 30fps → 0.27..0.80s.
+    let life = (16.0 + (r1 - 0.5) * 8.0) / 30.0;
+    // Slight horizontal scatter and upward drift (emitVector y=1, speed≈2 elmos/frame).
+    let scatter = Vec3::new((r2 - 0.5) * 4.0, 1.0, (r3 - 0.5) * 4.0);
+    let velocity = scatter.normalize_or(Vec3::Y) * 30.0; // ~2 elmos/frame * 30fps
+
+    let spawn_pos = target_pos + Vec3::Y * 1.0; // pos=0,1.0,0 in CEG
+
+    commands.spawn((
+        BuildSparkle {
+            lifetime: life,
+            max_lifetime: life,
+            velocity,
+            base_size: size,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(spawn_pos).with_scale(Vec3::splat(size)),
+    ));
+}
+
+/// Beam (Line, MegaBeam, BugShot, DOS_Beam, VirusBeam, GaussCannon).
 fn spawn_beam(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
@@ -239,8 +214,7 @@ fn spawn_beam(
     ));
 }
 
-// ── Burst beam (PacketBeam — multiple small beams with spray) ───────
-
+/// Burst beam (PacketBeam — multiple small beams with spray).
 fn spawn_burst_beam(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
@@ -290,8 +264,7 @@ fn spawn_burst_beam(
     }
 }
 
-// ── Projectile (Geometric, BugCannon, end_game_logic_bomb) ──────────
-
+/// Projectile (Geometric, BugCannon, end_game_logic_bomb).
 fn spawn_projectile(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
@@ -338,8 +311,7 @@ fn spawn_projectile(
     ));
 }
 
-// ── Melee flash (Wormbite) ──────────────────────────────────────────
-
+/// Melee flash (Wormbite).
 fn spawn_melee_flash(
     event: &AttackEvent,
     _weapon: &spring_tdf::WeaponDef,
@@ -365,60 +337,4 @@ fn spawn_melee_flash(
         MeshMaterial3d(material),
         Transform::from_translation(flash_pos),
     ));
-}
-
-// ── Tick system ─────────────────────────────────────────────────────
-
-#[allow(clippy::type_complexity)]
-pub fn tick_weapon_fx(
-    time: Res<Time>,
-    mut beams: Query<(Entity, &mut BeamVisual, &mut Transform), Without<ProjectileVisual>>,
-    mut bursts: Query<
-        (Entity, &mut BurstSegment),
-        (Without<BeamVisual>, Without<ProjectileVisual>),
-    >,
-    mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
-    mut commands: Commands,
-) {
-    let dt = time.delta_secs();
-
-    for (entity, mut beam, mut transform) in &mut beams {
-        beam.lifetime -= dt;
-        if beam.lifetime <= 0.0 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        // Fade by shrinking cross-section while keeping length.
-        let fade = (beam.lifetime / beam.max_lifetime).sqrt();
-        let s = transform.scale;
-        transform.scale = Vec3::new(s.x.min(1.0) * fade, s.y.min(1.0) * fade, s.z);
-    }
-
-    for (entity, mut burst) in &mut bursts {
-        burst.lifetime -= dt;
-        if burst.lifetime <= 0.0 {
-            commands.entity(entity).despawn();
-        }
-    }
-
-    for (entity, mut proj, mut transform) in &mut projectiles {
-        let total_dist = proj.origin.distance(proj.target);
-        if total_dist < 0.1 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        proj.progress += (proj.speed * dt) / total_dist;
-        if proj.progress >= 1.0 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-
-        let t = proj.progress;
-        let mut pos = proj.origin.lerp(proj.target, t);
-        if proj.arc_height > 0.0 {
-            let arc = 4.0 * t * (1.0 - t);
-            pos.y += proj.arc_height * total_dist * arc;
-        }
-        transform.translation = pos;
-    }
 }

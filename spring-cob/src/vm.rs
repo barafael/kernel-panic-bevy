@@ -4,13 +4,20 @@
 //! its own program counter, data stack, and call stack. Threads can sleep,
 //! wait for animations, signal each other, and spawn child threads.
 
+use smallvec::SmallVec;
+
 use crate::cob_file::CobFile;
-use crate::opcodes::*;
+use crate::opcodes::Opcode;
 
 /// Maximum data stack depth per thread.
 const MAX_STACK: usize = 64;
 /// Maximum call stack depth per thread.
 const MAX_CALL_STACK: usize = 16;
+
+/// Data stack: capped at `MAX_STACK`, so inline the whole thing.
+type DataStack = SmallVec<[i32; MAX_STACK]>;
+/// Call stack: capped at `MAX_CALL_STACK`, so inline the whole thing.
+type CallStack = SmallVec<[CallFrame; MAX_CALL_STACK]>;
 /// Maximum instructions per tick before forced yield (runaway protection).
 const MAX_INSTRUCTIONS_PER_TICK: usize = 5000;
 
@@ -47,8 +54,8 @@ pub struct CobThread {
     param_count: usize,
     ret_code: i32,
 
-    data_stack: Vec<i32>,
-    call_stack: Vec<CallFrame>,
+    data_stack: DataStack,
+    call_stack: CallStack,
 }
 
 impl CobThread {
@@ -63,8 +70,8 @@ impl CobThread {
             wait_axis: -1,
             param_count: 0,
             ret_code: 0,
-            data_stack: Vec::with_capacity(16),
-            call_stack: Vec::with_capacity(4),
+            data_stack: DataStack::new(),
+            call_stack: CallStack::new(),
         }
     }
 
@@ -324,25 +331,30 @@ impl CobVm {
             }
 
             instructions += 1;
-            let opcode = thread.read_code(&cob.code);
+            let raw_opcode = thread.read_code(&cob.code);
+            let Some(opcode) = Opcode::from_repr(raw_opcode) else {
+                // Unknown opcode — kill the thread to avoid infinite loops.
+                thread.state = ThreadState::Dead;
+                break;
+            };
 
             match opcode {
-                PUSH_CONSTANT => {
+                Opcode::PushConstant => {
                     let val = thread.read_code(&cob.code);
                     thread.push(val);
                 }
-                PUSH_LOCAL_VAR => {
+                Opcode::PushLocalVar => {
                     let idx = thread.read_code(&cob.code) as usize;
                     let frame = thread.local_stack_frame();
                     let val = thread.data_stack.get(frame + idx).copied().unwrap_or(0);
                     thread.push(val);
                 }
-                PUSH_STATIC => {
+                Opcode::PushStatic => {
                     let idx = thread.read_code(&cob.code) as usize;
                     let val = self.static_vars.get(idx).copied().unwrap_or(0);
                     thread.push(val);
                 }
-                POP_LOCAL_VAR => {
+                Opcode::PopLocalVar => {
                     let idx = thread.read_code(&cob.code) as usize;
                     let val = thread.pop();
                     let frame = thread.local_stack_frame();
@@ -350,17 +362,17 @@ impl CobVm {
                         thread.data_stack[frame + idx] = val;
                     }
                 }
-                POP_STATIC => {
+                Opcode::PopStatic => {
                     let idx = thread.read_code(&cob.code) as usize;
                     let val = thread.pop();
                     if idx < self.static_vars.len() {
                         self.static_vars[idx] = val;
                     }
                 }
-                POP_STACK => {
+                Opcode::PopStack => {
                     thread.pop();
                 }
-                CREATE_LOCAL_VAR => {
+                Opcode::CreateLocalVar => {
                     if thread.param_count == 0 {
                         thread.push(0);
                     } else {
@@ -369,103 +381,103 @@ impl CobVm {
                 }
 
                 // Arithmetic
-                ADD => {
+                Opcode::Add => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(a.wrapping_add(b));
                 }
-                SUB => {
+                Opcode::Sub => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(a.wrapping_sub(b));
                 }
-                MUL => {
+                Opcode::Mul => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(a.wrapping_mul(b));
                 }
-                DIV => {
+                Opcode::Div => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(if b != 0 { a / b } else { 1000 });
                 }
-                MOD => {
+                Opcode::Mod => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(if b != 0 { a % b } else { 0 });
                 }
-                BITWISE_AND => {
+                Opcode::BitAnd => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(a & b);
                 }
-                BITWISE_OR => {
+                Opcode::BitOr => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(a | b);
                 }
-                BITWISE_XOR => {
+                Opcode::BitXor => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(a ^ b);
                 }
-                BITWISE_NOT => {
+                Opcode::BitNot => {
                     let a = thread.pop();
                     thread.push(!a);
                 }
 
                 // Comparison
-                SET_LESS => {
+                Opcode::SetLess => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(i32::from(a < b));
                 }
-                SET_LESS_OR_EQUAL => {
+                Opcode::SetLessOrEqual => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(i32::from(a <= b));
                 }
-                SET_GREATER => {
+                Opcode::SetGreater => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(i32::from(a > b));
                 }
-                SET_GREATER_OR_EQUAL => {
+                Opcode::SetGreaterOrEqual => {
                     let b = thread.pop();
                     let a = thread.pop();
                     thread.push(i32::from(a >= b));
                 }
-                SET_EQUAL => {
+                Opcode::SetEqual => {
                     let a = thread.pop();
                     let b = thread.pop();
                     thread.push(i32::from(a == b));
                 }
-                SET_NOT_EQUAL => {
+                Opcode::SetNotEqual => {
                     let a = thread.pop();
                     let b = thread.pop();
                     thread.push(i32::from(a != b));
                 }
-                LOGICAL_AND => {
+                Opcode::LogicalAnd => {
                     let a = thread.pop();
                     let b = thread.pop();
                     thread.push(i32::from(a != 0 && b != 0));
                 }
-                LOGICAL_OR => {
+                Opcode::LogicalOr => {
                     let a = thread.pop();
                     let b = thread.pop();
                     thread.push(i32::from(a != 0 || b != 0));
                 }
-                LOGICAL_XOR => {
+                Opcode::LogicalXor => {
                     let a = thread.pop();
                     let b = thread.pop();
                     thread.push(i32::from((a != 0) ^ (b != 0)));
                 }
-                LOGICAL_NOT => {
+                Opcode::LogicalNot => {
                     let a = thread.pop();
                     thread.push(i32::from(a == 0));
                 }
 
-                RAND => {
+                Opcode::Rand => {
                     let b = thread.pop();
                     let a = thread.pop();
                     // Simple deterministic "random" — good enough for animations.
@@ -481,20 +493,26 @@ impl CobVm {
                 }
 
                 // Flow control
-                JUMP => {
+                Opcode::Jump => {
                     let addr = thread.read_code(&cob.code) as usize;
                     thread.pc = addr;
                 }
-                JUMP_NOT_EQUAL => {
+                Opcode::JumpNotEqual => {
                     let addr = thread.read_code(&cob.code) as usize;
                     let val = thread.pop();
                     if val == 0 {
                         thread.pc = addr;
                     }
                 }
-                CALL | REAL_CALL => {
+                Opcode::Call | Opcode::RealCall => {
                     let func_id = thread.read_code(&cob.code) as usize;
                     let arg_count = thread.read_code(&cob.code) as usize;
+
+                    let Some(stack_top) = thread.data_stack.len().checked_sub(arg_count) else {
+                        // Malformed bytecode: more args requested than stack holds.
+                        thread.state = ThreadState::Dead;
+                        break;
+                    };
 
                     if func_id < cob.script_lengths.len()
                         && cob.script_lengths[func_id] > 0
@@ -503,13 +521,13 @@ impl CobVm {
                         thread.call_stack.push(CallFrame {
                             function_id: func_id,
                             return_addr: thread.pc as i32,
-                            stack_top: thread.data_stack.len() - arg_count,
+                            stack_top,
                         });
                         thread.param_count = arg_count;
                         thread.pc = cob.script_offsets[func_id];
                     }
                 }
-                LUA_CALL => {
+                Opcode::LuaCall => {
                     // Skip lua calls — read and discard the args.
                     let _func_id = thread.read_code(&cob.code);
                     let arg_count = thread.read_code(&cob.code) as usize;
@@ -519,16 +537,16 @@ impl CobVm {
                     // Push 0 as lua return value (lua_* calls return 0 by default).
                     thread.push(0);
                 }
-                RETURN => {
+                Opcode::Return => {
                     let ret = thread.pop();
                     thread.ret_code = ret;
 
-                    if thread.local_return_addr() == -1 {
+                    let raw_addr = thread.local_return_addr();
+                    let Ok(return_addr) = usize::try_from(raw_addr) else {
+                        // -1 marks the root frame; any other negative is malformed bytecode.
                         thread.state = ThreadState::Dead;
                         break;
-                    }
-
-                    let return_addr = thread.local_return_addr() as usize;
+                    };
                     let stack_frame = thread.local_stack_frame();
                     thread
                         .data_stack
@@ -536,7 +554,7 @@ impl CobVm {
                     thread.call_stack.pop();
                     thread.pc = return_addr;
                 }
-                START => {
+                Opcode::Start => {
                     let func_id = thread.read_code(&cob.code) as usize;
                     let arg_count = thread.read_code(&cob.code) as usize;
 
@@ -551,7 +569,7 @@ impl CobVm {
                         signal_mask: thread.signal_mask,
                     });
                 }
-                SIGNAL => {
+                Opcode::Signal => {
                     let sig = thread.pop();
                     // Kill all threads whose signal_mask overlaps with sig.
                     for t in &mut self.threads {
@@ -560,13 +578,13 @@ impl CobVm {
                         }
                     }
                 }
-                SET_SIGNAL_MASK => {
+                Opcode::SetSignalMask => {
                     let mask = thread.pop();
                     thread.signal_mask = mask;
                 }
 
                 // Sleep
-                SLEEP => {
+                Opcode::Sleep => {
                     let ms = thread.pop();
                     thread.wake_time = self.current_time + ms;
                     thread.state = ThreadState::Sleep;
@@ -576,7 +594,7 @@ impl CobVm {
                 // Animation commands.
                 // Spring stack convention for MOVE/TURN: compiler pushes speed
                 // first then destination, so top of stack is destination.
-                TURN => {
+                Opcode::Turn => {
                     let dest = thread.pop();
                     let speed = thread.pop();
                     let piece = thread.read_code(&cob.code);
@@ -588,7 +606,7 @@ impl CobVm {
                         speed,
                     });
                 }
-                TURN_NOW => {
+                Opcode::TurnNow => {
                     let dest = thread.pop();
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
@@ -598,7 +616,7 @@ impl CobVm {
                         destination: dest,
                     });
                 }
-                MOVE => {
+                Opcode::Move => {
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
                     let dest = thread.pop();
@@ -610,7 +628,7 @@ impl CobVm {
                         speed,
                     });
                 }
-                MOVE_NOW => {
+                Opcode::MoveNow => {
                     let dest = thread.pop();
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
@@ -620,7 +638,7 @@ impl CobVm {
                         destination: dest,
                     });
                 }
-                SPIN => {
+                Opcode::Spin => {
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
                     let speed = thread.pop();
@@ -632,14 +650,14 @@ impl CobVm {
                         accel,
                     });
                 }
-                STOP_SPIN => {
+                Opcode::StopSpin => {
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
                     let decel = thread.pop();
                     commands.push(AnimCommand::StopSpin { piece, axis, decel });
                 }
 
-                WAIT_TURN => {
+                Opcode::WaitTurn => {
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
                     // In the real engine, this checks NeedsWait. For simplicity,
@@ -649,7 +667,7 @@ impl CobVm {
                     thread.state = ThreadState::WaitTurn;
                     break;
                 }
-                WAIT_MOVE => {
+                Opcode::WaitMove => {
                     let piece = thread.read_code(&cob.code);
                     let axis = thread.read_code(&cob.code);
                     thread.wait_piece = piece;
@@ -658,31 +676,31 @@ impl CobVm {
                     break;
                 }
 
-                SHOW => {
+                Opcode::Show => {
                     let piece = thread.read_code(&cob.code);
                     commands.push(AnimCommand::Show { piece });
                 }
-                HIDE => {
+                Opcode::Hide => {
                     let piece = thread.read_code(&cob.code);
                     commands.push(AnimCommand::Hide { piece });
                 }
-                EMIT_SFX => {
+                Opcode::EmitSfx => {
                     let sfx_type = thread.pop();
                     let piece = thread.read_code(&cob.code);
                     commands.push(AnimCommand::EmitSfx { sfx_type, piece });
                 }
-                EXPLODE => {
+                Opcode::Explode => {
                     let severity = thread.pop();
                     let piece = thread.read_code(&cob.code);
                     commands.push(AnimCommand::Explode { piece, severity });
                 }
 
                 // Get/Set unit values — return 0 for now (game integration point).
-                GET_UNIT_VALUE => {
+                Opcode::GetUnitValue => {
                     let _key = thread.pop();
                     thread.push(0);
                 }
-                GET => {
+                Opcode::Get => {
                     let _p5 = thread.pop();
                     let _p4 = thread.pop();
                     let _p3 = thread.pop();
@@ -690,35 +708,29 @@ impl CobVm {
                     let _key = thread.pop();
                     thread.push(0);
                 }
-                SET => {
+                Opcode::Set => {
                     let value = thread.pop();
                     let key = thread.pop();
                     commands.push(AnimCommand::SetValue { key, value });
                 }
 
                 // No-ops for visual hints we don't implement.
-                SHADE | DONT_SHADE | CACHE | DONT_CACHE => {
+                Opcode::Shade | Opcode::DontShade | Opcode::Cache | Opcode::DontCache => {
                     let _piece = thread.read_code(&cob.code);
                 }
 
-                PLAY_SOUND => {
+                Opcode::PlaySound => {
                     let _volume = thread.pop();
                     let _sound_id = thread.read_code(&cob.code);
                 }
 
-                ATTACH => {
+                Opcode::Attach => {
                     let _p3 = thread.pop();
                     let _p2 = thread.pop();
                     let _p1 = thread.pop();
                 }
-                DROP => {
+                Opcode::Drop => {
                     let _p1 = thread.pop();
-                }
-
-                _ => {
-                    // Unknown opcode — kill the thread to avoid infinite loops.
-                    thread.state = ThreadState::Dead;
-                    break;
                 }
             }
         }

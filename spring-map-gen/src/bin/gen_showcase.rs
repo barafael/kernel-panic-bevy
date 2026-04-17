@@ -15,7 +15,33 @@
 
 use std::path::{Path, PathBuf};
 
-use spring_map_gen::{Rgba, SmdBuilder, SmfBuilder, SmtBuilder, package_sdz};
+use clap::Parser;
+use spring_map_gen::{Feature, MapGenError, Rgba, SmdBuilder, SmfBuilder, SmtBuilder, package_sdz};
+use thiserror::Error;
+
+/// Generate a flat showcase map with 10 evenly-spread start positions,
+/// used by `kernel-panic` to place one of every mobile unit for visual
+/// inspection.
+#[derive(Parser)]
+#[command(about, long_about = None)]
+struct Args {
+    /// Output path for the `.sdz` archive. Defaults to
+    /// `<workspace>/kernel-panic/assets/maps/Showcase.sdz`.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Error)]
+enum ShowcaseGenError {
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("map generation failed: {0}")]
+    MapGen(#[from] MapGenError),
+
+    #[error("no workspace root above spring-map-gen (CARGO_MANIFEST_DIR has no parent directory)")]
+    NoWorkspaceRoot,
+}
 
 const MAP_NAME: &str = "Showcase";
 /// 384 SMUs × 8 elmos = 3072 elmos per side (multiple of 128). Small
@@ -70,7 +96,9 @@ fn slot_jitter(slot: usize) -> (f32, f32) {
     (to_signed(hx), to_signed(hz))
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), ShowcaseGenError> {
+    let args = Args::parse();
+
     // ---- Tiles ----
     // Two-tone dark-teal floor: clearly a surface under the game's
     // additive/emissive lighting, without washing out the unit silhouettes.
@@ -98,6 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     smf.set_tilemap(tilemap, &format!("maps/{MAP_NAME}.smt"), smt.tile_count())?;
 
+    // Single geovent at map center so the SMF feature section is non-empty.
+    // The showcase is otherwise a bare plain; consumers (and our end-to-end
+    // test) expect every map to have at least one feature.
+    smf.add_feature(Feature::geovent(WORLD_SIZE / 2.0, 0.0, WORLD_SIZE / 2.0));
+
     let smf_data = smf.build()?;
 
     // ---- SMD: start positions for the showcase grid ----
@@ -121,18 +154,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let smd_text = smd.build();
 
     // ---- Package ----
-    let out_path = output_path()?;
+    let out_path = match args.output {
+        Some(p) => p,
+        None => default_output_path()?,
+    };
     package_sdz(&out_path, MAP_NAME, &smf_data, &smt_data, &smd_text)?;
     println!("Wrote {}", out_path.display());
     Ok(())
 }
 
-fn output_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn default_output_path() -> Result<PathBuf, ShowcaseGenError> {
     // Walk up from CARGO_MANIFEST_DIR to find the workspace root.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
         .parent()
-        .ok_or("no workspace root above spring-map-gen")?;
+        .ok_or(ShowcaseGenError::NoWorkspaceRoot)?;
     let maps_dir = workspace_root.join("kernel-panic/assets/maps");
     if !Path::new(&maps_dir).exists() {
         std::fs::create_dir_all(&maps_dir)?;

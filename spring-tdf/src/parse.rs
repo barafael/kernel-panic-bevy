@@ -72,6 +72,19 @@ impl Section {
         self.get(key).unwrap_or_default().to_string()
     }
 
+    /// Get a value with inline `//` comments stripped and whitespace trimmed.
+    ///
+    /// Some TDF values contain trailing comments (e.g. `Weapon1=BuildLaser;//Unused`).
+    /// The line-level comment stripping in the parser doesn't catch these because
+    /// the `//` is inside the value portion of a `key=value;` pair.
+    pub fn string_clean(&self, key: &str) -> String {
+        let raw = self.get(key).unwrap_or_default();
+        match raw.find("//") {
+            Some(pos) => raw[..pos].trim().to_string(),
+            None => raw.to_string(),
+        }
+    }
+
     /// Parse a space-separated RGB triplet (e.g. `"128 0 0"` or `"0.8 1 0.8"`).
     ///
     /// Missing or malformed components default to `0.0`.

@@ -7,7 +7,8 @@ use bevy::prelude::*;
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 
 use super::components::Faction;
-use super::definitions::{UnitKind, stats};
+use super::definitions::UnitKind;
+use super::unit_registry::UnitRegistry;
 
 // ---------------------------------------------------------------------------
 // Caches
@@ -16,10 +17,10 @@ use super::definitions::{UnitKind, stats};
 /// Cached s3o model data, textures, and Bevy handles loaded from disk.
 #[derive(Resource, Default)]
 pub struct S3OModelCache {
-    models: HashMap<&'static str, Option<S3OModel>>,
+    models: HashMap<String, Option<S3OModel>>,
     raw_textures: HashMap<String, Option<TgaImage>>,
     colored_textures: HashMap<(String, Faction), Handle<Image>>,
-    mesh_handles: HashMap<&'static str, Handle<Mesh>>,
+    mesh_handles: HashMap<String, Handle<Mesh>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -33,15 +34,14 @@ pub struct S3OModelCache {
 /// to mean "100% team color". We bake the faction color into the texture so
 /// that Bevy's standard unlit material renders it correctly.
 pub fn unit_material(
-    kind: UnitKind,
+    _kind: UnitKind,
     faction: Faction,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     cache: &mut S3OModelCache,
+    model_filename: &str,
 ) -> Handle<StandardMaterial> {
-    let unit_stats = stats(kind);
-
-    let tex1_name = load_s3o_cached(unit_stats.model, cache).map(|model| model.texture1.clone());
+    let tex1_name = load_s3o_cached(model_filename, cache).map(|model| model.texture1.clone());
 
     if let Some(tex1_name) = tex1_name
         && let Some(handle) = build_faction_texture(&tex1_name, faction, images, cache)
@@ -68,22 +68,25 @@ pub fn unit_mesh(
     kind: UnitKind,
     meshes: &mut Assets<Mesh>,
     cache: &mut S3OModelCache,
+    unit_registry: &UnitRegistry,
 ) -> Handle<Mesh> {
-    let unit_stats = stats(kind);
+    let model_name = unit_registry.model(kind);
 
-    if let Some(handle) = cache.mesh_handles.get(unit_stats.model) {
+    if let Some(handle) = cache.mesh_handles.get(model_name) {
         return handle.clone();
     }
 
-    if let Some(model) = load_s3o_cached(unit_stats.model, cache) {
+    if let Some(model) = load_s3o_cached(model_name, cache) {
         let mesh = s3o_to_bevy_mesh(&model.root_piece, 1.0);
         let handle = meshes.add(mesh);
-        cache.mesh_handles.insert(unit_stats.model, handle.clone());
+        cache
+            .mesh_handles
+            .insert(model_name.to_string(), handle.clone());
         return handle;
     }
 
     // Fallback: procedural cylinder.
-    let scale = unit_stats.mesh_scale;
+    let scale = kind.mesh_scale();
     let mesh = match kind {
         UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection => {
             Cylinder::new(20.0 * scale, 12.0 * scale)
@@ -106,14 +109,14 @@ pub fn unit_mesh(
 }
 
 /// Load and return a clone of the s3o model for a given filename.
-pub fn load_s3o_model(filename: &'static str, cache: &mut S3OModelCache) -> Option<S3OModel> {
+pub fn load_s3o_model(filename: &str, cache: &mut S3OModelCache) -> Option<S3OModel> {
     load_s3o_cached(filename, cache).cloned()
 }
 
 /// Get the bounding radius of a unit's s3o model (in elmos), or a fallback.
-pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache) -> f32 {
-    let unit_stats = stats(kind);
-    load_s3o_cached(unit_stats.model, cache)
+pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache, unit_registry: &UnitRegistry) -> f32 {
+    let model_name = unit_registry.model(kind);
+    load_s3o_cached(model_name, cache)
         .map(|m| m.radius)
         .unwrap_or(20.0)
 }
@@ -122,15 +125,13 @@ pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache) -> f32 {
 // Model / texture loading with shared disk-read helper
 // ---------------------------------------------------------------------------
 
-fn load_s3o_cached<'a>(
-    filename: &'static str,
-    cache: &'a mut S3OModelCache,
-) -> Option<&'a S3OModel> {
-    cache
-        .models
-        .entry(filename)
-        .or_insert_with(|| load_asset_from_disk(filename, spring_unit_mesh::parse_s3o))
-        .as_ref()
+fn load_s3o_cached<'a>(filename: &str, cache: &'a mut S3OModelCache) -> Option<&'a S3OModel> {
+    // Two-phase lookup: check first to avoid String allocation on cache hits.
+    if !cache.models.contains_key(filename) {
+        let model = load_asset_from_disk(filename, spring_unit_mesh::parse_s3o);
+        cache.models.insert(filename.to_string(), model);
+    }
+    cache.models.get(filename).and_then(|m| m.as_ref())
 }
 
 fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Option<&'a TgaImage> {

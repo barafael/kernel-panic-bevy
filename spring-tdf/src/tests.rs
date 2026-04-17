@@ -1,4 +1,4 @@
-use crate::{Section, Tdf, WeaponDefs};
+use crate::{EffectClass, ExplosionDefs, Section, Tdf, UnitDefs, WeaponDefs};
 
 // ── Unit tests: TDF parser ──────────────────────────────────────────
 
@@ -380,6 +380,503 @@ fn damage_map_for_type() {
     assert_eq!(w.damage.for_type("unknown"), 50.0);
 }
 
+// ── Unit tests: UnitDef extraction ─────────────────────────────────
+
+#[test]
+fn unit_def_from_fbi_basic() {
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Name=Bit;
+    Unitname=bit;
+    Description=fast attack unit;
+    Side=CPU;
+    MaxDamage=600;
+    BuildCostMetal=10;
+    BuildTime=240;
+    CanMove=1;
+    MaxVelocity=3;
+    MovementClass=LIGHT;
+    ObjectName=ball.s3o;
+    Weapon1=Line;
+    CanAttack=1;
+    SightDistance=512;
+    Category=FAST EDIBLE UNIT NOTFACTORY TARGET;
+    FootprintX=2;
+    FootprintZ=2;
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let bit = defs.get("bit").unwrap();
+    assert_eq!(bit.name, "Bit");
+    assert_eq!(bit.id, "bit");
+    assert_eq!(bit.side, "CPU");
+    assert_eq!(bit.max_health, 600.0);
+    assert_eq!(bit.build_time, 240.0);
+    assert!(bit.can_move);
+    assert_eq!(bit.max_velocity, 3.0);
+    assert_eq!(bit.movement_class, "LIGHT");
+    assert_eq!(bit.object_name, "ball.s3o");
+    assert_eq!(bit.weapon1, "Line");
+    assert!(bit.can_attack);
+    assert_eq!(bit.sight_distance, 512.0);
+    assert_eq!(bit.footprint_x, 2.0);
+    assert!(!bit.builder);
+    assert!(!bit.commander);
+}
+
+#[test]
+fn unit_def_homebase() {
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Name=kernel;
+    Unitname=kernel;
+    Side=CPU;
+    MaxDamage=40000;
+    BuildTime=3200;
+    Commander=1;
+    Builder=1;
+    WorkerTime=128;
+    CanMove=1;
+    MaxVelocity=0;
+    ObjectName=kernel.s3o;
+    Weapon1=BuildLaser;
+    Weapon2=homebaseshieldgood;
+    Weapon3=homebaseshieldbad;
+    SightDistance=512;
+    FootprintX=8;
+    FootprintZ=8;
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let kernel = defs.get("kernel").unwrap();
+    assert!(kernel.commander);
+    assert!(kernel.builder);
+    assert_eq!(kernel.worker_time, 128.0);
+    assert_eq!(kernel.max_velocity, 0.0);
+    assert_eq!(kernel.weapon2, "homebaseshieldgood");
+    assert_eq!(kernel.weapon3, "homebaseshieldbad");
+}
+
+#[test]
+fn unit_def_weapon_inline_comment_stripped() {
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=port;
+    Name=Port;
+    Side=NET;
+    MaxDamage=20000;
+    ObjectName=network_minifac.s3o;
+    Weapon1=BuildLaser;//Unused
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let port = defs.get("port").unwrap();
+    assert_eq!(port.weapon1, "BuildLaser");
+}
+
+#[test]
+fn unit_def_kamikaze() {
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=logic_bomb;
+    Name=Logic Bomb;
+    Side=CPU;
+    MaxDamage=300;
+    ObjectName=logic_bomb.s3o;
+    Kamikaze=1;
+    Init_Cloaked=1;
+    Weapon1=end_game_logic_bomb;
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let bomb = defs.get("logic_bomb").unwrap();
+    assert!(bomb.kamikaze);
+    assert!(bomb.init_cloaked);
+    assert_eq!(bomb.weapon1, "end_game_logic_bomb");
+}
+
+#[test]
+fn unit_def_case_insensitive_lookup() {
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=Bit;
+    Name=Bit;
+    Side=CPU;
+    MaxDamage=600;
+    ObjectName=ball.s3o;
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    assert!(defs.get("bit").is_some());
+    assert!(defs.get("BIT").is_some());
+    assert!(defs.get("Bit").is_some());
+}
+
+#[test]
+fn unit_def_buildpic_parsed_case_insensitive() {
+    // FBIs use both `buildpic=` and `BuildPic=` — parser must accept either.
+    let lower = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=bit;
+    Name=Bit;
+    ObjectName=ball.s3o;
+    buildpic=bit.pcx;
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        UnitDefs::from_tdf(&lower).get("bit").unwrap().build_pic,
+        "bit.pcx"
+    );
+
+    let upper = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=logic_bomb;
+    Name=Logic Bomb;
+    ObjectName=logic_bomb.s3o;
+    BuildPic=logic_bomb.pcx;
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        UnitDefs::from_tdf(&upper)
+            .get("logic_bomb")
+            .unwrap()
+            .build_pic,
+        "logic_bomb.pcx"
+    );
+}
+
+#[test]
+fn unit_def_buildpic_missing_is_empty() {
+    // Some FBIs (kernel.fbi, signal.fbi) have no BuildPic field.
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=kernel;
+    Name=Kernel;
+    ObjectName=kernel.s3o;
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(
+        UnitDefs::from_tdf(&tdf).get("kernel").unwrap().build_pic,
+        ""
+    );
+}
+
+#[test]
+fn unit_def_damage_modifier_default() {
+    // When DamageModifier is absent, should default to 1.0
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=test;
+    Name=Test;
+    ObjectName=test.s3o;
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let unit = defs.get("test").unwrap();
+    assert_eq!(unit.damage_modifier, 1.0);
+}
+
+#[test]
+fn unit_def_flying_unit() {
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=signal;
+    Name=SIGTERM;
+    Side=CPU;
+    MaxDamage=600;
+    ObjectName=signal.s3o;
+    canFly=1;
+    cruiseAlt=200;
+    MaxVelocity=8;
+    CanMove=1;
+}
+"#,
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let signal = defs.get("signal").unwrap();
+    assert!(signal.can_fly);
+    assert_eq!(signal.cruise_alt, 200.0);
+    assert_eq!(signal.max_velocity, 8.0);
+}
+
+// ── Unit tests: ExplosionDef extraction ────────────────────────────
+
+#[test]
+fn explosion_def_particle_system() {
+    let tdf = Tdf::parse(
+        r#"
+[corruption_burst]
+{
+    [burst]
+    {
+        class=CSimpleParticleSystem;
+        [properties] {
+            Texture=circle;
+            colorMap=.4 0 0 1   .3 0 0 .8   0 0 0 0;
+            numParticles=30;
+            particleLife=24;
+            particleSpeed=5;
+            particleSize=4;
+            airdrag=.98;
+            directional=0;
+        }
+        air=1;
+        ground=1;
+        water=1;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let defs = ExplosionDefs::from_tdf(&tdf);
+    let burst = defs.get("corruption_burst").unwrap();
+    assert_eq!(burst.id, "corruption_burst");
+    assert_eq!(burst.effects.len(), 1);
+    assert!(burst.ground_flash.is_none());
+
+    let effect = &burst.effects[0];
+    assert_eq!(effect.name, "burst");
+    assert_eq!(effect.class, EffectClass::SimpleParticleSystem);
+    assert!(effect.air);
+    assert!(effect.ground);
+    assert!(effect.water);
+    assert_eq!(effect.count, 1);
+
+    match &effect.properties {
+        crate::EffectProperties::Particle(p) => {
+            assert_eq!(p.texture, "circle");
+            assert_eq!(p.num_particles, 30.0);
+            assert_eq!(p.particle_life, 24.0);
+            assert_eq!(p.particle_speed, 5.0);
+            assert_eq!(p.particle_size, 4.0);
+            assert!((p.airdrag - 0.98).abs() < 0.001);
+            assert!(!p.directional);
+        }
+        _ => panic!("expected Particle properties"),
+    }
+}
+
+#[test]
+fn explosion_def_ground_flash() {
+    let tdf = Tdf::parse(
+        r#"
+[oldskool]
+{
+    [groundflash]
+    {
+        flashSize = 16;
+        flashAlpha = 0;
+        circleGrowth = 6.4;
+        circleAlpha = 0;
+        ttl = 8;
+        color = 1,0.6,0.6;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let defs = ExplosionDefs::from_tdf(&tdf);
+    let expl = defs.get("oldskool").unwrap();
+    assert!(expl.effects.is_empty());
+    let flash = expl.ground_flash.as_ref().unwrap();
+    assert_eq!(flash.flash_size, 16.0);
+    assert_eq!(flash.ttl, 8.0);
+    assert!((flash.circle_growth - 6.4).abs() < 0.01);
+    assert!((flash.color[0] - 1.0).abs() < 0.01);
+    assert!((flash.color[1] - 0.6).abs() < 0.01);
+}
+
+#[test]
+fn explosion_def_bitmap_flame() {
+    let tdf = Tdf::parse(
+        r#"
+[linkbeam]
+{
+    [beam]
+    {
+        class=CBitmapMuzzleFlame;
+        [properties]
+        {
+            sideTexture=linkbeam;
+            frontTexture=none;
+            dir=dir;
+            size=5;
+            length=356;
+            ttl=60;
+        }
+        air=1;
+        ground=1;
+        water=1;
+        count=1;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let defs = ExplosionDefs::from_tdf(&tdf);
+    let expl = defs.get("linkbeam").unwrap();
+    assert_eq!(expl.effects.len(), 1);
+
+    let effect = &expl.effects[0];
+    assert_eq!(effect.class, EffectClass::BitmapMuzzleFlame);
+
+    match &effect.properties {
+        crate::EffectProperties::Flame(f) => {
+            assert_eq!(f.side_texture, "linkbeam");
+            assert_eq!(f.front_texture, "none");
+            assert_eq!(f.size, 5.0);
+            assert_eq!(f.length, 356.0);
+            assert_eq!(f.ttl, 60.0);
+            assert_eq!(f.dir, "dir");
+        }
+        _ => panic!("expected Flame properties"),
+    }
+}
+
+#[test]
+fn explosion_def_spawner() {
+    let tdf = Tdf::parse(
+        r#"
+[corruption_infection]
+{
+    [smoke]
+    {
+        class=CExpGenSpawner;
+        [properties]
+        {
+            delay=10 i10;
+            explosionGenerator=custom:corruption_infection_smoke;
+            dir=0,1,0;
+        }
+        air=1;
+        ground=1;
+        water=1;
+        count=40;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let defs = ExplosionDefs::from_tdf(&tdf);
+    let expl = defs.get("corruption_infection").unwrap();
+    assert_eq!(expl.effects.len(), 1);
+
+    let effect = &expl.effects[0];
+    assert_eq!(effect.class, EffectClass::ExpGenSpawner);
+    assert_eq!(effect.count, 40);
+
+    match &effect.properties {
+        crate::EffectProperties::Spawner(s) => {
+            assert_eq!(s.explosion_generator, "custom:corruption_infection_smoke");
+            assert_eq!(s.delay, "10 i10");
+        }
+        _ => panic!("expected Spawner properties"),
+    }
+}
+
+#[test]
+fn explosion_def_multiple_effects() {
+    let tdf = Tdf::parse(
+        r#"
+[oldskool]
+{
+    [squarecloud]
+    {
+        class=CSimpleParticleSystem;
+        [properties]
+        {
+            Texture=square;
+            numParticles=15;
+            particleSize=14;
+        }
+        air=1;
+        ground=1;
+    }
+    [tracers]
+    {
+        class=CSimpleParticleSystem;
+        [properties]
+        {
+            Texture=hline;
+            numParticles=15;
+            directional=1;
+        }
+        air=1;
+        ground=1;
+    }
+    [groundflash]
+    {
+        flashSize = 16;
+        ttl = 0;
+        color = 1,0.6,0.6;
+    }
+}
+"#,
+    )
+    .unwrap();
+    let defs = ExplosionDefs::from_tdf(&tdf);
+    let expl = defs.get("oldskool").unwrap();
+    assert_eq!(expl.effects.len(), 2);
+    assert_eq!(expl.effects[0].name, "squarecloud");
+    assert_eq!(expl.effects[1].name, "tracers");
+    assert!(expl.ground_flash.is_some());
+}
+
+#[test]
+fn explosion_def_empty() {
+    let tdf = Tdf::parse(
+        r#"
+[none]
+{
+}
+"#,
+    )
+    .unwrap();
+    let defs = ExplosionDefs::from_tdf(&tdf);
+    let expl = defs.get("none").unwrap();
+    assert!(expl.effects.is_empty());
+    assert!(expl.ground_flash.is_none());
+}
+
 // ── Proptest ────────────────────────────────────────────────────────
 
 mod proptests {
@@ -632,6 +1129,228 @@ mod real_files {
         let good = defs.get("homebaseshieldgood").expect("homebaseshieldgood");
         assert!(good.is_shield);
         assert_eq!(good.weapon_type, "Shield");
+    }
+
+    fn find_units_dir() -> Option<&'static str> {
+        const CANDIDATES: &[&str] = &[
+            "upstream/Kernel-Panic/units",
+            "kernel-panic/upstream/Kernel-Panic/units",
+            "../upstream/Kernel-Panic/units",
+        ];
+        CANDIDATES.iter().copied().find(|p| Path::new(p).is_dir())
+    }
+
+    fn load_unit_file(dir: &str, filename: &str) -> crate::UnitDefs {
+        let path = format!("{dir}/{filename}");
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let tdf = Tdf::parse(&text).unwrap_or_else(|e| panic!("failed to parse {path}: {e}"));
+        crate::UnitDefs::from_tdf(&tdf)
+    }
+
+    #[test]
+    fn parse_kernel_fbi() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "kernel.fbi");
+        let kernel = defs.get("kernel").expect("kernel unit");
+        assert_eq!(kernel.max_health, 40000.0);
+        assert_eq!(kernel.side, "CPU");
+        assert!(kernel.commander);
+        assert!(kernel.builder);
+        assert_eq!(kernel.object_name, "kernel.s3o");
+        assert_eq!(kernel.weapon2, "homebaseshieldgood");
+    }
+
+    #[test]
+    fn parse_bit_fbi() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "bit.fbi");
+        let bit = defs.get("bit").expect("bit unit");
+        assert_eq!(bit.max_health, 600.0);
+        assert_eq!(bit.max_velocity, 3.0);
+        assert_eq!(bit.weapon1, "Line");
+        assert_eq!(bit.movement_class, "LIGHT");
+        assert!(bit.can_move);
+    }
+
+    #[test]
+    fn parse_connection_fbi() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "connection.fbi");
+        let conn = defs.get("connection").expect("connection unit");
+        assert_eq!(conn.max_health, 15000.0);
+        assert_eq!(conn.side, "NET");
+        assert_eq!(conn.weapon1, "GaussCannon");
+        assert_eq!(conn.max_velocity, 1.5);
+    }
+
+    #[test]
+    fn parse_worm_fbi() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "worm.fbi");
+        let worm = defs.get("worm").expect("worm unit");
+        assert_eq!(worm.max_health, 12000.0);
+        assert_eq!(worm.weapon1, "Wormbite");
+        assert_eq!(worm.weapon2, "Wormsplash");
+    }
+
+    #[test]
+    fn parse_logic_bomb_fbi() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "logic_bomb.fbi");
+        let bomb = defs.get("logic_bomb").expect("logic_bomb unit");
+        assert_eq!(bomb.max_health, 300.0);
+        assert!(bomb.kamikaze);
+        assert!(bomb.init_cloaked);
+        assert_eq!(bomb.weapon1, "end_game_logic_bomb");
+    }
+
+    #[test]
+    fn parse_signal_fbi() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "signal.fbi");
+        let signal = defs.get("signal").expect("signal unit");
+        assert!(signal.can_fly);
+        assert_eq!(signal.cruise_alt, 200.0);
+        assert_eq!(signal.max_velocity, 8.0);
+    }
+
+    #[test]
+    fn parse_all_kp_unit_files() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let kp_units = [
+            "kernel.fbi",
+            "assembler.fbi",
+            "bit.fbi",
+            "byte.fbi",
+            "pointer.fbi",
+            "socket.fbi",
+            "firewall.fbi",
+            "hole.fbi",
+            "bug.fbi",
+            "exploit.fbi",
+            "worm.fbi",
+            "virus.fbi",
+            "dos.fbi",
+            "window.fbi",
+            "logic_bomb.fbi",
+            "connection.fbi",
+            "port.fbi",
+            "packet.fbi",
+            "signal.fbi",
+        ];
+        for filename in &kp_units {
+            let defs = load_unit_file(dir, filename);
+            assert!(
+                !defs.units.is_empty(),
+                "{filename} should contain at least one unit definition"
+            );
+            for (name, u) in &defs.units {
+                assert!(
+                    !name.is_empty(),
+                    "unit id should not be empty in {filename}"
+                );
+                assert!(
+                    u.max_health > 0.0,
+                    "{name} in {filename}: max_health should be positive"
+                );
+                assert!(
+                    !u.object_name.is_empty(),
+                    "{name} in {filename}: must have an object_name"
+                );
+            }
+        }
+    }
+
+    fn find_explosions_dir() -> Option<&'static str> {
+        const CANDIDATES: &[&str] = &[
+            "upstream/Kernel-Panic/gamedata/explosions",
+            "kernel-panic/upstream/Kernel-Panic/gamedata/explosions",
+            "../upstream/Kernel-Panic/gamedata/explosions",
+        ];
+        CANDIDATES.iter().copied().find(|p| Path::new(p).is_dir())
+    }
+
+    #[test]
+    fn parse_corruption_burst_explosion() {
+        let Some(dir) = find_explosions_dir() else {
+            eprintln!("skipping: explosions dir not found");
+            return;
+        };
+        let path = format!("{dir}/corruption_burst.tdf");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let tdf = Tdf::parse(&text).unwrap();
+        let defs = crate::ExplosionDefs::from_tdf(&tdf);
+        let burst = defs.get("corruption_burst").expect("corruption_burst");
+        assert!(!burst.effects.is_empty());
+        assert_eq!(
+            burst.effects[0].class,
+            crate::EffectClass::SimpleParticleSystem
+        );
+    }
+
+    #[test]
+    fn parse_linkbeam_explosion() {
+        let Some(dir) = find_explosions_dir() else {
+            eprintln!("skipping: explosions dir not found");
+            return;
+        };
+        let path = format!("{dir}/linkbeam.tdf");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let tdf = Tdf::parse(&text).unwrap();
+        let defs = crate::ExplosionDefs::from_tdf(&tdf);
+        let beam = defs.get("linkbeam").expect("linkbeam");
+        assert!(!beam.effects.is_empty());
+        assert_eq!(beam.effects[0].class, crate::EffectClass::BitmapMuzzleFlame);
+    }
+
+    #[test]
+    fn parse_all_explosion_files() {
+        let Some(dir) = find_explosions_dir() else {
+            eprintln!("skipping: explosions dir not found");
+            return;
+        };
+        let entries = std::fs::read_dir(dir).unwrap();
+        let mut count = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "tdf") {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+                let tdf = Tdf::parse(&text)
+                    .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()));
+                let defs = crate::ExplosionDefs::from_tdf(&tdf);
+                // Every file should produce at least one explosion def.
+                assert!(
+                    !defs.explosions.is_empty(),
+                    "{} should contain at least one explosion",
+                    path.display()
+                );
+                count += defs.explosions.len();
+            }
+        }
+        assert!(count > 10, "expected many explosion defs, got {count}");
     }
 
     #[test]

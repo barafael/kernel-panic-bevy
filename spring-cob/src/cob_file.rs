@@ -4,9 +4,9 @@
 //! animation system. Files contain a header, script/piece name tables,
 //! bytecode, and optionally sound name tables (TA:K version 6).
 
-use std::io::{Cursor, Seek, SeekFrom};
+use std::io::Cursor;
 
-use byteorder::{LittleEndian, ReadBytesExt};
+use binrw::{BinRead, binread};
 use thiserror::Error;
 
 /// A parsed COB file ready for execution by the VM.
@@ -28,6 +28,37 @@ pub struct CobFile {
     pub sound_names: Vec<String>,
 }
 
+/// Raw COB file header — 11 little-endian i32 fields, plus two more on
+/// version 6 (TA:K). All offsets are byte offsets into the file.
+#[binread]
+#[derive(Debug, Clone)]
+#[br(little)]
+struct CobHeader {
+    #[br(temp)]
+    version: i32,
+    num_scripts: i32,
+    num_pieces: i32,
+    total_script_len: i32,
+    num_static_vars: i32,
+    #[br(temp)]
+    _unknown_2: i32,
+    offset_script_code_index: i32,
+    offset_script_names: i32,
+    offset_piece_names: i32,
+    offset_script_code: i32,
+    #[br(temp)]
+    _unknown_3: i32,
+    #[br(if(version == 6), little)]
+    taksound: Option<TakSoundHeader>,
+}
+
+#[derive(Debug, Clone, BinRead)]
+#[br(little)]
+struct TakSoundHeader {
+    offset_sound_names: i32,
+    num_sounds: i32,
+}
+
 #[derive(Debug, Error)]
 pub enum CobParseError {
     #[error("I/O error: {0}")]
@@ -40,6 +71,15 @@ pub enum CobParseError {
     StringOutOfBounds(usize),
 }
 
+impl From<binrw::Error> for CobParseError {
+    fn from(err: binrw::Error) -> Self {
+        match err {
+            binrw::Error::Io(io) => CobParseError::Io(io),
+            other => CobParseError::Io(std::io::Error::other(other.to_string())),
+        }
+    }
+}
+
 /// Parse a COB file from raw bytes.
 pub fn parse_cob(data: &[u8]) -> Result<CobFile, CobParseError> {
     if data.len() < 44 {
@@ -47,26 +87,32 @@ pub fn parse_cob(data: &[u8]) -> Result<CobFile, CobParseError> {
     }
 
     let mut cursor = Cursor::new(data);
+    let header = CobHeader::read(&mut cursor)?;
 
-    let version = cursor.read_i32::<LittleEndian>()?;
-    let num_scripts = cursor.read_i32::<LittleEndian>()? as usize;
-    let num_pieces = cursor.read_i32::<LittleEndian>()? as usize;
-    let total_script_len = cursor.read_i32::<LittleEndian>()? as usize;
-    let num_static_vars = cursor.read_i32::<LittleEndian>()? as usize;
-    let _unknown_2 = cursor.read_i32::<LittleEndian>()?;
-    let offset_script_code_index = cursor.read_i32::<LittleEndian>()? as usize;
-    let offset_script_names = cursor.read_i32::<LittleEndian>()? as usize;
-    let offset_piece_names = cursor.read_i32::<LittleEndian>()? as usize;
-    let offset_script_code = cursor.read_i32::<LittleEndian>()? as usize;
-    let _unknown_3 = cursor.read_i32::<LittleEndian>()?;
-
-    // TA:K extension (version 6)
-    let (offset_sound_names, num_sounds) = if version == 6 {
-        let sn = cursor.read_i32::<LittleEndian>()? as usize;
-        let ns = cursor.read_i32::<LittleEndian>()? as usize;
-        (sn, ns)
-    } else {
-        (0, 0)
+    let num_scripts = usize::try_from(header.num_scripts)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let num_pieces = usize::try_from(header.num_pieces)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let total_script_len = usize::try_from(header.total_script_len)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let num_static_vars = usize::try_from(header.num_static_vars)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let offset_script_code_index = usize::try_from(header.offset_script_code_index)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let offset_script_names = usize::try_from(header.offset_script_names)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let offset_piece_names = usize::try_from(header.offset_piece_names)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let offset_script_code = usize::try_from(header.offset_script_code)
+        .map_err(|_| CobParseError::HeaderTruncated(data.len()))?;
+    let (offset_sound_names, num_sounds) = match header.taksound {
+        Some(s) => (
+            usize::try_from(s.offset_sound_names)
+                .map_err(|_| CobParseError::HeaderTruncated(data.len()))?,
+            usize::try_from(s.num_sounds)
+                .map_err(|_| CobParseError::HeaderTruncated(data.len()))?,
+        ),
+        None => (0, 0),
     };
 
     if num_scripts == 0 {
@@ -108,15 +154,12 @@ pub fn parse_cob(data: &[u8]) -> Result<CobFile, CobParseError> {
         piece_names.push(name.to_ascii_lowercase());
     }
 
-    // Read bytecode
-    let code_bytes = data.len().saturating_sub(offset_script_code);
-    let code_words = code_bytes / 4;
-    let mut code = Vec::with_capacity(code_words);
-    let mut code_cursor = Cursor::new(data);
-    code_cursor.seek(SeekFrom::Start(offset_script_code as u64))?;
-    for _ in 0..code_words {
-        code.push(code_cursor.read_i32::<LittleEndian>()?);
-    }
+    // Read bytecode — a flat i32 array from offset_script_code to EOF.
+    let code_bytes = data.get(offset_script_code..).unwrap_or(&[]);
+    let code: Vec<i32> = code_bytes
+        .chunks_exact(4)
+        .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
 
     // Read sound names (version 6 only)
     let mut sound_names = Vec::with_capacity(num_sounds);
@@ -144,18 +187,16 @@ impl CobFile {
 }
 
 fn read_i32_at(data: &[u8], offset: usize) -> Result<i32, CobParseError> {
-    if offset + 4 > data.len() {
-        return Err(CobParseError::StringOutOfBounds(offset));
-    }
-    let mut cursor = Cursor::new(&data[offset..]);
-    Ok(cursor.read_i32::<LittleEndian>()?)
+    let slice = data
+        .get(offset..offset + 4)
+        .ok_or(CobParseError::StringOutOfBounds(offset))?;
+    Ok(i32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
 fn read_null_string(data: &[u8], offset: usize) -> Result<String, CobParseError> {
-    if offset >= data.len() {
-        return Err(CobParseError::StringOutOfBounds(offset));
-    }
-    let slice = &data[offset..];
+    let slice = data
+        .get(offset..)
+        .ok_or(CobParseError::StringOutOfBounds(offset))?;
     let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
     Ok(String::from_utf8_lossy(&slice[..end]).into_owned())
 }

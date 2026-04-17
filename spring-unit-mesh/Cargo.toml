@@ -5,6 +5,7 @@ edition = "2024"
 description = "Parser for Spring RTS engine unit models (.s3o)"
 
 [dependencies]
+binrw = "0.15.1"
 byteorder = { workspace = true }
 thiserror = { workspace = true }
 

@@ -52,6 +52,20 @@ impl CommandQueue {
 #[derive(Resource)]
 pub struct NavGrid(pub NodeLayer);
 
+/// Per-frame snapshot of every unit, used by the movement pass to resolve
+/// collisions and decide when a waypoint is blocked by an "arrived" unit.
+struct UnitSnapshot {
+    entity: Entity,
+    pos: Vec3,
+    radius: f32,
+    /// Whether this unit kind is capable of moving (speed > 0).
+    mobile: bool,
+    /// Whether this specific unit has no active move order right now — i.e.
+    /// it has reached its goal (or never had one). Used by the deadlock
+    /// breaker to skip waypoints that a stationary unit is standing on.
+    stationary: bool,
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn movement_system(
     mut commands: Commands,
@@ -69,13 +83,19 @@ pub fn movement_system(
     unit_registry: Res<UnitRegistry>,
 ) {
     // Snapshot every unit's position and collision radius so each proposed
-    // movement can be clamped against all others without query aliasing.
-    let snapshot: Vec<(Entity, Vec3, f32, bool)> = query
+    // movement can be resolved against all others without query aliasing.
+    // `mobile` is "this unit kind *could* move", `stationary` is "this
+    // specific unit has no active move order right now" — the deadlock
+    // breaker uses the latter to decide whether a blocker counts as
+    // "already at its goal".
+    let snapshot: Vec<UnitSnapshot> = query
         .iter()
-        .map(|(e, ut, tf, _, _, _, _)| {
-            let radius = unit_registry.collision_radius(ut.0);
-            let mobile = unit_registry.speed(ut.0) > 0.0;
-            (e, tf.translation, radius, mobile)
+        .map(|(e, ut, tf, target, _, _, _)| UnitSnapshot {
+            entity: e,
+            pos: tf.translation,
+            radius: unit_registry.collision_radius(ut.0),
+            mobile: unit_registry.speed(ut.0) > 0.0,
+            stationary: target.is_none(),
         })
         .collect();
 
@@ -151,8 +171,14 @@ pub fn movement_system(
         // Arrival is "within my own footprint of the waypoint" — this lets
         // crowds converging on the same target settle at the boundary of
         // their neighbours rather than jittering on top of it.
+        //
+        // Deadlock breaker: if the waypoint is occupied by a unit that has
+        // already stopped (no move order of its own), also count it as
+        // reached so we don't keep pushing through a crowd that's arrived.
         let arrival_threshold = (self_radius + 2.0).max(8.0);
-        if distance < arrival_threshold {
+        if distance < arrival_threshold
+            || waypoint_blocked_by_arrived_unit(entity, goal, self_radius, &snapshot)
+        {
             path.current += 1;
             continue;
         }
@@ -161,82 +187,149 @@ pub fn movement_system(
         let step = speed * time.delta_secs();
         let desired = direction * step.min(distance);
 
-        // Resolve desired motion against every other unit: if the new XZ
-        // position would overlap another unit's circle, cap the motion at
-        // contact. This gives a hard stop rather than passing through. A
-        // single pass is sufficient because later frames keep retrying.
-        let resolved = resolve_motion(entity, current, desired, self_radius, &snapshot);
+        // Resolve desired motion against every other unit. Spring-style:
+        // units push each other with radial + lateral slide, weighted by
+        // mass/speed/head-on factor. See `resolve_motion`.
+        let resolved = resolve_motion(entity, current, desired, self_radius, speed, &snapshot);
 
         transform.translation += resolved;
 
-        // Only update facing when we actually moved, so a blocked unit
-        // doesn't snap to NaN or a stale direction.
-        if resolved.length_squared() > 0.0001 {
+        // Face the direction we actually moved (post-slide), falling back
+        // to the intended direction if we barely moved so idle-jitter
+        // doesn't flip the unit's facing around.
+        let resolved_xz = Vec3::new(resolved.x, 0.0, resolved.z);
+        if resolved_xz.length_squared() > 0.5 {
+            transform.look_to(resolved_xz.normalize(), Vec3::Y);
+        } else if desired.length_squared() > 0.0001 {
             transform.look_to(Vec3::new(direction.x, 0.0, direction.z), Vec3::Y);
         }
     }
 }
 
-/// Cap `desired` motion so the unit at `origin` with `radius` does not
-/// penetrate any other unit in `snapshot`. Only the XZ plane is considered.
+/// Resolve `desired` motion against neighbouring units using a Spring-style
+/// push + lateral slide. Inspired by `CGroundMoveType::CalculatePushVector`
+/// in the Recoil engine: units don't hard-stop at contact, they slide past
+/// each other, with head-on collisions weighted more heavily (so the
+/// side-crosser yields to the head-on runner) and heavier/faster units
+/// pushing lighter/slower ones.
 ///
-/// Strategy: for each other unit, advance `t ∈ [0, 1]` along `desired` until
-/// the distance between circles would reach `r_self + r_other`, and keep the
-/// smallest `t` across all obstacles. Reaching `t = 0` means we're already
-/// at the contact distance and cannot move toward that obstacle — we allow
-/// any residual motion that is perpendicular / away from it.
+/// Returns the delta to add to the unit's position this frame. Only the XZ
+/// plane is considered.
 fn resolve_motion(
     self_entity: Entity,
     origin: Vec3,
     desired: Vec3,
     self_radius: f32,
-    snapshot: &[(Entity, Vec3, f32, bool)],
+    self_speed: f32,
+    snapshot: &[UnitSnapshot],
 ) -> Vec3 {
     let desired_xz = Vec3::new(desired.x, 0.0, desired.z);
-    if desired_xz.length_squared() < 1e-6 {
+    let desired_len = desired_xz.length();
+    if desired_len < 1e-6 {
         return desired;
     }
+    let front = desired_xz / desired_len;
 
-    let mut t_max: f32 = 1.0;
-    for (other, other_pos, other_radius, _) in snapshot {
-        if *other == self_entity {
+    // Self's momentum proxy. Spring uses `mass * max(1, speed)`; we use
+    // area (radius²) as a stand-in for mass since the FBI data we surface
+    // doesn't include an explicit mass.
+    let self_mass = self_radius * self_radius;
+
+    let mut push = Vec3::ZERO;
+
+    for other in snapshot {
+        if other.entity == self_entity {
             continue;
         }
-        let sum_r = self_radius + other_radius;
-        let to_other = Vec3::new(other_pos.x - origin.x, 0.0, other_pos.z - origin.z);
-        let dist_sq = to_other.length_squared();
+        let sum_r = self_radius + other.radius;
 
-        // Already overlapping — don't let this obstacle further restrict us,
-        // just prevent motion *into* it. If desired points away from the
-        // obstacle, it's fine; if it points toward, cap at t=0.
-        if dist_sq < sum_r * sum_r {
-            if desired_xz.dot(to_other) > 0.0 {
-                t_max = 0.0;
-            }
+        // Predict the contact at the *end* of the desired step. This is
+        // what converts "two units walking toward each other through
+        // empty space" into an actual collision response this frame.
+        let new_origin = origin + desired_xz;
+        let sep = Vec3::new(new_origin.x - other.pos.x, 0.0, new_origin.z - other.pos.z);
+        let dist = sep.length();
+        if dist >= sum_r {
             continue;
         }
 
-        // Solve |origin + t*desired - other_pos| = sum_r for smallest t ≥ 0.
-        // Quadratic: a*t^2 + b*t + c = 0 where
-        //   a = desired·desired, b = -2 * desired·to_other, c = |to_other|^2 - sum_r^2.
-        let a = desired_xz.dot(desired_xz);
-        let b = -2.0 * desired_xz.dot(to_other);
-        let c = dist_sq - sum_r * sum_r;
-        let disc = b * b - 4.0 * a * c;
-        if disc <= 0.0 {
-            continue; // no intersection along the ray
-        }
-        let sqrt_disc = disc.sqrt();
-        let t = (-b - sqrt_disc) / (2.0 * a);
-        if t >= 0.0 && t < t_max {
-            t_max = t;
-        }
+        // Penetration depth once we take the step. Capped at sum_r so
+        // a deep overlap (e.g. from a spawn on top of someone) still
+        // produces a bounded correction.
+        let penetration = (sum_r - dist).min(sum_r);
+
+        // Direction from the obstacle toward us. If we're exactly on
+        // top of the obstacle, bias away from our front so the tie is
+        // broken cleanly.
+        let away = if dist > 1e-4 { sep / dist } else { -front };
+
+        // Head-on factor: perpendicular approach ≈ 1, direct head-on
+        // approach ≈ 6. The sign is from the obstacle's perspective, so
+        // we dot our forward with the vector *toward* them (−away).
+        let head_on = 1.0 + (1.0 - front.dot(-away).abs().min(1.0)) * 5.0;
+
+        // Other's mass proxy and weight. Static obstacles (buildings,
+        // speed=0) behave like infinite mass — our share of the push
+        // is effectively zero, so we take the full correction.
+        let other_mass = other.radius * other.radius;
+        let weight_self = self_mass * self_speed.max(1.0) * head_on;
+        let other_effective_speed = if other.mobile { 1.0 } else { 1e6 };
+        let weight_other = other_mass * other_effective_speed * head_on;
+        let total = weight_self + weight_other;
+        let other_share = if total > 1e-6 {
+            weight_other / total
+        } else {
+            0.5
+        };
+
+        // Radial push: shove ourselves out by our share of the penetration.
+        push += away * penetration * other_share;
+
+        // Lateral slide — this is the "deflection" piece. Pick the side
+        // that aligns with our forward so we slide *past* the obstacle
+        // instead of bouncing back. `right` is the XZ perpendicular of
+        // `front`; slide amount scales with penetration so shallow
+        // grazes barely nudge, deep head-ons slip noticeably sideways.
+        let right = Vec3::new(front.z, 0.0, -front.x);
+        let side_sign = if right.dot(away) >= 0.0 { 1.0 } else { -1.0 };
+        let slide_strength = penetration * 0.6 * other_share;
+        push += right * side_sign * slide_strength;
     }
 
-    // Leave a tiny gap so floating-point drift doesn't bury us inside
-    // the obstacle on the next frame.
-    let safe = (t_max - 1e-3).max(0.0);
-    desired * safe
+    // The final displacement is the desired step plus the accumulated
+    // push. Cap total motion to desired_len so the resolver never moves
+    // us *faster* than our speed would allow.
+    let combined = desired_xz + push;
+    let combined_len = combined.length();
+    let capped = if combined_len > desired_len {
+        combined * (desired_len / combined_len)
+    } else {
+        combined
+    };
+
+    Vec3::new(capped.x, desired.y, capped.z)
+}
+
+/// Spring's deadlock breaker: if the unit we'd be walking toward is
+/// already sitting on the next waypoint and has no move order of its
+/// own, don't keep shoving — declare that waypoint reached and advance.
+/// Prevents pile-ups when a group converges on a target and the lead
+/// units arrive while followers keep pushing.
+fn waypoint_blocked_by_arrived_unit(
+    self_entity: Entity,
+    waypoint: Vec3,
+    self_radius: f32,
+    snapshot: &[UnitSnapshot],
+) -> bool {
+    snapshot.iter().any(|other| {
+        if other.entity == self_entity || !other.stationary {
+            return false;
+        }
+        let r = self_radius + other.radius;
+        let dx = other.pos.x - waypoint.x;
+        let dz = other.pos.z - waypoint.z;
+        dx * dx + dz * dz < r * r
+    })
 }
 
 /// Safety-net that unsticks mobile units that *are already overlapping*,

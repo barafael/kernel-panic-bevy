@@ -1,0 +1,31 @@
+//! Unit selection, highlighting, right-click movement orders, and health bars.
+//!
+//! Sub-modules are composed here; only `Selected` and `SelectionPlugin` leak out.
+
+mod core;
+mod health_bars;
+mod highlight;
+mod right_click;
+
+use bevy::prelude::*;
+
+pub(super) use self::core::Hovered;
+pub use self::core::Selected;
+
+use self::core::SelectionCorePlugin;
+use health_bars::HealthBarsPlugin;
+use highlight::HighlightPlugin;
+use right_click::RightClickPlugin;
+
+pub struct SelectionPlugin;
+
+impl Plugin for SelectionPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins((
+            SelectionCorePlugin,
+            RightClickPlugin,
+            HighlightPlugin,
+            HealthBarsPlugin,
+        ));
+    }
+}
