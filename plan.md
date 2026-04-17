@@ -162,8 +162,8 @@ cursor.
 |------|---------|--------|
 | Pointer | NX Flag (r=120, 100 dps, 60s, friendly-fire) | ✅ wired |
 | Obelisk | Infection Gas (r=400, 120 dps, 13s, infects) | ✅ wired |
+| Firewall | Reflector Shield (r=300, 20s, 50% reduce + 50% reflect) | ✅ wired |
 | Terminal | SIGTERM airstrike | needs air-bomber spawn |
-| Firewall | Reflector Shield | needs shield system (§4.7) |
 | Byte | Mine Launcher | needs HP-cost + Logic-Bomb volley |
 
 ### 3.6 Infection Chain Refinement — ✅ DONE
@@ -174,22 +174,29 @@ attacker unit kind) so only Wormsplash / VirusBeam / VirusDeath / Infection trig
 it — direct Wormbite no longer infects, matching upstream. `death_system` sprays
 VirusDeath at a dying Virus's corpse so the infection chain spreads via AoE.
 
-### 3.7 Kernel Boost / Production Scaling (Low)
+### 3.7 Kernel Boost / Production Scaling — ✅ DONE
 
-Homebases get +20% production speed per small building owned by team. Snowball mechanic.
+`production_system` multiplies homebase build progress by
+`(1 + small_building_count × 0.2)` per team, reusing
+`network_buffer::is_small_building` as the predicate.
 
-### 3.8 Flow Dynamic Speed & Air Movement (Low — Partial)
+### 3.8 Flow Dynamic Speed & Air Movement — ✅ DONE (mostly)
 
-- ✅ Flying flag + `can_fly()` / `cruise_alt()` on `UnitRegistry`; flying units skip nav
-  grid in `movement.rs`
-- Flow speed scaling = base + (team small building count × 30) — not done
-- Ground units with `NoChaseCategory=VTOL` won't pursue Flows — not done
+- ✅ Flying flag + `can_fly()` / `cruise_alt()`; flying units skip nav grid.
+- ✅ Per-Flow `SpeedBoost` component refreshed every second from team small-building
+  count, added on top of the registry's base speed in movement.
+- ❌ Ground units with `NoChaseCategory=VTOL` — not yet; combat_system still targets
+  Flows indiscriminately.
 
-### 3.9 Mines & Walls (Low)
+### 3.9 Mines & Walls — ✅ Partial
 
-- **Logic Bomb**: cloaked, proximity detonation (r=64), 900 dmg AoE 512, max 64 per player
-- **Debug**: one-shot, 5k dmg vs mines, 20 vs everything else, AoE 512
-- **BadBlock**: 100 HP wall, blocks movement but not projectiles, crushable by Bytes
+- ✅ **Logic Bomb**: already cloaked (§3.3); `tick_kamikaze` detonates it when an enemy
+  enters the 64-elmo radius, queuing a `logic_bomb`-weapon self-hit so the existing
+  splash + armor-class pipeline handles the blast (3000 vs Subterranean).
+- ✅ **BadBlock**: spawned at 100 HP; being a building it blocks movement via the
+  existing collision pipeline. Crushable by Bytes is deferred.
+- ❌ **Debug**: the one-shot Minekiller placement/trigger flow isn't wired (upstream's
+  Launcher gadget delivers Debugs via a MineLauncher weapon, not direct construction).
 
 ---
 
@@ -229,31 +236,34 @@ No visual feedback at the firing unit (except melee flash for Wormbite).
 Returns weapon emit-point position. Currently beams originate from unit center instead of
 the model's barrel/turret piece.
 
-### 4.7 Shield Rendering (Important — 6 units have shields)
+### 4.7 Shield System — ✅ DONE (mechanic; visual deferred)
 
-Shield weapons are parsed but never rendered or applied. Kernel, Hole, Socket, Window, Port,
-Firewall all have shield weapons (Connection does not).
+`ShieldState` component holds radius / max_power / current_power / regen. `apply_hit`
+soaks damage through the shield before it hits Health or StunCharge; with upstream's
+`shieldpower=0` convention the shield is effectively infinite, matching the role of
+minifac and homebase shields. `regen_shields` ticks finite shields toward max.
 
-- Visible shield sphere with `shieldradius`, `shieldgoodcolor`/`shieldbadcolor`, `shieldalpha`
-- Shield power pool with `shieldpower` / `shieldpowerregen`
-- Projectile interception
+Remaining: visible shield sphere rendering (`shieldgoodcolor`/`shieldbadcolor`/
+`shieldalpha`). Projectile *interception* (as distinct from damage absorption) waits
+on §4.2 projectile physics.
 
 ---
 
 ## 5. AI Opponent
 
-### 5.1 Basic AI — ✅ Partial
+### 5.1 Basic AI — ✅ DONE
 
-Build + Attack phases land (`ai_brain` ticks once/second per non-player team):
+`ai_brain` ticks once/second per non-player team:
 
-- **Build**: keep each homebase's production queue topped up (≤3 items) with the
-  faction's basic combat unit (Bit / Bug / Packet).
-- **Attack**: when the team has ≥8 idle combat units, send every idle unit toward
-  the nearest enemy homebase.
-
-Deferred: **Expand** (send constructors to datavents to build secondary factories)
-and **Defend** (recall units when homebase is under attack). Both layer cleanly on
-the existing tick without restructuring.
+- **Build**: production queues stay ≤3 deep, mixing basic combat units with a
+  constructor every fifth order.
+- **Expand**: any idle friendly constructor gets routed to the nearest unclaimed
+  datavent (no friendly building within 120 elmos) with a `PendingBuild` for the
+  faction's secondary factory.
+- **Defend**: any non-friendly unit within 700 elmos of a homebase triggers recall
+  — idle combat units target the homebase instead of pushing out.
+- **Attack**: with ≥8 idle combat units and no home threat, everybody charges the
+  nearest enemy homebase.
 
 ### 5.2 Difficulty Levels (Low)
 
@@ -309,23 +319,20 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 ## Recommended Implementation Order
 
 Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit morph,
-§3.5 command-fire (NX Flag + Infection), §3.6 infection refinement, plus earlier
-§1/§2/§5.1 work.
+§3.5 command-fire (NX Flag + Infection + Firewall), §3.6 infection refinement,
+§3.7 Kernel Boost, §3.8 Flow speed, §3.9 Logic Bomb detonation, §4.7 shields,
+§5.1 AI Expand + Defend.
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
-| 2 | AI Expand + Defend | 5.1 | Round out the basic AI once play-tested |
-| 3 | Shield system | 4.7 | Unblocks Firewall reflector, homebase/factory shields |
-| 4 | Firewall reflector shield | 3.5 | Network defensive ability |
-| 5 | Kernel Boost | 3.7 | Snowball mechanic |
-| 6 | Mines & walls | 3.9 | Tactical depth |
-| 7 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 8 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 9 | Fog of war | 6 | Full visibility system |
-| 10 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 11 | Audio | 7 | Weapon sounds highest priority |
-| 12 | Multiplayer | 9 | Endgame feature |
+| 1 | Terminal SIGTERM + Byte MineLauncher | 3.5 | Last command-fire gaps |
+| 2 | Debug (Minekiller) placement | 3.9 | Last mine-kit gap |
+| 3 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 4 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 5 | Fog of war | 6 | Full visibility system |
+| 6 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 7 | Audio | 7 | Weapon sounds highest priority |
+| 8 | Multiplayer | 9 | Endgame feature |
 
 ---
 
