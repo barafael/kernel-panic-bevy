@@ -86,6 +86,20 @@ pub struct WeaponDef {
     // --- Paralyze ---
     pub paralyze_time: f32,
 
+    // --- Dynamic damage (BugCannon: damage scales with distance) ---
+    /// Exponent applied to the normalized range fraction. 0 / absent =
+    /// flat damage, 1 = linear.
+    pub dyn_damage_exp: f32,
+    /// Range over which `dyn_damage_exp` interpolates. When zero, the
+    /// weapon's own `range` is used as the denominator.
+    pub dyn_damage_range: f32,
+    /// When `true` (upstream `dynDamageInverted=1`), farther targets
+    /// take *more* damage — the defining Exploit quirk.
+    pub dyn_damage_inverted: bool,
+    /// Targeting preference: negative values deprioritize close units
+    /// (Exploit prefers distant targets).
+    pub proximity_priority: f32,
+
     // --- Damage map ---
     pub damage: DamageMap,
 }
@@ -126,6 +140,32 @@ impl DamageMap {
     /// avoid allocating a lowercase copy on the combat hot path.
     pub fn for_type(&self, armor_type: &str) -> f32 {
         self.types.get(armor_type).copied().unwrap_or(self.default)
+    }
+}
+
+impl WeaponDef {
+    /// Multiplier for dynamic-damage weapons (BugCannon) given the
+    /// distance from attacker to target. Returns 1.0 for weapons that
+    /// don't set `dyn_damage_exp` — i.e. most weapons keep flat damage.
+    ///
+    /// With `dynDamageInverted=1` (BugCannon), the multiplier is
+    /// `(dist / dyn_damage_range)^exp` — farther targets take more.
+    /// Otherwise it's `(1 - dist / dyn_damage_range)^exp` — falls off
+    /// with distance. Always clamped to [0, 1].
+    pub fn dyn_damage_multiplier(&self, dist: f32) -> f32 {
+        if self.dyn_damage_exp == 0.0 {
+            return 1.0;
+        }
+        let denom = if self.dyn_damage_range > 0.0 {
+            self.dyn_damage_range
+        } else if self.range > 0.0 {
+            self.range
+        } else {
+            return 1.0;
+        };
+        let t = (dist / denom).clamp(0.0, 1.0);
+        let base = if self.dyn_damage_inverted { t } else { 1.0 - t };
+        base.powf(self.dyn_damage_exp)
     }
 }
 
@@ -206,6 +246,11 @@ impl WeaponDef {
             sound_hit: s.string("soundhit"),
 
             paralyze_time: s.f32("paralyzetime"),
+
+            dyn_damage_exp: s.f32("dyndamageexp"),
+            dyn_damage_range: s.f32("dyndamagerange"),
+            dyn_damage_inverted: s.bool("dyndamageinverted"),
+            proximity_priority: s.f32("proximitypriority"),
 
             damage,
         }

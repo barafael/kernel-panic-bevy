@@ -8,6 +8,7 @@ pub mod construction;
 pub mod definitions;
 pub mod game_over;
 pub mod meshes;
+pub mod morph;
 pub mod production;
 pub mod script_triggers;
 pub mod spawning;
@@ -49,6 +50,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<ai::AiTicker>()
             .add_message::<command_fire::CommandFireEvent>()
+            .add_message::<morph::MorphEvent>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -68,6 +70,7 @@ impl Plugin for UnitsPlugin {
                 Update,
                 (
                     (
+                        morph::process_morph,
                         production::production_system,
                         production::install_fade_materials,
                         production::animate_connection_hatch,

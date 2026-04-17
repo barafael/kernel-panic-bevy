@@ -117,6 +117,10 @@ pub struct PendingDamage {
     pub attacker: Entity,
     pub weapon: String,
     pub impact_pos: Vec3,
+    /// Distance from attacker to primary target at the moment the hit
+    /// was queued. Used by dynamic-damage weapons (BugCannon) to scale
+    /// the primary hit; zero is fine for single-range weapons.
+    pub attacker_distance: f32,
 }
 
 /// Pending damage to apply after combat resolution.
@@ -298,9 +302,13 @@ pub fn combat_system(
         let attacker_pos = attacker_gtf.translation();
         let range_sq = range * range;
 
-        // Find nearest living enemy in range. Shared team = ally regardless
-        // of faction (showcase spawns mixed-faction units on team 0 and
-        // expects them to ignore each other).
+        // Pick a target in range. Most weapons prefer the nearest enemy;
+        // those with `proximity_priority < 0` (Exploit's BugCannon) prefer
+        // the *farthest*, matching upstream's anti-swarm artillery role.
+        // Shared team = ally regardless of faction (showcase spawns
+        // mixed-faction units on team 0 and expects them to ignore each
+        // other).
+        let prefer_distant = weapon_def.is_some_and(|w| w.proximity_priority < 0.0);
         let mut best: Option<(Entity, Vec3, f32)> = None;
         for (target_entity, target_faction, target_team, target_gtf, target_health) in
             &potential_targets
@@ -313,7 +321,17 @@ pub fn combat_system(
             }
             let target_pos = target_gtf.translation();
             let dist_sq = attacker_pos.distance_squared(target_pos);
-            if dist_sq <= range_sq && best.is_none_or(|(_, _, d)| dist_sq < d) {
+            if dist_sq > range_sq {
+                continue;
+            }
+            let better = best.is_none_or(|(_, _, d)| {
+                if prefer_distant {
+                    dist_sq > d
+                } else {
+                    dist_sq < d
+                }
+            });
+            if better {
                 best = Some((target_entity, target_pos, dist_sq));
             }
         }
@@ -379,6 +397,7 @@ pub fn combat_system(
             attacker: entity,
             weapon: weapon_name.to_string(),
             impact_pos: target_pos,
+            attacker_distance: attacker_pos.distance(target_pos),
         });
         commands.entity(entity).insert((
             AttackCooldown {
@@ -523,6 +542,7 @@ pub fn tick_burst_fire(
             attacker: entity,
             weapon: burst.weapon.clone(),
             impact_pos: burst.target_pos,
+            attacker_distance: gtf.translation().distance(burst.target_pos),
         });
         pending_attacks.events.push(AttackEvent {
             attacker_pos: gtf.translation(),
@@ -590,9 +610,10 @@ pub fn apply_damage(
         let paralyzer = weapon_def.paralyzer;
         let paralyze_time = weapon_def.paralyze_time;
 
+        let dyn_mult = weapon_def.dyn_damage_multiplier(pending.attacker_distance);
         let primary_damage = match target_unit_q.get(pending.target) {
-            Ok(unit) => base(unit.0),
-            Err(_) => weapon_def.damage.default,
+            Ok(unit) => base(unit.0) * dyn_mult,
+            Err(_) => weapon_def.damage.default * dyn_mult,
         };
         if paralyzer {
             if let Ok(max_hp) = health_q.get(pending.target).map(|h| h.max)
@@ -813,6 +834,7 @@ pub fn death_system(
                     attacker: entity,
                     weapon: "VirusDeath".to_string(),
                     impact_pos: gtf.translation(),
+                    attacker_distance: 0.0,
                 });
             }
 

@@ -14,12 +14,31 @@ use crate::rendering::camera::RtsCamera;
 use crate::units::command_fire::CommandFireEvent;
 use crate::units::components::UnitType;
 use crate::units::definitions::UnitKind;
+use crate::units::morph::MorphEvent;
 
 pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, trigger_command_fire_on_hotkey);
+        app.add_systems(
+            Update,
+            (trigger_command_fire_on_hotkey, trigger_morph_on_hotkey),
+        );
+    }
+}
+
+fn trigger_morph_on_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    mut ev: MessageWriter<MorphEvent>,
+) {
+    if !keys.just_pressed(KeyCode::KeyE) {
+        return;
+    }
+    for (entity, unit) in &selected_q {
+        if matches!(unit.0, UnitKind::Bug | UnitKind::Exploit) {
+            ev.write(MorphEvent { entity });
+        }
     }
 }
 

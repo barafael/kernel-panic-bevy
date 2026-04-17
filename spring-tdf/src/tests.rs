@@ -380,6 +380,48 @@ fn damage_map_for_type() {
     assert_eq!(w.damage.for_type("unknown"), 50.0);
 }
 
+#[test]
+fn dyn_damage_multiplier_inverted_grows_with_distance() {
+    let tdf = Tdf::parse(
+        r#"
+[BugCannon]
+{
+    range=1200;
+    dynDamageExp=1;
+    dynDamageInverted=1;
+    dynDamageRange=700;
+}
+"#,
+    )
+    .unwrap();
+    let defs = WeaponDefs::from_tdf(&tdf);
+    let w = defs.get("BugCannon").unwrap();
+    // Inverted + exp=1 → linear ramp from 0 at point-blank to 1 at range.
+    assert!((w.dyn_damage_multiplier(0.0) - 0.0).abs() < 1e-5);
+    assert!((w.dyn_damage_multiplier(350.0) - 0.5).abs() < 1e-5);
+    assert!((w.dyn_damage_multiplier(700.0) - 1.0).abs() < 1e-5);
+    // Beyond dyn_damage_range the multiplier clamps at 1.
+    assert_eq!(w.dyn_damage_multiplier(1400.0), 1.0);
+}
+
+#[test]
+fn dyn_damage_multiplier_flat_when_exp_zero() {
+    let tdf = Tdf::parse(
+        r#"
+[Plain]
+{
+    range=400;
+}
+"#,
+    )
+    .unwrap();
+    let defs = WeaponDefs::from_tdf(&tdf);
+    let w = defs.get("Plain").unwrap();
+    assert_eq!(w.dyn_damage_multiplier(0.0), 1.0);
+    assert_eq!(w.dyn_damage_multiplier(200.0), 1.0);
+    assert_eq!(w.dyn_damage_multiplier(400.0), 1.0);
+}
+
 // ── Unit tests: UnitDef extraction ─────────────────────────────────
 
 #[test]
