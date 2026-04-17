@@ -47,31 +47,29 @@ on FlowMissile (burst=2) and MegaBeam (burst=4).
 NX Flag, Obelisk's Infection gas, and Bug's FakeBugCannon will re-enter combat via the
 §3.5 command-fire ability framework.
 
-### 1.5 DOS Paralyze / Stun (Important)
+### 1.5 DOS Paralyze / Stun — ✅ DONE
 
-`paralyzer=1` and `paralyzetime=5` on DOS_Beam are parsed but never applied.
+Paralyzer weapons (DOS_Beam) accumulate on `StunCharge` instead of dealing HP damage;
+when charge ≥ max_health, the unit is `Stunned` for `paralyzetime` seconds. Stunned
+units skip combat and movement. Charge decays exponentially between hits. Bits fall
+over in one hit; Bytes need many hits. Byte closed-state armor loss on stun (plan item
+4) is deferred with the rest of the Byte-state COB integration.
 
-- `StunCharge` component that accumulates paralyzer damage
-- `Stunned` marker that blocks movement + attack when charge >= max HP
-- Stun decay over time; multiple DoS units stack charge faster
-- Stunned Bytes lose their 70% damage reduction (take full damage)
+### 1.6 Damage Modifiers — ✅ Partial
 
-### 1.6 Damage Modifiers (Important)
+Done: `avoidfriendly=1` and `noselfdamage=1` filter the splash set; FBI `DamageModifier`
+applied to every damage event (Socket/Window/Port/Firewall take 4×, homebases + Byte
+are near-immune). Infection is already wired (`Infected` + `VirusSpawnQueue`).
 
-Infection is implemented (`Infected` component, `VirusSpawnQueue`). Several damage
-modifier fields are still parsed but not applied:
+Deferred: Byte closed-state armor (needs COB `SetUnitValue(ARMORED, ...)` integration
+and a closed/open state distinct from the Pointer deploy cycle). `collidefriendly` on
+projectile physics (weapons don't have projectile collision yet).
 
-| Modifier | Description |
-|----------|-------------|
-| `collidefriendly` / `avoidfriendly` | Some weapons should never hit allies |
-| `noselfdamage` | Parsed but never checked |
-| Building vulnerability | Non-homebase buildings should take 4x damage |
-| Byte closed-state armor | Takes 30% damage when closed; full damage when firing or stunned |
+### 1.7 Auto-Heal — ✅ DONE
 
-### 1.7 Auto-Heal (Low)
-
-Units like Byte (400 HP/s after 20s idle), Worm (300 HP/s after 13s idle), and homebases
-have auto-heal in upstream but no `AutoHeal` component exists.
+`IdleTimer` component tracks seconds since last damage / move order / aim target.
+Once `IdleTime` (sim frames, 30/s) elapses, `auto_heal` regens at `IdleAutoHeal` HP/s.
+Wires Byte's 400 HP/s after 20s, Worm's 300 HP/s after ~13s, homebase regen, etc.
 
 ---
 
@@ -302,32 +300,31 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ## Recommended Implementation Order
 
-Done since last plan: §1.1 armor classes, §1.2 AoE splash, §1.3 burst fire, §1.4
-command-fire gating, §2.2 stat corrections, §3.1 factory building on datavents, partial
-§2.1 (Flow + Gateway), partial §3.8 (flying skips nav grid).
+Done since last plan: all of §1 (armor classes, AoE splash, burst fire, command-fire
+gating, DOS stun, damage modifiers, auto-heal), §2.2 stat corrections, §3.1 factory
+building on datavents, partial §2.1 (Flow + Gateway), partial §3.8 (flying skips nav
+grid).
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Damage modifiers + auto-heal | 1.6–1.7 | Building vulnerability, Byte armor |
-| 2 | Stun (DoS) | 1.5 | Stun system needed by later features |
-| 3 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
-| 4 | Basic AI | 5.1 | Single-player becomes possible now that factory building works |
-| 5 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
-| 6 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
-| 7 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
-| 8 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
-| 9 | Network buffer + dispatch | 3.2 | Network faction identity |
-| 10 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
-| 11 | Firewall reflector shield | 3.5 | Network defensive ability |
-| 12 | Kernel Boost | 3.7 | Snowball mechanic |
-| 13 | Mines & walls | 3.9 | Tactical depth |
-| 14 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 15 | Shield system | 4.7 | Homebase/factory shields |
-| 16 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 17 | Fog of war | 6 | Full visibility system |
-| 18 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 19 | Audio | 7 | Weapon sounds highest priority |
-| 20 | Multiplayer | 9 | Endgame feature |
+| 1 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
+| 2 | Basic AI | 5.1 | Single-player becomes possible now that factory building works |
+| 3 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
+| 4 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
+| 5 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
+| 6 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
+| 7 | Network buffer + dispatch | 3.2 | Network faction identity |
+| 8 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
+| 9 | Firewall reflector shield | 3.5 | Network defensive ability |
+| 10 | Kernel Boost | 3.7 | Snowball mechanic |
+| 11 | Mines & walls | 3.9 | Tactical depth |
+| 12 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 13 | Shield system | 4.7 | Homebase/factory shields |
+| 14 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 15 | Fog of war | 6 | Full visibility system |
+| 16 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 17 | Audio | 7 | Weapon sounds highest priority |
+| 18 | Multiplayer | 9 | Endgame feature |
 
 ---
 
