@@ -31,9 +31,8 @@ pub const FIREWALL_COOLDOWN: f32 = 90.0;
 /// attacker.
 pub const FIREWALL_DAMAGE_TAKEN: f32 = 0.5;
 
-/// Marker: this unit is inside a Firewall protection window. The
-/// timer ticks down in `tick_protection`; while present, `apply_hit`
-/// halves incoming damage and reflects half back to the attacker.
+/// While present, the unit takes `FIREWALL_DAMAGE_TAKEN` of any
+/// incoming damage and the rest is reflected to the attacker.
 #[derive(Component, Debug, Clone)]
 pub struct Protected {
     pub remaining: f32,
@@ -150,7 +149,6 @@ fn apply_firewall(
     }
 }
 
-/// System: tick `Protected` timers and remove the marker when expired.
 pub fn tick_protection(
     time: Res<Time>,
     mut query: Query<(Entity, &mut Protected)>,

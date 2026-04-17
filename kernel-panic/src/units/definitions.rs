@@ -178,6 +178,22 @@ impl UnitKind {
         }
     }
 
+    /// "Small building" per upstream `kpunittypes.lua`: the on-datavent
+    /// factories, Firewall, Terminal, Obelisk. Used by Kernel Boost and
+    /// Flow speed scaling (and anything else that rewards controlling
+    /// the map's datavents without counting the homebase).
+    pub fn is_small_building(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Socket
+                | UnitKind::Window
+                | UnitKind::Port
+                | UnitKind::Terminal
+                | UnitKind::Obelisk
+                | UnitKind::Firewall
+        )
+    }
+
     /// Armor class used to look up this unit's entry in a weapon's
     /// `[DAMAGE]` table. Mirrors upstream `armor.txt`.
     pub fn armor_class(self) -> ArmorClass {
@@ -263,5 +279,20 @@ mod tests {
         assert_eq!(ArmorClass::Subterranean.key(), "subterranean");
         assert_eq!(ArmorClass::Mine.key(), "mine");
         assert_eq!(ArmorClass::Infectious.key(), "infectious");
+    }
+
+    #[test]
+    fn small_building_classifier() {
+        assert!(UnitKind::Socket.is_small_building());
+        assert!(UnitKind::Window.is_small_building());
+        assert!(UnitKind::Port.is_small_building());
+        assert!(UnitKind::Terminal.is_small_building());
+        assert!(UnitKind::Obelisk.is_small_building());
+        assert!(UnitKind::Firewall.is_small_building());
+        // Homebases and mobile units are not small buildings.
+        assert!(!UnitKind::Kernel.is_small_building());
+        assert!(!UnitKind::Hole.is_small_building());
+        assert!(!UnitKind::Connection.is_small_building());
+        assert!(!UnitKind::Bit.is_small_building());
     }
 }

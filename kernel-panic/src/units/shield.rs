@@ -67,8 +67,14 @@ pub fn shield_weapon_for(kind: UnitKind) -> Option<&'static str> {
 /// shield weapon that resolves to a known def.
 pub fn shield_state_for(kind: UnitKind, weapons: &WeaponRegistry) -> Option<ShieldState> {
     let weapon = shield_weapon_for(kind)?;
-    let def = weapons.get(weapon)?;
+    let Some(def) = weapons.get(weapon) else {
+        warn!(
+            "shield weapon {weapon:?} for {kind:?} missing from registry — unit spawns unshielded"
+        );
+        return None;
+    };
     if !def.is_shield {
+        warn!("weapon {weapon:?} for {kind:?} is not flagged is_shield — unit spawns unshielded");
         return None;
     }
     let (max_power, current_power) = if def.shield_power > 0.0 {
@@ -98,11 +104,6 @@ pub fn regen_shields(time: Res<Time>, mut query: Query<&mut ShieldState>) {
             *current = (*current + regen * dt).min(max);
         }
     }
-}
-
-/// Convenience: whether this unit kind carries any shield at all.
-pub fn has_shield(kind: UnitKind) -> bool {
-    shield_weapon_for(kind).is_some()
 }
 
 /// System: any shielded unit that doesn't yet have a `ShieldState`

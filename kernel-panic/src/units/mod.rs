@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod animation;
+pub mod bookkeeping;
 pub mod cloak;
 pub mod combat;
 pub mod command_fire;
@@ -57,6 +58,7 @@ impl Plugin for UnitsPlugin {
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<network_buffer::PacketBuffer>()
             .init_resource::<network_buffer::FlowSpeedTicker>()
+            .init_resource::<bookkeeping::SmallBuildingCounts>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -76,6 +78,7 @@ impl Plugin for UnitsPlugin {
                 Update,
                 (
                     (
+                        bookkeeping::count_small_buildings,
                         shield::attach_shields,
                         shield::regen_shields,
                         morph::process_morph,

@@ -147,7 +147,7 @@ pub fn production_system(
         Option<&CobAnimator>,
         Option<&super::components::Homebase>,
     )>,
-    small_buildings: Query<(&UnitType, &TeamId)>,
+    small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<super::animation::PieceIndex>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -165,15 +165,6 @@ pub fn production_system(
     };
 
     let dt = time.delta_secs();
-
-    // Kernel Boost: count small buildings per team so homebase producers
-    // can apply a +20% speed bonus per friendly small building.
-    let mut small_count: std::collections::HashMap<u8, u32> = std::collections::HashMap::new();
-    for (unit, team) in &small_buildings {
-        if super::network_buffer::is_small_building(unit.0) {
-            *small_count.entry(team.0).or_default() += 1;
-        }
-    }
 
     // Each spawn carries: unit kind, faction, team, the underground spawn
     // position (where the model first appears), the surface y it should
@@ -204,7 +195,7 @@ pub fn production_system(
         };
 
         let speed_mult = if homebase.is_some() {
-            let buildings = small_count.get(&team.0).copied().unwrap_or(0) as f32;
+            let buildings = small_building_counts.get(team.0) as f32;
             1.0 + buildings * KERNEL_BOOST_PER_BUILDING
         } else {
             1.0
