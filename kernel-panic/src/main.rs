@@ -10,12 +10,15 @@ use bevy::prelude::*;
 
 use rendering::RenderingPlugin;
 use rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
-use spring_map::map_types::{GroundTexture, MipmapData, ParsedMap, SQUARE_SIZE};
+use spring_map::map_types::{GroundTexture, MipmapData, ParsedMap};
 use spring_map::smd_parser::MapInfo;
-use terrain::material::{create_datavent_material, create_terrain_material};
+use terrain::geovent::{
+    GeoventAssets, emit_geovent_smoke, spawn_geovent_smokers, tick_geovent_smoke,
+};
+use terrain::material::create_terrain_material;
 use terrain::mesh::generate_terrain_chunks;
 use units::meshes::S3OModelCache;
-use units::spawning::spawn_homebases;
+use units::spawning::{spawn_homebases, spawn_showcase};
 
 /// Marker component for all entities spawned by map loading.
 /// Used to despawn everything when switching maps.
@@ -44,16 +47,20 @@ fn main() {
         .init_resource::<S3OModelCache>()
         .init_resource::<units::animation::CobFileCache>()
         .insert_resource(units::weapons::WeaponRegistry::load())
+        .insert_resource(units::unit_registry::UnitRegistry::load())
         .init_resource::<units::combat::DamageQueue>()
         .init_resource::<units::combat::VirusSpawnQueue>()
         .init_resource::<units::weapon_fx::PendingAttacks>()
         .init_resource::<units::weapon_fx::BeamMaterialCache>()
+        .init_resource::<units::weapon_fx::BuildSparkleAssets>()
+        .init_resource::<GeoventAssets>()
         .init_resource::<units::game_over::GameState>()
         .init_resource::<units::game_over::PlayerTeam>()
         .add_systems(
             Startup,
             (
                 discover_maps,
+                validate_registries,
                 load_current_map.after(rendering::camera::spawn_camera),
             )
                 .chain(),
@@ -63,6 +70,8 @@ fn main() {
             (
                 cycle_map_on_keypress,
                 units::production::production_system,
+                units::spawning::emerge_system.after(units::production::production_system),
+                units::combat::tick_deploy_state.before(units::combat::combat_system),
                 units::combat::combat_system,
                 units::combat::apply_damage.after(units::combat::combat_system),
                 units::combat::tick_infections,
@@ -75,11 +84,25 @@ fn main() {
                 units::animation::animation_system.after(units::combat::death_system),
                 units::combat::cleanup_dying.after(units::animation::animation_system),
                 units::animation::decay_death_particles,
-                units::weapon_fx::spawn_weapon_visuals.after(units::combat::combat_system),
-                units::weapon_fx::tick_weapon_fx.after(units::weapon_fx::spawn_weapon_visuals),
+                (
+                    units::weapon_fx::spawn_weapon_visuals
+                        .after(units::combat::combat_system)
+                        .after(units::production::production_system),
+                    units::weapon_fx::tick_weapon_fx.after(units::weapon_fx::spawn_weapon_visuals),
+                    emit_geovent_smoke,
+                    tick_geovent_smoke.after(emit_geovent_smoke),
+                    apply_pending_fog,
+                ),
             ),
         )
         .run();
+}
+
+fn validate_registries(
+    weapon_registry: Res<units::weapons::WeaponRegistry>,
+    unit_registry: Res<units::unit_registry::UnitRegistry>,
+) {
+    weapon_registry.validate_unit_weapon_bindings(&unit_registry);
 }
 
 /// Discover all .sd7/.sdz map files and pick the initial one.
@@ -148,6 +171,9 @@ fn cycle_map_on_keypress(
     mut map_bounds: ResMut<MapBounds>,
     mut model_cache: ResMut<S3OModelCache>,
     mut cob_cache: ResMut<units::animation::CobFileCache>,
+    mut geovent_assets: ResMut<GeoventAssets>,
+    asset_server: Res<AssetServer>,
+    unit_registry: Res<units::unit_registry::UnitRegistry>,
 ) {
     let changed = if keys.just_pressed(KeyCode::BracketRight) {
         catalog.current = (catalog.current + 1) % catalog.maps.len();
@@ -184,6 +210,9 @@ fn cycle_map_on_keypress(
         &mut map_bounds,
         &mut model_cache,
         &mut cob_cache,
+        &mut geovent_assets,
+        &asset_server,
+        &unit_registry,
     );
 }
 
@@ -199,6 +228,9 @@ fn load_current_map(
     mut map_bounds: ResMut<MapBounds>,
     mut model_cache: ResMut<S3OModelCache>,
     mut cob_cache: ResMut<units::animation::CobFileCache>,
+    mut geovent_assets: ResMut<GeoventAssets>,
+    asset_server: Res<AssetServer>,
+    unit_registry: Res<units::unit_registry::UnitRegistry>,
 ) {
     load_map_at_index(
         &catalog,
@@ -210,6 +242,9 @@ fn load_current_map(
         &mut map_bounds,
         &mut model_cache,
         &mut cob_cache,
+        &mut geovent_assets,
+        &asset_server,
+        &unit_registry,
     );
 }
 
@@ -224,6 +259,9 @@ fn load_map_at_index(
     map_bounds: &mut ResMut<MapBounds>,
     model_cache: &mut ResMut<S3OModelCache>,
     cob_cache: &mut ResMut<units::animation::CobFileCache>,
+    geovent_assets: &mut GeoventAssets,
+    asset_server: &AssetServer,
+    unit_registry: &units::unit_registry::UnitRegistry,
 ) {
     let map_path = &catalog.maps[catalog.current];
     let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
@@ -277,7 +315,15 @@ fn load_map_at_index(
         );
     }
 
-    spawn_terrain(parsed, terrain_material, commands, meshes, std_materials);
+    spawn_terrain(
+        parsed,
+        terrain_material,
+        commands,
+        meshes,
+        std_materials,
+        geovent_assets,
+        asset_server,
+    );
 
     // Build pathfinding grid from heightmap.
     {
@@ -317,16 +363,32 @@ fn load_map_at_index(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, commands);
-        spawn_homebases(
-            parsed,
-            map_info,
-            commands,
-            meshes,
-            std_materials,
-            images,
-            model_cache,
-            cob_cache,
-        );
+        apply_fog(map_info, commands);
+        if map_name.eq_ignore_ascii_case("Showcase") {
+            spawn_showcase(
+                parsed,
+                map_info,
+                commands,
+                meshes,
+                std_materials,
+                images,
+                model_cache,
+                cob_cache,
+                unit_registry,
+            );
+        } else {
+            spawn_homebases(
+                parsed,
+                map_info,
+                commands,
+                meshes,
+                std_materials,
+                images,
+                model_cache,
+                cob_cache,
+                unit_registry,
+            );
+        }
         info!(
             "  {} start positions, gravity={}",
             map_info.start_positions.len(),
@@ -416,6 +478,8 @@ fn spawn_terrain(
     commands: &mut Commands,
     meshes: &mut ResMut<Assets<Mesh>>,
     std_materials: &mut ResMut<Assets<StandardMaterial>>,
+    geovent_assets: &mut GeoventAssets,
+    asset_server: &AssetServer,
 ) {
     let chunks = generate_terrain_chunks(map);
     info!("  Spawning {} terrain chunks", chunks.len());
@@ -430,45 +494,14 @@ fn spawn_terrain(
         ));
     }
 
-    spawn_datavent_markers(map, commands, meshes, std_materials);
-}
-
-fn spawn_datavent_markers(
-    map: &ParsedMap,
-    commands: &mut Commands,
-    meshes: &mut ResMut<Assets<Mesh>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) {
-    let marker_material = create_datavent_material(materials);
-    let marker_mesh = meshes.add(Cuboid::new(16.0, 2.0, 16.0));
-
-    let mut datavent_count = 0u32;
-
-    for feature in &map.features {
-        if feature.feature_type.is_geovent() {
-            let heightmap_w = map.header.heightmap_width();
-            let square_size = SQUARE_SIZE as f32;
-            let heightmap_x =
-                (feature.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-            let heightmap_z = (feature.z / square_size)
-                .clamp(0.0, (map.header.heightmap_height() - 1) as f32)
-                as usize;
-            let height = map.heights[heightmap_z * heightmap_w + heightmap_x];
-
-            commands.spawn((
-                MapEntity,
-                Mesh3d(marker_mesh.clone()),
-                MeshMaterial3d(marker_material.clone()),
-                Transform::from_xyz(feature.x, height + 2.0, feature.z),
-            ));
-
-            datavent_count += 1;
-        }
-    }
-
-    if datavent_count > 0 {
-        info!("  {datavent_count} datavents");
-    }
+    spawn_geovent_smokers(
+        map,
+        commands,
+        geovent_assets,
+        meshes,
+        std_materials,
+        asset_server,
+    );
 }
 
 fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
@@ -497,6 +530,46 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
         color: Color::linear_rgb(ambient[0], ambient[1], ambient[2]),
         brightness: 200.0,
         ..default()
+    });
+}
+
+/// Fog settings from the map, stored as a resource. A system applies it to the camera.
+#[derive(Resource)]
+struct MapFogSettings {
+    color: Color,
+    start: f32,
+    end: f32,
+}
+
+/// Apply pending fog settings to the camera's DistanceFog component.
+fn apply_pending_fog(
+    settings: Option<Res<MapFogSettings>>,
+    mut camera_q: Query<&mut DistanceFog, With<RtsCamera>>,
+    mut commands: Commands,
+) {
+    let Some(settings) = settings else { return };
+    let Ok(mut fog) = camera_q.single_mut() else {
+        return;
+    };
+
+    fog.color = settings.color;
+    fog.falloff = FogFalloff::Linear {
+        start: settings.start,
+        end: settings.end,
+    };
+    commands.remove_resource::<MapFogSettings>();
+}
+
+/// Queue fog update from map atmosphere.
+fn apply_fog(map_info: &MapInfo, commands: &mut Commands) {
+    let fog = map_info.atmosphere.fog_color;
+    let fog_start_frac = map_info.atmosphere.fog_start;
+    let max_view_distance = 4000.0;
+
+    commands.insert_resource(MapFogSettings {
+        color: Color::linear_rgb(fog[0], fog[1], fog[2]),
+        start: fog_start_frac * max_view_distance,
+        end: max_view_distance,
     });
 }
 

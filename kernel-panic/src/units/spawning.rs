@@ -8,16 +8,89 @@ use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 
 use super::animation::{CobAnimator, CobFileCache, PieceIndex, load_cob_cached};
+use super::combat::Deployable;
 use super::components::{Faction, Health, Homebase, SelectionVolume, TeamId, UnitType};
-use super::definitions::{UnitKind, stats};
+use super::definitions::UnitKind;
 use super::meshes::{S3OModelCache, unit_material, unit_radius};
 use super::production::default_production;
+use super::unit_registry::UnitRegistry;
 use crate::MapEntity;
 
 const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
 
 #[derive(Resource, Clone)]
 pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
+
+/// Marks a freshly-built unit that's rising up through its construction hole.
+/// The `emerge_system` lerps the entity's Y coordinate from below ground up
+/// to `target_y` over `total` seconds, then strips the component (and gives
+/// the unit its post-emergence rally order, if any).
+#[derive(Component)]
+pub struct Emerging {
+    /// Final Y coordinate the unit should reach when fully emerged.
+    pub target_y: f32,
+    /// Seconds remaining in the emerge animation.
+    pub remaining: f32,
+    /// Total duration of the emerge animation (used to compute lerp t).
+    pub total: f32,
+    /// World point the unit should walk to once it has emerged. `None` for
+    /// stationary units that don't need to clear the factory.
+    pub rally_point: Option<Vec3>,
+}
+
+/// Cached piece-index lookup for animated factories. Set once when a
+/// producer spawns; lets the production system pull the live world
+/// position of script-driven pieces (the `nanoemitter` that orbits the
+/// build hole, and the `pad` that defines the emergence point) without
+/// rescanning the model every frame.
+///
+/// Falls back to `None` for either field if the model doesn't have the
+/// expected piece — the production system then uses the factory's root
+/// transform instead.
+#[derive(Component, Default)]
+pub struct FactoryPieces {
+    pub nanoemitter: Option<usize>,
+    pub pad: Option<usize>,
+}
+
+/// Lifts `Emerging` units smoothly upward through the build hole. When the
+/// animation completes, the component is removed and the unit is given its
+/// rally-walk command (if any).
+pub fn emerge_system(
+    time: Res<Time>,
+    mut commands: Commands,
+    mut q: Query<(Entity, &mut Transform, &mut Emerging)>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut transform, mut emerging) in &mut q {
+        emerging.remaining = (emerging.remaining - dt).max(0.0);
+        // t goes 0 → 1 over the duration; ease-out so the unit decelerates
+        // as it reaches the surface (more "machine settling into place").
+        let raw = 1.0 - (emerging.remaining / emerging.total).clamp(0.0, 1.0);
+        let eased = 1.0 - (1.0 - raw).powi(2);
+        let start_y = emerging.target_y - EMERGE_DEPTH;
+        transform.translation.y = start_y + (emerging.target_y - start_y) * eased;
+
+        if emerging.remaining <= 0.0 {
+            transform.translation.y = emerging.target_y;
+            let rally = emerging.rally_point;
+            commands.entity(entity).remove::<Emerging>();
+            if let Some(target) = rally {
+                commands
+                    .entity(entity)
+                    .insert(crate::interaction::movement::MoveTarget(target))
+                    .remove::<crate::interaction::movement::MovePath>();
+            }
+        }
+    }
+}
+
+/// Distance below ground that a freshly-built unit starts at. The
+/// `emerge_system` lifts it back up by this much. Roughly the height of a
+/// typical unit so the model is fully hidden underground at t=0.
+pub const EMERGE_DEPTH: f32 = 40.0;
+/// Seconds the emerge animation takes from below-ground to fully out.
+pub const EMERGE_DURATION: f32 = 0.6;
 
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_homebases(
@@ -29,6 +102,7 @@ pub fn spawn_homebases(
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     cob_cache: &mut CobFileCache,
+    unit_registry: &UnitRegistry,
 ) {
     let invisible_mat = get_or_create_invisible_material(commands, materials);
     let square_size = SQUARE_SIZE as f32;
@@ -57,13 +131,82 @@ pub fn spawn_homebases(
             model_cache,
             cob_cache,
             &invisible_mat,
+            unit_registry,
         );
     }
 
     info!("Spawned {} homebases", map_info.start_positions.len());
 }
 
+/// Mobile unit kinds, in display order — one per slot on the showcase map.
+/// Excludes stationary units (LogicBomb, Exploit) and units that only spawn
+/// dynamically (Virus, which is created from Worm kills).
+const SHOWCASE_KINDS: &[UnitKind] = &[
+    UnitKind::Assembler,
+    UnitKind::Bit,
+    UnitKind::Byte,
+    UnitKind::Pointer,
+    UnitKind::Bug,
+    UnitKind::Worm,
+    UnitKind::Dos,
+    UnitKind::Virus,
+    UnitKind::Packet,
+    UnitKind::Signal,
+];
+
+/// Spawn one of each mobile unit at the map's start positions, instead of
+/// the usual three-faction homebases. Used by the `Showcase` map for visual
+/// inspection of unit models / animations / pathing in isolation.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_showcase(
+    parsed: &ParsedMap,
+    map_info: &MapInfo,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
+    cob_cache: &mut CobFileCache,
+    unit_registry: &UnitRegistry,
+) {
+    let invisible_mat = get_or_create_invisible_material(commands, materials);
+    let square_size = SQUARE_SIZE as f32;
+    let heightmap_w = parsed.header.heightmap_width();
+    let heightmap_h = parsed.header.heightmap_height();
+
+    for (slot, start_pos) in map_info.start_positions.iter().enumerate() {
+        let Some(&kind) = SHOWCASE_KINDS.get(slot) else {
+            break;
+        };
+        let hx = (start_pos.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
+        let hz = (start_pos.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
+        let height = parsed.heights[hz * heightmap_w + hx];
+        let position = Vec3::new(start_pos.x, height, start_pos.z);
+
+        spawn_unit(
+            kind,
+            kind.faction(),
+            slot as u8,
+            position,
+            commands,
+            meshes,
+            materials,
+            images,
+            model_cache,
+            cob_cache,
+            &invisible_mat,
+            unit_registry,
+        );
+    }
+
+    info!(
+        "Showcase: spawned {} mobile units",
+        SHOWCASE_KINDS.len().min(map_info.start_positions.len())
+    );
+}
+
 /// Spawn a single unit with per-piece children and COB animation.
+/// Returns the root entity of the spawned unit.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_unit(
     kind: UnitKind,
@@ -77,10 +220,11 @@ pub fn spawn_unit(
     model_cache: &mut S3OModelCache,
     cob_cache: &mut CobFileCache,
     invisible_mat: &SelectionVolumeMaterial,
-) {
-    let unit_stats = stats(kind);
-    let material = unit_material(kind, faction, materials, images, model_cache);
-    let radius = unit_radius(kind, model_cache);
+    unit_registry: &UnitRegistry,
+) -> Entity {
+    let model_name = unit_registry.model(kind);
+    let material = unit_material(kind, faction, materials, images, model_cache, model_name);
+    let radius = unit_radius(kind, model_cache, unit_registry);
     let selection_sphere = meshes.add(Sphere::new(radius).mesh().ico(3).unwrap());
 
     // Spawn the root unit entity.
@@ -90,7 +234,7 @@ pub fn spawn_unit(
             UnitType(kind),
             faction,
             TeamId(team),
-            Health::full(unit_stats.max_health),
+            Health::full(unit_registry.max_health(kind)),
             Transform::from_translation(position),
             Visibility::default(),
         ))
@@ -105,6 +249,9 @@ pub fn spawn_unit(
     ) {
         commands.entity(unit_entity).insert(Homebase);
     }
+    if matches!(kind, UnitKind::Pointer) {
+        commands.entity(unit_entity).insert(Deployable::initial());
+    }
 
     // Selection volume child.
     let sel_child = commands
@@ -118,7 +265,7 @@ pub fn spawn_unit(
     commands.entity(unit_entity).add_child(sel_child);
 
     // Try to load the s3o model and build per-piece children.
-    let s3o_model = super::meshes::load_s3o_model(unit_stats.model, model_cache);
+    let s3o_model = super::meshes::load_s3o_model(model_name, model_cache);
 
     if let Some(model) = &s3o_model {
         // Flatten the piece tree into a list, spawning each as a child entity.
@@ -167,7 +314,7 @@ pub fn spawn_unit(
         }
 
         // Attach CobAnimator with base offsets.
-        if let Some(cob) = load_cob_cached(unit_stats.script, cob_cache) {
+        if let Some(cob) = load_cob_cached(&kind.script(), cob_cache) {
             let num_pieces = piece_entities.len();
             let mut vm = CobVm::new(&cob);
             vm.start_script(&cob, "Create", &[]);
@@ -186,13 +333,26 @@ pub fn spawn_unit(
                 spin_speeds: vec![[0.0; 3]; num_pieces],
             });
         }
+
+        // For factories, cache the piece indices we need for build FX so
+        // the production system can read their world transforms each frame
+        // without rescanning the model. Both lookups are best-effort: any
+        // missing piece falls back to the factory root.
+        if default_production(kind).is_some() {
+            commands.entity(unit_entity).insert(FactoryPieces {
+                nanoemitter: find_piece_index_by_name(&model.root_piece, "nanoemitter"),
+                pad: find_piece_index_by_name(&model.root_piece, "pad"),
+            });
+        }
     } else {
         // Fallback: single flattened mesh, no animation.
-        let mesh = super::meshes::unit_mesh(kind, meshes, model_cache);
+        let mesh = super::meshes::unit_mesh(kind, meshes, model_cache, unit_registry);
         commands
             .entity(unit_entity)
             .insert((Mesh3d(mesh), MeshMaterial3d(material)));
     }
+
+    unit_entity
 }
 
 /// Flatten the piece tree depth-first, recording each piece's parent index.
@@ -214,6 +374,27 @@ fn flatten_pieces(
 fn get_piece_by_index(root: &S3OPiece, target: usize) -> Option<&S3OPiece> {
     let mut counter = 0;
     get_piece_recursive(root, target, &mut counter)
+}
+
+/// Find the flattened (depth-first) index of the first piece whose name
+/// matches `target` case-insensitively. `None` if the model has no such
+/// piece. Used by factories to cache their `nanoemitter` / `pad` indices.
+fn find_piece_index_by_name(root: &S3OPiece, target: &str) -> Option<usize> {
+    let mut counter = 0;
+    find_by_name_recursive(root, target, &mut counter)
+}
+
+fn find_by_name_recursive(piece: &S3OPiece, target: &str, counter: &mut usize) -> Option<usize> {
+    if piece.name.eq_ignore_ascii_case(target) {
+        return Some(*counter);
+    }
+    *counter += 1;
+    for child in &piece.children {
+        if let Some(found) = find_by_name_recursive(child, target, counter) {
+            return Some(found);
+        }
+    }
+    None
 }
 
 fn get_piece_recursive<'a>(
@@ -262,6 +443,7 @@ pub fn spawn_queued_viruses(
     mut model_cache: ResMut<S3OModelCache>,
     mut cob_cache: ResMut<CobFileCache>,
     sel_mat: Option<Res<SelectionVolumeMaterial>>,
+    unit_registry: Res<UnitRegistry>,
 ) {
     if virus_spawns.0.is_empty() {
         return;
@@ -285,6 +467,7 @@ pub fn spawn_queued_viruses(
             &mut model_cache,
             &mut cob_cache,
             &invisible_mat,
+            &unit_registry,
         );
     }
 }

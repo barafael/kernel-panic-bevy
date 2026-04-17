@@ -1,0 +1,35 @@
+[package]
+name = "spring-map-gen"
+version = "0.1.0"
+edition = "2024"
+description = "Programmatic generator for Spring RTS engine map files (.smf/.smt/.sdz)"
+
+[dependencies]
+byteorder = { workspace = true }
+thiserror = { workspace = true }
+zip = { workspace = true }
+spring-map = { path = "../spring-map" }
+
+# Viewer binary dependencies (optional, only for the map-viewer binary).
+bevy = { workspace = true, optional = true }
+spring-tdf = { path = "../spring-tdf", optional = true }
+spring-unit-mesh = { path = "../spring-unit-mesh", optional = true }
+spring-cob = { path = "../spring-cob", optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[features]
+viewer = ["dep:bevy", "dep:spring-tdf", "dep:spring-unit-mesh", "dep:spring-cob"]
+
+[[bin]]
+name = "map-viewer"
+path = "src/bin/map_viewer/main.rs"
+required-features = ["viewer"]
+
+[[bin]]
+name = "gen-showcase"
+path = "src/bin/gen_showcase.rs"
+
+[lib]
+doctest = false
