@@ -231,7 +231,7 @@ pub(super) fn resolve_unit_hit(
     })
 }
 
-pub(super) fn cursor_ray(
+pub(crate) fn cursor_ray(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
 ) -> Option<Ray3d> {

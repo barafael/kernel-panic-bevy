@@ -1,3 +1,4 @@
+pub mod ability;
 pub mod cursor;
 pub mod movement;
 pub(crate) mod selection;
@@ -7,6 +8,7 @@ use bevy::prelude::*;
 
 pub use selection::Selected;
 
+use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
     CommandLineGizmos, draw_selected_command_lines, movement_system, unit_separation_system,
@@ -17,7 +19,7 @@ pub struct InteractionPlugin;
 
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((SelectionPlugin, CursorPlugin))
+        app.add_plugins((SelectionPlugin, CursorPlugin, AbilityHotkeyPlugin))
             .init_gizmo_group::<CommandLineGizmos>()
             .add_systems(Startup, configure_command_line_gizmos)
             .add_systems(

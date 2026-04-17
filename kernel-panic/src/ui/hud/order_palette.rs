@@ -8,6 +8,7 @@ use super::style::{
 };
 use crate::interaction::Selected;
 use crate::units::components::UnitType;
+use crate::units::definitions::UnitKind;
 use crate::units::unit_registry::UnitRegistry;
 
 pub struct OrderPalettePlugin;
@@ -31,6 +32,7 @@ struct UnitOrderEvent {
 enum UnitOrder {
     Stop,
     AttackMove,
+    CommandFire,
 }
 
 #[derive(Component)]
@@ -60,8 +62,11 @@ fn update_order_palette(
     }
 
     let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
+    let has_ability = selected_q
+        .iter()
+        .any(|ut| matches!(ut.0, UnitKind::Pointer | UnitKind::Obelisk));
 
-    if !has_mobile {
+    if !has_mobile && !has_ability {
         return;
     }
 
@@ -107,7 +112,25 @@ fn update_order_palette(
     commands.entity(palette).add_child(grid);
 
     for (name, hotkey, order) in ORDERS {
+        if matches!(order, UnitOrder::Stop | UnitOrder::AttackMove) && !has_mobile {
+            continue;
+        }
         let btn = spawn_order_button(&mut commands, name, hotkey, *order);
+        commands.entity(grid).add_child(btn);
+    }
+
+    if has_ability {
+        // Only one "Ability" slot today — label it after the first ability
+        // unit in the selection so the player knows which cast Q fires.
+        let name = selected_q
+            .iter()
+            .find_map(|ut| match ut.0 {
+                UnitKind::Pointer => Some("NX Flag"),
+                UnitKind::Obelisk => Some("Infection"),
+                _ => None,
+            })
+            .unwrap_or("Ability");
+        let btn = spawn_order_button(&mut commands, name, "Q", UnitOrder::CommandFire);
         commands.entity(grid).add_child(btn);
     }
 }
@@ -213,6 +236,11 @@ fn apply_unit_orders(
                 // TODO: implement attack-move cursor mode.
                 // For now this just acts as a visual indicator that the
                 // command was received.
+            }
+            UnitOrder::CommandFire => {
+                // Handled by `interaction::ability`, which reads Q + cursor
+                // position. The button slot exists only as a hotkey hint;
+                // the click itself is a no-op (it has no ground target).
             }
         }
     }

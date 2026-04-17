@@ -81,7 +81,7 @@ pub struct Infected {
 }
 
 /// How long (seconds) a Worm/Virus infection lasts before expiring.
-const INFECTION_DURATION: f32 = 6.0;
+pub const INFECTION_DURATION: f32 = 6.0;
 
 /// Queued virus spawns from infected unit deaths (position, faction, team).
 #[derive(Resource, Default)]

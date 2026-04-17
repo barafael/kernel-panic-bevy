@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod animation;
 pub mod combat;
+pub mod command_fire;
 pub mod components;
 pub mod construction;
 pub mod definitions;
@@ -46,6 +47,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<combat::DamageQueue>()
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<ai::AiTicker>()
+            .add_message::<command_fire::CommandFireEvent>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -81,6 +83,9 @@ impl Plugin for UnitsPlugin {
                         combat::tick_burst_fire,
                         combat::aim_weapons_system,
                         combat::tick_infections,
+                        command_fire::process_command_fire,
+                        command_fire::tick_command_fire_cooldown,
+                        command_fire::tick_area_denial,
                         script_triggers::trigger_movement_scripts,
                         script_triggers::trigger_production_scripts,
                         script_triggers::trigger_weapon_scripts,
