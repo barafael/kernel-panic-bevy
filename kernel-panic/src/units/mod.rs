@@ -86,6 +86,7 @@ impl Plugin for UnitsPlugin {
                         .in_set(GameplaySet::Simulate),
                     (
                         combat::apply_damage,
+                        combat::tick_stun,
                         combat::auto_heal,
                         combat::death_system,
                         spawning::spawn_queued_viruses,

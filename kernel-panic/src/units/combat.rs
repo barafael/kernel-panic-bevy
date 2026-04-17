@@ -22,6 +22,25 @@ pub struct AttackCooldown {
 #[derive(Component, Default)]
 pub struct IdleTimer(pub f32);
 
+/// Accumulated paralyzer damage from weapons with `paralyzer=1`. Charge
+/// bleeds off over `STUN_CHARGE_DECAY` once the unit stops getting hit;
+/// when it crosses `max_health` the unit gains a `Stunned` marker for
+/// the weapon's `paralyzetime` seconds. The charge is cleared when
+/// `Stunned` is removed.
+#[derive(Component, Default)]
+pub struct StunCharge(pub f32);
+
+/// Marks a unit as paralyzed: the combat and movement systems treat it
+/// as inert until `remaining` elapses.
+#[derive(Component)]
+pub struct Stunned {
+    pub remaining: f32,
+}
+
+/// How many seconds it takes for accumulated stun charge to fully
+/// dissipate if no further paralyzer damage lands.
+const STUN_CHARGE_DECAY: f32 = 4.0;
+
 /// In-progress burst fire. Weapons with `burst > 1` fire the first shot
 /// through the normal combat path and attach this component for the
 /// remaining shots, which are released at `interval` spacing by
@@ -204,7 +223,11 @@ pub fn combat_system(
             &GlobalTransform,
             Option<&Deployable>,
         ),
-        (Without<Dying>, Without<super::spawning::Emerging>),
+        (
+            Without<Dying>,
+            Without<super::spawning::Emerging>,
+            Without<Stunned>,
+        ),
     >,
     potential_targets: Query<
         (Entity, &Faction, &TeamId, &GlobalTransform, &Health),
@@ -527,6 +550,7 @@ fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
 pub fn apply_damage(
     mut damage_queue: ResMut<DamageQueue>,
     mut health_q: Query<&mut Health>,
+    mut stun_q: Query<&mut StunCharge>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
     splash_q: Query<(Entity, &UnitType, &Faction, &TeamId, &GlobalTransform), With<Health>>,
@@ -545,12 +569,25 @@ pub fn apply_damage(
                 * unit_registry.damage_modifier(kind)
         };
         let attacker_info = attacker_q.get(pending.attacker).ok();
+        let paralyzer = weapon_def.paralyzer;
+        let paralyze_time = weapon_def.paralyze_time;
 
         let primary_damage = match target_unit_q.get(pending.target) {
             Ok(unit) => base(unit.0),
             Err(_) => weapon_def.damage.default,
         };
-        if let Ok(mut health) = health_q.get_mut(pending.target) {
+        if paralyzer {
+            if let Ok(max_hp) = health_q.get(pending.target).map(|h| h.max)
+                && let Ok(mut charge) = stun_q.get_mut(pending.target)
+            {
+                charge.0 += primary_damage;
+                if charge.0 >= max_hp {
+                    commands.entity(pending.target).insert(Stunned {
+                        remaining: paralyze_time,
+                    });
+                }
+            }
+        } else if let Ok(mut health) = health_q.get_mut(pending.target) {
             health.current -= primary_damage;
         }
         commands.entity(pending.target).insert(IdleTimer(0.0));
@@ -579,7 +616,18 @@ pub fn apply_damage(
                     continue;
                 }
                 let splash = base(unit.0) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
-                if let Ok(mut health) = health_q.get_mut(entity) {
+                if paralyzer {
+                    if let Ok(max_hp) = health_q.get(entity).map(|h| h.max)
+                        && let Ok(mut charge) = stun_q.get_mut(entity)
+                    {
+                        charge.0 += splash;
+                        if charge.0 >= max_hp {
+                            commands.entity(entity).insert(Stunned {
+                                remaining: paralyze_time,
+                            });
+                        }
+                    }
+                } else if let Ok(mut health) = health_q.get_mut(entity) {
                     health.current -= splash;
                 }
                 commands.entity(entity).insert(IdleTimer(0.0));
@@ -646,6 +694,36 @@ pub fn auto_heal(
         let threshold = unit_registry.idle_time(unit.0) / IDLE_FRAMES_PER_SECOND;
         if idle.0 >= threshold && health.current < health.max {
             health.current = (health.current + heal_rate * dt).min(health.max);
+        }
+    }
+}
+
+/// System: tick the `Stunned` timer. When it expires, remove the marker
+/// and zero out accumulated stun charge so the unit isn't re-stunned on
+/// the next DOS hit.
+pub fn tick_stun(
+    time: Res<Time>,
+    mut stunned_q: Query<(Entity, &mut Stunned, Option<&mut StunCharge>), With<Stunned>>,
+    mut charge_q: Query<&mut StunCharge, Without<Stunned>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut stun, charge) in &mut stunned_q {
+        stun.remaining -= dt;
+        if stun.remaining <= 0.0 {
+            commands.entity(entity).remove::<Stunned>();
+            if let Some(mut charge) = charge {
+                charge.0 = 0.0;
+            }
+        }
+    }
+
+    // Decay stun charge on unstunned units so a few scattered DOS pings
+    // don't add up to a lockdown hours later.
+    let decay_per_sec = 1.0 / STUN_CHARGE_DECAY;
+    for mut charge in &mut charge_q {
+        if charge.0 > 0.0 {
+            charge.0 = (charge.0 - charge.0 * decay_per_sec * dt).max(0.0);
         }
     }
 }

@@ -111,6 +111,7 @@ pub fn movement_system(
         Option<&mut CommandQueue>,
         Option<&Deployable>,
         Option<&mut SlopeTilt>,
+        Option<&crate::units::combat::Stunned>,
     )>,
     unit_registry: Res<UnitRegistry>,
 ) {
@@ -122,7 +123,7 @@ pub fn movement_system(
     // "already at its goal".
     let snapshot: Vec<UnitSnapshot> = query
         .iter()
-        .map(|(e, ut, tf, target, _, _, _, _)| UnitSnapshot {
+        .map(|(e, ut, tf, target, _, _, _, _, _)| UnitSnapshot {
             entity: e,
             pos: tf.translation,
             radius: unit_registry.collision_radius(ut.0),
@@ -141,8 +142,13 @@ pub fn movement_system(
         mut queue,
         deployable,
         mut slope_tilt,
+        stunned,
     ) in &mut query
     {
+        if stunned.is_some() {
+            continue;
+        }
+
         let speed = unit_registry.speed(unit_type.0);
         if speed == 0.0 {
             // Buildings can't move — remove any movement components.
