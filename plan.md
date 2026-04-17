@@ -22,30 +22,24 @@ map-sized fog/far-plane, Lua heightmap gadgets, map cycling.
 
 ## 1. Combat Mechanics
 
-*Game balance is broken without these — `damage.default` is the only damage path.*
+### 1.1 Armor-Type Damage Multipliers — ✅ DONE
 
-### 1.1 Armor-Type Damage Multipliers (Critical)
+`ArmorClass` enum (9 variants from upstream `armor.txt`), `UnitKind::armor_class()`
+mapping, and `apply_damage` resolves via `DamageMap::for_type`. Logic Bombs do 3000 vs
+Worms, Minekiller one-shots mines, RPS multipliers live for any weapon that defines
+per-armor entries.
 
-Per-weapon damage tables are parsed into `DamageMap` and `for_type()` exists in spring-tdf
-but is never called from game code. All combat uses `damage.default`. The rock-paper-scissors
-balance (e.g. Rock: 600 vs irony, 5 vs papery) is completely inert.
+### 1.2 AOE / Splash Damage — ✅ DONE
 
-- Add `ArmorClass` enum mapping each `UnitKind` to its armor category
-- Call `DamageMap::for_type()` in `apply_damage` instead of flat `damage.default`
+Weapons with `area_of_effect > 48` splash-damage every unit in radius with linear
+falloff via `edge_effectiveness`. Primary target still takes full damage; threshold
+keeps single-target weapons (BugShot AoE=8, VirusBeam AoE=16) on the O(1) path.
 
-### 1.2 AOE / Splash Damage (Critical)
+### 1.3 Burst Fire — ✅ DONE
 
-`area_of_effect` is parsed but ignored — all weapons are single-target. Logic Bomb (512
-AOE), MegaBeam (128), Infection (700) all hit one unit.
-
-- Spatial query around impact point with `edge_effectiveness` falloff
-
-### 1.3 Burst Fire (Important)
-
-`burst` / `burst_rate` are parsed but unused. MegaBeam (burst=4, burstrate=0.25) fires
-all damage in one frame.
-
-- Staggered attack queue with per-burst timing
+`BurstFire` component holds remaining shots + per-shot interval; `tick_burst_fire`
+releases follow-up shots at `burst_rate` spacing. Aim point frozen at trigger. Active
+on FlowMissile (burst=2) and MegaBeam (burst=4).
 
 ### 1.4 Command-Fire Gating (Important)
 
@@ -307,12 +301,13 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ## Recommended Implementation Order
 
-Done since last plan: §2.2 stat corrections, §3.1 factory building on datavents, partial
-§2.1 (Flow + Gateway), partial §3.8 (flying skips nav grid).
+Done since last plan: §1.1 armor classes, §1.2 AoE splash, §1.3 burst fire, §2.2 stat
+corrections, §3.1 factory building on datavents, partial §2.1 (Flow + Gateway), partial
+§3.8 (flying skips nav grid).
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Armor classes + AOE + burst fire + command-fire gating | 1.1–1.4 | Balance is broken without these |
+| 1 | Command-fire gating | 1.4 | Stop NX Flag / Infection / FakeBugCannon auto-firing |
 | 2 | Damage modifiers + auto-heal | 1.6–1.7 | Building vulnerability, Byte armor |
 | 3 | Stun (DoS) | 1.5 | Stun system needed by later features |
 | 4 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
