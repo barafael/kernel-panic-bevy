@@ -829,16 +829,15 @@ pub fn tick_stun(
     }
 }
 
-/// System: tick infection timers and remove expired infections.
 /// System: trigger kamikaze units (Logic Bombs) when any enemy enters
 /// their proximity radius. The bomb queues its ExplodeAs weapon as a
 /// self-damage event and forces its own HP to zero; `death_system` +
 /// `apply_damage` handle the splash and the corpse teardown.
+#[allow(clippy::type_complexity)]
 pub fn tick_kamikaze(
     unit_registry: Res<UnitRegistry>,
     bombs: Query<(Entity, &UnitType, &TeamId, &Faction, &GlobalTransform), Without<Dying>>,
-    potential_targets: Query<(&TeamId, &Faction, &GlobalTransform, &Health), With<UnitType>>,
-    mut health_q: Query<&mut Health>,
+    mut targets: Query<(&TeamId, &Faction, &GlobalTransform, &mut Health), With<UnitType>>,
     mut damage_queue: ResMut<DamageQueue>,
 ) {
     for (entity, unit, team, faction, gtf) in &bombs {
@@ -848,7 +847,7 @@ pub fn tick_kamikaze(
         }
         let trigger_sq = trigger_radius * trigger_radius;
         let self_pos = gtf.translation();
-        let triggered = potential_targets.iter().any(|(t, f, g, h)| {
+        let triggered = targets.iter().any(|(t, f, g, h)| {
             if h.current <= 0.0 {
                 return false;
             }
@@ -866,7 +865,7 @@ pub fn tick_kamikaze(
             impact_pos: self_pos,
             attacker_distance: 0.0,
         });
-        if let Ok(mut health) = health_q.get_mut(entity) {
+        if let Ok((_, _, _, mut health)) = targets.get_mut(entity) {
             health.current = 0.0;
         }
     }

@@ -5,7 +5,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, RayMeshHit};
 use bevy::prelude::*;
 
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::{SelectionVolume, UnitType};
+use crate::units::components::UnitType;
 
 pub(super) struct SelectionCorePlugin;
 
@@ -77,7 +77,7 @@ fn update_hover(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
     unit_q: Query<Entity, With<UnitType>>,
-    volume_q: Query<&ChildOf, With<SelectionVolume>>,
+    parent_q: Query<&ChildOf>,
     hovered_q: Query<Entity, With<Hovered>>,
     mut commands: Commands,
 ) {
@@ -91,7 +91,7 @@ fn update_hover(
     };
 
     let hits = ray_cast.cast_ray(ray, &default());
-    if let Some(entity) = resolve_unit_hit(hits, &unit_q, &volume_q) {
+    if let Some(entity) = resolve_unit_hit(hits, &unit_q, &parent_q) {
         commands.entity(entity).insert(Hovered);
     }
 }
@@ -215,19 +215,23 @@ fn handle_selection(
 pub(super) fn resolve_unit_hit(
     hits: &[(Entity, RayMeshHit)],
     unit_q: &Query<Entity, With<UnitType>>,
-    volume_q: &Query<&ChildOf, With<SelectionVolume>>,
+    parent_q: &Query<&ChildOf>,
 ) -> Option<Entity> {
+    // A ray can land on the unit root, its invisible selection-volume
+    // sphere, or any visible S3O piece — which can be nested several
+    // levels deep via COB piece parenting. Walk up the hierarchy from
+    // whatever we hit until we find an ancestor with `UnitType`.
     hits.iter().find_map(|(entity, _)| {
-        if unit_q.contains(*entity) {
-            return Some(*entity);
-        }
-        if let Ok(child_of) = volume_q.get(*entity) {
-            let parent = child_of.parent();
-            if unit_q.contains(parent) {
-                return Some(parent);
+        let mut cur = *entity;
+        loop {
+            if unit_q.contains(cur) {
+                return Some(cur);
+            }
+            match parent_q.get(cur) {
+                Ok(child_of) => cur = child_of.parent(),
+                Err(_) => return None,
             }
         }
-        None
     })
 }
 
