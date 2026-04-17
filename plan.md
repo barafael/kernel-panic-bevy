@@ -41,10 +41,11 @@ keeps single-target weapons (BugShot AoE=8, VirusBeam AoE=16) on the O(1) path.
 releases follow-up shots at `burst_rate` spacing. Aim point frozen at trigger. Active
 on FlowMissile (burst=2) and MegaBeam (burst=4).
 
-### 1.4 Command-Fire Gating (Important)
+### 1.4 Command-Fire Gating — ✅ DONE
 
-NX Flag, Infection (WMD), FakeBugCannon auto-fire when they should require manual
-activation (`commandfire=1`). Skip auto-fire in `combat_system` for these weapons.
+`combat_system` now skips weapons with `commandfire=1` during auto-target selection.
+NX Flag, Obelisk's Infection gas, and Bug's FakeBugCannon will re-enter combat via the
+§3.5 command-fire ability framework.
 
 ### 1.5 DOS Paralyze / Stun (Important)
 
@@ -301,33 +302,32 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 
 ## Recommended Implementation Order
 
-Done since last plan: §1.1 armor classes, §1.2 AoE splash, §1.3 burst fire, §2.2 stat
-corrections, §3.1 factory building on datavents, partial §2.1 (Flow + Gateway), partial
-§3.8 (flying skips nav grid).
+Done since last plan: §1.1 armor classes, §1.2 AoE splash, §1.3 burst fire, §1.4
+command-fire gating, §2.2 stat corrections, §3.1 factory building on datavents, partial
+§2.1 (Flow + Gateway), partial §3.8 (flying skips nav grid).
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Command-fire gating | 1.4 | Stop NX Flag / Infection / FakeBugCannon auto-firing |
-| 2 | Damage modifiers + auto-heal | 1.6–1.7 | Building vulnerability, Byte armor |
-| 3 | Stun (DoS) | 1.5 | Stun system needed by later features |
-| 4 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
-| 5 | Basic AI | 5.1 | Single-player becomes possible now that factory building works |
-| 6 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
-| 7 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
-| 8 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
-| 9 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
-| 10 | Network buffer + dispatch | 3.2 | Network faction identity |
-| 11 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
-| 12 | Firewall reflector shield | 3.5 | Network defensive ability |
-| 13 | Kernel Boost | 3.7 | Snowball mechanic |
-| 14 | Mines & walls | 3.9 | Tactical depth |
-| 15 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 16 | Shield system | 4.7 | Homebase/factory shields |
-| 17 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 18 | Fog of war | 6 | Full visibility system |
-| 19 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 20 | Audio | 7 | Weapon sounds highest priority |
-| 21 | Multiplayer | 9 | Endgame feature |
+| 1 | Damage modifiers + auto-heal | 1.6–1.7 | Building vulnerability, Byte armor |
+| 2 | Stun (DoS) | 1.5 | Stun system needed by later features |
+| 3 | Remaining missing units (Trojan, Terminal, Obelisk, Sigterm, Debug, BadBlock) | 2.1 | Prerequisites for faction mechanics |
+| 4 | Basic AI | 5.1 | Single-player becomes possible now that factory building works |
+| 5 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
+| 6 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
+| 7 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
+| 8 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
+| 9 | Network buffer + dispatch | 3.2 | Network faction identity |
+| 10 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
+| 11 | Firewall reflector shield | 3.5 | Network defensive ability |
+| 12 | Kernel Boost | 3.7 | Snowball mechanic |
+| 13 | Mines & walls | 3.9 | Tactical depth |
+| 14 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 15 | Shield system | 4.7 | Homebase/factory shields |
+| 16 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 17 | Fog of war | 6 | Full visibility system |
+| 18 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 19 | Audio | 7 | Weapon sounds highest priority |
+| 20 | Multiplayer | 9 | Endgame feature |
 
 ---
 
