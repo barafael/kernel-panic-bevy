@@ -47,12 +47,16 @@ pub struct VirusSpawnQueue(pub Vec<(Vec3, Faction, u8)>);
 
 /// A pending damage event. Damage is resolved at apply-time so the
 /// target's armor class can pick the right entry from the weapon's
-/// `[DAMAGE]` table.
+/// `[DAMAGE]` table. The primary target always takes full damage; if
+/// the weapon has `area_of_effect > 0`, other units within that radius
+/// of `impact_pos` also take damage with linear falloff from the weapon's
+/// `edge_effectiveness`.
 #[derive(Debug, Clone)]
 pub struct PendingDamage {
     pub target: Entity,
     pub attacker: Entity,
     pub weapon: String,
+    pub impact_pos: Vec3,
 }
 
 /// Pending damage to apply after combat resolution.
@@ -304,6 +308,7 @@ pub fn combat_system(
             target: target_entity,
             attacker: entity,
             weapon: weapon_name.to_string(),
+            impact_pos: target_pos,
         });
         commands.entity(entity).insert((
             AttackCooldown {
@@ -412,13 +417,33 @@ pub fn aim_weapons_system(
     }
 }
 
+/// Minimum `area_of_effect` (elmos) at which a weapon triggers a splash
+/// pass. Upstream weapons use tiny AoE values (8/16/32) for impact effects
+/// on single-target weapons; only lob/explosive weapons set AoE high
+/// enough to hit multiple units. This threshold avoids doing an O(n)
+/// position scan for every Bit shot.
+const AOE_SPLASH_THRESHOLD: f32 = 48.0;
+
+/// Linear splash falloff. `dist` is the distance from the impact point;
+/// `radius` is the weapon's `area_of_effect`; `edge_mult` is the weapon's
+/// `edge_effectiveness` (1.0 = full damage at the edge, 0.0 = no damage
+/// at the edge). Callers must ensure `dist < radius`.
+fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
+    let t = (dist / radius).clamp(0.0, 1.0);
+    1.0 - t * (1.0 - edge_mult)
+}
+
 /// System: apply queued damage and mark targets as infected when hit by
-/// Worm or Virus weapons.
+/// Worm or Virus weapons. Weapons with `area_of_effect > AOE_SPLASH_THRESHOLD`
+/// also damage other units in radius, with linear falloff from the
+/// weapon's `edge_effectiveness`.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_damage(
     mut damage_queue: ResMut<DamageQueue>,
     mut health_q: Query<&mut Health>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
+    splash_q: Query<(Entity, &UnitType, &GlobalTransform), With<Health>>,
     weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
 ) {
@@ -428,13 +453,33 @@ pub fn apply_damage(
             continue;
         };
 
-        let damage = match target_unit_q.get(pending.target) {
-            Ok(unit) => weapon_def.damage.for_type(unit.0.armor_class().key()),
+        let base = |kind: UnitKind| weapon_def.damage.for_type(kind.armor_class().key());
+
+        let primary_damage = match target_unit_q.get(pending.target) {
+            Ok(unit) => base(unit.0),
             Err(_) => weapon_def.damage.default,
         };
-
         if let Ok(mut health) = health_q.get_mut(pending.target) {
-            health.current -= damage;
+            health.current -= primary_damage;
+        }
+
+        let aoe = weapon_def.area_of_effect;
+        if aoe > AOE_SPLASH_THRESHOLD {
+            let aoe_sq = aoe * aoe;
+            let edge_mult = weapon_def.edge_effectiveness;
+            for (entity, unit, gtf) in &splash_q {
+                if entity == pending.target {
+                    continue;
+                }
+                let d_sq = gtf.translation().distance_squared(pending.impact_pos);
+                if d_sq >= aoe_sq {
+                    continue;
+                }
+                let splash = base(unit.0) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
+                if let Ok(mut health) = health_q.get_mut(entity) {
+                    health.current -= splash;
+                }
+            }
         }
 
         // Apply infection: Worm and Virus attacks infect non-Virus targets.
@@ -525,5 +570,34 @@ pub fn cleanup_dying(
         if anim_done || dying.timer <= 0.0 {
             commands.entity(entity).despawn();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::splash_falloff;
+
+    #[test]
+    fn splash_full_damage_at_center() {
+        assert!((splash_falloff(0.0, 512.0, 0.0) - 1.0).abs() < 1e-5);
+        assert!((splash_falloff(0.0, 100.0, 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn splash_edge_matches_edge_effectiveness() {
+        // edge_effectiveness = 0.8 → edge damage is 80% of center.
+        assert!((splash_falloff(512.0, 512.0, 0.8) - 0.8).abs() < 1e-5);
+        // edge_effectiveness = 0.0 → edge damage is zero.
+        assert!(splash_falloff(512.0, 512.0, 0.0).abs() < 1e-5);
+        // edge_effectiveness = 1.0 → full damage across the radius.
+        assert!((splash_falloff(256.0, 512.0, 1.0) - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn splash_linear_between_center_and_edge() {
+        // Halfway out at edge_effectiveness=0 → half damage.
+        assert!((splash_falloff(256.0, 512.0, 0.0) - 0.5).abs() < 1e-5);
+        // Quarter out at edge_effectiveness=0.4 → 1 - 0.25 * 0.6 = 0.85.
+        assert!((splash_falloff(128.0, 512.0, 0.4) - 0.85).abs() < 1e-5);
     }
 }
