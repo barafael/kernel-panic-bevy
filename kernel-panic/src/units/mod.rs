@@ -12,6 +12,7 @@ pub mod morph;
 pub mod network_buffer;
 pub mod production;
 pub mod script_triggers;
+pub mod shield;
 pub mod spawning;
 mod tdf_loader;
 pub mod unit_registry;
@@ -75,6 +76,8 @@ impl Plugin for UnitsPlugin {
                 Update,
                 (
                     (
+                        shield::attach_shields,
+                        shield::regen_shields,
                         morph::process_morph,
                         network_buffer::tick_port_buffers,
                         network_buffer::tick_spawn_stun,

@@ -86,6 +86,14 @@ pub struct WeaponDef {
     // --- Paralyze ---
     pub paralyze_time: f32,
 
+    // --- Shield (when is_shield=true) ---
+    pub shield_radius: f32,
+    /// Max shield HP. Zero means infinite (upstream homebase convention).
+    pub shield_power: f32,
+    /// Shield HP regenerated per second. Only consulted when
+    /// `shield_power > 0`.
+    pub shield_power_regen: f32,
+
     // --- Dynamic damage (BugCannon: damage scales with distance) ---
     /// Exponent applied to the normalized range fraction. 0 / absent =
     /// flat damage, 1 = linear.
@@ -246,6 +254,10 @@ impl WeaponDef {
             sound_hit: s.string("soundhit"),
 
             paralyze_time: s.f32("paralyzetime"),
+
+            shield_radius: s.f32("shieldradius"),
+            shield_power: s.f32("shieldpower"),
+            shield_power_regen: s.f32("shieldpowerregen"),
 
             dyn_damage_exp: s.f32("dyndamageexp"),
             dyn_damage_range: s.f32("dyndamagerange"),

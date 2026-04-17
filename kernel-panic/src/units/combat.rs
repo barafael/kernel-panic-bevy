@@ -565,10 +565,11 @@ pub fn tick_burst_fire(
     }
 }
 
-/// Apply a damage hit to `target`. Paralyzer weapons accumulate stun
-/// charge instead of touching HP, promoting to `Stunned` once charge
-/// exceeds the target's max HP; non-paralyzer weapons subtract directly
-/// from `Health`.
+/// Apply a damage hit to `target`. A shield (if any) soaks damage
+/// first; paralyzer weapons then accumulate any leak on the stun
+/// charge, promoting to `Stunned` once it exceeds max HP; non-paralyzer
+/// leak subtracts from `Health`.
+#[allow(clippy::too_many_arguments)]
 fn apply_hit(
     target: Entity,
     amount: f32,
@@ -576,13 +577,21 @@ fn apply_hit(
     paralyze_time: f32,
     health_q: &mut Query<&mut Health>,
     stun_q: &mut Query<&mut StunCharge>,
+    shield_q: &mut Query<&mut super::shield::ShieldState>,
     commands: &mut Commands,
 ) {
+    let leak = match shield_q.get_mut(target) {
+        Ok(mut shield) => shield.absorb(amount),
+        Err(_) => amount,
+    };
+    if leak <= 0.0 {
+        return;
+    }
     if paralyzer {
         if let Ok(max_hp) = health_q.get(target).map(|h| h.max)
             && let Ok(mut charge) = stun_q.get_mut(target)
         {
-            charge.0 += amount;
+            charge.0 += leak;
             if charge.0 >= max_hp {
                 commands.entity(target).insert(Stunned {
                     remaining: paralyze_time,
@@ -590,7 +599,7 @@ fn apply_hit(
             }
         }
     } else if let Ok(mut health) = health_q.get_mut(target) {
-        health.current -= amount;
+        health.current -= leak;
     }
 }
 
@@ -620,6 +629,7 @@ pub fn apply_damage(
     mut damage_queue: ResMut<DamageQueue>,
     mut health_q: Query<&mut Health>,
     mut stun_q: Query<&mut StunCharge>,
+    mut shield_q: Query<&mut super::shield::ShieldState>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
     splash_q: Query<(Entity, &UnitType, &Faction, &TeamId, &GlobalTransform), With<Health>>,
@@ -653,6 +663,7 @@ pub fn apply_damage(
             paralyze_time,
             &mut health_q,
             &mut stun_q,
+            &mut shield_q,
             &mut commands,
         );
         commands.entity(pending.target).insert(IdleTimer(0.0));
@@ -688,6 +699,7 @@ pub fn apply_damage(
                     paralyze_time,
                     &mut health_q,
                     &mut stun_q,
+                    &mut shield_q,
                     &mut commands,
                 );
                 commands.entity(entity).insert(IdleTimer(0.0));
