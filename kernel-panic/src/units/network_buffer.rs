@@ -40,7 +40,7 @@ pub const DISPATCH_RING_RADIUS: f32 = 48.0;
 /// Shared across-team packet counters. A team's Ports tick into it;
 /// dispatch drains it; Packets re-entering top it back up.
 #[derive(Resource, Default)]
-pub struct PacketBuffer(pub HashMap<u8, u32>);
+pub struct PacketBuffer(HashMap<u8, u32>);
 
 impl PacketBuffer {
     pub fn get(&self, team: u8) -> u32 {
@@ -119,12 +119,7 @@ pub fn tick_spawn_stun(
     }
 }
 
-/// Whether `kind` can dispatch from / absorb into the buffer.
-pub fn is_teleporter(kind: UnitKind) -> bool {
-    matches!(kind, UnitKind::Port | UnitKind::Connection)
-}
-
-/// System: drain `DispatchEvent`s, consuming packets from the team
+/// Drain `DispatchEvent`s, consuming packets from the team
 /// buffer and requesting spawns from the teleporter's position. Each
 /// dispatched packet gets a MoveTarget toward the event's `target`.
 #[allow(clippy::too_many_arguments)]
@@ -145,7 +140,7 @@ pub fn process_dispatch(
         let Ok((unit, team, faction, transform)) = teleporters.get(event.teleporter) else {
             continue;
         };
-        if !is_teleporter(unit.0) {
+        if !unit.0.is_teleporter() {
             continue;
         }
 
@@ -187,7 +182,7 @@ pub fn process_dispatch(
     }
 }
 
-/// System: drain `EnterEvent`s — absorb Packets that are close to a
+/// Drain `EnterEvent`s — absorb Packets that are close to a
 /// friendly teleporter and have finished their post-dispatch stun.
 pub fn process_enter(
     mut events: MessageReader<EnterEvent>,
@@ -207,7 +202,7 @@ pub fn process_enter(
         // Nearest friendly teleporter within range.
         let nearest = teleporters
             .iter()
-            .filter(|(t_unit, t_team, _)| is_teleporter(t_unit.0) && t_team.0 == packet_team.0)
+            .filter(|(t_unit, t_team, _)| t_unit.0.is_teleporter() && t_team.0 == packet_team.0)
             .map(|(_, _, t_tf)| packet_tf.translation.distance_squared(t_tf.translation))
             .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         if nearest.is_some_and(|d_sq| d_sq <= enter_sq) {
@@ -249,7 +244,7 @@ const FLOW_TICK_INTERVAL: f32 = 1.0;
 #[derive(Resource, Default)]
 pub struct FlowSpeedTicker(pub f32);
 
-/// System: periodically recount small buildings per team and update
+/// Periodically recount small buildings per team and update
 /// every Flow's `SpeedBoost` so movement can apply the bonus.
 pub fn tick_flow_speed(
     time: Res<Time>,
@@ -300,14 +295,6 @@ mod tests {
         assert_eq!(b.take(0, 2), 2);
         assert_eq!(b.get(0), 1);
         assert_eq!(b.get(1), 7);
-    }
-
-    #[test]
-    fn is_teleporter_classifies_correctly() {
-        assert!(is_teleporter(UnitKind::Port));
-        assert!(is_teleporter(UnitKind::Connection));
-        assert!(!is_teleporter(UnitKind::Packet));
-        assert!(!is_teleporter(UnitKind::Kernel));
     }
 
     #[test]

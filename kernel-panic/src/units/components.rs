@@ -66,6 +66,20 @@ pub fn health_color(frac: f32) -> Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
 pub struct TeamId(pub u8);
 
+/// Two units count as friendly when they share a team *or* a faction.
+/// The faction-share path matters on the Showcase map, where mixed-
+/// faction units all sit on team 0 and should ignore each other; in
+/// normal games teams and factions align 1:1, so this reduces to a
+/// team comparison.
+pub fn is_friendly(
+    unit_team: u8,
+    unit_faction: Faction,
+    other_team: u8,
+    other_faction: Faction,
+) -> bool {
+    unit_team == other_team || unit_faction == other_faction
+}
+
 /// Invisible child mesh used as a click target for unit selection.
 /// The parent entity is the actual unit.
 #[derive(Component)]

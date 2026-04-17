@@ -44,15 +44,6 @@ pub struct Constructing {
     pub progress: f32,
 }
 
-/// Which units can erect structures on datavents. Mirrors the "builder"
-/// units in upstream KP's `SIDEDATA.TDF` (assembler / trojan / gateway).
-pub fn is_constructor(kind: UnitKind) -> bool {
-    matches!(
-        kind,
-        UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway
-    )
-}
-
 /// Buildings the constructor `kind` can erect on a datavent. Pulled from
 /// upstream `[CANBUILD]` in `SIDEDATA.TDF`.
 pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
@@ -90,7 +81,7 @@ pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
 /// can start.
 const BUILD_DISTANCE: f32 = 180.0;
 
-/// System: promote `PendingBuild` to `Constructing` once the builder is
+/// Promote `PendingBuild` to `Constructing` once the builder is
 /// close enough to its datavent. Runs before `movement_system` so we can
 /// intercept the step and pin the unit at the build site.
 pub fn start_construction(
@@ -119,7 +110,7 @@ pub fn start_construction(
     }
 }
 
-/// System: tick build progress on units with `Constructing`, emit a
+/// Tick build progress on units with `Constructing`, emit a
 /// build-laser beam, and spawn the finished structure when the timer
 /// elapses. The unit is freed from `Constructing` at completion; the
 /// movement queue's next order (if any) is promoted next frame by

@@ -246,6 +246,63 @@ impl UnitKind {
         )
     }
 
+    /// Mobile constructors that can erect secondary factories on
+    /// datavents. Mirrors upstream KP's `SIDEDATA.TDF` builder list.
+    pub fn is_constructor(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Assembler | UnitKind::Trojan | UnitKind::Gateway
+        )
+    }
+
+    /// Network-faction teleporters: units that dispatch packets from
+    /// and absorb packets into the shared buffer.
+    pub fn is_teleporter(self) -> bool {
+        matches!(self, UnitKind::Port | UnitKind::Connection)
+    }
+
+    /// Units that carry the `Cloaked` marker at spawn time (§3.3).
+    pub fn spawns_cloaked(self) -> bool {
+        matches!(self, UnitKind::Worm | UnitKind::LogicBomb)
+    }
+
+    /// Any directly-buildable mobile combat unit (excludes constructors,
+    /// Viruses spawned dynamically, LogicBombs, and support like Terminal).
+    pub fn is_combat_unit(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Bit
+                | UnitKind::Byte
+                | UnitKind::Pointer
+                | UnitKind::Bug
+                | UnitKind::Exploit
+                | UnitKind::Worm
+                | UnitKind::Dos
+                | UnitKind::Packet
+                | UnitKind::Signal
+                | UnitKind::Flow
+        )
+    }
+
+    /// Every static structure that claims map territory: homebases,
+    /// secondary factories, walls, and special buildings. Broader than
+    /// [`Self::is_small_building`] — includes the homebases.
+    pub fn is_building(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Kernel
+                | UnitKind::Hole
+                | UnitKind::Connection
+                | UnitKind::Socket
+                | UnitKind::Window
+                | UnitKind::Port
+                | UnitKind::Firewall
+                | UnitKind::Terminal
+                | UnitKind::Obelisk
+                | UnitKind::BadBlock
+        )
+    }
+
     /// Armor class used to look up this unit's entry in a weapon's
     /// `[DAMAGE]` table. Mirrors upstream `armor.txt`.
     pub fn armor_class(self) -> ArmorClass {
@@ -346,5 +403,52 @@ mod tests {
         assert!(!UnitKind::Hole.is_small_building());
         assert!(!UnitKind::Connection.is_small_building());
         assert!(!UnitKind::Bit.is_small_building());
+    }
+
+    #[test]
+    fn constructor_classifier() {
+        assert!(UnitKind::Assembler.is_constructor());
+        assert!(UnitKind::Trojan.is_constructor());
+        assert!(UnitKind::Gateway.is_constructor());
+        assert!(!UnitKind::Bit.is_constructor());
+        assert!(!UnitKind::Kernel.is_constructor());
+    }
+
+    #[test]
+    fn teleporter_classifier() {
+        assert!(UnitKind::Port.is_teleporter());
+        assert!(UnitKind::Connection.is_teleporter());
+        assert!(!UnitKind::Packet.is_teleporter());
+        assert!(!UnitKind::Kernel.is_teleporter());
+    }
+
+    #[test]
+    fn spawns_cloaked_classifier() {
+        assert!(UnitKind::Worm.spawns_cloaked());
+        assert!(UnitKind::LogicBomb.spawns_cloaked());
+        assert!(!UnitKind::Bit.spawns_cloaked());
+        assert!(!UnitKind::Assembler.spawns_cloaked());
+    }
+
+    #[test]
+    fn combat_unit_classifier() {
+        assert!(UnitKind::Bit.is_combat_unit());
+        assert!(UnitKind::Bug.is_combat_unit());
+        assert!(UnitKind::Packet.is_combat_unit());
+        assert!(UnitKind::Byte.is_combat_unit());
+        assert!(!UnitKind::Assembler.is_combat_unit());
+        assert!(!UnitKind::Virus.is_combat_unit());
+        assert!(!UnitKind::LogicBomb.is_combat_unit());
+        assert!(!UnitKind::Kernel.is_combat_unit());
+    }
+
+    #[test]
+    fn building_classifier() {
+        assert!(UnitKind::Kernel.is_building());
+        assert!(UnitKind::Socket.is_building());
+        assert!(UnitKind::Firewall.is_building());
+        assert!(UnitKind::BadBlock.is_building());
+        assert!(!UnitKind::Bit.is_building());
+        assert!(!UnitKind::Assembler.is_building());
     }
 }

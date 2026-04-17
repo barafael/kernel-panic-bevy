@@ -16,7 +16,7 @@ use bevy::prelude::*;
 
 use super::{
     components::{Faction, Homebase, TeamId, UnitType},
-    construction::{Constructing, PendingBuild, is_constructor},
+    construction::{Constructing, PendingBuild},
     definitions::UnitKind,
     game_over::PlayerTeam,
     production::Producer,
@@ -109,7 +109,7 @@ pub fn ai_brain(
     let datavent_positions: Vec<Vec3> = datavents.iter().map(|v| v.pos).collect();
     let building_positions: Vec<Vec3> = buildings
         .iter()
-        .filter(|(_, ut, _)| is_building(ut.0))
+        .filter(|(_, ut, _)| ut.0.is_building())
         .map(|(_, _, gtf)| gtf.translation())
         .collect();
     let combat_snapshot: Vec<(Entity, u8, UnitKind, Vec3, bool)> = combat_units
@@ -143,7 +143,7 @@ pub fn ai_brain(
 
         let idle: Vec<(Entity, Vec3)> = combat_snapshot
             .iter()
-            .filter(|(_, t, kind, _, idle)| *t == team.0 && is_combat_unit(*kind) && *idle)
+            .filter(|(_, t, kind, _, idle)| *t == team.0 && kind.is_combat_unit() && *idle)
             .map(|(e, _, _, pos, _)| (*e, *pos))
             .collect();
 
@@ -210,7 +210,7 @@ fn dispatch_constructor(
     commands: &mut Commands,
 ) {
     let Some((entity, ctor_pos)) = constructors.iter().find_map(|(e, t, ut, gtf, mt, pb, c)| {
-        if t.0 == team && is_constructor(ut.0) && mt.is_none() && pb.is_none() && c.is_none() {
+        if t.0 == team && ut.0.is_constructor() && mt.is_none() && pb.is_none() && c.is_none() {
             Some((e, gtf.translation()))
         } else {
             None
@@ -294,38 +294,6 @@ fn secondary_factory(faction: Faction) -> UnitKind {
     }
 }
 
-fn is_combat_unit(kind: UnitKind) -> bool {
-    matches!(
-        kind,
-        UnitKind::Bit
-            | UnitKind::Byte
-            | UnitKind::Pointer
-            | UnitKind::Bug
-            | UnitKind::Exploit
-            | UnitKind::Worm
-            | UnitKind::Dos
-            | UnitKind::Packet
-            | UnitKind::Signal
-            | UnitKind::Flow
-    )
-}
-
-fn is_building(kind: UnitKind) -> bool {
-    matches!(
-        kind,
-        UnitKind::Kernel
-            | UnitKind::Hole
-            | UnitKind::Connection
-            | UnitKind::Socket
-            | UnitKind::Window
-            | UnitKind::Port
-            | UnitKind::Firewall
-            | UnitKind::Terminal
-            | UnitKind::Obelisk
-            | UnitKind::BadBlock
-    )
-}
-
 fn nearest_enemy_homebase(own_team: u8, homebases: &[(u8, Vec3)], from: Vec3) -> Option<Vec3> {
     homebases
         .iter()
@@ -357,18 +325,6 @@ mod tests {
     fn nearest_enemy_none_when_alone() {
         let bases = [(0, Vec3::ZERO)];
         assert!(nearest_enemy_homebase(0, &bases, Vec3::ZERO).is_none());
-    }
-
-    #[test]
-    fn combat_classifier_includes_basic_units() {
-        assert!(is_combat_unit(UnitKind::Bit));
-        assert!(is_combat_unit(UnitKind::Bug));
-        assert!(is_combat_unit(UnitKind::Packet));
-        assert!(is_combat_unit(UnitKind::Byte));
-        assert!(!is_combat_unit(UnitKind::Assembler));
-        assert!(!is_combat_unit(UnitKind::Virus));
-        assert!(!is_combat_unit(UnitKind::LogicBomb));
-        assert!(!is_combat_unit(UnitKind::Kernel));
     }
 
     #[test]

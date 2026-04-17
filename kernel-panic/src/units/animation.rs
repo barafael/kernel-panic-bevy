@@ -114,7 +114,7 @@ fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
     if axis == 0 { -value } else { value }
 }
 
-/// System: push host-tracked unit values (BUILD_PERCENT_LEFT today,
+/// Push host-tracked unit values (BUILD_PERCENT_LEFT today,
 /// more later) into each unit's COB VM so its `Create()` script can
 /// drive its own emerge animation. Runs before `animation_system` so
 /// the values are visible to scripts on this tick.
@@ -137,7 +137,7 @@ pub fn publish_unit_values(
     }
 }
 
-/// System: tick all CobAnimator VMs and apply piece transforms.
+/// Tick all CobAnimator VMs and apply piece transforms.
 #[allow(clippy::too_many_arguments)]
 pub fn animation_system(
     time: Res<Time>,
@@ -391,7 +391,7 @@ fn spawn_death_particle(
     ));
 }
 
-/// System: expand and fade death particles, then despawn them.
+/// Expand and fade death particles, then despawn them.
 pub fn decay_death_particles(
     time: Res<Time>,
     mut query: Query<(

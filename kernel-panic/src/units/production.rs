@@ -333,7 +333,7 @@ pub fn production_system(
 #[derive(Component)]
 pub struct PendingFadeInstall;
 
-/// System: host-animate Connection's `body` piece as a "hatch" — lifts
+/// Host-animate Connection's `body` piece as a "hatch" — lifts
 /// up by 16 elmos while the Connection is producing, drops back down
 /// when idle. The upstream Network homebase (Carrier) does this in its
 /// .bos via Activate/Deactivate moving a `mover` piece, but our

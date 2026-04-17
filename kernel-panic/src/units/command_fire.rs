@@ -75,7 +75,7 @@ pub struct AreaDenialZone {
     pub owner_faction: Faction,
 }
 
-/// System: drain queued `CommandFireEvent`s into persistent
+/// Drain queued `CommandFireEvent`s into persistent
 /// `AreaDenialZone` entities. A unit identifies its command-fire
 /// weapon by looking at its `UnitKind` — NX Flag for Pointer, Infection
 /// for Obelisk. Units without a registered ability are ignored.
@@ -136,8 +136,7 @@ fn apply_firewall(
 ) {
     let radius_sq = FIREWALL_RADIUS * FIREWALL_RADIUS;
     for (entity, team, faction, gtf) in targets.iter() {
-        let friendly = team.0 == caster_team || *faction == caster_faction;
-        if !friendly {
+        if !super::components::is_friendly(team.0, *faction, caster_team, caster_faction) {
             continue;
         }
         if gtf.translation().distance_squared(center) > radius_sq {
@@ -163,7 +162,7 @@ pub fn tick_protection(
     }
 }
 
-/// System: tick the per-caster `CommandFireCooldown` down to zero, then
+/// Tick the per-caster `CommandFireCooldown` down to zero, then
 /// remove the component so the caster becomes eligible again.
 pub fn tick_command_fire_cooldown(
     time: Res<Time>,
@@ -179,7 +178,7 @@ pub fn tick_command_fire_cooldown(
     }
 }
 
-/// System: tick every active `AreaDenialZone`. Applies `dps*dt` raw HP
+/// Tick every active `AreaDenialZone`. Applies `dps*dt` raw HP
 /// damage directly to each unit in radius (matching upstream's
 /// `Spring.AddUnitDamage` in areadenial.lua, which bypasses the armor
 /// multiplier table), optionally infects, and despawns expired zones.
@@ -209,8 +208,13 @@ pub fn tick_area_denial(
         let tick_damage = zone.dps * dt;
 
         for (unit_entity, _unit, faction, team, gtf, mut health) in &mut units {
-            let is_friendly = team.0 == zone.owner_team || *faction == zone.owner_faction;
-            if is_friendly && !zone.damage_friendly {
+            let friendly = super::components::is_friendly(
+                team.0,
+                *faction,
+                zone.owner_team,
+                zone.owner_faction,
+            );
+            if friendly && !zone.damage_friendly {
                 continue;
             }
             if gtf.translation().distance_squared(zone.center) >= radius_sq {
@@ -219,7 +223,7 @@ pub fn tick_area_denial(
 
             health.current -= tick_damage;
 
-            if zone.infects && !is_friendly {
+            if zone.infects && !friendly {
                 commands.entity(unit_entity).insert(Infected {
                     timer: INFECTION_DURATION,
                     attacker_faction: zone.owner_faction,

@@ -90,7 +90,7 @@ pub fn shield_state_for(kind: UnitKind, weapons: &WeaponRegistry) -> Option<Shie
     })
 }
 
-/// System: regenerate finite shields toward their max over time.
+/// Regenerate finite shields toward their max over time.
 /// Infinite shields are skipped — they have nothing to regen.
 pub fn regen_shields(time: Res<Time>, mut query: Query<&mut ShieldState>) {
     let dt = time.delta_secs();
@@ -106,7 +106,7 @@ pub fn regen_shields(time: Res<Time>, mut query: Query<&mut ShieldState>) {
     }
 }
 
-/// System: any shielded unit that doesn't yet have a `ShieldState`
+/// Any shielded unit that doesn't yet have a `ShieldState`
 /// gets one this frame. Runs once per spawned entity; `Added<UnitType>`
 /// filters keep the work proportional to actual spawns.
 pub fn attach_shields(

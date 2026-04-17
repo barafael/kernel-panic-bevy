@@ -86,15 +86,10 @@ pub(super) struct ImpactBurstAssets {
 /// Shared material cache to avoid per-frame allocations.
 #[derive(Resource, Default)]
 pub(super) struct BeamMaterialCache {
-    entries: Vec<CachedMaterial>,
+    entries: std::collections::HashMap<MaterialKey, Handle<StandardMaterial>>,
 }
 
-struct CachedMaterial {
-    key: MaterialKey,
-    handle: Handle<StandardMaterial>,
-}
-
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct MaterialKey {
     r: u8,
     g: u8,
@@ -132,28 +127,23 @@ impl BeamMaterialCache {
             additive,
             intensity: (emissive_scale * 2.0).round() as u8,
         };
-        for entry in &self.entries {
-            if entry.key == key {
-                return entry.handle.clone();
-            }
-        }
-        let alpha_mode = if additive {
-            AlphaMode::Add
-        } else {
-            AlphaMode::Blend
-        };
-        let handle = materials.add(StandardMaterial {
-            base_color: Color::LinearRgba(color),
-            emissive: color * emissive_scale,
-            unlit: true,
-            alpha_mode,
-            ..default()
-        });
-        self.entries.push(CachedMaterial {
-            key,
-            handle: handle.clone(),
-        });
-        handle
+        self.entries
+            .entry(key)
+            .or_insert_with(|| {
+                let alpha_mode = if additive {
+                    AlphaMode::Add
+                } else {
+                    AlphaMode::Blend
+                };
+                materials.add(StandardMaterial {
+                    base_color: Color::LinearRgba(color),
+                    emissive: color * emissive_scale,
+                    unlit: true,
+                    alpha_mode,
+                    ..default()
+                })
+            })
+            .clone()
     }
 }
 

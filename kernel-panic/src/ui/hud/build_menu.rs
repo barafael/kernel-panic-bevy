@@ -12,7 +12,7 @@ use super::style::{
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, UnitType};
-use crate::units::construction::{buildings_for, is_constructor};
+use crate::units::construction::buildings_for;
 use crate::units::definitions::UnitKind;
 use crate::units::production::Producer;
 use crate::units::unit_registry::UnitRegistry;
@@ -84,7 +84,7 @@ fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
             UnitKind::Flow,
         ],
         UnitKind::Port => &[UnitKind::Packet],
-        kind if is_constructor(kind) => buildings_for(kind),
+        kind if kind.is_constructor() => buildings_for(kind),
         _ => &[],
     }
 }
@@ -349,11 +349,11 @@ fn handle_build_clicks(
         // click — the icons shouldn't be visible in that case anyway.
         let Some((builder_entity, ut)) = selected_q
             .iter()
-            .find(|(_, ut)| is_constructor(ut.0) || !buildable_units(ut.0).is_empty())
+            .find(|(_, ut)| ut.0.is_constructor() || !buildable_units(ut.0).is_empty())
         else {
             continue;
         };
-        if is_constructor(ut.0) {
+        if ut.0.is_constructor() {
             ev_placement.write(BeginPlacementEvent {
                 builder: builder_entity,
                 kind: build_icon.0,

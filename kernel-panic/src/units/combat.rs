@@ -103,9 +103,30 @@ pub fn weapon_infection_duration(weapon: &str) -> Option<f32> {
     Some(frames / 30.0)
 }
 
-/// Queued virus spawns from infected unit deaths (position, faction, team).
+/// Queued virus spawns from infected unit deaths.
+#[derive(Debug, Clone, Copy)]
+pub struct VirusSpawn {
+    pub position: Vec3,
+    pub faction: Faction,
+    pub team: u8,
+}
+
 #[derive(Resource, Default)]
-pub struct VirusSpawnQueue(pub Vec<(Vec3, Faction, u8)>);
+pub struct VirusSpawnQueue(Vec<VirusSpawn>);
+
+impl VirusSpawnQueue {
+    pub fn push(&mut self, spawn: VirusSpawn) {
+        self.0.push(spawn);
+    }
+
+    pub fn drain(&mut self) -> std::vec::Drain<'_, VirusSpawn> {
+        self.0.drain(..)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
 
 /// A pending damage event. Damage is resolved at apply-time so the
 /// target's armor class can pick the right entry from the weapon's
@@ -128,6 +149,24 @@ pub struct PendingDamage {
 /// Pending damage to apply after combat resolution.
 #[derive(Resource, Default)]
 pub struct DamageQueue(Vec<PendingDamage>);
+
+impl DamageQueue {
+    pub fn push(&mut self, damage: PendingDamage) {
+        self.0.push(damage);
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn drain(&mut self) -> std::vec::Drain<'_, PendingDamage> {
+        self.0.drain(..)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+}
 
 /// Deploy cycle for units that must unfold before firing (e.g. Pointer).
 /// The COB script animates the legs/gun; this component gates combat so
@@ -183,7 +222,7 @@ impl Deployable {
     }
 }
 
-/// System: drive the deploy state machine from movement state, firing
+/// Drive the deploy state machine from movement state, firing
 /// the unit's `Open()` / `Close()` COB scripts so the visible model
 /// matches the logical deploy state. Stopping schedules `Open`; starting
 /// to move schedules `Close`.
@@ -233,7 +272,7 @@ pub fn tick_deploy_state(
     }
 }
 
-/// System: armed units auto-attack the nearest enemy in range.
+/// Armed units auto-attack the nearest enemy in range.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn combat_system(
     time: Res<Time>,
@@ -270,7 +309,7 @@ pub fn combat_system(
         cd.remaining = (cd.remaining - dt).max(0.0);
     }
 
-    damage_queue.0.clear();
+    damage_queue.clear();
 
     for (entity, unit_type, attacker_faction, attacker_team, attacker_gtf, deployable) in &attackers
     {
@@ -394,7 +433,7 @@ pub fn combat_system(
             }
         }
 
-        damage_queue.0.push(PendingDamage {
+        damage_queue.push(PendingDamage {
             target: target_entity,
             attacker: entity,
             weapon: weapon_name.to_string(),
@@ -433,7 +472,7 @@ pub fn combat_system(
     }
 }
 
-/// System: steer Deployable units to face their current `AimTarget` at
+/// Steer Deployable units to face their current `AimTarget` at
 /// the unit's FBI TurnRate, and tilt the `gunbase` piece by the pitch
 /// required to sight the target (accounting for ballistic arc height).
 /// The rotation is written directly into the CobAnimator's `piece_rotations`
@@ -521,7 +560,7 @@ pub fn aim_weapons_system(
     }
 }
 
-/// System: release follow-up shots for units in the middle of a burst.
+/// Release follow-up shots for units in the middle of a burst.
 /// The initial shot fires through the regular combat path; each follow-up
 /// queues another damage event and weapon-FX event at `burst_rate` spacing
 /// until `shots_remaining` hits zero, then removes the component.
@@ -539,7 +578,7 @@ pub fn tick_burst_fire(
             continue;
         }
 
-        damage_queue.0.push(PendingDamage {
+        damage_queue.push(PendingDamage {
             target: burst.target,
             attacker: entity,
             weapon: burst.weapon.clone(),
@@ -642,7 +681,7 @@ fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
     1.0 - t * (1.0 - edge_mult)
 }
 
-/// System: apply queued damage and mark targets as infected when hit by
+/// Apply queued damage and mark targets as infected when hit by
 /// Worm or Virus weapons. Weapons with `area_of_effect > AOE_SPLASH_THRESHOLD`
 /// also damage other units in radius, with linear falloff from the
 /// weapon's `edge_effectiveness`. `avoidfriendly=1` and `noselfdamage=1`
@@ -661,7 +700,7 @@ pub fn apply_damage(
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
 ) {
-    for pending in damage_queue.0.drain(..) {
+    for pending in damage_queue.drain() {
         let Some(weapon_def) = weapon_registry.get(&pending.weapon) else {
             warn!("apply_damage: weapon {:?} not in registry", pending.weapon);
             continue;
@@ -709,7 +748,7 @@ pub fn apply_damage(
                 }
                 if avoid_friendly
                     && let Some((_, a_faction, a_team)) = attacker_info
-                    && (team == a_team || faction == a_faction)
+                    && super::components::is_friendly(team.0, *faction, a_team.0, *a_faction)
                 {
                     continue;
                 }
@@ -759,7 +798,7 @@ pub fn apply_damage(
 /// seconds so we can compare against a `Time`-driven timer.
 const IDLE_FRAMES_PER_SECOND: f32 = 30.0;
 
-/// System: regenerate HP on units that have been idle long enough.
+/// Regenerate HP on units that have been idle long enough.
 /// A unit counts as idle when it has no move order and no current aim
 /// target. The idle timer is reset in `apply_damage` whenever the unit
 /// takes damage. Units whose FBI lacks `IdleAutoHeal` (value 0) opt out.
@@ -800,7 +839,7 @@ pub fn auto_heal(
     }
 }
 
-/// System: tick the `Stunned` timer. When it expires, remove the marker
+/// Tick the `Stunned` timer. When it expires, remove the marker
 /// and zero out accumulated stun charge so the unit isn't re-stunned on
 /// the next DOS hit.
 pub fn tick_stun(
@@ -830,7 +869,7 @@ pub fn tick_stun(
     }
 }
 
-/// System: trigger kamikaze units (Logic Bombs) when any enemy enters
+/// Trigger kamikaze units (Logic Bombs) when any enemy enters
 /// their proximity radius. The bomb queues its ExplodeAs weapon as a
 /// self-damage event and forces its own HP to zero; `death_system` +
 /// `apply_damage` handle the splash and the corpse teardown.
@@ -859,7 +898,7 @@ pub fn tick_kamikaze(
             continue;
         }
 
-        damage_queue.0.push(PendingDamage {
+        damage_queue.push(PendingDamage {
             target: entity,
             attacker: entity,
             weapon: "logic_bomb".to_string(),
@@ -886,7 +925,7 @@ pub fn tick_infections(
     }
 }
 
-/// System: when a unit reaches 0 HP, start the Killed() COB script and mark it
+/// When a unit reaches 0 HP, start the Killed() COB script and mark it
 /// as `Dying`. If the unit was infected, queue a Virus spawn. If the
 /// dying unit *is* a Virus, queue a VirusDeath hit at its corpse so
 /// the infection chain can spread via AoE splash.
@@ -918,18 +957,18 @@ pub fn death_system(
             // If the dying unit was infected, queue a Virus spawn for the
             // attacker's team at the death location.
             if let Some(infected) = infected {
-                virus_spawns.0.push((
-                    gtf.translation(),
-                    infected.attacker_faction,
-                    infected.attacker_team,
-                ));
+                virus_spawns.push(VirusSpawn {
+                    position: gtf.translation(),
+                    faction: infected.attacker_faction,
+                    team: infected.attacker_team,
+                });
             }
 
             // Virus death sprays VirusDeath at its own corpse so the
             // weapon's AoE + per-weapon infection window can chain the
             // outbreak through nearby units.
             if unit.0 == UnitKind::Virus {
-                damage_queue.0.push(PendingDamage {
+                damage_queue.push(PendingDamage {
                     target: entity,
                     attacker: entity,
                     weapon: "VirusDeath".to_string(),
@@ -945,7 +984,7 @@ pub fn death_system(
     }
 }
 
-/// System: despawn dying units once their death animation finishes or the
+/// Despawn dying units once their death animation finishes or the
 /// timeout expires.
 pub fn cleanup_dying(
     time: Res<Time>,
@@ -1034,7 +1073,7 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_millis(250));
         app.world_mut().run_system_once(tick_burst_fire).unwrap();
-        assert_eq!(app.world().resource::<DamageQueue>().0.len(), 1);
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
         assert_eq!(
             app.world()
                 .get::<BurstFire>(attacker)
@@ -1048,7 +1087,7 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_millis(100));
         app.world_mut().run_system_once(tick_burst_fire).unwrap();
-        assert_eq!(app.world().resource::<DamageQueue>().0.len(), 1);
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
 
         // Two more intervals: remaining shots fire, component is gone.
         app.world_mut()
@@ -1059,7 +1098,7 @@ mod tests {
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_millis(250));
         app.world_mut().run_system_once(tick_burst_fire).unwrap();
-        assert_eq!(app.world().resource::<DamageQueue>().0.len(), 3);
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 3);
         assert!(app.world().get::<BurstFire>(attacker).is_none());
     }
 }

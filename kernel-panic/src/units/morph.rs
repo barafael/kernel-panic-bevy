@@ -26,7 +26,7 @@ fn morph_target(kind: UnitKind) -> Option<UnitKind> {
     }
 }
 
-/// System: process morph events by despawning the source and spawning
+/// Process morph events by despawning the source and spawning
 /// its pair with proportional HP at the same position.
 pub fn process_morph(
     mut events: MessageReader<MorphEvent>,

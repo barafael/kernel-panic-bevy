@@ -15,7 +15,7 @@ use crate::units::command_fire::CommandFireEvent;
 use crate::units::components::UnitType;
 use crate::units::definitions::UnitKind;
 use crate::units::morph::MorphEvent;
-use crate::units::network_buffer::{DispatchEvent, EnterEvent, is_teleporter};
+use crate::units::network_buffer::{DispatchEvent, EnterEvent};
 
 pub struct AbilityHotkeyPlugin;
 
@@ -63,7 +63,7 @@ fn trigger_dispatch_on_hotkey(
         return;
     };
     for (entity, unit) in &selected_q {
-        if is_teleporter(unit.0) {
+        if unit.0.is_teleporter() {
             ev.write(DispatchEvent {
                 teleporter: entity,
                 target,

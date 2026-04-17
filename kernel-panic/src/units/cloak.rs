@@ -22,12 +22,7 @@ use super::unit_registry::UnitRegistry;
 #[derive(Component)]
 pub struct Cloaked;
 
-/// Units that should carry the `Cloaked` marker when spawned.
-pub fn spawns_cloaked(kind: UnitKind) -> bool {
-    matches!(kind, UnitKind::Worm | UnitKind::LogicBomb)
-}
-
-/// System: each frame, decide whether every cloaked unit is spotted
+/// Each frame, decide whether every cloaked unit is spotted
 /// and set its `Visibility` accordingly. A unit is spotted when any
 /// opposing team's detector is within that detector's radar range.
 pub fn update_cloak_visibility(
@@ -70,24 +65,5 @@ pub fn update_cloak_visibility(
         if *visibility != new_vis {
             *visibility = new_vis;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn worm_and_logic_bomb_spawn_cloaked() {
-        assert!(spawns_cloaked(UnitKind::Worm));
-        assert!(spawns_cloaked(UnitKind::LogicBomb));
-    }
-
-    #[test]
-    fn visible_units_do_not_spawn_cloaked() {
-        assert!(!spawns_cloaked(UnitKind::Bit));
-        assert!(!spawns_cloaked(UnitKind::Bug));
-        assert!(!spawns_cloaked(UnitKind::Kernel));
-        assert!(!spawns_cloaked(UnitKind::Assembler));
     }
 }

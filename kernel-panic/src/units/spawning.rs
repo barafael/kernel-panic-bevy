@@ -362,7 +362,7 @@ pub fn spawn_unit(
         super::combat::StunCharge(0.0),
     ));
 
-    if super::cloak::spawns_cloaked(kind) {
+    if kind.spawns_cloaked() {
         commands.entity(unit_entity).insert(super::cloak::Cloaked);
     }
 
@@ -652,7 +652,7 @@ fn piece_to_mesh(piece: &S3OPiece) -> Mesh {
     mesh
 }
 
-/// System: drain the `VirusSpawnQueue` and spawn Virus units at the queued
+/// Drain the `VirusSpawnQueue` and spawn Virus units at the queued
 /// positions. Runs after the death system so kills in a given frame produce
 /// Viruses on the next.
 #[allow(clippy::too_many_arguments)]
@@ -667,7 +667,7 @@ pub fn spawn_queued_viruses(
     sel_mat: Option<Res<SelectionVolumeMaterial>>,
     unit_registry: Res<UnitRegistry>,
 ) {
-    if virus_spawns.0.is_empty() {
+    if virus_spawns.is_empty() {
         return;
     }
 
@@ -676,12 +676,12 @@ pub fn spawn_queued_viruses(
         None => get_or_create_invisible_material(&mut commands, &mut materials),
     };
 
-    for (pos, faction, team) in virus_spawns.0.drain(..) {
+    for spawn in virus_spawns.drain() {
         spawn_unit(
             UnitKind::Virus,
-            faction,
-            team,
-            pos,
+            spawn.faction,
+            spawn.team,
+            spawn.position,
             &mut commands,
             &mut meshes,
             &mut materials,
