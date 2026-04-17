@@ -75,6 +75,7 @@ impl Plugin for UnitsPlugin {
                     (
                         combat::tick_deploy_state,
                         combat::combat_system,
+                        combat::tick_burst_fire,
                         combat::aim_weapons_system,
                         combat::tick_infections,
                         script_triggers::trigger_movement_scripts,

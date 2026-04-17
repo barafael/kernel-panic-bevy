@@ -15,6 +15,22 @@ pub struct AttackCooldown {
     pub remaining: f32,
 }
 
+/// In-progress burst fire. Weapons with `burst > 1` fire the first shot
+/// through the normal combat path and attach this component for the
+/// remaining shots, which are released at `interval` spacing by
+/// [`tick_burst_fire`]. The aim point is frozen at trigger time so the
+/// whole burst lands on the same spot regardless of target motion.
+#[derive(Component)]
+pub struct BurstFire {
+    pub shots_remaining: u32,
+    pub interval: f32,
+    pub timer: f32,
+    pub target: Entity,
+    pub target_pos: Vec3,
+    pub weapon: String,
+    pub arc_height: f32,
+}
+
 /// Marks a unit that has reached 0 HP and is playing its death animation.
 /// The entity will be despawned once the animation finishes or the timer expires.
 #[derive(Component)]
@@ -326,6 +342,19 @@ pub fn combat_system(
                 weapon_name: weapon_name.to_string(),
             });
         }
+
+        let burst = weapon_def.map_or(0.0, |w| w.burst) as u32;
+        if burst > 1 {
+            commands.entity(entity).insert(BurstFire {
+                shots_remaining: burst - 1,
+                interval: weapon_def.map_or(0.1, |w| w.burst_rate.max(0.05)),
+                timer: weapon_def.map_or(0.1, |w| w.burst_rate.max(0.05)),
+                target: target_entity,
+                target_pos,
+                weapon: weapon_name.to_string(),
+                arc_height,
+            });
+        }
     }
 }
 
@@ -413,6 +442,49 @@ pub fn aim_weapons_system(
             // (50 ang-units/frame ≈ 8.2°/sec) which feels too sluggish
             // for a responsive host-driven aim; we split the difference.
             animator.turn_speeds[idx][0] = std::f32::consts::PI * 0.5;
+        }
+    }
+}
+
+/// System: release follow-up shots for units in the middle of a burst.
+/// The initial shot fires through the regular combat path; each follow-up
+/// queues another damage event and weapon-FX event at `burst_rate` spacing
+/// until `shots_remaining` hits zero, then removes the component.
+pub fn tick_burst_fire(
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut BurstFire, &GlobalTransform), Without<Dying>>,
+    mut commands: Commands,
+    mut damage_queue: ResMut<DamageQueue>,
+    mut pending_attacks: ResMut<PendingAttacks>,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut burst, gtf) in &mut query {
+        burst.timer -= dt;
+        if burst.timer > 0.0 {
+            continue;
+        }
+
+        damage_queue.0.push(PendingDamage {
+            target: burst.target,
+            attacker: entity,
+            weapon: burst.weapon.clone(),
+            impact_pos: burst.target_pos,
+        });
+        pending_attacks.events.push(AttackEvent {
+            attacker_pos: gtf.translation(),
+            target_pos: burst.target_pos,
+            weapon_name: burst.weapon.clone(),
+        });
+        commands.entity(entity).insert(JustFired {
+            target_pos: burst.target_pos,
+            arc_height: burst.arc_height,
+        });
+
+        burst.shots_remaining -= 1;
+        if burst.shots_remaining == 0 {
+            commands.entity(entity).remove::<BurstFire>();
+        } else {
+            burst.timer = burst.interval;
         }
     }
 }
@@ -575,7 +647,7 @@ pub fn cleanup_dying(
 
 #[cfg(test)]
 mod tests {
-    use super::splash_falloff;
+    use super::*;
 
     #[test]
     fn splash_full_damage_at_center() {
@@ -599,5 +671,65 @@ mod tests {
         assert!((splash_falloff(256.0, 512.0, 0.0) - 0.5).abs() < 1e-5);
         // Quarter out at edge_effectiveness=0.4 → 1 - 0.25 * 0.6 = 0.85.
         assert!((splash_falloff(128.0, 512.0, 0.4) - 0.85).abs() < 1e-5);
+    }
+
+    #[test]
+    fn burst_fire_releases_shots_at_interval() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>();
+
+        let target = app.world_mut().spawn_empty().id();
+        let attacker = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                BurstFire {
+                    shots_remaining: 3,
+                    interval: 0.25,
+                    timer: 0.25,
+                    target,
+                    target_pos: Vec3::ZERO,
+                    weapon: "TestWeapon".to_string(),
+                    arc_height: 0.0,
+                },
+            ))
+            .id();
+
+        // Advance one interval: one shot fires, two remain.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(250));
+        app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        assert_eq!(app.world().resource::<DamageQueue>().0.len(), 1);
+        assert_eq!(
+            app.world()
+                .get::<BurstFire>(attacker)
+                .unwrap()
+                .shots_remaining,
+            2
+        );
+
+        // A fraction later: not yet due.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(100));
+        app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        assert_eq!(app.world().resource::<DamageQueue>().0.len(), 1);
+
+        // Two more intervals: remaining shots fire, component is gone.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(250));
+        app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(250));
+        app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        assert_eq!(app.world().resource::<DamageQueue>().0.len(), 3);
+        assert!(app.world().get::<BurstFire>(attacker).is_none());
     }
 }
