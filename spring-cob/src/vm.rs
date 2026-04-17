@@ -563,10 +563,19 @@ impl CobVm {
                         args.push(thread.pop());
                     }
 
+                    // start-script spawns a fresh thread that listens to
+                    // *no* signals until it sets its own mask. If we
+                    // inherited the parent's mask, the parent's next
+                    // `signal` would kill this thread immediately. Notably
+                    // byte's AimWeapon1 sets SIG_AIM, then start-scripts
+                    // Close() — if Close() inherited SIG_AIM the next
+                    // AimWeapon1 would terminate it before it could turn
+                    // the aimer back to rest, leaving the byte stuck
+                    // tilted at the previous target.
                     self.pending_spawns.push(SpawnRequest {
                         function_id: func_id,
                         args,
-                        signal_mask: thread.signal_mask,
+                        signal_mask: 0,
                     });
                 }
                 Opcode::Signal => {
