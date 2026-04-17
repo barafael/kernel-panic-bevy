@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod animation;
+pub mod cloak;
 pub mod combat;
 pub mod command_fire;
 pub mod components;
@@ -106,6 +107,7 @@ impl Plugin for UnitsPlugin {
                         animation::publish_unit_values,
                         animation::animation_system,
                         animation::decay_death_particles,
+                        cloak::update_cloak_visibility,
                     )
                         .chain()
                         .in_set(GameplaySet::Animate),

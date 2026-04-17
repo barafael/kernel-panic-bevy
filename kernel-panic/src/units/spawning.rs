@@ -366,6 +366,12 @@ pub fn spawn_unit(
         super::combat::StunCharge(0.0),
     ));
 
+    if super::cloak::spawns_cloaked(kind) {
+        commands
+            .entity(unit_entity)
+            .insert((super::cloak::Cloaked, super::cloak::Spotted::default()));
+    }
+
     if let Some(producer) = default_production(kind) {
         commands.entity(unit_entity).insert(producer);
     }

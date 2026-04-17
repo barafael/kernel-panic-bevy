@@ -151,6 +151,13 @@ impl UnitRegistry {
         self.def(kind).map_or("", |d| &d.build_pic)
     }
 
+    /// Detector radius (elmos) — a unit can reveal cloaked enemies within
+    /// this range. Maps to the FBI `RadarDistance` field; zero means this
+    /// unit kind does not detect cloaked targets.
+    pub fn detector_range(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.radar_distance)
+    }
+
     /// HP per second regenerated once a unit has been idle for `idle_time`.
     /// Zero means the unit never auto-heals.
     pub fn idle_auto_heal(&self, kind: UnitKind) -> f32 {
