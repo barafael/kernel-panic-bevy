@@ -376,6 +376,12 @@ pub fn spawn_unit(
             .insert(super::network_buffer::PortTimer::default());
     }
 
+    if kind == UnitKind::Flow {
+        commands
+            .entity(unit_entity)
+            .insert(super::network_buffer::SpeedBoost::default());
+    }
+
     if let Some(producer) = default_production(kind) {
         commands.entity(unit_entity).insert(producer);
     }

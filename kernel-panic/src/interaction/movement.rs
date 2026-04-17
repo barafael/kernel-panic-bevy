@@ -112,6 +112,7 @@ pub fn movement_system(
         Option<&Deployable>,
         Option<&mut SlopeTilt>,
         Option<&crate::units::combat::Stunned>,
+        Option<&crate::units::network_buffer::SpeedBoost>,
     )>,
     unit_registry: Res<UnitRegistry>,
 ) {
@@ -123,7 +124,7 @@ pub fn movement_system(
     // "already at its goal".
     let snapshot: Vec<UnitSnapshot> = query
         .iter()
-        .map(|(e, ut, tf, target, _, _, _, _, _)| UnitSnapshot {
+        .map(|(e, ut, tf, target, _, _, _, _, _, _)| UnitSnapshot {
             entity: e,
             pos: tf.translation,
             radius: unit_registry.collision_radius(ut.0),
@@ -143,13 +144,14 @@ pub fn movement_system(
         deployable,
         mut slope_tilt,
         stunned,
+        speed_boost,
     ) in &mut query
     {
         if stunned.is_some() {
             continue;
         }
 
-        let speed = unit_registry.speed(unit_type.0);
+        let speed = unit_registry.speed(unit_type.0) + speed_boost.map_or(0.0, |b| b.0);
         if speed == 0.0 {
             // Buildings can't move — remove any movement components.
             commands.entity(entity).remove::<MoveTarget>();

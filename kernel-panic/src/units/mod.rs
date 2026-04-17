@@ -55,6 +55,7 @@ impl Plugin for UnitsPlugin {
             .add_message::<network_buffer::DispatchEvent>()
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<network_buffer::PacketBuffer>()
+            .init_resource::<network_buffer::FlowSpeedTicker>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -77,6 +78,7 @@ impl Plugin for UnitsPlugin {
                         morph::process_morph,
                         network_buffer::tick_port_buffers,
                         network_buffer::tick_spawn_stun,
+                        network_buffer::tick_flow_speed,
                         network_buffer::process_dispatch,
                         network_buffer::process_enter,
                         production::production_system,

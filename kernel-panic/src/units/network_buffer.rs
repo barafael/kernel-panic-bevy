@@ -229,6 +229,76 @@ pub fn player_plays_network(player_team: u8, homebases: &[(u8, Faction)]) -> boo
         .any(|(t, f)| *t == player_team && matches!(f, Faction::Network))
 }
 
+/// Extra elmos-per-second added to Flow's base speed per *small
+/// building* (Socket, Window, Port, Terminal, Obelisk, Firewall) the
+/// team owns. Matches upstream `network_flowspeed.lua::bonusPerFac`.
+pub const FLOW_BONUS_PER_BUILDING: f32 = 30.0;
+
+/// Upstream caps Flow at MAX_SPEED=75; our registry speed lookup is in
+/// elmos/second (MaxVelocity * 30), so we cap the *bonus* portion so
+/// the combined speed never exceeds 75 elmos/frame equivalents.
+const FLOW_MAX_SPEED: f32 = 75.0 * 30.0;
+
+/// Per-Flow multiplier applied on top of `unit_registry.speed`. Updated
+/// once per second by `tick_flow_speed` based on the Flow's team's
+/// small-building count.
+#[derive(Component, Default, Clone, Copy, Debug)]
+pub struct SpeedBoost(pub f32);
+
+/// Which unit kinds upstream counts as "small buildings" for the Flow
+/// speed scaling.
+pub fn is_small_building(kind: UnitKind) -> bool {
+    matches!(
+        kind,
+        UnitKind::Socket
+            | UnitKind::Window
+            | UnitKind::Port
+            | UnitKind::Terminal
+            | UnitKind::Obelisk
+            | UnitKind::Firewall
+    )
+}
+
+/// How often to recompute each team's small-building count. One second
+/// matches upstream's 27-frame cadence well enough without rescanning
+/// every frame.
+const FLOW_TICK_INTERVAL: f32 = 1.0;
+
+#[derive(Resource, Default)]
+pub struct FlowSpeedTicker(pub f32);
+
+/// System: periodically recount small buildings per team and update
+/// every Flow's `SpeedBoost` so movement can apply the bonus.
+pub fn tick_flow_speed(
+    time: Res<Time>,
+    mut ticker: ResMut<FlowSpeedTicker>,
+    buildings: Query<(&UnitType, &TeamId), Without<Dying>>,
+    mut flows: Query<(&UnitType, &TeamId, &mut SpeedBoost)>,
+    unit_registry: Res<super::unit_registry::UnitRegistry>,
+) {
+    ticker.0 += time.delta_secs();
+    if ticker.0 < FLOW_TICK_INTERVAL {
+        return;
+    }
+    ticker.0 = 0.0;
+
+    let mut counts: HashMap<u8, u32> = HashMap::new();
+    for (unit, team) in &buildings {
+        if is_small_building(unit.0) {
+            *counts.entry(team.0).or_default() += 1;
+        }
+    }
+
+    for (unit, team, mut boost) in &mut flows {
+        if unit.0 != UnitKind::Flow {
+            continue;
+        }
+        let base = unit_registry.speed(UnitKind::Flow);
+        let bonus = counts.get(&team.0).copied().unwrap_or(0) as f32 * FLOW_BONUS_PER_BUILDING;
+        boost.0 = (base + bonus).min(FLOW_MAX_SPEED) - base;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +341,19 @@ mod tests {
         assert!(player_plays_network(0, &bases));
         assert!(!player_plays_network(1, &bases));
         assert!(!player_plays_network(2, &bases));
+    }
+
+    #[test]
+    fn small_building_classifier() {
+        assert!(is_small_building(UnitKind::Socket));
+        assert!(is_small_building(UnitKind::Window));
+        assert!(is_small_building(UnitKind::Port));
+        assert!(is_small_building(UnitKind::Terminal));
+        assert!(is_small_building(UnitKind::Obelisk));
+        assert!(is_small_building(UnitKind::Firewall));
+        assert!(!is_small_building(UnitKind::Kernel));
+        assert!(!is_small_building(UnitKind::Hole));
+        assert!(!is_small_building(UnitKind::Connection));
+        assert!(!is_small_building(UnitKind::Bit));
     }
 }
