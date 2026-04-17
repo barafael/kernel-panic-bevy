@@ -80,8 +80,26 @@ pub struct Infected {
     pub attacker_team: u8,
 }
 
-/// How long (seconds) a Worm/Virus infection lasts before expiring.
+/// How long (seconds) a Worm/Virus infection lasts before expiring,
+/// when the triggering weapon has no entry in
+/// [`weapon_infection_duration`]. The per-weapon map is the source of
+/// truth; this is a fallback for programmatic infections (e.g. the
+/// area-denial Infection gas spawning Viruses).
 pub const INFECTION_DURATION: f32 = 6.0;
+
+/// Per-weapon infection window in seconds. Mirrors upstream
+/// `LuaRules/Gadgets/infection.lua`, which expresses the window in sim
+/// frames at 30 fps. Returns `None` for weapons that don't infect.
+pub fn weapon_infection_duration(weapon: &str) -> Option<f32> {
+    let frames = match weapon {
+        "VirusBeam" | "virusbeam" => 90.0,
+        "VirusDeath" | "virusdeath" => 180.0,
+        "Wormsplash" | "wormsplash" => 200.0,
+        "Infection" | "infection" => 30.0,
+        _ => return None,
+    };
+    Some(frames / 30.0)
+}
 
 /// Queued virus spawns from infected unit deaths (position, faction, team).
 #[derive(Resource, Default)]
@@ -634,17 +652,19 @@ pub fn apply_damage(
             }
         }
 
-        // Apply infection: Worm and Virus attacks infect non-Virus targets.
-        if let Some((attacker_type, attacker_faction, attacker_team)) = attacker_info {
-            let is_infecting =
-                attacker_type.0 == UnitKind::Worm || attacker_type.0 == UnitKind::Virus;
+        // Apply infection: keyed on the weapon (not the attacker kind)
+        // to match upstream LuaRules/Gadgets/infection.lua. VirusBeam,
+        // VirusDeath, Wormsplash, and Obelisk Infection each have their
+        // own infection window in seconds.
+        if let Some(duration) = weapon_infection_duration(&pending.weapon)
+            && let Some((_, attacker_faction, attacker_team)) = attacker_info
+        {
             let target_is_virus = target_unit_q
                 .get(pending.target)
                 .is_ok_and(|ut| ut.0 == UnitKind::Virus);
-
-            if is_infecting && !target_is_virus {
+            if !target_is_virus {
                 commands.entity(pending.target).insert(Infected {
-                    timer: INFECTION_DURATION,
+                    timer: duration,
                     attacker_faction: *attacker_faction,
                     attacker_team: attacker_team.0,
                 });
@@ -744,18 +764,27 @@ pub fn tick_infections(
 }
 
 /// System: when a unit reaches 0 HP, start the Killed() COB script and mark it
-/// as `Dying`. If the unit was infected, queue a Virus spawn.
+/// as `Dying`. If the unit was infected, queue a Virus spawn. If the
+/// dying unit *is* a Virus, queue a VirusDeath hit at its corpse so
+/// the infection chain can spread via AoE splash.
 #[allow(clippy::type_complexity)]
 pub fn death_system(
     query: Query<
-        (Entity, &Health, &GlobalTransform, Option<&Infected>),
-        (With<UnitType>, Without<Dying>),
+        (
+            Entity,
+            &UnitType,
+            &Health,
+            &GlobalTransform,
+            Option<&Infected>,
+        ),
+        Without<Dying>,
     >,
     mut animators: Query<&mut CobAnimator>,
     mut virus_spawns: ResMut<VirusSpawnQueue>,
+    mut damage_queue: ResMut<DamageQueue>,
     mut commands: Commands,
 ) {
-    for (entity, health, gtf, infected) in &query {
+    for (entity, unit, health, gtf, infected) in &query {
         if health.current <= 0.0 {
             // Start the COB Killed() callback if the unit has an animator.
             if let Ok(mut animator) = animators.get_mut(entity) {
@@ -771,6 +800,20 @@ pub fn death_system(
                     infected.attacker_faction,
                     infected.attacker_team,
                 ));
+            }
+
+            // Virus death sprays the VirusDeath weapon at its corpse:
+            // apply_damage will use the weapon's AoE (90) + edge_effectiveness
+            // to damage nearby units, and weapon_infection_duration
+            // will infect anything hit with a 6s window. The dying virus
+            // is the attacker so damage inherits its team/faction.
+            if unit.0 == UnitKind::Virus {
+                damage_queue.0.push(PendingDamage {
+                    target: entity,
+                    attacker: entity,
+                    weapon: "VirusDeath".to_string(),
+                    impact_pos: gtf.translation(),
+                });
             }
 
             commands.entity(entity).remove::<Infected>().insert(Dying {
@@ -801,6 +844,18 @@ pub fn cleanup_dying(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn weapon_infection_durations_match_upstream_gadget() {
+        // Values from upstream LuaRules/Gadgets/infection.lua, converted
+        // from sim frames @ 30 fps to seconds.
+        assert_eq!(weapon_infection_duration("VirusBeam"), Some(3.0));
+        assert_eq!(weapon_infection_duration("VirusDeath"), Some(6.0));
+        assert!((weapon_infection_duration("Wormsplash").unwrap() - 6.666_667).abs() < 1e-3);
+        assert_eq!(weapon_infection_duration("Infection"), Some(1.0));
+        assert_eq!(weapon_infection_duration("BitShot"), None);
+        assert_eq!(weapon_infection_duration("Wormbite"), None);
+    }
 
     #[test]
     fn splash_full_damage_at_center() {
