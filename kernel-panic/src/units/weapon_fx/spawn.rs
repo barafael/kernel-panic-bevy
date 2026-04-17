@@ -224,16 +224,24 @@ fn spawn_beam(
     // Thickness from TDF, clamped for visibility.
     let thickness = (weapon.thickness * 0.25).clamp(0.3, 6.0);
 
-    // Duration from TDF fields.
-    let duration = if weapon.beam_time > 0.0 {
+    // Duration from TDF fields. `beam_decay` controls fade speed — upstream
+    // values near 0.8 mean the beam lingers; we stretch the base lifetime
+    // by it so PacketBeam and GaussCannon read as longer flashes than
+    // their raw duration field suggests.
+    let base = if weapon.beam_time > 0.0 {
         weapon.beam_time
     } else if weapon.duration > 0.0 {
         weapon.duration
     } else {
         0.15
     };
+    let duration = if weapon.beam_decay > 0.0 {
+        base * (1.0 + weapon.beam_decay)
+    } else {
+        base
+    };
 
-    let mat = cache.get_or_create(color, true, materials);
+    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, materials);
     let rotation = Quat::from_rotation_arc(Vec3::Z, dir.normalize());
 
     // The Byte's MegaBeam fires in bursts of 4 thick rectangles.
@@ -242,7 +250,12 @@ fn spawn_beam(
     let core = weapon.core_thickness * 0.25;
     if core > 0.1 && thickness > 1.0 {
         // Two-layer beam: bright thin core + dimmer outer.
-        let core_mat = cache.get_or_create(LinearRgba::WHITE, true, materials);
+        let core_mat = cache.get_or_create_with_intensity(
+            LinearRgba::WHITE,
+            true,
+            weapon.intensity,
+            materials,
+        );
         let core_mesh = meshes.add(Cuboid::new(core, core, length));
         commands.spawn((
             BeamVisual {
@@ -277,7 +290,7 @@ fn spawn_burst_beam(
     cache: &mut BeamMaterialCache,
 ) {
     let color = tdf_color(weapon.rgb_color);
-    let mat = cache.get_or_create(color, true, materials);
+    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, materials);
 
     let dir = event.target_pos - event.attacker_pos;
     let length = dir.length();

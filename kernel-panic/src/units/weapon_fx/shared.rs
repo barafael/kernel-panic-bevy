@@ -100,6 +100,7 @@ struct MaterialKey {
     g: u8,
     b: u8,
     additive: bool,
+    intensity: u8,
 }
 
 impl BeamMaterialCache {
@@ -109,11 +110,27 @@ impl BeamMaterialCache {
         additive: bool,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
+        self.get_or_create_with_intensity(color, additive, 1.0, materials)
+    }
+
+    /// Like `get_or_create` but scales the emissive strength by
+    /// `intensity`. Upstream weapons use intensity to vary glow —
+    /// BuildLightning=5 shines hard, GaussCannon=0 is flat. Quantized
+    /// into the cache key so we share materials across similar values.
+    pub(super) fn get_or_create_with_intensity(
+        &mut self,
+        color: LinearRgba,
+        additive: bool,
+        intensity: f32,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let emissive_scale = (intensity.max(0.5) * 4.0).clamp(1.0, 40.0);
         let key = MaterialKey {
             r: (color.red.clamp(0.0, 1.0) * 15.0).round() as u8,
             g: (color.green.clamp(0.0, 1.0) * 15.0).round() as u8,
             b: (color.blue.clamp(0.0, 1.0) * 15.0).round() as u8,
             additive,
+            intensity: (emissive_scale * 2.0).round() as u8,
         };
         for entry in &self.entries {
             if entry.key == key {
@@ -127,7 +144,7 @@ impl BeamMaterialCache {
         };
         let handle = materials.add(StandardMaterial {
             base_color: Color::LinearRgba(color),
-            emissive: color * 8.0,
+            emissive: color * emissive_scale,
             unlit: true,
             alpha_mode,
             ..default()
