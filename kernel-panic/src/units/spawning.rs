@@ -14,7 +14,7 @@ use super::definitions::UnitKind;
 use super::meshes::{S3OModelCache, unit_material, unit_radius};
 use super::production::default_production;
 use super::unit_registry::UnitRegistry;
-use crate::MapEntity;
+use crate::map_loading::MapEntity;
 
 const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
 
@@ -229,6 +229,16 @@ pub fn spawn_unit(
     let radius = unit_radius(kind, model_cache, unit_registry);
     let selection_sphere = meshes.add(Sphere::new(radius).mesh().ico(3).unwrap());
 
+    // Some s3o models are authored with their root at the mesh CENTER
+    // rather than at the bottom (octaeder.s3o, used by Byte, has blade
+    // vertices spanning y∈[-48,48]). If we plant the root at the
+    // heightmap, half the model sinks below ground. Lift the spawn point
+    // by however much the lowest vertex extends below piece-tree origin.
+    let ground_lift = super::meshes::load_s3o_model(model_name, model_cache)
+        .map(|m| compute_ground_lift(&m.root_piece, [0.0, 0.0, 0.0]))
+        .unwrap_or(0.0);
+    let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
+
     // Spawn the root unit entity.
     let unit_entity = commands
         .spawn((
@@ -237,7 +247,7 @@ pub fn spawn_unit(
             faction,
             TeamId(team),
             Health::full(unit_registry.max_health(kind)),
-            Transform::from_translation(position),
+            Transform::from_translation(lifted_position),
             Visibility::default(),
         ))
         .id();
@@ -414,6 +424,32 @@ fn get_piece_recursive<'a>(
         }
     }
     None
+}
+
+/// Walk the piece tree and return how far below the root origin the
+/// lowest vertex sits, in elmos. Pieces inherit their parents' offsets
+/// so their world-space y is parent_world_y + piece.offset.y +
+/// vertex.y. Returns 0.0 if every vertex is at or above y=0 (the
+/// common case — most models are authored with the root at ground).
+fn compute_ground_lift(piece: &S3OPiece, parent_origin: [f32; 3]) -> f32 {
+    let min_y = walk_min_y(piece, parent_origin);
+    if min_y >= 0.0 { 0.0 } else { -min_y }
+}
+
+fn walk_min_y(piece: &S3OPiece, parent_origin: [f32; 3]) -> f32 {
+    let origin = [
+        parent_origin[0] + piece.offset[0],
+        parent_origin[1] + piece.offset[1],
+        parent_origin[2] + piece.offset[2],
+    ];
+    let mut min_y = f32::INFINITY;
+    for v in &piece.vertices {
+        min_y = min_y.min(origin[1] + v.position[1]);
+    }
+    for child in &piece.children {
+        min_y = min_y.min(walk_min_y(child, origin));
+    }
+    min_y
 }
 
 fn piece_to_mesh(piece: &S3OPiece) -> Mesh {
