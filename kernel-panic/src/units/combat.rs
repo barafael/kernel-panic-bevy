@@ -236,7 +236,13 @@ pub fn combat_system(
         let range = weapon_def.map_or(0.0, |w| w.range);
         let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
 
-        if range == 0.0 {
+        // Command-fire weapons (NX Flag, Infection, FakeBugCannon) only
+        // activate when the player issues the ability order explicitly.
+        // Without this gate, an Obelisk would spew infection gas at
+        // whatever wandered into range.
+        let command_fire = weapon_def.is_some_and(|w| w.command_fire);
+
+        if range == 0.0 || command_fire {
             commands.entity(entity).remove::<AimTarget>();
             continue;
         }
