@@ -151,6 +151,17 @@ impl UnitRegistry {
         self.def(kind).map_or("", |d| &d.build_pic)
     }
 
+    /// HP per second regenerated once a unit has been idle for `idle_time`.
+    /// Zero means the unit never auto-heals.
+    pub fn idle_auto_heal(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.idle_auto_heal)
+    }
+
+    /// Sim frames (30/s) the unit must be idle before auto-heal kicks in.
+    pub fn idle_time(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.idle_time)
+    }
+
     /// Incoming-damage multiplier from the FBI `DamageModifier` field. Flat
     /// scalar applied to every damage event: secondary factories and the
     /// Firewall use `4` (fragile), homebases and Byte use near-zero values

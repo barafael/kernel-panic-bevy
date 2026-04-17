@@ -15,6 +15,13 @@ pub struct AttackCooldown {
     pub remaining: f32,
 }
 
+/// Seconds since this unit last took damage, moved, or picked a target.
+/// When this exceeds the unit's FBI `IdleTime`, the `auto_heal` system
+/// regenerates HP at `IdleAutoHeal` per second. Reset to zero on every
+/// activity signal.
+#[derive(Component, Default)]
+pub struct IdleTimer(pub f32);
+
 /// In-progress burst fire. Weapons with `burst > 1` fire the first shot
 /// through the normal combat path and attach this component for the
 /// remaining shots, which are released at `interval` spacing by
@@ -546,6 +553,7 @@ pub fn apply_damage(
         if let Ok(mut health) = health_q.get_mut(pending.target) {
             health.current -= primary_damage;
         }
+        commands.entity(pending.target).insert(IdleTimer(0.0));
 
         let aoe = weapon_def.area_of_effect;
         if aoe > AOE_SPLASH_THRESHOLD {
@@ -574,6 +582,7 @@ pub fn apply_damage(
                 if let Ok(mut health) = health_q.get_mut(entity) {
                     health.current -= splash;
                 }
+                commands.entity(entity).insert(IdleTimer(0.0));
             }
         }
 
@@ -592,6 +601,51 @@ pub fn apply_damage(
                     attacker_team: attacker_team.0,
                 });
             }
+        }
+    }
+}
+
+/// Spring encodes FBI `IdleTime` in sim frames at 30 fps; convert to
+/// seconds so we can compare against a `Time`-driven timer.
+const IDLE_FRAMES_PER_SECOND: f32 = 30.0;
+
+/// System: regenerate HP on units that have been idle long enough.
+/// A unit counts as idle when it has no move order and no current aim
+/// target. The idle timer is reset in `apply_damage` whenever the unit
+/// takes damage. Units whose FBI lacks `IdleAutoHeal` (value 0) opt out.
+#[allow(clippy::type_complexity)]
+pub fn auto_heal(
+    time: Res<Time>,
+    unit_registry: Res<UnitRegistry>,
+    mut query: Query<
+        (
+            &UnitType,
+            &mut Health,
+            &mut IdleTimer,
+            Option<&MoveTarget>,
+            Option<&MovePath>,
+            Option<&AimTarget>,
+        ),
+        Without<Dying>,
+    >,
+) {
+    let dt = time.delta_secs();
+    for (unit, mut health, mut idle, move_target, move_path, aim) in &mut query {
+        let heal_rate = unit_registry.idle_auto_heal(unit.0);
+        if heal_rate <= 0.0 {
+            continue;
+        }
+
+        let is_active = move_target.is_some() || move_path.is_some() || aim.is_some();
+        if is_active {
+            idle.0 = 0.0;
+            continue;
+        }
+
+        idle.0 += dt;
+        let threshold = unit_registry.idle_time(unit.0) / IDLE_FRAMES_PER_SECOND;
+        if idle.0 >= threshold && health.current < health.max {
+            health.current = (health.current + heal_rate * dt).min(health.max);
         }
     }
 }

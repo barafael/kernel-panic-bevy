@@ -361,6 +361,10 @@ pub fn spawn_unit(
         ))
         .id();
 
+    commands
+        .entity(unit_entity)
+        .insert(super::combat::IdleTimer(0.0));
+
     if let Some(producer) = default_production(kind) {
         commands.entity(unit_entity).insert(producer);
     }
