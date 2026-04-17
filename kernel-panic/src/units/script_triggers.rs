@@ -10,6 +10,7 @@ use bevy::prelude::*;
 use super::animation::CobAnimator;
 use super::combat::Dying;
 use super::production::Producer;
+use super::unit_registry::UnitRegistry;
 use crate::interaction::movement::{MovePath, MoveTarget};
 
 /// Tracks whether a unit was moving last frame, so we can detect transitions.
@@ -69,11 +70,11 @@ pub fn trigger_production_scripts(
         Option<&mut ProductionState>,
     )>,
     mut commands: Commands,
+    unit_registry: Res<UnitRegistry>,
 ) {
     for (entity, mut animator, producer, production_state) in &mut query {
-        // A factory is "active" if it's making progress (always true for now since
-        // production is continuous, but will matter when build queues can be paused).
-        let is_active = producer.progress_fraction() > 0.0;
+        // A factory is "active" when it has items in its build queue.
+        let is_active = producer.current_production().is_some();
 
         let was_active = production_state.as_ref().is_some_and(|s| s.was_active);
 
@@ -101,6 +102,10 @@ pub fn trigger_production_scripts(
 pub struct JustFired {
     /// World-space position of the target being fired at.
     pub target_pos: Vec3,
+    /// Arc height of the projectile's flight. Non-zero for ballistic
+    /// weapons (`trajectoryheight` > 0 in the .tdf); lets the gun aim at
+    /// the launch angle rather than the direct line to target.
+    pub arc_height: f32,
 }
 
 /// When a unit has JustFired, call AimWeapon1 and FireWeapon1 on the COB VM.
@@ -116,7 +121,18 @@ pub fn trigger_weapon_scripts(
         // and pitch (X-axis elevation). COB uses angular units (65536 = 360°).
         let heading_rad = to_target.x.atan2(to_target.z);
         let horizontal_dist = (to_target.x * to_target.x + to_target.z * to_target.z).sqrt();
-        let pitch_rad = (-to_target.y).atan2(horizontal_dist);
+        // For a ballistic shot the initial launch angle is above the direct
+        // line so the projectile arcs down onto the target. A symmetric arc
+        // of height `h` over horizontal distance `d` has a peak at the
+        // midpoint, giving an initial vertical rise of roughly 4h/d per
+        // unit of horizontal travel — so the extra pitch is atan(4h/d).
+        let direct_pitch = (-to_target.y).atan2(horizontal_dist);
+        let arc_pitch = if just_fired.arc_height > 0.0 && horizontal_dist > 1.0 {
+            (4.0 * just_fired.arc_height / horizontal_dist).atan()
+        } else {
+            0.0
+        };
+        let pitch_rad = direct_pitch + arc_pitch;
 
         let heading = (heading_rad / (2.0 * PI) * 65536.0) as i32;
         let pitch = (pitch_rad / (2.0 * PI) * 65536.0) as i32;

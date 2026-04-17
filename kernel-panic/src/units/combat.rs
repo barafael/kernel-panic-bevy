@@ -73,25 +73,37 @@ pub struct Deployable {
 pub const DEPLOY_DURATION: f32 = 1.5;
 
 impl Deployable {
-    /// Pointer's `Create()` hides the gun and calls `Open()` after the
-    /// build finishes — so a freshly spawned Pointer begins deploying.
+    /// Freshly-spawned deployable units start stowed (`Closed`). The
+    /// `tick_deploy_state` system promotes them to `Opening` as soon as
+    /// they're idle (i.e. have no move order), which triggers the COB
+    /// `Open()` animation.
     pub fn initial() -> Self {
         Self {
-            state: DeployState::Opening,
-            timer: DEPLOY_DURATION,
+            state: DeployState::Closed,
+            timer: 0.0,
         }
     }
 }
 
-/// System: drive the deploy state machine from movement state.
-/// Movement forces the unit to close; stopping re-opens it.
+/// System: drive the deploy state machine from movement state, firing
+/// the unit's `Open()` / `Close()` COB scripts so the visible model
+/// matches the logical deploy state. Stopping schedules `Open`; starting
+/// to move schedules `Close`.
 #[allow(clippy::type_complexity)]
 pub fn tick_deploy_state(
     time: Res<Time>,
-    mut query: Query<(&mut Deployable, Option<&MoveTarget>, Option<&MovePath>), Without<Dying>>,
+    mut query: Query<
+        (
+            &mut Deployable,
+            &mut CobAnimator,
+            Option<&MoveTarget>,
+            Option<&MovePath>,
+        ),
+        Without<Dying>,
+    >,
 ) {
     let dt = time.delta_secs();
-    for (mut deployable, move_target, move_path) in &mut query {
+    for (mut deployable, mut animator, move_target, move_path) in &mut query {
         let is_moving = move_target.is_some() || move_path.is_some();
 
         if deployable.timer > 0.0 {
@@ -109,10 +121,14 @@ pub fn tick_deploy_state(
             (DeployState::Open, true) | (DeployState::Opening, true) => {
                 deployable.state = DeployState::Closing;
                 deployable.timer = DEPLOY_DURATION;
+                let cob = animator.cob.clone();
+                animator.vm.start_script(&cob, "Close", &[]);
             }
             (DeployState::Closed, false) | (DeployState::Closing, false) => {
                 deployable.state = DeployState::Opening;
                 deployable.timer = DEPLOY_DURATION;
+                let cob = animator.cob.clone();
+                animator.vm.start_script(&cob, "Open", &[]);
             }
             _ => {}
         }
@@ -211,11 +227,15 @@ pub fn combat_system(
 
         if let Some((target_entity, target_pos, _)) = best {
             damage_queue.0.push((target_entity, damage, entity));
+            let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
             commands.entity(entity).insert((
                 AttackCooldown {
                     remaining: cooldown,
                 },
-                JustFired { target_pos },
+                JustFired {
+                    target_pos,
+                    arc_height,
+                },
             ));
             if !weapon_name.is_empty() {
                 pending_attacks.events.push(AttackEvent {
