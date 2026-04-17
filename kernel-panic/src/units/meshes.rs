@@ -1,14 +1,12 @@
-use std::collections::HashMap;
-use std::fmt;
-use std::path::PathBuf;
+use std::{collections::HashMap, fmt, path::PathBuf};
 
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::prelude::*;
+use bevy::{
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+};
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 
-use super::components::Faction;
-use super::definitions::UnitKind;
-use super::unit_registry::UnitRegistry;
+use super::{components::Faction, definitions::UnitKind, unit_registry::UnitRegistry};
 
 // ---------------------------------------------------------------------------
 // Caches
@@ -162,12 +160,12 @@ pub fn load_asset_from_disk<T, E: fmt::Display>(
                     info!("Loaded asset: {filename} ({} bytes)", data.len());
                     return Some(result);
                 }
-                Err(err) => {
-                    warn!("Failed to parse {filename}: {err}");
+                Err(error) => {
+                    warn!("Failed to parse {filename}: {error}");
                 }
             },
-            Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-                warn!("I/O error reading {}: {err}", path.display());
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                warn!("I/O error reading {}: {error}", path.display());
             }
             Err(_) => {}
         }

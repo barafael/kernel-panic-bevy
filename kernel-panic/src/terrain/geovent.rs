@@ -20,9 +20,7 @@ use bevy::prelude::*;
 
 use spring_map::map_types::ParsedMap;
 
-use crate::map_loading::MapEntity;
-use crate::rendering::camera::RtsCamera;
-use crate::terrain::heightmap::Heightmap;
+use crate::{map_loading::MapEntity, rendering::camera::RtsCamera, terrain::heightmap::Heightmap};
 
 /// Emits smoke puffs from a single geovent.
 #[derive(Component)]

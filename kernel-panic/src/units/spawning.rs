@@ -6,15 +6,16 @@ use spring_unit_mesh::S3OPiece;
 
 use spring_map::smd_parser::MapInfo;
 
-use super::animation::{CobAnimator, CobFileCache, PieceIndex, load_cob_cached};
-use super::combat::Deployable;
-use super::components::{Faction, Health, Homebase, SelectionVolume, TeamId, UnitType};
-use super::definitions::UnitKind;
-use super::meshes::{S3OModelCache, unit_material, unit_radius};
-use super::production::default_production;
-use super::unit_registry::UnitRegistry;
-use crate::map_loading::MapEntity;
-use crate::terrain::heightmap::Heightmap;
+use super::{
+    animation::{CobAnimator, CobFileCache, PieceIndex, load_cob_cached},
+    combat::Deployable,
+    components::{Faction, Health, Homebase, SelectionVolume, TeamId, UnitType},
+    definitions::UnitKind,
+    meshes::{S3OModelCache, unit_material, unit_radius},
+    production::default_production,
+    unit_registry::UnitRegistry,
+};
+use crate::{map_loading::MapEntity, terrain::heightmap::Heightmap};
 
 const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
 

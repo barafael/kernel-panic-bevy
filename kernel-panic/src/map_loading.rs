@@ -13,22 +13,28 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
-use crate::interaction;
-use crate::rendering::camera::{
-    MapBounds, RtsCamera, RtsCameraState, compute_transform_from_state,
+use crate::{
+    interaction,
+    rendering::camera::{MapBounds, RtsCamera, RtsCameraState, compute_transform_from_state},
+    terrain::{
+        geovent::{GeoventAssets, spawn_geovent_smokers},
+        heightmap::Heightmap,
+        material::create_terrain_material,
+        mesh::generate_terrain_chunks,
+    },
+    ui,
+    units::{
+        animation::CobFileCache,
+        game_over::{GameOverUi, GameState},
+        meshes::S3OModelCache,
+        spawning::{spawn_homebases, spawn_showcase},
+        unit_registry::UnitRegistry,
+    },
 };
-use crate::terrain::geovent::{GeoventAssets, spawn_geovent_smokers};
-use crate::terrain::heightmap::Heightmap;
-use crate::terrain::material::create_terrain_material;
-use crate::terrain::mesh::generate_terrain_chunks;
-use crate::ui;
-use crate::units::animation::CobFileCache;
-use crate::units::game_over::{GameOverUi, GameState};
-use crate::units::meshes::S3OModelCache;
-use crate::units::spawning::{spawn_homebases, spawn_showcase};
-use crate::units::unit_registry::UnitRegistry;
-use spring_map::map_types::{GroundTexture, MipmapData, ParsedMap};
-use spring_map::smd_parser::MapInfo;
+use spring_map::{
+    map_types::{GroundTexture, MipmapData, ParsedMap},
+    smd_parser::MapInfo,
+};
 
 pub struct MapLoadingPlugin;
 
@@ -66,7 +72,7 @@ fn discover_maps(mut commands: Commands) {
     ];
     let maps_dir = candidates.iter().find(|p| p.is_dir());
 
-    let mut maps: Vec<PathBuf> = Vec::new();
+    let mut maps = Vec::new();
 
     if let Some(Ok(entries)) = maps_dir.map(std::fs::read_dir) {
         for entry in entries.flatten() {
@@ -240,8 +246,8 @@ fn load_map_at_index(
 
     let spring_map = match spring_map::load_map(map_path) {
         Ok(m) => m,
-        Err(err) => {
-            error!("Failed to load {}: {err}", map_path.display());
+        Err(error) => {
+            error!("Failed to load {}: {error}", map_path.display());
             return;
         }
     };

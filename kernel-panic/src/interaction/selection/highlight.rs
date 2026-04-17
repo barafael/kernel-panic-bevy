@@ -6,7 +6,7 @@
 use bevy::prelude::*;
 
 use super::core::{Hovered, Selected, SelectionSet};
-use crate::units::components::{Faction, UnitType};
+use crate::units::components::{Faction, SelectionVolume, UnitType};
 
 pub(super) struct HighlightPlugin;
 
@@ -47,6 +47,7 @@ fn update_unit_highlight(
     >,
     children_q: Query<&Children>,
     mesh_mat_q: Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    volume_q: Query<(), With<SelectionVolume>>,
     original_q: Query<&OriginalMaterial>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
@@ -65,6 +66,7 @@ fn update_unit_highlight(
             HOVER_BRIGHTNESS,
             &children_q,
             &mesh_mat_q,
+            &volume_q,
             &original_q,
             &mut materials,
             &mut commands,
@@ -80,6 +82,7 @@ fn update_unit_highlight(
             SELECTED_BRIGHTNESS,
             &children_q,
             &mesh_mat_q,
+            &volume_q,
             &original_q,
             &mut materials,
             &mut commands,
@@ -96,16 +99,20 @@ fn brighten_unit(
     factor: f32,
     children_q: &Query<&Children>,
     mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    volume_q: &Query<(), With<SelectionVolume>>,
     original_q: &Query<&OriginalMaterial>,
     materials: &mut Assets<StandardMaterial>,
     commands: &mut Commands,
 ) {
     // Collect all entities to brighten: the unit itself + all descendants with meshes.
+    // Skip the invisible selection-volume sphere — its material has low
+    // alpha, and tinting base_color would turn it into a solid coloured blob
+    // over the unit.
     let mut targets = Vec::new();
-    if mesh_mat_q.contains(unit_entity) {
+    if mesh_mat_q.contains(unit_entity) && !volume_q.contains(unit_entity) {
         targets.push(unit_entity);
     }
-    collect_mesh_descendants(unit_entity, children_q, mesh_mat_q, &mut targets);
+    collect_mesh_descendants(unit_entity, children_q, mesh_mat_q, volume_q, &mut targets);
 
     for entity in targets {
         let Ok((_, current_mat)) = mesh_mat_q.get(entity) else {
@@ -150,14 +157,15 @@ fn collect_mesh_descendants(
     entity: Entity,
     children_q: &Query<&Children>,
     mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
+    volume_q: &Query<(), With<SelectionVolume>>,
     targets: &mut Vec<Entity>,
 ) {
     if let Ok(children) = children_q.get(entity) {
         for child in children.iter() {
-            if mesh_mat_q.contains(child) {
+            if mesh_mat_q.contains(child) && !volume_q.contains(child) {
                 targets.push(child);
             }
-            collect_mesh_descendants(child, children_q, mesh_mat_q, targets);
+            collect_mesh_descendants(child, children_q, mesh_mat_q, volume_q, targets);
         }
     }
 }
@@ -201,9 +209,25 @@ fn apply_brightness(
         return;
     };
 
+    // Unit materials are `unlit: true`, so the fragment shader only scales
+    // `base_color_texture * base_color`. Blend the source `base_color`
+    // toward the faction tint so the brightening is faction-coloured
+    // without saturating away the texture's own hues, and scale overall
+    // brightness by `factor`. Preserve alpha from the source so semi-
+    // transparent materials (e.g. the invisible selection volume) don't
+    // turn into opaque coloured blobs.
     let mut bright = source.clone();
-    let color = LinearRgba::from(faction.color());
-    bright.emissive = color * factor;
+    let src = LinearRgba::from(source.base_color);
+    let tint = LinearRgba::from(faction.color());
+    const TINT_MIX: f32 = 0.4;
+    let mixed = LinearRgba {
+        red: (src.red * (1.0 - TINT_MIX) + tint.red * TINT_MIX) * factor,
+        green: (src.green * (1.0 - TINT_MIX) + tint.green * TINT_MIX) * factor,
+        blue: (src.blue * (1.0 - TINT_MIX) + tint.blue * TINT_MIX) * factor,
+        alpha: src.alpha,
+    };
+    bright.base_color = Color::LinearRgba(mixed);
+    bright.emissive = mixed;
     let handle = materials.add(bright);
     commands.entity(entity).try_insert(MeshMaterial3d(handle));
 }

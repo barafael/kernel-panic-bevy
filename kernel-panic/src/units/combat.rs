@@ -599,10 +599,11 @@ fn apply_hit(
         (leak, 0.0)
     };
 
-    if reflected > 0.0 && target != attacker {
-        if let Ok(mut health) = health_q.get_mut(attacker) {
-            health.current -= reflected;
-        }
+    if reflected > 0.0
+        && target != attacker
+        && let Ok(mut health) = health_q.get_mut(attacker)
+    {
+        health.current -= reflected;
     }
 
     let leak = final_amount;

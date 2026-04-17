@@ -256,10 +256,10 @@ fn load_map_system(
 
     let spring_map = match spring_map::load_map(path) {
         Ok(m) => m,
-        Err(e) => {
+        Err(error) => {
             error!("Failed to load map '{}': {e}", path.display());
             commands.insert_resource(MapInfoDisplay {
-                name: format!("<load failed: {e}>"),
+                name: format!("<load failed: {error}>"),
                 map_x: 0,
                 map_y: 0,
                 num_features: 0,

@@ -6,10 +6,10 @@ use bevy::prelude::*;
 use super::style::{
     FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_TEXT_COLOR, UI_TEXT_DIM,
 };
-use crate::interaction::Selected;
-use crate::units::components::UnitType;
-use crate::units::definitions::UnitKind;
-use crate::units::unit_registry::UnitRegistry;
+use crate::{
+    interaction::Selected,
+    units::{components::UnitType, definitions::UnitKind, unit_registry::UnitRegistry},
+};
 
 pub struct OrderPalettePlugin;
 

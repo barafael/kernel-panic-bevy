@@ -46,8 +46,8 @@ pub fn load_all_tdf_files(dir: &Path, extension: &str) -> Vec<(String, Tdf)> {
     for entry in entries {
         let entry = match entry {
             Ok(e) => e,
-            Err(err) => {
-                warn!("Failed to read directory entry: {err}");
+            Err(error) => {
+                warn!("Failed to read directory entry: {error}");
                 continue;
             }
         };
@@ -62,8 +62,8 @@ pub fn load_all_tdf_files(dir: &Path, extension: &str) -> Vec<(String, Tdf)> {
                         .to_string();
                     results.push((name, tdf));
                 }
-                Err(err) => {
-                    warn!("Failed to load {}: {err}", path.display());
+                Err(error) => {
+                    warn!("Failed to load {}: {error}", path.display());
                 }
             }
         }

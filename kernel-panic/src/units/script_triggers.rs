@@ -70,7 +70,7 @@ pub fn trigger_production_scripts(
         Option<&mut ProductionState>,
     )>,
     mut commands: Commands,
-    unit_registry: Res<UnitRegistry>,
+    _unit_registry: Res<UnitRegistry>,
 ) {
     for (entity, mut animator, producer, production_state) in &mut query {
         // A factory is "active" when it has items in its build queue.

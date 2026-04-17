@@ -96,6 +96,12 @@ struct UnitSnapshot {
     stationary: bool,
 }
 
+/// Cap on the number of fresh paths `movement_system` will compute in a
+/// single frame. Extra units keep their stationary state until a later
+/// frame picks them up; prevents a 30-unit AI army launch from burning
+/// one frame on pathfinding and causing a visible hang.
+const PATHFIND_BUDGET_PER_FRAME: usize = 3;
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn movement_system(
     mut commands: Commands,
@@ -133,6 +139,8 @@ pub fn movement_system(
             stationary: target.is_none(),
         })
         .collect();
+
+    let mut pathfinds_used: usize = 0;
 
     for (
         entity,
@@ -176,19 +184,30 @@ pub fn movement_system(
         // If we have a MoveTarget but no MovePath, compute the path.
         // Flying units skip the nav grid entirely and take a straight XZ
         // line to the target — they can cross any terrain, so routing
-        // around cliffs would only add noise.
+        // around cliffs would only add noise. Ground pathfinds cost
+        // real CPU, so cap how many we do per frame — surplus units
+        // just wait one extra frame for their turn.
         if let Some(target) = move_target
             && move_path.is_none()
         {
             let path = if flying {
-                vec![Vec3::new(target.0.x, 0.0, target.0.z)]
+                Some(vec![Vec3::new(target.0.x, 0.0, target.0.z)])
+            } else if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
+                pathfinds_used += 1;
+                Some(compute_path(
+                    nav_grid.as_deref_mut(),
+                    transform.translation,
+                    target.0,
+                ))
             } else {
-                compute_path(nav_grid.as_deref_mut(), transform.translation, target.0)
+                None
             };
-            commands.entity(entity).insert(MovePath {
-                waypoints: path,
-                current: 0,
-            });
+            if let Some(path) = path {
+                commands.entity(entity).insert(MovePath {
+                    waypoints: path,
+                    current: 0,
+                });
+            }
         }
 
         // Follow the path waypoint by waypoint.

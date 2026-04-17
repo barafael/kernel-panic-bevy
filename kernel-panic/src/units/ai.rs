@@ -14,13 +14,17 @@
 
 use bevy::prelude::*;
 
-use super::components::{Faction, Homebase, TeamId, UnitType};
-use super::construction::{Constructing, PendingBuild, is_constructor};
-use super::definitions::UnitKind;
-use super::game_over::PlayerTeam;
-use super::production::Producer;
-use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::terrain::geovent::GeoventSmoker;
+use super::{
+    components::{Faction, Homebase, TeamId, UnitType},
+    construction::{Constructing, PendingBuild, is_constructor},
+    definitions::UnitKind,
+    game_over::PlayerTeam,
+    production::Producer,
+};
+use crate::{
+    interaction::movement::{MovePath, MoveTarget},
+    terrain::geovent::GeoventSmoker,
+};
 
 /// Seconds between AI decisions.
 const AI_TICK_INTERVAL: f32 = 1.0;
@@ -99,6 +103,28 @@ pub fn ai_brain(
         .map(|(team, _, gtf, _)| (team.0, gtf.translation()))
         .collect();
 
+    // Cached once per AI tick. `building_positions` feeds every team's
+    // datavent-claim check; the two `_by_team` vecs let the per-team
+    // inner loop skip the full query scan it used to do twice.
+    let datavent_positions: Vec<Vec3> = datavents.iter().map(|v| v.pos).collect();
+    let building_positions: Vec<Vec3> = buildings
+        .iter()
+        .filter(|(_, ut, _)| is_building(ut.0))
+        .map(|(_, _, gtf)| gtf.translation())
+        .collect();
+    let combat_snapshot: Vec<(Entity, u8, UnitKind, Vec3, bool)> = combat_units
+        .iter()
+        .map(|(e, t, ut, gtf, mt, mp)| {
+            (
+                e,
+                t.0,
+                ut.0,
+                gtf.translation(),
+                mt.is_none() && mp.is_none(),
+            )
+        })
+        .collect();
+
     for (team, faction, homebase_gtf, mut producer) in &mut homebases {
         if team.0 == player_team.0 {
             continue;
@@ -110,23 +136,19 @@ pub fn ai_brain(
             team.0,
             *faction,
             &constructors,
-            &buildings,
-            &datavents,
+            &building_positions,
+            &datavent_positions,
             &mut commands,
         );
 
-        let idle: Vec<(Entity, Vec3)> = combat_units
+        let idle: Vec<(Entity, Vec3)> = combat_snapshot
             .iter()
-            .filter(|(_, t, ut, _, mt, mp)| {
-                t.0 == team.0 && is_combat_unit(ut.0) && mt.is_none() && mp.is_none()
-            })
-            .map(|(e, _, _, gtf, _, _)| (e, gtf.translation()))
+            .filter(|(_, t, kind, _, idle)| *t == team.0 && is_combat_unit(*kind) && *idle)
+            .map(|(e, _, _, pos, _)| (*e, *pos))
             .collect();
 
-        if let Some(threat) = homebase_under_threat(team.0, &homebase_positions, &combat_units) {
-            for (entity, _) in idle {
-                commands.entity(entity).insert(MoveTarget(threat));
-            }
+        if let Some(threat) = homebase_under_threat(team.0, &homebase_positions, &combat_snapshot) {
+            assign_targets(&idle, threat, &mut commands);
             continue;
         }
 
@@ -138,9 +160,15 @@ pub fn ai_brain(
         let Some(target) = nearest_enemy_homebase(team.0, &homebase_positions, self_pos) else {
             continue;
         };
-        for (entity, _) in idle {
-            commands.entity(entity).insert(MoveTarget(target));
-        }
+        assign_targets(&idle, target, &mut commands);
+    }
+}
+
+/// Insert `MoveTarget(target)` on each entity. Extracted so the two
+/// defend/attack branches share one inner loop.
+fn assign_targets(idle: &[(Entity, Vec3)], target: Vec3, commands: &mut Commands) {
+    for (entity, _) in idle {
+        commands.entity(*entity).insert(MoveTarget(target));
     }
 }
 
@@ -177,8 +205,8 @@ fn dispatch_constructor(
         ),
         Without<Homebase>,
     >,
-    buildings: &Query<(&TeamId, &UnitType, &GlobalTransform)>,
-    datavents: &Query<&GeoventSmoker>,
+    building_positions: &[Vec3],
+    datavent_positions: &[Vec3],
     commands: &mut Commands,
 ) {
     let Some((entity, ctor_pos)) = constructors.iter().find_map(|(e, t, ut, gtf, mt, pb, c)| {
@@ -191,7 +219,8 @@ fn dispatch_constructor(
         return;
     };
 
-    let Some(site) = nearest_unclaimed_datavent(ctor_pos, buildings, datavents) else {
+    let Some(site) = nearest_unclaimed_datavent(ctor_pos, building_positions, datavent_positions)
+    else {
         return;
     };
 
@@ -204,18 +233,13 @@ fn dispatch_constructor(
 
 fn nearest_unclaimed_datavent(
     from: Vec3,
-    buildings: &Query<(&TeamId, &UnitType, &GlobalTransform)>,
-    datavents: &Query<&GeoventSmoker>,
+    building_positions: &[Vec3],
+    datavent_positions: &[Vec3],
 ) -> Option<Vec3> {
     let claim_sq = DATAVENT_CLAIM_RADIUS * DATAVENT_CLAIM_RADIUS;
-    let building_positions: Vec<Vec3> = buildings
+    datavent_positions
         .iter()
-        .filter(|(_, ut, _)| is_building(ut.0))
-        .map(|(_, _, gtf)| gtf.translation())
-        .collect();
-    datavents
-        .iter()
-        .map(|vent| vent.pos)
+        .copied()
         .filter(|vent_pos| {
             building_positions
                 .iter()
@@ -232,26 +256,16 @@ fn nearest_unclaimed_datavent(
 fn homebase_under_threat(
     team: u8,
     homebases: &[(u8, Vec3)],
-    combat_units: &Query<
-        (
-            Entity,
-            &TeamId,
-            &UnitType,
-            &GlobalTransform,
-            Option<&MoveTarget>,
-            Option<&MovePath>,
-        ),
-        Without<Homebase>,
-    >,
+    combat_snapshot: &[(Entity, u8, UnitKind, Vec3, bool)],
 ) -> Option<Vec3> {
     let radius_sq = DEFEND_RADIUS * DEFEND_RADIUS;
     homebases
         .iter()
         .find(|(t, _)| *t == team)
         .and_then(|(_, base_pos)| {
-            let under_fire = combat_units.iter().any(|(_, t, _, gtf, _, _)| {
-                t.0 != team && gtf.translation().distance_squared(*base_pos) < radius_sq
-            });
+            let under_fire = combat_snapshot
+                .iter()
+                .any(|(_, t, _, pos, _)| *t != team && pos.distance_squared(*base_pos) < radius_sq);
             under_fire.then_some(*base_pos)
         })
 }

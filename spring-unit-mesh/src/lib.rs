@@ -362,8 +362,8 @@ mod tests {
                     );
                     count += 1;
                 }
-                Err(err) => {
-                    failures.push(format!("{name}: {err}"));
+                Err(error) => {
+                    failures.push(format!("{name}: {error}"));
                 }
             }
         }

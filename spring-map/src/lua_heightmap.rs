@@ -40,8 +40,11 @@ pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -
                 eprintln!("Executed heightmap gadget: {}", gadget.path);
                 executed += 1;
             }
-            Err(err) => {
-                eprintln!("Failed to execute heightmap gadget {}: {err}", gadget.path);
+            Err(error) => {
+                eprintln!(
+                    "Failed to execute heightmap gadget {}: {error}",
+                    gadget.path
+                );
             }
         }
     }
