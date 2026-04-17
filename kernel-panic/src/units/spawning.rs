@@ -174,6 +174,9 @@ pub fn spawn_showcase(
     let heightmap_w = parsed.header.heightmap_width();
     let heightmap_h = parsed.header.heightmap_height();
 
+    let mut centroid = Vec3::ZERO;
+    let mut count = 0.0_f32;
+
     for (slot, start_pos) in map_info.start_positions.iter().enumerate() {
         let Some(&kind) = SHOWCASE_KINDS.get(slot) else {
             break;
@@ -182,6 +185,8 @@ pub fn spawn_showcase(
         let hz = (start_pos.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
         let height = parsed.heights[hz * heightmap_w + hx];
         let position = Vec3::new(start_pos.x, height, start_pos.z);
+        centroid += position;
+        count += 1.0;
 
         // All showcase units share team 0 so they never engage each other
         // — the goal is visual inspection, not gameplay.
@@ -201,8 +206,36 @@ pub fn spawn_showcase(
         );
     }
 
+    // Plant a single enemy Bit at the centroid of the showcase ring so
+    // the armed showcase units (Pointer, Byte, Dos, ...) actually have a
+    // valid target — they auto-attack the nearest non-allied unit and
+    // play their full deploy/aim/fire animations against it. Team 1 puts
+    // it on the opposite side of the only ownership boundary that
+    // matters (everyone else is team 0).
+    if count > 0.0 {
+        let mid_xz = centroid / count;
+        let hx = (mid_xz.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
+        let hz = (mid_xz.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
+        let height = parsed.heights[hz * heightmap_w + hx];
+        let target_pos = Vec3::new(mid_xz.x, height, mid_xz.z);
+        spawn_unit(
+            UnitKind::Bit,
+            UnitKind::Bit.faction(),
+            1,
+            target_pos,
+            commands,
+            meshes,
+            materials,
+            images,
+            model_cache,
+            cob_cache,
+            &invisible_mat,
+            unit_registry,
+        );
+    }
+
     info!(
-        "Showcase: spawned {} mobile units",
+        "Showcase: spawned {} mobile units + 1 sacrificial target",
         SHOWCASE_KINDS.len().min(map_info.start_positions.len())
     );
 }
@@ -325,35 +358,75 @@ pub fn spawn_unit(
             commands.entity(bevy_parent).add_child(piece_entity);
         }
 
-        // Attach CobAnimator with base offsets.
+        // Attach CobAnimator with base offsets. The COB script references
+        // pieces by index into its own `piece_names` table, which is the
+        // declaration order in the .bos source — *not* the s3o depth-first
+        // flatten order. Build a lookup that lets us address pieces by COB
+        // index everywhere downstream by reordering `piece_entities` and
+        // `piece_offsets` to match the COB's order. Pieces named in the
+        // .bos that don't exist in the s3o stay as a stub entity at the
+        // unit root (zero offset) so animations targeting them are no-ops
+        // instead of indexing into the wrong piece.
         if let Some(cob) = load_cob_cached(&kind.script(), cob_cache) {
-            let num_pieces = piece_entities.len();
+            let cob_piece_count = cob.piece_names.len();
+            let mut cob_entities = Vec::with_capacity(cob_piece_count);
+            let mut cob_offsets = Vec::with_capacity(cob_piece_count);
+            for cob_name in &cob.piece_names {
+                match find_piece_index_by_name(&model.root_piece, cob_name) {
+                    Some(s3o_idx) => {
+                        cob_entities.push(piece_entities[s3o_idx]);
+                        cob_offsets.push(piece_offsets[s3o_idx]);
+                    }
+                    None => {
+                        // Stub entity so VM operations on this slot don't
+                        // accidentally hit a real piece.
+                        let stub = commands
+                            .spawn((Transform::default(), Visibility::default()))
+                            .id();
+                        commands.entity(unit_entity).add_child(stub);
+                        cob_entities.push(stub);
+                        cob_offsets.push([0.0; 3]);
+                    }
+                }
+            }
+
             let mut vm = CobVm::new(&cob);
             vm.start_script(&cob, "Create", &[]);
 
             commands.entity(unit_entity).insert(CobAnimator {
                 vm,
                 cob,
-                piece_entities: piece_entities.clone(),
-                piece_base_offsets: piece_offsets,
-                piece_rotations: vec![[0.0; 3]; num_pieces],
-                piece_translations: vec![[0.0; 3]; num_pieces],
-                target_rotations: vec![[0.0; 3]; num_pieces],
-                turn_speeds: vec![[0.0; 3]; num_pieces],
-                target_translations: vec![[0.0; 3]; num_pieces],
-                move_speeds: vec![[0.0; 3]; num_pieces],
-                spin_speeds: vec![[0.0; 3]; num_pieces],
+                piece_entities: cob_entities,
+                piece_base_offsets: cob_offsets,
+                piece_rotations: vec![[0.0; 3]; cob_piece_count],
+                piece_translations: vec![[0.0; 3]; cob_piece_count],
+                target_rotations: vec![[0.0; 3]; cob_piece_count],
+                turn_speeds: vec![[0.0; 3]; cob_piece_count],
+                target_translations: vec![[0.0; 3]; cob_piece_count],
+                move_speeds: vec![[0.0; 3]; cob_piece_count],
+                spin_speeds: vec![[0.0; 3]; cob_piece_count],
             });
         }
 
         // For factories, cache the piece indices we need for build FX so
         // the production system can read their world transforms each frame
-        // without rescanning the model. Both lookups are best-effort: any
-        // missing piece falls back to the factory root.
+        // without rescanning the model. Indices are into the COB piece
+        // table (which is what `CobAnimator::piece_entities` is keyed on
+        // post-remapping above) — `None` if the model has no such piece,
+        // in which case the production system falls back to the factory
+        // root.
         if default_production(kind).is_some() {
+            let cob = load_cob_cached(&kind.script(), cob_cache);
+            let cob_index = |name: &str| -> Option<usize> {
+                cob.as_ref().and_then(|c| {
+                    c.piece_names
+                        .iter()
+                        .position(|p| p.eq_ignore_ascii_case(name))
+                })
+            };
             commands.entity(unit_entity).insert(FactoryPieces {
-                nanoemitter: find_piece_index_by_name(&model.root_piece, "nanoemitter"),
-                pad: find_piece_index_by_name(&model.root_piece, "pad"),
+                nanoemitter: cob_index("nanoemitter"),
+                pad: cob_index("pad"),
             });
         }
     } else {
