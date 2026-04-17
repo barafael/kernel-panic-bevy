@@ -96,6 +96,10 @@ struct UnitSnapshot {
     stationary: bool,
 }
 
+/// How far above the sampled ground height to draw command-line gizmos
+/// so they don't z-fight with the terrain.
+const GIZMO_LIFT: f32 = 1.5;
+
 /// Cap on the number of fresh paths `movement_system` will compute in a
 /// single frame. Extra units keep their stationary state until a later
 /// frame picks them up; prevents a 30-unit AI army launch from burning
@@ -646,7 +650,6 @@ pub fn draw_selected_command_lines(
 ) {
     const MOVE_COLOR: Color = Color::srgb(0.2, 1.0, 0.3);
     const BUILD_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
-    const LIFT: f32 = 1.5;
     const DISC_RADIUS: f32 = 6.0;
 
     let hm = heightmap.as_deref();
@@ -655,7 +658,7 @@ pub fn draw_selected_command_lines(
     // just above the surface instead of z-fighting with it.
     let at_ground = |x: f32, z: f32| -> Vec3 {
         let y = hm.map(|h| h.sample(x, z)).unwrap_or(0.0);
-        Vec3::new(x, y + LIFT, z)
+        Vec3::new(x, y + GIZMO_LIFT, z)
     };
 
     for (transform, target, path, queue) in &query {
@@ -678,7 +681,7 @@ pub fn draw_selected_command_lines(
             points.push(at_ground(current.0.x, current.0.z));
         }
 
-        draw_dashed_polyline(&mut gizmos, &points, MOVE_COLOR, at_ground);
+        draw_dashed_polyline(&mut gizmos, &points, MOVE_COLOR, hm);
 
         // Ring at the final point of the active order.
         let end = *points.last().unwrap();
@@ -699,7 +702,7 @@ pub fn draw_selected_command_lines(
                     QueuedCommand::Move(_) => MOVE_COLOR,
                     QueuedCommand::BuildAt { .. } => BUILD_COLOR,
                 };
-                draw_dashed_polyline(&mut gizmos, &[prev, to], color, at_ground);
+                draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
                 gizmos.circle(
                     Isometry3d::new(to, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
                     DISC_RADIUS,
@@ -718,8 +721,12 @@ fn draw_dashed_polyline(
     gizmos: &mut Gizmos<CommandLineGizmos>,
     points: &[Vec3],
     color: Color,
-    at_ground: impl Fn(f32, f32) -> Vec3,
+    heightmap: Option<&Heightmap>,
 ) {
+    let at_ground = |x: f32, z: f32| -> Vec3 {
+        let y = heightmap.map(|h| h.sample(x, z)).unwrap_or(0.0);
+        Vec3::new(x, y + GIZMO_LIFT, z)
+    };
     // Pattern walker: `cursor` is how far into the current pattern entry
     // we've consumed. Persisting across segments keeps the `-.-.` rhythm
     // continuous through waypoint corners.

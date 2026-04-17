@@ -9,10 +9,10 @@
 //! The VM is engine-agnostic: it emits [`vm::AnimCommand`]s that the game
 //! processes (turn pieces, play effects, etc.).
 
-pub mod cob_file;
-pub mod opcodes;
+mod cob_file;
+mod opcodes;
 pub mod unit_values;
-pub mod vm;
+mod vm;
 
 pub use cob_file::{CobFile, CobParseError, parse_cob};
 pub use vm::{AnimCommand, AnimType, CobVm, ThreadState};
