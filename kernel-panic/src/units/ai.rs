@@ -1,49 +1,61 @@
-//! Minimal enemy AI.
+//! Enemy AI.
 //!
-//! Runs a tick every `AI_TICK_INTERVAL` seconds per non-player team that
-//! owns a homebase. The state machine is deliberately shallow — just
-//! enough to make single-player a real game:
+//! Runs a tick every `AI_TICK_INTERVAL` per non-player team that owns
+//! a homebase. Each tick runs three phases in order:
 //!
-//! 1. **Build**: when the homebase's production queue is short, enqueue
-//!    a combat unit from the faction's basic roster.
-//! 2. **Attack**: once the team has `ARMY_THRESHOLD` idle combat units,
-//!    send every idle unit toward the nearest enemy homebase.
-//!
-//! Expand (constructors → datavents → secondary factories) and Defend
-//! (recall on incursion) are deferred; they'll layer on once the basic
-//! build+attack loop is proven in-game.
+//! 1. **Build**: keep the homebase production queue topped up with
+//!    basic combat units, occasionally inserting a constructor.
+//! 2. **Expand**: route any idle constructor to the nearest unclaimed
+//!    datavent and queue the appropriate secondary factory.
+//! 3. **Defend / Attack**: if an enemy unit is within
+//!    `DEFEND_RADIUS` of any friendly homebase, recall idle combat
+//!    units to the threatened base. Otherwise, once ARMY_THRESHOLD
+//!    idle units exist, send them at the nearest enemy homebase.
 
 use bevy::prelude::*;
 
 use super::components::{Faction, Homebase, TeamId, UnitType};
+use super::construction::{Constructing, PendingBuild, is_constructor};
 use super::definitions::UnitKind;
 use super::game_over::PlayerTeam;
 use super::production::Producer;
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::terrain::geovent::GeoventSmoker;
 
-/// Seconds between AI decisions. Once per second keeps per-frame cost
-/// negligible and feels reactive enough for the slow KP pacing.
+/// Seconds between AI decisions.
 const AI_TICK_INTERVAL: f32 = 1.0;
 
 /// Minimum idle combat units a team must have before it starts pushing.
-/// Small enough that pressure builds early, large enough that the AI
-/// doesn't trickle units into the meat grinder one at a time.
 const ARMY_THRESHOLD: usize = 8;
 
-/// Keep production queues short; re-queue as they drain. Prevents an
-/// absurd backlog that locks the AI into building one unit type
-/// forever.
+/// Keep production queues short; re-queue as they drain.
 const MAX_QUEUE_DEPTH: usize = 3;
 
-/// Per-team AI tick accumulator so each team's brain runs at the same
-/// cadence independent of frame rate.
+/// If any non-friendly unit is inside this distance of a friendly
+/// homebase, idle combat units recall home instead of pushing out.
+const DEFEND_RADIUS: f32 = 700.0;
+
+/// Max distance a datavent can be from an existing friendly building
+/// before we consider it "unclaimed". Also the radius the AI checks
+/// when deciding whether to send a constructor.
+const DATAVENT_CLAIM_RADIUS: f32 = 120.0;
+
+/// Ratio of combat-unit orders to constructor orders when refilling the
+/// queue. One constructor per four combat units keeps the build curve
+/// aggressive without starving expansion.
+const CONSTRUCTOR_EVERY: u32 = 4;
+
+/// Per-team AI tick accumulator.
 #[derive(Resource, Default)]
 pub struct AiTicker {
     accumulated: f32,
+    /// Per-team counter of how many times we've queued a combat unit
+    /// since the last constructor — used to sequence builds.
+    combat_units_since_constructor: std::collections::HashMap<u8, u32>,
 }
 
-/// Main AI brain. Runs once per `AI_TICK_INTERVAL` regardless of frame
-/// rate so decisions don't scale with render speed.
+/// Main AI brain. Splits into helpers so each phase reads top-to-bottom.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ai_brain(
     time: Res<Time>,
     mut ticker: ResMut<AiTicker>,
@@ -60,6 +72,20 @@ pub fn ai_brain(
         ),
         Without<Homebase>,
     >,
+    constructors: Query<
+        (
+            Entity,
+            &TeamId,
+            &UnitType,
+            &GlobalTransform,
+            Option<&MoveTarget>,
+            Option<&PendingBuild>,
+            Option<&Constructing>,
+        ),
+        Without<Homebase>,
+    >,
+    buildings: Query<(&TeamId, &UnitType, &GlobalTransform)>,
+    datavents: Query<&GeoventSmoker>,
     mut commands: Commands,
 ) {
     ticker.accumulated += time.delta_secs();
@@ -68,8 +94,6 @@ pub fn ai_brain(
     }
     ticker.accumulated = 0.0;
 
-    // Snapshot homebase positions per team so we can find the nearest
-    // enemy homebase without aliasing the mutable producer query.
     let homebase_positions: Vec<(u8, Vec3)> = homebases
         .iter()
         .map(|(team, _, gtf, _)| (team.0, gtf.translation()))
@@ -80,7 +104,17 @@ pub fn ai_brain(
             continue;
         }
 
-        // Count and collect this AI's idle combat units.
+        queue_builds(team.0, *faction, &mut producer, &mut ticker);
+
+        dispatch_constructor(
+            team.0,
+            *faction,
+            &constructors,
+            &buildings,
+            &datavents,
+            &mut commands,
+        );
+
         let idle: Vec<(Entity, Vec3)> = combat_units
             .iter()
             .filter(|(_, t, ut, _, mt, mp)| {
@@ -89,34 +123,139 @@ pub fn ai_brain(
             .map(|(e, _, _, gtf, _, _)| (e, gtf.translation()))
             .collect();
 
-        // Keep the production queue topped up. When we're below the
-        // army threshold we build aggressively; at or above, we slow
-        // down so the pushed army isn't immediately thinned by the
-        // homebase pulling units back home.
-        if producer.queue().len() < MAX_QUEUE_DEPTH {
-            producer.enqueue(basic_combat_unit(*faction));
+        if let Some(threat) = homebase_under_threat(team.0, &homebase_positions, &combat_units) {
+            for (entity, _) in idle {
+                commands.entity(entity).insert(MoveTarget(threat));
+            }
+            continue;
         }
 
         if idle.len() < ARMY_THRESHOLD {
             continue;
         }
 
-        // Attack phase: send idle units toward the nearest enemy
-        // homebase. If no enemy homebase exists (unusual — game-over
-        // would normally have triggered) we just hold position.
         let self_pos = homebase_gtf.translation();
         let Some(target) = nearest_enemy_homebase(team.0, &homebase_positions, self_pos) else {
             continue;
         };
-
         for (entity, _) in idle {
             commands.entity(entity).insert(MoveTarget(target));
         }
     }
 }
 
-/// Basic combat unit each faction can cheaply mass-produce. Matches the
-/// upstream Kernel/Hole/Connection `canbuild1` entry in SIDEDATA.TDF.
+fn queue_builds(team: u8, faction: Faction, producer: &mut Producer, ticker: &mut AiTicker) {
+    if producer.queue().len() >= MAX_QUEUE_DEPTH {
+        return;
+    }
+    let counter = ticker
+        .combat_units_since_constructor
+        .entry(team)
+        .or_default();
+    if *counter >= CONSTRUCTOR_EVERY {
+        producer.enqueue(constructor_unit(faction));
+        *counter = 0;
+    } else {
+        producer.enqueue(basic_combat_unit(faction));
+        *counter += 1;
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn dispatch_constructor(
+    team: u8,
+    faction: Faction,
+    constructors: &Query<
+        (
+            Entity,
+            &TeamId,
+            &UnitType,
+            &GlobalTransform,
+            Option<&MoveTarget>,
+            Option<&PendingBuild>,
+            Option<&Constructing>,
+        ),
+        Without<Homebase>,
+    >,
+    buildings: &Query<(&TeamId, &UnitType, &GlobalTransform)>,
+    datavents: &Query<&GeoventSmoker>,
+    commands: &mut Commands,
+) {
+    let Some((entity, ctor_pos)) = constructors.iter().find_map(|(e, t, ut, gtf, mt, pb, c)| {
+        if t.0 == team && is_constructor(ut.0) && mt.is_none() && pb.is_none() && c.is_none() {
+            Some((e, gtf.translation()))
+        } else {
+            None
+        }
+    }) else {
+        return;
+    };
+
+    let Some(site) = nearest_unclaimed_datavent(ctor_pos, buildings, datavents) else {
+        return;
+    };
+
+    let kind = secondary_factory(faction);
+    commands
+        .entity(entity)
+        .insert(MoveTarget(site))
+        .insert(PendingBuild { kind, site });
+}
+
+fn nearest_unclaimed_datavent(
+    from: Vec3,
+    buildings: &Query<(&TeamId, &UnitType, &GlobalTransform)>,
+    datavents: &Query<&GeoventSmoker>,
+) -> Option<Vec3> {
+    let claim_sq = DATAVENT_CLAIM_RADIUS * DATAVENT_CLAIM_RADIUS;
+    let building_positions: Vec<Vec3> = buildings
+        .iter()
+        .filter(|(_, ut, _)| is_building(ut.0))
+        .map(|(_, _, gtf)| gtf.translation())
+        .collect();
+    datavents
+        .iter()
+        .map(|vent| vent.pos)
+        .filter(|vent_pos| {
+            building_positions
+                .iter()
+                .all(|b| b.distance_squared(*vent_pos) > claim_sq)
+        })
+        .min_by(|a, b| {
+            from.distance_squared(*a)
+                .partial_cmp(&from.distance_squared(*b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+}
+
+#[allow(clippy::type_complexity)]
+fn homebase_under_threat(
+    team: u8,
+    homebases: &[(u8, Vec3)],
+    combat_units: &Query<
+        (
+            Entity,
+            &TeamId,
+            &UnitType,
+            &GlobalTransform,
+            Option<&MoveTarget>,
+            Option<&MovePath>,
+        ),
+        Without<Homebase>,
+    >,
+) -> Option<Vec3> {
+    let radius_sq = DEFEND_RADIUS * DEFEND_RADIUS;
+    homebases
+        .iter()
+        .find(|(t, _)| *t == team)
+        .and_then(|(_, base_pos)| {
+            let under_fire = combat_units.iter().any(|(_, t, _, gtf, _, _)| {
+                t.0 != team && gtf.translation().distance_squared(*base_pos) < radius_sq
+            });
+            under_fire.then_some(*base_pos)
+        })
+}
+
 fn basic_combat_unit(faction: Faction) -> UnitKind {
     match faction {
         Faction::System => UnitKind::Bit,
@@ -125,9 +264,22 @@ fn basic_combat_unit(faction: Faction) -> UnitKind {
     }
 }
 
-/// Coarse combat-unit classifier. Excludes constructors, viruses (they
-/// spawn from deaths and manage themselves), LogicBombs (suicide timing
-/// is a command ability, not a rush unit), and support types.
+fn constructor_unit(faction: Faction) -> UnitKind {
+    match faction {
+        Faction::System => UnitKind::Assembler,
+        Faction::Hacker => UnitKind::Trojan,
+        Faction::Network => UnitKind::Gateway,
+    }
+}
+
+fn secondary_factory(faction: Faction) -> UnitKind {
+    match faction {
+        Faction::System => UnitKind::Socket,
+        Faction::Hacker => UnitKind::Window,
+        Faction::Network => UnitKind::Port,
+    }
+}
+
 fn is_combat_unit(kind: UnitKind) -> bool {
     matches!(
         kind,
@@ -141,6 +293,22 @@ fn is_combat_unit(kind: UnitKind) -> bool {
             | UnitKind::Packet
             | UnitKind::Signal
             | UnitKind::Flow
+    )
+}
+
+fn is_building(kind: UnitKind) -> bool {
+    matches!(
+        kind,
+        UnitKind::Kernel
+            | UnitKind::Hole
+            | UnitKind::Connection
+            | UnitKind::Socket
+            | UnitKind::Window
+            | UnitKind::Port
+            | UnitKind::Firewall
+            | UnitKind::Terminal
+            | UnitKind::Obelisk
+            | UnitKind::BadBlock
     )
 }
 
@@ -167,7 +335,6 @@ mod tests {
             (1, Vec3::new(100.0, 0.0, 0.0)),
             (2, Vec3::new(50.0, 0.0, 0.0)),
         ];
-        // From team 0's origin, team 2 is closer than team 1.
         let target = nearest_enemy_homebase(0, &bases, Vec3::ZERO).unwrap();
         assert_eq!(target, Vec3::new(50.0, 0.0, 0.0));
     }
@@ -195,5 +362,19 @@ mod tests {
         assert_eq!(basic_combat_unit(Faction::System), UnitKind::Bit);
         assert_eq!(basic_combat_unit(Faction::Hacker), UnitKind::Bug);
         assert_eq!(basic_combat_unit(Faction::Network), UnitKind::Packet);
+    }
+
+    #[test]
+    fn constructor_per_faction() {
+        assert_eq!(constructor_unit(Faction::System), UnitKind::Assembler);
+        assert_eq!(constructor_unit(Faction::Hacker), UnitKind::Trojan);
+        assert_eq!(constructor_unit(Faction::Network), UnitKind::Gateway);
+    }
+
+    #[test]
+    fn secondary_factory_per_faction() {
+        assert_eq!(secondary_factory(Faction::System), UnitKind::Socket);
+        assert_eq!(secondary_factory(Faction::Hacker), UnitKind::Window);
+        assert_eq!(secondary_factory(Faction::Network), UnitKind::Port);
     }
 }
