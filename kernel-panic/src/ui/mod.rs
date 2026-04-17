@@ -1,4 +1,4 @@
-mod hud;
+pub(crate) mod hud;
 pub mod minimap;
 
 use bevy::prelude::*;

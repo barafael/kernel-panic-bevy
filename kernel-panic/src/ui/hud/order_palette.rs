@@ -4,7 +4,8 @@
 use bevy::prelude::*;
 
 use super::style::{
-    FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_TEXT_COLOR, UI_TEXT_DIM,
+    FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_PANEL_TINT, UI_TEXT_COLOR,
+    UI_TEXT_DIM,
 };
 use crate::{
     interaction::Selected,
@@ -42,9 +43,24 @@ struct OrderPalette;
 #[derive(Component)]
 struct OrderButton(UnitOrder);
 
-const ORDERS: &[(&str, &str, UnitOrder)] = &[
-    ("Stop", "S", UnitOrder::Stop),
-    ("Attack", "A", UnitOrder::AttackMove),
+/// A button entry in the order palette.
+struct OrderButtonSpec {
+    label: &'static str,
+    hotkey_hint: &'static str,
+    order: UnitOrder,
+}
+
+const ORDERS: &[OrderButtonSpec] = &[
+    OrderButtonSpec {
+        label: "Stop",
+        hotkey_hint: "S",
+        order: UnitOrder::Stop,
+    },
+    OrderButtonSpec {
+        label: "Attack",
+        hotkey_hint: "A",
+        order: UnitOrder::AttackMove,
+    },
 ];
 
 fn update_order_palette(
@@ -111,11 +127,11 @@ fn update_order_palette(
         .id();
     commands.entity(palette).add_child(grid);
 
-    for (name, hotkey, order) in ORDERS {
-        if matches!(order, UnitOrder::Stop | UnitOrder::AttackMove) && !has_mobile {
+    for spec in ORDERS {
+        if matches!(spec.order, UnitOrder::Stop | UnitOrder::AttackMove) && !has_mobile {
             continue;
         }
-        let btn = spawn_order_button(&mut commands, name, hotkey, *order);
+        let btn = spawn_order_button(&mut commands, spec.label, spec.hotkey_hint, spec.order);
         commands.entity(grid).add_child(btn);
     }
 
@@ -156,7 +172,7 @@ fn spawn_order_button(
                 ..default()
             },
             BorderColor::all(UI_BORDER_COLOR),
-            BackgroundColor(Color::srgba(0.0, 0.1, 0.0, 0.6)),
+            BackgroundColor(UI_PANEL_TINT),
         ))
         .id();
 

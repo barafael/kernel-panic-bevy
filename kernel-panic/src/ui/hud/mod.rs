@@ -8,7 +8,7 @@ mod info_panel;
 mod order_palette;
 mod placement;
 mod previews;
-mod style;
+pub(crate) mod style;
 
 use bevy::prelude::*;
 

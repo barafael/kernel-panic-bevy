@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use super::core::{Selected, SelectionSet};
 use crate::rendering::camera::RtsCamera;
+use crate::ui::hud::style::UI_OVERLAY_BLACK;
 use crate::units::components::{Health, UnitType, health_color};
 
 pub(super) struct HealthBarsPlugin;
@@ -193,7 +194,7 @@ fn get_or_init_bar_assets(
     let assets = HealthBarAssets {
         bar_mesh: meshes.add(Plane3d::new(Vec3::Z, Vec2::new(0.5, 0.5))),
         bg_material: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.0, 0.0, 0.0, 0.6),
+            base_color: UI_OVERLAY_BLACK,
             emissive: LinearRgba::NONE,
             unlit: true,
             alpha_mode: AlphaMode::Blend,

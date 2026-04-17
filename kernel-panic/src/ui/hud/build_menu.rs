@@ -7,8 +7,8 @@ use bevy::prelude::*;
 
 use super::previews::UnitPreviews;
 use super::style::{
-    BUILD_ICON_SIZE, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR,
-    UI_PROGRESS_COLOR, UI_TEXT_COLOR, UI_TEXT_DIM,
+    BUILD_ICON_SIZE, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_PANEL_TINT,
+    UI_PROGRESS_COLOR, UI_ROW_BG, UI_TEXT_COLOR, UI_TEXT_DIM,
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, UnitType};
@@ -208,7 +208,7 @@ fn spawn_build_progress(
                 height: Val::Percent(100.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.8)),
+            BackgroundColor(UI_ROW_BG),
         ))
         .id();
 
@@ -297,7 +297,7 @@ fn spawn_build_icon(
                 ..default()
             },
             BorderColor::all(faction.color()),
-            BackgroundColor(Color::srgba(0.0, 0.1, 0.0, 0.6)),
+            BackgroundColor(UI_PANEL_TINT),
         ))
         .id();
 

@@ -5,8 +5,8 @@
 use bevy::prelude::*;
 
 use super::style::{
-    FONT_SIZE_BODY, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_TEXT_COLOR,
-    UI_TEXT_DIM,
+    FONT_SIZE_BODY, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_ROW_BG,
+    UI_TEXT_COLOR, UI_TEXT_DIM,
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, Health, UnitType, health_color};
@@ -113,7 +113,7 @@ fn spawn_single_unit_info(
                 height: Val::Percent(100.0),
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.1, 0.1, 0.1, 0.8)),
+            BackgroundColor(UI_ROW_BG),
         ))
         .id();
 
