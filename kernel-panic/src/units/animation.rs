@@ -39,6 +39,14 @@ pub struct CobAnimator {
     pub move_speeds: Vec<[f32; 3]>,
     /// Spin velocity per piece per axis (radians/sec).
     pub spin_speeds: Vec<[f32; 3]>,
+    /// COB linear-constant scale for this script. The .bos compiler
+    /// multiplies every `[N]` literal by this constant; we divide by it
+    /// here to recover N elmos. Spring's *engine* default is 65536, but
+    /// the Kernel Panic project's *Scriptor* default was 163840 (only
+    /// pointer/hole opted out — they have a header comment overriding
+    /// the constant back to 65536). So pick the right per-unit value at
+    /// spawn time and stash it here.
+    pub linear_constant: f32,
 }
 
 /// Marks a Bevy entity as an animated piece child.
@@ -65,21 +73,33 @@ fn spring_angle_to_radians(angle: i32) -> f32 {
     (angle as f32) / 65536.0 * 2.0 * PI
 }
 
-/// Spring linear units: `1.0 / COBSCALE` per elmo (`COBSCALE = 65536`).
-fn spring_linear_to_elmos(val: i32) -> f32 {
-    val as f32 / 65536.0
+/// Spring linear units: the .bos `[N]` literal is compiled to
+/// `N * linear_constant`, so dividing by the same constant recovers N
+/// elmos. The constant is per-script (Kernel Panic's project default
+/// is 163840; pointer.bos and hole.bos override it back to 65536).
+fn spring_linear_to_elmos(val: i32, linear_constant: f32) -> f32 {
+    val as f32 / linear_constant
 }
 
-/// Spring's `CCobInstance::Move` / `MoveNow` negate destinations on the X axis
-/// to translate left-handed COB piece coords into world coords.
-fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
-    if axis == 0 { -value } else { value }
-}
-
-/// Spring's `CCobInstance::Turn` / `TurnNow` / `Spin` negate values on the Z
-/// axis for the same handedness conversion.
+/// Turn/TurnNow destinations map 1:1 between Spring and Bevy on X/Y; only
+/// the Z axis needs negation, since Spring's left-handed Z rotation inverts
+/// relative to Bevy's right-handed world.
 fn cobwtf_turn_axis(axis: i32, value: i32) -> i32 {
     if axis == 2 { -value } else { value }
+}
+
+/// Spin on the X axis additionally needs its sign flipped: Spring's
+/// "spin body around x-axis" rolls a unit forward over its nose as it
+/// moves, but the same raw angular velocity rolls a Bevy (right-handed)
+/// mesh backward. Flipping X here restores the expected forward roll
+/// (visible on the Pointer cube while moving). Z still needs the Turn
+/// negation.
+fn cobwtf_spin_axis(axis: i32, value: i32) -> i32 {
+    match axis {
+        0 => -value,
+        2 => -value,
+        _ => value,
+    }
 }
 
 /// System: tick all CobAnimator VMs and apply piece transforms.
@@ -139,7 +159,11 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        let pos = spring_linear_to_elmos(cobwtf_move_axis(*axis, *destination));
+                        // Move destinations map 1:1 — the COB "left" piece sits
+                        // at local -X and sliding it to +X visibly moves it
+                        // outward, which is what the Pointer Open animation
+                        // wants.
+                        let pos = spring_linear_to_elmos(*destination, animator.linear_constant);
                         animator.piece_translations[p][a] = pos;
                         animator.target_translations[p][a] = pos;
                         animator.move_speeds[p][a] = 0.0;
@@ -155,8 +179,9 @@ pub fn animation_system(
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
                         animator.target_translations[p][a] =
-                            spring_linear_to_elmos(cobwtf_move_axis(*axis, *destination));
-                        animator.move_speeds[p][a] = spring_linear_to_elmos(speed.abs());
+                            spring_linear_to_elmos(*destination, animator.linear_constant);
+                        animator.move_speeds[p][a] =
+                            spring_linear_to_elmos(speed.abs(), animator.linear_constant);
                     }
                 }
                 AnimCommand::Spin {
@@ -166,7 +191,7 @@ pub fn animation_system(
                     let a = *axis as usize;
                     if p < animator.spin_speeds.len() && a < 3 {
                         animator.spin_speeds[p][a] =
-                            spring_angle_to_radians(cobwtf_turn_axis(*axis, *speed));
+                            spring_angle_to_radians(cobwtf_spin_axis(*axis, *speed));
                     }
                 }
                 AnimCommand::StopSpin { piece, axis, .. } => {

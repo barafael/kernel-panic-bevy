@@ -415,6 +415,7 @@ pub fn spawn_unit(
                 target_translations: vec![[0.0; 3]; cob_piece_count],
                 move_speeds: vec![[0.0; 3]; cob_piece_count],
                 spin_speeds: vec![[0.0; 3]; cob_piece_count],
+                linear_constant: kind.cob_linear_constant(),
             });
         }
 

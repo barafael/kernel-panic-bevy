@@ -2,8 +2,8 @@ use bevy::prelude::*;
 
 use super::components::{Homebase, TeamId};
 
-/// Current game state.
-#[derive(Resource, Default, PartialEq, Eq)]
+/// Current game state. Systems in gameplay sets only run in `Playing`.
+#[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GameState {
     #[default]
     Playing,
@@ -24,53 +24,53 @@ pub struct GameOverUi;
 pub fn check_game_over(
     homebases: Query<&TeamId, With<Homebase>>,
     player_team: Res<PlayerTeam>,
-    mut game_state: ResMut<GameState>,
+    mut next_state: ResMut<NextState<GameState>>,
     mut commands: Commands,
     existing_ui: Query<Entity, With<GameOverUi>>,
 ) {
-    if *game_state != GameState::Playing {
+    // Sandbox / showcase maps don't spawn any homebases. Without this
+    // guard the player would be flagged "no homebase = defeat" on the
+    // very first frame, freezing every gameplay system before the user
+    // could see anything.
+    if homebases.is_empty() {
         return;
     }
-
     let player_alive = homebases.iter().any(|t| t.0 == player_team.0);
     let enemies_alive = homebases.iter().any(|t| t.0 != player_team.0);
 
     let new_state = if !player_alive {
-        Some(GameState::Defeat)
+        GameState::Defeat
     } else if !enemies_alive {
-        Some(GameState::Victory)
+        GameState::Victory
     } else {
-        None
+        return;
     };
 
-    if let Some(state) = new_state {
-        let (text, color) = match state {
-            GameState::Victory => ("VICTORY", Color::linear_rgb(0.0, 1.0, 0.3)),
-            GameState::Defeat => ("DEFEAT", Color::linear_rgb(1.0, 0.0, 0.2)),
-            GameState::Playing => unreachable!(),
-        };
+    let (text, color) = match new_state {
+        GameState::Victory => ("VICTORY", Color::linear_rgb(0.0, 1.0, 0.3)),
+        GameState::Defeat => ("DEFEAT", Color::linear_rgb(1.0, 0.0, 0.2)),
+        GameState::Playing => unreachable!(),
+    };
 
-        // Only spawn UI once.
-        if existing_ui.is_empty() {
-            commands.spawn((
-                GameOverUi,
-                Text::new(text),
-                TextFont {
-                    font_size: 120.0,
-                    ..default()
-                },
-                TextColor(color),
-                TextLayout::new_with_justify(Justify::Center),
-                Node {
-                    position_type: PositionType::Absolute,
-                    width: Val::Percent(100.0),
-                    top: Val::Percent(35.0),
-                    justify_self: JustifySelf::Center,
-                    ..default()
-                },
-            ));
-        }
-
-        *game_state = state;
+    if existing_ui.is_empty() {
+        commands.spawn((
+            GameOverUi,
+            Text::new(text),
+            TextFont {
+                font_size: 120.0,
+                ..default()
+            },
+            TextColor(color),
+            TextLayout::new_with_justify(Justify::Center),
+            Node {
+                position_type: PositionType::Absolute,
+                width: Val::Percent(100.0),
+                top: Val::Percent(35.0),
+                justify_self: JustifySelf::Center,
+                ..default()
+            },
+        ));
     }
+
+    next_state.set(new_state);
 }
