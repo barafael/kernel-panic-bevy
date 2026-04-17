@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, BurstSegment,
-    PendingAttacks, ProjectileVisual, tdf_color,
+    ImpactBurst, ImpactBurstAssets, PendingAttacks, ProjectileVisual, tdf_color,
 };
 use crate::units::weapons::WeaponRegistry;
 
@@ -26,6 +26,7 @@ pub(super) fn spawn_weapon_visuals(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cache: ResMut<BeamMaterialCache>,
     mut sparkle_assets: ResMut<BuildSparkleAssets>,
+    mut impact_assets: ResMut<ImpactBurstAssets>,
     asset_server: Res<AssetServer>,
 ) {
     for event in pending.events.drain(..) {
@@ -86,8 +87,60 @@ pub(super) fn spawn_weapon_visuals(
                 &mut sparkle_assets,
                 &asset_server,
             );
+        } else if !is_melee {
+            // Every non-melee / non-BuildLaser weapon pops a colored impact
+            // burst at the target so the player gets visual feedback even
+            // when the full upstream CEG isn't loaded.
+            let aoe = weapon.area_of_effect.max(4.0);
+            spawn_impact_burst(
+                event.target_pos,
+                weapon.rgb_color,
+                aoe,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                &mut impact_assets,
+            );
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_impact_burst(
+    target_pos: Vec3,
+    rgb: [f32; 3],
+    aoe: f32,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
+    impact_assets: &mut ImpactBurstAssets,
+) {
+    let mesh = impact_assets
+        .mesh
+        .get_or_insert_with(|| meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()))
+        .clone();
+
+    let color = tdf_color(rgb);
+    let material = cache.get_or_create(color, true, materials);
+
+    // Ground-hit weapons benefit from a bigger puff; single-target hit-scan
+    // (AoE=8) gets a small blip, while Logic Bomb (AoE=512) bursts large.
+    // Clamp so even the largest explosions stay readable.
+    let base_size = (aoe * 0.25).clamp(3.0, 24.0);
+    let life = 0.35;
+
+    commands.spawn((
+        ImpactBurst {
+            lifetime: life,
+            max_lifetime: life,
+            base_size,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(target_pos + Vec3::Y * 2.0).with_scale(Vec3::splat(base_size)),
+    ));
 }
 
 /// Mirrors the upstream CEG params:

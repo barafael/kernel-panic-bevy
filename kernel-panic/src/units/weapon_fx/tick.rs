@@ -3,7 +3,7 @@
 
 use bevy::prelude::*;
 
-use super::shared::{BeamVisual, BuildSparkle, BurstSegment, ProjectileVisual};
+use super::shared::{BeamVisual, BuildSparkle, BurstSegment, ImpactBurst, ProjectileVisual};
 use crate::rendering::camera::RtsCamera;
 
 #[allow(clippy::type_complexity)]
@@ -21,6 +21,15 @@ pub(super) fn tick_weapon_fx(
             Without<BeamVisual>,
             Without<ProjectileVisual>,
             Without<BurstSegment>,
+        ),
+    >,
+    mut impacts: Query<
+        (Entity, &mut ImpactBurst, &mut Transform),
+        (
+            Without<BeamVisual>,
+            Without<ProjectileVisual>,
+            Without<BurstSegment>,
+            Without<BuildSparkle>,
         ),
     >,
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
@@ -104,5 +113,18 @@ pub(super) fn tick_weapon_fx(
         let up = to_cam.cross(right).normalize_or(Vec3::Y);
         transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, to_cam));
         transform.scale = Vec3::splat(s);
+    }
+
+    // Impact bursts: scale up while fading, then despawn. Material is
+    // shared (cached by color), so opacity comes from the scale curve.
+    for (entity, mut impact, mut transform) in &mut impacts {
+        impact.lifetime -= dt;
+        if impact.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let life_frac = 1.0 - impact.lifetime / impact.max_lifetime;
+        let scale = impact.base_size * (1.0 + life_frac * 1.5);
+        transform.scale = Vec3::splat(scale);
     }
 }

@@ -65,6 +65,24 @@ pub(super) struct BuildSparkleAssets {
     pub material: Option<Handle<StandardMaterial>>,
 }
 
+/// Short-lived burst spawned at every weapon impact point, colored by
+/// the weapon's `rgb_color`. The sphere scales up and fades over
+/// `max_lifetime`; `decay_impact_bursts` despawns when the timer runs
+/// out. A substitute for the full upstream CEG particle system.
+#[derive(Component)]
+pub(super) struct ImpactBurst {
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub base_size: f32,
+}
+
+/// Shared sphere mesh reused across every ImpactBurst so we don't add
+/// a new mesh asset per hit.
+#[derive(Resource, Default)]
+pub(super) struct ImpactBurstAssets {
+    pub mesh: Option<Handle<Mesh>>,
+}
+
 /// Shared material cache to avoid per-frame allocations.
 #[derive(Resource, Default)]
 pub(super) struct BeamMaterialCache {

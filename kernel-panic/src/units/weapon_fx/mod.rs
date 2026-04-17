@@ -12,7 +12,7 @@ pub use shared::{AttackEvent, PendingAttacks};
 
 use bevy::prelude::*;
 
-use shared::{BeamMaterialCache, BuildSparkleAssets};
+use shared::{BeamMaterialCache, BuildSparkleAssets, ImpactBurstAssets};
 
 use super::GameplaySet;
 
@@ -28,6 +28,7 @@ impl Plugin for WeaponFxPlugin {
         app.init_resource::<PendingAttacks>()
             .init_resource::<BeamMaterialCache>()
             .init_resource::<BuildSparkleAssets>()
+            .init_resource::<ImpactBurstAssets>()
             .add_systems(
                 Update,
                 (spawn::spawn_weapon_visuals, tick::tick_weapon_fx)
