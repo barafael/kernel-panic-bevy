@@ -103,13 +103,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let smf_data = smf.build()?;
 
     // ---- SMD: start positions for the showcase grid ----
+    // `fog_start` is a fraction of `fog_end` (the game sizes fog_end to the
+    // map diagonal in `apply_fog`), so 0.95 pushes fog haze almost to the
+    // map edge — haze is basically cosmetic on the showcase map.
     let mut smd = SmdBuilder::new()
         .description("Showcase — one of every mobile unit on a flat plain")
         .gravity(50.0)
         .sky_color([0.02, 0.04, 0.08])
         .sun_color([1.0, 1.0, 1.0])
         .fog_color([0.05, 0.1, 0.15])
-        .fog_start(0.8)
+        .fog_start(0.95)
         .sun_dir([0.3, 1.0, 0.4])
         .ground_ambient([0.7, 0.75, 0.85])
         .ground_sun_color([1.0, 1.0, 1.0]);

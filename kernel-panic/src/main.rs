@@ -17,6 +17,7 @@ use terrain::geovent::{
 };
 use terrain::material::create_terrain_material;
 use terrain::mesh::generate_terrain_chunks;
+use units::UnitsPlugin;
 use units::meshes::S3OModelCache;
 use units::spawning::{spawn_homebases, spawn_showcase};
 
@@ -44,23 +45,12 @@ fn main() {
         .add_plugins(RenderingPlugin)
         .add_plugins(interaction::InteractionPlugin)
         .add_plugins(ui::UiPlugin)
-        .init_resource::<S3OModelCache>()
-        .init_resource::<units::animation::CobFileCache>()
-        .insert_resource(units::weapons::WeaponRegistry::load())
-        .insert_resource(units::unit_registry::UnitRegistry::load())
-        .init_resource::<units::combat::DamageQueue>()
-        .init_resource::<units::combat::VirusSpawnQueue>()
-        .init_resource::<units::weapon_fx::PendingAttacks>()
-        .init_resource::<units::weapon_fx::BeamMaterialCache>()
-        .init_resource::<units::weapon_fx::BuildSparkleAssets>()
+        .add_plugins(UnitsPlugin)
         .init_resource::<GeoventAssets>()
-        .init_resource::<units::game_over::GameState>()
-        .init_resource::<units::game_over::PlayerTeam>()
         .add_systems(
             Startup,
             (
                 discover_maps,
-                validate_registries,
                 load_current_map.after(rendering::camera::spawn_camera),
             )
                 .chain(),
@@ -69,40 +59,12 @@ fn main() {
             Update,
             (
                 cycle_map_on_keypress,
-                units::production::production_system,
-                units::spawning::emerge_system.after(units::production::production_system),
-                units::combat::tick_deploy_state.before(units::combat::combat_system),
-                units::combat::combat_system,
-                units::combat::apply_damage.after(units::combat::combat_system),
-                units::combat::tick_infections,
-                units::combat::death_system.after(units::combat::apply_damage),
-                units::spawning::spawn_queued_viruses.after(units::combat::death_system),
-                units::game_over::check_game_over.after(units::combat::death_system),
-                units::script_triggers::trigger_movement_scripts,
-                units::script_triggers::trigger_production_scripts,
-                units::script_triggers::trigger_weapon_scripts.after(units::combat::combat_system),
-                units::animation::animation_system.after(units::combat::death_system),
-                units::combat::cleanup_dying.after(units::animation::animation_system),
-                units::animation::decay_death_particles,
-                (
-                    units::weapon_fx::spawn_weapon_visuals
-                        .after(units::combat::combat_system)
-                        .after(units::production::production_system),
-                    units::weapon_fx::tick_weapon_fx.after(units::weapon_fx::spawn_weapon_visuals),
-                    emit_geovent_smoke,
-                    tick_geovent_smoke.after(emit_geovent_smoke),
-                    apply_pending_fog,
-                ),
+                emit_geovent_smoke,
+                tick_geovent_smoke.after(emit_geovent_smoke),
+                apply_pending_fog,
             ),
         )
         .run();
-}
-
-fn validate_registries(
-    weapon_registry: Res<units::weapons::WeaponRegistry>,
-    unit_registry: Res<units::unit_registry::UnitRegistry>,
-) {
-    weapon_registry.validate_unit_weapon_bindings(&unit_registry);
 }
 
 /// Discover all .sd7/.sdz map files and pick the initial one.
@@ -162,7 +124,7 @@ fn cycle_map_on_keypress(
     mut catalog: ResMut<MapCatalog>,
     map_entities: Query<Entity, With<MapEntity>>,
     game_over_ui: Query<Entity, With<units::game_over::GameOverUi>>,
-    mut game_state: ResMut<units::game_over::GameState>,
+    mut next_game_state: ResMut<NextState<units::game_over::GameState>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut std_materials: ResMut<Assets<StandardMaterial>>,
@@ -195,7 +157,7 @@ fn cycle_map_on_keypress(
     }
 
     // Reset game state so the new map starts fresh.
-    *game_state = units::game_over::GameState::Playing;
+    next_game_state.set(units::game_over::GameState::Playing);
     for entity in &game_over_ui {
         commands.entity(entity).despawn();
     }
@@ -363,7 +325,7 @@ fn load_map_at_index(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, commands);
-        apply_fog(map_info, commands);
+        apply_fog(map_info, parsed, commands);
         if map_name.eq_ignore_ascii_case("Showcase") {
             spawn_showcase(
                 parsed,
@@ -561,10 +523,19 @@ fn apply_pending_fog(
 }
 
 /// Queue fog update from map atmosphere.
-fn apply_fog(map_info: &MapInfo, commands: &mut Commands) {
+///
+/// Fog end scales with the map diagonal so large maps (like the showcase
+/// plain) don't get walled off by haze a few grid cells from the camera.
+/// Spring's `FogStart` is a fraction of that end distance.
+fn apply_fog(map_info: &MapInfo, parsed: &ParsedMap, commands: &mut Commands) {
     let fog = map_info.atmosphere.fog_color;
     let fog_start_frac = map_info.atmosphere.fog_start;
-    let max_view_distance = 4000.0;
+    let world_w = parsed.header.world_width();
+    let world_d = parsed.header.world_depth();
+    let diagonal = (world_w * world_w + world_d * world_d).sqrt();
+    // Cover the full map diagonal + a bit more so the far edge never fogs
+    // completely. Floor at 4000 elmos for small maps.
+    let max_view_distance = (diagonal * 1.1).max(4000.0);
 
     commands.insert_resource(MapFogSettings {
         color: Color::linear_rgb(fog[0], fog[1], fog[2]),

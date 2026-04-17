@@ -120,10 +120,25 @@ pub fn spawn_camera(mut commands: Commands) {
         RtsCamera,
         state,
         Camera3d::default(),
+        // Default Bevy far plane is 1000, which clips large maps long
+        // before the map fog takes over. `apply_fog` sizes the fog to
+        // the map diagonal, so push the far plane past any sensible map.
+        Projection::Perspective(PerspectiveProjection {
+            far: 40_000.0,
+            ..default()
+        }),
         transform,
         Hdr,
         bevy::post_process::bloom::Bloom {
             intensity: 0.15,
+            ..default()
+        },
+        DistanceFog {
+            color: Color::BLACK,
+            falloff: FogFalloff::Linear {
+                start: 3600.0,
+                end: 4000.0,
+            },
             ..default()
         },
     ));
