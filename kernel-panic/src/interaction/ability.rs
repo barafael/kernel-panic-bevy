@@ -15,6 +15,7 @@ use crate::units::command_fire::CommandFireEvent;
 use crate::units::components::UnitType;
 use crate::units::definitions::UnitKind;
 use crate::units::morph::MorphEvent;
+use crate::units::network_buffer::{DispatchEvent, EnterEvent, is_teleporter};
 
 pub struct AbilityHotkeyPlugin;
 
@@ -22,7 +23,12 @@ impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            (trigger_command_fire_on_hotkey, trigger_morph_on_hotkey),
+            (
+                trigger_command_fire_on_hotkey,
+                trigger_morph_on_hotkey,
+                trigger_dispatch_on_hotkey,
+                trigger_enter_on_hotkey,
+            ),
         );
     }
 }
@@ -38,6 +44,45 @@ fn trigger_morph_on_hotkey(
     for (entity, unit) in &selected_q {
         if matches!(unit.0, UnitKind::Bug | UnitKind::Exploit) {
             ev.write(MorphEvent { entity });
+        }
+    }
+}
+
+fn trigger_dispatch_on_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: bevy::picking::mesh_picking::ray_cast::MeshRayCast,
+    mut ev: MessageWriter<DispatchEvent>,
+) {
+    if !keys.just_pressed(KeyCode::KeyT) {
+        return;
+    }
+    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+        return;
+    };
+    for (entity, unit) in &selected_q {
+        if is_teleporter(unit.0) {
+            ev.write(DispatchEvent {
+                teleporter: entity,
+                target,
+            });
+        }
+    }
+}
+
+fn trigger_enter_on_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    mut ev: MessageWriter<EnterEvent>,
+) {
+    if !keys.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+    for (entity, unit) in &selected_q {
+        if unit.0 == UnitKind::Packet {
+            ev.write(EnterEvent { packet: entity });
         }
     }
 }

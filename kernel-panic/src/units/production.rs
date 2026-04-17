@@ -90,7 +90,8 @@ pub fn default_production(kind: UnitKind) -> Option<Producer> {
         UnitKind::Connection => Some(Producer::new(UnitKind::Packet)),
         UnitKind::Socket => Some(Producer::new(UnitKind::Bit)),
         UnitKind::Window => Some(Producer::new(UnitKind::Bug)),
-        UnitKind::Port => Some(Producer::new(UnitKind::Packet)),
+        // Port is a teleporter, not a factory — it tops up its team's
+        // PacketBuffer every 5.5s rather than spawning units directly.
         _ => None,
     }
 }

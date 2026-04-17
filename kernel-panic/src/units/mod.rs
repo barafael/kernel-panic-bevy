@@ -9,6 +9,7 @@ pub mod definitions;
 pub mod game_over;
 pub mod meshes;
 pub mod morph;
+pub mod network_buffer;
 pub mod production;
 pub mod script_triggers;
 pub mod spawning;
@@ -51,6 +52,9 @@ impl Plugin for UnitsPlugin {
             .init_resource::<ai::AiTicker>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<morph::MorphEvent>()
+            .add_message::<network_buffer::DispatchEvent>()
+            .add_message::<network_buffer::EnterEvent>()
+            .init_resource::<network_buffer::PacketBuffer>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -71,6 +75,10 @@ impl Plugin for UnitsPlugin {
                 (
                     (
                         morph::process_morph,
+                        network_buffer::tick_port_buffers,
+                        network_buffer::tick_spawn_stun,
+                        network_buffer::process_dispatch,
+                        network_buffer::process_enter,
                         production::production_system,
                         production::install_fade_materials,
                         production::animate_connection_hatch,

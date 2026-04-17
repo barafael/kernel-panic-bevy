@@ -370,6 +370,12 @@ pub fn spawn_unit(
         commands.entity(unit_entity).insert(super::cloak::Cloaked);
     }
 
+    if kind == UnitKind::Port {
+        commands
+            .entity(unit_entity)
+            .insert(super::network_buffer::PortTimer::default());
+    }
+
     if let Some(producer) = default_production(kind) {
         commands.entity(unit_entity).insert(producer);
     }
