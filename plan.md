@@ -150,21 +150,21 @@ transfer. Undeploy reverses.
 - Exploit target preference: prioritize distant enemies (`proximityPriority=-5`)
 - Needs `dynDamageExp`, `dynDamageRange`, `proximityPriority` added to `WeaponDef`
 
-### 3.5 Command-Fire & Area Denial Framework (Medium)
+### 3.5 Command-Fire & Area Denial Framework — ✅ Partial
 
-Several units need a shared command-fire system for secondary abilities:
+Framework in place: `CommandFireEvent` → `process_command_fire` spawns an
+`AreaDenialZone` entity, `tick_area_denial` deals dps*dt to units in radius
+with friendly-fire + infection flags, `CommandFireCooldown` gates recasts. Q
+hotkey (interaction::ability) fires the selected caster's ability at the
+cursor.
 
-| Unit | Ability | Description |
-|------|---------|-------------|
-| Pointer | NX Flag | Area denial: r=120, 60s, damages friendlies |
-| Obelisk | Infection Gas | Ballistic → poison cloud: r=400, 13s, kills→Viruses |
-| Terminal | SIGTERM | Spawns air bomber → 10k damage, 900 AoE + area denial |
-| Firewall | Reflector Shield | Allies in r=300 get 20s shield (50% reduction + 50% reflected) |
-| Byte | Mine Launcher | Costs 6k HP, fires 5 Logic Bombs, range 1100 |
-
-Framework: `SecondaryWeapon` component, targeting mode on ability hotkey, cooldown tracking.
-
-`AreaDenialZone` entity: position, radius, DPS, duration, friendly-fire flag, infection flag.
+| Unit | Ability | Status |
+|------|---------|--------|
+| Pointer | NX Flag (r=120, 100 dps, 60s, friendly-fire) | ✅ wired |
+| Obelisk | Infection Gas (r=400, 120 dps, 13s, infects) | ✅ wired |
+| Terminal | SIGTERM airstrike | needs air-bomber spawn |
+| Firewall | Reflector Shield | needs shield system (§4.7) |
+| Byte | Mine Launcher | needs HP-cost + Logic-Bomb volley |
 
 ### 3.6 Infection Chain Refinement (Medium)
 
@@ -308,28 +308,27 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 ## Recommended Implementation Order
 
 Done since last plan: all of §1 (combat mechanics), §2.1 (roster), §2.2 (stat
-corrections), §3.1 (factory building on datavents), §5.1 AI Build+Attack, partial
-§3.8 (flying skips nav grid).
+corrections), §3.1 (factory building on datavents), §3.5 command-fire framework
+(NX Flag + Infection), §5.1 AI Build+Attack, partial §3.8 (flying skips nav grid).
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
 | 1 | AI Expand + Defend | 5.1 | Round out the basic AI once play-tested |
-| 2 | Command-fire + area denial | 3.5 | Enables NX Flag, Obelisk, Terminal, Firewall |
-| 3 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
-| 4 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
-| 5 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
-| 6 | Network buffer + dispatch | 3.2 | Network faction identity |
-| 7 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
-| 8 | Firewall reflector shield | 3.5 | Network defensive ability |
-| 9 | Kernel Boost | 3.7 | Snowball mechanic |
-| 10 | Mines & walls | 3.9 | Tactical depth |
-| 11 | Impact/explosion effects | 4.3 | Load explosion TDFs |
-| 12 | Shield system | 4.7 | Homebase/factory shields |
-| 13 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 14 | Fog of war | 6 | Full visibility system |
-| 15 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 16 | Audio | 7 | Weapon sounds highest priority |
-| 17 | Multiplayer | 9 | Endgame feature |
+| 2 | Cloaking | 3.3 | Worm stealth + Logic Bomb invisibility |
+| 3 | Infection chain refinement | 3.6 | Per-weapon windows, Virus death chain |
+| 4 | Bug ↔ Exploit morph | 3.4 | Deploy/undeploy + distance scaling |
+| 5 | Network buffer + dispatch | 3.2 | Network faction identity |
+| 6 | Flow dynamic speed | 3.8 | Network late-game (air movement already partial) |
+| 7 | Firewall reflector shield | 3.5 | Needs shield system first |
+| 8 | Kernel Boost | 3.7 | Snowball mechanic |
+| 9 | Mines & walls | 3.9 | Tactical depth |
+| 10 | Impact/explosion effects | 4.3 | Load explosion TDFs |
+| 11 | Shield system | 4.7 | Homebase/factory shields + Firewall reflector |
+| 12 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 13 | Fog of war | 6 | Full visibility system |
+| 14 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 15 | Audio | 7 | Weapon sounds highest priority |
+| 16 | Multiplayer | 9 | Endgame feature |
 
 ---
 
