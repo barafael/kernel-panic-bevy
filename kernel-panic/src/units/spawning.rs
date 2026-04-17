@@ -174,8 +174,7 @@ pub fn spawn_showcase(
     let heightmap_w = parsed.header.heightmap_width();
     let heightmap_h = parsed.header.heightmap_height();
 
-    let mut centroid = Vec3::ZERO;
-    let mut count = 0.0_f32;
+    let mut showcase_positions: Vec<(UnitKind, Vec3)> = Vec::new();
 
     for (slot, start_pos) in map_info.start_positions.iter().enumerate() {
         let Some(&kind) = SHOWCASE_KINDS.get(slot) else {
@@ -185,8 +184,7 @@ pub fn spawn_showcase(
         let hz = (start_pos.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
         let height = parsed.heights[hz * heightmap_w + hx];
         let position = Vec3::new(start_pos.x, height, start_pos.z);
-        centroid += position;
-        count += 1.0;
+        showcase_positions.push((kind, position));
 
         // All showcase units share team 0 so they never engage each other
         // — the goal is visual inspection, not gameplay.
@@ -206,21 +204,31 @@ pub fn spawn_showcase(
         );
     }
 
-    // Plant a single enemy Bit at the centroid of the showcase ring so
-    // the armed showcase units (Pointer, Byte, Dos, ...) actually have a
-    // valid target — they auto-attack the nearest non-allied unit and
-    // play their full deploy/aim/fire animations against it. Team 1 puts
-    // it on the opposite side of the only ownership boundary that
-    // matters (everyone else is team 0).
-    if count > 0.0 {
-        let mid_xz = centroid / count;
-        let hx = (mid_xz.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
-        let hz = (mid_xz.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
+    // Plant one team-1 target ~120 elmos from each showcase unit so
+    // every armed slot has something nearby to engage — many KP weapons
+    // have ranges in the 200-450 elmo bracket, well below the spread of
+    // the 4×3 showcase grid, so a single centroid target was unreachable
+    // for most units. Using Bit (System) as the target works for the
+    // Hacker/Network attackers; we additionally spawn a Bug (Hacker) for
+    // System attackers so every unit has at least one cross-faction
+    // enemy in range. The target factions are chosen to be different
+    // from the attacker's faction (combat skips faction-mates).
+    let mut targets_spawned = 0usize;
+    for (kind, position) in &showcase_positions {
+        let attacker_faction = kind.faction();
+        let target_kind = match attacker_faction {
+            Faction::System => UnitKind::Bug,
+            Faction::Hacker | Faction::Network => UnitKind::Bit,
+        };
+        let offset = Vec3::new(120.0, 0.0, 0.0);
+        let target_xz = *position + offset;
+        let hx = (target_xz.x / square_size).clamp(0.0, (heightmap_w - 1) as f32) as usize;
+        let hz = (target_xz.z / square_size).clamp(0.0, (heightmap_h - 1) as f32) as usize;
         let height = parsed.heights[hz * heightmap_w + hx];
-        let target_pos = Vec3::new(mid_xz.x, height, mid_xz.z);
+        let target_pos = Vec3::new(target_xz.x, height, target_xz.z);
         spawn_unit(
-            UnitKind::Bit,
-            UnitKind::Bit.faction(),
+            target_kind,
+            target_kind.faction(),
             1,
             target_pos,
             commands,
@@ -232,11 +240,13 @@ pub fn spawn_showcase(
             &invisible_mat,
             unit_registry,
         );
+        targets_spawned += 1;
     }
 
     info!(
-        "Showcase: spawned {} mobile units + 1 sacrificial target",
-        SHOWCASE_KINDS.len().min(map_info.start_positions.len())
+        "Showcase: spawned {} mobile units + {} sacrificial targets",
+        showcase_positions.len(),
+        targets_spawned,
     );
 }
 
