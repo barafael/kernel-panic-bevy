@@ -1,37 +1,72 @@
 # Deferred Prompts
 
-* performance issues. What's taking so long (where is the overhead coming from)? Do a full optimization pass. Don't bother making the AI good. Even remove it if it is a lot of work right now. Use caching where possible. find better algorithms.
-* make a dedicated UI pass: the UI should resemble the original as closely as possible.
-* any bevy performance improvements we can make?
-* investigate the post-processing pipeline of this game vs. spring/kp.
-* double-click to select same units
-* unit groups
-* find which performance tweaks spring gets away with. Do they apply to us?
-* fix the skybox. Should be same as original kernel-panic.
-* start going on the web-assets-plan.md.
-* implement the game UI
-* investigate how to do server-authoritative multiplayer using matchbox and lightyear.
-* fix unit placement when using builders, just like the original
-* use a walk dir crate. Find the best one first.
-* don't use std::process::exit, use error handling, returning from main.
-* remove map cycling
-* load_current_map and load_map_at_index are redundant
-* find python-style super-terse variable names. We don't do this here, make them speak.
-* there should not be any fov. The entire map is always visible. Just not any buildings or units that were built.
-* use cargo-flamegraph. Do you find anything interesting?
-* large enum variants, especially with annotations and doc comments, should have a newline before the next variant starts. Everywhere. This also goes for structs!
-* ALL_UNIT_KINDS should be derived
-* same for SHOWCASE_KINDS and others like it
-* make another pass identifying special numerical or string values. Make them enums.
-* simplify pub fn load_asset_from_disk<T, E: fmt::Display>.
-* In general, find functions or methods which get passed a function. It should normally be possible and lead to broad design simplifications.
-* find places where error handling is skipped and log them.
-* find functions returning options which internally map a result to an option. Return the result instead and let the caller make the decision.
-* Make a pass over the tests. Run cargo llvm-cov and find gaps which would be useful to cover.
-* maybe reduce usage of println and eprintln, use logging instead.
-* Inspect the lib crates of this workspace. What is their public api? Can it be improved? Can it become more idiomatic?
-* any way you can reduce the number of arguments for the bevy system functions? It seems excessive in parts.
-* what about glyph_zero and glyph_one? would this be more optimal with an actual asset, or is it fastest like this?
-* ORDERS should be more idiomatic - it has 2 str's and an item, should be enums. Should be a struct in total, maybe?
-* Find colors, make them named constants. Name them by purpose.
-* The Interaction enum has a completely wild default implementation. Derive it instead, and look that this pattern is not used anywhere else either, like in FocusPolicy.
+Items struck through (~~…~~) were addressed in commits 2026-04-17..18.
+Everything else is still open; most require focused design work.
+
+## Done
+
+* ~~`std::process::exit` → error handling (item 16)~~
+* ~~remove map cycling (item 17)~~
+* ~~`load_current_map` / `load_map_at_index` redundant (item 18)~~
+* ~~`ALL_UNIT_KINDS` should be derived (item 23)~~
+* ~~`SHOWCASE_KINDS` filter instead of hardcoded list (item 24)~~
+* ~~special numerical / string values → enums (weapon_type → WeaponCategory) (item 25)~~
+* ~~large enum variants: blank lines + doc comments (item 22)~~
+* ~~colors → named constants (UI_PANEL_TINT / UI_ROW_BG / UI_OVERLAY_BLACK) (item 36)~~
+* ~~`ORDERS` → struct with named fields (item 35)~~
+* ~~tighten spring-cob public API (item 32, partial)~~
+* ~~functions taking fn pointers → design simplifications (`draw_dashed_polyline`) (item 27, partial)~~
+
+## Still open
+
+### Performance / profiling
+
+* any Bevy performance improvements we can make?
+* find which performance tweaks Spring gets away with. Do they apply to us?
+* use `cargo-flamegraph`. Do you find anything interesting?
+
+### UX / UI
+
+* dedicated UI pass — match the original layout/styling as closely as possible.
+* double-click to select same-kind units in view.
+* unit groups (Ctrl-1..9, 1..9 recall).
+* fix unit placement when using builders, just like the original.
+* no fog of war — entire map always visible, but buildings/units should
+  only be revealed when built.
+* fix the skybox to match original Kernel Panic.
+* glyph_zero / glyph_one: asset vs procedural — which is faster?
+* `Interaction`'s default impl and similar patterns — verify we're using
+  `Derive(Default)` where possible.
+
+### Multiplayer / deployment
+
+* investigate server-authoritative multiplayer via matchbox + lightyear.
+* start on `web-assets-plan.md`.
+* implement the game UI (broader than the style pass).
+
+### Rendering / VFX
+
+* investigate the post-processing pipeline of this game vs Spring/KP.
+
+### Housekeeping
+
+* use a walk-dir crate — picked one first. (Not justified: all walks are 1-deep.)
+* python-style terse variable names — standalone sweep, not a mechanical fix.
+  Most hits so far are math idioms (`t`, `u`, `p`), which stay.
+* another pass on special numerical / string values. (Ongoing; covered
+  weapon_type so far.)
+* simplify `pub fn load_asset_from_disk<T, E: fmt::Display>`.
+  (Kept generic — three callers each pass a different parser.)
+* reduce arg count on Bevy system fns. Candidates: `ai::ai_brain`,
+  `morph::process_morph`, `network_buffer::process_dispatch`,
+  `map_loading::load_map`. SystemParam bundle for spawn resources
+  would collapse ~35 lines.
+* `println`/`eprintln` → logging. Only test output left; fine.
+* Inspect lib crate public APIs for idiom/shape (ongoing).
+* reduce Bevy system param count (structured SystemParam bundle).
+* `cargo llvm-cov` coverage gaps — which tests to add.
+* find error paths silently dropped with `let _` / `.ok()` and log them.
+  (Two found, both intentional.)
+* find `Option`-returning functions that internally map a `Result`.
+  (Several, but each wraps a disk-load failure and the caller wants the
+  `Option` ergonomics — leaving alone.)
