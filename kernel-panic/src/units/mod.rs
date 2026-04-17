@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod animation;
 pub mod combat;
 pub mod components;
@@ -44,6 +45,7 @@ impl Plugin for UnitsPlugin {
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
             .init_resource::<combat::VirusSpawnQueue>()
+            .init_resource::<ai::AiTicker>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -73,6 +75,7 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Produce),
                     (
+                        ai::ai_brain,
                         combat::tick_deploy_state,
                         combat::combat_system,
                         combat::tick_burst_fire,
