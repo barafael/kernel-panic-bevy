@@ -566,24 +566,46 @@ pub fn tick_burst_fire(
 }
 
 /// Apply a damage hit to `target`. A shield (if any) soaks damage
-/// first; paralyzer weapons then accumulate any leak on the stun
-/// charge, promoting to `Stunned` once it exceeds max HP; non-paralyzer
-/// leak subtracts from `Health`.
+/// first; a Firewall-protected target then takes only
+/// `FIREWALL_DAMAGE_TAKEN` of the leak and reflects the rest back to
+/// the attacker; paralyzer weapons accumulate the final amount on the
+/// stun charge, promoting to `Stunned` once it exceeds max HP;
+/// non-paralyzer leak subtracts from `Health`.
 #[allow(clippy::too_many_arguments)]
 fn apply_hit(
     target: Entity,
+    attacker: Entity,
     amount: f32,
     paralyzer: bool,
     paralyze_time: f32,
     health_q: &mut Query<&mut Health>,
     stun_q: &mut Query<&mut StunCharge>,
     shield_q: &mut Query<&mut super::shield::ShieldState>,
+    protected_q: &Query<(), With<super::command_fire::Protected>>,
     commands: &mut Commands,
 ) {
     let leak = match shield_q.get_mut(target) {
         Ok(mut shield) => shield.absorb(amount),
         Err(_) => amount,
     };
+    if leak <= 0.0 {
+        return;
+    }
+
+    let (final_amount, reflected) = if protected_q.get(target).is_ok() {
+        let taken = leak * super::command_fire::FIREWALL_DAMAGE_TAKEN;
+        (taken, leak - taken)
+    } else {
+        (leak, 0.0)
+    };
+
+    if reflected > 0.0 && target != attacker {
+        if let Ok(mut health) = health_q.get_mut(attacker) {
+            health.current -= reflected;
+        }
+    }
+
+    let leak = final_amount;
     if leak <= 0.0 {
         return;
     }
@@ -633,6 +655,7 @@ pub fn apply_damage(
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
     splash_q: Query<(Entity, &UnitType, &Faction, &TeamId, &GlobalTransform), With<Health>>,
+    protected_q: Query<(), With<super::command_fire::Protected>>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
@@ -658,12 +681,14 @@ pub fn apply_damage(
         };
         apply_hit(
             pending.target,
+            pending.attacker,
             primary_damage,
             paralyzer,
             paralyze_time,
             &mut health_q,
             &mut stun_q,
             &mut shield_q,
+            &protected_q,
             &mut commands,
         );
         commands.entity(pending.target).insert(IdleTimer(0.0));
@@ -694,12 +719,14 @@ pub fn apply_damage(
                 let splash = base(unit.0) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
                 apply_hit(
                     entity,
+                    pending.attacker,
                     splash,
                     paralyzer,
                     paralyze_time,
                     &mut health_q,
                     &mut stun_q,
                     &mut shield_q,
+                    &protected_q,
                     &mut commands,
                 );
                 commands.entity(entity).insert(IdleTimer(0.0));

@@ -21,6 +21,24 @@ use super::combat::{INFECTION_DURATION, Infected};
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::UnitKind;
 
+/// Firewall protection zone: all allies within `FIREWALL_RADIUS` at
+/// cast time gain a `Protected` component for `FIREWALL_DURATION`.
+pub const FIREWALL_RADIUS: f32 = 300.0;
+pub const FIREWALL_DURATION: f32 = 20.0;
+pub const FIREWALL_COOLDOWN: f32 = 90.0;
+/// Fraction of incoming damage that a Protected unit *takes*. The
+/// remaining `1.0 - DAMAGE_TAKEN_FRACTION` is reflected back to the
+/// attacker.
+pub const FIREWALL_DAMAGE_TAKEN: f32 = 0.5;
+
+/// Marker: this unit is inside a Firewall protection window. The
+/// timer ticks down in `tick_protection`; while present, `apply_hit`
+/// halves incoming damage and reflects half back to the attacker.
+#[derive(Component, Debug, Clone)]
+pub struct Protected {
+    pub remaining: f32,
+}
+
 /// Per-caster cooldown in seconds before the command-fire ability is
 /// available again. Matches upstream weapon `reloadtime` (30s for nx,
 /// longer for Infection) so the ability cadence feels right without
@@ -62,9 +80,11 @@ pub struct AreaDenialZone {
 /// `AreaDenialZone` entities. A unit identifies its command-fire
 /// weapon by looking at its `UnitKind` — NX Flag for Pointer, Infection
 /// for Obelisk. Units without a registered ability are ignored.
+#[allow(clippy::too_many_arguments)]
 pub fn process_command_fire(
     mut events: MessageReader<CommandFireEvent>,
     casters: Query<(&UnitType, &TeamId, &Faction, Option<&CommandFireCooldown>)>,
+    protect_targets: Query<(Entity, &TeamId, &Faction, &GlobalTransform), With<Health>>,
     mut commands: Commands,
 ) {
     for event in events.read() {
@@ -74,10 +94,24 @@ pub fn process_command_fire(
         if cd.is_some_and(|c| c.remaining > 0.0) {
             continue;
         }
+
+        if unit.0 == UnitKind::Firewall {
+            apply_firewall(
+                event.target,
+                team.0,
+                *faction,
+                &protect_targets,
+                &mut commands,
+            );
+            commands.entity(event.attacker).insert(CommandFireCooldown {
+                remaining: FIREWALL_COOLDOWN,
+            });
+            continue;
+        }
+
         let Some(ability) = ability_for(unit.0) else {
             continue;
         };
-
         commands.spawn(AreaDenialZone {
             center: event.target,
             radius: ability.radius,
@@ -91,6 +125,43 @@ pub fn process_command_fire(
         commands.entity(event.attacker).insert(CommandFireCooldown {
             remaining: ability.cooldown,
         });
+    }
+}
+
+fn apply_firewall(
+    center: Vec3,
+    caster_team: u8,
+    caster_faction: Faction,
+    targets: &Query<(Entity, &TeamId, &Faction, &GlobalTransform), With<Health>>,
+    commands: &mut Commands,
+) {
+    let radius_sq = FIREWALL_RADIUS * FIREWALL_RADIUS;
+    for (entity, team, faction, gtf) in targets.iter() {
+        let friendly = team.0 == caster_team || *faction == caster_faction;
+        if !friendly {
+            continue;
+        }
+        if gtf.translation().distance_squared(center) > radius_sq {
+            continue;
+        }
+        commands.entity(entity).insert(Protected {
+            remaining: FIREWALL_DURATION,
+        });
+    }
+}
+
+/// System: tick `Protected` timers and remove the marker when expired.
+pub fn tick_protection(
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut Protected)>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut protected) in &mut query {
+        protected.remaining -= dt;
+        if protected.remaining <= 0.0 {
+            commands.entity(entity).remove::<Protected>();
+        }
     }
 }
 

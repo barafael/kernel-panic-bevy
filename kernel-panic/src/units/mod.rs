@@ -103,6 +103,7 @@ impl Plugin for UnitsPlugin {
                         command_fire::process_command_fire,
                         command_fire::tick_command_fire_cooldown,
                         command_fire::tick_area_denial,
+                        command_fire::tick_protection,
                         script_triggers::trigger_movement_scripts,
                         script_triggers::trigger_production_scripts,
                         script_triggers::trigger_weapon_scripts,

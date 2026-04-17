@@ -114,5 +114,8 @@ fn trigger_command_fire_on_hotkey(
 }
 
 fn has_ability(kind: UnitKind) -> bool {
-    matches!(kind, UnitKind::Pointer | UnitKind::Obelisk)
+    matches!(
+        kind,
+        UnitKind::Pointer | UnitKind::Obelisk | UnitKind::Firewall
+    )
 }
