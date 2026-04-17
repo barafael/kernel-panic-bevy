@@ -231,7 +231,7 @@ pub(super) fn resolve_unit_hit(
     })
 }
 
-pub(crate) fn cursor_ray(
+pub(super) fn cursor_ray(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
 ) -> Option<Ray3d> {
@@ -239,4 +239,16 @@ pub(crate) fn cursor_ray(
     let cursor_pos = window.cursor_position()?;
     let (camera, camera_transform) = camera_q.single().ok()?;
     camera.viewport_to_world(camera_transform, cursor_pos).ok()
+}
+
+/// Cast a ray from the cursor into the world and return the first
+/// mesh hit. Used by right-click orders and ability targeting.
+pub(crate) fn ground_hit(
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    ray_cast: &mut MeshRayCast,
+) -> Option<Vec3> {
+    let ray = cursor_ray(windows, camera_q)?;
+    let hits = ray_cast.cast_ray(ray, &default());
+    hits.first().map(|(_, hit)| hit.point)
 }

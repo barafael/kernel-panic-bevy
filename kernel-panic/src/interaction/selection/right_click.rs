@@ -5,7 +5,7 @@
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use super::core::{Selected, SelectionSet, cursor_ray};
+use super::core::{Selected, SelectionSet, ground_hit};
 use crate::interaction::movement::{CommandQueue, MovePath, MoveTarget, QueuedCommand};
 use crate::rendering::camera::RtsCamera;
 
@@ -305,16 +305,6 @@ fn update_formation_preview(
                 .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
         ));
     }
-}
-
-fn ground_hit(
-    windows: &Query<&Window>,
-    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    ray_cast: &mut MeshRayCast,
-) -> Option<Vec3> {
-    let ray = cursor_ray(windows, camera_q)?;
-    let hits = ray_cast.cast_ray(ray, &default());
-    hits.first().map(|(_, hit)| hit.point)
 }
 
 fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {

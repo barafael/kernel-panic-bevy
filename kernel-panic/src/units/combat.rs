@@ -89,13 +89,15 @@ pub const INFECTION_DURATION: f32 = 6.0;
 
 /// Per-weapon infection window in seconds. Mirrors upstream
 /// `LuaRules/Gadgets/infection.lua`, which expresses the window in sim
-/// frames at 30 fps. Returns `None` for weapons that don't infect.
+/// frames at 30 fps. Keys match weapon TDF section names as-authored
+/// (the TDF parser preserves case for section names even though it
+/// lowercases inner keys). Returns `None` for weapons that don't infect.
 pub fn weapon_infection_duration(weapon: &str) -> Option<f32> {
     let frames = match weapon {
-        "VirusBeam" | "virusbeam" => 90.0,
-        "VirusDeath" | "virusdeath" => 180.0,
-        "Wormsplash" | "wormsplash" => 200.0,
-        "Infection" | "infection" => 30.0,
+        "VirusBeam" => 90.0,
+        "VirusDeath" => 180.0,
+        "Wormsplash" => 200.0,
+        "Infection" => 30.0,
         _ => return None,
     };
     Some(frames / 30.0)
@@ -563,6 +565,35 @@ pub fn tick_burst_fire(
     }
 }
 
+/// Apply a damage hit to `target`. Paralyzer weapons accumulate stun
+/// charge instead of touching HP, promoting to `Stunned` once charge
+/// exceeds the target's max HP; non-paralyzer weapons subtract directly
+/// from `Health`.
+fn apply_hit(
+    target: Entity,
+    amount: f32,
+    paralyzer: bool,
+    paralyze_time: f32,
+    health_q: &mut Query<&mut Health>,
+    stun_q: &mut Query<&mut StunCharge>,
+    commands: &mut Commands,
+) {
+    if paralyzer {
+        if let Ok(max_hp) = health_q.get(target).map(|h| h.max)
+            && let Ok(mut charge) = stun_q.get_mut(target)
+        {
+            charge.0 += amount;
+            if charge.0 >= max_hp {
+                commands.entity(target).insert(Stunned {
+                    remaining: paralyze_time,
+                });
+            }
+        }
+    } else if let Ok(mut health) = health_q.get_mut(target) {
+        health.current -= amount;
+    }
+}
+
 /// Minimum `area_of_effect` (elmos) at which a weapon triggers a splash
 /// pass. Upstream weapons use tiny AoE values (8/16/32) for impact effects
 /// on single-target weapons; only lob/explosive weapons set AoE high
@@ -615,20 +646,15 @@ pub fn apply_damage(
             Ok(unit) => base(unit.0) * dyn_mult,
             Err(_) => weapon_def.damage.default * dyn_mult,
         };
-        if paralyzer {
-            if let Ok(max_hp) = health_q.get(pending.target).map(|h| h.max)
-                && let Ok(mut charge) = stun_q.get_mut(pending.target)
-            {
-                charge.0 += primary_damage;
-                if charge.0 >= max_hp {
-                    commands.entity(pending.target).insert(Stunned {
-                        remaining: paralyze_time,
-                    });
-                }
-            }
-        } else if let Ok(mut health) = health_q.get_mut(pending.target) {
-            health.current -= primary_damage;
-        }
+        apply_hit(
+            pending.target,
+            primary_damage,
+            paralyzer,
+            paralyze_time,
+            &mut health_q,
+            &mut stun_q,
+            &mut commands,
+        );
         commands.entity(pending.target).insert(IdleTimer(0.0));
 
         let aoe = weapon_def.area_of_effect;
@@ -655,20 +681,15 @@ pub fn apply_damage(
                     continue;
                 }
                 let splash = base(unit.0) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
-                if paralyzer {
-                    if let Ok(max_hp) = health_q.get(entity).map(|h| h.max)
-                        && let Ok(mut charge) = stun_q.get_mut(entity)
-                    {
-                        charge.0 += splash;
-                        if charge.0 >= max_hp {
-                            commands.entity(entity).insert(Stunned {
-                                remaining: paralyze_time,
-                            });
-                        }
-                    }
-                } else if let Ok(mut health) = health_q.get_mut(entity) {
-                    health.current -= splash;
-                }
+                apply_hit(
+                    entity,
+                    splash,
+                    paralyzer,
+                    paralyze_time,
+                    &mut health_q,
+                    &mut stun_q,
+                    &mut commands,
+                );
                 commands.entity(entity).insert(IdleTimer(0.0));
             }
         }
@@ -823,11 +844,9 @@ pub fn death_system(
                 ));
             }
 
-            // Virus death sprays the VirusDeath weapon at its corpse:
-            // apply_damage will use the weapon's AoE (90) + edge_effectiveness
-            // to damage nearby units, and weapon_infection_duration
-            // will infect anything hit with a 6s window. The dying virus
-            // is the attacker so damage inherits its team/faction.
+            // Virus death sprays VirusDeath at its own corpse so the
+            // weapon's AoE + per-weapon infection window can chain the
+            // outbreak through nearby units.
             if unit.0 == UnitKind::Virus {
                 damage_queue.0.push(PendingDamage {
                     target: entity,

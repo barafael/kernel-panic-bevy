@@ -9,7 +9,7 @@
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use super::selection::{Selected, cursor_ray};
+use super::selection::{Selected, ground_hit};
 use crate::rendering::camera::RtsCamera;
 use crate::units::command_fire::CommandFireEvent;
 use crate::units::components::UnitType;
@@ -70,14 +70,4 @@ fn trigger_command_fire_on_hotkey(
 
 fn has_ability(kind: UnitKind) -> bool {
     matches!(kind, UnitKind::Pointer | UnitKind::Obelisk)
-}
-
-fn ground_hit(
-    windows: &Query<&Window>,
-    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    ray_cast: &mut MeshRayCast,
-) -> Option<Vec3> {
-    let ray = cursor_ray(windows, camera_q)?;
-    let hits = ray_cast.cast_ray(ray, &default());
-    hits.first().map(|(_, hit)| hit.point)
 }

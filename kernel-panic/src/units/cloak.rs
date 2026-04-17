@@ -22,12 +22,6 @@ use super::unit_registry::UnitRegistry;
 #[derive(Component)]
 pub struct Cloaked;
 
-/// Whether a cloaked unit is currently spotted by *any* non-friendly
-/// detector. Updated each frame by `update_cloak_visibility`; read by
-/// renderers / HUDs that need to hide vs. show the unit.
-#[derive(Component, Default)]
-pub struct Spotted(pub bool);
-
 /// Units that should carry the `Cloaked` marker when spawned.
 pub fn spawns_cloaked(kind: UnitKind) -> bool {
     matches!(kind, UnitKind::Worm | UnitKind::LogicBomb)
@@ -40,16 +34,7 @@ pub fn update_cloak_visibility(
     player_team: Res<PlayerTeam>,
     unit_registry: Res<UnitRegistry>,
     detectors: Query<(&UnitType, &TeamId, &GlobalTransform)>,
-    mut cloaked: Query<
-        (
-            &TeamId,
-            &Faction,
-            &GlobalTransform,
-            &mut Visibility,
-            &mut Spotted,
-        ),
-        With<Cloaked>,
-    >,
+    mut cloaked: Query<(&TeamId, &Faction, &GlobalTransform, &mut Visibility), With<Cloaked>>,
 ) {
     // Snapshot every unit that could act as a detector. Done once per
     // frame so the nested loop is O(cloaked * detectors) with no
@@ -66,7 +51,7 @@ pub fn update_cloak_visibility(
         })
         .collect();
 
-    for (team, _faction, gtf, mut visibility, mut spotted) in &mut cloaked {
+    for (team, _faction, gtf, mut visibility) in &mut cloaked {
         let pos = gtf.translation();
         let detected = scanners
             .iter()
@@ -74,11 +59,8 @@ pub fn update_cloak_visibility(
                 *scanner_team != team.0 && scanner_pos.distance_squared(pos) <= *range_sq
             });
 
-        spotted.0 = detected;
-
-        // The player sees cloaked enemies only while spotted. Friendly
-        // cloaked units stay visible to the player so you can manage
-        // your own Worms / Logic Bombs.
+        // Friendly cloaked units stay visible to the player so you can
+        // manage your own Worms / Logic Bombs.
         let friendly = team.0 == player_team.0;
         let new_vis = if friendly || detected {
             Visibility::Visible
