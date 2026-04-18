@@ -499,6 +499,18 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] Map cycling: old minimap image handle leaks when `MinimapState` is overwritten
 - [ ] `SelectionVolumeMaterial` recreated on every spawn instead of truly cached
 
+### Upstream Bevy Issues
+
+- [ ] Device-loss cascade panic — tracked in [bevyengine/bevy#21753](https://github.com/bevyengine/bevy/issues/21753)
+  (regression in 0.17+, still open as of 2026-04-18). Closing one game instance while a
+  second is running can lose the GPU device on the survivor: `prepare_windows` fails with
+  "Couldn't get swap chain texture", then every render system (`prepare_view_uniforms`,
+  `prepare_material_bind_groups`, bloom uniforms, `prepare_previous_view_uniforms`, SSR,
+  light-probe upload, fog, cluster prep) `.unwrap()`s a `None` buffer and brings the whole
+  render world down. Same cascade is reported on wake-from-sleep and window-hide
+  (#11863, #12887). Bevy 0.18.1 + wgpu 27.0.1 on Windows. No workaround; revisit when
+  upstream ships a fix.
+
 ### Missing TDF Fields
 
 `WeaponDef` is missing fields used by upstream weapons: `scrollspeed`, `burnblow`,
