@@ -146,6 +146,7 @@ pub fn production_system(
         Option<&FactoryPieces>,
         Option<&CobAnimator>,
         Option<&super::components::Homebase>,
+        Has<super::cloak::Spotted>,
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<super::animation::PieceIndex>>,
@@ -172,6 +173,7 @@ pub fn production_system(
             Option<Vec3>,
             f32,
             EmergeStyle,
+            bool,
         )>,
     >,
 ) {
@@ -182,8 +184,16 @@ pub fn production_system(
     let dt = time.delta_secs();
     spawns.clear();
 
-    for (mut producer, faction, team, global_tf, factory_pieces, animator, homebase) in
-        &mut producers
+    for (
+        mut producer,
+        faction,
+        team,
+        global_tf,
+        factory_pieces,
+        animator,
+        homebase,
+        factory_spotted,
+    ) in &mut producers
     {
         let Some(build_time) = producer.current_build_time(&unit_registry) else {
             // Queue is empty — idle.
@@ -278,6 +288,7 @@ pub fn production_system(
                 rally_point,
                 emerge_lead,
                 style,
+                factory_spotted,
             ));
             producer.unit_spawned = true;
         }
@@ -290,7 +301,7 @@ pub fn production_system(
     }
 
     let invisible_mat_ref = SelectionVolumeMaterial(invisible_mat.0.clone());
-    for (kind, faction, team, spawn_pos, target_y, rally_point, emerge_duration, style) in
+    for (kind, faction, team, spawn_pos, target_y, rally_point, emerge_duration, style, spotted) in
         spawns.drain(..)
     {
         let entity = spawn_unit(
@@ -315,6 +326,14 @@ pub fn production_system(
             style,
             last_build_percent: -1,
         });
+        // Inherit fog visibility from the producing factory: if the
+        // player can already see the factory, units it produces are
+        // visible too — otherwise the build rays appeared to emit from
+        // empty space (homebases were pre-Spotted but their output
+        // wasn't, so freshly-rolled-out Bugs / Bits looked invisible).
+        if spotted {
+            commands.entity(entity).insert(super::cloak::Spotted);
+        }
         // Fade-style emergence needs per-unit cloned materials so the
         // alpha ramp doesn't leak onto every other unit sharing the
         // shared faction texture. We can't read the freshly-spawned
