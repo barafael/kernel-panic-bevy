@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::window::{PresentMode, PrimaryWindow, WindowResizeConstraints};
+use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstraints};
 
 use interaction::InteractionPlugin;
 use map_loading::MapLoadingPlugin;
@@ -89,6 +89,24 @@ fn main() {
                         // quirks on this hardware. Restore AutoVsync
                         // once the winit modal-loop fix is in.
                         present_mode: PresentMode::Immediate,
+                        // TODO(windows-resize): launch directly into
+                        // borderless fullscreen on the primary monitor.
+                        // Prior attempts (windowed + Startup-maximize,
+                        // with or without visible:false gymnastics) all
+                        // triggered a live swapchain reconfigure at
+                        // startup, which on Intel Iris Xe (Vulkan)
+                        // either wedges the surface ("gray screen, no
+                        // HUD") or flashes brief gray/white rectangles
+                        // as the window transitions. Borderless-
+                        // fullscreen sets winit's fullscreen attribute
+                        // at window creation time, so the surface is
+                        // born at monitor size and no reconfigure
+                        // happens. Trade-off: no title bar / no
+                        // built-in minimize-restore chrome. Acceptable
+                        // for an RTS; swap back to `Windowed` once the
+                        // upstream fix lands so the "windowed-maximize"
+                        // UX returns.
+                        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
                         // TODO(windows-resize): 320x240 floor keeps the
                         // swapchain from ever reconfiguring at 0x0
                         // during a fast drag-to-nothing, which panics
@@ -113,16 +131,5 @@ fn main() {
             TerrainPlugin,
             MapLoadingPlugin,
         ))
-        .add_systems(Startup, maximize_primary_window)
         .run();
-}
-
-/// Launch filling the screen. Bevy has no init-time "maximized" field,
-/// so we flip the flag once the window exists. Keeping it as a windowed
-/// maximize (rather than borderless fullscreen) preserves the title bar
-/// and the usual Windows minimize/restore affordances.
-fn maximize_primary_window(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    if let Ok(mut window) = windows.single_mut() {
-        window.set_maximized(true);
-    }
 }
