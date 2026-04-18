@@ -174,6 +174,12 @@ attacker unit kind) so only Wormsplash / VirusBeam / VirusDeath / Infection trig
 it — direct Wormbite no longer infects, matching upstream. `death_system` sprays
 VirusDeath at a dying Virus's corpse so the infection chain spreads via AoE.
 
+Caveat: Spring's engine has no infection logic anywhere — the whole chain is
+implemented by upstream KP in Lua gadgets under
+[upstream/Kernel-Panic/LuaRules/](upstream/Kernel-Panic/LuaRules/). Our version
+matches the observable behavior described in the readme but has never been diffed
+against the actual gadget code. Worth a pass before we treat this as frozen.
+
 ### 3.7 Kernel Boost / Production Scaling — ✅ DONE
 
 `production_system` multiplies homebase build progress by
@@ -186,7 +192,9 @@ VirusDeath at a dying Virus's corpse so the infection chain spreads via AoE.
 - ✅ Per-Flow `SpeedBoost` component refreshed every second from team small-building
   count, added on top of the registry's base speed in movement.
 - ❌ Ground units with `NoChaseCategory=VTOL` — not yet; combat_system still targets
-  Flows indiscriminately.
+  Flows indiscriminately. Upstream stores this as a `UnitDef::noChaseCategory`
+  bitmask checked in `Sim/Weapons/Weapon.cpp:AutoTarget` — same gate refactored for
+  §weapon-fire below.
 
 ### 3.9 Mines & Walls — ✅ Partial
 
@@ -208,9 +216,14 @@ VirusDeath at a dying Virus's corpse so the infection chain spreads via AoE.
 (Byte's grid), `circle.tga` (Bug's blob) exist on disk but beams render as flat-colored
 cuboids.
 
-- `scrollspeed` (DOS_Beam=4) should animate texture along the beam
-- `beamdecay` should fade beams (PacketBeam, GaussCannon)
+- `scrollspeed` (DOS_Beam=4) should animate texture along the beam — note
+  upstream's `BeamLaserProjectile::Draw` also parses but doesn't animate this, so
+  matching Spring literally means still flat. Low priority.
+- `beamdecay` should fade beams (PacketBeam, GaussCannon) — upstream applies this
+  per-frame to the beam's RGBA channels
 - `intensity` should control brightness (GaussCannon=0 flat, BuildLightning=5 bright)
+- Upstream beam geometry is two ortho-quads per segment (edge + core) with atlased
+  `texture1`/`texture2`/`texture3`; flat-colored cuboids are well short of this.
 
 ### 4.2 Projectile Models (Important)
 
@@ -232,7 +245,9 @@ have visible trails.
 
 ### 4.5 Muzzle Flash (Low)
 
-No visual feedback at the firing unit (except melee flash for Wormbite).
+No visual feedback at the firing unit (except melee flash for Wormbite). Spring
+spawns `BitmapMuzzleFlame` at `weaponMuzzlePos`, which is derived from §4.6's
+`QueryWeapon(n)` piece — fold both items into one fix.
 
 ### 4.6 COB `QueryWeapon1` Callback (Low)
 
@@ -247,8 +262,10 @@ soaks damage through the shield before it hits Health or StunCharge; with upstre
 minifac and homebase shields. `regen_shields` ticks finite shields toward max.
 
 Remaining: visible shield sphere rendering (`shieldgoodcolor`/`shieldbadcolor`/
-`shieldalpha`). Projectile *interception* (as distinct from damage absorption) waits
-on §4.2 projectile physics.
+`shieldalpha`). Upstream renders this as a 10×6 grid of `ShieldSegmentProjectile`
+billboards, not a sphere mesh — color updated in lock-step from repulser state.
+Projectile *interception* (as distinct from damage absorption) waits on §4.2
+projectile physics.
 
 ---
 
@@ -443,10 +460,50 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   ECS components at spawn time (e.g. `Speed(f32)`, `WeaponBinding(&str)`)
 - [ ] `AttackEvent::weapon_name` is `String` (heap alloc per attack) — introduce a `WeaponId`
   newtype (interned string or index into `WeaponRegistry`) so attack events carry a cheap
-  `Copy` identifier
+  `Copy` identifier. `BurstFire.weapon` and `PendingDamage.weapon` are also `String` and
+  clone per burst shot / damage event — they inherit from the same `WeaponId` change.
 - [ ] `UnitRegistry::weapon()` returns raw TDF section name strings — return
   `Option<&WeaponDef>` directly so callers never see string keys, eliminating empty-string
   checks in combat.rs and hud.rs
+- [ ] **Spatial hash** — shared `SpatialIndex` resource (XZ uniform grid, 256-elmo
+  cells, matching upstream `CQuadField`) rebuilt at the head of `GameplaySet::Simulate`
+  via `spatial::rebuild_spatial_index`. Retrofitted: `combat::combat_system` target
+  selection, `combat::apply_damage` splash radius, `combat::tick_kamikaze` trigger
+  check. Still linear and pending retrofit: `command_fire::tick_area_denial` +
+  `apply_firewall`, `interaction::movement::resolve_motion` + `unit_separation_system`,
+  `cloak::update_cloak_visibility`, `ai::nearest_unclaimed_datavent`.
+- [ ] `movement::movement_system` and `unit_separation_system` each allocate a fresh
+  `Vec<UnitSnapshot>` over all units every frame (movement.rs:135 and ~556). Promote the
+  buffer to a `Resource` (or `Local<Vec<_>>`) and `.clear() + extend()` each tick so the
+  allocation happens once and amortizes. Becomes moot once the spatial hash above
+  supplies neighborhood queries directly.
+- [ ] `production::production_system` allocates `spawns: Vec<…>` every frame (production.rs:177)
+  even when nothing is completing — most ticks push nothing. Hoist to `Local<Vec<_>>` and
+  clear each tick.
+- [ ] `animation::animation_system` calls `transforms.get_mut(piece_entities[p])` per piece
+  per frame — many pieces have no active turn/spin/move and don't need the lookup. Track
+  "dirty pieces" per animator (the set that had interpolation this tick) and query only
+  those.
+- [ ] `weapon_registry.get(weapon_name)` runs per unit per frame in `combat_system`,
+  `tick_burst_fire`, `apply_damage`, and the command-fire paths, hashing a string each
+  call. Intern weapon names into `WeaponId(u16)` during `WeaponRegistry::load()` and
+  cache the ID as a component on attackers (paired with the `WeaponBinding` work above).
+- [ ] `bookkeeping::count_small_buildings` scans all `UnitType` entities every 0.25s even
+  though buildings are a small fraction and only change when one spawns or dies. Switch
+  to event-driven counters: bump on spawn, drop on `Dying`, so per-tick cost is zero.
+- [ ] `tick_deploy_state` walks every Deployable every frame even when nothing moved.
+  Filter to `Changed<MoveTarget>` + in-flight transitions — the `Closed`/`Open` steady
+  states don't need a tick.
+- [ ] `ui::minimap::update_minimap` rewrites the full base image via
+  `copy_from_slice(&state.base_pixels)` every 0.1s. Track a dirty-rect of the previous
+  frame's unit dots + viewport rectangle and restore only those pixels, turning an
+  O(W·H) memcpy into O(units + viewport_perimeter).
+- [x] ~~`animation::publish_unit_values` pushed BUILD_PERCENT_LEFT to every animator every
+  frame~~ — filtered to `With<Emerging>` + `RemovedComponents<Emerging>` so only
+  mid-emerge animators pay the cost.
+- [x] ~~`cloak::update_cloak_visibility` ran every frame~~ — throttled to 10 Hz via
+  `CloakRefreshTimer` resource; visibility changes are well below perception threshold
+  at that rate.
 
 ### Testing & Tooling
 
@@ -487,8 +544,14 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] Attack-move (`A` hotkey) is wired in HUD but handler is empty (TODO at `hud.rs:849`)
 - [ ] Feature rotation (`MapFeature.rotation_degrees()`) parsed but never applied when
   rendering map features
-- [ ] Weapons ignore line-of-sight — `lineofsight=1` parsed but units fire through terrain
+- [x] ~~Weapons ignore line-of-sight~~ — `combat_system` now rejects targets whose
+  LOS is blocked by terrain (`Heightmap::has_line_of_sight` with `LOS_MARGIN=4`);
+  ballistic weapons (`trajectory_height > 0`) skip the check since they lob over.
 - [ ] Weapons never miss — `tolerance` parsed but ignored; perfect accuracy on all weapons
+- [ ] The two remaining items (tolerance/miss, and §1.6's `collidefriendly` on
+  projectile physics) live at the same seam in Spring: `Sim/Weapons/Weapon.cpp`'s
+  `AutoTarget` → `TestTarget` → `TryTarget` pipeline. Adding `noChaseCategory=VTOL`
+  (§3.8) fits the same gate.
 - [ ] Factory spawn offset hardcoded in `production.rs` — should use COB `QueryBuildInfo`
   callback for correct build-pad position
 
@@ -500,8 +563,15 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [x] ~~`BUILD_PERCENT_LEFT` bridge from CobVm to Create()~~ — wired through production
 - [ ] `GET` / `GET_UNIT_VALUE` still return 0 for most values — only select `springdefs.h`
   constants mapped; expand as needed
-- [ ] `EmitSfx` and `SetValue` opcodes still largely unimplemented
+- [ ] `EmitSfx` and `SetValue` opcodes still largely unimplemented — note that §4.3 CEG
+  emitters and §4.5 muzzle flash both sit downstream of this. Landing `EmitSfx` unblocks
+  both visual gaps at once.
 - [ ] `PieceIndex` component: inner value set but never read (only used as marker)
+- [ ] COB piece-space interpolation between sim frames — Spring's `LocalModelPiece` stores
+  `modelSpaceTra` with a dirty flag and interpolates between sim ticks for smooth
+  animation at render framerate. Worth checking whether our animator lerps or snaps;
+  sim runs at 30 Hz, render at up to 240 Hz, so non-interpolated piece transforms will
+  visibly pop on fast turrets.
 
 ### Visual Gaps
 
