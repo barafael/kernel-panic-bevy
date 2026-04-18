@@ -14,6 +14,7 @@ pub mod network_buffer;
 pub mod production;
 pub mod script_triggers;
 pub mod shield;
+pub mod spatial;
 pub mod spawning;
 mod tdf_loader;
 pub mod unit_registry;
@@ -59,6 +60,8 @@ impl Plugin for UnitsPlugin {
             .init_resource::<network_buffer::PacketBuffer>()
             .init_resource::<network_buffer::FlowSpeedTicker>()
             .init_resource::<bookkeeping::SmallBuildingCounts>()
+            .init_resource::<cloak::CloakRefreshTimer>()
+            .init_resource::<spatial::SpatialIndex>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -97,6 +100,7 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Produce),
                     (
+                        spatial::rebuild_spatial_index,
                         ai::ai_brain,
                         combat::tick_deploy_state,
                         combat::tick_kamikaze,

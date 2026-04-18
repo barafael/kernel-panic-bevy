@@ -4,10 +4,18 @@ use super::animation::CobAnimator;
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::UnitKind;
 use super::script_triggers::JustFired;
+use super::spatial::SpatialIndex;
 use super::unit_registry::UnitRegistry;
 use super::weapon_fx::{AttackEvent, PendingAttacks};
 use super::weapons::WeaponRegistry;
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::terrain::heightmap::Heightmap;
+
+/// Added to each sampled terrain height in LOS checks so the shooter and
+/// target standing on a crest don't self-block. Roughly half a heightmap
+/// square — tighter than this and slopes read as walls; looser and
+/// weapons shoot over short ridges.
+const LOS_MARGIN: f32 = 4.0;
 
 /// Tracks time until the unit can fire again.
 #[derive(Component)]
@@ -292,15 +300,13 @@ pub fn combat_system(
             Without<Stunned>,
         ),
     >,
-    potential_targets: Query<
-        (Entity, &Faction, &TeamId, &GlobalTransform, &Health),
-        (With<UnitType>, Without<super::spawning::Emerging>),
-    >,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     weapon_registry: Res<WeaponRegistry>,
     mut pending_attacks: ResMut<PendingAttacks>,
     unit_registry: Res<UnitRegistry>,
+    spatial: Res<SpatialIndex>,
+    heightmap: Option<Res<Heightmap>>,
 ) {
     let dt = time.delta_secs();
 
@@ -350,20 +356,28 @@ pub fn combat_system(
         // mixed-faction units on team 0 and expects them to ignore each
         // other).
         let prefer_distant = weapon_def.is_some_and(|w| w.proximity_priority < 0.0);
+        // Ballistic weapons (`trajectory_height > 0`) lob over terrain and
+        // should never fail an LOS check — the whole point is to clear
+        // the ridge. Direct-fire weapons with `lineofsight=1` do.
+        let enforce_los = weapon_def
+            .is_some_and(|w| w.line_of_sight && w.trajectory_height <= 0.0 && heightmap.is_some());
         let mut best: Option<(Entity, Vec3, f32)> = None;
-        for (target_entity, target_faction, target_team, target_gtf, target_health) in
-            &potential_targets
-        {
-            if target_team == attacker_team
-                || target_faction == attacker_faction
-                || target_health.current <= 0.0
+        spatial.query_radius(attacker_pos, range, |candidate| {
+            if !candidate.hp_positive
+                || candidate.team == attacker_team.0
+                || candidate.faction == *attacker_faction
             {
-                continue;
+                return;
             }
-            let target_pos = target_gtf.translation();
-            let dist_sq = attacker_pos.distance_squared(target_pos);
+            let dist_sq = attacker_pos.distance_squared(candidate.pos);
             if dist_sq > range_sq {
-                continue;
+                return;
+            }
+            if enforce_los
+                && let Some(hm) = heightmap.as_deref()
+                && !hm.has_line_of_sight(attacker_pos, candidate.pos, LOS_MARGIN)
+            {
+                return;
             }
             let better = best.is_none_or(|(_, _, d)| {
                 if prefer_distant {
@@ -373,9 +387,9 @@ pub fn combat_system(
                 }
             });
             if better {
-                best = Some((target_entity, target_pos, dist_sq));
+                best = Some((candidate.entity, candidate.pos, dist_sq));
             }
-        }
+        });
 
         let Some((target_entity, target_pos, _)) = best else {
             commands.entity(entity).remove::<AimTarget>();
@@ -694,10 +708,10 @@ pub fn apply_damage(
     mut shield_q: Query<&mut super::shield::ShieldState>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
-    splash_q: Query<(Entity, &UnitType, &Faction, &TeamId, &GlobalTransform), With<Health>>,
     protected_q: Query<(), With<super::command_fire::Protected>>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
+    spatial: Res<SpatialIndex>,
     mut commands: Commands,
 ) {
     for pending in damage_queue.drain() {
@@ -739,24 +753,39 @@ pub fn apply_damage(
             let edge_mult = weapon_def.edge_effectiveness;
             let avoid_friendly = weapon_def.avoid_friendly;
             let no_self_damage = weapon_def.no_self_damage;
-            for (entity, unit, faction, team, gtf) in &splash_q {
-                if entity == pending.target {
-                    continue;
+            // Collect first, then apply — apply_hit borrows mutable queries
+            // so we can't stay inside the spatial callback closure.
+            let mut splash_hits: Vec<(Entity, f32)> = Vec::new();
+            spatial.query_radius(pending.impact_pos, aoe, |candidate| {
+                if candidate.entity == pending.target {
+                    return;
                 }
-                if no_self_damage && entity == pending.attacker {
-                    continue;
+                if no_self_damage && candidate.entity == pending.attacker {
+                    return;
                 }
                 if avoid_friendly
                     && let Some((_, a_faction, a_team)) = attacker_info
-                    && super::components::is_friendly(team.0, *faction, a_team.0, *a_faction)
+                    && super::components::is_friendly(
+                        candidate.team,
+                        candidate.faction,
+                        a_team.0,
+                        *a_faction,
+                    )
                 {
-                    continue;
+                    return;
                 }
-                let d_sq = gtf.translation().distance_squared(pending.impact_pos);
+                let d_sq = candidate.pos.distance_squared(pending.impact_pos);
                 if d_sq >= aoe_sq {
-                    continue;
+                    return;
                 }
-                let splash = base(unit.0) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
+                let kind = match target_unit_q.get(candidate.entity) {
+                    Ok(ut) => ut.0,
+                    Err(_) => return,
+                };
+                let splash = base(kind) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
+                splash_hits.push((candidate.entity, splash));
+            });
+            for (entity, splash) in splash_hits {
                 apply_hit(
                     entity,
                     pending.attacker,
@@ -877,7 +906,8 @@ pub fn tick_stun(
 pub fn tick_kamikaze(
     unit_registry: Res<UnitRegistry>,
     bombs: Query<(Entity, &UnitType, &TeamId, &Faction, &GlobalTransform), Without<Dying>>,
-    mut targets: Query<(&TeamId, &Faction, &GlobalTransform, &mut Health), With<UnitType>>,
+    mut health_q: Query<&mut Health>,
+    spatial: Res<SpatialIndex>,
     mut damage_queue: ResMut<DamageQueue>,
 ) {
     for (entity, unit, team, faction, gtf) in &bombs {
@@ -887,12 +917,15 @@ pub fn tick_kamikaze(
         }
         let trigger_sq = trigger_radius * trigger_radius;
         let self_pos = gtf.translation();
-        let triggered = targets.iter().any(|(t, f, g, h)| {
-            if h.current <= 0.0 {
-                return false;
+        let mut triggered = false;
+        spatial.query_radius(self_pos, trigger_radius, |candidate| {
+            if triggered || !candidate.hp_positive {
+                return;
             }
-            let enemy = t.0 != team.0 && *f != *faction;
-            enemy && g.translation().distance_squared(self_pos) <= trigger_sq
+            let enemy = candidate.team != team.0 && candidate.faction != *faction;
+            if enemy && candidate.pos.distance_squared(self_pos) <= trigger_sq {
+                triggered = true;
+            }
         });
         if !triggered {
             continue;
@@ -905,7 +938,7 @@ pub fn tick_kamikaze(
             impact_pos: self_pos,
             attacker_distance: 0.0,
         });
-        if let Ok((_, _, _, mut health)) = targets.get_mut(entity) {
+        if let Ok(mut health) = health_q.get_mut(entity) {
             health.current = 0.0;
         }
     }
