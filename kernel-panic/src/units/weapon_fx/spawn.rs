@@ -8,6 +8,7 @@ use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, BurstSegment,
     ImpactBurst, ImpactBurstAssets, PendingAttacks, ProjectileVisual, tdf_color,
 };
+use crate::units::meshes::{S3OModelCache, load_raw_bevy_texture};
 use crate::units::weapons::WeaponRegistry;
 
 /// True for `BuildLaser` (the upstream build-laser weapon name). The
@@ -30,6 +31,8 @@ pub(super) fn spawn_weapon_visuals(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
     mut cache: ResMut<BeamMaterialCache>,
     mut sparkle_assets: ResMut<BuildSparkleAssets>,
     mut impact_assets: ResMut<ImpactBurstAssets>,
@@ -52,9 +55,22 @@ pub(super) fn spawn_weapon_visuals(
         let is_melee = weapon.category() == spring_tdf::WeaponCategory::Melee;
 
         if is_melee {
-            spawn_melee_flash(&event, weapon, &mut commands, &mut meshes, &mut materials);
+            spawn_melee_flash(
+                &event,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+            );
         } else if is_projectile {
-            spawn_projectile(&event, weapon, &mut commands, &mut meshes, &mut materials);
+            spawn_projectile(
+                &event,
+                weapon,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+            );
         } else if is_burst_beam {
             spawn_burst_beam(
                 &event,
@@ -62,6 +78,8 @@ pub(super) fn spawn_weapon_visuals(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
+                &mut images,
+                &mut model_cache,
                 &mut cache,
             );
         } else {
@@ -71,6 +89,8 @@ pub(super) fn spawn_weapon_visuals(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
+                &mut images,
+                &mut model_cache,
                 &mut cache,
             );
         }
@@ -226,13 +246,35 @@ fn spawn_build_sparkle(
     ));
 }
 
+/// Pull the beam texture filename (e.g. `arrow`) off a weapon def and
+/// resolve it to a Bevy handle. Upstream quotes the name without an
+/// extension — we try `.tga` (the format on disk) and cache the
+/// result keyed by the raw name so repeated shots of the same weapon
+/// pay disk I/O once. Returns `(name, handle)` ready for the material
+/// cache key, or `None` for untextured weapons.
+fn beam_texture<'a>(
+    tex1: &'a str,
+    model_cache: &mut S3OModelCache,
+    images: &mut Assets<Image>,
+) -> Option<(&'a str, Handle<Image>)> {
+    if tex1.is_empty() || tex1 == "none" {
+        return None;
+    }
+    let filename = format!("{tex1}.tga");
+    let handle = load_raw_bevy_texture(&filename, model_cache, images)?;
+    Some((tex1, handle))
+}
+
 /// Beam (Line, MegaBeam, BugShot, DOS_Beam, VirusBeam, GaussCannon).
+#[allow(clippy::too_many_arguments)]
 fn spawn_beam(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
 ) {
     let dir = event.target_pos - event.attacker_pos;
@@ -260,7 +302,8 @@ fn spawn_beam(
         base
     };
 
-    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, materials);
+    let texture = beam_texture(&weapon.texture1, model_cache, images);
+    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, texture, materials);
     let rotation = Quat::from_rotation_arc(Vec3::Z, dir.normalize());
 
     // The Byte's MegaBeam fires in bursts of 4 thick rectangles.
@@ -268,11 +311,14 @@ fn spawn_beam(
     // Most beam weapons: single cuboid from A to B.
     let core = weapon.core_thickness * 0.25;
     if core > 0.1 && thickness > 1.0 {
-        // Two-layer beam: bright thin core + dimmer outer.
+        // Two-layer beam: bright thin core + dimmer outer. Core stays
+        // untextured so the bright white stripe always reads cleanly
+        // over the atlased outer.
         let core_mat = cache.get_or_create_with_intensity(
             LinearRgba::WHITE,
             true,
             weapon.intensity,
+            None,
             materials,
         );
         let core_mesh = meshes.add(Cuboid::new(core, core, length));
@@ -300,16 +346,20 @@ fn spawn_beam(
 }
 
 /// Burst beam (PacketBeam — multiple small beams with spray).
+#[allow(clippy::too_many_arguments)]
 fn spawn_burst_beam(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
 ) {
     let color = tdf_color(weapon.rgb_color);
-    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, materials);
+    let texture = beam_texture(&weapon.texture1, model_cache, images);
+    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, texture, materials);
 
     let dir = event.target_pos - event.attacker_pos;
     let length = dir.length();
@@ -356,6 +406,7 @@ fn spawn_projectile(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
 ) {
     let color = tdf_color(weapon.rgb_color);
 
@@ -375,12 +426,11 @@ fn spawn_projectile(
         meshes.add(Sphere::new(proj_size))
     };
 
-    let material = materials.add(StandardMaterial {
-        base_color: Color::LinearRgba(color),
-        emissive: color * 6.0,
-        unlit: true,
-        ..default()
-    });
+    // Route through the shared cache so projectiles that re-use the same
+    // color + intensity share a single StandardMaterial handle instead of
+    // minting a fresh one per shot.
+    let material =
+        cache.get_or_create_with_intensity(color, false, weapon.intensity, None, materials);
 
     commands.spawn((
         ProjectileVisual {
@@ -399,20 +449,15 @@ fn spawn_projectile(
 /// Melee flash (Wormbite).
 fn spawn_melee_flash(
     event: &AttackEvent,
-    _weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
 ) {
     let flash_pos = (event.attacker_pos + event.target_pos) / 2.0;
     let mesh = meshes.add(Sphere::new(8.0));
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(1.0, 0.3, 0.0, 0.8),
-        emissive: LinearRgba::new(1.0, 0.3, 0.0, 1.0) * 4.0,
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        ..default()
-    });
+    let color = LinearRgba::new(1.0, 0.3, 0.0, 0.8);
+    let material = cache.get_or_create_with_intensity(color, true, 1.0, None, materials);
     commands.spawn((
         BeamVisual {
             lifetime: 0.15,

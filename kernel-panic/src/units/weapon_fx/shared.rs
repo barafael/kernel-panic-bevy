@@ -2,13 +2,21 @@
 //! visual marker components, the cached beam-material registry, and the
 //! TDF-colour normaliser.
 
+use std::borrow::Cow;
+
 use bevy::prelude::*;
 
 /// Describes a single attack for the visual system.
+///
+/// `weapon_name` is `Cow<'static, str>` so the hot build-laser path
+/// (production.rs pushes `"BuildLaser"` per emitter per factory per
+/// frame — 4×/kernel in steady state) uses a static borrow instead of
+/// allocating a fresh `String` for each ray; combat's per-shot path
+/// still allocates once per shot via `Cow::Owned`.
 pub struct AttackEvent {
     pub attacker_pos: Vec3,
     pub target_pos: Vec3,
-    pub weapon_name: String,
+    pub weapon_name: Cow<'static, str>,
 }
 
 /// Buffer written by the combat system, drained by visual systems.
@@ -89,13 +97,18 @@ pub(super) struct BeamMaterialCache {
     entries: std::collections::HashMap<MaterialKey, Handle<StandardMaterial>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct MaterialKey {
     r: u8,
     g: u8,
     b: u8,
     additive: bool,
     intensity: u8,
+    /// Texture filename or empty for untextured. Keeps per-weapon
+    /// atlas pickings (arrow / dosray / bytemegabeam) on their own
+    /// cache slot so a textured DOS beam doesn't clobber the flat
+    /// Bit line's material.
+    texture: String,
 }
 
 impl BeamMaterialCache {
@@ -105,27 +118,36 @@ impl BeamMaterialCache {
         additive: bool,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        self.get_or_create_with_intensity(color, additive, 1.0, materials)
+        self.get_or_create_with_intensity(color, additive, 1.0, None, materials)
     }
 
     /// Like `get_or_create` but scales the emissive strength by
-    /// `intensity`. Upstream weapons use intensity to vary glow —
-    /// BuildLightning=5 shines hard, GaussCannon=0 is flat. Quantized
-    /// into the cache key so we share materials across similar values.
+    /// `intensity` and optionally applies a beam texture. Upstream
+    /// weapons use intensity to vary glow (BuildLightning=5 shines
+    /// hard, GaussCannon=0 is flat), and `texture1=arrow` / `dosray` /
+    /// `bytemegabeam` to atlas the beam with a weapon-specific glyph.
+    /// Both are quantized into the cache key so we share materials
+    /// across weapons that emit the same visual.
     pub(super) fn get_or_create_with_intensity(
         &mut self,
         color: LinearRgba,
         additive: bool,
         intensity: f32,
+        texture: Option<(&str, Handle<Image>)>,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
         let emissive_scale = (intensity.max(0.5) * 4.0).clamp(1.0, 40.0);
+        let (tex_name, texture_handle) = match texture {
+            Some((name, handle)) => (name.to_string(), Some(handle)),
+            None => (String::new(), None),
+        };
         let key = MaterialKey {
             r: (color.red.clamp(0.0, 1.0) * 15.0).round() as u8,
             g: (color.green.clamp(0.0, 1.0) * 15.0).round() as u8,
             b: (color.blue.clamp(0.0, 1.0) * 15.0).round() as u8,
             additive,
             intensity: (emissive_scale * 2.0).round() as u8,
+            texture: tex_name,
         };
         self.entries
             .entry(key)
@@ -137,6 +159,7 @@ impl BeamMaterialCache {
                 };
                 materials.add(StandardMaterial {
                     base_color: Color::LinearRgba(color),
+                    base_color_texture: texture_handle,
                     emissive: color * emissive_scale,
                     unlit: true,
                     alpha_mode,

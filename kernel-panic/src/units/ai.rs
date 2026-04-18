@@ -58,11 +58,33 @@ pub struct AiTicker {
     combat_units_since_constructor: std::collections::HashMap<u8, u32>,
 }
 
+/// One combat unit's state captured at the top of an AI tick. Named so
+/// downstream loops can read `.pos` / `.idle` instead of tuple indices.
+struct CombatSnapshot {
+    entity: Entity,
+    team: u8,
+    kind: UnitKind,
+    pos: Vec3,
+    idle: bool,
+}
+
+/// Scratch buffers reused across AI ticks so the 1 Hz snapshot rebuild
+/// doesn't re-allocate.
+#[derive(Default)]
+pub struct AiScratch {
+    homebase_positions: Vec<(u8, Vec3)>,
+    datavent_positions: Vec<Vec3>,
+    building_positions: Vec<Vec3>,
+    combat_snapshot: Vec<CombatSnapshot>,
+    idle: Vec<(Entity, Vec3)>,
+}
+
 /// Main AI brain. Splits into helpers so each phase reads top-to-bottom.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn ai_brain(
     time: Res<Time>,
     mut ticker: ResMut<AiTicker>,
+    mut scratch: Local<AiScratch>,
     player_team: Res<PlayerTeam>,
     mut homebases: Query<(&TeamId, &Faction, &GlobalTransform, &mut Producer), With<Homebase>>,
     combat_units: Query<
@@ -98,32 +120,39 @@ pub fn ai_brain(
     }
     ticker.accumulated = 0.0;
 
-    let homebase_positions: Vec<(u8, Vec3)> = homebases
-        .iter()
-        .map(|(team, _, gtf, _)| (team.0, gtf.translation()))
-        .collect();
+    let scratch: &mut AiScratch = &mut scratch;
+    scratch.homebase_positions.clear();
+    scratch
+        .homebase_positions
+        .extend(homebases.iter().map(|(t, _, g, _)| (t.0, g.translation())));
 
-    // Cached once per AI tick. `building_positions` feeds every team's
-    // datavent-claim check; the two `_by_team` vecs let the per-team
-    // inner loop skip the full query scan it used to do twice.
-    let datavent_positions: Vec<Vec3> = datavents.iter().map(|v| v.pos).collect();
-    let building_positions: Vec<Vec3> = buildings
-        .iter()
-        .filter(|(_, ut, _)| ut.0.is_building())
-        .map(|(_, _, gtf)| gtf.translation())
-        .collect();
-    let combat_snapshot: Vec<(Entity, u8, UnitKind, Vec3, bool)> = combat_units
-        .iter()
-        .map(|(e, t, ut, gtf, mt, mp)| {
-            (
-                e,
-                t.0,
-                ut.0,
-                gtf.translation(),
-                mt.is_none() && mp.is_none(),
-            )
-        })
-        .collect();
+    scratch.datavent_positions.clear();
+    scratch
+        .datavent_positions
+        .extend(datavents.iter().map(|v| v.pos));
+
+    scratch.building_positions.clear();
+    scratch.building_positions.extend(
+        buildings
+            .iter()
+            .filter(|(_, ut, _)| ut.0.is_building())
+            .map(|(_, _, g)| g.translation()),
+    );
+
+    scratch.combat_snapshot.clear();
+    scratch
+        .combat_snapshot
+        .extend(
+            combat_units
+                .iter()
+                .map(|(e, t, ut, g, mt, mp)| CombatSnapshot {
+                    entity: e,
+                    team: t.0,
+                    kind: ut.0,
+                    pos: g.translation(),
+                    idle: mt.is_none() && mp.is_none(),
+                }),
+        );
 
     for (team, faction, homebase_gtf, mut producer) in &mut homebases {
         if team.0 == player_team.0 {
@@ -136,31 +165,39 @@ pub fn ai_brain(
             team.0,
             *faction,
             &constructors,
-            &building_positions,
-            &datavent_positions,
+            &scratch.building_positions,
+            &scratch.datavent_positions,
             &mut commands,
         );
 
-        let idle: Vec<(Entity, Vec3)> = combat_snapshot
-            .iter()
-            .filter(|(_, t, kind, _, idle)| *t == team.0 && kind.is_combat_unit() && *idle)
-            .map(|(e, _, _, pos, _)| (*e, *pos))
-            .collect();
+        scratch.idle.clear();
+        scratch.idle.extend(
+            scratch
+                .combat_snapshot
+                .iter()
+                .filter(|c| c.team == team.0 && c.kind.is_combat_unit() && c.idle)
+                .map(|c| (c.entity, c.pos)),
+        );
 
-        if let Some(threat) = homebase_under_threat(team.0, &homebase_positions, &combat_snapshot) {
-            assign_targets(&idle, threat, &mut commands);
+        if let Some(threat) = homebase_under_threat(
+            team.0,
+            &scratch.homebase_positions,
+            &scratch.combat_snapshot,
+        ) {
+            assign_targets(&scratch.idle, threat, &mut commands);
             continue;
         }
 
-        if idle.len() < ARMY_THRESHOLD {
+        if scratch.idle.len() < ARMY_THRESHOLD {
             continue;
         }
 
         let self_pos = homebase_gtf.translation();
-        let Some(target) = nearest_enemy_homebase(team.0, &homebase_positions, self_pos) else {
+        let Some(target) = nearest_enemy_homebase(team.0, &scratch.homebase_positions, self_pos)
+        else {
             continue;
         };
-        assign_targets(&idle, target, &mut commands);
+        assign_targets(&scratch.idle, target, &mut commands);
     }
 }
 
@@ -181,10 +218,10 @@ fn queue_builds(team: u8, faction: Faction, producer: &mut Producer, ticker: &mu
         .entry(team)
         .or_default();
     if *counter >= CONSTRUCTOR_EVERY {
-        producer.enqueue(constructor_unit(faction));
+        producer.enqueue(faction.constructor());
         *counter = 0;
     } else {
-        producer.enqueue(basic_combat_unit(faction));
+        producer.enqueue(faction.basic_combat_unit());
         *counter += 1;
     }
 }
@@ -224,7 +261,7 @@ fn dispatch_constructor(
         return;
     };
 
-    let kind = secondary_factory(faction);
+    let kind = faction.secondary_factory();
     commands
         .entity(entity)
         .insert(MoveTarget(site))
@@ -252,11 +289,10 @@ fn nearest_unclaimed_datavent(
         })
 }
 
-#[allow(clippy::type_complexity)]
 fn homebase_under_threat(
     team: u8,
     homebases: &[(u8, Vec3)],
-    combat_snapshot: &[(Entity, u8, UnitKind, Vec3, bool)],
+    combat_snapshot: &[CombatSnapshot],
 ) -> Option<Vec3> {
     let radius_sq = DEFEND_RADIUS * DEFEND_RADIUS;
     homebases
@@ -265,33 +301,9 @@ fn homebase_under_threat(
         .and_then(|(_, base_pos)| {
             let under_fire = combat_snapshot
                 .iter()
-                .any(|(_, t, _, pos, _)| *t != team && pos.distance_squared(*base_pos) < radius_sq);
+                .any(|c| c.team != team && c.pos.distance_squared(*base_pos) < radius_sq);
             under_fire.then_some(*base_pos)
         })
-}
-
-fn basic_combat_unit(faction: Faction) -> UnitKind {
-    match faction {
-        Faction::System => UnitKind::Bit,
-        Faction::Hacker => UnitKind::Bug,
-        Faction::Network => UnitKind::Packet,
-    }
-}
-
-fn constructor_unit(faction: Faction) -> UnitKind {
-    match faction {
-        Faction::System => UnitKind::Assembler,
-        Faction::Hacker => UnitKind::Trojan,
-        Faction::Network => UnitKind::Gateway,
-    }
-}
-
-fn secondary_factory(faction: Faction) -> UnitKind {
-    match faction {
-        Faction::System => UnitKind::Socket,
-        Faction::Hacker => UnitKind::Window,
-        Faction::Network => UnitKind::Port,
-    }
 }
 
 fn nearest_enemy_homebase(own_team: u8, homebases: &[(u8, Vec3)], from: Vec3) -> Option<Vec3> {
@@ -325,26 +337,5 @@ mod tests {
     fn nearest_enemy_none_when_alone() {
         let bases = [(0, Vec3::ZERO)];
         assert!(nearest_enemy_homebase(0, &bases, Vec3::ZERO).is_none());
-    }
-
-    #[test]
-    fn basic_combat_unit_per_faction() {
-        assert_eq!(basic_combat_unit(Faction::System), UnitKind::Bit);
-        assert_eq!(basic_combat_unit(Faction::Hacker), UnitKind::Bug);
-        assert_eq!(basic_combat_unit(Faction::Network), UnitKind::Packet);
-    }
-
-    #[test]
-    fn constructor_per_faction() {
-        assert_eq!(constructor_unit(Faction::System), UnitKind::Assembler);
-        assert_eq!(constructor_unit(Faction::Hacker), UnitKind::Trojan);
-        assert_eq!(constructor_unit(Faction::Network), UnitKind::Gateway);
-    }
-
-    #[test]
-    fn secondary_factory_per_faction() {
-        assert_eq!(secondary_factory(Faction::System), UnitKind::Socket);
-        assert_eq!(secondary_factory(Faction::Hacker), UnitKind::Window);
-        assert_eq!(secondary_factory(Faction::Network), UnitKind::Port);
     }
 }

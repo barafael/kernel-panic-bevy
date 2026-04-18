@@ -30,6 +30,7 @@ use crate::interaction::movement::{MovePath, MoveTarget};
 /// Cleared once the unit reaches the site and construction starts, or
 /// when the player replaces the order.
 #[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
 pub struct PendingBuild {
     pub kind: UnitKind,
     pub site: Vec3,
@@ -37,6 +38,7 @@ pub struct PendingBuild {
 
 /// Active construction state on a builder that has arrived at its site.
 #[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
 pub struct Constructing {
     pub kind: UnitKind,
     pub site: Vec3,
@@ -151,7 +153,7 @@ pub fn tick_construction(
         pending_attacks.events.push(AttackEvent {
             attacker_pos: start,
             target_pos: constructing.site,
-            weapon_name: "BuildLaser".to_string(),
+            weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
         });
 
         let build_time = unit_registry.build_time(constructing.kind);

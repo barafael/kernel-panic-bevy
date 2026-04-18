@@ -11,7 +11,8 @@ pub use selection::Selected;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, draw_selected_command_lines, movement_system, unit_separation_system,
+    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, movement_system,
+    unit_separation_system,
 };
 use selection::SelectionPlugin;
 
@@ -27,6 +28,9 @@ impl Plugin for InteractionPlugin {
                 (
                     movement_system,
                     unit_separation_system.after(movement_system),
+                    // Runs last so any Y drift introduced by the two
+                    // preceding systems is corrected in the same frame.
+                    ground_clamp_system.after(unit_separation_system),
                     draw_selected_command_lines.after(movement_system),
                 ),
             );

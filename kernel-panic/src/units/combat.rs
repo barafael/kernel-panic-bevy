@@ -327,6 +327,7 @@ pub fn combat_system(
         (
             Entity,
             &UnitType,
+            &super::components::UnitStats,
             &Faction,
             &TeamId,
             &GlobalTransform,
@@ -364,7 +365,8 @@ pub fn combat_system(
 
     damage_queue.clear();
 
-    for (entity, unit_type, attacker_faction, attacker_team, attacker_gtf, deployable) in &attackers
+    for (entity, unit_type, stats, attacker_faction, attacker_team, attacker_gtf, deployable) in
+        &attackers
     {
         // Deployable units (Pointer) can only fire while fully open. They
         // can still *aim* while opening (so the gun is pointed when Open
@@ -411,7 +413,13 @@ pub fn combat_system(
         // Most KP ground units set `NoChaseCategory=VTOL` so they ignore
         // Flows (and any future flying unit) during auto-target. Flying
         // units themselves still chase fliers — the filter is per-attacker.
-        let skip_flying = unit_registry.no_chase_vtol(unit_type.0);
+        let skip_flying = stats.no_chase_vtol;
+        // Debug (mineblaster) sets `OnlyTargetCategory1=VOID` upstream
+        // and only fires Minekiller on mines / walls — it's a
+        // defensive turret, not a tickle-turret for infantry. Keep the
+        // filter as a per-kind gate so future units can join the
+        // "targets mines only" club without touching combat_system.
+        let targets_mines_only = unit_type.0.targets_mines_only();
         let mut best: Option<(Entity, Vec3, f32)> = None;
         spatial.query_radius(attacker_pos, range, |candidate| {
             if !candidate.hp_positive
@@ -421,6 +429,9 @@ pub fn combat_system(
                 return;
             }
             if skip_flying && candidate.is_flying {
+                return;
+            }
+            if targets_mines_only && !candidate.kind.is_minekiller_target() {
                 return;
             }
             let dist_sq = attacker_pos.distance_squared(candidate.pos);
@@ -544,7 +555,7 @@ pub fn combat_system(
             pending_attacks.events.push(AttackEvent {
                 attacker_pos: visual_origin,
                 target_pos: impact_pos,
-                weapon_name: weapon_name.to_string(),
+                weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
             });
         }
 
@@ -576,15 +587,15 @@ pub fn aim_weapons_system(
     mut query: Query<(
         &mut Transform,
         &GlobalTransform,
-        &UnitType,
+        &super::components::UnitStats,
         &AimTarget,
         &mut CobAnimator,
+        Option<&super::animation::GunbasePiece>,
         &Deployable,
     )>,
-    unit_registry: Res<UnitRegistry>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, gtf, unit_type, aim, mut animator, _deploy) in &mut query {
+    for (mut transform, gtf, stats, aim, mut animator, gunbase, _deploy) in &mut query {
         let attacker_pos = gtf.translation();
         let to_target = Vec3::new(aim.pos.x - attacker_pos.x, 0.0, aim.pos.z - attacker_pos.z);
         let horizontal_dist = to_target.length();
@@ -603,9 +614,8 @@ pub fn aim_weapons_system(
                 f.normalize()
             }
         };
-        let turn_rate = unit_registry.turn_rate(unit_type.0);
-        let max_turn = if turn_rate > 0.0 {
-            turn_rate * dt
+        let max_turn = if stats.turn_rate > 0.0 {
+            stats.turn_rate * dt
         } else {
             std::f32::consts::TAU
         };
@@ -632,10 +642,10 @@ pub fn aim_weapons_system(
         // (so the barrel folds flat). AimWeapon1 rewrites it to (π/2 − p),
         // which is the same convention: higher pitch = smaller X rotation.
         // Since our VM doesn't actually run the aim loop, mirror it here.
-        let gunbase_idx = animator.piece_index("gunbase");
-        if let Some(idx) = gunbase_idx
-            && idx < animator.piece_rotations.len()
+        if let Some(gb) = gunbase
+            && gb.0 < animator.piece_rotations.len()
         {
+            let idx = gb.0;
             let target_x = std::f32::consts::FRAC_PI_2 - pitch;
             animator.target_rotations[idx][0] = target_x;
             // Reasonable pitch rate (~90°/sec) so the barrel visibly
@@ -679,7 +689,7 @@ pub fn tick_burst_fire(
         pending_attacks.events.push(AttackEvent {
             attacker_pos: visual_origin,
             target_pos: burst.target_pos,
-            weapon_name: burst.weapon.clone(),
+            weapon_name: std::borrow::Cow::Owned(burst.weapon.clone()),
         });
         commands.entity(entity).insert(JustFired {
             target_pos: burst.target_pos,
@@ -785,6 +795,7 @@ pub fn apply_damage(
     mut shield_q: Query<&mut super::shield::ShieldState>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
+    target_pos_q: Query<(&GlobalTransform, &super::components::UnitStats), With<UnitType>>,
     protected_q: Query<(), With<super::command_fire::Protected>>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
@@ -807,33 +818,45 @@ pub fn apply_damage(
         let paralyze_time = weapon_def.paralyze_time;
 
         let dyn_mult = weapon_def.dyn_damage_multiplier(pending.attacker_distance);
-        // Primary target always takes damage. We tried gating on
-        // "impact_pos inside target collision_radius" to implement
-        // spray_angle misses, but our scalar `collision_radius` comes
-        // from `footprint/2` which dramatically undersells Spring's
-        // volumetric hit box — at typical spray_angle=1024 (5.6°) × 350
-        // elmo range the XZ offset is ~34 elmos, well beyond our ~8 elmo
-        // Bit radius, so virtually every shot was scored as a miss and
-        // no unit ever died. Until we model real hit volumes, the spray
-        // perturbation only affects `impact_pos` (splash + visuals), not
-        // whether the primary hit registers.
-        let primary_damage = match target_unit_q.get(pending.target) {
-            Ok(unit) => base(unit.0) * dyn_mult,
-            Err(_) => weapon_def.damage.default * dyn_mult,
+        // Spray-angle miss gate. `spray_angle > 0` weapons perturbed
+        // their `impact_pos` in combat_system; here we check whether the
+        // perturbed impact still lands inside the target's volumetric
+        // `hit_radius` (the S3O bounding sphere, which is what Spring's
+        // `CCollisionHandler` sphere test uses — *not* the footprint-
+        // derived `UnitStats.radius`, which is 2-3× tighter and scored
+        // nearly every shot as a miss on the last attempt). Zero-spread
+        // weapons always land; a missed shot still produces splash from
+        // `impact_pos` below for AoE weapons.
+        let primary_target_kind = target_unit_q.get(pending.target).ok().map(|ut| ut.0);
+        let target_hit = if weapon_def.spray_angle > 0.0 {
+            if let Ok((tgt_xform, tgt_stats)) = target_pos_q.get(pending.target) {
+                tgt_xform.translation().distance(pending.impact_pos) <= tgt_stats.hit_radius
+            } else {
+                // Target despawned between queueing and apply — no
+                // primary hit, splash still handles nearby units.
+                false
+            }
+        } else {
+            true
         };
-        apply_hit(
-            pending.target,
-            pending.attacker,
-            primary_damage,
-            paralyzer,
-            paralyze_time,
-            &mut health_q,
-            &mut stun_q,
-            &mut shield_q,
-            &protected_q,
-            &mut commands,
-        );
-        commands.entity(pending.target).insert(IdleTimer(0.0));
+        if target_hit {
+            let primary_damage = primary_target_kind
+                .map(|k| base(k) * dyn_mult)
+                .unwrap_or(weapon_def.damage.default * dyn_mult);
+            apply_hit(
+                pending.target,
+                pending.attacker,
+                primary_damage,
+                paralyzer,
+                paralyze_time,
+                &mut health_q,
+                &mut stun_q,
+                &mut shield_q,
+                &protected_q,
+                &mut commands,
+            );
+            commands.entity(pending.target).insert(IdleTimer(0.0));
+        }
 
         let aoe = weapon_def.area_of_effect;
         if aoe > AOE_SPLASH_THRESHOLD {
@@ -894,8 +917,11 @@ pub fn apply_damage(
         // Apply infection: keyed on the weapon (not the attacker kind)
         // to match upstream LuaRules/Gadgets/infection.lua. VirusBeam,
         // VirusDeath, Wormsplash, and Obelisk Infection each have their
-        // own infection window in seconds.
-        if let Some(duration) = weapon_infection_duration(&pending.weapon)
+        // own infection window in seconds. Only fires when the primary
+        // hit actually landed — a shot that misses on spray angle
+        // shouldn't infect the intended target.
+        if target_hit
+            && let Some(duration) = weapon_infection_duration(&pending.weapon)
             && let Some((_, attacker_faction, attacker_team)) = attacker_info
         {
             let target_is_virus = target_unit_q

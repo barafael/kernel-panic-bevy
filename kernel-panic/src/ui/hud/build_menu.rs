@@ -96,15 +96,47 @@ fn update_build_menu(
     previews: Res<UnitPreviews>,
     mut commands: Commands,
     unit_registry: Res<UnitRegistry>,
+    mut last_hash: Local<u64>,
 ) {
+    // Rebuild only when the selection + production state actually
+    // changes. Without this guard the system despawns and respawns the
+    // entire build-icon subtree every Update tick even on fully static
+    // frames.
+    let builder = selected_q
+        .iter()
+        .find(|(ut, _)| !buildable_units(ut.0).is_empty());
+    let producer_slot = producer_q.iter().next();
+
+    let mut hash: u64 = 0;
+    if let Some((ut, faction)) = builder {
+        hash = hash.wrapping_mul(2654435761).wrapping_add(ut.0 as u64);
+        hash = hash.wrapping_mul(2654435761).wrapping_add(*faction as u64);
+    }
+    if let Some((producer, _)) = producer_slot {
+        if let Some(kind) = producer.current_production() {
+            hash = hash
+                .wrapping_mul(2654435761)
+                .wrapping_add(kind as u64 | 0x1000);
+            hash = hash
+                .wrapping_mul(2654435761)
+                .wrapping_add((producer.progress_fraction(&unit_registry) * 100.0) as u64);
+        }
+        hash = hash
+            .wrapping_mul(2654435761)
+            .wrapping_add(producer.queue().len() as u64);
+        for kind in producer.queue() {
+            hash = hash.wrapping_mul(2654435761).wrapping_add(*kind as u64);
+        }
+    }
+    if hash == *last_hash {
+        return;
+    }
+    *last_hash = hash;
+
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    // Find the first selected unit that has build options.
-    let builder = selected_q
-        .iter()
-        .find(|(ut, _)| !buildable_units(ut.0).is_empty());
     let Some((unit_type, faction)) = builder else {
         return;
     };

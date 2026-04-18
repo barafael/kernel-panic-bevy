@@ -33,7 +33,7 @@ pub struct Producer {
 }
 
 impl Producer {
-    pub fn new(_default: UnitKind) -> Self {
+    pub fn new() -> Self {
         Self {
             progress: 0.0,
             queue: VecDeque::new(),
@@ -89,11 +89,11 @@ pub const KERNEL_BOOST_PER_BUILDING: f32 = 0.2;
 
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
     match kind {
-        UnitKind::Kernel => Some(Producer::new(UnitKind::Bit)),
-        UnitKind::Hole => Some(Producer::new(UnitKind::Bug)),
-        UnitKind::Connection => Some(Producer::new(UnitKind::Packet)),
-        UnitKind::Socket => Some(Producer::new(UnitKind::Bit)),
-        UnitKind::Window => Some(Producer::new(UnitKind::Bug)),
+        UnitKind::Kernel
+        | UnitKind::Hole
+        | UnitKind::Connection
+        | UnitKind::Socket
+        | UnitKind::Window => Some(Producer::new()),
         // Port is a teleporter, not a factory — it tops up its team's
         // PacketBuffer every 5.5s rather than spawning units directly.
         _ => None,
@@ -117,7 +117,7 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
     pending.events.push(AttackEvent {
         attacker_pos: start,
         target_pos: end,
-        weapon_name: "BuildLaser".to_string(),
+        weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
     });
 }
 
@@ -313,6 +313,7 @@ pub fn production_system(
             total: emerge_duration,
             rally_point,
             style,
+            last_build_percent: -1,
         });
         // Fade-style emergence needs per-unit cloned materials so the
         // alpha ramp doesn't leak onto every other unit sharing the
@@ -330,6 +331,7 @@ pub fn production_system(
 /// next-frame `install_fade_materials` system can swap each piece's
 /// MeshMaterial3d for a per-unit clone before the alpha ramp starts.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct PendingFadeInstall;
 
 /// Host-animate Connection's `body` piece as a "hatch" — lifts
@@ -339,22 +341,14 @@ pub struct PendingFadeInstall;
 /// Connection's .bos has no such handler — so we drive it from the
 /// host the same way `aim_weapons_system` host-drives the Pointer's
 /// gunbase.
-pub fn animate_connection_hatch(mut query: Query<(&UnitType, &Producer, &mut CobAnimator)>) {
+pub fn animate_connection_hatch(
+    mut query: Query<(&Producer, &mut CobAnimator, &super::animation::HatchPiece)>,
+) {
     const HATCH_LIFT_ELMOS: f32 = 16.0;
     const HATCH_SPEED_ELMOS_PER_SEC: f32 = 24.0;
 
-    for (unit_type, producer, mut animator) in &mut query {
-        if unit_type.0 != UnitKind::Connection {
-            continue;
-        }
-        let body_idx = animator
-            .cob
-            .piece_names
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case("body"));
-        let Some(idx) = body_idx else {
-            continue;
-        };
+    for (producer, mut animator, hatch) in &mut query {
+        let idx = hatch.0;
         if idx >= animator.target_translations.len() {
             continue;
         }

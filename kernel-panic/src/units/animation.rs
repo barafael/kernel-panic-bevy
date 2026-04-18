@@ -16,6 +16,44 @@ pub struct DeathParticle {
     pub max_lifetime: f32,
 }
 
+/// Lazily-populated shared mesh and per-faction emissive materials for
+/// death particles. `spawn_death_particle` seeds the entry the first time
+/// it needs a given faction color; every subsequent particle re-uses the
+/// same Handle. Mirrors the pattern used by `BuildSparkleAssets` /
+/// `ImpactBurstAssets`.
+#[derive(Resource, Default)]
+pub struct DeathParticleAssets {
+    pub mesh: Option<Handle<Mesh>>,
+    pub system: Option<Handle<StandardMaterial>>,
+    pub hacker: Option<Handle<StandardMaterial>>,
+    pub network: Option<Handle<StandardMaterial>>,
+}
+
+impl DeathParticleAssets {
+    fn material_for(
+        &mut self,
+        faction: Faction,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let slot = match faction {
+            Faction::System => &mut self.system,
+            Faction::Hacker => &mut self.hacker,
+            Faction::Network => &mut self.network,
+        };
+        slot.get_or_insert_with(|| {
+            let color = LinearRgba::from(faction.color());
+            materials.add(StandardMaterial {
+                base_color: Color::from(color),
+                emissive: color * 6.0,
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                ..default()
+            })
+        })
+        .clone()
+    }
+}
+
 /// Component holding per-unit animation state.
 #[derive(Component)]
 pub struct CobAnimator {
@@ -65,6 +103,18 @@ pub struct PieceIndex;
 #[derive(Component, Clone, Copy, Debug)]
 pub struct MuzzlePiece(pub usize);
 
+/// Cached COB piece index for the deploy/aim gun pivot (`gunbase`). Set at
+/// spawn when the unit's script declares the piece; read every frame by
+/// `aim_weapons_system` so it doesn't re-scan the piece-name table.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct GunbasePiece(pub usize);
+
+/// Cached COB piece index for the Connection's hatch (`body`). Set at
+/// spawn when the unit's script declares the piece; read every frame by
+/// `animate_connection_hatch` so it doesn't re-scan the piece-name table.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct HatchPiece(pub usize);
+
 /// Cached parsed COB files, keyed by script filename.
 #[derive(Resource, Default)]
 pub struct CobFileCache {
@@ -78,19 +128,6 @@ pub fn load_cob_cached(script: &str, cache: &mut CobFileCache) -> Option<Arc<Cob
         .entry(script.to_string())
         .or_insert_with(|| load_asset_from_disk(script, parse_cob).map(Arc::new))
         .clone()
-}
-
-impl CobAnimator {
-    /// Index into `piece_entities` for the piece whose COB name matches
-    /// `target` (case-insensitive). `None` if the script doesn't declare
-    /// that name. O(#pieces) — callers that query per-frame should cache
-    /// the result on a component at spawn time.
-    pub fn piece_index(&self, target: &str) -> Option<usize> {
-        self.cob
-            .piece_names
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case(target))
-    }
 }
 
 /// Spring uses "angular units" where 65536 = 360°. Convert to radians.
@@ -195,6 +232,7 @@ pub fn animation_system(
     mut spawn_commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut death_assets: ResMut<DeathParticleAssets>,
     mut turn_finished: Local<Vec<(i32, i32)>>,
     mut move_finished: Local<Vec<(i32, i32)>>,
 ) {
@@ -321,6 +359,7 @@ pub fn animation_system(
                         spawn_death_particle(
                             piece_world_pos,
                             *faction,
+                            &mut death_assets,
                             &mut spawn_commands,
                             &mut meshes,
                             &mut materials,
@@ -414,22 +453,23 @@ pub fn animation_system(
 // ---------------------------------------------------------------------------
 
 /// Spawn a brief expanding, fading burst at `pos` in the unit's faction color.
+///
+/// Mesh and per-faction material are owned by [`DeathParticleAssets`] so
+/// every burst reuses the same Handle — an arena full of dying units
+/// doesn't each mint a fresh sphere and material asset.
 fn spawn_death_particle(
     pos: Vec3,
     faction: Faction,
+    assets: &mut DeathParticleAssets,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
 ) {
-    let color = LinearRgba::from(faction.color());
-    let material = materials.add(StandardMaterial {
-        base_color: Color::from(color),
-        emissive: color * 6.0,
-        unlit: true,
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
-    let mesh = meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap());
+    let mesh = assets
+        .mesh
+        .get_or_insert_with(|| meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()))
+        .clone();
+    let material = assets.material_for(faction, materials);
 
     commands.spawn((
         DeathParticle {
@@ -442,20 +482,18 @@ fn spawn_death_particle(
     ));
 }
 
-/// Expand and fade death particles, then despawn them.
+/// Expand and fade death particles, then despawn them. The shared
+/// material means we can't mutate alpha per-particle, so "fade" is done
+/// purely through the scale curve — the sphere grows, peaks, then
+/// shrinks back to zero in the last ~20% of its life, disappearing
+/// cleanly. The material itself stays at full emissive.
 pub fn decay_death_particles(
     time: Res<Time>,
-    mut query: Query<(
-        Entity,
-        &mut DeathParticle,
-        &mut Transform,
-        &MeshMaterial3d<StandardMaterial>,
-    )>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut query: Query<(Entity, &mut DeathParticle, &mut Transform)>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut particle, mut transform, mat_handle) in &mut query {
+    for (entity, mut particle, mut transform) in &mut query {
         particle.lifetime += dt;
         let t = (particle.lifetime / particle.max_lifetime).clamp(0.0, 1.0);
 
@@ -464,15 +502,9 @@ pub fn decay_death_particles(
             continue;
         }
 
-        // Expand rapidly then slow down.
-        let scale = 2.0 + t * 20.0;
-        transform.scale = Vec3::splat(scale);
-
-        // Fade out alpha and emissive.
-        if let Some(mat) = materials.get_mut(&mat_handle.0) {
-            let alpha = 1.0 - t;
-            mat.base_color = mat.base_color.with_alpha(alpha);
-            mat.emissive *= 1.0 - t * 0.8;
-        }
+        // Grow then shrink: peaks at t=0.8, collapses to zero by t=1.0.
+        let peak_scale = 2.0 + 20.0 * t.min(0.8) / 0.8;
+        let tail = if t > 0.8 { (1.0 - t) / 0.2 } else { 1.0 };
+        transform.scale = Vec3::splat(peak_scale * tail);
     }
 }

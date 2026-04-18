@@ -2,6 +2,7 @@ mod interaction;
 mod map_loading;
 mod paths;
 mod rendering;
+mod rng;
 mod terrain;
 mod ui;
 mod units;

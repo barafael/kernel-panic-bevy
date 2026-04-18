@@ -261,27 +261,46 @@ against the actual gadget code. Worth a pass before we treat this as frozen.
   splash + armor-class pipeline handles the blast (3000 vs Subterranean).
 - ✅ **BadBlock**: spawned at 100 HP; being a building it blocks movement via the
   existing collision pipeline. Crushable by Bytes is deferred.
-- ❌ **Debug**: the one-shot Minekiller placement/trigger flow isn't wired (upstream's
-  Launcher gadget delivers Debugs via a MineLauncher weapon, not direct construction).
+- ✅ **Debug**: buildable by every constructor (Assembler / Trojan /
+  Gateway build lists already include it) as a stationary Minekiller
+  turret. Weapon1=Minekiller auto-fires through the regular
+  `combat_system`, but target selection is gated by
+  `UnitKind::targets_mines_only` + `UnitKind::is_minekiller_target`
+  so Debug only aggros onto enemy Logic Bombs / BadBlocks — it won't
+  tickle infantry with its 20-damage anti-spam shots. `SpatialEntry`
+  gained a `kind: UnitKind` field so the filter runs without an
+  extra ECS lookup per candidate. Upstream's Launcher-via-
+  MineLauncher delivery path isn't reproduced; it's a buildable unit
+  here since our Byte MineLauncher command-fire already covers the
+  "drop a bunch of mines from a distance" use case.
 
 ---
 
 ## 4. Weapon Visuals & Animation
 
-### 4.1 Beam Textures (Important)
+### 4.1 Beam Textures — ✅ Partial
 
-`arrow.tga` (Bit's `>>>>>`), `dosray.tga` (DOS's binary stream), `bytemegabeam.tga`
-(Byte's grid), `circle.tga` (Bug's blob) exist on disk but beams render as flat-colored
-cuboids.
-
-- `scrollspeed` (DOS_Beam=4) should animate texture along the beam — note
-  upstream's `BeamLaserProjectile::Draw` also parses but doesn't animate this, so
-  matching Spring literally means still flat. Low priority.
-- `beamdecay` should fade beams (PacketBeam, GaussCannon) — upstream applies this
-  per-frame to the beam's RGBA channels
-- `intensity` should control brightness (GaussCannon=0 flat, BuildLightning=5 bright)
-- Upstream beam geometry is two ortho-quads per segment (edge + core) with atlased
-  `texture1`/`texture2`/`texture3`; flat-colored cuboids are well short of this.
+- ✅ **texture1 wiring**: weapons that declare `texture1=arrow` /
+  `dosray` / `bytemegabeam` now carry that bitmap on their beam
+  material. `meshes::load_raw_bevy_texture` loads the TGA from
+  `upstream/Kernel-Panic/bitmaps/kpsfx` on first use (added to
+  `ASSET_DIRS`), uploads it as a Bevy `Image`, and caches the handle
+  keyed by filename. `BeamMaterialCache` gained a texture slot in
+  its key so a textured DOS beam and a flat Bit line land in
+  different cache buckets. Core (inner bright stripe) stays
+  untextured so the core stays legibly white over the atlased
+  outer.
+- ⏳ **`scrollspeed`**: DOS_Beam's 4-UV animation still not wired
+  (upstream parses but doesn't animate either — matching Spring
+  literally means still flat).
+- ⏳ **`beamdecay`** per-frame RGBA fade (upstream applies to the
+  full channel) — ours still fades only by scale shrink.
+- ⏳ **`intensity`** — already feeds emissive strength on the
+  material via `BeamMaterialCache`; no further work needed unless
+  we want values > 10 to bloom harder.
+- ⏳ **Two-quad edge + core** — still a single thick cuboid with a
+  thin bright core cuboid layered on top when `corethickness`
+  warrants. Upstream's ortho-quad geometry remains deferred.
 
 ### 4.2 Projectile Models (Important)
 
@@ -366,12 +385,23 @@ Easy (slower production), Normal, Hard (faster production, better targeting, mul
 
 ---
 
-## 6. Fog of War (Medium)
+## 6. Fog of War — ✅ MVP (memory-only)
 
-Per-unit sight radius. Enemy units outside friendly sight are hidden. Terrain revealed
-permanently once scouted. Worms invisible unless within enemy sight AND attacking.
+The §10.3 MVP landed: `cloak::update_fog_visibility` runs at 10 Hz in
+the Animate set; any non-cloaked, non-friendly unit within a
+player-team unit's FBI `SightDistance` gains the [`Spotted`] marker
+and becomes visible. Once set, `Spotted` is never revoked — this is
+the "memory" variant, not full LoS. Cloaked units (Worm / Logic
+Bomb) keep their existing detector-based visibility via
+`update_cloak_visibility`; the two systems partition on the
+[`Cloaked`] marker so neither races the other's writes.
 
-Implementation: per-team visibility grid, shader/material override for hidden units.
+Terrain is always visible — no exploration mechanic yet.
+
+Deferred to full §6: active revoke on sight loss, per-team
+visibility grids (AI teams still have perfect information
+internally), terrain chunks only revealed once scouted, Worm-while-
+attacking reveal rules.
 
 ---
 

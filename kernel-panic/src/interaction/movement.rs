@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 use spring_pathfinding::{NodeLayer, find_path};
@@ -5,7 +7,7 @@ use spring_pathfinding::{NodeLayer, find_path};
 use super::selection::Selected;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{DeployState, Deployable};
-use crate::units::components::UnitType;
+use crate::units::components::{UnitStats, UnitType};
 use crate::units::definitions::UnitKind;
 use crate::units::unit_registry::UnitRegistry;
 
@@ -145,6 +147,7 @@ pub fn movement_system(
     mut query: Query<(
         Entity,
         &UnitType,
+        &UnitStats,
         &mut Transform,
         Option<&MoveTarget>,
         Option<&mut MovePath>,
@@ -170,12 +173,12 @@ pub fn movement_system(
     snapshot.extend(
         query
             .iter()
-            .map(|(e, ut, tf, target, _, _, _, _, _, _)| UnitSnapshot {
+            .map(|(e, _, stats, tf, target, _, _, _, _, _, _)| UnitSnapshot {
                 entity: e,
                 pos: tf.translation,
-                radius: unit_registry.collision_radius(ut.0),
-                mobile: unit_registry.speed(ut.0) > 0.0,
-                flying: unit_registry.can_fly(ut.0),
+                radius: stats.radius,
+                mobile: stats.speed > 0.0,
+                flying: stats.can_fly,
                 stationary: target.is_none(),
             }),
     );
@@ -185,6 +188,7 @@ pub fn movement_system(
     for (
         entity,
         unit_type,
+        stats,
         mut transform,
         move_target,
         move_path,
@@ -199,7 +203,7 @@ pub fn movement_system(
             continue;
         }
 
-        let speed = unit_registry.speed(unit_type.0) + speed_boost.map_or(0.0, |b| b.0);
+        let speed = stats.speed + speed_boost.map_or(0.0, |b| b.0);
         if speed == 0.0 {
             // Buildings can't move — remove any movement components.
             commands.entity(entity).remove::<MoveTarget>();
@@ -219,7 +223,7 @@ pub fn movement_system(
             continue;
         }
 
-        let flying = unit_registry.can_fly(unit_type.0);
+        let flying = stats.can_fly;
 
         // If we have a MoveTarget but no MovePath, compute the path.
         // Flying units skip the nav grid entirely and take a straight XZ
@@ -297,7 +301,7 @@ pub fn movement_system(
         let diff = goal - current;
         let distance = diff.length();
 
-        let self_radius = unit_registry.collision_radius(unit_type.0);
+        let self_radius = stats.radius;
 
         // Arrival is "within my own footprint of the waypoint" — this lets
         // crowds converging on the same target settle at the boundary of
@@ -333,7 +337,7 @@ pub fn movement_system(
             f.normalize()
         };
 
-        let turn_rate = unit_registry.turn_rate(unit_type.0);
+        let turn_rate = stats.turn_rate;
         let max_turn = if turn_rate > 0.0 {
             turn_rate * dt
         } else {
@@ -415,7 +419,7 @@ pub fn movement_system(
         if let Some(ref hm) = heightmap {
             let ground = hm.sample(transform.translation.x, transform.translation.z);
             transform.translation.y = if flying {
-                ground + unit_registry.cruise_alt(unit_type.0)
+                ground + stats.cruise_alt
             } else {
                 ground
             };
@@ -580,57 +584,79 @@ fn waypoint_blocked_by_arrived_unit(
 /// residual overlap with a gentle nudge — not drive the main separation.
 pub fn unit_separation_system(
     mut units: Query<
-        (Entity, &mut Transform, &UnitType),
+        (Entity, &mut Transform, &UnitStats),
         Without<crate::units::spawning::Emerging>,
     >,
     time: Res<Time>,
-    unit_registry: Res<UnitRegistry>,
     heightmap: Option<Res<Heightmap>>,
-    mut snapshot: Local<Vec<(Entity, Vec3, f32, bool, bool)>>,
+    mut snapshot: Local<Vec<SeparationEntry>>,
+    mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
     mut pushes: Local<Vec<(Entity, Vec3)>>,
 ) {
     let dt = time.delta_secs();
     let push_strength = 30.0_f32;
 
-    // Snapshot position, radius, mobility, flying. Both buffers persist
-    // across frames as `Local`s; steady-state iterations reuse capacity.
+    // Snapshot + per-frame bucket grid. Buckets are retained between frames
+    // (`Local`), only the contents clear, so the allocator stays quiet after
+    // warmup. `SEP_CELL` matches the largest footprint we see in practice
+    // (~32 elmos), so each ground unit touches ≤9 neighbouring cells and
+    // the inner loop shrinks from O(N²) to ~O(N·k) with k≈8.
+    const SEP_CELL: f32 = 32.0;
+    let to_cell = |x: f32, z: f32| -> (i32, i32) {
+        ((x / SEP_CELL).floor() as i32, (z / SEP_CELL).floor() as i32)
+    };
+
     snapshot.clear();
-    snapshot.extend(units.iter().map(|(e, tf, ut)| {
-        (
-            e,
-            tf.translation,
-            unit_registry.collision_radius(ut.0),
-            unit_registry.speed(ut.0) > 0.0,
-            unit_registry.can_fly(ut.0),
-        )
-    }));
+    for bucket in grid.values_mut() {
+        bucket.clear();
+    }
+    for (e, tf, stats) in units.iter() {
+        let idx = snapshot.len();
+        snapshot.push(SeparationEntry {
+            entity: e,
+            pos: tf.translation,
+            radius: stats.radius,
+            mobile: stats.speed > 0.0,
+            flying: stats.can_fly,
+        });
+        if !stats.can_fly {
+            // Flyers don't participate in ground separation — omit from
+            // the bucket so ground units don't scan through them.
+            let key = to_cell(tf.translation.x, tf.translation.z);
+            grid.entry(key).or_default().push(idx);
+        }
+    }
 
     pushes.clear();
     for i in 0..snapshot.len() {
-        if !snapshot[i].3 || snapshot[i].4 {
-            // Skip buildings (can't move) and flying units (separation
-            // is a ground-only concern; fliers don't occupy XZ space).
+        let me = &snapshot[i];
+        if !me.mobile || me.flying {
             continue;
         }
+        let (cx, cz) = to_cell(me.pos.x, me.pos.z);
         let mut push = Vec3::ZERO;
-        for j in 0..snapshot.len() {
-            if i == j || snapshot[j].4 {
-                continue; // ignore flyers overhead
-            }
-            let sum_r = snapshot[i].2 + snapshot[j].2;
-            let diff = Vec3::new(
-                snapshot[i].1.x - snapshot[j].1.x,
-                0.0,
-                snapshot[i].1.z - snapshot[j].1.z,
-            );
-            let dist = diff.length();
-            if dist < sum_r && dist > 0.01 {
-                let overlap = sum_r - dist;
-                push += (diff / dist) * overlap;
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let Some(bucket) = grid.get(&(cx + dx, cz + dz)) else {
+                    continue;
+                };
+                for &j in bucket {
+                    if i == j {
+                        continue;
+                    }
+                    let other = &snapshot[j];
+                    let sum_r = me.radius + other.radius;
+                    let diff = Vec3::new(me.pos.x - other.pos.x, 0.0, me.pos.z - other.pos.z);
+                    let dist = diff.length();
+                    if dist < sum_r && dist > 0.01 {
+                        let overlap = sum_r - dist;
+                        push += (diff / dist) * overlap;
+                    }
+                }
             }
         }
         if push.length_squared() > 0.01 {
-            pushes.push((snapshot[i].0, push));
+            pushes.push((me.entity, push));
         }
     }
 
@@ -642,6 +668,16 @@ pub fn unit_separation_system(
             }
         }
     }
+}
+
+/// One snapshot row for `unit_separation_system`. Named so the neighbour
+/// lookup reads `.pos` / `.radius` instead of tuple indices.
+pub struct SeparationEntry {
+    entity: Entity,
+    pos: Vec3,
+    radius: f32,
+    mobile: bool,
+    flying: bool,
 }
 
 /// Re-clamp every ground unit's Y to the heightmap surface. The
@@ -659,14 +695,13 @@ pub fn unit_separation_system(
 /// [`UnitKind::is_subterranean`]).
 pub fn ground_clamp_system(
     heightmap: Option<Res<Heightmap>>,
-    unit_registry: Res<UnitRegistry>,
-    mut units: Query<(&UnitType, &mut Transform)>,
+    mut units: Query<(&UnitType, &UnitStats, &mut Transform)>,
 ) {
     let Some(heightmap) = heightmap else {
         return;
     };
-    for (unit_type, mut transform) in &mut units {
-        if unit_registry.can_fly(unit_type.0) || unit_type.0.is_subterranean() {
+    for (unit_type, stats, mut transform) in &mut units {
+        if stats.can_fly || unit_type.0.is_subterranean() {
             continue;
         }
         let ground = heightmap.sample(transform.translation.x, transform.translation.z);

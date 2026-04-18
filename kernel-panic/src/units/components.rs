@@ -11,6 +11,13 @@ pub enum Faction {
 }
 
 impl Faction {
+    /// Map a map-team-id to a faction, System → Hacker → Network, wrapping.
+    /// Used to seed homebase factions at map load.
+    pub fn from_team_id(team: u8) -> Self {
+        const ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
+        ORDER[team as usize % ORDER.len()]
+    }
+
     /// The signature color for this faction (used for wireframe glow).
     pub fn color(&self) -> Color {
         match self {
@@ -26,6 +33,33 @@ impl Faction {
             Faction::System => UnitKind::Kernel,
             Faction::Hacker => UnitKind::Hole,
             Faction::Network => UnitKind::Connection,
+        }
+    }
+
+    /// The basic-combat unit produced by this faction's homebase.
+    pub fn basic_combat_unit(&self) -> UnitKind {
+        match self {
+            Faction::System => UnitKind::Bit,
+            Faction::Hacker => UnitKind::Bug,
+            Faction::Network => UnitKind::Packet,
+        }
+    }
+
+    /// The mobile-constructor unit for this faction.
+    pub fn constructor(&self) -> UnitKind {
+        match self {
+            Faction::System => UnitKind::Assembler,
+            Faction::Hacker => UnitKind::Trojan,
+            Faction::Network => UnitKind::Gateway,
+        }
+    }
+
+    /// The datavent-built secondary factory for this faction.
+    pub fn secondary_factory(&self) -> UnitKind {
+        match self {
+            Faction::System => UnitKind::Socket,
+            Faction::Hacker => UnitKind::Window,
+            Faction::Network => UnitKind::Port,
         }
     }
 }
@@ -66,6 +100,31 @@ pub fn health_color(frac: f32) -> Color {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
 pub struct TeamId(pub u8);
 
+/// Static per-unit stats cached at spawn so hot-path systems (movement,
+/// combat, spatial index) don't re-hit `UnitRegistry`'s string-keyed
+/// BTreeMap every frame per unit.
+///
+/// Values are derived from the FBI at spawn time; the registry stays
+/// authoritative for any stat not captured here (build time, HP max,
+/// auto-heal parameters — none of which are queried per frame per unit).
+#[derive(Debug, Clone, Copy, Component)]
+pub struct UnitStats {
+    /// Footprint-derived collision radius used by unit-unit separation
+    /// physics (`interaction::movement::resolve_motion`). Tighter than
+    /// the mesh bounds so units can pack in formation without overlap.
+    pub radius: f32,
+    /// Volumetric hit radius from the S3O bounding sphere — what Spring's
+    /// `CCollisionHandler` tests. Used by `apply_damage` to decide whether
+    /// a `spray_angle`-perturbed shot landed on the primary target.
+    /// Typically 2-3× larger than `radius` for the same unit.
+    pub hit_radius: f32,
+    pub speed: f32,
+    pub turn_rate: f32,
+    pub can_fly: bool,
+    pub cruise_alt: f32,
+    pub no_chase_vtol: bool,
+}
+
 /// Two units count as friendly when they share a team *or* a faction.
 /// The faction-share path matters on the Showcase map, where mixed-
 /// faction units all sit on team 0 and should ignore each other; in
@@ -89,3 +148,16 @@ pub struct SelectionVolume;
 /// Losing all homebases means defeat.
 #[derive(Component)]
 pub struct Homebase;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn faction_from_team_id_wraps() {
+        assert_eq!(Faction::from_team_id(0), Faction::System);
+        assert_eq!(Faction::from_team_id(1), Faction::Hacker);
+        assert_eq!(Faction::from_team_id(2), Faction::Network);
+        assert_eq!(Faction::from_team_id(3), Faction::System);
+    }
+}

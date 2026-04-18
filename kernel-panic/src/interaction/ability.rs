@@ -1,10 +1,10 @@
 //! Command-fire ability hotkeys.
 //!
-//! Pressing `Q` with a caster selected (Pointer / Obelisk) fires that
-//! unit's command ability at the cursor's ground-hit position. The
-//! cast goes through `CommandFireEvent` so `units::command_fire` owns
-//! cooldown, radius, and damage resolution — this layer just maps
-//! input to an intent.
+//! Pressing `Q` with a caster selected (Pointer / Obelisk / Firewall /
+//! Byte) fires that unit's command ability at the cursor's ground-hit
+//! position. The cast goes through `CommandFireEvent` so
+//! `units::command_fire` owns cooldown, radius, and damage resolution —
+//! this layer just maps input to an intent.
 
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
@@ -116,6 +116,10 @@ fn trigger_command_fire_on_hotkey(
 fn has_ability(kind: UnitKind) -> bool {
     matches!(
         kind,
-        UnitKind::Pointer | UnitKind::Obelisk | UnitKind::Firewall
+        UnitKind::Pointer
+            | UnitKind::Obelisk
+            | UnitKind::Firewall
+            | UnitKind::Byte
+            | UnitKind::Terminal
     )
 }

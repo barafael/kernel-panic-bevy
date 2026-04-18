@@ -24,17 +24,42 @@ impl Plugin for InfoPanelPlugin {
 #[derive(Component)]
 struct InfoPanel;
 
+/// Snapshot of the state the info panel renders. Rebuilding the panel
+/// every frame was pointless — the panel only changes when the selection
+/// or HP of a selected unit changes. Hashing is cheap compared to
+/// despawning + respawning ~10 UI entities per frame.
 fn update_info_panel(
     selected_q: Query<(&UnitType, &Health, &Faction), With<Selected>>,
     existing: Query<Entity, With<InfoPanel>>,
     mut commands: Commands,
     unit_registry: Res<UnitRegistry>,
+    mut last_hash: Local<u64>,
 ) {
+    let selected: Vec<_> = selected_q.iter().collect();
+
+    let mut hash: u64 = selected.len() as u64;
+    for (unit_type, health, _) in &selected {
+        hash = hash
+            .wrapping_mul(1315423911)
+            .wrapping_add(unit_type.0 as u64);
+        // HP changes frame-to-frame while the unit heals or bleeds, but
+        // the panel only shows rounded integers — bucket on those.
+        hash = hash
+            .wrapping_mul(1315423911)
+            .wrapping_add(health.current.round() as i64 as u64);
+        hash = hash
+            .wrapping_mul(1315423911)
+            .wrapping_add(health.max.round() as i64 as u64);
+    }
+    if hash == *last_hash {
+        return;
+    }
+    *last_hash = hash;
+
     for entity in &existing {
         commands.entity(entity).despawn();
     }
 
-    let selected: Vec<_> = selected_q.iter().collect();
     if selected.is_empty() {
         return;
     }

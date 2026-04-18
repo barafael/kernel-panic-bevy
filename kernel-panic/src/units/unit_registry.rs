@@ -210,6 +210,15 @@ impl UnitRegistry {
         self.def(kind).map_or(0.0, |d| d.radar_distance)
     }
 
+    /// Vision range in elmos (FBI `SightDistance`). Used by the
+    /// fog-of-war MVP in `cloak::update_fog_visibility` to reveal
+    /// enemies that any player-team unit can "see". Units without a
+    /// declared SightDistance (Debug, LogicBomb) return `0.0` and
+    /// contribute no vision.
+    pub fn sight_distance(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.sight_distance)
+    }
+
     /// HP per second regenerated once a unit has been idle for `idle_time`.
     /// Zero means the unit never auto-heals.
     pub fn idle_auto_heal(&self, kind: UnitKind) -> f32 {

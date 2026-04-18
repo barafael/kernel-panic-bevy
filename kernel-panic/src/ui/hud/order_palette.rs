@@ -68,7 +68,33 @@ fn update_order_palette(
     existing: Query<Entity, With<OrderPalette>>,
     mut commands: Commands,
     unit_registry: Res<UnitRegistry>,
+    mut last_hash: Local<u64>,
 ) {
+    let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
+    let has_ability = selected_q
+        .iter()
+        .any(|ut| matches!(ut.0, UnitKind::Pointer | UnitKind::Obelisk));
+    let ability_kind = selected_q.iter().find_map(|ut| match ut.0 {
+        UnitKind::Pointer => Some(UnitKind::Pointer as u64),
+        UnitKind::Obelisk => Some(UnitKind::Obelisk as u64),
+        _ => None,
+    });
+
+    let mut hash: u64 = 0;
+    if has_mobile {
+        hash |= 0b01;
+    }
+    if has_ability {
+        hash |= 0b10;
+    }
+    if let Some(k) = ability_kind {
+        hash = hash.wrapping_mul(2654435761).wrapping_add(k);
+    }
+    if hash == *last_hash {
+        return;
+    }
+    *last_hash = hash;
+
     for entity in &existing {
         commands.entity(entity).despawn();
     }
@@ -76,11 +102,6 @@ fn update_order_palette(
     if selected_q.is_empty() {
         return;
     }
-
-    let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
-    let has_ability = selected_q
-        .iter()
-        .any(|ut| matches!(ut.0, UnitKind::Pointer | UnitKind::Obelisk));
 
     if !has_mobile && !has_ability {
         return;

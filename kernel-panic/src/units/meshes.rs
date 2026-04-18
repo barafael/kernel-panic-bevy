@@ -19,6 +19,9 @@ pub struct S3OModelCache {
     raw_textures: HashMap<String, Option<TgaImage>>,
     colored_textures: HashMap<(String, Faction), Handle<Image>>,
     mesh_handles: HashMap<String, Handle<Mesh>>,
+    /// Bevy image handles for raw (un-tinted) beam / sfx textures.
+    /// Populated lazily by [`load_raw_bevy_texture`].
+    raw_bevy_images: HashMap<String, Option<Handle<Image>>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +139,34 @@ fn load_s3o_cached<'a>(filename: &str, cache: &'a mut S3OModelCache) -> Option<&
         cache.models.insert(filename.to_string(), model);
     }
     cache.models.get(filename).and_then(|m| m.as_ref())
+}
+
+/// Load a raw TGA from disk and upload it as a Bevy [`Image`], keyed
+/// by filename. Used by beam spawners to texture their meshes with
+/// upstream weapon bitmaps (`arrow`, `dosray`, `bytemegabeam`). The
+/// TGA alpha channel maps to the image's alpha, so additive-blended
+/// materials see the weapon glyph cut cleanly.
+///
+/// Returns `None` (and caches that verdict) when the file is missing
+/// or unparseable, so a subsequent call doesn't retry the disk hit.
+pub fn load_raw_bevy_texture(
+    tex_name: &str,
+    cache: &mut S3OModelCache,
+    images: &mut Assets<Image>,
+) -> Option<Handle<Image>> {
+    if let Some(slot) = cache.raw_bevy_images.get(tex_name) {
+        return slot.clone();
+    }
+    let (w, h, pixels) = {
+        let tga = load_raw_tga_cached(tex_name, cache)?;
+        (tga.width, tga.height, tga.pixels.clone())
+    };
+    let image = create_rgba8_image(w, h, pixels);
+    let handle = images.add(image);
+    cache
+        .raw_bevy_images
+        .insert(tex_name.to_string(), Some(handle.clone()));
+    Some(handle)
 }
 
 fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Option<&'a TgaImage> {
@@ -282,6 +313,10 @@ const ASSET_DIRS: &[&str] = &[
     "upstream/Kernel-Panic/objects3d",
     "upstream/Kernel-Panic/unittextures",
     "upstream/Kernel-Panic/scripts",
+    // Beam textures (arrow, dosray, bytemegabeam) live here. Added so
+    // `spring_unit_mesh::parse_tga` can resolve them through the same
+    // on-disk lookup the unit textures already use.
+    "upstream/Kernel-Panic/bitmaps/kpsfx",
 ];
 
 /// Lazily find the first existing asset path for a filename.

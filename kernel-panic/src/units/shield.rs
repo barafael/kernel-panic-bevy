@@ -21,7 +21,6 @@ use super::weapons::WeaponRegistry;
 /// and regenerates at `regen_per_sec`.
 #[derive(Component, Debug, Clone)]
 pub struct ShieldState {
-    pub radius: f32,
     pub max_power: Option<f32>,
     pub current_power: Option<f32>,
     pub regen_per_sec: f32,
@@ -83,7 +82,6 @@ pub fn shield_state_for(kind: UnitKind, weapons: &WeaponRegistry) -> Option<Shie
         (None, None)
     };
     Some(ShieldState {
-        radius: def.shield_radius,
         max_power,
         current_power,
         regen_per_sec: def.shield_power_regen,
@@ -151,7 +149,6 @@ mod tests {
     #[test]
     fn infinite_shield_absorbs_all() {
         let mut shield = ShieldState {
-            radius: 64.0,
             max_power: None,
             current_power: None,
             regen_per_sec: 0.0,
@@ -163,7 +160,6 @@ mod tests {
     #[test]
     fn finite_shield_absorbs_until_depleted() {
         let mut shield = ShieldState {
-            radius: 64.0,
             max_power: Some(500.0),
             current_power: Some(500.0),
             regen_per_sec: 0.0,

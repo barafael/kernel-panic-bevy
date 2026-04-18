@@ -43,10 +43,11 @@ pub(super) fn tick_weapon_fx(
             commands.entity(entity).despawn();
             continue;
         }
-        // Fade by shrinking cross-section while keeping length.
+        // Fade by shrinking cross-section while keeping length. Thickness is
+        // baked into the beam mesh (see spawn_beam), so scale starts at 1;
+        // write `fade` directly each frame rather than compounding it.
         let fade = (beam.lifetime / beam.max_lifetime).sqrt();
-        let s = transform.scale;
-        transform.scale = Vec3::new(s.x.min(1.0) * fade, s.y.min(1.0) * fade, s.z);
+        transform.scale = Vec3::new(fade, fade, 1.0);
     }
 
     for (entity, mut burst) in &mut bursts {
@@ -83,7 +84,9 @@ pub(super) fn tick_weapon_fx(
     // scale rather than mutating colour.
     let cam_pos = camera_q
         .single()
-        .ok()
+        .inspect_err(
+            |error| warn!(%error, "weapon_fx: camera query failed, using Vec3::Y*1000 fallback"),
+        )
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
     for (entity, mut sparkle, mut transform) in &mut sparkles {

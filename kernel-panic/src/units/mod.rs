@@ -52,6 +52,7 @@ impl Plugin for UnitsPlugin {
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
             .init_resource::<combat::VirusSpawnQueue>()
+            .init_resource::<command_fire::MineSpawnQueue>()
             .init_resource::<ai::AiTicker>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<morph::MorphEvent>()
@@ -62,6 +63,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<bookkeeping::SmallBuildingCounts>()
             .init_resource::<cloak::CloakRefreshTimer>()
             .init_resource::<spatial::SpatialIndex>()
+            .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
@@ -111,6 +113,7 @@ impl Plugin for UnitsPlugin {
                         command_fire::process_command_fire,
                         command_fire::tick_command_fire_cooldown,
                         command_fire::tick_area_denial,
+                        command_fire::tick_sigterm_bombs,
                         command_fire::tick_protection,
                         script_triggers::trigger_movement_scripts,
                         script_triggers::trigger_production_scripts,
@@ -119,11 +122,14 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Simulate),
                     (
-                        combat::apply_damage,
+                        combat::apply_damage.run_if(|q: Res<combat::DamageQueue>| !q.is_empty()),
                         combat::tick_stun,
                         combat::auto_heal,
                         combat::death_system,
-                        spawning::spawn_queued_viruses,
+                        spawning::spawn_queued_viruses
+                            .run_if(|q: Res<combat::VirusSpawnQueue>| !q.is_empty()),
+                        spawning::spawn_queued_mines
+                            .run_if(|q: Res<command_fire::MineSpawnQueue>| !q.is_empty()),
                         game_over::check_game_over,
                     )
                         .chain()
@@ -133,6 +139,7 @@ impl Plugin for UnitsPlugin {
                         animation::animation_system,
                         animation::decay_death_particles,
                         cloak::update_cloak_visibility,
+                        cloak::update_fog_visibility,
                     )
                         .chain()
                         .in_set(GameplaySet::Animate),

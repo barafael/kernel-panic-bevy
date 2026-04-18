@@ -266,6 +266,29 @@ impl UnitKind {
         matches!(self, UnitKind::Worm | UnitKind::LogicBomb)
     }
 
+    /// Burrowing units — allowed to sit below the heightmap surface.
+    /// Every other ground unit is re-clamped to terrain height each
+    /// frame so physics/collision pushes can't slide it into the mesh.
+    /// The Worm is the one intentional exception (its ambush animation
+    /// sinks it underground).
+    pub fn is_subterranean(self) -> bool {
+        matches!(self, UnitKind::Worm)
+    }
+
+    /// Units that only auto-fire against mine-class targets. Debug
+    /// (`mineblaster.fbi OnlyTargetCategory1=VOID`) is a defensive
+    /// Minekiller turret — letting it aggro infantry would waste its
+    /// 0.11s reload on pointless 20-HP hits.
+    pub fn targets_mines_only(self) -> bool {
+        matches!(self, UnitKind::Debug)
+    }
+
+    /// Valid targets for a Minekiller. Matches upstream `Debug`'s
+    /// declared role: "removes logic bombs and bad blocks in the area".
+    pub fn is_minekiller_target(self) -> bool {
+        matches!(self, UnitKind::LogicBomb | UnitKind::BadBlock)
+    }
+
     /// Any directly-buildable mobile combat unit (excludes constructors,
     /// Viruses spawned dynamically, LogicBombs, and support like Terminal).
     pub fn is_combat_unit(self) -> bool {
@@ -450,5 +473,21 @@ mod tests {
         assert!(UnitKind::BadBlock.is_building());
         assert!(!UnitKind::Bit.is_building());
         assert!(!UnitKind::Assembler.is_building());
+    }
+
+    #[test]
+    fn debug_only_targets_mines_and_walls() {
+        // Attacker side.
+        assert!(UnitKind::Debug.targets_mines_only());
+        assert!(!UnitKind::Bit.targets_mines_only());
+        assert!(!UnitKind::Byte.targets_mines_only());
+
+        // Target side.
+        assert!(UnitKind::LogicBomb.is_minekiller_target());
+        assert!(UnitKind::BadBlock.is_minekiller_target());
+        assert!(!UnitKind::Bit.is_minekiller_target());
+        assert!(!UnitKind::Byte.is_minekiller_target());
+        assert!(!UnitKind::Worm.is_minekiller_target());
+        assert!(!UnitKind::Kernel.is_minekiller_target());
     }
 }

@@ -292,15 +292,29 @@ pub fn emit_geovent_smoke(
     }
 }
 
+/// How often `release_stale_vent_claims` scans. The release is only
+/// observable when the player starts a second build on the same vent,
+/// so a claim hanging around an extra ~250ms has no user-visible effect
+/// — matches the cadence of `CloakRefreshTimer`.
+const VENT_CLAIM_RELEASE_INTERVAL: f32 = 0.25;
+
+/// Throttle timer for `release_stale_vent_claims`. Kept as a resource so
+/// the system can early-exit before touching any ECS query.
+#[derive(Resource, Default)]
+pub struct VentClaimReleaseTimer(pub f32);
+
 /// Release `VentClaim` once the vent has no committed builder *and* no
-/// finished building occupying it. Runs once per sim step and scans all
-/// claimed vents; the query set is tiny (≤ number of datavents on the
-/// map) so the scan cost is negligible.
+/// finished building occupying it. Throttled to
+/// [`VENT_CLAIM_RELEASE_INTERVAL`] because the release only gates
+/// "second builder can target this vent again", which nobody notices
+/// at sub-second granularity.
 ///
 /// The rule is position-based rather than identity-based so the natural
 /// hand-off — builder finishes, building spawns at the same spot, builder
 /// walks away — keeps the claim alive without an explicit transfer step.
 pub fn release_stale_vent_claims(
+    time: Res<Time>,
+    mut timer: ResMut<VentClaimReleaseTimer>,
     mut commands: Commands,
     claimed: Query<(Entity, &GeoventSmoker), With<VentClaim>>,
     pending: Query<&PendingBuild>,
@@ -308,6 +322,12 @@ pub fn release_stale_vent_claims(
     buildings: Query<(&UnitType, &GlobalTransform)>,
     unit_registry: Res<UnitRegistry>,
 ) {
+    timer.0 += time.delta_secs();
+    if timer.0 < VENT_CLAIM_RELEASE_INTERVAL {
+        return;
+    }
+    timer.0 = 0.0;
+
     let occupancy_sq = BUILDING_OCCUPANCY_RADIUS * BUILDING_OCCUPANCY_RADIUS;
     for (vent_entity, vent) in &claimed {
         let builder_committed = pending
@@ -336,7 +356,9 @@ pub fn tick_geovent_smoke(
 
     let cam_pos = camera_q
         .single()
-        .ok()
+        .inspect_err(
+            |error| warn!(%error, "geovent: camera query failed, using Vec3::Y*1000 fallback"),
+        )
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
 

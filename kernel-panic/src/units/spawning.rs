@@ -9,7 +9,7 @@ use spring_map::smd_parser::MapInfo;
 use super::{
     animation::{CobAnimator, CobFileCache, PieceIndex, load_cob_cached},
     combat::Deployable,
-    components::{Faction, Health, Homebase, SelectionVolume, TeamId, UnitType},
+    components::{Faction, Health, Homebase, SelectionVolume, TeamId, UnitStats, UnitType},
     definitions::UnitKind,
     meshes::{S3OModelCache, unit_material, unit_radius},
     production::default_production,
@@ -353,6 +353,15 @@ pub fn spawn_unit(
             faction,
             TeamId(team),
             Health::full(unit_registry.max_health(kind)),
+            UnitStats {
+                radius: unit_registry.collision_radius(kind),
+                hit_radius: radius,
+                speed: unit_registry.speed(kind),
+                turn_rate: unit_registry.turn_rate(kind),
+                can_fly: unit_registry.can_fly(kind),
+                cruise_alt: unit_registry.cruise_alt(kind),
+                no_chase_vtol: unit_registry.no_chase_vtol(kind),
+            },
             Transform::from_translation(lifted_position),
             Visibility::default(),
         ))
@@ -386,7 +395,12 @@ pub fn spawn_unit(
         kind,
         UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection
     ) {
-        commands.entity(unit_entity).insert(Homebase);
+        // Pre-mark homebases `Spotted` so the fog-of-war system doesn't
+        // hide them: every match starts with enemy homebases visible so
+        // their build-laser rays don't appear to emit from empty space.
+        commands
+            .entity(unit_entity)
+            .insert((Homebase, super::cloak::Spotted));
     }
     if matches!(kind, UnitKind::Pointer) {
         commands.entity(unit_entity).insert(Deployable::initial());
@@ -493,11 +507,14 @@ pub fn spawn_unit(
             // `flare`/`barrel`/`muzzle` as safety nets for any third-
             // party unit that uses the generic names.
             const MUZZLE_NAMES: &[&str] = &["gunpoint", "bp0", "flare", "barrel", "muzzle"];
-            let muzzle_idx = MUZZLE_NAMES.iter().find_map(|name| {
+            let piece_index = |name: &str| -> Option<usize> {
                 cob.piece_names
                     .iter()
                     .position(|n| n.eq_ignore_ascii_case(name))
-            });
+            };
+            let muzzle_idx = MUZZLE_NAMES.iter().find_map(|n| piece_index(n));
+            let gunbase_idx = piece_index("gunbase");
+            let hatch_idx = piece_index("body");
 
             commands.entity(unit_entity).insert(CobAnimator {
                 vm,
@@ -518,6 +535,18 @@ pub fn spawn_unit(
                 commands
                     .entity(unit_entity)
                     .insert(super::animation::MuzzlePiece(idx));
+            }
+            if let Some(idx) = gunbase_idx {
+                commands
+                    .entity(unit_entity)
+                    .insert(super::animation::GunbasePiece(idx));
+            }
+            if kind == UnitKind::Connection
+                && let Some(idx) = hatch_idx
+            {
+                commands
+                    .entity(unit_entity)
+                    .insert(super::animation::HatchPiece(idx));
             }
         }
 

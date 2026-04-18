@@ -43,12 +43,13 @@ pub const DISPATCH_RING_RADIUS: f32 = 48.0;
 pub struct PacketBuffer(HashMap<u8, u32>);
 
 impl PacketBuffer {
-    pub fn get(&self, team: u8) -> u32 {
-        self.0.get(&team).copied().unwrap_or(0)
-    }
-
     pub fn add(&mut self, team: u8, n: u32) {
         *self.0.entry(team).or_default() += n;
+    }
+
+    #[cfg(test)]
+    pub fn get(&self, team: u8) -> u32 {
+        self.0.get(&team).copied().unwrap_or(0)
     }
 
     /// Drain up to `want` packets from the team's buffer, returning how
@@ -69,6 +70,7 @@ pub struct PortTimer(pub f32);
 /// Attached to freshly-dispatched Packets; blocks re-entry until the
 /// timer expires, matching upstream's spawnStun behaviour.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct PacketSpawnStun {
     pub remaining: f32,
 }
@@ -212,14 +214,6 @@ pub fn process_enter(
     }
 }
 
-/// Whether the player team is controlling the Network faction, so the
-/// HUD knows to show the buffer counter. Used by hud/top_bar.
-pub fn player_plays_network(player_team: u8, homebases: &[(u8, Faction)]) -> bool {
-    homebases
-        .iter()
-        .any(|(t, f)| *t == player_team && matches!(f, Faction::Network))
-}
-
 /// Extra elmos-per-second added to Flow's base speed per *small
 /// building* (Socket, Window, Port, Terminal, Obelisk, Firewall) the
 /// team owns. Matches upstream `network_flowspeed.lua::bonusPerFac`.
@@ -295,13 +289,5 @@ mod tests {
         assert_eq!(b.take(0, 2), 2);
         assert_eq!(b.get(0), 1);
         assert_eq!(b.get(1), 7);
-    }
-
-    #[test]
-    fn network_detection() {
-        let bases = [(0, Faction::Network), (1, Faction::System)];
-        assert!(player_plays_network(0, &bases));
-        assert!(!player_plays_network(1, &bases));
-        assert!(!player_plays_network(2, &bases));
     }
 }

@@ -81,7 +81,6 @@ pub fn setup_minimap(
     // Spawn UI node in bottom-right corner.
     commands.spawn((
         MinimapNode,
-        crate::map_loading::MapEntity,
         Node {
             position_type: PositionType::Absolute,
             right: Val::Px(MINIMAP_MARGIN),
@@ -169,22 +168,21 @@ fn update_minimap(
             Vec2::new(0.0, screen_h),      // bottom-left
         ];
 
-        let mut ground_hits: Vec<(i32, i32)> = Vec::new();
+        let mut ground_hits = [(0i32, 0i32); 4];
+        let mut filled = 0;
 
         for screen_pos in &screen_corners {
-            if let Ok(ray) = camera.viewport_to_world(camera_global, *screen_pos) {
-                // Intersect ray with the ground plane Y = focus_y.
-                // Ray: P = origin + t * direction
-                // Solve for t where P.y = ground_y
-                if let Some(world_point) = ray_ground_intersect(&ray) {
-                    let mx = (world_point.x / state.world_width * mm_w as f32) as i32;
-                    let mz = (world_point.z / state.world_depth * mm_h as f32) as i32;
-                    ground_hits.push((mx, mz));
-                }
+            if let Ok(ray) = camera.viewport_to_world(camera_global, *screen_pos)
+                && let Some(world_point) = ray_ground_intersect(&ray)
+            {
+                let mx = (world_point.x / state.world_width * mm_w as f32) as i32;
+                let mz = (world_point.z / state.world_depth * mm_h as f32) as i32;
+                ground_hits[filled] = (mx, mz);
+                filled += 1;
             }
         }
 
-        if ground_hits.len() == 4 {
+        if filled == 4 {
             let white = [255, 255, 255, 200];
             for i in 0..4 {
                 let (x0, y0) = ground_hits[i];

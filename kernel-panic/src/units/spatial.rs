@@ -24,7 +24,6 @@ use super::combat::Dying;
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::UnitKind;
 use super::spawning::Emerging;
-use super::unit_registry::UnitRegistry;
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)
@@ -100,11 +99,11 @@ impl SpatialIndex {
 #[allow(clippy::type_complexity)]
 pub fn rebuild_spatial_index(
     mut index: ResMut<SpatialIndex>,
-    unit_registry: Res<UnitRegistry>,
     units: Query<
         (
             Entity,
             &UnitType,
+            &super::components::UnitStats,
             &TeamId,
             &Faction,
             &GlobalTransform,
@@ -114,7 +113,7 @@ pub fn rebuild_spatial_index(
     >,
 ) {
     index.clear();
-    for (entity, unit_type, team, faction, gtf, health) in &units {
+    for (entity, unit_type, stats, team, faction, gtf, health) in &units {
         index.push(SpatialEntry {
             entity,
             pos: gtf.translation(),
@@ -122,7 +121,7 @@ pub fn rebuild_spatial_index(
             faction: *faction,
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
-            is_flying: unit_registry.can_fly(unit_type.0),
+            is_flying: stats.can_fly,
         });
     }
 }
