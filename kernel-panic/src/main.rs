@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::window::{PresentMode, WindowResizeConstraints};
+use bevy::window::{PresentMode, PrimaryWindow, WindowResizeConstraints};
 
 use interaction::InteractionPlugin;
 use map_loading::MapLoadingPlugin;
@@ -82,17 +82,18 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Kernel Panic".to_string(),
-                        // TODO(windows-resize): AutoNoVsync stops the
-                        // vsync queue from piling up while Windows is
-                        // inside WM_ENTERSIZEMOVE. Restore AutoVsync
+                        // TODO(windows-resize): Immediate is pinned
+                        // explicitly instead of AutoNoVsync. AutoNoVsync
+                        // would pick Mailbox where available, and Intel
+                        // Vulkan Mailbox has its own resize-reconfigure
+                        // quirks on this hardware. Restore AutoVsync
                         // once the winit modal-loop fix is in.
-                        present_mode: PresentMode::AutoNoVsync,
+                        present_mode: PresentMode::Immediate,
                         // TODO(windows-resize): 320x240 floor keeps the
                         // swapchain from ever reconfiguring at 0x0
                         // during a fast drag-to-nothing, which panics
-                        // wgpu and drops HDR+Bloom's intermediate render
-                        // targets in a bad state. Remove once wgpu
-                        // handles 0x0 reconfigure gracefully.
+                        // wgpu. Remove once wgpu handles 0x0
+                        // reconfigure gracefully.
                         resize_constraints: WindowResizeConstraints {
                             min_width: 320.0,
                             min_height: 240.0,
@@ -112,5 +113,16 @@ fn main() {
             TerrainPlugin,
             MapLoadingPlugin,
         ))
+        .add_systems(Startup, maximize_primary_window)
         .run();
+}
+
+/// Launch filling the screen. Bevy has no init-time "maximized" field,
+/// so we flip the flag once the window exists. Keeping it as a windowed
+/// maximize (rather than borderless fullscreen) preserves the title bar
+/// and the usual Windows minimize/restore affordances.
+fn maximize_primary_window(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    if let Ok(mut window) = windows.single_mut() {
+        window.set_maximized(true);
+    }
 }

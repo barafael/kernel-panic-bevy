@@ -1,4 +1,4 @@
-use bevy::{input::mouse::MouseWheel, prelude::*, render::view::Hdr};
+use bevy::{input::mouse::MouseWheel, prelude::*};
 
 /// Marker component for the main RTS camera.
 #[derive(Component)]
@@ -128,19 +128,12 @@ pub fn spawn_camera(mut commands: Commands) {
             ..default()
         }),
         transform,
-        Hdr,
-        bevy::post_process::bloom::Bloom {
-            intensity: 0.15,
-            ..default()
-        },
-        DistanceFog {
-            color: Color::BLACK,
-            falloff: FogFalloff::Linear {
-                start: 3600.0,
-                end: 4000.0,
-            },
-            ..default()
-        },
+        // TODO(windows-resize): HDR + Bloom + DistanceFog were removed to
+        // isolate the Windows resize freeze. The post-process chain
+        // allocates intermediate float render targets sized to the
+        // swapchain, and on Intel Iris Xe (Vulkan) those reallocations
+        // during WM_ENTERSIZEMOVE have been observed to TDR the driver.
+        // Re-add once the resize hang is fixed or moved behind a setting.
     ));
 }
 
