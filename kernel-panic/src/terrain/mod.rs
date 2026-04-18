@@ -5,7 +5,7 @@ pub mod mesh;
 
 use bevy::prelude::*;
 
-use geovent::{GeoventAssets, emit_geovent_smoke, tick_geovent_smoke};
+use geovent::{GeoventAssets, emit_geovent_smoke, release_stale_vent_claims, tick_geovent_smoke};
 
 pub struct TerrainPlugin;
 
@@ -14,6 +14,7 @@ impl Plugin for TerrainPlugin {
         app.init_resource::<GeoventAssets>().add_systems(
             Update,
             (
+                release_stale_vent_claims,
                 emit_geovent_smoke,
                 tick_geovent_smoke.after(emit_geovent_smoke),
             ),

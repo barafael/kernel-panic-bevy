@@ -20,7 +20,23 @@ use bevy::prelude::*;
 
 use spring_map::map_types::ParsedMap;
 
-use crate::{map_loading::MapEntity, rendering::camera::RtsCamera, terrain::heightmap::Heightmap};
+use crate::{
+    rendering::camera::RtsCamera,
+    rng::{next_f32, random_unit_sphere, xorshift32},
+    terrain::heightmap::Heightmap,
+    units::{
+        components::UnitType,
+        construction::{Constructing, PendingBuild},
+        unit_registry::UnitRegistry,
+    },
+};
+
+/// How close a building has to sit to a vent for the building to inherit
+/// the vent's claim. Datavents are point features; a finished structure
+/// spawns at `feature.pos` ± a tiny snap offset. 16 elmos is tight enough
+/// that only the actual factory on the vent counts, not a unit that
+/// happens to wander over it.
+const BUILDING_OCCUPANCY_RADIUS: f32 = 16.0;
 
 /// Emits smoke puffs from a single geovent.
 #[derive(Component)]
@@ -32,6 +48,16 @@ pub struct GeoventSmoker {
     /// Per-smoker PRNG state so each vent's jitter is independent.
     pub rng: u32,
 }
+
+/// Marker on a `GeoventSmoker` entity that has been claimed by a builder
+/// or a finished building sitting on top of it. Claimed vents stop
+/// emitting smoke (so the vent glow doesn't poke through the factory) and
+/// are filtered out of the placement snap so a second constructor can't
+/// stack another building onto the same spot. Released by
+/// `release_stale_vent_claims` once neither a committed builder nor a
+/// finished building occupies the vent position.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct VentClaim;
 
 /// A single rising smoke puff.
 #[derive(Component)]
@@ -100,7 +126,6 @@ pub fn spawn_geovent_smokers(
         let initial_timer = next_f32(&mut rng) * EMIT_INTERVAL;
 
         commands.spawn((
-            MapEntity,
             GeoventSmoker {
                 pos,
                 emit_timer: initial_timer,
@@ -207,7 +232,7 @@ fn glyph_to_image(glyph: [u8; 8]) -> Image {
 
 pub fn emit_geovent_smoke(
     time: Res<Time>,
-    mut smokers: Query<&mut GeoventSmoker>,
+    mut smokers: Query<&mut GeoventSmoker, Without<VentClaim>>,
     assets: Res<GeoventAssets>,
     mut commands: Commands,
 ) {
@@ -252,7 +277,6 @@ pub fn emit_geovent_smoke(
             };
 
             commands.spawn((
-                MapEntity,
                 GeoventSmoke {
                     lifetime: ttl,
                     max_lifetime: ttl,
@@ -264,6 +288,40 @@ pub fn emit_geovent_smoke(
                 MeshMaterial3d(glyph_material),
                 Transform::from_translation(spawn_pos).with_scale(Vec3::splat(START_SIZE)),
             ));
+        }
+    }
+}
+
+/// Release `VentClaim` once the vent has no committed builder *and* no
+/// finished building occupying it. Runs once per sim step and scans all
+/// claimed vents; the query set is tiny (≤ number of datavents on the
+/// map) so the scan cost is negligible.
+///
+/// The rule is position-based rather than identity-based so the natural
+/// hand-off — builder finishes, building spawns at the same spot, builder
+/// walks away — keeps the claim alive without an explicit transfer step.
+pub fn release_stale_vent_claims(
+    mut commands: Commands,
+    claimed: Query<(Entity, &GeoventSmoker), With<VentClaim>>,
+    pending: Query<&PendingBuild>,
+    constructing: Query<&Constructing>,
+    buildings: Query<(&UnitType, &GlobalTransform)>,
+    unit_registry: Res<UnitRegistry>,
+) {
+    let occupancy_sq = BUILDING_OCCUPANCY_RADIUS * BUILDING_OCCUPANCY_RADIUS;
+    for (vent_entity, vent) in &claimed {
+        let builder_committed = pending
+            .iter()
+            .any(|p| p.site.distance_squared(vent.pos) < 1.0)
+            || constructing
+                .iter()
+                .any(|c| c.site.distance_squared(vent.pos) < 1.0);
+        let building_present = buildings.iter().any(|(ut, gtf)| {
+            unit_registry.is_building(ut.0)
+                && gtf.translation().distance_squared(vent.pos) <= occupancy_sq
+        });
+        if !builder_committed && !building_present {
+            commands.entity(vent_entity).remove::<VentClaim>();
         }
     }
 }
@@ -308,40 +366,4 @@ pub fn tick_geovent_smoke(
         transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, to_cam));
         transform.scale = Vec3::splat(visible_size);
     }
-}
-
-// ── Tiny PRNG ───────────────────────────────────────────────────────────
-//
-// xorshift32 — adequate for visual jitter and keeps us free of a `rand`
-// dependency. Callers pass a `&mut u32` state owned by each `GeoventSmoker`
-// so different vents stay uncorrelated without any global RNG.
-
-fn xorshift32(state: &mut u32) -> u32 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    x
-}
-
-fn next_f32(state: &mut u32) -> f32 {
-    // Upper 24 bits → [0, 1).
-    (xorshift32(state) >> 8) as f32 / (1u32 << 24) as f32
-}
-
-fn next_signed(state: &mut u32) -> f32 {
-    next_f32(state) * 2.0 - 1.0
-}
-
-fn random_unit_sphere(state: &mut u32) -> Vec3 {
-    // Cube rejection. Up to a few tries on average — bounded to 8 to avoid a
-    // pathological loop if the PRNG state ever locks to a corner of the cube.
-    for _ in 0..8 {
-        let v = Vec3::new(next_signed(state), next_signed(state), next_signed(state));
-        if v.length_squared() <= 1.0 && v.length_squared() > 0.0 {
-            return v;
-        }
-    }
-    Vec3::Y
 }

@@ -18,10 +18,9 @@ use bevy::prelude::*;
 
 use crate::interaction::Selected;
 use crate::interaction::movement::{MoveTarget, QueuedCommand};
-use crate::interaction::selection::{SelectionSet, apply_ordered_command};
-use crate::map_loading::MapEntity;
+use crate::interaction::selection::{SelectionSet, apply_ordered_command, ground_hit};
 use crate::rendering::camera::RtsCamera;
-use crate::terrain::geovent::GeoventSmoker;
+use crate::terrain::geovent::{GeoventSmoker, VentClaim};
 use crate::units::components::{Faction, UnitType};
 use crate::units::definitions::UnitKind;
 use crate::units::meshes::{S3OModelCache, unit_material, unit_mesh};
@@ -123,7 +122,6 @@ fn begin_placement(
 
         let ghost = commands
             .spawn((
-                MapEntity,
                 PlacementGhost,
                 Mesh3d(mesh),
                 MeshMaterial3d(ghost_mat),
@@ -161,7 +159,7 @@ fn update_placement_ghost(
     ghost_mats: Query<&MeshMaterial3d<StandardMaterial>, With<PlacementGhost>>,
     selected_q: Query<Entity, With<Selected>>,
     builder_q: Query<(), With<UnitType>>,
-    geovents: Query<&GeoventSmoker>,
+    geovents: Query<&GeoventSmoker, Without<VentClaim>>,
     mut commands: Commands,
 ) {
     let Some(active) = mode.active.as_mut() else {
@@ -177,7 +175,7 @@ fn update_placement_ghost(
         return;
     }
 
-    let Some(cursor_pt) = cursor_ground_hit(&windows, &camera_q, &mut ray_cast) else {
+    let Some(cursor_pt) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
         // Cursor off-screen / off-terrain: hide the ghost this frame.
         if let Ok((_, mut vis)) = transforms.get_mut(active.ghost) {
             *vis = Visibility::Hidden;
@@ -186,7 +184,10 @@ fn update_placement_ghost(
         return;
     };
 
-    // Snap to nearest datavent within SNAP_RADIUS.
+    // Snap to nearest *unclaimed* datavent within SNAP_RADIUS — the
+    // `Without<VentClaim>` filter on the query means claimed vents don't
+    // appear here at all, so a second constructor can't stack another
+    // building onto a vent that's already being built on.
     let mut best: Option<(Vec3, f32)> = None;
     for vent in &geovents {
         let d = (vent.pos - cursor_pt).length();
@@ -219,12 +220,19 @@ fn update_placement_ghost(
 /// Commit on left-click (if snapped), cancel on right-click or Escape.
 /// Consumed clicks are cleared from `ButtonInput` so the selection system
 /// doesn't also see them as a selection / deselect action.
+///
+/// On commit we also stamp `VentClaim` onto the target datavent so a
+/// concurrent constructor placing during the same frame can't end up
+/// building a second structure on the same spot. The claim is released
+/// by `release_stale_vent_claims` once neither the builder nor a
+/// finished building occupies the site.
 #[allow(clippy::too_many_arguments)]
 fn commit_or_cancel_placement(
     mut mode: ResMut<PlacementMode>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
     move_target_q: Query<(), With<MoveTarget>>,
+    vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     mut commands: Commands,
 ) {
     let Some(active) = mode.active.as_ref() else {
@@ -257,6 +265,15 @@ fn commit_or_cancel_placement(
                 &move_target_q,
                 &mut commands,
             );
+            // Stamp the claim onto the specific vent at this site. Uses
+            // a tiny exact-ish equality (1 elmo) because `site` came from
+            // the snap step, which just copied `vent.pos`.
+            for (vent_entity, vent) in &vents {
+                if vent.pos.distance_squared(site) < 1.0 {
+                    commands.entity(vent_entity).insert(VentClaim);
+                    break;
+                }
+            }
             commands.entity(active.ghost).despawn();
             mode.active = None;
         }
@@ -265,19 +282,4 @@ fn commit_or_cancel_placement(
         // it as a click-to-select on a unit under the cursor.
         mouse.clear_just_pressed(MouseButton::Left);
     }
-}
-
-fn cursor_ground_hit(
-    windows: &Query<&Window>,
-    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    ray_cast: &mut MeshRayCast,
-) -> Option<Vec3> {
-    let window = windows.single().ok()?;
-    let cursor_pos = window.cursor_position()?;
-    let (camera, camera_transform) = camera_q.single().ok()?;
-    let ray = camera
-        .viewport_to_world(camera_transform, cursor_pos)
-        .ok()?;
-    let hits = ray_cast.cast_ray(ray, &default());
-    hits.first().map(|(_, hit)| hit.point)
 }

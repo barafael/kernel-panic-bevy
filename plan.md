@@ -157,17 +157,23 @@ Remaining:
 
 - Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
   (Command-Fire Framework).
-- **Datavent claiming**: the first builder to start constructing on a given
-  datavent should lock it. While the claim holds (building alive or still
-  under construction) no other constructor — friend or foe — can target that
-  datavent for a second building. Release happens when the building is
-  destroyed/cancelled. Today the placement check only rejects overlap with
-  *existing* buildings, so two constructors racing the same datavent both
-  succeed and the second building stacks into the first.
-- **Hide the datavent mesh once claimed**: datavents stay rendered underneath
-  the building that's consuming them, which reads as a visual glitch (you
-  see the vent glow poking through the factory). Toggle the feature entity's
-  `Visibility::Hidden` on claim and restore it on release.
+
+Done in this pass:
+
+- ✅ **Datavent claiming**: `VentClaim` marker stamped on the target
+  `GeoventSmoker` at `BuildAt` commit (`placement.rs`). The placement
+  ghost's snap query filters by `Without<VentClaim>`, so a second
+  constructor can't aim at a vent that already has a commit. Release is
+  position-based via `release_stale_vent_claims` (terrain plugin):
+  the claim holds while either a builder with matching
+  `PendingBuild`/`Constructing.site` exists, or any building sits within
+  16 elmos of the vent. The builder → building hand-off happens
+  naturally without a dedicated transfer step.
+- ✅ **Hide the datavent mesh once claimed**: `emit_geovent_smoke` now
+  filters `Without<VentClaim>`, so claimed vents stop spawning puffs
+  (which were the only thing a vent renders — there's no static mesh
+  to hide). The green-digit stream resumes as soon as the claim
+  releases.
 
 ### 3.2 Network Packet Buffer & Teleportation — ✅ DONE
 
