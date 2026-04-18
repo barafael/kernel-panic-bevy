@@ -1,3 +1,6 @@
 [submodule "upstream/Kernel-Panic"]
 	path = upstream/Kernel-Panic
 	url = https://github.com/sprunk/Kernel-Panic.git
+[submodule "upstream/RecoilEngine"]
+	path = upstream/RecoilEngine
+	url = https://github.com/beyond-all-reason/RecoilEngine.git
