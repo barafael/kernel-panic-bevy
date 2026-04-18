@@ -644,21 +644,53 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
      `4.0` pass through unchanged. If we ever want homebase / Byte
      near-immunity back it should come from a dedicated per-kind
      multiplier table rather than the FBI engine-disable value.
-- [ ] **Movement ignores max slope / terrain penetration**. On some maps
-  units walk straight up vertical cliffs; on others they embed into the
-  terrain mesh. Root causes to unpick separately:
-  - Nav grid / QTPFS walkability ignores FBI `MaxSlope` (per-unit cap
-    on climbable incline). Need to (1) sample gradient from the
-    heightmap when building the nav grid, (2) mark cells whose slope
-    exceeds any unit's `MaxSlope` as impassable for *that* unit.
-    Spring does this via per-movetype `MoveDef` lookups.
-  - Ground clamp (from `movement::resolve_motion`) keeps units on the
-    heightmap surface, but nothing stops them from being *placed*
-    below it during pathing or during an emerge whose rally point sits
-    in a concave pocket. Clamp Y to `max(terrain_height + offset,
-    current_y)` every frame, not just at spawn.
-  - Worms are the only intended burrowers — exempt them via
-    `UnitKind::is_worm()` or a `SubterraneanMovement` marker.
+- [ ] **Movement ignores per-unit `MaxSlope`**. The original three-part
+  bug is now one part — the terrain-penetration and Worm-exemption
+  pieces landed via `ground_clamp_system` + `UnitKind::is_subterranean`,
+  and `map_loading.rs` dropped the global `max_slope` from 3.0 (~72°)
+  to 1.0 (45°) so no unit strolls up a vertical face. What's left is
+  honouring each unit's FBI `MaxSlope` instead of the single global cap.
+
+  KP's slope values bucket nicely: the roster declares 5 distinct caps
+  (10°, 15°, 20°, 32°, 60° → tan 0.18 / 0.27 / 0.36 / 0.62 / 1.73).
+  Upstream Spring does this with per-`MoveDef` nav grids; we match the
+  pattern with one `NodeLayer` per bucket.
+
+  Plan:
+
+  1. **`NavGridSet` resource** replacing the single `NavGrid`.
+     `Vec<(max_slope: f32, NodeLayer)>` sorted by `max_slope`. Built at
+     map load from `UnitRegistry`'s distinct `max_slope` values (plus a
+     default 45° bucket for anything that doesn't declare one).
+  2. **Per-query grid pick** in `compute_path` — resolve the unit's
+     cap via `UnitRegistry::max_slope`, pick the first bucket whose cap
+     ≥ unit's cap. Cache the bucket index on the unit as a
+     `NavBucket(u8)` component at spawn so the movement hot loop skips
+     the registry lookup.
+  3. **Build cost** — one `SpeedMap::from_heightmap` + `NodeLayer::new`
+     per bucket at map load. 5 buckets × current O(width·height) build
+     = 5× the current map-load cost for nav alone (still milliseconds
+     on a 2048² heightmap). Memory: ~5× the NodeLayer footprint —
+     roughly 20 MB of speed bins total, acceptable against the texture
+     budget.
+  4. **`slope_mod` stays uniform across buckets** so pathfinder cost
+     ordering is consistent — only impassability differs per class.
+  5. **Worms and flyers bypass the nav grid already** (`can_fly` skip
+     in `movement_system`, `is_subterranean` in `ground_clamp_system`),
+     so they don't need a bucket.
+  6. **Tests**: cliff (slope ≈ 1.0) blocks a Bit (MaxSlope 21°) but
+     passes a Byte (MaxSlope 60°); flat ground passes everything; a
+     unit whose bucket disappears on map cycle falls back to the
+     loosest bucket with a warn-log.
+
+  Sub-bugs to watch for while wiring this:
+
+  - QTPFS doesn't observe heightmap edits (Technical Debt → Architecture
+    "QTPFS terrain-change repathing"). Lua gadgets that pave on build
+    would invalidate any bucket grid. Follow-up, not blocking.
+  - The nav-grid rebuild needs to happen *after* upstream Lua gadgets
+    run their init-time heightmap edits, otherwise `map_loading`'s view
+    of terrain is stale. Verify ordering on map load.
 - [x] ~~`GameState` not reset on map cycling~~ — fixed in a50fe8b
 - [x] ~~Rally point / delivery point for factories~~ — `Emerging.rally_point` wired
 - [x] ~~Terrain height not sampled during movement~~ — ground clamping in recent walking
@@ -782,7 +814,7 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 ### Compiler Warnings
 
 - [x] ~~clippy warnings across workspace~~ — fixed in e23c987
-- [ ] `PieceIndex` field `.0` never read
+- [x] ~~`PieceIndex` field `.0` never read~~ — ZST'd in the simplification sweep
 
 ### Naming
 
