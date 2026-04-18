@@ -191,10 +191,9 @@ against the actual gadget code. Worth a pass before we treat this as frozen.
 - ✅ Flying flag + `can_fly()` / `cruise_alt()`; flying units skip nav grid.
 - ✅ Per-Flow `SpeedBoost` component refreshed every second from team small-building
   count, added on top of the registry's base speed in movement.
-- ❌ Ground units with `NoChaseCategory=VTOL` — not yet; combat_system still targets
-  Flows indiscriminately. Upstream stores this as a `UnitDef::noChaseCategory`
-  bitmask checked in `Sim/Weapons/Weapon.cpp:AutoTarget` — same gate refactored for
-  §weapon-fire below.
+- ✅ Ground units with `NoChaseCategory=VTOL` — `UnitDef.no_chase_category` parses
+  the raw token list, `UnitRegistry::no_chase_vtol` matches `VTOL`, and
+  `combat_system` skips candidates whose `SpatialEntry.is_flying` is set.
 
 ### 3.9 Mines & Walls — ✅ Partial
 
@@ -545,16 +544,22 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] No unit collision avoidance — units overlap when crowded (partial: walking improvements
   address some cases, revisit)
 - [ ] Attack-move (`A` hotkey) is wired in HUD but handler is empty (TODO at `hud.rs:849`)
-- [ ] Feature rotation (`MapFeature.rotation_degrees()`) parsed but never applied when
-  rendering map features
+- [ ] Non-geovent map features (trees, rocks, debris) are dropped on load —
+  only `feature.feature_type.is_geovent()` entries spawn, the rest are never
+  rendered. `MapFeature.rotation_degrees()` is parsed but there is nothing to
+  apply it to until we actually place the other feature types.
 - [x] ~~Weapons ignore line-of-sight~~ — `combat_system` now rejects targets whose
   LOS is blocked by terrain (`Heightmap::has_line_of_sight` with `LOS_MARGIN=4`);
   ballistic weapons (`trajectory_height > 0`) skip the check since they lob over.
-- [ ] Weapons never miss — `tolerance` parsed but ignored; perfect accuracy on all weapons
-- [ ] The two remaining items (tolerance/miss, and §1.6's `collidefriendly` on
-  projectile physics) live at the same seam in Spring: `Sim/Weapons/Weapon.cpp`'s
-  `AutoTarget` → `TestTarget` → `TryTarget` pipeline. Adding `noChaseCategory=VTOL`
-  (§3.8) fits the same gate.
+- [x] ~~Weapons never miss~~ — `combat_system` perturbs the queued `impact_pos` by
+  `tan(spray_angle) × distance` on a random XZ offset; `apply_damage` treats the
+  primary hit as a miss (no damage, no infection) when the perturbed impact sits
+  outside the target's `collision_radius`. Splash from `impact_pos` still lands.
+  `tolerance` (aim-error gate, distinct from per-shot spread) remains unimplemented —
+  most KP weapons set it to `3000-8000` short-units meaning "always allow firing",
+  so the practical gap is small.
+- [ ] `collidefriendly` on projectile physics (still blocked on §4.2 projectiles
+  gaining actual collision).
 - [ ] Factory spawn offset hardcoded in `production.rs` — should use COB `QueryBuildInfo`
   callback for correct build-pad position
 

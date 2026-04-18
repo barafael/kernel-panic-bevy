@@ -107,6 +107,18 @@ impl UnitRegistry {
         self.def(kind).is_some_and(|d| d.can_fly)
     }
 
+    /// Does this unit's `NoChaseCategory` contain `VTOL`? Most KP ground
+    /// units set this so they'll ignore Flows (and other flying units)
+    /// during auto-target selection. Upstream treats the field as a space-
+    /// separated token list, e.g. `NoChaseCategory=VTOL FACTORY`.
+    pub fn no_chase_vtol(&self, kind: UnitKind) -> bool {
+        self.def(kind).is_some_and(|d| {
+            d.no_chase_category
+                .split_ascii_whitespace()
+                .any(|tok| tok.eq_ignore_ascii_case("VTOL"))
+        })
+    }
+
     /// Cruise altitude in elmos above the terrain for flying units. 0 for
     /// ground units; only consulted when `can_fly` is true.
     pub fn cruise_alt(&self, kind: UnitKind) -> f32 {

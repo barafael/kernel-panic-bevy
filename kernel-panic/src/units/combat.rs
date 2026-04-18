@@ -17,6 +17,29 @@ use crate::terrain::heightmap::Heightmap;
 /// weapons shoot over short ridges.
 const LOS_MARGIN: f32 = 4.0;
 
+/// Spring encodes per-shot spread in "short" angular units where a full
+/// revolution is 65536. Conversion to radians for aim-offset math.
+const SHORT_ANGLE_TO_RAD: f32 = std::f32::consts::TAU / 65536.0;
+
+/// Tiny xorshift32; shared-resource variant of `terrain::geovent::xorshift32`
+/// so combat doesn't take a dep on terrain internals. Deterministic given
+/// a fixed seed, which is what we want for replayable sim results.
+fn xs32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x
+}
+
+/// Uniform f32 in `[-1.0, 1.0)` from the PRNG state.
+fn xs32_signed(state: &mut u32) -> f32 {
+    // Upper 24 bits → [0, 1), then shift to [-1, 1).
+    let unit = (xs32(state) >> 8) as f32 / (1u32 << 24) as f32;
+    unit * 2.0 - 1.0
+}
+
 /// Tracks time until the unit can fire again.
 #[derive(Component)]
 pub struct AttackCooldown {
@@ -307,7 +330,13 @@ pub fn combat_system(
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
     heightmap: Option<Res<Heightmap>>,
+    mut rng: Local<u32>,
 ) {
+    if *rng == 0 {
+        // Seed lazily on first tick so we never produce the all-zero
+        // xorshift state that locks up the PRNG.
+        *rng = 0xDEADBEEF;
+    }
     let dt = time.delta_secs();
 
     // Tick cooldowns.
@@ -361,12 +390,19 @@ pub fn combat_system(
         // the ridge. Direct-fire weapons with `lineofsight=1` do.
         let enforce_los = weapon_def
             .is_some_and(|w| w.line_of_sight && w.trajectory_height <= 0.0 && heightmap.is_some());
+        // Most KP ground units set `NoChaseCategory=VTOL` so they ignore
+        // Flows (and any future flying unit) during auto-target. Flying
+        // units themselves still chase fliers — the filter is per-attacker.
+        let skip_flying = unit_registry.no_chase_vtol(unit_type.0);
         let mut best: Option<(Entity, Vec3, f32)> = None;
         spatial.query_radius(attacker_pos, range, |candidate| {
             if !candidate.hp_positive
                 || candidate.team == attacker_team.0
                 || candidate.faction == *attacker_faction
             {
+                return;
+            }
+            if skip_flying && candidate.is_flying {
                 return;
             }
             let dist_sq = attacker_pos.distance_squared(candidate.pos);
@@ -447,26 +483,42 @@ pub fn combat_system(
             }
         }
 
+        // Per-shot spread. Upstream's `sprayangle` is in Spring short-angle
+        // units; offset magnitude at the target plane is roughly
+        // `tan(angle) × distance`, small-angle ≈ `angle × distance`. We
+        // perturb only XZ — vertical aim is already handled by arc_height
+        // and the aim pitch computed in `aim_weapons_system`.
+        let distance = attacker_pos.distance(target_pos);
+        let spray_short = weapon_def.map_or(0.0, |w| w.spray_angle);
+        let mut impact_pos = target_pos;
+        if spray_short > 0.0 && distance > 0.0 {
+            let spray_rad = spray_short * SHORT_ANGLE_TO_RAD;
+            let offset_radius = spray_rad.tan() * distance;
+            let dx = xs32_signed(&mut rng) * offset_radius;
+            let dz = xs32_signed(&mut rng) * offset_radius;
+            impact_pos = Vec3::new(target_pos.x + dx, target_pos.y, target_pos.z + dz);
+        }
+
         damage_queue.push(PendingDamage {
             target: target_entity,
             attacker: entity,
             weapon: weapon_name.to_string(),
-            impact_pos: target_pos,
-            attacker_distance: attacker_pos.distance(target_pos),
+            impact_pos,
+            attacker_distance: distance,
         });
         commands.entity(entity).insert((
             AttackCooldown {
                 remaining: cooldown,
             },
             JustFired {
-                target_pos,
+                target_pos: impact_pos,
                 arc_height,
             },
         ));
         if !weapon_name.is_empty() {
             pending_attacks.events.push(AttackEvent {
                 attacker_pos,
-                target_pos,
+                target_pos: impact_pos,
                 weapon_name: weapon_name.to_string(),
             });
         }
@@ -708,6 +760,7 @@ pub fn apply_damage(
     mut shield_q: Query<&mut super::shield::ShieldState>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
+    target_xform_q: Query<&GlobalTransform, With<UnitType>>,
     protected_q: Query<(), With<super::command_fire::Protected>>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
@@ -729,23 +782,40 @@ pub fn apply_damage(
         let paralyze_time = weapon_def.paralyze_time;
 
         let dyn_mult = weapon_def.dyn_damage_multiplier(pending.attacker_distance);
-        let primary_damage = match target_unit_q.get(pending.target) {
-            Ok(unit) => base(unit.0) * dyn_mult,
-            Err(_) => weapon_def.damage.default * dyn_mult,
+        // For weapons with `spray_angle > 0` the queued `impact_pos` is
+        // jittered away from the target — if it lands outside the target's
+        // collision radius, the primary hit misses entirely (splash still
+        // applies from impact_pos below). Zero-spread weapons always land
+        // on target and skip the check.
+        let primary_target_kind = target_unit_q.get(pending.target).ok().map(|ut| ut.0);
+        let target_hit = if let (Some(kind), Ok(tgt_xform)) =
+            (primary_target_kind, target_xform_q.get(pending.target))
+        {
+            let offset = tgt_xform.translation().distance(pending.impact_pos);
+            offset <= unit_registry.collision_radius(kind)
+        } else {
+            // Unknown target (despawned / missing xform) — treat as no
+            // primary hit; splash can still land on whatever else is nearby.
+            false
         };
-        apply_hit(
-            pending.target,
-            pending.attacker,
-            primary_damage,
-            paralyzer,
-            paralyze_time,
-            &mut health_q,
-            &mut stun_q,
-            &mut shield_q,
-            &protected_q,
-            &mut commands,
-        );
-        commands.entity(pending.target).insert(IdleTimer(0.0));
+        if target_hit {
+            let primary_damage = primary_target_kind
+                .map(|k| base(k) * dyn_mult)
+                .unwrap_or(weapon_def.damage.default * dyn_mult);
+            apply_hit(
+                pending.target,
+                pending.attacker,
+                primary_damage,
+                paralyzer,
+                paralyze_time,
+                &mut health_q,
+                &mut stun_q,
+                &mut shield_q,
+                &protected_q,
+                &mut commands,
+            );
+            commands.entity(pending.target).insert(IdleTimer(0.0));
+        }
 
         let aoe = weapon_def.area_of_effect;
         if aoe > AOE_SPLASH_THRESHOLD {
@@ -805,8 +875,11 @@ pub fn apply_damage(
         // Apply infection: keyed on the weapon (not the attacker kind)
         // to match upstream LuaRules/Gadgets/infection.lua. VirusBeam,
         // VirusDeath, Wormsplash, and Obelisk Infection each have their
-        // own infection window in seconds.
-        if let Some(duration) = weapon_infection_duration(&pending.weapon)
+        // own infection window in seconds. Only fires when the primary
+        // hit actually landed on the target — a missed shot shouldn't
+        // infect (splash-based infection would need its own pass).
+        if target_hit
+            && let Some(duration) = weapon_infection_duration(&pending.weapon)
             && let Some((_, attacker_faction, attacker_team)) = attacker_info
         {
             let target_is_virus = target_unit_q
@@ -1049,6 +1122,24 @@ mod tests {
         assert_eq!(weapon_infection_duration("Infection"), Some(1.0));
         assert_eq!(weapon_infection_duration("BitShot"), None);
         assert_eq!(weapon_infection_duration("Wormbite"), None);
+    }
+
+    #[test]
+    fn xs32_signed_stays_in_unit_range() {
+        let mut s = 0xDEADBEEFu32;
+        for _ in 0..10_000 {
+            let v = xs32_signed(&mut s);
+            assert!(v >= -1.0 && v < 1.0, "out-of-range draw: {v}");
+        }
+    }
+
+    #[test]
+    fn xs32_is_deterministic() {
+        let mut a = 0xABCDEF01u32;
+        let mut b = 0xABCDEF01u32;
+        for _ in 0..100 {
+            assert_eq!(xs32(&mut a), xs32(&mut b));
+        }
     }
 
     #[test]

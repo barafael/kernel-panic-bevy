@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use super::combat::Dying;
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::spawning::Emerging;
+use super::unit_registry::UnitRegistry;
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)
@@ -30,8 +31,8 @@ use super::spawning::Emerging;
 pub const SPATIAL_CELL: f32 = 256.0;
 
 /// Flat snapshot carried in each cell. Shape chosen so the common
-/// "is-enemy + is-alive + is-in-range" check in target picking runs without
-/// any follow-up ECS lookup.
+/// "is-enemy + is-alive + is-in-range + is-flying" check in target picking
+/// runs without any follow-up ECS lookup.
 #[derive(Clone, Copy)]
 pub struct SpatialEntry {
     pub entity: Entity,
@@ -39,6 +40,9 @@ pub struct SpatialEntry {
     pub team: u8,
     pub faction: Faction,
     pub hp_positive: bool,
+    /// Mirrored from the FBI `canFly=1` flag so ground weapons can cheaply
+    /// skip flying targets via `NoChaseCategory=VTOL`.
+    pub is_flying: bool,
 }
 
 /// Uniform XZ grid of [`SpatialEntry`] lists keyed by cell coordinates.
@@ -94,19 +98,28 @@ impl SpatialIndex {
 #[allow(clippy::type_complexity)]
 pub fn rebuild_spatial_index(
     mut index: ResMut<SpatialIndex>,
+    unit_registry: Res<UnitRegistry>,
     units: Query<
-        (Entity, &TeamId, &Faction, &GlobalTransform, &Health),
-        (With<UnitType>, Without<Dying>, Without<Emerging>),
+        (
+            Entity,
+            &UnitType,
+            &TeamId,
+            &Faction,
+            &GlobalTransform,
+            &Health,
+        ),
+        (Without<Dying>, Without<Emerging>),
     >,
 ) {
     index.clear();
-    for (entity, team, faction, gtf, health) in &units {
+    for (entity, unit_type, team, faction, gtf, health) in &units {
         index.push(SpatialEntry {
             entity,
             pos: gtf.translation(),
             team: team.0,
             faction: *faction,
             hp_positive: health.current > 0.0,
+            is_flying: unit_registry.can_fly(unit_type.0),
         });
     }
 }
@@ -122,6 +135,7 @@ mod tests {
             team: 0,
             faction: Faction::System,
             hp_positive: true,
+            is_flying: false,
         }
     }
 

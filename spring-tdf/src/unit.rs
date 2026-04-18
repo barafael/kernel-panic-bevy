@@ -101,6 +101,11 @@ pub struct UnitDef {
     // --- Categories ---
     /// Unit categories, space-separated (e.g. "FAST EDIBLE UNIT TARGET").
     pub category: String,
+    /// Target categories this unit's weapons will *not* chase. Raw, space-
+    /// separated (upstream spells it `NoChaseCategory=VTOL`, sometimes with
+    /// multiple tokens). Most KP ground units set this to `VTOL` so they
+    /// ignore Flows; DOS sets it to `FACTORY` so it doesn't chase buildings.
+    pub no_chase_category: String,
 
     // --- Death ---
     /// Explosion type on death (`ExplodeAs=`).
@@ -200,6 +205,7 @@ impl UnitDef {
             seismic_distance: s.f32("seismicdistance"),
 
             category: s.string("category"),
+            no_chase_category: s.string("nochasecategory"),
 
             explode_as: s.string("explodeas"),
             self_destruct_as: s.string("selfdestructas"),
