@@ -157,6 +157,13 @@ Remaining:
 
 - Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
   (Command-Fire Framework).
+- **Building-placement slope check** — each building's FBI `MaxSlope`
+  (Socket/Firewall/Terminal/Obelisk=10, BadBlock=32, Kernel/Hole=60)
+  governs whether a builder can drop the ghost there. Currently the
+  placement ghost only checks vent overlap + `VentClaim` (not slope),
+  so on hilly maps you can snap a factory onto an angled floor. Fold
+  a `heightmap.max_slope_in_footprint(site, footprint) ≤ MaxSlope_deg`
+  check into the ghost snap before the cursor colour turns green.
 
 Done in this pass:
 
@@ -644,53 +651,36 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
      `4.0` pass through unchanged. If we ever want homebase / Byte
      near-immunity back it should come from a dedicated per-kind
      multiplier table rather than the FBI engine-disable value.
-- [ ] **Movement ignores per-unit `MaxSlope`**. The original three-part
-  bug is now one part — the terrain-penetration and Worm-exemption
-  pieces landed via `ground_clamp_system` + `UnitKind::is_subterranean`,
-  and `map_loading.rs` dropped the global `max_slope` from 3.0 (~72°)
-  to 1.0 (45°) so no unit strolls up a vertical face. What's left is
-  honouring each unit's FBI `MaxSlope` instead of the single global cap.
+- [x] ~~**Movement ignores per-unit `MaxSlope`**~~ — done.
+  - Terrain penetration: `ground_clamp_system` + `UnitKind::is_subterranean`.
+  - Cliff climbing: `NavGridSet` holds one `NodeLayer` per distinct
+    `MaxSlope` cap (built from `BTreeSet` of converted-to-ratio caps
+    across `ALL_UNIT_KINDS` + the 45° default, so duplicate degrees
+    collapse into one bucket). `compute_path` picks the tightest
+    bucket whose cap ≥ the unit's via `NavGridSet::bucket_for`, and
+    the `slope_mod` is kept constant across buckets so path costs
+    order consistently. Lookup lives in `compute_path` (≤3 calls /
+    frame, cheaper than a cached-component scheme) — the
+    `NavBucket(u8)` cache drafted earlier turned out to be overkill.
+  - Building-placement MaxSlope is still a separate concern (FBI
+    values on Socket / Firewall / Terminal / Obelisk = 10, BadBlock
+    = 32, Kernel / Hole = 60 govern where you can drop the build
+    ghost, orthogonal to nav) — tracked under §3.1.
 
-  KP's slope values bucket nicely: the roster declares 5 distinct caps
-  (10°, 15°, 20°, 32°, 60° → tan 0.18 / 0.27 / 0.36 / 0.62 / 1.73).
-  Upstream Spring does this with per-`MoveDef` nav grids; we match the
-  pattern with one `NodeLayer` per bucket.
+  Sub-bugs still watching:
+  - QTPFS doesn't observe heightmap edits (Technical Debt →
+    Architecture "QTPFS terrain-change repathing"). Lua gadgets that
+    pave on build invalidate every bucket grid.
+  - The nav-grid build needs to happen *after* upstream Lua gadgets
+    run their init-time heightmap edits, otherwise `map_loading`'s
+    view of terrain is stale. Verify ordering on map load.
 
-  Plan:
-
-  1. **`NavGridSet` resource** replacing the single `NavGrid`.
-     `Vec<(max_slope: f32, NodeLayer)>` sorted by `max_slope`. Built at
-     map load from `UnitRegistry`'s distinct `max_slope` values (plus a
-     default 45° bucket for anything that doesn't declare one).
-  2. **Per-query grid pick** in `compute_path` — resolve the unit's
-     cap via `UnitRegistry::max_slope`, pick the first bucket whose cap
-     ≥ unit's cap. Cache the bucket index on the unit as a
-     `NavBucket(u8)` component at spawn so the movement hot loop skips
-     the registry lookup.
-  3. **Build cost** — one `SpeedMap::from_heightmap` + `NodeLayer::new`
-     per bucket at map load. 5 buckets × current O(width·height) build
-     = 5× the current map-load cost for nav alone (still milliseconds
-     on a 2048² heightmap). Memory: ~5× the NodeLayer footprint —
-     roughly 20 MB of speed bins total, acceptable against the texture
-     budget.
-  4. **`slope_mod` stays uniform across buckets** so pathfinder cost
-     ordering is consistent — only impassability differs per class.
-  5. **Worms and flyers bypass the nav grid already** (`can_fly` skip
-     in `movement_system`, `is_subterranean` in `ground_clamp_system`),
-     so they don't need a bucket.
-  6. **Tests**: cliff (slope ≈ 1.0) blocks a Bit (MaxSlope 21°) but
-     passes a Byte (MaxSlope 60°); flat ground passes everything; a
-     unit whose bucket disappears on map cycle falls back to the
-     loosest bucket with a warn-log.
-
-  Sub-bugs to watch for while wiring this:
-
-  - QTPFS doesn't observe heightmap edits (Technical Debt → Architecture
-    "QTPFS terrain-change repathing"). Lua gadgets that pave on build
-    would invalidate any bucket grid. Follow-up, not blocking.
-  - The nav-grid rebuild needs to happen *after* upstream Lua gadgets
-    run their init-time heightmap edits, otherwise `map_loading`'s view
-    of terrain is stale. Verify ordering on map load.
+  Data note: `gamedata/MOVEINFO.TDF` sets `MaxSlope=36` on all three
+  mobile move classes (LIGHT / MEDIUM / HEAVY). Recoil's
+  `DegreesToMaxSlope` (clamp × 1.5 → `1 − cos`) turns that into an
+  effective ~54° cap upstream. If the per-unit buckets feel like
+  overkill for KP specifically, collapsing back to a single 54°
+  grid is always a valid simplification.
 - [x] ~~`GameState` not reset on map cycling~~ — fixed in a50fe8b
 - [x] ~~Rally point / delivery point for factories~~ — `Emerging.rally_point` wired
 - [x] ~~Terrain height not sampled during movement~~ — ground clamping in recent walking
@@ -820,3 +810,122 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 - [ ] `DEEP_FEATURES.md` calls the Network homebase "Carrier" in 3 places but code uses
   `UnitKind::Connection` — upstream `sidedata.tdf` also uses "carrier"; consider aligning
+
+---
+
+## 11. Simplification Follow-Ups
+
+Deferred from the April 2026 simplification sweep. Each item was flagged by
+the review agents (reuse / quality / efficiency) but skipped because the
+blast radius was larger than one session warrants. Ordered high → low impact.
+
+### 11.1 Split the three kitchen-sink files
+
+- [ ] `units/combat.rs` (1228 LoC) → `combat::aim` + `combat::damage` +
+  `combat::lifecycle`, leaving a ~300-line `combat::core` for target selection.
+  Re-export from a thin `combat::mod` so the public API stays stable.
+- [ ] `units/spawning.rs` (709 LoC) → `spawning` (core + `SpawnContext`),
+  `spawning::s3o_mount` (flatten / piece-to-mesh / ground-lift / DFS),
+  `spawning::emerge` (`Emerging`, `EmergeStyle`, `FadeMaterials`, `emerge_system`),
+  and `spawning::showcase`. `FactoryPieces` belongs with `production.rs`.
+- [ ] `map_loading.rs` (524 LoC) → `map_loading::mipmap` +
+  `map_loading::atmosphere`, leaving `load_map` as the orchestrator.
+
+### 11.2 `SpawnContext` SystemParam
+
+- [ ] `spawn_unit` takes 12 arguments and is called from 7 sites, each
+  repeating the same 10-wide tail (plus `#[allow(clippy::too_many_arguments)]`).
+  Fold `(&mut Commands, &mut Assets<Mesh>, &mut Assets<StandardMaterial>,
+  &mut Assets<Image>, &mut S3OModelCache, &mut CobFileCache,
+  &SelectionVolumeMaterial, &UnitRegistry)` into a
+  `#[derive(SystemParam)] struct SpawnContext<'w, 's>`. Each call site shrinks
+  to 4 args and every caller's `too_many_arguments` allow disappears.
+
+### 11.3 Weapon IDs: kill the string allocs
+
+- [ ] `PendingDamage.weapon`, `BurstFire.weapon`, and `AttackEvent.weapon_name`
+  are all `String`. Every shot, every burst follow-up, and every factory
+  build-laser ray (4× per Kernel per frame in steady state) allocates a
+  `"BuildLaser".to_string()` / `weapon_name.to_string()`. Replace with
+  `&'static str` or an interned `WeaponId(u16)` resolved at TDF load.
+  Downstream `weapon_registry.get(&pending.weapon)` becomes an array lookup.
+- Unblocks folding `weapon_infection_duration(&str)` into `strum::EnumString`.
+
+### 11.4 HUD panels rebuild every frame
+
+- [ ] `ui/hud/info_panel.rs`, `build_menu.rs`, and `order_palette.rs` each
+  `despawn_all_children + spawn fresh` their entire subtree unconditionally on
+  every Update. With ~10–30 UI entities per panel, that's ~1800 despawn+respawn
+  ops/sec at 60 fps plus per-frame `format!("{:.0}", …)` allocs for every Text
+  node. Gate on `Changed<Selected>` or a `LastSelectionHash` resource; for
+  progress bar / HP refresh, update `Text` in place rather than respawn.
+
+### 11.5 `MovementState` / `ProductionState` → change detection
+
+- [ ] Both components exist solely to track "was moving/building last frame"
+  and reimplement what Bevy gives you for free via `Added<MoveTarget>`,
+  `RemovedComponents<MoveTarget>`, and friends. Delete both components + the
+  per-frame commands-churn of `insert(MovementState {...})`. Saves 2
+  components, 2 systems, ~100 LoC.
+
+### 11.6 Cached per-unit stats
+
+- [ ] `interaction/movement.rs` calls
+  `unit_registry.collision_radius/speed/can_fly/turn_rate` four times per
+  unit per frame — hash lookups on static data. Add a
+  `UnitStats { radius, speed, turn_rate, can_fly, cruise_alt }` component
+  written once at spawn. Combat-side equivalent:
+  `CombatProfile { enforce_los, no_chase_vtol, weapon: Option<WeaponId> }`
+  so `combat_system` stops string-keyed hashmap hits in its hot loop.
+
+### 11.7 Drop `.chain()` where data-flow allows
+
+- [ ] Every `GameplaySet` is `.chain()`ed internally, serializing systems that
+  touch disjoint components (e.g. `tick_port_buffers`, `tick_spawn_stun`,
+  `tick_flow_speed`, `animate_connection_hatch`; `tick_infections`,
+  `tick_command_fire_cooldown`, `tick_protection`). Audit each set, replace
+  the blanket `.chain()` with explicit `.after()` edges only where real data
+  deps exist. Bevy schedules the rest on the worker pool. Rough target:
+  1.5–2× Resolve-set throughput.
+
+### 11.8 Smaller wins
+
+- [ ] **`unit_separation_system`** ([interaction/movement.rs:549](kernel-panic/src/interaction/movement.rs#L549))
+  is still O(N²) — builds a full snapshot and nested-loops it. Route each
+  mobile unit through `SpatialIndex::query_radius` instead. Expected ~40×
+  fewer distance checks at N=300 units.
+- [ ] **`gunbase` / `body` piece-name scans** ([combat.rs:592](kernel-panic/src/units/combat.rs#L592),
+  [production.rs:346](kernel-panic/src/units/production.rs#L346)) still
+  case-insensitive-compare every frame (now via `CobAnimator::piece_index`).
+  Cache the indices at spawn like `FactoryPieces::emitters/pad` does.
+- [ ] **`spawn_projectile` / `spawn_melee_flash`** allocate a fresh
+  `StandardMaterial` per shot. Route through `BeamMaterialCache` (which
+  already handles beams + impact bursts) or a sibling `ProjectileAssets`.
+- [ ] **`spawn_death_particle`** allocates mesh + material per explode. Lazy
+  `DeathParticleAssets` resource (same pattern as `BuildSparkleAssets`),
+  fade via scale rather than per-particle material mutation.
+- [ ] **Observer-style one-shot markers**: `PendingFadeInstall` and
+  `JustFired` are "send one message to this entity next frame". Convert to
+  Bevy 0.18 entity-scoped events / observers — stops the component-churn
+  that sparse-set storage is compensating for.
+- [ ] **Three bespoke queue types** (`DamageQueue`, `VirusSpawnQueue`,
+  `PendingAttacks`) are identical `Vec<T>`-wrapped resources. Either migrate
+  them to Bevy `Events<T>` or unify under one `struct Queue<T>(Vec<T>)`.
+- [ ] **`install_fade_materials` / `bookkeeping::count_small_buildings`**
+  scan all units every frame; adopt `Added<T>` / `RemovedComponents<T>` for
+  incremental maintenance.
+- [ ] **Lifetime components dedup**: `BeamVisual`, `BurstSegment`,
+  `ImpactBurst`, `BuildSparkle`, `DeathParticle`, `GeoventSmoke` each carry a
+  `{ lifetime, max_lifetime }` pair plus a bespoke decay system. Extract a
+  shared `Lifetime { remaining, total }` + generic `tick_lifetimes` despawn
+  system; each specialized system keeps only its visual-specific curves.
+
+### 11.9 Align with workspace guardrails
+
+- [ ] `.ok()` swallowing errors at `terrain/geovent.rs` and
+  `weapon_fx/tick.rs` (camera-lookup fallbacks to `Vec3::Y * 1000.0`). Switch
+  to `.inspect_err(|error| warn!(%error, "no camera"))` so the error is
+  visible in traces before we accept the fallback.
+- [ ] `panic!("No map files found")` in `pick_map` could become a `thiserror`
+  `MapLoadError` propagated out — minor, but aligns with the workspace
+  "colocated thiserror enums" rule.

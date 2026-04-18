@@ -2,11 +2,9 @@
 //! terrain, atmosphere, fog, nav grid, minimap, and homebases (or
 //! showcase units) at startup.
 //!
-//! Exposes [`MapLoadingPlugin`], which loads the CLI-selected map at
-//! Startup and runs an `apply_pending_fog` Update system that copies
-//! the map's fog settings onto the camera once it exists.
+//! Exposes [`MapLoadingPlugin`], which loads the CLI-selected map at Startup.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
@@ -43,16 +41,9 @@ impl Plugin for MapLoadingPlugin {
                 load_map.after(crate::rendering::camera::spawn_camera),
             )
                 .chain(),
-        )
-        .add_systems(Update, apply_pending_fog);
+        );
     }
 }
-
-/// Marker component for all entities spawned by map loading.
-/// Retained for parity with existing spawn code even though we no
-/// longer bulk-despawn on map switch.
-#[derive(Component)]
-pub struct MapEntity;
 
 /// Path to the map archive loaded for this session.
 #[derive(Resource)]
@@ -70,7 +61,7 @@ fn pick_map(mut commands: Commands) {
     if let Some(direct) = std::env::args()
         .nth(1)
         .map(PathBuf::from)
-        .filter(|p| p.is_file() && is_map_ext(p))
+        .filter(|p| p.is_file() && is_map_ext(p.as_path()))
     {
         info!("Loading map: {}", direct.display());
         commands.insert_resource(SelectedMap(direct));
@@ -83,7 +74,7 @@ fn pick_map(mut commands: Commands) {
         .flatten()
         .flatten()
         .map(|e| e.path())
-        .filter(is_map_ext)
+        .filter(|p| is_map_ext(p.as_path()))
         .collect();
     maps.sort();
 
@@ -116,7 +107,7 @@ fn pick_map(mut commands: Commands) {
     commands.insert_resource(SelectedMap(selected));
 }
 
-fn is_map_ext(path: &PathBuf) -> bool {
+fn is_map_ext(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|e| e.to_str())
@@ -134,6 +125,7 @@ fn load_map(
     mut std_materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
     mut model_cache: ResMut<S3OModelCache>,
     mut cob_cache: ResMut<CobFileCache>,
@@ -203,32 +195,60 @@ fn load_map(
         &mut geovent_assets,
     );
 
-    // Build pathfinding grid from heightmap.
+    // Build one pathfinding grid per distinct per-unit `MaxSlope`.
+    // Upstream Spring does this with per-`MoveDef` grids — a Bit with
+    // `MaxSlope=21` should fail to walk onto a cliff that a Byte with
+    // `MaxSlope=60` strolls straight up. Buckets are keyed on the
+    // rise/run ratio (tan of the FBI degrees) and sorted ascending;
+    // `compute_path` picks the tightest bucket whose cap ≥ the unit's.
+    // `slope_mod` stays constant across buckets so path cost ordering
+    // is consistent — only impassability differs per class.
     {
-        let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
-            &parsed.heights,
-            parsed.header.heightmap_width() as u32,
-            parsed.header.heightmap_height() as u32,
-            // max_slope = rise/run above which terrain is impassable. 3.0
-            // (~72°) only blocks near-vertical cliffs, leaving all climbable
-            // hills open. Keeps `0.8` (the previous value) from detouring
-            // around every modest rise.
-            3.0,
-            // slope_mod = how much slope slows travel. Spring's default is
-            // 40, which leaves cliff-edge shortcuts cheaper than long flat
-            // detours. Bumping heavily so the pathfinder prefers gentle
-            // routes when they exist but still crosses a cliff if that's
-            // the only way.
-            400.0,
-        );
-        let node_layer = spring_pathfinding::NodeLayer::new(&speed_map);
-        info!(
-            "  Nav grid: {} leaf nodes from {}x{} speed map",
-            node_layer.leaf_count(),
-            speed_map.width,
-            speed_map.height,
-        );
-        commands.insert_resource(interaction::movement::NavGrid(node_layer));
+        use spring_pathfinding::{NodeLayer, SpeedMap};
+        use std::collections::BTreeSet;
+
+        use crate::units::definitions::ALL_UNIT_KINDS;
+        use crate::units::unit_registry::DEFAULT_MAX_SLOPE_RATIO;
+
+        const SLOPE_MOD: f32 = 400.0;
+        // Bin slopes to 3 decimals so float jitter on
+        // `tan(deg.to_radians())` doesn't split near-identical buckets.
+        const BUCKET_QUANTUM: f32 = 1_000.0;
+
+        let mut distinct_caps = BTreeSet::<u32>::new();
+        for &kind in ALL_UNIT_KINDS {
+            let cap = unit_registry.max_slope_ratio(kind);
+            distinct_caps.insert((cap * BUCKET_QUANTUM).round() as u32);
+        }
+        // Always keep the 45° fallback available for units whose FBI
+        // omits MaxSlope or for the `max_slope_ratio` default.
+        distinct_caps.insert((DEFAULT_MAX_SLOPE_RATIO * BUCKET_QUANTUM).round() as u32);
+
+        let mut nav_set = interaction::movement::NavGridSet::default();
+        for cap_q in distinct_caps {
+            let cap = cap_q as f32 / BUCKET_QUANTUM;
+            let speed_map = SpeedMap::from_heightmap(
+                &parsed.heights,
+                parsed.header.heightmap_width() as u32,
+                parsed.header.heightmap_height() as u32,
+                cap,
+                SLOPE_MOD,
+            );
+            let layer = NodeLayer::new(&speed_map);
+            info!(
+                "  Nav bucket max_slope={:.3}: {} leaf nodes from {}x{} speed map",
+                cap,
+                layer.leaf_count(),
+                speed_map.width,
+                speed_map.height,
+            );
+            nav_set.buckets.push(interaction::movement::NavBucket {
+                max_slope: cap,
+                layer,
+            });
+        }
+        // Buckets already ascending because BTreeSet iteration is sorted.
+        commands.insert_resource(nav_set);
     }
 
     // Setup minimap from ground texture.
@@ -250,7 +270,7 @@ fn load_map(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut commands);
-        apply_fog(map_info, parsed, &mut commands);
+        apply_fog(map_info, parsed, &mut fog_query);
         if map_name.eq_ignore_ascii_case("Showcase") {
             spawn_showcase(
                 &heightmap,
@@ -377,7 +397,6 @@ fn spawn_terrain(
     for chunk in chunks {
         let mesh_handle = meshes.add(chunk.mesh);
         commands.spawn((
-            MapEntity,
             Mesh3d(mesh_handle),
             MeshMaterial3d(terrain_material.clone()),
             Transform::from_translation(chunk.translation),
@@ -407,7 +426,6 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
         Vec3::new(dir[0], dir[1], dir[2]).normalize_or(Vec3::new(0.0, 1.0, 0.5).normalize());
 
     commands.spawn((
-        MapEntity,
         DirectionalLight {
             color: Color::linear_rgb(sun[0], sun[1], sun[2]),
             illuminance: 8000.0,
@@ -424,40 +442,20 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
     });
 }
 
-/// Fog settings from the map, stored as a resource. A system applies it to the camera.
-#[derive(Resource)]
-struct MapFogSettings {
-    color: Color,
-    start: f32,
-    end: f32,
-}
-
-/// Apply pending fog settings to the camera's DistanceFog component.
-fn apply_pending_fog(
-    settings: Option<Res<MapFogSettings>>,
-    mut camera_q: Query<&mut DistanceFog, With<RtsCamera>>,
-    mut commands: Commands,
-) {
-    let Some(settings) = settings else { return };
-    let Ok(mut fog) = camera_q.single_mut() else {
-        return;
-    };
-
-    fog.color = settings.color;
-    fog.falloff = FogFalloff::Linear {
-        start: settings.start,
-        end: settings.end,
-    };
-    commands.remove_resource::<MapFogSettings>();
-}
-
-/// Queue fog update from map atmosphere.
+/// Write the map's fog atmosphere onto the camera's `DistanceFog`.
 ///
 /// Fog end scales with the map diagonal so large maps (like the showcase
 /// plain) don't get walled off by haze a few grid cells from the camera.
 /// Spring's `FogStart` is a fraction of that end distance.
-fn apply_fog(map_info: &MapInfo, parsed: &ParsedMap, commands: &mut Commands) {
-    let fog = map_info.atmosphere.fog_color;
+fn apply_fog(
+    map_info: &MapInfo,
+    parsed: &ParsedMap,
+    fog_query: &mut Query<&mut DistanceFog, With<RtsCamera>>,
+) {
+    let Ok(mut fog) = fog_query.single_mut() else {
+        return;
+    };
+    let color = map_info.atmosphere.fog_color;
     let fog_start_frac = map_info.atmosphere.fog_start;
     let world_w = parsed.header.world_width();
     let world_d = parsed.header.world_depth();
@@ -466,11 +464,11 @@ fn apply_fog(map_info: &MapInfo, parsed: &ParsedMap, commands: &mut Commands) {
     // completely. Floor at 4000 elmos for small maps.
     let max_view_distance = (diagonal * 1.1).max(4000.0);
 
-    commands.insert_resource(MapFogSettings {
-        color: Color::linear_rgb(fog[0], fog[1], fog[2]),
+    fog.color = Color::linear_rgb(color[0], color[1], color[2]);
+    fog.falloff = FogFalloff::Linear {
         start: fog_start_frac * max_view_distance,
         end: max_view_distance,
-    });
+    };
 }
 
 fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> MipmapData {

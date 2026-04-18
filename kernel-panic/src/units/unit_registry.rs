@@ -21,6 +21,23 @@ const SPRING_SIM_FPS: f32 = 30.0;
 /// We use 128 as the standard worker speed (homebases).
 const DEFAULT_WORKER_TIME: f32 = 128.0;
 
+/// Below this cutoff, an FBI `DamageModifier` is treated as the Spring
+/// engine-disable hack (`0.000001`) rather than a real gameplay value
+/// and is normalised to `1.0`. Any legitimate designer-set vulnerability
+/// or resistance we've seen in KP is O(1) — 0.5 through 4.0 — so the
+/// threshold sits well below that range.
+const DAMAGE_MODIFIER_DISABLED_THRESHOLD: f32 = 0.01;
+
+/// Fallback max-slope ratio for units whose FBI omits `MaxSlope` (e.g.
+/// buildings). Matches the global cap in `map_loading.rs` (45°).
+pub const DEFAULT_MAX_SLOPE_RATIO: f32 = 1.0;
+
+/// Upper bound clamp on per-unit max-slope so a rogue FBI
+/// (`MaxSlope=90` → tan → infinity) can't produce a bucket that makes
+/// every cell passable. 60° (tan ≈ 1.73) matches the steepest explicit
+/// KP cap and is well above any real map slope.
+pub const MAX_SLOPE_RATIO: f32 = 1.8;
+
 /// All parsed unit definitions, accessible by `UnitKind`.
 #[derive(Resource)]
 pub struct UnitRegistry {
@@ -119,6 +136,21 @@ impl UnitRegistry {
         })
     }
 
+    /// Max traversable slope as a `dy/dx` ratio (what
+    /// `spring_pathfinding::SpeedMap` takes). Spring's FBI `MaxSlope` is in
+    /// degrees (KP values: 10, 15, 20, 32, 60); we convert with
+    /// `tan(degrees)`. Unknown / zero-MaxSlope units fall back to
+    /// [`DEFAULT_MAX_SLOPE_RATIO`] (45°, matching the global cap in
+    /// `map_loading.rs`).
+    pub fn max_slope_ratio(&self, kind: UnitKind) -> f32 {
+        self.def(kind)
+            .map(|d| d.max_slope)
+            .filter(|&deg| deg > 0.0)
+            .map_or(DEFAULT_MAX_SLOPE_RATIO, |deg| {
+                deg.to_radians().tan().min(MAX_SLOPE_RATIO)
+            })
+    }
+
     /// Cruise altitude in elmos above the terrain for flying units. 0 for
     /// ground units; only consulted when `can_fly` is true.
     pub fn cruise_alt(&self, kind: UnitKind) -> f32 {
@@ -189,12 +221,30 @@ impl UnitRegistry {
         self.def(kind).map_or(0.0, |d| d.idle_time)
     }
 
-    /// Incoming-damage multiplier from the FBI `DamageModifier` field. Flat
-    /// scalar applied to every damage event: secondary factories and the
-    /// Firewall use `4` (fragile), homebases and Byte use near-zero values
-    /// that approach immunity. Defaults to `1.0` when the field is absent.
+    /// Incoming-damage multiplier from the FBI `DamageModifier` field.
+    ///
+    /// Spring-engine trick: upstream Kernel Panic sets
+    /// `DamageModifier=0.000001` on every combat unit as a way to *disable*
+    /// Spring's default damage path — the real damage formula lives in
+    /// KP's LuaRules gadget. Our reimplementation resolves damage
+    /// directly in [`super::combat::apply_damage`], so treating the FBI
+    /// near-zero value literally zeroes out every hit (a Bit takes
+    /// `80 × 1e-6 ≈ 8e-5` HP per Line shot — it lives forever).
+    ///
+    /// Pragmatic rule: values below [`DAMAGE_MODIFIER_DISABLED_THRESHOLD`]
+    /// are treated as the engine-disable hack and round to `1.0`.
+    /// Explicit design values like `4.0` (Socket / Firewall: deliberately
+    /// fragile) pass through unchanged. A missing field also defaults to
+    /// `1.0`. If we ever want homebase / Byte near-immunity back, it
+    /// should come from a dedicated per-kind multiplier table rather
+    /// than the FBI engine-hack value.
     pub fn damage_modifier(&self, kind: UnitKind) -> f32 {
-        self.def(kind).map_or(1.0, |d| d.damage_modifier)
+        let raw = self.def(kind).map_or(1.0, |d| d.damage_modifier);
+        if raw < DAMAGE_MODIFIER_DISABLED_THRESHOLD {
+            1.0
+        } else {
+            raw
+        }
     }
 
     /// Primary weapon TDF section name, or `""` if unarmed / only has BuildLaser.
@@ -220,5 +270,89 @@ impl UnitRegistry {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spring_tdf::UnitDef;
+
+    fn registry_with(kind: UnitKind, raw_damage_modifier: f32) -> UnitRegistry {
+        let mut defs = UnitDefs::default();
+        let def = UnitDef {
+            damage_modifier: raw_damage_modifier,
+            ..UnitDef::default()
+        };
+        defs.units.insert(kind.unitname().to_string(), def);
+        UnitRegistry { defs }
+    }
+
+    /// Upstream KP ships every combat unit with `DamageModifier=0.000001`
+    /// as a Spring engine-disable hack. If we applied that literally
+    /// every hit would shave off 1e-6 of the weapon's damage and no unit
+    /// would ever die (observed pre-fix). The accessor must normalise
+    /// those sub-threshold values to `1.0`.
+    #[test]
+    fn near_zero_damage_modifier_is_treated_as_spring_engine_hack() {
+        let reg = registry_with(UnitKind::Bit, 0.000_001);
+        assert_eq!(reg.damage_modifier(UnitKind::Bit), 1.0);
+    }
+
+    /// Design-intent values (Socket / Firewall take 4× damage) must
+    /// survive normalisation unchanged.
+    #[test]
+    fn designer_set_multiplier_passes_through() {
+        let reg = registry_with(UnitKind::Socket, 4.0);
+        assert_eq!(reg.damage_modifier(UnitKind::Socket), 4.0);
+    }
+
+    /// Missing FBI entry falls back to neutral `1.0`.
+    #[test]
+    fn missing_unit_defaults_to_one() {
+        let reg = UnitRegistry {
+            defs: UnitDefs::default(),
+        };
+        assert_eq!(reg.damage_modifier(UnitKind::Bit), 1.0);
+    }
+
+    fn registry_with_slope(kind: UnitKind, raw_max_slope_deg: f32) -> UnitRegistry {
+        let mut defs = UnitDefs::default();
+        let def = UnitDef {
+            max_slope: raw_max_slope_deg,
+            ..UnitDef::default()
+        };
+        defs.units.insert(kind.unitname().to_string(), def);
+        UnitRegistry { defs }
+    }
+
+    #[test]
+    fn max_slope_ratio_converts_fbi_degrees_to_rise_run() {
+        // Bit's FBI: MaxSlope=20 → tan(20°) ≈ 0.364.
+        let reg = registry_with_slope(UnitKind::Bit, 20.0);
+        let ratio = reg.max_slope_ratio(UnitKind::Bit);
+        assert!(
+            (ratio - 20.0_f32.to_radians().tan()).abs() < 1e-5,
+            "got {ratio}"
+        );
+    }
+
+    #[test]
+    fn max_slope_ratio_default_for_missing_unit() {
+        let reg = UnitRegistry {
+            defs: UnitDefs::default(),
+        };
+        // Buildings / unparsed units fall back to the 45° cap.
+        assert_eq!(reg.max_slope_ratio(UnitKind::Bit), DEFAULT_MAX_SLOPE_RATIO);
+    }
+
+    #[test]
+    fn max_slope_ratio_clamps_absurd_values() {
+        // Paranoid FBI with MaxSlope=89 → tan(89°) ≈ 57, which would
+        // produce a bucket where every cell is passable. Clamp to our
+        // configured ceiling so the bucket selector still has a useful
+        // "loosest" category.
+        let reg = registry_with_slope(UnitKind::Bit, 89.0);
+        assert_eq!(reg.max_slope_ratio(UnitKind::Bit), MAX_SLOPE_RATIO);
     }
 }

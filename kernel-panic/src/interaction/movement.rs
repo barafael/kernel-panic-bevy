@@ -75,9 +75,39 @@ impl CommandQueue {
     }
 }
 
-/// The pathfinding grid resource, built from the loaded map.
-#[derive(Resource)]
-pub struct NavGrid(pub NodeLayer);
+/// One pathfinding grid plus the max-slope cap (dy/dx ratio) it was
+/// built for. Grids with smaller caps flag more cells as impassable.
+pub struct NavBucket {
+    pub max_slope: f32,
+    pub layer: NodeLayer,
+}
+
+/// A set of pathfinding grids, one per distinct `MaxSlope` in the unit
+/// roster. Units with a tighter slope cap pick a grid whose cells they
+/// can actually traverse; units with looser caps share the most permissive
+/// grid. Sorted ascending by `max_slope`.
+///
+/// Upstream Spring does the same thing via per-`MoveDef` grids
+/// (`rts/Sim/MoveTypes/MoveDefHandler.cpp`); see plan.md §Gameplay Bugs
+/// "Movement ignores per-unit `MaxSlope`" for the full motivation.
+#[derive(Resource, Default)]
+pub struct NavGridSet {
+    pub buckets: Vec<NavBucket>,
+}
+
+impl NavGridSet {
+    /// Pick the tightest bucket whose cap ≥ `cap`. If none qualifies
+    /// (the unit needs a looser grid than any we built), return the
+    /// loosest bucket. Panics if empty — the map loader always pushes
+    /// at least the default 45° bucket.
+    pub fn bucket_for(&self, cap: f32) -> usize {
+        debug_assert!(!self.buckets.is_empty(), "NavGridSet::bucket_for: empty");
+        self.buckets
+            .iter()
+            .position(|b| b.max_slope >= cap)
+            .unwrap_or(self.buckets.len() - 1)
+    }
+}
 
 /// Per-frame snapshot of every unit, used by the movement pass to resolve
 /// collisions and decide when a waypoint is blocked by an "arrived" unit.
@@ -110,7 +140,7 @@ const PATHFIND_BUDGET_PER_FRAME: usize = 3;
 pub fn movement_system(
     mut commands: Commands,
     time: Res<Time>,
-    mut nav_grid: Option<ResMut<NavGrid>>,
+    mut nav_set: Option<ResMut<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
     mut query: Query<(
         Entity,
@@ -205,7 +235,9 @@ pub fn movement_system(
             } else if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
                 pathfinds_used += 1;
                 Some(compute_path(
-                    nav_grid.as_deref_mut(),
+                    nav_set.as_deref_mut(),
+                    &unit_registry,
+                    unit_type.0,
                     transform.translation,
                     target.0,
                 ))
@@ -612,13 +644,55 @@ pub fn unit_separation_system(
     }
 }
 
-/// Compute a path using the QTPFS nav grid, or fall back to straight-line.
-fn compute_path(nav_grid: Option<&mut NavGrid>, from: Vec3, to: Vec3) -> Vec<Vec3> {
-    if let Some(nav) = nav_grid {
-        let src = [from.x, from.z];
-        let dst = [to.x, to.z];
-        let path = find_path(&mut nav.0, src, dst);
+/// Re-clamp every ground unit's Y to the heightmap surface. The
+/// in-loop clamp in `movement_system` only runs for units actively
+/// walking a path, and the clamp in `unit_separation_system` only fires
+/// for units that got pushed this frame — an idle unit standing on a
+/// slope can still end up below the mesh (spawn rounding, map heightmap
+/// edits, feature removal). Doing it here, unconditionally once per
+/// frame, guarantees no non-flying unit is ever rendered inside
+/// terrain.
+///
+/// Exceptions: flying units (kept at cruise altitude by
+/// `movement_system`) and subterranean units (the Worm, which
+/// intentionally sinks below the surface — see
+/// [`UnitKind::is_subterranean`]).
+pub fn ground_clamp_system(
+    heightmap: Option<Res<Heightmap>>,
+    unit_registry: Res<UnitRegistry>,
+    mut units: Query<(&UnitType, &mut Transform)>,
+) {
+    let Some(heightmap) = heightmap else {
+        return;
+    };
+    for (unit_type, mut transform) in &mut units {
+        if unit_registry.can_fly(unit_type.0) || unit_type.0.is_subterranean() {
+            continue;
+        }
+        let ground = heightmap.sample(transform.translation.x, transform.translation.z);
+        if transform.translation.y < ground {
+            transform.translation.y = ground;
+        }
+    }
+}
 
+/// Compute a path through the nav bucket matching the unit's `MaxSlope`,
+/// falling back to straight-line if no nav set is loaded or the unit kind
+/// is blocked-everywhere in its bucket.
+fn compute_path(
+    nav_set: Option<&mut NavGridSet>,
+    unit_registry: &UnitRegistry,
+    kind: UnitKind,
+    from: Vec3,
+    to: Vec3,
+) -> Vec<Vec3> {
+    if let Some(nav) = nav_set
+        && !nav.buckets.is_empty()
+    {
+        let cap = unit_registry.max_slope_ratio(kind);
+        let idx = nav.bucket_for(cap);
+        let layer = &mut nav.buckets[idx].layer;
+        let path = find_path(layer, [from.x, from.z], [to.x, to.z]);
         if !path.is_empty() {
             return path
                 .points
@@ -774,5 +848,39 @@ fn draw_dashed_polyline(
                 pattern_idx = (pattern_idx + 1) % DASH_PATTERN.len();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spring_pathfinding::SpeedMap;
+
+    fn bucket_with(cap: f32) -> NavBucket {
+        // Tiny 2×2 speed map — we only care about the `max_slope` value
+        // for selection tests, not the grid contents.
+        let layer = NodeLayer::new(&SpeedMap::uniform(2, 2, 1.0));
+        NavBucket {
+            max_slope: cap,
+            layer,
+        }
+    }
+
+    #[test]
+    fn bucket_for_picks_first_cap_at_or_above_unit_cap() {
+        let mut set = NavGridSet::default();
+        set.buckets
+            .extend([bucket_with(0.2), bucket_with(0.5), bucket_with(1.0)]);
+
+        // Bit with MaxSlope=21° (tan ≈ 0.384) gets the 0.5 bucket —
+        // tightest grid whose cap still covers what the unit can climb.
+        assert_eq!(set.bucket_for(0.384), 1);
+        // Exact match picks that bucket.
+        assert_eq!(set.bucket_for(0.5), 1);
+        // Byte with MaxSlope=60° (tan ≈ 1.73) exceeds every cap; fall
+        // back to the loosest so it's not falsely blocked.
+        assert_eq!(set.bucket_for(1.73), 2);
+        // A cap below the tightest still resolves to the tightest.
+        assert_eq!(set.bucket_for(0.1), 0);
     }
 }
