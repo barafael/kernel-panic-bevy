@@ -44,8 +44,7 @@ fn load_unit_previews(
     asset_server: Res<AssetServer>,
     unit_registry: Res<UnitRegistry>,
 ) {
-    let assets_root = std::path::Path::new("kernel-panic/assets/unitpics");
-    let assets_root_alt = std::path::Path::new("assets/unitpics");
+    let assets_root = crate::paths::from_project_root("kernel-panic/assets/unitpics");
 
     for &kind in ALL_UNIT_KINDS {
         let declared = unit_registry.build_pic(kind);
@@ -61,8 +60,7 @@ fn load_unit_previews(
         };
         let relative = format!("unitpics/{stem}.png");
 
-        let exists = assets_root.join(format!("{stem}.png")).is_file()
-            || assets_root_alt.join(format!("{stem}.png")).is_file();
+        let exists = assets_root.join(format!("{stem}.png")).is_file();
 
         let handle = if exists {
             asset_server.load(&relative)

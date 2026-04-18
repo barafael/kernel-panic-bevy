@@ -17,14 +17,8 @@ pub enum TdfLoadError {
 
 /// Find an upstream Kernel-Panic subdirectory by leaf name (e.g. "units", "weapons").
 pub fn find_upstream_dir(leaf: &str) -> Option<PathBuf> {
-    let candidates = [
-        format!("upstream/Kernel-Panic/{leaf}"),
-        format!("kernel-panic/upstream/Kernel-Panic/{leaf}"),
-    ];
-    candidates
-        .into_iter()
-        .map(PathBuf::from)
-        .find(|p| p.is_dir())
+    let resolved = crate::paths::from_project_root(&format!("upstream/Kernel-Panic/{leaf}"));
+    resolved.is_dir().then_some(resolved)
 }
 
 /// Parse a single TDF-format file from disk.

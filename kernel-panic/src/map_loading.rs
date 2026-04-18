@@ -60,65 +60,70 @@ struct SelectedMap(PathBuf);
 
 /// Discover the map archives in `assets/maps/` and pick the one named
 /// by the CLI arg (or the first alphabetically).
+///
+/// If the CLI arg is itself a usable `.sd7` / `.sdz` file (absolute or
+/// cwd-relative), we take it verbatim — no directory search needed.
+/// Otherwise we look up the maps directory relative to the project
+/// root (see `paths::project_root`), so the binary works regardless
+/// of where it was launched from.
 fn pick_map(mut commands: Commands) {
-    let candidates = [
-        PathBuf::from("kernel-panic/assets/maps"),
-        PathBuf::from("assets/maps"),
-    ];
-    let maps_dir = candidates.iter().find(|p| p.is_dir());
-
-    let mut maps = Vec::new();
-
-    if let Some(Ok(entries)) = maps_dir.map(std::fs::read_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if ext == "sd7" || ext == "sdz" {
-                maps.push(path);
-            }
-        }
+    if let Some(direct) = std::env::args()
+        .nth(1)
+        .map(PathBuf::from)
+        .filter(|p| p.is_file() && is_map_ext(p))
+    {
+        info!("Loading map: {}", direct.display());
+        commands.insert_resource(SelectedMap(direct));
+        return;
     }
 
+    let maps_dir = crate::paths::from_project_root("kernel-panic/assets/maps");
+    let mut maps: Vec<PathBuf> = std::fs::read_dir(&maps_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(is_map_ext)
+        .collect();
     maps.sort();
 
-    // If a CLI arg was given, find it in the list and set as current.
-    // Match by canonicalised path when possible, falling back to file
-    // name comparison so users can pass `Showcase`, `Showcase.sdz`, or
-    // any of the equivalent relative/absolute path spellings.
+    if maps.is_empty() {
+        panic!(
+            "No map files found in {}. Place .sd7/.sdz files there or pass one as a CLI arg.",
+            maps_dir.display()
+        );
+    }
+
+    // Match the CLI arg (if any) by filename stem — so `Showcase`,
+    // `Showcase.sdz`, and full paths all pick the same entry.
     let initial = std::env::args()
         .nth(1)
         .and_then(|arg| {
-            let arg_path = PathBuf::from(&arg);
-            let arg_canonical = arg_path.canonicalize().ok();
-            let arg_stem = arg_path
+            let stem = PathBuf::from(&arg)
                 .file_stem()
                 .map(|s| s.to_ascii_lowercase())
                 .unwrap_or_default();
             maps.iter().position(|p| {
-                if let Some(ref c) = arg_canonical
-                    && let Ok(pc) = p.canonicalize()
-                    && pc == *c
-                {
-                    return true;
-                }
                 p.file_stem()
-                    .map(|s| s.to_ascii_lowercase() == arg_stem)
+                    .map(|s| s.to_ascii_lowercase() == stem)
                     .unwrap_or(false)
             })
         })
         .unwrap_or(0);
 
-    if maps.is_empty() {
-        panic!("No map files found. Place .sd7/.sdz files in assets/maps/");
-    }
-
     let selected = maps.into_iter().nth(initial).unwrap();
     info!("Loading map: {}", selected.display());
     commands.insert_resource(SelectedMap(selected));
+}
+
+fn is_map_ext(path: &PathBuf) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("sd7") | Some("sdz")
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -282,16 +282,13 @@ const ASSET_DIRS: &[&str] = &[
     "upstream/Kernel-Panic/objects3d",
     "upstream/Kernel-Panic/unittextures",
     "upstream/Kernel-Panic/scripts",
-    "kernel-panic/upstream/Kernel-Panic/objects3d",
-    "kernel-panic/upstream/Kernel-Panic/unittextures",
-    "kernel-panic/upstream/Kernel-Panic/scripts",
 ];
 
 /// Lazily find the first existing asset path for a filename.
 fn find_asset_paths(filename: &str) -> impl Iterator<Item = PathBuf> + '_ {
     ASSET_DIRS
         .iter()
-        .map(move |dir| PathBuf::from(format!("{dir}/{filename}")))
+        .map(move |dir| crate::paths::from_project_root(&format!("{dir}/{filename}")))
 }
 
 // ---------------------------------------------------------------------------

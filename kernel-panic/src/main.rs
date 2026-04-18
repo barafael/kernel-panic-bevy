@@ -1,10 +1,12 @@
 mod interaction;
 mod map_loading;
+mod paths;
 mod rendering;
 mod terrain;
 mod ui;
 mod units;
 
+use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
@@ -58,10 +60,19 @@ fn main() {
         ..default()
     };
 
+    // Resolve the assets path relative to the project root so Bevy's
+    // AssetServer finds `kernel-panic/assets/...` regardless of cwd.
+    let assets_dir = paths::from_project_root("kernel-panic/assets");
+    let asset_plugin = AssetPlugin {
+        file_path: assets_dir.to_string_lossy().into_owned(),
+        ..default()
+    };
+
     App::new()
         .add_plugins(
             DefaultPlugins
                 .build()
+                .set(asset_plugin)
                 // TODO(windows-resize): disable pipelined rendering so
                 // the render world runs inline on the main thread. The
                 // second thread is what deadlocks during
