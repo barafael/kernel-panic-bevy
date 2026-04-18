@@ -17,6 +17,12 @@ fn is_build_laser(weapon_name: &str) -> bool {
     weapon_name == "BuildLaser"
 }
 
+/// Radius (elmos) of the muzzle-flash burst at the firing unit. Small
+/// enough that it reads as "that unit just shot" without obscuring the
+/// unit itself; the underlying [`ImpactBurst`] decays over its fixed
+/// lifetime so there's nothing to tune per weapon.
+const MUZZLE_FLASH_RADIUS: f32 = 6.0;
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_weapon_visuals(
     mut pending: ResMut<PendingAttacks>,
@@ -66,6 +72,25 @@ pub(super) fn spawn_weapon_visuals(
                 &mut meshes,
                 &mut materials,
                 &mut cache,
+            );
+        }
+
+        // Muzzle flash at the attacker's muzzle-piece position (or origin
+        // if no muzzle was resolved). Re-uses the impact-burst system as
+        // a pragmatic `BitmapMuzzleFlame` substitute — a short, bright,
+        // weapon-tinted pop so the player sees which of their units just
+        // fired. Melee attacks already have their own flash and build
+        // lasers shouldn't strobe the builder, so both are excluded.
+        if !is_melee && !is_build_laser(&event.weapon_name) {
+            spawn_impact_burst(
+                event.attacker_pos,
+                weapon.rgb_color,
+                MUZZLE_FLASH_RADIUS,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                &mut impact_assets,
             );
         }
 

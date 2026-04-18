@@ -22,6 +22,7 @@ use std::collections::HashMap;
 
 use super::combat::Dying;
 use super::components::{Faction, Health, TeamId, UnitType};
+use super::definitions::UnitKind;
 use super::spawning::Emerging;
 use super::unit_registry::UnitRegistry;
 
@@ -39,6 +40,7 @@ pub struct SpatialEntry {
     pub pos: Vec3,
     pub team: u8,
     pub faction: Faction,
+    pub kind: UnitKind,
     pub hp_positive: bool,
     /// Mirrored from the FBI `canFly=1` flag so ground weapons can cheaply
     /// skip flying targets via `NoChaseCategory=VTOL`.
@@ -118,6 +120,7 @@ pub fn rebuild_spatial_index(
             pos: gtf.translation(),
             team: team.0,
             faction: *faction,
+            kind: unit_type.0,
             hp_positive: health.current > 0.0,
             is_flying: unit_registry.can_fly(unit_type.0),
         });
@@ -134,6 +137,7 @@ mod tests {
             pos,
             team: 0,
             faction: Faction::System,
+            kind: UnitKind::Bit,
             hp_positive: true,
             is_flying: false,
         }
