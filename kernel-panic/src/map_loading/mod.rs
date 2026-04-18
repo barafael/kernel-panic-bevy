@@ -1,6 +1,5 @@
 //! Map loading: pick a map archive from `assets/maps/` and spawn its
-//! terrain, atmosphere, fog, nav grid, minimap, and homebases (or
-//! showcase units) at startup.
+//! terrain, atmosphere, fog, nav grid, minimap, and homebases at startup.
 //!
 //! Exposes [`MapLoadingPlugin`], which loads the CLI-selected map at Startup.
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
@@ -20,9 +19,7 @@ use crate::{
     },
     ui,
     units::{
-        animation::CobFileCache,
-        meshes::S3OModelCache,
-        spawning::{spawn_homebases, spawn_showcase},
+        animation::CobFileCache, meshes::S3OModelCache, spawning::spawn_homebases,
         unit_registry::UnitRegistry,
     },
 };
@@ -87,8 +84,8 @@ fn pick_map(mut commands: Commands) {
         );
     }
 
-    // Match the CLI arg (if any) by filename stem — so `Showcase`,
-    // `Showcase.sdz`, and full paths all pick the same entry.
+    // Match the CLI arg (if any) by filename stem — so a bare map name,
+    // `name.sdz`, and a full path all pick the same entry.
     let initial = std::env::args()
         .nth(1)
         .and_then(|arg| {
@@ -273,31 +270,17 @@ fn load_map(
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut commands);
         apply_fog(map_info, parsed, &mut fog_query);
-        if map_name.eq_ignore_ascii_case("Showcase") {
-            spawn_showcase(
-                &heightmap,
-                map_info,
-                &mut commands,
-                &mut meshes,
-                &mut std_materials,
-                &mut images,
-                &mut model_cache,
-                &mut cob_cache,
-                &unit_registry,
-            );
-        } else {
-            spawn_homebases(
-                &heightmap,
-                map_info,
-                &mut commands,
-                &mut meshes,
-                &mut std_materials,
-                &mut images,
-                &mut model_cache,
-                &mut cob_cache,
-                &unit_registry,
-            );
-        }
+        spawn_homebases(
+            &heightmap,
+            map_info,
+            &mut commands,
+            &mut meshes,
+            &mut std_materials,
+            &mut images,
+            &mut model_cache,
+            &mut cob_cache,
+            &unit_registry,
+        );
         info!(
             "  {} start positions, gravity={}",
             map_info.start_positions.len(),
@@ -394,9 +377,9 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
 
 /// Write the map's fog atmosphere onto the camera's `DistanceFog`.
 ///
-/// Fog end scales with the map diagonal so large maps (like the showcase
-/// plain) don't get walled off by haze a few grid cells from the camera.
-/// Spring's `FogStart` is a fraction of that end distance.
+/// Fog end scales with the map diagonal so large maps don't get walled
+/// off by haze a few grid cells from the camera. Spring's `FogStart` is a
+/// fraction of that end distance.
 fn apply_fog(
     map_info: &MapInfo,
     parsed: &ParsedMap,

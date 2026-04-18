@@ -4,7 +4,7 @@
 
 **6 crates, ~20.4k lines, 133 tests, all passing.**
 
-Working: map loading (14 maps including Showcase), original textures, S3O models, 3
+Working: map loading, original textures, S3O models, 3
 factions (21 unit types — Flow/Gateway added), FBI-loaded unit stats (no hardcoded
 values), TDF-loaded weapon stats, unit production with build queues and multi-emitter
 build rays per faction, two-phase spawn with emerge lead-time (Rise/Fade), factory
@@ -866,17 +866,12 @@ Deferred from the April 2026 simplification sweep. Each item was flagged by
 the review agents (reuse / quality / efficiency) but skipped because the
 blast radius was larger than one session warrants. Ordered high → low impact.
 
-### 11.1 Split the three kitchen-sink files
+### 11.1 Split the three kitchen-sink files — ✅ DONE
 
-- [ ] `units/combat.rs` (1228 LoC) → `combat::aim` + `combat::damage` +
-  `combat::lifecycle`, leaving a ~300-line `combat::core` for target selection.
-  Re-export from a thin `combat::mod` so the public API stays stable.
-- [ ] `units/spawning.rs` (709 LoC) → `spawning` (core + `SpawnContext`),
-  `spawning::s3o_mount` (flatten / piece-to-mesh / ground-lift / DFS),
-  `spawning::emerge` (`Emerging`, `EmergeStyle`, `FadeMaterials`, `emerge_system`),
-  and `spawning::showcase`. `FactoryPieces` belongs with `production.rs`.
-- [ ] `map_loading.rs` (524 LoC) → `map_loading::mipmap` +
-  `map_loading::atmosphere`, leaving `load_map` as the orchestrator.
+Landed in commit `9db68bf`. `combat.rs` → `combat/{mod, aim, damage,
+lifecycle}.rs`; `spawning.rs` → `spawning/{mod, emerge, s3o_mount}.rs`;
+`map_loading.rs` → `map_loading/{mod, mipmap}.rs`. Largest remaining
+file is `spawning/mod.rs` at ~580 LoC.
 
 ### 11.2 `SpawnContext` SystemParam
 

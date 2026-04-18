@@ -28,10 +28,10 @@ pub fn check_game_over(
     mut commands: Commands,
     existing_ui: Query<Entity, With<GameOverUi>>,
 ) {
-    // Sandbox / showcase maps don't spawn any homebases. Without this
-    // guard the player would be flagged "no homebase = defeat" on the
-    // very first frame, freezing every gameplay system before the user
-    // could see anything.
+    // Sandbox maps may not spawn any homebases. Without this guard the
+    // player would be flagged "no homebase = defeat" on the very first
+    // frame, freezing every gameplay system before the user could see
+    // anything.
     if homebases.is_empty() {
         return;
     }

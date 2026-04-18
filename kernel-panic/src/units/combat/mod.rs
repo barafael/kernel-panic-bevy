@@ -181,9 +181,7 @@ pub fn combat_system(
         // Pick a target in range. Most weapons prefer the nearest enemy;
         // those with `proximity_priority < 0` (Exploit's BugCannon) prefer
         // the *farthest*, matching upstream's anti-swarm artillery role.
-        // Shared team = ally regardless of faction (showcase spawns
-        // mixed-faction units on team 0 and expects them to ignore each
-        // other).
+        // Shared team or shared faction = ally (see `is_friendly`).
         let prefer_distant = weapon_def.is_some_and(|w| w.proximity_priority < 0.0);
         // Ballistic weapons (`trajectory_height > 0`) lob over terrain and
         // should never fail an LOS check — the whole point is to clear

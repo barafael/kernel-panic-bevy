@@ -127,9 +127,9 @@ impl UnitKind {
     }
 
     /// Default faction for this unit kind. Used as the spawn-faction when
-    /// the caller has no builder context (e.g. the showcase map). Shared
-    /// units (Debug, BadBlock) default to System but are spawned with the
-    /// builder's faction in real gameplay.
+    /// the caller has no builder context. Shared units (Debug, BadBlock)
+    /// default to System but are spawned with the builder's faction in
+    /// real gameplay.
     pub fn faction(self) -> Faction {
         match self {
             UnitKind::Kernel
@@ -202,32 +202,6 @@ impl UnitKind {
             UnitKind::Pointer | UnitKind::Hole => 65536.0,
             _ => 163840.0,
         }
-    }
-
-    /// Whether this kind should be spawned on the Showcase map. True
-    /// for every mobile unit that's directly buildable in normal play;
-    /// false for homebases (stationary, would never appear mid-game),
-    /// secondary factories, Firewall / Terminal / Obelisk buildings,
-    /// BadBlock / LogicBomb (stationary tactical pieces), and Debug
-    /// (one-shot mine).
-    pub fn is_showcase_candidate(self) -> bool {
-        matches!(
-            self,
-            UnitKind::Assembler
-                | UnitKind::Bit
-                | UnitKind::Byte
-                | UnitKind::Pointer
-                | UnitKind::Bug
-                | UnitKind::Exploit
-                | UnitKind::Worm
-                | UnitKind::Virus
-                | UnitKind::Dos
-                | UnitKind::Trojan
-                | UnitKind::Packet
-                | UnitKind::Signal
-                | UnitKind::Gateway
-                | UnitKind::Flow
-        )
     }
 
     /// "Small building" per upstream `kpunittypes.lua`: the on-datavent

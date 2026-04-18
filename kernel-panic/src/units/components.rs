@@ -126,10 +126,9 @@ pub struct UnitStats {
 }
 
 /// Two units count as friendly when they share a team *or* a faction.
-/// The faction-share path matters on the Showcase map, where mixed-
-/// faction units all sit on team 0 and should ignore each other; in
-/// normal games teams and factions align 1:1, so this reduces to a
-/// team comparison.
+/// In normal games teams and factions align 1:1 so this reduces to a
+/// team comparison; the faction-share path keeps mixed-faction sandbox
+/// setups (everyone on team 0) from shooting each other.
 pub fn is_friendly(
     unit_team: u8,
     unit_faction: Faction,

@@ -4,10 +4,9 @@
 //! gameplay component (combat timers, faction-specific markers, COB
 //! animator with resolved muzzle/gunbase/hatch piece indices), and
 //! registers faction-specific build-FX pieces for factories. Helpers on
-//! top of it — [`spawn_homebases`], [`spawn_showcase`],
-//! [`spawn_queued_viruses`], [`spawn_queued_mines`] — wire in the
-//! assets, registry, and invisible selection-volume material once at
-//! the system boundary.
+//! top of it — [`spawn_homebases`], [`spawn_queued_viruses`],
+//! [`spawn_queued_mines`] — wire in the assets, registry, and invisible
+//! selection-volume material once at the system boundary.
 //!
 //! Split into:
 //! - [`emerge`] — [`Emerging`] / [`FadeMaterials`] lifecycle.
@@ -108,107 +107,6 @@ pub fn spawn_homebases(
     }
 
     info!("Spawned {} homebases", map_info.start_positions.len());
-}
-
-/// Mobile unit kinds shown on the Showcase map — everything that can
-/// walk or fly around for visual inspection. Derived from
-/// `ALL_UNIT_KINDS` via `UnitKind::is_showcase_candidate`, so new
-/// variants only need to set that flag (and the registry must know
-/// them) to appear here.
-fn showcase_kinds() -> Vec<UnitKind> {
-    super::definitions::ALL_UNIT_KINDS
-        .iter()
-        .copied()
-        .filter(|k| k.is_showcase_candidate())
-        .collect()
-}
-
-/// Spawn one of each mobile unit at the map's start positions, instead of
-/// the usual three-faction homebases. Used by the `Showcase` map for visual
-/// inspection of unit models / animations / pathing in isolation.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_showcase(
-    heightmap: &Heightmap,
-    map_info: &MapInfo,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    model_cache: &mut S3OModelCache,
-    cob_cache: &mut CobFileCache,
-    unit_registry: &UnitRegistry,
-) {
-    let invisible_mat = get_or_create_invisible_material(commands, materials);
-
-    let mut showcase_positions: Vec<(UnitKind, Vec3)> = Vec::new();
-    let kinds = showcase_kinds();
-
-    for (slot, start_pos) in map_info.start_positions.iter().enumerate() {
-        let Some(&kind) = kinds.get(slot) else {
-            break;
-        };
-        let position = heightmap.place(start_pos.x, start_pos.z);
-        showcase_positions.push((kind, position));
-
-        // All showcase units share team 0 so they never engage each other
-        // — the goal is visual inspection, not gameplay.
-        spawn_unit(
-            kind,
-            kind.faction(),
-            0,
-            position,
-            commands,
-            meshes,
-            materials,
-            images,
-            model_cache,
-            cob_cache,
-            &invisible_mat,
-            unit_registry,
-        );
-    }
-
-    // Plant one team-1 target ~120 elmos from each showcase unit so
-    // every armed slot has something nearby to engage — many KP weapons
-    // have ranges in the 200-450 elmo bracket, well below the spread of
-    // the 4×3 showcase grid, so a single centroid target was unreachable
-    // for most units. Using Bit (System) as the target works for the
-    // Hacker/Network attackers; we additionally spawn a Bug (Hacker) for
-    // System attackers so every unit has at least one cross-faction
-    // enemy in range. The target factions are chosen to be different
-    // from the attacker's faction (combat skips faction-mates).
-    let mut targets_spawned = 0usize;
-    for (kind, position) in &showcase_positions {
-        let attacker_faction = kind.faction();
-        let target_kind = match attacker_faction {
-            Faction::System => UnitKind::Bug,
-            Faction::Hacker | Faction::Network => UnitKind::Bit,
-        };
-        let offset = Vec3::new(220.0, 0.0, 0.0);
-        let target_xz = *position + offset;
-        let target_pos = heightmap.place(target_xz.x, target_xz.z);
-        spawn_unit(
-            target_kind,
-            target_kind.faction(),
-            1,
-            target_pos,
-            commands,
-            meshes,
-            materials,
-            images,
-            model_cache,
-            cob_cache,
-            &invisible_mat,
-            unit_registry,
-        );
-        targets_spawned += 1;
-    }
-
-    info!(
-        "Showcase: spawned {} mobile units + {} sacrificial targets",
-        showcase_positions.len(),
-        targets_spawned,
-    );
 }
 
 /// Spawn a single unit with per-piece children and COB animation.
