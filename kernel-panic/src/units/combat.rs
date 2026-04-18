@@ -9,6 +9,7 @@ use super::unit_registry::UnitRegistry;
 use super::weapon_fx::{AttackEvent, PendingAttacks};
 use super::weapons::WeaponRegistry;
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::rng::next_signed;
 use crate::terrain::heightmap::Heightmap;
 
 /// Added to each sampled terrain height in LOS checks so the shooter and
@@ -20,25 +21,6 @@ const LOS_MARGIN: f32 = 4.0;
 /// Spring encodes per-shot spread in "short" angular units where a full
 /// revolution is 65536. Conversion to radians for aim-offset math.
 const SHORT_ANGLE_TO_RAD: f32 = std::f32::consts::TAU / 65536.0;
-
-/// Tiny xorshift32; shared-resource variant of `terrain::geovent::xorshift32`
-/// so combat doesn't take a dep on terrain internals. Deterministic given
-/// a fixed seed, which is what we want for replayable sim results.
-fn xs32(state: &mut u32) -> u32 {
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    x
-}
-
-/// Uniform f32 in `[-1.0, 1.0)` from the PRNG state.
-fn xs32_signed(state: &mut u32) -> f32 {
-    // Upper 24 bits → [0, 1), then shift to [-1, 1).
-    let unit = (xs32(state) >> 8) as f32 / (1u32 << 24) as f32;
-    unit * 2.0 - 1.0
-}
 
 /// Tracks time until the unit can fire again.
 #[derive(Component)]
@@ -64,6 +46,7 @@ pub struct StunCharge(pub f32);
 /// Marks a unit as paralyzed: the combat and movement systems treat it
 /// as inert until `remaining` elapses.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct Stunned {
     pub remaining: f32,
 }
@@ -78,6 +61,7 @@ const STUN_CHARGE_DECAY: f32 = 4.0;
 /// [`tick_burst_fire`]. The aim point is frozen at trigger time so the
 /// whole burst lands on the same spot regardless of target motion.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct BurstFire {
     pub shots_remaining: u32,
     pub interval: f32,
@@ -91,6 +75,7 @@ pub struct BurstFire {
 /// Marks a unit that has reached 0 HP and is playing its death animation.
 /// The entity will be despawned once the animation finishes or the timer expires.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct Dying {
     pub timer: f32,
 }
@@ -102,6 +87,7 @@ const DEATH_ANIM_TIMEOUT: f32 = 2.0;
 /// while this component is present, a Virus spawns at the death location
 /// for the attacker's team.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct Infected {
     /// Remaining seconds before the infection expires.
     pub timer: f32,
@@ -194,6 +180,11 @@ impl DamageQueue {
         self.0.drain(..)
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -494,8 +485,8 @@ pub fn combat_system(
         if spray_short > 0.0 && distance > 0.0 {
             let spray_rad = spray_short * SHORT_ANGLE_TO_RAD;
             let offset_radius = spray_rad.tan() * distance;
-            let dx = xs32_signed(&mut rng) * offset_radius;
-            let dz = xs32_signed(&mut rng) * offset_radius;
+            let dx = next_signed(&mut rng) * offset_radius;
+            let dz = next_signed(&mut rng) * offset_radius;
             impact_pos = Vec3::new(target_pos.x + dx, target_pos.y, target_pos.z + dz);
         }
 
@@ -607,11 +598,7 @@ pub fn aim_weapons_system(
         // (so the barrel folds flat). AimWeapon1 rewrites it to (π/2 − p),
         // which is the same convention: higher pitch = smaller X rotation.
         // Since our VM doesn't actually run the aim loop, mirror it here.
-        let gunbase_idx = animator
-            .cob
-            .piece_names
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case("gunbase"));
+        let gunbase_idx = animator.piece_index("gunbase");
         if let Some(idx) = gunbase_idx
             && idx < animator.piece_rotations.len()
         {
@@ -760,12 +747,12 @@ pub fn apply_damage(
     mut shield_q: Query<&mut super::shield::ShieldState>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
-    target_xform_q: Query<&GlobalTransform, With<UnitType>>,
     protected_q: Query<(), With<super::command_fire::Protected>>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
     mut commands: Commands,
+    mut splash_hits: Local<Vec<(Entity, f32)>>,
 ) {
     for pending in damage_queue.drain() {
         let Some(weapon_def) = weapon_registry.get(&pending.weapon) else {
@@ -782,40 +769,33 @@ pub fn apply_damage(
         let paralyze_time = weapon_def.paralyze_time;
 
         let dyn_mult = weapon_def.dyn_damage_multiplier(pending.attacker_distance);
-        // For weapons with `spray_angle > 0` the queued `impact_pos` is
-        // jittered away from the target — if it lands outside the target's
-        // collision radius, the primary hit misses entirely (splash still
-        // applies from impact_pos below). Zero-spread weapons always land
-        // on target and skip the check.
-        let primary_target_kind = target_unit_q.get(pending.target).ok().map(|ut| ut.0);
-        let target_hit = if let (Some(kind), Ok(tgt_xform)) =
-            (primary_target_kind, target_xform_q.get(pending.target))
-        {
-            let offset = tgt_xform.translation().distance(pending.impact_pos);
-            offset <= unit_registry.collision_radius(kind)
-        } else {
-            // Unknown target (despawned / missing xform) — treat as no
-            // primary hit; splash can still land on whatever else is nearby.
-            false
+        // Primary target always takes damage. We tried gating on
+        // "impact_pos inside target collision_radius" to implement
+        // spray_angle misses, but our scalar `collision_radius` comes
+        // from `footprint/2` which dramatically undersells Spring's
+        // volumetric hit box — at typical spray_angle=1024 (5.6°) × 350
+        // elmo range the XZ offset is ~34 elmos, well beyond our ~8 elmo
+        // Bit radius, so virtually every shot was scored as a miss and
+        // no unit ever died. Until we model real hit volumes, the spray
+        // perturbation only affects `impact_pos` (splash + visuals), not
+        // whether the primary hit registers.
+        let primary_damage = match target_unit_q.get(pending.target) {
+            Ok(unit) => base(unit.0) * dyn_mult,
+            Err(_) => weapon_def.damage.default * dyn_mult,
         };
-        if target_hit {
-            let primary_damage = primary_target_kind
-                .map(|k| base(k) * dyn_mult)
-                .unwrap_or(weapon_def.damage.default * dyn_mult);
-            apply_hit(
-                pending.target,
-                pending.attacker,
-                primary_damage,
-                paralyzer,
-                paralyze_time,
-                &mut health_q,
-                &mut stun_q,
-                &mut shield_q,
-                &protected_q,
-                &mut commands,
-            );
-            commands.entity(pending.target).insert(IdleTimer(0.0));
-        }
+        apply_hit(
+            pending.target,
+            pending.attacker,
+            primary_damage,
+            paralyzer,
+            paralyze_time,
+            &mut health_q,
+            &mut stun_q,
+            &mut shield_q,
+            &protected_q,
+            &mut commands,
+        );
+        commands.entity(pending.target).insert(IdleTimer(0.0));
 
         let aoe = weapon_def.area_of_effect;
         if aoe > AOE_SPLASH_THRESHOLD {
@@ -824,8 +804,9 @@ pub fn apply_damage(
             let avoid_friendly = weapon_def.avoid_friendly;
             let no_self_damage = weapon_def.no_self_damage;
             // Collect first, then apply — apply_hit borrows mutable queries
-            // so we can't stay inside the spatial callback closure.
-            let mut splash_hits: Vec<(Entity, f32)> = Vec::new();
+            // so we can't stay inside the spatial callback closure. Re-uses
+            // a Local buffer across calls to avoid per-hit allocation.
+            splash_hits.clear();
             spatial.query_radius(pending.impact_pos, aoe, |candidate| {
                 if candidate.entity == pending.target {
                     return;
@@ -855,7 +836,7 @@ pub fn apply_damage(
                 let splash = base(kind) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
                 splash_hits.push((candidate.entity, splash));
             });
-            for (entity, splash) in splash_hits {
+            for (entity, splash) in splash_hits.drain(..) {
                 apply_hit(
                     entity,
                     pending.attacker,
@@ -875,11 +856,8 @@ pub fn apply_damage(
         // Apply infection: keyed on the weapon (not the attacker kind)
         // to match upstream LuaRules/Gadgets/infection.lua. VirusBeam,
         // VirusDeath, Wormsplash, and Obelisk Infection each have their
-        // own infection window in seconds. Only fires when the primary
-        // hit actually landed on the target — a missed shot shouldn't
-        // infect (splash-based infection would need its own pass).
-        if target_hit
-            && let Some(duration) = weapon_infection_duration(&pending.weapon)
+        // own infection window in seconds.
+        if let Some(duration) = weapon_infection_duration(&pending.weapon)
             && let Some((_, attacker_faction, attacker_team)) = attacker_info
         {
             let target_is_virus = target_unit_q
@@ -1032,9 +1010,12 @@ pub fn tick_infections(
 }
 
 /// When a unit reaches 0 HP, start the Killed() COB script and mark it
-/// as `Dying`. If the unit was infected, queue a Virus spawn. If the
-/// dying unit *is* a Virus, queue a VirusDeath hit at its corpse so
-/// the infection chain can spread via AoE splash.
+/// as `Dying`. If the unit was infected, queue a Virus spawn. The unit's
+/// FBI `ExplodeAs` weapon (RetroDeath, RetroDeathBig, VirusDeath, …) is
+/// queued as a self-hit at the corpse position so its AoE splash + per-
+/// weapon infection window can chain through nearby units — this is what
+/// spreads the Virus outbreak, flattens the crowd around a dying Byte,
+/// and gives big units their signature death boom.
 #[allow(clippy::type_complexity)]
 pub fn death_system(
     query: Query<
@@ -1045,11 +1026,13 @@ pub fn death_system(
             &GlobalTransform,
             Option<&Infected>,
         ),
-        Without<Dying>,
+        (Without<Dying>, Changed<Health>),
     >,
     mut animators: Query<&mut CobAnimator>,
     mut virus_spawns: ResMut<VirusSpawnQueue>,
     mut damage_queue: ResMut<DamageQueue>,
+    unit_registry: Res<UnitRegistry>,
+    weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
 ) {
     for (entity, unit, health, gtf, infected) in &query {
@@ -1070,14 +1053,20 @@ pub fn death_system(
                 });
             }
 
-            // Virus death sprays VirusDeath at its own corpse so the
-            // weapon's AoE + per-weapon infection window can chain the
-            // outbreak through nearby units.
-            if unit.0 == UnitKind::Virus {
+            // Fire the FBI `ExplodeAs` weapon as a self-hit at the corpse.
+            // Virus's own ExplodeAs=VirusDeath drives the infection chain;
+            // Bit/Byte's RetroDeath/RetroDeathBig give big units their
+            // death-AoE. Skip when the named weapon isn't in the registry
+            // so we don't warn-spam on missing explosion TDFs.
+            if let Some(weapon_name) = unit_registry
+                .def(unit.0)
+                .map(|d| d.explode_as.as_str())
+                .filter(|s| !s.is_empty() && weapon_registry.get(s).is_some())
+            {
                 damage_queue.push(PendingDamage {
                     target: entity,
                     attacker: entity,
-                    weapon: "VirusDeath".to_string(),
+                    weapon: weapon_name.to_string(),
                     impact_pos: gtf.translation(),
                     attacker_distance: 0.0,
                 });
@@ -1122,24 +1111,6 @@ mod tests {
         assert_eq!(weapon_infection_duration("Infection"), Some(1.0));
         assert_eq!(weapon_infection_duration("BitShot"), None);
         assert_eq!(weapon_infection_duration("Wormbite"), None);
-    }
-
-    #[test]
-    fn xs32_signed_stays_in_unit_range() {
-        let mut s = 0xDEADBEEFu32;
-        for _ in 0..10_000 {
-            let v = xs32_signed(&mut s);
-            assert!(v >= -1.0 && v < 1.0, "out-of-range draw: {v}");
-        }
-    }
-
-    #[test]
-    fn xs32_is_deterministic() {
-        let mut a = 0xABCDEF01u32;
-        let mut b = 0xABCDEF01u32;
-        for _ in 0..100 {
-            assert_eq!(xs32(&mut a), xs32(&mut b));
-        }
     }
 
     #[test]

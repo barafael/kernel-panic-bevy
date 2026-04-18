@@ -58,18 +58,51 @@ over in one hit; Bytes need many hits. Byte closed-state armor loss on stun (pla
 ### 1.6 Damage Modifiers — ✅ Partial
 
 Done: `avoidfriendly=1` and `noselfdamage=1` filter the splash set; FBI `DamageModifier`
-applied to every damage event (Socket/Window/Port/Firewall take 4×, homebases + Byte
-are near-immune). Infection is already wired (`Infected` + `VirusSpawnQueue`).
+applied to every damage event, with values under `0.01` treated as the upstream Spring
+engine-disable hack and normalised to `1.0` (so Bits / Worms / Bytes / homebases take
+normal damage) while explicit design values like Socket/Window/Port/Firewall's `4×`
+pass through unchanged. Infection is already wired (`Infected` + `VirusSpawnQueue`).
 
 Deferred: Byte closed-state armor (needs COB `SetUnitValue(ARMORED, ...)` integration
 and a closed/open state distinct from the Pointer deploy cycle). `collidefriendly` on
-projectile physics (weapons don't have projectile collision yet).
+projectile physics (weapons don't have projectile collision yet). Homebase + Byte
+near-immunity — if we want that gameplay back, it should come from a dedicated
+per-kind multiplier table, not the FBI engine-hack value.
 
 ### 1.7 Auto-Heal — ✅ DONE
 
 `IdleTimer` component tracks seconds since last damage / move order / aim target.
 Once `IdleTime` (sim frames, 30/s) elapses, `auto_heal` regens at `IdleAutoHeal` HP/s.
 Wires Byte's 400 HP/s after 20s, Worm's 300 HP/s after ~13s, homebase regen, etc.
+
+### 1.8 Combat parity gaps vs upstream Spring
+
+Non-blocking today but each is a measurable divergence from how the engine
+actually resolves combat. Tracked here so we can close them deliberately
+rather than ship a "mostly Spring" feel.
+
+- **Volumetric hit box** — our `collision_radius` is the larger footprint
+  dimension × 4 elmos (i.e. `footprint/2`). Spring's `CCollisionHandler`
+  tests actual per-unit volumes (sphere / cylinder / piece-AABB). This is
+  the reason §spray_angle's primary-damage miss gate is reverted —
+  footprint-radius underestimates the hit box by 2-3× and dropped hit
+  rate to ~5%. Fixing this unblocks per-shot miss semantics, shield
+  *interception* (§4.7), and projectile physics (§4.2).
+- **Target weighting** — `CWeapon::TargetWeight` scores candidates by
+  threat/priority/health/weapon-match. We pick nearest (or farthest for
+  `proximity_priority < 0`). Observable as "my Bits don't prefer soft
+  targets" and "the Pointer ignores the wounded Byte in favour of the
+  full-HP one two elmos closer."
+- **LOS blockers beyond terrain** — our `Heightmap::has_line_of_sight`
+  only samples terrain Y. Spring's per-weapon `HaveFreeLineOfFire` also
+  tests unit bodies and map features, so you can hide a Flow behind a
+  Byte or shoot through a gap between buildings. We currently don't.
+- **Impulse / knockback** — `CExplosionParams` carries an impulse vector
+  and Spring pushes units on hit (visible as the classic "ragdoll fling"
+  on big AoE). We apply damage silently — blasts feel dead.
+- **Delayed damage queue** — `GameHelper` propagates large explosions
+  over multiple sim frames so the blast wave arrives in sequence; we
+  apply instantly. Only observable on very large AoE (Byte MegaBlast).
 
 ---
 
@@ -112,7 +145,7 @@ Remaining stat-adjacent work:
 
 ## 3. Faction Mechanics
 
-### 3.1 Factory Building on Datavents — ✅ DONE
+### 3.1 Factory Building on Datavents — ✅ Partial
 
 Full pipeline landed: `BeginPlacementEvent` → `PlacementMode` ghost preview →
 `BuildAt` queued command → `PendingBuild` → constructor walks to site and emits
@@ -120,8 +153,21 @@ build-laser rays from multi-emitter factory pieces → `Constructing` → two-ph
 with emerge lead-time (Rise for factories, Fade for infantry) → optional
 `Emerging.rally_point` drives post-emerge movement.
 
-Remaining: Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
-(Command-Fire Framework).
+Remaining:
+
+- Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
+  (Command-Fire Framework).
+- **Datavent claiming**: the first builder to start constructing on a given
+  datavent should lock it. While the claim holds (building alive or still
+  under construction) no other constructor — friend or foe — can target that
+  datavent for a second building. Release happens when the building is
+  destroyed/cancelled. Today the placement check only rejects overlap with
+  *existing* buildings, so two constructors racing the same datavent both
+  succeed and the second building stacks into the first.
+- **Hide the datavent mesh once claimed**: datavents stay rendered underneath
+  the building that's consuming them, which reads as a visual glitch (you
+  see the vent glow poking through the factory). Toggle the feature entity's
+  `Visibility::Hidden` on claim and restore it on release.
 
 ### 3.2 Network Packet Buffer & Teleportation — ✅ DONE
 
@@ -444,6 +490,35 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] `kernel-panic` is a monolith — as AI, networking, audio, and fog
   of war land, the single binary crate will become unwieldy. Bevy
   plugins are the natural splitting point.
+- [ ] **Command queue** — we express unit orders as `MoveTarget` /
+  `MovePath` components plus implicit auto-attack. Spring's `CommandAI`
+  holds a real queue (`commandQue`) that supports Shift-chain, Patrol,
+  Guard, Wait, Attack-move, Fight, and repeat flags. Missing from our
+  model and structurally blocks every multi-stage order. Introduce a
+  `CommandQueue(VecDeque<Command>)` component with `Stop`, `Move(pos)`,
+  `Attack(entity)`, `AttackGround(pos)`, `Patrol(pos)`, `Guard(entity)`
+  variants, consumed by the movement + combat systems. Attack-move
+  (§Gameplay Bugs) and future patrol/guard live on this.
+- [ ] **Event hub** — `CommandFireEvent`, `MorphEvent`, `DispatchEvent`,
+  `EnterEvent`, etc. are ad-hoc Bevy Messages per concern. Spring runs
+  every lifecycle change through `EventHandler` callins
+  (`UnitCreated`, `UnitDamaged`, `UnitDestroyed`, `WeaponFired`, …) so
+  new systems (fog-of-war, AI hooks, Lua gadgets, achievements) can
+  subscribe uniformly. Not blocking today; starts to hurt as more
+  systems need "tell me when X dies/fires/spawns."
+- [ ] **QTPFS terrain-change repathing** — upstream QTPFS has
+  `TerrainChange()` / `NodeLayersChangeTrack` that invalidate nodes
+  when the heightmap is edited (Lua gadgets do this when placing on
+  geovents). We don't re-pave on edits, so in-flight paths through
+  edited terrain can become wrong. Verify whether our QTPFS exposes a
+  change hook; wire `map_loading::apply_heightmap_edit` into it if not.
+- [ ] **Lua gadget audit (global)** — §3.6 flags the infection gadget
+  specifically, but upstream KP has dozens of gadgets under
+  `LuaRules/Gadgets/` that encode rules we've either re-implemented or
+  silently skipped (packetbuffer, launcher, stun_armor, kernel_boost,
+  explodeAs, area-damage, ward variants, …). None have been diffed
+  line-by-line. Schedule a pass: read each gadget, decide "already in
+  Rust" / "port" / "skip with rationale."
 
 ### Performance
 
@@ -537,13 +612,58 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ### Gameplay Bugs
 
+- [x] ~~**No unit ever dies**~~ (observed 2026-04-18, fixed same day).
+  Two compounding scale mismatches — either alone would have kept
+  health bars near-full; together they explained the observed
+  zero-deaths behaviour exactly.
+  1. Our scalar `collision_radius` (~8 elmos for a 2×2-footprint
+     Bit) vs. Spring's volumetric hit box. The new `spray_angle` miss
+     gate in `apply_damage` rejected any shot whose `impact_pos`
+     landed outside `collision_radius` of the target; at typical KP
+     `spray_angle=1024` (5.6°) and 350-elmo range that's a ~34-elmo
+     offset, so ~95% of shots missed every target. Fix: reverted the
+     primary-damage miss gate. Spray perturbation still jitters
+     `impact_pos` for splash and visuals, but the primary target
+     always takes full damage until we have real volumetric hit
+     boxes. The miss-threshold-needs-a-proper-hit-volume concern is
+     tracked under §Combat parity gaps below.
+  2. **FBI `DamageModifier=0.000001` applied literally**. Upstream KP
+     sets this near-zero value on every combat unit as a Spring
+     engine-disable hack — the real damage math lives in KP's
+     LuaRules gadget. Our reimplementation resolves damage directly,
+     so multiplying every hit by `1e-6` meant even shots that did
+     land delivered `80 × 1e-6 ≈ 8e-5` HP. `UnitRegistry::damage_modifier`
+     now treats sub-threshold values (`< 0.01`) as the engine hack and
+     returns `1.0`; explicit design values like Socket/Firewall's
+     `4.0` pass through unchanged. If we ever want homebase / Byte
+     near-immunity back it should come from a dedicated per-kind
+     multiplier table rather than the FBI engine-disable value.
+- [ ] **Movement ignores max slope / terrain penetration**. On some maps
+  units walk straight up vertical cliffs; on others they embed into the
+  terrain mesh. Root causes to unpick separately:
+  - Nav grid / QTPFS walkability ignores FBI `MaxSlope` (per-unit cap
+    on climbable incline). Need to (1) sample gradient from the
+    heightmap when building the nav grid, (2) mark cells whose slope
+    exceeds any unit's `MaxSlope` as impassable for *that* unit.
+    Spring does this via per-movetype `MoveDef` lookups.
+  - Ground clamp (from `movement::resolve_motion`) keeps units on the
+    heightmap surface, but nothing stops them from being *placed*
+    below it during pathing or during an emerge whose rally point sits
+    in a concave pocket. Clamp Y to `max(terrain_height + offset,
+    current_y)` every frame, not just at spawn.
+  - Worms are the only intended burrowers — exempt them via
+    `UnitKind::is_worm()` or a `SubterraneanMovement` marker.
 - [x] ~~`GameState` not reset on map cycling~~ — fixed in a50fe8b
 - [x] ~~Rally point / delivery point for factories~~ — `Emerging.rally_point` wired
 - [x] ~~Terrain height not sampled during movement~~ — ground clamping in recent walking
   improvements (5046fd2) + spawn clamp (6e043ba)
 - [ ] No unit collision avoidance — units overlap when crowded (partial: walking improvements
   address some cases, revisit)
-- [ ] Attack-move (`A` hotkey) is wired in HUD but handler is empty (TODO at `hud.rs:849`)
+- [ ] Attack-move (`A` hotkey) is wired in HUD but handler is empty (TODO at `hud.rs:849`).
+  Structural blocker: we have `MoveTarget` + implicit-attack, not a Spring-style
+  command queue. Attack-move, Shift-queued orders, Patrol, Guard all share the
+  same missing foundation. See `Sim/Units/CommandAI/MobileCAI`. Implementing a
+  proper `CommandQueue` component once unlocks the whole family.
 - [ ] Non-geovent map features (trees, rocks, debris) are dropped on load —
   only `feature.feature_type.is_geovent()` entries spawn, the rest are never
   rendered. `MapFeature.rotation_degrees()` is parsed but there is nothing to
@@ -551,13 +671,15 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [x] ~~Weapons ignore line-of-sight~~ — `combat_system` now rejects targets whose
   LOS is blocked by terrain (`Heightmap::has_line_of_sight` with `LOS_MARGIN=4`);
   ballistic weapons (`trajectory_height > 0`) skip the check since they lob over.
-- [x] ~~Weapons never miss~~ — `combat_system` perturbs the queued `impact_pos` by
-  `tan(spray_angle) × distance` on a random XZ offset; `apply_damage` treats the
-  primary hit as a miss (no damage, no infection) when the perturbed impact sits
-  outside the target's `collision_radius`. Splash from `impact_pos` still lands.
-  `tolerance` (aim-error gate, distinct from per-shot spread) remains unimplemented —
-  most KP weapons set it to `3000-8000` short-units meaning "always allow firing",
-  so the practical gap is small.
+- [ ] **Weapons never miss** — `combat_system` perturbs `impact_pos` by
+  `tan(spray_angle) × distance` (so splash and beam visuals sit off-target),
+  but the primary-damage miss gate is *reverted*: our scalar `collision_radius`
+  is ~3× smaller than Spring's volumetric hit box, which turned every shot
+  into a miss and froze the sim. Reinstating the miss gate is blocked on
+  §1.8 "Volumetric hit box". `tolerance` (aim-error fire gate, distinct from
+  per-shot spread) also remains unimplemented — most KP weapons set it to
+  3000-8000 short-units meaning "always allow firing", so the practical gap
+  is small.
 - [ ] `collidefriendly` on projectile physics (still blocked on §4.2 projectiles
   gaining actual collision).
 - [ ] Factory spawn offset hardcoded in `production.rs` — should use COB `QueryBuildInfo`
@@ -580,6 +702,26 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   animation at render framerate. Worth checking whether our animator lerps or snaps;
   sim runs at 30 Hz, render at up to 240 Hz, so non-interpolated piece transforms will
   visibly pop on fast turrets.
+- [ ] **`HitByWeaponId` damage callback** — confirmed called by `byte.bos`,
+  `hole.bos`, `carrier.bos`, `expbase.bos` with signature
+  `HitByWeaponId(headingZ, headingX, weaponId, damage)` returning a damage
+  multiplier (30 = take 30%, 100 = full). Wiring it needs (1) synchronous
+  `call_script` in `apply_hit` to consume the return value, (2) a
+  weapon-name → `weapon_id: u16` mapping so scripts can discriminate (KP's
+  id=168 is DOS which bypasses Byte's closed-armor). Shares the same u16
+  interning key as the `WeaponId` performance todo — do both in one pass.
+  This unlocks Byte closed-state armor (§1.5/1.6 deferred).
+- [ ] **`AnimFinished(piece, axis)`** — Spring fires this back to scripts when
+  turn/spin/move finish so `wait-for-turn` / `wait-for-move` opcodes can
+  resume. Not verified in our VM; if absent, scripts that block on animation
+  completion silently wedge. Quick audit against `script_triggers.rs`.
+- [x] ~~**`ExplodeAs` death trigger**~~ — `death_system` now reads each unit's
+  FBI `ExplodeAs` and queues a self-hit `PendingDamage` at the corpse with
+  that weapon so AoE splash resolves through the existing pipeline. Virus
+  gets VirusDeath (was hardcoded, now data-driven), Bit gets RetroDeath,
+  Byte gets RetroDeathBig, etc. Missing weapons are silently skipped so we
+  don't warn-spam on yet-unparsed explosion TDFs. `SelfDestructAs` gets the
+  same field but stays unused until manual-destruct exists.
 
 ### Visual Gaps
 
