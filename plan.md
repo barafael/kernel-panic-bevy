@@ -460,15 +460,21 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ### Upstream-waiting workarounds
 
-- [ ] `main.rs` carries three `TODO(windows-resize)` markers: Vulkan
-  backend preference, `PresentMode::AutoNoVsync`, and a 320×240 resize
-  floor. They compensate for the Bevy 0.18 + wgpu ~24 "resize freeze
-  then crash" behaviour on Windows (DX12 swapchain reconfigure hang
-  inside the Win32 modal loop + wgpu panicking on 0×0 surface
-  reconfigure against HDR+Bloom intermediate targets). Revert each
-  piece independently once the fix lands upstream — search Bevy's
-  `Platform-Windows` issues and gfx-rs/wgpu for "DX12 resize hang",
-  "WM_ENTERSIZEMOVE", and "surface reconfigure 0x0".
+- [ ] `main.rs` carries four `TODO(windows-resize)` markers
+  compensating for the Bevy 0.18 + Windows "freeze on resize" bug
+  stack:
+  1. Vulkan-only backend (no DX12 fallback) — DX12 swapchain
+     reconfigure hangs during `WM_ENTERSIZEMOVE`.
+  2. `PipelinedRenderingPlugin` disabled — the second render thread
+     deadlocks against the main thread's modal message pump.
+  3. `PresentMode::AutoNoVsync` — vsync waits queue up during the
+     modal pump and compound the stall.
+  4. 320×240 min resize — wgpu panics on 0×0 surface reconfigure,
+     which happens naturally during a fast drag-to-nothing.
+  Revert each piece independently once the fix lands upstream — search
+  Bevy's `Platform-Windows` issues and the gfx-rs/wgpu tracker for
+  "DX12 resize hang", "WM_ENTERSIZEMOVE", "pipelined rendering
+  deadlock", and "surface reconfigure 0x0".
 
 ### Gameplay Bugs
 

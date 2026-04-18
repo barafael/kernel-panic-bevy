@@ -7,6 +7,7 @@ mod units;
 
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
+use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy::window::{PresentMode, WindowResizeConstraints};
 
@@ -18,32 +19,40 @@ use ui::UiPlugin;
 use units::UnitsPlugin;
 
 fn main() {
-    // TODO(windows-resize): three linked workarounds for the Bevy 0.18 +
-    // Windows "freeze then crash on resize" bug. Each can be reverted
-    // independently when the upstream fix lands; they're grouped here so
-    // a future reader understands why the plain
-    // `DefaultPlugins + Window { title, ..default() }` we want isn't
-    // enough today.
+    // TODO(windows-resize): four linked workarounds for the Bevy 0.18 +
+    // Windows "freeze on resize" bug. Each is noted inline; they can
+    // be reverted independently when the upstream fix lands.
     //
-    // Symptom in the wild: grab the window frame, drag — the app locks
-    // for the duration of the drag, and often wgpu panics with either a
-    // surface-reconfigure error or a device-lost when the drag ends.
+    // Symptom in the wild: grab the window frame, see a single small
+    // resize, then the app locks until force-closed.
+    //
+    // Root cause stack (top-down):
+    //   1. Win32 enters a modal message loop (WM_ENTERSIZEMOVE) and the
+    //      main thread is stuck inside the OS's DispatchMessage.
+    //   2. Bevy's pipelined renderer runs the render world on a second
+    //      thread. When it tries to coordinate with the main thread
+    //      (swapchain acquire, extract sync) it deadlocks against the
+    //      modal loop.
+    //   3. Bevy 0.18 ships wgpu ~24, whose DX12 swapchain reconfigure
+    //      has a separate known hang during the same modal loop.
+    //   4. wgpu panics if the swapchain is ever reconfigured at 0x0,
+    //      which happens naturally during a fast drag-to-nothing and
+    //      leaves HDR+Bloom's intermediate render targets in a bad
+    //      state.
     //
     // See the Bevy issue tracker (`Platform-Windows` label) and the
     // gfx-rs/wgpu issue tracker (search: "DX12 resize hang",
-    // "WM_ENTERSIZEMOVE", "surface reconfigure 0x0") for the upstream
-    // threads — the project's Cargo.lock pins Bevy 0.18.1 which bundles
-    // wgpu ~24 and therefore predates the fixes.
+    // "WM_ENTERSIZEMOVE", "pipelined rendering deadlock",
+    // "surface reconfigure 0x0").
 
-    // TODO(windows-resize): prefer Vulkan over DX12 to sidestep the
-    // known DX12 swapchain reconfigure hang during the Win32 modal
-    // resize loop (WM_ENTERSIZEMOVE). Vulkan is available on every
-    // modern Windows GPU driver, so we lose nothing by preferring it.
-    // Remove once Bevy ships a wgpu with the DX12 fix and we've
-    // re-tested resize on Intel / AMD / NVIDIA.
+    // TODO(windows-resize): force Vulkan only. The previous attempt
+    // listed DX12 as a fallback, which meant Vulkan-less systems
+    // silently fell back into the bug we're trying to avoid. If Vulkan
+    // isn't available here we want to fail loudly so we notice, not
+    // quietly accept the broken path.
     let render_plugin = RenderPlugin {
         render_creation: RenderCreation::Automatic(WgpuSettings {
-            backends: Some(Backends::VULKAN | Backends::METAL | Backends::DX12),
+            backends: Some(Backends::VULKAN | Backends::METAL),
             ..default()
         }),
         ..default()
@@ -52,21 +61,27 @@ fn main() {
     App::new()
         .add_plugins(
             DefaultPlugins
+                .build()
+                // TODO(windows-resize): disable pipelined rendering so
+                // the render world runs inline on the main thread. The
+                // second thread is what deadlocks during
+                // WM_ENTERSIZEMOVE — without it, resize is a sequence
+                // of plain frames, slow but correct.
+                .disable::<PipelinedRenderingPlugin>()
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Kernel Panic".to_string(),
                         // TODO(windows-resize): AutoNoVsync stops the
                         // vsync queue from piling up while Windows is
                         // inside WM_ENTERSIZEMOVE. Restore AutoVsync
-                        // once the DX12 / winit modal-loop fix is in.
+                        // once the winit modal-loop fix is in.
                         present_mode: PresentMode::AutoNoVsync,
                         // TODO(windows-resize): 320x240 floor keeps the
                         // swapchain from ever reconfiguring at 0x0
                         // during a fast drag-to-nothing, which panics
                         // wgpu and drops HDR+Bloom's intermediate render
-                        // targets in a bad state. wgpu's 0-sized-surface
-                        // behaviour is the root cause; remove this once
-                        // wgpu handles 0x0 reconfigure gracefully.
+                        // targets in a bad state. Remove once wgpu
+                        // handles 0x0 reconfigure gracefully.
                         resize_constraints: WindowResizeConstraints {
                             min_width: 320.0,
                             min_height: 240.0,
