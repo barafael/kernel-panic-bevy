@@ -458,6 +458,18 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] Survey which performance tricks Spring / upstream KP apply that
   we could adopt.
 
+### Upstream-waiting workarounds
+
+- [ ] `main.rs` carries three `TODO(windows-resize)` markers: Vulkan
+  backend preference, `PresentMode::AutoNoVsync`, and a 320×240 resize
+  floor. They compensate for the Bevy 0.18 + wgpu ~24 "resize freeze
+  then crash" behaviour on Windows (DX12 swapchain reconfigure hang
+  inside the Win32 modal loop + wgpu panicking on 0×0 surface
+  reconfigure against HDR+Bloom intermediate targets). Revert each
+  piece independently once the fix lands upstream — search Bevy's
+  `Platform-Windows` issues and gfx-rs/wgpu for "DX12 resize hang",
+  "WM_ENTERSIZEMOVE", and "surface reconfigure 0x0".
+
 ### Gameplay Bugs
 
 - [x] ~~`GameState` not reset on map cycling~~ — fixed in a50fe8b
@@ -507,9 +519,18 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   "Couldn't get swap chain texture", then every render system (`prepare_view_uniforms`,
   `prepare_material_bind_groups`, bloom uniforms, `prepare_previous_view_uniforms`, SSR,
   light-probe upload, fog, cluster prep) `.unwrap()`s a `None` buffer and brings the whole
-  render world down. Same cascade is reported on wake-from-sleep and window-hide
-  (#11863, #12887). Bevy 0.18.1 + wgpu 27.0.1 on Windows. No workaround; revisit when
-  upstream ships a fix.
+  render world down. Same cascade is reported on wake-from-sleep and window-hide.
+  Bevy 0.18.1 + wgpu 27.0.1 on Windows. No workaround; revisit when upstream ships a fix.
+
+  Related upstream threads:
+  - [#21753 — Game crashes when resuming from sleep](https://github.com/bevyengine/bevy/issues/21753) (primary — same cascade list)
+  - [#11863 — Hiding window leads to swap chain timeout](https://github.com/bevyengine/bevy/issues/11863)
+  - [#12887 — Off-screen window crashes App](https://github.com/bevyengine/bevy/issues/12887)
+  - [#13150 — Swap chain texture timeout panic](https://github.com/bevyengine/bevy/issues/13150)
+  - [#11734 — 2D examples crash on exit with "Couldn't get swap chain texture"](https://github.com/bevyengine/bevy/issues/11734)
+  - [#3606 — Panic in bevy_render when acquiring next swapchain texture](https://github.com/bevyengine/bevy/issues/3606)
+  - [#3288 — Pipelined 3D examples crash with AMDVLK on Wayland](https://github.com/bevyengine/bevy/issues/3288)
+  - [PR #16964 — Move swap-chain acquire as late as possible in the pipeline](https://github.com/bevyengine/bevy/pull/16964) (partial mitigation already merged)
 
 ### Missing TDF Fields
 
