@@ -291,13 +291,13 @@ pub fn spawn_unit(
         kind,
         UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection
     ) {
-        // Pre-mark homebases `Spotted` so the fog-of-war system doesn't
-        // hide them: every match starts with enemy homebases visible so
-        // their build-laser rays don't appear to emit from empty space.
-        commands
-            .entity(unit_entity)
-            .insert((Homebase, super::cloak::Spotted));
+        commands.entity(unit_entity).insert(Homebase);
     }
+    // While there is no real "enemy" team — every faction is AI-driven
+    // but human-controllable — spot every unit at spawn so the fog-of-war
+    // pass leaves them all visible. Switch this back to a per-team check
+    // when a proper player/AI distinction lands.
+    commands.entity(unit_entity).insert(super::cloak::Spotted);
     if matches!(kind, UnitKind::Pointer) {
         commands.entity(unit_entity).insert(Deployable::initial());
     }
