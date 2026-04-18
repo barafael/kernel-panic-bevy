@@ -51,7 +51,19 @@ pub struct CobAnimator {
 
 /// Marks a Bevy entity as an animated piece child.
 #[derive(Component)]
-pub struct PieceIndex(#[allow(dead_code)] pub usize);
+pub struct PieceIndex;
+
+/// Index (into `CobAnimator::piece_entities`) of the unit's primary weapon
+/// muzzle — where beams and projectiles should originate. Upstream scripts
+/// express this through the `QueryWeapon1(piecenum)` callout which sets
+/// `piecenum` to a piece like `gunpoint`, `flare`, or `bp0`. Our VM doesn't
+/// yet execute `call_script` to consume a returned out-param, so we resolve
+/// the muzzle heuristically at spawn from a small list of well-known names.
+/// Covers every KP unit that declares one (Bit / Byte / Pointer / DOS /
+/// Exploit*); units without any match fall back to the unit transform
+/// origin in `combat_system`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct MuzzlePiece(pub usize);
 
 /// Cached parsed COB files, keyed by script filename.
 #[derive(Resource, Default)]
@@ -66,6 +78,19 @@ pub fn load_cob_cached(script: &str, cache: &mut CobFileCache) -> Option<Arc<Cob
         .entry(script.to_string())
         .or_insert_with(|| load_asset_from_disk(script, parse_cob).map(Arc::new))
         .clone()
+}
+
+impl CobAnimator {
+    /// Index into `piece_entities` for the piece whose COB name matches
+    /// `target` (case-insensitive). `None` if the script doesn't declare
+    /// that name. O(#pieces) — callers that query per-frame should cache
+    /// the result on a component at spawn time.
+    pub fn piece_index(&self, target: &str) -> Option<usize> {
+        self.cob
+            .piece_names
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(target))
+    }
 }
 
 /// Spring uses "angular units" where 65536 = 360°. Convert to radians.
@@ -128,16 +153,20 @@ fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
 /// finished emerging (to post the final 0 that closes out their
 /// `while(get BUILD_PERCENT_LEFT)` Create() loop).
 pub fn publish_unit_values(
-    mut emerging_q: Query<(&mut CobAnimator, &super::spawning::Emerging)>,
+    mut emerging_q: Query<(&mut CobAnimator, &mut super::spawning::Emerging)>,
     mut finished_q: Query<&mut CobAnimator, Without<super::spawning::Emerging>>,
     mut removed: RemovedComponents<super::spawning::Emerging>,
 ) {
-    for (mut animator, emerging) in &mut emerging_q {
+    for (mut animator, mut emerging) in &mut emerging_q {
         let percent = if emerging.total > 0.0 {
             ((emerging.remaining / emerging.total) * 100.0).round() as i32
         } else {
             0
         };
+        if percent == emerging.last_build_percent {
+            continue;
+        }
+        emerging.last_build_percent = percent;
         animator
             .vm
             .set_unit_value(spring_cob::unit_values::BUILD_PERCENT_LEFT, percent);
@@ -161,7 +190,7 @@ pub fn publish_unit_values(
 #[allow(clippy::too_many_arguments)]
 pub fn animation_system(
     time: Res<Time>,
-    mut animators: Query<(&mut CobAnimator, &Children, &Faction, &GlobalTransform)>,
+    mut animators: Query<(&mut CobAnimator, &Faction, &GlobalTransform)>,
     mut transforms: Query<(&mut Transform, &mut Visibility), With<PieceIndex>>,
     mut spawn_commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -172,7 +201,7 @@ pub fn animation_system(
     let dt = time.delta_secs();
     let dt_ms = (dt * 1000.0) as i32;
 
-    for (mut animator, _children, faction, unit_gtf) in &mut animators {
+    for (mut animator, faction, unit_gtf) in &mut animators {
         // Tick the COB VM.
         let cob = animator.cob.clone();
         let commands = animator.vm.tick(&cob, dt_ms);

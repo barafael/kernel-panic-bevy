@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use super::animation::CobAnimator;
+use super::animation::{CobAnimator, MuzzlePiece};
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::UnitKind;
 use super::script_triggers::JustFired;
@@ -11,6 +11,30 @@ use super::weapons::WeaponRegistry;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::rng::next_signed;
 use crate::terrain::heightmap::Heightmap;
+
+/// World-space position of `attacker`'s weapon muzzle, or its transform
+/// origin if the unit has no [`MuzzlePiece`] resolved (e.g. Wormbite's
+/// melee bite, a factory's BuildLaser, or a unit whose .bos doesn't
+/// declare a recognised muzzle name). Falling back to the unit origin
+/// keeps existing visuals working while upgrading every unit that *does*
+/// name its barrel to fire from that piece's world pos.
+fn muzzle_world_pos(
+    attacker: Entity,
+    attacker_gtf: &GlobalTransform,
+    muzzle_q: &Query<&MuzzlePiece>,
+    animator_q: &Query<&CobAnimator>,
+    piece_gtf_q: &Query<&GlobalTransform, Without<UnitType>>,
+) -> Vec3 {
+    if let Ok(mp) = muzzle_q.get(attacker)
+        && let Ok(animator) = animator_q.get(attacker)
+        && let Some(&piece_entity) = animator.piece_entities.get(mp.0)
+        && let Ok(piece_gtf) = piece_gtf_q.get(piece_entity)
+    {
+        piece_gtf.translation()
+    } else {
+        attacker_gtf.translation()
+    }
+}
 
 /// Added to each sampled terrain height in LOS checks so the shooter and
 /// target standing on a crest don't self-block. Roughly half a heightmap
@@ -321,6 +345,9 @@ pub fn combat_system(
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
     heightmap: Option<Res<Heightmap>>,
+    muzzle_q: Query<&MuzzlePiece>,
+    animator_q: Query<&CobAnimator>,
+    piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
     mut rng: Local<u32>,
 ) {
     if *rng == 0 {
@@ -507,8 +534,15 @@ pub fn combat_system(
             },
         ));
         if !weapon_name.is_empty() {
+            // Beam/projectile origin comes from the unit's resolved muzzle
+            // piece when available — unit-center origin here made Bit's
+            // `>>>>>` arrow look like it shot from the torso. Range and
+            // LOS checks above intentionally still use the unit center
+            // so arm-length-scale piece offsets don't flicker targeting.
+            let visual_origin =
+                muzzle_world_pos(entity, attacker_gtf, &muzzle_q, &animator_q, &piece_gtf_q);
             pending_attacks.events.push(AttackEvent {
-                attacker_pos,
+                attacker_pos: visual_origin,
                 target_pos: impact_pos,
                 weapon_name: weapon_name.to_string(),
             });
@@ -620,6 +654,9 @@ pub fn aim_weapons_system(
 pub fn tick_burst_fire(
     time: Res<Time>,
     mut query: Query<(Entity, &mut BurstFire, &GlobalTransform), Without<Dying>>,
+    muzzle_q: Query<&MuzzlePiece>,
+    animator_q: Query<&CobAnimator>,
+    piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
@@ -638,8 +675,9 @@ pub fn tick_burst_fire(
             impact_pos: burst.target_pos,
             attacker_distance: gtf.translation().distance(burst.target_pos),
         });
+        let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
         pending_attacks.events.push(AttackEvent {
-            attacker_pos: gtf.translation(),
+            attacker_pos: visual_origin,
             target_pos: burst.target_pos,
             weapon_name: burst.weapon.clone(),
         });

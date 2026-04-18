@@ -15,9 +15,7 @@ use super::{
     production::default_production,
     unit_registry::UnitRegistry,
 };
-use crate::{map_loading::MapEntity, terrain::heightmap::Heightmap};
-
-const FACTION_ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
+use crate::terrain::heightmap::Heightmap;
 
 #[derive(Resource, Clone)]
 pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
@@ -26,6 +24,7 @@ pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
 /// construction site. `emerge_system` ticks `remaining` toward 0 over
 /// `total` seconds; how the visible model arrives depends on `style`.
 #[derive(Component)]
+#[component(storage = "SparseSet")]
 pub struct Emerging {
     /// Final Y coordinate the unit should reach when fully emerged.
     pub target_y: f32,
@@ -38,6 +37,10 @@ pub struct Emerging {
     pub rally_point: Option<Vec3>,
     /// How the model becomes visible during the rise window.
     pub style: EmergeStyle,
+    /// Last `BUILD_PERCENT_LEFT` value pushed into the unit's CobVm. The
+    /// publisher system pushes a new value only when the integer crosses
+    /// a new unit so the VM doesn't re-receive the same reading 60× /s.
+    pub last_build_percent: i32,
 }
 
 /// Per-faction emergence visual.
@@ -187,7 +190,7 @@ pub fn spawn_homebases(
     let invisible_mat = get_or_create_invisible_material(commands, materials);
 
     for start_pos in &map_info.start_positions {
-        let faction = FACTION_ORDER[start_pos.team as usize % FACTION_ORDER.len()];
+        let faction = Faction::from_team_id(start_pos.team as u8);
         let kind = faction.homebase();
 
         let position = heightmap.place(start_pos.x, start_pos.z);
@@ -344,10 +347,8 @@ pub fn spawn_unit(
         .unwrap_or(0.0);
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
 
-    // Spawn the root unit entity.
     let unit_entity = commands
         .spawn((
-            MapEntity,
             UnitType(kind),
             faction,
             TeamId(team),
@@ -428,7 +429,7 @@ pub fn spawn_unit(
                 let mesh = piece_to_mesh(piece);
                 let mesh_handle = meshes.add(mesh);
                 commands.spawn((
-                    PieceIndex(idx),
+                    PieceIndex,
                     Mesh3d(mesh_handle),
                     MeshMaterial3d(material.clone()),
                     Transform::from_xyz(offset[0], offset[1], offset[2]),
@@ -436,7 +437,7 @@ pub fn spawn_unit(
                 ))
             } else {
                 commands.spawn((
-                    PieceIndex(idx),
+                    PieceIndex,
                     Transform::from_xyz(offset[0], offset[1], offset[2]),
                     Visibility::default(),
                 ))
@@ -486,6 +487,18 @@ pub fn spawn_unit(
             let mut vm = CobVm::new(&cob);
             vm.start_script(&cob, "Create", &[]);
 
+            // Resolve muzzle piece before moving `cob` into CobAnimator.
+            // Ordered by upstream KP convention: `gunpoint` covers
+            // Bit/Pointer/DOS/Exploit*, `bp0` the Byte's first barrel,
+            // `flare`/`barrel`/`muzzle` as safety nets for any third-
+            // party unit that uses the generic names.
+            const MUZZLE_NAMES: &[&str] = &["gunpoint", "bp0", "flare", "barrel", "muzzle"];
+            let muzzle_idx = MUZZLE_NAMES.iter().find_map(|name| {
+                cob.piece_names
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(name))
+            });
+
             commands.entity(unit_entity).insert(CobAnimator {
                 vm,
                 cob,
@@ -500,6 +513,12 @@ pub fn spawn_unit(
                 spin_speeds: vec![[0.0; 3]; cob_piece_count],
                 linear_constant: kind.cob_linear_constant(),
             });
+
+            if let Some(idx) = muzzle_idx {
+                commands
+                    .entity(unit_entity)
+                    .insert(super::animation::MuzzlePiece(idx));
+            }
         }
 
         // For factories, cache the piece indices we need for build FX so
@@ -667,10 +686,6 @@ pub fn spawn_queued_viruses(
     sel_mat: Option<Res<SelectionVolumeMaterial>>,
     unit_registry: Res<UnitRegistry>,
 ) {
-    if virus_spawns.is_empty() {
-        return;
-    }
-
     let invisible_mat = match sel_mat {
         Some(m) => m.clone(),
         None => get_or_create_invisible_material(&mut commands, &mut materials),
@@ -679,6 +694,47 @@ pub fn spawn_queued_viruses(
     for spawn in virus_spawns.drain() {
         spawn_unit(
             UnitKind::Virus,
+            spawn.faction,
+            spawn.team,
+            spawn.position,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut images,
+            &mut model_cache,
+            &mut cob_cache,
+            &invisible_mat,
+            &unit_registry,
+        );
+    }
+}
+
+/// Drain the `MineSpawnQueue` and spawn Logic Bombs at the queued
+/// positions. Sibling of `spawn_queued_viruses`; runs in the same
+/// `Resolve` set so a Byte's `LaunchMines` cast in frame N produces
+/// mines visible in frame N+1's Simulate pass. Logic Bombs auto-pick
+/// up `Cloaked` via `UnitKind::spawns_cloaked`, so they behave like
+/// factory-built mines the moment they appear.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_queued_mines(
+    mut mine_spawns: ResMut<super::command_fire::MineSpawnQueue>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
+    mut cob_cache: ResMut<CobFileCache>,
+    sel_mat: Option<Res<SelectionVolumeMaterial>>,
+    unit_registry: Res<UnitRegistry>,
+) {
+    let invisible_mat = match sel_mat {
+        Some(m) => m.clone(),
+        None => get_or_create_invisible_material(&mut commands, &mut materials),
+    };
+
+    for spawn in mine_spawns.drain() {
+        spawn_unit(
+            UnitKind::LogicBomb,
             spawn.faction,
             spawn.team,
             spawn.position,

@@ -222,8 +222,8 @@ cursor.
 | Pointer | NX Flag (r=120, 100 dps, 60s, friendly-fire) | ✅ wired |
 | Obelisk | Infection Gas (r=400, 120 dps, 13s, infects) | ✅ wired |
 | Firewall | Reflector Shield (r=300, 20s, 50% reduce + 50% reflect) | ✅ wired |
-| Terminal | SIGTERM airstrike | needs air-bomber spawn |
-| Byte | Mine Launcher | needs HP-cost + Logic-Bomb volley |
+| Terminal | SIGTERM airstrike (blast 900/10000, denial 350/2000/3s, 90s cd) | ✅ wired |
+| Byte | Mine Launcher (6000 HP cost, 5-mine fan, 10s cd) | ✅ wired |
 
 ### 3.6 Infection Chain Refinement — ✅ DONE
 
@@ -305,12 +305,29 @@ have visible trails.
 
 No visual feedback at the firing unit (except melee flash for Wormbite). Spring
 spawns `BitmapMuzzleFlame` at `weaponMuzzlePos`, which is derived from §4.6's
-`QueryWeapon(n)` piece — fold both items into one fix.
+`QueryWeapon(n)` piece — §4.6 is half-done (beam origin now comes from the
+muzzle piece), and adding the flame sprite at the same position is the
+remaining work.
 
-### 4.6 COB `QueryWeapon1` Callback (Low)
+### 4.6 COB `QueryWeapon1` Callback (Low) — ✅ Partial
 
-Returns weapon emit-point position. Currently beams originate from unit center instead of
-the model's barrel/turret piece.
+Beams and projectiles now originate from the unit's resolved muzzle piece
+instead of the transform root, so Bit's `>>>>>` arrow shoots from the
+barrel and Byte's MegaBeam leaves from `bp0` instead of the torso. The
+`MuzzlePiece` component is attached at spawn via a name heuristic —
+`gunpoint` → `bp0` → `flare` → `barrel` → `muzzle` — which covers every
+KP unit declaring a recognised muzzle in its .bos, falling back to unit
+origin for the rest (Worms / factories / turretless units).
+
+Deferred:
+
+1. Proper `call_script("QueryWeapon1", …)` consumption so the Byte's
+   barrel rotates between shots. Our VM's `call_script` returns
+   `ret_code` but .bos's `QueryWeapon1(piecenum) { piecenum = bp0; }`
+   pattern writes to an out-param rather than `return`ing; wiring the
+   param read-back unlocks per-shot barrel cycling on Byte (and any
+   future multi-barrel unit).
+2. Muzzle flash sprite at the same position — §4.5.
 
 ### 4.7 Shield System — ✅ DONE (mechanic; visual deferred)
 
