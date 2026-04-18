@@ -81,7 +81,7 @@ pub struct NavGrid(pub NodeLayer);
 
 /// Per-frame snapshot of every unit, used by the movement pass to resolve
 /// collisions and decide when a waypoint is blocked by an "arrived" unit.
-struct UnitSnapshot {
+pub struct UnitSnapshot {
     entity: Entity,
     pos: Vec3,
     radius: f32,
@@ -125,6 +125,10 @@ pub fn movement_system(
         Option<&crate::units::network_buffer::SpeedBoost>,
     )>,
     unit_registry: Res<UnitRegistry>,
+    // Reused across frames so the full-unit snapshot doesn't reallocate
+    // each tick. Dropped in favor of a spatial-hash neighborhood query
+    // eventually, but the allocation hoist is a free win until then.
+    mut snapshot: Local<Vec<UnitSnapshot>>,
 ) {
     // Snapshot every unit's position and collision radius so each proposed
     // movement can be resolved against all others without query aliasing.
@@ -132,17 +136,19 @@ pub fn movement_system(
     // specific unit has no active move order right now" — the deadlock
     // breaker uses the latter to decide whether a blocker counts as
     // "already at its goal".
-    let snapshot: Vec<UnitSnapshot> = query
-        .iter()
-        .map(|(e, ut, tf, target, _, _, _, _, _, _)| UnitSnapshot {
-            entity: e,
-            pos: tf.translation,
-            radius: unit_registry.collision_radius(ut.0),
-            mobile: unit_registry.speed(ut.0) > 0.0,
-            flying: unit_registry.can_fly(ut.0),
-            stationary: target.is_none(),
-        })
-        .collect();
+    snapshot.clear();
+    snapshot.extend(
+        query
+            .iter()
+            .map(|(e, ut, tf, target, _, _, _, _, _, _)| UnitSnapshot {
+                entity: e,
+                pos: tf.translation,
+                radius: unit_registry.collision_radius(ut.0),
+                mobile: unit_registry.speed(ut.0) > 0.0,
+                flying: unit_registry.can_fly(ut.0),
+                stationary: target.is_none(),
+            }),
+    );
 
     let mut pathfinds_used: usize = 0;
 
@@ -548,25 +554,26 @@ pub fn unit_separation_system(
     time: Res<Time>,
     unit_registry: Res<UnitRegistry>,
     heightmap: Option<Res<Heightmap>>,
+    mut snapshot: Local<Vec<(Entity, Vec3, f32, bool, bool)>>,
+    mut pushes: Local<Vec<(Entity, Vec3)>>,
 ) {
     let dt = time.delta_secs();
     let push_strength = 30.0_f32;
 
-    // Snapshot position, radius, mobility, flying.
-    let snapshot: Vec<(Entity, Vec3, f32, bool, bool)> = units
-        .iter()
-        .map(|(e, tf, ut)| {
-            (
-                e,
-                tf.translation,
-                unit_registry.collision_radius(ut.0),
-                unit_registry.speed(ut.0) > 0.0,
-                unit_registry.can_fly(ut.0),
-            )
-        })
-        .collect();
+    // Snapshot position, radius, mobility, flying. Both buffers persist
+    // across frames as `Local`s; steady-state iterations reuse capacity.
+    snapshot.clear();
+    snapshot.extend(units.iter().map(|(e, tf, ut)| {
+        (
+            e,
+            tf.translation,
+            unit_registry.collision_radius(ut.0),
+            unit_registry.speed(ut.0) > 0.0,
+            unit_registry.can_fly(ut.0),
+        )
+    }));
 
-    let mut pushes: Vec<(Entity, Vec3)> = Vec::new();
+    pushes.clear();
     for i in 0..snapshot.len() {
         if !snapshot[i].3 || snapshot[i].4 {
             // Skip buildings (can't move) and flying units (separation
@@ -595,7 +602,7 @@ pub fn unit_separation_system(
         }
     }
 
-    for (entity, push) in pushes {
+    for (entity, push) in pushes.drain(..) {
         if let Ok((_, mut tf, _)) = units.get_mut(entity) {
             tf.translation += push * push_strength * dt;
             if let Some(ref hm) = heightmap {

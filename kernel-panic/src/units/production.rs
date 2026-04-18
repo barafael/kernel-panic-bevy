@@ -159,31 +159,28 @@ pub fn production_system(
     existing_units: Query<(), With<UnitType>>,
     unit_registry: Res<UnitRegistry>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    // `Local` so the allocation is reused across frames — production
+    // completions are sparse (most ticks push nothing), but fresh Vecs on
+    // every frame cost allocator churn for no gain.
+    mut spawns: Local<
+        Vec<(
+            UnitKind,
+            Faction,
+            u8,
+            Vec3,
+            f32,
+            Option<Vec3>,
+            f32,
+            EmergeStyle,
+        )>,
+    >,
 ) {
     let Some(invisible_mat) = invisible_mat else {
         return;
     };
 
     let dt = time.delta_secs();
-
-    // Each spawn carries: unit kind, faction, team, the underground spawn
-    // position (where the model first appears), the surface y it should
-    // emerge to, and an optional rally point to walk to once emerged.
-    // Each spawn carries: unit kind, faction, team, spawn position,
-    // surface y to emerge to, optional rally point, the emerge duration
-    // (= the time remaining in the build cycle when the unit was spawned,
-    // so the rise/fade finishes exactly at build complete), and the
-    // visual emerge style (rise vs fade).
-    let mut spawns: Vec<(
-        UnitKind,
-        Faction,
-        u8,
-        Vec3,
-        f32,
-        Option<Vec3>,
-        f32,
-        EmergeStyle,
-    )> = Vec::new();
+    spawns.clear();
 
     for (mut producer, faction, team, global_tf, factory_pieces, animator, homebase) in
         &mut producers
@@ -293,7 +290,9 @@ pub fn production_system(
     }
 
     let invisible_mat_ref = SelectionVolumeMaterial(invisible_mat.0.clone());
-    for (kind, faction, team, spawn_pos, target_y, rally_point, emerge_duration, style) in spawns {
+    for (kind, faction, team, spawn_pos, target_y, rally_point, emerge_duration, style) in
+        spawns.drain(..)
+    {
         let entity = spawn_unit(
             kind,
             faction,

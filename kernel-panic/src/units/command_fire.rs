@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use super::combat::{INFECTION_DURATION, Infected};
 use super::components::{Faction, Health, TeamId, UnitType};
 use super::definitions::UnitKind;
+use super::spatial::SpatialIndex;
 
 /// Firewall protection zone: all allies within `FIREWALL_RADIUS` at
 /// cast time gain a `Protected` component for `FIREWALL_DURATION`.
@@ -186,17 +187,13 @@ pub fn tick_command_fire_cooldown(
 pub fn tick_area_denial(
     time: Res<Time>,
     mut zones: Query<(Entity, &mut AreaDenialZone)>,
-    mut units: Query<(
-        Entity,
-        &UnitType,
-        &Faction,
-        &TeamId,
-        &GlobalTransform,
-        &mut Health,
-    )>,
+    mut health_q: Query<&mut Health>,
+    spatial: Res<SpatialIndex>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
+    // Reused across zones so repeated casts don't realloc.
+    let mut hits: Vec<(Entity, bool)> = Vec::new();
     for (zone_entity, mut zone) in &mut zones {
         zone.remaining -= dt;
         if zone.remaining <= 0.0 {
@@ -207,22 +204,27 @@ pub fn tick_area_denial(
         let radius_sq = zone.radius * zone.radius;
         let tick_damage = zone.dps * dt;
 
-        for (unit_entity, _unit, faction, team, gtf, mut health) in &mut units {
+        hits.clear();
+        spatial.query_radius(zone.center, zone.radius, |candidate| {
             let friendly = super::components::is_friendly(
-                team.0,
-                *faction,
+                candidate.team,
+                candidate.faction,
                 zone.owner_team,
                 zone.owner_faction,
             );
             if friendly && !zone.damage_friendly {
-                continue;
+                return;
             }
-            if gtf.translation().distance_squared(zone.center) >= radius_sq {
-                continue;
+            if candidate.pos.distance_squared(zone.center) >= radius_sq {
+                return;
             }
+            hits.push((candidate.entity, friendly));
+        });
 
-            health.current -= tick_damage;
-
+        for (unit_entity, friendly) in hits.drain(..) {
+            if let Ok(mut health) = health_q.get_mut(unit_entity) {
+                health.current -= tick_damage;
+            }
             if zone.infects && !friendly {
                 commands.entity(unit_entity).insert(Infected {
                     timer: INFECTION_DURATION,

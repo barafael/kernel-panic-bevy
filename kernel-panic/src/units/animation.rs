@@ -121,23 +121,43 @@ fn cobwtf_move_axis(axis: i32, value: i32) -> i32 {
 ///
 /// Spring's BUILD_PERCENT_LEFT goes 100 (just spawned) → 0 (finished).
 /// We map from `Emerging.remaining / total` so the unit's `Create()`
-/// loop ticks down naturally over the rise window. Units without
-/// `Emerging` get 0 (already built).
+/// loop ticks down naturally over the rise window. The CobVm defaults
+/// unset keys to 0, so units that never had `Emerging` (buildings that
+/// skipped the rise, units spawned via cheat paths) read 0 implicitly
+/// — we only need to touch animators that are mid-emerge or just
+/// finished emerging (to post the final 0 that closes out their
+/// `while(get BUILD_PERCENT_LEFT)` Create() loop).
 pub fn publish_unit_values(
-    mut animators: Query<(&mut CobAnimator, Option<&super::spawning::Emerging>)>,
+    mut emerging_q: Query<(&mut CobAnimator, &super::spawning::Emerging)>,
+    mut finished_q: Query<&mut CobAnimator, Without<super::spawning::Emerging>>,
+    mut removed: RemovedComponents<super::spawning::Emerging>,
 ) {
-    for (mut animator, emerging) in &mut animators {
-        let percent = match emerging {
-            Some(e) if e.total > 0.0 => ((e.remaining / e.total) * 100.0).round() as i32,
-            _ => 0,
+    for (mut animator, emerging) in &mut emerging_q {
+        let percent = if emerging.total > 0.0 {
+            ((emerging.remaining / emerging.total) * 100.0).round() as i32
+        } else {
+            0
         };
         animator
             .vm
             .set_unit_value(spring_cob::unit_values::BUILD_PERCENT_LEFT, percent);
     }
+    for entity in removed.read() {
+        if let Ok(mut animator) = finished_q.get_mut(entity) {
+            animator
+                .vm
+                .set_unit_value(spring_cob::unit_values::BUILD_PERCENT_LEFT, 0);
+        }
+    }
 }
 
 /// Tick all CobAnimator VMs and apply piece transforms.
+///
+/// `turn_finished` / `move_finished` are `Local` scratch buffers reused across
+/// every animator on every frame. They were originally allocated fresh per
+/// animator, which meant ~N units × several allocations per frame just to hold
+/// a handful of completion events; `Local` keeps the capacity across runs so
+/// the steady state hits zero allocations.
 #[allow(clippy::too_many_arguments)]
 pub fn animation_system(
     time: Res<Time>,
@@ -146,6 +166,8 @@ pub fn animation_system(
     mut spawn_commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut turn_finished: Local<Vec<(i32, i32)>>,
+    mut move_finished: Local<Vec<(i32, i32)>>,
 ) {
     let dt = time.delta_secs();
     let dt_ms = (dt * 1000.0) as i32;
@@ -283,8 +305,8 @@ pub fn animation_system(
 
         // Interpolate piece transforms and collect anim-finished events.
         let num_pieces = animator.piece_rotations.len();
-        let mut turn_finished: Vec<(i32, i32)> = Vec::new();
-        let mut move_finished: Vec<(i32, i32)> = Vec::new();
+        turn_finished.clear();
+        move_finished.clear();
 
         for p in 0..num_pieces {
             for a in 0..3 {
@@ -345,12 +367,12 @@ pub fn animation_system(
         }
 
         // Notify VM of completed animations.
-        for (piece, axis) in turn_finished {
+        for (piece, axis) in turn_finished.drain(..) {
             animator
                 .vm
                 .anim_finished(spring_cob::AnimType::Turn, piece, axis);
         }
-        for (piece, axis) in move_finished {
+        for (piece, axis) in move_finished.drain(..) {
             animator
                 .vm
                 .anim_finished(spring_cob::AnimType::Move, piece, axis);

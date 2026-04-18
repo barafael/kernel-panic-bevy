@@ -455,7 +455,10 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 - [ ] `despawn_health_bars` is O(n×m) — use `HashSet` of removed units or query children
 - [ ] Melee flash and projectile materials created per-attack instead of cached — extend
   `BeamMaterialCache` to cover all weapon FX
-- [ ] Animation system allocates `Vec<(i32, i32)>` per animator per frame — use `SmallVec`
+- [x] ~~Animation system allocates `Vec<(i32, i32)>` per animator per frame~~ — hoisted
+  `turn_finished` / `move_finished` to `Local<Vec<_>>` parameters on `animation_system`,
+  cleared at the start of each animator and drained at the end. Steady state: zero
+  allocations.
 - [ ] Per-frame `UnitRegistry` lookups for immutable data (speed, weapon name) — cache as
   ECS components at spawn time (e.g. `Speed(f32)`, `WeaponBinding(&str)`)
 - [ ] `AttackEvent::weapon_name` is `String` (heap alloc per attack) — introduce a `WeaponId`
@@ -469,17 +472,17 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   cells, matching upstream `CQuadField`) rebuilt at the head of `GameplaySet::Simulate`
   via `spatial::rebuild_spatial_index`. Retrofitted: `combat::combat_system` target
   selection, `combat::apply_damage` splash radius, `combat::tick_kamikaze` trigger
-  check. Still linear and pending retrofit: `command_fire::tick_area_denial` +
-  `apply_firewall`, `interaction::movement::resolve_motion` + `unit_separation_system`,
+  check, `command_fire::tick_area_denial`. Still linear and pending retrofit:
+  `command_fire::apply_firewall` (cold path — per-cast only),
+  `interaction::movement::resolve_motion` + `unit_separation_system`,
   `cloak::update_cloak_visibility`, `ai::nearest_unclaimed_datavent`.
-- [ ] `movement::movement_system` and `unit_separation_system` each allocate a fresh
-  `Vec<UnitSnapshot>` over all units every frame (movement.rs:135 and ~556). Promote the
-  buffer to a `Resource` (or `Local<Vec<_>>`) and `.clear() + extend()` each tick so the
-  allocation happens once and amortizes. Becomes moot once the spatial hash above
-  supplies neighborhood queries directly.
-- [ ] `production::production_system` allocates `spawns: Vec<…>` every frame (production.rs:177)
-  even when nothing is completing — most ticks push nothing. Hoist to `Local<Vec<_>>` and
-  clear each tick.
+- [x] ~~`movement::movement_system` and `unit_separation_system` each allocate a fresh
+  `Vec<UnitSnapshot>` over all units every frame~~ — both now take
+  `Local<Vec<UnitSnapshot>>` / `Local<Vec<(Entity, Vec3, …)>>` params that are cleared and
+  repopulated each tick. Steady-state allocation count is zero until the spatial hash
+  replaces the snapshot entirely.
+- [x] ~~`production::production_system` allocates `spawns: Vec<…>` every frame~~ — hoisted
+  to a `Local<Vec<_>>`, cleared at the start of the system and drained after spawn.
 - [ ] `animation::animation_system` calls `transforms.get_mut(piece_entities[p])` per piece
   per frame — many pieces have no active turn/spin/move and don't need the lookup. Track
   "dirty pieces" per animator (the set that had interpolation this tick) and query only
