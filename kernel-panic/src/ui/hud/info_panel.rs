@@ -69,13 +69,23 @@ fn update_info_panel(
             InfoPanel,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(8.0),
-                bottom: Val::Px(220.0),
-                width: Val::Px(200.0),
-                padding: UiRect::all(Val::Px(8.0)),
+                left: Val::Px(0.0),
+                bottom: Val::Px(0.0),
+                width: Val::Px(220.0),
+                padding: UiRect {
+                    left: Val::Px(8.0),
+                    top: Val::Px(8.0),
+                    right: Val::Px(8.0),
+                    bottom: Val::Px(0.0),
+                },
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
-                border: UiRect::all(Val::Px(1.0)),
+                border: UiRect {
+                    left: Val::Px(0.0),
+                    top: Val::Px(1.0),
+                    right: Val::Px(1.0),
+                    bottom: Val::Px(0.0),
+                },
                 ..default()
             },
             BorderColor::all(UI_BORDER_COLOR),

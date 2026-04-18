@@ -192,15 +192,21 @@ impl UnitKind {
     /// multiplied by this constant; the animation system divides by it
     /// to recover N elmos.
     ///
-    /// Spring's *engine* default is 65536, but the Kernel Panic project
-    /// configured its Scriptor with 163840 — so most KP scripts use
-    /// 163840. The exceptions are the units whose .bos has an explicit
-    /// "linear constant must be changed to 65536" header comment:
-    /// pointer.bos and hole.bos.
+    /// Per upstream KP's `Kernel_Panic_readme.txt`: almost all BOS were
+    /// compiled with 65536 (Spring's engine default). The exceptions —
+    /// compiled with 163840 — are Kernel, Socket, Assembler, Bit, Byte,
+    /// Logic Bomb, Bad Block (plus ExpScout and Rock from the expansion,
+    /// which aren't in our UnitKind).
     pub fn cob_linear_constant(self) -> f32 {
         match self {
-            UnitKind::Pointer | UnitKind::Hole => 65536.0,
-            _ => 163840.0,
+            UnitKind::Kernel
+            | UnitKind::Socket
+            | UnitKind::Assembler
+            | UnitKind::Bit
+            | UnitKind::Byte
+            | UnitKind::LogicBomb
+            | UnitKind::BadBlock => 163840.0,
+            _ => 65536.0,
         }
     }
 

@@ -124,6 +124,7 @@ pub fn tick_construction(
     mut builders: Query<(
         Entity,
         &GlobalTransform,
+        &mut Transform,
         &Faction,
         &TeamId,
         &mut Constructing,
@@ -143,8 +144,18 @@ pub fn tick_construction(
     };
     let invisible_mat_clone = SelectionVolumeMaterial(invisible_mat.0.clone());
 
-    for (entity, gtf, faction, team, mut constructing) in &mut builders {
+    for (entity, gtf, mut transform, faction, team, mut constructing) in &mut builders {
         constructing.progress += dt;
+
+        // Pin the builder's yaw to face the build site so the beam leaves
+        // the muzzle piece forward rather than out of the unit's hip —
+        // mirrors the way a mobile constructor aims at a ghost before
+        // committing.
+        let to_site = constructing.site - gtf.translation();
+        if to_site.xz().length_squared() > 1e-4 {
+            let yaw = to_site.x.atan2(to_site.z);
+            transform.rotation = Quat::from_rotation_y(yaw);
+        }
 
         // Emit a build beam from the builder's root to the site so the
         // player sees something is happening. Re-uses the factory

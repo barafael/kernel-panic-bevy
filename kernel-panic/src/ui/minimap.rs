@@ -84,7 +84,7 @@ pub fn setup_minimap(
         Node {
             position_type: PositionType::Absolute,
             right: Val::Px(MINIMAP_MARGIN),
-            bottom: Val::Px(MINIMAP_MARGIN),
+            top: Val::Px(MINIMAP_MARGIN),
             width: Val::Px(mm_w as f32),
             height: Val::Px(mm_h as f32),
             border: UiRect::all(Val::Px(2.0)),

@@ -82,7 +82,8 @@ pub struct GeoventAssets {
 
 // Spring sim runs at 30 Hz; engine emits one puff per feature per frame.
 // KP slows that down — at full rate the digit puffs cluster too thickly and
-// stop reading as discrete bits. Roughly 6 Hz keeps the stream legible.
+// stop reading as discrete bits. 18 Hz keeps the stream legible while still
+// looking like a busy vent.
 const EMIT_INTERVAL: f32 = 1.0 / 18.0;
 
 // `startSize=6` elmos; `sizeExpansion=0.35` per frame → 10.5 elmos/s.

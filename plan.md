@@ -209,18 +209,18 @@ BugCannon's Inverted=1/Range=700 scales damage linearly with distance. Target
 selection picks the *farthest* enemy when `proximity_priority < 0`, matching
 Exploit's anti-push role.
 
-### 3.5 Command-Fire & Area Denial Framework — ✅ Partial
+### 3.5 Command-Fire & Area Denial Framework — ✅ DONE
 
-Framework in place: `CommandFireEvent` → `process_command_fire` spawns an
-`AreaDenialZone` entity, `tick_area_denial` deals dps*dt to units in radius
-with friendly-fire + infection flags, `CommandFireCooldown` gates recasts. Q
-hotkey (interaction::ability) fires the selected caster's ability at the
-cursor.
+All five command-fire abilities are live. Framework: `CommandFireEvent` →
+`process_command_fire` spawns an `AreaDenialZone` entity, `tick_area_denial`
+deals dps*dt to units in radius with friendly-fire + infection flags,
+`CommandFireCooldown` gates recasts. `D` hotkey
+(interaction::ability) fires the selected caster's ability at the cursor.
 
 | Unit | Ability | Status |
 |------|---------|--------|
 | Pointer | NX Flag (r=120, 100 dps, 60s, friendly-fire) | ✅ wired |
-| Obelisk | Infection Gas (r=400, 120 dps, 13s, infects) | ✅ wired |
+| Obelisk | Infection Gas (r=400, 120 dps, 13s, infects, 40s cd) | ✅ wired |
 | Firewall | Reflector Shield (r=300, 20s, 50% reduce + 50% reflect) | ✅ wired |
 | Terminal | SIGTERM airstrike (blast 900/10000, denial 350/2000/3s, 90s cd) | ✅ wired |
 | Byte | Mine Launcher (6000 HP cost, 5-mine fan, 10s cd) | ✅ wired |
@@ -320,13 +320,13 @@ CEG emitter stacks remain deferred).
 `cegTag` and `smoketrail=1` parsed but unused. BugCannon, FlowMissile, Geometric should
 have visible trails.
 
-### 4.5 Muzzle Flash (Low)
+### 4.5 Muzzle Flash — ✅ DONE
 
-No visual feedback at the firing unit (except melee flash for Wormbite). Spring
-spawns `BitmapMuzzleFlame` at `weaponMuzzlePos`, which is derived from §4.6's
-`QueryWeapon(n)` piece — §4.6 is half-done (beam origin now comes from the
-muzzle piece), and adding the flame sprite at the same position is the
-remaining work.
+`weapon_fx` now spawns a muzzle flash sprite at the resolved `MuzzlePiece`
+position for every non-melee, non-build-laser fire (commit `5f0ff19`).
+Spring's `BitmapMuzzleFlame` equivalent. Scale + duration read from the
+weapon TDF. Melee flash (Wormbite) retains its dedicated orange burst at
+the bite point.
 
 ### 4.6 COB `QueryWeapon1` Callback (Low) — ✅ Partial
 
@@ -669,6 +669,86 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   Bevy's `Platform-Windows` issues and the gfx-rs/wgpu tracker for
   "DX12 resize hang", "WM_ENTERSIZEMOVE", "pipelined rendering
   deadlock", and "surface reconfigure 0x0".
+
+### FEATURES.md Spec Gaps
+
+Items where [FEATURES.md](FEATURES.md) describes behaviour the code does
+not yet deliver. FEATURES.md is the source of truth for user-visible
+behaviour; plan.md holds the engineering work to get there.
+
+- [ ] **Pointer homing targets Flows** — FEATURES.md §6/§12 says the
+  Pointer is the exception to the `NoChaseCategory=VTOL` rule because its
+  projectile is homing. Currently `combat_system` reads the filter
+  uniformly from FBI (`unit_registry.no_chase_vtol`) and Pointer inherits
+  `NoChaseCategory=VTOL`, so it ignores Flows. Add a per-kind override
+  (`UnitKind::homing_weapon()` or similar) that bypasses the VTOL skip.
+- [ ] **Friendly cloak fade** — FEATURES.md §17 says friendly cloaked
+  units render semi-transparent / faded. `cloak::update_cloak_visibility`
+  only toggles `Visibility::Visible`/`Hidden` — no alpha ramp. Needs
+  per-material alpha clone with ~0.5 alpha for friendly-cloaked state.
+- [ ] **Build menu tabs for multi-builder selection** — FEATURES.md §4
+  says "When multiple builders are selected, the build pane has tabs on
+  top. When only one is selected, there is still a tab saying the
+  builder unit name." `build_menu.rs` picks the first producer via
+  `producer_q.iter().next()` and shows its grid; no tabs.
+- [ ] **Queue count on build icons** — FEATURES.md §4 says queued units
+  show their count in the bottom-left of their build icon. Current
+  `spawn_build_icon` has no count overlay. Queue totals only surface as
+  the "Queue: 3x Bit" text line.
+- [ ] **Minimap spotting filter** — FEATURES.md §4 says the minimap
+  "takes spotting into account." `ui::minimap::update_minimap` plots
+  every `(Transform, Faction)` in the world, ignoring `Spotted`. Gate
+  on `With<Spotted>` (or on the player team's own entities) so fog-of-war
+  drives the minimap too — will naturally activate once §6 un-neuters
+  the blanket-Spotted at spawn.
+- [ ] **Cursor animation 30 fps** — FEATURES.md §25 says the animated
+  cursor variants tick "at a fixed rate (~30 fps)." `cursor.rs`'s
+  `FRAME_PERIOD_SECS = 1.0 / 5.0` (5 fps). Either raise the rate or
+  update the spec — the current 5 fps feel is intentional per a
+  comment ("calmer feel"), so pick one and align.
+- [ ] **Camera yaw `Q`/`E` vs morph `E` hotkey collision** —
+  FEATURES.md §2 reserves `Q`/`E` for camera yaw left/right while §15
+  binds `E` to Bug↔Exploit morph. Both systems currently read `KeyE`
+  in parallel ([camera.rs:246](kernel-panic/src/rendering/camera.rs#L246)
+  and [ability.rs:44](kernel-panic/src/interaction/ability.rs#L44)), so
+  pressing `E` with a Bug selected morphs it *and* rotates the camera.
+  Decide on one binding (likely: keep camera on `Q`/`E`, rebind morph
+  to `M` or make camera yaw ignore repeats while the morph is firing)
+  and update FEATURES.md to match.
+- [ ] **Missing unit hotkeys** — FEATURES.md §3 lists hotkeys the code
+  does not yet bind: `F` (Fight), `T` (set target), `X` (unset target),
+  `Ctrl+D` (self-destroy with 5 s countdown), `A` (attack ground),
+  `P` (patrol). Several share the same structural blocker as attack-
+  move (Gameplay Bugs → "Attack-move"): they need the Spring-style
+  `CommandQueue` component. Self-destroy is standalone.
+- [ ] **Signal unit** — FEATURES.md §20 Network table lists Signal as
+  an "Air-strike caller (currently a stub)". Plan.md never mentions
+  Signal. Either implement as a proper caller (likely piggy-backing on
+  SIGTERM's bomber code path) or remove from FEATURES.md.
+- [ ] **Worm auto-hold toggle** — FEATURES.md §20 says the Worm "By
+  default holds fire while cloaked (auto-attack only on manual order;
+  toggle with autohold)". No autohold toggle wired. Default-hold while
+  cloaked is likely also not enforced (Worm attacks via normal
+  `combat_system` once a target enters range).
+- [ ] **Build-menu progress bar removal** — ✅ DONE (today).
+  `spawn_build_progress` replaced with `spawn_build_queue` which only
+  shows the "Queue: 3x Bit" text. Unused `UI_PROGRESS_COLOR` constant
+  dropped.
+- [ ] **Repair cursor on builder + friendly hover** — ✅ DONE (today).
+  `resolve_context_cursor` now distinguishes mover / weapon /
+  constructor selection and picks `Attack` / `Move` / `Repair`
+  accordingly.
+- [ ] **ALT-Dispatch double-fire** — ✅ DONE (today). Holding ALT
+  inserts the `AutoDispatch` marker without firing an immediate
+  `DispatchEvent`; the first 12-batch goes out next frame via
+  `tick_auto_dispatch`. Previously the first frame could drain up
+  to 24 Packets in a single tick.
+- [ ] **Dying units counted as movement candidates** — ✅ DONE (today).
+  `movement_system` query now carries `Without<Dying>` so corpses no
+  longer contribute to pathing / separation.
+- [ ] **Obelisk `Infection` cooldown = 40 s** — ✅ DONE (today).
+  `ability_for(UnitKind::Obelisk).cooldown` raised 30 → 40 s to match
+  upstream `weapons.tdf` `Infection.reloadtime=40`.
 
 ### Gameplay Bugs
 

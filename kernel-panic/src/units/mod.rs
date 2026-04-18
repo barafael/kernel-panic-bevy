@@ -90,6 +90,7 @@ impl Plugin for UnitsPlugin {
                         network_buffer::tick_port_buffers,
                         network_buffer::tick_spawn_stun,
                         network_buffer::tick_flow_speed,
+                        network_buffer::tick_auto_dispatch,
                         network_buffer::process_dispatch,
                         network_buffer::process_enter,
                         production::production_system,

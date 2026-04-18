@@ -1,0 +1,251 @@
+# Additional Faction Candidates — Kernel Panic
+
+**All sections below are fresh, optional, non-vanilla content.**
+Vanilla Kernel Panic ships three factions: System, Hacker, Network.
+
+Everything in this document is a proposed *addition* to that baseline
+— none of it is part of the original game. Each candidate below is
+independent and opt-in; shipping zero, one, or several of them are all
+valid choices.
+
+Each existing faction has a distinct mechanical identity:
+
+- System = order / control plane; Kernel Boost scales production with
+  small-building count.
+- Hacker = chaos / intrusion; infection chain, morph, cloak, kamikaze.
+- Network = connectivity / logistics; packet buffer, teleport, Flow
+  speed scaling.
+
+More factions should add a new axis, not duplicate one.
+
+---
+
+## Primary candidates — "meta" factions
+
+These all occupy the same conceptual slot: they act *on* other software
+rather than being software-as-combatant. Picking all three would crowd
+the ontology. Pick at most one (or Antivirus + Debugger if two slots
+are available).
+
+### 1. Antivirus (yellow) — "threat conversion"
+
+Core axis: transformation — turns enemy units into allies. Novel
+economic axis (nobody in current game steals the original unit —
+Hacker's infection only spawns a Virus on kill).
+
+Signature mechanic: **Quarantine Meter.** Reuse the `StunCharge`
+accumulator from DOS paralysis but call it `QuarantineMeter`. When it
+hits max, despawn the target and queue a spawn at the Antivirus
+homebase under the captor's team.
+
+| Unit | Role |
+| --- | --- |
+| (Homebase) | Quarantined units rematerialize here under your control |
+| Antivirus Daemon | Ranged quarantine weapon — non-damaging beam, fills QuarantineMeter on target; overflow triggers capture |
+| (basic combat) | TBD |
+| (on-vent) | Also passively slows Antivirus quarantine buildup on nearby friendlies |
+
+Design levers for tuning the capture mechanic:
+
+- Cap by homebase queue depth (not unbounded — otherwise late-game
+  this faction owns everyone's army).
+- Quarantine transit timer — captured unit appears in a "jail"
+  animation at the homebase for a few seconds before activating.
+  Gives enemy a scout/react window.
+- Decay off-beam (like DOS). A single ping shouldn't eventually add
+  up to a capture.
+- Homebases can't be captured. Otherwise game ends on one beam.
+- Virus and Logic Bomb should resist quarantine — thematic (they are
+  the infection) and keeps Hacker viable.
+
+Strongest argument for Antivirus: it's the only candidate whose
+existence is already *implied* by the current game. Hacker's whole
+identity (Virus, Infection, Logic Bomb) is screaming for an antithesis.
+Adding Antivirus retroactively sharpens Hacker's design.
+
+### 2. Debugger (dark orange) — "privileged inspection (JTAG)"
+
+Core axis: informational — sees through and pauses everything, metered.
+
+Signature mechanic: **Cycle budget** — team-wide meter spent on
+privileged operations:
+
+- **Breakpoint** (command-fire): freezes one specific enemy for a
+  duration. Precise, not stochastic like DOS; bypasses stun meter and
+  range entirely.
+- **Inspect**: hovering an enemy reveals exact HP, weapon cooldown,
+  current target.
+- **Attach** (constructor ability): briefly controls an enemy unit.
+- **Memory write** (weapon type): damage that bypasses shields
+  (shields are just numbers → zero them).
+
+| Unit | Role |
+| --- | --- |
+| IDE | Homebase |
+| Tracer | Mobile constructor; slowest in the game but sees the entire map |
+| Symbol | Basic combat unit |
+| Watchpoint | Detector with massive radar range; reveals enemy build queue |
+| StackFrame | Artillery; fires delayed shots that land when enemy next fires |
+| Breakpoint | Heavy; command-fire freeze, expensive in cycles |
+| Heap | On-vent secondary factory |
+| PDB | Special building — passively reveals nearest enemy homebase's queue |
+
+Mechanically the most orthogonal to all three existing factions (not
+cloak, not infection, not teleport, not boost). Counters fog-of-war
+cleanly once it's re-enabled. Gives a reason to finish fog-of-war.
+
+### 3. User (white) — "direct manipulation"
+
+Core axis: kinetic / physical intervention in the GUI.
+
+| Unit | Role |
+| --- | --- |
+| Desktop | Homebase |
+| Explorer | Mobile constructor; slow, vulnerable, no weapon |
+| Cursor | Basic melee — closes distance, "clicks" unit dead (1-hit on light units, cheap, dies fast) |
+| Double-Click | Heavier Cursor variant; strikes twice in quick succession (existing `burst>1` frozen-aim-point mechanic) |
+| Keyboard | Ranged staccato attacker; high fire rate, low per-shot damage (typing) |
+| Shortcut | Support unit; command-fire ability copies a nearby friendly unit at reduced HP (Ctrl+C / Ctrl+V) |
+| Drag | Can grab one enemy unit and relocate it — pulls it out of formation (fun vs. artillery) |
+| Taskbar | On-vent secondary factory |
+| Recycle Bin | Special building — feed captured enemies in for a one-shot global damage AoE (empty trash) |
+
+Strongest narrative hook; most tonal surprise.
+
+---
+
+## Decision matrix for the primary slot
+
+| Axis | User | Antivirus | Debugger |
+|---|---|---|---|
+| Core identity | Kinetic (manipulation) | Transformative (conversion) | Informational (inspection) |
+| Signature mechanic | Physical intervention (click, drag, type) | Quarantine → capture | Cycle-metered omniscience |
+| Novelty | High (no unit is kinetic now) | High (no faction steals units) | High (no faction has metered info) |
+| Completes existing tension? | No — opens a new axis | Yes — antithesis to Hacker | Partial — pairs with fog-of-war |
+| Implementation reuse | `burst`, melee flash | `StunCharge` → `QuarantineMeter` | Paralysis, radar, cloak reveal |
+| Tonal fit | Strong (classic OS metaphor) | Strong | Strong |
+| Risk | Capture/steal would be OP if also added | Capture tuning; could dominate if uncapped | Omniscience feels bad if not metered tightly |
+
+## Recommendation
+
+Pick based on what the 4th faction should *do* for the game:
+
+- **Narrative** → User. The human breaks into the software war.
+- **Symmetric** → Antivirus. Completes the Hacker/Antivirus dialectic
+  already half-present. Strongest argument overall because the game is
+  already pointing at it.
+- **Mechanical** → Debugger. Most orthogonal gimmick; gives a reason
+  to finish fog-of-war (FEATURES.md §24, currently neutered).
+
+If forced to pick one: **Antivirus**. Adding it retroactively sharpens
+Hacker. Adding User or Debugger opens a new axis instead of completing
+an existing one.
+
+If the game can support two new factions (5 total): **Antivirus +
+Debugger**. Antivirus completes the malware axis; Debugger opens the
+information axis. Skip User in that pairing — its kinetic/capture niche
+partially overlaps Antivirus's capture economy.
+
+If the game supports only one: **Antivirus**.
+
+---
+
+## Secondary candidates *(not primary)*
+
+These were considered earlier but don't make the primary cut — kept
+here for reference.
+
+### 4. Storage (amber/orange) — "persistence" *(not primary)*
+
+Gimmick: **Core Dump & Restore.** When any Storage unit dies, it drops
+a cloaked `CoreDump` entity on the ground. A constructor can spend time
+reconstituting it into a fresh unit of the same type at ~50% cost.
+Losses become a slow-burn economy instead of a binary wipe — the
+counterweight to Hacker's infection, which turns enemy losses into your
+units.
+
+| Unit | Role |
+| --- | --- |
+| Mainframe | Homebase; queue is a LIFO stack (last-queued builds first) |
+| Indexer | Mobile constructor; also reconstitutes CoreDumps |
+| Block | Basic combat unit, medium armor, slow turn rate |
+| Cache | Fast harasser — very cheap, drops a richer CoreDump on death |
+| Journal | Artillery; fires delayed "write-back" shells that land on the predicted target position N seconds later |
+| Vault | On-datavent secondary factory; stores a small per-team `BackupBuffer` that auto-revives one random dead unit per minute |
+| Defrag | Special building — pulls all friendly corpses in radius back as CoreDumps |
+
+Natural counter to Hacker (Virus chains less juicy when storage losses
+partially come back).
+
+### 5. Compute / GPU (magenta/pink) — "parallelism" *(not primary)*
+
+Gimmick: **Thread Pool.** Team-wide `ThreadPool` counter (like
+Network's PacketBuffer but used differently). Almost every action —
+attacking, moving fast, building — consumes a thread. Idle units
+return threads to the pool. Under heavy pool pressure, combat units
+visibly slow their fire rate. Rewards micromanagement and timing
+windows; punishes blob wars.
+
+| Unit | Role |
+| --- | --- |
+| Scheduler | Homebase; visibly rotates to "dispatch" threads |
+| Compiler | Mobile constructor |
+| Thread | Basic combat unit; splits into two weaker Threads on kill (fork bomb) |
+| KernelThread | Heavy; consumes 4 thread slots, immune to DOS paralyze |
+| Shader | Area-effect unit; single wide cone blast, long cooldown, very high pool cost per shot |
+| Core | On-vent secondary factory; generates threads over time |
+| Mutex | Special building — locks a region: enemy weapons can't fire inside its radius |
+
+Natural counter to Network: Flow's speed scaling is powerful, but
+Compute's Shader chunks clustered flyers.
+
+### 6. Legacy / Mainframe (cyan/beige) — "deprecation" *(not primary)*
+
+Gimmick: **Deprecation Timer.** Every Legacy unit spawns with a
+countdown. When it hits zero the unit upgrades — becomes more powerful
+but more expensive to replace. Longer you keep a unit alive, the scarier
+it is. Rewards preservation; hard-countered by infection and kamikaze.
+
+Mechanically the weakest of the three — less novel than Storage or
+Compute.
+
+### 7. LLM (neon cyan?) — "stochastic cognition" *(not primary)*
+
+Fits a 2026 setting. Mechanically distinct gimmicks available:
+
+- **Hallucination**: spawn visible decoys that are real to enemy
+  auto-targeting but pop on contact and deal no damage. Inverts cloak
+  — overwhelm targeting with plausible fakes.
+- **Context Window**: team-wide token budget, every action costs
+  tokens, units degrade under pressure.
+
+| Unit | Role |
+| --- | --- |
+| Transformer | Homebase; attention-pattern visuals on production |
+| Agent | Mobile constructor; autonomously re-queues itself when idle (builds wrong thing ~10% of the time) |
+| Token | Basic unit, dirt cheap, dies fast |
+| Prompt | Ranged; fires questions that confuse enemy auto-target for 1s |
+| Hallucination | Fake unit — looks real, dies on first hit, costs almost nothing |
+| Embedding | On-vent; passively regenerates team Context pool |
+| RAG | Special building — reveals one random enemy unit's stats globally |
+
+Risk: tonal. The rest of the game reads as a 90s computer metaphor;
+LLM drags it into 2026. Works if you lean in, feels anachronistic if
+you don't.
+
+### 8. Firmware — "POST + thermal" *(not primary)*
+
+Gimmick: **Boot sequence + thermal throttling.** Firmware units emerge
+inactive during a boot window (helpless for N seconds), then are
+extremely durable. Sustained firing heats them; heat drops fire rate;
+they need Heatsink buildings to cool.
+
+Unit names: Bootloader (homebase), Flasher (constructor, can flash
+enemy firmware = brick enemy mech units briefly), ROM (basic), Cache
+(heavy), Register (artillery), BIOS (on-vent factory), Heatsink
+(special building).
+
+Problem: "orderly, durable, scales with small buildings" is already
+System's lane. Distinguishable via thermal as a resource you *manage*
+(not accumulate), but the factions would feel like cousins. Works, but
+competes for conceptual space.

@@ -47,9 +47,14 @@ impl PacketBuffer {
         *self.0.entry(team).or_default() += n;
     }
 
+    /// Read the team's buffer without modifying it.
+    pub fn peek(&self, team: u8) -> u32 {
+        self.0.get(&team).copied().unwrap_or(0)
+    }
+
     #[cfg(test)]
     pub fn get(&self, team: u8) -> u32 {
-        self.0.get(&team).copied().unwrap_or(0)
+        self.peek(team)
     }
 
     /// Drain up to `want` packets from the team's buffer, returning how
@@ -79,6 +84,18 @@ pub struct PacketSpawnStun {
 #[derive(Message, Debug, Clone, Copy)]
 pub struct DispatchEvent {
     pub teleporter: Entity,
+    pub target: Vec3,
+}
+
+/// Marker on a teleporter that's mid-drain: an ALT-modified Dispatch
+/// keeps re-firing the 12-Packet batch every frame until the team's
+/// Packet Buffer is empty, mirroring upstream `network_dispatch.lua`'s
+/// `not opts.alt or bufferSize[team]==0` continuation rule. The
+/// component is removed as soon as the buffer reaches zero, the
+/// teleporter dies, or the player issues another order.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct AutoDispatch {
     pub target: Vec3,
 }
 
@@ -118,6 +135,30 @@ pub fn tick_spawn_stun(
         if stun.remaining <= 0.0 {
             commands.entity(entity).remove::<PacketSpawnStun>();
         }
+    }
+}
+
+/// Each frame, re-issue a `DispatchEvent` for every teleporter still
+/// flagged `AutoDispatch`, then drop the marker if the team's Packet
+/// Buffer is empty. Mirrors the upstream `CommandFallback` continuation
+/// rule (`not opts.alt or bufferSize[team]==0`) — the dispatch order
+/// stays "active" until the buffer drains, peeling 12 Packets per
+/// frame off the top.
+pub fn tick_auto_dispatch(
+    auto_q: Query<(Entity, &TeamId, &AutoDispatch), Without<Dying>>,
+    buffer: Res<PacketBuffer>,
+    mut ev: MessageWriter<DispatchEvent>,
+    mut commands: Commands,
+) {
+    for (entity, team, auto) in &auto_q {
+        if buffer.peek(team.0) == 0 {
+            commands.entity(entity).remove::<AutoDispatch>();
+            continue;
+        }
+        ev.write(DispatchEvent {
+            teleporter: entity,
+            target: auto.target,
+        });
     }
 }
 

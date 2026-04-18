@@ -1,0 +1,29 @@
+========--------------------------------------------
+License:
+--------
+
+- The content of the /mods/Kernel*.sd7 is Public Domain, save:
+/LuaUI/Widgets/kp_buildbar.lua
+/LuaRules/Gadgets/autohold.lua
+/LuaRules/Gadgets/Burrow.lua
+/LuaRules/Gadgets/game_spawn.lua
+which are GPL, taken from http://www.caspring.org or http://springrts.com
+- The maps Marble Madness and Direct Memory Access are Public Domain
+- The maps Major Madness and Speed Balls 16 Way status are unknown
+- The maps Central Hub, Corrupted Core, Dual Core, Quad Core were CC BY-NC-SA and are now CC-BY-SA
+https://springrts.com/phpbb/viewtopic.php?f=43&t=21331&p=401680#p397471
+https://springrts.com/phpbb/viewtopic.php?f=43&t=27499&start=6
+- The Spring engine is GPL, available from http://spring.clan-sy.com
+
+========--------------------------------------------
+Credits:
+--------
+
+- Original concept by Boirunner
+- About all the work done by KDR_11k
+- Maintenance and silly mod options by zwzsg
+- Voices by Eva and Panda
+- Sounds by Noruas and Pendrokar
+- Maps by Boirunner, Runecrafter, zwzsg, TradeMark, KDR_11k and FireStorm
+- Some LUA interface upgrade based of jK and trepan code
+- The touhou faction characters were inspired by ZUN's works

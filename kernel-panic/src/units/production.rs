@@ -69,11 +69,10 @@ impl Producer {
         &self.queue
     }
 
-    /// Enqueue a unit to be built (max 100 items).
+    /// Enqueue a unit to be built. The queue is unbounded; the player
+    /// can stack as many orders as they want.
     pub fn enqueue(&mut self, kind: UnitKind) {
-        if self.queue.len() < 100 {
-            self.queue.push_back(kind);
-        }
+        self.queue.push_back(kind);
     }
 }
 

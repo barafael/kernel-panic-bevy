@@ -524,7 +524,7 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
             radius: 400.0,
             dps: 120.0,
             ttl: 13.0,
-            cooldown: 30.0,
+            cooldown: 40.0,
             damage_friendly: false,
             infects: true,
         }),
@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(a.radius, 400.0);
         assert_eq!(a.dps, 120.0);
         assert_eq!(a.ttl, 13.0);
-        assert_eq!(a.cooldown, 30.0);
+        assert_eq!(a.cooldown, 40.0);
         assert!(!a.damage_friendly);
         assert!(a.infects);
     }

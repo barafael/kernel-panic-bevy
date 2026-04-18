@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use super::previews::UnitPreviews;
 use super::style::{
     BUILD_ICON_SIZE, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_PANEL_TINT,
-    UI_PROGRESS_COLOR, UI_ROW_BG, UI_TEXT_COLOR, UI_TEXT_DIM,
+    UI_TEXT_COLOR, UI_TEXT_DIM,
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, UnitType};
@@ -142,18 +142,32 @@ fn update_build_menu(
     };
     let options = buildable_units(unit_type.0);
 
+    // Mid-left: anchor at 50% top with a translateY trick via `top` minus
+    // half the menu's expected height. Bevy 0.18 doesn't expose CSS
+    // transforms on Nodes, so we use top + a margin-top offset of half
+    // the icon block; this keeps the menu visually centered on the
+    // left edge.
     let menu = commands
         .spawn((
             BuildMenu,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(8.0),
-                top: Val::Px(8.0),
+                left: Val::Px(0.0),
+                top: Val::Percent(50.0),
                 width: Val::Px(BUILD_ICON_SIZE * 2.0 + 28.0),
                 padding: UiRect::all(Val::Px(8.0)),
+                margin: UiRect {
+                    top: Val::Px(-((BUILD_ICON_SIZE * 2.0) + 24.0)),
+                    ..default()
+                },
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(6.0),
-                border: UiRect::all(Val::Px(1.0)),
+                border: UiRect {
+                    left: Val::Px(0.0),
+                    top: Val::Px(1.0),
+                    right: Val::Px(1.0),
+                    bottom: Val::Px(1.0),
+                },
                 ..default()
             },
             BorderColor::all(UI_BORDER_COLOR),
@@ -174,11 +188,11 @@ fn update_build_menu(
         .id();
     commands.entity(menu).add_child(title);
 
-    // Build progress (if this unit is a producer and has something queued)
+    // Queue summary (if this unit is a producer with something queued)
     if let Some((producer, _)) = producer_q.iter().next()
-        && let Some(current_kind) = producer.current_production()
+        && producer.current_production().is_some()
     {
-        spawn_build_progress(&mut commands, menu, producer, current_kind, &unit_registry);
+        spawn_build_queue(&mut commands, menu, producer, &unit_registry);
     }
 
     // Grid of build icons (2 columns)
@@ -201,67 +215,15 @@ fn update_build_menu(
     }
 }
 
-/// Render the "Building: Bit (75%)" label, progress bar, and remaining queue.
-fn spawn_build_progress(
+/// Render the remaining build queue ("Queue: 3x Bit, Byte"). The player
+/// tracks production progress via the rising HP bar of the unit still in
+/// the factory — there is no numeric progress bar in the HUD.
+fn spawn_build_queue(
     commands: &mut Commands,
     menu: Entity,
     producer: &Producer,
-    current_kind: UnitKind,
     unit_registry: &UnitRegistry,
 ) {
-    let producing_name = unit_registry.name(current_kind);
-    let progress = producer.progress_fraction(unit_registry);
-
-    let progress_text = format!("Building: {} ({:.0}%)", producing_name, progress * 100.0);
-    let progress_label = commands
-        .spawn((
-            Text::new(progress_text),
-            TextFont {
-                font_size: FONT_SIZE_SMALL,
-                ..default()
-            },
-            TextColor(UI_TEXT_DIM),
-        ))
-        .id();
-    commands.entity(menu).add_child(progress_label);
-
-    let bar_container = commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(6.0),
-            ..default()
-        })
-        .id();
-
-    let bar_bg = commands
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            BackgroundColor(UI_ROW_BG),
-        ))
-        .id();
-
-    let bar_fg = commands
-        .spawn((
-            Node {
-                width: Val::Percent(progress * 100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                ..default()
-            },
-            BackgroundColor(UI_PROGRESS_COLOR),
-        ))
-        .id();
-
-    commands
-        .entity(bar_container)
-        .add_children(&[bar_bg, bar_fg]);
-    commands.entity(menu).add_child(bar_container);
-
-    // Queue display — coalesce consecutive same-kind entries into "3x Bit".
     let queue = producer.queue();
     if !queue.is_empty() {
         let mut queue_parts: Vec<String> = Vec::new();

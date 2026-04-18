@@ -71,14 +71,10 @@ fn update_order_palette(
     mut last_hash: Local<u64>,
 ) {
     let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
-    let has_ability = selected_q
+    let has_ability = selected_q.iter().any(|ut| ability_label(ut.0).is_some());
+    let ability_kind = selected_q
         .iter()
-        .any(|ut| matches!(ut.0, UnitKind::Pointer | UnitKind::Obelisk));
-    let ability_kind = selected_q.iter().find_map(|ut| match ut.0 {
-        UnitKind::Pointer => Some(UnitKind::Pointer as u64),
-        UnitKind::Obelisk => Some(UnitKind::Obelisk as u64),
-        _ => None,
-    });
+        .find_map(|ut| ability_label(ut.0).map(|_| ut.0 as u64));
 
     let mut hash: u64 = 0;
     if has_mobile {
@@ -112,8 +108,8 @@ fn update_order_palette(
             OrderPalette,
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(8.0),
-                bottom: Val::Px(8.0),
+                left: Val::Px(8.0),
+                top: Val::Px(8.0),
                 padding: UiRect::all(Val::Px(8.0)),
                 flex_direction: FlexDirection::Column,
                 row_gap: Val::Px(4.0),
@@ -157,18 +153,28 @@ fn update_order_palette(
     }
 
     if has_ability {
-        // Only one "Ability" slot today — label it after the first ability
-        // unit in the selection so the player knows which cast Q fires.
+        // Label the slot after the first ability unit in the selection so
+        // the player sees which cast `D` fires. Mirrors `interaction::ability::has_ability`.
         let name = selected_q
             .iter()
-            .find_map(|ut| match ut.0 {
-                UnitKind::Pointer => Some("NX Flag"),
-                UnitKind::Obelisk => Some("Infection"),
-                _ => None,
-            })
+            .find_map(|ut| ability_label(ut.0))
             .unwrap_or("Ability");
-        let btn = spawn_order_button(&mut commands, name, "Q", UnitOrder::CommandFire);
+        let btn = spawn_order_button(&mut commands, name, "D", UnitOrder::CommandFire);
         commands.entity(grid).add_child(btn);
+    }
+}
+
+/// Friendly name shown on the ability button for each unit kind that
+/// has a `D`-hotkey ability. Mirrors the unit-set in
+/// `interaction::ability::has_ability`.
+fn ability_label(kind: UnitKind) -> Option<&'static str> {
+    match kind {
+        UnitKind::Pointer => Some("NX Flag"),
+        UnitKind::Obelisk => Some("Infection"),
+        UnitKind::Firewall => Some("Protect"),
+        UnitKind::Byte => Some("Mine Launch"),
+        UnitKind::Terminal => Some("SIGTERM"),
+        _ => None,
     }
 }
 
@@ -261,12 +267,14 @@ fn apply_unit_orders(
     for event in ev_order.read() {
         match event.order {
             UnitOrder::Stop => {
+                use crate::units::construction::PendingBuild;
                 for entity in &selected_q {
                     commands
                         .entity(entity)
                         .remove::<MoveTarget>()
                         .remove::<MovePath>()
-                        .remove::<CommandQueue>();
+                        .remove::<CommandQueue>()
+                        .remove::<PendingBuild>();
                 }
             }
             UnitOrder::AttackMove => {

@@ -1,10 +1,13 @@
-//! Command-fire ability hotkeys.
+//! Ability hotkeys.
 //!
-//! Pressing `Q` with a caster selected (Pointer / Obelisk / Firewall /
-//! Byte) fires that unit's command ability at the cursor's ground-hit
-//! position. The cast goes through `CommandFireEvent` so
-//! `units::command_fire` owns cooldown, radius, and damage resolution —
-//! this layer just maps input to an intent.
+//! Pressing `D` with a caster selected fires that unit's "ability" at
+//! the cursor — whatever the unit kind treats as its ability:
+//! - Pointer / Obelisk / Firewall / Byte / Terminal → command-fire weapon
+//!   (NX Flag, Infection gas, etc.) routed through `CommandFireEvent`.
+//! - Port / Connection → Dispatch packets (with ALT modifier for
+//!   "drain the buffer", mirroring upstream `network_dispatch.lua`).
+//!
+//! `E` morphs Bug ↔ Exploit. `R` lets a Packet re-Enter the buffer.
 
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
@@ -55,15 +58,30 @@ fn trigger_dispatch_on_hotkey(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: bevy::picking::mesh_picking::ray_cast::MeshRayCast,
     mut ev: MessageWriter<DispatchEvent>,
+    mut commands: Commands,
 ) {
-    if !keys.just_pressed(KeyCode::KeyT) {
+    if !keys.just_pressed(KeyCode::KeyD) {
         return;
     }
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
         return;
     };
+    // Holding ALT mirrors upstream `network_dispatch.lua`: the dispatch
+    // command stays active and re-fires every frame until the team's
+    // Packet Buffer is empty, instead of stopping after one 12-batch.
+    // When ALT is held we only insert the `AutoDispatch` marker — the
+    // first batch goes out on the next frame via `tick_auto_dispatch`,
+    // avoiding a double-fire that would drain up to 24 packets in frame 1.
+    let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
     for (entity, unit) in &selected_q {
-        if unit.0.is_teleporter() {
+        if !unit.0.is_teleporter() {
+            continue;
+        }
+        if alt_held {
+            commands
+                .entity(entity)
+                .insert(crate::units::network_buffer::AutoDispatch { target });
+        } else {
             ev.write(DispatchEvent {
                 teleporter: entity,
                 target,
@@ -95,7 +113,7 @@ fn trigger_command_fire_on_hotkey(
     mut ray_cast: MeshRayCast,
     mut ev: MessageWriter<CommandFireEvent>,
 ) {
-    if !keys.just_pressed(KeyCode::KeyQ) {
+    if !keys.just_pressed(KeyCode::KeyD) {
         return;
     }
 

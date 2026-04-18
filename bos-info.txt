@@ -1,0 +1,3 @@
+Almost all BOS are meant for a linear constant of 65536, not the default.
+Except the Kernel, Socket, Assembler, Bit, Byte, Logic Bomb, Bad Block, ExpScout, and Rock
+which are made for linear constant of 163840.

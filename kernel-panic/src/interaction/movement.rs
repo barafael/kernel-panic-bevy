@@ -6,7 +6,7 @@ use spring_pathfinding::{NodeLayer, find_path};
 
 use super::selection::Selected;
 use crate::terrain::heightmap::Heightmap;
-use crate::units::combat::{DeployState, Deployable};
+use crate::units::combat::{DeployState, Deployable, Dying};
 use crate::units::components::{UnitStats, UnitType};
 use crate::units::definitions::UnitKind;
 use crate::units::unit_registry::UnitRegistry;
@@ -144,19 +144,22 @@ pub fn movement_system(
     time: Res<Time>,
     mut nav_set: Option<ResMut<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
-    mut query: Query<(
-        Entity,
-        &UnitType,
-        &UnitStats,
-        &mut Transform,
-        Option<&MoveTarget>,
-        Option<&mut MovePath>,
-        Option<&mut CommandQueue>,
-        Option<&Deployable>,
-        Option<&mut SlopeTilt>,
-        Option<&crate::units::combat::Stunned>,
-        Option<&crate::units::network_buffer::SpeedBoost>,
-    )>,
+    mut query: Query<
+        (
+            Entity,
+            &UnitType,
+            &UnitStats,
+            &mut Transform,
+            Option<&MoveTarget>,
+            Option<&mut MovePath>,
+            Option<&mut CommandQueue>,
+            Option<&Deployable>,
+            Option<&mut SlopeTilt>,
+            Option<&crate::units::combat::Stunned>,
+            Option<&crate::units::network_buffer::SpeedBoost>,
+        ),
+        Without<Dying>,
+    >,
     unit_registry: Res<UnitRegistry>,
     // Reused across frames so the full-unit snapshot doesn't reallocate
     // each tick. Dropped in favor of a spatial-hash neighborhood query

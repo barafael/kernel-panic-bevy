@@ -1,5 +1,6 @@
 pub mod lua_heightmap;
 pub mod map_types;
+pub mod mapinfo_lua;
 pub mod sd7_archive;
 pub mod smd_parser;
 pub mod smf_parser;
@@ -48,7 +49,24 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         None => None,
     };
 
-    let map_info = extracted.smd_text.as_deref().map(smd_parser::parse_smd);
+    let map_info = extracted
+        .smd_text
+        .as_deref()
+        .map(smd_parser::parse_smd)
+        .or_else(|| {
+            // Modern maps (e.g. Hex Farm) ship mapinfo.lua instead of .smd.
+            let mapinfo = extracted
+                .lua_files
+                .iter()
+                .find(|f| f.path.eq_ignore_ascii_case("mapinfo.lua"))?;
+            match mapinfo_lua::parse_mapinfo_lua(&mapinfo.content) {
+                Ok(info) => Some(info),
+                Err(error) => {
+                    eprintln!("Failed to parse mapinfo.lua: {error}");
+                    None
+                }
+            }
+        });
 
     Ok(SpringMap {
         parsed,

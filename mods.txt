@@ -1,0 +1,96 @@
+The "King Of The Hill" option:
+- The input value is a counter, in minute, of how long one must hold the center to win
+- In the beginning of the game, it does not run yet
+- A unit must be killed by an opposing unit to initiate KOTH
+- Colored gauges, one per team, appear in the center of the map
+- Whoever owns the unit closest to center gets his gauge filling
+- As soon as one fill his gauge, everybody else die
+
+The "Datavent spots" option, formerly "Metal To Geo", is meant to allow Kernel Panic to be played on maps without geovents:
+- Auto: Count the geovents, and if there are not enough, also turns metal spots into geovents.
+- Metal: Remove geovents, and then turn metal spots into geovents.
+- Geo: Leave the map as it is.
+- Both: Keep geovents and turn metal spots into additional geovents.
+
+The "ONS" option is meant to make the game friendlier to newbies, especially in wide level gap differences teams, by surrounding all homebases and minifacs that are not on the territory limits by shields that render them invulnerable:
+- ONS: Disabled : Normal game, without any of those spherical shields.
+- ONS: Homebase only : Homebase shielded as long as one other building is up.
+- ONS: Weak : Every extremities of the allied network is unshielded, non extremities are shielded.
+- ONS: Strong : Only the furthest extremities of the allied network are unshielded, non extremities or closer extremities are shielded.
+- ONS: Ultra : Only the buildings near enemies buildings are unshielded, everything else is shielded.
+
+The "Save Our Mem" option is a special gamemode where:
+- Each datavent covered give you a "sector" of memory
+- Every lost unit leaves a "Memory leak", displayed as a team colored circle
+- Memory leaks remain until free'ed by the touch of a friendly unit
+- Everys second, every memory leak decrease the amount of memory you have
+- When you are out of memory, all your mobiles units are destroyed, and your building heavily damaged.
+The input number of the mod option the sector size (amount of memory per sector). Or 0 for disabled. Negative mean insta death when out of mem.
+
+The "Color Wars" option is a special gamemode where:
+- When a timer elapse, all units turn into blocks.
+- Those blocks spread until the whole map is covered.
+- The player with most blocks is declared winner.
+The input number is the timer, in minutes. Or 0 for disabled.
+
+The "Rebalancing Formula" is a way to simply edit the balance of the game:
+- It's an edit box where you can write formula to change the units/weapons/features statistics.
+- Exemple: socket window port maxdamage /4 buildtime x0.25
+- Click the ? for help, also check infolog.txt
+- Possible keywords: unit, feature, weapon, property, (with shorthands u, f, w, p)
+- Possible aliases: light, medium, arty, heavy, mega, cons, fac, home, all, ...
+- Aliases are aliases of units, but can be preceded or followed by the keyword weapon or wreck to mean the weapon or wreck of those units
+- Possible operators: + - / x * = (x and * are the same, there's longhand Add, Substract, Multiply, Divide, Set)
+- If no operator is used, then it assumes setter.
+- Keywords can be ommited, and the code will implicitly guess them:
+- If you just write the name of an UnitDefs key, it will understand you mean a unit. Same for feature and weapon.
+- If you write something that isn't the name of unit/weapon/feature, then it will assume it's a property.
+- Except if a property was already declared but not yet operated on, in which case it will assume it's its value.
+- Also except for numbers, which are assumed to be values, possibly using implicit setter.
+- You can obviously only use + - / x on values that are numbers
+- Non existant properties can be created by setting them
+- Case is ignored, except for values
+- You can declare several units in a row, and the following properties change will be applied to all of them
+- They must be grouped, with no property/operator/operand inbetween
+- Same apply to features and weapons, obviously
+- The unit/feature/weapon names used are the internal ones, which might not be the same as the one displayed by ingame Spring tooltip!
+- If a property field is actually a table, then the operation is applied to all the item in the table (useful to change weapon damage)
+- You can apply several operations to the same property, they will be applied in succession (ex: Add 10 Mult 2)
+- If you have unit/feature/weapon/property/value that are spelled:
+- With space, tab or comma
+- As numbers
+- As operator or keyword names
+- In the form KeywordNumber or OperatorNumber
+- In the form Keyword_Number or Operator_Number
+- The same as another unit/feature/weapon/property
+Then it might be troublesome getting the edit box to do what you want.
+
+The "Heroes of Mainframe / Defense of the ENIACs" group is a special gamemode where:
+- Instead of a RTS, the game becomes a shoot'n'run
+- You control one single unit, moving with the keyboard (arrow keys), and aiming with the mouse (left button to shoot)
+- All other units are handled by an AI.
+- The one hero unit you have has superior armor and firepower, you must use it to help tip the tide of war in your favor.
+- Since only the homebase can rebuild your hero, I'd advise to use the homebase ONS mod option, or at least the "Kill homebase" end condition.
+- Each team can only have as many simultaneous "heroes" as there are human players in that team. So AI-Bot teams do not have heroes, and when several human players are team sharing, each will get his own hero.
+
+This group used to have several ModOptions to tweak the strength of heroes. Theses options have been removed since 4.3. However you can use the "Rebalancing formula" field, with the "hero" alias, to achieve the same effect. For instance, write in the "Rebalancing formula" field the line below:
+UNIT HERO MaxVelocity /3 Acceleration /3 BrakeRate /3 MaxDamage x5 WEAPON HERO Damage x2 ReloadTime x2 AreaOfEffect x2 CollideFriendly 0 GroundBounce 0
+To have heroes three time slower, with shots twice more powerful but fired half as often, with more AoE, but passing through allies and no ground hugging.
+
+Hero Right Click:
+- This setting allows or disallow controlling the rest of the team units while in hero mode.
+- The default widget can then use the rigth mouse button to issue contextual actions.
+- Any of the custom player custom widget is also free to order units.
+- The AI still keeps on issuing orders, which might conflict with yours, so don't be surprise units don't always obey you.
+
+Pre-placed Minifacs:
+- Start the game with datavents already covered, splitting the available spots fairly amongst teams.
+- This is most useful for heroes game mode, however it can also be used it independently.
+- Contrary to what name says, it also places specials (one per team, if datavent count per team is at least 4).
+
+The "Remove special buildings and abilities" option, which:
+- Removes SIGTERM, Obelisk, Firewall, ...
+- Removes NX flag, MineLauncher, Exploit, Dispatch from Connection, ...
+
+The "Force all factions to system", which:
+- Turn any homebase (kernel, hole, carrier, ..) into system's homebase (kernel)

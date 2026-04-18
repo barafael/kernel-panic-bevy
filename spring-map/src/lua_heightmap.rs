@@ -53,22 +53,50 @@ pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -
 }
 
 fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), LuaError> {
-    let lua = Lua::new();
-
     let heightmap_w = map.header.heightmap_width();
     let heightmap_h = map.header.heightmap_height();
     let world_size_x = (map.header.map_x * SQUARE_SIZE) as f32;
     let world_size_z = (map.header.map_y * SQUARE_SIZE) as f32;
 
-    // Shared mutable reference to the heights array via Rc<RefCell>.
+    // Shared mutable reference to the heights array via Rc<RefCell>. Taking
+    // heights out of `map` avoids a full clone while the gadget runs — but we
+    // must always put them back (even on error) so the map stays well-formed.
     let heights = Rc::new(RefCell::new(std::mem::take(&mut map.heights)));
+
+    let result = run_gadget_internal(
+        source,
+        &heights,
+        heightmap_w,
+        heightmap_h,
+        world_size_x,
+        world_size_z,
+    );
+
+    // Always restore heights, whether the gadget succeeded, partially
+    // succeeded, or errored before touching them.
+    map.heights = Rc::try_unwrap(heights)
+        .expect("all Lua references should be dropped after the VM is gone")
+        .into_inner();
+
+    result
+}
+
+fn run_gadget_internal(
+    source: &str,
+    heights: &Rc<RefCell<Vec<f32>>>,
+    heightmap_w: usize,
+    heightmap_h: usize,
+    world_size_x: f32,
+    world_size_z: f32,
+) -> Result<(), LuaError> {
+    let lua = Lua::new();
 
     // --- Stub the Spring table ---
     let spring_table = lua.create_table()?;
 
     // Spring.SetHeightMap(x, z, height)
     {
-        let heights_ref = Rc::clone(&heights);
+        let heights_ref = Rc::clone(heights);
         let set_height_map = lua.create_function(move |_, (x, z, height): (f32, f32, f32)| {
             let hx = (x / SQUARE_SIZE as f32).round() as usize;
             let hz = (z / SQUARE_SIZE as f32).round() as usize;
@@ -81,18 +109,19 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
         spring_table.set("SetHeightMap", set_height_map)?;
     }
 
-    // Spring.SetHeightMapFunc(func) — calls the function once
+    // Spring.SetHeightMapFunc(func, ...) — calls the function once, forwarding extra args
     {
-        let set_height_map_func = lua.create_function(|_, func: LuaFunction| {
-            func.call::<()>(())?;
-            Ok(())
-        })?;
+        let set_height_map_func =
+            lua.create_function(|_, (func, args): (LuaFunction, LuaMultiValue)| {
+                func.call::<()>(args)?;
+                Ok(())
+            })?;
         spring_table.set("SetHeightMapFunc", set_height_map_func)?;
     }
 
     // Spring.GetGroundHeight(x, z)
     {
-        let heights_ref = Rc::clone(&heights);
+        let heights_ref = Rc::clone(heights);
         let get_ground_height = lua.create_function(move |_, (x, z): (f32, f32)| {
             let hx = (x / SQUARE_SIZE as f32).round() as usize;
             let hz = (z / SQUARE_SIZE as f32).round() as usize;
@@ -106,17 +135,32 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
         spring_table.set("GetGroundHeight", get_ground_height)?;
     }
 
-    // Spring.GetMapOptions() — return empty table (defaults)
+    // Spring.GetMapOptions/GetModOptions — return empty table (defaults)
     spring_table.set(
         "GetMapOptions",
         lua.create_function(|lua, ()| lua.create_table())?,
     )?;
+    spring_table.set(
+        "GetModOptions",
+        lua.create_function(|lua, ()| lua.create_table())?,
+    )?;
 
-    // Spring.Echo(msg)
+    // Spring.Echo(msg) — accept any args and stringify the first
     spring_table.set(
         "Echo",
-        lua.create_function(|_, msg: String| {
-            eprintln!("[Lua] {msg}");
+        lua.create_function(|_, args: LuaMultiValue| {
+            let mut parts: Vec<String> = Vec::with_capacity(args.len());
+            for v in args.iter() {
+                parts.push(match v {
+                    LuaValue::String(s) => s.to_str()?.to_string(),
+                    LuaValue::Integer(i) => i.to_string(),
+                    LuaValue::Number(n) => n.to_string(),
+                    LuaValue::Boolean(b) => b.to_string(),
+                    LuaValue::Nil => "nil".to_string(),
+                    other => format!("{other:?}"),
+                });
+            }
+            eprintln!("[Lua] {}", parts.join(" "));
             Ok(())
         })?,
     )?;
@@ -126,10 +170,78 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
     spring_table.set("IsDevLuaEnabled", lua.create_function(|_, ()| Ok(false))?)?;
     spring_table.set("IsGodModeEnabled", lua.create_function(|_, ()| Ok(false))?)?;
 
-    // Feature stubs (return empty results)
+    // Team/gaia stubs — pretend we have two teams plus gaia
+    spring_table.set(
+        "GetTeamList",
+        lua.create_function(|lua, ()| {
+            let t = lua.create_table()?;
+            t.push(0)?;
+            t.push(1)?;
+            t.push(2)?; // gaia
+            Ok(t)
+        })?,
+    )?;
+    spring_table.set("GetGaiaTeamID", lua.create_function(|_, ()| Ok(2))?)?;
+
+    // Terrain / metal / smoothmesh setters — no-op (we only care about heights)
+    spring_table.set(
+        "SetMapSquareTerrainType",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set(
+        "SetMetalAmount",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set(
+        "SetSmoothMesh",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set(
+        "SetSmoothMeshFunc",
+        lua.create_function(|_, (func, args): (LuaFunction, LuaMultiValue)| {
+            func.call::<()>(args)?;
+            Ok(())
+        })?,
+    )?;
+
+    // Watchdog / config stubs
+    spring_table.set(
+        "ClearWatchDogTimer",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set(
+        "SetConfigInt",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+
+    // Feature stubs (return empty results / no-op)
     spring_table.set(
         "GetAllFeatures",
         lua.create_function(|lua, ()| lua.create_table())?,
+    )?;
+    spring_table.set(
+        "GetFeaturesInRectangle",
+        lua.create_function(|lua, _: LuaMultiValue| lua.create_table())?,
+    )?;
+    spring_table.set(
+        "GetFeaturePosition",
+        lua.create_function(|_, _: LuaMultiValue| Ok((0.0, 0.0, 0.0)))?,
+    )?;
+    spring_table.set(
+        "GetFeatureDefID",
+        lua.create_function(|_, _: LuaMultiValue| Ok(0))?,
+    )?;
+    spring_table.set(
+        "SetFeaturePosition",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set(
+        "CreateFeature",
+        lua.create_function(|_, _: LuaMultiValue| Ok(0))?,
+    )?;
+    spring_table.set(
+        "DestroyFeature",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
     )?;
 
     lua.globals().set("Spring", spring_table)?;
@@ -138,12 +250,44 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
     let game_table = lua.create_table()?;
     game_table.set("mapSizeX", world_size_x as i32)?;
     game_table.set("mapSizeZ", world_size_z as i32)?;
+    // modName drives mod-specific branches in HexFarm — claim we're kernel-panic.
+    game_table.set("modName", "Kernel Panic")?;
+    game_table.set("startPosType", 0)?; // fixed start positions
+    let armor_types = lua.create_table()?;
+    armor_types.set("default", 1)?;
+    game_table.set("armorTypes", armor_types)?;
     lua.globals().set("Game", game_table)?;
+
+    // --- Stub UnitDefNames / UnitDefs / FeatureDefs / WeaponDefs ---
+    // UnitDefNames is accessed like UnitDefNames["kernel"]; HexFarm uses it to
+    // pick a skin, and the "kernel" branch is the right one for us.
+    let unit_def_names = lua.create_table()?;
+    unit_def_names.set("kernel", lua.create_table()?)?;
+    lua.globals().set("UnitDefNames", unit_def_names)?;
+    lua.globals().set("UnitDefs", lua.create_table()?)?;
+    lua.globals().set("FeatureDefs", lua.create_table()?)?;
+    lua.globals().set("WeaponDefs", lua.create_table()?)?;
 
     // --- Stub gadgetHandler ---
     let gadget_handler = lua.create_table()?;
     gadget_handler.set("IsSyncedCode", lua.create_function(|_, ()| Ok(true))?)?;
+    gadget_handler.set(
+        "RemoveCallIn",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    gadget_handler.set(
+        "RemoveGadget",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
     lua.globals().set("gadgetHandler", gadget_handler)?;
+
+    // --- Stub Script (some gadgets call Script.SetWatchWeapon etc) ---
+    let script_table = lua.create_table()?;
+    script_table.set(
+        "SetWatchWeapon",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    lua.globals().set("Script", script_table)?;
 
     // --- Load the gadget source ---
     // Spring gadgets use `function gadget:GetInfo()` and `function gadget:Initialize()`.
@@ -158,14 +302,6 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
     if let Ok(init_fn) = gadget_table.get::<LuaFunction>("Initialize") {
         init_fn.call::<()>(gadget_table)?;
     }
-
-    // Drop the Lua VM to release all Rc references before unwrapping.
-    drop(lua);
-
-    // Retrieve the modified heights.
-    map.heights = Rc::try_unwrap(heights)
-        .expect("all Lua references should be dropped after Lua VM drop")
-        .into_inner();
 
     Ok(())
 }

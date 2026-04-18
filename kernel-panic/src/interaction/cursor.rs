@@ -157,8 +157,7 @@ impl CursorRequest {
 /// priority.
 fn resolve_context_cursor(
     mut request: ResMut<CursorRequest>,
-    selected: Query<(), With<Selected>>,
-    selected_with_speed: Query<&UnitType, With<Selected>>,
+    selected: Query<&UnitType, With<Selected>>,
     hovered: Query<&TeamId, (With<Hovered>, With<UnitType>)>,
     player: Res<PlayerTeam>,
     unit_registry: Res<UnitRegistry>,
@@ -168,18 +167,43 @@ fn resolve_context_cursor(
         return;
     }
 
-    let selection_can_act = selected_with_speed
-        .iter()
-        .any(|ut| unit_registry.speed(ut.0) > 0.0);
-    if !selection_can_act {
-        request.set(CursorKind::Normal, 0);
-        return;
+    let mut has_mover = false;
+    let mut has_weapon = false;
+    let mut has_constructor = false;
+    for ut in &selected {
+        if unit_registry.speed(ut.0) > 0.0 {
+            has_mover = true;
+        }
+        if !unit_registry.weapon(ut.0).is_empty() {
+            has_weapon = true;
+        }
+        if ut.0.is_constructor() {
+            has_constructor = true;
+        }
     }
 
     match hovered.iter().next() {
-        Some(team) if team.0 != player.0 => request.set(CursorKind::Attack, 0),
-        Some(_) => request.set(CursorKind::Normal, 0),
-        None => request.set(CursorKind::Move, 0),
+        Some(team) if team.0 != player.0 => {
+            if has_weapon {
+                request.set(CursorKind::Attack, 0);
+            } else {
+                request.set(CursorKind::Normal, 0);
+            }
+        }
+        Some(_) => {
+            if has_constructor {
+                request.set(CursorKind::Repair, 0);
+            } else {
+                request.set(CursorKind::Normal, 0);
+            }
+        }
+        None => {
+            if has_mover {
+                request.set(CursorKind::Move, 0);
+            } else {
+                request.set(CursorKind::Normal, 0);
+            }
+        }
     }
 }
 

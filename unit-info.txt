@@ -1,0 +1,68 @@
+==================----------------------------------
+Units Description:
+==========------------------------------------------
+CPU units:
+----------
+Kernel: You start with one of these. It can build all mobile units in the game. Has rapid auto-heal and lots of health.
+
+Socket: The socket is a factory which can only be built on a datavent. It can solely build bits, and slower than the kernel can. It autoheals, and has a decent amount of health.
+
+Terminal: This is a new structure that gets placed on datavents. It can dispatch a nuclear bomber once every 120 seconds that will deal about 16000 damage to a large target area, i.e. it destroys everything except factories. It does much less damage to the kernel and hole. The bomber can strike any position on the map, there is no defense.
+
+Assembler: The assembler is a construction unit. It can build sockets, but it cannot assist-build. Slow, little health. Equipped with a radar to detect mines and other cloacked units.
+
+Bit: Your basic attacking unit. Cheap, fast, small, not very much health. Is armed with a SPARCling laser. Can be built by a kernel or a socket.
+
+Byte: A large, strong, and slow attacking unit. Can holds it's own against many bits, as it has lots of health and a powerful gun. More armored when closed. Can plow through bad blocks. In division zero, the byte has an alternate firing mode, the mine launcher, that throw 5 mines at the cost of 6000hp.
+
+Pointer: An artillery unit. Its normal shot is not so useful against moving units, but can kill kernels and sockets pretty quickly. Is slow and has little health, so it needs protection. In division zero, the pointer has an alternate firing mode, the NX Flag, which set a wide area ablaze for a minute.
+
+=============---------------------------------------
+Hacker units:
+-------------
+Security Hole: The Hacker kernel equivalent.
+
+Window: The Hacker socket equivalent.
+
+Obelisk: This building is a stationary artillery weapon, it can fire an infection shot every 40 seconds (the obelisk has a pink fire on top when it's ready to shoot) that will cover a large area in poison. The poison does a bit of damage (about 1000) and turns any enemy that dies inside the cloud into a Virus. The weapon's range is fairly limited. Best used against stationnary herds of Bits/Bugs.
+
+Virus: A crappy little swarm unit. It cannot be built but is produced when killing enemy units with certain weapons. Namely, the Virus, the Worm, and the Obelisk.
+
+Bug: The Hacker spam unit. The Bug is weaker than the Bit but can sense movement outside of its LOS. It has a stronger weapon and more range but cannot shoot at things behind it or through friendly units and won't take much damage before dying. The mine ability of the old bug has been removed. Instead it can now morph into the Exploit with the deploy button, or the bombard button.
+
+Exploit: This is the new name for the bug cannon. It's a building the Bug morphs into with the deploy or bombard command. The Exploit is a stationary artillery emplacement that does more damage the further the target is away. Even more frail than the Bug, so don't let any foe come near.
+
+Denial of Service: Not an artillery, but close: fire a beam that stun units. For bigger targets it'll take longer to stun them so perform a DDoS (use multiple) to stun them fast. Once the DoS stops firing the target will quickly unfreeze. It moves faster than the pointer but causes a particle trail that can be seen from far away.
+
+Worm: The worm is a sneaky assassin, travelling cloacked, then surfacing only to kill many bits at once with its large area of effect weapon, which turn any slain units into virus. The worm large splash damage will damage your own units. However, it does practicaly no damage against other worms or virus. When cloacked, the worm does not automatically attack, you have to give attack orders manually. If you'd rather have your worms auto-attack even when cloacked, set autohold to off. The autohold setting of new worms is inherited from the Security Hole.
+
+Trojan: This unit is your constructor as well as radar platform (needed for detecting mines and cloaked units), just like the assembler. It builds all the same stuff as the assembler, except it has the window instead of the socket and the obelisk instead of the terminal.
+
+========--------------------------------------------
+Network:
+--------
+The network faction is built around mobility, its small factories (Ports) don't produce units openly but instead move them into a cache (the Buffer). Packets in the Buffer can be materialized at any teleporter unit (currently that means the Port and the Connection), it's also possible to move the Packets back into the Buffer by making them enter a teleport.
+
+Carrier: The base building, like a Kernel or Security Hole.
+
+Port: The production building. It puts Packets into the Buffer, to materialize them select the Dispatch command. Dispatch will send 12 Packets if available, you can hold ALT when giving the order to make the Port dispatch until the Buffer is empty.
+
+Packet: The basic light spam unit, it's weaker in combat than both competitors but much faster.
+
+Connection: Mostly a mobile teleporter (i.e. can dispatch Packets and let them enter like a Port). The Connection has decent armor and an arc beam that can do a lot of damage to single targets and has good range. It can defeat most large units one on one but engaging Bytes will probably result in pointer fire which the Connection cannot withstand and the arc beam is not optimal for engaging swarms.
+
+Flow: An air unit. The Flow moves fairly slowly but can of course cross any terrain. It's equipped to attack light targets (spam units and fire support) but it's highly vulnerable to return fire. If you want to use them in open combat give them a meatshield and hope the enemy doesn't field long range units, Pointers, DoSes and Connections make short work of Flows if they hit.
+
+Gateway: The constructor. It is lightly armed to help against enemy raids.
+
+Firewall: This building can cover units (affects friendly units in a certain radius around the target location) in a protective shield for 20 seconds. The shield halves all damage the unit receives and throws the other half back at the attacker.
+
+===============-------------------------------------
+All side units:
+---------------
+Bad Block: A tiny wall that block small units movement. Do not block any shot however. Easily removed by the Debug or simply crushing them with a Byte.
+
+Logic Bomb: A mine that can be built by the Assembler/Trojan. It takes out Bits in a single blow, has a decent damage radius, and doesn't chain explode. Use with care, as the blast hurts your own units too. Limited to 64.
+
+Debug: An easy way to clear an area of all mines and walls, this is a one shot weapon built by the Assembler/Trojan.
+
