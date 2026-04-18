@@ -1,0 +1,27 @@
+x Marble_Madness_Map.sd7 ( 11 KB)
+x Direct_Memory_Access_0.5c_beta.sd7 ( 64 KB)
+x Direct_Memory_Access_0.5e_beta.sd7 ( 64 KB)
+x Major_Madness3.0.sd7 ( 285 KB)
+x Speed_Balls_16_Way.sdz ( 3729 KB)
+x DigitalDivide_PT2.sd7 ( 293 KB)
+x Spooler_Buffer_0.5_beta.sd7 ( 34 KB)
+x Data_Cache_L1.sd7 ( 43 KB)
+x Palladium_0.5_(beta).sd7 ( 179 KB)
+x Central_Hub.sd7 ( 229 KB)
+x Corrupted_Core.sd7 ( 181 KB)
+x Dual_Core.sd7 ( 245 KB)
+x Quad_Core.sd7 ( 356 KB)
+x Memory_Bank_v3.sdz ( 1387 KB)
+x pacman.sd7 ( 99 KB)
+x Hex_Farm_8.sd7 ( 11526 KB)
+If you don't have those maps, I suggest getting Kernel_Panic_4.9.zip wich contains maps and mods, or to check:
+x http://spring.clan-sy.com/wiki/Kernel_Panic
+x http://www.springfiles.com
+x http://spring.jobjol.nl
+x http://caspring.org/wiki/sd
+x http://www.springinfo.info/ (also community portal)
+x AF: http://www.darkstars.co.uk/downloads/
+x BLC: http://spring-portal.com
+x FA: http://evolutionrts.info/maps/
+x M_A_D: http://www.tasdownloads.com/
+x iamacup: http://www.unknown-files.net/
