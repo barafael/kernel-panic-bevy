@@ -122,13 +122,17 @@ pub(super) fn tick_weapon_fx(
     // fast), fade by shrinking the quad, billboard toward camera, despawn at
     // end of life. Material is shared, so per-particle alpha must come from
     // scale rather than mutating colour.
-    let cam_pos = camera_q
-        .single()
-        .inspect_err(
-            |error| warn!(%error, "weapon_fx: camera query failed, using Vec3::Y*1000 fallback"),
-        )
-        .map(|gt| gt.translation())
-        .unwrap_or(Vec3::Y * 1000.0);
+    let cam_pos = if sparkles.is_empty() {
+        Vec3::ZERO // unused — loop won't run
+    } else {
+        camera_q
+            .single()
+            .inspect_err(
+                |error| warn!(%error, "weapon_fx: camera query failed, using Vec3::Y*1000 fallback"),
+            )
+            .map(|gt| gt.translation())
+            .unwrap_or(Vec3::Y * 1000.0)
+    };
     for (entity, mut sparkle, mut transform) in &mut sparkles {
         sparkle.lifetime -= dt;
         if sparkle.lifetime <= 0.0 {
@@ -189,7 +193,7 @@ pub(super) fn tick_weapon_fx(
             1.0
         };
         let r = flash.base_radius * grow * fade;
-        transform.scale = Vec3::new(r, r, r);
+        transform.scale = Vec3::splat(r);
     }
 }
 

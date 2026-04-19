@@ -70,11 +70,6 @@ pub fn update_cloak_visibility(
     }
     timer.0 = 0.0;
 
-    // With AI removed and every team player-controllable, there's no
-    // "enemy" perspective to hide cloaked units from — the player owns
-    // all three factions, so every Worm / Logic Bomb belongs to them.
-    // Force all cloaked units visible; the detector-range reveal path
-    // becomes a no-op in this sandbox mode.
     for mut visibility in &mut cloaked {
         if *visibility != Visibility::Visible {
             *visibility = Visibility::Visible;
@@ -189,10 +184,6 @@ pub fn update_fog_visibility(
     }
     *timer = 0.0;
 
-    // Player-controls-everything sandbox: no fog. Every non-cloaked unit
-    // is visible to the camera regardless of which team owns it. The
-    // `Spotted` marker and detector-range reveal logic are dormant but
-    // kept in the codebase for when a real player/AI split lands.
     for mut visibility in &mut targets {
         if *visibility != Visibility::Visible {
             *visibility = Visibility::Visible;

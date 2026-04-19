@@ -189,7 +189,6 @@ pub fn spawn_homebases(
         (cx - radius * 0.5, cz - radius * 0.866),
         (cx - radius * 0.5, cz + radius * 0.866),
     ];
-    let margin = CLUSTER_STANDOFF;
 
     // Resolve every faction's homebase position up front so we can
     // block datavents that sit inside any homebase's footprint before
@@ -202,8 +201,8 @@ pub fn spawn_homebases(
                 .get(i)
                 .map(|sp| (sp.x, sp.z))
                 .unwrap_or(fallback_positions[i]);
-            let fx = fx.clamp(margin, world_w - margin);
-            let fz = fz.clamp(margin, world_d - margin);
+            let fx = fx.clamp(CLUSTER_STANDOFF, world_w - CLUSTER_STANDOFF);
+            let fz = fz.clamp(CLUSTER_STANDOFF, world_d - CLUSTER_STANDOFF);
             out[i] = heightmap.place(fx, fz);
         }
         out
@@ -404,7 +403,9 @@ pub fn spawn_unit(
     // vertices spanning y∈[-48,48]). If we plant the root at the
     // heightmap, half the model sinks below ground. Lift the spawn point
     // by however much the lowest vertex extends below piece-tree origin.
-    let ground_lift = crate::units::assets::meshes::load_s3o_model(model_name, model_cache)
+    let s3o_model = crate::units::assets::meshes::load_s3o_model(model_name, model_cache);
+    let ground_lift = s3o_model
+        .as_ref()
         .map(|m| compute_ground_lift(&m.root_piece, [0.0, 0.0, 0.0]))
         .unwrap_or(0.0);
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
@@ -479,9 +480,6 @@ pub fn spawn_unit(
         ))
         .id();
     commands.entity(unit_entity).add_child(sel_child);
-
-    // Try to load the s3o model and build per-piece children.
-    let s3o_model = crate::units::assets::meshes::load_s3o_model(model_name, model_cache);
 
     if let Some(model) = &s3o_model {
         // Flatten the piece tree into a list, spawning each as a child entity.

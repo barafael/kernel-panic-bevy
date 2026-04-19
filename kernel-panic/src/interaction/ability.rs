@@ -23,6 +23,10 @@ use crate::units::mechanics::command_fire::CommandFireEvent;
 use crate::units::mechanics::deploy::DeployEvent;
 use crate::units::mechanics::network_buffer::{DispatchEvent, EnterEvent};
 
+fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
+}
+
 pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
@@ -63,8 +67,7 @@ fn trigger_self_destruct_on_hotkey(
     selected_q: Query<Entity, With<Selected>>,
     mut commands: Commands,
 ) {
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    if !ctrl || !keys.just_pressed(KeyCode::KeyD) {
+    if !ctrl_held(&keys) || !keys.just_pressed(KeyCode::KeyD) {
         return;
     }
     for entity in &selected_q {
@@ -86,8 +89,7 @@ fn trigger_deploy_on_hotkey(
     if !keys.just_pressed(KeyCode::KeyD) {
         return;
     }
-    // Ctrl+D is self-destruct — don't also deploy.
-    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+    if ctrl_held(&keys) {
         return;
     }
     for (entity, unit) in &selected_q {
@@ -109,8 +111,7 @@ fn trigger_dispatch_on_hotkey(
     if !keys.just_pressed(KeyCode::KeyD) {
         return;
     }
-    // Ctrl+D is self-destruct — don't dispatch packets as a side effect.
-    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+    if ctrl_held(&keys) {
         return;
     }
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
@@ -166,8 +167,7 @@ fn trigger_command_fire_on_hotkey(
     if !keys.just_pressed(KeyCode::KeyD) {
         return;
     }
-    // Ctrl+D is the self-destruct hotkey — don't also fire the ability.
-    if keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight) {
+    if ctrl_held(&keys) {
         return;
     }
 
@@ -196,8 +196,7 @@ fn toggle_attack_ground_mode(
 ) {
     // Ignore A while Ctrl is down so Ctrl+A (reserved for select-all
     // in future) doesn't toggle this mode.
-    let ctrl = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    if !ctrl && keys.just_pressed(KeyCode::KeyA) {
+    if !ctrl_held(&keys) && keys.just_pressed(KeyCode::KeyA) {
         mode.active = !mode.active;
         return;
     }

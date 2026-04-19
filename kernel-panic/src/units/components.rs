@@ -66,6 +66,14 @@ impl Faction {
             Faction::Network => UnitKind::Port,
         }
     }
+
+    /// Faction color as linear `[r, g, b]` in 0-1 range. Shared by weapon-fx
+    /// SFX routing and death-explosion fallback coloring.
+    pub fn rgb_f32(self) -> [f32; 3] {
+        use bevy::color::LinearRgba;
+        let c = LinearRgba::from(self.color());
+        [c.red, c.green, c.blue]
+    }
 }
 
 /// What type of unit this is.

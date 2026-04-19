@@ -821,6 +821,11 @@ fn compute_path(
 /// Drawn back-to-back they form a repeating `-.-.` run.
 const DASH_PATTERN: [(f32, bool); 4] = [(16.0, true), (6.0, false), (4.0, true), (6.0, false)];
 
+fn sample_at_ground(x: f32, z: f32, heightmap: Option<&Heightmap>) -> Vec3 {
+    let y = heightmap.map(|h| h.sample(x, z)).unwrap_or(0.0);
+    Vec3::new(x, y + GIZMO_LIFT, z)
+}
+
 /// Draw the path each selected unit is walking (actual waypoint polyline,
 /// hugging the terrain) plus a disc marker at each pending destination —
 /// current `MoveTarget` and every `QueuedCommand`. The line follows the
@@ -846,13 +851,6 @@ pub fn draw_selected_command_lines(
 
     let hm = heightmap.as_deref();
 
-    // Place `(x, z)` on terrain with a small lift so the line/disc hovers
-    // just above the surface instead of z-fighting with it.
-    let at_ground = |x: f32, z: f32| -> Vec3 {
-        let y = hm.map(|h| h.sample(x, z)).unwrap_or(0.0);
-        Vec3::new(x, y + GIZMO_LIFT, z)
-    };
-
     for (transform, target, path, queue) in &query {
         let Some(current) = target else {
             continue;
@@ -861,16 +859,19 @@ pub fn draw_selected_command_lines(
         // Collect the sequence of polyline vertices: unit → remaining
         // waypoints. If no path exists yet (freshly-issued order), fall
         // back to unit → current target so the player sees something.
-        let mut points: Vec<Vec3> =
-            vec![at_ground(transform.translation.x, transform.translation.z)];
+        let mut points: Vec<Vec3> = vec![sample_at_ground(
+            transform.translation.x,
+            transform.translation.z,
+            hm,
+        )];
         if let Some(path) = path
             && path.current < path.waypoints.len()
         {
             for wp in &path.waypoints[path.current..] {
-                points.push(at_ground(wp.x, wp.z));
+                points.push(sample_at_ground(wp.x, wp.z, hm));
             }
         } else {
-            points.push(at_ground(current.0.x, current.0.z));
+            points.push(sample_at_ground(current.0.x, current.0.z, hm));
         }
 
         draw_dashed_polyline(&mut gizmos, &points, MOVE_COLOR, hm);
@@ -889,7 +890,7 @@ pub fn draw_selected_command_lines(
             let mut prev = end;
             for cmd in &queue.commands {
                 let pos = cmd.position();
-                let to = at_ground(pos.x, pos.z);
+                let to = sample_at_ground(pos.x, pos.z, hm);
                 let color = match cmd {
                     QueuedCommand::Move(_) => MOVE_COLOR,
                     QueuedCommand::BuildAt { .. } => BUILD_COLOR,
@@ -915,10 +916,6 @@ fn draw_dashed_polyline(
     color: Color,
     heightmap: Option<&Heightmap>,
 ) {
-    let at_ground = |x: f32, z: f32| -> Vec3 {
-        let y = heightmap.map(|h| h.sample(x, z)).unwrap_or(0.0);
-        Vec3::new(x, y + GIZMO_LIFT, z)
-    };
     // Pattern walker: `cursor` is how far into the current pattern entry
     // we've consumed. Persisting across segments keeps the `-.-.` rhythm
     // continuous through waypoint corners.
@@ -944,10 +941,11 @@ fn draw_dashed_polyline(
             let advance = remaining.min(seg_len - t);
 
             if visible {
-                let a = at_ground(start.x + step_x * t, start.z + step_z * t);
-                let b = at_ground(
+                let a = sample_at_ground(start.x + step_x * t, start.z + step_z * t, heightmap);
+                let b = sample_at_ground(
                     start.x + step_x * (t + advance),
                     start.z + step_z * (t + advance),
+                    heightmap,
                 );
                 gizmos.line(a, b, color);
             }

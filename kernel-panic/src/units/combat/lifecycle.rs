@@ -261,7 +261,7 @@ pub fn death_system(
                 let rgb = weapon
                     .map(|w| w.rgb_color)
                     .filter(|c| c[0] + c[1] + c[2] > 0.01)
-                    .unwrap_or_else(|| faction_rgb(*faction));
+                    .unwrap_or_else(|| faction.rgb_f32());
                 explosions.events.push(ExplosionEvent { pos, rgb, radius });
             } else {
                 // Even units without an ExplodeAs get a small faction-
@@ -269,7 +269,7 @@ pub fn death_system(
                 // silently, which reads as a bug.
                 explosions.events.push(ExplosionEvent {
                     pos,
-                    rgb: faction_rgb(*faction),
+                    rgb: faction.rgb_f32(),
                     radius: 16.0,
                 });
             }
@@ -279,14 +279,6 @@ pub fn death_system(
             });
         }
     }
-}
-
-/// Faction-tinted fallback colour for death explosions whose `ExplodeAs`
-/// weapon has no configured `rgbcolor`. Matches the FEATURES.md §21 rule
-/// that System = green, Hacker = red, Network = blue.
-fn faction_rgb(faction: Faction) -> [f32; 3] {
-    let c = LinearRgba::from(faction.color());
-    [c.red, c.green, c.blue]
 }
 
 /// Tick every [`SelfDestructCountdown`] and, when it reaches zero,

@@ -540,7 +540,7 @@ fn dispatch_emit_sfx(
         (2.5, 0.6)
     };
 
-    let base = faction_rgb(faction);
+    let base = faction.rgb_f32();
     let rgb = [
         base[0] * intensity,
         base[1] * intensity,
@@ -548,14 +548,6 @@ fn dispatch_emit_sfx(
     ];
 
     explosions.events.push(ExplosionEvent { pos, rgb, radius });
-}
-
-/// Faction → normalised RGB for SFX pops. Matches the
-/// `DeathParticleAssets::material_for` colour so a unit that emits a
-/// fire-sfx burst and a piece-explode burst reads as the same palette.
-fn faction_rgb(faction: Faction) -> [f32; 3] {
-    let c = LinearRgba::from(faction.color());
-    [c.red, c.green, c.blue]
 }
 
 // ---------------------------------------------------------------------------
