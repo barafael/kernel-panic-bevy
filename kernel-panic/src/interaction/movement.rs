@@ -8,8 +8,8 @@ use super::selection::Selected;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{DeployState, Deployable, Dying};
 use crate::units::components::{UnitStats, UnitType};
-use crate::units::definitions::UnitKind;
-use crate::units::unit_registry::UnitRegistry;
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
 
 /// Rate at which the pitch/roll component of a unit's rotation relaxes
 /// toward the slope-aligned target. Higher = snappier tilt, lower = more
@@ -156,7 +156,7 @@ pub fn movement_system(
             Option<&Deployable>,
             Option<&mut SlopeTilt>,
             Option<&crate::units::combat::Stunned>,
-            Option<&crate::units::network_buffer::SpeedBoost>,
+            Option<&crate::units::mechanics::network_buffer::SpeedBoost>,
         ),
         Without<Dying>,
     >,
@@ -279,20 +279,20 @@ pub fn movement_system(
                     commands
                         .entity(entity)
                         .insert(MoveTarget(pos))
-                        .remove::<crate::units::construction::PendingBuild>();
+                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
                 }
                 Some(QueuedCommand::BuildAt { kind, site }) => {
                     commands
                         .entity(entity)
                         .insert(MoveTarget(site))
-                        .insert(crate::units::construction::PendingBuild { kind, site });
+                        .insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
                 }
                 None => {
                     commands.entity(entity).remove::<MoveTarget>();
                     commands.entity(entity).remove::<CommandQueue>();
                     commands
                         .entity(entity)
-                        .remove::<crate::units::construction::PendingBuild>();
+                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
                 }
             }
             continue;
@@ -588,7 +588,7 @@ fn waypoint_blocked_by_arrived_unit(
 pub fn unit_separation_system(
     mut units: Query<
         (Entity, &mut Transform, &UnitStats),
-        Without<crate::units::spawning::Emerging>,
+        Without<crate::units::lifecycle::spawning::Emerging>,
     >,
     time: Res<Time>,
     heightmap: Option<Res<Heightmap>>,
@@ -711,6 +711,79 @@ pub fn ground_clamp_system(
         if transform.translation.y < ground {
             transform.translation.y = ground;
         }
+    }
+}
+
+/// Orient every stationary unit (no active move order) to the terrain
+/// normal, preserving its current yaw. Counterpart to the slope-tilt
+/// block inside `movement_system`: that one only fires for units with
+/// a live `MovePath`, so factories and idle mobile units would stay
+/// axis-aligned and read as floating off sloped ground.
+///
+/// Flying units skip — they already ride `cruise_alt` above the
+/// heightmap and shouldn't pick up a slope from the terrain below.
+#[allow(clippy::type_complexity)]
+pub fn orient_stationary_to_terrain(
+    heightmap: Option<Res<Heightmap>>,
+    mut q: Query<(
+        Entity,
+        &mut Transform,
+        Option<&mut SlopeTilt>,
+        &UnitStats,
+        &UnitType,
+        Option<&MoveTarget>,
+        Option<&MovePath>,
+    )>,
+    mut commands: Commands,
+) {
+    let Some(heightmap) = heightmap else {
+        return;
+    };
+    for (entity, mut transform, mut slope_tilt, stats, unit_type, move_target, move_path) in &mut q
+    {
+        if stats.can_fly || unit_type.0.is_subterranean() {
+            continue;
+        }
+        // If the unit is actively pathing, `movement_system` owns its
+        // rotation this frame — skip so we don't fight that system's
+        // slerp toward the steering target.
+        if move_target.is_some() || move_path.is_some() {
+            continue;
+        }
+
+        let pos = transform.translation;
+        let normal = heightmap.normal(pos.x, pos.z);
+
+        // Preserve yaw: read the current forward, flatten to XZ, and
+        // build a yaw-only rotation from it. Stationary buildings start
+        // at yaw=0 (facing -Z); mobile units keep whichever yaw they
+        // finished their last move order with.
+        let forward = transform.forward().as_vec3();
+        let forward_xz = {
+            let f = Vec3::new(forward.x, 0.0, forward.z);
+            if f.length_squared() < 1e-6 {
+                -Vec3::Z
+            } else {
+                f.normalize()
+            }
+        };
+        let yaw_only = Transform::IDENTITY.looking_to(forward_xz, Vec3::Y).rotation;
+
+        let body_right = Vec3::new(forward_xz.z, 0.0, -forward_xz.x);
+        let pitch = (-forward_xz.dot(normal) / normal.y.max(1e-4)).atan();
+        let roll = (-body_right.dot(normal) / normal.y.max(1e-4)).atan();
+        let target_tilt =
+            Quat::from_axis_angle(Vec3::X, pitch) * Quat::from_axis_angle(Vec3::Z, roll);
+
+        match slope_tilt.as_deref_mut() {
+            Some(t) => {
+                t.0 = target_tilt;
+            }
+            None => {
+                commands.entity(entity).insert(SlopeTilt(target_tilt));
+            }
+        }
+        transform.rotation = yaw_only * target_tilt;
     }
 }
 

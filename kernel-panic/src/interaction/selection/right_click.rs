@@ -201,10 +201,10 @@ pub(crate) fn apply_ordered_command(
             .remove::<MovePath>();
         match cmd {
             QueuedCommand::BuildAt { kind, site } => {
-                ec.insert(crate::units::construction::PendingBuild { kind, site });
+                ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
             }
             QueuedCommand::Move(_) => {
-                ec.remove::<crate::units::construction::PendingBuild>();
+                ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
             }
         }
     }

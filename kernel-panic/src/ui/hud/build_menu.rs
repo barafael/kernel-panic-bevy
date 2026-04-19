@@ -12,10 +12,10 @@ use super::style::{
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, UnitType};
-use crate::units::construction::buildings_for;
-use crate::units::definitions::UnitKind;
-use crate::units::production::Producer;
-use crate::units::unit_registry::UnitRegistry;
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::lifecycle::construction::buildings_for;
+use crate::units::lifecycle::production::Producer;
 
 pub struct BuildMenuPlugin;
 
@@ -77,11 +77,14 @@ fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
             UnitKind::Trojan,
         ],
         UnitKind::Window => &[UnitKind::Bug],
-        UnitKind::Connection => &[
+        // Upstream `SIDEDATA.TDF [carrier]`: packet, connection, flow,
+        // gateway. All mobile — buildings come from the Gateway, which
+        // is the Network line's mobile constructor.
+        UnitKind::Carrier => &[
             UnitKind::Packet,
-            UnitKind::Signal,
-            UnitKind::Gateway,
+            UnitKind::Connection,
             UnitKind::Flow,
+            UnitKind::Gateway,
         ],
         UnitKind::Port => &[UnitKind::Packet],
         kind if kind.is_constructor() => buildings_for(kind),
@@ -117,9 +120,6 @@ fn update_build_menu(
             hash = hash
                 .wrapping_mul(2654435761)
                 .wrapping_add(kind as u64 | 0x1000);
-            hash = hash
-                .wrapping_mul(2654435761)
-                .wrapping_add((producer.progress_fraction(&unit_registry) * 100.0) as u64);
         }
         hash = hash
             .wrapping_mul(2654435761)
@@ -207,10 +207,25 @@ fn update_build_menu(
         .id();
     commands.entity(menu).add_child(grid);
 
+    // Count how many of each kind are queued on the producer in focus, so
+    // each build icon can surface its own pending-count badge (FEATURES.md §4).
+    let queue_counts: std::collections::HashMap<UnitKind, u32> = producer_q
+        .iter()
+        .next()
+        .map(|(producer, _)| {
+            let mut counts = std::collections::HashMap::new();
+            for kind in producer.queue() {
+                *counts.entry(*kind).or_insert(0u32) += 1;
+            }
+            counts
+        })
+        .unwrap_or_default();
+
     for kind in options {
         let name = unit_registry.name(*kind);
         let preview = previews.get(*kind).cloned();
-        let icon = spawn_build_icon(&mut commands, name, faction, *kind, preview);
+        let count = queue_counts.get(kind).copied().unwrap_or(0);
+        let icon = spawn_build_icon(&mut commands, name, faction, *kind, preview, count);
         commands.entity(grid).add_child(icon);
     }
 }
@@ -275,6 +290,7 @@ fn spawn_build_icon(
     faction: &Faction,
     kind: UnitKind,
     preview: Option<Handle<Image>>,
+    queue_count: u32,
 ) -> Entity {
     let icon = commands
         .spawn((
@@ -323,6 +339,31 @@ fn spawn_build_icon(
         ))
         .id();
     commands.entity(icon).add_child(name_label);
+
+    // Queue-count badge in the bottom-left corner (FEATURES.md §4).
+    // Hidden entirely when the queue is empty so the empty state reads
+    // clean; rendered as an absolutely-positioned text node so it sits
+    // inside the icon's bounds regardless of layout rounding.
+    if queue_count > 0 {
+        let badge = commands
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(2.0),
+                    bottom: Val::Px(2.0),
+                    ..default()
+                },
+                Text::new(queue_count.to_string()),
+                TextFont {
+                    font_size: FONT_SIZE_SMALL,
+                    ..default()
+                },
+                TextColor(UI_TEXT_COLOR),
+                BackgroundColor(UI_PANEL_TINT),
+            ))
+            .id();
+        commands.entity(icon).add_child(badge);
+    }
 
     icon
 }

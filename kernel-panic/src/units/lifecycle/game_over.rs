@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use super::components::{Homebase, TeamId};
+use crate::units::components::{Homebase, TeamId};
 
 /// Current game state. Systems in gameplay sets only run in `Playing`.
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -11,36 +11,43 @@ pub enum GameState {
     Defeat,
 }
 
-/// The player's team ID (team 0 by default).
-#[derive(Resource, Default)]
-pub struct PlayerTeam(pub u8);
-
 /// UI entity for the game-over overlay.
 #[derive(Component)]
 pub struct GameOverUi;
 
-/// Check if the game is over: player loses all homebases → defeat,
-/// all enemy homebases destroyed → victory.
+/// Sandbox-mode game-over check: with AI removed and every team
+/// player-controllable, there's no "enemy" perspective. We declare
+/// victory once a single team has all surviving homebases, and defeat
+/// if every homebase on the map is gone.
 pub fn check_game_over(
     homebases: Query<&TeamId, With<Homebase>>,
-    player_team: Res<PlayerTeam>,
     mut next_state: ResMut<NextState<GameState>>,
     mut commands: Commands,
     existing_ui: Query<Entity, With<GameOverUi>>,
 ) {
-    // Sandbox maps may not spawn any homebases. Without this guard the
-    // player would be flagged "no homebase = defeat" on the very first
-    // frame, freezing every gameplay system before the user could see
-    // anything.
-    if homebases.is_empty() {
+    // Maps with no homebases (test / sandbox variants) never flip state.
+    if homebases.is_empty() && existing_ui.is_empty() {
         return;
     }
-    let player_alive = homebases.iter().any(|t| t.0 == player_team.0);
-    let enemies_alive = homebases.iter().any(|t| t.0 != player_team.0);
 
-    let new_state = if !player_alive {
+    let mut first_team: Option<u8> = None;
+    let mut only_one = true;
+    let mut any = false;
+    for t in &homebases {
+        any = true;
+        match first_team {
+            None => first_team = Some(t.0),
+            Some(ft) if ft != t.0 => {
+                only_one = false;
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    let new_state = if !any {
         GameState::Defeat
-    } else if !enemies_alive {
+    } else if only_one {
         GameState::Victory
     } else {
         return;

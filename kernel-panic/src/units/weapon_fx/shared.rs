@@ -25,14 +25,48 @@ pub struct PendingAttacks {
     pub events: Vec<AttackEvent>,
 }
 
+/// A standalone explosion — no beam, no flying projectile, just a pop at
+/// a point. Used for unit-death `ExplodeAs` blasts, kamikaze detonations,
+/// and any future self-damage visual that shouldn't fake a shooter.
+///
+/// `radius` is the weapon's `area_of_effect`; the spawn side scales
+/// both the fireball sphere and the ground flash from it so a Bit pop
+/// looks smaller than a Terminal SIGTERM crater.
+pub struct ExplosionEvent {
+    pub pos: Vec3,
+    pub rgb: [f32; 3],
+    pub radius: f32,
+}
+
+/// Event buffer drained by [`spawn::spawn_pending_explosions`]. Separate
+/// from [`PendingAttacks`] so systems that model a pure detonation don't
+/// have to fake a zero-length beam.
+#[derive(Resource, Default)]
+pub struct PendingExplosions {
+    pub events: Vec<ExplosionEvent>,
+}
+
 /// A beam visual that fades over its lifetime.
+///
+/// Mesh is the shared unit cuboid/sphere from [`WeaponFxMeshes`]; the real
+/// dimensions live in `base_thickness` (X/Y) and `length` (Z) and are reapplied
+/// to `Transform::scale` by the tick system with an animated fade factor.
 #[derive(Component)]
 pub(super) struct BeamVisual {
     pub lifetime: f32,
     pub max_lifetime: f32,
+    pub base_thickness: f32,
+    pub length: f32,
 }
 
 /// A projectile traveling from origin to target.
+///
+/// `trail_rgb` and `trail_interval` drive the in-flight smoke/dust trail
+/// that upstream weapons configure via `smoketrail=1` or the `cegTag` CEG
+/// reference. Interval is seconds between puffs; `None` skips trailing
+/// entirely (e.g. the Bit's plain laser dot). `trail_accumulator` is
+/// advanced every tick and consumed on each puff so frame-rate changes
+/// don't change trail density.
 #[derive(Component)]
 pub(super) struct ProjectileVisual {
     pub origin: Vec3,
@@ -40,6 +74,9 @@ pub(super) struct ProjectileVisual {
     pub speed: f32,
     pub progress: f32,
     pub arc_height: f32,
+    pub trail_rgb: Option<[f32; 3]>,
+    pub trail_interval: f32,
+    pub trail_accumulator: f32,
 }
 
 /// A burst of multiple small beam segments (spray weapons like PacketBeam).
@@ -89,6 +126,50 @@ pub(super) struct ImpactBurst {
 #[derive(Resource, Default)]
 pub(super) struct ImpactBurstAssets {
     pub mesh: Option<Handle<Mesh>>,
+}
+
+/// Flat horizontal emissive disc spawned at each ground-level impact —
+/// a visual stand-in for the upstream `GroundFlash` CEG subsection that
+/// most KP explosions mount. Separated from [`ImpactBurst`] (a 3D
+/// fireball) so the two can fade on different curves: the burst rises
+/// and fades, the ring expands and stays bright until the end.
+#[derive(Component)]
+pub(super) struct GroundFlash {
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub base_radius: f32,
+}
+
+/// Shared flat-disc mesh for every [`GroundFlash`]. The mesh is a unit
+/// circle; the spawn system scales it to the weapon's radius via
+/// `Transform::scale`.
+#[derive(Resource, Default)]
+pub(super) struct GroundFlashAssets {
+    pub mesh: Option<Handle<Mesh>>,
+}
+
+/// Unit-length primitives shared across every beam, burst, projectile, and
+/// melee visual. Baking thickness/length into `Transform::scale` instead of
+/// the mesh keeps `Assets<Mesh>` at a handful of handles regardless of how
+/// many shots fly per second.
+#[derive(Resource, Default)]
+pub(super) struct WeaponFxMeshes {
+    pub unit_cube: Option<Handle<Mesh>>,
+    pub unit_sphere: Option<Handle<Mesh>>,
+}
+
+impl WeaponFxMeshes {
+    pub(super) fn unit_cube(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        self.unit_cube
+            .get_or_insert_with(|| meshes.add(Cuboid::new(1.0, 1.0, 1.0)))
+            .clone()
+    }
+
+    pub(super) fn unit_sphere(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        self.unit_sphere
+            .get_or_insert_with(|| meshes.add(Sphere::new(1.0)))
+            .clone()
+    }
 }
 
 /// Shared material cache to avoid per-frame allocations.

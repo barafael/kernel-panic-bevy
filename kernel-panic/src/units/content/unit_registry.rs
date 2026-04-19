@@ -206,15 +206,21 @@ impl UnitRegistry {
     /// Detector radius (elmos) — a unit can reveal cloaked enemies within
     /// this range. Maps to the FBI `RadarDistance` field; zero means this
     /// unit kind does not detect cloaked targets.
+    ///
+    /// Currently unused: with AI removed and every team player-
+    /// controllable, there is no "enemy" perspective to hide cloaked
+    /// units from. Kept in the API for when a real player/AI split
+    /// returns.
+    #[allow(dead_code)]
     pub fn detector_range(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.radar_distance)
     }
 
-    /// Vision range in elmos (FBI `SightDistance`). Used by the
-    /// fog-of-war MVP in `cloak::update_fog_visibility` to reveal
-    /// enemies that any player-team unit can "see". Units without a
-    /// declared SightDistance (Debug, LogicBomb) return `0.0` and
-    /// contribute no vision.
+    /// Vision range in elmos (FBI `SightDistance`). Fed the fog-of-war
+    /// sight pass before it was disabled for sandbox mode; held on the
+    /// registry so the system can be revived without rewiring the
+    /// lookup.
+    #[allow(dead_code)]
     pub fn sight_distance(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.sight_distance)
     }

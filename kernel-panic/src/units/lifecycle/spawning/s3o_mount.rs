@@ -70,14 +70,22 @@ fn find_by_name_recursive(piece: &S3OPiece, target: &str, counter: &mut usize) -
     None
 }
 
-/// Walk the piece tree and return how far below the root origin the
-/// lowest vertex sits, in elmos. Pieces inherit their parents' offsets
-/// so their world-space y is parent_world_y + piece.offset.y +
-/// vertex.y. Returns 0.0 if every vertex is at or above y=0 (the
-/// common case — most models are authored with the root at ground).
+/// Walk the piece tree and return the Y-offset that lands the model's
+/// lowest vertex on the heightmap, in elmos. Positive values lift the
+/// model up (the root sits above the lowest vertex — e.g. Byte's
+/// octaeder.s3o has blade vertices spanning y∈[-48,48], so `lift = 48`).
+/// Negative values sink the model down (the root sits *below* the
+/// lowest vertex — e.g. `carrier.s3o / network_base.s3o` is authored
+/// with its base above the piece-tree origin, which reads as "floating"
+/// when planted at heightmap y). Zero means the lowest vertex is
+/// already at y=0 and no adjustment is needed.
+///
+/// Returning `-min_y` unconditionally handles all three cases with the
+/// same formula, so the caller can just `position + lift * Y` without
+/// branching.
 pub(super) fn compute_ground_lift(piece: &S3OPiece, parent_origin: [f32; 3]) -> f32 {
     let min_y = walk_min_y(piece, parent_origin);
-    if min_y >= 0.0 { 0.0 } else { -min_y }
+    if min_y.is_finite() { -min_y } else { 0.0 }
 }
 
 fn walk_min_y(piece: &S3OPiece, parent_origin: [f32; 3]) -> f32 {

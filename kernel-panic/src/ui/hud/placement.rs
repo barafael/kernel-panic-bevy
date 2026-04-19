@@ -21,10 +21,10 @@ use crate::interaction::movement::{MoveTarget, QueuedCommand};
 use crate::interaction::selection::{SelectionSet, apply_ordered_command, ground_hit};
 use crate::rendering::camera::RtsCamera;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
+use crate::units::assets::meshes::{S3OModelCache, unit_material, unit_mesh};
 use crate::units::components::{Faction, UnitType};
-use crate::units::definitions::UnitKind;
-use crate::units::meshes::{S3OModelCache, unit_material, unit_mesh};
-use crate::units::unit_registry::UnitRegistry;
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
 
 use super::build_menu::BeginPlacementEvent;
 

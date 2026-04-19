@@ -48,7 +48,8 @@ read the resulting state.
   is clamped at minimum and maximum bounds.
 - **Orbit**: middle-mouse drag rotates yaw + pitch. Pitch is clamped
   so the camera can't flip through the ground or look straight up.
-- **Yaw rotate hotkeys**: `Q` rotates left, `E` rotates right.
+- **Yaw rotate hotkeys**: `Q` rotates left, `E` rotates right. Both
+  rotate as long as the key is held, independent of unit selection.
 
 ## 3. Selection & orders
 
@@ -79,11 +80,14 @@ read the resulting state.
   hide when the unit is deselected.
 - The hardware cursor changes shape based on what the cursor is over /
   what action is queued (hardware-cursor swap by order context).
-- Hotkeys: Stop=S, Fight=F, D for the ability of any selected
-  Pointer or Obelisk, R for repair on builders, T for set target
-  (units target it when in range but movement commands don't unselect
-  the target), X for unset-target, Ctrl+D for self-destroy after 5s
-  countdown, A for attack ground, P for patrol.
+- Hotkeys: Stop=S, Fight=F *(reserved)*, D for the context-sensitive
+  ability (NX Flag / Infection / Protect / Mine Launch / SIGTERM on
+  the corresponding caster; Dispatch on a teleporter; Deploy/Pack Up
+  on a Bug or Exploit), R for Packet re-enter / repair on builders
+  *(repair reserved)*, T for set target *(reserved)*, X for
+  unset-target *(reserved)*, `Ctrl+D` for self-destruct with a
+  5-second countdown (cancelled by `Stop`), A for attack-move
+  *(reserved)*, P for patrol *(reserved)*.
 - A `Stop` order halts the unit immediately and clears the queue.
 - On production, the builder unit sets a waypoint for the produced
   unit to move straight out of the factory.
@@ -100,15 +104,17 @@ read the resulting state.
   ability buttons. Hides when no unit is selected.
 - **Mid-left build menu**: faction-colored icons for what the selected
   factory or constructor can produce. When units are queued, the
-  number of queued units is displayed on the icon's bottom-left.
-  Hides when no factory/constructor is selected.
+  number of queued units of that kind is displayed as a small badge
+  in the icon's bottom-left. Hides when no factory/constructor is
+  selected.
   - When multiple builders are selected, the build pane has tabs on
     top. When only one is selected, there is still a tab saying the
     builder unit name.
 - **Top-right minimap**: shows the ground texture as a tiny overview,
   the camera viewport as an outlined rectangle (frustum outline), and
   dots for friendly and enemy units coloured by faction (green /
-  red / blue). Takes spotting into account.
+  red / blue). Gated on the fog-of-war `Spotted` marker — unspotted
+  enemies stay off the minimap too.
 
 ## 5. Movement
 
@@ -351,6 +357,12 @@ read the resulting state.
 - A Bug can morph into an Exploit and back. The unit re-spawns in
   place as the new kind (mutual-morph pair, in-place re-spawn). An
   Exploit cannot move.
+- Hotkey: `D`. Also surfaced in the order palette as a **Deploy** /
+  **Pack Up** button while a Bug or Exploit is selected. The Bug ↔
+  Exploit selection never overlaps with the command-fire ability set
+  (Pointer / Obelisk / Firewall / Byte / Terminal) or the teleporter
+  set (Port / Connection), so `D` resolves unambiguously per
+  selection.
 
 ## 16. Infection chain
 

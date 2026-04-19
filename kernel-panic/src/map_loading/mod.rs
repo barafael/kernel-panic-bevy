@@ -19,8 +19,9 @@ use crate::{
     },
     ui,
     units::{
-        animation::CobFileCache, meshes::S3OModelCache, spawning::spawn_homebases,
-        unit_registry::UnitRegistry,
+        assets::{animation::CobFileCache, meshes::S3OModelCache},
+        content::unit_registry::UnitRegistry,
+        lifecycle::spawning::spawn_homebases,
     },
 };
 use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
@@ -206,8 +207,8 @@ fn load_map(
         use spring_pathfinding::{NodeLayer, SpeedMap};
         use std::collections::BTreeSet;
 
-        use crate::units::definitions::ALL_UNIT_KINDS;
-        use crate::units::unit_registry::DEFAULT_MAX_SLOPE_RATIO;
+        use crate::units::content::definitions::ALL_UNIT_KINDS;
+        use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_RATIO;
 
         const SLOPE_MOD: f32 = 400.0;
         // Bin slopes to 3 decimals so float jitter on
@@ -270,9 +271,20 @@ fn load_map(
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut commands);
         apply_fog(map_info, parsed, &mut fog_query);
+        // Geovent smokers are spawned *after* this block (further down),
+        // so we read datavent positions straight off the parsed features
+        // table instead of querying live entities. Same XZ values the
+        // smoker will later use, so the two stay aligned.
+        let datavent_positions: Vec<Vec3> = parsed
+            .features
+            .iter()
+            .filter(|f| f.feature_type.is_geovent())
+            .map(|f| heightmap.place(f.x, f.z))
+            .collect();
         spawn_homebases(
             &heightmap,
             map_info,
+            &datavent_positions,
             &mut commands,
             &mut meshes,
             &mut std_materials,
@@ -282,8 +294,9 @@ fn load_map(
             &unit_registry,
         );
         info!(
-            "  {} start positions, gravity={}",
+            "  {} start positions, {} datavents, gravity={}",
             map_info.start_positions.len(),
+            datavent_positions.len(),
             map_info.gravity,
         );
     }

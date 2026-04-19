@@ -12,9 +12,9 @@
 
 use bevy::prelude::*;
 
-use super::components::UnitType;
-use super::definitions::UnitKind;
-use super::weapons::WeaponRegistry;
+use crate::units::components::UnitType;
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::weapons::WeaponRegistry;
 
 /// A unit's shield HP pool. `current_power = None` means infinite
 /// (upstream `shieldpower=0`); otherwise the shield has a finite pool

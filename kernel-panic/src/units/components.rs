@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use super::definitions::UnitKind;
+use super::content::definitions::UnitKind;
 
 /// Which faction a unit belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
@@ -32,7 +32,11 @@ impl Faction {
         match self {
             Faction::System => UnitKind::Kernel,
             Faction::Hacker => UnitKind::Hole,
-            Faction::Network => UnitKind::Connection,
+            // Network's homebase is the upstream `carrier.fbi` (stationary
+            // factory, 40,000 HP, yardmap). The mobile `Connection`
+            // teleporter is a separate unit the player builds out of the
+            // Carrier and then drives around.
+            Faction::Network => UnitKind::Carrier,
         }
     }
 

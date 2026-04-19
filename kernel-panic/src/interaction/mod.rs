@@ -12,7 +12,7 @@ use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
     CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, movement_system,
-    unit_separation_system,
+    orient_stationary_to_terrain, unit_separation_system,
 };
 use selection::SelectionPlugin;
 
@@ -31,6 +31,9 @@ impl Plugin for InteractionPlugin {
                     // Runs last so any Y drift introduced by the two
                     // preceding systems is corrected in the same frame.
                     ground_clamp_system.after(unit_separation_system),
+                    // Tilt idle units and buildings after clamping so
+                    // the slope normal is sampled at the final Y.
+                    orient_stationary_to_terrain.after(ground_clamp_system),
                     draw_selected_command_lines.after(movement_system),
                 ),
             );

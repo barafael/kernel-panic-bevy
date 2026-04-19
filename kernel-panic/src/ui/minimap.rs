@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use crate::units::components::Faction;
+use crate::units::mechanics::cloak::Spotted;
 
 /// Minimap display size in logical pixels.
 const MINIMAP_SIZE: f32 = 200.0;
@@ -112,7 +113,7 @@ fn update_minimap(
     mut state: ResMut<MinimapState>,
     mut images: ResMut<Assets<Image>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<crate::rendering::camera::RtsCamera>>,
-    unit_query: Query<(&Transform, &Faction)>,
+    unit_query: Query<(&Transform, &Faction), With<Spotted>>,
     windows: Query<&Window>,
 ) {
     state.timer.tick(time.delta());

@@ -1,27 +1,18 @@
-pub mod ai;
-pub mod animation;
-pub mod bookkeeping;
-pub mod cloak;
+pub mod assets;
 pub mod combat;
-pub mod command_fire;
 pub mod components;
-pub mod construction;
-pub mod definitions;
-pub mod game_over;
-pub mod meshes;
-pub mod morph;
-pub mod network_buffer;
-pub mod production;
-pub mod script_triggers;
-pub mod shield;
+pub mod content;
+pub mod lifecycle;
+pub mod mechanics;
 pub mod spatial;
-pub mod spawning;
-mod tdf_loader;
-pub mod unit_registry;
 pub mod weapon_fx;
-pub mod weapons;
 
 use bevy::prelude::*;
+
+use assets::animation;
+use content::{unit_registry, weapons};
+use lifecycle::{bookkeeping, construction, game_over, production, script_triggers, spawning};
+use mechanics::{cloak, command_fire, deploy, network_buffer, shield};
 
 /// Logical buckets for gameplay systems. Systems inside a set run after the
 /// previous set completes; inside a set they are unordered unless they declare
@@ -46,16 +37,15 @@ pub struct UnitsPlugin;
 impl Plugin for UnitsPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<game_over::GameState>()
-            .init_resource::<meshes::S3OModelCache>()
+            .init_resource::<assets::meshes::S3OModelCache>()
             .init_resource::<animation::CobFileCache>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<command_fire::MineSpawnQueue>()
-            .init_resource::<ai::AiTicker>()
             .add_message::<command_fire::CommandFireEvent>()
-            .add_message::<morph::MorphEvent>()
+            .add_message::<deploy::DeployEvent>()
             .add_message::<network_buffer::DispatchEvent>()
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<network_buffer::PacketBuffer>()
@@ -65,7 +55,6 @@ impl Plugin for UnitsPlugin {
             .init_resource::<spatial::SpatialIndex>()
             .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
-            .init_resource::<game_over::PlayerTeam>()
             .configure_sets(
                 Update,
                 (
@@ -86,7 +75,7 @@ impl Plugin for UnitsPlugin {
                         bookkeeping::count_small_buildings,
                         shield::attach_shields,
                         shield::regen_shields,
-                        morph::process_morph,
+                        deploy::process_deploy,
                         network_buffer::tick_port_buffers,
                         network_buffer::tick_spawn_stun,
                         network_buffer::tick_flow_speed,
@@ -104,7 +93,6 @@ impl Plugin for UnitsPlugin {
                         .in_set(GameplaySet::Produce),
                     (
                         spatial::rebuild_spatial_index,
-                        ai::ai_brain,
                         combat::tick_deploy_state,
                         combat::tick_kamikaze,
                         combat::combat_system,
@@ -125,6 +113,7 @@ impl Plugin for UnitsPlugin {
                     (
                         combat::apply_damage.run_if(|q: Res<combat::DamageQueue>| !q.is_empty()),
                         combat::tick_stun,
+                        combat::tick_self_destruct,
                         combat::auto_heal,
                         combat::death_system,
                         spawning::spawn_queued_viruses
@@ -141,6 +130,8 @@ impl Plugin for UnitsPlugin {
                         animation::decay_death_particles,
                         cloak::update_cloak_visibility,
                         cloak::update_fog_visibility,
+                        cloak::install_cloak_fade_materials,
+                        cloak::restore_cloak_fade_materials,
                     )
                         .chain()
                         .in_set(GameplaySet::Animate),

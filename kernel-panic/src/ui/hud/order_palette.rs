@@ -9,7 +9,11 @@ use super::style::{
 };
 use crate::{
     interaction::Selected,
-    units::{components::UnitType, definitions::UnitKind, unit_registry::UnitRegistry},
+    units::{
+        components::UnitType,
+        content::{definitions::UnitKind, unit_registry::UnitRegistry},
+        mechanics::deploy::DeployEvent,
+    },
 };
 
 pub struct OrderPalettePlugin;
@@ -34,6 +38,7 @@ enum UnitOrder {
     Stop,
     AttackMove,
     CommandFire,
+    Deploy,
 }
 
 #[derive(Component)]
@@ -71,19 +76,31 @@ fn update_order_palette(
     mut last_hash: Local<u64>,
 ) {
     let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
-    let has_ability = selected_q.iter().any(|ut| ability_label(ut.0).is_some());
+    let has_ability = selected_q.iter().any(|ut| ut.0.has_command_fire_ability());
+    let has_deploy = selected_q.iter().any(|ut| ut.0.deploy_pair().is_some());
     let ability_kind = selected_q
         .iter()
-        .find_map(|ut| ability_label(ut.0).map(|_| ut.0 as u64));
+        .find(|ut| ut.0.has_command_fire_ability())
+        .map(|ut| ut.0 as u64);
+    let deploy_kind = selected_q
+        .iter()
+        .find(|ut| ut.0.deploy_pair().is_some())
+        .map(|ut| ut.0 as u64);
 
     let mut hash: u64 = 0;
     if has_mobile {
-        hash |= 0b01;
+        hash |= 0b001;
     }
     if has_ability {
-        hash |= 0b10;
+        hash |= 0b010;
+    }
+    if has_deploy {
+        hash |= 0b100;
     }
     if let Some(k) = ability_kind {
+        hash = hash.wrapping_mul(2654435761).wrapping_add(k);
+    }
+    if let Some(k) = deploy_kind {
         hash = hash.wrapping_mul(2654435761).wrapping_add(k);
     }
     if hash == *last_hash {
@@ -99,7 +116,7 @@ fn update_order_palette(
         return;
     }
 
-    if !has_mobile && !has_ability {
+    if !has_mobile && !has_ability && !has_deploy {
         return;
     }
 
@@ -153,8 +170,6 @@ fn update_order_palette(
     }
 
     if has_ability {
-        // Label the slot after the first ability unit in the selection so
-        // the player sees which cast `D` fires. Mirrors `interaction::ability::has_ability`.
         let name = selected_q
             .iter()
             .find_map(|ut| ability_label(ut.0))
@@ -162,11 +177,20 @@ fn update_order_palette(
         let btn = spawn_order_button(&mut commands, name, "D", UnitOrder::CommandFire);
         commands.entity(grid).add_child(btn);
     }
+
+    if has_deploy {
+        let name = selected_q
+            .iter()
+            .find_map(|ut| deploy_label(ut.0))
+            .unwrap_or("Deploy");
+        let btn = spawn_order_button(&mut commands, name, "D", UnitOrder::Deploy);
+        commands.entity(grid).add_child(btn);
+    }
 }
 
-/// Friendly name shown on the ability button for each unit kind that
-/// has a `D`-hotkey ability. Mirrors the unit-set in
-/// `interaction::ability::has_ability`.
+/// Display name shown on the ability button. Eligibility lives on
+/// [`UnitKind::has_command_fire_ability`]; this table is purely
+/// presentation.
 fn ability_label(kind: UnitKind) -> Option<&'static str> {
     match kind {
         UnitKind::Pointer => Some("NX Flag"),
@@ -174,6 +198,16 @@ fn ability_label(kind: UnitKind) -> Option<&'static str> {
         UnitKind::Firewall => Some("Protect"),
         UnitKind::Byte => Some("Mine Launch"),
         UnitKind::Terminal => Some("SIGTERM"),
+        _ => None,
+    }
+}
+
+/// Display name for the Bug ↔ Exploit deploy button. Eligibility lives
+/// on [`UnitKind::deploy_pair`]; this table is purely presentation.
+fn deploy_label(kind: UnitKind) -> Option<&'static str> {
+    match kind {
+        UnitKind::Bug => Some("Deploy"),
+        UnitKind::Exploit => Some("Pack Up"),
         _ => None,
     }
 }
@@ -259,22 +293,25 @@ fn handle_order_clicks(
 
 fn apply_unit_orders(
     mut ev_order: MessageReader<UnitOrderEvent>,
-    selected_q: Query<Entity, With<Selected>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
     mut commands: Commands,
+    mut ev_deploy: MessageWriter<DeployEvent>,
 ) {
     use crate::interaction::movement::{CommandQueue, MovePath, MoveTarget};
 
     for event in ev_order.read() {
         match event.order {
             UnitOrder::Stop => {
-                use crate::units::construction::PendingBuild;
-                for entity in &selected_q {
+                use crate::units::combat::SelfDestructCountdown;
+                use crate::units::lifecycle::construction::PendingBuild;
+                for (entity, _) in &selected_q {
                     commands
                         .entity(entity)
                         .remove::<MoveTarget>()
                         .remove::<MovePath>()
                         .remove::<CommandQueue>()
-                        .remove::<PendingBuild>();
+                        .remove::<PendingBuild>()
+                        .remove::<SelfDestructCountdown>();
                 }
             }
             UnitOrder::AttackMove => {
@@ -283,10 +320,84 @@ fn apply_unit_orders(
                 // command was received.
             }
             UnitOrder::CommandFire => {
-                // Handled by `interaction::ability`, which reads Q + cursor
+                // Handled by `interaction::ability`, which reads D + cursor
                 // position. The button slot exists only as a hotkey hint;
                 // the click itself is a no-op (it has no ground target).
             }
+            UnitOrder::Deploy => {
+                for (entity, unit) in &selected_q {
+                    if deploy_label(unit.0).is_some() {
+                        ev_deploy.write(DeployEvent { entity });
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every D-hotkey ability unit gets a friendly button label. If
+    /// `interaction::ability::has_ability` grows, this test will fail
+    /// until the new kind is given a label here — the palette button
+    /// would otherwise fall back to the generic "Ability" string.
+    #[test]
+    fn ability_label_covers_every_hotkey_ability_kind() {
+        assert_eq!(ability_label(UnitKind::Pointer), Some("NX Flag"));
+        assert_eq!(ability_label(UnitKind::Obelisk), Some("Infection"));
+        assert_eq!(ability_label(UnitKind::Firewall), Some("Protect"));
+        assert_eq!(ability_label(UnitKind::Byte), Some("Mine Launch"));
+        assert_eq!(ability_label(UnitKind::Terminal), Some("SIGTERM"));
+    }
+
+    #[test]
+    fn ability_label_is_none_for_non_ability_kinds() {
+        assert_eq!(ability_label(UnitKind::Bit), None);
+        assert_eq!(ability_label(UnitKind::Bug), None);
+        assert_eq!(ability_label(UnitKind::Worm), None);
+        assert_eq!(ability_label(UnitKind::Packet), None);
+        assert_eq!(ability_label(UnitKind::Kernel), None);
+    }
+
+    /// Deploy is the Bug ↔ Exploit toggle. Both halves of the pair
+    /// surface as buttons so the player doesn't need to know the `D`
+    /// hotkey to discover it.
+    #[test]
+    fn deploy_label_covers_both_halves_of_the_pair() {
+        assert_eq!(deploy_label(UnitKind::Bug), Some("Deploy"));
+        assert_eq!(deploy_label(UnitKind::Exploit), Some("Pack Up"));
+    }
+
+    #[test]
+    fn deploy_label_is_none_for_non_deployable_kinds() {
+        assert_eq!(deploy_label(UnitKind::Bit), None);
+        assert_eq!(deploy_label(UnitKind::Pointer), None);
+        assert_eq!(deploy_label(UnitKind::Worm), None);
+    }
+
+    /// The command-fire ability set and the deploy set both read `D`
+    /// but must never overlap on the same kind — if a unit had both,
+    /// pressing `D` would deploy it *and* fire its ability. The
+    /// hotkey resolver relies on this partition instead of running a
+    /// priority/modifier sort, and the palette surfaces one button
+    /// per kind.
+    #[test]
+    fn ability_and_deploy_labels_do_not_overlap() {
+        for kind in [
+            UnitKind::Pointer,
+            UnitKind::Obelisk,
+            UnitKind::Firewall,
+            UnitKind::Byte,
+            UnitKind::Terminal,
+            UnitKind::Bug,
+            UnitKind::Exploit,
+        ] {
+            assert!(
+                ability_label(kind).is_none() || deploy_label(kind).is_none(),
+                "{kind:?} has both a command-fire and deploy label — `D` would do both",
+            );
         }
     }
 }

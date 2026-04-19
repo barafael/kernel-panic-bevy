@@ -5,8 +5,8 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use super::combat::Dying;
-use super::components::{TeamId, UnitType};
+use crate::units::combat::Dying;
+use crate::units::components::{TeamId, UnitType};
 
 /// Seconds between refreshes of `SmallBuildingCounts`. Consumers
 /// (Kernel Boost production scaling, Flow speed boost) read the cached

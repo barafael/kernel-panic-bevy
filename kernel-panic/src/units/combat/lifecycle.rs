@@ -10,14 +10,15 @@
 
 use bevy::prelude::*;
 
-use super::super::animation::CobAnimator;
-use super::super::components::{Faction, Health, TeamId, UnitType};
-use super::super::spatial::SpatialIndex;
-use super::super::unit_registry::UnitRegistry;
-use super::super::weapons::WeaponRegistry;
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
 use super::{AimTarget, IdleTimer, StunCharge};
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::units::assets::animation::CobAnimator;
+use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::content::weapons::WeaponRegistry;
+use crate::units::spatial::SpatialIndex;
+use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
 /// Marks a unit that has reached 0 HP and is playing its death animation.
 /// The entity will be despawned once the animation finishes or the timer expires.
@@ -29,6 +30,23 @@ pub struct Dying {
 
 /// Maximum time to wait for a death animation before force-despawning (seconds).
 const DEATH_ANIM_TIMEOUT: f32 = 2.0;
+
+/// Countdown placed on a unit that the player ordered to self-destroy
+/// via the `Ctrl+D` hotkey (FEATURES.md §3). When `remaining` hits zero
+/// [`tick_self_destruct`] drops the unit's HP to zero so the existing
+/// death/explode pipeline (incl. `ExplodeAs`) handles the blast.
+/// `Stop` removes the component to abort the countdown.
+#[derive(Component)]
+#[component(storage = "SparseSet")]
+pub struct SelfDestructCountdown {
+    pub remaining: f32,
+}
+
+/// Seconds between ordering self-destruct and detonation. Matches the
+/// 5 s number called out in FEATURES.md §3 — long enough to walk the
+/// unit away from allies, short enough that the player doesn't feel
+/// the command is lagging.
+pub const SELF_DESTRUCT_DELAY: f32 = 5.0;
 
 /// Marks a unit as paralyzed: the combat and movement systems treat it
 /// as inert until `remaining` elapses.
@@ -177,6 +195,7 @@ pub fn death_system(
             Entity,
             &UnitType,
             &Health,
+            &Faction,
             &GlobalTransform,
             Option<&Infected>,
         ),
@@ -185,11 +204,12 @@ pub fn death_system(
     mut animators: Query<&mut CobAnimator>,
     mut virus_spawns: ResMut<VirusSpawnQueue>,
     mut damage_queue: ResMut<DamageQueue>,
+    mut explosions: ResMut<PendingExplosions>,
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
 ) {
-    for (entity, unit, health, gtf, infected) in &query {
+    for (entity, unit, health, faction, gtf, infected) in &query {
         if health.current <= 0.0 {
             // Start the COB Killed() callback if the unit has an animator.
             if let Ok(mut animator) = animators.get_mut(entity) {
@@ -212,6 +232,17 @@ pub fn death_system(
             // Bit/Byte's RetroDeath/RetroDeathBig give big units their
             // death-AoE. Skip when the named weapon isn't in the registry
             // so we don't warn-spam on missing explosion TDFs.
+            //
+            // We also push a matching visual explosion so the big-unit
+            // boom actually reads on screen — the per-piece `Explode`
+            // particles from the COB Killed() script only draw a few
+            // little pops at the pieces themselves, not the wide fireball
+            // the upstream CEG would render. Scaled by the ExplodeAs
+            // weapon's `area_of_effect` and tinted with the weapon's
+            // own `rgb_color` so Virus / Logic Bomb / RetroDeathBig each
+            // read differently. Fall back to faction colour for weapons
+            // without a configured colour so the ring still pops.
+            let pos = gtf.translation();
             if let Some(weapon_name) = unit_registry
                 .def(unit.0)
                 .map(|d| d.explode_as.as_str())
@@ -221,14 +252,56 @@ pub fn death_system(
                     target: entity,
                     attacker: entity,
                     weapon: weapon_name.to_string(),
-                    impact_pos: gtf.translation(),
+                    impact_pos: pos,
                     attacker_distance: 0.0,
+                });
+
+                let weapon = weapon_registry.get(weapon_name);
+                let radius = weapon.map_or(24.0, |w| w.area_of_effect.max(24.0));
+                let rgb = weapon
+                    .map(|w| w.rgb_color)
+                    .filter(|c| c[0] + c[1] + c[2] > 0.01)
+                    .unwrap_or_else(|| faction_rgb(*faction));
+                explosions.events.push(ExplosionEvent { pos, rgb, radius });
+            } else {
+                // Even units without an ExplodeAs get a small faction-
+                // coloured pop — otherwise Bits and Packets vanish
+                // silently, which reads as a bug.
+                explosions.events.push(ExplosionEvent {
+                    pos,
+                    rgb: faction_rgb(*faction),
+                    radius: 16.0,
                 });
             }
 
             commands.entity(entity).remove::<Infected>().insert(Dying {
                 timer: DEATH_ANIM_TIMEOUT,
             });
+        }
+    }
+}
+
+/// Faction-tinted fallback colour for death explosions whose `ExplodeAs`
+/// weapon has no configured `rgbcolor`. Matches the FEATURES.md §21 rule
+/// that System = green, Hacker = red, Network = blue.
+fn faction_rgb(faction: Faction) -> [f32; 3] {
+    let c = LinearRgba::from(faction.color());
+    [c.red, c.green, c.blue]
+}
+
+/// Tick every [`SelfDestructCountdown`] and, when it reaches zero,
+/// drop the unit's HP to zero so `death_system` takes over — the
+/// existing `ExplodeAs` pipeline spawns the death AoE, so this stays
+/// a tiny bridge instead of a parallel detonation path.
+pub fn tick_self_destruct(
+    time: Res<Time>,
+    mut query: Query<(&mut SelfDestructCountdown, &mut Health), Without<Dying>>,
+) {
+    let dt = time.delta_secs();
+    for (mut countdown, mut health) in &mut query {
+        countdown.remaining -= dt;
+        if countdown.remaining <= 0.0 {
+            health.current = 0.0;
         }
     }
 }

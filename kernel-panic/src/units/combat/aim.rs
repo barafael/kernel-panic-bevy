@@ -13,10 +13,10 @@
 
 use bevy::prelude::*;
 
-use super::super::animation::CobAnimator;
-use super::super::components::UnitStats;
 use super::Dying;
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::units::assets::animation::CobAnimator;
+use crate::units::components::UnitStats;
 
 /// Deploy cycle for units that must unfold before firing (e.g. Pointer).
 /// The COB script animates the legs/gun; this component gates combat so
@@ -138,7 +138,7 @@ pub fn aim_weapons_system(
         &UnitStats,
         &AimTarget,
         &mut CobAnimator,
-        Option<&super::super::animation::GunbasePiece>,
+        Option<&crate::units::assets::animation::GunbasePiece>,
         &Deployable,
     )>,
 ) {

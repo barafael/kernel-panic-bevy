@@ -65,6 +65,11 @@ pub struct DragState {
     start: Option<Vec2>,
     /// Whether we're actively dragging (past threshold).
     dragging: bool,
+    /// True when the press that opened the current mouse-down happened
+    /// over a UI button. The release then skips world-space selection so
+    /// clicking a build icon doesn't also deselect the constructor the
+    /// click was targeting. Cleared on the matching release.
+    started_on_ui: bool,
 }
 
 /// Visual overlay for the selection box.
@@ -112,15 +117,45 @@ fn handle_selection(
     selected_q: Query<Entity, With<Selected>>,
     unit_q: Query<(Entity, &GlobalTransform), With<UnitType>>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
+    ui_interactions: Query<&Interaction>,
+    attack_mode: Res<crate::interaction::ability::AttackGroundMode>,
     mut drag_state: ResMut<DragState>,
     mut commands: Commands,
 ) {
     let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
 
+    // Ground-attack mode: while the `A`-toggle is active, the click
+    // belongs to the attack-ground hotkey (see
+    // `ability::trigger_attack_ground_click`) and must not flow into
+    // selection — otherwise the release would clear the selection
+    // before the attack-ground command could dispatch.
+    let attack_mode_active = attack_mode.active;
+
     // --- Left press: start tracking ---
     if mouse.just_pressed(MouseButton::Left) {
+        // If the press landed on a UI button (build icon, order palette,
+        // etc.), swallow the whole click cycle — otherwise the matching
+        // release later drops `Selected` off every unit and the click on
+        // the build icon also deselects the constructor it was meant
+        // to command. `Interaction::Pressed` is set on the UI node for
+        // exactly the frame the button is pressed-and-held, which makes
+        // this a cheap O(button-count) scan.
+        let on_ui = ui_interactions
+            .iter()
+            .any(|i| *i == Interaction::Pressed || *i == Interaction::Hovered);
+        drag_state.started_on_ui = on_ui || attack_mode_active;
+        if on_ui || attack_mode_active {
+            return;
+        }
         drag_state.start = cursor_pos;
         drag_state.dragging = false;
+    }
+
+    if drag_state.started_on_ui {
+        if mouse.just_released(MouseButton::Left) {
+            drag_state.started_on_ui = false;
+        }
+        return;
     }
 
     // --- While held: update box if past threshold ---

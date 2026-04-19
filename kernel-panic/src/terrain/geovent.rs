@@ -26,8 +26,8 @@ use crate::{
     terrain::heightmap::Heightmap,
     units::{
         components::UnitType,
-        construction::{Constructing, PendingBuild},
-        unit_registry::UnitRegistry,
+        content::unit_registry::UnitRegistry,
+        lifecycle::construction::{Constructing, PendingBuild},
     },
 };
 

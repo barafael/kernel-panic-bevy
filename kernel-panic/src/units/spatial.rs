@@ -22,8 +22,8 @@ use std::collections::HashMap;
 
 use super::combat::Dying;
 use super::components::{Faction, Health, TeamId, UnitType};
-use super::definitions::UnitKind;
-use super::spawning::Emerging;
+use super::content::definitions::UnitKind;
+use super::lifecycle::spawning::Emerging;
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)

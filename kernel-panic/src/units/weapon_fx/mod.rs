@@ -8,11 +8,13 @@ mod shared;
 mod spawn;
 mod tick;
 
-pub use shared::{AttackEvent, PendingAttacks};
+pub use shared::{AttackEvent, ExplosionEvent, PendingAttacks, PendingExplosions};
 
 use bevy::prelude::*;
 
-use shared::{BeamMaterialCache, BuildSparkleAssets, ImpactBurstAssets};
+use shared::{
+    BeamMaterialCache, BuildSparkleAssets, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes,
+};
 
 use super::GameplaySet;
 
@@ -26,12 +28,19 @@ pub struct WeaponFxPlugin;
 impl Plugin for WeaponFxPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingAttacks>()
+            .init_resource::<PendingExplosions>()
             .init_resource::<BeamMaterialCache>()
             .init_resource::<BuildSparkleAssets>()
             .init_resource::<ImpactBurstAssets>()
+            .init_resource::<GroundFlashAssets>()
+            .init_resource::<WeaponFxMeshes>()
             .add_systems(
                 Update,
-                (spawn::spawn_weapon_visuals, tick::tick_weapon_fx)
+                (
+                    spawn::spawn_weapon_visuals,
+                    spawn::spawn_pending_explosions,
+                    tick::tick_weapon_fx,
+                )
                     .chain()
                     .in_set(GameplaySet::Simulate),
             );

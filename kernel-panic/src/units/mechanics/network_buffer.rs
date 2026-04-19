@@ -13,9 +13,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use super::combat::Dying;
-use super::components::{Faction, TeamId, UnitType};
-use super::definitions::UnitKind;
+use crate::units::combat::Dying;
+use crate::units::components::{Faction, TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
 
 /// Seconds between per-Port buffer increments. Upstream uses 164 sim
 /// frames at 30 fps ≈ 5.47s.
@@ -173,10 +173,10 @@ pub fn process_dispatch(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<super::meshes::S3OModelCache>,
-    mut cob_cache: ResMut<super::animation::CobFileCache>,
-    invisible_mat: Res<super::spawning::SelectionVolumeMaterial>,
-    unit_registry: Res<super::unit_registry::UnitRegistry>,
+    mut model_cache: ResMut<crate::units::assets::meshes::S3OModelCache>,
+    mut cob_cache: ResMut<crate::units::assets::animation::CobFileCache>,
+    invisible_mat: Res<crate::units::lifecycle::spawning::SelectionVolumeMaterial>,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
     mut commands: Commands,
 ) {
     for event in events.read() {
@@ -201,7 +201,7 @@ pub fn process_dispatch(
                     0.0,
                     angle.sin() * DISPATCH_RING_RADIUS,
                 );
-            let spawned = super::spawning::spawn_unit(
+            let spawned = crate::units::lifecycle::spawning::spawn_unit(
                 UnitKind::Packet,
                 *faction,
                 team.0,
@@ -285,8 +285,8 @@ pub fn tick_flow_speed(
     time: Res<Time>,
     mut ticker: ResMut<FlowSpeedTicker>,
     mut flows: Query<(&UnitType, &TeamId, &mut SpeedBoost)>,
-    unit_registry: Res<super::unit_registry::UnitRegistry>,
-    small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+    small_building_counts: Res<crate::units::lifecycle::bookkeeping::SmallBuildingCounts>,
 ) {
     ticker.0 += time.delta_secs();
     if ticker.0 < FLOW_TICK_INTERVAL {

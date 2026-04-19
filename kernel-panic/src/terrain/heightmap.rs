@@ -70,6 +70,16 @@ impl Heightmap {
         Vec3::new(x, self.sample(x, z), z)
     }
 
+    /// Total world-space extent of the map in elmos (width × depth).
+    /// Useful for synthesising spawn positions when the map's
+    /// `start_positions` doesn't supply enough.
+    pub fn world_size(&self) -> (f32, f32) {
+        (
+            self.width as f32 * self.square_size,
+            self.height as f32 * self.square_size,
+        )
+    }
+
     /// Upward-pointing terrain normal at `(x, z)`, derived from the heightmap
     /// gradient via central differences. Used by movement to tilt units into
     /// the slope they're traversing.

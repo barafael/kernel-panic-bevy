@@ -6,10 +6,11 @@ use bevy::prelude::*;
 
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, BurstSegment,
-    ImpactBurst, ImpactBurstAssets, PendingAttacks, ProjectileVisual, tdf_color,
+    GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, PendingAttacks,
+    PendingExplosions, ProjectileVisual, WeaponFxMeshes, tdf_color,
 };
-use crate::units::meshes::{S3OModelCache, load_raw_bevy_texture};
-use crate::units::weapons::WeaponRegistry;
+use crate::units::assets::meshes::{S3OModelCache, load_raw_bevy_texture};
+use crate::units::content::weapons::WeaponRegistry;
 
 /// True for `BuildLaser` (the upstream build-laser weapon name). The
 /// `BuildLaserNoEffect` variant intentionally suppresses the impact particles,
@@ -36,6 +37,8 @@ pub(super) fn spawn_weapon_visuals(
     mut cache: ResMut<BeamMaterialCache>,
     mut sparkle_assets: ResMut<BuildSparkleAssets>,
     mut impact_assets: ResMut<ImpactBurstAssets>,
+    mut flash_assets: ResMut<GroundFlashAssets>,
+    mut fx_meshes: ResMut<WeaponFxMeshes>,
     asset_server: Res<AssetServer>,
 ) {
     for event in pending.events.drain(..) {
@@ -61,6 +64,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut meshes,
                 &mut materials,
                 &mut cache,
+                &mut fx_meshes,
             );
         } else if is_projectile {
             spawn_projectile(
@@ -70,6 +74,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut meshes,
                 &mut materials,
                 &mut cache,
+                &mut fx_meshes,
             );
         } else if is_burst_beam {
             spawn_burst_beam(
@@ -81,6 +86,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut images,
                 &mut model_cache,
                 &mut cache,
+                &mut fx_meshes,
             );
         } else {
             spawn_beam(
@@ -92,6 +98,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut images,
                 &mut model_cache,
                 &mut cache,
+                &mut fx_meshes,
             );
         }
 
@@ -141,8 +148,118 @@ pub(super) fn spawn_weapon_visuals(
                 &mut cache,
                 &mut impact_assets,
             );
+            // A flat expanding ring at the impact plane adds weight to the
+            // sphere-shaped burst and stands in for the upstream `GroundFlash`
+            // CEG subsection most KP explosions include. Muzzle flash at the
+            // shooter is left ringless — it's at barrel height, not on the
+            // ground.
+            spawn_ground_flash(
+                event.target_pos,
+                weapon.rgb_color,
+                aoe,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                &mut flash_assets,
+            );
         }
     }
+}
+
+/// Drain every [`PendingExplosions`] entry and spawn a matching
+/// burst + ground flash. No beam, no muzzle flash, no projectile — this
+/// path is for standalone detonations (unit-death `ExplodeAs`, kamikaze
+/// triggers, command-fire area blasts). Scaling matches the per-weapon
+/// impact so a Logic Bomb's death boom reads the same visual language
+/// as its in-flight hit.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_pending_explosions(
+    mut pending: ResMut<PendingExplosions>,
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut cache: ResMut<BeamMaterialCache>,
+    mut impact_assets: ResMut<ImpactBurstAssets>,
+    mut flash_assets: ResMut<GroundFlashAssets>,
+) {
+    for event in pending.events.drain(..) {
+        let aoe = event.radius.max(4.0);
+        spawn_impact_burst(
+            event.pos,
+            event.rgb,
+            aoe,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut cache,
+            &mut impact_assets,
+        );
+        spawn_ground_flash(
+            event.pos,
+            event.rgb,
+            aoe,
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            &mut cache,
+            &mut flash_assets,
+        );
+    }
+}
+
+/// Flat horizontal emissive ring at `pos`. Radius animates from 0.25× to
+/// 1.5× `aoe` over the lifetime so the ring visibly "blooms" outward from
+/// the impact point before fading. Mesh is a shared unit-circle; the
+/// spawn-time scale carries the initial radius so the tick system only
+/// needs to grow `base_radius` — no material mutation per frame.
+///
+/// The ground plane is approximated at `pos.y + 0.5` so the ring sits
+/// slightly above terrain without z-fighting. Units that explode mid-air
+/// (Flow, command-fire projectiles) still project their ring close to
+/// the blast center — good enough; a world-space ground snap would
+/// require a heightmap sample and isn't worth the dependency on this
+/// visual-only path.
+#[allow(clippy::too_many_arguments)]
+fn spawn_ground_flash(
+    pos: Vec3,
+    rgb: [f32; 3],
+    aoe: f32,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
+    flash_assets: &mut GroundFlashAssets,
+) {
+    let mesh = flash_assets
+        .mesh
+        .get_or_insert_with(|| meshes.add(Circle::new(1.0)))
+        .clone();
+
+    let color = tdf_color(rgb);
+    let material = cache.get_or_create_with_intensity(color, true, 2.0, None, materials);
+
+    // Clamp so even mines / SIGTERM don't swallow the screen, but keep
+    // beam pings (AoE=8) readable. Small ring radius feels snappier than
+    // the full blast sphere.
+    let base_radius = (aoe * 0.5).clamp(4.0, 80.0);
+    let life = 0.45;
+
+    // `Circle` is XY by default; rotate to lie flat on XZ so it hugs the ground.
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+
+    commands.spawn((
+        GroundFlash {
+            lifetime: life,
+            max_lifetime: life,
+            base_radius,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(pos + Vec3::Y * 0.5)
+            .with_rotation(flat)
+            .with_scale(Vec3::splat(base_radius * 0.25)),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -276,6 +393,7 @@ fn spawn_beam(
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
+    fx_meshes: &mut WeaponFxMeshes,
 ) {
     let dir = event.target_pos - event.attacker_pos;
     let length = dir.length();
@@ -321,27 +439,35 @@ fn spawn_beam(
             None,
             materials,
         );
-        let core_mesh = meshes.add(Cuboid::new(core, core, length));
+        let unit_cube = fx_meshes.unit_cube(meshes);
         commands.spawn((
             BeamVisual {
                 lifetime: duration,
                 max_lifetime: duration,
+                base_thickness: core,
+                length,
             },
-            Mesh3d(core_mesh),
+            Mesh3d(unit_cube),
             MeshMaterial3d(core_mat),
-            Transform::from_translation(midpoint + Vec3::Y * 0.1).with_rotation(rotation),
+            Transform::from_translation(midpoint + Vec3::Y * 0.1)
+                .with_rotation(rotation)
+                .with_scale(Vec3::new(core, core, length)),
         ));
     }
 
-    let mesh = meshes.add(Cuboid::new(thickness, thickness, length));
+    let unit_cube = fx_meshes.unit_cube(meshes);
     commands.spawn((
         BeamVisual {
             lifetime: duration,
             max_lifetime: duration,
+            base_thickness: thickness,
+            length,
         },
-        Mesh3d(mesh),
+        Mesh3d(unit_cube),
         MeshMaterial3d(mat),
-        Transform::from_translation(midpoint).with_rotation(rotation),
+        Transform::from_translation(midpoint)
+            .with_rotation(rotation)
+            .with_scale(Vec3::new(thickness, thickness, length)),
     ));
 }
 
@@ -356,6 +482,7 @@ fn spawn_burst_beam(
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
+    fx_meshes: &mut WeaponFxMeshes,
 ) {
     let color = tdf_color(weapon.rgb_color);
     let texture = beam_texture(&weapon.texture1, model_cache, images);
@@ -381,7 +508,8 @@ fn spawn_burst_beam(
         0.12
     };
 
-    let mesh = meshes.add(Cuboid::new(thickness, thickness, length));
+    let unit_cube = fx_meshes.unit_cube(meshes);
+    let scale = Vec3::new(thickness, thickness, length);
 
     for i in 0..count {
         let angle = spray_rad * (i as f32 / count as f32 - 0.5);
@@ -392,9 +520,11 @@ fn spawn_burst_beam(
 
         commands.spawn((
             BurstSegment { lifetime: ttl },
-            Mesh3d(mesh.clone()),
+            Mesh3d(unit_cube.clone()),
             MeshMaterial3d(mat.clone()),
-            Transform::from_translation(mid).with_rotation(rotation),
+            Transform::from_translation(mid)
+                .with_rotation(rotation)
+                .with_scale(scale),
         ));
     }
 }
@@ -407,6 +537,7 @@ fn spawn_projectile(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
+    fx_meshes: &mut WeaponFxMeshes,
 ) {
     let color = tdf_color(weapon.rgb_color);
 
@@ -421,9 +552,9 @@ fn spawn_projectile(
 
     // Geometric uses an octahedron model — approximate with a small cube.
     let mesh = if !weapon.model.is_empty() && weapon.model != ";" {
-        meshes.add(Cuboid::new(proj_size, proj_size, proj_size))
+        fx_meshes.unit_cube(meshes)
     } else {
-        meshes.add(Sphere::new(proj_size))
+        fx_meshes.unit_sphere(meshes)
     };
 
     // Route through the shared cache so projectiles that re-use the same
@@ -432,6 +563,16 @@ fn spawn_projectile(
     let material =
         cache.get_or_create_with_intensity(color, false, weapon.intensity, None, materials);
 
+    // Upstream weapons that configure `smoketrail=1` or a `cegTag=...`
+    // (BugCannon → corruption_BCtrail, WMD → corruption_WMDtrail, DOS
+    // particle trail) draw a trailing cloud as the shell flies. We can't
+    // load the real CEG here, but dropping a tiny faction-coloured puff
+    // every few frames reads as the same visual — a streak of motion
+    // behind the projectile. Plain laser projectiles (no smoke, no ceg)
+    // stay trail-less so the Bit's arrow-beam doesn't get a ghost tail.
+    let has_trail = weapon.smoke_trail || !weapon.ceg_tag.is_empty();
+    let trail_rgb = has_trail.then_some(weapon.rgb_color);
+
     commands.spawn((
         ProjectileVisual {
             origin: event.attacker_pos,
@@ -439,10 +580,16 @@ fn spawn_projectile(
             speed,
             progress: 0.0,
             arc_height,
+            trail_rgb,
+            // ~8 puffs/second — dense enough to read as a streak, sparse
+            // enough that a long arc shot doesn't mint hundreds of
+            // impact-burst entities.
+            trail_interval: 0.12,
+            trail_accumulator: 0.0,
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(event.attacker_pos),
+        Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(proj_size)),
     ));
 }
 
@@ -453,18 +600,22 @@ fn spawn_melee_flash(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
+    fx_meshes: &mut WeaponFxMeshes,
 ) {
     let flash_pos = (event.attacker_pos + event.target_pos) / 2.0;
-    let mesh = meshes.add(Sphere::new(8.0));
+    let mesh = fx_meshes.unit_sphere(meshes);
     let color = LinearRgba::new(1.0, 0.3, 0.0, 0.8);
     let material = cache.get_or_create_with_intensity(color, true, 1.0, None, materials);
+    let size = 8.0;
     commands.spawn((
         BeamVisual {
             lifetime: 0.15,
             max_lifetime: 0.15,
+            base_thickness: size,
+            length: size,
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(flash_pos),
+        Transform::from_translation(flash_pos).with_scale(Vec3::splat(size)),
     ));
 }

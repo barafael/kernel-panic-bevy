@@ -3,10 +3,13 @@
 
 use bevy::prelude::*;
 
-use super::shared::{BeamVisual, BuildSparkle, BurstSegment, ImpactBurst, ProjectileVisual};
+use super::shared::{
+    BeamMaterialCache, BeamVisual, BuildSparkle, BurstSegment, GroundFlash, ImpactBurst,
+    ImpactBurstAssets, ProjectileVisual, tdf_color,
+};
 use crate::rendering::camera::RtsCamera;
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn tick_weapon_fx(
     time: Res<Time>,
     mut beams: Query<(Entity, &mut BeamVisual, &mut Transform), Without<ProjectileVisual>>,
@@ -32,7 +35,21 @@ pub(super) fn tick_weapon_fx(
             Without<BuildSparkle>,
         ),
     >,
+    mut flashes: Query<
+        (Entity, &mut GroundFlash, &mut Transform),
+        (
+            Without<BeamVisual>,
+            Without<ProjectileVisual>,
+            Without<BurstSegment>,
+            Without<BuildSparkle>,
+            Without<ImpactBurst>,
+        ),
+    >,
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut cache: ResMut<BeamMaterialCache>,
+    mut impact_assets: ResMut<ImpactBurstAssets>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -43,11 +60,12 @@ pub(super) fn tick_weapon_fx(
             commands.entity(entity).despawn();
             continue;
         }
-        // Fade by shrinking cross-section while keeping length. Thickness is
-        // baked into the beam mesh (see spawn_beam), so scale starts at 1;
-        // write `fade` directly each frame rather than compounding it.
+        // Fade by shrinking cross-section while holding length constant. Mesh
+        // is the shared unit cuboid/sphere, so scale carries both the base
+        // dimensions and the animated fade.
         let fade = (beam.lifetime / beam.max_lifetime).sqrt();
-        transform.scale = Vec3::new(fade, fade, 1.0);
+        let t = beam.base_thickness * fade;
+        transform.scale = Vec3::new(t, t, beam.length);
     }
 
     for (entity, mut burst) in &mut bursts {
@@ -76,6 +94,28 @@ pub(super) fn tick_weapon_fx(
             pos.y += proj.arc_height * total_dist * arc;
         }
         transform.translation = pos;
+
+        // Emit trail puffs for smoke_trail / cegTag projectiles. Accumulate
+        // dt so frame-rate drops don't thin out the trail, but clamp the
+        // catch-up to one puff per tick — a huge `dt` spike shouldn't
+        // mint 50 bursts in the same frame.
+        if let Some(trail_rgb) = proj.trail_rgb
+            && proj.trail_interval > 0.0
+        {
+            proj.trail_accumulator += dt;
+            if proj.trail_accumulator >= proj.trail_interval {
+                proj.trail_accumulator -= proj.trail_interval;
+                spawn_trail_puff(
+                    pos,
+                    trail_rgb,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut impact_assets,
+                );
+            }
+        }
     }
 
     // Build-sparkle particles: drift, decay velocity (airdrag=1 in CEG kills it
@@ -130,4 +170,63 @@ pub(super) fn tick_weapon_fx(
         let scale = impact.base_size * (1.0 + life_frac * 1.5);
         transform.scale = Vec3::splat(scale);
     }
+
+    // Ground flash ring: expand outward from 0.25× to 1.5× radius over
+    // the lifetime, then collapse to zero in the final quarter to fade
+    // out cleanly. Flat (XZ) scale keeps the disc hugging the ground;
+    // rotation is set at spawn and never touched.
+    for (entity, mut flash, mut transform) in &mut flashes {
+        flash.lifetime -= dt;
+        if flash.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let life_frac = 1.0 - flash.lifetime / flash.max_lifetime;
+        let grow = 0.25 + life_frac * 1.25;
+        let fade = if life_frac > 0.75 {
+            (1.0 - life_frac) * 4.0
+        } else {
+            1.0
+        };
+        let r = flash.base_radius * grow * fade;
+        transform.scale = Vec3::new(r, r, r);
+    }
+}
+
+/// Drop a small faction-coloured puff behind a trailing projectile. The
+/// puff reuses the [`ImpactBurst`] component + shared sphere mesh so the
+/// existing decay loop shrinks it to nothing without any dedicated tick
+/// code. Kept tiny (base size 2) and short (0.35 s life) so a dozen in a
+/// row reads as a streak rather than a wall of fireballs.
+#[allow(clippy::too_many_arguments)]
+fn spawn_trail_puff(
+    pos: Vec3,
+    rgb: [f32; 3],
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
+    impact_assets: &mut ImpactBurstAssets,
+) {
+    let mesh = impact_assets
+        .mesh
+        .get_or_insert_with(|| meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()))
+        .clone();
+
+    let color = tdf_color(rgb);
+    let material = cache.get_or_create(color, true, materials);
+
+    let life = 0.35;
+    let base_size = 2.0;
+
+    commands.spawn((
+        ImpactBurst {
+            lifetime: life,
+            max_lifetime: life,
+            base_size,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(pos).with_scale(Vec3::splat(base_size)),
+    ));
 }

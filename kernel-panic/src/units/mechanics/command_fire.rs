@@ -17,10 +17,10 @@
 
 use bevy::prelude::*;
 
-use super::combat::{INFECTION_DURATION, Infected};
-use super::components::{Faction, Health, TeamId, UnitType};
-use super::definitions::UnitKind;
-use super::spatial::SpatialIndex;
+use crate::units::combat::{INFECTION_DURATION, Infected};
+use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
+use crate::units::spatial::SpatialIndex;
 
 /// Firewall protection zone: all allies within `FIREWALL_RADIUS` at
 /// cast time gain a `Protected` component for `FIREWALL_DURATION`.
@@ -340,7 +340,7 @@ fn apply_firewall(
 ) {
     let radius_sq = FIREWALL_RADIUS * FIREWALL_RADIUS;
     for (entity, team, faction, gtf) in targets.iter() {
-        if !super::components::is_friendly(team.0, *faction, caster_team, caster_faction) {
+        if !crate::units::components::is_friendly(team.0, *faction, caster_team, caster_faction) {
             continue;
         }
         if gtf.translation().distance_squared(center) > radius_sq {
@@ -409,7 +409,7 @@ pub fn tick_area_denial(
 
         hits.clear();
         spatial.query_radius(zone.center, zone.radius, |candidate| {
-            let friendly = super::components::is_friendly(
+            let friendly = crate::units::components::is_friendly(
                 candidate.team,
                 candidate.faction,
                 zone.owner_team,

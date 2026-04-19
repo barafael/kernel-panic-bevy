@@ -7,8 +7,8 @@
 use bevy::prelude::*;
 
 use crate::units::components::Faction;
-use crate::units::definitions::{ALL_UNIT_KINDS, UnitKind};
-use crate::units::unit_registry::UnitRegistry;
+use crate::units::content::definitions::{ALL_UNIT_KINDS, UnitKind};
+use crate::units::content::unit_registry::UnitRegistry;
 
 pub struct PreviewsPlugin;
 

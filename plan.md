@@ -676,60 +676,70 @@ Items where [FEATURES.md](FEATURES.md) describes behaviour the code does
 not yet deliver. FEATURES.md is the source of truth for user-visible
 behaviour; plan.md holds the engineering work to get there.
 
-- [ ] **Pointer homing targets Flows** — FEATURES.md §6/§12 says the
-  Pointer is the exception to the `NoChaseCategory=VTOL` rule because its
-  projectile is homing. Currently `combat_system` reads the filter
-  uniformly from FBI (`unit_registry.no_chase_vtol`) and Pointer inherits
-  `NoChaseCategory=VTOL`, so it ignores Flows. Add a per-kind override
-  (`UnitKind::homing_weapon()` or similar) that bypasses the VTOL skip.
-- [ ] **Friendly cloak fade** — FEATURES.md §17 says friendly cloaked
-  units render semi-transparent / faded. `cloak::update_cloak_visibility`
-  only toggles `Visibility::Visible`/`Hidden` — no alpha ramp. Needs
-  per-material alpha clone with ~0.5 alpha for friendly-cloaked state.
+- [x] ~~**Pointer homing targets Flows**~~ — done.
+  `UnitKind::homing_targets_air()` (currently only `Pointer`) now
+  overrides the `NoChaseCategory=VTOL` filter in `combat_system`
+  ([combat/mod.rs:194](kernel-panic/src/units/combat/mod.rs#L194)). Unit test
+  `only_pointer_homes_on_air_targets` in [definitions.rs](kernel-panic/src/units/definitions.rs)
+  pins the list so widening it without intent fails loudly.
+- [x] ~~**Friendly cloak fade**~~ — done. `install_cloak_fade_materials`
+  clones each piece's `StandardMaterial` with alpha 0.5 on
+  `Added<Cloaked>` for player-team units; `restore_cloak_fade_materials`
+  reverts via `RemovedComponents<Cloaked>`. Mirrors the
+  `install_fade_materials` / `FadeMaterials` pattern used for emerge
+  fade-in.
 - [ ] **Build menu tabs for multi-builder selection** — FEATURES.md §4
   says "When multiple builders are selected, the build pane has tabs on
   top. When only one is selected, there is still a tab saying the
   builder unit name." `build_menu.rs` picks the first producer via
-  `producer_q.iter().next()` and shows its grid; no tabs.
-- [ ] **Queue count on build icons** — FEATURES.md §4 says queued units
-  show their count in the bottom-left of their build icon. Current
-  `spawn_build_icon` has no count overlay. Queue totals only surface as
-  the "Queue: 3x Bit" text line.
-- [ ] **Minimap spotting filter** — FEATURES.md §4 says the minimap
-  "takes spotting into account." `ui::minimap::update_minimap` plots
-  every `(Transform, Faction)` in the world, ignoring `Spotted`. Gate
-  on `With<Spotted>` (or on the player team's own entities) so fog-of-war
-  drives the minimap too — will naturally activate once §6 un-neuters
-  the blanket-Spotted at spawn.
-- [ ] **Cursor animation 30 fps** — FEATURES.md §25 says the animated
-  cursor variants tick "at a fixed rate (~30 fps)." `cursor.rs`'s
-  `FRAME_PERIOD_SECS = 1.0 / 5.0` (5 fps). Either raise the rate or
-  update the spec — the current 5 fps feel is intentional per a
-  comment ("calmer feel"), so pick one and align.
-- [ ] **Camera yaw `Q`/`E` vs morph `E` hotkey collision** —
-  FEATURES.md §2 reserves `Q`/`E` for camera yaw left/right while §15
-  binds `E` to Bug↔Exploit morph. Both systems currently read `KeyE`
-  in parallel ([camera.rs:246](kernel-panic/src/rendering/camera.rs#L246)
-  and [ability.rs:44](kernel-panic/src/interaction/ability.rs#L44)), so
-  pressing `E` with a Bug selected morphs it *and* rotates the camera.
-  Decide on one binding (likely: keep camera on `Q`/`E`, rebind morph
-  to `M` or make camera yaw ignore repeats while the morph is firing)
-  and update FEATURES.md to match.
-- [ ] **Missing unit hotkeys** — FEATURES.md §3 lists hotkeys the code
-  does not yet bind: `F` (Fight), `T` (set target), `X` (unset target),
-  `Ctrl+D` (self-destroy with 5 s countdown), `A` (attack ground),
-  `P` (patrol). Several share the same structural blocker as attack-
-  move (Gameplay Bugs → "Attack-move"): they need the Spring-style
-  `CommandQueue` component. Self-destroy is standalone.
+  `producer_q.iter().next()` and shows its grid; no tabs. Structural:
+  needs a focused-builder resource and per-tab click handlers.
+- [x] ~~**Queue count on build icons**~~ — done.
+  `spawn_build_icon` now takes a `queue_count` and renders a small
+  bottom-left badge when non-zero. Per-kind counts are computed in
+  `update_build_menu` from the producer's queue.
+- [x] ~~**Minimap spotting filter**~~ — done. `update_minimap`'s unit
+  query now carries `With<Spotted>`. Under the current blanket-Spotted
+  spawn it's a no-op, but the plumbing is in place for when §6 fog is
+  un-neutered.
+- [x] ~~**Cursor animation 30 fps**~~ — done. `FRAME_PERIOD_SECS`
+  raised 1/5 s → 1/30 s in [cursor.rs](kernel-panic/src/interaction/cursor.rs) to
+  match FEATURES.md §25.
+- [x] ~~**Camera yaw `Q`/`E` vs morph `E` hotkey collision**~~ — done.
+  The morph system was renamed to `deploy` (see
+  [units/mechanics/deploy.rs](kernel-panic/src/units/mechanics/deploy.rs)) and
+  rebound to `D`. `D` now multiplexes across three disjoint selection
+  sets: command-fire casters, teleporters, and Bug/Exploit — the
+  eligibility predicates never overlap on one kind (covered by
+  [`ability_and_deploy_labels_do_not_overlap`](kernel-panic/src/ui/hud/order_palette.rs)).
+  Camera keeps `Q`/`E` unchanged. FEATURES.md §15 documents the `D`
+  binding.
+- [ ] **Missing unit hotkeys (structural)** — FEATURES.md §3 still
+  reserves `F` (Fight), `T` (set target), `X` (unset target), `A`
+  (attack ground), `P` (patrol). All share the same blocker as
+  attack-move (Gameplay Bugs → "Attack-move"): they need the
+  Spring-style `CommandQueue` component before implementation is
+  coherent.
+- [x] ~~**Self-destruct (`Ctrl+D`)**~~ — done, standalone path.
+  `SelfDestructCountdown` component (lifecycle.rs) ticks at
+  `SELF_DESTRUCT_DELAY = 5.0` seconds and then drops HP to zero;
+  existing `death_system` + `ExplodeAs` handle the blast. `Ctrl+D` is
+  guarded in `trigger_command_fire_on_hotkey` and
+  `trigger_dispatch_on_hotkey` so the same keypress doesn't also fire
+  NX Flag or Dispatch. `Stop` removes the countdown.
 - [ ] **Signal unit** — FEATURES.md §20 Network table lists Signal as
-  an "Air-strike caller (currently a stub)". Plan.md never mentions
-  Signal. Either implement as a proper caller (likely piggy-backing on
-  SIGTERM's bomber code path) or remove from FEATURES.md.
-- [ ] **Worm auto-hold toggle** — FEATURES.md §20 says the Worm "By
-  default holds fire while cloaked (auto-attack only on manual order;
-  toggle with autohold)". No autohold toggle wired. Default-hold while
-  cloaked is likely also not enforced (Worm attacks via normal
-  `combat_system` once a target enters range).
+  an "Air-strike caller (currently a stub)". Needs either an
+  implementation (likely piggy-backing on SIGTERM's bomber code path)
+  or removal from FEATURES.md.
+- [x] ~~**Worm holds fire while cloaked (default)**~~ — done.
+  `combat_system`'s attacker query now carries `Without<Cloaked>` so
+  Worms / Logic Bombs no longer auto-attack while the cloak is up.
+  The `autohold` toggle (manual override) remains deferred — that's
+  the "autohold" half of FEATURES.md §20.
+- [ ] **Worm `autohold` toggle** — FEATURES.md §20 says the player
+  can toggle between default-hold and auto-attack-while-cloaked.
+  Needs a toggle button in the order palette plus a `ForceAttack`
+  marker that combat_system treats as "fire even while cloaked."
 - [ ] **Build-menu progress bar removal** — ✅ DONE (today).
   `spawn_build_progress` replaced with `spawn_build_queue` which only
   shows the "Queue: 3x Bit" text. Unused `UI_PROGRESS_COLOR` constant
@@ -966,21 +976,30 @@ file is `spawning/mod.rs` at ~580 LoC.
 ### 11.3 Weapon IDs: kill the string allocs
 
 - [ ] `PendingDamage.weapon`, `BurstFire.weapon`, and `AttackEvent.weapon_name`
-  are all `String`. Every shot, every burst follow-up, and every factory
-  build-laser ray (4× per Kernel per frame in steady state) allocates a
-  `"BuildLaser".to_string()` / `weapon_name.to_string()`. Replace with
-  `&'static str` or an interned `WeaponId(u16)` resolved at TDF load.
-  Downstream `weapon_registry.get(&pending.weapon)` becomes an array lookup.
+  are all `String` / `Cow<'static, str>`. Every shot, every burst follow-up,
+  and every factory build-laser ray (4× per Kernel per frame in steady state)
+  allocates or clones a weapon-name string. Replace with an interned
+  `WeaponId(u16)` resolved once at TDF load; store `Vec<WeaponDef>` indexed
+  by it. `weapon_registry.get(&str)` shrinks from a `BTreeMap<String, _>`
+  lookup per shot to an array index. Keep `&str` only at the TDF boundary.
+- Concrete call sites (from April 2026 audit):
+  [combat/mod.rs:169,322,358](kernel-panic/src/units/combat/mod.rs#L169),
+  [combat/damage.rs:293-294](kernel-panic/src/units/combat/damage.rs#L293),
+  [combat/lifecycle.rs:235](kernel-panic/src/units/combat/lifecycle.rs#L235),
+  [weapon_fx/spawn.rs:42](kernel-panic/src/units/weapon_fx/spawn.rs#L42).
 - Unblocks folding `weapon_infection_duration(&str)` into `strum::EnumString`.
 
 ### 11.4 HUD panels rebuild every frame
 
 - [ ] `ui/hud/info_panel.rs`, `build_menu.rs`, and `order_palette.rs` each
-  `despawn_all_children + spawn fresh` their entire subtree unconditionally on
-  every Update. With ~10–30 UI entities per panel, that's ~1800 despawn+respawn
-  ops/sec at 60 fps plus per-frame `format!("{:.0}", …)` allocs for every Text
-  node. Gate on `Changed<Selected>` or a `LastSelectionHash` resource; for
-  progress bar / HP refresh, update `Text` in place rather than respawn.
+  `despawn_all_children + spawn fresh` their entire subtree on state change.
+  `build_menu` and `order_palette` already gate on a `LastSelectionHash`, so
+  fully-static frames are free; `build_menu` no longer folds build-progress
+  into its hash, so a single building being produced no longer churns the
+  icon grid ~60×/sec (April 2026 sweep). What's still open: for the per-tick
+  refreshes that DO fire (HP bars, progress bars, queue badges), mutate the
+  retained `Text` / `Node.width` in place rather than despawn+respawn the
+  whole subtree. Also drop the per-frame `format!("{:.0}", …)` allocs.
 
 ### 11.5 `MovementState` / `ProductionState` → change detection
 
@@ -1020,9 +1039,11 @@ file is `spawning/mod.rs` at ~580 LoC.
   [production.rs:346](kernel-panic/src/units/production.rs#L346)) still
   case-insensitive-compare every frame (now via `CobAnimator::piece_index`).
   Cache the indices at spawn like `FactoryPieces::emitters/pad` does.
-- [ ] **`spawn_projectile` / `spawn_melee_flash`** allocate a fresh
-  `StandardMaterial` per shot. Route through `BeamMaterialCache` (which
-  already handles beams + impact bursts) or a sibling `ProjectileAssets`.
+- [x] **`spawn_projectile` / `spawn_melee_flash` / `spawn_beam`** used to
+  allocate a fresh `Cuboid`/`Sphere` mesh per shot. Now share the unit-length
+  primitives cached in `WeaponFxMeshes` and bake thickness+length into
+  `Transform::scale`. `StandardMaterial` was already cached via
+  `BeamMaterialCache`. (April 2026 simplification sweep.)
 - [ ] **`spawn_death_particle`** allocates mesh + material per explode. Lazy
   `DeathParticleAssets` resource (same pattern as `BuildSparkleAssets`),
   fade via scale rather than per-particle material mutation.

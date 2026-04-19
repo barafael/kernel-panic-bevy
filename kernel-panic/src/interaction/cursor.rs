@@ -14,9 +14,8 @@ use bevy::prelude::*;
 use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
-use crate::units::components::{TeamId, UnitType};
-use crate::units::game_over::PlayerTeam;
-use crate::units::unit_registry::UnitRegistry;
+use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
+use crate::units::content::unit_registry::UnitRegistry;
 
 pub struct CursorPlugin;
 
@@ -157,9 +156,8 @@ impl CursorRequest {
 /// priority.
 fn resolve_context_cursor(
     mut request: ResMut<CursorRequest>,
-    selected: Query<&UnitType, With<Selected>>,
-    hovered: Query<&TeamId, (With<Hovered>, With<UnitType>)>,
-    player: Res<PlayerTeam>,
+    selected: Query<(&UnitType, &TeamId, &Faction), With<Selected>>,
+    hovered: Query<(&TeamId, &Faction), (With<Hovered>, With<UnitType>)>,
     unit_registry: Res<UnitRegistry>,
 ) {
     if selected.is_empty() {
@@ -170,7 +168,12 @@ fn resolve_context_cursor(
     let mut has_mover = false;
     let mut has_weapon = false;
     let mut has_constructor = false;
-    for ut in &selected {
+    // Track the first selected unit's team/faction so we can ask
+    // `is_friendly` about the hovered unit. With AI removed, the "player
+    // owns one team" assumption is gone — cursor hint is resolved by
+    // comparing the selection against what's under the cursor.
+    let mut selection_team_faction: Option<(u8, Faction)> = None;
+    for (ut, team, faction) in &selected {
         if unit_registry.speed(ut.0) > 0.0 {
             has_mover = true;
         }
@@ -180,18 +183,20 @@ fn resolve_context_cursor(
         if ut.0.is_constructor() {
             has_constructor = true;
         }
+        selection_team_faction.get_or_insert((team.0, *faction));
     }
 
     match hovered.iter().next() {
-        Some(team) if team.0 != player.0 => {
-            if has_weapon {
-                request.set(CursorKind::Attack, 0);
-            } else {
-                request.set(CursorKind::Normal, 0);
-            }
-        }
-        Some(_) => {
-            if has_constructor {
+        Some((hover_team, hover_faction)) => {
+            let is_enemy = selection_team_faction
+                .is_some_and(|(t, f)| !is_friendly(t, f, hover_team.0, *hover_faction));
+            if is_enemy {
+                if has_weapon {
+                    request.set(CursorKind::Attack, 0);
+                } else {
+                    request.set(CursorKind::Normal, 0);
+                }
+            } else if has_constructor {
                 request.set(CursorKind::Repair, 0);
             } else {
                 request.set(CursorKind::Normal, 0);
@@ -217,8 +222,9 @@ fn load_cursor_frames(asset_server: Res<AssetServer>, mut state: ResMut<CursorSt
     }
 }
 
-/// ~5 fps animation — slower than Spring's default for a calmer feel.
-const FRAME_PERIOD_SECS: f32 = 1.0 / 5.0;
+/// ~30 fps animation (FEATURES.md §25). Matches Spring's default; at
+/// 5 fps the Move/Attack sprites visibly stepped through frames.
+const FRAME_PERIOD_SECS: f32 = 1.0 / 30.0;
 
 fn frame_advance(time: Res<Time>, mut state: ResMut<CursorState>) {
     state.timer.tick(time.delta());

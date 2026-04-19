@@ -6,7 +6,9 @@ use bevy::{
 };
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 
-use super::{components::Faction, definitions::UnitKind, unit_registry::UnitRegistry};
+use crate::units::components::Faction;
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
 
 // ---------------------------------------------------------------------------
 // Caches
@@ -89,7 +91,7 @@ pub fn unit_mesh(
     // Fallback: procedural cylinder.
     let scale = kind.mesh_scale();
     let mesh = match kind {
-        UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection => {
+        UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier | UnitKind::Connection => {
             Cylinder::new(20.0 * scale, 12.0 * scale)
         }
         UnitKind::Socket | UnitKind::Window | UnitKind::Port => {

@@ -10,8 +10,8 @@ use super::style::{
 };
 use crate::interaction::Selected;
 use crate::units::components::{Faction, Health, UnitType, health_color};
-use crate::units::definitions::UnitKind;
-use crate::units::unit_registry::UnitRegistry;
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
 
 pub struct InfoPanelPlugin;
 

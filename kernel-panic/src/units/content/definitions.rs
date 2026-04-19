@@ -77,7 +77,16 @@ pub enum UnitKind {
     Obelisk,
 
     // --- Network ---
-    /// Homebase + teleporter.
+    /// Homebase. The Network's main factory: stationary, builds mobile
+    /// units (Packet / Connection / Flow / Gateway). Loaded from
+    /// upstream `carrier.fbi`. Separate from the mobile `Connection`
+    /// teleporter, which shares no assets with it.
+    #[strum(serialize = "carrier")]
+    Carrier,
+
+    /// Mobile teleporter. Dispatches Packets from the shared buffer and
+    /// absorbs them back on `Enter`. Not a homebase — see `Carrier` for
+    /// the Network commander.
     #[strum(serialize = "connection")]
     Connection,
 
@@ -112,7 +121,7 @@ pub enum UnitKind {
     BadBlock,
 }
 
-use super::components::Faction;
+use crate::units::components::Faction;
 use strum::VariantArray;
 
 /// All `UnitKind` variants in declaration order. Re-exported from
@@ -154,6 +163,7 @@ impl UnitKind {
             | UnitKind::Obelisk => Faction::Hacker,
 
             UnitKind::Firewall
+            | UnitKind::Carrier
             | UnitKind::Connection
             | UnitKind::Port
             | UnitKind::Packet
@@ -166,7 +176,7 @@ impl UnitKind {
     /// Mesh scale override (not in FBI files — game-specific rendering tweak).
     pub fn mesh_scale(self) -> f32 {
         match self {
-            UnitKind::Kernel | UnitKind::Hole | UnitKind::Connection => 3.0,
+            UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier | UnitKind::Connection => 3.0,
             UnitKind::Terminal | UnitKind::Obelisk => 2.5,
             UnitKind::Socket | UnitKind::Window | UnitKind::Port => 2.0,
             UnitKind::Byte => 2.0,
@@ -241,6 +251,31 @@ impl UnitKind {
         matches!(self, UnitKind::Port | UnitKind::Connection)
     }
 
+    /// Units that carry a `D`-hotkey command-fire ability (NX Flag,
+    /// Infection, Protect, Mine Launch, SIGTERM). The UI picks its label
+    /// separately; only the eligibility set lives here.
+    pub fn has_command_fire_ability(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Pointer
+                | UnitKind::Obelisk
+                | UnitKind::Firewall
+                | UnitKind::Byte
+                | UnitKind::Terminal
+        )
+    }
+
+    /// The paired unit for Bug ↔ Exploit deploy. Returns `None` for
+    /// units that can't deploy. Mutual: `X.deploy_pair() == Some(Y)`
+    /// implies `Y.deploy_pair() == Some(X)`.
+    pub fn deploy_pair(self) -> Option<UnitKind> {
+        match self {
+            UnitKind::Bug => Some(UnitKind::Exploit),
+            UnitKind::Exploit => Some(UnitKind::Bug),
+            _ => None,
+        }
+    }
+
     /// Units that carry the `Cloaked` marker at spawn time (§3.3).
     pub fn spawns_cloaked(self) -> bool {
         matches!(self, UnitKind::Worm | UnitKind::LogicBomb)
@@ -253,6 +288,15 @@ impl UnitKind {
     /// sinks it underground).
     pub fn is_subterranean(self) -> bool {
         matches!(self, UnitKind::Worm)
+    }
+
+    /// Documented exception to `NoChaseCategory=VTOL`: units whose
+    /// projectile homes on air targets despite the FBI filter.
+    /// FEATURES.md §12 calls this out specifically for the Pointer —
+    /// its `octashot.s3o` round tracks ground *and* air (Flows). Every
+    /// other ground unit still respects `NoChaseCategory=VTOL`.
+    pub fn homing_targets_air(self) -> bool {
+        matches!(self, UnitKind::Pointer)
     }
 
     /// Units that only auto-fire against mine-class targets. Debug
@@ -295,7 +339,7 @@ impl UnitKind {
             self,
             UnitKind::Kernel
                 | UnitKind::Hole
-                | UnitKind::Connection
+                | UnitKind::Carrier
                 | UnitKind::Socket
                 | UnitKind::Window
                 | UnitKind::Port
@@ -321,6 +365,7 @@ impl UnitKind {
             UnitKind::Kernel
             | UnitKind::Socket
             | UnitKind::Hole
+            | UnitKind::Carrier
             | UnitKind::Window
             | UnitKind::Port
             | UnitKind::Firewall
@@ -404,6 +449,7 @@ mod tests {
         // Homebases and mobile units are not small buildings.
         assert!(!UnitKind::Kernel.is_small_building());
         assert!(!UnitKind::Hole.is_small_building());
+        assert!(!UnitKind::Carrier.is_small_building());
         assert!(!UnitKind::Connection.is_small_building());
         assert!(!UnitKind::Bit.is_small_building());
     }
@@ -415,6 +461,34 @@ mod tests {
         assert!(UnitKind::Gateway.is_constructor());
         assert!(!UnitKind::Bit.is_constructor());
         assert!(!UnitKind::Kernel.is_constructor());
+    }
+
+    /// Only the Pointer's `octashot.s3o` homes on air targets
+    /// (FEATURES.md §12). Every other ground unit respects its FBI
+    /// `NoChaseCategory=VTOL` filter. The combat system AND-combines
+    /// `no_chase_vtol` with `!homing_targets_air` to decide whether to
+    /// skip flying candidates, so widening this list without
+    /// intending to would let any unit tag Flows.
+    #[test]
+    fn only_pointer_homes_on_air_targets() {
+        assert!(UnitKind::Pointer.homing_targets_air());
+        for kind in [
+            UnitKind::Bit,
+            UnitKind::Byte,
+            UnitKind::Bug,
+            UnitKind::Exploit,
+            UnitKind::Dos,
+            UnitKind::Packet,
+            UnitKind::Flow,
+            UnitKind::Worm,
+            UnitKind::Terminal,
+            UnitKind::Obelisk,
+        ] {
+            assert!(
+                !kind.homing_targets_air(),
+                "{kind:?} should not bypass NoChaseCategory=VTOL",
+            );
+        }
     }
 
     #[test]
@@ -453,6 +527,31 @@ mod tests {
         assert!(UnitKind::BadBlock.is_building());
         assert!(!UnitKind::Bit.is_building());
         assert!(!UnitKind::Assembler.is_building());
+    }
+
+    #[test]
+    fn deploy_pair_is_mutual_and_limited_to_bug_exploit() {
+        assert_eq!(UnitKind::Bug.deploy_pair(), Some(UnitKind::Exploit));
+        assert_eq!(UnitKind::Exploit.deploy_pair(), Some(UnitKind::Bug));
+        assert_eq!(UnitKind::Bit.deploy_pair(), None);
+        assert_eq!(UnitKind::Kernel.deploy_pair(), None);
+        assert_eq!(UnitKind::Packet.deploy_pair(), None);
+    }
+
+    #[test]
+    fn command_fire_ability_set_does_not_overlap_deploy_set() {
+        for kind in ALL_UNIT_KINDS {
+            if kind.has_command_fire_ability() {
+                assert!(
+                    kind.deploy_pair().is_none(),
+                    "{kind:?} has both an ability and a deploy pair",
+                );
+            }
+        }
+        assert!(UnitKind::Pointer.has_command_fire_ability());
+        assert!(UnitKind::Byte.has_command_fire_ability());
+        assert!(!UnitKind::Bit.has_command_fire_ability());
+        assert!(!UnitKind::Bug.has_command_fire_ability());
     }
 
     #[test]

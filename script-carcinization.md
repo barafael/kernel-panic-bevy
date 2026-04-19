@@ -47,15 +47,22 @@ function scope. Grepping `spring-map/` for `GameFrame`, `gadget:Update`,
 Of the 16 shipped maps in [kernel-panic/assets/maps/](kernel-panic/assets/maps/),
 **three** contain Lua (extracted and scanned directly from each archive):
 
-| Map | Lua gadget | LOC | `setheightmap`? | Runs today? |
-|-----|-----------|-----|-----------------|-------------|
-| `Palladium_0.5_(beta).sd7` | `LuaRules/Gadgets/PalladiumHeight.lua` | 529 | yes | Phase 1 only |
-| `Hex_Farm_8.sd7` | `LuaRules/Gadgets/HexFarm8.lua` | 2810 | yes | Phase 1 only |
-| `pacman.sd7` | `LuaRules/Gadgets/tp_wraparoundmap.lua` | 127 | no | Not at all |
+- **`Palladium_0.5_(beta).sd7`** → `LuaRules/Gadgets/PalladiumHeight.lua`
+  (529 LOC). Writes heightmap → **Phase 1 runs today**. Phases 2+ dropped.
+- **`Hex_Farm_8.sd7`** → `LuaRules/Gadgets/HexFarm8.lua` (2810 LOC — 5× the
+  size of Palladium). Writes heightmap → **Phase 1 runs today**. Has
+  Initialize, GameFrame, UnitFinished, UnitDestroyed, AllowUnitBuildStep,
+  Explosion, RecvLuaMsg, DrawWorldPreUnit — everything after Initialize is
+  dropped.
+- **`pacman.sd7`** → `LuaRules/Gadgets/tp_wraparoundmap.lua` (127 LOC).
+  **No `setheightmap`** → current filter skips it entirely. Has GameStart,
+  GameFrame, Initialize — almost certainly implements the pac-man-style
+  edge-wrap teleport that the map's name implies. **Zero** of its behavior
+  runs today.
 
-Palladium is documented in detail below because it's the archetype and the
-simplest; Hex_Farm_8 follows the same shape but larger; pacman is a separate
-kind of gadget (no heightmap writes, so the current filter skips it).
+Palladium is documented in detail below because it's the cleanest example
+and the one that motivated the stub; Hex_Farm_8 follows the same shape but
+larger; pacman is a separate kind of gadget.
 
 The three gadgets all have **multi-phase** structure with runtime callbacks
 the current Rust stub silently drops. Only `Initialize()` runs; any
@@ -66,6 +73,7 @@ the current Rust stub silently drops. Only `Initialize()` runs; any
 #### Phase 1 — `Initialize()` (load-time, currently running)
 
 `PalladiumHeight.lua:234-400` (`MakePalladiumBeginningHeightMap`) stamps:
+
 - 4× mirrored **static platforms** (L246-248) at fixed tile rects, heights
   320/448/384/256 with per-side ramp/pyramid parameters.
 - 4× mirrored **dynamic platforms** (L250-253) — the four "crosses" at
@@ -80,6 +88,7 @@ terrain. The current Rust path handles this correctly.
 #### Phase 2 — `GameFrame(f)` (per-tick, missing)
 
 `PalladiumHeight.lua:414-423`:
+
 - At `f == 3`: `ResetFeaturesHeight()` destroys every feature on the map and
   recreates it at the new ground height — features settle after Initialize.
 - Each frame: drains a `MustRedo` queue, calling `ReMakeDynamicPlatforms(p)`
@@ -135,6 +144,7 @@ missing. Phase 1 is all that runs.
 Two viable shapes:
 
 **A. Bake + drop, skip the dynamic behavior.**
+
 1. Run `apply_lua_heightmap_gadgets` once offline per shipped map, snapshot
    `parsed.heights` into a baked artifact (rewrite `.smf` heightmap block
    in-place, or sidecar).
@@ -145,6 +155,7 @@ Two viable shapes:
 
 **B. Bake + port the dynamic behavior to Rust.**
 Same as A, then additionally:
+
 1. Hardcode the four dynamic-platform rects and ramp-direction wedges as a
    Rust const table (4 entries × 4 ramps each).
 2. Bevy system on `UnitSpawned` / `UnitDestroyed` for static units with
@@ -272,6 +283,7 @@ behavior mechanically. Generated code is ugly but faithful.
 
 **C. 4–5 shared Rust animation archetypes + per-unit data tables. (recommended)**
 Kernel-Panic's visual vocabulary is repetitive — most units fit one of:
+
 - `EmergeUp { pieces, duration }` — every Create() is "pieces rise while
   BUILD_PERCENT_LEFT counts down"
 - `Walk { leg_pieces, cycle_ms }` — StartMoving/StopMoving leg wobble
@@ -294,6 +306,7 @@ archetypes, and the `.bos` sources are readable so classifying them is an
 afternoon of work.
 
 Removal sequence:
+
 1. Read all 48 `.bos` files at [upstream/Kernel-Panic/scripts/](upstream/Kernel-Panic/scripts/),
    bucket by archetype. Note the oddballs.
 2. Implement 4–5 generic animation systems in Rust keyed on marker components.
@@ -311,18 +324,34 @@ Rust without re-compiling `.bos`.
 
 ## 3. Combined removal order
 
-Lua removal is hours; COB removal is 1–2 weeks. Independent changes —
-different crates, different subsystems, different touch points. Can be done
-in either order.
+Effort depends heavily on which Lua path you pick:
+
+- **Lua path A** (bake-only): hours. Same mechanical work regardless of
+  gadget size — Hex_Farm_8's 2810 LOC bakes the same way Palladium's 529
+  LOC does. Accepts that Palladium's ramp morph, Hex_Farm_8's runtime
+  hex-board behavior, and pacman's edge-wrap stay missing.
+- **Lua path B** (bake + port dynamics): days to weeks, dominated by
+  Hex_Farm_8. Palladium is ~200 LOC of Rust; Hex_Farm_8 is a larger unknown
+  (2810 LOC of Lua with UnitFinished, AllowUnitBuildStep, Explosion, and
+  GameFrame callbacks); pacman's wraparound teleport is a small standalone
+  system.
+- **COB removal** (path C): 1–2 weeks, largely independent of Lua work.
+
+The changes are independent — different crates, different subsystems,
+different touch points. Can be done in any order.
 
 Suggested sequence:
 
-1. **Lua, path B** — bake Palladium into a static .smf + port the dynamic
-   ramps to a Bevy system. Drop `mlua` dep, delete `lua_heightmap.rs`, drop
-   `LuaFile` / `lua_files`. Restores a lost gameplay feature in the process.
-2. **COB, step 1** — classify 48 `.bos` files into archetypes, commit the
+1. **Lua path A first.** Bake all three maps, drop `mlua`. Hours of work,
+   matches the status quo (nothing that currently runs stops running), keeps
+   the "scripts shipped in binary" goal intact.
+2. **Decide per-map whether to restore dynamics.** Palladium's ramps are
+   worth it (small, gameplay-relevant). Hex_Farm_8 needs its own scoping
+   pass — the 2810 LOC gadget is the real tail. pacman's edge-wrap is a
+   self-contained feature that can wait.
+3. **COB step 1** — classify 48 `.bos` files into archetypes, commit the
    bucket list.
-3. **COB, steps 2–5** — implement the 4–5 archetype systems, author the
+4. **COB steps 2–5** — implement the 4–5 archetype systems, author the
    data table, handle oddballs, delete spring-cob.
 
 After both: two fewer runtime interpreters, the binary is plain Rust + Bevy

@@ -9,15 +9,15 @@
 
 use bevy::prelude::*;
 
-use super::super::animation::{CobAnimator, MuzzlePiece};
-use super::super::components::{Faction, Health, TeamId, UnitStats, UnitType};
-use super::super::definitions::UnitKind;
-use super::super::script_triggers::JustFired;
-use super::super::spatial::SpatialIndex;
-use super::super::unit_registry::UnitRegistry;
-use super::super::weapon_fx::{AttackEvent, PendingAttacks};
-use super::super::weapons::WeaponRegistry;
 use super::{Dying, IdleTimer, StunCharge, Stunned, muzzle_world_pos};
+use crate::units::assets::animation::{CobAnimator, MuzzlePiece};
+use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::content::weapons::WeaponRegistry;
+use crate::units::lifecycle::script_triggers::JustFired;
+use crate::units::spatial::SpatialIndex;
+use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// A pending damage event. Damage is resolved at apply-time so the
 /// target's armor class can pick the right entry from the weapon's
@@ -222,8 +222,8 @@ fn apply_hit(
     paralyze_time: f32,
     health_q: &mut Query<&mut Health>,
     stun_q: &mut Query<&mut StunCharge>,
-    shield_q: &mut Query<&mut super::super::shield::ShieldState>,
-    protected_q: &Query<(), With<super::super::command_fire::Protected>>,
+    shield_q: &mut Query<&mut crate::units::mechanics::shield::ShieldState>,
+    protected_q: &Query<(), With<crate::units::mechanics::command_fire::Protected>>,
     commands: &mut Commands,
 ) {
     let leak = match shield_q.get_mut(target) {
@@ -235,7 +235,7 @@ fn apply_hit(
     }
 
     let (final_amount, reflected) = if protected_q.get(target).is_ok() {
-        let taken = leak * super::super::command_fire::FIREWALL_DAMAGE_TAKEN;
+        let taken = leak * crate::units::mechanics::command_fire::FIREWALL_DAMAGE_TAKEN;
         (taken, leak - taken)
     } else {
         (leak, 0.0)
@@ -278,11 +278,11 @@ pub fn apply_damage(
     mut damage_queue: ResMut<DamageQueue>,
     mut health_q: Query<&mut Health>,
     mut stun_q: Query<&mut StunCharge>,
-    mut shield_q: Query<&mut super::super::shield::ShieldState>,
+    mut shield_q: Query<&mut crate::units::mechanics::shield::ShieldState>,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
     target_pos_q: Query<(&GlobalTransform, &UnitStats), With<UnitType>>,
-    protected_q: Query<(), With<super::super::command_fire::Protected>>,
+    protected_q: Query<(), With<crate::units::mechanics::command_fire::Protected>>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
@@ -363,7 +363,7 @@ pub fn apply_damage(
                 }
                 if avoid_friendly
                     && let Some((_, a_faction, a_team)) = attacker_info
-                    && super::super::components::is_friendly(
+                    && crate::units::components::is_friendly(
                         candidate.team,
                         candidate.faction,
                         a_team.0,

@@ -17,13 +17,13 @@
 
 use bevy::prelude::*;
 
-use super::animation::{CobAnimator, MuzzlePiece};
+use super::assets::animation::{CobAnimator, MuzzlePiece};
 use super::components::{Faction, TeamId, UnitStats, UnitType};
-use super::script_triggers::JustFired;
+use super::content::unit_registry::UnitRegistry;
+use super::content::weapons::WeaponRegistry;
+use super::lifecycle::script_triggers::JustFired;
 use super::spatial::SpatialIndex;
-use super::unit_registry::UnitRegistry;
 use super::weapon_fx::{AttackEvent, PendingAttacks};
-use super::weapons::WeaponRegistry;
 use crate::rng::next_signed;
 use crate::terrain::heightmap::Heightmap;
 
@@ -40,7 +40,8 @@ pub use damage::{
     apply_damage, tick_burst_fire, tick_infections,
 };
 pub use lifecycle::{
-    Dying, Stunned, auto_heal, cleanup_dying, death_system, tick_kamikaze, tick_stun,
+    Dying, SELF_DESTRUCT_DELAY, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
+    death_system, tick_kamikaze, tick_self_destruct, tick_stun,
 };
 
 /// Added to each sampled terrain height in LOS checks so the shooter and
@@ -115,8 +116,14 @@ pub fn combat_system(
         ),
         (
             Without<Dying>,
-            Without<super::spawning::Emerging>,
+            Without<super::lifecycle::spawning::Emerging>,
             Without<Stunned>,
+            // Cloaked units (Worm, Logic Bomb) hold fire by default —
+            // FEATURES.md §20 / upstream KP behaviour. A manual attack
+            // order would remove `Cloaked` before firing in the
+            // future; today the toggle doesn't exist yet (Worm
+            // `autohold` remains in the spec-gaps list).
+            Without<crate::units::mechanics::cloak::Cloaked>,
         ),
     >,
     mut commands: Commands,
@@ -191,7 +198,10 @@ pub fn combat_system(
         // Most KP ground units set `NoChaseCategory=VTOL` so they ignore
         // Flows (and any future flying unit) during auto-target. Flying
         // units themselves still chase fliers — the filter is per-attacker.
-        let skip_flying = stats.no_chase_vtol;
+        // The Pointer is the documented exception (FEATURES.md §12): its
+        // homing projectile explicitly tracks air targets, so we override
+        // the FBI filter for that one kind.
+        let skip_flying = stats.no_chase_vtol && !unit_type.0.homing_targets_air();
         // Debug (mineblaster) sets `OnlyTargetCategory1=VOID` upstream
         // and only fires Minekiller on mines / walls — it's a
         // defensive turret, not a tickle-turret for infantry. Keep the

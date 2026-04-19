@@ -7,10 +7,10 @@ use std::f32::consts::PI;
 
 use bevy::prelude::*;
 
-use super::animation::CobAnimator;
-use super::combat::Dying;
 use super::production::Producer;
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::units::assets::animation::CobAnimator;
+use crate::units::combat::Dying;
 
 /// Marks a unit that fired `StartMoving` on its COB VM and has not yet
 /// fired `StopMoving`. Presence means "previously observed moving"; the

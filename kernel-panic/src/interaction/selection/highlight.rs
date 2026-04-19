@@ -26,16 +26,26 @@ const SELECTED_BRIGHTNESS: f32 = 2.5;
 #[derive(Component)]
 struct OriginalMaterial(Handle<StandardMaterial>);
 
-/// Marker to track that a unit currently has brightened materials.
+/// Tracks the brightness factor currently baked into a unit's materials.
+/// The system skips re-applying when this matches the desired factor, so a
+/// steady selection doesn't mint a fresh `StandardMaterial` every frame.
 #[derive(Component)]
-struct Highlighted;
+struct Highlighted(f32);
+
+/// Two epsilon for the `f32` factor comparison so we treat `HOVER_BRIGHTNESS`
+/// vs `SELECTED_BRIGHTNESS` as unambiguously different without triggering on
+/// bit-identical values.
+const FACTOR_EPS: f32 = 0.01;
 
 /// Brighten a unit's materials when it becomes hovered or selected.
 /// Works on both the root entity and its piece children (S3O models).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_unit_highlight(
-    hovered_q: Query<(Entity, &Faction), (With<Hovered>, Without<Selected>, With<UnitType>)>,
-    selected_q: Query<(Entity, &Faction), (With<Selected>, With<UnitType>)>,
+    hovered_q: Query<
+        (Entity, &Faction, Option<&Highlighted>),
+        (With<Hovered>, Without<Selected>, With<UnitType>),
+    >,
+    selected_q: Query<(Entity, &Faction, Option<&Highlighted>), (With<Selected>, With<UnitType>)>,
     unhighlighted_q: Query<
         Entity,
         (
@@ -52,14 +62,18 @@ fn update_unit_highlight(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut commands: Commands,
 ) {
-    // Restore materials on units that are no longer hovered or selected.
     for unit_entity in &unhighlighted_q {
         restore_unit_materials(unit_entity, &children_q, &original_q, &mut commands);
         commands.entity(unit_entity).try_remove::<Highlighted>();
     }
 
-    // Apply hover brightness (only if not also selected).
-    for (unit_entity, faction) in &hovered_q {
+    // Apply hover brightness only when the state actually changed. Skipping
+    // otherwise is the whole point: `apply_brightness` clones+inserts a new
+    // `StandardMaterial` per piece, and doing that 60×/s leaks asset handles.
+    for (unit_entity, faction, current) in &hovered_q {
+        if !needs_rebrighten(current, HOVER_BRIGHTNESS) {
+            continue;
+        }
         brighten_unit(
             unit_entity,
             faction,
@@ -71,11 +85,15 @@ fn update_unit_highlight(
             &mut materials,
             &mut commands,
         );
-        commands.entity(unit_entity).insert(Highlighted);
+        commands
+            .entity(unit_entity)
+            .insert(Highlighted(HOVER_BRIGHTNESS));
     }
 
-    // Apply selection brightness (takes priority over hover).
-    for (unit_entity, faction) in &selected_q {
+    for (unit_entity, faction, current) in &selected_q {
+        if !needs_rebrighten(current, SELECTED_BRIGHTNESS) {
+            continue;
+        }
         brighten_unit(
             unit_entity,
             faction,
@@ -87,8 +105,14 @@ fn update_unit_highlight(
             &mut materials,
             &mut commands,
         );
-        commands.entity(unit_entity).insert(Highlighted);
+        commands
+            .entity(unit_entity)
+            .insert(Highlighted(SELECTED_BRIGHTNESS));
     }
+}
+
+fn needs_rebrighten(current: Option<&Highlighted>, desired: f32) -> bool {
+    current.map_or(true, |h| (h.0 - desired).abs() > FACTOR_EPS)
 }
 
 /// Brighten all mesh materials on a unit entity and its children.

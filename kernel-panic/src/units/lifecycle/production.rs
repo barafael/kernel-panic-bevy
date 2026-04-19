@@ -2,17 +2,16 @@ use std::collections::VecDeque;
 
 use bevy::prelude::*;
 
-use super::animation::PieceIndex;
-use super::animation::{CobAnimator, CobFileCache};
-use super::components::{Faction, TeamId, UnitType};
-use super::definitions::UnitKind;
-use super::meshes::S3OModelCache;
 use super::spawning::{
     EMERGE_DEPTH, EMERGE_LEAD_TIME, EmergeStyle, Emerging, FactoryPieces, FadeMaterials,
     SelectionVolumeMaterial, spawn_unit,
 };
-use super::unit_registry::UnitRegistry;
-use super::weapon_fx::{AttackEvent, PendingAttacks};
+use crate::units::assets::animation::{CobAnimator, CobFileCache, PieceIndex};
+use crate::units::assets::meshes::S3OModelCache;
+use crate::units::components::{Faction, TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// Attached to factories/homebases. Builds units from its queue.
 ///
@@ -30,6 +29,10 @@ pub struct Producer {
     /// the same unit twice while progress ramps from "spawn moment" to
     /// "build_time" (the rising-out-of-the-pad window).
     unit_spawned: bool,
+    /// Monotonic count of units this factory has spawned. Used to spread
+    /// rally points deterministically across a grid in front of the
+    /// factory so a stream of Packets doesn't pile onto the same spot.
+    spawn_count: u32,
 }
 
 impl Producer {
@@ -38,6 +41,7 @@ impl Producer {
             progress: 0.0,
             queue: VecDeque::new(),
             unit_spawned: false,
+            spawn_count: 0,
         }
     }
 
@@ -50,18 +54,6 @@ impl Producer {
     fn current_build_time(&self, registry: &UnitRegistry) -> Option<f32> {
         self.current_production()
             .map(|kind| registry.build_time(kind))
-    }
-
-    /// Build progress as a fraction 0.0..1.0.
-    pub fn progress_fraction(&self, registry: &UnitRegistry) -> f32 {
-        let Some(bt) = self.current_build_time(registry) else {
-            return 0.0;
-        };
-        if bt > 0.0 {
-            (self.progress / bt).clamp(0.0, 1.0)
-        } else {
-            0.0
-        }
     }
 
     /// The queued build orders.
@@ -90,11 +82,13 @@ pub fn default_production(kind: UnitKind) -> Option<Producer> {
     match kind {
         UnitKind::Kernel
         | UnitKind::Hole
-        | UnitKind::Connection
+        | UnitKind::Carrier
         | UnitKind::Socket
         | UnitKind::Window => Some(Producer::new()),
         // Port is a teleporter, not a factory — it tops up its team's
         // PacketBuffer every 5.5s rather than spawning units directly.
+        // Connection (mobile) is likewise a teleporter — it dispatches
+        // Packets from the buffer but does not build new units.
         _ => None,
     }
 }
@@ -126,7 +120,7 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
 fn piece_world_pos(
     piece_idx: Option<usize>,
     animator: Option<&CobAnimator>,
-    piece_transforms: &Query<&GlobalTransform, With<super::animation::PieceIndex>>,
+    piece_transforms: &Query<&GlobalTransform, With<PieceIndex>>,
 ) -> Option<Vec3> {
     let idx = piece_idx?;
     let animator = animator?;
@@ -144,10 +138,10 @@ pub fn production_system(
         &GlobalTransform,
         Option<&FactoryPieces>,
         Option<&CobAnimator>,
-        Option<&super::components::Homebase>,
+        Option<&crate::units::components::Homebase>,
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
-    piece_transforms: Query<&GlobalTransform, With<super::animation::PieceIndex>>,
+    piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -244,18 +238,37 @@ pub fn production_system(
             // its forward direction so the new unit walks clear of the
             // hole once it has finished emerging. Stationary units
             // (speed == 0) get no rally point.
+            //
+            // Per-unit spread: a single rally point makes every Packet
+            // from the same Carrier converge on the same spot and pile
+            // up. Lay out points on a grid in front of the factory —
+            // rows of seven, each row further away, lateral slot picked
+            // from `spawn_count`. Produces a deterministic, non-piling
+            // rally cloud without any RNG or allocation.
             let kind = producer.current_production().unwrap();
             let rally_point = if unit_registry.speed(kind) > 0.0 {
-                let forward = global_tf.forward().as_vec3();
-                let exit_offset = if forward.length_squared() > 0.01 {
-                    forward.normalize() * 60.0
+                let raw_forward = global_tf.forward().as_vec3();
+                let forward = if raw_forward.length_squared() > 0.01 {
+                    Vec3::new(raw_forward.x, 0.0, raw_forward.z).normalize_or(Vec3::Z)
                 } else {
-                    Vec3::new(0.0, 0.0, 60.0)
+                    Vec3::Z
                 };
-                Some(pad_pos + exit_offset)
+                // Right-hand perpendicular on XZ (Y-up): (fz, 0, -fx).
+                let right = Vec3::new(forward.z, 0.0, -forward.x);
+                const SLOTS_PER_ROW: u32 = 7;
+                const LATERAL_STEP: f32 = 20.0;
+                const ROW_STEP: f32 = 40.0;
+                const ROW0_DISTANCE: f32 = 60.0;
+                let n = producer.spawn_count;
+                let slot = (n % SLOTS_PER_ROW) as f32 - (SLOTS_PER_ROW as f32 - 1.0) * 0.5;
+                let ring = (n / SLOTS_PER_ROW) as f32;
+                let offset =
+                    forward * (ROW0_DISTANCE + ring * ROW_STEP) + right * (slot * LATERAL_STEP);
+                Some(pad_pos + offset)
             } else {
                 None
             };
+            producer.spawn_count = producer.spawn_count.wrapping_add(1);
 
             // System units rise out of the ground (start underground at
             // `pad_y - EMERGE_DEPTH`); Hacker / Network units materialize
@@ -341,7 +354,11 @@ pub struct PendingFadeInstall;
 /// host the same way `aim_weapons_system` host-drives the Pointer's
 /// gunbase.
 pub fn animate_connection_hatch(
-    mut query: Query<(&Producer, &mut CobAnimator, &super::animation::HatchPiece)>,
+    mut query: Query<(
+        &Producer,
+        &mut CobAnimator,
+        &crate::units::assets::animation::HatchPiece,
+    )>,
 ) {
     const HATCH_LIFT_ELMOS: f32 = 16.0;
     const HATCH_SPEED_ELMOS_PER_SEC: f32 = 24.0;
