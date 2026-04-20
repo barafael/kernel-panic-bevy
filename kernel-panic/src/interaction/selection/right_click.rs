@@ -198,7 +198,8 @@ pub(crate) fn apply_ordered_command(
         let mut ec = commands.entity(entity);
         ec.insert(MoveTarget(cmd.position()))
             .insert(CommandQueue::default())
-            .remove::<MovePath>();
+            .remove::<MovePath>()
+            .remove::<crate::units::combat::AttackGroundOrder>();
         match cmd {
             QueuedCommand::BuildAt { kind, site } => {
                 ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });

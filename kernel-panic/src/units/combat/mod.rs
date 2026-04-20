@@ -44,6 +44,19 @@ pub use lifecycle::{
     death_system, tick_kamikaze, tick_self_destruct, tick_stun,
 };
 
+/// Player-issued order to fire the unit's weapon at a fixed ground position.
+///
+/// While present the unit moves toward `pos` if out of weapon range, then
+/// fires at `pos` each reload cycle. The normal auto-attack path in
+/// [`combat_system`] still runs concurrently — the first enemy that steps
+/// into range gets hit as usual.
+///
+/// Cleared on Stop, right-click move, or any new explicit order.
+#[derive(Component, Clone, Copy)]
+pub struct AttackGroundOrder {
+    pub pos: Vec3,
+}
+
 /// Added to each sampled terrain height in LOS checks so the shooter and
 /// target standing on a crest don't self-block. Roughly half a heightmap
 /// square — tighter than this and slopes read as walls; looser and
@@ -317,7 +330,7 @@ pub fn combat_system(
         }
 
         damage_queue.push(PendingDamage {
-            target: target_entity,
+            target: Some(target_entity),
             attacker: entity,
             weapon: weapon_name.to_string(),
             impact_pos,
@@ -340,10 +353,14 @@ pub fn combat_system(
             // so arm-length-scale piece offsets don't flicker targeting.
             let visual_origin =
                 muzzle_world_pos(entity, attacker_gtf, &muzzle_q, &animator_q, &piece_gtf_q);
+            let muzzle_ceg = unit_registry
+                .preferred_muzzle_ceg(unit_type.0)
+                .map(|s| std::borrow::Cow::Owned(s.to_string()));
             pending_attacks.events.push(AttackEvent {
                 attacker_pos: visual_origin,
                 target_pos: impact_pos,
                 weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
+                muzzle_ceg,
             });
         }
 
@@ -359,5 +376,99 @@ pub fn combat_system(
                 arc_height,
             });
         }
+    }
+}
+
+/// Fire the unit's weapon at a player-specified ground position.
+///
+/// Each frame where cooldown has expired and the target is in range, the
+/// system fires one shot at `order.pos` with no primary entity target
+/// (`PendingDamage.target = None`). Splash damage from AoE weapons hits
+/// everything within `area_of_effect` around the impact point as normal.
+///
+/// If the target is out of range the system steers the unit toward it by
+/// inserting a `MoveTarget` pointed at the range boundary. The unit stops
+/// advancing once it can fire — it won't walk all the way to the impact
+/// point unless the weapon range is 0 (unarmed units skip this system).
+#[allow(clippy::too_many_arguments)]
+pub fn attack_ground_system(
+    unit_registry: Res<UnitRegistry>,
+    weapon_registry: Res<WeaponRegistry>,
+    attackers: Query<(Entity, &UnitType, &GlobalTransform, &AttackGroundOrder), Without<Dying>>,
+    cooldowns: Query<&AttackCooldown>,
+    muzzle_q: Query<&MuzzlePiece>,
+    animator_q: Query<&CobAnimator>,
+    piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
+    mut commands: Commands,
+    mut damage_queue: ResMut<DamageQueue>,
+    mut pending_attacks: ResMut<PendingAttacks>,
+) {
+    for (entity, unit_type, gtf, order) in &attackers {
+        let weapon_name = unit_registry.weapon(unit_type.0);
+        let Some(weapon_def) = weapon_registry.get(weapon_name) else {
+            continue;
+        };
+        let range = weapon_def.range;
+        if range <= 0.0 {
+            continue;
+        }
+
+        let attacker_pos = gtf.translation();
+        let dist = attacker_pos.distance(order.pos);
+
+        if dist > range {
+            // Move toward the target, stopping just inside weapon range so
+            // the unit doesn't walk through the blast zone of its own AoE.
+            let dir = (order.pos - attacker_pos).normalize_or(Vec3::NEG_Z);
+            let stop_at = attacker_pos + dir * (dist - range * 0.85);
+            commands
+                .entity(entity)
+                .insert(crate::interaction::movement::MoveTarget(stop_at));
+            continue;
+        }
+
+        // Read the shared cooldown WITHOUT decrementing — `combat_system`
+        // already ticks every `AttackCooldown` once per frame. Ticking
+        // again here would halve the effective reload for ground-target
+        // orders, making weapons fire twice as fast as the TDF spec.
+        let cd_ready = cooldowns.get(entity).map_or(true, |cd| cd.remaining <= 0.0);
+        if !cd_ready {
+            continue;
+        }
+
+        // Aim at ground target so the barrel sweeps visibly.
+        let arc_height = weapon_def.trajectory_height * 0.4;
+        commands.entity(entity).insert(AimTarget {
+            pos: order.pos,
+            arc_height,
+        });
+
+        // Fire.
+        let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
+        let muzzle_ceg = unit_registry
+            .preferred_muzzle_ceg(unit_type.0)
+            .map(|s| std::borrow::Cow::Owned(s.to_string()));
+        pending_attacks.events.push(AttackEvent {
+            attacker_pos: visual_origin,
+            target_pos: order.pos,
+            weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
+            muzzle_ceg,
+        });
+        damage_queue.push(PendingDamage {
+            target: None,
+            attacker: entity,
+            weapon: weapon_name.to_string(),
+            impact_pos: order.pos,
+            attacker_distance: dist,
+        });
+        commands.entity(entity).insert((
+            AttackCooldown {
+                remaining: weapon_def.reload_time,
+            },
+            JustFired {
+                target_pos: order.pos,
+                arc_height,
+            },
+        ));
     }
 }

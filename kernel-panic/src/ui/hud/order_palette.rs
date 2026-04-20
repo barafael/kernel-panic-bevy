@@ -302,7 +302,7 @@ fn apply_unit_orders(
     for event in ev_order.read() {
         match event.order {
             UnitOrder::Stop => {
-                use crate::units::combat::SelfDestructCountdown;
+                use crate::units::combat::{AttackGroundOrder, SelfDestructCountdown};
                 use crate::units::lifecycle::construction::PendingBuild;
                 for (entity, _) in &selected_q {
                     commands
@@ -311,7 +311,8 @@ fn apply_unit_orders(
                         .remove::<MovePath>()
                         .remove::<CommandQueue>()
                         .remove::<PendingBuild>()
-                        .remove::<SelfDestructCountdown>();
+                        .remove::<SelfDestructCountdown>()
+                        .remove::<AttackGroundOrder>();
                 }
             }
             UnitOrder::AttackMove => {

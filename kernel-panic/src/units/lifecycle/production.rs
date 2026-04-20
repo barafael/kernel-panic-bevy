@@ -111,6 +111,10 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
         attacker_pos: start,
         target_pos: end,
         weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
+        // BuildLaser pulses don't drive a muzzle CEG — the sparkle at
+        // the target end is the primary fx; strobing the builder every
+        // frame would drown out the rest of the scene.
+        muzzle_ceg: None,
     });
 }
 

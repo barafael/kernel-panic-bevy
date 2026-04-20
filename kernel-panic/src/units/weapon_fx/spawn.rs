@@ -4,12 +4,14 @@
 
 use bevy::prelude::*;
 
+use super::ceg::{CegParticleMesh, CegRegistry, spawn_ceg};
 use super::shared::{
-    AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, BurstSegment,
-    GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, PendingAttacks,
-    PendingExplosions, ProjectileVisual, WeaponFxMeshes, tdf_color,
+    AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, GroundFlash,
+    GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, PendingAttacks,
+    PendingExplosions, ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT, WeaponFxMeshes,
+    build_billboard_quad_mesh, tdf_color, weapon_core_color, weapon_edge_color,
 };
-use crate::units::assets::meshes::{S3OModelCache, load_raw_bevy_texture};
+use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_mesh};
 use crate::units::content::weapons::WeaponRegistry;
 
 /// True for `BuildLaser` (the upstream build-laser weapon name). The
@@ -29,6 +31,7 @@ const MUZZLE_FLASH_RADIUS: f32 = 6.0;
 pub(super) fn spawn_weapon_visuals(
     mut pending: ResMut<PendingAttacks>,
     weapon_registry: Res<WeaponRegistry>,
+    ceg_registry: Res<CegRegistry>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -39,7 +42,9 @@ pub(super) fn spawn_weapon_visuals(
     mut impact_assets: ResMut<ImpactBurstAssets>,
     mut flash_assets: ResMut<GroundFlashAssets>,
     mut fx_meshes: ResMut<WeaponFxMeshes>,
+    mut particle_mesh: ResMut<CegParticleMesh>,
     asset_server: Res<AssetServer>,
+    mut rng: Local<u32>,
 ) {
     for event in pending.events.drain(..) {
         let Some(weapon) = weapon_registry.get(&event.weapon_name) else {
@@ -52,10 +57,17 @@ pub(super) fn spawn_weapon_visuals(
             continue;
         }
 
-        // Classify weapon by its TDF properties.
+        // Classify through the typed category — `derived_weapon_type`
+        // runs the `weapondefs_post.lua` legacy-tag shim so weapons that
+        // authored `beamweapon=1 lineofsight=1` without a literal
+        // `weaponType=` still land on `LaserCannon` (Bit `Line`, Byte
+        // `MegaBeam`, RetroDeath family, MineLauncher). Shim details
+        // live on [`spring_tdf::WeaponDef::derived_weapon_type`].
+        let category = weapon.category();
+        let is_melee = category == spring_tdf::WeaponCategory::Melee;
         let is_projectile = weapon.is_projectile();
-        let is_burst_beam = weapon.beam_burst || weapon.spray_angle > 100.0;
-        let is_melee = weapon.category() == spring_tdf::WeaponCategory::Melee;
+        let is_beam_laser = category == spring_tdf::WeaponCategory::BeamLaser;
+        let is_laser_cannon = category == spring_tdf::WeaponCategory::LaserCannon;
 
         if is_melee {
             spawn_melee_flash(
@@ -65,19 +77,10 @@ pub(super) fn spawn_weapon_visuals(
                 &mut materials,
                 &mut cache,
                 &mut fx_meshes,
+                &mut impact_assets,
             );
         } else if is_projectile {
             spawn_projectile(
-                &event,
-                weapon,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut fx_meshes,
-            );
-        } else if is_burst_beam {
-            spawn_burst_beam(
                 &event,
                 weapon,
                 &mut commands,
@@ -88,10 +91,38 @@ pub(super) fn spawn_weapon_visuals(
                 &mut cache,
                 &mut fx_meshes,
             );
-        } else {
-            spawn_beam(
+        } else if is_laser_cannon {
+            spawn_laser_bolt(
                 &event,
                 weapon,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &mut cache,
+                &mut fx_meshes,
+            );
+        } else if is_beam_laser {
+            spawn_textured_beam(
+                &event,
+                weapon,
+                true,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &mut cache,
+                &mut fx_meshes,
+            );
+        } else {
+            // Untyped weapon (shouldn't happen for KP's roster). Fall
+            // back to a flat untextured beam so there's *some* feedback.
+            spawn_textured_beam(
+                &event,
+                weapon,
+                false,
                 &mut commands,
                 &mut meshes,
                 &mut materials,
@@ -102,23 +133,47 @@ pub(super) fn spawn_weapon_visuals(
             );
         }
 
-        // Muzzle flash at the attacker's muzzle-piece position (or origin
-        // if no muzzle was resolved). Re-uses the impact-burst system as
-        // a pragmatic `BitmapMuzzleFlame` substitute — a short, bright,
-        // weapon-tinted pop so the player sees which of their units just
-        // fired. Melee attacks already have their own flash and build
-        // lasers shouldn't strobe the builder, so both are excluded.
+        // Muzzle flash at the attacker's muzzle-piece position.
+        //
+        // When the unit's FBI declared a `[SFXTypes]` table and combat
+        // filled in `event.muzzle_ceg`, replay that CEG verbatim — this
+        // is the path that gives Bit the cyan `arrowflare` muzzle
+        // (`custom:oldskool_shot2`) and Byte/Pointer the soft-blue
+        // `oldskool_shot1` puff. When no SFX CEG was authored, fall
+        // back to the synthesised coloured sphere so there's still a
+        // "something fired" signal. Melee / BuildLaser skip both — see
+        // `is_melee` / `is_build_laser` filters.
         if !is_melee && !is_build_laser(&event.weapon_name) {
-            spawn_impact_burst(
-                event.attacker_pos,
-                weapon.rgb_color,
-                MUZZLE_FLASH_RADIUS,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut impact_assets,
-            );
+            let ceg_spawned = if let Some(muzzle_ceg) = event.muzzle_ceg.as_deref() {
+                let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
+                spawn_ceg(
+                    muzzle_ceg,
+                    event.attacker_pos,
+                    muzzle_dir,
+                    &ceg_registry,
+                    &mut rng,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                    &mut model_cache,
+                    &mut particle_mesh,
+                )
+            } else {
+                false
+            };
+            if !ceg_spawned {
+                spawn_impact_burst(
+                    event.attacker_pos,
+                    weapon.rgb_color,
+                    MUZZLE_FLASH_RADIUS,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut impact_assets,
+                );
+            }
         }
 
         // Build lasers also drop a short-lived "nanoframe pixel" sprite at
@@ -134,35 +189,52 @@ pub(super) fn spawn_weapon_visuals(
                 &asset_server,
             );
         } else if !is_melee {
-            // Every non-melee / non-BuildLaser weapon pops a colored impact
-            // burst at the target so the player gets visual feedback even
-            // when the full upstream CEG isn't loaded.
-            let aoe = weapon.area_of_effect.max(4.0);
-            spawn_impact_burst(
-                event.target_pos,
-                weapon.rgb_color,
-                aoe,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut impact_assets,
-            );
-            // A flat expanding ring at the impact plane adds weight to the
-            // sphere-shaped burst and stands in for the upstream `GroundFlash`
-            // CEG subsection most KP explosions include. Muzzle flash at the
-            // shooter is left ringless — it's at barrel height, not on the
-            // ground.
-            spawn_ground_flash(
-                event.target_pos,
-                weapon.rgb_color,
-                aoe,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut flash_assets,
-            );
+            // Upstream CEG is the source of truth for impact particles:
+            // the weapon's `explosiongenerator=custom:NAME` resolves to a
+            // CSimpleParticleSystem definition in `gamedata/explosions/`.
+            // Replay those particles faithfully — colormap, size growth,
+            // directional spread, lifetime all come from the authored
+            // script. Fall back to the synthesised burst + ground flash
+            // only when the CEG is missing or references a class we
+            // don't yet support (CBitmapMuzzleFlame etc).
+            let dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
+            let used_ceg = !weapon.explosion_generator.is_empty()
+                && spawn_ceg(
+                    &weapon.explosion_generator,
+                    event.target_pos,
+                    dir,
+                    &ceg_registry,
+                    &mut rng,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                    &mut model_cache,
+                    &mut particle_mesh,
+                );
+            if !used_ceg {
+                let aoe = weapon.area_of_effect.max(4.0);
+                spawn_impact_burst(
+                    event.target_pos,
+                    weapon.rgb_color,
+                    aoe,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut impact_assets,
+                );
+                spawn_ground_flash(
+                    event.target_pos,
+                    weapon.rgb_color,
+                    aoe,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut flash_assets,
+                );
+            }
         }
     }
 }
@@ -179,32 +251,58 @@ pub(super) fn spawn_pending_explosions(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
     mut cache: ResMut<BeamMaterialCache>,
     mut impact_assets: ResMut<ImpactBurstAssets>,
     mut flash_assets: ResMut<GroundFlashAssets>,
+    mut particle_mesh: ResMut<CegParticleMesh>,
+    ceg_registry: Res<CegRegistry>,
+    mut rng: Local<u32>,
 ) {
     for event in pending.events.drain(..) {
-        let aoe = event.radius.max(4.0);
-        spawn_impact_burst(
-            event.pos,
-            event.rgb,
-            aoe,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut cache,
-            &mut impact_assets,
-        );
-        spawn_ground_flash(
-            event.pos,
-            event.rgb,
-            aoe,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut cache,
-            &mut flash_assets,
-        );
+        // Drive standalone explosions through the same CEG lookup: if
+        // the caller passed a named CEG (death `ExplodeAs`, mine kill,
+        // SIGTERM), replay its emitters; otherwise fall back to the
+        // synthesised burst so there's still feedback for unscripted
+        // detonations.
+        let used_ceg = !event.ceg_name.is_empty()
+            && spawn_ceg(
+                &event.ceg_name,
+                event.pos,
+                Vec3::Y,
+                &ceg_registry,
+                &mut rng,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &mut particle_mesh,
+            );
+        if !used_ceg {
+            let aoe = event.radius.max(4.0);
+            spawn_impact_burst(
+                event.pos,
+                event.rgb,
+                aoe,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                &mut impact_assets,
+            );
+            spawn_ground_flash(
+                event.pos,
+                event.rgb,
+                aoe,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                &mut flash_assets,
+            );
+        }
     }
 }
 
@@ -237,7 +335,7 @@ fn spawn_ground_flash(
         .clone();
 
     let color = tdf_color(rgb);
-    let material = cache.get_or_create_with_intensity(color, true, 2.0, None, materials);
+    let material = cache.get_or_create_tiled(color, true, 2.0, None, 0, materials);
 
     // Clamp so even mines / SIGTERM don't swallow the screen, but keep
     // beam pings (AoE=8) readable. Small ring radius feels snappier than
@@ -363,30 +461,51 @@ fn spawn_build_sparkle(
     ));
 }
 
-/// Pull the beam texture filename (e.g. `arrow`) off a weapon def and
-/// resolve it to a Bevy handle. Upstream quotes the name without an
-/// extension — we try `.tga` (the format on disk) and cache the
-/// result keyed by the raw name so repeated shots of the same weapon
-/// pay disk I/O once. Returns `(name, handle)` ready for the material
-/// cache key, or `None` for untextured weapons.
+/// Resolve a TDF `texture1=...` name to a Bevy handle *with repeat
+/// sampling enabled* plus the texture's pixel dimensions, so callers
+/// can compute a tile count that preserves the texture's native
+/// aspect ratio along the beam length. Returns `None` for textures
+/// that couldn't be loaded (disk miss) or weapons that set `texture1=`
+/// to empty / `none`.
+///
+/// Upstream `RESOURCES.TDF` declares atlas aliases — `bytelasermid`
+/// points at the on-disk `bytemegabeammid.tga`, not a file named after
+/// the alias itself. We consult [`CegRegistry::resolve_texture`] first
+/// (which mirrors the same alias table) and fall back to a literal
+/// `{name}.tga` lookup for weapon textures that don't happen to be
+/// aliased (e.g. `circle.tga` already lives on disk under that name).
 fn beam_texture<'a>(
     tex1: &'a str,
     model_cache: &mut S3OModelCache,
     images: &mut Assets<Image>,
-) -> Option<(&'a str, Handle<Image>)> {
-    if tex1.is_empty() || tex1 == "none" {
+) -> Option<(&'a str, Handle<Image>, f32)> {
+    if tex1.is_empty() || tex1.eq_ignore_ascii_case("none") {
         return None;
     }
-    let filename = format!("{tex1}.tga");
-    let handle = load_raw_bevy_texture(&filename, model_cache, images)?;
-    Some((tex1, handle))
+    let resolved = CegRegistry::resolve_texture(tex1)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{tex1}.tga"));
+    let (handle, w, h) = load_beam_texture(&resolved, model_cache, images)?;
+    let aspect = if h > 0 { w as f32 / h as f32 } else { 1.0 };
+    Some((tex1, handle, aspect))
 }
 
-/// Beam (Line, MegaBeam, BugShot, DOS_Beam, VirusBeam, GaussCannon).
+/// Spawn a `BeamLaser` hit-scan ribbon from attacker to target.
+///
+/// Mirrors the upstream two-pass draw in
+/// `rts/Sim/Projectiles/WeaponProjectiles/BeamLaserProjectile.cpp`:
+/// the outer pass draws the full-thickness quad with the texture
+/// tinted by `rgbColor` ([`weapon_edge_color`]); the core pass draws
+/// a `thickness * corethickness` quad on top with `rgbColor2` =
+/// white ([`weapon_core_color`]), which is what preserves baked-colour
+/// textures unchanged in the center. Both passes use the same beam
+/// texture (`texture1`); end caps (`texture2`) would go through
+/// `visuals.texture2` but we haven't ported that detail yet.
 #[allow(clippy::too_many_arguments)]
-fn spawn_beam(
+fn spawn_textured_beam(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
+    is_beam_laser: bool,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -397,83 +516,123 @@ fn spawn_beam(
 ) {
     let dir = event.target_pos - event.attacker_pos;
     let length = dir.length();
-    let midpoint = (event.attacker_pos + event.target_pos) / 2.0;
-    let color = tdf_color(weapon.rgb_color);
-
-    // Thickness from TDF, clamped for visibility.
-    let thickness = (weapon.thickness * 0.25).clamp(0.3, 6.0);
-
-    // Duration from TDF fields. `beam_decay` controls fade speed — upstream
-    // values near 0.8 mean the beam lingers; we stretch the base lifetime
-    // by it so PacketBeam and GaussCannon read as longer flashes than
-    // their raw duration field suggests.
-    let base = if weapon.beam_time > 0.0 {
-        weapon.beam_time
-    } else if weapon.duration > 0.0 {
-        weapon.duration
-    } else {
-        0.15
-    };
-    let duration = if weapon.beam_decay > 0.0 {
-        base * (1.0 + weapon.beam_decay)
-    } else {
-        base
-    };
-
-    let texture = beam_texture(&weapon.texture1, model_cache, images);
-    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, texture, materials);
-    let rotation = Quat::from_rotation_arc(Vec3::Z, dir.normalize());
-
-    // The Byte's MegaBeam fires in bursts of 4 thick rectangles.
-    // The Line weapon has corethickness=1 which gives a thinner core + thicker outer.
-    // Most beam weapons: single cuboid from A to B.
-    let core = weapon.core_thickness * 0.25;
-    if core > 0.1 && thickness > 1.0 {
-        // Two-layer beam: bright thin core + dimmer outer. Core stays
-        // untextured so the bright white stripe always reads cleanly
-        // over the atlased outer.
-        let core_mat = cache.get_or_create_with_intensity(
-            LinearRgba::WHITE,
-            true,
-            weapon.intensity,
-            None,
-            materials,
-        );
-        let unit_cube = fx_meshes.unit_cube(meshes);
-        commands.spawn((
-            BeamVisual {
-                lifetime: duration,
-                max_lifetime: duration,
-                base_thickness: core,
-                length,
-            },
-            Mesh3d(unit_cube),
-            MeshMaterial3d(core_mat),
-            Transform::from_translation(midpoint + Vec3::Y * 0.1)
-                .with_rotation(rotation)
-                .with_scale(Vec3::new(core, core, length)),
-        ));
+    if length < 0.1 {
+        return;
     }
+    // Trust the TDF-authored thickness verbatim. The earlier 0.9×
+    // squeeze + clamp(1.5, 12.0) suppressed Byte's authored 16-elmo
+    // MegaBeam down to a 12-unit stripe, which is why the impact
+    // flare and core were reading as a unit hairline rather than the
+    // fat upstream ribbon.
+    let thickness = weapon.thickness.max(1.0);
 
-    let unit_cube = fx_meshes.unit_cube(meshes);
+    // BeamLaser lifetime comes from `beamtime`/`beamttl`; beam_decay
+    // stretches the tail. 0.08 s is a pragmatic floor so single-frame
+    // shots still visibly flash.
+    let base_lifetime = if is_beam_laser {
+        let ttl_sec = weapon.beam_ttl / 30.0; // beam_ttl is frames @ 30fps
+        weapon.beam_time.max(ttl_sec).max(0.08)
+    } else {
+        weapon.duration.max(0.08)
+    };
+    let lifetime = base_lifetime * (1.0 + weapon.beam_decay.max(0.0));
+
+    // Tile the texture along beam length so `arrow`'s `>>>>` or
+    // `dosray`'s `01010101` stream reads as a sequence of glyphs
+    // rather than one stretched smear. 56 elmos/tile matches the
+    // on-screen glyph size in upstream footage at default zoom.
+    const ARROW_TILE_LENGTH: f32 = 56.0;
+    let texture = beam_texture(&weapon.texture1, model_cache, images);
+    let has_texture = texture.is_some();
+    let tile_count = if has_texture {
+        ((length / ARROW_TILE_LENGTH).round() as u32).clamp(1, 24)
+    } else {
+        0
+    };
+
+    // Outer (edge) pass: each beam entity owns a 4-vertex mesh that
+    // the tick system rewrites per frame with camera-facing corners.
+    let edge_color = weapon_edge_color(weapon);
+    let outer_mat = cache.get_or_create_tiled(
+        edge_color,
+        true,
+        weapon.intensity,
+        texture
+            .as_ref()
+            .map(|(name, handle, _)| (*name, handle.clone())),
+        tile_count,
+        materials,
+    );
+    let outer_mesh = meshes.add(build_billboard_quad_mesh());
     commands.spawn((
         BeamVisual {
-            lifetime: duration,
-            max_lifetime: duration,
-            base_thickness: thickness,
-            length,
+            start: event.attacker_pos,
+            end: event.target_pos,
+            thickness,
+            lifetime,
+            max_lifetime: lifetime,
+            mesh: outer_mesh.clone(),
         },
-        Mesh3d(unit_cube),
-        MeshMaterial3d(mat),
-        Transform::from_translation(midpoint)
-            .with_rotation(rotation)
-            .with_scale(Vec3::new(thickness, thickness, length)),
+        Mesh3d(outer_mesh),
+        MeshMaterial3d(outer_mat),
+        Transform::IDENTITY,
     ));
+
+    // Core pass: `corethickness × rgbColor2 (white) × texture`. Always
+    // drawn when authored > 0. For `corethickness=1` the core fully
+    // covers the outer and baked-colour textures (arrow cyan,
+    // bytemegabeam magenta) come through intact. Lower ratios let the
+    // outer halo peek around for a two-tone look.
+    let core_ratio = weapon.core_thickness.clamp(0.0, 1.0);
+    if core_ratio > 0.01 {
+        let core_thickness = thickness * core_ratio;
+        let core_color = weapon_core_color(weapon);
+        let core_mat = cache.get_or_create_tiled(
+            core_color,
+            true,
+            weapon.intensity.max(1.0),
+            texture.map(|(name, handle, _)| (name, handle)),
+            tile_count,
+            materials,
+        );
+        let core_mesh = meshes.add(build_billboard_quad_mesh());
+        commands.spawn((
+            BeamVisual {
+                start: event.attacker_pos,
+                end: event.target_pos,
+                thickness: core_thickness,
+                lifetime,
+                max_lifetime: lifetime,
+                mesh: core_mesh.clone(),
+            },
+            Mesh3d(core_mesh),
+            MeshMaterial3d(core_mat),
+            Transform::IDENTITY,
+        ));
+    }
+    // `fx_meshes` is still shared with other spawners; this path no
+    // longer pulls the old `beam_quad` handle.
+    let _ = fx_meshes;
+    let _ = length;
 }
 
-/// Burst beam (PacketBeam — multiple small beams with spray).
+/// Spawn a traveling laser bolt for `LaserCannon` weapons (Bit `Line`,
+/// Byte `MegaBeam`, RetroDeath death streaks, Bug `BugShot`, Virus
+/// `VirusBeam`, MineLauncher). Upstream's
+/// `rts/Sim/Projectiles/WeaponProjectiles/LaserProjectile.cpp`
+/// renders a short segment of length
+/// `max_length = duration * weapon_velocity` flying at
+/// `weapon_velocity` elmos/sec: the lead extends from the muzzle,
+/// the tail trails by up to `max_length`, then contracts after
+/// impact. [`tick_weapon_fx`] animates position + length.
+///
+/// The atlas stretches once across the moving bolt — we don't tile,
+/// matching upstream's `tex1->xstart..xend` assignment at tail/lead.
+/// Same two-pass draw as `spawn_textured_beam`: outer edge with
+/// `rgbColor × texture`, core with white × texture (covered fully
+/// when `corethickness=1`).
 #[allow(clippy::too_many_arguments)]
-fn spawn_burst_beam(
+fn spawn_laser_bolt(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
@@ -484,58 +643,126 @@ fn spawn_burst_beam(
     cache: &mut BeamMaterialCache,
     fx_meshes: &mut WeaponFxMeshes,
 ) {
-    let color = tdf_color(weapon.rgb_color);
+    let delta = event.target_pos - event.attacker_pos;
+    let distance = delta.length();
+    if distance < 0.1 {
+        return;
+    }
+    let direction = delta / distance;
+
+    // Trust the authored thickness — see spawn_textured_beam.
+    let thickness = weapon.thickness.max(1.0);
+
+    let speed = if weapon.weapon_velocity > 0.0 {
+        weapon.weapon_velocity
+    } else {
+        256.0
+    };
+    let duration = weapon.duration.max(0.05);
+    // `max_length = duration * speed` per upstream, with a floor of
+    // `thickness * 3` so very short ticks still read as a bolt.
+    let max_length = (speed * duration).max(thickness * 3.0);
+
     let texture = beam_texture(&weapon.texture1, model_cache, images);
-    let mat = cache.get_or_create_with_intensity(color, true, weapon.intensity, texture, materials);
+    let has_texture = texture.is_some();
+    let tile_count: u32 = if has_texture { 1 } else { 0 };
 
-    let dir = event.target_pos - event.attacker_pos;
-    let length = dir.length();
-    let base_dir = dir.normalize();
+    // Each bolt instance owns its own 4-vertex mesh; the tick system
+    // rewrites the corners each frame using the current camera. No
+    // transform scaling, no rotation — positions go in world space.
+    let edge_color = weapon_edge_color(weapon);
+    let outer_mat = cache.get_or_create_tiled(
+        edge_color,
+        true,
+        weapon.intensity,
+        texture
+            .as_ref()
+            .map(|(name, handle, _)| (*name, handle.clone())),
+        tile_count,
+        materials,
+    );
+    let outer_mesh = meshes.add(build_billboard_quad_mesh());
+    commands.spawn((
+        LaserBolt {
+            origin: event.attacker_pos,
+            direction,
+            total_distance: distance,
+            speed,
+            max_length,
+            thickness,
+            elapsed: 0.0,
+            mesh: outer_mesh.clone(),
+        },
+        Mesh3d(outer_mesh),
+        MeshMaterial3d(outer_mat),
+        Transform::IDENTITY,
+    ));
 
-    // Number of burst segments.
-    let count = if weapon.burst > 1.0 {
-        weapon.burst as usize
-    } else {
-        3
-    };
-
-    let spray_rad = (weapon.spray_angle / 65536.0) * std::f32::consts::TAU;
-    let thickness = (weapon.thickness * 0.2).clamp(0.3, 2.0);
-
-    let ttl = if weapon.beam_ttl > 0.0 {
-        weapon.beam_ttl / 30.0 // beam_ttl is in frames (30fps)
-    } else {
-        0.12
-    };
-
-    let unit_cube = fx_meshes.unit_cube(meshes);
-    let scale = Vec3::new(thickness, thickness, length);
-
-    for i in 0..count {
-        let angle = spray_rad * (i as f32 / count as f32 - 0.5);
-        let perturbed = Quat::from_rotation_y(angle) * base_dir;
-        let end = event.attacker_pos + perturbed * length;
-        let mid = (event.attacker_pos + end) / 2.0;
-        let rotation = Quat::from_rotation_arc(Vec3::Z, perturbed);
-
+    // Core pass: `corethickness × white × texture`. For Bit's
+    // `Line` (corethickness=1) the core is full width and fully covers
+    // the outer pass, leaving the arrow texture's baked cyan intact.
+    // For Byte's MegaBeam (corethickness=0.5) the outer magenta halo
+    // surrounds a hot-white core.
+    let core_ratio = weapon.core_thickness.clamp(0.0, 1.0);
+    if core_ratio > 0.01 {
+        let core_thickness = thickness * core_ratio;
+        let core_color = weapon_core_color(weapon);
+        let core_mat = cache.get_or_create_tiled(
+            core_color,
+            true,
+            weapon.intensity.max(1.0),
+            texture.map(|(name, handle, _)| (name, handle)),
+            tile_count,
+            materials,
+        );
+        let core_mesh = meshes.add(build_billboard_quad_mesh());
         commands.spawn((
-            BurstSegment { lifetime: ttl },
-            Mesh3d(unit_cube.clone()),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_translation(mid)
-                .with_rotation(rotation)
-                .with_scale(scale),
+            LaserBolt {
+                origin: event.attacker_pos,
+                direction,
+                total_distance: distance,
+                speed,
+                max_length,
+                thickness: core_thickness,
+                elapsed: 0.0,
+                mesh: core_mesh.clone(),
+            },
+            Mesh3d(core_mesh),
+            MeshMaterial3d(core_mat),
+            Transform::IDENTITY,
         ));
     }
+    // `fx_meshes` remains in the signature for the other spawners;
+    // this path no longer pulls the shared `beam_quad` handle.
+    let _ = fx_meshes;
 }
 
-/// Projectile (Geometric, BugCannon, end_game_logic_bomb).
+/// Projectile (Pointer Geometric / NX, BugCannon, SigTerm bomb,
+/// Logic Bomb end-game blast, Cannon shells).
+///
+/// Loads the weapon's authored [`spring_tdf::WeaponDef::model`]
+/// (`octashot.s3o` for the Pointer, `sigterm.s3o` for the Terminal's
+/// airstrike) through the shared [`S3OModelCache`] so every shot of
+/// the same weapon reuses one mesh handle. When no model is set the
+/// projectile falls back to a small unit sphere — this covers plain
+/// cannon/plasma weapons that upstream Spring renders as a sprite
+/// billboard.
+///
+/// `arc_height` is the authored `trajectoryHeight` scaled to look
+/// right at typical map ranges (upstream stores a fraction of target
+/// distance; we bake in a gentler 0.4× factor so pointer shots
+/// don't arc into orbit). A full 1.0× curve puts the apex at the
+/// same Y as the distance — too bouncy in 3D camera; the tick system
+/// applies a 4·t·(1-t) parabola on top which is already a full arc.
+#[allow(clippy::too_many_arguments)]
 fn spawn_projectile(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
     fx_meshes: &mut WeaponFxMeshes,
 ) {
@@ -548,30 +775,56 @@ fn spawn_projectile(
     };
 
     let arc_height = weapon.trajectory_height * 0.4;
-    let proj_size = (weapon.size * 0.4).clamp(1.5, 6.0);
 
-    // Geometric uses an octahedron model — approximate with a small cube.
-    let mesh = if !weapon.model.is_empty() && weapon.model != ";" {
-        fx_meshes.unit_cube(meshes)
+    // Prefer the authored S3O model (octashot, sigterm, etc.). The s3o
+    // meshes are authored at their real upstream size in elmos, so the
+    // `proj_size` scale we apply to the fallback sphere/cube (derived
+    // from the weapon's `size=`) is inappropriate here — leave real
+    // models at 1.0× and the model's own geometry dictates on-screen
+    // size. Unknown / missing models drop to a small sphere sized by
+    // the weapon's authored `size=`, which matches upstream Spring's
+    // sprite-projectile fallback for Cannon weapons.
+    let model_name = weapon.model.trim().trim_end_matches(';');
+    let (mesh, visual_scale) = if !model_name.is_empty() && model_name != ";" {
+        if let Some(handle) = load_s3o_mesh(model_name, meshes, model_cache) {
+            (handle, 1.0)
+        } else {
+            (
+                fx_meshes.unit_sphere(meshes),
+                (weapon.size * 0.4).clamp(1.5, 6.0),
+            )
+        }
     } else {
-        fx_meshes.unit_sphere(meshes)
+        (
+            fx_meshes.unit_sphere(meshes),
+            (weapon.size * 0.4).clamp(1.5, 6.0),
+        )
     };
 
     // Route through the shared cache so projectiles that re-use the same
     // color + intensity share a single StandardMaterial handle instead of
     // minting a fresh one per shot.
-    let material =
-        cache.get_or_create_with_intensity(color, false, weapon.intensity, None, materials);
+    let material = cache.get_or_create_tiled(color, false, weapon.intensity, None, 0, materials);
 
-    // Upstream weapons that configure `smoketrail=1` or a `cegTag=...`
-    // (BugCannon → corruption_BCtrail, WMD → corruption_WMDtrail, DOS
-    // particle trail) draw a trailing cloud as the shell flies. We can't
-    // load the real CEG here, but dropping a tiny faction-coloured puff
-    // every few frames reads as the same visual — a streak of motion
-    // behind the projectile. Plain laser projectiles (no smoke, no ceg)
-    // stay trail-less so the Bit's arrow-beam doesn't get a ghost tail.
+    // Upstream weapons with `smoketrail=1` or a `cegTag=...` leave a
+    // trailing ribbon along the flight path. Build it as a dedicated
+    // triangle-strip entity textured with the weapon's `texture2`
+    // (`pointertrail` / `firetrail` / …) and keep its mesh handle on
+    // the projectile so the tick system can rewrite it each frame.
     let has_trail = weapon.smoke_trail || !weapon.ceg_tag.is_empty();
-    let trail_rgb = has_trail.then_some(weapon.rgb_color);
+    let trail = if has_trail {
+        build_projectile_trail(
+            event.attacker_pos,
+            weapon,
+            commands,
+            meshes,
+            materials,
+            images,
+            model_cache,
+        )
+    } else {
+        None
+    };
 
     commands.spawn((
         ProjectileVisual {
@@ -580,42 +833,130 @@ fn spawn_projectile(
             speed,
             progress: 0.0,
             arc_height,
-            trail_rgb,
-            // ~8 puffs/second — dense enough to read as a streak, sparse
-            // enough that a long arc shot doesn't mint hundreds of
-            // impact-burst entities.
-            trail_interval: 0.12,
-            trail_accumulator: 0.0,
+            trail,
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(proj_size)),
+        Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(visual_scale)),
     ));
 }
 
-/// Melee flash (Wormbite).
+/// Spawn a companion entity that carries the projectile's trail mesh.
+///
+/// The mesh starts empty — the tick system rewrites it every frame
+/// from the projectile's sample ring-buffer. The material picks up
+/// the weapon's `texture2` (the designated smoke-trail atlas); when
+/// that texture can't be loaded the trail falls back to an untextured
+/// coloured strip so something still reads as "motion behind the
+/// shell".
+#[allow(clippy::too_many_arguments)]
+fn build_projectile_trail(
+    origin: Vec3,
+    weapon: &spring_tdf::WeaponDef,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
+) -> Option<ProjectileTrail> {
+    // Half-width: trails look natural at ~0.5× the weapon's authored
+    // size (or a minimum of 2 elmos so a cegTag with size=0 still
+    // leaves a visible streak).
+    let half_width = (weapon.size * 0.5).max(2.0);
+
+    // Build an empty triangle-strip mesh sized for `TRAIL_SAMPLE_COUNT`
+    // samples (one quad per segment, two tris per quad). The tick
+    // system fills in vertex positions each frame.
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleStrip,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
+    );
+    let vert_count = TRAIL_SAMPLE_COUNT * 2;
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; vert_count]);
+    mesh.insert_attribute(
+        Mesh::ATTRIBUTE_NORMAL,
+        vec![[0.0, 1.0, 0.0_f32]; vert_count],
+    );
+    // UV.u runs along the trail (0 at head, 1 at tail); UV.v alternates
+    // 0/1 across the ribbon width. The tick system writes .u per
+    // sample; .v stays constant so we initialise once here.
+    let mut uvs = Vec::with_capacity(vert_count);
+    for _ in 0..TRAIL_SAMPLE_COUNT {
+        uvs.push([0.0, 0.0]);
+        uvs.push([0.0, 1.0]);
+    }
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+
+    let mesh_handle = meshes.add(mesh);
+
+    // Material: tint by weapon's resolved edge color so the `texture2`
+    // multiplies by the intended hue. For Pointer's Geometric the
+    // rgbColor is (0,0,0) → defaults to Cannon orange, which overlays
+    // `pointertrail.tga`'s baked orange-red beautifully.
+    let color = weapon_edge_color(weapon);
+    let texture = if !weapon.texture2.is_empty() && weapon.texture2 != "none" {
+        super::super::weapon_fx::ceg::CegRegistry::resolve_texture(&weapon.texture2)
+            .and_then(|filename| {
+                crate::units::assets::meshes::load_beam_texture(filename, model_cache, images)
+            })
+            .map(|(handle, _, _)| handle)
+    } else {
+        None
+    };
+    let material = materials.add(StandardMaterial {
+        base_color: Color::LinearRgba(color),
+        base_color_texture: texture,
+        emissive: color * 3.0,
+        unlit: true,
+        alpha_mode: AlphaMode::Add,
+        cull_mode: None,
+        ..default()
+    });
+
+    let ribbon_entity = commands
+        .spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(material),
+            // Mesh is already in world space — the ribbon doesn't ride
+            // the projectile's transform.
+            Transform::IDENTITY,
+        ))
+        .id();
+
+    // Seed the sample buffer with the origin so the very first frame
+    // draws a zero-length strip rather than a degenerate fan from the
+    // origin; segments fill in as the projectile moves.
+    let samples = vec![origin; TRAIL_SAMPLE_COUNT];
+
+    Some(ProjectileTrail {
+        ribbon_entity,
+        mesh: mesh_handle,
+        samples,
+        half_width,
+    })
+}
+
+/// Melee flash (Wormbite): a short-lived orange `ImpactBurst` at the
+/// midpoint. Reuses the impact-burst component so `tick_weapon_fx`
+/// handles fade/despawn uniformly; no beam geometry involved.
 fn spawn_melee_flash(
     event: &AttackEvent,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
-    fx_meshes: &mut WeaponFxMeshes,
+    _fx_meshes: &mut WeaponFxMeshes,
+    impact_assets: &mut ImpactBurstAssets,
 ) {
     let flash_pos = (event.attacker_pos + event.target_pos) / 2.0;
-    let mesh = fx_meshes.unit_sphere(meshes);
-    let color = LinearRgba::new(1.0, 0.3, 0.0, 0.8);
-    let material = cache.get_or_create_with_intensity(color, true, 1.0, None, materials);
-    let size = 8.0;
-    commands.spawn((
-        BeamVisual {
-            lifetime: 0.15,
-            max_lifetime: 0.15,
-            base_thickness: size,
-            length: size,
-        },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(flash_pos).with_scale(Vec3::splat(size)),
-    ));
+    spawn_impact_burst(
+        flash_pos,
+        [1.0, 0.3, 0.0],
+        16.0,
+        commands,
+        meshes,
+        materials,
+        cache,
+        impact_assets,
+    );
 }

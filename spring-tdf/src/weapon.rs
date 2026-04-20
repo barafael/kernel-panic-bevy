@@ -23,6 +23,17 @@ pub struct WeaponDef {
     // --- Rendering ---
     pub render_type: f32,
     pub rgb_color: [f32; 3],
+    /// Legacy palette hue (0-255). When `rgb_color` is unset upstream's
+    /// `weapondefs_post.lua` synthesises an `rgbColor` via
+    /// [`WeaponDef::palette_rgb`] using `color` as HSV hue and forcing
+    /// saturation=1.0 (its `color2` sibling is intentionally ignored —
+    /// upstream has a FIXME noting the same). Zero means "palette path
+    /// not taken"; for `RetroDeath` the value 40 resolves to a bright
+    /// yellow.
+    pub color: f32,
+    /// Legacy palette saturation (0-255). Kept for round-trip but
+    /// ignored by the `hs2rgb` shim per upstream.
+    pub color2: f32,
     pub thickness: f32,
     pub core_thickness: f32,
     pub intensity: f32,
@@ -46,6 +57,16 @@ pub struct WeaponDef {
     pub beam_time: f32,
     pub beam_ttl: f32,
     pub beam_decay: f32,
+    /// Texture-UV scroll speed in texels/second along the beam. Used by
+    /// the DOS_Beam so the `dosray` 0/1 texture visibly streams along the
+    /// beam instead of sitting still. 0 = no scrolling.
+    pub scroll_speed: f32,
+    /// Radius (in thickness-multiples) of the end-flare drawn at the
+    /// beam origin for `BeamLaser` weapons. 0 = no flare.
+    pub laser_flare_size: f32,
+    /// When true, a beam-weapon laser that runs out of range stops at
+    /// max extent rather than fading; matches upstream `hardstop=1`.
+    pub hard_stop: bool,
 
     // --- Ballistics ---
     pub weapon_velocity: f32,
@@ -121,6 +142,184 @@ pub struct DamageMap {
     pub types: BTreeMap<String, f32>,
 }
 
+/// Normalise a legacy-format RGB triplet into 0-1. Tag authors write
+/// either 0-255 or 0-1; the heuristic tests for any channel above 2.0.
+fn normalise_legacy_rgb(rgb: [f32; 3]) -> [f32; 3] {
+    let [r, g, b] = rgb;
+    if r > 2.0 || g > 2.0 || b > 2.0 {
+        [r / 255.0, g / 255.0, b / 255.0]
+    } else {
+        [r, g, b]
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod shim_tests {
+    use super::*;
+    use crate::Tdf;
+
+    fn parse(src: &str, name: &str) -> WeaponDef {
+        let tdf = Tdf::parse(src).unwrap();
+        let defs = WeaponDefs::from_tdf(&tdf);
+        defs.get(name).cloned().expect("section")
+    }
+
+    #[test]
+    fn explicit_weapon_type_wins() {
+        let w = parse("[W]\n{\nweapontype=BeamLaser;\nbeamweapon=1;\n}", "W");
+        // Even though beamweapon=1 would map to LaserCannon in the
+        // legacy shim, the explicit weaponType takes precedence.
+        assert_eq!(w.category(), WeaponCategory::BeamLaser);
+    }
+
+    #[test]
+    fn bit_line_becomes_laser_cannon() {
+        // Verbatim-ish `Line` (Bit): `beamweapon=1 lineofsight=1` with
+        // no literal `weaponType=`. Must resolve to LaserCannon so
+        // weapon_fx spawns a traveling bolt, not a hitscan beam.
+        let w = parse(
+            "[Line]\n{\nbeamweapon=1;\nlineofsight=1;\nthickness=4;\n}",
+            "Line",
+        );
+        assert_eq!(w.category(), WeaponCategory::LaserCannon);
+        assert!(!w.is_projectile());
+    }
+
+    #[test]
+    fn byte_megabeam_becomes_laser_cannon() {
+        let w = parse(
+            "[MegaBeam]\n{\nbeamweapon=1;\nlineofsight=1;\nburst=4;\n}",
+            "MegaBeam",
+        );
+        assert_eq!(w.category(), WeaponCategory::LaserCannon);
+    }
+
+    #[test]
+    fn pointer_geometric_becomes_missile_launcher() {
+        // `smoketrail=1` with `lineofsight=1` → MissileLauncher,
+        // regardless of whether a `model=` is set. The model-check in
+        // `is_projectile` is a secondary guard.
+        let w = parse(
+            "[Geo]\n{\nsmoketrail=1;\nlineofsight=1;\nmodel=octashot.s3o;\ntracks=1;\n}",
+            "Geo",
+        );
+        assert_eq!(w.category(), WeaponCategory::MissileLauncher);
+        assert!(w.is_projectile());
+    }
+
+    #[test]
+    fn build_laser_becomes_beam_laser() {
+        let w = parse(
+            "[BuildLaser]\n{\nbeamlaser=1;\nbeamtime=0.06;\n}",
+            "BuildLaser",
+        );
+        assert_eq!(w.category(), WeaponCategory::BeamLaser);
+    }
+
+    #[test]
+    fn mine_launcher_honors_explicit_laser_cannon() {
+        // MineLauncher: `WeaponType=LaserCannon; ballistic=1;`. The
+        // explicit weaponType keeps it a LaserCannon; ballistic makes
+        // `is_projectile()` true separately (gravity-affected bolt).
+        let w = parse(
+            "[M]\n{\nweapontype=LaserCannon;\nballistic=1;\nmygravity=.4;\n}",
+            "M",
+        );
+        assert_eq!(w.category(), WeaponCategory::LaserCannon);
+        assert!(w.is_projectile());
+    }
+
+    #[test]
+    fn sigterm_becomes_aircraft_bomb() {
+        let w = parse(
+            "[Sig]\n{\nweapontype=AircraftBomb;\nmodel=sigterm.s3o;\n}",
+            "Sig",
+        );
+        assert_eq!(w.category(), WeaponCategory::AircraftBomb);
+    }
+
+    #[test]
+    fn shield_flag_wins_over_everything() {
+        // Weapons marked `isshield=1` must resolve to Shield even if
+        // they also carry `beamweapon=1` etc — those flags describe
+        // the projectile template the shield uses on collision.
+        let w = parse("[S]\n{\nisshield=1;\nbeamweapon=1;\n}", "S");
+        assert_eq!(w.category(), WeaponCategory::Shield);
+    }
+
+    #[test]
+    fn pure_cannon_fallback() {
+        // Nothing set → Cannon (upstream default in weapondefs_post).
+        let w = parse("[C]\n{\n}", "C");
+        assert_eq!(w.category(), WeaponCategory::Cannon);
+    }
+
+    // Palette resolution -------------------------------------------------
+
+    fn rgb_close(a: [f32; 3], b: [f32; 3]) {
+        for i in 0..3 {
+            assert!(
+                (a[i] - b[i]).abs() < 1e-2,
+                "channel {i}: got {} expected {}",
+                a[i],
+                b[i],
+            );
+        }
+    }
+
+    #[test]
+    fn retrodeath_color_40_synthesises_yellow() {
+        // Upstream `RetroDeath` authors only `color=40` (hue ≈
+        // 40/255 = 0.157, which is in the first 1/6 of the wheel).
+        // The hs2rgb shim produces r=1, g=40/255*6 ≈ 0.94, b=0.
+        let w = parse("[RD]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=40;\n}", "RD");
+        let rgb = w.palette_rgb().expect("color=40 must synth");
+        rgb_close(rgb, [1.0, 0.941, 0.0]);
+        // `resolved_rgb` must prefer the palette over white.
+        rgb_close(w.resolved_rgb(), [1.0, 0.941, 0.0]);
+    }
+
+    #[test]
+    fn palette_hue_high_bumps_by_0_1() {
+        // Upstream applies a `+0.1` bump when hue > 0.5. At `color=128`
+        // (hue ≈ 0.5019), the bump pushes hue into the 0.6+ range,
+        // which lands in the 2/3..5/6 segment → blue-heavy.
+        let w = parse("[P]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=128;\n}", "P");
+        let rgb = w.palette_rgb().expect("synth");
+        assert!(rgb[2] > 0.5, "expected blue-dominant, got {rgb:?}");
+    }
+
+    #[test]
+    fn palette_zero_color_returns_none() {
+        let w = parse("[P]\n{\nbeamweapon=1;\nlineofsight=1;\n}", "P");
+        assert!(w.palette_rgb().is_none());
+    }
+
+    #[test]
+    fn resolved_rgb_prefers_rgb_color_over_palette() {
+        let w = parse(
+            "[P]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=40;\nrgbcolor=0.1 0.2 0.3;\n}",
+            "P",
+        );
+        rgb_close(w.resolved_rgb(), [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn resolved_rgb_normalises_0_255_rgb() {
+        let w = parse("[P]\n{\nrgbcolor=255 128 64;\n}", "P");
+        rgb_close(w.resolved_rgb(), [1.0, 0.502, 0.251]);
+    }
+
+    #[test]
+    fn resolved_rgb_cannon_default_is_orange() {
+        // No rgbColor, no color palette → Cannon default (1.0, 0.5, 0.0).
+        let w = parse("[P]\n{\n}", "P");
+        rgb_close(w.resolved_rgb(), [1.0, 0.5, 0.0]);
+    }
+}
+
 impl WeaponDefs {
     /// Extract weapon definitions from a parsed TDF.
     ///
@@ -152,41 +351,126 @@ impl DamageMap {
 }
 
 /// Canonical classification of a weapon's rendering / behaviour
-/// category, derived from the TDF `weaponType=` string. Upstream KP
-/// uses only the five variants below; anything else falls through to
-/// `Other`.
+/// category.
+///
+/// Upstream KP almost never sets `weaponType=` literally — the
+/// category comes from the **legacy tag shim** implemented in
+/// `cont/base/springcontent/gamedata/weapondefs_post.lua`, which maps
+/// old-style flags (`beamweapon=1`, `smoketrail=1`, `ballistic=1`,
+/// `beamlaser=1`, etc.) onto the modern weapon types. See
+/// [`WeaponDef::derived_weapon_type`] for the exact rules. Two
+/// specimens illustrate why the shim matters:
+///
+/// - `Line` (Bit's weapon) sets `beamweapon=1 lineofsight=1` and
+///   *nothing else* → [`LaserCannon`] (a traveling finite-length
+///   bolt, NOT a hitscan beam). Our fx side must spawn a `LaserBolt`.
+/// - `Geometric` (Pointer) sets `smoketrail=1 lineofsight=1 model=…`
+///   → [`MissileLauncher`]. FX side must render the `.s3o` model
+///   along an arcing homing path, not a beam.
+///
+/// Without the shim both land in [`Other`] and fx routing picks the
+/// wrong path.
+///
+/// [`LaserCannon`]: Self::LaserCannon
+/// [`MissileLauncher`]: Self::MissileLauncher
+/// [`Other`]: Self::Other
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeaponCategory {
     Melee,
     Shield,
+    /// Instant hitscan beam (Spring `BeamLaser`). Drawn as a static
+    /// quad from attacker to target for `beamTime` seconds.
     BeamLaser,
+    /// Finite-length traveling bolt (Spring `LaserCannon`). Visual
+    /// length = `duration * weaponVelocity`. Covers Bit's `Line`,
+    /// Byte's `MegaBeam`, the `RetroDeath*` family, and the
+    /// `MineLauncher`.
+    LaserCannon,
     MissileLauncher,
     StarburstLauncher,
+    /// Hitscan lightning ribbon with wobble.
+    LightningCannon,
+    /// Spray weapon (flamer).
+    Flame,
+    /// Multi-bullet plasma-like.
+    EmgCannon,
+    /// Ballistic sprite / model projectile that falls under gravity.
     Cannon,
     AircraftBomb,
+    /// Tag present but not one we recognise — fx falls back to a
+    /// flat untextured beam. Getting here for a KP weapon is a bug.
     Other,
 }
 
 impl WeaponDef {
-    /// Parse `weapon_type` into [`WeaponCategory`]. Used by the game
-    /// to classify a weapon without re-matching string literals at
-    /// every call site.
+    /// Classify this weapon.
+    ///
+    /// Honours a literal `weaponType=` if it was set, otherwise runs
+    /// the legacy-tag shim documented on [`WeaponCategory`]. Called
+    /// instead of matching raw strings so every fx/combat call site
+    /// stays in sync when the shim gains a new case.
     pub fn category(&self) -> WeaponCategory {
-        match self.weapon_type.as_str() {
-            "Melee" => WeaponCategory::Melee,
-            "Shield" => WeaponCategory::Shield,
-            "BeamLaser" => WeaponCategory::BeamLaser,
-            "MissileLauncher" => WeaponCategory::MissileLauncher,
-            "StarburstLauncher" => WeaponCategory::StarburstLauncher,
-            "Cannon" => WeaponCategory::Cannon,
-            "AircraftBomb" => WeaponCategory::AircraftBomb,
-            _ => WeaponCategory::Other,
+        self.derived_weapon_type()
+    }
+
+    /// Resolve the effective Spring weapon-type, running the same
+    /// compatibility mapping as
+    /// `cont/base/springcontent/gamedata/weapondefs_post.lua` in the
+    /// upstream engine. A literal `weaponType=` in the TDF takes
+    /// precedence; otherwise the legacy flag set determines the
+    /// category.
+    pub fn derived_weapon_type(&self) -> WeaponCategory {
+        // 1. Explicit `weaponType=...` wins.
+        if !self.weapon_type.is_empty() {
+            return match self.weapon_type.as_str() {
+                "Melee" => WeaponCategory::Melee,
+                "Shield" => WeaponCategory::Shield,
+                "BeamLaser" => WeaponCategory::BeamLaser,
+                "LaserCannon" => WeaponCategory::LaserCannon,
+                "MissileLauncher" => WeaponCategory::MissileLauncher,
+                "StarburstLauncher" => WeaponCategory::StarburstLauncher,
+                "LightningCannon" => WeaponCategory::LightningCannon,
+                "Flame" => WeaponCategory::Flame,
+                "EmgCannon" => WeaponCategory::EmgCannon,
+                "Cannon" => WeaponCategory::Cannon,
+                "AircraftBomb" => WeaponCategory::AircraftBomb,
+                "TorpedoLauncher" | "Rifle" | "DGun" => WeaponCategory::Other,
+                _ => WeaponCategory::Other,
+            };
         }
+
+        // 2. Legacy flags — order matters; matches weapondefs_post.lua.
+        if self.is_shield {
+            return WeaponCategory::Shield;
+        }
+        if self.beam_laser {
+            return WeaponCategory::BeamLaser;
+        }
+
+        if self.line_of_sight {
+            // `rendertype=7` is the old lightning cannon marker;
+            // we don't currently parse that field, and KP never sets
+            // it anyway, so the simple fallthrough below suffices.
+            if self.beam_weapon {
+                return WeaponCategory::LaserCannon;
+            }
+            if self.smoke_trail {
+                return WeaponCategory::MissileLauncher;
+            }
+            return WeaponCategory::Cannon;
+        }
+
+        WeaponCategory::Cannon
     }
 
     /// True for any weapon whose projectile class launches an actual
-    /// model, rather than a hitscan beam. Used by weapon-fx to decide
-    /// whether to spawn a moving `ProjectileVisual` vs a beam cuboid.
+    /// model or ballistic shell, rather than a hitscan beam or short
+    /// traveling bolt. Used by weapon-fx to decide whether to spawn a
+    /// moving `ProjectileVisual` vs a beam ribbon.
+    ///
+    /// `LaserCannon` is NOT a projectile in this sense even though
+    /// it travels — it renders as a flat stretched ribbon via
+    /// [`crate::WeaponCategory::LaserCannon`], not a 3D model shell.
     pub fn is_projectile(&self) -> bool {
         self.ballistic
             || matches!(
@@ -197,6 +481,89 @@ impl WeaponDef {
                     | WeaponCategory::AircraftBomb,
             )
             || (!self.model.is_empty() && self.model != ";")
+    }
+
+    /// Synthesise an RGB triplet from the legacy `color=` palette
+    /// field (0-255 hue) when `rgb_color` is unset.
+    ///
+    /// Mirrors `hs2rgb(color/255, _)` from
+    /// `cont/base/springcontent/gamedata/weapondefs_post.lua` verbatim
+    /// — saturation is clamped to 1.0 internally (the upstream author
+    /// left a `FIXME? ignores saturation completely` comment), so
+    /// `color2` never affects the result. Hue values above 0.5 get a
+    /// +0.1 bump per the upstream formula.
+    ///
+    /// Returns `None` when `color` is zero or negative — the caller
+    /// should then stay with the authored `rgb_color` (or the
+    /// type-aware default).
+    pub fn palette_rgb(&self) -> Option<[f32; 3]> {
+        if self.color <= 0.0 {
+            return None;
+        }
+        let mut h = self.color / 255.0;
+        // Per upstream: a bump for the second-half of the wheel.
+        if h > 0.5 {
+            h += 0.1;
+            if h > 1.0 {
+                h -= 1.0;
+            }
+        }
+        // Saturation forced to 1, as in upstream's FIXME'd shim.
+        let s = 1.0_f32;
+        let inv_sat = 1.0 - s;
+
+        let mut r = inv_sat / 2.0;
+        let mut g = inv_sat / 2.0;
+        let mut b = inv_sat / 2.0;
+
+        const T1: f32 = 1.0 / 6.0;
+        const T2: f32 = 1.0 / 3.0;
+        const T3: f32 = 1.0 / 2.0;
+        const T4: f32 = 2.0 / 3.0;
+        const T5: f32 = 5.0 / 6.0;
+
+        if h < T1 {
+            r += s;
+            g += s * (h * 6.0);
+        } else if h < T2 {
+            g += s;
+            r += s * ((T2 - h) * 6.0);
+        } else if h < T3 {
+            g += s;
+            b += s * ((h - T2) * 6.0);
+        } else if h < T4 {
+            b += s;
+            g += s * ((T4 - h) * 6.0);
+        } else if h < T5 {
+            b += s;
+            r += s * ((h - T4) * 6.0);
+        } else {
+            r += s;
+            b += s * ((1.0 - h) * 6.0);
+        }
+
+        Some([r, g, b])
+    }
+
+    /// Resolve the effective edge-tint RGB (0-1) for this weapon,
+    /// applying the same three-tier cascade upstream does: explicit
+    /// `rgbColor` → synthesised from `color=` palette → per-category
+    /// default (Cannon orange, EmgCannon yellow, others white). All
+    /// weapon-fx call sites should go through this helper instead of
+    /// reading `rgb_color` directly.
+    pub fn resolved_rgb(&self) -> [f32; 3] {
+        let [r, g, b] = self.rgb_color;
+        if !(r == 0.0 && g == 0.0 && b == 0.0) {
+            return normalise_legacy_rgb([r, g, b]);
+        }
+        if let Some(rgb) = self.palette_rgb() {
+            return rgb;
+        }
+        match self.category() {
+            WeaponCategory::Cannon => [1.0, 0.5, 0.0],
+            WeaponCategory::EmgCannon => [0.9, 0.9, 0.2],
+            _ => [1.0, 1.0, 1.0],
+        }
     }
 
     /// Multiplier for dynamic-damage weapons (BugCannon) given the
@@ -246,6 +613,8 @@ impl WeaponDef {
 
             render_type: s.f32("rendertype"),
             rgb_color: s.color3("rgbcolor"),
+            color: s.f32("color"),
+            color2: s.f32("color2"),
             thickness: s.f32("thickness"),
             core_thickness: s.f32("corethickness"),
             intensity: s.f32("intensity"),
@@ -267,6 +636,9 @@ impl WeaponDef {
             beam_time: s.f32("beamtime"),
             beam_ttl: s.f32("beamttl"),
             beam_decay: s.f32("beamdecay"),
+            scroll_speed: s.f32("scrollspeed"),
+            laser_flare_size: s.f32("laserflaresize"),
+            hard_stop: s.bool("hardstop"),
 
             weapon_velocity: s.f32("weaponvelocity"),
             start_velocity: s.f32("startvelocity"),

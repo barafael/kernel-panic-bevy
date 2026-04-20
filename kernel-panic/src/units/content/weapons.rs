@@ -46,17 +46,33 @@ impl WeaponRegistry {
 
     /// Warn if any unit references a weapon name not in the registry.
     /// Call after both registries are loaded (e.g. from a startup system).
+    /// Also logs each resolved (unit → weapon, reloadtime) binding at
+    /// info level so `reload_time` regressions are visible in the game
+    /// log — observed in-game fire rate should match these values within
+    /// one frame, otherwise something downstream (double-tick, AimTarget
+    /// gate, deploy state) is stealing shots.
     pub fn validate_unit_weapon_bindings(
         &self,
         unit_registry: &super::unit_registry::UnitRegistry,
     ) {
         for &kind in ALL_UNIT_KINDS {
             let weapon = unit_registry.weapon(kind);
-            if !weapon.is_empty() && self.defs.get(weapon).is_none() {
-                warn!(
-                    "Unit '{:?}' references weapon '{}' which is not in the TDF registry",
-                    kind, weapon,
-                );
+            if weapon.is_empty() {
+                continue;
+            }
+            match self.defs.get(weapon) {
+                None => {
+                    warn!(
+                        "Unit '{:?}' references weapon '{}' which is not in the TDF registry",
+                        kind, weapon,
+                    );
+                }
+                Some(def) => {
+                    info!(
+                        "  {:?} → {} (reload={}s, burst={}, burstrate={}s, range={})",
+                        kind, weapon, def.reload_time, def.burst, def.burst_rate, def.range,
+                    );
+                }
             }
         }
     }

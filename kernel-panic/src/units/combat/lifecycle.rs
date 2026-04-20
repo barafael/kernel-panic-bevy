@@ -169,7 +169,7 @@ pub fn tick_kamikaze(
         }
 
         damage_queue.push(PendingDamage {
-            target: entity,
+            target: Some(entity),
             attacker: entity,
             weapon: "logic_bomb".to_string(),
             impact_pos: self_pos,
@@ -249,7 +249,7 @@ pub fn death_system(
                 .filter(|s| !s.is_empty() && weapon_registry.get(s).is_some())
             {
                 damage_queue.push(PendingDamage {
-                    target: entity,
+                    target: Some(entity),
                     attacker: entity,
                     weapon: weapon_name.to_string(),
                     impact_pos: pos,
@@ -262,7 +262,15 @@ pub fn death_system(
                     .map(|w| w.rgb_color)
                     .filter(|c| c[0] + c[1] + c[2] > 0.01)
                     .unwrap_or_else(|| faction.rgb_f32());
-                explosions.events.push(ExplosionEvent { pos, rgb, radius });
+                let ceg_name = weapon
+                    .map(|w| w.explosion_generator.clone())
+                    .unwrap_or_default();
+                explosions.events.push(ExplosionEvent {
+                    pos,
+                    rgb,
+                    radius,
+                    ceg_name,
+                });
             } else {
                 // Even units without an ExplodeAs get a small faction-
                 // coloured pop — otherwise Bits and Packets vanish
@@ -271,6 +279,7 @@ pub fn death_system(
                     pos,
                     rgb: faction.rgb_f32(),
                     radius: 16.0,
+                    ceg_name: String::new(),
                 });
             }
 

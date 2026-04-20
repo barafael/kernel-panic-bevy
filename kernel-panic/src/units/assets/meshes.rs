@@ -22,7 +22,7 @@ pub struct S3OModelCache {
     colored_textures: HashMap<(String, Faction), Handle<Image>>,
     mesh_handles: HashMap<String, Handle<Mesh>>,
     /// Bevy image handles for raw (un-tinted) beam / sfx textures.
-    /// Populated lazily by [`load_raw_bevy_texture`].
+    /// Populated lazily by [`load_beam_texture`].
     raw_bevy_images: HashMap<String, Option<Handle<Image>>>,
 }
 
@@ -122,6 +122,30 @@ pub fn load_s3o_model(filename: &str, cache: &mut S3OModelCache) -> Option<S3OMo
     load_s3o_cached(filename, cache).cloned()
 }
 
+/// Return a cached [`Handle<Mesh>`] built from the given .s3o filename.
+///
+/// Used by the weapon-fx layer to render projectile models
+/// (`octashot.s3o` for the Pointer's Geometric, `sigterm.s3o` for the
+/// airstrike bomb) through the same disk-read/parse pipeline as unit
+/// bodies — no per-shot mesh allocations. Returns `None` when the
+/// file is missing or unparseable.
+pub fn load_s3o_mesh(
+    filename: &str,
+    meshes: &mut Assets<Mesh>,
+    cache: &mut S3OModelCache,
+) -> Option<Handle<Mesh>> {
+    if let Some(handle) = cache.mesh_handles.get(filename) {
+        return Some(handle.clone());
+    }
+    let model = load_s3o_cached(filename, cache)?;
+    let mesh = s3o_to_bevy_mesh(&model.root_piece, 1.0);
+    let handle = meshes.add(mesh);
+    cache
+        .mesh_handles
+        .insert(filename.to_string(), handle.clone());
+    Some(handle)
+}
+
 /// Get the bounding radius of a unit's s3o model (in elmos), or a fallback.
 pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache, unit_registry: &UnitRegistry) -> f32 {
     let model_name = unit_registry.model(kind);
@@ -151,24 +175,40 @@ fn load_s3o_cached<'a>(filename: &str, cache: &'a mut S3OModelCache) -> Option<&
 ///
 /// Returns `None` (and caches that verdict) when the file is missing
 /// or unparseable, so a subsequent call doesn't retry the disk hit.
-pub fn load_raw_bevy_texture(
+/// Load a beam texture with a Repeat address-mode sampler so material
+/// `uv_transform` scales beyond 1.0 tile the texture instead of
+/// clamping. Returns the TGA's pixel dimensions alongside the handle so
+/// callers can compute tile counts that preserve the texture's native
+/// aspect ratio along the beam length.
+pub fn load_beam_texture(
     tex_name: &str,
     cache: &mut S3OModelCache,
     images: &mut Assets<Image>,
-) -> Option<Handle<Image>> {
-    if let Some(slot) = cache.raw_bevy_images.get(tex_name) {
-        return slot.clone();
-    }
-    let (w, h, pixels) = {
+) -> Option<(Handle<Image>, u32, u32)> {
+    let dims = {
         let tga = load_raw_tga_cached(tex_name, cache)?;
-        (tga.width, tga.height, tga.pixels.clone())
+        (tga.width, tga.height)
     };
-    let image = create_rgba8_image(w, h, pixels);
+    if let Some(slot) = cache.raw_bevy_images.get(tex_name)
+        && let Some(handle) = slot.clone()
+    {
+        return Some((handle, dims.0, dims.1));
+    }
+    let pixels = load_raw_tga_cached(tex_name, cache)?.pixels.clone();
+    let mut image = create_rgba8_image(dims.0, dims.1, pixels);
+    image.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
+        min_filter: bevy::image::ImageFilterMode::Linear,
+        mag_filter: bevy::image::ImageFilterMode::Linear,
+        mipmap_filter: bevy::image::ImageFilterMode::Linear,
+        address_mode_u: bevy::image::ImageAddressMode::Repeat,
+        address_mode_v: bevy::image::ImageAddressMode::Repeat,
+        ..default()
+    });
     let handle = images.add(image);
     cache
         .raw_bevy_images
         .insert(tex_name.to_string(), Some(handle.clone()));
-    Some(handle)
+    Some((handle, dims.0, dims.1))
 }
 
 fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Option<&'a TgaImage> {

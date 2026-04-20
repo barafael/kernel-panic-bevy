@@ -725,12 +725,14 @@ fn explosion_def_particle_system() {
 
     match &effect.properties {
         crate::EffectProperties::Particle(p) => {
+            use crate::EvalCtx;
+            let ctx = EvalCtx::default();
             assert_eq!(p.texture, "circle");
-            assert_eq!(p.num_particles, 30.0);
-            assert_eq!(p.particle_life, 24.0);
-            assert_eq!(p.particle_speed, 5.0);
-            assert_eq!(p.particle_size, 4.0);
-            assert!((p.airdrag - 0.98).abs() < 0.001);
+            assert_eq!(p.num_particles.eval(&ctx), 30.0);
+            assert_eq!(p.particle_life.eval(&ctx), 24.0);
+            assert_eq!(p.particle_speed.eval(&ctx), 5.0);
+            assert_eq!(p.particle_size.eval(&ctx), 4.0);
+            assert!((p.airdrag.eval(&ctx) - 0.98).abs() < 0.001);
             assert!(!p.directional);
         }
         _ => panic!("expected Particle properties"),
@@ -803,12 +805,18 @@ fn explosion_def_bitmap_flame() {
 
     match &effect.properties {
         crate::EffectProperties::Flame(f) => {
+            use crate::EvalCtx;
+            let ctx = EvalCtx::default();
             assert_eq!(f.side_texture, "linkbeam");
             assert_eq!(f.front_texture, "none");
-            assert_eq!(f.size, 5.0);
-            assert_eq!(f.length, 356.0);
-            assert_eq!(f.ttl, 60.0);
-            assert_eq!(f.dir, "dir");
+            assert_eq!(f.size.eval(&ctx), 5.0);
+            assert_eq!(f.length.eval(&ctx), 356.0);
+            assert_eq!(f.ttl.eval(&ctx), 60.0);
+            // `dir=dir` in a CBitmapMuzzleFlame only parses the tokens
+            // literally — there's no `EmitVector` enum on this struct;
+            // the result is `[d, i, r]` all parsed as unknown opcodes
+            // and reduced to an empty expression (0.0). Verified below.
+            assert_eq!(f.dir.eval(&ctx), [0.0, 0.0, 0.0]);
         }
         _ => panic!("expected Flame properties"),
     }
@@ -848,8 +856,26 @@ fn explosion_def_spawner() {
 
     match &effect.properties {
         crate::EffectProperties::Spawner(s) => {
-            assert_eq!(s.explosion_generator, "custom:corruption_infection_smoke");
-            assert_eq!(s.delay, "10 i10");
+            use crate::EvalCtx;
+            // The parser strips the `custom:` prefix at storage time so
+            // lookups through `ExplosionDefs::get(name)` work regardless
+            // of whether callers pass the bare or prefixed form.
+            assert_eq!(s.explosion_generator, "corruption_infection_smoke");
+            // `delay=10 i10` → first spawn at 10, sixth at 60.
+            assert_eq!(
+                s.delay.eval(&EvalCtx {
+                    index: 0,
+                    ..Default::default()
+                }),
+                10.0
+            );
+            assert_eq!(
+                s.delay.eval(&EvalCtx {
+                    index: 5,
+                    ..Default::default()
+                }),
+                60.0
+            );
         }
         _ => panic!("expected Spawner properties"),
     }
@@ -1047,7 +1073,7 @@ mod proptests {
 mod real_files {
     use std::path::Path;
 
-    use crate::{Tdf, WeaponDefs};
+    use crate::{Tdf, UnitDefs, WeaponDefs};
 
     fn find_weapons_dir() -> Option<&'static str> {
         const CANDIDATES: &[&str] = &[
@@ -1325,6 +1351,42 @@ mod real_files {
         }
     }
 
+    #[test]
+    fn parse_bit_fbi_sfx_types() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let path = format!("{dir}/bit.fbi");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let tdf = Tdf::parse(&text).unwrap();
+        let defs = UnitDefs::from_tdf(&tdf);
+        let bit = defs.get("bit").expect("bit unit");
+        // Bit's FBI declares both `explosiongenerator0=custom:oldskool_shot1`
+        // and `explosiongenerator1=custom:oldskool_shot2`; the COB's
+        // `emit-sfx 1025 from gunpoint` maps to index 1 (arrowflare).
+        assert_eq!(bit.sfx_types.len(), 2);
+        assert_eq!(bit.sfx_types[0], "custom:oldskool_shot1");
+        assert_eq!(bit.sfx_types[1], "custom:oldskool_shot2");
+    }
+
+    #[test]
+    fn parse_pointer_fbi_single_sfx_type() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let path = format!("{dir}/pointer.fbi");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let tdf = Tdf::parse(&text).unwrap();
+        let defs = UnitDefs::from_tdf(&tdf);
+        let p = defs.get("pointer").expect("pointer unit");
+        // Pointer declares only generator 0 — emit-sfx 1024 from the
+        // `FireWeapon1` COB body plays the soft-blue `oldskool_shot1`.
+        assert_eq!(p.sfx_types.len(), 1);
+        assert_eq!(p.sfx_types[0], "custom:oldskool_shot1");
+    }
+
     fn find_explosions_dir() -> Option<&'static str> {
         const CANDIDATES: &[&str] = &[
             "upstream/Kernel-Panic/gamedata/explosions",
@@ -1393,6 +1455,161 @@ mod real_files {
             }
         }
         assert!(count > 10, "expected many explosion defs, got {count}");
+    }
+
+    /// Pin the parsed structure of System-faction CEGs against the
+    /// actual upstream files. If an upstream rename or a parser
+    /// regression drops `oldskool_impact`'s yellow→red→black gradient,
+    /// or downgrades the `system_nx` spawner to `count=1`, or loses the
+    /// `particleSpeed=12 d-.5` damage-scaled decay on `system_sigterm`,
+    /// this test catches it before it shows up as a visual bug.
+    #[test]
+    fn parse_system_faction_ceg_corpus_details() {
+        use crate::{EffectClass, EffectProperties, EvalCtx};
+        let Some(dir) = find_explosions_dir() else {
+            eprintln!("skipping: explosions dir not found");
+            return;
+        };
+
+        // Aggregate every *.tdf in the folder so we can query named
+        // CEGs regardless of which file they live in.
+        let mut merged = crate::ExplosionDefs::default();
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if !path.extension().is_some_and(|e| e == "tdf") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let tdf = Tdf::parse(&text).unwrap();
+            merged.merge(crate::ExplosionDefs::from_tdf(&tdf));
+        }
+
+        // ── oldskool_shot1 — bit muzzle + fly-path CEG ────────────────
+        let shot1 = merged.get("oldskool_shot1").expect("oldskool_shot1");
+        assert_eq!(shot1.effects.len(), 1);
+        let EffectProperties::Particle(p) = &shot1.effects[0].properties else {
+            panic!("expected Particle");
+        };
+        assert_eq!(p.texture, "circle");
+        // White-faint → blue-faint → transparent-black (3 stops).
+        assert_eq!(p.color_map.stops.len(), 3);
+        let blue_stop = p.color_map.stops[1];
+        assert!(
+            blue_stop[2] > 0.9 && blue_stop[0] < 0.3,
+            "stop 1 should be dominantly blue, got {blue_stop:?}"
+        );
+        assert_eq!(p.emit_vector, crate::EmitVector::Direction);
+
+        // ── oldskool — byte MegaBeam impact (yellow→red→black squares) ─
+        let old = merged.get("oldskool").expect("oldskool");
+        // Three top-level emitters: [squarecloud], [tracers] + ground-flash.
+        let particle_count = old
+            .effects
+            .iter()
+            .filter(|e| matches!(e.class, EffectClass::SimpleParticleSystem))
+            .count();
+        assert_eq!(particle_count, 2, "oldskool has squarecloud + tracers");
+        assert!(old.ground_flash.is_some());
+
+        // ── oldskool_impact — pointer Geometric impact (big white flash) ─
+        let imp = merged.get("oldskool_impact").expect("oldskool_impact");
+        assert!(
+            imp.effects.len() >= 3,
+            "oldskool_impact has circle+bigcircle+tracers"
+        );
+        // `bigcircle` is a single 128-elmo flash — check one emitter's
+        // particleSize reaches that magnitude.
+        let has_big = imp.effects.iter().any(|e| {
+            if let EffectProperties::Particle(p) = &e.properties {
+                p.particle_size.eval(&EvalCtx::default()) >= 64.0
+            } else {
+                false
+            }
+        });
+        assert!(
+            has_big,
+            "oldskool_impact must contain the big-flash emitter"
+        );
+
+        // ── system_nx — 240 delayed respawns of system_nx_fire ─────────
+        let nx = merged.get("system_nx").expect("system_nx");
+        let spawner = nx
+            .effects
+            .iter()
+            .find(|e| e.class == EffectClass::ExpGenSpawner)
+            .expect("system_nx has a CExpGenSpawner");
+        assert_eq!(spawner.count, 240);
+        let EffectProperties::Spawner(s) = &spawner.properties else {
+            panic!("expected Spawner");
+        };
+        assert_eq!(s.explosion_generator, "system_nx_fire");
+        // `delay=8 i8` → spawn #n fires at 8 + 8n frames. Check the
+        // last one: 8 + 8*239 = 1920.
+        assert_eq!(
+            s.delay.eval(&EvalCtx {
+                index: 239,
+                ..Default::default()
+            }),
+            1920.0
+        );
+
+        // ── system_sigterm — 20 respawns + damage-scaled rising speed ──
+        let sig = merged.get("system_sigterm").expect("system_sigterm");
+        let rising = sig
+            .effects
+            .iter()
+            .find(|e| e.class == EffectClass::ExpGenSpawner)
+            .expect("system_sigterm has a CExpGenSpawner");
+        assert_eq!(rising.count, 20);
+
+        // ── system_sigterm_fire — squarecloud with speed=12 d-.5 ──────
+        let fire = merged
+            .get("system_sigterm_fire")
+            .expect("system_sigterm_fire");
+        let EffectProperties::Particle(p) = &fire.effects[0].properties else {
+            panic!("expected Particle");
+        };
+        // With damage=0 the speed is the literal 12. With damage=10 it
+        // falls to 12 + 10 * -0.5 = 7.
+        assert_eq!(
+            p.particle_speed.eval(&EvalCtx {
+                damage: 0.0,
+                ..Default::default()
+            }),
+            12.0
+        );
+        assert_eq!(
+            p.particle_speed.eval(&EvalCtx {
+                damage: 10.0,
+                ..Default::default()
+            }),
+            7.0
+        );
+        // gravity has a d-component on Y: `0, -0.1 d0.01, 0`.
+        let grav_zero = p.gravity.eval(&EvalCtx {
+            damage: 0.0,
+            ..Default::default()
+        });
+        assert!((grav_zero[1] - -0.1).abs() < 1e-4);
+        let grav_damaged = p.gravity.eval(&EvalCtx {
+            damage: 100.0,
+            ..Default::default()
+        });
+        assert!(
+            (grav_damaged[1] - (-0.1 + 100.0 * 0.01)).abs() < 1e-4,
+            "gravity.y with damage=100: {}",
+            grav_damaged[1]
+        );
+
+        // ── linkbeam — CBitmapMuzzleFlame reaches through front_texture ─
+        let link = merged.get("linkbeam").expect("linkbeam");
+        let EffectProperties::Flame(f) = &link.effects[0].properties else {
+            panic!("expected Flame");
+        };
+        assert!(
+            !f.side_texture.is_empty(),
+            "linkbeam must carry a side texture"
+        );
     }
 
     #[test]

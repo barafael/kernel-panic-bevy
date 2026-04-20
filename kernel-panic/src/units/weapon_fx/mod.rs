@@ -4,6 +4,7 @@
 //! `spawn_weapon_visuals` drains the buffer and spawns the right visual;
 //! `tick_weapon_fx` fades/moves/despawns them each frame.
 
+mod ceg;
 mod shared;
 mod spawn;
 mod tick;
@@ -12,6 +13,7 @@ pub use shared::{AttackEvent, ExplosionEvent, PendingAttacks, PendingExplosions}
 
 use bevy::prelude::*;
 
+use ceg::{CegParticleMesh, CegRegistry};
 use shared::{
     BeamMaterialCache, BuildSparkleAssets, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes,
 };
@@ -34,12 +36,17 @@ impl Plugin for WeaponFxPlugin {
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
+            .init_resource::<CegParticleMesh>()
+            .insert_resource(CegRegistry::load())
             .add_systems(
                 Update,
                 (
                     spawn::spawn_weapon_visuals,
                     spawn::spawn_pending_explosions,
                     tick::tick_weapon_fx,
+                    ceg::tick_ceg_particles,
+                    ceg::tick_ceg_flames,
+                    ceg::tick_ceg_delayed_spawns,
                 )
                     .chain()
                     .in_set(GameplaySet::Simulate),

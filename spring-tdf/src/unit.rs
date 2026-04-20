@@ -126,6 +126,31 @@ pub struct UnitDef {
     pub max_slope: f32,
     /// Initial cloaked state.
     pub init_cloaked: bool,
+
+    /// Indexed particle-effect tags from the unit's `[SFXTypes]` block.
+    ///
+    /// Upstream `.fbi` files declare a short table of CEG references
+    /// that COB scripts fire via `emit-sfx N from piece`:
+    ///
+    /// ```text
+    /// [SFXTypes]
+    /// {
+    ///     explosiongenerator0=custom:oldskool_shot1;
+    ///     explosiongenerator1=custom:oldskool_shot2;
+    /// }
+    /// ```
+    ///
+    /// The opcode `emit-sfx 1024+i` pulls generator index `i` from this
+    /// table (see `springdefs.h` `SFXTYPE_*` constants); values below
+    /// 1024 trigger built-in engine effects. For the Bit: `emit-sfx
+    /// 1025 from gunpoint` resolves to `sfx_types[1]` →
+    /// `custom:oldskool_shot2` — the cyan arrowflare muzzle flash.
+    ///
+    /// Stored as a sparse `Vec<String>` where empty slots fill in for
+    /// missing indices, so `sfx_types.get(i)` is the canonical lookup.
+    /// Entries include the `custom:` prefix verbatim (stripped by the
+    /// CEG registry on lookup).
+    pub sfx_types: Vec<String>,
 }
 
 impl UnitDefs {
@@ -216,6 +241,39 @@ impl UnitDef {
             idle_time: s.f32("idletime"),
             max_slope: s.f32("maxslope"),
             init_cloaked: s.bool("init_cloaked"),
+            sfx_types: parse_sfx_types(s),
         }
     }
+}
+
+/// Read the `[SFXTypes]` child section into a dense-indexed vec.
+///
+/// Upstream keys are `explosiongenerator0`, `explosiongenerator1`, …
+/// and the indices can skip (a unit might declare only `0` and `2`);
+/// unset indices are preserved as empty strings so callers can do
+/// `sfx_types.get(i)` without worrying about gaps.
+fn parse_sfx_types(s: &Section) -> Vec<String> {
+    let Some(block) = s.child("SFXTypes") else {
+        return Vec::new();
+    };
+    // Find the max index so we can size the vec.
+    let mut max_idx: i32 = -1;
+    for key in block.entries.keys() {
+        if let Some(rest) = key.strip_prefix("explosiongenerator") {
+            if let Ok(idx) = rest.parse::<i32>() {
+                if idx > max_idx {
+                    max_idx = idx;
+                }
+            }
+        }
+    }
+    if max_idx < 0 {
+        return Vec::new();
+    }
+    let mut out = vec![String::new(); (max_idx + 1) as usize];
+    for i in 0..=max_idx {
+        let key = format!("explosiongenerator{i}");
+        out[i as usize] = block.string_clean(&key);
+    }
+    out
 }

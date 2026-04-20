@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use super::movement::{MoveTarget, QueuedCommand};
 use super::selection::{Selected, apply_ordered_command, ground_hit};
 use crate::rendering::camera::RtsCamera;
-use crate::units::combat::{SELF_DESTRUCT_DELAY, SelfDestructCountdown};
+use crate::units::combat::{AttackGroundOrder, SELF_DESTRUCT_DELAY, SelfDestructCountdown};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 use crate::units::mechanics::command_fire::CommandFireEvent;
@@ -207,16 +207,10 @@ fn toggle_attack_ground_mode(
 }
 
 /// Ground-target click: while [`AttackGroundMode`] is active, the next
-/// left-click on the ground issues a move order to that point for every
-/// selected unit. Since `combat_system` auto-targets enemies in range
-/// every frame, the moving unit opens fire on anything along the way
-/// and keeps firing after it arrives — Spring's "attack-move"
-/// semantics without a dedicated command kind. Shift queues, matching
-/// the move-order behaviour of right-click.
-///
-/// Commits exit the mode. The selection system short-circuits while
-/// `AttackGroundMode.active` so the same click doesn't also clear the
-/// current selection.
+/// left-click issues an [`AttackGroundOrder`] for every selected unit.
+/// `attack_ground_system` moves the unit into weapon range if needed, then
+/// fires each reload cycle at the ground position. Shift queues a move to
+/// the same point first. Commits exit the mode (Shift stays in mode).
 #[allow(clippy::too_many_arguments)]
 fn trigger_attack_ground_click(
     mouse: Res<ButtonInput<MouseButton>>,
@@ -237,18 +231,28 @@ fn trigger_attack_ground_click(
     };
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     for entity in &selected_q {
-        apply_ordered_command(
-            entity,
-            QueuedCommand::Move(target),
-            shift,
-            &move_target_q,
-            &mut commands,
-        );
+        if shift && move_target_q.contains(entity) {
+            // Shift-queue: append a move-then-attack-ground sequence
+            // by enqueuing a move order to the target position.
+            // The AttackGroundOrder fires once the unit arrives.
+            apply_ordered_command(
+                entity,
+                QueuedCommand::Move(target),
+                true,
+                &move_target_q,
+                &mut commands,
+            );
+        } else {
+            // Immediate: cancel any current order, issue AttackGroundOrder.
+            // attack_ground_system handles movement if needed.
+            commands
+                .entity(entity)
+                .remove::<MoveTarget>()
+                .remove::<crate::interaction::movement::MovePath>()
+                .remove::<crate::interaction::movement::CommandQueue>()
+                .insert(AttackGroundOrder { pos: target });
+        }
     }
-    // Single-shot: one click finishes the order, exit the mode so the
-    // next click reverts to normal selection semantics. Shift-click
-    // stays in the mode so the player can fan several targets without
-    // re-pressing `A` for each.
     if !shift {
         mode.active = false;
     }

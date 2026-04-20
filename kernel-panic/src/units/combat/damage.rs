@@ -21,13 +21,16 @@ use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// A pending damage event. Damage is resolved at apply-time so the
 /// target's armor class can pick the right entry from the weapon's
-/// `[DAMAGE]` table. The primary target always takes full damage; if
-/// the weapon has `area_of_effect > 0`, other units within that radius
-/// of `impact_pos` also take damage with linear falloff from the weapon's
+/// `[DAMAGE]` table. When `target` is `Some`, that entity always takes
+/// full primary damage. When `None` (attack-ground, area blasts with no
+/// specific primary hit) only AoE splash fires. If the weapon has
+/// `area_of_effect > 0`, other units within that radius of `impact_pos`
+/// also take damage with linear falloff from the weapon's
 /// `edge_effectiveness`.
 #[derive(Debug, Clone)]
 pub struct PendingDamage {
-    pub target: Entity,
+    /// Primary target. `None` for ground-targeted or pure-AoE hits.
+    pub target: Option<Entity>,
     pub attacker: Entity,
     pub weapon: String,
     pub impact_pos: Vec3,
@@ -163,35 +166,41 @@ pub(super) fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
 /// The initial shot fires through the regular combat path; each follow-up
 /// queues another damage event and weapon-FX event at `burst_rate` spacing
 /// until `shots_remaining` hits zero, then removes the component.
+#[allow(clippy::too_many_arguments)]
 pub fn tick_burst_fire(
     time: Res<Time>,
-    mut query: Query<(Entity, &mut BurstFire, &GlobalTransform), Without<Dying>>,
+    mut query: Query<(Entity, &UnitType, &mut BurstFire, &GlobalTransform), Without<Dying>>,
     muzzle_q: Query<&MuzzlePiece>,
     animator_q: Query<&CobAnimator>,
     piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
+    unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut burst, gtf) in &mut query {
+    for (entity, unit_type, mut burst, gtf) in &mut query {
         burst.timer -= dt;
         if burst.timer > 0.0 {
             continue;
         }
 
         damage_queue.push(PendingDamage {
-            target: burst.target,
+            target: Some(burst.target),
             attacker: entity,
             weapon: burst.weapon.clone(),
             impact_pos: burst.target_pos,
             attacker_distance: gtf.translation().distance(burst.target_pos),
         });
         let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
+        let muzzle_ceg = unit_registry
+            .preferred_muzzle_ceg(unit_type.0)
+            .map(|s| std::borrow::Cow::Owned(s.to_string()));
         pending_attacks.events.push(AttackEvent {
             attacker_pos: visual_origin,
             target_pos: burst.target_pos,
             weapon_name: std::borrow::Cow::Owned(burst.weapon.clone()),
+            muzzle_ceg,
         });
         commands.entity(entity).insert(JustFired {
             target_pos: burst.target_pos,
@@ -313,36 +322,40 @@ pub fn apply_damage(
         // nearly every shot as a miss on the last attempt). Zero-spread
         // weapons always land; a missed shot still produces splash from
         // `impact_pos` below for AoE weapons.
-        let primary_target_kind = target_unit_q.get(pending.target).ok().map(|ut| ut.0);
-        let target_hit = if weapon_def.spray_angle > 0.0 {
-            if let Ok((tgt_xform, tgt_stats)) = target_pos_q.get(pending.target) {
-                tgt_xform.translation().distance(pending.impact_pos) <= tgt_stats.hit_radius
-            } else {
-                // Target despawned between queueing and apply — no
-                // primary hit, splash still handles nearby units.
-                false
+        let target_hit = match pending.target {
+            None => false, // ground-only hit: no primary target
+            Some(target) => {
+                let kind = target_unit_q.get(target).ok().map(|ut| ut.0);
+                let hit = if weapon_def.spray_angle > 0.0 {
+                    if let Ok((tgt_xform, tgt_stats)) = target_pos_q.get(target) {
+                        tgt_xform.translation().distance(pending.impact_pos) <= tgt_stats.hit_radius
+                    } else {
+                        false
+                    }
+                } else {
+                    true
+                };
+                if hit {
+                    let primary_damage = kind
+                        .map(|k| base(k) * dyn_mult)
+                        .unwrap_or(weapon_def.damage.default * dyn_mult);
+                    apply_hit(
+                        target,
+                        pending.attacker,
+                        primary_damage,
+                        paralyzer,
+                        paralyze_time,
+                        &mut health_q,
+                        &mut stun_q,
+                        &mut shield_q,
+                        &protected_q,
+                        &mut commands,
+                    );
+                    commands.entity(target).insert(IdleTimer(0.0));
+                }
+                hit
             }
-        } else {
-            true
         };
-        if target_hit {
-            let primary_damage = primary_target_kind
-                .map(|k| base(k) * dyn_mult)
-                .unwrap_or(weapon_def.damage.default * dyn_mult);
-            apply_hit(
-                pending.target,
-                pending.attacker,
-                primary_damage,
-                paralyzer,
-                paralyze_time,
-                &mut health_q,
-                &mut stun_q,
-                &mut shield_q,
-                &protected_q,
-                &mut commands,
-            );
-            commands.entity(pending.target).insert(IdleTimer(0.0));
-        }
 
         let aoe = weapon_def.area_of_effect;
         if aoe > AOE_SPLASH_THRESHOLD {
@@ -355,7 +368,7 @@ pub fn apply_damage(
             // a Local buffer across calls to avoid per-hit allocation.
             splash_hits.clear();
             spatial.query_radius(pending.impact_pos, aoe, |candidate| {
-                if candidate.entity == pending.target {
+                if pending.target == Some(candidate.entity) {
                     return;
                 }
                 if no_self_damage && candidate.entity == pending.attacker {
@@ -407,14 +420,15 @@ pub fn apply_damage(
         // hit actually landed — a shot that misses on spray angle
         // shouldn't infect the intended target.
         if target_hit
+            && let Some(target) = pending.target
             && let Some(duration) = weapon_infection_duration(&pending.weapon)
             && let Some((_, attacker_faction, attacker_team)) = attacker_info
         {
             let target_is_virus = target_unit_q
-                .get(pending.target)
+                .get(target)
                 .is_ok_and(|ut| ut.0 == UnitKind::Virus);
             if !target_is_virus {
-                commands.entity(pending.target).insert(Infected {
+                commands.entity(target).insert(Infected {
                     timer: duration,
                     attacker_faction: *attacker_faction,
                     attacker_team: attacker_team.0,
@@ -480,6 +494,112 @@ mod tests {
         assert!((splash_falloff(128.0, 512.0, 0.4) - 0.85).abs() < 1e-5);
     }
 
+    /// Pin the upstream `MegaBeam` cadence (burst=4, burstrate=0.25,
+    /// reloadtime=2) end-to-end: running `tick_burst_fire` at 60fps for
+    /// a full reload cycle must produce exactly 3 follow-up shots (on
+    /// top of the initial combat_system shot), spaced at 0.25s each.
+    /// The initial shot at t=0, then shots at 0.25 / 0.50 / 0.75 — 4
+    /// total damage events in 0.75s, then no further shots until the
+    /// next burst (not exercised here, since tick_burst_fire doesn't
+    /// own the cooldown path).
+    ///
+    /// Regression guard: if anything ever doubles `burst_rate` or
+    /// halves the per-frame `dt` on the burst timer, this test flips
+    /// from 4-in-0.75s to 4-in-1.5s (the exact mismatch the user
+    /// reported in-game).
+    #[test]
+    fn megabeam_burst_produces_4_shots_in_0_75_seconds() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .insert_resource(UnitRegistry::empty());
+
+        let target = app.world_mut().spawn_empty().id();
+        // Initial shot is simulated by inserting a BurstFire directly
+        // — matches what `combat_system` would do for MegaBeam on the
+        // frame the first shot fires (shots_remaining = burst - 1).
+        let _attacker = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::default(),
+                UnitType(UnitKind::Byte),
+                BurstFire {
+                    shots_remaining: 3,
+                    interval: 0.25,
+                    timer: 0.25,
+                    target,
+                    target_pos: Vec3::ZERO,
+                    weapon: "MegaBeam".to_string(),
+                    arc_height: 0.0,
+                },
+            ))
+            .id();
+
+        // Drive 60fps ticks for 0.85s — just past the expected end of
+        // the burst at 0.75s. Every frame: advance Time, tick burst.
+        const FRAMES: usize = 52; // 0.85s at 60fps
+        const FRAME_DT_MS: u64 = 16; // ≈16.67 ms
+        let mut shots_seen_by_deadline: Vec<(usize, usize)> = Vec::new();
+        for frame in 0..FRAMES {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(FRAME_DT_MS));
+            app.world_mut().run_system_once(tick_burst_fire).unwrap();
+            let damage_count = app.world().resource::<DamageQueue>().len();
+            shots_seen_by_deadline.push((frame, damage_count));
+        }
+
+        // After 0.85s (frame 51 @ 60fps), all 3 follow-ups must have
+        // fired. Spacing checks:
+        // shot #1 (follow-up) at ~0.25s → frame 15 or 16
+        // shot #2 at ~0.50s → frame 31 or 32
+        // shot #3 at ~0.75s → frame 46 or 47
+        let damage_count_final = app.world().resource::<DamageQueue>().len();
+        assert_eq!(
+            damage_count_final, 3,
+            "burst must produce exactly 3 follow-up shots; saw {damage_count_final}. \
+             progression = {shots_seen_by_deadline:?}",
+        );
+
+        // Check the damage events arrived at the expected frames. Each
+        // interval is 16 frames ±1 at 60fps (since 0.25s / 0.01667s ≈
+        // 15.0, but the first tick already consumed some of the timer
+        // on frame 0, so the first fire lands at frame 15).
+        let first_shot_frame = shots_seen_by_deadline
+            .iter()
+            .find(|(_, c)| *c >= 1)
+            .map(|(f, _)| *f)
+            .expect("first follow-up must fire");
+        let second_shot_frame = shots_seen_by_deadline
+            .iter()
+            .find(|(_, c)| *c >= 2)
+            .map(|(f, _)| *f)
+            .expect("second follow-up must fire");
+        let third_shot_frame = shots_seen_by_deadline
+            .iter()
+            .find(|(_, c)| *c >= 3)
+            .map(|(f, _)| *f)
+            .expect("third follow-up must fire");
+
+        // Each gap should be ~15 frames (0.25s / 0.01667s). Allow ±2
+        // for integer-frame rounding. If cadence doubled silently to
+        // 0.5s, gaps would land at ~30 frames and this would fail.
+        let gap_1 = first_shot_frame; // from insertion
+        let gap_2 = second_shot_frame - first_shot_frame;
+        let gap_3 = third_shot_frame - second_shot_frame;
+        for (label, gap) in [("gap1", gap_1), ("gap2", gap_2), ("gap3", gap_3)] {
+            assert!(
+                (13..=17).contains(&gap),
+                "{label} = {gap} frames; expected ~15 (0.25s @ 60fps). \
+                 If this is near 30 frames the burst rate silently doubled. \
+                 progression = {shots_seen_by_deadline:?}",
+            );
+        }
+    }
+
     #[test]
     fn burst_fire_releases_shots_at_interval() {
         use bevy::ecs::system::RunSystemOnce;
@@ -487,13 +607,20 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
-            .init_resource::<PendingAttacks>();
+            .init_resource::<PendingAttacks>()
+            // Empty UnitRegistry — `preferred_muzzle_ceg` returns None
+            // for the test attacker (no sfx_types entry), so the event
+            // falls back to the synthesised muzzle flash. What we're
+            // actually asserting below is burst timing + DamageQueue
+            // count; the muzzle CEG is incidental.
+            .insert_resource(UnitRegistry::empty());
 
         let target = app.world_mut().spawn_empty().id();
         let attacker = app
             .world_mut()
             .spawn((
                 GlobalTransform::default(),
+                UnitType(UnitKind::Bit),
                 BurstFire {
                     shots_remaining: 3,
                     interval: 0.25,

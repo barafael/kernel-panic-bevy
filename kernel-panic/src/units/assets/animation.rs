@@ -547,7 +547,12 @@ fn dispatch_emit_sfx(
         base[2] * intensity,
     ];
 
-    explosions.events.push(ExplosionEvent { pos, rgb, radius });
+    explosions.events.push(ExplosionEvent {
+        pos,
+        rgb,
+        radius,
+        ceg_name: String::new(),
+    });
 }
 
 // ---------------------------------------------------------------------------

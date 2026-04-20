@@ -68,6 +68,17 @@ impl UnitRegistry {
         registry
     }
 
+    /// An empty registry — tests that instantiate systems without
+    /// reading upstream disk files use this to satisfy the `Res<UnitRegistry>`
+    /// system-param without triggering a `warn!` log flood for every
+    /// known `UnitKind`.
+    #[cfg(test)]
+    pub fn empty() -> Self {
+        Self {
+            defs: UnitDefs::default(),
+        }
+    }
+
     /// Look up the raw FBI definition for a unit kind.
     ///
     /// Uses direct BTreeMap lookup since `UnitKind::unitname()` returns
@@ -260,6 +271,42 @@ impl UnitRegistry {
         } else {
             raw
         }
+    }
+
+    /// The "best" muzzle-flash CEG for this unit's fire event.
+    ///
+    /// COB integration is incomplete, so `emit-sfx 1024+i` from the
+    /// real script doesn't drive the visual. The pragmatic stand-in:
+    /// index 1 if the unit declares it (Bit's arrowflare at 1025),
+    /// falling back to index 0 (every other System-faction unit
+    /// points at `custom:oldskool_shot1`). Returns `None` when the
+    /// unit has no `[SFXTypes]` block at all.
+    pub fn preferred_muzzle_ceg(&self, kind: UnitKind) -> Option<&str> {
+        self.sfx_type(kind, 1).or_else(|| self.sfx_type(kind, 0))
+    }
+
+    /// Indexed CEG name for one of the unit's FBI `[SFXTypes]` entries.
+    ///
+    /// COB scripts fire `emit-sfx 1024+i from piece` to play particle
+    /// generator `i` from the unit's FBI. Combat-side fire paths
+    /// (muzzle flash, weapon hit) call this with the index their
+    /// corresponding COB `FireWeaponN` body emits:
+    ///
+    /// - Bit `FireWeapon1` → `emit-sfx 1025` → index 1 (arrowflare muzzle).
+    /// - Pointer `FireWeapon1` / `FireWeapon2` → `emit-sfx 1024` → index 0
+    ///   (soft-blue puff).
+    /// - Byte `FireWeapon1` → `emit-sfx 1024` at bp0..bp3 → index 0.
+    ///
+    /// Returns `None` when the unit has no `[SFXTypes]` block or the
+    /// requested index is unset, so callers can fall back to a
+    /// synthesised muzzle flash.
+    pub fn sfx_type(&self, kind: UnitKind, index: usize) -> Option<&str> {
+        self.def(kind).and_then(|d| {
+            d.sfx_types
+                .get(index)
+                .map(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+        })
     }
 
     /// Primary weapon TDF section name, or `""` if unarmed / only has BuildLaser.

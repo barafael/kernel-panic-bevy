@@ -165,6 +165,9 @@ pub fn tick_construction(
             attacker_pos: start,
             target_pos: constructing.site,
             weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
+            // Builder BuildLaser also skips the muzzle flash CEG — see
+            // the same-named call site in production.rs.
+            muzzle_ceg: None,
         });
 
         let build_time = unit_registry.build_time(constructing.kind);
