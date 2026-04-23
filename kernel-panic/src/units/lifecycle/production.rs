@@ -115,6 +115,7 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
         // the target end is the primary fx; strobing the builder every
         // frame would drown out the rest of the scene.
         muzzle_ceg: None,
+        delayed_hit: None,
     });
 }
 

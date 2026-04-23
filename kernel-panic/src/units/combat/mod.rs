@@ -23,7 +23,7 @@ use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::WeaponRegistry;
 use super::lifecycle::script_triggers::JustFired;
 use super::spatial::SpatialIndex;
-use super::weapon_fx::{AttackEvent, PendingAttacks};
+use super::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
 use crate::rng::next_signed;
 use crate::terrain::heightmap::Heightmap;
 
@@ -32,8 +32,8 @@ mod damage;
 mod lifecycle;
 
 pub use aim::{
-    AIM_HEADING_TOLERANCE, AimTarget, DeployState, Deployable, aim_weapons_system,
-    tick_deploy_state,
+    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimTarget, BYTE_OPEN_DURATION, DeployState,
+    Deployable, OpeningDelay, aim_weapons_system, tick_deploy_state, tick_opening_delay,
 };
 pub use damage::{
     BurstFire, DamageQueue, INFECTION_DURATION, Infected, PendingDamage, VirusSpawnQueue,
@@ -57,11 +57,26 @@ pub struct AttackGroundOrder {
     pub pos: Vec3,
 }
 
-/// Added to each sampled terrain height in LOS checks so the shooter and
-/// target standing on a crest don't self-block. Roughly half a heightmap
-/// square — tighter than this and slopes read as walls; looser and
-/// weapons shoot over short ridges.
+/// Required clearance (elmos) between the LOS ray and the underlying
+/// terrain at every sample point — the ray passes iff `beam_y >=
+/// terrain_y + LOS_MARGIN`.
+///
+/// Held tight (4 elmos) so actual ridges still block, but **only**
+/// meaningful once the ray itself is lifted above ground by
+/// [`LOS_MUZZLE_HEIGHT`]. Without that lift the shooter and target
+/// stand at ground level, `beam_y == terrain_y` along flat terrain,
+/// and every check fails the `terrain + 4` margin. That was the
+/// observed bit-vs-packet bug: bit saw packet 100 elmos away, well
+/// inside its 256 range, but LOS rejected every tick.
 const LOS_MARGIN: f32 = 4.0;
+
+/// Muzzle height added to both endpoints of the LOS ray — a stand-in
+/// for shooting from the weapon's gun piece rather than from the
+/// unit's feet. 16 elmos is roughly the height of the smallest KP
+/// unit's gun mount (bit ball.s3o has the gunpoint at z=-3 off a
+/// 32-tall body); bigger units (byte, pointer) sit higher but we
+/// err on the conservative side so a genuine wall still blocks.
+const LOS_MUZZLE_HEIGHT: f32 = 16.0;
 
 /// Spring encodes per-shot spread in "short" angular units where a full
 /// revolution is 65536. Conversion to radians for aim-offset math.
@@ -126,6 +141,7 @@ pub fn combat_system(
             &TeamId,
             &GlobalTransform,
             Option<&Deployable>,
+            Option<&OpeningDelay>,
         ),
         (
             Without<Dying>,
@@ -149,6 +165,8 @@ pub fn combat_system(
     muzzle_q: Query<&MuzzlePiece>,
     animator_q: Query<&CobAnimator>,
     piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
+    gunbase_q: Query<&crate::units::assets::animation::GunbasePiece>,
+    aimer_q: Query<&crate::units::assets::animation::AimerPiece>,
     mut rng: Local<u32>,
 ) {
     if *rng == 0 {
@@ -165,13 +183,37 @@ pub fn combat_system(
 
     damage_queue.clear();
 
-    for (entity, unit_type, stats, attacker_faction, attacker_team, attacker_gtf, deployable) in
-        &attackers
+    for (
+        entity,
+        unit_type,
+        stats,
+        attacker_faction,
+        attacker_team,
+        attacker_gtf,
+        deployable,
+        opening_delay,
+    ) in &attackers
     {
+        use crate::units::content::definitions::UnitKind;
+        let is_bb = matches!(unit_type.0, UnitKind::Byte | UnitKind::Bit);
         // Deployable units (Pointer) can only fire while fully open. They
         // can still *aim* while opening (so the gun is pointed when Open
         // completes), but firing is gated on the open state.
         let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
+        // Byte holds fire until its `Open()` script finishes fanning the
+        // blades out — upstream's `isOpen` gate, mirrored host-side via
+        // `OpeningDelay`. Combat & attack-ground both honour it so the
+        // 4-shot MegaBeam burst can't leave while firing positions are
+        // still folded together at the unit center.
+        let fire_blocked_by_opening = opening_delay.is_some_and(|d| d.remaining > 0.0);
+        if is_bb && (fire_blocked_by_deploy || fire_blocked_by_opening) {
+            info!(
+                "AUTODBG {:?} deploy_state={:?} opening_remaining={:?} blocks fire",
+                unit_type.0,
+                deployable.map(|d| d.state),
+                opening_delay.map(|d| d.remaining),
+            );
+        }
 
         let weapon_name = unit_registry.weapon(unit_type.0);
 
@@ -222,27 +264,79 @@ pub fn combat_system(
         // "targets mines only" club without touching combat_system.
         let targets_mines_only = unit_type.0.targets_mines_only();
         let mut best: Option<(Entity, Vec3, f32)> = None;
+        let mut dbg_saw = 0u32;
+        let mut dbg_dead = 0u32;
+        let mut dbg_same_team = 0u32;
+        let mut dbg_same_faction = 0u32;
+        let mut dbg_flying_skip = 0u32;
+        let mut dbg_mines_skip = 0u32;
+        let mut dbg_out_of_range = 0u32;
+        let mut dbg_los_fail = 0u32;
+        let mut dbg_nearest_enemy_dist_sq = f32::INFINITY;
+        let mut dbg_nearest_enemy_kind: Option<crate::units::content::definitions::UnitKind> = None;
         spatial.query_radius(attacker_pos, range, |candidate| {
-            if !candidate.hp_positive
-                || candidate.team == attacker_team.0
-                || candidate.faction == *attacker_faction
-            {
+            if is_bb {
+                dbg_saw += 1;
+            }
+            if !candidate.hp_positive {
+                if is_bb {
+                    dbg_dead += 1;
+                }
                 return;
             }
+            if candidate.team == attacker_team.0 {
+                if is_bb {
+                    dbg_same_team += 1;
+                }
+                return;
+            }
+            if candidate.faction == *attacker_faction {
+                if is_bb {
+                    dbg_same_faction += 1;
+                }
+                return;
+            }
+            // This candidate is a VALID ENEMY up to now — track the
+            // closest one regardless of range/flying/LOS so the log
+            // shows "there IS an enemy 400 elmos away, but my range
+            // is 256" rather than just "best=None".
+            if is_bb {
+                let d = attacker_pos.distance_squared(candidate.pos);
+                if d < dbg_nearest_enemy_dist_sq {
+                    dbg_nearest_enemy_dist_sq = d;
+                    dbg_nearest_enemy_kind = Some(candidate.kind);
+                }
+            }
             if skip_flying && candidate.is_flying {
+                if is_bb {
+                    dbg_flying_skip += 1;
+                }
                 return;
             }
             if targets_mines_only && !candidate.kind.is_minekiller_target() {
+                if is_bb {
+                    dbg_mines_skip += 1;
+                }
                 return;
             }
             let dist_sq = attacker_pos.distance_squared(candidate.pos);
             if dist_sq > range_sq {
+                if is_bb {
+                    dbg_out_of_range += 1;
+                }
                 return;
             }
             if enforce_los
                 && let Some(hm) = heightmap.as_deref()
-                && !hm.has_line_of_sight(attacker_pos, candidate.pos, LOS_MARGIN)
+                && !hm.has_line_of_sight(
+                    attacker_pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
+                    candidate.pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
+                    LOS_MARGIN,
+                )
             {
+                if is_bb {
+                    dbg_los_fail += 1;
+                }
                 return;
             }
             let better = best.is_none_or(|(_, _, d)| {
@@ -257,6 +351,31 @@ pub fn combat_system(
             }
         });
 
+        if is_bb {
+            let nearest_enemy_dist = if dbg_nearest_enemy_dist_sq.is_finite() {
+                dbg_nearest_enemy_dist_sq.sqrt()
+            } else {
+                f32::INFINITY
+            };
+            info!(
+                "AUTODBG {:?} range={} pos={:?} cd={:?} saw={} dead={} team_skip={} fac_skip={} fly_skip={} mines_skip={} oor={} los={} best={:?} nearest_enemy={:.1}@{:?}",
+                unit_type.0,
+                range,
+                attacker_pos,
+                cooldowns.get(entity).map(|c| c.remaining).ok(),
+                dbg_saw,
+                dbg_dead,
+                dbg_same_team,
+                dbg_same_faction,
+                dbg_flying_skip,
+                dbg_mines_skip,
+                dbg_out_of_range,
+                dbg_los_fail,
+                best,
+                nearest_enemy_dist,
+                dbg_nearest_enemy_kind,
+            );
+        }
         let Some((target_entity, target_pos, _)) = best else {
             commands.entity(entity).remove::<AimTarget>();
             continue;
@@ -273,7 +392,7 @@ pub fn combat_system(
             arc_height,
         });
 
-        if fire_blocked_by_deploy {
+        if fire_blocked_by_deploy || fire_blocked_by_opening {
             continue;
         }
 
@@ -284,32 +403,82 @@ pub fn combat_system(
             continue;
         }
 
-        // For Deployable units, only fire when the body is actually
-        // pointed at the target. The aim system will have been steering
-        // us all along; this just delays the shot until the steering
-        // has caught up, preventing the Pointer from firing off-axis.
-        if deployable.is_some() {
+        // Aim-alignment gate. Up to three checks, each guarded on which
+        // piece markers the unit actually has — Pointer (Deployable +
+        // GunbasePiece) needs body heading + gunbase pitch; Byte
+        // (AimerPiece, no Deployable) needs aimer Y + aimer X. Without
+        // these, a unit fires mid-slew and beams visibly leave at the
+        // wrong angle while the aim catches up after the projectile is
+        // already flying.
+        //
+        // Mirrors upstream's `AimWeapon1` returning 0 (not ready) until
+        // `wait-for-turn` completes — firing only proceeds once the
+        // script returns 1.
+        let to_target_xz = Vec3::new(
+            target_pos.x - attacker_pos.x,
+            0.0,
+            target_pos.z - attacker_pos.z,
+        );
+        let horizontal_dist = to_target_xz.length();
+
+        // Body-heading gate (Pointer): wait for the body to finish
+        // turning. Deployable is the marker for "this unit's whole body
+        // aims" — Byte uses aimer-piece aim and skips this check.
+        if deployable.is_some() && horizontal_dist > 1e-3 {
+            let to_target_n = to_target_xz / horizontal_dist;
             let forward = attacker_gtf.forward().as_vec3();
-            let to_target = Vec3::new(
-                target_pos.x - attacker_pos.x,
-                0.0,
-                target_pos.z - attacker_pos.z,
-            );
-            let to_target_len_sq = to_target.length_squared();
-            if to_target_len_sq > 1e-6 {
-                let to_target_n = to_target / to_target_len_sq.sqrt();
-                let forward_xz = {
-                    let f = Vec3::new(forward.x, 0.0, forward.z);
-                    if f.length_squared() < 1e-6 {
-                        Vec3::Z
-                    } else {
-                        f.normalize()
-                    }
-                };
-                let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
-                if align.acos() > AIM_HEADING_TOLERANCE {
-                    continue;
+            let forward_xz = {
+                let f = Vec3::new(forward.x, 0.0, forward.z);
+                if f.length_squared() < 1e-6 {
+                    Vec3::Z
+                } else {
+                    f.normalize()
                 }
+            };
+            let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
+            if align.acos() > AIM_HEADING_TOLERANCE {
+                continue;
+            }
+        }
+
+        // Compute the elevation `aim_weapons_system` uses as the gunbase
+        // / aimer X target this frame so the gate uses the same
+        // arithmetic and converges cleanly when the slew finishes.
+        let dy = target_pos.y - attacker_pos.y;
+        let direct_pitch = dy.atan2(horizontal_dist.max(1e-6));
+        let arc_pitch = if arc_height > 0.0 && horizontal_dist > 1.0 {
+            (4.0 * arc_height / horizontal_dist).atan()
+        } else {
+            0.0
+        };
+        let target_pitch = direct_pitch + arc_pitch;
+
+        // Gunbase pitch gate (Pointer): aim_weapons_system writes
+        // `target_x = π/2 - pitch` for gunbase, matching pointer.bos's
+        // `(<-90>-p)` convention. Compare against the live piece rotation.
+        if let Ok(gb) = gunbase_q.get(entity)
+            && let Ok(animator) = animator_q.get(entity)
+            && let Some(rot) = animator.piece_rotations.get(gb.0)
+        {
+            let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
+            if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
+                continue;
+            }
+        }
+
+        // Aimer alignment gate (Byte): host-side aim writes both axes of
+        // `target_rotations`; compare current rotations against those
+        // targets. This is what `AimWeapon1`'s `wait-for-turn aimer
+        // around y-axis` / `around x-axis` pair does in upstream.
+        if let Ok(ap) = aimer_q.get(entity)
+            && let Ok(animator) = animator_q.get(entity)
+            && let Some(rot) = animator.piece_rotations.get(ap.0)
+            && let Some(target_rot) = animator.target_rotations.get(ap.0)
+        {
+            let dy_axis = (rot[1] - target_rot[1]).abs();
+            let dx_axis = (rot[0] - target_rot[0]).abs();
+            if dy_axis > AIM_HEADING_TOLERANCE || dx_axis > AIM_PITCH_TOLERANCE {
+                continue;
             }
         }
 
@@ -329,13 +498,20 @@ pub fn combat_system(
             impact_pos = Vec3::new(target_pos.x + dx, target_pos.y, target_pos.z + dz);
         }
 
-        damage_queue.push(PendingDamage {
-            target: Some(target_entity),
-            attacker: entity,
-            weapon: weapon_name.to_string(),
-            impact_pos,
-            attacker_distance: distance,
-        });
+        // Hitscan lands this frame via `DamageQueue`; traveling bolts
+        // defer their hit via `AttackEvent::delayed_hit` — the visual
+        // spawned by `spawn_weapon_visuals` carries the payload and
+        // fires it on impact (see [`crate::units::weapon_fx`]).
+        let is_traveling = weapon_def.is_some_and(spring_tdf::WeaponDef::is_traveling);
+        if !is_traveling {
+            damage_queue.push(PendingDamage {
+                target: Some(target_entity),
+                attacker: entity,
+                weapon: weapon_name.to_string(),
+                impact_pos,
+                attacker_distance: distance,
+            });
+        }
         commands.entity(entity).insert((
             AttackCooldown {
                 remaining: cooldown,
@@ -356,24 +532,32 @@ pub fn combat_system(
             let muzzle_ceg = unit_registry
                 .preferred_muzzle_ceg(unit_type.0)
                 .map(|s| std::borrow::Cow::Owned(s.to_string()));
+            let delayed_hit = is_traveling.then(|| DelayedHitInfo {
+                target: Some(target_entity),
+                attacker: entity,
+                attacker_distance: distance,
+            });
             pending_attacks.events.push(AttackEvent {
                 attacker_pos: visual_origin,
                 target_pos: impact_pos,
                 weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
                 muzzle_ceg,
+                delayed_hit,
             });
         }
 
         let burst = weapon_def.map_or(0.0, |w| w.burst) as u32;
         if burst > 1 {
+            let interval = weapon_def.map_or(0.1, |w| w.burst_rate.max(0.05));
             commands.entity(entity).insert(BurstFire {
                 shots_remaining: burst - 1,
-                interval: weapon_def.map_or(0.1, |w| w.burst_rate.max(0.05)),
-                timer: weapon_def.map_or(0.1, |w| w.burst_rate.max(0.05)),
-                target: target_entity,
+                interval,
+                timer: interval,
+                target: Some(target_entity),
                 target_pos,
                 weapon: weapon_name.to_string(),
                 arc_height,
+                is_traveling,
             });
         }
     }
@@ -394,22 +578,65 @@ pub fn combat_system(
 pub fn attack_ground_system(
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
-    attackers: Query<(Entity, &UnitType, &GlobalTransform, &AttackGroundOrder), Without<Dying>>,
+    attackers: Query<
+        (
+            Entity,
+            &UnitType,
+            &GlobalTransform,
+            &AttackGroundOrder,
+            Option<&Deployable>,
+            Option<&OpeningDelay>,
+        ),
+        Without<Dying>,
+    >,
     cooldowns: Query<&AttackCooldown>,
     muzzle_q: Query<&MuzzlePiece>,
     animator_q: Query<&CobAnimator>,
     piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
+    gunbase_q: Query<&crate::units::assets::animation::GunbasePiece>,
+    aimer_q: Query<&crate::units::assets::animation::AimerPiece>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order) in &attackers {
+    for (entity, unit_type, gtf, order, deployable, opening_delay) in &attackers {
+        use crate::units::content::definitions::UnitKind;
+        let is_dbg = matches!(unit_type.0, UnitKind::Byte | UnitKind::Bit);
+        if is_dbg {
+            info!(
+                "ATKGND {:?} {:?} order_pos={:?} pos={:?}",
+                entity,
+                unit_type.0,
+                order.pos,
+                gtf.translation()
+            );
+        }
+        // Same deploy / opening gates as `combat_system`. Player-issued
+        // attack-ground orders MUST honour them too — otherwise the
+        // player can force-fire a Pointer that's still folding open or a
+        // byte whose blades haven't fanned yet, bypassing upstream's
+        // `AimWeapon1`-returns-0 contract.
+        if deployable.is_some_and(|d| d.state != DeployState::Open) {
+            continue;
+        }
+        if opening_delay.is_some_and(|d| d.remaining > 0.0) {
+            continue;
+        }
         let weapon_name = unit_registry.weapon(unit_type.0);
         let Some(weapon_def) = weapon_registry.get(weapon_name) else {
+            if is_dbg {
+                info!(
+                    "ATKGND {:?} no weapon_def for '{}'",
+                    unit_type.0, weapon_name
+                );
+            }
             continue;
         };
         let range = weapon_def.range;
         if range <= 0.0 {
+            if is_dbg {
+                info!("ATKGND {:?} range<=0", unit_type.0);
+            }
             continue;
         }
 
@@ -417,6 +644,12 @@ pub fn attack_ground_system(
         let dist = attacker_pos.distance(order.pos);
 
         if dist > range {
+            if is_dbg {
+                info!(
+                    "ATKGND {:?} dist={:.1} > range={:.0}, moving",
+                    unit_type.0, dist, range
+                );
+            }
             // Move toward the target, stopping just inside weapon range so
             // the unit doesn't walk through the blast zone of its own AoE.
             let dir = (order.pos - attacker_pos).normalize_or(Vec3::NEG_Z);
@@ -433,7 +666,17 @@ pub fn attack_ground_system(
         // orders, making weapons fire twice as fast as the TDF spec.
         let cd_ready = cooldowns.get(entity).map_or(true, |cd| cd.remaining <= 0.0);
         if !cd_ready {
+            if is_dbg {
+                let cd = cooldowns.get(entity).map(|c| c.remaining).unwrap_or(-1.0);
+                info!("ATKGND {:?} cooldown={:.3} > 0, skip", unit_type.0, cd);
+            }
             continue;
+        }
+        if is_dbg {
+            info!(
+                "ATKGND {:?} FIRING at {:?} dist={:.1}",
+                unit_type.0, order.pos, dist
+            );
         }
 
         // Aim at ground target so the barrel sweeps visibly.
@@ -443,24 +686,88 @@ pub fn attack_ground_system(
             arc_height,
         });
 
+        // Same alignment gates as `combat_system` — body-heading for
+        // Deployable, gunbase pitch for GunbasePiece, aimer-axis for
+        // AimerPiece. The math mirrors `aim_weapons_system` so the
+        // gate converges cleanly once the slew finishes.
+        let to_target_xz = Vec3::new(
+            order.pos.x - attacker_pos.x,
+            0.0,
+            order.pos.z - attacker_pos.z,
+        );
+        let horizontal_dist = to_target_xz.length();
+        if deployable.is_some() && horizontal_dist > 1e-3 {
+            let to_target_n = to_target_xz / horizontal_dist;
+            let forward = gtf.forward().as_vec3();
+            let forward_xz = {
+                let f = Vec3::new(forward.x, 0.0, forward.z);
+                if f.length_squared() < 1e-6 {
+                    Vec3::Z
+                } else {
+                    f.normalize()
+                }
+            };
+            let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
+            if align.acos() > AIM_HEADING_TOLERANCE {
+                continue;
+            }
+        }
+        let dy = order.pos.y - attacker_pos.y;
+        let direct_pitch = dy.atan2(horizontal_dist.max(1e-6));
+        let arc_pitch = if arc_height > 0.0 && horizontal_dist > 1.0 {
+            (4.0 * arc_height / horizontal_dist).atan()
+        } else {
+            0.0
+        };
+        let target_pitch = direct_pitch + arc_pitch;
+        if let Ok(gb) = gunbase_q.get(entity)
+            && let Ok(animator) = animator_q.get(entity)
+            && let Some(rot) = animator.piece_rotations.get(gb.0)
+        {
+            let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
+            if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
+                continue;
+            }
+        }
+        if let Ok(ap) = aimer_q.get(entity)
+            && let Ok(animator) = animator_q.get(entity)
+            && let Some(rot) = animator.piece_rotations.get(ap.0)
+            && let Some(target_rot) = animator.target_rotations.get(ap.0)
+        {
+            let dy_axis = (rot[1] - target_rot[1]).abs();
+            let dx_axis = (rot[0] - target_rot[0]).abs();
+            if dy_axis > AIM_HEADING_TOLERANCE || dx_axis > AIM_PITCH_TOLERANCE {
+                continue;
+            }
+        }
+
         // Fire.
         let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
         let muzzle_ceg = unit_registry
             .preferred_muzzle_ceg(unit_type.0)
             .map(|s| std::borrow::Cow::Owned(s.to_string()));
+        let is_traveling = weapon_def.is_traveling();
+        let delayed_hit = is_traveling.then(|| DelayedHitInfo {
+            target: None,
+            attacker: entity,
+            attacker_distance: dist,
+        });
         pending_attacks.events.push(AttackEvent {
             attacker_pos: visual_origin,
             target_pos: order.pos,
             weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
             muzzle_ceg,
+            delayed_hit,
         });
-        damage_queue.push(PendingDamage {
-            target: None,
-            attacker: entity,
-            weapon: weapon_name.to_string(),
-            impact_pos: order.pos,
-            attacker_distance: dist,
-        });
+        if !is_traveling {
+            damage_queue.push(PendingDamage {
+                target: None,
+                attacker: entity,
+                weapon: weapon_name.to_string(),
+                impact_pos: order.pos,
+                attacker_distance: dist,
+            });
+        }
         commands.entity(entity).insert((
             AttackCooldown {
                 remaining: weapon_def.reload_time,
@@ -470,5 +777,30 @@ pub fn attack_ground_system(
                 arc_height,
             },
         ));
+
+        // Queue the remaining burst shots exactly like `combat_system`
+        // does on the auto-target path. Missing this was the reason a
+        // player-commanded byte fired one shot per 2 s reload instead
+        // of the authored 4-shot `burstrate=0.25` flurry: the initial
+        // shot went through here, cooldown was set, and `tick_burst_fire`
+        // never saw a `BurstFire` component because only the other fire
+        // site inserted it.
+        let burst = weapon_def.burst as u32;
+        if burst > 1 {
+            let interval = weapon_def.burst_rate.max(0.05);
+            commands.entity(entity).insert(BurstFire {
+                shots_remaining: burst - 1,
+                interval,
+                timer: interval,
+                // Attack-ground has no primary-hit entity; AoE splash
+                // at `target_pos` via `apply_damage` still reaches
+                // everything in range.
+                target: None,
+                target_pos: order.pos,
+                weapon: weapon_name.to_string(),
+                arc_height,
+                is_traveling,
+            });
+        }
     }
 }

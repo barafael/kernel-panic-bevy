@@ -483,6 +483,17 @@ impl WeaponDef {
             || (!self.model.is_empty() && self.model != ";")
     }
 
+    /// True for weapons whose shot visibly travels across the map before
+    /// landing — laser bolts (`LaserCannon`: Bit Line, Byte MegaBeam,
+    /// MineLauncher, RetroDeath*) plus any [`is_projectile`]. Hitscan
+    /// weapons (`BeamLaser`, `Melee`, `Flame`, `LightningCannon`) return
+    /// false so combat can apply their damage on the firing frame.
+    ///
+    /// [`is_projectile`]: Self::is_projectile
+    pub fn is_traveling(&self) -> bool {
+        self.is_projectile() || self.category() == WeaponCategory::LaserCannon
+    }
+
     /// Synthesise an RGB triplet from the legacy `color=` palette
     /// field (0-255 hue) when `rgb_color` is unset.
     ///

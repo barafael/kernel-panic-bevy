@@ -6,8 +6,8 @@ use bevy::prelude::*;
 
 use super::ceg::{CegParticleMesh, CegRegistry, spawn_ceg};
 use super::shared::{
-    AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, GroundFlash,
-    GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, PendingAttacks,
+    AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
+    GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, PendingAttacks,
     PendingExplosions, ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT, WeaponFxMeshes,
     build_billboard_quad_mesh, tdf_color, weapon_core_color, weapon_edge_color,
 };
@@ -69,6 +69,10 @@ pub(super) fn spawn_weapon_visuals(
         let is_beam_laser = category == spring_tdf::WeaponCategory::BeamLaser;
         let is_laser_cannon = category == spring_tdf::WeaponCategory::LaserCannon;
 
+        // Primary visual entity — the projectile / bolt that carries
+        // the `DelayedHit` if this attack has deferred damage.
+        let mut primary_visual: Option<Entity> = None;
+
         if is_melee {
             spawn_melee_flash(
                 &event,
@@ -80,7 +84,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut impact_assets,
             );
         } else if is_projectile {
-            spawn_projectile(
+            primary_visual = Some(spawn_projectile(
                 &event,
                 weapon,
                 &mut commands,
@@ -90,9 +94,9 @@ pub(super) fn spawn_weapon_visuals(
                 &mut model_cache,
                 &mut cache,
                 &mut fx_meshes,
-            );
+            ));
         } else if is_laser_cannon {
-            spawn_laser_bolt(
+            primary_visual = Some(spawn_laser_bolt(
                 &event,
                 weapon,
                 &mut commands,
@@ -102,7 +106,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut model_cache,
                 &mut cache,
                 &mut fx_meshes,
-            );
+            ));
         } else if is_beam_laser {
             spawn_textured_beam(
                 &event,
@@ -131,6 +135,18 @@ pub(super) fn spawn_weapon_visuals(
                 &mut cache,
                 &mut fx_meshes,
             );
+        }
+
+        // Hand the deferred payload to the visual `tick_weapon_fx`
+        // will process on impact. The weapon's name is enough to
+        // recover rgb / AoE / explosion CEG via the registry then.
+        if let (Some(visual), Some(delayed)) = (primary_visual, event.delayed_hit.as_ref()) {
+            commands.entity(visual).insert(DelayedHit {
+                target: delayed.target,
+                attacker: delayed.attacker,
+                weapon: event.weapon_name.clone(),
+                attacker_distance: delayed.attacker_distance,
+            });
         }
 
         // Muzzle flash at the attacker's muzzle-piece position.
@@ -188,7 +204,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut sparkle_assets,
                 &asset_server,
             );
-        } else if !is_melee {
+        } else if !is_melee && event.delayed_hit.is_none() {
             // Upstream CEG is the source of truth for impact particles:
             // the weapon's `explosiongenerator=custom:NAME` resolves to a
             // CSimpleParticleSystem definition in `gamedata/explosions/`.
@@ -642,12 +658,9 @@ fn spawn_laser_bolt(
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
     fx_meshes: &mut WeaponFxMeshes,
-) {
+) -> Entity {
     let delta = event.target_pos - event.attacker_pos;
-    let distance = delta.length();
-    if distance < 0.1 {
-        return;
-    }
+    let distance = delta.length().max(0.1);
     let direction = delta / distance;
 
     // Trust the authored thickness — see spawn_textured_beam.
@@ -682,21 +695,23 @@ fn spawn_laser_bolt(
         materials,
     );
     let outer_mesh = meshes.add(build_billboard_quad_mesh());
-    commands.spawn((
-        LaserBolt {
-            origin: event.attacker_pos,
-            direction,
-            total_distance: distance,
-            speed,
-            max_length,
-            thickness,
-            elapsed: 0.0,
-            mesh: outer_mesh.clone(),
-        },
-        Mesh3d(outer_mesh),
-        MeshMaterial3d(outer_mat),
-        Transform::IDENTITY,
-    ));
+    let outer_entity = commands
+        .spawn((
+            LaserBolt {
+                origin: event.attacker_pos,
+                direction,
+                total_distance: distance,
+                speed,
+                max_length,
+                thickness,
+                elapsed: 0.0,
+                mesh: outer_mesh.clone(),
+            },
+            Mesh3d(outer_mesh),
+            MeshMaterial3d(outer_mat),
+            Transform::IDENTITY,
+        ))
+        .id();
 
     // Core pass: `corethickness × white × texture`. For Bit's
     // `Line` (corethickness=1) the core is full width and fully covers
@@ -735,6 +750,7 @@ fn spawn_laser_bolt(
     // `fx_meshes` remains in the signature for the other spawners;
     // this path no longer pulls the shared `beam_quad` handle.
     let _ = fx_meshes;
+    outer_entity
 }
 
 /// Projectile (Pointer Geometric / NX, BugCannon, SigTerm bomb,
@@ -765,7 +781,7 @@ fn spawn_projectile(
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
     fx_meshes: &mut WeaponFxMeshes,
-) {
+) -> Entity {
     let color = tdf_color(weapon.rgb_color);
 
     let speed = if weapon.weapon_velocity > 0.0 {
@@ -826,19 +842,21 @@ fn spawn_projectile(
         None
     };
 
-    commands.spawn((
-        ProjectileVisual {
-            origin: event.attacker_pos,
-            target: event.target_pos,
-            speed,
-            progress: 0.0,
-            arc_height,
-            trail,
-        },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(visual_scale)),
-    ));
+    commands
+        .spawn((
+            ProjectileVisual {
+                origin: event.attacker_pos,
+                target: event.target_pos,
+                speed,
+                progress: 0.0,
+                arc_height,
+                trail,
+            },
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(visual_scale)),
+        ))
+        .id()
 }
 
 /// Spawn a companion entity that carries the projectile's trail mesh.

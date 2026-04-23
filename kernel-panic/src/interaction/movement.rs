@@ -413,6 +413,50 @@ pub fn movement_system(
             resolve_motion(entity, current, desired, self_radius, speed, &snapshot)
         };
 
+        // Slope gate for ground units.
+        //
+        // Without this, `transform.translation.y = terrain.sample(new XZ)`
+        // below lifts a walker straight up any cliff the next step lands
+        // under — the pathfinder's slope cap only shapes the *route*,
+        // not the per-frame translation. A Byte (`MaxSlope=10` → 0.176
+        // tan) was climbing vertical walls every time its pathfind
+        // fell back to `vec![to]` (straight line) across impassable
+        // terrain.
+        //
+        // The check is *signed*: only ascents steeper than the cap are
+        // rejected. Descents always pass — a unit can step off a ledge
+        // even if it couldn't walk back up. `abs()` here had the unit
+        // freezing at plateau edges every time it tried to walk down.
+        //
+        // A 20 % margin absorbs the mismatch between the pathfinder's
+        // per-cell slope (grid-corner diffs across an 8-elmo square)
+        // and the movement's bilinear per-step sample — valid paths
+        // routinely straddle cells where the bilinear rise just barely
+        // exceeds the cap.
+        //
+        // If the step is refused, advance the waypoint instead of
+        // sitting on the same one forever. The pathfinder's straight-
+        // line fallback (`vec![to]`) is a single waypoint, so advancing
+        // exhausts the path cleanly and the outer loop promotes the
+        // next queued command or drops the order. For genuinely valid
+        // multi-waypoint paths, skipping one corner that happens to
+        // land on a terrain shelf is a small price versus stalling the
+        // whole unit.
+        if !flying && let Some(ref hm) = heightmap {
+            let dxz = Vec3::new(resolved.x, 0.0, resolved.z).length();
+            if dxz > 1e-4 {
+                let proposed = current + resolved;
+                let cur_ground = hm.sample(current.x, current.z);
+                let new_ground = hm.sample(proposed.x, proposed.z);
+                let rise = new_ground - cur_ground;
+                let cap = unit_registry.max_slope_ratio(unit_type.0);
+                if rise > 0.0 && rise > cap * dxz * 1.2 {
+                    path.current += 1;
+                    continue;
+                }
+            }
+        }
+
         transform.translation += resolved;
 
         // Altitude: ground units hug the terrain; flying units hover at

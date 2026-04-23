@@ -293,56 +293,87 @@ pub fn emit_geovent_smoke(
     }
 }
 
-/// How often `release_stale_vent_claims` scans. The release is only
-/// observable when the player starts a second build on the same vent,
-/// so a claim hanging around an extra ~250ms has no user-visible effect
-/// — matches the cadence of `CloakRefreshTimer`.
-const VENT_CLAIM_RELEASE_INTERVAL: f32 = 0.25;
+/// How often `reconcile_vent_claims` scans. Sub-second granularity is
+/// plenty: 250 ms of smoke still puffing out of a just-spawned vent is
+/// not visually disruptive, and the equivalent add/remove lag on the
+/// release side only matters when the player starts a second build on
+/// the same vent.
+const VENT_CLAIM_RECONCILE_INTERVAL: f32 = 0.25;
 
-/// Throttle timer for `release_stale_vent_claims`. Kept as a resource so
+/// Throttle timer for `reconcile_vent_claims`. Kept as a resource so
 /// the system can early-exit before touching any ECS query.
 #[derive(Resource, Default)]
 pub struct VentClaimReleaseTimer(pub f32);
 
-/// Release `VentClaim` once the vent has no committed builder *and* no
-/// finished building occupying it. Throttled to
-/// [`VENT_CLAIM_RELEASE_INTERVAL`] because the release only gates
-/// "second builder can target this vent again", which nobody notices
-/// at sub-second granularity.
+/// Keep every vent's `VentClaim` in sync with whether a building (or
+/// a committed / in-progress builder) occupies it.
 ///
-/// The rule is position-based rather than identity-based so the natural
-/// hand-off — builder finishes, building spawns at the same spot, builder
-/// walks away — keeps the claim alive without an explicit transfer step.
-pub fn release_stale_vent_claims(
+/// The rule is **position-based**: a vent is claimed iff
+/// (a) there's a `PendingBuild` whose `site` coincides with the vent,
+/// (b) there's a `Constructing` whose `site` coincides with the vent, or
+/// (c) a finished building sits within [`BUILDING_OCCUPANCY_RADIUS`] of the vent.
+///
+/// Adding the stamp side (previously only release was implemented) is
+/// what stops the "0/1 spray keeps pouring out of a vent that already
+/// has a socket / terminal built on it" visual — the starter-roster
+/// spawner goes straight through [`spawn_unit`] at a datavent position
+/// without touching the placement UI, so it never inserted the claim
+/// itself. The reconciler picks that up on its next 250 ms tick.
+///
+/// Position-based reconciliation also means the natural hand-off —
+/// builder finishes, building spawns at the same spot, builder walks
+/// away — just works: at any moment something is at the vent, the
+/// claim stays live.
+pub fn reconcile_vent_claims(
     time: Res<Time>,
     mut timer: ResMut<VentClaimReleaseTimer>,
     mut commands: Commands,
-    claimed: Query<(Entity, &GeoventSmoker), With<VentClaim>>,
+    vents: Query<(Entity, &GeoventSmoker, Option<&VentClaim>)>,
     pending: Query<&PendingBuild>,
     constructing: Query<&Constructing>,
     buildings: Query<(&UnitType, &GlobalTransform)>,
     unit_registry: Res<UnitRegistry>,
 ) {
     timer.0 += time.delta_secs();
-    if timer.0 < VENT_CLAIM_RELEASE_INTERVAL {
+    if timer.0 < VENT_CLAIM_RECONCILE_INTERVAL {
         return;
     }
     timer.0 = 0.0;
 
     let occupancy_sq = BUILDING_OCCUPANCY_RADIUS * BUILDING_OCCUPANCY_RADIUS;
-    for (vent_entity, vent) in &claimed {
+    // Horizontal-only distance: `spawn_unit` lifts a building's root
+    // by its model's `ground_lift`, and `Emerging` sinks it further
+    // for the rise animation — both apply to Y only. Measuring 3D
+    // distance to the vent (which sits at ground level) pushes a
+    // building whose XZ *exactly* matches the vent outside a tight
+    // 16-elmo sphere the moment its root Y diverges by 16+. Restrict
+    // the check to the XZ plane so the occupancy test tracks the
+    // building's footprint rather than its current emerge height.
+    let horiz_dist_sq = |a: Vec3, b: Vec3| {
+        let dx = a.x - b.x;
+        let dz = a.z - b.z;
+        dx * dx + dz * dz
+    };
+    for (vent_entity, vent, claim) in &vents {
         let builder_committed = pending
             .iter()
-            .any(|p| p.site.distance_squared(vent.pos) < 1.0)
+            .any(|p| horiz_dist_sq(p.site, vent.pos) < 1.0)
             || constructing
                 .iter()
-                .any(|c| c.site.distance_squared(vent.pos) < 1.0);
+                .any(|c| horiz_dist_sq(c.site, vent.pos) < 1.0);
         let building_present = buildings.iter().any(|(ut, gtf)| {
             unit_registry.is_building(ut.0)
-                && gtf.translation().distance_squared(vent.pos) <= occupancy_sq
+                && horiz_dist_sq(gtf.translation(), vent.pos) <= occupancy_sq
         });
-        if !builder_committed && !building_present {
-            commands.entity(vent_entity).remove::<VentClaim>();
+        let should_claim = builder_committed || building_present;
+        match (should_claim, claim.is_some()) {
+            (true, false) => {
+                commands.entity(vent_entity).insert(VentClaim);
+            }
+            (false, true) => {
+                commands.entity(vent_entity).remove::<VentClaim>();
+            }
+            _ => {}
         }
     }
 }

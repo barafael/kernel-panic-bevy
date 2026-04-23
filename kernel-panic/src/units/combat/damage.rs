@@ -17,7 +17,7 @@ use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::lifecycle::script_triggers::JustFired;
 use crate::units::spatial::SpatialIndex;
-use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
+use crate::units::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
 
 /// A pending damage event. Damage is resolved at apply-time so the
 /// target's armor class can pick the right entry from the weapon's
@@ -65,6 +65,14 @@ impl DamageQueue {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+
+    /// Borrow the pending damage slice for assertions. Test-only so the
+    /// production code can't accidentally peek at queued items out of
+    /// order.
+    #[cfg(test)]
+    pub fn iter_snapshot_for_test(&self) -> impl Iterator<Item = &PendingDamage> {
+        self.0.iter()
+    }
 }
 
 /// In-progress burst fire. Weapons with `burst > 1` fire the first shot
@@ -72,16 +80,30 @@ impl DamageQueue {
 /// remaining shots, which are released at `interval` spacing by
 /// [`tick_burst_fire`]. The aim point is frozen at trigger time so the
 /// whole burst lands on the same spot regardless of target motion.
+///
+/// `target` is `None` for bursts triggered by an [`AttackGroundOrder`]
+/// — the player clicked a ground point rather than a specific enemy,
+/// so there is no "primary hit" entity and damage falls through to
+/// AoE splash at [`target_pos`] via [`apply_damage`]. Before this was
+/// an option, the ground-attack path fired exactly one shot per
+/// reload, because [`attack_ground_system`] lacked a burst queue and
+/// the non-optional `Entity` field had no sensible value to fill.
+///
+/// [`target_pos`]: Self::target_pos
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct BurstFire {
     pub shots_remaining: u32,
     pub interval: f32,
     pub timer: f32,
-    pub target: Entity,
+    pub target: Option<Entity>,
     pub target_pos: Vec3,
     pub weapon: String,
     pub arc_height: f32,
+    /// Cached at burst creation from [`spring_tdf::WeaponDef::is_traveling`]
+    /// so `tick_burst_fire` doesn't re-hash the registry every frame
+    /// for a flag that's fixed for the burst's lifetime.
+    pub is_traveling: bool,
 }
 
 /// Marks a unit as infected by a Worm or Virus attack. If the unit dies
@@ -185,22 +207,31 @@ pub fn tick_burst_fire(
             continue;
         }
 
-        damage_queue.push(PendingDamage {
-            target: Some(burst.target),
-            attacker: entity,
-            weapon: burst.weapon.clone(),
-            impact_pos: burst.target_pos,
-            attacker_distance: gtf.translation().distance(burst.target_pos),
-        });
+        let distance = gtf.translation().distance(burst.target_pos);
+        if !burst.is_traveling {
+            damage_queue.push(PendingDamage {
+                target: burst.target,
+                attacker: entity,
+                weapon: burst.weapon.clone(),
+                impact_pos: burst.target_pos,
+                attacker_distance: distance,
+            });
+        }
         let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
         let muzzle_ceg = unit_registry
             .preferred_muzzle_ceg(unit_type.0)
             .map(|s| std::borrow::Cow::Owned(s.to_string()));
+        let delayed_hit = burst.is_traveling.then(|| DelayedHitInfo {
+            target: burst.target,
+            attacker: entity,
+            attacker_distance: distance,
+        });
         pending_attacks.events.push(AttackEvent {
             attacker_pos: visual_origin,
             target_pos: burst.target_pos,
             weapon_name: std::borrow::Cow::Owned(burst.weapon.clone()),
             muzzle_ceg,
+            delayed_hit,
         });
         commands.entity(entity).insert(JustFired {
             target_pos: burst.target_pos,
@@ -515,7 +546,8 @@ mod tests {
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
-            .insert_resource(UnitRegistry::empty());
+            .insert_resource(UnitRegistry::empty())
+            .init_resource::<WeaponRegistry>();
 
         let target = app.world_mut().spawn_empty().id();
         // Initial shot is simulated by inserting a BurstFire directly
@@ -530,10 +562,11 @@ mod tests {
                     shots_remaining: 3,
                     interval: 0.25,
                     timer: 0.25,
-                    target,
+                    target: Some(target),
                     target_pos: Vec3::ZERO,
                     weapon: "MegaBeam".to_string(),
                     arc_height: 0.0,
+                    is_traveling: false,
                 },
             ))
             .id();
@@ -600,6 +633,65 @@ mod tests {
         }
     }
 
+    /// Regression guard for the "one shot every 2 seconds" bug: when
+    /// the player issued an attack-ground order on a byte, only the
+    /// first shot of the authored 4-shot burst actually fired, because
+    /// `attack_ground_system` queued an `AttackCooldown` but not a
+    /// `BurstFire`. Here we simulate that state (`BurstFire.target =
+    /// None`, signalling the ground-attack variant) and assert the
+    /// follow-up shots still fire at the authored 0.25 s cadence. The
+    /// cost is two extra frames of dispatch — negligible — and the
+    /// payoff is parity with the auto-target path.
+    #[test]
+    fn ground_attack_burst_fires_follow_ups_with_none_target() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .insert_resource(UnitRegistry::empty())
+            .init_resource::<WeaponRegistry>();
+
+        app.world_mut().spawn((
+            GlobalTransform::default(),
+            UnitType(UnitKind::Byte),
+            BurstFire {
+                shots_remaining: 3,
+                interval: 0.25,
+                timer: 0.25,
+                target: None, // <-- ground-attack variant
+                target_pos: Vec3::ZERO,
+                weapon: "MegaBeam".to_string(),
+                arc_height: 0.0,
+                is_traveling: false,
+            },
+        ));
+
+        // Advance past the entire burst (0.85 s worth of 60fps ticks).
+        for _ in 0..52 {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(16));
+            app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        }
+        // All 3 follow-up shots must fire. Each pushes a PendingDamage
+        // with `target = None` → the splash path in `apply_damage`
+        // still reaches everything in AoE around `target_pos`.
+        let dq = app.world().resource::<DamageQueue>();
+        assert_eq!(
+            dq.len(),
+            3,
+            "ground-attack burst must still fire 3 follow-ups"
+        );
+        for entry in dq.iter_snapshot_for_test() {
+            assert!(
+                entry.target.is_none(),
+                "ground-attack burst must keep target=None on every follow-up",
+            );
+        }
+    }
+
     #[test]
     fn burst_fire_releases_shots_at_interval() {
         use bevy::ecs::system::RunSystemOnce;
@@ -613,7 +705,8 @@ mod tests {
             // falls back to the synthesised muzzle flash. What we're
             // actually asserting below is burst timing + DamageQueue
             // count; the muzzle CEG is incidental.
-            .insert_resource(UnitRegistry::empty());
+            .insert_resource(UnitRegistry::empty())
+            .init_resource::<WeaponRegistry>();
 
         let target = app.world_mut().spawn_empty().id();
         let attacker = app
@@ -625,10 +718,11 @@ mod tests {
                     shots_remaining: 3,
                     interval: 0.25,
                     timer: 0.25,
-                    target,
+                    target: Some(target),
                     target_pos: Vec3::ZERO,
                     weapon: "TestWeapon".to_string(),
                     arc_height: 0.0,
+                    is_traveling: false,
                 },
             ))
             .id();

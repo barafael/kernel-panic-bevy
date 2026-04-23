@@ -4,10 +4,12 @@
 use bevy::prelude::*;
 
 use super::shared::{
-    BeamVisual, BuildSparkle, GroundFlash, ImpactBurst, LaserBolt, ProjectileVisual,
-    TRAIL_SAMPLE_COUNT,
+    BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, GroundFlash, ImpactBurst, LaserBolt,
+    PendingExplosions, ProjectileVisual, TRAIL_SAMPLE_COUNT,
 };
 use crate::rendering::camera::RtsCamera;
+use crate::units::combat::{DamageQueue, PendingDamage};
+use crate::units::content::weapons::WeaponRegistry;
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn tick_weapon_fx(
@@ -45,6 +47,10 @@ pub(super) fn tick_weapon_fx(
             Without<ImpactBurst>,
         ),
     >,
+    delayed_hits: Query<&DelayedHit>,
+    mut damage_queue: ResMut<DamageQueue>,
+    mut pending_explosions: ResMut<PendingExplosions>,
+    weapon_registry: Res<WeaponRegistry>,
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
@@ -104,6 +110,18 @@ pub(super) fn tick_weapon_fx(
         bolt.elapsed += dt;
         let lead_raw = bolt.speed * bolt.elapsed;
         let lead_dist = lead_raw.min(bolt.total_distance);
+        if lead_raw >= bolt.total_distance {
+            let impact_pos = bolt.origin + bolt.direction * bolt.total_distance;
+            trigger_delayed_hit(
+                entity,
+                impact_pos,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
+        }
         let tail_raw = (lead_raw - bolt.max_length).max(0.0);
         if tail_raw >= bolt.total_distance {
             commands.entity(entity).despawn();
@@ -156,11 +174,29 @@ pub(super) fn tick_weapon_fx(
     for (entity, mut proj, mut transform) in &mut projectiles {
         let total_dist = proj.origin.distance(proj.target);
         if total_dist < 0.1 {
+            trigger_delayed_hit(
+                entity,
+                proj.target,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
             despawn_projectile(entity, &mut proj, &mut commands);
             continue;
         }
         proj.progress += (proj.speed * dt) / total_dist;
         if proj.progress >= 1.0 {
+            trigger_delayed_hit(
+                entity,
+                proj.target,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
             despawn_projectile(entity, &mut proj, &mut commands);
             continue;
         }
@@ -255,6 +291,46 @@ pub(super) fn tick_weapon_fx(
     }
 }
 
+/// Fire the one-shot impact payload riding on a traveling visual: push
+/// the deferred [`PendingDamage`] onto [`DamageQueue`] and enqueue the
+/// weapon's impact CEG as an [`ExplosionEvent`], then remove the
+/// component so the still-visible bolt tail can't re-trigger. No-op
+/// for entities without a [`DelayedHit`] (hitscan beams / build-lasers
+/// whose damage settled at spawn time).
+#[allow(clippy::too_many_arguments)]
+fn trigger_delayed_hit(
+    entity: Entity,
+    impact_pos: Vec3,
+    delayed_hits: &Query<&DelayedHit>,
+    weapon_registry: &WeaponRegistry,
+    damage_queue: &mut DamageQueue,
+    pending_explosions: &mut PendingExplosions,
+    commands: &mut Commands,
+) {
+    let Ok(hit) = delayed_hits.get(entity) else {
+        return;
+    };
+    damage_queue.push(PendingDamage {
+        target: hit.target,
+        attacker: hit.attacker,
+        weapon: hit.weapon.to_string(),
+        impact_pos,
+        attacker_distance: hit.attacker_distance,
+    });
+    let (rgb, radius, ceg_name) = weapon_registry
+        .get(&hit.weapon)
+        .map_or(([0.7; 3], 4.0, String::new()), |w| {
+            (w.rgb_color, w.area_of_effect, w.explosion_generator.clone())
+        });
+    pending_explosions.events.push(ExplosionEvent {
+        pos: impact_pos,
+        rgb,
+        radius,
+        ceg_name,
+    });
+    commands.entity(entity).remove::<DelayedHit>();
+}
+
 /// Despawn the projectile and its companion ribbon entity (if any).
 /// Called from the projectile loop at both the "arrived at target" and
 /// the "origin == target" early-exit paths so the ribbon never
@@ -337,4 +413,137 @@ fn rewrite_trail_mesh(
 
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Traveling weapons MUST defer damage + impact CEG until the bolt's
+    /// lead reaches the target. Bolt flies for 1 s: first tick
+    /// (mid-flight) leaves queues empty; second tick (impact) pushes
+    /// one damage + one explosion and removes the component; third
+    /// tick (tail still trailing) must not re-fire.
+    #[test]
+    fn laser_bolt_defers_damage_until_lead_reaches_target() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .init_resource::<WeaponRegistry>()
+            .init_resource::<Assets<Mesh>>();
+
+        let attacker = app.world_mut().spawn_empty().id();
+        let target = app.world_mut().spawn_empty().id();
+
+        // Bolt geometry: 100 elmos at 100 elmos/s → impact at t=1.0.
+        // max_length=50 so tail takes another 0.5 s to clear.
+        let mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(super::super::shared::build_billboard_quad_mesh());
+        let bolt_entity = app
+            .world_mut()
+            .spawn((
+                LaserBolt {
+                    origin: Vec3::ZERO,
+                    direction: Vec3::Z,
+                    total_distance: 100.0,
+                    speed: 100.0,
+                    max_length: 50.0,
+                    thickness: 1.0,
+                    elapsed: 0.0,
+                    mesh: mesh_handle,
+                },
+                Transform::IDENTITY,
+                DelayedHit {
+                    target: Some(target),
+                    attacker,
+                    weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                    attacker_distance: 100.0,
+                },
+            ))
+            .id();
+
+        // Tick 1: advance 0.5 s — lead at 50 elmos, not yet at target.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(500));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        assert!(app.world().resource::<DamageQueue>().is_empty());
+        assert!(
+            app.world()
+                .resource::<PendingExplosions>()
+                .events
+                .is_empty()
+        );
+        assert!(app.world().get::<DelayedHit>(bolt_entity).is_some());
+
+        // Tick 2: advance another 0.5 s → lead now at 100 elmos = impact.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(500));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
+        assert_eq!(app.world().resource::<PendingExplosions>().events.len(), 1);
+        assert!(
+            app.world().get::<DelayedHit>(bolt_entity).is_none(),
+            "component removed after firing so later ticks can't re-trigger",
+        );
+
+        // Tick 3: tail still trailing — must not re-fire.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(200));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
+        assert_eq!(app.world().resource::<PendingExplosions>().events.len(), 1);
+    }
+
+    /// Bolts without a `DelayedHit` (hitscan beams / build-lasers come
+    /// through here too for the width-axis rewrite) must NOT touch
+    /// `DamageQueue` or `PendingExplosions` — their damage path settles
+    /// at fire time via combat's `PendingDamage` push.
+    #[test]
+    fn laser_bolt_without_delayed_hit_leaves_queues_empty() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .init_resource::<WeaponRegistry>()
+            .init_resource::<Assets<Mesh>>();
+
+        let mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(super::super::shared::build_billboard_quad_mesh());
+        app.world_mut().spawn((
+            LaserBolt {
+                origin: Vec3::ZERO,
+                direction: Vec3::Z,
+                total_distance: 10.0,
+                speed: 100.0,
+                max_length: 20.0,
+                thickness: 1.0,
+                elapsed: 0.0,
+                mesh: mesh_handle,
+            },
+            Transform::IDENTITY,
+        ));
+
+        // Advance well past impact.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs(1));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+
+        assert!(app.world().resource::<DamageQueue>().is_empty());
+        assert!(
+            app.world()
+                .resource::<PendingExplosions>()
+                .events
+                .is_empty()
+        );
+    }
 }

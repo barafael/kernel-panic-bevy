@@ -648,15 +648,29 @@ pub(super) fn tick_ceg_delayed_spawns(
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
-/// Evaluate `base + (signed random in [-1, 1]) * spread / 2` so the
-/// authored `spread` reads as a full half-range (matching Spring's
-/// conventional interpretation of the paired `*Spread` fields).
+/// Evaluate `base + uniform(0, 1) * spread` — upstream's *exact*
+/// convention per `CSimpleParticleSystem::Init`:
+///
+/// ```text
+/// p.size = particleSize + guRNG.NextFloat() * particleSizeSpread;
+/// p.decayrate = 1.0 / (particleLife + guRNG.NextFloat() * particleLifeSpread);
+/// ```
+///
+/// I had this as `base + signed[-1, 1] * spread * 0.5` — same mean,
+/// but a *symmetric* range. For `oldskool`'s squarecloud with
+/// `particleSize=14 spread=10` the symmetric form produced sizes in
+/// `[9, 19]`; upstream gives `[14, 24]` — so my particles averaged
+/// ~14 elmos instead of ~19, visibly smaller. The same regression on
+/// `particleLife=12 spread=24` meant particles lived 0–24 frames
+/// (mean 12) instead of 12–36 (mean 24) — the impact cloud dissolved
+/// twice as fast as authored. Fixed by matching upstream's one-sided
+/// range verbatim.
 fn eval_with_spread(base: &CegExpr, spread: &CegExpr, rng: &mut u32, mut ctx: EvalCtx) -> f32 {
     ctx.rand01 = next_unit(rng);
     let b = base.eval(&ctx);
     ctx.rand01 = next_unit(rng);
     let s = spread.eval(&ctx);
-    b + next_signed(rng) * s * 0.5
+    b + next_unit(rng) * s
 }
 
 fn perpendicular_to(dir: Vec3, rand: f32) -> Vec3 {
@@ -812,14 +826,31 @@ mod tests {
     }
 
     #[test]
-    fn eval_with_spread_within_half_range_of_base() {
-        // base=100 spread=40 → result must land in [80, 120].
+    fn eval_with_spread_matches_upstream_one_sided_range() {
+        // Upstream's `particleSize + rand(0, 1) * spread` puts the
+        // result in `[base, base + spread)`. base=100 spread=40 →
+        // result in [100, 140). The old symmetric impl gave [80, 120]
+        // instead, shaving 20% off the average and 40% off the upper
+        // tail — the root of the "explosions are way too small" bug.
         let base = CegExpr::parse("100");
         let spread = CegExpr::parse("40");
         let mut rng = 0xFEED_FACEu32;
-        for _ in 0..1000 {
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        let mut sum = 0.0;
+        const N: usize = 4000;
+        for _ in 0..N {
             let v = eval_with_spread(&base, &spread, &mut rng, EvalCtx::default());
-            assert!((80.0..=120.0).contains(&v), "out of range: {v}");
+            assert!((100.0..=140.0).contains(&v), "out of range: {v}");
+            min = min.min(v);
+            max = max.max(v);
+            sum += v;
         }
+        let mean = sum / N as f32;
+        // Mean should be ~120 (midpoint of [100, 140)) and min/max
+        // must hug the bounds within a handful of buckets.
+        assert!((mean - 120.0).abs() < 2.0, "mean = {mean}, expected ~120");
+        assert!(min < 102.0, "min = {min}, expected near 100");
+        assert!(max > 138.0, "max = {max}, expected near 140");
     }
 }

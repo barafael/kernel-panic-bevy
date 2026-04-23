@@ -168,6 +168,7 @@ pub fn tick_construction(
             // Builder BuildLaser also skips the muzzle flash CEG — see
             // the same-named call site in production.rs.
             muzzle_ceg: None,
+            delayed_hit: None,
         });
 
         let build_time = unit_registry.build_time(constructing.kind);

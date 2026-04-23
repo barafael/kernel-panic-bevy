@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::f32::consts::PI;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -78,14 +77,6 @@ pub struct CobAnimator {
     pub move_speeds: Vec<[f32; 3]>,
     /// Spin velocity per piece per axis (radians/sec).
     pub spin_speeds: Vec<[f32; 3]>,
-    /// COB linear-constant scale for this script. The .bos compiler
-    /// multiplies every `[N]` literal by this constant; we divide by it
-    /// here to recover N elmos. Spring's *engine* default is 65536, but
-    /// the Kernel Panic project's *Scriptor* default was 163840 (only
-    /// pointer/hole opted out — they have a header comment overriding
-    /// the constant back to 65536). So pick the right per-unit value at
-    /// spawn time and stash it here.
-    pub linear_constant: f32,
 }
 
 /// Marks a Bevy entity as an animated piece child.
@@ -134,6 +125,18 @@ impl MuzzlePiece {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct GunbasePiece(pub usize);
 
+/// Cached COB piece index for the turret yaw pivot (`aimer`). Set at
+/// spawn when the unit's script declares the piece. Upstream units
+/// with an `aimer` (byte, wormOLD) use it as the rotation target for
+/// `AimWeapon1(h,p)` — heading `h` applied to the aimer's Y axis
+/// swings every descendant (rotor → blades → bp0..3) around so the
+/// firing piece ends up on the target bearing. Without this, the
+/// firing corner stays at the model's authored heading=0 and the
+/// bolt visibly emerges perpendicular to the target line. Read by
+/// `aim_weapons_system` to drive the rotation.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct AimerPiece(pub usize);
+
 /// Cached COB piece index for the Connection's hatch (`body`). Set at
 /// spawn when the unit's script declares the piece; read every frame by
 /// `animate_connection_hatch` so it doesn't re-scan the piece-name table.
@@ -155,17 +158,71 @@ pub fn load_cob_cached(script: &str, cache: &mut CobFileCache) -> Option<Arc<Cob
         .clone()
 }
 
-/// Spring uses "angular units" where 65536 = 360°. Convert to radians.
+/// Spring's fixed runtime scale for both linear and angular values in
+/// a compiled `.cob`. **Always 65536**, never per-unit — see
+/// [`spring_cob`]'s crate-level docs for the full rationale and
+/// upstream citations (`rts/Sim/Units/Scripts/CobInstance.h:20`).
+///
+/// The per-`UnitKind` divisor table that used to live in
+/// `content::definitions` was a misread of the Scriptor comment in
+/// `byte.bos`/`bit.bos`/etc. (`// To be compiled with a linear
+/// constant of 163840`). That's a compiler directive, not a runtime
+/// divisor. Dividing by 163840 produced 2.5×-too-small animations
+/// (blade spacing, base lift, launcher arm) on every unit whose
+/// `.bos` was compiled at 163840.
+const COBSCALE: f32 = spring_cob::COBSCALE as f32;
+
+/// TA-angle units (1 revolution = `COBSCALE` = 65536) → radians.
+/// Matches upstream's `TAANG2RAD = π / COBSCALE_HALF`
+/// (`CobInstance.h:25`).
 fn spring_angle_to_radians(angle: i32) -> f32 {
-    (angle as f32) / 65536.0 * 2.0 * PI
+    (angle as f32) * std::f32::consts::TAU / COBSCALE
 }
 
-/// Spring linear units: the .bos `[N]` literal is compiled to
-/// `N * linear_constant`, so dividing by the same constant recovers N
-/// elmos. The constant is per-script (Kernel Panic's project default
-/// is 163840; pointer.bos and hole.bos override it back to 65536).
-fn spring_linear_to_elmos(val: i32, linear_constant: f32) -> f32 {
-    val as f32 / linear_constant
+/// COB linear value (Scriptor bakes source `[N]` → `N * scriptor_constant`)
+/// → elmos, via `value * COBSCALE_INV` exactly like
+/// `CobInstance.h:131`'s `Move`/`MoveNow` dispatch. Do not add a
+/// per-unit divisor here — see [`COBSCALE`].
+fn spring_linear_to_elmos(val: i32) -> f32 {
+    val as f32 / COBSCALE
+}
+
+#[cfg(test)]
+mod cobscale_regression {
+    //! Regression guards for the "byte animations are 2.5× too small"
+    //! bug. If anyone adds a per-unit divisor back, these fail.
+    //! The companion tests live in `spring-cob::cobscale_tests` —
+    //! they pin the constant itself; these pin the helpers.
+
+    use super::{COBSCALE, spring_angle_to_radians, spring_linear_to_elmos};
+
+    #[test]
+    fn linear_helper_uses_cobscale_65536() {
+        assert!((COBSCALE - 65536.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn byte_bos_move_blade0_bracket_4_recovers_10_elmos() {
+        // byte.bos: `move blade0 to z-axis [4] speed [16];`
+        // Compiled with Scriptor linear=163840 per the header
+        // comment, so `[4]` is 4 * 163840 = 655360 in bytecode.
+        // Upstream runtime: 655360 / 65536 = 10.0 elmos effective.
+        assert_eq!(spring_linear_to_elmos(4 * 163840), 10.0);
+    }
+
+    #[test]
+    fn standard_scriptor_bracket_1_recovers_1_elmo() {
+        // Most units (pointer, hole, …) use Scriptor's default 65536.
+        // Source `[1]` → 65536 in bytecode → 1.0 elmo at runtime.
+        assert_eq!(spring_linear_to_elmos(65536), 1.0);
+    }
+
+    #[test]
+    fn angle_helper_half_circle_is_pi() {
+        // Spring's TA-angle unit: 65536 = 2π. Half circle = 32768.
+        let half_circle = spring_angle_to_radians(32768);
+        assert!((half_circle - std::f32::consts::PI).abs() < 1e-3);
+    }
 }
 
 /// Turn/TurnNow destinations map 1:1 between Spring and Bevy on X/Y; only
@@ -312,10 +369,7 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        let pos = spring_linear_to_elmos(
-                            cobwtf_move_axis(*axis, *destination),
-                            animator.linear_constant,
-                        );
+                        let pos = spring_linear_to_elmos(cobwtf_move_axis(*axis, *destination));
                         animator.piece_translations[p][a] = pos;
                         animator.target_translations[p][a] = pos;
                         animator.move_speeds[p][a] = 0.0;
@@ -330,12 +384,9 @@ pub fn animation_system(
                     let p = *piece as usize;
                     let a = *axis as usize;
                     if p < animator.piece_translations.len() && a < 3 {
-                        animator.target_translations[p][a] = spring_linear_to_elmos(
-                            cobwtf_move_axis(*axis, *destination),
-                            animator.linear_constant,
-                        );
-                        animator.move_speeds[p][a] =
-                            spring_linear_to_elmos(speed.abs(), animator.linear_constant);
+                        animator.target_translations[p][a] =
+                            spring_linear_to_elmos(cobwtf_move_axis(*axis, *destination));
+                        animator.move_speeds[p][a] = spring_linear_to_elmos(speed.abs());
                     }
                 }
                 AnimCommand::Spin {

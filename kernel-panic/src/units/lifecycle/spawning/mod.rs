@@ -341,10 +341,28 @@ pub fn spawn_homebases(
         }
     }
 
-    info!(
-        "Spawned starter roster: {} buildings, {} mobile units across 3 factions ({} datavent-buildings skipped: no vents left)",
-        total_buildings, total_units, skipped_for_no_vent,
-    );
+    // Only mention skipped datavent-buildings when there actually
+    // were any — the old unconditional "(0 datavent-buildings skipped:
+    // no vents left)" tail was misleading: it read as if the map was
+    // out of vents whether or not anything had been skipped. In the
+    // common case (every Socket / Terminal / Window / Port / Obelisk
+    // / Firewall found a vent), the tail is simply omitted.
+    if skipped_for_no_vent > 0 {
+        info!(
+            "Spawned starter roster: {} buildings, {} mobile units across {} factions ({} datavent-buildings skipped: no free vents)",
+            total_buildings,
+            total_units,
+            ROSTERS.len(),
+            skipped_for_no_vent,
+        );
+    } else {
+        info!(
+            "Spawned starter roster: {} buildings, {} mobile units across {} factions",
+            total_buildings,
+            total_units,
+            ROSTERS.len(),
+        );
+    }
 }
 
 /// Find the unclaimed vent closest to `origin`, or `None` if every
@@ -466,6 +484,20 @@ pub fn spawn_unit(
     commands
         .entity(unit_entity)
         .insert(crate::units::mechanics::cloak::Spotted);
+    // Pointer is the only upstream unit whose Deployable cycle is
+    // movement-gated ("drive closed, sit open"). Byte *does* have
+    // `Open()` / `Close()` COB routines, but upstream's `byte.bos`
+    // only calls `Open` from `AimWeapon1` (first aim → unfold →
+    // `isOpen=1`) and `Close` on a 3-second idle timeout — byte
+    // does NOT pack just because it's moving. I briefly put Byte
+    // into the generic Deployable list; that made it close on every
+    // move order and never re-open in time to fire.
+    //
+    // Instead, kick the byte's `Open` script once right after
+    // `Create`: the COB physically fans the blades out, the visual
+    // reads as "deployed" from spawn, and combat stays ungated so
+    // firing happens when combat decides, not when a deploy state
+    // machine decides.
     if matches!(kind, UnitKind::Pointer) {
         commands.entity(unit_entity).insert(Deployable::initial());
     }
@@ -562,6 +594,30 @@ pub fn spawn_unit(
             let mut vm = CobVm::new(&cob);
             vm.start_script(&cob, "Create", &[]);
 
+            // Byte has `Open()` / `Close()` scripts that fan its
+            // octaeder blades out and in. Upstream triggers `Open`
+            // from `AimWeapon1`; we don't run COB-side aim, so kick
+            // the script here so the visual is "deployed" from the
+            // moment the unit is visible. `start_script` silently
+            // no-ops when the named entry point is missing on other
+            // kinds, so this is safe to gate on kind without a
+            // lookup.
+            //
+            // Block firing for `BYTE_OPEN_DURATION` so the 4-shot
+            // MegaBeam burst can't leave while the blades are still
+            // folded together. Upstream's `byte.bos` enforces the
+            // same: `AimWeapon1` returns 0 (not ready) until
+            // `isOpen=1`. Our COB VM doesn't surface script statics
+            // so the gate is host-side via [`OpeningDelay`].
+            if matches!(kind, UnitKind::Byte) {
+                vm.start_script(&cob, "Open", &[]);
+                commands
+                    .entity(unit_entity)
+                    .insert(crate::units::combat::OpeningDelay {
+                        remaining: crate::units::combat::BYTE_OPEN_DURATION,
+                    });
+            }
+
             // Resolve cached piece components before moving `cob` into
             // CobAnimator. MuzzlePiece::resolve owns the per-unit piece-
             // name convention for weapon emit points; gunbase/body are
@@ -574,21 +630,38 @@ pub fn spawn_unit(
                     .position(|n| n.eq_ignore_ascii_case(name))
             };
             let gunbase_idx = piece_index("gunbase");
+            let aimer_idx = piece_index("aimer");
             let hatch_idx = piece_index("body");
 
+            // Aimer-bearing units (currently only byte) need their aimer
+            // pre-tipped into the firing pose at spawn — upstream's
+            // `AimWeapon1` puts aimer X at `(<-90>-p)`, which at p=0 means
+            // -π/2. Without this seed, the bp0..bp3 firing points sit at
+            // their authored offset (0, -48, 0) directly *under* the unit
+            // center; the first shot of the unit's life would emit from
+            // ground level under the byte while the host-side aim slews
+            // up to the firing pose. Seeding both `piece_rotations` and
+            // `target_rotations` (rather than relying on
+            // `aim_weapons_system` to set the target on first AimTarget)
+            // means the byte stands ready-to-fire from frame zero.
+            let mut piece_rotations = vec![[0.0; 3]; cob_piece_count];
+            let mut target_rotations = vec![[0.0; 3]; cob_piece_count];
+            if let Some(idx) = aimer_idx {
+                piece_rotations[idx][0] = -std::f32::consts::FRAC_PI_2;
+                target_rotations[idx][0] = -std::f32::consts::FRAC_PI_2;
+            }
             commands.entity(unit_entity).insert(CobAnimator {
                 vm,
                 cob,
                 piece_entities: cob_entities,
                 piece_base_offsets: cob_offsets,
-                piece_rotations: vec![[0.0; 3]; cob_piece_count],
+                piece_rotations,
                 piece_translations: vec![[0.0; 3]; cob_piece_count],
-                target_rotations: vec![[0.0; 3]; cob_piece_count],
+                target_rotations,
                 turn_speeds: vec![[0.0; 3]; cob_piece_count],
                 target_translations: vec![[0.0; 3]; cob_piece_count],
                 move_speeds: vec![[0.0; 3]; cob_piece_count],
                 spin_speeds: vec![[0.0; 3]; cob_piece_count],
-                linear_constant: kind.cob_linear_constant(),
             });
 
             if let Some(muzzle) = muzzle_idx {
@@ -598,6 +671,11 @@ pub fn spawn_unit(
                 commands
                     .entity(unit_entity)
                     .insert(crate::units::assets::animation::GunbasePiece(idx));
+            }
+            if let Some(idx) = aimer_idx {
+                commands
+                    .entity(unit_entity)
+                    .insert(crate::units::assets::animation::AimerPiece(idx));
             }
             if kind == UnitKind::Connection
                 && let Some(idx) = hatch_idx

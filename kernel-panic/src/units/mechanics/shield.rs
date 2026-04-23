@@ -9,6 +9,16 @@
 //!
 //! Upstream's `shieldpower=0` encodes an infinite shield (homebase,
 //! minifac) — we model that as `None` in `ShieldState::current_power`.
+//!
+//! **Upstream only activates these shields in ONS gamemode.**
+//! `anydefs_post.lua` unconditionally deletes `homebaseshieldgood` /
+//! `minifacshieldgood` from every FBI when the `ons` mod option is
+//! off or absent — and the default non-ONS `kernel_panic.modoptions`
+//! leaves it off. Without that gating, every homebase / minifac /
+//! firewall / obelisk / terminal becomes permanently invincible
+//! because they all ship with `shieldpower=0` (infinite) shields.
+//! [`OnsMode`] is the runtime toggle; [`attach_shields`] is gated on
+//! it and stays a no-op for the default sandbox game.
 
 use bevy::prelude::*;
 
@@ -104,14 +114,38 @@ pub fn regen_shields(time: Res<Time>, mut query: Query<&mut ShieldState>) {
     }
 }
 
-/// Any shielded unit that doesn't yet have a `ShieldState`
-/// gets one this frame. Runs once per spawned entity; `Added<UnitType>`
-/// filters keep the work proportional to actual spawns.
+/// Runtime toggle for ONS mode.
+///
+/// Upstream's `anydefs_post.lua` scrubs every shielded FBI's weapon
+/// slots back to `BuildLaser` when `Spring.GetModOptions()["ons"]`
+/// is `nil` or `"0"` — i.e. a normal game. Only the dedicated ONS
+/// gametype keeps the `homebaseshieldgood` / `minifacshieldgood`
+/// weapons attached.
+///
+/// Defaults to off to match the standard sandbox we ship. Flip it
+/// on if/when an ONS scenario loads and needs the indestructible
+/// homebase / minifac shields.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub struct OnsMode {
+    pub enabled: bool,
+}
+
+/// Any shielded unit that doesn't yet have a `ShieldState` gets one
+/// this frame — **but only when `OnsMode::enabled` is true**. See the
+/// module-level note: without ONS, upstream removes the shield weapons
+/// outright, and our shield pool is `shieldpower=0` → infinite, so
+/// every homebase / socket / terminal / firewall / obelisk becomes
+/// unkillable if we unconditionally attach one. `Added<UnitType>`
+/// keeps the scan proportional to actual spawns.
 pub fn attach_shields(
     new_units: Query<(Entity, &UnitType), Added<UnitType>>,
     weapons: Res<WeaponRegistry>,
+    ons: Res<OnsMode>,
     mut commands: Commands,
 ) {
+    if !ons.enabled {
+        return;
+    }
     for (entity, unit) in &new_units {
         if let Some(state) = shield_state_for(unit.0, &weapons) {
             commands.entity(entity).insert(state);

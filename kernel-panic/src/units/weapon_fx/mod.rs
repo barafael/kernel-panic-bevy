@@ -9,7 +9,7 @@ mod shared;
 mod spawn;
 mod tick;
 
-pub use shared::{AttackEvent, ExplosionEvent, PendingAttacks, PendingExplosions};
+pub use shared::{AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, PendingExplosions};
 
 use bevy::prelude::*;
 
@@ -41,9 +41,12 @@ impl Plugin for WeaponFxPlugin {
             .add_systems(
                 Update,
                 (
+                    // tick fires `DelayedHit` into `PendingExplosions`;
+                    // the explosion spawner must follow it in the chain
+                    // or impact CEGs land a frame late.
                     spawn::spawn_weapon_visuals,
-                    spawn::spawn_pending_explosions,
                     tick::tick_weapon_fx,
+                    spawn::spawn_pending_explosions,
                     ceg::tick_ceg_particles,
                     ceg::tick_ceg_flames,
                     ceg::tick_ceg_delayed_spawns,

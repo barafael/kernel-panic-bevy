@@ -43,6 +43,7 @@ impl Plugin for UnitsPlugin {
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
             .init_resource::<combat::VirusSpawnQueue>()
+            .init_resource::<shield::OnsMode>()
             .init_resource::<command_fire::MineSpawnQueue>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<deploy::DeployEvent>()
@@ -94,6 +95,7 @@ impl Plugin for UnitsPlugin {
                     (
                         spatial::rebuild_spatial_index,
                         combat::tick_deploy_state,
+                        combat::tick_opening_delay,
                         combat::tick_kamikaze,
                         combat::combat_system,
                         combat::attack_ground_system,

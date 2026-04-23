@@ -6,7 +6,7 @@ pub mod mesh;
 use bevy::prelude::*;
 
 use geovent::{
-    GeoventAssets, VentClaimReleaseTimer, emit_geovent_smoke, release_stale_vent_claims,
+    GeoventAssets, VentClaimReleaseTimer, emit_geovent_smoke, reconcile_vent_claims,
     tick_geovent_smoke,
 };
 
@@ -19,7 +19,7 @@ impl Plugin for TerrainPlugin {
             .add_systems(
                 Update,
                 (
-                    release_stale_vent_claims,
+                    reconcile_vent_claims,
                     emit_geovent_smoke,
                     tick_geovent_smoke.after(emit_geovent_smoke),
                 ),

@@ -86,8 +86,3 @@ pub enum Opcode {
     Attach = 0x10083000_u32 as i32,
     Drop = 0x10084000_u32 as i32,
 }
-
-/// Axis indices used in MOVE/TURN/SPIN operands.
-pub const AXIS_X: i32 = 0;
-pub const AXIS_Y: i32 = 1;
-pub const AXIS_Z: i32 = 2;

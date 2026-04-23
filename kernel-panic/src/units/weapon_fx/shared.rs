@@ -22,11 +22,45 @@ use bevy::prelude::*;
 /// pulses, where the sparkle at the target side is the primary fx).
 /// When `Some`, `spawn_weapon_visuals` replays that CEG at the muzzle
 /// instead of the generic coloured sphere.
+///
+/// `delayed_hit` is populated for traveling weapons (projectiles,
+/// laser bolts) where the damage + impact visual should only fire
+/// when the shell actually reaches the target. Hitscan weapons
+/// (beams, melee) leave it `None` — their damage is queued in
+/// `DamageQueue` directly and the impact CEG spawns at fire time.
+/// See [`DelayedHit`] for the component attached to the resulting
+/// visual entity.
 pub struct AttackEvent {
     pub attacker_pos: Vec3,
     pub target_pos: Vec3,
     pub weapon_name: Cow<'static, str>,
     pub muzzle_ceg: Option<Cow<'static, str>>,
+    pub delayed_hit: Option<DelayedHitInfo>,
+}
+
+/// Damage bookkeeping moved onto a traveling visual. The fields match
+/// [`crate::units::combat::PendingDamage`] so `tick_weapon_fx` can
+/// translate a `DelayedHit` verbatim onto `DamageQueue` on impact.
+#[derive(Clone, Debug)]
+pub struct DelayedHitInfo {
+    pub target: Option<Entity>,
+    pub attacker: Entity,
+    pub attacker_distance: f32,
+}
+
+/// Attached to every traveling-projectile / laser-bolt visual that
+/// owes a hit. On the frame the visual's lead reaches the target,
+/// `tick_weapon_fx` drains it into `DamageQueue` + `PendingExplosions`
+/// and removes this component — once-and-done. The impact position
+/// and explosion parameters (rgb / AoE / CEG name) are recovered from
+/// the visual's geometry and the `WeaponRegistry` at trigger time, so
+/// this component carries only what can't be re-derived.
+#[derive(Component)]
+pub(super) struct DelayedHit {
+    pub target: Option<Entity>,
+    pub attacker: Entity,
+    pub weapon: Cow<'static, str>,
+    pub attacker_distance: f32,
 }
 
 /// Buffer written by the combat system, drained by visual systems.

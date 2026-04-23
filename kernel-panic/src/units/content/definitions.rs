@@ -197,29 +197,6 @@ impl UnitKind {
         format!("{}.cob", self.unitname())
     }
 
-    /// Linear constant baked into the .cob bytecode by Scriptor when
-    /// the .bos was compiled. Every `[N]` literal in the source gets
-    /// multiplied by this constant; the animation system divides by it
-    /// to recover N elmos.
-    ///
-    /// Per upstream KP's `Kernel_Panic_readme.txt`: almost all BOS were
-    /// compiled with 65536 (Spring's engine default). The exceptions —
-    /// compiled with 163840 — are Kernel, Socket, Assembler, Bit, Byte,
-    /// Logic Bomb, Bad Block (plus ExpScout and Rock from the expansion,
-    /// which aren't in our UnitKind).
-    pub fn cob_linear_constant(self) -> f32 {
-        match self {
-            UnitKind::Kernel
-            | UnitKind::Socket
-            | UnitKind::Assembler
-            | UnitKind::Bit
-            | UnitKind::Byte
-            | UnitKind::LogicBomb
-            | UnitKind::BadBlock => 163840.0,
-            _ => 65536.0,
-        }
-    }
-
     /// "Small building" per upstream `kpunittypes.lua`: the on-datavent
     /// factories, Firewall, Terminal, Obelisk. Used by Kernel Boost and
     /// Flow speed scaling (and anything else that rewards controlling
