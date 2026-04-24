@@ -1,6 +1,7 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
 //! projectile arcs, drift + billboard build-sparkles, despawn at end of life.
 
+use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
 use super::shared::{
@@ -92,10 +93,7 @@ pub(super) fn tick_weapon_fx(
             let br = beam.start - offset;
             let tr = beam.start + offset;
             let tl = beam.end + offset;
-            mesh.insert_attribute(
-                Mesh::ATTRIBUTE_POSITION,
-                vec![bl.to_array(), br.to_array(), tr.to_array(), tl.to_array()],
-            );
+            rewrite_quad_positions(mesh, bl, br, tr, tl);
         }
     }
 
@@ -164,10 +162,7 @@ pub(super) fn tick_weapon_fx(
             let br = tail_pos - offset;
             let tr = tail_pos + offset;
             let tl = lead_pos + offset;
-            mesh.insert_attribute(
-                Mesh::ATTRIBUTE_POSITION,
-                vec![bl.to_array(), br.to_array(), tr.to_array(), tl.to_array()],
-            );
+            rewrite_quad_positions(mesh, bl, br, tr, tl);
         }
     }
 
@@ -377,10 +372,16 @@ fn rewrite_trail_mesh(
         return;
     };
     let expected = TRAIL_SAMPLE_COUNT * 2;
+    let denom = (samples.len().saturating_sub(1).max(1)) as f32;
 
-    let mut positions = Vec::with_capacity(expected);
-    let mut uvs = Vec::with_capacity(expected);
-
+    // Pre-allocated at spawn (`build_projectile_trail`); mutate in place so
+    // we don't allocate `expected × 12` bytes per live projectile per frame.
+    let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    else {
+        return;
+    };
+    let mut write = 0usize;
     for (i, sample) in samples.iter().enumerate() {
         let to_cam = (cam_pos - *sample).normalize_or(Vec3::Y);
         // Tangent: the direction the ribbon runs at this sample. Use
@@ -394,25 +395,50 @@ fn rewrite_trail_mesh(
             Vec3::Z
         };
         let right = tangent.cross(to_cam).normalize_or(Vec3::X) * half_width;
-        let left = *sample - right;
-        let right_pos = *sample + right;
-        positions.push(left.to_array());
-        positions.push(right_pos.to_array());
-        let u = i as f32 / (samples.len().saturating_sub(1).max(1)) as f32;
-        uvs.push([u, 0.0]);
-        uvs.push([u, 1.0]);
+        positions[write] = (*sample - right).to_array();
+        positions[write + 1] = (*sample + right).to_array();
+        write += 2;
+    }
+    // Pad any unused tail slots with the last valid vertex so the GPU sees
+    // a stable buffer size (trail shorter than the ring buffer capacity).
+    let pad = positions
+        .get(write.saturating_sub(1))
+        .copied()
+        .unwrap_or([0.0; 3]);
+    for slot in positions[write..expected].iter_mut() {
+        *slot = pad;
     }
 
-    // Strip vertex count is fixed at spawn time; if we're somehow
-    // short (e.g. empty samples) pad with degenerate vertices at the
-    // head so the GPU sees a consistent buffer size.
-    while positions.len() < expected {
-        positions.push(positions.last().copied().unwrap_or([0.0, 0.0, 0.0]));
-        uvs.push([1.0, 0.0]);
+    // UVs also need rewriting each frame because `samples.len()` determines
+    // the `u` gradient. Same in-place pattern.
+    if let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0) {
+        let mut write = 0usize;
+        for i in 0..samples.len() {
+            let u = i as f32 / denom;
+            uvs[write] = [u, 0.0];
+            uvs[write + 1] = [u, 1.0];
+            write += 2;
+        }
+        for slot in uvs[write..expected].iter_mut() {
+            *slot = [1.0, 0.0];
+        }
     }
+}
 
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+/// Rewrite a 4-vertex quad's positions in place (shared by beam + bolt
+/// paths). Uses `Mesh::attribute_mut` to mutate the existing
+/// `Float32x3` buffer instead of allocating a fresh `Vec` every frame.
+/// The vertex order matches [`super::shared::build_billboard_quad_mesh`].
+fn rewrite_quad_positions(mesh: &mut Mesh, bl: Vec3, br: Vec3, tr: Vec3, tl: Vec3) {
+    if let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+        && positions.len() >= 4
+    {
+        positions[0] = bl.to_array();
+        positions[1] = br.to_array();
+        positions[2] = tr.to_array();
+        positions[3] = tl.to_array();
+    }
 }
 
 #[cfg(test)]

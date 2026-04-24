@@ -82,6 +82,45 @@ const LOS_MUZZLE_HEIGHT: f32 = 16.0;
 /// revolution is 65536. Conversion to radians for aim-offset math.
 const SHORT_ANGLE_TO_RAD: f32 = std::f32::consts::TAU / 65536.0;
 
+/// Seconds between full spatial scans for a unit that already has a
+/// cached target. Mirrors Spring's `CWeapon::lastTargetRetry + 65`
+/// guard (`rts/Sim/Weapons/Weapon.cpp`) which re-scans at most every
+/// ~2.17 s (65 sim frames @ 30 fps). We tighten it to 0.25 s so new
+/// threats are picked up within a few frames while still amortising
+/// the spatial sweep ~15× at 60 fps. Cache is invalidated immediately
+/// whenever the cached target dies or leaves weapon range.
+const TARGET_RESCAN_INTERVAL: f32 = 0.25;
+
+/// Cached auto-target for an armed unit. While present and the target
+/// is still alive + in-range, `combat_system` skips its spatial
+/// `query_radius` sweep — the dominant per-frame cost in big battles.
+#[derive(Component)]
+pub struct TargetCache {
+    pub target: Entity,
+    pub expires_at: f32,
+}
+
+/// Grouped queries for target caching, bundled into one `SystemParam`
+/// so `combat_system` stays under Bevy's 16-param limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct TargetCachePick<'w, 's> {
+    pub cache: Query<'w, 's, &'static TargetCache>,
+    pub alive: Query<'w, 's, &'static GlobalTransform, (With<UnitType>, Without<Dying>)>,
+}
+
+/// Grouped piece-lookup queries for muzzle position, body animator,
+/// piece world transforms, and the `GunbasePiece` / `AimerPiece`
+/// marker components. Lets the combat systems stay under Bevy's
+/// 16-param system limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct PieceLookup<'w, 's> {
+    pub muzzle: Query<'w, 's, &'static MuzzlePiece>,
+    pub animator: Query<'w, 's, &'static CobAnimator>,
+    pub piece_gtf: Query<'w, 's, &'static GlobalTransform, Without<UnitType>>,
+    pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
+    pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
+}
+
 /// Tracks time until the unit can fire again.
 #[derive(Component)]
 pub struct AttackCooldown {
@@ -162,11 +201,8 @@ pub fn combat_system(
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
     heightmap: Option<Res<Heightmap>>,
-    muzzle_q: Query<&MuzzlePiece>,
-    animator_q: Query<&CobAnimator>,
-    piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
-    gunbase_q: Query<&crate::units::assets::animation::GunbasePiece>,
-    aimer_q: Query<&crate::units::assets::animation::AimerPiece>,
+    pieces: PieceLookup,
+    target_pick: TargetCachePick,
     mut rng: Local<u32>,
 ) {
     if *rng == 0 {
@@ -175,6 +211,7 @@ pub fn combat_system(
         *rng = 0xDEADBEEF;
     }
     let dt = time.delta_secs();
+    let now = time.elapsed_secs();
 
     // Tick cooldowns.
     for mut cd in &mut cooldowns {
@@ -194,8 +231,6 @@ pub fn combat_system(
         opening_delay,
     ) in &attackers
     {
-        use crate::units::content::definitions::UnitKind;
-        let is_bb = matches!(unit_type.0, UnitKind::Byte | UnitKind::Bit);
         // Deployable units (Pointer) can only fire while fully open. They
         // can still *aim* while opening (so the gun is pointed when Open
         // completes), but firing is gated on the open state.
@@ -206,14 +241,6 @@ pub fn combat_system(
         // 4-shot MegaBeam burst can't leave while firing positions are
         // still folded together at the unit center.
         let fire_blocked_by_opening = opening_delay.is_some_and(|d| d.remaining > 0.0);
-        if is_bb && (fire_blocked_by_deploy || fire_blocked_by_opening) {
-            info!(
-                "AUTODBG {:?} deploy_state={:?} opening_remaining={:?} blocks fire",
-                unit_type.0,
-                deployable.map(|d| d.state),
-                opening_delay.map(|d| d.remaining),
-            );
-        }
 
         let weapon_name = unit_registry.weapon(unit_type.0);
 
@@ -263,123 +290,75 @@ pub fn combat_system(
         // filter as a per-kind gate so future units can join the
         // "targets mines only" club without touching combat_system.
         let targets_mines_only = unit_type.0.targets_mines_only();
-        let mut best: Option<(Entity, Vec3, f32)> = None;
-        let mut dbg_saw = 0u32;
-        let mut dbg_dead = 0u32;
-        let mut dbg_same_team = 0u32;
-        let mut dbg_same_faction = 0u32;
-        let mut dbg_flying_skip = 0u32;
-        let mut dbg_mines_skip = 0u32;
-        let mut dbg_out_of_range = 0u32;
-        let mut dbg_los_fail = 0u32;
-        let mut dbg_nearest_enemy_dist_sq = f32::INFINITY;
-        let mut dbg_nearest_enemy_kind: Option<crate::units::content::definitions::UnitKind> = None;
-        spatial.query_radius(attacker_pos, range, |candidate| {
-            if is_bb {
-                dbg_saw += 1;
-            }
-            if !candidate.hp_positive {
-                if is_bb {
-                    dbg_dead += 1;
+
+        // Try the cached target first. While it's still alive, in
+        // range, and the cache hasn't aged out, we skip the spatial
+        // sweep entirely. This mirrors Spring's `lastTargetRetry`
+        // guard (see `TARGET_RESCAN_INTERVAL`).
+        let mut best: Option<(Entity, Vec3, f32)> = target_pick
+            .cache
+            .get(entity)
+            .ok()
+            .filter(|cache| cache.expires_at > now)
+            .and_then(|cache| {
+                let gtf = target_pick.alive.get(cache.target).ok()?;
+                let pos = gtf.translation();
+                let dist_sq = attacker_pos.distance_squared(pos);
+                (dist_sq <= range_sq).then_some((cache.target, pos, dist_sq))
+            });
+
+        if best.is_none() {
+            spatial.query_radius(attacker_pos, range, |candidate| {
+                if !candidate.hp_positive {
+                    return;
                 }
-                return;
-            }
-            if candidate.team == attacker_team.0 {
-                if is_bb {
-                    dbg_same_team += 1;
+                if candidate.team == attacker_team.0 || candidate.faction == *attacker_faction {
+                    return;
                 }
-                return;
-            }
-            if candidate.faction == *attacker_faction {
-                if is_bb {
-                    dbg_same_faction += 1;
+                if skip_flying && candidate.is_flying {
+                    return;
                 }
-                return;
-            }
-            // This candidate is a VALID ENEMY up to now — track the
-            // closest one regardless of range/flying/LOS so the log
-            // shows "there IS an enemy 400 elmos away, but my range
-            // is 256" rather than just "best=None".
-            if is_bb {
-                let d = attacker_pos.distance_squared(candidate.pos);
-                if d < dbg_nearest_enemy_dist_sq {
-                    dbg_nearest_enemy_dist_sq = d;
-                    dbg_nearest_enemy_kind = Some(candidate.kind);
+                if targets_mines_only && !candidate.kind.is_minekiller_target() {
+                    return;
                 }
-            }
-            if skip_flying && candidate.is_flying {
-                if is_bb {
-                    dbg_flying_skip += 1;
+                let dist_sq = attacker_pos.distance_squared(candidate.pos);
+                if dist_sq > range_sq {
+                    return;
                 }
-                return;
-            }
-            if targets_mines_only && !candidate.kind.is_minekiller_target() {
-                if is_bb {
-                    dbg_mines_skip += 1;
+                if enforce_los
+                    && let Some(hm) = heightmap.as_deref()
+                    && !hm.has_line_of_sight(
+                        attacker_pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
+                        candidate.pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
+                        LOS_MARGIN,
+                    )
+                {
+                    return;
                 }
-                return;
-            }
-            let dist_sq = attacker_pos.distance_squared(candidate.pos);
-            if dist_sq > range_sq {
-                if is_bb {
-                    dbg_out_of_range += 1;
-                }
-                return;
-            }
-            if enforce_los
-                && let Some(hm) = heightmap.as_deref()
-                && !hm.has_line_of_sight(
-                    attacker_pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
-                    candidate.pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
-                    LOS_MARGIN,
-                )
-            {
-                if is_bb {
-                    dbg_los_fail += 1;
-                }
-                return;
-            }
-            let better = best.is_none_or(|(_, _, d)| {
-                if prefer_distant {
-                    dist_sq > d
-                } else {
-                    dist_sq < d
+                let better = best.is_none_or(|(_, _, d)| {
+                    if prefer_distant {
+                        dist_sq > d
+                    } else {
+                        dist_sq < d
+                    }
+                });
+                if better {
+                    best = Some((candidate.entity, candidate.pos, dist_sq));
                 }
             });
-            if better {
-                best = Some((candidate.entity, candidate.pos, dist_sq));
-            }
-        });
-
-        if is_bb {
-            let nearest_enemy_dist = if dbg_nearest_enemy_dist_sq.is_finite() {
-                dbg_nearest_enemy_dist_sq.sqrt()
-            } else {
-                f32::INFINITY
-            };
-            info!(
-                "AUTODBG {:?} range={} pos={:?} cd={:?} saw={} dead={} team_skip={} fac_skip={} fly_skip={} mines_skip={} oor={} los={} best={:?} nearest_enemy={:.1}@{:?}",
-                unit_type.0,
-                range,
-                attacker_pos,
-                cooldowns.get(entity).map(|c| c.remaining).ok(),
-                dbg_saw,
-                dbg_dead,
-                dbg_same_team,
-                dbg_same_faction,
-                dbg_flying_skip,
-                dbg_mines_skip,
-                dbg_out_of_range,
-                dbg_los_fail,
-                best,
-                nearest_enemy_dist,
-                dbg_nearest_enemy_kind,
-            );
         }
+
         let Some((target_entity, target_pos, _)) = best else {
-            commands.entity(entity).remove::<AimTarget>();
+            commands
+                .entity(entity)
+                .remove::<AimTarget>()
+                .remove::<TargetCache>();
             continue;
         };
+        commands.entity(entity).insert(TargetCache {
+            target: target_entity,
+            expires_at: now + TARGET_RESCAN_INTERVAL,
+        });
 
         let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
 
@@ -456,8 +435,8 @@ pub fn combat_system(
         // Gunbase pitch gate (Pointer): aim_weapons_system writes
         // `target_x = π/2 - pitch` for gunbase, matching pointer.bos's
         // `(<-90>-p)` convention. Compare against the live piece rotation.
-        if let Ok(gb) = gunbase_q.get(entity)
-            && let Ok(animator) = animator_q.get(entity)
+        if let Ok(gb) = pieces.gunbase.get(entity)
+            && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(gb.0)
         {
             let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
@@ -470,8 +449,8 @@ pub fn combat_system(
         // `target_rotations`; compare current rotations against those
         // targets. This is what `AimWeapon1`'s `wait-for-turn aimer
         // around y-axis` / `around x-axis` pair does in upstream.
-        if let Ok(ap) = aimer_q.get(entity)
-            && let Ok(animator) = animator_q.get(entity)
+        if let Ok(ap) = pieces.aimer.get(entity)
+            && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(ap.0)
             && let Some(target_rot) = animator.target_rotations.get(ap.0)
         {
@@ -527,8 +506,13 @@ pub fn combat_system(
             // `>>>>>` arrow look like it shot from the torso. Range and
             // LOS checks above intentionally still use the unit center
             // so arm-length-scale piece offsets don't flicker targeting.
-            let visual_origin =
-                muzzle_world_pos(entity, attacker_gtf, &muzzle_q, &animator_q, &piece_gtf_q);
+            let visual_origin = muzzle_world_pos(
+                entity,
+                attacker_gtf,
+                &pieces.muzzle,
+                &pieces.animator,
+                &pieces.piece_gtf,
+            );
             let muzzle_ceg = unit_registry
                 .preferred_muzzle_ceg(unit_type.0)
                 .map(|s| std::borrow::Cow::Owned(s.to_string()));
@@ -590,27 +574,12 @@ pub fn attack_ground_system(
         Without<Dying>,
     >,
     cooldowns: Query<&AttackCooldown>,
-    muzzle_q: Query<&MuzzlePiece>,
-    animator_q: Query<&CobAnimator>,
-    piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
-    gunbase_q: Query<&crate::units::assets::animation::GunbasePiece>,
-    aimer_q: Query<&crate::units::assets::animation::AimerPiece>,
+    pieces: PieceLookup,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
     for (entity, unit_type, gtf, order, deployable, opening_delay) in &attackers {
-        use crate::units::content::definitions::UnitKind;
-        let is_dbg = matches!(unit_type.0, UnitKind::Byte | UnitKind::Bit);
-        if is_dbg {
-            info!(
-                "ATKGND {:?} {:?} order_pos={:?} pos={:?}",
-                entity,
-                unit_type.0,
-                order.pos,
-                gtf.translation()
-            );
-        }
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
@@ -624,19 +593,10 @@ pub fn attack_ground_system(
         }
         let weapon_name = unit_registry.weapon(unit_type.0);
         let Some(weapon_def) = weapon_registry.get(weapon_name) else {
-            if is_dbg {
-                info!(
-                    "ATKGND {:?} no weapon_def for '{}'",
-                    unit_type.0, weapon_name
-                );
-            }
             continue;
         };
         let range = weapon_def.range;
         if range <= 0.0 {
-            if is_dbg {
-                info!("ATKGND {:?} range<=0", unit_type.0);
-            }
             continue;
         }
 
@@ -644,12 +604,6 @@ pub fn attack_ground_system(
         let dist = attacker_pos.distance(order.pos);
 
         if dist > range {
-            if is_dbg {
-                info!(
-                    "ATKGND {:?} dist={:.1} > range={:.0}, moving",
-                    unit_type.0, dist, range
-                );
-            }
             // Move toward the target, stopping just inside weapon range so
             // the unit doesn't walk through the blast zone of its own AoE.
             let dir = (order.pos - attacker_pos).normalize_or(Vec3::NEG_Z);
@@ -666,17 +620,7 @@ pub fn attack_ground_system(
         // orders, making weapons fire twice as fast as the TDF spec.
         let cd_ready = cooldowns.get(entity).map_or(true, |cd| cd.remaining <= 0.0);
         if !cd_ready {
-            if is_dbg {
-                let cd = cooldowns.get(entity).map(|c| c.remaining).unwrap_or(-1.0);
-                info!("ATKGND {:?} cooldown={:.3} > 0, skip", unit_type.0, cd);
-            }
             continue;
-        }
-        if is_dbg {
-            info!(
-                "ATKGND {:?} FIRING at {:?} dist={:.1}",
-                unit_type.0, order.pos, dist
-            );
         }
 
         // Aim at ground target so the barrel sweeps visibly.
@@ -720,8 +664,8 @@ pub fn attack_ground_system(
             0.0
         };
         let target_pitch = direct_pitch + arc_pitch;
-        if let Ok(gb) = gunbase_q.get(entity)
-            && let Ok(animator) = animator_q.get(entity)
+        if let Ok(gb) = pieces.gunbase.get(entity)
+            && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(gb.0)
         {
             let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
@@ -729,8 +673,8 @@ pub fn attack_ground_system(
                 continue;
             }
         }
-        if let Ok(ap) = aimer_q.get(entity)
-            && let Ok(animator) = animator_q.get(entity)
+        if let Ok(ap) = pieces.aimer.get(entity)
+            && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(ap.0)
             && let Some(target_rot) = animator.target_rotations.get(ap.0)
         {
@@ -742,7 +686,13 @@ pub fn attack_ground_system(
         }
 
         // Fire.
-        let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
+        let visual_origin = muzzle_world_pos(
+            entity,
+            gtf,
+            &pieces.muzzle,
+            &pieces.animator,
+            &pieces.piece_gtf,
+        );
         let muzzle_ceg = unit_registry
             .preferred_muzzle_ceg(unit_type.0)
             .map(|s| std::borrow::Cow::Owned(s.to_string()));
