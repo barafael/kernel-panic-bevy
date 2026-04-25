@@ -45,6 +45,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<shield::OnsMode>()
             .init_resource::<command_fire::MineSpawnQueue>()
+            .init_resource::<command_fire::SigTermAssets>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<deploy::DeployEvent>()
             .add_message::<network_buffer::DispatchEvent>()

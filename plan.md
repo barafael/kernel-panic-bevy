@@ -2,7 +2,7 @@
 
 ## Current State (April 2026)
 
-**6 crates, ~20.4k lines, 133 tests, all passing.**
+**6 crates, ~32k lines, 303 tests, all passing.**
 
 Working: map loading, original textures, S3O models, 3
 factions (21 unit types — Flow/Gateway added), FBI-loaded unit stats (no hardcoded
@@ -52,22 +52,25 @@ NX Flag, Obelisk's Infection gas, and Bug's FakeBugCannon will re-enter combat v
 Paralyzer weapons (DOS_Beam) accumulate on `StunCharge` instead of dealing HP damage;
 when charge ≥ max_health, the unit is `Stunned` for `paralyzetime` seconds. Stunned
 units skip combat and movement. Charge decays exponentially between hits. Bits fall
-over in one hit; Bytes need many hits. Byte closed-state armor loss on stun (plan item
-4) is deferred with the rest of the Byte-state COB integration.
+over in one hit; Bytes need many hits. Stunned Bytes lose their closed-state armor
+bonus (forced open) — see §1.6.
 
-### 1.6 Damage Modifiers — ✅ Partial
+### 1.6 Damage Modifiers — ✅ DONE
 
-Done: `avoidfriendly=1` and `noselfdamage=1` filter the splash set; FBI `DamageModifier`
+`avoidfriendly=1` and `noselfdamage=1` filter the splash set; FBI `DamageModifier`
 applied to every damage event, with values under `0.01` treated as the upstream Spring
-engine-disable hack and normalised to `1.0` (so Bits / Worms / Bytes / homebases take
-normal damage) while explicit design values like Socket/Window/Port/Firewall's `4×`
-pass through unchanged. Infection is already wired (`Infected` + `VirusSpawnQueue`).
+engine-disable hack and normalised to `1.0` while explicit design values like
+Socket/Window/Port/Firewall's `4×` pass through unchanged.
 
-Deferred: Byte closed-state armor (needs COB `SetUnitValue(ARMORED, ...)` integration
-and a closed/open state distinct from the Pointer deploy cycle). `collidefriendly` on
-projectile physics (weapons don't have projectile collision yet). Homebase + Byte
-near-immunity — if we want that gameplay back, it should come from a dedicated
-per-kind multiplier table, not the FBI engine-hack value.
+Byte closed-state armor (`byte.bos HitByWeaponId`'s 30%-when-closed rule) is wired
+host-side via `byte_armor_multiplier` and the `ByteOpen` component (commit `8d81187`).
+SIGTERM bombs and stunned Bytes bypass the gate, mirroring upstream's `id == 168`
+exception and `lua_IsParalyzed` branch. Infection chain wired via `Infected` +
+`VirusSpawnQueue`.
+
+Deferred: `collidefriendly` on projectile physics (weapons don't have projectile
+collision yet — §4.2). Generalising `HitByWeaponId` for Hole/Carrier/Expbase if those
+turn out to need it.
 
 ### 1.7 Auto-Heal — ✅ DONE
 
@@ -222,22 +225,26 @@ deals dps*dt to units in radius with friendly-fire + infection flags,
 | Pointer | NX Flag (r=120, 100 dps, 60s, friendly-fire) | ✅ wired |
 | Obelisk | Infection Gas (r=400, 120 dps, 13s, infects, 40s cd) | ✅ wired |
 | Firewall | Reflector Shield (r=300, 20s, 50% reduce + 50% reflect) | ✅ wired |
-| Terminal | SIGTERM airstrike (blast 900/10000, denial 350/2000/3s, 90s cd) | ✅ wired |
+| Terminal | SIGTERM airstrike — two-stage `SigTermSignal` → `SigTermBomb` (blast 900/10000, denial 350/2000/3s, 90s cd) | ✅ wired |
 | Byte | Mine Launcher (6000 HP cost, 5-mine fan, 10s cd) | ✅ wired |
+
+SIGTERM matches upstream `airstrike.lua` two-stage flow (commit `8d81187`):
+the bomber flies from the Terminal to the target, then drops the bomb which
+gravity-falls and detonates. Both stages are untargetable by construction
+(no `UnitType`), mirroring upstream's `Category=NUKE VTOL` filter.
 
 ### 3.6 Infection Chain Refinement — ✅ DONE
 
 `weapon_infection_duration()` maps the four infecting weapons to their upstream
-frame-count windows. `apply_damage` keys infection on the weapon name (not the
+frame-count windows (diffed against `LuaRules/Gadgets/infection.lua` in commit
+`8d81187`: virusbeam=90, virusdeath=180, wormsplash=200, infection=30, all in
+sim frames @ 30 Hz). `apply_damage` keys infection on the weapon name (not the
 attacker unit kind) so only Wormsplash / VirusBeam / VirusDeath / Infection trigger
 it — direct Wormbite no longer infects, matching upstream. `death_system` sprays
 VirusDeath at a dying Virus's corpse so the infection chain spreads via AoE.
 
-Caveat: Spring's engine has no infection logic anywhere — the whole chain is
-implemented by upstream KP in Lua gadgets under
-[upstream/Kernel-Panic/LuaRules/](upstream/Kernel-Panic/LuaRules/). Our version
-matches the observable behavior described in the readme but has never been diffed
-against the actual gadget code. Worth a pass before we treat this as frozen.
+Obelisk's gas zone now infects with the canonical 1 s window (upstream `infection`
+weapon = 30 frames; was 6 s host-side default before).
 
 ### 3.7 Kernel Boost / Production Scaling — ✅ DONE
 
@@ -302,10 +309,15 @@ against the actual gadget code. Worth a pass before we treat this as frozen.
   thin bright core cuboid layered on top when `corethickness`
   warrants. Upstream's ortho-quad geometry remains deferred.
 
-### 4.2 Projectile Models (Important)
+### 4.2 Projectile Models — ✅ DONE
 
-`model=octashot.s3o` (Pointer), `model=network_medium_missile.s3o` (Flow) exist but code
-renders placeholder cubes in `spawn_projectile`.
+`spawn_projectile` loads the weapon's `model=` field via `load_s3o_mesh`
+([weapon_fx/spawn.rs](kernel-panic/src/units/weapon_fx/spawn.rs)) — Pointer's
+`octashot.s3o`, Flow's `network_medium_missile.s3o`, Marisa's `marisa_shot.s3o`,
+and SIGTERM's `sigterm.s3o` all render as their authored meshes; missing /
+unparseable models fall back to a sphere sized by `weapon.size`. SIGTERM's
+two-stage strike uses `signal.s3o` for the bomber and `sigterm.s3o` for the
+falling shell, both cached lazily in `SigTermAssets`.
 
 ### 4.3 Explosion / Impact Effects — ✅ Partial
 
@@ -328,25 +340,18 @@ Spring's `BitmapMuzzleFlame` equivalent. Scale + duration read from the
 weapon TDF. Melee flash (Wormbite) retains its dedicated orange burst at
 the bite point.
 
-### 4.6 COB `QueryWeapon1` Callback (Low) — ✅ Partial
+### 4.6 COB `QueryWeapon1` Callback — ✅ DONE
 
-Beams and projectiles now originate from the unit's resolved muzzle piece
-instead of the transform root, so Bit's `>>>>>` arrow shoots from the
-barrel and Byte's MegaBeam leaves from `bp0` instead of the torso. The
-`MuzzlePiece` component is attached at spawn via a name heuristic —
-`gunpoint` → `bp0` → `flare` → `barrel` → `muzzle` — which covers every
-KP unit declaring a recognised muzzle in its .bos, falling back to unit
-origin for the rest (Worms / factories / turretless units).
+Wired in commit `8d81187`. `CobVm::call_script_out_param` runs a
+function and reads back local[0] — the BOS-idiomatic out-param slot
+used by every `Query*`. `refresh_muzzle_pieces` runs each frame for
+units with an `AimTarget` and stores the script-declared piece in
+`MuzzlePiece`. Byte's `gp` static var cycles bp0..bp3 across the
+4-shot MegaBeam burst, and the visual muzzle now follows.
 
-Deferred:
-
-1. Proper `call_script("QueryWeapon1", …)` consumption so the Byte's
-   barrel rotates between shots. Our VM's `call_script` returns
-   `ret_code` but .bos's `QueryWeapon1(piecenum) { piecenum = bp0; }`
-   pattern writes to an out-param rather than `return`ing; wiring the
-   param read-back unlocks per-shot barrel cycling on Byte (and any
-   future multi-barrel unit).
-2. Muzzle flash sprite at the same position — §4.5.
+`MuzzlePiece::resolve` is kept as a spawn-time fallback for units
+whose scripts don't declare `QueryWeapon1` (factories, Worm,
+turretless buildings).
 
 ### 4.7 Shield System — ✅ DONE (mechanic; visual deferred)
 
@@ -444,19 +449,19 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 ## Recommended Implementation Order
 
 Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit morph,
-§3.5 command-fire (NX Flag + Infection + Firewall), §3.6 infection refinement,
-§3.7 Kernel Boost, §3.8 Flow speed, §3.9 Logic Bomb detonation, §4.3 impact bursts,
-§4.7 shields, §5.1 AI Expand + Defend.
+§3.5 all command-fire (incl. two-stage SIGTERM + Byte MineLauncher), §3.6 infection
+refinement (diffed against `infection.lua`), §3.7 Kernel Boost, §3.8 Flow speed,
+§3.9 Logic Bomb detonation + Debug placement, §4.3 impact bursts, §4.6 QueryWeapon1
+script callback, §4.7 shields, §5.1 AI Expand + Defend, §1.6 Byte closed-state armor,
+QTPFS slope cap matched to upstream's `1 - cos(deg × 1.5)` encoding.
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Terminal SIGTERM + Byte MineLauncher | 3.5 | Last command-fire gaps |
-| 2 | Debug (Minekiller) placement | 3.9 | Last mine-kit gap |
-| 3 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 4 | Fog of war | 6 | Full visibility system |
-| 5 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 6 | Audio | 7 | Weapon sounds highest priority |
-| 7 | Multiplayer | 9 | Endgame feature |
+| 1 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
+| 2 | Fog of war (full per-team) | 6 | MVP landed; real LoS still open |
+| 3 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 4 | Audio | 7 | Weapon sounds highest priority |
+| 5 | Multiplayer | 9 | Endgame feature |
 
 ---
 
@@ -679,8 +684,9 @@ behaviour; plan.md holds the engineering work to get there.
 - [x] ~~**Pointer homing targets Flows**~~ — done.
   `UnitKind::homing_targets_air()` (currently only `Pointer`) now
   overrides the `NoChaseCategory=VTOL` filter in `combat_system`
-  ([combat/mod.rs:194](kernel-panic/src/units/combat/mod.rs#L194)). Unit test
-  `only_pointer_homes_on_air_targets` in [definitions.rs](kernel-panic/src/units/definitions.rs)
+  ([combat/mod.rs](kernel-panic/src/units/combat/mod.rs)). Unit test
+  `only_pointer_homes_on_air_targets` in
+  [content/definitions.rs](kernel-panic/src/units/content/definitions.rs)
   pins the list so widening it without intent fails loudly.
 - [x] ~~**Friendly cloak fade**~~ — done. `install_cloak_fade_materials`
   clones each piece's `StandardMaterial` with alpha 0.5 on
@@ -790,15 +796,18 @@ behaviour; plan.md holds the engineering work to get there.
      multiplier table rather than the FBI engine-disable value.
 - [x] ~~**Movement ignores per-unit `MaxSlope`**~~ — done.
   - Terrain penetration: `ground_clamp_system` + `UnitKind::is_subterranean`.
-  - Cliff climbing: `NavGridSet` holds one `NodeLayer` per distinct
-    `MaxSlope` cap (built from `BTreeSet` of converted-to-ratio caps
-    across `ALL_UNIT_KINDS` + the 45° default, so duplicate degrees
-    collapse into one bucket). `compute_path` picks the tightest
-    bucket whose cap ≥ the unit's via `NavGridSet::bucket_for`, and
-    the `slope_mod` is kept constant across buckets so path costs
-    order consistently. Lookup lives in `compute_path` (≤3 calls /
-    frame, cheaper than a cached-component scheme) — the
-    `NavBucket(u8)` cache drafted earlier turned out to be overkill.
+  - Cliff climbing: caps and slope penalties match upstream's Spring
+    encoding exactly (commit `8d81187`). `SpeedMap::from_heightmap`
+    computes `1 - cos(angle)` per cell (matching `ReadMap::UpdateSlopemap`),
+    `max_slope_from_degrees` applies the upstream `1.5×` pre-multiplier
+    from `DegreesToMaxSlope`, and `slope_mod_from_max_slope` derives
+    the slope penalty as `4 / (max_slope + 0.001)`. KP mobile units
+    that lack an FBI MaxSlope fall back to `DEFAULT_MAX_SLOPE_DEGREES
+    = 36` (MOVEINFO LIGHT/MEDIUM/HEAVY default), giving an effective
+    54° geometric cap. `NavGridSet` still holds one bucket per
+    distinct cap; `compute_path` picks the tightest bucket whose cap
+    ≥ the unit's. The per-step rise gate in `movement_system` uses
+    the same encoding via `slope_from_rise_run`.
   - Building-placement MaxSlope is still a separate concern (FBI
     values on Socket / Firewall / Terminal / Obelisk = 10, BadBlock
     = 32, Kernel / Hole = 60 govern where you can drop the build
@@ -811,13 +820,6 @@ behaviour; plan.md holds the engineering work to get there.
   - The nav-grid build needs to happen *after* upstream Lua gadgets
     run their init-time heightmap edits, otherwise `map_loading`'s
     view of terrain is stale. Verify ordering on map load.
-
-  Data note: `gamedata/MOVEINFO.TDF` sets `MaxSlope=36` on all three
-  mobile move classes (LIGHT / MEDIUM / HEAVY). Recoil's
-  `DegreesToMaxSlope` (clamp × 1.5 → `1 − cos`) turns that into an
-  effective ~54° cap upstream. If the per-unit buckets feel like
-  overkill for KP specifically, collapsing back to a single 54°
-  grid is always a valid simplification.
 - [x] ~~`GameState` not reset on map cycling~~ — fixed in a50fe8b
 - [x] ~~Rally point / delivery point for factories~~ — `Emerging.rally_point` wired
 - [x] ~~Terrain height not sampled during movement~~ — ground clamping in recent walking
@@ -858,9 +860,13 @@ behaviour; plan.md holds the engineering work to get there.
 - [x] ~~`BUILD_PERCENT_LEFT` bridge from CobVm to Create()~~ — wired through production
 - [ ] `GET` / `GET_UNIT_VALUE` still return 0 for most values — only select `springdefs.h`
   constants mapped; expand as needed
-- [ ] `EmitSfx` and `SetValue` opcodes still largely unimplemented — note that §4.3 CEG
-  emitters and §4.5 muzzle flash both sit downstream of this. Landing `EmitSfx` unblocks
-  both visual gaps at once.
+- [x] ~~`EmitSfx` opcode~~ — wired via `dispatch_emit_sfx` in
+  [animation.rs](kernel-panic/src/units/assets/animation.rs); spawns
+  faction-coloured impact bursts at the script-declared piece. Full
+  per-CEG emitter stacks (§4.3) still deferred but the pipeline is
+  live. `SetValue` opcode remains unimplemented (only `ARMORED` /
+  `ACTIVATION` are emitted from KP scripts and neither has a
+  game-visible host effect today).
 - [ ] `PieceIndex` component: inner value set but never read (only used as marker)
 - [ ] COB piece-space interpolation between sim frames — Spring's `LocalModelPiece` stores
   `modelSpaceTra` with a dirty flag and interpolates between sim ticks for smooth
@@ -870,12 +876,12 @@ behaviour; plan.md holds the engineering work to get there.
 - [ ] **`HitByWeaponId` damage callback** — confirmed called by `byte.bos`,
   `hole.bos`, `carrier.bos`, `expbase.bos` with signature
   `HitByWeaponId(headingZ, headingX, weaponId, damage)` returning a damage
-  multiplier (30 = take 30%, 100 = full). Wiring it needs (1) synchronous
-  `call_script` in `apply_hit` to consume the return value, (2) a
-  weapon-name → `weapon_id: u16` mapping so scripts can discriminate (KP's
-  id=168 is DOS which bypasses Byte's closed-armor). Shares the same u16
-  interning key as the `WeaponId` performance todo — do both in one pass.
-  This unlocks Byte closed-state armor (§1.5/1.6 deferred).
+  multiplier (30 = take 30%, 100 = full). Byte's closed-state armor case is
+  now handled host-side via `byte_armor_multiplier` (§1.6, commit `8d81187`),
+  side-stepping the script wiring entirely. The remaining work — synchronous
+  `call_script` in `apply_hit` plus a weapon-name → `weapon_id: u16` mapping
+  — is only needed if Hole/Carrier/Expbase turn out to use `HitByWeaponId`
+  for non-Byte rules. Shares the u16 interning key with §11.3 weapon IDs.
 - [ ] **`AnimFinished(piece, axis)`** — Spring fires this back to scripts when
   turn/spin/move finish so `wait-for-turn` / `wait-for-move` opcodes can
   resume. Not verified in our VM; if absent, scripts that block on animation
@@ -982,12 +988,13 @@ file is `spawning/mod.rs` at ~580 LoC.
   `WeaponId(u16)` resolved once at TDF load; store `Vec<WeaponDef>` indexed
   by it. `weapon_registry.get(&str)` shrinks from a `BTreeMap<String, _>`
   lookup per shot to an array index. Keep `&str` only at the TDF boundary.
-- Concrete call sites (from April 2026 audit):
-  [combat/mod.rs:169,322,358](kernel-panic/src/units/combat/mod.rs#L169),
-  [combat/damage.rs:293-294](kernel-panic/src/units/combat/damage.rs#L293),
-  [combat/lifecycle.rs:235](kernel-panic/src/units/combat/lifecycle.rs#L235),
-  [weapon_fx/spawn.rs:42](kernel-panic/src/units/weapon_fx/spawn.rs#L42).
-- Unblocks folding `weapon_infection_duration(&str)` into `strum::EnumString`.
+- Discussed April 2026 and deliberately deferred — current scale doesn't
+  show the cost in profiles, and the change touches many types. Pick up
+  the next time a feature lands in `WeaponDef` so the refactor amortises.
+- Unblocks folding `weapon_infection_duration(&str)` into `strum::EnumString`,
+  and lets the SIGTERM-name string compare in `byte_armor_multiplier`
+  ([damage.rs](kernel-panic/src/units/combat/damage.rs)) become an integer
+  compare.
 
 ### 11.4 HUD panels rebuild every frame
 
@@ -996,10 +1003,14 @@ file is `spawning/mod.rs` at ~580 LoC.
   `build_menu` and `order_palette` already gate on a `LastSelectionHash`, so
   fully-static frames are free; `build_menu` no longer folds build-progress
   into its hash, so a single building being produced no longer churns the
-  icon grid ~60×/sec (April 2026 sweep). What's still open: for the per-tick
-  refreshes that DO fire (HP bars, progress bars, queue badges), mutate the
-  retained `Text` / `Node.width` in place rather than despawn+respawn the
-  whole subtree. Also drop the per-frame `format!("{:.0}", …)` allocs.
+  icon grid ~60×/sec (April 2026 sweep). The hash now seeds with FNV-1a
+  offset basis and the click handler runs before the rebuild so a click
+  on a freshly-spawned button isn't swallowed (commit `8d81187` — fixed
+  the System homebase showing no build menu). What's still open: for the
+  per-tick refreshes that DO fire (HP bars, progress bars, queue badges),
+  mutate the retained `Text` / `Node.width` in place rather than
+  despawn+respawn the whole subtree. Also drop the per-frame
+  `format!("{:.0}", …)` allocs.
 
 ### 11.5 `MovementState` / `ProductionState` → change detection
 
@@ -1031,14 +1042,14 @@ file is `spawning/mod.rs` at ~580 LoC.
 
 ### 11.8 Smaller wins
 
-- [ ] **`unit_separation_system`** ([interaction/movement.rs:549](kernel-panic/src/interaction/movement.rs#L549))
+- [ ] **`unit_separation_system`** ([interaction/movement.rs](kernel-panic/src/interaction/movement.rs))
   is still O(N²) — builds a full snapshot and nested-loops it. Route each
   mobile unit through `SpatialIndex::query_radius` instead. Expected ~40×
   fewer distance checks at N=300 units.
-- [ ] **`gunbase` / `body` piece-name scans** ([combat.rs:592](kernel-panic/src/units/combat.rs#L592),
-  [production.rs:346](kernel-panic/src/units/production.rs#L346)) still
-  case-insensitive-compare every frame (now via `CobAnimator::piece_index`).
-  Cache the indices at spawn like `FactoryPieces::emitters/pad` does.
+- [x] ~~**`gunbase` / `body` piece-name scans**~~ — done. `GunbasePiece`,
+  `AimerPiece`, and `HatchPiece` are resolved once at spawn via
+  `cob.piece_names.iter().position(...)` ([spawning/mod.rs](kernel-panic/src/units/lifecycle/spawning/mod.rs))
+  and read every frame as cached `usize` indices.
 - [x] **`spawn_projectile` / `spawn_melee_flash` / `spawn_beam`** used to
   allocate a fresh `Cuboid`/`Sphere` mesh per shot. Now share the unit-length
   primitives cached in `WeaponFxMeshes` and bake thickness+length into

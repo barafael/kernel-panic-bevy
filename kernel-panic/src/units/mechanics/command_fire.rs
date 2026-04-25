@@ -15,12 +15,105 @@
 //! | infection | 400    | 120 | 13s | no            | yes     |
 //! | sigterm   | 350    | 2000| 3s  | yes           | no      |
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
+use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::{Infected, weapon_infection_duration};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::spatial::SpatialIndex;
+
+/// Filename of the SIGTERM bomber's S3O model (`signal.fbi:ObjectName`).
+const SIGNAL_MODEL: &str = "signal.s3o";
+/// Filename of the SIGTERM bomb's S3O model
+/// (`weapons/retroweapons.tdf:[SigTerm]:model`).
+const SIGTERM_BOMB_MODEL: &str = "sigterm.s3o";
+
+/// Lazily-loaded mesh + per-faction material handles for the two
+/// SIGTERM visual stages. Mirrors `DeathParticleAssets` /
+/// `BuildSparkleAssets`. The 90 s SIGTERM cooldown means cache
+/// misses are rare anyway, but caching keeps the per-cast spawn
+/// allocation-free and avoids leaking a fresh `StandardMaterial`
+/// per cast.
+#[derive(Resource, Default)]
+pub struct SigTermAssets {
+    signal_mesh: Option<Handle<Mesh>>,
+    bomb_mesh: Option<Handle<Mesh>>,
+    /// One material per faction (caster colour-tints the visual).
+    signal_material: HashMap<Faction, Handle<StandardMaterial>>,
+    bomb_material: HashMap<Faction, Handle<StandardMaterial>>,
+}
+
+impl SigTermAssets {
+    fn signal(
+        &mut self,
+        faction: Faction,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+        model_cache: &mut S3OModelCache,
+    ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+        let mesh = self
+            .signal_mesh
+            .get_or_insert_with(|| {
+                load_s3o_mesh(SIGNAL_MODEL, meshes, model_cache)
+                    .unwrap_or_else(|| meshes.add(Cuboid::new(18.0, 6.0, 24.0)))
+            })
+            .clone();
+        let material = self
+            .signal_material
+            .entry(faction)
+            .or_insert_with(|| {
+                unit_material(
+                    UnitKind::Signal,
+                    faction,
+                    materials,
+                    images,
+                    model_cache,
+                    SIGNAL_MODEL,
+                )
+            })
+            .clone();
+        (mesh, material)
+    }
+
+    fn bomb(
+        &mut self,
+        faction: Faction,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+        model_cache: &mut S3OModelCache,
+    ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+        let mesh = self
+            .bomb_mesh
+            .get_or_insert_with(|| {
+                load_s3o_mesh(SIGTERM_BOMB_MODEL, meshes, model_cache)
+                    .unwrap_or_else(|| meshes.add(Sphere::new(14.0)))
+            })
+            .clone();
+        // Why: `unit_material` keys textures by faction, not by
+        // UnitKind — Signal is the right faction lookup for both
+        // stages of the strike.
+        let material = self
+            .bomb_material
+            .entry(faction)
+            .or_insert_with(|| {
+                unit_material(
+                    UnitKind::Signal,
+                    faction,
+                    materials,
+                    images,
+                    model_cache,
+                    SIGTERM_BOMB_MODEL,
+                )
+            })
+            .clone();
+        (mesh, material)
+    }
+}
 
 /// Firewall protection zone: all allies within `FIREWALL_RADIUS` at
 /// cast time gain a `Protected` component for `FIREWALL_DURATION`.
@@ -212,6 +305,9 @@ pub fn process_command_fire(
     mut mine_spawns: ResMut<MineSpawnQueue>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
+    mut sigterm_assets: ResMut<SigTermAssets>,
     mut commands: Commands,
 ) {
     for event in events.read() {
@@ -276,13 +372,13 @@ pub fn process_command_fire(
             );
             let distance = start.distance(release);
 
-            let signal_mesh = meshes.add(Cuboid::new(18.0, 6.0, 24.0));
-            let signal_material = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.3, 1.0, 0.6),
-                emissive: LinearRgba::new(0.2, 1.0, 0.5, 1.0) * 6.0,
-                unlit: true,
-                ..default()
-            });
+            let (signal_mesh, signal_material) = sigterm_assets.signal(
+                *faction,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+            );
             let facing = if distance > 1e-3 {
                 Transform::from_translation(start).looking_at(release, Vec3::Y)
             } else {
@@ -488,6 +584,9 @@ pub fn tick_sigterm_signals(
     mut signals: Query<(Entity, &mut SigTermSignal, &mut Transform)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
+    mut sigterm_assets: ResMut<SigTermAssets>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -501,16 +600,15 @@ pub fn tick_sigterm_signals(
         let release = Vec3::new(signal.target.x, signal.start.y, signal.target.z);
 
         if total_time <= 0.0 || signal.elapsed >= total_time {
-            // Arrived — drop the bomb from cruise altitude, despawn
-            // the Signal. Free-fall duration is canonical, not
-            // recalculated per release altitude.
-            let bomb_mesh = meshes.add(Sphere::new(14.0));
-            let bomb_material = materials.add(StandardMaterial {
-                base_color: Color::srgb(1.0, 0.3, 0.0),
-                emissive: LinearRgba::new(1.0, 0.4, 0.1, 1.0) * 8.0,
-                unlit: true,
-                ..default()
-            });
+            // Arrived — drop the bomb from cruise altitude. Free-fall
+            // duration is canonical, not recalculated per altitude.
+            let (bomb_mesh, bomb_material) = sigterm_assets.bomb(
+                signal.owner_faction,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+            );
             commands.spawn((
                 SigTermBomb {
                     target: signal.target,
@@ -530,10 +628,7 @@ pub fn tick_sigterm_signals(
         }
 
         let t = (signal.elapsed / total_time).clamp(0.0, 1.0);
-        let pos = signal.start.lerp(release, t);
-        transform.translation = pos;
-        // Keep the nose pointed at the release heading so the
-        // cuboid visibly streaks rather than tumbling.
+        transform.translation = signal.start.lerp(release, t);
         if signal.total_distance > 1e-3 {
             transform.look_at(release, Vec3::Y);
         }
@@ -779,7 +874,10 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<Assets<Mesh>>()
-            .init_resource::<Assets<StandardMaterial>>();
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<S3OModelCache>()
+            .init_resource::<SigTermAssets>();
 
         // Start 500 elmos east of the target at cruise altitude. At
         // SIGTERM_SIGNAL_SPEED = 240 elmos/s, flight takes ~2.08 s.
