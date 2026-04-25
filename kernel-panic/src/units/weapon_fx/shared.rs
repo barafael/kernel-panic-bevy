@@ -208,11 +208,14 @@ pub(super) struct ProjectileVisual {
 }
 
 /// Number of samples retained in the projectile trail's ring buffer.
-/// The ribbon mesh draws `N - 1` quads; 16 lands the per-frame
-/// rewrite at ~96 vertices per projectile, which is negligible next
-/// to the cost of the projectile mesh itself but gives enough length
-/// that a Pointer arc's head-to-tail reads as one continuous ribbon.
-pub(super) const TRAIL_SAMPLE_COUNT: usize = 16;
+/// The ribbon mesh draws `N - 1` quads; one sample is added per
+/// rendered frame (60 Hz), so `N = 128` gives ~2.1 s of visible
+/// trail — comparable to upstream Spring's
+/// `CSmokeProjectile::lifeTime ≈ 70` frames at the 30 Hz sim rate.
+/// 16 (the original value) covered ~0.27 s, well under most
+/// projectiles' flight time and visibly stubby on Pointer arcs.
+/// Per-frame cost is negligible (256 vertex writes per live trail).
+pub(super) const TRAIL_SAMPLE_COUNT: usize = 128;
 
 /// State for a single projectile's trailing ribbon. Lives on the same
 /// entity as the `ProjectileVisual`; the companion trail-ribbon entity

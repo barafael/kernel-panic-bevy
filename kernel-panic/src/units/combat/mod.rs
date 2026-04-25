@@ -428,14 +428,46 @@ pub fn combat_system(
 
         // Aimer-piece gate (Byte). Mirrors `wait-for-turn aimer
         // around {y,x}-axis` in upstream's AimWeapon1.
+        //
+        // Why we don't compare against `animator.target_rotations`:
+        // `aim_weapons_system` writes those values AFTER combat_system
+        // in the same frame, so on the tick where a new target is
+        // acquired the cached target rotation is stale (pointing at
+        // last frame's target, or default). Reading it would let the
+        // aimer-rotation gate pass while the piece is still mid-slew
+        // toward the new target, which is exactly the "trail leaves
+        // the gun in any direction" symptom. Compute the target axes
+        // here from the live target position instead — same
+        // arithmetic `aim_weapons_system` runs.
         if let Ok(ap) = pieces.aimer.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(ap.0)
-            && let Some(target_rot) = animator.target_rotations.get(ap.0)
         {
-            let dy_axis = (rot[1] - target_rot[1]).abs();
-            let dx_axis = (rot[0] - target_rot[0]).abs();
-            if dy_axis > AIM_HEADING_TOLERANCE || dx_axis > AIM_PITCH_TOLERANCE {
+            let body_yaw = attacker_gtf.rotation().to_euler(EulerRot::YXZ).0;
+            let to_target_n = if horizontal_dist > 1e-3 {
+                to_target_xz / horizontal_dist
+            } else {
+                Vec3::Z
+            };
+            let target_world_heading = to_target_n.x.atan2(to_target_n.z);
+            let mut target_y = target_world_heading - body_yaw;
+            while target_y > std::f32::consts::PI {
+                target_y -= std::f32::consts::TAU;
+            }
+            while target_y < -std::f32::consts::PI {
+                target_y += std::f32::consts::TAU;
+            }
+            let target_x = -std::f32::consts::FRAC_PI_2 - target_pitch;
+
+            // Wrap the heading delta into (-π, π] so a 359° turn
+            // doesn't read as "off by 359°" when the slew is one
+            // frame from completion.
+            let mut dy = (rot[1] - target_y).rem_euclid(std::f32::consts::TAU);
+            if dy > std::f32::consts::PI {
+                dy = std::f32::consts::TAU - dy;
+            }
+            let dx = (rot[0] - target_x).abs();
+            if dy > AIM_HEADING_TOLERANCE || dx > AIM_PITCH_TOLERANCE {
                 continue;
             }
         }
