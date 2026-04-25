@@ -50,9 +50,12 @@ impl Plugin for MapLoadingPlugin {
 struct SelectedMap(PathBuf);
 
 /// Discover the map archives in `assets/maps/` and pick the one named
-/// by the CLI arg (or the first alphabetically).
+/// by the CLI arg (or the first alphabetically). If both a baked
+/// `.kpmap` and a source `.sd7`/`.sdz` exist for the same stem, the
+/// baked form wins — no archive extraction or Lua execution at
+/// startup, and the WASM target (plan §8.1) can't run those anyway.
 ///
-/// If the CLI arg is itself a usable `.sd7` / `.sdz` file (absolute or
+/// If the CLI arg is itself a usable map file (absolute or
 /// cwd-relative), we take it verbatim — no directory search needed.
 /// Otherwise we look up the maps directory relative to the project
 /// root (see `paths::project_root`), so the binary works regardless
@@ -76,6 +79,7 @@ fn pick_map(mut commands: Commands) {
         .map(|e| e.path())
         .filter(|p| is_map_ext(p.as_path()))
         .collect();
+    dedupe_prefer_baked(&mut maps);
     maps.sort();
 
     if maps.is_empty() {
@@ -113,8 +117,71 @@ fn is_map_ext(path: &Path) -> bool {
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase)
             .as_deref(),
-        Some("sd7") | Some("sdz")
+        Some("sd7") | Some("sdz") | Some("kpmap")
     )
+}
+
+fn is_baked_ext(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("kpmap"))
+        .unwrap_or(false)
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LoadMapError {
+    #[error(transparent)]
+    Source(#[from] spring_map::map_types::MapError),
+    #[error(transparent)]
+    Baked(#[from] spring_map::baked::BakedMapError),
+    #[error("I/O error reading {path}: {error}")]
+    Io {
+        path: PathBuf,
+        #[source]
+        error: std::io::Error,
+    },
+}
+
+/// Dispatch on file extension: `.kpmap` reads the postcard payload via
+/// the baked loader (no archive / Lua deps), anything else hits the
+/// full `.sd7`/`.sdz` pipeline.
+fn load_map_dispatch(path: &Path) -> Result<spring_map::SpringMap, LoadMapError> {
+    if is_baked_ext(path) {
+        let bytes = std::fs::read(path).map_err(|error| LoadMapError::Io {
+            path: path.to_path_buf(),
+            error,
+        })?;
+        Ok(spring_map::baked::read_baked_map(&bytes)?)
+    } else {
+        Ok(spring_map::load_map(path)?)
+    }
+}
+
+/// When a `.kpmap` and an `.sd7`/`.sdz` share the same file stem, drop
+/// the source archive — the baked form has the same content and loads
+/// without 7z / Lua. Side-effect-free if the baked form is absent.
+fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
+    use std::collections::HashSet;
+    let baked_stems: HashSet<String> = maps
+        .iter()
+        .filter(|p| is_baked_ext(p))
+        .filter_map(|p| {
+            p.file_stem()
+                .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        })
+        .collect();
+    maps.retain(|p| {
+        if is_baked_ext(p) {
+            return true;
+        }
+        let Some(stem) = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        else {
+            return true;
+        };
+        !baked_stems.contains(&stem)
+    });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -137,7 +204,7 @@ fn load_map(
 
     info!("Loading map: {map_name}");
 
-    let spring_map = match spring_map::load_map(map_path) {
+    let spring_map = match load_map_dispatch(map_path) {
         Ok(m) => m,
         Err(error) => {
             error!("Failed to load {}: {error}", map_path.display());

@@ -154,7 +154,7 @@ impl SmfHeader {
 ///
 /// The engine hardcodes two categories: geothermal vents and trees.
 /// All other feature types are mod-specific and captured by `Other`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FeatureType {
     /// Geothermal vent — used by Kernel Panic as datavent (factory placement site).
     GeoVent,
@@ -201,7 +201,7 @@ impl std::fmt::Display for FeatureType {
 }
 
 /// A single feature placement on the map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MapFeature {
     pub feature_type: FeatureType,
     pub x: f32,

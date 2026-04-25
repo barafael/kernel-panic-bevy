@@ -1,3 +1,4 @@
+pub mod baked;
 pub mod lua_heightmap;
 pub mod map_types;
 pub mod mapinfo_lua;

@@ -439,22 +439,33 @@ unit acknowledgements, ambient, UI feedback.
 
 ## 8. WASM / Web Build (Medium)
 
-### 8.1 Pre-Bake Map Format
+### 8.1 Pre-Bake Map Format — ✅ Done
 
-Build step converts .sd7 → flat binary (heightmap + texture PNG + features + metadata).
-WASM app loads via HTTP fetch — no filesystem, no 7zip. The SMF/SMT parsers already work
-on `&[u8]`.
+`.kpmap` is the runtime form: `cargo run -p spring-map --bin bake_map -- INPUT.sd7`
+produces a postcard-encoded blob (heightmap + metalmap + features + assembled
+ground texture as raw RGBA + .smd / mapinfo.lua resolved to `MapInfo`) that
+loads through `spring_map::baked::read_baked_map` with no archive / mlua /
+SMT-tile dependencies. The runtime now prefers a `.kpmap` over the source
+`.sd7` of the same stem — see `dedupe_prefer_baked` and `load_map_dispatch`.
 
-### 8.2 Deployment
+Texture is currently raw RGBA, ~16 MB for a 2k² map. PNG/DXT compression is
+deferred until §8.2 actually requires it (file size only matters when we ship
+over HTTP).
+
+### 8.2 Deployment (deferred)
 
 GitHub Actions workflow: build WASM → `wasm-bindgen` → deploy to GitHub Pages with one
-pre-baked map (Marble Madness).
+pre-baked map (Marble Madness). Held until gameplay is solid; the `.kpmap`
+format is the prerequisite that's now in place.
 
 ### 8.3 Compatibility Constraints
 
-- `sevenz-rust` won't compile to WASM — pre-baking avoids this
-- `mlua` may need WASM special handling — pre-apply Lua gadgets during bake
+- `sevenz-rust` won't compile to WASM — `.kpmap` sidesteps this entirely
+- `mlua` heightmap gadgets run at bake time, not runtime — `.kpmap` consumers
+  don't link mlua at all (still pulled by the source `.sd7` path; gated behind
+  `#[cfg(not(target_arch = "wasm32"))]` when WASM lands)
 - `spring-map` needs `#[cfg(not(target_arch = "wasm32"))]` on filesystem code
+  (deferred until 8.2)
 
 ---
 
@@ -470,16 +481,17 @@ replication. Lockstep or server-authoritative. Lobby system with map/faction sel
 Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit morph,
 §3.5 all command-fire (incl. two-stage SIGTERM + Byte MineLauncher), §3.6 infection
 refinement (diffed against `infection.lua`), §3.7 Kernel Boost, §3.8 Flow speed,
-§3.9 Logic Bomb detonation + Debug placement, §4.3 impact bursts, §4.6 QueryWeapon1
-script callback, §4.7 shields, §5.1 AI Expand + Defend, §1.6 Byte closed-state armor,
-QTPFS slope cap matched to upstream's `1 - cos(deg × 1.5)` encoding,
-§6 fog of war (full active LoS from `PlayerTeam` perspective).
+§3.9 Logic Bomb detonation + Debug placement, §4.1 `beamdecay`, §4.3 impact bursts,
+§4.6 QueryWeapon1 script callback, §4.7 shields, §5.1 AI Expand + Defend,
+§1.6 Byte closed-state armor, QTPFS slope cap matched to upstream's
+`1 - cos(deg × 1.5)` encoding, §6 fog of war (full active LoS from `PlayerTeam`
+perspective), §8.1 `.kpmap` pre-bake format.
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
-| 1 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 2 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 3 | Audio | 7 | Weapon sounds highest priority |
+| 1 | `texture2` endcaps + remaining beam polish | 4.1 | Visual polish |
+| 2 | Audio | 7 | Weapon sounds highest priority |
+| 3 | WASM deploy (gameplay-gated) | 8.2 | Browser-playable |
 | 4 | Multiplayer | 9 | Endgame feature |
 
 ---

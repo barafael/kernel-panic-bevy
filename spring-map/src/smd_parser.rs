@@ -5,7 +5,7 @@
 //! is used by all legacy Spring maps including the Kernel Panic set.
 
 /// Parsed map metadata from an .smd file.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MapInfo {
     pub description: String,
     pub gravity: f32,
@@ -14,14 +14,14 @@ pub struct MapInfo {
     pub lighting: Lighting,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StartPosition {
     pub team: u32,
     pub x: f32,
     pub z: f32,
 }
 
-#[derive(Debug, Clone, better_default::Default)]
+#[derive(Debug, Clone, better_default::Default, serde::Serialize, serde::Deserialize)]
 pub struct Atmosphere {
     pub fog_color: [f32; 3],
     #[default(0.999)]
@@ -33,7 +33,7 @@ pub struct Atmosphere {
     pub cloud_density: f32,
 }
 
-#[derive(Debug, Clone, better_default::Default)]
+#[derive(Debug, Clone, better_default::Default, serde::Serialize, serde::Deserialize)]
 pub struct Lighting {
     #[default([0.0, 1.0, 1.0])]
     pub sun_dir: [f32; 3],

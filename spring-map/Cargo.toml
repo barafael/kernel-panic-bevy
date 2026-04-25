@@ -12,6 +12,8 @@ sevenz-rust = { workspace = true }
 zip = { workspace = true }
 mlua = { version = "0.11", features = ["lua51", "vendored"] }
 binrw = "0.15.1"
+serde = { workspace = true }
+postcard = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
