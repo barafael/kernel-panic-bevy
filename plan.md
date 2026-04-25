@@ -403,29 +403,34 @@ Easy (slower production), Normal, Hard (faster production, better targeting, mul
 
 ---
 
-## 6. Fog of War — ✅ Active LoS (single-perspective)
+## 6. Fog of War — ✅ Implemented, gated off
 
-`cloak::update_fog_visibility` runs at 10 Hz in the Animate set from
-the [`PlayerTeam`] resource's perspective (defaults to team 0). Any
-non-cloaked, non-friendly unit within a player-team unit's FBI
-`SightDistance` is `Visible` and tagged [`Spotted`]; otherwise
-`Hidden` and `Spotted` is removed. Sight is revoked when the
-observer dies or moves away — full active LoS, not the memory
-variant. Cloaked units (Worm / Logic Bomb) get detector-based
-visibility via `update_cloak_visibility` against player-team units
-with non-zero FBI `RadarDistance`; the two systems partition on the
-[`Cloaked`] marker so neither races the other's writes.
+`cloak::update_fog_visibility` + `update_cloak_visibility` implement
+active LoS from the [`PlayerTeam`]'s perspective: non-cloaked enemy
+units within sight of any friendly are `Visible` + [`Spotted`],
+otherwise `Hidden` and `Spotted` is revoked; cloaked enemies are
+hidden unless a player-team unit with FBI `RadarDistance > 0` is in
+range. The two systems partition on the [`Cloaked`] marker so
+neither races the other's writes.
 
-AI teams query the world directly and ignore `Visibility`, so they
-keep perfect information internally — fog only affects rendering.
+The systems are gated by the [`FogEnabled`] resource, which defaults
+to `false` in the current sandbox build. The user can switch
+perspectives across every faction, so hiding any team's units is a
+UX bug — confirmed in playtest where everything except `PlayerTeam(0)`
+went invisible. While `FogEnabled.0 == false`, both systems
+short-circuit to "everything Visible + Spotted" and `install_cloak_fade_materials`
+fades every cloaked unit.
+
+Flip `FogEnabled` to `true` once a real player/AI ownership
+distinction exists (faction-select / per-client PlayerTeam) — the
+fog logic is ready; no further work needed on the LoS pipeline.
 
 Terrain is always visible — no exploration mechanic yet.
 
 Deferred: per-client `PlayerTeam` (currently a single global
-resource for sandbox mode), terrain chunks only revealed once
-scouted, Worm-while-attacking reveal rules (blocked on autohold
-toggle / `CommandQueue` so we know when a Worm is choosing to
-attack).
+resource), terrain chunks only revealed once scouted, Worm-while-
+attacking reveal rules (blocked on autohold toggle / `CommandQueue`
+so we know when a Worm is choosing to attack).
 
 ---
 

@@ -55,6 +55,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<bookkeeping::SmallBuildingCounts>()
             .init_resource::<cloak::VisibilityRefreshTimer>()
             .init_resource::<cloak::PlayerTeam>()
+            .init_resource::<cloak::FogEnabled>()
             .init_resource::<spatial::SpatialIndex>()
             .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)

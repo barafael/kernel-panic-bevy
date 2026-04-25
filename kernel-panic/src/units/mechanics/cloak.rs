@@ -1,8 +1,14 @@
 //! Visibility: cloak + fog-of-war.
 //!
+//! Both systems are gated on [`FogEnabled`] (off by default — the
+//! current sandbox build lets the player drive every faction, so
+//! hiding any team's units is a UX bug). When off, every unit stays
+//! `Visible` and gets `Spotted`. Flip the resource to `true` once
+//! proper player/AI ownership lands and the systems below take over.
+//!
 //! Two compose-able visibility systems live here, both throttled to
 //! the same [`VISIBILITY_REFRESH_INTERVAL`] and both anchored on the
-//! [`PlayerTeam`] resource (defaults to team 0 in sandbox mode):
+//! [`PlayerTeam`] resource (defaults to team 0):
 //!
 //! - **Cloak** ([`update_cloak_visibility`]) — Logic Bombs
 //!   (`Init_Cloaked=1`) and Worms (stealth ambushers per upstream)
@@ -40,6 +46,16 @@ impl PlayerTeam {
         self.0 == *team
     }
 }
+
+/// Master switch for fog-of-war / cloak-hiding. Off in the current
+/// sandbox build because every faction is human-controllable — hiding
+/// "enemy" units would mean the player loses sight of teams they're
+/// also driving. The visibility systems still run (and keep `Spotted`
+/// in sync) but treat every team as friendly until this flips on.
+///
+/// Wire to `true` once proper player/AI ownership exists per §6.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct FogEnabled(pub bool);
 
 /// Marker: this unit hides from enemies unless a detector is close.
 /// Worms carry it permanently; Logic Bombs carry it until they detonate.
@@ -81,6 +97,7 @@ pub struct VisibilityRefreshTimer(pub f32);
 pub fn update_cloak_visibility(
     time: Res<Time>,
     mut timer: ResMut<VisibilityRefreshTimer>,
+    fog: Res<FogEnabled>,
     player: Res<PlayerTeam>,
     unit_registry: Res<UnitRegistry>,
     detectors_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
@@ -91,6 +108,18 @@ pub fn update_cloak_visibility(
         return;
     }
     timer.0 = 0.0;
+
+    // Sandbox mode: nothing hides. The system still runs so the loop is
+    // ready when fog is wired live, but every cloaked unit just stays
+    // visible.
+    if !fog.0 {
+        for (_, _, mut vis) in &mut cloaked_q {
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
+        }
+        return;
+    }
 
     let detectors: Vec<(Vec3, f32)> = detectors_q
         .iter()
@@ -146,6 +175,7 @@ pub struct CloakFadeMaterials {
 #[allow(clippy::type_complexity)]
 pub fn install_cloak_fade_materials(
     mut commands: Commands,
+    fog: Res<FogEnabled>,
     player: Res<PlayerTeam>,
     new_cloaked: Query<(Entity, &TeamId, &Children), (Added<Cloaked>, Without<CloakFadeMaterials>)>,
     piece_q: Query<&Children, With<PieceIndex>>,
@@ -153,7 +183,9 @@ pub fn install_cloak_fade_materials(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (entity, team, children) in &new_cloaked {
-        if !player.matches(team) {
+        // While fog is off, every team is "friendly" — fade them all so
+        // the player can see at a glance which units are cloaked.
+        if fog.0 && !player.matches(team) {
             continue;
         }
         let mut overrides = Vec::new();
@@ -224,10 +256,11 @@ pub fn restore_cloak_fade_materials(
 /// Throttled to [`VISIBILITY_REFRESH_INTERVAL`]; partitioned from
 /// `update_cloak_visibility` via `Without<Cloaked>` so neither
 /// system writes `Visibility` on the same entity.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_fog_visibility(
     time: Res<Time>,
     mut timer: Local<f32>,
+    fog: Res<FogEnabled>,
     player: Res<PlayerTeam>,
     unit_registry: Res<UnitRegistry>,
     viewers_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
@@ -248,6 +281,22 @@ pub fn update_fog_visibility(
         return;
     }
     *timer = 0.0;
+
+    // Sandbox mode: every unit visible + spotted, no enemy distinction.
+    // Keeping the same loop (vs. just early-returning) ensures the
+    // `Spotted` marker is set on units that spawned while fog was
+    // disabled, so minimap / HUD filters keyed off `Spotted` light up.
+    if !fog.0 {
+        for (entity, _, _, mut vis, was_spotted) in &mut targets_q {
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
+            if !was_spotted {
+                commands.entity(entity).insert(Spotted);
+            }
+        }
+        return;
+    }
 
     // Player-team viewers and their sight-radius squares. Empty if
     // the player has no units alive (then everything is hidden).
