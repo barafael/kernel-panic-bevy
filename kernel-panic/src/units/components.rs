@@ -109,7 +109,7 @@ pub fn health_color(frac: f32) -> Color {
 }
 
 /// Which team/player owns this unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Component)]
 pub struct TeamId(pub u8);
 
 /// Static per-unit stats cached at spawn so hot-path systems (movement,

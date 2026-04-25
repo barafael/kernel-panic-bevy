@@ -1,25 +1,25 @@
 //! Visibility: cloak + fog-of-war.
 //!
 //! Two compose-able visibility systems live here, both throttled to
-//! the same [`VISIBILITY_REFRESH_INTERVAL`]:
+//! the same [`VISIBILITY_REFRESH_INTERVAL`] and both anchored on the
+//! [`PlayerTeam`] resource (defaults to team 0 in sandbox mode):
 //!
 //! - **Cloak** ([`update_cloak_visibility`]) — Logic Bombs
 //!   (`Init_Cloaked=1`) and Worms (stealth ambushers per upstream)
-//!   are hidden from the player until an enemy detector (Assembler /
-//!   Trojan / Gateway with non-zero FBI `RadarDistance`) enters
-//!   range. Active detection only — no memory.
+//!   are hidden from the player until a player-team detector
+//!   (Assembler / Trojan / Gateway with non-zero FBI `RadarDistance`)
+//!   enters range. Active detection only — no memory.
 //!
 //! - **Fog of war** ([`update_fog_visibility`]) — non-cloaked enemy
-//!   units are hidden until any player-owned unit comes within its
-//!   FBI `SightDistance`. Once spotted, the enemy gains the
-//!   [`Spotted`] marker and stays visible permanently — matches the
-//!   "memory" MVP from plan §10.3. Full per-team vision (§6) is
-//!   deferred.
+//!   units are visible iff currently within any player-team unit's
+//!   FBI `SightDistance`; the [`Spotted`] marker is added/removed in
+//!   lockstep so downstream consumers (minimap filter) get cheap
+//!   reads. Full active LoS, not the memory variant.
 //!
 //! The two systems partition on [`Cloaked`]: cloak handles entities
 //! with the marker, fog handles everything else, so their writes to
-//! [`Visibility`] don't race. AI teams keep perfect information
-//! internally — the fog only affects rendering.
+//! [`Visibility`] don't race. AI teams ignore both systems and query
+//! the world directly — the fog only affects rendering.
 
 use bevy::prelude::*;
 
@@ -33,18 +33,25 @@ use crate::units::content::unit_registry::UnitRegistry;
 /// "player" — defaults to team 0. A future MP build would set this
 /// per client.
 #[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct PlayerTeam(pub u8);
+pub struct PlayerTeam(pub TeamId);
+
+impl PlayerTeam {
+    fn matches(self, team: &TeamId) -> bool {
+        self.0 == *team
+    }
+}
 
 /// Marker: this unit hides from enemies unless a detector is close.
 /// Worms carry it permanently; Logic Bombs carry it until they detonate.
 #[derive(Component)]
 pub struct Cloaked;
 
-/// Marker: a non-cloaked enemy unit that the player has observed at
-/// least once via the fog-of-war sight pass. Once set, never removed
-/// — matches the "memory" fog variant in plan §10.3. A full
-/// LoS-based §6 fog would revoke visibility when sight breaks; this
-/// MVP doesn't.
+/// Marker: this unit is currently visible to the [`PlayerTeam`].
+/// Friendly units always carry it (they're always visible); enemies
+/// have it added when they enter sight and removed when they leave.
+/// Maintained in lockstep with [`Visibility`] by
+/// [`update_fog_visibility`] so minimap / HUD systems can filter on
+/// it cheaply.
 #[derive(Component)]
 pub struct Spotted;
 
@@ -54,15 +61,12 @@ pub struct Spotted;
 /// 60 Hz. Matches the cadence of `count_small_buildings`.
 pub const VISIBILITY_REFRESH_INTERVAL: f32 = 0.1;
 
-/// Shared refresh timer for both `update_cloak_visibility` and
-/// `update_fog_visibility`. Each system ticks it independently from
-/// its own local counter so neither blocks the other.
+/// Refresh timer for `update_cloak_visibility`. `update_fog_visibility`
+/// uses its own `Local<f32>`; the two ticks may land on adjacent
+/// frames, which is fine — both feed `Visibility` and don't depend
+/// on each other.
 #[derive(Resource, Default)]
 pub struct VisibilityRefreshTimer(pub f32);
-
-/// Retained for back-compat with systems that still reference the old
-/// name. New callers should use [`VisibilityRefreshTimer`].
-pub type CloakRefreshTimer = VisibilityRefreshTimer;
 
 /// Visibility for cloaked units (Worms / Logic Bombs) from the
 /// [`PlayerTeam`]'s perspective.
@@ -90,7 +94,7 @@ pub fn update_cloak_visibility(
 
     let detectors: Vec<(Vec3, f32)> = detectors_q
         .iter()
-        .filter(|(team, _, _)| team.0 == player.0)
+        .filter(|(team, _, _)| player.matches(team))
         .filter_map(|(_, ut, gtf)| {
             let radar = unit_registry.radar_distance(ut.0);
             (radar > 0.0).then(|| (gtf.translation(), radar * radar))
@@ -98,7 +102,7 @@ pub fn update_cloak_visibility(
         .collect();
 
     for (team, gtf, mut vis) in &mut cloaked_q {
-        if team.0 == player.0 {
+        if player.matches(team) {
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }
@@ -142,15 +146,16 @@ pub struct CloakFadeMaterials {
 #[allow(clippy::type_complexity)]
 pub fn install_cloak_fade_materials(
     mut commands: Commands,
+    player: Res<PlayerTeam>,
     new_cloaked: Query<(Entity, &TeamId, &Children), (Added<Cloaked>, Without<CloakFadeMaterials>)>,
     piece_q: Query<&Children, With<PieceIndex>>,
     leaf_q: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // With every team player-controllable, every cloaked unit is
-    // "friendly" and gets the faded-preview material so the player can
-    // see what they own.
-    for (entity, _team, children) in &new_cloaked {
+    for (entity, team, children) in &new_cloaked {
+        if !player.matches(team) {
+            continue;
+        }
         let mut overrides = Vec::new();
         let mut stack: Vec<Entity> = children.iter().collect();
         while let Some(node) = stack.pop() {
@@ -234,7 +239,7 @@ pub fn update_fog_visibility(
             &mut Visibility,
             Has<Spotted>,
         ),
-        (With<UnitType>, Without<Cloaked>),
+        (With<UnitType>, Without<Cloaked>, Without<Dying>),
     >,
     mut commands: Commands,
 ) {
@@ -248,7 +253,7 @@ pub fn update_fog_visibility(
     // the player has no units alive (then everything is hidden).
     let viewers: Vec<(Vec3, f32)> = viewers_q
         .iter()
-        .filter(|(team, _, _)| team.0 == player.0)
+        .filter(|(team, _, _)| player.matches(team))
         .map(|(_, ut, gtf)| {
             let sight = unit_registry.sight_distance(ut.0);
             (gtf.translation(), sight * sight)
@@ -258,7 +263,7 @@ pub fn update_fog_visibility(
     for (entity, team, gtf, mut vis, was_spotted) in &mut targets_q {
         // Friendly units always visible to the player; their Spotted
         // marker stays in sync so the minimap shows them.
-        if team.0 == player.0 {
+        if player.matches(team) {
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }
