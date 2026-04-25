@@ -5,7 +5,7 @@ use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, RayMeshHit};
 use bevy::prelude::*;
 
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::UnitType;
+use crate::units::components::{TeamId, UnitType};
 
 pub(super) struct SelectionCorePlugin;
 
@@ -58,6 +58,11 @@ pub struct Hovered;
 /// Minimum drag distance in pixels before it counts as a box-select.
 const DRAG_THRESHOLD: f32 = 8.0;
 
+/// Window for double-click recognition (seconds). Standard OS default
+/// is ~500 ms; we run tighter so a slow second click doesn't surprise
+/// the user with a select-all.
+const DOUBLE_CLICK_INTERVAL: f32 = 0.30;
+
 /// Tracks drag state for box selection.
 #[derive(Resource, Default)]
 pub struct DragState {
@@ -70,6 +75,11 @@ pub struct DragState {
     /// clicking a build icon doesn't also deselect the constructor the
     /// click was targeting. Cleared on the matching release.
     started_on_ui: bool,
+    /// (timestamp, entity) of the last click that landed on a unit. A
+    /// second click on the same entity within
+    /// [`DOUBLE_CLICK_INTERVAL`] expands the selection to all visible
+    /// units of the same `(UnitType, TeamId)` on screen.
+    last_click: Option<(f32, Entity)>,
 }
 
 /// Visual overlay for the selection box.
@@ -107,8 +117,9 @@ fn update_hover(
 /// - **Plain click/drag** -- replace the current selection.
 /// - **Shift+click/drag** -- add to the current selection.
 /// - **Ctrl+click** -- toggle the clicked unit in/out of the selection.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_selection(
+    time: Res<Time>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
@@ -116,6 +127,8 @@ fn handle_selection(
     hovered_q: Query<Entity, With<Hovered>>,
     selected_q: Query<Entity, With<Selected>>,
     unit_q: Query<(Entity, &GlobalTransform), With<UnitType>>,
+    kind_team_q: Query<(&UnitType, &TeamId)>,
+    same_kind_q: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
     ui_interactions: Query<&Interaction>,
     attack_mode: Res<crate::interaction::ability::AttackGroundMode>,
@@ -240,6 +253,47 @@ fn handle_selection(
             }
         } else if let Some(entity) = hovered_q.iter().next() {
             commands.entity(entity).insert(Selected);
+
+            // Double-click: expand selection to every visible unit of the
+            // same `(UnitType, TeamId)` currently on screen. The same-team
+            // filter avoids the surprising "click your bug, get every
+            // bug on the map (including AI's)" outcome.
+            let now = time.elapsed_secs();
+            let prior_was_double = drag_state
+                .last_click
+                .is_some_and(|(t, e)| e == entity && (now - t) <= DOUBLE_CLICK_INTERVAL);
+            if prior_was_double
+                && let Ok((kind, team)) = kind_team_q.get(entity)
+                && let Ok((camera, camera_transform)) = camera_q.single()
+                && let Some(window) = windows.single().ok()
+            {
+                let win_size = Vec2::new(window.width(), window.height());
+                for (other, other_kind, other_team, gtf, vis) in &same_kind_q {
+                    if other_kind.0 != kind.0 || other_team.0 != team.0 {
+                        continue;
+                    }
+                    if matches!(*vis, Visibility::Hidden) {
+                        continue;
+                    }
+                    let Ok(screen_pos) =
+                        camera.world_to_viewport(camera_transform, gtf.translation())
+                    else {
+                        continue;
+                    };
+                    if screen_pos.x >= 0.0
+                        && screen_pos.x <= win_size.x
+                        && screen_pos.y >= 0.0
+                        && screen_pos.y <= win_size.y
+                    {
+                        commands.entity(other).insert(Selected);
+                    }
+                }
+                // Reset so a third click in quick succession doesn't
+                // re-trigger the expansion (already at maximum scope).
+                drag_state.last_click = None;
+            } else {
+                drag_state.last_click = Some((now, entity));
+            }
         }
 
         drag_state.start = None;

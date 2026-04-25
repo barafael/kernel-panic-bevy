@@ -3,6 +3,7 @@
 //! Sub-modules are composed here; only `Selected` and `SelectionPlugin` leak out.
 
 mod core;
+mod groups;
 mod health_bars;
 mod highlight;
 mod right_click;
@@ -16,6 +17,7 @@ pub(crate) use self::core::ground_hit;
 pub(crate) use self::right_click::apply_ordered_command;
 
 use self::core::SelectionCorePlugin;
+use self::groups::UnitGroupsPlugin;
 use health_bars::HealthBarsPlugin;
 use highlight::HighlightPlugin;
 use right_click::RightClickPlugin;
@@ -26,6 +28,7 @@ impl Plugin for SelectionPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             SelectionCorePlugin,
+            UnitGroupsPlugin,
             RightClickPlugin,
             HighlightPlugin,
             HealthBarsPlugin,

@@ -503,9 +503,15 @@ focused chunk when we're ready.
 
 ### 10.1 Selection / input
 
-- Double-click to select every visible unit of the same kind.
-- Unit groups: `Ctrl-1..9` to assign, `1..9` to recall (and center camera
-  on the group).
+- ✅ Double-click to select every visible unit of the same kind —
+  filtered to the click target's `(UnitType, TeamId)` and to units
+  currently on screen + not `Visibility::Hidden`. 300 ms recognition
+  window; `last_click` tracked in `DragState`.
+- ✅ Unit groups: `Ctrl-1..9` assigns the live selection, plain
+  `1..9` recalls (replace), `Shift-1..9` recalls (additive). Lives
+  in `interaction::selection::groups`. Camera centering on recall
+  is still TODO; would slot into [`RtsCameraState`] when the group
+  has any live members.
 - Builder placement UX pass — match the original Kernel Panic cursor
   behaviour when picking a datavent.
 
