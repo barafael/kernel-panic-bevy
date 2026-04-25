@@ -139,6 +139,10 @@ pub(super) fn tick_weapon_fx(
         }
         let tail_raw = (lead_raw - bolt.max_length).max(0.0);
         if tail_raw >= bolt.total_distance {
+            if let Some(caps) = bolt.caps.as_ref() {
+                commands.entity(caps.lead_entity).despawn();
+                commands.entity(caps.tail_entity).despawn();
+            }
             commands.entity(entity).despawn();
             continue;
         }
@@ -180,6 +184,35 @@ pub(super) fn tick_weapon_fx(
             let tr = tail_pos + offset;
             let tl = lead_pos + offset;
             rewrite_quad_positions(mesh, bl, br, tr, tl);
+        }
+
+        // Rewrite endcap quads (texture2). Upstream's `dir2` is the
+        // camera-aligned forward axis: perpendicular to dir1 and to
+        // the camera ray, pointing roughly along the bolt. Each cap
+        // is a `2*thickness × thickness` quad anchored at the bolt's
+        // tip, extending one thickness *outward* (forward at the
+        // lead, backward at the tail).
+        if let Some(caps) = bolt.caps.as_ref() {
+            let dir2 = to_cam.cross(dir1).try_normalize().unwrap_or(bolt.direction);
+            let cap_depth = dir2 * bolt.thickness;
+            // Lead cap: extends *past* the lead in the forward direction
+            // so it reads as a rounded tip at the leading edge.
+            if let Some(mesh) = meshes.get_mut(&caps.lead_mesh) {
+                let bl = lead_pos - offset + cap_depth;
+                let br = lead_pos - offset;
+                let tr = lead_pos + offset;
+                let tl = lead_pos + offset + cap_depth;
+                rewrite_quad_positions(mesh, bl, br, tr, tl);
+            }
+            // Tail cap: extends *past* the tail in the backward direction
+            // for the trailing tip.
+            if let Some(mesh) = meshes.get_mut(&caps.tail_mesh) {
+                let bl = tail_pos - offset;
+                let br = tail_pos - offset - cap_depth;
+                let tr = tail_pos + offset - cap_depth;
+                let tl = tail_pos + offset;
+                rewrite_quad_positions(mesh, bl, br, tr, tl);
+            }
         }
     }
 
@@ -514,6 +547,7 @@ mod tests {
                     thickness: 1.0,
                     elapsed: 0.0,
                     mesh: mesh_handle,
+                    caps: None,
                 },
                 Transform::IDENTITY,
                 DelayedHit {
@@ -587,6 +621,7 @@ mod tests {
                 thickness: 1.0,
                 elapsed: 0.0,
                 mesh: mesh_handle,
+                caps: None,
             },
             Transform::IDENTITY,
         ));

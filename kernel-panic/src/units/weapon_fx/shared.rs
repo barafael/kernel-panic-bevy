@@ -169,6 +169,25 @@ pub(super) struct LaserBolt {
     pub elapsed: f32,
     /// Per-entity mesh the tick system rewrites each frame.
     pub mesh: Handle<Mesh>,
+    /// Optional `texture2` end-caps that mirror upstream
+    /// `LaserProjectile::Draw`'s endcap pass. When `Some`, the tick
+    /// system rewrites the lead and tail cap quads each frame from the
+    /// same camera math, and despawns the cap entities alongside the
+    /// bolt. Only `Byte`'s `MegaBeam` (`texture2=bytelaser`) sets this
+    /// in the KP roster.
+    pub caps: Option<BoltCaps>,
+}
+
+/// Companion entities + meshes for a [`LaserBolt`]'s `texture2`
+/// endcaps. Each cap is a 4-vertex quad anchored at the lead / tail
+/// of the bolt, extending one `thickness` outward along the
+/// camera-aligned forward axis (`dir2` in upstream
+/// `LaserProjectile::Draw`).
+pub(super) struct BoltCaps {
+    pub lead_entity: Entity,
+    pub tail_entity: Entity,
+    pub lead_mesh: Handle<Mesh>,
+    pub tail_mesh: Handle<Mesh>,
 }
 
 /// A projectile traveling from origin to target.

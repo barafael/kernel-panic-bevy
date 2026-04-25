@@ -314,10 +314,13 @@ weapon = 30 frames; was 6 s host-side default before).
 - ⏳ **`scrollspeed`**: DOS_Beam's 4-UV animation still not wired
   (upstream parses but doesn't animate either — matching Spring
   literally means still flat).
-- ⏳ **`texture2` endcaps**: upstream wraps two extra half-quads
-  at each end via `ydir` for round-cap textures. Byte's `MegaBeam`
-  authors `texture2=megabeamring` and would benefit; deferred since
-  no other KP weapon uses endcaps.
+- ✅ **`texture2` endcaps**: `LaserBolt` gained an optional `caps`
+  field that holds the lead + tail cap entities + their meshes;
+  `build_bolt_caps` resolves `weapon.texture2` and spawns them if
+  the texture is in `CegRegistry::resolve_texture` (today only
+  Byte's `MegaBeam` with `bytelaser`). Tick rewrites both quads
+  using `dir2 = to_cam.cross(dir1)` per upstream
+  `LaserProjectile::Draw`; despawn cleans up cap entities.
 - ⏳ **`intensity`** — already feeds emissive strength on the
   material via `BeamMaterialCache`; no further work needed unless
   we want values > 10 to bloom harder.
@@ -340,10 +343,17 @@ and AoE splashes with a single code path; a pragmatic substitute for the full CE
 particle system. The ~40 upstream explosion TDFs are still not parsed (full per-weapon
 CEG emitter stacks remain deferred).
 
-### 4.4 Projectile Trails & Smoke (Low)
+### 4.4 Projectile Trails & Smoke — ✅ Mostly done
 
-`cegTag` and `smoketrail=1` parsed but unused. BugCannon, FlowMissile, Geometric should
-have visible trails.
+`build_projectile_trail` already spawns a textured ribbon for any
+weapon with `smoketrail=1` or a non-empty `cegTag`. Geometric
+(`texture2=pointertrail`) and FlowMissile (`texture2=flowtrail`)
+both render their authored trail textures now —`flowtrail` was the
+missing entry in `CegRegistry::resolve_texture` and trails fell
+back to an untextured strip; fixed.
+
+BugCannon's `smoketrail=1` is commented out upstream, so it stays
+trailless to match.
 
 ### 4.5 Muzzle Flash — ✅ DONE
 

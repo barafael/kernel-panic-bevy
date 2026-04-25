@@ -108,6 +108,7 @@ impl CegRegistry {
             "hexgridhole" => Some("hexgridhole.tga"),
             "hexastar" => Some("hexastar.tga"),
             "pointertrail" => Some("pointershottrail.tga"),
+            "flowtrail" => Some("flowtrail1.tga"),
             "firetrail" => Some("firetrail.tga"),
             "sparkle" => Some("sparkle.tga"),
             "bubbles" => Some("bubbles.tga"),
@@ -743,6 +744,10 @@ mod tests {
         assert_eq!(
             CegRegistry::resolve_texture("pointertrail"),
             Some("pointershottrail.tga")
+        );
+        assert_eq!(
+            CegRegistry::resolve_texture("flowtrail"),
+            Some("flowtrail1.tga")
         );
     }
 

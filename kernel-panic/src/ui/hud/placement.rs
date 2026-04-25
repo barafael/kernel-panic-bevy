@@ -32,18 +32,23 @@ pub(super) struct PlacementPlugin;
 
 impl Plugin for PlacementPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlacementMode>().add_systems(
-            Update,
-            (
-                begin_placement,
-                update_placement_ghost,
-                commit_or_cancel_placement,
-            )
-                .chain()
-                // Run before selection so consumed mouse clicks don't
-                // bleed through into click-to-select.
-                .before(SelectionSet::Select),
-        );
+        app.init_resource::<PlacementMode>()
+            .init_resource::<GeoHighlightAssets>()
+            .add_systems(
+                Update,
+                (
+                    (
+                        begin_placement,
+                        update_placement_ghost,
+                        commit_or_cancel_placement,
+                    )
+                        .chain()
+                        // Run before selection so consumed mouse clicks don't
+                        // bleed through into click-to-select.
+                        .before(SelectionSet::Select),
+                    pulse_geo_highlights,
+                ),
+            );
     }
 }
 
@@ -215,6 +220,135 @@ fn update_placement_ghost(
         } else {
             GHOST_INVALID_COLOR
         };
+    }
+}
+
+/// Edge length (elmos) of the green highlight square that hovers over
+/// each unclaimed datavent during placement mode. Matches upstream
+/// `kp_geoshighlight.lua`'s `Width=32` (the lua draws ±Width vertices,
+/// so the square spans 64 elmos).
+const GEO_HIGHLIGHT_EXTENT: f32 = 64.0;
+/// Hover height above the ground so the quad doesn't z-fight with the
+/// terrain mesh.
+const GEO_HIGHLIGHT_HOVER: f32 = 2.0;
+/// Full pulse period. Upstream's widget runs at 1.25 Hz with a 50%
+/// duty cycle (visible 0.4 s, hidden 0.4 s, repeat).
+const GEO_PULSE_PERIOD: f32 = 0.8;
+
+/// Marker for a `GeoventSmoker`-attached highlight quad spawned during
+/// placement mode and despawned when placement ends. Toggled visible /
+/// hidden each frame to produce the upstream blink.
+#[derive(Component)]
+struct GeoHighlight;
+
+/// Lazy-initialised mesh + material shared across every geovent's
+/// highlight quad.
+#[derive(Resource, Default)]
+struct GeoHighlightAssets {
+    mesh: Option<Handle<Mesh>>,
+    material: Option<Handle<StandardMaterial>>,
+}
+
+impl GeoHighlightAssets {
+    fn mesh_handle(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        self.mesh
+            .get_or_insert_with(|| {
+                meshes.add(Rectangle::new(GEO_HIGHLIGHT_EXTENT, GEO_HIGHLIGHT_EXTENT))
+            })
+            .clone()
+    }
+
+    fn material_handle(
+        &mut self,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        self.material
+            .get_or_insert_with(|| {
+                materials.add(StandardMaterial {
+                    base_color: Color::linear_rgb(0.3, 1.0, 0.4),
+                    unlit: true,
+                    alpha_mode: AlphaMode::Add,
+                    ..default()
+                })
+            })
+            .clone()
+    }
+}
+
+/// During placement mode, ensure every unclaimed datavent has a
+/// pulsing green highlight on the ground; despawn highlights when
+/// placement ends. Mirrors upstream `kp_geoshighlight.lua` so the
+/// player can spot every legal build site at a glance instead of
+/// hunting near the cursor.
+#[allow(clippy::too_many_arguments)]
+fn pulse_geo_highlights(
+    time: Res<Time>,
+    mode: Res<PlacementMode>,
+    mut assets: ResMut<GeoHighlightAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
+    highlights: Query<(Entity, &ChildOf), With<GeoHighlight>>,
+    mut highlight_vis: Query<&mut Visibility, With<GeoHighlight>>,
+    mut commands: Commands,
+) {
+    let active = mode.active.is_some();
+
+    if !active {
+        // Tear down any leftover highlights from a previous placement.
+        for (highlight, _) in &highlights {
+            commands.entity(highlight).despawn();
+        }
+        return;
+    }
+
+    // Spawn missing highlights for every currently-unclaimed vent.
+    let already_lit: std::collections::HashSet<Entity> = highlights
+        .iter()
+        .map(|(_, parent)| parent.parent())
+        .collect();
+    let mesh = assets.mesh_handle(&mut meshes);
+    let material = assets.material_handle(&mut materials);
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    for (vent_entity, _) in &vents {
+        if already_lit.contains(&vent_entity) {
+            continue;
+        }
+        commands.entity(vent_entity).with_children(|builder| {
+            // GeoventSmoker's transform is already at the vent's world
+            // position, so the highlight just sits at parent origin
+            // raised by HOVER to dodge terrain z-fighting.
+            builder.spawn((
+                GeoHighlight,
+                Mesh3d(mesh.clone()),
+                MeshMaterial3d(material.clone()),
+                Transform::from_xyz(0.0, GEO_HIGHLIGHT_HOVER, 0.0).with_rotation(flat),
+            ));
+        });
+    }
+
+    // Drop highlights whose parent vent got claimed mid-placement so
+    // committed sites stop pulsing.
+    let unclaimed: std::collections::HashSet<Entity> = vents.iter().map(|(e, _)| e).collect();
+    for (highlight, parent) in &highlights {
+        if !unclaimed.contains(&parent.parent()) {
+            commands.entity(highlight).despawn();
+        }
+    }
+
+    // Square-wave blink at 1.25 Hz: visible during the first half of
+    // every 0.8 s window, hidden during the second.
+    let phase = time.elapsed_secs() % GEO_PULSE_PERIOD;
+    let visible = phase < GEO_PULSE_PERIOD * 0.5;
+    let target = if visible {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in &mut highlight_vis {
+        if *vis != target {
+            *vis = target;
+        }
     }
 }
 

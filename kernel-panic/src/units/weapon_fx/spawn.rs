@@ -697,6 +697,22 @@ fn spawn_laser_bolt(
         tile_count,
         materials,
     );
+    // Optional endcaps from `texture2`. Upstream's `LaserProjectile::Draw`
+    // wraps two extra half-quads at the lead and tail using `texture2`
+    // to round off the bolt — `Byte`'s `MegaBeam` is the only weapon in
+    // the KP roster that authors this (`texture2=bytelaser`); everyone
+    // else either omits texture2 or sets it to `none`. Skipped when the
+    // lookup fails so a typo in the TDF doesn't crash the game.
+    let caps = build_bolt_caps(
+        weapon,
+        edge_color,
+        commands,
+        meshes,
+        materials,
+        images,
+        model_cache,
+        cache,
+    );
     let outer_mesh = meshes.add(build_billboard_quad_mesh());
     let outer_entity = commands
         .spawn((
@@ -709,6 +725,7 @@ fn spawn_laser_bolt(
                 thickness,
                 elapsed: 0.0,
                 mesh: outer_mesh.clone(),
+                caps,
             },
             Mesh3d(outer_mesh),
             MeshMaterial3d(outer_mat),
@@ -744,6 +761,9 @@ fn spawn_laser_bolt(
                 thickness: core_thickness,
                 elapsed: 0.0,
                 mesh: core_mesh.clone(),
+                // Caps live on the outer bolt only — duplicating them on
+                // the core would just sit a second pair on top.
+                caps: None,
             },
             Mesh3d(core_mesh),
             MeshMaterial3d(core_mat),
@@ -860,6 +880,64 @@ fn spawn_projectile(
             Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(visual_scale)),
         ))
         .id()
+}
+
+/// Resolve `weapon.texture2` and spawn the lead + tail endcap entities
+/// for a [`LaserBolt`]. Returns `None` when the texture is unset / not
+/// in the resolver, so callers fall back cleanly to a body-only bolt.
+#[allow(clippy::too_many_arguments)]
+fn build_bolt_caps(
+    weapon: &spring_tdf::WeaponDef,
+    edge_color: bevy::color::LinearRgba,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
+    cache: &mut BeamMaterialCache,
+) -> Option<super::shared::BoltCaps> {
+    if weapon.texture2.is_empty() || weapon.texture2.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    let filename = super::ceg::CegRegistry::resolve_texture(&weapon.texture2)?;
+    let (handle, _, _) =
+        crate::units::assets::meshes::load_beam_texture(filename, model_cache, images)?;
+
+    // Caps share a material across the bolt's lifetime; key it by the
+    // texture filename so different texture2 weapons don't collide.
+    let cap_mat = cache.get_or_create_tiled(
+        edge_color,
+        true,
+        weapon.intensity,
+        Some((filename, handle)),
+        0,
+        materials,
+    );
+
+    let lead_mesh = meshes.add(build_billboard_quad_mesh());
+    let tail_mesh = meshes.add(build_billboard_quad_mesh());
+
+    let lead_entity = commands
+        .spawn((
+            Mesh3d(lead_mesh.clone()),
+            MeshMaterial3d(cap_mat.clone()),
+            Transform::IDENTITY,
+        ))
+        .id();
+    let tail_entity = commands
+        .spawn((
+            Mesh3d(tail_mesh.clone()),
+            MeshMaterial3d(cap_mat),
+            Transform::IDENTITY,
+        ))
+        .id();
+
+    Some(super::shared::BoltCaps {
+        lead_entity,
+        tail_entity,
+        lead_mesh,
+        tail_mesh,
+    })
 }
 
 /// Spawn a companion entity that carries the projectile's trail mesh.
