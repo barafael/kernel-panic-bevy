@@ -390,23 +390,29 @@ Easy (slower production), Normal, Hard (faster production, better targeting, mul
 
 ---
 
-## 6. Fog of War — ✅ MVP (memory-only)
+## 6. Fog of War — ✅ Active LoS (single-perspective)
 
-The §10.3 MVP landed: `cloak::update_fog_visibility` runs at 10 Hz in
-the Animate set; any non-cloaked, non-friendly unit within a
-player-team unit's FBI `SightDistance` gains the [`Spotted`] marker
-and becomes visible. Once set, `Spotted` is never revoked — this is
-the "memory" variant, not full LoS. Cloaked units (Worm / Logic
-Bomb) keep their existing detector-based visibility via
-`update_cloak_visibility`; the two systems partition on the
+`cloak::update_fog_visibility` runs at 10 Hz in the Animate set from
+the [`PlayerTeam`] resource's perspective (defaults to team 0). Any
+non-cloaked, non-friendly unit within a player-team unit's FBI
+`SightDistance` is `Visible` and tagged [`Spotted`]; otherwise
+`Hidden` and `Spotted` is removed. Sight is revoked when the
+observer dies or moves away — full active LoS, not the memory
+variant. Cloaked units (Worm / Logic Bomb) get detector-based
+visibility via `update_cloak_visibility` against player-team units
+with non-zero FBI `RadarDistance`; the two systems partition on the
 [`Cloaked`] marker so neither races the other's writes.
+
+AI teams query the world directly and ignore `Visibility`, so they
+keep perfect information internally — fog only affects rendering.
 
 Terrain is always visible — no exploration mechanic yet.
 
-Deferred to full §6: active revoke on sight loss, per-team
-visibility grids (AI teams still have perfect information
-internally), terrain chunks only revealed once scouted, Worm-while-
-attacking reveal rules.
+Deferred: per-client `PlayerTeam` (currently a single global
+resource for sandbox mode), terrain chunks only revealed once
+scouted, Worm-while-attacking reveal rules (blocked on autohold
+toggle / `CommandQueue` so we know when a Worm is choosing to
+attack).
 
 ---
 
@@ -453,15 +459,15 @@ Done since last plan: §3.2 packet buffer, §3.3 cloaking, §3.4 Bug↔Exploit m
 refinement (diffed against `infection.lua`), §3.7 Kernel Boost, §3.8 Flow speed,
 §3.9 Logic Bomb detonation + Debug placement, §4.3 impact bursts, §4.6 QueryWeapon1
 script callback, §4.7 shields, §5.1 AI Expand + Defend, §1.6 Byte closed-state armor,
-QTPFS slope cap matched to upstream's `1 - cos(deg × 1.5)` encoding.
+QTPFS slope cap matched to upstream's `1 - cos(deg × 1.5)` encoding,
+§6 fog of war (full active LoS from `PlayerTeam` perspective).
 
 | # | Item | Section | Rationale |
 |---|------|---------|-----------|
 | 1 | Beam textures + projectile models | 4.1–4.2 | Visual polish |
-| 2 | Fog of war (full per-team) | 6 | MVP landed; real LoS still open |
-| 3 | WASM pre-bake + deploy | 8 | Browser-playable |
-| 4 | Audio | 7 | Weapon sounds highest priority |
-| 5 | Multiplayer | 9 | Endgame feature |
+| 2 | WASM pre-bake + deploy | 8 | Browser-playable |
+| 3 | Audio | 7 | Weapon sounds highest priority |
+| 4 | Multiplayer | 9 | Endgame feature |
 
 ---
 
@@ -488,13 +494,12 @@ focused chunk when we're ready.
 - Decide `glyph_zero` / `glyph_one`: keep the procedural baseline or
   ship a sprite asset. Benchmark first.
 
-### 10.3 Fog-of-war clarification
+### 10.3 Fog-of-war (resolved)
 
-§6 covers the full fog system; the MVP the original uses is simpler —
-the entire map is always visible, but buildings / units are only
-revealed when they've been built (i.e. no Line-of-Sight; it's a
-"memory" system, not per-frame vision). Worth implementing that
-cheaper variant first before the full per-team vision grid.
+Done — see §6. We landed full active LoS rather than the cheaper
+"memory" variant the original uses; revoking visibility when the
+observer dies or moves was easy on top of the same per-frame scan,
+so there was no reason to ship the simpler version first.
 
 ### 10.4 Profiling / performance
 

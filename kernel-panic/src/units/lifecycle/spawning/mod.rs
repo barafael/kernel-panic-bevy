@@ -477,13 +477,12 @@ pub fn spawn_unit(
     if matches!(kind, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier) {
         commands.entity(unit_entity).insert(Homebase);
     }
-    // While there is no real "enemy" team — every faction is AI-driven
-    // but human-controllable — spot every unit at spawn so the fog-of-war
-    // pass leaves them all visible. Switch this back to a per-team check
-    // when a proper player/AI distinction lands.
-    commands
-        .entity(unit_entity)
-        .insert(crate::units::mechanics::cloak::Spotted);
+    // Why: visibility is now driven by `update_fog_visibility` from
+    // the [`PlayerTeam`] perspective. Friendlies get `Spotted` on the
+    // first fog tick (≤100 ms later); enemies stay un-spotted until
+    // a friendly observer enters sight. There's a sub-100 ms flash of
+    // a fresh enemy spawn before the next fog tick hides it — at the
+    // throttle cadence we use, indistinguishable from the spawn fade.
     // Pointer is the only upstream unit whose Deployable cycle is
     // movement-gated ("drive closed, sit open"). Byte *does* have
     // `Open()` / `Close()` COB routines, but upstream's `byte.bos`

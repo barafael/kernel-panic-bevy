@@ -220,16 +220,11 @@ impl UnitRegistry {
             .map_or(0.0, |d| if d.kamikaze { d.kamikaze_distance } else { 0.0 })
     }
 
-    /// Detector radius (elmos) — a unit can reveal cloaked enemies within
-    /// this range. Maps to the FBI `RadarDistance` field; zero means this
-    /// unit kind does not detect cloaked targets.
-    ///
-    /// Currently unused: with AI removed and every team player-
-    /// controllable, there is no "enemy" perspective to hide cloaked
-    /// units from. Kept in the API for when a real player/AI split
-    /// returns.
-    #[allow(dead_code)]
-    pub fn detector_range(&self, kind: UnitKind) -> f32 {
+    /// Detector radius (elmos) — a unit reveals cloaked enemies within
+    /// this range. Maps to the FBI `RadarDistance` field; zero means
+    /// this unit kind does not detect cloaked targets. Read by
+    /// `update_cloak_visibility` against the [`PlayerTeam`].
+    pub fn radar_distance(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.radar_distance)
     }
 

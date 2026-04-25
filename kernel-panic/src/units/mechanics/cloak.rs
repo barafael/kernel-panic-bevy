@@ -24,7 +24,16 @@
 use bevy::prelude::*;
 
 use crate::units::assets::animation::PieceIndex;
+use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
+use crate::units::content::unit_registry::UnitRegistry;
+
+/// Which team's perspective the fog-of-war pass applies from. In
+/// sandbox mode (every faction human-controllable) this picks the
+/// "player" — defaults to team 0. A future MP build would set this
+/// per client.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct PlayerTeam(pub u8);
 
 /// Marker: this unit hides from enemies unless a detector is close.
 /// Worms carry it permanently; Logic Bombs carry it until they detonate.
@@ -55,14 +64,23 @@ pub struct VisibilityRefreshTimer(pub f32);
 /// name. New callers should use [`VisibilityRefreshTimer`].
 pub type CloakRefreshTimer = VisibilityRefreshTimer;
 
-/// Decide whether every cloaked unit is spotted and set its
-/// `Visibility` accordingly. A cloaked unit is spotted when any
-/// opposing team's detector is within that detector's radar range.
+/// Visibility for cloaked units (Worms / Logic Bombs) from the
+/// [`PlayerTeam`]'s perspective.
+///
+/// - Friendly cloaked: always visible (`install_cloak_fade_materials`
+///   handles the half-alpha rendering).
+/// - Enemy cloaked: hidden unless a player-team detector
+///   (Assembler / Trojan / Gateway with FBI `RadarDistance > 0`)
+///   is within range.
+///
 /// Throttled to [`VISIBILITY_REFRESH_INTERVAL`].
 pub fn update_cloak_visibility(
     time: Res<Time>,
     mut timer: ResMut<VisibilityRefreshTimer>,
-    mut cloaked: Query<&mut Visibility, With<Cloaked>>,
+    player: Res<PlayerTeam>,
+    unit_registry: Res<UnitRegistry>,
+    detectors_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
+    mut cloaked_q: Query<(&TeamId, &GlobalTransform, &mut Visibility), With<Cloaked>>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < VISIBILITY_REFRESH_INTERVAL {
@@ -70,9 +88,33 @@ pub fn update_cloak_visibility(
     }
     timer.0 = 0.0;
 
-    for mut visibility in &mut cloaked {
-        if *visibility != Visibility::Visible {
-            *visibility = Visibility::Visible;
+    let detectors: Vec<(Vec3, f32)> = detectors_q
+        .iter()
+        .filter(|(team, _, _)| team.0 == player.0)
+        .filter_map(|(_, ut, gtf)| {
+            let radar = unit_registry.radar_distance(ut.0);
+            (radar > 0.0).then(|| (gtf.translation(), radar * radar))
+        })
+        .collect();
+
+    for (team, gtf, mut vis) in &mut cloaked_q {
+        if team.0 == player.0 {
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
+            continue;
+        }
+        let pos = gtf.translation();
+        let detected = detectors
+            .iter()
+            .any(|(dp, radar_sq)| pos.distance_squared(*dp) <= *radar_sq);
+        let target = if detected {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != target {
+            *vis = target;
         }
     }
 }
@@ -162,21 +204,39 @@ pub fn restore_cloak_fade_materials(
     }
 }
 
-/// Persistent fog-of-war over non-cloaked units. Friendly units stay
-/// visible; enemy units are hidden until any player-team unit comes
-/// within its FBI `SightDistance`, at which point the enemy gains
-/// [`Spotted`] and stays visible for the rest of the match.
+/// Active fog-of-war over non-cloaked units, applied from the
+/// [`PlayerTeam`]'s perspective. Friendly units (team == player)
+/// stay visible. Enemy units are visible iff *currently* within
+/// any friendly unit's FBI `SightDistance`; the [`Spotted`] marker
+/// is added/removed in lockstep with that visibility so downstream
+/// systems (minimap dot filter) can read it cheaply. Sight is
+/// revoked when the friendly observer dies or moves away — full
+/// LoS, not the memory variant.
 ///
-/// Throttled to [`VISIBILITY_REFRESH_INTERVAL`]; uses its own
-/// [`Local`] accumulator so cadence is independent of
-/// `update_cloak_visibility`. Partitioned from cloak via
-/// `Without<Cloaked>` so neither system writes `Visibility` on the
-/// same entity.
+/// AI-controlled teams ignore this entirely; their decision systems
+/// query the world directly.
+///
+/// Throttled to [`VISIBILITY_REFRESH_INTERVAL`]; partitioned from
+/// `update_cloak_visibility` via `Without<Cloaked>` so neither
+/// system writes `Visibility` on the same entity.
 #[allow(clippy::type_complexity)]
 pub fn update_fog_visibility(
     time: Res<Time>,
     mut timer: Local<f32>,
-    mut targets: Query<&mut Visibility, (With<UnitType>, Without<Cloaked>)>,
+    player: Res<PlayerTeam>,
+    unit_registry: Res<UnitRegistry>,
+    viewers_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
+    mut targets_q: Query<
+        (
+            Entity,
+            &TeamId,
+            &GlobalTransform,
+            &mut Visibility,
+            Has<Spotted>,
+        ),
+        (With<UnitType>, Without<Cloaked>),
+    >,
+    mut commands: Commands,
 ) {
     *timer += time.delta_secs();
     if *timer < VISIBILITY_REFRESH_INTERVAL {
@@ -184,9 +244,49 @@ pub fn update_fog_visibility(
     }
     *timer = 0.0;
 
-    for mut visibility in &mut targets {
-        if *visibility != Visibility::Visible {
-            *visibility = Visibility::Visible;
+    // Player-team viewers and their sight-radius squares. Empty if
+    // the player has no units alive (then everything is hidden).
+    let viewers: Vec<(Vec3, f32)> = viewers_q
+        .iter()
+        .filter(|(team, _, _)| team.0 == player.0)
+        .map(|(_, ut, gtf)| {
+            let sight = unit_registry.sight_distance(ut.0);
+            (gtf.translation(), sight * sight)
+        })
+        .collect();
+
+    for (entity, team, gtf, mut vis, was_spotted) in &mut targets_q {
+        // Friendly units always visible to the player; their Spotted
+        // marker stays in sync so the minimap shows them.
+        if team.0 == player.0 {
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
+            if !was_spotted {
+                commands.entity(entity).insert(Spotted);
+            }
+            continue;
+        }
+
+        let pos = gtf.translation();
+        let in_sight = viewers
+            .iter()
+            .any(|(vp, sight_sq)| pos.distance_squared(*vp) <= *sight_sq);
+
+        if in_sight {
+            if !was_spotted {
+                commands.entity(entity).insert(Spotted);
+            }
+            if *vis != Visibility::Visible {
+                *vis = Visibility::Visible;
+            }
+        } else {
+            if was_spotted {
+                commands.entity(entity).remove::<Spotted>();
+            }
+            if *vis != Visibility::Hidden {
+                *vis = Visibility::Hidden;
+            }
         }
     }
 }
