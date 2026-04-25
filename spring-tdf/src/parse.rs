@@ -57,9 +57,16 @@ impl Section {
 
     /// Parse a value as `f32`, returning `0.0` for missing or malformed values.
     pub fn f32(&self, key: &str) -> f32 {
+        self.f32_or(key, 0.0)
+    }
+
+    /// Parse a value as `f32`, returning `default` for missing or malformed
+    /// values. Use when Spring's authored default for a tag is non-zero
+    /// (e.g. `beamdecay` defaults to 1.0 — "no fade" — when omitted).
+    pub fn f32_or(&self, key: &str, default: f32) -> f32 {
         self.get(key)
             .and_then(|v| v.trim().parse().ok())
-            .unwrap_or(0.0)
+            .unwrap_or(default)
     }
 
     /// Parse a value as `bool` (Spring convention: `1` = true, anything else = false).

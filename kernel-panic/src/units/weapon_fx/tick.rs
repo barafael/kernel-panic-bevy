@@ -80,9 +80,25 @@ pub(super) fn tick_weapon_fx(
             .cross(beam_dir)
             .try_normalize()
             .unwrap_or_else(|| Vec3::Y.cross(beam_dir).try_normalize().unwrap_or(Vec3::X));
-        // Fade by shrinking thickness over the lifetime.
-        let fade = (beam.lifetime / beam.max_lifetime).sqrt();
-        let offset = dir1 * beam.thickness * fade;
+        // Decay-aware fade. With `beamdecay` < 1.0 the beam is supposed to
+        // dim its color each sim frame (Spring's `BeamLaserProjectile::Update`
+        // multiplies `coreCol*` / `edgeCol*` by `decay`). We honour that
+        // via vertex colors below; thickness stays full. For weapons
+        // without authored decay (default 1.0) we keep the legacy
+        // sqrt-thickness shrink so a single-frame `beamtime` weapon
+        // still reads as a smooth flash rather than a hard pop.
+        let elapsed_frames = (beam.max_lifetime - beam.lifetime).max(0.0) * 30.0;
+        let intensity = if beam.decay < 1.0 {
+            beam.decay.powf(elapsed_frames)
+        } else {
+            1.0
+        };
+        let thickness_fade = if beam.decay < 1.0 {
+            1.0
+        } else {
+            (beam.lifetime / beam.max_lifetime).sqrt()
+        };
+        let offset = dir1 * beam.thickness * thickness_fade;
         // Match the bolt convention: U=0 at `end` (target-side, where
         // any texture's "arrow tip" / "hit end" should read), U=1 at
         // `start` (shooter-side). Keeps a textured BeamLaser like the
@@ -94,6 +110,7 @@ pub(super) fn tick_weapon_fx(
             let tr = beam.start + offset;
             let tl = beam.end + offset;
             rewrite_quad_positions(mesh, bl, br, tr, tl);
+            rewrite_quad_color(mesh, [intensity, intensity, intensity, 1.0]);
         }
     }
 
@@ -438,6 +455,22 @@ fn rewrite_quad_positions(mesh: &mut Mesh, bl: Vec3, br: Vec3, tr: Vec3, tl: Vec
         positions[1] = br.to_array();
         positions[2] = tr.to_array();
         positions[3] = tl.to_array();
+    }
+}
+
+/// Set all 4 quad vertex colors to `rgba`. Used by the beam path to
+/// apply per-frame `beamdecay` intensity without per-beam material
+/// clones: the cached material's `base_color` carries the weapon's
+/// authored RGB, vertex color carries the time-varying multiplier,
+/// and Bevy's StandardMaterial multiplies them on the GPU.
+fn rewrite_quad_color(mesh: &mut Mesh, rgba: [f32; 4]) {
+    if let Some(VertexAttributeValues::Float32x4(colors)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
+        && colors.len() >= 4
+    {
+        for slot in colors.iter_mut().take(4) {
+            *slot = rgba;
+        }
     }
 }
 

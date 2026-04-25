@@ -56,6 +56,11 @@ pub struct WeaponDef {
     pub duration: f32,
     pub beam_time: f32,
     pub beam_ttl: f32,
+    /// Per-frame RGB multiplier for `BeamLaser` visuals — each sim frame
+    /// the beam's color is multiplied by this value, so `0.8` fades 20%
+    /// per frame and the beam reads as a streak rather than a stripe.
+    /// Default `1.0` means no fade. Spring applies this in
+    /// `BeamLaserProjectile::Update`.
     pub beam_decay: f32,
     /// Texture-UV scroll speed in texels/second along the beam. Used by
     /// the DOS_Beam so the `dosray` 0/1 texture visibly streams along the
@@ -646,7 +651,7 @@ impl WeaponDef {
             duration: s.f32("duration"),
             beam_time: s.f32("beamtime"),
             beam_ttl: s.f32("beamttl"),
-            beam_decay: s.f32("beamdecay"),
+            beam_decay: s.f32_or("beamdecay", 1.0),
             scroll_speed: s.f32("scrollspeed"),
             laser_flare_size: s.f32("laserflaresize"),
             hard_stop: s.bool("hardstop"),

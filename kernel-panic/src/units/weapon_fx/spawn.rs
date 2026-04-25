@@ -542,16 +542,17 @@ fn spawn_textured_beam(
     // fat upstream ribbon.
     let thickness = weapon.thickness.max(1.0);
 
-    // BeamLaser lifetime comes from `beamtime`/`beamttl`; beam_decay
-    // stretches the tail. 0.08 s is a pragmatic floor so single-frame
+    // BeamLaser lifetime comes from `beamtime`/`beamttl`. Color decay is
+    // a separate per-frame multiplier on the vertex colors (see
+    // `BeamVisual.decay`); it doesn't extend the lifetime, contrary to
+    // an earlier port-ism. 0.08 s is a pragmatic floor so single-frame
     // shots still visibly flash.
-    let base_lifetime = if is_beam_laser {
+    let lifetime = if is_beam_laser {
         let ttl_sec = weapon.beam_ttl / 30.0; // beam_ttl is frames @ 30fps
         weapon.beam_time.max(ttl_sec).max(0.08)
     } else {
         weapon.duration.max(0.08)
     };
-    let lifetime = base_lifetime * (1.0 + weapon.beam_decay.max(0.0));
 
     // Tile the texture along beam length so `arrow`'s `>>>>` or
     // `dosray`'s `01010101` stream reads as a sequence of glyphs
@@ -588,6 +589,7 @@ fn spawn_textured_beam(
             lifetime,
             max_lifetime: lifetime,
             mesh: outer_mesh.clone(),
+            decay: weapon.beam_decay,
         },
         Mesh3d(outer_mesh),
         MeshMaterial3d(outer_mat),
@@ -620,6 +622,7 @@ fn spawn_textured_beam(
                 lifetime,
                 max_lifetime: lifetime,
                 mesh: core_mesh.clone(),
+                decay: weapon.beam_decay,
             },
             Mesh3d(core_mesh),
             MeshMaterial3d(core_mat),

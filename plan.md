@@ -297,17 +297,30 @@ weapon = 30 frames; was 6 s host-side default before).
   different cache buckets. Core (inner bright stripe) stays
   untextured so the core stays legibly white over the atlased
   outer.
+- ✅ **`beamdecay`**: per-frame RGB multiplier wired through vertex
+  colors. The shared `BeamMaterialCache` material keeps the
+  weapon's authored RGB; each `BeamVisual` carries the weapon's
+  `decay` and `tick_weapon_fx` writes `[d,d,d,1]` to all 4 vertex
+  colors each frame, where `d = decay^(elapsed_frames)`. Network
+  weapons (`beamdecay=0.8`) now read as fading streaks rather than
+  a thickness-shrinking stripe. Default `1.0` falls back to the
+  legacy sqrt-thickness fade so non-decay beams (Corruption /
+  Retro flashes) still feel smooth at 60 Hz over a 1-2 frame
+  `beamtime`.
+- ✅ **Two-quad edge + core**: outer + core are independent
+  camera-rewritten quads (`build_billboard_quad_mesh`) at different
+  thicknesses; matches upstream's `BeamLaserProjectile::Draw` for
+  the long-axis pass.
 - ⏳ **`scrollspeed`**: DOS_Beam's 4-UV animation still not wired
   (upstream parses but doesn't animate either — matching Spring
   literally means still flat).
-- ⏳ **`beamdecay`** per-frame RGBA fade (upstream applies to the
-  full channel) — ours still fades only by scale shrink.
+- ⏳ **`texture2` endcaps**: upstream wraps two extra half-quads
+  at each end via `ydir` for round-cap textures. Byte's `MegaBeam`
+  authors `texture2=megabeamring` and would benefit; deferred since
+  no other KP weapon uses endcaps.
 - ⏳ **`intensity`** — already feeds emissive strength on the
   material via `BeamMaterialCache`; no further work needed unless
   we want values > 10 to bloom harder.
-- ⏳ **Two-quad edge + core** — still a single thick cuboid with a
-  thin bright core cuboid layered on top when `corethickness`
-  warrants. Upstream's ortho-quad geometry remains deferred.
 
 ### 4.2 Projectile Models — ✅ DONE
 

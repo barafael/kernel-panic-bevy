@@ -114,6 +114,11 @@ pub(super) struct BeamVisual {
     pub lifetime: f32,
     pub max_lifetime: f32,
     pub mesh: Handle<Mesh>,
+    /// Per-sim-frame RGB multiplier from the weapon's `beamdecay`. Each
+    /// tick the beam's vertex colors are scaled by this value raised to
+    /// the elapsed-frames power, mirroring upstream
+    /// `BeamLaserProjectile::Update`. `1.0` means no fade.
+    pub decay: f32,
 }
 
 /// A traveling laser bolt from a `LaserCannon`-category weapon (Bit
@@ -320,6 +325,11 @@ pub(super) fn build_billboard_quad_mesh() -> Mesh {
         Mesh::ATTRIBUTE_UV_0,
         vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
     );
+    // Vertex colors multiply with the cached material's base color.
+    // `tick_weapon_fx` rewrites these per frame to apply the weapon's
+    // `beamdecay` fade without per-beam material clones; bolts that
+    // never decay leave them at white and the multiply is a no-op.
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0_f32; 4]; 4]);
     // Two tris, both orientations so the quad is visible from either side.
     mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2]));
     mesh
