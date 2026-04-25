@@ -1476,7 +1476,7 @@ mod real_files {
         let mut merged = crate::ExplosionDefs::default();
         for entry in std::fs::read_dir(dir).unwrap().flatten() {
             let path = entry.path();
-            if !path.extension().is_some_and(|e| e == "tdf") {
+            if path.extension().is_none_or(|e| e != "tdf") {
                 continue;
             }
             let text = std::fs::read_to_string(&path).unwrap();

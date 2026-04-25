@@ -324,6 +324,7 @@ pub struct VentClaimReleaseTimer(pub f32);
 /// builder finishes, building spawns at the same spot, builder walks
 /// away — just works: at any moment something is at the vent, the
 /// claim stays live.
+#[allow(clippy::too_many_arguments)]
 pub fn reconcile_vent_claims(
     time: Res<Time>,
     mut timer: ResMut<VentClaimReleaseTimer>,

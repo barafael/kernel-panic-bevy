@@ -188,7 +188,7 @@ pub fn tick_kamikaze(
 /// weapon infection window can chain through nearby units — this is what
 /// spreads the Virus outbreak, flattens the crowd around a dying Byte,
 /// and gives big units their signature death boom.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn death_system(
     query: Query<
         (

@@ -484,7 +484,7 @@ pub fn combat_system(
             let muzzle_ceg = unit_registry
                 .preferred_muzzle_ceg(unit_type.0)
                 .map(|s| std::borrow::Cow::Owned(s.to_string()));
-            let delayed_hit = is_traveling.then(|| DelayedHitInfo {
+            let delayed_hit = is_traveling.then_some(DelayedHitInfo {
                 target: Some(target_entity),
                 attacker: entity,
                 attacker_distance: distance,
@@ -525,7 +525,7 @@ pub fn combat_system(
 /// inserting a `MoveTarget` pointed at the range boundary. The unit stops
 /// advancing once it can fire — it won't walk all the way to the impact
 /// point unless the weapon range is 0 (unarmed units skip this system).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn attack_ground_system(
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
@@ -654,7 +654,7 @@ pub fn attack_ground_system(
             .preferred_muzzle_ceg(unit_type.0)
             .map(|s| std::borrow::Cow::Owned(s.to_string()));
         let is_traveling = weapon_def.is_traveling();
-        let delayed_hit = is_traveling.then(|| DelayedHitInfo {
+        let delayed_hit = is_traveling.then_some(DelayedHitInfo {
             target: None,
             attacker: entity,
             attacker_distance: dist,

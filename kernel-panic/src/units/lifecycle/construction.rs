@@ -86,6 +86,7 @@ const BUILD_DISTANCE: f32 = 180.0;
 /// Promote `PendingBuild` to `Constructing` once the builder is
 /// close enough to its datavent. Runs before `movement_system` so we can
 /// intercept the step and pin the unit at the build site.
+#[allow(clippy::type_complexity)]
 pub fn start_construction(
     mut commands: Commands,
     pending_q: Query<

@@ -259,12 +259,11 @@ fn parse_sfx_types(s: &Section) -> Vec<String> {
     // Find the max index so we can size the vec.
     let mut max_idx: i32 = -1;
     for key in block.entries.keys() {
-        if let Some(rest) = key.strip_prefix("explosiongenerator") {
-            if let Ok(idx) = rest.parse::<i32>() {
-                if idx > max_idx {
-                    max_idx = idx;
-                }
-            }
+        if let Some(rest) = key.strip_prefix("explosiongenerator")
+            && let Ok(idx) = rest.parse::<i32>()
+            && idx > max_idx
+        {
+            max_idx = idx;
         }
     }
     if max_idx < 0 {

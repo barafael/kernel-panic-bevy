@@ -48,7 +48,7 @@ mod tests {
         let mut s = 0xDEADBEEFu32;
         for _ in 0..10_000 {
             let v = next_signed(&mut s);
-            assert!(v >= -1.0 && v < 1.0, "out-of-range draw: {v}");
+            assert!((-1.0..1.0).contains(&v), "out-of-range draw: {v}");
         }
     }
 

@@ -380,7 +380,7 @@ fn claim_nearest_vent(positions: &[Vec3], claimed: &[bool], origin: Vec3) -> Opt
 /// every unit that lands on that row. Returns the resulting row widths
 /// so the caller can centre each row on the homebase X.
 fn row_total_widths(units: &[UnitKind], unit_registry: &UnitRegistry) -> Vec<f32> {
-    let row_count = (units.len() + UNITS_PER_ROW - 1) / UNITS_PER_ROW;
+    let row_count = units.len().div_ceil(UNITS_PER_ROW);
     let mut widths = vec![0.0; row_count.max(1)];
     for (j, &kind) in units.iter().enumerate() {
         let row = j / UNITS_PER_ROW;

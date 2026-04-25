@@ -112,7 +112,7 @@ fn update_unit_highlight(
 }
 
 fn needs_rebrighten(current: Option<&Highlighted>, desired: f32) -> bool {
-    current.map_or(true, |h| (h.0 - desired).abs() > FACTOR_EPS)
+    current.is_none_or(|h| (h.0 - desired).abs() > FACTOR_EPS)
 }
 
 /// Brighten all mesh materials on a unit entity and its children.

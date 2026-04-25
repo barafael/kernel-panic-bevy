@@ -71,6 +71,7 @@ const SNAP_RADIUS: f32 = 48.0;
 
 /// Begin placement when the build menu fires an event. If a previous
 /// placement was already active we despawn its ghost and replace it.
+#[allow(clippy::too_many_arguments)]
 fn begin_placement(
     mut ev: MessageReader<BeginPlacementEvent>,
     mut mode: ResMut<PlacementMode>,

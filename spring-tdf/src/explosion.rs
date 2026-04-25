@@ -125,12 +125,12 @@ impl CegExpr {
                 continue;
             }
             // Literal number (possibly signed). No opcode prefix.
-            if c.is_ascii_digit() || c == '.' || c == '-' || c == '+' {
-                if let Some((val, consumed)) = parse_float(&src[i..]) {
-                    ops.push(CegOp::Add(val));
-                    i += consumed;
-                    continue;
-                }
+            if (c.is_ascii_digit() || c == '.' || c == '-' || c == '+')
+                && let Some((val, consumed)) = parse_float(&src[i..])
+            {
+                ops.push(CegOp::Add(val));
+                i += consumed;
+                continue;
             }
             // Opcode + operand.
             match c {

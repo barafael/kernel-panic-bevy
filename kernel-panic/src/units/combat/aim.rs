@@ -296,14 +296,11 @@ pub fn tick_deploy_state(
 ///   produce visible turret rotation in time.
 /// - **Aimer-piece aim** — units with an [`AimerPiece`] (currently just
 ///   Byte's octahedron; WormOLD's turret if/when that ships) leave the
-///   body alone and rotate only the aimer piece. This matches upstream
-///   exactly: `byte.bos`'s `AimWeapon1(h,p)` does
-///       turn aimer to y-axis h speed <270>;
-///       turn aimer to x-axis (<-90>-p) speed <270>;
-///   where `h` is the **absolute world heading**. Forcing the body to
-///   rotate (the previous behavior) was the visible "the byte spins
-///   around to face you" bug; upstream's byte never turns its body for
-///   aim — only the aimer-rooted firing assembly does.
+///   body alone and rotate only the aimer piece. Mirrors `byte.bos`'s
+///   `AimWeapon1(h,p)`: `turn aimer to y-axis h speed <270>` followed
+///   by `turn aimer to x-axis (<-90>-p) speed <270>`, where `h` is the
+///   **absolute world heading**. Upstream's byte never turns its body
+///   for aim — only the aimer-rooted firing assembly does.
 ///
 /// Units currently moving (have a `MoveTarget`) are excluded — the
 /// movement system owns their heading, and fighting movement for

@@ -325,6 +325,7 @@ fn setup_camera(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_terrain(
     map: &ParsedMap,
     heightmap: &Heightmap,

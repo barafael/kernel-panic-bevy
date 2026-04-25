@@ -219,44 +219,6 @@ fn spring_linear_to_elmos(val: i32) -> f32 {
     val as f32 / COBSCALE
 }
 
-#[cfg(test)]
-mod cobscale_regression {
-    //! Regression guards for the "byte animations are 2.5× too small"
-    //! bug. If anyone adds a per-unit divisor back, these fail.
-    //! The companion tests live in `spring-cob::cobscale_tests` —
-    //! they pin the constant itself; these pin the helpers.
-
-    use super::{COBSCALE, spring_angle_to_radians, spring_linear_to_elmos};
-
-    #[test]
-    fn linear_helper_uses_cobscale_65536() {
-        assert!((COBSCALE - 65536.0).abs() < 1e-6);
-    }
-
-    #[test]
-    fn byte_bos_move_blade0_bracket_4_recovers_10_elmos() {
-        // byte.bos: `move blade0 to z-axis [4] speed [16];`
-        // Compiled with Scriptor linear=163840 per the header
-        // comment, so `[4]` is 4 * 163840 = 655360 in bytecode.
-        // Upstream runtime: 655360 / 65536 = 10.0 elmos effective.
-        assert_eq!(spring_linear_to_elmos(4 * 163840), 10.0);
-    }
-
-    #[test]
-    fn standard_scriptor_bracket_1_recovers_1_elmo() {
-        // Most units (pointer, hole, …) use Scriptor's default 65536.
-        // Source `[1]` → 65536 in bytecode → 1.0 elmo at runtime.
-        assert_eq!(spring_linear_to_elmos(65536), 1.0);
-    }
-
-    #[test]
-    fn angle_helper_half_circle_is_pi() {
-        // Spring's TA-angle unit: 65536 = 2π. Half circle = 32768.
-        let half_circle = spring_angle_to_radians(32768);
-        assert!((half_circle - std::f32::consts::PI).abs() < 1e-3);
-    }
-}
-
 /// Turn/TurnNow destinations map 1:1 between Spring and Bevy on X/Y; only
 /// the Z axis needs negation, since Spring's left-handed Z rotation inverts
 /// relative to Bevy's right-handed world.
@@ -696,5 +658,43 @@ pub fn decay_death_particles(
         let peak_scale = 2.0 + 20.0 * t.min(0.8) / 0.8;
         let tail = if t > 0.8 { (1.0 - t) / 0.2 } else { 1.0 };
         transform.scale = Vec3::splat(peak_scale * tail);
+    }
+}
+
+#[cfg(test)]
+mod cobscale_regression {
+    //! Regression guards for the "byte animations are 2.5× too small"
+    //! bug. If anyone adds a per-unit divisor back, these fail.
+    //! The companion tests live in `spring-cob::cobscale_tests` —
+    //! they pin the constant itself; these pin the helpers.
+
+    use super::{COBSCALE, spring_angle_to_radians, spring_linear_to_elmos};
+
+    #[test]
+    fn linear_helper_uses_cobscale_65536() {
+        assert!((COBSCALE - 65536.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn byte_bos_move_blade0_bracket_4_recovers_10_elmos() {
+        // byte.bos: `move blade0 to z-axis [4] speed [16];`
+        // Compiled with Scriptor linear=163840 per the header
+        // comment, so `[4]` is 4 * 163840 = 655360 in bytecode.
+        // Upstream runtime: 655360 / 65536 = 10.0 elmos effective.
+        assert_eq!(spring_linear_to_elmos(4 * 163840), 10.0);
+    }
+
+    #[test]
+    fn standard_scriptor_bracket_1_recovers_1_elmo() {
+        // Most units (pointer, hole, …) use Scriptor's default 65536.
+        // Source `[1]` → 65536 in bytecode → 1.0 elmo at runtime.
+        assert_eq!(spring_linear_to_elmos(65536), 1.0);
+    }
+
+    #[test]
+    fn angle_helper_half_circle_is_pi() {
+        // Spring's TA-angle unit: 65536 = 2π. Half circle = 32768.
+        let half_circle = spring_angle_to_radians(32768);
+        assert!((half_circle - std::f32::consts::PI).abs() < 1e-3);
     }
 }

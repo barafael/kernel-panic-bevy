@@ -22,6 +22,7 @@ pub struct DeployEvent {
 
 /// Process deploy events by despawning the source and spawning
 /// its pair with proportional HP at the same position.
+#[allow(clippy::too_many_arguments)]
 pub fn process_deploy(
     mut events: MessageReader<DeployEvent>,
     query: Query<(&UnitType, &Faction, &TeamId, &Transform, &Health)>,

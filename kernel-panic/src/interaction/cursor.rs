@@ -154,6 +154,7 @@ impl CursorRequest {
 /// Default-priority context resolver. Other systems (build placement, order
 /// modes) can override later by writing to `CursorRequest` with a higher
 /// priority.
+#[allow(clippy::type_complexity)]
 fn resolve_context_cursor(
     mut request: ResMut<CursorRequest>,
     selected: Query<(&UnitType, &TeamId, &Faction), With<Selected>>,

@@ -341,7 +341,7 @@ fn despawn_projectile(entity: Entity, proj: &mut ProjectileVisual, commands: &mu
 /// prepend the projectile's current position at the head of the
 /// buffer. `samples` is oldest-first so `last()` is always the head
 /// (current projectile pos) and `first()` is the tail end.
-fn update_trail_samples(samples: &mut Vec<Vec3>, head_pos: Vec3) {
+fn update_trail_samples(samples: &mut [Vec3], head_pos: Vec3) {
     if samples.is_empty() {
         return;
     }
