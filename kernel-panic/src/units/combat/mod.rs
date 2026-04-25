@@ -32,12 +32,13 @@ mod damage;
 mod lifecycle;
 
 pub use aim::{
-    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimTarget, BYTE_OPEN_DURATION, DeployState,
-    Deployable, OpeningDelay, aim_weapons_system, tick_deploy_state, tick_opening_delay,
+    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, BYTE_CLOSE_DELAY, ByteOpen,
+    DeployState, Deployable, OpeningDelay, aim_weapons_system, drive_aim_script, tick_byte_open,
+    tick_deploy_state, tick_opening_delay, update_aim_script,
 };
 pub use damage::{
-    BurstFire, DamageQueue, INFECTION_DURATION, Infected, PendingDamage, VirusSpawnQueue,
-    apply_damage, tick_burst_fire, tick_infections,
+    BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawnQueue, apply_damage,
+    tick_burst_fire, tick_infections, weapon_infection_duration,
 };
 pub use lifecycle::{
     Dying, SELF_DESTRUCT_DELAY, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
@@ -83,13 +84,13 @@ const LOS_MUZZLE_HEIGHT: f32 = 16.0;
 const SHORT_ANGLE_TO_RAD: f32 = std::f32::consts::TAU / 65536.0;
 
 /// Seconds between full spatial scans for a unit that already has a
-/// cached target. Mirrors Spring's `CWeapon::lastTargetRetry + 65`
+/// cached target. Matches Spring's `CWeapon::lastTargetRetry + 65`
 /// guard (`rts/Sim/Weapons/Weapon.cpp`) which re-scans at most every
-/// ~2.17 s (65 sim frames @ 30 fps). We tighten it to 0.25 s so new
-/// threats are picked up within a few frames while still amortising
-/// the spatial sweep ~15× at 60 fps. Cache is invalidated immediately
-/// whenever the cached target dies or leaves weapon range.
-const TARGET_RESCAN_INTERVAL: f32 = 0.25;
+/// ~2 s (65 sim frames @ 30 fps). Cache is invalidated immediately
+/// whenever the cached target dies or leaves weapon range, so this
+/// only controls how quickly a unit abandons a valid target for a
+/// newly-arrived closer one — not how fast it reacts to kills.
+const TARGET_RESCAN_INTERVAL: f32 = 2.0;
 
 /// Cached auto-target for an armed unit. While present and the target
 /// is still alive + in-range, `combat_system` skips its spatial
@@ -119,6 +120,17 @@ pub struct PieceLookup<'w, 's> {
     pub piece_gtf: Query<'w, 's, &'static GlobalTransform, Without<UnitType>>,
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
     pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
+}
+
+/// XZ-flatten and normalise a forward vector. Falls back to +Z
+/// when the projection is degenerate (forward straight up/down).
+fn flat_forward(forward: Vec3) -> Vec3 {
+    let f = Vec3::new(forward.x, 0.0, forward.z);
+    if f.length_squared() < 1e-6 {
+        Vec3::Z
+    } else {
+        f.normalize()
+    }
 }
 
 /// Tracks time until the unit can fire again.
@@ -181,16 +193,14 @@ pub fn combat_system(
             &GlobalTransform,
             Option<&Deployable>,
             Option<&OpeningDelay>,
+            Option<&AimScript>,
         ),
         (
             Without<Dying>,
             Without<super::lifecycle::spawning::Emerging>,
             Without<Stunned>,
-            // Cloaked units (Worm, Logic Bomb) hold fire by default —
-            // FEATURES.md §20 / upstream KP behaviour. A manual attack
-            // order would remove `Cloaked` before firing in the
-            // future; today the toggle doesn't exist yet (Worm
-            // `autohold` remains in the spec-gaps list).
+            // Why: cloaked units (Worm, Logic Bomb) hold fire by
+            // default — FEATURES.md §20 / upstream `autohold`.
             Without<crate::units::mechanics::cloak::Cloaked>,
         ),
     >,
@@ -229,17 +239,12 @@ pub fn combat_system(
         attacker_gtf,
         deployable,
         opening_delay,
+        aim_script,
     ) in &attackers
     {
-        // Deployable units (Pointer) can only fire while fully open. They
-        // can still *aim* while opening (so the gun is pointed when Open
-        // completes), but firing is gated on the open state.
+        // Deployable: keep aiming through Opening so the gun is on
+        // target when the state flips, but only fire while Open.
         let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
-        // Byte holds fire until its `Open()` script finishes fanning the
-        // blades out — upstream's `isOpen` gate, mirrored host-side via
-        // `OpeningDelay`. Combat & attack-ground both honour it so the
-        // 4-shot MegaBeam burst can't leave while firing positions are
-        // still folded together at the unit center.
         let fire_blocked_by_opening = opening_delay.is_some_and(|d| d.remaining > 0.0);
 
         let weapon_name = unit_registry.weapon(unit_type.0);
@@ -253,10 +258,8 @@ pub fn combat_system(
         let range = weapon_def.map_or(0.0, |w| w.range);
         let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
 
-        // Command-fire weapons (NX Flag, Infection, FakeBugCannon) only
-        // activate when the player issues the ability order explicitly.
-        // Without this gate, an Obelisk would spew infection gas at
-        // whatever wandered into range.
+        // Command-fire weapons (NX Flag, Infection, …) need an
+        // explicit order; auto-target must skip them.
         let command_fire = weapon_def.is_some_and(|w| w.command_fire);
 
         if range == 0.0 || command_fire {
@@ -267,34 +270,18 @@ pub fn combat_system(
         let attacker_pos = attacker_gtf.translation();
         let range_sq = range * range;
 
-        // Pick a target in range. Most weapons prefer the nearest enemy;
-        // those with `proximity_priority < 0` (Exploit's BugCannon) prefer
-        // the *farthest*, matching upstream's anti-swarm artillery role.
-        // Shared team or shared faction = ally (see `is_friendly`).
+        // Why: `proximity_priority < 0` is upstream's anti-swarm
+        // marker — Exploit's BugCannon prefers far targets.
         let prefer_distant = weapon_def.is_some_and(|w| w.proximity_priority < 0.0);
-        // Ballistic weapons (`trajectory_height > 0`) lob over terrain and
-        // should never fail an LOS check — the whole point is to clear
-        // the ridge. Direct-fire weapons with `lineofsight=1` do.
+        // Ballistic shots clear ridges; only direct-fire enforces LOS.
         let enforce_los = weapon_def
             .is_some_and(|w| w.line_of_sight && w.trajectory_height <= 0.0 && heightmap.is_some());
-        // Most KP ground units set `NoChaseCategory=VTOL` so they ignore
-        // Flows (and any future flying unit) during auto-target. Flying
-        // units themselves still chase fliers — the filter is per-attacker.
-        // The Pointer is the documented exception (FEATURES.md §12): its
-        // homing projectile explicitly tracks air targets, so we override
-        // the FBI filter for that one kind.
+        // Pointer's homing missile is the only ground unit that
+        // overrides upstream's `NoChaseCategory=VTOL` and tracks air.
         let skip_flying = stats.no_chase_vtol && !unit_type.0.homing_targets_air();
-        // Debug (mineblaster) sets `OnlyTargetCategory1=VOID` upstream
-        // and only fires Minekiller on mines / walls — it's a
-        // defensive turret, not a tickle-turret for infantry. Keep the
-        // filter as a per-kind gate so future units can join the
-        // "targets mines only" club without touching combat_system.
         let targets_mines_only = unit_type.0.targets_mines_only();
 
-        // Try the cached target first. While it's still alive, in
-        // range, and the cache hasn't aged out, we skip the spatial
-        // sweep entirely. This mirrors Spring's `lastTargetRetry`
-        // guard (see `TARGET_RESCAN_INTERVAL`).
+        // Cached-target fast path mirrors Spring's `lastTargetRetry`.
         let mut best: Option<(Entity, Vec3, f32)> = target_pick
             .cache
             .get(entity)
@@ -362,37 +349,43 @@ pub fn combat_system(
 
         let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
 
-        // Always stamp the aim target while we have a candidate — that
-        // lets `aim_weapons_system` keep steering the body/gun even
-        // while we're still on cooldown or still opening, so the weapon
-        // is already on-target when it's allowed to fire.
+        // Stamp aim target unconditionally so `aim_weapons_system`
+        // keeps steering through cooldown/opening — the weapon is on
+        // target the moment firing is allowed.
         commands.entity(entity).insert(AimTarget {
             pos: target_pos,
             arc_height,
         });
 
+        // Why: each in-range frame refreshes Byte's open window —
+        // upstream `byte.bos AimWeapon1` signals SIG_AIM and re-
+        // schedules Close(), which is what keeps the Byte open while
+        // engaging.
+        if unit_type.0 == crate::units::content::definitions::UnitKind::Byte {
+            commands.entity(entity).insert(ByteOpen {
+                open_until: now + BYTE_CLOSE_DELAY,
+            });
+        }
+
         if fire_blocked_by_deploy || fire_blocked_by_opening {
             continue;
         }
+        // Why: upstream `AimWeapon1` contract — return 1 ⇒ allowed
+        // to fire; anything else ⇒ barrel not on-target yet.
+        if aim_script.is_some_and(|a| !a.ready) {
+            continue;
+        }
 
-        // Skip if still on cooldown.
         if let Ok(cd) = cooldowns.get(entity)
             && cd.remaining > 0.0
         {
             continue;
         }
 
-        // Aim-alignment gate. Up to three checks, each guarded on which
-        // piece markers the unit actually has — Pointer (Deployable +
-        // GunbasePiece) needs body heading + gunbase pitch; Byte
-        // (AimerPiece, no Deployable) needs aimer Y + aimer X. Without
-        // these, a unit fires mid-slew and beams visibly leave at the
-        // wrong angle while the aim catches up after the projectile is
-        // already flying.
-        //
-        // Mirrors upstream's `AimWeapon1` returning 0 (not ready) until
-        // `wait-for-turn` completes — firing only proceeds once the
-        // script returns 1.
+        // Aim-alignment gate, gated on which piece markers the unit
+        // declared. Without it, beams leave mid-slew before the gun
+        // is on target. Same arithmetic as `aim_weapons_system` so
+        // the two converge cleanly.
         let to_target_xz = Vec3::new(
             target_pos.x - attacker_pos.x,
             0.0,
@@ -400,29 +393,18 @@ pub fn combat_system(
         );
         let horizontal_dist = to_target_xz.length();
 
-        // Body-heading gate (Pointer): wait for the body to finish
-        // turning. Deployable is the marker for "this unit's whole body
-        // aims" — Byte uses aimer-piece aim and skips this check.
+        // Body-heading gate (Pointer): Deployable units rotate the
+        // whole body to aim, so wait for that turn to finish. Byte
+        // uses an aimer piece and skips this branch.
         if deployable.is_some() && horizontal_dist > 1e-3 {
             let to_target_n = to_target_xz / horizontal_dist;
-            let forward = attacker_gtf.forward().as_vec3();
-            let forward_xz = {
-                let f = Vec3::new(forward.x, 0.0, forward.z);
-                if f.length_squared() < 1e-6 {
-                    Vec3::Z
-                } else {
-                    f.normalize()
-                }
-            };
+            let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
             let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
             if align.acos() > AIM_HEADING_TOLERANCE {
                 continue;
             }
         }
 
-        // Compute the elevation `aim_weapons_system` uses as the gunbase
-        // / aimer X target this frame so the gate uses the same
-        // arithmetic and converges cleanly when the slew finishes.
         let dy = target_pos.y - attacker_pos.y;
         let direct_pitch = dy.atan2(horizontal_dist.max(1e-6));
         let arc_pitch = if arc_height > 0.0 && horizontal_dist > 1.0 {
@@ -432,9 +414,8 @@ pub fn combat_system(
         };
         let target_pitch = direct_pitch + arc_pitch;
 
-        // Gunbase pitch gate (Pointer): aim_weapons_system writes
-        // `target_x = π/2 - pitch` for gunbase, matching pointer.bos's
-        // `(<-90>-p)` convention. Compare against the live piece rotation.
+        // Gunbase pitch gate (Pointer). `target_x = π/2 - pitch`
+        // matches pointer.bos's `(<-90>-p)` convention.
         if let Ok(gb) = pieces.gunbase.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(gb.0)
@@ -445,10 +426,8 @@ pub fn combat_system(
             }
         }
 
-        // Aimer alignment gate (Byte): host-side aim writes both axes of
-        // `target_rotations`; compare current rotations against those
-        // targets. This is what `AimWeapon1`'s `wait-for-turn aimer
-        // around y-axis` / `around x-axis` pair does in upstream.
+        // Aimer-piece gate (Byte). Mirrors `wait-for-turn aimer
+        // around {y,x}-axis` in upstream's AimWeapon1.
         if let Ok(ap) = pieces.aimer.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(ap.0)
@@ -461,11 +440,8 @@ pub fn combat_system(
             }
         }
 
-        // Per-shot spread. Upstream's `sprayangle` is in Spring short-angle
-        // units; offset magnitude at the target plane is roughly
-        // `tan(angle) × distance`, small-angle ≈ `angle × distance`. We
-        // perturb only XZ — vertical aim is already handled by arc_height
-        // and the aim pitch computed in `aim_weapons_system`.
+        // Why: upstream `sprayangle` is in Spring short-angle units;
+        // small-angle offset at target plane ≈ tan(angle) × distance.
         let distance = attacker_pos.distance(target_pos);
         let spray_short = weapon_def.map_or(0.0, |w| w.spray_angle);
         let mut impact_pos = target_pos;
@@ -477,10 +453,7 @@ pub fn combat_system(
             impact_pos = Vec3::new(target_pos.x + dx, target_pos.y, target_pos.z + dz);
         }
 
-        // Hitscan lands this frame via `DamageQueue`; traveling bolts
-        // defer their hit via `AttackEvent::delayed_hit` — the visual
-        // spawned by `spawn_weapon_visuals` carries the payload and
-        // fires it on impact (see [`crate::units::weapon_fx`]).
+        // Hitscan lands now; traveling bolts defer via `delayed_hit`.
         let is_traveling = weapon_def.is_some_and(spring_tdf::WeaponDef::is_traveling);
         if !is_traveling {
             damage_queue.push(PendingDamage {
@@ -495,17 +468,12 @@ pub fn combat_system(
             AttackCooldown {
                 remaining: cooldown,
             },
-            JustFired {
-                target_pos: impact_pos,
-                arc_height,
-            },
+            JustFired,
         ));
         if !weapon_name.is_empty() {
-            // Beam/projectile origin comes from the unit's resolved muzzle
-            // piece when available — unit-center origin here made Bit's
-            // `>>>>>` arrow look like it shot from the torso. Range and
-            // LOS checks above intentionally still use the unit center
-            // so arm-length-scale piece offsets don't flicker targeting.
+            // Visual origin uses the resolved muzzle piece; range/LOS
+            // checks above intentionally stay at unit center so
+            // arm-length offsets don't flicker targeting.
             let visual_origin = muzzle_world_pos(
                 entity,
                 attacker_gtf,
@@ -540,7 +508,6 @@ pub fn combat_system(
                 target: Some(target_entity),
                 target_pos,
                 weapon: weapon_name.to_string(),
-                arc_height,
                 is_traveling,
             });
         }
@@ -630,10 +597,8 @@ pub fn attack_ground_system(
             arc_height,
         });
 
-        // Same alignment gates as `combat_system` — body-heading for
-        // Deployable, gunbase pitch for GunbasePiece, aimer-axis for
-        // AimerPiece. The math mirrors `aim_weapons_system` so the
-        // gate converges cleanly once the slew finishes.
+        // Same alignment gates as `combat_system` — body / gunbase /
+        // aimer per piece markers. Math mirrors `aim_weapons_system`.
         let to_target_xz = Vec3::new(
             order.pos.x - attacker_pos.x,
             0.0,
@@ -642,15 +607,7 @@ pub fn attack_ground_system(
         let horizontal_dist = to_target_xz.length();
         if deployable.is_some() && horizontal_dist > 1e-3 {
             let to_target_n = to_target_xz / horizontal_dist;
-            let forward = gtf.forward().as_vec3();
-            let forward_xz = {
-                let f = Vec3::new(forward.x, 0.0, forward.z);
-                if f.length_squared() < 1e-6 {
-                    Vec3::Z
-                } else {
-                    f.normalize()
-                }
-            };
+            let forward_xz = flat_forward(gtf.forward().as_vec3());
             let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
             if align.acos() > AIM_HEADING_TOLERANCE {
                 continue;
@@ -722,10 +679,7 @@ pub fn attack_ground_system(
             AttackCooldown {
                 remaining: weapon_def.reload_time,
             },
-            JustFired {
-                target_pos: order.pos,
-                arc_height,
-            },
+            JustFired,
         ));
 
         // Queue the remaining burst shots exactly like `combat_system`
@@ -748,7 +702,6 @@ pub fn attack_ground_system(
                 target: None,
                 target_pos: order.pos,
                 weapon: weapon_name.to_string(),
-                arc_height,
                 is_traveling,
             });
         }

@@ -9,7 +9,7 @@
 
 use bevy::prelude::*;
 
-use super::{Dying, IdleTimer, StunCharge, Stunned, muzzle_world_pos};
+use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned, muzzle_world_pos};
 use crate::units::assets::animation::{CobAnimator, MuzzlePiece};
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -75,21 +75,12 @@ impl DamageQueue {
     }
 }
 
-/// In-progress burst fire. Weapons with `burst > 1` fire the first shot
-/// through the normal combat path and attach this component for the
-/// remaining shots, which are released at `interval` spacing by
-/// [`tick_burst_fire`]. The aim point is frozen at trigger time so the
-/// whole burst lands on the same spot regardless of target motion.
-///
-/// `target` is `None` for bursts triggered by an [`AttackGroundOrder`]
-/// — the player clicked a ground point rather than a specific enemy,
-/// so there is no "primary hit" entity and damage falls through to
-/// AoE splash at [`target_pos`] via [`apply_damage`]. Before this was
-/// an option, the ground-attack path fired exactly one shot per
-/// reload, because [`attack_ground_system`] lacked a burst queue and
-/// the non-optional `Entity` field had no sensible value to fill.
-///
-/// [`target_pos`]: Self::target_pos
+/// In-progress burst fire. Weapons with `burst > 1` fire the first
+/// shot through the regular combat path; this component releases the
+/// rest at `interval` spacing, with the aim point frozen so the whole
+/// burst lands on `target_pos` regardless of target motion. `target ==
+/// None` means an [`AttackGroundOrder`] burst — apply_damage falls
+/// through to AoE splash at `target_pos`.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct BurstFire {
@@ -99,10 +90,7 @@ pub struct BurstFire {
     pub target: Option<Entity>,
     pub target_pos: Vec3,
     pub weapon: String,
-    pub arc_height: f32,
-    /// Cached at burst creation from [`spring_tdf::WeaponDef::is_traveling`]
-    /// so `tick_burst_fire` doesn't re-hash the registry every frame
-    /// for a flag that's fixed for the burst's lifetime.
+    /// Why: cached so `tick_burst_fire` doesn't hash the registry per shot.
     pub is_traveling: bool,
 }
 
@@ -119,13 +107,6 @@ pub struct Infected {
     /// The team ID that will own the spawned Virus.
     pub attacker_team: u8,
 }
-
-/// How long (seconds) a Worm/Virus infection lasts before expiring,
-/// when the triggering weapon has no entry in
-/// [`weapon_infection_duration`]. The per-weapon map is the source of
-/// truth; this is a fallback for programmatic infections (e.g. the
-/// area-denial Infection gas spawning Viruses).
-pub const INFECTION_DURATION: f32 = 6.0;
 
 /// Per-weapon infection window in seconds. Mirrors upstream
 /// `LuaRules/Gadgets/infection.lua`, which expresses the window in sim
@@ -166,6 +147,54 @@ impl VirusSpawnQueue {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+}
+
+/// Upstream SIGTERM bomb weaponID is `168` in `retroweapons.tdf` —
+/// byte.bos's `HitByWeaponId` checks that literal ID to bypass the
+/// closed-state damage reduction. Our weapons are identified by
+/// section name rather than numeric ID, so we compare against
+/// `"SigTerm"` (the section tag in `retroweapons.tdf`).
+const SIGTERM_WEAPON_NAME: &str = "SigTerm";
+
+/// Pure form of the Byte armor rule, decoupled from Bevy queries so
+/// it can be unit-tested without a live world. See
+/// [`byte_closed_damage_multiplier`] for the Query wrapper.
+fn byte_armor_multiplier(
+    target_kind: UnitKind,
+    weapon: &str,
+    is_open: bool,
+    is_stunned: bool,
+) -> f32 {
+    if target_kind != UnitKind::Byte {
+        return 1.0;
+    }
+    // Why: SigTerm bypasses the armor bonus (upstream `id == 168`);
+    // paralysis forces the Byte open (`!get LUA2` branch returns 100%).
+    if weapon == SIGTERM_WEAPON_NAME || is_stunned || is_open {
+        1.0
+    } else {
+        0.3
+    }
+}
+
+/// Upstream `byte.bos HitByWeaponId`: a closed Byte takes 30% damage
+/// from anything except the SIGTERM bomb, and only while not paralyzed.
+fn byte_closed_damage_multiplier(
+    target: Entity,
+    weapon: &str,
+    target_unit_q: &Query<&UnitType>,
+    byte_open_q: &Query<&ByteOpen>,
+    stunned_q: &Query<&Stunned>,
+) -> f32 {
+    let Ok(unit) = target_unit_q.get(target) else {
+        return 1.0;
+    };
+    byte_armor_multiplier(
+        unit.0,
+        weapon,
+        byte_open_q.get(target).is_ok(),
+        stunned_q.get(target).is_ok(),
+    )
 }
 
 /// Minimum `area_of_effect` (elmos) at which a weapon triggers a splash
@@ -233,10 +262,7 @@ pub fn tick_burst_fire(
             muzzle_ceg,
             delayed_hit,
         });
-        commands.entity(entity).insert(JustFired {
-            target_pos: burst.target_pos,
-            arc_height: burst.arc_height,
-        });
+        commands.entity(entity).insert(JustFired);
 
         burst.shots_remaining -= 1;
         if burst.shots_remaining == 0 {
@@ -266,10 +292,10 @@ fn apply_hit(
     protected_q: &Query<(), With<crate::units::mechanics::command_fire::Protected>>,
     commands: &mut Commands,
 ) {
-    let leak = match shield_q.get_mut(target) {
-        Ok(mut shield) => shield.absorb(amount),
-        Err(_) => amount,
-    };
+    let leak = shield_q
+        .get_mut(target)
+        .map(|mut shield| shield.absorb(amount))
+        .unwrap_or(amount);
     if leak <= 0.0 {
         return;
     }
@@ -323,6 +349,8 @@ pub fn apply_damage(
     target_unit_q: Query<&UnitType>,
     target_pos_q: Query<(&GlobalTransform, &UnitStats), With<UnitType>>,
     protected_q: Query<(), With<crate::units::mechanics::command_fire::Protected>>,
+    byte_open_q: Query<&ByteOpen>,
+    stunned_q: Query<&Stunned>,
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
@@ -367,9 +395,17 @@ pub fn apply_damage(
                     true
                 };
                 if hit {
-                    let primary_damage = kind
+                    let raw_damage = kind
                         .map(|k| base(k) * dyn_mult)
                         .unwrap_or(weapon_def.damage.default * dyn_mult);
+                    let primary_damage = raw_damage
+                        * byte_closed_damage_multiplier(
+                            target,
+                            &pending.weapon,
+                            &target_unit_q,
+                            &byte_open_q,
+                            &stunned_q,
+                        );
                     apply_hit(
                         target,
                         pending.attacker,
@@ -428,10 +464,18 @@ pub fn apply_damage(
                 splash_hits.push((candidate.entity, splash));
             });
             for (entity, splash) in splash_hits.drain(..) {
+                let amount = splash
+                    * byte_closed_damage_multiplier(
+                        entity,
+                        &pending.weapon,
+                        &target_unit_q,
+                        &byte_open_q,
+                        &stunned_q,
+                    );
                 apply_hit(
                     entity,
                     pending.attacker,
-                    splash,
+                    amount,
                     paralyzer,
                     paralyze_time,
                     &mut health_q,
@@ -490,6 +534,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn byte_closed_takes_30_percent_from_normal_weapons() {
+        let m = byte_armor_multiplier(UnitKind::Byte, "BitShot", false, false);
+        assert!((m - 0.3).abs() < 1e-5);
+    }
+
+    #[test]
+    fn byte_open_takes_full_damage() {
+        let m = byte_armor_multiplier(UnitKind::Byte, "BitShot", true, false);
+        assert!((m - 1.0).abs() < 1e-5);
+    }
+
+    /// Upstream: paralyzed bytes lose the armor bonus (forced open).
+    #[test]
+    fn byte_closed_but_stunned_takes_full_damage() {
+        let m = byte_armor_multiplier(UnitKind::Byte, "BitShot", false, true);
+        assert!((m - 1.0).abs() < 1e-5);
+    }
+
+    /// Upstream: `id == 168` (SIGTERM bomb) bypasses the 30% gate.
+    #[test]
+    fn byte_closed_takes_full_damage_from_sigterm() {
+        let m = byte_armor_multiplier(UnitKind::Byte, SIGTERM_WEAPON_NAME, false, false);
+        assert!((m - 1.0).abs() < 1e-5);
+    }
+
+    /// Non-Byte targets are unaffected by the armor rule.
+    #[test]
+    fn non_byte_targets_take_full_damage() {
+        let m = byte_armor_multiplier(UnitKind::Bit, "BitShot", false, false);
+        assert!((m - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
     fn weapon_infection_durations_match_upstream_gadget() {
         // Values from upstream LuaRules/Gadgets/infection.lua, converted
         // from sim frames @ 30 fps to seconds.
@@ -525,19 +602,9 @@ mod tests {
         assert!((splash_falloff(128.0, 512.0, 0.4) - 0.85).abs() < 1e-5);
     }
 
-    /// Pin the upstream `MegaBeam` cadence (burst=4, burstrate=0.25,
-    /// reloadtime=2) end-to-end: running `tick_burst_fire` at 60fps for
-    /// a full reload cycle must produce exactly 3 follow-up shots (on
-    /// top of the initial combat_system shot), spaced at 0.25s each.
-    /// The initial shot at t=0, then shots at 0.25 / 0.50 / 0.75 — 4
-    /// total damage events in 0.75s, then no further shots until the
-    /// next burst (not exercised here, since tick_burst_fire doesn't
-    /// own the cooldown path).
-    ///
-    /// Regression guard: if anything ever doubles `burst_rate` or
-    /// halves the per-frame `dt` on the burst timer, this test flips
-    /// from 4-in-0.75s to 4-in-1.5s (the exact mismatch the user
-    /// reported in-game).
+    /// Why: pins upstream `MegaBeam` cadence (burst=4, burstrate=0.25,
+    /// reloadtime=2). 3 follow-ups at 0.25/0.50/0.75 s — fails fast
+    /// if burst_rate ever doubles or per-frame dt halves.
     #[test]
     fn megabeam_burst_produces_4_shots_in_0_75_seconds() {
         use bevy::ecs::system::RunSystemOnce;
@@ -565,7 +632,6 @@ mod tests {
                     target: Some(target),
                     target_pos: Vec3::ZERO,
                     weapon: "MegaBeam".to_string(),
-                    arc_height: 0.0,
                     is_traveling: false,
                 },
             ))
@@ -633,15 +699,10 @@ mod tests {
         }
     }
 
-    /// Regression guard for the "one shot every 2 seconds" bug: when
-    /// the player issued an attack-ground order on a byte, only the
-    /// first shot of the authored 4-shot burst actually fired, because
-    /// `attack_ground_system` queued an `AttackCooldown` but not a
-    /// `BurstFire`. Here we simulate that state (`BurstFire.target =
-    /// None`, signalling the ground-attack variant) and assert the
-    /// follow-up shots still fire at the authored 0.25 s cadence. The
-    /// cost is two extra frames of dispatch — negligible — and the
-    /// payoff is parity with the auto-target path.
+    /// Why: ground-attack bursts (`BurstFire.target == None`) used
+    /// to fire one shot per reload because `attack_ground_system`
+    /// queued the cooldown but not the burst. Pins parity with the
+    /// auto-target path.
     #[test]
     fn ground_attack_burst_fires_follow_ups_with_none_target() {
         use bevy::ecs::system::RunSystemOnce;
@@ -663,7 +724,6 @@ mod tests {
                 target: None, // <-- ground-attack variant
                 target_pos: Vec3::ZERO,
                 weapon: "MegaBeam".to_string(),
-                arc_height: 0.0,
                 is_traveling: false,
             },
         ));
@@ -721,7 +781,6 @@ mod tests {
                     target: Some(target),
                     target_pos: Vec3::ZERO,
                     weapon: "TestWeapon".to_string(),
-                    arc_height: 0.0,
                     is_traveling: false,
                 },
             ))

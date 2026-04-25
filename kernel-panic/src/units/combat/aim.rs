@@ -66,47 +66,156 @@ pub const AIM_PITCH_TOLERANCE: f32 = 0.09;
 /// script timings (legs move over 0.5s, gun extends over another 1.0s).
 pub const DEPLOY_DURATION: f32 = 1.5;
 
-/// Time (seconds) the byte's `Open()` script needs to fan its blades out
-/// from the closed-octahedron start pose. Matches the upstream `byte.bos`
-/// sequence: `move base to y-axis [24] speed [48]` (0.5 s) then
-/// `move blade0 to z-axis [4] speed [16]` (0.25 s) running concurrently
-/// with `turn rotor to y-axis <45> speed <90>`. We use the longer chain
-/// (0.75 s) plus a 0.25 s margin so combat can't kick in mid-fan.
-///
-/// Read by [`tick_opening_delay`] to clear [`OpeningDelay`]; gated in
-/// `combat_system` and `attack_ground_system` so the byte can't fire
-/// while its blades are still folded together (firing positions overlap
-/// at the unit center and beams visibly leave the wrong place).
-pub const BYTE_OPEN_DURATION: f32 = 1.0;
-
-/// Marker on a unit whose firing is blocked until the COB `Open()`
-/// unfold animation completes. Inserted at spawn for the byte; removed
-/// by [`tick_opening_delay`] when `remaining` reaches zero. Upstream's
-/// equivalent is the `isOpen` static-var in `byte.bos`, checked by
-/// `AimWeapon1` (returns 0 → "not ready, don't fire") on every tick
-/// until `Open()` flips it to 1. Our COB VM doesn't surface script
-/// statics, so we mirror the gate host-side.
+/// Host-side mirror of `byte.bos`'s `isOpen=0` state. Blocks firing
+/// until the spawn-time `Open()` animation completes; the COB VM
+/// doesn't surface script statics, so the gate lives in Bevy.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct OpeningDelay {
     pub remaining: f32,
 }
 
-/// Decrement [`OpeningDelay`] timers each frame; remove the marker when
-/// it hits zero so combat can pick the unit up next tick. Runs in the
-/// `Simulate` set before `combat_system` so the gate clears in the same
-/// frame the unit becomes ready (otherwise the byte loses one frame of
-/// firing per spawn).
+/// Seconds before a recently-aimed Byte folds its blades back in.
+/// Mirrors the `sleep 3000` at the top of `byte.bos Close()`.
+pub const BYTE_CLOSE_DELAY: f32 = 3.0;
+
+/// Present iff a Byte is currently in its `isOpen=1` state. Read by
+/// the damage pipeline for the upstream 30 % closed-state damage
+/// reduction (`byte.bos HitByWeaponId`).
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct ByteOpen {
+    pub open_until: f32,
+}
+
+/// Tick down [`OpeningDelay`] timers; on expiry, remove the marker
+/// and (for Byte) seed [`ByteOpen`] with the upstream
+/// [`BYTE_CLOSE_DELAY`] window.
 pub fn tick_opening_delay(
     time: Res<Time>,
-    mut q: Query<(Entity, &mut OpeningDelay)>,
+    mut q: Query<(
+        Entity,
+        &mut OpeningDelay,
+        &crate::units::components::UnitType,
+    )>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut delay) in &mut q {
+    let now = time.elapsed_secs();
+    for (entity, mut delay, unit_type) in &mut q {
         delay.remaining -= dt;
         if delay.remaining <= 0.0 {
             commands.entity(entity).remove::<OpeningDelay>();
+            if unit_type.0 == crate::units::content::definitions::UnitKind::Byte {
+                commands.entity(entity).insert(ByteOpen {
+                    open_until: now + BYTE_CLOSE_DELAY,
+                });
+            }
+        }
+    }
+}
+
+/// Remove expired [`ByteOpen`] markers so the damage pipeline can
+/// switch the Byte back to its 30 % incoming-damage discount. Runs
+/// alongside `tick_opening_delay`; the per-aim refresh in
+/// `combat_system` is what keeps an actively-fighting Byte open.
+pub fn tick_byte_open(time: Res<Time>, q: Query<(Entity, &ByteOpen)>, mut commands: Commands) {
+    let now = time.elapsed_secs();
+    for (entity, state) in &q {
+        if state.open_until <= now {
+            commands.entity(entity).remove::<ByteOpen>();
+        }
+    }
+}
+
+/// Aim-before-fire gate. Inserted at spawn on every unit whose
+/// `.cob` declares `AimWeapon1`. `combat_system` blocks firing while
+/// `ready == false`; `drive_aim_script` keeps `thread_id` populated
+/// while a script is running, [`update_aim_script`] flips `ready`
+/// when the thread ends with `ret_code == 1`.
+#[derive(Component, Clone, Copy, Debug, Default)]
+#[component(storage = "SparseSet")]
+pub struct AimScript {
+    pub thread_id: Option<u32>,
+    pub ready: bool,
+    pub last_heading_rad: f32,
+    pub last_pitch_rad: f32,
+}
+
+/// Heading or pitch shift (radians) at which `drive_aim_script`
+/// abandons a still-running aim thread and re-spawns. ~11° — small
+/// enough that a Packet dispatching behind a shooter forces a fresh
+/// cycle, large enough that drifting targets don't churn threads.
+pub const AIM_SCRIPT_RETARGET_THRESHOLD: f32 = 0.2;
+
+/// Spring's COB heading/pitch unit: 65536 == TAU radians. Inverse
+/// of [`SHORT_ANGLE_TO_RAD`](super::SHORT_ANGLE_TO_RAD).
+const RAD_TO_SHORT_ANGLE: f32 = 65536.0 / std::f32::consts::TAU;
+
+/// Advance every unit's `AimWeapon1` thread lifecycle. Spawn a
+/// thread if none is running, or re-spawn if the target shifted
+/// past [`AIM_SCRIPT_RETARGET_THRESHOLD`]. The thread itself ticks
+/// in `animation_system`; [`update_aim_script`] reads its ret_code.
+#[allow(clippy::type_complexity)]
+pub fn drive_aim_script(
+    mut query: Query<
+        (
+            &mut AimScript,
+            &mut CobAnimator,
+            &GlobalTransform,
+            &AimTarget,
+        ),
+        Without<Dying>,
+    >,
+) {
+    for (mut aim, mut animator, gtf, target) in &mut query {
+        let attacker_pos = gtf.translation();
+        let to_target = target.pos - attacker_pos;
+        let heading_rad = to_target.x.atan2(to_target.z);
+        let horizontal_dist = (to_target.x * to_target.x + to_target.z * to_target.z).sqrt();
+        let direct_pitch = (-to_target.y).atan2(horizontal_dist.max(1e-6));
+        let arc_pitch = if target.arc_height > 0.0 && horizontal_dist > 1.0 {
+            (4.0 * target.arc_height / horizontal_dist).atan()
+        } else {
+            0.0
+        };
+        let pitch_rad = direct_pitch + arc_pitch;
+
+        if aim.thread_id.is_some() {
+            let dh = (heading_rad - aim.last_heading_rad).abs();
+            let dp = (pitch_rad - aim.last_pitch_rad).abs();
+            if dh <= AIM_SCRIPT_RETARGET_THRESHOLD && dp <= AIM_SCRIPT_RETARGET_THRESHOLD {
+                continue;
+            }
+            aim.thread_id = None;
+            aim.ready = false;
+        }
+
+        let heading = (heading_rad * RAD_TO_SHORT_ANGLE) as i32;
+        let pitch = (pitch_rad * RAD_TO_SHORT_ANGLE) as i32;
+
+        let cob = animator.cob.clone();
+        if let Some(tid) = animator
+            .vm
+            .start_script(&cob, "AimWeapon1", &[heading, pitch])
+        {
+            aim.thread_id = Some(tid);
+            aim.last_heading_rad = heading_rad;
+            aim.last_pitch_rad = pitch_rad;
+        }
+    }
+}
+
+/// Drain the just-ended aim thread's `ret_code` from each unit's
+/// VM and flip [`AimScript::ready`] accordingly. `ret_code == 1`
+/// means upstream's `AimWeapon1` returned with the barrel locked
+/// on; anything else clears `thread_id` so next frame re-spawns.
+pub fn update_aim_script(mut query: Query<(&mut AimScript, &mut CobAnimator)>) {
+    for (mut aim, mut animator) in &mut query {
+        let Some(tid) = aim.thread_id else { continue };
+        if let Some(ret_code) = animator.vm.take_thread_return_code(tid) {
+            aim.ready = ret_code == 1;
+            aim.thread_id = None;
         }
     }
 }

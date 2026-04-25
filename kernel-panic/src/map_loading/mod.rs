@@ -195,49 +195,47 @@ fn load_map(
         &mut geovent_assets,
     );
 
-    // Build one pathfinding grid per distinct per-unit `MaxSlope`.
-    // Upstream Spring does this with per-`MoveDef` grids — a Bit with
-    // `MaxSlope=21` should fail to walk onto a cliff that a Byte with
-    // `MaxSlope=60` strolls straight up. Buckets are keyed on the
-    // rise/run ratio (tan of the FBI degrees) and sorted ascending;
+    // One pathfinding grid per distinct unit `MaxSlope`. Caps and
+    // slope-mods are in Spring's encoding — see `cost.rs`.
     // `compute_path` picks the tightest bucket whose cap ≥ the unit's.
-    // `slope_mod` stays constant across buckets so path cost ordering
-    // is consistent — only impassability differs per class.
     {
-        use spring_pathfinding::{NodeLayer, SpeedMap};
+        use spring_pathfinding::{NodeLayer, SpeedMap, slope_mod_from_max_slope};
         use std::collections::BTreeSet;
 
         use crate::units::content::definitions::ALL_UNIT_KINDS;
-        use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_RATIO;
+        use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_DEGREES;
 
-        const SLOPE_MOD: f32 = 400.0;
-        // Bin slopes to 3 decimals so float jitter on
-        // `tan(deg.to_radians())` doesn't split near-identical buckets.
-        const BUCKET_QUANTUM: f32 = 1_000.0;
+        // Why: bin to 4 decimals so float jitter doesn't split
+        // near-identical buckets.
+        const BUCKET_QUANTUM: f32 = 10_000.0;
 
         let mut distinct_caps = BTreeSet::<u32>::new();
         for &kind in ALL_UNIT_KINDS {
             let cap = unit_registry.max_slope_ratio(kind);
             distinct_caps.insert((cap * BUCKET_QUANTUM).round() as u32);
         }
-        // Always keep the 45° fallback available for units whose FBI
-        // omits MaxSlope or for the `max_slope_ratio` default.
-        distinct_caps.insert((DEFAULT_MAX_SLOPE_RATIO * BUCKET_QUANTUM).round() as u32);
+        // Always keep the KP-default bucket (FBI MaxSlope=36 from
+        // `MOVEINFO.TDF`'s LIGHT/MEDIUM/HEAVY) available for units
+        // whose FBI omits `MaxSlope`.
+        let default_cap = spring_pathfinding::max_slope_from_degrees(DEFAULT_MAX_SLOPE_DEGREES);
+        distinct_caps.insert((default_cap * BUCKET_QUANTUM).round() as u32);
 
         let mut nav_set = interaction::movement::NavGridSet::default();
         for cap_q in distinct_caps {
             let cap = cap_q as f32 / BUCKET_QUANTUM;
+            let slope_mod = slope_mod_from_max_slope(cap);
             let speed_map = SpeedMap::from_heightmap(
                 &parsed.heights,
                 parsed.header.heightmap_width() as u32,
                 parsed.header.heightmap_height() as u32,
                 cap,
-                SLOPE_MOD,
+                slope_mod,
             );
             let layer = NodeLayer::new(&speed_map);
             info!(
-                "  Nav bucket max_slope={:.3}: {} leaf nodes from {}x{} speed map",
+                "  Nav bucket max_slope={:.3} (slope_mod={:.2}): {} leaf nodes from {}x{} speed map",
                 cap,
+                slope_mod,
                 layer.leaf_count(),
                 speed_map.width,
                 speed_map.height,

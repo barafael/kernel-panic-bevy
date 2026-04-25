@@ -177,6 +177,11 @@ pub struct CobVm {
     /// host updates them each tick (e.g. `BUILD_PERCENT_LEFT`,
     /// `INBUILDSTANCE`). Anything not set reads as 0.
     unit_values: smallvec::SmallVec<[(i32, i32); 8]>,
+    /// `(thread_id, ret_code)` pairs for threads that died on the most
+    /// recent `tick()`, captured before pruning so the host can still
+    /// correlate a previously-spawned thread (e.g. `AimWeapon1`) to its
+    /// return value. Drained by [`CobVm::take_ended_threads`].
+    ended_threads: Vec<(u32, i32)>,
 }
 
 impl CobVm {
@@ -189,6 +194,7 @@ impl CobVm {
             next_thread_id: 1,
             current_time: 0,
             unit_values: smallvec::SmallVec::new(),
+            ended_threads: Vec::new(),
         }
     }
 
@@ -241,6 +247,46 @@ impl CobVm {
             .map(|t| t.ret_code)
     }
 
+    /// Call a script function by name and read back local[0] — the
+    /// BOS-idiomatic out-parameter slot used by every `Query*`
+    /// function (e.g. `QueryWeapon1(piecenum) { piecenum = gunpoint; }`).
+    /// Mirrors upstream's [`CCobInstance::Call`][CobInstance], which
+    /// copies the locals back into the caller's `args` vector after
+    /// the function exits.
+    ///
+    /// Returns `None` if the function is missing, empty, or yielded
+    /// — `Query*` should never yield.
+    ///
+    /// [CobInstance]: https://github.com/beyond-all-reason/RecoilEngine/blob/master/rts/Sim/Units/Scripts/CobInstance.cpp
+    pub fn call_script_out_param(&mut self, cob: &CobFile, name: &str) -> Option<i32> {
+        let func_id = cob.function_id(name)?;
+        if cob.script_lengths[func_id] == 0 {
+            return None;
+        }
+        // Seed local[0] with 0 — matches upstream's empty out-param.
+        let thread_id = self.start_function(cob, func_id, &[0], 0);
+        let mut commands = Vec::new();
+        self.tick_thread(cob, thread_id, &mut commands);
+
+        // Why: at root-frame Return the VM breaks out without
+        // truncating the data stack, so locals live on at
+        // `[0, param_count)`. Read local[0] before pruning.
+        let result = self
+            .threads
+            .iter()
+            .find(|t| t.id == thread_id)
+            .filter(|t| t.state == ThreadState::Dead)
+            .and_then(|t| t.data_stack.first().copied());
+
+        // Prune the just-finished thread directly. Without this,
+        // dead `Query*` threads accumulate until the next `tick()`
+        // both bloats `self.threads` and leaks into the
+        // [`take_thread_return_code`] lookup as bogus entries.
+        self.threads.retain(|t| t.id != thread_id);
+
+        result
+    }
+
     /// Advance time by `dt_ms` milliseconds and tick all runnable threads.
     /// Returns animation commands emitted during execution.
     pub fn tick(&mut self, cob: &CobFile, dt_ms: i32) -> Vec<AnimCommand> {
@@ -272,10 +318,32 @@ impl CobVm {
             self.start_function(cob, spawn.function_id, &spawn.args, spawn.signal_mask);
         }
 
-        // Remove dead threads.
+        // Snapshot (id, ret_code) of threads dying this tick before
+        // we prune, so the host can still correlate previously-
+        // spawned threads (e.g. `AimWeapon1`) via
+        // [`take_thread_return_code`]. Overwritten each tick.
+        self.ended_threads.clear();
+        for t in &self.threads {
+            if t.state == ThreadState::Dead {
+                self.ended_threads.push((t.id, t.ret_code));
+            }
+        }
         self.threads.retain(|t| t.state != ThreadState::Dead);
 
         commands
+    }
+
+    /// Take the return code of `thread_id` if that thread ended
+    /// during the last [`tick`](Self::tick). Drains the entry so
+    /// repeated calls return `None`; lets a host correlate a
+    /// previously-spawned thread to its final return value even
+    /// though the thread itself has been pruned from the live list.
+    pub fn take_thread_return_code(&mut self, thread_id: u32) -> Option<i32> {
+        let pos = self
+            .ended_threads
+            .iter()
+            .position(|(id, _)| *id == thread_id)?;
+        Some(self.ended_threads.swap_remove(pos).1)
     }
 
     /// Notify the VM that a turn/move animation has completed on a piece+axis.
@@ -791,4 +859,55 @@ impl CobVm {
 pub enum AnimType {
     Turn,
     Move,
+}
+
+#[cfg(test)]
+mod out_param_tests {
+    use super::*;
+    use crate::cob_file::CobFile;
+    use crate::opcodes::Opcode;
+
+    /// Build a minimal CobFile with a single function that models
+    /// BOS-style `Query(piecenum) { piecenum = expected; }`:
+    ///
+    /// - `CreateLocalVar`    — claims local[0] (pops the param slot)
+    /// - `PushConstant N`    — pushes the out-value
+    /// - `PopLocalVar 0`     — writes local[0] = N
+    /// - `PushConstant 0`    — (Scriptor-style implicit return 0)
+    /// - `Return`            — pops → ret_code = 0
+    fn single_fn_cob(name: &str, piecenum: i32) -> CobFile {
+        let code: Vec<i32> = vec![
+            Opcode::CreateLocalVar as i32,
+            Opcode::PushConstant as i32,
+            piecenum,
+            Opcode::PopLocalVar as i32,
+            0,
+            Opcode::PushConstant as i32,
+            0,
+            Opcode::Return as i32,
+        ];
+        CobFile {
+            script_names: vec![name.to_string()],
+            script_offsets: vec![0],
+            script_lengths: vec![code.len()],
+            piece_names: Vec::new(),
+            code,
+            num_static_vars: 0,
+            sound_names: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn out_param_returns_written_local0() {
+        let cob = single_fn_cob("QueryWeapon1", 17);
+        let mut vm = CobVm::new(&cob);
+        assert_eq!(vm.call_script_out_param(&cob, "QueryWeapon1"), Some(17));
+    }
+
+    #[test]
+    fn out_param_missing_function_returns_none() {
+        let cob = single_fn_cob("QueryWeapon1", 17);
+        let mut vm = CobVm::new(&cob);
+        assert_eq!(vm.call_script_out_param(&cob, "QueryWeapon42"), None);
+    }
 }

@@ -83,25 +83,27 @@ pub struct CobAnimator {
 #[derive(Component)]
 pub struct PieceIndex;
 
-/// Index (into `CobAnimator::piece_entities`) of the unit's primary weapon
-/// muzzle — where beams and projectiles should originate. Upstream scripts
-/// express this through the `QueryWeapon1(piecenum)` callout which sets
-/// `piecenum` to a piece like `gunpoint`, `flare`, or `bp0`. Our VM doesn't
-/// yet execute `call_script` to consume a returned out-param, so we resolve
-/// the muzzle heuristically at spawn from a small list of well-known names.
-/// Covers every KP unit that declares one (Bit / Byte / Pointer / DOS /
-/// Exploit*); units without any match fall back to the unit transform
-/// origin in `combat_system`.
+/// Index (into `CobAnimator::piece_entities`) of the unit's primary
+/// weapon muzzle — where beams and projectiles originate.
+///
+/// Upstream scripts express this through the `QueryWeapon1(piecenum)`
+/// callout which sets `piecenum` to a piece like `gunpoint`, `flare`,
+/// or `bp0`. The [`refresh_muzzle_pieces`] system runs every frame
+/// and asks the script directly, so Byte's `gp`-driven cycle through
+/// bp0 → bp1 → bp2 → bp3 is honoured shot-for-shot instead of
+/// resolving to a single barrel once at spawn. `MuzzlePiece::resolve`
+/// remains as a spawn-time fallback for units whose scripts don't
+/// declare a recognised muzzle name.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct MuzzlePiece(pub usize);
 
 impl MuzzlePiece {
-    /// Candidate piece names searched in order at spawn. `gunpoint` covers
-    /// Bit / Pointer / DOS / Exploit*, `bp0` the Byte's first barrel,
-    /// `flare` / `barrel` / `muzzle` are generic fallbacks for any
-    /// third-party unit that doesn't follow KP's specific naming. Pulled
-    /// out so the MuzzlePiece component owns both the data (index) and
-    /// the convention that resolves it.
+    /// Candidate piece names searched in order at spawn, as a
+    /// fallback when `QueryWeapon1` is absent (factories, turretless
+    /// units). `gunpoint` covers Bit / Pointer / DOS / Exploit*,
+    /// `bp0` the Byte's first barrel, `flare` / `barrel` / `muzzle`
+    /// are generic fallbacks for any third-party unit that doesn't
+    /// follow KP's specific naming.
     pub const CANDIDATE_NAMES: &'static [&'static str] =
         &["gunpoint", "bp0", "flare", "barrel", "muzzle"];
 
@@ -116,6 +118,36 @@ impl MuzzlePiece {
                 .position(|n| n.eq_ignore_ascii_case(name))
                 .map(Self)
         })
+    }
+}
+
+/// Refresh [`MuzzlePiece`] from the script's `QueryWeapon1` answer
+/// for every unit currently engaging a target. Why: byte's `gp`
+/// static var only advances inside `FireWeapon1`, so units without
+/// an [`crate::units::combat::AimTarget`] never see it change —
+/// re-querying them every tick would burn VM ops at scale for no
+/// behaviour change.
+pub fn refresh_muzzle_pieces(
+    mut query: Query<
+        (Entity, &mut CobAnimator, Option<&MuzzlePiece>),
+        With<crate::units::combat::AimTarget>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, mut animator, cached) in &mut query {
+        let cob = animator.cob.clone();
+        let Some(piece_i32) = animator.vm.call_script_out_param(&cob, "QueryWeapon1") else {
+            continue;
+        };
+        let Ok(piece_usize) = usize::try_from(piece_i32) else {
+            continue;
+        };
+        if piece_usize >= animator.piece_entities.len() {
+            continue;
+        }
+        if cached.is_none_or(|mp| mp.0 != piece_usize) {
+            commands.entity(entity).insert(MuzzlePiece(piece_usize));
+        }
     }
 }
 

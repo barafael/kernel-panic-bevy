@@ -17,7 +17,7 @@
 
 use bevy::prelude::*;
 
-use crate::units::combat::{INFECTION_DURATION, Infected};
+use crate::units::combat::{Infected, weapon_infection_duration};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::spatial::SpatialIndex;
@@ -51,22 +51,22 @@ pub const MINELAUNCHER_FAN_COUNT: usize = 5;
 /// front of the Byte at the clicked position.
 pub const MINELAUNCHER_FAN_RADIUS: f32 = 40.0;
 
-/// Terminal `SIGTERM` airstrike (§3.5). Upstream spawns an invisible
-/// Signal bomber that flies to the target and drops a `sigterm.s3o`
-/// AircraftBomb (AoE 900, damage 10000); on detonation the
-/// `areadenial.lua` gadget lays a persistent poison zone at the impact
-/// site. We skip the bomber entirely — the player never sees it —
-/// and drop a stand-in projectile straight down from high altitude,
-/// which detonates on a fixed timer.
+/// Terminal `SIGTERM` airstrike: a [`SigTermSignal`] flies to the
+/// target, then drops a [`SigTermBomb`] that gravity-falls and
+/// detonates. Why: matches upstream `airstrike.lua`'s two-stage
+/// strike. Neither stage carries a `UnitType`, which is what makes
+/// them untargetable — same effect as upstream's
+/// `Category=NUKE VTOL` + every ground unit's `NoChaseCategory=VTOL`.
 pub const SIGTERM_COOLDOWN: f32 = 90.0;
-/// Height above the target where the bomb appears when the cast fires.
-/// Large enough that the descent reads as "the sky just dropped
-/// something" without forcing an awkwardly long wait.
-pub const SIGTERM_BOMB_ALTITUDE: f32 = 500.0;
-/// Seconds from cast to detonation. Matches upstream's
-/// `myGravity=0.3` fall time from a spawn altitude of roughly
-/// 250 elmos — fast enough that the player can't walk a unit out of
-/// the way but slow enough to feel air-strike-y.
+/// Signal's cruise altitude. Matches signal.fbi `cruiseAlt=200`.
+pub const SIGTERM_SIGNAL_ALTITUDE: f32 = 200.0;
+/// Signal's ground speed. Matches signal.fbi `MaxVelocity=8` in elmos
+/// per sim-frame @ 30 Hz → 240 elmos/s. Fast enough that the flight
+/// reads as a jet blip, not a blimp.
+pub const SIGTERM_SIGNAL_SPEED: f32 = 240.0;
+/// Seconds of bomb free-fall from Signal's release altitude.
+/// Matches upstream's `myGravity=0.3` — `sqrt(2 * 200 / (0.3 * 30²))`
+/// works out to roughly 1.2 s from `cruiseAlt=200`.
 pub const SIGTERM_FALL_DURATION: f32 = 1.2;
 /// One-shot blast radius, matching upstream `SigTerm.areaofeffect=900`.
 pub const SIGTERM_BLAST_RADIUS: f32 = 900.0;
@@ -81,6 +81,20 @@ pub const SIGTERM_BLAST_EDGE: f32 = 0.8;
 pub const SIGTERM_DENIAL_RADIUS: f32 = 350.0;
 pub const SIGTERM_DENIAL_DPS: f32 = 2000.0;
 pub const SIGTERM_DENIAL_TTL: f32 = 3.0;
+
+/// SIGTERM stage 1: bomber flying from `start` to over `target`.
+/// `tick_sigterm_signals` lerps along the cruise path, then spawns a
+/// [`SigTermBomb`] on arrival.
+#[derive(Component, Debug, Clone)]
+pub struct SigTermSignal {
+    pub target: Vec3,
+    pub start: Vec3,
+    /// Cruise-path length, divided by [`SIGTERM_SIGNAL_SPEED`] for flight time.
+    pub total_distance: f32,
+    pub elapsed: f32,
+    pub owner_team: u8,
+    pub owner_faction: Faction,
+}
 
 /// A Terminal-spawned SIGTERM bomb falling toward [`target`]. Ticked
 /// by `tick_sigterm_bombs`: each frame lerps its transform toward the
@@ -161,6 +175,12 @@ pub struct CommandFireEvent {
 /// `owner_team` / `owner_faction` are copied from the caster so friendly
 /// filtering still works after the caster dies (upstream's gadget
 /// reassigns ownership to a random homebase; we just cache it).
+///
+/// `infection_duration` is `Some(window_seconds)` for zones that tag
+/// units with [`Infected`] on every DPS tick — matches upstream's
+/// `areadenial.lua` re-applying the source weapon's `UnitDamaged`
+/// event, which re-arms the infection window via `infection.lua`.
+/// `None` means the zone does not infect at all.
 #[derive(Component)]
 pub struct AreaDenialZone {
     pub center: Vec3,
@@ -168,7 +188,7 @@ pub struct AreaDenialZone {
     pub dps: f32,
     pub remaining: f32,
     pub damage_friendly: bool,
-    pub infects: bool,
+    pub infection_duration: Option<f32>,
     pub owner_team: u8,
     pub owner_faction: Faction,
 }
@@ -237,30 +257,49 @@ pub fn process_command_fire(
         }
 
         if unit.0 == UnitKind::Terminal {
-            let start = event.target + Vec3::new(0.0, SIGTERM_BOMB_ALTITUDE, 0.0);
-            // Visual stand-in for the missing sigterm.s3o model: a
-            // bright red/orange sphere. Mesh + material cloned fresh
-            // per-cast since casts are rare (≥90s cd per Terminal) and
-            // this path isn't hot.
-            let mesh = meshes.add(Sphere::new(14.0));
-            let material = materials.add(StandardMaterial {
-                base_color: Color::srgb(1.0, 0.3, 0.0),
-                emissive: LinearRgba::new(1.0, 0.4, 0.1, 1.0) * 8.0,
+            // Signal aircraft spawns at the Terminal's altitude + a
+            // climb-out offset so the takeoff reads instead of the
+            // Signal punching sideways through the roof. Flies in a
+            // straight line to cruise altitude directly over the
+            // target, then releases a bomb. No `UnitType` on either
+            // entity → not in the spatial index → not targetable.
+            let caster_pos = gtf.translation();
+            let start = Vec3::new(
+                caster_pos.x,
+                caster_pos.y + SIGTERM_SIGNAL_ALTITUDE,
+                caster_pos.z,
+            );
+            let release = Vec3::new(
+                event.target.x,
+                event.target.y + SIGTERM_SIGNAL_ALTITUDE,
+                event.target.z,
+            );
+            let distance = start.distance(release);
+
+            let signal_mesh = meshes.add(Cuboid::new(18.0, 6.0, 24.0));
+            let signal_material = materials.add(StandardMaterial {
+                base_color: Color::srgb(0.3, 1.0, 0.6),
+                emissive: LinearRgba::new(0.2, 1.0, 0.5, 1.0) * 6.0,
                 unlit: true,
                 ..default()
             });
+            let facing = if distance > 1e-3 {
+                Transform::from_translation(start).looking_at(release, Vec3::Y)
+            } else {
+                Transform::from_translation(start)
+            };
             commands.spawn((
-                SigTermBomb {
+                SigTermSignal {
                     target: event.target,
                     start,
-                    time_to_detonate: SIGTERM_FALL_DURATION,
-                    total_fall: SIGTERM_FALL_DURATION,
+                    total_distance: distance,
+                    elapsed: 0.0,
                     owner_team: team.0,
                     owner_faction: *faction,
                 },
-                Mesh3d(mesh),
-                MeshMaterial3d(material),
-                Transform::from_translation(start),
+                Mesh3d(signal_mesh),
+                MeshMaterial3d(signal_material),
+                facing,
                 Visibility::default(),
             ));
             commands.entity(event.attacker).insert(CommandFireCooldown {
@@ -278,7 +317,7 @@ pub fn process_command_fire(
             dps: ability.dps,
             remaining: ability.ttl,
             damage_friendly: ability.damage_friendly,
-            infects: ability.infects,
+            infection_duration: ability.infection_weapon.and_then(weapon_infection_duration),
             owner_team: team.0,
             owner_faction: *faction,
         });
@@ -428,13 +467,75 @@ pub fn tick_area_denial(
             if let Ok(mut health) = health_q.get_mut(unit_entity) {
                 health.current -= tick_damage;
             }
-            if zone.infects && !friendly {
+            if let Some(window) = zone.infection_duration
+                && !friendly
+            {
                 commands.entity(unit_entity).insert(Infected {
-                    timer: INFECTION_DURATION,
+                    timer: window,
                     attacker_faction: zone.owner_faction,
                     attacker_team: zone.owner_team,
                 });
             }
+        }
+    }
+}
+
+/// Fly every in-flight Signal bomber. On arrival, drop a
+/// [`SigTermBomb`] at the release point and despawn the Signal.
+#[allow(clippy::too_many_arguments)]
+pub fn tick_sigterm_signals(
+    time: Res<Time>,
+    mut signals: Query<(Entity, &mut SigTermSignal, &mut Transform)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, mut signal, mut transform) in &mut signals {
+        signal.elapsed += dt;
+        let total_time = if signal.total_distance > 1e-3 {
+            signal.total_distance / SIGTERM_SIGNAL_SPEED
+        } else {
+            0.0
+        };
+        let release = Vec3::new(signal.target.x, signal.start.y, signal.target.z);
+
+        if total_time <= 0.0 || signal.elapsed >= total_time {
+            // Arrived — drop the bomb from cruise altitude, despawn
+            // the Signal. Free-fall duration is canonical, not
+            // recalculated per release altitude.
+            let bomb_mesh = meshes.add(Sphere::new(14.0));
+            let bomb_material = materials.add(StandardMaterial {
+                base_color: Color::srgb(1.0, 0.3, 0.0),
+                emissive: LinearRgba::new(1.0, 0.4, 0.1, 1.0) * 8.0,
+                unlit: true,
+                ..default()
+            });
+            commands.spawn((
+                SigTermBomb {
+                    target: signal.target,
+                    start: release,
+                    time_to_detonate: SIGTERM_FALL_DURATION,
+                    total_fall: SIGTERM_FALL_DURATION,
+                    owner_team: signal.owner_team,
+                    owner_faction: signal.owner_faction,
+                },
+                Mesh3d(bomb_mesh),
+                MeshMaterial3d(bomb_material),
+                Transform::from_translation(release),
+                Visibility::default(),
+            ));
+            commands.entity(entity).despawn();
+            continue;
+        }
+
+        let t = (signal.elapsed / total_time).clamp(0.0, 1.0);
+        let pos = signal.start.lerp(release, t);
+        transform.translation = pos;
+        // Keep the nose pointed at the release heading so the
+        // cuboid visibly streaks rather than tumbling.
+        if signal.total_distance > 1e-3 {
+            transform.look_at(release, Vec3::Y);
         }
     }
 }
@@ -489,7 +590,7 @@ pub fn tick_sigterm_bombs(
             dps: SIGTERM_DENIAL_DPS,
             remaining: SIGTERM_DENIAL_TTL,
             damage_friendly: true,
-            infects: false,
+            infection_duration: None,
             owner_team: bomb.owner_team,
             owner_faction: bomb.owner_faction,
         });
@@ -500,6 +601,11 @@ pub fn tick_sigterm_bombs(
 /// Definition of a unit's command-fire ability. Values come from
 /// upstream `LuaRules/Gadgets/areadenial.lua` (radius / dps / ttl /
 /// friendly-fire) and the weapon's own `reloadtime` for cooldown.
+///
+/// `infection_weapon` names the source weapon whose `UnitDamaged`
+/// event upstream's `infection.lua` watches — for Obelisk's gas that
+/// is the `"Infection"` weapon (1 s window). `None` means the zone
+/// doesn't infect.
 struct Ability {
     radius: f32,
     dps: f32,
@@ -507,7 +613,7 @@ struct Ability {
     ttl: f32,
     cooldown: f32,
     damage_friendly: bool,
-    infects: bool,
+    infection_weapon: Option<&'static str>,
 }
 
 fn ability_for(kind: UnitKind) -> Option<Ability> {
@@ -518,7 +624,7 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
             ttl: 60.0,
             cooldown: 30.0,
             damage_friendly: true,
-            infects: false,
+            infection_weapon: None,
         }),
         UnitKind::Obelisk => Some(Ability {
             radius: 400.0,
@@ -526,7 +632,7 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
             ttl: 13.0,
             cooldown: 40.0,
             damage_friendly: false,
-            infects: true,
+            infection_weapon: Some("Infection"),
         }),
         _ => None,
     }
@@ -544,7 +650,7 @@ mod tests {
         assert_eq!(a.ttl, 60.0);
         assert_eq!(a.cooldown, 30.0);
         assert!(a.damage_friendly);
-        assert!(!a.infects);
+        assert_eq!(a.infection_weapon, None);
     }
 
     #[test]
@@ -555,7 +661,13 @@ mod tests {
         assert_eq!(a.ttl, 13.0);
         assert_eq!(a.cooldown, 40.0);
         assert!(!a.damage_friendly);
-        assert!(a.infects);
+        // Upstream infection.lua: `infector[WeaponDefNames["infection"].id]
+        // = 30` frames @ 30 fps → 1 s infection window per DPS tick.
+        assert_eq!(a.infection_weapon, Some("Infection"));
+        assert_eq!(
+            weapon_infection_duration(a.infection_weapon.unwrap()),
+            Some(1.0)
+        );
     }
 
     #[test]
@@ -657,6 +769,73 @@ mod tests {
         assert_eq!(SIGTERM_DENIAL_TTL, 3.0);
     }
 
+    /// A Signal flown to its release point hands off to a SigTermBomb
+    /// at the current altitude. Two-stage airstrike reproduced: the
+    /// Signal does the horizontal traversal, the bomb does the fall.
+    #[test]
+    fn sigterm_signal_drops_bomb_on_arrival() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>();
+
+        // Start 500 elmos east of the target at cruise altitude. At
+        // SIGTERM_SIGNAL_SPEED = 240 elmos/s, flight takes ~2.08 s.
+        let target = Vec3::ZERO;
+        let start = Vec3::new(500.0, SIGTERM_SIGNAL_ALTITUDE, 0.0);
+        let distance = start.distance(Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0));
+        app.world_mut().spawn((
+            SigTermSignal {
+                target,
+                start,
+                total_distance: distance,
+                elapsed: 0.0,
+                owner_team: 0,
+                owner_faction: Faction::System,
+            },
+            Transform::from_translation(start),
+        ));
+
+        // Advance past the full flight time. One tick of the system
+        // after arrival spawns the bomb + despawns the Signal.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(2_500));
+        app.world_mut()
+            .run_system_once(tick_sigterm_signals)
+            .unwrap();
+
+        let signals_left = app
+            .world_mut()
+            .query::<&SigTermSignal>()
+            .iter(app.world())
+            .count();
+        assert_eq!(signals_left, 0, "signal must despawn after dropping bomb");
+
+        let bombs: Vec<SigTermBomb> = app
+            .world_mut()
+            .query::<&SigTermBomb>()
+            .iter(app.world())
+            .cloned()
+            .collect();
+        assert_eq!(bombs.len(), 1, "signal must spawn exactly one bomb");
+        let bomb = &bombs[0];
+        assert_eq!(bomb.target, target);
+        assert!(
+            (bomb.start.y - SIGTERM_SIGNAL_ALTITUDE).abs() < 1e-3,
+            "bomb should fall from cruise altitude, got {}",
+            bomb.start.y
+        );
+        assert!(
+            (bomb.start.x - target.x).abs() < 1e-3 && (bomb.start.z - target.z).abs() < 1e-3,
+            "bomb should release directly above the target, got {:?}",
+            bomb.start
+        );
+        assert_eq!(bomb.owner_team, 0);
+    }
+
     /// A bomb spawned at altitude reaches ground just as its timer
     /// hits zero. Verifies the lerp math doesn't overshoot or drift.
     #[test]
@@ -667,7 +846,7 @@ mod tests {
         app.init_resource::<Time>().init_resource::<SpatialIndex>();
 
         let target = Vec3::new(100.0, 0.0, 50.0);
-        let start = target + Vec3::new(0.0, SIGTERM_BOMB_ALTITUDE, 0.0);
+        let start = target + Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0);
         let bomb = app
             .world_mut()
             .spawn((
@@ -712,7 +891,7 @@ mod tests {
         app.world_mut().spawn((
             SigTermBomb {
                 target,
-                start: target + Vec3::new(0.0, SIGTERM_BOMB_ALTITUDE, 0.0),
+                start: target + Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0),
                 time_to_detonate: 0.0,
                 total_fall: SIGTERM_FALL_DURATION,
                 owner_team: 1,

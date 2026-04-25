@@ -92,24 +92,38 @@ impl Plugin for UnitsPlugin {
                     )
                         .chain()
                         .in_set(GameplaySet::Produce),
+                    // Why: MuzzlePiece + AimScript must update before
+                    // `combat_system` reads them. The Simulate set is
+                    // split in two only because Bevy's tuple-arity cap
+                    // is 21.
                     (
-                        spatial::rebuild_spatial_index,
-                        combat::tick_deploy_state,
-                        combat::tick_opening_delay,
-                        combat::tick_kamikaze,
-                        combat::combat_system,
-                        combat::attack_ground_system,
-                        combat::tick_burst_fire,
-                        combat::aim_weapons_system,
-                        combat::tick_infections,
-                        command_fire::process_command_fire,
-                        command_fire::tick_command_fire_cooldown,
-                        command_fire::tick_area_denial,
-                        command_fire::tick_sigterm_bombs,
-                        command_fire::tick_protection,
-                        script_triggers::trigger_movement_scripts,
-                        script_triggers::trigger_production_scripts,
-                        script_triggers::trigger_weapon_scripts,
+                        (
+                            spatial::rebuild_spatial_index,
+                            combat::tick_deploy_state,
+                            combat::tick_opening_delay,
+                            combat::tick_byte_open,
+                            combat::tick_kamikaze,
+                            assets::animation::refresh_muzzle_pieces,
+                            combat::drive_aim_script,
+                            combat::combat_system,
+                            combat::attack_ground_system,
+                            combat::tick_burst_fire,
+                            combat::aim_weapons_system,
+                        )
+                            .chain(),
+                        (
+                            combat::tick_infections,
+                            command_fire::process_command_fire,
+                            command_fire::tick_command_fire_cooldown,
+                            command_fire::tick_area_denial,
+                            command_fire::tick_sigterm_signals,
+                            command_fire::tick_sigterm_bombs,
+                            command_fire::tick_protection,
+                            script_triggers::trigger_movement_scripts,
+                            script_triggers::trigger_production_scripts,
+                            script_triggers::trigger_weapon_scripts,
+                        )
+                            .chain(),
                     )
                         .chain()
                         .in_set(GameplaySet::Simulate),
@@ -130,6 +144,10 @@ impl Plugin for UnitsPlugin {
                     (
                         animation::publish_unit_values,
                         animation::animation_system,
+                        // Why: must run after animation_system so the
+                        // VM's `ended_threads` snapshot contains this
+                        // frame's AimWeapon1 returns.
+                        combat::update_aim_script,
                         animation::decay_death_particles,
                         cloak::update_cloak_visibility,
                         cloak::update_fog_visibility,

@@ -28,15 +28,15 @@ const DEFAULT_WORKER_TIME: f32 = 128.0;
 /// threshold sits well below that range.
 const DAMAGE_MODIFIER_DISABLED_THRESHOLD: f32 = 0.01;
 
-/// Fallback max-slope ratio for units whose FBI omits `MaxSlope` (e.g.
-/// buildings). Matches the global cap in `map_loading.rs` (45°).
-pub const DEFAULT_MAX_SLOPE_RATIO: f32 = 1.0;
-
-/// Upper bound clamp on per-unit max-slope so a rogue FBI
-/// (`MaxSlope=90` → tan → infinity) can't produce a bucket that makes
-/// every cell passable. 60° (tan ≈ 1.73) matches the steepest explicit
-/// KP cap and is well above any real map slope.
-pub const MAX_SLOPE_RATIO: f32 = 1.8;
+/// Default FBI `MaxSlope` (degrees) for KP movement classes, taken
+/// from upstream `gamedata/MOVEINFO.TDF` where every entry
+/// (LIGHT/MEDIUM/HEAVY) sets `MaxSlope=36`. Mobile units in KP don't
+/// declare `MaxSlope` directly in their FBIs — they reference a
+/// MovementClass that does. Until we wire up MOVEINFO parsing, fall
+/// back to this so the pathfinder's effective cap matches the engine
+/// upstream uses (54° geometric, after Spring's 1.5× pre-multiplier in
+/// `DegreesToMaxSlope`).
+pub const DEFAULT_MAX_SLOPE_DEGREES: f32 = 36.0;
 
 /// All parsed unit definitions, accessible by `UnitKind`.
 #[derive(Resource)]
@@ -147,19 +147,25 @@ impl UnitRegistry {
         })
     }
 
-    /// Max traversable slope as a `dy/dx` ratio (what
-    /// `spring_pathfinding::SpeedMap` takes). Spring's FBI `MaxSlope` is in
-    /// degrees (KP values: 10, 15, 20, 32, 60); we convert with
-    /// `tan(degrees)`. Unknown / zero-MaxSlope units fall back to
-    /// [`DEFAULT_MAX_SLOPE_RATIO`] (45°, matching the global cap in
-    /// `map_loading.rs`).
+    /// Max traversable slope in **Spring's encoding**: `1 - cos(deg ×
+    /// 1.5)`. Ground units in KP don't set FBI `MaxSlope` — they
+    /// reference `MovementClass` which keys into `MOVEINFO.TDF` where
+    /// every class has `MaxSlope=36`. Until we parse `MOVEINFO.TDF`,
+    /// the default mirrors that. Buildings (which DO declare `MaxSlope`
+    /// directly) still pull from the FBI value.
+    ///
+    /// The 1.5× pre-multiplier in [`max_slope_from_degrees`] matches
+    /// upstream `Sim/MoveTypes/MoveDefHandler.cpp:DegreesToMaxSlope` —
+    /// without it, the port's pathfinder rejects ramps the engine
+    /// would have accepted, leaving units stuck on plateaus that have
+    /// 50° ramps the original game routes them through.
     pub fn max_slope_ratio(&self, kind: UnitKind) -> f32 {
-        self.def(kind)
+        let deg = self
+            .def(kind)
             .map(|d| d.max_slope)
             .filter(|&deg| deg > 0.0)
-            .map_or(DEFAULT_MAX_SLOPE_RATIO, |deg| {
-                deg.to_radians().tan().min(MAX_SLOPE_RATIO)
-            })
+            .unwrap_or(DEFAULT_MAX_SLOPE_DEGREES);
+        spring_pathfinding::max_slope_from_degrees(deg)
     }
 
     /// Cruise altitude in elmos above the terrain for flying units. 0 for
@@ -388,33 +394,48 @@ mod tests {
         UnitRegistry { defs }
     }
 
+    /// FBI MaxSlope=20 should produce Spring's encoded value
+    /// `1 - cos(20° × 1.5) = 1 - cos(30°) ≈ 0.134`. The 1.5×
+    /// pre-multiplier matches upstream `DegreesToMaxSlope`.
     #[test]
-    fn max_slope_ratio_converts_fbi_degrees_to_rise_run() {
-        // Bit's FBI: MaxSlope=20 → tan(20°) ≈ 0.364.
+    fn max_slope_ratio_uses_spring_encoding() {
         let reg = registry_with_slope(UnitKind::Bit, 20.0);
         let ratio = reg.max_slope_ratio(UnitKind::Bit);
+        let expected = 1.0 - 30.0_f32.to_radians().cos();
         assert!(
-            (ratio - 20.0_f32.to_radians().tan()).abs() < 1e-5,
-            "got {ratio}"
+            (ratio - expected).abs() < 1e-5,
+            "got {ratio}, expected {expected}",
         );
     }
 
+    /// KP mobile units (Bit/Bug/Byte/etc.) don't declare
+    /// `MaxSlope=` in their FBIs — they reference `MovementClass`
+    /// which keys into `MOVEINFO.TDF`. Until we parse that file, the
+    /// fallback uses the upstream LIGHT/MEDIUM/HEAVY default of
+    /// `MaxSlope=36`, encoded as `1 - cos(54°) ≈ 0.412`.
     #[test]
-    fn max_slope_ratio_default_for_missing_unit() {
+    fn max_slope_ratio_default_is_kp_class_default() {
         let reg = UnitRegistry {
             defs: UnitDefs::default(),
         };
-        // Buildings / unparsed units fall back to the 45° cap.
-        assert_eq!(reg.max_slope_ratio(UnitKind::Bit), DEFAULT_MAX_SLOPE_RATIO);
+        let expected = 1.0 - 54.0_f32.to_radians().cos();
+        let got = reg.max_slope_ratio(UnitKind::Bit);
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "got {got}, expected {expected} (FBI MaxSlope=36 default)",
+        );
     }
 
+    /// `max_slope_from_degrees` clamps the FBI input to `[0, 60]`
+    /// before applying the 1.5× multiplier, mirroring upstream — a
+    /// degenerate `MaxSlope=89` saturates at the same value as
+    /// `MaxSlope=60` (≡ 1 - cos(90°) = 1.0, i.e. the whole map is
+    /// climbable). We verify the clamp rather than imposing our own.
     #[test]
-    fn max_slope_ratio_clamps_absurd_values() {
-        // Paranoid FBI with MaxSlope=89 → tan(89°) ≈ 57, which would
-        // produce a bucket where every cell is passable. Clamp to our
-        // configured ceiling so the bucket selector still has a useful
-        // "loosest" category.
+    fn max_slope_ratio_saturates_at_upstream_clamp() {
         let reg = registry_with_slope(UnitKind::Bit, 89.0);
-        assert_eq!(reg.max_slope_ratio(UnitKind::Bit), MAX_SLOPE_RATIO);
+        let got = reg.max_slope_ratio(UnitKind::Bit);
+        // 60° clamp: 1 - cos(60° × 1.5) = 1 - cos(90°) = 1.0.
+        assert!((got - 1.0).abs() < 1e-5, "got {got}, expected 1.0");
     }
 }

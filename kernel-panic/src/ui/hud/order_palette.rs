@@ -20,9 +20,15 @@ pub struct OrderPalettePlugin;
 
 impl Plugin for OrderPalettePlugin {
     fn build(&self, app: &mut App) {
+        // Order matters: clicks land on the buttons that
+        // `update_order_palette` last spawned. If `update_order_palette`
+        // runs first within a frame and rebuilds the palette (selection
+        // changed, ability/deploy hash flipped, …), the just-pressed
+        // entity is despawned before `handle_order_clicks` can read its
+        // `Changed<Interaction>`. Run handler first, then rebuild.
         app.add_message::<UnitOrderEvent>().add_systems(
             Update,
-            (update_order_palette, handle_order_clicks, apply_unit_orders),
+            (handle_order_clicks, apply_unit_orders, update_order_palette).chain(),
         );
     }
 }

@@ -20,8 +20,26 @@ impl SpeedMap {
     /// Build a speed map from heightmap data.
     ///
     /// `heights` is row-major `(width+1) * (height+1)` (fence-post vertices).
-    /// `max_slope` is the maximum traversable slope (typically 0.5–1.0 for kbots).
-    /// `slope_mod` controls how much slope reduces speed (typically 40.0).
+    ///
+    /// `max_slope` and `slope_mod` are in **Spring's encoding**:
+    ///
+    /// - `slope` is `1 - normal.y` (= `1 - cos(angle)` for a surface
+    ///   tilted by `angle` from horizontal). Range `[0, 1]`.
+    /// - `max_slope` is the same `1 - cos(...)` value beyond which a
+    ///   square is impassable. Spring derives it from FBI MaxSlope via
+    ///   `1 - cos(deg * 1.5)` — so an FBI value of `36` allows
+    ///   geometric slopes up to **54°**, not 36°. (See
+    ///   [`DegreesToMaxSlope`][move_def] in upstream.)
+    /// - `slope_mod` is the slope penalty in
+    ///   `speed = 1 / (1 + slope * slope_mod)`. Spring's default is
+    ///   `4 / (max_slope + 0.001)` — so steeper-tolerant units get a
+    ///   gentler penalty curve to compensate.
+    ///
+    /// Use [`max_slope_from_degrees`] and [`slope_mod_from_max_slope`]
+    /// to compute these from FBI values; that keeps every consumer on
+    /// the same encoding upstream uses.
+    ///
+    /// [move_def]: https://github.com/beyond-all-reason/RecoilEngine/blob/master/rts/Sim/MoveTypes/MoveDefHandler.cpp
     pub fn from_heightmap(
         heights: &[f32],
         heightmap_width: u32,
@@ -45,7 +63,12 @@ impl SpeedMap {
 
                 let dx = ((h10 - h00).abs() + (h11 - h01).abs()) * 0.5 / SQUARE_SIZE;
                 let dz = ((h01 - h00).abs() + (h11 - h10).abs()) * 0.5 / SQUARE_SIZE;
-                let slope = (dx * dx + dz * dz).sqrt();
+                // tan(angle) of the steepest slope across the cell.
+                let tan_slope = (dx * dx + dz * dz).sqrt();
+                // Spring's encoding: `slope = 1 - cos(angle)` where
+                // `cos(angle) = 1 / sqrt(1 + tan²(angle))`. Matches
+                // `1.0 - faceNormal.y` in `ReadMap::UpdateSlopemap`.
+                let slope = 1.0 - 1.0 / (1.0 + tan_slope * tan_slope).sqrt();
 
                 let speed = if slope > max_slope {
                     0.0 // impassable
@@ -94,6 +117,38 @@ impl SpeedMap {
     }
 }
 
+/// Convert FBI `MaxSlope` (degrees) to Spring's internal max-slope
+/// encoding `1 - cos(clamp(deg, 0, 60) * 1.5 * π/180)`. Why: matches
+/// upstream's `DegreesToMaxSlope` in `MoveDefHandler.cpp`, including
+/// the 1.5× pre-multiplier — an FBI value of 36 permits geometric
+/// slopes up to 54°, not 36°. Without that, the port rejects ramps
+/// the original game accepts.
+pub fn max_slope_from_degrees(degrees: f32) -> f32 {
+    let deg = degrees.clamp(0.0, 60.0) * 1.5;
+    let rad = deg.to_radians();
+    1.0 - rad.cos()
+}
+
+/// Encode a single rise/run step in Spring's `1 - cos(angle)` form
+/// — the same encoding [`SpeedMap::from_heightmap`] and
+/// [`max_slope_from_degrees`] use, so callers can compare step slopes
+/// against [`max_slope_from_degrees`] cap values directly. Returns
+/// `0.0` for zero or negative `run`.
+pub fn slope_from_rise_run(rise: f32, run: f32) -> f32 {
+    if run <= 0.0 {
+        return 0.0;
+    }
+    1.0 - run / (rise * rise + run * run).sqrt()
+}
+
+/// Default `slope_mod` for a given `max_slope`, mirroring upstream's
+/// `slopeMod = 4 / (maxSlope + 0.001)` in `MoveDefHandler.cpp`. Steeper-
+/// tolerant units (large `max_slope`) get a gentler penalty curve so
+/// the engine doesn't make them crawl on every gentle hill.
+pub fn slope_mod_from_max_slope(max_slope: f32) -> f32 {
+    4.0 / (max_slope + 0.001)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,10 +167,59 @@ mod tests {
     #[test]
     fn steep_slope_blocked() {
         // Create a cliff: row 0 at height 0, row 1 at height 100.
+        // Geometric angle ~85.4°; Spring-encoded slope ≈ 0.92.
         let heights = vec![0.0, 0.0, 0.0, 100.0, 100.0, 100.0];
         let map = SpeedMap::from_heightmap(&heights, 3, 2, 0.5, 40.0);
-        // The slope is 100/8 = 12.5, way above max_slope=0.5.
         assert_eq!(map.get(0, 0), 0.0);
+    }
+
+    /// FBI MaxSlope=36 (KP's LIGHT/MEDIUM/HEAVY classes) should
+    /// produce Spring's internal value of `1 - cos(54°)` ≈ 0.412 —
+    /// the 1.5× pre-multiplier is the upstream behaviour our
+    /// pathfinder must mirror.
+    #[test]
+    fn fbi_max_slope_36_matches_upstream_encoding() {
+        let s = max_slope_from_degrees(36.0);
+        let expected = 1.0 - (54.0_f32.to_radians()).cos();
+        assert!(
+            (s - expected).abs() < 1e-5,
+            "max_slope_from_degrees(36) = {s}, expected {expected}",
+        );
+    }
+
+    /// 50° geometric ramp is comfortably under FBI MaxSlope=36's
+    /// effective cap of 54°. Spring would route units onto this; the
+    /// port's old `tan(angle)` cap of 1.0 (= 45°) wouldn't, leaving
+    /// units stuck on plateaus. Verify the new encoding lets it
+    /// through with a sensible (slow but non-zero) speed.
+    #[test]
+    fn ramp_under_effective_cap_is_passable() {
+        let dh = 8.0 * 50.0_f32.to_radians().tan();
+        let heights = vec![0.0, 0.0, 0.0, dh, dh, dh];
+        let cap = max_slope_from_degrees(36.0);
+        let mod_ = slope_mod_from_max_slope(cap);
+        let map = SpeedMap::from_heightmap(&heights, 3, 2, cap, mod_);
+        let s = map.get(0, 0);
+        assert!(
+            s > 0.0,
+            "50° ramp must be passable under FBI MaxSlope=36 (got speed {s})",
+        );
+        assert!(
+            s < 0.4,
+            "50° ramp speed should be heavily penalised, got {s}"
+        );
+    }
+
+    /// At a 60° geometric ramp the slope exceeds the FBI MaxSlope=36
+    /// effective cap (54°) and the cell is hard-blocked.
+    #[test]
+    fn ramp_above_effective_cap_is_blocked() {
+        let dh = 8.0 * 60.0_f32.to_radians().tan();
+        let heights = vec![0.0, 0.0, 0.0, dh, dh, dh];
+        let cap = max_slope_from_degrees(36.0);
+        let mod_ = slope_mod_from_max_slope(cap);
+        let map = SpeedMap::from_heightmap(&heights, 3, 2, cap, mod_);
+        assert_eq!(map.get(0, 0), 0.0, "60° ramp should be blocked");
     }
 
     #[test]

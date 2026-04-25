@@ -21,11 +21,17 @@ pub struct BuildMenuPlugin;
 
 impl Plugin for BuildMenuPlugin {
     fn build(&self, app: &mut App) {
+        // Order matters: `update_build_menu` rebuilds the icon subtree
+        // whenever production progress shifts the hash (queue advances,
+        // current production changes). If it runs before
+        // `handle_build_clicks` within a frame, the just-pressed icon
+        // entity is despawned before its `Changed<Interaction>` is
+        // read — clicks evaporate. Run handler first, then rebuild.
         app.add_message::<BuildOrderEvent>()
             .add_message::<BeginPlacementEvent>()
             .add_systems(
                 Update,
-                (update_build_menu, handle_build_clicks, apply_build_orders),
+                (handle_build_clicks, apply_build_orders, update_build_menu).chain(),
             );
     }
 }
@@ -105,12 +111,19 @@ fn update_build_menu(
     // changes. Without this guard the system despawns and respawns the
     // entire build-icon subtree every Update tick even on fully static
     // frames.
+    //
+    // Seeded with a non-zero FNV-1a 64-bit offset basis so a
+    // legitimate "Kernel + System" selection (both enum variants
+    // discriminate to 0) doesn't collide with the `Local<u64>::default()
+    // == 0` first-frame sentinel — the unguarded version returned
+    // early on every frame for the System homebase, and the build
+    // menu never appeared.
     let builder = selected_q
         .iter()
         .find(|(ut, _)| !buildable_units(ut.0).is_empty());
     let producer_slot = producer_q.iter().next();
 
-    let mut hash: u64 = 0;
+    let mut hash: u64 = 0xcbf29ce484222325;
     if let Some((ut, faction)) = builder {
         hash = hash.wrapping_mul(2654435761).wrapping_add(ut.0 as u64);
         hash = hash.wrapping_mul(2654435761).wrapping_add(*faction as u64);
