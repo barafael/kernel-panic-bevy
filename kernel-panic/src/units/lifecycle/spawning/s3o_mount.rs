@@ -9,7 +9,7 @@
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use spring_unit_mesh::S3OPiece;
+use spring_unit_mesh::{S3OModel, S3OPiece};
 
 /// Flatten the piece tree depth-first, recording each piece's parent index.
 pub(super) fn flatten_pieces(
@@ -70,38 +70,21 @@ fn find_by_name_recursive(piece: &S3OPiece, target: &str, counter: &mut usize) -
     None
 }
 
-/// Walk the piece tree and return the Y-offset that lands the model's
-/// lowest vertex on the heightmap, in elmos. Positive values lift the
-/// model up (the root sits above the lowest vertex — e.g. Byte's
-/// octaeder.s3o has blade vertices spanning y∈[-48,48], so `lift = 48`).
-/// Negative values sink the model down (the root sits *below* the
-/// lowest vertex — e.g. `carrier.s3o / network_base.s3o` is authored
-/// with its base above the piece-tree origin, which reads as "floating"
-/// when planted at heightmap y). Zero means the lowest vertex is
-/// already at y=0 and no adjustment is needed.
+/// Return the Y-offset that lands the model's lowest vertex on the
+/// heightmap, in elmos. Positive values lift the model up (the root sits
+/// above the lowest vertex — e.g. Byte's octaeder.s3o has blade vertices
+/// spanning y∈[-48,48], so `lift = 48`). Negative values sink the model
+/// down (the root sits *below* the lowest vertex — e.g.
+/// `carrier.s3o / network_base.s3o` is authored with its base above the
+/// piece-tree origin, which reads as "floating" when planted at heightmap
+/// y). Zero means the lowest vertex is already at y=0 and no adjustment
+/// is needed.
 ///
-/// Returning `-min_y` unconditionally handles all three cases with the
+/// Returning `-mins.y` unconditionally handles all three cases with the
 /// same formula, so the caller can just `position + lift * Y` without
 /// branching.
-pub(super) fn compute_ground_lift(piece: &S3OPiece, parent_origin: [f32; 3]) -> f32 {
-    let min_y = walk_min_y(piece, parent_origin);
-    if min_y.is_finite() { -min_y } else { 0.0 }
-}
-
-fn walk_min_y(piece: &S3OPiece, parent_origin: [f32; 3]) -> f32 {
-    let origin = [
-        parent_origin[0] + piece.offset[0],
-        parent_origin[1] + piece.offset[1],
-        parent_origin[2] + piece.offset[2],
-    ];
-    let mut min_y = f32::INFINITY;
-    for v in &piece.vertices {
-        min_y = min_y.min(origin[1] + v.position[1]);
-    }
-    for child in &piece.children {
-        min_y = min_y.min(walk_min_y(child, origin));
-    }
-    min_y
+pub(super) fn compute_ground_lift(model: &S3OModel) -> f32 {
+    -model.mins[1]
 }
 
 /// Convert one S3O piece's geometry into a Bevy mesh.

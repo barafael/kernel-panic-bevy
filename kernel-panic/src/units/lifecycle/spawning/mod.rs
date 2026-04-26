@@ -193,10 +193,7 @@ pub fn spawn_unit(
     // heightmap, half the model sinks below ground. Lift the spawn point
     // by however much the lowest vertex extends below piece-tree origin.
     let s3o_model = crate::units::assets::meshes::load_s3o_model(model_name, model_cache);
-    let ground_lift = s3o_model
-        .as_ref()
-        .map(|m| compute_ground_lift(&m.root_piece, [0.0, 0.0, 0.0]))
-        .unwrap_or(0.0);
+    let ground_lift = s3o_model.as_ref().map(compute_ground_lift).unwrap_or(0.0);
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
 
     let unit_entity = commands
