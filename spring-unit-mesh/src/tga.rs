@@ -73,9 +73,26 @@ pub fn parse_tga(data: &[u8]) -> Result<TgaImage, TgaParseError> {
         rgba.push(if bytes_per_pixel == 4 { pixel[3] } else { 255 }); // A
     }
 
-    // Handle origin: TGA default is bottom-left. If top-origin bit is NOT set,
-    // flip vertically.
-    let origin_top = (descriptor >> 5) & 1 != 0;
+    // Handle origin: TGA default is bottom-left.
+    //   * descriptor bit 4 (0x10) — pixels run right-to-left within a row.
+    //   * descriptor bit 5 (0x20) — rows run top-to-bottom.
+    // KP textures all use the bottom-left default, so the horizontal-flip
+    // path is dormant for shipped assets but required for spec compliance.
+    let origin_right = descriptor & 0x10 != 0;
+    let origin_top = descriptor & 0x20 != 0;
+    if origin_right {
+        let row_bytes = w * 4;
+        for y in 0..h {
+            let row = &mut rgba[y * row_bytes..(y + 1) * row_bytes];
+            for x in 0..w / 2 {
+                let l = x * 4;
+                let r = (w - 1 - x) * 4;
+                for byte in 0..4 {
+                    row.swap(l + byte, r + byte);
+                }
+            }
+        }
+    }
     if !origin_top {
         let row_bytes = w * 4;
         for y in 0..h / 2 {
@@ -285,5 +302,85 @@ mod tests {
             parse_tga(&header),
             Err(TgaParseError::UnsupportedImageType(3))
         ));
+    }
+
+    /// Build a 2x2 32bpp uncompressed TGA with a custom descriptor byte and
+    /// four distinct BGRA pixels, then verify the decoded pixel layout.
+    fn make_2x2_tga(descriptor: u8) -> Vec<u8> {
+        let mut buf = Vec::<u8>::new();
+        buf.push(0); // id length
+        buf.push(0); // color map type
+        buf.push(2); // image type: uncompressed true-color
+        buf.extend_from_slice(&[0; 5]); // color map spec
+        buf.extend_from_slice(&0u16.to_le_bytes()); // x origin
+        buf.extend_from_slice(&0u16.to_le_bytes()); // y origin
+        buf.extend_from_slice(&2u16.to_le_bytes()); // width
+        buf.extend_from_slice(&2u16.to_le_bytes()); // height
+        buf.push(32); // bpp
+        buf.push(descriptor);
+        // BGRA pixels in file order. Label them by (row, col) to make the
+        // expected post-flip layout easy to follow:
+        //   row 0 (file): (0,0)=red, (0,1)=green
+        //   row 1 (file): (1,0)=blue, (1,1)=white
+        buf.extend_from_slice(&[0x00, 0x00, 0xFF, 0xFF]); // red
+        buf.extend_from_slice(&[0x00, 0xFF, 0x00, 0xFF]); // green
+        buf.extend_from_slice(&[0xFF, 0x00, 0x00, 0xFF]); // blue
+        buf.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // white
+        buf
+    }
+
+    fn pixels(img: &TgaImage) -> Vec<[u8; 4]> {
+        img.pixels
+            .chunks_exact(4)
+            .map(|c| [c[0], c[1], c[2], c[3]])
+            .collect()
+    }
+
+    #[test]
+    fn descriptor_top_origin_no_flip() {
+        // descriptor 0x20: top-origin, left-to-right.
+        let img = parse_tga(&make_2x2_tga(0x20)).unwrap();
+        let p = pixels(&img);
+        // Output as-stored: row 0 = red, green; row 1 = blue, white.
+        assert_eq!(p[0], [0xFF, 0x00, 0x00, 0xFF]); // red
+        assert_eq!(p[1], [0x00, 0xFF, 0x00, 0xFF]); // green
+        assert_eq!(p[2], [0x00, 0x00, 0xFF, 0xFF]); // blue
+        assert_eq!(p[3], [0xFF, 0xFF, 0xFF, 0xFF]); // white
+    }
+
+    #[test]
+    fn descriptor_bottom_origin_vertical_flip() {
+        // descriptor 0x00: default bottom-origin → flip rows.
+        let img = parse_tga(&make_2x2_tga(0x00)).unwrap();
+        let p = pixels(&img);
+        // After vertical flip: row 0 = blue, white; row 1 = red, green.
+        assert_eq!(p[0], [0x00, 0x00, 0xFF, 0xFF]); // blue
+        assert_eq!(p[1], [0xFF, 0xFF, 0xFF, 0xFF]); // white
+        assert_eq!(p[2], [0xFF, 0x00, 0x00, 0xFF]); // red
+        assert_eq!(p[3], [0x00, 0xFF, 0x00, 0xFF]); // green
+    }
+
+    #[test]
+    fn descriptor_horizontal_flip_top_origin() {
+        // descriptor 0x30: top-origin + right-to-left → flip columns only.
+        let img = parse_tga(&make_2x2_tga(0x30)).unwrap();
+        let p = pixels(&img);
+        // After horizontal flip: row 0 = green, red; row 1 = white, blue.
+        assert_eq!(p[0], [0x00, 0xFF, 0x00, 0xFF]); // green
+        assert_eq!(p[1], [0xFF, 0x00, 0x00, 0xFF]); // red
+        assert_eq!(p[2], [0xFF, 0xFF, 0xFF, 0xFF]); // white
+        assert_eq!(p[3], [0x00, 0x00, 0xFF, 0xFF]); // blue
+    }
+
+    #[test]
+    fn descriptor_both_flips_bottom_origin() {
+        // descriptor 0x10: bottom-origin + right-to-left → both flips.
+        let img = parse_tga(&make_2x2_tga(0x10)).unwrap();
+        let p = pixels(&img);
+        // After H-flip then V-flip: row 0 = white, blue; row 1 = green, red.
+        assert_eq!(p[0], [0xFF, 0xFF, 0xFF, 0xFF]); // white
+        assert_eq!(p[1], [0x00, 0x00, 0xFF, 0xFF]); // blue
+        assert_eq!(p[2], [0x00, 0xFF, 0x00, 0xFF]); // green
+        assert_eq!(p[3], [0xFF, 0x00, 0x00, 0xFF]); // red
     }
 }

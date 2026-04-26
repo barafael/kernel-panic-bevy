@@ -3,15 +3,26 @@ use thiserror::Error;
 /// A parsed `.s3o` unit model.
 #[derive(Debug, Clone)]
 pub struct S3OModel {
-    /// Bounding sphere radius.
+    /// Bounding sphere radius. Falls back to half the AABB diagonal when the
+    /// header value is <= 0.01 (matches upstream `S3OParser::Load`).
     pub radius: f32,
-    /// Total model height.
+    /// Total model height. Falls back to `maxs.y - mins.y` when the header
+    /// value is <= 0.01.
     pub height: f32,
     /// Model center point `[x, y, z]`.
     pub midpoint: [f32; 3],
-    /// Primary texture filename (typically diffuse color).
+    /// World-space minimum corner of the AABB enclosing every piece that has
+    /// vertices, with each piece's accumulated parent offsets applied. Empty
+    /// pieces (no vertices) don't contribute. `[0; 3]` for models with no
+    /// geometry at all (e.g. `nullobject.s3o`).
+    pub mins: [f32; 3],
+    /// World-space maximum corner of the AABB. See [`Self::mins`].
+    pub maxs: [f32; 3],
+    /// Primary texture filename (typically diffuse color). Empty when the
+    /// header offset is 0 (= "no texture").
     pub texture1: String,
     /// Secondary texture filename (typically team-color or specular map).
+    /// Empty when the header offset is 0.
     pub texture2: String,
     /// Root of the piece hierarchy.
     pub root_piece: S3OPiece,
@@ -35,6 +46,12 @@ pub struct S3OPiece {
     /// of the original primitive type in the file (strips and quads are
     /// converted during parsing).
     pub indices: Vec<u32>,
+    /// Local-space minimum corner of this piece's vertex AABB. `[0; 3]` for
+    /// pieces with no vertices (typically empty container pieces).
+    pub mins: [f32; 3],
+    /// Local-space maximum corner of this piece's vertex AABB. `[0; 3]` for
+    /// pieces with no vertices.
+    pub maxs: [f32; 3],
     /// Child pieces attached to this one.
     pub children: Vec<S3OPiece>,
 }
