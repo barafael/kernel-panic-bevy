@@ -5,3 +5,6 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 511599485bf329f38e451d367737e472a9d69b3a8494d32bba91111f95626bfc # shrinks to name = "A", entries = [("o", ""), ("o", "0")]
+cc 42028360ec9b9b4f82dc98d9ff0403c69fb5b10cd1d138b8fedb968de2c5e848 # shrinks to name = "a", entries = [("a", "\"")]
+cc 3f73a30a9abef6817fb2c4081c0374a4aacf33bbf3f8b8bd3a4717b179b0a2e1 # shrinks to doc = "[a]\n{\n    A=\";\n}\n"
+cc 05f0a1d80e123e8dc369fb415af73f2e6888087f08b514135334fe94e4392af5 # shrinks to name = "A", key = "a", value = "\""

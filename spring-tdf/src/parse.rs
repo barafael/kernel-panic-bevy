@@ -2,25 +2,56 @@
 //!
 //! Produces a [`Tdf`] tree — a list of named [`Section`]s, each containing
 //! key-value pairs and nested subsections.
+//!
+//! ## Conformance
+//!
+//! This is a port of Spring's reference parser
+//! (`cont/base/springcontent/gamedata/parse_tdf.lua`, invoked from
+//! [`rts/System/TdfParser.cpp`][cpp]). It mirrors that implementation
+//! precisely:
+//!
+//! - whitespace, `//` line comments, and `/* … */` block comments (non-greedy,
+//!   may span lines) are eaten between tokens via [`Parser::eat_white`]
+//! - section headers are `[name]` with `]`-terminated names; any whitespace
+//!   or comment may sit between `]` and the opening `{`
+//! - keys match `[^\s=]+` and may carry inline tabs/spaces around the `=`
+//! - values are either quoted (`"…";+`) or unquoted (`[^\n;]*;+`); both
+//!   forms **require** a trailing `;`
+//! - top-level `key=value;` pairs sitting outside any section are valid and
+//!   land in [`Tdf::root_entries`]
+//!
+//! Strictness deliberately matches Spring: missing terminators, unterminated
+//! comments, unterminated quotes, and stray closing braces all raise
+//! [`ParseError`] rather than being silently skipped. Real upstream KP
+//! files satisfy these rules.
+//!
+//! [cpp]: https://github.com/beyond-all-reason/RecoilEngine/blob/master/rts/System/TdfParser.cpp
 
 use std::collections::BTreeMap;
 
 use thiserror::Error;
 
-/// A parsed TDF document: a sequence of top-level sections.
+/// A parsed TDF document.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tdf {
+    /// Top-level named sections, in source order.
     pub sections: Vec<Section>,
+    /// Top-level `key=value;` pairs that appear outside any section.
+    /// Spring stores these on the root table; for KP content this is
+    /// always empty, but the field exists so callers passing arbitrary
+    /// TDF can still see them.
+    pub root_entries: BTreeMap<String, String>,
 }
 
 /// A named section containing key-value pairs and nested subsections.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Section {
-    /// The section name as it appeared in `[Name]`.
+    /// The section name as it appeared in `[Name]` (whitespace-trimmed).
     pub name: String,
-    /// Key-value pairs (keys lowercased, values as-is).
+    /// Key-value pairs (keys lowercased, values verbatim apart from
+    /// stripped trailing inline whitespace).
     pub entries: BTreeMap<String, String>,
-    /// Nested child sections.
+    /// Nested child sections, in source order.
     pub children: Vec<Section>,
 }
 
@@ -81,9 +112,11 @@ impl Section {
 
     /// Get a value with inline `//` comments stripped and whitespace trimmed.
     ///
-    /// Some TDF values contain trailing comments (e.g. `Weapon1=BuildLaser;//Unused`).
-    /// The line-level comment stripping in the parser doesn't catch these because
-    /// the `//` is inside the value portion of a `key=value;` pair.
+    /// Under the strict parser this is functionally equivalent to
+    /// [`Section::string`] — `//` comments inside lines are consumed by the
+    /// tokenizer's [`Parser::eat_white`] before they can reach a value. The
+    /// helper is kept for callers that want the previous semantics
+    /// explicitly.
     pub fn string_clean(&self, key: &str) -> String {
         let raw = self.get(key).unwrap_or_default();
         match raw.find("//") {
@@ -109,93 +142,207 @@ impl Section {
     }
 }
 
-#[derive(Debug, Error)]
+/// Errors raised while parsing TDF text.
+///
+/// Variants intentionally cover every failure mode Spring's reference
+/// parser also rejects, so error messages stay actionable.
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum ParseError {
-    #[error("line {line}: unexpected closing brace without matching section")]
+    #[error("line {line}: section header missing closing `]`")]
+    UnclosedSectionHeader { line: usize },
+
+    #[error("line {line}: section `{section}` missing opening `{{`")]
+    MissingOpenBrace { line: usize, section: String },
+
+    #[error("line {line}: section `{section}` missing closing `}}`")]
+    UnclosedSection { line: usize, section: String },
+
+    #[error("line {line}: unmatched `}}` outside any section")]
     UnmatchedCloseBrace { line: usize },
 
-    #[error("line {line}: unexpected end of input inside section `{section}`")]
-    UnclosedSection { line: usize, section: String },
+    #[error("line {line}: empty key")]
+    EmptyKey { line: usize },
+
+    #[error("line {line}: missing `=` after key `{key}`")]
+    MissingEquals { line: usize, key: String },
+
+    #[error("line {line}: missing `;` after value")]
+    MissingSemicolon { line: usize },
+
+    #[error("line {line}: unterminated quoted string")]
+    UnterminatedString { line: usize },
+
+    #[error("line {line}: unterminated block comment")]
+    UnterminatedBlockComment { line: usize },
 }
 
 struct Parser<'a> {
-    lines: Vec<(usize, &'a str)>,
+    text: &'a str,
+    bytes: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Parser<'a> {
     fn new(text: &'a str) -> Self {
-        let lines: Vec<(usize, &str)> = text
-            .lines()
-            .enumerate()
-            .map(|(i, line)| (i + 1, strip_comment(line).trim()))
-            .filter(|(_, line)| !line.is_empty())
-            .collect();
-        Self { lines, pos: 0 }
+        Self {
+            text,
+            bytes: text.as_bytes(),
+            pos: 0,
+        }
     }
 
-    fn peek(&self) -> Option<(usize, &'a str)> {
-        self.lines.get(self.pos).copied()
+    fn line(&self) -> usize {
+        self.line_at(self.pos)
     }
 
-    fn advance(&mut self) {
-        self.pos += 1;
+    fn line_at(&self, pos: usize) -> usize {
+        let p = pos.min(self.bytes.len());
+        self.bytes[..p].iter().filter(|&&b| b == b'\n').count() + 1
     }
 
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn starts_with(&self, lit: &[u8]) -> bool {
+        self.bytes
+            .get(self.pos..)
+            .is_some_and(|s| s.starts_with(lit))
+    }
+
+    /// Advance over whitespace, `//` line comments, and `/* … */` block
+    /// comments. Loops until no progress is made — matches the
+    /// `repeat … until ppos == pos` shape in Spring's `EatWhite`.
+    fn eat_white(&mut self) -> Result<(), ParseError> {
+        loop {
+            let start = self.pos;
+
+            // ASCII whitespace (space, tab, CR, LF, FF, VT).
+            while let Some(b) = self.peek() {
+                if b.is_ascii_whitespace() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Line comment: `//` to end of line. The newline itself is
+            // left for the whitespace pass on the next iteration.
+            if self.starts_with(b"//") {
+                self.pos += 2;
+                while let Some(b) = self.peek() {
+                    if b == b'\n' {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                continue;
+            }
+
+            // Block comment: `/*` … `*/`. Non-greedy: closes on the
+            // first `*/`. May span multiple lines.
+            if self.starts_with(b"/*") {
+                let open_line = self.line();
+                self.pos += 2;
+                loop {
+                    if self.pos >= self.bytes.len() {
+                        return Err(ParseError::UnterminatedBlockComment { line: open_line });
+                    }
+                    if self.starts_with(b"*/") {
+                        self.pos += 2;
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                continue;
+            }
+
+            if self.pos == start {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Parse one TDF document. Top-level elements are sections,
+    /// `key=value;` pairs (stored in [`Tdf::root_entries`]), or trailing
+    /// whitespace / comments. A stray `}` at the top level is an error.
     fn parse_document(&mut self) -> Result<Tdf, ParseError> {
         let mut sections = Vec::new();
-        while let Some((line_num, line)) = self.peek() {
-            if line == "}" {
-                return Err(ParseError::UnmatchedCloseBrace { line: line_num });
-            }
-            if let Some(name) = section_name(line) {
-                self.advance();
-                let section = self.parse_section(name.to_string(), line_num)?;
-                sections.push(section);
-            } else {
-                // Stray key=value outside any section — skip.
-                self.advance();
+        let mut root_entries = BTreeMap::new();
+
+        loop {
+            self.eat_white()?;
+            match self.peek() {
+                None => break,
+                Some(b'}') => {
+                    return Err(ParseError::UnmatchedCloseBrace { line: self.line() });
+                }
+                Some(b'[') => sections.push(self.parse_section()?),
+                Some(_) => {
+                    let (key, value) = self.parse_pair()?;
+                    root_entries.insert(key, value);
+                }
             }
         }
-        Ok(Tdf { sections })
+
+        Ok(Tdf {
+            sections,
+            root_entries,
+        })
     }
 
-    fn parse_section(&mut self, name: String, open_line: usize) -> Result<Section, ParseError> {
-        // Expect `{` on the next non-empty line.
-        if let Some((_, line)) = self.peek()
-            && line == "{"
-        {
-            self.advance();
+    /// Parse a section starting at the leading `[`.
+    fn parse_section(&mut self) -> Result<Section, ParseError> {
+        debug_assert_eq!(self.peek(), Some(b'['));
+        let header_line = self.line();
+        self.pos += 1;
+
+        let name_start = self.pos;
+        while let Some(b) = self.peek() {
+            match b {
+                b']' => break,
+                b'\n' => return Err(ParseError::UnclosedSectionHeader { line: header_line }),
+                _ => self.pos += 1,
+            }
         }
-        // Some files put `{` on the same line as `[Name]` — already consumed.
+        if self.peek() != Some(b']') {
+            return Err(ParseError::UnclosedSectionHeader { line: header_line });
+        }
+        let name = self.text[name_start..self.pos].trim().to_string();
+        self.pos += 1; // consume ']'
+
+        self.eat_white()?;
+        if self.peek() != Some(b'{') {
+            return Err(ParseError::MissingOpenBrace {
+                line: self.line(),
+                section: name,
+            });
+        }
+        let body_line = self.line();
+        self.pos += 1;
 
         let mut entries = BTreeMap::new();
         let mut children = Vec::new();
 
         loop {
-            let Some((line_num, line)) = self.peek() else {
-                return Err(ParseError::UnclosedSection {
-                    line: open_line,
-                    section: name,
-                });
-            };
-
-            if line == "}" {
-                self.advance();
-                break;
+            self.eat_white()?;
+            match self.peek() {
+                None => {
+                    return Err(ParseError::UnclosedSection {
+                        line: body_line,
+                        section: name,
+                    });
+                }
+                Some(b'}') => {
+                    self.pos += 1;
+                    break;
+                }
+                Some(b'[') => children.push(self.parse_section()?),
+                Some(_) => {
+                    let (k, v) = self.parse_pair()?;
+                    entries.insert(k, v);
+                }
             }
-
-            if let Some(child_name) = section_name(line) {
-                self.advance();
-                let child = self.parse_section(child_name.to_string(), line_num)?;
-                children.push(child);
-                continue;
-            }
-
-            if let Some((key, value)) = parse_key_value(line) {
-                entries.insert(key, value);
-            }
-            self.advance();
         }
 
         Ok(Section {
@@ -204,35 +351,103 @@ impl<'a> Parser<'a> {
             children,
         })
     }
-}
 
-/// Strip `//` line comments.
-fn strip_comment(line: &str) -> &str {
-    match line.find("//") {
-        Some(pos) => &line[..pos],
-        None => line,
+    fn parse_pair(&mut self) -> Result<(String, String), ParseError> {
+        let key = self.parse_key()?;
+        let value = self.parse_value()?;
+        Ok((key, value))
     }
-}
 
-/// Extract the section name from a `[Name]` header line.
-fn section_name(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.starts_with('[') {
-        let end = line.find(']')?;
-        Some(line[1..end].trim())
-    } else {
-        None
-    }
-}
+    /// Parse a key plus the surrounding `=`. Mirrors
+    /// `^([^%s=]+)[ \t]*=[ \t]*` from Spring's `ParseKey`.
+    fn parse_key(&mut self) -> Result<String, ParseError> {
+        let line = self.line();
+        let start = self.pos;
+        while let Some(b) = self.peek() {
+            if b == b'=' || b.is_ascii_whitespace() {
+                break;
+            }
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return Err(ParseError::EmptyKey { line });
+        }
+        let key = self.text[start..self.pos].to_ascii_lowercase();
 
-/// Parse `key=value;` into (lowercased_key, trimmed_value).
-fn parse_key_value(line: &str) -> Option<(String, String)> {
-    let line = line.trim_end_matches(';').trim();
-    let eq_pos = line.find('=')?;
-    let key = line[..eq_pos].trim().to_ascii_lowercase();
-    let value = line[eq_pos + 1..].trim().to_string();
-    if key.is_empty() {
-        return None;
+        // Inline whitespace before `=` (tabs / spaces only — newlines
+        // make the key invalid).
+        self.eat_inline_ws();
+        if self.peek() != Some(b'=') {
+            return Err(ParseError::MissingEquals { line, key });
+        }
+        self.pos += 1;
+        self.eat_inline_ws();
+        Ok(key)
     }
-    Some((key, value))
+
+    /// Parse a value plus its trailing `;`. Quoted values are recognised
+    /// with the same regex as Spring's `ParseValue`.
+    fn parse_value(&mut self) -> Result<String, ParseError> {
+        let line = self.line();
+
+        if self.peek() == Some(b'"') {
+            self.pos += 1;
+            let start = self.pos;
+            while let Some(b) = self.peek() {
+                if b == b'"' || b == b'\n' {
+                    break;
+                }
+                self.pos += 1;
+            }
+            if self.peek() != Some(b'"') {
+                return Err(ParseError::UnterminatedString { line });
+            }
+            let value = self.text[start..self.pos].to_string();
+            self.pos += 1; // consume closing `"`
+            self.eat_inline_ws();
+            self.consume_semicolons(line)?;
+            return Ok(value);
+        }
+
+        let start = self.pos;
+        while let Some(b) = self.peek() {
+            if b == b'\n' || b == b';' {
+                break;
+            }
+            self.pos += 1;
+        }
+        if self.peek() != Some(b';') {
+            return Err(ParseError::MissingSemicolon { line });
+        }
+        // Spring's regex captures up to `;` as-is; trim trailing inline
+        // whitespace so `key = value ;` round-trips to `value` rather
+        // than `value ` (the existing Section helpers already assume a
+        // trimmed view of values via .trim() at the call site).
+        let value = self.text[start..self.pos]
+            .trim_end_matches([' ', '\t'])
+            .to_string();
+        self.consume_semicolons(line)?;
+        Ok(value)
+    }
+
+    fn eat_inline_ws(&mut self) {
+        while let Some(b) = self.peek() {
+            if b == b' ' || b == b'\t' {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Spring requires at least one `;` and consumes any chain of them.
+    fn consume_semicolons(&mut self, line: usize) -> Result<(), ParseError> {
+        if self.peek() != Some(b';') {
+            return Err(ParseError::MissingSemicolon { line });
+        }
+        while self.peek() == Some(b';') {
+            self.pos += 1;
+        }
+        Ok(())
+    }
 }

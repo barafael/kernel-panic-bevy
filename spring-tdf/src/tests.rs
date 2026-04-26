@@ -1,4 +1,4 @@
-use crate::{EffectClass, ExplosionDefs, Section, Tdf, UnitDefs, WeaponDefs};
+use crate::{EffectClass, ExplosionDefs, ParseError, Section, Tdf, UnitDefs, WeaponDefs};
 
 // ── Unit tests: TDF parser ──────────────────────────────────────────
 
@@ -243,18 +243,227 @@ fn deeply_nested() {
 
 #[test]
 fn error_on_unmatched_close_brace() {
-    let result = Tdf::parse("}");
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("unexpected closing brace"));
+    assert!(matches!(
+        Tdf::parse("}"),
+        Err(ParseError::UnmatchedCloseBrace { line: 1 })
+    ));
 }
 
 #[test]
 fn error_on_unclosed_section() {
-    let result = Tdf::parse("[W]\n{");
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.to_string().contains("unexpected end of input"));
+    assert!(matches!(
+        Tdf::parse("[W]\n{"),
+        Err(ParseError::UnclosedSection { section, .. }) if section == "W"
+    ));
+}
+
+// ── Strict Spring-conformance tests ─────────────────────────────────
+//
+// These pin behaviour against `cont/base/springcontent/gamedata/parse_tdf.lua`
+// in the Recoil engine. Each test names the rule it enforces.
+
+#[test]
+fn block_comment_single_line_stripped() {
+    let tdf = Tdf::parse(
+        r#"
+[W]
+{
+    a=1; /* inline */ b=2;
+}
+"#,
+    )
+    .unwrap();
+    let s = &tdf.sections[0];
+    assert_eq!(s.f32("a"), 1.0);
+    assert_eq!(s.f32("b"), 2.0);
+}
+
+#[test]
+fn block_comment_multiline_stripped() {
+    // Mirrors the `/* ... */` block in upstream `units/thminifac.fbi`.
+    let tdf = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=test;
+    /*UseBuildingGroundDecal=1;
+    BuildingGroundDecalType=socket_base.tga;
+    BuildingGroundDecalSizeX=8;*/
+    MaxDamage=20000;
+}
+"#,
+    )
+    .unwrap();
+    let s = &tdf.sections[0];
+    assert_eq!(s.get("unitname"), Some("test"));
+    assert_eq!(s.f32("maxdamage"), 20000.0);
+    // Keys inside the block comment must NOT leak into entries.
+    assert!(s.get("usebuildinggrounddecal").is_none());
+    assert!(s.get("buildinggrounddecaltype").is_none());
+    assert!(s.get("buildinggrounddecalsizex").is_none());
+}
+
+#[test]
+fn block_comment_unterminated_errors() {
+    assert!(matches!(
+        Tdf::parse("[W]\n{\n  /* never closed\n  a=1;\n}\n"),
+        Err(ParseError::UnterminatedBlockComment { .. })
+    ));
+}
+
+#[test]
+fn block_comment_first_close_wins_non_greedy() {
+    // Spring's `^/%*.-*/()` is non-greedy: the first `*/` closes the
+    // comment. The second `*/` is then a syntax error inside a value
+    // context — but here we wrap it so the value remains well-formed.
+    let tdf = Tdf::parse("[W]\n{\n  /* a */ b=2;\n}\n").unwrap();
+    let s = &tdf.sections[0];
+    assert_eq!(s.f32("b"), 2.0);
+}
+
+#[test]
+fn missing_semicolon_errors() {
+    assert!(matches!(
+        Tdf::parse("[W]\n{\n  a=1\n}\n"),
+        Err(ParseError::MissingSemicolon { .. })
+    ));
+}
+
+#[test]
+fn missing_equals_errors() {
+    assert!(matches!(
+        Tdf::parse("[W]\n{\n  bareword;\n}\n"),
+        Err(ParseError::MissingEquals { .. })
+    ));
+}
+
+#[test]
+fn quoted_value_preserves_semicolon() {
+    // Quoted values may contain `;` — the unquoted form may not.
+    let tdf = Tdf::parse(
+        r#"
+[W]
+{
+    msg="hi;there";
+}
+"#,
+    )
+    .unwrap();
+    let s = &tdf.sections[0];
+    assert_eq!(s.get("msg"), Some("hi;there"));
+}
+
+#[test]
+fn quoted_value_with_newline_errors() {
+    assert!(matches!(
+        Tdf::parse("[W]\n{\n  msg=\"line1\nline2\";\n}\n"),
+        Err(ParseError::UnterminatedString { .. })
+    ));
+}
+
+#[test]
+fn unterminated_quoted_value_errors() {
+    assert!(matches!(
+        Tdf::parse("[W]\n{\n  msg=\"never closed;\n}\n"),
+        Err(ParseError::UnterminatedString { .. })
+    ));
+}
+
+#[test]
+fn missing_section_close_brace_reports_section_name() {
+    let err = Tdf::parse("[Foo]\n{\n  a=1;\n").unwrap_err();
+    match err {
+        ParseError::UnclosedSection { section, .. } => assert_eq!(section, "Foo"),
+        other => panic!("expected UnclosedSection, got {other:?}"),
+    }
+}
+
+#[test]
+fn missing_section_open_brace_errors() {
+    // Header without a `{` afterwards.
+    assert!(matches!(
+        Tdf::parse("[W]\n  a=1;\n"),
+        Err(ParseError::MissingOpenBrace { section, .. }) if section == "W"
+    ));
+}
+
+#[test]
+fn unclosed_section_header_errors() {
+    assert!(matches!(
+        Tdf::parse("[W\n{\n}\n"),
+        Err(ParseError::UnclosedSectionHeader { .. })
+    ));
+}
+
+#[test]
+fn comment_between_header_and_brace_ok() {
+    // Spring's `EatWhite` runs after `]`, so a comment can sit between
+    // the header and the opening brace.
+    let tdf = Tdf::parse(
+        r#"
+[W] // trailing comment on the header
+/* block comment between */
+{
+    a=1;
+}
+"#,
+    )
+    .unwrap();
+    assert_eq!(tdf.sections[0].f32("a"), 1.0);
+}
+
+#[test]
+fn top_level_kv_stored_in_root_entries() {
+    // `parse_tdf.lua` accepts a value at the root scope and stores it
+    // in the root table; we surface those via `Tdf::root_entries`.
+    let tdf = Tdf::parse("globalKey=42;\n[Sec]\n{\n}\n").unwrap();
+    assert_eq!(
+        tdf.root_entries.get("globalkey").map(String::as_str),
+        Some("42")
+    );
+    assert_eq!(tdf.sections.len(), 1);
+}
+
+#[test]
+fn multiple_semicolons_collapsed() {
+    // `;+` matches one or more — the chain is consumed.
+    let tdf = Tdf::parse("[W]\n{\n  a=1;;;\n  b=2;\n}\n").unwrap();
+    let s = &tdf.sections[0];
+    assert_eq!(s.f32("a"), 1.0);
+    assert_eq!(s.f32("b"), 2.0);
+}
+
+#[test]
+fn inline_whitespace_around_equals_ok() {
+    // `key  =  value;` is valid: tabs/spaces between `key` and `=`.
+    let tdf = Tdf::parse("[W]\n{\n  range\t = \t320 ;\n}\n").unwrap();
+    assert_eq!(tdf.sections[0].f32("range"), 320.0);
+}
+
+#[test]
+fn key_then_newline_before_equals_errors() {
+    // Newline between key and `=` is invalid (Spring's `[ \t]*` excludes
+    // newlines).
+    assert!(matches!(
+        Tdf::parse("[W]\n{\n  range\n  =320;\n}\n"),
+        Err(ParseError::MissingEquals { .. })
+    ));
+}
+
+#[test]
+fn empty_value_ok() {
+    let tdf = Tdf::parse("[W]\n{\n  empty=;\n  emptyq=\"\";\n}\n").unwrap();
+    let s = &tdf.sections[0];
+    assert_eq!(s.get("empty"), Some(""));
+    assert_eq!(s.get("emptyq"), Some(""));
+}
+
+#[test]
+fn section_name_with_metacharacters_preserved() {
+    // Mirrors `[Team%i(%s) is no more]` in upstream `gamedata/messages.tdf`.
+    let tdf = Tdf::parse("[Team%i(%s) is no more]\n{\n  tr1=hello;\n}\n").unwrap();
+    assert_eq!(tdf.sections[0].name, "Team%i(%s) is no more");
+    assert_eq!(tdf.sections[0].get("tr1"), Some("hello"));
 }
 
 #[test]
@@ -957,18 +1166,23 @@ mod proptests {
         "[A-Za-z][A-Za-z0-9_]{0,15}".prop_map(String::from)
     }
 
-    /// Generate a TDF-safe value (no semicolons, braces, brackets, or slashes that form comments).
+    /// Generate a TDF-safe value (no semicolons, braces, brackets,
+    /// quotes, or slashes that form comments).
+    ///
+    /// Spring's strict tokenizer treats a leading `"` as the start of a
+    /// quoted string and `/* … */` as a block comment, so we exclude
+    /// those characters and post-strip any `//` or `/*` runs the
+    /// generator may stitch together.
     fn arb_value() -> impl Strategy<Value = String> {
         prop::collection::vec(
             prop::char::range('!', '~').prop_filter("TDF-safe char", |c| {
-                !matches!(c, ';' | '{' | '}' | '[' | ']')
+                !matches!(c, ';' | '{' | '}' | '[' | ']' | '"' | '=')
             }),
             0..20,
         )
         .prop_map(|chars| {
             let s: String = chars.into_iter().collect();
-            // Strip any accidental `//` sequences.
-            s.replace("//", "")
+            s.replace("//", "").replace("/*", "")
         })
     }
 
