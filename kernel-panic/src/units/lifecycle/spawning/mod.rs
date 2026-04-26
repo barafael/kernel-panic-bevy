@@ -72,104 +72,45 @@ pub struct FactoryPieces {
     pub pad: Option<usize>,
 }
 
-/// Ordered roster the startup spawner lays out for each faction.
+/// Per-faction starting entry: the team slot, faction tag, and the
+/// homebase kind to plant at the map's declared start position.
 struct FactionRoster {
     faction: Faction,
-    /// Homebase kind (Kernel / Hole / Carrier). Spawned at the map's
-    /// declared start position for this team, not on a datavent.
     homebase: UnitKind,
-    /// Small buildings that upstream only allows on a datavent (Socket
-    /// / Terminal for System, Window / Obelisk for Hacker, Port /
-    /// Firewall for Network). The spawner assigns each one to the
-    /// nearest unclaimed datavent, falling back to skipping the kind
-    /// once no free vents remain.
-    datavent_buildings: &'static [UnitKind],
-    /// Mobile units cluster next to the homebase. Shared kinds (Debug,
-    /// BadBlock, LogicBomb) are left out — any constructor can build
-    /// them on demand.
-    units: &'static [UnitKind],
 }
 
-/// Gap between successive units placed in the mobile-unit row, on top
-/// of each unit's own collision radius. Keeps bodies visibly apart
-/// without triggering the spatial-hash push-out on spawn.
-const UNIT_ROW_GAP: f32 = 12.0;
-/// Max mobile units per row before wrapping to a new row further
-/// south. Keeps the cluster visually compact.
-const UNITS_PER_ROW: usize = 4;
-/// Distance between adjacent rows in the mobile-unit cluster (Byte
-/// sits on row 0, Assembler wraps to row 1, etc.).
-const UNIT_ROW_SPACING: f32 = 40.0;
-/// Gap between the homebase and the first row of mobile units — big
-/// enough to clear a Kernel's 64-elmo footprint plus the largest
-/// unit's radius.
-const CLUSTER_STANDOFF: f32 = 100.0;
-/// Keep-out radius around each homebase's centre when assigning
-/// datavent-buildings. Maps can place a geovent on or adjacent to a
-/// start position (upstream KP's `Valley` does exactly that); without
-/// this guard the first Socket/Window/Port gets placed inside the
-/// Kernel's 8×8 footprint. 120 elmos = homebase half-diagonal (≈46)
-/// plus a small-building half-width (≈16) plus breathing room.
-const HOMEBASE_DATAVENT_CLEARANCE: f32 = 120.0;
+/// Margin from the map edge when clamping a homebase's start position.
+/// Keeps a Kernel/Hole/Carrier footprint clear of the world boundary
+/// even when the map's declared start position sits right on it.
+const HOMEBASE_EDGE_MARGIN: f32 = 100.0;
 
-/// Every faction's starting roster. The homebase is anchored at the
-/// map's declared start position; datavent-only buildings are scattered
-/// onto unclaimed vents; mobile units cluster just south of the
-/// homebase.
+/// Sandbox mode roster: only the three homebases, each on its own team
+/// (and faction), all human-controllable. Different teams + factions
+/// means [`is_friendly`](super::super::components::is_friendly) returns
+/// false across pairs, so units produced by these bases will engage on
+/// sight as enemies.
 const ROSTERS: [FactionRoster; 3] = [
     FactionRoster {
         faction: Faction::System,
         homebase: UnitKind::Kernel,
-        datavent_buildings: &[UnitKind::Socket, UnitKind::Terminal],
-        units: &[
-            UnitKind::Bit,
-            UnitKind::Byte,
-            UnitKind::Pointer,
-            UnitKind::Assembler,
-        ],
     },
     FactionRoster {
         faction: Faction::Hacker,
         homebase: UnitKind::Hole,
-        datavent_buildings: &[UnitKind::Window, UnitKind::Obelisk],
-        units: &[
-            UnitKind::Bug,
-            UnitKind::Exploit,
-            UnitKind::Worm,
-            UnitKind::Dos,
-            UnitKind::Trojan,
-        ],
     },
     FactionRoster {
         faction: Faction::Network,
         homebase: UnitKind::Carrier,
-        datavent_buildings: &[UnitKind::Port, UnitKind::Firewall],
-        // Signal intentionally omitted — upstream's `signal.fbi` is the
-        // SIGTERM air-strike bomber (Side=CPU), spawned by Terminal's
-        // ability rather than by the Carrier. Putting it in the Network
-        // cluster misrepresented the unit roster.
-        units: &[
-            UnitKind::Packet,
-            UnitKind::Flow,
-            UnitKind::Gateway,
-            UnitKind::Connection,
-        ],
     },
 ];
 
-/// Spawn every faction's starting roster. See [`FactionRoster`] for the
-/// per-faction layout rules.
-///
-/// `datavent_positions` is the list of geovent world positions on the
-/// current map — computed from `parsed.features` in map_loading before
-/// the geovent-smoker entities exist. Each datavent is claimed at most
-/// once across all factions, in first-come order (closest-to-faction-
-/// homebase wins the claim).
+/// Spawn one homebase per faction at the map's declared start position.
+/// No datavent buildings, no mobile-unit clusters — anything past the
+/// three bases comes from in-game production.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_homebases(
     heightmap: &Heightmap,
     map_info: &MapInfo,
-    datavent_positions: &[Vec3],
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -190,48 +131,17 @@ pub fn spawn_homebases(
         (cx - radius * 0.5, cz + radius * 0.866),
     ];
 
-    // Resolve every faction's homebase position up front so we can
-    // block datavents that sit inside any homebase's footprint before
-    // the allocation loop.
-    let home_positions: [Vec3; 3] = {
-        let mut out = [Vec3::ZERO; 3];
-        for (i, _) in ROSTERS.iter().enumerate() {
-            let (fx, fz) = map_info
-                .start_positions
-                .get(i)
-                .map(|sp| (sp.x, sp.z))
-                .unwrap_or(fallback_positions[i]);
-            let fx = fx.clamp(CLUSTER_STANDOFF, world_w - CLUSTER_STANDOFF);
-            let fz = fz.clamp(CLUSTER_STANDOFF, world_d - CLUSTER_STANDOFF);
-            out[i] = heightmap.place(fx, fz);
-        }
-        out
-    };
-
-    // Datavent bookkeeping: a parallel `bool` mask so we can mark a
-    // claim without mutating the input slice. Pre-seed the mask by
-    // claiming every vent that falls inside a homebase's keep-out
-    // radius — otherwise a map whose start position sits on a geovent
-    // (Valley, etc.) plants a Socket inside the Kernel's 8×8 footprint.
-    let mut claimed = vec![false; datavent_positions.len()];
-    let clearance_sq = HOMEBASE_DATAVENT_CLEARANCE * HOMEBASE_DATAVENT_CLEARANCE;
-    for (vi, vpos) in datavent_positions.iter().enumerate() {
-        if home_positions
-            .iter()
-            .any(|hp| hp.distance_squared(*vpos) < clearance_sq)
-        {
-            claimed[vi] = true;
-        }
-    }
-    let mut total_buildings = 0usize;
-    let mut total_units = 0usize;
-    let mut skipped_for_no_vent = 0usize;
-
     for (i, roster) in ROSTERS.iter().enumerate() {
         let team = i as u8;
-        let home_pos = home_positions[i];
+        let (fx, fz) = map_info
+            .start_positions
+            .get(i)
+            .map(|sp| (sp.x, sp.z))
+            .unwrap_or(fallback_positions[i]);
+        let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
+        let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
+        let home_pos = heightmap.place(fx, fz);
 
-        // 1. Homebase at the exact start position.
         spawn_unit(
             roster.homebase,
             roster.faction,
@@ -246,152 +156,13 @@ pub fn spawn_homebases(
             &invisible_mat,
             unit_registry,
         );
-        total_buildings += 1;
-
-        // 2. Datavent-only buildings. Each one claims the nearest
-        // unclaimed vent to the homebase; if no vents remain we skip
-        // the kind (matches "until you run out of spots").
-        for &kind in roster.datavent_buildings {
-            let Some(vent_idx) = claim_nearest_vent(datavent_positions, &claimed, home_pos) else {
-                skipped_for_no_vent += 1;
-                continue;
-            };
-            claimed[vent_idx] = true;
-            let vent_pos = datavent_positions[vent_idx];
-            spawn_unit(
-                kind,
-                roster.faction,
-                team,
-                vent_pos,
-                commands,
-                meshes,
-                materials,
-                images,
-                model_cache,
-                cob_cache,
-                &invisible_mat,
-                unit_registry,
-            );
-            total_buildings += 1;
-        }
-
-        // 3. Mobile units: grid laid out in the direction pointing from
-        // the homebase toward the centroid of all homebases. A fixed
-        // "+Z south" cluster drops units off the map whenever the
-        // start position sits on a north edge (quadcore's Hacker slot
-        // does exactly this); pointing toward the centroid instead
-        // keeps the cluster on-map for every map shape without any
-        // per-map special-casing. Perpendicular `right` axis spreads
-        // the row across the unit radii sum.
-        let centroid = (home_positions[0] + home_positions[1] + home_positions[2]) / 3.0;
-        let raw_forward = Vec3::new(centroid.x - home_pos.x, 0.0, centroid.z - home_pos.z);
-        let forward = if raw_forward.length_squared() > 1e-3 {
-            raw_forward.normalize()
-        } else {
-            Vec3::Z
-        };
-        let right = Vec3::new(forward.z, 0.0, -forward.x);
-
-        let row_widths = row_total_widths(roster.units, unit_registry);
-        let mut row_idx = 0usize;
-        let mut col_idx = 0usize;
-        let mut cursor = 0.0f32; // running sum along `right`
-        let mut row_start = -row_widths[0] * 0.5;
-
-        for (j, &kind) in roster.units.iter().enumerate() {
-            let r = unit_registry.collision_radius(kind);
-            // Step past half the previous unit plus the gap before
-            // planting the centre of this unit.
-            let step = if col_idx == 0 {
-                r
-            } else {
-                cursor + UNIT_ROW_GAP + r
-            };
-            let across = row_start + step;
-            let depth = CLUSTER_STANDOFF + row_idx as f32 * UNIT_ROW_SPACING;
-
-            let ux = home_pos.x + forward.x * depth + right.x * across;
-            let uz = home_pos.z + forward.z * depth + right.z * across;
-            let pos = heightmap.place(ux, uz);
-            spawn_unit(
-                kind,
-                roster.faction,
-                team,
-                pos,
-                commands,
-                meshes,
-                materials,
-                images,
-                model_cache,
-                cob_cache,
-                &invisible_mat,
-                unit_registry,
-            );
-            total_units += 1;
-
-            cursor = step + r;
-            col_idx += 1;
-            if col_idx >= UNITS_PER_ROW && j + 1 < roster.units.len() {
-                row_idx += 1;
-                col_idx = 0;
-                cursor = 0.0;
-                let next_row_width = row_widths.get(row_idx).copied().unwrap_or(row_widths[0]);
-                row_start = -next_row_width * 0.5;
-            }
-        }
     }
 
-    // Only mention skipped datavent-buildings when there actually
-    // were any — the old unconditional "(0 datavent-buildings skipped:
-    // no vents left)" tail was misleading: it read as if the map was
-    // out of vents whether or not anything had been skipped. In the
-    // common case (every Socket / Terminal / Window / Port / Obelisk
-    // / Firewall found a vent), the tail is simply omitted.
-    if skipped_for_no_vent > 0 {
-        info!(
-            "Spawned starter roster: {} buildings, {} mobile units across {} factions ({} datavent-buildings skipped: no free vents)",
-            total_buildings,
-            total_units,
-            ROSTERS.len(),
-            skipped_for_no_vent,
-        );
-    } else {
-        info!(
-            "Spawned starter roster: {} buildings, {} mobile units across {} factions",
-            total_buildings,
-            total_units,
-            ROSTERS.len(),
-        );
-    }
-}
-
-/// Find the unclaimed vent closest to `origin`, or `None` if every
-/// vent in the slice is already taken.
-fn claim_nearest_vent(positions: &[Vec3], claimed: &[bool], origin: Vec3) -> Option<usize> {
-    positions
-        .iter()
-        .enumerate()
-        .filter_map(|(i, p)| (!claimed[i]).then_some((i, p.distance_squared(origin))))
-        .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(i, _)| i)
-}
-
-/// For each row in the unit-cluster grid, sum up `2*radius + gap` for
-/// every unit that lands on that row. Returns the resulting row widths
-/// so the caller can centre each row on the homebase X.
-fn row_total_widths(units: &[UnitKind], unit_registry: &UnitRegistry) -> Vec<f32> {
-    let row_count = units.len().div_ceil(UNITS_PER_ROW);
-    let mut widths = vec![0.0; row_count.max(1)];
-    for (j, &kind) in units.iter().enumerate() {
-        let row = j / UNITS_PER_ROW;
-        let col = j % UNITS_PER_ROW;
-        let r = unit_registry.collision_radius(kind);
-        widths[row] += 2.0 * r;
-        if col > 0 {
-            widths[row] += UNIT_ROW_GAP;
-        }
-    }
-    widths
+    info!(
+        "Spawned starter roster: {} homebases across {} factions",
+        ROSTERS.len(),
+        ROSTERS.len(),
+    );
 }
 
 /// Spawn a single unit with per-piece children and COB animation.
@@ -524,6 +295,22 @@ pub fn spawn_unit(
             &mut piece_offsets,
         );
 
+        // S3O models author their visual front along local +Z (Spring's
+        // `frontdir` convention from `SolidObject::ComposeMatrix`), but
+        // Bevy's `Transform::look_to` aligns local -Z with the requested
+        // forward, so without compensation the body — and its gun — face
+        // 180° away. Parent every top-level piece under a `model_root`
+        // carrying a constant 180° Y rotation so the visual +Z ends up at
+        // world -Z, matching Bevy's forward and the host-side `look_to`
+        // contract.
+        let model_root = commands
+            .spawn((
+                Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
+                Visibility::default(),
+            ))
+            .id();
+        commands.entity(unit_entity).add_child(model_root);
+
         // Spawn piece entities.
         for (idx, parent_idx) in piece_parents.iter().enumerate() {
             let piece = get_piece_by_index(&model.root_piece, idx);
@@ -553,7 +340,7 @@ pub fn spawn_unit(
 
             let bevy_parent = match parent_idx {
                 Some(pi) => piece_entities[*pi],
-                None => unit_entity,
+                None => model_root,
             };
             commands.entity(bevy_parent).add_child(piece_entity);
         }

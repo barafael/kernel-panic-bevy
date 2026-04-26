@@ -1,33 +1,23 @@
-//! In-game HUD: info panel, build menu, order palette, and unit preview cache.
-//!
-//! Each sub-module is a self-contained `Plugin`; `HudPlugin` just wires them
-//! together and owns the one shared resource (`UnitPreviews`).
+//! In-game HUD panels: build menu, info panel, order palette, placement preview.
 
 mod build_menu;
 mod info_panel;
 mod order_palette;
 mod placement;
 mod previews;
-pub(crate) mod style;
 
 use bevy::prelude::*;
 
-use build_menu::BuildMenuPlugin;
-use info_panel::InfoPanelPlugin;
-use order_palette::OrderPalettePlugin;
-use placement::PlacementPlugin;
-use previews::PreviewsPlugin;
-
-pub struct HudPlugin;
+pub(super) struct HudPlugin;
 
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            PreviewsPlugin,
-            InfoPanelPlugin,
-            BuildMenuPlugin,
-            OrderPalettePlugin,
-            PlacementPlugin,
+            previews::PreviewsPlugin,
+            build_menu::BuildMenuPlugin,
+            info_panel::InfoPanelPlugin,
+            order_palette::OrderPalettePlugin,
+            placement::PlacementPlugin,
         ));
     }
 }

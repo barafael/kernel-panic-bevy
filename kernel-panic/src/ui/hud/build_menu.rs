@@ -1,425 +1,382 @@
-//! Top-left build menu: shows buildable units for the selected factory
-//! and its current production progress/queue. Clicking an icon enqueues a
-//! unit on a stationary factory, or enters datavent placement mode on a
-//! mobile constructor (Assembler / Trojan / Gateway).
+//! Right-side build menu.
+//!
+//! Two roles:
+//! 1. **Factories** (Producer-bearing units): clicking an icon enqueues
+//!    that unit on the factory's [`Producer::queue`].
+//! 2. **Mobile constructors** (Assembler / Trojan / Gateway): clicking an
+//!    icon arms the global [`PlacementMode`] — the placement system then
+//!    converts the next ground click into a `BuildAt` command for each
+//!    selected constructor.
+//!
+//! Click handling uses Bevy's `Interaction::Pressed` watching for
+//! `Changed<Interaction>` — proven path, paired with a system ordering
+//! that runs the click handler **before** the panel rebuilds so an icon
+//! about to be despawned doesn't drop its press.
 
 use bevy::prelude::*;
 
-use super::previews::UnitPreviews;
-use super::style::{
-    BUILD_ICON_SIZE, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_PANEL_TINT,
-    UI_TEXT_COLOR, UI_TEXT_DIM,
-};
-use crate::interaction::Selected;
+use crate::interaction::selection::Selected;
 use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::buildings_for;
 use crate::units::lifecycle::production::Producer;
 
-pub struct BuildMenuPlugin;
+use super::super::theme::*;
+use super::previews::UnitPreviews;
+
+pub(super) struct BuildMenuPlugin;
 
 impl Plugin for BuildMenuPlugin {
     fn build(&self, app: &mut App) {
-        // Order matters: `update_build_menu` rebuilds the icon subtree
-        // whenever production progress shifts the hash (queue advances,
-        // current production changes). If it runs before
-        // `handle_build_clicks` within a frame, the just-pressed icon
-        // entity is despawned before its `Changed<Interaction>` is
-        // read — clicks evaporate. Run handler first, then rebuild.
-        app.add_message::<BuildOrderEvent>()
-            .add_message::<BeginPlacementEvent>()
+        app.init_resource::<PlacementMode>()
+            // Click handler runs first so the just-pressed icon entity
+            // is still alive when its `Changed<Interaction>` is read.
+            // Armed-highlight runs separately so toggling placement
+            // does *not* rebuild the panel — otherwise the new icon
+            // entities inherit the still-held mouse press and re-toggle
+            // placement on the next frame, eating the click.
             .add_systems(
                 Update,
-                (handle_build_clicks, apply_build_orders, update_build_menu).chain(),
+                (handle_clicks, refresh_panel, update_armed_highlight).chain(),
             );
     }
 }
 
-/// Fired when the player clicks a build icon on a stationary factory.
-#[derive(Message)]
-struct BuildOrderEvent {
-    kind: UnitKind,
-}
-
-/// Fired when the player clicks a build icon on a mobile constructor.
-/// The placement module (`placement.rs`) picks this up, spawns a ghost
-/// preview of the building, and waits for a left-click on a datavent
-/// before issuing a `BuildAt` command (shift-queued if shift is held).
-#[derive(Message)]
-pub struct BeginPlacementEvent {
-    pub builder: Entity,
-    pub kind: UnitKind,
-}
-
-#[derive(Component)]
-struct BuildMenu;
-
-/// Attached to a build icon button. Carries the unit kind to build.
-#[derive(Component)]
-struct BuildIcon(UnitKind);
-
-/// Build options per factory/constructor type.
+/// Active placement order: the next ground click commits a `BuildAt`
+/// for `kind` to every selected constructor unit. Cleared on commit /
+/// right-click / Escape.
 ///
-/// Matches upstream `SIDEDATA.TDF` with one game-design rule overlaid:
-/// **homebases (Kernel / Hole / Connection) build only mobile units**;
-/// static structures (Socket, Window, Port, Firewall, LogicBomb, …) are
-/// produced by the mobile builder line (Assembler / Trojan / Gateway),
-/// which requires placing the building on a datavent. Construction unit
-/// build lists live in `construction::buildings_for`.
-fn buildable_units(kind: UnitKind) -> &'static [UnitKind] {
-    match kind {
+/// Read by the placement system.
+#[derive(Resource, Default, Debug, Clone, Copy)]
+pub(crate) struct PlacementMode {
+    pub kind: Option<UnitKind>,
+}
+
+/// Marker on the panel root so we can find/despawn the whole tree.
+#[derive(Component)]
+struct BuildMenuRoot;
+
+#[derive(Component, Clone, Copy)]
+struct BuildIcon {
+    kind: UnitKind,
+    /// `true` for a constructor's buildable structure (commits a
+    /// placement); `false` for a factory's producible unit (enqueues
+    /// directly).
+    is_construction: bool,
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn refresh_panel(
+    mut commands: Commands,
+    previews: Res<UnitPreviews>,
+    registry: Res<UnitRegistry>,
+    selected_q: Query<(&UnitType, Option<&Producer>, Option<&Faction>), With<Selected>>,
+    existing: Query<Entity, With<BuildMenuRoot>>,
+    mut last_hash: Local<u64>,
+) {
+    let snapshot = MenuSnapshot::collect(&selected_q);
+    // Hash deliberately excludes `PlacementMode` — see
+    // `update_armed_highlight`: rebuilding the panel on arm/disarm
+    // would let the still-held mouse press re-toggle placement on the
+    // newly-spawned icon entity.
+    let new_hash = snapshot.hash();
+
+    if new_hash == *last_hash {
+        return;
+    }
+    *last_hash = new_hash;
+
+    for entity in &existing {
+        commands.entity(entity).despawn();
+    }
+
+    if snapshot.is_empty() {
+        return;
+    }
+
+    commands
+        .spawn((
+            BuildMenuRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                right: Val::Px(8.0),
+                top: Val::Px(8.0),
+                width: Val::Px(RIGHT_COLUMN_WIDTH),
+                padding: UiRect::all(Val::Px(PANEL_PADDING)),
+                border: UiRect::all(Val::Px(1.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(PANEL_GAP),
+                ..default()
+            },
+            BackgroundColor(PANEL_BG),
+            BorderColor::all(PANEL_BORDER),
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("Build"),
+                TextFont {
+                    font_size: TEXT_TITLE,
+                    ..default()
+                },
+                TextColor(KP_GREEN),
+            ));
+            parent
+                .spawn(Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(PANEL_GAP),
+                    row_gap: Val::Px(PANEL_GAP),
+                    ..default()
+                })
+                .with_children(|grid| {
+                    for (kind, queue_count, is_construction) in snapshot.entries() {
+                        spawn_icon(
+                            grid,
+                            kind,
+                            queue_count,
+                            is_construction,
+                            &registry,
+                            &previews,
+                        );
+                    }
+                });
+        });
+}
+
+/// Per-frame update that mutates each icon's border + background based
+/// on whether the placement order is currently armed for its kind.
+/// Decoupled from `refresh_panel` so toggling placement does **not**
+/// despawn the icon entities — the still-held mouse press would
+/// otherwise re-trigger `Changed<Interaction>` on the new icons and
+/// flip placement back off, eating the user's click.
+fn update_armed_highlight(
+    placement: Res<PlacementMode>,
+    mut icons: Query<(
+        &BuildIcon,
+        &mut BorderColor,
+        &mut BackgroundColor,
+        &mut Node,
+    )>,
+) {
+    let active = placement.kind;
+    for (icon, mut border, mut bg, mut node) in &mut icons {
+        let armed = icon.is_construction && active == Some(icon.kind);
+        let target_border = if armed { KP_GREEN } else { PANEL_BORDER };
+        let target_bg = if armed { BUTTON_BG_PRESSED } else { BUTTON_BG };
+        let target_width = if armed { 2.0 } else { 1.0 };
+        *border = BorderColor::all(target_border);
+        *bg = BackgroundColor(target_bg);
+        node.border = UiRect::all(Val::Px(target_width));
+    }
+}
+
+fn spawn_icon(
+    grid: &mut ChildSpawnerCommands,
+    kind: UnitKind,
+    queue_count: u32,
+    is_construction: bool,
+    registry: &UnitRegistry,
+    previews: &UnitPreviews,
+) {
+    // Spawn neutral; `update_armed_highlight` paints the armed visual
+    // every frame without rebuilding the icon entity.
+    grid.spawn((
+        Button,
+        BuildIcon {
+            kind,
+            is_construction,
+        },
+        Node {
+            width: Val::Px(ICON_SIZE),
+            height: Val::Px(ICON_SIZE),
+            border: UiRect::all(Val::Px(1.0)),
+            flex_direction: FlexDirection::Column,
+            justify_content: JustifyContent::FlexEnd,
+            align_items: AlignItems::Center,
+            padding: UiRect::all(Val::Px(2.0)),
+            ..default()
+        },
+        BackgroundColor(BUTTON_BG),
+        BorderColor::all(PANEL_BORDER),
+    ))
+    .with_children(|btn| {
+        // Image as a sized child so its aspect doesn't get stretched
+        // by the icon's flex layout. The square slot leaves room
+        // beneath for the unit name.
+        if let Some(handle) = previews.get(kind) {
+            btn.spawn((
+                ImageNode::new(handle.clone()),
+                Node {
+                    width: Val::Px(ICON_SIZE - 6.0),
+                    height: Val::Px(ICON_SIZE - 22.0),
+                    ..default()
+                },
+            ));
+        }
+
+        btn.spawn((
+            Text::new(registry.name(kind).to_string()),
+            TextFont {
+                font_size: TEXT_SMALL,
+                ..default()
+            },
+            TextColor(KP_GREEN_DIM),
+            TextLayout::new_with_justify(Justify::Center),
+        ));
+
+        if queue_count > 0 {
+            btn.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    right: Val::Px(2.0),
+                    top: Val::Px(1.0),
+                    padding: UiRect::axes(Val::Px(3.0), Val::Px(0.0)),
+                    ..default()
+                },
+                BackgroundColor(TEXT_BG),
+            ))
+            .with_children(|badge| {
+                badge.spawn((
+                    Text::new(format!("{queue_count}")),
+                    TextFont {
+                        font_size: TEXT_SMALL,
+                        ..default()
+                    },
+                    TextColor(KP_GREEN),
+                ));
+            });
+        }
+    });
+}
+
+#[allow(clippy::type_complexity)]
+fn handle_clicks(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    interactions: Query<(&Interaction, &BuildIcon), Changed<Interaction>>,
+    mut producers: Query<&mut Producer, With<Selected>>,
+    mut placement: ResMut<PlacementMode>,
+) {
+    // Right-click anywhere cancels armed placement (mirrors Spring).
+    if mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::Escape) {
+        placement.kind = None;
+    }
+
+    for (interaction, icon) in &interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        if icon.is_construction {
+            placement.kind = if placement.kind == Some(icon.kind) {
+                None
+            } else {
+                Some(icon.kind)
+            };
+        } else {
+            for mut producer in &mut producers {
+                producer.enqueue(icon.kind);
+            }
+        }
+    }
+}
+
+/// Snapshot of the buildable roster the menu would render this frame —
+/// drives both rendering and the panel-state-hash idempotency check.
+struct MenuSnapshot {
+    /// `(kind, queue_count, is_construction)`.
+    entries: Vec<(UnitKind, u32, bool)>,
+}
+
+impl MenuSnapshot {
+    #[allow(clippy::type_complexity)]
+    fn collect(
+        selected_q: &Query<(&UnitType, Option<&Producer>, Option<&Faction>), With<Selected>>,
+    ) -> Self {
+        // Pick the first selected unit that has *any* roster.
+        // Multi-builder tabs are deferred (see plan B1).
+        let mut entries: Vec<(UnitKind, u32, bool)> = Vec::new();
+        for (ut, producer, faction) in selected_q {
+            if ut.0.is_constructor() {
+                let buildings = buildings_for(ut.0);
+                entries = buildings.iter().map(|k| (*k, 0, true)).collect();
+                break;
+            }
+            if producer.is_some()
+                && let Some(faction) = faction
+            {
+                let roster = factory_roster(ut.0, *faction);
+                let queue_counts = producer
+                    .map(|p| {
+                        let mut counts = std::collections::HashMap::<UnitKind, u32>::new();
+                        for kind in p.queue() {
+                            *counts.entry(*kind).or_default() += 1;
+                        }
+                        counts
+                    })
+                    .unwrap_or_default();
+                entries = roster
+                    .iter()
+                    .map(|k| (*k, queue_counts.get(k).copied().unwrap_or(0), false))
+                    .collect();
+                break;
+            }
+        }
+
+        Self { entries }
+    }
+
+    fn entries(&self) -> impl Iterator<Item = (UnitKind, u32, bool)> + '_ {
+        self.entries.iter().copied()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        // Non-zero seed so a roster of UnitKind::Kernel + Faction::System
+        // (both discriminate to 0) doesn't collide with the
+        // `Local<u64>::default() == 0` first-frame sentinel.
+        0xcbf29ce484222325u64.hash(&mut h);
+        for entry in &self.entries {
+            entry.hash(&mut h);
+        }
+        h.finish()
+    }
+}
+
+/// Per-faction factory rosters. Hardcoded to mirror upstream
+/// `SIDEDATA.TDF`'s `[BUILDOPTIONS]`. Only the homebases and secondary
+/// factories produce units; mobile builders use the construction
+/// pipeline and have their own [`buildings_for`] roster.
+fn factory_roster(factory: UnitKind, _faction: Faction) -> &'static [UnitKind] {
+    match factory {
         UnitKind::Kernel => &[
             UnitKind::Bit,
-            UnitKind::Assembler,
             UnitKind::Byte,
             UnitKind::Pointer,
+            UnitKind::Assembler,
         ],
-        UnitKind::Socket => &[UnitKind::Bit],
         UnitKind::Hole => &[
             UnitKind::Bug,
             UnitKind::Worm,
             UnitKind::Dos,
             UnitKind::Trojan,
         ],
-        UnitKind::Window => &[UnitKind::Bug],
-        // Upstream `SIDEDATA.TDF [carrier]`: packet, connection, flow,
-        // gateway. All mobile — buildings come from the Gateway, which
-        // is the Network line's mobile constructor.
         UnitKind::Carrier => &[
             UnitKind::Packet,
-            UnitKind::Connection,
+            UnitKind::Signal,
             UnitKind::Flow,
+            UnitKind::Connection,
             UnitKind::Gateway,
         ],
+        UnitKind::Socket => &[UnitKind::Bit],
+        UnitKind::Window => &[UnitKind::Bug],
         UnitKind::Port => &[UnitKind::Packet],
-        kind if kind.is_constructor() => buildings_for(kind),
         _ => &[],
-    }
-}
-
-fn update_build_menu(
-    selected_q: Query<(&UnitType, &Faction), With<Selected>>,
-    producer_q: Query<(&Producer, &UnitType), With<Selected>>,
-    existing: Query<Entity, With<BuildMenu>>,
-    previews: Res<UnitPreviews>,
-    mut commands: Commands,
-    unit_registry: Res<UnitRegistry>,
-    mut last_hash: Local<u64>,
-) {
-    // Rebuild only when the selection + production state actually
-    // changes. Without this guard the system despawns and respawns the
-    // entire build-icon subtree every Update tick even on fully static
-    // frames.
-    //
-    // Seeded with a non-zero FNV-1a 64-bit offset basis so a
-    // legitimate "Kernel + System" selection (both enum variants
-    // discriminate to 0) doesn't collide with the `Local<u64>::default()
-    // == 0` first-frame sentinel — the unguarded version returned
-    // early on every frame for the System homebase, and the build
-    // menu never appeared.
-    let builder = selected_q
-        .iter()
-        .find(|(ut, _)| !buildable_units(ut.0).is_empty());
-    let producer_slot = producer_q.iter().next();
-
-    let mut hash: u64 = 0xcbf29ce484222325;
-    if let Some((ut, faction)) = builder {
-        hash = hash.wrapping_mul(2654435761).wrapping_add(ut.0 as u64);
-        hash = hash.wrapping_mul(2654435761).wrapping_add(*faction as u64);
-    }
-    if let Some((producer, _)) = producer_slot {
-        if let Some(kind) = producer.current_production() {
-            hash = hash
-                .wrapping_mul(2654435761)
-                .wrapping_add(kind as u64 | 0x1000);
-        }
-        hash = hash
-            .wrapping_mul(2654435761)
-            .wrapping_add(producer.queue().len() as u64);
-        for kind in producer.queue() {
-            hash = hash.wrapping_mul(2654435761).wrapping_add(*kind as u64);
-        }
-    }
-    if hash == *last_hash {
-        return;
-    }
-    *last_hash = hash;
-
-    for entity in &existing {
-        commands.entity(entity).despawn();
-    }
-
-    let Some((unit_type, faction)) = builder else {
-        return;
-    };
-    let options = buildable_units(unit_type.0);
-
-    // Mid-left: anchor at 50% top with a translateY trick via `top` minus
-    // half the menu's expected height. Bevy 0.18 doesn't expose CSS
-    // transforms on Nodes, so we use top + a margin-top offset of half
-    // the icon block; this keeps the menu visually centered on the
-    // left edge.
-    let menu = commands
-        .spawn((
-            BuildMenu,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Percent(50.0),
-                width: Val::Px(BUILD_ICON_SIZE * 2.0 + 28.0),
-                padding: UiRect::all(Val::Px(8.0)),
-                margin: UiRect {
-                    top: Val::Px(-((BUILD_ICON_SIZE * 2.0) + 24.0)),
-                    ..default()
-                },
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(6.0),
-                border: UiRect {
-                    left: Val::Px(0.0),
-                    top: Val::Px(1.0),
-                    right: Val::Px(1.0),
-                    bottom: Val::Px(1.0),
-                },
-                ..default()
-            },
-            BorderColor::all(UI_BORDER_COLOR),
-            BackgroundColor(UI_BG_COLOR),
-        ))
-        .id();
-
-    // Title
-    let title = commands
-        .spawn((
-            Text::new("BUILD"),
-            TextFont {
-                font_size: FONT_SIZE_TITLE,
-                ..default()
-            },
-            TextColor(UI_TEXT_COLOR),
-        ))
-        .id();
-    commands.entity(menu).add_child(title);
-
-    // Queue summary (if this unit is a producer with something queued)
-    if let Some((producer, _)) = producer_q.iter().next()
-        && producer.current_production().is_some()
-    {
-        spawn_build_queue(&mut commands, menu, producer, &unit_registry);
-    }
-
-    // Grid of build icons (2 columns)
-    let grid = commands
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            flex_wrap: FlexWrap::Wrap,
-            column_gap: Val::Px(4.0),
-            row_gap: Val::Px(4.0),
-            ..default()
-        })
-        .id();
-    commands.entity(menu).add_child(grid);
-
-    // Count how many of each kind are queued on the producer in focus, so
-    // each build icon can surface its own pending-count badge (FEATURES.md §4).
-    let queue_counts: std::collections::HashMap<UnitKind, u32> = producer_q
-        .iter()
-        .next()
-        .map(|(producer, _)| {
-            let mut counts = std::collections::HashMap::new();
-            for kind in producer.queue() {
-                *counts.entry(*kind).or_insert(0u32) += 1;
-            }
-            counts
-        })
-        .unwrap_or_default();
-
-    for kind in options {
-        let name = unit_registry.name(*kind);
-        let preview = previews.get(*kind).cloned();
-        let count = queue_counts.get(kind).copied().unwrap_or(0);
-        let icon = spawn_build_icon(&mut commands, name, faction, *kind, preview, count);
-        commands.entity(grid).add_child(icon);
-    }
-}
-
-/// Render the remaining build queue ("Queue: 3x Bit, Byte"). The player
-/// tracks production progress via the rising HP bar of the unit still in
-/// the factory — there is no numeric progress bar in the HUD.
-fn spawn_build_queue(
-    commands: &mut Commands,
-    menu: Entity,
-    producer: &Producer,
-    unit_registry: &UnitRegistry,
-) {
-    let queue = producer.queue();
-    if !queue.is_empty() {
-        let mut queue_parts: Vec<String> = Vec::new();
-        let mut prev_kind: Option<UnitKind> = None;
-        let mut count = 0u32;
-        for kind in queue {
-            if prev_kind == Some(*kind) {
-                count += 1;
-            } else {
-                if let Some(pk) = prev_kind {
-                    let name = unit_registry.name(pk);
-                    if count > 1 {
-                        queue_parts.push(format!("{count}x {name}"));
-                    } else {
-                        queue_parts.push(name.to_string());
-                    }
-                }
-                prev_kind = Some(*kind);
-                count = 1;
-            }
-        }
-        if let Some(pk) = prev_kind {
-            let name = unit_registry.name(pk);
-            if count > 1 {
-                queue_parts.push(format!("{count}x {name}"));
-            } else {
-                queue_parts.push(name.to_string());
-            }
-        }
-
-        let queue_str = format!("Queue: {}", queue_parts.join(", "));
-        let queue_node = commands
-            .spawn((
-                Text::new(queue_str),
-                TextFont {
-                    font_size: FONT_SIZE_SMALL,
-                    ..default()
-                },
-                TextColor(UI_TEXT_DIM),
-            ))
-            .id();
-        commands.entity(menu).add_child(queue_node);
-    }
-}
-
-fn spawn_build_icon(
-    commands: &mut Commands,
-    name: &str,
-    faction: &Faction,
-    kind: UnitKind,
-    preview: Option<Handle<Image>>,
-    queue_count: u32,
-) -> Entity {
-    let icon = commands
-        .spawn((
-            BuildIcon(kind),
-            Button,
-            Node {
-                width: Val::Px(BUILD_ICON_SIZE),
-                height: Val::Px(BUILD_ICON_SIZE),
-                border: UiRect::all(Val::Px(1.0)),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::End,
-                align_items: AlignItems::Center,
-                padding: UiRect::all(Val::Px(2.0)),
-                ..default()
-            },
-            BorderColor::all(faction.color()),
-            BackgroundColor(UI_PANEL_TINT),
-        ))
-        .id();
-
-    // Preview image
-    if let Some(image_handle) = preview {
-        let img = commands
-            .spawn((
-                ImageNode::new(image_handle),
-                Node {
-                    width: Val::Px(BUILD_ICON_SIZE - 8.0),
-                    height: Val::Px(BUILD_ICON_SIZE - 24.0),
-                    ..default()
-                },
-            ))
-            .id();
-        commands.entity(icon).add_child(img);
-    }
-
-    // Unit name
-    let name_label = commands
-        .spawn((
-            Text::new(name),
-            TextFont {
-                font_size: FONT_SIZE_SMALL,
-                ..default()
-            },
-            TextColor(UI_TEXT_COLOR),
-            TextLayout::new_with_justify(Justify::Center),
-        ))
-        .id();
-    commands.entity(icon).add_child(name_label);
-
-    // Queue-count badge in the bottom-left corner (FEATURES.md §4).
-    // Hidden entirely when the queue is empty so the empty state reads
-    // clean; rendered as an absolutely-positioned text node so it sits
-    // inside the icon's bounds regardless of layout rounding.
-    if queue_count > 0 {
-        let badge = commands
-            .spawn((
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(2.0),
-                    bottom: Val::Px(2.0),
-                    ..default()
-                },
-                Text::new(queue_count.to_string()),
-                TextFont {
-                    font_size: FONT_SIZE_SMALL,
-                    ..default()
-                },
-                TextColor(UI_TEXT_COLOR),
-                BackgroundColor(UI_PANEL_TINT),
-            ))
-            .id();
-        commands.entity(icon).add_child(badge);
-    }
-
-    icon
-}
-
-fn handle_build_clicks(
-    interaction_q: Query<(&Interaction, &BuildIcon), Changed<Interaction>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    mut ev_build: MessageWriter<BuildOrderEvent>,
-    mut ev_placement: MessageWriter<BeginPlacementEvent>,
-) {
-    for (interaction, build_icon) in &interaction_q {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
-        // Route the click based on what the first selected unit is: a
-        // mobile constructor enters placement mode, a stationary factory
-        // just enqueues. If nothing that can build is selected, drop the
-        // click — the icons shouldn't be visible in that case anyway.
-        let Some((builder_entity, ut)) = selected_q
-            .iter()
-            .find(|(_, ut)| ut.0.is_constructor() || !buildable_units(ut.0).is_empty())
-        else {
-            continue;
-        };
-        if ut.0.is_constructor() {
-            ev_placement.write(BeginPlacementEvent {
-                builder: builder_entity,
-                kind: build_icon.0,
-            });
-        } else {
-            ev_build.write(BuildOrderEvent { kind: build_icon.0 });
-        }
-    }
-}
-
-fn apply_build_orders(
-    mut ev_build: MessageReader<BuildOrderEvent>,
-    mut producers: Query<&mut Producer, With<Selected>>,
-) {
-    for event in ev_build.read() {
-        // Enqueue on the first selected producer.
-        if let Some(mut producer) = producers.iter_mut().next() {
-            producer.enqueue(event.kind);
-        }
     }
 }

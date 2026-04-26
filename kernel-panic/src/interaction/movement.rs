@@ -48,6 +48,9 @@ pub enum QueuedCommand {
     /// Walk to `site`, then erect a building of `kind` there. Used by
     /// constructor units (Assembler / Trojan / Gateway) after the player
     /// picks a building in the build menu and clicks on a datavent.
+    /// Currently has no constructor caller — the placement UI that
+    /// produced these was removed pending a rewrite.
+    #[allow(dead_code)]
     BuildAt {
         kind: UnitKind,
         site: Vec3,

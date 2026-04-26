@@ -1,24 +1,25 @@
 //! Datavent-placement mode for mobile constructors.
 //!
-//! Activated by a `BeginPlacementEvent` from the build menu (issued when
-//! the player clicks a building icon while a constructor is selected).
-//! While active, a translucent ghost of the target building follows the
-//! cursor, snapping to the nearest datavent within range. The ghost tints
-//! green on a valid datavent and red otherwise.
+//! Armed by the build menu writing [`PlacementMode::kind`] when the
+//! player clicks a constructor's building icon. While armed:
 //!
-//! **Commit:** left-click while the ghost is green → issue a `BuildAt`
-//! command to the builder (shift-queued if Shift is held). Otherwise the
-//! left-click is swallowed so the underlying selection system doesn't fire.
+//! 1. A translucent ghost of the target building's S3O mesh hovers at
+//!    the cursor, snapping to the nearest unclaimed datavent within
+//!    [`SNAP_RADIUS`]. Tinted green on a valid snap, red otherwise.
+//! 2. Left-click commits a `BuildAt` order to every selected
+//!    constructor (Shift queues; plain click replaces). The mouse press
+//!    is cleared so the underlying selection system doesn't drop the
+//!    selection.
+//! 3. Right-click or Escape cancels.
 //!
-//! **Cancel:** right-click, Escape, or selecting a different unit — all
-//! exit placement mode without issuing a command.
+//! Runs `before(SelectionSet::Select)` so a consumed click never reaches
+//! the click-to-select / drag-box logic.
 
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use crate::interaction::Selected;
 use crate::interaction::movement::{MoveTarget, QueuedCommand};
-use crate::interaction::selection::{SelectionSet, apply_ordered_command, ground_hit};
+use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit};
 use crate::rendering::camera::RtsCamera;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
 use crate::units::assets::meshes::{S3OModelCache, unit_material, unit_mesh};
@@ -26,193 +27,205 @@ use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 
-use super::build_menu::BeginPlacementEvent;
+use super::build_menu::PlacementMode;
 
 pub(super) struct PlacementPlugin;
 
 impl Plugin for PlacementPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlacementMode>()
-            .init_resource::<GeoHighlightAssets>()
-            .add_systems(
-                Update,
-                (
-                    (
-                        begin_placement,
-                        update_placement_ghost,
-                        commit_or_cancel_placement,
-                    )
-                        .chain()
-                        // Run before selection so consumed mouse clicks don't
-                        // bleed through into click-to-select.
-                        .before(SelectionSet::Select),
-                    pulse_geo_highlights,
-                ),
-            );
+        app.init_resource::<PlacementGhost>().add_systems(
+            Update,
+            (manage_ghost_lifecycle, update_ghost, commit_or_cancel)
+                .chain()
+                // Run before selection so a committed/cancelled click
+                // never reaches click-to-select.
+                .before(crate::interaction::selection::SelectionSet::Select),
+        );
     }
 }
 
-/// Active placement mode. `None` field means no placement in progress.
+/// Max XZ distance from the cursor to a datavent for the ghost to snap.
+const SNAP_RADIUS: f32 = 64.0;
+
+const GHOST_VALID_COLOR: Color = Color::srgba(0.30, 1.00, 0.40, 0.55);
+const GHOST_INVALID_COLOR: Color = Color::srgba(1.00, 0.30, 0.30, 0.55);
+
+/// Marker for the ghost entity rendered in the world.
+#[derive(Component)]
+struct GhostMarker;
+
+/// Sync state between the [`PlacementMode`] resource (driven by the
+/// build menu) and the live ghost entity. Holds the entity handle so
+/// `manage_ghost_lifecycle` can despawn it when placement is disarmed,
+/// and the most recent snap result so `commit_or_cancel` knows whether
+/// the click is on a valid site without re-running the raycast.
 #[derive(Resource, Default)]
-pub struct PlacementMode {
-    pub active: Option<ActivePlacement>,
+struct PlacementGhost {
+    entity: Option<Entity>,
+    /// `kind` the ghost was spawned for, so a kind change rebuilds the
+    /// mesh.
+    spawned_kind: Option<UnitKind>,
+    /// Snapped vent position, set by [`update_ghost`] each frame.
+    snapped: Option<Vec3>,
 }
 
-pub struct ActivePlacement {
-    pub builder: Entity,
-    pub kind: UnitKind,
-    /// Ghost entity rendered at the snapped datavent (or at the raw cursor
-    /// position when no datavent is in range).
-    pub ghost: Entity,
-    /// Snapped datavent world position, if any. `None` when the cursor is
-    /// too far from every datavent (the ghost is shown red at the raw
-    /// cursor and left-click is rejected).
-    pub snapped: Option<Vec3>,
-}
-
-/// Max XZ distance from the cursor to a datavent for the ghost to snap
-/// onto it. Generous enough that clicking "near" a vent still registers.
-const SNAP_RADIUS: f32 = 48.0;
-
-/// Begin placement when the build menu fires an event. If a previous
-/// placement was already active we despawn its ghost and replace it.
 #[allow(clippy::too_many_arguments)]
-fn begin_placement(
-    mut ev: MessageReader<BeginPlacementEvent>,
-    mut mode: ResMut<PlacementMode>,
+fn manage_ghost_lifecycle(
     mut commands: Commands,
+    mut state: ResMut<PlacementGhost>,
+    mut placement: ResMut<PlacementMode>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
     unit_registry: Res<UnitRegistry>,
-    faction_q: Query<&Faction>,
+    selected_q: Query<&Faction, With<Selected>>,
+    constructors_q: Query<(), (With<UnitType>, With<Selected>)>,
 ) {
-    for event in ev.read() {
-        if let Some(existing) = mode.active.take() {
-            commands.entity(existing.ghost).despawn();
+    // Auto-cancel if no constructor is selected — armed placement with
+    // an empty selection has nothing to dispatch the order to.
+    if placement.kind.is_some() && constructors_q.is_empty() {
+        placement.kind = None;
+    }
+
+    match (placement.kind, state.entity, state.spawned_kind) {
+        (Some(kind), Some(entity), Some(prev)) if prev != kind => {
+            // Kind changed mid-placement (rare: user clicked a
+            // different building icon). Despawn and respawn so the
+            // ghost mesh updates.
+            commands.entity(entity).despawn();
+            state.entity = None;
+            state.spawned_kind = None;
+            spawn_ghost(
+                kind,
+                &selected_q,
+                &mut state,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &unit_registry,
+            );
         }
-
-        // Use the builder's faction for the ghost tint so the preview
-        // reads visually as "this will be mine".
-        let faction = faction_q
-            .get(event.builder)
-            .copied()
-            .unwrap_or(Faction::System);
-        let mesh = unit_mesh(event.kind, &mut meshes, &mut model_cache, &unit_registry);
-        let model_name = unit_registry.model(event.kind).to_string();
-        let base_mat = unit_material(
-            event.kind,
-            faction,
-            &mut materials,
-            &mut images,
-            &mut model_cache,
-            &model_name,
-        );
-        // Clone the base material and make it translucent green. We spawn
-        // a fresh handle so that flipping between valid/invalid tint
-        // doesn't mutate the real unit material.
-        let ghost_mat = {
-            let source = materials
-                .get(&base_mat)
-                .cloned()
-                .unwrap_or(StandardMaterial::default());
-            materials.add(StandardMaterial {
-                base_color: GHOST_VALID_COLOR,
-                alpha_mode: AlphaMode::Blend,
-                unlit: true,
-                base_color_texture: source.base_color_texture.clone(),
-                ..default()
-            })
-        };
-
-        let ghost = commands
-            .spawn((
-                PlacementGhost,
-                Mesh3d(mesh),
-                MeshMaterial3d(ghost_mat),
-                Transform::default(),
-                Visibility::Hidden,
-            ))
-            .id();
-
-        mode.active = Some(ActivePlacement {
-            builder: event.builder,
-            kind: event.kind,
-            ghost,
-            snapped: None,
-        });
+        (Some(kind), None, _) => {
+            spawn_ghost(
+                kind,
+                &selected_q,
+                &mut state,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &unit_registry,
+            );
+        }
+        (None, Some(entity), _) => {
+            commands.entity(entity).despawn();
+            state.entity = None;
+            state.spawned_kind = None;
+            state.snapped = None;
+        }
+        _ => {}
     }
 }
 
-#[derive(Component)]
-struct PlacementGhost;
-
-const GHOST_VALID_COLOR: Color = Color::srgba(0.3, 1.0, 0.4, 0.55);
-const GHOST_INVALID_COLOR: Color = Color::srgba(1.0, 0.3, 0.3, 0.55);
-
-/// Each frame: ray-cast the cursor onto the ground, find the nearest
-/// datavent within SNAP_RADIUS, update the ghost's position + tint.
-/// Despawns the ghost if the builder was deselected or destroyed.
 #[allow(clippy::too_many_arguments)]
-fn update_placement_ghost(
-    mut mode: ResMut<PlacementMode>,
+fn spawn_ghost(
+    kind: UnitKind,
+    selected_q: &Query<&Faction, With<Selected>>,
+    state: &mut PlacementGhost,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
+    unit_registry: &UnitRegistry,
+) {
+    // Tint with the constructor's faction so the preview reads as
+    // "this will be mine".
+    let faction = selected_q.iter().next().copied().unwrap_or(Faction::System);
+
+    let mesh = unit_mesh(kind, meshes, model_cache, unit_registry);
+    let model_name = unit_registry.model(kind).to_string();
+    let base_mat = unit_material(kind, faction, materials, images, model_cache, &model_name);
+
+    // Clone the base material into a translucent tinted variant so
+    // tweaking valid/invalid color doesn't leak into the real building.
+    let ghost_mat = {
+        let source = materials.get(&base_mat).cloned().unwrap_or_default();
+        materials.add(StandardMaterial {
+            base_color: GHOST_VALID_COLOR,
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            base_color_texture: source.base_color_texture.clone(),
+            ..default()
+        })
+    };
+
+    let entity = commands
+        .spawn((
+            GhostMarker,
+            Mesh3d(mesh),
+            MeshMaterial3d(ghost_mat),
+            Transform::default(),
+            Visibility::Hidden,
+        ))
+        .id();
+
+    state.entity = Some(entity);
+    state.spawned_kind = Some(kind);
+    state.snapped = None;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_ghost(
+    mut state: ResMut<PlacementGhost>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
-    mut transforms: Query<(&mut Transform, &mut Visibility), With<PlacementGhost>>,
+    mut transforms: Query<(&mut Transform, &mut Visibility), With<GhostMarker>>,
+    ghost_mats: Query<&MeshMaterial3d<StandardMaterial>, With<GhostMarker>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    ghost_mats: Query<&MeshMaterial3d<StandardMaterial>, With<PlacementGhost>>,
-    selected_q: Query<Entity, With<Selected>>,
-    builder_q: Query<(), With<UnitType>>,
     geovents: Query<&GeoventSmoker, Without<VentClaim>>,
-    mut commands: Commands,
 ) {
-    let Some(active) = mode.active.as_mut() else {
+    let Some(ghost) = state.entity else {
         return;
     };
-
-    // Auto-cancel when the builder was destroyed or deselected.
-    let builder_alive = builder_q.contains(active.builder);
-    let builder_selected = selected_q.contains(active.builder);
-    if !builder_alive || !builder_selected {
-        commands.entity(active.ghost).despawn();
-        mode.active = None;
-        return;
-    }
 
     let Some(cursor_pt) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
-        // Cursor off-screen / off-terrain: hide the ghost this frame.
-        if let Ok((_, mut vis)) = transforms.get_mut(active.ghost) {
+        // Cursor off-screen or off-terrain: hide the ghost this frame.
+        if let Ok((_, mut vis)) = transforms.get_mut(ghost) {
             *vis = Visibility::Hidden;
         }
-        active.snapped = None;
+        state.snapped = None;
         return;
     };
 
-    // Snap to nearest *unclaimed* datavent within SNAP_RADIUS — the
-    // `Without<VentClaim>` filter on the query means claimed vents don't
-    // appear here at all, so a second constructor can't stack another
-    // building onto a vent that's already being built on.
+    // Snap to the nearest unclaimed vent in XZ.
     let mut best: Option<(Vec3, f32)> = None;
     for vent in &geovents {
-        let d = (vent.pos - cursor_pt).length();
+        let dx = vent.pos.x - cursor_pt.x;
+        let dz = vent.pos.z - cursor_pt.z;
+        let d = (dx * dx + dz * dz).sqrt();
         if d <= SNAP_RADIUS && best.is_none_or(|(_, bd)| d < bd) {
             best = Some((vent.pos, d));
         }
     }
 
-    let (ghost_pos, valid) = match best {
-        Some((pos, _)) => (pos, true),
+    let (pos, valid) = match best {
+        Some((p, _)) => (p, true),
         None => (cursor_pt, false),
     };
-    active.snapped = if valid { Some(ghost_pos) } else { None };
+    state.snapped = if valid { Some(pos) } else { None };
 
-    if let Ok((mut tf, mut vis)) = transforms.get_mut(active.ghost) {
-        tf.translation = ghost_pos + Vec3::Y * 0.1;
+    if let Ok((mut tf, mut vis)) = transforms.get_mut(ghost) {
+        // Lift slightly so the mesh doesn't z-fight with the ground.
+        tf.translation = pos + Vec3::Y * 0.5;
         *vis = Visibility::Inherited;
     }
-    if let Ok(mat_handle) = ghost_mats.get(active.ghost)
+    if let Ok(mat_handle) = ghost_mats.get(ghost)
         && let Some(mat) = materials.get_mut(&mat_handle.0)
     {
         mat.base_color = if valid {
@@ -223,198 +236,76 @@ fn update_placement_ghost(
     }
 }
 
-/// Edge length (elmos) of the green highlight square that hovers over
-/// each unclaimed datavent during placement mode. Matches upstream
-/// `kp_geoshighlight.lua`'s `Width=32` (the lua draws ±Width vertices,
-/// so the square spans 64 elmos).
-const GEO_HIGHLIGHT_EXTENT: f32 = 64.0;
-/// Hover height above the ground so the quad doesn't z-fight with the
-/// terrain mesh.
-const GEO_HIGHLIGHT_HOVER: f32 = 2.0;
-/// Full pulse period. Upstream's widget runs at 1.25 Hz with a 50%
-/// duty cycle (visible 0.4 s, hidden 0.4 s, repeat).
-const GEO_PULSE_PERIOD: f32 = 0.8;
-
-/// Marker for a `GeoventSmoker`-attached highlight quad spawned during
-/// placement mode and despawned when placement ends. Toggled visible /
-/// hidden each frame to produce the upstream blink.
-#[derive(Component)]
-struct GeoHighlight;
-
-/// Lazy-initialised mesh + material shared across every geovent's
-/// highlight quad.
-#[derive(Resource, Default)]
-struct GeoHighlightAssets {
-    mesh: Option<Handle<Mesh>>,
-    material: Option<Handle<StandardMaterial>>,
-}
-
-impl GeoHighlightAssets {
-    fn mesh_handle(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
-        self.mesh
-            .get_or_insert_with(|| {
-                meshes.add(Rectangle::new(GEO_HIGHLIGHT_EXTENT, GEO_HIGHLIGHT_EXTENT))
-            })
-            .clone()
-    }
-
-    fn material_handle(
-        &mut self,
-        materials: &mut Assets<StandardMaterial>,
-    ) -> Handle<StandardMaterial> {
-        self.material
-            .get_or_insert_with(|| {
-                materials.add(StandardMaterial {
-                    base_color: Color::linear_rgb(0.3, 1.0, 0.4),
-                    unlit: true,
-                    alpha_mode: AlphaMode::Add,
-                    ..default()
-                })
-            })
-            .clone()
-    }
-}
-
-/// During placement mode, ensure every unclaimed datavent has a
-/// pulsing green highlight on the ground; despawn highlights when
-/// placement ends. Mirrors upstream `kp_geoshighlight.lua` so the
-/// player can spot every legal build site at a glance instead of
-/// hunting near the cursor.
 #[allow(clippy::too_many_arguments)]
-fn pulse_geo_highlights(
-    time: Res<Time>,
-    mode: Res<PlacementMode>,
-    mut assets: ResMut<GeoHighlightAssets>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
-    highlights: Query<(Entity, &ChildOf), With<GeoHighlight>>,
-    mut highlight_vis: Query<&mut Visibility, With<GeoHighlight>>,
+fn commit_or_cancel(
     mut commands: Commands,
-) {
-    let active = mode.active.is_some();
-
-    if !active {
-        // Tear down any leftover highlights from a previous placement.
-        for (highlight, _) in &highlights {
-            commands.entity(highlight).despawn();
-        }
-        return;
-    }
-
-    // Spawn missing highlights for every currently-unclaimed vent.
-    let already_lit: std::collections::HashSet<Entity> = highlights
-        .iter()
-        .map(|(_, parent)| parent.parent())
-        .collect();
-    let mesh = assets.mesh_handle(&mut meshes);
-    let material = assets.material_handle(&mut materials);
-    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-    for (vent_entity, _) in &vents {
-        if already_lit.contains(&vent_entity) {
-            continue;
-        }
-        commands.entity(vent_entity).with_children(|builder| {
-            // GeoventSmoker's transform is already at the vent's world
-            // position, so the highlight just sits at parent origin
-            // raised by HOVER to dodge terrain z-fighting.
-            builder.spawn((
-                GeoHighlight,
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform::from_xyz(0.0, GEO_HIGHLIGHT_HOVER, 0.0).with_rotation(flat),
-            ));
-        });
-    }
-
-    // Drop highlights whose parent vent got claimed mid-placement so
-    // committed sites stop pulsing.
-    let unclaimed: std::collections::HashSet<Entity> = vents.iter().map(|(e, _)| e).collect();
-    for (highlight, parent) in &highlights {
-        if !unclaimed.contains(&parent.parent()) {
-            commands.entity(highlight).despawn();
-        }
-    }
-
-    // Square-wave blink at 1.25 Hz: visible during the first half of
-    // every 0.8 s window, hidden during the second.
-    let phase = time.elapsed_secs() % GEO_PULSE_PERIOD;
-    let visible = phase < GEO_PULSE_PERIOD * 0.5;
-    let target = if visible {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut vis in &mut highlight_vis {
-        if *vis != target {
-            *vis = target;
-        }
-    }
-}
-
-/// Commit on left-click (if snapped), cancel on right-click or Escape.
-/// Consumed clicks are cleared from `ButtonInput` so the selection system
-/// doesn't also see them as a selection / deselect action.
-///
-/// On commit we also stamp `VentClaim` onto the target datavent so a
-/// concurrent constructor placing during the same frame can't end up
-/// building a second structure on the same spot. The claim is released
-/// by `release_stale_vent_claims` once neither the builder nor a
-/// finished building occupies the site.
-#[allow(clippy::too_many_arguments)]
-fn commit_or_cancel_placement(
-    mut mode: ResMut<PlacementMode>,
+    mut placement: ResMut<PlacementMode>,
+    state: Res<PlacementGhost>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
+    builders: Query<(Entity, &UnitType), With<Selected>>,
     move_target_q: Query<(), With<MoveTarget>>,
     vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
-    mut commands: Commands,
 ) {
-    let Some(active) = mode.active.as_ref() else {
+    if placement.kind.is_none() {
         return;
-    };
+    }
 
     if mouse.just_pressed(MouseButton::Right) {
         mouse.clear_just_pressed(MouseButton::Right);
-        commands.entity(active.ghost).despawn();
-        mode.active = None;
+        placement.kind = None;
         return;
     }
     if keys.just_pressed(KeyCode::Escape) {
         keys.clear_just_pressed(KeyCode::Escape);
-        commands.entity(active.ghost).despawn();
-        mode.active = None;
+        placement.kind = None;
         return;
     }
 
-    if mouse.just_pressed(MouseButton::Left) {
-        if let Some(site) = active.snapped {
-            let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-            apply_ordered_command(
-                active.builder,
-                QueuedCommand::BuildAt {
-                    kind: active.kind,
-                    site,
-                },
-                shift,
-                &move_target_q,
-                &mut commands,
-            );
-            // Stamp the claim onto the specific vent at this site. Uses
-            // a tiny exact-ish equality (1 elmo) because `site` came from
-            // the snap step, which just copied `vent.pos`.
-            for (vent_entity, vent) in &vents {
-                if vent.pos.distance_squared(site) < 1.0 {
-                    commands.entity(vent_entity).insert(VentClaim);
-                    break;
-                }
-            }
-            commands.entity(active.ghost).despawn();
-            mode.active = None;
-        }
-        // Either we committed or the click was on invalid ground; either
-        // way we consume it so the selection system doesn't reinterpret
-        // it as a click-to-select on a unit under the cursor.
-        mouse.clear_just_pressed(MouseButton::Left);
+    if !mouse.just_pressed(MouseButton::Left) {
+        return;
     }
+
+    let Some(kind) = placement.kind else {
+        return;
+    };
+    let Some(site) = state.snapped else {
+        // Click on invalid site: still consume so it doesn't bleed into
+        // selection (would deselect the constructor mid-placement).
+        mouse.clear_just_pressed(MouseButton::Left);
+        return;
+    };
+
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+
+    let mut any_dispatched = false;
+    for (entity, ut) in &builders {
+        if !ut.0.is_constructor() {
+            continue;
+        }
+        apply_ordered_command(
+            entity,
+            QueuedCommand::BuildAt { kind, site },
+            shift,
+            &move_target_q,
+            &mut commands,
+        );
+        any_dispatched = true;
+    }
+
+    if any_dispatched {
+        // Stamp the claim so a second constructor can't queue onto the
+        // same vent during this frame.
+        for (vent_entity, vent) in &vents {
+            if vent.pos.distance_squared(site) < 1.0 {
+                commands.entity(vent_entity).insert(VentClaim);
+                break;
+            }
+        }
+    }
+
+    if !shift {
+        placement.kind = None;
+    }
+    mouse.clear_just_pressed(MouseButton::Left);
 }

@@ -16,7 +16,8 @@
 
 use bevy::prelude::*;
 
-use super::spawning::{SelectionVolumeMaterial, spawn_unit};
+use super::production::PendingFadeInstall;
+use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SelectionVolumeMaterial, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::animation::CobFileCache;
 use crate::units::assets::meshes::S3OModelCache;
@@ -44,10 +45,18 @@ pub struct Constructing {
     pub site: Vec3,
     /// Seconds accumulated toward finishing.
     pub progress: f32,
+    /// The slowly-rising building entity that the constructor is welding
+    /// into existence. Populated on the first `tick_construction` frame
+    /// after `start_construction` flips the constructor into this state
+    /// — the building's [`Emerging`] runs for `build_time` seconds so
+    /// the visible mesh rises throughout the entire build.
+    pub building: Option<Entity>,
 }
 
 /// Buildings the constructor `kind` can erect on a datavent. Pulled from
-/// upstream `[CANBUILD]` in `SIDEDATA.TDF`.
+/// upstream `[CANBUILD]` in `SIDEDATA.TDF`. The build menu (currently
+/// removed pending a rewrite) was the sole caller.
+#[allow(dead_code)]
 pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
     match kind {
         UnitKind::Assembler => &[
@@ -105,6 +114,7 @@ pub fn start_construction(
                     kind: pending.kind,
                     site: pending.site,
                     progress: 0.0,
+                    building: None,
                 })
                 .remove::<MoveTarget>()
                 .remove::<MovePath>()
@@ -147,6 +157,58 @@ pub fn tick_construction(
 
     for (entity, gtf, mut transform, faction, team, mut constructing) in &mut builders {
         constructing.progress += dt;
+        let build_time = unit_registry.build_time(constructing.kind);
+
+        // First tick of construction: spawn the building so it can
+        // visibly rise/fade throughout the entire build. Skip if
+        // build_time is degenerate (would otherwise produce a frozen
+        // emerge with `total = 0` that divides by zero downstream).
+        if constructing.building.is_none() && build_time > 0.0 {
+            let style = match faction {
+                Faction::System => EmergeStyle::Rise,
+                Faction::Hacker | Faction::Network => EmergeStyle::Fade,
+            };
+            let target_y = constructing.site.y;
+            let spawn_pos = match style {
+                EmergeStyle::Rise => Vec3::new(
+                    constructing.site.x,
+                    target_y - EMERGE_DEPTH,
+                    constructing.site.z,
+                ),
+                EmergeStyle::Fade => constructing.site,
+            };
+            let new_entity = spawn_unit(
+                constructing.kind,
+                *faction,
+                team.0,
+                spawn_pos,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &mut cob_cache,
+                &invisible_mat_clone,
+                &unit_registry,
+            );
+            // Emerging runs for the full build_time so the rise/fade
+            // tracks the build progress 1:1 — both decay at `dt` per
+            // frame. `EMERGE_LEAD_TIME` is the *factory* convention
+            // (last 1.5 s of a build) and is deliberately not used
+            // here; mobile-constructor builds want the slower visual.
+            commands.entity(new_entity).insert(Emerging {
+                target_y,
+                remaining: build_time,
+                total: build_time,
+                rally_point: None,
+                style,
+                last_build_percent: -1,
+            });
+            if matches!(style, EmergeStyle::Fade) {
+                commands.entity(new_entity).insert(PendingFadeInstall);
+            }
+            constructing.building = Some(new_entity);
+        }
 
         // Pin the builder's yaw to face the build site so the beam leaves
         // the muzzle piece forward rather than out of the unit's hip —
@@ -166,29 +228,17 @@ pub fn tick_construction(
             attacker_pos: start,
             target_pos: constructing.site,
             weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
-            // Builder BuildLaser also skips the muzzle flash CEG — see
-            // the same-named call site in production.rs.
+            // Builder BuildLaser skips the muzzle flash CEG — same
+            // reason as the factory call site.
             muzzle_ceg: None,
             delayed_hit: None,
         });
 
-        let build_time = unit_registry.build_time(constructing.kind);
         if build_time > 0.0 && constructing.progress >= build_time {
-            // Spawn the structure at the datavent.
-            spawn_unit(
-                constructing.kind,
-                *faction,
-                team.0,
-                constructing.site,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut model_cache,
-                &mut cob_cache,
-                &invisible_mat_clone,
-                &unit_registry,
-            );
+            // The building's `Emerging` was started with
+            // `total = build_time`, so its rise/fade finishes naturally
+            // alongside this constructor's progress. Just clear the
+            // construction marker; the building stands on its own.
             commands.entity(entity).remove::<Constructing>();
         }
     }

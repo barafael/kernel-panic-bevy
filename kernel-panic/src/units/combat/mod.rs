@@ -414,8 +414,9 @@ pub fn combat_system(
         };
         let target_pitch = direct_pitch + arc_pitch;
 
-        // Gunbase pitch gate (Pointer). `target_x = π/2 - pitch`
-        // matches pointer.bos's `(<-90>-p)` convention.
+        // Gunbase pitch gate (Pointer). pointer.bos's `AimWeapon1`
+        // writes `turn gunbase to x-axis (<90>-p)`; cobwtf passes X
+        // through unchanged, so `piece_rotations[gunbase][0] == π/2 - p`.
         if let Ok(gb) = pieces.gunbase.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
             && let Some(rot) = animator.piece_rotations.get(gb.0)

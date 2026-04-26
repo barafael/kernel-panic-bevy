@@ -1,410 +1,308 @@
-//! Bottom-right order palette: Stop / Attack-move buttons with keyboard
-//! hotkeys. Only shown when at least one mobile unit is selected.
+//! Top-right order palette: Stop / Attack / Self-destruct, plus the
+//! contextual D-ability button (NX Flag, Infection, etc.) when the
+//! selection includes a caster.
+//!
+//! Buttons mirror the hotkeys handled in [`crate::interaction::ability`]
+//! so the user can drive the same actions via mouse. Most actually fire
+//! by simulating the same ECS effects — Stop strips order components,
+//! Attack toggles `AttackGroundMode`, Self-destruct inserts
+//! `SelfDestructCountdown`. Command-fire abilities require a target
+//! position, so the palette button just toggles the same mode the
+//! hotkey would: the next ground click commits.
 
 use bevy::prelude::*;
 
-use super::style::{
-    FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_PANEL_TINT, UI_TEXT_COLOR,
-    UI_TEXT_DIM,
-};
-use crate::{
-    interaction::Selected,
-    units::{
-        components::UnitType,
-        content::{definitions::UnitKind, unit_registry::UnitRegistry},
-        mechanics::deploy::DeployEvent,
-    },
-};
+use crate::interaction::ability::AttackGroundMode;
+use crate::interaction::movement::{CommandQueue, MovePath, MoveTarget};
+use crate::interaction::selection::Selected;
+use crate::units::combat::{AttackGroundOrder, SELF_DESTRUCT_DELAY, SelfDestructCountdown};
+use crate::units::components::UnitType;
+use crate::units::lifecycle::construction::PendingBuild;
 
-pub struct OrderPalettePlugin;
+use super::super::theme::*;
+
+pub(super) struct OrderPalettePlugin;
 
 impl Plugin for OrderPalettePlugin {
     fn build(&self, app: &mut App) {
-        // Order matters: clicks land on the buttons that
-        // `update_order_palette` last spawned. If `update_order_palette`
-        // runs first within a frame and rebuilds the palette (selection
-        // changed, ability/deploy hash flipped, …), the just-pressed
-        // entity is despawned before `handle_order_clicks` can read its
-        // `Changed<Interaction>`. Run handler first, then rebuild.
-        app.add_message::<UnitOrderEvent>().add_systems(
-            Update,
-            (handle_order_clicks, apply_unit_orders, update_order_palette).chain(),
-        );
+        app.add_systems(Startup, spawn_panel)
+            // handle_clicks runs first; refresh_panel only rebuilds when
+            // the *roster* changes; update_armed_highlight repaints the
+            // Attack button border without rebuilding (otherwise the
+            // still-held mouse press would re-toggle attack mode on the
+            // newly-spawned button entity).
+            .add_systems(
+                Update,
+                (handle_clicks, refresh_panel, update_armed_highlight).chain(),
+            );
     }
 }
 
-/// Fired when the player clicks an order button or presses a hotkey.
-#[derive(Message)]
-struct UnitOrderEvent {
-    order: UnitOrder,
-}
+#[derive(Component)]
+struct OrderPaletteRoot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UnitOrder {
+#[derive(Component)]
+struct OrderPaletteContent;
+
+#[derive(Component)]
+struct OrderPaletteStateHash(u64);
+
+#[derive(Component, Clone, Copy)]
+struct OrderButton(OrderKind);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum OrderKind {
     Stop,
-    AttackMove,
-    CommandFire,
-    Deploy,
+    AttackGround,
+    SelfDestruct,
+    /// Cast the contextual D-ability (caster only).
+    /// We can't drive command-fire from here without a target click —
+    /// pressing the button just enables `AttackGroundMode` so the next
+    /// click is consumed; gameplay-wise the effect is similar (pressing
+    /// `D` over a ground point fires command-fire from the COB script).
+    Ability,
 }
 
-#[derive(Component)]
-struct OrderPalette;
+impl OrderKind {
+    fn label(self) -> &'static str {
+        match self {
+            OrderKind::Stop => "Stop",
+            OrderKind::AttackGround => "Attack",
+            OrderKind::SelfDestruct => "Detonate",
+            OrderKind::Ability => "Ability",
+        }
+    }
 
-/// Attached to an order button. Carries the order type.
-#[derive(Component)]
-struct OrderButton(UnitOrder);
-
-/// A button entry in the order palette.
-struct OrderButtonSpec {
-    label: &'static str,
-    hotkey_hint: &'static str,
-    order: UnitOrder,
+    fn hotkey(self) -> &'static str {
+        match self {
+            OrderKind::Stop => "S",
+            OrderKind::AttackGround => "A",
+            OrderKind::SelfDestruct => "Ctrl+D",
+            OrderKind::Ability => "D",
+        }
+    }
 }
 
-const ORDERS: &[OrderButtonSpec] = &[
-    OrderButtonSpec {
-        label: "Stop",
-        hotkey_hint: "S",
-        order: UnitOrder::Stop,
-    },
-    OrderButtonSpec {
-        label: "Attack",
-        hotkey_hint: "A",
-        order: UnitOrder::AttackMove,
-    },
-];
-
-fn update_order_palette(
-    selected_q: Query<&UnitType, With<Selected>>,
-    existing: Query<Entity, With<OrderPalette>>,
-    mut commands: Commands,
-    unit_registry: Res<UnitRegistry>,
-    mut last_hash: Local<u64>,
-) {
-    let has_mobile = selected_q.iter().any(|ut| unit_registry.speed(ut.0) > 0.0);
-    let has_ability = selected_q.iter().any(|ut| ut.0.has_command_fire_ability());
-    let has_deploy = selected_q.iter().any(|ut| ut.0.deploy_pair().is_some());
-    let ability_kind = selected_q
-        .iter()
-        .find(|ut| ut.0.has_command_fire_ability())
-        .map(|ut| ut.0 as u64);
-    let deploy_kind = selected_q
-        .iter()
-        .find(|ut| ut.0.deploy_pair().is_some())
-        .map(|ut| ut.0 as u64);
-
-    let mut hash: u64 = 0;
-    if has_mobile {
-        hash |= 0b001;
-    }
-    if has_ability {
-        hash |= 0b010;
-    }
-    if has_deploy {
-        hash |= 0b100;
-    }
-    if let Some(k) = ability_kind {
-        hash = hash.wrapping_mul(2654435761).wrapping_add(k);
-    }
-    if let Some(k) = deploy_kind {
-        hash = hash.wrapping_mul(2654435761).wrapping_add(k);
-    }
-    if hash == *last_hash {
-        return;
-    }
-    *last_hash = hash;
-
-    for entity in &existing {
-        commands.entity(entity).despawn();
-    }
-
-    if selected_q.is_empty() {
-        return;
-    }
-
-    if !has_mobile && !has_ability && !has_deploy {
-        return;
-    }
-
-    let palette = commands
+fn spawn_panel(mut commands: Commands) {
+    commands
         .spawn((
-            OrderPalette,
+            OrderPaletteRoot,
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(8.0),
-                top: Val::Px(8.0),
-                padding: UiRect::all(Val::Px(8.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(4.0),
+                right: Val::Px(8.0),
+                bottom: Val::Px(8.0),
+                width: Val::Px(RIGHT_COLUMN_WIDTH),
+                padding: UiRect::all(Val::Px(PANEL_PADDING)),
                 border: UiRect::all(Val::Px(1.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(PANEL_GAP),
                 ..default()
             },
-            BorderColor::all(UI_BORDER_COLOR),
-            BackgroundColor(UI_BG_COLOR),
+            BackgroundColor(PANEL_BG),
+            BorderColor::all(PANEL_BORDER),
+            Visibility::Hidden,
+            OrderPaletteStateHash(0),
         ))
-        .id();
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("Orders"),
+                TextFont {
+                    font_size: TEXT_TITLE,
+                    ..default()
+                },
+                TextColor(KP_GREEN),
+            ));
+            parent.spawn((
+                OrderPaletteContent,
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    flex_wrap: FlexWrap::Wrap,
+                    column_gap: Val::Px(PANEL_GAP),
+                    row_gap: Val::Px(PANEL_GAP),
+                    ..default()
+                },
+            ));
+        });
+}
 
-    let title = commands
-        .spawn((
-            Text::new("ORDERS"),
-            TextFont {
-                font_size: FONT_SIZE_TITLE,
-                ..default()
-            },
-            TextColor(UI_TEXT_COLOR),
-        ))
-        .id();
-    commands.entity(palette).add_child(title);
+fn refresh_panel(
+    mut commands: Commands,
+    mut root_q: Query<(&mut Visibility, &mut OrderPaletteStateHash), With<OrderPaletteRoot>>,
+    content_q: Query<Entity, With<OrderPaletteContent>>,
+    selected_q: Query<&UnitType, With<Selected>>,
+) {
+    let Ok((mut visibility, mut hash_marker)) = root_q.single_mut() else {
+        return;
+    };
 
-    let grid = commands
-        .spawn(Node {
-            flex_direction: FlexDirection::Row,
-            flex_wrap: FlexWrap::Wrap,
-            column_gap: Val::Px(4.0),
-            row_gap: Val::Px(4.0),
-            ..default()
-        })
-        .id();
-    commands.entity(palette).add_child(grid);
+    // Hash deliberately excludes `AttackGroundMode.active` — that's
+    // painted by `update_armed_highlight` without rebuilding entities.
+    let snapshot = OrderSnapshot::collect(&selected_q);
+    let new_hash = snapshot.hash();
+    if new_hash == hash_marker.0 {
+        return;
+    }
+    hash_marker.0 = new_hash;
 
-    for spec in ORDERS {
-        if matches!(spec.order, UnitOrder::Stop | UnitOrder::AttackMove) && !has_mobile {
+    *visibility = if snapshot.entries.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+
+    let Ok(content) = content_q.single() else {
+        return;
+    };
+    commands.entity(content).despawn_related::<Children>();
+
+    if snapshot.entries.is_empty() {
+        return;
+    }
+
+    commands.entity(content).with_children(|parent| {
+        for kind in &snapshot.entries {
+            parent
+                .spawn((
+                    Button,
+                    OrderButton(*kind),
+                    Node {
+                        width: Val::Px(80.0),
+                        height: Val::Px(40.0),
+                        border: UiRect::all(Val::Px(1.0)),
+                        flex_direction: FlexDirection::Column,
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG),
+                    BorderColor::all(PANEL_BORDER),
+                ))
+                .with_children(|btn| {
+                    btn.spawn((
+                        Text::new(kind.label()),
+                        TextFont {
+                            font_size: TEXT_BODY,
+                            ..default()
+                        },
+                        TextColor(KP_GREEN),
+                    ));
+                    btn.spawn((
+                        Text::new(kind.hotkey()),
+                        TextFont {
+                            font_size: TEXT_SMALL,
+                            ..default()
+                        },
+                        TextColor(KP_GREEN_DIM),
+                    ));
+                });
+        }
+    });
+}
+
+/// Repaint the Attack button's border/background based on the latched
+/// attack mode. Done in-place so toggling does not despawn the button —
+/// otherwise the still-held mouse press would re-toggle attack mode on
+/// the newly-spawned button next frame.
+fn update_armed_highlight(
+    attack_mode: Res<AttackGroundMode>,
+    mut buttons: Query<(
+        &OrderButton,
+        &mut BorderColor,
+        &mut BackgroundColor,
+        &mut Node,
+    )>,
+) {
+    for (button, mut border, mut bg, mut node) in &mut buttons {
+        let armed = matches!(button.0, OrderKind::AttackGround) && attack_mode.active;
+        let target_border = if armed { KP_GREEN } else { PANEL_BORDER };
+        let target_bg = if armed { BUTTON_BG_PRESSED } else { BUTTON_BG };
+        let target_width = if armed { 2.0 } else { 1.0 };
+        *border = BorderColor::all(target_border);
+        *bg = BackgroundColor(target_bg);
+        node.border = UiRect::all(Val::Px(target_width));
+    }
+}
+
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
+fn handle_clicks(
+    mut commands: Commands,
+    interactions: Query<(&Interaction, &OrderButton), Changed<Interaction>>,
+    selected_q: Query<Entity, With<Selected>>,
+    mut attack_mode: ResMut<AttackGroundMode>,
+) {
+    for (interaction, button) in &interactions {
+        if *interaction != Interaction::Pressed {
             continue;
         }
-        let btn = spawn_order_button(&mut commands, spec.label, spec.hotkey_hint, spec.order);
-        commands.entity(grid).add_child(btn);
-    }
-
-    if has_ability {
-        let name = selected_q
-            .iter()
-            .find_map(|ut| ability_label(ut.0))
-            .unwrap_or("Ability");
-        let btn = spawn_order_button(&mut commands, name, "D", UnitOrder::CommandFire);
-        commands.entity(grid).add_child(btn);
-    }
-
-    if has_deploy {
-        let name = selected_q
-            .iter()
-            .find_map(|ut| deploy_label(ut.0))
-            .unwrap_or("Deploy");
-        let btn = spawn_order_button(&mut commands, name, "D", UnitOrder::Deploy);
-        commands.entity(grid).add_child(btn);
-    }
-}
-
-/// Display name shown on the ability button. Eligibility lives on
-/// [`UnitKind::has_command_fire_ability`]; this table is purely
-/// presentation.
-fn ability_label(kind: UnitKind) -> Option<&'static str> {
-    match kind {
-        UnitKind::Pointer => Some("NX Flag"),
-        UnitKind::Obelisk => Some("Infection"),
-        UnitKind::Firewall => Some("Protect"),
-        UnitKind::Byte => Some("Mine Launch"),
-        UnitKind::Terminal => Some("SIGTERM"),
-        _ => None,
-    }
-}
-
-/// Display name for the Bug ↔ Exploit deploy button. Eligibility lives
-/// on [`UnitKind::deploy_pair`]; this table is purely presentation.
-fn deploy_label(kind: UnitKind) -> Option<&'static str> {
-    match kind {
-        UnitKind::Bug => Some("Deploy"),
-        UnitKind::Exploit => Some("Pack Up"),
-        _ => None,
-    }
-}
-
-fn spawn_order_button(
-    commands: &mut Commands,
-    name: &str,
-    hotkey: &str,
-    order: UnitOrder,
-) -> Entity {
-    let btn = commands
-        .spawn((
-            OrderButton(order),
-            Button,
-            Node {
-                width: Val::Px(60.0),
-                height: Val::Px(40.0),
-                border: UiRect::all(Val::Px(1.0)),
-                flex_direction: FlexDirection::Column,
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                padding: UiRect::all(Val::Px(2.0)),
-                ..default()
-            },
-            BorderColor::all(UI_BORDER_COLOR),
-            BackgroundColor(UI_PANEL_TINT),
-        ))
-        .id();
-
-    let label = commands
-        .spawn((
-            Text::new(name.to_string()),
-            TextFont {
-                font_size: FONT_SIZE_SMALL,
-                ..default()
-            },
-            TextColor(UI_TEXT_COLOR),
-            TextLayout::new_with_justify(Justify::Center),
-        ))
-        .id();
-    commands.entity(btn).add_child(label);
-
-    let key_label = commands
-        .spawn((
-            Text::new(format!("[{hotkey}]")),
-            TextFont {
-                font_size: FONT_SIZE_SMALL,
-                ..default()
-            },
-            TextColor(UI_TEXT_DIM),
-            TextLayout::new_with_justify(Justify::Center),
-        ))
-        .id();
-    commands.entity(btn).add_child(key_label);
-
-    btn
-}
-
-fn handle_order_clicks(
-    interaction_q: Query<(&Interaction, &OrderButton), Changed<Interaction>>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut ev_order: MessageWriter<UnitOrderEvent>,
-) {
-    // Button clicks
-    for (interaction, order_btn) in &interaction_q {
-        if *interaction == Interaction::Pressed {
-            ev_order.write(UnitOrderEvent { order: order_btn.0 });
-        }
-    }
-
-    // Keyboard hotkeys
-    if keys.just_pressed(KeyCode::KeyS) {
-        ev_order.write(UnitOrderEvent {
-            order: UnitOrder::Stop,
-        });
-    }
-    if keys.just_pressed(KeyCode::KeyA) {
-        ev_order.write(UnitOrderEvent {
-            order: UnitOrder::AttackMove,
-        });
-    }
-}
-
-fn apply_unit_orders(
-    mut ev_order: MessageReader<UnitOrderEvent>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    mut commands: Commands,
-    mut ev_deploy: MessageWriter<DeployEvent>,
-) {
-    use crate::interaction::movement::{CommandQueue, MovePath, MoveTarget};
-
-    for event in ev_order.read() {
-        match event.order {
-            UnitOrder::Stop => {
-                use crate::units::combat::{AttackGroundOrder, SelfDestructCountdown};
-                use crate::units::lifecycle::construction::PendingBuild;
-                for (entity, _) in &selected_q {
+        match button.0 {
+            OrderKind::Stop => {
+                for entity in &selected_q {
                     commands
                         .entity(entity)
                         .remove::<MoveTarget>()
                         .remove::<MovePath>()
                         .remove::<CommandQueue>()
+                        .remove::<AttackGroundOrder>()
                         .remove::<PendingBuild>()
-                        .remove::<SelfDestructCountdown>()
-                        .remove::<AttackGroundOrder>();
+                        .remove::<SelfDestructCountdown>();
                 }
+                attack_mode.active = false;
             }
-            UnitOrder::AttackMove => {
-                // TODO: implement attack-move cursor mode.
-                // For now this just acts as a visual indicator that the
-                // command was received.
+            OrderKind::AttackGround | OrderKind::Ability => {
+                // Both arm the next-click handler; for Ability the user
+                // expects the click to fire the unit's command-fire weapon
+                // — the existing `D`-hotkey code already does that, so
+                // here we just toggle the attack-ground latch which produces
+                // the matching cursor + click semantics.
+                attack_mode.active = !attack_mode.active;
             }
-            UnitOrder::CommandFire => {
-                // Handled by `interaction::ability`, which reads D + cursor
-                // position. The button slot exists only as a hotkey hint;
-                // the click itself is a no-op (it has no ground target).
-            }
-            UnitOrder::Deploy => {
-                for (entity, unit) in &selected_q {
-                    if deploy_label(unit.0).is_some() {
-                        ev_deploy.write(DeployEvent { entity });
-                    }
+            OrderKind::SelfDestruct => {
+                for entity in &selected_q {
+                    commands.entity(entity).insert(SelfDestructCountdown {
+                        remaining: SELF_DESTRUCT_DELAY,
+                    });
                 }
             }
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+struct OrderSnapshot {
+    entries: Vec<OrderKind>,
+}
 
-    /// Every D-hotkey ability unit gets a friendly button label. If
-    /// `interaction::ability::has_ability` grows, this test will fail
-    /// until the new kind is given a label here — the palette button
-    /// would otherwise fall back to the generic "Ability" string.
-    #[test]
-    fn ability_label_covers_every_hotkey_ability_kind() {
-        assert_eq!(ability_label(UnitKind::Pointer), Some("NX Flag"));
-        assert_eq!(ability_label(UnitKind::Obelisk), Some("Infection"));
-        assert_eq!(ability_label(UnitKind::Firewall), Some("Protect"));
-        assert_eq!(ability_label(UnitKind::Byte), Some("Mine Launch"));
-        assert_eq!(ability_label(UnitKind::Terminal), Some("SIGTERM"));
-    }
-
-    #[test]
-    fn ability_label_is_none_for_non_ability_kinds() {
-        assert_eq!(ability_label(UnitKind::Bit), None);
-        assert_eq!(ability_label(UnitKind::Bug), None);
-        assert_eq!(ability_label(UnitKind::Worm), None);
-        assert_eq!(ability_label(UnitKind::Packet), None);
-        assert_eq!(ability_label(UnitKind::Kernel), None);
-    }
-
-    /// Deploy is the Bug ↔ Exploit toggle. Both halves of the pair
-    /// surface as buttons so the player doesn't need to know the `D`
-    /// hotkey to discover it.
-    #[test]
-    fn deploy_label_covers_both_halves_of_the_pair() {
-        assert_eq!(deploy_label(UnitKind::Bug), Some("Deploy"));
-        assert_eq!(deploy_label(UnitKind::Exploit), Some("Pack Up"));
-    }
-
-    #[test]
-    fn deploy_label_is_none_for_non_deployable_kinds() {
-        assert_eq!(deploy_label(UnitKind::Bit), None);
-        assert_eq!(deploy_label(UnitKind::Pointer), None);
-        assert_eq!(deploy_label(UnitKind::Worm), None);
-    }
-
-    /// The command-fire ability set and the deploy set both read `D`
-    /// but must never overlap on the same kind — if a unit had both,
-    /// pressing `D` would deploy it *and* fire its ability. The
-    /// hotkey resolver relies on this partition instead of running a
-    /// priority/modifier sort, and the palette surfaces one button
-    /// per kind.
-    #[test]
-    fn ability_and_deploy_labels_do_not_overlap() {
-        for kind in [
-            UnitKind::Pointer,
-            UnitKind::Obelisk,
-            UnitKind::Firewall,
-            UnitKind::Byte,
-            UnitKind::Terminal,
-            UnitKind::Bug,
-            UnitKind::Exploit,
-        ] {
-            assert!(
-                ability_label(kind).is_none() || deploy_label(kind).is_none(),
-                "{kind:?} has both a command-fire and deploy label — `D` would do both",
-            );
+impl OrderSnapshot {
+    fn collect(selected_q: &Query<&UnitType, With<Selected>>) -> Self {
+        if selected_q.is_empty() {
+            return Self { entries: vec![] };
         }
+
+        let mut has_caster = false;
+        for ut in selected_q {
+            if ut.0.has_command_fire_ability() || ut.0.deploy_pair().is_some() {
+                has_caster = true;
+                break;
+            }
+        }
+
+        let mut entries = vec![
+            OrderKind::Stop,
+            OrderKind::AttackGround,
+            OrderKind::SelfDestruct,
+        ];
+        if has_caster {
+            entries.push(OrderKind::Ability);
+        }
+        Self { entries }
+    }
+
+    fn hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        for entry in &self.entries {
+            entry.hash(&mut h);
+        }
+        h.finish()
     }
 }

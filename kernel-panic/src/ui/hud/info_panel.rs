@@ -1,268 +1,321 @@
-//! Bottom-left info panel: shows HP, weapon, and speed for the current
-//! selection. Switches to a multi-unit summary when more than one unit is
-//! selected.
+//! Bottom-left info panel. Single selection: name, HP bar, weapon, speed.
+//! Multi selection: per-kind tally.
 
 use bevy::prelude::*;
 
-use super::style::{
-    FONT_SIZE_BODY, FONT_SIZE_SMALL, FONT_SIZE_TITLE, UI_BG_COLOR, UI_BORDER_COLOR, UI_ROW_BG,
-    UI_TEXT_COLOR, UI_TEXT_DIM,
-};
-use crate::interaction::Selected;
+use crate::interaction::selection::Selected;
 use crate::units::components::{Faction, Health, UnitType, health_color};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 
-pub struct InfoPanelPlugin;
+use super::super::theme::*;
+
+pub(super) struct InfoPanelPlugin;
 
 impl Plugin for InfoPanelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update_info_panel);
+        app.add_systems(Startup, spawn_panel)
+            .add_systems(Update, refresh_panel);
     }
 }
 
 #[derive(Component)]
-struct InfoPanel;
+struct InfoPanelRoot;
 
-/// Snapshot of the state the info panel renders. Rebuilding the panel
-/// every frame was pointless — the panel only changes when the selection
-/// or HP of a selected unit changes. Hashing is cheap compared to
-/// despawning + respawning ~10 UI entities per frame.
-fn update_info_panel(
-    selected_q: Query<(&UnitType, &Health, &Faction), With<Selected>>,
-    existing: Query<Entity, With<InfoPanel>>,
-    mut commands: Commands,
-    unit_registry: Res<UnitRegistry>,
-    mut last_hash: Local<u64>,
-) {
-    let selected: Vec<_> = selected_q.iter().collect();
+#[derive(Component)]
+struct InfoPanelContent;
 
-    let mut hash: u64 = selected.len() as u64;
-    for (unit_type, health, _) in &selected {
-        hash = hash
-            .wrapping_mul(1315423911)
-            .wrapping_add(unit_type.0 as u64);
-        // HP changes frame-to-frame while the unit heals or bleeds, but
-        // the panel only shows rounded integers — bucket on those.
-        hash = hash
-            .wrapping_mul(1315423911)
-            .wrapping_add(health.current.round() as i64 as u64);
-        hash = hash
-            .wrapping_mul(1315423911)
-            .wrapping_add(health.max.round() as i64 as u64);
-    }
-    if hash == *last_hash {
-        return;
-    }
-    *last_hash = hash;
+#[derive(Component)]
+struct InfoPanelStateHash(u64);
 
-    for entity in &existing {
-        commands.entity(entity).despawn();
-    }
-
-    if selected.is_empty() {
-        return;
-    }
-
-    let panel = commands
-        .spawn((
-            InfoPanel,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                bottom: Val::Px(0.0),
-                width: Val::Px(220.0),
-                padding: UiRect {
-                    left: Val::Px(8.0),
-                    top: Val::Px(8.0),
-                    right: Val::Px(8.0),
-                    bottom: Val::Px(0.0),
-                },
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(4.0),
-                border: UiRect {
-                    left: Val::Px(0.0),
-                    top: Val::Px(1.0),
-                    right: Val::Px(1.0),
-                    bottom: Val::Px(0.0),
-                },
-                ..default()
-            },
-            BorderColor::all(UI_BORDER_COLOR),
-            BackgroundColor(UI_BG_COLOR),
-        ))
-        .id();
-
-    if selected.len() == 1 {
-        let (unit_type, health, faction) = selected[0];
-        spawn_single_unit_info(
-            &mut commands,
-            panel,
-            unit_type.0,
-            health,
-            faction,
-            &unit_registry,
-        );
-    } else {
-        spawn_multi_unit_info(&mut commands, panel, &selected, &unit_registry);
-    }
-}
-
-fn spawn_single_unit_info(
-    commands: &mut Commands,
-    parent: Entity,
-    kind: UnitKind,
-    health: &Health,
-    faction: &Faction,
-    unit_registry: &UnitRegistry,
-) {
-    // Unit name
-    let name_node = commands
-        .spawn((
-            Text::new(unit_registry.name(kind)),
-            TextFont {
-                font_size: FONT_SIZE_TITLE,
-                ..default()
-            },
-            TextColor(faction.color()),
-        ))
-        .id();
-    commands.entity(parent).add_child(name_node);
-
-    // Health bar
-    let health_fraction = health.fraction();
-    let bar_color = health_color(health_fraction);
-
-    let bar_container = commands
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(10.0),
-            ..default()
-        })
-        .id();
-
-    let bar_bg = commands
-        .spawn((
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            BackgroundColor(UI_ROW_BG),
-        ))
-        .id();
-
-    let bar_fg = commands
-        .spawn((
-            Node {
-                width: Val::Percent(health_fraction * 100.0),
-                height: Val::Percent(100.0),
-                position_type: PositionType::Absolute,
-                ..default()
-            },
-            BackgroundColor(bar_color),
-        ))
-        .id();
-
+fn spawn_panel(mut commands: Commands) {
     commands
-        .entity(bar_container)
-        .add_children(&[bar_bg, bar_fg]);
-    commands.entity(parent).add_child(bar_container);
-
-    // HP text
-    let hp_text = format!("{:.0} / {:.0}", health.current, health.max);
-    let hp_node = commands
         .spawn((
-            Text::new(hp_text),
-            TextFont {
-                font_size: FONT_SIZE_SMALL,
+            InfoPanelRoot,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(8.0),
+                bottom: Val::Px(8.0),
+                width: Val::Px(LEFT_COLUMN_WIDTH),
+                padding: UiRect::all(Val::Px(PANEL_PADDING)),
+                border: UiRect::all(Val::Px(1.0)),
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(PANEL_GAP),
                 ..default()
             },
-            TextColor(UI_TEXT_DIM),
+            BackgroundColor(PANEL_BG),
+            BorderColor::all(PANEL_BORDER),
+            Visibility::Hidden,
+            InfoPanelStateHash(0),
         ))
-        .id();
-    commands.entity(parent).add_child(hp_node);
-
-    // Weapon info
-    let weapon_name = unit_registry.weapon(kind);
-    if !weapon_name.is_empty() {
-        let weapon_text = format!("WPN {weapon_name}");
-        let weapon_node = commands
-            .spawn((
-                Text::new(weapon_text),
-                TextFont {
-                    font_size: FONT_SIZE_BODY,
+        .with_children(|parent| {
+            parent.spawn((
+                InfoPanelContent,
+                Node {
+                    flex_direction: FlexDirection::Column,
+                    row_gap: Val::Px(PANEL_GAP),
                     ..default()
                 },
-                TextColor(UI_TEXT_COLOR),
-            ))
-            .id();
-        commands.entity(parent).add_child(weapon_node);
+            ));
+        });
+}
+
+#[allow(clippy::type_complexity)]
+fn refresh_panel(
+    mut commands: Commands,
+    mut root_q: Query<(Entity, &mut Visibility, &mut InfoPanelStateHash), With<InfoPanelRoot>>,
+    content_q: Query<Entity, With<InfoPanelContent>>,
+    selected_q: Query<(&UnitType, Option<&Faction>, Option<&Health>), With<Selected>>,
+    registry: Res<UnitRegistry>,
+) {
+    let Ok((root, mut visibility, mut hash_marker)) = root_q.single_mut() else {
+        return;
+    };
+
+    // Build a stable signature of what we'd render — only rebuild when it
+    // changes. This keeps Text node reuse idiomatic and avoids per-frame
+    // despawn churn that would otherwise reflow the layout.
+    let snapshot = collect_snapshot(&selected_q);
+    let new_hash = snapshot.hash();
+    if new_hash == hash_marker.0 {
+        return;
+    }
+    hash_marker.0 = new_hash;
+
+    let Ok(content) = content_q.single() else {
+        return;
+    };
+
+    *visibility = if snapshot.is_empty() {
+        Visibility::Hidden
+    } else {
+        Visibility::Inherited
+    };
+
+    commands.entity(content).despawn_related::<Children>();
+
+    if snapshot.is_empty() {
+        let _ = root;
+        return;
     }
 
-    // Speed
-    let speed = unit_registry.speed(kind);
-    if speed > 0.0 {
-        let speed_text = format!("SPD {speed:.0}");
-        let speed_node = commands
-            .spawn((
-                Text::new(speed_text),
-                TextFont {
-                    font_size: FONT_SIZE_BODY,
-                    ..default()
-                },
-                TextColor(UI_TEXT_COLOR),
-            ))
-            .id();
-        commands.entity(parent).add_child(speed_node);
+    match snapshot {
+        Snapshot::Single {
+            kind,
+            faction,
+            health_frac,
+        } => {
+            commands.entity(content).with_children(|parent| {
+                build_single_unit_panel(parent, kind, faction, health_frac, &registry);
+            });
+        }
+        Snapshot::Multi { tally, total } => {
+            commands.entity(content).with_children(|parent| {
+                build_multi_summary(parent, &tally, total);
+            });
+        }
+        Snapshot::Empty => {}
     }
 }
 
-fn spawn_multi_unit_info(
-    commands: &mut Commands,
-    parent: Entity,
-    selected: &[(&UnitType, &Health, &Faction)],
-    unit_registry: &UnitRegistry,
+fn build_single_unit_panel(
+    parent: &mut ChildSpawnerCommands,
+    kind: UnitKind,
+    faction: Option<Faction>,
+    health_frac: Option<f32>,
+    registry: &UnitRegistry,
 ) {
-    let mut counts: Vec<(UnitKind, u32)> = Vec::new();
-    for (unit_type, _, _) in selected {
-        if let Some(entry) = counts.iter_mut().find(|(k, _)| *k == unit_type.0) {
-            entry.1 += 1;
-        } else {
-            counts.push((unit_type.0, 1));
-        }
+    let title = registry.name(kind).to_string();
+    let title_color = faction.map_or(KP_GREEN, |f| f.color());
+
+    parent.spawn((
+        Text::new(title),
+        TextFont {
+            font_size: TEXT_TITLE,
+            ..default()
+        },
+        TextColor(title_color),
+    ));
+
+    if let Some(frac) = health_frac {
+        let max = registry.max_health(kind).max(1.0);
+        let current = (frac * max).round() as i32;
+        let max_i = max.round() as i32;
+        parent
+            .spawn(Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(2.0),
+                ..default()
+            })
+            .with_children(|inner| {
+                inner.spawn((
+                    Text::new(format!("HP {current} / {max_i}")),
+                    TextFont {
+                        font_size: TEXT_SMALL,
+                        ..default()
+                    },
+                    TextColor(KP_GREEN_DIM),
+                ));
+                // Health bar: black backing, colored fill, 8px tall.
+                inner
+                    .spawn((
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(6.0),
+                            border: UiRect::all(Val::Px(1.0)),
+                            ..default()
+                        },
+                        BackgroundColor(TEXT_BG),
+                        BorderColor::all(PANEL_BORDER),
+                    ))
+                    .with_children(|bar| {
+                        bar.spawn((
+                            Node {
+                                width: Val::Percent((frac * 100.0).clamp(0.0, 100.0)),
+                                height: Val::Percent(100.0),
+                                ..default()
+                            },
+                            BackgroundColor(health_color(frac)),
+                        ));
+                    });
+            });
     }
 
-    let header = format!("{} units selected", selected.len());
-    let header_node = commands
-        .spawn((
-            Text::new(header),
+    let weapon = registry.weapon(kind);
+    let speed = registry.speed(kind);
+
+    if !weapon.is_empty() {
+        parent.spawn((
+            Text::new(format!("Weapon: {weapon}")),
             TextFont {
-                font_size: FONT_SIZE_TITLE,
+                font_size: TEXT_BODY,
                 ..default()
             },
-            TextColor(UI_TEXT_COLOR),
-        ))
-        .id();
-    commands.entity(parent).add_child(header_node);
-
-    for (kind, count) in &counts {
-        let name = unit_registry.name(*kind);
-        let line = if *count > 1 {
-            format!("{}x {}", count, name)
-        } else {
-            name.to_string()
-        };
-        let line_node = commands
-            .spawn((
-                Text::new(line),
-                TextFont {
-                    font_size: FONT_SIZE_BODY,
-                    ..default()
-                },
-                TextColor(UI_TEXT_DIM),
-            ))
-            .id();
-        commands.entity(parent).add_child(line_node);
+            TextColor(KP_GREEN_DIM),
+        ));
     }
+
+    if speed > 0.0 {
+        parent.spawn((
+            Text::new(format!("Speed: {speed:.0}")),
+            TextFont {
+                font_size: TEXT_BODY,
+                ..default()
+            },
+            TextColor(KP_GREEN_DIM),
+        ));
+    } else {
+        parent.spawn((
+            Text::new("Stationary"),
+            TextFont {
+                font_size: TEXT_BODY,
+                ..default()
+            },
+            TextColor(KP_GREEN_DIM),
+        ));
+    }
+}
+
+fn build_multi_summary(parent: &mut ChildSpawnerCommands, tally: &[(UnitKind, u32)], total: u32) {
+    parent.spawn((
+        Text::new(format!("Selection: {total} units")),
+        TextFont {
+            font_size: TEXT_TITLE,
+            ..default()
+        },
+        TextColor(KP_GREEN),
+    ));
+    for (kind, count) in tally {
+        parent.spawn((
+            Text::new(format!("{:>3} × {}", count, kind.unitname())),
+            TextFont {
+                font_size: TEXT_BODY,
+                ..default()
+            },
+            TextColor(KP_GREEN_DIM),
+        ));
+    }
+}
+
+enum Snapshot {
+    Empty,
+    Single {
+        kind: UnitKind,
+        faction: Option<Faction>,
+        health_frac: Option<f32>,
+    },
+    Multi {
+        /// Per-kind counts, sorted by `unitname()` for deterministic
+        /// rendering + stable hashing.
+        tally: Vec<(UnitKind, u32)>,
+        total: u32,
+    },
+}
+
+impl Snapshot {
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    /// Hash that flips when the rendered content would differ. Health is
+    /// quantised to whole percent so the panel doesn't rebuild every
+    /// frame as a unit takes damage.
+    fn hash(&self) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        match self {
+            Snapshot::Empty => 0u8.hash(&mut h),
+            Snapshot::Single {
+                kind,
+                faction,
+                health_frac,
+            } => {
+                1u8.hash(&mut h);
+                kind.hash(&mut h);
+                faction.hash(&mut h);
+                let pct = health_frac
+                    .map(|f| (f * 100.0).round() as i32)
+                    .unwrap_or(-1);
+                pct.hash(&mut h);
+            }
+            Snapshot::Multi { tally, total } => {
+                2u8.hash(&mut h);
+                total.hash(&mut h);
+                for (k, c) in tally {
+                    k.hash(&mut h);
+                    c.hash(&mut h);
+                }
+            }
+        }
+        h.finish()
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn collect_snapshot(
+    selected_q: &Query<(&UnitType, Option<&Faction>, Option<&Health>), With<Selected>>,
+) -> Snapshot {
+    let mut iter = selected_q.iter();
+    let Some(first) = iter.next() else {
+        return Snapshot::Empty;
+    };
+
+    if iter.next().is_none() {
+        return Snapshot::Single {
+            kind: first.0.0,
+            faction: first.1.copied(),
+            health_frac: first.2.map(|h| h.fraction()),
+        };
+    }
+
+    let mut tally = std::collections::HashMap::<UnitKind, u32>::new();
+    let mut total = 0u32;
+    for (ut, _, _) in selected_q {
+        *tally.entry(ut.0).or_default() += 1;
+        total += 1;
+    }
+    let mut tally: Vec<(UnitKind, u32)> = tally.into_iter().collect();
+    tally.sort_by_key(|(k, _)| k.unitname());
+    Snapshot::Multi { tally, total }
 }

@@ -6,8 +6,13 @@ use bevy::prelude::*;
 
 use super::core::{Selected, SelectionSet};
 use crate::rendering::camera::RtsCamera;
-use crate::ui::hud::style::UI_OVERLAY_BLACK;
 use crate::units::components::{Health, UnitType, health_color};
+
+/// Translucent black backing color for the health bar's background
+/// quad (formerly `crate::ui::hud::style::UI_OVERLAY_BLACK` — inlined
+/// here so the world-space health-bar visuals don't depend on the now-
+/// removed `ui` module).
+const UI_OVERLAY_BLACK: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
 
 pub(super) struct HealthBarsPlugin;
 

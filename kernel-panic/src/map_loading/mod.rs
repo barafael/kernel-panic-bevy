@@ -336,20 +336,9 @@ fn load_map(
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut commands);
         apply_fog(map_info, parsed, &mut fog_query);
-        // Geovent smokers are spawned *after* this block (further down),
-        // so we read datavent positions straight off the parsed features
-        // table instead of querying live entities. Same XZ values the
-        // smoker will later use, so the two stay aligned.
-        let datavent_positions: Vec<Vec3> = parsed
-            .features
-            .iter()
-            .filter(|f| f.feature_type.is_geovent())
-            .map(|f| heightmap.place(f.x, f.z))
-            .collect();
         spawn_homebases(
             &heightmap,
             map_info,
-            &datavent_positions,
             &mut commands,
             &mut meshes,
             &mut std_materials,
@@ -358,10 +347,15 @@ fn load_map(
             &mut cob_cache,
             &unit_registry,
         );
+        let datavent_count = parsed
+            .features
+            .iter()
+            .filter(|f| f.feature_type.is_geovent())
+            .count();
         info!(
             "  {} start positions, {} datavents, gravity={}",
             map_info.start_positions.len(),
-            datavent_positions.len(),
+            datavent_count,
             map_info.gravity,
         );
     }

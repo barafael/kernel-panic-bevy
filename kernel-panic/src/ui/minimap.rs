@@ -1,36 +1,35 @@
-use bevy::prelude::*;
+//! Minimap.
+//!
+//! At map load the [`setup_minimap`] entry point downsamples the
+//! `ParsedMap.ground_texture` into a small RGBA image, spawns it as an
+//! `ImageNode` in the corner, and inserts a [`MinimapState`] resource
+//! holding the base pixels. Each frame the update system copies the
+//! base pixels back into the image, then over-writes them with:
+//!
+//! 1. One 3×3 dot per spotted unit, faction-tinted.
+//! 2. A four-corner viewport rectangle traced from the camera's screen
+//!    corners projected onto the ground plane.
+//!
+//! Drawing pixel-perfect into the texture (rather than spawning Node
+//! children for every dot) avoids per-frame UI tree churn for what is
+//! a quintessentially raster overlay.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+use crate::rendering::camera::RtsCamera;
 use crate::units::components::Faction;
 use crate::units::mechanics::cloak::Spotted;
 
-/// Minimap display size in logical pixels.
+use super::theme::PANEL_BORDER;
+
+/// Minimap display size in logical pixels along the longer axis.
 const MINIMAP_SIZE: f32 = 200.0;
-/// Padding from screen edge.
-const MINIMAP_MARGIN: f32 = 12.0;
-/// How often to refresh the minimap overlay (seconds).
+/// Padding from the screen edge.
+const MINIMAP_MARGIN: f32 = 8.0;
+/// Refresh cadence in seconds (10 Hz).
 const REFRESH_INTERVAL: f32 = 0.1;
-
-/// Resource holding the generated minimap texture data.
-#[derive(Resource)]
-pub struct MinimapState {
-    /// Handle to the minimap image asset (updated each frame).
-    pub image_handle: Handle<Image>,
-    /// Pixel width of the minimap texture.
-    pub width: u32,
-    /// Pixel height of the minimap texture.
-    pub height: u32,
-    /// World-space bounds of the map.
-    pub world_width: f32,
-    pub world_depth: f32,
-    /// Base terrain pixels (copied from ground texture, downscaled).
-    pub base_pixels: Vec<u8>,
-    /// Timer for refresh throttling.
-    pub timer: Timer,
-}
-
-/// Marker for the minimap UI node.
-#[derive(Component)]
-struct MinimapNode;
 
 pub struct MinimapPlugin;
 
@@ -43,7 +42,28 @@ impl Plugin for MinimapPlugin {
     }
 }
 
-/// Create the minimap resources and UI node. Called from main.rs after map load.
+/// Marker for the minimap UI node.
+#[derive(Component)]
+struct MinimapNode;
+
+/// Per-map minimap state.
+#[derive(Resource)]
+pub struct MinimapState {
+    image_handle: Handle<Image>,
+    width: u32,
+    height: u32,
+    /// World-space extent of the map in elmos.
+    world_width: f32,
+    world_depth: f32,
+    /// Pristine downsampled terrain pixels — copied back over the image
+    /// each refresh before drawing dots / viewport on top.
+    base_pixels: Vec<u8>,
+    timer: Timer,
+}
+
+/// Build the minimap image, spawn the UI node, and insert
+/// [`MinimapState`]. Call once at map load with the map's ground texture
+/// pixels (or `None` if the map has no ground texture).
 pub fn setup_minimap(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -53,7 +73,6 @@ pub fn setup_minimap(
     world_width: f32,
     world_depth: f32,
 ) {
-    // Determine minimap pixel dimensions maintaining aspect ratio.
     let aspect = world_width / world_depth;
     let (mm_w, mm_h) = if aspect >= 1.0 {
         (MINIMAP_SIZE as u32, (MINIMAP_SIZE / aspect) as u32)
@@ -61,37 +80,33 @@ pub fn setup_minimap(
         ((MINIMAP_SIZE * aspect) as u32, MINIMAP_SIZE as u32)
     };
 
-    // Downsample the ground texture to minimap resolution.
     let base_pixels = downsample_terrain(ground_pixels, ground_width, ground_height, mm_w, mm_h);
 
-    // Create the image asset.
     let image = Image::new(
-        bevy::render::render_resource::Extent3d {
+        Extent3d {
             width: mm_w,
             height: mm_h,
             depth_or_array_layers: 1,
         },
-        bevy::render::render_resource::TextureDimension::D2,
+        TextureDimension::D2,
         base_pixels.clone(),
-        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
-
     let image_handle = images.add(image);
 
-    // Spawn UI node in bottom-right corner.
     commands.spawn((
         MinimapNode,
         Node {
             position_type: PositionType::Absolute,
-            right: Val::Px(MINIMAP_MARGIN),
+            left: Val::Px(MINIMAP_MARGIN),
             top: Val::Px(MINIMAP_MARGIN),
             width: Val::Px(mm_w as f32),
             height: Val::Px(mm_h as f32),
             border: UiRect::all(Val::Px(2.0)),
             ..default()
         },
-        BorderColor::all(Color::linear_rgb(0.0, 0.6, 0.0)),
+        BorderColor::all(PANEL_BORDER),
         BackgroundColor(Color::BLACK),
         ImageNode::new(image_handle.clone()),
     ));
@@ -107,13 +122,13 @@ pub fn setup_minimap(
     });
 }
 
-/// Per-frame update: overlay unit dots and viewport rectangle on the minimap.
+#[allow(clippy::type_complexity)]
 fn update_minimap(
     time: Res<Time>,
     mut state: ResMut<MinimapState>,
     mut images: ResMut<Assets<Image>>,
-    camera_query: Query<(&Camera, &GlobalTransform), With<crate::rendering::camera::RtsCamera>>,
-    unit_query: Query<(&Transform, &Faction), With<Spotted>>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    unit_q: Query<(&Transform, &Faction), With<Spotted>>,
     windows: Query<&Window>,
 ) {
     state.timer.tick(time.delta());
@@ -134,13 +149,12 @@ fn update_minimap(
     // Reset to base terrain.
     pixels.copy_from_slice(&state.base_pixels);
 
-    // Draw unit dots.
-    for (transform, faction) in &unit_query {
-        let (r, g, b) = faction_rgb(faction);
+    // Unit dots.
+    for (transform, faction) in &unit_q {
+        let (r, g, b) = faction_rgb(*faction);
         let mx = ((transform.translation.x / state.world_width) * mm_w as f32) as i32;
         let mz = ((transform.translation.z / state.world_depth) * mm_h as f32) as i32;
 
-        // Draw a 3x3 dot.
         for dy in -1..=1 {
             for dx in -1..=1 {
                 let px = mx + dx;
@@ -156,67 +170,58 @@ fn update_minimap(
         }
     }
 
-    // Draw viewport by casting rays from the four screen corners to the
-    // ground plane (Y = avg terrain height) and connecting the hit points.
-    if let (Ok((camera, camera_global)), Ok(window)) = (camera_query.single(), windows.single()) {
+    // Viewport rectangle: cast rays from the four screen corners onto
+    // the ground plane (Y = 0) and connect the hit points.
+    if let (Ok((camera, camera_global)), Ok(window)) = (camera_q.single(), windows.single()) {
         let screen_w = window.width();
         let screen_h = window.height();
-
-        let screen_corners = [
-            Vec2::new(0.0, 0.0),           // top-left
-            Vec2::new(screen_w, 0.0),      // top-right
-            Vec2::new(screen_w, screen_h), // bottom-right
-            Vec2::new(0.0, screen_h),      // bottom-left
+        let corners = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(screen_w, 0.0),
+            Vec2::new(screen_w, screen_h),
+            Vec2::new(0.0, screen_h),
         ];
 
-        let mut ground_hits = [(0i32, 0i32); 4];
+        let mut hits = [(0i32, 0i32); 4];
         let mut filled = 0;
-
-        for screen_pos in &screen_corners {
+        for screen_pos in &corners {
             if let Ok(ray) = camera.viewport_to_world(camera_global, *screen_pos)
                 && let Some(world_point) = ray_ground_intersect(&ray)
             {
                 let mx = (world_point.x / state.world_width * mm_w as f32) as i32;
                 let mz = (world_point.z / state.world_depth * mm_h as f32) as i32;
-                ground_hits[filled] = (mx, mz);
+                hits[filled] = (mx, mz);
                 filled += 1;
             }
         }
 
         if filled == 4 {
-            let white = [255, 255, 255, 200];
+            let frame = [255, 255, 255, 200];
             for i in 0..4 {
-                let (x0, y0) = ground_hits[i];
-                let (x1, y1) = ground_hits[(i + 1) % 4];
-                draw_line(pixels, mm_w, mm_h, x0, y0, x1, y1, white);
+                let (x0, y0) = hits[i];
+                let (x1, y1) = hits[(i + 1) % 4];
+                draw_line(pixels, mm_w, mm_h, x0, y0, x1, y1, frame);
             }
         }
     }
 }
 
-/// Intersect a ray with the ground plane (Y = 0).
-/// Returns the world-space hit point, or `None` if the ray is parallel or pointing away.
 fn ray_ground_intersect(ray: &Ray3d) -> Option<Vec3> {
     let origin = ray.origin;
     let dir = *ray.direction;
-
-    // Ground plane: Y = 0. Solve origin.y + t * dir.y = 0.
     if dir.y.abs() < 1e-6 {
-        return None; // Ray parallel to ground.
+        return None;
     }
-
     let t = -origin.y / dir.y;
     if t < 0.0 {
-        return None; // Hit is behind camera.
+        return None;
     }
-
-    // Clamp t to avoid extremely distant intersections for near-horizontal rays.
-    let t = t.min(50000.0);
-
+    // Cap distant intersections so a near-horizontal ray doesn't blow
+    // out the int conversion further down.
+    let t = t.min(50_000.0);
     Some(origin + dir * t)
 }
 
-/// Bresenham line drawing between two points.
 #[allow(clippy::too_many_arguments)]
 fn draw_line(
     pixels: &mut [u8],
@@ -256,7 +261,7 @@ fn draw_line(
     }
 }
 
-fn faction_rgb(faction: &Faction) -> (u8, u8, u8) {
+fn faction_rgb(faction: Faction) -> (u8, u8, u8) {
     let srgba = Srgba::from(faction.color());
     (
         (srgba.red * 255.0) as u8,
@@ -265,7 +270,6 @@ fn faction_rgb(faction: &Faction) -> (u8, u8, u8) {
     )
 }
 
-/// Downsample a large ground texture to minimap resolution using box filtering.
 fn downsample_terrain(
     source: Option<&[u8]>,
     src_w: usize,
@@ -275,10 +279,10 @@ fn downsample_terrain(
 ) -> Vec<u8> {
     let dst_w = dst_w as usize;
     let dst_h = dst_h as usize;
-    let mut result = vec![20u8; dst_w * dst_h * 4]; // dark default
+    let mut result = vec![20u8; dst_w * dst_h * 4];
 
     let Some(source) = source else {
-        // Fill alpha channel.
+        // Fill alpha for the dark default so it isn't transparent.
         for chunk in result.chunks_exact_mut(4) {
             chunk[3] = 255;
         }
@@ -295,7 +299,6 @@ fn downsample_terrain(
             let src_y = (dst_y * src_h / dst_h).min(src_h - 1);
             let src_idx = (src_y * src_w + src_x) * 4;
             let dst_idx = (dst_y * dst_w + dst_x) * 4;
-
             if src_idx + 3 < source.len() {
                 result[dst_idx] = source[src_idx];
                 result[dst_idx + 1] = source[src_idx + 1];

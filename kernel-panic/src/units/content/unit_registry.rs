@@ -90,7 +90,9 @@ impl UnitRegistry {
 
     // -- Convenience accessors that map FBI fields to game-usable values --
 
-    /// Display name (e.g. "Bit", "Denial of Service").
+    /// Display name (e.g. "Bit", "Denial of Service"). Used by the UI
+    /// (currently removed pending a rewrite) for build-icon labels.
+    #[allow(dead_code)]
     pub fn name(&self, kind: UnitKind) -> &str {
         self.def(kind).map_or(kind.unitname(), |d| &d.name)
     }
@@ -207,7 +209,9 @@ impl UnitRegistry {
     }
 
     /// Buildpic filename as declared in the FBI (e.g. "bit.pcx", "network_big.png").
-    /// Returns `""` when the unit has no BuildPic field.
+    /// Returns `""` when the unit has no BuildPic field. Used by the UI
+    /// (currently removed pending a rewrite) for build-icon previews.
+    #[allow(dead_code)]
     pub fn build_pic(&self, kind: UnitKind) -> &str {
         self.def(kind).map_or("", |d| &d.build_pic)
     }

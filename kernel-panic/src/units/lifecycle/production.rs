@@ -56,13 +56,17 @@ impl Producer {
             .map(|kind| registry.build_time(kind))
     }
 
-    /// The queued build orders.
+    /// The queued build orders. The build menu (currently removed
+    /// pending a rewrite) read this for the queue-summary UI.
+    #[allow(dead_code)]
     pub fn queue(&self) -> &VecDeque<UnitKind> {
         &self.queue
     }
 
     /// Enqueue a unit to be built. The queue is unbounded; the player
-    /// can stack as many orders as they want.
+    /// can stack as many orders as they want. The build menu (currently
+    /// removed pending a rewrite) was the sole caller.
+    #[allow(dead_code)]
     pub fn enqueue(&mut self, kind: UnitKind) {
         self.queue.push_back(kind);
     }
