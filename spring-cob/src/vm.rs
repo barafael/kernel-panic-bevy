@@ -8,11 +8,16 @@ use smallvec::SmallVec;
 
 use crate::cob_file::CobFile;
 use crate::opcodes::Opcode;
+use crate::unit_values::{NUM_LUA_ARGS, builtin_get_value, lua_arg_index};
 
 /// Maximum data stack depth per thread.
 const MAX_STACK: usize = 64;
 /// Maximum call stack depth per thread.
 const MAX_CALL_STACK: usize = 16;
+/// Game-tick rate the engine runs at. The Spring engine ships at 30
+/// frames/sec; `GAME_FRAME` and a few helpers depend on this exact
+/// value. Mirrors `rts/Sim/Misc/GlobalConstants.h:GAME_SPEED`.
+const GAME_SPEED_FPS: i32 = 30;
 
 /// Data stack: capped at `MAX_STACK`, so inline the whole thing.
 type DataStack = SmallVec<[i32; MAX_STACK]>;
@@ -28,6 +33,9 @@ pub enum ThreadState {
     Sleep,
     WaitTurn,
     WaitMove,
+    /// Suspended waiting on a piece-scale animation (Recoil's
+    /// `WAIT_SCALE`). Wakes on `anim_finished(AnimType::Scale, ...)`.
+    WaitScale,
     Dead,
 }
 
@@ -56,6 +64,14 @@ pub struct CobThread {
 
     data_stack: DataStack,
     call_stack: CallStack,
+    /// Per-thread Lua argument slots `[LUA0..LUA9]` (keys 110..119).
+    /// Mirrors upstream `CCobThread::luaArgs`. `Set(LUA_n)` writes here
+    /// instead of generating a host-visible `AnimCommand::SetValue`,
+    /// and `Get(LUA_n)` reads from here. Without a Lua VM these slots
+    /// behave as a tiny per-thread scratch register file — useful for
+    /// scripts that hand off intermediate values across LuaCalls that
+    /// we stub out.
+    lua_args: [i32; NUM_LUA_ARGS],
 }
 
 impl CobThread {
@@ -72,6 +88,7 @@ impl CobThread {
             ret_code: 0,
             data_stack: DataStack::new(),
             call_stack: CallStack::new(),
+            lua_args: [0; NUM_LUA_ARGS],
         }
     }
 
@@ -101,7 +118,13 @@ impl CobThread {
 }
 
 /// Animation command emitted by the VM for the game to process.
+///
+/// Hosts pattern-match this enum and apply each variant to their
+/// rendering / sim layer. New variants may be added in additive minor
+/// releases — match it with a `_ => {}` catch-all so future opcodes
+/// don't break compilation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AnimCommand {
     Turn {
         piece: i32,
@@ -136,6 +159,20 @@ pub enum AnimCommand {
         axis: i32,
         decel: i32,
     },
+    /// Recoil-only piece scale animation. `destination` and `speed` are
+    /// in COBSCALE-fixed-point (divide by 65536 for the host-side float).
+    /// Single-axis (uniform) — there is no `axis` because the engine
+    /// scales the whole piece.
+    Scale {
+        piece: i32,
+        destination: i32,
+        speed: i32,
+    },
+    /// Snap a piece's scale (uniform) without animating.
+    ScaleNow {
+        piece: i32,
+        destination: i32,
+    },
     Show {
         piece: i32,
     },
@@ -149,6 +186,25 @@ pub enum AnimCommand {
     Explode {
         piece: i32,
         severity: i32,
+    },
+    /// Play a sound by index into `CobFile::sound_names` (TA:K v6 sound
+    /// table). `volume` matches upstream's `attr` arg — most scripts
+    /// pass 0 and let the engine pick a default.
+    PlaySound {
+        sound_id: i32,
+        volume: i32,
+    },
+    /// COB transports a unit by attaching it to one of its pieces.
+    /// `unit_id` and `piece` come from the script; `attach_type` is
+    /// the third arg (upstream calls it the asPieceNum/extra slot).
+    Attach {
+        unit_id: i32,
+        piece: i32,
+        attach_type: i32,
+    },
+    /// Drop the previously-attached unit.
+    Drop {
+        unit_id: i32,
     },
     SetValue {
         key: i32,
@@ -172,6 +228,11 @@ pub struct CobVm {
     static_vars: Vec<i32>,
     next_thread_id: u32,
     current_time: i32,
+    /// xorshift32 state for `Opcode::Rand`. Seeded deterministically per
+    /// VM so two units sharing the same script get reproducible
+    /// animations across runs (required for replay/desync-free play).
+    /// Use [`CobVm::set_rand_seed`] to pin.
+    rand_state: u32,
     /// Host-supplied state the VM exposes through `Opcode::Get`. Keys are
     /// the well-known Spring COB value indices (see `cob_values`); the
     /// host updates them each tick (e.g. `BUILD_PERCENT_LEFT`,
@@ -193,9 +254,21 @@ impl CobVm {
             static_vars: vec![0; cob.num_static_vars],
             next_thread_id: 1,
             current_time: 0,
+            // Non-zero default — xorshift32 collapses to 0 if seeded
+            // with 0. `0xC0BEFE` is arbitrary but stable.
+            rand_state: 0x00C0_BEFE,
             unit_values: smallvec::SmallVec::new(),
             ended_threads: Vec::new(),
         }
+    }
+
+    /// Seed the per-VM `Opcode::Rand` PRNG. Pass any 32-bit value other
+    /// than zero (xorshift32 collapses on 0; the VM substitutes a
+    /// non-zero default in that case). Determinism is per-VM, not
+    /// per-unit-kind, so seed each spawn with its unit id (or any
+    /// other replay-stable value) to avoid lockstep desync.
+    pub fn set_rand_seed(&mut self, seed: u32) {
+        self.rand_state = if seed == 0 { 0x00C0_BEFE } else { seed };
     }
 
     /// Update (or insert) the value the VM should return for COB
@@ -212,11 +285,18 @@ impl CobVm {
 
     /// Read a host-published unit value, or 0 if none was set.
     pub fn get_unit_value(&self, key: i32) -> i32 {
+        self.lookup_unit_value(key).unwrap_or(0)
+    }
+
+    /// Internal lookup that returns `None` when the host hasn't
+    /// published the key — distinguishes "explicitly set to zero" from
+    /// "not in the bag", which the dispatch loop uses to fall through
+    /// to built-in math handlers.
+    fn lookup_unit_value(&self, key: i32) -> Option<i32> {
         self.unit_values
             .iter()
             .find(|(k, _)| *k == key)
             .map(|(_, v)| *v)
-            .unwrap_or(0)
     }
 
     /// Start a script function by name. Returns the thread ID, or None if
@@ -355,7 +435,9 @@ impl CobVm {
             }
             let wake = matches!(
                 (thread.state, anim_type),
-                (ThreadState::WaitTurn, AnimType::Turn) | (ThreadState::WaitMove, AnimType::Move)
+                (ThreadState::WaitTurn, AnimType::Turn)
+                    | (ThreadState::WaitMove, AnimType::Move)
+                    | (ThreadState::WaitScale, AnimType::Scale)
             );
             if wake {
                 thread.state = ThreadState::Run;
@@ -573,17 +655,21 @@ impl CobVm {
                 }
 
                 Opcode::Rand => {
+                    // Stack order matches upstream: top = high, below = low.
+                    // `gsRNG.NextInt(high - low + 1) + low`.
                     let b = thread.pop();
                     let a = thread.pop();
-                    // Simple deterministic "random" — good enough for animations.
-                    let range = (b - a + 1).max(1);
-                    let val = a
-                        + (self
-                            .current_time
-                            .wrapping_mul(1103515245)
-                            .wrapping_add(12345)
-                            % range)
-                            .abs();
+                    // xorshift32; seeded once per VM and advances per Rand.
+                    let mut s = self.rand_state;
+                    s ^= s << 13;
+                    s ^= s >> 17;
+                    s ^= s << 5;
+                    self.rand_state = if s == 0 { 0x00C0_BEFE } else { s };
+                    // Inclusive range: count = b - a + 1, but guard `b < a`
+                    // (upstream Spring's NextInt would assert there; we
+                    // collapse to a so the script doesn't loop).
+                    let count = (b - a + 1).max(1) as u32;
+                    let val = a + (self.rand_state % count) as i32;
                     thread.push(val);
                 }
 
@@ -676,6 +762,11 @@ impl CobVm {
                 Opcode::Signal => {
                     let sig = thread.pop();
                     // Kill all threads whose signal_mask overlaps with sig.
+                    // We exclude the current thread to match the surrounding
+                    // workaround for inherited signal masks (see the
+                    // `Opcode::Start` arm); upstream's `CCobInstance::Signal`
+                    // would also kill self, but that interacts badly with
+                    // the kernel-panic-specific signal_mask=0 spawn rule.
                     for t in &mut self.threads {
                         if t.id != thread_id && (t.signal_mask & sig) != 0 {
                             t.state = ThreadState::Dead;
@@ -799,36 +890,57 @@ impl CobVm {
                     commands.push(AnimCommand::Explode { piece, severity });
                 }
 
-                // Get/Set unit values — host publishes the readable ones
-                // via `set_unit_value`; everything else reads as 0.
+                // Get/Set unit values — three priority layers, in order:
+                //   1. LUA0..LUA9   → per-thread `lua_args` slots
+                //   2. host-published `unit_values`
+                //   3. built-in math handlers (ATAN/HYPOT/POW/...)
+                // Anything still unresolved reads as 0; this matches
+                // upstream's "missing key returns 0" leniency.
                 Opcode::GetUnitValue => {
                     let key = thread.pop();
-                    let value = self
-                        .unit_values
-                        .iter()
-                        .find(|(k, _)| *k == key)
-                        .map(|(_, v)| *v)
-                        .unwrap_or(0);
-                    thread.push(value);
+                    let lua_value = lua_arg_index(key).map(|i| thread.lua_args[i]);
+                    let value = match lua_value {
+                        Some(v) => v,
+                        None => self
+                            .lookup_unit_value(key)
+                            .or_else(|| builtin_get_value(key, 0, 0, 0, 0))
+                            .unwrap_or(0),
+                    };
+                    self.threads[thread_idx].push(value);
                 }
                 Opcode::Get => {
-                    let _p5 = thread.pop();
-                    let _p4 = thread.pop();
-                    let _p3 = thread.pop();
-                    let _p2 = thread.pop();
+                    let p4 = thread.pop();
+                    let p3 = thread.pop();
+                    let p2 = thread.pop();
+                    let p1 = thread.pop();
                     let key = thread.pop();
-                    let value = self
-                        .unit_values
-                        .iter()
-                        .find(|(k, _)| *k == key)
-                        .map(|(_, v)| *v)
-                        .unwrap_or(0);
-                    thread.push(value);
+                    let lua_value = lua_arg_index(key).map(|i| thread.lua_args[i]);
+                    let value = match lua_value {
+                        Some(v) => v,
+                        None => self
+                            .lookup_unit_value(key)
+                            .or_else(|| builtin_get_value(key, p1, p2, p3, p4))
+                            .or_else(|| {
+                                // GAME_FRAME counts engine ticks. We
+                                // don't have the global game clock, so
+                                // map our `current_time` (ms) onto
+                                // frames at the engine's 30 fps.
+                                (key == crate::unit_values::GAME_FRAME)
+                                    .then(|| self.current_time / (1000 / GAME_SPEED_FPS))
+                            })
+                            .unwrap_or(0),
+                    };
+                    self.threads[thread_idx].push(value);
                 }
                 Opcode::Set => {
                     let value = thread.pop();
                     let key = thread.pop();
-                    commands.push(AnimCommand::SetValue { key, value });
+                    if let Some(idx) = lua_arg_index(key) {
+                        // LUA-arg writes stay thread-local; don't bubble.
+                        thread.lua_args[idx] = value;
+                    } else {
+                        commands.push(AnimCommand::SetValue { key, value });
+                    }
                 }
 
                 // No-ops for visual hints we don't implement.
@@ -837,28 +949,99 @@ impl CobVm {
                 }
 
                 Opcode::PlaySound => {
-                    let _volume = thread.pop();
-                    let _sound_id = thread.read_code(&cob.code);
+                    let volume = thread.pop();
+                    let sound_id = thread.read_code(&cob.code);
+                    commands.push(AnimCommand::PlaySound { sound_id, volume });
                 }
 
                 Opcode::Attach => {
-                    let _p3 = thread.pop();
-                    let _p2 = thread.pop();
-                    let _p1 = thread.pop();
+                    // Upstream: `r3 = pop; r2 = pop; r1 = pop;
+                    // cobInst->AttachUnit(r2, r1)`. So the topmost arg is
+                    // unused (recoil naming: piece-num for the asPiece
+                    // slot), the next is the piece, the bottom is the
+                    // unit id. We forward all three so the host can
+                    // implement the full attach call if it ever wires
+                    // transports up.
+                    let attach_type = thread.pop();
+                    let piece = thread.pop();
+                    let unit_id = thread.pop();
+                    commands.push(AnimCommand::Attach {
+                        unit_id,
+                        piece,
+                        attach_type,
+                    });
                 }
                 Opcode::Drop => {
-                    let _p1 = thread.pop();
+                    let unit_id = thread.pop();
+                    commands.push(AnimCommand::Drop { unit_id });
+                }
+
+                // Recoil scale animations — single-axis (uniform) scaling
+                // of a piece. Stack layout matches MOVE: top=destination,
+                // below=speed; piece comes from inline operand.
+                Opcode::Scale => {
+                    let piece = thread.read_code(&cob.code);
+                    let dest = thread.pop();
+                    let speed = thread.pop();
+                    commands.push(AnimCommand::Scale {
+                        piece,
+                        destination: dest,
+                        speed,
+                    });
+                }
+                Opcode::ScaleNow => {
+                    let piece = thread.read_code(&cob.code);
+                    let dest = thread.pop();
+                    commands.push(AnimCommand::ScaleNow {
+                        piece,
+                        destination: dest,
+                    });
+                }
+                Opcode::WaitScale => {
+                    let piece = thread.read_code(&cob.code);
+                    thread.wait_piece = piece;
+                    thread.wait_axis = -1;
+                    thread.state = ThreadState::WaitScale;
+                    break;
+                }
+
+                // Recoil "deferred Lua call" — same wire format as
+                // LuaCall (script id, arg count, then `arg_count`
+                // values popped). Without a Lua VM the call is a
+                // no-op; consume the args so we don't desync the
+                // stack and push a 0 return.
+                Opcode::BatchLua => {
+                    let _func_id = thread.read_code(&cob.code);
+                    let arg_count = thread.read_code(&cob.code) as usize;
+                    for _ in 0..arg_count {
+                        thread.pop();
+                    }
+                    thread.push(0);
+                }
+
+                // Hitting SIGNATURE_LUA in the dispatch loop means the
+                // caller routed a Lua-only script through the bytecode
+                // VM by mistake. Upstream logs an error and kills the
+                // thread (`CobThread.cpp:314-317`); same here.
+                Opcode::SignatureLua => {
+                    thread.state = ThreadState::Dead;
+                    break;
                 }
             }
         }
     }
 }
 
-/// Animation type for `anim_finished` callbacks.
+/// Animation type for `anim_finished` callbacks. Mirrors upstream's
+/// `CUnitScript::AnimType { ATurn, ASpin, AMove, AScale }` (Spin runs
+/// forever and never raises a finished event, so it isn't represented
+/// here).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimType {
     Turn,
     Move,
+    /// Recoil-only scale animation completion.
+    Scale,
 }
 
 #[cfg(test)]
@@ -886,15 +1069,16 @@ mod out_param_tests {
             0,
             Opcode::Return as i32,
         ];
-        CobFile {
-            script_names: vec![name.to_string()],
-            script_offsets: vec![0],
-            script_lengths: vec![code.len()],
-            piece_names: Vec::new(),
+        CobFile::from_test_parts(
+            "test",
+            vec![name.to_string()],
+            vec![0],
+            vec![code.len()],
+            Vec::new(),
             code,
-            num_static_vars: 0,
-            sound_names: Vec::new(),
-        }
+            0,
+            Vec::new(),
+        )
     }
 
     #[test]

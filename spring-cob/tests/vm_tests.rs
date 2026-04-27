@@ -1,6 +1,8 @@
 //! Integration tests for the COB virtual machine using real KP animation scripts.
 
-use spring_cob::{AnimCommand, CobFile, CobVm, parse_cob};
+use spring_cob::{
+    AnimCommand, AnimType, CallinSlot, CobFile, CobFn, CobVm, Opcode, WeaponCallin, parse_cob,
+};
 use std::path::PathBuf;
 
 /// kernel.bos was compiled with Scriptor's linear constant set to 163840
@@ -471,4 +473,276 @@ fn signal_kills_matching_threads() {
 
     // The VM should still be functioning (no panics from signal handling).
     // This test mainly verifies the signal mechanism doesn't crash.
+}
+
+// ---------------------------------------------------------------------------
+// New-opcode and feature tests on synthetic bytecode
+// ---------------------------------------------------------------------------
+
+/// Build a minimal CobFile holding a single function whose bytecode is
+/// the supplied `code`. Skips the binary parser — useful for opcode-level
+/// probes that need a single instruction sequence.
+fn synthetic_cob(code: Vec<i32>) -> CobFile {
+    CobFile::from_test_parts(
+        "synthetic",
+        vec!["Test".to_string()],
+        vec![0],
+        vec![code.len()],
+        Vec::new(),
+        code,
+        0,
+        Vec::new(),
+    )
+}
+
+/// Append `pushc N; return` to `code_prefix`. Used by the scale and
+/// built-in-GET probes that need the synthetic function to terminate
+/// after the opcode under test.
+fn return_after(code_prefix: Vec<i32>, return_value: i32) -> Vec<i32> {
+    let mut code = code_prefix;
+    code.push(Opcode::PushConstant as i32);
+    code.push(return_value);
+    code.push(Opcode::Return as i32);
+    code
+}
+
+#[test]
+fn scale_opcode_emits_scale_anim_command() {
+    let cob = synthetic_cob(return_after(
+        vec![
+            Opcode::PushConstant as i32,
+            8,
+            Opcode::PushConstant as i32,
+            4096,
+            Opcode::Scale as i32,
+            2,
+        ],
+        0,
+    ));
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Test", &[]);
+    let cmds = vm.tick(&cob, 0);
+
+    let scale = cmds.iter().find_map(|c| match c {
+        AnimCommand::Scale {
+            piece,
+            destination,
+            speed,
+        } => Some((*piece, *destination, *speed)),
+        _ => None,
+    });
+    assert_eq!(scale, Some((2, 4096, 8)));
+}
+
+#[test]
+fn scale_now_snaps_immediately() {
+    let cob = synthetic_cob(return_after(
+        vec![
+            Opcode::PushConstant as i32,
+            65536,
+            Opcode::ScaleNow as i32,
+            5,
+        ],
+        0,
+    ));
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Test", &[]);
+    let cmds = vm.tick(&cob, 0);
+    assert!(matches!(
+        cmds.as_slice(),
+        [
+            AnimCommand::ScaleNow {
+                piece: 5,
+                destination: 65536
+            },
+            ..
+        ]
+    ));
+}
+
+#[test]
+fn wait_scale_blocks_until_anim_finished() {
+    let cob = synthetic_cob(return_after(
+        vec![
+            Opcode::PushConstant as i32,
+            16,
+            Opcode::PushConstant as i32,
+            1024,
+            Opcode::Scale as i32,
+            7,
+            Opcode::WaitScale as i32,
+            7,
+        ],
+        42,
+    ));
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Test", &[]);
+    vm.tick(&cob, 0);
+    assert!(
+        vm.has_active_threads(),
+        "WaitScale must keep the thread alive"
+    );
+    vm.anim_finished(AnimType::Scale, 7, -1);
+    vm.tick(&cob, 0);
+    assert!(
+        !vm.has_active_threads(),
+        "after anim_finished + tick the thread should be done"
+    );
+}
+
+#[test]
+fn signature_lua_kills_thread() {
+    let cob = synthetic_cob(vec![
+        Opcode::SignatureLua as i32,
+        Opcode::PushConstant as i32,
+        99,
+        Opcode::Return as i32,
+    ]);
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Test", &[]);
+    vm.tick(&cob, 0);
+    assert!(
+        !vm.has_active_threads(),
+        "SIGNATURE_LUA must terminate the thread immediately"
+    );
+}
+
+#[test]
+fn batch_lua_consumes_args_and_returns_zero() {
+    let cob = synthetic_cob(vec![
+        Opcode::PushConstant as i32,
+        10,
+        Opcode::PushConstant as i32,
+        20,
+        Opcode::PushConstant as i32,
+        30,
+        Opcode::BatchLua as i32,
+        4,
+        3,
+        Opcode::Return as i32,
+    ]);
+    let mut vm = CobVm::new(&cob);
+    let ret = vm.call_script(&cob, "Test", &[]);
+    assert_eq!(ret, Some(0), "BATCH_LUA must push 0 as its return value");
+}
+
+#[test]
+fn lua_arg_set_is_thread_local_not_anim_command() {
+    let cob = synthetic_cob(return_after(
+        vec![
+            Opcode::PushConstant as i32,
+            spring_cob::unit_values::LUA0,
+            Opcode::PushConstant as i32,
+            7,
+            Opcode::Set as i32,
+        ],
+        0,
+    ));
+    let mut vm = CobVm::new(&cob);
+    vm.start_script(&cob, "Test", &[]);
+    let cmds = vm.tick(&cob, 0);
+    assert!(
+        !cmds
+            .iter()
+            .any(|c| matches!(c, AnimCommand::SetValue { .. })),
+        "Set on LUA arg must be thread-local, got {cmds:?}"
+    );
+}
+
+#[test]
+fn builtin_get_min_max_works_without_host() {
+    // Push order: key, p1, p2, p3, p4. GET pops p4..p1 then key, so
+    // top of stack is p4.
+    let cob = synthetic_cob(vec![
+        Opcode::PushConstant as i32,
+        spring_cob::unit_values::COB_MIN,
+        Opcode::PushConstant as i32,
+        3,
+        Opcode::PushConstant as i32,
+        8,
+        Opcode::PushConstant as i32,
+        0,
+        Opcode::PushConstant as i32,
+        0,
+        Opcode::Get as i32,
+        Opcode::Return as i32,
+    ]);
+    let mut vm = CobVm::new(&cob);
+    let ret = vm.call_script(&cob, "Test", &[]);
+    assert_eq!(ret, Some(3));
+}
+
+#[test]
+fn rand_stays_inside_inclusive_range() {
+    let cob = synthetic_cob(vec![
+        Opcode::PushConstant as i32,
+        10,
+        Opcode::PushConstant as i32,
+        20,
+        Opcode::Rand as i32,
+        Opcode::Return as i32,
+    ]);
+
+    for seed in [1u32, 42, 0xDEAD_BEEF, 0xC0FF_EE00] {
+        let mut vm = CobVm::new(&cob);
+        vm.set_rand_seed(seed);
+        let ret = vm.call_script(&cob, "Test", &[]).unwrap();
+        assert!(
+            (10..=20).contains(&ret),
+            "Rand returned {ret} out of [10, 20] (seed {seed:#x})"
+        );
+    }
+}
+
+#[test]
+fn rand_seed_zero_does_not_collapse() {
+    let cob = synthetic_cob(vec![
+        Opcode::PushConstant as i32,
+        0,
+        Opcode::PushConstant as i32,
+        100,
+        Opcode::Rand as i32,
+        Opcode::Return as i32,
+    ]);
+    let mut vm = CobVm::new(&cob);
+    vm.set_rand_seed(0);
+    let ret = vm.call_script(&cob, "Test", &[]).unwrap();
+    assert!((0..=100).contains(&ret), "Rand seed=0 returned {ret}");
+}
+
+#[test]
+fn cobfile_resolves_known_callins_in_real_script() {
+    let Some(cob) = load_cob("kernel.cob") else {
+        eprintln!("Skipping: kernel.cob not found");
+        return;
+    };
+    assert!(cob.has_callin(CallinSlot::Plain(CobFn::Create)));
+    assert!(cob.has_callin(CallinSlot::Plain(CobFn::Activate)));
+    assert!(cob.has_callin(CallinSlot::Plain(CobFn::Deactivate)));
+    let create_id = cob.function_id_for_callin(CallinSlot::Plain(CobFn::Create));
+    assert_eq!(create_id, cob.function_id("Create"));
+}
+
+#[test]
+fn cobfile_resolves_weapon_callins_on_byte() {
+    let Some(cob) = load_cob("byte.cob") else {
+        eprintln!("Skipping: byte.cob not found");
+        return;
+    };
+    let aim = cob.function_id_for_callin(CallinSlot::Weapon(WeaponCallin::Aim, 0));
+    let fire = cob.function_id_for_callin(CallinSlot::Weapon(WeaponCallin::Fire, 0));
+    let query = cob.function_id_for_callin(CallinSlot::Weapon(WeaponCallin::Query, 0));
+    assert_eq!(aim, cob.function_id("AimWeapon1"));
+    assert_eq!(fire, cob.function_id("FireWeapon1"));
+    assert_eq!(query, cob.function_id("QueryWeapon1"));
+}
+
+#[test]
+fn parse_cob_named_records_script_name() {
+    let Some(dir) = scripts_dir() else {
+        return;
+    };
+    let data = std::fs::read(dir.join("bit.cob")).unwrap();
+    let cob = spring_cob::parse_cob_named(&data, "bit".to_string()).unwrap();
+    assert_eq!(cob.name, "bit");
 }

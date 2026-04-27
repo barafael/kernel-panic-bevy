@@ -9,9 +9,16 @@ use std::io::Cursor;
 use binrw::{BinRead, binread};
 use thiserror::Error;
 
+use crate::opcodes::Opcode;
+use crate::script_names::{CallinSlot, resolve_callin, total_callin_slots};
+
 /// A parsed COB file ready for execution by the VM.
 #[derive(Debug, Clone)]
 pub struct CobFile {
+    /// Source identifier — usually the script's basename ("bit",
+    /// "kernel", ...). Mirrors upstream `CCobFile::name`. Used in error
+    /// messages and for logging only; not consulted during execution.
+    pub name: String,
     /// Script function names (e.g. "Create", "AimWeapon1").
     pub script_names: Vec<String>,
     /// Byte offsets into `code` where each script starts (in 32-bit words).
@@ -26,6 +33,18 @@ pub struct CobFile {
     pub num_static_vars: usize,
     /// Sound names (only present in version 6 / TA:K files).
     pub sound_names: Vec<String>,
+    /// For each script index, `Some(name)` if the script is a Lua-only
+    /// reference (either declared with the `lua_` prefix, or whose
+    /// first opcode is [`Opcode::SignatureLua`]). The string is the
+    /// Lua callback name minus the `lua_` prefix. Mirrors upstream
+    /// `CCobFile::luaScripts`. Always the same length as
+    /// `script_names`; non-Lua entries are an empty string.
+    pub lua_scripts: Vec<String>,
+    /// Callin lookup: for each `CallinSlot::callin_index()` returns the
+    /// script function id (`Some(idx)`) if the script defines that
+    /// well-known entry point, else `None`. Mirrors upstream
+    /// `CCobFile::scriptIndex`.
+    callin_index: Vec<Option<usize>>,
 }
 
 /// Raw COB file header — 11 little-endian i32 fields, plus two more on
@@ -80,8 +99,17 @@ impl From<binrw::Error> for CobParseError {
     }
 }
 
-/// Parse a COB file from raw bytes.
+/// Parse a COB file from raw bytes. The resulting file's
+/// [`CobFile::name`] is left empty — use [`parse_cob_named`] when you
+/// know the script's source name (typically the basename without
+/// extension), so error messages and logs identify it.
 pub fn parse_cob(data: &[u8]) -> Result<CobFile, CobParseError> {
+    parse_cob_named(data, String::new())
+}
+
+/// Same as [`parse_cob`] but stamps the file with its source name so
+/// later logging / error messages can identify it.
+pub fn parse_cob_named(data: &[u8], name: String) -> Result<CobFile, CobParseError> {
     if data.len() < 44 {
         return Err(CobParseError::HeaderTruncated(data.len()));
     }
@@ -168,7 +196,41 @@ pub fn parse_cob(data: &[u8]) -> Result<CobFile, CobParseError> {
         sound_names.push(read_null_string(data, name_offset)?);
     }
 
+    // Detect Lua scripts. Either: name starts with `lua_` (engine
+    // synthesises a callback under that name), or the first bytecode
+    // word is the SIGNATURE_LUA sentinel (Recoil-style Lua reference).
+    // See upstream CobFile.cpp:139-145.
+    let signature_lua = Opcode::SignatureLua as i32;
+    let lua_scripts: Vec<String> = script_names
+        .iter()
+        .enumerate()
+        .map(|(i, fn_name)| {
+            if let Some(stripped) = fn_name.strip_prefix("lua_") {
+                stripped.to_string()
+            } else if code.get(script_offsets[i]).copied() == Some(signature_lua) {
+                fn_name.clone()
+            } else {
+                String::new()
+            }
+        })
+        .collect();
+
+    // Build the COBFN_* → script-id table. Multiple `script_names` may
+    // legitimately resolve to the same callin slot (legacy aliases),
+    // and we want the *last* match to win — matches upstream's
+    // unordered-map iteration which the engine relies on for the
+    // weapon-numbered name (e.g. `AimWeapon1`) to override the legacy
+    // `AimPrimary` alias. Iterating in script-id order with overwrite
+    // is good enough since both writes land in the same slot.
+    let mut callin_index = vec![None; total_callin_slots()];
+    for (id, fn_name) in script_names.iter().enumerate() {
+        if let Some(slot) = resolve_callin(fn_name) {
+            callin_index[slot.callin_index()] = Some(id);
+        }
+    }
+
     Ok(CobFile {
+        name,
         script_names,
         script_offsets,
         script_lengths,
@@ -176,6 +238,8 @@ pub fn parse_cob(data: &[u8]) -> Result<CobFile, CobParseError> {
         code,
         num_static_vars,
         sound_names,
+        lua_scripts,
+        callin_index,
     })
 }
 
@@ -183,6 +247,91 @@ impl CobFile {
     /// Find a script function by name, returning its index.
     pub fn function_id(&self, name: &str) -> Option<usize> {
         self.script_names.iter().position(|n| n == name)
+    }
+
+    /// Resolve a known callin slot ([`CallinSlot::Plain`] or
+    /// [`CallinSlot::Weapon`]) to the script function id that
+    /// implements it on this file, or `None` if the script omits
+    /// the callin. Mirrors upstream's `cobFile->scriptIndex[COBFN_*]`
+    /// O(1) lookup; preferred over [`CobFile::function_id`] when the
+    /// callin is a well-known one because it skips the string compare.
+    pub fn function_id_for_callin(&self, slot: CallinSlot) -> Option<usize> {
+        self.callin_index
+            .get(slot.callin_index())
+            .copied()
+            .flatten()
+    }
+
+    /// True if the script defines [`CallinSlot::Plain`] /
+    /// [`CallinSlot::Weapon`] entry — equivalent to
+    /// `function_id_for_callin(slot).is_some()`. Mirrors upstream's
+    /// `CCobInstance::HasFunction`.
+    pub fn has_callin(&self, slot: CallinSlot) -> bool {
+        self.function_id_for_callin(slot).is_some()
+    }
+
+    /// True if the given script id is a Lua-only reference (defined
+    /// via the `lua_` prefix or [`Opcode::SignatureLua`]). Lua
+    /// references must not be executed as bytecode — the engine
+    /// dispatches them to a Lua callback instead. Without a Lua VM
+    /// the VM still detects them and avoids running garbage.
+    pub fn is_lua_script(&self, function_id: usize) -> bool {
+        self.lua_scripts
+            .get(function_id)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Hand-build a [`CobFile`] without going through the binary
+    /// parser. Intended for unit tests that want to exercise the VM on
+    /// synthetic bytecode (single-function fixtures, opcode probes,
+    /// etc.) without round-tripping through `.cob` headers.
+    ///
+    /// Populates `lua_scripts` and `callin_index` consistently with
+    /// the binary parser so callin lookups work identically.
+    #[doc(hidden)]
+    pub fn from_test_parts(
+        name: impl Into<String>,
+        script_names: Vec<String>,
+        script_offsets: Vec<usize>,
+        script_lengths: Vec<usize>,
+        piece_names: Vec<String>,
+        code: Vec<i32>,
+        num_static_vars: usize,
+        sound_names: Vec<String>,
+    ) -> Self {
+        let signature_lua = Opcode::SignatureLua as i32;
+        let lua_scripts: Vec<String> = script_names
+            .iter()
+            .enumerate()
+            .map(|(i, fn_name)| {
+                if let Some(stripped) = fn_name.strip_prefix("lua_") {
+                    stripped.to_string()
+                } else if code.get(script_offsets[i]).copied() == Some(signature_lua) {
+                    fn_name.clone()
+                } else {
+                    String::new()
+                }
+            })
+            .collect();
+        let mut callin_index = vec![None; total_callin_slots()];
+        for (id, fn_name) in script_names.iter().enumerate() {
+            if let Some(slot) = resolve_callin(fn_name) {
+                callin_index[slot.callin_index()] = Some(id);
+            }
+        }
+        Self {
+            name: name.into(),
+            script_names,
+            script_offsets,
+            script_lengths,
+            piece_names,
+            code,
+            num_static_vars,
+            sound_names,
+            lua_scripts,
+            callin_index,
+        }
     }
 }
 

@@ -73,10 +73,13 @@
 
 mod cob_file;
 mod opcodes;
+pub mod script_names;
 pub mod unit_values;
 mod vm;
 
-pub use cob_file::{CobFile, CobParseError, parse_cob};
+pub use cob_file::{CobFile, CobParseError, parse_cob, parse_cob_named};
+pub use opcodes::Opcode;
+pub use script_names::{CallinSlot, CobFn, WeaponCallin};
 pub use vm::{AnimCommand, AnimType, CobVm, ThreadState};
 
 /// The runtime fixed-point scale for every linear and angular value in a
