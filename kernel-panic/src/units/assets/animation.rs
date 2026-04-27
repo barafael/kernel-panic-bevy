@@ -226,21 +226,18 @@ fn cobwtf_turn_axis(axis: i32, value: i32) -> i32 {
     if axis == 2 { -value } else { value }
 }
 
-/// Spin axis mapping. With the spawn-time `model_root` 180° Y rotation
-/// we now apply, an X-axis spin on a piece — spinning around its local
-/// `+X` — is rendered around world `-X` (model_root flips the X axis),
-/// which already inverts Spring's left-handed handedness for X spins.
-/// So an unmodified Spring `spin body x +180` produces the expected
-/// forward roll (top of the Pointer cube toward the direction of
-/// motion) without any extra negation here.
-///
-/// Z still needs negation: the same model_root-flip-vs-handedness
-/// argument applied to Z would also cancel out, but Spring's `RotateZ`
-/// is left-handed independently of the front-axis convention, and we
-/// haven't found a Z-axis spin in the KP roster to verify against —
-/// keep the historical sign and revisit if a unit reports it wrong.
+/// Spin on the X axis additionally needs its sign flipped: Spring's
+/// "spin body around x-axis" rolls a unit forward over its nose as it
+/// moves, but the same raw angular velocity rolls a Bevy (right-handed)
+/// mesh backward. Flipping X here restores the expected forward roll
+/// (visible on the Pointer cube while moving). Z still needs the Turn
+/// negation.
 fn cobwtf_spin_axis(axis: i32, value: i32) -> i32 {
-    if axis == 2 { -value } else { value }
+    match axis {
+        0 => -value,
+        2 => -value,
+        _ => value,
+    }
 }
 
 /// Move destinations on the X axis are mirrored between Spring and Bevy.
