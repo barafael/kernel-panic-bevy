@@ -1,7 +1,7 @@
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use crate::map_types::{ArchiveError, LuaFile};
+use crate::map_types::{ArchiveError, BitmapFile, LuaFile};
 
 /// Extracted map data from an archive.
 #[derive(Debug)]
@@ -13,6 +13,14 @@ pub struct ExtractedMap {
     pub smd_text: Option<String>,
     /// Lua files found in the archive (gadgets, mapinfo.lua, featureplacer scripts, etc.).
     pub lua_files: Vec<LuaFile>,
+    /// PNG/JPG bitmaps found under `bitmaps/` in the archive — used by
+    /// Lua-driven maps that pick a runtime diffuse from a skin set.
+    pub bitmaps: Vec<BitmapFile>,
+}
+
+fn is_bitmap_path(lower: &str) -> bool {
+    lower.starts_with("bitmaps/")
+        && (lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg"))
 }
 
 /// Load map data from a .sd7, .sdz, or raw .smf file.
@@ -50,6 +58,7 @@ pub fn load_map_archive(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                 smt_data,
                 smd_text,
                 lua_files: vec![],
+                bitmaps: vec![],
             })
         }
         other => Err(ArchiveError::UnsupportedFormat(other.to_string())),
@@ -67,12 +76,13 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     let mut smt_data: Option<Vec<u8>> = None;
     let mut smd_text: Option<String> = None;
     let mut lua_files: Vec<LuaFile> = Vec::new();
+    let mut bitmaps: Vec<BitmapFile> = Vec::new();
     let mut smf_name = String::new();
 
     archive
         .for_each_entries(|entry, reader| {
             let name = entry.name().to_string();
-            let lower = name.to_ascii_lowercase();
+            let lower = name.to_ascii_lowercase().replace('\\', "/");
             if lower.ends_with(".smf") && smf_data.is_none() {
                 let mut buf = Vec::new();
                 reader.read_to_end(&mut buf)?;
@@ -93,6 +103,13 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                     path: name,
                     content: String::from_utf8_lossy(&buf).into_owned(),
                 });
+            } else if is_bitmap_path(&lower) {
+                let mut buf = Vec::new();
+                reader.read_to_end(&mut buf)?;
+                bitmaps.push(BitmapFile {
+                    path: name,
+                    data: buf,
+                });
             }
             Ok(true) // always continue — Lua files can be anywhere
         })
@@ -105,6 +122,7 @@ fn extract_from_7z(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             smt_data,
             smd_text,
             lua_files,
+            bitmaps,
         }),
         None => Err(ArchiveError::NoSmfFound),
     }
@@ -118,12 +136,13 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
     let mut smt_data: Option<Vec<u8>> = None;
     let mut smd_text: Option<String> = None;
     let mut lua_files: Vec<LuaFile> = Vec::new();
+    let mut bitmaps: Vec<BitmapFile> = Vec::new();
     let mut smf_name = String::new();
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let name = entry.name().to_string();
-        let lower = name.to_ascii_lowercase();
+        let lower = name.to_ascii_lowercase().replace('\\', "/");
         if lower.ends_with(".smf") && smf_data.is_none() {
             let mut buf = Vec::with_capacity(entry.size() as usize);
             entry.read_to_end(&mut buf)?;
@@ -144,6 +163,13 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                 path: name,
                 content: String::from_utf8_lossy(&buf).into_owned(),
             });
+        } else if is_bitmap_path(&lower) {
+            let mut buf = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut buf)?;
+            bitmaps.push(BitmapFile {
+                path: name,
+                data: buf,
+            });
         }
     }
 
@@ -154,6 +180,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
             smt_data,
             smd_text,
             lua_files,
+            bitmaps,
         }),
         None => Err(ArchiveError::NoSmfFound),
     }

@@ -14,6 +14,7 @@ mlua = { version = "0.11", features = ["lua51", "vendored"] }
 binrw = "0.15.1"
 serde = { workspace = true }
 postcard = { workspace = true }
+image = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

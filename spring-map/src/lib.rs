@@ -1,5 +1,6 @@
 pub mod baked;
 pub mod lua_heightmap;
+pub mod lua_skin;
 pub mod map_types;
 pub mod mapinfo_lua;
 pub mod sd7_archive;
@@ -32,13 +33,18 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
     let mut parsed = parse_smf(&extracted.smf_data)?;
 
     // Execute any Lua heightmap gadgets (e.g., Palladium's platform system).
-    let gadget_count =
+    let gadget_results =
         lua_heightmap::apply_lua_heightmap_gadgets(&mut parsed, &extracted.lua_files);
-    if gadget_count > 0 {
-        eprintln!("Applied {gadget_count} Lua heightmap gadget(s)");
+    if !gadget_results.is_empty() {
+        eprintln!("Applied {} Lua heightmap gadget(s)", gadget_results.len());
     }
 
-    let ground_texture = match &extracted.smt_data {
+    // First try the SMT (engine-baked diffuse). If a Lua-driven gadget
+    // told us to use a runtime skin instead — Hex Farm picks
+    // `bitmaps/MapTex/hexfarm8_<skin>.<ext>` — that wins, because the
+    // SMT in those archives is a placeholder that Spring overwrites at
+    // runtime via `SetMapShadingTexture`.
+    let smt_texture = match &extracted.smt_data {
         Some(smt_data) => {
             let tiles = parse_smt_tiles(smt_data)?;
             Some(assemble_ground_texture(
@@ -49,6 +55,9 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         }
         None => None,
     };
+    let ground_texture =
+        lua_skin::composite_ground_texture(&gadget_results, &extracted.bitmaps, &parsed)
+            .or(smt_texture);
 
     let map_info = extracted
         .smd_text

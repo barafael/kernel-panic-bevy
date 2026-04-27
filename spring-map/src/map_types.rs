@@ -281,6 +281,53 @@ pub struct LuaFile {
     pub content: String,
 }
 
+/// A raw bitmap (PNG/JPG) shipped inside the map archive.
+///
+/// Lua-driven maps (e.g. Hex Farm) keep their actual diffuse textures
+/// here under `bitmaps/MapTex/` and bind them at runtime via Spring's
+/// graphics API. We pre-extract them so the texture compositor can pick
+/// the right one without touching the archive again.
+#[derive(Debug, Clone)]
+pub struct BitmapFile {
+    pub path: String,
+    pub data: Vec<u8>,
+}
+
+/// One captured `SendToUnsynced(...)` call from a Lua gadget.
+///
+/// Spring gadgets run in two halves — synced (gameplay) and unsynced
+/// (rendering). They communicate via `SendToUnsynced(msgName, ...args)`.
+/// We only execute the synced half and capture the messages it would
+/// have sent, so the renderer can mirror the unsynced compositing logic
+/// from Rust.
+pub type UnsyncedMessage = Vec<UnsyncedArg>;
+
+#[derive(Debug, Clone)]
+pub enum UnsyncedArg {
+    Integer(i64),
+    Number(f64),
+    String(String),
+    Bool(bool),
+    Nil,
+}
+
+impl UnsyncedArg {
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::Integer(i) => Some(*i),
+            Self::Number(n) => Some(*n as i64),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// Pre-computed mipmap chain for a texture.
 pub struct MipmapData {
     /// Concatenated pixel data for all mip levels (level 0 first).

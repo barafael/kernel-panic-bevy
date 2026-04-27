@@ -3,17 +3,37 @@
 /// This stubs the minimal Spring API surface needed for heightmap gadgets
 /// like Palladium's `PalladiumHeight.lua` to modify the terrain during
 /// their `Initialize()` call.
+///
+/// Map gadgets often run in two halves — synced (gameplay/heightmap)
+/// and unsynced (rendering). After the synced `Initialize()` completes
+/// we drive the synced→unsynced handshake (`gadget:RecvLuaMsg`) and
+/// capture every `SendToUnsynced(...)` call. Callers that mirror the
+/// unsynced compositing logic (e.g. selecting a Lua-driven map skin)
+/// can read those messages from [`LuaGadgetResult`] without touching
+/// the OpenGL API the unsynced half would normally use.
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use mlua::prelude::*;
 
-use crate::map_types::{LuaFile, ParsedMap, SQUARE_SIZE};
+use crate::map_types::{LuaFile, ParsedMap, SQUARE_SIZE, UnsyncedArg, UnsyncedMessage};
+
+/// Per-gadget output from running the synced half.
+#[derive(Debug, Default, Clone)]
+pub struct LuaGadgetResult {
+    /// Captured `SendToUnsynced(...)` calls from this gadget, in order.
+    pub unsynced_messages: Vec<UnsyncedMessage>,
+}
 
 /// Find and execute any heightmap gadgets from the extracted Lua files.
 ///
-/// Modifies `map.heights` in place. Returns the number of gadgets executed.
-pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -> usize {
+/// Modifies `map.heights` in place. Returns one [`LuaGadgetResult`] per
+/// gadget that ran (in load order). The number of executed gadgets is
+/// `result.len()`.
+pub fn apply_lua_heightmap_gadgets(
+    map: &mut ParsedMap,
+    lua_files: &[LuaFile],
+) -> Vec<LuaGadgetResult> {
     let gadgets: Vec<&LuaFile> = lua_files
         .iter()
         .filter(|f| {
@@ -23,10 +43,10 @@ pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -
         .collect();
 
     if gadgets.is_empty() {
-        return 0;
+        return Vec::new();
     }
 
-    let mut executed = 0;
+    let mut results = Vec::new();
 
     for gadget in &gadgets {
         // Only execute gadgets that look like they modify the heightmap.
@@ -36,9 +56,9 @@ pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -
         }
 
         match execute_heightmap_gadget(map, &gadget.content) {
-            Ok(()) => {
+            Ok(result) => {
                 eprintln!("Executed heightmap gadget: {}", gadget.path);
-                executed += 1;
+                results.push(result);
             }
             Err(error) => {
                 eprintln!(
@@ -49,10 +69,13 @@ pub fn apply_lua_heightmap_gadgets(map: &mut ParsedMap, lua_files: &[LuaFile]) -
         }
     }
 
-    executed
+    results
 }
 
-fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), LuaError> {
+fn execute_heightmap_gadget(
+    map: &mut ParsedMap,
+    source: &str,
+) -> Result<LuaGadgetResult, LuaError> {
     let heightmap_w = map.header.heightmap_width();
     let heightmap_h = map.header.heightmap_height();
     let world_size_x = (map.header.map_x * SQUARE_SIZE) as f32;
@@ -62,10 +85,12 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
     // heights out of `map` avoids a full clone while the gadget runs — but we
     // must always put them back (even on error) so the map stays well-formed.
     let heights = Rc::new(RefCell::new(std::mem::take(&mut map.heights)));
+    let unsynced: Rc<RefCell<Vec<UnsyncedMessage>>> = Rc::new(RefCell::new(Vec::new()));
 
     let result = run_gadget_internal(
         source,
         &heights,
+        &unsynced,
         heightmap_w,
         heightmap_h,
         world_size_x,
@@ -78,12 +103,17 @@ fn execute_heightmap_gadget(map: &mut ParsedMap, source: &str) -> Result<(), Lua
         .expect("all Lua references should be dropped after the VM is gone")
         .into_inner();
 
-    result
+    let unsynced_messages = Rc::try_unwrap(unsynced)
+        .expect("all Lua references should be dropped after the VM is gone")
+        .into_inner();
+
+    result.map(|()| LuaGadgetResult { unsynced_messages })
 }
 
 fn run_gadget_internal(
     source: &str,
     heights: &Rc<RefCell<Vec<f32>>>,
+    unsynced: &Rc<RefCell<Vec<UnsyncedMessage>>>,
     heightmap_w: usize,
     heightmap_h: usize,
     world_size_x: f32,
@@ -214,6 +244,22 @@ fn run_gadget_internal(
         lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
     )?;
 
+    // Stubs for synced→unsynced messaging round-trip and gameframe
+    // accessors that some gadgets sprinkle through their synced half.
+    spring_table.set(
+        "SendLuaRulesMsg",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set(
+        "SendCommands",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    spring_table.set("GetGameFrame", lua.create_function(|_, ()| Ok(0))?)?;
+    spring_table.set(
+        "GetTeamColor",
+        lua.create_function(|_, _: LuaMultiValue| Ok((1.0, 1.0, 1.0, 1.0)))?,
+    )?;
+
     // Feature stubs (return empty results / no-op)
     spring_table.set(
         "GetAllFeatures",
@@ -268,6 +314,29 @@ fn run_gadget_internal(
     lua.globals().set("FeatureDefs", lua.create_table()?)?;
     lua.globals().set("WeaponDefs", lua.create_table()?)?;
 
+    // --- SendToUnsynced(msgName, ...args) — capture for the renderer ---
+    {
+        let unsynced_ref = Rc::clone(unsynced);
+        let send_to_unsynced = lua.create_function(move |_, args: LuaMultiValue| {
+            let msg: UnsyncedMessage = args
+                .iter()
+                .map(|v| match v {
+                    LuaValue::Integer(i) => UnsyncedArg::Integer(*i),
+                    LuaValue::Number(n) => UnsyncedArg::Number(*n),
+                    LuaValue::String(s) => {
+                        UnsyncedArg::String(s.to_str().map(|s| s.to_string()).unwrap_or_default())
+                    }
+                    LuaValue::Boolean(b) => UnsyncedArg::Bool(*b),
+                    LuaValue::Nil => UnsyncedArg::Nil,
+                    _ => UnsyncedArg::Nil,
+                })
+                .collect();
+            unsynced_ref.borrow_mut().push(msg);
+            Ok(())
+        })?;
+        lua.globals().set("SendToUnsynced", send_to_unsynced)?;
+    }
+
     // --- Stub gadgetHandler ---
     let gadget_handler = lua.create_table()?;
     gadget_handler.set("IsSyncedCode", lua.create_function(|_, ()| Ok(true))?)?;
@@ -277,6 +346,10 @@ fn run_gadget_internal(
     )?;
     gadget_handler.set(
         "RemoveGadget",
+        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+    )?;
+    gadget_handler.set(
+        "AddSyncAction",
         lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
     )?;
     lua.globals().set("gadgetHandler", gadget_handler)?;
@@ -300,7 +373,24 @@ fn run_gadget_internal(
 
     // Call gadget:Initialize() if it exists.
     if let Ok(init_fn) = gadget_table.get::<LuaFunction>("Initialize") {
-        init_fn.call::<()>(gadget_table)?;
+        init_fn.call::<()>(&gadget_table)?;
+    }
+
+    // Trigger the synced→unsynced handshake. Spring gadgets that compose
+    // visuals from runtime data ship a `RecvLuaMsg(msg, player)` callin
+    // that, on a magic ping from the unsynced half, fans out the layout
+    // via `SendToUnsynced(...)`. We don't run unsynced, so we ping it
+    // directly with the conventional "<gadget name>: send me the data!"
+    // string used by HexFarm and similar.
+    if let Ok(recv) = gadget_table.get::<LuaFunction>("RecvLuaMsg") {
+        if let Ok(get_info) = gadget_table.get::<LuaFunction>("GetInfo") {
+            let info: LuaTable = get_info.call(&gadget_table)?;
+            let name: String = info.get("name").unwrap_or_else(|_| String::new());
+            if !name.is_empty() {
+                let msg = format!("{name}: send me the data!");
+                let _ = recv.call::<()>((&gadget_table, msg, 0));
+            }
+        }
     }
 
     Ok(())
@@ -342,8 +432,8 @@ mod tests {
             content: gadget_source.to_string(),
         }];
 
-        let executed = apply_lua_heightmap_gadgets(&mut map, &lua_files);
-        assert_eq!(executed, 1);
+        let results = apply_lua_heightmap_gadgets(&mut map, &lua_files);
+        assert_eq!(results.len(), 1);
 
         // The gadget set all accessible heights to 200.
         assert!((map.heights[0] - 200.0).abs() < 0.01);
@@ -376,8 +466,12 @@ mod tests {
             "Palladium should be flat before gadget execution"
         );
 
-        let executed = apply_lua_heightmap_gadgets(&mut parsed, &extracted.lua_files);
-        assert_eq!(executed, 1, "Should execute exactly one heightmap gadget");
+        let results = apply_lua_heightmap_gadgets(&mut parsed, &extracted.lua_files);
+        assert_eq!(
+            results.len(),
+            1,
+            "Should execute exactly one heightmap gadget"
+        );
 
         // After gadget: heights should vary (platforms at different levels).
         let min_height = parsed.heights.iter().cloned().fold(f32::INFINITY, f32::min);
