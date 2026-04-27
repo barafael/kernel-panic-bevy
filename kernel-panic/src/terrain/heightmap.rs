@@ -95,6 +95,32 @@ impl Heightmap {
         Vec3::new(-dy_dx, 1.0, -dy_dz).normalize()
     }
 
+    /// Steepest slope sampled across an axis-aligned footprint centred on
+    /// `(center.x, center.z)`, returned in Spring's `1 - cos(angle)`
+    /// encoding so callers can compare directly against
+    /// [`spring_pathfinding::max_slope_from_degrees`] caps. Footprint is in
+    /// elmos; sampling stride is one heightmap square (8 elmos).
+    pub fn max_slope_in_footprint(&self, center: Vec3, footprint: Vec2) -> f32 {
+        let half_x = footprint.x * 0.5;
+        let half_z = footprint.y * 0.5;
+        let step = self.square_size;
+        let mut max_slope = 0.0_f32;
+        let mut x = center.x - half_x;
+        while x <= center.x + half_x {
+            let mut z = center.z - half_z;
+            while z <= center.z + half_z {
+                let n = self.normal(x, z);
+                let slope = (1.0 - n.y.max(0.0)).max(0.0);
+                if slope > max_slope {
+                    max_slope = slope;
+                }
+                z += step;
+            }
+            x += step;
+        }
+        max_slope
+    }
+
     /// Does a straight line from `from` to `to` clear the terrain?
     ///
     /// `margin` is added to each sampled terrain height — callers pass a
@@ -195,6 +221,33 @@ mod tests {
         assert!((n.z).abs() < 1e-4, "no Z gradient on an X-only ramp");
         assert!(n.y > 0.0, "normal still points up-ish");
         assert!((n.length() - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn max_slope_in_footprint_zero_on_flat_terrain() {
+        let hm = flat(42.0, 8, 8);
+        let s = hm.max_slope_in_footprint(Vec3::new(32.0, 0.0, 32.0), Vec2::splat(32.0));
+        assert!(s.abs() < 1e-4);
+    }
+
+    #[test]
+    fn max_slope_in_footprint_picks_up_a_ramp() {
+        // 5×5 ramp along +X: slope = 1 elmo rise per elmo of run (45°).
+        let mut heights = Vec::with_capacity(25);
+        for _ in 0..5 {
+            for x in 0..5 {
+                heights.push(x as f32 * 8.0);
+            }
+        }
+        let hm = Heightmap {
+            heights,
+            width: 5,
+            height: 5,
+            square_size: 8.0,
+        };
+        // 1 - cos(45°) ≈ 0.293.
+        let s = hm.max_slope_in_footprint(Vec3::new(16.0, 0.0, 16.0), Vec2::splat(16.0));
+        assert!((s - 0.293).abs() < 0.01, "expected ~0.293, got {s}");
     }
 
     #[test]

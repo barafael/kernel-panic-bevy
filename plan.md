@@ -160,13 +160,11 @@ Remaining:
 
 - Terminal/Obelisk/Firewall special-building abilities — deferred to §3.5
   (Command-Fire Framework).
-- **Building-placement slope check** — each building's FBI `MaxSlope`
-  (Socket/Firewall/Terminal/Obelisk=10, BadBlock=32, Kernel/Hole=60)
-  governs whether a builder can drop the ghost there. Currently the
-  placement ghost only checks vent overlap + `VentClaim` (not slope),
-  so on hilly maps you can snap a factory onto an angled floor. Fold
-  a `heightmap.max_slope_in_footprint(site, footprint) ≤ MaxSlope_deg`
-  check into the ghost snap before the cursor colour turns green.
+- ✅ **Building-placement slope check** — done. `Heightmap::max_slope_in_footprint`
+  samples the steepest cell across the building's `FootprintX × FootprintZ`
+  in Spring's `1 - cos(angle)` encoding; `update_ghost` (placement.rs)
+  rejects the snap when it exceeds `unit_registry.max_slope_ratio(kind)`.
+  Footprint values pulled from FBI via `UnitRegistry::footprint_elmos`.
 
 Done in this pass:
 

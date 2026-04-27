@@ -191,6 +191,20 @@ impl UnitRegistry {
         })
     }
 
+    /// Footprint in world elmos (`FootprintX × FootprintZ × 8`). Used by
+    /// the placement ghost to sample the slope a building would sit on.
+    /// Falls back to a 2×2-square footprint when FBI data is missing so
+    /// the gate has *some* extent to test rather than a zero-area point.
+    pub fn footprint_elmos(&self, kind: UnitKind) -> Vec2 {
+        const ELMOS_PER_SQUARE: f32 = 8.0;
+        self.def(kind).map_or(Vec2::splat(16.0), |d| {
+            Vec2::new(
+                d.footprint_x * ELMOS_PER_SQUARE,
+                d.footprint_z * ELMOS_PER_SQUARE,
+            )
+        })
+    }
+
     /// Build time in seconds, assuming the standard worker speed.
     pub fn build_time(&self, kind: UnitKind) -> f32 {
         self.def(kind)

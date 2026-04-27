@@ -22,6 +22,7 @@ use crate::interaction::movement::{MoveTarget, QueuedCommand};
 use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit};
 use crate::rendering::camera::RtsCamera;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
+use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, unit_material, unit_mesh};
 use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -189,6 +190,9 @@ fn update_ghost(
     ghost_mats: Query<&MeshMaterial3d<StandardMaterial>, With<GhostMarker>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     geovents: Query<&GeoventSmoker, Without<VentClaim>>,
+    placement: Res<PlacementMode>,
+    heightmap: Option<Res<Heightmap>>,
+    unit_registry: Res<UnitRegistry>,
 ) {
     let Some(ghost) = state.entity else {
         return;
@@ -214,10 +218,22 @@ fn update_ghost(
         }
     }
 
-    let (pos, valid) = match best {
+    let (pos, mut valid) = match best {
         Some((p, _)) => (p, true),
         None => (cursor_pt, false),
     };
+
+    // Slope gate: even on a snapped vent, reject if the building's
+    // footprint would straddle terrain steeper than its FBI MaxSlope.
+    // Mirrors upstream's `CGameHelper::TestUnitBuildSquare` slope check.
+    if valid && let (Some(kind), Some(hm)) = (placement.kind, heightmap.as_deref()) {
+        let footprint = unit_registry.footprint_elmos(kind);
+        let cap = unit_registry.max_slope_ratio(kind);
+        if hm.max_slope_in_footprint(pos, footprint) > cap {
+            valid = false;
+        }
+    }
+
     state.snapped = if valid { Some(pos) } else { None };
 
     if let Ok((mut tf, mut vis)) = transforms.get_mut(ghost) {
