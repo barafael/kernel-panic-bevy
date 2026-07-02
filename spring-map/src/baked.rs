@@ -181,6 +181,10 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         // looked at them was the SMT decoder, which already ran during
         // bake. Anyone needing this in future would add it here.
         smf_data: Vec::new(),
+        // Baked maps don't carry the captured Lua layout — the bake
+        // path runs before this work landed and tiles the skin into the
+        // ground texture only. Re-bake to get hex meshes via .kpmap.
+        lua_compositing: None,
     })
 }
 
@@ -225,6 +229,7 @@ mod tests {
                 lighting: Lighting::default(),
             }),
             smf_data: Vec::new(),
+            lua_compositing: None,
         }
     }
 

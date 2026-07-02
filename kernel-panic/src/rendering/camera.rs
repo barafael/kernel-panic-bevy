@@ -169,6 +169,43 @@ fn right_ground(state: &RtsCameraState) -> Vec3 {
     Vec3::new(f.z, 0.0, -f.x)
 }
 
+/// Active middle-mouse drag mode, set on press and held until release.
+#[derive(Default)]
+pub enum MiddleDrag {
+    #[default]
+    None,
+    /// Plain middle-drag: focus shifts so this world point stays under the cursor.
+    Pan { anchor: Vec3 },
+    /// Alt+middle-drag: orbit. Focus was already snapped to the cursor's
+    /// world point on press, so the existing yaw/pitch update orbits it.
+    Rotate,
+}
+
+fn intersect_ground_y(ray: Ray3d, plane_y: f32) -> Option<Vec3> {
+    let dir = *ray.direction;
+    if dir.y.abs() < 1e-6 {
+        return None;
+    }
+    let t = (plane_y - ray.origin.y) / dir.y;
+    if t < 0.0 {
+        return None;
+    }
+    // Cap near-horizon rays so a sliver of pitch doesn't put the anchor
+    // a million units away.
+    Some(ray.origin + dir * t.min(50_000.0))
+}
+
+fn cursor_world_on_plane(
+    camera: &Camera,
+    cam_gxf: &GlobalTransform,
+    window: &Window,
+    plane_y: f32,
+) -> Option<Vec3> {
+    let cursor = window.cursor_position()?;
+    let ray = camera.viewport_to_world(cam_gxf, cursor).ok()?;
+    intersect_ground_y(ray, plane_y)
+}
+
 // ---------------------------------------------------------------------------
 // Systems
 // ---------------------------------------------------------------------------
@@ -182,9 +219,22 @@ pub fn camera_control(
     mut mouse_motion: MessageReader<bevy::input::mouse::MouseMotion>,
     settings: Res<CameraSettings>,
     bounds: Res<MapBounds>,
-    mut query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    windows: Query<&Window>,
+    mut query: Query<
+        (
+            &Camera,
+            &GlobalTransform,
+            &mut RtsCameraState,
+            &mut Transform,
+        ),
+        With<RtsCamera>,
+    >,
+    mut drag: Local<MiddleDrag>,
 ) {
-    let Ok((mut state, mut transform)) = query.single_mut() else {
+    let Ok((camera, cam_gxf, mut state, mut transform)) = query.single_mut() else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
         return;
     };
 
@@ -228,15 +278,64 @@ pub fn camera_control(
             (state.distance * factor).clamp(settings.min_distance, settings.max_distance);
     }
 
-    // --- Orbit (middle-mouse drag) ---
-    if mouse_buttons.pressed(MouseButton::Middle) {
-        for motion in mouse_motion.read() {
-            state.yaw -= motion.delta.x * settings.rotate_speed_mouse;
-            state.pitch = (state.pitch + motion.delta.y * settings.rotate_speed_mouse)
-                .clamp(settings.min_pitch, settings.max_pitch);
+    // --- Middle-mouse: drag-pan, or alt+middle: orbit around cursor ---
+    if mouse_buttons.just_pressed(MouseButton::Middle) {
+        let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+        let plane_y = state.focus.y;
+        if alt_held {
+            // Re-anchor focus onto the world point under the cursor without
+            // a visible jump: keep the eye fixed and recompute yaw/pitch/distance
+            // around the new pivot.
+            *drag = MiddleDrag::Rotate;
+            if let Some(pivot) = cursor_world_on_plane(camera, cam_gxf, window, plane_y) {
+                let eye = transform.translation;
+                let offset = eye - pivot;
+                let horizontal = (offset.x * offset.x + offset.z * offset.z).sqrt();
+                let new_distance = offset.length();
+                let new_pitch = offset.y.atan2(horizontal);
+                let new_yaw = offset.x.atan2(offset.z);
+                if (settings.min_distance..=settings.max_distance).contains(&new_distance)
+                    && (settings.min_pitch..=settings.max_pitch).contains(&new_pitch)
+                {
+                    state.focus = pivot;
+                    state.distance = new_distance;
+                    state.yaw = new_yaw;
+                    state.pitch = new_pitch;
+                    state.smooth_focus = pivot;
+                    state.smooth_distance = new_distance;
+                    state.smooth_yaw = new_yaw;
+                    state.smooth_pitch = new_pitch;
+                }
+            }
+        } else if let Some(anchor) = cursor_world_on_plane(camera, cam_gxf, window, plane_y) {
+            *drag = MiddleDrag::Pan { anchor };
         }
-    } else {
-        mouse_motion.clear();
+    }
+    if mouse_buttons.just_released(MouseButton::Middle) {
+        *drag = MiddleDrag::None;
+    }
+
+    match &*drag {
+        MiddleDrag::Pan { anchor } => {
+            // Each frame: shift focus so the original anchor stays under the cursor.
+            // Sync smooth_focus too so the drag feels 1:1 instead of lagging.
+            if let Some(current) = cursor_world_on_plane(camera, cam_gxf, window, anchor.y) {
+                let new_focus = bounds.clamp_focus(state.focus + (*anchor - current));
+                state.focus = new_focus;
+                state.smooth_focus = new_focus;
+            }
+            mouse_motion.clear();
+        }
+        MiddleDrag::Rotate => {
+            for motion in mouse_motion.read() {
+                state.yaw -= motion.delta.x * settings.rotate_speed_mouse;
+                state.pitch = (state.pitch + motion.delta.y * settings.rotate_speed_mouse)
+                    .clamp(settings.min_pitch, settings.max_pitch);
+            }
+        }
+        MiddleDrag::None => {
+            mouse_motion.clear();
+        }
     }
 
     // --- Q/E rotate shortcuts ---

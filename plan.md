@@ -91,6 +91,29 @@ rather than ship a "mostly Spring" feel.
   footprint-radius underestimates the hit box by 2-3× and dropped hit
   rate to ~5%. Fixing this unblocks per-shot miss semantics, shield
   *interception* (§4.7), and projectile physics (§4.2).
+  *Foundation landed*: `combat::CollisionVolume` enum (Sphere / Cylinder /
+  Aabb) is cached at spawn from the S3O bounding sphere and exposes
+  `contains` + `ray_segment_hit` for the three shapes. Every unit
+  currently spawns a Sphere matching `hit_radius`.
+  *Wired into projectile mid-flight*: both `LaserBolt` and `ProjectileVisual`
+  in `weapon_fx::tick` now sweep their per-frame travel segment against
+  the target's current `CollisionVolume` via `target_volume_hit` before
+  falling back to the original `lead_raw >= total_distance` /
+  `progress >= 1.0` triggers. Moving targets are caught the moment the
+  bolt's segment crosses them; off-axis targets stay un-intercepted.
+  *Broad-phase landed*: a second pass via the `SpatialIndex`
+  (`broad_phase_volume_hit`) catches any non-friendly, non-attacker unit
+  whose volume the segment crosses — closest-`t` wins, friendlies are
+  skipped (matches upstream's default `collidefriendly=0`), and the
+  resolved damage redirects to the interloper instead of the originally
+  intended target. Tests:
+  `laser_bolt_intercepts_target_volume_before_predicted_impact`,
+  `laser_bolt_does_not_intercept_off_axis_target`, and
+  `laser_bolt_broad_phase_intercepts_enemy_in_path_skips_friendly`.
+  Remaining: route shield interception through `ray_segment_hit`
+  (so shields can absorb projectiles mid-flight, not only at
+  endpoint), and add per-unit Cylinder / Aabb classifiers (e.g. tall
+  thin units like Pointer).
 - **Target weighting** — `CWeapon::TargetWeight` scores candidates by
   threat/priority/health/weapon-match. We pick nearest (or farthest for
   `proximity_priority < 0`). Observable as "my Bits don't prefer soft
@@ -636,11 +659,25 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ### Performance
 
-- [ ] HUD systems despawn+respawn entire UI tree every frame (~30–50 entities) — use change
-  detection (`Changed<Selected>`, `Changed<Health>`, `Changed<Producer>`) to update in-place
-- [ ] `update_unit_highlight` clones and re-adds a `StandardMaterial` per selected/hovered
-  unit every frame, leaking orphaned handles — cache per-faction+brightness
-- [ ] `despawn_health_bars` is O(n×m) — use `HashSet` of removed units or query children
+- [x] ~~HUD systems despawn+respawn entire UI tree every frame (~30–50 entities) — use change
+  detection (`Changed<Selected>`, `Changed<Health>`, `Changed<Producer>`) to update in-place~~
+  Resolved via hash-based change detection: `info_panel`, `order_palette`, and
+  `build_menu` each carry a `*StateHash(u64)` marker on the panel root, hash a
+  `Snapshot` of the rendered content, and early-out when the hash matches.
+  Steady-state cost is one snapshot + hash per frame; rebuilds only fire on
+  selection / production / HP-bucket transitions.
+- [x] ~~`update_unit_highlight` clones and re-adds a `StandardMaterial` per selected/hovered
+  unit every frame, leaking orphaned handles — cache per-faction+brightness~~
+  Resolved via the `Highlighted(f32)` marker — the system early-outs when the
+  unit's currently-baked brightness already matches the desired factor, so
+  `apply_brightness` only mints a new `StandardMaterial` on state transitions
+  (not per frame). The previous bright handle is replaced by `MeshMaterial3d`,
+  so its asset reclaims when the strong handle drops.
+- [x] ~~`despawn_health_bars` is O(n×m) — use `HashSet` of removed units or query children~~
+  Switched to walking each deselected unit's `Children` directly (`children_q.get(unit)`),
+  filtering by an `Or<(With<HealthBarBg>, With<HealthBarFg>)>` query — O(removed ×
+  children-per-unit ≈ 2-3) instead of O(removed × total-bars-in-world). The 122
+  existing tests still pass; bar lifecycle is unchanged.
 - [ ] Melee flash and projectile materials created per-attack instead of cached — extend
   `BeamMaterialCache` to cover all weapon FX
 - [x] ~~Animation system allocates `Vec<(i32, i32)>` per animator per frame~~ — hoisted
@@ -648,11 +685,19 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   cleared at the start of each animator and drained at the end. Steady state: zero
   allocations.
 - [ ] Per-frame `UnitRegistry` lookups for immutable data (speed, weapon name) — cache as
-  ECS components at spawn time (e.g. `Speed(f32)`, `WeaponBinding(&str)`)
+  ECS components at spawn time (e.g. `Speed(f32)`, `WeaponBinding(&str)`).
+  *Partially done*: `WeaponBinding(WeaponId)` is now cached at spawn and read by
+  `combat_system` + `attack_ground_system`; the `unit_registry.weapon()` /
+  `weapon_registry.get()` string-hash chain is gone from those hot loops. `Speed(f32)`
+  caching is still pending.
 - [ ] `AttackEvent::weapon_name` is `String` (heap alloc per attack) — introduce a `WeaponId`
   newtype (interned string or index into `WeaponRegistry`) so attack events carry a cheap
   `Copy` identifier. `BurstFire.weapon` and `PendingDamage.weapon` are also `String` and
   clone per burst shot / damage event — they inherit from the same `WeaponId` change.
+  *Partial*: `WeaponId` + `intern` / `by_id` API and the slot-0 `BUILD_LASER` sentinel
+  exist on `WeaponRegistry`. The String fields on `AttackEvent` / `BurstFire` /
+  `PendingDamage` / `DelayedHit` are still string-typed — converting them is a
+  follow-up touching ~15 files that wasn't bundled with the per-frame fix.
 - [ ] `UnitRegistry::weapon()` returns raw TDF section name strings — return
   `Option<&WeaponDef>` directly so callers never see string keys, eliminating empty-string
   checks in combat.rs and hud.rs
@@ -679,16 +724,36 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   `tick_burst_fire`, `apply_damage`, and the command-fire paths, hashing a string each
   call. Intern weapon names into `WeaponId(u16)` during `WeaponRegistry::load()` and
   cache the ID as a component on attackers (paired with the `WeaponBinding` work above).
-- [ ] `bookkeeping::count_small_buildings` scans all `UnitType` entities every 0.25s even
-  though buildings are a small fraction and only change when one spawns or dies. Switch
-  to event-driven counters: bump on spawn, drop on `Dying`, so per-tick cost is zero.
-- [ ] `tick_deploy_state` walks every Deployable every frame even when nothing moved.
+  *Partially done*: `combat_system` and `attack_ground_system` now read a cached
+  `WeaponBinding(WeaponId)` and call `weapon_registry.by_id()` (a `Vec` index) instead
+  of `get(&str)`. Still pending: `tick_burst_fire`, `apply_damage`, and the command-fire
+  paths — those carry the weapon as a `String` field on `BurstFire` / `PendingDamage`
+  and need that field changed too.
+- [x] ~~`bookkeeping::count_small_buildings` scans all `UnitType` entities every 0.25s
+  even though buildings are a small fraction and only change when one spawns or dies.~~
+  Replaced by `track_added_buildings` (`Added<UnitType>`) + `track_dying_buildings`
+  (`Added<Dying>`); per-tick cost is now O(deltas), zero in steady state. Saturating
+  drop guards against any spurious `Dying`-without-prior-Add path.
+- [x] ~~`tick_deploy_state` walks every Deployable every frame even when nothing moved.
   Filter to `Changed<MoveTarget>` + in-flight transitions — the `Closed`/`Open` steady
-  states don't need a tick.
-- [ ] `ui::minimap::update_minimap` rewrites the full base image via
+  states don't need a tick.~~ *Lighter version landed*: an early-`continue` skips the
+  match arm + animator borrow when `timer == 0` and `(state, is_moving)` is already a
+  steady-state pair (Open + idle, Closed + moving). The query still iterates all
+  Deployables — a marker-component split would require coordinating
+  `RemovedComponents<MoveTarget>` and `Added<Deployable>`, which costs more than the
+  optimization saves at the current ~handful-of-Pointers scale.
+- [x] ~~`ui::minimap::update_minimap` rewrites the full base image via
   `copy_from_slice(&state.base_pixels)` every 0.1s. Track a dirty-rect of the previous
   frame's unit dots + viewport rectangle and restore only those pixels, turning an
-  O(W·H) memcpy into O(units + viewport_perimeter).
+  O(W·H) memcpy into O(units + viewport_perimeter).~~ Replaced the full-image
+  `copy_from_slice` with a per-pixel dirty list (`dirty_byte_indices`) populated
+  by `write_dirty_pixel` from both the dot loop and `draw_line`. Restore is now
+  O(touched_pixels) — at ~50 visible units + viewport rect roughly 30× cheaper
+  than the 200×200×4 memcpy. Capacity reused across refreshes (steady-state
+  zero-alloc). Tested via `write_dirty_pixel_records_byte_offset`,
+  `restore_loop_resets_only_dirty_pixels`,
+  `draw_line_populates_dirty_list`, and
+  `draw_line_clipped_writes_skip_dirty_list`.
 - [x] ~~`animation::publish_unit_values` pushed BUILD_PERCENT_LEFT to every animator every
   frame~~ — filtered to `With<Emerging>` + `RemovedComponents<Emerging>` so only
   mid-emerge animators pay the cost.
@@ -1061,13 +1126,11 @@ file is `spawning/mod.rs` at ~580 LoC.
   despawn+respawn the whole subtree. Also drop the per-frame
   `format!("{:.0}", …)` allocs.
 
-### 11.5 `MovementState` / `ProductionState` → change detection
+### 11.5 `MovementState` / `ProductionState` → change detection — ✅ DONE
 
-- [ ] Both components exist solely to track "was moving/building last frame"
-  and reimplement what Bevy gives you for free via `Added<MoveTarget>`,
-  `RemovedComponents<MoveTarget>`, and friends. Delete both components + the
-  per-frame commands-churn of `insert(MovementState {...})`. Saves 2
-  components, 2 systems, ~100 LoC.
+Both components were already deleted; behaviour now drives off
+`Added<MoveTarget>` / `RemovedComponents<MoveTarget>` (and the producer
+equivalents) directly. No grep hits for either type anywhere in the tree.
 
 ### 11.6 Cached per-unit stats
 

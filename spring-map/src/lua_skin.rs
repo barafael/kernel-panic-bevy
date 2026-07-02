@@ -15,7 +15,8 @@
 use thiserror::Error;
 
 use crate::lua_heightmap::LuaGadgetResult;
-use crate::map_types::{BitmapFile, GroundTexture, ParsedMap, UnsyncedMessage};
+use crate::lua_layout::HexFarmLayout;
+use crate::map_types::{BitmapFile, GroundTexture, ParsedMap};
 
 /// HexFarm's skin table (mirrors lines 16–26 of `HexFarm8.lua`).
 ///
@@ -43,6 +44,17 @@ const HEXFARM_SKINS: &[(i64, &str, &str)] = &[
 /// pattern that's just repeating itself.
 const COMPOSITE_TEXTURE_SIZE: usize = 4096;
 
+/// Decoded skin atlas — the same image the unsynced gadget binds via
+/// `gl.Texture(":a:bitmaps/MapTex/hexfarm8_<skin>.<ext>")`. Width and
+/// height match the source bitmap exactly so the renderer can map the
+/// 8-region UV strips directly. Pixels are tightly packed RGBA8.
+#[derive(Debug, Clone)]
+pub struct SkinAtlas {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
 #[derive(Debug, Error)]
 enum CompositeError {
     #[error("no `Skin` message captured from synced gadget")]
@@ -59,30 +71,46 @@ enum CompositeError {
     },
 }
 
-/// If a gadget told us which Lua skin to use, decode the matching
-/// bitmap and return a tiled ground texture. Returns `None` when no
-/// skin was selected (most maps) or the matching bitmap is missing or
-/// unreadable — caller falls back to the SMT-derived texture.
-pub fn composite_ground_texture(
-    gadget_results: &[LuaGadgetResult],
-    bitmaps: &[BitmapFile],
-    _parsed: &ParsedMap,
-) -> Option<GroundTexture> {
-    match try_composite(gadget_results, bitmaps) {
-        Ok(texture) => Some(texture),
+/// Decode the skin atlas referenced by a captured layout, if any.
+/// Returns `None` for maps without HexFarm-style Lua compositing or if
+/// the atlas can't be located / decoded.
+pub fn decode_skin_atlas(layout: &HexFarmLayout, bitmaps: &[BitmapFile]) -> Option<SkinAtlas> {
+    match try_decode_atlas(layout, bitmaps) {
+        Ok(atlas) => Some(atlas),
         Err(CompositeError::NoSkin) => None,
         Err(error) => {
-            eprintln!("Lua skin compositing skipped: {error}");
+            eprintln!("Lua skin atlas decoding skipped: {error}");
             None
         }
     }
 }
 
-fn try_composite(
+/// Convenience: tile a decoded atlas into a `GroundTexture` for use as
+/// the map's diffuse. Until the hex-tower meshes cover the play area
+/// this is what shows under the towers.
+pub fn ground_texture_from_atlas(atlas: &SkinAtlas) -> GroundTexture {
+    let img = image::RgbaImage::from_raw(atlas.width, atlas.height, atlas.pixels.clone())
+        .expect("SkinAtlas dimensions match its pixel buffer by construction");
+    tile_to_ground_texture(&img, COMPOSITE_TEXTURE_SIZE, COMPOSITE_TEXTURE_SIZE)
+}
+
+/// Back-compat shim: pick a skin and return a tiled `GroundTexture`,
+/// for callers that don't need the layout (bake_map, tests).
+pub fn composite_ground_texture(
     gadget_results: &[LuaGadgetResult],
     bitmaps: &[BitmapFile],
-) -> Result<GroundTexture, CompositeError> {
-    let skin = find_skin_message(gadget_results).ok_or(CompositeError::NoSkin)?;
+    _parsed: &ParsedMap,
+) -> Option<GroundTexture> {
+    let layout = HexFarmLayout::from_gadget_results(gadget_results)?;
+    let atlas = decode_skin_atlas(&layout, bitmaps)?;
+    Some(ground_texture_from_atlas(&atlas))
+}
+
+fn try_decode_atlas(
+    layout: &HexFarmLayout,
+    bitmaps: &[BitmapFile],
+) -> Result<SkinAtlas, CompositeError> {
+    let skin = layout.skin.ok_or(CompositeError::NoSkin)?;
     let (name, ext) = HEXFARM_SKINS
         .iter()
         .find(|(n, _, _)| *n == skin)
@@ -105,36 +133,11 @@ fn try_composite(
         img.height()
     );
 
-    Ok(tile_to_ground_texture(
-        &img,
-        COMPOSITE_TEXTURE_SIZE,
-        COMPOSITE_TEXTURE_SIZE,
-    ))
-}
-
-/// Walk every captured `SendToUnsynced(...)` looking for the
-/// `("ReceiveHexFarmLayout", "Skin", N)` shape used by HexFarm.
-fn find_skin_message(gadget_results: &[LuaGadgetResult]) -> Option<i64> {
-    for result in gadget_results {
-        for msg in &result.unsynced_messages {
-            if let Some(skin) = match_skin(msg) {
-                return Some(skin);
-            }
-        }
-    }
-    None
-}
-
-fn match_skin(msg: &UnsyncedMessage) -> Option<i64> {
-    let action = msg.first()?.as_str()?;
-    if !action.eq_ignore_ascii_case("ReceiveHexFarmLayout") {
-        return None;
-    }
-    let key = msg.get(1)?.as_str()?;
-    if !key.eq_ignore_ascii_case("Skin") {
-        return None;
-    }
-    msg.get(2)?.as_i64()
+    Ok(SkinAtlas {
+        width: img.width(),
+        height: img.height(),
+        pixels: img.into_raw(),
+    })
 }
 
 /// Case-insensitive lookup for `bitmaps/MapTex/hexfarm8_<skin>.<ext>`.

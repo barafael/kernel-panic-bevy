@@ -4,10 +4,9 @@ use bevy::prelude::*;
 
 use super::spawning::{
     EMERGE_DEPTH, EMERGE_LEAD_TIME, EmergeStyle, Emerging, FactoryPieces, FadeMaterials,
-    SelectionVolumeMaterial, spawn_unit,
+    SpawnContext, spawn_unit,
 };
-use crate::units::assets::animation::{CobAnimator, CobFileCache, PieceIndex};
-use crate::units::assets::meshes::S3OModelCache;
+use crate::units::assets::animation::{CobAnimator, PieceIndex};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -151,16 +150,9 @@ pub fn production_system(
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut cob_cache: ResMut<CobFileCache>,
-    invisible_mat: Option<Res<SelectionVolumeMaterial>>,
     existing_units: Query<(), With<UnitType>>,
-    unit_registry: Res<UnitRegistry>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    mut ctx: SpawnContext,
     // `Local` so the allocation is reused across frames — production
     // completions are sparse (most ticks push nothing), but fresh Vecs on
     // every frame cost allocator churn for no gain.
@@ -177,17 +169,13 @@ pub fn production_system(
         )>,
     >,
 ) {
-    let Some(invisible_mat) = invisible_mat else {
-        return;
-    };
-
     let dt = time.delta_secs();
     spawns.clear();
 
     for (mut producer, faction, team, global_tf, factory_pieces, animator, homebase) in
         &mut producers
     {
-        let Some(build_time) = producer.current_build_time(&unit_registry) else {
+        let Some(build_time) = producer.current_build_time(&ctx.unit_registry) else {
             // Queue is empty — idle.
             producer.progress = 0.0;
             continue;
@@ -255,7 +243,7 @@ pub fn production_system(
             // from `spawn_count`. Produces a deterministic, non-piling
             // rally cloud without any RNG or allocation.
             let kind = producer.current_production().unwrap();
-            let rally_point = if unit_registry.speed(kind) > 0.0 {
+            let rally_point = if ctx.unit_registry.speed(kind) > 0.0 {
                 let raw_forward = global_tf.forward().as_vec3();
                 let forward = if raw_forward.length_squared() > 0.01 {
                     Vec3::new(raw_forward.x, 0.0, raw_forward.z).normalize_or(Vec3::Z)
@@ -310,25 +298,11 @@ pub fn production_system(
         }
     }
 
-    let invisible_mat_ref = SelectionVolumeMaterial(invisible_mat.0.clone());
     for (kind, faction, team, spawn_pos, target_y, rally_point, emerge_duration, style) in
         spawns.drain(..)
     {
-        let entity = spawn_unit(
-            kind,
-            faction,
-            team,
-            spawn_pos,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut model_cache,
-            &mut cob_cache,
-            &invisible_mat_ref,
-            &unit_registry,
-        );
-        commands.entity(entity).insert(Emerging {
+        let entity = spawn_unit(kind, faction, team, spawn_pos, &mut ctx);
+        ctx.commands.entity(entity).insert(Emerging {
             target_y,
             remaining: emerge_duration,
             total: emerge_duration,
@@ -343,7 +317,7 @@ pub fn production_system(
         // exist until the next schedule sync), so a follow-up system
         // (`install_fade_materials`) does the clone next frame.
         if matches!(style, EmergeStyle::Fade) {
-            commands.entity(entity).insert(PendingFadeInstall);
+            ctx.commands.entity(entity).insert(PendingFadeInstall);
         }
     }
 }

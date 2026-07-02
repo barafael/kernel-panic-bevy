@@ -74,6 +74,14 @@ impl SpatialIndex {
         self.cells.entry(key).or_default().push(entry);
     }
 
+    /// Test-only: insert a fully-formed entry directly. Production
+    /// callers should use [`rebuild_spatial_index`] instead, which
+    /// derives entries from a live world snapshot.
+    #[cfg(test)]
+    pub fn insert_for_test(&mut self, entry: SpatialEntry) {
+        self.push(entry);
+    }
+
     /// Invoke `f` for every entry whose bucket could intersect a sphere
     /// centered at `center` with XZ `radius`. Callers still need to do
     /// the real distance check — this only trims the outer loop.

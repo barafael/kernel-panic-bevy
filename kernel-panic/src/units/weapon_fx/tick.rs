@@ -9,8 +9,23 @@ use super::shared::{
     PendingExplosions, ProjectileVisual, TRAIL_SAMPLE_COUNT,
 };
 use crate::rendering::camera::RtsCamera;
-use crate::units::combat::{DamageQueue, PendingDamage};
+use bevy::ecs::system::SystemParam;
+
+use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
+use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 use crate::units::content::weapons::WeaponRegistry;
+use crate::units::spatial::SpatialIndex;
+
+/// Grouped read-only inputs for the volumetric mid-flight collision
+/// pass: target volumes, attacker team/faction (for the friendly
+/// filter), and the broad-phase spatial index. Bundled as a
+/// `SystemParam` so `tick_weapon_fx` stays under Bevy's 16-arg limit.
+#[derive(SystemParam)]
+pub(super) struct VolumeHitCtx<'w, 's> {
+    target_q: Query<'w, 's, (&'static GlobalTransform, &'static CollisionVolume), With<UnitType>>,
+    attacker_q: Query<'w, 's, (&'static TeamId, &'static Faction)>,
+    spatial: Res<'w, SpatialIndex>,
+}
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn tick_weapon_fx(
@@ -53,6 +68,7 @@ pub(super) fn tick_weapon_fx(
     mut pending_explosions: ResMut<PendingExplosions>,
     weapon_registry: Res<WeaponRegistry>,
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
+    volume_ctx: VolumeHitCtx,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
 ) {
@@ -122,13 +138,63 @@ pub(super) fn tick_weapon_fx(
     // is the width axis; the quad spans `±dir1 * thickness` at lead
     // and tail. Despawns once both ends pass the target.
     for (entity, mut bolt, _transform) in &mut bolts {
+        let prev_lead_raw = (bolt.speed * bolt.elapsed).min(bolt.total_distance);
         bolt.elapsed += dt;
         let lead_raw = bolt.speed * bolt.elapsed;
         let lead_dist = lead_raw.min(bolt.total_distance);
-        if lead_raw >= bolt.total_distance {
+
+        // §1.8: sweep this frame's lead segment against (1) the
+        // intended target, then (2) the broader spatial-index neighbours
+        // for "anyone in path". Triggering removes `DelayedHit`, so
+        // the timeout fallback below is a no-op for the same bolt and
+        // bolts can't double-trigger.
+        let prev_lead_pos = bolt.origin + bolt.direction * prev_lead_raw;
+        let curr_lead_pos = bolt.origin + bolt.direction * lead_dist;
+        let hit_meta = delayed_hits.get(entity).ok();
+        let target_entity = hit_meta.and_then(|h| h.target);
+        let attacker_entity = hit_meta.map(|h| h.attacker);
+        if let Some(impact_pos) = target_volume_hit(
+            target_entity,
+            prev_lead_pos,
+            curr_lead_pos,
+            &volume_ctx.target_q,
+        ) {
+            trigger_delayed_hit(
+                entity,
+                None,
+                impact_pos,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
+        } else if let Some(attacker) = attacker_entity
+            && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
+                attacker,
+                target_entity,
+                prev_lead_pos,
+                curr_lead_pos,
+                &volume_ctx.spatial,
+                &volume_ctx.target_q,
+                &volume_ctx.attacker_q,
+            )
+        {
+            trigger_delayed_hit(
+                entity,
+                Some(hit_entity),
+                impact_pos,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
+        } else if lead_raw >= bolt.total_distance {
             let impact_pos = bolt.origin + bolt.direction * bolt.total_distance;
             trigger_delayed_hit(
                 entity,
+                None,
                 impact_pos,
                 &delayed_hits,
                 &weapon_registry,
@@ -221,6 +287,7 @@ pub(super) fn tick_weapon_fx(
         if total_dist < 0.1 {
             trigger_delayed_hit(
                 entity,
+                None,
                 proj.target,
                 &delayed_hits,
                 &weapon_registry,
@@ -231,10 +298,71 @@ pub(super) fn tick_weapon_fx(
             despawn_projectile(entity, &mut proj, &mut commands);
             continue;
         }
+        let prev_progress = proj.progress;
         proj.progress += (proj.speed * dt) / total_dist;
+
+        // §1.8: sweep this frame's straight-line segment against (1)
+        // the intended target's volume, then (2) the broader spatial
+        // index for any other unit in path. The arc-height curve is
+        // non-linear but the per-frame slice is short enough that a
+        // straight segment is a good approximation — visible miss rate
+        // vs the upstream parabolic ray test is below frame-time
+        // discretisation noise. Triggering here removes `DelayedHit`,
+        // so the `progress >= 1.0` fallback below is a no-op for the
+        // same projectile.
+        let seg_start = proj.origin.lerp(proj.target, prev_progress);
+        let seg_end = proj.origin.lerp(proj.target, proj.progress.min(1.0));
+        let hit_meta = delayed_hits.get(entity).ok();
+        let target_entity = hit_meta.and_then(|h| h.target);
+        let attacker_entity = hit_meta.map(|h| h.attacker);
+
+        let mut intercepted = false;
+        if let Some(impact_pos) =
+            target_volume_hit(target_entity, seg_start, seg_end, &volume_ctx.target_q)
+        {
+            trigger_delayed_hit(
+                entity,
+                None,
+                impact_pos,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
+            intercepted = true;
+        } else if let Some(attacker) = attacker_entity
+            && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
+                attacker,
+                target_entity,
+                seg_start,
+                seg_end,
+                &volume_ctx.spatial,
+                &volume_ctx.target_q,
+                &volume_ctx.attacker_q,
+            )
+        {
+            trigger_delayed_hit(
+                entity,
+                Some(hit_entity),
+                impact_pos,
+                &delayed_hits,
+                &weapon_registry,
+                &mut damage_queue,
+                &mut pending_explosions,
+                &mut commands,
+            );
+            intercepted = true;
+        }
+        if intercepted {
+            despawn_projectile(entity, &mut proj, &mut commands);
+            continue;
+        }
+
         if proj.progress >= 1.0 {
             trigger_delayed_hit(
                 entity,
+                None,
                 proj.target,
                 &delayed_hits,
                 &weapon_registry,
@@ -336,6 +464,94 @@ pub(super) fn tick_weapon_fx(
     }
 }
 
+/// Sweep a per-frame travel segment against the intended target's
+/// `CollisionVolume`. Returns the world-space impact position when the
+/// segment crosses the volume, `None` otherwise.
+///
+/// This is the §1.8 volumetric-hit work for in-flight projectiles: the
+/// previous logic waited for the bolt's lead to reach the *predicted*
+/// total distance and then relied on `apply_damage`'s spray-angle
+/// check, which left targets that moved during flight unhit. With this
+/// helper the bolt couples to the target's *current* volume each frame
+/// — a moving target gets caught the moment the bolt's segment crosses
+/// it. Ground-targeted shots (`target == None`) and shots whose target
+/// has despawned fall through to `None` and the existing
+/// total-distance fallback fires.
+fn target_volume_hit(
+    target: Option<Entity>,
+    seg_start: Vec3,
+    seg_end: Vec3,
+    target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
+) -> Option<Vec3> {
+    let target = target?;
+    let (tf, volume) = target_q.get(target).ok()?;
+    let t = volume.ray_segment_hit(tf.translation(), seg_start, seg_end)?;
+    Some(seg_start.lerp(seg_end, t))
+}
+
+/// Broad-phase second pass: find any non-friendly, non-attacker unit
+/// whose `CollisionVolume` the segment crosses, returning the closest
+/// (smallest `t`) candidate. Catches the "friendly walks into the
+/// bolt" / "an enemy steps into the path" cases the intended-target
+/// check misses.
+///
+/// `skip_target` is the intended target (already covered by
+/// [`target_volume_hit`]) — passing it here keeps the broad-phase from
+/// double-firing on the same entity. `attacker` is the unit that fired
+/// the bolt; we never let a unit shoot itself, and friendlies are
+/// skipped so the broad pass doesn't unintentionally introduce
+/// friendly fire (matches upstream's default `collidefriendly=0`).
+///
+/// In the test environment the spatial index is typically empty (no
+/// `rebuild_spatial_index` has run), so this returns `None` and the
+/// existing intended-target / timeout paths drive behaviour. In a
+/// running game the index is rebuilt at the head of every Simulate
+/// frame, so this catches anyone in path.
+fn broad_phase_volume_hit(
+    attacker: Entity,
+    skip_target: Option<Entity>,
+    seg_start: Vec3,
+    seg_end: Vec3,
+    spatial: &SpatialIndex,
+    target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
+    attacker_q: &Query<(&TeamId, &Faction)>,
+) -> Option<(Entity, Vec3)> {
+    // Conservative bound on any unit's collision-volume reach; chosen
+    // to comfortably exceed every shipped S3O bounding sphere. Used
+    // only as a broad-phase culling pad, not as a damage radius.
+    const MAX_UNIT_VOLUME_REACH: f32 = 96.0;
+
+    let attacker_info = attacker_q.get(attacker).ok();
+    let mid = seg_start.lerp(seg_end, 0.5);
+    let half_len = (seg_end - seg_start).length() * 0.5;
+    let radius = half_len + MAX_UNIT_VOLUME_REACH;
+
+    let mut best: Option<(Entity, f32)> = None;
+    spatial.query_radius(mid, radius, |entry| {
+        if entry.entity == attacker {
+            return;
+        }
+        if Some(entry.entity) == skip_target {
+            return;
+        }
+        if let Some((atk_team, atk_faction)) = attacker_info
+            && is_friendly(entry.team, entry.faction, atk_team.0, *atk_faction)
+        {
+            return;
+        }
+        let Ok((tf, volume)) = target_q.get(entry.entity) else {
+            return;
+        };
+        if let Some(t) = volume.ray_segment_hit(tf.translation(), seg_start, seg_end) {
+            if best.is_none_or(|(_, prev_t)| t < prev_t) {
+                best = Some((entry.entity, t));
+            }
+        }
+    });
+
+    best.map(|(entity, t)| (entity, seg_start.lerp(seg_end, t)))
+}
+
 /// Fire the one-shot impact payload riding on a traveling visual: push
 /// the deferred [`PendingDamage`] onto [`DamageQueue`] and enqueue the
 /// weapon's impact CEG as an [`ExplosionEvent`], then remove the
@@ -345,6 +561,7 @@ pub(super) fn tick_weapon_fx(
 #[allow(clippy::too_many_arguments)]
 fn trigger_delayed_hit(
     entity: Entity,
+    target_override: Option<Entity>,
     impact_pos: Vec3,
     delayed_hits: &Query<&DelayedHit>,
     weapon_registry: &WeaponRegistry,
@@ -355,8 +572,13 @@ fn trigger_delayed_hit(
     let Ok(hit) = delayed_hits.get(entity) else {
         return;
     };
+    // `target_override` wins when the broad-phase intercepted a unit
+    // other than the originally-aimed-at one. Otherwise stick with
+    // `hit.target` (which may itself be `None` for ground-targeted
+    // shots).
+    let final_target = target_override.or(hit.target);
     damage_queue.push(PendingDamage {
-        target: hit.target,
+        target: final_target,
         attacker: hit.attacker,
         weapon: hit.weapon.to_string(),
         impact_pos,
@@ -524,6 +746,7 @@ mod tests {
             .init_resource::<DamageQueue>()
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
+            .init_resource::<SpatialIndex>()
             .init_resource::<Assets<Mesh>>();
 
         let attacker = app.world_mut().spawn_empty().id();
@@ -605,6 +828,7 @@ mod tests {
             .init_resource::<DamageQueue>()
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
+            .init_resource::<SpatialIndex>()
             .init_resource::<Assets<Mesh>>();
 
         let mesh_handle = app
@@ -638,6 +862,293 @@ mod tests {
                 .resource::<PendingExplosions>()
                 .events
                 .is_empty()
+        );
+    }
+
+    /// §1.8 mid-flight volumetric hit. Target sits at z=70 with a
+    /// 5-elmo collision sphere; the predicted impact at z=100 is
+    /// behind it. The first tick advances the bolt past the target
+    /// volume — `target_volume_hit` should fire damage at the actual
+    /// crossing point (z ≈ 65), NOT at the predicted z=100.
+    #[test]
+    fn laser_bolt_intercepts_target_volume_before_predicted_impact() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .init_resource::<WeaponRegistry>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<Assets<Mesh>>();
+
+        let attacker = app.world_mut().spawn_empty().id();
+        let target = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(0.0, 0.0, 70.0)),
+                GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 70.0))),
+                CollisionVolume::sphere(5.0),
+                UnitType(crate::units::content::definitions::UnitKind::Bit),
+            ))
+            .id();
+
+        let mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(super::super::shared::build_billboard_quad_mesh());
+
+        app.world_mut().spawn((
+            LaserBolt {
+                origin: Vec3::ZERO,
+                direction: Vec3::Z,
+                total_distance: 100.0,
+                speed: 100.0,
+                max_length: 50.0,
+                thickness: 1.0,
+                elapsed: 0.0,
+                mesh: mesh_handle,
+                caps: None,
+            },
+            Transform::IDENTITY,
+            DelayedHit {
+                target: Some(target),
+                attacker,
+                weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                attacker_distance: 100.0,
+            },
+        ));
+
+        // Tick 1: 0.7 s → lead advances 0..70. Target volume sits at
+        // z=70 ± 5, so the segment 0→70 crosses the front of the
+        // sphere at z = 65.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(700));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+
+        let queue = app.world().resource::<DamageQueue>();
+        assert_eq!(queue.len(), 1);
+        let impact_z = queue
+            .iter_snapshot_for_test()
+            .next()
+            .expect("damage entry")
+            .impact_pos
+            .z;
+        assert!(
+            (impact_z - 65.0).abs() < 0.5,
+            "impact should land on the sphere front (~65), got {impact_z}",
+        );
+    }
+
+    /// Broad-phase: a hostile unit standing in the bolt's path —
+    /// not the intended target — should intercept the shot, with the
+    /// resolved `PendingDamage::target` pointing at the interloper.
+    /// Friendly units sharing the attacker's team are skipped entirely
+    /// (matches upstream's default `collidefriendly=0`).
+    #[test]
+    fn laser_bolt_broad_phase_intercepts_enemy_in_path_skips_friendly() {
+        use crate::units::components::Faction;
+        use crate::units::content::definitions::UnitKind;
+        use crate::units::spatial::SpatialEntry;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .init_resource::<WeaponRegistry>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<Assets<Mesh>>();
+
+        // Attacker on team 0 / System.
+        let attacker = app.world_mut().spawn((TeamId(0), Faction::System)).id();
+
+        // Friendly unit at z=30, directly on the bolt's path. Same
+        // team + faction → must be skipped.
+        let friendly = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(0.0, 0.0, 30.0)),
+                GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 30.0))),
+                CollisionVolume::sphere(5.0),
+                UnitType(UnitKind::Bit),
+                TeamId(0),
+                Faction::System,
+            ))
+            .id();
+
+        // Hostile interloper at z=50, also on the path — not the
+        // intended target. Should soak the broad-phase hit.
+        let enemy = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(0.0, 0.0, 50.0)),
+                GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 50.0))),
+                CollisionVolume::sphere(5.0),
+                UnitType(UnitKind::Bug),
+                TeamId(1),
+                Faction::Hacker,
+            ))
+            .id();
+
+        // Intended target way out at z=100.
+        let intended = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(0.0, 0.0, 100.0)),
+                GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 100.0))),
+                CollisionVolume::sphere(5.0),
+                UnitType(UnitKind::Bug),
+                TeamId(1),
+                Faction::Hacker,
+            ))
+            .id();
+
+        // Populate the spatial index with all three on-path units.
+        let entries = [
+            (friendly, Vec3::new(0.0, 0.0, 30.0), 0u8, Faction::System),
+            (enemy, Vec3::new(0.0, 0.0, 50.0), 1u8, Faction::Hacker),
+            (intended, Vec3::new(0.0, 0.0, 100.0), 1u8, Faction::Hacker),
+        ];
+        let mut spatial = app.world_mut().resource_mut::<SpatialIndex>();
+        for (entity, pos, team, faction) in entries {
+            spatial.insert_for_test(SpatialEntry {
+                entity,
+                pos,
+                team,
+                faction,
+                kind: UnitKind::Bit,
+                hp_positive: true,
+                is_flying: false,
+            });
+        }
+
+        let mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(super::super::shared::build_billboard_quad_mesh());
+
+        app.world_mut().spawn((
+            LaserBolt {
+                origin: Vec3::ZERO,
+                direction: Vec3::Z,
+                total_distance: 100.0,
+                speed: 100.0,
+                max_length: 50.0,
+                thickness: 1.0,
+                elapsed: 0.0,
+                mesh: mesh_handle,
+                caps: None,
+            },
+            Transform::IDENTITY,
+            DelayedHit {
+                target: Some(intended),
+                attacker,
+                weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                attacker_distance: 100.0,
+            },
+        ));
+
+        // Tick: 0.6 s — lead advances 0..60. Segment crosses
+        // friendly's volume at z=25 first, but the friendly filter
+        // skips it; the enemy at z=50 intercepts at z≈45.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(600));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+
+        let queue = app.world().resource::<DamageQueue>();
+        assert_eq!(queue.len(), 1, "exactly one hit (the enemy interloper)");
+        let damage = queue.iter_snapshot_for_test().next().expect("damage entry");
+        assert_eq!(
+            damage.target,
+            Some(enemy),
+            "broad-phase must redirect damage to the interloper, NOT the original target",
+        );
+        assert!(
+            (damage.impact_pos.z - 45.0).abs() < 0.5,
+            "impact should land on enemy's near face (~45), got {}",
+            damage.impact_pos.z,
+        );
+    }
+
+    /// Mid-flight interception only fires when the bolt's segment
+    /// actually crosses the target volume. A target offset off the
+    /// bolt's flight line should NOT receive an early hit; the bolt
+    /// continues to the predicted total_distance and the existing
+    /// fallback path triggers there.
+    #[test]
+    fn laser_bolt_does_not_intercept_off_axis_target() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .init_resource::<WeaponRegistry>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<Assets<Mesh>>();
+
+        let attacker = app.world_mut().spawn_empty().id();
+        // Target way off to the side — bolt path is along +Z so
+        // segment never enters the target's x=50 sphere.
+        let target = app
+            .world_mut()
+            .spawn((
+                Transform::from_translation(Vec3::new(50.0, 0.0, 70.0)),
+                GlobalTransform::from(Transform::from_translation(Vec3::new(50.0, 0.0, 70.0))),
+                CollisionVolume::sphere(5.0),
+                UnitType(crate::units::content::definitions::UnitKind::Bit),
+            ))
+            .id();
+
+        let mesh_handle = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(super::super::shared::build_billboard_quad_mesh());
+
+        app.world_mut().spawn((
+            LaserBolt {
+                origin: Vec3::ZERO,
+                direction: Vec3::Z,
+                total_distance: 100.0,
+                speed: 100.0,
+                max_length: 50.0,
+                thickness: 1.0,
+                elapsed: 0.0,
+                mesh: mesh_handle,
+                caps: None,
+            },
+            Transform::IDENTITY,
+            DelayedHit {
+                target: Some(target),
+                attacker,
+                weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                attacker_distance: 100.0,
+            },
+        ));
+
+        // Tick: 0.7 s — lead at z=70, well past the off-axis target.
+        // Mid-flight check must miss; lead has not yet reached z=100,
+        // so no fallback fires either. Queue stays empty.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(700));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        assert!(
+            app.world().resource::<DamageQueue>().is_empty(),
+            "off-axis target must not trigger mid-flight interception",
+        );
+
+        // Tick 2: another 0.4 s → lead reaches 110 (clamped 100).
+        // Fallback at total_distance now fires with the predicted
+        // impact at z=100, NOT at the off-axis target's position.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(400));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        let queue = app.world().resource::<DamageQueue>();
+        assert_eq!(queue.len(), 1);
+        let impact = queue.iter_snapshot_for_test().next().unwrap().impact_pos;
+        assert!(
+            (impact.x - 0.0).abs() < 1e-3 && (impact.z - 100.0).abs() < 1e-3,
+            "fallback impact should be at predicted total_distance (0,0,100), got {impact:?}",
         );
     }
 }

@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use spring_pathfinding::{NodeLayer, find_path, slope_from_rise_run};
 
 use super::selection::Selected;
+use crate::map_events::CircularFlow;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{DeployState, Deployable, Dying};
 use crate::units::components::{UnitStats, UnitType};
@@ -147,6 +148,7 @@ pub fn movement_system(
     time: Res<Time>,
     mut nav_set: Option<ResMut<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
+    circular_flow: Option<Res<CircularFlow>>,
     mut query: Query<
         (
             Entity,
@@ -399,7 +401,10 @@ pub fn movement_system(
         // so the unit doesn't arc wide during sharp turns.
         let cos_err = new_forward.dot(desired_forward);
         let align = if cos_err > 0.5 { cos_err } else { 0.0 };
-        let step = speed * dt * align;
+        let mut step = speed * dt * align;
+        if let Some(flow) = circular_flow.as_deref() {
+            step *= flow.step_multiplier(current, new_forward);
+        }
         if step < 1e-4 {
             continue;
         }

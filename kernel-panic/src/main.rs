@@ -1,4 +1,5 @@
 mod interaction;
+mod map_events;
 mod map_loading;
 mod paths;
 mod rendering;
@@ -15,6 +16,7 @@ use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstraints};
 
 use interaction::InteractionPlugin;
+use map_events::MapEventsPlugin;
 use map_loading::MapLoadingPlugin;
 use rendering::RenderingPlugin;
 use terrain::TerrainPlugin;
@@ -131,6 +133,7 @@ fn main() {
             UnitsPlugin,
             TerrainPlugin,
             MapLoadingPlugin,
+            MapEventsPlugin,
         ))
         .run();
 }

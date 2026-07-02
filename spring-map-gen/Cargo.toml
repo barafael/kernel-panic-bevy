@@ -29,5 +29,13 @@ required-features = ["viewer"]
 name = "gen-showcase"
 path = "src/bin/gen_showcase.rs"
 
+[[bin]]
+name = "gen-stack-overflow"
+path = "src/bin/gen_stack_overflow.rs"
+
+[[bin]]
+name = "gen-circular-buffer"
+path = "src/bin/gen_circular_buffer.rs"
+
 [lib]
 doctest = false

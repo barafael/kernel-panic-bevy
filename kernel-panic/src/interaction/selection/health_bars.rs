@@ -103,16 +103,24 @@ fn spawn_health_bars(
 }
 
 /// Remove health bar children from units that are no longer selected.
+///
+/// Walks each deselected unit's `Children` directly (O(children-of-unit))
+/// rather than scanning every health bar in the world per deselection
+/// (the previous O(removed × total-bars) form). At realistic selection
+/// sizes the difference is two orders of magnitude.
 fn despawn_health_bars(
     mut removed_selections: RemovedComponents<Selected>,
-    bg_bars: Query<(Entity, &ChildOf), With<HealthBarBg>>,
-    fg_bars: Query<(Entity, &ChildOf), With<HealthBarFg>>,
+    children_q: Query<&Children>,
+    bar_q: Query<(), Or<(With<HealthBarBg>, With<HealthBarFg>)>>,
     mut commands: Commands,
 ) {
     for unit in removed_selections.read() {
-        for (bar_entity, child_of) in bg_bars.iter().chain(fg_bars.iter()) {
-            if child_of.parent() == unit {
-                commands.entity(bar_entity).despawn();
+        let Ok(children) = children_q.get(unit) else {
+            continue;
+        };
+        for child in children.iter() {
+            if bar_q.contains(child) {
+                commands.entity(child).despawn();
             }
         }
     }

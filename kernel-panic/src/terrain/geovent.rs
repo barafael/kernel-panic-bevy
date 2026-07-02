@@ -119,28 +119,34 @@ pub fn spawn_geovent_smokers(
             continue;
         }
         let pos = heightmap.place(feature.x, feature.z);
-
-        // Seed the per-smoker PRNG deterministically from feature coords so
-        // identical maps produce identical jitter across runs.
-        let seed = feature.x.to_bits() ^ feature.z.to_bits().rotate_left(13);
-        let mut rng = seed | 1; // avoid the all-zeros state
-        let initial_timer = next_f32(&mut rng) * EMIT_INTERVAL;
-
-        commands.spawn((
-            GeoventSmoker {
-                pos,
-                emit_timer: initial_timer,
-                rng,
-            },
-            Transform::from_translation(pos),
-            Visibility::default(),
-        ));
+        spawn_smoker_at(commands, pos);
         count += 1;
     }
 
     if count > 0 {
         info!("  {count} geovents (animated)");
     }
+}
+
+/// Spawn one [`GeoventSmoker`] at `pos`. Public so dynamic placers
+/// (HexFarm's Lua-driven `g`-flagged hexes) can route through the same
+/// path as static SMF features.
+pub fn spawn_smoker_at(commands: &mut Commands, pos: Vec3) {
+    // Seed the per-smoker PRNG deterministically from coords so
+    // identical maps produce identical jitter across runs.
+    let seed = pos.x.to_bits() ^ pos.z.to_bits().rotate_left(13);
+    let mut rng = seed | 1; // avoid the all-zeros state
+    let initial_timer = next_f32(&mut rng) * EMIT_INTERVAL;
+
+    commands.spawn((
+        GeoventSmoker {
+            pos,
+            emit_timer: initial_timer,
+            rng,
+        },
+        Transform::from_translation(pos),
+        Visibility::default(),
+    ));
 }
 
 fn ensure_assets(

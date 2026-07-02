@@ -76,7 +76,8 @@ impl Plugin for UnitsPlugin {
                 Update,
                 (
                     (
-                        bookkeeping::count_small_buildings,
+                        bookkeeping::track_added_buildings,
+                        bookkeeping::track_dying_buildings,
                         shield::attach_shields,
                         shield::regen_shields,
                         deploy::process_deploy,

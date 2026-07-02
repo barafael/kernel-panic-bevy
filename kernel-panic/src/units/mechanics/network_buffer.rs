@@ -165,19 +165,11 @@ pub fn tick_auto_dispatch(
 /// Drain `DispatchEvent`s, consuming packets from the team
 /// buffer and requesting spawns from the teleporter's position. Each
 /// dispatched packet gets a MoveTarget toward the event's `target`.
-#[allow(clippy::too_many_arguments)]
 pub fn process_dispatch(
     mut events: MessageReader<DispatchEvent>,
     teleporters: Query<(&UnitType, &TeamId, &Faction, &Transform)>,
     mut buffer: ResMut<PacketBuffer>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<crate::units::assets::meshes::S3OModelCache>,
-    mut cob_cache: ResMut<crate::units::assets::animation::CobFileCache>,
-    invisible_mat: Res<crate::units::lifecycle::spawning::SelectionVolumeMaterial>,
-    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
-    mut commands: Commands,
+    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
 ) {
     for event in events.read() {
         let Ok((unit, team, faction, transform)) = teleporters.get(event.teleporter) else {
@@ -206,16 +198,9 @@ pub fn process_dispatch(
                 *faction,
                 team.0,
                 spawn_pos,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut model_cache,
-                &mut cob_cache,
-                &invisible_mat,
-                &unit_registry,
+                &mut ctx,
             );
-            commands.entity(spawned).insert((
+            ctx.commands.entity(spawned).insert((
                 crate::interaction::movement::MoveTarget(event.target),
                 PacketSpawnStun {
                     remaining: SPAWN_STUN_SECONDS,

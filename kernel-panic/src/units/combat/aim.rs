@@ -258,6 +258,20 @@ pub fn tick_deploy_state(
     for (mut deployable, mut animator, move_target, move_path) in &mut query {
         let is_moving = move_target.is_some() || move_path.is_some();
 
+        // Steady-state fast path: if no transition is in flight and the
+        // deploy state already matches the movement state, there is
+        // nothing to update. Skips the bulk of branch / animator-clone
+        // work in the common case (a Pointer parked on a hill, every
+        // frame, for the whole game).
+        if deployable.timer == 0.0
+            && matches!(
+                (deployable.state, is_moving),
+                (DeployState::Open, false) | (DeployState::Closed, true)
+            )
+        {
+            continue;
+        }
+
         if deployable.timer > 0.0 {
             deployable.timer = (deployable.timer - dt).max(0.0);
             if deployable.timer == 0.0 {

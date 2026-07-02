@@ -1,5 +1,6 @@
 pub mod baked;
 pub mod lua_heightmap;
+pub mod lua_layout;
 pub mod lua_skin;
 pub mod map_types;
 pub mod mapinfo_lua;
@@ -10,11 +11,23 @@ pub mod smt_parser;
 
 use std::path::Path;
 
+use lua_layout::HexFarmLayout;
+use lua_skin::SkinAtlas;
 use map_types::{GroundTexture, MapError, ParsedMap};
 use sd7_archive::load_map_archive;
 use smd_parser::MapInfo;
 use smf_parser::parse_smf;
 use smt_parser::{assemble_ground_texture, parse_smt_tiles};
+
+/// Reconstructed Lua-driven map decorations (HexFarm towers + bridges
+/// and the skin atlas they're textured with). Present only for maps
+/// whose synced gadget sent a `("ReceiveHexFarmLayout", ...)` set —
+/// otherwise the renderer just uses `ground_texture`.
+#[derive(Debug, Clone)]
+pub struct LuaCompositing {
+    pub layout: HexFarmLayout,
+    pub atlas: SkinAtlas,
+}
 
 /// Result of loading a Spring map from an archive.
 pub struct SpringMap {
@@ -22,6 +35,7 @@ pub struct SpringMap {
     pub ground_texture: Option<GroundTexture>,
     pub map_info: Option<MapInfo>,
     pub smf_data: Vec<u8>,
+    pub lua_compositing: Option<LuaCompositing>,
 }
 
 /// Load a Spring map from a .sd7, .sdz, or raw .smf file.
@@ -55,9 +69,23 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         }
         None => None,
     };
-    let ground_texture =
-        lua_skin::composite_ground_texture(&gadget_results, &extracted.bitmaps, &parsed)
-            .or(smt_texture);
+    let lua_compositing = HexFarmLayout::from_gadget_results(&gadget_results).and_then(|layout| {
+        let atlas = lua_skin::decode_skin_atlas(&layout, &extracted.bitmaps)?;
+        eprintln!(
+            "Captured HexFarm layout: {} hexes, {} bridges, skin={:?}",
+            layout.hexes.len(),
+            layout.bridges.len(),
+            layout.skin,
+        );
+        Some(LuaCompositing { layout, atlas })
+    });
+
+    // Until the hex-tower meshes blanket the play area, keep showing
+    // the tiled skin atlas under them so the gaps aren't pitch black.
+    let ground_texture = lua_compositing
+        .as_ref()
+        .map(|c| lua_skin::ground_texture_from_atlas(&c.atlas))
+        .or(smt_texture);
 
     let map_info = extracted
         .smd_text
@@ -83,6 +111,7 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         ground_texture,
         map_info,
         smf_data: extracted.smf_data,
+        lua_compositing,
     })
 }
 

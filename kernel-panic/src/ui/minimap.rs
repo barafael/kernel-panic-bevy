@@ -55,10 +55,19 @@ pub struct MinimapState {
     /// World-space extent of the map in elmos.
     world_width: f32,
     world_depth: f32,
-    /// Pristine downsampled terrain pixels — copied back over the image
-    /// each refresh before drawing dots / viewport on top.
+    /// Pristine downsampled terrain pixels — copied back into the
+    /// touched-pixel set each refresh before drawing the new frame's
+    /// dots / viewport on top.
     base_pixels: Vec<u8>,
     timer: Timer,
+    /// Byte offsets of every pixel touched by the previous refresh's
+    /// dots + viewport. On the next refresh these get restored from
+    /// `base_pixels` first, then the new frame's draw calls populate
+    /// the list afresh. Replaces a per-tick O(W·H) memcpy with
+    /// O(touched_pixels) — at ~50 visible units + viewport rect that
+    /// is roughly 30× cheaper. The `Vec`'s capacity is reused across
+    /// refreshes, so steady state allocates nothing.
+    dirty_byte_indices: Vec<usize>,
 }
 
 /// Build the minimap image, spawn the UI node, and insert
@@ -119,6 +128,7 @@ pub fn setup_minimap(
         world_depth,
         base_pixels,
         timer: Timer::from_seconds(REFRESH_INTERVAL, TimerMode::Repeating),
+        dirty_byte_indices: Vec::new(),
     });
 }
 
@@ -143,11 +153,21 @@ fn update_minimap(
         return;
     };
 
+    // Disjoint-field borrow: `base_pixels` (read) and
+    // `dirty_byte_indices` (mutate) live on the same resource.
+    let state = state.as_mut();
     let mm_w = state.width as usize;
     let mm_h = state.height as usize;
 
-    // Reset to base terrain.
-    pixels.copy_from_slice(&state.base_pixels);
+    // Restore *only* the pixels touched last frame. Replaces the
+    // previous full-image memcpy and is the whole point of the dirty
+    // tracking. Pixels not in the list are unchanged from the last
+    // refresh — but everything we ever paint over is in the list, so
+    // they're already at base-terrain colour.
+    for &idx in &state.dirty_byte_indices {
+        pixels[idx..idx + 4].copy_from_slice(&state.base_pixels[idx..idx + 4]);
+    }
+    state.dirty_byte_indices.clear();
 
     // Unit dots.
     for (transform, faction) in &unit_q {
@@ -161,10 +181,7 @@ fn update_minimap(
                 let pz = mz + dy;
                 if px >= 0 && px < mm_w as i32 && pz >= 0 && pz < mm_h as i32 {
                     let idx = (pz as usize * mm_w + px as usize) * 4;
-                    pixels[idx] = r;
-                    pixels[idx + 1] = g;
-                    pixels[idx + 2] = b;
-                    pixels[idx + 3] = 255;
+                    write_dirty_pixel(pixels, &mut state.dirty_byte_indices, idx, [r, g, b, 255]);
                 }
             }
         }
@@ -200,10 +217,28 @@ fn update_minimap(
             for i in 0..4 {
                 let (x0, y0) = hits[i];
                 let (x1, y1) = hits[(i + 1) % 4];
-                draw_line(pixels, mm_w, mm_h, x0, y0, x1, y1, frame);
+                draw_line(
+                    pixels,
+                    &mut state.dirty_byte_indices,
+                    mm_w,
+                    mm_h,
+                    x0,
+                    y0,
+                    x1,
+                    y1,
+                    frame,
+                );
             }
         }
     }
+}
+
+/// Write `rgba` to `pixels[idx..idx+4]` and record the byte offset for
+/// next refresh's restore pass. Inlined into both the dot loop and
+/// `draw_line` so every pixel mutation participates in dirty tracking.
+fn write_dirty_pixel(pixels: &mut [u8], dirty: &mut Vec<usize>, idx: usize, rgba: [u8; 4]) {
+    pixels[idx..idx + 4].copy_from_slice(&rgba);
+    dirty.push(idx);
 }
 
 fn ray_ground_intersect(ray: &Ray3d) -> Option<Vec3> {
@@ -225,6 +260,7 @@ fn ray_ground_intersect(ray: &Ray3d) -> Option<Vec3> {
 #[allow(clippy::too_many_arguments)]
 fn draw_line(
     pixels: &mut [u8],
+    dirty: &mut Vec<usize>,
     width: usize,
     height: usize,
     x0: i32,
@@ -244,7 +280,7 @@ fn draw_line(
     loop {
         if x >= 0 && x < width as i32 && y >= 0 && y < height as i32 {
             let idx = (y as usize * width + x as usize) * 4;
-            pixels[idx..idx + 4].copy_from_slice(&color);
+            write_dirty_pixel(pixels, dirty, idx, color);
         }
         if x == x1 && y == y1 {
             break;
@@ -309,4 +345,75 @@ fn downsample_terrain(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_dirty_pixel_records_byte_offset() {
+        let mut pixels = vec![0u8; 16];
+        let mut dirty = Vec::new();
+        write_dirty_pixel(&mut pixels, &mut dirty, 4, [10, 20, 30, 40]);
+        assert_eq!(&pixels[4..8], &[10, 20, 30, 40]);
+        assert_eq!(dirty, vec![4]);
+    }
+
+    /// Restore-from-base must reset every pixel the previous frame
+    /// painted, leaving untouched pixels alone. Mirrors the
+    /// `update_minimap` restore loop.
+    #[test]
+    fn restore_loop_resets_only_dirty_pixels() {
+        // 2x2 image, RGBA = 16 bytes. Base is all 1s.
+        let base = vec![1u8; 16];
+        let mut pixels = base.clone();
+
+        // "Last frame" painted pixel (0,0) and pixel (1,1) red.
+        let mut dirty = Vec::new();
+        write_dirty_pixel(&mut pixels, &mut dirty, 0, [255, 0, 0, 255]);
+        write_dirty_pixel(&mut pixels, &mut dirty, 12, [255, 0, 0, 255]);
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[4..8], &[1, 1, 1, 1], "pixel (1,0) untouched");
+
+        // Now restore — the two dirty pixels return to base, others
+        // unchanged. (And dirty is cleared so the next frame starts
+        // fresh.)
+        for &idx in &dirty {
+            pixels[idx..idx + 4].copy_from_slice(&base[idx..idx + 4]);
+        }
+        dirty.clear();
+
+        assert_eq!(pixels, base, "all pixels back to base after restore");
+        assert!(dirty.is_empty());
+    }
+
+    /// `draw_line` must record every painted pixel into the dirty
+    /// list so the next refresh's restore covers it.
+    #[test]
+    fn draw_line_populates_dirty_list() {
+        let mut pixels = vec![0u8; 4 * 10 * 10];
+        let mut dirty = Vec::new();
+        // Horizontal line from (0,0) to (4,0): 5 pixels.
+        draw_line(&mut pixels, &mut dirty, 10, 10, 0, 0, 4, 0, [9, 9, 9, 9]);
+        assert_eq!(dirty.len(), 5);
+        for &idx in &dirty {
+            assert_eq!(&pixels[idx..idx + 4], &[9, 9, 9, 9]);
+        }
+    }
+
+    /// Out-of-bounds pixel writes must NOT pollute the dirty list —
+    /// otherwise the restore loop would index out of range next
+    /// refresh.
+    #[test]
+    fn draw_line_clipped_writes_skip_dirty_list() {
+        let mut pixels = vec![0u8; 4 * 4 * 4];
+        let mut dirty = Vec::new();
+        // Line crossing partly outside a 4x4 image.
+        draw_line(&mut pixels, &mut dirty, 4, 4, -2, 1, 5, 1, [7, 7, 7, 7]);
+        for &idx in &dirty {
+            // every recorded byte offset must address a valid 4-byte slot.
+            assert!(idx + 3 < pixels.len(), "dirty idx {idx} out of bounds");
+        }
+    }
 }

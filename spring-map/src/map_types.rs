@@ -316,6 +316,10 @@ impl UnsyncedArg {
         match self {
             Self::Integer(i) => Some(*i),
             Self::Number(n) => Some(*n as i64),
+            // Lua booleans flow through synced→unsynced messages as
+            // truthy/falsy flags (e.g. HexFarm's `h.g` geo flag is
+            // assigned `GeoSelector(...)` which returns true/false).
+            Self::Bool(b) => Some(if *b { 1 } else { 0 }),
             _ => None,
         }
     }

@@ -13,6 +13,7 @@
 //! - [`s3o_mount`] — piece-tree walking helpers used by `spawn_unit`.
 //! - [`mod`](self) — [`spawn_unit`] + the top-level spawners.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use spring_cob::CobVm;
@@ -47,6 +48,50 @@ use s3o_mount::{
 /// maps with no units never mint a material asset.
 #[derive(Resource, Clone)]
 pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
+
+/// Bundles the asset / cache / registry resources `spawn_unit` needs.
+///
+/// Every system that calls `spawn_unit` previously had to declare 8
+/// separate `Commands` / `ResMut<Assets<…>>` / `ResMut<…Cache>` params
+/// and forward them through; bundling them as one `SystemParam` shrinks
+/// each call site to a single argument and lets helper functions reborrow
+/// `&mut SpawnContext` without re-listing the same eight types.
+///
+/// `sel_mat` is `Option` because the resource is lazily created on the
+/// first spawn — a fresh app boot has no `SelectionVolumeMaterial` until
+/// `ensure_invisible_material` mints it.
+#[derive(SystemParam)]
+pub struct SpawnContext<'w, 's> {
+    pub commands: Commands<'w, 's>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub images: ResMut<'w, Assets<Image>>,
+    pub model_cache: ResMut<'w, S3OModelCache>,
+    pub cob_cache: ResMut<'w, CobFileCache>,
+    pub sel_mat: Option<Res<'w, SelectionVolumeMaterial>>,
+    pub unit_registry: Res<'w, UnitRegistry>,
+    pub weapon_registry: Res<'w, crate::units::content::weapons::WeaponRegistry>,
+}
+
+impl SpawnContext<'_, '_> {
+    /// Get the shared invisible-selection material, lazy-initialising the
+    /// resource on first call. Mirrors the previous standalone helper so
+    /// the first spawn on a fresh app boot still works without requiring
+    /// a startup system to plant the resource.
+    fn ensure_invisible_material(&mut self) -> SelectionVolumeMaterial {
+        if let Some(m) = &self.sel_mat {
+            return SelectionVolumeMaterial(m.0.clone());
+        }
+        let mat = SelectionVolumeMaterial(self.materials.add(StandardMaterial {
+            base_color: Color::srgba(0.0, 0.0, 0.0, 0.0),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            ..default()
+        }));
+        self.commands.insert_resource(mat.clone());
+        mat
+    }
+}
 
 /// Cached piece-index lookup for animated factories. Set once when a
 /// producer spawns; lets the production system pull the live world
@@ -107,20 +152,7 @@ const ROSTERS: [FactionRoster; 3] = [
 /// Spawn one homebase per faction at the map's declared start position.
 /// No datavent buildings, no mobile-unit clusters — anything past the
 /// three bases comes from in-game production.
-#[allow(clippy::too_many_arguments)]
-pub fn spawn_homebases(
-    heightmap: &Heightmap,
-    map_info: &MapInfo,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    model_cache: &mut S3OModelCache,
-    cob_cache: &mut CobFileCache,
-    unit_registry: &UnitRegistry,
-) {
-    let invisible_mat = get_or_create_invisible_material(commands, materials);
-
+pub fn spawn_homebases(heightmap: &Heightmap, map_info: &MapInfo, ctx: &mut SpawnContext) {
     let (world_w, world_d) = heightmap.world_size();
     let cx = world_w * 0.5;
     let cz = world_d * 0.5;
@@ -142,20 +174,7 @@ pub fn spawn_homebases(
         let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
         let home_pos = heightmap.place(fx, fz);
 
-        spawn_unit(
-            roster.homebase,
-            roster.faction,
-            team,
-            home_pos,
-            commands,
-            meshes,
-            materials,
-            images,
-            model_cache,
-            cob_cache,
-            &invisible_mat,
-            unit_registry,
-        );
+        spawn_unit(roster.homebase, roster.faction, team, home_pos, ctx);
     }
 
     info!(
@@ -167,21 +186,27 @@ pub fn spawn_homebases(
 
 /// Spawn a single unit with per-piece children and COB animation.
 /// Returns the root entity of the spawned unit.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_unit(
     kind: UnitKind,
     faction: Faction,
     team: u8,
     position: Vec3,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    model_cache: &mut S3OModelCache,
-    cob_cache: &mut CobFileCache,
-    invisible_mat: &SelectionVolumeMaterial,
-    unit_registry: &UnitRegistry,
+    ctx: &mut SpawnContext,
 ) -> Entity {
+    let invisible_mat = ctx.ensure_invisible_material();
+    // Reborrow each `SpawnContext` field as a plain `&mut` to its inner
+    // value so the existing body — which threads `&mut Assets<…>` /
+    // `&mut S3OModelCache` / `&UnitRegistry` to helper functions — works
+    // unchanged. Disjoint-field borrow rules let us hold these
+    // simultaneously.
+    let commands = &mut ctx.commands;
+    let meshes = &mut *ctx.meshes;
+    let materials = &mut *ctx.materials;
+    let images = &mut *ctx.images;
+    let model_cache = &mut *ctx.model_cache;
+    let cob_cache = &mut *ctx.cob_cache;
+    let unit_registry = &*ctx.unit_registry;
+    let invisible_mat = &invisible_mat;
     let model_name = unit_registry.model(kind);
     let material = unit_material(kind, faction, materials, images, model_cache, model_name);
     let radius = unit_radius(kind, model_cache, unit_registry);
@@ -219,7 +244,29 @@ pub fn spawn_unit(
     commands.entity(unit_entity).insert((
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
+        // §1.8 first slice: cache a typed collision volume so
+        // projectile / shield / per-shot-miss systems can do
+        // volume-aware tests without re-deriving from the S3O on
+        // every check. Today every unit spawns a Sphere matching
+        // the existing `hit_radius`; future per-unit overrides
+        // (Cylinder for tall thin units, AABB for boxes) only need
+        // to update this classifier.
+        crate::units::combat::CollisionVolume::from_s3o_radius(radius),
     ));
+
+    // Cache the weapon-id binding once so the per-frame combat hot
+    // path can read it directly without hashing strings against the
+    // weapon registry every tick. Units with no primary weapon (or
+    // whose only weapon is BuildLaser, filtered by `unit_registry.weapon`)
+    // get no binding — combat skips them via `Option<&WeaponBinding>`.
+    let weapon_name = unit_registry.weapon(kind);
+    if !weapon_name.is_empty() {
+        if let Some(weapon_id) = ctx.weapon_registry.intern(weapon_name) {
+            commands
+                .entity(unit_entity)
+                .insert(crate::units::combat::WeaponBinding(weapon_id));
+        }
+    }
 
     if kind.spawns_cloaked() {
         commands
@@ -492,37 +539,17 @@ pub fn spawn_unit(
 /// Drain the `VirusSpawnQueue` and spawn Virus units at the queued
 /// positions. Runs after the death system so kills in a given frame produce
 /// Viruses on the next.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_queued_viruses(
     mut virus_spawns: ResMut<crate::units::combat::VirusSpawnQueue>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut cob_cache: ResMut<CobFileCache>,
-    sel_mat: Option<Res<SelectionVolumeMaterial>>,
-    unit_registry: Res<UnitRegistry>,
+    mut ctx: SpawnContext,
 ) {
-    let invisible_mat = match sel_mat {
-        Some(m) => m.clone(),
-        None => get_or_create_invisible_material(&mut commands, &mut materials),
-    };
-
     for spawn in virus_spawns.drain() {
         spawn_unit(
             UnitKind::Virus,
             spawn.faction,
             spawn.team,
             spawn.position,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut model_cache,
-            &mut cob_cache,
-            &invisible_mat,
-            &unit_registry,
+            &mut ctx,
         );
     }
 }
@@ -533,51 +560,17 @@ pub fn spawn_queued_viruses(
 /// mines visible in frame N+1's Simulate pass. Logic Bombs auto-pick
 /// up `Cloaked` via `UnitKind::spawns_cloaked`, so they behave like
 /// factory-built mines the moment they appear.
-#[allow(clippy::too_many_arguments)]
 pub fn spawn_queued_mines(
     mut mine_spawns: ResMut<crate::units::mechanics::command_fire::MineSpawnQueue>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut cob_cache: ResMut<CobFileCache>,
-    sel_mat: Option<Res<SelectionVolumeMaterial>>,
-    unit_registry: Res<UnitRegistry>,
+    mut ctx: SpawnContext,
 ) {
-    let invisible_mat = match sel_mat {
-        Some(m) => m.clone(),
-        None => get_or_create_invisible_material(&mut commands, &mut materials),
-    };
-
     for spawn in mine_spawns.drain() {
         spawn_unit(
             UnitKind::LogicBomb,
             spawn.faction,
             spawn.team,
             spawn.position,
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &mut images,
-            &mut model_cache,
-            &mut cob_cache,
-            &invisible_mat,
-            &unit_registry,
+            &mut ctx,
         );
     }
-}
-
-fn get_or_create_invisible_material(
-    commands: &mut Commands,
-    materials: &mut Assets<StandardMaterial>,
-) -> SelectionVolumeMaterial {
-    let mat = SelectionVolumeMaterial(materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 0.0, 0.0, 0.0),
-        alpha_mode: AlphaMode::Blend,
-        unlit: true,
-        ..default()
-    }));
-    commands.insert_resource(mat.clone());
-    mat
 }

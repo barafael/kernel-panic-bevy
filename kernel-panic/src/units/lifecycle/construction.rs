@@ -17,13 +17,10 @@
 use bevy::prelude::*;
 
 use super::production::PendingFadeInstall;
-use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SelectionVolumeMaterial, spawn_unit};
+use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SpawnContext, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::units::assets::animation::CobFileCache;
-use crate::units::assets::meshes::S3OModelCache;
 use crate::units::components::{Faction, TeamId};
 use crate::units::content::definitions::UnitKind;
-use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// Marks a constructor unit that the player has ordered to build `kind`
@@ -128,10 +125,8 @@ pub fn start_construction(
 /// elapses. The unit is freed from `Constructing` at completion; the
 /// movement queue's next order (if any) is promoted next frame by
 /// `movement_system` once it sees `MoveTarget` is absent.
-#[allow(clippy::too_many_arguments)]
 pub fn tick_construction(
     time: Res<Time>,
-    mut commands: Commands,
     mut builders: Query<(
         Entity,
         &GlobalTransform,
@@ -140,24 +135,14 @@ pub fn tick_construction(
         &TeamId,
         &mut Constructing,
     )>,
-    unit_registry: Res<UnitRegistry>,
     mut pending_attacks: ResMut<PendingAttacks>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut cob_cache: ResMut<CobFileCache>,
-    invisible_mat: Option<Res<SelectionVolumeMaterial>>,
+    mut ctx: SpawnContext,
 ) {
     let dt = time.delta_secs();
-    let Some(invisible_mat) = invisible_mat else {
-        return;
-    };
-    let invisible_mat_clone = SelectionVolumeMaterial(invisible_mat.0.clone());
 
     for (entity, gtf, mut transform, faction, team, mut constructing) in &mut builders {
         constructing.progress += dt;
-        let build_time = unit_registry.build_time(constructing.kind);
+        let build_time = ctx.unit_registry.build_time(constructing.kind);
 
         // First tick of construction: spawn the building so it can
         // visibly rise/fade throughout the entire build. Skip if
@@ -177,26 +162,13 @@ pub fn tick_construction(
                 ),
                 EmergeStyle::Fade => constructing.site,
             };
-            let new_entity = spawn_unit(
-                constructing.kind,
-                *faction,
-                team.0,
-                spawn_pos,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut model_cache,
-                &mut cob_cache,
-                &invisible_mat_clone,
-                &unit_registry,
-            );
+            let new_entity = spawn_unit(constructing.kind, *faction, team.0, spawn_pos, &mut ctx);
             // Emerging runs for the full build_time so the rise/fade
             // tracks the build progress 1:1 — both decay at `dt` per
             // frame. `EMERGE_LEAD_TIME` is the *factory* convention
             // (last 1.5 s of a build) and is deliberately not used
             // here; mobile-constructor builds want the slower visual.
-            commands.entity(new_entity).insert(Emerging {
+            ctx.commands.entity(new_entity).insert(Emerging {
                 target_y,
                 remaining: build_time,
                 total: build_time,
@@ -205,7 +177,7 @@ pub fn tick_construction(
                 last_build_percent: -1,
             });
             if matches!(style, EmergeStyle::Fade) {
-                commands.entity(new_entity).insert(PendingFadeInstall);
+                ctx.commands.entity(new_entity).insert(PendingFadeInstall);
             }
             constructing.building = Some(new_entity);
         }
@@ -239,7 +211,7 @@ pub fn tick_construction(
             // `total = build_time`, so its rise/fade finishes naturally
             // alongside this constructor's progress. Just clear the
             // construction marker; the building stands on its own.
-            commands.entity(entity).remove::<Constructing>();
+            ctx.commands.entity(entity).remove::<Constructing>();
         }
     }
 }

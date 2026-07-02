@@ -20,7 +20,7 @@ use bevy::prelude::*;
 use super::assets::animation::{CobAnimator, MuzzlePiece};
 use super::components::{Faction, TeamId, UnitStats, UnitType};
 use super::content::unit_registry::UnitRegistry;
-use super::content::weapons::WeaponRegistry;
+use super::content::weapons::{WeaponId, WeaponRegistry};
 use super::lifecycle::script_triggers::JustFired;
 use super::spatial::SpatialIndex;
 use super::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
@@ -28,8 +28,11 @@ use crate::rng::next_signed;
 use crate::terrain::heightmap::Heightmap;
 
 mod aim;
+mod collision_volume;
 mod damage;
 mod lifecycle;
+
+pub use collision_volume::CollisionVolume;
 
 pub use aim::{
     AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, BYTE_CLOSE_DELAY, ByteOpen,
@@ -37,7 +40,7 @@ pub use aim::{
     tick_deploy_state, tick_opening_delay, update_aim_script,
 };
 pub use damage::{
-    BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawnQueue, apply_damage,
+    BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage,
     tick_burst_fire, tick_infections, weapon_infection_duration,
 };
 pub use lifecycle::{
@@ -139,6 +142,17 @@ pub struct AttackCooldown {
     pub remaining: f32,
 }
 
+/// Per-attacker cached primary-weapon id. Inserted at spawn time once
+/// the unit's FBI weapon name has been interned by the
+/// [`WeaponRegistry`]; from there the per-frame combat hot path looks
+/// up the `WeaponDef` via a single `Vec` index instead of hashing the
+/// weapon's TDF name on every iteration. Units with no primary weapon
+/// (or whose only weapon is BuildLaser, filtered upstream by
+/// `unit_registry.weapon`) carry no binding — combat skips them via
+/// `Option<&WeaponBinding>`.
+#[derive(Component, Copy, Clone, Debug)]
+pub struct WeaponBinding(pub WeaponId);
+
 /// Seconds since this unit last took damage, moved, or picked a target.
 /// When this exceeds the unit's FBI `IdleTime`, the `auto_heal` system
 /// regenerates HP at `IdleAutoHeal` per second. Reset to zero on every
@@ -194,6 +208,7 @@ pub fn combat_system(
             Option<&Deployable>,
             Option<&OpeningDelay>,
             Option<&AimScript>,
+            Option<&WeaponBinding>,
         ),
         (
             Without<Dying>,
@@ -240,6 +255,7 @@ pub fn combat_system(
         deployable,
         opening_delay,
         aim_script,
+        weapon_binding,
     ) in &attackers
     {
         // Deployable: keep aiming through Opening so the gun is on
@@ -247,13 +263,25 @@ pub fn combat_system(
         let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
         let fire_blocked_by_opening = opening_delay.is_some_and(|d| d.remaining > 0.0);
 
-        let weapon_name = unit_registry.weapon(unit_type.0);
-
-        // Resolve weapon stats from the TDF registry.
-        let weapon_def = if weapon_name.is_empty() {
-            None
-        } else {
-            weapon_registry.get(weapon_name)
+        // Resolve weapon stats via the cached binding when present.
+        // Falling back to the registry name lookup for legacy paths
+        // (e.g. units that haven't been migrated to `WeaponBinding`)
+        // keeps behaviour identical for any unit class that bypasses
+        // `spawn_unit` — known callers cover every armed unit today
+        // but the safety net is cheap.
+        let (weapon_name, weapon_def) = match weapon_binding {
+            Some(binding) => {
+                let def = weapon_registry.by_id(binding.0);
+                (weapon_registry.name(binding.0), Some(def))
+            }
+            None => {
+                let name = unit_registry.weapon(unit_type.0);
+                if name.is_empty() {
+                    (name, None)
+                } else {
+                    (name, weapon_registry.get(name))
+                }
+            }
         };
         let range = weapon_def.map_or(0.0, |w| w.range);
         let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
@@ -570,6 +598,7 @@ pub fn attack_ground_system(
             &AttackGroundOrder,
             Option<&Deployable>,
             Option<&OpeningDelay>,
+            Option<&WeaponBinding>,
         ),
         Without<Dying>,
     >,
@@ -579,7 +608,7 @@ pub fn attack_ground_system(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, opening_delay) in &attackers {
+    for (entity, unit_type, gtf, order, deployable, opening_delay, weapon_binding) in &attackers {
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
@@ -591,8 +620,17 @@ pub fn attack_ground_system(
         if opening_delay.is_some_and(|d| d.remaining > 0.0) {
             continue;
         }
-        let weapon_name = unit_registry.weapon(unit_type.0);
-        let Some(weapon_def) = weapon_registry.get(weapon_name) else {
+        let (weapon_name, weapon_def) = match weapon_binding {
+            Some(binding) => (
+                weapon_registry.name(binding.0),
+                Some(weapon_registry.by_id(binding.0)),
+            ),
+            None => {
+                let name = unit_registry.weapon(unit_type.0);
+                (name, weapon_registry.get(name))
+            }
+        };
+        let Some(weapon_def) = weapon_def else {
             continue;
         };
         let range = weapon_def.range;

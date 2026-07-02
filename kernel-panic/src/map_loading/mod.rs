@@ -18,16 +18,14 @@ use crate::{
         mesh::generate_terrain_chunks,
     },
     ui,
-    units::{
-        assets::{animation::CobFileCache, meshes::S3OModelCache},
-        content::unit_registry::UnitRegistry,
-        lifecycle::spawning::spawn_homebases,
-    },
+    units::lifecycle::spawning::spawn_homebases,
 };
 use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 
+mod lua_compositing;
 mod mipmap;
 
+use lua_compositing::spawn_lua_compositing;
 use mipmap::{build_terrain_material_from_texture, dark_fallback_material};
 
 pub struct MapLoadingPlugin;
@@ -184,20 +182,13 @@ fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn load_map(
     selected: Res<SelectedMap>,
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut cob_cache: ResMut<CobFileCache>,
     mut geovent_assets: ResMut<GeoventAssets>,
-    unit_registry: Res<UnitRegistry>,
+    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
 ) {
     let map_path = &selected.0;
     let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
@@ -225,11 +216,11 @@ fn load_map(
 
     let terrain_material = match &spring_map.ground_texture {
         Some(ground) => {
-            build_terrain_material_from_texture(ground, &mut images, &mut std_materials)
+            build_terrain_material_from_texture(ground, &mut ctx.images, &mut ctx.materials)
         }
         None => {
             warn!("No ground texture — using fallback");
-            dark_fallback_material(&mut std_materials)
+            dark_fallback_material(&mut *ctx.materials)
         }
     };
 
@@ -255,12 +246,22 @@ fn load_map(
         parsed,
         &heightmap,
         terrain_material,
-        &mut commands,
-        &mut meshes,
-        &mut std_materials,
-        &mut images,
+        &mut ctx.commands,
+        &mut ctx.meshes,
+        &mut ctx.materials,
+        &mut ctx.images,
         &mut geovent_assets,
     );
+
+    if let Some(compositing) = &spring_map.lua_compositing {
+        spawn_lua_compositing(
+            compositing,
+            &mut ctx.commands,
+            &mut ctx.meshes,
+            &mut ctx.materials,
+            &mut ctx.images,
+        );
+    }
 
     // One pathfinding grid per distinct unit `MaxSlope`. Caps and
     // slope-mods are in Spring's encoding — see `cost.rs`.
@@ -278,7 +279,7 @@ fn load_map(
 
         let mut distinct_caps = BTreeSet::<u32>::new();
         for &kind in ALL_UNIT_KINDS {
-            let cap = unit_registry.max_slope_ratio(kind);
+            let cap = ctx.unit_registry.max_slope_ratio(kind);
             distinct_caps.insert((cap * BUCKET_QUANTUM).round() as u32);
         }
         // Always keep the KP-default bucket (FBI MaxSlope=36 from
@@ -313,7 +314,7 @@ fn load_map(
             });
         }
         // Buckets already ascending because BTreeSet iteration is sorted.
-        commands.insert_resource(nav_set);
+        ctx.commands.insert_resource(nav_set);
     }
 
     // Setup minimap from ground texture.
@@ -323,8 +324,8 @@ fn load_map(
             None => (None, 0, 0),
         };
         ui::minimap::setup_minimap(
-            &mut commands,
-            &mut images,
+            &mut ctx.commands,
+            &mut *ctx.images,
             gp,
             gw,
             gh,
@@ -334,19 +335,10 @@ fn load_map(
     }
 
     if let Some(map_info) = &spring_map.map_info {
-        apply_atmosphere(map_info, &mut commands);
+        apply_atmosphere(map_info, &mut ctx.commands);
         apply_fog(map_info, parsed, &mut fog_query);
-        spawn_homebases(
-            &heightmap,
-            map_info,
-            &mut commands,
-            &mut meshes,
-            &mut std_materials,
-            &mut images,
-            &mut model_cache,
-            &mut cob_cache,
-            &unit_registry,
-        );
+        spawn_homebases(&heightmap, map_info, &mut ctx);
+        configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
         let datavent_count = parsed
             .features
             .iter()
@@ -360,7 +352,7 @@ fn load_map(
         );
     }
 
-    commands.insert_resource(heightmap);
+    ctx.commands.insert_resource(heightmap);
 }
 
 fn setup_camera(
@@ -418,6 +410,35 @@ fn spawn_terrain(
         std_materials,
         images,
     );
+}
+
+/// Insert any per-map [`map_events`](crate::map_events) resources whose
+/// activation key matches the loaded map's filename stem.
+fn configure_map_events(
+    map_name: &str,
+    map_info: &MapInfo,
+    heightmap: &Heightmap,
+    commands: &mut Commands,
+) {
+    if map_name.eq_ignore_ascii_case("Stack_Overflow") {
+        let starts: Vec<Vec3> = map_info
+            .start_positions
+            .iter()
+            .map(|sp| heightmap.place(sp.x, sp.z))
+            .collect();
+        info!("  Stack_Overflow detected — installing eruption schedule");
+        commands.insert_resource(crate::map_events::EruptionConfig::stack_overflow(starts));
+    }
+    if map_name.eq_ignore_ascii_case("Circular_Buffer") {
+        let (w, d) = heightmap.world_size();
+        let center = Vec2::new(w * 0.5, d * 0.5);
+        info!("  Circular_Buffer detected — installing clockwise flow swirl");
+        commands.insert_resource(crate::map_events::CircularFlow {
+            center_xz: center,
+            strength: 0.6,
+            clockwise: true,
+        });
+    }
 }
 
 fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
