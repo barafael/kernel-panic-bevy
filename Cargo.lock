@@ -3495,6 +3495,7 @@ version = "0.1.0"
 dependencies = [
  "better_default",
  "bevy",
+ "futures-lite",
  "spring-cob",
  "spring-map",
  "spring-pathfinding",
@@ -5194,6 +5195,7 @@ dependencies = [
  "better_default",
  "binrw",
  "byteorder",
+ "flate2",
  "image",
  "mlua",
  "postcard",
