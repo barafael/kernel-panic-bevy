@@ -47,6 +47,24 @@ impl Plugin for MapLoadingPlugin {
 #[derive(Resource)]
 struct SelectedMap(PathBuf);
 
+/// Marker for UI nodes (menu backdrops, game-over panels) that the menu
+/// builder must not treat as disposable across page rebuilds.
+#[derive(Component)]
+pub struct PersistentEntity;
+
+/// All selectable map names (file stems) discovered in `assets/maps/`,
+/// fed to the launch-menu map list and the demo boot.
+#[derive(Resource, Default)]
+pub struct MapCatalog {
+    names: Vec<String>,
+}
+
+impl MapCatalog {
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+}
+
 /// Discover the map archives in `assets/maps/` and pick the one named
 /// by the CLI arg (or the first alphabetically). If both a baked
 /// `.kpmap` and a source `.sd7`/`.sdz` exist for the same stem, the
@@ -65,7 +83,14 @@ fn pick_map(mut commands: Commands) {
         .filter(|p| p.is_file() && is_map_ext(p.as_path()))
     {
         info!("Loading map: {}", direct.display());
+        let name = direct
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         commands.insert_resource(SelectedMap(direct));
+        commands.insert_resource(MapCatalog {
+            names: vec![name],
+        });
         return;
     }
 
@@ -103,6 +128,12 @@ fn pick_map(mut commands: Commands) {
             })
         })
         .unwrap_or(0);
+
+    let names: Vec<String> = maps
+        .iter()
+        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .collect();
+    commands.insert_resource(MapCatalog { names });
 
     let selected = maps.into_iter().nth(initial).unwrap();
     info!("Loading map: {}", selected.display());

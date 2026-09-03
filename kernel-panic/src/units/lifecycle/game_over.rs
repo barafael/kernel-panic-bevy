@@ -1,8 +1,12 @@
 use bevy::prelude::*;
 
+use crate::game_setup::GameOverDismissed;
 use crate::units::components::{Homebase, TeamId};
+use crate::units::player::LocalTeam;
 
 /// Current game state. Systems in gameplay sets only run in `Playing`.
+/// The menu system watches for transitions into Victory/Defeat and opens
+/// the game-over panel (see `ui::menu`).
 #[derive(States, Default, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GameState {
     #[default]
@@ -11,73 +15,43 @@ pub enum GameState {
     Defeat,
 }
 
-/// UI entity for the game-over overlay.
-#[derive(Component)]
-pub struct GameOverUi;
-
-/// Sandbox-mode game-over check: with AI removed and every team
-/// player-controllable, there's no "enemy" perspective. We declare
-/// victory once a single team has all surviving homebases, and defeat
-/// if every homebase on the map is gone.
+/// Player-relative game-over check: **Defeat** when the local team has
+/// no homebases left, **Victory** once every surviving homebase belongs
+/// to the local team. A map with no homebases at all (test / sandbox
+/// variants) never flips state. Once the player dismisses the game-over
+/// panel ("Keep on playing"), the check stops re-triggering.
 pub fn check_game_over(
+    local: Res<LocalTeam>,
+    dismissed: Res<GameOverDismissed>,
     homebases: Query<&TeamId, With<Homebase>>,
     mut next_state: ResMut<NextState<GameState>>,
-    mut commands: Commands,
-    existing_ui: Query<Entity, With<GameOverUi>>,
 ) {
-    // Maps with no homebases (test / sandbox variants) never flip state.
-    if homebases.is_empty() && existing_ui.is_empty() {
+    if dismissed.0 {
         return;
     }
 
-    let mut first_team: Option<u8> = None;
-    let mut only_one = true;
-    let mut any = false;
+    // Maps with no homebases (test / sandbox variants) never flip state.
+    if homebases.is_empty() {
+        return;
+    }
+
+    let mut local_bases: usize = 0;
+    let mut enemy_bases: usize = 0;
     for t in &homebases {
-        any = true;
-        match first_team {
-            None => first_team = Some(t.0),
-            Some(ft) if ft != t.0 => {
-                only_one = false;
-                break;
-            }
-            _ => {}
+        if t.0 == local.0 {
+            local_bases += 1;
+        } else {
+            enemy_bases += 1;
         }
     }
 
-    let new_state = if !any {
+    let new_state = if local_bases == 0 {
         GameState::Defeat
-    } else if only_one {
+    } else if enemy_bases == 0 {
         GameState::Victory
     } else {
         return;
     };
-
-    let (text, color) = match new_state {
-        GameState::Victory => ("VICTORY", Color::linear_rgb(0.0, 1.0, 0.3)),
-        GameState::Defeat => ("DEFEAT", Color::linear_rgb(1.0, 0.0, 0.2)),
-        GameState::Playing => unreachable!(),
-    };
-
-    if existing_ui.is_empty() {
-        commands.spawn((
-            GameOverUi,
-            Text::new(text),
-            TextFont {
-                font_size: 120.0,
-                ..default()
-            },
-            TextColor(color),
-            TextLayout::new_with_justify(Justify::Center),
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                top: Val::Percent(35.0),
-                justify_self: JustifySelf::Center,
-                ..default()
-            },
-        ));
-    }
 
     next_state.set(new_state);
 }

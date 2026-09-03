@@ -69,6 +69,13 @@ impl Producer {
     pub fn enqueue(&mut self, kind: UnitKind) {
         self.queue.push_back(kind);
     }
+
+    /// Pop and return the next unit to build, if any. Used by tests to
+    /// assert on the AI's build sequencing.
+    #[allow(dead_code)]
+    pub fn dequeue_front(&mut self) -> Option<UnitKind> {
+        self.queue.pop_front()
+    }
 }
 
 /// Which units are factories and what they produce by default.

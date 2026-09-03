@@ -1,3 +1,4 @@
+mod game_setup;
 mod interaction;
 mod map_events;
 mod map_loading;
@@ -135,5 +136,10 @@ fn main() {
             MapLoadingPlugin,
             MapEventsPlugin,
         ))
+        .init_state::<game_setup::AppState>()
+        .init_resource::<game_setup::SkirmishConfig>()
+        .init_resource::<game_setup::GameOverDismissed>()
+        .insert_resource(game_setup::AiDifficulty(2))
+        .add_message::<game_setup::RunGame>()
         .run();
 }

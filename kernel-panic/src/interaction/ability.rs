@@ -14,9 +14,9 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use super::movement::{MoveTarget, QueuedCommand};
-use super::selection::{Selected, apply_ordered_command, ground_hit};
+use super::selection::{apply_ordered_command, ground_hit, Selected};
 use crate::rendering::camera::RtsCamera;
-use crate::units::combat::{AttackGroundOrder, SELF_DESTRUCT_DELAY, SelfDestructCountdown};
+use crate::units::combat::{AttackGroundOrder, SelfDestructCountdown, SELF_DESTRUCT_DELAY};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 use crate::units::mechanics::command_fire::CommandFireEvent;
@@ -31,19 +31,24 @@ pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AttackGroundMode>().add_systems(
-            Update,
-            (
-                trigger_command_fire_on_hotkey,
-                trigger_deploy_on_hotkey,
-                trigger_dispatch_on_hotkey,
-                trigger_enter_on_hotkey,
-                trigger_self_destruct_on_hotkey,
-                toggle_attack_ground_mode,
-                trigger_attack_ground_click,
-                update_attack_ground_cursor,
-            ),
-        );
+        app.init_resource::<AttackGroundMode>()
+            .init_resource::<PatrolCursorMode>()
+            .add_systems(
+                Update,
+                (
+                    trigger_command_fire_on_hotkey,
+                    trigger_deploy_on_hotkey,
+                    trigger_dispatch_on_hotkey,
+                    trigger_enter_on_hotkey,
+                    trigger_self_destruct_on_hotkey,
+                    toggle_patrol_cursor_mode,
+                    trigger_patrol_click,
+                    update_patrol_cursor,
+                    toggle_attack_ground_mode,
+                    trigger_attack_ground_click,
+                    update_attack_ground_cursor,
+                ),
+            );
     }
 }
 
@@ -55,6 +60,16 @@ impl Plugin for AbilityHotkeyPlugin {
 /// every selected unit.
 #[derive(Resource, Default)]
 pub struct AttackGroundMode {
+    pub active: bool,
+}
+
+/// Sticky patrol targeting mode: toggled on by pressing `P`,
+/// cleared by pressing `P` again, Escape, right-click, or issuing the
+/// click that commits the patrol target. While `active` the cursor is
+/// forced to [`CursorKind::Patrol`] and the next left-click is consumed
+/// by [`trigger_patrol_click`] as a patrol order for every selected unit.
+#[derive(Resource, Default)]
+pub struct PatrolCursorMode {
     pub active: bool,
 }
 
@@ -268,5 +283,80 @@ fn update_attack_ground_cursor(
 ) {
     if mode.active {
         request.set(crate::interaction::cursor::CursorKind::Attack, 10);
+    }
+}
+
+/// Toggle [`PatrolCursorMode`]. `P` flips the flag; Escape and
+/// right-click hard-cancel. While active the cursor renders as
+/// [`CursorKind::Patrol`] (see [`update_patrol_cursor`]) and the
+/// next left-click commits the patrol order.
+fn toggle_patrol_cursor_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut mode: ResMut<PatrolCursorMode>,
+) {
+    if keys.just_pressed(KeyCode::KeyP) {
+        mode.active = !mode.active;
+        return;
+    }
+    if mode.active && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    {
+        mode.active = false;
+    }
+}
+
+/// Click handler: while [`PatrolCursorMode`] is active, the next left-click
+/// issues a patrol order for every selected unit. The unit will patrol
+/// between its current location and the clicked location.
+#[allow(clippy::too_many_arguments)]
+fn trigger_patrol_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    transform_q: Query<&Transform>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: MeshRayCast,
+    mut mode: ResMut<PatrolCursorMode>,
+    mut commands: Commands,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+) {
+    if !mode.active || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+        return;
+    };
+
+    for (entity, unit) in &selected_q {
+        let speed = unit_registry.speed(unit.0);
+        if speed <= 0.0 {
+            continue;
+        }
+
+        // Get current position of the unit
+        let Ok(current_tf) = transform_q.get(entity) else {
+            continue;
+        };
+        let current_pos = current_tf.translation;
+
+        // Issue a patrol command: move to target, then return to start, repeat
+        // For patrol, we queue two moves: target -> start
+        use super::movement::{CommandQueue, MoveTarget};
+
+        commands.entity(entity).insert(MoveTarget(target));
+        commands.entity(entity).insert(CommandQueue {
+            commands: vec![super::movement::QueuedCommand::Patrol(current_pos)],
+        });
+    }
+    mode.active = false;
+}
+
+/// Force the cursor to the Patrol glyph while the patrol mode is active.
+fn update_patrol_cursor(
+    mode: Res<PatrolCursorMode>,
+    mut request: ResMut<crate::interaction::cursor::CursorRequest>,
+) {
+    if mode.active {
+        request.set(crate::interaction::cursor::CursorKind::Patrol, 10);
     }
 }

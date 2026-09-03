@@ -6,6 +6,7 @@
 //! this module's rebuild.
 
 mod hud;
+mod menu;
 pub mod minimap;
 pub mod theme;
 
@@ -15,6 +16,6 @@ pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((hud::HudPlugin, minimap::MinimapPlugin));
+        app.add_plugins((hud::HudPlugin, menu::MenuPlugin, minimap::MinimapPlugin));
     }
 }

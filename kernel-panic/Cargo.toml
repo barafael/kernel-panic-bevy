@@ -10,6 +10,7 @@ spring-unit-mesh = { path = "../spring-unit-mesh" }
 spring-cob = { path = "../spring-cob" }
 spring-pathfinding = { path = "../spring-pathfinding" }
 bevy = { version = "0.18", features = ["serialize", "debug", "custom_cursor"] }
+tracing-chrome = "0.7"
 better_default = { workspace = true }
 thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }

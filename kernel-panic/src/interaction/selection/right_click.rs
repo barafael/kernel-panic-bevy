@@ -204,7 +204,10 @@ pub(crate) fn apply_ordered_command(
             QueuedCommand::BuildAt { kind, site } => {
                 ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
             }
-            QueuedCommand::Move(_) => {
+            QueuedCommand::Move(_)
+            | QueuedCommand::Patrol(_)
+            | QueuedCommand::AttackMove(_)
+            | QueuedCommand::Guard(_) => {
                 ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
             }
         }

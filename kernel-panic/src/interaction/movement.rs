@@ -56,12 +56,28 @@ pub enum QueuedCommand {
         kind: UnitKind,
         site: Vec3,
     },
+    /// Walk to `target`, then return to the origin, repeating. Issued by
+    /// the patrol (P) order.
+    Patrol(Vec3),
+    /// Walk to `target`, then fight anything hostile on the way. The
+    /// attack-move keybind was removed upstream; the variant remains so
+    /// AI / future keybinds can issue it.
+    #[allow(dead_code)]
+    AttackMove(Vec3),
+    /// Hold position at `point`, engaging hostile units that come within
+    /// weapon range. The guard keybind was removed upstream; the variant
+    /// remains so AI / future keybinds can issue it.
+    #[allow(dead_code)]
+    Guard(Vec3),
 }
 
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
-            QueuedCommand::Move(p) => *p,
+            QueuedCommand::Move(p)
+            | QueuedCommand::Patrol(p)
+            | QueuedCommand::AttackMove(p)
+            | QueuedCommand::Guard(p) => *p,
             QueuedCommand::BuildAt { site, .. } => *site,
         }
     }
@@ -280,7 +296,12 @@ pub fn movement_system(
                 }
             });
             match next {
-                Some(QueuedCommand::Move(pos)) => {
+                Some(
+                    QueuedCommand::Move(pos)
+                    | QueuedCommand::Patrol(pos)
+                    | QueuedCommand::AttackMove(pos)
+                    | QueuedCommand::Guard(pos),
+                ) => {
                     commands
                         .entity(entity)
                         .insert(MoveTarget(pos))
@@ -879,6 +900,7 @@ pub fn draw_selected_command_lines(
 ) {
     const MOVE_COLOR: Color = Color::srgb(0.2, 1.0, 0.3);
     const BUILD_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
+    const PATROL_COLOR: Color = Color::srgb(0.4, 0.7, 1.0);
     const DISC_RADIUS: f32 = 6.0;
 
     let hm = heightmap.as_deref();
@@ -926,6 +948,9 @@ pub fn draw_selected_command_lines(
                 let color = match cmd {
                     QueuedCommand::Move(_) => MOVE_COLOR,
                     QueuedCommand::BuildAt { .. } => BUILD_COLOR,
+                    QueuedCommand::Patrol(_) => PATROL_COLOR,
+                    QueuedCommand::AttackMove(_) => MOVE_COLOR,
+                    QueuedCommand::Guard(_) => MOVE_COLOR,
                 };
                 draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
                 gizmos.circle(

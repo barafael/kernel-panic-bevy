@@ -1,9 +1,11 @@
+pub mod ai;
 pub mod assets;
 pub mod combat;
 pub mod components;
 pub mod content;
 pub mod lifecycle;
 pub mod mechanics;
+pub mod player;
 pub mod spatial;
 pub mod weapon_fx;
 
@@ -39,6 +41,8 @@ impl Plugin for UnitsPlugin {
         app.init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
             .init_resource::<animation::CobFileCache>()
+            .insert_resource(player::LocalTeam(0))
+            .init_resource::<ai::AiTicker>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
@@ -59,6 +63,13 @@ impl Plugin for UnitsPlugin {
             .init_resource::<spatial::SpatialIndex>()
             .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
+            .add_systems(
+                Update,
+                ai::ai_brain
+                    .before(GameplaySet::Produce)
+                    .run_if(in_state(game_over::GameState::Playing))
+                    .run_if(in_state(crate::game_setup::AppState::InGame)),
+            )
             .configure_sets(
                 Update,
                 (

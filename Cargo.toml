@@ -23,3 +23,26 @@ proptest = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Bevy debug runs are ~5-10x slower than release because dependencies
+# (bevy, wgpu, glam) build with opt-level 0. Optimize all dependencies
+# fully while keeping workspace crates at opt-1: near-release FPS with
+# debug-grade compile times and full debug info for the game code.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+# opt 1, not 2/3: bevy_pbr/bevy_render at opt>=2 OOM-kill rustc on ~8 GB
+# free RAM. opt 1 already gives the big win over opt 0 (bounds-check
+# elimination, inlining, debug_asserts still on) — Bevy runs several
+# times faster than fully-unoptimized dev builds.
+opt-level = 1
+# Dependencies don't need debug info: cuts rustc peak memory and shrinks
+# the target dir massively.
+debug = false
+
+# NOTE: the mixed profile (opt-1 workspace + opt-1/debug=false deps) can
+# trip a nightly rust-lld flake — "undefined hidden symbol: anon…" from
+# stale incremental codegen units. Rebuild with `CARGO_INCREMENTAL=0`
+# once if it appears.
+

@@ -289,7 +289,7 @@ fn colorize_texture(tga: &TgaImage, faction: Faction) -> Vec<u8> {
     let pixel_count = (tga.width * tga.height) as usize;
     let mut pixels = Vec::with_capacity(pixel_count * 4);
 
-    for chunk in tga.pixels.chunks_exact(4) {
+    for chunk in tga.pixels.as_chunks::<4>().0 {
         let (src_r, src_g, src_b) = (chunk[0], chunk[1], chunk[2]);
         let alpha = chunk[3] as u16;
 

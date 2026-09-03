@@ -2,3 +2,6 @@
 
 # Pre-baked map output (regenerable from .sd7/.sdz via `cargo run -p spring-map --bin bake_map`)
 *.kpmap
+
+trace-kp*
+trace-*.json
