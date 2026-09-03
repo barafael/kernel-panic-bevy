@@ -1,19 +1,25 @@
 //! Pre-baked map format.
 //!
-//! A `.kpmap` file is the result of running [`bake_map`] on a Spring
+//! A `.kpmap` file is the result of running `bake_map` on a Spring
 //! `.sd7` / `.sdz`: the archive is unpacked, Lua heightmap gadgets are
 //! applied, SMT tiles are decoded, and the final terrain + texture +
 //! metadata is serialized into a single deterministic blob. The game
-//! can then load it without sevenz / zip / mlua at runtime, which both
-//! cuts cold-start time and is a prerequisite for the WASM target
+//! can then load it with no archive / Lua / image dependencies, which
+//! both cuts cold-start time and is a prerequisite for the WASM target
 //! (plan §8.1) — `sevenz-rust` and `mlua` don't compile to wasm32.
 //!
-//! Format (all little-endian, postcard-encoded body):
+//! Format (all little-endian):
 //!
 //! ```text
-//! magic        : 8 bytes  = b"kpmapv1\0"
-//! body_len     : u32      = postcard-encoded body length in bytes
-//! body         : [u8; N]  = postcard(BakedMap)
+//! magic        : 8 bytes
+//!   kpmapv1\0  = body is the raw postcard payload
+//!   kpmapv2\0  = body is DEFLATE(postcard payload) — the raw payload
+//!                is dominated by solid-colour textures, so v2 shrinks
+//!                a 270 MB v1 blob to ~5 MB and is what ships over
+//!                HTTP for the web build
+//! body_len     : u32      = body length in bytes (post-decode for v1,
+//!                          compressed for v2)
+//! body         : [u8; N]  = postcard(BakedMap), deflated for v2
 //! ```
 //!
 //! The magic + body_len header lets future format versions detect this
@@ -21,7 +27,7 @@
 //! Bumping the version number means the reader rejects mismatched
 //! files instead of silently corrupting them.
 
-use std::io::Write;
+use std::io::{Read, Write};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -30,7 +36,10 @@ use crate::SpringMap;
 use crate::map_types::{GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError};
 use crate::smd_parser::MapInfo;
 
-const MAGIC: &[u8; 8] = b"kpmapv1\0";
+const MAGIC_V1: &[u8; 8] = b"kpmapv1\0";
+const MAGIC_V2: &[u8; 8] = b"kpmapv2\0";
+/// Current writer version: v2 deflates the postcard body.
+const MAGIC: &[u8; 8] = MAGIC_V2;
 
 #[derive(Debug, Error)]
 pub enum BakedMapError {
@@ -99,27 +108,43 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
     };
 
     let body = postcard::to_allocvec(&baked).map_err(BakedMapError::PostcardEncode)?;
-    let body_len: u32 = body
+
+    // v2: deflate the body. The payload is dominated by solid-colour
+    // textures and zeroed maps, so this routinely shrinks it ~50×.
+    let mut encoder =
+        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+    encoder.write_all(&body)?;
+    let compressed = encoder.finish()?;
+
+    let body_len: u32 = compressed
         .len()
         .try_into()
-        .expect("postcard body exceeds u32::MAX");
+        .expect("deflated body exceeds u32::MAX");
 
-    let mut out = Vec::with_capacity(MAGIC.len() + 4 + body.len());
+    let mut out = Vec::with_capacity(MAGIC.len() + 4 + compressed.len());
     out.write_all(MAGIC)?;
     out.write_all(&body_len.to_le_bytes())?;
-    out.write_all(&body)?;
+    out.write_all(&compressed)?;
     Ok(out)
 }
 
 /// Deserialize a `.kpmap` blob back into the same shape `load_map`
 /// returns for a `.sd7` — the rest of the engine doesn't need to know
-/// which path the data took.
+/// which path the data took. Accepts v1 (raw body) and v2 (deflated).
 pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
+    let magic = bytes
+        .get(..MAGIC.len())
+        .ok_or(BakedMapError::HeaderTruncated)?;
+    let compressed = if magic == MAGIC_V1.as_slice() {
+        false
+    } else if magic == MAGIC_V2.as_slice() {
+        true
+    } else {
+        return Err(BakedMapError::BadMagic);
+    };
+
     if bytes.len() < MAGIC.len() + 4 {
         return Err(BakedMapError::HeaderTruncated);
-    }
-    if &bytes[..MAGIC.len()] != MAGIC {
-        return Err(BakedMapError::BadMagic);
     }
 
     let len_bytes: [u8; 4] = bytes[MAGIC.len()..MAGIC.len() + 4].try_into().unwrap();
@@ -131,9 +156,20 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
             actual: body.len(),
         });
     }
+    let stored = &body[..body_len];
+
+    // v1 stores the postcard payload raw; v2 deflates it.
+    let payload: Vec<u8> = if compressed {
+        let mut decoder = flate2::read::DeflateDecoder::new(stored);
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded)?;
+        decoded
+    } else {
+        stored.to_vec()
+    };
 
     let baked: BakedMap =
-        postcard::from_bytes(&body[..body_len]).map_err(BakedMapError::PostcardDecode)?;
+        postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
 
     // Validate texture byte count before constructing GroundTexture so a
     // corrupt file fails loudly instead of producing a silently malformed

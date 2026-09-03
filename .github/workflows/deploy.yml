@@ -42,6 +42,18 @@ jobs:
           curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
+      # Web can't extract .sd7/.sdz archives (no sevenz/mlua on wasm), so
+      # bake every source map to the compressed .kpmap format first. The
+      # kernel-panic build script embeds the resulting catalog at compile
+      # time, and index.html's copy-dir ships the .kpmap files.
+      - name: Bake maps (.kpmap)
+        run: |
+          cargo build --release -p spring-map --bin bake_map
+          for f in kernel-panic/assets/maps/*.sd7 kernel-panic/assets/maps/*.sdz; do
+            [ -e "$f" ] || continue
+            ./target/release/bake_map "$f"
+          done
+
       - name: Build
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
 

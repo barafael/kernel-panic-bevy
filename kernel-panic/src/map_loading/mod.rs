@@ -10,7 +10,9 @@
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use bevy::prelude::*;
 
@@ -34,6 +36,15 @@ use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 mod lua_compositing;
 mod mipmap;
 
+// Web-only: maps arrive as fetched `.kpmap` bytes through the asset
+// server, and the deploy's map list is embedded at build time.
+#[cfg(target_arch = "wasm32")]
+mod bytes_asset;
+#[cfg(target_arch = "wasm32")]
+use bytes_asset::BytesAsset;
+#[cfg(target_arch = "wasm32")]
+include!(concat!(env!("OUT_DIR"), "/web_map_catalog.rs"));
+
 #[cfg(not(target_arch = "wasm32"))]
 use lua_compositing::spawn_lua_compositing;
 use mipmap::{build_terrain_material_from_texture, dark_fallback_material};
@@ -50,8 +61,11 @@ pub struct GameWorldRebuild;
 
 impl Plugin for MapLoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, pick_map.after(crate::rendering::camera::spawn_camera))
-            .add_systems(
+        app.add_systems(Startup, pick_map.after(crate::rendering::camera::spawn_camera));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            app.add_systems(
                 OnEnter(crate::game_setup::AppState::InGame),
                 (prepare_game_entry, load_map)
                     .chain()
@@ -71,6 +85,28 @@ impl Plugin for MapLoadingPlugin {
                     .run_if(rerun_requested)
                     .after(crate::ui::menu::boot_demo),
             );
+        }
+
+        // Web: no filesystem — the world is built from a fetched
+        // `.kpmap`. `prepare_game_entry` requests the asset; the arrival
+        // system polls every frame and spawns once the bytes land.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use bevy::asset::AssetApp;
+            app.register_asset_loader(bytes_asset::BytesLoader)
+                .init_resource::<PendingWebMapLoad>()
+                .add_systems(
+                    OnEnter(crate::game_setup::AppState::InGame),
+                    prepare_game_entry.in_set(GameWorldRebuild),
+                )
+                .add_systems(
+                    Update,
+                    (prepare_game_entry.run_if(rerun_requested), web_map_arrival)
+                        .chain()
+                        .in_set(GameWorldRebuild)
+                        .after(crate::ui::menu::boot_demo),
+                );
+        }
     }
 }
 
@@ -81,8 +117,15 @@ fn rerun_requested(mut reader: MessageReader<RunGame>) -> bool {
 }
 
 /// Path to the map archive loaded for this session.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource)]
 struct SelectedMap(PathBuf);
+
+/// Web: in-flight `.kpmap` fetch, requested by [`prepare_game_entry`]
+/// and consumed by [`web_map_arrival`] when the payload lands.
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+struct PendingWebMapLoad(Option<Handle<BytesAsset>>);
 
 /// Marker for entities that survive game-world teardown (menu UI):
 /// the launch menu, Esc overlay, and game-over panel all carry it so
@@ -140,7 +183,19 @@ fn prepare_game_entry(world: &mut World) {
     match path {
         Some(p) => {
             info!("Preparing match on {} ({})", setup.map, p.display());
-            world.resource_mut::<SelectedMap>().0 = p;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                world.resource_mut::<SelectedMap>().0 = p;
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // Catalog entries are already asset-relative paths
+                // (`maps/<stem>.kpmap`) — request the fetch.
+                let handle: Handle<BytesAsset> = world
+                    .resource::<AssetServer>()
+                    .load(p.to_string_lossy().into_owned());
+                world.resource_mut::<PendingWebMapLoad>().0 = Some(handle);
+            }
         }
         None => {
             error!("Map catalog is empty — cannot start a game");
@@ -204,84 +259,83 @@ fn despawn_game_world(world: &mut World) {
 /// default `GameSetup` and auto-enters the game — preserving the old
 /// "launch straight into a map" behaviour for headless testing.
 ///
-/// If both a baked `.kpmap` and a source `.sd7`/`.sdz` exist for the
-/// same stem, the baked form wins — no archive extraction or Lua
-/// execution at startup, and the WASM target (plan §8.1) can't run
-/// those anyway.
+/// Web: no filesystem. The deploy workflow bakes `.kpmap` files into the
+/// artifact and [`WEB_MAP_CATALOG`] (see build.rs) lists them at compile
+/// time, so the catalog is just the embedded list.
 fn pick_map(mut commands: Commands) {
-    let maps_dir = crate::paths::from_project_root("kernel-panic/assets/maps");
-    let mut maps: Vec<PathBuf> = std::fs::read_dir(&maps_dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| is_map_ext(p.as_path()))
-        .collect();
-    dedupe_prefer_baked(&mut maps);
-    maps.sort();
+    #[cfg(target_arch = "wasm32")]
+    {
+        let paths: Vec<PathBuf> = WEB_MAP_CATALOG
+            .iter()
+            .map(|n| PathBuf::from(format!("maps/{n}.kpmap")))
+            .collect();
+        commands.insert_resource(MapCatalog(paths));
+        commands.insert_resource(crate::game_setup::GameSetup::default());
+        return;
+    }
 
-    if maps.is_empty() {
-        // Web has no filesystem: `read_dir` always fails there, and the
-        // baked-map story (plan §8.1) isn't wired to the asset server
-        // yet. Boot with an empty catalog — the menu comes up, map
-        // loads fail with a logged error instead of a panic.
-        #[cfg(target_arch = "wasm32")]
-        {
-            warn!("No maps available on web (fs access unavailable); booting with empty catalog");
-            commands.insert_resource(MapCatalog(Vec::new()));
-            commands.insert_resource(crate::game_setup::GameSetup::default());
-            // Placeholder so the load_map chain never sees a missing
-            // resource; the fs read fails and logs an error instead.
-            commands.insert_resource(SelectedMap(PathBuf::new()));
-            return;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let maps_dir = crate::paths::from_project_root("kernel-panic/assets/maps");
+        let mut maps: Vec<PathBuf> = std::fs::read_dir(&maps_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| is_map_ext(p.as_path()))
+            .collect();
+        dedupe_prefer_baked(&mut maps);
+        maps.sort();
+
+        if maps.is_empty() {
+            panic!(
+                "No map files found in {}. Place .sd7/.sdz files there or pass one as a CLI arg.",
+                maps_dir.display()
+            );
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        panic!(
-            "No map files found in {}. Place .sd7/.sdz files there or pass one as a CLI arg.",
-            maps_dir.display()
-        );
-    }
 
-    // CLI override: a direct usable map file, or a name stem matched
-    // against the catalog.
-    let cli_arg = std::env::args().nth(1);
-    let direct = cli_arg
-        .as_ref()
-        .map(PathBuf::from)
-        .filter(|p| p.is_file() && is_map_ext(p.as_path()));
-    let stem_pick = cli_arg.as_ref().and_then(|arg| {
-        let stem = PathBuf::from(arg)
-            .file_stem()
-            .map(|s| s.to_ascii_lowercase())
-            .unwrap_or_default();
-        maps.iter().position(|p| {
-            p.file_stem()
-                .map(|s| s.to_ascii_lowercase() == stem)
-                .unwrap_or(false)
-        })
-    });
+        // CLI override: a direct usable map file, or a name stem matched
+        // against the catalog.
+        let cli_arg = std::env::args().nth(1);
+        let direct = cli_arg
+            .as_ref()
+            .map(PathBuf::from)
+            .filter(|p| p.is_file() && is_map_ext(p.as_path()));
+        let stem_pick = cli_arg.as_ref().and_then(|arg| {
+            let stem = PathBuf::from(arg)
+                .file_stem()
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            maps.iter().position(|p| {
+                p.file_stem()
+                    .map(|s| s.to_ascii_lowercase() == stem)
+                    .unwrap_or(false)
+            })
+        });
 
-    let mut setup = crate::game_setup::GameSetup::default();
-    let mut auto_enter = false;
-    if let Some(path) = direct.or_else(|| stem_pick.map(|i| maps[i].clone())) {
-        setup.map = path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        auto_enter = true;
-        info!("CLI map argument: {}", setup.map);
-    }
+        let mut setup = crate::game_setup::GameSetup::default();
+        let mut auto_enter = false;
+        if let Some(path) = direct.or_else(|| stem_pick.map(|i| maps[i].clone())) {
+            setup.map = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            auto_enter = true;
+            info!("CLI map argument: {}", setup.map);
+        }
 
-    commands.insert_resource(MapCatalog(maps.clone()));
-    commands.insert_resource(SelectedMap(
-        maps.first().cloned().expect("maps is non-empty"),
-    ));
-    commands.insert_resource(setup);
-    if auto_enter {
-        commands.insert_resource(NextState::Pending(crate::game_setup::AppState::InGame));
+        commands.insert_resource(MapCatalog(maps.clone()));
+        commands.insert_resource(SelectedMap(
+            maps.first().cloned().expect("maps is non-empty"),
+        ));
+        commands.insert_resource(setup);
+        if auto_enter {
+            commands.insert_resource(NextState::Pending(crate::game_setup::AppState::InGame));
+        }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_map_ext(path: &Path) -> bool {
     matches!(
         path.extension()
@@ -292,6 +346,7 @@ fn is_map_ext(path: &Path) -> bool {
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_baked_ext(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -313,9 +368,7 @@ enum LoadMapError {
     },
 }
 
-/// Dispatch on file extension: `.kpmap` reads the postcard payload via
-/// the baked loader (no archive / Lua deps), anything else hits the
-/// full `.sd7`/`.sdz` pipeline.
+#[cfg(not(target_arch = "wasm32"))]
 fn load_map_dispatch(path: &Path) -> Result<spring_map::SpringMap, LoadMapError> {
     if is_baked_ext(path) {
         let bytes = std::fs::read(path).map_err(|error| LoadMapError::Io {
@@ -328,9 +381,7 @@ fn load_map_dispatch(path: &Path) -> Result<spring_map::SpringMap, LoadMapError>
     }
 }
 
-/// When a `.kpmap` and an `.sd7`/`.sdz` share the same file stem, drop
-/// the source archive — the baked form has the same content and loads
-/// without 7z / Lua. Side-effect-free if the baked form is absent.
+#[cfg(not(target_arch = "wasm32"))]
 fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
     use std::collections::HashSet;
     let baked_stems: HashSet<String> = maps
@@ -354,7 +405,10 @@ fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
         !baked_stems.contains(&stem)
     });
 }
-
+/// Native: read the selected archive (baked `.kpmap` preferred), then
+/// build the world. Web uses [`web_map_arrival`] instead.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
 fn load_map(
     selected: Res<SelectedMap>,
     setup: Res<GameSetup>,
@@ -365,7 +419,7 @@ fn load_map(
     mut ctx: crate::units::lifecycle::spawning::SpawnContext,
 ) {
     let map_path = &selected.0;
-    let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy();
+    let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
 
     info!("Loading map: {map_name}");
 
@@ -377,6 +431,91 @@ fn load_map(
         }
     };
 
+    spawn_map_world(
+        spring_map,
+        &setup,
+        &map_name,
+        &mut camera_query,
+        &mut fog_query,
+        &mut map_bounds,
+        &mut geovent_assets,
+        &mut ctx,
+    );
+}
+
+/// Web: poll the in-flight `.kpmap` fetch; once the bytes have landed,
+/// decode and build the world. A failed fetch logs an error and clears
+/// the pending state so the menu can retry.
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+fn web_map_arrival(
+    mut pending: ResMut<PendingWebMapLoad>,
+    assets: Res<Assets<BytesAsset>>,
+    server: Res<AssetServer>,
+    setup: Res<GameSetup>,
+    mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
+    mut map_bounds: ResMut<MapBounds>,
+    mut geovent_assets: ResMut<GeoventAssets>,
+    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
+) {
+    use bevy::asset::LoadState;
+
+    let Some(handle) = pending.0.as_ref() else {
+        return;
+    };
+    match server.load_state(handle) {
+        LoadState::Loaded => {}
+        LoadState::Failed(error) => {
+            error!("Map fetch failed: {error}");
+            pending.0 = None;
+            return;
+        }
+        _ => return, // still fetching / deps loading
+    }
+    let Some(asset) = assets.get(handle) else {
+        return;
+    };
+
+    let map_name = setup.map.clone();
+    info!("Received {} ({} baked bytes)", map_name, asset.0.len());
+    let spring_map = match spring_map::baked::read_baked_map(&asset.0) {
+        Ok(m) => m,
+        Err(error) => {
+            error!("Failed to decode baked map {map_name}: {error}");
+            pending.0 = None;
+            return;
+        }
+    };
+
+    spawn_map_world(
+        spring_map,
+        &setup,
+        &map_name,
+        &mut camera_query,
+        &mut fog_query,
+        &mut map_bounds,
+        &mut geovent_assets,
+        &mut ctx,
+    );
+    pending.0 = None;
+}
+
+/// Everything after "I have a `SpringMap` in hand": terrain, atmosphere,
+/// fog, nav grids, minimap, homebases, per-map events, heightmap
+/// resource. Shared by the native file path and the web baked-bytes
+/// path.
+#[allow(clippy::too_many_arguments)]
+fn spawn_map_world(
+    spring_map: spring_map::SpringMap,
+    setup: &GameSetup,
+    map_name: &str,
+    camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    fog_query: &mut Query<&mut DistanceFog, With<RtsCamera>>,
+    map_bounds: &mut ResMut<MapBounds>,
+    geovent_assets: &mut GeoventAssets,
+    ctx: &mut crate::units::lifecycle::spawning::SpawnContext,
+) {
     let parsed = &spring_map.parsed;
 
     info!(
@@ -398,7 +537,7 @@ fn load_map(
         }
     };
 
-    setup_camera(parsed, &mut camera_query, &mut map_bounds);
+    setup_camera(parsed, camera_query, &mut **map_bounds);
 
     // Check actual height variance, not header values (gadgets may have modified the terrain).
     let min_actual = parsed.heights.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -424,7 +563,7 @@ fn load_map(
         &mut ctx.meshes,
         &mut ctx.materials,
         &mut ctx.images,
-        &mut geovent_assets,
+        geovent_assets,
     );
 
     // HexFarm Lua-composited decorations: native-only (see module docs).
@@ -512,16 +651,16 @@ fn load_map(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut ctx.commands);
-        apply_fog(map_info, parsed, &mut fog_query);
+        apply_fog(map_info, parsed, fog_query);
         if setup.demo {
             // Attract-mode demo: no bases, no win/lose — the menu's
             // demo director (ui::menu) spawns the cast and replaces
             // losses.
             info!("  Demo match — skipping base spawn");
         } else {
-            spawn_homebases(&heightmap, map_info, &mut ctx);
+            spawn_homebases(&heightmap, map_info, ctx);
         }
-        configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
+        configure_map_events(map_name, map_info, &heightmap, &mut ctx.commands);
         let datavent_count = parsed
             .features
             .iter()
@@ -537,6 +676,7 @@ fn load_map(
 
     ctx.commands.insert_resource(heightmap);
 }
+
 
 fn setup_camera(
     parsed: &ParsedMap,

@@ -14,3 +14,5 @@ tracing-chrome = "0.7"
 better_default = { workspace = true }
 thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }
+# Async `Reader::read_to_end` for the BytesAsset loader (web map fetch).
+futures-lite = "2"

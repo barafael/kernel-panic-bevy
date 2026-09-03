@@ -9,6 +9,9 @@ better_default = { workspace = true }
 byteorder = { workspace = true }
 thiserror = { workspace = true }
 zip = { workspace = true, default-features = false, features = ["deflate"] }
+# kpmap v2: deflate the postcard body (rust_backend/miniz_oxide is
+# wasm-safe).
+flate2 = "1"
 binrw = "0.15.1"
 serde = { workspace = true }
 postcard = { workspace = true }
