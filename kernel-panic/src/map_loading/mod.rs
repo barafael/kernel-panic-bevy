@@ -28,9 +28,13 @@ use crate::{
 };
 use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 
+// HexFarm Lua-composited decorations come out of the source-archive
+// pipeline, which doesn't exist on wasm (plan §8.1).
+#[cfg(not(target_arch = "wasm32"))]
 mod lua_compositing;
 mod mipmap;
 
+#[cfg(not(target_arch = "wasm32"))]
 use lua_compositing::spawn_lua_compositing;
 use mipmap::{build_terrain_material_from_texture, dark_fallback_material};
 
@@ -217,6 +221,18 @@ fn pick_map(mut commands: Commands) {
     maps.sort();
 
     if maps.is_empty() {
+        // Web has no filesystem: `read_dir` always fails there, and the
+        // baked-map story (plan §8.1) isn't wired to the asset server
+        // yet. Boot with an empty catalog — the menu comes up, map
+        // loads fail with a logged error instead of a panic.
+        #[cfg(target_arch = "wasm32")]
+        {
+            warn!("No maps available on web (fs access unavailable); booting with empty catalog");
+            commands.insert_resource(MapCatalog(Vec::new()));
+            commands.insert_resource(crate::game_setup::GameSetup::default());
+            return;
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         panic!(
             "No map files found in {}. Place .sd7/.sdz files there or pass one as a CLI arg.",
             maps_dir.display()
@@ -408,6 +424,8 @@ fn load_map(
         &mut geovent_assets,
     );
 
+    // HexFarm Lua-composited decorations: native-only (see module docs).
+    #[cfg(not(target_arch = "wasm32"))]
     if let Some(compositing) = &spring_map.lua_compositing {
         spawn_lua_compositing(
             compositing,

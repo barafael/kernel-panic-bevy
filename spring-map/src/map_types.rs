@@ -19,6 +19,11 @@ pub enum MapError {
     Smf(#[from] SmfParseError),
     #[error("SMT parse error: {0}")]
     Smt(#[from] SmtParseError),
+    /// Web builds cannot extract source archives (no sevenz / mlua on
+    /// wasm32); callers must load baked `.kpmap` files instead.
+    #[cfg(target_arch = "wasm32")]
+    #[error("source archives are unsupported on wasm — bake to .kpmap (plan §8.1)")]
+    SourceArchivesUnsupported,
 }
 
 #[derive(Debug, Error)]

@@ -8,13 +8,18 @@ description = "Parser for Spring RTS engine map files (.smf/.smt/.sd7)"
 better_default = { workspace = true }
 byteorder = { workspace = true }
 thiserror = { workspace = true }
-sevenz-rust = { workspace = true }
-zip = { workspace = true }
-mlua = { version = "0.11", features = ["lua51", "vendored"] }
+zip = { workspace = true, default-features = false, features = ["deflate"] }
 binrw = "0.15.1"
 serde = { workspace = true }
 postcard = { workspace = true }
 image = { workspace = true }
+
+# Source-archive and Lua-gadget support. Both stacks compile C (or assume
+# native std fs) and don't build for wasm32 — on web the baked `.kpmap`
+# reader is the only load path (plan §8.1).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+sevenz-rust = { workspace = true }
+mlua = { version = "0.11", features = ["lua51", "vendored"] }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -1,9 +1,17 @@
 pub mod baked;
+// Source-archive extraction and Lua-gadget execution are native-only:
+// `sevenz-rust` and `mlua` don't compile to wasm32 (plan §8.1). Web
+// loads baked `.kpmap` files through `baked::read_baked_map` instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod lua_heightmap;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod lua_layout;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod lua_skin;
 pub mod map_types;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod mapinfo_lua;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sd7_archive;
 pub mod smd_parser;
 pub mod smf_parser;
@@ -11,18 +19,24 @@ pub mod smt_parser;
 
 use std::path::Path;
 
+#[cfg(not(target_arch = "wasm32"))]
 use lua_layout::HexFarmLayout;
+#[cfg(not(target_arch = "wasm32"))]
 use lua_skin::SkinAtlas;
 use map_types::{GroundTexture, MapError, ParsedMap};
+#[cfg(not(target_arch = "wasm32"))]
 use sd7_archive::load_map_archive;
 use smd_parser::MapInfo;
+#[cfg(not(target_arch = "wasm32"))]
 use smf_parser::parse_smf;
+#[cfg(not(target_arch = "wasm32"))]
 use smt_parser::{assemble_ground_texture, parse_smt_tiles};
 
 /// Reconstructed Lua-driven map decorations (HexFarm towers + bridges
 /// and the skin atlas they're textured with). Present only for maps
 /// whose synced gadget sent a `("ReceiveHexFarmLayout", ...)` set —
 /// otherwise the renderer just uses `ground_texture`.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct LuaCompositing {
     pub layout: HexFarmLayout,
@@ -35,6 +49,7 @@ pub struct SpringMap {
     pub ground_texture: Option<GroundTexture>,
     pub map_info: Option<MapInfo>,
     pub smf_data: Vec<u8>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub lua_compositing: Option<LuaCompositing>,
 }
 
@@ -42,6 +57,7 @@ pub struct SpringMap {
 ///
 /// Handles archive extraction, SMF parsing, Lua heightmap gadget execution,
 /// SMT tile decoding, .smd metadata parsing, and texture assembly.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
     let extracted = load_map_archive(path)?;
     let mut parsed = parse_smf(&extracted.smf_data)?;
@@ -113,6 +129,14 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         smf_data: extracted.smf_data,
         lua_compositing,
     })
+}
+
+/// Web stub: `.sd7`/`.sdz` extraction needs sevenz/zip-from-file and the
+/// Lua gadgets need mlua — none of which exist on wasm. Bake maps to
+/// `.kpmap` (see `baked`) and load those instead.
+#[cfg(target_arch = "wasm32")]
+pub fn load_map(_path: &Path) -> Result<SpringMap, MapError> {
+    Err(MapError::SourceArchivesUnsupported)
 }
 
 #[cfg(test)]

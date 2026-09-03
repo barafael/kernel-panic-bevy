@@ -12,9 +12,15 @@ mod units;
 use bevy::asset::AssetPlugin;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
+// Pipelined rendering and explicit backend selection are native-only;
+// the web build uses the platform's own WebGPU/WebGL path.
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
+#[cfg(not(target_arch = "wasm32"))]
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
-use bevy::window::{MonitorSelection, PresentMode, WindowMode, WindowResizeConstraints};
+#[cfg(not(target_arch = "wasm32"))]
+use bevy::window::MonitorSelection;
+use bevy::window::{PresentMode, WindowMode, WindowResizeConstraints};
 
 use interaction::InteractionPlugin;
 use map_events::MapEventsPlugin;
@@ -56,6 +62,10 @@ fn main() {
     // silently fell back into the bug we're trying to avoid. If Vulkan
     // isn't available here we want to fail loudly so we notice, not
     // quietly accept the broken path.
+    //
+    // Web picks its own backend (WebGPU with WebGL2 fallback) — pinning
+    // VULKAN|METAL there would select nothing.
+    #[cfg(not(target_arch = "wasm32"))]
     let render_plugin = RenderPlugin {
         render_creation: RenderCreation::Automatic(WgpuSettings {
             backends: Some(Backends::VULKAN | Backends::METAL),
@@ -63,26 +73,39 @@ fn main() {
         }),
         ..default()
     };
+    #[cfg(target_arch = "wasm32")]
+    let render_plugin = RenderPlugin::default();
 
-    // Resolve the assets path relative to the project root so Bevy's
-    // AssetServer finds `kernel-panic/assets/...` regardless of cwd.
-    let assets_dir = paths::from_project_root("kernel-panic/assets");
-    let asset_plugin = AssetPlugin {
-        file_path: assets_dir.to_string_lossy().into_owned(),
-        ..default()
-    };
+    // Native: resolve the assets path relative to the project root so
+    // Bevy's AssetServer finds `kernel-panic/assets/...` regardless of
+    // cwd. Web: fetch through the asset server instead (no fs) and skip
+    // the processed-asset meta check since the site ships plain assets.
+    #[allow(unused_mut)]
+    let mut asset_plugin = AssetPlugin::default();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let assets_dir = paths::from_project_root("kernel-panic/assets");
+        asset_plugin.file_path = assets_dir.to_string_lossy().into_owned();
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        asset_plugin.meta_check = bevy::asset::AssetMetaCheck::Never;
+    }
+
+    #[allow(unused_mut)]
+    let mut default_plugins = DefaultPlugins.build().set(asset_plugin);
+    // TODO(windows-resize): disable pipelined rendering so
+    // the render world runs inline on the main thread. The
+    // second thread is what deadlocks during
+    // WM_ENTERSIZEMOVE — without it, resize is a sequence
+    // of plain frames, slow but correct. (Native-only: the
+    // plugin doesn't exist on wasm.)
+    #[cfg(not(target_arch = "wasm32"))]
+    let default_plugins = default_plugins.disable::<PipelinedRenderingPlugin>();
 
     App::new()
         .add_plugins(
-            DefaultPlugins
-                .build()
-                .set(asset_plugin)
-                // TODO(windows-resize): disable pipelined rendering so
-                // the render world runs inline on the main thread. The
-                // second thread is what deadlocks during
-                // WM_ENTERSIZEMOVE — without it, resize is a sequence
-                // of plain frames, slow but correct.
-                .disable::<PipelinedRenderingPlugin>()
+            default_plugins
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: "Kernel Panic".to_string(),
@@ -110,7 +133,23 @@ fn main() {
                         // for an RTS; swap back to `Windowed` once the
                         // upstream fix lands so the "windowed-maximize"
                         // UX returns.
-                        mode: WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
+                        // Native: borderless fullscreen on the primary
+                        // monitor. Web: windowed + canvas-fill — there
+                        // is no monitor selection on wasm, and the
+                        // canvas is sized by the page.
+                        mode: {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+                            }
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                WindowMode::Windowed
+                            }
+                        },
+                        // Web: fill the Trunk page's canvas element.
+                        #[cfg(target_arch = "wasm32")]
+                        fit_canvas_to_parent: true,
                         // TODO(windows-resize): 320x240 floor keeps the
                         // swapchain from ever reconfiguring at 0x0
                         // during a fast drag-to-nothing, which panics

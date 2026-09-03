@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<!-- Trunk entry point for the web build (deployed to GitHub Pages). -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#111" />
+  <title>Kernel Panic</title>
+  <style>
+    html, body {
+      margin: 0; padding: 0;
+      width: 100%; height: 100%;
+      background: #111;
+      overflow: hidden;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    canvas {
+      display: block;
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      outline: none;
+      touch-action: none;
+    }
+    /* Shown until the wasm module takes over the page. */
+    #boot {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: #8a8a95;
+      font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div id="boot">Loading…</div>
+
+  <link data-trunk rel="rust" href="kernel-panic/Cargo.toml" data-bin="kernel-panic"
+        data-cargo-profile="wasm-release" data-wasm-opt="2" />
+  <link data-trunk rel="copy-dir" href="kernel-panic/assets" />
+
+  <script>
+    // Bevy takes over the page once it spawns a canvas; drop the boot notice.
+    new MutationObserver(function () {
+      var c = document.querySelector('canvas');
+      if (!c) return;
+      var boot = document.getElementById('boot');
+      if (boot) boot.remove();
+
+      // A lost GPU context leaves a permanently blank canvas, which looks like
+      // a hang. Reload instead of showing nothing.
+      if (!c.dataset.glh) {
+        c.dataset.glh = '1';
+        function onLost(e) {
+          e.preventDefault();
+          console.warn('GPU context lost; reloading');
+          setTimeout(function () { location.reload(); }, 200);
+        }
+        c.addEventListener('webglcontextlost', onLost);
+        c.addEventListener('webgpucontextlost', onLost);
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+
+    // The RTS uses right-click for orders; keep the browser menu out of the way.
+    document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    window.addEventListener('beforeunload', function () {
+      document.querySelectorAll('canvas').forEach(function (c) { c.remove(); });
+    });
+  </script>
+</body>
+</html>

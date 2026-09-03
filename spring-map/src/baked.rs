@@ -184,6 +184,7 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         // Baked maps don't carry the captured Lua layout — the bake
         // path runs before this work landed and tiles the skin into the
         // ground texture only. Re-bake to get hex meshes via .kpmap.
+        #[cfg(not(target_arch = "wasm32"))]
         lua_compositing: None,
     })
 }
@@ -229,6 +230,7 @@ mod tests {
                 lighting: Lighting::default(),
             }),
             smf_data: Vec::new(),
+            #[cfg(not(target_arch = "wasm32"))]
             lua_compositing: None,
         }
     }

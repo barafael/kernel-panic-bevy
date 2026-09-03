@@ -46,3 +46,15 @@ debug = false
 # stale incremental codegen units. Rebuild with `CARGO_INCREMENTAL=0`
 # once if it appears.
 
+
+# The wasm-release profile: optimize for runtime speed on web (not size
+# exclusively). Selected by `index.html`'s `data-cargo-profile` for the
+# Trunk build; GitHub Pages deploys it via .github/workflows/deploy.yml.
+[profile.wasm-release]
+inherits = "release"
+# Optimize for speed. wasm-opt (data-wasm-opt="2" in index.html) also
+# runs -O2 post-build.
+opt-level = 2
+# Strip all debugging information from the binary to slightly reduce
+# file size.
+strip = "debuginfo"
