@@ -1569,18 +1569,23 @@ fn demo_director(
 
 /// Deterministic-enough per-call jitter (menu demo only; gameplay uses
 /// no randomness).
+///
+/// Uses Bevy's `Instant`, not `std::time`: `SystemTime`/`Instant` panic
+/// with "time not supported on this platform" on wasm32, where Bevy's
+/// is `performance.now()`-backed instead.
 fn rand_01() -> f32 {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use bevy::platform::time::Instant;
     thread_local! {
         static STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static ANCHOR: Instant = Instant::now();
     }
     STATE.with(|s| {
         let mut x = s.get();
         if x == 0 {
-            x = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.subsec_nanos() as u64 ^ (d.as_secs() << 17))
-                .unwrap_or(0x853C49E6748FEA9B)
+            // No epoch on Instant — seed from nanos elapsed since this
+            // thread's first call, mixed with a fixed odd constant.
+            let elapsed = ANCHOR.with(|a| a.elapsed());
+            x = ((elapsed.subsec_nanos() as u64) ^ (elapsed.as_secs() << 17) ^ 0x853C49E6748FEA9B)
                 | 1;
         }
         x ^= x << 13;

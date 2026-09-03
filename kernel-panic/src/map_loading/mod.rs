@@ -230,6 +230,9 @@ fn pick_map(mut commands: Commands) {
             warn!("No maps available on web (fs access unavailable); booting with empty catalog");
             commands.insert_resource(MapCatalog(Vec::new()));
             commands.insert_resource(crate::game_setup::GameSetup::default());
+            // Placeholder so the load_map chain never sees a missing
+            // resource; the fs read fails and logs an error instead.
+            commands.insert_resource(SelectedMap(PathBuf::new()));
             return;
         }
         #[cfg(not(target_arch = "wasm32"))]
