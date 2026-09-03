@@ -47,7 +47,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<DemoDirector>()
             .init_resource::<MenuFocus>()
             .add_message::<MenuActionMessage>()
-            .add_systems(OnEnter(AppState::InGame), close_all_overlays)
+            .add_systems(OnEnter(AppState::InGame), (close_all_overlays, despawn_launch_menu))
             .add_systems(OnExit(AppState::InGame), close_all_overlays)
             .add_systems(
                 Update,
@@ -56,6 +56,7 @@ impl Plugin for MenuPlugin {
                     keyboard_menu_nav,
                     mouse_menu_input
                         .run_if(in_state(AppState::Menu).or(in_state(AppState::InGame))),
+                    esc_in_menu.run_if(in_state(AppState::Menu)),
                     boot_demo
                         .run_if(in_state(AppState::Menu).and(resource_exists::<MapCatalog>)),
                     demo_director
@@ -349,8 +350,21 @@ fn label(
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(x_pct),
+                // Centered labels span the full window so the text's
+                // Justify::Center has something to center within; a
+                // shrink-to-fit node would just sit at `left` with the
+                // text left-aligned inside it.
+                left: if centered {
+                    Val::Percent(0.0)
+                } else {
+                    Val::Percent(x_pct)
+                },
                 top: Val::Percent(y_pct),
+                width: if centered {
+                    Val::Percent(100.0)
+                } else {
+                    Val::Auto
+                },
                 padding: UiRect::all(Val::Px(font_size * 0.15)),
                 ..default()
             },
@@ -443,13 +457,13 @@ fn handle_menu_actions(
                 config.difficulty = difficulty;
                 config.grouping = Grouping::Duel;
                 config.map = None; // weighted random, like RunRandomGame
-                commands.insert_resource(build_setup(&config, catalog.names()));
+                commands.insert_resource(build_setup(&config, &catalog.names()));
                 // No RunGame here — OnEnter(InGame) performs the single
                 // prepare+load pass.
                 app_state.set(AppState::InGame);
             }
             MenuAction::StartSkirmish => {
-                commands.insert_resource(build_setup(&config, catalog.names()));
+                commands.insert_resource(build_setup(&config, &catalog.names()));
                 app_state.set(AppState::InGame);
             }
             MenuAction::Restart => {
@@ -707,7 +721,7 @@ fn maintain_launch_menu(
             root,
             page_size,
             &config,
-            catalog.names(),
+            &catalog.names(),
         ),
         MenuPage::MapList => map_list_page(&mut commands, root, list_size, &catalog),
         MenuPage::Credits => credits_page(&mut commands, root, page_size),
@@ -1212,8 +1226,20 @@ fn readme_lines() -> Vec<String> {
     CACHE
         .get_or_init(|| {
             let path = crate::paths::from_project_root("kernel-panic/assets/readme.txt");
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    // The upstream readme is ISO-8859-1, which
+                    // `read_to_string` rejects as invalid UTF-8. Latin-1
+                    // maps every byte 1:1 onto U+0000..=U+00FF, so decode
+                    // non-UTF-8 bytes by widening them — umlauts and
+                    // friends survive intact.
+                    let text = String::from_utf8(bytes).unwrap_or_else(|error| {
+                        error
+                            .into_bytes()
+                            .into_iter()
+                            .map(|b| b as char)
+                            .collect()
+                    });
                     let mut out: Vec<String> = Vec::new();
                     for line in text.replace("\r\n", "\n").split('\n') {
                         let line = line.trim_end();
@@ -1246,6 +1272,27 @@ fn esc_toggle(
 ) {
     if keys.just_pressed(KeyCode::Escape) && !game_over_open.0 {
         esc_open.0 = !esc_open.0;
+    }
+}
+
+/// In the launch menu, Escape backs out to the main page — the only
+/// exit the sub-pages offer besides their Back button. On Main itself
+/// Esc does nothing (no accidental quit).
+fn esc_in_menu(keys: Res<ButtonInput<KeyCode>>, mut page: ResMut<MenuPage>) {
+    if keys.just_pressed(KeyCode::Escape) && *page != MenuPage::Main {
+        *page = MenuPage::Main;
+    }
+}
+
+/// The launch menu root carries `PersistentEntity` (it must survive the
+/// in-game world teardown), so leaving `Menu` for `InGame` has to drop
+/// it explicitly or the last page would stay frozen over the match.
+fn despawn_launch_menu(
+    mut commands: Commands,
+    existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
+) {
+    for e in &existing_root {
+        commands.entity(e).despawn();
     }
 }
 
@@ -1546,7 +1593,10 @@ fn rand_01() -> f32 {
 
 /// On first boot: once the map catalog exists, load the demo world
 /// behind the launch menu.
-fn boot_demo(
+/// First-frame boot: seed the attract-mode demo. Public so
+/// `map_loading` can order its `RunGame` reload after this system —
+/// the reload must observe the `demo_setup` insert this writes.
+pub fn boot_demo(
     mut done: Local<bool>,
     mut commands: Commands,
     mut run_game: MessageWriter<RunGame>,

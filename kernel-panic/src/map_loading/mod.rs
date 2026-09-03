@@ -1,7 +1,12 @@
 //! Map loading: pick a map archive from `assets/maps/` and spawn its
-//! terrain, atmosphere, fog, nav grid, minimap, and homebases at startup.
+//! terrain, atmosphere, fog, nav grid, minimap, and homebases.
 //!
-//! Exposes [`MapLoadingPlugin`], which loads the CLI-selected map at Startup.
+//! Exposes [`MapLoadingPlugin`]. The map catalog is discovered at
+//! Startup; the world itself is (re)built on every entry into
+//! [`AppState::InGame`] and whenever the menu issues a [`RunGame`]
+//! (restart / demo reload), so one code path serves fresh games,
+//! restarts, and the menu's attract-mode reload.
+//!
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
@@ -10,6 +15,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 
 use crate::{
+    game_setup::{GameSetup, RunGame},
     interaction,
     rendering::camera::{MapBounds, RtsCamera, RtsCameraState, compute_transform_from_state},
     terrain::{
@@ -30,70 +36,175 @@ use mipmap::{build_terrain_material_from_texture, dark_fallback_material};
 
 pub struct MapLoadingPlugin;
 
+/// Set containing the world teardown+rebuild pair. UI systems that hold
+/// entity references across frames (info panel, order palette, build
+/// menu, placement ghost) must order themselves `.after(Self::*)` this —
+/// otherwise a rebuild in the same frame can despawn entities their
+/// queued commands still reference, which panics at command-apply time.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GameWorldRebuild;
+
 impl Plugin for MapLoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
-            Startup,
-            (
-                pick_map,
-                load_map.after(crate::rendering::camera::spawn_camera),
+        app.add_systems(Startup, pick_map.after(crate::rendering::camera::spawn_camera))
+            .add_systems(
+                OnEnter(crate::game_setup::AppState::InGame),
+                (prepare_game_entry, load_map)
+                    .chain()
+                    .in_set(GameWorldRebuild),
             )
-                .chain(),
-        );
+            // Restart / demo reload while in any state: the menu writes
+            // `RunGame` (optionally with a fresh `GameSetup`) and we tear
+            // down + rebuild the world in-place. Ordered after the menu's
+            // writers so their `GameSetup` inserts are applied before we
+            // read it — otherwise the boot demo would run with the
+            // default (non-demo) setup and spawn homebases.
+            .add_systems(
+                Update,
+                (prepare_game_entry, load_map)
+                    .chain()
+                    .in_set(GameWorldRebuild)
+                    .run_if(rerun_requested)
+                    .after(crate::ui::menu::boot_demo),
+            );
     }
+}
+
+/// Run-condition helper for the in-game Restart path: true on any frame
+/// where the menu issued a `RunGame`.
+fn rerun_requested(mut reader: MessageReader<RunGame>) -> bool {
+    reader.read().next().is_some()
 }
 
 /// Path to the map archive loaded for this session.
 #[derive(Resource)]
 struct SelectedMap(PathBuf);
 
-/// Marker for UI nodes (menu backdrops, game-over panels) that the menu
-/// builder must not treat as disposable across page rebuilds.
+/// Marker for entities that survive game-world teardown (menu UI):
+/// the launch menu, Esc overlay, and game-over panel all carry it so
+/// [`despawn_game_world`] spares them while clearing the match.
 #[derive(Component)]
 pub struct PersistentEntity;
 
-/// All selectable map names (file stems) discovered in `assets/maps/`,
-/// fed to the launch-menu map list and the demo boot.
-#[derive(Resource, Default)]
-pub struct MapCatalog {
-    names: Vec<String>,
-}
+/// All map archives available in `assets/maps/`, sorted. The menu's map
+/// list and random-map resolution read this.
+#[derive(Resource, Clone)]
+pub struct MapCatalog(pub Vec<PathBuf>);
 
 impl MapCatalog {
-    pub fn names(&self) -> &[String] {
-        &self.names
+    /// Human-facing names (file stems) in catalog order.
+    pub fn names(&self) -> Vec<String> {
+        self.0
+            .iter()
+            .map(|p| {
+                p.file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
+            .collect()
     }
 }
 
-/// Discover the map archives in `assets/maps/` and pick the one named
-/// by the CLI arg (or the first alphabetically). If both a baked
-/// `.kpmap` and a source `.sd7`/`.sdz` exist for the same stem, the
-/// baked form wins — no archive extraction or Lua execution at
-/// startup, and the WASM target (plan §8.1) can't run those anyway.
-///
-/// If the CLI arg is itself a usable map file (absolute or
-/// cwd-relative), we take it verbatim — no directory search needed.
-/// Otherwise we look up the maps directory relative to the project
-/// root (see `paths::project_root`), so the binary works regardless
-/// of where it was launched from.
-fn pick_map(mut commands: Commands) {
-    if let Some(direct) = std::env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .filter(|p| p.is_file() && is_map_ext(p.as_path()))
-    {
-        info!("Loading map: {}", direct.display());
-        let name = direct
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        commands.insert_resource(SelectedMap(direct));
-        commands.insert_resource(MapCatalog {
-            names: vec![name],
-        });
-        return;
+/// Every transition into `InGame` (fresh game, Restart, re-run after
+/// defeat) passes through here: tear down any previous game world, reset
+/// the in-game state machine, resolve the map path from the setup.
+/// Exclusive system — it mutates the world directly for the teardown.
+fn prepare_game_entry(world: &mut World) {
+    use crate::game_setup::GameOverDismissed;
+    use crate::units::lifecycle::game_over::GameState;
+
+    // The local player is always seat 0 / team 0 in the setups the menu
+    // builds.
+    world.resource_mut::<crate::units::player::LocalTeam>().0 = 0;
+
+    // Fresh in-game state: `Playing`, game-over panel re-armed.
+    world.resource_mut::<NextState<GameState>>().set(GameState::Playing);
+    world.resource_mut::<GameOverDismissed>().0 = false;
+
+    // Resolve the setup's map name against the catalog.
+    let setup = world.resource::<GameSetup>().clone();
+    let catalog = world.resource::<MapCatalog>().0.clone();
+    let path = catalog
+        .iter()
+        .find(|p| {
+            p.file_stem()
+                .map(|s| s.to_string_lossy() == setup.map)
+                .unwrap_or(false)
+        })
+        .or_else(|| catalog.first())
+        .cloned();
+    match path {
+        Some(p) => {
+            info!("Preparing match on {} ({})", setup.map, p.display());
+            world.resource_mut::<SelectedMap>().0 = p;
+        }
+        None => {
+            error!("Map catalog is empty — cannot start a game");
+            return;
+        }
     }
 
+    // Tear down the previous game world (no-op on first entry). Kept
+    // entities: windows, the RTS camera (and its children), and anything
+    // tagged `PersistentEntity` (menu UI).
+    despawn_game_world(world);
+}
+
+fn despawn_game_world(world: &mut World) {
+    use bevy::ecs::entity::EntityHashSet;
+    use bevy::window::Window;
+
+    // Roots we keep: windows, the RTS camera, persistent UI.
+    let mut keep: EntityHashSet = EntityHashSet::default();
+    let mut windows = world.query_filtered::<Entity, With<Window>>();
+    for e in windows.iter(world) {
+        keep.insert(e);
+    }
+    let mut cameras = world.query_filtered::<Entity, With<RtsCamera>>();
+    for e in cameras.iter(world) {
+        keep.insert(e);
+    }
+    let mut persistent = world.query_filtered::<Entity, With<PersistentEntity>>();
+    for e in persistent.iter(world) {
+        keep.insert(e);
+    }
+
+    // Pull kept roots' descendants into the keep set (camera children,
+    // UI trees).
+    loop {
+        let mut grew = false;
+        let mut relations = world.query_filtered::<(Entity, &ChildOf), ()>();
+        for (e, child_of) in relations.iter(world) {
+            if keep.contains(&child_of.parent()) && keep.insert(e) {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+
+    // Everything not kept goes. `despawn` on the remaining roots takes
+    // care of subtrees; existence checks tolerate overlaps.
+    let mut all = world.query_filtered::<Entity, ()>();
+    let doomed: Vec<Entity> = all.iter(world).filter(|e| !keep.contains(e)).collect();
+    for e in doomed {
+        if world.get_entity(e).is_ok() {
+            world.entity_mut(e).despawn();
+        }
+    }
+}
+
+/// Discover the map archives in `assets/maps/` into the menu-facing
+/// catalog. A CLI map argument (direct file or name stem) pre-seeds the
+/// default `GameSetup` and auto-enters the game — preserving the old
+/// "launch straight into a map" behaviour for headless testing.
+///
+/// If both a baked `.kpmap` and a source `.sd7`/`.sdz` exist for the
+/// same stem, the baked form wins — no archive extraction or Lua
+/// execution at startup, and the WASM target (plan §8.1) can't run
+/// those anyway.
+fn pick_map(mut commands: Commands) {
     let maps_dir = crate::paths::from_project_root("kernel-panic/assets/maps");
     let mut maps: Vec<PathBuf> = std::fs::read_dir(&maps_dir)
         .into_iter()
@@ -112,32 +223,44 @@ fn pick_map(mut commands: Commands) {
         );
     }
 
-    // Match the CLI arg (if any) by filename stem — so a bare map name,
-    // `name.sdz`, and a full path all pick the same entry.
-    let initial = std::env::args()
-        .nth(1)
-        .and_then(|arg| {
-            let stem = PathBuf::from(&arg)
-                .file_stem()
-                .map(|s| s.to_ascii_lowercase())
-                .unwrap_or_default();
-            maps.iter().position(|p| {
-                p.file_stem()
-                    .map(|s| s.to_ascii_lowercase() == stem)
-                    .unwrap_or(false)
-            })
+    // CLI override: a direct usable map file, or a name stem matched
+    // against the catalog.
+    let cli_arg = std::env::args().nth(1);
+    let direct = cli_arg
+        .as_ref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file() && is_map_ext(p.as_path()));
+    let stem_pick = cli_arg.as_ref().and_then(|arg| {
+        let stem = PathBuf::from(arg)
+            .file_stem()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        maps.iter().position(|p| {
+            p.file_stem()
+                .map(|s| s.to_ascii_lowercase() == stem)
+                .unwrap_or(false)
         })
-        .unwrap_or(0);
+    });
 
-    let names: Vec<String> = maps
-        .iter()
-        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
-        .collect();
-    commands.insert_resource(MapCatalog { names });
+    let mut setup = crate::game_setup::GameSetup::default();
+    let mut auto_enter = false;
+    if let Some(path) = direct.or_else(|| stem_pick.map(|i| maps[i].clone())) {
+        setup.map = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        auto_enter = true;
+        info!("CLI map argument: {}", setup.map);
+    }
 
-    let selected = maps.into_iter().nth(initial).unwrap();
-    info!("Loading map: {}", selected.display());
-    commands.insert_resource(SelectedMap(selected));
+    commands.insert_resource(MapCatalog(maps.clone()));
+    commands.insert_resource(SelectedMap(
+        maps.first().cloned().expect("maps is non-empty"),
+    ));
+    commands.insert_resource(setup);
+    if auto_enter {
+        commands.insert_resource(NextState::Pending(crate::game_setup::AppState::InGame));
+    }
 }
 
 fn is_map_ext(path: &Path) -> bool {
@@ -215,6 +338,7 @@ fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
 
 fn load_map(
     selected: Res<SelectedMap>,
+    setup: Res<GameSetup>,
     mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
     mut map_bounds: ResMut<MapBounds>,
@@ -368,7 +492,14 @@ fn load_map(
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut ctx.commands);
         apply_fog(map_info, parsed, &mut fog_query);
-        spawn_homebases(&heightmap, map_info, &mut ctx);
+        if setup.demo {
+            // Attract-mode demo: no bases, no win/lose — the menu's
+            // demo director (ui::menu) spawns the cast and replaces
+            // losses.
+            info!("  Demo match — skipping base spawn");
+        } else {
+            spawn_homebases(&heightmap, map_info, &mut ctx);
+        }
         configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
         let datavent_count = parsed
             .features

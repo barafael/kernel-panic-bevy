@@ -6,7 +6,7 @@
 //! this module's rebuild.
 
 mod hud;
-mod menu;
+pub(crate) mod menu;
 pub mod minimap;
 pub mod theme;
 

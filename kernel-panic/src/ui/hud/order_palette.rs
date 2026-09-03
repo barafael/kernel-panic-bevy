@@ -25,16 +25,27 @@ pub(super) struct OrderPalettePlugin;
 
 impl Plugin for OrderPalettePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_panel)
+        // The panel spawns in `Update` (not Startup) and re-spawns if
+        // missing: the game-world teardown (menu reload / restart)
+        // despawns it, and it must come back on the next match.
+        app.add_systems(
+            Update,
             // handle_clicks runs first; refresh_panel only rebuilds when
             // the *roster* changes; update_armed_highlight repaints the
             // Attack button border without rebuilding (otherwise the
             // still-held mouse press would re-toggle attack mode on the
-            // newly-spawned button entity).
-            .add_systems(
-                Update,
-                (handle_clicks, refresh_panel, update_armed_highlight).chain(),
-            );
+            // newly-spawned button entity). Ordered after the world
+            // rebuild so its commands never reference entities the
+            // teardown despawned this frame.
+            (
+                spawn_panel,
+                handle_clicks,
+                refresh_panel,
+                update_armed_highlight,
+            )
+                .chain()
+                .after(crate::map_loading::GameWorldRebuild),
+        );
     }
 }
 
@@ -83,7 +94,10 @@ impl OrderKind {
     }
 }
 
-fn spawn_panel(mut commands: Commands) {
+fn spawn_panel(mut commands: Commands, existing: Query<(), With<OrderPaletteRoot>>) {
+    if !existing.is_empty() {
+        return;
+    }
     commands
         .spawn((
             OrderPaletteRoot,
@@ -153,13 +167,19 @@ fn refresh_panel(
     let Ok(content) = content_q.single() else {
         return;
     };
-    commands.entity(content).despawn_related::<Children>();
+    // The panel can vanish with the game-world teardown (menu reload /
+    // restart); skip the rebuild when it's gone — spawn_panel restores
+    // it next frame.
+    let Ok(mut content_cmds) = commands.get_entity(content) else {
+        return;
+    };
+    content_cmds.despawn_related::<Children>();
 
     if snapshot.entries.is_empty() {
         return;
     }
 
-    commands.entity(content).with_children(|parent| {
+    content_cmds.with_children(|parent| {
         for kind in &snapshot.entries {
             parent
                 .spawn((

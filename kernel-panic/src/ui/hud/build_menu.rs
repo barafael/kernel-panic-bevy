@@ -38,7 +38,12 @@ impl Plugin for BuildMenuPlugin {
             // placement on the next frame, eating the click.
             .add_systems(
                 Update,
-                (handle_clicks, refresh_panel, update_armed_highlight).chain(),
+                (handle_clicks, refresh_panel, update_armed_highlight)
+                    .chain()
+                    // After the game-world rebuild: the teardown despawns
+                    // the icon entities this panel rebuilds from; running
+                    // before it would queue commands on despawned entities.
+                    .after(crate::map_loading::GameWorldRebuild),
             );
     }
 }

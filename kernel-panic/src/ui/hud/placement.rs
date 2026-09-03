@@ -39,8 +39,11 @@ impl Plugin for PlacementPlugin {
             (manage_ghost_lifecycle, update_ghost, commit_or_cancel)
                 .chain()
                 // Run before selection so a committed/cancelled click
-                // never reaches click-to-select.
-                .before(crate::interaction::selection::SelectionSet::Select),
+                // never reaches click-to-select. After the game-world
+                // rebuild so stale ghost state is observed post-teardown
+                // (the try_despawn calls tolerate the ghost's absence).
+                .before(crate::interaction::selection::SelectionSet::Select)
+                .after(crate::map_loading::GameWorldRebuild),
         );
     }
 }
@@ -93,8 +96,9 @@ fn manage_ghost_lifecycle(
         (Some(kind), Some(entity), Some(prev)) if prev != kind => {
             // Kind changed mid-placement (rare: user clicked a
             // different building icon). Despawn and respawn so the
-            // ghost mesh updates.
-            commands.entity(entity).despawn();
+            // ghost mesh updates. `try_despawn` tolerates the ghost
+            // having gone with a game-world teardown.
+            commands.entity(entity).try_despawn();
             state.entity = None;
             state.spawned_kind = None;
             spawn_ghost(
@@ -123,7 +127,9 @@ fn manage_ghost_lifecycle(
             );
         }
         (None, Some(entity), _) => {
-            commands.entity(entity).despawn();
+            // `try_despawn` tolerates the ghost having gone with a
+            // game-world teardown (menu reload / restart).
+            commands.entity(entity).try_despawn();
             state.entity = None;
             state.spawned_kind = None;
             state.snapped = None;

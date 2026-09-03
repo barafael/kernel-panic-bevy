@@ -14,8 +14,20 @@ pub(super) struct InfoPanelPlugin;
 
 impl Plugin for InfoPanelPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_panel)
-            .add_systems(Update, refresh_panel);
+        // The panel spawns in `Update` (not Startup) and re-spawns if
+        // missing: the game-world teardown (menu reload / restart)
+        // despawns it, and it must come back on the next match. Ordered
+        // after the world rebuild so its commands never reference
+        // entities the teardown despawned this frame.
+        app.add_systems(
+            Update,
+            (
+                spawn_panel,
+                refresh_panel,
+            )
+                .chain()
+                .after(crate::map_loading::GameWorldRebuild),
+        );
     }
 }
 
@@ -28,7 +40,10 @@ struct InfoPanelContent;
 #[derive(Component)]
 struct InfoPanelStateHash(u64);
 
-fn spawn_panel(mut commands: Commands) {
+fn spawn_panel(mut commands: Commands, existing: Query<(), With<InfoPanelRoot>>) {
+    if !existing.is_empty() {
+        return;
+    }
     commands
         .spawn((
             InfoPanelRoot,
@@ -92,7 +107,13 @@ fn refresh_panel(
         Visibility::Inherited
     };
 
-    commands.entity(content).despawn_related::<Children>();
+    // The panel can vanish with the game-world teardown (menu reload /
+    // restart). Skip the rebuild in that case; the HudPlugin respawn
+    // path restores the panel next frame.
+    let Ok(mut content_cmds) = commands.get_entity(content) else {
+        return;
+    };
+    content_cmds.despawn_related::<Children>();
 
     if snapshot.is_empty() {
         let _ = root;
@@ -105,12 +126,12 @@ fn refresh_panel(
             faction,
             health_frac,
         } => {
-            commands.entity(content).with_children(|parent| {
+            content_cmds.with_children(|parent| {
                 build_single_unit_panel(parent, kind, faction, health_frac, &registry);
             });
         }
         Snapshot::Multi { tally, total } => {
-            commands.entity(content).with_children(|parent| {
+            content_cmds.with_children(|parent| {
                 build_multi_summary(parent, &tally, total);
             });
         }
