@@ -247,17 +247,7 @@ fn button(
     // (box ends at x, i.e. right edge at 100-r).
     right_anchor: Option<f32>,
 ) -> Entity {
-    let text = commands
-        .spawn((
-            Text::new(label),
-            TextColor(TEXT_WHITE),
-            TextFont {
-                font_size,
-                ..default()
-            },
-            Pickable::IGNORE,
-        ))
-        .id();
+    let text = spawn_button_text(commands, label, font_size);
     let entity = commands
         .spawn((
             MenuButton { action, base: color },
@@ -278,10 +268,62 @@ fn button(
             border(color),
         ))
         .id();
+    finish_button(commands, parent, entity, text)
+}
+
+/// A [`button`] that participates in flex layout instead of absolute
+/// positioning — put it in a [`button_stack`] so a column of buttons
+/// spaces itself and can never overlap, whatever the window height.
+fn stacked_button(
+    commands: &mut Commands,
+    parent: Entity,
+    label: &str,
+    color: Color,
+    font_size: f32,
+    action: MenuAction,
+) -> Entity {
+    let text = spawn_button_text(commands, label, font_size);
+    let entity = commands
+        .spawn((
+            MenuButton { action, base: color },
+            Node {
+                padding: UiRect::all(Val::Px(font_size * 0.25)),
+                border: UiRect::all(Val::Px((font_size * 0.09).max(1.0))),
+                ..default()
+            },
+            fill(color),
+            border(color),
+        ))
+        .id();
+    finish_button(commands, parent, entity, text)
+}
+
+fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> Entity {
+    commands
+        .spawn((
+            Text::new(label),
+            TextColor(TEXT_WHITE),
+            TextFont {
+                font_size,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .id()
+}
+
+/// Wire click/hover observers, attach the text, and parent to `parent`.
+fn finish_button(
+    commands: &mut Commands,
+    parent: Entity,
+    entity: Entity,
+    text: Entity,
+) -> Entity {
     commands.entity(entity).add_child(text);
 
-    // Click + hover through bevy_picking, same as the HUD build icons.
-    // Click + hover through bevy_picking, same as the HUD build icons.
+    // Click + hover hit-tested manually in `mouse_menu_input` —
+    // bevy_picking's pointer pipeline does not populate in this app's
+    // runtime, so the observers only exist for parity with the HUD.
     commands.entity(entity).observe(
         |click: On<Pointer<Click>>,
          buttons: Query<&MenuButton>,
@@ -314,6 +356,36 @@ fn button(
         },
     );
 
+    commands.entity(parent).add_child(entity);
+    entity
+}
+
+/// Full-width absolute column that centers and gaps its children —
+/// parent for [`stacked_button`]s.
+fn button_stack(
+    commands: &mut Commands,
+    parent: Entity,
+    top_pct: f32,
+    height_pct: f32,
+    gap: f32,
+) -> Entity {
+    let entity = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(0.0),
+                width: Val::Percent(100.0),
+                top: Val::Percent(top_pct),
+                height: Val::Percent(height_pct),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                row_gap: Val::Px(gap),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .id();
     commands.entity(parent).add_child(entity);
     entity
 }
@@ -1325,41 +1397,35 @@ fn maintain_esc_menu(
     };
     let menu_size = window.height() / 20.0;
 
-    // The original's SaveLoadMenu cluster: big green buttons around
-    // screen centre (Save/Load omitted — no save system yet).
+    // The original's SaveLoadMenu cluster: big green buttons centred
+    // around screen centre (Save/Load omitted — no save system yet).
+    // Stacked via flex so they space themselves instead of overlapping
+    // when the window is short.
     let root = spawn_backdrop(&mut commands, OVERLAY_GLASS);
-    button(
+    let stack = button_stack(&mut commands, root, 28.0, 44.0, menu_size * 0.5);
+    stacked_button(
         &mut commands,
-        root,
+        stack,
         "Resume",
         BUTTON_GREEN,
         menu_size * 1.4,
-        50.0,
-        42.0,
         MenuAction::Resume,
-        Some(50.0),
     );
-    button(
+    stacked_button(
         &mut commands,
-        root,
+        stack,
         "Restart",
         BUTTON_GREEN,
         menu_size * 1.4,
-        50.0,
-        52.0,
         MenuAction::Restart,
-        Some(50.0),
     );
-    button(
+    stacked_button(
         &mut commands,
-        root,
+        stack,
         "Menu",
         BUTTON_GREEN,
         menu_size * 1.4,
-        50.0,
-        62.0,
         MenuAction::GoToMenu,
-        Some(50.0),
     );
 }
 
@@ -1438,41 +1504,42 @@ fn maintain_game_over(
     );
 
     if won {
-        button(
+        let stack = button_stack(&mut commands, root, 55.0, 40.0, menu_size * 0.5);
+        stacked_button(
             &mut commands,
-            root,
+            stack,
             "Keep on playing",
             BUTTON_GREEN,
-            menu_size,
-            46.0,
-            70.0,
+            menu_size * 1.4,
             MenuAction::KeepPlaying,
-            Some(52.0),
+        );
+        stacked_button(
+            &mut commands,
+            stack,
+            "Go to Menu",
+            BUTTON_GREEN,
+            menu_size * 1.4,
+            MenuAction::GoToMenu,
         );
     } else {
-        button(
+        let stack = button_stack(&mut commands, root, 55.0, 40.0, menu_size * 0.5);
+        stacked_button(
             &mut commands,
-            root,
+            stack,
             "Restart",
             BUTTON_GREEN,
-            menu_size,
-            48.0,
-            70.0,
+            menu_size * 1.4,
             MenuAction::Restart,
-            Some(52.0),
+        );
+        stacked_button(
+            &mut commands,
+            stack,
+            "Go to Menu",
+            BUTTON_GREEN,
+            menu_size * 1.4,
+            MenuAction::GoToMenu,
         );
     }
-    button(
-        &mut commands,
-        root,
-        "Go to Menu",
-        BUTTON_GREEN,
-        menu_size,
-        52.0,
-        70.0,
-        MenuAction::GoToMenu,
-        None,
-    );
 }
 
 // (no trailing helpers)
