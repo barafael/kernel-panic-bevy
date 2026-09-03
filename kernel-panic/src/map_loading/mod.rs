@@ -93,7 +93,8 @@ impl Plugin for MapLoadingPlugin {
         #[cfg(target_arch = "wasm32")]
         {
             use bevy::asset::AssetApp;
-            app.register_asset_loader(bytes_asset::BytesLoader)
+            app.init_asset::<BytesAsset>()
+                .register_asset_loader(bytes_asset::BytesLoader)
                 .init_resource::<PendingWebMapLoad>()
                 .add_systems(
                     OnEnter(crate::game_setup::AppState::InGame),
