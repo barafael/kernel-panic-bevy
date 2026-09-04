@@ -53,6 +53,11 @@ pub struct GameSetup {
     /// demo director spawns the cast instead (`ui::menu::demo_director`).
     #[allow(dead_code)]
     pub demo: bool,
+    /// Showcase mode: spawn only the given faction's homebase on
+    /// Data_Cache_L1, then instruct its factory to produce one of each
+    /// unit and its builder to erect one of each building.  The player
+    /// controls all units; no AI enemy is present.
+    pub showcase: Option<Faction>,
 }
 
 impl Default for GameSetup {
@@ -73,6 +78,7 @@ impl Default for GameSetup {
             ],
             difficulty: 2,
             demo: false,
+            showcase: None,
         }
     }
 }
@@ -97,6 +103,24 @@ pub fn demo_setup() -> GameSetup {
         ],
         difficulty: 2,
         demo: true,
+        showcase: None,
+    }
+}
+
+/// Showcase setup: one faction, Data_Cache_L1, no AI enemies.
+/// The [`ShowcaseDirector`](crate::showcase::ShowcaseDirector) queues
+/// factory production and builder construction after the world spawns.
+pub fn showcase_setup(faction: Faction) -> GameSetup {
+    GameSetup {
+        map: "Data_Cache_L1".to_string(),
+        players: vec![PlayerSpec {
+            faction,
+            team: 0,
+            ai: false,
+        }],
+        difficulty: 1,
+        demo: false,
+        showcase: Some(faction),
     }
 }
 
@@ -222,6 +246,7 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
         players,
         difficulty: config.difficulty,
         demo: false,
+        showcase: None,
     }
 }
 

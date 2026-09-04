@@ -358,7 +358,7 @@ impl MenuSnapshot {
 /// `SIDEDATA.TDF`'s `[BUILDOPTIONS]`. Only the homebases and secondary
 /// factories produce units; mobile builders use the construction
 /// pipeline and have their own [`buildings_for`] roster.
-fn factory_roster(factory: UnitKind, _faction: Faction) -> &'static [UnitKind] {
+pub(crate) fn factory_roster(factory: UnitKind, _faction: Faction) -> &'static [UnitKind] {
     match factory {
         UnitKind::Kernel => &[
             UnitKind::Bit,

@@ -26,7 +26,7 @@ use crate::{
         mesh::generate_terrain_chunks,
     },
     ui,
-    units::lifecycle::spawning::spawn_homebases,
+    units::lifecycle::spawning::{spawn_homebases, spawn_showcase_homebase},
 };
 use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 
@@ -658,8 +658,19 @@ fn spawn_map_world(
             // demo director (ui::menu) spawns the cast and replaces
             // losses.
             info!("  Demo match — skipping base spawn");
+            // Clear any leftover showcase director from a previous game.
+            ctx.commands
+                .remove_resource::<crate::showcase::ShowcaseDirector>();
+        } else if let Some(faction) = setup.showcase {
+            spawn_showcase_homebase(&heightmap, map_info, faction, ctx);
+            ctx.commands
+                .insert_resource(crate::showcase::ShowcaseDirector::new(faction));
+            info!("  Showcase({:?}) — skipping full roster", faction);
         } else {
             spawn_homebases(&heightmap, map_info, ctx);
+            // Clear any leftover showcase director from a previous game.
+            ctx.commands
+                .remove_resource::<crate::showcase::ShowcaseDirector>();
         }
         configure_map_events(map_name, map_info, &heightmap, &mut ctx.commands);
         let datavent_count = parsed

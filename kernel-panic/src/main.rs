@@ -5,6 +5,7 @@ mod map_loading;
 mod paths;
 mod rendering;
 mod rng;
+mod showcase;
 mod terrain;
 mod ui;
 mod units;
@@ -26,6 +27,7 @@ use interaction::InteractionPlugin;
 use map_events::MapEventsPlugin;
 use map_loading::MapLoadingPlugin;
 use rendering::RenderingPlugin;
+use showcase::ShowcasePlugin;
 use terrain::TerrainPlugin;
 use ui::UiPlugin;
 use units::UnitsPlugin;
@@ -174,6 +176,7 @@ fn main() {
             TerrainPlugin,
             MapLoadingPlugin,
             MapEventsPlugin,
+            ShowcasePlugin,
         ))
         .init_state::<game_setup::AppState>()
         .init_resource::<game_setup::SkirmishConfig>()

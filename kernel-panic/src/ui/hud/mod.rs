@@ -1,6 +1,6 @@
 //! In-game HUD panels: build menu, info panel, order palette, placement preview.
 
-mod build_menu;
+pub(crate) mod build_menu;
 mod info_panel;
 mod order_palette;
 mod placement;

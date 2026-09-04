@@ -26,8 +26,8 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 
 use crate::game_setup::{
-    build_setup, describe_setup, demo_setup, AppState, GameOverDismissed, Grouping, RunGame,
-    SkirmishConfig,
+    build_setup, describe_setup, demo_setup, showcase_setup, AppState, GameOverDismissed,
+    Grouping, RunGame, SkirmishConfig,
 };
 use crate::map_loading::MapCatalog;
 use crate::terrain::heightmap::Heightmap;
@@ -83,6 +83,7 @@ pub enum MenuPage {
     QuickSkirmish,
     AdvancedSkirmish,
     MapList,
+    Showcase,
     Credits,
     Readme,
 }
@@ -156,6 +157,8 @@ enum MenuAction {
     PickMap(usize),
     PickRandomMap,
     ScrollReadme(i32),
+    /// Start showcase mode for the given faction.
+    Showcase(Faction),
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +586,10 @@ fn handle_menu_actions(
             MenuAction::ScrollReadme(lines) => {
                 readme_scroll.0 = (readme_scroll.0 as isize + lines as isize).max(0) as usize;
             }
+            MenuAction::Showcase(faction) => {
+                commands.insert_resource(showcase_setup(faction));
+                app_state.set(AppState::InGame);
+            }
         }
     }
 }
@@ -796,6 +803,7 @@ fn maintain_launch_menu(
             &catalog.names(),
         ),
         MenuPage::MapList => map_list_page(&mut commands, root, list_size, &catalog),
+        MenuPage::Showcase => showcase_page(&mut commands, root, page_size),
         MenuPage::Credits => credits_page(&mut commands, root, page_size),
         MenuPage::Readme => readme_page(&mut commands, root, window.height(), readme.0),
     }
@@ -863,6 +871,77 @@ fn main_menu_page(commands: &mut Commands, root: Entity, menu_size: f32) {
         68.0,
         MenuAction::Quit,
         None,
+    );
+    button(
+        commands,
+        root,
+        "Showcase",
+        EASY_CYAN,
+        menu_size,
+        46.0,
+        78.0,
+        MenuAction::Goto(MenuPage::Showcase),
+        Some(54.0),
+    );
+}
+
+/// The original's showcase page: pick a faction to see one of each of its
+/// units and buildings built live on Data_Cache_L1.
+fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
+    title(commands, root, page_size, "Showcase");
+    label(
+        commands,
+        root,
+        "Pick a faction to see its full unit tree built live:",
+        TEXT_WHITE,
+        page_size * 0.7,
+        50.0,
+        24.0,
+        false,
+    );
+    button(
+        commands,
+        root,
+        "System",
+        EASY_CYAN,
+        page_size,
+        50.0,
+        38.0,
+        MenuAction::Showcase(Faction::System),
+        Some(50.0),
+    );
+    button(
+        commands,
+        root,
+        "Hacker",
+        VERY_HARD_RED,
+        page_size,
+        50.0,
+        48.0,
+        MenuAction::Showcase(Faction::Hacker),
+        Some(50.0),
+    );
+    button(
+        commands,
+        root,
+        "Network",
+        DESC_BLUE,
+        page_size,
+        50.0,
+        58.0,
+        MenuAction::Showcase(Faction::Network),
+        Some(50.0),
+    );
+    button(
+        commands,
+        root,
+        "Back",
+        NAV_BLUE,
+        page_size,
+        50.0,
+        75.0,
+        MenuAction::Goto(MenuPage::Main),
+        Some(50.0),
     );
 }
 

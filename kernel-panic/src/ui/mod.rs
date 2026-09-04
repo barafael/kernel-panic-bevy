@@ -5,7 +5,7 @@
 //! `interaction::selection` — they're more game-state than UI and predate
 //! this module's rebuild.
 
-mod hud;
+pub(crate) mod hud;
 pub(crate) mod menu;
 pub mod minimap;
 pub mod theme;

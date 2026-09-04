@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use crate::game_setup::GameOverDismissed;
+use crate::game_setup::{GameOverDismissed, GameSetup};
 use crate::units::components::{Homebase, TeamId};
 use crate::units::player::LocalTeam;
 
@@ -23,9 +23,14 @@ pub enum GameState {
 pub fn check_game_over(
     local: Res<LocalTeam>,
     dismissed: Res<GameOverDismissed>,
+    setup: Res<GameSetup>,
     homebases: Query<&TeamId, With<Homebase>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
+    // Showcase mode: no enemies, no win/lose — run forever.
+    if setup.showcase.is_some() {
+        return;
+    }
     if dismissed.0 {
         return;
     }

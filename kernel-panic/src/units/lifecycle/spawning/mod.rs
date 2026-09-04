@@ -184,6 +184,34 @@ pub fn spawn_homebases(heightmap: &Heightmap, map_info: &MapInfo, ctx: &mut Spaw
     );
 }
 
+/// Showcase mode: spawn exactly one homebase for `faction` on team 0 at
+/// the map's first start position (or the map centre as fallback).
+pub fn spawn_showcase_homebase(
+    heightmap: &Heightmap,
+    map_info: &MapInfo,
+    faction: Faction,
+    ctx: &mut SpawnContext,
+) {
+    let (world_w, world_d) = heightmap.world_size();
+    let (fx, fz) = map_info
+        .start_positions
+        .first()
+        .map(|sp| (sp.x, sp.z))
+        .unwrap_or((world_w * 0.5, world_d * 0.5));
+    let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
+    let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
+    let home_pos = heightmap.place(fx, fz);
+
+    spawn_unit(faction.homebase(), faction, 0, home_pos, ctx);
+    info!(
+        "Showcase({:?}): spawned {:?} homebase at ({:.0}, {:.0})",
+        faction,
+        faction.homebase(),
+        fx,
+        fz,
+    );
+}
+
 /// Spawn a single unit with per-piece children and COB animation.
 /// Returns the root entity of the spawned unit.
 pub fn spawn_unit(
