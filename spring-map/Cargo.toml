@@ -8,7 +8,7 @@ description = "Parser for Spring RTS engine map files (.smf/.smt/.sd7)"
 better_default = { workspace = true }
 byteorder = { workspace = true }
 thiserror = { workspace = true }
-zip = { workspace = true, default-features = false, features = ["deflate"] }
+zip = { workspace = true }
 # kpmap v2: deflate the postcard body (rust_backend/miniz_oxide is
 # wasm-safe).
 flate2 = "1"

@@ -18,7 +18,7 @@ bevy = { version = "0.18", features = ["serialize"] }
 byteorder = "1.5"
 thiserror = "2"
 sevenz-rust = "0.6"
-zip = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
