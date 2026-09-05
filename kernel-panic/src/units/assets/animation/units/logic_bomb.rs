@@ -9,14 +9,15 @@ pub struct LogicBombAnim;
 
 impl UnitAnim for LogicBombAnim {
     fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Create(): move mine to y-axis [-4] now.
-        rig.move_to("mine", Axis::Y, -4.0, 0.0);
+        // Create(): move mine to y-axis now — bytecode -655360 = -10
+        // elmos (163840 linear constant; the .bos's [-4] is 10 elmos).
+        rig.move_to("mine", Axis::Y, -10.0, 0.0);
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge: mine rises from [-4]·pct/100.
         if ctx.emerging {
-            super::emerge_lift(rig, "mine", 4.0, ctx.build_percent);
+            super::emerge_lift(rig, "mine", 10.0, ctx.build_percent);
         }
     }
 

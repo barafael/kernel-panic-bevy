@@ -8,9 +8,19 @@ pub struct BitAnim;
 
 impl UnitAnim for BitAnim {
     fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Create(): move gunpoint to z-axis [-3] now — pull the muzzle
-        // flush with the shell surface.
-        rig.move_to("gunpoint", Axis::Z, -3.0, 0.0);
+        // Create(): move gunpoint to z-axis now — bytecode -491520 =
+        // -7.5 elmos (bit compiles at linear constant 163840, so the
+        // .bos's [-3] is 7.5 elmos). Pulls the muzzle flush with the
+        // shell surface.
+        rig.move_to("gunpoint", Axis::Z, -7.5, 0.0);
+    }
+
+    fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
+        // Create()'s emerge loop: base sinks [-16]·pct/100 = bytecode
+        // -40 elmos while building.
+        if ctx.emerging {
+            super::emerge_lift(rig, "base", 40.0, ctx.build_percent);
+        }
     }
 
     fn start_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {

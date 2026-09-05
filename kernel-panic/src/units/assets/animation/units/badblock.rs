@@ -4,9 +4,10 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 
-/// BuildLasers(): square half-width [-12]/[12] @32 elmos/s.
-const SWEEP: f32 = 12.0;
-const SWEEP_SPEED: f32 = 32.0;
+/// BuildLasers(): square half-width ±30 elmos @80 elmos/s (bytecode
+/// ±1966080 @5242880 — 163840 linear constant).
+const SWEEP: f32 = 30.0;
+const SWEEP_SPEED: f32 = 80.0;
 /// Emit cadence (script: `sleep 60`, throttled for particle budget).
 const EMIT_INTERVAL: f32 = 0.12;
 
@@ -22,14 +23,14 @@ impl UnitAnim for BadBlockAnim {
         // Create(): blaser0/1 to x <90> now; base starts sunk [-8].
         rig.turn_deg("blaser0", Axis::X, 90.0, 0.0);
         rig.turn_deg("blaser1", Axis::X, 90.0, 0.0);
-        rig.move_to("base", Axis::Y, -8.0, 0.0);
+        rig.move_to("base", Axis::Y, -20.0, 0.0);
         self.sweep_timer = SWEEP / SWEEP_SPEED;
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge loop: base lifts with BUILD_PERCENT_LEFT.
         if ctx.emerging {
-            super::emerge_lift(rig, "base", 8.0, ctx.build_percent);
+            super::emerge_lift(rig, "base", 20.0, ctx.build_percent);
         }
 
         // BuildLasers(): square sweep, forever.

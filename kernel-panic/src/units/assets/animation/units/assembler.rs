@@ -17,7 +17,7 @@ impl UnitAnim for AssemblerAnim {
         // Create(): base sinks [-8]·pct/100 while building, then the
         // body ring starts spinning.
         if ctx.emerging {
-            super::emerge_lift(rig, "base", 8.0, ctx.build_percent);
+            super::emerge_lift(rig, "base", 20.0, ctx.build_percent);
         }
         if !self.spinning && ctx.build_percent <= 0 {
             self.spinning = true;

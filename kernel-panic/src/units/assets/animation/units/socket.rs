@@ -4,12 +4,15 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 
-/// BuildLasers(): outer-laser square half-width [-24]/[24] @32 elmos/s.
-const SWEEP: f32 = 24.0;
-const SWEEP_SPEED: f32 = 32.0;
-/// ConLasers(): inner-laser bob depth [14] @16 elmos/s.
-const BOB: f32 = 14.0;
-const BOB_SPEED: f32 = 16.0;
+/// BuildLasers(): outer-laser square half-width ±60 elmos @80 elmos/s
+/// (bytecode ±3932160 @5242880 — socket compiles at linear constant
+/// 163840, so the .bos's ±[24]@[32] is 2.5× that).
+const SWEEP: f32 = 60.0;
+const SWEEP_SPEED: f32 = 80.0;
+/// ConLasers(): inner-laser bob depth 35 @40 elmos/s (bytecode
+/// 2293760 @2621440).
+const BOB: f32 = 35.0;
+const BOB_SPEED: f32 = 40.0;
 /// Emit cadence (script: `sleep 60`, throttled 2× for particle budget).
 const EMIT_INTERVAL: f32 = 0.12;
 
@@ -31,7 +34,7 @@ impl UnitAnim for SocketAnim {
         for laser in ["blaser0", "blaser1", "claser0", "claser1"] {
             rig.turn_deg(laser, Axis::X, 90.0, 0.0);
         }
-        rig.move_to("body", Axis::Y, -16.0, 0.0);
+        rig.move_to("body", Axis::Y, -40.0, 0.0);
         self.sweep_timer = SWEEP / SWEEP_SPEED;
         self.bob_timer = BOB / BOB_SPEED;
     }
@@ -39,7 +42,7 @@ impl UnitAnim for SocketAnim {
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge: body lifts with BUILD_PERCENT_LEFT.
         if ctx.emerging {
-            super::emerge_lift(rig, "body", 16.0, ctx.build_percent);
+            super::emerge_lift(rig, "body", 40.0, ctx.build_percent);
         }
 
         // BuildLasers(): outer pair traces a square forever.
