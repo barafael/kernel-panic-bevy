@@ -489,6 +489,7 @@ pub fn spawn_unit(
                         move_speeds: vec![[0.0; 3]; piece_count],
                         spin_speeds: vec![[0.0; 3]; piece_count],
                         muzzle: muzzle_idx.unwrap_or(0),
+                        move_gate: 1.0,
                         outbox: Vec::new(),
                     },
                 },

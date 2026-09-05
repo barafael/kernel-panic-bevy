@@ -160,11 +160,13 @@ pub fn drive_aim_script(
             &mut UnitAnimator,
             &GlobalTransform,
             &AimTarget,
+            Option<&MoveTarget>,
+            Option<&MovePath>,
         ),
         Without<Dying>,
     >,
 ) {
-    for (mut aim, mut animator, gtf, target) in &mut query {
+    for (mut aim, mut animator, gtf, target, move_target, move_path) in &mut query {
         let attacker_pos = gtf.translation();
         let to_target = target.pos - attacker_pos;
         let heading_rad = to_target.x.atan2(to_target.z);
@@ -183,7 +185,11 @@ pub fn drive_aim_script(
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
         let retarget = dh > AIM_SCRIPT_RETARGET_THRESHOLD || dp > AIM_SCRIPT_RETARGET_THRESHOLD;
 
-        let ctx = AnimCtx::minimal();
+        let ctx = AnimCtx {
+            moving: move_target.is_some() || move_path.is_some(),
+            aim_active: true,
+            ..AnimCtx::minimal()
+        };
         let UnitAnimator { rig, driver, .. } = &mut *animator;
         aim.ready = driver.aim(rig, heading_rad, pitch_rad, ctx);
         if retarget || !aim.ready {

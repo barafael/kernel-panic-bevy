@@ -173,6 +173,11 @@ pub struct AnimRig {
     pub spin_speeds: Vec<[f32; 3]>,
     /// Weapon muzzle piece index (drivers may cycle it between shots).
     pub muzzle: usize,
+    /// Movement gate multiplier in [0, 1], written by the driver every
+    /// frame. A driver holds this at 0 while a fold/unfold choreography
+    /// must complete before the unit may drive (Byte folds to move);
+    /// the movement system multiplies its step by it. Defaults to 1.
+    pub move_gate: f32,
     /// Effects queued by drivers, drained every frame.
     pub outbox: Vec<FxEvent>,
 }

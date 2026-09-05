@@ -206,6 +206,7 @@ pub fn movement_system(
             Option<&crate::units::mechanics::network_buffer::SpeedBoost>,
             Option<&AttackMoveActive>,
             Option<&AimTarget>,
+            Option<&crate::units::assets::animation::UnitAnimator>,
         ),
         Without<Dying>,
     >,
@@ -225,7 +226,7 @@ pub fn movement_system(
     snapshot.extend(
         query
             .iter()
-            .map(|(e, _, stats, tf, target, _, _, _, _, _, _, _, _)| UnitSnapshot {
+            .map(|(e, _, stats, tf, target, _, _, _, _, _, _, _, _, _)| UnitSnapshot {
                 entity: e,
                 pos: tf.translation,
                 radius: stats.radius,
@@ -251,6 +252,7 @@ pub fn movement_system(
         speed_boost,
         attack_move_active,
         aim_target,
+        animator,
     ) in &mut query
     {
         if stunned.is_some() {
@@ -489,6 +491,9 @@ pub fn movement_system(
         let cos_err = new_forward.dot(desired_forward);
         let align = if cos_err > 0.5 { cos_err } else { 0.0 };
         let mut step = speed * dt * align;
+        // Animation gate: a driver holds its unit in place while a fold
+        // choreography must complete before driving (Byte: fold-to-move).
+        step *= animator.map_or(1.0, |a| a.rig.move_gate);
         if let Some(flow) = circular_flow.as_deref() {
             step *= flow.step_multiplier(current, new_forward);
         }
