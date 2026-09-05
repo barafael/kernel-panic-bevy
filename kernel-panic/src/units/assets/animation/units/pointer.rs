@@ -110,4 +110,8 @@ impl UnitAnim for PointerAnim {
         rig.explode("left", 4);
         rig.explode("right", 4);
     }
+
+    fn is_open(&self) -> Option<bool> {
+        Some(self.last_state == Some(DeployState::Open))
+    }
 }

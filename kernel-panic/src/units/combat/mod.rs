@@ -635,7 +635,7 @@ pub fn attack_ground_system(
             &GlobalTransform,
             &AttackGroundOrder,
             Option<&Deployable>,
-            Option<&AimScript>,
+            Option<&UnitAnimator>,
             Option<&WeaponBinding>,
         ),
         Without<Dying>,
@@ -646,16 +646,20 @@ pub fn attack_ground_system(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, aim_script, weapon_binding) in &attackers {
+    for (entity, unit_type, gtf, order, deployable, animator, weapon_binding) in &attackers {
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
         // byte whose blades haven't fanned yet, bypassing upstream's
-        // `AimWeapon1`-returns-0 contract.
+        // `AimWeapon1`-returns-0 contract. The gate probes the driver's
+        // fold state rather than AimScript.ready: a ground order on
+        // empty terrain never produces an AimTarget, so a ready gate
+        // would deadlock the shot behind an aim request that can't
+        // exist.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
             continue;
         }
-        if aim_script.is_some_and(|a| !a.ready) {
+        if animator.and_then(|a| a.driver.is_open()).is_some_and(|open| !open) {
             continue;
         }
         let (weapon_name, weapon_def) = match weapon_binding {
@@ -844,7 +848,7 @@ pub fn attack_target_system(
             &GlobalTransform,
             &AttackTargetOrder,
             Option<&Deployable>,
-            Option<&AimScript>,
+            Option<&UnitAnimator>,
             Option<&WeaponBinding>,
         ),
         Without<Dying>,
@@ -860,7 +864,7 @@ pub fn attack_target_system(
         gtf,
         order,
         deployable,
-        aim_script,
+        animator,
         weapon_binding,
     ) in &attackers
     {
@@ -868,7 +872,7 @@ pub fn attack_target_system(
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
             continue;
         }
-        if aim_script.is_some_and(|a| !a.ready) {
+        if animator.and_then(|a| a.driver.is_open()).is_some_and(|open| !open) {
             continue;
         }
 

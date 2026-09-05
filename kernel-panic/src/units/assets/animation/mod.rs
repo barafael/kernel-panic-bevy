@@ -300,6 +300,12 @@ pub struct AnimCtx {
     pub deploy: Option<crate::units::combat::DeployState>,
     /// The unit currently has a live aim request (`AimTarget`).
     pub aim_active: bool,
+    /// The unit is under an explicit attack order (attack-target /
+    /// attack-ground). Foldable units must treat this as a want-open
+    /// signal even when no enemy unit is auto-acquired to aim at (a
+    /// ground order may target empty terrain) — otherwise a click gate
+    /// on the fold state would deadlock against the missing AimTarget.
+    pub attack_ordering: bool,
     /// The unit is still emerging (has an `Emerging` component). Drivers
     /// must run their build-emerge pose only while this is set — past
     /// emergence, the snap-to-rest would fight later choreography on
@@ -318,6 +324,7 @@ impl AnimCtx {
             producing: false,
             deploy: None,
             aim_active: false,
+            attack_ordering: false,
             emerging: false,
         }
     }
@@ -408,6 +415,8 @@ pub fn animation_system(
             Option<&crate::units::combat::Deployable>,
             Option<&crate::units::lifecycle::spawning::Emerging>,
             Option<&crate::units::combat::AimTarget>,
+            Option<&crate::units::combat::AttackGroundOrder>,
+            Option<&crate::units::combat::AttackTargetOrder>,
         ),
         // Dying units are deliberately included: their `killed()`
         // drivers tick here (explode/hide choreography) until despawn.
@@ -432,6 +441,8 @@ pub fn animation_system(
         deployable,
         emerging,
         aim_target,
+        attack_ground,
+        attack_target,
     ) in &mut animators
     {
         let build_percent = emerging
@@ -451,6 +462,7 @@ pub fn animation_system(
             producing: producer.is_some_and(|p| p.current_production().is_some()),
             deploy: deployable.map(|d| d.state),
             aim_active: aim_target.is_some(),
+            attack_ordering: attack_ground.is_some() || attack_target.is_some(),
             emerging: emerging.is_some(),
         };
 

@@ -106,7 +106,11 @@ impl UnitAnim for ByteAnim {
             super::emerge_lift(rig, "base", 40.0, ctx.build_percent);
         }
 
-        if ctx.aim_active {
+        // A live aim request or an explicit attack order counts as
+        // "wants to fight" — a ground order may target empty terrain,
+        // where no AimTarget is ever stamped.
+        let wants_open = ctx.aim_active || ctx.attack_ordering;
+        if wants_open {
             self.since_target = 0.0;
         } else {
             self.since_target += ctx.dt;
@@ -116,7 +120,7 @@ impl UnitAnim for ByteAnim {
             FoldState::Closed => {
                 // Unfold to fight — but only while stationary.
                 rig.move_gate = 1.0;
-                if ctx.aim_active && !ctx.moving {
+                if wants_open && !ctx.moving {
                     self.enter_opening(rig);
                 }
             }
