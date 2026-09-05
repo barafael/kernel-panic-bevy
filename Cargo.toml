@@ -7,10 +7,32 @@ members = [
     "spring-map",
     "spring-map-gen",
     "spring-unit-mesh",
-    "spring-cob",
     "spring-pathfinding",
     "kernel-panic",
 ]
+# exclude = [
+#     "spring-cob",  # RETIRED — see note below
+# ]
+
+# RETIRED CRATE: spring-cob
+# -------------------------
+# `spring-cob` was a bytecode VM for Spring's compiled COB unit scripts
+# (`.cob`, compiled from `.bos` by Scriptor). It ran every unit's
+# animation: threads with sleep/wait-for-turn semantics, a data stack,
+# signals, and an AnimCommand stream that the game translated into piece
+# transforms.
+#
+# It was retired in favour of hand-written per-unit animation drivers in
+# `kernel-panic/src/units/assets/animation/units/<kind>.rs` (one Rust
+# struct per unit kind, translating the `.bos` entry points directly).
+# The VM's sign conventions for piece rotations were also the root cause
+# of wrong-direction unit animations (spin-X vs turn-X inconsistency,
+# double-negated Z spins).
+#
+# Piece tables now live in code as static per-kind lists
+# (`animation::units::piece_names`), so nothing reads `.cob` files any
+# more. The crate directory is kept in the repo for reference but is no
+# longer a workspace member and has no dependents. Safe to delete.
 
 [workspace.dependencies]
 better_default = "1"

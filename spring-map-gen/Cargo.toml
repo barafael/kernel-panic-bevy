@@ -14,11 +14,10 @@ spring-map = { path = "../spring-map" }
 bevy = { workspace = true, optional = true }
 spring-tdf = { path = "../spring-tdf", optional = true }
 spring-unit-mesh = { path = "../spring-unit-mesh", optional = true }
-spring-cob = { path = "../spring-cob", optional = true }
 clap = { version = "4.6.1", features = ["derive"] }
 
 [features]
-viewer = ["dep:bevy", "dep:spring-tdf", "dep:spring-unit-mesh", "dep:spring-cob"]
+viewer = ["dep:bevy", "dep:spring-tdf", "dep:spring-unit-mesh"]
 
 [[bin]]
 name = "map-viewer"

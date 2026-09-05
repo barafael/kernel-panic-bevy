@@ -16,7 +16,7 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use crate::units::assets::animation::{CobFileCache, PieceIndex, load_cob_cached};
+use crate::units::assets::animation::PieceIndex;
 use spring_map::smd_parser::MapInfo;
 
 use super::production::default_production;
@@ -65,7 +65,6 @@ pub struct SpawnContext<'w, 's> {
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
-    pub cob_cache: ResMut<'w, CobFileCache>,
     pub sel_mat: Option<Res<'w, SelectionVolumeMaterial>>,
     pub unit_registry: Res<'w, UnitRegistry>,
     pub weapon_registry: Res<'w, crate::units::content::weapons::WeaponRegistry>,
@@ -230,7 +229,6 @@ pub fn spawn_unit(
     let materials = &mut *ctx.materials;
     let images = &mut *ctx.images;
     let model_cache = &mut *ctx.model_cache;
-    let cob_cache = &mut *ctx.cob_cache;
     let unit_registry = &*ctx.unit_registry;
     let invisible_mat = &invisible_mat;
     let model_name = unit_registry.model(kind);
@@ -415,22 +413,22 @@ pub fn spawn_unit(
             commands.entity(bevy_parent).add_child(piece_entity);
         }
 
-        // Attach the animation rig. The rig is keyed on the COB piece
-        // table (declaration order in the .bos source — *not* the s3o
-        // depth-first flatten order), so remap piece entities/offsets to
-        // COB order here. Pieces named in the .bos that don't exist in
-        // the s3o stay as a stub entity at the unit root (zero offset)
-        // so animations targeting them are no-ops instead of indexing
-        // into the wrong piece.
-        if let Some(cob) = load_cob_cached(&kind.script(), cob_cache) {
-            let cob_piece_count = cob.piece_names.len();
-            let mut cob_entities = Vec::with_capacity(cob_piece_count);
-            let mut cob_offsets = Vec::with_capacity(cob_piece_count);
-            for cob_name in &cob.piece_names {
-                match find_piece_index_by_name(&model.root_piece, cob_name) {
+        // Attach the animation rig. The rig is keyed on the unit's
+        // static piece table (declaration order in the original script —
+        // *not* the s3o depth-first flatten order), so remap piece
+        // entities/offsets to table order here. Pieces named in the
+        // table that don't exist in the s3o stay as a stub entity at
+        // the unit root (zero offset) so animations targeting them are
+        // no-ops instead of indexing into the wrong piece.
+        {
+            let table = crate::units::assets::animation::piece_names(kind);
+            let mut table_entities = Vec::with_capacity(table.len());
+            let mut table_offsets = Vec::with_capacity(table.len());
+            for table_name in table {
+                match find_piece_index_by_name(&model.root_piece, table_name) {
                     Some(s3o_idx) => {
-                        cob_entities.push(piece_entities[s3o_idx]);
-                        cob_offsets.push(piece_offsets[s3o_idx]);
+                        table_entities.push(piece_entities[s3o_idx]);
+                        table_offsets.push(piece_offsets[s3o_idx]);
                     }
                     None => {
                         // Stub entity so animation ops on this slot don't
@@ -439,8 +437,8 @@ pub fn spawn_unit(
                             .spawn((Transform::default(), Visibility::default()))
                             .id();
                         commands.entity(unit_entity).add_child(stub);
-                        cob_entities.push(stub);
-                        cob_offsets.push([0.0; 3]);
+                        table_entities.push(stub);
+                        table_offsets.push([0.0; 3]);
                     }
                 }
             }
@@ -449,51 +447,47 @@ pub fn spawn_unit(
             // (Byte/Flow cycle theirs at fire time); gunbase/body are
             // one-off lookups for the Pointer aim pivot and the
             // Connection hatch respectively.
+            let table_index = |name: &str| -> Option<usize> {
+                table
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(name))
+            };
             let muzzle_idx = crate::units::assets::animation::muzzle_piece_names(kind)
                 .and_then(|names| {
                     names.first().and_then(|n| {
-                        cob.piece_names
-                            .iter()
-                            .position(|p| p.eq_ignore_ascii_case(n))
+                        table.iter().position(|p| p.eq_ignore_ascii_case(n))
                     })
                 })
                 .or_else(|| {
                     crate::units::assets::animation::MUZZLE_CANDIDATE_NAMES.iter().find_map(|n| {
-                        cob.piece_names
-                            .iter()
-                            .position(|p| p.eq_ignore_ascii_case(n))
+                        table.iter().position(|p| p.eq_ignore_ascii_case(n))
                     })
                 });
-            let piece_index = |name: &str| -> Option<usize> {
-                cob.piece_names
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(name))
-            };
-            let gunbase_idx = piece_index("gunbase");
-            let aimer_idx = piece_index("aimer");
-            let hatch_idx = piece_index("body");
+            let gunbase_idx = table_index("gunbase");
+            let aimer_idx = table_index("aimer");
+            let hatch_idx = table_index("body");
             // Aim-before-fire gate is only meaningful for units whose
-            // `.cob` actually declares `AimWeapon1`.
-            let has_aim_weapon =
-                crate::units::assets::animation::declares_aim_weapon(&cob);
+            // script declares `AimWeapon1`.
+            let has_aim = crate::units::assets::animation::has_aim_weapon(kind);
 
-            let piece_rotations = vec![[0.0; 3]; cob_piece_count];
-            let target_rotations = vec![[0.0; 3]; cob_piece_count];
+            let piece_count = table.len();
+            let piece_rotations = vec![[0.0; 3]; piece_count];
+            let target_rotations = vec![[0.0; 3]; piece_count];
             commands.entity(unit_entity).insert(
                 crate::units::assets::animation::UnitAnimator {
                     created: false,
                     driver: crate::units::assets::animation::driver_for(kind),
                     rig: crate::units::assets::animation::AnimRig {
-                        piece_names: cob.piece_names.clone(),
-                        piece_entities: cob_entities,
-                        piece_base_offsets: cob_offsets,
+                        piece_names: table.iter().map(|s| s.to_string()).collect(),
+                        piece_entities: table_entities,
+                        piece_base_offsets: table_offsets,
                         piece_rotations,
-                        piece_translations: vec![[0.0; 3]; cob_piece_count],
+                        piece_translations: vec![[0.0; 3]; piece_count],
                         target_rotations,
-                        turn_speeds: vec![[0.0; 3]; cob_piece_count],
-                        target_translations: vec![[0.0; 3]; cob_piece_count],
-                        move_speeds: vec![[0.0; 3]; cob_piece_count],
-                        spin_speeds: vec![[0.0; 3]; cob_piece_count],
+                        turn_speeds: vec![[0.0; 3]; piece_count],
+                        target_translations: vec![[0.0; 3]; piece_count],
+                        move_speeds: vec![[0.0; 3]; piece_count],
+                        spin_speeds: vec![[0.0; 3]; piece_count],
                         muzzle: muzzle_idx.unwrap_or(0),
                         outbox: Vec::new(),
                     },
@@ -522,7 +516,7 @@ pub fn spawn_unit(
                     .entity(unit_entity)
                     .insert(crate::units::assets::animation::HatchPiece(idx));
             }
-            if has_aim_weapon {
+            if has_aim {
                 commands
                     .entity(unit_entity)
                     .insert(crate::units::combat::AimScript::default());
@@ -531,19 +525,16 @@ pub fn spawn_unit(
 
         // For factories, cache the piece indices we need for build FX so
         // the production system can read their world transforms each frame
-        // without rescanning the model. Indices are into the COB piece
-        // table (which is what `CobAnimator::piece_entities` is keyed on
-        // post-remapping above) — `None` if the model has no such piece,
-        // in which case the production system falls back to the factory
-        // root.
+        // without rescanning the model. Indices are into the static piece
+        // table (which is what `AnimRig::piece_entities` is keyed on
+        // above) — `None` if the model has no such piece, in which case
+        // the production system falls back to the factory root.
         if default_production(kind).is_some() {
-            let cob = load_cob_cached(&kind.script(), cob_cache);
-            let cob_index = |name: &str| -> Option<usize> {
-                cob.as_ref().and_then(|c| {
-                    c.piece_names
-                        .iter()
-                        .position(|p| p.eq_ignore_ascii_case(name))
-                })
+            let table = crate::units::assets::animation::piece_names(kind);
+            let table_index = |name: &str| -> Option<usize> {
+                table
+                    .iter()
+                    .position(|p| p.eq_ignore_ascii_case(name))
             };
             // Faction-specific emitter piece names, in the order they
             // appear in the upstream .bos for each factory. Pieces that
@@ -561,10 +552,10 @@ pub fn spawn_unit(
                 UnitKind::Socket => &["blaser0", "blaser1"],
                 _ => &["nanoemitter"],
             };
-            let emitters: Vec<usize> = emitter_names.iter().filter_map(|n| cob_index(n)).collect();
+            let emitters: Vec<usize> = emitter_names.iter().filter_map(|n| table_index(n)).collect();
             commands.entity(unit_entity).insert(FactoryPieces {
                 emitters,
-                pad: cob_index("pad"),
+                pad: table_index("pad"),
             });
         }
     } else {

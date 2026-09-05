@@ -30,4 +30,10 @@ impl UnitAnim for AssemblerAnim {
         rig.explode("body", 4);
         rig.explode("nozzle", 3);
     }
+
+    fn aim(&mut self, _rig: &mut AnimRig, _h: f32, _p: f32, _ctx: AnimCtx) -> bool {
+        // assembler.bos AimWeapon1: `return 0` — the assembler is a
+        // builder and never fires through the weapon pipeline.
+        false
+    }
 }

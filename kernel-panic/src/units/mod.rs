@@ -40,7 +40,6 @@ impl Plugin for UnitsPlugin {
     fn build(&self, app: &mut App) {
         app.init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
-            .init_resource::<animation::CobFileCache>()
             .insert_resource(player::LocalTeam(0))
             .init_resource::<ai::AiTicker>()
             .insert_resource(weapons::WeaponRegistry::load())

@@ -14,7 +14,6 @@
 mod units;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
@@ -22,7 +21,6 @@ use bevy::render::view::Hdr;
 use clap::Parser;
 use thiserror::Error;
 
-use spring_cob::{CobFile, CobVm};
 use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
 use spring_tdf::{UnitDefs, WeaponDefs};
 
@@ -101,22 +99,14 @@ fn cam_transform(s: &CamState) -> Transform {
 #[derive(Component)]
 struct HudText;
 
-// ── Animation ──────────────────────────────────────────────────────────
+// ── Units ──────────────────────────────────────────────────────────────
 
+/// Marker for demo units spawned at the start positions. Units render as
+/// static piece trees — the viewer carries no animation (the game's
+/// per-unit Rust drivers live in kernel-panic; the spring-cob VM this
+/// viewer used to run has been retired).
 #[derive(Component)]
-struct CobAnimator {
-    vm: CobVm,
-    cob: Arc<CobFile>,
-    piece_entities: Vec<Entity>,
-    piece_base_offsets: Vec<[f32; 3]>,
-    piece_rotations: Vec<[f32; 3]>,
-    piece_translations: Vec<[f32; 3]>,
-    target_rotations: Vec<[f32; 3]>,
-    turn_speeds: Vec<[f32; 3]>,
-    target_translations: Vec<[f32; 3]>,
-    move_speeds: Vec<[f32; 3]>,
-    spin_speeds: Vec<[f32; 3]>,
-}
+struct ViewerUnit;
 
 #[derive(Component)]
 struct PieceIndex(#[allow(dead_code)] usize);
@@ -168,7 +158,6 @@ fn main() -> Result<(), MapViewerError> {
             Update,
             (
                 camera_control,
-                animation_system,
                 weapon_fire_demo,
                 tick_weapon_fx,
                 update_hud,
@@ -257,7 +246,7 @@ fn load_map_system(
     let spring_map = match spring_map::load_map(path) {
         Ok(m) => m,
         Err(error) => {
-            error!("Failed to load map '{}': {e}", path.display());
+            error!("Failed to load map '{}': {error}", path.display());
             commands.insert_resource(MapInfoDisplay {
                 name: format!("<load failed: {error}>"),
                 map_x: 0,
@@ -496,166 +485,6 @@ fn camera_control(
     *tf = cam_transform(&s);
 }
 
-// ── Animation system ───────────────────────────────────────────────────
-
-fn animation_system(
-    time: Res<Time>,
-    mut animators: Query<&mut CobAnimator>,
-    mut transforms: Query<(&mut Transform, &mut Visibility), With<PieceIndex>>,
-) {
-    let dt = time.delta_secs();
-    let dt_ms = (dt * 1000.0) as i32;
-
-    for mut animator in &mut animators {
-        let cob = animator.cob.clone();
-        let commands = animator.vm.tick(&cob, dt_ms);
-
-        for cmd in &commands {
-            match cmd {
-                spring_cob::AnimCommand::TurnNow {
-                    piece,
-                    axis,
-                    destination,
-                } => {
-                    let (p, a) = (*piece as usize, *axis as usize);
-                    if p < animator.piece_rotations.len() && a < 3 {
-                        let angle = spring_ang(*destination);
-                        animator.piece_rotations[p][a] = angle;
-                        animator.target_rotations[p][a] = angle;
-                        animator.turn_speeds[p][a] = 0.0;
-                    }
-                }
-                spring_cob::AnimCommand::Turn {
-                    piece,
-                    axis,
-                    destination,
-                    speed,
-                } => {
-                    let (p, a) = (*piece as usize, *axis as usize);
-                    if p < animator.piece_rotations.len() && a < 3 {
-                        animator.target_rotations[p][a] = spring_ang(*destination);
-                        animator.turn_speeds[p][a] = spring_ang(speed.abs());
-                    }
-                }
-                spring_cob::AnimCommand::MoveNow {
-                    piece,
-                    axis,
-                    destination,
-                } => {
-                    let (p, a) = (*piece as usize, *axis as usize);
-                    if p < animator.piece_translations.len() && a < 3 {
-                        let pos = spring_lin(*destination);
-                        animator.piece_translations[p][a] = pos;
-                        animator.target_translations[p][a] = pos;
-                        animator.move_speeds[p][a] = 0.0;
-                    }
-                }
-                spring_cob::AnimCommand::Move {
-                    piece,
-                    axis,
-                    destination,
-                    speed,
-                } => {
-                    let (p, a) = (*piece as usize, *axis as usize);
-                    if p < animator.piece_translations.len() && a < 3 {
-                        animator.target_translations[p][a] = spring_lin(*destination);
-                        animator.move_speeds[p][a] = spring_lin(speed.abs());
-                    }
-                }
-                spring_cob::AnimCommand::Spin {
-                    piece, axis, speed, ..
-                } => {
-                    let (p, a) = (*piece as usize, *axis as usize);
-                    if p < animator.spin_speeds.len() && a < 3 {
-                        animator.spin_speeds[p][a] = spring_ang(*speed);
-                    }
-                }
-                spring_cob::AnimCommand::StopSpin { piece, axis, .. } => {
-                    let (p, a) = (*piece as usize, *axis as usize);
-                    if p < animator.spin_speeds.len() && a < 3 {
-                        animator.spin_speeds[p][a] = 0.0;
-                    }
-                }
-                spring_cob::AnimCommand::Show { piece } => {
-                    let p = *piece as usize;
-                    if p < animator.piece_entities.len()
-                        && let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p])
-                    {
-                        *vis = Visibility::Inherited;
-                    }
-                }
-                spring_cob::AnimCommand::Hide { piece } => {
-                    let p = *piece as usize;
-                    if p < animator.piece_entities.len()
-                        && let Ok((_, mut vis)) = transforms.get_mut(animator.piece_entities[p])
-                    {
-                        *vis = Visibility::Hidden;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Interpolate.
-        let n = animator.piece_rotations.len();
-        let mut turn_done = Vec::new();
-        let mut move_done = Vec::new();
-        for p in 0..n {
-            for a in 0..3 {
-                if animator.spin_speeds[p][a] != 0.0 {
-                    animator.piece_rotations[p][a] += animator.spin_speeds[p][a] * dt;
-                }
-                let ts = animator.turn_speeds[p][a];
-                if ts > 0.0 {
-                    let diff = animator.target_rotations[p][a] - animator.piece_rotations[p][a];
-                    let step = ts * dt;
-                    if diff.abs() <= step {
-                        animator.piece_rotations[p][a] = animator.target_rotations[p][a];
-                        animator.turn_speeds[p][a] = 0.0;
-                        turn_done.push((p as i32, a as i32));
-                    } else {
-                        animator.piece_rotations[p][a] += step * diff.signum();
-                    }
-                }
-                let ms = animator.move_speeds[p][a];
-                if ms > 0.0 {
-                    let diff =
-                        animator.target_translations[p][a] - animator.piece_translations[p][a];
-                    let step = ms * dt;
-                    if diff.abs() <= step {
-                        animator.piece_translations[p][a] = animator.target_translations[p][a];
-                        animator.move_speeds[p][a] = 0.0;
-                        move_done.push((p as i32, a as i32));
-                    } else {
-                        animator.piece_translations[p][a] += step * diff.signum();
-                    }
-                }
-            }
-            if p < animator.piece_entities.len()
-                && let Ok((mut tf, _)) = transforms.get_mut(animator.piece_entities[p])
-            {
-                let r = animator.piece_rotations[p];
-                let t = animator.piece_translations[p];
-                let b = animator.piece_base_offsets[p];
-                tf.rotation = Quat::from_euler(EulerRot::XYZ, r[0], r[1], r[2]);
-                tf.translation = Vec3::new(b[0] + t[0], b[1] + t[1], b[2] + t[2]);
-            }
-        }
-        for (p, a) in turn_done {
-            animator.vm.anim_finished(spring_cob::AnimType::Turn, p, a);
-        }
-        for (p, a) in move_done {
-            animator.vm.anim_finished(spring_cob::AnimType::Move, p, a);
-        }
-    }
-}
-
-fn spring_ang(v: i32) -> f32 {
-    v as f32 / 65536.0 * 2.0 * std::f32::consts::PI
-}
-fn spring_lin(v: i32) -> f32 {
-    v as f32 / 65536.0
-}
 
 // ── Weapon fire demo ───────────────────────────────────────────────────
 
@@ -663,7 +492,7 @@ fn weapon_fire_demo(
     time: Res<Time>,
     mut timer: ResMut<WeaponFireTimer>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut animators: Query<(&GlobalTransform, &mut CobAnimator)>,
+    units: Query<(&GlobalTransform, Entity), With<ViewerUnit>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -674,29 +503,15 @@ fn weapon_fire_demo(
     }
 
     // Collect unit positions first.
-    let positions: Vec<Vec3> = animators.iter().map(|(gtf, _)| gtf.translation()).collect();
+    let positions: Vec<Vec3> = units.iter().map(|(gtf, _)| gtf.translation()).collect();
     if positions.len() < 2 {
         return;
     }
 
     // Each unit fires at the next one in the list.
-    for (idx, (gtf, mut animator)) in animators.iter_mut().enumerate() {
+    for (idx, (gtf, _)) in units.iter().enumerate() {
         let target = positions[(idx + 1) % positions.len()];
         let my_pos = gtf.translation();
-
-        // Trigger COB fire scripts.
-        let to_target = target - my_pos;
-        let heading = to_target.x.atan2(to_target.z);
-        let hdist = (to_target.x * to_target.x + to_target.z * to_target.z).sqrt();
-        let pitch_r = (-to_target.y).atan2(hdist);
-        let heading_i = (heading / (2.0 * std::f32::consts::PI) * 65536.0) as i32;
-        let pitch_i = (pitch_r / (2.0 * std::f32::consts::PI) * 65536.0) as i32;
-
-        let cob = animator.cob.clone();
-        animator
-            .vm
-            .start_script(&cob, "AimWeapon1", &[heading_i, pitch_i]);
-        animator.vm.start_script(&cob, "FireWeapon1", &[]);
 
         // Spawn beam visual.
         let dir = target - my_pos;
@@ -805,13 +620,13 @@ fn tick_weapon_fx(
 fn update_hud(
     info: Option<Res<MapInfoDisplay>>,
     mut text_q: Query<&mut Text, With<HudText>>,
-    animators: Query<&CobAnimator>,
+    units: Query<&ViewerUnit>,
 ) {
     let Ok(mut text) = text_q.single_mut() else {
         return;
     };
     let Some(info) = info else { return };
-    let unit_count = animators.iter().count();
+    let unit_count = units.iter().count();
     **text = format!(
         "{}\n{}x{} | {} features | {} units\n\nArrows pan | Scroll zoom | Middle-drag orbit | Q/E rotate | Space fire weapons",
         info.name, info.map_x, info.map_y, info.num_features, unit_count,

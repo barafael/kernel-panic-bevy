@@ -3,18 +3,16 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use spring_cob::{CobFile, CobVm, parse_cob};
 use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
 use spring_map::smd_parser::MapInfo;
 use spring_tdf::{UnitDefs, WeaponDefs};
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage, parse_tga};
 
-use super::{CobAnimator, MapEntity, PieceIndex};
+use super::{MapEntity, PieceIndex, ViewerUnit};
 
 // ── Unit kinds ─────────────────────────────────────────────────────────
 
@@ -112,7 +110,6 @@ pub fn spawn_all_units(
 
     let mut model_cache: HashMap<String, Option<S3OModel>> = HashMap::new();
     let mut tga_cache: HashMap<String, Option<TgaImage>> = HashMap::new();
-    let mut cob_cache: HashMap<String, Option<Arc<CobFile>>> = HashMap::new();
 
     for (unit_idx, &(unitname, faction, mesh_scale)) in UNIT_NAMES.iter().enumerate() {
         // Pick a start position for this unit (round-robin).
@@ -194,6 +191,7 @@ pub fn spawn_all_units(
         let root = commands
             .spawn((
                 MapEntity,
+                ViewerUnit,
                 Transform::from_translation(position),
                 Visibility::default(),
             ))
@@ -243,31 +241,10 @@ pub fn spawn_all_units(
                 commands.entity(parent_entity).add_child(pe_id);
             }
 
-            // Attach COB animator.
-            let script = format!("{unitname}.cob");
-            if !cob_cache.contains_key(&script) {
-                let cob = load_asset(&script, parse_cob).map(Arc::new);
-                cob_cache.insert(script.clone(), cob);
-            }
-            if let Some(cob) = cob_cache.get(&script).and_then(|c| c.clone()) {
-                let n = piece_entities.len();
-                let mut vm = CobVm::new(&cob);
-                vm.start_script(&cob, "Create", &[]);
-
-                commands.entity(root).insert(CobAnimator {
-                    vm,
-                    cob,
-                    piece_entities: piece_entities.clone(),
-                    piece_base_offsets: piece_offsets,
-                    piece_rotations: vec![[0.0; 3]; n],
-                    piece_translations: vec![[0.0; 3]; n],
-                    target_rotations: vec![[0.0; 3]; n],
-                    turn_speeds: vec![[0.0; 3]; n],
-                    target_translations: vec![[0.0; 3]; n],
-                    move_speeds: vec![[0.0; 3]; n],
-                    spin_speeds: vec![[0.0; 3]; n],
-                });
-            }
+            // Units render as static piece trees here — the viewer has
+            // no animation (the game's per-unit Rust drivers live in
+            // kernel-panic, and the spring-cob VM they replaced has
+            // been retired).
         } else {
             // Fallback cylinder.
             let mesh = meshes.add(Cylinder::new(5.0 * mesh_scale, 8.0 * mesh_scale));

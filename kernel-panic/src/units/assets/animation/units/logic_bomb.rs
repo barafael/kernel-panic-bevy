@@ -17,4 +17,10 @@ impl UnitAnim for LogicBombAnim {
         // Create()'s emerge: mine rises from [-4]·pct/100.
         super::emerge_lift(rig, "mine", 4.0, ctx.build_percent);
     }
+
+    fn aim(&mut self, _rig: &mut AnimRig, _h: f32, _p: f32, _ctx: AnimCtx) -> bool {
+        // logic_bomb.bos AimWeapon1: `return 0` — the mine kills through
+        // its detonation, never through the weapon pipeline.
+        false
+    }
 }

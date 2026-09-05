@@ -26,20 +26,14 @@
 
 pub mod units;
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use bevy::prelude::*;
 
-use spring_cob::{CobFile, parse_cob};
-
-use super::meshes::load_asset_from_disk;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::components::Faction;
 use crate::units::content::definitions::UnitKind;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
-pub use units::driver_for;
+pub use units::{driver_for, has_aim_weapon, piece_names};
 
 /// Angle conversion for the degree-based driver helpers. `<n>` in a
 /// `.bos` is n degrees (Scriptor scales by 65536/360 into COB angle
@@ -51,7 +45,7 @@ pub const DEG2RAD: f32 = std::f32::consts::PI / 180.0;
 /// drivers work in degrees/elmos directly, so this only guards the
 /// historical "byte animations 2.5× too small" bug against a comeback.
 #[allow(dead_code)]
-pub const COBSCALE: f32 = spring_cob::COBSCALE as f32;
+pub const COBSCALE: f32 = 65536.0;
 
 // ---------------------------------------------------------------------------
 // Piece-table components resolved at spawn
@@ -110,30 +104,6 @@ pub struct AimerPiece(pub usize);
 /// frame by `animate_connection_hatch` so it doesn't re-scan piece names.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct HatchPiece(pub usize);
-
-/// Cached parsed COB files, keyed by script filename. Kept only for the
-/// piece-name tables (which mirror each s3o's piece tree) — no bytecode
-/// is executed any more.
-#[derive(Resource, Default)]
-pub struct CobFileCache {
-    files: HashMap<String, Option<Arc<CobFile>>>,
-}
-
-/// Load a COB file from disk, cached.
-pub fn load_cob_cached(script: &str, cache: &mut CobFileCache) -> Option<Arc<CobFile>> {
-    cache
-        .files
-        .entry(script.to_string())
-        .or_insert_with(|| load_asset_from_disk(script, parse_cob).map(Arc::new))
-        .clone()
-}
-
-/// Does the unit's COB script declare an `AimWeapon1`? Spawn-time
-/// metadata (gates the [`AimScript`](crate::units::combat::AimScript)
-/// component) read straight off the parsed function table.
-pub fn declares_aim_weapon(cob: &CobFile) -> bool {
-    cob.function_id("AimWeapon1").is_some()
-}
 
 // ---------------------------------------------------------------------------
 // Rig: pieces + interpolation state + fx outbox
