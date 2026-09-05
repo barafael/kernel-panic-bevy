@@ -17,7 +17,9 @@ pub use self::core::Selected;
 #[allow(unused_imports)]
 pub(crate) use self::core::SelectionSet;
 pub(crate) use self::core::ground_hit;
+pub(crate) use self::core::unit_hit;
 pub(crate) use self::right_click::apply_ordered_command;
+pub(crate) use self::right_click::{OrderMarker, PendingMoveIndicators};
 
 use self::core::SelectionCorePlugin;
 use self::groups::UnitGroupsPlugin;

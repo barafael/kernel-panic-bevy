@@ -1,21 +1,26 @@
-//! Top-right order palette: Stop / Attack / Self-destruct, plus the
-//! contextual D-ability button (NX Flag, Infection, etc.) when the
+//! Top-right order palette: Stop / Attack / Fight / Self-destruct, plus
+//! the contextual D-ability button (NX Flag, Infection, etc.) when the
 //! selection includes a caster.
 //!
 //! Buttons mirror the hotkeys handled in [`crate::interaction::ability`]
 //! so the user can drive the same actions via mouse. Most actually fire
 //! by simulating the same ECS effects — Stop strips order components,
-//! Attack toggles `AttackGroundMode`, Self-destruct inserts
+//! Attack toggles `OrderCursorModes::attack_ground`, Fight toggles
+//! `OrderCursorModes::attack_move`, Self-destruct inserts
 //! `SelfDestructCountdown`. Command-fire abilities require a target
 //! position, so the palette button just toggles the same mode the
 //! hotkey would: the next ground click commits.
 
 use bevy::prelude::*;
 
-use crate::interaction::ability::AttackGroundMode;
-use crate::interaction::movement::{CommandQueue, MovePath, MoveTarget};
+use crate::interaction::ability::OrderCursorModes;
+use crate::interaction::movement::{
+    AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget,
+};
 use crate::interaction::selection::Selected;
-use crate::units::combat::{AttackGroundOrder, SELF_DESTRUCT_DELAY, SelfDestructCountdown};
+use crate::units::combat::{
+    AttackGroundOrder, ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown,
+};
 use crate::units::components::UnitType;
 use crate::units::lifecycle::construction::PendingBuild;
 
@@ -65,12 +70,27 @@ struct OrderButton(OrderKind);
 enum OrderKind {
     Stop,
     AttackGround,
+    /// Attack-move ("Fight"): march to a clicked point, engaging hostile
+    /// units encountered en route. `F` toggles the armed cursor mode; the
+    /// click that follows issues the order.
+    Fight,
+    /// Guard: click a friendly unit to have the selection trail and
+    /// protect it. `G` arms the Defend cursor.
+    Guard,
+    /// Plain move order via cursor (`M`).
+    Move,
+    /// Manual target designation (`T`): pick a unit the selection will
+    /// prefer as its target; tracked by the turret, never chased.
+    SetTarget,
+    /// Clear the manual target designation (`X`).
+    UnsetTarget,
     SelfDestruct,
     /// Cast the contextual D-ability (caster only).
     /// We can't drive command-fire from here without a target click —
-    /// pressing the button just enables `AttackGroundMode` so the next
-    /// click is consumed; gameplay-wise the effect is similar (pressing
-    /// `D` over a ground point fires command-fire from the COB script).
+    /// pressing the button just enables `OrderCursorModes::attack_ground`
+    /// so the next click is consumed; gameplay-wise the effect is similar
+    /// (pressing `D` over a ground point fires command-fire from the COB
+    /// script).
     Ability,
 }
 
@@ -79,6 +99,11 @@ impl OrderKind {
         match self {
             OrderKind::Stop => "Stop",
             OrderKind::AttackGround => "Attack",
+            OrderKind::Fight => "Fight",
+            OrderKind::Guard => "Guard",
+            OrderKind::Move => "Move",
+            OrderKind::SetTarget => "Target",
+            OrderKind::UnsetTarget => "Unset",
             OrderKind::SelfDestruct => "Detonate",
             OrderKind::Ability => "Ability",
         }
@@ -88,6 +113,11 @@ impl OrderKind {
         match self {
             OrderKind::Stop => "S",
             OrderKind::AttackGround => "A",
+            OrderKind::Fight => "F",
+            OrderKind::Guard => "G",
+            OrderKind::Move => "M",
+            OrderKind::SetTarget => "T",
+            OrderKind::UnsetTarget => "X",
             OrderKind::SelfDestruct => "Ctrl+D",
             OrderKind::Ability => "D",
         }
@@ -149,8 +179,8 @@ fn refresh_panel(
         return;
     };
 
-    // Hash deliberately excludes `AttackGroundMode.active` — that's
-    // painted by `update_armed_highlight` without rebuilding entities.
+    // Hash deliberately excludes the `OrderCursorModes` flags — those
+    // are painted by `update_armed_highlight` without rebuilding entities.
     let snapshot = OrderSnapshot::collect(&selected_q);
     let new_hash = snapshot.hash();
     if new_hash == hash_marker.0 {
@@ -224,7 +254,7 @@ fn refresh_panel(
 /// otherwise the still-held mouse press would re-toggle attack mode on
 /// the newly-spawned button next frame.
 fn update_armed_highlight(
-    attack_mode: Res<AttackGroundMode>,
+    modes: Res<OrderCursorModes>,
     mut buttons: Query<(
         &OrderButton,
         &mut BorderColor,
@@ -233,7 +263,11 @@ fn update_armed_highlight(
     )>,
 ) {
     for (button, mut border, mut bg, mut node) in &mut buttons {
-        let armed = matches!(button.0, OrderKind::AttackGround) && attack_mode.active;
+        let armed = (matches!(button.0, OrderKind::AttackGround) && modes.attack_ground)
+            || (matches!(button.0, OrderKind::Fight) && modes.attack_move)
+            || (matches!(button.0, OrderKind::Guard) && modes.guard)
+            || (matches!(button.0, OrderKind::Move) && modes.move_order)
+            || (matches!(button.0, OrderKind::SetTarget) && modes.set_target);
         let target_border = if armed { KP_GREEN } else { PANEL_BORDER };
         let target_bg = if armed { BUTTON_BG_PRESSED } else { BUTTON_BG };
         let target_width = if armed { 2.0 } else { 1.0 };
@@ -247,34 +281,86 @@ fn update_armed_highlight(
 fn handle_clicks(
     mut commands: Commands,
     interactions: Query<(&Interaction, &OrderButton), Changed<Interaction>>,
+    keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<Entity, With<Selected>>,
-    mut attack_mode: ResMut<AttackGroundMode>,
+    mut modes: ResMut<OrderCursorModes>,
 ) {
+    // Keyboard hotkey: S issues Stop (mirrors the Stop button).
+    if keys.just_pressed(KeyCode::KeyS) {
+        stop_selection(&mut commands, &selected_q, &mut modes);
+    }
+
     for (interaction, button) in &interactions {
         if *interaction != Interaction::Pressed {
             continue;
         }
         match button.0 {
-            OrderKind::Stop => {
-                for entity in &selected_q {
-                    commands
-                        .entity(entity)
-                        .remove::<MoveTarget>()
-                        .remove::<MovePath>()
-                        .remove::<CommandQueue>()
-                        .remove::<AttackGroundOrder>()
-                        .remove::<PendingBuild>()
-                        .remove::<SelfDestructCountdown>();
-                }
-                attack_mode.active = false;
-            }
+            OrderKind::Stop => stop_selection(&mut commands, &selected_q, &mut modes),
             OrderKind::AttackGround | OrderKind::Ability => {
                 // Both arm the next-click handler; for Ability the user
                 // expects the click to fire the unit's command-fire weapon
                 // — the existing `D`-hotkey code already does that, so
                 // here we just toggle the attack-ground latch which produces
                 // the matching cursor + click semantics.
-                attack_mode.active = !attack_mode.active;
+                let next = !modes.attack_ground;
+                modes.attack_ground = next;
+                if next {
+                    modes.attack_move = false;
+                    modes.patrol = false;
+                    modes.guard = false;
+                    modes.move_order = false;
+                    modes.set_target = false;
+                }
+            }
+            OrderKind::Fight => {
+                let next = !modes.attack_move;
+                modes.attack_move = next;
+                if next {
+                    modes.attack_ground = false;
+                    modes.patrol = false;
+                    modes.guard = false;
+                    modes.move_order = false;
+                    modes.set_target = false;
+                }
+            }
+            OrderKind::Guard => {
+                let next = !modes.guard;
+                modes.guard = next;
+                if next {
+                    modes.attack_ground = false;
+                    modes.attack_move = false;
+                    modes.patrol = false;
+                    modes.move_order = false;
+                    modes.set_target = false;
+                }
+            }
+            OrderKind::Move => {
+                let next = !modes.move_order;
+                modes.move_order = next;
+                if next {
+                    modes.attack_ground = false;
+                    modes.attack_move = false;
+                    modes.patrol = false;
+                    modes.guard = false;
+                    modes.set_target = false;
+                }
+            }
+            OrderKind::SetTarget => {
+                let next = !modes.set_target;
+                modes.set_target = next;
+                if next {
+                    modes.attack_ground = false;
+                    modes.attack_move = false;
+                    modes.patrol = false;
+                    modes.guard = false;
+                    modes.move_order = false;
+                }
+            }
+            OrderKind::UnsetTarget => {
+                for entity in &selected_q {
+                    commands.entity(entity).remove::<ForcedTarget>();
+                }
+                modes.set_target = false;
             }
             OrderKind::SelfDestruct => {
                 for entity in &selected_q {
@@ -285,6 +371,36 @@ fn handle_clicks(
             }
         }
     }
+}
+
+/// Stop order: strip every movement/order component off the selection and
+/// disarm the order-cursor modes. Shared by the Stop button and the `S`
+/// hotkey so both stay identical.
+fn stop_selection(
+    commands: &mut Commands,
+    selected_q: &Query<Entity, With<Selected>>,
+    modes: &mut OrderCursorModes,
+) {
+    for entity in selected_q {
+        commands
+            .entity(entity)
+            .remove::<MoveTarget>()
+            .remove::<MovePath>()
+            .remove::<CommandQueue>()
+            .remove::<AttackGroundOrder>()
+            .remove::<AttackMoveActive>()
+            .remove::<crate::units::combat::AttackTargetOrder>()
+            .remove::<GuardTarget>()
+            .remove::<ForcedTarget>()
+            .remove::<PendingBuild>()
+            .remove::<SelfDestructCountdown>();
+    }
+    modes.attack_ground = false;
+    modes.attack_move = false;
+    modes.patrol = false;
+    modes.guard = false;
+    modes.move_order = false;
+    modes.set_target = false;
 }
 
 struct OrderSnapshot {
@@ -307,7 +423,12 @@ impl OrderSnapshot {
 
         let mut entries = vec![
             OrderKind::Stop,
+            OrderKind::Move,
             OrderKind::AttackGround,
+            OrderKind::Fight,
+            OrderKind::Guard,
+            OrderKind::SetTarget,
+            OrderKind::UnsetTarget,
             OrderKind::SelfDestruct,
         ];
         if has_caster {

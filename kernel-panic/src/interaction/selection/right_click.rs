@@ -1,13 +1,21 @@
 //! Right-click movement orders: single-click moves the selection to a point,
 //! right-drag samples a path and distributes units along it. Shows a
 //! formation preview during the drag and a move-target torus on release.
+//! A right-click that lands on an enemy unit issues an attack order instead.
+
+use std::collections::HashMap;
 
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use super::core::{Selected, SelectionSet, ground_hit};
-use crate::interaction::movement::{CommandQueue, MovePath, MoveTarget, QueuedCommand};
+use super::core::{Selected, SelectionSet, ground_hit, unit_hit};
+use crate::interaction::movement::{
+    AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget, QueuedCommand,
+};
 use crate::rendering::camera::RtsCamera;
+use crate::units::combat::AttackTargetOrder;
+use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
+use crate::units::content::unit_registry::UnitRegistry;
 
 pub(super) struct RightClickPlugin;
 
@@ -64,25 +72,59 @@ pub struct RightDragPath {
     active: bool,
 }
 
-/// Buffered indicator targets written by `handle_right_click`, consumed by
-/// `spawn_move_indicator_visuals`. Separated into two systems because
-/// `MeshRayCast` holds `Res<Assets<Mesh>>` which conflicts with `ResMut`.
-#[derive(Resource, Default)]
-pub struct PendingMoveIndicators {
-    pub targets: Vec<Vec3>,
+/// Order-commit marker kinds, rendered as colored torus rings at the
+/// clicked point / target unit. Colors mirror the command-line palette in
+/// `movement::draw_selected_command_lines` so a click's ring matches the
+/// line color Spring draws for that order kind.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) enum OrderMarker {
+    Move,
+    Attack,
+    Patrol,
+    Guard,
+    /// Manual target designation (`T`).
+    Target,
 }
 
-/// Right-click: single click moves all selected to one point.
-/// Right-drag: sample a path, distribute selected units along it on release.
-#[allow(clippy::too_many_arguments)]
+impl OrderMarker {
+    fn color(self) -> Color {
+        match self {
+            OrderMarker::Move => Color::srgb(0.2, 1.0, 0.3),
+            OrderMarker::Attack => Color::srgb(1.0, 0.3, 0.25),
+            OrderMarker::Patrol => Color::srgb(0.4, 0.7, 1.0),
+            OrderMarker::Guard => Color::srgb(0.85, 0.95, 1.0),
+            OrderMarker::Target => Color::srgb(1.0, 0.65, 0.2),
+        }
+    }
+}
+
+/// Buffered order-commit markers written by `handle_right_click` (and the
+/// ability order modes), consumed by `spawn_move_indicator_visuals`.
+/// Separated into two systems because `MeshRayCast` holds
+/// `Res<Assets<Mesh>>` which conflicts with `ResMut`.
+#[derive(Resource, Default)]
+pub struct PendingMoveIndicators {
+    pub markers: Vec<(Vec3, OrderMarker)>,
+}
+
+/// Right-click: single click moves all selected to one point — unless the
+/// click lands on an enemy unit, in which case every selected *armed* unit
+/// attacks it instead (Spring's default attack order). Right-drag: sample a
+/// path, distribute selected units along it on release.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
-    selected_q: Query<(Entity, &Transform), With<Selected>>,
+    selected_q: Query<(Entity, &Transform, &UnitType), With<Selected>>,
+    unit_root_q: Query<Entity, With<UnitType>>,
+    parent_q: Query<&ChildOf>,
+    unit_info_q: Query<(&TeamId, &Faction)>,
+    target_gtf_q: Query<&GlobalTransform>,
     move_target_q: Query<(), With<MoveTarget>>,
+    unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
     mut drag_path: ResMut<RightDragPath>,
     mut pending: ResMut<PendingMoveIndicators>,
@@ -114,7 +156,7 @@ fn handle_right_click(
 
         let mut units: Vec<(Entity, Vec3)> = selected_q
             .iter()
-            .map(|(e, tf)| (e, tf.translation))
+            .map(|(e, tf, _)| (e, tf.translation))
             .collect();
         if units.is_empty() || drag_path.points.is_empty() {
             return;
@@ -123,7 +165,62 @@ fn handle_right_click(
         let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
         if drag_path.points.len() == 1 {
-            // Single-point move: every unit goes to the same point — no
+            // Single-point order. First check for a right-click ON a unit:
+            // an enemy under the cursor turns the order into an attack for
+            // every selected armed unit (unarmed units move as usual).
+            let clicked_enemy = unit_hit(
+                &windows,
+                &camera_q,
+                &mut ray_cast,
+                &unit_root_q,
+                &parent_q,
+            )
+            .filter(|&target| {
+                unit_info_q
+                    .get(target)
+                    .ok()
+                    .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
+                    .is_some_and(|((t_team, t_faction), (m_team, m_faction))| {
+                        !is_friendly(m_team.0, *m_faction, t_team.0, *t_faction)
+                    })
+            });
+
+            if let Some(target_unit) = clicked_enemy {
+                let target_pos = target_gtf_q
+                    .get(target_unit)
+                    .map(|t| t.translation())
+                    .unwrap_or(drag_path.points[0]);
+                let mut any_armed = false;
+                for (entity, _, unit) in &selected_q {
+                    if unit_registry.weapon(unit.0).is_empty() {
+                        continue;
+                    }
+                    any_armed = true;
+                    if shift && move_target_q.contains(entity) {
+                        // Shift-queue: walk to the target's current position
+                        // first, then attack it (the chase retargets live).
+                        commands
+                            .entity(entity)
+                            .entry::<CommandQueue>()
+                            .or_default()
+                            .and_modify(move |mut queue: Mut<CommandQueue>| {
+                                queue.push(QueuedCommand::AttackUnit {
+                                    target: target_unit,
+                                    pos: target_pos,
+                                });
+                            });
+                    } else {
+                        issue_attack_order(entity, target_unit, &mut commands);
+                    }
+                }
+                if any_armed {
+                    pending.markers.push((target_pos, OrderMarker::Attack));
+                    drag_path.points.clear();
+                    return;
+                }
+            }
+
+            // Plain ground move: every unit goes to the same point — no
             // ordering question to answer.
             let target = drag_path.points[0];
             for (entity, _) in &units {
@@ -135,7 +232,7 @@ fn handle_right_click(
                     &mut commands,
                 );
             }
-            pending.targets.push(target);
+            pending.markers.push((target, OrderMarker::Move));
         } else {
             // Path-based formation: sort units by projection onto the drag's
             // principal axis (start → end) so the nearest-to-start unit gets
@@ -164,11 +261,31 @@ fn handle_right_click(
                     &mut commands,
                 );
             }
-            pending.targets.extend(targets);
+            pending
+                .markers
+                .extend(targets.into_iter().map(|t| (t, OrderMarker::Move)));
         }
 
         drag_path.points.clear();
     }
+}
+
+/// Replace a unit's current order with an attack on `target`. Mirrors the
+/// replace branch of [`apply_ordered_command`] for every order component
+/// attack supersedes. The explicit attack also supersedes a manual (T)
+/// target designation.
+fn issue_attack_order(entity: Entity, target: Entity, commands: &mut Commands) {
+    commands
+        .entity(entity)
+        .remove::<MoveTarget>()
+        .remove::<MovePath>()
+        .remove::<CommandQueue>()
+        .remove::<crate::units::combat::AttackGroundOrder>()
+        .remove::<AttackMoveActive>()
+        .remove::<GuardTarget>()
+        .remove::<crate::units::combat::ForcedTarget>()
+        .remove::<crate::units::lifecycle::construction::PendingBuild>()
+        .insert(AttackTargetOrder { target });
 }
 
 /// Apply a positional command to a unit, either replacing its current order
@@ -199,51 +316,75 @@ pub(crate) fn apply_ordered_command(
         ec.insert(MoveTarget(cmd.position()))
             .insert(CommandQueue::default())
             .remove::<MovePath>()
-            .remove::<crate::units::combat::AttackGroundOrder>();
+            .remove::<crate::units::combat::AttackGroundOrder>()
+            .remove::<crate::units::combat::AttackTargetOrder>()
+            .remove::<GuardTarget>()
+            .remove::<AttackMoveActive>();
         match cmd {
             QueuedCommand::BuildAt { kind, site } => {
                 ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
             }
             QueuedCommand::Move(_)
             | QueuedCommand::Patrol(_)
-            | QueuedCommand::AttackMove(_)
             | QueuedCommand::Guard(_) => {
                 ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
+            }
+            QueuedCommand::AttackMove(_) => {
+                ec.remove::<crate::units::lifecycle::construction::PendingBuild>()
+                    .insert(AttackMoveActive);
+            }
+            QueuedCommand::AttackUnit { target, .. } => {
+                ec.remove::<crate::units::lifecycle::construction::PendingBuild>()
+                    .remove::<MoveTarget>()
+                    .remove::<crate::units::combat::ForcedTarget>()
+                    .insert(crate::units::combat::AttackTargetOrder { target });
             }
         }
     }
 }
 
-/// Drains `PendingMoveIndicators` and creates torus visuals.
+/// Drains `PendingMoveIndicators` and creates torus visuals colored by
+/// order kind (move green / attack red / patrol blue / guard white).
 ///
 /// Separated from `handle_right_click` because `MeshRayCast` holds an
 /// immutable `Res<Assets<Mesh>>` that conflicts with `ResMut<Assets<Mesh>>`.
+#[allow(clippy::type_complexity)]
 fn spawn_move_indicator_visuals(
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut mesh_cache: Local<Option<Handle<Mesh>>>,
+    mut material_cache: Local<HashMap<OrderMarker, Handle<StandardMaterial>>>,
 ) {
-    if pending.targets.is_empty() {
+    if pending.markers.is_empty() {
         return;
     }
 
-    let mesh = meshes.add(Torus::new(2.0, 4.0));
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgba(0.0, 1.0, 0.3, 0.6),
-        emissive: LinearRgba::new(0.0, 1.0, 0.3, 1.0) * 2.0,
-        unlit: true,
-        alpha_mode: AlphaMode::Blend,
-        ..default()
-    });
+    let mesh = mesh_cache
+        .get_or_insert_with(|| meshes.add(Torus::new(2.0, 4.0)))
+        .clone();
 
-    for target in pending.targets.drain(..) {
+    for (target, marker) in pending.markers.drain(..) {
+        let material = material_cache
+            .entry(marker)
+            .or_insert_with(|| {
+                let color = marker.color();
+                materials.add(StandardMaterial {
+                    base_color: color.with_alpha(0.6),
+                    emissive: LinearRgba::from(color) * 2.0,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    ..default()
+                })
+            })
+            .clone();
         commands.spawn((
             MoveIndicator {
                 lifetime: Timer::from_seconds(1.5, TimerMode::Once),
             },
             Mesh3d(mesh.clone()),
-            MeshMaterial3d(material.clone()),
+            MeshMaterial3d(material),
             Transform::from_translation(target + Vec3::Y * 1.0)
                 .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
         ));

@@ -131,18 +131,17 @@ fn handle_selection(
     same_kind_q: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
     ui_interactions: Query<&Interaction>,
-    attack_mode: Res<crate::interaction::ability::AttackGroundMode>,
+    modes: Res<crate::interaction::ability::OrderCursorModes>,
     mut drag_state: ResMut<DragState>,
     mut commands: Commands,
 ) {
     let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
 
-    // Ground-attack mode: while the `A`-toggle is active, the click
-    // belongs to the attack-ground hotkey (see
-    // `ability::trigger_attack_ground_click`) and must not flow into
-    // selection — otherwise the release would clear the selection
-    // before the attack-ground command could dispatch.
-    let attack_mode_active = attack_mode.active;
+    // While any order cursor mode is armed (attack-ground, attack-move,
+    // or patrol), the left-click belongs to that mode's click handler and
+    // must not flow into selection — otherwise the release would clear the
+    // selection before the order could dispatch.
+    let cursor_mode_active = modes.any_active();
 
     // --- Left press: start tracking ---
     if mouse.just_pressed(MouseButton::Left) {
@@ -156,8 +155,8 @@ fn handle_selection(
         let on_ui = ui_interactions
             .iter()
             .any(|i| *i == Interaction::Pressed || *i == Interaction::Hovered);
-        drag_state.started_on_ui = on_ui || attack_mode_active;
-        if on_ui || attack_mode_active {
+        drag_state.started_on_ui = on_ui || cursor_mode_active;
+        if on_ui || cursor_mode_active {
             return;
         }
         drag_state.start = cursor_pos;
@@ -344,4 +343,21 @@ pub(crate) fn ground_hit(
     let ray = cursor_ray(windows, camera_q)?;
     let hits = ray_cast.cast_ray(ray, &default());
     hits.first().map(|(_, hit)| hit.point)
+}
+
+/// Cast a ray from the cursor and resolve the first *unit* it lands on
+/// (walking up S3O piece hierarchy to the unit root). Returns `None` when
+/// the ray hits only terrain / nothing at all. Used by right-click attack
+/// orders and guard targeting.
+#[allow(clippy::type_complexity)]
+pub(crate) fn unit_hit(
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    ray_cast: &mut MeshRayCast,
+    unit_q: &Query<Entity, With<UnitType>>,
+    parent_q: &Query<&ChildOf>,
+) -> Option<Entity> {
+    let ray = cursor_ray(windows, camera_q)?;
+    let hits = ray_cast.cast_ray(ray, &default());
+    resolve_unit_hit(hits, unit_q, parent_q)
 }

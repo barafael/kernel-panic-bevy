@@ -13,12 +13,17 @@
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use super::movement::{MoveTarget, QueuedCommand};
-use super::selection::{apply_ordered_command, ground_hit, Selected};
+use super::movement::{AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget, QueuedCommand};
+use super::selection::{
+    OrderMarker, PendingMoveIndicators, Selected, apply_ordered_command, ground_hit, unit_hit,
+};
 use crate::rendering::camera::RtsCamera;
-use crate::units::combat::{AttackGroundOrder, SelfDestructCountdown, SELF_DESTRUCT_DELAY};
-use crate::units::components::UnitType;
+use crate::units::combat::{
+    AttackGroundOrder, AttackTargetOrder, ForcedTarget, SelfDestructCountdown, SELF_DESTRUCT_DELAY,
+};
+use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::mechanics::command_fire::CommandFireEvent;
 use crate::units::mechanics::deploy::DeployEvent;
 use crate::units::mechanics::network_buffer::{DispatchEvent, EnterEvent};
@@ -31,46 +36,98 @@ pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<AttackGroundMode>()
-            .init_resource::<PatrolCursorMode>()
+        app.init_resource::<OrderCursorModes>()
             .add_systems(
                 Update,
+                // Two nested groups: a flat tuple here would exceed
+                // Bevy's 21-item tuple-arity cap.
                 (
-                    trigger_command_fire_on_hotkey,
-                    trigger_deploy_on_hotkey,
-                    trigger_dispatch_on_hotkey,
-                    trigger_enter_on_hotkey,
-                    trigger_self_destruct_on_hotkey,
-                    toggle_patrol_cursor_mode,
-                    trigger_patrol_click,
-                    update_patrol_cursor,
-                    toggle_attack_ground_mode,
-                    trigger_attack_ground_click,
-                    update_attack_ground_cursor,
+                    (
+                        trigger_command_fire_on_hotkey,
+                        trigger_deploy_on_hotkey,
+                        trigger_dispatch_on_hotkey,
+                        trigger_enter_on_hotkey,
+                        trigger_self_destruct_on_hotkey,
+                        trigger_unset_target_on_hotkey,
+                    ),
+                    (
+                        toggle_patrol_cursor_mode,
+                        trigger_patrol_click,
+                        update_patrol_cursor,
+                        toggle_attack_ground_mode,
+                        trigger_attack_ground_click,
+                        update_attack_ground_cursor,
+                        toggle_attack_move_mode,
+                        trigger_attack_move_click,
+                        update_attack_move_cursor,
+                        toggle_guard_mode,
+                        trigger_guard_click,
+                        update_guard_cursor,
+                        toggle_move_mode,
+                        trigger_move_click,
+                        update_move_cursor,
+                        toggle_set_target_mode,
+                        trigger_set_target_click,
+                        update_set_target_cursor,
+                    ),
                 ),
             );
     }
 }
 
-/// Sticky ground-attack targeting mode: toggled on by pressing `A`,
-/// cleared by pressing `A` again, Escape, right-click, or issuing the
-/// click that commits the ground target. While `active` the cursor is
-/// forced to [`CursorKind::Attack`] and the next left-click is consumed
-/// by [`trigger_attack_ground_click`] as a ground-target order for
-/// every selected unit.
+/// Sticky order-targeting modes armed from the hotkeys / order palette.
+///
+/// Only one mode may be active at a time. The active mode forces the
+/// cursor glyph (Attack / Attack / Patrol) and the next left-click is
+/// consumed by that mode's click handler as an order for the selection:
+/// - `attack_ground` (`A` / Attack button): fire at a static ground point.
+/// - `attack_move` (`F` / Fight button): march to a point, fighting en
+///   route.
+/// - `patrol` (`P` / button): shuttle between the click point and where
+///   the unit started.
+///
+/// Modes are cleared by re-pressing the key, Escape, right-click, the
+/// committing click, or a Stop order.
 #[derive(Resource, Default)]
-pub struct AttackGroundMode {
-    pub active: bool,
+pub struct OrderCursorModes {
+    pub attack_ground: bool,
+    pub attack_move: bool,
+    pub patrol: bool,
+    pub guard: bool,
+    pub move_order: bool,
+    pub set_target: bool,
 }
 
-/// Sticky patrol targeting mode: toggled on by pressing `P`,
-/// cleared by pressing `P` again, Escape, right-click, or issuing the
-/// click that commits the patrol target. While `active` the cursor is
-/// forced to [`CursorKind::Patrol`] and the next left-click is consumed
-/// by [`trigger_patrol_click`] as a patrol order for every selected unit.
-#[derive(Resource, Default)]
-pub struct PatrolCursorMode {
-    pub active: bool,
+impl OrderCursorModes {
+    pub fn any_active(&self) -> bool {
+        self.attack_ground
+            || self.attack_move
+            || self.patrol
+            || self.guard
+            || self.move_order
+            || self.set_target
+    }
+
+    /// Arm exactly one mode, clearing the others (they share the cursor).
+    fn arm(&mut self, mode: Mode) {
+        self.attack_ground = mode == Mode::AttackGround;
+        self.attack_move = mode == Mode::AttackMove;
+        self.patrol = mode == Mode::Patrol;
+        self.guard = mode == Mode::Guard;
+        self.move_order = mode == Mode::Move;
+        self.set_target = mode == Mode::SetTarget;
+    }
+}
+
+/// The sticky order-targeting modes, for [`OrderCursorModes::arm`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    AttackGround,
+    AttackMove,
+    Patrol,
+    Guard,
+    Move,
+    SetTarget,
 }
 
 /// `Ctrl+D` starts a 5 s self-destruct countdown on every selected
@@ -200,32 +257,38 @@ fn trigger_command_fire_on_hotkey(
     }
 }
 
-/// Toggle [`AttackGroundMode`]. `A` flips the flag; Escape and
-/// right-click hard-cancel. While active the cursor renders as
+/// Toggle [`OrderCursorModes::attack_ground`]. `A` flips the flag; Escape
+/// and right-click hard-cancel. While armed the cursor renders as
 /// [`CursorKind::Attack`] (see [`update_attack_ground_cursor`]) and the
 /// next left-click on the ground commits the order.
 fn toggle_attack_ground_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut mode: ResMut<AttackGroundMode>,
+    mut modes: ResMut<OrderCursorModes>,
 ) {
     // Ignore A while Ctrl is down so Ctrl+A (reserved for select-all
     // in future) doesn't toggle this mode.
     if !ctrl_held(&keys) && keys.just_pressed(KeyCode::KeyA) {
-        mode.active = !mode.active;
+        if modes.attack_ground {
+            modes.attack_ground = false;
+        } else {
+            modes.arm(Mode::AttackGround);
+        }
         return;
     }
-    if mode.active && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    if modes.attack_ground
+        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
     {
-        mode.active = false;
+        modes.attack_ground = false;
     }
 }
 
-/// Ground-target click: while [`AttackGroundMode`] is active, the next
-/// left-click issues an [`AttackGroundOrder`] for every selected unit.
-/// `attack_ground_system` moves the unit into weapon range if needed, then
-/// fires each reload cycle at the ground position. Shift queues a move to
-/// the same point first. Commits exit the mode (Shift stays in mode).
+/// Ground-target click: while [`OrderCursorModes::attack_ground`] is
+/// armed, the next left-click issues an [`AttackGroundOrder`] for every
+/// selected unit. `attack_ground_system` moves the unit into weapon range
+/// if needed, then fires each reload cycle at the ground position. Shift
+/// queues a move to the same point first. Commits exit the mode (Shift
+/// stays in mode).
 #[allow(clippy::too_many_arguments)]
 fn trigger_attack_ground_click(
     mouse: Res<ButtonInput<MouseButton>>,
@@ -235,10 +298,11 @@ fn trigger_attack_ground_click(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
     move_target_q: Query<(), With<MoveTarget>>,
-    mut mode: ResMut<AttackGroundMode>,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
 ) {
-    if !mode.active || !mouse.just_pressed(MouseButton::Left) {
+    if !modes.attack_ground || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
@@ -265,11 +329,14 @@ fn trigger_attack_ground_click(
                 .remove::<MoveTarget>()
                 .remove::<crate::interaction::movement::MovePath>()
                 .remove::<crate::interaction::movement::CommandQueue>()
+                .remove::<AttackTargetOrder>()
+                .remove::<GuardTarget>()
                 .insert(AttackGroundOrder { pos: target });
         }
     }
+    pending.markers.push((target, OrderMarker::Attack));
     if !shift {
-        mode.active = false;
+        modes.attack_ground = false;
     }
 }
 
@@ -278,54 +345,270 @@ fn trigger_attack_ground_click(
 /// resolver; returning a lower priority when inactive lets the context
 /// resolver regain control.
 fn update_attack_ground_cursor(
-    mode: Res<AttackGroundMode>,
+    modes: Res<OrderCursorModes>,
     mut request: ResMut<crate::interaction::cursor::CursorRequest>,
 ) {
-    if mode.active {
+    if modes.attack_ground {
         request.set(crate::interaction::cursor::CursorKind::Attack, 10);
     }
 }
 
-/// Toggle [`PatrolCursorMode`]. `P` flips the flag; Escape and
-/// right-click hard-cancel. While active the cursor renders as
-/// [`CursorKind::Patrol`] (see [`update_patrol_cursor`]) and the
-/// next left-click commits the patrol order.
+/// Toggle [`OrderCursorModes::patrol`]. `P` flips the flag; Escape and
+/// right-click hard-cancel. While armed the cursor renders as
+/// [`CursorKind::Patrol`] (see [`update_patrol_cursor`]) and the next
+/// left-click commits the patrol order.
 fn toggle_patrol_cursor_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
-    mut mode: ResMut<PatrolCursorMode>,
+    mut modes: ResMut<OrderCursorModes>,
 ) {
     if keys.just_pressed(KeyCode::KeyP) {
-        mode.active = !mode.active;
+        if modes.patrol {
+            modes.patrol = false;
+        } else {
+            modes.arm(Mode::Patrol);
+        }
         return;
     }
-    if mode.active && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    if modes.patrol
+        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
     {
-        mode.active = false;
+        modes.patrol = false;
     }
 }
 
-/// Click handler: while [`PatrolCursorMode`] is active, the next left-click
-/// issues a patrol order for every selected unit. The unit will patrol
-/// between its current location and the clicked location.
-#[allow(clippy::too_many_arguments)]
-fn trigger_patrol_click(
+/// Toggle [`OrderCursorModes::attack_move`] with `F` (Fight). Escape and
+/// right-click hard-cancel, mirroring the other order modes. At most one
+/// cursor mode stays armed at a time.
+fn toggle_attack_move_mode(
+    keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    mut modes: ResMut<OrderCursorModes>,
+) {
+    if keys.just_pressed(KeyCode::KeyF) {
+        if modes.attack_move {
+            modes.attack_move = false;
+        } else {
+            modes.arm(Mode::AttackMove);
+        }
+        return;
+    }
+    if modes.attack_move
+        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    {
+        modes.attack_move = false;
+    }
+}
+
+/// Toggle [`OrderCursorModes::guard`] with `G` (Guard). While armed the
+/// cursor renders as [`CursorKind::Defend`] and the next left-click on a
+/// friendly unit makes every selected unit guard it.
+fn toggle_guard_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut modes: ResMut<OrderCursorModes>,
+) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        if modes.guard {
+            modes.guard = false;
+        } else {
+            modes.arm(Mode::Guard);
+        }
+        return;
+    }
+    if modes.guard && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    {
+        modes.guard = false;
+    }
+}
+
+/// Toggle [`OrderCursorModes::move_order`] with `M` (Spring's `CMD_MOVE`):
+/// while armed the cursor renders as [`CursorKind::Move`] and the next
+/// left-click issues a plain move for the selection.
+fn toggle_move_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut modes: ResMut<OrderCursorModes>,
+) {
+    if keys.just_pressed(KeyCode::KeyM) {
+        if modes.move_order {
+            modes.move_order = false;
+        } else {
+            modes.arm(Mode::Move);
+        }
+        return;
+    }
+    if modes.move_order
+        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    {
+        modes.move_order = false;
+    }
+}
+
+/// Toggle [`OrderCursorModes::set_target`] with `T` (Spring's
+/// `CMD_SET_TARGET`): while armed the next left-click on a unit designates
+/// it as the selected units' manual target — preferred over auto-target
+/// in range, turret-tracked out of range, never chased.
+fn toggle_set_target_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut modes: ResMut<OrderCursorModes>,
+) {
+    if keys.just_pressed(KeyCode::KeyT) {
+        if modes.set_target {
+            modes.set_target = false;
+        } else {
+            modes.arm(Mode::SetTarget);
+        }
+        return;
+    }
+    if modes.set_target
+        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    {
+        modes.set_target = false;
+    }
+}
+
+/// `X` (Spring's `CMD_UNSET_TARGET`): drop the manual target designation
+/// from every selected unit.
+fn trigger_unset_target_on_hotkey(
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<Entity, With<Selected>>,
+    mut commands: Commands,
+) {
+    if !keys.just_pressed(KeyCode::KeyX) {
+        return;
+    }
+    for entity in &selected_q {
+        commands.entity(entity).remove::<ForcedTarget>();
+    }
+}
+
+/// Click handler for the move mode: the next left-click issues a plain
+/// move order. Shift queues it behind the active order and stays armed.
+#[allow(clippy::too_many_arguments)]
+fn trigger_move_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    transform_q: Query<&Transform>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
-    mut mode: ResMut<PatrolCursorMode>,
+    move_target_q: Query<(), With<MoveTarget>>,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
-    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+    unit_registry: Res<UnitRegistry>,
 ) {
-    if !mode.active || !mouse.just_pressed(MouseButton::Left) {
+    if !modes.move_order || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
         return;
     };
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    for (entity, unit) in &selected_q {
+        if unit_registry.speed(unit.0) <= 0.0 {
+            continue;
+        }
+        apply_ordered_command(
+            entity,
+            QueuedCommand::Move(target),
+            shift,
+            &move_target_q,
+            &mut commands,
+        );
+    }
+    pending.markers.push((target, OrderMarker::Move));
+    if !shift {
+        modes.move_order = false;
+    }
+}
+
+/// Click handler for the set-target mode: the next left-click on an enemy
+/// unit designates it as the selection's manual target. This is an aim
+/// designation only — current orders are left untouched. Shift stays armed.
+#[allow(clippy::too_many_arguments)]
+fn trigger_set_target_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId, &Faction), With<Selected>>,
+    unit_root_q: Query<Entity, With<UnitType>>,
+    parent_q: Query<&ChildOf>,
+    unit_info_q: Query<(&TeamId, &Faction)>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: MeshRayCast,
+    target_gtf_q: Query<&GlobalTransform>,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut commands: Commands,
+    unit_registry: Res<UnitRegistry>,
+) {
+    if !modes.set_target || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q)
+    else {
+        return;
+    };
+    // Manual fire must only ever designate hostiles — the forced-target
+    // combat path bypasses the auto-targeter's friend filters.
+    let Ok((t_team, t_faction)) = unit_info_q.get(target) else {
+        return;
+    };
+    let Some((sel_team, sel_faction)) = selected_q
+        .iter()
+        .next()
+        .map(|(_, _, team, faction)| (team.0, *faction))
+    else {
+        return;
+    };
+    if is_friendly(sel_team, sel_faction, t_team.0, *t_faction) {
+        return;
+    }
+    for (entity, unit, _, _) in &selected_q {
+        if unit_registry.weapon(unit.0).is_empty() {
+            continue;
+        }
+        commands.entity(entity).insert(ForcedTarget(target));
+    }
+    if let Ok(t_gtf) = target_gtf_q.get(target) {
+        pending.markers.push((t_gtf.translation(), OrderMarker::Target));
+    }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if !shift {
+        modes.set_target = false;
+    }
+}
+
+/// Click handler: while [`OrderCursorModes::patrol`] is armed, the next
+/// left-click issues a patrol order for every selected unit. The unit
+/// will patrol between its current location and the clicked location. Shift queues a
+/// follow-up patrol waypoint behind the unit's active order instead of
+/// replacing it (and stays armed for chain-patrolling).
+#[allow(clippy::too_many_arguments)]
+fn trigger_patrol_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    transform_q: Query<&Transform>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: MeshRayCast,
+    move_target_q: Query<(), With<MoveTarget>>,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut commands: Commands,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+) {
+    if !modes.patrol || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+        return;
+    };
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
     for (entity, unit) in &selected_q {
         let speed = unit_registry.speed(unit.0);
@@ -333,30 +616,202 @@ fn trigger_patrol_click(
             continue;
         }
 
-        // Get current position of the unit
+        if shift && move_target_q.contains(entity) {
+            // Shift-queue: walk to the clicked point once the current
+            // order finishes, then patrol back & forth from there.
+            apply_ordered_command(
+                entity,
+                QueuedCommand::Patrol(target),
+                true,
+                &move_target_q,
+                &mut commands,
+            );
+            continue;
+        }
+
+        // Immediate: cancel the current order, march to the target, then
+        // return to the starting position — `movement_system` re-queues
+        // the opposing waypoint on arrival so this shuttles indefinitely.
         let Ok(current_tf) = transform_q.get(entity) else {
             continue;
         };
         let current_pos = current_tf.translation;
-
-        // Issue a patrol command: move to target, then return to start, repeat
-        // For patrol, we queue two moves: target -> start
-        use super::movement::{CommandQueue, MoveTarget};
-
-        commands.entity(entity).insert(MoveTarget(target));
-        commands.entity(entity).insert(CommandQueue {
-            commands: vec![super::movement::QueuedCommand::Patrol(current_pos)],
-        });
+        let mut queue = CommandQueue::default();
+        queue.push(QueuedCommand::Patrol(current_pos));
+        commands
+            .entity(entity)
+            .remove::<MovePath>()
+            .remove::<AttackMoveActive>()
+            .remove::<AttackGroundOrder>()
+            .remove::<AttackTargetOrder>()
+            .remove::<GuardTarget>()
+            .insert(MoveTarget(target))
+            .insert(queue);
     }
-    mode.active = false;
+    pending.markers.push((target, OrderMarker::Patrol));
+    if !shift {
+        modes.patrol = false;
+    }
+}
+
+/// Click handler: while [`OrderCursorModes::attack_move`] is active, the
+/// next left-click issues an attack-move order (march to the point,
+/// engaging hostiles en route) for every selected mobile unit. Shift
+/// queues the march behind the active order and stays armed.
+#[allow(clippy::too_many_arguments)]
+fn trigger_attack_move_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: MeshRayCast,
+    move_target_q: Query<(), With<MoveTarget>>,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut commands: Commands,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+) {
+    if !modes.attack_move || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+        return;
+    };
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    for (entity, unit) in &selected_q {
+        let speed = unit_registry.speed(unit.0);
+        if speed <= 0.0 {
+            continue;
+        }
+        apply_ordered_command(
+            entity,
+            QueuedCommand::AttackMove(target),
+            shift,
+            &move_target_q,
+            &mut commands,
+        );
+    }
+    pending.markers.push((target, OrderMarker::Attack));
+    if !shift {
+        modes.attack_move = false;
+    }
+}
+
+/// Force the cursor to the Attack glyph while the attack-move mode is active.
+fn update_attack_move_cursor(
+    modes: Res<OrderCursorModes>,
+    mut request: ResMut<crate::interaction::cursor::CursorRequest>,
+) {
+    if modes.attack_move {
+        request.set(crate::interaction::cursor::CursorKind::Attack, 10);
+    }
+}
+
+/// Force the cursor to the Defend glyph while the guard mode is armed.
+fn update_guard_cursor(
+    modes: Res<OrderCursorModes>,
+    mut request: ResMut<crate::interaction::cursor::CursorRequest>,
+) {
+    if modes.guard {
+        request.set(crate::interaction::cursor::CursorKind::Defend, 10);
+    }
+}
+
+/// Force the cursor to the Move glyph while the move mode is armed.
+fn update_move_cursor(
+    modes: Res<OrderCursorModes>,
+    mut request: ResMut<crate::interaction::cursor::CursorRequest>,
+) {
+    if modes.move_order {
+        request.set(crate::interaction::cursor::CursorKind::Move, 10);
+    }
+}
+
+/// Force the cursor to the Attack glyph while the set-target mode is armed
+/// (Spring renders set-target with the attack crosshair too).
+fn update_set_target_cursor(
+    modes: Res<OrderCursorModes>,
+    mut request: ResMut<crate::interaction::cursor::CursorRequest>,
+) {
+    if modes.set_target {
+        request.set(crate::interaction::cursor::CursorKind::Attack, 10);
+    }
+}
+
+/// Click handler: while [`OrderCursorModes::guard`] is armed, the next
+/// left-click on a friendly unit makes every selected mobile unit guard
+/// it — trail it at close range while the auto-attack path defends it.
+/// Clicking an enemy or bare ground is ignored (the mode stays armed).
+#[allow(clippy::too_many_arguments)]
+fn trigger_guard_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId, &Faction), With<Selected>>,
+    unit_root_q: Query<Entity, With<UnitType>>,
+    parent_q: Query<&ChildOf>,
+    unit_info_q: Query<(&TeamId, &Faction)>,
+    target_gtf_q: Query<&GlobalTransform>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: MeshRayCast,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut commands: Commands,
+    unit_registry: Res<UnitRegistry>,
+) {
+    if !modes.guard || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q)
+    else {
+        return;
+    };
+    let Ok((t_team, t_faction)) = unit_info_q.get(target) else {
+        return;
+    };
+    // Guarding makes sense only on a friendly unit.
+    let Some((sel_team, sel_faction)) = selected_q
+        .iter()
+        .next()
+        .map(|(_, _, team, faction)| (team.0, *faction))
+    else {
+        return;
+    };
+    if !is_friendly(sel_team, sel_faction, t_team.0, *t_faction) {
+        return;
+    }
+
+    for (entity, unit, _, _) in &selected_q {
+        if unit_registry.speed(unit.0) <= 0.0 {
+            continue;
+        }
+        commands
+            .entity(entity)
+            .remove::<MoveTarget>()
+            .remove::<MovePath>()
+            .remove::<CommandQueue>()
+            .remove::<AttackGroundOrder>()
+            .remove::<AttackTargetOrder>()
+            .remove::<AttackMoveActive>()
+            .remove::<crate::units::lifecycle::construction::PendingBuild>()
+            .insert(GuardTarget(target));
+    }
+    if let Ok(t_gtf) = target_gtf_q.get(target) {
+        pending.markers.push((t_gtf.translation(), OrderMarker::Guard));
+    }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if !shift {
+        modes.guard = false;
+    }
 }
 
 /// Force the cursor to the Patrol glyph while the patrol mode is active.
 fn update_patrol_cursor(
-    mode: Res<PatrolCursorMode>,
+    modes: Res<OrderCursorModes>,
     mut request: ResMut<crate::interaction::cursor::CursorRequest>,
 ) {
-    if mode.active {
+    if modes.patrol {
         request.set(crate::interaction::cursor::CursorKind::Patrol, 10);
     }
 }

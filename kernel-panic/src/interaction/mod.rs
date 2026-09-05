@@ -14,8 +14,8 @@ pub use selection::Selected;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, movement_system,
-    orient_stationary_to_terrain, unit_separation_system,
+    CommandLineGizmos, draw_selected_command_lines, guard_follow_system, ground_clamp_system,
+    movement_system, orient_stationary_to_terrain, unit_separation_system,
 };
 use selection::SelectionPlugin;
 
@@ -29,6 +29,7 @@ impl Plugin for InteractionPlugin {
             .add_systems(
                 Update,
                 (
+                    guard_follow_system,
                     movement_system,
                     unit_separation_system.after(movement_system),
                     // Runs last so any Y drift introduced by the two

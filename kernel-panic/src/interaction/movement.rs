@@ -7,7 +7,10 @@ use spring_pathfinding::{NodeLayer, find_path, slope_from_rise_run};
 use super::selection::Selected;
 use crate::map_events::CircularFlow;
 use crate::terrain::heightmap::Heightmap;
-use crate::units::combat::{DeployState, Deployable, Dying};
+use crate::units::combat::{
+    AimTarget, AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, DeployState,
+    Deployable, Dying, ForcedTarget,
+};
 use crate::units::components::{UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -25,6 +28,23 @@ pub struct CommandLineGizmos;
 /// When present, the unit will move toward this world position.
 #[derive(Component)]
 pub struct MoveTarget(pub Vec3);
+
+/// Marks an active attack-move order. While it is present AND the unit
+/// has an `AimTarget` (an in-range hostile), movement halts so the unit
+/// stops and fights; it resumes marching when the threat clears.
+#[derive(Component)]
+pub struct AttackMoveActive;
+
+/// Player-issued order to guard (follow and protect) another unit.
+/// [`guard_follow_system`] trails the target at `GUARD_DISTANCE`; while
+/// close the guard holds position and the normal auto-attack path engages
+/// anything that comes into weapon range.
+#[derive(Component, Clone, Copy)]
+pub struct GuardTarget(pub Entity);
+
+/// How far behind the guarded unit a guard trails (elmos, beyond the
+/// target's own footprint).
+const GUARD_DISTANCE: f32 = 48.0;
 
 /// Per-unit slope tilt, smoothed across frames. Kept as a component rather
 /// than extracted from `Transform::rotation` each frame because tilt rotates
@@ -69,6 +89,11 @@ pub enum QueuedCommand {
     /// remains so AI / future keybinds can issue it.
     #[allow(dead_code)]
     Guard(Vec3),
+    /// Walk to `pos`, then attack the unit `target` (shift-chained
+    /// right-click attack). `pos` is the target's position at enqueue
+    /// time, used only for command-line drawing; the live chase targets
+    /// the unit itself via `AttackTargetOrder`.
+    AttackUnit { target: Entity, pos: Vec3 },
 }
 
 impl QueuedCommand {
@@ -78,6 +103,7 @@ impl QueuedCommand {
             | QueuedCommand::Patrol(p)
             | QueuedCommand::AttackMove(p)
             | QueuedCommand::Guard(p) => *p,
+            QueuedCommand::AttackUnit { pos, .. } => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
         }
     }
@@ -178,6 +204,8 @@ pub fn movement_system(
             Option<&mut SlopeTilt>,
             Option<&crate::units::combat::Stunned>,
             Option<&crate::units::mechanics::network_buffer::SpeedBoost>,
+            Option<&AttackMoveActive>,
+            Option<&AimTarget>,
         ),
         Without<Dying>,
     >,
@@ -197,7 +225,7 @@ pub fn movement_system(
     snapshot.extend(
         query
             .iter()
-            .map(|(e, _, stats, tf, target, _, _, _, _, _, _)| UnitSnapshot {
+            .map(|(e, _, stats, tf, target, _, _, _, _, _, _, _, _)| UnitSnapshot {
                 entity: e,
                 pos: tf.translation,
                 radius: stats.radius,
@@ -221,6 +249,8 @@ pub fn movement_system(
         mut slope_tilt,
         stunned,
         speed_boost,
+        attack_move_active,
+        aim_target,
     ) in &mut query
     {
         if stunned.is_some() {
@@ -248,6 +278,13 @@ pub fn movement_system(
         }
 
         let flying = stats.can_fly;
+
+        // Attack-move: hold position and fight while a hostile is in
+        // weapon range (an `AimTarget` is stamped by `combat_system`),
+        // then resume marching toward the destination once it clears.
+        if attack_move_active.is_some() && aim_target.is_some() {
+            continue;
+        }
 
         // If we have a MoveTarget but no MovePath, compute the path.
         // Flying units skip the nav grid entirely and take a straight XZ
@@ -296,16 +333,44 @@ pub fn movement_system(
                 }
             });
             match next {
-                Some(
-                    QueuedCommand::Move(pos)
-                    | QueuedCommand::Patrol(pos)
-                    | QueuedCommand::AttackMove(pos)
-                    | QueuedCommand::Guard(pos),
-                ) => {
+                Some(QueuedCommand::Move(pos) | QueuedCommand::Guard(pos)) => {
                     commands
                         .entity(entity)
                         .insert(MoveTarget(pos))
                         .remove::<crate::units::lifecycle::construction::PendingBuild>();
+                }
+                Some(QueuedCommand::Patrol(pos)) => {
+                    // Patrol shuttles between two points forever: the unit
+                    // just arrived at `pos`'s predecessor, so record where it
+                    // is now and re-queue that as the opposing waypoint.
+                    // Mirrors upstream CommandAI.cpp pushing `owner->pos` as
+                    // the first patrol point when none is queued.
+                    let origin = Vec3::new(transform.translation.x, 0.0, transform.translation.z);
+                    commands
+                        .entity(entity)
+                        .insert(MoveTarget(pos))
+                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
+                    if let Some(queue) = queue.as_mut() {
+                        queue.commands.push(QueuedCommand::Patrol(origin));
+                    }
+                }
+                Some(QueuedCommand::AttackMove(pos)) => {
+                    commands
+                        .entity(entity)
+                        .insert(MoveTarget(pos))
+                        .insert(AttackMoveActive)
+                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
+                }
+                Some(QueuedCommand::AttackUnit { target, .. }) => {
+                    // Explicit attack supersedes a manual (T) designation,
+                    // and the attack system owns movement from here — no
+                    // MoveTarget, so the finished leg can't re-route.
+                    commands
+                        .entity(entity)
+                        .remove::<crate::units::lifecycle::construction::PendingBuild>()
+                        .remove::<MoveTarget>()
+                        .remove::<crate::units::combat::ForcedTarget>()
+                        .insert(crate::units::combat::AttackTargetOrder { target });
                 }
                 Some(QueuedCommand::BuildAt { kind, site }) => {
                     commands
@@ -318,7 +383,8 @@ pub fn movement_system(
                     commands.entity(entity).remove::<CommandQueue>();
                     commands
                         .entity(entity)
-                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
+                        .remove::<crate::units::lifecycle::construction::PendingBuild>()
+                        .remove::<AttackMoveActive>();
                 }
             }
             continue;
@@ -477,6 +543,62 @@ pub fn movement_system(
             } else {
                 ground
             };
+        }
+    }
+}
+
+/// Guard orders: trail [`GuardTarget`] at `GUARD_DISTANCE` beyond the
+/// target's footprint. Farther than that, chase (repathing only when the
+/// current path endpoint lags the target, sharing [`CHASE_REPATH_DISTANCE`]
+/// with the attack-chase); inside it, settle and let the auto-attack path
+/// engage anything in range. When the target dies the guard stands down.
+pub fn guard_follow_system(
+    mut commands: Commands,
+    guards: Query<
+        (Entity, &GlobalTransform, &UnitStats, &GuardTarget),
+        Without<Dying>,
+    >,
+    targets: Query<(&GlobalTransform, &UnitStats), Without<Dying>>,
+    move_path_q: Query<&MovePath>,
+) {
+    for (entity, gtf, stats, guard) in &guards {
+        // Buildings have nobody to trail.
+        if stats.speed <= 0.0 {
+            continue;
+        }
+        let Ok((target_gtf, target_stats)) = targets.get(guard.0) else {
+            // Target gone: stand down and clear movement.
+            commands
+                .entity(entity)
+                .remove::<GuardTarget>()
+                .remove::<MoveTarget>()
+                .remove::<MovePath>();
+            continue;
+        };
+
+        let target_pos = target_gtf.translation();
+        let keep = target_stats.radius + GUARD_DISTANCE;
+        let dist = gtf.translation().distance(target_pos);
+
+        if dist > keep {
+            // Trail the target; repath when there's no path yet or the
+            // path endpoint lags the target's current position.
+            let stale = move_path_q.get(entity).map_or(true, |p| {
+                p.waypoints
+                    .last()
+                    .is_none_or(|w| w.distance(target_pos) > CHASE_REPATH_DISTANCE)
+            });
+            if stale {
+                commands
+                    .entity(entity)
+                    .insert(MoveTarget(target_pos))
+                    .remove::<MovePath>();
+            }
+        } else {
+            commands
+                .entity(entity)
+                .remove::<MoveTarget>()
+                .remove::<MovePath>();
         }
     }
 }
@@ -879,12 +1001,12 @@ fn sample_at_ground(x: f32, z: f32, heightmap: Option<&Heightmap>) -> Vec3 {
     Vec3::new(x, y + GIZMO_LIFT, z)
 }
 
-/// Draw the path each selected unit is walking (actual waypoint polyline,
-/// hugging the terrain) plus a disc marker at each pending destination —
-/// current `MoveTarget` and every `QueuedCommand`. The line follows the
-/// computed `MovePath` when one exists, falling back to unit→target when
-/// pathfinding hasn't run yet. Mimics Spring's green move-order overlay.
-#[allow(clippy::type_complexity)]
+/// Draw each selected unit's order overlay in Spring's per-command colors:
+/// the active path polyline plus a disc at the destination, follow-up queue
+/// segments, and — for unit-targeted orders — a line and ring on the
+/// attack / guard target themselves. Mimics Spring's command-overlay
+/// palette: move green, fight/attack red, patrol blue, guard white.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn draw_selected_command_lines(
     mut gizmos: Gizmos<CommandLineGizmos>,
     query: Query<
@@ -893,19 +1015,84 @@ pub fn draw_selected_command_lines(
             Option<&MoveTarget>,
             Option<&MovePath>,
             Option<&CommandQueue>,
+            Option<&AttackMoveActive>,
+            Option<&AttackGroundOrder>,
+            Option<&AttackTargetOrder>,
+            Option<&GuardTarget>,
+            Option<&ForcedTarget>,
         ),
         With<Selected>,
     >,
+    targets: Query<&GlobalTransform>,
     heightmap: Option<Res<Heightmap>>,
 ) {
     const MOVE_COLOR: Color = Color::srgb(0.2, 1.0, 0.3);
     const BUILD_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
     const PATROL_COLOR: Color = Color::srgb(0.4, 0.7, 1.0);
+    const FIGHT_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
+    const GUARD_COLOR: Color = Color::srgb(0.85, 0.95, 1.0);
+    const TARGET_COLOR: Color = Color::srgb(1.0, 0.65, 0.2);
     const DISC_RADIUS: f32 = 6.0;
 
     let hm = heightmap.as_deref();
 
-    for (transform, target, path, queue) in &query {
+    for (
+        transform,
+        target,
+        path,
+        queue,
+        attack_move,
+        attack_ground,
+        attack_target,
+        guard,
+        forced,
+    ) in &query
+    {
+        let unit_pt = sample_at_ground(
+            transform.translation.x,
+            transform.translation.z,
+            hm,
+        );
+
+        // Unit-targeted orders: line + ring on the target unit itself,
+        // drawn regardless of whether the unit is currently moving.
+        if let Some(atk) = attack_target
+            && let Ok(t_gtf) = targets.get(atk.target)
+        {
+            let tp = sample_at_ground(t_gtf.translation().x, t_gtf.translation().z, hm);
+            draw_dashed_polyline(&mut gizmos, &[unit_pt, tp], FIGHT_COLOR, hm);
+            gizmos.circle(
+                Isometry3d::new(tp, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
+                DISC_RADIUS,
+                FIGHT_COLOR,
+            );
+        }
+        if let Some(guard) = guard
+            && let Ok(t_gtf) = targets.get(guard.0)
+        {
+            let tp = sample_at_ground(t_gtf.translation().x, t_gtf.translation().z, hm);
+            draw_dashed_polyline(&mut gizmos, &[unit_pt, tp], GUARD_COLOR, hm);
+            gizmos.circle(
+                Isometry3d::new(tp, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
+                DISC_RADIUS,
+                GUARD_COLOR,
+            );
+        }
+
+        // Manual target designation (T): amber line + ring on the forced
+        // target, independent of any movement order.
+        if let Some(forced) = forced
+            && let Ok(t_gtf) = targets.get(forced.0)
+        {
+            let tp = sample_at_ground(t_gtf.translation().x, t_gtf.translation().z, hm);
+            draw_dashed_polyline(&mut gizmos, &[unit_pt, tp], TARGET_COLOR, hm);
+            gizmos.circle(
+                Isometry3d::new(tp, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
+                DISC_RADIUS,
+                TARGET_COLOR,
+            );
+        }
+
         let Some(current) = target else {
             continue;
         };
@@ -913,11 +1100,7 @@ pub fn draw_selected_command_lines(
         // Collect the sequence of polyline vertices: unit → remaining
         // waypoints. If no path exists yet (freshly-issued order), fall
         // back to unit → current target so the player sees something.
-        let mut points: Vec<Vec3> = vec![sample_at_ground(
-            transform.translation.x,
-            transform.translation.z,
-            hm,
-        )];
+        let mut points: Vec<Vec3> = vec![unit_pt];
         if let Some(path) = path
             && path.current < path.waypoints.len()
         {
@@ -928,14 +1111,32 @@ pub fn draw_selected_command_lines(
             points.push(sample_at_ground(current.0.x, current.0.z, hm));
         }
 
-        draw_dashed_polyline(&mut gizmos, &points, MOVE_COLOR, hm);
+        // Active-order line color: fight/attack red, patrol blue, guard
+        // white — detected from the order markers riding along with the
+        // plain `MoveTarget`.
+        let has_patrol_queued = queue.is_some_and(|q| {
+            q.commands
+                .iter()
+                .any(|c| matches!(c, QueuedCommand::Patrol(_)))
+        });
+        let active_color = if attack_move.is_some() || attack_ground.is_some() {
+            FIGHT_COLOR
+        } else if has_patrol_queued {
+            PATROL_COLOR
+        } else if guard.is_some() {
+            GUARD_COLOR
+        } else {
+            MOVE_COLOR
+        };
+
+        draw_dashed_polyline(&mut gizmos, &points, active_color, hm);
 
         // Ring at the final point of the active order.
         let end = *points.last().unwrap();
         gizmos.circle(
             Isometry3d::new(end, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
             DISC_RADIUS,
-            MOVE_COLOR,
+            active_color,
         );
 
         // Queued follow-ups: straight dashed segments between successive
@@ -949,8 +1150,9 @@ pub fn draw_selected_command_lines(
                     QueuedCommand::Move(_) => MOVE_COLOR,
                     QueuedCommand::BuildAt { .. } => BUILD_COLOR,
                     QueuedCommand::Patrol(_) => PATROL_COLOR,
-                    QueuedCommand::AttackMove(_) => MOVE_COLOR,
-                    QueuedCommand::Guard(_) => MOVE_COLOR,
+                    QueuedCommand::AttackMove(_) => FIGHT_COLOR,
+                    QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
+                    QueuedCommand::Guard(_) => GUARD_COLOR,
                 };
                 draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
                 gizmos.circle(
