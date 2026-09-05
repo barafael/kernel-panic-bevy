@@ -156,7 +156,22 @@ pub fn drive_aim_script(
         };
         let pitch_rad = direct_pitch + arc_pitch;
 
-        let dh = (heading_rad - aim.last_heading_rad).abs();
+        // Spring passes AimWeapon1 a heading *relative to the unit's
+        // body* (world heading minus body yaw) — that's why upstream
+        // scripts can `turn <turret> to y-axis h` and stay on target no
+        // matter which way the hull ended up facing. Pieces aim within
+        // the unit frame, so hand them the same relative heading and
+        // wrap to (-π, π] for the shortest slew.
+        let body_yaw = gtf.rotation().to_euler(EulerRot::YXZ).0;
+        let mut rel_heading = heading_rad - body_yaw;
+        while rel_heading > std::f32::consts::PI {
+            rel_heading -= std::f32::consts::TAU;
+        }
+        while rel_heading < -std::f32::consts::PI {
+            rel_heading += std::f32::consts::TAU;
+        }
+
+        let dh = (rel_heading - aim.last_heading_rad).abs();
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
         let retarget = dh > AIM_SCRIPT_RETARGET_THRESHOLD || dp > AIM_SCRIPT_RETARGET_THRESHOLD;
 
@@ -166,9 +181,9 @@ pub fn drive_aim_script(
             ..AnimCtx::minimal()
         };
         let UnitAnimator { rig, driver, .. } = &mut *animator;
-        aim.ready = driver.aim(rig, heading_rad, pitch_rad, ctx);
+        aim.ready = driver.aim(rig, rel_heading, pitch_rad, ctx);
         if retarget || !aim.ready {
-            aim.last_heading_rad = heading_rad;
+            aim.last_heading_rad = rel_heading;
             aim.last_pitch_rad = pitch_rad;
         }
     }

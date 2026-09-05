@@ -635,6 +635,7 @@ pub fn attack_ground_system(
             &GlobalTransform,
             &AttackGroundOrder,
             Option<&Deployable>,
+            Option<&AimScript>,
             Option<&WeaponBinding>,
         ),
         Without<Dying>,
@@ -645,13 +646,16 @@ pub fn attack_ground_system(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, weapon_binding) in &attackers {
+    for (entity, unit_type, gtf, order, deployable, aim_script, weapon_binding) in &attackers {
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
         // byte whose blades haven't fanned yet, bypassing upstream's
         // `AimWeapon1`-returns-0 contract.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
+            continue;
+        }
+        if aim_script.is_some_and(|a| !a.ready) {
             continue;
         }
         let (weapon_name, weapon_def) = match weapon_binding {
@@ -840,6 +844,7 @@ pub fn attack_target_system(
             &GlobalTransform,
             &AttackTargetOrder,
             Option<&Deployable>,
+            Option<&AimScript>,
             Option<&WeaponBinding>,
         ),
         Without<Dying>,
@@ -855,11 +860,15 @@ pub fn attack_target_system(
         gtf,
         order,
         deployable,
+        aim_script,
         weapon_binding,
     ) in &attackers
     {
         // Same deploy / opening gates as `attack_ground_system`.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
+            continue;
+        }
+        if aim_script.is_some_and(|a| !a.ready) {
             continue;
         }
 
