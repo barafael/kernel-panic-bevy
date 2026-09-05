@@ -325,6 +325,23 @@ fn pick_map(mut commands: Commands) {
             info!("CLI map argument: {}", setup.map);
         }
 
+        // Showcase override: `showcase:<System|Hacker|Network>` boots
+        // straight into that faction's showcase, bypassing the menu.
+        if let Some(faction) = cli_arg.as_ref().and_then(|arg| {
+            arg.strip_prefix("showcase:")
+                .map(|n| match n.to_ascii_lowercase().as_str() {
+                    "system" => Some(crate::units::components::Faction::System),
+                    "hacker" => Some(crate::units::components::Faction::Hacker),
+                    "network" => Some(crate::units::components::Faction::Network),
+                    _ => None,
+                })
+                .flatten()
+        }) {
+            setup = crate::game_setup::showcase_setup(faction);
+            auto_enter = true;
+            info!("CLI showcase argument: {:?}", faction);
+        }
+
         commands.insert_resource(MapCatalog(maps.clone()));
         commands.insert_resource(SelectedMap(
             maps.first().cloned().expect("maps is non-empty"),

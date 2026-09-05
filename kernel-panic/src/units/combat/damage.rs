@@ -10,7 +10,7 @@
 use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned, muzzle_world_pos};
-use crate::units::assets::animation::{CobAnimator, MuzzlePiece};
+use crate::units::assets::animation::{MuzzlePiece, UnitAnimator};
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -222,7 +222,7 @@ pub fn tick_burst_fire(
     time: Res<Time>,
     mut query: Query<(Entity, &UnitType, &mut BurstFire, &GlobalTransform), Without<Dying>>,
     muzzle_q: Query<&MuzzlePiece>,
-    animator_q: Query<&CobAnimator>,
+    animator_q: Query<&UnitAnimator>,
     piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,

@@ -17,7 +17,7 @@
 
 use bevy::prelude::*;
 
-use super::assets::animation::{CobAnimator, MuzzlePiece};
+use super::assets::animation::{MuzzlePiece, UnitAnimator};
 use super::components::{Faction, TeamId, UnitStats, UnitType};
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
@@ -37,7 +37,7 @@ pub use collision_volume::CollisionVolume;
 pub use aim::{
     AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, BYTE_CLOSE_DELAY, ByteOpen,
     DeployState, Deployable, OpeningDelay, aim_weapons_system, drive_aim_script, tick_byte_open,
-    tick_deploy_state, tick_opening_delay, update_aim_script,
+    tick_deploy_state, tick_opening_delay,
 };
 pub use damage::{
     BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage,
@@ -60,6 +60,28 @@ pub use lifecycle::{
 pub struct AttackGroundOrder {
     pub pos: Vec3,
 }
+
+/// Player-issued order to attack a specific unit (right-click on an enemy).
+///
+/// [`attack_target_system`] chases the target while it is out of weapon
+/// range, holds position once inside, and lets the normal auto-attack path
+/// in [`combat_system`] do the shooting. Cleared automatically when the
+/// target dies, and on Stop / any new explicit order.
+#[derive(Component, Clone, Copy)]
+pub struct AttackTargetOrder {
+    pub target: Entity,
+}
+
+/// Manual target designation (`T` set-target / `X` unset, Spring's
+/// `CMD_SET_TARGET` / `CMD_UNSET_TARGET`).
+///
+/// An *aim designation*, not a move order: the unit prefers the forced
+/// target over auto-acquisition once it is inside weapon range, and keeps
+/// its turret tracking it even while out of range (no fire, no chase).
+/// Persists across move orders; cleared by `X`, Stop, death of the target,
+/// or an explicit attack order.
+#[derive(Component, Clone, Copy)]
+pub struct ForcedTarget(pub Entity);
 
 /// Required clearance (elmos) between the LOS ray and the underlying
 /// terrain at every sample point — the ray passes iff `beam_y >=
@@ -119,7 +141,7 @@ pub struct TargetCachePick<'w, 's> {
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct PieceLookup<'w, 's> {
     pub muzzle: Query<'w, 's, &'static MuzzlePiece>,
-    pub animator: Query<'w, 's, &'static CobAnimator>,
+    pub animator: Query<'w, 's, &'static UnitAnimator>,
     pub piece_gtf: Query<'w, 's, &'static GlobalTransform, Without<UnitType>>,
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
     pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
@@ -178,12 +200,12 @@ pub(super) fn muzzle_world_pos(
     attacker: Entity,
     attacker_gtf: &GlobalTransform,
     muzzle_q: &Query<&MuzzlePiece>,
-    animator_q: &Query<&CobAnimator>,
+    animator_q: &Query<&UnitAnimator>,
     piece_gtf_q: &Query<&GlobalTransform, Without<UnitType>>,
 ) -> Vec3 {
     if let Ok(mp) = muzzle_q.get(attacker)
         && let Ok(animator) = animator_q.get(attacker)
-        && let Some(&piece_entity) = animator.piece_entities.get(mp.0)
+        && let Some(&piece_entity) = animator.rig.piece_entities.get(mp.0)
         && let Ok(piece_gtf) = piece_gtf_q.get(piece_entity)
     {
         piece_gtf.translation()
@@ -225,6 +247,7 @@ pub fn combat_system(
     mut pending_attacks: ResMut<PendingAttacks>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
+    forced_q: Query<&ForcedTarget>,
     heightmap: Option<Res<Heightmap>>,
     pieces: PieceLookup,
     target_pick: TargetCachePick,
@@ -310,17 +333,46 @@ pub fn combat_system(
         let targets_mines_only = unit_type.0.targets_mines_only();
 
         // Cached-target fast path mirrors Spring's `lastTargetRetry`.
-        let mut best: Option<(Entity, Vec3, f32)> = target_pick
-            .cache
-            .get(entity)
-            .ok()
-            .filter(|cache| cache.expires_at > now)
-            .and_then(|cache| {
-                let gtf = target_pick.alive.get(cache.target).ok()?;
-                let pos = gtf.translation();
-                let dist_sq = attacker_pos.distance_squared(pos);
-                (dist_sq <= range_sq).then_some((cache.target, pos, dist_sq))
-            });
+        let mut best: Option<(Entity, Vec3, f32)> = None;
+
+        // Manual target designation (T / set-target) overrides auto-
+        // acquisition: in range → fire at it; out of range → track it
+        // with the turret (no fire, no chase); dead → drop the mark.
+        if let Ok(forced) = forced_q.get(entity) {
+            match target_pick.alive.get(forced.0) {
+                Ok(t_gtf) => {
+                    let t_pos = t_gtf.translation();
+                    let dist_sq = attacker_pos.distance_squared(t_pos);
+                    if dist_sq <= range_sq {
+                        best = Some((forced.0, t_pos, dist_sq));
+                    } else {
+                        commands.entity(entity).insert(AimTarget {
+                            pos: t_pos,
+                            arc_height: weapon_def.map_or(0.0, |w| w.trajectory_height),
+                        });
+                        commands.entity(entity).remove::<TargetCache>();
+                        continue;
+                    }
+                }
+                Err(_) => {
+                    commands.entity(entity).remove::<ForcedTarget>();
+                }
+            }
+        }
+
+        if best.is_none() {
+            best = target_pick
+                .cache
+                .get(entity)
+                .ok()
+                .filter(|cache| cache.expires_at > now)
+                .and_then(|cache| {
+                    let gtf = target_pick.alive.get(cache.target).ok()?;
+                    let pos = gtf.translation();
+                    let dist_sq = attacker_pos.distance_squared(pos);
+                    (dist_sq <= range_sq).then_some((cache.target, pos, dist_sq))
+                });
+        }
 
         if best.is_none() {
             spatial.query_radius(attacker_pos, range, |candidate| {
@@ -447,7 +499,7 @@ pub fn combat_system(
         // through unchanged, so `piece_rotations[gunbase][0] == π/2 - p`.
         if let Ok(gb) = pieces.gunbase.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.piece_rotations.get(gb.0)
+            && let Some(rot) = animator.rig.piece_rotations.get(gb.0)
         {
             let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
             if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
@@ -470,7 +522,7 @@ pub fn combat_system(
         // arithmetic `aim_weapons_system` runs.
         if let Ok(ap) = pieces.aimer.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.piece_rotations.get(ap.0)
+            && let Some(rot) = animator.rig.piece_rotations.get(ap.0)
         {
             let body_yaw = attacker_gtf.rotation().to_euler(EulerRot::YXZ).0;
             let to_target_n = if horizontal_dist > 1e-3 {
@@ -694,7 +746,7 @@ pub fn attack_ground_system(
         let target_pitch = direct_pitch + arc_pitch;
         if let Ok(gb) = pieces.gunbase.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.piece_rotations.get(gb.0)
+            && let Some(rot) = animator.rig.piece_rotations.get(gb.0)
         {
             let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
             if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
@@ -703,8 +755,8 @@ pub fn attack_ground_system(
         }
         if let Ok(ap) = pieces.aimer.get(entity)
             && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.piece_rotations.get(ap.0)
-            && let Some(target_rot) = animator.target_rotations.get(ap.0)
+            && let Some(rot) = animator.rig.piece_rotations.get(ap.0)
+            && let Some(target_rot) = animator.rig.target_rotations.get(ap.0)
         {
             let dy_axis = (rot[1] - target_rot[1]).abs();
             let dx_axis = (rot[0] - target_rot[0]).abs();
@@ -775,6 +827,120 @@ pub fn attack_ground_system(
                 weapon: weapon_name.to_string(),
                 is_traveling,
             });
+        }
+    }
+}
+
+/// How far a chase path's final waypoint may lag the target's current
+/// position before the path is recomputed (elmos). Kept above the movement
+/// arrival threshold (~8) so a *stationary* target doesn't thrash the
+/// per-frame pathfinding budget with identical repaths.
+pub const CHASE_REPATH_DISTANCE: f32 = 24.0;
+
+/// Right-click attack order ([`AttackTargetOrder`]): chase `target` until
+/// inside weapon range, then hold and let [`combat_system`]'s auto-attack
+/// do the shooting.
+///
+/// While chasing, the path is only recomputed once the old path's endpoint
+/// lags the target by more than [`CHASE_REPATH_DISTANCE`] — repathing a
+/// moving chase every frame would starve the `PATHFIND_BUDGET_PER_FRAME`
+/// budget and freeze the rest of the army. Static units (buildings) drop
+/// the order when the target is unreachable.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn attack_target_system(
+    unit_registry: Res<UnitRegistry>,
+    weapon_registry: Res<WeaponRegistry>,
+    attackers: Query<
+        (
+            Entity,
+            &UnitType,
+            &UnitStats,
+            &GlobalTransform,
+            &AttackTargetOrder,
+            Option<&Deployable>,
+            Option<&OpeningDelay>,
+            Option<&WeaponBinding>,
+        ),
+        Without<Dying>,
+    >,
+    target_q: Query<&GlobalTransform, Without<Dying>>,
+    move_path_q: Query<&crate::interaction::movement::MovePath>,
+    mut commands: Commands,
+) {
+    for (
+        entity,
+        unit_type,
+        stats,
+        gtf,
+        order,
+        deployable,
+        opening_delay,
+        weapon_binding,
+    ) in &attackers
+    {
+        // Same deploy / opening gates as `attack_ground_system`.
+        if deployable.is_some_and(|d| d.state != DeployState::Open) {
+            continue;
+        }
+        if opening_delay.is_some_and(|d| d.remaining > 0.0) {
+            continue;
+        }
+
+        // Resolve weapon range exactly like `combat_system`.
+        let weapon_def = match weapon_binding {
+            Some(binding) => Some(weapon_registry.by_id(binding.0)),
+            None => {
+                let name = unit_registry.weapon(unit_type.0);
+                if name.is_empty() {
+                    None
+                } else {
+                    weapon_registry.get(name)
+                }
+            }
+        };
+        let range = weapon_def.map_or(0.0, |w| w.range);
+
+        let Ok(target_gtf) = target_q.get(order.target) else {
+            // Target died / despawned: stand down and clear movement.
+            commands
+                .entity(entity)
+                .remove::<AttackTargetOrder>()
+                .remove::<crate::interaction::movement::MoveTarget>()
+                .remove::<crate::interaction::movement::MovePath>();
+            continue;
+        };
+        let target_pos = target_gtf.translation();
+        let dist = gtf.translation().distance(target_pos);
+
+        if stats.speed <= 0.0 && dist > range {
+            // Immobile unit (armed building) can never close the gap —
+            // drop the order instead of churning MoveTarget insert/remove
+            // against `movement_system` every frame.
+            commands.entity(entity).remove::<AttackTargetOrder>();
+            continue;
+        }
+
+        if dist > range {
+            // Out of range: chase. Only repath when the current path's
+            // endpoint lags the target beyond `CHASE_REPATH_DISTANCE` —
+            // or when there is no path at all (fresh order / budget stall).
+            let stale = move_path_q.get(entity).map_or(true, |p| {
+                p.waypoints
+                    .last()
+                    .is_none_or(|w| w.distance(target_pos) > CHASE_REPATH_DISTANCE)
+            });
+            if stale {
+                commands
+                    .entity(entity)
+                    .insert(crate::interaction::movement::MoveTarget(target_pos))
+                    .remove::<crate::interaction::movement::MovePath>();
+            }
+        } else {
+            // In range: hold position and fire.
+            commands
+                .entity(entity)
+                .remove::<crate::interaction::movement::MoveTarget>()
+                .remove::<crate::interaction::movement::MovePath>();
         }
     }
 }

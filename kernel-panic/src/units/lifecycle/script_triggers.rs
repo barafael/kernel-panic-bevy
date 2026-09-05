@@ -1,34 +1,38 @@
-//! Bridges game events to COB animation script calls.
+//! Bridges game events to per-unit animation drivers.
 //!
-//! Detects state changes (started moving, stopped moving, started building,
-//! attacking) and fires the corresponding COB script functions.
+//! Detects state changes (started moving, stopped moving, started
+//! producing, fired a weapon) and drives the unit's animation driver —
+//! the Rust-native replacement for the old COB script entry points
+//! (`StartMoving`, `Activate`, `FireWeapon1`, ...).
 
 use bevy::prelude::*;
 
 use super::production::Producer;
 use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::units::assets::animation::CobAnimator;
+use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::combat::Dying;
 
-/// Marks a unit that fired `StartMoving` on its COB VM and has not yet
-/// fired `StopMoving`. Presence means "previously observed moving"; the
-/// trigger system toggles it against the live MoveTarget / MovePath state.
+/// Marks a unit that fired its start-moving animation and has not yet
+/// fired stop-moving. Presence means "previously observed moving"; the
+/// trigger system toggles it against the live MoveTarget / MovePath
+/// state.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct WasMoving;
 
-/// Marks a producer that fired `Activate` on its COB VM and has not yet
-/// fired `Deactivate`. Toggled by `trigger_production_scripts`.
+/// Marks a producer that fired its activate animation and has not yet
+/// fired deactivate. Toggled by `trigger_production_scripts`.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct WasActive;
 
-/// Detect movement start/stop and fire StartMoving/StopMoving COB scripts.
+/// Detect movement start/stop and drive the driver's
+/// `start_moving`/`stop_moving` hooks.
 #[allow(clippy::type_complexity)]
 pub fn trigger_movement_scripts(
     mut query: Query<(
         Entity,
-        &mut CobAnimator,
+        &mut UnitAnimator,
         Option<&MoveTarget>,
         Option<&MovePath>,
         Has<WasMoving>,
@@ -39,13 +43,13 @@ pub fn trigger_movement_scripts(
         let is_moving = move_target.is_some() || move_path.is_some();
         match (is_moving, was_moving) {
             (true, false) => {
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "StartMoving", &[]);
+                let UnitAnimator { rig, driver, .. } = &mut *animator;
+                driver.start_moving(rig, AnimCtx::minimal());
                 commands.entity(entity).insert(WasMoving);
             }
             (false, true) => {
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "StopMoving", &[]);
+                let UnitAnimator { rig, driver, .. } = &mut *animator;
+                driver.stop_moving(rig, AnimCtx::minimal());
                 commands.entity(entity).remove::<WasMoving>();
             }
             _ => {}
@@ -53,22 +57,23 @@ pub fn trigger_movement_scripts(
     }
 }
 
-/// Detect factory activation and fire Activate/Deactivate COB scripts.
+/// Detect factory activation and drive the driver's
+/// `activate`/`deactivate` hooks.
 pub fn trigger_production_scripts(
-    mut query: Query<(Entity, &mut CobAnimator, &Producer, Has<WasActive>)>,
+    mut query: Query<(Entity, &mut UnitAnimator, &Producer, Has<WasActive>)>,
     mut commands: Commands,
 ) {
     for (entity, mut animator, producer, was_active) in &mut query {
         let is_active = producer.current_production().is_some();
         match (is_active, was_active) {
             (true, false) => {
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "Activate", &[]);
+                let UnitAnimator { rig, driver, .. } = &mut *animator;
+                driver.activate(rig, AnimCtx::minimal());
                 commands.entity(entity).insert(WasActive);
             }
             (false, true) => {
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "Deactivate", &[]);
+                let UnitAnimator { rig, driver, .. } = &mut *animator;
+                driver.deactivate(rig, AnimCtx::minimal());
                 commands.entity(entity).remove::<WasActive>();
             }
             _ => {}
@@ -77,37 +82,31 @@ pub fn trigger_production_scripts(
 }
 
 /// Marker inserted by the combat system on the frame a unit fires.
-/// Used solely as the trigger for `FireWeapon1` — aim (heading /
-/// pitch / arc) is handled per-frame by [`drive_aim_script`], so this
-/// is a bare marker rather than carrying the target pose.
+/// Used solely as the trigger for the fire animation — aim (heading /
+/// pitch / arc) is handled per-frame by `drive_aim_script`, so this is a
+/// bare marker rather than carrying the target pose.
 ///
 /// [`drive_aim_script`]: crate::units::combat::drive_aim_script
 #[derive(Component, Default)]
 #[component(storage = "SparseSet")]
 pub struct JustFired;
 
-/// When a unit has JustFired, call FireWeapon1 on the COB VM.
+/// When a unit has JustFired, drive its fire animation (muzzle flash /
+/// recoil / barrel cycling).
 ///
-/// `AimWeapon1` is **no longer** triggered here — [`drive_aim_script`]
+/// `AimWeapon1` is **not** triggered here — [`drive_aim_script`]
 /// runs it per-frame from [`AimTarget`] + entity transform so the
-/// script's return value can gate firing *before* the shot. Calling
-/// it again here would spawn a second aim thread, `signal SIG_AIM`
-/// would kill the first one, and the [`AimScript`] ready flag would
-/// race to false on the frame of the shot that *just* satisfied it.
-///
-/// `FireWeapon1` still runs per shot — it's the recoil / muzzle-flash
-/// animation trigger and doesn't conflict with the aim path.
+/// aim-ready gate applies *before* the shot.
 ///
 /// [`drive_aim_script`]: crate::units::combat::drive_aim_script
 /// [`AimTarget`]: crate::units::combat::AimTarget
-/// [`AimScript`]: crate::units::combat::AimScript
 pub fn trigger_weapon_scripts(
-    mut query: Query<(Entity, &mut CobAnimator, &JustFired), Without<Dying>>,
+    mut query: Query<(Entity, &mut UnitAnimator, &JustFired), Without<Dying>>,
     mut commands: Commands,
 ) {
     for (entity, mut animator, _just_fired) in &mut query {
-        let cob = animator.cob.clone();
-        animator.vm.start_script(&cob, "FireWeapon1", &[]);
+        let UnitAnimator { rig, driver, .. } = &mut *animator;
+        driver.fire(rig, AnimCtx::minimal());
         commands.entity(entity).remove::<JustFired>();
     }
 }

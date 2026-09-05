@@ -174,7 +174,6 @@ pub fn tick_construction(
                 total: build_time,
                 rally_point: None,
                 style,
-                last_build_percent: -1,
             });
             if matches!(style, EmergeStyle::Fade) {
                 ctx.commands.entity(new_entity).insert(PendingFadeInstall);

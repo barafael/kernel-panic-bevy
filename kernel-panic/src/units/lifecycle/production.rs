@@ -6,7 +6,7 @@ use super::spawning::{
     EMERGE_DEPTH, EMERGE_LEAD_TIME, EmergeStyle, Emerging, FactoryPieces, FadeMaterials,
     SpawnContext, spawn_unit,
 };
-use crate::units::assets::animation::{CobAnimator, PieceIndex};
+use crate::units::assets::animation::{PieceIndex, UnitAnimator};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -134,12 +134,12 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
 /// available yet (e.g. the same frame the unit was spawned).
 fn piece_world_pos(
     piece_idx: Option<usize>,
-    animator: Option<&CobAnimator>,
+    animator: Option<&UnitAnimator>,
     piece_transforms: &Query<&GlobalTransform, With<PieceIndex>>,
 ) -> Option<Vec3> {
     let idx = piece_idx?;
     let animator = animator?;
-    let entity = *animator.piece_entities.get(idx)?;
+    let entity = *animator.rig.piece_entities.get(idx)?;
     piece_transforms.get(entity).ok().map(|gt| gt.translation())
 }
 
@@ -152,7 +152,7 @@ pub fn production_system(
         &TeamId,
         &GlobalTransform,
         Option<&FactoryPieces>,
-        Option<&CobAnimator>,
+        Option<&UnitAnimator>,
         Option<&crate::units::components::Homebase>,
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
@@ -315,7 +315,6 @@ pub fn production_system(
             total: emerge_duration,
             rally_point,
             style,
-            last_build_percent: -1,
         });
         // Fade-style emergence needs per-unit cloned materials so the
         // alpha ramp doesn't leak onto every other unit sharing the
@@ -346,7 +345,7 @@ pub struct PendingFadeInstall;
 pub fn animate_connection_hatch(
     mut query: Query<(
         &Producer,
-        &mut CobAnimator,
+        &mut UnitAnimator,
         &crate::units::assets::animation::HatchPiece,
     )>,
 ) {
@@ -355,7 +354,7 @@ pub fn animate_connection_hatch(
 
     for (producer, mut animator, hatch) in &mut query {
         let idx = hatch.0;
-        if idx >= animator.target_translations.len() {
+        if idx >= animator.rig.target_translations.len() {
             continue;
         }
         let target_y = if producer.current_production().is_some() {
@@ -363,8 +362,8 @@ pub fn animate_connection_hatch(
         } else {
             0.0
         };
-        animator.target_translations[idx][1] = target_y;
-        animator.move_speeds[idx][1] = HATCH_SPEED_ELMOS_PER_SEC;
+        animator.rig.target_translations[idx][1] = target_y;
+        animator.rig.move_speeds[idx][1] = HATCH_SPEED_ELMOS_PER_SEC;
     }
 }
 

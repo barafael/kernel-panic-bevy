@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
 use super::{AimTarget, IdleTimer, StunCharge};
 use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::units::assets::animation::CobAnimator;
+use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::WeaponRegistry;
@@ -201,7 +201,7 @@ pub fn death_system(
         ),
         (Without<Dying>, Changed<Health>),
     >,
-    mut animators: Query<&mut CobAnimator>,
+    mut animators: Query<&mut UnitAnimator>,
     mut virus_spawns: ResMut<VirusSpawnQueue>,
     mut damage_queue: ResMut<DamageQueue>,
     mut explosions: ResMut<PendingExplosions>,
@@ -211,10 +211,11 @@ pub fn death_system(
 ) {
     for (entity, unit, health, faction, gtf, infected) in &query {
         if health.current <= 0.0 {
-            // Start the COB Killed() callback if the unit has an animator.
+            // Drive the Killed() animation if the unit has an animator.
             if let Ok(mut animator) = animators.get_mut(entity) {
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "Killed", &[0, 0]);
+                let crate::units::assets::animation::UnitAnimator { rig, driver, .. } =
+                    &mut *animator;
+                driver.killed(rig, crate::units::assets::animation::AnimCtx::minimal());
             }
 
             // If the dying unit was infected, queue a Virus spawn for the
@@ -311,14 +312,14 @@ pub fn tick_self_destruct(
 /// timeout expires.
 pub fn cleanup_dying(
     time: Res<Time>,
-    mut query: Query<(Entity, &mut Dying, Option<&CobAnimator>)>,
+    mut query: Query<(Entity, &mut Dying, Option<&UnitAnimator>)>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
     for (entity, mut dying, animator) in &mut query {
         dying.timer -= dt;
 
-        let anim_done = animator.is_none_or(|a| !a.vm.has_active_threads());
+        let anim_done = animator.is_none_or(|a| !a.driver.busy());
         if anim_done || dying.timer <= 0.0 {
             commands.entity(entity).despawn();
         }

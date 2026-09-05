@@ -23,10 +23,6 @@ pub struct Emerging {
     pub rally_point: Option<Vec3>,
     /// How the model becomes visible during the rise window.
     pub style: EmergeStyle,
-    /// Last `BUILD_PERCENT_LEFT` value pushed into the unit's CobVm. The
-    /// publisher system pushes a new value only when the integer crosses
-    /// a new unit so the VM doesn't re-receive the same reading 60× /s.
-    pub last_build_percent: i32,
 }
 
 /// Per-faction emergence visual.

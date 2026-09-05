@@ -16,13 +16,11 @@
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
-use spring_cob::CobVm;
-
+use crate::units::assets::animation::{CobFileCache, PieceIndex, load_cob_cached};
 use spring_map::smd_parser::MapInfo;
 
 use super::production::default_production;
 use crate::terrain::heightmap::Heightmap;
-use crate::units::assets::animation::{CobAnimator, CobFileCache, PieceIndex, load_cob_cached};
 use crate::units::assets::meshes::{S3OModelCache, unit_material, unit_radius};
 use crate::units::combat::Deployable;
 use crate::units::components::{
@@ -417,15 +415,13 @@ pub fn spawn_unit(
             commands.entity(bevy_parent).add_child(piece_entity);
         }
 
-        // Attach CobAnimator with base offsets. The COB script references
-        // pieces by index into its own `piece_names` table, which is the
-        // declaration order in the .bos source — *not* the s3o depth-first
-        // flatten order. Build a lookup that lets us address pieces by COB
-        // index everywhere downstream by reordering `piece_entities` and
-        // `piece_offsets` to match the COB's order. Pieces named in the
-        // .bos that don't exist in the s3o stay as a stub entity at the
-        // unit root (zero offset) so animations targeting them are no-ops
-        // instead of indexing into the wrong piece.
+        // Attach the animation rig. The rig is keyed on the COB piece
+        // table (declaration order in the .bos source — *not* the s3o
+        // depth-first flatten order), so remap piece entities/offsets to
+        // COB order here. Pieces named in the .bos that don't exist in
+        // the s3o stay as a stub entity at the unit root (zero offset)
+        // so animations targeting them are no-ops instead of indexing
+        // into the wrong piece.
         if let Some(cob) = load_cob_cached(&kind.script(), cob_cache) {
             let cob_piece_count = cob.piece_names.len();
             let mut cob_entities = Vec::with_capacity(cob_piece_count);
@@ -437,7 +433,7 @@ pub fn spawn_unit(
                         cob_offsets.push(piece_offsets[s3o_idx]);
                     }
                     None => {
-                        // Stub entity so VM operations on this slot don't
+                        // Stub entity so animation ops on this slot don't
                         // accidentally hit a real piece.
                         let stub = commands
                             .spawn((Transform::default(), Visibility::default()))
@@ -449,15 +445,25 @@ pub fn spawn_unit(
                 }
             }
 
-            let mut vm = CobVm::new(&cob);
-            vm.start_script(&cob, "Create", &[]);
-
-            // Resolve cached piece components before moving `cob` into
-            // CobAnimator. MuzzlePiece::resolve owns the per-unit piece-
-            // name convention for weapon emit points; gunbase/body are
+            // Resolve cached piece components: muzzle names are per-kind
+            // (Byte/Flow cycle theirs at fire time); gunbase/body are
             // one-off lookups for the Pointer aim pivot and the
             // Connection hatch respectively.
-            let muzzle_idx = crate::units::assets::animation::MuzzlePiece::resolve(&cob);
+            let muzzle_idx = crate::units::assets::animation::muzzle_piece_names(kind)
+                .and_then(|names| {
+                    names.first().and_then(|n| {
+                        cob.piece_names
+                            .iter()
+                            .position(|p| p.eq_ignore_ascii_case(n))
+                    })
+                })
+                .or_else(|| {
+                    crate::units::assets::animation::MUZZLE_CANDIDATE_NAMES.iter().find_map(|n| {
+                        cob.piece_names
+                            .iter()
+                            .position(|p| p.eq_ignore_ascii_case(n))
+                    })
+                });
             let piece_index = |name: &str| -> Option<usize> {
                 cob.piece_names
                     .iter()
@@ -468,27 +474,36 @@ pub fn spawn_unit(
             let hatch_idx = piece_index("body");
             // Aim-before-fire gate is only meaningful for units whose
             // `.cob` actually declares `AimWeapon1`.
-            let has_aim_weapon = cob.function_id("AimWeapon1").is_some();
+            let has_aim_weapon =
+                crate::units::assets::animation::declares_aim_weapon(&cob);
 
-            // Pieces start at their authored S3O offsets.
             let piece_rotations = vec![[0.0; 3]; cob_piece_count];
             let target_rotations = vec![[0.0; 3]; cob_piece_count];
-            commands.entity(unit_entity).insert(CobAnimator {
-                vm,
-                cob,
-                piece_entities: cob_entities,
-                piece_base_offsets: cob_offsets,
-                piece_rotations,
-                piece_translations: vec![[0.0; 3]; cob_piece_count],
-                target_rotations,
-                turn_speeds: vec![[0.0; 3]; cob_piece_count],
-                target_translations: vec![[0.0; 3]; cob_piece_count],
-                move_speeds: vec![[0.0; 3]; cob_piece_count],
-                spin_speeds: vec![[0.0; 3]; cob_piece_count],
-            });
+            commands.entity(unit_entity).insert(
+                crate::units::assets::animation::UnitAnimator {
+                    created: false,
+                    driver: crate::units::assets::animation::driver_for(kind),
+                    rig: crate::units::assets::animation::AnimRig {
+                        piece_names: cob.piece_names.clone(),
+                        piece_entities: cob_entities,
+                        piece_base_offsets: cob_offsets,
+                        piece_rotations,
+                        piece_translations: vec![[0.0; 3]; cob_piece_count],
+                        target_rotations,
+                        turn_speeds: vec![[0.0; 3]; cob_piece_count],
+                        target_translations: vec![[0.0; 3]; cob_piece_count],
+                        move_speeds: vec![[0.0; 3]; cob_piece_count],
+                        spin_speeds: vec![[0.0; 3]; cob_piece_count],
+                        muzzle: muzzle_idx.unwrap_or(0),
+                        outbox: Vec::new(),
+                    },
+                },
+            );
 
-            if let Some(muzzle) = muzzle_idx {
-                commands.entity(unit_entity).insert(muzzle);
+            if let Some(idx) = muzzle_idx {
+                commands
+                    .entity(unit_entity)
+                    .insert(crate::units::assets::animation::MuzzlePiece(idx));
             }
             if let Some(idx) = gunbase_idx {
                 commands

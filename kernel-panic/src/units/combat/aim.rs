@@ -15,7 +15,7 @@ use bevy::prelude::*;
 
 use super::Dying;
 use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::units::assets::animation::CobAnimator;
+use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
 
 /// Deploy cycle for units that must unfold before firing (e.g. Pointer).
@@ -130,38 +130,34 @@ pub fn tick_byte_open(time: Res<Time>, q: Query<(Entity, &ByteOpen)>, mut comman
 
 /// Aim-before-fire gate. Inserted at spawn on every unit whose
 /// `.cob` declares `AimWeapon1`. `combat_system` blocks firing while
-/// `ready == false`; `drive_aim_script` keeps `thread_id` populated
-/// while a script is running, [`update_aim_script`] flips `ready`
-/// when the thread ends with `ret_code == 1`.
+/// `ready == false`; `drive_aim_script` flips `ready` from the unit's
+/// animation driver each frame.
 #[derive(Component, Clone, Copy, Debug, Default)]
 #[component(storage = "SparseSet")]
 pub struct AimScript {
-    pub thread_id: Option<u32>,
     pub ready: bool,
     pub last_heading_rad: f32,
     pub last_pitch_rad: f32,
 }
 
 /// Heading or pitch shift (radians) at which `drive_aim_script`
-/// abandons a still-running aim thread and re-spawns. ~11° — small
+/// abandons a still-running aim cycle and re-drives it. ~11° — small
 /// enough that a Packet dispatching behind a shooter forces a fresh
-/// cycle, large enough that drifting targets don't churn threads.
+/// cycle, large enough that drifting targets don't churn.
 pub const AIM_SCRIPT_RETARGET_THRESHOLD: f32 = 0.2;
 
-/// Spring's COB heading/pitch unit: 65536 == TAU radians. Inverse
-/// of [`SHORT_ANGLE_TO_RAD`](super::SHORT_ANGLE_TO_RAD).
-const RAD_TO_SHORT_ANGLE: f32 = 65536.0 / std::f32::consts::TAU;
-
-/// Advance every unit's `AimWeapon1` thread lifecycle. Spawn a
-/// thread if none is running, or re-spawn if the target shifted
-/// past [`AIM_SCRIPT_RETARGET_THRESHOLD`]. The thread itself ticks
-/// in `animation_system`; [`update_aim_script`] reads its ret_code.
+/// Advance every unit's aim cycle. Call the unit's animation driver
+/// each frame with the current heading/pitch (its `AimWeapon1`
+/// equivalent); the driver turns the relevant pieces and returns
+/// whether the weapon may commit, which becomes [`AimScript::ready`].
+/// Re-aims when the target shifts past
+/// [`AIM_SCRIPT_RETARGET_THRESHOLD`].
 #[allow(clippy::type_complexity)]
 pub fn drive_aim_script(
     mut query: Query<
         (
             &mut AimScript,
-            &mut CobAnimator,
+            &mut UnitAnimator,
             &GlobalTransform,
             &AimTarget,
         ),
@@ -174,9 +170,7 @@ pub fn drive_aim_script(
         let heading_rad = to_target.x.atan2(to_target.z);
         let horizontal_dist = (to_target.x * to_target.x + to_target.z * to_target.z).sqrt();
         // Spring's pitch convention is `asin(localY)` (`Weapon.cpp:418`),
-        // so positive pitch = target above horizon. Our previous
-        // `(-to_target.y).atan2(...)` had the opposite sign and broke
-        // the `(<90>-p)` arithmetic in pointer.bos.
+        // so positive pitch = target above horizon.
         let direct_pitch = to_target.y.atan2(horizontal_dist.max(1e-6));
         let arc_pitch = if target.arc_height > 0.0 && horizontal_dist > 1.0 {
             (4.0 * target.arc_height / horizontal_dist).atan()
@@ -185,41 +179,16 @@ pub fn drive_aim_script(
         };
         let pitch_rad = direct_pitch + arc_pitch;
 
-        if aim.thread_id.is_some() {
-            let dh = (heading_rad - aim.last_heading_rad).abs();
-            let dp = (pitch_rad - aim.last_pitch_rad).abs();
-            if dh <= AIM_SCRIPT_RETARGET_THRESHOLD && dp <= AIM_SCRIPT_RETARGET_THRESHOLD {
-                continue;
-            }
-            aim.thread_id = None;
-            aim.ready = false;
-        }
+        let dh = (heading_rad - aim.last_heading_rad).abs();
+        let dp = (pitch_rad - aim.last_pitch_rad).abs();
+        let retarget = dh > AIM_SCRIPT_RETARGET_THRESHOLD || dp > AIM_SCRIPT_RETARGET_THRESHOLD;
 
-        let heading = (heading_rad * RAD_TO_SHORT_ANGLE) as i32;
-        let pitch = (pitch_rad * RAD_TO_SHORT_ANGLE) as i32;
-
-        let cob = animator.cob.clone();
-        if let Some(tid) = animator
-            .vm
-            .start_script(&cob, "AimWeapon1", &[heading, pitch])
-        {
-            aim.thread_id = Some(tid);
+        let ctx = AnimCtx::minimal();
+        let UnitAnimator { rig, driver, .. } = &mut *animator;
+        aim.ready = driver.aim(rig, heading_rad, pitch_rad, ctx);
+        if retarget || !aim.ready {
             aim.last_heading_rad = heading_rad;
             aim.last_pitch_rad = pitch_rad;
-        }
-    }
-}
-
-/// Drain the just-ended aim thread's `ret_code` from each unit's
-/// VM and flip [`AimScript::ready`] accordingly. `ret_code == 1`
-/// means upstream's `AimWeapon1` returned with the barrel locked
-/// on; anything else clears `thread_id` so next frame re-spawns.
-pub fn update_aim_script(mut query: Query<(&mut AimScript, &mut CobAnimator)>) {
-    for (mut aim, mut animator) in &mut query {
-        let Some(tid) = aim.thread_id else { continue };
-        if let Some(ret_code) = animator.vm.take_thread_return_code(tid) {
-            aim.ready = ret_code == 1;
-            aim.thread_id = None;
         }
     }
 }
@@ -237,17 +206,18 @@ impl Deployable {
     }
 }
 
-/// Drive the deploy state machine from movement state, firing
-/// the unit's `Open()` / `Close()` COB scripts so the visible model
-/// matches the logical deploy state. Stopping schedules `Open`; starting
-/// to move schedules `Close`.
+/// Drive the deploy state machine from movement state. Stopping
+/// schedules `Open`; starting to move schedules `Close`. The visible
+/// open/close choreography is the animation driver's job — it watches
+/// the deploy state through its [`AnimCtx::deploy`] each frame.
+///
+/// [`AnimCtx::deploy`]: crate::units::assets::animation::AnimCtx::deploy
 #[allow(clippy::type_complexity)]
 pub fn tick_deploy_state(
     time: Res<Time>,
     mut query: Query<
         (
             &mut Deployable,
-            &mut CobAnimator,
             Option<&MoveTarget>,
             Option<&MovePath>,
         ),
@@ -255,14 +225,14 @@ pub fn tick_deploy_state(
     >,
 ) {
     let dt = time.delta_secs();
-    for (mut deployable, mut animator, move_target, move_path) in &mut query {
+    for (mut deployable, move_target, move_path) in &mut query {
         let is_moving = move_target.is_some() || move_path.is_some();
 
         // Steady-state fast path: if no transition is in flight and the
         // deploy state already matches the movement state, there is
-        // nothing to update. Skips the bulk of branch / animator-clone
-        // work in the common case (a Pointer parked on a hill, every
-        // frame, for the whole game).
+        // nothing to update. Skips the bulk of branch work in the
+        // common case (a Pointer parked on a hill, every frame, for the
+        // whole game).
         if deployable.timer == 0.0
             && matches!(
                 (deployable.state, is_moving),
@@ -287,14 +257,10 @@ pub fn tick_deploy_state(
             (DeployState::Open, true) | (DeployState::Opening, true) => {
                 deployable.state = DeployState::Closing;
                 deployable.timer = DEPLOY_DURATION;
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "Close", &[]);
             }
             (DeployState::Closed, false) | (DeployState::Closing, false) => {
                 deployable.state = DeployState::Opening;
                 deployable.timer = DEPLOY_DURATION;
-                let cob = animator.cob.clone();
-                animator.vm.start_script(&cob, "Open", &[]);
             }
             _ => {}
         }

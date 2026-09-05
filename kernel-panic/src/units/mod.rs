@@ -118,10 +118,10 @@ impl Plugin for UnitsPlugin {
                             combat::tick_opening_delay,
                             combat::tick_byte_open,
                             combat::tick_kamikaze,
-                            assets::animation::refresh_muzzle_pieces,
                             combat::drive_aim_script,
                             combat::combat_system,
                             combat::attack_ground_system,
+                            combat::attack_target_system,
                             combat::tick_burst_fire,
                             combat::aim_weapons_system,
                         )
@@ -157,12 +157,8 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Resolve),
                     (
-                        animation::publish_unit_values,
                         animation::animation_system,
-                        // Why: must run after animation_system so the
-                        // VM's `ended_threads` snapshot contains this
-                        // frame's AimWeapon1 returns.
-                        combat::update_aim_script,
+                        animation::sync_muzzle_pieces,
                         animation::decay_death_particles,
                         cloak::update_cloak_visibility,
                         cloak::update_fog_visibility,
