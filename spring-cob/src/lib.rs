@@ -9,6 +9,13 @@
 //! The VM is engine-agnostic: it emits [`vm::AnimCommand`]s that the game
 //! processes (turn pieces, play effects, etc.).
 //!
+//! **Retired**: the game no longer executes bytecode — its animations are
+//! hand-written per-unit Rust drivers (see the retirement note in the
+//! workspace `Cargo.toml`). This crate remains as a parser reference and
+//! host of the [`cobdump`](../examples/cobdump.rs) disassembler, the
+//! audit tool for verifying those drivers against the bytecode they
+//! translate (`cargo run --example cobdump -- <file.cob>`).
+//!
 //! # `COBSCALE` — the 65536 constant
 //!
 //! Every linear (`move [N]`, `get XY`) and angular (`turn <N>`, `spin`)

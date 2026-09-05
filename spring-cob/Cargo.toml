@@ -8,10 +8,15 @@ description = "Parser and virtual machine for Spring RTS engine COB animation sc
 binrw = "0.15.1"
 smallvec = "1.15.1"
 strum = { version = "0.28.0", features = ["derive"] }
-thiserror = { workspace = true }
+thiserror = "2"
 
 [dev-dependencies]
-proptest = { workspace = true }
+proptest = "1"
 
 [lib]
 doctest = false
+
+# Retired from the parent workspace (see the note in the root
+# Cargo.toml). This empty [workspace] section detaches the crate so it
+# can still be built standalone for the `cobdump` example below.
+[workspace]
