@@ -54,7 +54,9 @@ impl UnitAnim for PointerAnim {
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge loop: base sinks [-32]·pct/100 while building.
-        super::emerge_lift(rig, "base", 32.0, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "base", 32.0, ctx.build_percent);
+        }
 
         // React to deploy transitions (the host Deployable state machine
         // mirrors the script's Open/Close cycle).

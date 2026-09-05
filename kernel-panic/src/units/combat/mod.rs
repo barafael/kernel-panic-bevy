@@ -35,9 +35,8 @@ mod lifecycle;
 pub use collision_volume::CollisionVolume;
 
 pub use aim::{
-    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, BYTE_CLOSE_DELAY, ByteOpen,
-    DeployState, Deployable, OpeningDelay, aim_weapons_system, drive_aim_script, tick_byte_open,
-    tick_deploy_state, tick_opening_delay,
+    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, ByteOpen, DeployState,
+    Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state, tick_deploy_state,
 };
 pub use damage::{
     BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage,
@@ -228,7 +227,6 @@ pub fn combat_system(
             &TeamId,
             &GlobalTransform,
             Option<&Deployable>,
-            Option<&OpeningDelay>,
             Option<&AimScript>,
             Option<&WeaponBinding>,
         ),
@@ -276,7 +274,6 @@ pub fn combat_system(
         attacker_team,
         attacker_gtf,
         deployable,
-        opening_delay,
         aim_script,
         weapon_binding,
     ) in &attackers
@@ -284,7 +281,6 @@ pub fn combat_system(
         // Deployable: keep aiming through Opening so the gun is on
         // target when the state flips, but only fire while Open.
         let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
-        let fire_blocked_by_opening = opening_delay.is_some_and(|d| d.remaining > 0.0);
 
         // Resolve weapon stats via the cached binding when present.
         // Falling back to the registry name lookup for legacy paths
@@ -437,17 +433,7 @@ pub fn combat_system(
             arc_height,
         });
 
-        // Why: each in-range frame refreshes Byte's open window —
-        // upstream `byte.bos AimWeapon1` signals SIG_AIM and re-
-        // schedules Close(), which is what keeps the Byte open while
-        // engaging.
-        if unit_type.0 == crate::units::content::definitions::UnitKind::Byte {
-            commands.entity(entity).insert(ByteOpen {
-                open_until: now + BYTE_CLOSE_DELAY,
-            });
-        }
-
-        if fire_blocked_by_deploy || fire_blocked_by_opening {
+        if fire_blocked_by_deploy {
             continue;
         }
         // Why: upstream `AimWeapon1` contract — return 1 ⇒ allowed
@@ -649,7 +635,6 @@ pub fn attack_ground_system(
             &GlobalTransform,
             &AttackGroundOrder,
             Option<&Deployable>,
-            Option<&OpeningDelay>,
             Option<&WeaponBinding>,
         ),
         Without<Dying>,
@@ -660,16 +645,13 @@ pub fn attack_ground_system(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, opening_delay, weapon_binding) in &attackers {
+    for (entity, unit_type, gtf, order, deployable, weapon_binding) in &attackers {
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
         // byte whose blades haven't fanned yet, bypassing upstream's
         // `AimWeapon1`-returns-0 contract.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
-            continue;
-        }
-        if opening_delay.is_some_and(|d| d.remaining > 0.0) {
             continue;
         }
         let (weapon_name, weapon_def) = match weapon_binding {
@@ -858,7 +840,6 @@ pub fn attack_target_system(
             &GlobalTransform,
             &AttackTargetOrder,
             Option<&Deployable>,
-            Option<&OpeningDelay>,
             Option<&WeaponBinding>,
         ),
         Without<Dying>,
@@ -874,15 +855,11 @@ pub fn attack_target_system(
         gtf,
         order,
         deployable,
-        opening_delay,
         weapon_binding,
     ) in &attackers
     {
         // Same deploy / opening gates as `attack_ground_system`.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
-            continue;
-        }
-        if opening_delay.is_some_and(|d| d.remaining > 0.0) {
             continue;
         }
 

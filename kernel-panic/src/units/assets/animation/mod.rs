@@ -300,6 +300,11 @@ pub struct AnimCtx {
     pub deploy: Option<crate::units::combat::DeployState>,
     /// The unit currently has a live aim request (`AimTarget`).
     pub aim_active: bool,
+    /// The unit is still emerging (has an `Emerging` component). Drivers
+    /// must run their build-emerge pose only while this is set — past
+    /// emergence, the snap-to-rest would fight later choreography on
+    /// the same piece (e.g. the byte's base lift on unfold).
+    pub emerging: bool,
 }
 
 impl AnimCtx {
@@ -313,6 +318,7 @@ impl AnimCtx {
             producing: false,
             deploy: None,
             aim_active: false,
+            emerging: false,
         }
     }
 }
@@ -357,6 +363,14 @@ pub trait UnitAnim: Send + Sync + 'static {
     /// dying unit is despawned once this goes `false`.
     fn busy(&self) -> bool {
         false
+    }
+
+    /// For units with a fold cycle: `Some(true)` while fully unfolded,
+    /// `Some(false)` otherwise. `None` for units without one. Read by
+    /// host systems that mirror fold state (the byte's open-armor
+    /// damage discount).
+    fn is_open(&self) -> Option<bool> {
+        None
     }
 }
 
@@ -437,6 +451,7 @@ pub fn animation_system(
             producing: producer.is_some_and(|p| p.current_production().is_some()),
             deploy: deployable.map(|d| d.state),
             aim_active: aim_target.is_some(),
+            emerging: emerging.is_some(),
         };
 
         let UnitAnimator {

@@ -59,7 +59,9 @@ impl UnitAnim for TerminalAnim {
 
         // Create()'s emerge: `move body to y [-.75]·pct` — sink rises
         // with the build percentage directly.
-        super::emerge_lift(rig, "body", 0.75, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "body", 0.75, ctx.build_percent);
+        }
 
         self.sweep_timer -= ctx.dt;
         if self.sweep_timer <= 0.0 {

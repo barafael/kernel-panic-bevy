@@ -105,7 +105,9 @@ impl UnitAnim for ByteAnim {
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge loop: base sinks [-16]·pct/100 while building.
-        super::emerge_lift(rig, "base", 16.0, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "base", 16.0, ctx.build_percent);
+        }
 
         if ctx.aim_active {
             self.since_target = 0.0;
@@ -209,6 +211,10 @@ impl UnitAnim for ByteAnim {
             rig.hide(blade);
             rig.explode(blade, 4);
         }
+    }
+
+    fn is_open(&self) -> Option<bool> {
+        Some(self.state == FoldState::Open)
     }
 }
 

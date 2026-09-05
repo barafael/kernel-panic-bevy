@@ -16,7 +16,9 @@ impl UnitAnim for AssemblerAnim {
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create(): base sinks [-8]·pct/100 while building, then the
         // body ring starts spinning.
-        super::emerge_lift(rig, "base", 8.0, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "base", 8.0, ctx.build_percent);
+        }
         if !self.spinning && ctx.build_percent <= 0 {
             self.spinning = true;
             rig.spin_dps("body", Axis::Y, BODY_SPIN_DPS);

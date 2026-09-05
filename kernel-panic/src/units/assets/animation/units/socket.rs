@@ -38,7 +38,9 @@ impl UnitAnim for SocketAnim {
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge: body lifts with BUILD_PERCENT_LEFT.
-        super::emerge_lift(rig, "body", 16.0, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "body", 16.0, ctx.build_percent);
+        }
 
         // BuildLasers(): outer pair traces a square forever.
         self.sweep_timer -= ctx.dt;

@@ -28,7 +28,9 @@ impl UnitAnim for BadBlockAnim {
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge loop: base lifts with BUILD_PERCENT_LEFT.
-        super::emerge_lift(rig, "base", 8.0, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "base", 8.0, ctx.build_percent);
+        }
 
         // BuildLasers(): square sweep, forever.
         self.sweep_timer -= ctx.dt;

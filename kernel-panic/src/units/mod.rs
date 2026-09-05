@@ -114,8 +114,6 @@ impl Plugin for UnitsPlugin {
                         (
                             spatial::rebuild_spatial_index,
                             combat::tick_deploy_state,
-                            combat::tick_opening_delay,
-                            combat::tick_byte_open,
                             combat::tick_kamikaze,
                             combat::drive_aim_script,
                             combat::combat_system,
@@ -158,6 +156,7 @@ impl Plugin for UnitsPlugin {
                     (
                         animation::animation_system,
                         animation::sync_muzzle_pieces,
+                        combat::sync_byte_fold_state,
                         animation::decay_death_particles,
                         cloak::update_cloak_visibility,
                         cloak::update_fog_visibility,

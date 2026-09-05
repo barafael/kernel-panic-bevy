@@ -17,6 +17,7 @@ use super::Dying;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
+use crate::units::components::UnitType;
 
 /// Deploy cycle for units that must unfold before firing (e.g. Pointer).
 /// The COB script animates the legs/gun; this component gates combat so
@@ -66,64 +67,38 @@ pub const AIM_PITCH_TOLERANCE: f32 = 0.09;
 /// script timings (legs move over 0.5s, gun extends over another 1.0s).
 pub const DEPLOY_DURATION: f32 = 1.5;
 
-/// Host-side mirror of `byte.bos`'s `isOpen=0` state. Blocks firing
-/// until the spawn-time `Open()` animation completes; the COB VM
-/// doesn't surface script statics, so the gate lives in Bevy.
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct OpeningDelay {
-    pub remaining: f32,
-}
-
-/// Seconds before a recently-aimed Byte folds its blades back in.
-/// Mirrors the `sleep 3000` at the top of `byte.bos Close()`.
-pub const BYTE_CLOSE_DELAY: f32 = 3.0;
-
-/// Present iff a Byte is currently in its `isOpen=1` state. Read by
-/// the damage pipeline for the upstream 30 % closed-state damage
-/// reduction (`byte.bos HitByWeaponId`).
+/// Host-side mirror of the byte's fold state, read by the damage
+/// pipeline for the upstream 30 % closed-state damage reduction
+/// (`byte.bos HitByWeaponId`). Written by [`sync_byte_fold_state`]
+/// from the byte's animation driver — the single source of truth for
+/// whether the byte is currently unfolded.
 #[derive(Component, Clone, Copy, Debug)]
 #[component(storage = "SparseSet")]
-pub struct ByteOpen {
-    pub open_until: f32,
-}
+pub struct ByteOpen;
 
-/// Tick down [`OpeningDelay`] timers; on expiry, remove the marker
-/// and (for Byte) seed [`ByteOpen`] with the upstream
-/// [`BYTE_CLOSE_DELAY`] window.
-pub fn tick_opening_delay(
-    time: Res<Time>,
-    mut q: Query<(
-        Entity,
-        &mut OpeningDelay,
-        &crate::units::components::UnitType,
-    )>,
+/// Mirror the byte driver's fold state into the [`ByteOpen`] marker the
+/// damage pipeline reads. The driver is the single source of truth: the
+/// marker is present exactly while the fold state machine reports the
+/// byte fully unfolded, so a closed (or mid-fold) byte keeps its armor.
+pub fn sync_byte_fold_state(
+    mut query: Query<(Entity, &UnitType, &UnitAnimator)>,
+    open: Query<&ByteOpen>,
     mut commands: Commands,
 ) {
-    let dt = time.delta_secs();
-    let now = time.elapsed_secs();
-    for (entity, mut delay, unit_type) in &mut q {
-        delay.remaining -= dt;
-        if delay.remaining <= 0.0 {
-            commands.entity(entity).remove::<OpeningDelay>();
-            if unit_type.0 == crate::units::content::definitions::UnitKind::Byte {
-                commands.entity(entity).insert(ByteOpen {
-                    open_until: now + BYTE_CLOSE_DELAY,
-                });
-            }
+    for (entity, unit_type, animator) in &mut query {
+        if unit_type.0 != crate::units::content::definitions::UnitKind::Byte {
+            continue;
         }
-    }
-}
-
-/// Remove expired [`ByteOpen`] markers so the damage pipeline can
-/// switch the Byte back to its 30 % incoming-damage discount. Runs
-/// alongside `tick_opening_delay`; the per-aim refresh in
-/// `combat_system` is what keeps an actively-fighting Byte open.
-pub fn tick_byte_open(time: Res<Time>, q: Query<(Entity, &ByteOpen)>, mut commands: Commands) {
-    let now = time.elapsed_secs();
-    for (entity, state) in &q {
-        if state.open_until <= now {
-            commands.entity(entity).remove::<ByteOpen>();
+        let is_open = animator.driver.is_open();
+        let currently = open.get(entity).is_ok();
+        match is_open {
+            Some(true) if !currently => {
+                commands.entity(entity).insert(ByteOpen);
+            }
+            Some(false) | None if currently => {
+                commands.entity(entity).remove::<ByteOpen>();
+            }
+            _ => {}
         }
     }
 }

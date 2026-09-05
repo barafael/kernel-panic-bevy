@@ -15,7 +15,9 @@ impl UnitAnim for LogicBombAnim {
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge: mine rises from [-4]·pct/100.
-        super::emerge_lift(rig, "mine", 4.0, ctx.build_percent);
+        if ctx.emerging {
+            super::emerge_lift(rig, "mine", 4.0, ctx.build_percent);
+        }
     }
 
     fn aim(&mut self, _rig: &mut AnimRig, _h: f32, _p: f32, _ctx: AnimCtx) -> bool {
