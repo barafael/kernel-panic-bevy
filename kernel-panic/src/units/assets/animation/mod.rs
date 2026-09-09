@@ -26,6 +26,12 @@
 
 pub mod units;
 
+/// Kani model-checking harnesses proving equivalence with the retired
+/// bytecode-VM pipeline. Compiled only under `cargo kani` (`cfg(kani)`)
+/// — invisible to normal builds, tests and wasm.
+#[cfg(kani)]
+mod proofs;
+
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
