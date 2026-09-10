@@ -283,7 +283,7 @@ pub fn showcase_director(
     if d.primed
         && d.faction == Faction::Hacker
         && !d.bug_deployed
-        && let Some((bug_entity, ut, team, bug_gtf, move_target)) = bugs
+        && let Some((bug_entity, _ut, _team, bug_gtf, move_target)) = bugs
             .iter()
             .find(|(_, ut, team, _, _)| team.0 == 0 && ut.0 == UnitKind::Bug)
         && let Some(home_pos) = d.home_pos
