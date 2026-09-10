@@ -242,7 +242,15 @@ pub fn spawn_unit(
     // heightmap, half the model sinks below ground. Lift the spawn point
     // by however much the lowest vertex extends below piece-tree origin.
     let s3o_model = crate::units::assets::meshes::load_s3o_model(model_name, model_cache);
-    let ground_lift = s3o_model.as_ref().map(compute_ground_lift).unwrap_or(0.0);
+    let ground_lift = match kind {
+        // network_base.s3o (Network homebase) is authored as a flat pad
+        // hanging entirely below its origin (mover spans y −22..+2), so
+        // the "bottom rests on the heightmap" lift parked the whole pad
+        // 22 elmos in the air. Plant it at origin — Spring parity, where
+        // the pad reads as sitting flush on the terrain.
+        UnitKind::Carrier => 0.0,
+        _ => s3o_model.as_ref().map(compute_ground_lift).unwrap_or(0.0),
+    };
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
 
     let unit_entity = commands
