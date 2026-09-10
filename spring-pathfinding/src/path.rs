@@ -1,12 +1,21 @@
 /// A computed path: a list of world-space waypoints.
+///
+/// `reached_goal` is `false` when the destination itself is unreachable
+/// and the search converged on the closest reachable cell instead —
+/// hosts treat such an order as failed (upstream `pathingFailed`) and
+/// refuse it rather than having the unit park against the obstacle.
 #[derive(Debug, Clone)]
 pub struct Path {
     pub points: Vec<[f32; 2]>,
+    pub reached_goal: bool,
 }
 
 impl Path {
     pub fn empty() -> Self {
-        Self { points: Vec::new() }
+        Self {
+            points: Vec::new(),
+            reached_goal: false,
+        }
     }
 
     pub fn is_empty(&self) -> bool {

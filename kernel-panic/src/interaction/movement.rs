@@ -298,15 +298,15 @@ pub fn movement_system(
             && move_path.is_none()
         {
             // Outcome of this frame's pathing attempt for this unit:
-            // - `Some(waypoints)` → follow them.
-            // - `Some(empty)` → no route exists; refuse the order
-            //   (upstream `pathingFailed`) instead of straight-lining
-            //   through whatever is in the way.
+            // - `Route(waypoints)` → follow them.
+            // - `Unreachable` → the goal cannot be reached at all;
+            //   refuse the order (upstream `pathingFailed`) instead of
+            //   walking into the nearest wall and camping there.
             // - `None` → nothing decided this frame (no nav grid yet
             //   mid-load, or the per-frame search budget ran out);
             //   keep the order and retry next frame.
             let outcome = if flying {
-                Some(vec![Vec3::new(target.0.x, 0.0, target.0.z)])
+                Some(PathOutcome::Route(vec![Vec3::new(target.0.x, 0.0, target.0.z)]))
             } else if let Some(nav) = nav_set.as_deref() {
                 if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
                     pathfinds_used += 1;
@@ -318,16 +318,16 @@ pub fn movement_system(
                 None
             };
             match outcome {
-                Some(waypoints) if !waypoints.is_empty() => {
+                Some(PathOutcome::Route(waypoints)) if !waypoints.is_empty() => {
                     commands.entity(entity).insert(MovePath {
                         waypoints,
                         current: 0,
                     });
                 }
-                Some(_) => {
+                Some(PathOutcome::Unreachable) => {
                     commands.entity(entity).remove::<MoveTarget>();
                 }
-                None => {}
+                _ => {}
             }
         }
 
@@ -980,19 +980,25 @@ pub fn orient_stationary_to_terrain(
 /// Compute a path through the nav bucket matching the unit's `MaxSlope`,
 /// falling back to straight-line if no nav set is loaded or the unit kind
 /// is blocked-everywhere in its bucket.
-/// `Some(waypoints)` when a route exists (a partial path to the closest
-/// reachable point when the goal itself is unreachable — upstream's
-/// `pathingFailed` gathers units at the obstacle); `None` only when
-/// there is no nav grid yet or the unit cannot leave its current cell,
-/// in which case the caller drops the order instead of walking a
-/// straight line through whatever is in the way.
+/// Outcome of one pathing attempt.
+enum PathOutcome {
+    /// A route exists — follow these waypoints.
+    Route(Vec<Vec3>),
+    /// The goal is unreachable (upstream `pathingFailed`): refuse the
+    /// order instead of walking the unit into the nearest wall and
+    /// parking it there.
+    Unreachable,
+}
+
+/// `None` means nothing was decided this frame — no nav grid yet — and
+/// the caller should keep the order and retry.
 fn compute_path(
     nav_set: Option<&NavGridSet>,
     unit_registry: &UnitRegistry,
     kind: UnitKind,
     from: Vec3,
     to: Vec3,
-) -> Option<Vec<Vec3>> {
+) -> Option<PathOutcome> {
     let nav = nav_set?;
     if nav.buckets.is_empty() {
         return None;
@@ -1001,12 +1007,15 @@ fn compute_path(
     let idx = nav.bucket_for(cap);
     let speed_map = &nav.buckets[idx].speed_map;
     let path = find_path(speed_map, [from.x, from.z], [to.x, to.z])?;
-    Some(
+    if !path.reached_goal {
+        return Some(PathOutcome::Unreachable);
+    }
+    Some(PathOutcome::Route(
         path.points
             .iter()
             .map(|p| Vec3::new(p[0], 0.0, p[1]))
             .collect(),
-    )
+    ))
 }
 
 /// Dash-pattern segment lengths (long dash, gap, short dot, gap), in elmos.

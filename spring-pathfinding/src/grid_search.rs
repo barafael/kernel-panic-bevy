@@ -23,16 +23,17 @@ use std::collections::BinaryHeap;
 use crate::cost::{SpeedMap, SQUARE_SIZE};
 use crate::path::Path;
 
-/// Expansions before giving up. A 512×384 map has ~196k cells; this
-/// caps the worst case (destination on an unreachable island) at a
-/// fraction of a frame.
-const MAX_EXPANSIONS: u32 = 100_000;
-
 /// A* over `speed_map` from world-space `src` to `dst` (XZ).
 ///
 /// Returns the waypoint list in world coordinates (including both
-/// endpoints), or `None` when the source itself is impassable or the
-/// iteration cap was hit before reaching anywhere useful.
+/// endpoints), or `None` when the source itself is impassable. The
+/// search terminates naturally — a closed set bounds it by the cell
+/// count, so no expansion cap is needed (a fixed cap truncated long
+/// detours mid-search and made units camp against the wall they were
+/// trying to round).
+///
+/// `Path::reached_goal` is `false` when the goal cell is unreachable:
+/// the path then leads to the closest reachable cell.
 pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<Path> {
     let width = speed_map.width;
     let height = speed_map.height;
@@ -53,7 +54,10 @@ pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<P
 
     // Same cell: identical passability by construction, walk straight.
     if (sx, sz) == (dx, dz) {
-        return Some(Path { points: vec![src, dst] });
+        return Some(Path {
+            points: vec![src, dst],
+            reached_goal: true,
+        });
     }
 
     // Admissible octile heuristic scaled by the slowest possible travel:
@@ -84,17 +88,12 @@ pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<P
     let goal = cell_idx(dx, dz, width);
     let mut best = start;
     let mut best_h = heuristic(sx, sz);
-    let mut expansions = 0u32;
 
     while let Some(Open { cell, .. }) = open.pop() {
         if closed[cell] {
             continue; // stale heap entry
         }
         closed[cell] = true;
-        expansions += 1;
-        if expansions > MAX_EXPANSIONS {
-            break;
-        }
 
         if cell == goal {
             best = goal;
@@ -141,8 +140,10 @@ pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<P
         }
     }
     // Goal reachable → trace it; otherwise trace the closest reachable
-    // cell (upstream's partial-path behaviour).
-    let end = if closed[goal] { goal } else { best };
+    // cell and flag the order as failed so the host can refuse it
+    // (upstream `pathingFailed`) instead of parking units at the wall.
+    let reached_goal = closed[goal];
+    let end = if reached_goal { goal } else { best };
     if end == start {
         return None;
     }
@@ -178,7 +179,10 @@ pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<P
     }
 
     smooth(&mut points, speed_map);
-    Some(Path { points })
+    Some(Path {
+        points,
+        reached_goal,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -312,6 +316,7 @@ mod tests {
     fn open_terrain_is_nearly_straight() {
         let map = flat(32, 32);
         let path = find_path(&map, [20.0, 20.0], [240.0, 240.0]).expect("path");
+        assert!(path.reached_goal);
         assert!(path.len() <= 3, "LOS smoothing should collapse open-field runs, got {} waypoints", path.len());
         // Ends at the exact destination.
         let last = path.points.last().unwrap();
@@ -327,6 +332,7 @@ mod tests {
         let src = [40.0, 128.0];
         let dst = [240.0, 128.0];
         let path = find_path(&map, src, dst).expect("path around wall");
+        assert!(path.reached_goal, "wall is detourable — goal must be reached");
         assert!(path.total_length() > 200.0, "must detour around the wall");
         // No waypoint sits on a wall cell (column 16, rows 4..28).
         for p in &path.points {
@@ -356,6 +362,7 @@ mod tests {
         let src = [40.0, 40.0];
         let dst = [188.0, 188.0]; // inside the sealed box
         let path = find_path(&map, src, dst).expect("partial path");
+        assert!(!path.reached_goal, "sealed-box goal must not be reached");
         // Path ends adjacent to the wall, not inside the box, and not
         // at the source.
         let last = path.points.last().unwrap();

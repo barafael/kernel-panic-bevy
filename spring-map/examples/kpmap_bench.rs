@@ -92,10 +92,13 @@ fn main() {
                 cap,
                 slope_mod_from_max_slope(cap),
             );
-            let targets: [([f32; 2], &str); 3] = [
+            let targets: [([f32; 2], &str); 6] = [
                 ([224.0, 1374.0], "vent south"),
                 ([932.0, 1243.0], "vent far"),
                 ([4400.0, 300.0], "map far corner"),
+                ([4088.0, 3000.0], "corner B"),
+                ([200.0, 200.0], "corner C"),
+                ([4000.0, 500.0], "corner D"),
             ];
             for (dst, label) in targets {
                 let t = Instant::now();
@@ -106,11 +109,19 @@ fn main() {
                             let cz = (p[1] / 8.0) as u32;
                             speed_map.get(cx, cz) <= 0.0
                         });
+                        // Does the last waypoint sit ON the goal?
+                        let reached = path
+                            .points
+                            .last()
+                            .is_some_and(|p| {
+                                ((p[0] - dst[0]).powi(2) + (p[1] - dst[1]).powi(2)).sqrt() < 8.0
+                            });
                         println!(
-                            "    path {label:<16} {:>5} waypoints, {:>7.0} elmos, {:>5.1}ms, blocked-cell crossing: {}",
+                            "    path {label:<16} {:>5} waypoints, {:>7.0} elmos, {:>5.1}ms, reached goal: {}, crossings: {}",
                             path.len(),
                             path.total_length(),
                             t.elapsed().as_secs_f64() * 1000.0,
+                            if reached { "yes" } else { "NO (partial)" },
                             if crossings { "YES (BUG)" } else { "no" },
                         );
                         assert!(!crossings, "path crossed a blocked cell");
