@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc d5aceb8ddb8eafafc2ed4c7add94c1aac85a2707568f002eb0970d465dc46a69 # shrinks to map_size = 17, wall_x = 15
+cc 61ac559d0eddf8449fdd8b228351cc3f126bf0859371a62128bf8ce31bb45fe4 # shrinks to width = 8, height = 8, src_x = 226.53569, src_z = 378.6543, dst_x = 203.379, dst_z = 180.40872
+cc b930e4fc9cd459134886dfce665ba9281395d317ded96582de63d4fe20e1761e # shrinks to map_size = 32, wall_x = 10

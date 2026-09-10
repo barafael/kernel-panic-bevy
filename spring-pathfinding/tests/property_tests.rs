@@ -15,17 +15,13 @@ proptest! {
         dst_z in 0.0f32..500.0,
     ) {
         let speed_map = SpeedMap::uniform(width, height, 1.0);
-        let mut layer = NodeLayer::new(&speed_map);
 
         let max_world_x = (width as f32) * 8.0 - 1.0;
         let max_world_z = (height as f32) * 8.0 - 1.0;
         let src = [src_x.min(max_world_x), src_z.min(max_world_z)];
         let dst = [dst_x.min(max_world_x), dst_z.min(max_world_z)];
 
-        let path = find_path(&mut layer, src, dst);
-
-        // Should always find a path on a fully open map.
-        prop_assert!(!path.is_empty(), "should find path on open map");
+        let path = find_path(&speed_map, src, dst).expect("open map is always pathable");
 
         let straight = ((dst[0] - src[0]).powi(2) + (dst[1] - src[1]).powi(2)).sqrt();
         if straight > 1.0 {
@@ -39,9 +35,7 @@ proptest! {
         }
     }
 
-    /// A path around a blocked wall should be findable and longer than straight-line.
-    /// NOTE: waypoints may touch partially-blocked nodes at the coarse level —
-    /// this is inherent to hierarchical pathfinding and handled by local avoidance.
+    /// A path around a blocked wall should be findable and never cross the wall.
     #[test]
     fn path_around_wall_is_longer(
         map_size in 16u32..64,
@@ -55,18 +49,22 @@ proptest! {
             speed_map.speeds[(z * map_size + wall_x) as usize] = 0.0;
         }
 
-        let mut layer = NodeLayer::new(&speed_map);
-
         let src = [8.0, (map_size as f32 / 2.0) * 8.0];
         let dst = [(map_size as f32 - 2.0) * 8.0, (map_size as f32 / 2.0) * 8.0];
 
-        let path = find_path(&mut layer, src, dst);
+        let path = find_path(&speed_map, src, dst).expect("wall leaves gaps at the edges");
 
-        if !path.is_empty() {
-            let straight = ((dst[0] - src[0]).powi(2) + (dst[1] - src[1]).powi(2)).sqrt();
-            // Path should exist and be at least as long as straight-line.
-            prop_assert!(path.total_length() >= straight * 0.9,
-                "path should be at least ~straight-line distance");
+        let straight = ((dst[0] - src[0]).powi(2) + (dst[1] - src[1]).powi(2)).sqrt();
+        prop_assert!(path.total_length() >= straight * 0.9,
+            "path should be at least ~straight-line distance");
+
+        // No waypoint may sit on a wall cell (column wall_x, rows 2..size-2).
+        for p in &path.points {
+            let cx = (p[0] / 8.0) as u32;
+            let cz = (p[1] / 8.0) as u32;
+            if cx == wall_x && (2..map_size - 2).contains(&cz) {
+                prop_assert!(false, "waypoint inside the wall: {:?}", p);
+            }
         }
     }
 
@@ -88,39 +86,21 @@ proptest! {
         }
     }
 
-    /// Tessellation should produce at least one leaf node.
-    #[test]
-    fn tessellation_always_has_leaves(
-        width in 2u32..32,
-        height in 2u32..32,
-        speed in 0.0f32..1.0,
-    ) {
-        let speed_map = SpeedMap::uniform(width, height, speed);
-        let layer = NodeLayer::new(&speed_map);
-        prop_assert!(layer.leaf_count() >= 1);
-    }
-
-    /// Path endpoints should match source and destination.
+    /// On open terrain the path runs exactly source → destination.
     #[test]
     fn path_starts_at_src_ends_at_dst(
         size in 16u32..64,
     ) {
         let speed_map = SpeedMap::uniform(size, size, 1.0);
-        let mut layer = NodeLayer::new(&speed_map);
 
         let src = [16.0, 16.0];
         let dst = [(size as f32 - 3.0) * 8.0, (size as f32 - 3.0) * 8.0];
 
-        let path = find_path(&mut layer, src, dst);
-        prop_assert!(!path.is_empty());
-
+        let path = find_path(&speed_map, src, dst).expect("open map");
         let first = path.points.first().unwrap();
         let last = path.points.last().unwrap();
 
-        let src_dist = ((first[0] - src[0]).powi(2) + (first[1] - src[1]).powi(2)).sqrt();
-        let dst_dist = ((last[0] - dst[0]).powi(2) + (last[1] - dst[1]).powi(2)).sqrt();
-
-        prop_assert!(src_dist < 50.0, "path start too far from src: {}", src_dist);
-        prop_assert!(dst_dist < 50.0, "path end too far from dst: {}", dst_dist);
+        prop_assert!((first[0] - src[0]).abs() < 0.01 && (first[1] - src[1]).abs() < 0.01);
+        prop_assert!((last[0] - dst[0]).abs() < 0.01 && (last[1] - dst[1]).abs() < 0.01);
     }
 }

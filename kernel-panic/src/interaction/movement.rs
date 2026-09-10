@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use spring_pathfinding::{NodeLayer, find_path, slope_from_rise_run};
+use spring_pathfinding::{SpeedMap, find_path, slope_from_rise_run};
 
 use super::selection::Selected;
 use crate::map_events::CircularFlow;
@@ -127,7 +127,7 @@ impl CommandQueue {
 /// built for. Grids with smaller caps flag more cells as impassable.
 pub struct NavBucket {
     pub max_slope: f32,
-    pub layer: NodeLayer,
+    pub speed_map: SpeedMap,
 }
 
 /// A set of pathfinding grids, one per distinct `MaxSlope` in the unit
@@ -188,7 +188,7 @@ const PATHFIND_BUDGET_PER_FRAME: usize = 3;
 pub fn movement_system(
     mut commands: Commands,
     time: Res<Time>,
-    mut nav_set: Option<ResMut<NavGridSet>>,
+    nav_set: Option<Res<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
     circular_flow: Option<Res<CircularFlow>>,
     mut query: Query<
@@ -297,25 +297,37 @@ pub fn movement_system(
         if let Some(target) = move_target
             && move_path.is_none()
         {
-            let path = if flying {
+            // Outcome of this frame's pathing attempt for this unit:
+            // - `Some(waypoints)` → follow them.
+            // - `Some(empty)` → no route exists; refuse the order
+            //   (upstream `pathingFailed`) instead of straight-lining
+            //   through whatever is in the way.
+            // - `None` → nothing decided this frame (no nav grid yet
+            //   mid-load, or the per-frame search budget ran out);
+            //   keep the order and retry next frame.
+            let outcome = if flying {
                 Some(vec![Vec3::new(target.0.x, 0.0, target.0.z)])
-            } else if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
-                pathfinds_used += 1;
-                Some(compute_path(
-                    nav_set.as_deref_mut(),
-                    &unit_registry,
-                    unit_type.0,
-                    transform.translation,
-                    target.0,
-                ))
+            } else if let Some(nav) = nav_set.as_deref() {
+                if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
+                    pathfinds_used += 1;
+                    compute_path(Some(nav), &unit_registry, unit_type.0, transform.translation, target.0)
+                } else {
+                    None
+                }
             } else {
                 None
             };
-            if let Some(path) = path {
-                commands.entity(entity).insert(MovePath {
-                    waypoints: path,
-                    current: 0,
-                });
+            match outcome {
+                Some(waypoints) if !waypoints.is_empty() => {
+                    commands.entity(entity).insert(MovePath {
+                        waypoints,
+                        current: 0,
+                    });
+                }
+                Some(_) => {
+                    commands.entity(entity).remove::<MoveTarget>();
+                }
+                None => {}
             }
         }
 
@@ -968,33 +980,33 @@ pub fn orient_stationary_to_terrain(
 /// Compute a path through the nav bucket matching the unit's `MaxSlope`,
 /// falling back to straight-line if no nav set is loaded or the unit kind
 /// is blocked-everywhere in its bucket.
+/// `Some(waypoints)` when a route exists (a partial path to the closest
+/// reachable point when the goal itself is unreachable — upstream's
+/// `pathingFailed` gathers units at the obstacle); `None` only when
+/// there is no nav grid yet or the unit cannot leave its current cell,
+/// in which case the caller drops the order instead of walking a
+/// straight line through whatever is in the way.
 fn compute_path(
-    nav_set: Option<&mut NavGridSet>,
+    nav_set: Option<&NavGridSet>,
     unit_registry: &UnitRegistry,
     kind: UnitKind,
     from: Vec3,
     to: Vec3,
-) -> Vec<Vec3> {
-    if let Some(nav) = nav_set
-        && !nav.buckets.is_empty()
-    {
-        let cap = unit_registry.max_slope_ratio(kind);
-        let idx = nav.bucket_for(cap);
-        let layer = &mut nav.buckets[idx].layer;
-        let path = find_path(layer, [from.x, from.z], [to.x, to.z]);
-        if !path.is_empty() {
-            // Why: a partial path (unreachable destination) ends at
-            // the closest reachable node — same as upstream
-            // `GroundMoveType::CanSetNextWayPoint`'s `pathingFailed`.
-            return path
-                .points
-                .iter()
-                .map(|p| Vec3::new(p[0], 0.0, p[1]))
-                .collect();
-        }
+) -> Option<Vec<Vec3>> {
+    let nav = nav_set?;
+    if nav.buckets.is_empty() {
+        return None;
     }
-    // Fallback: no nav grid yet, or flying.
-    vec![to]
+    let cap = unit_registry.max_slope_ratio(kind);
+    let idx = nav.bucket_for(cap);
+    let speed_map = &nav.buckets[idx].speed_map;
+    let path = find_path(speed_map, [from.x, from.z], [to.x, to.z])?;
+    Some(
+        path.points
+            .iter()
+            .map(|p| Vec3::new(p[0], 0.0, p[1]))
+            .collect(),
+    )
 }
 
 /// Dash-pattern segment lengths (long dash, gap, short dot, gap), in elmos.
@@ -1232,10 +1244,9 @@ mod tests {
     fn bucket_with(cap: f32) -> NavBucket {
         // Tiny 2×2 speed map — we only care about the `max_slope` value
         // for selection tests, not the grid contents.
-        let layer = NodeLayer::new(&SpeedMap::uniform(2, 2, 1.0));
         NavBucket {
             max_slope: cap,
-            layer,
+            speed_map: SpeedMap::uniform(2, 2, 1.0),
         }
     }
 

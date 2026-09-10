@@ -649,7 +649,7 @@ fn spawn_map_world(
     // `compute_path` picks the tightest bucket whose cap ≥ the unit's.
     let t_nav = std::time::Instant::now();
     {
-        use spring_pathfinding::{NodeLayer, SpeedMap, slope_mod_from_max_slope};
+        use spring_pathfinding::{SpeedMap, slope_mod_from_max_slope};
         use std::collections::BTreeSet;
 
         use crate::units::content::definitions::ALL_UNIT_KINDS;
@@ -681,18 +681,23 @@ fn spawn_map_world(
                 cap,
                 slope_mod,
             );
-            let layer = NodeLayer::new(&speed_map);
+            let blocked = speed_map
+                .speeds
+                .iter()
+                .filter(|&&s| s <= 0.0)
+                .count();
             info!(
-                "  Nav bucket max_slope={:.3} (slope_mod={:.2}): {} leaf nodes from {}x{} speed map",
+                "  Nav bucket max_slope={:.3} (slope_mod={:.2}): {} blocked of {} cells ({}x{})",
                 cap,
                 slope_mod,
-                layer.leaf_count(),
+                blocked,
+                speed_map.speeds.len(),
                 speed_map.width,
                 speed_map.height,
             );
             nav_set.buckets.push(interaction::movement::NavBucket {
                 max_slope: cap,
-                layer,
+                speed_map,
             });
         }
         // Buckets already ascending because BTreeSet iteration is sorted.
