@@ -78,6 +78,48 @@ fn main() {
             100.0 * dfl9.len() as f64 / bytes.len() as f64,
         );
 
+        // Pathfinding probe on the real terrain: from the KP-default
+        // bucket's speed map, route the showcase homebase (224, 2848) to
+        // the datavent build sites the showcase director actually uses,
+        // and verify no path crosses a blocked cell.
+        if name == "Data_Cache_L1" {
+            use spring_pathfinding::{max_slope_from_degrees, slope_mod_from_max_slope};
+            let cap = max_slope_from_degrees(36.0);
+            let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
+                &map.parsed.heights,
+                map.parsed.header.heightmap_width() as u32,
+                map.parsed.header.heightmap_height() as u32,
+                cap,
+                slope_mod_from_max_slope(cap),
+            );
+            let targets: [([f32; 2], &str); 3] = [
+                ([224.0, 1374.0], "vent south"),
+                ([932.0, 1243.0], "vent far"),
+                ([4400.0, 300.0], "map far corner"),
+            ];
+            for (dst, label) in targets {
+                let t = Instant::now();
+                match spring_pathfinding::find_path(&speed_map, [224.0, 2848.0], dst) {
+                    Some(path) => {
+                        let crossings = path.points.iter().any(|p| {
+                            let cx = (p[0] / 8.0) as u32;
+                            let cz = (p[1] / 8.0) as u32;
+                            speed_map.get(cx, cz) <= 0.0
+                        });
+                        println!(
+                            "    path {label:<16} {:>5} waypoints, {:>7.0} elmos, {:>5.1}ms, blocked-cell crossing: {}",
+                            path.len(),
+                            path.total_length(),
+                            t.elapsed().as_secs_f64() * 1000.0,
+                            if crossings { "YES (BUG)" } else { "no" },
+                        );
+                        assert!(!crossings, "path crossed a blocked cell");
+                    }
+                    None => println!("    path {label:<16} NONE"),
+                }
+            }
+        }
+
         // ruzstd decode timing of a zstd-19 frame produced by the CLI.
         if let Some(out) = &raw_out {
             let zst = std::path::Path::new(out).join(format!("{name}.payload.zst"));
@@ -101,13 +143,19 @@ fn main() {
     }
 }
 
-/// Split a kpmap into its raw postcard payload; reports whether v1.
+/// Split a kpmap into its raw postcard payload (v1 raw, v2 deflate,
+/// v3 zstd).
 fn inflate_body(bytes: &[u8]) -> (Vec<u8>, bool) {
-    let magic_v1 = &bytes[..8] == b"kpmapv1\0";
+    let magic = &bytes[..8];
     let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let body = &bytes[12..12 + len];
-    if magic_v1 {
+    if magic == b"kpmapv1\0" {
         (body.to_vec(), true)
+    } else if magic == b"kpmapv3\0" {
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(body).unwrap();
+        let mut out = Vec::new();
+        decoder.read_to_end(&mut out).unwrap();
+        (out, false)
     } else {
         let mut decoder = flate2::read::DeflateDecoder::new(body);
         let mut out = Vec::new();

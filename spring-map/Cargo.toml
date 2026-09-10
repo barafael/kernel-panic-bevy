@@ -32,6 +32,9 @@ mlua = { version = "0.11", features = ["lua51", "vendored"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# kpmap_bench example: routes paths across real baked terrain to audit
+# the grid pathfinder against actual map cliffs.
+spring-pathfinding = { path = "../spring-pathfinding" }
 
 [lib]
 doctest = false
