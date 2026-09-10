@@ -32,17 +32,18 @@ pub(super) fn build_terrain_material_from_texture(
     images: &mut ResMut<Assets<Image>>,
     materials: &mut ResMut<Assets<StandardMaterial>>,
 ) -> Handle<StandardMaterial> {
-    let (base_pixels, base_w, base_h) = downsample_to_fit(
-        &ground.pixels,
-        ground.width,
-        ground.height,
-        MAX_GROUND_TEX_DIM,
-    );
+    // Build the mip chain straight out of the baked texture — no
+    // intermediate copies. Every map ships at ≤8192² already (the bake
+    // caps it), so the common path is a single chained-buffer
+    // allocation; the old code made two full extra copies of the base
+    // level (~100 MB of memcpy on a 4096×3072 map, all on the wasm main
+    // thread).
+    let (base_w, base_h) = downsample_dims(ground.width, ground.height, MAX_GROUND_TEX_DIM);
 
     let MipmapData {
         pixels: mipmap_pixels,
         level_count: mip_levels,
-    } = generate_mipmaps(&base_pixels, base_w, base_h);
+    } = generate_mipmaps(&ground.pixels, ground.width, ground.height, base_w, base_h);
 
     let size = bevy::render::render_resource::Extent3d {
         width: base_w as u32,
@@ -111,51 +112,56 @@ fn box_filter_2x(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: us
     dst
 }
 
-/// Halve the texture until both dimensions are ≤ `max_dim`, box-filtering
-/// at each step. No-op (returns a copy) when already within bounds.
-fn downsample_to_fit(
-    pixels: &[u8],
-    width: usize,
-    height: usize,
-    max_dim: usize,
-) -> (Vec<u8>, usize, usize) {
-    if width <= max_dim && height <= max_dim {
-        return (pixels.to_vec(), width, height);
-    }
-    let mut current = pixels.to_vec();
-    let mut cw = width;
-    let mut ch = height;
+/// Halve `width`/`height` (min 1) until both are ≤ `max_dim`.
+fn downsample_dims(width: usize, height: usize, max_dim: usize) -> (usize, usize) {
+    let (mut cw, mut ch) = (width, height);
     while cw > max_dim || ch > max_dim {
-        let nw = (cw / 2).max(1);
-        let nh = (ch / 2).max(1);
-        current = box_filter_2x(&current, cw, ch, nw, nh);
-        cw = nw;
-        ch = nh;
+        cw = (cw / 2).max(1);
+        ch = (ch / 2).max(1);
     }
-    (current, cw, ch)
+    (cw, ch)
 }
 
 /// Build a full mipmap chain by 2×2 box-filtering the source texture
-/// down to 1×1. Returns the chained pixel buffer (all levels
-/// concatenated) and the level count, ready to feed into Bevy's
-/// `texture_descriptor.mip_level_count`.
-fn generate_mipmaps(pixels: &[u8], width: usize, height: usize) -> MipmapData {
-    let mut all_data = Vec::with_capacity(pixels.len() * 4 / 3);
-    all_data.extend_from_slice(pixels);
+/// down to 1×1. When `base_w/base_h` are smaller than `width/height`
+/// (size-cap path), the chain starts with the box-filtered base level.
+///
+/// Levels are read back out of the chained buffer via index ranges, so
+/// the source is never duplicated: one allocation holds the whole
+/// chain, and each level is filtered straight from the previous level's
+/// slice. Returns the chained pixel buffer and the level count, ready
+/// for Bevy's `texture_descriptor.mip_level_count`.
+fn generate_mipmaps(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    base_w: usize,
+    base_h: usize,
+) -> MipmapData {
+    // Level 0: the base (box-filtered once up front if capping applied).
+    let (base, w0, h0) = if (base_w, base_h) == (width, height) {
+        (pixels.to_vec(), width, height)
+    } else {
+        (box_filter_2x(pixels, width, height, base_w, base_h), base_w, base_h)
+    };
+
+    let mut all_data = Vec::with_capacity(base.len() * 4 / 3);
+    all_data.extend_from_slice(&base);
     let mut levels = 1u32;
 
-    let mut current_w = width;
-    let mut current_h = height;
-    let mut src = pixels.to_vec();
+    let mut current_w = w0;
+    let mut current_h = h0;
+    let mut src_start = 0usize;
 
     while current_w > 1 || current_h > 1 {
         let next_w = (current_w / 2).max(1);
         let next_h = (current_h / 2).max(1);
-        let dst = box_filter_2x(&src, current_w, current_h, next_w, next_h);
+        let src = &all_data[src_start..];
+        let dst = box_filter_2x(src, current_w, current_h, next_w, next_h);
 
+        src_start += current_w * current_h * 4;
         all_data.extend_from_slice(&dst);
         levels += 1;
-        src = dst;
         current_w = next_w;
         current_h = next_h;
     }

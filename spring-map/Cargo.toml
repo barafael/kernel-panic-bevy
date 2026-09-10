@@ -12,6 +12,9 @@ zip = { workspace = true }
 # kpmap v2: deflate the postcard body (rust_backend/miniz_oxide is
 # wasm-safe).
 flate2 = "1"
+# kpmap v3: zstd frames. ruzstd is a pure-Rust decoder (wasm-safe); the
+# encoder side lives behind zstd on native bake targets only.
+ruzstd = "0.8"
 binrw = "0.15.1"
 serde = { workspace = true }
 postcard = { workspace = true }
@@ -22,6 +25,9 @@ image = { workspace = true }
 # reader is the only load path (plan §8.1).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 sevenz-rust = { workspace = true }
+# kpmap v3 encoder (bake runs native only). The reader side uses ruzstd,
+# which is pure Rust and wasm-safe.
+zstd = "0.13"
 mlua = { version = "0.11", features = ["lua51", "vendored"] }
 
 [dev-dependencies]

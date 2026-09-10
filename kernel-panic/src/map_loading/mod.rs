@@ -96,13 +96,18 @@ impl Plugin for MapLoadingPlugin {
             app.init_asset::<BytesAsset>()
                 .register_asset_loader(bytes_asset::BytesLoader)
                 .init_resource::<PendingWebMapLoad>()
+                .init_resource::<PrefetchedWebMaps>()
                 .add_systems(
                     OnEnter(crate::game_setup::AppState::InGame),
                     prepare_game_entry.in_set(GameWorldRebuild),
                 )
                 .add_systems(
                     Update,
-                    (prepare_game_entry.run_if(rerun_requested), web_map_arrival)
+                    (
+                        prepare_game_entry.run_if(rerun_requested),
+                        web_map_arrival,
+                        prefetch_selected_map,
+                    )
                         .chain()
                         .in_set(GameWorldRebuild)
                         .after(crate::ui::menu::boot_demo),
@@ -127,6 +132,49 @@ struct SelectedMap(PathBuf);
 #[cfg(target_arch = "wasm32")]
 #[derive(Resource, Default)]
 struct PendingWebMapLoad(Option<Handle<BytesAsset>>);
+
+/// Web: map paths already handed to the asset server (in flight or
+/// loaded), so the prefetcher doesn't re-request every frame.
+#[cfg(target_arch = "wasm32")]
+#[derive(Resource, Default)]
+struct PrefetchedWebMaps(std::collections::HashSet<String>);
+
+/// Resolve the setup's map name against the catalog the same way
+/// [`prepare_game_entry`] does: exact stem match, else the first entry.
+fn resolve_catalog_path(setup_map: &str, catalog: &[PathBuf]) -> Option<PathBuf> {
+    catalog
+        .iter()
+        .find(|p| {
+            p.file_stem()
+                .map(|s| s.to_string_lossy() == setup_map)
+                .unwrap_or(false)
+        })
+        .or_else(|| catalog.first())
+        .cloned()
+}
+
+/// Web: fetch the selected map's `.kpmap` while the player is still in
+/// the menu, so the bytes are already local when Play is clicked. The
+/// asset server dedupes loads of the same path, so `prepare_game_entry`
+/// re-requesting it later is free.
+#[cfg(target_arch = "wasm32")]
+fn prefetch_selected_map(
+    setup: Res<GameSetup>,
+    catalog: Res<MapCatalog>,
+    mut prefetched: ResMut<PrefetchedWebMaps>,
+    server: Res<AssetServer>,
+) {
+    let Some(path) = resolve_catalog_path(&setup.map, &catalog.0) else {
+        return;
+    };
+    let key = path.to_string_lossy().into_owned();
+    if prefetched.0.contains(&key) {
+        return;
+    }
+    prefetched.0.insert(key.clone());
+    server.load::<BytesAsset>(key);
+    info!("Prefetching {}", setup.map);
+}
 
 /// Marker for entities that survive game-world teardown (menu UI):
 /// the launch menu, Esc overlay, and game-over panel all carry it so
@@ -172,15 +220,7 @@ fn prepare_game_entry(world: &mut World) {
     // Resolve the setup's map name against the catalog.
     let setup = world.resource::<GameSetup>().clone();
     let catalog = world.resource::<MapCatalog>().0.clone();
-    let path = catalog
-        .iter()
-        .find(|p| {
-            p.file_stem()
-                .map(|s| s.to_string_lossy() == setup.map)
-                .unwrap_or(false)
-        })
-        .or_else(|| catalog.first())
-        .cloned();
+    let path = resolve_catalog_path(&setup.map, &catalog);
     match path {
         Some(p) => {
             info!("Preparing match on {} ({})", setup.map, p.display());
@@ -441,6 +481,7 @@ fn load_map(
 
     info!("Loading map: {map_name}");
 
+    let decode_start = std::time::Instant::now();
     let spring_map = match load_map_dispatch(map_path) {
         Ok(m) => m,
         Err(error) => {
@@ -448,6 +489,7 @@ fn load_map(
             return;
         }
     };
+    info!("  decoded in {:.0}ms", decode_start.elapsed().as_secs_f64() * 1000.0);
 
     spawn_map_world(
         spring_map,
@@ -497,6 +539,7 @@ fn web_map_arrival(
 
     let map_name = setup.map.clone();
     info!("Received {} ({} baked bytes)", map_name, asset.0.len());
+    let decode_start = std::time::Instant::now();
     let spring_map = match spring_map::baked::read_baked_map(&asset.0) {
         Ok(m) => m,
         Err(error) => {
@@ -505,6 +548,7 @@ fn web_map_arrival(
             return;
         }
     };
+    info!("  decoded in {:.0}ms", decode_start.elapsed().as_secs_f64() * 1000.0);
 
     spawn_map_world(
         spring_map,
@@ -545,6 +589,7 @@ fn spawn_map_world(
         parsed.features.len(),
     );
 
+    let t_texture = std::time::Instant::now();
     let terrain_material = match &spring_map.ground_texture {
         Some(ground) => {
             build_terrain_material_from_texture(ground, &mut ctx.images, &mut ctx.materials)
@@ -554,6 +599,7 @@ fn spawn_map_world(
             dark_fallback_material(&mut *ctx.materials)
         }
     };
+    let texture_ms = t_texture.elapsed().as_secs_f64() * 1000.0;
 
     setup_camera(parsed, camera_query, &mut **map_bounds);
 
@@ -571,6 +617,7 @@ fn spawn_map_world(
         );
     }
 
+    let t_terrain = std::time::Instant::now();
     let heightmap = Heightmap::from_parsed(parsed);
 
     spawn_terrain(
@@ -583,6 +630,7 @@ fn spawn_map_world(
         &mut ctx.images,
         geovent_assets,
     );
+    let terrain_ms = t_terrain.elapsed().as_secs_f64() * 1000.0;
 
     // HexFarm Lua-composited decorations: native-only (see module docs).
     #[cfg(not(target_arch = "wasm32"))]
@@ -599,6 +647,7 @@ fn spawn_map_world(
     // One pathfinding grid per distinct unit `MaxSlope`. Caps and
     // slope-mods are in Spring's encoding — see `cost.rs`.
     // `compute_path` picks the tightest bucket whose cap ≥ the unit's.
+    let t_nav = std::time::Instant::now();
     {
         use spring_pathfinding::{NodeLayer, SpeedMap, slope_mod_from_max_slope};
         use std::collections::BTreeSet;
@@ -647,8 +696,17 @@ fn spawn_map_world(
             });
         }
         // Buckets already ascending because BTreeSet iteration is sorted.
+        let bucket_count = nav_set.buckets.len();
         ctx.commands.insert_resource(nav_set);
+        info!(
+            "  built {bucket_count} nav buckets in {:.0}ms",
+            t_nav.elapsed().as_secs_f64() * 1000.0
+        );
     }
+
+    info!(
+        "  world built: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, nav (see above)"
+    );
 
     // Setup minimap from ground texture.
     {

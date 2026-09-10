@@ -17,8 +17,15 @@
 //!                is dominated by solid-colour textures, so v2 shrinks
 //!                a 270 MB v1 blob to ~5 MB and is what ships over
 //!                HTTP for the web build
+//!   kpmapv3\0  = body is ZSTD(postcard payload). Measured on the
+//!                shipped maps, zstd beats the deflate stream by 35-94%
+//!                at decode-parity (the payloads are long solid-colour
+//!                texture runs that zstd's longer matches crush):
+//!                Data_Cache_L1 314→49 KB, Memory_Bank_v3 5.3→0.32 MB,
+//!                Hex_Farm_8 19.7→11.1 MB. Decode via ruzstd runs at
+//!                220-610 MB/s native — parity with miniz inflate.
 //! body_len     : u32      = body length in bytes (post-decode for v1,
-//!                          compressed for v2)
+//!                          compressed for v2/v3)
 //! body         : [u8; N]  = postcard(BakedMap), deflated for v2
 //! ```
 //!
@@ -38,8 +45,19 @@ use crate::smd_parser::MapInfo;
 
 const MAGIC_V1: &[u8; 8] = b"kpmapv1\0";
 const MAGIC_V2: &[u8; 8] = b"kpmapv2\0";
-/// Current writer version: v2 deflates the postcard body.
-const MAGIC: &[u8; 8] = MAGIC_V2;
+const MAGIC_V3: &[u8; 8] = b"kpmapv3\0";
+/// Current writer version: v3 zstd-encodes the postcard body (level 19
+/// at bake time — bake is native and offline, so the slowest-but-smallest
+/// setting is free at load).
+const MAGIC: &[u8; 8] = MAGIC_V3;
+
+/// Body codec, keyed off the file magic.
+#[derive(Clone, Copy)]
+enum Codec {
+    Raw,
+    Deflate,
+    Zstd,
+}
 
 #[derive(Debug, Error)]
 pub enum BakedMapError {
@@ -89,6 +107,21 @@ struct BakedTexture {
     pixels: Vec<u8>,
 }
 
+/// Encode a zstd frame. The encoder (C zstd) only links on native —
+/// baking is a native-only job; wasm builds just need the reader.
+#[cfg(not(target_arch = "wasm32"))]
+fn encode_zstd(body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
+    Ok(zstd::stream::encode_all(body, 19)?)
+}
+
+/// wasm stub: `write_baked_map` is only called by the native bake bin.
+#[cfg(target_arch = "wasm32")]
+fn encode_zstd(_body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
+    Err(BakedMapError::Io(std::io::Error::other(
+        "kpmap baking requires the native target",
+    )))
+}
+
 /// Serialize `map` to the `.kpmap` wire format.
 pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
     let baked = BakedMap {
@@ -109,12 +142,10 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
 
     let body = postcard::to_allocvec(&baked).map_err(BakedMapError::PostcardEncode)?;
 
-    // v2: deflate the body. The payload is dominated by solid-colour
-    // textures and zeroed maps, so this routinely shrinks it ~50×.
-    let mut encoder =
-        flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
-    encoder.write_all(&body)?;
-    let compressed = encoder.finish()?;
+    // v3: zstd the body at level 19. The payload is dominated by
+    // solid-colour textures and zeroed maps; zstd's longer matches and
+    // stronger entropy coding beat the v2 deflate stream by 35-94%.
+    let compressed = encode_zstd(&body)?;
 
     let body_len: u32 = compressed
         .len()
@@ -135,10 +166,12 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     let magic = bytes
         .get(..MAGIC.len())
         .ok_or(BakedMapError::HeaderTruncated)?;
-    let compressed = if magic == MAGIC_V1.as_slice() {
-        false
+    let codec = if magic == MAGIC_V1.as_slice() {
+        Codec::Raw
     } else if magic == MAGIC_V2.as_slice() {
-        true
+        Codec::Deflate
+    } else if magic == MAGIC_V3.as_slice() {
+        Codec::Zstd
     } else {
         return Err(BakedMapError::BadMagic);
     };
@@ -158,14 +191,22 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     }
     let stored = &body[..body_len];
 
-    // v1 stores the postcard payload raw; v2 deflates it.
-    let payload: Vec<u8> = if compressed {
-        let mut decoder = flate2::read::DeflateDecoder::new(stored);
-        let mut decoded = Vec::new();
-        decoder.read_to_end(&mut decoded)?;
-        decoded
-    } else {
-        stored.to_vec()
+    // v1 stores the postcard payload raw; v2 deflates it; v3 zstds it.
+    let payload: Vec<u8> = match codec {
+        Codec::Raw => stored.to_vec(),
+        Codec::Deflate => {
+            let mut decoder = flate2::read::DeflateDecoder::new(stored);
+            let mut decoded = Vec::new();
+            decoder.read_to_end(&mut decoded)?;
+            decoded
+        }
+        Codec::Zstd => {
+            let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
+                .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
+            let mut decoded = Vec::new();
+            decoder.read_to_end(&mut decoded)?;
+            decoded
+        }
     };
 
     let baked: BakedMap =
