@@ -148,6 +148,7 @@ pub fn production_system(
     time: Res<Time>,
     mut producers: Query<(
         &mut Producer,
+        &UnitType,
         &Faction,
         &TeamId,
         &GlobalTransform,
@@ -179,7 +180,7 @@ pub fn production_system(
     let dt = time.delta_secs();
     spawns.clear();
 
-    for (mut producer, faction, team, global_tf, factory_pieces, animator, homebase) in
+    for (mut producer, factory_type, faction, team, global_tf, factory_pieces, animator, homebase) in
         &mut producers
     {
         let Some(build_time) = producer.current_build_time(&ctx.unit_registry) else {
@@ -262,12 +263,26 @@ pub fn production_system(
                 const SLOTS_PER_ROW: u32 = 7;
                 const LATERAL_STEP: f32 = 20.0;
                 const ROW_STEP: f32 = 40.0;
-                const ROW0_DISTANCE: f32 = 60.0;
+                // The first row must land beyond the factory's visual
+                // silhouette, not just its gameplay footprint: the
+                // Kernel's model is 128 elmos wide while its footprint
+                // radius is only 32, so a fixed 60-elmo rally left
+                // freshly-built units standing "inside" the base.
+                let factory_radius =
+                    crate::units::assets::meshes::unit_radius(
+                        factory_type.0,
+                        &mut *ctx.model_cache,
+                        &ctx.unit_registry,
+                    );
+                let unit_radius = ctx.unit_registry.collision_radius(kind);
+                const EXIT_MARGIN: f32 = 24.0;
+                let row0_distance =
+                    (factory_radius + unit_radius + EXIT_MARGIN).max(60.0);
                 let n = producer.spawn_count;
                 let slot = (n % SLOTS_PER_ROW) as f32 - (SLOTS_PER_ROW as f32 - 1.0) * 0.5;
                 let ring = (n / SLOTS_PER_ROW) as f32;
                 let offset =
-                    forward * (ROW0_DISTANCE + ring * ROW_STEP) + right * (slot * LATERAL_STEP);
+                    forward * (row0_distance + ring * ROW_STEP) + right * (slot * LATERAL_STEP);
                 Some(pad_pos + offset)
             } else {
                 None

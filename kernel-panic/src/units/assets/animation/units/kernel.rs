@@ -1,26 +1,45 @@
 //! kernel.cob — the System homebase, translated from the compiled
 //! bytecode. Kernel compiles with Scriptor linear constant 163840, so
 //! every `.bos` bracket is 2.5× the bytecode value: elmos below are
-//! raw/65536 straight from the disassembly. Four pillar assemblies sink
-//! into the pad on creation and rise staged; Activate/Deactivate
-//! (production on/off) extend or retract them staggered; while
-//! producing the tips spray build sparks.
+//! raw/65536 straight from the disassembly.
+//!
+//! Lifecycle, faithful to the script:
+//!
+//! - `Create()` — pillars fan out (±45°/135°), everything sinks, bases
+//!   rise, then pillars/heads rise partway. `canbuild` flips true here.
+//! - `Activate()` (production starts) — wait for `canbuild`, then
+//!   unfold the four nano-arm pillars one per 200 ms
+//!   (`GetPillarNReady`): tilt out to 30°/35° and lift to 0. The base
+//!   starts producing immediately, so it spawns mid-rise and unfolds
+//!   right after — the "unfold at start" look.
+//! - `Deactivate()` (production stops) — fold the pillars back down one
+//!   per **1800 ms** (`GetPillarNRest`): a slow, leisurely retract at
+//!   2.5 elmos/s.
+//! - While producing, the tips spray build sparks (`StartBuilding`).
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 
-/// Stagger between per-pillar pose changes in Activate/Deactivate (the
-/// script staggers with `sleep 200`; its per-pillar choreography runs
-/// concurrently from there).
-const PILLAR_STAGGER: f32 = 0.2;
+/// Activate(): `sleep 200` between pillar unfolds.
+const READY_STAGGER: f32 = 0.2;
+/// Deactivate(): `sleep 1800` between pillar folds.
+const REST_STAGGER: f32 = 1.8;
 /// StartBuilding(): emit burst per `sleep 60` (throttled 2×).
 const BUILD_EMIT_INTERVAL: f32 = 0.12;
 
-#[derive(Default)]
+/// Which staged choreography is running (mirrors which script the host
+/// triggered), and the next pillar it will move.
+#[derive(Clone, Copy, PartialEq)]
+enum Choreo {
+    Ready,
+    Rest,
+}
+
 pub struct KernelAnim {
-    /// Create's staged rise (stage 0 = bases rising, 1 = pillars rising,
-    /// 4 = done).
-    stage: usize,
-    stage_timer: f32,
+    /// Create()'s staged rise: `Some(seconds_until_pillar_rise)` while
+    /// the bases are still coming up, `None` once `canbuild` is set.
+    rise_wait: Option<f32>,
+    /// Active Activate/Deactivate choreography, if any.
+    choreo: Option<(Choreo, usize, f32)>,
     build_emit_timer: f32,
 }
 
@@ -50,12 +69,21 @@ impl KernelAnim {
     }
 }
 
+impl Default for KernelAnim {
+    fn default() -> Self {
+        Self {
+            rise_wait: Some(0.4),
+            choreo: None,
+            build_emit_timer: 0.0,
+        }
+    }
+}
+
 impl UnitAnim for KernelAnim {
     fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Create(): fan the pillars out (8190=45°, 24570=135°), sink
         // bases −20 / pillars −80 / heads −80 (bytecode −1310720 /
-        // −5242880), rise the bases @30, then the pillars and heads
-        // staged after 0.4s: pillars → −40 @60, heads → −30 @40.
+        // −5242880), rise the bases @30.
         for (i, yaw) in [45.0, 135.0, -45.0, -135.0].iter().enumerate() {
             rig.turn_deg(&format!("pillar{i}"), Axis::Y, *yaw, 0.0);
         }
@@ -67,16 +95,14 @@ impl UnitAnim for KernelAnim {
         for i in 0..4 {
             rig.move_to(&format!("base{i}"), Axis::Y, 0.0, 30.0);
         }
-        self.stage = 0;
-        self.stage_timer = 0.4;
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
-        // Create()'s staged rise: after ~0.4s the pillars come up.
-        if self.stage == 0 {
-            self.stage_timer -= ctx.dt;
-            if self.stage_timer <= 0.0 {
-                self.stage = 4; // rise done; stage 4 = "open & idle"
+        // Create()'s staged pillar rise after the bases come up.
+        if let Some(wait) = &mut self.rise_wait {
+            *wait -= ctx.dt;
+            if *wait <= 0.0 {
+                self.rise_wait = None;
                 for i in 0..4 {
                     rig.move_to(&format!("pillar{i}"), Axis::Y, -40.0, 60.0);
                     rig.move_to(&format!("head{i}"), Axis::Y, -30.0, 40.0);
@@ -84,18 +110,33 @@ impl UnitAnim for KernelAnim {
             }
         }
 
-        // Activate()/Deactivate() staging, one pillar per tick.
-        if self.stage > 0 && self.stage < 4 {
-            self.stage_timer -= ctx.dt;
-            if self.stage_timer <= 0.0 {
-                let i = self.stage - 1;
-                if ctx.producing {
-                    self.pillar_ready(rig, i);
-                } else {
-                    self.pillar_rest(rig, i);
-                }
-                self.stage += 1;
-                self.stage_timer = PILLAR_STAGGER;
+        // Activate()/Deactivate() staged choreography. Activate waits
+        // for the rise (`while(!canbuild) sleep 100`) before unfolding.
+        // Activate waits for the Create rise to finish (`while(!canbuild)
+        // sleep 100`) before the unfold starts.
+        if let Some((choreo, next_pillar, timer)) = self.choreo {
+            if choreo == Choreo::Ready && self.rise_wait.is_some() {
+                return;
+            }
+            self.choreo = None; // take ownership while firing this step
+            let mut next = next_pillar;
+            let mut timer = timer;
+            timer -= ctx.dt;
+            if timer > 0.0 {
+                self.choreo = Some((choreo, next, timer));
+                return;
+            }
+            match choreo {
+                Choreo::Ready => self.pillar_ready(rig, next),
+                Choreo::Rest => self.pillar_rest(rig, next),
+            }
+            next += 1;
+            if next < 4 {
+                let stagger = match choreo {
+                    Choreo::Ready => READY_STAGGER,
+                    Choreo::Rest => REST_STAGGER,
+                };
+                self.choreo = Some((choreo, next, stagger));
             }
         }
 
@@ -112,14 +153,12 @@ impl UnitAnim for KernelAnim {
     }
 
     fn activate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Activate(): start the staged pillar-ready choreography.
-        self.stage = 1;
-        self.stage_timer = 0.0;
+        // Activate(): staged pillar-unfold (one per 200 ms).
+        self.choreo = Some((Choreo::Ready, 0, 0.0));
     }
 
     fn deactivate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Deactivate(): staged pillar-rest choreography.
-        self.stage = 1;
-        self.stage_timer = 0.0;
+        // Deactivate(): staged pillar-fold (one per 1800 ms).
+        self.choreo = Some((Choreo::Rest, 0, 0.0));
     }
 }

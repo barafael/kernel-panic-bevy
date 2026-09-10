@@ -120,7 +120,13 @@ pub fn showcase_director(
     >,
     vents: Query<&GeoventSmoker, Without<VentClaim>>,
     bugs: Query<
-        (Entity, &UnitType, &TeamId),
+        (
+            Entity,
+            &UnitType,
+            &TeamId,
+            &GlobalTransform,
+            Option<&crate::interaction::movement::MoveTarget>,
+        ),
         (
             Without<Homebase>,
             Without<Emerging>,
@@ -149,6 +155,16 @@ pub fn showcase_director(
         } else {
             return; // homebase hasn't spawned yet
         }
+    }
+
+    // Keep the home position live: on the tick the homebase is first
+    // resolved, its GlobalTransform is still identity (spawn commands
+    // have not propagated yet), so a one-shot capture would pin (0, 0)
+    // and break everything downstream that measures against it.
+    if let Some(entity) = d.homebase
+        && let Ok((_, _, _, gtf, _, _)) = homebases.get(entity)
+    {
+        d.home_pos = Some(gtf.translation());
     }
 
     // ------------------------------------------------------------------
@@ -256,18 +272,36 @@ pub fn showcase_director(
     }
 
     // ------------------------------------------------------------------
-    // Phase 4 — Hacker: deploy the first fully-emerged Bug.
+    // Phase 4 — Hacker: deploy the first fully-emerged Bug — but only
+    // once it has walked clear of the base (rally takes it out; an
+    // Exploit materializing inside the homebase would bury it in the
+    // pad). If the exit walk finished without clearing the distance
+    // (blocked terrain), deploy where the Bug stands rather than
+    // stalling the showcase forever.
     // ------------------------------------------------------------------
+    const DEPLOY_CLEAR_DISTANCE: f32 = 96.0;
     if d.primed
         && d.faction == Faction::Hacker
         && !d.bug_deployed
-        && let Some((bug_entity, _, _)) = bugs
+        && let Some((bug_entity, ut, team, bug_gtf, move_target)) = bugs
             .iter()
-            .find(|(_, ut, team)| team.0 == 0 && ut.0 == UnitKind::Bug)
+            .find(|(_, ut, team, _, _)| team.0 == 0 && ut.0 == UnitKind::Bug)
+        && let Some(home_pos) = d.home_pos
     {
-        deploy_writer.write(DeployEvent { entity: bug_entity });
-        d.bug_deployed = true;
-        info!("Showcase(Hacker): deploying first Bug → Exploit");
+        let dist = bug_gtf.translation().distance(home_pos);
+        let clear_of_base = dist > DEPLOY_CLEAR_DISTANCE || move_target.is_none();
+        if clear_of_base {
+            deploy_writer.write(DeployEvent { entity: bug_entity });
+            d.bug_deployed = true;
+            info!(
+                "Showcase(Hacker): deploying first Bug → Exploit (dist {dist:.0}, ordered: {}, bug at {:.0}/{:.0}, home at {:.0}/{:.0})",
+                move_target.is_some(),
+                bug_gtf.translation().x,
+                bug_gtf.translation().z,
+                home_pos.x,
+                home_pos.z
+            );
+        }
     }
 }
 

@@ -252,6 +252,15 @@ pub fn spawn_unit(
         _ => s3o_model.as_ref().map(compute_ground_lift).unwrap_or(0.0),
     };
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
+    #[cfg(target_arch = "wasm32")]
+    let _ = ground_lift;
+    if matches!(kind, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier) {
+        info!(
+            "spawn {kind:?}: ground y={:.1}, lift={ground_lift:.1}, root y={:.1}",
+            position.y,
+            lifted_position.y
+        );
+    }
 
     let unit_entity = commands
         .spawn((
