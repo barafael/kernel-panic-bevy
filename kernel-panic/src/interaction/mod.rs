@@ -1,5 +1,6 @@
 pub mod ability;
 pub mod cursor;
+pub mod debug_movement;
 pub mod movement;
 pub(crate) mod selection;
 
@@ -23,7 +24,12 @@ pub struct InteractionPlugin;
 
 impl Plugin for InteractionPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((SelectionPlugin, CursorPlugin, AbilityHotkeyPlugin))
+        app.add_plugins((
+            SelectionPlugin,
+            CursorPlugin,
+            AbilityHotkeyPlugin,
+            crate::interaction::debug_movement::DebugMovementPlugin,
+        ))
             .init_gizmo_group::<CommandLineGizmos>()
             .add_systems(Startup, configure_command_line_gizmos)
             .add_systems(

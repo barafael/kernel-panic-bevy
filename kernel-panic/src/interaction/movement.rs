@@ -185,6 +185,31 @@ const GIZMO_LIFT: f32 = 1.5;
 const PATHFIND_BUDGET_PER_FRAME: usize = 3;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+/// Exact surface-aligned orientation: local up = terrain `normal`,
+/// local forward = `forward_xz` projected into the surface plane.
+///
+/// Replaces the old pitch/roll Euler composition, which used a
+/// mislabeled perpendicular (it was the left vector), composed the two
+/// rotations about world axes (only exact when the fall line aligns
+/// with the body — diagonal slopes leaned sideways), and — worst of
+/// all — slerped a *local-space* tilt, so a buffered downhill pitch
+/// applied after a yaw change read as a sideways lean mid-turn.
+pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
+    // Degenerate normals (cliff faces from central differences) fall
+    // back to flat so the basis stays invertible.
+    let up = if normal.y > 0.1 { normal.normalize() } else { Vec3::Y };
+    let mut f = Vec3::new(forward_xz.x, 0.0, forward_xz.z);
+    if f.length_squared() < 1e-6 {
+        f = Vec3::Z;
+    }
+    let f = f.normalize();
+    // Right-handed frame: for f=+Z and up=+Y this yields right=−X —
+    // facing +Z with Y up, your right hand points toward −X.
+    let right = f.cross(up).normalize();
+    let fwd_on_plane = up.cross(right);
+    Quat::from_mat3(&Mat3::from_cols(right, up, -fwd_on_plane))
+}
+
 pub fn movement_system(
     mut commands: Commands,
     time: Res<Time>,
@@ -460,41 +485,33 @@ pub fn movement_system(
         // unit pivots in place; if we gated the rotation behind translation
         // too, the unit would freeze and never finish the turn.
         if new_forward.length_squared() > 1e-6 {
-            let yaw_only = Transform::default()
-                .looking_to(new_forward, Vec3::Y)
-                .rotation;
-            let target_tilt = match heightmap.as_deref() {
+            // Target orientation: heading = rate-limited new_forward,
+            // up = terrain normal — one exact basis (see
+            // `surface_aligned_rotation`).
+            let target = match heightmap.as_deref() {
                 Some(hm) => {
                     let normal = hm.normal(transform.translation.x, transform.translation.z);
-                    // Body axes: forward = new_forward (XZ), right = right-hand
-                    // perpendicular in XZ, up = world Y before tilt.
-                    let body_right = Vec3::new(new_forward.z, 0.0, -new_forward.x);
-                    // Slope angles. `pitch` = how much the ground rises ahead
-                    // (positive = nose up). `roll` = how much it rises to the
-                    // right (positive = right side up). `normal.y` is always
-                    // positive on valid terrain; we divide by it to get tan.
-                    let pitch = (-new_forward.dot(normal) / normal.y.max(1e-4)).atan();
-                    let roll = (-body_right.dot(normal) / normal.y.max(1e-4)).atan();
-                    // Pitch around body-right (local X), roll around body-
-                    // forward (local -Z in Bevy). Composing them in body
-                    // space keeps yaw exactly zero.
-                    Quat::from_axis_angle(Vec3::X, pitch) * Quat::from_axis_angle(Vec3::Z, roll)
+                    surface_aligned_rotation(new_forward, normal)
                 }
-                None => Quat::IDENTITY,
+                None => Transform::default().looking_to(new_forward, Vec3::Y).rotation,
             };
+            // Smooth in WORLD space. A local-space tilt buffer applied
+            // after a yaw change re-interprets a buffered downhill pitch
+            // as a sideways lean mid-turn; smoothing the world
+            // orientation keeps the unit glued to the surface plane
+            // through turns.
             let blend = 1.0 - (-TILT_SMOOTH_RATE * dt).exp();
-            let smoothed_tilt = match slope_tilt.as_deref_mut() {
+            let smoothed = match slope_tilt.as_deref_mut() {
                 Some(t) => {
-                    t.0 = t.0.slerp(target_tilt, blend);
+                    t.0 = t.0.slerp(target, blend);
                     t.0
                 }
                 None => {
-                    let t = Quat::IDENTITY.slerp(target_tilt, blend);
-                    commands.entity(entity).insert(SlopeTilt(t));
-                    t
+                    commands.entity(entity).insert(SlopeTilt(target));
+                    target
                 }
             };
-            transform.rotation = yaw_only * smoothed_tilt;
+            transform.rotation = smoothed;
         }
 
         // Facing-gated forward speed. Within ~60° of the target heading,
@@ -945,9 +962,10 @@ pub fn orient_stationary_to_terrain(
         let normal = heightmap.normal(pos.x, pos.z);
 
         // Preserve yaw: read the current forward, flatten to XZ, and
-        // build a yaw-only rotation from it. Stationary buildings start
-        // at yaw=0 (facing -Z); mobile units keep whichever yaw they
-        // finished their last move order with.
+        // let `surface_aligned_rotation` rebuild the orientation from
+        // it. Stationary buildings start at yaw=0 (facing -Z); mobile
+        // units keep whichever yaw they finished their last move order
+        // with.
         let forward = transform.forward().as_vec3();
         let forward_xz = {
             let f = Vec3::new(forward.x, 0.0, forward.z);
@@ -957,23 +975,18 @@ pub fn orient_stationary_to_terrain(
                 f.normalize()
             }
         };
-        let yaw_only = Transform::IDENTITY.looking_to(forward_xz, Vec3::Y).rotation;
 
-        let body_right = Vec3::new(forward_xz.z, 0.0, -forward_xz.x);
-        let pitch = (-forward_xz.dot(normal) / normal.y.max(1e-4)).atan();
-        let roll = (-body_right.dot(normal) / normal.y.max(1e-4)).atan();
-        let target_tilt =
-            Quat::from_axis_angle(Vec3::X, pitch) * Quat::from_axis_angle(Vec3::Z, roll);
+        let target = surface_aligned_rotation(forward_xz, normal);
 
         match slope_tilt.as_deref_mut() {
             Some(t) => {
-                t.0 = target_tilt;
+                t.0 = target;
             }
             None => {
-                commands.entity(entity).insert(SlopeTilt(target_tilt));
+                commands.entity(entity).insert(SlopeTilt(target));
             }
         }
-        transform.rotation = yaw_only * target_tilt;
+        transform.rotation = target;
     }
 }
 
@@ -1242,6 +1255,81 @@ fn draw_dashed_polyline(
                 pattern_idx = (pattern_idx + 1) % DASH_PATTERN.len();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tilt_tests {
+    use super::*;
+
+    const EPS: f32 = 1e-4;
+
+    fn local_axis(rot: Quat, axis: Vec3) -> Vec3 {
+        rot * axis
+    }
+
+    /// 30° slope descending along +Z: surface normal tilts toward +Z.
+    fn downhill_normal() -> Vec3 {
+        Vec3::new(0.0, 30.0_f32.to_radians().cos(), 30.0_f32.to_radians().sin())
+    }
+
+    #[test]
+    fn flat_terrain_is_identity_for_plus_z() {
+        let rot = surface_aligned_rotation(Vec3::Z, Vec3::Y);
+        // Facing +Z means a 180° yaw (Bevy forward is −Z) with zero tilt.
+        assert!((rot * -Vec3::Z - Vec3::Z).length() < EPS);
+        assert!((rot * Vec3::Y - Vec3::Y).length() < EPS);
+    }
+
+    #[test]
+    fn downhill_up_matches_normal_exactly() {
+        let n = downhill_normal();
+        let rot = surface_aligned_rotation(Vec3::Z, n);
+        assert!((local_axis(rot, Vec3::Y) - n).length() < EPS);
+    }
+
+    #[test]
+    fn downhill_forward_stays_in_plane_without_sideways_tilt() {
+        let n = downhill_normal();
+        let rot = surface_aligned_rotation(Vec3::Z, n);
+        let fwd = local_axis(rot, -Vec3::Z);
+        // In-plane: perpendicular to the normal.
+        assert!(fwd.dot(n).abs() < EPS, "forward not in plane: dot={}", fwd.dot(n));
+        // Descending along +Z: the in-plane forward points down (y < 0).
+        assert!(fwd.y < 0.0);
+        // No sideways lean: the body right axis stays perpendicular to
+        // the normal AND horizontal on a pure downhill (fall line along
+        // the movement axis).
+        let right = local_axis(rot, Vec3::X);
+        assert!(right.dot(n).abs() < EPS);
+        assert!(right.y.abs() < EPS);
+    }
+
+    /// The reported-bug scenario: moving diagonally across a slope. The
+    /// exact basis keeps every body axis in its plane; the old
+    /// world-axis Euler composition could not.
+    #[test]
+    fn diagonal_descent_matches_plane() {
+        let n = downhill_normal();
+        let forward = Vec3::new(1.0, 0.0, 1.0).normalize();
+        let rot = surface_aligned_rotation(forward, n);
+        assert!((local_axis(rot, Vec3::Y) - n).length() < EPS);
+        let fwd = local_axis(rot, -Vec3::Z);
+        assert!(fwd.dot(n).abs() < EPS);
+        let right = local_axis(rot, Vec3::X);
+        assert!(right.dot(n).abs() < EPS);
+    }
+
+    /// Turning on a slope: same normal, opposite heading — both
+    /// orientations keep the up axis on the normal (the old local-tilt
+    /// slerp made the buffered pitch read as a sideways lean mid-turn).
+    #[test]
+    fn up_axis_stable_when_reversing_on_slope() {
+        let n = downhill_normal();
+        let a = surface_aligned_rotation(Vec3::Z, n);
+        let b = surface_aligned_rotation(-Vec3::Z, n);
+        assert!((local_axis(a, Vec3::Y) - n).length() < EPS);
+        assert!((local_axis(b, Vec3::Y) - n).length() < EPS);
     }
 }
 
