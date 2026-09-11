@@ -189,6 +189,14 @@ pub fn production_system(
             continue;
         };
 
+        // A fold-capable homebase (the Kernel) must finish its unfold
+        // before production may begin: hold progress at zero until the
+        // driver reports it fully open. Units without a fold cycle
+        // return `None` and pass straight through.
+        if animator.is_some_and(|a| a.driver.is_open() == Some(false)) {
+            continue;
+        }
+
         let speed_mult = if homebase.is_some() {
             let buildings = small_building_counts.get(team.0) as f32;
             1.0 + buildings * KERNEL_BOOST_PER_BUILDING

@@ -243,6 +243,22 @@ impl AnimRig {
         }
     }
 
+    /// True when `piece` has reached its target along `axis` (the
+    /// `.bos` `wait-for-turn`/`wait-for-move` conditions). Rotation and
+    /// translation are both checked against the same axis index — the
+    /// non-moving component sits at its (unchanged) target, so it never
+    /// falsifies the check. Missing pieces are "at target" (nothing to
+    /// wait for).
+    pub fn at_target(&self, piece: &str, axis: Axis) -> bool {
+        let Some(p) = self.piece(piece) else {
+            return true;
+        };
+        let a = axis.index();
+        const EPS: f32 = 1e-4;
+        (self.piece_rotations[p][a] - self.target_rotations[p][a]).abs() < EPS
+            && (self.piece_translations[p][a] - self.target_translations[p][a]).abs() < EPS
+    }
+
     /// Continuous spin in degrees/sec (`.bos` `spin <piece> around <axis>
     /// speed <n>`). Direction follows the same convention as turns.
     pub fn spin_dps(&mut self, piece: &str, axis: Axis, deg_per_sec: f32) {
