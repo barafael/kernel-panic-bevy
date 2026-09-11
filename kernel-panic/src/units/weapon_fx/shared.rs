@@ -205,6 +205,55 @@ pub(super) struct ProjectileVisual {
     pub progress: f32,
     pub arc_height: f32,
     pub trail: Option<ProjectileTrail>,
+    /// Per-category flight integration, transcribed from the Recoil
+    /// engine's projectile classes (`MissileLauncher::FireImpl`,
+    /// `MissileProjectile`, `CannonProjectile`). `Direct` keeps the
+    /// legacy parametric lerp; the others integrate velocity per tick.
+    pub flight: Flight,
+    /// Current velocity (used by Non-direct flights; the tick
+    /// integrates position from it).
+    pub velocity: Vec3,
+    /// Accumulated flight time, for homing delays and arrival checks.
+    pub elapsed: f32,
+    /// `cegTag=`-authored trail CEG replayed along the flight path
+    /// (BugCannon's `corruption_BCtrail`). `None` for ribbon-trail
+    /// weapons (their `texture2` streak is handled separately).
+    pub trail_ceg: Option<Cow<'static, str>>,
+    /// Throttle accumulator (seconds) for the periodic trail-CEG spawn.
+    pub trail_emit: f32,
+    /// Per-projectile PRNG seed so ticks can call `spawn_ceg` without a
+    /// system `Local` (each projectile gets a stable-but-different roll).
+    pub trail_seed: u32,
+}
+
+/// Flight integration for a projectile. Spawn computes the launch
+/// state from the weapon TDF; the tick integrates it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Flight {
+    /// Parametric straight line (legacy path — AircraftBomb, etc.).
+    Direct,
+    /// Guided missile (`MissileLauncher` with `tracks` + optional
+    /// `trajectoryHeight` up-bias — Pointer's Geometric). Launches
+    /// along `launch_dir`, then steers onto the target with a
+    /// turn-rate cap (`weaponDef->turnrate`, radians/s — the spawn side
+    /// converts the TDF's TA angle units).
+    Missile { launch_dir: Vec3, launch_speed: f32, turn_rate: f32 },
+    /// Starburst (`weapontype=StarburstLauncher` + `fixedLauncher` —
+    /// Flow's FlowMissile): launches straight up along the fixed
+    /// weapon dir, accelerates, and homes after the `weapontimer`
+    /// delay with a near-snap turn rate.
+    Starburst {
+        launch_dir: Vec3,
+        launch_speed: f32,
+        acceleration: f32,
+        max_speed: f32,
+        home_delay: f32,
+        turn_rate: f32,
+    },
+    /// Ballistic shell (`ballistic=1` + `myGravity` — Exploit's
+    /// BugCannon): fixed launch velocity from the ballistic solve +
+    /// constant gravity `g` elmos/s² (`myGravity × map gravity`).
+    Ballistic { velocity: Vec3, gravity: f32 },
 }
 
 /// Number of samples retained in the projectile trail's ring buffer.

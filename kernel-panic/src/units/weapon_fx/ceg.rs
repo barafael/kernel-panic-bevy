@@ -20,6 +20,7 @@
 //! runtime never touches the raw TDF strings.
 
 use bevy::prelude::*;
+use bevy::ecs::system::SystemParam;
 use spring_tdf::{
     CegExpr, EffectProperties, EmitVector, EvalCtx, ExplosionDef, ExplosionDefs, FlameProperties,
     ParticleProperties, SpawnerProperties,
@@ -52,6 +53,21 @@ impl CegParticleMesh {
             .get_or_insert_with(|| meshes.add(Rectangle::new(2.0, 2.0)))
             .clone()
     }
+}
+
+/// Bundled CEG-spawn dependencies so `tick_weapon_fx` can replay
+/// projectiles' `cegTag` trails (`corruption_BCtrail`) mid-flight
+/// without pushing the system past Bevy's arg limit. Mirrors the
+/// `VolumeHitCtx` pattern in `tick.rs`.
+#[derive(SystemParam)]
+pub(super) struct CegTrailCtx<'w, 's> {
+    pub ceg_registry: Res<'w, CegRegistry>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub images: ResMut<'w, Assets<Image>>,
+    pub model_cache: ResMut<'w, S3OModelCache>,
+    pub particle_mesh: ResMut<'w, CegParticleMesh>,
+    pub _marker: std::marker::PhantomData<&'s ()>,
 }
 
 impl CegRegistry {

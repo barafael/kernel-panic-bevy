@@ -2,14 +2,16 @@
 //! event to the appropriate effect spawner (beam, burst, projectile, melee,
 //! plus the bonus nanoframe sparkle for build lasers).
 
+use std::borrow::Cow;
+
 use bevy::prelude::*;
 
 use super::ceg::{CegParticleMesh, CegRegistry, spawn_ceg};
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
     GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, PendingAttacks,
-    PendingExplosions, ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT, WeaponFxMeshes,
-    build_billboard_quad_mesh, tdf_color, weapon_core_color, weapon_edge_color,
+    Flight, PendingExplosions, ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT,
+    WeaponFxMeshes, build_billboard_quad_mesh, tdf_color, weapon_core_color, weapon_edge_color,
 };
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_mesh};
 use crate::units::content::weapons::WeaponRegistry;
@@ -787,12 +789,28 @@ fn spawn_laser_bolt(
 /// cannon/plasma weapons that upstream Spring renders as a sprite
 /// billboard.
 ///
-/// `arc_height` is the authored `trajectoryHeight` scaled to look
-/// right at typical map ranges (upstream stores a fraction of target
-/// distance; we bake in a gentler 0.4× factor so pointer shots
-/// don't arc into orbit). A full 1.0× curve puts the apex at the
-/// same Y as the distance — too bouncy in 3D camera; the tick system
-/// applies a 4·t·(1-t) parabola on top which is already a full arc.
+/// Flight model selection, transcribed from the Recoil engine:
+///
+/// - `MissileLauncher` + `trajectoryHeight > 0` (Pointer's Geometric):
+///   `FireImpl` launches along `normalize(toTarget + up × height)` at
+///   `startvelocity`, homing with `turnrate`.
+/// - `StarburstLauncher` + `fixedLauncher` (Flow's FlowMissile):
+///   launches along the fixed weapon dir (straight up), accelerates by
+///   `weaponacceleration` to `weaponvelocity`, homes after
+///   `weapontimer` seconds.
+/// - `ballistic=1` + `myGravity` (Exploit's BugCannon):
+///   `CannonProjectile` integrates `myGravity × map gravity`; the
+///   launch angle is the low-arc ballistic solve so the shell lands on
+///   the target.
+/// - everything else (AircraftBomb, plain cannons): direct parametric
+///   lerp as before.
+///
+/// Spring TA-angle-units to radians/s: TDF `turnrate=` counts 65536 per
+/// full revolution (the same heading units as COB angle constants).
+fn ta_turn_rate(units: f32) -> f32 {
+    units * std::f32::consts::TAU / 65536.0
+}
+
 #[allow(clippy::too_many_arguments)]
 fn spawn_projectile(
     event: &AttackEvent,
@@ -805,7 +823,13 @@ fn spawn_projectile(
     cache: &mut BeamMaterialCache,
     fx_meshes: &mut WeaponFxMeshes,
 ) -> Entity {
-    let color = tdf_color(weapon.rgb_color);
+    // BugCannon's shell is `texture1=black` — an opaque near-black ball,
+    // not the default orange Cannon marker. Darken the fallback sphere.
+    let color = if weapon.texture1.trim().eq_ignore_ascii_case("black") {
+        LinearRgba::new(0.02, 0.02, 0.02, 1.0)
+    } else {
+        tdf_color(weapon.rgb_color)
+    };
 
     let speed = if weapon.weapon_velocity > 0.0 {
         weapon.weapon_velocity
@@ -814,6 +838,81 @@ fn spawn_projectile(
     };
 
     let arc_height = weapon.trajectory_height * 0.4;
+
+    // ── Flight model (see the doc comment above) ──
+    let to_target = event.target_pos - event.attacker_pos;
+    let up = Vec3::Y;
+    const MAP_GRAVITY: f32 = 50.0; // elmos/s², from the map's gravity=
+    let flight = if weapon.category() == spring_tdf::WeaponCategory::StarburstLauncher {
+        Flight::Starburst {
+            launch_dir: up,
+            launch_speed: if weapon.start_velocity > 0.0 {
+                weapon.start_velocity
+            } else {
+                speed
+            },
+            acceleration: weapon.weapon_acceleration,
+            max_speed: if weapon.weapon_velocity > 0.0 {
+                weapon.weapon_velocity
+            } else {
+                speed
+            },
+            home_delay: 0.1, // weapontimer=0.1 before homing starts
+            turn_rate: ta_turn_rate(weapon.turn_rate),
+        }
+    } else if weapon.category() == spring_tdf::WeaponCategory::MissileLauncher
+        && weapon.trajectory_height > 0.0
+    {
+        // FireImpl: targetVec = normalize(toTarget + up × trajectoryHeight)
+        let launch_dir = (to_target.normalize() + up * weapon.trajectory_height).normalize();
+        Flight::Missile {
+            launch_dir,
+            launch_speed: if weapon.start_velocity > 0.0 {
+                weapon.start_velocity
+            } else {
+                speed
+            },
+            turn_rate: ta_turn_rate(weapon.turn_rate),
+        }
+    // `myGravity > 0` is the discriminator: every KPK ballistic shell
+    // carries a gravity multiplier (BugCannon .3, WMD .4). A
+    // `ballistic=1` tag with no gravity (SwallowDamage's burnblow) is a
+    // point-blank damage weapon, not a lobbed projectile — solving with
+    // g = 0 would divide by zero.
+    } else if weapon.category() == spring_tdf::WeaponCategory::Cannon
+        && weapon.ballistic
+        && weapon.my_gravity > 0.0
+    {
+        // Low-arc ballistic solve: sin(2θ) = g·d / v²  (+ height term).
+        let g = weapon.my_gravity * MAP_GRAVITY;
+        let horizontal = Vec3::new(to_target.x, 0.0, to_target.z);
+        let d = horizontal.length();
+        let h = to_target.y;
+        let v = if weapon.start_velocity > 0.0 {
+            weapon.start_velocity
+        } else {
+            speed
+        };
+        // tanθ = (v² − √(v⁴ − g(g·d² + 2·h·v²))) / (g·d) — low arc.
+        let disc = v * v * v * v - g * (g * d * d + 2.0 * h * v * v);
+        let velocity = if d > 1.0 && disc >= 0.0 {
+            let tan_theta = (v * v - disc.sqrt()) / (g * d);
+            let cos_theta = 1.0 / (1.0 + tan_theta * tan_theta).sqrt();
+            let dir = horizontal / d;
+            dir * (v * cos_theta) + up * (v * cos_theta * tan_theta)
+        } else {
+            // Out of ballistic reach — 45° max-range lob.
+            let v45 = (g * d * d).max(v * v * 0.5).sqrt();
+            (horizontal / d.max(1.0)) * (v45 * std::f32::consts::FRAC_1_SQRT_2)
+                + up * (v45 * std::f32::consts::FRAC_1_SQRT_2)
+        };
+        Flight::Ballistic {
+            velocity,
+            gravity: g,
+        }
+    } else {
+        Flight::Direct
+    };
 
     // Prefer the authored S3O model (octashot, sigterm, etc.). The s3o
     // meshes are authored at their real upstream size in elmos, so the
@@ -845,12 +944,24 @@ fn spawn_projectile(
     // minting a fresh one per shot.
     let material = cache.get_or_create_tiled(color, false, weapon.intensity, None, 0, materials);
 
-    // Upstream weapons with `smoketrail=1` or a `cegTag=...` leave a
-    // trailing ribbon along the flight path. Build it as a dedicated
-    // triangle-strip entity textured with the weapon's `texture2`
-    // (`pointertrail` / `firetrail` / …) and keep its mesh handle on
-    // the projectile so the tick system can rewrite it each frame.
-    let has_trail = weapon.smoke_trail || !weapon.ceg_tag.is_empty();
+    // Upstream weapons with `smoketrail=1` leave a trailing ribbon
+    // along the flight path. Build it as a dedicated triangle-strip
+    // entity textured with the weapon's `texture2` (`pointertrail` /
+    // `firetrail` / …) and keep its mesh handle on the projectile
+    // so the tick system can rewrite it each frame. A bare `cegTag`
+    // with no `texture2` (BugCannon's `corruption_BCtrail`) skips the
+    // ribbon — that trail is replayed as the actual CEG in the tick.
+    let has_trail = weapon.smoke_trail
+        || (!weapon.ceg_tag.is_empty() && !weapon.texture2.is_empty() && weapon.texture2 != "none");
+    // The authored per-projectile CEG trail, emitted periodically by
+    // `tick_weapon_fx`. Only for ballistic shells with a bare `cegTag`
+    // (no ribbon texture to hang it on).
+    let trail_ceg = if weapon.ballistic && !weapon.ceg_tag.is_empty() {
+        Some(Cow::Owned(weapon.ceg_tag.clone()))
+    } else {
+        None
+    };
+
     let trail = if has_trail {
         build_projectile_trail(
             event.attacker_pos,
@@ -865,6 +976,16 @@ fn spawn_projectile(
         None
     };
 
+    // Initial velocity for integrated flights (the tick takes over).
+    let (velocity, speed) = match flight {
+        Flight::Missile { launch_dir, launch_speed, .. }
+        | Flight::Starburst { launch_dir, launch_speed, .. } => {
+            (launch_dir * launch_speed, launch_speed)
+        }
+        Flight::Ballistic { velocity, .. } => (velocity, velocity.length()),
+        Flight::Direct => (Vec3::ZERO, speed),
+    };
+
     commands
         .spawn((
             ProjectileVisual {
@@ -873,7 +994,15 @@ fn spawn_projectile(
                 speed,
                 progress: 0.0,
                 arc_height,
+                flight,
+                velocity,
+                elapsed: 0.0,
                 trail,
+                trail_ceg,
+                trail_emit: 0.0,
+                trail_seed: 0x9e3779b9u32.wrapping_mul(
+                    (event.attacker_pos.x * 131.0 + event.target_pos.z * 7.0).to_bits()
+                ),
             },
             Mesh3d(mesh),
             MeshMaterial3d(material),
