@@ -11,10 +11,12 @@ use crate::units::content::weapons::WeaponId;
 use super::ceg::{CegParticleMesh, CegRegistry, spawn_ceg};
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
-    GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, PendingAttacks,
-    Flight, PendingExplosions, ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT,
-    WeaponFxMeshes, build_billboard_quad_mesh, tdf_color, weapon_core_color, weapon_edge_color,
+    Flight, GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt,
+    LightningArc, PendingAttacks, PendingExplosions, ProjectileTrail, ProjectileVisual,
+    TRAIL_SAMPLE_COUNT, WeaponFxMeshes, build_arc_mesh, build_billboard_quad_mesh, tdf_color,
+    weapon_core_color, weapon_edge_color,
 };
+use crate::rng::{next_f32, next_signed};
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_mesh};
 use crate::units::content::weapons::WeaponRegistry;
 
@@ -77,7 +79,24 @@ pub(super) fn spawn_weapon_visuals(
         // the `DelayedHit` if this attack has deferred damage.
         let mut primary_visual: Option<Entity> = None;
 
-        if is_melee {
+        // The Connection's GaussCannon replaces *all* engine visuals
+        // with the gadget-drawn lightning arc (upstream
+        // `network_arceffect.lua`): the TDF beam has `intensity=0`
+        // (invisible by design) and `explosiongenerator=custom:none`.
+        let is_gauss_arc = weapon_registry
+            .name(event.weapon_id)
+            .eq_ignore_ascii_case("gausscannon");
+
+        if is_gauss_arc {
+            spawn_lightning_arc(
+                &event,
+                &mut rng,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+            );
+        } else if is_melee {
             spawn_melee_flash(
                 &event,
                 &mut commands,
@@ -163,7 +182,7 @@ pub(super) fn spawn_weapon_visuals(
         // back to the synthesised coloured sphere so there's still a
         // "something fired" signal. Melee / BuildLaser skip both — see
         // `is_melee` / `is_build_laser` filters.
-        if !is_melee && !is_build_laser(event.weapon_id) {
+        if !is_melee && !is_build_laser(event.weapon_id) && !is_gauss_arc {
             let ceg_spawned = if let Some(muzzle_ceg) = event.muzzle_ceg.as_deref() {
                 let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
                 spawn_ceg(
@@ -208,7 +227,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut sparkle_assets,
                 &asset_server,
             );
-        } else if !is_melee && event.delayed_hit.is_none() {
+        } else if !is_melee && !is_gauss_arc && event.delayed_hit.is_none() {
             // Upstream CEG is the source of truth for impact particles:
             // the weapon's `explosiongenerator=custom:NAME` resolves to a
             // CSimpleParticleSystem definition in `gamedata/explosions/`.
@@ -980,10 +999,16 @@ fn spawn_projectile(
 
     // Initial velocity for integrated flights (the tick takes over).
     let (velocity, speed) = match flight {
-        Flight::Missile { launch_dir, launch_speed, .. }
-        | Flight::Starburst { launch_dir, launch_speed, .. } => {
-            (launch_dir * launch_speed, launch_speed)
+        Flight::Missile {
+            launch_dir,
+            launch_speed,
+            ..
         }
+        | Flight::Starburst {
+            launch_dir,
+            launch_speed,
+            ..
+        } => (launch_dir * launch_speed, launch_speed),
         Flight::Ballistic { velocity, .. } => (velocity, velocity.length()),
         Flight::Direct => (Vec3::ZERO, speed),
     };
@@ -1003,7 +1028,7 @@ fn spawn_projectile(
                 trail_ceg,
                 trail_emit: 0.0,
                 trail_seed: 0x9e3779b9u32.wrapping_mul(
-                    (event.attacker_pos.x * 131.0 + event.target_pos.z * 7.0).to_bits()
+                    (event.attacker_pos.x * 131.0 + event.target_pos.z * 7.0).to_bits(),
                 ),
             },
             Mesh3d(mesh),
@@ -1189,4 +1214,192 @@ fn spawn_melee_flash(
         cache,
         impact_assets,
     );
+}
+
+/// GaussCannon lightning bolt, mirroring upstream
+/// `LuaRules/Gadgets/network_arceffect.lua::BuildArc`: straight
+/// muzzle→impact line, a 160-elmo arch at the midpoint
+/// (`+160 * (1 − (2t−1)²)`), ±15-elmo jitter shrinking toward the
+/// ends, electric-green tint with randomized red/blue channels.
+/// The gadget's arc lives a single sim frame; we hold it for
+/// [`ARC_LIFETIME`] so a 4-second-reload shot still reads on screen.
+fn spawn_lightning_arc(
+    event: &AttackEvent,
+    rng: &mut Local<u32>,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
+) {
+    let start = event.attacker_pos;
+    let end = event.target_pos;
+    let dir = (end - start).normalize_or(Vec3::Z);
+    // Two world-space perpendiculars to jitter along; the ribbon
+    // itself is re-oriented to the camera every tick.
+    let perp1 = dir.cross(Vec3::Y).try_normalize().unwrap_or(Vec3::X);
+    let perp2 = dir.cross(perp1).try_normalize().unwrap_or(Vec3::Y);
+
+    let mut points = Vec::with_capacity(ARC_SEGMENTS + 1);
+    for i in 0..=ARC_SEGMENTS {
+        let t = i as f32 / ARC_SEGMENTS as f32;
+        let arch = 1.0 - (2.0 * t - 1.0).powi(2);
+        let taper = 1.0 - (2.0 * t - 1.0).abs();
+        points.push(
+            start.lerp(end, t)
+                + Vec3::Y * (ARC_ARCH_HEIGHT * arch)
+                + perp1 * (next_signed(rng) * ARC_JITTER * taper)
+                + perp2 * (next_signed(rng) * ARC_JITTER * taper),
+        );
+    }
+
+    // Upstream tints per draw: `gl.Color(rand(0.2–0.3), 0.9, rand(0.2–0.3))`.
+    let tint = LinearRgba::rgb(0.2 + 0.1 * next_f32(rng), 0.9, 0.2 + 0.1 * next_f32(rng));
+
+    let mesh = meshes.add(build_arc_mesh(ARC_SEGMENTS));
+    let material = cache.get_or_create(LinearRgba::WHITE, true, materials);
+    commands.spawn((
+        LightningArc {
+            points,
+            width: ARC_WIDTH,
+            lifetime: ARC_LIFETIME,
+            max_lifetime: ARC_LIFETIME,
+            mesh: mesh.clone(),
+            tint,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::IDENTITY,
+    ));
+}
+
+/// Arc geometry constants — see [`spawn_lightning_arc`]. Segment count
+/// 16 matches the upstream gadget's strip resolution.
+const ARC_SEGMENTS: usize = 16;
+/// Ribbon half-width in elmos (upstream GL line width 4).
+const ARC_WIDTH: f32 = 3.0;
+/// How long the bolt stays visible. Upstream redraws for exactly one
+/// sim frame; with the port's 4 s reload a single frame would be a
+/// subliminal flicker, so hold it a touch longer.
+const ARC_LIFETIME: f32 = 0.12;
+/// Midpoint arch height, from `BuildArc`'s `+160 * (1 − (2i−1)²)`.
+const ARC_ARCH_HEIGHT: f32 = 160.0;
+/// Maximum end-to-end jitter, from `BuildArc`'s ±15 spray.
+const ARC_JITTER: f32 = 15.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::MinimalPlugins;
+    use bevy::asset::AssetPlugin;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// Headless harness with every resource `spawn_weapon_visuals`
+    /// touches. MinimalPlugins + AssetPlugin provide the `AssetServer`
+    /// the build-sparkle path borrows; no actual assets load here.
+    fn fx_app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_resource::<PendingAttacks>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<CegParticleMesh>()
+            .init_resource::<S3OModelCache>()
+            .init_resource::<BeamMaterialCache>()
+            .init_resource::<BuildSparkleAssets>()
+            .init_resource::<ImpactBurstAssets>()
+            .init_resource::<GroundFlashAssets>()
+            .init_resource::<WeaponFxMeshes>()
+            .insert_resource(CegRegistry::load());
+        app
+    }
+
+    fn beam_def() -> spring_tdf::WeaponDef {
+        spring_tdf::WeaponDef {
+            weapon_type: "BeamLaser".into(),
+            rgb_color: [0.2, 1.0, 0.2],
+            ..Default::default()
+        }
+    }
+
+    /// The Connection's GaussCannon must render as a lightning arc —
+    /// no engine beam (its TDF `intensity=0` is invisible by design),
+    /// no impact burst (`explosiongenerator=custom:none`), no
+    /// synthesized muzzle flash.
+    #[test]
+    fn gauss_cannon_spawns_arc_instead_of_beam() {
+        let mut app = fx_app();
+        let mut weapons = WeaponRegistry::default();
+        let gauss = weapons.insert_for_test("GaussCannon", beam_def());
+        app.insert_resource(weapons);
+
+        app.world_mut()
+            .resource_mut::<PendingAttacks>()
+            .events
+            .push(AttackEvent {
+                attacker_pos: Vec3::ZERO,
+                target_pos: Vec3::new(200.0, 0.0, 0.0),
+                weapon_id: gauss,
+                muzzle_ceg: None,
+                delayed_hit: None,
+            });
+
+        app.world_mut()
+            .run_system_once(spawn_weapon_visuals)
+            .unwrap();
+
+        let mut world = app.world_mut();
+        let arcs = world
+            .query_filtered::<&LightningArc, ()>()
+            .iter(&world)
+            .count();
+        let beams = world
+            .query_filtered::<&BeamVisual, ()>()
+            .iter(&world)
+            .count();
+        let impacts = world
+            .query_filtered::<&ImpactBurst, ()>()
+            .iter(&world)
+            .count();
+        assert_eq!(arcs, 1, "gauss shot must spawn exactly one arc");
+        assert_eq!(beams, 0, "gauss beam is invisible upstream (intensity=0)");
+        assert_eq!(impacts, 0, "gauss impact CEG is custom:none upstream");
+    }
+
+    /// Ordinary beam weapons keep their regular visuals — the arc path
+    /// must not swallow them.
+    #[test]
+    fn regular_beam_laser_still_spawns_beam() {
+        let mut app = fx_app();
+        let mut weapons = WeaponRegistry::default();
+        let id = weapons.insert_for_test("PacketBeam", beam_def());
+        app.insert_resource(weapons);
+
+        app.world_mut()
+            .resource_mut::<PendingAttacks>()
+            .events
+            .push(AttackEvent {
+                attacker_pos: Vec3::ZERO,
+                target_pos: Vec3::new(100.0, 0.0, 0.0),
+                weapon_id: id,
+                muzzle_ceg: None,
+                delayed_hit: None,
+            });
+
+        app.world_mut()
+            .run_system_once(spawn_weapon_visuals)
+            .unwrap();
+
+        let mut world = app.world_mut();
+        let arcs = world
+            .query_filtered::<&LightningArc, ()>()
+            .iter(&world)
+            .count();
+        let beams = world
+            .query_filtered::<&BeamVisual, ()>()
+            .iter(&world)
+            .count();
+        assert_eq!(arcs, 0);
+        assert!(beams > 0, "BeamLaser weapons must keep their beams");
+    }
 }

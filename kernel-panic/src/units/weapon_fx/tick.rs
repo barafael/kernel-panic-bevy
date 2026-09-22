@@ -5,18 +5,18 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
 use super::shared::{
-    BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, GroundFlash, ImpactBurst, LaserBolt,
-    Flight, PendingExplosions, ProjectileVisual, TRAIL_SAMPLE_COUNT,
+    BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, Flight, GroundFlash, ImpactBurst,
+    LaserBolt, LightningArc, PendingExplosions, ProjectileVisual, TRAIL_SAMPLE_COUNT,
 };
 use crate::rendering::camera::RtsCamera;
 use bevy::ecs::system::SystemParam;
 
+use super::ceg::{CegTrailCtx, spawn_ceg};
 use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
 use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
-use crate::units::content::weapons::WeaponRegistry;
 #[cfg(test)]
 use crate::units::content::weapons::WeaponId;
-use super::ceg::{CegTrailCtx, spawn_ceg};
+use crate::units::content::weapons::WeaponRegistry;
 use crate::units::spatial::SpatialIndex;
 
 /// Engine-faithful missile steering (`MissileProjectile.cpp`):
@@ -42,7 +42,6 @@ fn steer_toward(dir: Vec3, desired: Vec3, turn_rate: f32, dt: f32) -> Vec3 {
     }
 }
 
-
 /// Grouped read-only inputs for the volumetric mid-flight collision
 /// pass: target volumes, attacker team/faction (for the friendly
 /// filter), and the broad-phase spatial index. Bundled as a
@@ -57,6 +56,7 @@ pub(super) struct VolumeHitCtx<'w, 's> {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn tick_weapon_fx(
     time: Res<Time>,
+    mut arcs: Query<(Entity, &mut LightningArc)>,
     mut beams: Query<(Entity, &mut BeamVisual, &mut Transform), Without<ProjectileVisual>>,
     mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
     mut bolts: Query<
@@ -106,6 +106,49 @@ pub(super) fn tick_weapon_fx(
         .single()
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
+
+    // GaussCannon lightning arcs (upstream network_arceffect.lua).
+    // Rewrite each segment's 4 corners as a camera-facing ribbon and
+    // fade via vertex colors — the shared additive material is never
+    // touched.
+    for (entity, mut arc) in &mut arcs {
+        arc.lifetime -= dt;
+        if arc.lifetime <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let fade = (arc.lifetime / arc.max_lifetime).clamp(0.0, 1.0);
+        let half = arc.width;
+        let Some(mesh) = ceg_ctx.meshes.get_mut(&arc.mesh) else {
+            continue;
+        };
+        let segments = arc.points.len().saturating_sub(1);
+        if segments == 0 {
+            continue;
+        }
+        let mut positions = Vec::with_capacity(segments * 4);
+        let mut colors = Vec::with_capacity(segments * 4);
+        for pair in arc.points.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let seg_dir = (b - a).try_normalize().unwrap_or(Vec3::Z);
+            let to_cam = cam_pos - a;
+            let perp = to_cam
+                .cross(seg_dir)
+                .try_normalize()
+                .unwrap_or_else(|| Vec3::Y.cross(seg_dir).try_normalize().unwrap_or(Vec3::X));
+            let offset = perp * half;
+            positions.push([a.x - offset.x, a.y - offset.y, a.z - offset.z]);
+            positions.push([a.x + offset.x, a.y + offset.y, a.z + offset.z]);
+            positions.push([b.x + offset.x, b.y + offset.y, b.z + offset.z]);
+            positions.push([b.x - offset.x, b.y - offset.y, b.z - offset.z]);
+            let c = arc.tint.to_f32_array();
+            for _ in 0..4 {
+                colors.push([c[0], c[1], c[2], c[3] * fade]);
+            }
+        }
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    }
 
     // Hit-scan beams (BeamLaser / BuildLaser). Rewrite the 4 corners
     // each frame so the ribbon always faces the camera — same xdir
@@ -879,10 +922,10 @@ fn rewrite_quad_color(mesh: &mut Mesh, rgba: [f32; 4]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use bevy::ecs::system::RunSystemOnce;
-    use crate::units::assets::meshes::S3OModelCache;
     use super::super::ceg::{CegParticleMesh, CegRegistry};
+    use super::*;
+    use crate::units::assets::meshes::S3OModelCache;
+    use bevy::ecs::system::RunSystemOnce;
 
     /// Traveling weapons MUST defer damage + impact CEG until the bolt's
     /// lead reaches the target. Bolt flies for 1 s: first tick
@@ -1364,10 +1407,16 @@ mod tests {
                     trail: None,
                     flight,
                     velocity: match flight {
-                        Flight::Missile { launch_dir, launch_speed, .. }
-                        | Flight::Starburst { launch_dir, launch_speed, .. } => {
-                            launch_dir * launch_speed
+                        Flight::Missile {
+                            launch_dir,
+                            launch_speed,
+                            ..
                         }
+                        | Flight::Starburst {
+                            launch_dir,
+                            launch_speed,
+                            ..
+                        } => launch_dir * launch_speed,
                         Flight::Ballistic { velocity, .. } => velocity,
                         Flight::Direct => Vec3::ZERO,
                     },
@@ -1387,11 +1436,7 @@ mod tests {
             .id()
     }
 
-    fn run_ticks(
-        app: &mut App,
-        dt_ms: u64,
-        count: usize,
-    ) -> std::collections::HashMap<u32, ()> {
+    fn run_ticks(app: &mut App, dt_ms: u64, count: usize) -> std::collections::HashMap<u32, ()> {
         // Tracks the highest Y reached by any still-live projectile per
         // frame; despawned (arrived) projectiles drop out of the query.
         for _ in 0..count {
@@ -1443,8 +1488,14 @@ mod tests {
                 read.translation
             );
         }
-        assert!(max_y > 4.0, "expected a visible up-kick from the 45° launch, got {max_y}");
-        assert!(arrived, "missile should arrive at the target within 3.2s of flight");
+        assert!(
+            max_y > 4.0,
+            "expected a visible up-kick from the 45° launch, got {max_y}"
+        );
+        assert!(
+            arrived,
+            "missile should arrive at the target within 3.2s of flight"
+        );
         assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
         let dmg = app
             .world()
@@ -1534,7 +1585,10 @@ mod tests {
         let velocity = Vec3::X * (v * cos_theta) + Vec3::Y * (v * cos_theta * tan_theta);
         let proj = spawn_flight_projectile(
             &mut app,
-            Flight::Ballistic { velocity, gravity: g },
+            Flight::Ballistic {
+                velocity,
+                gravity: g,
+            },
             origin,
             target,
             velocity.length(),

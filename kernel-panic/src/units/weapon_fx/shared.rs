@@ -102,6 +102,76 @@ pub struct PendingExplosions {
     pub events: Vec<ExplosionEvent>,
 }
 
+/// Upstream `LuaRules/Gadgets/network_arceffect.lua`: the Connection's
+/// GaussCannon is drawn as a procedural jagged lightning bolt instead of
+/// the engine beam — the weapon's TDF `intensity=0` makes the ordinary
+/// beam invisible by design, and `explosiongenerator=custom:none`
+/// suppresses the impact burst too.
+///
+/// One entity per shot. `points` is a polyline of `SEGMENTS + 1` world
+/// positions from muzzle to impact: the straight connecting line plus a
+/// 160-elmo arch at the midpoint (`arch = 160 · (1 − (2t−1)²)`), with
+/// per-point jitter up to ±15 elmos shrinking toward the ends — both
+/// numbers lifted verbatim from the gadget's `BuildArc`.
+#[derive(Component)]
+pub(super) struct LightningArc {
+    pub points: Vec<Vec3>,
+    /// Half-width of the camera-facing ribbon, in elmos. The gadget
+    /// draws with GL line width 4; as a world-space ribbon 3 reads the
+    /// same at battle distances.
+    pub width: f32,
+    pub lifetime: f32,
+    pub max_lifetime: f32,
+    pub mesh: Handle<Mesh>,
+    /// Per-shot tint (electric green with randomized red/blue), applied
+    /// through vertex colors so the shared white material in
+    /// [`BeamMaterialCache`] is never cloned per arc.
+    pub tint: LinearRgba,
+}
+
+/// Build an empty triangle-list mesh for a [`LightningArc`] of
+/// `segments` quads — 4 vertices per segment, both winding orders so
+/// the ribbon reads from either side. `tick_weapon_fx` rewrites the
+/// positions every frame to face the camera (same pattern as
+/// [`BeamVisual`] / [`LaserBolt`]); colors carry the per-arc tint ×
+/// lifetime fade.
+pub(super) fn build_arc_mesh(segments: usize) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+
+    let verts = segments * 4;
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; verts]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0_f32]; verts]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; verts]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0_f32; 4]; verts]);
+    let mut indices = Vec::with_capacity(segments * 12);
+    for s in 0..segments as u32 {
+        let b = s * 4;
+        // bl, br, tr, tl — both orientations, matching
+        // `build_billboard_quad_mesh`.
+        indices.extend_from_slice(&[
+            b,
+            b + 1,
+            b + 2,
+            b,
+            b + 2,
+            b + 3,
+            b,
+            b + 2,
+            b + 1,
+            b,
+            b + 3,
+            b + 2,
+        ]);
+    }
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
 /// A hitscan beam (Spring `BeamLaser`) drawn as a camera-facing
 /// ribbon from `start` to `end`.
 ///
@@ -242,7 +312,11 @@ pub enum Flight {
     /// along `launch_dir`, then steers onto the target with a
     /// turn-rate cap (`weaponDef->turnrate`, radians/s — the spawn side
     /// converts the TDF's TA angle units).
-    Missile { launch_dir: Vec3, launch_speed: f32, turn_rate: f32 },
+    Missile {
+        launch_dir: Vec3,
+        launch_speed: f32,
+        turn_rate: f32,
+    },
     /// Starburst (`weapontype=StarburstLauncher` + `fixedLauncher` —
     /// Flow's FlowMissile): launches straight up along the fixed
     /// weapon dir, accelerates, and homes after the `weapontimer`

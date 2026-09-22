@@ -58,10 +58,13 @@ impl ShieldState {
 }
 
 /// Shield weapon name for a given unit kind. Returns `None` for units
-/// that don't carry a shield.
+/// that don't carry a shield. Upstream wires `homebaseshieldgood` into
+/// weapon slot 2 of kernel / hole / carrier (see carrier.fbi — the
+/// slot-1 BuildLaser exists only to keep Spring from reordering the
+/// slots), and `minifacshieldgood` into the small structures.
 pub fn shield_weapon_for(kind: UnitKind) -> Option<&'static str> {
     match kind {
-        UnitKind::Kernel | UnitKind::Hole => Some("homebaseshieldgood"),
+        UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier => Some("homebaseshieldgood"),
         UnitKind::Socket
         | UnitKind::Window
         | UnitKind::Port
@@ -153,6 +156,126 @@ pub fn attach_shields(
     }
 }
 
+// --- Shield shell visuals ------------------------------------------------
+//
+// Upstream's shield weapons set `visibleshield=1` so the engine draws a
+// hex-textured repulsor dome (green at full power, red when down —
+// `onsshield.tdf` colors + `texture1=hexgrid`). We approximate that with
+// an unlit translucent sphere child, tinted by the remaining power
+// ratio: full → upstream's `shieldColonColor` green `0 0.5 0`, empty →
+// red `0.5 0 0` with the shell fading to `Visibility::Hidden` so a
+// collapsed shield stops advertising invulnerability. Only ONS mode has
+// `ShieldState` at all (see `attach_shields`), so sandbox games stay
+// clean.
+
+/// Full-power shell color: upstream `homebaseshieldgood`'s
+/// `shieldColonColor=0 0.5 0`, lifted to a readable alpha.
+const SHELL_COLOR_FULL: Color = Color::srgba(0.0, 0.5, 0.0, 0.16);
+/// Depleted shell color: upstream's red `0.5 0 0`.
+const SHELL_COLOR_EMPTY: Color = Color::srgba(0.5, 0.0, 0.0, 0.05);
+
+/// Marker on the translucent dome child spawned for a shielded unit.
+#[derive(Component)]
+pub struct ShieldShell;
+
+/// Shared sphere mesh for all shells (radius comes from per-entity
+/// `Transform::scale` — upstream radii are 128 for homebases, 64 for
+/// minifacs).
+#[derive(Resource, Default)]
+pub struct ShieldShellAssets {
+    mesh: Option<Handle<Mesh>>,
+}
+
+/// Spawn a dome child for every newly-shielded unit. Reads the shield
+/// radius from the unit's shield weapon def so Kernel / Hole / Carrier
+/// (128) and minifacs (64) match upstream's `shieldradius`.
+pub fn spawn_shield_shells(
+    new_shields: Query<(Entity, &UnitType), Added<ShieldState>>,
+    weapons: Res<WeaponRegistry>,
+    mut assets: ResMut<ShieldShellAssets>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    for (entity, unit) in &new_shields {
+        let Some(radius) = shield_weapon_for(unit.0)
+            .and_then(|w| weapons.get(w))
+            .map(|def| def.shield_radius)
+            .filter(|r| *r > 0.0)
+        else {
+            continue;
+        };
+        let mesh = assets
+            .mesh
+            .get_or_insert_with(|| meshes.add(Sphere::new(1.0)))
+            .clone();
+        let material = materials.add(StandardMaterial {
+            base_color: SHELL_COLOR_FULL,
+            unlit: true,
+            alpha_mode: AlphaMode::Blend,
+            // Double-sided: the camera looks at the dome from outside,
+            // but units inside still see its inner surface.
+            cull_mode: None,
+            ..default()
+        });
+        commands.entity(entity).with_children(|parent| {
+            parent.spawn((
+                ShieldShell,
+                Mesh3d(mesh),
+                MeshMaterial3d(material),
+                Transform::from_scale(Vec3::splat(radius)),
+                Visibility::Inherited,
+                InheritedVisibility::VISIBLE,
+                ViewVisibility::default(),
+            ));
+        });
+    }
+}
+
+/// Retint every shell from its owner's remaining power. Runs every
+/// frame over the (small) set of shielded units — the tint lerp is
+/// trivial and keeps the shell honest after each hit/regen tick.
+#[allow(clippy::type_complexity)]
+pub fn tick_shield_shells(
+    shields: Query<(&ShieldState, &Children)>,
+    mut shells: Query<(
+        &ShieldShell,
+        &MeshMaterial3d<StandardMaterial>,
+        &mut Visibility,
+    )>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    for (state, children) in &shields {
+        let ratio = match (state.max_power, state.current_power) {
+            // Infinite shield (upstream `shieldpower=0`): always full.
+            (None, _) => 1.0,
+            (Some(max), Some(current)) if max > 0.0 => (current / max).clamp(0.0, 1.0),
+            _ => 0.0,
+        };
+        let full = SHELL_COLOR_FULL.to_srgba();
+        let empty = SHELL_COLOR_EMPTY.to_srgba();
+        let tinted = Color::srgba(
+            empty.red + (full.red - empty.red) * ratio,
+            empty.green + (full.green - empty.green) * ratio,
+            empty.blue + (full.blue - empty.blue) * ratio,
+            empty.alpha + (full.alpha - empty.alpha) * ratio,
+        );
+        for child in children {
+            let Ok((_, material, mut visibility)) = shells.get_mut(*child) else {
+                continue;
+            };
+            if let Some(mat) = materials.get_mut(&material.0) {
+                mat.base_color = tinted;
+            }
+            *visibility = if ratio <= 0.0 {
+                Visibility::Hidden
+            } else {
+                Visibility::Inherited
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +290,11 @@ mod tests {
             shield_weapon_for(UnitKind::Hole),
             Some("homebaseshieldgood")
         );
+        // carrier.fbi wires homebaseshieldgood into weapon slot 2.
+        assert_eq!(
+            shield_weapon_for(UnitKind::Carrier),
+            Some("homebaseshieldgood")
+        );
         assert_eq!(
             shield_weapon_for(UnitKind::Socket),
             Some("minifacshieldgood")
@@ -175,7 +303,7 @@ mod tests {
             shield_weapon_for(UnitKind::Firewall),
             Some("minifacshieldgood")
         );
-        // Connection (Network homebase) has no shield in upstream.
+        // Connection (the mobile teleporter) has no shield in upstream.
         assert!(shield_weapon_for(UnitKind::Connection).is_none());
         assert!(shield_weapon_for(UnitKind::Bit).is_none());
     }
@@ -204,5 +332,114 @@ mod tests {
         assert_eq!(shield.current_power, Some(0.0));
         // Fully depleted now — damage leaks through entirely.
         assert_eq!(shield.absorb(50.0), 50.0);
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use spring_tdf::WeaponDef;
+
+    fn shell_app() -> (App, Entity) {
+        let mut app = App::new();
+        app.init_resource::<ShieldShellAssets>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<OnsMode>();
+        let mut weapons = WeaponRegistry::default();
+        weapons.insert_for_test(
+            "homebaseshieldgood",
+            WeaponDef {
+                is_shield: true,
+                shield_radius: 128.0,
+                shield_power: 0.0, // infinite, upstream homebase style
+                ..Default::default()
+            },
+        );
+        app.insert_resource(weapons);
+        app.world_mut().resource_mut::<OnsMode>().enabled = true;
+
+        let kernel = app.world_mut().spawn(UnitType(UnitKind::Kernel)).id();
+        app.world_mut().run_system_once(attach_shields).unwrap();
+        (app, kernel)
+    }
+
+    fn shell_base_color(world: &mut World) -> Srgba {
+        let (_, mat_handle) = world
+            .query::<(&ShieldShell, &MeshMaterial3d<StandardMaterial>)>()
+            .single(world)
+            .unwrap()
+            .clone();
+        world
+            .get_resource::<Assets<StandardMaterial>>()
+            .unwrap()
+            .get(&mat_handle.0)
+            .unwrap()
+            .base_color
+            .to_srgba()
+    }
+
+    /// A shielded unit grows a dome child scaled to the weapon's
+    /// `shieldradius`, and the tint tracks the remaining power:
+    /// full → upstream green, half → halfway toward red, empty → the
+    /// shell hides instead of advertising protection.
+    #[test]
+    fn shell_spawn_scale_and_power_tint() {
+        let (mut app, kernel) = shell_app();
+
+        // attach_shields must have granted an infinite pool.
+        let state = app.world().get::<ShieldState>(kernel).unwrap();
+        assert_eq!(state.max_power, None);
+
+        app.world_mut()
+            .run_system_once(spawn_shield_shells)
+            .unwrap();
+
+        let mut shell = None;
+        for child in app
+            .world()
+            .get::<Children>(kernel)
+            .expect("shell child spawned")
+            .iter()
+        {
+            if app.world().get::<ShieldShell>(child).is_some() {
+                shell = Some(child);
+            }
+        }
+        let shell = shell.expect("ShieldShell child");
+        let scale = app.world().get::<Transform>(shell).unwrap().scale.x;
+        assert_eq!(scale, 128.0, "homebase radius comes from the shield def");
+
+        // Full power (infinite → ratio 1): green dominates.
+        app.world_mut().run_system_once(tick_shield_shells).unwrap();
+        let full = shell_base_color(&mut app.world_mut());
+        assert!(
+            full.green > full.red,
+            "full shield reads green, got {full:?}"
+        );
+
+        // Half power: red channel climbs above its full-power value.
+        app.world_mut().entity_mut(kernel).insert(ShieldState {
+            max_power: Some(100.0),
+            current_power: Some(50.0),
+            regen_per_sec: 0.0,
+        });
+        app.world_mut().run_system_once(tick_shield_shells).unwrap();
+        let half = shell_base_color(&mut app.world_mut());
+        assert!(
+            half.red > full.red && half.green < full.green,
+            "half power must sit between the green and red anchors: {half:?} vs {full:?}"
+        );
+
+        // Depleted → shell hides.
+        app.world_mut().entity_mut(kernel).insert(ShieldState {
+            max_power: Some(100.0),
+            current_power: Some(0.0),
+            regen_per_sec: 0.0,
+        });
+        app.world_mut().run_system_once(tick_shield_shells).unwrap();
+        let visibility = app.world().get::<Visibility>(shell).unwrap();
+        assert_eq!(*visibility, Visibility::Hidden);
     }
 }

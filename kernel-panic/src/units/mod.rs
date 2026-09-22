@@ -59,6 +59,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<combat::DamageQueue>()
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<shield::OnsMode>()
+            .init_resource::<shield::ShieldShellAssets>()
             .init_resource::<command_fire::MineSpawnQueue>()
             .init_resource::<command_fire::SigTermAssets>()
             .add_message::<command_fire::CommandFireEvent>()
@@ -120,6 +121,17 @@ impl Plugin for UnitsPlugin {
                         spawning::emerge_system,
                     )
                         .chain()
+                        .in_set(GameplaySet::Produce),
+                    // Kept as a separate tuple only to stay under
+                    // Bevy's 21-system tuple-arity cap; `after` puts
+                    // them behind the regen pass so a shell's tint
+                    // reflects this frame's regeneration.
+                    (
+                        shield::spawn_shield_shells,
+                        shield::tick_shield_shells,
+                    )
+                        .chain()
+                        .after(shield::regen_shields)
                         .in_set(GameplaySet::Produce),
                     // Why: MuzzlePiece + AimScript must update before
                     // `combat_system` reads them. The Simulate set is
