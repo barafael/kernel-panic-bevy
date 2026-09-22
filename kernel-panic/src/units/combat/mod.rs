@@ -264,7 +264,16 @@ pub fn combat_system(
         cd.remaining = (cd.remaining - dt).max(0.0);
     }
 
-    damage_queue.clear();
+    // Why: no `damage_queue.clear()` here. The queue's lifecycle is
+    // write-then-drain: `apply_damage` (Resolve) drains it empty, and
+    // producers may push on either side of that drain in the same frame
+    // — `tick_kamikaze` runs before this system in Simulate, and
+    // `death_system` pushes `ExplodeAs` self-hits after `apply_damage`
+    // in Resolve. Clearing here destroyed both: kamikaze splash was
+    // wiped before any drain, and death-AoE sat in the queue until the
+    // next frame's clear killed it. The drain in `apply_damage` is the
+    // only consumer; a frame's damage is always delivered by the next
+    // Resolve.
 
     for (
         entity,

@@ -41,16 +41,20 @@ pub struct PendingDamage {
 }
 
 /// Pending damage to apply after combat resolution.
+///
+/// Lifecycle: producers `push` (combat shots, kamikaze triggers,
+/// death-system `ExplodeAs` self-hits), and `apply_damage` is the sole
+/// consumer, draining the queue empty each time it runs. There is
+/// deliberately **no `clear()`**: producers fire on both sides of the
+/// drain within a frame, so any eager clear would silently drop damage
+/// (that was a real bug — kamikaze splash and every death-AoE were
+/// wiped before delivery).
 #[derive(Resource, Default)]
 pub struct DamageQueue(Vec<PendingDamage>);
 
 impl DamageQueue {
     pub fn push(&mut self, damage: PendingDamage) {
         self.0.push(damage);
-    }
-
-    pub fn clear(&mut self) {
-        self.0.clear();
     }
 
     pub fn drain(&mut self) -> std::vec::Drain<'_, PendingDamage> {
@@ -818,5 +822,111 @@ mod tests {
         app.world_mut().run_system_once(tick_burst_fire).unwrap();
         assert_eq!(app.world().resource::<DamageQueue>().len(), 3);
         assert!(app.world().get::<BurstFire>(attacker).is_none());
+    }
+
+    fn death_boom_weapon() -> WeaponRegistry {
+        let mut weapons = WeaponRegistry::default();
+        weapons.insert_for_test(
+            "RegressionDeathBoom",
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 25.0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        weapons
+    }
+
+    /// Why: pins the [`DamageQueue`] lifecycle. `apply_damage` must
+    /// fully drain the queue, and entries pushed *after* a drain — the
+    /// death system's `ExplodeAs` self-hits are queued in Resolve behind
+    /// `apply_damage` — must survive until the next drain. The old
+    /// `combat_system` `clear()` at the top of the next frame destroyed
+    /// exactly those entries, silently dropping every unit's death-AoE
+    /// (RetroDeath crowd damage, Virus infection chains).
+    #[test]
+    fn damage_queue_drains_fully_and_late_pushes_survive() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<DamageQueue>()
+            .init_resource::<SpatialIndex>()
+            .insert_resource(UnitRegistry::empty())
+            .insert_resource(death_boom_weapon());
+
+        let target = app
+            .world_mut()
+            .spawn(Health::full(100.0))
+            .id();
+        app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
+            target: Some(target),
+            attacker: target,
+            weapon: "RegressionDeathBoom".to_string(),
+            impact_pos: Vec3::ZERO,
+            attacker_distance: 0.0,
+        });
+
+        // First drain: the hit lands and the queue empties.
+        app.world_mut().run_system_once(apply_damage).unwrap();
+        let health = app.world().get::<Health>(target).unwrap().current;
+        assert!((health - 75.0).abs() < 1e-4, "first hit must land, got {health}");
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 0);
+
+        // A push after the drain (what `death_system` does in Resolve,
+        // behind `apply_damage`) must still be sitting in the queue.
+        app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
+            target: Some(target),
+            attacker: target,
+            weapon: "RegressionDeathBoom".to_string(),
+            impact_pos: Vec3::ZERO,
+            attacker_distance: 0.0,
+        });
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
+
+        // Next frame's drain delivers it; no clear() in between wipes it.
+        app.world_mut().run_system_once(apply_damage).unwrap();
+        let health = app.world().get::<Health>(target).unwrap().current;
+        assert!((health - 50.0).abs() < 1e-4, "second hit must land, got {health}");
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 0);
+    }
+
+    /// Why: `combat_system` used to `damage_queue.clear()` itself on
+    /// entry, which destroyed `tick_kamikaze`'s push (it runs earlier in
+    /// the Simulate chain, before this system) before any drain saw it.
+    /// The system must treat the queue as append-only and leave
+    /// consumption to `apply_damage`.
+    #[test]
+    fn combat_system_preserves_preexisting_queue_entries() {
+        use bevy::ecs::system::RunSystemOnce;
+        use crate::units::combat::combat_system;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .init_resource::<SpatialIndex>()
+            .insert_resource(UnitRegistry::empty())
+            .insert_resource(WeaponRegistry::default());
+
+        // What `tick_kamikaze` pushes earlier in the same Simulate frame.
+        let kamikaze = app.world_mut().spawn_empty().id();
+        app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
+            target: Some(kamikaze),
+            attacker: kamikaze,
+            weapon: "logic_bomb".to_string(),
+            impact_pos: Vec3::ZERO,
+            attacker_distance: 0.0,
+        });
+
+        app.world_mut().run_system_once(combat_system).unwrap();
+
+        assert_eq!(
+            app.world().resource::<DamageQueue>().len(),
+            1,
+            "combat_system must not clear pre-existing queue entries — \
+             they are delivered by the next apply_damage drain",
+        );
     }
 }
