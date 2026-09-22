@@ -100,8 +100,11 @@ pub fn update_cloak_visibility(
     fog: Res<FogEnabled>,
     player: Res<PlayerTeam>,
     unit_registry: Res<UnitRegistry>,
+    spatial: Res<crate::units::spatial::SpatialIndex>,
     detectors_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
-    mut cloaked_q: Query<(&TeamId, &GlobalTransform, &mut Visibility), With<Cloaked>>,
+    mut cloaked_q: Query<(Entity, &TeamId, &mut Visibility), With<Cloaked>>,
+    // Retained across frames so the refresh tick doesn't reallocate.
+    mut detected: Local<std::collections::HashSet<Entity>>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < VISIBILITY_REFRESH_INTERVAL {
@@ -121,27 +124,38 @@ pub fn update_cloak_visibility(
         return;
     }
 
-    let detectors: Vec<(Vec3, f32)> = detectors_q
+    // Invert the scan: instead of testing every cloaked unit against
+    // every detector (O(detectors × cloaked) at the refresh cadence),
+    // radius-query the shared spatial index once per detector and mark
+    // the detected enemy entities. Detector positions come from the
+    // Simulate-head snapshot — at most one sim tick stale, invisible at
+    // a 10 Hz visibility refresh.
+    detected.clear();
+    detectors_q
         .iter()
         .filter(|(team, _, _)| player.matches(team))
         .filter_map(|(_, ut, gtf)| {
             let radar = unit_registry.radar_distance(ut.0);
-            (radar > 0.0).then(|| (gtf.translation(), radar * radar))
+            (radar > 0.0).then(|| (gtf.translation(), radar))
         })
-        .collect();
+        .for_each(|(dp, radar)| {
+            spatial.query_radius(dp, radar, |candidate| {
+                if candidate.team != player.0 .0
+                    && candidate.pos.distance_squared(dp) <= radar * radar
+                {
+                    detected.insert(candidate.entity);
+                }
+            });
+        });
 
-    for (team, gtf, mut vis) in &mut cloaked_q {
+    for (entity, team, mut vis) in &mut cloaked_q {
         if player.matches(team) {
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }
             continue;
         }
-        let pos = gtf.translation();
-        let detected = detectors
-            .iter()
-            .any(|(dp, radar_sq)| pos.distance_squared(*dp) <= *radar_sq);
-        let target = if detected {
+        let target = if detected.contains(&entity) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -263,6 +277,7 @@ pub fn update_fog_visibility(
     fog: Res<FogEnabled>,
     player: Res<PlayerTeam>,
     unit_registry: Res<UnitRegistry>,
+    spatial: Res<crate::units::spatial::SpatialIndex>,
     viewers_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
     mut targets_q: Query<
         (
@@ -275,6 +290,8 @@ pub fn update_fog_visibility(
         (With<UnitType>, Without<Cloaked>, Without<Dying>),
     >,
     mut commands: Commands,
+    // Retained across frames so the refresh tick doesn't reallocate.
+    mut in_sight: Local<std::collections::HashSet<Entity>>,
 ) {
     *timer += time.delta_secs();
     if *timer < VISIBILITY_REFRESH_INTERVAL {
@@ -298,18 +315,28 @@ pub fn update_fog_visibility(
         return;
     }
 
-    // Player-team viewers and their sight-radius squares. Empty if
-    // the player has no units alive (then everything is hidden).
-    let viewers: Vec<(Vec3, f32)> = viewers_q
+    // Invert the scan: instead of testing every target against every
+    // viewer (O(viewers × targets) at the refresh cadence), radius-query
+    // the shared spatial index once per viewer and mark the enemy
+    // entities that are in sight. Viewer positions come from the
+    // Simulate-head snapshot — at most one sim tick stale, invisible at
+    // a 10 Hz visibility refresh.
+    in_sight.clear();
+    viewers_q
         .iter()
         .filter(|(team, _, _)| player.matches(team))
-        .map(|(_, ut, gtf)| {
-            let sight = unit_registry.sight_distance(ut.0);
-            (gtf.translation(), sight * sight)
-        })
-        .collect();
+        .map(|(_, ut, gtf)| (gtf.translation(), unit_registry.sight_distance(ut.0)))
+        .for_each(|(vp, sight)| {
+            spatial.query_radius(vp, sight, |candidate| {
+                if candidate.team != player.0 .0
+                    && candidate.pos.distance_squared(vp) <= sight * sight
+                {
+                    in_sight.insert(candidate.entity);
+                }
+            });
+        });
 
-    for (entity, team, gtf, mut vis, was_spotted) in &mut targets_q {
+    for (entity, team, _gtf, mut vis, was_spotted) in &mut targets_q {
         // Friendly units always visible to the player; their Spotted
         // marker stays in sync so the minimap shows them.
         if player.matches(team) {
@@ -322,10 +349,7 @@ pub fn update_fog_visibility(
             continue;
         }
 
-        let pos = gtf.translation();
-        let in_sight = viewers
-            .iter()
-            .any(|(vp, sight_sq)| pos.distance_squared(*vp) <= *sight_sq);
+        let in_sight = in_sight.contains(&entity);
 
         if in_sight {
             if !was_spotted {

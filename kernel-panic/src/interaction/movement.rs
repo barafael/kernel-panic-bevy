@@ -248,9 +248,10 @@ pub fn movement_system(
     circular_flow: Option<Res<CircularFlow>>,
     mut m: MovementQuery,
     // Reused across frames so the full-unit snapshot doesn't reallocate
-    // each tick. Dropped in favor of a spatial-hash neighborhood query
-    // eventually, but the allocation hoist is a free win until then.
+    // each tick.
     mut snapshot: Local<Vec<UnitSnapshot>>,
+    // Retained grid buckets over `snapshot` — same hoist trick.
+    mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
 ) {
     let MovementQuery {
         ref mut query,
@@ -276,6 +277,23 @@ pub fn movement_system(
                 stationary: target.is_none(),
             }),
     );
+
+    // Index the snapshot into a retained cell grid so each moving unit
+    // resolves against its neighbours instead of the whole army. Buckets
+    // clear (not reallocate) each frame, mirroring `unit_separation_system`.
+    grid.clear();
+    let mut max_ground_radius = 0.0_f32;
+    for (idx, entry) in snapshot.iter().enumerate() {
+        if !entry.flying {
+            grid.entry(cell_of(entry.pos.x, entry.pos.z)).or_default().push(idx);
+            max_ground_radius = max_ground_radius.max(entry.radius);
+        }
+    }
+    let grid = SnapshotGrid {
+        entries: &snapshot,
+        cells: &grid,
+        max_ground_radius,
+    };
 
     let mut pathfinds_used: usize = 0;
 
@@ -462,7 +480,7 @@ pub fn movement_system(
         // reached so we don't keep pushing through a crowd that's arrived.
         let arrival_threshold = (self_radius + 2.0).max(8.0);
         if distance < arrival_threshold
-            || waypoint_blocked_by_arrived_unit(entity, goal, self_radius, &snapshot)
+            || waypoint_blocked_by_arrived_unit(entity, goal, self_radius, &grid)
         {
             path.current += 1;
             continue;
@@ -555,7 +573,7 @@ pub fn movement_system(
         let resolved = if flying {
             desired
         } else {
-            resolve_motion(entity, current, desired, self_radius, speed, &snapshot)
+            resolve_motion(entity, current, desired, self_radius, speed, &grid)
         };
 
         // Slope gate: signed, so descents always pass — a unit can
@@ -683,13 +701,64 @@ pub fn rotate_toward_xz(from: Vec3, to: Vec3, max_turn: f32) -> Vec3 {
 ///
 /// Returns the delta to add to the unit's position this frame. Only the XZ
 /// plane is considered.
-fn resolve_motion(
+/// Cell size for the movement snapshot grid. Generous enough that a
+/// typical query (self radius + largest footprint + one frame's step,
+/// ~90 elmos worst case) touches at most the 5×5 block around its cell.
+const SNAPSHOT_CELL: f32 = 64.0;
+
+fn cell_of(x: f32, z: f32) -> (i32, i32) {
+    (
+        (x / SNAPSHOT_CELL).floor() as i32,
+        (z / SNAPSHOT_CELL).floor() as i32,
+    )
+}
+
+/// Uniform grid over a frame's [`UnitSnapshot`]s. `resolve_motion` and
+/// `waypoint_blocked_by_arrived_unit` used to scan the entire snapshot
+/// per moving unit — O(moving × N), the dominant cost in big battles.
+/// A query visits only the cells its search circle overlaps, so the
+/// scan shrinks to the units actually nearby.
+struct SnapshotGrid<'a> {
+    entries: &'a [UnitSnapshot],
+    cells: &'a HashMap<(i32, i32), Vec<usize>>,
+    /// Largest radius among non-flying entries — lets callers bound a
+    /// search circle without a second pass.
+    max_ground_radius: f32,
+}
+
+impl SnapshotGrid<'_> {
+    /// Invoke `f` for every non-flying entry whose center lies within
+    /// `radius` elmos of (x, z) *by cell distance* — i.e. a superset of
+    /// the true circle. Callers do the exact distance test inside `f`.
+    fn for_each_near(
+        &self,
+        x: f32,
+        z: f32,
+        radius: f32,
+        mut f: impl FnMut(&UnitSnapshot),
+    ) {
+        let (cx, cz) = cell_of(x, z);
+        let r = (radius / SNAPSHOT_CELL).ceil() as i32;
+        for dx in -r..=r {
+            for dz in -r..=r {
+                let Some(bucket) = self.cells.get(&(cx + dx, cz + dz)) else {
+                    continue;
+                };
+                for &i in bucket {
+                    f(&self.entries[i]);
+                }
+            }
+        }
+    }
+}
+
+ fn resolve_motion(
     self_entity: Entity,
     origin: Vec3,
     desired: Vec3,
     self_radius: f32,
     self_speed: f32,
-    snapshot: &[UnitSnapshot],
+    snapshot: &SnapshotGrid,
 ) -> Vec3 {
     let desired_xz = Vec3::new(desired.x, 0.0, desired.z);
     let desired_len = desired_xz.length();
@@ -705,28 +774,27 @@ fn resolve_motion(
 
     let mut push = Vec3::ZERO;
 
-    for other in snapshot {
+    // Contact is tested at the *end* of the desired step, so the search
+    // circle must cover the step length too.
+    let search_radius = desired_len + self_radius + snapshot.max_ground_radius;
+    let new_origin = origin + desired_xz;
+    snapshot.for_each_near(new_origin.x, new_origin.z, search_radius, |other| {
         if other.entity == self_entity || other.flying {
             // Skip self and any airborne unit: the caller only invokes
             // this for ground units (fliers bypass collision entirely),
             // and a flier overhead shouldn't obstruct a walker below.
-            continue;
+            return;
         }
         let sum_r = self_radius + other.radius;
-
-        // Predict the contact at the *end* of the desired step. This is
-        // what converts "two units walking toward each other through
-        // empty space" into an actual collision response this frame.
-        let new_origin = origin + desired_xz;
-        let sep = Vec3::new(new_origin.x - other.pos.x, 0.0, new_origin.z - other.pos.z);
-        let dist = sep.length();
-        if dist >= sum_r {
-            continue;
-        }
 
         // Penetration depth once we take the step. Capped at sum_r so
         // a deep overlap (e.g. from a spawn on top of someone) still
         // produces a bounded correction.
+        let sep = Vec3::new(new_origin.x - other.pos.x, 0.0, new_origin.z - other.pos.z);
+        let dist = sep.length();
+        if dist >= sum_r {
+            return;
+        }
         let penetration = (sum_r - dist).min(sum_r);
 
         // Direction from the obstacle toward us. If we're exactly on
@@ -765,7 +833,7 @@ fn resolve_motion(
         let side_sign = if right.dot(away) >= 0.0 { 1.0 } else { -1.0 };
         let slide_strength = penetration * 0.6 * other_share;
         push += right * side_sign * slide_strength;
-    }
+    });
 
     // The final displacement is the desired step plus the accumulated
     // push. Cap total motion to desired_len so the resolver never moves
@@ -790,17 +858,21 @@ fn waypoint_blocked_by_arrived_unit(
     self_entity: Entity,
     waypoint: Vec3,
     self_radius: f32,
-    snapshot: &[UnitSnapshot],
+    snapshot: &SnapshotGrid,
 ) -> bool {
-    snapshot.iter().any(|other| {
-        if other.entity == self_entity || !other.stationary {
-            return false;
+    let mut blocked = false;
+    snapshot.for_each_near(waypoint.x, waypoint.z, self_radius + snapshot.max_ground_radius, |other| {
+        if blocked || other.entity == self_entity || !other.stationary {
+            return;
         }
         let r = self_radius + other.radius;
         let dx = other.pos.x - waypoint.x;
         let dz = other.pos.z - waypoint.z;
-        dx * dx + dz * dz < r * r
-    })
+        if dx * dx + dz * dz < r * r {
+            blocked = true;
+        }
+    });
+    blocked
 }
 
 /// Safety-net that unsticks mobile units that *are already overlapping*,
