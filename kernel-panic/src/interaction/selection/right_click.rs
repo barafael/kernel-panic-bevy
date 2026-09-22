@@ -107,6 +107,23 @@ pub struct PendingMoveIndicators {
     pub markers: Vec<(Vec3, OrderMarker)>,
 }
 
+/// Grouped lookup queries for `handle_right_click`, keeping the system
+/// under Bevy's 16-parameter limit (adding the UI-interaction guard and
+/// target-type lookup pushed the flat signature to 17).
+#[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)]
+struct RightClickLookups<'w, 's> {
+    windows: Query<'w, 's, &'static Window>,
+    camera_q: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<RtsCamera>>,
+    unit_root_q: Query<'w, 's, Entity, With<UnitType>>,
+    parent_q: Query<'w, 's, &'static ChildOf>,
+    unit_info_q: Query<'w, 's, (&'static TeamId, &'static Faction)>,
+    target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
+    target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
+    move_target_q: Query<'w, 's, (), With<MoveTarget>>,
+    ui_interactions: Query<'w, 's, &'static Interaction>,
+}
+
 /// Right-click: single click moves all selected to one point — unless the
 /// click lands on an enemy unit, in which case every selected *armed* unit
 /// attacks it instead (Spring's default attack order). Right-drag: sample a
@@ -115,21 +132,38 @@ pub struct PendingMoveIndicators {
 fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
     selected_q: Query<(Entity, &Transform, &UnitType), With<Selected>>,
-    unit_root_q: Query<Entity, With<UnitType>>,
-    parent_q: Query<&ChildOf>,
-    unit_info_q: Query<(&TeamId, &Faction)>,
-    target_gtf_q: Query<&GlobalTransform>,
-    move_target_q: Query<(), With<MoveTarget>>,
+    lookups: RightClickLookups,
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
     mut drag_path: ResMut<RightDragPath>,
     mut pending: ResMut<PendingMoveIndicators>,
 ) {
+    let RightClickLookups {
+        windows,
+        camera_q,
+        unit_root_q,
+        parent_q,
+        unit_info_q,
+        target_gtf_q,
+        target_type_q,
+        move_target_q,
+        ui_interactions,
+    } = lookups;
     if mouse.just_pressed(MouseButton::Right) {
+        // A press that starts over a live UI node (minimap, order
+        // palette, HUD) belongs to the UI. Without this guard the
+        // cursor's ray still reaches the terrain underneath the panel
+        // and the player right-clicking the minimap quietly issues a
+        // move order to the world point below it.
+        if ui_interactions
+            .iter()
+            .any(|i| matches!(i, Interaction::Pressed | Interaction::Hovered))
+        {
+            return;
+        }
+
         drag_path.points.clear();
         drag_path.active = true;
 
@@ -168,22 +202,18 @@ fn handle_right_click(
             // Single-point order. First check for a right-click ON a unit:
             // an enemy under the cursor turns the order into an attack for
             // every selected armed unit (unarmed units move as usual).
-            let clicked_enemy = unit_hit(
-                &windows,
-                &camera_q,
-                &mut ray_cast,
-                &unit_root_q,
-                &parent_q,
-            )
-            .filter(|&target| {
-                unit_info_q
-                    .get(target)
-                    .ok()
-                    .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
-                    .is_some_and(|((t_team, t_faction), (m_team, m_faction))| {
-                        !is_friendly(m_team.0, *m_faction, t_team.0, *t_faction)
-                    })
-            });
+            let clicked_enemy =
+                unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q).filter(
+                    |&target| {
+                        unit_info_q
+                            .get(target)
+                            .ok()
+                            .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
+                            .is_some_and(|((t_team, t_faction), (m_team, m_faction))| {
+                                !is_friendly(m_team.0, *m_faction, t_team.0, *t_faction)
+                            })
+                    },
+                );
 
             if let Some(target_unit) = clicked_enemy {
                 let target_pos = target_gtf_q
@@ -193,6 +223,16 @@ fn handle_right_click(
                 let mut any_armed = false;
                 for (entity, _, unit) in &selected_q {
                     if unit_registry.weapon(unit.0).is_empty() {
+                        continue;
+                    }
+                    // Upstream `OnlyTargetCategory1` gates explicit
+                    // attack orders too — a DOS physically cannot
+                    // attack a building, so issuing one is refused and
+                    // the unit holds position rather than chasing.
+                    let target_kind = target_type_q.get(target_unit).map(|ut| ut.0);
+                    if let Ok(target_kind) = target_kind
+                        && !unit_registry.can_attack(unit.0, target_kind)
+                    {
                         continue;
                     }
                     any_armed = true;
@@ -275,8 +315,7 @@ fn handle_right_click(
 /// attack supersedes. The explicit attack also supersedes a manual (T)
 /// target designation.
 fn issue_attack_order(entity: Entity, target: Entity, commands: &mut Commands) {
-    super::super::clear_orders(&mut commands.entity(entity))
-        .insert(AttackTargetOrder { target });
+    super::super::clear_orders(&mut commands.entity(entity)).insert(AttackTargetOrder { target });
 }
 
 /// Apply a positional command to a unit, either replacing its current order
@@ -315,9 +354,7 @@ pub(crate) fn apply_ordered_command(
             QueuedCommand::BuildAt { kind, site } => {
                 ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
             }
-            QueuedCommand::Move(_)
-            | QueuedCommand::Patrol(_)
-            | QueuedCommand::Guard(_) => {
+            QueuedCommand::Move(_) | QueuedCommand::Patrol(_) | QueuedCommand::Guard(_) => {
                 ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
             }
             QueuedCommand::AttackMove(_) => {
@@ -483,4 +520,159 @@ fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map_loading::TerrainChunkMarker;
+    use crate::units::content::definitions::UnitKind;
+    use bevy::camera::primitives::Aabb;
+    use bevy::camera::visibility::SetViewVisibility;
+    use bevy::camera::{ComputedCameraValues, RenderTargetInfo, Viewport};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::math::primitives::Cuboid;
+    use bevy::math::{DVec2, Vec3A};
+    use bevy::mesh::Mesh;
+
+    /// Headless scene: 100x100 viewport with the cursor dead-centre,
+    /// camera 100 units above the origin looking straight down, and a
+    /// wide flat terrain box — so a right-click ray hits (0, 0.5, 0).
+    fn world_with_camera_and_terrain() -> World {
+        // `cast_ray` culls candidates with `par_iter`.
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.insert_resource(UnitRegistry::empty());
+        world.init_resource::<RightDragPath>();
+        world.init_resource::<PendingMoveIndicators>();
+
+        let mut window = Window::default();
+        window.set_physical_cursor_position(Some(DVec2::new(50.0, 50.0)));
+        world.spawn(window);
+        world.spawn((
+            RtsCamera,
+            Camera {
+                viewport: Some(Viewport {
+                    physical_position: UVec2::ZERO,
+                    physical_size: UVec2::splat(100),
+                    ..default()
+                }),
+                computed: ComputedCameraValues {
+                    target_info: Some(RenderTargetInfo {
+                        physical_size: UVec2::splat(100),
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                ..default()
+            },
+            GlobalTransform::from(
+                Transform::from_xyz(0.0, 100.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
+            ),
+        ));
+
+        let terrain_mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(200.0, 1.0, 200.0)));
+        let terrain = world
+            .spawn((
+                TerrainChunkMarker,
+                Mesh3d(terrain_mesh),
+                Transform::default(),
+                GlobalTransform::default(),
+                InheritedVisibility::VISIBLE,
+                ViewVisibility::default(),
+                Aabb {
+                    center: Vec3A::ZERO,
+                    half_extents: Vec3A::new(100.0, 0.5, 100.0),
+                },
+            ))
+            .id();
+        {
+            let mut vv = world.get_mut::<ViewVisibility>(terrain).unwrap();
+            vv.set_visible();
+        }
+        world
+    }
+
+    /// Right-click on open ground moves the selection to the point
+    /// under the cursor.
+    #[test]
+    fn world_right_click_moves_selection() {
+        let mut world = world_with_camera_and_terrain();
+        world.spawn((
+            UnitType(UnitKind::Bit),
+            Selected,
+            Transform::from_xyz(10.0, 0.0, 10.0),
+        ));
+
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        world.run_system_once(handle_right_click).unwrap();
+
+        assert!(
+            world.resource::<RightDragPath>().active,
+            "press on open ground must start a drag",
+        );
+
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Right);
+        world.run_system_once(handle_right_click).unwrap();
+
+        let target = world
+            .query_filtered::<&MoveTarget, With<UnitType>>()
+            .single(&world)
+            .unwrap()
+            .0;
+        // Ray lands on the terrain box top (y=0.5) at the cursor's
+        // world point — dead centre of the viewport.
+        assert!((target - Vec3::new(0.0, 0.5, 0.0)).length() < 1.0);
+    }
+
+    /// Regression: a right-click that starts over a live UI node (e.g.
+    /// the minimap) must not leak a move order to the terrain hidden
+    /// underneath the panel.
+    #[test]
+    fn ui_right_click_issues_no_move_order() {
+        let mut world = world_with_camera_and_terrain();
+        world.spawn((
+            UnitType(UnitKind::Bit),
+            Selected,
+            Transform::from_xyz(10.0, 0.0, 10.0),
+        ));
+        // The UI element under the cursor.
+        world.spawn(Interaction::Hovered);
+
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+        world.run_system_once(handle_right_click).unwrap();
+
+        assert!(
+            !world.resource::<RightDragPath>().active,
+            "press over UI must not start a drag",
+        );
+
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Right);
+        world.run_system_once(handle_right_click).unwrap();
+
+        assert!(
+            world
+                .query_filtered::<Entity, With<MoveTarget>>()
+                .iter(&world)
+                .next()
+                .is_none(),
+            "no move order may leak through a UI click",
+        );
+    }
 }

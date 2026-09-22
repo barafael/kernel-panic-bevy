@@ -38,6 +38,18 @@ const DAMAGE_MODIFIER_DISABLED_THRESHOLD: f32 = 0.01;
 /// `DegreesToMaxSlope`).
 pub const DEFAULT_MAX_SLOPE_DEGREES: f32 = 36.0;
 
+/// Do the two space-separated category token lists share a token
+/// (case-insensitive)? Spring category comparisons are ASCII
+/// case-insensitive, and upstream FBI authors mix `FactoRy`-style
+/// casing freely.
+fn categories_intersect(tokens: &str, categories: &str) -> bool {
+    tokens.split_ascii_whitespace().any(|tok| {
+        categories
+            .split_ascii_whitespace()
+            .any(|c| c.eq_ignore_ascii_case(tok))
+    })
+}
+
 /// All parsed unit definitions, accessible by `UnitKind`.
 #[derive(Resource)]
 pub struct UnitRegistry {
@@ -77,6 +89,14 @@ impl UnitRegistry {
         Self {
             defs: UnitDefs::default(),
         }
+    }
+
+    /// Test-only: build a registry from hand-authored defs, so systems
+    /// under test can exercise FBI-derived behavior (target-category
+    /// gates, speed conversion) without loading disk data.
+    #[cfg(test)]
+    pub fn for_test(defs: UnitDefs) -> Self {
+        Self { defs }
     }
 
     /// Look up the raw FBI definition for a unit kind.
@@ -147,6 +167,51 @@ impl UnitRegistry {
                 .split_ascii_whitespace()
                 .any(|tok| tok.eq_ignore_ascii_case("VTOL"))
         })
+    }
+
+    /// Auto-target gate for the primary weapon, mirroring upstream FBI
+    /// `OnlyTargetCategory1` / `BadTargetCategory1` against the
+    /// candidate's `Category` list:
+    ///
+    /// - **OnlyTarget** — when non-empty, the weapon may only acquire
+    ///   candidates whose categories share at least one token. `VOID`
+    ///   (Byte's mine launcher, all build lasers) therefore disables
+    ///   auto-targeting entirely.
+    /// - **BadTarget** — candidates sharing a token are skipped by
+    ///   auto-acquisition even though they remain attackable by order
+    ///   (`BadTargetCategory1=FACTORY` on Bit/Byte/Packet: they ignore
+    ///   buildings until the player says otherwise).
+    ///
+    /// Missing FBI entries (tests with an empty registry, unnamed kinds)
+    /// leave the weapon unfiltered, matching a unit that declares no
+    /// category restrictions.
+    pub fn auto_target_allowed(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
+        let Some(attacker_def) = self.def(attacker) else {
+            return true;
+        };
+        let categories = self.def(candidate).map_or("", |d| d.category.as_str());
+        let only = attacker_def.only_target_category1.as_str();
+        if !only.is_empty() && !categories_intersect(only, categories) {
+            return false;
+        }
+        !categories_intersect(&attacker_def.bad_target_category1, categories)
+    }
+
+    /// Manual-order gate for the primary weapon. `OnlyTargetCategory1`
+    /// also blocks explicit attack orders in Spring (a DOS literally
+    /// cannot attack a building — the engine refuses the command), while
+    /// `BadTargetCategory1` only affects auto-acquisition. This checks
+    /// the OnlyTarget half only.
+    pub fn can_attack(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
+        let Some(attacker_def) = self.def(attacker) else {
+            return true;
+        };
+        let only = attacker_def.only_target_category1.as_str();
+        only.is_empty()
+            || categories_intersect(
+                only,
+                self.def(candidate).map_or("", |d| d.category.as_str()),
+            )
     }
 
     /// Max traversable slope in **Spring's encoding**: `1 - cos(deg ×
@@ -450,5 +515,77 @@ mod tests {
         let got = reg.max_slope_ratio(UnitKind::Bit);
         // 60° clamp: 1 - cos(60° × 1.5) = 1 - cos(90°) = 1.0.
         assert!((got - 1.0).abs() < 1e-5, "got {got}, expected 1.0");
+    }
+
+    /// Register two kinds with the category tables copied from the
+    /// upstream FBIs, so the target-category gates can be exercised
+    /// without loading disk data.
+    fn target_registry() -> UnitRegistry {
+        let mut defs = UnitDefs::default();
+        let bit = UnitDef {
+            category: "FAST EDIBLE UNIT NOTFACTORY TARGET".into(),
+            only_target_category1: "TARGET".into(),
+            bad_target_category1: "FACTORY".into(),
+            ..UnitDef::default()
+        };
+        let socket = UnitDef {
+            category: "EDIBLE FACTORY TARGET".into(),
+            ..UnitDef::default()
+        };
+        let dos = UnitDef {
+            category: "EDIBLE UNIT NOTFACTORY TARGET".into(),
+            only_target_category1: "UNIT".into(),
+            bad_target_category1: "FAST".into(),
+            ..UnitDef::default()
+        };
+        defs.units.insert("bit".into(), bit);
+        defs.units.insert("socket".into(), socket);
+        defs.units.insert("dos".into(), dos);
+        UnitRegistry { defs }
+    }
+
+    /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): Bits skip
+    /// buildings during auto-acquisition.
+    #[test]
+    fn bit_auto_target_ignores_factories() {
+        let reg = target_registry();
+        assert!(!reg.auto_target_allowed(UnitKind::Bit, UnitKind::Socket));
+        // A Bit remains a perfectly fine auto-target for another Bit.
+        assert!(reg.auto_target_allowed(UnitKind::Bit, UnitKind::Bit));
+    }
+
+    /// Upstream `OnlyTargetCategory1=UNIT` (dos.fbi): the DOS beam can
+    /// never target buildings — not even on a manual order.
+    #[test]
+    fn dos_cannot_attack_buildings_even_manually() {
+        let reg = target_registry();
+        assert!(!reg.can_attack(UnitKind::Dos, UnitKind::Socket));
+        assert!(reg.can_attack(UnitKind::Dos, UnitKind::Bit));
+        // BadTarget=FAST (dos.fbi) only affects auto-acquisition: the
+        // DOS won't *chase* Bits on its own, but a manual order sticks.
+        assert!(!reg.auto_target_allowed(UnitKind::Dos, UnitKind::Bit));
+        assert!(reg.can_attack(UnitKind::Dos, UnitKind::Bit));
+    }
+
+    /// `BadTargetCategory1` blocks auto-acquisition but NOT manual
+    /// orders (bit.fbi vs a Socket).
+    #[test]
+    fn bad_target_still_allows_manual_orders() {
+        let reg = target_registry();
+        assert!(reg.can_attack(UnitKind::Bit, UnitKind::Socket));
+    }
+
+    /// Registry entries without category fields (tests, unloaded kinds)
+    /// leave targeting unfiltered.
+    #[test]
+    fn missing_categories_keep_targeting_open() {
+        let reg = target_registry();
+        // Kernel is not in the fixture registry at all.
+        assert!(reg.auto_target_allowed(UnitKind::Kernel, UnitKind::Bit));
+        assert!(reg.can_attack(UnitKind::Kernel, UnitKind::Socket));
+        // `UnitRegistry::empty()` behaves the same way for every pair.
+        let empty = UnitRegistry::empty();
+        assert!(empty.auto_target_allowed(UnitKind::Bit, UnitKind::Socket));
+        assert!(empty.can_attack(UnitKind::Dos, UnitKind::Socket));
     }
 }

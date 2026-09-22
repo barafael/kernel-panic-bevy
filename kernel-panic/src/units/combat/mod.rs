@@ -392,6 +392,14 @@ pub fn combat_system(
                 if targets_mines_only && !candidate.kind.is_minekiller_target() {
                     return;
                 }
+                // Upstream `OnlyTargetCategory1` / `BadTargetCategory1`:
+                // Bits/Bytes/Packets ignore buildings until ordered not
+                // to, the Dos beam only ever looks at mobile units, and
+                // artillery won't chase FAST spam. Manual attack orders
+                // bypass this via the `can_attack` gate at order time.
+                if !unit_registry.auto_target_allowed(unit_type.0, candidate.kind) {
+                    return;
+                }
                 let dist_sq = attacker_pos.distance_squared(candidate.pos);
                 if dist_sq > range_sq {
                     return;
@@ -667,7 +675,10 @@ pub fn attack_ground_system(
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
             continue;
         }
-        if animator.and_then(|a| a.driver.is_open()).is_some_and(|open| !open) {
+        if animator
+            .and_then(|a| a.driver.is_open())
+            .is_some_and(|open| !open)
+        {
             continue;
         }
         let (weapon_id, weapon_def) = match weapon_binding {
@@ -864,22 +875,15 @@ pub fn attack_target_system(
     move_path_q: Query<&crate::interaction::movement::MovePath>,
     mut commands: Commands,
 ) {
-    for (
-        entity,
-        unit_type,
-        stats,
-        gtf,
-        order,
-        deployable,
-        animator,
-        weapon_binding,
-    ) in &attackers
-    {
+    for (entity, unit_type, stats, gtf, order, deployable, animator, weapon_binding) in &attackers {
         // Same deploy / opening gates as `attack_ground_system`.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
             continue;
         }
-        if animator.and_then(|a| a.driver.is_open()).is_some_and(|open| !open) {
+        if animator
+            .and_then(|a| a.driver.is_open())
+            .is_some_and(|open| !open)
+        {
             continue;
         }
 
@@ -939,5 +943,168 @@ pub fn attack_target_system(
                 .remove::<crate::interaction::movement::MoveTarget>()
                 .remove::<crate::interaction::movement::MovePath>();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::components::{TeamId, UnitStats};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::spatial::{SpatialEntry, SpatialIndex};
+    use bevy::ecs::system::RunSystemOnce;
+    use spring_tdf::{UnitDef, UnitDefs};
+
+    fn stats() -> UnitStats {
+        UnitStats {
+            radius: 12.0,
+            hit_radius: 20.0,
+            speed: 90.0,
+            turn_rate: 3.0,
+            can_fly: false,
+            cruise_alt: 0.0,
+            no_chase_vtol: true,
+        }
+    }
+
+    /// Category tables copied from the upstream FBIs: bit.fbi declares
+    /// `Category=FAST EDIBLE UNIT NOTFACTORY TARGET` with
+    /// `OnlyTargetCategory1=TARGET` / `BadTargetCategory1=FACTORY`;
+    /// socket.fbi declares `Category=EDIBLE FACTORY TARGET`.
+    fn bit_vs_socket_registry() -> UnitRegistry {
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                category: "FAST EDIBLE UNIT NOTFACTORY TARGET".into(),
+                only_target_category1: "TARGET".into(),
+                bad_target_category1: "FACTORY".into(),
+                weapon1: "Line".into(),
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "socket".into(),
+            UnitDef {
+                category: "EDIBLE FACTORY TARGET".into(),
+                ..UnitDef::default()
+            },
+        );
+        UnitRegistry::for_test(defs)
+    }
+
+    fn line_weapon_registry() -> WeaponRegistry {
+        let mut weapons = WeaponRegistry::default();
+        weapons.insert_for_test(
+            "Line",
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 80.0,
+                    ..Default::default()
+                },
+                range: 256.0,
+                reload_time: 0.5,
+                ..Default::default()
+            },
+        );
+        weapons
+    }
+
+    /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): a Bit must not
+    /// auto-acquire a Socket standing in weapon range — auto-targeting
+    /// ignores buildings until the player issues an explicit attack.
+    /// A Bit-vs-Bit scan under identical conditions still acquires.
+    #[test]
+    fn bit_ignores_factories_but_scans_bits() {
+        // --- Socket enemy in range: must NOT be acquired. ---
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .init_resource::<SpatialIndex>();
+        app.insert_resource(bit_vs_socket_registry());
+        let weapons = line_weapon_registry();
+        let line = weapons.intern("Line").unwrap();
+        app.insert_resource(weapons);
+
+        let bit = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Bit),
+                stats(),
+                Faction::System,
+                TeamId(0),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+                WeaponBinding(line),
+            ))
+            .id();
+        let socket = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: socket,
+                pos: Vec3::new(100.0, 0.0, 0.0),
+                team: 1,
+                faction: Faction::Hacker,
+                kind: UnitKind::Socket,
+                hp_positive: true,
+                is_flying: false,
+            });
+
+        app.world_mut().run_system_once(combat_system).unwrap();
+
+        assert!(app.world().get::<TargetCache>(bit).is_none());
+        assert!(app.world().get::<AimTarget>(bit).is_none());
+        assert!(app.world().get::<AttackCooldown>(bit).is_none());
+        assert!(app.world().resource::<DamageQueue>().is_empty());
+
+        // --- Same setup, but the enemy is another Bit: acquired. ---
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .init_resource::<SpatialIndex>();
+        app.insert_resource(bit_vs_socket_registry());
+        let weapons = line_weapon_registry();
+        let line = weapons.intern("Line").unwrap();
+        app.insert_resource(weapons);
+
+        let bit = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Bit),
+                stats(),
+                Faction::System,
+                TeamId(0),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+                WeaponBinding(line),
+            ))
+            .id();
+        let enemy_bit = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: enemy_bit,
+                pos: Vec3::new(100.0, 0.0, 0.0),
+                team: 1,
+                faction: Faction::Hacker,
+                kind: UnitKind::Bit,
+                hp_positive: true,
+                is_flying: false,
+            });
+
+        app.world_mut().run_system_once(combat_system).unwrap();
+
+        let cache = app.world().get::<TargetCache>(bit).unwrap();
+        assert_eq!(cache.target, enemy_bit);
+        // `Line` is a traveling LaserCannon: the shot goes out as an
+        // AttackEvent with a deferred `DelayedHit`, not straight into
+        // the damage queue.
+        assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
+        assert!(
+            app.world().resource::<PendingAttacks>().events[0]
+                .delayed_hit
+                .is_some()
+        );
     }
 }

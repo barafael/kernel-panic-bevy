@@ -334,7 +334,7 @@ pub fn cleanup_dying(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::assets::animation::{AnimCtx, AnimRig, UnitAnim};
+    use crate::units::assets::animation::{AnimRig, UnitAnim};
     use bevy::ecs::system::RunSystemOnce;
 
     /// A driver whose death choreography is still playing.
@@ -381,8 +381,14 @@ mod tests {
     fn busy_driver_delays_despawn() {
         let mut app = App::new();
         app.init_resource::<Time>();
-        let busy_unit = app.world_mut().spawn((Dying { timer: 2.0 }, animator(true))).id();
-        let idle_unit = app.world_mut().spawn((Dying { timer: 2.0 }, animator(false))).id();
+        let busy_unit = app
+            .world_mut()
+            .spawn((Dying { timer: 2.0 }, animator(true)))
+            .id();
+        let idle_unit = app
+            .world_mut()
+            .spawn((Dying { timer: 2.0 }, animator(false)))
+            .id();
 
         app.world_mut().run_system_once(cleanup_dying).unwrap();
 

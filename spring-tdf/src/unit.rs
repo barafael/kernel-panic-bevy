@@ -106,6 +106,18 @@ pub struct UnitDef {
     /// multiple tokens). Most KP ground units set this to `VTOL` so they
     /// ignore Flows; DOS sets it to `FACTORY` so it doesn't chase buildings.
     pub no_chase_category: String,
+    /// Primary-weapon hard target restriction (`OnlyTargetCategory1=`),
+    /// space-separated. When non-empty the weapon can only target units
+    /// whose `Category` intersects this list — manual attack orders
+    /// included (`VOID` therefore means "never auto-targets", which is
+    /// how KP gates script-fired weapons like Byte's MineLauncher).
+    pub only_target_category1: String,
+    /// Primary-weapon auto-target exclusion (`BadTargetCategory1=`),
+    /// space-separated. Units whose `Category` intersects this list are
+    /// skipped by auto-acquisition but can still be attacked manually
+    /// (Bits carry `BadTargetCategory1=FACTORY`: they ignore buildings
+    /// until ordered not to).
+    pub bad_target_category1: String,
 
     // --- Death ---
     /// Explosion type on death (`ExplodeAs=`).
@@ -231,6 +243,8 @@ impl UnitDef {
 
             category: s.string("category"),
             no_chase_category: s.string("nochasecategory"),
+            only_target_category1: s.string("onlytargetcategory1"),
+            bad_target_category1: s.string("badtargetcategory1"),
 
             explode_as: s.string("explodeas"),
             self_destruct_as: s.string("selfdestructas"),
