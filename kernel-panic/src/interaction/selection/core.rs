@@ -1,7 +1,7 @@
 //! Core selection state: hover detection, left-click + drag-box selection,
 //! and the resolve-unit-under-cursor logic shared across the sub-module.
 
-use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, RayMeshHit};
+use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayMeshHit};
 use bevy::prelude::*;
 
 use crate::rendering::camera::RtsCamera;
@@ -343,6 +343,25 @@ pub(crate) fn ground_hit(
     let ray = cursor_ray(windows, camera_q)?;
     let hits = ray_cast.cast_ray(ray, &default());
     hits.first().map(|(_, hit)| hit.point)
+}
+
+/// Like [`ground_hit`], but only meshes passing `filter` are considered.
+/// Used by the placement ghost, which must hit terrain only — an
+/// unfiltered cast would hit the ghost's own (translucent) mesh sitting
+/// exactly on the cursor ray, freezing the preview at its spawn point
+/// instead of following the cursor.
+pub(crate) fn ground_hit_filtered(
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    ray_cast: &mut MeshRayCast,
+    filter: impl Fn(Entity) -> bool,
+) -> Option<Vec3> {
+    let ray = cursor_ray(windows, camera_q)?;
+    let settings = MeshRayCastSettings::default().with_filter(&filter);
+    ray_cast
+        .cast_ray(ray, &settings)
+        .first()
+        .map(|(_, hit)| hit.point)
 }
 
 /// Cast a ray from the cursor and resolve the first *unit* it lands on

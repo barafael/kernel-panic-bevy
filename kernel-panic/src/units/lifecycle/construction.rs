@@ -53,9 +53,8 @@ pub struct Constructing {
 }
 
 /// Buildings the constructor `kind` can erect on a datavent. Pulled from
-/// upstream `[CANBUILD]` in `SIDEDATA.TDF`. The build menu (currently
-/// removed pending a rewrite) was the sole caller.
-#[allow(dead_code)]
+/// upstream `[CANBUILD]` in `SIDEDATA.TDF`. The build menu renders these
+/// as its constructor roster.
 pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
     match kind {
         UnitKind::Assembler => &[

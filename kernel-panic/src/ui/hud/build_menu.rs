@@ -257,16 +257,16 @@ fn spawn_icon(
 
 #[allow(clippy::type_complexity)]
 fn handle_clicks(
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     interactions: Query<(&Interaction, &BuildIcon), Changed<Interaction>>,
     mut producers: Query<&mut Producer, With<Selected>>,
     mut placement: ResMut<PlacementMode>,
 ) {
-    // Right-click anywhere cancels armed placement (mirrors Spring).
-    if mouse.just_pressed(MouseButton::Right) || keys.just_pressed(KeyCode::Escape) {
-        placement.kind = None;
-    }
+    // Cancelling an armed placement (right-click / Escape) is owned by
+    // the placement module's `commit_or_cancel` — it also clears the
+    // input flags so the cancel never doubles as a right-click move
+    // order. Doing it here too would race that system (the two are
+    // unordered), nondeterministically leaking the cancel through as a
+    // move order.
 
     for (interaction, icon) in &interactions {
         if *interaction != Interaction::Pressed {
@@ -383,5 +383,150 @@ pub(crate) fn factory_roster(factory: UnitKind, _faction: Faction) -> &'static [
         UnitKind::Window => &[UnitKind::Bug],
         UnitKind::Port => &[UnitKind::Packet],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn spawn_kernel(world: &mut World) -> Entity {
+        world
+            .spawn((
+                UnitType(UnitKind::Kernel),
+                Producer::new(),
+                Faction::System,
+                Selected,
+                Transform::default(),
+            ))
+            .id()
+    }
+
+    fn spawn_assembler(world: &mut World) -> Entity {
+        world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Faction::System,
+                Selected,
+                Transform::default(),
+            ))
+            .id()
+    }
+
+    fn press(world: &mut World, icon: Entity) {
+        world.entity_mut(icon).insert(Interaction::Pressed);
+    }
+
+    fn icons(world: &mut World) -> Vec<(Entity, BuildIcon)> {
+        let mut q = world.query::<(Entity, &BuildIcon)>();
+        q.iter(world).map(|(e, i)| (e, *i)).collect()
+    }
+
+    fn menu_root(world: &mut World) -> Option<Entity> {
+        world
+            .query_filtered::<Entity, With<BuildMenuRoot>>()
+            .iter(world)
+            .next()
+    }
+
+    /// Selecting a factory renders its roster; clicking a unit icon
+    /// enqueues it on the factory and leaves placement disarmed.
+    #[test]
+    fn factory_menu_renders_roster_and_click_enqueues() {
+        let mut world = World::new();
+        world.init_resource::<UnitPreviews>();
+        world.insert_resource(UnitRegistry::empty());
+        world.init_resource::<PlacementMode>();
+        let kernel = spawn_kernel(&mut world);
+
+        world.run_system_once(refresh_panel).unwrap();
+
+        assert!(menu_root(&mut world).is_some(), "menu must appear");
+        let roster = icons(&mut world);
+        assert_eq!(roster.len(), 4, "Kernel builds Bit/Byte/Pointer/Assembler");
+        assert!(roster.iter().all(|(_, i)| !i.is_construction));
+
+        let bit = roster
+            .iter()
+            .find(|(_, i)| i.kind == UnitKind::Bit)
+            .expect("Bit icon")
+            .0;
+        press(&mut world, bit);
+        world.run_system_once(handle_clicks).unwrap();
+
+        let queue = world.get::<Producer>(kernel).unwrap().queue().clone();
+        assert!(
+            queue.iter().any(|k| *k == UnitKind::Bit),
+            "click must enqueue Bit, got {queue:?}",
+        );
+        assert_eq!(world.resource::<PlacementMode>().kind, None);
+    }
+
+    /// Selecting a mobile constructor renders its building roster;
+    /// clicking an icon arms placement for that kind, clicking again
+    /// disarms it (toggle) — and the panel is NOT rebuilt between the
+    /// two clicks, so the still-held press can't re-toggle.
+    #[test]
+    fn constructor_icon_arms_and_toggles_placement() {
+        let mut world = World::new();
+        world.init_resource::<UnitPreviews>();
+        world.insert_resource(UnitRegistry::empty());
+        world.init_resource::<PlacementMode>();
+        spawn_assembler(&mut world);
+
+        world.run_system_once(refresh_panel).unwrap();
+
+        let roster = icons(&mut world);
+        assert_eq!(
+            roster.len(),
+            5,
+            "Assembler builds Socket/BadBlock/LogicBomb/Debug/Terminal",
+        );
+        assert!(roster.iter().all(|(_, i)| i.is_construction));
+
+        let socket = roster
+            .iter()
+            .find(|(_, i)| i.kind == UnitKind::Socket)
+            .expect("Socket icon")
+            .0;
+        press(&mut world, socket);
+        world.run_system_once(handle_clicks).unwrap();
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            Some(UnitKind::Socket),
+            "first click arms placement",
+        );
+
+        press(&mut world, socket);
+        world.run_system_once(handle_clicks).unwrap();
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            None,
+            "second click on the same icon disarms",
+        );
+    }
+
+    /// No selection → no menu (and a stale menu from a previous
+    /// selection is torn down).
+    #[test]
+    fn menu_hides_when_nothing_selected() {
+        let mut world = World::new();
+        world.init_resource::<UnitPreviews>();
+        world.insert_resource(UnitRegistry::empty());
+        world.init_resource::<PlacementMode>();
+        // Selected but nothing buildable (a combat unit).
+        world.spawn((UnitType(UnitKind::Bit), Selected, Transform::default()));
+
+        world.run_system_once(refresh_panel).unwrap();
+        assert!(menu_root(&mut world).is_none(), "Bit has no roster");
+
+        // A real builder, then deselect it: menu must go away.
+        let builder = spawn_assembler(&mut world);
+        world.run_system_once(refresh_panel).unwrap();
+        assert!(menu_root(&mut world).is_some());
+        world.entity_mut(builder).remove::<Selected>();
+        world.run_system_once(refresh_panel).unwrap();
+        assert!(menu_root(&mut world).is_none(), "menu must hide");
     }
 }

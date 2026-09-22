@@ -61,7 +61,10 @@ pub struct GameWorldRebuild;
 
 impl Plugin for MapLoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, pick_map.after(crate::rendering::camera::spawn_camera));
+        app.add_systems(
+            Startup,
+            pick_map.after(crate::rendering::camera::spawn_camera),
+        );
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -182,6 +185,12 @@ fn prefetch_selected_map(
 #[derive(Component)]
 pub struct PersistentEntity;
 
+/// Marker on terrain chunk meshes. The placement ghost's cursor ray
+/// filters on this so it reads the ground plane only — never the ghost
+/// mesh itself, unit meshes under the cursor, or order-palette gizmos.
+#[derive(Component)]
+pub struct TerrainChunkMarker;
+
 /// All map archives available in `assets/maps/`, sorted. The menu's map
 /// list and random-map resolution read this.
 #[derive(Resource, Clone)]
@@ -214,7 +223,9 @@ fn prepare_game_entry(world: &mut World) {
     world.resource_mut::<crate::units::player::LocalTeam>().0 = 0;
 
     // Fresh in-game state: `Playing`, game-over panel re-armed.
-    world.resource_mut::<NextState<GameState>>().set(GameState::Playing);
+    world
+        .resource_mut::<NextState<GameState>>()
+        .set(GameState::Playing);
     world.resource_mut::<GameOverDismissed>().0 = false;
 
     // Resolve the setup's map name against the catalog.
@@ -278,10 +289,7 @@ fn despawn_game_world(world: &mut World) {
         let mut relations = world.query::<(Entity, Option<&ChildOf>)>();
         for (e, child_of) in relations.iter(world) {
             if let Some(child_of) = child_of {
-                children_of
-                    .entry(child_of.parent())
-                    .or_default()
-                    .push(e);
+                children_of.entry(child_of.parent()).or_default().push(e);
             }
         }
         let mut stack: Vec<Entity> = keep.iter().copied().collect();
@@ -489,7 +497,11 @@ fn load_map(
     mut ctx: crate::units::lifecycle::spawning::SpawnContext,
 ) {
     let map_path = &selected.0;
-    let map_name = map_path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let map_name = map_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
 
     info!("Loading map: {map_name}");
 
@@ -501,7 +513,10 @@ fn load_map(
             return;
         }
     };
-    info!("  decoded in {:.0}ms", decode_start.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "  decoded in {:.0}ms",
+        decode_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     spawn_map_world(
         spring_map,
@@ -560,7 +575,10 @@ fn web_map_arrival(
             return;
         }
     };
-    info!("  decoded in {:.0}ms", decode_start.elapsed().as_secs_f64() * 1000.0);
+    info!(
+        "  decoded in {:.0}ms",
+        decode_start.elapsed().as_secs_f64() * 1000.0
+    );
 
     spawn_map_world(
         spring_map,
@@ -693,11 +711,7 @@ fn spawn_map_world(
                 cap,
                 slope_mod,
             );
-            let blocked = speed_map
-                .speeds
-                .iter()
-                .filter(|&&s| s <= 0.0)
-                .count();
+            let blocked = speed_map.speeds.iter().filter(|&&s| s <= 0.0).count();
             info!(
                 "  Nav bucket max_slope={:.3} (slope_mod={:.2}): {} blocked of {} cells ({}x{})",
                 cap,
@@ -721,9 +735,7 @@ fn spawn_map_world(
         );
     }
 
-    info!(
-        "  world built: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, nav (see above)"
-    );
+    info!("  world built: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, nav (see above)");
 
     // Setup minimap from ground texture.
     {
@@ -781,7 +793,6 @@ fn spawn_map_world(
     ctx.commands.insert_resource(heightmap);
 }
 
-
 fn setup_camera(
     parsed: &ParsedMap,
     camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
@@ -822,6 +833,7 @@ fn spawn_terrain(
     for chunk in chunks {
         let mesh_handle = meshes.add(chunk.mesh);
         commands.spawn((
+            TerrainChunkMarker,
             Mesh3d(mesh_handle),
             MeshMaterial3d(terrain_material.clone()),
             Transform::from_translation(chunk.translation),

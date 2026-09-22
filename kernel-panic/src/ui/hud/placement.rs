@@ -19,7 +19,8 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MoveTarget, QueuedCommand};
-use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit};
+use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit_filtered};
+use crate::map_loading::TerrainChunkMarker;
 use crate::rendering::camera::RtsCamera;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
 use crate::terrain::heightmap::Heightmap;
@@ -196,6 +197,7 @@ fn update_ghost(
     ghost_mats: Query<&MeshMaterial3d<StandardMaterial>, With<GhostMarker>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     geovents: Query<&GeoventSmoker, Without<VentClaim>>,
+    terrain: Query<(), With<TerrainChunkMarker>>,
     placement: Res<PlacementMode>,
     heightmap: Option<Res<Heightmap>>,
     unit_registry: Res<UnitRegistry>,
@@ -204,7 +206,13 @@ fn update_ghost(
         return;
     };
 
-    let Some(cursor_pt) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+    // Terrain-only cast. The ghost itself hovers exactly on the cursor
+    // ray, so an unfiltered cast would hit its own translucent mesh
+    // first and freeze the preview at its spawn point instead of
+    // tracking the cursor.
+    let terrain_only = |e: Entity| terrain.contains(e);
+    let Some(cursor_pt) = ground_hit_filtered(&windows, &camera_q, &mut ray_cast, &terrain_only)
+    else {
         // Cursor off-screen or off-terrain: hide the ghost this frame.
         if let Ok((_, mut vis)) = transforms.get_mut(ghost) {
             *vis = Visibility::Hidden;
@@ -268,8 +276,21 @@ fn commit_or_cancel(
     builders: Query<(Entity, &UnitType), With<Selected>>,
     move_target_q: Query<(), With<MoveTarget>>,
     vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
+    ui_interactions: Query<&Interaction>,
 ) {
     if placement.kind.is_none() {
+        return;
+    }
+
+    // A cursor over any live UI node (build icons, order palette, HUD)
+    // means the click belongs to the UI. The ghost's snapped position
+    // is stale from wherever the cursor last touched terrain —
+    // committing under the panel would build at a spot the player
+    // isn't even pointing at. Placement stays armed.
+    if ui_interactions
+        .iter()
+        .any(|i| matches!(i, Interaction::Pressed | Interaction::Hovered))
+    {
         return;
     }
 
@@ -330,4 +351,340 @@ fn commit_or_cancel(
         placement.kind = None;
     }
     mouse.clear_just_pressed(MouseButton::Left);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::lifecycle::construction::PendingBuild;
+    use bevy::camera::Viewport;
+    use bevy::camera::primitives::Aabb;
+    use bevy::camera::visibility::SetViewVisibility;
+    use bevy::camera::{ComputedCameraValues, RenderTargetInfo};
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::math::primitives::Cuboid;
+    use bevy::math::{DVec2, Vec3A};
+    use bevy::mesh::Mesh;
+
+    /// Commit dispatches `BuildAt` (as `PendingBuild` + `MoveTarget`) to
+    /// every selected constructor and stamps the vent so a second
+    /// constructor can't queue onto it. Plain click disarms placement.
+    #[test]
+    fn commit_dispatches_buildat_claims_vent_and_disarms() {
+        let mut world = World::new();
+        world.init_resource::<PlacementMode>();
+        world.init_resource::<PlacementGhost>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+
+        let site = Vec3::new(10.0, 2.0, -4.0);
+        let vent = world
+            .spawn((GeoventSmoker {
+                pos: site,
+                emit_timer: 0.0,
+                rng: 0,
+            },))
+            .id();
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Selected,
+                Transform::default(),
+            ))
+            .id();
+
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        world.resource_mut::<PlacementGhost>().snapped = Some(site);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+
+        world.run_system_once(commit_or_cancel).unwrap();
+
+        let b = world.entity(builder);
+        let pending = b.get::<PendingBuild>().expect("PendingBuild inserted");
+        assert_eq!(pending.kind, UnitKind::Socket);
+        assert_eq!(pending.site, site);
+        let target = b.get::<MoveTarget>().expect("MoveTarget inserted");
+        assert_eq!(target.0, site);
+        assert!(world.get::<VentClaim>(vent).is_some(), "vent claimed");
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            None,
+            "plain click must disarm placement",
+        );
+    }
+
+    /// Shift-click queues: the order is dispatched (with a fresh queue —
+    /// the builder had no active order) and placement stays armed so the
+    /// next click places another one.
+    #[test]
+    fn shift_keeps_placement_armed_for_queueing() {
+        let mut world = World::new();
+        world.init_resource::<PlacementMode>();
+        world.init_resource::<PlacementGhost>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+
+        let site = Vec3::new(40.0, 1.0, 40.0);
+        world.spawn((GeoventSmoker {
+            pos: site,
+            emit_timer: 0.0,
+            rng: 1,
+        },));
+        let builder = world
+            .spawn((UnitType(UnitKind::Trojan), Selected, Transform::default()))
+            .id();
+
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Firewall);
+        world.resource_mut::<PlacementGhost>().snapped = Some(site);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+
+        world.run_system_once(commit_or_cancel).unwrap();
+
+        assert!(world.entity(builder).get::<PendingBuild>().is_some());
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            Some(UnitKind::Firewall),
+            "shift must keep placement armed",
+        );
+    }
+
+    /// Right-click cancels placement and consumes the press so the
+    /// right-click move-order system never sees it.
+    #[test]
+    fn right_click_cancels_and_consumes_the_press() {
+        let mut world = World::new();
+        world.init_resource::<PlacementMode>();
+        world.init_resource::<PlacementGhost>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+
+        world.spawn((UnitType(UnitKind::Gateway), Selected, Transform::default()));
+
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Debug);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Right);
+
+        world.run_system_once(commit_or_cancel).unwrap();
+
+        assert_eq!(world.resource::<PlacementMode>().kind, None);
+        let mouse = world.resource::<ButtonInput<MouseButton>>();
+        assert!(
+            !mouse.just_pressed(MouseButton::Right),
+            "cancel must eat the click so it can't double as a move order",
+        );
+    }
+
+    /// A left-click on an invalid site (no snapped vent) places nothing,
+    /// is swallowed so it can't fall through into click-to-select, and
+    /// keeps placement armed for a proper click elsewhere.
+    #[test]
+    fn invalid_site_swallows_click_and_stays_armed() {
+        let mut world = World::new();
+        world.init_resource::<PlacementMode>();
+        world.init_resource::<PlacementGhost>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Selected,
+                Transform::default(),
+            ))
+            .id();
+
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        world.resource_mut::<PlacementGhost>().snapped = None;
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+
+        world.run_system_once(commit_or_cancel).unwrap();
+
+        assert!(world.entity(builder).get::<PendingBuild>().is_none());
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            Some(UnitKind::Socket)
+        );
+        assert!(
+            !world
+                .resource::<ButtonInput<MouseButton>>()
+                .just_pressed(MouseButton::Left),
+            "invalid-site click must not leak into selection",
+        );
+    }
+
+    /// A click over a UI node (e.g. a build icon) never commits a
+    /// placement at the ghost's stale snapped position, and placement
+    /// stays armed afterwards.
+    #[test]
+    fn ui_click_never_commits_placement() {
+        let mut world = World::new();
+        world.init_resource::<PlacementMode>();
+        world.init_resource::<PlacementGhost>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Selected,
+                Transform::default(),
+            ))
+            .id();
+        world.spawn((Button, Interaction::Hovered, Transform::default()));
+
+        let stale = Vec3::new(-30.0, 0.0, 12.0);
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        world.resource_mut::<PlacementGhost>().snapped = Some(stale);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+
+        world.run_system_once(commit_or_cancel).unwrap();
+
+        assert!(world.entity(builder).get::<PendingBuild>().is_none());
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            Some(UnitKind::Socket)
+        );
+    }
+
+    /// Regression: the ghost's cursor ray must hit terrain only. The
+    /// ghost hovers exactly on the cursor ray, so an unfiltered cast
+    /// hits its own translucent mesh first — the preview froze at its
+    /// spawn point instead of following the cursor, which made every
+    /// placement land (or fail) at a stale spot.
+    fn ghost_tracks_terrain_and_ignores_itself_setup() {
+        // `cast_ray` culls candidates with `par_iter`.
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+    }
+
+    #[test]
+    fn ghost_tracks_terrain_and_ignores_itself() {
+        ghost_tracks_terrain_and_ignores_itself_setup();
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<PlacementMode>();
+        world.init_resource::<PlacementGhost>();
+        world.insert_resource(UnitRegistry::empty());
+
+        // 100x100 viewport with the cursor dead-centre; camera 100 units
+        // above the origin looking straight down → ray hits (0, 0, 0).
+        let mut window = Window::default();
+        window.set_physical_cursor_position(Some(DVec2::new(50.0, 50.0)));
+        world.spawn(window);
+        world.spawn((
+            RtsCamera,
+            Camera {
+                viewport: Some(Viewport {
+                    physical_position: UVec2::ZERO,
+                    physical_size: UVec2::splat(100),
+                    ..default()
+                }),
+                // Headless stand-in for what `camera_system` derives from
+                // the render target: scale factor 1.0 so the logical
+                // cursor conversion works without a render world.
+                computed: ComputedCameraValues {
+                    target_info: Some(RenderTargetInfo {
+                        physical_size: UVec2::splat(100),
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                ..default()
+            },
+            GlobalTransform::from(
+                Transform::from_xyz(0.0, 100.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
+            ),
+        ));
+
+        // Terrain plane: a wide flat box at ground level.
+        let terrain_mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(200.0, 1.0, 200.0)));
+        let terrain = world
+            .spawn((
+                TerrainChunkMarker,
+                Mesh3d(terrain_mesh),
+                Transform::default(),
+                GlobalTransform::default(),
+                InheritedVisibility::VISIBLE,
+                ViewVisibility::default(),
+                Aabb {
+                    center: Vec3A::ZERO,
+                    half_extents: Vec3A::new(100.0, 0.5, 100.0),
+                },
+            ))
+            .id();
+        // Headless stand-in for render-world visibility propagation.
+        {
+            let mut vv = world.get_mut::<ViewVisibility>(terrain).unwrap();
+            vv.set_visible();
+        }
+
+        // The ghost itself, parked exactly on the cursor ray above the
+        // ground point — a decoy that an unfiltered cast would hit.
+        let ghost_mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(4.0, 4.0, 4.0)));
+        let ghost_mat = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial {
+                base_color: GHOST_VALID_COLOR,
+                alpha_mode: AlphaMode::Blend,
+                unlit: true,
+                ..default()
+            });
+        let ghost = world
+            .spawn((
+                GhostMarker,
+                Mesh3d(ghost_mesh),
+                MeshMaterial3d(ghost_mat),
+                Transform::from_xyz(0.0, 50.0, 0.0),
+                GlobalTransform::from_xyz(0.0, 50.0, 0.0),
+                Visibility::Inherited,
+                InheritedVisibility::VISIBLE,
+                ViewVisibility::default(),
+                Aabb {
+                    center: Vec3A::ZERO,
+                    half_extents: Vec3A::splat(2.0),
+                },
+            ))
+            .id();
+        // Mark the decoy view-visible (same call the render world uses).
+        {
+            let mut vv = world.get_mut::<ViewVisibility>(ghost).unwrap();
+            vv.set_visible();
+        }
+
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        // The lifecycle system normally installs these; point the ghost
+        // state straight at the decoy.
+        world.resource_mut::<PlacementGhost>().entity = Some(ghost);
+        world.resource_mut::<PlacementGhost>().spawned_kind = Some(UnitKind::Socket);
+
+        world.run_system_once(update_ghost).unwrap();
+
+        let tf = world.get::<Transform>(ghost).unwrap();
+        assert!(
+            (tf.translation - Vec3::new(0.0, 1.0, 0.0)).length() < 0.5,
+            "ghost must sit on the terrain under the cursor (+0.5 lift over \
+             the box top at y=0.5), not on its own mesh: got {tf:?}",
+        );
+        assert_eq!(
+            world.resource::<PlacementGhost>().snapped,
+            None,
+            "no vents around: nothing valid to snap to",
+        );
+    }
 }

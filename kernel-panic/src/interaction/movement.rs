@@ -66,12 +66,9 @@ pub struct MovePath {
 #[derive(Clone, Copy, Debug)]
 pub enum QueuedCommand {
     Move(Vec3),
-    /// Walk to `site`, then erect a building of `kind` there. Used by
-    /// constructor units (Assembler / Trojan / Gateway) after the player
-    /// picks a building in the build menu and clicks on a datavent.
-    /// Currently has no constructor caller — the placement UI that
-    /// produced these was removed pending a rewrite.
-    #[allow(dead_code)]
+    /// Walk to `site`, then erect a building of `kind` there. Issued by
+    /// the placement flow: the build menu arms a `PlacementMode`, the
+    /// ghost click commits a `BuildAt` to every selected constructor.
     BuildAt {
         kind: UnitKind,
         site: Vec3,
@@ -93,7 +90,10 @@ pub enum QueuedCommand {
     /// right-click attack). `pos` is the target's position at enqueue
     /// time, used only for command-line drawing; the live chase targets
     /// the unit itself via `AttackTargetOrder`.
-    AttackUnit { target: Entity, pos: Vec3 },
+    AttackUnit {
+        target: Entity,
+        pos: Vec3,
+    },
 }
 
 impl QueuedCommand {
@@ -197,7 +197,11 @@ const PATHFIND_BUDGET_PER_FRAME: usize = 3;
 pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
     // Degenerate normals (cliff faces from central differences) fall
     // back to flat so the basis stays invertible.
-    let up = if normal.y > 0.1 { normal.normalize() } else { Vec3::Y };
+    let up = if normal.y > 0.1 {
+        normal.normalize()
+    } else {
+        Vec3::Y
+    };
     let mut f = Vec3::new(forward_xz.x, 0.0, forward_xz.z);
     if f.length_squared() < 1e-6 {
         f = Vec3::Z;
@@ -266,16 +270,16 @@ pub fn movement_system(
     // "already at its goal".
     snapshot.clear();
     snapshot.extend(
-        query
-            .iter()
-            .map(|(e, _, stats, tf, target, _, _, _, _, _, _, _, _, _)| UnitSnapshot {
+        query.iter().map(
+            |(e, _, stats, tf, target, _, _, _, _, _, _, _, _, _)| UnitSnapshot {
                 entity: e,
                 pos: tf.translation,
                 radius: stats.radius,
                 mobile: stats.speed > 0.0,
                 flying: stats.can_fly,
                 stationary: target.is_none(),
-            }),
+            },
+        ),
     );
 
     // Index the snapshot into a retained cell grid so each moving unit
@@ -285,7 +289,9 @@ pub fn movement_system(
     let mut max_ground_radius = 0.0_f32;
     for (idx, entry) in snapshot.iter().enumerate() {
         if !entry.flying {
-            grid.entry(cell_of(entry.pos.x, entry.pos.z)).or_default().push(idx);
+            grid.entry(cell_of(entry.pos.x, entry.pos.z))
+                .or_default()
+                .push(idx);
             max_ground_radius = max_ground_radius.max(entry.radius);
         }
     }
@@ -365,11 +371,19 @@ pub fn movement_system(
             //   mid-load, or the per-frame search budget ran out);
             //   keep the order and retry next frame.
             let outcome = if flying {
-                Some(PathOutcome::Route(vec![Vec3::new(target.0.x, 0.0, target.0.z)]))
+                Some(PathOutcome::Route(vec![Vec3::new(
+                    target.0.x, 0.0, target.0.z,
+                )]))
             } else if let Some(nav) = nav_set.as_deref() {
                 if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
                     pathfinds_used += 1;
-                    compute_path(Some(nav), unit_registry, unit_type.0, transform.translation, target.0)
+                    compute_path(
+                        Some(nav),
+                        unit_registry,
+                        unit_type.0,
+                        transform.translation,
+                        target.0,
+                    )
                 } else {
                     None
                 }
@@ -527,7 +541,11 @@ pub fn movement_system(
                     let normal = hm.normal(transform.translation.x, transform.translation.z);
                     surface_aligned_rotation(new_forward, normal)
                 }
-                None => Transform::default().looking_to(new_forward, Vec3::Y).rotation,
+                None => {
+                    Transform::default()
+                        .looking_to(new_forward, Vec3::Y)
+                        .rotation
+                }
             };
             // Smooth in WORLD space. A local-space tilt buffer applied
             // after a yaw change re-interprets a buffered downhill pitch
@@ -622,10 +640,7 @@ pub fn movement_system(
 /// engage anything in range. When the target dies the guard stands down.
 pub fn guard_follow_system(
     mut commands: Commands,
-    guards: Query<
-        (Entity, &GlobalTransform, &UnitStats, &GuardTarget),
-        Without<Dying>,
-    >,
+    guards: Query<(Entity, &GlobalTransform, &UnitStats, &GuardTarget), Without<Dying>>,
     targets: Query<(&GlobalTransform, &UnitStats), Without<Dying>>,
     move_path_q: Query<&MovePath>,
 ) {
@@ -730,13 +745,7 @@ impl SnapshotGrid<'_> {
     /// Invoke `f` for every non-flying entry whose center lies within
     /// `radius` elmos of (x, z) *by cell distance* — i.e. a superset of
     /// the true circle. Callers do the exact distance test inside `f`.
-    fn for_each_near(
-        &self,
-        x: f32,
-        z: f32,
-        radius: f32,
-        mut f: impl FnMut(&UnitSnapshot),
-    ) {
+    fn for_each_near(&self, x: f32, z: f32, radius: f32, mut f: impl FnMut(&UnitSnapshot)) {
         let (cx, cz) = cell_of(x, z);
         let r = (radius / SNAPSHOT_CELL).ceil() as i32;
         for dx in -r..=r {
@@ -752,7 +761,7 @@ impl SnapshotGrid<'_> {
     }
 }
 
- fn resolve_motion(
+fn resolve_motion(
     self_entity: Entity,
     origin: Vec3,
     desired: Vec3,
@@ -861,17 +870,22 @@ fn waypoint_blocked_by_arrived_unit(
     snapshot: &SnapshotGrid,
 ) -> bool {
     let mut blocked = false;
-    snapshot.for_each_near(waypoint.x, waypoint.z, self_radius + snapshot.max_ground_radius, |other| {
-        if blocked || other.entity == self_entity || !other.stationary {
-            return;
-        }
-        let r = self_radius + other.radius;
-        let dx = other.pos.x - waypoint.x;
-        let dz = other.pos.z - waypoint.z;
-        if dx * dx + dz * dz < r * r {
-            blocked = true;
-        }
-    });
+    snapshot.for_each_near(
+        waypoint.x,
+        waypoint.z,
+        self_radius + snapshot.max_ground_radius,
+        |other| {
+            if blocked || other.entity == self_entity || !other.stationary {
+                return;
+            }
+            let r = self_radius + other.radius;
+            let dx = other.pos.x - waypoint.x;
+            let dz = other.pos.z - waypoint.z;
+            if dx * dx + dz * dz < r * r {
+                blocked = true;
+            }
+        },
+    );
     blocked
 }
 
@@ -1175,11 +1189,7 @@ pub fn draw_selected_command_lines(
         forced,
     ) in &query
     {
-        let unit_pt = sample_at_ground(
-            transform.translation.x,
-            transform.translation.z,
-            hm,
-        );
+        let unit_pt = sample_at_ground(transform.translation.x, transform.translation.z, hm);
 
         // Unit-targeted orders: line + ring on the target unit itself,
         // drawn regardless of whether the unit is currently moving.
@@ -1358,7 +1368,11 @@ mod tilt_tests {
 
     /// 30° slope descending along +Z: surface normal tilts toward +Z.
     fn downhill_normal() -> Vec3 {
-        Vec3::new(0.0, 30.0_f32.to_radians().cos(), 30.0_f32.to_radians().sin())
+        Vec3::new(
+            0.0,
+            30.0_f32.to_radians().cos(),
+            30.0_f32.to_radians().sin(),
+        )
     }
 
     #[test]
@@ -1382,7 +1396,11 @@ mod tilt_tests {
         let rot = surface_aligned_rotation(Vec3::Z, n);
         let fwd = local_axis(rot, -Vec3::Z);
         // In-plane: perpendicular to the normal.
-        assert!(fwd.dot(n).abs() < EPS, "forward not in plane: dot={}", fwd.dot(n));
+        assert!(
+            fwd.dot(n).abs() < EPS,
+            "forward not in plane: dot={}",
+            fwd.dot(n)
+        );
         // Descending along +Z: the in-plane forward points down (y < 0).
         assert!(fwd.y < 0.0);
         // No sideways lean: the body right axis stays perpendicular to
