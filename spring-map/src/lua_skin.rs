@@ -14,7 +14,7 @@
 
 use thiserror::Error;
 
-use crate::lua_heightmap::LuaGadgetResult;
+use crate::map_types::UnsyncedMessage;
 use crate::lua_layout::HexFarmLayout;
 use crate::map_types::{BitmapFile, GroundTexture, ParsedMap};
 
@@ -97,11 +97,11 @@ pub fn ground_texture_from_atlas(atlas: &SkinAtlas) -> GroundTexture {
 /// Back-compat shim: pick a skin and return a tiled `GroundTexture`,
 /// for callers that don't need the layout (bake_map, tests).
 pub fn composite_ground_texture(
-    gadget_results: &[LuaGadgetResult],
+    messages: &[UnsyncedMessage],
     bitmaps: &[BitmapFile],
     _parsed: &ParsedMap,
 ) -> Option<GroundTexture> {
-    let layout = HexFarmLayout::from_gadget_results(gadget_results)?;
+    let layout = HexFarmLayout::from_messages(messages)?;
     let atlas = decode_skin_atlas(&layout, bitmaps)?;
     Some(ground_texture_from_atlas(&atlas))
 }

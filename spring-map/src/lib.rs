@@ -1,16 +1,15 @@
 pub mod baked;
-// Source-archive extraction and Lua-gadget execution are native-only:
-// `sevenz-rust` and `mlua` don't compile to wasm32 (plan §8.1). Web
-// loads baked `.kpmap` files through `baked::read_baked_map` instead.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod lua_heightmap;
+pub mod gadget_bake;
+// Source-archive extraction is native-only: `sevenz-rust` assumes
+// native std fs and doesn't build for wasm32 (plan §8.1). Web loads
+// baked `.kpmap` files through `baked::read_baked_map` instead. The
+// Lua gadget *runner* is gone entirely — its deterministic outputs for
+// the two Lua-driven maps are captured in `gadget_bake`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lua_layout;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod lua_skin;
 pub mod map_types;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod mapinfo_lua;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sd7_archive;
 pub mod smd_parser;
@@ -62,11 +61,15 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
     let extracted = load_map_archive(path)?;
     let mut parsed = parse_smf(&extracted.smf_data)?;
 
-    // Execute any Lua heightmap gadgets (e.g., Palladium's platform system).
-    let gadget_results =
-        lua_heightmap::apply_lua_heightmap_gadgets(&mut parsed, &extracted.lua_files);
-    if !gadget_results.is_empty() {
-        eprintln!("Applied {} Lua heightmap gadget(s)", gadget_results.len());
+    // Apply the pre-captured Lua gadget outputs where the mlua runner
+    // used to execute them (see `gadget_bake` for the rationale).
+    let baked_gadgets = gadget_bake::lookup(&extracted.lua_files);
+    if let Some(baked) = baked_gadgets {
+        baked.apply_heights(&mut parsed);
+        eprintln!(
+            "Applied baked Lua gadget terrain ({} unsynced message(s))",
+            baked.unsynced_messages.len(),
+        );
     }
 
     // First try the SMT (engine-baked diffuse). If a Lua-driven gadget
@@ -85,7 +88,10 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         }
         None => None,
     };
-    let lua_compositing = HexFarmLayout::from_gadget_results(&gadget_results).and_then(|layout| {
+    let lua_messages: &[std::vec::Vec<map_types::UnsyncedArg>] = baked_gadgets
+        .map(|b| b.unsynced_messages.as_slice())
+        .unwrap_or(&[]);
+    let lua_compositing = HexFarmLayout::from_messages(lua_messages).and_then(|layout| {
         let atlas = lua_skin::decode_skin_atlas(&layout, &extracted.bitmaps)?;
         eprintln!(
             "Captured HexFarm layout: {} hexes, {} bridges, skin={:?}",
@@ -108,18 +114,10 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         .as_deref()
         .map(smd_parser::parse_smd)
         .or_else(|| {
-            // Modern maps (e.g. Hex Farm) ship mapinfo.lua instead of .smd.
-            let mapinfo = extracted
-                .lua_files
-                .iter()
-                .find(|f| f.path.eq_ignore_ascii_case("mapinfo.lua"))?;
-            match mapinfo_lua::parse_mapinfo_lua(&mapinfo.content) {
-                Ok(info) => Some(info),
-                Err(error) => {
-                    eprintln!("Failed to parse mapinfo.lua: {error}");
-                    None
-                }
-            }
+            // Modern maps (e.g. Hex Farm) ship mapinfo.lua instead of .smd
+            // — pre-parsed and checked in with the gadget capture.
+            let info = baked_gadgets?.map_info.clone()?;
+            Some(info)
         });
 
     Ok(SpringMap {

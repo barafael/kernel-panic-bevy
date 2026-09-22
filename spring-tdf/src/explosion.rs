@@ -103,6 +103,24 @@ impl CegExpr {
         acc
     }
 
+    /// The constant this expression always evaluates to, if it has no
+    /// `rand`/`index`/`damage` ops. Most CEG properties are exactly
+    /// this — a folded literal lets the per-particle eval collapse to a
+    /// field read on the hot spawn path.
+    pub fn literal(&self) -> Option<f32> {
+        if !self.is_literal() {
+            return None;
+        }
+        Some(self
+            .0
+            .iter()
+            .filter_map(|op| match op {
+                CegOp::Add(v) => Some(*v),
+                _ => None,
+            })
+            .sum())
+    }
+
     /// True if this expression reduces to a single literal (no
     /// randomness, no per-spawn index, no damage dependency).
     pub fn is_literal(&self) -> bool {

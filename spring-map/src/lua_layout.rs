@@ -6,7 +6,6 @@
 //! messages, walk them, and produce a flat Rust struct the renderer
 //! can build meshes from without knowing about Lua at all.
 
-use crate::lua_heightmap::LuaGadgetResult;
 use crate::map_types::{UnsyncedArg, UnsyncedMessage};
 
 /// One hex tower from the captured layout.
@@ -46,12 +45,12 @@ pub struct HexFarmLayout {
 impl HexFarmLayout {
     /// Walk every captured `SendToUnsynced(...)` call and assemble the
     /// layout. Returns `None` if no messages mention HexFarm.
-    pub fn from_gadget_results(gadget_results: &[LuaGadgetResult]) -> Option<Self> {
+    pub fn from_messages(messages: &[UnsyncedMessage]) -> Option<Self> {
         let mut layout = Self::default();
         let mut seen_any = false;
 
-        for result in gadget_results {
-            for msg in &result.unsynced_messages {
+        for msg in messages {
+            {
                 if !is_hex_farm_message(msg) {
                     continue;
                 }

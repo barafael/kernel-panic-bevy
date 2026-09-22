@@ -683,6 +683,13 @@ pub(super) fn tick_ceg_delayed_spawns(
 /// twice as fast as authored. Fixed by matching upstream's one-sided
 /// range verbatim.
 fn eval_with_spread(base: &CegExpr, spread: &CegExpr, rng: &mut u32, mut ctx: EvalCtx) -> f32 {
+    // Fast path: most properties are folded literals — skip the RNG
+    // draws and op loop entirely (the draws would only add 0).
+    if let (Some(b), Some(s)) = (base.literal(), spread.literal()) {
+        if s == 0.0 {
+            return b;
+        }
+    }
     ctx.rand01 = next_unit(rng);
     let b = base.eval(&ctx);
     ctx.rand01 = next_unit(rng);

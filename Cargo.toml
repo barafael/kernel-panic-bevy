@@ -31,8 +31,12 @@ members = [
 #
 # Piece tables now live in code as static per-kind lists
 # (`animation::units::piece_names`), so nothing reads `.cob` files any
-# more. The crate directory is kept in the repo for reference but is no
-# longer a workspace member and has no dependents. Safe to delete.
+# more. The crate directory is kept for posterity — it documents how
+# the VM interpreted Spring's script bytecode (opcodes, thread
+# scheduling, the Scriptor 163840 linear constant the drivers' value
+# tables derive from) and is the reference oracle quoted by the Kani
+# equivalence harnesses in `animation/proofs.rs`. Not a workspace
+# member; no dependents. Not scheduled for deletion.
 
 [workspace.dependencies]
 better_default = "1"

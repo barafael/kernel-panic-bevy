@@ -307,7 +307,7 @@ pub struct BitmapFile {
 /// from Rust.
 pub type UnsyncedMessage = Vec<UnsyncedArg>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum UnsyncedArg {
     Integer(i64),
     Number(f64),

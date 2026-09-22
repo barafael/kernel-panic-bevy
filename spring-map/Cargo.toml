@@ -20,15 +20,14 @@ serde = { workspace = true }
 postcard = { workspace = true }
 image = { workspace = true }
 
-# Source-archive and Lua-gadget support. Both stacks compile C (or assume
-# native std fs) and don't build for wasm32 — on web the baked `.kpmap`
-# reader is the only load path (plan §8.1).
+# Source-archive support: `sevenz-rust` assumes native std fs and
+# doesn't build for wasm32 — on web the baked `.kpmap` reader is the
+# only load path (plan §8.1).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 sevenz-rust = { workspace = true }
 # kpmap v3 encoder (bake runs native only). The reader side uses ruzstd,
 # which is pure Rust and wasm-safe.
 zstd = "0.13"
-mlua = { version = "0.11", features = ["lua51", "vendored"] }
 
 [dev-dependencies]
 proptest = { workspace = true }
