@@ -11,6 +11,7 @@
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
 #[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -270,17 +271,29 @@ fn despawn_game_world(world: &mut World) {
     }
 
     // Pull kept roots' descendants into the keep set (camera children,
-    // UI trees).
-    loop {
-        let mut grew = false;
-        let mut relations = world.query_filtered::<(Entity, &ChildOf), ()>();
+    // UI trees). One pass builds a parent→children map, then a DFS from
+    // the roots — the old fixed-point loop rescanned every `ChildOf` in
+    // the world once per hierarchy level, O(E · depth).
+    {
+        let mut children_of: HashMap<Entity, Vec<Entity>> = HashMap::new();
+        let mut relations = world.query::<(Entity, Option<&ChildOf>)>();
         for (e, child_of) in relations.iter(world) {
-            if keep.contains(&child_of.parent()) && keep.insert(e) {
-                grew = true;
+            if let Some(child_of) = child_of {
+                children_of
+                    .entry(child_of.parent())
+                    .or_default()
+                    .push(e);
             }
         }
-        if !grew {
-            break;
+        let mut stack: Vec<Entity> = keep.iter().copied().collect();
+        while let Some(parent) = stack.pop() {
+            if let Some(children) = children_of.get(&parent) {
+                for &child in children {
+                    if keep.insert(child) {
+                        stack.push(child);
+                    }
+                }
+            }
         }
     }
 

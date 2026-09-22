@@ -221,13 +221,10 @@ pub(super) fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
 /// The initial shot fires through the regular combat path; each follow-up
 /// queues another damage event and weapon-FX event at `burst_rate` spacing
 /// until `shots_remaining` hits zero, then removes the component.
-#[allow(clippy::too_many_arguments)]
 pub fn tick_burst_fire(
     time: Res<Time>,
     mut query: Query<(Entity, &UnitType, &mut BurstFire, &GlobalTransform), Without<Dying>>,
-    muzzle_q: Query<&MuzzlePiece>,
-    animator_q: Query<&UnitAnimator>,
-    piece_gtf_q: Query<&GlobalTransform, Without<UnitType>>,
+    pieces: super::PieceLookup,
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
@@ -250,7 +247,8 @@ pub fn tick_burst_fire(
                 attacker_distance: distance,
             });
         }
-        let visual_origin = muzzle_world_pos(entity, gtf, &muzzle_q, &animator_q, &piece_gtf_q);
+        let visual_origin =
+            super::muzzle_world_pos(entity, gtf, &pieces.muzzle, &pieces.animator, &pieces.piece_gtf);
         let muzzle_ceg = unit_registry
             .preferred_muzzle_ceg(unit_type.0)
             .map(|s| std::borrow::Cow::Owned(s.to_string()));
@@ -460,10 +458,9 @@ pub fn apply_damage(
                 if d_sq >= aoe_sq {
                     return;
                 }
-                let kind = match target_unit_q.get(candidate.entity) {
-                    Ok(ut) => ut.0,
-                    Err(_) => return,
-                };
+                // The spatial snapshot already carries the target's kind —
+                // no ECS re-fetch needed per splash candidate.
+                let kind = candidate.kind;
                 let splash = base(kind) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
                 splash_hits.push((candidate.entity, splash));
             });

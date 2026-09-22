@@ -13,6 +13,7 @@
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
+use super::clear_orders;
 use super::movement::{AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget, QueuedCommand};
 use super::selection::{
     OrderMarker, PendingMoveIndicators, Selected, apply_ordered_command, ground_hit, unit_hit,
@@ -324,13 +325,7 @@ fn trigger_attack_ground_click(
         } else {
             // Immediate: cancel any current order, issue AttackGroundOrder.
             // attack_ground_system handles movement if needed.
-            commands
-                .entity(entity)
-                .remove::<MoveTarget>()
-                .remove::<crate::interaction::movement::MovePath>()
-                .remove::<crate::interaction::movement::CommandQueue>()
-                .remove::<AttackTargetOrder>()
-                .remove::<GuardTarget>()
+            clear_orders(&mut commands.entity(entity))
                 .insert(AttackGroundOrder { pos: target });
         }
     }
@@ -786,16 +781,7 @@ fn trigger_guard_click(
         if unit_registry.speed(unit.0) <= 0.0 {
             continue;
         }
-        commands
-            .entity(entity)
-            .remove::<MoveTarget>()
-            .remove::<MovePath>()
-            .remove::<CommandQueue>()
-            .remove::<AttackGroundOrder>()
-            .remove::<AttackTargetOrder>()
-            .remove::<AttackMoveActive>()
-            .remove::<crate::units::lifecycle::construction::PendingBuild>()
-            .insert(GuardTarget(target));
+        clear_orders(&mut commands.entity(entity)).insert(GuardTarget(target));
     }
     if let Ok(t_gtf) = target_gtf_q.get(target) {
         pending.markers.push((t_gtf.translation(), OrderMarker::Guard));

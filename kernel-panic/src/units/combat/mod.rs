@@ -35,7 +35,7 @@ mod lifecycle;
 pub use collision_volume::CollisionVolume;
 
 pub use aim::{
-    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, ByteOpen, DeployState,
+    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, Byte, ByteOpen, DeployState,
     Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state, tick_deploy_state,
 };
 pub use damage::{

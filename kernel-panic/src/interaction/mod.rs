@@ -20,6 +20,29 @@ use movement::{
 };
 use selection::SelectionPlugin;
 
+/// Wipe every order component an explicit player command supersedes.
+///
+/// Used by the replace-style command paths (attack, attack-ground,
+/// guard) before inserting their new order component. Queue-promotion
+/// and path-completion sites in the movement system intentionally clear
+/// narrower subsets — don't switch them over.
+///
+/// Centralized because the previous six hand-rolled chains had drifted:
+/// attack-ground left a stale `AttackMoveActive`/`PendingBuild` behind
+/// and guard left a stale `ForcedTarget`, while their sibling attack
+/// path cleared all three.
+pub(crate) fn clear_orders<'a>(ec: &'a mut EntityCommands<'a>) -> &'a mut EntityCommands<'a> {
+    ec.remove::<movement::MoveTarget>()
+        .remove::<movement::MovePath>()
+        .remove::<movement::CommandQueue>()
+        .remove::<crate::units::combat::AttackGroundOrder>()
+        .remove::<crate::units::combat::AttackTargetOrder>()
+        .remove::<movement::AttackMoveActive>()
+        .remove::<crate::units::combat::ForcedTarget>()
+        .remove::<movement::GuardTarget>()
+        .remove::<crate::units::lifecycle::construction::PendingBuild>()
+}
+
 pub struct InteractionPlugin;
 
 impl Plugin for InteractionPlugin {

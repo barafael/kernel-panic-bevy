@@ -548,6 +548,11 @@ pub fn spawn_unit(
                     .entity(unit_entity)
                     .insert(crate::units::combat::AimScript::default());
             }
+            if kind == UnitKind::Byte {
+                commands
+                    .entity(unit_entity)
+                    .insert(crate::units::combat::Byte);
+            }
         }
 
         // For factories, cache the piece indices we need for build FX so

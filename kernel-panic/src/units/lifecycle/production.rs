@@ -158,7 +158,7 @@ pub fn production_system(
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
-    existing_units: Query<(), With<UnitType>>,
+    unit_count: Res<super::bookkeeping::TotalUnitCount>,
     mut pending_attacks: ResMut<PendingAttacks>,
     mut ctx: SpawnContext,
     // `Local` so the allocation is reused across frames — production
@@ -240,7 +240,10 @@ pub fn production_system(
         let spawn_threshold = (build_time - emerge_lead).max(0.0);
 
         if !producer.unit_spawned && producer.progress >= spawn_threshold {
-            if existing_units.iter().count() > 10_000 {
+            // O(1) via the bookkeeping-maintained counter — the old
+            // `iter().count()` scanned every unit each time a factory
+            // sat at the spawn threshold.
+            if unit_count.0 > 10_000 {
                 // Don't busy-loop; pin progress at the threshold and
                 // try again next frame.
                 producer.progress = spawn_threshold;

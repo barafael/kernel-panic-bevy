@@ -275,16 +275,7 @@ fn handle_right_click(
 /// attack supersedes. The explicit attack also supersedes a manual (T)
 /// target designation.
 fn issue_attack_order(entity: Entity, target: Entity, commands: &mut Commands) {
-    commands
-        .entity(entity)
-        .remove::<MoveTarget>()
-        .remove::<MovePath>()
-        .remove::<CommandQueue>()
-        .remove::<crate::units::combat::AttackGroundOrder>()
-        .remove::<AttackMoveActive>()
-        .remove::<GuardTarget>()
-        .remove::<crate::units::combat::ForcedTarget>()
-        .remove::<crate::units::lifecycle::construction::PendingBuild>()
+    super::super::clear_orders(&mut commands.entity(entity))
         .insert(AttackTargetOrder { target });
 }
 

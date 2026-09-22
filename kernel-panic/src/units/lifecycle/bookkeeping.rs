@@ -16,6 +16,30 @@ use std::collections::HashMap;
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 
+/// O(1) count of live units (everything carrying a `UnitType`), used by
+/// the factory spawn cap. Replaces an `iter().count()` over the whole
+/// unit query on every spawn-threshold frame — a scan that only gets
+/// more expensive as the battle grows.
+#[derive(Resource, Default, Debug)]
+pub struct TotalUnitCount(pub u32);
+
+/// Bumps [`TotalUnitCount`] for each newly-added `UnitType`. Pairs with
+/// [`track_dying_units`]; both lean on Bevy change detection, so the
+/// counter is exact as long as every unit despawn passes through
+/// `Dying` (the same lifecycle assumption the small-building counts
+/// document).
+pub fn track_added_units(
+    added: Query<(), Added<UnitType>>,
+    mut count: ResMut<TotalUnitCount>,
+) {
+    count.0 += added.iter().count() as u32;
+}
+
+/// Drops [`TotalUnitCount`] for each unit entering the death pipeline.
+pub fn track_dying_units(dying: Query<(), Added<Dying>>, mut count: ResMut<TotalUnitCount>) {
+    count.0 = count.0.saturating_sub(dying.iter().count() as u32);
+}
+
 #[derive(Resource, Default)]
 pub struct SmallBuildingCounts {
     counts: HashMap<u8, u32>,

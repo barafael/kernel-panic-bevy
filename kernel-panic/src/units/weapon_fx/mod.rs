@@ -52,6 +52,17 @@ impl Plugin for WeaponFxPlugin {
                     ceg::tick_ceg_delayed_spawns,
                 )
                     .chain()
+                    // Why the explicit anchors: this chain lives in
+                    // `GameplaySet::Simulate` but outside its combat /
+                    // command-fire sub-chains, so without edges the
+                    // scheduler may drain `PendingAttacks` before the
+                    // frame's shots are queued — a nondeterministic
+                    // one-frame FX lag. Both anchors are the *last*
+                    // systems of their sub-chain, so ordering against
+                    // them places the fx chain after all of Simulate's
+                    // producers.
+                    .after(crate::units::combat::aim_weapons_system)
+                    .after(crate::units::lifecycle::script_triggers::trigger_weapon_scripts)
                     .in_set(GameplaySet::Simulate),
             );
     }

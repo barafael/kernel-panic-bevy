@@ -17,7 +17,6 @@ use super::Dying;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
-use crate::units::components::UnitType;
 
 /// Deploy cycle for units that must unfold before firing (e.g. Pointer).
 /// The COB script animates the legs/gun; this component gates combat so
@@ -76,19 +75,21 @@ pub const DEPLOY_DURATION: f32 = 1.5;
 #[component(storage = "SparseSet")]
 pub struct ByteOpen;
 
+/// Spawn-time marker for the Byte kind, so the per-frame fold mirroring
+/// only iterates Bytes instead of every animator in the world.
+#[derive(Component)]
+pub struct Byte;
+
 /// Mirror the byte driver's fold state into the [`ByteOpen`] marker the
 /// damage pipeline reads. The driver is the single source of truth: the
 /// marker is present exactly while the fold state machine reports the
 /// byte fully unfolded, so a closed (or mid-fold) byte keeps its armor.
 pub fn sync_byte_fold_state(
-    mut query: Query<(Entity, &UnitType, &UnitAnimator)>,
+    mut query: Query<(Entity, &UnitAnimator), With<Byte>>,
     open: Query<&ByteOpen>,
     mut commands: Commands,
 ) {
-    for (entity, unit_type, animator) in &mut query {
-        if unit_type.0 != crate::units::content::definitions::UnitKind::Byte {
-            continue;
-        }
+    for (entity, animator) in &mut query {
         let is_open = animator.driver.is_open();
         let currently = open.get(entity).is_ok();
         match is_open {
