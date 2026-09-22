@@ -10,7 +10,6 @@
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;

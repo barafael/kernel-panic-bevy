@@ -11,6 +11,11 @@ pub mod weapon_fx;
 
 use bevy::prelude::*;
 
+/// The fixed simulation tick rate (ticks/second) for the gameplay
+/// chain — Spring's own sim frame rate. Every cooldown, burst rate and
+/// production speed in the registries is authored against this cadence.
+const SIMULATION_HZ: f64 = 30.0;
+
 use assets::animation;
 use content::{unit_registry, weapons};
 use lifecycle::{bookkeeping, construction, game_over, production, script_triggers, spawning};
@@ -38,7 +43,14 @@ pub struct UnitsPlugin;
 
 impl Plugin for UnitsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_state::<game_over::GameState>()
+        // Spring's sim ticks at a fixed 30 Hz (its `GAME_SPEED` frame
+        // unit is 1/30 s, and every FBI cooldown/burst/rate constant in
+        // the registries is authored against that cadence). Running the
+        // gameplay chain on `Time<Fixed>` makes those constants
+        // frame-rate-independent; `Res<Time>` inside `FixedUpdate`
+        // reads the fixed clock, while rendering/UI keep variable dt.
+        app.insert_resource(Time::<Fixed>::from_hz(SIMULATION_HZ))
+            .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
             .init_resource::<ai::AiTicker>()
@@ -64,14 +76,14 @@ impl Plugin for UnitsPlugin {
             .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .add_systems(
-                Update,
+                FixedUpdate,
                 ai::ai_brain
                     .before(GameplaySet::Produce)
                     .run_if(in_state(game_over::GameState::Playing))
                     .run_if(in_state(crate::game_setup::AppState::InGame)),
             )
             .configure_sets(
-                Update,
+                FixedUpdate,
                 (
                     GameplaySet::Produce,
                     GameplaySet::Simulate,
@@ -84,7 +96,7 @@ impl Plugin for UnitsPlugin {
             )
             .add_systems(Startup, validate_registries)
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     (
                         bookkeeping::track_added_buildings,

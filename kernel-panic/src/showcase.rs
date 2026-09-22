@@ -311,8 +311,11 @@ pub struct ShowcasePlugin;
 
 impl Plugin for ShowcasePlugin {
     fn build(&self, app: &mut App) {
+        // Same schedule as the gameplay chain it feeds (the `.before`
+        // ordering is only meaningful there — the sets live on the fixed
+        // sim clock).
         app.add_systems(
-            Update,
+            FixedUpdate,
             showcase_director
                 .before(crate::units::GameplaySet::Produce)
                 .run_if(in_state(crate::game_setup::AppState::InGame))

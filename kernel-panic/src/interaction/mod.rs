@@ -55,8 +55,14 @@ impl Plugin for InteractionPlugin {
         ))
             .init_gizmo_group::<CommandLineGizmos>()
             .add_systems(Startup, configure_command_line_gizmos)
+            // Unit motion is simulation: it runs on the fixed 30 Hz
+            // clock alongside the gameplay chain, so movement speed and
+            // separation are frame-rate-independent. Input/selection/UI
+            // systems stay on variable dt in `Update` — their commands
+            // land in the next sim tick (Bevy runs FixedUpdate before
+            // Update within a frame).
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     guard_follow_system,
                     movement_system,
@@ -67,9 +73,13 @@ impl Plugin for InteractionPlugin {
                     // Tilt idle units and buildings after clamping so
                     // the slope normal is sampled at the final Y.
                     orient_stationary_to_terrain.after(ground_clamp_system),
-                    draw_selected_command_lines.after(movement_system),
                 ),
-            );
+            )
+            // Command-line gizmos draw from `Update` on variable dt —
+            // pure visuals. No ordering edge against `movement_system`
+            // (that lives in `FixedUpdate` now); worst case the overlay
+            // trails the moved units by one frame.
+            .add_systems(Update, draw_selected_command_lines);
     }
 }
 

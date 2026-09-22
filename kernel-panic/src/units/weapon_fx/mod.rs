@@ -22,9 +22,9 @@ use super::GameplaySet;
 
 /// Registers the visual-effect resources and both fx systems.
 ///
-/// The spawn and tick systems both land in `GameplaySet::Simulate` with the
-/// spawn system running first so the tick system sees newly-spawned visuals
-/// on the same frame.
+/// The spawn and tick systems both land in `GameplaySet::Simulate` (the
+/// fixed 30 Hz sim schedule) with the spawn system running first so the
+/// tick system sees newly-spawned visuals on the same frame.
 pub struct WeaponFxPlugin;
 
 impl Plugin for WeaponFxPlugin {
@@ -39,7 +39,7 @@ impl Plugin for WeaponFxPlugin {
             .init_resource::<CegParticleMesh>()
             .insert_resource(CegRegistry::load())
             .add_systems(
-                Update,
+                FixedUpdate,
                 (
                     // tick fires `DelayedHit` into `PendingExplosions`;
                     // the explosion spawner must follow it in the chain
