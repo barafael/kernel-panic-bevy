@@ -385,8 +385,12 @@ pub fn animate_connection_hatch(
         } else {
             0.0
         };
-        animator.rig.target_translations[idx][1] = target_y;
-        animator.rig.move_speeds[idx][1] = HATCH_SPEED_ELMOS_PER_SEC;
+        let rig = &mut animator.rig;
+        rig.target_translations[idx][1] = target_y;
+        rig.move_speeds[idx][1] = HATCH_SPEED_ELMOS_PER_SEC;
+        // Bypassing the rig primitives means no automatic dirty flag —
+        // mark the rig so apply_and_drain actually pushes the hatch.
+        rig.dirty = true;
     }
 }
 

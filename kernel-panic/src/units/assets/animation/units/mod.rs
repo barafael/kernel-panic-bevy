@@ -50,29 +50,123 @@ pub fn driver_for(kind: UnitKind) -> Box<dyn UnitAnim> {
     match kind {
         Kernel => Box::new(kernel::KernelAnim::default()),
         Assembler => Box::new(assembler::AssemblerAnim::default()),
-        Bit => Box::new(bit::BitAnim),
+        Bit => Box::new(bit::BitAnim::default()),
         Byte => Box::new(byte::ByteAnim::default()),
         Pointer => Box::new(pointer::PointerAnim::default()),
         Socket => Box::new(socket::SocketAnim::default()),
         Terminal => Box::new(terminal::TerminalAnim::default()),
         BadBlock => Box::new(badblock::BadBlockAnim::default()),
         Hole => Box::new(hole::HoleAnim::default()),
-        Bug => Box::new(bug::BugAnim),
-        Exploit => Box::new(bug::ExploitAnim),
+        Bug => Box::new(bug::BugAnim::default()),
+        Exploit => Box::new(bug::ExploitAnim::default()),
         Worm => Box::new(worm::WormAnim::default()),
         Virus => Box::new(NoAnim),
         Dos => Box::new(dos::DosAnim::default()),
         Window => Box::new(window::WindowAnim::default()),
-        LogicBomb => Box::new(logic_bomb::LogicBombAnim),
+        LogicBomb => Box::new(logic_bomb::LogicBombAnim::default()),
         Trojan => Box::new(trojan::TrojanAnim::default()),
         Obelisk => Box::new(obelisk::ObeliskAnim::default()),
-        Carrier => Box::new(carrier::CarrierAnim),
-        Connection => Box::new(connection::ConnectionAnim),
+        Carrier => Box::new(carrier::CarrierAnim::default()),
+        Connection => Box::new(connection::ConnectionAnim::default()),
         Port | Firewall | Debug => Box::new(NoAnim),
-        Packet => Box::new(packet::PacketAnim),
+        Packet => Box::new(packet::PacketAnim::default()),
         Signal => Box::new(signal::SignalAnim::default()),
         Gateway => Box::new(gateway::GatewayAnim::default()),
         Flow => Box::new(flow::FlowAnim::default()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared driver idioms
+// ---------------------------------------------------------------------------
+
+/// Death-choreography tracker shared by drivers whose `killed()` plays a
+/// visible burst: `killed()` calls [`DeathFx::start`], `update()` ticks
+/// it, and `busy()` reports it so `cleanup_dying` holds the corpse until
+/// the death fx has played instead of despawning on the death frame.
+#[derive(Default)]
+pub struct DeathFx {
+    remaining: Option<f32>,
+}
+
+/// How long a driver stays `busy()` after its `killed()` fired. Covers
+/// the death-particle burst (~0.5 s lifetime) plus a beat of lingering.
+const DEATH_FX_WINDOW: f32 = 0.6;
+
+impl DeathFx {
+    pub fn start(&mut self) {
+        self.remaining = Some(DEATH_FX_WINDOW);
+    }
+
+    pub fn tick(&mut self, dt: f32) {
+        if let Some(t) = &mut self.remaining {
+            *t -= dt;
+            if *t <= 0.0 {
+                self.remaining = None;
+            }
+        }
+    }
+
+    pub fn busy(&self) -> bool {
+        self.remaining.is_some()
+    }
+}
+
+/// The two-laser square sweep shared by Socket and BadBlock
+/// (BuildLasers()): both lasers trace a square forever — x out on
+/// opposite sides, z out on opposite sides, then snap home and hold a
+/// leg. Terminal's variant sweeps a rectangle and re-homes at speed, so
+/// it keeps its own leg fn.
+#[derive(Default)]
+pub struct SquareSweep {
+    /// Current leg 0..4 (x-out → z-out → snap home ×2).
+    leg: usize,
+    timer: f32,
+}
+
+impl SquareSweep {
+    /// Time one leg takes: half-width ÷ speed.
+    pub fn new(half_width: f32, speed: f32) -> Self {
+        Self {
+            leg: 0,
+            timer: half_width / speed,
+        }
+    }
+
+    /// Advance the sweep. `a`/`b` are the two laser pieces; `half_width`
+    /// and `speed` are the script constants.
+    pub fn update(
+        &mut self,
+        rig: &mut AnimRig,
+        a: usize,
+        b: usize,
+        half_width: f32,
+        speed: f32,
+        dt: f32,
+    ) {
+        self.timer -= dt;
+        if self.timer > 0.0 {
+            return;
+        }
+        self.timer = half_width / speed;
+        self.leg = (self.leg + 1) % 4;
+        match self.leg {
+            0 => {
+                rig.move_to(a, Axis::X, -half_width, speed);
+                rig.move_to(b, Axis::X, half_width, speed);
+            }
+            1 => {
+                rig.move_to(a, Axis::Z, half_width, speed);
+                rig.move_to(b, Axis::Z, -half_width, speed);
+            }
+            _ => {
+                // snap home (x 0 now; z 0 now) and hold one leg
+                rig.move_to(a, Axis::X, 0.0, 0.0);
+                rig.move_to(b, Axis::X, 0.0, 0.0);
+                rig.move_to(a, Axis::Z, 0.0, 0.0);
+                rig.move_to(b, Axis::Z, 0.0, 0.0);
+            }
+        }
     }
 }
 
@@ -80,7 +174,7 @@ pub fn driver_for(kind: UnitKind) -> Box<dyn UnitAnim> {
 /// ([-depth]*(get BUILD_PERCENT_LEFT)/100) now`. Sinks `piece` by
 /// `depth` elmos proportionally to the build percentage so freshly-built
 /// units rise out of the ground / factory pad.
-pub fn emerge_lift(rig: &mut AnimRig, piece: &str, depth: f32, build_percent: i32) {
+pub fn emerge_lift(rig: &mut AnimRig, piece: usize, depth: f32, build_percent: i32) {
     let offset = depth * (build_percent.clamp(0, 100) as f32) / 100.0;
     rig.move_to(piece, Axis::Y, -offset, 0.0);
 }

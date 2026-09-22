@@ -2,7 +2,8 @@
 //! wave while moving; aiming surfaces the head and yaws the body; a
 //! strike lashes every segment forward before retracting.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
+use super::DeathFx;
 
 /// WALK_WAVEDIST [-8] — wave trough depth in elmos.
 const WAVE_DEPTH: f32 = 8.0;
@@ -17,8 +18,44 @@ const STRIKE_SPEED: f32 = 48.0;
 /// ATTACK_RETRACT [24] — retract speed.
 const STRIKE_RETRACT: f32 = 24.0;
 
+#[derive(Clone, Copy, Default)]
+struct WormPieces {
+    body: usize,
+    head: usize,
+    ring: [usize; 6],
+    end: usize,
+}
+
+impl WormPieces {
+    fn bind(rig: &AnimRig) -> Self {
+        Self {
+            body: rig.bind_piece("body"),
+            head: rig.bind_piece("head"),
+            ring: [
+                rig.bind_piece("ring0"),
+                rig.bind_piece("ring1"),
+                rig.bind_piece("ring2"),
+                rig.bind_piece("ring3"),
+                rig.bind_piece("ring4"),
+                rig.bind_piece("ring5"),
+            ],
+            end: rig.bind_piece("end"),
+        }
+    }
+
+    /// Every segment that takes part in the wave / strike / death, in
+    /// tail order (head → rings → end).
+    fn segments(&self) -> [usize; 8] {
+        [
+            self.head, self.ring[0], self.ring[1], self.ring[2], self.ring[3], self.ring[4],
+            self.ring[5], self.end,
+        ]
+    }
+}
+
 #[derive(Default)]
 pub struct WormAnim {
+    pieces: WormPieces,
     /// Walking-wave enabled (mirrors doMove).
     walking: bool,
     /// Current wave step (six segments per loop).
@@ -28,6 +65,7 @@ pub struct WormAnim {
     strike: Option<f32>,
     /// Head crouched (cloaked idle) vs surfaced (aiming).
     crouched: bool,
+    death: DeathFx,
 }
 
 impl WormAnim {
@@ -36,31 +74,35 @@ impl WormAnim {
         // trough while the rest return to 0. Head crests on the first
         // half of the loop; `end` trails a step behind the last ring.
         let s = self.phase % 6;
-        rig.move_to("head", Axis::Z, if s < 3 { 3.0 * WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
-        for i in 0..6 {
+        rig.move_to(self.pieces.head, Axis::Z, if s < 3 { 3.0 * WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
+        for (i, ring) in self.pieces.ring.into_iter().enumerate() {
             let active = (s + 6 - i) % 6 < 3;
-            let name = format!("ring{i}");
-            rig.move_to(&name, Axis::Z, if active { -WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
+            rig.move_to(ring, Axis::Z, if active { -WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
         }
-        rig.move_to("end", Axis::Z, if (s + 5) % 6 < 3 { -WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
+        rig.move_to(self.pieces.end, Axis::Z, if (s + 5) % 6 < 3 { -WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
     }
 
     fn flatten(&mut self, rig: &mut AnimRig) {
         // ForceStopWalk(): every segment snaps home.
-        for name in ["head", "ring0", "ring1", "ring2", "ring3", "ring4", "ring5", "end"] {
-            rig.move_to(name, Axis::Z, 0.0, 0.0);
+        for segment in self.pieces.segments() {
+            rig.move_to(segment, Axis::Z, 0.0, 0.0);
         }
     }
 }
 
 impl UnitAnim for WormAnim {
+    fn bind(&mut self, rig: &AnimRig) {
+        self.pieces = WormPieces::bind(rig);
+    }
+
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Cloaked idle crouch (Create()/ResetAim(): head y [-16] @12)
         // once the emerge completes.
         if !self.crouched && ctx.build_percent <= 0 && self.strike.is_none() && !self.walking {
             self.crouched = true;
-            rig.move_to("head", Axis::Y, -16.0, 12.0);
+            rig.move_to(self.pieces.head, Axis::Y, -16.0, 12.0);
         }
+        self.death.tick(ctx.dt);
 
         if let Some(t) = &mut self.strike {
             *t += ctx.dt;
@@ -69,11 +111,11 @@ impl UnitAnim for WormAnim {
                 // extension issued on strike start; hold
             } else if *t < 0.66 {
                 if *t - ctx.dt < 0.33 {
-                    rig.move_to("head", Axis::Z, 0.0, 7.0 * STRIKE_RETRACT);
-                    for i in 0..6 {
-                        rig.move_to(&format!("ring{i}"), Axis::Z, 0.0, STRIKE_RETRACT);
+                    rig.move_to(self.pieces.head, Axis::Z, 0.0, 7.0 * STRIKE_RETRACT);
+                    for ring in self.pieces.ring {
+                        rig.move_to(ring, Axis::Z, 0.0, STRIKE_RETRACT);
                     }
-                    rig.move_to("end", Axis::Z, 0.0, STRIKE_RETRACT);
+                    rig.move_to(self.pieces.end, Axis::Z, 0.0, STRIKE_RETRACT);
                 }
             } else {
                 self.strike = None;
@@ -105,8 +147,8 @@ impl UnitAnim for WormAnim {
         // StopMoving(): doMove=0 — the wave runs out and flattens.
         self.walking = false;
         if self.strike.is_none() {
-            for name in ["head", "ring0", "ring1", "ring2", "ring3", "ring4", "ring5", "end"] {
-                rig.move_to(name, Axis::Z, 0.0, WAVE_SPEED);
+            for segment in self.pieces.segments() {
+                rig.move_to(segment, Axis::Z, 0.0, WAVE_SPEED);
             }
         }
     }
@@ -118,8 +160,8 @@ impl UnitAnim for WormAnim {
         }
         self.walking = false;
         self.flatten(rig);
-        rig.move_to("head", Axis::Y, 0.0, 12.0);
-        rig.turn_rad("body", Axis::Y, h, 800.0 * super::super::DEG2RAD);
+        rig.move_to(self.pieces.head, Axis::Y, 0.0, 12.0);
+        rig.turn_rad(self.pieces.body, Axis::Y, h, deg2rad(800.0));
         let _ = p;
         true
     }
@@ -132,17 +174,22 @@ impl UnitAnim for WormAnim {
         }
         self.strike = Some(0.0);
         self.walking = false;
-        rig.move_to("head", Axis::Z, 7.0 * STRIKE_DEPTH, 7.0 * STRIKE_SPEED);
-        for i in 0..6 {
-            rig.move_to(&format!("ring{i}"), Axis::Z, -STRIKE_DEPTH, STRIKE_SPEED);
+        rig.move_to(self.pieces.head, Axis::Z, 7.0 * STRIKE_DEPTH, 7.0 * STRIKE_SPEED);
+        for ring in self.pieces.ring {
+            rig.move_to(ring, Axis::Z, -STRIKE_DEPTH, STRIKE_SPEED);
         }
-        rig.move_to("end", Axis::Z, -STRIKE_DEPTH, STRIKE_SPEED);
+        rig.move_to(self.pieces.end, Axis::Z, -STRIKE_DEPTH, STRIKE_SPEED);
     }
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode head + rings + end, all FALL.
-        for name in ["head", "ring0", "ring1", "ring2", "ring3", "ring4", "ring5", "end"] {
-            rig.explode(name, 3);
+        for segment in self.pieces.segments() {
+            rig.explode(segment, 3);
         }
+        self.death.start();
+    }
+
+    fn busy(&self) -> bool {
+        self.death.busy()
     }
 }

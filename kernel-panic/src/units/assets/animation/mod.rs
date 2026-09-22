@@ -46,6 +46,19 @@ pub use units::{driver_for, has_aim_weapon, piece_names};
 /// units); `[n]` is n elmos.
 pub const DEG2RAD: f32 = std::f32::consts::PI / 180.0;
 
+/// Degree→radian in one call — replaces the per-driver `rad2deg`-style
+/// helpers and the `n * super::super::DEG2RAD` spelling.
+pub const fn deg2rad(deg: f32) -> f32 {
+    deg * DEG2RAD
+}
+
+/// Sentinel piece index for pieces a unit's model doesn't have. Drivers
+/// bind their piece indices once (in [`UnitAnim::bind`]); animating a
+/// missing piece must be a harmless no-op, exactly like the old
+/// name-based `piece() == None` path — so every index-taking primitive
+/// bounds-checks and bails on this value.
+pub const PIECE_MISSING: usize = usize::MAX;
+
 /// Spring's fixed runtime scale for linear and angular values in a
 /// compiled `.cob` (65536). Pinned by the regression tests below —
 /// drivers work in degrees/elmos directly, so this only guards the
@@ -138,7 +151,10 @@ impl Axis {
 /// [`animation_system`].
 #[derive(Debug)]
 pub enum FxEvent {
-    Emit { piece: usize, sfx: i32 },
+    Emit {
+        piece: usize,
+        kind: SfxKind,
+    },
     /// Piece detonation. `severity` mirrors the upstream
     /// `explode ... type FALL/SHATTER/...` class (3 = FALL, 4 = SHATTER
     /// in the constant encoding we inherit); currently all classes
@@ -152,13 +168,44 @@ pub enum FxEvent {
     Hide { piece: usize },
 }
 
+/// What a driver wants an `emit-sfx` to look like, replacing the raw COB
+/// integer opcodes (`2048`, `4097`, ...) drivers used to push. Upstream
+/// scripts OR a weapon index into the constant (`emit-sfx
+/// SFX_DETONATE_WEAPON + 1`); the current renderer buckets by range only,
+/// so the index is dropped here rather than carried dead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SfxKind {
+    /// `0..SFX_FIRE_WEAPON_BASE` — generic SFX (wake, smoke, ground
+    /// spark, dust). Tiny puff so movement/attack scripts don't strobe.
+    Puff,
+    /// `SFX_FIRE_WEAPON_BASE..SFX_DETONATE_WEAPON_BASE` — weapon-fire
+    /// flash at the piece (builder beams, idle turret flares). Small pop.
+    FireFlash,
+    /// `SFX_DETONATE_WEAPON_BASE..SFX_CEG_BASE` — explicit weapon
+    /// detonation (the worm's bite). Full explosion radius. No driver
+    /// emits it yet — upstream's `emit-sfx 4097 from head` (exploit.bos)
+    /// is the first candidate when per-weapon detonation is wired.
+    #[allow(dead_code)]
+    Detonate,
+    /// `SFX_CEG_BASE..` — named-CEG spawn, treated as a medium puff so
+    /// ambient dust still reads without faking the particle system. No
+    /// driver emits it yet (named CEGs render through `weapon_fx`
+    /// instead); kept so the opcode space stays fully encoded.
+    #[allow(dead_code)]
+    Ceg,
+}
+
 /// The per-unit animation hardware: piece table, interpolation arrays and
 /// the effect outbox. Split from [`UnitAnimator`] so a driver call can
 /// take `&mut AnimRig` and `&mut dyn UnitAnim` from one component
 /// without fighting the borrow checker.
 pub struct AnimRig {
-    /// Piece names in COB declaration order (from the parsed script).
-    pub piece_names: Vec<String>,
+    /// Piece names in COB declaration order (from the static per-kind
+    /// table). `&'static` — the old `Vec<String>` forced a heap string
+    /// per piece per unit and case-insensitive compares on every lookup;
+    /// drivers now bind indices once and this table is only consulted
+    /// by [`AnimRig::piece`] (binding + tests).
+    pub piece_names: &'static [&'static str],
     /// Maps COB piece index → Bevy child entity.
     pub piece_entities: Vec<Entity>,
     /// Static base offsets from the s3o model (never modified by animation).
@@ -186,21 +233,41 @@ pub struct AnimRig {
     pub move_gate: f32,
     /// Effects queued by drivers, drained every frame.
     pub outbox: Vec<FxEvent>,
+    /// Whether the rig's piece transforms changed since
+    /// [`animation_system`] last applied them. Set by every primitive
+    /// write and by [`tick_rig`]; lets `apply_and_drain` skip the
+    /// per-piece `Quat::from_euler` + transform write for idle rigs —
+    /// an army standing still costs nothing to animate.
+    pub dirty: bool,
 }
 
 impl AnimRig {
     /// COB piece index for `name`, or `None` when the model has no such
-    /// piece (animations targeting it become no-ops).
+    /// piece. Called from [`UnitAnim::bind`] at spawn (once per driver)
+    /// and by tests — never on the per-frame path.
     pub fn piece(&self, name: &str) -> Option<usize> {
         self.piece_names
             .iter()
             .position(|n| n.eq_ignore_ascii_case(name))
     }
 
+    /// Resolve a piece name to a bind-time index, collapsing "missing
+    /// piece" into [`PIECE_MISSING`] so drivers can store plain `usize`s.
+    pub fn bind_piece(&self, name: &str) -> usize {
+        self.piece(name).unwrap_or(PIECE_MISSING)
+    }
+
+    /// Bounds-check for the bound-index primitives: `PIECE_MISSING` and
+    /// out-of-range indices become no-ops.
+    #[inline]
+    fn live(&self, piece: usize) -> bool {
+        piece < self.piece_rotations.len()
+    }
+
     /// Rotate `piece` toward `target_deg` at `speed_deg_per_sec` (`.bos`
     /// `turn <piece> to <axis> <t> speed <s>`). A speed of 0 snaps
     /// instantly (`turn ... now`).
-    pub fn turn_deg(&mut self, piece: &str, axis: Axis, target_deg: f32, speed_deg_per_sec: f32) {
+    pub fn turn_deg(&mut self, piece: usize, axis: Axis, target_deg: f32, speed_deg_per_sec: f32) {
         self.turn_rad(
             piece,
             axis,
@@ -211,36 +278,38 @@ impl AnimRig {
 
     /// Rotate `piece` toward `target_rad` at `speed_rad_per_sec`. A speed
     /// of 0 snaps instantly. Used for host-computed aim headings.
-    pub fn turn_rad(&mut self, piece: &str, axis: Axis, target_rad: f32, speed_rad_per_sec: f32) {
-        let Some(p) = self.piece(piece) else {
+    pub fn turn_rad(&mut self, piece: usize, axis: Axis, target_rad: f32, speed_rad_per_sec: f32) {
+        if !self.live(piece) {
             return;
-        };
-        let a = axis.index();
-        self.target_rotations[p][a] = target_rad;
-        if speed_rad_per_sec <= 0.0 {
-            self.piece_rotations[p][a] = target_rad;
-            self.turn_speeds[p][a] = 0.0;
-        } else {
-            self.turn_speeds[p][a] = speed_rad_per_sec;
         }
+        let a = axis.index();
+        self.target_rotations[piece][a] = target_rad;
+        if speed_rad_per_sec <= 0.0 {
+            self.piece_rotations[piece][a] = target_rad;
+            self.turn_speeds[piece][a] = 0.0;
+        } else {
+            self.turn_speeds[piece][a] = speed_rad_per_sec;
+        }
+        self.dirty = true;
     }
 
     /// Slide `piece` to `elmos` along `axis` at `speed` elmos/sec (`.bos`
     /// `move <piece> to <axis> [d] speed [s]`). A speed of 0 snaps
     /// instantly. X is mirrored — see the module docs.
-    pub fn move_to(&mut self, piece: &str, axis: Axis, elmos: f32, speed: f32) {
-        let Some(p) = self.piece(piece) else {
+    pub fn move_to(&mut self, piece: usize, axis: Axis, elmos: f32, speed: f32) {
+        if !self.live(piece) {
             return;
-        };
+        }
         let a = axis.index();
         let target = if axis == Axis::X { -elmos } else { elmos };
-        self.target_translations[p][a] = target;
+        self.target_translations[piece][a] = target;
         if speed <= 0.0 {
-            self.piece_translations[p][a] = target;
-            self.move_speeds[p][a] = 0.0;
+            self.piece_translations[piece][a] = target;
+            self.move_speeds[piece][a] = 0.0;
         } else {
-            self.move_speeds[p][a] = speed;
+            self.move_speeds[piece][a] = speed;
         }
+        self.dirty = true;
     }
 
     /// True when `piece` has reached its target along `axis` (the
@@ -249,57 +318,55 @@ impl AnimRig {
     /// non-moving component sits at its (unchanged) target, so it never
     /// falsifies the check. Missing pieces are "at target" (nothing to
     /// wait for).
-    pub fn at_target(&self, piece: &str, axis: Axis) -> bool {
-        let Some(p) = self.piece(piece) else {
+    pub fn at_target(&self, piece: usize, axis: Axis) -> bool {
+        if !self.live(piece) {
             return true;
-        };
+        }
         let a = axis.index();
         const EPS: f32 = 1e-4;
-        (self.piece_rotations[p][a] - self.target_rotations[p][a]).abs() < EPS
-            && (self.piece_translations[p][a] - self.target_translations[p][a]).abs() < EPS
+        (self.piece_rotations[piece][a] - self.target_rotations[piece][a]).abs() < EPS
+            && (self.piece_translations[piece][a] - self.target_translations[piece][a]).abs() < EPS
     }
 
     /// Continuous spin in degrees/sec (`.bos` `spin <piece> around <axis>
     /// speed <n>`). Direction follows the same convention as turns.
-    pub fn spin_dps(&mut self, piece: &str, axis: Axis, deg_per_sec: f32) {
-        let Some(p) = self.piece(piece) else {
+    pub fn spin_dps(&mut self, piece: usize, axis: Axis, deg_per_sec: f32) {
+        if !self.live(piece) {
             return;
-        };
-        self.spin_speeds[p][axis.index()] = deg_per_sec * DEG2RAD;
+        }
+        self.spin_speeds[piece][axis.index()] = deg_per_sec * DEG2RAD;
+        self.dirty = true;
     }
 
     /// Stop a spin (`.bos` `stop-spin <piece> around <axis>`).
-    pub fn stop_spin(&mut self, piece: &str, axis: Axis) {
-        let Some(p) = self.piece(piece) else {
+    pub fn stop_spin(&mut self, piece: usize, axis: Axis) {
+        if !self.live(piece) {
             return;
-        };
-        self.spin_speeds[p][axis.index()] = 0.0;
+        }
+        self.spin_speeds[piece][axis.index()] = 0.0;
     }
 
-    pub fn emit(&mut self, piece: &str, sfx: i32) {
-        if let Some(p) = self.piece(piece) {
-            self.outbox.push(FxEvent::Emit { piece: p, sfx });
+    pub fn emit(&mut self, piece: usize, kind: SfxKind) {
+        if self.live(piece) {
+            self.outbox.push(FxEvent::Emit { piece, kind });
         }
     }
 
-    pub fn explode(&mut self, piece: &str, severity: i32) {
-        if let Some(p) = self.piece(piece) {
-            self.outbox.push(FxEvent::Explode {
-                piece: p,
-                severity,
-            });
+    pub fn explode(&mut self, piece: usize, severity: i32) {
+        if self.live(piece) {
+            self.outbox.push(FxEvent::Explode { piece, severity });
         }
     }
 
-    pub fn show(&mut self, piece: &str) {
-        if let Some(p) = self.piece(piece) {
-            self.outbox.push(FxEvent::Show { piece: p });
+    pub fn show(&mut self, piece: usize) {
+        if self.live(piece) {
+            self.outbox.push(FxEvent::Show { piece });
         }
     }
 
-    pub fn hide(&mut self, piece: &str) {
-        if let Some(p) = self.piece(piece) {
-            self.outbox.push(FxEvent::Hide { piece: p });
+    pub fn hide(&mut self, piece: usize) {
+        if self.live(piece) {
+            self.outbox.push(FxEvent::Hide { piece });
         }
     }
 }
@@ -356,6 +423,15 @@ impl AnimCtx {
 /// [`units`](self::units); every method defaults to a no-op so a driver
 /// only implements what its unit actually does.
 pub trait UnitAnim: Send + Sync + 'static {
+    /// Resolve this driver's piece indices from the rig, once at spawn.
+    /// Called before any other method, so even a unit killed on its
+    /// spawn frame can address its pieces. Store the results (using
+    /// [`PIECE_MISSING`] for pieces the model lacks) and use the
+    /// index-taking rig primitives from then on — the old
+    /// name-per-call API forced a `format!` + case-insensitive linear
+    /// scan on every primitive call.
+    fn bind(&mut self, _rig: &AnimRig) {}
+
     /// Run once when the unit spawns: initial poses, resting spins, the
     /// build-emerge pose. Corresponds to the `.bos` `Create()`.
     fn create(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}
@@ -389,7 +465,11 @@ pub trait UnitAnim: Send + Sync + 'static {
     fn killed(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}
 
     /// True while a death or one-shot animation is still playing; the
-    /// dying unit is despawned once this goes `false`.
+    /// dying unit is despawned once this goes `false` (or the
+    /// [`DEATH_ANIM_TIMEOUT`](crate::units::combat::lifecycle) backstop
+    /// fires). Drivers with death choreography override this alongside
+    /// [`UnitAnim::killed`] so the corpse lingers for the burst instead
+    /// of popping out of existence on the death frame.
     fn busy(&self) -> bool {
         false
     }
@@ -417,39 +497,54 @@ pub struct UnitAnimator {
 // System
 // ---------------------------------------------------------------------------
 
+/// Everything [`animation_system`] needs to push rig state into the
+/// render world: piece transforms, spawn commands for death particles,
+/// the shared death-particle assets, and the explosion outbox. Grouped
+/// into one `SystemParam` so the system signature stays readable — the
+/// old signature was a 12-tuple query plus six loose params, suppressed
+/// with `clippy::too_many_arguments`.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct AnimFxOut<'w, 's> {
+    pub transforms:
+        Query<'w, 's, (&'static mut Transform, &'static mut Visibility), With<PieceIndex>>,
+    pub commands: Commands<'w, 's>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
+    pub materials: ResMut<'w, Assets<StandardMaterial>>,
+    pub death_assets: ResMut<'w, DeathParticleAssets>,
+    pub explosions: ResMut<'w, PendingExplosions>,
+}
+
+/// The driver-tick query plus its per-frame world inputs. Dying units are
+/// deliberately included: their `killed()` drivers tick here (explode/hide
+/// choreography) until despawn.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct AnimDrivers<'w, 's> {
+    pub animators: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static mut UnitAnimator,
+            &'static Faction,
+            &'static GlobalTransform,
+            Option<&'static MoveTarget>,
+            Option<&'static MovePath>,
+            Option<&'static crate::units::lifecycle::production::Producer>,
+            Option<&'static crate::units::combat::Deployable>,
+            Option<&'static crate::units::lifecycle::spawning::Emerging>,
+            Option<&'static crate::units::combat::AimTarget>,
+            Option<&'static crate::units::combat::AttackGroundOrder>,
+            Option<&'static crate::units::combat::AttackTargetOrder>,
+        ),
+    >,
+}
+
 /// Tick every driver, interpolate the rigs, and apply piece transforms.
 ///
 /// Also feeds `BUILD_PERCENT_LEFT` from the `Emerging` component into the
 /// driver context (upstream value: 100 just spawned → 0 finished), and
 /// fills in movement/production/deploy state from the host components.
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
-pub fn animation_system(
-    time: Res<Time>,
-    mut animators: Query<
-        (
-            Entity,
-            &mut UnitAnimator,
-            &Faction,
-            &GlobalTransform,
-            Option<&MoveTarget>,
-            Option<&MovePath>,
-            Option<&crate::units::lifecycle::production::Producer>,
-            Option<&crate::units::combat::Deployable>,
-            Option<&crate::units::lifecycle::spawning::Emerging>,
-            Option<&crate::units::combat::AimTarget>,
-            Option<&crate::units::combat::AttackGroundOrder>,
-            Option<&crate::units::combat::AttackTargetOrder>,
-        ),
-        // Dying units are deliberately included: their `killed()`
-        // drivers tick here (explode/hide choreography) until despawn.
-    >,
-    mut transforms: Query<(&mut Transform, &mut Visibility), With<PieceIndex>>,
-    mut spawn_commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut death_assets: ResMut<DeathParticleAssets>,
-    mut explosions: ResMut<PendingExplosions>,
-) {
+pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimFxOut) {
     let dt = time.delta_secs();
 
     for (
@@ -465,7 +560,7 @@ pub fn animation_system(
         aim_target,
         attack_ground,
         attack_target,
-    ) in &mut animators
+    ) in &mut drivers.animators
     {
         let build_percent = emerging
             .map(|e| {
@@ -502,28 +597,21 @@ pub fn animation_system(
 
         tick_rig(rig, dt);
 
-        apply_and_drain(
-            rig,
-            *faction,
-            unit_gtf,
-            &mut transforms,
-            &mut spawn_commands,
-            &mut meshes,
-            &mut materials,
-            &mut death_assets,
-            &mut explosions,
-        );
+        apply_and_drain(rig, *faction, unit_gtf, &mut fx);
     }
 }
 
 /// Advance a rig's interpolation: spins integrate continuously; turns and
-/// moves step toward their targets and stop when they arrive.
+/// moves step toward their targets and stop when they arrive. Flags the
+/// rig dirty whenever anything actually moved.
 pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
+    let mut changed = false;
     for p in 0..rig.piece_rotations.len() {
         for a in 0..3 {
             let spin = rig.spin_speeds[p][a];
             if spin != 0.0 {
                 rig.piece_rotations[p][a] += spin * dt;
+                changed = true;
             }
 
             let speed = rig.turn_speeds[p][a];
@@ -538,6 +626,7 @@ pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
                 } else {
                     rig.piece_rotations[p][a] += step * diff.signum();
                 }
+                changed = true;
             }
 
             let mspeed = rig.move_speeds[p][a];
@@ -552,74 +641,80 @@ pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
                 } else {
                     rig.piece_translations[p][a] += step * diff.signum();
                 }
+                changed = true;
             }
         }
+    }
+    if changed {
+        rig.dirty = true;
     }
 }
 
 /// Apply a rig's piece transforms to Bevy, then drain its fx outbox.
-#[allow(clippy::too_many_arguments)]
+/// The transform write is gated on the rig's dirty flag — an idle rig
+/// (no in-flight interpolation, spinning pieces, or fresh commands)
+/// skips the per-piece euler compose entirely.
 fn apply_and_drain(
     rig: &mut AnimRig,
     faction: Faction,
     unit_gtf: &GlobalTransform,
-    transforms: &mut Query<(&mut Transform, &mut Visibility), With<PieceIndex>>,
-    spawn_commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    death_assets: &mut DeathParticleAssets,
-    explosions: &mut PendingExplosions,
+    fx: &mut AnimFxOut,
 ) {
-    let piece_count = rig.piece_rotations.len().min(rig.piece_entities.len());
-    for p in 0..piece_count {
-        let Ok((mut tf, _)) = transforms.get_mut(rig.piece_entities[p]) else {
-            continue;
-        };
-        let r = rig.piece_rotations[p];
-        let t = rig.piece_translations[p];
-        let base = rig.piece_base_offsets[p];
-        // Stored Spring angles apply as Bevy euler (X=+θ, Y=+θ, Z=−θ) —
-        // see the module docs for the handedness derivation.
-        tf.rotation = Quat::from_euler(EulerRot::YXZ, r[1], r[0], -r[2]);
-        tf.translation = Vec3::new(base[0] + t[0], base[1] + t[1], base[2] + t[2]);
+    if rig.dirty {
+        let piece_count = rig.piece_rotations.len().min(rig.piece_entities.len());
+        for p in 0..piece_count {
+            let Ok((mut tf, _)) = fx.transforms.get_mut(rig.piece_entities[p]) else {
+                continue;
+            };
+            let r = rig.piece_rotations[p];
+            let t = rig.piece_translations[p];
+            let base = rig.piece_base_offsets[p];
+            // Stored Spring angles apply as Bevy euler (X=+θ, Y=+θ, Z=−θ) —
+            // see the module docs for the handedness derivation.
+            tf.rotation = Quat::from_euler(EulerRot::YXZ, r[1], r[0], -r[2]);
+            tf.translation = Vec3::new(base[0] + t[0], base[1] + t[1], base[2] + t[2]);
+        }
+        rig.dirty = false;
     }
 
-    for fx in rig.outbox.drain(..) {
+    for fx_event in rig.outbox.drain(..) {
         let in_range = |piece: usize| piece < rig.piece_entities.len();
-        match fx {
+        match fx_event {
             FxEvent::Show { piece } if in_range(piece) => {
-                if let Ok((_, mut vis)) = transforms.get_mut(rig.piece_entities[piece]) {
+                if let Ok((_, mut vis)) = fx.transforms.get_mut(rig.piece_entities[piece]) {
                     *vis = Visibility::Inherited;
                 }
             }
             FxEvent::Hide { piece } if in_range(piece) => {
-                if let Ok((_, mut vis)) = transforms.get_mut(rig.piece_entities[piece]) {
+                if let Ok((_, mut vis)) = fx.transforms.get_mut(rig.piece_entities[piece]) {
                     *vis = Visibility::Hidden;
                 }
             }
             FxEvent::Explode { piece, .. } if in_range(piece) => {
-                if let Ok((_, mut vis)) = transforms.get_mut(rig.piece_entities[piece]) {
+                if let Ok((_, mut vis)) = fx.transforms.get_mut(rig.piece_entities[piece]) {
                     *vis = Visibility::Hidden;
                 }
-                let piece_world_pos = transforms
+                let piece_world_pos = fx
+                    .transforms
                     .get(rig.piece_entities[piece])
                     .map(|(tf, _)| unit_gtf.translation() + tf.translation)
                     .unwrap_or_else(|_| unit_gtf.translation());
                 spawn_death_particle(
                     piece_world_pos,
                     faction,
-                    death_assets,
-                    spawn_commands,
-                    meshes,
-                    materials,
+                    &mut fx.death_assets,
+                    &mut fx.commands,
+                    &mut fx.meshes,
+                    &mut fx.materials,
                 );
             }
-            FxEvent::Emit { piece, sfx } if in_range(piece) => {
-                let piece_world_pos = transforms
+            FxEvent::Emit { piece, kind } if in_range(piece) => {
+                let piece_world_pos = fx
+                    .transforms
                     .get(rig.piece_entities[piece])
                     .map(|(tf, _)| unit_gtf.translation() + tf.translation)
                     .unwrap_or_else(|_| unit_gtf.translation());
-                dispatch_emit_sfx(sfx, piece_world_pos, faction, explosions);
+                dispatch_emit_sfx(kind, piece_world_pos, faction, &mut fx.explosions);
             }
             _ => {}
         }
@@ -629,8 +724,14 @@ fn apply_and_drain(
 /// Mirror driver-cycled muzzle indices ([`AnimRig::muzzle`]) into the
 /// [`MuzzlePiece`] component that combat reads. Runs right after
 /// [`animation_system`].
+///
+/// Why no `Changed<UnitAnimator>` filter: `animation_system` takes the
+/// animator by `DerefMut` for every unit every frame (the rig ticks even
+/// when idle), so the change-detection flag fires unconditionally and the
+/// filter never filters. The work here is one component get + compare per
+/// unit — cheap enough to just run.
 pub fn sync_muzzle_pieces(
-    animators: Query<(Entity, &UnitAnimator), Changed<UnitAnimator>>,
+    animators: Query<(Entity, &UnitAnimator)>,
     muzzle: Query<&MuzzlePiece>,
     mut commands: Commands,
 ) {
@@ -645,49 +746,21 @@ pub fn sync_muzzle_pieces(
 }
 
 // ---------------------------------------------------------------------------
-// COB EmitSfx dispatch
+// EmitSfx dispatch
 // ---------------------------------------------------------------------------
 
-/// Upstream sfx-type constants. COB scripts pass these as integer
-/// literals, optionally ORed with a weapon index — e.g. `emit-sfx
-/// SFX_DETONATE_WEAPON + 1 from head` detonates weapon 1 at the `head`
-/// piece. We bucket the raw value into fire / detonate / generic and
-/// spawn a correspondingly-sized explosion. Weapon-index / CEG-ID
-/// demultiplexing is intentionally coarse: wiring every weapon-specific
-/// CEG would require loading the full upstream particle-system table,
-/// and the current goal is faithful-enough visible feedback.
-const SFX_FIRE_WEAPON_BASE: i32 = 2048;
-const SFX_DETONATE_WEAPON_BASE: i32 = 4096;
-const SFX_CEG_BASE: i32 = 8192;
-const SFX_GLOBAL_CEG_BASE: i32 = 16384;
-
-/// Turn a raw SFX opcode arg into a faction-coloured explosion event.
+/// Turn a typed [`SfxKind`] into a faction-coloured explosion event.
 ///
-/// * `0..SFX_FIRE_WEAPON_BASE`: generic SFX (wake, smoke, fire spark,
-///   dust cloud). Tiny puff so movement/attack scripts don't strobe the
-///   screen every step.
-/// * `SFX_FIRE_WEAPON_BASE..SFX_DETONATE_WEAPON_BASE`: weapon-fire flash
-///   at the piece (builder's build-beam emit, idle turret idle-flare).
-///   Small pop.
-/// * `SFX_DETONATE_WEAPON_BASE..SFX_CEG_BASE`: explicit weapon
-///   detonation — the worm's `emit-sfx 4097 from head` in exploit.bos
-///   uses this for its bite. Full explosion radius.
-/// * `SFX_CEG_BASE..`: named-CEG spawn. Treated as a medium puff so
-///   scripts that use it for ambient dust (assembler's construction
-///   beam glows) still read, without faking the full particle system.
-fn dispatch_emit_sfx(sfx_type: i32, pos: Vec3, faction: Faction, explosions: &mut PendingExplosions) {
-    let (radius, intensity) = if sfx_type >= SFX_GLOBAL_CEG_BASE {
-        // Global CEG (attached to world, not piece) — ignore; wiring it up
-        // needs a registry we don't have.
-        return;
-    } else if sfx_type >= SFX_CEG_BASE {
-        (6.0, 0.9)
-    } else if sfx_type >= SFX_DETONATE_WEAPON_BASE {
-        (32.0, 1.0)
-    } else if sfx_type >= SFX_FIRE_WEAPON_BASE {
-        (4.0, 0.8)
-    } else {
-        (2.5, 0.6)
+/// The raw COB opcode → kind decoding lives in [`SfxKind`]; this is the
+/// rendering half. Sizes follow the old range-bucketing so the visual
+/// language is unchanged (see the [`SfxKind`] docs for the upstream
+/// constant ranges each kind stands in for).
+fn dispatch_emit_sfx(kind: SfxKind, pos: Vec3, faction: Faction, explosions: &mut PendingExplosions) {
+    let (radius, intensity) = match kind {
+        SfxKind::Ceg => (6.0, 0.9),
+        SfxKind::Detonate => (32.0, 1.0),
+        SfxKind::FireFlash => (4.0, 0.8),
+        SfxKind::Puff => (2.5, 0.6),
     };
 
     let base = faction.rgb_f32();

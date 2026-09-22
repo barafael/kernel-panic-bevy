@@ -4,20 +4,37 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 
+#[derive(Clone, Copy, Default)]
+struct CarrierPieces {
+    mover: usize,
+}
+
+impl CarrierPieces {
+    fn bind(rig: &AnimRig) -> Self {
+        Self {
+            mover: rig.bind_piece("mover"),
+        }
+    }
+}
+
 #[derive(Default)]
-pub struct CarrierAnim;
+pub struct CarrierAnim {
+    pieces: CarrierPieces,
+}
 
 impl UnitAnim for CarrierAnim {
+    fn bind(&mut self, rig: &AnimRig) {
+        self.pieces = CarrierPieces::bind(rig);
+    }
+
     fn activate(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Activate(): move mover to y-axis [16] speed [8] — the pad
         // rises and hovers while the factory is producing.
-        bevy::prelude::info!("Carrier: Activate (pad up)");
-        rig.move_to("mover", Axis::Y, 16.0, 8.0);
+        rig.move_to(self.pieces.mover, Axis::Y, 16.0, 8.0);
     }
 
     fn deactivate(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Deactivate(): move mover to y-axis 0 speed [12].
-        bevy::prelude::info!("Carrier: Deactivate (pad down)");
-        rig.move_to("mover", Axis::Y, 0.0, 12.0);
+        rig.move_to(self.pieces.mover, Axis::Y, 0.0, 12.0);
     }
 }

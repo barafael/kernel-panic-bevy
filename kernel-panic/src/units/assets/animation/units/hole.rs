@@ -2,7 +2,7 @@
 //! assembly, which sweeps out and shuttles the emitter head back and
 //! forth while producing; deactivating hides it again.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
 
 /// Activate(): emitter shuttles z 0 ↔ [-55] @128 elmos/s (each leg).
 /// Plus the arm sweeps x [-16] ↔ [-64] @64.
@@ -12,8 +12,26 @@ const ARM_NEAR: f32 = 16.0;
 const ARM_FAR: f32 = 64.0;
 const ARM_SPEED: f32 = 64.0;
 
+#[derive(Clone, Copy, Default)]
+struct HolePieces {
+    nanoarm: usize,
+    nanomover: usize,
+    nanoemitter: usize,
+}
+
+impl HolePieces {
+    fn bind(rig: &AnimRig) -> Self {
+        Self {
+            nanoarm: rig.bind_piece("nanoarm"),
+            nanomover: rig.bind_piece("nanomover"),
+            nanoemitter: rig.bind_piece("nanoemitter"),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct HoleAnim {
+    pieces: HolePieces,
     /// Production open (mirrors Activate/Deactivate).
     active: bool,
     /// True = shuttling out, false = returning.
@@ -27,13 +45,17 @@ pub struct HoleAnim {
 }
 
 impl UnitAnim for HoleAnim {
-    fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Create(): hide nanoarm; hide nanomover.
-        rig.hide("nanoarm");
-        rig.hide("nanomover");
+    fn bind(&mut self, rig: &AnimRig) {
+        self.pieces = HolePieces::bind(rig);
     }
 
-    fn update(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+    fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+        // Create(): hide nanoarm; hide nanomover.
+        rig.hide(self.pieces.nanoarm);
+        rig.hide(self.pieces.nanomover);
+    }
+
+    fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         if !self.active {
             return;
         }
@@ -41,27 +63,27 @@ impl UnitAnim for HoleAnim {
         // travel; the nano-arm sweeps back and forth in the opposite
         // rhythm (script: `for i in 16..=64 { move nanoarm to x
         // [-1]*i }` around each stroke).
-        self.leg_timer -= _ctx.dt;
+        self.leg_timer -= ctx.dt;
         if self.leg_timer <= 0.0 {
             self.leg_timer = SHUTTLE_DEPTH / SHUTTLE_SPEED;
             self.out = !self.out;
             let target = if self.out { -SHUTTLE_DEPTH } else { 0.0 };
-            rig.move_to("nanomover", Axis::Z, target, SHUTTLE_SPEED);
+            rig.move_to(self.pieces.nanomover, Axis::Z, target, SHUTTLE_SPEED);
         }
 
-        self.arm_timer -= _ctx.dt;
+        self.arm_timer -= ctx.dt;
         if self.arm_timer <= 0.0 {
             self.arm_timer = (ARM_FAR - ARM_NEAR) / ARM_SPEED;
             self.arm_out = !self.arm_out;
             let target = if self.arm_out { -ARM_FAR } else { -ARM_NEAR };
-            rig.move_to("nanoarm", Axis::X, target, ARM_SPEED);
+            rig.move_to(self.pieces.nanoarm, Axis::X, target, ARM_SPEED);
         }
 
         // EmitFX(): `if (doEmit) emit-sfx 1025 from nanoemitter` —
         // burst while the head is parked at the far end (doEmit in the
         // script is set at the bottom of each stroke).
         if self.out {
-            rig.emit("nanoemitter", 1025);
+            rig.emit(self.pieces.nanoemitter, SfxKind::Puff);
         }
     }
 
@@ -72,18 +94,18 @@ impl UnitAnim for HoleAnim {
         self.arm_out = true;
         self.leg_timer = SHUTTLE_DEPTH / SHUTTLE_SPEED;
         self.arm_timer = (ARM_FAR - ARM_NEAR) / ARM_SPEED;
-        rig.show("nanoarm");
-        rig.show("nanomover");
-        rig.move_to("nanomover", Axis::Z, -SHUTTLE_DEPTH, SHUTTLE_SPEED);
-        rig.move_to("nanoarm", Axis::X, -ARM_FAR, ARM_SPEED);
+        rig.show(self.pieces.nanoarm);
+        rig.show(self.pieces.nanomover);
+        rig.move_to(self.pieces.nanomover, Axis::Z, -SHUTTLE_DEPTH, SHUTTLE_SPEED);
+        rig.move_to(self.pieces.nanoarm, Axis::X, -ARM_FAR, ARM_SPEED);
     }
 
     fn deactivate(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Deactivate(): hide the arm and park everything.
         self.active = false;
-        rig.hide("nanoarm");
-        rig.hide("nanomover");
-        rig.move_to("nanoarm", Axis::X, 0.0, 64.0);
-        rig.move_to("nanomover", Axis::Z, 0.0, 100.0);
+        rig.hide(self.pieces.nanoarm);
+        rig.hide(self.pieces.nanomover);
+        rig.move_to(self.pieces.nanoarm, Axis::X, 0.0, 64.0);
+        rig.move_to(self.pieces.nanomover, Axis::Z, 0.0, 100.0);
     }
 }

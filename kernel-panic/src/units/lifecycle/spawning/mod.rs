@@ -490,27 +490,36 @@ pub fn spawn_unit(
             let piece_count = table.len();
             let piece_rotations = vec![[0.0; 3]; piece_count];
             let target_rotations = vec![[0.0; 3]; piece_count];
-            commands.entity(unit_entity).insert(
-                crate::units::assets::animation::UnitAnimator {
+            let rig = crate::units::assets::animation::AnimRig {
+                piece_names: table,
+                piece_entities: table_entities,
+                piece_base_offsets: table_offsets,
+                piece_rotations,
+                piece_translations: vec![[0.0; 3]; piece_count],
+                target_rotations,
+                turn_speeds: vec![[0.0; 3]; piece_count],
+                target_translations: vec![[0.0; 3]; piece_count],
+                move_speeds: vec![[0.0; 3]; piece_count],
+                spin_speeds: vec![[0.0; 3]; piece_count],
+                muzzle: muzzle_idx.unwrap_or(0),
+                move_gate: 1.0,
+                outbox: Vec::new(),
+                // First apply must push the (possibly driver-snapped)
+                // poses even though nothing has ticked yet.
+                dirty: true,
+            };
+            let mut driver = crate::units::assets::animation::driver_for(kind);
+            // Bind piece indices once, before any entry point can run —
+            // even a unit killed on its spawn frame then addresses pieces
+            // through bound indices.
+            driver.bind(&rig);
+            commands
+                .entity(unit_entity)
+                .insert(crate::units::assets::animation::UnitAnimator {
                     created: false,
-                    driver: crate::units::assets::animation::driver_for(kind),
-                    rig: crate::units::assets::animation::AnimRig {
-                        piece_names: table.iter().map(|s| s.to_string()).collect(),
-                        piece_entities: table_entities,
-                        piece_base_offsets: table_offsets,
-                        piece_rotations,
-                        piece_translations: vec![[0.0; 3]; piece_count],
-                        target_rotations,
-                        turn_speeds: vec![[0.0; 3]; piece_count],
-                        target_translations: vec![[0.0; 3]; piece_count],
-                        move_speeds: vec![[0.0; 3]; piece_count],
-                        spin_speeds: vec![[0.0; 3]; piece_count],
-                        muzzle: muzzle_idx.unwrap_or(0),
-                        move_gate: 1.0,
-                        outbox: Vec::new(),
-                    },
-                },
-            );
+                    driver,
+                    rig,
+                });
 
             if let Some(idx) = muzzle_idx {
                 commands

@@ -325,3 +325,72 @@ pub fn cleanup_dying(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::assets::animation::{AnimCtx, AnimRig, UnitAnim};
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A driver whose death choreography is still playing.
+    #[derive(Default)]
+    struct BusyDeath;
+    impl UnitAnim for BusyDeath {
+        fn busy(&self) -> bool {
+            true
+        }
+    }
+
+    fn animator(busy: bool) -> UnitAnimator {
+        UnitAnimator {
+            rig: AnimRig {
+                piece_names: &[],
+                piece_entities: Vec::new(),
+                piece_base_offsets: Vec::new(),
+                piece_rotations: Vec::new(),
+                piece_translations: Vec::new(),
+                target_rotations: Vec::new(),
+                turn_speeds: Vec::new(),
+                target_translations: Vec::new(),
+                move_speeds: Vec::new(),
+                spin_speeds: Vec::new(),
+                muzzle: 0,
+                move_gate: 1.0,
+                outbox: Vec::new(),
+                dirty: false,
+            },
+            created: true,
+            driver: if busy {
+                Box::new(BusyDeath::default())
+            } else {
+                Box::new(crate::units::assets::animation::units::NoAnim::default())
+            },
+        }
+    }
+
+    /// Why: `busy()` used to be a dormant default — every dying unit
+    /// despawned on its first Cleanup tick regardless of choreography.
+    /// Drivers with death choreography now hold the corpse until the
+    /// window elapses (or the timeout backstop fires).
+    #[test]
+    fn busy_driver_delays_despawn() {
+        let mut app = App::new();
+        app.init_resource::<Time>();
+        let busy_unit = app.world_mut().spawn((Dying { timer: 2.0 }, animator(true))).id();
+        let idle_unit = app.world_mut().spawn((Dying { timer: 2.0 }, animator(false))).id();
+
+        app.world_mut().run_system_once(cleanup_dying).unwrap();
+
+        // The idle driver reports done → despawned this tick.
+        assert!(app.world().get_entity(idle_unit).is_err());
+        // The busy driver holds the unit despite timer > 0.
+        assert!(app.world().get_entity(busy_unit).is_ok());
+
+        // Once the timeout backstop expires, even a busy driver lets go.
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(2.5));
+        app.world_mut().run_system_once(cleanup_dying).unwrap();
+        assert!(app.world().get_entity(busy_unit).is_err());
+    }
+}

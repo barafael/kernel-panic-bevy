@@ -2,7 +2,8 @@
 //! at creation; the outer pair forever traces a square while the inner
 //! pair bobs — and the inner pair sparks while the factory produces.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::SquareSweep;
 
 /// BuildLasers(): outer-laser square half-width ±60 elmos @80 elmos/s
 /// (bytecode ±3932160 @5242880 — socket compiles at linear constant
@@ -18,9 +19,9 @@ const EMIT_INTERVAL: f32 = 0.12;
 
 #[derive(Default)]
 pub struct SocketAnim {
-    /// Outer-laser sweep leg 0..4 (x-out → z-out → snap home ×2).
-    sweep_leg: usize,
-    sweep_timer: f32,
+    pieces: SocketPieces,
+    /// Outer-laser square sweep.
+    sweep: SquareSweep,
     /// Inner-laser bob phase.
     bob_out: bool,
     bob_timer: f32,
@@ -28,46 +29,48 @@ pub struct SocketAnim {
     emit_timer: f32,
 }
 
+#[derive(Clone, Copy, Default)]
+struct SocketPieces {
+    body: usize,
+    blaser: [usize; 2],
+    claser: [usize; 2],
+}
+
+impl SocketPieces {
+    fn bind(rig: &AnimRig) -> Self {
+        Self {
+            body: rig.bind_piece("body"),
+            blaser: [rig.bind_piece("blaser0"), rig.bind_piece("blaser1")],
+            claser: [rig.bind_piece("claser0"), rig.bind_piece("claser1")],
+        }
+    }
+}
+
 impl UnitAnim for SocketAnim {
+    fn bind(&mut self, rig: &AnimRig) {
+        self.pieces = SocketPieces::bind(rig);
+    }
+
     fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Create(): all four lasers pitch up <90>; body starts sunk.
-        for laser in ["blaser0", "blaser1", "claser0", "claser1"] {
+        for laser in self.pieces.blaser.into_iter().chain(self.pieces.claser) {
             rig.turn_deg(laser, Axis::X, 90.0, 0.0);
         }
-        rig.move_to("body", Axis::Y, -40.0, 0.0);
-        self.sweep_timer = SWEEP / SWEEP_SPEED;
+        rig.move_to(self.pieces.body, Axis::Y, -40.0, 0.0);
+        self.sweep = SquareSweep::new(SWEEP, SWEEP_SPEED);
         self.bob_timer = BOB / BOB_SPEED;
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Create()'s emerge: body lifts with BUILD_PERCENT_LEFT.
         if ctx.emerging {
-            super::emerge_lift(rig, "body", 40.0, ctx.build_percent);
+            super::emerge_lift(rig, self.pieces.body, 40.0, ctx.build_percent);
         }
 
         // BuildLasers(): outer pair traces a square forever.
-        self.sweep_timer -= ctx.dt;
-        if self.sweep_timer <= 0.0 {
-            self.sweep_timer = SWEEP / SWEEP_SPEED;
-            self.sweep_leg = (self.sweep_leg + 1) % 4;
-            match self.sweep_leg {
-                0 => {
-                    rig.move_to("blaser0", Axis::X, -SWEEP, SWEEP_SPEED);
-                    rig.move_to("blaser1", Axis::X, SWEEP, SWEEP_SPEED);
-                }
-                1 => {
-                    rig.move_to("blaser0", Axis::Z, SWEEP, SWEEP_SPEED);
-                    rig.move_to("blaser1", Axis::Z, -SWEEP, SWEEP_SPEED);
-                }
-                _ => {
-                    // snap home (x 0 now; z 0 now) and hold one leg
-                    rig.move_to("blaser0", Axis::X, 0.0, 0.0);
-                    rig.move_to("blaser1", Axis::X, 0.0, 0.0);
-                    rig.move_to("blaser0", Axis::Z, 0.0, 0.0);
-                    rig.move_to("blaser1", Axis::Z, 0.0, 0.0);
-                }
-            }
-        }
+        let [blaser0, blaser1] = self.pieces.blaser;
+        self.sweep
+            .update(rig, blaser0, blaser1, SWEEP, SWEEP_SPEED, ctx.dt);
 
         // ConLasers(): inner pair bobs up and down forever.
         self.bob_timer -= ctx.dt;
@@ -75,8 +78,9 @@ impl UnitAnim for SocketAnim {
             self.bob_timer = BOB / BOB_SPEED;
             self.bob_out = !self.bob_out;
             let target = if self.bob_out { BOB } else { 0.0 };
-            rig.move_to("claser0", Axis::Z, target, BOB_SPEED);
-            rig.move_to("claser1", Axis::Z, target, BOB_SPEED);
+            for claser in self.pieces.claser {
+                rig.move_to(claser, Axis::Z, target, BOB_SPEED);
+            }
         }
 
         // EmitBuildLasers() / EmitConLasers(): the outer pair sparks
@@ -85,11 +89,13 @@ impl UnitAnim for SocketAnim {
         self.emit_timer -= ctx.dt;
         if self.emit_timer <= 0.0 {
             self.emit_timer = EMIT_INTERVAL;
-            rig.emit("blaser0", 2048);
-            rig.emit("blaser1", 2048);
+            for blaser in self.pieces.blaser {
+                rig.emit(blaser, SfxKind::FireFlash);
+            }
             if ctx.producing {
-                rig.emit("claser0", 2051);
-                rig.emit("claser1", 2051);
+                for claser in self.pieces.claser {
+                    rig.emit(claser, SfxKind::FireFlash);
+                }
             }
         }
     }

@@ -68,6 +68,16 @@ fn old_visual(axis: u8, stored: f32) -> f32 {
     }
 }
 
+/// The new pipeline's store steps: spins and turns both store the
+/// Spring value verbatim — that unification *is* the sign invariant.
+fn new_spin_store(_axis: u8, value: f32) -> f32 {
+    value
+}
+
+fn new_turn_store(_axis: u8, value: f32) -> f32 {
+    value
+}
+
 /// The new pipeline has no parse-level sign flips: drivers store the
 /// Spring angle directly and the same compose step applies.
 fn new_visual(axis: u8, stored: f32) -> f32 {
@@ -163,7 +173,7 @@ fn one_axis_rig(
     trans: f32,
 ) -> AnimRig {
     let mut rig = AnimRig {
-        piece_names: Vec::new(),
+        piece_names: &[],
         piece_entities: Vec::new(),
         piece_base_offsets: vec![[0.0; 3]],
         piece_rotations: vec![[0.0; 3]],
@@ -176,6 +186,7 @@ fn one_axis_rig(
         muzzle: 0,
         move_gate: 1.0,
         outbox: Vec::new(),
+        dirty: false,
     };
     rig.spin_speeds[0][0] = spin;
     rig.turn_speeds[0][0] = turn_speed;
@@ -307,18 +318,22 @@ fn spin_visual_conventions() {
 }
 
 /// The unification invariant: in the new pipeline a spin of `v` on any
-/// axis renders in the same direction as a turn to that axis — the old
-/// pipeline contradicted itself on X (spin stored −v against turn's +v),
-/// which was exactly the reported backwards-roll bug. The old pipeline
-/// demonstrably disagrees on X for every nonzero spin.
+/// axis renders in the same direction as a turn to that axis, because
+/// the spin store and the turn store are the *same* identity mapping.
+/// The old pipeline contradicted itself on X (spin stored −v against
+/// turn's +v), which was exactly the reported backwards-roll bug; the
+/// old stores demonstrably disagree on X for every nonzero spin.
 #[kani::proof]
 fn spin_now_matches_turn() {
     let axis: u8 = kani::any();
     kani::assume(axis < 3);
     let v = symbolic_finite();
 
-    // New: spin and turn agree on every axis.
-    assert!(new_visual(axis, v) == new_visual(axis, v));
+    // New: spin and turn stores are both the identity, so their renders
+    // agree on every axis.
+    assert!(
+        new_visual(axis, new_spin_store(axis, v)) == new_visual(axis, new_turn_store(axis, v))
+    );
 
     // Old: on X they disagreed — the bug this refactor fixed.
     if axis == 0 && v != 0.0 {

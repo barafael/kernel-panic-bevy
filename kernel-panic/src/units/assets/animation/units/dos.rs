@@ -2,15 +2,35 @@
 //! (with ground sparks); aiming tilts the `slash` blade and slides the
 //! `center` hub forward, resetting a few seconds after the target dies.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim, deg2rad};
 
 /// dos.bos AimWeapon1 aims over ~0.35s of waits before returning 1.
 const AIM_SETTLE: f32 = 0.35;
 /// dos.bos ResetAim(): `sleep 3000` before relaxing the pose.
 const AIM_RESET_DELAY: f32 = 3.0;
 
+#[derive(Clone, Copy, Default)]
+struct DosPieces {
+    center: usize,
+    slash: usize,
+    dot: usize,
+    ground: usize,
+}
+
+impl DosPieces {
+    fn bind(rig: &AnimRig) -> Self {
+        Self {
+            center: rig.bind_piece("center"),
+            slash: rig.bind_piece("slash"),
+            dot: rig.bind_piece("dot"),
+            ground: rig.bind_piece("ground"),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct DosAnim {
+    pieces: DosPieces,
     /// Seconds since the last aim request (drives ResetAim).
     since_aim: f32,
     /// Seconds since aim started (fire gate).
@@ -22,9 +42,13 @@ pub struct DosAnim {
 }
 
 impl UnitAnim for DosAnim {
+    fn bind(&mut self, rig: &AnimRig) {
+        self.pieces = DosPieces::bind(rig);
+    }
+
     fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Create(): turn ground to y-axis <180> now
-        rig.turn_deg("ground", Axis::Y, 180.0, 0.0);
+        rig.turn_deg(self.pieces.ground, Axis::Y, 180.0, 0.0);
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
@@ -33,7 +57,7 @@ impl UnitAnim for DosAnim {
             self.spark_timer -= ctx.dt;
             if self.spark_timer <= 0.0 {
                 self.spark_timer = 0.12;
-                rig.emit("ground", 1024);
+                rig.emit(self.pieces.ground, SfxKind::Puff);
             }
         } else {
             self.spark_timer = 0.0;
@@ -45,30 +69,29 @@ impl UnitAnim for DosAnim {
             if self.since_aim > AIM_RESET_DELAY {
                 // ResetAim(): relax the pose.
                 self.aimed = false;
-                rig.turn_deg("slash", Axis::Y, 0.0, 270.0);
-                rig.turn_deg("slash", Axis::X, 0.0, 180.0);
-                rig.move_to("center", Axis::Z, 0.0, 16.0);
+                rig.turn_deg(self.pieces.slash, Axis::Y, 0.0, 270.0);
+                rig.turn_deg(self.pieces.slash, Axis::X, 0.0, 180.0);
+                rig.move_to(self.pieces.center, Axis::Z, 0.0, 16.0);
             }
         }
     }
 
     fn start_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // StartMoving(): spin dot around x-axis speed <360>
-        rig.spin_dps("dot", Axis::X, 360.0);
+        rig.spin_dps(self.pieces.dot, Axis::X, 360.0);
     }
 
     fn stop_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // StopMoving(): stop-spin dot
-        rig.stop_spin("dot", Axis::X);
+        rig.stop_spin(self.pieces.dot, Axis::X);
     }
 
     fn aim(&mut self, rig: &mut AnimRig, h: f32, p: f32, _ctx: AnimCtx) -> bool {
         // AimWeapon1(h,p): slash x to (<-67>-p) @<180>; center z to [8]
         // @16; slash y to h @<270>.
-        let p_deg = p * 360.0 / std::f32::consts::TAU;
-        rig.turn_deg("slash", Axis::X, -67.0 - p_deg, 180.0);
-        rig.move_to("center", Axis::Z, 8.0, 16.0);
-        rig.turn_rad("slash", Axis::Y, h, 270.0 * super::super::DEG2RAD);
+        rig.turn_deg(self.pieces.slash, Axis::X, -67.0 - p.to_degrees(), 180.0);
+        rig.move_to(self.pieces.center, Axis::Z, 8.0, 16.0);
+        rig.turn_rad(self.pieces.slash, Axis::Y, h, deg2rad(270.0));
 
         if !self.aimed {
             self.aimed = true;
@@ -79,10 +102,5 @@ impl UnitAnim for DosAnim {
             self.since_aim = 0.0;
         }
         self.since_aim_start >= AIM_SETTLE
-    }
-
-    fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // No Killed() in dos.bos — leave pieces to the host despawn.
-        let _ = rig;
     }
 }

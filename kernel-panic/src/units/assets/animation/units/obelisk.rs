@@ -2,13 +2,35 @@
 //! part when aiming, snap back while idle, and the tip smoulders
 //! between the 40-second reloads.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
 
 /// obelisk.bos FireWeapon1(): `sleep 40000` reload.
 const RELOAD_SECS: f32 = 40.0;
 
+#[derive(Clone, Copy, Default)]
+struct ObeliskPieces {
+    segf: usize,
+    segb: usize,
+    segl: usize,
+    segr: usize,
+    tip: usize,
+}
+
+impl ObeliskPieces {
+    fn bind(rig: &AnimRig) -> Self {
+        Self {
+            segf: rig.bind_piece("segf"),
+            segb: rig.bind_piece("segb"),
+            segl: rig.bind_piece("segl"),
+            segr: rig.bind_piece("segr"),
+            tip: rig.bind_piece("tip"),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ObeliskAnim {
+    pieces: ObeliskPieces,
     /// Mirrors the script's `reloading` static.
     reloading: bool,
     reload_timer: f32,
@@ -19,24 +41,33 @@ pub struct ObeliskAnim {
     post_emerge_done: bool,
 }
 
+impl ObeliskAnim {
+    /// Segment x/z part/ home targets at a shared speed — the script's
+    /// open, close and reload-relax poses all use this one motion.
+    fn segments_to(&self, rig: &mut AnimRig, part: f32, speed: f32) {
+        rig.move_to(self.pieces.segf, Axis::Z, part, speed);
+        rig.move_to(self.pieces.segb, Axis::Z, -part, speed);
+        rig.move_to(self.pieces.segr, Axis::X, part, speed);
+        rig.move_to(self.pieces.segl, Axis::X, -part, speed);
+    }
+}
+
 impl UnitAnim for ObeliskAnim {
+    fn bind(&mut self, rig: &AnimRig) {
+        self.pieces = ObeliskPieces::bind(rig);
+    }
+
     fn create(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Create(): segs splayed out ±16 elmos (bytecode ±1048576)
         // while the obelisk builds.
-        rig.move_to("segf", Axis::Z, 16.0, 0.0);
-        rig.move_to("segb", Axis::Z, -16.0, 0.0);
-        rig.move_to("segr", Axis::X, 16.0, 0.0);
-        rig.move_to("segl", Axis::X, -16.0, 0.0);
+        self.segments_to(rig, 16.0, 0.0);
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         if !self.post_emerge_done && !ctx.emerging {
             // Create(), post-build: segments close to rest @8 elmos/s.
             self.post_emerge_done = true;
-            rig.move_to("segf", Axis::Z, 0.0, 8.0);
-            rig.move_to("segb", Axis::Z, 0.0, 8.0);
-            rig.move_to("segr", Axis::X, 0.0, 8.0);
-            rig.move_to("segl", Axis::X, 0.0, 8.0);
+            self.segments_to(rig, 0.0, 8.0);
         }
 
         if self.reloading {
@@ -44,10 +75,7 @@ impl UnitAnim for ObeliskAnim {
             if self.reload_timer <= 0.0 {
                 // ResetAim()/ChargeFX(): segments home, tip smoulders.
                 self.reloading = false;
-                rig.move_to("segf", Axis::Z, 0.0, 8.0);
-                rig.move_to("segb", Axis::Z, 0.0, 8.0);
-                rig.move_to("segr", Axis::X, 0.0, 8.0);
-                rig.move_to("segl", Axis::X, 0.0, 8.0);
+                self.segments_to(rig, 0.0, 8.0);
             }
         } else {
             // ChargeFX(): emit-sfx 1024 from tip while !reloading
@@ -55,7 +83,7 @@ impl UnitAnim for ObeliskAnim {
             self.charge_timer -= ctx.dt;
             if self.charge_timer <= 0.0 {
                 self.charge_timer = 0.25;
-                rig.emit("tip", 1024);
+                rig.emit(self.pieces.tip, SfxKind::Puff);
             }
         }
     }
@@ -66,17 +94,13 @@ impl UnitAnim for ObeliskAnim {
         if self.reloading {
             return false;
         }
-        rig.move_to("segf", Axis::Z, 8.0, 8.0);
-        rig.move_to("segb", Axis::Z, -8.0, 8.0);
-        rig.move_to("segr", Axis::X, 8.0, 8.0);
-        rig.move_to("segl", Axis::X, -8.0, 8.0);
+        self.segments_to(rig, 8.0, 8.0);
         true
     }
 
-    fn fire(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+    fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // FireWeapon1(): reloading=1; sleep 40000.
         self.reloading = true;
         self.reload_timer = RELOAD_SECS;
-        let _ = rig;
     }
 }
