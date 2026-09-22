@@ -210,37 +210,53 @@ pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(right, up, -fwd_on_plane))
 }
 
+/// The movement god-query, bundled: one struct instead of a 14-slot
+/// tuple plus seven loose params (the old signature needed
+/// `clippy::too_many_arguments` + `clippy::type_complexity` waivers).
+#[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)]
+pub struct MovementQuery<'w, 's> {
+    pub query: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static UnitType,
+            &'static UnitStats,
+            &'static mut Transform,
+            Option<&'static MoveTarget>,
+            Option<&'static mut MovePath>,
+            Option<&'static mut CommandQueue>,
+            Option<&'static Deployable>,
+            Option<&'static mut SlopeTilt>,
+            Option<&'static crate::units::combat::Stunned>,
+            Option<&'static crate::units::mechanics::network_buffer::SpeedBoost>,
+            Option<&'static AttackMoveActive>,
+            Option<&'static AimTarget>,
+            Option<&'static crate::units::assets::animation::UnitAnimator>,
+        ),
+        Without<Dying>,
+    >,
+    pub unit_registry: Res<'w, UnitRegistry>,
+}
+
 pub fn movement_system(
     mut commands: Commands,
     time: Res<Time>,
     nav_set: Option<Res<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
     circular_flow: Option<Res<CircularFlow>>,
-    mut query: Query<
-        (
-            Entity,
-            &UnitType,
-            &UnitStats,
-            &mut Transform,
-            Option<&MoveTarget>,
-            Option<&mut MovePath>,
-            Option<&mut CommandQueue>,
-            Option<&Deployable>,
-            Option<&mut SlopeTilt>,
-            Option<&crate::units::combat::Stunned>,
-            Option<&crate::units::mechanics::network_buffer::SpeedBoost>,
-            Option<&AttackMoveActive>,
-            Option<&AimTarget>,
-            Option<&crate::units::assets::animation::UnitAnimator>,
-        ),
-        Without<Dying>,
-    >,
-    unit_registry: Res<UnitRegistry>,
+    mut m: MovementQuery,
     // Reused across frames so the full-unit snapshot doesn't reallocate
     // each tick. Dropped in favor of a spatial-hash neighborhood query
     // eventually, but the allocation hoist is a free win until then.
     mut snapshot: Local<Vec<UnitSnapshot>>,
 ) {
+    let MovementQuery {
+        ref mut query,
+        ref unit_registry,
+    } = m;
+    let unit_registry = &**unit_registry;
     // Snapshot every unit's position and collision radius so each proposed
     // movement can be resolved against all others without query aliasing.
     // `mobile` is "this unit kind *could* move", `stationary` is "this
@@ -278,7 +294,7 @@ pub fn movement_system(
         attack_move_active,
         aim_target,
         animator,
-    ) in &mut query
+    ) in &mut *query
     {
         if stunned.is_some() {
             continue;
@@ -335,7 +351,7 @@ pub fn movement_system(
             } else if let Some(nav) = nav_set.as_deref() {
                 if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
                     pathfinds_used += 1;
-                    compute_path(Some(nav), &unit_registry, unit_type.0, transform.translation, target.0)
+                    compute_path(Some(nav), unit_registry, unit_type.0, transform.translation, target.0)
                 } else {
                     None
                 }
