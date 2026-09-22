@@ -16,6 +16,8 @@
 
 use bevy::prelude::*;
 
+use crate::units::content::weapons::WeaponId;
+
 use super::production::PendingFadeInstall;
 use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SpawnContext, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget};
@@ -198,7 +200,7 @@ pub fn tick_construction(
         pending_attacks.events.push(AttackEvent {
             attacker_pos: start,
             target_pos: constructing.site,
-            weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
+            weapon_id: WeaponId::BUILD_LASER,
             // Builder BuildLaser skips the muzzle flash CEG — same
             // reason as the factory call site.
             muzzle_ceg: None,

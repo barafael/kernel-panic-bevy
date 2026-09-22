@@ -9,10 +9,10 @@
 
 use bevy::prelude::*;
 
-use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned, muzzle_world_pos};
-use crate::units::assets::animation::{MuzzlePiece, UnitAnimator};
+use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
+use crate::units::content::weapons::WeaponId;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::lifecycle::script_triggers::JustFired;
@@ -32,7 +32,11 @@ pub struct PendingDamage {
     /// Primary target. `None` for ground-targeted or pure-AoE hits.
     pub target: Option<Entity>,
     pub attacker: Entity,
-    pub weapon: String,
+    /// Interned weapon id (see [`WeaponRegistry`]) — pushed by systems
+    /// that already resolved the weapon through the registry, so the
+    /// apply path never string-hashes. Display names come back out via
+    /// [`WeaponRegistry::name`].
+    pub weapon: WeaponId,
     pub impact_pos: Vec3,
     /// Distance from attacker to primary target at the moment the hit
     /// was queued. Used by dynamic-damage weapons (BugCannon) to scale
@@ -93,7 +97,7 @@ pub struct BurstFire {
     pub timer: f32,
     pub target: Option<Entity>,
     pub target_pos: Vec3,
-    pub weapon: String,
+    pub weapon: WeaponId,
     /// Why: cached so `tick_burst_fire` doesn't hash the registry per shot.
     pub is_traveling: bool,
 }
@@ -242,7 +246,7 @@ pub fn tick_burst_fire(
             damage_queue.push(PendingDamage {
                 target: burst.target,
                 attacker: entity,
-                weapon: burst.weapon.clone(),
+                weapon: burst.weapon,
                 impact_pos: burst.target_pos,
                 attacker_distance: distance,
             });
@@ -260,7 +264,7 @@ pub fn tick_burst_fire(
         pending_attacks.events.push(AttackEvent {
             attacker_pos: visual_origin,
             target_pos: burst.target_pos,
-            weapon_name: std::borrow::Cow::Owned(burst.weapon.clone()),
+            weapon_id: burst.weapon,
             muzzle_ceg,
             delayed_hit,
         });
@@ -360,10 +364,9 @@ pub fn apply_damage(
     mut splash_hits: Local<Vec<(Entity, f32)>>,
 ) {
     for pending in damage_queue.drain() {
-        let Some(weapon_def) = weapon_registry.get(&pending.weapon) else {
-            warn!("apply_damage: weapon {:?} not in registry", pending.weapon);
-            continue;
-        };
+        // Ids are interned through this same registry — infallible.
+        let weapon_def = weapon_registry.by_id(pending.weapon);
+        let weapon_name = weapon_registry.name(pending.weapon);
 
         let base = |kind: UnitKind| {
             weapon_def.damage.for_type(kind.armor_class().key())
@@ -403,7 +406,7 @@ pub fn apply_damage(
                     let primary_damage = raw_damage
                         * byte_closed_damage_multiplier(
                             target,
-                            &pending.weapon,
+                            weapon_name,
                             &target_unit_q,
                             &byte_open_q,
                             &stunned_q,
@@ -468,7 +471,7 @@ pub fn apply_damage(
                 let amount = splash
                     * byte_closed_damage_multiplier(
                         entity,
-                        &pending.weapon,
+                        weapon_name,
                         &target_unit_q,
                         &byte_open_q,
                         &stunned_q,
@@ -497,7 +500,7 @@ pub fn apply_damage(
         // shouldn't infect the intended target.
         if target_hit
             && let Some(target) = pending.target
-            && let Some(duration) = weapon_infection_duration(&pending.weapon)
+            && let Some(duration) = weapon_infection_duration(weapon_name)
             && let Some((_, attacker_faction, attacker_team)) = attacker_info
         {
             let target_is_virus = target_unit_q
@@ -632,7 +635,7 @@ mod tests {
                     timer: 0.25,
                     target: Some(target),
                     target_pos: Vec3::ZERO,
-                    weapon: "MegaBeam".to_string(),
+                    weapon: WeaponId::BUILD_LASER,
                     is_traveling: false,
                 },
             ))
@@ -724,7 +727,7 @@ mod tests {
                 timer: 0.25,
                 target: None, // <-- ground-attack variant
                 target_pos: Vec3::ZERO,
-                weapon: "MegaBeam".to_string(),
+                weapon: WeaponId::BUILD_LASER,
                 is_traveling: false,
             },
         ));
@@ -781,7 +784,7 @@ mod tests {
                     timer: 0.25,
                     target: Some(target),
                     target_pos: Vec3::ZERO,
-                    weapon: "TestWeapon".to_string(),
+                    weapon: WeaponId::BUILD_LASER,
                     is_traveling: false,
                 },
             ))
@@ -821,9 +824,9 @@ mod tests {
         assert!(app.world().get::<BurstFire>(attacker).is_none());
     }
 
-    fn death_boom_weapon() -> WeaponRegistry {
+    fn death_boom_weapon() -> (WeaponRegistry, WeaponId) {
         let mut weapons = WeaponRegistry::default();
-        weapons.insert_for_test(
+        let id = weapons.insert_for_test(
             "RegressionDeathBoom",
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
@@ -833,7 +836,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        weapons
+        (weapons, id)
     }
 
     /// Why: pins the [`DamageQueue`] lifecycle. `apply_damage` must
@@ -850,8 +853,9 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<DamageQueue>()
             .init_resource::<SpatialIndex>()
-            .insert_resource(UnitRegistry::empty())
-            .insert_resource(death_boom_weapon());
+            .insert_resource(UnitRegistry::empty());
+        let (weapons, boom_id) = death_boom_weapon();
+        app.insert_resource(weapons);
 
         let target = app
             .world_mut()
@@ -860,7 +864,7 @@ mod tests {
         app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
             target: Some(target),
             attacker: target,
-            weapon: "RegressionDeathBoom".to_string(),
+            weapon: boom_id,
             impact_pos: Vec3::ZERO,
             attacker_distance: 0.0,
         });
@@ -876,7 +880,7 @@ mod tests {
         app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
             target: Some(target),
             attacker: target,
-            weapon: "RegressionDeathBoom".to_string(),
+            weapon: boom_id,
             impact_pos: Vec3::ZERO,
             attacker_distance: 0.0,
         });
@@ -912,7 +916,7 @@ mod tests {
         app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
             target: Some(kamikaze),
             attacker: kamikaze,
-            weapon: "logic_bomb".to_string(),
+            weapon: WeaponId::BUILD_LASER,
             impact_pos: Vec3::ZERO,
             attacker_distance: 0.0,
         });

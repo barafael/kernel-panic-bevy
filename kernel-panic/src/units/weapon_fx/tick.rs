@@ -14,6 +14,8 @@ use bevy::ecs::system::SystemParam;
 use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
 use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 use crate::units::content::weapons::WeaponRegistry;
+#[cfg(test)]
+use crate::units::content::weapons::WeaponId;
 use super::ceg::{CegTrailCtx, spawn_ceg};
 use crate::units::spatial::SpatialIndex;
 
@@ -710,15 +712,16 @@ fn trigger_delayed_hit(
     damage_queue.push(PendingDamage {
         target: final_target,
         attacker: hit.attacker,
-        weapon: hit.weapon.to_string(),
+        weapon: hit.weapon,
         impact_pos,
         attacker_distance: hit.attacker_distance,
     });
-    let (rgb, radius, ceg_name) = weapon_registry
-        .get(&hit.weapon)
-        .map_or(([0.7; 3], 4.0, String::new()), |w| {
-            (w.rgb_color, w.area_of_effect, w.explosion_generator.clone())
-        });
+    let weapon_def = weapon_registry.by_id(hit.weapon);
+    let (rgb, radius, ceg_name) = (
+        weapon_def.rgb_color,
+        weapon_def.area_of_effect,
+        weapon_def.explosion_generator.clone(),
+    );
     pending_explosions.events.push(ExplosionEvent {
         pos: impact_pos,
         rgb,
@@ -928,7 +931,7 @@ mod tests {
                 DelayedHit {
                     target: Some(target),
                     attacker,
-                    weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                    weapon: WeaponId::BUILD_LASER,
                     attacker_distance: 100.0,
                 },
             ))
@@ -1074,7 +1077,7 @@ mod tests {
             DelayedHit {
                 target: Some(target),
                 attacker,
-                weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
             },
         ));
@@ -1209,7 +1212,7 @@ mod tests {
             DelayedHit {
                 target: Some(intended),
                 attacker,
-                weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
             },
         ));
@@ -1291,7 +1294,7 @@ mod tests {
             DelayedHit {
                 target: Some(target),
                 attacker,
-                weapon: std::borrow::Cow::Borrowed("TestLaser"),
+                weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
             },
         ));
@@ -1377,7 +1380,7 @@ mod tests {
                 DelayedHit {
                     target: None,
                     attacker: entity.unwrap_or(Entity::PLACEHOLDER),
-                    weapon: std::borrow::Cow::Borrowed("TestFlight"),
+                    weapon: WeaponId::BUILD_LASER,
                     attacker_distance: target.distance(origin),
                 },
             ))

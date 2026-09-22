@@ -6,6 +6,8 @@ use std::borrow::Cow;
 
 use bevy::prelude::*;
 
+use crate::units::content::weapons::WeaponId;
+
 use super::ceg::{CegParticleMesh, CegRegistry, spawn_ceg};
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
@@ -19,8 +21,8 @@ use crate::units::content::weapons::WeaponRegistry;
 /// True for `BuildLaser` (the upstream build-laser weapon name). The
 /// `BuildLaserNoEffect` variant intentionally suppresses the impact particles,
 /// so only the bare-name version triggers `BuildSparkle` spawn.
-fn is_build_laser(weapon_name: &str) -> bool {
-    weapon_name == "BuildLaser"
+fn is_build_laser(weapon_id: WeaponId) -> bool {
+    weapon_id == WeaponId::BUILD_LASER
 }
 
 /// Radius (elmos) of the muzzle-flash burst at the firing unit. Small
@@ -49,9 +51,9 @@ pub(super) fn spawn_weapon_visuals(
     mut rng: Local<u32>,
 ) {
     for event in pending.events.drain(..) {
-        let Some(weapon) = weapon_registry.get(&event.weapon_name) else {
-            continue;
-        };
+        // Ids are interned through this same registry at the combat
+        // side, so the lookup is infallible.
+        let weapon = weapon_registry.by_id(event.weapon_id);
 
         let dir = event.target_pos - event.attacker_pos;
         let length = dir.length();
@@ -146,7 +148,7 @@ pub(super) fn spawn_weapon_visuals(
             commands.entity(visual).insert(DelayedHit {
                 target: delayed.target,
                 attacker: delayed.attacker,
-                weapon: event.weapon_name.clone(),
+                weapon: event.weapon_id,
                 attacker_distance: delayed.attacker_distance,
             });
         }
@@ -161,7 +163,7 @@ pub(super) fn spawn_weapon_visuals(
         // back to the synthesised coloured sphere so there's still a
         // "something fired" signal. Melee / BuildLaser skip both — see
         // `is_melee` / `is_build_laser` filters.
-        if !is_melee && !is_build_laser(&event.weapon_name) {
+        if !is_melee && !is_build_laser(event.weapon_id) {
             let ceg_spawned = if let Some(muzzle_ceg) = event.muzzle_ceg.as_deref() {
                 let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
                 spawn_ceg(
@@ -197,7 +199,7 @@ pub(super) fn spawn_weapon_visuals(
         // Build lasers also drop a short-lived "nanoframe pixel" sprite at
         // the target end (upstream `oldskool_build` CEG). The NoEffect variant
         // intentionally skips this.
-        if is_build_laser(&event.weapon_name) {
+        if is_build_laser(event.weapon_id) {
             spawn_build_sparkle(
                 event.target_pos,
                 &mut commands,

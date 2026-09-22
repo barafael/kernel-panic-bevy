@@ -6,6 +6,8 @@ use std::borrow::Cow;
 
 use bevy::prelude::*;
 
+use crate::units::content::weapons::WeaponId;
+
 /// Describes a single attack for the visual system.
 ///
 /// `weapon_name` is `Cow<'static, str>` so the hot build-laser path
@@ -33,7 +35,10 @@ use bevy::prelude::*;
 pub struct AttackEvent {
     pub attacker_pos: Vec3,
     pub target_pos: Vec3,
-    pub weapon_name: Cow<'static, str>,
+    /// Interned weapon id — the combat side resolves it from the
+    /// `WeaponBinding` (or the unit's FBI weapon name) before pushing,
+    /// so the fx side never string-matches the registry.
+    pub weapon_id: WeaponId,
     pub muzzle_ceg: Option<Cow<'static, str>>,
     pub delayed_hit: Option<DelayedHitInfo>,
 }
@@ -59,7 +64,7 @@ pub struct DelayedHitInfo {
 pub(super) struct DelayedHit {
     pub target: Option<Entity>,
     pub attacker: Entity,
-    pub weapon: Cow<'static, str>,
+    pub weapon: WeaponId,
     pub attacker_distance: f32,
 }
 

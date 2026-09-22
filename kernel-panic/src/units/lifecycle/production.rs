@@ -7,6 +7,7 @@ use super::spawning::{
     SpawnContext, spawn_unit,
 };
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
+use crate::units::content::weapons::WeaponId;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -120,7 +121,7 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
     pending.events.push(AttackEvent {
         attacker_pos: start,
         target_pos: end,
-        weapon_name: std::borrow::Cow::Borrowed("BuildLaser"),
+        weapon_id: WeaponId::BUILD_LASER,
         // BuildLaser pulses don't drive a muzzle CEG — the sparkle at
         // the target end is the primary fx; strobing the builder every
         // frame would drown out the rest of the scene.

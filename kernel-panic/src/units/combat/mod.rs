@@ -297,17 +297,16 @@ pub fn combat_system(
         // keeps behaviour identical for any unit class that bypasses
         // `spawn_unit` — known callers cover every armed unit today
         // but the safety net is cheap.
-        let (weapon_name, weapon_def) = match weapon_binding {
-            Some(binding) => {
-                let def = weapon_registry.by_id(binding.0);
-                (weapon_registry.name(binding.0), Some(def))
-            }
+        // The display name is no longer needed here — every consumer
+        // (damage queue, fx events, burst component) carries the id.
+        let (weapon_id, weapon_def) = match weapon_binding {
+            Some(binding) => (Some(binding.0), Some(weapon_registry.by_id(binding.0))),
             None => {
                 let name = unit_registry.weapon(unit_type.0);
                 if name.is_empty() {
-                    (name, None)
+                    (None, None)
                 } else {
-                    (name, weapon_registry.get(name))
+                    (weapon_registry.intern(name), weapon_registry.get(name))
                 }
             }
         };
@@ -567,7 +566,7 @@ pub fn combat_system(
             damage_queue.push(PendingDamage {
                 target: Some(target_entity),
                 attacker: entity,
-                weapon: weapon_name.to_string(),
+                weapon: weapon_id.expect("firing weapon is registered"),
                 impact_pos,
                 attacker_distance: distance,
             });
@@ -578,7 +577,7 @@ pub fn combat_system(
             },
             JustFired,
         ));
-        if !weapon_name.is_empty() {
+        if let Some(weapon_id) = weapon_id {
             // Visual origin uses the resolved muzzle piece; range/LOS
             // checks above intentionally stay at unit center so
             // arm-length offsets don't flicker targeting.
@@ -600,7 +599,7 @@ pub fn combat_system(
             pending_attacks.events.push(AttackEvent {
                 attacker_pos: visual_origin,
                 target_pos: impact_pos,
-                weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
+                weapon_id,
                 muzzle_ceg,
                 delayed_hit,
             });
@@ -615,7 +614,7 @@ pub fn combat_system(
                 timer: interval,
                 target: Some(target_entity),
                 target_pos,
-                weapon: weapon_name.to_string(),
+                weapon: weapon_id.expect("burst weapon is registered"),
                 is_traveling,
             });
         }
@@ -671,19 +670,18 @@ pub fn attack_ground_system(
         if animator.and_then(|a| a.driver.is_open()).is_some_and(|open| !open) {
             continue;
         }
-        let (weapon_name, weapon_def) = match weapon_binding {
-            Some(binding) => (
-                weapon_registry.name(binding.0),
-                Some(weapon_registry.by_id(binding.0)),
-            ),
+        let (weapon_id, weapon_def) = match weapon_binding {
+            Some(binding) => (Some(binding.0), Some(weapon_registry.by_id(binding.0))),
             None => {
                 let name = unit_registry.weapon(unit_type.0);
-                (name, weapon_registry.get(name))
+                let def = weapon_registry.get(name);
+                (weapon_registry.intern(name), def)
             }
         };
         let Some(weapon_def) = weapon_def else {
             continue;
         };
+        let weapon_id = weapon_id.expect("registered weapon is interned");
         let range = weapon_def.range;
         if range <= 0.0 {
             continue;
@@ -784,7 +782,7 @@ pub fn attack_ground_system(
         pending_attacks.events.push(AttackEvent {
             attacker_pos: visual_origin,
             target_pos: order.pos,
-            weapon_name: std::borrow::Cow::Owned(weapon_name.to_string()),
+            weapon_id,
             muzzle_ceg,
             delayed_hit,
         });
@@ -792,7 +790,7 @@ pub fn attack_ground_system(
             damage_queue.push(PendingDamage {
                 target: None,
                 attacker: entity,
-                weapon: weapon_name.to_string(),
+                weapon: weapon_id,
                 impact_pos: order.pos,
                 attacker_distance: dist,
             });
@@ -823,7 +821,7 @@ pub fn attack_ground_system(
                 // everything in range.
                 target: None,
                 target_pos: order.pos,
-                weapon: weapon_name.to_string(),
+                weapon: weapon_id,
                 is_traveling,
             });
         }

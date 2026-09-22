@@ -142,6 +142,7 @@ pub fn tick_stun(
 #[allow(clippy::type_complexity)]
 pub fn tick_kamikaze(
     unit_registry: Res<UnitRegistry>,
+    weapon_registry: Res<WeaponRegistry>,
     bombs: Query<(Entity, &UnitType, &TeamId, &Faction, &GlobalTransform), Without<Dying>>,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
@@ -168,10 +169,13 @@ pub fn tick_kamikaze(
             continue;
         }
 
+        let Some(logic_bomb) = weapon_registry.intern("logic_bomb") else {
+            continue;
+        };
         damage_queue.push(PendingDamage {
             target: Some(entity),
             attacker: entity,
-            weapon: "logic_bomb".to_string(),
+            weapon: logic_bomb,
             impact_pos: self_pos,
             attacker_distance: 0.0,
         });
@@ -244,15 +248,16 @@ pub fn death_system(
             // read differently. Fall back to faction colour for weapons
             // without a configured colour so the ring still pops.
             let pos = gtf.translation();
-            if let Some(weapon_name) = unit_registry
+            if let Some((weapon_name, weapon_id)) = unit_registry
                 .def(unit.0)
                 .map(|d| d.explode_as.as_str())
                 .filter(|s| !s.is_empty() && weapon_registry.get(s).is_some())
+                .and_then(|s| weapon_registry.intern(s).map(|id| (s, id)))
             {
                 damage_queue.push(PendingDamage {
                     target: Some(entity),
                     attacker: entity,
-                    weapon: weapon_name.to_string(),
+                    weapon: weapon_id,
                     impact_pos: pos,
                     attacker_distance: 0.0,
                 });
