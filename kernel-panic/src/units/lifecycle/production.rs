@@ -7,10 +7,10 @@ use super::spawning::{
     SpawnContext, spawn_unit,
 };
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
-use crate::units::content::weapons::WeaponId;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::content::weapons::WeaponId;
 use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// Attached to factories/homebases. Builds units from its queue.
@@ -108,7 +108,13 @@ pub fn default_production(kind: UnitKind) -> Option<Producer> {
 /// or — if either is too close to the factory root — synthesise a short
 /// downward strand so something still shows during the first frame after
 /// spawn (before the COB script has had time to position its pieces).
-fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut PendingAttacks) {
+fn emit_build_ray(
+    start: Vec3,
+    end: Vec3,
+    factory_root: Vec3,
+    pending: &mut PendingAttacks,
+    build_arc: bool,
+) {
     // Defensive: zero-length rays produce no visible effect and would
     // generate a NaN normal in spawn_beam — skip them.
     let length_sq = (end - start).length_squared();
@@ -127,6 +133,7 @@ fn emit_build_ray(start: Vec3, end: Vec3, factory_root: Vec3, pending: &mut Pend
         // frame would drown out the rest of the scene.
         muzzle_ceg: None,
         delayed_hit: None,
+        build_arc,
     });
 }
 
@@ -181,8 +188,16 @@ pub fn production_system(
     let dt = time.delta_secs();
     spawns.clear();
 
-    for (mut producer, factory_type, faction, team, global_tf, factory_pieces, animator, homebase) in
-        &mut producers
+    for (
+        mut producer,
+        factory_type,
+        faction,
+        team,
+        global_tf,
+        factory_pieces,
+        animator,
+        homebase,
+    ) in &mut producers
     {
         let Some(build_time) = producer.current_build_time(&ctx.unit_registry) else {
             // Queue is empty — idle.
@@ -221,14 +236,26 @@ pub fn production_system(
         if let Some(fp) = factory_pieces {
             for &emitter_idx in &fp.emitters {
                 if let Some(pos) = piece_world_pos(Some(emitter_idx), animator, &piece_transforms) {
-                    emit_build_ray(pos, pad_pos, factory_pos, &mut pending_attacks);
+                    emit_build_ray(
+                        pos,
+                        pad_pos,
+                        factory_pos,
+                        &mut pending_attacks,
+                        factory_type.0 == UnitKind::Gateway,
+                    );
                     emitted_any = true;
                 }
             }
         }
         if !emitted_any {
             let synthetic = factory_pos + Vec3::new(0.0, 24.0, 16.0);
-            emit_build_ray(synthetic, pad_pos, factory_pos, &mut pending_attacks);
+            emit_build_ray(
+                synthetic,
+                pad_pos,
+                factory_pos,
+                &mut pending_attacks,
+                factory_type.0 == UnitKind::Gateway,
+            );
         }
 
         // Two-phase spawn: when the producer's progress reaches the
@@ -280,16 +307,14 @@ pub fn production_system(
                 // Kernel's model is 128 elmos wide while its footprint
                 // radius is only 32, so a fixed 60-elmo rally left
                 // freshly-built units standing "inside" the base.
-                let factory_radius =
-                    crate::units::assets::meshes::unit_radius(
-                        factory_type.0,
-                        &mut *ctx.model_cache,
-                        &ctx.unit_registry,
-                    );
+                let factory_radius = crate::units::assets::meshes::unit_radius(
+                    factory_type.0,
+                    &mut *ctx.model_cache,
+                    &ctx.unit_registry,
+                );
                 let unit_radius = ctx.unit_registry.collision_radius(kind);
                 const EXIT_MARGIN: f32 = 24.0;
-                let row0_distance =
-                    (factory_radius + unit_radius + EXIT_MARGIN).max(60.0);
+                let row0_distance = (factory_radius + unit_radius + EXIT_MARGIN).max(60.0);
                 let n = producer.spawn_count;
                 let slot = (n % SLOTS_PER_ROW) as f32 - (SLOTS_PER_ROW as f32 - 1.0) * 0.5;
                 let ring = (n / SLOTS_PER_ROW) as f32;

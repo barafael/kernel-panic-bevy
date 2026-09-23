@@ -610,7 +610,8 @@ pub fn combat_system(
                 weapon_id,
                 muzzle_ceg,
                 delayed_hit,
-            });
+            build_arc: false,
+        });
         }
 
         let burst = weapon_def.map_or(0.0, |w| w.burst) as u32;
@@ -796,6 +797,7 @@ pub fn attack_ground_system(
             weapon_id,
             muzzle_ceg,
             delayed_hit,
+            build_arc: false,
         });
         if !is_traveling {
             damage_queue.push(PendingDamage {

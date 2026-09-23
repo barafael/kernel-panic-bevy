@@ -14,7 +14,7 @@ use crate::interaction::movement::{
 };
 use crate::rendering::camera::RtsCamera;
 use crate::units::combat::AttackTargetOrder;
-use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
+use crate::units::components::{Faction, TeamId, UnitStats, UnitType, is_friendly};
 use crate::units::content::unit_registry::UnitRegistry;
 
 pub(super) struct RightClickPlugin;
@@ -133,7 +133,7 @@ fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut ray_cast: MeshRayCast,
-    selected_q: Query<(Entity, &Transform, &UnitType), With<Selected>>,
+    selected_q: Query<(Entity, &Transform, &UnitType, &UnitStats), With<Selected>>,
     lookups: RightClickLookups,
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
@@ -190,7 +190,7 @@ fn handle_right_click(
 
         let mut units: Vec<(Entity, Vec3)> = selected_q
             .iter()
-            .map(|(e, tf, _)| (e, tf.translation))
+            .map(|(e, tf, _, _)| (e, tf.translation))
             .collect();
         if units.is_empty() || drag_path.points.is_empty() {
             return;
@@ -221,7 +221,7 @@ fn handle_right_click(
                     .map(|t| t.translation())
                     .unwrap_or(drag_path.points[0]);
                 let mut any_armed = false;
-                for (entity, _, unit) in &selected_q {
+                for (entity, _, unit, _) in &selected_q {
                     if unit_registry.weapon(unit.0).is_empty() {
                         continue;
                     }
@@ -260,19 +260,26 @@ fn handle_right_click(
                 }
             }
 
-            // Plain ground move: every unit goes to the same point — no
-            // ordering question to answer.
+            // Plain ground move: fan the group out around the clicked
+            // point (single units go exactly there).
             let target = drag_path.points[0];
-            for (entity, _) in &units {
+            let max_radius = selected_q
+                .iter()
+                .map(|(_, _, _, stats)| stats.radius)
+                .fold(0.0_f32, f32::max);
+            let targets = spread_targets(target, units.len(), 1.6 * max_radius);
+            for ((entity, _), slot) in units.iter().zip(targets.iter()) {
                 apply_ordered_command(
                     *entity,
-                    QueuedCommand::Move(target),
+                    QueuedCommand::Move(*slot),
                     shift,
                     &move_target_q,
                     &mut commands,
                 );
             }
-            pending.markers.push((target, OrderMarker::Move));
+            pending
+                .markers
+                .extend(targets.into_iter().map(|t| (t, OrderMarker::Move)));
         } else {
             // Path-based formation: sort units by projection onto the drag's
             // principal axis (start → end) so the nearest-to-start unit gets
@@ -480,6 +487,28 @@ fn update_formation_preview(
     }
 }
 
+/// Sunflower-spiral slot layout for a multi-unit move to a single
+/// point: slot 0 sits on the point, slot i at `r = spacing·√i`,
+/// `θ = i·goldenAngle`. Neighbor slots stay roughly `spacing` apart
+/// at any unit count, so a group ordered to one spot forms a packed
+/// disc instead of a shove-match that only the collision push can
+/// untangle. Units sorted by the caller land on slots in ECS order;
+/// the spiral keeps them apart either way.
+fn spread_targets(center: Vec3, count: usize, spacing: f32) -> Vec<Vec3> {
+    const GOLDEN_ANGLE: f32 = 2.399_963_2;
+    (0..count)
+        .map(|i| {
+            if i == 0 {
+                return center;
+            }
+            let i = i as f32;
+            let r = spacing * i.sqrt();
+            let theta = i * GOLDEN_ANGLE;
+            center + Vec3::new(r * theta.cos(), 0.0, r * theta.sin())
+        })
+        .collect()
+}
+
 fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
     if count == 0 || path.is_empty() {
         return vec![];
@@ -607,6 +636,17 @@ mod tests {
         world.spawn((
             UnitType(UnitKind::Bit),
             Selected,
+            UnitStats {
+                radius: 12.0,
+                hit_radius: 20.0,
+                speed: 90.0,
+                accel: 27.0,
+                brake: 60.0,
+                turn_rate: 3.0,
+                can_fly: false,
+                cruise_alt: 0.0,
+                no_chase_vtol: true,
+            },
             Transform::from_xyz(10.0, 0.0, 10.0),
         ));
 
@@ -636,6 +676,38 @@ mod tests {
         assert!((target - Vec3::new(0.0, 0.5, 0.0)).length() < 1.0);
     }
 
+    /// The sunflower spread packs any unit count into a disc whose
+    /// slots stay roughly one spacing apart, and sends slot 0 exactly
+    /// to the clicked point.
+    #[test]
+    fn spread_targets_form_a_packed_disc() {
+        let center = Vec3::new(500.0, 2.0, -300.0);
+        let slots = spread_targets(center, 16, 24.0);
+
+        assert_eq!(slots.len(), 16);
+        assert_eq!(slots[0], center, "slot 0 takes the clicked point");
+
+        // Everything stays inside the spiral's bounding radius, on the
+        // ground plane (Y untouched).
+        let max_r = 24.0 * (15.0 as f32).sqrt();
+        for slot in &slots {
+            assert!((slot.y - center.y).abs() < 1e-5);
+            assert!(
+                slot.distance(center) <= max_r + 1e-3,
+                "slot {slot:?} escapes the disc radius {max_r}"
+            );
+        }
+
+        // No two slots closer than half a spacing — the point of the
+        // fan-out is not stacking the army.
+        for (i, a) in slots.iter().enumerate() {
+            for b in &slots[i + 1..] {
+                let d = a.distance(*b);
+                assert!(d >= 12.0, "slots {i} and {} are only {d} apart", i + 1);
+            }
+        }
+    }
+
     /// Regression: a right-click that starts over a live UI node (e.g.
     /// the minimap) must not leak a move order to the terrain hidden
     /// underneath the panel.
@@ -645,6 +717,17 @@ mod tests {
         world.spawn((
             UnitType(UnitKind::Bit),
             Selected,
+            UnitStats {
+                radius: 12.0,
+                hit_radius: 20.0,
+                speed: 90.0,
+                accel: 27.0,
+                brake: 60.0,
+                turn_rate: 3.0,
+                can_fly: false,
+                cruise_alt: 0.0,
+                no_chase_vtol: true,
+            },
             Transform::from_xyz(10.0, 0.0, 10.0),
         ));
         // The UI element under the cursor.

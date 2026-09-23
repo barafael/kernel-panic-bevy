@@ -41,6 +41,10 @@ pub struct AttackEvent {
     pub weapon_id: WeaponId,
     pub muzzle_ceg: Option<Cow<'static, str>>,
     pub delayed_hit: Option<DelayedHitInfo>,
+    /// True for the Gateway's factory build ray: render the upstream
+    /// `BuildArc` white lightning strand (gateway.bos `lua_BuildArc`)
+    /// instead of the standard build-laser beam + sparkle.
+    pub build_arc: bool,
 }
 
 /// Damage bookkeeping moved onto a traveling visual. The fields match

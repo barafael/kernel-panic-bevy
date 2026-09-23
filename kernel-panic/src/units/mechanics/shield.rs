@@ -22,6 +22,7 @@
 
 use bevy::prelude::*;
 
+use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::weapons::WeaponRegistry;
@@ -178,13 +179,19 @@ const SHELL_COLOR_EMPTY: Color = Color::srgba(0.5, 0.0, 0.0, 0.05);
 #[derive(Component)]
 pub struct ShieldShell;
 
-/// Shared sphere mesh for all shells (radius comes from per-entity
-/// `Transform::scale` — upstream radii are 128 for homebases, 64 for
-/// minifacs).
+/// Shared sphere mesh + hex texture for all shells (radius comes from
+/// per-entity `Transform::scale` — upstream radii are 128 for
+/// homebases, 64 for minifacs).
 #[derive(Resource, Default)]
 pub struct ShieldShellAssets {
     mesh: Option<Handle<Mesh>>,
+    texture: Option<Handle<Image>>,
 }
+
+/// How many times `hexgrid.tga` wraps the dome. Upstream tiles the
+/// texture in engine screen space; on a UV sphere six repeats reads
+/// as the same cell density at battle zoom.
+const SHELL_HEX_TILES: f32 = 6.0;
 
 /// Spawn a dome child for every newly-shielded unit. Reads the shield
 /// radius from the unit's shield weapon def so Kernel / Hole / Carrier
@@ -195,6 +202,8 @@ pub fn spawn_shield_shells(
     mut assets: ResMut<ShieldShellAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut model_cache: ResMut<S3OModelCache>,
     mut commands: Commands,
 ) {
     for (entity, unit) in &new_shields {
@@ -209,13 +218,28 @@ pub fn spawn_shield_shells(
             .mesh
             .get_or_insert_with(|| meshes.add(Sphere::new(1.0)))
             .clone();
+        // Upstream `texture1=hexgrid` (onsshield.tdf): the dome is a
+        // visible hex-patterned repulsor, not a bare bubble. Falls
+        // back to the flat tint when the upstream bitmap isn't on
+        // disk (wasm bundle without assets).
+        let texture = match &assets.texture {
+            Some(handle) => Some(handle.clone()),
+            None => load_beam_texture("hexgrid.tga", &mut model_cache, &mut images).map(
+                |(handle, _, _)| {
+                    assets.texture = Some(handle.clone());
+                    handle
+                },
+            ),
+        };
         let material = materials.add(StandardMaterial {
             base_color: SHELL_COLOR_FULL,
+            base_color_texture: texture,
             unlit: true,
             alpha_mode: AlphaMode::Blend,
             // Double-sided: the camera looks at the dome from outside,
             // but units inside still see its inner surface.
             cull_mode: None,
+            uv_transform: bevy::math::Affine2::from_scale(Vec2::splat(SHELL_HEX_TILES)),
             ..default()
         });
         commands.entity(entity).with_children(|parent| {
@@ -346,6 +370,8 @@ mod shell_tests {
         app.init_resource::<ShieldShellAssets>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<S3OModelCache>()
             .init_resource::<OnsMode>();
         let mut weapons = WeaponRegistry::default();
         weapons.insert_for_test(

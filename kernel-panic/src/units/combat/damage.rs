@@ -12,8 +12,8 @@ use bevy::prelude::*;
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
-use crate::units::content::weapons::WeaponId;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::content::weapons::WeaponId;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::lifecycle::script_triggers::JustFired;
 use crate::units::spatial::SpatialIndex;
@@ -251,8 +251,13 @@ pub fn tick_burst_fire(
                 attacker_distance: distance,
             });
         }
-        let visual_origin =
-            super::muzzle_world_pos(entity, gtf, &pieces.muzzle, &pieces.animator, &pieces.piece_gtf);
+        let visual_origin = super::muzzle_world_pos(
+            entity,
+            gtf,
+            &pieces.muzzle,
+            &pieces.animator,
+            &pieces.piece_gtf,
+        );
         let muzzle_ceg = unit_registry
             .preferred_muzzle_ceg(unit_type.0)
             .map(|s| std::borrow::Cow::Owned(s.to_string()));
@@ -267,6 +272,7 @@ pub fn tick_burst_fire(
             weapon_id: burst.weapon,
             muzzle_ceg,
             delayed_hit,
+            build_arc: false,
         });
         commands.entity(entity).insert(JustFired);
 
@@ -857,39 +863,46 @@ mod tests {
         let (weapons, boom_id) = death_boom_weapon();
         app.insert_resource(weapons);
 
-        let target = app
-            .world_mut()
-            .spawn(Health::full(100.0))
-            .id();
-        app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
-            target: Some(target),
-            attacker: target,
-            weapon: boom_id,
-            impact_pos: Vec3::ZERO,
-            attacker_distance: 0.0,
-        });
+        let target = app.world_mut().spawn(Health::full(100.0)).id();
+        app.world_mut()
+            .resource_mut::<DamageQueue>()
+            .push(PendingDamage {
+                target: Some(target),
+                attacker: target,
+                weapon: boom_id,
+                impact_pos: Vec3::ZERO,
+                attacker_distance: 0.0,
+            });
 
         // First drain: the hit lands and the queue empties.
         app.world_mut().run_system_once(apply_damage).unwrap();
         let health = app.world().get::<Health>(target).unwrap().current;
-        assert!((health - 75.0).abs() < 1e-4, "first hit must land, got {health}");
+        assert!(
+            (health - 75.0).abs() < 1e-4,
+            "first hit must land, got {health}"
+        );
         assert_eq!(app.world().resource::<DamageQueue>().len(), 0);
 
         // A push after the drain (what `death_system` does in Resolve,
         // behind `apply_damage`) must still be sitting in the queue.
-        app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
-            target: Some(target),
-            attacker: target,
-            weapon: boom_id,
-            impact_pos: Vec3::ZERO,
-            attacker_distance: 0.0,
-        });
+        app.world_mut()
+            .resource_mut::<DamageQueue>()
+            .push(PendingDamage {
+                target: Some(target),
+                attacker: target,
+                weapon: boom_id,
+                impact_pos: Vec3::ZERO,
+                attacker_distance: 0.0,
+            });
         assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
 
         // Next frame's drain delivers it; no clear() in between wipes it.
         app.world_mut().run_system_once(apply_damage).unwrap();
         let health = app.world().get::<Health>(target).unwrap().current;
-        assert!((health - 50.0).abs() < 1e-4, "second hit must land, got {health}");
+        assert!(
+            (health - 50.0).abs() < 1e-4,
+            "second hit must land, got {health}"
+        );
         assert_eq!(app.world().resource::<DamageQueue>().len(), 0);
     }
 
@@ -900,8 +913,8 @@ mod tests {
     /// consumption to `apply_damage`.
     #[test]
     fn combat_system_preserves_preexisting_queue_entries() {
-        use bevy::ecs::system::RunSystemOnce;
         use crate::units::combat::combat_system;
+        use bevy::ecs::system::RunSystemOnce;
 
         let mut app = App::new();
         app.init_resource::<Time>()
@@ -913,13 +926,15 @@ mod tests {
 
         // What `tick_kamikaze` pushes earlier in the same Simulate frame.
         let kamikaze = app.world_mut().spawn_empty().id();
-        app.world_mut().resource_mut::<DamageQueue>().push(PendingDamage {
-            target: Some(kamikaze),
-            attacker: kamikaze,
-            weapon: WeaponId::BUILD_LASER,
-            impact_pos: Vec3::ZERO,
-            attacker_distance: 0.0,
-        });
+        app.world_mut()
+            .resource_mut::<DamageQueue>()
+            .push(PendingDamage {
+                target: Some(kamikaze),
+                attacker: kamikaze,
+                weapon: WeaponId::BUILD_LASER,
+                impact_pos: Vec3::ZERO,
+                attacker_distance: 0.0,
+            });
 
         app.world_mut().run_system_once(combat_system).unwrap();
 

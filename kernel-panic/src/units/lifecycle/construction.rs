@@ -204,6 +204,7 @@ pub fn tick_construction(
             // reason as the factory call site.
             muzzle_ceg: None,
             delayed_hit: None,
+            build_arc: false,
         });
 
         if build_time > 0.0 && constructing.progress >= build_time {
