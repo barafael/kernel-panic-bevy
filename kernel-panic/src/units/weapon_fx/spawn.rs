@@ -97,15 +97,41 @@ pub(super) fn spawn_weapon_visuals(
                 &mut cache,
             );
         } else if is_melee {
-            spawn_melee_flash(
-                &event,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut fx_meshes,
-                &mut impact_assets,
-            );
+            // Upstream worm.bos `FireWeapon1` telescopes the head and
+            // detonates the Wormsplash weapon at the bite points
+            // (`emit-sfx 4097 from head/end`) — the bite itself has
+            // `explosiongenerator=custom:none` and no projectile, so
+            // the cyan shockwave ring IS the visible attack. Replay
+            // that CEG at the impact point; the generic melee flash is
+            // only the fallback for registries without the splash.
+            let bite_dir = dir / length.max(1e-6);
+            let splash_played = weapon_registry
+                .name(event.weapon_id)
+                .eq_ignore_ascii_case("wormbite")
+                && spawn_ceg(
+                    "corruption_worm_splash",
+                    event.target_pos,
+                    bite_dir,
+                    &ceg_registry,
+                    &mut rng,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut images,
+                    &mut model_cache,
+                    &mut particle_mesh,
+                );
+            if !splash_played {
+                spawn_melee_flash(
+                    &event,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut fx_meshes,
+                    &mut impact_assets,
+                );
+            }
         } else if is_projectile {
             primary_visual = Some(spawn_projectile(
                 &event,
@@ -1364,6 +1390,56 @@ mod tests {
         assert_eq!(arcs, 1, "gauss shot must spawn exactly one arc");
         assert_eq!(beams, 0, "gauss beam is invisible upstream (intensity=0)");
         assert_eq!(impacts, 0, "gauss impact CEG is custom:none upstream");
+    }
+
+    /// Upstream worm.bos detonates the Wormsplash weapon at the bite
+    /// points, so the melee hit shows the cyan `corruption_worm_splash`
+    /// shockwave — not the generic orange flash, and no burst/beam.
+    #[test]
+    fn worm_bite_replays_the_splash_ceg() {
+        let mut app = fx_app();
+        let mut weapons = WeaponRegistry::default();
+        let bite = weapons.insert_for_test(
+            "Wormbite",
+            spring_tdf::WeaponDef {
+                weapon_type: "Melee".into(),
+                ..Default::default()
+            },
+        );
+        app.insert_resource(weapons);
+
+        app.world_mut()
+            .resource_mut::<PendingAttacks>()
+            .events
+            .push(AttackEvent {
+                attacker_pos: Vec3::ZERO,
+                target_pos: Vec3::new(60.0, 0.0, 0.0),
+                weapon_id: bite,
+                muzzle_ceg: None,
+                delayed_hit: None,
+            });
+
+        app.world_mut()
+            .run_system_once(spawn_weapon_visuals)
+            .unwrap();
+
+        let mut world = app.world_mut();
+        let flashes = world
+            .query_filtered::<&ImpactBurst, ()>()
+            .iter(&world)
+            .count();
+        let flames = world
+            .query_filtered::<&super::super::ceg::CegFlame, ()>()
+            .iter(&world)
+            .count();
+        assert_eq!(
+            flashes, 0,
+            "the bite must not fall back to the generic melee flash"
+        );
+        assert!(
+            flames > 0,
+            "the splash CEG (CBitmapMuzzleFlame class) must spawn"
+        );
     }
 
     /// Ordinary beam weapons keep their regular visuals — the arc path

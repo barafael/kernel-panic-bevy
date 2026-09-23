@@ -131,6 +131,12 @@ pub struct UnitStats {
     /// Typically 2-3× larger than `radius` for the same unit.
     pub hit_radius: f32,
     pub speed: f32,
+    /// Acceleration in elmos/s² (from FBI `Acceleration`). Drives the
+    /// ramp from standstill to `speed` in `movement_system`.
+    pub accel: f32,
+    /// Braking deceleration in elmos/s² (from FBI `BrakeRate`). Both
+    /// the standstill→speed ramp and the stop-distance clamp read it.
+    pub brake: f32,
     pub turn_rate: f32,
     pub can_fly: bool,
     pub cruise_alt: f32,

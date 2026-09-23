@@ -960,6 +960,8 @@ mod tests {
             radius: 12.0,
             hit_radius: 20.0,
             speed: 90.0,
+            accel: 27.0,
+            brake: 60.0,
             turn_rate: 3.0,
             can_fly: false,
             cruise_alt: 0.0,

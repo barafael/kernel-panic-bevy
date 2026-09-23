@@ -128,6 +128,36 @@ impl UnitRegistry {
             .map_or(0.0, |d| d.max_velocity * SPRING_SIM_FPS)
     }
 
+    /// Acceleration in elmos/s². FBI `Acceleration` uses the same
+    /// frame-based convention as `MaxVelocity` (a Bit's 0.9 gains
+    /// 0.9 elmo/frame of speed per frame), which converts to
+    /// `× SPRING_SIM_FPS` elmo/s per second — the Bit ramps 90 elmo/s
+    /// in ≈3.3 s. Missing or zero → reach max speed in ~1 s.
+    pub fn acceleration(&self, kind: UnitKind) -> f32 {
+        let speed = self.speed(kind);
+        self.def(kind).map_or(speed, |d| {
+            if d.acceleration > 0.0 {
+                d.acceleration * SPRING_SIM_FPS
+            } else {
+                speed
+            }
+        })
+    }
+
+    /// Braking deceleration in elmos/s². FBI `BrakeRate`, same
+    /// conversion as [`Self::acceleration`]. Missing or zero → stop
+    /// from max speed in ~0.5 s.
+    pub fn brake_rate(&self, kind: UnitKind) -> f32 {
+        let fallback = self.speed(kind) * 2.0;
+        self.def(kind).map_or(fallback, |d| {
+            if d.brake_rate > 0.0 {
+                d.brake_rate * SPRING_SIM_FPS
+            } else {
+                fallback
+            }
+        })
+    }
+
     /// Maximum turn speed in radians per second. Spring's FBI `TurnRate` is
     /// in 16-bit heading units per sim frame (65536 = 360°, 30 fps), so
     /// `rad/sec = TurnRate / 65536 * 2π * 30`. A TurnRate of 0 means the
@@ -502,6 +532,42 @@ mod tests {
             (got - expected).abs() < 1e-5,
             "got {got}, expected {expected} (FBI MaxSlope=36 default)",
         );
+    }
+
+    /// FBI `Acceleration=0.9` (bit.fbi) converts frame-based gain to
+    /// 27 elmo/s²; `BrakeRate=1.2` to 36. Units without the fields fall
+    /// back to neutral ramps (1 s to full speed, 0.5 s to stop).
+    #[test]
+    fn accel_brake_conversion_matches_fbi_frame_convention() {
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                max_velocity: 3.0,
+                acceleration: 0.9,
+                brake_rate: 1.2,
+                ..UnitDef::default()
+            },
+        );
+        let reg = UnitRegistry::for_test(defs);
+
+        assert_eq!(reg.speed(UnitKind::Bit), 90.0);
+        assert!((reg.acceleration(UnitKind::Bit) - 27.0).abs() < 1e-4);
+        assert!((reg.brake_rate(UnitKind::Bit) - 36.0).abs() < 1e-4);
+
+        // Missing fields → neutral fallbacks derived from speed
+        // (60 elmo/s max → 1 s ramp, 0.5 s stop).
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                max_velocity: 2.0,
+                ..UnitDef::default()
+            },
+        );
+        let reg = UnitRegistry::for_test(defs);
+        assert!((reg.acceleration(UnitKind::Bit) - 60.0).abs() < 1e-4);
+        assert!((reg.brake_rate(UnitKind::Bit) - 120.0).abs() < 1e-4);
     }
 
     /// `max_slope_from_degrees` clamps the FBI input to `[0, 60]`

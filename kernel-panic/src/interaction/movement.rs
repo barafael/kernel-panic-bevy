@@ -29,6 +29,15 @@ pub struct CommandLineGizmos;
 #[derive(Component)]
 pub struct MoveTarget(pub Vec3);
 
+/// The unit's current longitudinal speed in elmos/s. Ramps from 0 at
+/// `UnitStats::accel` while under way, brakes at `UnitStats::brake` when
+/// the order completes or is dropped, and is clamped near the final
+/// waypoint so a unit arrives at rest instead of overshooting —
+/// Spring's `CGroundMoveType` speed control in miniature. Units without
+/// the component (tests, pre-existing spawns) run speed directly.
+#[derive(Component, Default)]
+pub struct CurrentSpeed(pub f32);
+
 /// Marks an active attack-move order. While it is present AND the unit
 /// has an `AimTarget` (an in-range hostile), movement halts so the unit
 /// stops and fights; it resumes marching when the threat clears.
@@ -238,6 +247,7 @@ pub struct MovementQuery<'w, 's> {
             Option<&'static AttackMoveActive>,
             Option<&'static AimTarget>,
             Option<&'static crate::units::assets::animation::UnitAnimator>,
+            Option<&'static mut CurrentSpeed>,
         ),
         Without<Dying>,
     >,
@@ -271,7 +281,7 @@ pub fn movement_system(
     snapshot.clear();
     snapshot.extend(
         query.iter().map(
-            |(e, _, stats, tf, target, _, _, _, _, _, _, _, _, _)| UnitSnapshot {
+            |(e, _, stats, tf, target, _, _, _, _, _, _, _, _, _, _)| UnitSnapshot {
                 entity: e,
                 pos: tf.translation,
                 radius: stats.radius,
@@ -318,6 +328,7 @@ pub fn movement_system(
         attack_move_active,
         aim_target,
         animator,
+        mut current_speed,
     ) in &mut *query
     {
         if stunned.is_some() {
@@ -330,6 +341,15 @@ pub fn movement_system(
             commands.entity(entity).remove::<MoveTarget>();
             commands.entity(entity).remove::<MovePath>();
             commands.entity(entity).remove::<CommandQueue>();
+            continue;
+        }
+
+        // No live order: coast down to rest so a fresh order starts
+        // from a stopped state instead of teleporting into motion.
+        if move_target.is_none() && move_path.is_none() {
+            if let Some(cs) = current_speed.as_deref_mut() {
+                cs.0 = (cs.0 - stats.brake * time.delta_secs()).max(0.0);
+            }
             continue;
         }
 
@@ -411,7 +431,13 @@ pub fn movement_system(
 
         if path.current >= path.waypoints.len() {
             // Path complete — promote the next queued command if any.
+            // The stop-distance clamp got us here at walking pace; zero
+            // out the remaining momentum so the promoted order (or
+            // standstill) starts from rest.
             commands.entity(entity).remove::<MovePath>();
+            if let Some(cs) = current_speed.as_deref_mut() {
+                cs.0 = 0.0;
+            }
             let next = queue.as_mut().and_then(|q| {
                 if q.commands.is_empty() {
                     None
@@ -496,7 +522,14 @@ pub fn movement_system(
         if distance < arrival_threshold
             || waypoint_blocked_by_arrived_unit(entity, goal, self_radius, &grid)
         {
+            // Completing the *final* waypoint ends the leg at rest
+            // (mid-path waypoints stay fly-through — braking for those
+            // would make every path choppy stop-and-go).
+            let was_final = path.current == path.waypoints.len() - 1;
             path.current += 1;
+            if was_final && let Some(cs) = current_speed.as_deref_mut() {
+                cs.0 = 0.0;
+            }
             continue;
         }
 
@@ -571,7 +604,29 @@ pub fn movement_system(
         // so the unit doesn't arc wide during sharp turns.
         let cos_err = new_forward.dot(desired_forward);
         let align = if cos_err > 0.5 { cos_err } else { 0.0 };
-        let mut step = speed * dt * align;
+
+        // Longitudinal speed control: accelerate toward the FBI speed,
+        // brake for the final waypoint so the unit arrives at rest
+        // (`v = √(2·a·d)` is the fastest speed that can still stop in
+        // `distance`), and record the result for the next frame.
+        let mut target_speed = speed;
+        if path.current == path.waypoints.len() - 1 {
+            let stop_speed = (2.0 * stats.brake * distance).sqrt();
+            target_speed = target_speed.min(stop_speed);
+        }
+        let drive_speed = match current_speed.as_deref_mut() {
+            Some(cs) => {
+                if cs.0 < target_speed {
+                    cs.0 = (cs.0 + stats.accel * dt).min(target_speed);
+                } else {
+                    cs.0 = (cs.0 - stats.brake * dt).max(target_speed);
+                }
+                cs.0
+            }
+            // No component (tests, legacy spawns): run at full speed.
+            None => target_speed,
+        };
+        let mut step = drive_speed * dt * align;
         // Animation gate: a driver holds its unit in place while a fold
         // choreography must complete before driving (Byte: fold-to-move).
         step *= animator.map_or(1.0, |a| a.rig.move_gate);
@@ -1469,5 +1524,128 @@ mod tests {
         assert_eq!(set.bucket_for(1.73), 2);
         // A cap below the tightest still resolves to the tightest.
         assert_eq!(set.bucket_for(0.1), 0);
+    }
+}
+
+#[cfg(test)]
+mod inertia_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::time::Duration;
+
+    fn moving_unit(speed: f32, accel: f32, brake: f32, waypoint: Vec3) -> (World, Entity) {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(UnitRegistry::empty());
+        let unit = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                UnitStats {
+                    radius: 12.0,
+                    hit_radius: 20.0,
+                    speed,
+                    accel,
+                    brake,
+                    turn_rate: 100.0,
+                    can_fly: false,
+                    cruise_alt: 0.0,
+                    no_chase_vtol: true,
+                },
+                // Facing +X so the heading gate (align=1) doesn't gate
+                // translation away from the speed math under test.
+                Transform::from_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X)),
+                MoveTarget(waypoint),
+                MovePath {
+                    waypoints: vec![waypoint],
+                    current: 0,
+                },
+                CurrentSpeed::default(),
+            ))
+            .id();
+        (world, unit)
+    }
+
+    fn tick(world: &mut World) {
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(33));
+        world.run_system_once(movement_system).unwrap();
+    }
+
+    /// A unit under way ramps its longitudinal speed at the FBI
+    /// acceleration instead of teleporting to full speed: frame 1
+    /// covers `accel·dt²`, and after ~4 s of 30 Hz ticks it cruises
+    /// at the full 90 elmo/s.
+    #[test]
+    fn unit_accelerates_from_standstill() {
+        let (mut world, unit) = moving_unit(90.0, 27.0, 60.0, Vec3::new(2000.0, 0.0, 0.0));
+
+        tick(&mut world);
+        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
+        assert!(
+            (cs - 27.0 * 0.033).abs() < 0.05,
+            "one frame of accel from rest: {cs}"
+        );
+        let x1 = world.get::<Transform>(unit).unwrap().translation.x;
+        assert!(x1 > 0.0 && x1 < 1.0, "first frame crawls: x={x1}");
+
+        for _ in 0..140 {
+            tick(&mut world);
+        }
+        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
+        assert!(
+            (cs - 90.0).abs() < 1.0,
+            "after 4.6 s the unit cruises at max: {cs}"
+        );
+    }
+
+    /// Approaching the final waypoint, the stop-distance clamp
+    /// (`v = √(2·a·d)`) brakes a fast unit instead of letting it
+    /// overshoot: a 90 elmo/s unit 24 elmos out may plan at most
+    /// √(2·60·24) ≈ 53.7 elmo/s this frame, the speed decays toward
+    /// that limit, and the unit never lands past the waypoint.
+    #[test]
+    fn unit_brakes_for_the_final_waypoint() {
+        let (mut world, unit) = moving_unit(90.0, 27.0, 60.0, Vec3::new(24.0, 0.0, 0.0));
+        world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
+
+        tick(&mut world);
+
+        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
+        assert!(
+            cs < 90.0,
+            "speed must brake toward the stop-distance limit: {cs}"
+        );
+        let x = world.get::<Transform>(unit).unwrap().translation.x;
+        assert!(x <= 24.0 + 1e-3, "must not overshoot the waypoint: x={x}");
+
+        // Keep ticking until arrival: the unit lands on the waypoint
+        // at rest instead of skidding past it.
+        for _ in 0..40 {
+            tick(&mut world);
+        }
+        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
+        assert_eq!(cs, 0.0, "arrival ends the leg at rest: {cs}");
+    }
+
+    /// An idle unit (no order) coasts down to rest at the brake rate,
+    /// so a fresh order starts from a stopped state.
+    #[test]
+    fn idle_unit_coasts_to_rest() {
+        let (mut world, unit) = moving_unit(90.0, 27.0, 60.0, Vec3::new(2000.0, 0.0, 0.0));
+        world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
+        world
+            .entity_mut(unit)
+            .remove::<MoveTarget>()
+            .remove::<MovePath>();
+
+        for _ in 0..60 {
+            tick(&mut world);
+        }
+        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
+        assert_eq!(
+            cs, 0.0,
+            "2 s of braking from 90 at 60 elmo/s² stops the unit"
+        );
     }
 }

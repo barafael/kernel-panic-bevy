@@ -257,8 +257,7 @@ pub fn spawn_unit(
     if matches!(kind, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier) {
         info!(
             "spawn {kind:?}: ground y={:.1}, lift={ground_lift:.1}, root y={:.1}",
-            position.y,
-            lifted_position.y
+            position.y, lifted_position.y
         );
     }
 
@@ -272,6 +271,8 @@ pub fn spawn_unit(
                 radius: unit_registry.collision_radius(kind),
                 hit_radius: radius,
                 speed: unit_registry.speed(kind),
+                accel: unit_registry.acceleration(kind),
+                brake: unit_registry.brake_rate(kind),
                 turn_rate: unit_registry.turn_rate(kind),
                 can_fly: unit_registry.can_fly(kind),
                 cruise_alt: unit_registry.cruise_alt(kind),
@@ -285,6 +286,7 @@ pub fn spawn_unit(
     commands.entity(unit_entity).insert((
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
+        crate::interaction::movement::CurrentSpeed::default(),
         // §1.8 first slice: cache a typed collision volume so
         // projectile / shield / per-shot-miss systems can do
         // volume-aware tests without re-deriving from the S3O on
@@ -465,20 +467,18 @@ pub fn spawn_unit(
             // one-off lookups for the Pointer aim pivot and the
             // Connection hatch respectively.
             let table_index = |name: &str| -> Option<usize> {
-                table
-                    .iter()
-                    .position(|n| n.eq_ignore_ascii_case(name))
+                table.iter().position(|n| n.eq_ignore_ascii_case(name))
             };
             let muzzle_idx = crate::units::assets::animation::muzzle_piece_names(kind)
                 .and_then(|names| {
-                    names.first().and_then(|n| {
-                        table.iter().position(|p| p.eq_ignore_ascii_case(n))
-                    })
+                    names
+                        .first()
+                        .and_then(|n| table.iter().position(|p| p.eq_ignore_ascii_case(n)))
                 })
                 .or_else(|| {
-                    crate::units::assets::animation::MUZZLE_CANDIDATE_NAMES.iter().find_map(|n| {
-                        table.iter().position(|p| p.eq_ignore_ascii_case(n))
-                    })
+                    crate::units::assets::animation::MUZZLE_CANDIDATE_NAMES
+                        .iter()
+                        .find_map(|n| table.iter().position(|p| p.eq_ignore_ascii_case(n)))
                 });
             let gunbase_idx = table_index("gunbase");
             let aimer_idx = table_index("aimer");
@@ -564,9 +564,7 @@ pub fn spawn_unit(
         if default_production(kind).is_some() {
             let table = crate::units::assets::animation::piece_names(kind);
             let table_index = |name: &str| -> Option<usize> {
-                table
-                    .iter()
-                    .position(|p| p.eq_ignore_ascii_case(name))
+                table.iter().position(|p| p.eq_ignore_ascii_case(name))
             };
             // Faction-specific emitter piece names, in the order they
             // appear in the upstream .bos for each factory. Pieces that
@@ -584,7 +582,10 @@ pub fn spawn_unit(
                 UnitKind::Socket => &["blaser0", "blaser1"],
                 _ => &["nanoemitter"],
             };
-            let emitters: Vec<usize> = emitter_names.iter().filter_map(|n| table_index(n)).collect();
+            let emitters: Vec<usize> = emitter_names
+                .iter()
+                .filter_map(|n| table_index(n))
+                .collect();
             commands.entity(unit_entity).insert(FactoryPieces {
                 emitters,
                 pad: table_index("pad"),
