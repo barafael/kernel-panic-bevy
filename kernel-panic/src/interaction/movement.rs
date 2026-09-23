@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use spring_pathfinding::{SpeedMap, find_path, slope_from_rise_run};
+use spring_pathfinding::{HeatMap, SpeedMap, find_path_with_heat, slope_from_rise_run};
 
 use super::selection::Selected;
 use crate::map_events::CircularFlow;
@@ -166,6 +166,56 @@ impl NavGridSet {
     }
 }
 
+/// Spring `MOVEINFO.TDF` HeatMapping: a shared congestion grid the
+/// pathfinder reads as extra cost. Walking ground units deposit heat on
+/// the cell they stand in; later paths bend around hot cells, so
+/// columns marching the same line fan out instead of braiding into a
+/// single rut. Upstream keeps per-class decay rates; a single shared
+/// grid decays at the most persistent class (LIGHT, `HeatMod=0.10`)
+/// while MEDIUM/HEAVY keep their much higher deposits.
+#[derive(Resource)]
+pub struct PathHeat(pub spring_pathfinding::HeatMap);
+
+/// Per-second heat retention of the shared grid (upstream LIGHT
+/// `HeatMod=0.10`).
+const HEAT_RETENTION_PER_SECOND: f32 = 0.1;
+/// Full-grid decay runs in steps of this many seconds (a plain
+/// multiply at `retention^period` — same curve, memcpy cost).
+const HEAT_DECAY_PERIOD: f32 = 0.5;
+
+/// Deposit + decay pass for [`PathHeat`]. Runs before
+/// `movement_system` so freshly-issued paths see this tick's
+/// congestion. No-op when no map (and therefore no grid) is loaded.
+#[allow(clippy::type_complexity)]
+pub fn update_path_heat(
+    time: Res<Time>,
+    movers: Query<(&GlobalTransform, &UnitType, &UnitStats), With<MovePath>>,
+    registry: Res<UnitRegistry>,
+    mut heat: Option<ResMut<PathHeat>>,
+    mut decay_timer: Local<f32>,
+) {
+    let Some(heat) = heat.as_deref_mut() else {
+        return;
+    };
+    let dt = time.delta_secs();
+    for (gtf, unit, stats) in &movers {
+        // Flyers never touch the nav grid — they leave no trail.
+        if stats.can_fly || stats.speed <= 0.0 {
+            continue;
+        }
+        let produced = registry.heat_produced(unit.0);
+        let pos = gtf.translation();
+        heat.0.add_heat([pos.x, pos.z], produced * dt);
+    }
+
+    *decay_timer += dt;
+    if *decay_timer >= HEAT_DECAY_PERIOD {
+        *decay_timer = 0.0;
+        heat.0
+            .decay(HEAT_RETENTION_PER_SECOND.powf(HEAT_DECAY_PERIOD));
+    }
+}
+
 /// Per-frame snapshot of every unit, used by the movement pass to resolve
 /// collisions and decide when a waypoint is blocked by an "arrived" unit.
 pub struct UnitSnapshot {
@@ -260,6 +310,7 @@ pub fn movement_system(
     nav_set: Option<Res<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
     circular_flow: Option<Res<CircularFlow>>,
+    path_heat: Option<Res<PathHeat>>,
     mut m: MovementQuery,
     // Reused across frames so the full-unit snapshot doesn't reallocate
     // each tick.
@@ -403,6 +454,7 @@ pub fn movement_system(
                         unit_type.0,
                         transform.translation,
                         target.0,
+                        path_heat.as_deref().map(|h| &h.0),
                     )
                 } else {
                     None
@@ -1168,6 +1220,7 @@ fn compute_path(
     kind: UnitKind,
     from: Vec3,
     to: Vec3,
+    heat: Option<&spring_pathfinding::HeatMap>,
 ) -> Option<PathOutcome> {
     let nav = nav_set?;
     if nav.buckets.is_empty() {
@@ -1176,7 +1229,7 @@ fn compute_path(
     let cap = unit_registry.max_slope_ratio(kind);
     let idx = nav.bucket_for(cap);
     let speed_map = &nav.buckets[idx].speed_map;
-    let path = find_path(speed_map, [from.x, from.z], [to.x, to.z])?;
+    let path = find_path_with_heat(speed_map, heat, [from.x, from.z], [to.x, to.z])?;
     if !path.reached_goal {
         return Some(PathOutcome::Unreachable);
     }
@@ -1647,5 +1700,114 @@ mod inertia_tests {
             cs, 0.0,
             "2 s of braking from 90 at 60 elmo/s² stops the unit"
         );
+    }
+}
+
+#[cfg(test)]
+mod heat_tests {
+    use super::*;
+    use crate::units::components::TeamId;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::time::Duration;
+
+    /// Walking ground units deposit heat at their cell; a full decay
+    /// step multiplies the grid down by `retention^period`. Flyers
+    /// leave no trail.
+    #[test]
+    fn walkers_deposit_heat_and_decay_shrinks_it() {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(UnitRegistry::empty());
+        world.insert_resource(PathHeat(HeatMap::new(8, 8)));
+
+        let walker = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                UnitStats {
+                    radius: 12.0,
+                    hit_radius: 20.0,
+                    speed: 90.0,
+                    accel: 27.0,
+                    brake: 60.0,
+                    turn_rate: 3.0,
+                    can_fly: false,
+                    cruise_alt: 0.0,
+                    no_chase_vtol: true,
+                },
+                TeamId(0),
+                GlobalTransform::from_xyz(32.0, 0.0, 8.0),
+                MovePath {
+                    waypoints: vec![Vec3::new(500.0, 0.0, 8.0)],
+                    current: 0,
+                },
+            ))
+            .id();
+        let flyer = world
+            .spawn((
+                UnitType(UnitKind::Flow),
+                UnitStats {
+                    radius: 12.0,
+                    hit_radius: 20.0,
+                    speed: 30.0,
+                    accel: 9.0,
+                    brake: 27.0,
+                    turn_rate: 3.0,
+                    can_fly: true,
+                    cruise_alt: 40.0,
+                    no_chase_vtol: false,
+                },
+                TeamId(0),
+                GlobalTransform::from_xyz(40.0, 0.0, 8.0),
+                MovePath {
+                    waypoints: vec![Vec3::new(500.0, 0.0, 8.0)],
+                    current: 0,
+                },
+            ))
+            .id();
+
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_millis(500));
+        world.run_system_once(update_path_heat).unwrap();
+
+        let walker_heat = world.resource::<PathHeat>().0.get([32.0, 8.0]);
+        assert!(
+            walker_heat > 0.0,
+            "walker must deposit heat at its cell, got {walker_heat}"
+        );
+        assert_eq!(
+            world.resource::<PathHeat>().0.get([40.0, 8.0]),
+            0.0,
+            "flyers must leave no heat"
+        );
+        let deposited = walker_heat;
+
+        // Despawn the walkers so the next call is decay-only: a
+        // standing unit would keep re-depositing, and the test wants
+        // the isolated decay step.
+        world.despawn(walker);
+        world.despawn(flyer);
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f32(HEAT_DECAY_PERIOD));
+        world.run_system_once(update_path_heat).unwrap();
+
+        let decayed = world.resource::<PathHeat>().0.get([32.0, 8.0]);
+        let expected_factor = HEAT_RETENTION_PER_SECOND.powf(HEAT_DECAY_PERIOD);
+        assert!(
+            (decayed - deposited * expected_factor).abs() < deposited * 0.05,
+            "decay step must multiply by retention^{HEAT_DECAY_PERIOD}: {deposited} → {decayed}"
+        );
+    }
+
+    /// The real FBI + MOVEINFO.TDF pair drives per-class heat: Bits
+    /// (LIGHT) deposit 10/s, Bytes (HEAVY) 500/s.
+    #[test]
+    fn fbi_movement_class_selects_heat_params() {
+        let registry = crate::units::content::unit_registry::UnitRegistry::load();
+        assert!((registry.heat_produced(UnitKind::Bit) - 10.0).abs() < 1e-4);
+        assert!((registry.heat_retention(UnitKind::Bit) - 0.10).abs() < 1e-4);
+        assert!((registry.heat_produced(UnitKind::Byte) - 500.0).abs() < 1e-4);
+        assert!((registry.heat_retention(UnitKind::Byte) - 0.002).abs() < 1e-4);
     }
 }

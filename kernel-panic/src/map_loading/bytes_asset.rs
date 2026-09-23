@@ -5,8 +5,8 @@
 //! doesn't exist there. The loader accepts any file; the `.kpmap`
 //! extension mapping is declared for completeness.
 
-use bevy::asset::{Asset, AssetLoader, LoadContext};
 use bevy::asset::io::Reader;
+use bevy::asset::{Asset, AssetLoader, LoadContext};
 use bevy::reflect::TypePath;
 use std::sync::Arc;
 

@@ -142,7 +142,11 @@ fn generate_mipmaps(
     let (base, w0, h0) = if (base_w, base_h) == (width, height) {
         (pixels.to_vec(), width, height)
     } else {
-        (box_filter_2x(pixels, width, height, base_w, base_h), base_w, base_h)
+        (
+            box_filter_2x(pixels, width, height, base_w, base_h),
+            base_w,
+            base_h,
+        )
     };
 
     let mut all_data = Vec::with_capacity(base.len() * 4 / 3);

@@ -728,6 +728,17 @@ fn spawn_map_world(
         }
         // Buckets already ascending because BTreeSet iteration is sorted.
         let bucket_count = nav_set.buckets.len();
+        // One shared congestion grid across all nav buckets — every
+        // bucket is built from the same heightmap, so the dimensions
+        // match. (Bucket 0 exists by construction; if somehow none
+        // were built, the Option<Res> paths degrade gracefully.)
+        if let Some(bucket) = nav_set.buckets.first() {
+            let (w, h) = (bucket.speed_map.width, bucket.speed_map.height);
+            ctx.commands
+                .insert_resource(interaction::movement::PathHeat(
+                    spring_pathfinding::HeatMap::new(w, h),
+                ));
+        }
         ctx.commands.insert_resource(nav_set);
         info!(
             "  built {bucket_count} nav buckets in {:.0}ms",

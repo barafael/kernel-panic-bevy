@@ -14,13 +14,15 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use super::clear_orders;
-use super::movement::{AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget, QueuedCommand};
+use super::movement::{
+    AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget, QueuedCommand,
+};
 use super::selection::{
     OrderMarker, PendingMoveIndicators, Selected, apply_ordered_command, ground_hit, unit_hit,
 };
 use crate::rendering::camera::RtsCamera;
 use crate::units::combat::{
-    AttackGroundOrder, AttackTargetOrder, ForcedTarget, SelfDestructCountdown, SELF_DESTRUCT_DELAY,
+    AttackGroundOrder, AttackTargetOrder, ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown,
 };
 use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
@@ -37,42 +39,41 @@ pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<OrderCursorModes>()
-            .add_systems(
-                Update,
-                // Two nested groups: a flat tuple here would exceed
-                // Bevy's 21-item tuple-arity cap.
+        app.init_resource::<OrderCursorModes>().add_systems(
+            Update,
+            // Two nested groups: a flat tuple here would exceed
+            // Bevy's 21-item tuple-arity cap.
+            (
                 (
-                    (
-                        trigger_command_fire_on_hotkey,
-                        trigger_deploy_on_hotkey,
-                        trigger_dispatch_on_hotkey,
-                        trigger_enter_on_hotkey,
-                        trigger_self_destruct_on_hotkey,
-                        trigger_unset_target_on_hotkey,
-                    ),
-                    (
-                        toggle_patrol_cursor_mode,
-                        trigger_patrol_click,
-                        update_patrol_cursor,
-                        toggle_attack_ground_mode,
-                        trigger_attack_ground_click,
-                        update_attack_ground_cursor,
-                        toggle_attack_move_mode,
-                        trigger_attack_move_click,
-                        update_attack_move_cursor,
-                        toggle_guard_mode,
-                        trigger_guard_click,
-                        update_guard_cursor,
-                        toggle_move_mode,
-                        trigger_move_click,
-                        update_move_cursor,
-                        toggle_set_target_mode,
-                        trigger_set_target_click,
-                        update_set_target_cursor,
-                    ),
+                    trigger_command_fire_on_hotkey,
+                    trigger_deploy_on_hotkey,
+                    trigger_dispatch_on_hotkey,
+                    trigger_enter_on_hotkey,
+                    trigger_self_destruct_on_hotkey,
+                    trigger_unset_target_on_hotkey,
                 ),
-            );
+                (
+                    toggle_patrol_cursor_mode,
+                    trigger_patrol_click,
+                    update_patrol_cursor,
+                    toggle_attack_ground_mode,
+                    trigger_attack_ground_click,
+                    update_attack_ground_cursor,
+                    toggle_attack_move_mode,
+                    trigger_attack_move_click,
+                    update_attack_move_cursor,
+                    toggle_guard_mode,
+                    trigger_guard_click,
+                    update_guard_cursor,
+                    toggle_move_mode,
+                    trigger_move_click,
+                    update_move_cursor,
+                    toggle_set_target_mode,
+                    trigger_set_target_click,
+                    update_set_target_cursor,
+                ),
+            ),
+        );
     }
 }
 
@@ -325,8 +326,7 @@ fn trigger_attack_ground_click(
         } else {
             // Immediate: cancel any current order, issue AttackGroundOrder.
             // attack_ground_system handles movement if needed.
-            clear_orders(&mut commands.entity(entity))
-                .insert(AttackGroundOrder { pos: target });
+            clear_orders(&mut commands.entity(entity)).insert(AttackGroundOrder { pos: target });
         }
     }
     pending.markers.push((target, OrderMarker::Attack));
@@ -543,8 +543,7 @@ fn trigger_set_target_click(
     if !modes.set_target || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q)
-    else {
+    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q) else {
         return;
     };
     // Manual fire must only ever designate hostiles — the forced-target
@@ -569,7 +568,9 @@ fn trigger_set_target_click(
         commands.entity(entity).insert(ForcedTarget(target));
     }
     if let Ok(t_gtf) = target_gtf_q.get(target) {
-        pending.markers.push((t_gtf.translation(), OrderMarker::Target));
+        pending
+            .markers
+            .push((t_gtf.translation(), OrderMarker::Target));
     }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     if !shift {
@@ -758,8 +759,7 @@ fn trigger_guard_click(
     if !modes.guard || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
-    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q)
-    else {
+    let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q) else {
         return;
     };
     let Ok((t_team, t_faction)) = unit_info_q.get(target) else {
@@ -784,7 +784,9 @@ fn trigger_guard_click(
         clear_orders(&mut commands.entity(entity)).insert(GuardTarget(target));
     }
     if let Ok(t_gtf) = target_gtf_q.get(target) {
-        pending.markers.push((t_gtf.translation(), OrderMarker::Guard));
+        pending
+            .markers
+            .push((t_gtf.translation(), OrderMarker::Guard));
     }
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     if !shift {

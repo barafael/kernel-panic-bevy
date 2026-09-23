@@ -8,6 +8,7 @@ use bevy::prelude::*;
 use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
+use super::moveinfo::{DEFAULT_HEAT_PARAMS, MoveClassTable};
 use super::tdf_loader;
 
 /// Spring engine simulation runs at 30 frames per second.
@@ -54,6 +55,10 @@ fn categories_intersect(tokens: &str, categories: &str) -> bool {
 #[derive(Resource)]
 pub struct UnitRegistry {
     defs: UnitDefs,
+    /// Upstream MOVEINFO.TDF movement-class heat params, keyed by the
+    /// FBI `MovementClass` name. Lookups go through
+    /// [`Self::heat_params`].
+    move_classes: MoveClassTable,
 }
 
 impl UnitRegistry {
@@ -63,6 +68,7 @@ impl UnitRegistry {
             warn!("Upstream units directory not found — using empty registry");
             return Self {
                 defs: UnitDefs::default(),
+                move_classes: MoveClassTable::default(),
             };
         };
 
@@ -75,7 +81,10 @@ impl UnitRegistry {
         }
 
         info!("Unit registry: {} definitions total", merged.units.len());
-        let registry = Self { defs: merged };
+        let registry = Self {
+            defs: merged,
+            move_classes: MoveClassTable::load(),
+        };
         registry.validate_unit_bindings();
         registry
     }
@@ -88,6 +97,7 @@ impl UnitRegistry {
     pub fn empty() -> Self {
         Self {
             defs: UnitDefs::default(),
+            move_classes: MoveClassTable::default(),
         }
     }
 
@@ -96,7 +106,10 @@ impl UnitRegistry {
     /// gates, speed conversion) without loading disk data.
     #[cfg(test)]
     pub fn for_test(defs: UnitDefs) -> Self {
-        Self { defs }
+        Self {
+            defs,
+            move_classes: MoveClassTable::default(),
+        }
     }
 
     /// Look up the raw FBI definition for a unit kind.
@@ -156,6 +169,27 @@ impl UnitRegistry {
                 fallback
             }
         })
+    }
+
+    /// Path-heat deposit rate (per second of walking) for this kind,
+    /// from its FBI `MovementClass` via MOVEINFO.TDF. Units without a
+    /// class use the upstream LIGHT defaults.
+    pub fn heat_produced(&self, kind: UnitKind) -> f32 {
+        self.heat_params(kind).heat_produced
+    }
+
+    /// Fraction of this kind's heat that survives one second — see
+    /// [`Self::heat_produced`].
+    pub fn heat_retention(&self, kind: UnitKind) -> f32 {
+        self.heat_params(kind).heat_retention
+    }
+
+    fn heat_params(&self, kind: UnitKind) -> super::moveinfo::MoveClassParams {
+        let class = self
+            .def(kind)
+            .map(|d| d.movement_class.as_str())
+            .unwrap_or_default();
+        self.move_classes.params_for(class)
     }
 
     /// Maximum turn speed in radians per second. Spring's FBI `TurnRate` is
@@ -461,7 +495,10 @@ mod tests {
             ..UnitDef::default()
         };
         defs.units.insert(kind.unitname().to_string(), def);
-        UnitRegistry { defs }
+        UnitRegistry {
+            defs,
+            move_classes: MoveClassTable::default(),
+        }
     }
 
     /// Upstream KP ships every combat unit with `DamageModifier=0.000001`
@@ -488,6 +525,7 @@ mod tests {
     fn missing_unit_defaults_to_one() {
         let reg = UnitRegistry {
             defs: UnitDefs::default(),
+            move_classes: MoveClassTable::default(),
         };
         assert_eq!(reg.damage_modifier(UnitKind::Bit), 1.0);
     }
@@ -499,7 +537,10 @@ mod tests {
             ..UnitDef::default()
         };
         defs.units.insert(kind.unitname().to_string(), def);
-        UnitRegistry { defs }
+        UnitRegistry {
+            defs,
+            move_classes: MoveClassTable::default(),
+        }
     }
 
     /// FBI MaxSlope=20 should produce Spring's encoded value
@@ -525,6 +566,7 @@ mod tests {
     fn max_slope_ratio_default_is_kp_class_default() {
         let reg = UnitRegistry {
             defs: UnitDefs::default(),
+            move_classes: MoveClassTable::default(),
         };
         let expected = 1.0 - 54.0_f32.to_radians().cos();
         let got = reg.max_slope_ratio(UnitKind::Bit);
@@ -607,7 +649,10 @@ mod tests {
         defs.units.insert("bit".into(), bit);
         defs.units.insert("socket".into(), socket);
         defs.units.insert("dos".into(), dos);
-        UnitRegistry { defs }
+        UnitRegistry {
+            defs,
+            move_classes: MoveClassTable::default(),
+        }
     }
 
     /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): Bits skip

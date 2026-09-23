@@ -20,8 +20,21 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use crate::cost::{SpeedMap, SQUARE_SIZE};
+use crate::cost::{SQUARE_SIZE, SpeedMap};
 use crate::path::Path;
+
+/// How strongly path heat (see [`crate::HeatMap`]) slows a cell in the
+/// A\* cost model: `speed_eff = speed / (1 + heat · HEAT_COST_SOFTNESS)`.
+/// Tuned so a single LIGHT-class trail (~10 heat) costs a few percent
+/// while a marching column (~200 heat, Byte-class deposits) pushes
+/// later units well off the line — soft avoidance, never blockage.
+pub const HEAT_COST_SOFTNESS: f32 = 0.02;
+
+/// Smoothing tolerance: the LOS pass refuses to shortcut across cells
+/// whose heat slows travel by more than this fraction. Without it the
+/// optimizer collapses a heat detour straight back through the crowd
+/// the detour was avoiding (the pass only ever checked passability).
+const HEAT_SMOOTH_TOLERANCE: f32 = 0.5;
 
 /// A* over `speed_map` from world-space `src` to `dst` (XZ).
 ///
@@ -35,6 +48,19 @@ use crate::path::Path;
 /// `Path::reached_goal` is `false` when the goal cell is unreachable:
 /// the path then leads to the closest reachable cell.
 pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<Path> {
+    find_path_with_heat(speed_map, None, src, dst)
+}
+
+/// [`find_path`], with an optional congestion overlay: cells with heat
+/// cost more (`speed / (1 + heat·HEAT_COST_SOFTNESS)`), so later units
+/// route around columns that just marched through. Heat never blocks —
+/// the overlay can only slow the search down, not seal a route.
+pub fn find_path_with_heat(
+    speed_map: &SpeedMap,
+    heat: Option<&crate::heat::HeatMap>,
+    src: [f32; 2],
+    dst: [f32; 2],
+) -> Option<Path> {
     let width = speed_map.width;
     let height = speed_map.height;
     if width == 0 || height == 0 {
@@ -112,7 +138,13 @@ pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<P
 
         for (nx, nz, step_len) in neighbors(cx, cz, width, height) {
             let n_idx = cell_idx(nx, nz, width);
-            let speed = speed_map.speeds[n_idx];
+            let mut speed = speed_map.speeds[n_idx];
+            if let Some(hm) = heat {
+                let cell_heat = hm.heat[n_idx];
+                if cell_heat > 0.0 {
+                    speed /= 1.0 + cell_heat * HEAT_COST_SOFTNESS;
+                }
+            }
             if speed <= 0.0 {
                 continue; // impassable
             }
@@ -178,7 +210,7 @@ pub fn find_path(speed_map: &SpeedMap, src: [f32; 2], dst: [f32; 2]) -> Option<P
         *last = dst;
     }
 
-    smooth(&mut points, speed_map);
+    smooth(&mut points, speed_map, heat);
     Some(Path {
         points,
         reached_goal,
@@ -216,12 +248,7 @@ impl Ord for Open {
 /// 8-connected neighbour steps as `(cell_x, cell_z, world_step_length)`.
 /// Yields in a fixed order; diagonals carry √2 length so the corner-cut
 /// check can identify them by length.
-fn neighbors(
-    x: u32,
-    z: u32,
-    width: u32,
-    height: u32,
-) -> impl Iterator<Item = (u32, u32, f32)> {
+fn neighbors(x: u32, z: u32, width: u32, height: u32) -> impl Iterator<Item = (u32, u32, f32)> {
     let diag = SQUARE_SIZE * std::f32::consts::SQRT_2;
     let (xi, zi) = (x as i32, z as i32);
     [
@@ -264,7 +291,7 @@ fn octile(x: u32, z: u32, dx: u32, dz: u32) -> f32 {
 /// waypoint list dropping any intermediate point while a straight ray
 /// to the furthest visible successor crosses only passable cells
 /// (supercover walk so corners can't be clipped diagonally).
-fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap) {
+fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap, heat: Option<&crate::heat::HeatMap>) {
     if points.len() <= 2 {
         return;
     }
@@ -275,9 +302,7 @@ fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap) {
         // Furthest j ≥ i+2 visible from points[i]; default to the
         // immediate successor.
         let mut j = i + 1;
-        while j + 1 < points.len()
-            && line_clear(points[i], points[j + 1], speed_map)
-        {
+        while j + 1 < points.len() && line_clear(points[i], points[j + 1], speed_map, heat) {
             j += 1;
         }
         out.push(points[j]);
@@ -287,18 +312,31 @@ fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap) {
 }
 
 /// Sample the straight segment every half-square and require every
-/// touched cell to be passable.
-fn line_clear(a: [f32; 2], b: [f32; 2], speed_map: &SpeedMap) -> bool {
+/// touched cell to be passable — and, when a heat overlay is present,
+/// not hot enough to defeat the shortcut.
+fn line_clear(
+    a: [f32; 2],
+    b: [f32; 2],
+    speed_map: &SpeedMap,
+    heat: Option<&crate::heat::HeatMap>,
+) -> bool {
     let dist = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
     let steps = (dist / (SQUARE_SIZE * 0.5)).ceil() as usize;
     for s in 1..steps {
         let t = s as f32 / steps as f32;
         let x = a[0] + (b[0] - a[0]) * t;
         let z = a[1] + (b[1] - a[1]) * t;
-        if speed_map.get(world_to_cell(x, speed_map.width), world_to_cell(z, speed_map.height))
-            <= 0.0
+        if speed_map.get(
+            world_to_cell(x, speed_map.width),
+            world_to_cell(z, speed_map.height),
+        ) <= 0.0
         {
             return false;
+        }
+        if let Some(hm) = heat {
+            if hm.get_with_neighbors([x, z]) * HEAT_COST_SOFTNESS > HEAT_SMOOTH_TOLERANCE {
+                return false;
+            }
         }
     }
     true
@@ -317,7 +355,11 @@ mod tests {
         let map = flat(32, 32);
         let path = find_path(&map, [20.0, 20.0], [240.0, 240.0]).expect("path");
         assert!(path.reached_goal);
-        assert!(path.len() <= 3, "LOS smoothing should collapse open-field runs, got {} waypoints", path.len());
+        assert!(
+            path.len() <= 3,
+            "LOS smoothing should collapse open-field runs, got {} waypoints",
+            path.len()
+        );
         // Ends at the exact destination.
         let last = path.points.last().unwrap();
         assert!((last[0] - 240.0).abs() < 0.01 && (last[1] - 240.0).abs() < 0.01);
@@ -332,7 +374,10 @@ mod tests {
         let src = [40.0, 128.0];
         let dst = [240.0, 128.0];
         let path = find_path(&map, src, dst).expect("path around wall");
-        assert!(path.reached_goal, "wall is detourable — goal must be reached");
+        assert!(
+            path.reached_goal,
+            "wall is detourable — goal must be reached"
+        );
         assert!(path.total_length() > 200.0, "must detour around the wall");
         // No waypoint sits on a wall cell (column 16, rows 4..28).
         for p in &path.points {
@@ -395,8 +440,14 @@ mod tests {
         // squeeze diagonally through the blocked corner at (4,3).
         let path = find_path(&map, [20.0, 20.0], [20.0, 36.0]).expect("path");
         for w in path.points.windows(2) {
-            let a = [(w[0][0] / SQUARE_SIZE) as i32, (w[0][1] / SQUARE_SIZE) as i32];
-            let b = [(w[1][0] / SQUARE_SIZE) as i32, (w[1][1] / SQUARE_SIZE) as i32];
+            let a = [
+                (w[0][0] / SQUARE_SIZE) as i32,
+                (w[0][1] / SQUARE_SIZE) as i32,
+            ];
+            let b = [
+                (w[1][0] / SQUARE_SIZE) as i32,
+                (w[1][1] / SQUARE_SIZE) as i32,
+            ];
             let (dx, dz) = ((a[0] - b[0]).abs(), (a[1] - b[1]).abs());
             if dx == 1 && dz == 1 {
                 // Both orthogonal neighbours of the diagonal must be open.
@@ -405,6 +456,72 @@ mod tests {
                 assert!(orth1 > 0.0 && orth2 > 0.0, "corner cut at {a:?}->{b:?}");
             }
         }
+    }
+
+    /// A column of heat down the middle bends the route: the path
+    /// prefers a detour over eating the congestion penalty, but heat
+    /// never blocks — the goal is still reached.
+    #[test]
+    fn heat_diverts_the_path_without_blocking_it() {
+        use crate::heat::HeatMap;
+        let map = flat(32, 32);
+        let mut heat = HeatMap::new(32, 32);
+        // Hot band ACROSS the route (rows 15-17, columns 6..28):
+        // walking it means eating ~24 hot cells; stepping out of the
+        // band costs a couple of diagonal steps. Columns 6.. so the
+        // source cell (5,16) itself stands outside the band.
+        for z in 15..=17 {
+            for x in 6..28 {
+                heat.heat[(z * 32 + x) as usize] = 300.0;
+            }
+        }
+        let src = [40.0, 128.0];
+        let dst = [240.0, 128.0];
+
+        let cold = find_path(&map, src, dst).expect("cold path");
+        let hot = find_path_with_heat(&map, Some(&heat), src, dst).expect("hot path");
+
+        assert!(hot.reached_goal, "heat must never seal a route");
+        // The cold path runs straight through the strip; the hot path
+        // pays a detour instead.
+        assert!(
+            hot.total_length() > cold.total_length(),
+            "hot {:?} must pay at least a little over cold {:?}",
+            hot.total_length(),
+            cold.total_length(),
+        );
+        // No hot waypoint sits inside the band — that's the actual
+        // fidelity claim: routing goes around hot cells.
+        for p in &hot.points {
+            let cx = (p[0] / SQUARE_SIZE) as u32;
+            let cz = (p[1] / SQUARE_SIZE) as u32;
+            assert!(
+                !((15..=17).contains(&cz) && (6..28).contains(&cx)),
+                "waypoint {p:?} runs straight through the hot band"
+            );
+        }
+    }
+
+    /// Mild heat on the direct line is cheaper than a detour: with a
+    /// short low-heat strip the path stays straight — avoidance has to
+    /// be worth its way around.
+    #[test]
+    fn mild_heat_is_preferred_over_a_detour() {
+        use crate::heat::HeatMap;
+        let map = flat(32, 32);
+        let mut heat = HeatMap::new(32, 32);
+        for z in 14..18 {
+            heat.heat[(z * 32 + 16) as usize] = 5.0;
+        }
+        let cold = find_path(&map, [40.0, 128.0], [240.0, 128.0]).expect("cold");
+        let hot =
+            find_path_with_heat(&map, Some(&heat), [40.0, 128.0], [240.0, 128.0]).expect("hot");
+        assert!(
+            (hot.total_length() - cold.total_length()).abs() < 20.0,
+            "a 5-heat sliver must not trigger a detour: hot {:?} vs cold {:?}",
+            hot.total_length(),
+            cold.total_length(),
+        );
     }
 
     #[test]

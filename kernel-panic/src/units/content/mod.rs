@@ -2,6 +2,7 @@
 //! registries (per-kind stats, per-weapon stats). Pure data; no systems.
 
 pub mod definitions;
+pub mod moveinfo;
 pub(crate) mod tdf_loader;
 pub mod unit_registry;
 pub mod weapons;

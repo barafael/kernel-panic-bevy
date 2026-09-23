@@ -18,8 +18,10 @@
 
 mod cost;
 mod grid_search;
+mod heat;
 mod path;
 
 pub use cost::{SpeedMap, max_slope_from_degrees, slope_from_rise_run, slope_mod_from_max_slope};
-pub use grid_search::find_path;
+pub use grid_search::{find_path, find_path_with_heat};
+pub use heat::HeatMap;
 pub use path::Path;

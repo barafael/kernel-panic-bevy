@@ -32,13 +32,13 @@ pub struct DebugMovementGizmos;
 
 impl GizmoConfigGroup for DebugMovementGizmos {}
 
-fn toggle_movement_debug(
-    keyboard: Res<ButtonInput<KeyCode>>,
-    mut state: ResMut<MovementDebug>,
-) {
+fn toggle_movement_debug(keyboard: Res<ButtonInput<KeyCode>>, mut state: ResMut<MovementDebug>) {
     if keyboard.just_pressed(KeyCode::F3) {
         state.enabled = !state.enabled;
-        info!("movement debug overlay: {}", if state.enabled { "on" } else { "off" });
+        info!(
+            "movement debug overlay: {}",
+            if state.enabled { "on" } else { "off" }
+        );
     }
 }
 
@@ -66,7 +66,11 @@ fn draw_movement_debug(
         // Heading (red) and up (cyan) axes — the tilt inspector.
         let fwd = transform.forward().as_vec3();
         gizmos.line(pos, pos + fwd * HEADING_LEN, Color::srgb(1.0, 0.25, 0.1));
-        gizmos.line(pos, pos + transform.up() * UP_LEN, Color::srgb(0.1, 0.9, 1.0));
+        gizmos.line(
+            pos,
+            pos + transform.up() * UP_LEN,
+            Color::srgb(0.1, 0.9, 1.0),
+        );
 
         let Some(path) = move_path else {
             continue;
@@ -77,11 +81,7 @@ fn draw_movement_debug(
 
         // Remaining path polyline, ground-sampled per segment so the
         // line hugs the terrain instead of tunneling through ridges.
-        let mut prev = [
-            pos.x,
-            ground(pos.x, pos.z) + LIFT,
-            pos.z,
-        ];
+        let mut prev = [pos.x, ground(pos.x, pos.z) + LIFT, pos.z];
         for wp in &path.waypoints[path.current..] {
             let next = [wp.x, ground(wp.x, wp.z) + LIFT, wp.z];
             gizmos.line(prev.into(), next.into(), Color::srgb(0.2, 1.0, 0.3));
@@ -116,9 +116,6 @@ impl Plugin for DebugMovementPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MovementDebug>()
             .init_gizmo_group::<DebugMovementGizmos>()
-            .add_systems(
-                Update,
-                (toggle_movement_debug, draw_movement_debug).chain(),
-            );
+            .add_systems(Update, (toggle_movement_debug, draw_movement_debug).chain());
     }
 }

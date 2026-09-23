@@ -15,8 +15,8 @@ pub use selection::Selected;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, draw_selected_command_lines, guard_follow_system, ground_clamp_system,
-    movement_system, orient_stationary_to_terrain, unit_separation_system,
+    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, guard_follow_system,
+    movement_system, orient_stationary_to_terrain, unit_separation_system, update_path_heat,
 };
 use selection::SelectionPlugin;
 
@@ -53,33 +53,34 @@ impl Plugin for InteractionPlugin {
             AbilityHotkeyPlugin,
             crate::interaction::debug_movement::DebugMovementPlugin,
         ))
-            .init_gizmo_group::<CommandLineGizmos>()
-            .add_systems(Startup, configure_command_line_gizmos)
-            // Unit motion is simulation: it runs on the fixed 30 Hz
-            // clock alongside the gameplay chain, so movement speed and
-            // separation are frame-rate-independent. Input/selection/UI
-            // systems stay on variable dt in `Update` — their commands
-            // land in the next sim tick (Bevy runs FixedUpdate before
-            // Update within a frame).
-            .add_systems(
-                FixedUpdate,
-                (
-                    guard_follow_system,
-                    movement_system,
-                    unit_separation_system.after(movement_system),
-                    // Runs last so any Y drift introduced by the two
-                    // preceding systems is corrected in the same frame.
-                    ground_clamp_system.after(unit_separation_system),
-                    // Tilt idle units and buildings after clamping so
-                    // the slope normal is sampled at the final Y.
-                    orient_stationary_to_terrain.after(ground_clamp_system),
-                ),
-            )
-            // Command-line gizmos draw from `Update` on variable dt —
-            // pure visuals. No ordering edge against `movement_system`
-            // (that lives in `FixedUpdate` now); worst case the overlay
-            // trails the moved units by one frame.
-            .add_systems(Update, draw_selected_command_lines);
+        .init_gizmo_group::<CommandLineGizmos>()
+        .add_systems(Startup, configure_command_line_gizmos)
+        // Unit motion is simulation: it runs on the fixed 30 Hz
+        // clock alongside the gameplay chain, so movement speed and
+        // separation are frame-rate-independent. Input/selection/UI
+        // systems stay on variable dt in `Update` — their commands
+        // land in the next sim tick (Bevy runs FixedUpdate before
+        // Update within a frame).
+        .add_systems(
+            FixedUpdate,
+            (
+                guard_follow_system,
+                update_path_heat.before(movement_system),
+                movement_system,
+                unit_separation_system.after(movement_system),
+                // Runs last so any Y drift introduced by the two
+                // preceding systems is corrected in the same frame.
+                ground_clamp_system.after(unit_separation_system),
+                // Tilt idle units and buildings after clamping so
+                // the slope normal is sampled at the final Y.
+                orient_stationary_to_terrain.after(ground_clamp_system),
+            ),
+        )
+        // Command-line gizmos draw from `Update` on variable dt —
+        // pure visuals. No ordering edge against `movement_system`
+        // (that lives in `FixedUpdate` now); worst case the overlay
+        // trails the moved units by one frame.
+        .add_systems(Update, draw_selected_command_lines);
     }
 }
 
