@@ -254,8 +254,14 @@ const PATHFIND_BUDGET_PER_FRAME: usize = 3;
 /// all — slerped a *local-space* tilt, so a buffered downhill pitch
 /// applied after a yaw change read as a sideways lean mid-turn.
 pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
-    // Degenerate normals (cliff faces from central differences) fall
-    // back to flat so the basis stays invertible.
+    // Degenerate normals fall back to flat so the basis stays
+    // invertible. The threshold is deliberately strict: normals steeper
+    // than 60° from vertical only exist at cliff bases / walls (units
+    // never stand there — passable cells cap at 54°, normal.y ≈ 0.59).
+    // Projecting the heading onto such an extreme plane deflects its XZ
+    // direction every tick, which used to pin units at cliff bases —
+    // facing a fixed wrong heading at full throttle, never aligning
+    // with the waypoint.
     let up = if normal.y > 0.1 {
         normal.normalize()
     } else {
@@ -266,11 +272,20 @@ pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
         f = Vec3::Z;
     }
     let f = f.normalize();
+    // Shear the heading VERTICALLY onto the slope plane: the body's
+    // world-space forward keeps the requested XZ heading exactly while
+    // gaining the pitch the slope demands. (The previous
+    // closest-point projection *rotated the heading itself* on tilted
+    // ground — by up to ~11° per tick at cliff bases, exactly the
+    // per-tick turn budget, so units were pinned facing a fixed wrong
+    // heading at full throttle, never able to align with their
+    // waypoint.)
+    let shear = (f.x * up.x + f.z * up.z) / up.y;
+    let fwd = Vec3::new(f.x, -shear, f.z).normalize();
     // Right-handed frame: for f=+Z and up=+Y this yields right=−X —
     // facing +Z with Y up, your right hand points toward −X.
-    let right = f.cross(up).normalize();
-    let fwd_on_plane = up.cross(right);
-    Quat::from_mat3(&Mat3::from_cols(right, up, -fwd_on_plane))
+    let right = fwd.cross(up).normalize();
+    Quat::from_mat3(&Mat3::from_cols(right, up, -fwd))
 }
 
 /// The movement god-query, bundled: one struct instead of a 14-slot
@@ -701,13 +716,24 @@ pub fn movement_system(
             resolve_motion(entity, current, desired, self_radius, speed, &grid)
         };
 
-        // Slope gate: signed, so descents always pass — a unit can
-        // step off a ledge it can't climb back up. The 20% margin
-        // absorbs the mismatch between the pathfinder's per-cell
-        // slope and movement's bilinear per-step sample. If the
-        // step is refused, advance the waypoint so a straight-line
-        // fallback exhausts cleanly instead of stalling.
-        if !flying && let Some(ref hm) = heightmap {
+        // Slope gate for the no-navgrid straight-line fallback only.
+        // Signed, so descents always pass — a unit can step off a
+        // ledge it can't climb back up.
+        //
+        // Why not while following a real path: the pathfinder already
+        // guarantees every crossed cell is within the unit's MaxSlope
+        // (that's what the nav bucket encodes — same as upstream
+        // Spring, which has no per-step slope re-check). This gate
+        // used to run unconditionally and re-deriving slope from the
+        // *bilinear* per-step sample measures stepped terrain at up to
+        // twice the pathfinder's cell-average — so the first uphill
+        // tick on a legal ramp got refused, the waypoint-skip burned
+        // the whole path within a few ticks, and the unit froze at the
+        // base of slopes it was supposed to cross. Nobody Advanced.
+        if !flying
+            && nav_set.is_none()
+            && let Some(ref hm) = heightmap
+        {
             let dxz = Vec3::new(resolved.x, 0.0, resolved.z).length();
             if dxz > 1e-4 {
                 let proposed = current + resolved;
@@ -1809,5 +1835,206 @@ mod heat_tests {
         assert!((registry.heat_retention(UnitKind::Bit) - 0.10).abs() < 1e-4);
         assert!((registry.heat_produced(UnitKind::Byte) - 500.0).abs() < 1e-4);
         assert!((registry.heat_retention(UnitKind::Byte) - 0.002).abs() < 1e-4);
+    }
+}
+
+#[cfg(test)]
+mod cross_map_tests {
+    use super::*;
+    use crate::units::components::TeamId;
+    use bevy::ecs::system::RunSystemOnce;
+    use std::time::Duration;
+
+    /// Ground-truth diagnostic: load a real shipped map, build the nav
+    /// grid the game builds, and drive a real Bit through the real
+    /// `movement_system` to targets all over the map — including up
+    /// plateau ramps. Reports which targets are reachable.
+    #[test]
+    #[ignore = "manual diagnostic — run with -- --ignored --nocapture"]
+    fn drive_bit_across_real_maps() {
+        for map_name in ["Central_Hub", "DigitalDivide_PT2"] {
+            let path = format!("assets/maps/{map_name}.kpmap");
+            let Ok(bytes) = std::fs::read(&path) else {
+                eprintln!("skip {map_name}: no {path}");
+                continue;
+            };
+            let baked = spring_map::baked::read_baked_map(&bytes).expect("baked map");
+            let start_positions = baked
+                .map_info
+                .as_ref()
+                .map(|info| info.start_positions.clone())
+                .unwrap_or_default();
+            let parsed = baked.parsed;
+            let heightmap = Heightmap::from_parsed(&parsed);
+
+            let cap = spring_pathfinding::max_slope_from_degrees(36.0);
+            let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
+                &parsed.heights,
+                parsed.header.heightmap_width() as u32,
+                parsed.header.heightmap_height() as u32,
+                cap,
+                spring_pathfinding::slope_mod_from_max_slope(cap),
+            );
+
+            let mut nav = NavGridSet::default();
+            nav.buckets.push(NavBucket {
+                max_slope: cap,
+                speed_map,
+            });
+
+            let mut world = World::new();
+            world.init_resource::<Time>();
+            world.insert_resource(UnitRegistry::load());
+            world.insert_resource(nav);
+            world.insert_resource(heightmap);
+            let heat_dims = (
+                parsed.header.heightmap_width() as u32 - 1,
+                parsed.header.heightmap_height() as u32 - 1,
+            );
+            world.insert_resource(PathHeat(HeatMap::new(heat_dims.0, heat_dims.1)));
+
+            // Start/target: the map's authored start positions — the
+            // places the game actually spawns homebases. If units can't
+            // march between those, the map is unplayable.
+            let start = start_positions
+                .first()
+                .map(|sp| Vec3::new(sp.x, 0.0, sp.z))
+                .unwrap_or(Vec3::new(2048.0, 0.0, 64.0));
+            let enemy_spawn = start_positions.get(1).map(|sp| Vec3::new(sp.x, 0.0, sp.z));
+            println!(
+                "  {map_name}: start at ({:.0},{:.0}), enemy spawn {:?}",
+                start.x,
+                start.z,
+                enemy_spawn.map(|e| (e.x, e.z)),
+            );
+
+            let unit = world
+                .spawn((
+                    UnitType(UnitKind::Bit),
+                    UnitStats {
+                        radius: 12.0,
+                        hit_radius: 20.0,
+                        speed: 90.0,
+                        accel: 27.0,
+                        brake: 60.0,
+                        turn_rate: 6.0,
+                        can_fly: false,
+                        cruise_alt: 0.0,
+                        no_chase_vtol: true,
+                    },
+                    TeamId(0),
+                    Transform::from_translation(start),
+                    CurrentSpeed::default(),
+                ))
+                .id();
+
+            let max_cell = (heat_dims.0 as usize).min(504);
+            let mut reached = 0usize;
+            let mut total = 0usize;
+            for (tx, tz) in [
+                (max_cell, max_cell),
+                (max_cell, 8),
+                (8, max_cell),
+                (256, 256),
+                (256, 8),
+                (8, 256),
+            ] {
+                let (tx, tz) = (tx.min(max_cell), tz.min(max_cell));
+                let target = Vec3::new(tx as f32 * 8.0, 0.0, tz as f32 * 8.0);
+                total += 1;
+
+                // Reset the unit for this leg.
+                world
+                    .entity_mut(unit)
+                    .insert(MoveTarget(target))
+                    .insert(Transform::from_translation(start));
+                world
+                    .resource_mut::<Time>()
+                    .advance_by(Duration::from_secs(1));
+
+                let mut arrived_at = None;
+                for tick in 0..2400 {
+                    world
+                        .resource_mut::<Time>()
+                        .advance_by(Duration::from_millis(33));
+                    world.run_system_once(movement_system).unwrap();
+                    let pos = world.get::<Transform>(unit).unwrap().translation;
+                    let dxz = ((pos.x - target.x).powi(2) + (pos.z - target.z).powi(2)).sqrt();
+                    if dxz < 16.0 {
+                        arrived_at = Some(tick);
+                        break;
+                    }
+                }
+                let pos = world
+                    .get::<Transform>(unit)
+                    .map(|t| t.translation)
+                    .unwrap_or_default();
+                let hm = world.resource::<Heightmap>();
+                let h_start = hm.sample(start.x, start.z);
+                let h_target = hm.sample(target.x, target.z);
+                match arrived_at {
+                    Some(tick) => {
+                        reached += 1;
+                        println!(
+                            "  {map_name} -> cell {tx},{tz} (dh={:+.0}): ARRIVED {} ticks ({:.0}s) y={:.1}",
+                            h_target - h_start,
+                            tick,
+                            tick as f32 * 0.033,
+                            pos.y,
+                        );
+                    }
+                    None => {
+                        let mt = world.get::<MoveTarget>(unit).is_some();
+                        let mp = world
+                            .get::<MovePath>(unit)
+                            .map(|p| (p.current, p.waypoints.len()));
+                        let dxz = ((pos.x - target.x).powi(2) + (pos.z - target.z).powi(2)).sqrt();
+                        println!(
+                            "  {map_name} -> cell {tx},{tz} (dh={:+.0}): STUCK at ({:.0},{:.0}) dxz {:.0} y={:.1} order_alive={mt} path={mp:?}",
+                            h_target - h_start,
+                            pos.x,
+                            pos.z,
+                            dxz,
+                            pos.y,
+                        );
+                    }
+                }
+            }
+            // The leg that matters: spawn-to-spawn.
+            if let Some(espawn) = enemy_spawn {
+                total += 1;
+                world
+                    .entity_mut(unit)
+                    .insert(MoveTarget(espawn))
+                    .insert(Transform::from_translation(start));
+                world
+                    .resource_mut::<Time>()
+                    .advance_by(Duration::from_secs(1));
+                let mut arrived_at = None;
+                for tick in 0..3600 {
+                    world
+                        .resource_mut::<Time>()
+                        .advance_by(Duration::from_millis(33));
+                    world.run_system_once(movement_system).unwrap();
+                    let pos = world.get::<Transform>(unit).unwrap().translation;
+                    if ((pos.x - espawn.x).powi(2) + (pos.z - espawn.z).powi(2)).sqrt() < 20.0 {
+                        arrived_at = Some(tick);
+                        break;
+                    }
+                }
+                match arrived_at {
+                    Some(tick) => {
+                        reached += 1;
+                        println!(
+                            "  {map_name} -> ENEMY SPAWN: ARRIVED {} ticks ({:.0}s)",
+                            tick,
+                            tick as f32 * 0.033,
+                        );
+                    }
+                    None => println!("  {map_name} -> ENEMY SPAWN: FAILED TO ARRIVE"),
+                }
+            }
+            println!("{map_name}: {reached}/{total} targets reached");
+        }
     }
 }
