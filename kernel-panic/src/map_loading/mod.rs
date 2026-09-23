@@ -505,7 +505,7 @@ fn load_map(
 
     info!("Loading map: {map_name}");
 
-    let decode_start = std::time::Instant::now();
+    let decode_start = bevy::platform::time::Instant::now();
     let spring_map = match load_map_dispatch(map_path) {
         Ok(m) => m,
         Err(error) => {
@@ -566,7 +566,7 @@ fn web_map_arrival(
 
     let map_name = setup.map.clone();
     info!("Received {} ({} baked bytes)", map_name, asset.0.len());
-    let decode_start = std::time::Instant::now();
+    let decode_start = bevy::platform::time::Instant::now();
     let spring_map = match spring_map::baked::read_baked_map(&asset.0) {
         Ok(m) => m,
         Err(error) => {
@@ -619,7 +619,7 @@ fn spawn_map_world(
         parsed.features.len(),
     );
 
-    let t_texture = std::time::Instant::now();
+    let t_texture = bevy::platform::time::Instant::now();
     let terrain_material = match &spring_map.ground_texture {
         Some(ground) => {
             build_terrain_material_from_texture(ground, &mut ctx.images, &mut ctx.materials)
@@ -647,7 +647,7 @@ fn spawn_map_world(
         );
     }
 
-    let t_terrain = std::time::Instant::now();
+    let t_terrain = bevy::platform::time::Instant::now();
     let heightmap = Heightmap::from_parsed(parsed);
 
     spawn_terrain(
@@ -677,7 +677,7 @@ fn spawn_map_world(
     // One pathfinding grid per distinct unit `MaxSlope`. Caps and
     // slope-mods are in Spring's encoding — see `cost.rs`.
     // `compute_path` picks the tightest bucket whose cap ≥ the unit's.
-    let t_nav = std::time::Instant::now();
+    let t_nav = bevy::platform::time::Instant::now();
     {
         use spring_pathfinding::{SpeedMap, slope_mod_from_max_slope};
         use std::collections::BTreeSet;
