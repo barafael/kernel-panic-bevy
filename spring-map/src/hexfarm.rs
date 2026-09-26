@@ -12,9 +12,9 @@
 //! Everything here is plain data + arithmetic, deterministic per seed.
 //! Lua's `math.random` is replaced by [`Rng`] (same call sequence and
 //! ranges, different generator — a seed doesn't reproduce a Spring
-//! game, it reproduces a port game). Metal (`SetMetalAmount`) and the
-//! air `SmoothMesh` are not ported: Kernel Panic has no metal and the
-//! port's flyers keep their own cruise altitude.
+//! game, it reproduces a port game). Metal (`SetMetalAmount`) is not
+//! ported: Kernel Panic has no metal economy and nothing reads it. The
+//! air smooth mesh is ([`HexFarm::set_whole_smooth_mesh`]).
 //!
 //! Indices are 0-based where the gadget's are 1-based; each function's
 //! doc cites the gadget function (and line) it ports.
@@ -1254,6 +1254,96 @@ impl HexFarm {
             .collect()
     }
 
+    /// `CalculateSmoothMeshProfile(step)` (l.1049): the aircraft flight
+    /// profile by distance from the map centre, so planes keep a level
+    /// averaged between the nearest towers instead of diving into the
+    /// pits. Entry `k` is the height at radius `k * step`: the highest
+    /// tower whose ring (`|s - tower distance| <= TowerRadius`) covers
+    /// it, else a line between the nearest tower rings inside and out.
+    /// Every tower counts, sunk (hidden) ones included.
+    pub fn smooth_mesh_profile(&self, step: f64) -> Vec<f64> {
+        struct Elem {
+            s: f64,
+            y: f64,
+            r: f64,
+        }
+        let (xc, zc) = (self.map_center_x, self.map_center_z);
+        let mut ep: Vec<Elem> = self
+            .hexes
+            .iter()
+            .map(|h| Elem {
+                s: ((h.x - xc).powi(2) + (h.z - zc).powi(2)).sqrt(),
+                y: h.y,
+                r: self.tower_radius,
+            })
+            .collect();
+        // `table.sort` is unstable; a stable sort keeps the lowest tower
+        // index among equal distances (which one survives the thinning).
+        ep.sort_by(|a, b| a.s.total_cmp(&b.s));
+        // Drop towers that are the same ring as the previous one (just
+        // rotated about the centre).
+        for k in (1..ep.len()).rev() {
+            if (ep[k].r - ep[k - 1].r).abs() < 1.0 && (ep[k].s - ep[k - 1].s).abs() < 1.0 {
+                ep.remove(k);
+            }
+        }
+        let top = 2 + (1.42 * xc.max(zc) / step).floor() as usize;
+        let mut smp = vec![0.0; top + 1];
+        for (k, out) in smp.iter_mut().enumerate() {
+            let s = step * k as f64;
+            let mut y: Option<f64> = None;
+            for e in &ep {
+                if (s - e.s).abs() <= e.r && y.is_none_or(|y| y < e.y) {
+                    y = Some(e.y);
+                }
+            }
+            *out = y.unwrap_or_else(|| {
+                // `h1, h2 = 1, #ep`: last ring at/inside `s`, first beyond.
+                let (mut h1, mut h2) = (0, ep.len() - 1);
+                for (k, e) in ep.iter().enumerate() {
+                    if e.s <= s {
+                        h1 = k;
+                    } else {
+                        h2 = k;
+                        break;
+                    }
+                }
+                let (s1, y1) = (ep[h1].s + ep[h1].r, ep[h1].y);
+                let (s2, y2) = (ep[h2].s + ep[h2].r, ep[h2].y);
+                if h1 != h2 && s2 != s1 {
+                    (s - s1) * (y2 - y1) / (s2 - s1) + y1
+                } else {
+                    y1
+                }
+            });
+        }
+        smp
+    }
+
+    /// `SetWholeSmoothMesh` + `SetTheSmoothMesh` (l.1097-1117): every
+    /// 16 elmos over the whole map, `Spring.SetSmoothMesh(x, z, h)` with
+    /// the profile height at the (quantized) distance from the centre.
+    /// `set(x, z, h)` is that call.
+    pub fn set_whole_smooth_mesh(&self, mut set: impl FnMut(f64, f64, f64)) {
+        const PROFILE_STEP: f64 = 7.0;
+        let profile = self.smooth_mesh_profile(PROFILE_STEP);
+        let (xc, zc) = (self.map_center_x, self.map_center_z);
+        let mut x = 0.0;
+        while x <= self.map_size_x {
+            let mut z = 0.0;
+            while z <= self.map_size_z {
+                let d = ((x - xc).powi(2) + (z - zc).powi(2)).sqrt();
+                let k = (PROFILE_STEP / 2.0 + d / PROFILE_STEP).floor() as usize;
+                // Out of the profile: the gadget echoes an error and skips.
+                if let Some(&h) = profile.get(k) {
+                    set(x, z, h);
+                }
+                z += 16.0;
+            }
+            x += 16.0;
+        }
+    }
+
     /// The layout as the gadget sends it to its unsynced half
     /// (`SendHexFarmToUnsynced`, l.1466) — what the renderer draws.
     pub fn layout(&self) -> HexFarmLayout {
@@ -1345,6 +1435,58 @@ mod tests {
         assert_eq!(a.rects.len(), b.rects.len());
         assert_eq!(a.start_positions, b.start_positions);
         assert_eq!(heights(&a), heights(&b));
+    }
+
+    /// The flight profile bridges the pits: at every tower's distance
+    /// from the centre it is at least that tower's height, and between
+    /// rings it interpolates instead of dropping to the void.
+    #[test]
+    fn smooth_mesh_profile_bridges_the_pits() {
+        for seed in 0..10u64 {
+            let farm = HexFarm::generate(seed, setup(2 + (seed % 4) as usize));
+            let step = 7.0;
+            let p = farm.smooth_mesh_profile(step);
+            let void_floor = farm.center_height.min(farm.edge_height) - farm.pit_depth;
+            let (lo, hi) = farm.hexes.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), h| {
+                (lo.min(h.y), hi.max(h.y))
+            });
+            for h in &farm.hexes {
+                let s = ((h.x - farm.map_center_x).powi(2) + (h.z - farm.map_center_z).powi(2)).sqrt();
+                let k = (s / step).round() as usize;
+                assert!(p[k] >= h.y - 1e-9, "seed {seed}: ring below its tower");
+            }
+            for &y in &p {
+                // Interpolation between rings stays within the towers'
+                // span (bar extrapolation off the outer ring's edge).
+                assert!(y > void_floor, "seed {seed}: profile dips into the void ({y})");
+                assert!(y <= hi + (hi - lo) + 1.0);
+            }
+        }
+    }
+
+    /// `SetTheSmoothMesh` visits every 16-elmo mesh cell.
+    #[test]
+    fn whole_smooth_mesh_covers_every_cell() {
+        let farm = HexFarm::generate(3, setup(2));
+        let hm = heights(&farm);
+        let w = (SIZE / 8.0) as usize + 1;
+        let mut mesh = crate::smooth_mesh::SmoothHeightMesh::new(&hm, w, w);
+        let (mx, my) = mesh.dims();
+        let mut hit = vec![false; mx * my];
+        farm.set_whole_smooth_mesh(|x, z, h| {
+            if mesh.set_smooth_mesh(x as f32, z as f32, h as f32, None).is_some() {
+                hit[(z / 16.0) as usize * mx + (x / 16.0) as usize] = true;
+            }
+        });
+        assert!(hit.iter().all(|&b| b));
+        // Over a tower the mesh is now the profile, not the max filter
+        // of the surrounding cliffs.
+        let t = &farm.hexes[0];
+        let flat = farm.smooth_mesh_profile(7.0);
+        let d = ((t.x - farm.map_center_x).powi(2) + (t.z - farm.map_center_z).powi(2)).sqrt();
+        let k = (3.5 + d / 7.0).floor() as usize;
+        let cell = (t.z / 16.0) as usize * mx + (t.x / 16.0) as usize;
+        assert!((mesh.mesh()[cell] as f64 - flat[k]).abs() < 1e-3);
     }
 
     #[test]
