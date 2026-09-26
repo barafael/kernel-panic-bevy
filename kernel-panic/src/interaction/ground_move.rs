@@ -35,7 +35,7 @@ use super::movement::{
 use crate::map_events::CircularFlow;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AimTarget, DeployState, Deployable, Dying, Stunned};
-use crate::units::components::{UnitStats, UnitType};
+use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
@@ -138,6 +138,8 @@ pub struct GroundMover {
     pub limit_speed_for_turning: u8,
     /// `lastAvoidanceDir` (obstacle avoidance).
     pub last_avoidance_dir: Vec2,
+    /// `avoidingUnits`: steered round someone at the last evaluation.
+    pub avoiding_units: bool,
     pub position_stuck: bool,
     /// `oldPos` at the last `OwnerMoved`.
     pub old_pos: Vec3,
@@ -188,6 +190,7 @@ impl GroundMover {
             best_reattempted_last_waypoint_dist: f32::INFINITY,
             limit_speed_for_turning: 0,
             last_avoidance_dir: Vec2::ZERO,
+            avoiding_units: false,
             position_stuck: false,
             old_pos: Vec3::ZERO,
             frame: 0,
@@ -805,6 +808,7 @@ pub struct MoverData {
     animator: Option<&'static crate::units::assets::animation::UnitAnimator>,
     pending_build: Has<PendingBuild>,
     lift: Option<&'static GroundLift>,
+    team: Option<&'static TeamId>,
 }
 
 /// Steps 1–3 for every ground unit (see the module docs); flyers are
@@ -819,8 +823,40 @@ pub fn movement_system(
     registry: Res<UnitRegistry>,
     budget: Option<Res<PathSearchBudget>>,
     mut query: Query<MoverData, Without<Dying>>,
+    mut avoidees: Local<Vec<Avoidee>>,
+    mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
 ) {
     let nav = nav_set.as_deref();
+    // Avoidance reads everyone's pose from before this frame's moves
+    // (Spring evaluates it in the parallel traversal-plan pass).
+    avoidees.clear();
+    for bucket in avoid_grid.values_mut() {
+        bucket.clear();
+    }
+    for u in &query {
+        let Some(m) = u.mover else { continue };
+        if u.stats.can_fly || u.stats.speed <= 0.0 || !m.initialised {
+            continue;
+        }
+        let pos = u.transform.translation.xz();
+        avoid_grid.entry(cell_of(pos)).or_default().push(avoidees.len());
+        avoidees.push(Avoidee {
+            entity: u.entity,
+            pos,
+            vel: m.front() * m.current_speed,
+            front: m.front(),
+            right: m.right(),
+            owner_radius: m.owner_radius,
+            mass: m.mass,
+            team: u.team.map_or(0, |t| t.0),
+            moving: m.is_moving(),
+            crushable: false,
+        });
+    }
+    let avoid = AvoidanceView {
+        entries: &avoidees,
+        cells: &avoid_grid,
+    };
     let budget_secs = budget.map_or(PATH_SEARCH_BUDGET_SECS, |b| b.0);
     let started = bevy::platform::time::Instant::now();
     let mut searches = 0u32;
@@ -989,7 +1025,15 @@ pub fn movement_system(
             u.path.as_deref_mut().filter(|p| !p.waypoints.is_empty()),
             &map,
             up_dir(m, heightmap.as_deref(), pos),
-            |_, d| d,
+            |m, d| {
+                let me = AvoiderInfo {
+                    entity: u.entity,
+                    pos: pos.xz(),
+                    team: u.team.map_or(0, |t| t.0),
+                    model_radius: u.stats.hit_radius,
+                };
+                obstacle_avoidance_dir(m, d, &me, &avoid)
+            },
             |p, dir| ground_speed_mod(nav, heightmap.as_deref(), max_slope, p, dir),
         );
 
@@ -1022,6 +1066,131 @@ pub fn movement_system(
             }
         }
     }
+}
+
+/// Another ground mover as obstacle avoidance sees it.
+#[derive(Clone, Copy)]
+pub struct Avoidee {
+    entity: Entity,
+    pos: Vec2,
+    vel: Vec2,
+    front: Vec2,
+    right: Vec2,
+    owner_radius: f32,
+    mass: f32,
+    team: u8,
+    moving: bool,
+    /// Something this mover could crush (never true for units in KP:
+    /// `crushable` defaults to false).
+    crushable: bool,
+}
+
+/// The avoider's own identity for [`obstacle_avoidance_dir`].
+pub struct AvoiderInfo {
+    pub entity: Entity,
+    pub pos: Vec2,
+    pub team: u8,
+    /// `CSolidObject::radius` (the model radius).
+    pub model_radius: f32,
+}
+
+/// The pre-move snapshot of ground movers, bucketed by cell.
+pub struct AvoidanceView<'a> {
+    entries: &'a [Avoidee],
+    cells: &'a HashMap<(i32, i32), Vec<usize>>,
+}
+
+/// `groundUnitCollisionAvoidanceUpdateRate` default (ModInfo.cpp:44).
+const AVOIDANCE_UPDATE_RATE: u32 = 3;
+
+/// `CGroundMoveType::GetObstacleAvoidanceDir` (GroundMoveType.cpp:1837):
+/// steer sideways away from moving units (and idle enemies) ahead —
+/// within ±120° of the facing, closer than a second's travel and the
+/// goal — weighted by their mass share, how head-on the two are and
+/// how close, then blended with the wanted direction. Idle allies are
+/// not avoided: collision response pushes them aside. Evaluated every
+/// third frame per unit, reusing the last direction in between.
+pub fn obstacle_avoidance_dir(
+    m: &mut GroundMover,
+    desired: Vec2,
+    me: &AvoiderInfo,
+    view: &AvoidanceView,
+) -> Vec2 {
+    const AVOIDER_DIR_WEIGHT: f32 = 1.0;
+    const DESIRED_DIR_WEIGHT: f32 = 0.5;
+    const LAST_DIR_MIX_ALPHA: f32 = 0.7;
+    let max_avoidee_cosine = 120.0_f32.to_radians().cos();
+
+    if !m.frame.is_multiple_of(AVOIDANCE_UPDATE_RATE) {
+        if !m.avoiding_units {
+            m.last_avoidance_dir = desired;
+        }
+        return m.last_avoidance_dir;
+    }
+    m.avoiding_units = false;
+    m.last_avoidance_dir = desired;
+    let front = m.front();
+    // Facing away from where we want to go: normal steering first.
+    if front.dot(desired) < 0.0 {
+        return m.last_avoidance_dir;
+    }
+    let goal = m.goal.unwrap_or(me.pos);
+    let right = m.right();
+    let vel = front * m.current_speed;
+    let avoidance_radius = m.current_speed.max(1.0) * (me.model_radius * 2.0);
+    let mut avoidance_vec = Vec2::ZERO;
+
+    let (cx, cz) = cell_of(me.pos);
+    let reach = (avoidance_radius / COLLISION_CELL).ceil() as i32;
+    for dz in -reach..=reach {
+        for dx in -reach..=reach {
+            let Some(bucket) = view.cells.get(&(cx + dx, cz + dz)) else { continue };
+            for &i in bucket {
+                let o = &view.entries[i];
+                if o.entity == me.entity || o.crushable {
+                    continue;
+                }
+                if o.pos.distance_squared(me.pos) > avoidance_radius * avoidance_radius {
+                    continue;
+                }
+                // Idle movable allies get pushed, not avoided.
+                if !o.moving && o.team == me.team {
+                    continue;
+                }
+                let vector = (me.pos + vel) - (o.pos + o.vel);
+                let radius_sum = m.owner_radius + o.owner_radius;
+                let mass_scale = o.mass / (m.mass + o.mass);
+                let dist_sq = vector.length_squared();
+                let dist = dist_sq.sqrt() + 0.01;
+                if front.dot(-(vector / dist)) < max_avoidee_cosine {
+                    continue;
+                }
+                if dist_sq >= (m.current_speed.max(1.0) * GAME_SPEED + radius_sum).powi(2) {
+                    continue;
+                }
+                if dist_sq >= me.pos.distance_squared(goal) {
+                    continue;
+                }
+                let mut avoider_turn_sign = -sign(o.pos.dot(right) - me.pos.dot(right));
+                let avoidee_turn_sign = -sign(me.pos.dot(o.right) - o.pos.dot(o.right));
+                // Maximal when anti-parallel; both turn the same local
+                // way then.
+                let cos_angle = front.dot(o.front).clamp(-1.0, 1.0);
+                let response = (1.0 - cos_angle) + 0.1;
+                let fall_off = 1.0 - (dist / (5.0 * radius_sum)).min(1.0);
+                if cos_angle < 0.0 {
+                    avoider_turn_sign = avoider_turn_sign.max(avoidee_turn_sign);
+                }
+                avoidance_vec +=
+                    right * AVOIDER_DIR_WEIGHT * avoider_turn_sign * response * fall_off * mass_scale;
+                m.avoiding_units = true;
+            }
+        }
+    }
+    let dir = desired.lerp(avoidance_vec, DESIRED_DIR_WEIGHT).normalize_or_zero();
+    let dir = dir.lerp(m.last_avoidance_dir, LAST_DIR_MIX_ALPHA).normalize_or_zero();
+    m.last_avoidance_dir = if dir == Vec2::ZERO { desired } else { dir };
+    m.last_avoidance_dir
 }
 
 /// `CMoveMath::GetPosSpeedMod` for a tank/kbot (`MoveMath.cpp:107-139`,
@@ -1231,7 +1400,13 @@ pub fn ground_collision_system(
             ),
             None => (stats.radius, stats.radius, 1e6, 0.0, Vec2::Y, Progress::Done),
         };
+        // A pending `TriggerSkipWayPoint` marks `currWayPoint.y = -2`,
+        // so that waypoint no longer compares equal to anyone's in the
+        // traffic-jam test (at the end of a path the mark stays).
         let curr_waypoint = mover.as_deref().and_then(|m| {
+            if m.skip_waypoint {
+                return None;
+            }
             m.goal.map(|g| current_waypoints(path, pos, g).0)
         });
         let idx = entries.len();
@@ -1921,5 +2096,48 @@ mod tests {
         assert!((h.pos(e).y - (-17.0)).abs() < 1e-4, "on the lowered ground + lift: {}", h.pos(e));
         let up = h.world.get::<Transform>(kernel).unwrap().rotation * Vec3::Y;
         assert!((up - Vec3::Y).length() < 1e-5);
+    }
+
+    /// Obstacle avoidance: two Bits walking straight at each other peel
+    /// apart early and pass without ever overlapping.
+    #[test]
+    fn head_on_units_steer_past_each_other() {
+        let mut h = Harness::flat();
+        let a = h.spawn(UnitKind::Bit, 0, Vec3::new(600.0, 0.0, 600.0));
+        let b = h.spawn(UnitKind::Bit, 1, Vec3::new(1000.0, 0.0, 600.0));
+        h.step();
+        // Face each other first.
+        h.world.get_mut::<GroundMover>(b).unwrap().heading = heading_of(-Vec2::X);
+        h.world.entity_mut(a).insert(MoveTarget(Vec3::new(1000.0, 0.0, 600.0)));
+        h.world.entity_mut(b).insert(MoveTarget(Vec3::new(600.0, 0.0, 600.0)));
+        let mut min_d = f32::MAX;
+        for _ in 0..400 {
+            h.step();
+            min_d = min_d.min(h.pos(a).xz().distance(h.pos(b).xz()));
+        }
+        assert!(!h.has_order(a) && !h.has_order(b), "both arrived");
+        assert!(min_d > 20.0, "passed without overlapping: {min_d}");
+    }
+
+    /// Nine Bytes sent to one point settle round it instead of orbiting
+    /// it forever: the traffic-jam skip marks the waypoint, so the
+    /// arrival rules of `HandleUnitCollisionsAux` get their turn.
+    #[test]
+    fn crowd_on_one_point_settles() {
+        let mut h = Harness::flat();
+        let units: Vec<Entity> = (0..9)
+            .map(|i| {
+                let (x, z) = ((i % 3) as f32, (i / 3) as f32);
+                h.spawn(UnitKind::Byte, 0, Vec3::new(560.0 + x * 40.0, 0.0, 560.0 + z * 40.0))
+            })
+            .collect();
+        h.step();
+        h.group_move(&units, Vec3::new(1000.0, 0.0, 600.0));
+        for _ in 0..900 {
+            h.step();
+        }
+        for &e in &units {
+            assert!(!h.has_order(e), "{e:?} still circling at {}", h.pos(e));
+        }
     }
 }

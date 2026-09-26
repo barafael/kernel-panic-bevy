@@ -175,6 +175,8 @@ pub(crate) struct Metrics {
     pub path_ratio: f32,
     /// Heading-rate sign flips per moving unit-second (wiggle).
     pub wiggle_per_s: f32,
+    /// Mean |heading change| per moving unit-second, degrees.
+    pub turn_deg_per_s: f32,
     /// Elmos arrived units got shoved in total.
     pub idle_shove: f32,
     /// Ticks where a unit with an order stood still after having started.
@@ -195,6 +197,7 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
     let mut arrived_at: Vec<Option<u32>> = vec![None; n];
     let mut started = vec![false; n];
     let mut flips = 0u32;
+    let mut turned = 0.0f32;
     let mut moving_ticks = 0u32;
     let mut m = Metrics {
         units: n,
@@ -234,6 +237,7 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
                 } else if rate < -std::f32::consts::PI {
                     rate += std::f32::consts::TAU;
                 }
+                turned += rate.abs();
                 if rate.abs() > 1e-3 && prev_rate[i].abs() > 1e-3 && rate.signum() != prev_rate[i].signum() {
                     flips += 1;
                 }
@@ -279,6 +283,7 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
     }
     m.path_ratio = ratio / n as f32;
     m.wiggle_per_s = flips as f32 / (moving_ticks as f32 * DT as f32).max(1e-3);
+    m.turn_deg_per_s = turned.to_degrees() / (moving_ticks as f32 * DT as f32).max(1e-3);
     m
 }
 
@@ -301,10 +306,10 @@ fn goals_of(h: &Harness, units: &[Entity]) -> Vec<Vec3> {
         .collect()
 }
 
-/// 16 Bits in a loose blob, right-click 400 elmos east.
-pub(crate) fn scenario_blob(kind: UnitKind, n: usize) -> Metrics {
+/// `n` units in a loose blob, right-click 400 elmos east.
+pub(crate) fn scenario_blob(kind: UnitKind, n: usize, seed: u32) -> Metrics {
     let mut h = Harness::flat();
-    let units: Vec<Entity> = scatter(n, Vec3::new(600.0, 0.0, 600.0), 40.0, 1)
+    let units: Vec<Entity> = scatter(n, Vec3::new(600.0, 0.0, 600.0), 40.0, seed)
         .into_iter()
         .map(|p| h.spawn(kind, 0, p))
         .collect();
@@ -352,6 +357,18 @@ pub(crate) fn scenario_building() -> Metrics {
     run(&mut h, &units, &goals, 60.0)
 }
 
+/// Two Bits walking straight at each other on the same line.
+pub(crate) fn scenario_head_on(kind: UnitKind) -> Metrics {
+    let mut h = Harness::flat();
+    let a = h.spawn(kind, 0, Vec3::new(600.0, 0.0, 600.0));
+    let b = h.spawn(kind, 1, Vec3::new(1000.0, 0.0, 600.0));
+    h.step();
+    let goals = [Vec3::new(1000.0, 0.0, 600.0), Vec3::new(600.0, 0.0, 600.0)];
+    h.world.entity_mut(a).insert(MoveTarget(goals[0]));
+    h.world.entity_mut(b).insert(MoveTarget(goals[1]));
+    run(&mut h, &[a, b], &goals, 60.0)
+}
+
 /// One Bit walking a queued zig-zag of four legs.
 pub(crate) fn scenario_chain() -> Metrics {
     let mut h = Harness::flat();
@@ -369,9 +386,31 @@ pub(crate) fn scenario_chain() -> Metrics {
     run(&mut h, &[e], &[legs[3]], 60.0)
 }
 
+/// Mean of several runs (arrival times over the runs that finished).
+pub(crate) fn average(runs: &[Metrics]) -> Metrics {
+    let n = runs.len() as f32;
+    let mean = |f: &dyn Fn(&Metrics) -> f32| runs.iter().map(f).sum::<f32>() / n;
+    let finished: Vec<f32> = runs.iter().filter_map(|m| m.last_arrival_s).collect();
+    Metrics {
+        units: runs[0].units,
+        last_arrival_s: (!finished.is_empty())
+            .then(|| finished.iter().sum::<f32>() / finished.len() as f32),
+        first_arrival_s: Some(mean(&|m| m.first_arrival_s.unwrap_or(0.0))),
+        stuck: runs.iter().map(|m| m.stuck).sum(),
+        min_pair_dist: runs.iter().map(|m| m.min_pair_dist).fold(f32::MAX, f32::min),
+        path_ratio: mean(&|m| m.path_ratio),
+        wiggle_per_s: mean(&|m| m.wiggle_per_s),
+        turn_deg_per_s: mean(&|m| m.turn_deg_per_s),
+        idle_shove: mean(&|m| m.idle_shove),
+        stall_ticks: (mean(&|m| m.stall_ticks as f32)).round() as u32,
+        max_goal_miss: mean(&|m| m.max_goal_miss),
+        inside_structure_ticks: (mean(&|m| m.inside_structure_ticks as f32)).round() as u32,
+    }
+}
+
 pub(crate) fn print(name: &str, m: &Metrics) {
     println!(
-        "{name:>10}: n={:2} last={:>6} first={:>6} stuck={} minpair={:5.1} path×={:.3} wiggle/s={:.2} shove={:6.1} stalls={:4} miss={:5.1} in_struct={}",
+        "{name:>10}: n={:2} last={:>6} first={:>6} stuck={} minpair={:5.1} path×={:.3} wiggle/s={:.2} turn°/s={:5.1} shove={:6.1} stalls={:4} miss={:5.1} in_struct={}",
         m.units,
         m.last_arrival_s.map_or("-".into(), |s| format!("{s:.2}s")),
         m.first_arrival_s.map_or("-".into(), |s| format!("{s:.2}s")),
@@ -379,6 +418,7 @@ pub(crate) fn print(name: &str, m: &Metrics) {
         if m.min_pair_dist == f32::MAX { 0.0 } else { m.min_pair_dist },
         m.path_ratio,
         m.wiggle_per_s,
+        m.turn_deg_per_s,
         m.idle_shove,
         m.stall_ticks,
         m.max_goal_miss,
@@ -389,9 +429,15 @@ pub(crate) fn print(name: &str, m: &Metrics) {
 #[test]
 #[ignore = "report — run with -- --ignored --nocapture"]
 fn report() {
-    print("blob16 bit", &scenario_blob(UnitKind::Bit, 16));
-    print("blob9 byte", &scenario_blob(UnitKind::Byte, 9));
+    // Blob scenarios: mean over five scatters (stuck: total).
+    let seeds = 1..=5;
+    print("blob16 bit", &average(&seeds.clone().map(|s| scenario_blob(UnitKind::Bit, 16, s)).collect::<Vec<_>>()));
+    print("blob9 byte", &average(&seeds.map(|s| scenario_blob(UnitKind::Byte, 9, s)).collect::<Vec<_>>()));
     print("crossing", &scenario_crossing());
     print("building", &scenario_building());
+    print("headon bit", &scenario_head_on(UnitKind::Bit));
+    print("headon byt", &scenario_head_on(UnitKind::Byte));
     print("chain", &scenario_chain());
 }
+
+
