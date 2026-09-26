@@ -300,6 +300,14 @@ pub fn random_weighted_map() -> String {
     "Marble_Madness_Map".to_string()
 }
 
+/// A fresh seed for per-match procedural content (Hex Farm's layout,
+/// which the original gadget re-rolls every game).
+pub fn match_seed() -> u64 {
+    let hi = (rand_f64() * (1u64 << 32) as f64) as u64;
+    let lo = (rand_f64() * (1u64 << 32) as f64) as u64;
+    (hi << 32) | lo
+}
+
 /// Tiny XOR-shift PRNG so we don't need a rand dependency. Seeded from
 /// the clock once per call site chain.
 ///

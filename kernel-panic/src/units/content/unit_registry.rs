@@ -130,6 +130,19 @@ impl UnitRegistry {
         self.def(kind).map_or(kind.unitname(), |d| &d.name)
     }
 
+    /// Median `health` and `buildTime` over every loaded unit def, as Hex
+    /// Farm's gadget computes them from `UnitDefs` to scale how much
+    /// damage sinks a tower and how much building raises one
+    /// (`HexFarm8.lua` l.214-245). Raw FBI values (`MaxDamage`,
+    /// `BuildTime`), not the port's derived seconds.
+    pub fn hexfarm_medians(&self) -> (f64, f64) {
+        let defs = || self.defs.units.values();
+        (
+            spring_map::hexfarm::lua_median(defs().map(|d| d.max_health as f64)),
+            spring_map::hexfarm::lua_median(defs().map(|d| d.build_time as f64)),
+        )
+    }
+
     /// Maximum health (FBI `MaxDamage`).
     pub fn max_health(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.max_health)

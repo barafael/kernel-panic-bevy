@@ -5,9 +5,11 @@
 //!
 //! * **Palladium** — `PalladiumHeight.lua` carves the floating platforms
 //!   into the heightmap during `Initialize()`.
-//! * **Hex Farm 8** — `HexFarm8.lua` carves the hex-pit terrain *and*
-//!   reports the tower/bridge layout + skin via `SendToUnsynced`, plus a
-//!   `mapinfo.lua` (modern maps ship that instead of `.smd`).
+//! * **Hex Farm 8** — `HexFarm8.lua` rolls a new random layout every
+//!   game, so a capture can't stand in for it: the gadget itself is
+//!   ported ([`crate::hexfarm`]) and runs per match. Only its parsed
+//!   `mapinfo.lua` (modern maps ship that instead of `.smd`) is kept
+//!   here, with an empty heightmap / message list.
 //!
 //! Running real Lua (mlua, a vendored C build) to re-derive deterministic
 //! outputs on every load was the last interpreter in the map pipeline.
@@ -41,7 +43,12 @@ pub struct BakedGadgets {
 
 impl BakedGadgets {
     /// Overwrite `parsed.heights` with the captured post-gadget terrain.
+    /// No-op for a capture without terrain (Hex Farm's is generated per
+    /// match).
     pub fn apply_heights(&self, parsed: &mut crate::map_types::ParsedMap) {
+        if self.heights.is_empty() {
+            return;
+        }
         assert_eq!(
             parsed.heights.len(),
             self.heights.len(),
@@ -76,6 +83,11 @@ fn gadget_matches(lua_files: &[LuaFile], gadget: &str) -> bool {
     lua_files
         .iter()
         .any(|f| f.path.to_ascii_lowercase().ends_with(gadget))
+}
+
+/// Is this archive Hex Farm (its gadget, however the archive is named)?
+pub fn is_hex_farm(lua_files: &[LuaFile]) -> bool {
+    gadget_matches(lua_files, "hexfarm8.lua")
 }
 
 /// Find the captured gadget outputs for a map archive, if it is one of

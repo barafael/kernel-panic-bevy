@@ -30,9 +30,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use spring_map::LuaCompositing;
+use spring_map::lua_layout::HexFarmLayout;
 use spring_map::lua_skin::SkinAtlas;
-
-use crate::terrain::geovent::spawn_smoker_at;
 
 /// `local VisualPitDepth=1024` (gadget l.1972; 2048 only for the
 /// skybox-and-fog skins, which KP's skin 9 "Digital" isn't). Tower walls
@@ -326,17 +325,16 @@ pub fn atlas_material(
     })
 }
 
-/// Spawn the captured layout's visible towers and bridges as one static
-/// mesh, plus a datavent on every visible `g` tower (`RedoDatavents`,
-/// gadget l.1120).
+/// Spawn the layout's visible towers and bridges as one static mesh.
+/// (Datavents come in as regular map features — see `spawn_map_world`.)
 pub fn spawn_lua_compositing(
     compositing: &LuaCompositing,
+    layout: &HexFarmLayout,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    let layout = &compositing.layout;
     let Some(first) = layout.hexes.first() else {
         return;
     };
@@ -361,18 +359,6 @@ pub fn spawn_lua_compositing(
     if !buf.is_empty() {
         commands.spawn((Mesh3d(meshes.add(buf.into_mesh())), MeshMaterial3d(material)));
     }
-
-    let mut geo_count = 0u32;
-    for hex in layout.hexes.iter().filter(|h| !h.hidden && h.g != 0) {
-        spawn_smoker_at(commands, Vec3::from_array(hex.center));
-        geo_count += 1;
-    }
-    info!(
-        "Hex Farm: {} towers, {} bridges, {} datavents",
-        layout.hexes.iter().filter(|h| !h.hidden).count(),
-        layout.bridges.iter().filter(|r| !r.hidden).count(),
-        geo_count,
-    );
 }
 
 /// Even-odd point-in-polygon test (the gadget's `IsInsidePolygon`).
@@ -394,11 +380,10 @@ fn inside(poly: &[[f32; 3]], x: f32, z: f32) -> bool {
 
 /// Minimap fallback for a voidGround map: there is no ground texture,
 /// so paint the visible towers and bridges' footprints over black.
-pub fn minimap_pixels(compositing: &LuaCompositing, world: Vec2, size: usize) -> Vec<u8> {
+pub fn minimap_pixels(layout: &HexFarmLayout, world: Vec2, size: usize) -> Vec<u8> {
     const TOWER: [u8; 4] = [150, 24, 24, 255];
     const VENT: [u8; 4] = [40, 150, 40, 255];
     const BRIDGE: [u8; 4] = [95, 40, 40, 255];
-    let layout = &compositing.layout;
     let mut px = vec![0u8; size * size * 4];
     for (i, chunk) in px.chunks_exact_mut(4).enumerate() {
         chunk[3] = 255;

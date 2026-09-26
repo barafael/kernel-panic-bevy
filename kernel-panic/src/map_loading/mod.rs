@@ -624,22 +624,57 @@ fn spawn_map_world(
     // A Lua-composited map (Hex Farm) is drawn entirely by its gadget
     // over a hidden (`voidGround`) ground — see `lua_compositing`.
     let void_ground = spring_map.lua_compositing.is_some();
-    if let (Some(lua), Some(info)) = (&spring_map.lua_compositing, &mut spring_map.map_info) {
-        // The mapinfo's `teams` are dummies; the gadget's `SetStartPos`
-        // put every team on its own tower — the towers left visible.
-        info.start_positions = lua
-            .layout
-            .hexes
-            .iter()
-            .filter(|h| !h.hidden)
-            .enumerate()
-            .map(|(team, h)| spring_map::smd_parser::StartPosition {
-                team: team as u32,
-                x: h.center[0],
-                z: h.center[2],
-            })
-            .collect();
-    }
+    // Hex Farm: roll this match's layout the way the gadget's
+    // `Initialize()` does, and apply what it writes to the engine —
+    // heightmap, datavents, start positions — before anything reads
+    // the map.
+    let hex_farm = spring_map.lua_compositing.is_some().then(|| {
+        let (median_health, median_build_time) = ctx.unit_registry.hexfarm_medians();
+        let parsed = &mut spring_map.parsed;
+        let farm = spring_map::hexfarm::HexFarm::generate(
+            crate::game_setup::match_seed(),
+            spring_map::hexfarm::HexFarmSetup {
+                map_size_x: parsed.header.world_width() as f64,
+                map_size_z: parsed.header.world_depth() as f64,
+                teams: setup.players.len().max(1),
+                median_health,
+                median_build_time,
+            },
+        );
+        farm.write_whole_heightmap(&mut parsed.heights);
+        parsed.features.extend(farm.datavents().into_iter().map(|v| {
+            spring_map::map_types::MapFeature::new(
+                spring_map::map_types::FeatureType::GeoVent,
+                v[0] as f32,
+                v[1] as f32,
+                v[2] as f32,
+                0.0,
+                1.0,
+            )
+        }));
+        if let Some(info) = &mut spring_map.map_info {
+            // The mapinfo's `teams` are dummies; `SetStartPos` decides.
+            info.start_positions = farm
+                .start_positions
+                .iter()
+                .enumerate()
+                .map(|(team, p)| spring_map::smd_parser::StartPosition {
+                    team: team as u32,
+                    x: p[0] as f32,
+                    z: p[1] as f32,
+                })
+                .collect();
+        }
+        info!(
+            "  Hex Farm: {:?} boundary, {} towers, {} bridges, tower radius {}, {} vents",
+            farm.boundary,
+            farm.hexes.len(),
+            farm.rects.len(),
+            farm.tower_radius,
+            farm.datavents().len(),
+        );
+        farm
+    });
     let parsed = &spring_map.parsed;
 
     info!(
@@ -695,9 +730,10 @@ fn spawn_map_world(
     );
     let terrain_ms = t_terrain.elapsed().as_secs_f64() * 1000.0;
 
-    if let Some(compositing) = &spring_map.lua_compositing {
+    if let (Some(compositing), Some(farm)) = (&spring_map.lua_compositing, &hex_farm) {
         spawn_lua_compositing(
             compositing,
+            &farm.layout(),
             &mut ctx.commands,
             &mut ctx.meshes,
             &mut ctx.materials,
@@ -783,9 +819,9 @@ fn spawn_map_world(
     // paint its towers and bridges instead).
     {
         const LUA_MINIMAP_RES: usize = 400;
-        let lua_minimap = spring_map.lua_compositing.as_ref().map(|lua| {
+        let lua_minimap = hex_farm.as_ref().map(|farm| {
             let world = Vec2::new(parsed.header.world_width(), parsed.header.world_depth());
-            lua_compositing::minimap_pixels(lua, world, LUA_MINIMAP_RES)
+            lua_compositing::minimap_pixels(&farm.layout(), world, LUA_MINIMAP_RES)
         });
         let (gp, gw, gh) = match (&lua_minimap, &spring_map.ground_texture) {
             (Some(px), _) => (Some(px.as_slice()), LUA_MINIMAP_RES, LUA_MINIMAP_RES),

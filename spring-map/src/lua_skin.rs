@@ -4,9 +4,9 @@
 //! is a placeholder that the unsynced Lua gadget overwrites at runtime
 //! by binding one of the `bitmaps/MapTex/hexfarm8_<skin>.<ext>` PNG/JPG
 //! files via `gl.Texture` and `Spring.SetMapShadingTexture`. The skin
-//! is chosen in the synced half (line 211 of `HexFarm8.lua`) and
+//! is chosen in the synced half (line 186 of `HexFarm8.lua`) and
 //! shipped to unsynced via `SendToUnsynced("ReceiveHexFarmLayout",
-//! "Skin", N)`.
+//! "Skin", N)` — always 9 for Kernel Panic.
 //!
 //! We don't run the unsynced half (no GL VM), so we mirror the skin
 //! lookup table here and decode the matching bitmap into a
@@ -16,11 +16,15 @@
 
 use thiserror::Error;
 
-use crate::lua_layout::HexFarmLayout;
 use crate::map_types::BitmapFile;
 
 /// HexFarm's skin table (mirrors lines 16–26 of `HexFarm8.lua`).
 ///
+/// The skin `UseMapOptions` (l.186) picks when it detects Kernel Panic
+/// (`UnitDefNames["kernel"]`) and no `hexfarm_skin` map option is set:
+/// 9, "Digital".
+pub const KERNEL_PANIC_SKIN: i64 = 9;
+
 /// Index = the integer the gadget sends via `("ReceiveHexFarmLayout",
 /// "Skin", N)`. `(name, ext)` is the lower-case stem and original
 /// extension of `bitmaps/MapTex/hexfarm8_<name>.<ext>`. We match
@@ -51,8 +55,6 @@ pub struct SkinAtlas {
 
 #[derive(Debug, Error)]
 enum CompositeError {
-    #[error("no `Skin` message captured from synced gadget")]
-    NoSkin,
     #[error("skin {0} is not in the HexFarm skin table")]
     UnknownSkin(i64),
     #[error("no bitmap matching `bitmaps/MapTex/hexfarm8_{0}.*` in archive")]
@@ -65,13 +67,11 @@ enum CompositeError {
     },
 }
 
-/// Decode the skin atlas referenced by a captured layout, if any.
-/// Returns `None` for maps without HexFarm-style Lua compositing or if
-/// the atlas can't be located / decoded.
-pub fn decode_skin_atlas(layout: &HexFarmLayout, bitmaps: &[BitmapFile]) -> Option<SkinAtlas> {
-    match try_decode_atlas(layout, bitmaps) {
+/// Decode HexFarm skin `skin`'s atlas from the archive's bitmaps.
+/// `None` (logged) if it can't be located / decoded.
+pub fn decode_skin_atlas(skin: i64, bitmaps: &[BitmapFile]) -> Option<SkinAtlas> {
+    match try_decode_atlas(skin, bitmaps) {
         Ok(atlas) => Some(atlas),
-        Err(CompositeError::NoSkin) => None,
         Err(error) => {
             eprintln!("Lua skin atlas decoding skipped: {error}");
             None
@@ -79,11 +79,7 @@ pub fn decode_skin_atlas(layout: &HexFarmLayout, bitmaps: &[BitmapFile]) -> Opti
     }
 }
 
-fn try_decode_atlas(
-    layout: &HexFarmLayout,
-    bitmaps: &[BitmapFile],
-) -> Result<SkinAtlas, CompositeError> {
-    let skin = layout.skin.ok_or(CompositeError::NoSkin)?;
+fn try_decode_atlas(skin: i64, bitmaps: &[BitmapFile]) -> Result<SkinAtlas, CompositeError> {
     let (name, ext) = HEXFARM_SKINS
         .iter()
         .find(|(n, _, _)| *n == skin)

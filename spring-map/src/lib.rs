@@ -1,5 +1,6 @@
 pub mod baked;
 pub mod gadget_bake;
+pub mod hexfarm;
 // Source-archive extraction is native-only: `sevenz-rust` assumes
 // native std fs and doesn't build for wasm32 (plan §8.1). Web loads
 // baked `.kpmap` files through `baked::read_baked_map` instead. The
@@ -18,7 +19,6 @@ pub mod smt_parser;
 
 use std::path::Path;
 
-use lua_layout::HexFarmLayout;
 use lua_skin::SkinAtlas;
 use map_types::{GroundTexture, MapError, ParsedMap};
 #[cfg(not(target_arch = "wasm32"))]
@@ -29,17 +29,15 @@ use smf_parser::parse_smf;
 #[cfg(not(target_arch = "wasm32"))]
 use smt_parser::{assemble_ground_texture, parse_smt_tiles};
 
-/// Reconstructed Lua-driven map decorations (HexFarm towers + bridges
-/// and the skin atlas they're textured with). Present only for maps
-/// whose synced gadget sent a `("ReceiveHexFarmLayout", ...)` set —
-/// otherwise the renderer just uses `ground_texture`.
+/// Hex Farm's Lua-drawn world: the skin atlas its towers and bridges
+/// are textured with. The layout itself is rolled per match by
+/// [`hexfarm::HexFarm::generate`], as the gadget does at `Initialize()`.
 ///
 /// Its presence also means the map is drawn Lua-only: Hex Farm's SMT is
 /// fully transparent and hidden by `voidGround` (mapinfo + KP's
 /// `hotfixes.lua` ~l.207), so there is no `ground_texture` for it.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LuaCompositing {
-    pub layout: HexFarmLayout,
     pub atlas: SkinAtlas,
 }
 
@@ -72,19 +70,12 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         );
     }
 
-    let lua_messages: &[std::vec::Vec<map_types::UnsyncedArg>] = baked_gadgets
-        .map(|b| b.unsynced_messages.as_slice())
-        .unwrap_or(&[]);
-    let lua_compositing = HexFarmLayout::from_messages(lua_messages).and_then(|layout| {
-        let atlas = lua_skin::decode_skin_atlas(&layout, &extracted.bitmaps)?;
-        eprintln!(
-            "Captured HexFarm layout: {} hexes, {} bridges, skin={:?}",
-            layout.hexes.len(),
-            layout.bridges.len(),
-            layout.skin,
-        );
-        Some(LuaCompositing { layout, atlas })
-    });
+    // Hex Farm: the gadget is ported (`hexfarm`) and rolls the layout
+    // at match start; the archive only contributes its skin atlas.
+    let lua_compositing = gadget_bake::is_hex_farm(&extracted.lua_files)
+        .then(|| lua_skin::decode_skin_atlas(lua_skin::KERNEL_PANIC_SKIN, &extracted.bitmaps))
+        .flatten()
+        .map(|atlas| LuaCompositing { atlas });
 
     // A Lua-composited map (Hex Farm) ships a 100% transparent SMT that
     // the engine hides via `voidGround`: everything visible is the

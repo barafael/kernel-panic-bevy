@@ -26,8 +26,8 @@
 //!                220-610 MB/s native — parity with miniz inflate.
 //!   kpmapv4\0  = ZSTD(postcard(BakedMap, Option<LuaCompositing>)):
 //!                v3's body followed by the Lua-composited map data
-//!                (Hex Farm's skin atlas + layout) the runtime needs to
-//!                draw the gadget's towers and bridges. Postcard isn't
+//!                (Hex Farm's skin atlas) the runtime needs to draw
+//!                the gadget's towers and bridges. Postcard isn't
 //!                self-describing, so the extra trailing field needs
 //!                the version bump; v1-v3 bodies still decode as a bare
 //!                `BakedMap` with no compositing.
@@ -348,22 +348,9 @@ mod tests {
 
     #[test]
     fn roundtrip_preserves_lua_compositing() {
-        use crate::lua_layout::{HexFarmLayout, HexTower};
         use crate::lua_skin::SkinAtlas;
         let mut original = sample_map();
         original.lua_compositing = Some(LuaCompositing {
-            layout: HexFarmLayout {
-                skin: Some(9),
-                team_colored: false,
-                hexes: vec![HexTower {
-                    center: [1.0, 2.0, 3.0],
-                    g: 1,
-                    corners: [[4.0; 3]; 6],
-                    corner_bridges: [0; 6],
-                    hidden: false,
-                }],
-                bridges: Vec::new(),
-            },
             atlas: SkinAtlas {
                 width: 1,
                 height: 1,
@@ -372,8 +359,6 @@ mod tests {
         });
         let loaded = read_baked_map(&write_baked_map(&original).unwrap()).unwrap();
         let lua = loaded.lua_compositing.expect("v4 keeps the compositing");
-        assert_eq!(lua.layout.skin, Some(9));
-        assert_eq!(lua.layout.hexes[0].center, [1.0, 2.0, 3.0]);
         assert_eq!(lua.atlas.pixels, vec![1, 2, 3, 255]);
     }
 
