@@ -264,6 +264,12 @@ read the resulting state.
   stack as many orders as you like.
 - The player left-clicks an icon in the build menu to add a unit to
   the queue (or chains placement orders for mobile constructors).
+- **Minifac autospam** (upstream `kp_autospam.lua`, applied to every
+  team): a finished Socket starts building Bits and a finished Window
+  Bugs, on repeat — each finished unit goes back to the end of the
+  queue, so the factory keeps spamming forever. Orders the player adds
+  join the cycle. A minifac does not produce while it is still being
+  built. Ports don't produce; they fill the packet buffer (§13).
 - The factory builds the queue in order. There is no progress bar.
   The only progress indicator is the "health bar" of the unit in the
   factory, which goes up to 100%.
@@ -510,17 +516,54 @@ moved back into the Buffer by entering a teleporter.
 
 ## 23. AI opponent
 
-- Every non-player team runs an AI brain that ticks once per second
-  (per-team AI tick at 1 Hz).
-- The AI keeps its homebase build queue topped up with combat units,
-  inserting one constructor every few combat units (build phase).
-- Idle constructors get sent to the nearest unclaimed datavent to put
-  down the appropriate secondary factory (expand phase).
-- If an enemy is within ~700 elmos of a friendly homebase the AI
-  recalls idle combat units to defend the threatened base (defend
-  phase).
-- Once it has built up an army of ~8+ idle units, the AI sends them
-  at the nearest enemy homebase (attack phase).
+A port of upstream's Lua AI (`KPAI.lua`, in its "Fair KPAI" flavour).
+
+- Every non-player team that owns a homebase runs an AI brain that
+  ticks once per second. A team with several homebases (several AI
+  seats on one ally team) runs one brain driving all of them.
+- **Fairness**: each tick the AI works out how far ahead of its
+  enemies it is allowed to be — a head start of 8 spam units, 2
+  "medium" units (constructors, heavies, artillery) and 1 building,
+  plus every enemy unit of that kind, minus every one of its own. The
+  menu difficulty widens the head start (Easy is exactly upstream's
+  Fair KPAI). Once a budget is spent, that kind of production pauses.
+- **Homebase production** (upstream `OrderHomeBase`): whenever a
+  homebase's queue runs down, the AI rolls a d1000. With *n*
+  constructors, a roll above 200·*n* builds another constructor (so
+  there are never more than five); otherwise a roll in the top
+  20 × (army size + packet buffer) builds one heavy or one artillery
+  unit (coin flip) — big armies shift toward them; otherwise it queues
+  three spam units. Kernel: Assembler / Bit / Pointer / Byte; Hole:
+  Trojan / Bug / Dos / Worm; Carrier: Gateway / Packet / Flow /
+  Connection.
+- **Minifacs** autospam for every team (§10); the AI only switches
+  their repeat off while its spam budget is spent.
+- **Expansion**: every idle constructor picks a free datavent (a random
+  sample of the free vents, nearest of the sample — so expansion
+  spreads out) and builds its minifac there. Once the team owns three
+  minifacs, one build in three is the faction special instead
+  (Terminal / Obelisk / Firewall). The vent is claimed immediately.
+- **Defend**: if enemy units come within ~700 elmos of a homebase,
+  every idle army unit fights its way to them.
+- **Attack**: once 8+ idle army units wait at home they attack-move
+  (stop and fight anything met en route) at the nearest enemy minifac,
+  falling back to the nearest enemy homebase. With an army over 50
+  (packet buffer included) they instead rush the homebase of an enemy
+  owning fewer than four small buildings. Idle units already out in
+  the field rejoin the push immediately. Destinations are scattered
+  on a 40–130 elmo ring so the group doesn't pile onto one point.
+- **Network**: a teleporter with an enemy within 300 elmos dispatches
+  packets at it (≥3 buffered, at most every 5 s per teleporter); a
+  full 12-packet buffer is dispatched from the teleporter nearest the
+  push target.
+- **Specials**: a ready Terminal SIGTERMs the densest enemy cluster
+  (15+ enemies within 300 elmos, not tangled up with too many of its
+  own units), at most once per 15 s; a ready Obelisk gasses the
+  nearest enemy within 1500; a ready Pointer plants an NX Flag on a
+  crowd of 8+ within its 1400 range.
+- **Hacker**: idle Bugs deploy into Exploits when the nearest enemy is
+  600–1000 elmos away; Exploits pack back up when nothing is within
+  1100 or an enemy closes inside 500.
 
 ## 24. Fog of war (currently neutered)
 

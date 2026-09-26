@@ -184,9 +184,10 @@ impl Grouping {
     }
 }
 
-/// How much the AI may out-produce the strongest enemy army before its
-/// fairness cap kicks in. Difficulty 1 mirrors upstream "Fair KPAI"
-/// (never outnumbers you); higher settings loosen the cap.
+/// How far the AI may out-produce its enemies before its fairness cap
+/// kicks in: the slack widens Fair KPAI's `Lack` head start
+/// (`units::ai::build_orders::Lack::compute`). Difficulty 1 is exactly
+/// upstream "Fair KPAI"; higher settings loosen the cap.
 #[derive(Debug, Clone, Copy, Resource)]
 pub struct AiDifficulty(pub u8);
 

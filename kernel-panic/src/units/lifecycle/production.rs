@@ -33,6 +33,11 @@ pub struct Producer {
     /// rally points deterministically across a grid in front of the
     /// factory so a stream of Packets doesn't pile onto the same spot.
     spawn_count: u32,
+    /// Spring `CMD.REPEAT`: when a queued unit finishes it is re-appended
+    /// to the back of the queue instead of dropped, so the factory cycles
+    /// its queue forever. Minifacs start with it on (upstream
+    /// `kp_autospam.lua`); homebases start with it off.
+    repeat: bool,
 }
 
 impl Producer {
@@ -42,6 +47,40 @@ impl Producer {
             queue: VecDeque::new(),
             unit_spawned: false,
             spawn_count: 0,
+            repeat: false,
+        }
+    }
+
+    /// A factory on repeat with `kind` queued — the upstream
+    /// `kp_autospam.lua` start state for Sockets / Windows, applied to
+    /// every team (the widget runs for every human player and KPAI's
+    /// `AddMiniFac` issues the same orders for AI teams).
+    pub fn spamming(kind: UnitKind) -> Self {
+        let mut producer = Self::new();
+        producer.repeat = true;
+        producer.queue.push_back(kind);
+        producer
+    }
+
+    /// Whether finished units are re-appended to the queue.
+    #[cfg(test)]
+    pub fn repeat(&self) -> bool {
+        self.repeat
+    }
+
+    /// Toggle repeat. The fair AI switches its minifacs' repeat off
+    /// whenever its spam budget runs out (upstream `KPAI_Fair.lua` slow
+    /// update issues `CMD.REPEAT {0}` on every MiniFac).
+    pub fn set_repeat(&mut self, on: bool) {
+        self.repeat = on;
+    }
+
+    /// Pop the finished front unit, re-appending it when on repeat.
+    fn complete_front(&mut self) {
+        if let Some(done) = self.queue.pop_front()
+            && self.repeat
+        {
+            self.queue.push_back(done);
         }
     }
 
@@ -56,17 +95,14 @@ impl Producer {
             .map(|kind| registry.build_time(kind))
     }
 
-    /// The queued build orders. The build menu (currently removed
-    /// pending a rewrite) read this for the queue-summary UI.
-    #[allow(dead_code)]
+    /// The queued build orders. Read by the build menu's queue-summary
+    /// UI and the AI's refill check.
     pub fn queue(&self) -> &VecDeque<UnitKind> {
         &self.queue
     }
 
     /// Enqueue a unit to be built. The queue is unbounded; the player
-    /// can stack as many orders as they want. The build menu (currently
-    /// removed pending a rewrite) was the sole caller.
-    #[allow(dead_code)]
+    /// can stack as many orders as they want (build menu, AI).
     pub fn enqueue(&mut self, kind: UnitKind) {
         self.queue.push_back(kind);
     }
@@ -91,11 +127,14 @@ pub const KERNEL_BOOST_PER_BUILDING: f32 = 0.2;
 
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
     match kind {
-        UnitKind::Kernel
-        | UnitKind::Hole
-        | UnitKind::Carrier
-        | UnitKind::Socket
-        | UnitKind::Window => Some(Producer::new()),
+        UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier => Some(Producer::new()),
+        // Minifacs autospam from the moment they finish building:
+        // upstream `kp_autospam.lua` gives every socket `REPEAT` + `bit`
+        // and every window `REPEAT` + `bug`. The player can still add to
+        // or toggle the queue; production waits for `Emerging` to end,
+        // mirroring the widget's `UnitFinished` hook.
+        UnitKind::Socket => Some(Producer::spamming(UnitKind::Bit)),
+        UnitKind::Window => Some(Producer::spamming(UnitKind::Bug)),
         // Port is a teleporter, not a factory — it tops up its team's
         // PacketBuffer every 5.5s rather than spawning units directly.
         // Connection (mobile) is likewise a teleporter — it dispatches
@@ -163,6 +202,7 @@ pub fn production_system(
         Option<&FactoryPieces>,
         Option<&UnitAnimator>,
         Option<&crate::units::components::Homebase>,
+        Has<Emerging>,
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
@@ -197,8 +237,15 @@ pub fn production_system(
         factory_pieces,
         animator,
         homebase,
+        emerging,
     ) in &mut producers
     {
+        // A factory still rising out of its construction site is not
+        // finished yet — upstream only hands out orders on
+        // `UnitFinished`, so a half-built Socket must not spam Bits.
+        if emerging {
+            continue;
+        }
         let Some(build_time) = producer.current_build_time(&ctx.unit_registry) else {
             // Queue is empty — idle.
             producer.progress = 0.0;
@@ -353,7 +400,7 @@ pub fn production_system(
         if producer.progress >= build_time {
             producer.progress -= build_time;
             producer.unit_spawned = false;
-            producer.queue.pop_front();
+            producer.complete_front();
         }
     }
 
@@ -468,5 +515,42 @@ pub fn install_fade_materials(
             .entity(entity)
             .insert(FadeMaterials { overrides })
             .remove::<PendingFadeInstall>();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minifacs start spamming their faction's swarm unit on repeat
+    /// (upstream `kp_autospam.lua`); Ports stay teleporters and
+    /// homebases start idle with repeat off.
+    #[test]
+    fn minifacs_default_to_autospam() {
+        let socket = default_production(UnitKind::Socket).unwrap();
+        assert!(socket.repeat());
+        assert_eq!(socket.current_production(), Some(UnitKind::Bit));
+        let window = default_production(UnitKind::Window).unwrap();
+        assert!(window.repeat());
+        assert_eq!(window.current_production(), Some(UnitKind::Bug));
+        assert!(default_production(UnitKind::Port).is_none());
+        let kernel = default_production(UnitKind::Kernel).unwrap();
+        assert!(!kernel.repeat());
+        assert!(kernel.queue().is_empty());
+    }
+
+    /// Repeat re-appends the finished unit behind anything the player
+    /// queued meanwhile, so the queue cycles instead of growing or
+    /// draining; with repeat off the finished unit is dropped.
+    #[test]
+    fn repeat_cycles_queue() {
+        let mut p = Producer::spamming(UnitKind::Bit);
+        p.enqueue(UnitKind::Bit);
+        p.complete_front();
+        assert_eq!(p.queue().len(), 2);
+        p.set_repeat(false);
+        p.complete_front();
+        p.complete_front();
+        assert!(p.queue().is_empty());
     }
 }
