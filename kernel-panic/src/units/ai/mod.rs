@@ -444,7 +444,9 @@ fn nearest_enemy(
     let r_sq = radius * radius;
     let mut best: Option<(Vec3, f32)> = None;
     spatial.query_radius(pos, radius, |e| {
-        if e.team == team || !e.hp_positive || !filter(e.kind) {
+        // The AI must not see what its detectors can't: undetected
+        // cloaked Worms / Logic Bombs are invisible to it too.
+        if e.team == team || !e.hp_positive || !e.targetable_by(team) || !filter(e.kind) {
             return;
         }
         let d = flat_dist_sq(e.pos, pos);
@@ -681,6 +683,8 @@ mod tests {
             kind,
             hp_positive: true,
             is_flying: false,
+            cloaked: false,
+            detected_by: 0,
         }
     }
 
