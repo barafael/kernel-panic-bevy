@@ -96,8 +96,14 @@ pub fn demo_setup() -> GameSetup {
             ai: true,
         })
         .collect();
+    // Dev override: `KP_DEMO_MAP=<stem>` pins the attract-mode map (for
+    // `KP_MENU_SHOTS` visual checks of one map). Not on wasm (no env).
+    #[cfg(not(target_arch = "wasm32"))]
+    let map = std::env::var("KP_DEMO_MAP").unwrap_or_else(|_| random_weighted_map());
+    #[cfg(target_arch = "wasm32")]
+    let map = random_weighted_map();
     GameSetup {
-        map: random_weighted_map(),
+        map,
         players,
         difficulty: 2,
         demo: true,

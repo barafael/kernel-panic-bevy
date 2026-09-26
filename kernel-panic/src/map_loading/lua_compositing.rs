@@ -1,142 +1,47 @@
-//! Render the HexFarm-style tower meshes captured from the synced
-//! gadget. The Lua skin compositor in `spring-map` already produced a
-//! [`LuaCompositing`] containing per-hex layout data and the decoded
-//! atlas; this module turns that into a single Bevy mesh + material
-//! and spawns it as map decoration.
+//! Draw a Lua-composited map (Hex Farm) the way its unsynced gadget
+//! does. Hex Farm's SMT is fully transparent and hidden by `voidGround`;
+//! everything visible is `HexFarm8.lua`'s immediate-mode geometry over a
+//! black void, textured from one 8-region skin atlas:
 //!
-//! Geometry mirrors the gadget's `DrawHex` (lines 2181–2370 of
-//! `HexFarm8.lua`):
-//! - Top hexagon split into two trapezoidal quads, UV-mapped to atlas
-//!   region 1 (with geo) or 5 (no geo).
-//! - Six side walls, each a quad from the corner top down to
-//!   `-VISUAL_PIT_DEPTH`, UV-mapped to region 3 (no bridge) or 4
-//!   (bridge), V wrapping vertically based on the tower height.
+//! ```text
+//!  ________________________________
+//!  |/  |  \|   |   |/  |  \|   |   |
+//!  ||1 | 2|| 3 | 4 ||5 | 6|| 7 | 8 |
+//!  || geo ||   |   ||  |  ||   |   |
+//!  |\__|__/|___|___|\__|__/|___|___|
+//! ```
 //!
-//! Bridges, animations, and team coloring stay out of scope until they
-//! become the dominant visual gap.
+//! - Towers (`DrawHex`, gadget l.2181-2370): the top hexagon as two
+//!   trapezoids UV-mapped onto regions 1+2 (tower with a datavent) or
+//!   5+6, and six walls from the top down to `-VisualPitDepth`,
+//!   alternating regions 4/3 (skin 9 has neither `BridgeSupport` nor
+//!   `SeparateTip`). Walls fade from `TopColor` to black at the bottom.
+//! - Bridges (`DrawRect`, l.2375-2520): a sloped top quad on region 7
+//!   and two side skirts `width/3` deep on region 8.
+//!
+//! The quads are emitted exactly as the gadget's `GL_QUADS` (same
+//! vertex order, UVs and colours), split into the two triangles GL
+//! would draw. Material is unlit: the gadget draws with lighting off.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use spring_map::LuaCompositing;
-use spring_map::lua_layout::HexTower;
 use spring_map::lua_skin::SkinAtlas;
 
 use crate::terrain::geovent::spawn_smoker_at;
 
-/// Matches `local VisualPitDepth=1024` (line 1972 of `HexFarm8.lua`).
-/// Side walls extend from the tower top down to this Y.
-const VISUAL_PIT_DEPTH: f32 = 1024.0;
+/// `local VisualPitDepth=1024` (gadget l.1972; 2048 only for the
+/// skybox-and-fog skins, which KP's skin 9 "Digital" isn't). Tower walls
+/// run from the top down to this Y.
+pub const VISUAL_PIT_DEPTH: f32 = 1024.0;
 
-pub fn spawn_lua_compositing(
-    compositing: &LuaCompositing,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-) {
-    let layout = &compositing.layout;
-    if layout.hexes.is_empty() {
-        return;
-    }
-
-    let atlas_handle = upload_atlas(&compositing.atlas, images);
-    let material = materials.add(StandardMaterial {
-        base_color_texture: Some(atlas_handle),
-        unlit: true,
-        // The skin atlas is partly transparent (the gadget loads it via
-        // `:a:` for alpha-aware sampling). Without alpha discard the
-        // hex shape would be a rectangle. `Mask` is fine — there's no
-        // soft edge that needs blending.
-        alpha_mode: AlphaMode::Mask(0.5),
-        // Trapezoid winding for the top face is reversed from Bevy's
-        // CCW front-face convention, and side normals are unreliable
-        // until we compute them properly. Disable culling for now.
-        cull_mode: None,
-        ..default()
-    });
-
-    let mesh = build_hex_mesh(&layout.hexes);
-    let mesh_handle = meshes.add(mesh);
-    commands.spawn((Mesh3d(mesh_handle), MeshMaterial3d(material)));
-
-    // Mirror the Lua gadget's `RedoDatavents` (HexFarm8.lua:1120) — every
-    // visible hex with `g` set carries a geovent at its center. Routing
-    // through `spawn_smoker_at` means these vents participate in the
-    // existing claim/build pipeline exactly like SMF-listed geovents.
-    let mut geo_count = 0u32;
-    for hex in &layout.hexes {
-        if hex.hidden || hex.g == 0 {
-            continue;
-        }
-        spawn_smoker_at(
-            commands,
-            Vec3::new(hex.center[0], hex.center[1], hex.center[2]),
-        );
-        geo_count += 1;
-    }
-
-    info!(
-        "Hex Farm: spawned {} hex towers, {} geovents ({} bridges captured but not yet rendered)",
-        layout.hexes.iter().filter(|h| !h.hidden).count(),
-        geo_count,
-        layout.bridges.len(),
-    );
-}
-
-fn upload_atlas(atlas: &SkinAtlas, images: &mut Assets<Image>) -> Handle<Image> {
-    let mut image = Image::new(
-        Extent3d {
-            width: atlas.width,
-            height: atlas.height,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        atlas.pixels.clone(),
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    // V wraps vertically because side-wall UVs go past 1.0 for tall
-    // towers. U does not — atlas regions are stacked horizontally and
-    // we don't want sample-bleed between regions 3 and 4.
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::ClampToEdge,
-        address_mode_v: ImageAddressMode::Repeat,
-        ..default()
-    });
-    images.add(image)
-}
-
-fn build_hex_mesh(hexes: &[HexTower]) -> Mesh {
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut uvs: Vec<[f32; 2]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-
-    for hex in hexes {
-        if hex.hidden {
-            continue;
-        }
-        emit_hex(hex, &mut positions, &mut uvs, &mut normals, &mut indices);
-    }
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
-}
-
-/// `GetLeft(n)` from the gadget. n=1 and n=5 inset by the hex
-/// half-diameter so the trapezoid UV doesn't bleed past the actual
-/// hexagonal sub-region of the atlas.
+/// The atlas regions are 1/8 of the texture wide. `GetLeft(n)` from the
+/// gadget: regions 1 and 5 are inset to where the drawn hexagon's left
+/// corner sits in the image.
 fn get_left(n: u32) -> f32 {
     match n {
         1 => 0.133_974_6 / 8.0,
@@ -145,7 +50,7 @@ fn get_left(n: u32) -> f32 {
     }
 }
 
-/// `GetRight(n)` from the gadget — symmetric to `get_left`.
+/// `GetRight(n)` from the gadget — mirror of [`get_left`].
 fn get_right(n: u32) -> f32 {
     match n {
         2 => 1.866_025_4 / 8.0,
@@ -154,89 +59,370 @@ fn get_right(n: u32) -> f32 {
     }
 }
 
-fn emit_hex(
-    hex: &HexTower,
-    positions: &mut Vec<[f32; 3]>,
-    uvs: &mut Vec<[f32; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    indices: &mut Vec<u32>,
-) {
-    let c = &hex.corners;
-    let y_top = hex.center[1];
-    let y_bot = -VISUAL_PIT_DEPTH;
+/// `gl.Color` values, RGBA.
+pub type Rgba = [f32; 4];
+pub const WHITE: Rgba = [1.0, 1.0, 1.0, 1.0];
+/// `BottomColor` for skins without `UseSkyboxAndFog`: walls fade to
+/// black so the towers dissolve into the void.
+pub const BLACK: Rgba = [0.0, 0.0, 0.0, 1.0];
 
-    // Top face: regions 1 (geo) or 5 (no geo).
-    let u_top = if hex.g != 0 { 1 } else { 5 };
-    let lu = get_left(u_top);
-    let ru = get_right(u_top);
+fn scale(c: Rgba, k: f32) -> Rgba {
+    [c[0] * k, c[1] * k, c[2] * k, c[3]]
+}
 
-    // Eight vertices in two trapezoidal quads, mirroring lines 2229–2250
-    // of the gadget. c1 and c4 each carry two UV coords.
-    let top_verts: [([f32; 3], [f32; 2]); 8] = [
-        ([c[0][0], y_top, c[0][2]], [ru, 1.0]), // c1, right edge, top-V
-        ([c[1][0], y_top, c[1][2]], [lu, 0.75]), // c2
-        ([c[2][0], y_top, c[2][2]], [lu, 0.25]), // c3
-        ([c[3][0], y_top, c[3][2]], [ru, 0.0]), // c4, right edge, bottom-V
-        ([c[3][0], y_top, c[3][2]], [lu, 0.0]), // c4', left edge
-        ([c[4][0], y_top, c[4][2]], [ru, 0.25]), // c5
-        ([c[5][0], y_top, c[5][2]], [ru, 0.75]), // c6
-        ([c[0][0], y_top, c[0][2]], [lu, 1.0]), // c1', left edge
-    ];
-    let top_base = positions.len() as u32;
-    for (p, uv) in top_verts {
-        positions.push(p);
-        uvs.push(uv);
-        normals.push([0.0, 1.0, 0.0]);
-    }
-    // Two trapezoidal quads → 4 triangles. Indices match the gadget's
-    // GL_QUADS layout (c1,c2,c3,c4 and c4',c5,c6,c1') but we're CCW
-    // from below; cull_mode: None lets either side render.
-    indices.extend_from_slice(&[
-        top_base,
-        top_base + 1,
-        top_base + 2,
-        top_base,
-        top_base + 2,
-        top_base + 3,
-        top_base + 4,
-        top_base + 5,
-        top_base + 6,
-        top_base + 4,
-        top_base + 6,
-        top_base + 7,
-    ]);
+/// Growable triangle soup in the gadget's `GL_QUADS` vocabulary.
+#[derive(Default)]
+pub struct QuadBuffer {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    colors: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+}
 
-    // Side faces: 6 quads from corner s (at y_top) down to (corner s,
-    // y_bot) and across to corner (s+1)%6. Region 3 if no bridge sits
-    // on this side, 4 if there is one (matches `cu[s] = cb[s] != 0`).
-    let side_hex = ((c[1][0] - c[0][0]).powi(2) + (c[1][2] - c[0][2]).powi(2)).sqrt();
-    let v_depth = if side_hex > 0.0 {
-        (y_top + VISUAL_PIT_DEPTH) / (2.0 * side_hex)
-    } else {
-        1.0
-    };
-
-    for s in 0..6 {
-        let cur = c[s];
-        let next = c[(s + 1) % 6];
-        let u_side = if hex.corner_bridges[s] != 0 { 4 } else { 3 };
-        let lu_s = get_left(u_side);
-        let ru_s = get_right(u_side);
-
-        let base = positions.len() as u32;
-        let side_verts: [([f32; 3], [f32; 2]); 4] = [
-            ([cur[0], y_top, cur[2]], [ru_s, 0.0]),
-            ([cur[0], y_bot, cur[2]], [ru_s, v_depth]),
-            ([next[0], y_bot, next[2]], [lu_s, v_depth]),
-            ([next[0], y_top, next[2]], [lu_s, 0.0]),
-        ];
-        for (p, uv) in side_verts {
-            positions.push(p);
-            uvs.push(uv);
-            // Side normals would need an outward direction per face.
-            // unlit: true on the material makes this irrelevant.
-            normals.push([0.0, 1.0, 0.0]);
+impl QuadBuffer {
+    /// One `GL_QUADS` quad: GL splits `(a,b,c,d)` into `(a,b,c)` and
+    /// `(a,c,d)`, which also fixes how the UVs interpolate.
+    fn quad(&mut self, v: [([f32; 3], [f32; 2], Rgba); 4]) {
+        let base = self.positions.len() as u32;
+        for (p, uv, c) in v {
+            self.positions.push(p);
+            self.uvs.push(uv);
+            self.colors.push(c);
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        self.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+
+    pub fn into_mesh(self) -> Mesh {
+        // Unlit material: normals only need to exist.
+        let normals = vec![[0.0, 1.0, 0.0]; self.positions.len()];
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        mesh.insert_indices(Indices::U32(self.indices));
+        mesh
+    }
+}
+
+/// Everything `DrawHex` needs about one tower.
+pub struct HexDraw<'a> {
+    /// The six top corners, `c[1]..c[6]` in gadget order.
+    pub corners: &'a [[f32; 3]; 6],
+    /// Tower top height (`h.y`).
+    pub y: f32,
+    /// `h.g`: the tower carries a datavent (top texture 1+2, else 5+6).
+    pub geo: bool,
+    /// `TeamColors[h.owner]`.
+    pub top_color: Rgba,
+}
+
+/// Emit one tower (`DrawHex`, skin without `BridgeSupport`/`SeparateTip`).
+///
+/// `side_hex` is the gadget's `sideHex`, the side length of `hex[1]`
+/// (all towers share one radius). `progress` animates a rising/sinking
+/// tower: the top slides between `-VisualPitDepth` and `y` along
+/// `1-(1-p)^2`, and its colour fades in with `p2^4` (l.2208-2225).
+pub fn push_hex(
+    buf: &mut QuadBuffer,
+    h: &HexDraw,
+    side_hex: f32,
+    team_colored: bool,
+    progress: Option<f32>,
+) {
+    let c = h.corners;
+    let mut top = h.top_color;
+    let mut bottom = BLACK;
+    let mut y = h.y;
+    if let Some(progress) = progress {
+        if team_colored {
+            let p = progress * progress;
+            top = scale(top, p);
+            bottom = scale(bottom, p);
+        } else {
+            let p2 = 1.0 - (1.0 - progress) * (1.0 - progress);
+            y = y * p2 - VISUAL_PIT_DEPTH * (1.0 - p2);
+            top = scale(top, p2.powi(4));
+        }
+    }
+    let v_depth = (y + VISUAL_PIT_DEPTH) / (2.0 * side_hex);
+    let at = |k: usize, y: f32| [c[k][0], y, c[k][2]];
+
+    // Top south face: slice 1 if geo, 5 if not.
+    let u = if h.geo { 1 } else { 5 };
+    buf.quad([
+        (at(0, y), [get_right(u), 1.0], top),
+        (at(1, y), [get_left(u), 0.75], top),
+        (at(2, y), [get_left(u), 0.25], top),
+        (at(3, y), [get_right(u), 0.0], top),
+    ]);
+    // Top north face: slice 2 if geo, 6 if not.
+    let u = if h.geo { 2 } else { 6 };
+    buf.quad([
+        (at(3, y), [get_left(u), 0.0], top),
+        (at(4, y), [get_right(u), 0.25], top),
+        (at(5, y), [get_right(u), 0.75], top),
+        (at(0, y), [get_left(u), 1.0], top),
+    ]);
+    // Walls, south-east first, alternating wall textures 4 and 3.
+    let bot = -VISUAL_PIT_DEPTH;
+    for s in 0..6 {
+        let n = (s + 1) % 6;
+        let u = if s % 2 == 0 { 4 } else { 3 };
+        buf.quad([
+            (at(s, y), [get_right(u), 0.0], top),
+            (at(s, bot), [get_right(u), v_depth], bottom),
+            (at(n, bot), [get_left(u), v_depth], bottom),
+            (at(n, y), [get_left(u), 0.0], top),
+        ]);
+    }
+}
+
+/// Emit one bridge (`DrawRect`). `corners` are `r.c[1..4]` with their
+/// own heights (c1/c4 at the first tower's height, c2/c3 at the
+/// second's); `c1`/`c2` are the owner colours of the two towers.
+/// `anim` = `(progress, corner)` swings the bridge up from vertical
+/// around its far end (the "rotate" animation, l.2415-2475).
+pub fn push_rect(
+    buf: &mut QuadBuffer,
+    corners: &[[f32; 3]; 4],
+    mut c1: Rgba,
+    mut c2: Rgba,
+    team_colored: bool,
+    anim: Option<(f32, u8)>,
+) {
+    let [mut p1, mut p2, mut p3, mut p4] = *corners;
+    let dist = |a: [f32; 3], b: [f32; 3]| {
+        ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt()
+    };
+    let void_side = dist(p1, p2);
+    let tower_side = dist(p2, p3);
+    let thickness = tower_side / 3.0;
+    let v = void_side / (4.0 * tower_side);
+    let v14 = 0.5 - v;
+    let v23 = 0.5 + v;
+    let u = get_left(8) + (get_right(8) - get_left(8)) * thickness / tower_side;
+    let down = |p: [f32; 3]| [p[0], p[1] - thickness, p[2]];
+
+    if let Some((progress, corner)) = anim {
+        if team_colored {
+            let p = progress * progress;
+            c1 = scale(c1, p);
+            c2 = scale(c2, p);
+        } else {
+            let side_rect = ((p2[0] - p1[0]).powi(2) + (p2[2] - p1[2]).powi(2)).sqrt();
+            let sinus = ((1.0 - progress) * std::f32::consts::FRAC_PI_2).sin();
+            let cosinus = ((1.0 - progress) * std::f32::consts::FRAC_PI_2).cos();
+            let v2 = v * thickness / void_side;
+            // Lerp `a` toward the hinge `b` by the swing, dropping it
+            // below the hinge by the swung length.
+            let swing = |a: [f32; 3], b: [f32; 3]| {
+                [
+                    a[0] * cosinus + b[0] * (1.0 - cosinus),
+                    a[1] - side_rect * sinus,
+                    a[2] * cosinus + b[2] * (1.0 - cosinus),
+                ]
+            };
+            if corner == 1 {
+                p1 = swing(p1, p2);
+                p4 = swing(p4, p3);
+                // 14 end cover face.
+                buf.quad([
+                    (p1, [get_right(7), 0.5 + v], c1),
+                    (down(p1), [get_right(7), 0.5 + v + v2], c1),
+                    (down(p4), [get_left(7), 0.5 + v + v2], c1),
+                    (p4, [get_left(7), 0.5 + v], c1),
+                ]);
+            } else if corner == 3 {
+                p2 = swing(p2, p1);
+                p3 = swing(p3, p4);
+                // 23 end cover face.
+                buf.quad([
+                    (p2, [get_right(7), 0.5 + v], c2),
+                    (down(p2), [get_right(7), 0.5 + v + v2], c2),
+                    (down(p3), [get_left(7), 0.5 + v + v2], c2),
+                    (p3, [get_left(7), 0.5 + v], c2),
+                ]);
+            }
+        }
+    }
+
+    // Top.
+    buf.quad([
+        (p1, [get_right(7), v14], c1),
+        (p2, [get_right(7), v23], c2),
+        (p3, [get_left(7), v23], c2),
+        (p4, [get_left(7), v14], c1),
+    ]);
+    // South side.
+    buf.quad([
+        (p1, [get_left(8), v14], c1),
+        (p2, [get_left(8), v23], c2),
+        (down(p2), [u, v23], c2),
+        (down(p1), [u, v14], c1),
+    ]);
+    // North side.
+    buf.quad([
+        (p3, [get_left(8), v23], c2),
+        (p4, [get_left(8), v14], c1),
+        (down(p4), [u, v14], c1),
+        (down(p3), [u, v23], c2),
+    ]);
+}
+
+/// Upload the skin atlas with a full mip chain. Both axes repeat, as the
+/// gadget's texture does (wall V runs past 1 on tall towers; bridge V
+/// can run below 0 on long bridges).
+pub fn upload_atlas(atlas: &SkinAtlas, images: &mut Assets<Image>) -> Handle<Image> {
+    let (pixels, levels) = super::mipmap::generate_mipmaps_rgba8(
+        &atlas.pixels,
+        atlas.width as usize,
+        atlas.height as usize,
+    );
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: atlas.width,
+            height: atlas.height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    image.data = Some(pixels);
+    image.texture_descriptor.mip_level_count = levels;
+    // The gadget loads it with `:a:` (anisotropic filtering).
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        min_filter: ImageFilterMode::Linear,
+        mag_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..default()
+    });
+    images.add(image)
+}
+
+/// The atlas material: unlit (the gadget draws with lighting off),
+/// texture × vertex colour, double-sided (no culling in the gadget).
+pub fn atlas_material(
+    atlas: Handle<Image>,
+    materials: &mut Assets<StandardMaterial>,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color_texture: Some(atlas),
+        unlit: true,
+        cull_mode: None,
+        ..default()
+    })
+}
+
+/// Spawn the captured layout's visible towers and bridges as one static
+/// mesh, plus a datavent on every visible `g` tower (`RedoDatavents`,
+/// gadget l.1120).
+pub fn spawn_lua_compositing(
+    compositing: &LuaCompositing,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+) {
+    let layout = &compositing.layout;
+    let Some(first) = layout.hexes.first() else {
+        return;
+    };
+    let material = atlas_material(upload_atlas(&compositing.atlas, images), materials);
+    let side_hex = ((first.corners[1][0] - first.corners[0][0]).powi(2)
+        + (first.corners[1][2] - first.corners[0][2]).powi(2))
+    .sqrt();
+
+    let mut buf = QuadBuffer::default();
+    for hex in layout.hexes.iter().filter(|h| !h.hidden) {
+        let draw = HexDraw {
+            corners: &hex.corners,
+            y: hex.center[1],
+            geo: hex.g != 0,
+            top_color: WHITE,
+        };
+        push_hex(&mut buf, &draw, side_hex, layout.team_colored, None);
+    }
+    for rect in layout.bridges.iter().filter(|r| !r.hidden) {
+        push_rect(&mut buf, &rect.corners, WHITE, WHITE, layout.team_colored, None);
+    }
+    if !buf.is_empty() {
+        commands.spawn((Mesh3d(meshes.add(buf.into_mesh())), MeshMaterial3d(material)));
+    }
+
+    let mut geo_count = 0u32;
+    for hex in layout.hexes.iter().filter(|h| !h.hidden && h.g != 0) {
+        spawn_smoker_at(commands, Vec3::from_array(hex.center));
+        geo_count += 1;
+    }
+    info!(
+        "Hex Farm: {} towers, {} bridges, {} datavents",
+        layout.hexes.iter().filter(|h| !h.hidden).count(),
+        layout.bridges.iter().filter(|r| !r.hidden).count(),
+        geo_count,
+    );
+}
+
+/// Even-odd point-in-polygon test (the gadget's `IsInsidePolygon`).
+fn inside(poly: &[[f32; 3]], x: f32, z: f32) -> bool {
+    let mut inside = false;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (a, b) = (poly[i], poly[j]);
+        if z >= a[2].min(b[2])
+            && z < a[2].max(b[2])
+            && x < (b[0] - a[0]) * (z - a[2]) / (b[2] - a[2]) + a[0]
+        {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Minimap fallback for a voidGround map: there is no ground texture,
+/// so paint the visible towers and bridges' footprints over black.
+pub fn minimap_pixels(compositing: &LuaCompositing, world: Vec2, size: usize) -> Vec<u8> {
+    const TOWER: [u8; 4] = [150, 24, 24, 255];
+    const VENT: [u8; 4] = [40, 150, 40, 255];
+    const BRIDGE: [u8; 4] = [95, 40, 40, 255];
+    let layout = &compositing.layout;
+    let mut px = vec![0u8; size * size * 4];
+    for (i, chunk) in px.chunks_exact_mut(4).enumerate() {
+        chunk[3] = 255;
+        let x = ((i % size) as f32 + 0.5) / size as f32 * world.x;
+        let z = ((i / size) as f32 + 0.5) / size as f32 * world.y;
+        let hex = layout
+            .hexes
+            .iter()
+            .find(|h| !h.hidden && inside(&h.corners, x, z));
+        let color = if let Some(h) = hex {
+            let r = ((x - h.center[0]).powi(2) + (z - h.center[2]).powi(2)).sqrt();
+            if h.g != 0 && r < 64.0 { Some(VENT) } else { Some(TOWER) }
+        } else if layout
+            .bridges
+            .iter()
+            .any(|r| !r.hidden && inside(&r.corners, x, z))
+        {
+            Some(BRIDGE)
+        } else {
+            None
+        };
+        if let Some(c) = color {
+            chunk.copy_from_slice(&c);
+        }
+    }
+    px
 }

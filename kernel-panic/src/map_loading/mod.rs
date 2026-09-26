@@ -30,9 +30,8 @@ use crate::{
 };
 use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 
-// HexFarm Lua-composited decorations come out of the source-archive
-// pipeline, which doesn't exist on wasm (plan §8.1).
-#[cfg(not(target_arch = "wasm32"))]
+// HexFarm Lua-composited towers/bridges (native and web: the data
+// round-trips through `.kpmap` v4).
 mod lua_compositing;
 mod mipmap;
 
@@ -45,9 +44,8 @@ use bytes_asset::BytesAsset;
 #[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/web_map_catalog.rs"));
 
-#[cfg(not(target_arch = "wasm32"))]
 use lua_compositing::spawn_lua_compositing;
-use mipmap::{build_terrain_material_from_texture, dark_fallback_material};
+use mipmap::{build_terrain_material_from_texture, dark_fallback_material, void_ground_material};
 
 pub struct MapLoadingPlugin;
 
@@ -622,6 +620,26 @@ fn spawn_map_world(
     geovent_assets: &mut GeoventAssets,
     ctx: &mut crate::units::lifecycle::spawning::SpawnContext,
 ) {
+    let mut spring_map = spring_map;
+    // A Lua-composited map (Hex Farm) is drawn entirely by its gadget
+    // over a hidden (`voidGround`) ground — see `lua_compositing`.
+    let void_ground = spring_map.lua_compositing.is_some();
+    if let (Some(lua), Some(info)) = (&spring_map.lua_compositing, &mut spring_map.map_info) {
+        // The mapinfo's `teams` are dummies; the gadget's `SetStartPos`
+        // put every team on its own tower — the towers left visible.
+        info.start_positions = lua
+            .layout
+            .hexes
+            .iter()
+            .filter(|h| !h.hidden)
+            .enumerate()
+            .map(|(team, h)| spring_map::smd_parser::StartPosition {
+                team: team as u32,
+                x: h.center[0],
+                z: h.center[2],
+            })
+            .collect();
+    }
     let parsed = &spring_map.parsed;
 
     info!(
@@ -635,6 +653,7 @@ fn spawn_map_world(
 
     let t_texture = bevy::platform::time::Instant::now();
     let terrain_material = match &spring_map.ground_texture {
+        _ if void_ground => void_ground_material(&mut ctx.materials),
         Some(ground) => {
             build_terrain_material_from_texture(ground, &mut ctx.images, &mut ctx.materials)
         }
@@ -676,8 +695,6 @@ fn spawn_map_world(
     );
     let terrain_ms = t_terrain.elapsed().as_secs_f64() * 1000.0;
 
-    // HexFarm Lua-composited decorations: native-only (see module docs).
-    #[cfg(not(target_arch = "wasm32"))]
     if let Some(compositing) = &spring_map.lua_compositing {
         spawn_lua_compositing(
             compositing,
@@ -762,11 +779,18 @@ fn spawn_map_world(
 
     info!("  world built: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, nav (see above)");
 
-    // Setup minimap from ground texture.
+    // Setup minimap from ground texture (a voidGround map has none:
+    // paint its towers and bridges instead).
     {
-        let (gp, gw, gh) = match &spring_map.ground_texture {
-            Some(g) => (Some(g.pixels.as_slice()), g.width, g.height),
-            None => (None, 0, 0),
+        const LUA_MINIMAP_RES: usize = 400;
+        let lua_minimap = spring_map.lua_compositing.as_ref().map(|lua| {
+            let world = Vec2::new(parsed.header.world_width(), parsed.header.world_depth());
+            lua_compositing::minimap_pixels(lua, world, LUA_MINIMAP_RES)
+        });
+        let (gp, gw, gh) = match (&lua_minimap, &spring_map.ground_texture) {
+            (Some(px), _) => (Some(px.as_slice()), LUA_MINIMAP_RES, LUA_MINIMAP_RES),
+            (None, Some(g)) => (Some(g.pixels.as_slice()), g.width, g.height),
+            (None, None) => (None, 0, 0),
         };
         ui::minimap::setup_minimap(
             &mut ctx.commands,
@@ -781,6 +805,11 @@ fn spawn_map_world(
 
     if let Some(map_info) = &spring_map.map_info {
         apply_atmosphere(map_info, &mut ctx.commands);
+        if void_ground {
+            // The gadget turns sky and water off (`SetDrawSky(false)`,
+            // `SetDrawWater(false)`): the void is black.
+            ctx.commands.insert_resource(ClearColor(Color::BLACK));
+        }
         apply_fog(map_info, parsed, fog_query);
         if setup.demo {
             // Attract-mode demo: an all-AI skirmish behind the menu.

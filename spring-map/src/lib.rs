@@ -4,10 +4,10 @@ pub mod gadget_bake;
 // native std fs and doesn't build for wasm32 (plan §8.1). Web loads
 // baked `.kpmap` files through `baked::read_baked_map` instead. The
 // Lua gadget *runner* is gone entirely — its deterministic outputs for
-// the two Lua-driven maps are captured in `gadget_bake`.
-#[cfg(not(target_arch = "wasm32"))]
+// the two Lua-driven maps are captured in `gadget_bake`. The HexFarm
+// layout/skin types are plain data (they round-trip through `.kpmap`
+// v4), so they build everywhere.
 pub mod lua_layout;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod lua_skin;
 pub mod map_types;
 #[cfg(not(target_arch = "wasm32"))]
@@ -18,9 +18,7 @@ pub mod smt_parser;
 
 use std::path::Path;
 
-#[cfg(not(target_arch = "wasm32"))]
 use lua_layout::HexFarmLayout;
-#[cfg(not(target_arch = "wasm32"))]
 use lua_skin::SkinAtlas;
 use map_types::{GroundTexture, MapError, ParsedMap};
 #[cfg(not(target_arch = "wasm32"))]
@@ -35,8 +33,11 @@ use smt_parser::{assemble_ground_texture, parse_smt_tiles};
 /// and the skin atlas they're textured with). Present only for maps
 /// whose synced gadget sent a `("ReceiveHexFarmLayout", ...)` set —
 /// otherwise the renderer just uses `ground_texture`.
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
+///
+/// Its presence also means the map is drawn Lua-only: Hex Farm's SMT is
+/// fully transparent and hidden by `voidGround` (mapinfo + KP's
+/// `hotfixes.lua` ~l.207), so there is no `ground_texture` for it.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LuaCompositing {
     pub layout: HexFarmLayout,
     pub atlas: SkinAtlas,
@@ -48,7 +49,6 @@ pub struct SpringMap {
     pub ground_texture: Option<GroundTexture>,
     pub map_info: Option<MapInfo>,
     pub smf_data: Vec<u8>,
-    #[cfg(not(target_arch = "wasm32"))]
     pub lua_compositing: Option<LuaCompositing>,
 }
 
@@ -72,22 +72,6 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         );
     }
 
-    // First try the SMT (engine-baked diffuse). If a Lua-driven gadget
-    // told us to use a runtime skin instead — Hex Farm picks
-    // `bitmaps/MapTex/hexfarm8_<skin>.<ext>` — that wins, because the
-    // SMT in those archives is a placeholder that Spring overwrites at
-    // runtime via `SetMapShadingTexture`.
-    let smt_texture = match &extracted.smt_data {
-        Some(smt_data) => {
-            let tiles = parse_smt_tiles(smt_data)?;
-            Some(assemble_ground_texture(
-                &extracted.smf_data,
-                &parsed,
-                &tiles,
-            )?)
-        }
-        None => None,
-    };
     let lua_messages: &[std::vec::Vec<map_types::UnsyncedArg>] = baked_gadgets
         .map(|b| b.unsynced_messages.as_slice())
         .unwrap_or(&[]);
@@ -102,12 +86,22 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         Some(LuaCompositing { layout, atlas })
     });
 
-    // Until the hex-tower meshes blanket the play area, keep showing
-    // the tiled skin atlas under them so the gaps aren't pitch black.
-    let ground_texture = lua_compositing
-        .as_ref()
-        .map(|c| lua_skin::ground_texture_from_atlas(&c.atlas))
-        .or(smt_texture);
+    // A Lua-composited map (Hex Farm) ships a 100% transparent SMT that
+    // the engine hides via `voidGround`: everything visible is the
+    // gadget's towers and bridges over a black void. Don't decode or
+    // carry the (invisible) ground texture at all — the renderer treats
+    // `lua_compositing.is_some()` as voidGround.
+    let ground_texture = match (&extracted.smt_data, &lua_compositing) {
+        (Some(smt_data), None) => {
+            let tiles = parse_smt_tiles(smt_data)?;
+            Some(assemble_ground_texture(
+                &extracted.smf_data,
+                &parsed,
+                &tiles,
+            )?)
+        }
+        _ => None,
+    };
 
     let map_info = extracted
         .smd_text

@@ -27,6 +27,24 @@ pub(super) fn dark_fallback_material(
     })
 }
 
+/// `voidGround` (mapinfo, forced for Hex Farm by KP's `hotfixes.lua`
+/// ~l.207): the engine alpha-tests the ground against `voidAlphaMin`
+/// and Hex Farm's SMT is fully transparent, so no ground pixel is ever
+/// drawn. Mirror it with an all-transparent alpha-masked material —
+/// the terrain mesh stays in the world (so cursor ray-casts and the
+/// placement ghost still hit the heightmap surface) but every fragment
+/// is discarded, depth included, leaving the black void.
+pub(super) fn void_ground_material(
+    materials: &mut Assets<StandardMaterial>,
+) -> Handle<StandardMaterial> {
+    materials.add(StandardMaterial {
+        base_color: Color::NONE,
+        alpha_mode: AlphaMode::Mask(0.9),
+        unlit: true,
+        ..default()
+    })
+}
+
 pub(super) fn build_terrain_material_from_texture(
     ground: &GroundTexture,
     images: &mut ResMut<Assets<Image>>,
@@ -81,6 +99,16 @@ pub(super) fn build_terrain_material_from_texture(
 
     let texture_handle = images.add(image);
     create_terrain_material(texture_handle, materials)
+}
+
+/// Full mip chain for an RGBA8 image at its native size: the chained
+/// pixel buffer and its level count. Used for Lua skin atlases.
+pub(super) fn generate_mipmaps_rgba8(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32) {
+    let MipmapData {
+        pixels,
+        level_count,
+    } = generate_mipmaps(pixels, width, height, width, height);
+    (pixels, level_count)
 }
 
 /// 2×2 box-filter `src` (`src_w`×`src_h`) into a buffer sized `dst_w`×`dst_h`.

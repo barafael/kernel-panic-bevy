@@ -14,7 +14,7 @@ use crate::map_types::{UnsyncedArg, UnsyncedMessage};
 /// center.y`). `corner_bridges[k]` is the bridge ID at the side
 /// starting at corner k+1 — non-zero means a bridge connects out of
 /// that side, which the gadget renders with a different UV region.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HexTower {
     pub center: [f32; 3],
     pub g: i64,
@@ -26,7 +26,7 @@ pub struct HexTower {
 /// One bridge connecting two hex towers. Four corners, top face only —
 /// the gadget extrudes the sides downwards by `VisualBridgeThickness`
 /// at draw time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HexBridge {
     pub hex1: i64,
     pub hex2: i64,
@@ -34,7 +34,7 @@ pub struct HexBridge {
     pub hidden: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct HexFarmLayout {
     pub skin: Option<i64>,
     pub team_colored: bool,

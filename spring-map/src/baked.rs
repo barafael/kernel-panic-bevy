@@ -24,6 +24,13 @@
 //!                Data_Cache_L1 314→49 KB, Memory_Bank_v3 5.3→0.32 MB,
 //!                Hex_Farm_8 19.7→11.1 MB. Decode via ruzstd runs at
 //!                220-610 MB/s native — parity with miniz inflate.
+//!   kpmapv4\0  = ZSTD(postcard(BakedMap, Option<LuaCompositing>)):
+//!                v3's body followed by the Lua-composited map data
+//!                (Hex Farm's skin atlas + layout) the runtime needs to
+//!                draw the gadget's towers and bridges. Postcard isn't
+//!                self-describing, so the extra trailing field needs
+//!                the version bump; v1-v3 bodies still decode as a bare
+//!                `BakedMap` with no compositing.
 //! body_len     : u32      = body length in bytes (post-decode for v1,
 //!                          compressed for v2/v3)
 //! body         : [u8; N]  = postcard(BakedMap), deflated for v2
@@ -39,17 +46,18 @@ use std::io::{Read, Write};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::SpringMap;
+use crate::{LuaCompositing, SpringMap};
 use crate::map_types::{GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError};
 use crate::smd_parser::MapInfo;
 
 const MAGIC_V1: &[u8; 8] = b"kpmapv1\0";
 const MAGIC_V2: &[u8; 8] = b"kpmapv2\0";
 const MAGIC_V3: &[u8; 8] = b"kpmapv3\0";
-/// Current writer version: v3 zstd-encodes the postcard body (level 19
+const MAGIC_V4: &[u8; 8] = b"kpmapv4\0";
+/// Current writer version: v4 zstd-encodes the postcard body (level 19
 /// at bake time — bake is native and offline, so the slowest-but-smallest
-/// setting is free at load).
-const MAGIC: &[u8; 8] = MAGIC_V3;
+/// setting is free at load) and appends the Lua compositing data.
+const MAGIC: &[u8; 8] = MAGIC_V4;
 
 /// Body codec, keyed off the file magic.
 #[derive(Clone, Copy)]
@@ -124,7 +132,7 @@ fn encode_zstd(_body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
 
 /// Serialize `map` to the `.kpmap` wire format.
 pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
-    let baked = BakedMap {
+    let core = BakedMap {
         map_x: map.parsed.header.map_x,
         map_y: map.parsed.header.map_y,
         min_height: map.parsed.header.min_height,
@@ -140,7 +148,10 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
         }),
     };
 
-    let body = postcard::to_allocvec(&baked).map_err(BakedMapError::PostcardEncode)?;
+    // v4: the v3 body with the Lua compositing data appended (a postcard
+    // tuple is the plain concatenation of its fields).
+    let body = postcard::to_allocvec(&(core, &map.lua_compositing))
+        .map_err(BakedMapError::PostcardEncode)?;
 
     // v3: zstd the body at level 19. The payload is dominated by
     // solid-colour textures and zeroed maps; zstd's longer matches and
@@ -170,7 +181,7 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         Codec::Raw
     } else if magic == MAGIC_V2.as_slice() {
         Codec::Deflate
-    } else if magic == MAGIC_V3.as_slice() {
+    } else if magic == MAGIC_V3.as_slice() || magic == MAGIC_V4.as_slice() {
         Codec::Zstd
     } else {
         return Err(BakedMapError::BadMagic);
@@ -209,8 +220,13 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         }
     };
 
-    let baked: BakedMap =
-        postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
+    let (baked, lua_compositing): (BakedMap, Option<LuaCompositing>) =
+        if magic == MAGIC_V4.as_slice() {
+            postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?
+        } else {
+            let core = postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
+            (core, None)
+        };
 
     // Validate texture byte count before constructing GroundTexture so a
     // corrupt file fails loudly instead of producing a silently malformed
@@ -258,11 +274,9 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         // looked at them was the SMT decoder, which already ran during
         // bake. Anyone needing this in future would add it here.
         smf_data: Vec::new(),
-        // Baked maps don't carry the captured Lua layout — the bake
-        // path runs before this work landed and tiles the skin into the
-        // ground texture only. Re-bake to get hex meshes via .kpmap.
-        #[cfg(not(target_arch = "wasm32"))]
-        lua_compositing: None,
+        // v4 carries it; older bakes predate it (re-bake Hex Farm to get
+        // its towers and bridges).
+        lua_compositing,
     })
 }
 
@@ -307,7 +321,6 @@ mod tests {
                 lighting: Lighting::default(),
             }),
             smf_data: Vec::new(),
-            #[cfg(not(target_arch = "wasm32"))]
             lua_compositing: None,
         }
     }
@@ -331,6 +344,61 @@ mod tests {
         let info = loaded.map_info.as_ref().unwrap();
         assert_eq!(info.gravity, 130.0);
         assert_eq!(info.start_positions.len(), 1);
+    }
+
+    #[test]
+    fn roundtrip_preserves_lua_compositing() {
+        use crate::lua_layout::{HexFarmLayout, HexTower};
+        use crate::lua_skin::SkinAtlas;
+        let mut original = sample_map();
+        original.lua_compositing = Some(LuaCompositing {
+            layout: HexFarmLayout {
+                skin: Some(9),
+                team_colored: false,
+                hexes: vec![HexTower {
+                    center: [1.0, 2.0, 3.0],
+                    g: 1,
+                    corners: [[4.0; 3]; 6],
+                    corner_bridges: [0; 6],
+                    hidden: false,
+                }],
+                bridges: Vec::new(),
+            },
+            atlas: SkinAtlas {
+                width: 1,
+                height: 1,
+                pixels: vec![1, 2, 3, 255],
+            },
+        });
+        let loaded = read_baked_map(&write_baked_map(&original).unwrap()).unwrap();
+        let lua = loaded.lua_compositing.expect("v4 keeps the compositing");
+        assert_eq!(lua.layout.skin, Some(9));
+        assert_eq!(lua.layout.hexes[0].center, [1.0, 2.0, 3.0]);
+        assert_eq!(lua.atlas.pixels, vec![1, 2, 3, 255]);
+    }
+
+    /// Pre-v4 bakes (no trailing compositing field) must still load.
+    #[test]
+    fn reads_v3_body() {
+        let map = sample_map();
+        let core = BakedMap {
+            map_x: map.parsed.header.map_x,
+            map_y: map.parsed.header.map_y,
+            min_height: map.parsed.header.min_height,
+            max_height: map.parsed.header.max_height,
+            heights: map.parsed.heights.clone(),
+            metalmap: map.parsed.metalmap.clone(),
+            features: map.parsed.features.clone(),
+            map_info: map.map_info.clone(),
+            ground_texture: None,
+        };
+        let body = encode_zstd(&postcard::to_allocvec(&core).unwrap()).unwrap();
+        let mut bytes = MAGIC_V3.to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        let loaded = read_baked_map(&bytes).unwrap();
+        assert_eq!(loaded.parsed.heights, map.parsed.heights);
+        assert!(loaded.lua_compositing.is_none());
     }
 
     #[test]

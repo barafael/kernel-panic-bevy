@@ -9,14 +9,15 @@
 //! "Skin", N)`.
 //!
 //! We don't run the unsynced half (no GL VM), so we mirror the skin
-//! lookup table here, capture the synced→unsynced message, decode the
-//! matching bitmap, and tile it across a fresh [`GroundTexture`].
+//! lookup table here and decode the matching bitmap into a
+//! [`SkinAtlas`]. The renderer UV-maps the gadget's tower and bridge
+//! geometry into it exactly like `DrawHex` / `DrawRect` do; nothing is
+//! ever tiled across the ground (the ground is `voidGround`-hidden).
 
 use thiserror::Error;
 
-use crate::map_types::UnsyncedMessage;
 use crate::lua_layout::HexFarmLayout;
-use crate::map_types::{BitmapFile, GroundTexture, ParsedMap};
+use crate::map_types::BitmapFile;
 
 /// HexFarm's skin table (mirrors lines 16–26 of `HexFarm8.lua`).
 ///
@@ -37,18 +38,11 @@ const HEXFARM_SKINS: &[(i64, &str, &str)] = &[
     (9, "digital", "png"),
 ];
 
-/// Output dimensions of the tiled diffuse. The SMT-derived texture for
-/// most maps is 8 px / elmo, but the renderer caps to 8192² anyway, so
-/// we don't gain anything from going larger here. 4096² leaves the
-/// PNG visibly tileable without burning hundreds of MB of VRAM on a
-/// pattern that's just repeating itself.
-const COMPOSITE_TEXTURE_SIZE: usize = 4096;
-
 /// Decoded skin atlas — the same image the unsynced gadget binds via
 /// `gl.Texture(":a:bitmaps/MapTex/hexfarm8_<skin>.<ext>")`. Width and
 /// height match the source bitmap exactly so the renderer can map the
 /// 8-region UV strips directly. Pixels are tightly packed RGBA8.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SkinAtlas {
     pub width: u32,
     pub height: u32,
@@ -83,27 +77,6 @@ pub fn decode_skin_atlas(layout: &HexFarmLayout, bitmaps: &[BitmapFile]) -> Opti
             None
         }
     }
-}
-
-/// Convenience: tile a decoded atlas into a `GroundTexture` for use as
-/// the map's diffuse. Until the hex-tower meshes cover the play area
-/// this is what shows under the towers.
-pub fn ground_texture_from_atlas(atlas: &SkinAtlas) -> GroundTexture {
-    let img = image::RgbaImage::from_raw(atlas.width, atlas.height, atlas.pixels.clone())
-        .expect("SkinAtlas dimensions match its pixel buffer by construction");
-    tile_to_ground_texture(&img, COMPOSITE_TEXTURE_SIZE, COMPOSITE_TEXTURE_SIZE)
-}
-
-/// Back-compat shim: pick a skin and return a tiled `GroundTexture`,
-/// for callers that don't need the layout (bake_map, tests).
-pub fn composite_ground_texture(
-    messages: &[UnsyncedMessage],
-    bitmaps: &[BitmapFile],
-    _parsed: &ParsedMap,
-) -> Option<GroundTexture> {
-    let layout = HexFarmLayout::from_messages(messages)?;
-    let atlas = decode_skin_atlas(&layout, bitmaps)?;
-    Some(ground_texture_from_atlas(&atlas))
 }
 
 fn try_decode_atlas(
@@ -149,29 +122,4 @@ fn find_bitmap<'a>(bitmaps: &'a [BitmapFile], skin_name: &str) -> Option<&'a Bit
         let lower = b.path.to_ascii_lowercase().replace('\\', "/");
         lower.contains(&needle)
     })
-}
-
-/// Repeat `src` enough times to fill a `dst_w × dst_h` RGBA8 buffer.
-/// Per-pixel modulo into the source image — coarse but matches the
-/// "tiled texture" effect Spring achieves with a wrapping sampler on
-/// the original SMF UVs.
-fn tile_to_ground_texture(src: &image::RgbaImage, dst_w: usize, dst_h: usize) -> GroundTexture {
-    let sw = src.width() as usize;
-    let sh = src.height() as usize;
-    let mut pixels = vec![0u8; dst_w * dst_h * 4];
-    let raw = src.as_raw();
-    for y in 0..dst_h {
-        let sy = y % sh;
-        for x in 0..dst_w {
-            let sx = x % sw;
-            let src_i = (sy * sw + sx) * 4;
-            let dst_i = (y * dst_w + x) * 4;
-            pixels[dst_i..dst_i + 4].copy_from_slice(&raw[src_i..src_i + 4]);
-        }
-    }
-    GroundTexture {
-        width: dst_w,
-        height: dst_h,
-        pixels,
-    }
 }
