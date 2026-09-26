@@ -1,10 +1,13 @@
-//! In-game HUD panels: build menu, info panel, order palette, placement preview.
+//! In-game HUD: the Spring-style command panel, Kernel Panic's build bar,
+//! the bottom-left tooltip box, building placement and the datavent
+//! highlight shown while placing.
 
-pub(crate) mod build_menu;
-mod info_panel;
-mod order_palette;
-mod placement;
+mod build_bar;
+pub(crate) mod command_panel;
+mod geo_highlight;
+pub(crate) mod placement;
 mod previews;
+pub(crate) mod tooltip;
 
 use bevy::prelude::*;
 
@@ -14,10 +17,11 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
             previews::PreviewsPlugin,
-            build_menu::BuildMenuPlugin,
-            info_panel::InfoPanelPlugin,
-            order_palette::OrderPalettePlugin,
+            command_panel::CommandPanelPlugin,
+            build_bar::BuildBarPlugin,
+            tooltip::TooltipPlugin,
             placement::PlacementPlugin,
+            geo_highlight::GeoHighlightPlugin,
         ));
     }
 }

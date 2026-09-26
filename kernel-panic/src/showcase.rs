@@ -25,13 +25,12 @@ use crate::{
     interaction::movement::MoveTarget,
     terrain::geovent::{GeoventSmoker, VentClaim},
     terrain::heightmap::Heightmap,
-    ui::hud::build_menu::factory_roster,
     units::{
         components::{Faction, Homebase, TeamId, UnitType},
         content::definitions::UnitKind,
         lifecycle::{
             construction::{Constructing, PendingBuild, buildings_for},
-            production::Producer,
+            production::{Producer, factory_roster},
             spawning::Emerging,
         },
         mechanics::deploy::DeployEvent,
@@ -73,7 +72,7 @@ pub struct ShowcaseDirector {
 
 impl ShowcaseDirector {
     pub fn new(faction: Faction) -> Self {
-        let roster = factory_roster(faction.homebase(), faction).to_vec();
+        let roster = factory_roster(faction.homebase()).to_vec();
         Self {
             faction,
             homebase: None,

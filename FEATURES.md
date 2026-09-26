@@ -113,42 +113,95 @@ read the resulting state.
   hide when the unit is deselected.
 - The hardware cursor changes shape based on what the cursor is over /
   what action is queued (hardware-cursor swap by order context).
-- Hotkeys: Stop=S, Fight=F *(reserved)*, D for the context-sensitive
-  ability (NX Flag / Infection / Protect / Mine Launch / SIGTERM on
-  the corresponding caster; Dispatch on a teleporter; Deploy/Pack Up
-  on a Bug or Exploit), R for Packet re-enter / repair on builders
-  *(repair reserved)*, T for set target *(reserved)*, X for
-  unset-target *(reserved)*, `Ctrl+D` for self-destruct with a
-  5-second countdown (cancelled by `Stop`), A for attack-move
-  *(reserved)*, P for patrol *(reserved)*.
+- Hotkeys (every one goes through the same command activation as a
+  click on the matching command-panel button, §4): Stop=S, Attack=A,
+  Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm), Enter=R
+  (Packet), Undeploy=U (Exploit), `Ctrl+D` self-destruct with a
+  5-second countdown (cancelled by `Stop`), set target=T and
+  unset target=X (remake extras: no panel button, as in KP), `,` / `.`
+  previous / next panel page, and keypad 2/4/6/8 arm the selected
+  constructor's minifac (Socket / Window / Port, `kp_hotkeys.lua`).
+  `D` fires the context-sensitive ability at the cursor at once (NX
+  Flag / Infection / Protect / Mine Launch / SIGTERM on the caster,
+  Dispatch on a teleporter, Deploy / Pack Up on a Bug or Exploit).
+  Pressing an armed command's hotkey again disarms it; Escape or a
+  right-click anywhere disarms whatever command is armed, and that
+  right-click issues no order.
 - A `Stop` order halts the unit immediately and clears the queue.
 - On production, the builder unit sets a waypoint for the produced
   unit to move straight out of the factory.
 
 ## 4. HUD
 
-- **Bottom-left info panel**: shows the selected unit's name in faction
-  color, HP bar (red→yellow→green) and HP text, weapon name, and speed.
-  Multi-select switches to a unit-count summary. Hides when nothing is
-  selected.
-  The panel is attached to the bottom left corner with no right or
-  bottom padding.
-- **Top-left order palette**: context-sensitive Stop / Fight / other
-  ability buttons. Hides when no unit is selected. The **Ability**
-  button does what `D` does: Bugs / Exploits deploy at once; aimed
-  abilities (command-fire, Dispatch) arm a cast cursor and the next
-  ground click casts them there. While every selected command-fire
-  caster is recharging, the button reads the seconds left (`"42s"`,
-  rounded up like upstream's command label).
-- **Mid-left build menu**: faction-colored icons for what the selected
-  factory or constructor can produce. When units are queued, the
-  number of queued units of that kind is displayed as a small badge
-  in the icon's bottom-left. Hides when no factory/constructor is
-  selected.
-  - When multiple builders are selected, the build pane has tabs on
-    top. When only one is selected, there is still a tab saying the
-    builder unit name.
-- **Top-right minimap**: shows the ground texture as a tiny overview,
+- **Command panel** (Spring's engine control panel as configured by
+  KP's `KP_CtrlPanel.txt`): a 3×9 grid glued to the left edge, from
+  14.7 % to 68.7 % up the screen; each button is 6 % of the window
+  width by 6 % of its height, so the panel scales with the window. No
+  background frame. It lists every order the selection supports in
+  Spring's order — Stop, Attack, the state buttons (Repeat on
+  factories, AutoHold on Worms), Move / Patrol / Fight / Guard for
+  mobile units, the KP gadget commands (NX Flag, Deploy, Undeploy,
+  Launch Mines, SIGTERM, Firewall, Dispatch, Enter; the Obelisk's
+  Infection sits on its "Attack" button) — then the build options.
+  With a mixed selection each command appears once (first unit wins)
+  and all build options come last. It stays up as long as the unit is
+  selected; clicking a button never closes it.
+  - Build options and NX Flag / SIGTERM / Launch Mines show a picture
+    stretched over the whole button; other commands show their name
+    in white, scaled to fill the button, in a faint frame. State
+    buttons show their current option ("Repeat on") above option LEDs
+    (red = off, green = on).
+  - A factory's queued count of each unit is printed in the bottom-left
+    corner of its button.
+  - Hovered button: blue wash + white outline (red outline while a
+    mouse button is down); the armed command: red wash + yellow
+    outline; disabled commands are darkened — Logic Bomb at the team
+    cap, SIGTERM / Firewall while recharging (the button then reads the
+    seconds left, e.g. "42s").
+  - A command runs when the mouse is *released* over the button it was
+    pressed on (press on one button, release on another: nothing).
+    Clicks on the panel never reach the map (no deselect, no box
+    select, no stray order); clicks on empty slots pass through.
+  - Instant commands (Stop, Deploy, Undeploy, Enter) run at once;
+    state buttons step to their next option for the whole selection;
+    targeted commands and build options *arm* — the next map click
+    supplies the target (§11).
+  - Factory build options: left click queues one, right click removes
+    one (newest first), Shift ×5, Ctrl ×20, Shift+Ctrl ×100; Alt puts
+    the new orders at the front of the queue (behind a unit already in
+    progress) or, with a right click, removes the oldest.
+  - More than 25 commands page: the last two slots become
+    previous / next arrows (`,` / `.`). A new selection starts on its
+    first page.
+  - Not listed because the remake doesn't simulate them yet: Wait,
+    Repeat on mobile units, builder Repair / Reclaim, factory rally
+    orders, the Bug's Bombard. Fire state / Move state / Cloak are
+    hidden as in KP (`hide_commands.lua`).
+- **Build bar** (KP's `kp_buildbar.lua`): a row of icons along the top
+  edge, right-aligned — Terminals and Firewalls first, then the
+  homebase. Icons are `55 + (width − 800) / 38` px wide, ¾ as tall,
+  with a green border.
+  - The homebase icon shows the unit it is building with a clockwise
+    progress pie (else the homebase itself); below it the next queued
+    units, up to three, with their counts.
+  - A Terminal / Firewall shows its recharge pie and the seconds left,
+    or "Ready!".
+  - Hovering the homebase opens its build options below it (they stay
+    open until a click elsewhere); clicking one edits that homebase's
+    queue with the command panel's rules. Clicking an icon selects
+    that unit (replacing selected units of the same type); on a
+    Terminal / Firewall it also arms SIGTERM / Firewall.
+- **Tooltip box** (KP's `kp_tooltip.lua` over `bitmaps/tooltipbg.png`),
+  always in the bottom-left corner, sized to its text (font
+  `max(8, 4 + height / 100)` px):
+  - over a command button: its tooltip with the action name in green,
+    then "Hotkeys: …" in orange;
+  - over a build option: "N units selected", then the unit's name and
+    description, build time, health and speed;
+  - otherwise: "One unit selected" / "N units selected" and the unit
+    under the cursor (or the last selected unit): name, description,
+    health, speed, and a friendly teleporter's buffered packets.
+- **Top-left minimap**: shows the ground texture as a tiny overview,
   the camera viewport as an outlined rectangle (frustum outline), and
   dots for friendly and enemy units coloured by faction (green /
   red / blue). Gated on the fog-of-war `Spotted` marker — unspotted
@@ -331,8 +384,11 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 
 - Each factory has a build queue (FIFO). The queue is unbounded —
   stack as many orders as you like.
-- The player left-clicks an icon in the build menu to add a unit to
-  the queue (or chains placement orders for mobile constructors).
+- The player clicks a unit's button in the command panel (or the build
+  bar's homebase menu) to queue it: left +1, right −1, Shift ×5, Ctrl
+  ×20, Alt at the front (§4). The queued count shows on the button.
+- A factory's **Repeat** state button (LEDs) toggles repeat: finished
+  units go back to the end of the queue.
 - **Minifac autospam** (upstream `kp_autospam.lua`, applied to every
   team): a finished Socket starts building Bits and a finished Window
   Bugs, on repeat — each finished unit goes back to the end of the
@@ -371,29 +427,38 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 
 ## 11. Mobile constructors
 
-- Selecting a constructor and left-clicking a building in the build
-  menu enters **placement mode**.
+- Selecting a constructor lists its buildings in the command panel.
+  Clicking one (or keypad 2/4/6/8 for the minifac) *arms* placement —
+  the button turns red with a yellow outline; nothing is placed yet.
 - A translucent ghost of the chosen building follows the cursor
-  (placement-ghost preview entity).
-- The ghost snaps to the nearest unclaimed datavent within ~48 elmos
-  (snap-to-feature placement).
-- Ghost tints **green** on a valid datavent, **red** otherwise
-  (validity tint).
-- Left-click on a green ghost commits the order; the constructor walks
-  to the datavent and erects the building (visible build ray from the
-  constructor while building) (`PendingBuild → Constructing → spawn`
-  pipeline).
+  (placement-ghost preview entity), tinted **green** on a valid site
+  and **red** otherwise.
+- Small buildings (Socket / Window / Port / Terminal / Obelisk /
+  Firewall — KP's `SmallBuilding` set, whose yardmaps need a
+  geothermal vent) snap to the nearest unclaimed datavent within ~64
+  elmos; while one is armed every datavent blinks with a green square
+  (`kp_geoshighlight.lua`, 0.4 s on / 0.4 s off). Bad Blocks, Logic
+  Bombs and Debuggers go anywhere on Spring's 16-elmo build grid that
+  isn't too steep or occupied by a building.
+- The *second* click places it: the building is ordered on release of
+  the map click; the constructor walks there and erects it (visible
+  build ray from the constructor while building) (`PendingBuild →
+  Constructing → spawn` pipeline). The constructor stays selected and
+  the panel stays up.
+- A plain click places one building and disarms. Shift+click queues it
+  and keeps the command armed for the next one; once Shift is let go
+  the next click only disarms (Spring's `needShift`).
+- Shift+drag lays a row of buildings from the press point to the
+  release point, spaced by the footprint (Ctrl: axis-aligned; Alt:
+  filled rectangle; Alt+Ctrl: its outline) — all queued. For datavent
+  buildings every sample snaps to a vent of its own.
+- A click on an invalid site places nothing and keeps the command
+  armed. Right-click / Escape / deselecting the constructor cancels.
 - While constructing, the builder is pinned facing the build site —
   the beam leaves its muzzle piece forward, never out of its side or
   back.
-- Shift + left-click queues additional placements (placement queue).
-- Right-click / Escape / picking a different unit cancels (placement
-  cancel).
 - Once a builder commits to a vent, no second constructor can stack
   on the same vent (`VentClaim` exclusivity).
-- On issuing a build order, the selection of the builder is not lost.
-  If shift was held during placement, the next placement ghost
-  immediately appears under the cursor for chained orders.
 
 ## 12. Pointer (system artillery unit)
 
@@ -443,8 +508,8 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 - A Bug can morph into an Exploit and back. The unit re-spawns in
   place as the new kind (mutual-morph pair, in-place re-spawn). An
   Exploit cannot move.
-- Hotkey: `D`. Also surfaced in the order palette as a **Deploy** /
-  **Pack Up** button while a Bug or Exploit is selected. The Bug ↔
+- Hotkey: `D` (and `U` to undeploy). Also on the command panel as the
+  **Deploy** (Bug) / **Undeploy** (Exploit) button. The Bug ↔
   Exploit selection never overlaps with the command-fire ability set
   (Pointer / Obelisk / Firewall / Byte / Terminal) or the teleporter
   set (Port / Connection), so `D` resolves unambiguously per
@@ -489,6 +554,10 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 
 ## 19. Command-fire abilities (D hotkey)
 
+- `D` casts at the cursor at once; each ability also has its command
+  panel button (NX Flag, "Attack" on the Obelisk, Firewall, Launch
+  Mines, SIGTERM, Dispatch — §4), which arms it so the next map click
+  casts it for the selected units of that kind only.
 - Weapon-backed abilities honour their weapon's TDF range: NX Flag
   1400, Infection 2000, Mine Launch 1100 elmos. A mobile caster
   (Pointer, Byte) ordered beyond range walks toward the target and

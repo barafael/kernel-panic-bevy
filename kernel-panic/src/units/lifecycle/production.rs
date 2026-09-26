@@ -62,8 +62,8 @@ impl Producer {
         producer
     }
 
-    /// Whether finished units are re-appended to the queue.
-    #[cfg(test)]
+    /// Whether finished units are re-appended to the queue (Spring's
+    /// `CMD_REPEAT` state, shown on the command panel's Repeat button).
     pub fn repeat(&self) -> bool {
         self.repeat
     }
@@ -82,6 +82,13 @@ impl Producer {
         {
             self.queue.push_back(done);
         }
+    }
+
+    /// Fraction of the current build done, `0..=1` (the build bar's
+    /// progress pie).
+    pub fn progress_fraction(&self, registry: &UnitRegistry) -> Option<f32> {
+        self.current_build_time(registry)
+            .map(|t| if t > 0.0 { (self.progress / t).clamp(0.0, 1.0) } else { 0.0 })
     }
 
     /// What is currently being built, if anything.
@@ -107,6 +114,44 @@ impl Producer {
         self.queue.push_back(kind);
     }
 
+    /// Spring `CFactoryCAI` Alt+click: put `count` × `kind` at the front
+    /// of the queue. A unit already in progress keeps building (it is
+    /// never swapped out mid-build), so the new orders go right behind it.
+    pub fn enqueue_front(&mut self, kind: UnitKind, count: u32) {
+        let at = usize::from(self.progress > 0.0 || self.unit_spawned).min(self.queue.len());
+        for _ in 0..count {
+            self.queue.insert(at, kind);
+        }
+    }
+
+    /// Spring `CFactoryCAI` right-click: drop up to `count` queued `kind`
+    /// orders, newest first — or oldest first with `from_front` (Alt).
+    /// Cancelling the order in progress resets its build progress; one
+    /// whose unit is already rising out of the pad can't be cancelled.
+    pub fn remove_kind(&mut self, kind: UnitKind, count: u32, from_front: bool) {
+        let locked_front = self.unit_spawned;
+        let hits: Vec<usize> = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|&(i, k)| *k == kind && !(i == 0 && locked_front))
+            .map(|(i, _)| i)
+            .collect();
+        let mut picked: Vec<usize> = if from_front {
+            hits.into_iter().take(count as usize).collect()
+        } else {
+            hits.into_iter().rev().take(count as usize).collect()
+        };
+        // Remove back to front so earlier indices stay valid.
+        picked.sort_unstable_by(|a, b| b.cmp(a));
+        for i in picked {
+            self.queue.remove(i);
+            if i == 0 {
+                self.progress = 0.0;
+            }
+        }
+    }
+
     /// Pop and return the next unit to build, if any. Used by tests to
     /// assert on the AI's build sequencing.
     #[allow(dead_code)]
@@ -124,6 +169,39 @@ impl Producer {
 /// Homebase production-speed bonus per small building the team owns.
 /// Matches upstream `kernelboost.lua::bonusPerFac = 0.2`.
 pub const KERNEL_BOOST_PER_BUILDING: f32 = 0.2;
+
+/// Units a factory can produce, in upstream `SIDEDATA.TDF [CANBUILD]`
+/// `canbuildN` order — the order Spring lists them on the command panel.
+/// Minifacs build their faction's swarm unit; Ports build nothing (they
+/// fill the packet buffer). Mobile builders use
+/// [`super::construction::buildings_for`] instead.
+pub fn factory_roster(factory: UnitKind) -> &'static [UnitKind] {
+    match factory {
+        UnitKind::Kernel => &[
+            UnitKind::Bit,
+            UnitKind::Pointer,
+            UnitKind::Byte,
+            UnitKind::Assembler,
+        ],
+        UnitKind::Hole => &[
+            UnitKind::Bug,
+            UnitKind::Dos,
+            UnitKind::Worm,
+            UnitKind::Trojan,
+        ],
+        // `[carrier]` canbuild1..4. No Signal: that's the SIGTERM
+        // bomber, which only a Terminal's airstrike ever creates.
+        UnitKind::Carrier => &[
+            UnitKind::Packet,
+            UnitKind::Connection,
+            UnitKind::Flow,
+            UnitKind::Gateway,
+        ],
+        UnitKind::Socket => &[UnitKind::Bit],
+        UnitKind::Window => &[UnitKind::Bug],
+        _ => &[],
+    }
+}
 
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
     match kind {
@@ -547,6 +625,64 @@ mod tests {
         let kernel = default_production(UnitKind::Kernel).unwrap();
         assert!(!kernel.repeat());
         assert!(kernel.queue().is_empty());
+    }
+
+    /// Upstream `[CANBUILD]` order; the Signal bomber is never buildable.
+    #[test]
+    fn factory_rosters_follow_sidedata() {
+        assert_eq!(
+            factory_roster(UnitKind::Kernel),
+            &[UnitKind::Bit, UnitKind::Pointer, UnitKind::Byte, UnitKind::Assembler]
+        );
+        assert_eq!(
+            factory_roster(UnitKind::Hole),
+            &[UnitKind::Bug, UnitKind::Dos, UnitKind::Worm, UnitKind::Trojan]
+        );
+        assert_eq!(
+            factory_roster(UnitKind::Carrier),
+            &[UnitKind::Packet, UnitKind::Connection, UnitKind::Flow, UnitKind::Gateway]
+        );
+        assert!(factory_roster(UnitKind::Port).is_empty());
+        for f in [UnitKind::Kernel, UnitKind::Hole, UnitKind::Carrier] {
+            assert!(!factory_roster(f).contains(&UnitKind::Signal));
+        }
+    }
+
+    /// Right-click removes newest-first (Alt: oldest-first); cancelling
+    /// the order in progress resets its progress; Alt+click queues at the
+    /// front but behind a build already under way.
+    #[test]
+    fn spring_queue_edits() {
+        let mut p = Producer::new();
+        for k in [UnitKind::Bit, UnitKind::Byte, UnitKind::Bit, UnitKind::Bit] {
+            p.enqueue(k);
+        }
+        p.progress = 1.0;
+        p.remove_kind(UnitKind::Bit, 1, false);
+        assert_eq!(
+            p.queue().iter().copied().collect::<Vec<_>>(),
+            vec![UnitKind::Bit, UnitKind::Byte, UnitKind::Bit]
+        );
+        assert_eq!(p.progress, 1.0);
+        p.remove_kind(UnitKind::Bit, 1, true);
+        assert_eq!(p.current_production(), Some(UnitKind::Byte));
+        assert_eq!(p.progress, 0.0, "cancelling the front resets progress");
+        p.progress = 0.5;
+        p.enqueue_front(UnitKind::Pointer, 2);
+        assert_eq!(
+            p.queue().iter().copied().collect::<Vec<_>>(),
+            vec![UnitKind::Byte, UnitKind::Pointer, UnitKind::Pointer, UnitKind::Bit]
+        );
+        let mut idle = Producer::new();
+        idle.enqueue(UnitKind::Bit);
+        idle.enqueue_front(UnitKind::Byte, 1);
+        assert_eq!(idle.current_production(), Some(UnitKind::Byte));
+        // A unit already rising out of the pad can't be cancelled.
+        let mut rising = Producer::new();
+        rising.enqueue(UnitKind::Bit);
+        rising.unit_spawned = true;
+        rising.remove_kind(UnitKind::Bit, 5, false);
+        assert_eq!(rising.queue().len(), 1);
     }
 
     /// Repeat re-appends the finished unit behind anything the player

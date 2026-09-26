@@ -10,11 +10,8 @@ pub(crate) mod right_click;
 
 use bevy::prelude::*;
 
-pub(super) use self::core::Hovered;
+pub(crate) use self::core::Hovered;
 pub use self::core::Selected;
-// Kept for the UI rewrite: the deleted `ui/hud/placement.rs` referenced
-// these and the new UI module is expected to need them again.
-#[allow(unused_imports)]
 pub(crate) use self::core::SelectionSet;
 pub(crate) use self::core::ground_hit;
 pub(crate) use self::core::ground_hit_filtered;

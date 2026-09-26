@@ -114,8 +114,9 @@ impl MovePath {
 pub enum QueuedCommand {
     Move(Vec3),
     /// Walk to `site`, then erect a building of `kind` there. Issued by
-    /// the placement flow: the build menu arms a `PlacementMode`, the
-    /// ghost click commits a `BuildAt` to every selected constructor.
+    /// the placement flow: a command-panel build button arms
+    /// `PlacementMode`, the placing click commits a `BuildAt` to every
+    /// selected constructor.
     BuildAt {
         kind: UnitKind,
         site: Vec3,

@@ -8,12 +8,15 @@
 //!   "drain the buffer", mirroring upstream `network_dispatch.lua`).
 //! - Bug / Exploit → Deploy / Pack Up (the Bug ↔ Exploit morph).
 //!
-//! `R` lets a Packet re-Enter the buffer. `Ctrl+D` is self-destruct.
-//!
-//! The order palette's Ability button drives the same logic: it deploys
-//! Bugs / Exploits at once and arms [`OrderCursorModes::ability`] so the
-//! next ground click casts the aimed abilities, as `D` over that point
-//! would ([`deploy_units`] / [`cast_aimed_abilities`] are shared).
+//! The other order hotkeys (Stop, Attack, Move, Fight, Patrol, Guard,
+//! Enter, self-destruct …) go through the command panel's single
+//! activation path (`ui::hud::command_panel::activation`), exactly like
+//! a click on the matching panel button. This module owns the sticky
+//! [`OrderCursorModes`] they arm and the map-click handlers that turn an
+//! armed mode into an order. The panel's ability buttons (NX Flag,
+//! SIGTERM, Dispatch …) arm [`OrderCursorModes::ability`] so the next
+//! ground click casts the aimed abilities, as `D` over that point would
+//! ([`deploy_units`] / [`cast_aimed_abilities`] are shared).
 
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
@@ -27,14 +30,14 @@ use super::selection::{
 };
 use crate::rendering::camera::RtsCamera;
 use crate::units::combat::{
-    AttackGroundOrder, AttackTargetOrder, ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown,
+    AttackGroundOrder, AttackTargetOrder, ForcedTarget,
 };
 use crate::units::components::{TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::mechanics::command_fire::{CommandFireEvent, PendingCommandFire};
 use crate::units::mechanics::deploy::DeployEvent;
-use crate::units::mechanics::network_buffer::{DispatchEvent, EnterEvent};
+use crate::units::mechanics::network_buffer::DispatchEvent;
 
 fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
@@ -52,30 +55,20 @@ impl Plugin for AbilityHotkeyPlugin {
                 (
                     trigger_aimed_ability_on_hotkey,
                     trigger_deploy_on_hotkey,
-                    trigger_enter_on_hotkey,
-                    trigger_self_destruct_on_hotkey,
-                    trigger_unset_target_on_hotkey,
-                    cancel_ability_mode,
                     trigger_ability_click,
                     update_ability_cursor,
                 ),
                 (
-                    toggle_patrol_cursor_mode,
                     trigger_patrol_click,
                     update_patrol_cursor,
-                    toggle_attack_ground_mode,
                     trigger_attack_ground_click,
                     update_attack_ground_cursor,
-                    toggle_attack_move_mode,
                     trigger_attack_move_click,
                     update_attack_move_cursor,
-                    toggle_guard_mode,
                     trigger_guard_click,
                     update_guard_cursor,
-                    toggle_move_mode,
                     trigger_move_click,
                     update_move_cursor,
-                    toggle_set_target_mode,
                     trigger_set_target_click,
                     update_set_target_cursor,
                 ),
@@ -84,7 +77,7 @@ impl Plugin for AbilityHotkeyPlugin {
     }
 }
 
-/// Sticky order-targeting modes armed from the hotkeys / order palette.
+/// Sticky order-targeting modes armed from the hotkeys / command panel.
 ///
 /// Only one mode may be active at a time. The active mode forces the
 /// cursor glyph (Attack / Attack / Patrol) and the next left-click is
@@ -97,8 +90,9 @@ impl Plugin for AbilityHotkeyPlugin {
 /// - `ability` (Ability button only — `D` casts at the cursor directly):
 ///   cast the selection's aimed abilities at the clicked point.
 ///
-/// Modes are cleared by re-pressing the key, Escape, right-click, the
-/// committing click, or a Stop order.
+/// Modes are cleared by re-pressing the key, Escape, right-click (both
+/// handled by the command panel's input, like Spring's `CGuiHandler`),
+/// the committing click, or a Stop order.
 #[derive(Resource, Default)]
 pub struct OrderCursorModes {
     pub attack_ground: bool,
@@ -108,6 +102,11 @@ pub struct OrderCursorModes {
     pub move_order: bool,
     pub set_target: bool,
     pub ability: bool,
+    /// Which casters an armed [`Self::ability`] click fires: the panel's
+    /// per-command buttons (NX Flag, SIGTERM, Dispatch …) only cast their
+    /// own units' ability, like a Spring command goes only to units that
+    /// list it. `None` casts every aimed ability in the selection.
+    pub ability_for: Option<fn(UnitKind) -> bool>,
 }
 
 impl OrderCursorModes {
@@ -122,7 +121,8 @@ impl OrderCursorModes {
     }
 
     /// Arm exactly one mode, clearing the others (they share the cursor).
-    fn arm(&mut self, mode: Mode) {
+    pub fn arm(&mut self, mode: Mode) {
+        self.ability_for = None;
         self.attack_ground = mode == Mode::AttackGround;
         self.attack_move = mode == Mode::AttackMove;
         self.patrol = mode == Mode::Patrol;
@@ -132,20 +132,15 @@ impl OrderCursorModes {
         self.ability = mode == Mode::Ability;
     }
 
-    /// Flip the Ability button's click-to-cast mode (arming it clears
-    /// the other modes).
-    pub fn toggle_ability(&mut self) {
-        if self.ability {
-            self.ability = false;
-        } else {
-            self.arm(Mode::Ability);
-        }
+    /// Disarm every mode.
+    pub fn clear(&mut self) {
+        *self = Self::default();
     }
 }
 
 /// The sticky order-targeting modes, for [`OrderCursorModes::arm`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
     AttackGround,
     AttackMove,
     Patrol,
@@ -218,25 +213,6 @@ fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
 }
 
-/// `Ctrl+D` starts a 5 s self-destruct countdown on every selected
-/// unit. The countdown is aborted by `Stop` (handled by the order
-/// palette, which removes `SelfDestructCountdown` alongside the rest
-/// of the order state) so the player can cancel before detonation.
-fn trigger_self_destruct_on_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<Entity, With<Selected>>,
-    mut commands: Commands,
-) {
-    if !ctrl_held(&keys) || !keys.just_pressed(KeyCode::KeyD) {
-        return;
-    }
-    for entity in &selected_q {
-        commands.entity(entity).insert(SelfDestructCountdown {
-            remaining: SELF_DESTRUCT_DELAY,
-        });
-    }
-}
-
 /// `D` deploys a selected Bug into an Exploit and packs an Exploit
 /// back into a Bug. Co-exists with command-fire / dispatch on the
 /// same key because the eligibility sets don't overlap — Bug/Exploit
@@ -253,21 +229,6 @@ fn trigger_deploy_on_hotkey(
         return;
     }
     deploy_units(selected_q.iter().map(|(e, u)| (e, u.0)), &mut ev);
-}
-
-fn trigger_enter_on_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    mut ev: MessageWriter<EnterEvent>,
-) {
-    if !keys.just_pressed(KeyCode::KeyR) {
-        return;
-    }
-    for (entity, unit) in &selected_q {
-        if unit.0 == UnitKind::Packet {
-            ev.write(EnterEvent { packet: entity });
-        }
-    }
 }
 
 /// `D` casts the selection's aimed abilities (command-fire, Dispatch)
@@ -307,20 +268,6 @@ fn trigger_aimed_ability_on_hotkey(
     );
 }
 
-/// Escape / right-click disarm the Ability button's click-to-cast mode,
-/// like every other order mode.
-fn cancel_ability_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    if modes.ability
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.ability = false;
-    }
-}
-
 /// Click handler for [`OrderCursorModes::ability`]: the next left-click
 /// on the ground casts the selection's aimed abilities there — exactly
 /// what `D` would do with the cursor at that point. Shift stays armed.
@@ -344,8 +291,12 @@ fn trigger_ability_click(
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
         return;
     };
+    let filter = modes.ability_for;
     cast_aimed_abilities(
-        selected_q.iter().map(|(e, u)| (e, u.0)),
+        selected_q
+            .iter()
+            .map(|(e, u)| (e, u.0))
+            .filter(|(_, k)| filter.is_none_or(|f| f(*k))),
         target,
         alt_held(&keys),
         &mut command_fire,
@@ -366,32 +317,6 @@ fn update_ability_cursor(
 ) {
     if modes.ability {
         request.set(crate::interaction::cursor::CursorKind::Attack, 10);
-    }
-}
-
-/// Toggle [`OrderCursorModes::attack_ground`]. `A` flips the flag; Escape
-/// and right-click hard-cancel. While armed the cursor renders as
-/// [`CursorKind::Attack`] (see [`update_attack_ground_cursor`]) and the
-/// next left-click on the ground commits the order.
-fn toggle_attack_ground_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    // Ignore A while Ctrl is down so Ctrl+A (reserved for select-all
-    // in future) doesn't toggle this mode.
-    if !ctrl_held(&keys) && keys.just_pressed(KeyCode::KeyA) {
-        if modes.attack_ground {
-            modes.attack_ground = false;
-        } else {
-            modes.arm(Mode::AttackGround);
-        }
-        return;
-    }
-    if modes.attack_ground
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.attack_ground = false;
     }
 }
 
@@ -455,137 +380,6 @@ fn update_attack_ground_cursor(
 ) {
     if modes.attack_ground {
         request.set(crate::interaction::cursor::CursorKind::Attack, 10);
-    }
-}
-
-/// Toggle [`OrderCursorModes::patrol`]. `P` flips the flag; Escape and
-/// right-click hard-cancel. While armed the cursor renders as
-/// [`CursorKind::Patrol`] (see [`update_patrol_cursor`]) and the next
-/// left-click commits the patrol order.
-fn toggle_patrol_cursor_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    if keys.just_pressed(KeyCode::KeyP) {
-        if modes.patrol {
-            modes.patrol = false;
-        } else {
-            modes.arm(Mode::Patrol);
-        }
-        return;
-    }
-    if modes.patrol
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.patrol = false;
-    }
-}
-
-/// Toggle [`OrderCursorModes::attack_move`] with `F` (Fight). Escape and
-/// right-click hard-cancel, mirroring the other order modes. At most one
-/// cursor mode stays armed at a time.
-fn toggle_attack_move_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    if keys.just_pressed(KeyCode::KeyF) {
-        if modes.attack_move {
-            modes.attack_move = false;
-        } else {
-            modes.arm(Mode::AttackMove);
-        }
-        return;
-    }
-    if modes.attack_move
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.attack_move = false;
-    }
-}
-
-/// Toggle [`OrderCursorModes::guard`] with `G` (Guard). While armed the
-/// cursor renders as [`CursorKind::Defend`] and the next left-click on a
-/// friendly unit makes every selected unit guard it.
-fn toggle_guard_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    if keys.just_pressed(KeyCode::KeyG) {
-        if modes.guard {
-            modes.guard = false;
-        } else {
-            modes.arm(Mode::Guard);
-        }
-        return;
-    }
-    if modes.guard && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.guard = false;
-    }
-}
-
-/// Toggle [`OrderCursorModes::move_order`] with `M` (Spring's `CMD_MOVE`):
-/// while armed the cursor renders as [`CursorKind::Move`] and the next
-/// left-click issues a plain move for the selection.
-fn toggle_move_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    if keys.just_pressed(KeyCode::KeyM) {
-        if modes.move_order {
-            modes.move_order = false;
-        } else {
-            modes.arm(Mode::Move);
-        }
-        return;
-    }
-    if modes.move_order
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.move_order = false;
-    }
-}
-
-/// Toggle [`OrderCursorModes::set_target`] with `T` (Spring's
-/// `CMD_SET_TARGET`): while armed the next left-click on a unit designates
-/// it as the selected units' manual target — preferred over auto-target
-/// in range, turret-tracked out of range, never chased.
-fn toggle_set_target_mode(
-    keys: Res<ButtonInput<KeyCode>>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    mut modes: ResMut<OrderCursorModes>,
-) {
-    if keys.just_pressed(KeyCode::KeyT) {
-        if modes.set_target {
-            modes.set_target = false;
-        } else {
-            modes.arm(Mode::SetTarget);
-        }
-        return;
-    }
-    if modes.set_target
-        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
-    {
-        modes.set_target = false;
-    }
-}
-
-/// `X` (Spring's `CMD_UNSET_TARGET`): drop the manual target designation
-/// from every selected unit.
-fn trigger_unset_target_on_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<Entity, With<Selected>>,
-    mut commands: Commands,
-) {
-    if !keys.just_pressed(KeyCode::KeyX) {
-        return;
-    }
-    for entity in &selected_q {
-        commands.entity(entity).remove::<ForcedTarget>();
     }
 }
 
