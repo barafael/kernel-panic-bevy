@@ -13,8 +13,10 @@
 //! Lua's `math.random` is replaced by [`Rng`] (same call sequence and
 //! ranges, different generator — a seed doesn't reproduce a Spring
 //! game, it reproduces a port game). Metal (`SetMetalAmount`) is not
-//! ported: Kernel Panic has no metal economy and nothing reads it. The
-//! air smooth mesh is ([`HexFarm::set_whole_smooth_mesh`]).
+//! ported: Kernel Panic has no metal economy, and the port has nothing
+//! that reads a metal map (upstream's only reader, `MetalToGeo.lua`, is
+//! not ported). The aircraft smooth mesh is
+//! ([`HexFarm::set_whole_smooth_mesh`]).
 //!
 //! Indices are 0-based where the gadget's are 1-based; each function's
 //! doc cites the gadget function (and line) it ports.
@@ -1246,6 +1248,15 @@ impl HexFarm {
     /// Datavents present on the visible towers (`RedoDatavents`,
     /// l.1117, after its frame-25 re-run: hidden towers' vents are
     /// erased rather than parked in the sky).
+    ///
+    /// Until frame 25 (`VentsMoveNotErase`) the gadget also creates a
+    /// geovent for every *sunk* vent tower, `2 × mapSize` elmos up.
+    /// Nothing can build there and its smoke is far off-screen; the
+    /// point is that start-up scans of `Spring.GetAllFeatures()` count
+    /// every vent the farm may ever show — Kernel Panic's `MetalToGeo`
+    /// ("auto" turns metal spots into vents when a map has fewer than 4
+    /// geos). The port has no such scan (no `MetalToGeo`, the AI reads
+    /// the live vents), so they are not created.
     pub fn datavents(&self) -> Vec<[f64; 3]> {
         self.hexes
             .iter()

@@ -276,6 +276,12 @@ weapon = 30 frames; was 6 s host-side default before).
 ### 3.8 Flow Dynamic Speed & Air Movement — ✅ DONE (mostly)
 
 - ✅ Flying flag + `can_fly()` / `cruise_alt()`; flying units skip nav grid.
+- ✅ Flow flies `CHoverAirMoveType` (`interaction::air_movement`) over the
+  ported `SmoothHeightMesh` (`spring_map::smooth_mesh`, resource
+  `terrain::smooth_ground`, incremental `MapChanged` updates). Not ported
+  (unused by KP): landing, transports, airStrafe circling, attack pitch,
+  crashing. `maxWantedSpeed` tracks `maxSpeed` so the Flow speed bonus
+  applies (Recoil clamps COB `MAX_SPEED` raises at the def speed).
 - ✅ Per-Flow `SpeedBoost` component refreshed every second from team small-building
   count, added on top of the registry's base speed in movement.
 - ✅ Ground units with `NoChaseCategory=VTOL` — `UnitDef.no_chase_category` parses
@@ -492,11 +498,18 @@ Hex Farm 8 no longer replays a captured gadget run: `spring_map::hexfarm`
 ports `HexFarm8.lua` (layout, start positions, heightmap/terrain writers,
 dynamic mode) and runs per match; `map_events::hex_farm` is the engine
 glue and renderer. Known deviations: `math.random` stream differs (own
-RNG); no metal map / air SmoothMesh; startPosType 2/3 (`GoHideAllEmpty`)
-not ported (KP uses fixed); vents parked in the sky before frame 25 are
-simply absent; tower ownership (team-coloured games) is polled (nearest
-finished ≥5×5 building) rather than event-driven; animations interpolate
-between sim frames. Open: the attract demo still loses some units to the
+RNG); no metal map (nothing in the port reads metal; upstream's only
+reader, `MetalToGeo.lua`, isn't ported); startPosType 2/3
+(`GoHideAllEmpty`) not ported (KP uses fixed); vents parked in the sky
+before frame 25 are not created (they only exist for Initialize-time
+feature scans like `MetalToGeo`'s geo count); animations interpolate
+between sim frames. The aircraft smooth mesh is the gadget's radial
+flight profile (`SetWholeSmoothMesh`); it is applied after the final
+heightmap and the initial `SetWholeHeightMap` does *not* queue a
+`MapChanged` (in Recoil that queued rebuild would erase the profile
+~25 s in; the map was written for engines without runtime smooth-mesh
+updates) — later dynamic reshapes do, as in Recoil. Tower ownership is
+event-driven (`UnitFinished`/`UnitDestroyed`). Open: the attract demo still loses some units to the
 void early on (to confirm after the void-impassable nav fix).
 
 Texture is currently raw RGBA, ~16 MB for a 2k² map. PNG/DXT compression is

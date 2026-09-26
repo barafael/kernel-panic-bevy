@@ -43,6 +43,10 @@ read the resulting state.
     up there (the ground sank under them) are pushed back onto a nearby
     tower or bridge, or self-destruct ("fell into the void").
   - The minimap shows the standing towers, bridges and vents.
+  - Flows fly a level bridged over the pits (the map's own radial
+    flight profile) instead of diving into the void between towers;
+    where towers later rise or sink, the flight surface re-forms over
+    the following seconds.
 - The entire map is rendered every frame — no fog-of-war hides any
   region.
 - **Geovents ("datavents")** spawn animated streams of rising "0/1"
@@ -161,8 +165,10 @@ read the resulting state.
   instead of jittering on top of one another (waypoint deadlock
   breaker).
 - Ground units don't go into the terrain. They can be blown away by
-  some weapons; flying units (Flow) hover at a somewhat fixed altitude
-  and pass over hills (cruise-altitude hover); the Worm is
+  some weapons; flying units (Flow) cruise at their altitude above a
+  smoothed version of the terrain (Spring's smooth height mesh), so
+  they glide over hills and pits instead of bobbing along every bump,
+  climbing early for ridges ahead; the Worm is
   subterranean — it is allowed to sink below ground level while
   cloaked and surfaces to attack.
 - Ground units smoothly tilt their pitch and roll to match the slope
@@ -387,8 +393,13 @@ read the resulting state.
 
 ## 14. Network — Flow speed scaling
 
-- Flow is the only flying unit (hovers above terrain, ignores ground
-  collision) (VTOL / cruise-alt hover).
+- Flow is the only flying unit, flown like Spring's hovering aircraft:
+  it lifts off after being built, accelerates / brakes / turns at its
+  FBI rates (it can side-slip while its nose catches up) and banks into
+  turns; a move order ends within 64 elmos of the target, after which
+  it hovers in place (it never lands). It holds its cruise altitude
+  above the smoothed terrain; Flows that bump into each other are
+  pushed apart, and one flying straight at another changes height.
 - Flow's speed visibly scales with the team's small-building count:
   more Sockets / Ports / Firewalls / etc. → faster Flow
   (`SpeedBoost` per small building). Same finished-buildings-only
