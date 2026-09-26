@@ -722,6 +722,16 @@ fn spawn_map_world(
 
     let t_terrain = bevy::platform::time::Instant::now();
     let heightmap = Heightmap::from_parsed(parsed);
+    // The aircraft's smoothed ground (`smoothGround.Init` at
+    // `PreLoadSimulation`); Hex Farm replaces it with its own flight
+    // profile (`SetWholeSmoothMesh` in the gadget's `Initialize`).
+    let mut smooth_ground = crate::terrain::smooth_ground::SmoothGround::from_heightmap(&heightmap);
+    if let Some(farm) = hex_farm.as_ref() {
+        farm.set_whole_smooth_mesh(|x, z, h| {
+            smooth_ground.mesh.set_smooth_mesh(x as f32, z as f32, h as f32, None);
+        });
+    }
+    ctx.commands.insert_resource(smooth_ground);
 
     spawn_terrain(
         parsed,

@@ -15,8 +15,9 @@
 //!   mark their polygon occupied, which drives exploration.
 //! - **Effects out**: `SetOneHex`/`SetOneRect` rewrite the heightmap —
 //!   mirrored into the [`Heightmap`] resource, the nav grids, the
-//!   (invisible, ray-cast) terrain mesh and the minimap for just the
-//!   touched area — and add/remove datavents.
+//!   aircraft [`SmoothGround`] (queued `MapChanged`), the (invisible,
+//!   ray-cast) terrain mesh and the minimap for just the touched area —
+//!   and add/remove datavents.
 //! - **The unsynced half**: [`hex_farm_draw`] keeps the still towers
 //!   and bridges in one mesh (the gadget's display list, rebuilt on any
 //!   change) and redraws the animated ones every frame (rise: top slides
@@ -44,6 +45,7 @@ use crate::map_loading::lua_compositing::{
 use crate::rendering::camera::RtsCamera;
 use crate::terrain::geovent::{GeoventSmoker, spawn_smoker_at};
 use crate::terrain::heightmap::Heightmap;
+use crate::terrain::smooth_ground::SmoothGround;
 use crate::terrain::mesh::{CHUNK_SIZE, build_chunk};
 use crate::ui::minimap::MinimapState;
 use crate::units::combat::Dying;
@@ -251,6 +253,7 @@ fn hex_farm_sim(
     mut view: ResMut<HexFarmView>,
     mut heightmap: Option<ResMut<Heightmap>>,
     mut nav: Option<ResMut<NavGridSet>>,
+    mut smooth_ground: Option<ResMut<SmoothGround>>,
     mut minimap: Option<ResMut<MinimapState>>,
     mut units: Query<(&mut Transform, &UnitType, &mut Health), Without<Dying>>,
     registry: Res<UnitRegistry>,
@@ -323,6 +326,12 @@ fn hex_farm_sim(
                     continue; // nothing inside the map
                 }
                 let (hw, _) = hm.grid_size();
+                // `RecalcArea` → `smoothGround.MapChanged`: the aircraft
+                // mesh catches up over the next frames (and forgets the
+                // gadget's flight profile there, as in Recoil).
+                if let Some(sg) = smooth_ground.as_deref_mut() {
+                    sg.map_changed(x0, z0, x1, z1);
+                }
                 if let Some(nav) = nav.as_deref_mut() {
                     for bucket in &mut nav.buckets {
                         bucket.speed_map.update_region(

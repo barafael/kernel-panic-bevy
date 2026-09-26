@@ -306,7 +306,6 @@ pub fn spawn_unit(
                 brake: unit_registry.brake_rate(kind),
                 turn_rate: unit_registry.turn_rate(kind),
                 can_fly: unit_registry.can_fly(kind),
-                cruise_alt: unit_registry.cruise_alt(kind),
                 no_chase_vtol: unit_registry.no_chase_vtol(kind),
             },
             Transform::from_translation(lifted_position),

@@ -41,6 +41,18 @@ impl Heightmap {
         }
     }
 
+    /// A heightmap from raw row-major vertex heights (8-elmo squares).
+    #[cfg(test)]
+    pub fn from_raw(heights: Vec<f32>, width: usize, height: usize) -> Self {
+        assert_eq!(heights.len(), width * height);
+        Self {
+            heights,
+            width,
+            height,
+            square_size: SQUARE_SIZE as f32,
+        }
+    }
+
     /// Raw row-major heights (`width × height` vertices).
     pub fn heights(&self) -> &[f32] {
         &self.heights

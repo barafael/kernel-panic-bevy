@@ -1046,7 +1046,6 @@ mod tests {
             brake: 60.0,
             turn_rate: 3.0,
             can_fly: false,
-            cruise_alt: 0.0,
             no_chase_vtol: true,
         }
     }

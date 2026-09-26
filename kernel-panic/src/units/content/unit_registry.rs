@@ -312,6 +312,29 @@ impl UnitRegistry {
         spring_pathfinding::max_slope_from_degrees(deg)
     }
 
+    /// `CHoverAirMoveType` constants for a flying unit, in Spring's
+    /// per-frame units (`AAirMoveType` / `CHoverAirMoveType` ctors).
+    pub fn hover_air_params(&self, kind: UnitKind) -> crate::interaction::air_movement::HoverAirParams {
+        const HEADING_UNITS_PER_REV: f32 = 65536.0;
+        let d = self.def(kind).cloned().unwrap_or_default();
+        // `maxAcc = acceleration (default 0.5)`, `maxDec = brakeRate
+        // (default maxAcc)`; the TDF parser reads a missing tag as 0.
+        let acc = if d.acceleration > 0.0 { d.acceleration } else { 0.5 };
+        let dec = if d.brake_rate > 0.0 { d.brake_rate } else { acc };
+        crate::interaction::air_movement::HoverAirParams {
+            acc_rate: acc.max(0.01),
+            dec_rate: dec.max(0.01),
+            altitude_rate: d.vertical_speed.max(0.01),
+            turn_rate: d.turn_rate / HEADING_UNITS_PER_REV * std::f32::consts::TAU,
+            cruise_alt: d.cruise_alt,
+            hover_factor: d.air_hover_factor,
+            banking_allowed: d.banking_allowed,
+            // `mass` defaults to the metal cost (flow.fbi comments its
+            // `mass` out).
+            mass: d.build_cost_metal.max(1.0),
+        }
+    }
+
     /// Cruise altitude in elmos above the terrain for flying units. 0 for
     /// ground units; only consulted when `can_fly` is true.
     pub fn cruise_alt(&self, kind: UnitKind) -> f32 {

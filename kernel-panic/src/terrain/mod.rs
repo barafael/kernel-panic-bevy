@@ -2,6 +2,7 @@ pub mod geovent;
 pub mod heightmap;
 pub mod material;
 pub mod mesh;
+pub mod smooth_ground;
 
 use bevy::prelude::*;
 

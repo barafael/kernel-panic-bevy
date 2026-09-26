@@ -139,7 +139,6 @@ pub struct UnitStats {
     pub brake: f32,
     pub turn_rate: f32,
     pub can_fly: bool,
-    pub cruise_alt: f32,
     pub no_chase_vtol: bool,
 }
 

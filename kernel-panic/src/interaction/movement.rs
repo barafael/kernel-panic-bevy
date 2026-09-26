@@ -431,7 +431,8 @@ pub fn movement_system(
         mut current_speed,
     ) in &mut *query
     {
-        if stunned.is_some() {
+        // Aircraft fly `CHoverAirMoveType` in `air_movement`.
+        if stunned.is_some() || stats.can_fly {
             continue;
         }
 
@@ -464,8 +465,6 @@ pub fn movement_system(
             continue;
         }
 
-        let flying = stats.can_fly;
-
         // Attack-move: hold position and fight while a hostile is in
         // weapon range (an `AimTarget` is stamped by `combat_system`),
         // then resume marching toward the destination once it clears.
@@ -474,11 +473,8 @@ pub fn movement_system(
         }
 
         // If we have a MoveTarget but no MovePath, compute the path.
-        // Flying units skip the nav grid entirely and take a straight XZ
-        // line to the target — they can cross any terrain, so routing
-        // around cliffs would only add noise. Ground pathfinds cost
-        // real CPU, so cap how many we do per frame — surplus units
-        // just wait one extra frame for their turn.
+        // Pathfinds cost real CPU, so cap how many we do per frame —
+        // surplus units just wait one extra frame for their turn.
         if let Some(target) = move_target
             && move_path.is_none()
         {
@@ -490,11 +486,7 @@ pub fn movement_system(
             // - `None` → nothing decided this frame (no nav grid yet
             //   mid-load, or the per-frame search budget ran out);
             //   keep the order and retry next frame.
-            let outcome = if flying {
-                Some(PathOutcome::Route(vec![Vec3::new(
-                    target.0.x, 0.0, target.0.z,
-                )]))
-            } else if let Some(nav) = nav_set.as_deref() {
+            let outcome = if let Some(nav) = nav_set.as_deref() {
                 if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
                     pathfinds_used += 1;
                     compute_path(
@@ -539,68 +531,12 @@ pub fn movement_system(
             if let Some(cs) = current_speed.as_deref_mut() {
                 cs.0 = 0.0;
             }
-            let next = queue.as_mut().and_then(|q| {
-                if q.commands.is_empty() {
-                    None
-                } else {
-                    Some(q.commands.remove(0))
-                }
-            });
-            match next {
-                Some(QueuedCommand::Move(pos) | QueuedCommand::Guard(pos)) => {
-                    commands
-                        .entity(entity)
-                        .insert(MoveTarget(pos))
-                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
-                }
-                Some(QueuedCommand::Patrol(pos)) => {
-                    // Patrol shuttles between two points forever: the unit
-                    // just arrived at `pos`'s predecessor, so record where it
-                    // is now and re-queue that as the opposing waypoint.
-                    // Mirrors upstream CommandAI.cpp pushing `owner->pos` as
-                    // the first patrol point when none is queued.
-                    let origin = Vec3::new(transform.translation.x, 0.0, transform.translation.z);
-                    commands
-                        .entity(entity)
-                        .insert(MoveTarget(pos))
-                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
-                    if let Some(queue) = queue.as_mut() {
-                        queue.commands.push(QueuedCommand::Patrol(origin));
-                    }
-                }
-                Some(QueuedCommand::AttackMove(pos)) => {
-                    commands
-                        .entity(entity)
-                        .insert(MoveTarget(pos))
-                        .insert(AttackMoveActive)
-                        .remove::<crate::units::lifecycle::construction::PendingBuild>();
-                }
-                Some(QueuedCommand::AttackUnit { target, .. }) => {
-                    // Explicit attack supersedes a manual (T) designation,
-                    // and the attack system owns movement from here — no
-                    // MoveTarget, so the finished leg can't re-route.
-                    commands
-                        .entity(entity)
-                        .remove::<crate::units::lifecycle::construction::PendingBuild>()
-                        .remove::<MoveTarget>()
-                        .remove::<crate::units::combat::ForcedTarget>()
-                        .insert(crate::units::combat::AttackTargetOrder { target });
-                }
-                Some(QueuedCommand::BuildAt { kind, site }) => {
-                    commands
-                        .entity(entity)
-                        .insert(MoveTarget(site))
-                        .insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
-                }
-                None => {
-                    commands.entity(entity).remove::<MoveTarget>();
-                    commands.entity(entity).remove::<CommandQueue>();
-                    commands
-                        .entity(entity)
-                        .remove::<crate::units::lifecycle::construction::PendingBuild>()
-                        .remove::<AttackMoveActive>();
-                }
-            }
+            promote_next_command(
+                &mut commands,
+                entity,
+                transform.translation,
+                queue.as_deref_mut(),
+            );
             continue;
         }
 
@@ -741,14 +677,8 @@ pub fn movement_system(
 
         // Resolve desired motion against every other unit. Spring-style:
         // units push each other with radial + lateral slide, weighted by
-        // mass/speed/head-on factor. See `resolve_motion`. Flying units
-        // skip collision entirely — nothing on the ground obstructs them,
-        // and they pass over each other freely too.
-        let resolved = if flying {
-            desired
-        } else {
-            resolve_motion(entity, current, desired, self_radius, speed, &grid)
-        };
+        // mass/speed/head-on factor. See `resolve_motion`.
+        let resolved = resolve_motion(entity, current, desired, self_radius, speed, &grid);
 
         // Slope gate for the no-navgrid straight-line fallback only.
         // Signed, so descents always pass — a unit can step off a
@@ -764,8 +694,7 @@ pub fn movement_system(
         // tick on a legal ramp got refused, the waypoint-skip burned
         // the whole path within a few ticks, and the unit froze at the
         // base of slopes it was supposed to cross. Nobody Advanced.
-        if !flying
-            && nav_set.is_none()
+        if nav_set.is_none()
             && let Some(ref hm) = heightmap
         {
             let dxz = Vec3::new(resolved.x, 0.0, resolved.z).length();
@@ -784,24 +713,91 @@ pub fn movement_system(
         }
 
         let resolved = match nav_set.as_deref() {
-            Some(nav) if !flying => {
+            Some(nav) => {
                 nav.gate_step(unit_registry.max_slope_ratio(unit_type.0), current, resolved)
             }
             _ => resolved,
         };
         transform.translation += resolved;
 
-        // Altitude: ground units hug the terrain; flying units hover at
-        // their FBI `cruiseAlt` above it, so hills/cliffs pass underneath
-        // without colliding. Ground is sampled either way so air units
-        // rise over rolling terrain instead of staying at a fixed world Y.
+        // Altitude: ground units hug the terrain.
         if let Some(ref hm) = heightmap {
-            let ground = hm.sample(transform.translation.x, transform.translation.z);
-            transform.translation.y = if flying {
-                ground + stats.cruise_alt
-            } else {
-                ground
-            };
+            transform.translation.y = hm.sample(transform.translation.x, transform.translation.z);
+        }
+    }
+}
+
+/// An order leg is done: promote the next queued command to the active
+/// order, or — queue empty — drop the order entirely. Shared by the
+/// ground walker ([`movement_system`]) and the aircraft
+/// (`air_movement::hover_air_system`). `translation` is where the unit
+/// is now (the patrol return point).
+pub(crate) fn promote_next_command(
+    commands: &mut Commands,
+    entity: Entity,
+    translation: Vec3,
+    mut queue: Option<&mut CommandQueue>,
+) {
+    let next = queue.as_deref_mut().and_then(|q| {
+        if q.commands.is_empty() {
+            None
+        } else {
+            Some(q.commands.remove(0))
+        }
+    });
+    match next {
+        Some(QueuedCommand::Move(pos) | QueuedCommand::Guard(pos)) => {
+            commands
+                .entity(entity)
+                .insert(MoveTarget(pos))
+                .remove::<crate::units::lifecycle::construction::PendingBuild>();
+        }
+        Some(QueuedCommand::Patrol(pos)) => {
+            // Patrol shuttles between two points forever: the unit
+            // just arrived at `pos`'s predecessor, so record where it
+            // is now and re-queue that as the opposing waypoint.
+            // Mirrors upstream CommandAI.cpp pushing `owner->pos` as
+            // the first patrol point when none is queued.
+            let origin = Vec3::new(translation.x, 0.0, translation.z);
+            commands
+                .entity(entity)
+                .insert(MoveTarget(pos))
+                .remove::<crate::units::lifecycle::construction::PendingBuild>();
+            if let Some(queue) = queue {
+                queue.commands.push(QueuedCommand::Patrol(origin));
+            }
+        }
+        Some(QueuedCommand::AttackMove(pos)) => {
+            commands
+                .entity(entity)
+                .insert(MoveTarget(pos))
+                .insert(AttackMoveActive)
+                .remove::<crate::units::lifecycle::construction::PendingBuild>();
+        }
+        Some(QueuedCommand::AttackUnit { target, .. }) => {
+            // Explicit attack supersedes a manual (T) designation,
+            // and the attack system owns movement from here — no
+            // MoveTarget, so the finished leg can't re-route.
+            commands
+                .entity(entity)
+                .remove::<crate::units::lifecycle::construction::PendingBuild>()
+                .remove::<MoveTarget>()
+                .remove::<crate::units::combat::ForcedTarget>()
+                .insert(crate::units::combat::AttackTargetOrder { target });
+        }
+        Some(QueuedCommand::BuildAt { kind, site }) => {
+            commands
+                .entity(entity)
+                .insert(MoveTarget(site))
+                .insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
+        }
+        None => {
+            commands.entity(entity).remove::<MoveTarget>();
+            commands.entity(entity).remove::<CommandQueue>();
+            commands
+                .entity(entity)
+                .remove::<crate::units::lifecycle::construction::PendingBuild>()
+                .remove::<AttackMoveActive>();
         }
     }
 }
@@ -1183,8 +1179,8 @@ pub struct SeparationEntry {
 /// frame, guarantees no non-flying unit is ever rendered inside
 /// terrain.
 ///
-/// Exceptions: flying units (kept at cruise altitude by
-/// `movement_system`) and subterranean units (the Worm, which
+/// Exceptions: flying units (flown by `air_movement`) and
+/// subterranean units (the Worm, which
 /// intentionally sinks below the surface — see
 /// [`UnitKind::is_subterranean`]).
 pub fn ground_clamp_system(
@@ -1211,8 +1207,7 @@ pub fn ground_clamp_system(
 /// a live `MovePath`, so factories and idle mobile units would stay
 /// axis-aligned and read as floating off sloped ground.
 ///
-/// Flying units skip — they already ride `cruise_alt` above the
-/// heightmap and shouldn't pick up a slope from the terrain below.
+/// Flying units skip — `air_movement` owns their attitude.
 #[allow(clippy::type_complexity)]
 pub fn orient_stationary_to_terrain(
     heightmap: Option<Res<Heightmap>>,
@@ -1676,7 +1671,6 @@ mod inertia_tests {
                     brake,
                     turn_rate: 100.0,
                     can_fly: false,
-                    cruise_alt: 0.0,
                     no_chase_vtol: true,
                 },
                 // Facing +X so the heading gate (align=1) doesn't gate
@@ -1806,7 +1800,6 @@ mod heat_tests {
                     brake: 60.0,
                     turn_rate: 3.0,
                     can_fly: false,
-                    cruise_alt: 0.0,
                     no_chase_vtol: true,
                 },
                 TeamId(0),
@@ -1828,7 +1821,6 @@ mod heat_tests {
                     brake: 27.0,
                     turn_rate: 3.0,
                     can_fly: true,
-                    cruise_alt: 40.0,
                     no_chase_vtol: false,
                 },
                 TeamId(0),
@@ -1968,7 +1960,6 @@ mod cross_map_tests {
                         brake: 60.0,
                         turn_rate: 6.0,
                         can_fly: false,
-                        cruise_alt: 0.0,
                         no_chase_vtol: true,
                     },
                     TeamId(0),

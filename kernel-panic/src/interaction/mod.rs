@@ -1,4 +1,5 @@
 pub mod ability;
+pub mod air_movement;
 pub mod cursor;
 pub mod debug_movement;
 pub mod movement;
@@ -68,6 +69,11 @@ impl Plugin for InteractionPlugin {
                 guard_follow_system,
                 update_path_heat.before(movement_system),
                 movement_system,
+                // `smoothGround.UpdateSmoothMesh()` precedes the unit
+                // updates in the engine's frame.
+                crate::terrain::smooth_ground::update_smooth_ground
+                    .before(air_movement::hover_air_system),
+                air_movement::hover_air_system.after(movement_system),
                 unit_separation_system.after(movement_system),
                 // Runs last so any Y drift introduced by the two
                 // preceding systems is corrected in the same frame.
