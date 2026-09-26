@@ -84,6 +84,45 @@ pub struct PieceIndex;
 #[derive(Component, Clone, Copy, Debug)]
 pub struct MuzzlePiece(pub usize);
 
+/// A piece's weapon emit point and direction in its own local space —
+/// upstream `S3DModelPiece::GetEmitPos` / `GetEmitDir`
+/// (`Rendering/Models/3DModelPiece.cpp:60-77`), which
+/// `CWeapon::UpdateWeaponVectors` reads through `GetEmitDirPos` for the
+/// `QueryWeapon` piece: an empty piece (the usual `gp` / `gunpoint`
+/// marker) emits from its origin along local +Z; a one-vertex piece
+/// from its origin toward that vertex; otherwise from vertex 0 toward
+/// vertex 1. Attached to every model piece entity at spawn.
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct PieceEmit {
+    pub pos: Vec3,
+    pub dir: Vec3,
+}
+
+impl Default for PieceEmit {
+    fn default() -> Self {
+        Self {
+            pos: Vec3::ZERO,
+            dir: Vec3::Z,
+        }
+    }
+}
+
+impl PieceEmit {
+    pub fn from_vertices(vertices: &[[f32; 3]]) -> Self {
+        match vertices {
+            [] => Self::default(),
+            [v0] => Self {
+                pos: Vec3::ZERO,
+                dir: Vec3::from_array(*v0),
+            },
+            [v0, v1, ..] => Self {
+                pos: Vec3::from_array(*v0),
+                dir: Vec3::from_array(*v1) - Vec3::from_array(*v0),
+            },
+        }
+    }
+}
+
 /// Candidate piece names searched in order at spawn when a kind has no
 /// dedicated muzzle mapping (`gunpoint` covers Bit / Pointer / DOS /
 /// Exploit, `bp0` the Byte's first barrel, the rest are generic
@@ -105,6 +144,26 @@ pub fn muzzle_piece_names(kind: UnitKind) -> Option<&'static [&'static str]> {
         Bit | Pointer | Dos | Exploit => &["gunpoint"],
         _ => return None,
     })
+}
+
+/// The FBI `[SFXTypes]` index a unit's `FireWeapon1` plays at its
+/// muzzle (`emit-sfx 1024+i from <muzzle>`), or `None` when the script
+/// emits nothing there. Upstream has no automatic muzzle flash: the
+/// only muzzle effect is what the script emits.
+///
+/// - bit.bos `emit-sfx 1025 from gunpoint` → 1 (arrowflare).
+/// - byte.bos `emit-sfx 1024 from bp0..bp3` → 0.
+/// - pointer.bos `emit-sfx 1024 from gunpoint` → 0.
+/// - flow.bos, packet.bos, connection.bos, dos.bos, … declare no
+///   `FireWeapon1` emit at all (Flow's `[SFXTypes]` are never used by
+///   its weapon).
+pub fn fire_weapon_sfx(kind: UnitKind) -> Option<usize> {
+    use UnitKind::*;
+    match kind {
+        Bit => Some(1),
+        Byte | Pointer => Some(0),
+        _ => None,
+    }
 }
 
 /// Cached COB piece index for the deploy/aim gun pivot (`gunbase`). Set at
@@ -242,6 +301,28 @@ pub struct AnimRig {
 }
 
 impl AnimRig {
+    /// A bare rig over `names` (no piece entities) for driver unit tests.
+    #[cfg(test)]
+    pub fn for_test(names: &'static [&'static str]) -> Self {
+        let n = names.len();
+        Self {
+            piece_names: names,
+            piece_entities: Vec::new(),
+            piece_base_offsets: vec![[0.0; 3]; n],
+            piece_rotations: vec![[0.0; 3]; n],
+            piece_translations: vec![[0.0; 3]; n],
+            target_rotations: vec![[0.0; 3]; n],
+            turn_speeds: vec![[0.0; 3]; n],
+            target_translations: vec![[0.0; 3]; n],
+            move_speeds: vec![[0.0; 3]; n],
+            spin_speeds: vec![[0.0; 3]; n],
+            muzzle: 0,
+            move_gate: 1.0,
+            outbox: Vec::new(),
+            dirty: true,
+        }
+    }
+
     /// COB piece index for `name`, or `None` when the model has no such
     /// piece. Called from [`UnitAnim::bind`] at spawn (once per driver)
     /// and by tests — never on the per-frame path.
@@ -454,6 +535,17 @@ pub trait UnitAnim: Send + Sync + 'static {
 
     /// `.bos` `FireWeapon1()` — muzzle flash / recoil / barrel cycling.
     fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}
+
+    /// `.bos` `Shot1()` followed by `QueryWeapon1()`: upstream
+    /// `CWeapon::UpdateSalvo` (`Weapon.cpp:590-597`) calls both once per
+    /// *projectile*, right before it resolves the muzzle and spawns the
+    /// projectile. Drivers that cycle barrels point [`AnimRig::muzzle`]
+    /// at the piece `QueryWeapon1` would return. Runs synchronously on
+    /// the combat side, so the muzzle is current for the very shot.
+    fn shot(&mut self, _rig: &mut AnimRig) {}
+
+    /// `.bos` `EndBurst1()` — after the salvo's last shot.
+    fn end_burst(&mut self, _rig: &mut AnimRig) {}
 
     /// `.bos` `Activate()` — factory opens for production.
     fn activate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}

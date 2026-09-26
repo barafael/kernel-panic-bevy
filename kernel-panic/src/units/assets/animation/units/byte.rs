@@ -193,6 +193,9 @@ pub struct ByteAnim {
     /// Seconds since a target was last visible (drives the idle fold).
     since_target: f32,
     pieces: BytePieces,
+    /// `static-var gp` — the barrel `QueryWeapon1` names (bp0..bp3),
+    /// advanced by `FireWeapon1`'s sleeps between the salvo's shots.
+    gp: usize,
     /// Death choreography window (the `busy()` source).
     death: DeathFx,
 }
@@ -215,6 +218,7 @@ impl Default for ByteAnim {
             state: FoldState::Closed,
             since_target: f32::INFINITY,
             pieces: BytePieces::default(),
+            gp: 0,
             death: DeathFx::default(),
         }
     }
@@ -314,12 +318,21 @@ impl UnitAnim for ByteAnim {
         true
     }
 
+    fn shot(&mut self, rig: &mut AnimRig) {
+        // QueryWeapon1: `if (gp==k) piecenum=bpk`. `rig.muzzle` is a
+        // piece index — the old driver wrote the 0..3 slot number into
+        // it, so every shot after the first left from base/aimer/rotor.
+        rig.muzzle = self.pieces.bp[self.gp % 4];
+    }
+
     fn fire(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // FireWeapon1(): emit 1024 from bp{gp}, then cycle static[1]
-        // gp 0→1→2→3→0. The host fires one shot per call; the volley
-        // pacing (sleep 90/150) is the weapon cooldown here.
-        let idx = self_cycle(&mut rig.muzzle, 4);
+        // FireWeapon1(): emit 1024 from bp{gp}, then `gp` steps
+        // 0→1→2→3→0 (sleep 90 / 150 between barrels). The host calls
+        // this once per burst shot, after that shot's `QueryWeapon1`,
+        // so each shot leaves — and flashes — at the next barrel.
+        let idx = self.gp % 4;
         rig.emit(self.pieces.bp[idx], super::super::SfxKind::Puff);
+        self.gp = (idx + 1) % 4;
     }
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
@@ -338,10 +351,4 @@ impl UnitAnim for ByteAnim {
     fn is_open(&self) -> Option<bool> {
         Some(self.state == FoldState::Open)
     }
-}
-
-fn self_cycle(value: &mut usize, modulus: usize) -> usize {
-    let current = *value % modulus;
-    *value = (current + 1) % modulus;
-    current
 }

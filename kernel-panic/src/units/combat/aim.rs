@@ -122,6 +122,37 @@ pub struct AimScript {
 /// cycle, large enough that drifting targets don't churn.
 pub const AIM_SCRIPT_RETARGET_THRESHOLD: f32 = 0.2;
 
+/// `AimWeapon1(h, p)` arguments for a weapon aiming along `to_target`
+/// from a unit oriented by `unit_rot` — upstream
+/// `CWeapon::CallAimingScript` (`Weapon.cpp:410-421`): the wanted
+/// direction is projected onto the unit's own `rightdir` / `updir` /
+/// `frontdir`, so heading **and** pitch are relative to the body's full
+/// orientation (a banking or pitching flyer, a unit on a slope), then
+/// `h = -GetHeadingFromVector(localX, localZ)`, `p = asin(localY)`.
+///
+/// In this port a unit's front is local −Z (`Transform::looking_to`)
+/// and the model root carries a 180° yaw, so a piece turned by `h`
+/// around its Y axis points its S3O +Z at `atan2(−right, front)`:
+/// `h = 0` is dead ahead whatever way the body faces. (Using the body's
+/// Bevy yaw here — which is `heading + π` for a `looking_to` rotation —
+/// turned every aiming piece 180° away from its target.)
+///
+/// `arc_height` adds the ballistic elevation bias the Pointer's gun
+/// uses for its lob (`(4·h/d).atan()`), measured in the unit frame.
+pub fn local_aim_angles(unit_rot: Quat, to_target: Vec3, arc_height: f32) -> (f32, f32) {
+    let local = unit_rot.inverse() * to_target;
+    let (right, up, front) = (local.x, local.y, -local.z);
+    let heading = (-right).atan2(front);
+    let horizontal = (right * right + front * front).sqrt();
+    let direct_pitch = up.atan2(horizontal.max(1e-6));
+    let arc_pitch = if arc_height > 0.0 && horizontal > 1.0 {
+        (4.0 * arc_height / horizontal).atan()
+    } else {
+        0.0
+    };
+    (heading, direct_pitch + arc_pitch)
+}
+
 /// Advance every unit's aim cycle. Call the unit's animation driver
 /// each frame with the current heading/pitch (its `AimWeapon1`
 /// equivalent); the driver turns the relevant pieces and returns
@@ -143,34 +174,8 @@ pub fn drive_aim_script(
     >,
 ) {
     for (mut aim, mut animator, gtf, target, move_target, move_path) in &mut query {
-        let attacker_pos = gtf.translation();
-        let to_target = target.pos - attacker_pos;
-        let heading_rad = to_target.x.atan2(to_target.z);
-        let horizontal_dist = (to_target.x * to_target.x + to_target.z * to_target.z).sqrt();
-        // Spring's pitch convention is `asin(localY)` (`Weapon.cpp:418`),
-        // so positive pitch = target above horizon.
-        let direct_pitch = to_target.y.atan2(horizontal_dist.max(1e-6));
-        let arc_pitch = if target.arc_height > 0.0 && horizontal_dist > 1.0 {
-            (4.0 * target.arc_height / horizontal_dist).atan()
-        } else {
-            0.0
-        };
-        let pitch_rad = direct_pitch + arc_pitch;
-
-        // Spring passes AimWeapon1 a heading *relative to the unit's
-        // body* (world heading minus body yaw) — that's why upstream
-        // scripts can `turn <turret> to y-axis h` and stay on target no
-        // matter which way the hull ended up facing. Pieces aim within
-        // the unit frame, so hand them the same relative heading and
-        // wrap to (-π, π] for the shortest slew.
-        let body_yaw = gtf.rotation().to_euler(EulerRot::YXZ).0;
-        let mut rel_heading = heading_rad - body_yaw;
-        while rel_heading > std::f32::consts::PI {
-            rel_heading -= std::f32::consts::TAU;
-        }
-        while rel_heading < -std::f32::consts::PI {
-            rel_heading += std::f32::consts::TAU;
-        }
+        let (rel_heading, pitch_rad) =
+            local_aim_angles(gtf.rotation(), target.pos - gtf.translation(), target.arc_height);
 
         let dh = (rel_heading - aim.last_heading_rad).abs();
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
@@ -315,7 +320,13 @@ pub fn aim_weapons_system(
 ) {
     let dt = time.delta_secs();
     for (mut transform, stats, aim, aimer) in &mut query {
-        if aimer.is_some() {
+        // HoverAttack aircraft (Flow) never turn their body for an
+        // auto-acquired target: `HoverAirMoveType` owns the heading (it
+        // only faces `circlingPos` under an explicit attack order), and
+        // flow.bos swings the `base` piece onto the target instead.
+        // Turning the body here also fought `hover_air_system`, which
+        // rewrites the attitude every tick.
+        if aimer.is_some() || stats.can_fly {
             continue;
         }
         let to_target = Vec3::new(
@@ -347,6 +358,44 @@ pub fn aim_weapons_system(
             crate::interaction::movement::rotate_toward_xz(current_xz, desired_forward, max_turn);
         if new_forward.length_squared() > 1e-6 {
             transform.look_to(new_forward, Vec3::Y);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `AimWeapon1(h, p)` a unit receives must turn a piece's S3O +Z
+    /// (under the 180° model root) onto the target, whatever the body's
+    /// heading, bank or pitch — the old yaw-based heading was off by π
+    /// (every turret aimed backwards) and ignored bank/pitch.
+    #[test]
+    fn local_aim_angles_point_a_turned_piece_at_the_target() {
+        let root = Quat::from_rotation_y(std::f32::consts::PI);
+        for heading in [0.0f32, 0.9, 2.6, -1.7] {
+            for bank in [0.0f32, 0.35] {
+                let front = Vec3::new(heading.sin(), 0.0, heading.cos());
+                let right = front.cross(Vec3::Y);
+                let up = (Vec3::Y * bank.cos() + right * bank.sin()).normalize();
+                let body = Transform::default().looking_to(front, up).rotation;
+                for to_target in [
+                    front * 100.0,
+                    Vec3::new(80.0, -60.0, 10.0),
+                    Vec3::new(-30.0, 25.0, -90.0),
+                ] {
+                    let (h, p) = local_aim_angles(body, to_target, 0.0);
+                    let piece = Quat::from_euler(EulerRot::YXZ, h, -p, 0.0);
+                    let gun = body * root * piece * Vec3::Z;
+                    assert!(
+                        gun.dot(to_target.normalize()) > 0.9999,
+                        "heading {heading} bank {bank}: gun {gun} vs {to_target}"
+                    );
+                }
+                // Dead ahead is h = 0.
+                let (h, _) = local_aim_angles(body, front * 50.0, 0.0);
+                assert!(h.abs() < 0.2, "ahead should be ~0, got {h}");
+            }
         }
     }
 }

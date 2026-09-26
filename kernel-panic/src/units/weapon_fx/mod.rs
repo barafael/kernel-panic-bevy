@@ -5,6 +5,7 @@
 //! `tick_weapon_fx` fades/moves/despawns them each frame.
 
 mod ceg;
+mod flight;
 mod shared;
 mod spawn;
 mod tick;
@@ -57,9 +58,11 @@ impl Plugin for WeaponFxPlugin {
                     // or impact CEGs land a frame late.
                     spawn::spawn_weapon_visuals,
                     tick::tick_weapon_fx,
+                    tick::tick_fading_trails,
                     spawn::spawn_pending_explosions,
                     ceg::tick_ceg_particles,
                     ceg::tick_ceg_flames,
+                    ceg::tick_ceg_spikes,
                     ceg::tick_ceg_delayed_spawns,
                 )
                     .chain()

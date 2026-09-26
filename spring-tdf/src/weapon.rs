@@ -81,6 +81,16 @@ pub struct WeaponDef {
     pub trajectory_height: f32,
     pub turn_rate: f32,
     pub flight_time: f32,
+    /// `weapontimer` — Spring's `uptime`: seconds of straight ascent
+    /// before a `StarburstLauncher` projectile turns onto its target.
+    pub weapon_timer: f32,
+    /// `fixedLauncher` — Missile/Starburst launch along the muzzle
+    /// piece's emit direction instead of toward the target / straight up.
+    pub fixed_launcher: bool,
+    /// `wobble` (TA angle units per second) — Missile only.
+    pub wobble: f32,
+    /// `dance` (elmos) — Missile only.
+    pub dance: f32,
 
     // --- Combat ---
     pub turret: bool,
@@ -663,6 +673,10 @@ impl WeaponDef {
             trajectory_height: s.f32("trajectoryheight"),
             turn_rate: s.f32("turnrate"),
             flight_time: s.f32("flighttime"),
+            weapon_timer: s.f32("weapontimer"),
+            fixed_launcher: s.bool("fixedlauncher"),
+            wobble: s.f32("wobble"),
+            dance: s.f32("dance"),
 
             turret: s.bool("turret"),
             range: s.f32("range"),
@@ -671,9 +685,11 @@ impl WeaponDef {
             edge_effectiveness: s.f32("edgeeffectiveness"),
             tolerance: s.f32("tolerance"),
             spray_angle: s.f32("sprayangle"),
-            burst: s.f32("burst"),
-            burst_rate: s.f32("burstrate"),
-            projectiles: s.f32("projectiles"),
+            // Spring defaults (`WeaponDef.cpp`): `burst` 1,
+            // `burstRate` 0.1 s, `projectiles` 1.
+            burst: s.f32_or("burst", 1.0),
+            burst_rate: s.f32_or("burstrate", 0.1),
+            projectiles: s.f32_or("projectiles", 1.0),
 
             line_of_sight: s.bool("lineofsight"),
             collide_friendly: s.bool("collidefriendly"),

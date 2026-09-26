@@ -17,7 +17,7 @@ use crate::units::content::weapons::WeaponId;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::lifecycle::script_triggers::JustFired;
 use crate::units::spatial::SpatialIndex;
-use crate::units::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
+use crate::units::weapon_fx::PendingAttacks;
 
 /// A pending damage event. Damage is resolved at apply-time so the
 /// target's armor class can pick the right entry from the weapon's
@@ -83,23 +83,24 @@ impl DamageQueue {
     }
 }
 
-/// In-progress burst fire. Weapons with `burst > 1` fire the first
-/// shot through the regular combat path; this component releases the
-/// rest at `interval` spacing, with the aim point frozen so the whole
-/// burst lands on `target_pos` regardless of target motion. `target ==
-/// None` means an [`AttackGroundOrder`] burst — apply_damage falls
-/// through to AoE splash at `target_pos`.
+/// In-progress salvo (upstream `salvoLeft` / `nextSalvo`). Weapons with
+/// `burst > 1` fire the first shot where the salvo opens; this component
+/// releases the rest `salvo_delay` whole sim frames apart
+/// (`int(burstRate · 30)`, `WeaponLoader.cpp:171` — FlowMissile's 0.3 s
+/// is 9 frames, MegaBeam's 0.25 s is 7), with the aim point frozen so the
+/// whole burst lands on `shot.impact_pos`. `shot.target == None` means an
+/// [`AttackGroundOrder`] burst — apply_damage falls through to AoE splash.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct BurstFire {
+    pub shot: super::SalvoShot,
     pub shots_remaining: u32,
-    pub interval: f32,
-    pub timer: f32,
-    pub target: Option<Entity>,
-    pub target_pos: Vec3,
-    pub weapon: WeaponId,
-    /// Why: cached so `tick_burst_fire` doesn't hash the registry per shot.
-    pub is_traveling: bool,
+    /// Sim frame of the last shot — never two salvo shots in one frame
+    /// (`UpdateSalvo` runs once per frame even with `salvoDelay == 0`).
+    pub last_frame: u64,
+    /// Sim frame the next shot is due (`nextSalvo`).
+    pub next_frame: u64,
+    pub salvo_delay: u64,
 }
 
 /// Marks a unit as infected by a Worm or Virus attack. If the unit dies
@@ -222,65 +223,42 @@ pub(super) fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
 }
 
 /// Release follow-up shots for units in the middle of a burst.
-/// The initial shot fires through the regular combat path; each follow-up
-/// queues another damage event and weapon-FX event at `burst_rate` spacing
-/// until `shots_remaining` hits zero, then removes the component.
+/// The first shot fires where the salvo opens; each follow-up runs one
+/// `UpdateSalvo` step ([`super::fire_salvo_shot`]: per projectile
+/// `Shot1` → `QueryWeapon1` → fire) once its frame is due, and the last
+/// one also calls `EndBurst1`.
 pub fn tick_burst_fire(
     time: Res<Time>,
-    mut query: Query<(Entity, &UnitType, &mut BurstFire, &GlobalTransform), Without<Dying>>,
-    pieces: super::PieceLookup,
+    mut query: Query<(Entity, &mut BurstFire, &GlobalTransform), Without<Dying>>,
+    mut pieces: super::PieceLookup,
     unit_registry: Res<UnitRegistry>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    let dt = time.delta_secs();
-    for (entity, unit_type, mut burst, gtf) in &mut query {
-        burst.timer -= dt;
-        if burst.timer > 0.0 {
+    let frame = super::sim_frame(&time);
+    for (entity, mut burst, gtf) in &mut query {
+        if frame < burst.next_frame || frame <= burst.last_frame {
             continue;
         }
-
-        let distance = gtf.translation().distance(burst.target_pos);
-        if !burst.is_traveling {
-            damage_queue.push(PendingDamage {
-                target: burst.target,
-                attacker: entity,
-                weapon: burst.weapon,
-                impact_pos: burst.target_pos,
-                attacker_distance: distance,
-            });
-        }
-        let visual_origin = super::muzzle_world_pos(
-            entity,
+        let last = burst.shots_remaining <= 1;
+        super::fire_salvo_shot(
+            &burst.shot,
             gtf,
-            &pieces.muzzle,
-            &pieces.animator,
-            &pieces.piece_gtf,
+            last,
+            &mut pieces,
+            &unit_registry,
+            &mut pending_attacks,
+            &mut damage_queue,
         );
-        let muzzle_ceg = unit_registry
-            .preferred_muzzle_ceg(unit_type.0)
-            .map(|s| std::borrow::Cow::Owned(s.to_string()));
-        let delayed_hit = burst.is_traveling.then(|| DelayedHitInfo {
-            target: burst.target,
-            attacker: entity,
-            attacker_distance: distance,
-        });
-        pending_attacks.events.push(AttackEvent {
-            attacker_pos: visual_origin,
-            target_pos: burst.target_pos,
-            weapon_id: burst.weapon,
-            muzzle_ceg,
-            delayed_hit,
-            build_arc: false,
-        });
         commands.entity(entity).try_insert(JustFired);
 
-        burst.shots_remaining -= 1;
+        burst.shots_remaining = burst.shots_remaining.saturating_sub(1);
         if burst.shots_remaining == 0 {
             commands.entity(entity).remove::<BurstFire>();
         } else {
-            burst.timer = burst.interval;
+            burst.last_frame = frame;
+            burst.next_frame = frame + burst.salvo_delay;
         }
     }
 }
@@ -635,11 +613,12 @@ mod tests {
         assert!((splash_falloff(128.0, 512.0, 0.4) - 0.85).abs() < 1e-5);
     }
 
-    /// Why: pins upstream `MegaBeam` cadence (burst=4, burstrate=0.25,
-    /// reloadtime=2). 3 follow-ups at 0.25/0.50/0.75 s — fails fast
-    /// if burst_rate ever doubles or per-frame dt halves.
+    /// Upstream salvo cadence in whole sim frames: MegaBeam
+    /// (burst=4, burstrate=0.25) → `salvoDelay = int(7.5) = 7`, so the
+    /// follow-ups land on frames 7, 14, 21 after the opening shot —
+    /// not every 0.25 s of wall time (7.5 frames, which rounded to 8).
     #[test]
-    fn megabeam_burst_produces_4_shots_in_0_75_seconds() {
+    fn megabeam_burst_follow_ups_every_7_frames() {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut app = App::new();
@@ -650,89 +629,66 @@ mod tests {
             .init_resource::<WeaponRegistry>();
 
         let target = app.world_mut().spawn_empty().id();
-        // Initial shot is simulated by inserting a BurstFire directly
-        // — matches what `combat_system` would do for MegaBeam on the
-        // frame the first shot fires (shots_remaining = burst - 1).
-        let _attacker = app
-            .world_mut()
-            .spawn((
-                GlobalTransform::default(),
-                UnitType(UnitKind::Byte),
-                BurstFire {
-                    shots_remaining: 3,
-                    interval: 0.25,
-                    timer: 0.25,
-                    target: Some(target),
-                    target_pos: Vec3::ZERO,
+        let delay = super::super::salvo_delay_frames(0.25);
+        assert_eq!(delay, 7);
+        // Opening shot at frame 0, as `open_salvo` leaves it.
+        let attacker = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(attacker).insert((
+            GlobalTransform::default(),
+            UnitType(UnitKind::Byte),
+            BurstFire {
+                shot: super::super::SalvoShot {
+                    attacker,
+                    kind: UnitKind::Byte,
                     weapon: WeaponId::BUILD_LASER,
+                    target: Some(target),
+                    impact_pos: Vec3::ZERO,
                     is_traveling: false,
+                    projectiles: 1,
                 },
-            ))
-            .id();
+                shots_remaining: 3,
+                last_frame: 0,
+                next_frame: delay,
+                salvo_delay: delay,
+            },
+        ));
 
-        // Drive 60fps ticks for 0.85s — just past the expected end of
-        // the burst at 0.75s. Every frame: advance Time, tick burst.
-        const FRAMES: usize = 52; // 0.85s at 60fps
-        const FRAME_DT_MS: u64 = 16; // ≈16.67 ms
-        let mut shots_seen_by_deadline: Vec<(usize, usize)> = Vec::new();
-        for frame in 0..FRAMES {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_millis(FRAME_DT_MS));
+        let mut fired_on = Vec::new();
+        for frame in 0..=30u64 {
+            if frame > 0 {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+            }
+            let before = app.world().resource::<DamageQueue>().len();
             app.world_mut().run_system_once(tick_burst_fire).unwrap();
-            let damage_count = app.world().resource::<DamageQueue>().len();
-            shots_seen_by_deadline.push((frame, damage_count));
+            if app.world().resource::<DamageQueue>().len() > before {
+                fired_on.push(frame);
+            }
         }
+        assert_eq!(fired_on, vec![7, 14, 21]);
+        assert!(app.world().get::<BurstFire>(attacker).is_none());
+    }
 
-        // After 0.85s (frame 51 @ 60fps), all 3 follow-ups must have
-        // fired. Spacing checks:
-        // shot #1 (follow-up) at ~0.25s → frame 15 or 16
-        // shot #2 at ~0.50s → frame 31 or 32
-        // shot #3 at ~0.75s → frame 46 or 47
-        let damage_count_final = app.world().resource::<DamageQueue>().len();
-        assert_eq!(
-            damage_count_final, 3,
-            "burst must produce exactly 3 follow-up shots; saw {damage_count_final}. \
-             progression = {shots_seen_by_deadline:?}",
-        );
-
-        // Check the damage events arrived at the expected frames. Each
-        // interval is 16 frames ±1 at 60fps (since 0.25s / 0.01667s ≈
-        // 15.0, but the first tick already consumed some of the timer
-        // on frame 0, so the first fire lands at frame 15).
-        let first_shot_frame = shots_seen_by_deadline
-            .iter()
-            .find(|(_, c)| *c >= 1)
-            .map(|(f, _)| *f)
-            .expect("first follow-up must fire");
-        let second_shot_frame = shots_seen_by_deadline
-            .iter()
-            .find(|(_, c)| *c >= 2)
-            .map(|(f, _)| *f)
-            .expect("second follow-up must fire");
-        let third_shot_frame = shots_seen_by_deadline
-            .iter()
-            .find(|(_, c)| *c >= 3)
-            .map(|(f, _)| *f)
-            .expect("third follow-up must fire");
-
-        // Each gap should be ~15 frames (0.25s / 0.01667s). Allow ±2
-        // for integer-frame rounding. If cadence doubled silently to
-        // 0.5s, gaps would land at ~30 frames and this would fail.
-        let gap_1 = first_shot_frame; // from insertion
-        let gap_2 = second_shot_frame - first_shot_frame;
-        let gap_3 = third_shot_frame - second_shot_frame;
-        for (label, gap) in [("gap1", gap_1), ("gap2", gap_2), ("gap3", gap_3)] {
-            assert!(
-                (13..=17).contains(&gap),
-                "{label} = {gap} frames; expected ~15 (0.25s @ 60fps). \
-                 If this is near 30 frames the burst rate silently doubled. \
-                 progression = {shots_seen_by_deadline:?}",
-            );
+    fn burst(attacker: Entity, target: Option<Entity>, kind: UnitKind) -> BurstFire {
+        BurstFire {
+            shot: super::super::SalvoShot {
+                attacker,
+                kind,
+                weapon: WeaponId::BUILD_LASER,
+                target,
+                impact_pos: Vec3::ZERO,
+                is_traveling: false,
+                projectiles: 1,
+            },
+            shots_remaining: 3,
+            last_frame: 0,
+            next_frame: 7,
+            salvo_delay: 7,
         }
     }
 
-    /// Why: ground-attack bursts (`BurstFire.target == None`) used
+    /// Why: ground-attack bursts (`shot.target == None`) used
     /// to fire one shot per reload because `attack_ground_system`
     /// queued the cooldown but not the burst. Pins parity with the
     /// auto-target path.
@@ -747,30 +703,23 @@ mod tests {
             .insert_resource(UnitRegistry::empty())
             .init_resource::<WeaponRegistry>();
 
-        app.world_mut().spawn((
+        let attacker = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(attacker).insert((
             GlobalTransform::default(),
             UnitType(UnitKind::Byte),
-            BurstFire {
-                shots_remaining: 3,
-                interval: 0.25,
-                timer: 0.25,
-                target: None, // <-- ground-attack variant
-                target_pos: Vec3::ZERO,
-                weapon: WeaponId::BUILD_LASER,
-                is_traveling: false,
-            },
+            burst(attacker, None, UnitKind::Byte),
         ));
 
-        // Advance past the entire burst (0.85 s worth of 60fps ticks).
-        for _ in 0..52 {
+        // Advance past the entire burst (a second of sim frames).
+        for _ in 0..30 {
             app.world_mut()
                 .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_millis(16));
+                .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
             app.world_mut().run_system_once(tick_burst_fire).unwrap();
         }
         // All 3 follow-up shots must fire. Each pushes a PendingDamage
         // with `target = None` → the splash path in `apply_damage`
-        // still reaches everything in AoE around `target_pos`.
+        // still reaches everything in AoE around `impact_pos`.
         let dq = app.world().resource::<DamageQueue>();
         assert_eq!(
             dq.len(),
@@ -785,46 +734,40 @@ mod tests {
         }
     }
 
+    /// Follow-ups wait for their frame, never double up in one frame,
+    /// and each pushes one hitscan damage + one fx event.
     #[test]
-    fn burst_fire_releases_shots_at_interval() {
+    fn burst_fire_releases_shots_at_salvo_delay() {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
-            // Empty UnitRegistry — `preferred_muzzle_ceg` returns None
-            // for the test attacker (no sfx_types entry), so the event
-            // falls back to the synthesised muzzle flash. What we're
-            // actually asserting below is burst timing + DamageQueue
-            // count; the muzzle CEG is incidental.
             .insert_resource(UnitRegistry::empty())
             .init_resource::<WeaponRegistry>();
 
         let target = app.world_mut().spawn_empty().id();
-        let attacker = app
-            .world_mut()
-            .spawn((
-                GlobalTransform::default(),
-                UnitType(UnitKind::Bit),
-                BurstFire {
-                    shots_remaining: 3,
-                    interval: 0.25,
-                    timer: 0.25,
-                    target: Some(target),
-                    target_pos: Vec3::ZERO,
-                    weapon: WeaponId::BUILD_LASER,
-                    is_traveling: false,
-                },
-            ))
-            .id();
+        let attacker = app.world_mut().spawn_empty().id();
+        app.world_mut().entity_mut(attacker).insert((
+            GlobalTransform::default(),
+            UnitType(UnitKind::Bit),
+            burst(attacker, Some(target), UnitKind::Bit),
+        ));
+        let step = |app: &mut App, frames: u32| {
+            for _ in 0..frames {
+                app.world_mut()
+                    .resource_mut::<Time>()
+                    .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+                app.world_mut().run_system_once(tick_burst_fire).unwrap();
+            }
+        };
 
-        // Advance one interval: one shot fires, two remain.
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(250));
-        app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        step(&mut app, 6);
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 0, "not due before frame 7");
+        step(&mut app, 1);
         assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
+        assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
         assert_eq!(
             app.world()
                 .get::<BurstFire>(attacker)
@@ -832,26 +775,11 @@ mod tests {
                 .shots_remaining,
             2
         );
-
-        // A fraction later: not yet due.
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(100));
-        app.world_mut().run_system_once(tick_burst_fire).unwrap();
-        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
-
-        // Two more intervals: remaining shots fire, component is gone.
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(250));
-        app.world_mut().run_system_once(tick_burst_fire).unwrap();
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(250));
-        app.world_mut().run_system_once(tick_burst_fire).unwrap();
+        step(&mut app, 14);
         assert_eq!(app.world().resource::<DamageQueue>().len(), 3);
         assert!(app.world().get::<BurstFire>(attacker).is_none());
     }
+
 
     fn death_boom_weapon() -> (WeaponRegistry, WeaponId) {
         let mut weapons = WeaponRegistry::default();

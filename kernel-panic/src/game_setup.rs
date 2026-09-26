@@ -89,13 +89,39 @@ pub const SPECTATOR_TEAM: u8 = u8::MAX;
 pub fn demo_setup() -> GameSetup {
     const FACTIONS: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
     let seats = 2 + (rand_f64() * 3.0) as u8;
-    let players = (0..seats)
+    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+    let mut players: Vec<PlayerSpec> = (0..seats)
         .map(|i| PlayerSpec {
             faction: FACTIONS[(rand_f64() * 3.0) as usize % 3],
             team: 1 + i,
             ai: true,
         })
         .collect();
+    // Dev override: `KP_DEMO_FACTIONS=Network,System` pins the seats'
+    // factions (one seat per name) — e.g. to watch a specific unit's
+    // weapons in `KP_MENU_SHOTS` visual checks.
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(list) = std::env::var("KP_DEMO_FACTIONS") {
+        let pinned: Vec<Faction> = list
+            .split(',')
+            .filter_map(|name| {
+                FACTIONS
+                    .into_iter()
+                    .find(|f| format!("{f:?}").eq_ignore_ascii_case(name.trim()))
+            })
+            .collect();
+        if pinned.len() >= 2 {
+            players = pinned
+                .into_iter()
+                .enumerate()
+                .map(|(i, faction)| PlayerSpec {
+                    faction,
+                    team: 1 + i as u8,
+                    ai: true,
+                })
+                .collect();
+        }
+    }
     // Dev override: `KP_DEMO_MAP=<stem>` pins the attract-mode map (for
     // `KP_MENU_SHOTS` visual checks of one map). Not on wasm (no env).
     #[cfg(not(target_arch = "wasm32"))]

@@ -213,35 +213,32 @@ pub(super) fn spawn_weapon_visuals(
             });
         }
 
-        // Muzzle flash at the attacker's muzzle-piece position.
-        //
-        // When the unit's FBI declared a `[SFXTypes]` table and combat
-        // filled in `event.muzzle_ceg`, replay that CEG verbatim — this
-        // is the path that gives Bit the cyan `arrowflare` muzzle
-        // (`custom:oldskool_shot2`) and Byte/Pointer the soft-blue
-        // `oldskool_shot1` puff. When no SFX CEG was authored, fall
-        // back to the synthesised coloured sphere so there's still a
-        // "something fired" signal. Melee / BuildLaser skip both — see
-        // `is_melee` / `is_build_laser` filters.
-        if !is_melee && !is_build_laser(event.weapon_id) && !is_gauss_arc {
-            let ceg_spawned = if let Some(muzzle_ceg) = event.muzzle_ceg.as_deref() {
-                let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
-                spawn_ceg(
-                    muzzle_ceg,
-                    event.attacker_pos,
-                    muzzle_dir,
-                    &ceg_registry,
-                    &mut rng,
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut images,
-                    &mut model_cache,
-                    &mut particle_mesh,
-                )
-            } else {
-                false
-            };
+        // Muzzle flash: the CEG the unit's `FireWeapon1` emits from its
+        // muzzle (`emit-sfx 1024+i`), resolved by combat into
+        // `event.muzzle_ceg` — Bit's cyan `arrowflare`, Byte/Pointer's
+        // soft-blue `oldskool_shot1`. Upstream has no automatic muzzle
+        // flash, so a unit whose script emits nothing (Flow, Packet, …)
+        // gets nothing. The coloured sphere only stands in when the named
+        // CEG is missing from the registry.
+        if !is_melee
+            && !is_build_laser(event.weapon_id)
+            && !is_gauss_arc
+            && let Some(muzzle_ceg) = event.muzzle_ceg.as_deref()
+        {
+            let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
+            let ceg_spawned = spawn_ceg(
+                muzzle_ceg,
+                event.attacker_pos,
+                muzzle_dir,
+                &ceg_registry,
+                &mut rng,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut images,
+                &mut model_cache,
+                &mut particle_mesh,
+            );
             if !ceg_spawned {
                 spawn_impact_burst(
                     event.attacker_pos,
@@ -851,28 +848,23 @@ fn spawn_laser_bolt(
 /// cannon/plasma weapons that upstream Spring renders as a sprite
 /// billboard.
 ///
-/// Flight model selection, transcribed from the Recoil engine:
+/// Flight model selection, transcribed from the Recoil engine (see
+/// [`super::flight`]):
 ///
-/// - `MissileLauncher` + `trajectoryHeight > 0` (Pointer's Geometric):
-///   `FireImpl` launches along `normalize(toTarget + up × height)` at
-///   `startvelocity`, homing with `turnrate`.
-/// - `StarburstLauncher` + `fixedLauncher` (Flow's FlowMissile):
-///   launches along the fixed weapon dir (straight up), accelerates by
-///   `weaponacceleration` to `weaponvelocity`, homes after
-///   `weapontimer` seconds.
+/// - `MissileLauncher` (Pointer's Geometric, NX): `CMissileLauncher::
+///   FireImpl` + `CMissileProjectile` — launch toward the target (up-biased
+///   by `trajectoryHeight`, or along the muzzle when `fixedLauncher`),
+///   `extraHeight` arc, per-frame vector steering by `turnrate`.
+/// - `StarburstLauncher` (Flow's FlowMissile): launch from 2 elmos above
+///   the muzzle along the muzzle piece's emit dir (`fixedLauncher`; else
+///   straight up), `weapontimer` frames of ascent, a `turnrate` swing
+///   onto the target, then homing + acceleration to `weaponvelocity`.
 /// - `ballistic=1` + `myGravity` (Exploit's BugCannon):
 ///   `CannonProjectile` integrates `myGravity × map gravity`; the
 ///   launch angle is the low-arc ballistic solve so the shell lands on
 ///   the target.
 /// - everything else (AircraftBomb, plain cannons): direct parametric
 ///   lerp as before.
-///
-/// Spring TA-angle-units to radians/s: TDF `turnrate=` counts 65536 per
-/// full revolution (the same heading units as COB angle constants).
-fn ta_turn_rate(units: f32) -> f32 {
-    units * std::f32::consts::TAU / 65536.0
-}
-
 #[allow(clippy::too_many_arguments)]
 fn spawn_projectile(
     event: &AttackEvent,
@@ -905,37 +897,25 @@ fn spawn_projectile(
     let to_target = event.target_pos - event.attacker_pos;
     let up = Vec3::Y;
     const MAP_GRAVITY: f32 = 50.0; // elmos/s², from the map's gravity=
+    let muzzle_dir = event
+        .delayed_hit
+        .as_ref()
+        .map_or_else(|| to_target.normalize_or(up), |d| d.muzzle_dir);
+    let launch = super::flight::Launch {
+        weapon,
+        muzzle_pos: event.attacker_pos,
+        muzzle_dir,
+        target_pos: event.target_pos,
+    };
+    let mut spawn_pos = event.attacker_pos;
     let flight = if weapon.category() == spring_tdf::WeaponCategory::StarburstLauncher {
-        Flight::Starburst {
-            launch_dir: up,
-            launch_speed: if weapon.start_velocity > 0.0 {
-                weapon.start_velocity
-            } else {
-                speed
-            },
-            acceleration: weapon.weapon_acceleration,
-            max_speed: if weapon.weapon_velocity > 0.0 {
-                weapon.weapon_velocity
-            } else {
-                speed
-            },
-            home_delay: 0.1, // weapontimer=0.1 before homing starts
-            turn_rate: ta_turn_rate(weapon.turn_rate),
-        }
-    } else if weapon.category() == spring_tdf::WeaponCategory::MissileLauncher
-        && weapon.trajectory_height > 0.0
-    {
-        // FireImpl: targetVec = normalize(toTarget + up × trajectoryHeight)
-        let launch_dir = (to_target.normalize() + up * weapon.trajectory_height).normalize();
-        Flight::Missile {
-            launch_dir,
-            launch_speed: if weapon.start_velocity > 0.0 {
-                weapon.start_velocity
-            } else {
-                speed
-            },
-            turn_rate: ta_turn_rate(weapon.turn_rate),
-        }
+        let (f, pos) = super::flight::StarburstFlight::launch(launch);
+        spawn_pos = pos;
+        Flight::Starburst(f)
+    } else if weapon.category() == spring_tdf::WeaponCategory::MissileLauncher {
+        let (f, pos) = super::flight::MissileFlight::launch(launch);
+        spawn_pos = pos;
+        Flight::Missile(f)
     // `myGravity > 0` is the discriminator: every KPK ballistic shell
     // carries a gravity multiplier (BugCannon .3, WMD .4). A
     // `ballistic=1` tag with no gravity (SwallowDamage's burnblow) is a
@@ -1006,58 +986,32 @@ fn spawn_projectile(
     // minting a fresh one per shot.
     let material = cache.get_or_create_tiled(color, false, weapon.intensity, None, 0, materials);
 
-    // Upstream weapons with `smoketrail=1` leave a trailing ribbon
-    // along the flight path. Build it as a dedicated triangle-strip
-    // entity textured with the weapon's `texture2` (`pointertrail` /
-    // `firetrail` / …) and keep its mesh handle on the projectile
-    // so the tick system can rewrite it each frame. A bare `cegTag`
-    // with no `texture2` (BugCannon's `corruption_BCtrail`) skips the
-    // ribbon — that trail is replayed as the actual CEG in the tick.
-    let has_trail = weapon.smoke_trail
-        || (!weapon.ceg_tag.is_empty() && !weapon.texture2.is_empty() && weapon.texture2 != "none");
-    // The authored per-projectile CEG trail, emitted periodically by
-    // `tick_weapon_fx`. Only for ballistic shells with a bare `cegTag`
-    // (no ribbon texture to hang it on).
-    let trail_ceg = if weapon.ballistic && !weapon.ceg_tag.is_empty() {
-        Some(Cow::Owned(weapon.ceg_tag.clone()))
+    // Upstream weapons with `smoketrail=1` leave a smoke-trail ribbon
+    // textured with the weapon's `texture2` (`pointertrail` /
+    // `flowtrail` / `firetrail`).
+    let trail = if weapon.smoke_trail {
+        build_projectile_trail(weapon, commands, meshes, materials, images, model_cache)
     } else {
         None
     };
-
-    let trail = if has_trail {
-        build_projectile_trail(
-            event.attacker_pos,
-            weapon,
-            commands,
-            meshes,
-            materials,
-            images,
-            model_cache,
-        )
-    } else {
-        None
-    };
+    // The authored per-frame `cegTag` CEG, emitted by `tick_weapon_fx`.
+    let trail_ceg = (!weapon.ceg_tag.is_empty()).then(|| Cow::Owned(weapon.ceg_tag.clone()));
 
     // Initial velocity for integrated flights (the tick takes over).
     let (velocity, speed) = match flight {
-        Flight::Missile {
-            launch_dir,
-            launch_speed,
-            ..
-        }
-        | Flight::Starburst {
-            launch_dir,
-            launch_speed,
-            ..
-        } => (launch_dir * launch_speed, launch_speed),
+        Flight::Missile(m) => (m.dir * m.speed * super::flight::GAME_SPEED, m.speed * 30.0),
+        Flight::Starburst(s) => (s.dir * s.speed * super::flight::GAME_SPEED, s.speed * 30.0),
         Flight::Ballistic { velocity, .. } => (velocity, velocity.length()),
         Flight::Direct => (Vec3::ZERO, speed),
     };
+    let rotation = flight
+        .guided_dir()
+        .map_or(Quat::IDENTITY, super::tick::projectile_orientation);
 
     commands
         .spawn((
             ProjectileVisual {
-                origin: event.attacker_pos,
+                origin: spawn_pos,
                 target: event.target_pos,
                 speed,
                 progress: 0.0,
@@ -1067,14 +1021,16 @@ fn spawn_projectile(
                 elapsed: 0.0,
                 trail,
                 trail_ceg,
-                trail_emit: 0.0,
                 trail_seed: 0x9e3779b9u32.wrapping_mul(
                     (event.attacker_pos.x * 131.0 + event.target_pos.z * 7.0).to_bits(),
-                ),
+                ) | 1,
+                last_target_pos: None,
             },
             Mesh3d(mesh),
             MeshMaterial3d(material),
-            Transform::from_translation(event.attacker_pos).with_scale(Vec3::splat(visual_scale)),
+            Transform::from_translation(spawn_pos)
+                .with_rotation(rotation)
+                .with_scale(Vec3::splat(visual_scale)),
         ))
         .id()
 }
@@ -1137,17 +1093,16 @@ fn build_bolt_caps(
     })
 }
 
-/// Spawn a companion entity that carries the projectile's trail mesh.
+/// Spawn a companion entity that carries the projectile's smoke-trail
+/// mesh (upstream `CSmokeTrailProjectile`, one segment per sim frame).
 ///
-/// The mesh starts empty — the tick system rewrites it every frame
-/// from the projectile's sample ring-buffer. The material picks up
-/// the weapon's `texture2` (the designated smoke-trail atlas); when
-/// that texture can't be loaded the trail falls back to an untextured
-/// coloured strip so something still reads as "motion behind the
-/// shell".
-#[allow(clippy::too_many_arguments)]
+/// The mesh starts empty — the tick system rewrites it every frame from
+/// the trail samples. Colour follows upstream: grey `smokeColor` (0.65)
+/// times the weapon's `texture2`, faded per vertex through premultiplied
+/// vertex colours (the effects pass draws `GL_ONE, GL_ONE_MINUS_SRC_ALPHA`
+/// with colour and alpha both scaled by the fade). The weapon's `rgbColor`
+/// plays no part.
 fn build_projectile_trail(
-    origin: Vec3,
     weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -1155,14 +1110,6 @@ fn build_projectile_trail(
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
 ) -> Option<ProjectileTrail> {
-    // Half-width: trails look natural at ~0.5× the weapon's authored
-    // size (or a minimum of 2 elmos so a cegTag with size=0 still
-    // leaves a visible streak).
-    let half_width = (weapon.size * 0.5).max(2.0);
-
-    // Build an empty triangle-strip mesh sized for `TRAIL_SAMPLE_COUNT`
-    // samples (one quad per segment, two tris per quad). The tick
-    // system fills in vertex positions each frame.
     let mut mesh = Mesh::new(
         bevy::mesh::PrimitiveTopology::TriangleStrip,
         bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
@@ -1173,25 +1120,20 @@ fn build_projectile_trail(
         Mesh::ATTRIBUTE_NORMAL,
         vec![[0.0, 1.0, 0.0_f32]; vert_count],
     );
-    // UV.u runs along the trail (0 at head, 1 at tail); UV.v alternates
-    // 0/1 across the ribbon width. The tick system writes .u per
-    // sample; .v stays constant so we initialise once here.
+    // V runs across the ribbon; U alternates per segment (each upstream
+    // segment spans the whole texture).
     let mut uvs = Vec::with_capacity(vert_count);
-    for _ in 0..TRAIL_SAMPLE_COUNT {
-        uvs.push([0.0, 0.0]);
-        uvs.push([0.0, 1.0]);
+    for i in 0..TRAIL_SAMPLE_COUNT {
+        let u = (i % 2) as f32;
+        uvs.push([u, 0.0]);
+        uvs.push([u, 1.0]);
     }
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0_f32; 4]; vert_count]);
     let mesh_handle = meshes.add(mesh);
 
-    // Material: tint by weapon's resolved edge color so the `texture2`
-    // multiplies by the intended hue. For Pointer's Geometric the
-    // rgbColor is (0,0,0) → defaults to Cannon orange, which overlays
-    // `pointertrail.tga`'s baked orange-red beautifully.
-    let color = weapon_edge_color(weapon);
     let texture = if !weapon.texture2.is_empty() && weapon.texture2 != "none" {
-        super::super::weapon_fx::ceg::CegRegistry::resolve_texture(&weapon.texture2)
+        CegRegistry::resolve_texture(&weapon.texture2)
             .and_then(|filename| {
                 crate::units::assets::meshes::load_beam_texture(filename, model_cache, images)
             })
@@ -1200,11 +1142,10 @@ fn build_projectile_trail(
         None
     };
     let material = materials.add(StandardMaterial {
-        base_color: Color::LinearRgba(color),
+        base_color: Color::WHITE,
         base_color_texture: texture,
-        emissive: color * 3.0,
         unlit: true,
-        alpha_mode: AlphaMode::Add,
+        alpha_mode: AlphaMode::Premultiplied,
         cull_mode: None,
         ..default()
     });
@@ -1219,16 +1160,10 @@ fn build_projectile_trail(
         ))
         .id();
 
-    // Seed the sample buffer with the origin so the very first frame
-    // draws a zero-length strip rather than a degenerate fan from the
-    // origin; segments fill in as the projectile moves.
-    let samples = vec![origin; TRAIL_SAMPLE_COUNT];
-
     Some(ProjectileTrail {
         ribbon_entity,
         mesh: mesh_handle,
-        samples,
-        half_width,
+        samples: std::collections::VecDeque::with_capacity(TRAIL_SAMPLE_COUNT),
     })
 }
 

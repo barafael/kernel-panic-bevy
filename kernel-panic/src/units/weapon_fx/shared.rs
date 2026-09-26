@@ -55,6 +55,10 @@ pub struct DelayedHitInfo {
     pub target: Option<Entity>,
     pub attacker: Entity,
     pub attacker_distance: f32,
+    /// World-space emit direction of the `QueryWeapon` piece at fire
+    /// time (`CWeapon::weaponDir`) — the launch direction of a
+    /// `fixedLauncher` missile / starburst.
+    pub muzzle_dir: Vec3,
 }
 
 /// Attached to every traveling-projectile / laser-bolt visual that
@@ -271,11 +275,9 @@ pub(super) struct BoltCaps {
 
 /// A projectile traveling from origin to target.
 ///
-/// When `trail` is `Some`, the tick system maintains a ribbon of
-/// recent positions behind the projectile and rewrites a triangle-
-/// strip mesh from those samples every frame. Upstream Spring drives
-/// the same visual via `smoketrail=1` with `texture2` pointing at the
-/// weapon's trail atlas (`pointertrail`, `firetrail`, `flametrail`…).
+/// When `trail` is `Some`, the tick system appends a smoke-trail sample
+/// every sim frame and rewrites the ribbon mesh (upstream
+/// `smoketrail=1` → `CSmokeTrailProjectile`, textured with `texture2`).
 #[derive(Component)]
 pub(super) struct ProjectileVisual {
     pub origin: Vec3,
@@ -285,24 +287,24 @@ pub(super) struct ProjectileVisual {
     pub arc_height: f32,
     pub trail: Option<ProjectileTrail>,
     /// Per-category flight integration, transcribed from the Recoil
-    /// engine's projectile classes (`MissileLauncher::FireImpl`,
-    /// `MissileProjectile`, `CannonProjectile`). `Direct` keeps the
-    /// legacy parametric lerp; the others integrate velocity per tick.
+    /// engine's projectile classes (see [`super::flight`]). `Direct`
+    /// keeps the legacy parametric lerp; the others integrate per tick.
     pub flight: Flight,
-    /// Current velocity (used by Non-direct flights; the tick
-    /// integrates position from it).
+    /// Current velocity in elmos/s (integrated flights).
     pub velocity: Vec3,
-    /// Accumulated flight time, for homing delays and arrival checks.
+    /// Accumulated flight time (seconds).
     pub elapsed: f32,
-    /// `cegTag=`-authored trail CEG replayed along the flight path
-    /// (BugCannon's `corruption_BCtrail`). `None` for ribbon-trail
-    /// weapons (their `texture2` streak is handled separately).
+    /// `cegTag=` CEG the projectile emits at its position every sim
+    /// frame while it has fuel (`explGenHandler.GenExplosion(cegID, …)`
+    /// in each projectile's `Update`) — FlowMissile's
+    /// `network_flowtrail` spikes, BugCannon's `corruption_BCtrail`.
     pub trail_ceg: Option<Cow<'static, str>>,
-    /// Throttle accumulator (seconds) for the periodic trail-CEG spawn.
-    pub trail_emit: f32,
     /// Per-projectile PRNG seed so ticks can call `spawn_ceg` without a
     /// system `Local` (each projectile gets a stable-but-different roll).
     pub trail_seed: u32,
+    /// Last frame's tracked target position, to derive the target's
+    /// velocity for the missile lead (`UpdateTargeting`'s `targetVel`).
+    pub last_target_pos: Option<Vec3>,
 }
 
 /// Flight integration for a projectile. Spawn computes the launch
@@ -311,61 +313,82 @@ pub(super) struct ProjectileVisual {
 pub enum Flight {
     /// Parametric straight line (legacy path — AircraftBomb, etc.).
     Direct,
-    /// Guided missile (`MissileLauncher` with `tracks` + optional
-    /// `trajectoryHeight` up-bias — Pointer's Geometric). Launches
-    /// along `launch_dir`, then steers onto the target with a
-    /// turn-rate cap (`weaponDef->turnrate`, radians/s — the spawn side
-    /// converts the TDF's TA angle units).
-    Missile {
-        launch_dir: Vec3,
-        launch_speed: f32,
-        turn_rate: f32,
-    },
-    /// Starburst (`weapontype=StarburstLauncher` + `fixedLauncher` —
-    /// Flow's FlowMissile): launches straight up along the fixed
-    /// weapon dir, accelerates, and homes after the `weapontimer`
-    /// delay with a near-snap turn rate.
-    Starburst {
-        launch_dir: Vec3,
-        launch_speed: f32,
-        acceleration: f32,
-        max_speed: f32,
-        home_delay: f32,
-        turn_rate: f32,
-    },
+    /// `CMissileProjectile` (`weapontype=MissileLauncher` — Pointer's
+    /// Geometric, NX Flag).
+    Missile(super::flight::MissileFlight),
+    /// `CStarburstProjectile` (`weapontype=StarburstLauncher` — Flow's
+    /// FlowMissile).
+    Starburst(super::flight::StarburstFlight),
     /// Ballistic shell (`ballistic=1` + `myGravity` — Exploit's
     /// BugCannon): fixed launch velocity from the ballistic solve +
     /// constant gravity `g` elmos/s² (`myGravity × map gravity`).
     Ballistic { velocity: Vec3, gravity: f32 },
 }
 
-/// Number of samples retained in the projectile trail's ring buffer.
-/// The ribbon mesh draws `N - 1` quads; one sample is added per
-/// rendered frame (60 Hz), so `N = 128` gives ~2.1 s of visible
-/// trail — comparable to upstream Spring's
-/// `CSmokeProjectile::lifeTime ≈ 70` frames at the 30 Hz sim rate.
-/// 16 (the original value) covered ~0.27 s, well under most
-/// projectiles' flight time and visibly stubby on Pointer arcs.
-/// Per-frame cost is negligible (256 vertex writes per live trail).
-pub(super) const TRAIL_SAMPLE_COUNT: usize = 128;
+impl Flight {
+    /// Unit flight direction of a guided projectile.
+    pub fn guided_dir(&self) -> Option<Vec3> {
+        match self {
+            Flight::Missile(m) => Some(m.dir),
+            Flight::Starburst(s) => Some(s.dir),
+            _ => None,
+        }
+    }
 
-/// State for a single projectile's trailing ribbon. Lives on the same
-/// entity as the `ProjectileVisual`; the companion trail-ribbon entity
-/// is referenced via `ribbon_entity` so both despawn together.
+    /// Whether the projectile still burns fuel (`ttl > 0`) — the window
+    /// in which it emits its `cegTag`.
+    pub fn has_fuel(&self) -> bool {
+        match self {
+            Flight::Missile(m) => m.ttl > 0,
+            Flight::Starburst(s) => s.ttl > 0,
+            Flight::Ballistic { .. } => true,
+            Flight::Direct => false,
+        }
+    }
+}
+
+/// Upstream smoke-trail defaults (`WeaponDef.cpp:246-249`), none of which
+/// a Kernel Panic weapon overrides: a new trail segment every frame
+/// (`smokePeriod=1`), each lingering `smokeTime` = 60 frames, half-width
+/// growing `1 + t·smokeSize` (t = age / smokeTime, `smokeSize=7`),
+/// brightness `smokeColor=0.65`.
+pub(super) const SMOKE_TIME_FRAMES: f32 = 60.0;
+pub(super) const SMOKE_SIZE: f32 = 7.0;
+pub(super) const SMOKE_COLOR: f32 = 0.65;
+
+/// Ring capacity of a trail ribbon: one sample per sim frame over the
+/// `smokeTime` window plus the head.
+pub(super) const TRAIL_SAMPLE_COUNT: usize = SMOKE_TIME_FRAMES as usize + 2;
+
+/// One smoke-trail vertex pair: where the projectile was, which way it
+/// flew, and how many sim frames ago (`CSmokeTrailProjectile` segment
+/// endpoints `pos1/dir1`, `pos2/dir2`, `creationTime`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct TrailSample {
+    pub pos: Vec3,
+    pub dir: Vec3,
+    pub age: f32,
+    /// Drawn at zero alpha: the launch point (`firstSegment`) and the
+    /// impact point (`lastSegment`).
+    pub hidden: bool,
+}
+
+/// State for a projectile's smoke-trail ribbon. Lives on the projectile
+/// while it flies; on impact it moves onto the ribbon entity as a
+/// [`FadingTrail`] so the smoke lingers its full `smokeTime` like
+/// upstream's independent trail segments.
 pub(super) struct ProjectileTrail {
     /// Entity carrying the ribbon's `Mesh3d` / material.
     pub ribbon_entity: Entity,
     /// Mesh the tick system rewrites each frame.
     pub mesh: Handle<Mesh>,
-    /// Ring-buffer of recent world positions, oldest first. Sized by
-    /// `TRAIL_SAMPLE_COUNT`; the tick system prepends the projectile's
-    /// current pos and drops the oldest.
-    pub samples: Vec<Vec3>,
-    /// Ribbon half-width in world units — set at spawn from the
-    /// weapon's authored `size` so a Pointer shell leaves a thicker
-    /// trail than a BugCannon pellet.
-    pub half_width: f32,
+    /// Samples, oldest first.
+    pub samples: std::collections::VecDeque<TrailSample>,
 }
+
+/// A trail whose projectile is gone, still fading out.
+#[derive(Component)]
+pub(super) struct FadingTrail(pub ProjectileTrail);
 
 /// One pixelly square spawned at a build-laser impact point.
 ///

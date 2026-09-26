@@ -372,6 +372,9 @@ pub enum EffectClass {
     ExpGenSpawner,
     /// Animated static stars / sparkles (rarely used).
     Stars,
+    /// `CExploSpikeProjectile` (`class=explspike`): a camera-facing
+    /// streak that grows and fades in a few frames.
+    ExploSpike,
     /// Unknown class string (preserved for forward compatibility).
     Other(String),
 }
@@ -430,12 +433,29 @@ pub struct SpawnerProperties {
     pub always_visible: bool,
 }
 
+/// Properties for a `CExploSpikeProjectile` (`explspike`) effect —
+/// upstream `ExploSpikeProjectile.cpp`.
+#[derive(Debug, Clone, Default)]
+pub struct SpikeProperties {
+    pub length: CegExpr,
+    pub width: CegExpr,
+    pub alpha: CegExpr,
+    pub alpha_decay: CegExpr,
+    /// Unnormalised streak direction; its length also sets the
+    /// per-frame length growth (`Init`: `lengthGrowth = |dir|·(0.5+r·0.4)`).
+    pub dir: CegVec3,
+    pub pos: CegVec3,
+    /// Tint; upstream default `(1, 0.8, 0.5)`.
+    pub color: Option<CegVec3>,
+}
+
 /// Union of effect-specific properties.
 #[derive(Debug, Clone)]
 pub enum EffectProperties {
     Particle(ParticleProperties),
     Flame(FlameProperties),
     Spawner(SpawnerProperties),
+    Spike(SpikeProperties),
     /// Unknown or unsupported class — raw entries retained for debugging.
     Raw(BTreeMap<String, String>),
 }
@@ -534,6 +554,7 @@ impl EffectLayer {
             EffectClass::ExpGenSpawner => {
                 EffectProperties::Spawner(SpawnerProperties::from_section(props))
             }
+            EffectClass::ExploSpike => EffectProperties::Spike(SpikeProperties::from_section(props)),
             EffectClass::Stars | EffectClass::Other(_) => {
                 EffectProperties::Raw(props.map(|p| p.entries.clone()).unwrap_or_default())
             }
@@ -545,10 +566,10 @@ impl EffectLayer {
             air: s.bool("air"),
             ground: s.bool("ground"),
             water: s.bool("water"),
-            count: {
-                let c = s.f32("count") as u32;
-                if c == 0 { 1 } else { c }
-            },
+            // `psi.count = max(0, GetInt("count", 1))`
+            // (`ExplosionGenerator.cpp:978`): absent → 1, an explicit
+            // `count=0` disables the layer (network_flowtrail's Circle).
+            count: s.f32_or("count", 1.0).max(0.0) as u32,
             properties,
         })
     }
@@ -561,6 +582,7 @@ impl EffectClass {
             "CBitmapMuzzleFlame" => Self::BitmapMuzzleFlame,
             "CExpGenSpawner" => Self::ExpGenSpawner,
             "CStars" => Self::Stars,
+            "explspike" | "CExploSpikeProjectile" => Self::ExploSpike,
             other => Self::Other(other.to_string()),
         }
     }
@@ -630,6 +652,24 @@ impl FlameProperties {
             dir: CegVec3::parse(&s.string("dir")),
             pos: CegVec3::parse(&s.string("pos")),
             always_visible: s.bool("alwaysvisible"),
+        }
+    }
+}
+
+impl SpikeProperties {
+    fn from_section(s: Option<&Section>) -> Self {
+        let Some(s) = s else {
+            return Self::default();
+        };
+        let color = s.get("color").map(CegVec3::parse);
+        Self {
+            length: expr(s, "length"),
+            width: expr(s, "width"),
+            alpha: expr(s, "alpha"),
+            alpha_decay: expr(s, "alphadecay"),
+            dir: CegVec3::parse(&s.string("dir")),
+            pos: CegVec3::parse(&s.string("pos")),
+            color,
         }
     }
 }

@@ -359,6 +359,9 @@ const ASSET_DIRS: &[&str] = &[
     // `spring_unit_mesh::parse_tga` can resolve them through the same
     // on-disk lookup the unit textures already use.
     "upstream/Kernel-Panic/bitmaps/kpsfx",
+    // Engine default textures the game relies on without shipping
+    // (`laserend` for `explspike` CEG streaks).
+    "upstream/RecoilEngine/cont/base/bitmaps/bitmaps",
 ];
 
 /// Lazily find the first existing asset path for a filename.

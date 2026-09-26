@@ -1881,3 +1881,28 @@ mod real_files {
         }
     }
 }
+
+/// `network_flowtrail` (FlowMissile's `cegTag`): the Circle layer is
+/// authored `count=0` — disabled upstream (`max(0, GetInt("count", 1))`)
+/// — and the six `explspike` streaks parse as spikes.
+#[test]
+fn flowtrail_ceg_disables_count_zero_and_parses_spikes() {
+    let tdf = crate::Tdf::parse(
+        "[network_flowtrail]\n{\n[Circle]\n{\nclass=CSimpleParticleSystem;\n[properties]\n{\nparticleLife=48;\n}\nair=1;\ncount=0;\n}\n\
+         [spikes]\n{\nclass=explspike;\n[properties]\n{\ndir=-1 r2, -1 r2, -1 r2;\nwidth=4;\nlength=10 r7;\nalpha=0.9;\nalphadecay=0.3;\ncolor=1,1,1;\n}\nair=1;\ncount=6;\n}\n}\n",
+    )
+    .unwrap();
+    let defs = crate::ExplosionDefs::from_tdf(&tdf);
+    let def = defs.get("network_flowtrail").unwrap();
+    assert_eq!(def.effects[0].count, 0);
+    assert_eq!(def.effects[1].class, crate::EffectClass::ExploSpike);
+    assert_eq!(def.effects[1].count, 6);
+    let crate::EffectProperties::Spike(spike) = &def.effects[1].properties else {
+        panic!("explspike must parse as a spike");
+    };
+    let ctx = crate::EvalCtx::default();
+    assert_eq!(spike.width.eval(&ctx), 4.0);
+    assert_eq!(spike.length.eval(&ctx), 10.0);
+    assert!((spike.alpha_decay.eval(&ctx) - 0.3).abs() < 1e-6);
+    assert!(spike.color.is_some());
+}

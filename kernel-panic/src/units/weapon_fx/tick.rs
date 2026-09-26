@@ -5,8 +5,9 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
 use super::shared::{
-    BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, Flight, GroundFlash, ImpactBurst,
-    LaserBolt, LightningArc, PendingExplosions, ProjectileVisual, TRAIL_SAMPLE_COUNT,
+    BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, FadingTrail, Flight, GroundFlash,
+    ImpactBurst, LaserBolt, LightningArc, PendingExplosions, ProjectileTrail, ProjectileVisual,
+    SMOKE_COLOR, SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
 };
 use crate::rendering::camera::RtsCamera;
 use bevy::ecs::system::SystemParam;
@@ -17,29 +18,21 @@ use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 #[cfg(test)]
 use crate::units::content::weapons::WeaponId;
 use crate::units::content::weapons::WeaponRegistry;
+use crate::terrain::heightmap::Heightmap;
 use crate::units::spatial::SpatialIndex;
 
-/// Engine-faithful missile steering (`MissileProjectile.cpp`):
-/// if the direction error is within `turn_rate` (radians) the missile
-/// snaps straight onto the lead direction (the `SqLength < Square(turnrate)`
-/// check compares a bounded difference-vector against the rate), else it
-/// rotates by `turn_rate · dt` per tick. `turn_rate` arrives in
-/// radians/s already (Spring TDF `turnrate=` is in TA angle units, 65536
-/// per revolution, converted at parse/spawn time).
-fn steer_toward(dir: Vec3, desired: Vec3, turn_rate: f32, dt: f32) -> Vec3 {
-    let ms = dir.length();
-    if ms <= f32::EPSILON || desired.length_squared() <= f32::EPSILON {
-        return dir;
-    }
-    let du = dir / ms;
-    let desired_u = desired.normalize();
-    let angle = du.angle_between(desired_u);
-    if angle <= turn_rate {
-        desired_u * ms
-    } else {
-        let axis = du.cross(desired_u).try_normalize().unwrap_or(Vec3::Y);
-        (Quat::from_axis_angle(axis, turn_rate * dt) * du) * ms
-    }
+/// Upper bound on a guided projectile's life (seconds). Missiles end on
+/// the ground or a unit; this only catches one that leaves the map.
+const GUIDED_MAX_LIFETIME: f32 = 30.0;
+
+/// Rotation that points a projectile model's S3O +Z along `dir`, with
+/// its +Y as close to world up as possible — upstream
+/// `CProjectile::GetTransformMatrix` (`Projectile.cpp:209-223`).
+pub(super) fn projectile_orientation(dir: Vec3) -> Quat {
+    let dir = dir.normalize_or(Vec3::Z);
+    let up = if dir.y.abs() < 0.95 { Vec3::Y } else { Vec3::X };
+    // `looking_to` aims local −Z; aim it backwards so +Z leads.
+    Transform::IDENTITY.looking_to(-dir, up).rotation
 }
 
 /// Grouped read-only inputs for the volumetric mid-flight collision
@@ -51,6 +44,8 @@ pub(super) struct VolumeHitCtx<'w, 's> {
     target_q: Query<'w, 's, (&'static GlobalTransform, &'static CollisionVolume), With<UnitType>>,
     attacker_q: Query<'w, 's, (&'static TeamId, &'static Faction)>,
     spatial: Res<'w, SpatialIndex>,
+    /// Terrain for guided projectiles' ground impacts.
+    heightmap: Option<Res<'w, Heightmap>>,
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -361,9 +356,16 @@ pub(super) fn tick_weapon_fx(
         }
     }
 
+    let frames = dt * super::flight::GAME_SPEED;
     for (entity, mut proj, mut transform) in &mut projectiles {
+        // Plain `&mut` so the flight-state and bookkeeping fields borrow
+        // disjointly.
+        let proj: &mut ProjectileVisual = &mut proj;
         let total_dist = proj.origin.distance(proj.target);
-        if total_dist < 0.1 {
+        let hit_meta = delayed_hits.get(entity).ok();
+        let target_entity = hit_meta.and_then(|h| h.target);
+        let attacker_entity = hit_meta.map(|h| h.attacker);
+        if total_dist < 0.1 && proj.flight == Flight::Direct {
             trigger_delayed_hit(
                 entity,
                 None,
@@ -374,26 +376,29 @@ pub(super) fn tick_weapon_fx(
                 &mut pending_explosions,
                 &mut commands,
             );
-            despawn_projectile(entity, &mut proj, &mut commands);
+            despawn_projectile(entity, proj, &mut commands);
             continue;
         }
-        let hit_meta = delayed_hits.get(entity).ok();
-        let target_entity = hit_meta.and_then(|h| h.target);
-        let attacker_entity = hit_meta.map(|h| h.attacker);
 
         // —— Integrate this frame's flight model. Every model yields the
         // swept segment (seg_start → seg_end), whether the projectile
-        // arrived at its target this frame, and where the impact FX
-        // should trigger (`impact_pos` — the shell's *actual* landing
-        // spot for ballistic rounds, the target for guided ones).
+        // ended its flight this frame, and where the impact FX should
+        // trigger.
         //
         // `Direct` keeps the legacy parametric lerp (arc height baked
-        // separately below); guided and ballistic models integrate
-        // `proj.velocity` per tick, transcribed from the Recoil engine:
-        // `MissileProjectile.cpp` (`targetLeadDir`, the
-        // `SqLength < Square(turnrate)` snap else per-frame rotate) and
-        // `CannonProjectile` (`velocity.y -= gravity·dt`).
-        let (seg_start, seg_end, arrived, impact_pos) = match proj.flight {
+        // separately below). Guided flights step the engine's per-frame
+        // update ([`super::flight`]) against the target's *current*
+        // position (`tracks=1`), and end on the ground — upstream
+        // missiles never "arrive"; they hit a unit's volume (swept
+        // below) or the terrain. `Ballistic` is `CannonProjectile`
+        // (`velocity.y -= gravity·dt`).
+        let ground_y = |p: Vec3| {
+            volume_ctx
+                .heightmap
+                .as_deref()
+                .map_or(0.0, |hm| hm.sample(p.x, p.z))
+        };
+        let (seg_start, seg_end, arrived, impact_pos) = match &mut proj.flight {
             Flight::Direct => {
                 let prev_progress = proj.progress;
                 proj.progress += (proj.speed * dt) / total_dist;
@@ -401,51 +406,37 @@ pub(super) fn tick_weapon_fx(
                 let seg_end = proj.origin.lerp(proj.target, proj.progress.min(1.0));
                 (seg_start, seg_end, proj.progress >= 1.0, proj.target)
             }
-            Flight::Missile { turn_rate, .. } => {
-                proj.elapsed += dt;
-                // Move with the previous direction first (the engine
-                // integrates `pos += dir·speed·dt` before re-aiming), so
-                // the 45°-up launch imparts its first diagonal step even
-                // when the homing snap pulls the velocity flat next frame.
+            Flight::Missile(_) | Flight::Starburst(_) => {
+                let target_now = target_entity
+                    .and_then(|t| volume_ctx.target_q.get(t).ok())
+                    .map(|(gtf, _)| gtf.translation());
+                let sample = target_now.map(|pos| super::flight::TargetSample {
+                    pos,
+                    vel: proj.last_target_pos.map_or(Vec3::ZERO, |last| pos - last),
+                });
+                proj.last_target_pos = target_now;
                 let prev = transform.translation;
-                let step = proj.velocity * dt;
-                let new_pos = prev + step;
-                let desired = (proj.target - new_pos).normalize_or(proj.velocity.normalize());
-                proj.velocity = steer_toward(proj.velocity, desired, turn_rate, dt);
-                let arrived = (proj.target - prev).length() <= step.length()
-                    || (proj.target - new_pos).dot(desired) <= 0.0;
-                (prev, new_pos, arrived, proj.target)
-            }
-            Flight::Starburst {
-                launch_dir,
-                acceleration,
-                max_speed,
-                home_delay,
-                turn_rate,
-                ..
-            } => {
+                let v = match &mut proj.flight {
+                    Flight::Missile(m) => m.step(prev, sample),
+                    Flight::Starburst(s) => s.step(prev, sample),
+                    Flight::Direct | Flight::Ballistic { .. } => Vec3::ZERO,
+                };
+                if let Some(t) = target_now {
+                    proj.target = t;
+                }
                 proj.elapsed += dt;
-                // Pop phase keeps the previous velocity (straight up);
-                // once `weapontimer` expires we steer onto the target.
-                // Move first, then re-aim, like `MissileLauncher::Update`.
-                if proj.elapsed < home_delay {
-                    proj.speed = (proj.speed + acceleration * dt).min(max_speed);
-                    proj.velocity = launch_dir * proj.speed;
-                } else {
-                    proj.speed = (proj.speed + acceleration * dt).min(max_speed);
-                }
-                let prev = transform.translation;
-                let step = proj.velocity * dt;
-                let new_pos = prev + step;
-                let desired = (proj.target - new_pos).normalize_or(launch_dir);
-                if proj.elapsed >= home_delay {
-                    proj.velocity = steer_toward(proj.velocity, desired, turn_rate, dt);
-                }
-                let arrived = (proj.target - prev).length() <= step.length()
-                    || (proj.target - new_pos).dot(desired) <= 0.0;
-                (prev, new_pos, arrived, proj.target)
+                proj.velocity = v * super::flight::GAME_SPEED;
+                let new_pos = prev + v * frames;
+                let ground = ground_y(new_pos);
+                let hit_ground = new_pos.y <= ground;
+                // A missile that never finds ground (off the map edge)
+                // still can't live forever.
+                let expired = proj.elapsed > GUIDED_MAX_LIFETIME;
+                let impact = Vec3::new(new_pos.x, new_pos.y.max(ground), new_pos.z);
+                (prev, new_pos, hit_ground || expired, impact)
             }
             Flight::Ballistic { gravity, .. } => {
+                let gravity = *gravity;
                 proj.elapsed += dt;
                 // `CannonProjectile`: `pos += speed·dt` then
                 // `speed.y -= gravity·dt` — the first frame flies on the
@@ -498,23 +489,24 @@ pub(super) fn tick_weapon_fx(
             );
             intercepted = true;
         }
-        if intercepted {
-            despawn_projectile(entity, &mut proj, &mut commands);
-            continue;
-        }
-
-        if arrived {
-            trigger_delayed_hit(
-                entity,
-                None,
-                impact_pos,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                &mut commands,
-            );
-            despawn_projectile(entity, &mut proj, &mut commands);
+        if intercepted || arrived {
+            if !intercepted {
+                trigger_delayed_hit(
+                    entity,
+                    None,
+                    impact_pos,
+                    &delayed_hits,
+                    &weapon_registry,
+                    &mut damage_queue,
+                    &mut pending_explosions,
+                    &mut commands,
+                );
+            }
+            // The trail's last segment ends where the projectile died.
+            if let Some(trail) = &mut proj.trail {
+                push_trail_sample(trail, seg_end, proj.velocity, true);
+            }
+            despawn_projectile(entity, proj, &mut commands);
             continue;
         }
 
@@ -528,45 +520,37 @@ pub(super) fn tick_weapon_fx(
             }
         }
         transform.translation = pos;
-
-        // Advance the trail ring-buffer and rewrite the ribbon mesh.
-        if let Some(trail) = &mut proj.trail {
-            update_trail_samples(&mut trail.samples, pos);
-            rewrite_trail_mesh(
-                &mut ceg_ctx.meshes,
-                &trail.mesh,
-                &trail.samples,
-                trail.half_width,
-                cam_pos,
-            );
+        // Model projectiles face their flight direction
+        // (`CProjectile::GetTransformMatrix`: z = dir).
+        if let Some(dir) = proj.flight.guided_dir() {
+            transform.rotation = projectile_orientation(dir);
         }
 
-        // `cegTag` trail (BugCannon's `corruption_BCtrail`): replay the
-        // CEG at the shell's current position on a ~20/s cadence. Using
-        // the projectile's own velocity as the emit direction keeps the
-        // corruption puff sweeping back from the shell like upstream's
-        // GyroGravity-less trailing CEG.
+        // One smoke-trail segment per sim frame.
+        if let Some(trail) = &mut proj.trail {
+            push_trail_sample(trail, pos, proj.velocity, false);
+            rewrite_trail_mesh(&mut ceg_ctx.meshes, trail, cam_pos);
+        }
+
+        // `cegTag`: `explGenHandler.GenExplosion(cegID, pos, dir, …)`
+        // every sim frame while the projectile has fuel.
         if let Some(ceg) = proj.trail_ceg.clone()
-            && proj.flight != Flight::Direct
+            && proj.flight.has_fuel()
         {
-            proj.trail_emit += dt;
-            if proj.trail_emit >= 0.05 {
-                let dir = proj.velocity.normalize_or(Vec3::Y);
-                spawn_ceg(
-                    &ceg,
-                    pos,
-                    dir,
-                    &ceg_ctx.ceg_registry,
-                    &mut proj.trail_seed,
-                    &mut commands,
-                    &mut ceg_ctx.meshes,
-                    &mut ceg_ctx.materials,
-                    &mut ceg_ctx.images,
-                    &mut ceg_ctx.model_cache,
-                    &mut ceg_ctx.particle_mesh,
-                );
-                proj.trail_emit = 0.0;
-            }
+            let dir = proj.velocity.normalize_or(Vec3::Y);
+            spawn_ceg(
+                &ceg,
+                pos,
+                dir,
+                &ceg_ctx.ceg_registry,
+                &mut proj.trail_seed,
+                &mut commands,
+                &mut ceg_ctx.meshes,
+                &mut ceg_ctx.materials,
+                &mut ceg_ctx.images,
+                &mut ceg_ctx.model_cache,
+                &mut ceg_ctx.particle_mesh,
+            );
         }
     }
 
@@ -774,102 +758,116 @@ fn trigger_delayed_hit(
     commands.entity(entity).remove::<DelayedHit>();
 }
 
-/// Despawn the projectile and its companion ribbon entity (if any).
-/// Called from the projectile loop at both the "arrived at target" and
-/// the "origin == target" early-exit paths so the ribbon never
-/// dangles without its projectile.
+/// Despawn the projectile. Its smoke trail (if any) outlives it: the
+/// trail state moves onto the ribbon entity as a [`FadingTrail`] and
+/// fades out over `smokeTime` like upstream's free-standing
+/// `CSmokeTrailProjectile` segments.
 fn despawn_projectile(entity: Entity, proj: &mut ProjectileVisual, commands: &mut Commands) {
     if let Some(trail) = proj.trail.take() {
-        commands.entity(trail.ribbon_entity).despawn();
+        commands.entity(trail.ribbon_entity).insert(FadingTrail(trail));
     }
     commands.entity(entity).despawn();
 }
 
-/// Advance the ring-buffer by one step: drop the oldest sample and
-/// prepend the projectile's current position at the head of the
-/// buffer. `samples` is oldest-first so `last()` is always the head
-/// (current projectile pos) and `first()` is the tail end.
-fn update_trail_samples(samples: &mut [Vec3], head_pos: Vec3) {
-    if samples.is_empty() {
-        return;
-    }
-    samples.rotate_left(1);
-    if let Some(last) = samples.last_mut() {
-        *last = head_pos;
+/// Age every sample by one sim frame, append the projectile's current
+/// position as the new head and drop samples older than `smokeTime`.
+/// The launch point (first sample) and the impact point (`last`) draw at
+/// zero alpha (`firstSegment` / `lastSegment`).
+pub(super) fn push_trail_sample(trail: &mut ProjectileTrail, pos: Vec3, velocity: Vec3, last: bool) {
+    age_trail(trail);
+    let first = trail.samples.is_empty();
+    let dir = velocity
+        .try_normalize()
+        .or_else(|| trail.samples.back().map(|s| s.dir))
+        .unwrap_or(Vec3::Y);
+    trail.samples.push_back(TrailSample {
+        pos,
+        dir,
+        age: 0.0,
+        hidden: first || last,
+    });
+    while trail.samples.len() > TRAIL_SAMPLE_COUNT {
+        trail.samples.pop_front();
     }
 }
 
-/// Rebuild the trail's triangle-strip mesh from the sample buffer.
-///
-/// The ribbon is a series of 1-quad-wide segments stitched together
-/// as a single triangle strip (`N` samples → `2N` vertices). Each
-/// sample contributes two vertices offset by `±half_width` along a
-/// camera-facing right vector (so the ribbon always reads as a flat
-/// strip regardless of viewing angle). UV.u encodes "progress along
-/// the trail" from 0 (oldest) to 1 (head), which lets textures with
-/// baked-in gradients (firetrail.tga's yellow→transparent fade) feel
-/// natural without any material mutation.
-fn rewrite_trail_mesh(
-    meshes: &mut Assets<Mesh>,
-    handle: &Handle<Mesh>,
-    samples: &[Vec3],
-    half_width: f32,
-    cam_pos: Vec3,
+/// One sim frame of ageing; expired samples fall off the tail.
+fn age_trail(trail: &mut ProjectileTrail) {
+    for s in trail.samples.iter_mut() {
+        s.age += 1.0;
+    }
+    while trail
+        .samples
+        .front()
+        .is_some_and(|s| s.age > SMOKE_TIME_FRAMES)
+    {
+        trail.samples.pop_front();
+    }
+}
+
+/// Fade out orphaned trails and despawn them once every segment expired.
+pub(super) fn tick_fading_trails(
+    mut trails: Query<(Entity, &mut FadingTrail)>,
+    camera_q: Query<&GlobalTransform, With<RtsCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut commands: Commands,
 ) {
-    let Some(mesh) = meshes.get_mut(handle) else {
+    if trails.is_empty() {
+        return;
+    }
+    let cam_pos = camera_q
+        .single()
+        .map(|gt| gt.translation())
+        .unwrap_or(Vec3::Y * 1000.0);
+    for (entity, mut fading) in &mut trails {
+        age_trail(&mut fading.0);
+        if fading.0.samples.len() < 2 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        rewrite_trail_mesh(&mut meshes, &fading.0, cam_pos);
+    }
+}
+
+/// Upstream `CSmokeTrailProjectile::Draw`, one strip vertex pair per
+/// sample: offset `±(camDir × dir)·(1 + t·smokeSize)` with
+/// `t = age / smokeTime`, faded by `(1 − t)·(0.7 + |camDir·dir|)` and
+/// tinted `smokeColor`. Vertex colours are premultiplied (rgb and alpha
+/// both carry the fade). Unused tail slots collapse onto the oldest
+/// sample.
+fn rewrite_trail_mesh(meshes: &mut Assets<Mesh>, trail: &ProjectileTrail, cam_pos: Vec3) {
+    let Some(mesh) = meshes.get_mut(&trail.mesh) else {
         return;
     };
     let expected = TRAIL_SAMPLE_COUNT * 2;
-    let denom = (samples.len().saturating_sub(1).max(1)) as f32;
-
-    // Pre-allocated at spawn (`build_projectile_trail`); mutate in place so
-    // we don't allocate `expected × 12` bytes per live projectile per frame.
-    let Some(VertexAttributeValues::Float32x3(positions)) =
-        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-    else {
-        return;
-    };
-    let mut write = 0usize;
-    for (i, sample) in samples.iter().enumerate() {
-        let to_cam = (cam_pos - *sample).normalize_or(Vec3::Y);
-        // Tangent: the direction the ribbon runs at this sample. Use
-        // the next sample when possible so the normal is authoritative
-        // for the segment; fall back to the previous sample at the head.
-        let tangent = if i + 1 < samples.len() {
-            (samples[i + 1] - *sample).normalize_or(Vec3::Z)
-        } else if i > 0 {
-            (*sample - samples[i - 1]).normalize_or(Vec3::Z)
+    let mut verts: Vec<[f32; 3]> = Vec::with_capacity(expected);
+    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(expected);
+    for s in &trail.samples {
+        let t = (s.age / SMOKE_TIME_FRAMES).clamp(0.0, 1.0);
+        let dif = (s.pos - cam_pos).normalize_or(Vec3::NEG_Y);
+        let odir = dif.cross(s.dir).normalize_or(Vec3::X);
+        let size = 1.0 + t * SMOKE_SIZE;
+        let fade = if s.hidden {
+            0.0
         } else {
-            Vec3::Z
+            ((1.0 - t) * (0.7 + dif.dot(s.dir).abs())).clamp(0.0, 1.0)
         };
-        let right = tangent.cross(to_cam).normalize_or(Vec3::X) * half_width;
-        positions[write] = (*sample - right).to_array();
-        positions[write + 1] = (*sample + right).to_array();
-        write += 2;
+        let c = SMOKE_COLOR * fade;
+        verts.push((s.pos - odir * size).to_array());
+        verts.push((s.pos + odir * size).to_array());
+        colors.push([c, c, c, fade]);
+        colors.push([c, c, c, fade]);
     }
-    // Pad any unused tail slots with the last valid vertex so the GPU sees
-    // a stable buffer size (trail shorter than the ring buffer capacity).
-    let pad = positions
-        .get(write.saturating_sub(1))
-        .copied()
-        .unwrap_or([0.0; 3]);
-    for slot in positions[write..expected].iter_mut() {
-        *slot = pad;
+    let pad_pos = verts.first().copied().unwrap_or([0.0; 3]);
+    verts.resize(expected, pad_pos);
+    colors.resize(expected, [0.0; 4]);
+    if let Some(VertexAttributeValues::Float32x3(positions)) =
+        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+    {
+        positions.copy_from_slice(&verts);
     }
-
-    // UVs also need rewriting each frame because `samples.len()` determines
-    // the `u` gradient. Same in-place pattern.
-    if let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0) {
-        let mut write = 0usize;
-        for i in 0..samples.len() {
-            let u = i as f32 / denom;
-            uvs[write] = [u, 0.0];
-            uvs[write + 1] = [u, 1.0];
-            write += 2;
-        }
-        for slot in uvs[write..expected].iter_mut() {
-            *slot = [1.0, 0.0];
-        }
+    if let Some(VertexAttributeValues::Float32x4(dst)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+        dst.copy_from_slice(&colors);
     }
 }
 
@@ -1397,6 +1395,12 @@ mod tests {
         speed: f32,
         entity: Option<Entity>,
     ) -> Entity {
+        let velocity = match flight {
+            Flight::Missile(m) => m.dir * m.speed * 30.0,
+            Flight::Starburst(s) => s.dir * s.speed * 30.0,
+            Flight::Ballistic { velocity, .. } => velocity,
+            Flight::Direct => Vec3::ZERO,
+        };
         app.world_mut()
             .spawn((
                 ProjectileVisual {
@@ -1407,24 +1411,11 @@ mod tests {
                     arc_height: 0.0,
                     trail: None,
                     flight,
-                    velocity: match flight {
-                        Flight::Missile {
-                            launch_dir,
-                            launch_speed,
-                            ..
-                        }
-                        | Flight::Starburst {
-                            launch_dir,
-                            launch_speed,
-                            ..
-                        } => launch_dir * launch_speed,
-                        Flight::Ballistic { velocity, .. } => velocity,
-                        Flight::Direct => Vec3::ZERO,
-                    },
+                    velocity,
                     elapsed: 0.0,
                     trail_ceg: None,
-                    trail_emit: 0.0,
                     trail_seed: 0x1234_5678,
+                    last_target_pos: None,
                 },
                 Transform::from_translation(origin),
                 DelayedHit {
@@ -1437,54 +1428,67 @@ mod tests {
             .id()
     }
 
+    fn sim_tick(app: &mut App) {
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+    }
+
+    fn flow_missile() -> spring_tdf::WeaponDef {
+        spring_tdf::WeaponDef {
+            weapon_type: "StarburstLauncher".into(),
+            range: 350.0,
+            weapon_velocity: 2000.0,
+            start_velocity: 400.0,
+            weapon_acceleration: 600.0,
+            fixed_launcher: true,
+            tracks: true,
+            weapon_timer: 0.1,
+            turn_rate: 60000.0,
+            flight_time: 5.0,
+            ..Default::default()
+        }
+    }
+
+    /// Pointer's Geometric (MissileLauncher, trajectoryheight=1): the
+    /// `extraHeight` arc lifts it well above the direct line, it comes
+    /// down on the (ground) target and detonates on the terrain.
     #[test]
-    fn geometric_missile_has_up_biased_launch_then_homes() {
-        // Pointer's Geometric: trajectoryHeight=1 → launch along
-        // normalize(toTarget + up), startvelocity 400, turnrate 20000
-        // (≈1.92 rad/s — snappy, near-straight homing with a muzzle
-        // kick), NOT the big rainbow arc the old transform gave it.
+    fn geometric_missile_arcs_then_lands_on_ground_target() {
         let mut app = flight_test_app();
-        let launch_dir = (Vec3::X + Vec3::Y).normalize();
+        let w = spring_tdf::WeaponDef {
+            weapon_type: "MissileLauncher".into(),
+            range: 1400.0,
+            weapon_velocity: 400.0,
+            start_velocity: 400.0,
+            trajectory_height: 1.0,
+            tracks: true,
+            turn_rate: 20000.0,
+            ..Default::default()
+        };
         let target = Vec3::new(400.0, 0.0, 0.0);
-        let proj = spawn_flight_projectile(
-            &mut app,
-            Flight::Missile {
-                launch_dir,
-                launch_speed: 400.0,
-                turn_rate: 20000.0 * std::f32::consts::TAU / 65536.0,
-            },
-            Vec3::ZERO,
-            target,
-            400.0,
-            None,
-        );
+        let origin = Vec3::new(0.0, 10.0, 0.0);
+        let (flight, pos) = super::super::flight::MissileFlight::launch(super::super::flight::Launch {
+            weapon: &w,
+            muzzle_pos: origin,
+            muzzle_dir: Vec3::X,
+            target_pos: target,
+        });
+        let proj = spawn_flight_projectile(&mut app, Flight::Missile(flight), pos, target, 400.0, None);
 
         let mut max_y = 0.0f32;
         let mut arrived = false;
-        for _ in 0..160 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_millis(20));
-            app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        for _ in 0..300 {
+            sim_tick(&mut app);
             let Some(read) = app.world().get::<Transform>(proj) else {
                 arrived = true;
                 break;
             };
             max_y = max_y.max(read.translation.y);
-            assert!(
-                read.translation.x <= 405.0,
-                "missile overshot: {}",
-                read.translation
-            );
         }
-        assert!(
-            max_y > 4.0,
-            "expected a visible up-kick from the 45° launch, got {max_y}"
-        );
-        assert!(
-            arrived,
-            "missile should arrive at the target within 3.2s of flight"
-        );
+        assert!(arrived, "missile should come down on the target");
+        assert!(max_y > 80.0, "trajectoryheight arc, got max_y={max_y}");
         assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
         let dmg = app
             .world()
@@ -1493,68 +1497,64 @@ mod tests {
             .next()
             .expect("damage");
         assert!(
-            (dmg.impact_pos.distance(target)) < 12.0,
+            dmg.impact_pos.distance(target) < 30.0,
             "guided missile should land on/near the target, got {}",
             dmg.impact_pos,
         );
     }
 
+    /// Flow's FlowMissile, launched level along the muzzle (a flyer's
+    /// forward gunpoint) at a unit target *below and behind the launch
+    /// line*: it flies out straight for the `weapontimer` frames, swings
+    /// round at `turnrate` and hits the target's collision volume — and
+    /// the model is oriented along its flight direction.
     #[test]
-    fn starburst_missile_pops_up_then_dives_onto_target() {
-        // Flow's FlowMissile: fixedLauncher → launch straight up at
-        // 400, accelerate 600→2000, home after weapontimer 0.1s with
-        // turnrate 60000 (≈5.75 rad/s). Must show a clear vertical
-        // pop before turning onto the target.
+    fn starburst_from_the_muzzle_swings_onto_a_unit_target() {
         let mut app = flight_test_app();
-        let target = Vec3::new(150.0, 0.0, 0.0);
-        let proj = spawn_flight_projectile(
-            &mut app,
-            Flight::Starburst {
-                launch_dir: Vec3::Y,
-                launch_speed: 400.0,
-                acceleration: 600.0,
-                max_speed: 2000.0,
-                home_delay: 0.1,
-                turn_rate: 60000.0 * std::f32::consts::TAU / 65536.0,
-            },
-            Vec3::ZERO,
-            target,
-            400.0,
-            None,
-        );
+        let target_pos = Vec3::new(-100.0, 0.0, 150.0);
+        let target = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_translation(target_pos),
+                CollisionVolume::sphere(12.0),
+                UnitType(crate::units::content::definitions::UnitKind::Bit),
+            ))
+            .id();
+        let w = flow_missile();
+        let origin = Vec3::new(0.0, 140.0, 0.0);
+        let (flight, pos) = super::super::flight::StarburstFlight::launch(super::super::flight::Launch {
+            weapon: &w,
+            muzzle_pos: origin,
+            muzzle_dir: Vec3::X,
+            target_pos,
+        });
+        let proj = spawn_flight_projectile(&mut app, Flight::Starburst(flight), pos, target_pos, 400.0, None);
+        app.world_mut().get_mut::<DelayedHit>(proj).unwrap().target = Some(target);
 
-        let mut max_y = 0.0f32;
-        let mut sample_after_pop = Vec::new();
-        let mut arrived = false;
+        let mut path = vec![pos];
+        let mut hit = false;
         for _ in 0..200 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_millis(20));
-            app.world_mut().run_system_once(tick_weapon_fx).unwrap();
-            let Some(read) = app.world().get::<Transform>(proj) else {
-                arrived = true;
+            sim_tick(&mut app);
+            let Some(tf) = app.world().get::<Transform>(proj) else {
+                hit = true;
                 break;
             };
-            max_y = max_y.max(read.translation.y);
-            sample_after_pop.push(read.translation);
+            path.push(tf.translation);
+            let model_fwd = tf.rotation * Vec3::Z;
+            let vel = app.world().get::<ProjectileVisual>(proj).unwrap().velocity;
+            assert!(model_fwd.dot(vel.normalize()) > 0.999, "model faces its flight");
         }
-        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
-        assert!(
-            max_y > 25.0,
-            "starburst should pop visibly above the launcher, got max_y={max_y}",
-        );
-        assert!(arrived, "starburst missile should arrive");
+        assert!(hit, "missile must reach its target");
+        // Frames 1-2 go straight along the muzzle (+X).
+        assert!(path[2].x > path[1].x && (path[2].z - pos.z).abs() < 1e-3);
         let dmg = app
             .world()
             .resource::<DamageQueue>()
             .iter_snapshot_for_test()
             .next()
             .expect("damage");
-        assert!(
-            dmg.impact_pos.distance(target) < 15.0,
-            "starburst should only intercept at target, got {}",
-            dmg.impact_pos,
-        );
+        assert_eq!(dmg.target, Some(target));
+        assert!(dmg.impact_pos.distance(target_pos) < 14.0, "hit at {}", dmg.impact_pos);
     }
 
     #[test]

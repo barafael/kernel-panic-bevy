@@ -525,18 +525,6 @@ impl UnitRegistry {
         }
     }
 
-    /// The "best" muzzle-flash CEG for this unit's fire event.
-    ///
-    /// COB integration is incomplete, so `emit-sfx 1024+i` from the
-    /// real script doesn't drive the visual. The pragmatic stand-in:
-    /// index 1 if the unit declares it (Bit's arrowflare at 1025),
-    /// falling back to index 0 (every other System-faction unit
-    /// points at `custom:oldskool_shot1`). Returns `None` when the
-    /// unit has no `[SFXTypes]` block at all.
-    pub fn preferred_muzzle_ceg(&self, kind: UnitKind) -> Option<&str> {
-        self.sfx_type(kind, 1).or_else(|| self.sfx_type(kind, 0))
-    }
-
     /// Indexed CEG name for one of the unit's FBI `[SFXTypes]` entries.
     ///
     /// COB scripts fire `emit-sfx 1024+i from piece` to play particle

@@ -17,7 +17,8 @@
 
 use bevy::prelude::*;
 
-use super::assets::animation::{MuzzlePiece, UnitAnimator};
+use super::assets::animation::{MuzzlePiece, PieceEmit, UnitAnimator};
+use super::content::definitions::UnitKind;
 use super::components::{TeamId, UnitStats, UnitType};
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
@@ -160,16 +161,169 @@ pub struct ExplicitTargets<'w, 's> {
 }
 
 /// Grouped piece-lookup queries for muzzle position, body animator,
-/// piece world transforms, and the `GunbasePiece` / `AimerPiece`
+/// piece local transforms, and the `GunbasePiece` / `AimerPiece`
 /// marker components. Lets the combat systems stay under Bevy's
 /// 16-param system limit.
+///
+/// The animator is mutable because every projectile runs the driver's
+/// `Shot1` / `QueryWeapon1` synchronously ([`fire_salvo_shot`]).
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct PieceLookup<'w, 's> {
     pub muzzle: Query<'w, 's, &'static MuzzlePiece>,
-    pub animator: Query<'w, 's, &'static UnitAnimator>,
-    pub piece_gtf: Query<'w, 's, &'static GlobalTransform, Without<UnitType>>,
+    pub animator: Query<'w, 's, &'static mut UnitAnimator>,
+    pub piece_tf: Query<
+        'w,
+        's,
+        (&'static Transform, &'static ChildOf, Option<&'static PieceEmit>),
+        Without<UnitType>,
+    >,
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
     pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
+}
+
+/// World-space weapon muzzle of a unit: position and emit direction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Muzzle {
+    pub pos: Vec3,
+    pub dir: Vec3,
+}
+
+impl PieceLookup<'_, '_> {
+    /// Upstream `CWeapon::UpdateWeaponVectors` (`Weapon.cpp:282-291`):
+    /// the `QueryWeapon` piece's emit point and direction
+    /// ([`PieceEmit`]) through the piece's model-space transform and the
+    /// unit's full world transform — so a banking / pitching flyer or a
+    /// spinning wing carries the muzzle with it.
+    ///
+    /// Composed from the pieces' *local* `Transform`s up to the unit
+    /// root instead of the pieces' `GlobalTransform`s: those are last
+    /// render frame's propagation of the render-interpolated pose, a
+    /// tick stale (a Flow's gp pieces sweep 6°/tick on the spinning
+    /// wings). `restore_sim_pose` puts the true sim pose back into every
+    /// piece `Transform` at the start of the tick.
+    ///
+    /// Falls back to the unit origin / body front when the unit has no
+    /// resolved [`MuzzlePiece`] (melee, BuildLaser, unmapped scripts).
+    pub fn muzzle(&self, attacker: Entity, attacker_gtf: &GlobalTransform) -> Muzzle {
+        let fallback = Muzzle {
+            pos: attacker_gtf.translation(),
+            dir: attacker_gtf.forward().as_vec3(),
+        };
+        if self.muzzle.get(attacker).is_err() {
+            return fallback;
+        }
+        let Ok(animator) = self.animator.get(attacker) else {
+            return fallback;
+        };
+        let Some(&piece) = animator.rig.piece_entities.get(animator.rig.muzzle) else {
+            return fallback;
+        };
+        let Ok((_, _, emit)) = self.piece_tf.get(piece) else {
+            return fallback;
+        };
+        let emit = emit.copied().unwrap_or_default();
+        // Accumulate local transforms piece → … → model root → unit.
+        let mut local = bevy::math::Affine3A::IDENTITY;
+        let mut cur = piece;
+        for _ in 0..64 {
+            if cur == attacker {
+                let world = attacker_gtf.affine() * local;
+                return Muzzle {
+                    pos: world.transform_point3(emit.pos),
+                    dir: world
+                        .transform_vector3(emit.dir)
+                        .try_normalize()
+                        .unwrap_or(fallback.dir),
+                };
+            }
+            let Ok((tf, parent, _)) = self.piece_tf.get(cur) else {
+                break;
+            };
+            local = tf.compute_affine() * local;
+            cur = parent.parent();
+        }
+        fallback
+    }
+}
+
+/// Everything a salvo's shots share, captured when the salvo opens.
+#[derive(Clone, Copy, Debug)]
+pub struct SalvoShot {
+    pub attacker: Entity,
+    pub kind: UnitKind,
+    pub weapon: WeaponId,
+    /// Unit target (`None` for attack-ground).
+    pub target: Option<Entity>,
+    /// Aim point, including spray.
+    pub impact_pos: Vec3,
+    pub is_traveling: bool,
+    /// `projectiles=` — projectiles per salvo shot.
+    pub projectiles: u32,
+}
+
+/// Upstream `CWeapon::UpdateSalvo` for one salvo shot
+/// (`Weapon.cpp:541-608`): for each of the weapon's `projectiles`,
+/// `Shot1` → `QueryWeapon1` → `FireImpl` from the freshly resolved
+/// muzzle; after the salvo's last shot, `EndBurst1`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn fire_salvo_shot(
+    shot: &SalvoShot,
+    attacker_gtf: &GlobalTransform,
+    last_of_salvo: bool,
+    pieces: &mut PieceLookup,
+    unit_registry: &UnitRegistry,
+    pending_attacks: &mut PendingAttacks,
+    damage_queue: &mut DamageQueue,
+) {
+    let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(shot.kind)
+        .and_then(|index| unit_registry.sfx_type(shot.kind, index))
+        .map(|s| std::borrow::Cow::Owned(s.to_string()));
+    let distance = attacker_gtf.translation().distance(shot.impact_pos);
+    for _ in 0..shot.projectiles.max(1) {
+        if let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {
+            let UnitAnimator { rig, driver, .. } = &mut *animator;
+            driver.shot(rig);
+        }
+        let muzzle = pieces.muzzle(shot.attacker, attacker_gtf);
+        if !shot.is_traveling {
+            damage_queue.push(PendingDamage {
+                target: shot.target,
+                attacker: shot.attacker,
+                weapon: shot.weapon,
+                impact_pos: shot.impact_pos,
+                attacker_distance: distance,
+            });
+        }
+        pending_attacks.events.push(AttackEvent {
+            attacker_pos: muzzle.pos,
+            target_pos: shot.impact_pos,
+            weapon_id: shot.weapon,
+            muzzle_ceg: muzzle_ceg.clone(),
+            delayed_hit: shot.is_traveling.then_some(DelayedHitInfo {
+                target: shot.target,
+                attacker: shot.attacker,
+                attacker_distance: distance,
+                muzzle_dir: muzzle.dir,
+            }),
+            build_arc: false,
+        });
+    }
+    if last_of_salvo && let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {
+        let UnitAnimator { rig, driver, .. } = &mut *animator;
+        driver.end_burst(rig);
+    }
+}
+
+/// Spring sim frame number of the current fixed tick (`gs->frameNum`),
+/// from the fixed clock (30 Hz — `GAME_SPEED`).
+pub(crate) fn sim_frame(time: &Time) -> u64 {
+    (time.elapsed_secs_f64() * 30.0).round() as u64
+}
+
+/// `salvoDelay = int(burstRate * GAME_SPEED)` (`WeaponLoader.cpp:171`):
+/// whole sim frames between a salvo's shots.
+pub(crate) fn salvo_delay_frames(burst_rate: f32) -> u64 {
+    (burst_rate * 30.0).max(0.0) as u64
 }
 
 /// XZ-flatten and normalise a forward vector. Falls back to +Z
@@ -215,30 +369,6 @@ pub struct IdleTimer(pub f32);
 #[derive(Component, Default)]
 pub struct StunCharge(pub f32);
 
-/// World-space position of `attacker`'s weapon muzzle, or its transform
-/// origin if the unit has no [`MuzzlePiece`] resolved (e.g. Wormbite's
-/// melee bite, a factory's BuildLaser, or a unit whose .bos doesn't
-/// declare a recognised muzzle name). Falling back to the unit origin
-/// keeps existing visuals working while upgrading every unit that *does*
-/// name its barrel to fire from that piece's world pos.
-pub(super) fn muzzle_world_pos(
-    attacker: Entity,
-    attacker_gtf: &GlobalTransform,
-    muzzle_q: &Query<&MuzzlePiece>,
-    animator_q: &Query<&UnitAnimator>,
-    piece_gtf_q: &Query<&GlobalTransform, Without<UnitType>>,
-) -> Vec3 {
-    if let Ok(mp) = muzzle_q.get(attacker)
-        && let Ok(animator) = animator_q.get(attacker)
-        && let Some(&piece_entity) = animator.rig.piece_entities.get(mp.0)
-        && let Ok(piece_gtf) = piece_gtf_q.get(piece_entity)
-    {
-        piece_gtf.translation()
-    } else {
-        attacker_gtf.translation()
-    }
-}
-
 /// Armed units auto-attack the nearest enemy in range.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn combat_system(
@@ -272,7 +402,7 @@ pub fn combat_system(
     spatial: Res<SpatialIndex>,
     explicit: ExplicitTargets,
     heightmap: Option<Res<Heightmap>>,
-    pieces: PieceLookup,
+    mut pieces: PieceLookup,
     target_pick: TargetCachePick,
     mut rng: Local<u32>,
 ) {
@@ -527,91 +657,15 @@ pub fn combat_system(
         // declared. Without it, beams leave mid-slew before the gun
         // is on target. Same arithmetic as `aim_weapons_system` so
         // the two converge cleanly.
-        let to_target_xz = Vec3::new(
-            target_pos.x - attacker_pos.x,
-            0.0,
-            target_pos.z - attacker_pos.z,
-        );
-        let horizontal_dist = to_target_xz.length();
-
-        // Body-heading gate (Pointer): Deployable units rotate the
-        // whole body to aim, so wait for that turn to finish. Byte
-        // uses an aimer piece and skips this branch.
-        if deployable.is_some() && horizontal_dist > 1e-3 {
-            let to_target_n = to_target_xz / horizontal_dist;
-            let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
-            let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
-            if align.acos() > AIM_HEADING_TOLERANCE {
-                continue;
-            }
-        }
-
-        let dy = target_pos.y - attacker_pos.y;
-        let direct_pitch = dy.atan2(horizontal_dist.max(1e-6));
-        let arc_pitch = if arc_height > 0.0 && horizontal_dist > 1.0 {
-            (4.0 * arc_height / horizontal_dist).atan()
-        } else {
-            0.0
-        };
-        let target_pitch = direct_pitch + arc_pitch;
-
-        // Gunbase pitch gate (Pointer). pointer.bos's `AimWeapon1`
-        // writes `turn gunbase to x-axis (<90>-p)`; cobwtf passes X
-        // through unchanged, so `piece_rotations[gunbase][0] == π/2 - p`.
-        if let Ok(gb) = pieces.gunbase.get(entity)
-            && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.rig.piece_rotations.get(gb.0)
-        {
-            let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
-            if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
-                continue;
-            }
-        }
-
-        // Aimer-piece gate (Byte). Mirrors `wait-for-turn aimer
-        // around {y,x}-axis` in upstream's AimWeapon1.
-        //
-        // Why we don't compare against `animator.target_rotations`:
-        // `aim_weapons_system` writes those values AFTER combat_system
-        // in the same frame, so on the tick where a new target is
-        // acquired the cached target rotation is stale (pointing at
-        // last frame's target, or default). Reading it would let the
-        // aimer-rotation gate pass while the piece is still mid-slew
-        // toward the new target, which is exactly the "trail leaves
-        // the gun in any direction" symptom. Compute the target axes
-        // here from the live target position instead — same
-        // arithmetic `aim_weapons_system` runs.
-        if let Ok(ap) = pieces.aimer.get(entity)
-            && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.rig.piece_rotations.get(ap.0)
-        {
-            let body_yaw = attacker_gtf.rotation().to_euler(EulerRot::YXZ).0;
-            let to_target_n = if horizontal_dist > 1e-3 {
-                to_target_xz / horizontal_dist
-            } else {
-                Vec3::Z
-            };
-            let target_world_heading = to_target_n.x.atan2(to_target_n.z);
-            let mut target_y = target_world_heading - body_yaw;
-            while target_y > std::f32::consts::PI {
-                target_y -= std::f32::consts::TAU;
-            }
-            while target_y < -std::f32::consts::PI {
-                target_y += std::f32::consts::TAU;
-            }
-            let target_x = -std::f32::consts::FRAC_PI_2 - target_pitch;
-
-            // Wrap the heading delta into (-π, π] so a 359° turn
-            // doesn't read as "off by 359°" when the slew is one
-            // frame from completion.
-            let mut dy = (rot[1] - target_y).rem_euclid(std::f32::consts::TAU);
-            if dy > std::f32::consts::PI {
-                dy = std::f32::consts::TAU - dy;
-            }
-            let dx = (rot[0] - target_x).abs();
-            if dy > AIM_HEADING_TOLERANCE || dx > AIM_PITCH_TOLERANCE {
-                continue;
-            }
+        if !aim_gates_pass(
+            entity,
+            attacker_gtf,
+            target_pos,
+            arc_height,
+            deployable.is_some(),
+            &pieces,
+        ) {
+            continue;
         }
 
         // Why: upstream `sprayangle` is in Spring short-angle units;
@@ -629,14 +683,32 @@ pub fn combat_system(
 
         // Hitscan lands now; traveling bolts defer via `delayed_hit`.
         let is_traveling = weapon_def.is_some_and(spring_tdf::WeaponDef::is_traveling);
-        if !is_traveling {
-            damage_queue.push(PendingDamage {
-                target: Some(target_entity),
-                attacker: entity,
-                weapon: weapon_id.expect("firing weapon is registered"),
-                impact_pos,
-                attacker_distance: distance,
-            });
+        commands.entity(entity).insert((
+            AttackCooldown {
+                remaining: cooldown,
+            },
+            JustFired,
+        ));
+        if let (Some(weapon_id), Some(weapon_def)) = (weapon_id, weapon_def) {
+            open_salvo(
+                SalvoShot {
+                    attacker: entity,
+                    kind: unit_type.0,
+                    weapon: weapon_id,
+                    target: Some(target_entity),
+                    impact_pos,
+                    is_traveling,
+                    projectiles: weapon_def.projectiles as u32,
+                },
+                weapon_def,
+                attacker_gtf,
+                sim_frame(&time),
+                &mut pieces,
+                &unit_registry,
+                &mut pending_attacks,
+                &mut damage_queue,
+                &mut commands,
+            );
         }
         if let Some(splash) = worm_splash {
             queue_wormsplash(
@@ -647,55 +719,109 @@ pub fn combat_system(
                 attacker_pos,
             );
         }
-        commands.entity(entity).insert((
-            AttackCooldown {
-                remaining: cooldown,
-            },
-            JustFired,
-        ));
-        if let Some(weapon_id) = weapon_id {
-            // Visual origin uses the resolved muzzle piece; range/LOS
-            // checks above intentionally stay at unit center so
-            // arm-length offsets don't flicker targeting.
-            let visual_origin = muzzle_world_pos(
-                entity,
-                attacker_gtf,
-                &pieces.muzzle,
-                &pieces.animator,
-                &pieces.piece_gtf,
-            );
-            let muzzle_ceg = unit_registry
-                .preferred_muzzle_ceg(unit_type.0)
-                .map(|s| std::borrow::Cow::Owned(s.to_string()));
-            let delayed_hit = is_traveling.then_some(DelayedHitInfo {
-                target: Some(target_entity),
-                attacker: entity,
-                attacker_distance: distance,
-            });
-            pending_attacks.events.push(AttackEvent {
-                attacker_pos: visual_origin,
-                target_pos: impact_pos,
-                weapon_id,
-                muzzle_ceg,
-                delayed_hit,
-            build_arc: false,
-        });
-        }
+    }
+}
 
-        let burst = weapon_def.map_or(0.0, |w| w.burst) as u32;
-        if burst > 1 {
-            let interval = weapon_def.map_or(0.1, |w| w.burst_rate.max(0.05));
-            commands.entity(entity).insert(BurstFire {
-                shots_remaining: burst - 1,
-                interval,
-                timer: interval,
-                target: Some(target_entity),
-                target_pos,
-                weapon: weapon_id.expect("burst weapon is registered"),
-                is_traveling,
-            });
+/// Fire a salvo's first shot now and, for `burst > 1`, queue the rest
+/// as a [`BurstFire`] spaced `salvoDelay` sim frames apart — upstream
+/// `CWeapon::UpdateFire` (`salvoLeft = salvoSize`, `nextSalvo = now`)
+/// followed by the same frame's `UpdateSalvo`.
+#[allow(clippy::too_many_arguments)]
+fn open_salvo(
+    shot: SalvoShot,
+    weapon_def: &spring_tdf::WeaponDef,
+    attacker_gtf: &GlobalTransform,
+    frame: u64,
+    pieces: &mut PieceLookup,
+    unit_registry: &UnitRegistry,
+    pending_attacks: &mut PendingAttacks,
+    damage_queue: &mut DamageQueue,
+    commands: &mut Commands,
+) {
+    let burst = (weapon_def.burst as u32).max(1);
+    fire_salvo_shot(
+        &shot,
+        attacker_gtf,
+        burst == 1,
+        pieces,
+        unit_registry,
+        pending_attacks,
+        damage_queue,
+    );
+    if burst > 1 {
+        let delay = salvo_delay_frames(weapon_def.burst_rate);
+        commands.entity(shot.attacker).insert(BurstFire {
+            shot,
+            shots_remaining: burst - 1,
+            last_frame: frame,
+            next_frame: frame + delay,
+            salvo_delay: delay,
+        });
+    }
+}
+
+/// The aim-before-fire gates for units whose script doesn't gate
+/// itself: body heading (Deployable — the Pointer turns its whole body),
+/// the Pointer's `gunbase` pitch, the Byte's `aimer` yaw/pitch. Uses the
+/// same unit-relative [`aim::local_aim_angles`] the aim script receives,
+/// so gate and slew converge on the same numbers.
+fn aim_gates_pass(
+    entity: Entity,
+    attacker_gtf: &GlobalTransform,
+    target_pos: Vec3,
+    arc_height: f32,
+    deployable: bool,
+    pieces: &PieceLookup,
+) -> bool {
+    let (heading, pitch) = aim::local_aim_angles(
+        attacker_gtf.rotation(),
+        target_pos - attacker_gtf.translation(),
+        arc_height,
+    );
+    let to_target_xz = (target_pos - attacker_gtf.translation()) * Vec3::new(1.0, 0.0, 1.0);
+
+    // Body-heading gate (Pointer): Deployable units rotate the whole
+    // body to aim, so wait for that turn to finish. Byte uses an aimer
+    // piece and skips this branch.
+    if deployable && to_target_xz.length() > 1e-3 {
+        let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
+        let align = forward_xz.dot(to_target_xz.normalize()).clamp(-1.0, 1.0);
+        if align.acos() > AIM_HEADING_TOLERANCE {
+            return false;
         }
     }
+
+    // Gunbase pitch gate (Pointer). pointer.bos's `AimWeapon1` writes
+    // `turn gunbase to x-axis (<90>-p)`.
+    if let Ok(gb) = pieces.gunbase.get(entity)
+        && let Ok(animator) = pieces.animator.get(entity)
+        && let Some(rot) = animator.rig.piece_rotations.get(gb.0)
+    {
+        let target_x = std::f32::consts::FRAC_PI_2 - pitch;
+        if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
+            return false;
+        }
+    }
+
+    // Aimer-piece gate (Byte): `wait-for-turn aimer around {y,x}-axis`
+    // after `turn aimer to y-axis h` / `x-axis (<-90>-p)`. Computed from
+    // the live target rather than `target_rotations`, which
+    // `drive_aim_script` may not have refreshed for a new target yet.
+    if let Ok(ap) = pieces.aimer.get(entity)
+        && let Ok(animator) = pieces.animator.get(entity)
+        && let Some(rot) = animator.rig.piece_rotations.get(ap.0)
+    {
+        let target_x = -std::f32::consts::FRAC_PI_2 - pitch;
+        let mut dy = (rot[1] - heading).rem_euclid(std::f32::consts::TAU);
+        if dy > std::f32::consts::PI {
+            dy = std::f32::consts::TAU - dy;
+        }
+        let dx = (rot[0] - target_x).abs();
+        if dy > AIM_HEADING_TOLERANCE || dx > AIM_PITCH_TOLERANCE {
+            return false;
+        }
+    }
+    true
 }
 
 /// Fire the unit's weapon at a player-specified ground position.
@@ -720,7 +846,6 @@ pub fn attack_ground_system(
             &GlobalTransform,
             &AttackGroundOrder,
             Option<&Deployable>,
-            Option<&UnitAnimator>,
             Option<&WeaponBinding>,
             Has<Cloaked>,
             Option<&WormSplash>,
@@ -728,12 +853,13 @@ pub fn attack_ground_system(
         Without<Dying>,
     >,
     cooldowns: Query<&AttackCooldown>,
-    pieces: PieceLookup,
+    mut pieces: PieceLookup,
+    time: Res<Time>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, animator, weapon_binding, cloaked, worm_splash) in
+    for (entity, unit_type, gtf, order, deployable, weapon_binding, cloaked, worm_splash) in
         &attackers
     {
         // Same deploy / opening gates as `combat_system`. Player-issued
@@ -748,7 +874,10 @@ pub fn attack_ground_system(
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
             continue;
         }
-        if animator
+        if pieces
+            .animator
+            .get(entity)
+            .ok()
             .and_then(|a| a.driver.is_open())
             .is_some_and(|open| !open)
         {
@@ -807,116 +936,52 @@ pub fn attack_ground_system(
         }
 
         // Same alignment gates as `combat_system` — body / gunbase /
-        // aimer per piece markers. Math mirrors `aim_weapons_system`.
-        let to_target_xz = Vec3::new(
-            order.pos.x - attacker_pos.x,
-            0.0,
-            order.pos.z - attacker_pos.z,
-        );
-        let horizontal_dist = to_target_xz.length();
-        if deployable.is_some() && horizontal_dist > 1e-3 {
-            let to_target_n = to_target_xz / horizontal_dist;
-            let forward_xz = flat_forward(gtf.forward().as_vec3());
-            let align = forward_xz.dot(to_target_n).clamp(-1.0, 1.0);
-            if align.acos() > AIM_HEADING_TOLERANCE {
-                continue;
-            }
-        }
-        let dy = order.pos.y - attacker_pos.y;
-        let direct_pitch = dy.atan2(horizontal_dist.max(1e-6));
-        let arc_pitch = if arc_height > 0.0 && horizontal_dist > 1.0 {
-            (4.0 * arc_height / horizontal_dist).atan()
-        } else {
-            0.0
-        };
-        let target_pitch = direct_pitch + arc_pitch;
-        if let Ok(gb) = pieces.gunbase.get(entity)
-            && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.rig.piece_rotations.get(gb.0)
-        {
-            let target_x = std::f32::consts::FRAC_PI_2 - target_pitch;
-            if (rot[0] - target_x).abs() > AIM_PITCH_TOLERANCE {
-                continue;
-            }
-        }
-        if let Ok(ap) = pieces.aimer.get(entity)
-            && let Ok(animator) = pieces.animator.get(entity)
-            && let Some(rot) = animator.rig.piece_rotations.get(ap.0)
-            && let Some(target_rot) = animator.rig.target_rotations.get(ap.0)
-        {
-            let dy_axis = (rot[1] - target_rot[1]).abs();
-            let dx_axis = (rot[0] - target_rot[0]).abs();
-            if dy_axis > AIM_HEADING_TOLERANCE || dx_axis > AIM_PITCH_TOLERANCE {
-                continue;
-            }
+        // aimer per piece markers.
+        if !aim_gates_pass(
+            entity,
+            gtf,
+            order.pos,
+            arc_height,
+            deployable.is_some(),
+            &pieces,
+        ) {
+            continue;
         }
 
         // Fire.
-        let visual_origin = muzzle_world_pos(
-            entity,
-            gtf,
-            &pieces.muzzle,
-            &pieces.animator,
-            &pieces.piece_gtf,
-        );
-        let muzzle_ceg = unit_registry
-            .preferred_muzzle_ceg(unit_type.0)
-            .map(|s| std::borrow::Cow::Owned(s.to_string()));
         let is_traveling = weapon_def.is_traveling();
-        let delayed_hit = is_traveling.then_some(DelayedHitInfo {
-            target: None,
-            attacker: entity,
-            attacker_distance: dist,
-        });
-        pending_attacks.events.push(AttackEvent {
-            attacker_pos: visual_origin,
-            target_pos: order.pos,
-            weapon_id,
-            muzzle_ceg,
-            delayed_hit,
-            build_arc: false,
-        });
-        if !is_traveling {
-            damage_queue.push(PendingDamage {
-                target: None,
-                attacker: entity,
-                weapon: weapon_id,
-                impact_pos: order.pos,
-                attacker_distance: dist,
-            });
-        }
-        if let Some(splash) = worm_splash {
-            queue_wormsplash(&mut damage_queue, entity, splash.0, order.pos, attacker_pos);
-        }
         commands.entity(entity).insert((
             AttackCooldown {
                 remaining: weapon_def.reload_time,
             },
             JustFired,
         ));
-
-        // Queue the remaining burst shots exactly like `combat_system`
-        // does on the auto-target path. Missing this was the reason a
-        // player-commanded byte fired one shot per 2 s reload instead
-        // of the authored 4-shot `burstrate=0.25` flurry: the initial
-        // shot went through here, cooldown was set, and `tick_burst_fire`
-        // never saw a `BurstFire` component because only the other fire
-        // site inserted it.
-        let burst = weapon_def.burst as u32;
-        if burst > 1 {
-            let interval = weapon_def.burst_rate.max(0.05);
-            commands.entity(entity).insert(BurstFire {
-                shots_remaining: burst - 1,
-                interval,
-                timer: interval,
-                // Attack-ground has no primary-hit entity; AoE splash
-                // at `target_pos` via `apply_damage` still reaches
-                // everything in range.
-                target: None,
-                target_pos: order.pos,
+        // The salvo's remaining shots go through `BurstFire` exactly like
+        // `combat_system`'s — a player-commanded byte fires its authored
+        // 4-shot MegaBeam burst, not one shot per reload. Attack-ground
+        // has no primary-hit entity; AoE splash at `impact_pos` via
+        // `apply_damage` still reaches everything in range.
+        open_salvo(
+            SalvoShot {
+                attacker: entity,
+                kind: unit_type.0,
                 weapon: weapon_id,
+                target: None,
+                impact_pos: order.pos,
                 is_traveling,
-            });
+                projectiles: weapon_def.projectiles as u32,
+            },
+            weapon_def,
+            gtf,
+            sim_frame(&time),
+            &mut pieces,
+            &unit_registry,
+            &mut pending_attacks,
+            &mut damage_queue,
+            &mut commands,
+        );
+        if let Some(splash) = worm_splash {
+            queue_wormsplash(&mut damage_queue, entity, splash.0, order.pos, attacker_pos);
         }
     }
 }
@@ -1387,5 +1452,119 @@ mod tests {
         assert_eq!(splashes.len(), 2);
         assert!(splashes.iter().all(|h| h.target.is_none() && h.attacker == worm));
         assert!(splashes.iter().any(|h| h.impact_pos == Vec3::new(100.0, 0.0, 0.0)));
+    }
+
+    /// A Flow banked in flight and aimed by its `base` piece: every
+    /// projectile of a salvo shot runs `Shot1` → `QueryWeapon1` and
+    /// leaves from the *next* gunpoint, at that piece's world position
+    /// through the unit's full attitude (bank included) and the spinning
+    /// wing — and, `base` having been turned by the unit-relative
+    /// `AimWeapon1(h, p)`, the fixed-launcher emit direction (the
+    /// gunpoints' +Z) points straight at the target.
+    #[test]
+    fn flow_salvo_shot_uses_each_gunpoint_through_the_flyer_attitude() {
+        use crate::units::assets::animation::{
+            AnimRig, MuzzlePiece, PieceEmit, UnitAnimator, driver_for, piece_names,
+        };
+
+        let mut app = App::new();
+        app.init_resource::<PendingAttacks>()
+            .init_resource::<DamageQueue>()
+            .insert_resource(UnitRegistry::empty());
+
+        let unit_tf = Transform::from_xyz(300.0, 140.0, 200.0).with_rotation(
+            crate::interaction::air_movement::attitude(0.7, 0.25),
+        );
+        let target = Vec3::new(420.0, 20.0, 150.0);
+        let (h, p) = aim::local_aim_angles(unit_tf.rotation, target - unit_tf.translation, 0.0);
+        // Rig → Bevy mapping (`apply_and_drain`): euler YXZ (y, x, −z).
+        let base_tf = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, h, -p, 0.0));
+        let wing_tf = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.0, 0.0, -0.8));
+        let root_tf = Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI));
+        let gp0_tf = Transform::from_xyz(-9.5, 0.0, 11.5);
+        let gp1_tf = Transform::from_xyz(9.5, 0.0, 11.5);
+
+        let world = app.world_mut();
+        let unit = world
+            .spawn((unit_tf, GlobalTransform::from(unit_tf), UnitType(UnitKind::Flow)))
+            .id();
+        let root = world.spawn((root_tf, ChildOf(unit))).id();
+        let base = world.spawn((base_tf, ChildOf(root), PieceEmit::default())).id();
+        let wing1 = world.spawn((wing_tf, ChildOf(base), PieceEmit::default())).id();
+        let gp0 = world.spawn((gp0_tf, ChildOf(wing1), PieceEmit::default())).id();
+        let gp1 = world.spawn((gp1_tf, ChildOf(wing1), PieceEmit::default())).id();
+        let stub = || (Transform::default(), ChildOf(unit));
+        let monolith = world.spawn(stub()).id();
+        let wing2 = world.spawn(stub()).id();
+        let gp2 = world.spawn(stub()).id();
+        let gp3 = world.spawn(stub()).id();
+        let mut rig = AnimRig::for_test(piece_names(UnitKind::Flow));
+        rig.piece_entities = vec![base, monolith, wing1, wing2, gp0, gp1, gp2, gp3];
+        rig.muzzle = 4;
+        let mut driver = driver_for(UnitKind::Flow);
+        driver.bind(&rig);
+        world.entity_mut(unit).insert((
+            UnitAnimator {
+                rig,
+                created: true,
+                driver,
+            },
+            MuzzlePiece(4),
+        ));
+
+        let shot = SalvoShot {
+            attacker: unit,
+            kind: UnitKind::Flow,
+            weapon: WeaponId::BUILD_LASER,
+            target: None,
+            impact_pos: target,
+            is_traveling: true,
+            projectiles: 2,
+        };
+        app.world_mut()
+            .run_system_once(
+                move |mut pieces: PieceLookup,
+                      registry: Res<UnitRegistry>,
+                      mut attacks: ResMut<PendingAttacks>,
+                      mut damage: ResMut<DamageQueue>| {
+                    fire_salvo_shot(
+                        &shot,
+                        &GlobalTransform::from(unit_tf),
+                        false,
+                        &mut pieces,
+                        &registry,
+                        &mut attacks,
+                        &mut damage,
+                    );
+                },
+            )
+            .unwrap();
+
+        let chain = |leaf: Transform| {
+            GlobalTransform::from(unit_tf).affine()
+                * root_tf.compute_affine()
+                * base_tf.compute_affine()
+                * wing_tf.compute_affine()
+                * leaf.compute_affine()
+        };
+        let events = &app.world().resource::<PendingAttacks>().events;
+        assert_eq!(events.len(), 2, "projectiles=2 → two projectiles per salvo shot");
+        for (event, leaf) in events.iter().zip([gp0_tf, gp1_tf]) {
+            let expected = chain(leaf).transform_point3(Vec3::ZERO);
+            assert!(
+                event.attacker_pos.distance(expected) < 1e-3,
+                "muzzle {} != gunpoint {}",
+                event.attacker_pos,
+                expected
+            );
+            let dir = event.delayed_hit.as_ref().unwrap().muzzle_dir;
+            let aim = (target - unit_tf.translation).normalize();
+            assert!(dir.dot(aim) > 0.9999, "launch dir {dir} vs aim {aim}");
+        }
+        assert!(events[0].attacker_pos.distance(events[1].attacker_pos) > 15.0);
+        // No muzzle flash: flow.bos emits nothing from its gunpoints.
+        assert!(events[0].muzzle_ceg.is_none());
+        let animator = app.world().get::<UnitAnimator>(unit).unwrap();
+        assert_eq!(animator.rig.muzzle, 5, "two Shot1s: gp0 then gp1");
     }
 }

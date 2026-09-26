@@ -45,6 +45,9 @@ pub struct CegRegistry {
 #[derive(Resource, Default)]
 pub(super) struct CegParticleMesh {
     pub handle: Option<Handle<Mesh>>,
+    /// Shared additive `laserend` material for [`CegSpike`] streaks
+    /// (per-spike colour rides on vertex colours).
+    pub spike_material: Option<Handle<StandardMaterial>>,
 }
 
 impl CegParticleMesh {
@@ -129,6 +132,9 @@ impl CegRegistry {
             "sparkle" => Some("sparkle.tga"),
             "bubbles" => Some("bubbles.tga"),
             "lobedincantation" => Some("lobedincantation.tga"),
+            // Engine default atlas (`ProjectileDrawer`'s `laserendtex`),
+            // used by `explspike` streaks.
+            "laserend" => Some("laserend.tga"),
             "none" | "" => None,
             _ => None,
         }
@@ -168,6 +174,26 @@ pub(super) struct CegFlame {
     pub size_growth_per_frame: f32,
     pub color_map_stops: Vec<[f32; 4]>,
     pub material: Handle<StandardMaterial>,
+}
+
+/// One live `CExploSpikeProjectile` (`class=explspike`) — upstream
+/// `Rendering/Env/Particles/Classes/ExploSpikeProjectile.cpp`: a
+/// camera-facing `laserend` streak from `pos − dir·length` to
+/// `pos + dir·length`, `width` wide, whose length grows by
+/// `length_growth` and alpha drops by `alpha_decay` every frame; gone
+/// at alpha 0. Drawn additively with colour `alpha · color`.
+#[derive(Component)]
+pub(super) struct CegSpike {
+    pub pos: Vec3,
+    /// Unnormalised (`dir /= lengthGrowth` in `Init`).
+    pub dir: Vec3,
+    pub length: f32,
+    pub length_growth: f32,
+    pub width: f32,
+    pub alpha: f32,
+    pub alpha_decay: f32,
+    pub color: Vec3,
+    pub mesh: Handle<Mesh>,
 }
 
 /// A scheduled recursive CEG spawn (CExpGenSpawner).
@@ -238,6 +264,18 @@ pub(super) fn spawn_ceg(
             EffectProperties::Spawner(s) => {
                 spawn_delayed(effect.count, s, pos, dir, commands);
             }
+            EffectProperties::Spike(sp) => spawn_spikes(
+                effect.count,
+                sp,
+                pos,
+                rng,
+                commands,
+                meshes,
+                materials,
+                images,
+                model_cache,
+                particle_mesh,
+            ),
             EffectProperties::Raw(_) => {
                 // Unsupported class (CStars, etc.) — silently skipped.
             }
@@ -449,6 +487,138 @@ fn spawn_flame(
             MeshMaterial3d(material.clone()),
             Transform::from_translation(origin + pos_offset).with_scale(Vec3::splat(base_size)),
         ));
+    }
+}
+
+/// `CExploSpikeProjectile` spawn + `Init`: every CEG expression is
+/// rolled per spike; `lengthGrowth = |dir|·(0.5 + r·0.4)` and `dir` is
+/// divided by it.
+#[allow(clippy::too_many_arguments)]
+fn spawn_spikes(
+    count: u32,
+    props: &spring_tdf::SpikeProperties,
+    origin: Vec3,
+    rng: &mut u32,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    model_cache: &mut S3OModelCache,
+    particle_mesh: &mut CegParticleMesh,
+) {
+    if count == 0 {
+        return;
+    }
+    let material = match &particle_mesh.spike_material {
+        Some(m) => m.clone(),
+        None => {
+            let texture = CegRegistry::resolve_texture("laserend")
+                .and_then(|f| load_beam_texture(f, model_cache, images))
+                .map(|(h, _, _)| h);
+            let m = materials.add(StandardMaterial {
+                base_color: Color::WHITE,
+                base_color_texture: texture,
+                unlit: true,
+                alpha_mode: AlphaMode::Add,
+                cull_mode: None,
+                ..default()
+            });
+            particle_mesh.spike_material = Some(m.clone());
+            m
+        }
+    };
+    for index in 0..count {
+        let roll = |e: &CegExpr, rng: &mut u32| {
+            e.eval(&EvalCtx {
+                index,
+                damage: 0.0,
+                rand01: next_unit(rng),
+            })
+        };
+        let raw_dir = Vec3::new(
+            roll(&props.dir.x, rng),
+            roll(&props.dir.y, rng),
+            roll(&props.dir.z, rng),
+        );
+        let offset = Vec3::new(
+            roll(&props.pos.x, rng),
+            roll(&props.pos.y, rng),
+            roll(&props.pos.z, rng),
+        );
+        let color = props.color.as_ref().map_or(Vec3::new(1.0, 0.8, 0.5), |c| {
+            Vec3::new(roll(&c.x, rng), roll(&c.y, rng), roll(&c.z, rng))
+        });
+        let length_growth = raw_dir.length() * (0.5 + next_unit(rng) * 0.4);
+        let dir = if length_growth > 0.0 {
+            raw_dir / length_growth
+        } else {
+            raw_dir
+        };
+        let mesh = meshes.add(super::shared::build_billboard_quad_mesh());
+        commands.spawn((
+            CegSpike {
+                pos: origin + offset,
+                dir,
+                length: roll(&props.length, rng),
+                length_growth,
+                width: roll(&props.width, rng),
+                alpha: roll(&props.alpha, rng),
+                alpha_decay: roll(&props.alpha_decay, rng).max(1e-3),
+                color,
+                mesh: mesh.clone(),
+            },
+            Mesh3d(mesh),
+            MeshMaterial3d(material.clone()),
+            Transform::IDENTITY,
+        ));
+    }
+}
+
+/// Grow / fade [`CegSpike`]s one sim frame per tick and rewrite their
+/// camera-facing quads (`CExploSpikeProjectile::Update` + `Draw`).
+pub(super) fn tick_ceg_spikes(
+    time: Res<Time>,
+    mut spikes: Query<(Entity, &mut CegSpike)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
+    mut commands: Commands,
+) {
+    if spikes.is_empty() {
+        return;
+    }
+    let frames = time.delta_secs() * CEG_FRAME_RATE;
+    let cam_pos = camera_q
+        .single()
+        .map(|gt| gt.translation())
+        .unwrap_or(Vec3::Y * 1000.0);
+    for (entity, mut spike) in &mut spikes {
+        spike.length += spike.length_growth * frames;
+        spike.alpha = (spike.alpha - spike.alpha_decay * frames).max(0.0);
+        if spike.alpha <= 0.0 {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let dif = (spike.pos - cam_pos).normalize_or(Vec3::NEG_Y);
+        let w = dif.cross(spike.dir).normalize_or(Vec3::X) * spike.width;
+        let l = spike.dir * spike.length;
+        let Some(mesh) = meshes.get_mut(&spike.mesh) else {
+            continue;
+        };
+        use bevy::mesh::VertexAttributeValues;
+        if let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+            && p.len() >= 4
+        {
+            p[0] = (spike.pos - l - w).to_array();
+            p[1] = (spike.pos + l - w).to_array();
+            p[2] = (spike.pos + l + w).to_array();
+            p[3] = (spike.pos - l + w).to_array();
+        }
+        let c = spike.color * spike.alpha;
+        if let Some(VertexAttributeValues::Float32x4(col)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
+            for slot in col.iter_mut().take(4) {
+                *slot = [c.x, c.y, c.z, 1.0];
+            }
+        }
     }
 }
 

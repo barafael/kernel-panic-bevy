@@ -442,7 +442,7 @@ pub fn spawn_unit(
             let has_geometry = piece.is_some_and(|p| !p.vertices.is_empty());
             let offset = piece_offsets[idx];
 
-            let piece_cmd = if has_geometry {
+            let mut piece_cmd = if has_geometry {
                 let piece = piece.unwrap();
                 let mesh = piece_to_mesh(piece);
                 let mesh_handle = meshes.add(mesh);
@@ -460,7 +460,14 @@ pub fn spawn_unit(
                     Visibility::default(),
                 ))
             };
-            let piece_entity = piece_cmd.id();
+            let emit_vertices: Vec<[f32; 3]> = piece
+                .map(|p| p.vertices.iter().take(2).map(|v| v.position).collect())
+                .unwrap_or_default();
+            let piece_entity = piece_cmd
+                .insert(crate::units::assets::animation::PieceEmit::from_vertices(
+                    &emit_vertices,
+                ))
+                .id();
             piece_entities.push(piece_entity);
 
             let bevy_parent = match parent_idx {

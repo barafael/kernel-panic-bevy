@@ -26,7 +26,7 @@ mod weapon;
 pub use explosion::{
     CegExpr, CegOp, CegVec3, ColorMap, EffectClass, EffectLayer, EffectProperties, EmitVector,
     EvalCtx, ExplosionDef, ExplosionDefs, FlameProperties, GroundFlash, ParticleProperties,
-    SpawnerProperties,
+    SpawnerProperties, SpikeProperties,
 };
 pub use parse::{ParseError, Section, Tdf};
 pub use unit::{UnitDef, UnitDefs};
