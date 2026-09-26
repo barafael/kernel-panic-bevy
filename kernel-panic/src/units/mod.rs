@@ -11,6 +11,8 @@ pub mod weapon_fx;
 
 use bevy::prelude::*;
 
+use crate::rendering::interpolation::SimPose;
+
 /// The fixed simulation tick rate (ticks/second) for the gameplay
 /// chain — Spring's own sim frame rate. Every cooldown, burst rate and
 /// production speed in the registries is authored against this cadence.
@@ -76,6 +78,13 @@ impl Plugin for UnitsPlugin {
             .init_resource::<spatial::SpatialIndex>()
             .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
+            // Everything the fixed sim moves is drawn interpolated
+            // between the last two sim poses (`rendering::interpolation`).
+            .register_required_components::<components::UnitType, SimPose>()
+            .register_required_components::<animation::PieceIndex, SimPose>()
+            .register_required_components::<animation::DeathParticle, SimPose>()
+            .register_required_components::<command_fire::SigTermSignal, SimPose>()
+            .register_required_components::<command_fire::SigTermBomb, SimPose>()
             .add_systems(
                 FixedUpdate,
                 // Also runs in `AppState::Menu`: the attract-mode demo

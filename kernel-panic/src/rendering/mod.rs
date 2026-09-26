@@ -1,4 +1,5 @@
 pub mod camera;
+pub mod interpolation;
 
 use bevy::prelude::*;
 
@@ -11,7 +12,8 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<CameraSettings>()
+        app.add_plugins(interpolation::SimInterpolationPlugin)
+            .init_resource::<CameraSettings>()
             .init_resource::<MapBounds>()
             .add_systems(Startup, spawn_camera)
             .add_systems(
