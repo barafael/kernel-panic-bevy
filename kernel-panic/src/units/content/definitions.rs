@@ -98,7 +98,9 @@ pub enum UnitKind {
     #[strum(serialize = "packet")]
     Packet,
 
-    /// Scout unit.
+    /// SIGTERM bomber: spawned by a Terminal's airstrike (upstream
+    /// `airstrike.lua` creates it with `Spring.CreateUnit`), never built
+    /// — it is in no factory's `SIDEDATA.TDF` build list.
     #[strum(serialize = "signal")]
     Signal,
 
@@ -211,6 +213,31 @@ impl UnitKind {
                 | UnitKind::Obelisk
                 | UnitKind::Firewall
         )
+    }
+
+    /// "Factory" per upstream `game_over.lua` (gamemode 1, the default):
+    /// `kpunittypes.lua`'s `isHomeBase` + `isMiniFac`. A team that owns
+    /// none of these is out of the game.
+    pub fn is_factory(self) -> bool {
+        matches!(
+            self,
+            UnitKind::Kernel
+                | UnitKind::Hole
+                | UnitKind::Carrier
+                | UnitKind::Socket
+                | UnitKind::Window
+                | UnitKind::Port
+        )
+    }
+
+    /// Per-team unit cap (FBI `UnitRestricted`). Only `logic_bomb.fbi`
+    /// declares one (64); upstream `Launcher.lua` and `byte.bos`
+    /// (`lua_GetLogicBombLeft`) honour it for launched mines too.
+    pub fn team_limit(self) -> Option<u32> {
+        match self {
+            UnitKind::LogicBomb => Some(64),
+            _ => None,
+        }
     }
 
     /// Mobile constructors that can erect secondary factories on
@@ -472,6 +499,32 @@ mod tests {
                 !kind.homing_targets_air(),
                 "{kind:?} should not bypass NoChaseCategory=VTOL",
             );
+        }
+    }
+
+    /// Upstream `game_over.lua` keeps a team alive on homebases +
+    /// MiniFacs only — special buildings and constructors don't count.
+    #[test]
+    fn factory_classifier_matches_game_over_lua() {
+        let mut factories: Vec<&str> = ALL_UNIT_KINDS
+            .iter()
+            .filter(|k| k.is_factory())
+            .map(|k| k.unitname())
+            .collect();
+        factories.sort_unstable();
+        assert_eq!(
+            factories,
+            ["carrier", "hole", "kernel", "port", "socket", "window"]
+        );
+    }
+
+    #[test]
+    fn only_logic_bomb_has_team_limit() {
+        assert_eq!(UnitKind::LogicBomb.team_limit(), Some(64));
+        for kind in ALL_UNIT_KINDS {
+            if *kind != UnitKind::LogicBomb {
+                assert_eq!(kind.team_limit(), None, "{kind:?}");
+            }
         }
     }
 

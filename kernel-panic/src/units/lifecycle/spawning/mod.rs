@@ -313,6 +313,12 @@ pub fn spawn_unit(
             .insert(crate::units::mechanics::network_buffer::SpeedBoost::default());
     }
 
+    // Terminal / Firewall start recharging at creation (upstream
+    // `UnitCreated` in airstrike.lua / network_reflectorshield.lua).
+    if let Some(cooldown) = crate::units::mechanics::command_fire::initial_cooldown(kind) {
+        commands.entity(unit_entity).insert(cooldown);
+    }
+
     if let Some(producer) = default_production(kind) {
         commands.entity(unit_entity).insert(producer);
     }
@@ -611,11 +617,25 @@ pub fn spawn_queued_viruses(
 /// mines visible in frame N+1's Simulate pass. Logic Bombs auto-pick
 /// up `Cloaked` via `UnitKind::spawns_cloaked`, so they behave like
 /// factory-built mines the moment they appear.
+///
+/// Each mine is dropped when its team already fields the Logic Bomb
+/// `UnitRestricted` cap — upstream `Launcher.lua` only calls
+/// `CreateUnit` while `#GetTeamUnitsByDefs(team, logic_bomb) <
+/// maxThisUnit`.
 pub fn spawn_queued_mines(
     mut mine_spawns: ResMut<crate::units::mechanics::command_fire::MineSpawnQueue>,
+    live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
     mut ctx: SpawnContext,
 ) {
+    let limit = UnitKind::LogicBomb.team_limit().unwrap_or(u32::MAX);
+    let mut counts =
+        crate::units::lifecycle::bookkeeping::team_kind_counts(UnitKind::LogicBomb, &live_units);
     for spawn in mine_spawns.drain() {
+        let count = counts.entry(spawn.team).or_default();
+        if *count >= limit {
+            continue;
+        }
+        *count += 1;
         spawn_unit(
             UnitKind::LogicBomb,
             spawn.faction,

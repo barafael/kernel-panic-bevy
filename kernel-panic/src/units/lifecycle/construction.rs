@@ -14,6 +14,8 @@
 //!    datavent with the builder's team/faction, despawn the `Constructing`
 //!    component, and let `movement_system` promote the next queued order.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 use crate::units::content::weapons::WeaponId;
@@ -21,7 +23,7 @@ use crate::units::content::weapons::WeaponId;
 use super::production::PendingFadeInstall;
 use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SpawnContext, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::units::components::{Faction, TeamId};
+use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
@@ -126,6 +128,11 @@ pub fn start_construction(
 /// elapses. The unit is freed from `Constructing` at completion; the
 /// movement queue's next order (if any) is promoted next frame by
 /// `movement_system` once it sees `MoveTarget` is absent.
+///
+/// A kind with a per-team cap (`UnitRestricted`: Logic Bombs) is
+/// refused — construction cancelled before the nanoframe appears — when
+/// the team already fields the cap, as Spring refuses the build order.
+#[allow(clippy::too_many_arguments)]
 pub fn tick_construction(
     time: Res<Time>,
     mut builders: Query<(
@@ -137,11 +144,31 @@ pub fn tick_construction(
         &mut Constructing,
     )>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
     mut ctx: SpawnContext,
 ) {
     let dt = time.delta_secs();
+    // Lazily-built per-(kind, team) census for capped kinds, bumped as
+    // this pass starts nanoframes so two builders starting on the same
+    // frame can't both slip under the cap.
+    let mut capped_counts: HashMap<UnitKind, HashMap<u8, u32>> = HashMap::new();
 
     for (entity, gtf, mut transform, faction, team, mut constructing) in &mut builders {
+        if constructing.building.is_none()
+            && let Some(limit) = constructing.kind.team_limit()
+        {
+            let kind = constructing.kind;
+            let counts = capped_counts.entry(kind).or_insert_with(|| {
+                crate::units::lifecycle::bookkeeping::team_kind_counts(kind, &live_units)
+            });
+            let count = counts.entry(team.0).or_default();
+            if *count >= limit {
+                ctx.commands.entity(entity).remove::<Constructing>();
+                continue;
+            }
+            *count += 1;
+        }
+
         constructing.progress += dt;
         let build_time = ctx.unit_registry.build_time(constructing.kind);
 

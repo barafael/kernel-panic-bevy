@@ -356,7 +356,8 @@ pub(crate) fn apply_ordered_command(
             .remove::<crate::units::combat::AttackGroundOrder>()
             .remove::<crate::units::combat::AttackTargetOrder>()
             .remove::<GuardTarget>()
-            .remove::<AttackMoveActive>();
+            .remove::<AttackMoveActive>()
+            .remove::<crate::units::mechanics::command_fire::PendingCommandFire>();
         match cmd {
             QueuedCommand::BuildAt { kind, site } => {
                 ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });

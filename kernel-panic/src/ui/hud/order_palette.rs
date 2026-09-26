@@ -7,14 +7,19 @@
 //! by simulating the same ECS effects — Stop strips order components,
 //! Attack toggles `OrderCursorModes::attack_ground`, Fight toggles
 //! `OrderCursorModes::attack_move`, Self-destruct inserts
-//! `SelfDestructCountdown`. Command-fire abilities require a target
-//! position, so the palette button just toggles the same mode the
-//! hotkey would: the next ground click commits. Selections with a Worm
-//! also get the AutoHold toggle (`H`).
+//! `SelfDestructCountdown`. The Ability button runs the `D` logic from
+//! [`crate::interaction::ability`]: Bug / Exploit deploy at once, and
+//! aimed abilities (command-fire, Dispatch) arm
+//! `OrderCursorModes::ability` — the button sits where the cursor is,
+//! so the next ground click supplies the point `D` would read from the
+//! cursor. While every selected command-fire caster is recharging the
+//! button reads the seconds left, like upstream's `"<n>s"` command
+//! label (`airstrike.lua` / `network_reflectorshield.lua`). Selections
+//! with a Worm also get the AutoHold toggle (`H`).
 
 use bevy::prelude::*;
 
-use crate::interaction::ability::OrderCursorModes;
+use crate::interaction::ability::{OrderCursorModes, ability_is_aimed, deploy_units};
 use crate::interaction::movement::{
     AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget,
 };
@@ -25,6 +30,8 @@ use crate::units::combat::{
 use crate::units::components::UnitType;
 use crate::units::lifecycle::construction::PendingBuild;
 use crate::units::mechanics::worm::AutoHold;
+use crate::units::mechanics::command_fire::{CommandFireCooldown, PendingCommandFire};
+use crate::units::mechanics::deploy::DeployEvent;
 
 use super::super::theme::*;
 
@@ -49,6 +56,7 @@ impl Plugin for OrderPalettePlugin {
                 handle_clicks,
                 refresh_panel,
                 update_armed_highlight,
+                update_ability_label,
             )
                 .chain()
                 .after(crate::map_loading::GameWorldRebuild),
@@ -67,6 +75,11 @@ struct OrderPaletteStateHash(u64);
 
 #[derive(Component, Clone, Copy)]
 struct OrderButton(OrderKind);
+
+/// The Ability button's title text, rewritten each frame with the
+/// recharge countdown by [`update_ability_label`].
+#[derive(Component)]
+struct AbilityLabel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum OrderKind {
@@ -91,12 +104,9 @@ enum OrderKind {
     /// selected Worms: while on, a cloaked worm holds fire until given
     /// an explicit attack order. Shown only when a Worm is selected.
     AutoHold,
-    /// Cast the contextual D-ability (caster only).
-    /// We can't drive command-fire from here without a target click —
-    /// pressing the button just enables `OrderCursorModes::attack_ground`
-    /// so the next click is consumed; gameplay-wise the effect is similar
-    /// (pressing `D` over a ground point fires command-fire from the COB
-    /// script).
+    /// The contextual `D` ability: deploy Bug / Exploit immediately,
+    /// and arm `OrderCursorModes::ability` for aimed abilities so the
+    /// next ground click casts them.
     Ability,
 }
 
@@ -236,7 +246,7 @@ fn refresh_panel(
                     BorderColor::all(PANEL_BORDER),
                 ))
                 .with_children(|btn| {
-                    btn.spawn((
+                    let mut label = btn.spawn((
                         Text::new(kind.label()),
                         TextFont {
                             font_size: TEXT_BODY,
@@ -244,6 +254,9 @@ fn refresh_panel(
                         },
                         TextColor(KP_GREEN),
                     ));
+                    if *kind == OrderKind::Ability {
+                        label.insert(AbilityLabel);
+                    }
                     btn.spawn((
                         Text::new(kind.hotkey()),
                         TextFont {
@@ -277,6 +290,7 @@ fn update_armed_highlight(
             || (matches!(button.0, OrderKind::Guard) && modes.guard)
             || (matches!(button.0, OrderKind::Move) && modes.move_order)
             || (matches!(button.0, OrderKind::SetTarget) && modes.set_target)
+            || (matches!(button.0, OrderKind::Ability) && modes.ability)
             || (matches!(button.0, OrderKind::AutoHold) && autohold_on(&autohold_q));
         let target_border = if armed { KP_GREEN } else { PANEL_BORDER };
         let target_bg = if armed { BUTTON_BG_PRESSED } else { BUTTON_BG };
@@ -294,6 +308,8 @@ fn handle_clicks(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<Entity, With<Selected>>,
     mut autohold_q: Query<&mut AutoHold, With<Selected>>,
+    selected_kinds: Query<(Entity, &UnitType), With<Selected>>,
+    mut deploy: MessageWriter<DeployEvent>,
     mut modes: ResMut<OrderCursorModes>,
 ) {
     // Keyboard hotkey: S issues Stop (mirrors the Stop button).
@@ -311,12 +327,7 @@ fn handle_clicks(
         }
         match button.0 {
             OrderKind::Stop => stop_selection(&mut commands, &selected_q, &mut modes),
-            OrderKind::AttackGround | OrderKind::Ability => {
-                // Both arm the next-click handler; for Ability the user
-                // expects the click to fire the unit's command-fire weapon
-                // — the existing `D`-hotkey code already does that, so
-                // here we just toggle the attack-ground latch which produces
-                // the matching cursor + click semantics.
+            OrderKind::AttackGround => {
                 let next = !modes.attack_ground;
                 modes.attack_ground = next;
                 if next {
@@ -325,12 +336,22 @@ fn handle_clicks(
                     modes.guard = false;
                     modes.move_order = false;
                     modes.set_target = false;
+                    modes.ability = false;
+                }
+            }
+            OrderKind::Ability => {
+                // Same split as the `D` hotkey: the untargeted deploy
+                // happens now; aimed abilities wait for a ground click.
+                deploy_units(selected_kinds.iter().map(|(e, u)| (e, u.0)), &mut deploy);
+                if selected_kinds.iter().any(|(_, u)| ability_is_aimed(u.0)) {
+                    modes.toggle_ability();
                 }
             }
             OrderKind::Fight => {
                 let next = !modes.attack_move;
                 modes.attack_move = next;
                 if next {
+                    modes.ability = false;
                     modes.attack_ground = false;
                     modes.patrol = false;
                     modes.guard = false;
@@ -342,6 +363,7 @@ fn handle_clicks(
                 let next = !modes.guard;
                 modes.guard = next;
                 if next {
+                    modes.ability = false;
                     modes.attack_ground = false;
                     modes.attack_move = false;
                     modes.patrol = false;
@@ -353,6 +375,7 @@ fn handle_clicks(
                 let next = !modes.move_order;
                 modes.move_order = next;
                 if next {
+                    modes.ability = false;
                     modes.attack_ground = false;
                     modes.attack_move = false;
                     modes.patrol = false;
@@ -364,6 +387,7 @@ fn handle_clicks(
                 let next = !modes.set_target;
                 modes.set_target = next;
                 if next {
+                    modes.ability = false;
                     modes.attack_ground = false;
                     modes.attack_move = false;
                     modes.patrol = false;
@@ -409,6 +433,7 @@ fn stop_selection(
             .remove::<GuardTarget>()
             .remove::<ForcedTarget>()
             .remove::<PendingBuild>()
+            .remove::<PendingCommandFire>()
             .remove::<SelfDestructCountdown>();
     }
     modes.attack_ground = false;
@@ -417,6 +442,50 @@ fn stop_selection(
     modes.guard = false;
     modes.move_order = false;
     modes.set_target = false;
+    modes.ability = false;
+}
+
+/// Label for the Ability button: `"Ability"` while any selected
+/// command-fire caster is ready (the next cast fires from it),
+/// otherwise the shortest remaining recharge as whole seconds rounded
+/// up — upstream writes `math.ceil((readyFrame - now) / 32) .. "s"`
+/// into the command's name.
+fn ability_label(cooldowns: impl IntoIterator<Item = Option<f32>>) -> Option<String> {
+    let mut soonest: Option<f32> = None;
+    for remaining in cooldowns {
+        match remaining {
+            Some(r) if r > 0.0 => soonest = Some(soonest.map_or(r, |s| s.min(r))),
+            _ => return None,
+        }
+    }
+    soonest.map(|r| format!("{}s", r.ceil() as u32))
+}
+
+/// Keep the Ability button's label on the selection's recharge
+/// countdown. Selections without a command-fire caster (Bug / Exploit /
+/// teleporters only) always read "Ability".
+fn update_ability_label(
+    selected_q: Query<(&UnitType, Option<&CommandFireCooldown>), With<Selected>>,
+    mut labels: Query<(&mut Text, &mut TextColor), With<AbilityLabel>>,
+) {
+    let countdown = ability_label(
+        selected_q
+            .iter()
+            .filter(|(u, _)| u.0.has_command_fire_ability())
+            .map(|(_, cd)| cd.map(|c| c.remaining)),
+    );
+    let (text, color) = match &countdown {
+        Some(secs) => (secs.as_str(), TEXT_DISABLED),
+        None => (OrderKind::Ability.label(), KP_GREEN),
+    };
+    for (mut label, mut label_color) in &mut labels {
+        if label.0 != text {
+            label.0 = text.to_string();
+        }
+        if label_color.0 != color {
+            label_color.0 = color;
+        }
+    }
 }
 
 /// True when every selected AutoHold unit has the toggle on (and at
@@ -447,7 +516,7 @@ impl OrderSnapshot {
         let mut has_caster = false;
         let mut has_autohold = false;
         for ut in selected_q {
-            if ut.0.has_command_fire_ability() || ut.0.deploy_pair().is_some() {
+            if ability_is_aimed(ut.0) || ut.0.deploy_pair().is_some() {
                 has_caster = true;
             }
             has_autohold |= ut.0.has_autohold();
@@ -480,5 +549,24 @@ impl OrderSnapshot {
             entry.hash(&mut h);
         }
         h.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Any ready caster keeps the button live; all recharging shows the
+    /// soonest countdown, rounded up like upstream's label.
+    #[test]
+    fn ability_label_shows_soonest_recharge() {
+        assert_eq!(ability_label([]), None);
+        assert_eq!(ability_label([None]), None);
+        assert_eq!(ability_label([Some(12.0), None]), None);
+        assert_eq!(ability_label([Some(95.2)]), Some("96s".to_string()));
+        assert_eq!(
+            ability_label([Some(40.0), Some(3.01)]),
+            Some("4s".to_string())
+        );
     }
 }

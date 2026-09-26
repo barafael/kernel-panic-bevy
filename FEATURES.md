@@ -104,7 +104,12 @@ read the resulting state.
   The panel is attached to the bottom left corner with no right or
   bottom padding.
 - **Top-left order palette**: context-sensitive Stop / Fight / other
-  ability buttons. Hides when no unit is selected.
+  ability buttons. Hides when no unit is selected. The **Ability**
+  button does what `D` does: Bugs / Exploits deploy at once; aimed
+  abilities (command-fire, Dispatch) arm a cast cursor and the next
+  ground click casts them there. While every selected command-fire
+  caster is recharging, the button reads the seconds left (`"42s"`,
+  rounded up like upstream's command label).
 - **Mid-left build menu**: faction-colored icons for what the selected
   factory or constructor can produce. When units are queued, the
   number of queued units of that kind is displayed as a small badge
@@ -276,7 +281,9 @@ read the resulting state.
 - The Kernel (System homebase) builds faster as the team controls more
   small buildings — Sockets, Windows, Ports, Terminals, Obelisks,
   Firewalls (Kernel Boost: +0.2× per small building). Visible as the
-  in-progress unit's HP bar filling faster.
+  in-progress unit's HP bar filling faster. Only *finished* buildings
+  count (upstream `UnitFinished`); one still under construction — or
+  destroyed before completion — adds nothing.
 - **Two-phase emergence**:
   - **System units (Kernel-built)** rise out of the ground at the
     factory's spawn pad, easing up to the surface (Rise emerge
@@ -359,7 +366,8 @@ read the resulting state.
   collision) (VTOL / cruise-alt hover).
 - Flow's speed visibly scales with the team's small-building count:
   more Sockets / Ports / Firewalls / etc. → faster Flow
-  (`SpeedBoost` per small building).
+  (`SpeedBoost` per small building). Same finished-buildings-only
+  count as Kernel Boost.
 
 ## 15. Hacker — Bug ↔ Exploit morph
 
@@ -400,7 +408,10 @@ read the resulting state.
 
 - **Logic Bomb**: cloaked mine that triggers when an enemy enters its
   proximity radius — kamikazes with a big AoE explosion (kamikaze
-  proximity trigger, FBI `kamikazeDistance`).
+  proximity trigger, FBI `kamikazeDistance`). Capped at 64 per team
+  (`logic_bomb.fbi UnitRestricted=64`, nanoframes included): at the cap
+  the build icon greys out, constructors refuse to start one, and
+  launched mines beyond it are simply not created (`Launcher.lua`).
 - **Bad Block**: cheap destructible wall. Blocks small units' movement;
   does **not** block shots. Cleared by Debug or crushed by a Byte /
   Connection.
@@ -409,6 +420,13 @@ read the resulting state.
 
 ## 19. Command-fire abilities (D hotkey)
 
+- Weapon-backed abilities honour their weapon's TDF range: NX Flag
+  1400, Infection 2000, Mine Launch 1100 elmos. A mobile caster
+  (Pointer, Byte) ordered beyond range walks toward the target and
+  casts as soon as it is in range; any new order (move, attack, Stop…)
+  cancels the pending cast. A stationary Obelisk refuses an
+  out-of-range order. SIGTERM and Protect are Lua commands upstream
+  with no range check — both reach anywhere on the map.
 - **NX Flag** (Pointer): area ability — sets a wide circle ablaze for
   ~1 minute, dealing constant damage to anything inside. Has a
   multi-second cooldown after firing.
@@ -418,13 +436,17 @@ read the resulting state.
   cooldown; visible "pink fire on top" on the Obelisk while the
   weapon is ready.
 - **Protect** (Firewall): casts a 20-second damage-halving bubble on
-  a friendly target at the click position; half of incoming damage
-  is reflected back at the attacker.
+  every friendly unit within 300 elmos of the click position; half of
+  incoming damage is reflected back at the attacker. 96 s recharge
+  (upstream `90 * 32` frames), which also runs from the moment the
+  Firewall is created — a new Firewall isn't ready right away.
 - **Mine Launch** (Byte): lobs 5 Logic Bombs in a spread toward the
-  target point at the cost of HP (self-damage).
-- **SIGTERM** (Terminal): calls a nuclear bomber that drops on the
-  target point for ~10,000 damage over a wide area, plus a brief
-  denial zone. ~90 s cooldown; no defense.
+  target point at the cost of HP (self-damage). Mines past the team's
+  Logic Bomb cap are not created.
+- **SIGTERM** (Terminal): calls the Signal bomber, which flies to the
+  target point and drops a bomb for ~10,000 damage over a wide area,
+  plus a brief denial zone. 96 s recharge that, like the Firewall's,
+  starts when the Terminal is created; no defense.
 
 ## 20. Unit roster
 
@@ -465,12 +487,12 @@ moved back into the Buffer by entering a teleporter.
 
 | Unit | Role |
 | --- | --- |
-| **Connection** (as homebase) | Homebase / main factory. Substitutes for upstream's "Carrier" base building; in our build it's the same model that doubles as the mobile teleporter. Visible body-piece "hatch" lifts up while producing |
+| **Carrier** | Homebase / main factory. Builds Packet, Connection, Flow and Gateway (`SIDEDATA.TDF [carrier]`). Visible body-piece "hatch" lifts up while producing |
 | **Connection** (mobile) | Mobile teleporter — Dispatch + Enter just like a Port. Decent armor and an arc beam with good range and high single-target damage. Wins most 1v1 against large units, but folds to Pointer fire and is bad against swarms |
 | **Gateway** | Lightly-armed mobile constructor (builds Ports, Firewalls, plus shared Bad Block / Logic Bomb / Debug); detector for mines + cloaked units |
 | **Port** | On-datavent production building. Ticks the team's Packet Buffer. Dispatch sends up to 12 Packets at once; ALT-modified Dispatch drains the Buffer in 12-per-frame batches |
 | **Packet** | Basic light spam unit. Weaker than Bit / Bug in combat, but much faster. Spawned by Dispatch and can re-Enter the buffer |
-| **Signal** | Air-strike caller (currently a stub) |
+| **Signal** | The SIGTERM bomber a Terminal sends (§19). Not buildable — no factory lists it; untargetable while it flies |
 | **Flow** | Air unit. Slow but crosses any terrain. Built to attack light targets (spam units, fire support); highly vulnerable to return fire — Pointers, DOS units and Connections shred Flows |
 | **Firewall** | Special building. Casts a 20-second protective bubble on friendly units in a target radius — halves incoming damage and reflects the other half back at the attacker |
 
@@ -479,7 +501,7 @@ moved back into the Buffer by entering a teleporter.
 | Unit | Role |
 | --- | --- |
 | **Bad Block** | Tiny wall, built by Assembler / Trojan / Gateway. Blocks small units' movement; does **not** block shots. Cleared by Debug or crushed by a Byte / Connection |
-| **Logic Bomb** | Cloaked kamikaze mine, built by any constructor; also launchable by Bytes via the mine-launcher ability. One-shots Bits / Bugs, decent damage radius, does **not** chain-explode but does hurt your own units. Cap of ~32 per team |
+| **Logic Bomb** | Cloaked kamikaze mine, built by any constructor; also launchable by Bytes via the mine-launcher ability. One-shots Bits / Bugs, decent damage radius, does **not** chain-explode but does hurt your own units. Cap of 64 per team (§18) |
 | **Debug** | One-shot mine/wall clearer, built by any constructor |
 
 ## 21. Animation
@@ -504,15 +526,21 @@ moved back into the Buffer by entering a teleporter.
 
 ## 22. Game state
 
-- The player's team is `0` by default. Defeat = the player team has
-  no homebases left. Victory = every other team has no homebases left.
+- The player's team is `0` by default. Once a second, any team left
+  without a factory — homebase (Kernel / Hole / Carrier) or MiniFac
+  (Socket / Window / Port), unfinished ones included — is out: all its
+  remaining units die through the normal death path (upstream
+  `game_over.lua` gamemode 1 + `KillTeam`). Defeat = the player team
+  is out. Victory = every other team is out.
 - On defeat, a centered red `DEFEAT` headline (~120 pt) appears at
   ~35 % from the top of the screen. On victory, the same layout but
   green and `VICTORY`.
 - Once the game-over screen is shown, all gameplay systems stop
   ticking (units, animations, AI, combat). The camera still works.
-- A sandbox map with no homebases at all skips the game-over check
-  entirely (no auto-defeat on the first frame).
+- A sandbox map with no factories at all skips the game-over check
+  entirely (no auto-defeat on the first frame); so do showcase mode
+  and the menu demo. After "Keep on playing", factoryless teams are
+  still wiped out but the result screen doesn't re-open.
 
 ## 23. AI opponent
 

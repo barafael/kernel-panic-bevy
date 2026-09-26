@@ -16,7 +16,8 @@
 use bevy::prelude::*;
 
 use crate::interaction::selection::Selected;
-use crate::units::components::{Faction, UnitType};
+use crate::units::combat::Dying;
+use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::buildings_for;
@@ -69,18 +70,35 @@ struct BuildIcon {
     /// placement); `false` for a factory's producible unit (enqueues
     /// directly).
     is_construction: bool,
+    /// The team is at the kind's `UnitRestricted` cap (Logic Bombs):
+    /// the icon renders greyed and ignores clicks, like Spring's
+    /// disabled build button.
+    at_cap: bool,
 }
+
+/// One roster slot of the menu snapshot.
+#[derive(Clone, Copy, Hash)]
+struct MenuEntry {
+    kind: UnitKind,
+    queue_count: u32,
+    is_construction: bool,
+    at_cap: bool,
+}
+
+/// Live (non-dying) units per team, for the `UnitRestricted` cap check.
+type TeamUnitsQuery<'w, 's> = Query<'w, 's, (&'static UnitType, &'static TeamId), Without<Dying>>;
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn refresh_panel(
     mut commands: Commands,
     previews: Res<UnitPreviews>,
     registry: Res<UnitRegistry>,
-    selected_q: Query<(&UnitType, Option<&Producer>, Option<&Faction>), With<Selected>>,
+    selected_q: SelectedRosterQuery,
+    team_units: TeamUnitsQuery,
     existing: Query<Entity, With<BuildMenuRoot>>,
     mut last_hash: Local<u64>,
 ) {
-    let snapshot = MenuSnapshot::collect(&selected_q);
+    let snapshot = MenuSnapshot::collect(&selected_q, &team_units);
     // Hash deliberately excludes `PlacementMode` — see
     // `update_armed_highlight`: rebuilding the panel on arm/disarm
     // would let the still-held mouse press re-toggle placement on the
@@ -135,15 +153,8 @@ fn refresh_panel(
                     ..default()
                 })
                 .with_children(|grid| {
-                    for (kind, queue_count, is_construction) in snapshot.entries() {
-                        spawn_icon(
-                            grid,
-                            kind,
-                            queue_count,
-                            is_construction,
-                            &registry,
-                            &previews,
-                        );
+                    for entry in snapshot.entries() {
+                        spawn_icon(grid, entry, &registry, &previews);
                     }
                 });
         });
@@ -178,12 +189,16 @@ fn update_armed_highlight(
 
 fn spawn_icon(
     grid: &mut ChildSpawnerCommands,
-    kind: UnitKind,
-    queue_count: u32,
-    is_construction: bool,
+    entry: MenuEntry,
     registry: &UnitRegistry,
     previews: &UnitPreviews,
 ) {
+    let MenuEntry {
+        kind,
+        queue_count,
+        is_construction,
+        at_cap,
+    } = entry;
     // Spawn neutral; `update_armed_highlight` paints the armed visual
     // every frame without rebuilding the icon entity.
     grid.spawn((
@@ -191,6 +206,7 @@ fn spawn_icon(
         BuildIcon {
             kind,
             is_construction,
+            at_cap,
         },
         Node {
             width: Val::Px(ICON_SIZE),
@@ -210,8 +226,15 @@ fn spawn_icon(
         // by the icon's flex layout. The square slot leaves room
         // beneath for the unit name.
         if let Some(handle) = previews.get(kind) {
+            // Capped kinds render dimmed (Spring greys a disabled build
+            // button).
+            let tint = if at_cap {
+                Color::srgba(0.35, 0.35, 0.35, 1.0)
+            } else {
+                Color::WHITE
+            };
             btn.spawn((
-                ImageNode::new(handle.clone()),
+                ImageNode::new(handle.clone()).with_color(tint),
                 Node {
                     width: Val::Px(ICON_SIZE - 6.0),
                     height: Val::Px(ICON_SIZE - 22.0),
@@ -226,7 +249,7 @@ fn spawn_icon(
                 font_size: TEXT_SMALL,
                 ..default()
             },
-            TextColor(KP_GREEN_DIM),
+            TextColor(if at_cap { TEXT_DISABLED } else { KP_GREEN_DIM }),
             TextLayout::new_with_justify(Justify::Center),
         ));
 
@@ -269,7 +292,7 @@ fn handle_clicks(
     // move order.
 
     for (interaction, icon) in &interactions {
-        if *interaction != Interaction::Pressed {
+        if *interaction != Interaction::Pressed || icon.at_cap {
             continue;
         }
         if icon.is_construction {
@@ -286,25 +309,57 @@ fn handle_clicks(
     }
 }
 
+/// The selection as the build menu sees it.
+type SelectedRosterQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static UnitType,
+        Option<&'static Producer>,
+        Option<&'static Faction>,
+        Option<&'static TeamId>,
+    ),
+    With<Selected>,
+>;
+
+/// Whether `team` already fields its full `UnitRestricted` quota of
+/// `kind`. Counts nanoframes too, like upstream's
+/// `Spring.GetTeamUnitsByDefs`.
+fn team_at_cap(kind: UnitKind, team: Option<u8>, team_units: &TeamUnitsQuery) -> bool {
+    let (Some(limit), Some(team)) = (kind.team_limit(), team) else {
+        return false;
+    };
+    let count = team_units
+        .iter()
+        .filter(|(u, t)| u.0 == kind && t.0 == team)
+        .count();
+    count as u32 >= limit
+}
+
 /// Snapshot of the buildable roster the menu would render this frame —
 /// drives both rendering and the panel-state-hash idempotency check.
 struct MenuSnapshot {
-    /// `(kind, queue_count, is_construction)`.
-    entries: Vec<(UnitKind, u32, bool)>,
+    entries: Vec<MenuEntry>,
 }
 
 impl MenuSnapshot {
-    #[allow(clippy::type_complexity)]
-    fn collect(
-        selected_q: &Query<(&UnitType, Option<&Producer>, Option<&Faction>), With<Selected>>,
-    ) -> Self {
+    fn collect(selected_q: &SelectedRosterQuery, team_units: &TeamUnitsQuery) -> Self {
         // Pick the first selected unit that has *any* roster.
         // Multi-builder tabs are deferred (see plan B1).
-        let mut entries: Vec<(UnitKind, u32, bool)> = Vec::new();
-        for (ut, producer, faction) in selected_q {
+        let mut entries: Vec<MenuEntry> = Vec::new();
+        for (ut, producer, faction, team) in selected_q {
             if ut.0.is_constructor() {
+                let team = team.map(|t| t.0);
                 let buildings = buildings_for(ut.0);
-                entries = buildings.iter().map(|k| (*k, 0, true)).collect();
+                entries = buildings
+                    .iter()
+                    .map(|k| MenuEntry {
+                        kind: *k,
+                        queue_count: 0,
+                        is_construction: true,
+                        at_cap: team_at_cap(*k, team, team_units),
+                    })
+                    .collect();
                 break;
             }
             if producer.is_some()
@@ -322,7 +377,12 @@ impl MenuSnapshot {
                     .unwrap_or_default();
                 entries = roster
                     .iter()
-                    .map(|k| (*k, queue_counts.get(k).copied().unwrap_or(0), false))
+                    .map(|k| MenuEntry {
+                        kind: *k,
+                        queue_count: queue_counts.get(k).copied().unwrap_or(0),
+                        is_construction: false,
+                        at_cap: false,
+                    })
                     .collect();
                 break;
             }
@@ -331,7 +391,7 @@ impl MenuSnapshot {
         Self { entries }
     }
 
-    fn entries(&self) -> impl Iterator<Item = (UnitKind, u32, bool)> + '_ {
+    fn entries(&self) -> impl Iterator<Item = MenuEntry> + '_ {
         self.entries.iter().copied()
     }
 
@@ -372,11 +432,12 @@ pub(crate) fn factory_roster(factory: UnitKind, _faction: Faction) -> &'static [
             UnitKind::Dos,
             UnitKind::Trojan,
         ],
+        // `[carrier]` canbuild1..4. No Signal: that's the SIGTERM
+        // bomber, which only a Terminal's airstrike ever creates.
         UnitKind::Carrier => &[
             UnitKind::Packet,
-            UnitKind::Signal,
-            UnitKind::Flow,
             UnitKind::Connection,
+            UnitKind::Flow,
             UnitKind::Gateway,
         ],
         UnitKind::Socket => &[UnitKind::Bit],
@@ -528,5 +589,85 @@ mod tests {
         world.entity_mut(builder).remove::<Selected>();
         world.run_system_once(refresh_panel).unwrap();
         assert!(menu_root(&mut world).is_none(), "menu must hide");
+    }
+
+    /// Upstream `SIDEDATA.TDF [carrier]` lists packet / connection /
+    /// flow / gateway only — the Signal bomber is never buildable.
+    #[test]
+    fn carrier_roster_matches_sidedata() {
+        assert_eq!(
+            factory_roster(UnitKind::Carrier, Faction::Network),
+            &[
+                UnitKind::Packet,
+                UnitKind::Connection,
+                UnitKind::Flow,
+                UnitKind::Gateway,
+            ]
+        );
+        for factory in [
+            UnitKind::Kernel,
+            UnitKind::Hole,
+            UnitKind::Carrier,
+            UnitKind::Socket,
+            UnitKind::Window,
+            UnitKind::Port,
+        ] {
+            assert!(
+                !factory_roster(factory, Faction::Network).contains(&UnitKind::Signal),
+                "{factory:?} must not build Signal",
+            );
+        }
+    }
+
+    /// At the `UnitRestricted=64` Logic Bomb cap the constructor's
+    /// Logic Bomb icon is flagged capped and a click does not arm
+    /// placement; other icons stay live.
+    #[test]
+    fn logic_bomb_icon_disabled_at_team_cap() {
+        let mut world = World::new();
+        world.init_resource::<UnitPreviews>();
+        world.insert_resource(UnitRegistry::empty());
+        world.init_resource::<PlacementMode>();
+        let builder = spawn_assembler(&mut world);
+        world.entity_mut(builder).insert(TeamId(0));
+        for _ in 0..64 {
+            world.spawn((UnitType(UnitKind::LogicBomb), TeamId(0)));
+        }
+        // Another team's mines don't count against team 0.
+        world.spawn((UnitType(UnitKind::LogicBomb), TeamId(1)));
+
+        world.run_system_once(refresh_panel).unwrap();
+        let roster = icons(&mut world);
+        let (bomb, bomb_icon) = *roster
+            .iter()
+            .find(|(_, i)| i.kind == UnitKind::LogicBomb)
+            .expect("Logic Bomb icon");
+        assert!(bomb_icon.at_cap);
+        assert!(
+            roster
+                .iter()
+                .filter(|(_, i)| i.kind != UnitKind::LogicBomb)
+                .all(|(_, i)| !i.at_cap)
+        );
+        press(&mut world, bomb);
+        world.run_system_once(handle_clicks).unwrap();
+        assert_eq!(world.resource::<PlacementMode>().kind, None);
+    }
+
+    /// One mine below the cap the icon is live.
+    #[test]
+    fn logic_bomb_icon_live_below_cap() {
+        let mut world = World::new();
+        world.init_resource::<UnitPreviews>();
+        world.insert_resource(UnitRegistry::empty());
+        world.init_resource::<PlacementMode>();
+        let builder = spawn_assembler(&mut world);
+        world.entity_mut(builder).insert(TeamId(0));
+        for _ in 0..63 {
+            world.spawn((UnitType(UnitKind::LogicBomb), TeamId(0)));
+        }
+        world.run_system_once(refresh_panel).unwrap();
+        let roster = icons(&mut world);
+        assert!(roster.iter().all(|(_, i)| !i.at_cap));
     }
 }
