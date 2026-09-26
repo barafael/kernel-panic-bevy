@@ -210,6 +210,27 @@ pub fn install(
     commands.insert_resource(HexFarmInbox::default());
 }
 
+/// Terrain type 0 "void" has `moveSpeeds` 0 for every move class
+/// (mapinfo `terrainTypes`), so it is impassable whatever a unit's slope
+/// tolerance — the spike bed alone would let an all-terrain unit path
+/// across. Zero the nav cells over void squares in the cell box
+/// `x0..=x1, z0..=z1` (8-elmo cells; terrain squares are 16).
+pub fn mask_void(
+    terrain: &[u8],
+    type_w: usize,
+    map: &mut spring_pathfinding::SpeedMap,
+    [x0, z0, x1, z1]: [u32; 4],
+) {
+    for z in z0..=z1.min(map.height - 1) {
+        for x in x0..=x1.min(map.width - 1) {
+            let sq = (z / 2) as usize * type_w + (x / 2) as usize;
+            if terrain.get(sq).is_none_or(|&t| t == spring_map::hexfarm::TERRAIN_VOID) {
+                map.speeds[(z * map.width + x) as usize] = 0.0;
+            }
+        }
+    }
+}
+
 /// Offsets the fall sweep tries, in order (`gadget:GameFrame` l.1788).
 const PUSHES: [(f32, f32); 8] = [
     (-17.0, 0.0),
@@ -314,6 +335,13 @@ fn hex_farm_sim(
                             x1 as u32,
                             z1 as u32,
                         );
+                        let region = [
+                            (x0 as u32).saturating_sub(1),
+                            (z0 as u32).saturating_sub(1),
+                            x1 as u32,
+                            z1 as u32,
+                        ];
+                        mask_void(&farm.terrain, farm.type_w, &mut bucket.speed_map, region);
                     }
                 }
                 // Vertices on a chunk seam belong to both chunks.
@@ -611,5 +639,42 @@ fn hex_farm_labels(
                 vis.set_if_neq(Visibility::Hidden);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spring_map::hexfarm::{HexFarmSetup, TERRAIN_TOWER};
+
+    /// Every nav cell over a void square is blocked, even in a bucket
+    /// whose slope cap accepts the spike bed; cells over towers aren't.
+    #[test]
+    fn void_is_impassable_for_every_slope_cap() {
+        let farm = HexFarm::generate(
+            5,
+            HexFarmSetup {
+                map_size_x: 12288.0,
+                map_size_z: 12288.0,
+                teams: 2,
+                median_health: 2000.0,
+                median_build_time: 1600.0,
+            },
+        );
+        let n = 12288 / 8;
+        let mut map = spring_pathfinding::SpeedMap::uniform(n, n, 1.0);
+        mask_void(&farm.terrain, farm.type_w, &mut map, [0, 0, n - 1, n - 1]);
+        for z in (0..n).step_by(7) {
+            for x in (0..n).step_by(7) {
+                let t = farm.terrain[(z / 2) as usize * farm.type_w + (x / 2) as usize];
+                assert_eq!(map.get(x, z) > 0.0, t != spring_map::hexfarm::TERRAIN_VOID);
+            }
+        }
+        let [sx, sz] = farm.start_positions[0];
+        assert_eq!(
+            farm.terrain[(sz / 16.0) as usize * farm.type_w + (sx / 16.0) as usize],
+            TERRAIN_TOWER
+        );
+        assert!(map.get((sx / 8.0) as u32, (sz / 8.0) as u32) > 0.0);
     }
 }

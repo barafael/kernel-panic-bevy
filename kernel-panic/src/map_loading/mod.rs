@@ -740,6 +740,8 @@ fn spawn_map_world(
     let lua_minimap = hex_farm.as_ref().map(|farm| {
         lua_compositing::minimap_pixels(farm, crate::map_events::hex_farm::MINIMAP_RES)
     });
+    // Void squares are impassable to every move class (see `mask_void`).
+    let void_terrain = hex_farm.as_ref().map(|farm| (farm.terrain.clone(), farm.type_w));
     // Towers/bridges drawing + dynamic mode (or clear a previous match's).
     crate::map_events::hex_farm::install(
         hex_farm,
@@ -780,13 +782,17 @@ fn spawn_map_world(
         for cap_q in distinct_caps {
             let cap = cap_q as f32 / BUCKET_QUANTUM;
             let slope_mod = slope_mod_from_max_slope(cap);
-            let speed_map = SpeedMap::from_heightmap(
+            let mut speed_map = SpeedMap::from_heightmap(
                 &parsed.heights,
                 parsed.header.heightmap_width() as u32,
                 parsed.header.heightmap_height() as u32,
                 cap,
                 slope_mod,
             );
+            if let Some((terrain, type_w)) = &void_terrain {
+                let all = [0, 0, speed_map.width - 1, speed_map.height - 1];
+                crate::map_events::hex_farm::mask_void(terrain, *type_w, &mut speed_map, all);
+            }
             let blocked = speed_map.speeds.iter().filter(|&&s| s <= 0.0).count();
             info!(
                 "  Nav bucket max_slope={:.3} (slope_mod={:.2}): {} blocked of {} cells ({}x{})",
