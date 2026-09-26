@@ -2,7 +2,7 @@
 //! while moving; deploying (`Open`) splits the side plates, extends the
 //! gun and exposes the muzzle; the gunbase carries the pitch when aiming.
 
-use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 use super::DeathFx;
 use crate::units::combat::DeployState;
 
@@ -123,9 +123,12 @@ impl UnitAnim for PointerAnim {
         true
     }
 
-    fn fire(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+    fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // FireWeapon1(): emit-sfx 1024 from gunpoint
-        rig.emit(self.pieces.gunpoint, SfxKind::Puff);
+        // (Rendered by combat, not here: the `emit-sfx 1024+i` CEG comes
+        // out of `fire_weapon_sfx` → `ProjectileFxEvent::muzzle_ceg` at
+        // the shot's resolved muzzle. Emitting it from the rig as well
+        // drew a second, generic faction puff on every shot.)
     }
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {

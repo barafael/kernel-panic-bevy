@@ -1,7 +1,7 @@
 //! bit.bos — the System swarm unit. A shell (`body`) that rolls around
 //! its x-axis while driving; the gun aims instantly (`turn ... now`).
 
-use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 use super::DeathFx;
 
 #[derive(Clone, Copy, Default)]
@@ -71,9 +71,12 @@ impl UnitAnim for BitAnim {
         true
     }
 
-    fn fire(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+    fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // FireWeapon1(): emit-sfx 1025 from gunpoint
-        rig.emit(self.pieces.gunpoint, SfxKind::Puff);
+        // (Rendered by combat, not here: the `emit-sfx 1024+i` CEG comes
+        // out of `fire_weapon_sfx` → `ProjectileFxEvent::muzzle_ceg` at
+        // the shot's resolved muzzle. Emitting it from the rig as well
+        // drew a second, generic faction puff on every shot.)
     }
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {

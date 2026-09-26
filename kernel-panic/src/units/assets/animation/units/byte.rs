@@ -325,13 +325,16 @@ impl UnitAnim for ByteAnim {
         rig.muzzle = self.pieces.bp[self.gp % 4];
     }
 
-    fn fire(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+    fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // FireWeapon1(): emit 1024 from bp{gp}, then `gp` steps
         // 0→1→2→3→0 (sleep 90 / 150 between barrels). The host calls
         // this once per burst shot, after that shot's `QueryWeapon1`,
         // so each shot leaves — and flashes — at the next barrel.
         let idx = self.gp % 4;
-        rig.emit(self.pieces.bp[idx], super::super::SfxKind::Puff);
+        // (Rendered by combat, not here: the `emit-sfx 1024+i` CEG comes
+        // out of `fire_weapon_sfx` → `ProjectileFxEvent::muzzle_ceg` at
+        // the shot's resolved muzzle. Emitting it from the rig as well
+        // drew a second, generic faction puff on every shot.)
         self.gp = (idx + 1) % 4;
     }
 

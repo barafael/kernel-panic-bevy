@@ -264,3 +264,28 @@ pub fn has_aim_weapon(kind: UnitKind) -> bool {
             | Debug
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::assets::animation::{AnimCtx, AnimRig, FxEvent, fire_weapon_sfx};
+
+    /// A unit whose `FireWeapon1` emits a muzzle CEG gets it from combat
+    /// (`fire_weapon_sfx` → `muzzle_ceg`); its driver must not emit a
+    /// second effect of its own on the same shot.
+    #[test]
+    fn muzzle_ceg_units_fire_without_rig_emits() {
+        for kind in [UnitKind::Bit, UnitKind::Byte, UnitKind::Pointer] {
+            assert!(fire_weapon_sfx(kind).is_some(), "{kind:?} has a muzzle CEG");
+            let mut rig = AnimRig::for_test(piece_names(kind));
+            let mut anim = driver_for(kind);
+            anim.create(&mut rig, AnimCtx::minimal());
+            rig.outbox.clear();
+            anim.fire(&mut rig, AnimCtx::minimal());
+            assert!(
+                !rig.outbox.iter().any(|e| matches!(e, FxEvent::Emit { .. })),
+                "{kind:?} emitted a duplicate muzzle effect"
+            );
+        }
+    }
+}
