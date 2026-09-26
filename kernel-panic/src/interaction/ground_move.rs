@@ -39,6 +39,7 @@ use crate::units::components::{UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
+use super::structures::crushes_features;
 
 /// Spring's sim frame rate (`GAME_SPEED`).
 pub const GAME_SPEED: f32 = 30.0;
@@ -1081,6 +1082,9 @@ pub struct CollisionEntry {
     radius: f32,
     owner_radius: f32,
     mobile: bool,
+    /// A feature movers with enough crush strength drive over (Bad
+    /// Block).
+    crushable: bool,
     mass: f32,
     /// `speed.w` (elmos/frame).
     speed: f32,
@@ -1142,26 +1146,6 @@ pub fn push_vector(
     sep_dir * response * mass_scale + right1 * slide_sign * (1.0 / pen) * q2
 }
 
-/// `HandleStaticObjectCollision`'s radius branch (GroundMoveType.cpp:
-/// 2765): bounce off and strafe around a static circle, both capped by
-/// the collider's current speed. Returns `(force, pen)`.
-fn static_circle_push(
-    pos: Vec2,
-    r1: f32,
-    other: Vec2,
-    r2: f32,
-    right: Vec2,
-    current_speed: f32,
-) -> (Vec2, f32) {
-    let sep = pos - other;
-    let sep_distance = sep.length() + 0.1;
-    let pen = (sep_distance - (r1 + r2)).min(0.0);
-    let slide_sign = -sign(other.dot(right) - pos.dot(right));
-    let strafe = current_speed.min((-pen * 0.5).max(0.0));
-    let bounce = current_speed.min((-pen).max(0.0));
-    (right * slide_sign * strafe + sep / sep_distance * bounce, pen)
-}
-
 /// Steps 4–5 for every ground unit: collision response
 /// (`HandleObjectCollisions` → `HandleUnitCollisions`,
 /// `HandleStaticObjectCollision`), the `Update` that applies it,
@@ -1182,11 +1166,9 @@ pub fn ground_collision_system(
             Option<&MovePath>,
             Has<MoveTarget>,
             Option<&mut CommandQueue>,
+            Has<Dying>,
         ),
-        (
-            Without<Dying>,
-            Without<crate::units::lifecycle::spawning::Emerging>,
-        ),
+        Without<crate::units::lifecycle::spawning::Emerging>,
     >,
     mut entries: Local<Vec<CollisionEntry>>,
     mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
@@ -1197,8 +1179,8 @@ pub fn ground_collision_system(
         bucket.clear();
     }
     let mut max_radius = 0.0_f32;
-    for (entity, _, stats, tf, mover, path, has_target, queue) in &movers {
-        if stats.can_fly {
+    for (entity, kind, stats, tf, mover, path, has_target, queue, dying) in &movers {
+        if stats.can_fly || dying {
             continue;
         }
         let mobile = stats.speed > 0.0 && mover.is_some();
@@ -1224,6 +1206,7 @@ pub fn ground_collision_system(
             radius,
             owner_radius,
             mobile,
+            crushable: !mobile && registry.def(kind.0).is_some_and(|d| d.is_feature),
             mass,
             speed,
             front,
@@ -1234,11 +1217,11 @@ pub fn ground_collision_system(
         grid.entry(cell_of(pos)).or_default().push(idx);
         max_radius = max_radius.max(radius);
     }
-    let _ = &registry;
+    let mut crushed: Vec<Entity> = Vec::new();
 
-    for (entity, kind, stats, mut tf, mover, path, _, mut queue) in &mut movers {
+    for (entity, kind, stats, mut tf, mover, path, _, mut queue, dying) in &mut movers {
         let Some(mut m) = mover else { continue };
-        if stats.can_fly || stats.speed <= 0.0 || !m.initialised {
+        if stats.can_fly || stats.speed <= 0.0 || !m.initialised || dying {
             continue;
         }
         let pos = tf.translation.xz();
@@ -1290,16 +1273,22 @@ pub fn ground_collision_system(
                             o.front,
                             right,
                         );
+                    } else if o.crushable && crushes_features(m.crush_strength) {
+                        // `HandleFeatureCollisions`: a feature we are
+                        // not crush-resistant against is crushed
+                        // (`FeatureCrushEvents` → `Kill`); its squares
+                        // never blocked us.
+                        crushed.push(o.entity);
                     } else {
-                        // Structure (always static).
-                        let (f, pen) =
-                            static_circle_push(pos, r1, o.pos, r2, right, m.current_speed);
+                        // Structure (always static): strafe round its
+                        // blocked yardmap squares.
+                        let f = static_square_push(&m, pos, map.nav, fs_max_speed(stats));
                         force_static += f;
                         if f != Vec2::ZERO {
                             m.limit_speed_for_turning = 2;
-                        }
-                        if !m.at_end_of_path && !m.at_goal && pen < 0.0 {
-                            request_path = true;
+                            if !m.at_end_of_path && !m.at_goal {
+                                request_path = true;
+                            }
                         }
                     }
                 }
@@ -1396,6 +1385,72 @@ pub fn ground_collision_system(
             }
         }
     }
+    crushed.sort();
+    crushed.dedup();
+    for e in crushed {
+        // A crushed feature just vanishes (no unit death explosion).
+        commands.entity(e).insert(Dying { timer: 0.0 });
+    }
+}
+
+fn fs_max_speed(stats: &UnitStats) -> f32 {
+    stats.speed / GAME_SPEED
+}
+
+/// `HandleStaticObjectCollision`'s yardmap branch (GroundMoveType.cpp:
+/// 2616-2735) against a colliding structure: every `BLOCK_STRUCTURE`
+/// square in the collider's footprint window around `pos + speed`
+/// (at least 3×3) that isn't behind it adds a sideways "bounce", and
+/// the average square pulls a "strafe" away from it — both along
+/// `rightdir`, each `max(0.1, -pen/2)` capped by `maxSpeed`. (The
+/// engine's push-out term for squares inside the footprint compares
+/// loop offsets with absolute squares and never fires, so it is not
+/// ported.)
+fn static_square_push(m: &GroundMover, pos: Vec2, nav: Option<&NavGridSet>, max_speed: f32) -> Vec2 {
+    let Some(nav) = nav else { return Vec2::ZERO };
+    // Radius of a square: sqrt(2·4²).
+    const SQUARE_RADIUS: f32 = 5.656_854;
+    let right = m.right();
+    let vel = m.front() * m.current_speed;
+    let xmid = ((pos.x + vel.x) / SQUARE_SIZE).floor() as i32;
+    let zmid = ((pos.y + vel.y) / SQUARE_SIZE).floor() as i32;
+    let ext = m.xsizeh.max(1);
+    let mut bounce = Vec2::ZERO;
+    let mut pen_sum = 0.0;
+    let mut count = 0.0;
+    let mut pos_sum = Vec2::ZERO;
+    for dz in -ext..=ext {
+        for dx in -ext..=ext {
+            let (x, z) = (xmid + dx, zmid + dz);
+            if !nav.structure_square(x, z, m.crush_strength) {
+                continue;
+            }
+            let square = Vec2::new(
+                x as f32 * SQUARE_SIZE + SQUARE_SIZE * 0.5,
+                z as f32 * SQUARE_SIZE + SQUARE_SIZE * 0.5,
+            );
+            let sv = pos - square;
+            let sep = sv.length() + 0.1;
+            let pen = (sep - (m.collision_radius + SQUARE_RADIUS)).min(0.0);
+            // Ignore squares behind us (relative to the velocity).
+            if sv.dot(vel) > 0.0 {
+                continue;
+            }
+            bounce += right * right.dot(sv / sep);
+            pen_sum += pen;
+            count += 1.0;
+            pos_sum += square;
+        }
+    }
+    if count == 0.0 {
+        return Vec2::ZERO;
+    }
+    let avg_pos = pos_sum / count;
+    let avg_pen = pen_sum / count;
+    let strafe_sign = -sign(avg_pos.dot(right) - pos.dot(right));
+    let bounce_sign = sign(right.dot(bounce));
+    let scale = max_speed.min((-avg_pen * 0.5).max(0.1));
+    right * strafe_sign * scale + right * bounce_sign * scale
 }
 
 /// `HandleUnitCollisionsAux` (GroundMoveType.cpp:282): colliding with
@@ -1577,7 +1632,7 @@ mod tests {
             }
             let nav = NavGridSet {
                 buckets: vec![super::super::movement::NavBucket { max_slope: 1.0, speed_map }],
-                revision: 0,
+                ..Default::default()
             };
             let mut m = GroundMover::new(UnitKind::Bit, &reg, &stats);
             m.initialised = true;
@@ -1633,7 +1688,7 @@ mod tests {
         speed_map.speeds[(2 * 8 + 3) as usize] = 0.0; // (3,2)
         let nav = NavGridSet {
             buckets: vec![super::super::movement::NavBucket { max_slope: 1.0, speed_map }],
-            revision: 0,
+            ..Default::default()
         };
         let map = MoveMap { nav: Some(&nav), max_slope: 1.0, xsizeh: 1, crush_strength: 0.0 };
         // Heading +X into (3,2) from (2,2): slides to an open neighbour.
@@ -1650,7 +1705,7 @@ mod tests {
         speed_map.speeds[(3 * 8 + 2) as usize] = 0.0;
         let nav = NavGridSet {
             buckets: vec![super::super::movement::NavBucket { max_slope: 1.0, speed_map }],
-            revision: 0,
+            ..Default::default()
         };
         let map = MoveMap { nav: Some(&nav), max_slope: 1.0, xsizeh: 1, crush_strength: 0.0 };
         let d = Vec2::new(2.0, 2.0);

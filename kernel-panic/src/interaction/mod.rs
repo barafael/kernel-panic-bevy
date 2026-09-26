@@ -7,6 +7,7 @@ pub mod movement;
 #[cfg(test)]
 mod movement_harness;
 pub(crate) mod selection;
+pub mod structures;
 
 use bevy::gizmos::config::GizmoConfigStore;
 use bevy::prelude::*;
@@ -71,6 +72,8 @@ impl Plugin for InteractionPlugin {
             FixedUpdate,
             (
                 guard_follow_system,
+                // Buildings stamped / cleared before anyone paths.
+                structures::update_structure_layer.before(movement_system),
                 update_path_heat.before(movement_system),
                 movement_system,
                 // `smoothGround.UpdateSmoothMesh()` precedes the unit

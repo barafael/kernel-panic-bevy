@@ -332,6 +332,9 @@ fn hex_farm_sim(
                     sg.map_changed(x0, z0, x1, z1);
                 }
                 if let Some(nav) = nav.as_deref_mut() {
+                    // Terrain changed under existing paths: have them
+                    // re-checked (QTPFS `PathUpdated` on `TerrainChange`).
+                    nav.revision += 1;
                     for bucket in &mut nav.buckets {
                         bucket.speed_map.update_region(
                             hm.heights(),

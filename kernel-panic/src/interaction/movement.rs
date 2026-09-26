@@ -36,6 +36,7 @@ pub(crate) fn ground_mover_components(kind: UnitKind, registry: &UnitRegistry) -
 pub(crate) fn add_ground_sim_systems(schedule: &mut Schedule) {
     schedule.add_systems(
         (
+            super::structures::update_structure_layer,
             update_path_heat,
             movement_system,
             ground_collision_system,
@@ -191,6 +192,8 @@ pub struct NavGridSet {
     /// Bumped whenever the structure layer changes, so paths made
     /// before can be re-checked (QTPFS `PathUpdated`).
     pub revision: u64,
+    /// Squares blocked by buildings, and per-mover-class path masks.
+    pub structures: super::structures::StructureLayer,
 }
 
 impl NavGridSet {
@@ -225,13 +228,25 @@ impl NavGridSet {
 
     /// Does a structure block any square of a `xsizeh`-footprint mover
     /// centred at `(x, z)` (`MoveDef::TestMovePositionForObjects`)?
-    pub fn footprint_blocked(&self, _x: f32, _z: f32, _xsizeh: i32, _crush_strength: f32) -> bool {
-        false
+    pub fn footprint_blocked(&self, x: f32, z: f32, xsizeh: i32, crush_strength: f32) -> bool {
+        self.structures.footprint_blocked(
+            (x / 8.0).floor() as i32,
+            (z / 8.0).floor() as i32,
+            xsizeh,
+            super::structures::crushes_features(crush_strength),
+        )
+    }
+
+    /// `SquareIsBlocked(..) & BLOCK_STRUCTURE` for one square.
+    pub fn structure_square(&self, x: i32, z: i32, crush_strength: f32) -> bool {
+        self.structures
+            .square_blocked(x, z, super::structures::crushes_features(crush_strength))
     }
 
     /// The structure mask a mover class paths against, if any.
-    pub fn block_mask(&self, _xsizeh: i32, _crush_strength: f32) -> Option<&BlockMask> {
-        None
+    pub fn block_mask(&self, xsizeh: i32, crush_strength: f32) -> Option<&BlockMask> {
+        self.structures
+            .mask(xsizeh, super::structures::crushes_features(crush_strength))
     }
 
     /// `MoveDef::DoRawSearch`: can a mover drive straight `a → b`?
