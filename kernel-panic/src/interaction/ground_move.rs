@@ -29,8 +29,8 @@ use std::f32::consts::{PI, TAU};
 use bevy::prelude::*;
 
 use super::movement::{
-    AttackMoveActive, CommandQueue, MovePath, MoveTarget, NavGridSet, PathHeat, PathOutcome,
-    SlopeTilt, compute_path, promote_next_command, surface_aligned_rotation,
+    AttackMoveActive, CommandQueue, GroundLift, MovePath, MoveTarget, NavGridSet, PathHeat,
+    PathOutcome, compute_path, promote_next_command,
 };
 use crate::map_events::CircularFlow;
 use crate::terrain::heightmap::Heightmap;
@@ -604,6 +604,7 @@ pub fn step_mover(
     order: &OrderView,
     mut path: Option<&mut MovePath>,
     map: &MoveMap,
+    up: Vec3,
     avoidance: impl FnOnce(&mut GroundMover, Vec2) -> Vec2,
     ground_speed_mod: impl Fn(Vec2, Vec2) -> f32,
 ) -> StepResult {
@@ -689,7 +690,9 @@ pub fn step_mover(
     let wanted_speed = if steering { fs.max_speed } else { 0.0 };
     let delta = change_speed(m, fs, wanted_speed, &inputs);
     let new_speed = (m.current_speed + delta).max(0.0);
-    let request = m.front() * new_speed;
+    // `owner->frontdir * speed`: the heading tilted onto the ground,
+    // so slopes shorten the horizontal step by the pitch's cosine.
+    let request = attitude(m.heading, up).mul_vec3(Vec3::NEG_Z).xz() * new_speed;
     let mut step = Vec2::ZERO;
     if request.length_squared() > 0.0 {
         let gated = update_pos(map, pos2, request, m.right(), m.front(), m.position_stuck);
@@ -795,13 +798,13 @@ pub struct MoverData {
     path: Option<&'static mut MovePath>,
     queue: Option<&'static mut CommandQueue>,
     deployable: Option<&'static Deployable>,
-    tilt: Option<&'static mut SlopeTilt>,
     stunned: Has<Stunned>,
     boost: Option<&'static crate::units::mechanics::network_buffer::SpeedBoost>,
     attack_move: Has<AttackMoveActive>,
     aim: Has<AimTarget>,
     animator: Option<&'static crate::units::assets::animation::UnitAnimator>,
     pending_build: Has<PendingBuild>,
+    lift: Option<&'static GroundLift>,
 }
 
 /// Steps 1–3 for every ground unit (see the module docs); flyers are
@@ -985,8 +988,9 @@ pub fn movement_system(
             &order,
             u.path.as_deref_mut().filter(|p| !p.waypoints.is_empty()),
             &map,
+            up_dir(m, heightmap.as_deref(), pos),
             |_, d| d,
-            |p, dir| nav.map_or(1.0, |n| n.speed_mod(max_slope, p, dir)),
+            |p, dir| ground_speed_mod(nav, heightmap.as_deref(), max_slope, p, dir),
         );
 
         let mut step = result.step;
@@ -1001,11 +1005,11 @@ pub fn movement_system(
             tf.translation.x += step.x;
             tf.translation.z += step.y;
             if let Some(hm) = heightmap.as_deref() {
-                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z);
+                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z) + u.lift.map_or(0.0, |l| l.0);
             }
             tf.translation
         };
-        orient(&mut u.transform, m, heightmap.as_deref(), u.tilt.as_deref_mut(), &mut commands, u.entity);
+        u.transform.rotation = attitude(m.heading, up_dir(m, heightmap.as_deref(), new_pos));
 
         if result.finished.is_some() {
             // `Arrived` / `Fail` run the CAI's SlowUpdate right away.
@@ -1018,6 +1022,40 @@ pub fn movement_system(
             }
         }
     }
+}
+
+/// `CMoveMath::GetPosSpeedMod` for a tank/kbot (`MoveMath.cpp:107-139`,
+/// `GroundMoveMath.cpp:31-50`): `1 / (1 + max(0, slope · dirSlopeMod)
+/// · slopeMod)` where `dirSlopeMod = -dir · centerNormal2D` is +1 when
+/// heading straight up the fall line — only climbing slows, downhill is
+/// full speed. KP's MaxSlope 36 gives `slopeMod ≈ 9.7`, so a 30° climb
+/// runs at ~0.43×. Impassable squares give 0; `ChangeSpeed` then looks
+/// one square ahead so a unit on a closed square can drive out.
+pub fn ground_speed_mod(
+    nav: Option<&NavGridSet>,
+    hm: Option<&Heightmap>,
+    cap: f32,
+    pos: Vec2,
+    dir: Vec2,
+) -> f32 {
+    let (Some(nav), Some(hm)) = (nav, hm) else {
+        return 1.0;
+    };
+    let at = |p: Vec2| -> f32 {
+        let Some(slope) = nav.square_slope(cap, p) else {
+            return 0.0;
+        };
+        let sq = ((p.x / SQUARE_SIZE).floor() as i32, (p.y / SQUARE_SIZE).floor() as i32);
+        let Some(grad) = hm.square_gradient(sq.0, sq.1) else {
+            return 1.0;
+        };
+        // centerNormals2D = normalize(-grad): pointing downhill.
+        let n2 = (-grad).normalize_or_zero();
+        let dir_slope = -dir.dot(n2);
+        1.0 / (1.0 + (slope * dir_slope).max(0.0) * nav.slope_mod(cap))
+    };
+    let m = at(pos);
+    if m == 0.0 { at(pos + dir * SQUARE_SIZE) } else { m }
 }
 
 /// The CAI side of a finished leg (`CMobileCAI::ExecuteMove` →
@@ -1044,32 +1082,21 @@ fn finish_leg(
     }
 }
 
-/// Orientation: the heading, tilted onto the terrain unless `upright`
-/// (`CUnit::UpdateDirVectors`, applied immediately — KP units have
-/// `upDirSmoothing = 0`).
-fn orient(
-    tf: &mut Transform,
-    m: &GroundMover,
-    heightmap: Option<&Heightmap>,
-    tilt: Option<&mut SlopeTilt>,
-    commands: &mut Commands,
-    entity: Entity,
-) {
-    let f = m.front();
-    let forward = Vec3::new(f.x, 0.0, f.y);
-    let target = match heightmap {
-        Some(hm) if !m.upright => {
-            surface_aligned_rotation(forward, hm.normal(tf.translation.x, tf.translation.z))
-        }
-        _ => Transform::default().looking_to(forward, Vec3::Y).rotation,
-    };
-    match tilt {
-        Some(t) => t.0 = target,
-        None => {
-            commands.entity(entity).insert(SlopeTilt(target));
-        }
+/// `GetWantedUpDir`: the smoothed ground normal, or straight up for
+/// `upright` units (KP units have `upDirSmoothing = 0`: applied as is).
+fn up_dir(m: &GroundMover, heightmap: Option<&Heightmap>, pos: Vec3) -> Vec3 {
+    match heightmap {
+        Some(hm) if !m.upright => hm.smooth_normal(pos.x, pos.z),
+        _ => Vec3::Y,
     }
-    tf.rotation = target;
+}
+
+/// `CSolidObject::UpdateDirVectors` (SolidObject.cpp:435): the flat
+/// heading rotated by the shortest arc from straight up to `up`.
+pub fn attitude(heading: f32, up: Vec3) -> Quat {
+    let f = dir_of(heading);
+    let yaw = Transform::default().looking_to(Vec3::new(f.x, 0.0, f.y), Vec3::Y).rotation;
+    Quat::from_rotation_arc(Vec3::Y, up.normalize_or(Vec3::Y)) * yaw
 }
 
 /// Squared `CMobileCAI::cancelDistance` (MobileCAI.cpp:1316): the
@@ -1174,6 +1201,7 @@ pub fn ground_collision_system(
             Has<MoveTarget>,
             Option<&mut CommandQueue>,
             Has<Dying>,
+            Option<&GroundLift>,
         ),
         Without<crate::units::lifecycle::spawning::Emerging>,
     >,
@@ -1186,7 +1214,7 @@ pub fn ground_collision_system(
         bucket.clear();
     }
     let mut max_radius = 0.0_f32;
-    for (entity, kind, stats, tf, mover, path, has_target, queue, dying) in &movers {
+    for (entity, kind, stats, tf, mover, path, has_target, queue, dying, _) in &movers {
         if stats.can_fly || dying {
             continue;
         }
@@ -1226,7 +1254,7 @@ pub fn ground_collision_system(
     }
     let mut crushed: Vec<Entity> = Vec::new();
 
-    for (entity, kind, stats, mut tf, mover, path, _, mut queue, dying) in &mut movers {
+    for (entity, kind, stats, mut tf, mover, path, _, mut queue, dying, lift) in &mut movers {
         let Some(mut m) = mover else { continue };
         if stats.can_fly || stats.speed <= 0.0 || !m.initialised || dying {
             continue;
@@ -1318,7 +1346,7 @@ pub fn ground_collision_system(
             tf.translation.x += applied.x;
             tf.translation.z += applied.y;
             if let Some(hm) = heightmap.as_deref() {
-                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z);
+                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z) + lift.map_or(0.0, |l| l.0);
             }
         }
 
@@ -1655,7 +1683,7 @@ mod tests {
             path.current = 1;
             let map = MoveMap { nav: Some(&nav), max_slope: 1.0, xsizeh: 1, crush_strength: 0.0 };
             let order = OrderView { has_move_cmd: true, last_command: true, hold: false };
-            step_mover(&mut m, &fs, pos, &order, Some(&mut path), &map, |_, d| d, |_, _| 1.0);
+            step_mover(&mut m, &fs, pos, &order, Some(&mut path), &map, Vec3::Y, |_, d| d, |_, _| 1.0);
             path.current
         };
         assert_eq!(run(false), 2, "40 elmos ahead, inside the turn circle, clear LOS: skip");
@@ -1836,5 +1864,62 @@ mod tests {
         // The closest reachable cell is just outside the box, 10 cells
         // from the goal.
         assert!(p.xz().distance(Vec2::new(880.0, 640.0)) < 100.0, "stopped at the box: {p}");
+    }
+
+    /// `GetPosSpeedMod`: climbing a 30° ramp runs at
+    /// `1/(1 + (1-cos 30°)·slopeMod)` ≈ 0.43× (slopeMod ≈ 9.7 for KP's
+    /// MaxSlope 36); descending it is full speed.
+    #[test]
+    fn uphill_slope_slows_downhill_does_not() {
+        let mut h = Harness::flat();
+        let verts = 257usize;
+        let rise = 8.0 * 30.0_f32.to_radians().tan();
+        let heights: Vec<f32> = (0..verts * verts).map(|i| (i % verts) as f32 * rise).collect();
+        let cap = h.world.resource::<NavGridSet>().buckets[0].max_slope;
+        let map = spring_pathfinding::SpeedMap::from_heightmap(
+            &heights,
+            verts as u32,
+            verts as u32,
+            cap,
+            spring_pathfinding::slope_mod_from_max_slope(cap),
+        );
+        h.world.resource_mut::<NavGridSet>().buckets[0].speed_map = map;
+        h.world.insert_resource(Heightmap::from_raw(heights, verts, verts));
+        let steady = |h: &mut Harness, from: f32, to: f32| {
+            let e = h.spawn(UnitKind::Bit, 0, Vec3::new(from, 0.0, 1000.0));
+            h.step();
+            h.world.entity_mut(e).insert(MoveTarget(Vec3::new(to, 0.0, 1000.0)));
+            // Long enough to turn round (the harness spawns facing +X).
+            for _ in 0..150 {
+                h.step();
+            }
+            let s = mover_speed(h, e);
+            h.world.despawn(e);
+            s
+        };
+        let up = steady(&mut h, 600.0, 1400.0);
+        let down = steady(&mut h, 1400.0, 600.0);
+        let slope = 1.0 - 30.0_f32.to_radians().cos();
+        let expected =
+            90.0 / (1.0 + slope * spring_pathfinding::slope_mod_from_max_slope(cap));
+        assert!((up - expected).abs() < 2.0, "uphill {up} vs {expected}");
+        assert!((down - 90.0).abs() < 0.5, "downhill full speed: {down}");
+    }
+
+    /// Idle units follow sinking terrain down (Hex Farm) instead of
+    /// hovering, keeping their spawn lift; structures stay upright.
+    #[test]
+    fn idle_units_follow_the_ground_down_and_structures_stay_upright() {
+        let mut h = Harness::flat();
+        let e = h.spawn(UnitKind::Bit, 0, Vec3::new(400.0, 0.0, 400.0));
+        h.world.entity_mut(e).insert(crate::interaction::movement::GroundLift(3.0));
+        let kernel = h.spawn_structure(UnitKind::Kernel, 0, Vec3::new(800.0, 0.0, 800.0));
+        for hgt in h.world.resource_mut::<Heightmap>().heights_mut() {
+            *hgt = -20.0;
+        }
+        h.step();
+        assert!((h.pos(e).y - (-17.0)).abs() < 1e-4, "on the lowered ground + lift: {}", h.pos(e));
+        let up = h.world.get::<Transform>(kernel).unwrap().rotation * Vec3::Y;
+        assert!((up - Vec3::Y).length() < 1e-5);
     }
 }

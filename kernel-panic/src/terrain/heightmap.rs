@@ -69,28 +69,76 @@ impl Heightmap {
         (self.width, self.height)
     }
 
-    /// Bilinearly sample the terrain Y at world position `(x, z)`. Out-of-bounds
-    /// queries clamp to the nearest edge cell.
+    /// Terrain Y at world position `(x, z)`, interpolated on the two
+    /// triangles of the heightmap square exactly as the terrain mesh is
+    /// triangulated (diagonal top-right → bottom-left) — Spring's
+    /// `CGround::GetHeightReal` / `InterpolateCornerHeight`
+    /// (`Map/Ground.cpp:18`). A bilinear blend differs from the drawn
+    /// surface by up to a quarter of the diagonal's height step, so
+    /// units floated or sank on ridges. Out-of-bounds queries clamp to
+    /// the nearest edge.
     pub fn sample(&self, x: f32, z: f32) -> f32 {
         let gx = (x / self.square_size).clamp(0.0, (self.width - 1) as f32);
         let gz = (z / self.square_size).clamp(0.0, (self.height - 1) as f32);
 
-        let x0 = gx.floor() as usize;
-        let z0 = gz.floor() as usize;
+        let x0 = (gx.floor() as usize).min(self.width.saturating_sub(2));
+        let z0 = (gz.floor() as usize).min(self.height.saturating_sub(2));
         let x1 = (x0 + 1).min(self.width - 1);
         let z1 = (z0 + 1).min(self.height - 1);
 
-        let fx = gx - x0 as f32;
-        let fz = gz - z0 as f32;
+        let dx = gx - x0 as f32;
+        let dz = gz - z0 as f32;
 
         let h00 = self.heights[z0 * self.width + x0];
         let h10 = self.heights[z0 * self.width + x1];
         let h01 = self.heights[z1 * self.width + x0];
         let h11 = self.heights[z1 * self.width + x1];
 
-        let top = h00 + (h10 - h00) * fx;
-        let bot = h01 + (h11 - h01) * fx;
-        top + (bot - top) * fz
+        if dx + dz < 1.0 {
+            // Top-left triangle.
+            h00 + (h10 - h00) * dx + (h01 - h00) * dz
+        } else {
+            // Bottom-right triangle.
+            h11 + (h01 - h11) * (1.0 - dx) + (h10 - h11) * (1.0 - dz)
+        }
+    }
+
+    /// `CReadMap::centerNormals` of square `(sx, sz)`: the normalized
+    /// sum of its two triangles' face normals.
+    fn center_normal(&self, sx: usize, sz: usize) -> Vec3 {
+        let s = self.square_size;
+        let w = self.width;
+        let p = |x: usize, z: usize| Vec3::new(x as f32 * s, self.heights[z * w + x], z as f32 * s);
+        let (tl, tr) = (p(sx, sz), p(sx + 1, sz));
+        let (bl, br) = (p(sx, sz + 1), p(sx + 1, sz + 1));
+        let up = |n: Vec3| if n.y < 0.0 { -n } else { n };
+        let n1 = up((bl - tl).cross(tr - tl)).normalize_or_zero();
+        let n2 = up((bl - tr).cross(br - tr)).normalize_or_zero();
+        (n1 + n2).normalize_or(Vec3::Y)
+    }
+
+    /// `CGround::GetSmoothNormal` (`Map/Ground.cpp:511`): the square
+    /// centre normals around `(x, z)` blended bilinearly — the up vector
+    /// ground units tilt to.
+    pub fn smooth_normal(&self, x: f32, z: f32) -> Vec3 {
+        if self.width < 4 || self.height < 4 {
+            return Vec3::Y;
+        }
+        let (mx, mz) = (self.width - 1, self.height - 1);
+        let fx = x / self.square_size;
+        let fz = z / self.square_size;
+        let sx = (fx.floor() as isize).clamp(1, mx as isize - 2) as usize;
+        let sz = (fz.floor() as isize).clamp(1, mz as isize - 2) as usize;
+        let dx = fx - sx as f32;
+        let dz = fz - sz as f32;
+        let (sx2, wx) = if dx > 0.5 { (sx + 1, dx - 0.5) } else { (sx - 1, 0.5 - dx) };
+        let (sz2, wz) = if dz > 0.5 { (sz + 1, dz - 0.5) } else { (sz - 1, 0.5 - dz) };
+        let (wx, wz) = (wx.clamp(0.0, 1.0), wz.clamp(0.0, 1.0));
+        let n = self.center_normal(sx, sz) * (1.0 - wx) * (1.0 - wz)
+            + self.center_normal(sx2, sz) * wx * (1.0 - wz)
+            + self.center_normal(sx, sz2) * (1.0 - wx) * wz
+            + self.center_normal(sx2, sz2) * wx * wz;
+        n.normalize_or(Vec3::Y)
     }
 
     /// World-space position at `(x, z)` with Y snapped to the terrain.
@@ -121,6 +169,27 @@ impl Heightmap {
         // Surface tangent vectors are (1, dy/dx, 0) and (0, dy/dz, 1); their
         // cross product is (-dy/dx, 1, -dy/dz), which is the upward normal.
         Vec3::new(-dy_dx, 1.0, -dy_dz).normalize()
+    }
+
+    /// Height gradient `(∂h/∂x, ∂h/∂z)` across heightmap square
+    /// `(sx, sz)`, averaged over its two edges per axis — the square's
+    /// downhill-pointing horizontal normal is `-gradient`
+    /// (`CReadMap::centerNormals2D`, the XZ part of the square's two
+    /// face normals). `None` off the map.
+    pub fn square_gradient(&self, sx: i32, sz: i32) -> Option<Vec2> {
+        if sx < 0 || sz < 0 || sx as usize + 1 >= self.width || sz as usize + 1 >= self.height {
+            return None;
+        }
+        let (x, z, w) = (sx as usize, sz as usize, self.width);
+        let h00 = self.heights[z * w + x];
+        let h10 = self.heights[z * w + x + 1];
+        let h01 = self.heights[(z + 1) * w + x];
+        let h11 = self.heights[(z + 1) * w + x + 1];
+        let s = self.square_size;
+        Some(Vec2::new(
+            ((h10 - h00) + (h11 - h01)) * 0.5 / s,
+            ((h01 - h00) + (h11 - h10)) * 0.5 / s,
+        ))
     }
 
     /// Steepest slope sampled across an axis-aligned footprint centred on
@@ -176,6 +245,33 @@ impl Heightmap {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod triangle_tests {
+    use super::*;
+
+    /// Heights follow the mesh's two triangles (diagonal TR→BL), not a
+    /// bilinear blend: with only the bottom-right corner raised, the
+    /// square's centre lies on the diagonal at height 0 (bilinear: 2).
+    #[test]
+    fn sample_follows_the_mesh_triangles() {
+        let hm = Heightmap::from_raw(vec![0.0, 0.0, 0.0, 8.0], 2, 2);
+        assert!(hm.sample(4.0, 4.0).abs() < 1e-5);
+        assert!((hm.sample(6.0, 6.0) - 4.0).abs() < 1e-5);
+        assert!(hm.sample(2.0, 2.0).abs() < 1e-5);
+    }
+
+    /// The smooth normal is up on flat ground and tilts downhill.
+    #[test]
+    fn smooth_normal_tilts_downhill() {
+        let w = 8;
+        let flat = Heightmap::from_raw(vec![0.0; w * w], w, w);
+        assert!((flat.smooth_normal(20.0, 20.0) - Vec3::Y).length() < 1e-5);
+        let ramp: Vec<f32> = (0..w * w).map(|i| (i % w) as f32 * 8.0).collect();
+        let n = Heightmap::from_raw(ramp, w, w).smooth_normal(20.0, 20.0);
+        assert!(n.x < -0.5 && n.y > 0.5, "45° ramp rising along +X: {n}");
     }
 }
 

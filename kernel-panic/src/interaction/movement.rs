@@ -64,12 +64,11 @@ pub struct GuardTarget(pub Entity);
 /// target's own footprint).
 const GUARD_DISTANCE: f32 = 48.0;
 
-/// Per-unit slope tilt, smoothed across frames. Kept as a component rather
-/// than extracted from `Transform::rotation` each frame because tilt rotates
-/// the forward vector off the XZ plane, and re-reading it would leak into
-/// yaw on the next steering pass.
-#[derive(Component, Default)]
-pub struct SlopeTilt(pub Quat);
+/// Height of a unit's root above the ground: `spawn_unit` lifts models
+/// authored around their centre so they rest on the terrain; every
+/// ground-following write keeps that offset.
+#[derive(Component, Default, Clone, Copy, Debug)]
+pub struct GroundLift(pub f32);
 
 /// A computed path the unit follows waypoint-by-waypoint.
 #[derive(Component, Clone, Debug)]
@@ -265,9 +264,28 @@ impl NavGridSet {
         )
     }
 
-    /// Terrain speed multiplier for a mover at `pos` heading `dir`.
-    pub fn speed_mod(&self, _cap: f32, _pos: Vec2, _dir: Vec2) -> f32 {
-        1.0
+    /// Spring's slope encoding (`1 - cos(angle)`) of the square under
+    /// `pos` as the bucket for cap `cap` rated it, or `None` where that
+    /// bucket has it impassable. Recovered from the stored speed
+    /// `1/(1 + slope·slopeMod)`.
+    pub fn square_slope(&self, cap: f32, pos: Vec2) -> Option<f32> {
+        let idx = (!self.buckets.is_empty()).then(|| self.bucket_for(cap))?;
+        let b = &self.buckets[idx];
+        if pos.x < 0.0 || pos.y < 0.0 {
+            return None;
+        }
+        let s = b.speed_map.get((pos.x / 8.0) as u32, (pos.y / 8.0) as u32);
+        (s > 0.0).then(|| {
+            (1.0 / s - 1.0).max(0.0) / spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
+        })
+    }
+
+    /// `slopeMod` of the bucket for cap `cap`.
+    pub fn slope_mod(&self, cap: f32) -> f32 {
+        if self.buckets.is_empty() {
+            return 0.0;
+        }
+        spring_pathfinding::slope_mod_from_max_slope(self.buckets[self.bucket_for(cap)].max_slope)
     }
 }
 
@@ -278,6 +296,14 @@ impl NavGridSet {
 /// single rut. Upstream keeps per-class decay rates; a single shared
 /// grid decays at the most persistent class (LIGHT, `HeatMod=0.10`)
 /// while MEDIUM/HEAVY keep their much higher deposits.
+///
+/// Fidelity note: only Spring's legacy HAPFS pathfinder reads heat
+/// (`Path/HAPFS/PathHeatMap`); KP runs QTPFS (`pathFinderSystem=1`),
+/// which ignores it. It is kept as KP's authored data because it does
+/// not fight the Spring movement port: it only biases *where* new paths
+/// run (never blocks), the corner-cutting look-ahead
+/// (`CanSetNextWayPoint`'s raw search) ignores it, and the headless
+/// harness measures identical group-move numbers with and without it.
 #[derive(Resource)]
 pub struct PathHeat(pub spring_pathfinding::HeatMap);
 
@@ -324,50 +350,6 @@ pub fn update_path_heat(
 /// How far above the sampled ground height to draw command-line gizmos
 /// so they don't z-fight with the terrain.
 const GIZMO_LIFT: f32 = 1.5;
-
-/// Exact surface-aligned orientation: local up = terrain `normal`,
-/// local forward = `forward_xz` projected into the surface plane.
-///
-/// Replaces the old pitch/roll Euler composition, which used a
-/// mislabeled perpendicular (it was the left vector), composed the two
-/// rotations about world axes (only exact when the fall line aligns
-/// with the body — diagonal slopes leaned sideways), and — worst of
-/// all — slerped a *local-space* tilt, so a buffered downhill pitch
-/// applied after a yaw change read as a sideways lean mid-turn.
-pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
-    // Degenerate normals fall back to flat so the basis stays
-    // invertible. The threshold is deliberately strict: normals steeper
-    // than 60° from vertical only exist at cliff bases / walls (units
-    // never stand there — passable cells cap at 54°, normal.y ≈ 0.59).
-    // Projecting the heading onto such an extreme plane deflects its XZ
-    // direction every tick, which used to pin units at cliff bases —
-    // facing a fixed wrong heading at full throttle, never aligning
-    // with the waypoint.
-    let up = if normal.y > 0.1 {
-        normal.normalize()
-    } else {
-        Vec3::Y
-    };
-    let mut f = Vec3::new(forward_xz.x, 0.0, forward_xz.z);
-    if f.length_squared() < 1e-6 {
-        f = Vec3::Z;
-    }
-    let f = f.normalize();
-    // Shear the heading VERTICALLY onto the slope plane: the body's
-    // world-space forward keeps the requested XZ heading exactly while
-    // gaining the pitch the slope demands. (The previous
-    // closest-point projection *rotated the heading itself* on tilted
-    // ground — by up to ~11° per tick at cliff bases, exactly the
-    // per-tick turn budget, so units were pinned facing a fixed wrong
-    // heading at full throttle, never able to align with their
-    // waypoint.)
-    let shear = (f.x * up.x + f.z * up.z) / up.y;
-    let fwd = Vec3::new(f.x, -shear, f.z).normalize();
-    // Right-handed frame: for f=+Z and up=+Y this yields right=−X —
-    // facing +Z with Y up, your right hand points toward −X.
-    let right = fwd.cross(up).normalize();
-    Quat::from_mat3(&Mat3::from_cols(right, up, -fwd))
-}
 
 /// An order leg is done: promote the next queued command to the active
 /// order, or — queue empty — drop the order entirely. Shared by the
@@ -521,102 +503,56 @@ pub fn rotate_toward_xz(from: Vec3, to: Vec3, max_turn: f32) -> Vec3 {
     (rot * from).normalize()
 }
 
-/// Re-clamp every ground unit's Y to the heightmap surface. The
-/// in-loop clamp in `movement_system` only runs for units actively
-/// walking a path, and the clamp in `unit_separation_system` only fires
-/// for units that got pushed this frame — an idle unit standing on a
-/// slope can still end up below the mesh (spawn rounding, map heightmap
-/// edits, feature removal). Doing it here, unconditionally once per
-/// frame, guarantees no non-flying unit is ever rendered inside
-/// terrain.
-///
-/// Exceptions: flying units (flown by `air_movement`) and
-/// subterranean units (the Worm, which
-/// intentionally sinks below the surface — see
-/// [`UnitKind::is_subterranean`]).
+/// Keep every ground unit on the terrain surface (plus its
+/// [`GroundLift`]) once per sim frame, in both directions: mobile units
+/// follow the ground down too (Hex Farm sinking terrain used to leave
+/// idle units hovering). Structures are only pushed up — Spring blocks
+/// terrain changes under them (`blockHeightChanges`). Flyers
+/// (`air_movement`) and units still emerging from a factory are left
+/// alone.
+#[allow(clippy::type_complexity)]
 pub fn ground_clamp_system(
     heightmap: Option<Res<Heightmap>>,
-    mut units: Query<(&UnitType, &UnitStats, &mut Transform)>,
+    mut units: Query<
+        (&UnitStats, &mut Transform, Option<&GroundLift>),
+        Without<crate::units::lifecycle::spawning::Emerging>,
+    >,
 ) {
     let Some(heightmap) = heightmap else {
         return;
     };
-    for (unit_type, stats, mut transform) in &mut units {
-        if stats.can_fly || unit_type.0.is_subterranean() {
+    for (stats, mut transform, lift) in &mut units {
+        if stats.can_fly {
             continue;
         }
-        let ground = heightmap.sample(transform.translation.x, transform.translation.z);
-        if transform.translation.y < ground {
+        let ground = heightmap.sample(transform.translation.x, transform.translation.z)
+            + lift.map_or(0.0, |l| l.0);
+        let y = transform.translation.y;
+        if y < ground || (stats.speed > 0.0 && y != ground) {
             transform.translation.y = ground;
         }
     }
 }
 
-/// Orient every stationary unit (no active move order) to the terrain
-/// normal, preserving its current yaw. Counterpart to the slope-tilt
-/// block inside `movement_system`: that one only fires for units with
-/// a live `MovePath`, so factories and idle mobile units would stay
-/// axis-aligned and read as floating off sloped ground.
-///
-/// Flying units skip — `air_movement` owns their attitude.
+/// Structures stand upright, keeping their yaw: Spring sets `upright`
+/// for every unit without a `MoveDef` that doesn't fly
+/// (`UnitDef.cpp:608`). Ground units are oriented by the movement
+/// system every frame, moving or idle; flyers by `air_movement`.
 #[allow(clippy::type_complexity)]
 pub fn orient_stationary_to_terrain(
-    heightmap: Option<Res<Heightmap>>,
-    mut q: Query<(
-        Entity,
-        &mut Transform,
-        Option<&mut SlopeTilt>,
-        &UnitStats,
-        &UnitType,
-        Option<&MoveTarget>,
-        Option<&MovePath>,
-    )>,
-    mut commands: Commands,
+    mut q: Query<(&mut Transform, &UnitStats), Changed<Transform>>,
 ) {
-    let Some(heightmap) = heightmap else {
-        return;
-    };
-    for (entity, mut transform, mut slope_tilt, stats, unit_type, move_target, move_path) in &mut q
-    {
-        if stats.can_fly || unit_type.0.is_subterranean() {
+    for (mut transform, stats) in &mut q {
+        if stats.can_fly || stats.speed > 0.0 {
             continue;
         }
-        // If the unit is actively pathing, `movement_system` owns its
-        // rotation this frame — skip so we don't fight that system's
-        // slerp toward the steering target.
-        if move_target.is_some() || move_path.is_some() {
-            continue;
-        }
-
-        let pos = transform.translation;
-        let normal = heightmap.normal(pos.x, pos.z);
-
-        // Preserve yaw: read the current forward, flatten to XZ, and
-        // let `surface_aligned_rotation` rebuild the orientation from
-        // it. Stationary buildings start at yaw=0 (facing -Z); mobile
-        // units keep whichever yaw they finished their last move order
-        // with.
         let forward = transform.forward().as_vec3();
-        let forward_xz = {
-            let f = Vec3::new(forward.x, 0.0, forward.z);
-            if f.length_squared() < 1e-6 {
-                -Vec3::Z
-            } else {
-                f.normalize()
-            }
-        };
-
-        let target = surface_aligned_rotation(forward_xz, normal);
-
-        match slope_tilt.as_deref_mut() {
-            Some(t) => {
-                t.0 = target;
-            }
-            None => {
-                commands.entity(entity).insert(SlopeTilt(target));
-            }
+        let f = Vec3::new(forward.x, 0.0, forward.z);
+        let f = if f.length_squared() < 1e-6 { -Vec3::Z } else { f.normalize() };
+        let target = Transform::default().looking_to(f, Vec3::Y).rotation;
+        if transform.rotation != target {
+            transform.rotation = target;
         }
-        transform.rotation = target;
     }
 }
 
@@ -887,84 +823,42 @@ fn draw_dashed_polyline(
 
 #[cfg(test)]
 mod tilt_tests {
-    use super::*;
+    use super::super::ground_move::{attitude, heading_of};
+    use bevy::prelude::*;
 
     const EPS: f32 = 1e-4;
 
-    fn local_axis(rot: Quat, axis: Vec3) -> Vec3 {
-        rot * axis
-    }
-
     /// 30° slope descending along +Z: surface normal tilts toward +Z.
     fn downhill_normal() -> Vec3 {
-        Vec3::new(
-            0.0,
-            30.0_f32.to_radians().cos(),
-            30.0_f32.to_radians().sin(),
-        )
+        Vec3::new(0.0, 30.0_f32.to_radians().cos(), 30.0_f32.to_radians().sin())
     }
 
     #[test]
-    fn flat_terrain_is_identity_for_plus_z() {
-        let rot = surface_aligned_rotation(Vec3::Z, Vec3::Y);
-        // Facing +Z means a 180° yaw (Bevy forward is −Z) with zero tilt.
+    fn flat_terrain_is_pure_yaw() {
+        let rot = attitude(heading_of(Vec2::Y), Vec3::Y);
         assert!((rot * -Vec3::Z - Vec3::Z).length() < EPS);
         assert!((rot * Vec3::Y - Vec3::Y).length() < EPS);
     }
 
+    /// `UpdateDirVectors`: up is the ground normal, and the front stays
+    /// in the surface plane.
     #[test]
-    fn downhill_up_matches_normal_exactly() {
+    fn up_matches_normal_and_front_lies_in_the_plane() {
         let n = downhill_normal();
-        let rot = surface_aligned_rotation(Vec3::Z, n);
-        assert!((local_axis(rot, Vec3::Y) - n).length() < EPS);
+        for dir in [Vec2::Y, Vec2::X, Vec2::new(1.0, 1.0).normalize(), -Vec2::Y] {
+            let rot = attitude(heading_of(dir), n);
+            assert!((rot * Vec3::Y - n).length() < EPS);
+            assert!((rot * -Vec3::Z).dot(n).abs() < EPS);
+        }
     }
 
+    /// Heading down the fall line: pitched down, no roll.
     #[test]
-    fn downhill_forward_stays_in_plane_without_sideways_tilt() {
+    fn fall_line_pitches_without_roll() {
         let n = downhill_normal();
-        let rot = surface_aligned_rotation(Vec3::Z, n);
-        let fwd = local_axis(rot, -Vec3::Z);
-        // In-plane: perpendicular to the normal.
-        assert!(
-            fwd.dot(n).abs() < EPS,
-            "forward not in plane: dot={}",
-            fwd.dot(n)
-        );
-        // Descending along +Z: the in-plane forward points down (y < 0).
-        assert!(fwd.y < 0.0);
-        // No sideways lean: the body right axis stays perpendicular to
-        // the normal AND horizontal on a pure downhill (fall line along
-        // the movement axis).
-        let right = local_axis(rot, Vec3::X);
-        assert!(right.dot(n).abs() < EPS);
-        assert!(right.y.abs() < EPS);
-    }
-
-    /// The reported-bug scenario: moving diagonally across a slope. The
-    /// exact basis keeps every body axis in its plane; the old
-    /// world-axis Euler composition could not.
-    #[test]
-    fn diagonal_descent_matches_plane() {
-        let n = downhill_normal();
-        let forward = Vec3::new(1.0, 0.0, 1.0).normalize();
-        let rot = surface_aligned_rotation(forward, n);
-        assert!((local_axis(rot, Vec3::Y) - n).length() < EPS);
-        let fwd = local_axis(rot, -Vec3::Z);
-        assert!(fwd.dot(n).abs() < EPS);
-        let right = local_axis(rot, Vec3::X);
-        assert!(right.dot(n).abs() < EPS);
-    }
-
-    /// Turning on a slope: same normal, opposite heading — both
-    /// orientations keep the up axis on the normal (the old local-tilt
-    /// slerp made the buffered pitch read as a sideways lean mid-turn).
-    #[test]
-    fn up_axis_stable_when_reversing_on_slope() {
-        let n = downhill_normal();
-        let a = surface_aligned_rotation(Vec3::Z, n);
-        let b = surface_aligned_rotation(-Vec3::Z, n);
-        assert!((local_axis(a, Vec3::Y) - n).length() < EPS);
-        assert!((local_axis(b, Vec3::Y) - n).length() < EPS);
+        let rot = attitude(heading_of(Vec2::Y), n);
+        assert!((rot * -Vec3::Z).y < 0.0);
+        assert!((rot * Vec3::X).y.abs() < EPS);
     }
 }
 

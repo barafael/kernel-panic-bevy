@@ -292,15 +292,6 @@ impl UnitKind {
         matches!(self, UnitKind::Worm)
     }
 
-    /// Burrowing units — allowed to sit below the heightmap surface.
-    /// Every other ground unit is re-clamped to terrain height each
-    /// frame so physics/collision pushes can't slide it into the mesh.
-    /// The Worm is the one intentional exception (its ambush animation
-    /// sinks it underground).
-    pub fn is_subterranean(self) -> bool {
-        matches!(self, UnitKind::Worm)
-    }
-
     /// Documented exception to `NoChaseCategory=VTOL`: units whose
     /// projectile homes on air targets despite the FBI filter.
     /// FEATURES.md §12 calls this out specifically for the Pointer —

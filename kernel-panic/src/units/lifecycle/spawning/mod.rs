@@ -308,6 +308,7 @@ pub fn spawn_unit(
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
         crate::interaction::movement::ground_mover_components(kind, unit_registry),
+        crate::interaction::movement::GroundLift(ground_lift),
         // §1.8 first slice: cache a typed collision volume so
         // projectile / shield / per-shot-miss systems can do
         // volume-aware tests without re-deriving from the S3O on
