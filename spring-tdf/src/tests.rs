@@ -1513,6 +1513,26 @@ mod real_files {
         assert!(signal.can_fly);
         assert_eq!(signal.cruise_alt, 200.0);
         assert_eq!(signal.max_velocity, 8.0);
+        // Air defaults when the FBI is silent.
+        assert!(!signal.hover_attack);
+        assert_eq!(signal.air_hover_factor, -1.0);
+        assert_eq!(signal.vertical_speed, 3.0);
+        assert!(signal.banking_allowed);
+    }
+
+    #[test]
+    fn parse_flow_fbi_air_tags() {
+        let Some(dir) = find_units_dir() else {
+            eprintln!("skipping: units dir not found");
+            return;
+        };
+        let defs = load_unit_file(dir, "flow.fbi");
+        let flow = defs.get("flow").expect("flow unit");
+        assert!(flow.can_fly && flow.hover_attack && !flow.air_strafe);
+        // AirHoverFactor=0: never lands, no hover drift.
+        assert_eq!(flow.air_hover_factor, 0.0);
+        assert_eq!(flow.cruise_alt, 140.0);
+        assert_eq!(flow.turn_rate, 1280.0);
     }
 
     #[test]

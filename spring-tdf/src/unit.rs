@@ -130,6 +130,21 @@ pub struct UnitDef {
     pub can_fly: bool,
     /// Cruise altitude for flying units.
     pub cruise_alt: f32,
+    /// `HoverAttack=1`: hovering aircraft (`CHoverAirMoveType`) rather
+    /// than a strafing plane.
+    pub hover_attack: bool,
+    /// `AirHoverFactor` (Spring default −1: can land). `>= 0` means the
+    /// aircraft never lands, and is how far it drifts while hovering.
+    #[default(-1.0)]
+    pub air_hover_factor: f32,
+    /// `verticalSpeed`: climb/descent rate, elmos/frame (default 3).
+    #[default(3.0)]
+    pub vertical_speed: f32,
+    /// `bankingAllowed` (default on).
+    #[default(true)]
+    pub banking_allowed: bool,
+    /// `AirStrafe`.
+    pub air_strafe: bool,
     /// Auto-heal rate when idle (HP/sec).
     pub idle_auto_heal: f32,
     /// Seconds before idle auto-heal kicks in.
@@ -251,6 +266,11 @@ impl UnitDef {
 
             can_fly: s.bool("canfly"),
             cruise_alt: s.f32("cruisealt"),
+            hover_attack: s.bool("hoverattack"),
+            air_hover_factor: s.f32_or("airhoverfactor", -1.0),
+            vertical_speed: s.f32_or("verticalspeed", 3.0),
+            banking_allowed: s.get("bankingallowed").is_none_or(|v| v.trim() == "1"),
+            air_strafe: s.bool("airstrafe"),
             idle_auto_heal: s.f32("idleautoheal"),
             idle_time: s.f32("idletime"),
             max_slope: s.f32("maxslope"),
