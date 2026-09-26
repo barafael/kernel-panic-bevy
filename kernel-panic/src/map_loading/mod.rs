@@ -233,6 +233,10 @@ fn prepare_game_entry(world: &mut World) {
         .resource_mut::<NextState<GameState>>()
         .set(GameState::Playing);
     world.resource_mut::<GameOverDismissed>().0 = false;
+    // The teardown below despawns units without the `Dying` pass the
+    // event-driven tallies decrement on — start the new match from zero.
+    world.insert_resource(crate::units::lifecycle::bookkeeping::SmallBuildingCounts::default());
+    world.insert_resource(crate::units::lifecycle::bookkeeping::TotalUnitCount::default());
 
     // Resolve the setup's map name against the catalog.
     let catalog = world.resource::<MapCatalog>().0.clone();

@@ -22,7 +22,11 @@ use bevy::prelude::*;
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::{Infected, weapon_infection_duration};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::units::combat::Dying;
 use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::content::weapons::WeaponRegistry;
 use crate::units::spatial::SpatialIndex;
 
 /// Filename of the SIGTERM bomber's S3O model (`signal.fbi:ObjectName`).
@@ -115,11 +119,23 @@ impl SigTermAssets {
     }
 }
 
+/// Recharge of the two Lua-driven abilities, in seconds. Upstream
+/// `airstrike.lua` (`airstrike_reload_time = 90`) and
+/// `network_reflectorshield.lua` (`reloadTime = 90`) both count it as
+/// `reload * 32` sim frames — at Spring's 30 Hz that is 96 s of game
+/// time (their button label counts down 32-frame "seconds" from 90).
+/// Both also start the recharge in `UnitCreated`, so a fresh Terminal /
+/// Firewall is not ready either (see [`initial_cooldown`]).
+pub const LUA_ABILITY_RELOAD: f32 = 90.0 * 32.0 / 30.0;
+
 /// Firewall protection zone: all allies within `FIREWALL_RADIUS` at
 /// cast time gain a `Protected` component for `FIREWALL_DURATION`.
+/// Upstream's `CMD_FIREWALL` is an `ICON_MAP` command run straight from
+/// `CommandFallback` — `GetUnitsInCylinder(x, z, 300)` around the click
+/// with no range check — so the Firewall reaches any point on the map.
 pub const FIREWALL_RADIUS: f32 = 300.0;
 pub const FIREWALL_DURATION: f32 = 20.0;
-pub const FIREWALL_COOLDOWN: f32 = 90.0;
+pub const FIREWALL_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// Fraction of incoming damage that a Protected unit *takes*. The
 /// remaining `1.0 - DAMAGE_TAKEN_FRACTION` is reflected back to the
 /// attacker.
@@ -150,7 +166,7 @@ pub const MINELAUNCHER_FAN_RADIUS: f32 = 40.0;
 /// strike. Neither stage carries a `UnitType`, which is what makes
 /// them untargetable — same effect as upstream's
 /// `Category=NUKE VTOL` + every ground unit's `NoChaseCategory=VTOL`.
-pub const SIGTERM_COOLDOWN: f32 = 90.0;
+pub const SIGTERM_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// Signal's cruise altitude. Matches signal.fbi `cruiseAlt=200`.
 pub const SIGTERM_SIGNAL_ALTITUDE: f32 = 200.0;
 /// Signal's ground speed. Matches signal.fbi `MaxVelocity=8` in elmos
@@ -252,6 +268,74 @@ pub struct CommandFireCooldown {
     pub remaining: f32,
 }
 
+/// The recharge a freshly created `kind` starts with. Upstream's
+/// `airstrike.lua` / `network_reflectorshield.lua` stamp the full
+/// reload in `UnitCreated` — which fires when the nanoframe appears, so
+/// the timer runs down during construction. The weapon-driven abilities
+/// (NX Flag, Infection, Mine Launch) start loaded.
+pub fn initial_cooldown(kind: UnitKind) -> Option<CommandFireCooldown> {
+    match kind {
+        UnitKind::Terminal => Some(CommandFireCooldown {
+            remaining: SIGTERM_COOLDOWN,
+        }),
+        UnitKind::Firewall => Some(CommandFireCooldown {
+            remaining: FIREWALL_COOLDOWN,
+        }),
+        _ => None,
+    }
+}
+
+/// Fallback cast ranges (elmos) for the weapon-backed abilities, used
+/// only when the TDF registry is unavailable (tests / missing upstream
+/// data). Values are the TDF `range=` of each weapon.
+const NX_RANGE: f32 = 1400.0; // retroweapons.tdf [nx]
+const MINELAUNCHER_RANGE: f32 = 1100.0; // retroweapons.tdf [MineLauncher]
+const INFECTION_RANGE: f32 = 2000.0; // corruptionweapons.tdf [Infection]
+
+/// How far from the caster `kind`'s ability may land, or `None` when it
+/// reaches anywhere on the map.
+///
+/// NX Flag, Infection and Mine Launch are real weapons upstream, so the
+/// engine only fires them at targets inside the weapon's `range` (the
+/// unit walks into range first if it can move). SIGTERM and Firewall are
+/// Lua `ICON_MAP` commands executed in `CommandFallback` without any
+/// distance check: the Signal bomber flies to the target, the Firewall
+/// shield lands wherever the player clicked.
+pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
+    let (weapon, fallback) = match kind {
+        UnitKind::Pointer => ("nx", NX_RANGE),
+        UnitKind::Byte => ("MineLauncher", MINELAUNCHER_RANGE),
+        UnitKind::Obelisk => ("Infection", INFECTION_RANGE),
+        _ => return None,
+    };
+    Some(
+        weapons
+            .get(weapon)
+            .map(|def| def.range)
+            .filter(|r| *r > 0.0)
+            .unwrap_or(fallback),
+    )
+}
+
+/// Horizontal (XZ) distance — weapon ranges are checked on the ground
+/// plane so a caster on a ridge isn't penalised for the height gap.
+fn flat_distance(a: Vec3, b: Vec3) -> f32 {
+    Vec2::new(a.x - b.x, a.z - b.z).length()
+}
+
+/// A mobile caster walking toward an out-of-range ability target.
+/// [`advance_pending_casts`] fires the ability once the target is
+/// within [`cast_range`], mirroring how Spring's command-fire attack
+/// order approaches before shooting. Any new order clears it
+/// (`interaction::clear_orders`, the replace-branch of
+/// `apply_ordered_command`, Stop); losing its `MoveTarget` without
+/// reaching range (e.g. stuck) abandons the cast.
+#[derive(Component, Debug, Clone, Copy)]
+#[component(storage = "SparseSet")]
+pub struct PendingCommandFire {
+    pub target: Vec3,
+}
+
 /// Event: a selected unit should fire its command-fire ability at
 /// `target`. The weapon and source-unit resolution happens when the
 /// event is processed so the hotkey handler doesn't need to know which
@@ -286,20 +370,101 @@ pub struct AreaDenialZone {
     pub owner_faction: Faction,
 }
 
+/// What to do with a cast order given the caster's position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CastReach {
+    /// Target inside the ability's range (or the ability is map-wide).
+    Fire,
+    /// Out of range, but the caster can walk into range first.
+    Approach,
+    /// Out of range and the caster is stationary: refuse the order,
+    /// as Spring does for a building told to attack beyond its range.
+    Refuse,
+}
+
+fn cast_reach(range: Option<f32>, caster: Vec3, target: Vec3, mobile: bool) -> CastReach {
+    match range {
+        Some(range) if flat_distance(caster, target) > range => {
+            if mobile {
+                CastReach::Approach
+            } else {
+                CastReach::Refuse
+            }
+        }
+        _ => CastReach::Fire,
+    }
+}
+
+/// Fire the command-fire ability of every [`PendingCommandFire`] caster
+/// that has walked into range, and drop pending casts whose approach
+/// walk ended (stuck / pathing gave up) short of range. Runs right
+/// before [`process_command_fire`], which receives the in-range event.
+#[allow(clippy::type_complexity)]
+pub fn advance_pending_casts(
+    weapons: Res<WeaponRegistry>,
+    casters: Query<
+        (
+            Entity,
+            &UnitType,
+            &GlobalTransform,
+            &PendingCommandFire,
+            Has<MoveTarget>,
+        ),
+        Without<Dying>,
+    >,
+    mut events: MessageWriter<CommandFireEvent>,
+    mut commands: Commands,
+) {
+    for (entity, unit, gtf, pending, moving) in &casters {
+        match cast_reach(
+            cast_range(unit.0, &weapons),
+            gtf.translation(),
+            pending.target,
+            true,
+        ) {
+            CastReach::Fire => {
+                // In range: stop the approach walk where it stands and
+                // cast — Spring halts an attacking unit once it can fire.
+                commands
+                    .entity(entity)
+                    .remove::<(PendingCommandFire, MoveTarget, MovePath)>();
+                events.write(CommandFireEvent {
+                    attacker: entity,
+                    target: pending.target,
+                });
+            }
+            _ if !moving => {
+                commands.entity(entity).remove::<PendingCommandFire>();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Drain queued `CommandFireEvent`s into persistent
 /// `AreaDenialZone` entities. A unit identifies its command-fire
 /// weapon by looking at its `UnitKind` — NX Flag for Pointer, Infection
 /// for Obelisk. Units without a registered ability are ignored.
-#[allow(clippy::too_many_arguments)]
+///
+/// Weapon-backed abilities honour their TDF range ([`cast_range`]): a
+/// mobile caster ordered beyond it walks into range first (see
+/// [`PendingCommandFire`]), a stationary one refuses the order.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn process_command_fire(
     mut events: MessageReader<CommandFireEvent>,
-    casters: Query<(
-        &UnitType,
-        &TeamId,
-        &Faction,
-        &GlobalTransform,
-        Option<&CommandFireCooldown>,
-    )>,
+    casters: Query<
+        (
+            &UnitType,
+            &TeamId,
+            &Faction,
+            &GlobalTransform,
+            Option<&CommandFireCooldown>,
+            Has<PendingCommandFire>,
+        ),
+        Without<Dying>,
+    >,
+    unit_registry: Res<UnitRegistry>,
+    weapons: Res<WeaponRegistry>,
     protect_targets: Query<(Entity, &TeamId, &Faction, &GlobalTransform), With<Health>>,
     mut health_q: Query<&mut Health>,
     mut mine_spawns: ResMut<MineSpawnQueue>,
@@ -311,11 +476,39 @@ pub fn process_command_fire(
     mut commands: Commands,
 ) {
     for event in events.read() {
-        let Ok((unit, team, faction, gtf, cd)) = casters.get(event.attacker) else {
+        let Ok((unit, team, faction, gtf, cd, was_pending)) = casters.get(event.attacker) else {
             continue;
         };
         if cd.is_some_and(|c| c.remaining > 0.0) {
             continue;
+        }
+        match cast_reach(
+            cast_range(unit.0, &weapons),
+            gtf.translation(),
+            event.target,
+            unit_registry.speed(unit.0) > 0.0,
+        ) {
+            CastReach::Fire => {}
+            CastReach::Approach => {
+                // A fresh order: drop whatever the caster was doing and
+                // walk toward the target; `advance_pending_casts` casts
+                // once it's in range.
+                crate::interaction::clear_orders(&mut commands.entity(event.attacker)).insert((
+                    PendingCommandFire {
+                        target: event.target,
+                    },
+                    MoveTarget(event.target),
+                ));
+                continue;
+            }
+            CastReach::Refuse => continue,
+        }
+        if was_pending {
+            // An in-range cast supersedes an earlier cast's approach
+            // walk — stop walking toward the stale target.
+            commands
+                .entity(event.attacker)
+                .remove::<(PendingCommandFire, MoveTarget, MovePath)>();
         }
 
         if unit.0 == UnitKind::Firewall {
@@ -756,6 +949,195 @@ mod tests {
             weapon_infection_duration(a.infection_weapon.unwrap()),
             Some(1.0)
         );
+    }
+
+    /// Weapon abilities are range-limited to their TDF `range=` (with
+    /// fallbacks when the registry lacks the weapon); the two Lua
+    /// abilities reach anywhere.
+    #[test]
+    fn cast_range_matches_tdf() {
+        let empty = WeaponRegistry::default();
+        assert_eq!(cast_range(UnitKind::Pointer, &empty), Some(1400.0));
+        assert_eq!(cast_range(UnitKind::Byte, &empty), Some(1100.0));
+        assert_eq!(cast_range(UnitKind::Obelisk, &empty), Some(2000.0));
+        assert_eq!(cast_range(UnitKind::Terminal, &empty), None);
+        assert_eq!(cast_range(UnitKind::Firewall, &empty), None);
+
+        let mut weapons = WeaponRegistry::default();
+        weapons.insert_for_test(
+            "nx",
+            spring_tdf::WeaponDef {
+                range: 900.0,
+                ..Default::default()
+            },
+        );
+        assert_eq!(cast_range(UnitKind::Pointer, &weapons), Some(900.0));
+    }
+
+    #[test]
+    fn cast_reach_classifies_orders() {
+        let far = Vec3::new(2000.0, 0.0, 0.0);
+        let near = Vec3::new(500.0, 300.0, 0.0);
+        assert_eq!(cast_reach(Some(1400.0), Vec3::ZERO, near, false), CastReach::Fire);
+        assert_eq!(cast_reach(Some(1400.0), Vec3::ZERO, far, true), CastReach::Approach);
+        assert_eq!(cast_reach(Some(1400.0), Vec3::ZERO, far, false), CastReach::Refuse);
+        assert_eq!(cast_reach(None, Vec3::ZERO, far * 10.0, false), CastReach::Fire);
+    }
+
+    /// Terminal and Firewall start with a full recharge (upstream
+    /// `UnitCreated`); weapon casters start loaded.
+    #[test]
+    fn lua_abilities_start_recharging() {
+        assert!((LUA_ABILITY_RELOAD - 96.0).abs() < 1e-4);
+        for kind in [UnitKind::Terminal, UnitKind::Firewall] {
+            let cd = initial_cooldown(kind).expect("starts recharging");
+            assert_eq!(cd.remaining, LUA_ABILITY_RELOAD);
+        }
+        for kind in [UnitKind::Pointer, UnitKind::Obelisk, UnitKind::Byte] {
+            assert!(initial_cooldown(kind).is_none());
+        }
+    }
+
+    fn cast_app(units: &[(&str, f32)]) -> App {
+        let mut defs = spring_tdf::UnitDefs::default();
+        for (name, velocity) in units {
+            defs.units.insert(
+                (*name).into(),
+                spring_tdf::UnitDef {
+                    max_velocity: *velocity,
+                    ..Default::default()
+                },
+            );
+        }
+        let mut app = App::new();
+        app.add_message::<CommandFireEvent>()
+            .init_resource::<Assets<Mesh>>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<Assets<Image>>()
+            .init_resource::<S3OModelCache>()
+            .init_resource::<SigTermAssets>()
+            .init_resource::<MineSpawnQueue>()
+            .insert_resource(UnitRegistry::for_test(defs))
+            .insert_resource(WeaponRegistry::default());
+        app
+    }
+
+    fn spawn_caster(app: &mut App, kind: UnitKind, pos: Vec3) -> Entity {
+        app.world_mut()
+            .spawn((
+                UnitType(kind),
+                TeamId(0),
+                Faction::System,
+                Health::full(15_000.0),
+                GlobalTransform::from_translation(pos),
+            ))
+            .id()
+    }
+
+    fn cast(app: &mut App, attacker: Entity, target: Vec3) {
+        use bevy::ecs::system::RunSystemOnce;
+        app.world_mut()
+            .write_message(CommandFireEvent { attacker, target });
+        app.world_mut().run_system_once(process_command_fire).unwrap();
+        // Each `run_system_once` builds a fresh reader that would replay
+        // this event; drop it so later runs see only new casts.
+        app.world_mut()
+            .resource_mut::<Messages<CommandFireEvent>>()
+            .clear();
+    }
+
+    fn zone_count(app: &mut App) -> usize {
+        app.world_mut()
+            .query::<&AreaDenialZone>()
+            .iter(app.world())
+            .count()
+    }
+
+    /// A stationary Obelisk refuses an Infection order beyond its range:
+    /// no gas, no cooldown spent.
+    #[test]
+    fn stationary_caster_refuses_out_of_range() {
+        let mut app = cast_app(&[]);
+        let obelisk = spawn_caster(&mut app, UnitKind::Obelisk, Vec3::ZERO);
+        cast(&mut app, obelisk, Vec3::new(2500.0, 0.0, 0.0));
+        assert_eq!(zone_count(&mut app), 0);
+        assert!(app.world().get::<CommandFireCooldown>(obelisk).is_none());
+
+        cast(&mut app, obelisk, Vec3::new(1500.0, 0.0, 0.0));
+        assert_eq!(zone_count(&mut app), 1);
+        assert!(app.world().get::<CommandFireCooldown>(obelisk).is_some());
+    }
+
+    /// A Pointer ordered beyond NX range walks toward the target instead
+    /// of casting; once in range `advance_pending_casts` stops it and
+    /// the flag lands.
+    #[test]
+    fn mobile_caster_walks_into_range_then_casts() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = cast_app(&[("pointer", 2.0)]);
+        let pointer = spawn_caster(&mut app, UnitKind::Pointer, Vec3::ZERO);
+        let target = Vec3::new(3000.0, 0.0, 0.0);
+        cast(&mut app, pointer, target);
+        assert_eq!(zone_count(&mut app), 0);
+        assert_eq!(
+            app.world().get::<PendingCommandFire>(pointer).map(|p| p.target),
+            Some(target)
+        );
+        assert_eq!(
+            app.world().get::<MoveTarget>(pointer).map(|m| m.0),
+            Some(target)
+        );
+
+        // Still out of range: the approach continues.
+        app.world_mut()
+            .run_system_once(advance_pending_casts)
+            .unwrap();
+        assert!(app.world().get::<PendingCommandFire>(pointer).is_some());
+
+        // Walked on to 1300 elmos from the target — inside NX's 1400.
+        app.world_mut()
+            .entity_mut(pointer)
+            .insert(GlobalTransform::from_translation(Vec3::new(1700.0, 0.0, 0.0)));
+        app.world_mut()
+            .run_system_once(advance_pending_casts)
+            .unwrap();
+        app.world_mut().run_system_once(process_command_fire).unwrap();
+        assert_eq!(zone_count(&mut app), 1);
+        assert!(app.world().get::<PendingCommandFire>(pointer).is_none());
+        assert!(
+            app.world().get::<MoveTarget>(pointer).is_none(),
+            "caster stops once it can cast"
+        );
+    }
+
+    /// An approach whose move order vanished (new order, stuck) is
+    /// abandoned rather than casting later out of the blue.
+    #[test]
+    fn pending_cast_dropped_when_walk_ends() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = cast_app(&[("pointer", 2.0)]);
+        let pointer = spawn_caster(&mut app, UnitKind::Pointer, Vec3::ZERO);
+        app.world_mut().entity_mut(pointer).insert(PendingCommandFire {
+            target: Vec3::new(5000.0, 0.0, 0.0),
+        });
+        app.world_mut()
+            .run_system_once(advance_pending_casts)
+            .unwrap();
+        assert!(app.world().get::<PendingCommandFire>(pointer).is_none());
+    }
+
+    /// SIGTERM stays map-wide: a Terminal casts at any distance.
+    #[test]
+    fn sigterm_has_no_range_limit() {
+        let mut app = cast_app(&[]);
+        let terminal = spawn_caster(&mut app, UnitKind::Terminal, Vec3::ZERO);
+        cast(&mut app, terminal, Vec3::new(20_000.0, 0.0, 0.0));
+        let signals = app
+            .world_mut()
+            .query::<&SigTermSignal>()
+            .iter(app.world())
+            .count();
+        assert_eq!(signals, 1);
     }
 
     #[test]

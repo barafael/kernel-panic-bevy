@@ -101,6 +101,7 @@ impl Plugin for UnitsPlugin {
                 (
                     (
                         bookkeeping::track_added_buildings,
+                        bookkeeping::track_finished_buildings,
                         bookkeeping::track_dying_buildings,
                         bookkeeping::track_added_units,
                         bookkeeping::track_dying_units,
@@ -152,6 +153,7 @@ impl Plugin for UnitsPlugin {
                             .chain(),
                         (
                             combat::tick_infections,
+                            command_fire::advance_pending_casts,
                             command_fire::process_command_fire,
                             command_fire::tick_command_fire_cooldown,
                             command_fire::tick_area_denial,

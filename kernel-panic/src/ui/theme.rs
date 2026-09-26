@@ -39,6 +39,10 @@ pub const BUTTON_BG_PRESSED: Color = Color::srgba(0.15, 0.40, 0.20, 0.95);
 /// stay legible against varied terrain (queue badges, tooltip body, etc.).
 pub const TEXT_BG: Color = Color::srgba(0.0, 0.0, 0.0, 0.6);
 
+/// Label colour for a disabled control (capped build icon, recharging
+/// ability button).
+pub const TEXT_DISABLED: Color = Color::srgb(0.45, 0.50, 0.46);
+
 /// Health-bar / unit-info accent red for low HP (mirrors `health_color`).
 #[allow(dead_code)]
 pub const KP_RED: Color = Color::srgb(0.95, 0.30, 0.25);

@@ -9,6 +9,11 @@
 //! - Bug / Exploit → Deploy / Pack Up (the Bug ↔ Exploit morph).
 //!
 //! `R` lets a Packet re-Enter the buffer. `Ctrl+D` is self-destruct.
+//!
+//! The order palette's Ability button drives the same logic: it deploys
+//! Bugs / Exploits at once and arms [`OrderCursorModes::ability`] so the
+//! next ground click casts the aimed abilities, as `D` over that point
+//! would ([`deploy_units`] / [`cast_aimed_abilities`] are shared).
 
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
@@ -27,7 +32,7 @@ use crate::units::combat::{
 use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::mechanics::command_fire::CommandFireEvent;
+use crate::units::mechanics::command_fire::{CommandFireEvent, PendingCommandFire};
 use crate::units::mechanics::deploy::DeployEvent;
 use crate::units::mechanics::network_buffer::{DispatchEvent, EnterEvent};
 
@@ -45,12 +50,14 @@ impl Plugin for AbilityHotkeyPlugin {
             // Bevy's 21-item tuple-arity cap.
             (
                 (
-                    trigger_command_fire_on_hotkey,
+                    trigger_aimed_ability_on_hotkey,
                     trigger_deploy_on_hotkey,
-                    trigger_dispatch_on_hotkey,
                     trigger_enter_on_hotkey,
                     trigger_self_destruct_on_hotkey,
                     trigger_unset_target_on_hotkey,
+                    cancel_ability_mode,
+                    trigger_ability_click,
+                    update_ability_cursor,
                 ),
                 (
                     toggle_patrol_cursor_mode,
@@ -87,6 +94,8 @@ impl Plugin for AbilityHotkeyPlugin {
 ///   route.
 /// - `patrol` (`P` / button): shuttle between the click point and where
 ///   the unit started.
+/// - `ability` (Ability button only — `D` casts at the cursor directly):
+///   cast the selection's aimed abilities at the clicked point.
 ///
 /// Modes are cleared by re-pressing the key, Escape, right-click, the
 /// committing click, or a Stop order.
@@ -98,6 +107,7 @@ pub struct OrderCursorModes {
     pub guard: bool,
     pub move_order: bool,
     pub set_target: bool,
+    pub ability: bool,
 }
 
 impl OrderCursorModes {
@@ -108,6 +118,7 @@ impl OrderCursorModes {
             || self.guard
             || self.move_order
             || self.set_target
+            || self.ability
     }
 
     /// Arm exactly one mode, clearing the others (they share the cursor).
@@ -118,6 +129,17 @@ impl OrderCursorModes {
         self.guard = mode == Mode::Guard;
         self.move_order = mode == Mode::Move;
         self.set_target = mode == Mode::SetTarget;
+        self.ability = mode == Mode::Ability;
+    }
+
+    /// Flip the Ability button's click-to-cast mode (arming it clears
+    /// the other modes).
+    pub fn toggle_ability(&mut self) {
+        if self.ability {
+            self.ability = false;
+        } else {
+            self.arm(Mode::Ability);
+        }
     }
 }
 
@@ -130,6 +152,70 @@ enum Mode {
     Guard,
     Move,
     SetTarget,
+    Ability,
+}
+
+/// Whether `kind`'s `D` ability is aimed at a map point: command-fire
+/// casters (NX Flag, Infection, Protect, Mine Launch, SIGTERM) and the
+/// packet teleporters (Dispatch). Bug / Exploit deploy needs no target.
+pub(crate) fn ability_is_aimed(kind: UnitKind) -> bool {
+    kind.has_command_fire_ability() || kind.is_teleporter()
+}
+
+/// Deploy / pack up every Bug / Exploit in `units` — the untargeted half
+/// of the `D` ability.
+pub(crate) fn deploy_units(
+    units: impl IntoIterator<Item = (Entity, UnitKind)>,
+    ev: &mut MessageWriter<DeployEvent>,
+) {
+    for (entity, kind) in units {
+        if kind.deploy_pair().is_some() {
+            ev.write(DeployEvent { entity });
+        }
+    }
+}
+
+/// Cast the aimed half of the `D` ability at `target` for every unit in
+/// `units`: command-fire casters get a [`CommandFireEvent`] (range /
+/// approach handled by `process_command_fire`), teleporters dispatch.
+///
+/// `alt_held` mirrors upstream `network_dispatch.lua`: the dispatch
+/// command stays active and re-fires every frame until the team's
+/// Packet Buffer is empty, instead of stopping after one 12-batch. With
+/// ALT we only insert the `AutoDispatch` marker — the first batch goes
+/// out on the next frame via `tick_auto_dispatch`, avoiding a
+/// double-fire that would drain up to 24 packets in frame 1.
+pub(crate) fn cast_aimed_abilities(
+    units: impl IntoIterator<Item = (Entity, UnitKind)>,
+    target: Vec3,
+    alt_held: bool,
+    command_fire: &mut MessageWriter<CommandFireEvent>,
+    dispatch: &mut MessageWriter<DispatchEvent>,
+    commands: &mut Commands,
+) {
+    for (entity, kind) in units {
+        if kind.has_command_fire_ability() {
+            command_fire.write(CommandFireEvent {
+                attacker: entity,
+                target,
+            });
+        } else if kind.is_teleporter() {
+            if alt_held {
+                commands
+                    .entity(entity)
+                    .insert(crate::units::mechanics::network_buffer::AutoDispatch { target });
+            } else {
+                dispatch.write(DispatchEvent {
+                    teleporter: entity,
+                    target,
+                });
+            }
+        }
+    }
+}
+
+fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight)
 }
 
 /// `Ctrl+D` starts a 5 s self-destruct countdown on every selected
@@ -166,53 +252,7 @@ fn trigger_deploy_on_hotkey(
     if ctrl_held(&keys) {
         return;
     }
-    for (entity, unit) in &selected_q {
-        if unit.0.deploy_pair().is_some() {
-            ev.write(DeployEvent { entity });
-        }
-    }
-}
-
-fn trigger_dispatch_on_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: bevy::picking::mesh_picking::ray_cast::MeshRayCast,
-    mut ev: MessageWriter<DispatchEvent>,
-    mut commands: Commands,
-) {
-    if !keys.just_pressed(KeyCode::KeyD) {
-        return;
-    }
-    if ctrl_held(&keys) {
-        return;
-    }
-    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
-        return;
-    };
-    // Holding ALT mirrors upstream `network_dispatch.lua`: the dispatch
-    // command stays active and re-fires every frame until the team's
-    // Packet Buffer is empty, instead of stopping after one 12-batch.
-    // When ALT is held we only insert the `AutoDispatch` marker — the
-    // first batch goes out on the next frame via `tick_auto_dispatch`,
-    // avoiding a double-fire that would drain up to 24 packets in frame 1.
-    let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-    for (entity, unit) in &selected_q {
-        if !unit.0.is_teleporter() {
-            continue;
-        }
-        if alt_held {
-            commands
-                .entity(entity)
-                .insert(crate::units::mechanics::network_buffer::AutoDispatch { target });
-        } else {
-            ev.write(DispatchEvent {
-                teleporter: entity,
-                target,
-            });
-        }
-    }
+    deploy_units(selected_q.iter().map(|(e, u)| (e, u.0)), &mut ev);
 }
 
 fn trigger_enter_on_hotkey(
@@ -230,32 +270,97 @@ fn trigger_enter_on_hotkey(
     }
 }
 
-fn trigger_command_fire_on_hotkey(
+/// `D` casts the selection's aimed abilities (command-fire, Dispatch)
+/// at the ground point under the cursor.
+#[allow(clippy::too_many_arguments)]
+fn trigger_aimed_ability_on_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
-    mut ev: MessageWriter<CommandFireEvent>,
+    mut command_fire: MessageWriter<CommandFireEvent>,
+    mut dispatch: MessageWriter<DispatchEvent>,
+    mut commands: Commands,
 ) {
-    if !keys.just_pressed(KeyCode::KeyD) {
+    if !keys.just_pressed(KeyCode::KeyD) || ctrl_held(&keys) {
         return;
     }
-    if ctrl_held(&keys) {
+    if !selected_q.iter().any(|(_, u)| ability_is_aimed(u.0)) {
         return;
     }
-
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
         return;
     };
+    cast_aimed_abilities(
+        selected_q.iter().map(|(e, u)| (e, u.0)),
+        target,
+        alt_held(&keys),
+        &mut command_fire,
+        &mut dispatch,
+        &mut commands,
+    );
+}
 
-    for (entity, unit) in &selected_q {
-        if unit.0.has_command_fire_ability() {
-            ev.write(CommandFireEvent {
-                attacker: entity,
-                target,
-            });
-        }
+/// Escape / right-click disarm the Ability button's click-to-cast mode,
+/// like every other order mode.
+fn cancel_ability_mode(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut modes: ResMut<OrderCursorModes>,
+) {
+    if modes.ability
+        && (keys.just_pressed(KeyCode::Escape) || mouse.just_pressed(MouseButton::Right))
+    {
+        modes.ability = false;
+    }
+}
+
+/// Click handler for [`OrderCursorModes::ability`]: the next left-click
+/// on the ground casts the selection's aimed abilities there — exactly
+/// what `D` would do with the cursor at that point. Shift stays armed.
+#[allow(clippy::too_many_arguments)]
+fn trigger_ability_click(
+    mouse: Res<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: MeshRayCast,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut command_fire: MessageWriter<CommandFireEvent>,
+    mut dispatch: MessageWriter<DispatchEvent>,
+    mut commands: Commands,
+) {
+    if !modes.ability || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+        return;
+    };
+    cast_aimed_abilities(
+        selected_q.iter().map(|(e, u)| (e, u.0)),
+        target,
+        alt_held(&keys),
+        &mut command_fire,
+        &mut dispatch,
+        &mut commands,
+    );
+    pending.markers.push((target, OrderMarker::Attack));
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if !shift {
+        modes.ability = false;
+    }
+}
+
+/// Attack glyph while the Ability button's cast mode is armed.
+fn update_ability_cursor(
+    modes: Res<OrderCursorModes>,
+    mut request: ResMut<crate::interaction::cursor::CursorRequest>,
+) {
+    if modes.ability {
+        request.set(crate::interaction::cursor::CursorKind::Attack, 10);
     }
 }
 
@@ -638,6 +743,7 @@ fn trigger_patrol_click(
             .remove::<AttackGroundOrder>()
             .remove::<AttackTargetOrder>()
             .remove::<GuardTarget>()
+            .remove::<PendingCommandFire>()
             .insert(MoveTarget(target))
             .insert(queue);
     }

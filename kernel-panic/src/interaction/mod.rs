@@ -41,6 +41,7 @@ pub(crate) fn clear_orders<'a>(ec: &'a mut EntityCommands<'a>) -> &'a mut Entity
         .remove::<crate::units::combat::ForcedTarget>()
         .remove::<movement::GuardTarget>()
         .remove::<crate::units::lifecycle::construction::PendingBuild>()
+        .remove::<crate::units::mechanics::command_fire::PendingCommandFire>()
 }
 
 pub struct InteractionPlugin;
