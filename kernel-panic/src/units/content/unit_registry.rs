@@ -154,34 +154,34 @@ impl UnitRegistry {
             .map_or(0.0, |d| d.max_velocity * SPRING_SIM_FPS)
     }
 
-    /// Acceleration in elmos/s². FBI `Acceleration` uses the same
-    /// frame-based convention as `MaxVelocity` (a Bit's 0.9 gains
-    /// 0.9 elmo/frame of speed per frame), which converts to
-    /// `× SPRING_SIM_FPS` elmo/s per second — the Bit ramps 90 elmo/s
-    /// in ≈3.3 s. Missing or zero → reach max speed in ~1 s.
+    /// Acceleration in elmos/s². FBI `Acceleration` is Spring's
+    /// `UnitDef::maxAcc` in elmos/frame² (`UnitDef.cpp:455`, default
+    /// 0.5), which `CGroundMoveType` applies once per sim frame as
+    /// `accRate` (`GroundMoveType.cpp:518`, `IPathController.cpp:33`).
+    /// Per-second² is therefore `× GAME_SPEED²` = ×900: a Bit's 0.9
+    /// gains 810 elmo/s², reaching its 90 elmo/s top speed in ~3.3
+    /// frames — Spring units snap to speed, they don't ramp for seconds.
     pub fn acceleration(&self, kind: UnitKind) -> f32 {
-        let speed = self.speed(kind);
-        self.def(kind).map_or(speed, |d| {
-            if d.acceleration > 0.0 {
-                d.acceleration * SPRING_SIM_FPS
-            } else {
-                speed
-            }
-        })
+        const DEFAULT_MAX_ACC: f32 = 0.5;
+        let acc = self
+            .def(kind)
+            .map(|d| d.acceleration)
+            .filter(|&a| a > 0.0)
+            .unwrap_or(DEFAULT_MAX_ACC);
+        acc * SPRING_SIM_FPS * SPRING_SIM_FPS
     }
 
-    /// Braking deceleration in elmos/s². FBI `BrakeRate`, same
-    /// conversion as [`Self::acceleration`]. Missing or zero → stop
-    /// from max speed in ~0.5 s.
+    /// Braking deceleration in elmos/s². FBI `BrakeRate` is Spring's
+    /// `maxDec` (elmos/frame², defaulting to `maxAcc`, `UnitDef.cpp:459`),
+    /// same ×900 conversion as [`Self::acceleration`]: a Bit's 1.2
+    /// stops it from full speed within `v²/2a` = 3.75 elmos.
     pub fn brake_rate(&self, kind: UnitKind) -> f32 {
-        let fallback = self.speed(kind) * 2.0;
-        self.def(kind).map_or(fallback, |d| {
-            if d.brake_rate > 0.0 {
-                d.brake_rate * SPRING_SIM_FPS
-            } else {
-                fallback
-            }
-        })
+        let dec = self.def(kind).map_or(0.0, |d| d.brake_rate);
+        if dec > 0.0 {
+            dec * SPRING_SIM_FPS * SPRING_SIM_FPS
+        } else {
+            self.acceleration(kind)
+        }
     }
 
     /// Path-heat deposit rate (per second of walking) for this kind,
@@ -625,9 +625,10 @@ mod tests {
         );
     }
 
-    /// FBI `Acceleration=0.9` (bit.fbi) converts frame-based gain to
-    /// 27 elmo/s²; `BrakeRate=1.2` to 36. Units without the fields fall
-    /// back to neutral ramps (1 s to full speed, 0.5 s to stop).
+    /// FBI `Acceleration=0.9` / `BrakeRate=1.2` (bit.fbi) are
+    /// elmos/frame²; at 30 frames/s that is 810 / 1080 elmo/s².
+    /// Missing fields fall back to Spring's defaults (`maxAcc` 0.5,
+    /// `maxDec = maxAcc`).
     #[test]
     fn accel_brake_conversion_matches_fbi_frame_convention() {
         let mut defs = UnitDefs::default();
@@ -643,11 +644,9 @@ mod tests {
         let reg = UnitRegistry::for_test(defs);
 
         assert_eq!(reg.speed(UnitKind::Bit), 90.0);
-        assert!((reg.acceleration(UnitKind::Bit) - 27.0).abs() < 1e-4);
-        assert!((reg.brake_rate(UnitKind::Bit) - 36.0).abs() < 1e-4);
+        assert!((reg.acceleration(UnitKind::Bit) - 810.0).abs() < 1e-2);
+        assert!((reg.brake_rate(UnitKind::Bit) - 1080.0).abs() < 1e-2);
 
-        // Missing fields → neutral fallbacks derived from speed
-        // (60 elmo/s max → 1 s ramp, 0.5 s stop).
         let mut defs = UnitDefs::default();
         defs.units.insert(
             "bit".into(),
@@ -657,8 +656,8 @@ mod tests {
             },
         );
         let reg = UnitRegistry::for_test(defs);
-        assert!((reg.acceleration(UnitKind::Bit) - 60.0).abs() < 1e-4);
-        assert!((reg.brake_rate(UnitKind::Bit) - 120.0).abs() < 1e-4);
+        assert!((reg.acceleration(UnitKind::Bit) - 450.0).abs() < 1e-2);
+        assert!((reg.brake_rate(UnitKind::Bit) - 450.0).abs() < 1e-2);
     }
 
     /// `max_slope_from_degrees` clamps the FBI input to `[0, 60]`

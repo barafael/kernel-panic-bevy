@@ -370,7 +370,10 @@ pub struct MovementQuery<'w, 's> {
             Option<&'static AttackMoveActive>,
             Option<&'static AimTarget>,
             Option<&'static crate::units::assets::animation::UnitAnimator>,
-            Option<&'static mut CurrentSpeed>,
+            (
+                Option<&'static mut CurrentSpeed>,
+                Option<&'static crate::units::lifecycle::construction::PendingBuild>,
+            ),
         ),
         Without<Dying>,
     >,
@@ -452,7 +455,7 @@ pub fn movement_system(
         attack_move_active,
         aim_target,
         animator,
-        mut current_speed,
+        (mut current_speed, pending_build),
     ) in &mut *query
     {
         // Aircraft fly `CHoverAirMoveType` in `air_movement`.
@@ -546,15 +549,22 @@ pub fn movement_system(
             continue;
         };
 
-        if path.current >= path.waypoints.len() {
-            // Path complete — promote the next queued command if any.
-            // The stop-distance clamp got us here at walking pace; zero
-            // out the remaining momentum so the promoted order (or
-            // standstill) starts from rest.
+        // `CMobileCAI::ExecuteMove` (MobileCAI.cpp:423): with more
+        // move-type commands queued, a move finishes as soon as the unit
+        // is inside `cancelDistance` of its goal, so consecutive legs
+        // chain without braking. Build orders must reach their site.
+        let more_moves = queue.as_deref().is_some_and(|q| !q.commands.is_empty());
+        let finish_early = more_moves
+            && pending_build.is_none()
+            && move_target.is_some_and(|t| {
+                t.0.xz().distance_squared(transform.translation.xz())
+                    < cancel_distance_sq(stats.speed, stats.turn_rate)
+            });
+        if path.current >= path.waypoints.len() || finish_early {
+            // Leg complete — promote the next queued command if any.
+            // Momentum carries over (Spring's `StopEngine` keeps
+            // `currentSpeed`; only an empty queue brakes, below).
             commands.entity(entity).remove::<MovePath>();
-            if let Some(cs) = current_speed.as_deref_mut() {
-                cs.0 = 0.0;
-            }
             promote_next_command(
                 &mut commands,
                 entity,
@@ -586,11 +596,7 @@ pub fn movement_system(
             // Completing the *final* waypoint ends the leg at rest
             // (mid-path waypoints stay fly-through — braking for those
             // would make every path choppy stop-and-go).
-            let was_final = path.current == path.waypoints.len() - 1;
             path.current += 1;
-            if was_final && let Some(cs) = current_speed.as_deref_mut() {
-                cs.0 = 0.0;
-            }
             continue;
         }
 
@@ -671,7 +677,10 @@ pub fn movement_system(
         // (`v = √(2·a·d)` is the fastest speed that can still stop in
         // `distance`), and record the result for the next frame.
         let mut target_speed = speed;
-        if path.current == path.waypoints.len() - 1 {
+        // Spring brakes for the goal only when this is the last command
+        // (`UNIT_CMD_QUE_SIZE(owner) <= 1`, GroundMoveType.cpp:1325);
+        // with more queued the unit keeps its speed into the next leg.
+        if !more_moves && path.current == path.waypoints.len() - 1 {
             let stop_speed = (2.0 * stats.brake * distance).sqrt();
             target_speed = target_speed.min(stop_speed);
         }
@@ -749,6 +758,17 @@ pub fn movement_system(
             transform.translation.y = hm.sample(transform.translation.x, transform.translation.z);
         }
     }
+}
+
+/// Squared `CMobileCAI::cancelDistance` (MobileCAI.cpp:1316): the
+/// static turn radius (`AMoveType::CalcStaticTurnRadius`,
+/// MoveType.cpp:125 — `maxSpeed·(65536/turnRate)/2π` in elmos) plus two
+/// squares, squared and clamped to `[1024, 2048]` (32–45 elmos). Inputs
+/// are the port's per-second `speed` (elmos/s) and `turn_rate` (rad/s),
+/// whose ratio is the same per frame.
+pub(crate) fn cancel_distance_sq(speed: f32, turn_rate: f32) -> f32 {
+    let turn_radius = if turn_rate > 0.0 { speed / turn_rate } else { 0.0 };
+    (turn_radius + 16.0).powi(2).clamp(1024.0, 2048.0)
 }
 
 /// An order leg is done: promote the next queued command to the active
@@ -1718,67 +1738,77 @@ mod inertia_tests {
         world.run_system_once(movement_system).unwrap();
     }
 
-    /// A unit under way ramps its longitudinal speed at the FBI
-    /// acceleration instead of teleporting to full speed: frame 1
-    /// covers `accel·dt²`, and after ~4 s of 30 Hz ticks it cruises
-    /// at the full 90 elmo/s.
+    /// A Bit (`Acceleration=0.9` elmo/frame² → 810 elmo/s²) reaches
+    /// its 90 elmo/s top speed in ~3.3 sim frames, as in Spring
+    /// (`IPathController::GetDeltaSpeed` adds `min(Δ, accRate)` per
+    /// frame).
     #[test]
-    fn unit_accelerates_from_standstill() {
-        let (mut world, unit) = moving_unit(90.0, 27.0, 60.0, Vec3::new(2000.0, 0.0, 0.0));
-
-        tick(&mut world);
-        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
-        assert!(
-            (cs - 27.0 * 0.033).abs() < 0.05,
-            "one frame of accel from rest: {cs}"
-        );
-        let x1 = world.get::<Transform>(unit).unwrap().translation.x;
-        assert!(x1 > 0.0 && x1 < 1.0, "first frame crawls: x={x1}");
-
-        for _ in 0..140 {
+    fn bit_reaches_top_speed_in_four_frames() {
+        let (mut world, unit) = moving_unit(90.0, 810.0, 1080.0, Vec3::new(2000.0, 0.0, 0.0));
+        let mut speeds = Vec::new();
+        for _ in 0..4 {
             tick(&mut world);
+            speeds.push(world.get::<CurrentSpeed>(unit).unwrap().0);
         }
-        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
         assert!(
-            (cs - 90.0).abs() < 1.0,
-            "after 4.6 s the unit cruises at max: {cs}"
+            (speeds[0] - 810.0 * 0.033).abs() < 0.5,
+            "one frame of accel from rest: {speeds:?}"
         );
+        assert!(speeds[2] < 90.0, "not yet at speed after 3 frames: {speeds:?}");
+        assert_eq!(speeds[3], 90.0, "top speed on frame 4: {speeds:?}");
     }
 
-    /// Approaching the final waypoint, the stop-distance clamp
-    /// (`v = √(2·a·d)`) brakes a fast unit instead of letting it
-    /// overshoot: a 90 elmo/s unit 24 elmos out may plan at most
-    /// √(2·60·24) ≈ 53.7 elmo/s this frame, the speed decays toward
-    /// that limit, and the unit never lands past the waypoint.
+    /// Approaching the final goal with nothing queued, the unit brakes
+    /// and never overshoots.
     #[test]
     fn unit_brakes_for_the_final_waypoint() {
-        let (mut world, unit) = moving_unit(90.0, 27.0, 60.0, Vec3::new(24.0, 0.0, 0.0));
+        let (mut world, unit) = moving_unit(90.0, 810.0, 1080.0, Vec3::new(24.0, 0.0, 0.0));
         world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
-
-        tick(&mut world);
-
-        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
-        assert!(
-            cs < 90.0,
-            "speed must brake toward the stop-distance limit: {cs}"
-        );
-        let x = world.get::<Transform>(unit).unwrap().translation.x;
-        assert!(x <= 24.0 + 1e-3, "must not overshoot the waypoint: x={x}");
-
-        // Keep ticking until arrival: the unit lands on the waypoint
-        // at rest instead of skidding past it.
         for _ in 0..40 {
             tick(&mut world);
+            let x = world.get::<Transform>(unit).unwrap().translation.x;
+            assert!(x <= 24.0 + 1e-3, "must not overshoot the waypoint: x={x}");
         }
         let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
         assert_eq!(cs, 0.0, "arrival ends the leg at rest: {cs}");
+        assert!(world.get::<MoveTarget>(unit).is_none());
+    }
+
+    /// With another move queued, Spring does not brake for the goal
+    /// (`startBraking` needs `UNIT_CMD_QUE_SIZE <= 1`) and MobileCAI
+    /// finishes the leg inside `cancelDistance`, so the unit carries its
+    /// full speed into the next leg.
+    #[test]
+    fn queued_legs_chain_without_braking() {
+        let goal = Vec3::new(200.0, 0.0, 0.0);
+        let (mut world, unit) = moving_unit(90.0, 810.0, 1080.0, goal);
+        world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
+        world.entity_mut(unit).insert(CommandQueue {
+            commands: vec![QueuedCommand::Move(Vec3::new(400.0, 0.0, 0.0))],
+        });
+        let mut promoted_at = None;
+        for i in 0..80 {
+            tick(&mut world);
+            let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
+            assert!(cs > 89.0, "tick {i}: speed dropped to {cs} before the leg ended");
+            if world.get::<MoveTarget>(unit).is_some_and(|t| t.0.x == 400.0) {
+                promoted_at = Some(world.get::<Transform>(unit).unwrap().translation.x);
+                break;
+            }
+        }
+        let x = promoted_at.expect("next leg must be promoted");
+        let left = goal.x - x;
+        assert!(
+            (0.0..=46.0).contains(&left),
+            "leg finishes inside cancelDistance (32–45 elmos): {left} left"
+        );
     }
 
     /// An idle unit (no order) coasts down to rest at the brake rate,
     /// so a fresh order starts from a stopped state.
     #[test]
     fn idle_unit_coasts_to_rest() {
-        let (mut world, unit) = moving_unit(90.0, 27.0, 60.0, Vec3::new(2000.0, 0.0, 0.0));
+        let (mut world, unit) = moving_unit(90.0, 810.0, 60.0, Vec3::new(2000.0, 0.0, 0.0));
         world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
         world
             .entity_mut(unit)
