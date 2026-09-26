@@ -14,7 +14,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
-use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
+use crate::units::components::{TeamId, UnitType, is_friendly};
 use crate::units::content::unit_registry::UnitRegistry;
 
 pub struct CursorPlugin;
@@ -157,8 +157,8 @@ impl CursorRequest {
 #[allow(clippy::type_complexity)]
 fn resolve_context_cursor(
     mut request: ResMut<CursorRequest>,
-    selected: Query<(&UnitType, &TeamId, &Faction), With<Selected>>,
-    hovered: Query<(&TeamId, &Faction), (With<Hovered>, With<UnitType>)>,
+    selected: Query<(&UnitType, &TeamId), With<Selected>>,
+    hovered: Query<&TeamId, (With<Hovered>, With<UnitType>)>,
     unit_registry: Res<UnitRegistry>,
 ) {
     if selected.is_empty() {
@@ -169,12 +169,11 @@ fn resolve_context_cursor(
     let mut has_mover = false;
     let mut has_weapon = false;
     let mut has_constructor = false;
-    // Track the first selected unit's team/faction so we can ask
-    // `is_friendly` about the hovered unit. With AI removed, the "player
-    // owns one team" assumption is gone — cursor hint is resolved by
-    // comparing the selection against what's under the cursor.
-    let mut selection_team_faction: Option<(u8, Faction)> = None;
-    for (ut, team, faction) in &selected {
+    // Track the first selected unit's team so we can ask `is_friendly`
+    // about the hovered unit — the cursor hint is resolved by comparing
+    // the selection against what's under the cursor.
+    let mut selection_team: Option<u8> = None;
+    for (ut, team) in &selected {
         if unit_registry.speed(ut.0) > 0.0 {
             has_mover = true;
         }
@@ -184,13 +183,12 @@ fn resolve_context_cursor(
         if ut.0.is_constructor() {
             has_constructor = true;
         }
-        selection_team_faction.get_or_insert((team.0, *faction));
+        selection_team.get_or_insert(team.0);
     }
 
     match hovered.iter().next() {
-        Some((hover_team, _)) => {
-            let is_enemy = selection_team_faction
-                .is_some_and(|(t, _)| !is_friendly(t, hover_team.0));
+        Some(hover_team) => {
+            let is_enemy = selection_team.is_some_and(|t| !is_friendly(t, hover_team.0));
             if is_enemy {
                 if has_weapon {
                     request.set(CursorKind::Attack, 0);

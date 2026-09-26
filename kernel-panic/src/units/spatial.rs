@@ -31,6 +31,15 @@ use super::mechanics::cloak::{Cloaked, DetectedBy, hidden_from};
 /// and the largest (~700 elmo homebase guns).
 pub const SPATIAL_CELL: f32 = 256.0;
 
+/// Horizontal (XZ) distance² — heights differ across terrain but
+/// upstream ranges are XZ cylinders (`GetUnitsInCylinder`, weapon range
+/// checks). Shared by ability range gates and the AI's range reasoning.
+pub fn flat_dist_sq(a: Vec3, b: Vec3) -> f32 {
+    let dx = a.x - b.x;
+    let dz = a.z - b.z;
+    dx * dx + dz * dz
+}
+
 /// Flat snapshot carried in each cell. Shape chosen so the common
 /// "is-enemy + is-alive + is-in-range + is-flying" check in target picking
 /// runs without any follow-up ECS lookup.

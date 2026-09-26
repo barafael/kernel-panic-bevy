@@ -27,7 +27,7 @@ use crate::units::combat::Dying;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::WeaponRegistry;
-use crate::units::spatial::SpatialIndex;
+use crate::units::spatial::{SpatialIndex, flat_dist_sq};
 
 /// Filename of the SIGTERM bomber's S3O model (`signal.fbi:ObjectName`).
 const SIGNAL_MODEL: &str = "signal.s3o";
@@ -230,7 +230,7 @@ pub struct MineSpawn {
     pub team: u8,
 }
 
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Clone)]
 pub struct MineSpawnQueue(Vec<MineSpawn>);
 
 impl MineSpawnQueue {
@@ -317,12 +317,6 @@ pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
     )
 }
 
-/// Horizontal (XZ) distance — weapon ranges are checked on the ground
-/// plane so a caster on a ridge isn't penalised for the height gap.
-fn flat_distance(a: Vec3, b: Vec3) -> f32 {
-    Vec2::new(a.x - b.x, a.z - b.z).length()
-}
-
 /// A mobile caster walking toward an out-of-range ability target.
 /// [`advance_pending_casts`] fires the ability once the target is
 /// within [`cast_range`], mirroring how Spring's command-fire attack
@@ -384,7 +378,9 @@ enum CastReach {
 
 fn cast_reach(range: Option<f32>, caster: Vec3, target: Vec3, mobile: bool) -> CastReach {
     match range {
-        Some(range) if flat_distance(caster, target) > range => {
+        // Ranges are checked on the ground plane so a caster on a ridge
+        // isn't penalised for the height gap.
+        Some(range) if flat_dist_sq(caster, target) > range * range => {
             if mobile {
                 CastReach::Approach
             } else {
@@ -425,9 +421,19 @@ pub fn advance_pending_casts(
             CastReach::Fire => {
                 // In range: stop the approach walk where it stands and
                 // cast — Spring halts an attacking unit once it can fire.
-                commands
-                    .entity(entity)
-                    .remove::<(PendingCommandFire, MoveTarget, MovePath)>();
+                // Why an empty path instead of removing the order: the
+                // movement system's path-complete branch is the one place
+                // that promotes shift-queued follow-ups (or clears the
+                // order when none are queued); bypassing it would strand
+                // the queue behind a vanished MoveTarget.
+                let mut caster = commands.entity(entity);
+                caster.remove::<PendingCommandFire>();
+                if moving {
+                    caster.insert(MovePath {
+                        waypoints: Vec::new(),
+                        current: 0,
+                    });
+                }
                 events.write(CommandFireEvent {
                     attacker: entity,
                     target: pending.target,
@@ -465,8 +471,9 @@ pub fn process_command_fire(
     >,
     unit_registry: Res<UnitRegistry>,
     weapons: Res<WeaponRegistry>,
-    protect_targets: Query<(Entity, &TeamId, &Faction, &GlobalTransform), With<Health>>,
+    protect_targets: Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
     mut health_q: Query<&mut Health>,
+    live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
     mut mine_spawns: ResMut<MineSpawnQueue>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -525,6 +532,12 @@ pub fn process_command_fire(
         }
 
         if unit.0 == UnitKind::Byte {
+            // Why: `spawn_queued_mines` drops every mine past the Logic
+            // Bomb cap, so a cast with no room left would burn 6000 HP
+            // and the reload for nothing — refuse it up front instead.
+            if logic_bombs_at_cap(team.0, &live_units, &mine_spawns) {
+                continue;
+            }
             let Ok(mut health) = health_q.get_mut(event.attacker) else {
                 continue;
             };
@@ -615,6 +628,22 @@ pub fn process_command_fire(
     }
 }
 
+/// Whether `team` has no room left under the Logic Bomb `UnitRestricted`
+/// cap, counting live mines plus mines already queued this frame.
+fn logic_bombs_at_cap(
+    team: u8,
+    live_units: &Query<(&UnitType, &TeamId), Without<Dying>>,
+    mine_spawns: &MineSpawnQueue,
+) -> bool {
+    let Some(limit) = UnitKind::LogicBomb.team_limit() else {
+        return false;
+    };
+    let live =
+        crate::units::lifecycle::bookkeeping::team_kind_count(UnitKind::LogicBomb, team, live_units);
+    let queued = mine_spawns.0.iter().filter(|m| m.team == team).count() as u32;
+    live + queued >= limit
+}
+
 /// Queue a fan of Logic Bombs at `target` and deduct the HP cost from
 /// the casting Byte. Returns `false` (so the caller skips the cooldown
 /// stamp) when the cast is refused — not enough HP, or caster and
@@ -661,11 +690,11 @@ fn fire_minelauncher(
 fn apply_firewall(
     center: Vec3,
     caster_team: u8,
-    targets: &Query<(Entity, &TeamId, &Faction, &GlobalTransform), With<Health>>,
+    targets: &Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
     commands: &mut Commands,
 ) {
     let radius_sq = FIREWALL_RADIUS * FIREWALL_RADIUS;
-    for (entity, team, _, gtf) in targets.iter() {
+    for (entity, team, gtf) in targets.iter() {
         if !crate::units::components::is_friendly(team.0, caster_team) {
             continue;
         }
@@ -1104,8 +1133,13 @@ mod tests {
         app.world_mut().run_system_once(process_command_fire).unwrap();
         assert_eq!(zone_count(&mut app), 1);
         assert!(app.world().get::<PendingCommandFire>(pointer).is_none());
+        // The approach leg is ended (empty path), leaving the movement
+        // system's path-complete branch to halt the caster and promote
+        // any shift-queued follow-up order.
         assert!(
-            app.world().get::<MoveTarget>(pointer).is_none(),
+            app.world()
+                .get::<MovePath>(pointer)
+                .is_some_and(|p| p.current >= p.waypoints.len()),
             "caster stops once it can cast"
         );
     }
@@ -1224,6 +1258,37 @@ mod tests {
         );
         assert!(!fired);
         assert_eq!(queue.len(), 0);
+    }
+
+    /// Mines already on the map plus mines queued this frame count
+    /// against the team's Logic Bomb cap; other teams don't.
+    #[test]
+    fn logic_bomb_cap_counts_live_and_queued_mines() {
+        use bevy::ecs::system::RunSystemOnce;
+        let limit = UnitKind::LogicBomb.team_limit().unwrap();
+        let mut app = App::new();
+        for _ in 0..limit - 1 {
+            app.world_mut()
+                .spawn((UnitType(UnitKind::LogicBomb), TeamId(0)));
+        }
+        let mut queue = MineSpawnQueue::default();
+        let check = move |queue: MineSpawnQueue| {
+            move |live: Query<(&UnitType, &TeamId), Without<Dying>>| {
+                (logic_bombs_at_cap(0, &live, &queue), logic_bombs_at_cap(1, &live, &queue))
+            }
+        };
+        let (own, other) = app.world_mut().run_system_once(check(queue.clone())).unwrap();
+        assert!(!own, "one slot left");
+        assert!(!other);
+
+        queue.push(MineSpawn {
+            position: Vec3::ZERO,
+            faction: Faction::System,
+            team: 0,
+        });
+        let (own, other) = app.world_mut().run_system_once(check(queue)).unwrap();
+        assert!(own, "the queued mine fills the last slot");
+        assert!(!other);
     }
 
     /// SIGTERM values line up with upstream's `SigTerm` weapon +

@@ -71,7 +71,9 @@ fn outcome(census: &HashMap<u8, TeamCensus>, local: u8) -> Option<GameState> {
 /// [`outcome`]). Maps with no factories at all (test / sandbox variants,
 /// the menu demo) never kill or flip state; neither does showcase mode.
 /// Once the player dismisses the game-over panel ("Keep on playing") the
-/// state stops re-triggering, but eliminations continue.
+/// state stops re-triggering, but eliminations continue. Teams without
+/// a seat in [`GameSetup::players`] (map-event neutrals) are never
+/// counted or killed.
 #[allow(clippy::too_many_arguments)]
 pub fn check_game_over(
     time: Res<Time>,
@@ -92,8 +94,15 @@ pub fn check_game_over(
     }
     *since_check = 0.0;
 
+    // Only seated teams can be eliminated — upstream exempts the Gaia
+    // team the same way. Neutral parties such as the map-event eruption
+    // spawns (`map_events::ERUPTION_TEAM`) own no factory by design.
+    let seated = |team: u8| setup.players.iter().any(|p| p.team == team);
     let mut census: HashMap<u8, TeamCensus> = HashMap::new();
     for (team, unit, _) in &units {
+        if !seated(team.0) {
+            continue;
+        }
         let entry = census.entry(team.0).or_default();
         entry.units += 1;
         if unit.0.is_factory() {
@@ -244,6 +253,19 @@ mod tests {
         spawn(&mut app, UnitKind::Bug, 1);
         run_check(&mut app);
         assert_eq!(app.world().get::<Health>(bit).unwrap().current, 100.0);
+        assert_eq!(pending_state(&app), None);
+    }
+
+    /// Units on a team without a seat (map-event eruption neutrals)
+    /// own no factory by design and must survive the census.
+    #[test]
+    fn unseated_neutral_team_is_not_eliminated() {
+        let mut app = world();
+        spawn(&mut app, UnitKind::Kernel, 0);
+        spawn(&mut app, UnitKind::Hole, 1);
+        let wall = spawn(&mut app, UnitKind::BadBlock, 99);
+        run_check(&mut app);
+        assert_eq!(app.world().get::<Health>(wall).unwrap().current, 100.0);
         assert_eq!(pending_state(&app), None);
     }
 

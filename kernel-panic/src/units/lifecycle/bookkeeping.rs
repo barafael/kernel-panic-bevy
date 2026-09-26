@@ -38,6 +38,20 @@ pub fn team_kind_counts(
     counts
 }
 
+/// Live units of `kind` on `team` — the single-team form of
+/// [`team_kind_counts`], shared by the build menu's cap indicator and
+/// the Mine Launcher's cap check so both agree with the enforcement.
+pub fn team_kind_count(
+    kind: UnitKind,
+    team: u8,
+    units: &Query<(&UnitType, &TeamId), Without<Dying>>,
+) -> u32 {
+    units
+        .iter()
+        .filter(|(unit, t)| unit.0 == kind && t.0 == team)
+        .count() as u32
+}
+
 /// O(1) count of live units (everything carrying a `UnitType`), used by
 /// the factory spawn cap. Replaces an `iter().count()` over the whole
 /// unit query on every spawn-threshold frame — a scan that only gets

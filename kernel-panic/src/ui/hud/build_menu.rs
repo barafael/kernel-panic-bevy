@@ -329,11 +329,7 @@ fn team_at_cap(kind: UnitKind, team: Option<u8>, team_units: &TeamUnitsQuery) ->
     let (Some(limit), Some(team)) = (kind.team_limit(), team) else {
         return false;
     };
-    let count = team_units
-        .iter()
-        .filter(|(u, t)| u.0 == kind && t.0 == team)
-        .count();
-    count as u32 >= limit
+    crate::units::lifecycle::bookkeeping::team_kind_count(kind, team, team_units) >= limit
 }
 
 /// Snapshot of the buildable roster the menu would render this frame —

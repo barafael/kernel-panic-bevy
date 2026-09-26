@@ -67,8 +67,9 @@ use expansion::{choose_building, pick_datavent};
 use specials::{
     COUNTER_DISPATCH_RANGE, CROWD_RADIUS, NX_CROWD_MIN, NX_RANGE, OBELISK_RANGE, SIGTERM_CROWD_MIN,
     SIGTERM_INTERVAL, UNDEPLOY_MAX, bug_should_deploy, crowded_cluster, exploit_should_undeploy,
-    flat_dist_sq, should_counter_dispatch,
+    should_counter_dispatch,
 };
+use crate::units::spatial::flat_dist_sq;
 
 /// Seconds between AI decisions. Upstream's slow update runs every 128
 /// frames (~4 s); a faster cadence keeps factories from idling.

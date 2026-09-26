@@ -14,7 +14,7 @@ use crate::interaction::movement::{
 };
 use crate::rendering::camera::RtsCamera;
 use crate::units::combat::AttackTargetOrder;
-use crate::units::components::{Faction, TeamId, UnitStats, UnitType, is_friendly};
+use crate::units::components::{TeamId, UnitStats, UnitType, is_friendly};
 use crate::units::content::unit_registry::UnitRegistry;
 
 pub(super) struct RightClickPlugin;
@@ -117,7 +117,7 @@ struct RightClickLookups<'w, 's> {
     camera_q: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<RtsCamera>>,
     unit_root_q: Query<'w, 's, Entity, With<UnitType>>,
     parent_q: Query<'w, 's, &'static ChildOf>,
-    unit_info_q: Query<'w, 's, (&'static TeamId, &'static Faction)>,
+    unit_info_q: Query<'w, 's, &'static TeamId>,
     target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
     move_target_q: Query<'w, 's, (), With<MoveTarget>>,
@@ -209,7 +209,7 @@ fn handle_right_click(
                             .get(target)
                             .ok()
                             .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
-                            .is_some_and(|((t_team, _), (m_team, _))| {
+                            .is_some_and(|(t_team, m_team)| {
                                 !is_friendly(m_team.0, t_team.0)
                             })
                     },

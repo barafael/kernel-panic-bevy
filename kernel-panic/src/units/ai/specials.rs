@@ -3,6 +3,8 @@
 
 use bevy::prelude::Vec3;
 
+use crate::units::spatial::flat_dist_sq;
+
 /// Cluster radius for "crowded" (upstream `GetUnitsInCylinder(..,300)`).
 pub const CROWD_RADIUS: f32 = 300.0;
 /// Enemies in [`CROWD_RADIUS`] before a Terminal spends SIGTERM on it
@@ -87,14 +89,6 @@ pub fn bug_should_deploy(nearest_enemy: Option<f32>) -> bool {
 /// is already inside 500.
 pub fn exploit_should_undeploy(nearest_enemy: Option<f32>) -> bool {
     nearest_enemy.is_none_or(|d| d > UNDEPLOY_MAX || d < UNDEPLOY_MIN)
-}
-
-/// Horizontal distance² — heights differ across terrain but ranges are
-/// XZ cylinders upstream (`GetUnitsInCylinder`).
-pub fn flat_dist_sq(a: Vec3, b: Vec3) -> f32 {
-    let dx = a.x - b.x;
-    let dz = a.z - b.z;
-    dx * dx + dz * dz
 }
 
 #[cfg(test)]

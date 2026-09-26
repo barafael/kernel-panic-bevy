@@ -29,7 +29,7 @@ use crate::rendering::camera::RtsCamera;
 use crate::units::combat::{
     AttackGroundOrder, AttackTargetOrder, ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown,
 };
-use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
+use crate::units::components::{TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::mechanics::command_fire::{CommandFireEvent, PendingCommandFire};
@@ -279,6 +279,7 @@ fn trigger_aimed_ability_on_hotkey(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
+    mut modes: ResMut<OrderCursorModes>,
     mut command_fire: MessageWriter<CommandFireEvent>,
     mut dispatch: MessageWriter<DispatchEvent>,
     mut commands: Commands,
@@ -292,6 +293,10 @@ fn trigger_aimed_ability_on_hotkey(
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
         return;
     };
+    // Why: `D` consumes a click-to-cast the palette button armed — left
+    // armed, the next unrelated click would cast again (a second
+    // 12-packet Dispatch drains the buffer twice).
+    modes.ability = false;
     cast_aimed_abilities(
         selected_q.iter().map(|(e, u)| (e, u.0)),
         target,
@@ -632,7 +637,7 @@ fn trigger_move_click(
 fn trigger_set_target_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType, &TeamId, &Faction), With<Selected>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
     unit_root_q: Query<Entity, With<UnitType>>,
     parent_q: Query<&ChildOf>,
     unit_info_q: Query<&TeamId>,
@@ -656,14 +661,14 @@ fn trigger_set_target_click(
     let Ok(t_team) = unit_info_q.get(target) else {
         return;
     };
-    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team, _)| team.0)
+    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0)
     else {
         return;
     };
     if is_friendly(sel_team, t_team.0) {
         return;
     }
-    for (entity, unit, _, _) in &selected_q {
+    for (entity, unit, _) in &selected_q {
         if unit_registry.weapon(unit.0).is_empty() {
             continue;
         }
@@ -846,7 +851,7 @@ fn update_set_target_cursor(
 fn trigger_guard_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType, &TeamId, &Faction), With<Selected>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
     unit_root_q: Query<Entity, With<UnitType>>,
     parent_q: Query<&ChildOf>,
     unit_info_q: Query<&TeamId>,
@@ -869,7 +874,7 @@ fn trigger_guard_click(
         return;
     };
     // Guarding makes sense only on a friendly unit.
-    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team, _)| team.0)
+    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0)
     else {
         return;
     };
@@ -877,7 +882,7 @@ fn trigger_guard_click(
         return;
     }
 
-    for (entity, unit, _, _) in &selected_q {
+    for (entity, unit, _) in &selected_q {
         if unit_registry.speed(unit.0) <= 0.0 {
             continue;
         }
