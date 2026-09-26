@@ -48,10 +48,10 @@ jobs:
       # time, and index.html's copy-dir ships the .kpmap files.
       - name: Bake maps (.kpmap)
         run: |
-          cargo build --release -p spring-map --bin bake_map
+          cargo build --release -p spring-map --bin bake-map
           for f in kernel-panic/assets/maps/*.sd7 kernel-panic/assets/maps/*.sdz; do
             [ -e "$f" ] || continue
-            ./target/release/bake_map "$f"
+            ./target/release/bake-map "$f"
           done
 
       - name: Build

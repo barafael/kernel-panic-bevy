@@ -484,7 +484,7 @@ unit acknowledgements, ambient, UI feedback.
 
 ### 8.1 Pre-Bake Map Format — ✅ Done
 
-`.kpmap` is the runtime form: `cargo run -p spring-map --bin bake_map -- INPUT.sd7`
+`.kpmap` is the runtime form: `cargo run -p spring-map --bin bake-map -- INPUT.sd7`
 produces a postcard-encoded blob (heightmap + metalmap + features + assembled
 ground texture as raw RGBA + .smd / mapinfo.lua resolved to `MapInfo`) that
 loads through `spring_map::baked::read_baked_map` with no archive / mlua /

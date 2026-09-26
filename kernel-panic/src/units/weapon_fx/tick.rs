@@ -1437,18 +1437,6 @@ mod tests {
             .id()
     }
 
-    fn run_ticks(app: &mut App, dt_ms: u64, count: usize) -> std::collections::HashMap<u32, ()> {
-        // Tracks the highest Y reached by any still-live projectile per
-        // frame; despawned (arrived) projectiles drop out of the query.
-        for _ in 0..count {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_millis(dt_ms));
-            app.world_mut().run_system_once(tick_weapon_fx).unwrap();
-        }
-        std::collections::HashMap::new()
-    }
-
     #[test]
     fn geometric_missile_has_up_biased_launch_then_homes() {
         // Pointer's Geometric: trajectoryHeight=1 → launch along

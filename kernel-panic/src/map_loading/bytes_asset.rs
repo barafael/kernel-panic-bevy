@@ -38,9 +38,3 @@ impl AssetLoader for BytesLoader {
         &["kpmap"]
     }
 }
-
-/// Asset path of a cataloged map, relative to the asset root
-/// (`kernel-panic/assets`, shipped as `assets/` by the web build).
-pub fn map_asset_path(stem: &str) -> String {
-    format!("maps/{stem}.kpmap")
-}

@@ -131,6 +131,18 @@ impl MoveClassTable {
             .copied()
             .unwrap_or(DEFAULT_HEAT_PARAMS)
     }
+
+    /// Per-second retention of the single shared heat grid: the most
+    /// persistent class (highest `HeatMod`-derived retention), so no
+    /// class's trail fades faster than upstream lets it. LIGHT's 0.10
+    /// in KP's MOVEINFO; the LIGHT default when the table is empty.
+    pub fn shared_heat_retention(&self) -> f32 {
+        self.classes
+            .values()
+            .map(|p| p.heat_retention)
+            .fold(None, |max: Option<f32>, r| Some(max.map_or(r, |m| m.max(r))))
+            .unwrap_or(DEFAULT_HEAT_PARAMS.heat_retention)
+    }
 }
 
 #[cfg(test)]

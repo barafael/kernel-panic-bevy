@@ -1300,8 +1300,8 @@ fn spawn_lightning_arc(
         points.push(
             start.lerp(end, t)
                 + Vec3::Y * (ARC_ARCH_HEIGHT * arch)
-                + perp1 * (next_signed(rng) * ARC_JITTER * taper)
-                + perp2 * (next_signed(rng) * ARC_JITTER * taper),
+                + perp1 * (next_signed(rng) * jitter * taper)
+                + perp2 * (next_signed(rng) * jitter * taper),
         );
     }
 
@@ -1407,7 +1407,7 @@ mod tests {
             .run_system_once(spawn_weapon_visuals)
             .unwrap();
 
-        let mut world = app.world_mut();
+        let world = app.world_mut();
         let arcs = world
             .query_filtered::<&LightningArc, ()>()
             .iter(&world)
@@ -1457,7 +1457,7 @@ mod tests {
             .run_system_once(spawn_weapon_visuals)
             .unwrap();
 
-        let mut world = app.world_mut();
+        let world = app.world_mut();
         let flashes = world
             .query_filtered::<&ImpactBurst, ()>()
             .iter(&world)
@@ -1483,7 +1483,7 @@ mod tests {
     #[test]
     fn gateway_build_ray_spawns_white_build_arc() {
         let mut app = fx_app();
-        let mut weapons = WeaponRegistry::default();
+        let weapons = WeaponRegistry::default();
         let build_laser = weapons.intern("BuildLaser").unwrap();
         app.insert_resource(weapons);
 
@@ -1503,7 +1503,7 @@ mod tests {
             .run_system_once(spawn_weapon_visuals)
             .unwrap();
 
-        let mut world = app.world_mut();
+        let world = app.world_mut();
         let arcs: Vec<&LightningArc> = world
             .query_filtered::<&LightningArc, ()>()
             .iter(&world)
@@ -1548,7 +1548,7 @@ mod tests {
             .run_system_once(spawn_weapon_visuals)
             .unwrap();
 
-        let mut world = app.world_mut();
+        let world = app.world_mut();
         let arcs = world
             .query_filtered::<&LightningArc, ()>()
             .iter(&world)

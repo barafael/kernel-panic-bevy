@@ -79,7 +79,6 @@ fn main() {
         if std::env::var("PIECES").is_ok() {
             dump_pieces(&model.root_piece, [0.0; 3], 0);
         }
-        let lift = -mins[1];
         let hlift = -model.mins[1];
         println!(
             "{name:<24} walked mins.y={:>7.1}  header mins.y={:>7.1}  game_lift=-header.y={hlift:>6.1}",

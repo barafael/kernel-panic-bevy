@@ -307,9 +307,6 @@ impl NavGridSet {
 #[derive(Resource)]
 pub struct PathHeat(pub spring_pathfinding::HeatMap);
 
-/// Per-second heat retention of the shared grid (upstream LIGHT
-/// `HeatMod=0.10`).
-const HEAT_RETENTION_PER_SECOND: f32 = 0.1;
 /// Full-grid decay runs in steps of this many seconds (a plain
 /// multiply at `retention^period` — same curve, memcpy cost).
 const HEAT_DECAY_PERIOD: f32 = 0.5;
@@ -343,7 +340,7 @@ pub fn update_path_heat(
     if *decay_timer >= HEAT_DECAY_PERIOD {
         *decay_timer = 0.0;
         heat.0
-            .decay(HEAT_RETENTION_PER_SECOND.powf(HEAT_DECAY_PERIOD));
+            .decay(registry.shared_heat_retention().powf(HEAT_DECAY_PERIOD));
     }
 }
 
@@ -978,7 +975,10 @@ mod heat_tests {
         world.run_system_once(update_path_heat).unwrap();
 
         let decayed = world.resource::<PathHeat>().0.get([32.0, 8.0]);
-        let expected_factor = HEAT_RETENTION_PER_SECOND.powf(HEAT_DECAY_PERIOD);
+        let expected_factor = world
+            .resource::<UnitRegistry>()
+            .shared_heat_retention()
+            .powf(HEAT_DECAY_PERIOD);
         assert!(
             (decayed - deposited * expected_factor).abs() < deposited * 0.05,
             "decay step must multiply by retention^{HEAT_DECAY_PERIOD}: {deposited} → {decayed}"

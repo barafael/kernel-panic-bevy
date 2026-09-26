@@ -1,7 +1,7 @@
 //! Bake a Spring `.sd7` / `.sdz` to the `.kpmap` runtime format.
 //!
 //! ```text
-//! cargo run -p spring-map --bin bake_map -- INPUT [OUTPUT]
+//! cargo run -p spring-map --bin bake-map -- INPUT [OUTPUT]
 //! ```
 //!
 //! If `OUTPUT` is omitted, writes alongside the input with a `.kpmap`
@@ -20,7 +20,7 @@ use spring_map::load_map;
 
 #[derive(Debug, thiserror::Error)]
 enum BakeError {
-    #[error("usage: bake_map INPUT.sd7 [OUTPUT.kpmap]")]
+    #[error("usage: bake-map INPUT.sd7 [OUTPUT.kpmap]")]
     Usage,
     #[error("input not found: {0}")]
     InputMissing(PathBuf),
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("bake_map: {error}");
+            eprintln!("bake-map: {error}");
             ExitCode::FAILURE
         }
     }

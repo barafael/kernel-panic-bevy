@@ -11,6 +11,7 @@
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -134,10 +135,13 @@ struct SelectedMap(PathBuf);
 struct PendingWebMapLoad(Option<Handle<BytesAsset>>);
 
 /// Web: map paths already handed to the asset server (in flight or
-/// loaded), so the prefetcher doesn't re-request every frame.
+/// loaded), so the prefetcher doesn't re-request every frame. Holds
+/// the strong handles: Bevy frees an asset once its last strong handle
+/// drops, which would throw the prefetched bytes away before the match
+/// asks for them.
 #[cfg(target_arch = "wasm32")]
 #[derive(Resource, Default)]
-struct PrefetchedWebMaps(std::collections::HashSet<String>);
+struct PrefetchedWebMaps(HashMap<String, Handle<BytesAsset>>);
 
 /// Resolve the setup's map name against the catalog the same way
 /// [`prepare_game_entry`] does: exact stem match, else the first entry.
@@ -168,11 +172,11 @@ fn prefetch_selected_map(
         return;
     };
     let key = path.to_string_lossy().into_owned();
-    if prefetched.0.contains(&key) {
+    if prefetched.0.contains_key(&key) {
         return;
     }
-    prefetched.0.insert(key.clone());
-    server.load::<BytesAsset>(key);
+    let handle = server.load::<BytesAsset>(key.clone());
+    prefetched.0.insert(key, handle);
     info!("Prefetching {}", setup.map);
 }
 
@@ -449,6 +453,7 @@ fn is_baked_ext(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, thiserror::Error)]
 enum LoadMapError {
     #[error(transparent)]

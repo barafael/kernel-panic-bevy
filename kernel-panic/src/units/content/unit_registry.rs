@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
-use super::moveinfo::{DEFAULT_HEAT_PARAMS, MoveClassTable};
+use super::moveinfo::MoveClassTable;
 use super::tdf_loader;
 
 /// Spring engine simulation runs at 30 frames per second.
@@ -227,8 +227,15 @@ impl UnitRegistry {
 
     /// Fraction of this kind's heat that survives one second — see
     /// [`Self::heat_produced`].
+    #[cfg(test)]
     pub fn heat_retention(&self, kind: UnitKind) -> f32 {
         self.heat_params(kind).heat_retention
+    }
+
+    /// Per-second retention of the shared path-heat grid — see
+    /// [`MoveClassTable::shared_heat_retention`].
+    pub fn shared_heat_retention(&self) -> f32 {
+        self.move_classes.shared_heat_retention()
     }
 
     fn heat_params(&self, kind: UnitKind) -> super::moveinfo::MoveClassParams {

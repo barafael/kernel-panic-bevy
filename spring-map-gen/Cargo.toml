@@ -8,7 +8,7 @@ description = "Programmatic generator for Spring RTS engine map files (.smf/.smt
 byteorder = { workspace = true }
 thiserror = { workspace = true }
 zip = { workspace = true }
-spring-map = { path = "../spring-map" }
+spring-map = { path = "../spring-map", optional = true }
 
 # Viewer binary dependencies (optional, only for the map-viewer binary).
 bevy = { workspace = true, optional = true }
@@ -16,8 +16,12 @@ spring-tdf = { path = "../spring-tdf", optional = true }
 spring-unit-mesh = { path = "../spring-unit-mesh", optional = true }
 clap = { version = "4.6.1", features = ["derive"] }
 
+[dev-dependencies]
+# The round-trip tests load generated maps through the real parser.
+spring-map = { path = "../spring-map" }
+
 [features]
-viewer = ["dep:bevy", "dep:spring-tdf", "dep:spring-unit-mesh"]
+viewer = ["dep:bevy", "dep:spring-map", "dep:spring-tdf", "dep:spring-unit-mesh"]
 
 [[bin]]
 name = "map-viewer"

@@ -1,6 +1,6 @@
 //! Pre-baked map format.
 //!
-//! A `.kpmap` file is the result of running `bake_map` on a Spring
+//! A `.kpmap` file is the result of running `bake-map` on a Spring
 //! `.sd7` / `.sdz`: the archive is unpacked, Lua heightmap gadgets are
 //! applied, SMT tiles are decoded, and the final terrain + texture +
 //! metadata is serialized into a single deterministic blob. The game
