@@ -170,6 +170,9 @@ pub fn spawn_demo_squads(
 ) {
     const SPAM: usize = 8;
     const RING: f32 = 220.0;
+    /// Height difference from the base that still counts as "the same
+    /// plateau" (Hex Farm's void sits ≥96 elmos below a tower top).
+    const LEVEL_TOLERANCE: f32 = 40.0;
     let (w, d) = heightmap.world_size();
     let centre = Vec3::new(w * 0.5, 0.0, d * 0.5);
     for &(faction, team, base) in bases {
@@ -183,11 +186,24 @@ pub fn spawn_demo_squads(
         let heading = to_centre.z.atan2(to_centre.x);
         let count = SPAM + 3;
         for (i, kind) in squad.enumerate() {
-            // Spread over a 120° arc facing the centre.
+            // Spread over a 120° arc facing the centre, pulled inward
+            // until the spot is level with the base: on Hex Farm the
+            // smallest towers (r=192) end inside the ring and the void
+            // around them kills anything spawned there; on hilly maps it
+            // keeps squads off cliffs.
             let a = heading + (i as f32 / (count - 1) as f32 - 0.5) * 2.1;
-            let x = (base.x + RING * a.cos()).clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
-            let z = (base.z + RING * a.sin()).clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
-            let mut pos = heightmap.place(x, z);
+            let spot = |r: f32| {
+                let x = (base.x + r * a.cos()).clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
+                let z = (base.z + r * a.sin()).clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
+                heightmap.place(x, z)
+            };
+            let Some(mut pos) = [RING, RING * 0.65, RING * 0.4]
+                .into_iter()
+                .map(spot)
+                .find(|p| (p.y - base.y).abs() < LEVEL_TOLERANCE)
+            else {
+                continue;
+            };
             if ctx.unit_registry.can_fly(kind) {
                 pos.y += ctx.unit_registry.cruise_alt(kind);
             }
