@@ -37,8 +37,27 @@ impl Plugin for MinimapPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(
             Update,
-            update_minimap.run_if(resource_exists::<MinimapState>),
+            (
+                update_minimap.run_if(resource_exists::<MinimapState>),
+                show_minimap_in_game,
+            ),
         );
+    }
+}
+
+/// The minimap is match HUD: hide it behind the launch menu, where the
+/// attract-mode demo map is scenery, not something to navigate.
+fn show_minimap_in_game(
+    state: Res<State<crate::game_setup::AppState>>,
+    mut nodes: Query<&mut Visibility, With<MinimapNode>>,
+) {
+    let want = if *state.get() == crate::game_setup::AppState::InGame {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in &mut nodes {
+        vis.set_if_neq(want);
     }
 }
 

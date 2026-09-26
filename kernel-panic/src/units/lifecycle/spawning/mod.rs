@@ -124,17 +124,19 @@ const HOMEBASE_EDGE_MARGIN: f32 = 100.0;
 /// gets its side's start unit (System → Kernel, Hacker → Hole,
 /// Network → Carrier) on the seat's ally team. Seats beyond the map's
 /// declared start positions fall back to a ring around the map centre.
+/// Returns each seat's faction, team and homebase position.
 pub fn spawn_homebases(
     heightmap: &Heightmap,
     map_info: &MapInfo,
     players: &[crate::game_setup::PlayerSpec],
     ctx: &mut SpawnContext,
-) {
+) -> Vec<(Faction, u8, Vec3)> {
     let (world_w, world_d) = heightmap.world_size();
     let cx = world_w * 0.5;
     let cz = world_d * 0.5;
     let radius = world_w.min(world_d) * 0.30;
     let seats = players.len().max(1) as f32;
+    let mut bases = Vec::with_capacity(players.len());
 
     for (i, seat) in players.iter().enumerate() {
         let (fx, fz) = map_info
@@ -150,9 +152,48 @@ pub fn spawn_homebases(
         let home_pos = heightmap.place(fx, fz);
 
         spawn_unit(seat.faction.homebase(), seat.faction, seat.team, home_pos, ctx);
+        bases.push((seat.faction, seat.team, home_pos));
     }
 
     info!("Spawned {} homebases", players.len());
+    bases
+}
+
+/// Starting squad per seat of the menu's attract-mode demo: the AI's
+/// spam / artillery / heavy picks for the faction, fanned out on the
+/// side of the base facing the map centre, so fighting starts within
+/// a minute instead of after the first production cycles.
+pub fn spawn_demo_squads(
+    heightmap: &Heightmap,
+    bases: &[(Faction, u8, Vec3)],
+    ctx: &mut SpawnContext,
+) {
+    const SPAM: usize = 8;
+    const RING: f32 = 220.0;
+    let (w, d) = heightmap.world_size();
+    let centre = Vec3::new(w * 0.5, 0.0, d * 0.5);
+    for &(faction, team, base) in bases {
+        let Some(roster) = crate::units::ai::build_orders::homebase_roster(faction.homebase())
+        else {
+            continue;
+        };
+        let squad = std::iter::repeat_n(roster.spam, SPAM)
+            .chain([roster.arty, roster.arty, roster.heavy]);
+        let to_centre = (centre - base).with_y(0.0).normalize_or(Vec3::X);
+        let heading = to_centre.z.atan2(to_centre.x);
+        let count = SPAM + 3;
+        for (i, kind) in squad.enumerate() {
+            // Spread over a 120° arc facing the centre.
+            let a = heading + (i as f32 / (count - 1) as f32 - 0.5) * 2.1;
+            let x = (base.x + RING * a.cos()).clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
+            let z = (base.z + RING * a.sin()).clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
+            let mut pos = heightmap.place(x, z);
+            if ctx.unit_registry.can_fly(kind) {
+                pos.y += ctx.unit_registry.cruise_alt(kind);
+            }
+            spawn_unit(kind, faction, team, pos, ctx);
+        }
+    }
 }
 
 /// Showcase mode: spawn exactly one homebase for `faction` on team 0 at

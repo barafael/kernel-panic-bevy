@@ -30,11 +30,10 @@ use crate::game_setup::{
     Grouping, RunGame, SkirmishConfig,
 };
 use crate::map_loading::MapCatalog;
-use crate::terrain::heightmap::Heightmap;
-use crate::units::components::{Faction, UnitType};
-use crate::units::content::definitions::UnitKind;
+use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
+use crate::units::combat::AimTarget;
+use crate::units::components::{Faction, Homebase, TeamId, UnitType};
 use crate::units::lifecycle::game_over::GameState;
-use crate::units::lifecycle::spawning::{spawn_unit, SpawnContext};
 
 pub struct MenuPlugin;
 
@@ -45,6 +44,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<GameOverOpen>()
             .init_resource::<ReadmeScroll>()
             .init_resource::<DemoDirector>()
+            .init_resource::<AttractCamera>()
             .init_resource::<MenuFocus>()
             .add_message::<MenuActionMessage>()
             .add_systems(OnEnter(AppState::InGame), (close_all_overlays, despawn_launch_menu))
@@ -59,8 +59,13 @@ impl Plugin for MenuPlugin {
                     esc_in_menu.run_if(in_state(AppState::Menu)),
                     boot_demo
                         .run_if(in_state(AppState::Menu).and(resource_exists::<MapCatalog>)),
-                    demo_director
-                        .run_if(in_state(AppState::Menu).and(resource_exists::<Heightmap>)),
+                    demo_director.run_if(
+                        in_state(AppState::Menu)
+                            .and(resource_exists::<crate::game_setup::GameSetup>),
+                    ),
+                    attract_camera
+                        .run_if(in_state(AppState::Menu))
+                        .before(crate::rendering::camera::camera_smoothing),
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
                     esc_toggle.run_if(in_state(AppState::InGame)),
                     maintain_esc_menu.run_if(in_state(AppState::InGame)),
@@ -77,7 +82,7 @@ impl Plugin for MenuPlugin {
 
 /// Which page the launch menu (or an overlay) is showing.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Resource)]
-pub enum MenuPage {
+pub(crate) enum MenuPage {
     #[default]
     Main,
     QuickSkirmish,
@@ -234,8 +239,72 @@ const MENU_GLASS: Color = Color::srgba(0.13, 0.13, 0.0, 0.55);
 /// Darker glass for the in-game overlays.
 const OVERLAY_GLASS: Color = Color::srgba(0.0, 0.0, 0.0, 0.55);
 
-/// One skewed-plate stand-in: bordered, tinted, white text, absolute at
-/// screen-relative coordinates. Clicks go to the central action router.
+/// Where a frame hangs off its position: the original `AddFrame`'s
+/// two-letter `FramePosition` code — horizontal `l`/`c`/`r`, vertical
+/// `t`/`c`/`b`. `Cc` centres the frame on the point, `Rb` puts its
+/// bottom-right corner there, and so on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    Lt,
+    Ct,
+    Rt,
+    Lc,
+    Cc,
+    Rc,
+    Lb,
+    Cb,
+    Rb,
+}
+
+impl Anchor {
+    /// Translation, in percent of the frame's own size, that moves the
+    /// frame's top-left corner (where layout puts it) onto the anchor.
+    fn shift(self) -> (f32, f32) {
+        use Anchor::*;
+        let x = match self {
+            Lt | Lc | Lb => 0.0,
+            Ct | Cc | Cb => -50.0,
+            Rt | Rc | Rb => -100.0,
+        };
+        let y = match self {
+            Lt | Ct | Rt => 0.0,
+            Lc | Cc | Rc => -50.0,
+            Lb | Cb | Rb => -100.0,
+        };
+        (x, y)
+    }
+}
+
+/// Absolute placement at the original's screen coordinates: `x` runs
+/// 0..1 from the left, `y` 0..1 from the *bottom* (Spring's convention,
+/// so page layouts transcribe `AddFrame(…, {x=vsx*X, y=vsy*Y}, …)`
+/// literally). `UiTransform` percentages resolve against the node's own
+/// size, which is what makes the anchor exact for any text width.
+fn anchored(x: f32, y: f32, anchor: Anchor) -> (Node, UiTransform) {
+    let (sx, sy) = anchor.shift();
+    (
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Percent(x * 100.0),
+            top: Val::Percent((1.0 - y) * 100.0),
+            ..default()
+        },
+        UiTransform::from_translation(Val2::percent(sx, sy)),
+    )
+}
+
+/// Frame padding: the original sizes a frame `FontSize·(1+width)` by
+/// `FontSize·(1+lines)`, i.e. half a font size of margin per side.
+fn frame_padding(font_size: f32) -> UiRect {
+    UiRect::axes(Val::Px(font_size * 0.5), Val::Px(font_size * 0.25))
+}
+
+fn frame_border(font_size: f32) -> UiRect {
+    UiRect::all(Val::Px((font_size * 0.09).max(1.0)))
+}
+
+/// A clickable frame at original coordinates (see [`anchored`]).
+/// Clicks go to the central action router.
 #[allow(clippy::too_many_arguments)]
 fn button(
     commands: &mut Commands,
@@ -243,30 +312,20 @@ fn button(
     label: &str,
     color: Color,
     font_size: f32,
-    x_pct: f32,
-    y_pct: f32,
+    (x, y): (f32, f32),
+    anchor: Anchor,
     action: MenuAction,
-    // None = left-anchored (box starts at x); Some(r) = right-anchored
-    // (box ends at x, i.e. right edge at 100-r).
-    right_anchor: Option<f32>,
 ) -> Entity {
     let text = spawn_button_text(commands, label, font_size);
+    let (mut node, transform) = anchored(x, y, anchor);
+    node.padding = frame_padding(font_size);
+    node.border = frame_border(font_size);
+    node.justify_content = JustifyContent::Center;
     let entity = commands
         .spawn((
             MenuButton { action, base: color },
-            Node {
-                position_type: PositionType::Absolute,
-                left: if right_anchor.is_none() {
-                    Val::Percent(x_pct)
-                } else {
-                    Val::Auto
-                },
-                right: right_anchor.map(Val::Percent).unwrap_or(Val::Auto),
-                top: Val::Percent(y_pct),
-                padding: UiRect::all(Val::Px(font_size * 0.25)),
-                border: UiRect::all(Val::Px((font_size * 0.09).max(1.0))),
-                ..default()
-            },
+            node,
+            transform,
             fill(color),
             border(color),
         ))
@@ -274,31 +333,40 @@ fn button(
     finish_button(commands, parent, entity, text)
 }
 
-/// A [`button`] that participates in flex layout instead of absolute
-/// positioning — put it in a [`button_stack`] so a column of buttons
-/// spaces itself and can never overlap, whatever the window height.
-fn stacked_button(
+/// A [`button`] for one option of a choice group (grouping,
+/// difficulty): the current pick is drawn brightened with a heavier
+/// border, so the page shows the configuration at a glance.
+#[allow(clippy::too_many_arguments)]
+fn choice_button(
     commands: &mut Commands,
     parent: Entity,
     label: &str,
     color: Color,
     font_size: f32,
+    pos: (f32, f32),
+    anchor: Anchor,
     action: MenuAction,
+    chosen: bool,
 ) -> Entity {
-    let text = spawn_button_text(commands, label, font_size);
-    let entity = commands
-        .spawn((
-            MenuButton { action, base: color },
-            Node {
-                padding: UiRect::all(Val::Px(font_size * 0.25)),
-                border: UiRect::all(Val::Px((font_size * 0.09).max(1.0))),
-                ..default()
-            },
-            fill(color),
-            border(color),
-        ))
-        .id();
-    finish_button(commands, parent, entity, text)
+    let base = if chosen { brighten(color) } else { color };
+    let e = button(commands, parent, label, base, font_size, pos, anchor, action);
+    if chosen {
+        let heavy = UiRect::all(Val::Px((font_size * 0.18).max(2.0)));
+        commands
+            .entity(e)
+            .entry::<Node>()
+            .and_modify(move |mut n| n.border = heavy);
+    }
+    e
+}
+
+/// Give a frame a minimum width (percent of the window) so a column of
+/// frames lines up as even boxes instead of a ragged edge.
+fn min_width(commands: &mut Commands, entity: Entity, pct: f32) {
+    commands
+        .entity(entity)
+        .entry::<Node>()
+        .and_modify(move |mut n| n.min_width = Val::Percent(pct));
 }
 
 fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> Entity {
@@ -310,6 +378,10 @@ fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> En
                 font_size,
                 ..default()
             },
+            // Why no-wrap: an absolute node's available width is what's
+            // left right of its `left` inset, so a right-anchored frame
+            // near the edge would otherwise wrap its label.
+            TextLayout::new(Justify::Center, LineBreak::NoWrap),
             Pickable::IGNORE,
         ))
         .id()
@@ -363,47 +435,19 @@ fn finish_button(
     entity
 }
 
-/// Full-width absolute column that centers and gaps its children —
-/// parent for [`stacked_button`]s.
-fn button_stack(
-    commands: &mut Commands,
-    parent: Entity,
-    top_pct: f32,
-    height_pct: f32,
-    gap: f32,
-) -> Entity {
-    let entity = commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Percent(0.0),
-                width: Val::Percent(100.0),
-                top: Val::Percent(top_pct),
-                height: Val::Percent(height_pct),
-                flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                row_gap: Val::Px(gap),
-                ..default()
-            },
-            Pickable::IGNORE,
-        ))
-        .id();
-    commands.entity(parent).add_child(entity);
-    entity
-}
-
-/// Non-interactive text panel (titles, description lines).
+/// Non-interactive frame (headings, description lines, text blocks).
+/// `frame` draws the original's coloured plate behind the text; `None`
+/// leaves bare text. `justify` aligns multi-line text inside the frame.
 #[allow(clippy::too_many_arguments)]
 fn label(
     commands: &mut Commands,
     parent: Entity,
     text: &str,
-    color: Color,
+    frame: Option<Color>,
     font_size: f32,
-    x_pct: f32,
-    y_pct: f32,
-    centered: bool,
+    (x, y): (f32, f32),
+    anchor: Anchor,
+    justify: Justify,
 ) -> Entity {
     let text = commands
         .spawn((
@@ -413,82 +457,48 @@ fn label(
                 font_size,
                 ..default()
             },
-            Pickable::IGNORE,
-            TextLayout::new_with_justify(if centered {
-                Justify::Center
-            } else {
-                Justify::Left
-            }),
-        ))
-        .id();
-    let entity = commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                // Centered labels span the full window so the text's
-                // Justify::Center has something to center within; a
-                // shrink-to-fit node would just sit at `left` with the
-                // text left-aligned inside it.
-                left: if centered {
-                    Val::Percent(0.0)
-                } else {
-                    Val::Percent(x_pct)
-                },
-                top: Val::Percent(y_pct),
-                width: if centered {
-                    Val::Percent(100.0)
-                } else {
-                    Val::Auto
-                },
-                padding: UiRect::all(Val::Px(font_size * 0.15)),
-                ..default()
-            },
+            TextLayout::new(justify, LineBreak::NoWrap),
             Pickable::IGNORE,
         ))
         .id();
+    let (mut node, transform) = anchored(x, y, anchor);
+    node.padding = frame_padding(font_size);
+    if frame.is_some() {
+        node.border = frame_border(font_size);
+    }
+    let entity = commands.spawn((node, transform, Pickable::IGNORE)).id();
+    if let Some(color) = frame {
+        commands.entity(entity).insert((fill(color), border(color)));
+    }
     commands.entity(entity).add_child(text);
-    let _ = color; // kept for call-site readability; text stays white like the original
     commands.entity(parent).add_child(entity);
     entity
 }
 
-/// The `Kernel Panic!` title, cyan, vsy/14 — per the original.
-fn title(commands: &mut Commands, parent: Entity, font_size: f32, suffix: &str) {
-    let text = if suffix.is_empty() {
-        "Kernel Panic!".to_string()
-    } else {
-        format!("Kernel Panic!\n{suffix}")
-    };
+/// The `Kernel Panic!` title: cyan, top-centre, like the original main
+/// menu's `AddFrame("Kernel Panic!", {x=vsx*0.5, y=vsy*0.98}, vsy/14, …, "ct")`.
+fn title(commands: &mut Commands, parent: Entity, font_size: f32) {
     let t = commands
         .spawn((
-            Text::new(text),
+            Text::new("Kernel Panic!"),
             TextColor(TITLE_CYAN),
             TextFont {
                 font_size,
                 ..default()
             },
+            TextLayout::new(Justify::Center, LineBreak::NoWrap),
             Pickable::IGNORE,
-            TextLayout::new_with_justify(Justify::Center),
         ))
         .id();
     let entity = commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Percent(0.0),
-                top: Val::Percent(2.0),
-                width: Val::Percent(100.0),
-                justify_content: JustifyContent::Center,
-                ..default()
-            },
-            Pickable::IGNORE,
-        ))
+        .spawn((anchored(0.5, 0.98, Anchor::Ct), Pickable::IGNORE))
         .id();
     commands.entity(entity).add_child(t);
     commands.entity(parent).add_child(entity);
 }
 
-/// Window-height-derived font sizes, matching the original's vsy ratios.
+/// Window-height-derived font sizes, matching the original's vsy ratios:
+/// `vsy/14` title, `vsy/20` main menu, `vsy/24` pages, `vsy/28` lists.
 fn vsizes(height: f32) -> (f32, f32, f32, f32) {
     (height / 14.0, height / 20.0, height / 24.0, height / 28.0)
 }
@@ -789,11 +799,11 @@ fn maintain_launch_menu(
     let Ok(window) = windows.single() else {
         return;
     };
-    let (_title_size, menu_size, page_size, list_size) = vsizes(window.height());
+    let (title_size, menu_size, page_size, list_size) = vsizes(window.height());
 
     let root = spawn_backdrop(&mut commands, MENU_GLASS);
     match *page {
-        MenuPage::Main => main_menu_page(&mut commands, root, menu_size),
+        MenuPage::Main => main_menu_page(&mut commands, root, title_size, menu_size),
         MenuPage::QuickSkirmish => quick_skirmish_page(&mut commands, root, page_size),
         MenuPage::AdvancedSkirmish => advanced_skirmish_page(
             &mut commands,
@@ -809,217 +819,155 @@ fn maintain_launch_menu(
     }
 }
 
-/// The original's zigzag main menu: buttons alternate between ending at
-/// x=46% and starting at x=54%, marching down the screen.
-fn main_menu_page(commands: &mut Commands, root: Entity, menu_size: f32) {
-    title(commands, root, menu_size * 20.0 / 14.0, "");
-    // Zigzag layout, alternating left/right anchors like the original.
-    // All five buttons fit between the title and the bottom edge: at
-    // vsy/20 fonts each button is ~7% of the window tall, so 10% steps
-    // ending at 66% + 7% clear the bottom with room to spare.
-    button(
-        commands,
-        root,
-        "Skirmish",
-        BUTTON_GREEN,
-        menu_size,
-        54.0,
-        28.0,
-        MenuAction::Goto(MenuPage::AdvancedSkirmish),
-        None,
-    );
-    button(
-        commands,
-        root,
-        "Quick Battle",
-        BUTTON_GREEN,
-        menu_size,
-        46.0,
-        38.0,
-        MenuAction::Goto(MenuPage::QuickSkirmish),
-        Some(54.0),
-    );
-    button(
-        commands,
-        root,
-        "Credits",
-        BUTTON_GREEN,
-        menu_size,
-        54.0,
-        48.0,
-        MenuAction::Goto(MenuPage::Credits),
-        None,
-    );
-    button(
-        commands,
-        root,
-        "Readme",
-        BUTTON_GREEN,
-        menu_size,
-        46.0,
-        58.0,
-        MenuAction::Goto(MenuPage::Readme),
-        Some(54.0),
-    );
-    button(
-        commands,
-        root,
-        "Quit",
-        BUTTON_GREEN,
-        menu_size,
-        54.0,
-        68.0,
-        MenuAction::Quit,
-        None,
-    );
-    button(
-        commands,
-        root,
-        "Showcase",
-        EASY_CYAN,
-        menu_size,
-        46.0,
-        78.0,
-        MenuAction::Goto(MenuPage::Showcase),
-        Some(54.0),
-    );
+/// The original's zigzag main menu (`MainMenu`): `vsy/20` buttons whose
+/// bottom corners alternate between ending at x=46% (`rb`) and starting
+/// at x=54% (`lb`), stepping down 10% of the screen per button.
+fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_size: f32) {
+    title(commands, root, title_size);
+    let entries: [(&str, Color, MenuAction); 6] = [
+        ("Skirmish", BUTTON_GREEN, MenuAction::Goto(MenuPage::AdvancedSkirmish)),
+        ("Quick Battle", BUTTON_GREEN, MenuAction::Goto(MenuPage::QuickSkirmish)),
+        ("Showcase", EASY_CYAN, MenuAction::Goto(MenuPage::Showcase)),
+        ("Credits", BUTTON_GREEN, MenuAction::Goto(MenuPage::Credits)),
+        ("Readme", BUTTON_GREEN, MenuAction::Goto(MenuPage::Readme)),
+        ("Quit", BUTTON_GREEN, MenuAction::Quit),
+    ];
+    for (i, (name, color, action)) in entries.into_iter().enumerate() {
+        let y = 0.7 - 0.1 * i as f32;
+        let (x, anchor) = if i % 2 == 0 {
+            (0.46, Anchor::Rb)
+        } else {
+            (0.54, Anchor::Lb)
+        };
+        button(commands, root, name, color, menu_size, (x, y), anchor, action);
+    }
 }
 
-/// The original's showcase page: pick a faction to see one of each of its
-/// units and buildings built live on Data_Cache_L1.
-fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
-    title(commands, root, page_size, "Showcase");
+/// Page heading in the original's style: a blue plate at the top
+/// centre (`AddFrame("Kernel Panic!\n<page>", {x=0.5, y=0.9}, vsy/24, {0,0,1}, "cc")`).
+fn page_heading(commands: &mut Commands, root: Entity, page_size: f32, text: &str) {
     label(
         commands,
         root,
-        "Pick a faction to see its full unit tree built live:",
-        TEXT_WHITE,
+        &format!("Kernel Panic!\n{text}"),
+        Some(NAV_BLUE),
+        page_size,
+        (0.5, 0.9),
+        Anchor::Cc,
+        Justify::Center,
+    );
+}
+
+/// Pick a faction to see one of each of its units and buildings built
+/// live on Data_Cache_L1. Laid out like the quick-battle column.
+fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
+    page_heading(commands, root, page_size, "Showcase");
+    label(
+        commands,
+        root,
+        "Pick a faction to see its full unit tree built live",
+        None,
         page_size * 0.7,
-        50.0,
-        24.0,
-        false,
+        (0.5, 0.72),
+        Anchor::Cc,
+        Justify::Center,
     );
-    button(
-        commands,
-        root,
-        "System",
-        EASY_CYAN,
-        page_size,
-        50.0,
-        38.0,
-        MenuAction::Showcase(Faction::System),
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        "Hacker",
-        VERY_HARD_RED,
-        page_size,
-        50.0,
-        48.0,
-        MenuAction::Showcase(Faction::Hacker),
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        "Network",
-        DESC_BLUE,
-        page_size,
-        50.0,
-        58.0,
-        MenuAction::Showcase(Faction::Network),
-        Some(50.0),
-    );
+    for (i, (name, color, faction)) in [
+        ("System", EASY_CYAN, Faction::System),
+        ("Hacker", VERY_HARD_RED, Faction::Hacker),
+        ("Network", DESC_BLUE, Faction::Network),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = button(
+            commands,
+            root,
+            name,
+            color,
+            page_size,
+            (0.5, 0.6 - 0.1 * i as f32),
+            Anchor::Cc,
+            MenuAction::Showcase(faction),
+        );
+        min_width(commands, e, 18.0);
+    }
+    back_button(commands, root, page_size, (0.5, 0.2), MenuPage::Main);
+}
+
+/// Blue `Back` plate, centred on `pos`.
+fn back_button(
+    commands: &mut Commands,
+    root: Entity,
+    font_size: f32,
+    pos: (f32, f32),
+    to: MenuPage,
+) -> Entity {
     button(
         commands,
         root,
         "Back",
         NAV_BLUE,
-        page_size,
-        50.0,
-        75.0,
-        MenuAction::Goto(MenuPage::Main),
-        Some(50.0),
-    );
+        font_size,
+        pos,
+        Anchor::Cc,
+        MenuAction::Goto(to),
+    )
 }
 
-/// The original's `SimplerSinglePlayer`: title doubles as the toggle to
-/// the advanced page; every difficulty button starts a random-map Duel
-/// immediately.
+/// The original's `SimplerSinglePlayer`: a centred column of difficulty
+/// buttons that each start a random-map Duel at once. The heading
+/// plate toggles to the advanced page, like the original's.
 fn quick_skirmish_page(commands: &mut Commands, root: Entity, page_size: f32) {
-    title(commands, root, page_size, "Single Player");
-    button(
+    let heading = button(
         commands,
         root,
-        "Advanced setup…",
+        "Kernel Panic!\nSingle Player",
         NAV_BLUE,
-        page_size * 0.8,
-        50.0,
-        12.0,
+        page_size,
+        (0.5, 0.8),
+        Anchor::Cc,
         MenuAction::Goto(MenuPage::AdvancedSkirmish),
-        Some(50.0),
     );
-
-    button(
+    min_width(commands, heading, 24.0);
+    for (i, (name, color, difficulty)) in [
+        ("Easy", MEDIUM_GREEN, 1),
+        ("Medium", HARD_YELLOW, 2),
+        ("Hard", EXTREME_ORANGE, 3),
+        ("Very Hard", VERY_HARD_RED, 4),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = button(
+            commands,
+            root,
+            name,
+            color,
+            page_size,
+            (0.5, 0.6 - 0.1 * i as f32),
+            Anchor::Cc,
+            MenuAction::QuickStart(difficulty),
+        );
+        min_width(commands, e, 18.0);
+    }
+    back_button(commands, root, page_size, (0.5, 0.2), MenuPage::Main);
+    label(
         commands,
         root,
-        "Easy",
-        EASY_CYAN,
-        page_size,
-        50.0,
-        32.0,
-        MenuAction::QuickStart(1),
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        "Medium",
-        MEDIUM_GREEN,
-        page_size,
-        50.0,
-        42.0,
-        MenuAction::QuickStart(2),
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        "Hard",
-        HARD_YELLOW,
-        page_size,
-        50.0,
-        52.0,
-        MenuAction::QuickStart(3),
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        "Very Hard",
-        VERY_HARD_RED,
-        page_size,
-        50.0,
-        62.0,
-        MenuAction::QuickStart(4),
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        "Back",
-        NAV_BLUE,
-        page_size,
-        50.0,
-        75.0,
-        MenuAction::Goto(MenuPage::Main),
-        Some(50.0),
+        "Click the heading for the advanced setup",
+        None,
+        page_size * 0.6,
+        (0.5, 0.1),
+        Anchor::Cc,
+        Justify::Center,
     );
 }
 
-/// The original's `SinglePlayer` advanced page.
+/// The original's `SinglePlayer` advanced page, at its coordinates:
+/// heading, map and the two faction plates down the centre, grouping
+/// presets on the left (`lc` at x=10%), difficulty on the right (`rc`
+/// at x=90%), Run!/Back side by side, description line at the bottom.
 fn advanced_skirmish_page(
     commands: &mut Commands,
     root: Entity,
@@ -1027,68 +975,44 @@ fn advanced_skirmish_page(
     config: &SkirmishConfig,
     map_names: &[String],
 ) {
-    title(commands, root, page_size, "Single Player");
+    let heading = button(
+        commands,
+        root,
+        "Kernel Panic!\nSingle Player",
+        NAV_BLUE,
+        page_size,
+        (0.5, 0.9),
+        Anchor::Cc,
+        MenuAction::Goto(MenuPage::QuickSkirmish),
+    );
+    min_width(commands, heading, 24.0);
+
     let map_name = match config.map {
         Some(i) => map_names.get(i).map(String::as_str).unwrap_or("random"),
         None => "random",
     };
-    label(
+    let map = button(
         commands,
         root,
         &format!("Map: {map_name}"),
         MAP_GREEN,
         page_size,
-        42.0,
-        12.0,
-        false,
-    );
-    button(
-        commands,
-        root,
-        "Choose map…",
-        MAP_GREEN,
-        page_size * 0.85,
-        58.0,
-        12.4,
+        (0.5, 0.75),
+        Anchor::Cc,
         MenuAction::Goto(MenuPage::MapList),
-        None,
     );
-    button(
-        commands,
-        root,
-        "Random map",
-        MAP_GREEN,
-        page_size * 0.85,
-        42.0,
-        19.0,
-        MenuAction::PickRandomMap,
-        None,
-    );
+    min_width(commands, map, 24.0);
 
-    button(
-        commands,
-        root,
-        &format!("You:\n{:?}", config.your_faction),
-        EASY_CYAN,
-        page_size,
-        50.0,
-        25.0,
-        MenuAction::CycleYourFaction,
-        Some(50.0),
-    );
-    button(
-        commands,
-        root,
-        &format!("Enemy:\n{:?}", config.enemy_faction),
-        EASY_CYAN,
-        page_size,
-        50.0,
-        40.0,
-        MenuAction::CycleEnemyFaction,
-        Some(50.0),
-    );
+    for (text, y, action) in [
+        (format!("You:\n{:?}", config.your_faction), 0.6, MenuAction::CycleYourFaction),
+        (format!("Enemy:\n{:?}", config.enemy_faction), 0.45, MenuAction::CycleEnemyFaction),
+    ] {
+        let e = button(commands, root, &text, EASY_CYAN, page_size, (0.5, y), Anchor::Cc, action);
+        min_width(commands, e, 24.0);
+    }
 
-    // Grouping presets — left column at x=10%.
+    // Grouping presets: left column. (Spectate / Team Game / Heroic are
+    // not implemented yet — see `Grouping`.)
     for (i, (g, color)) in [
         (Grouping::Duel, MEDIUM_GREEN),
         (Grouping::Outgunned, EXTREME_ORANGE),
@@ -1096,20 +1020,21 @@ fn advanced_skirmish_page(
     .into_iter()
     .enumerate()
     {
-        button(
+        let e = choice_button(
             commands,
             root,
             g.label(),
             color,
             page_size,
-            10.0,
-            30.0 + 8.0 * i as f32,
+            (0.1, 0.55 - 0.1 * i as f32),
+            Anchor::Lc,
             MenuAction::SetGrouping(g),
-            None,
+            config.grouping == g,
         );
+        min_width(commands, e, 16.0);
     }
 
-    // Difficulty — right column ending at x=90%.
+    // Difficulty: right column.
     for (i, (name, color)) in [
         ("Easy", EASY_CYAN),
         ("Medium", MEDIUM_GREEN),
@@ -1119,111 +1044,116 @@ fn advanced_skirmish_page(
     .into_iter()
     .enumerate()
     {
-        button(
+        let difficulty = 1 + i as u8;
+        let e = choice_button(
             commands,
             root,
             name,
             color,
             page_size,
-            90.0,
-            30.0 + 8.0 * i as f32,
-            MenuAction::SetDifficulty(1 + i as u8),
-            Some(10.0),
+            (0.9, 0.6 - 0.1 * i as f32),
+            Anchor::Rc,
+            MenuAction::SetDifficulty(difficulty),
+            config.difficulty == difficulty,
         );
+        min_width(commands, e, 16.0);
     }
 
-    button(
+    let run = button(
         commands,
         root,
         "Run!",
         NAV_BLUE,
         page_size,
-        40.0,
-        68.0,
+        (0.4, 0.2),
+        Anchor::Cc,
         MenuAction::StartSkirmish,
-        None,
     );
-    button(
-        commands,
-        root,
-        "Back",
-        NAV_BLUE,
-        page_size,
-        60.0,
-        68.0,
-        MenuAction::Goto(MenuPage::Main),
-        None,
-    );
+    min_width(commands, run, 12.0);
+    let back = back_button(commands, root, page_size, (0.6, 0.2), MenuPage::Main);
+    min_width(commands, back, 12.0);
 
-    // Live description line, in the original's format.
     label(
         commands,
         root,
         &describe_setup(config),
-        DESC_BLUE,
-        page_size * 0.9,
-        50.0,
-        82.0,
-        true,
+        Some(DESC_BLUE),
+        page_size * 0.8,
+        (0.5, 0.05),
+        Anchor::Cc,
+        Justify::Center,
     );
-    let _ = page_size;
 }
 
-/// Two-column map list; "Random" first. (Minimap previews are a noted
-/// future improvement — they need an off-thread map parse.)
+/// The original's `ListMap`: two columns of map plates (`lc` at x=10%,
+/// `rc` at x=90%) under a "Choose a map:" heading, Back at the bottom
+/// — paired with the weighted-random pick like Run!/Back, since long
+/// map names reach into the centre column.
 fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog: &MapCatalog) {
-    title(commands, root, list_size * 24.0 / 28.0, "");
-    label(commands, root, "Choose a map:", NAV_BLUE, list_size, 46.0, 8.0, false);
-
-    button(
+    label(
         commands,
         root,
-        "Random (weighted)",
-        TEAL,
-        list_size,
-        10.0,
-        16.0,
-        MenuAction::PickRandomMap,
-        None,
+        "Choose a map:",
+        Some(NAV_BLUE),
+        list_size * 28.0 / 24.0,
+        (0.5, 0.95),
+        Anchor::Cc,
+        Justify::Center,
     );
+    let nav_size = list_size * 28.0 / 24.0;
+    let random = button(
+        commands,
+        root,
+        "Random map",
+        TEAL,
+        nav_size,
+        (0.4, 0.05),
+        Anchor::Cc,
+        MenuAction::PickRandomMap,
+    );
+    min_width(commands, random, 16.0);
 
     let names = catalog.names();
-    let half = names.len().div_ceil(2);
+    let rows = names.len().div_ceil(2).max(1);
+    // The original steps 10% per row from y=85%; longer catalogs
+    // squeeze to keep the last row clear of Back.
+    let step = (0.72 / rows as f32).min(0.1);
     for (i, name) in names.iter().enumerate() {
-        let (x, anchor) = if i < half {
-            (10.0, None)
+        let (col, row) = (i / rows, i % rows);
+        let (x, anchor) = if col == 0 {
+            (0.1, Anchor::Lc)
         } else {
-            (90.0, Some(10.0))
+            (0.9, Anchor::Rc)
         };
-        let row = if i < half { i } else { i - half };
-        button(
+        let e = button(
             commands,
             root,
             name,
             BUTTON_GREEN,
             list_size,
-            x,
-            24.0 + row as f32 * 7.0,
-            MenuAction::PickMap(i),
+            (x, 0.85 - step * row as f32),
             anchor,
+            MenuAction::PickMap(i),
         );
+        min_width(commands, e, 30.0);
     }
-
-    button(
-        commands,
-        root,
-        "Back",
-        NAV_BLUE,
-        list_size,
-        50.0,
-        90.0,
-        MenuAction::Goto(MenuPage::AdvancedSkirmish),
-        Some(50.0),
-    );
+    let back = back_button(commands, root, nav_size, (0.6, 0.05), MenuPage::AdvancedSkirmish);
+    min_width(commands, back, 16.0);
 }
 
+/// The original's `Credits`: heading plate sitting on y=80%, the credit
+/// lines hanging below it, the engine credit around y=30%, Back at 10%.
 fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
-    title(commands, root, page_size, "Credits:");
+    label(
+        commands,
+        root,
+        "Kernel Panic!\nCredits:",
+        Some(MEDIUM_GREEN),
+        page_size,
+        (0.5, 0.8),
+        Anchor::Cb,
+        Justify::Center,
+    );
     const CREDITS: &str = "\
 - Original concept by Boirunner
 - About all the work done by KDR_11k
@@ -1233,42 +1163,62 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 - Maps by Boirunner, Runecrafter, zwzsg, TradeMark, KDR_11k and FireStorm
 - Some LUA interface upgrade based of jK and trepan code
 - The Touhou faction characters were inspired by ZUN's works
-
-Reimplementation: Rust + Bevy, from the original Spring mod.";
-    label(commands, root, CREDITS, BUTTON_GREEN, page_size * 0.8, 30.0, 18.0, true);
+- Many thanks to lurker, Quantum, and the rest of #lua crew
+- Reimplementation in Rust + Bevy, from the original Spring mod";
     label(
         commands,
         root,
-        "Original engine: Spring RTS (the mod runs on it unmodified)",
-        EXTREME_ORANGE,
-        page_size * 0.7,
-        50.0,
-        75.0,
-        true,
+        CREDITS,
+        Some(TEAL),
+        page_size * 24.0 / 30.0,
+        (0.5, 0.78),
+        Anchor::Ct,
+        Justify::Left,
     );
-    button(
+    label(
         commands,
         root,
-        "Back",
-        NAV_BLUE,
+        "Spring Engine by:",
+        Some(EXTREME_ORANGE),
         page_size,
-        50.0,
-        88.0,
-        MenuAction::Goto(MenuPage::Main),
-        Some(50.0),
+        (0.5, 0.28),
+        Anchor::Cb,
+        Justify::Center,
     );
+    label(
+        commands,
+        root,
+        "Swedish Yankspankers",
+        Some(README_UPDOWN),
+        page_size * 24.0 / 30.0,
+        (0.5, 0.28),
+        Anchor::Ct,
+        Justify::Center,
+    );
+    back_button(commands, root, page_size * 24.0 / 30.0, (0.5, 0.1), MenuPage::Main);
 }
 
-/// Readme page: body slice + Up/Down (orange) + Back, per the original's
-/// `PrintReadMe` (wheel scrolling is a noted TODO — bevy_picking scroll
-/// events aren't wired for UI nodes here yet).
+/// The original's `PrintReadMe`: file name plate at the top centre, the
+/// text panel filling the screen below it, Up in both top corners, Down
+/// at 30% / 70% along the bottom edge and Back between them.
 fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usize) {
     let page_size = window_h / 24.0;
-    title(commands, root, page_size, "");
-    label(commands, root, "Kernel_Panic_readme.txt", BUTTON_GREEN, page_size, 44.0, 6.0, false);
+    label(
+        commands,
+        root,
+        "Kernel_Panic_readme.txt",
+        Some(Color::srgb(1.0, 1.0, 0.5)),
+        window_h / 32.0,
+        (0.5, 1.0),
+        Anchor::Ct,
+        Justify::Center,
+    );
 
-    const LINE_HEIGHT: f32 = 16.0;
-    let lines_per_screen = ((window_h * 0.70) / LINE_HEIGHT) as usize;
+    // The original prints 16 px lines at ~1080p; scale with the window.
+    let line_px = (window_h / 64.0).max(12.0);
+    // Leave the top ~10% for the file name and the bottom ~10% for the
+    // Down / Back row.
+    let lines_per_screen = ((window_h * 0.78) / (line_px * 1.2)) as usize;
     let lines = readme_lines();
     let max_scroll = lines.len().saturating_sub(lines_per_screen);
     let scroll = scroll.min(max_scroll);
@@ -1284,7 +1234,7 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
             Text::new(body),
             TextColor(TEXT_WHITE),
             TextFont {
-                font_size: LINE_HEIGHT,
+                font_size: line_px,
                 ..default()
             },
             Pickable::IGNORE,
@@ -1294,12 +1244,12 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Percent(8.0),
-                top: Val::Percent(12.0),
-                width: Val::Percent(84.0),
-                height: Val::Percent(70.0),
+                left: Val::Percent(0.0),
+                top: Val::Percent(10.0),
+                width: Val::Percent(100.0),
+                height: Val::Percent(80.0),
                 overflow: Overflow::clip(),
-                padding: UiRect::all(Val::Px(8.0)),
+                padding: UiRect::axes(Val::Px(line_px), Val::Px(line_px * 0.5)),
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.1, 0.2, 1.0)),
@@ -1311,60 +1261,43 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
 
     // Page by (lines per screen - 1), like the original's Up/Down.
     let page = (lines_per_screen.saturating_sub(1)) as i32;
-    button(
-        commands,
-        root,
-        "Up",
-        README_UPDOWN,
-        page_size * 0.8,
-        0.0,
-        12.0,
-        MenuAction::ScrollReadme(-page),
-        None,
-    );
-    button(
-        commands,
-        root,
-        "Up",
-        README_UPDOWN,
-        page_size * 0.8,
-        100.0,
-        12.0,
-        MenuAction::ScrollReadme(-page),
-        Some(0.0),
-    );
-    button(
-        commands,
-        root,
-        "Down",
-        README_UPDOWN,
-        page_size * 0.8,
-        30.0,
-        84.0,
-        MenuAction::ScrollReadme(page),
-        None,
-    );
-    button(
-        commands,
-        root,
-        "Down",
-        README_UPDOWN,
-        page_size * 0.8,
-        70.0,
-        84.0,
-        MenuAction::ScrollReadme(page),
-        None,
-    );
+    if scroll > 0 {
+        for (x, anchor) in [(0.0, Anchor::Lt), (1.0, Anchor::Rt)] {
+            button(
+                commands,
+                root,
+                "Up",
+                README_UPDOWN,
+                page_size,
+                (x, 1.0),
+                anchor,
+                MenuAction::ScrollReadme(-page),
+            );
+        }
+    }
+    if scroll < max_scroll {
+        for x in [0.3, 0.7] {
+            button(
+                commands,
+                root,
+                "Down",
+                README_UPDOWN,
+                page_size,
+                (x, 0.0),
+                Anchor::Cb,
+                MenuAction::ScrollReadme(page),
+            );
+        }
+    }
     button(
         commands,
         root,
         "Back",
         NAV_BLUE,
         page_size,
-        50.0,
-        92.0,
+        (0.5, 0.0),
+        Anchor::Cb,
         MenuAction::Goto(MenuPage::Main),
-        Some(50.0),
     );
 }
 
@@ -1474,38 +1407,21 @@ fn maintain_esc_menu(
     let Ok(window) = windows.single() else {
         return;
     };
-    let menu_size = window.height() / 20.0;
+    let size = window.height() / 14.0;
 
-    // The original's SaveLoadMenu cluster: big green buttons centred
-    // around screen centre (Save/Load omitted — no save system yet).
-    // Stacked via flex so they space themselves instead of overlapping
-    // when the window is short.
+    // The original's `SaveLoadMenu`: four big plates meeting around the
+    // screen centre — Save/Load on top (here Resume/Restart; there is no
+    // save system), Menu/Restart below (here Menu/Quit).
     let root = spawn_backdrop(&mut commands, OVERLAY_GLASS);
-    let stack = button_stack(&mut commands, root, 28.0, 44.0, menu_size * 0.5);
-    stacked_button(
-        &mut commands,
-        stack,
-        "Resume",
-        BUTTON_GREEN,
-        menu_size * 1.4,
-        MenuAction::Resume,
-    );
-    stacked_button(
-        &mut commands,
-        stack,
-        "Restart",
-        BUTTON_GREEN,
-        menu_size * 1.4,
-        MenuAction::Restart,
-    );
-    stacked_button(
-        &mut commands,
-        stack,
-        "Menu",
-        BUTTON_GREEN,
-        menu_size * 1.4,
-        MenuAction::GoToMenu,
-    );
+    for (text, pos, anchor, action) in [
+        ("Resume", (0.45, 0.505), Anchor::Rb, MenuAction::Resume),
+        ("Restart", (0.55, 0.505), Anchor::Lb, MenuAction::Restart),
+        ("Menu", (0.45, 0.5), Anchor::Rt, MenuAction::GoToMenu),
+        ("Quit", (0.55, 0.5), Anchor::Lt, MenuAction::Quit),
+    ] {
+        let e = button(&mut commands, root, text, BUTTON_GREEN, size, pos, anchor, action);
+        min_width(&mut commands, e, 22.0);
+    }
 }
 
 #[derive(Component)]
@@ -1571,52 +1487,50 @@ fn maintain_game_over(
         ))
         .id();
 
+    // The original's `GameOverMenu`: result plate at y=70%, then
+    // "Keep on playing/watching" ending at x=48% and "Go to Menu"
+    // starting at x=52% on the y=25% line; a loss adds Restart above.
     label(
         &mut commands,
         root,
         if won { "You won!" } else { "You lost!" },
-        if won { WON_GREEN } else { LOST_RED },
+        Some(if won { WON_GREEN } else { LOST_RED }),
         title_size,
-        50.0,
-        30.0,
-        true,
+        (0.5, 0.7),
+        Anchor::Cc,
+        Justify::Center,
     );
-
-    if won {
-        let stack = button_stack(&mut commands, root, 55.0, 40.0, menu_size * 0.5);
-        stacked_button(
+    let keep = if won { "Keep on playing" } else { "Keep on watching" };
+    button(
+        &mut commands,
+        root,
+        keep,
+        BUTTON_GREEN,
+        menu_size,
+        (0.48, 0.25),
+        Anchor::Rc,
+        MenuAction::KeepPlaying,
+    );
+    button(
+        &mut commands,
+        root,
+        "Go to Menu",
+        BUTTON_GREEN,
+        menu_size,
+        (0.52, 0.25),
+        Anchor::Lc,
+        MenuAction::GoToMenu,
+    );
+    if !won {
+        button(
             &mut commands,
-            stack,
-            "Keep on playing",
-            BUTTON_GREEN,
-            menu_size * 1.4,
-            MenuAction::KeepPlaying,
-        );
-        stacked_button(
-            &mut commands,
-            stack,
-            "Go to Menu",
-            BUTTON_GREEN,
-            menu_size * 1.4,
-            MenuAction::GoToMenu,
-        );
-    } else {
-        let stack = button_stack(&mut commands, root, 55.0, 40.0, menu_size * 0.5);
-        stacked_button(
-            &mut commands,
-            stack,
+            root,
             "Restart",
             BUTTON_GREEN,
-            menu_size * 1.4,
+            menu_size,
+            (0.5, 0.35),
+            Anchor::Cc,
             MenuAction::Restart,
-        );
-        stacked_button(
-            &mut commands,
-            stack,
-            "Go to Menu",
-            BUTTON_GREEN,
-            menu_size * 1.4,
-            MenuAction::GoToMenu,
         );
     }
 }
@@ -1627,90 +1541,124 @@ fn maintain_game_over(
 // Attract-mode demo — live battle behind the main menu
 // ---------------------------------------------------------------------------
 
-/// The demo cast: a battery of Pointers on the west side that auto-fire
-/// at Flows streaming in from the east. Every lost unit is replaced, so
-/// the battle runs forever.
+/// Keeps the attract-mode demo alive: once the all-AI skirmish behind
+/// the menu is decided (one seat's homebases left) or has run for
+/// [`DEMO_MAX_AGE`], roll a fresh random setup and reload.
 #[derive(Resource, Default)]
 struct DemoDirector {
-    /// Desired Pointer battery: (live entity, home position). A `None`
-    /// or dead entity is respawned at its position.
-    pointer_slots: Vec<(Option<Entity>, Vec3)>,
-    flow_timer: f32,
+    /// Seconds since the current demo world loaded.
+    age: f32,
+    /// Seconds the match has been decided for (restart after a grace
+    /// period so the last fight finishes on screen).
+    decided_for: f32,
+    /// Whether two or more sides have been seen alive — a world still
+    /// loading shows no homebases at all and must not count as decided.
+    contested: bool,
 }
 
-/// Marker on demo Flows, for counting the live swarm.
-#[derive(Component)]
-struct DemoFlow;
+/// Longest a single demo match runs before a new roll.
+const DEMO_MAX_AGE: f32 = 12.0 * 60.0;
+/// Minimum demo age before "decided" is checked.
+const DEMO_SETTLE: f32 = 10.0;
+/// Seconds a decided match keeps playing before the restart.
+const DEMO_DECIDED_GRACE: f32 = 8.0;
 
-const DEMO_FLOW_CAP: usize = 10;
-const DEMO_FLOW_SPAWN_INTERVAL: f32 = 1.5;
-
-#[allow(clippy::too_many_arguments)]
 fn demo_director(
     time: Res<Time>,
+    setup: Res<crate::game_setup::GameSetup>,
     mut director: ResMut<DemoDirector>,
-    heightmap: Option<Res<Heightmap>>,
-    units: Query<(), With<UnitType>>,
-    flows: Query<(), With<DemoFlow>>,
-    mut ctx: SpawnContext,
+    homebases: Query<&TeamId, With<Homebase>>,
+    mut commands: Commands,
+    mut run_game: MessageWriter<RunGame>,
 ) {
-    // The first frame after a world (re)load may still see the previous
-    // match's heightmap — spawning into a stale map self-corrects: the
-    // RunGame teardown despawns those actors and the slots refill here.
-    let Some(heightmap) = heightmap else {
+    if setup.is_changed() {
+        *director = DemoDirector::default();
+    }
+    if !setup.demo {
+        return;
+    }
+    director.age += time.delta_secs();
+    let mut teams: Vec<u8> = homebases.iter().map(|t| t.0).collect();
+    teams.sort_unstable();
+    teams.dedup();
+    director.contested |= teams.len() >= 2;
+    let decided = director.contested && director.age > DEMO_SETTLE && teams.len() <= 1;
+    director.decided_for = if decided {
+        director.decided_for + time.delta_secs()
+    } else {
+        0.0
+    };
+    if director.decided_for > DEMO_DECIDED_GRACE || director.age > DEMO_MAX_AGE {
+        commands.insert_resource(demo_setup());
+        run_game.write(RunGame);
+        *director = DemoDirector::default();
+    }
+}
+
+/// The attract-mode camera: glides between points of interest — a unit
+/// that is currently aiming at something (a fight), else a homebase —
+/// while slowly orbiting, like a spectator director.
+#[derive(Resource, Default)]
+struct AttractCamera {
+    /// Seconds until the next point of interest is picked.
+    retarget_in: f32,
+    target: Option<Vec3>,
+    clock: f32,
+}
+
+/// Seconds between points of interest.
+const ATTRACT_DWELL: f32 = 14.0;
+/// Max glide speed of the focus between points (elmos/s).
+const ATTRACT_GLIDE_SPEED: f32 = 260.0;
+/// Orbit speed (rad/s).
+const ATTRACT_ORBIT_SPEED: f32 = 0.06;
+
+#[allow(clippy::too_many_arguments)]
+fn attract_camera(
+    time: Res<Time>,
+    mut director: ResMut<AttractCamera>,
+    bounds: Res<MapBounds>,
+    fighters: Query<&GlobalTransform, (With<AimTarget>, With<UnitType>)>,
+    bases: Query<&GlobalTransform, With<Homebase>>,
+    mut cam: Query<&mut RtsCameraState, With<RtsCamera>>,
+) {
+    let Ok(mut state) = cam.single_mut() else {
         return;
     };
-    let (w, d) = heightmap.world_size();
-
-    // Pointer battery (west half), initialised once per director life.
-    if director.pointer_slots.is_empty() {
-        for i in 0..6 {
-            let x = w * (0.16 + 0.05 * (i % 3) as f32);
-            let z = d * (0.28 + 0.22 * (i / 3) as f32);
-            director.pointer_slots.push((None, Vec3::new(x, 0.0, z)));
-        }
+    let dt = time.delta_secs();
+    director.clock += dt;
+    // A freshly loaded map invalidates the old point of interest.
+    if bounds.is_changed() {
+        director.target = None;
+        director.retarget_in = 0.0;
     }
-
-    // Replace lost Pointers at their home position — the user-visible
-    // rule "if any unit dies, it is replaced".
-    for slot in &mut director.pointer_slots {
-        let alive = slot
-            .0
-            .is_some_and(|e| units.get(e).is_ok());
-        if !alive {
-            let pos = heightmap.place(slot.1.x, slot.1.z);
-            slot.0 = Some(spawn_unit(
-                UnitKind::Pointer,
-                Faction::System,
-                0,
-                pos,
-                &mut ctx,
-            ));
-        }
+    director.retarget_in -= dt;
+    if director.retarget_in <= 0.0 || director.target.is_none() {
+        director.retarget_in = ATTRACT_DWELL;
+        let pick = |n: usize| ((rand_01() * n as f32) as usize).min(n.saturating_sub(1));
+        let fighting: Vec<Vec3> = fighters.iter().map(|g| g.translation()).collect();
+        let homes: Vec<Vec3> = bases.iter().map(|g| g.translation()).collect();
+        director.target = if !fighting.is_empty() {
+            Some(fighting[pick(fighting.len())])
+        } else if !homes.is_empty() {
+            Some(homes[pick(homes.len())])
+        } else {
+            Some((bounds.min + bounds.max) * 0.5)
+        };
     }
-
-    // Flow swarm (east half): spawn on a timer while under the cap.
-    director.flow_timer -= time.delta_secs();
-    if director.flow_timer <= 0.0 {
-        director.flow_timer = DEMO_FLOW_SPAWN_INTERVAL;
-        if flows.iter().count() < DEMO_FLOW_CAP {
-            let x = w * (0.62 + 0.25 * rand_01());
-            let z = d * (0.15 + 0.70 * rand_01());
-            let ground = heightmap.place(x, z);
-            let alt = ctx
-                .unit_registry
-                .cruise_alt(UnitKind::Flow)
-                .max(60.0);
-            let entity = spawn_unit(
-                UnitKind::Flow,
-                Faction::Network,
-                1,
-                ground + Vec3::Y * alt,
-                &mut ctx,
-            );
-            ctx.commands.entity(entity).insert(DemoFlow);
-        }
+    if let Some(target) = director.target {
+        let to = target - state.focus;
+        let step = ATTRACT_GLIDE_SPEED * dt;
+        state.focus = if to.length() <= step {
+            target
+        } else {
+            state.focus + to.normalize() * step
+        };
     }
+    state.yaw += ATTRACT_ORBIT_SPEED * dt;
+    state.pitch = 0.62;
+    // Slow breathing zoom so the shot doesn't feel static.
+    state.distance = 1250.0 + 250.0 * (director.clock * 0.07).sin();
 }
 
 /// Deterministic-enough per-call jitter (menu demo only; gameplay uses

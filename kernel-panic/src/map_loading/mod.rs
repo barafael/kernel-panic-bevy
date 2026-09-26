@@ -26,7 +26,7 @@ use crate::{
         mesh::generate_terrain_chunks,
     },
     ui,
-    units::lifecycle::spawning::{spawn_homebases, spawn_showcase_homebase},
+    units::lifecycle::spawning::{spawn_demo_squads, spawn_homebases, spawn_showcase_homebase},
 };
 use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 
@@ -218,11 +218,16 @@ fn prepare_game_entry(world: &mut World) {
     use crate::game_setup::GameOverDismissed;
     use crate::units::lifecycle::game_over::GameState;
 
-    // Seat 0 is the local player; its ally team drives input, the
-    // game-over check and the fog/cloak perspective. The difficulty
-    // the menu picked drives the AI.
+    // The human seat's ally team drives input, the game-over check and
+    // the fog/cloak perspective; with no human seat (the menu's
+    // attract-mode demo) the local player spectates. The difficulty the
+    // menu picked drives the AI.
     let setup = world.resource::<GameSetup>().clone();
-    let local_team = setup.players.first().map_or(0, |p| p.team);
+    let local_team = setup
+        .players
+        .iter()
+        .find(|p| !p.ai)
+        .map_or(crate::game_setup::SPECTATOR_TEAM, |p| p.team);
     world.resource_mut::<crate::units::player::LocalTeam>().0 = local_team;
     world.resource_mut::<crate::units::mechanics::cloak::PlayerTeam>().0 =
         crate::units::components::TeamId(local_team);
@@ -778,11 +783,12 @@ fn spawn_map_world(
         apply_atmosphere(map_info, &mut ctx.commands);
         apply_fog(map_info, parsed, fog_query);
         if setup.demo {
-            // Attract-mode demo: no bases, no win/lose — the menu's
-            // demo director (ui::menu) spawns the cast and replaces
-            // losses.
-            info!("  Demo match — skipping base spawn");
-            // Clear any leftover showcase director from a previous game.
+            // Attract-mode demo: an all-AI skirmish behind the menu.
+            // Each seat gets a starting squad so there is action to
+            // watch before the first production cycle completes; the
+            // menu's demo director restarts the match once it's decided.
+            let bases = spawn_homebases(&heightmap, map_info, &setup.players, ctx);
+            spawn_demo_squads(&heightmap, &bases, ctx);
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();
         } else if let Some(faction) = setup.showcase {

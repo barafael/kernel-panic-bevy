@@ -28,7 +28,7 @@
 //!    nearest enemy, NX Flags on crowds, and Bug ↔ Exploit deploys.
 
 mod army;
-mod build_orders;
+pub(crate) mod build_orders;
 mod expansion;
 mod specials;
 

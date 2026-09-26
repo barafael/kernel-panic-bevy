@@ -78,10 +78,11 @@ impl Plugin for UnitsPlugin {
             .add_plugins(weapon_fx::WeaponFxPlugin)
             .add_systems(
                 FixedUpdate,
+                // Also runs in `AppState::Menu`: the attract-mode demo
+                // behind the menu is an all-AI skirmish.
                 ai::ai_brain
                     .before(GameplaySet::Produce)
-                    .run_if(in_state(game_over::GameState::Playing))
-                    .run_if(in_state(crate::game_setup::AppState::InGame)),
+                    .run_if(in_state(game_over::GameState::Playing)),
             )
             .configure_sets(
                 FixedUpdate,

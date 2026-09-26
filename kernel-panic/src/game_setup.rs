@@ -27,9 +27,8 @@ pub struct PlayerSpec {
     /// Ally team. Players sharing a team are friendly (the local player
     /// is always team 0).
     pub team: u8,
-    /// AI seats never run the local input path; reserved for future
-    /// ally support (an AI seat on the local team).
-    #[allow(dead_code)]
+    /// AI seats never run the local input path. A setup without any
+    /// human seat is spectated (see [`SPECTATOR_TEAM`]).
     pub ai: bool,
 }
 
@@ -44,9 +43,9 @@ pub struct GameSetup {
     /// 1 Easy … 4 Extreme. Drives the AI fairness slack (`AiDifficulty`
     /// mirrors it at match start); enemy count comes from the grouping.
     pub difficulty: u8,
-    /// Menu attract-mode demo: no homebases, no win/lose — the menu's
-    /// demo director spawns the cast instead (`ui::menu::demo_director`).
-    #[allow(dead_code)]
+    /// Menu attract-mode demo: an all-AI skirmish with no win/lose
+    /// screen — the menu's demo director (`ui::menu::demo_director`)
+    /// restarts it once decided.
     pub demo: bool,
     /// Showcase mode: spawn only the given faction's homebase on
     /// Data_Cache_L1, then instruct its factory to produce one of each
@@ -78,24 +77,28 @@ impl Default for GameSetup {
     }
 }
 
-/// The main-menu attract-mode setup: a live skirmish map with no
-/// homebases. The demo director keeps Flows spawning into Pointer fire;
-/// anything that dies is replaced, so the battle never ends.
+/// Local "team" when no seat is human (the menu's attract-mode demo):
+/// no unit ever carries it, so every seat is an opponent the AI drives
+/// and the player only watches.
+pub const SPECTATOR_TEAM: u8 = u8::MAX;
+
+/// The main-menu attract-mode setup: a random all-AI skirmish on a
+/// weighted-random map — 2 to 4 seats of random factions, each on its
+/// own team, played by the AI while the player spectates. The menu's
+/// demo director restarts it with a fresh roll once it's decided.
 pub fn demo_setup() -> GameSetup {
+    const FACTIONS: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
+    let seats = 2 + (rand_f64() * 3.0) as u8;
+    let players = (0..seats)
+        .map(|i| PlayerSpec {
+            faction: FACTIONS[(rand_f64() * 3.0) as usize % 3],
+            team: 1 + i,
+            ai: true,
+        })
+        .collect();
     GameSetup {
         map: random_weighted_map(),
-        players: vec![
-            PlayerSpec {
-                faction: Faction::System,
-                team: 0,
-                ai: false,
-            },
-            PlayerSpec {
-                faction: Faction::Network,
-                team: 1,
-                ai: true,
-            },
-        ],
+        players,
         difficulty: 2,
         demo: true,
         showcase: None,
@@ -251,7 +254,7 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
 pub fn describe_setup(config: &SkirmishConfig) -> String {
     let enemies = config.grouping.enemies(config.difficulty);
     format!(
-        "{}: 1v{} - Player is nº0 in [0..{}] and {:?}",
+        "{}: 1v{} - Player is #0 in [0..{}] and {:?}",
         config.grouping.setup_name(config.difficulty),
         enemies,
         enemies,

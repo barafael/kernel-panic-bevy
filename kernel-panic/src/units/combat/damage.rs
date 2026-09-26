@@ -274,7 +274,7 @@ pub fn tick_burst_fire(
             delayed_hit,
             build_arc: false,
         });
-        commands.entity(entity).insert(JustFired);
+        commands.entity(entity).try_insert(JustFired);
 
         burst.shots_remaining -= 1;
         if burst.shots_remaining == 0 {
@@ -336,7 +336,7 @@ fn apply_hit(
         {
             charge.0 += leak;
             if charge.0 >= max_hp {
-                commands.entity(target).insert(Stunned {
+                commands.entity(target).try_insert(Stunned {
                     remaining: paralyze_time,
                 });
             }
@@ -430,7 +430,11 @@ pub fn apply_damage(
                         &protected_q,
                         &mut commands,
                     );
-                    commands.entity(target).insert(IdleTimer(0.0));
+                    // Why `try_insert` on hit markers: a victim can be
+                    // despawned by an earlier command in the same flush
+                    // (death cleanup, Bug/Exploit morph), and a plain
+                    // insert on a dead entity panics the app.
+                    commands.entity(target).try_insert(IdleTimer(0.0));
                 }
                 hit
             }
@@ -497,12 +501,12 @@ pub fn apply_damage(
                     &protected_q,
                     &mut commands,
                 );
-                commands.entity(entity).insert(IdleTimer(0.0));
+                commands.entity(entity).try_insert(IdleTimer(0.0));
                 if infect
                     && let (Some(duration), Some((_, attacker_faction, attacker_team))) =
                         (infection_window, attacker_info)
                 {
-                    commands.entity(entity).insert(Infected {
+                    commands.entity(entity).try_insert(Infected {
                         timer: duration,
                         attacker_faction: *attacker_faction,
                         attacker_team: attacker_team.0,
@@ -526,7 +530,7 @@ pub fn apply_damage(
                 .get(target)
                 .is_ok_and(|ut| ut.0 == UnitKind::Virus);
             if !target_is_virus {
-                commands.entity(target).insert(Infected {
+                commands.entity(target).try_insert(Infected {
                     timer: duration,
                     attacker_faction: *attacker_faction,
                     attacker_team: attacker_team.0,

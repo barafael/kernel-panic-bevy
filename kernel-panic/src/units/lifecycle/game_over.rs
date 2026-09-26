@@ -68,9 +68,9 @@ fn outcome(census: &HashMap<u8, TeamCensus>, local: u8) -> Option<GameState> {
 /// `ExplodeAs`), the same route self-destruct takes.
 ///
 /// The local player's **Defeat** / **Victory** follows from it (see
-/// [`outcome`]). Maps with no factories at all (test / sandbox variants,
-/// the menu demo) never kill or flip state; neither does showcase mode.
-/// Once the player dismisses the game-over panel ("Keep on playing") the
+/// [`outcome`]). Maps with no factories at all (test / sandbox variants)
+/// never kill or flip state; neither does showcase mode. The menu's
+/// all-AI demo eliminates but never flips state. Once the player dismisses the game-over panel ("Keep on playing") the
 /// state stops re-triggering, but eliminations continue. Teams without
 /// a seat in [`GameSetup::players`] (map-event neutrals) are never
 /// counted or killed.
@@ -84,8 +84,10 @@ pub fn check_game_over(
     mut units: Query<(&TeamId, &UnitType, &mut Health), Without<Dying>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
-    // Showcase / demo: no win/lose — run forever.
-    if setup.showcase.is_some() || setup.demo {
+    // Showcase: no win/lose — run forever. The menu demo still
+    // eliminates beaten seats (so its battles resolve) but never shows
+    // a result; its director restarts the match instead.
+    if setup.showcase.is_some() {
         return;
     }
     *since_check += time.delta_secs();
@@ -123,7 +125,7 @@ pub fn check_game_over(
         }
     }
 
-    if dismissed.0 {
+    if dismissed.0 || setup.demo {
         return;
     }
     if let Some(state) = outcome(&census, local.0) {

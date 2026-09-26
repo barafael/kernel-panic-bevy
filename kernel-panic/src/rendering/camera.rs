@@ -225,13 +225,13 @@ pub fn camera_control(
             &Camera,
             &GlobalTransform,
             &mut RtsCameraState,
-            &mut Transform,
+            &Transform,
         ),
         With<RtsCamera>,
     >,
     mut drag: Local<MiddleDrag>,
 ) {
-    let Ok((camera, cam_gxf, mut state, mut transform)) = query.single_mut() else {
+    let Ok((camera, cam_gxf, mut state, transform)) = query.single_mut() else {
         return;
     };
     let Ok(window) = windows.single() else {
@@ -346,8 +346,21 @@ pub fn camera_control(
         state.yaw -= settings.rotate_speed_keys * delta_time;
     }
 
-    // --- Smooth interpolation ---
-    let t = (settings.smoothing * delta_time).min(1.0);
+}
+
+/// Ease the rendered camera toward the target state and write its
+/// transform. Split from [`camera_control`] so it keeps running when
+/// player input is off (the menu's attract-mode camera drives the
+/// targets instead).
+pub fn camera_smoothing(
+    time: Res<Time>,
+    settings: Res<CameraSettings>,
+    mut query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+) {
+    let Ok((mut state, mut transform)) = query.single_mut() else {
+        return;
+    };
+    let t = (settings.smoothing * time.delta_secs()).min(1.0);
     state.smooth_focus = state.smooth_focus.lerp(state.focus, t);
     state.smooth_distance = state.smooth_distance.lerp(state.distance, t);
     state.smooth_yaw = state.smooth_yaw.lerp(state.yaw, t);

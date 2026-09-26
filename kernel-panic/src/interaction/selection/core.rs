@@ -22,6 +22,13 @@ impl Plugin for SelectionCorePlugin {
                 )
                     .chain(),
             )
+            // No picking or ordering in the menu: clicks there belong to
+            // the menu buttons, and the demo behind it is all-AI.
+            .configure_sets(
+                Update,
+                (SelectionSet::Hover, SelectionSet::Select, SelectionSet::RightClick)
+                    .run_if(in_state(crate::game_setup::AppState::InGame)),
+            )
             .add_systems(
                 Update,
                 (
