@@ -157,8 +157,8 @@ read the resulting state.
   no engagement.
 - Exploit's BugCannon (anti-swarm artillery) instead picks the
   *farthest* enemy (negative `proximityPriority`).
-- "Friendly" = same team **or** same faction; allies don't shoot each
-  other (faction + team friend-or-foe).
+- "Friendly" = same ally team; allies don't shoot each
+  other (team friend-or-foe; factions don't matter).
 - Most ground weapons don't chase flying targets — Flow can zip past
   them safely (`NoChaseCategory=VTOL`). The pointer is the exception —
   its projectile is homing (for air and ground units).
