@@ -9,7 +9,8 @@
 //! `OrderCursorModes::attack_move`, Self-destruct inserts
 //! `SelfDestructCountdown`. Command-fire abilities require a target
 //! position, so the palette button just toggles the same mode the
-//! hotkey would: the next ground click commits.
+//! hotkey would: the next ground click commits. Selections with a Worm
+//! also get the AutoHold toggle (`H`).
 
 use bevy::prelude::*;
 
@@ -23,6 +24,7 @@ use crate::units::combat::{
 };
 use crate::units::components::UnitType;
 use crate::units::lifecycle::construction::PendingBuild;
+use crate::units::mechanics::worm::AutoHold;
 
 use super::super::theme::*;
 
@@ -85,6 +87,10 @@ enum OrderKind {
     /// Clear the manual target designation (`X`).
     UnsetTarget,
     SelfDestruct,
+    /// Toggle AutoHold (upstream autohold.lua `CMD_AUTOHOLD`) on the
+    /// selected Worms: while on, a cloaked worm holds fire until given
+    /// an explicit attack order. Shown only when a Worm is selected.
+    AutoHold,
     /// Cast the contextual D-ability (caster only).
     /// We can't drive command-fire from here without a target click —
     /// pressing the button just enables `OrderCursorModes::attack_ground`
@@ -105,6 +111,7 @@ impl OrderKind {
             OrderKind::SetTarget => "Target",
             OrderKind::UnsetTarget => "Unset",
             OrderKind::SelfDestruct => "Detonate",
+            OrderKind::AutoHold => "AutoHold",
             OrderKind::Ability => "Ability",
         }
     }
@@ -119,6 +126,7 @@ impl OrderKind {
             OrderKind::SetTarget => "T",
             OrderKind::UnsetTarget => "X",
             OrderKind::SelfDestruct => "Ctrl+D",
+            OrderKind::AutoHold => "H",
             OrderKind::Ability => "D",
         }
     }
@@ -255,6 +263,7 @@ fn refresh_panel(
 /// the newly-spawned button next frame.
 fn update_armed_highlight(
     modes: Res<OrderCursorModes>,
+    autohold_q: Query<&AutoHold, With<Selected>>,
     mut buttons: Query<(
         &OrderButton,
         &mut BorderColor,
@@ -267,7 +276,8 @@ fn update_armed_highlight(
             || (matches!(button.0, OrderKind::Fight) && modes.attack_move)
             || (matches!(button.0, OrderKind::Guard) && modes.guard)
             || (matches!(button.0, OrderKind::Move) && modes.move_order)
-            || (matches!(button.0, OrderKind::SetTarget) && modes.set_target);
+            || (matches!(button.0, OrderKind::SetTarget) && modes.set_target)
+            || (matches!(button.0, OrderKind::AutoHold) && autohold_on(&autohold_q));
         let target_border = if armed { KP_GREEN } else { PANEL_BORDER };
         let target_bg = if armed { BUTTON_BG_PRESSED } else { BUTTON_BG };
         let target_width = if armed { 2.0 } else { 1.0 };
@@ -283,11 +293,16 @@ fn handle_clicks(
     interactions: Query<(&Interaction, &OrderButton), Changed<Interaction>>,
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<Entity, With<Selected>>,
+    mut autohold_q: Query<&mut AutoHold, With<Selected>>,
     mut modes: ResMut<OrderCursorModes>,
 ) {
     // Keyboard hotkey: S issues Stop (mirrors the Stop button).
     if keys.just_pressed(KeyCode::KeyS) {
         stop_selection(&mut commands, &selected_q, &mut modes);
+    }
+    // H toggles AutoHold (mirrors the AutoHold button).
+    if keys.just_pressed(KeyCode::KeyH) {
+        toggle_autohold(&mut autohold_q);
     }
 
     for (interaction, button) in &interactions {
@@ -362,6 +377,7 @@ fn handle_clicks(
                 }
                 modes.set_target = false;
             }
+            OrderKind::AutoHold => toggle_autohold(&mut autohold_q),
             OrderKind::SelfDestruct => {
                 for entity in &selected_q {
                     commands.entity(entity).insert(SelfDestructCountdown {
@@ -403,6 +419,21 @@ fn stop_selection(
     modes.set_target = false;
 }
 
+/// True when every selected AutoHold unit has the toggle on (and at
+/// least one is selected) — the button's lit state.
+fn autohold_on(autohold_q: &Query<&AutoHold, With<Selected>>) -> bool {
+    !autohold_q.is_empty() && autohold_q.iter().all(|a| a.0)
+}
+
+/// Flip AutoHold for the whole selection as one group: all on → all off,
+/// otherwise all on (a mixed group converges instead of inverting).
+fn toggle_autohold(autohold_q: &mut Query<&mut AutoHold, With<Selected>>) {
+    let next = !autohold_q.iter().all(|a| a.0);
+    for mut hold in autohold_q.iter_mut() {
+        hold.0 = next;
+    }
+}
+
 struct OrderSnapshot {
     entries: Vec<OrderKind>,
 }
@@ -414,11 +445,12 @@ impl OrderSnapshot {
         }
 
         let mut has_caster = false;
+        let mut has_autohold = false;
         for ut in selected_q {
             if ut.0.has_command_fire_ability() || ut.0.deploy_pair().is_some() {
                 has_caster = true;
-                break;
             }
+            has_autohold |= ut.0.has_autohold();
         }
 
         let mut entries = vec![
@@ -431,6 +463,9 @@ impl OrderSnapshot {
             OrderKind::UnsetTarget,
             OrderKind::SelfDestruct,
         ];
+        if has_autohold {
+            entries.push(OrderKind::AutoHold);
+        }
         if has_caster {
             entries.push(OrderKind::Ability);
         }

@@ -17,6 +17,20 @@ const STRIKE_DEPTH: f32 = 16.0;
 const STRIKE_SPEED: f32 = 48.0;
 /// ATTACK_RETRACT [24] — retract speed.
 const STRIKE_RETRACT: f32 = 24.0;
+/// ResetAim(): `sleep 2000` after the last AimWeapon1 before the head
+/// sinks back. The gameplay half (speed + re-cloak) runs on the same
+/// clock in `mechanics::worm::tick_worm_surfacing`.
+const RESET_AIM_SLEEP: f32 = 2.0;
+/// Body heading slack (rad) for `wait-for-turn body around y-axis`:
+/// the host re-issues the heading every frame against a moving target,
+/// so an exact match would never settle.
+const AIM_BODY_TOLERANCE: f32 = 0.2;
+
+/// Absolute shortest-arc difference between two angles (rad).
+fn angle_delta(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(std::f32::consts::TAU);
+    d.min(std::f32::consts::TAU - d)
+}
 
 #[derive(Clone, Copy, Default)]
 struct WormPieces {
@@ -56,8 +70,15 @@ impl WormPieces {
 #[derive(Default)]
 pub struct WormAnim {
     pieces: WormPieces,
-    /// Walking-wave enabled (mirrors doMove).
+    /// Walking-wave running (mirrors `moving`: the Walkanim loop).
     walking: bool,
+    /// Move order active (mirrors doMove) — resumes the wave once the
+    /// aim resets.
+    do_move: bool,
+    /// Surfaced for an aim (mirrors `aiming`); cleared by ResetAim.
+    surfaced: bool,
+    /// Seconds since the last AimWeapon1 call.
+    since_aim: f32,
     /// Current wave step (six segments per loop).
     phase: usize,
     phase_timer: f32,
@@ -98,11 +119,29 @@ impl UnitAnim for WormAnim {
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         // Cloaked idle crouch (Create()/ResetAim(): head y [-16] @12)
         // once the emerge completes.
-        if !self.crouched && ctx.build_percent <= 0 && self.strike.is_none() && !self.walking {
+        if !self.crouched
+            && !self.surfaced
+            && ctx.build_percent <= 0
+            && self.strike.is_none()
+            && !self.walking
+        {
             self.crouched = true;
             rig.move_to(self.pieces.head, Axis::Y, -16.0, 12.0);
         }
         self.death.tick(ctx.dt);
+
+        // ResetAim(): 2 s without an aim → body straight, head back
+        // down, and the wave resumes if a move order is still active.
+        self.since_aim += ctx.dt;
+        if self.surfaced && self.strike.is_none() && self.since_aim >= RESET_AIM_SLEEP {
+            self.surfaced = false;
+            rig.turn_deg(self.pieces.body, Axis::Y, 0.0, 360.0);
+            rig.move_to(self.pieces.head, Axis::Y, -16.0, 12.0);
+            if self.do_move {
+                self.walking = true;
+                self.phase_timer = 0.0;
+            }
+        }
 
         if let Some(t) = &mut self.strike {
             *t += ctx.dt;
@@ -118,12 +157,8 @@ impl UnitAnim for WormAnim {
                     rig.move_to(self.pieces.end, Axis::Z, 0.0, STRIKE_RETRACT);
                 }
             } else {
+                // The head stays surfaced until ResetAim sinks it.
                 self.strike = None;
-                if self.walking {
-                    self.set_wave(rig);
-                } else {
-                    self.crouched = false; // re-crouch next tick
-                }
             }
         } else if self.walking {
             self.phase_timer -= ctx.dt;
@@ -137,7 +172,8 @@ impl UnitAnim for WormAnim {
 
     fn start_moving(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // StartMoving(): doMove=1; Walkanim() unless aiming.
-        if self.strike.is_none() {
+        self.do_move = true;
+        if self.strike.is_none() && !self.surfaced {
             self.walking = true;
             self.phase_timer = 0.0;
         }
@@ -145,6 +181,7 @@ impl UnitAnim for WormAnim {
 
     fn stop_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // StopMoving(): doMove=0 — the wave runs out and flattens.
+        self.do_move = false;
         self.walking = false;
         if self.strike.is_none() {
             for segment in self.pieces.segments() {
@@ -154,16 +191,30 @@ impl UnitAnim for WormAnim {
     }
 
     fn aim(&mut self, rig: &mut AnimRig, h: f32, p: f32, _ctx: AnimCtx) -> bool {
-        // AimWeapon1: surface the head, yaw the body; a strike blocks.
+        // AimWeapon1: restart the ResetAim clock, then surface the head
+        // and yaw the body; a strike in flight (`shooting`) returns 0.
+        self.since_aim = 0.0;
         if self.strike.is_some() {
             return false;
         }
-        self.walking = false;
-        self.flatten(rig);
+        // The Create() crouch is skipped once an aim has happened.
+        self.crouched = true;
+        if !self.surfaced {
+            self.surfaced = true;
+            self.walking = false;
+            self.flatten(rig);
+        }
         rig.move_to(self.pieces.head, Axis::Y, 0.0, 12.0);
         rig.turn_rad(self.pieces.body, Axis::Y, h, deg2rad(800.0));
         let _ = p;
-        true
+        // `wait-for-move head along y-axis; wait-for-turn body` — the
+        // bite only commits once the head is fully up (the ~1.3 s
+        // surfacing telegraph) and the body faces the target.
+        let body_on = rig
+            .piece_rotations
+            .get(self.pieces.body)
+            .is_none_or(|r| angle_delta(r[1], h) <= AIM_BODY_TOLERANCE);
+        rig.at_target(self.pieces.head, Axis::Y) && body_on
     }
 
     fn fire(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {

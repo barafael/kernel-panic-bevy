@@ -367,12 +367,13 @@ pub fn apply_damage(
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
     mut commands: Commands,
-    mut splash_hits: Local<Vec<(Entity, f32)>>,
+    mut splash_hits: Local<Vec<(Entity, f32, bool)>>,
 ) {
     for pending in damage_queue.drain() {
         // Ids are interned through this same registry — infallible.
         let weapon_def = weapon_registry.by_id(pending.weapon);
         let weapon_name = weapon_registry.name(pending.weapon);
+        let infection_window = weapon_infection_duration(weapon_name);
 
         let base = |kind: UnitKind| {
             weapon_def.damage.for_type(kind.armor_class().key())
@@ -466,9 +467,16 @@ pub fn apply_damage(
                 // no ECS re-fetch needed per splash candidate.
                 let kind = candidate.kind;
                 let splash = base(kind) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
-                splash_hits.push((candidate.entity, splash));
+                // infection.lua keys on `UnitDamaged`, which fires for
+                // every unit an explosion touches — splash victims of an
+                // infector (Wormsplash, VirusDeath) are infected too, as
+                // long as they're on another team and not a Virus.
+                let infect = infection_window.is_some()
+                    && kind != UnitKind::Virus
+                    && attacker_info.is_some_and(|(_, _, a_team)| candidate.team != a_team.0);
+                splash_hits.push((candidate.entity, splash, infect));
             });
-            for (entity, splash) in splash_hits.drain(..) {
+            for (entity, splash, infect) in splash_hits.drain(..) {
                 let amount = splash
                     * byte_closed_damage_multiplier(
                         entity,
@@ -490,6 +498,16 @@ pub fn apply_damage(
                     &mut commands,
                 );
                 commands.entity(entity).insert(IdleTimer(0.0));
+                if infect
+                    && let (Some(duration), Some((_, attacker_faction, attacker_team))) =
+                        (infection_window, attacker_info)
+                {
+                    commands.entity(entity).insert(Infected {
+                        timer: duration,
+                        attacker_faction: *attacker_faction,
+                        attacker_team: attacker_team.0,
+                    });
+                }
             }
         }
 
@@ -501,7 +519,7 @@ pub fn apply_damage(
         // shouldn't infect the intended target.
         if target_hit
             && let Some(target) = pending.target
-            && let Some(duration) = weapon_infection_duration(weapon_name)
+            && let Some(duration) = infection_window
             && let Some((_, attacker_faction, attacker_team)) = attacker_info
         {
             let target_is_virus = target_unit_q
@@ -939,5 +957,77 @@ mod tests {
             "combat_system must not clear pre-existing queue entries — \
              they are delivered by the next apply_damage drain",
         );
+    }
+    /// Why: upstream infection.lua infects on every `UnitDamaged` from an
+    /// infector weapon, so a target-less Wormsplash detonation (worm.bos
+    /// `emit-sfx 4097`) must tag enemy splash victims with `Infected` —
+    /// that is what turns Worm kills into Viruses. Friendlies are
+    /// skipped by `avoidfriendly=1` and never infected.
+    #[test]
+    fn wormsplash_splash_infects_enemy_victims() {
+        use crate::units::spatial::SpatialEntry;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<DamageQueue>()
+            .init_resource::<SpatialIndex>()
+            .insert_resource(UnitRegistry::empty());
+        let mut weapons = WeaponRegistry::default();
+        let splash = weapons.insert_for_test(
+            "Wormsplash",
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 800.0,
+                    ..Default::default()
+                },
+                area_of_effect: 210.0,
+                edge_effectiveness: 1.0,
+                avoid_friendly: true,
+                ..Default::default()
+            },
+        );
+        app.insert_resource(weapons);
+
+        let worm = app
+            .world_mut()
+            .spawn((UnitType(UnitKind::Worm), Faction::Hacker, TeamId(1)))
+            .id();
+        let enemy = app.world_mut().spawn(Health::full(1000.0)).id();
+        let friend = app.world_mut().spawn(Health::full(1000.0)).id();
+        for (entity, team, x) in [(enemy, 0u8, 50.0), (friend, 1u8, -50.0)] {
+            app.world_mut()
+                .resource_mut::<SpatialIndex>()
+                .insert_for_test(SpatialEntry {
+                    entity,
+                    pos: Vec3::new(x, 0.0, 0.0),
+                    team,
+                    kind: UnitKind::Bit,
+                    hp_positive: true,
+                    is_flying: false,
+                    cloaked: false,
+                    detected_by: 0,
+                });
+        }
+        app.world_mut()
+            .resource_mut::<DamageQueue>()
+            .push(PendingDamage {
+                target: None,
+                attacker: worm,
+                weapon: splash,
+                impact_pos: Vec3::ZERO,
+                attacker_distance: 0.0,
+            });
+
+        app.world_mut().run_system_once(apply_damage).unwrap();
+
+        // edgeeffectiveness=1: full 800 anywhere inside the 210 radius.
+        let hp = app.world().get::<Health>(enemy).unwrap().current;
+        assert!((hp - 200.0).abs() < 1e-3, "enemy took {hp}");
+        let infected = app.world().get::<Infected>(enemy).expect("enemy infected");
+        assert_eq!(infected.attacker_team, 1);
+        assert!((infected.timer - 200.0 / 30.0).abs() < 1e-4);
+
+        assert!((app.world().get::<Health>(friend).unwrap().current - 1000.0).abs() < 1e-3);
+        assert!(app.world().get::<Infected>(friend).is_none());
     }
 }

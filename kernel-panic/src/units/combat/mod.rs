@@ -22,6 +22,8 @@ use super::components::{TeamId, UnitStats, UnitType};
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
 use super::lifecycle::script_triggers::JustFired;
+use super::mechanics::cloak::{Cloaked, DetectedBy};
+use super::mechanics::worm::{AutoHold, WormSplash, queue_wormsplash};
 use super::spatial::SpatialIndex;
 use super::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
 use crate::rng::next_signed;
@@ -131,6 +133,30 @@ pub struct TargetCache {
 pub struct TargetCachePick<'w, 's> {
     pub cache: Query<'w, 's, &'static TargetCache>,
     pub alive: Query<'w, 's, &'static GlobalTransform, (With<UnitType>, Without<Dying>)>,
+    /// Detection mask of every currently cloaked unit — a cached or
+    /// designated target that burrows out of detector range is dropped.
+    pub cloaked: Query<'w, 's, &'static DetectedBy, With<Cloaked>>,
+}
+
+impl TargetCachePick<'_, '_> {
+    /// Position of `target` if it is alive and `team` can currently see
+    /// it (not an undetected cloaked unit).
+    fn visible_pos(&self, target: Entity, team: u8) -> Option<Vec3> {
+        if self.cloaked.get(target).is_ok_and(|d| !d.contains(team)) {
+            return None;
+        }
+        self.alive.get(target).ok().map(GlobalTransform::translation)
+    }
+}
+
+/// The player's explicit targets for a unit: the `T` designation and the
+/// right-click attack order. Both override auto-acquisition once in
+/// range (Spring's `CMD_ATTACK` / `CMD_SET_TARGET` set the weapon's
+/// target directly), and both still fire under hold-fire.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct ExplicitTargets<'w, 's> {
+    pub forced: Query<'w, 's, &'static ForcedTarget>,
+    pub ordered: Query<'w, 's, &'static AttackTargetOrder>,
 }
 
 /// Grouped piece-lookup queries for muzzle position, body animator,
@@ -228,14 +254,14 @@ pub fn combat_system(
             Option<&Deployable>,
             Option<&AimScript>,
             Option<&WeaponBinding>,
+            Has<Cloaked>,
+            Option<&AutoHold>,
+            Option<&WormSplash>,
         ),
         (
             Without<Dying>,
             Without<super::lifecycle::spawning::Emerging>,
             Without<Stunned>,
-            // Why: cloaked units (Worm, Logic Bomb) hold fire by
-            // default — FEATURES.md §20 / upstream `autohold`.
-            Without<crate::units::mechanics::cloak::Cloaked>,
         ),
     >,
     mut commands: Commands,
@@ -244,7 +270,7 @@ pub fn combat_system(
     mut pending_attacks: ResMut<PendingAttacks>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
-    forced_q: Query<&ForcedTarget>,
+    explicit: ExplicitTargets,
     heightmap: Option<Res<Heightmap>>,
     pieces: PieceLookup,
     target_pick: TargetCachePick,
@@ -283,8 +309,21 @@ pub fn combat_system(
         deployable,
         aim_script,
         weapon_binding,
+        cloaked,
+        autohold,
+        worm_splash,
     ) in &attackers
     {
+        // Why: a cloaked unit without a surfacing script (Logic Bomb)
+        // never fires — it detonates via `tick_kamikaze`. A cloaked Worm
+        // may still pick a target (below) and surfaces to bite.
+        if cloaked && autohold.is_none() {
+            continue;
+        }
+        // worm.bos `STANDINGFIREORDERS=0` while cloaked with AutoHold on:
+        // hold fire — only the player's explicit targets engage.
+        let hold_fire = cloaked && autohold.is_some_and(|a| a.0);
+
         // Deployable: keep aiming through Opening so the gun is on
         // target when the state flips, but only fire while Open.
         let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
@@ -339,11 +378,12 @@ pub fn combat_system(
 
         // Manual target designation (T / set-target) overrides auto-
         // acquisition: in range → fire at it; out of range → track it
-        // with the turret (no fire, no chase); dead → drop the mark.
-        if let Ok(forced) = forced_q.get(entity) {
-            match target_pick.alive.get(forced.0) {
-                Ok(t_gtf) => {
-                    let t_pos = t_gtf.translation();
+        // with the turret (no fire, no chase); dead or hidden under an
+        // undetected cloak → drop the mark (upstream can't target what
+        // it can't see).
+        if let Ok(forced) = explicit.forced.get(entity) {
+            match target_pick.visible_pos(forced.0, attacker_team.0) {
+                Some(t_pos) => {
                     let dist_sq = attacker_pos.distance_squared(t_pos);
                     if dist_sq <= range_sq {
                         best = Some((forced.0, t_pos, dist_sq));
@@ -356,32 +396,50 @@ pub fn combat_system(
                         continue;
                     }
                 }
-                Err(_) => {
+                None => {
                     commands.entity(entity).remove::<ForcedTarget>();
                 }
             }
         }
 
-        if best.is_none() {
+        // Right-click attack order: once `attack_target_system` has
+        // closed to range, shoot the ordered unit rather than whatever
+        // is nearest. Out of range the chase continues and auto-
+        // acquisition below may engage passers-by.
+        if best.is_none()
+            && let Ok(order) = explicit.ordered.get(entity)
+            && let Some(t_pos) = target_pick.visible_pos(order.target, attacker_team.0)
+        {
+            let dist_sq = attacker_pos.distance_squared(t_pos);
+            if dist_sq <= range_sq {
+                best = Some((order.target, t_pos, dist_sq));
+            }
+        }
+
+        if best.is_none() && !hold_fire {
             best = target_pick
                 .cache
                 .get(entity)
                 .ok()
                 .filter(|cache| cache.expires_at > now)
                 .and_then(|cache| {
-                    let gtf = target_pick.alive.get(cache.target).ok()?;
-                    let pos = gtf.translation();
+                    let pos = target_pick.visible_pos(cache.target, attacker_team.0)?;
                     let dist_sq = attacker_pos.distance_squared(pos);
                     (dist_sq <= range_sq).then_some((cache.target, pos, dist_sq))
                 });
         }
 
-        if best.is_none() {
+        if best.is_none() && !hold_fire {
             spatial.query_radius(attacker_pos, range, |candidate| {
                 if !candidate.hp_positive {
                     return;
                 }
                 if candidate.team == attacker_team.0 {
+                    return;
+                }
+                // Undetected cloaked units (Worms, Logic Bombs) are
+                // invisible to this team's weapons.
+                if !candidate.targetable_by(attacker_team.0) {
                     return;
                 }
                 if skip_flying && candidate.is_flying {
@@ -447,7 +505,10 @@ pub fn combat_system(
             arc_height,
         });
 
-        if fire_blocked_by_deploy {
+        // A cloaked Worm never bites from under cover: the aim request
+        // above surfaces it (`tick_worm_surfacing`, worm.bos AimWeapon1
+        // `CLOAKED=FALSE`) and the bite commits on a later tick.
+        if fire_blocked_by_deploy || cloaked {
             continue;
         }
         // Why: upstream `AimWeapon1` contract — return 1 ⇒ allowed
@@ -577,6 +638,15 @@ pub fn combat_system(
                 attacker_distance: distance,
             });
         }
+        if let Some(splash) = worm_splash {
+            queue_wormsplash(
+                &mut damage_queue,
+                entity,
+                splash.0,
+                impact_pos,
+                attacker_pos,
+            );
+        }
         commands.entity(entity).insert((
             AttackCooldown {
                 remaining: cooldown,
@@ -652,6 +722,8 @@ pub fn attack_ground_system(
             Option<&Deployable>,
             Option<&UnitAnimator>,
             Option<&WeaponBinding>,
+            Has<Cloaked>,
+            Option<&WormSplash>,
         ),
         Without<Dying>,
     >,
@@ -661,7 +733,9 @@ pub fn attack_ground_system(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, animator, weapon_binding) in &attackers {
+    for (entity, unit_type, gtf, order, deployable, animator, weapon_binding, cloaked, worm_splash) in
+        &attackers
+    {
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
@@ -726,6 +800,11 @@ pub fn attack_ground_system(
             pos: order.pos,
             arc_height,
         });
+        // Same surfacing rule as `combat_system`: the aim request above
+        // decloaks a Worm; the bite waits for it to be out of cover.
+        if cloaked {
+            continue;
+        }
 
         // Same alignment gates as `combat_system` — body / gunbase /
         // aimer per piece markers. Math mirrors `aim_weapons_system`.
@@ -805,6 +884,9 @@ pub fn attack_ground_system(
                 impact_pos: order.pos,
                 attacker_distance: dist,
             });
+        }
+        if let Some(splash) = worm_splash {
+            queue_wormsplash(&mut damage_queue, entity, splash.0, order.pos, attacker_pos);
         }
         commands.entity(entity).insert((
             AttackCooldown {
@@ -1050,6 +1132,8 @@ mod tests {
                 kind: UnitKind::Socket,
                 hp_positive: true,
                 is_flying: false,
+                cloaked: false,
+                detected_by: 0,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -1091,6 +1175,8 @@ mod tests {
                 kind: UnitKind::Bit,
                 hp_positive: true,
                 is_flying: false,
+                cloaked: false,
+                detected_by: 0,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -1106,5 +1192,200 @@ mod tests {
                 .delayed_hit
                 .is_some()
         );
+    }
+    /// Worm vs Bit registry (no category restrictions — the upstream
+    /// worm.fbi `OnlyTargetCategory1=EDIBLE` would need Bit's category
+    /// too; the cloak rules under test don't depend on it).
+    fn worm_weapons() -> (WeaponRegistry, WeaponId, WeaponId) {
+        let mut weapons = WeaponRegistry::default();
+        let bite = weapons.insert_for_test(
+            "Wormbite",
+            spring_tdf::WeaponDef {
+                weapon_type: "Melee".into(),
+                damage: spring_tdf::DamageMap {
+                    default: 3200.0,
+                    ..Default::default()
+                },
+                range: 200.0,
+                reload_time: 6.0,
+                area_of_effect: 140.0,
+                ..Default::default()
+            },
+        );
+        let splash = weapons.insert_for_test(
+            "Wormsplash",
+            spring_tdf::WeaponDef {
+                weapon_type: "Melee".into(),
+                damage: spring_tdf::DamageMap {
+                    default: 800.0,
+                    ..Default::default()
+                },
+                range: 200.0,
+                area_of_effect: 210.0,
+                edge_effectiveness: 1.0,
+                avoid_friendly: true,
+                ..Default::default()
+            },
+        );
+        (weapons, bite, splash)
+    }
+
+    fn combat_app(weapons: WeaponRegistry) -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .init_resource::<SpatialIndex>()
+            .insert_resource(UnitRegistry::empty())
+            .insert_resource(weapons);
+        app
+    }
+
+    fn enemy_entry(app: &mut App, pos: Vec3, cloaked: bool, detected_by: u64) -> Entity {
+        let enemy = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: enemy,
+                pos,
+                team: 1,
+                kind: UnitKind::Worm,
+                hp_positive: true,
+                is_flying: false,
+                cloaked,
+                detected_by,
+            });
+        enemy
+    }
+
+    fn spawn_bit_shooter(app: &mut App, line: WeaponId) -> Entity {
+        app.world_mut()
+            .spawn((
+                UnitType(UnitKind::Bit),
+                stats(),
+                Faction::System,
+                TeamId(0),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+                WeaponBinding(line),
+            ))
+            .id()
+    }
+
+    /// A cloaked enemy is invisible to auto-targeting until the
+    /// shooter's team has a detector on it (`DetectedBy` bit set).
+    #[test]
+    fn undetected_cloaked_enemy_is_not_auto_targeted() {
+        // --- Detected only by team 1 (its own side): ignored. ---
+        let mut app = combat_app(line_weapon_registry());
+        let line = app.world().resource::<WeaponRegistry>().intern("Line").unwrap();
+        let bit = spawn_bit_shooter(&mut app, line);
+        enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), true, 0b10);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert!(app.world().get::<TargetCache>(bit).is_none());
+        assert!(app.world().get::<AimTarget>(bit).is_none());
+
+        // --- Detected by team 0: acquired. ---
+        let mut app = combat_app(line_weapon_registry());
+        let bit = spawn_bit_shooter(&mut app, line);
+        let worm = enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), true, 0b01);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(app.world().get::<TargetCache>(bit).unwrap().target, worm);
+    }
+
+    /// AutoHold OFF (AI worms): a cloaked worm acquires on its own and
+    /// stamps the aim request that surfaces it — but never bites from
+    /// under cover. AutoHold ON (human worms): holds fire entirely.
+    #[test]
+    fn cloaked_worm_autohold_gates_auto_targeting() {
+        for hold in [false, true] {
+            let (weapons, bite, splash) = worm_weapons();
+            let mut app = combat_app(weapons);
+            let worm = app
+                .world_mut()
+                .spawn((
+                    UnitType(UnitKind::Worm),
+                    stats(),
+                    Faction::Hacker,
+                    TeamId(0),
+                    GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+                    WeaponBinding(bite),
+                    WormSplash(splash),
+                    AutoHold(hold),
+                    Cloaked,
+                ))
+                .id();
+            enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), false, 0);
+            app.world_mut().run_system_once(combat_system).unwrap();
+
+            assert_eq!(app.world().get::<AimTarget>(worm).is_some(), !hold, "hold={hold}");
+            assert_eq!(app.world().get::<TargetCache>(worm).is_some(), !hold, "hold={hold}");
+            assert!(app.world().resource::<DamageQueue>().is_empty(), "hold={hold}");
+            assert!(app.world().get::<AttackCooldown>(worm).is_none(), "hold={hold}");
+        }
+    }
+
+    /// An explicit attack order still engages under AutoHold: the
+    /// ordered target in range gets the aim request (which surfaces
+    /// the worm) even though auto-acquisition is off.
+    #[test]
+    fn autohold_worm_engages_ordered_target() {
+        let (weapons, bite, splash) = worm_weapons();
+        let mut app = combat_app(weapons);
+        let enemy = app
+            .world_mut()
+            .spawn((UnitType(UnitKind::Bit), GlobalTransform::from_xyz(100.0, 0.0, 0.0)))
+            .id();
+        let worm = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Worm),
+                stats(),
+                Faction::Hacker,
+                TeamId(0),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+                WeaponBinding(bite),
+                WormSplash(splash),
+                AutoHold(true),
+                Cloaked,
+                AttackTargetOrder { target: enemy },
+            ))
+            .id();
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(app.world().get::<TargetCache>(worm).unwrap().target, enemy);
+        assert!(app.world().get::<AimTarget>(worm).is_some());
+    }
+
+    /// A surfaced worm's bite queues the Wormbite hit plus two target-
+    /// less Wormsplash detonations (worm.bos `emit-sfx 4097 from head`
+    /// and `from end`) so `apply_damage` runs AoE + infection for them.
+    #[test]
+    fn worm_bite_queues_wormsplash_aoe() {
+        let (weapons, bite, splash) = worm_weapons();
+        let mut app = combat_app(weapons);
+        let worm = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Worm),
+                stats(),
+                Faction::Hacker,
+                TeamId(0),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+                WeaponBinding(bite),
+                WormSplash(splash),
+                AutoHold(true),
+            ))
+            .id();
+        let enemy = enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), false, 0);
+        app.world_mut().run_system_once(combat_system).unwrap();
+
+        let queue = app.world().resource::<DamageQueue>();
+        let hits: Vec<_> = queue.iter_snapshot_for_test().collect();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].weapon, bite);
+        assert_eq!(hits[0].target, Some(enemy));
+        let splashes: Vec<_> = hits.iter().filter(|h| h.weapon == splash).collect();
+        assert_eq!(splashes.len(), 2);
+        assert!(splashes.iter().all(|h| h.target.is_none() && h.attacker == worm));
+        assert!(splashes.iter().any(|h| h.impact_pos == Vec3::new(100.0, 0.0, 0.0)));
     }
 }

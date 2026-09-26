@@ -14,7 +14,11 @@
 //!   (`Init_Cloaked=1`) and Worms (stealth ambushers per upstream)
 //!   are hidden from the player until a player-team detector
 //!   (Assembler / Trojan / Gateway with non-zero FBI `RadarDistance`)
-//!   enters range. Active detection only — no memory.
+//!   enters range. Active detection only — no memory. The detection
+//!   itself is gameplay, not rendering: [`update_cloak_detection`]
+//!   keeps a per-team [`DetectedBy`] mask on every cloaked unit
+//!   regardless of [`FogEnabled`], and auto-targeting refuses cloaked
+//!   units the shooter's team hasn't detected.
 //!
 //! - **Fog of war** ([`update_fog_visibility`]) — non-cloaked enemy
 //!   units are visible iff currently within any player-team unit's
@@ -24,8 +28,8 @@
 //!
 //! The two systems partition on [`Cloaked`]: cloak handles entities
 //! with the marker, fog handles everything else, so their writes to
-//! [`Visibility`] don't race. AI teams ignore both systems and query
-//! the world directly — the fog only affects rendering.
+//! [`Visibility`] don't race. The fog only affects rendering; the
+//! cloak's targeting rule applies to every team, AI included.
 
 use bevy::prelude::*;
 
@@ -58,9 +62,39 @@ impl PlayerTeam {
 pub struct FogEnabled(pub bool);
 
 /// Marker: this unit hides from enemies unless a detector is close.
-/// Worms carry it permanently; Logic Bombs carry it until they detonate.
+/// Logic Bombs carry it until they detonate; Worms drop it while
+/// surfaced to bite and regain it once the aim resets
+/// (`mechanics::worm`, upstream worm.bos `AimWeapon1` / `ResetAim`).
 #[derive(Component)]
+#[require(DetectedBy)]
 pub struct Cloaked;
+
+/// Bitmask of the teams (bit `t` = `TeamId(t)`) that currently have a
+/// detector in range of this cloaked unit. Refreshed by
+/// [`update_cloak_detection`]; only meaningful while [`Cloaked`] is
+/// present. Teams ≥ 64 never detect (no map ships that many).
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DetectedBy(pub u64);
+
+impl DetectedBy {
+    pub fn contains(self, team: u8) -> bool {
+        self.0 & team_bit(team) != 0
+    }
+}
+
+/// `DetectedBy` bit for `team`; `0` for teams that don't fit the mask.
+pub fn team_bit(team: u8) -> u64 {
+    1u64.checked_shl(u32::from(team)).unwrap_or(0)
+}
+
+/// Whether a unit with the given stealth state is hidden from `team`:
+/// cloaked and not currently detected by any of that team's detectors.
+/// Upstream Spring can't aim at a cloaked unit outside its allyteam's
+/// decloak coverage, so auto-targeting (and set-target) skip it — AoE
+/// and kamikaze proximity still hit it normally.
+pub fn hidden_from(cloaked: bool, detected_by: u64, team: u8) -> bool {
+    cloaked && detected_by & team_bit(team) == 0
+}
 
 /// Marker: this unit is currently visible to the [`PlayerTeam`].
 /// Friendly units always carry it (they're always visible); enemies
@@ -84,14 +118,68 @@ pub const VISIBILITY_REFRESH_INTERVAL: f32 = 0.1;
 #[derive(Resource, Default)]
 pub struct VisibilityRefreshTimer(pub f32);
 
+/// Recompute every cloaked unit's [`DetectedBy`] mask: bit `t` is set
+/// while any living team-`t` unit with FBI `RadarDistance > 0`
+/// (Assembler, Trojan, Gateway, Byte, Connection, Worm, …) is within
+/// that distance and `t` is hostile to the cloaked unit.
+///
+/// Runs for every team independently of [`FogEnabled`] — it feeds
+/// combat targeting, not just the player's rendering. Throttled to
+/// [`VISIBILITY_REFRESH_INTERVAL`]; detector positions come from the
+/// spatial snapshot (at most one sim tick stale).
+#[allow(clippy::type_complexity)]
+pub fn update_cloak_detection(
+    time: Res<Time>,
+    mut timer: Local<f32>,
+    unit_registry: Res<UnitRegistry>,
+    spatial: Res<crate::units::spatial::SpatialIndex>,
+    detectors_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
+    mut cloaked_q: Query<(Entity, &mut DetectedBy), With<Cloaked>>,
+    // Retained across frames so the refresh tick doesn't reallocate.
+    mut detected: Local<std::collections::HashMap<Entity, u64>>,
+) {
+    *timer += time.delta_secs();
+    if *timer < VISIBILITY_REFRESH_INTERVAL {
+        return;
+    }
+    *timer = 0.0;
+
+    // Invert the scan: instead of testing every cloaked unit against
+    // every detector, radius-query the shared spatial index once per
+    // detector and OR its team bit into each hostile cloaked entry.
+    detected.clear();
+    for (team, ut, gtf) in &detectors_q {
+        let radar = unit_registry.radar_distance(ut.0);
+        if radar <= 0.0 {
+            continue;
+        }
+        let dp = gtf.translation();
+        let bit = team_bit(team.0);
+        spatial.query_radius(dp, radar, |candidate| {
+            if candidate.cloaked
+                && !crate::units::components::is_friendly(candidate.team, team.0)
+                && candidate.pos.distance_squared(dp) <= radar * radar
+            {
+                *detected.entry(candidate.entity).or_default() |= bit;
+            }
+        });
+    }
+
+    for (entity, mut mask) in &mut cloaked_q {
+        let next = DetectedBy(detected.get(&entity).copied().unwrap_or(0));
+        if *mask != next {
+            *mask = next;
+        }
+    }
+}
+
 /// Visibility for cloaked units (Worms / Logic Bombs) from the
 /// [`PlayerTeam`]'s perspective.
 ///
 /// - Friendly cloaked: always visible (`install_cloak_fade_materials`
 ///   handles the half-alpha rendering).
-/// - Enemy cloaked: hidden unless a player-team detector
-///   (Assembler / Trojan / Gateway with FBI `RadarDistance > 0`)
-///   is within range.
+/// - Enemy cloaked: hidden unless [`update_cloak_detection`] reports a
+///   player-team detector in range.
 ///
 /// Throttled to [`VISIBILITY_REFRESH_INTERVAL`].
 pub fn update_cloak_visibility(
@@ -99,12 +187,7 @@ pub fn update_cloak_visibility(
     mut timer: ResMut<VisibilityRefreshTimer>,
     fog: Res<FogEnabled>,
     player: Res<PlayerTeam>,
-    unit_registry: Res<UnitRegistry>,
-    spatial: Res<crate::units::spatial::SpatialIndex>,
-    detectors_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
-    mut cloaked_q: Query<(Entity, &TeamId, &mut Visibility), With<Cloaked>>,
-    // Retained across frames so the refresh tick doesn't reallocate.
-    mut detected: Local<std::collections::HashSet<Entity>>,
+    mut cloaked_q: Query<(&TeamId, &DetectedBy, &mut Visibility), With<Cloaked>>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < VISIBILITY_REFRESH_INTERVAL {
@@ -112,50 +195,10 @@ pub fn update_cloak_visibility(
     }
     timer.0 = 0.0;
 
-    // Sandbox mode: nothing hides. The system still runs so the loop is
-    // ready when fog is wired live, but every cloaked unit just stays
-    // visible.
-    if !fog.0 {
-        for (_, _, mut vis) in &mut cloaked_q {
-            if *vis != Visibility::Visible {
-                *vis = Visibility::Visible;
-            }
-        }
-        return;
-    }
-
-    // Invert the scan: instead of testing every cloaked unit against
-    // every detector (O(detectors × cloaked) at the refresh cadence),
-    // radius-query the shared spatial index once per detector and mark
-    // the detected enemy entities. Detector positions come from the
-    // Simulate-head snapshot — at most one sim tick stale, invisible at
-    // a 10 Hz visibility refresh.
-    detected.clear();
-    detectors_q
-        .iter()
-        .filter(|(team, _, _)| player.matches(team))
-        .filter_map(|(_, ut, gtf)| {
-            let radar = unit_registry.radar_distance(ut.0);
-            (radar > 0.0).then(|| (gtf.translation(), radar))
-        })
-        .for_each(|(dp, radar)| {
-            spatial.query_radius(dp, radar, |candidate| {
-                if candidate.team != player.0 .0
-                    && candidate.pos.distance_squared(dp) <= radar * radar
-                {
-                    detected.insert(candidate.entity);
-                }
-            });
-        });
-
-    for (entity, team, mut vis) in &mut cloaked_q {
-        if player.matches(team) {
-            if *vis != Visibility::Visible {
-                *vis = Visibility::Visible;
-            }
-            continue;
-        }
-        let target = if detected.contains(&entity) {
+    for (team, detected_by, mut vis) in &mut cloaked_q {
+        // Sandbox mode (fog off): nothing hides, every cloaked unit
+        // just stays visible.
+        let target = if !fog.0 || player.matches(team) || detected_by.contains(player.0.0) {
             Visibility::Visible
         } else {
             Visibility::Hidden

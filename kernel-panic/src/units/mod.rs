@@ -19,7 +19,7 @@ const SIMULATION_HZ: f64 = 30.0;
 use assets::animation;
 use content::{unit_registry, weapons};
 use lifecycle::{bookkeeping, construction, game_over, production, script_triggers, spawning};
-use mechanics::{cloak, command_fire, deploy, network_buffer, shield};
+use mechanics::{cloak, command_fire, deploy, network_buffer, shield, worm};
 
 /// Logical buckets for gameplay systems. Systems inside a set run after the
 /// previous set completes; inside a set they are unordered unless they declare
@@ -139,6 +139,8 @@ impl Plugin for UnitsPlugin {
                     // is 21.
                     (
                         (
+                            worm::init_autohold,
+                            cloak::update_cloak_detection,
                             spatial::rebuild_spatial_index,
                             combat::tick_deploy_state,
                             combat::tick_kamikaze,
@@ -146,6 +148,7 @@ impl Plugin for UnitsPlugin {
                             combat::combat_system,
                             combat::attack_ground_system,
                             combat::attack_target_system,
+                            worm::tick_worm_surfacing,
                             combat::tick_burst_fire,
                             combat::aim_weapons_system,
                         )

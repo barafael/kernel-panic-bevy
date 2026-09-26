@@ -24,6 +24,7 @@ use super::combat::Dying;
 use super::components::{Health, TeamId, UnitType};
 use super::content::definitions::UnitKind;
 use super::lifecycle::spawning::Emerging;
+use super::mechanics::cloak::{Cloaked, DetectedBy, hidden_from};
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)
@@ -43,6 +44,20 @@ pub struct SpatialEntry {
     /// Mirrored from the FBI `canFly=1` flag so ground weapons can cheaply
     /// skip flying targets via `NoChaseCategory=VTOL`.
     pub is_flying: bool,
+    /// Carries the [`Cloaked`] marker right now (Logic Bomb, buried Worm).
+    pub cloaked: bool,
+    /// [`DetectedBy`] team mask — which teams' detectors currently see
+    /// this cloaked unit. Zero (and ignored) for uncloaked units.
+    pub detected_by: u64,
+}
+
+impl SpatialEntry {
+    /// Whether auto-targeting from `team` may pick this entry: a cloaked
+    /// unit is invisible to teams without a detector in range. See
+    /// [`crate::units::mechanics::cloak::hidden_from`].
+    pub fn targetable_by(&self, team: u8) -> bool {
+        !hidden_from(self.cloaked, self.detected_by, team)
+    }
 }
 
 /// Uniform XZ grid of [`SpatialEntry`] lists keyed by cell coordinates.
@@ -114,12 +129,14 @@ pub fn rebuild_spatial_index(
             &TeamId,
             &GlobalTransform,
             &Health,
+            Has<Cloaked>,
+            Option<&DetectedBy>,
         ),
         (Without<Dying>, Without<Emerging>),
     >,
 ) {
     index.clear();
-    for (entity, unit_type, stats, team, gtf, health) in &units {
+    for (entity, unit_type, stats, team, gtf, health, cloaked, detected_by) in &units {
         index.push(SpatialEntry {
             entity,
             pos: gtf.translation(),
@@ -127,6 +144,8 @@ pub fn rebuild_spatial_index(
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
             is_flying: stats.can_fly,
+            cloaked,
+            detected_by: detected_by.map_or(0, |d| d.0),
         });
     }
 }
@@ -143,6 +162,8 @@ mod tests {
             kind: UnitKind::Bit,
             hp_positive: true,
             is_flying: false,
+            cloaked: false,
+            detected_by: 0,
         }
     }
 

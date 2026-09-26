@@ -470,6 +470,13 @@ impl UnitRegistry {
         })
     }
 
+    /// Secondary weapon (FBI `Weapon2`) TDF section name, or `""`.
+    /// Only script-detonated weapons use it today (worm.bos `FireWeapon1`
+    /// → `emit-sfx 4097` = Wormsplash).
+    pub fn weapon2(&self, kind: UnitKind) -> &str {
+        self.def(kind).map_or("", |d| d.weapon2.as_str())
+    }
+
     fn validate_unit_bindings(&self) {
         for &kind in ALL_UNIT_KINDS {
             if self.def(kind).is_none() {

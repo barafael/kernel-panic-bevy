@@ -1230,6 +1230,8 @@ mod tests {
                 kind: UnitKind::Bit,
                 hp_positive: true,
                 is_flying: false,
+                cloaked: false,
+                detected_by: 0,
             });
         }
 
