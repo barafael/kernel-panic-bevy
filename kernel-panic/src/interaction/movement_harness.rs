@@ -54,6 +54,8 @@ impl Harness {
         let verts = (MAP_SQUARES + 1) as usize;
         world.insert_resource(Heightmap::from_raw(vec![0.0; verts * verts], verts, verts));
         world.insert_resource(PathHeat(HeatMap::new(MAP_SQUARES, MAP_SQUARES)));
+        // Never run out of search budget: reproducible runs.
+        world.insert_resource(super::ground_move::PathSearchBudget(f64::INFINITY));
 
         let mut schedule = Schedule::default();
         super::movement::add_ground_sim_systems(&mut schedule);

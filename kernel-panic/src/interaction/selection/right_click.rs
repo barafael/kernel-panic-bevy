@@ -121,6 +121,7 @@ struct RightClickLookups<'w, 's> {
     target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
     move_target_q: Query<'w, 's, (), With<MoveTarget>>,
+    queue_end_q: Query<'w, 's, (Option<&'static MoveTarget>, Option<&'static CommandQueue>)>,
     ui_interactions: Query<'w, 's, &'static Interaction>,
 }
 
@@ -149,6 +150,7 @@ fn handle_right_click(
         target_gtf_q,
         target_type_q,
         move_target_q,
+        queue_end_q,
         ui_interactions,
     } = lookups;
     if mouse.just_pressed(MouseButton::Right) {
@@ -188,7 +190,7 @@ fn handle_right_click(
     if mouse.just_released(MouseButton::Right) && drag_path.active {
         drag_path.active = false;
 
-        let mut units: Vec<(Entity, Vec3)> = selected_q
+        let units: Vec<(Entity, Vec3)> = selected_q
             .iter()
             .map(|(e, tf, _, _)| (e, tf.translation))
             .collect();
@@ -260,8 +262,11 @@ fn handle_right_click(
                 }
             }
 
-            // Plain ground move: fan the group out around the clicked
-            // point (single units go exactly there).
+            // Plain ground move: every unit gets the clicked point, as a
+            // single right-click does in Spring (KP's CustomFormations2
+            // widget passes single clicks straight to the engine). The
+            // group spreads out by collision response and
+            // `HandleUnitCollisionsAux`'s arrival rules.
             let target = drag_path.points[0];
             let movers: Vec<(Entity, Vec3, f32)> = selected_q
                 .iter()
@@ -277,32 +282,33 @@ fn handle_right_click(
                     &mut commands,
                 );
             }
-            pending
-                .markers
-                .extend(orders.into_iter().map(|(_, t)| (t, OrderMarker::Move)));
+            pending.markers.push((target, OrderMarker::Move));
         } else {
-            // Path-based formation: sort units by projection onto the drag's
-            // principal axis (start → end) so the nearest-to-start unit gets
-            // the first target. This keeps movement lines roughly parallel
-            // instead of letting arbitrary ECS ordering cause paths to cross.
-            let path_start = *drag_path.points.first().unwrap();
-            let path_end = *drag_path.points.last().unwrap();
-            let axis = Vec3::new(path_end.x - path_start.x, 0.0, path_end.z - path_start.z);
-            let axis_len_sq = axis.length_squared();
-
-            if axis_len_sq > 0.01 {
-                units.sort_by(|(_, a), (_, b)| {
-                    let pa = (Vec3::new(a.x - path_start.x, 0.0, a.z - path_start.z)).dot(axis);
-                    let pb = (Vec3::new(b.x - path_start.x, 0.0, b.z - path_start.z)).dot(axis);
-                    pa.partial_cmp(&pb).unwrap_or(std::cmp::Ordering::Equal)
-                });
-            }
-
+            // Drawn formation (KP `unit_customformations2.lua`): nodes
+            // evenly spaced along the drag, matched to units by
+            // `GetOrdersHungarian` (min total distance) up to 20 units,
+            // `GetOrdersNoX` (greedy + uncross) beyond. Shift matches
+            // from the end of each unit's queue.
+            let from: Vec<Vec3> = units
+                .iter()
+                .map(|(e, p)| {
+                    if shift {
+                        queue_end_q.get(*e).ok().and_then(|(t, q)| {
+                            q.and_then(|q| q.commands.last().map(|c| c.position()))
+                                .or(t.map(|t| t.0))
+                        })
+                    } else {
+                        None
+                    }
+                    .unwrap_or(*p)
+                })
+                .collect();
             let targets = sample_path_evenly(&drag_path.points, units.len());
-            for ((entity, _), target) in units.iter().zip(targets.iter()) {
+            let assignment = assign_formation(&from, &targets);
+            for (i, (entity, _)) in units.iter().enumerate() {
                 apply_ordered_command(
                     *entity,
-                    QueuedCommand::Move(*target),
+                    QueuedCommand::Move(targets[assignment[i]]),
                     shift,
                     &move_target_q,
                     &mut commands,
@@ -488,33 +494,136 @@ fn update_formation_preview(
     }
 }
 
-/// Group move to one point: one slot per unit, as `(unit, slot)`.
+/// Group move to one point: every unit is sent to `target` itself
+/// (Spring's plain right-click), as `(unit, goal)`.
 pub(crate) fn group_move_slots(units: &[(Entity, Vec3, f32)], target: Vec3) -> Vec<(Entity, Vec3)> {
-    let max_radius = units.iter().map(|u| u.2).fold(0.0_f32, f32::max);
-    let targets = spread_targets(target, units.len(), 1.6 * max_radius);
-    units.iter().map(|u| u.0).zip(targets).collect()
+    units.iter().map(|u| (u.0, target)).collect()
 }
 
-/// Sunflower-spiral slot layout for a multi-unit move to a single
-/// point: slot 0 sits on the point, slot i at `r = spacing·√i`,
-/// `θ = i·goldenAngle`. Neighbor slots stay roughly `spacing` apart
-/// at any unit count, so a group ordered to one spot forms a packed
-/// disc instead of a shove-match that only the collision push can
-/// untangle. Units sorted by the caller land on slots in ECS order;
-/// the spiral keeps them apart either way.
-pub(crate) fn spread_targets(center: Vec3, count: usize, spacing: f32) -> Vec<Vec3> {
-    const GOLDEN_ANGLE: f32 = 2.399_963_2;
-    (0..count)
-        .map(|i| {
-            if i == 0 {
-                return center;
+/// Unit count up to which the optimal assignment is used
+/// (CustomFormations2 `defaultHungarianUnits`).
+const MAX_HUNGARIAN_UNITS: usize = 20;
+
+/// Match `units` (positions) to formation `nodes` one-to-one; returns
+/// the node index per unit. Minimum total Euclidean distance
+/// (`GetOrdersHungarian`) for small groups — a min-cost matching never
+/// has two crossing paths, since uncrossing shortens both — and
+/// `GetOrdersNoX` (each unit to its nearest free node, then swap any
+/// pair whose straight paths cross until none do) for large ones.
+pub(crate) fn assign_formation(units: &[Vec3], nodes: &[Vec3]) -> Vec<usize> {
+    let n = units.len().min(nodes.len());
+    let cost = |u: usize, t: usize| units[u].xz().distance(nodes[t].xz());
+    if n <= MAX_HUNGARIAN_UNITS {
+        hungarian(n, cost)
+    } else {
+        no_crossings(units, nodes)
+    }
+}
+
+/// Min-cost perfect matching (Kuhn–Munkres with potentials, O(n³)).
+/// `cost(row, col)`; returns the column assigned to each row.
+fn hungarian(n: usize, cost: impl Fn(usize, usize) -> f32) -> Vec<usize> {
+    let inf = f64::INFINITY;
+    let mut u = vec![0.0f64; n + 1];
+    let mut v = vec![0.0f64; n + 1];
+    let mut p = vec![0usize; n + 1];
+    let mut way = vec![0usize; n + 1];
+    for i in 1..=n {
+        p[0] = i;
+        let mut j0 = 0usize;
+        let mut minv = vec![inf; n + 1];
+        let mut used = vec![false; n + 1];
+        loop {
+            used[j0] = true;
+            let i0 = p[j0];
+            let mut delta = inf;
+            let mut j1 = 0usize;
+            for j in 1..=n {
+                if !used[j] {
+                    let cur = cost(i0 - 1, j - 1) as f64 - u[i0] - v[j];
+                    if cur < minv[j] {
+                        minv[j] = cur;
+                        way[j] = j0;
+                    }
+                    if minv[j] < delta {
+                        delta = minv[j];
+                        j1 = j;
+                    }
+                }
             }
-            let i = i as f32;
-            let r = spacing * i.sqrt();
-            let theta = i * GOLDEN_ANGLE;
-            center + Vec3::new(r * theta.cos(), 0.0, r * theta.sin())
-        })
-        .collect()
+            for j in 0..=n {
+                if used[j] {
+                    u[p[j]] += delta;
+                    v[j] -= delta;
+                } else {
+                    minv[j] -= delta;
+                }
+            }
+            j0 = j1;
+            if p[j0] == 0 {
+                break;
+            }
+        }
+        loop {
+            let j1 = way[j0];
+            p[j0] = p[j1];
+            j0 = j1;
+            if j0 == 0 {
+                break;
+            }
+        }
+    }
+    let mut out = vec![0usize; n];
+    for j in 1..=n {
+        if p[j] > 0 {
+            out[p[j] - 1] = j - 1;
+        }
+    }
+    out
+}
+
+/// Do segments `a0→a1` and `b0→b1` (XZ) properly cross?
+fn segments_cross(a0: Vec2, a1: Vec2, b0: Vec2, b1: Vec2) -> bool {
+    let orient = |p: Vec2, q: Vec2, r: Vec2| (q - p).perp_dot(r - p);
+    let (d1, d2) = (orient(b0, b1, a0), orient(b0, b1, a1));
+    let (d3, d4) = (orient(a0, a1, b0), orient(a0, a1, b1));
+    d1 * d2 < 0.0 && d3 * d4 < 0.0
+}
+
+/// `GetOrdersNoX`: nearest free node per unit, then swap crossing
+/// pairs. Each swap strictly shortens the total length, so it
+/// terminates; the pass count is capped like the widget's time cap.
+fn no_crossings(units: &[Vec3], nodes: &[Vec3]) -> Vec<usize> {
+    let n = units.len().min(nodes.len());
+    let mut taken = vec![false; n];
+    let mut m = vec![0usize; n];
+    for (u, pos) in units.iter().enumerate().take(n) {
+        let best = (0..n)
+            .filter(|&t| !taken[t])
+            .min_by(|&a, &b| {
+                pos.xz()
+                    .distance_squared(nodes[a].xz())
+                    .total_cmp(&pos.xz().distance_squared(nodes[b].xz()))
+            })
+            .unwrap_or(0);
+        taken[best] = true;
+        m[u] = best;
+    }
+    for _ in 0..(n * n).max(1) {
+        let mut swapped = false;
+        for a in 0..n {
+            for b in a + 1..n {
+                if segments_cross(units[a].xz(), nodes[m[a]].xz(), units[b].xz(), nodes[m[b]].xz()) {
+                    m.swap(a, b);
+                    swapped = true;
+                }
+            }
+        }
+        if !swapped {
+            break;
+        }
+    }
+    m
 }
 
 fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
@@ -683,36 +792,52 @@ mod tests {
         assert!((target - Vec3::new(0.0, 0.5, 0.0)).length() < 1.0);
     }
 
-    /// The sunflower spread packs any unit count into a disc whose
-    /// slots stay roughly one spacing apart, and sends slot 0 exactly
-    /// to the clicked point.
+    /// Formation assignment never sends two units along crossing
+    /// paths — optimal for small groups, uncrossed for large ones — and
+    /// uses every node once.
     #[test]
-    fn spread_targets_form_a_packed_disc() {
-        let center = Vec3::new(500.0, 2.0, -300.0);
-        let slots = spread_targets(center, 16, 24.0);
-
-        assert_eq!(slots.len(), 16);
-        assert_eq!(slots[0], center, "slot 0 takes the clicked point");
-
-        // Everything stays inside the spiral's bounding radius, on the
-        // ground plane (Y untouched).
-        let max_r = 24.0 * (15.0 as f32).sqrt();
-        for slot in &slots {
-            assert!((slot.y - center.y).abs() < 1e-5);
-            assert!(
-                slot.distance(center) <= max_r + 1e-3,
-                "slot {slot:?} escapes the disc radius {max_r}"
-            );
-        }
-
-        // No two slots closer than half a spacing — the point of the
-        // fan-out is not stacking the army.
-        for (i, a) in slots.iter().enumerate() {
-            for b in &slots[i + 1..] {
-                let d = a.distance(*b);
-                assert!(d >= 12.0, "slots {i} and {} are only {d} apart", i + 1);
+    fn formation_assignment_has_no_crossings() {
+        let mut seed = 7u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        for n in [5usize, 16, 40] {
+            let units: Vec<Vec3> =
+                (0..n).map(|_| Vec3::new(rnd() * 200.0, 0.0, rnd() * 200.0)).collect();
+            let line = [Vec3::new(400.0, 0.0, 0.0), Vec3::new(500.0, 0.0, 300.0)];
+            let nodes = sample_path_evenly(&line, n);
+            let m = assign_formation(&units, &nodes);
+            let mut seen = m.clone();
+            seen.sort();
+            assert_eq!(seen, (0..n).collect::<Vec<_>>(), "a permutation");
+            for a in 0..n {
+                for b in a + 1..n {
+                    assert!(
+                        !segments_cross(units[a].xz(), nodes[m[a]].xz(), units[b].xz(), nodes[m[b]].xz()),
+                        "n={n}: paths {a} and {b} cross"
+                    );
+                }
             }
         }
+    }
+
+    /// The optimal matcher finds the minimum-total-distance assignment.
+    #[test]
+    fn hungarian_is_optimal() {
+        let units = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(20.0, 0.0, 0.0)];
+        let nodes = [Vec3::new(21.0, 0.0, 5.0), Vec3::new(1.0, 0.0, 5.0), Vec3::new(11.0, 0.0, 5.0)];
+        assert_eq!(assign_formation(&units, &nodes), vec![1, 2, 0]);
+    }
+
+    /// A plain right-click sends every selected unit to the clicked
+    /// point (Spring), not to invented slots.
+    #[test]
+    fn single_click_shares_the_goal() {
+        let e = [Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap()];
+        let t = Vec3::new(5.0, 0.0, 9.0);
+        let orders = group_move_slots(&[(e[0], Vec3::ZERO, 12.0), (e[1], Vec3::X, 12.0)], t);
+        assert!(orders.iter().all(|(_, g)| *g == t));
     }
 
     /// Regression: a right-click that starts over a live UI node (e.g.

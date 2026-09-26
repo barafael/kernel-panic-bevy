@@ -70,6 +70,11 @@ const CMP_EPS: f32 = 1e-4;
 /// temporary waypoint / keep their old path until a later frame).
 const PATH_SEARCH_BUDGET_SECS: f64 = 0.002;
 
+/// Overrides [`PATH_SEARCH_BUDGET_SECS`] (the headless harness makes
+/// runs reproducible by never running out).
+#[derive(Resource, Clone, Copy)]
+pub struct PathSearchBudget(pub f64);
+
 /// `AMoveType::ProgressState`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Progress {
@@ -809,9 +814,11 @@ pub fn movement_system(
     circular_flow: Option<Res<CircularFlow>>,
     path_heat: Option<Res<PathHeat>>,
     registry: Res<UnitRegistry>,
+    budget: Option<Res<PathSearchBudget>>,
     mut query: Query<MoverData, Without<Dying>>,
 ) {
     let nav = nav_set.as_deref();
+    let budget_secs = budget.map_or(PATH_SEARCH_BUDGET_SECS, |b| b.0);
     let started = bevy::platform::time::Instant::now();
     let mut searches = 0u32;
     let map_max = heightmap.as_deref().map(|hm| {
@@ -924,7 +931,7 @@ pub fn movement_system(
             let stale = u.path.as_deref().is_none_or(|p| p.goal.xz() != g);
             if (m.path_requested || stale)
                 && nav.is_some()
-                && (searches == 0 || started.elapsed().as_secs_f64() < PATH_SEARCH_BUDGET_SECS)
+                && (searches == 0 || started.elapsed().as_secs_f64() < budget_secs)
             {
                 searches += 1;
                 m.path_requested = false;
@@ -1790,5 +1797,44 @@ mod tests {
         let fs = bit_frame_stats();
         assert!(ticks as f32 > PI / fs.turn_rate, "not before the idle limit: {ticks}");
         assert!(h.pos(e).xz().distance(start.xz()) < 16.0);
+    }
+
+    /// An unreachable goal (inside a sealed box) yields a partial path:
+    /// the unit walks to the closest reachable point and the order fails
+    /// there, instead of being refused on the spot.
+    #[test]
+    fn unreachable_goal_walks_to_closest_point_then_fails() {
+        let mut h = Harness::flat();
+        {
+            let mut nav = h.world.resource_mut::<NavGridSet>();
+            let map = &mut nav.buckets[0].speed_map;
+            let w = map.width;
+            for z in 70..90 {
+                for x in 100..120 {
+                    if x == 100 || x == 119 || z == 70 || z == 89 {
+                        map.speeds[(z * w + x) as usize] = 0.0;
+                    }
+                }
+            }
+        }
+        let e = h.spawn(UnitKind::Bit, 0, Vec3::new(500.0, 0.0, 640.0));
+        h.step();
+        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(880.0, 0.0, 640.0)));
+        h.step();
+        assert!(!h.world.get::<MovePath>(e).unwrap().reached_goal, "partial path");
+        for _ in 0..600 {
+            h.step();
+            if !h.has_order(e) {
+                break;
+            }
+        }
+        assert!(!h.has_order(e), "order ended");
+        assert_eq!(h.world.get::<GroundMover>(e).unwrap().progress, Progress::Failed);
+        let p = h.pos(e);
+        let inside = (800.0..960.0).contains(&p.x) && (560.0..720.0).contains(&p.z);
+        assert!(!inside, "never entered the box: {p}");
+        // The closest reachable cell is just outside the box, 10 cells
+        // from the goal.
+        assert!(p.xz().distance(Vec2::new(880.0, 640.0)) < 100.0, "stopped at the box: {p}");
     }
 }
