@@ -15,6 +15,7 @@ pub mod map_types;
 pub mod sd7_archive;
 pub mod smd_parser;
 pub mod smf_parser;
+pub mod smooth_mesh;
 pub mod smt_parser;
 
 use std::path::Path;
