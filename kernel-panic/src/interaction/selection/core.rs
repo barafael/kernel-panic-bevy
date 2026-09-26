@@ -133,8 +133,9 @@ fn handle_selection(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     hovered_q: Query<Entity, With<Hovered>>,
     selected_q: Query<Entity, With<Selected>>,
-    unit_q: Query<(Entity, &GlobalTransform), With<UnitType>>,
+    unit_q: Query<(Entity, &GlobalTransform, &TeamId), With<UnitType>>,
     kind_team_q: Query<(&UnitType, &TeamId)>,
+    local: Res<crate::units::player::LocalTeam>,
     same_kind_q: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
     ui_interactions: Query<&Interaction>,
@@ -211,6 +212,11 @@ fn handle_selection(
         }
     }
 
+    // Only the local player's own units can be selected (and so
+    // ordered) — clicking or boxing another team's units just clears
+    // the selection, as in Spring. Co-op control would widen this.
+    let own = |e: Entity| kind_team_q.get(e).is_ok_and(|(_, t)| t.0 == local.0);
+
     // --- Left release ---
     if mouse.just_released(MouseButton::Left) {
         for entity in &box_nodes {
@@ -233,7 +239,10 @@ fn handle_selection(
                 let max_screen = Vec2::new(start.x.max(end.x), start.y.max(end.y));
 
                 if let Ok((camera, camera_transform)) = camera_q.single() {
-                    for (entity, global_transform) in &unit_q {
+                    for (entity, global_transform, team) in &unit_q {
+                        if team.0 != local.0 {
+                            continue;
+                        }
                         let Ok(screen_pos) = camera
                             .world_to_viewport(camera_transform, global_transform.translation())
                         else {
@@ -250,14 +259,14 @@ fn handle_selection(
                 }
             }
         } else if ctrl {
-            if let Some(entity) = hovered_q.iter().next() {
+            if let Some(entity) = hovered_q.iter().next().filter(|e| own(*e)) {
                 if selected_q.contains(entity) {
                     commands.entity(entity).remove::<Selected>();
                 } else {
                     commands.entity(entity).insert(Selected);
                 }
             }
-        } else if let Some(entity) = hovered_q.iter().next() {
+        } else if let Some(entity) = hovered_q.iter().next().filter(|e| own(*e)) {
             commands.entity(entity).insert(Selected);
 
             // Double-click: expand selection to every visible unit of the
