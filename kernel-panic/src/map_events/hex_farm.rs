@@ -50,6 +50,7 @@ use crate::terrain::mesh::{CHUNK_SIZE, build_chunk};
 use crate::ui::minimap::MinimapState;
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, Health, UnitType};
+use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::Emerging;
 
@@ -125,7 +126,6 @@ pub struct HexFarmView {
     still_dirty: bool,
     /// `%` indicators: value and label entity.
     percent: HashMap<Poly, (i32, Entity)>,
-    owner_timer: Timer,
 }
 
 /// A `%` indicator label.
@@ -206,7 +206,6 @@ pub fn install(
         moving,
         still_dirty: true,
         percent: HashMap::new(),
-        owner_timer: Timer::from_seconds(0.5, TimerMode::Repeating),
     });
     commands.insert_resource(HexFarmState { farm, frame: 0 });
     commands.insert_resource(HexFarmInbox::default());
@@ -464,41 +463,82 @@ impl HexFarmView {
     }
 }
 
-/// `TeamColors[hex.owner]` in team-coloured games. The gadget sets a
-/// tower's owner when a big (≥5×5) immobile unit finishes on it, and on
-/// its death hands it to the nearest remaining one; this polls the
-/// same thing: the nearest finished big building within `TowerRadius`
-/// of the tower's centre, coloured by its faction.
+/// `TeamColors[hex.owner]` in team-coloured games, kept by the gadget's
+/// `SendOwnerShipChangeToUnsynced` (l.1508) from its `UnitFinished` and
+/// `UnitDestroyed` call-ins: a big (≥5×5) immobile unit finishing
+/// within `TowerRadius` of a tower's centre (the first such tower)
+/// makes its team the owner; when one dies the tower goes to the
+/// nearest remaining finished big building within `TowerRadius`, or
+/// back to white.
+#[allow(clippy::type_complexity)]
 fn hex_farm_owners(
-    time: Res<Time>,
     mut view: ResMut<HexFarmView>,
     state: Res<HexFarmState>,
     registry: Res<UnitRegistry>,
-    buildings: Query<(&Transform, &UnitType, &Faction), (Without<Emerging>, Without<Dying>)>,
+    spawned_finished: Query<Entity, (Added<UnitType>, Without<Emerging>)>,
+    mut finished_building: RemovedComponents<Emerging>,
+    destroyed: Query<(Entity, &Transform, &UnitType), Added<Dying>>,
+    live: Query<(Entity, &Transform, &UnitType, &Faction), (Without<Emerging>, Without<Dying>)>,
 ) {
-    if !view.team_colored || !view.owner_timer.tick(time.delta()).just_finished() {
+    let finished: Vec<Entity> = spawned_finished.iter().chain(finished_building.read()).collect();
+    if !view.team_colored || (finished.is_empty() && destroyed.is_empty()) {
         return;
     }
     let farm = &state.farm;
     let r2 = (farm.tower_radius * farm.tower_radius) as f32;
-    let mut owners = vec![WHITE; farm.hexes.len()];
-    let mut best = vec![f32::INFINITY; farm.hexes.len()];
-    for (tf, kind, faction) in &buildings {
-        let fp = registry.footprint_elmos(kind.0);
-        if !registry.is_building(kind.0) || fp.x < 40.0 || fp.y < 40.0 {
+    // `ud.canMove==false and ud.xsize>=5 and ud.zsize>=5`: `xsize` is in
+    // heightmap squares, `FootprintX × SPRING_FOOTPRINT_SCALE (2)` — so
+    // every 4×4 KP building counts, not just the homebases.
+    let big = |kind: UnitKind| {
+        registry.is_building(kind)
+            && registry
+                .def(kind)
+                .is_some_and(|d| d.footprint_x * 2.0 >= 5.0 && d.footprint_z * 2.0 >= 5.0)
+    };
+    // `for n,h in ipairs(hex)`: the first tower whose centre is within
+    // `TowerRadius`.
+    let tower_of = |pos: Vec3| {
+        farm.hexes.iter().position(|h| {
+            (pos.x - h.x as f32).powi(2) + (pos.z - h.z as f32).powi(2) <= r2
+        })
+    };
+    let mut owners = view.owners.clone();
+
+    // `UnitFinished`: the finisher's team owns the tower.
+    for e in finished {
+        let Ok((_, tf, kind, faction)) = live.get(e) else {
+            continue; // died before finishing
+        };
+        if !big(kind.0) {
             continue;
         }
-        let Some(Poly::Hex(k)) = farm.poly_at(tf.translation.x as f64, tf.translation.z as f64)
-        else {
-            continue;
-        };
-        let h = &farm.hexes[k];
-        let d2 = (tf.translation.x - h.x as f32).powi(2) + (tf.translation.z - h.z as f32).powi(2);
-        if d2 <= r2 && d2 < best[k] {
-            best[k] = d2;
-            owners[k] = faction.color().to_linear().to_f32_array();
+        if let Some(n) = tower_of(tf.translation) {
+            owners[n] = faction.color().to_linear().to_f32_array();
         }
     }
+
+    // `UnitDestroyed`: the nearest remaining finished big building.
+    for (dead, tf, kind) in &destroyed {
+        if !big(kind.0) {
+            continue;
+        }
+        let Some(n) = tower_of(tf.translation) else {
+            continue;
+        };
+        let h = &farm.hexes[n];
+        let mut best: Option<(f32, Rgba)> = None;
+        for (e, otf, okind, faction) in &live {
+            if e == dead || !big(okind.0) {
+                continue;
+            }
+            let d2 = (otf.translation.x - h.x as f32).powi(2) + (otf.translation.z - h.z as f32).powi(2);
+            if d2 <= r2 && best.is_none_or(|(b, _)| d2 < b) {
+                best = Some((d2, faction.color().to_linear().to_f32_array()));
+            }
+        }
+        owners[n] = best.map_or(WHITE, |(_, c)| c);
+    }
+
     if owners != view.owners {
         view.owners = owners;
         view.still_dirty = true;
@@ -655,6 +695,98 @@ fn hex_farm_labels(
 mod tests {
     use super::*;
     use spring_map::hexfarm::{HexFarmSetup, TERRAIN_TOWER};
+
+    fn farm() -> HexFarm {
+        HexFarm::generate(
+            5,
+            HexFarmSetup {
+                map_size_x: 12288.0,
+                map_size_z: 12288.0,
+                teams: 2,
+                median_health: 2000.0,
+                median_build_time: 1600.0,
+            },
+        )
+    }
+
+    /// `SendOwnerShipChangeToUnsynced` from `UnitFinished` /
+    /// `UnitDestroyed`, event by event.
+    #[test]
+    fn tower_ownership_follows_finish_and_death_events() {
+        let farm = farm();
+        let layout = farm.layout();
+        let n = layout.hexes.len();
+        let (hx, hz) = (farm.hexes[0].x as f32, farm.hexes[0].z as f32);
+        let mut world = World::new();
+        world.insert_resource(HexFarmView {
+            hexes: vec![PolyView { hidden: false, anim: None }; n],
+            rects: vec![],
+            owners: vec![WHITE; n],
+            layout,
+            side_hex: 1.0,
+            team_colored: true,
+            still: (Entity::PLACEHOLDER, Handle::default()),
+            moving: (Entity::PLACEHOLDER, Handle::default()),
+            still_dirty: false,
+            percent: HashMap::new(),
+        });
+        world.insert_resource(HexFarmState { farm, frame: 0 });
+        let mut defs = spring_tdf::UnitDefs::default();
+        for (name, fp) in [("kernel", 8.0), ("socket", 4.0), ("badblock", 2.0)] {
+            defs.units.insert(
+                name.into(),
+                spring_tdf::UnitDef {
+                    id: name.into(),
+                    footprint_x: fp,
+                    footprint_z: fp,
+                    ..Default::default()
+                },
+            );
+        }
+        world.insert_resource(UnitRegistry::for_test(defs));
+        let sys = world.register_system(hex_farm_owners);
+        let owner = |w: &World| w.resource::<HexFarmView>().owners[0];
+        let color = |f: Faction| f.color().to_linear().to_f32_array();
+
+        let at = |dx: f32| Transform::from_xyz(hx + dx, 0.0, hz);
+        let kernel = world
+            .spawn((UnitType(UnitKind::Kernel), Faction::System, at(40.0)))
+            .id();
+        // Too small to claim (FootprintX 2: xsize 4).
+        world.spawn((UnitType(UnitKind::BadBlock), Faction::Hacker, at(0.0)));
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), color(Faction::System));
+
+        // A 4×4 building (xsize 8 ≥ 5) claims it only once finished.
+        let socket = world
+            .spawn((
+                UnitType(UnitKind::Socket),
+                Faction::Network,
+                at(-10.0),
+                Emerging {
+                    target_y: 0.0,
+                    remaining: 1.0,
+                    total: 1.0,
+                    rally_point: None,
+                    style: crate::units::lifecycle::spawning::EmergeStyle::Fade,
+                },
+            ))
+            .id();
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), color(Faction::System));
+        world.entity_mut(socket).remove::<Emerging>();
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), color(Faction::Network));
+
+        // Its death hands the tower to the nearest remaining one...
+        world.entity_mut(socket).insert(Dying { timer: 1.0 });
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), color(Faction::System));
+        // ...and with none left it goes back to white.
+        world.entity_mut(kernel).insert(Dying { timer: 1.0 });
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), WHITE);
+    }
 
     /// Every nav cell over a void square is blocked, even in a bucket
     /// whose slope cap accepts the spike bed; cells over towers aren't.
