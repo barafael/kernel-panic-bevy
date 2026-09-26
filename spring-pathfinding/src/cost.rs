@@ -52,31 +52,9 @@ impl SpeedMap {
         let hw = heightmap_width as usize;
 
         let mut speeds = Vec::with_capacity((width * height) as usize);
-
         for z in 0..height as usize {
             for x in 0..width as usize {
-                // Compute slope from the four corners of this cell.
-                let h00 = heights[z * hw + x];
-                let h10 = heights[z * hw + x + 1];
-                let h01 = heights[(z + 1) * hw + x];
-                let h11 = heights[(z + 1) * hw + x + 1];
-
-                let dx = ((h10 - h00).abs() + (h11 - h01).abs()) * 0.5 / SQUARE_SIZE;
-                let dz = ((h01 - h00).abs() + (h11 - h10).abs()) * 0.5 / SQUARE_SIZE;
-                // tan(angle) of the steepest slope across the cell.
-                let tan_slope = (dx * dx + dz * dz).sqrt();
-                // Spring's encoding: `slope = 1 - cos(angle)` where
-                // `cos(angle) = 1 / sqrt(1 + tan²(angle))`. Matches
-                // `1.0 - faceNormal.y` in `ReadMap::UpdateSlopemap`.
-                let slope = 1.0 - 1.0 / (1.0 + tan_slope * tan_slope).sqrt();
-
-                let speed = if slope > max_slope {
-                    0.0 // impassable
-                } else {
-                    (1.0 / (1.0 + slope * slope_mod)).clamp(0.0, 1.0)
-                };
-
-                speeds.push(speed);
+                speeds.push(cell_speed(heights, hw, x, z, max_slope, slope_mod));
             }
         }
 
@@ -84,6 +62,33 @@ impl SpeedMap {
             width,
             height,
             speeds,
+        }
+    }
+
+    /// Recompute the cells touching heightmap vertices `x0..=x1`,
+    /// `z0..=z1` after the heights there changed (terrain edited at
+    /// runtime, e.g. Hex Farm's towers rising and sinking), with the
+    /// same `max_slope` / `slope_mod` the map was built with. Cheaper
+    /// than a full [`Self::from_heightmap`] rebuild for local edits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_region(
+        &mut self,
+        heights: &[f32],
+        heightmap_width: u32,
+        max_slope: f32,
+        slope_mod: f32,
+        x0: u32,
+        z0: u32,
+        x1: u32,
+        z1: u32,
+    ) {
+        let hw = heightmap_width as usize;
+        // A vertex belongs to the up-to-four cells around it.
+        for z in z0.saturating_sub(1)..=z1.min(self.height - 1) {
+            for x in x0.saturating_sub(1)..=x1.min(self.width - 1) {
+                self.speeds[(z * self.width + x) as usize] =
+                    cell_speed(heights, hw, x as usize, z as usize, max_slope, slope_mod);
+            }
         }
     }
 
@@ -114,6 +119,30 @@ impl SpeedMap {
         } else {
             ((NUM_SPEEDMOD_BINS as f32 * speed) as u8).min(NUM_SPEEDMOD_BINS - 1)
         }
+    }
+}
+
+/// Relative speed of heightmap cell `(x, z)`, from the slope of its
+/// four corner vertices (see [`SpeedMap::from_heightmap`]).
+fn cell_speed(heights: &[f32], hw: usize, x: usize, z: usize, max_slope: f32, slope_mod: f32) -> f32 {
+    let h00 = heights[z * hw + x];
+    let h10 = heights[z * hw + x + 1];
+    let h01 = heights[(z + 1) * hw + x];
+    let h11 = heights[(z + 1) * hw + x + 1];
+
+    let dx = ((h10 - h00).abs() + (h11 - h01).abs()) * 0.5 / SQUARE_SIZE;
+    let dz = ((h01 - h00).abs() + (h11 - h10).abs()) * 0.5 / SQUARE_SIZE;
+    // tan(angle) of the steepest slope across the cell.
+    let tan_slope = (dx * dx + dz * dz).sqrt();
+    // Spring's encoding: `slope = 1 - cos(angle)` where
+    // `cos(angle) = 1 / sqrt(1 + tan²(angle))`. Matches
+    // `1.0 - faceNormal.y` in `ReadMap::UpdateSlopemap`.
+    let slope = 1.0 - 1.0 / (1.0 + tan_slope * tan_slope).sqrt();
+
+    if slope > max_slope {
+        0.0 // impassable
+    } else {
+        (1.0 / (1.0 + slope * slope_mod)).clamp(0.0, 1.0)
     }
 }
 
@@ -236,5 +265,21 @@ mod tests {
     fn bin_midrange() {
         let bin = SpeedMap::speed_to_bin(0.5);
         assert!((1..=NUM_SPEEDMOD_BINS - 1).contains(&bin));
+    }
+}
+
+#[cfg(test)]
+mod update_region_tests {
+    use super::*;
+
+    #[test]
+    fn update_region_matches_full_rebuild() {
+        let (w, h) = (9u32, 7u32);
+        let mut heights: Vec<f32> = (0..w * h).map(|i| (i % 5) as f32).collect();
+        let mut map = SpeedMap::from_heightmap(&heights, w, h, 0.4, 10.0);
+        heights[(3 * w + 4) as usize] = 90.0;
+        map.update_region(&heights, w, 0.4, 10.0, 4, 3, 4, 3);
+        let full = SpeedMap::from_heightmap(&heights, w, h, 0.4, 10.0);
+        assert_eq!(map.speeds, full.speeds);
     }
 }

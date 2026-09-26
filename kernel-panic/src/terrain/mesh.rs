@@ -6,7 +6,8 @@ use bevy::{
 
 use spring_map::map_types::ParsedMap;
 
-const CHUNK_SIZE: usize = 32;
+/// Heightmap squares per terrain chunk side.
+pub const CHUNK_SIZE: usize = 32;
 
 pub struct TerrainChunk {
     pub mesh: Mesh,
@@ -25,16 +26,17 @@ pub fn generate_terrain_chunks(map: &ParsedMap) -> Vec<TerrainChunk> {
 
     for cz in 0..chunks_z {
         for cx in 0..chunks_x {
-            chunks.push(build_chunk(map, cx, cz));
+            chunks.push(build_chunk(&map.heights, hm_w, hm_h, cx, cz));
         }
     }
 
     chunks
 }
 
-fn build_chunk(map: &ParsedMap, cx: usize, cz: usize) -> TerrainChunk {
-    let hm_w = map.header.heightmap_width();
-    let hm_h = map.header.heightmap_height();
+/// Mesh of chunk `(cx, cz)` from a `hm_w × hm_h` height grid. Public
+/// so runtime terrain edits (Hex Farm) can rebuild just the chunks they
+/// touched.
+pub fn build_chunk(heights: &[f32], hm_w: usize, hm_h: usize, cx: usize, cz: usize) -> TerrainChunk {
     let sq_size = spring_map::map_types::SQUARE_SIZE as f32;
 
     let vx_start = cx * CHUNK_SIZE;
@@ -57,7 +59,7 @@ fn build_chunk(map: &ParsedMap, cx: usize, cz: usize) -> TerrainChunk {
             let global_x = vx_start + local_x;
             let global_z = vz_start + local_z;
 
-            let height = map.heights[global_z * hm_w + global_x];
+            let height = heights[global_z * hm_w + global_x];
             positions.push([local_x as f32 * sq_size, height, local_z as f32 * sq_size]);
 
             let u = global_x as f32 / (hm_w - 1) as f32;

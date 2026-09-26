@@ -347,6 +347,12 @@ impl UnitRegistry {
         })
     }
 
+    /// Raw FBI `BuildTime` (Spring's `UnitDefs[].buildTime`), in build
+    /// points rather than seconds.
+    pub fn raw_build_time(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.build_time)
+    }
+
     /// Build time in seconds, assuming the standard worker speed.
     pub fn build_time(&self, kind: UnitKind) -> f32 {
         self.def(kind)

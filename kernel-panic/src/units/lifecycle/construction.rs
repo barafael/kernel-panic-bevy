@@ -146,6 +146,7 @@ pub fn tick_construction(
     mut pending_attacks: ResMut<PendingAttacks>,
     live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
     mut ctx: SpawnContext,
+    mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
 ) {
     let dt = time.delta_secs();
     // Lazily-built per-(kind, team) census for capped kinds, bumped as
@@ -171,6 +172,16 @@ pub fn tick_construction(
 
         constructing.progress += dt;
         let build_time = ctx.unit_registry.build_time(constructing.kind);
+        // `AllowUnitBuildStep` for Hex Farm: this tick's share of the
+        // build, in `buildTime` points, at the building's site.
+        if let Some(inbox) = hex_farm.as_deref_mut()
+            && build_time > 0.0
+        {
+            inbox.build_step(
+                constructing.site,
+                dt / build_time * ctx.unit_registry.raw_build_time(constructing.kind),
+            );
+        }
 
         // First tick of construction: spawn the building so it can
         // visibly rise/fade throughout the entire build. Skip if

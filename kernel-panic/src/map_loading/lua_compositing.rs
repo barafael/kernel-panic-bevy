@@ -22,6 +22,8 @@
 //! The quads are emitted exactly as the gadget's `GL_QUADS` (same
 //! vertex order, UVs and colours), split into the two triangles GL
 //! would draw. Material is unlit: the gadget draws with lighting off.
+//! The live state (which polygons are up, animations, owners) is
+//! [`crate::map_events::hex_farm`]'s; this module is the drawing kit.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
@@ -29,8 +31,7 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use spring_map::LuaCompositing;
-use spring_map::lua_layout::HexFarmLayout;
+use spring_map::hexfarm::{HexFarm, TERRAIN_BRIDGE, TERRAIN_TOWER};
 use spring_map::lua_skin::SkinAtlas;
 
 /// `local VisualPitDepth=1024` (gadget l.1972; 2048 only for the
@@ -325,88 +326,55 @@ pub fn atlas_material(
     })
 }
 
-/// Spawn the layout's visible towers and bridges as one static mesh.
-/// (Datavents come in as regular map features — see `spawn_map_world`.)
-pub fn spawn_lua_compositing(
-    compositing: &LuaCompositing,
-    layout: &HexFarmLayout,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-) {
-    let Some(first) = layout.hexes.first() else {
-        return;
-    };
-    let material = atlas_material(upload_atlas(&compositing.atlas, images), materials);
-    let side_hex = ((first.corners[1][0] - first.corners[0][0]).powi(2)
-        + (first.corners[1][2] - first.corners[0][2]).powi(2))
-    .sqrt();
-
-    let mut buf = QuadBuffer::default();
-    for hex in layout.hexes.iter().filter(|h| !h.hidden) {
-        let draw = HexDraw {
-            corners: &hex.corners,
-            y: hex.center[1],
-            geo: hex.g != 0,
-            top_color: WHITE,
-        };
-        push_hex(&mut buf, &draw, side_hex, layout.team_colored, None);
+/// Kernel Panic's team-coloured variant of the skin (`TeamColoredMapTexture`,
+/// rolled 1 in 5): the gadget loads the atlas as `:at3,3,3g:` —
+/// greyscaled (Rec.601 luma), then tinted ×3 (clamped) — so the owner's
+/// team colour, multiplied in as vertex colour, reads strongly.
+pub fn team_colored_atlas(atlas: &SkinAtlas) -> SkinAtlas {
+    let mut pixels = atlas.pixels.clone();
+    for px in pixels.chunks_exact_mut(4) {
+        let luma = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
+        let v = (luma * 3.0).min(255.0) as u8;
+        px[..3].fill(v);
     }
-    for rect in layout.bridges.iter().filter(|r| !r.hidden) {
-        push_rect(&mut buf, &rect.corners, WHITE, WHITE, layout.team_colored, None);
-    }
-    if !buf.is_empty() {
-        commands.spawn((Mesh3d(meshes.add(buf.into_mesh())), MeshMaterial3d(material)));
+    SkinAtlas {
+        width: atlas.width,
+        height: atlas.height,
+        pixels,
     }
 }
 
-/// Even-odd point-in-polygon test (the gadget's `IsInsidePolygon`).
-fn inside(poly: &[[f32; 3]], x: f32, z: f32) -> bool {
-    let mut inside = false;
-    let mut j = poly.len() - 1;
-    for i in 0..poly.len() {
-        let (a, b) = (poly[i], poly[j]);
-        if z >= a[2].min(b[2])
-            && z < a[2].max(b[2])
-            && x < (b[0] - a[0]) * (z - a[2]) / (b[2] - a[2]) + a[0]
-        {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
-/// Minimap fallback for a voidGround map: there is no ground texture,
-/// so paint the visible towers and bridges' footprints over black.
-pub fn minimap_pixels(layout: &HexFarmLayout, world: Vec2, size: usize) -> Vec<u8> {
+/// Minimap for a voidGround map: there is no ground texture, so paint
+/// the solid towers and bridges (their terrain types) over black, with
+/// a dot per datavent.
+pub fn minimap_pixels(farm: &HexFarm, size: usize) -> Vec<u8> {
     const TOWER: [u8; 4] = [150, 24, 24, 255];
     const VENT: [u8; 4] = [40, 150, 40, 255];
     const BRIDGE: [u8; 4] = [95, 40, 40, 255];
+    const VOID: [u8; 4] = [0, 0, 0, 255];
+    let (w, d) = (farm.map_size_x, farm.map_size_z);
     let mut px = vec![0u8; size * size * 4];
     for (i, chunk) in px.chunks_exact_mut(4).enumerate() {
-        chunk[3] = 255;
-        let x = ((i % size) as f32 + 0.5) / size as f32 * world.x;
-        let z = ((i / size) as f32 + 0.5) / size as f32 * world.y;
-        let hex = layout
-            .hexes
-            .iter()
-            .find(|h| !h.hidden && inside(&h.corners, x, z));
-        let color = if let Some(h) = hex {
-            let r = ((x - h.center[0]).powi(2) + (z - h.center[2]).powi(2)).sqrt();
-            if h.g != 0 && r < 64.0 { Some(VENT) } else { Some(TOWER) }
-        } else if layout
-            .bridges
-            .iter()
-            .any(|r| !r.hidden && inside(&r.corners, x, z))
-        {
-            Some(BRIDGE)
-        } else {
-            None
+        let x = ((i % size) as f64 + 0.5) / size as f64 * w;
+        let z = ((i / size) as f64 + 0.5) / size as f64 * d;
+        let sq = (z / 16.0) as usize * farm.type_w + (x / 16.0) as usize;
+        let color = match farm.terrain.get(sq).copied() {
+            Some(TERRAIN_TOWER) => TOWER,
+            Some(TERRAIN_BRIDGE) => BRIDGE,
+            _ => VOID,
         };
-        if let Some(c) = color {
-            chunk.copy_from_slice(&c);
+        chunk.copy_from_slice(&color);
+    }
+    let r = (size as f64 * 64.0 / w).ceil().max(1.0) as i64;
+    for v in farm.datavents() {
+        let (cx, cz) = ((v[0] / w * size as f64) as i64, (v[2] / d * size as f64) as i64);
+        for pz in cz - r..=cz + r {
+            for pxx in cx - r..=cx + r {
+                if (0..size as i64).contains(&pxx) && (0..size as i64).contains(&pz) {
+                    let i = (pz as usize * size + pxx as usize) * 4;
+                    px[i..i + 4].copy_from_slice(&VENT);
+                }
+            }
         }
     }
     px

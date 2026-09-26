@@ -368,10 +368,16 @@ pub fn apply_damage(
     spatial: Res<SpatialIndex>,
     mut commands: Commands,
     mut splash_hits: Local<Vec<(Entity, f32, bool)>>,
+    mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
 ) {
     for pending in damage_queue.drain() {
         // Ids are interned through this same registry — infallible.
         let weapon_def = weapon_registry.by_id(pending.weapon);
+        // Every impact is an engine `Explosion` event; Hex Farm's
+        // gadget watches them all to damage the ground.
+        if let Some(inbox) = hex_farm.as_deref_mut() {
+            inbox.explosion(pending.impact_pos, weapon_def.damage.default);
+        }
         let weapon_name = weapon_registry.name(pending.weapon);
         let infection_window = weapon_infection_duration(weapon_name);
 

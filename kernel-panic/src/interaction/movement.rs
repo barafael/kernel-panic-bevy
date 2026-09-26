@@ -164,6 +164,40 @@ impl NavGridSet {
             .position(|b| b.max_slope >= cap)
             .unwrap_or(self.buckets.len() - 1)
     }
+
+    /// Can a ground unit with slope cap `cap` stand on the heightmap
+    /// square under `(x, z)`? Off-map squares are not. With no grids
+    /// built everything is.
+    pub fn passable(&self, cap: f32, x: f32, z: f32) -> bool {
+        if self.buckets.is_empty() {
+            return true;
+        }
+        let map = &self.buckets[self.bucket_for(cap)].speed_map;
+        let (cx, cz) = ((x / 8.0).floor(), (z / 8.0).floor());
+        cx >= 0.0 && cz >= 0.0 && map.get(cx as u32, cz as u32) > 0.0
+    }
+
+    /// Spring's ground move types never step (or get pushed) from a
+    /// passable square onto an impassable one — e.g. a Hex Farm unit
+    /// cutting a corner or jostled off a tower edge would otherwise walk
+    /// into the void. Slide along the blocked axis instead, or stay.
+    /// A unit already on an impassable square may move freely (so it can
+    /// walk out).
+    pub fn gate_step(&self, cap: f32, current: Vec3, step: Vec3) -> Vec3 {
+        let ok = |d: Vec3| self.passable(cap, current.x + d.x, current.z + d.z);
+        if !ok(Vec3::ZERO) || ok(step) {
+            return step;
+        }
+        let along_x = Vec3::new(step.x, step.y, 0.0);
+        if ok(along_x) {
+            return along_x;
+        }
+        let along_z = Vec3::new(0.0, step.y, step.z);
+        if ok(along_z) {
+            return along_z;
+        }
+        Vec3::new(0.0, step.y, 0.0)
+    }
 }
 
 /// Spring `MOVEINFO.TDF` HeatMapping: a shared congestion grid the
@@ -749,6 +783,12 @@ pub fn movement_system(
             }
         }
 
+        let resolved = match nav_set.as_deref() {
+            Some(nav) if !flying => {
+                nav.gate_step(unit_registry.max_slope_ratio(unit_type.0), current, resolved)
+            }
+            _ => resolved,
+        };
         transform.translation += resolved;
 
         // Altitude: ground units hug the terrain; flying units hover at
@@ -1027,13 +1067,17 @@ fn waypoint_blocked_by_arrived_unit(
 /// when the terrain pushes a unit into a building. `movement_system` now
 /// does the primary hard-collision work, so this only needs to correct
 /// residual overlap with a gentle nudge — not drive the main separation.
+#[allow(clippy::too_many_arguments)]
 pub fn unit_separation_system(
     mut units: Query<
         (Entity, &mut Transform, &UnitStats),
         Without<crate::units::lifecycle::spawning::Emerging>,
     >,
+    kinds: Query<&UnitType>,
     time: Res<Time>,
     heightmap: Option<Res<Heightmap>>,
+    nav_set: Option<Res<NavGridSet>>,
+    unit_registry: Res<UnitRegistry>,
     mut snapshot: Local<Vec<SeparationEntry>>,
     mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
     mut pushes: Local<Vec<(Entity, Vec3)>>,
@@ -1107,7 +1151,12 @@ pub fn unit_separation_system(
 
     for (entity, push) in pushes.drain(..) {
         if let Ok((_, mut tf, _)) = units.get_mut(entity) {
-            tf.translation += push * push_strength * dt;
+            let mut step = push * push_strength * dt;
+            // Pushes respect impassable squares too (see `gate_step`).
+            if let (Some(nav), Ok(kind)) = (nav_set.as_deref(), kinds.get(entity)) {
+                step = nav.gate_step(unit_registry.max_slope_ratio(kind.0), tf.translation, step);
+            }
+            tf.translation += step;
             if let Some(ref hm) = heightmap {
                 tf.translation.y = hm.sample(tf.translation.x, tf.translation.z);
             }
@@ -2036,5 +2085,45 @@ mod cross_map_tests {
             }
             println!("{map_name}: {reached}/{total} targets reached");
         }
+    }
+}
+
+#[cfg(test)]
+mod gate_step_tests {
+    use super::*;
+
+    /// 4×4 cells, the right half (x ≥ 16) impassable.
+    fn half_blocked() -> NavGridSet {
+        let mut speed_map = SpeedMap::uniform(4, 4, 1.0);
+        for z in 0..4 {
+            for x in 2..4 {
+                speed_map.speeds[(z * 4 + x) as usize] = 0.0;
+            }
+        }
+        NavGridSet {
+            buckets: vec![NavBucket {
+                max_slope: 0.5,
+                speed_map,
+            }],
+        }
+    }
+
+    #[test]
+    fn step_into_impassable_slides_or_stops() {
+        let nav = half_blocked();
+        let at = Vec3::new(12.0, 0.0, 12.0);
+        // Straight in: refused.
+        assert_eq!(nav.gate_step(0.5, at, Vec3::new(6.0, 0.0, 0.0)), Vec3::ZERO);
+        // Diagonal in: keeps the passable (z) component.
+        assert_eq!(
+            nav.gate_step(0.5, at, Vec3::new(6.0, 0.0, 3.0)),
+            Vec3::new(0.0, 0.0, 3.0)
+        );
+        // Within passable ground: untouched.
+        let s = Vec3::new(-3.0, 0.0, 2.0);
+        assert_eq!(nav.gate_step(0.5, at, s), s);
+        // Already on impassable ground: free to walk out.
+        let s = Vec3::new(-6.0, 0.0, 0.0);
+        assert_eq!(nav.gate_step(0.5, Vec3::new(20.0, 0.0, 12.0), s), s);
     }
 }

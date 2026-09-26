@@ -285,7 +285,40 @@ pub struct HexFarm {
     /// `PolyHealth`, indexed by [`Poly::key`] through [`Self::health`].
     hex_health: Vec<f64>,
     rect_health: Vec<f64>,
+    /// `PolyPercent`: last % indicator sent per polygon.
+    percent: std::collections::HashMap<Poly, i32>,
+    /// What the synced side told the rest of the game since the last
+    /// [`Self::drain_events`] (the gadget's `SendToUnsynced` plus the
+    /// engine-side effects of `SetOneHex` / `SetOneRect`).
+    events: Vec<HexFarmEvent>,
     pub rng: Rng,
+}
+
+/// Side effects of the dynamic mode, for the renderer and the engine
+/// glue to apply.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HexFarmEvent {
+    /// `SendToUnsynced("ReceiveHexFarmLayout",'moving',...)`: animate a
+    /// polygon rising (`direction` 1) or sinking (-1) between the two
+    /// sim frames. `corner` picks which end of a bridge swings.
+    Moving {
+        poly: Poly,
+        first_frame: f64,
+        last_frame: f64,
+        direction: i8,
+        corner: u8,
+    },
+    /// `SetOneHex` / `SetOneRect` ran: the polygon's heightmap (see
+    /// [`HexFarm::write_poly_heights`]) and terrain type changed.
+    Reshaped(Poly),
+    /// A datavent appeared at the centre of this (just risen) tower.
+    VentAdded(usize),
+    /// Datavents inside this (just sunk) tower are gone.
+    VentsRemoved(usize),
+    /// `SendToUnsynced(...,"%",k,percent)`: the % indicator of a polygon
+    /// being destroyed (health left) or rebuilt (build progress);
+    /// `None` clears it.
+    Percent(Poly, Option<i32>),
 }
 
 impl HexFarm {
@@ -388,6 +421,8 @@ impl HexFarm {
             poly_map: Vec::new(),
             hex_health: Vec::new(),
             rect_health: Vec::new(),
+            percent: Default::default(),
+            events: Vec::new(),
             rng,
         }
     }
@@ -885,6 +920,19 @@ impl HexFarm {
         self.terrain = terrain;
     }
 
+    /// Terrain half of `SetOneHex` / `SetOneRect`.
+    fn set_poly_terrain(&mut self, p: Poly) {
+        let (_, _, hidden) = self.poly_shape(p);
+        let t = match (hidden, p) {
+            (true, _) => TERRAIN_VOID,
+            (false, Poly::Hex(_)) => TERRAIN_TOWER,
+            (false, Poly::Rect(_)) => TERRAIN_BRIDGE,
+        };
+        let mut terrain = std::mem::take(&mut self.terrain);
+        self.for_poly_squares(p, |i| terrain[i] = t);
+        self.terrain = terrain;
+    }
+
     /// `SetWholePolyMap` (l.960): which polygon each terrain square
     /// belongs to (bridges written last, so they win overlaps), hidden
     /// or not.
@@ -916,6 +964,13 @@ impl HexFarm {
         }
     }
 
+    fn health_mut(&mut self, p: Poly) -> &mut f64 {
+        match p {
+            Poly::Hex(k) => &mut self.hex_health[k],
+            Poly::Rect(k) => &mut self.rect_health[k],
+        }
+    }
+
     fn square_index(&self, x: f64, z: f64) -> Option<usize> {
         let (sx, sz) = ((x / TYPE_SQUARE).floor(), (z / TYPE_SQUARE).floor());
         (sx >= 0.0 && sz >= 0.0 && (sx as usize) < self.type_w && (sz as usize) < self.type_h)
@@ -932,6 +987,260 @@ impl HexFarm {
     pub fn is_void(&self, x: f64, z: f64) -> bool {
         self.square_index(x, z)
             .is_none_or(|i| self.terrain[i] == TERRAIN_VOID)
+    }
+
+    // ------------------------------------------------------------------
+    // Dynamic mode (`Dynamic = Exploration or PolyHitpoint or
+    // PolyBuildpoint`, always on for KP's defaults).
+    // ------------------------------------------------------------------
+
+    /// Take the events emitted since the last call.
+    pub fn drain_events(&mut self) -> Vec<HexFarmEvent> {
+        std::mem::take(&mut self.events)
+    }
+
+    fn hidden(&self, p: Poly) -> bool {
+        match p {
+            Poly::Hex(k) => self.hexes[k].hidden,
+            Poly::Rect(k) => self.rects[k].hidden,
+        }
+    }
+
+    fn progress(&self, p: Poly) -> Option<f64> {
+        match p {
+            Poly::Hex(k) => self.hexes[k].progress,
+            Poly::Rect(k) => self.rects[k].progress,
+        }
+    }
+
+    /// Set `hidden`/`progress`/`dy` together, as the gadget always does.
+    fn set_state(&mut self, p: Poly, hidden: bool, progress: Option<f64>, dy: f64) {
+        let (h, pr, d) = match p {
+            Poly::Hex(k) => {
+                let h = &mut self.hexes[k];
+                (&mut h.hidden, &mut h.progress, &mut h.dy)
+            }
+            Poly::Rect(k) => {
+                let r = &mut self.rects[k];
+                (&mut r.hidden, &mut r.progress, &mut r.dy)
+            }
+        };
+        (*h, *pr, *d) = (hidden, progress, dy);
+    }
+
+    fn moving(&mut self, poly: Poly, first_frame: f64, last_frame: f64, direction: i8, corner: u8) {
+        self.events.push(HexFarmEvent::Moving {
+            poly,
+            first_frame,
+            last_frame,
+            direction,
+            corner,
+        });
+    }
+
+    /// Update `PolyPercent[k]`, emitting only on change (`PolyPercentUpdate`).
+    fn set_percent(&mut self, p: Poly, percent: Option<i32>) {
+        if !self.indication {
+            return;
+        }
+        let changed = match percent {
+            Some(v) => self.percent.insert(p, v) != Some(v),
+            None => self.percent.remove(&p).is_some(),
+        };
+        if changed {
+            self.events.push(HexFarmEvent::Percent(p, percent));
+        }
+    }
+
+    /// `SetOneHex` / `SetOneRect` (l.861, l.936): rewrite the polygon's
+    /// terrain type (and, through [`HexFarmEvent::Reshaped`], its
+    /// heightmap) for its current visibility, and add/remove a tower's
+    /// datavent. (`VentsMoveNotErase` only matters before frame 25,
+    /// where parking a vent in the sky is the same as removing it.)
+    fn set_one(&mut self, p: Poly) {
+        self.set_poly_terrain(p);
+        self.events.push(HexFarmEvent::Reshaped(p));
+        if let Poly::Hex(k) = p
+            && self.hexes[k].g
+        {
+            self.events.push(if self.hexes[k].hidden {
+                HexFarmEvent::VentsRemoved(k)
+            } else {
+                HexFarmEvent::VentAdded(k)
+            });
+        }
+    }
+
+    /// `gadget:Explosion` (l.1727): with `PolyHitpoint`, every explosion
+    /// damages the solid polygon under it (not one still rising) by the
+    /// weapon's default damage; below zero it sinks — a tower taking
+    /// its bridges down with it — and must be rebuilt with
+    /// `PolyBuildpoint` of construction.
+    pub fn explosion(&mut self, frame: f64, x: f64, z: f64, damage: f64) {
+        let Some(p) = self.poly_at(x, z) else {
+            return;
+        };
+        if self.hidden(p) || self.progress(p).is_some() {
+            return;
+        }
+        *self.health_mut(p) -= damage;
+        let percent = (0.5 + 100.0 * self.health(p) / self.poly_hitpoint).floor() as i32;
+        self.set_percent(p, Some(percent));
+        if self.health(p) >= 0.0 {
+            return;
+        }
+        self.set_state(p, true, None, 0.0);
+        let corner = if self.rng.range(1, 2) == 2 { 1 } else { 3 };
+        self.moving(p, frame, frame + self.tower_pop_time / 4.0, -1, corner);
+        *self.health_mut(p) = -self.poly_buildpoint;
+        self.set_percent(p, None);
+        self.set_one(p);
+        if let Poly::Hex(k) = p {
+            for r in self.hexes[k].bridge_links.clone() {
+                if !self.rects[r].hidden || self.rects[r].progress.is_some() {
+                    self.set_state(Poly::Rect(r), true, None, 0.0);
+                    let corner = if self.rects[r].hex1 == k { 1 } else { 3 };
+                    self.moving(
+                        Poly::Rect(r),
+                        frame,
+                        frame + self.bridge_pop_time / 4.0,
+                        -1,
+                        corner,
+                    );
+                    *self.health_mut(Poly::Rect(r)) = -self.poly_buildpoint;
+                    self.set_percent(Poly::Rect(r), None);
+                    self.set_one(Poly::Rect(r));
+                }
+            }
+        }
+    }
+
+    /// `gadget:AllowUnitBuildStep` (l.1662): a build step on a unit
+    /// standing on tower `k` (`points` = `Amount × buildTime`) pays into
+    /// every destroyed (health ≤ 0) sunk neighbour — bridges and
+    /// towers alike — and raises the ones it completes.
+    pub fn build_step(&mut self, frame: f64, x: f64, z: f64, points: f64) {
+        let Some(Poly::Hex(k)) = self.poly_at(x, z) else {
+            return;
+        };
+        let bp = self.poly_buildpoint;
+        for r in self.hexes[k].bridge_links.clone() {
+            let p = Poly::Rect(r);
+            if !(self.rects[r].hidden && self.rects[r].progress.is_none() && self.health(p) <= 0.0) {
+                continue;
+            }
+            *self.health_mut(p) += points;
+            self.set_percent(p, Some((0.5 + 100.0 * (bp + self.health(p)) / bp).floor() as i32));
+            if self.health(p) >= 0.0 {
+                *self.health_mut(p) = self.poly_hitpoint;
+                self.set_percent(p, None);
+                self.set_state(p, false, Some(0.0), 41.0 / self.bridge_pop_time);
+                let rect = &self.rects[r];
+                let span = if self.hexes[rect.hex1].hidden || self.hexes[rect.hex2].hidden {
+                    self.tower_pop_time.max(self.bridge_pop_time)
+                } else {
+                    self.bridge_pop_time
+                };
+                let corner = if rect.hex1 == k { 3 } else { 1 };
+                self.moving(p, frame, frame + span, 1, corner);
+            }
+        }
+        for h in self.hexes[k].tower_links.clone() {
+            let p = Poly::Hex(h);
+            if !(self.hexes[h].hidden && self.hexes[h].progress.is_none() && self.health(p) <= 0.0) {
+                continue;
+            }
+            *self.health_mut(p) += points;
+            self.set_percent(p, Some((0.5 + 100.0 * (bp + self.health(p)) / bp).floor() as i32));
+            if self.health(p) >= 0.0 {
+                *self.health_mut(p) = self.poly_hitpoint;
+                self.set_percent(p, None);
+                self.set_state(p, false, Some(0.0), 41.0 / self.tower_pop_time);
+                self.moving(p, frame, frame + self.tower_pop_time, 1, 0);
+            }
+        }
+    }
+
+    /// The polygon part of `gadget:GameFrame` (l.1781), run on the
+    /// frames where `frame % 41 == 25`, after the caller's fall sweep
+    /// collected `occupied`: the polygons with a (non-flying, not
+    /// fallen) unit on them. Exploration raises the towers next to
+    /// occupied ones; rising polygons advance by `dy` per sweep (a tower
+    /// nobody stands next to anymore sinks back), and finished ones
+    /// become solid — a finished tower then raises its bridges to
+    /// other solid towers.
+    pub fn game_frame(&mut self, frame: f64, occupied: &std::collections::HashSet<Poly>) {
+        let tpt = self.tower_pop_time;
+        let bpt = self.bridge_pop_time;
+        if self.exploration > 0.0 {
+            for h1 in (0..self.hexes.len()).rev() {
+                if !occupied.contains(&Poly::Hex(h1)) {
+                    continue;
+                }
+                for n in self.hexes[h1].tower_links.clone().into_iter().rev() {
+                    let h = &self.hexes[n];
+                    if h.hidden && h.progress.is_none() && self.hex_health[n] > 0.0 {
+                        self.set_state(Poly::Hex(n), false, Some(0.0), 41.0 / tpt);
+                        self.moving(Poly::Hex(n), frame, frame + tpt, 1, 0);
+                    }
+                }
+            }
+        }
+        for h in (0..self.hexes.len()).rev() {
+            let Some(progress) = self.hexes[h].progress else {
+                continue;
+            };
+            let neighbour_occupied = self.hexes[h]
+                .tower_links
+                .iter()
+                .any(|&n| occupied.contains(&Poly::Hex(n)));
+            if !neighbour_occupied && self.hexes[h].dy > 0.0 {
+                // Sinking Hex
+                self.hexes[h].dy = -41.0 / tpt;
+                let first = frame - (1.0 - progress) * tpt;
+                self.moving(Poly::Hex(h), first, first + tpt, -1, 0);
+            }
+            let progress = progress + self.hexes[h].dy;
+            if progress < 0.0 {
+                // Deleting Hex (its ground never became solid).
+                self.set_state(Poly::Hex(h), true, None, 0.0);
+            } else if progress > 1.0 {
+                // Finishing Hex
+                self.set_state(Poly::Hex(h), false, None, 0.0);
+                self.set_one(Poly::Hex(h));
+                if self.exploration > 0.0 {
+                    for r in self.hexes[h].bridge_links.clone().into_iter().rev() {
+                        let rect = &self.rects[r];
+                        if rect.hidden
+                            && rect.progress.is_none()
+                            && !self.hexes[rect.hex1].hidden
+                            && !self.hexes[rect.hex2].hidden
+                            && self.rect_health[r] > 0.0
+                        {
+                            let corner = if rect.hex1 == h { 3 } else { 1 };
+                            self.set_state(Poly::Rect(r), false, Some(0.0), 41.0 / bpt);
+                            self.moving(Poly::Rect(r), frame, frame + bpt, 1, corner);
+                        }
+                    }
+                }
+            } else {
+                self.hexes[h].progress = Some(progress);
+            }
+        }
+        for r in (0..self.rects.len()).rev() {
+            let Some(progress) = self.rects[r].progress else {
+                continue;
+            };
+            let progress = progress + self.rects[r].dy;
+            if progress < 0.0 {
+                self.set_state(Poly::Rect(r), true, None, 0.0);
+            } else if progress > 1.0 {
+                self.set_state(Poly::Rect(r), false, None, 0.0);
+                self.set_one(Poly::Rect(r));
+            } else {
+                self.rects[r].progress = Some(progress);
+            }
+        }
     }
 
     /// Datavents present on the visible towers (`RedoDatavents`,
@@ -1152,5 +1461,115 @@ mod tests {
         assert!((spike - pit - 96.0).abs() < 1e-6);
         assert!(farm.is_void(1.0, 1.0));
         assert!(farm.poly_at(1.0, 1.0).is_none());
+    }
+
+    /// Run sweeps (every 41 frames from 25) with `occupied` fixed.
+    fn sweep(farm: &mut HexFarm, frames: &mut f64, count: usize, occupied: &std::collections::HashSet<Poly>) {
+        for _ in 0..count {
+            *frames += 41.0;
+            farm.game_frame(*frames, occupied);
+        }
+    }
+
+    /// A seed whose layout has a start tower with at least one neighbour.
+    fn farm_with_neighbours() -> (HexFarm, usize) {
+        for seed in 0..100 {
+            let farm = HexFarm::generate(seed, setup(2));
+            if let Some(k) = (0..farm.hexes.len())
+                .find(|&k| !farm.hexes[k].hidden && !farm.hexes[k].tower_links.is_empty())
+            {
+                return (farm, k);
+            }
+        }
+        panic!("no layout with linked towers");
+    }
+
+    #[test]
+    fn exploration_raises_neighbours_then_bridges() {
+        let (mut farm, start) = farm_with_neighbours();
+        let occupied = std::collections::HashSet::from([Poly::Hex(start)]);
+        let n = farm.hexes[start].tower_links[0];
+        assert!(farm.hexes[n].hidden);
+        let mut frame = 25.0;
+        farm.game_frame(frame, &occupied);
+        let events = farm.drain_events();
+        assert!(events.iter().any(|e| matches!(e, HexFarmEvent::Moving { poly: Poly::Hex(h), direction: 1, .. } if *h == n)));
+        // Still rising: not walkable yet.
+        assert!(farm.is_void(farm.hexes[n].x, farm.hexes[n].z));
+        // TowerPopTime = 300 frames: done after ceil(300/41)+1 sweeps.
+        sweep(&mut farm, &mut frame, 8, &occupied);
+        assert!(!farm.hexes[n].hidden && farm.hexes[n].progress.is_none());
+        assert!(!farm.is_void(farm.hexes[n].x, farm.hexes[n].z));
+        let events = farm.drain_events();
+        assert!(events.contains(&HexFarmEvent::Reshaped(Poly::Hex(n))));
+        // The bridge between the two is now rising, then solid.
+        let r = farm.hexes[start]
+            .bridge_links
+            .iter()
+            .copied()
+            .find(|&r| farm.rects[r].hex1 == n || farm.rects[r].hex2 == n)
+            .unwrap();
+        assert!(farm.rects[r].progress.is_some());
+        sweep(&mut farm, &mut frame, 5, &occupied);
+        assert!(!farm.rects[r].hidden && farm.rects[r].progress.is_none());
+    }
+
+    #[test]
+    fn unattended_rising_tower_sinks_back() {
+        let (mut farm, start) = farm_with_neighbours();
+        let n = farm.hexes[start].tower_links[0];
+        let mut frame = 25.0;
+        farm.game_frame(frame, &std::collections::HashSet::from([Poly::Hex(start)]));
+        sweep(&mut farm, &mut frame, 2, &std::collections::HashSet::from([Poly::Hex(start)]));
+        sweep(&mut farm, &mut frame, 10, &Default::default());
+        assert!(farm.hexes[n].hidden && farm.hexes[n].progress.is_none());
+    }
+
+    #[test]
+    fn explosions_sink_and_construction_raises() {
+        let (mut farm, start) = farm_with_neighbours();
+        let w = (SIZE / 8.0) as usize + 1;
+        let mut hm = heights(&farm);
+        let n = farm.hexes[start].tower_links[0];
+        // Explore n and its bridge first.
+        let occupied = std::collections::HashSet::from([Poly::Hex(start)]);
+        let mut frame = 25.0;
+        sweep(&mut farm, &mut frame, 15, &occupied);
+        assert!(!farm.hexes[n].hidden);
+        farm.drain_events();
+
+        let (x, z) = (farm.hexes[n].x, farm.hexes[n].z);
+        farm.explosion(frame, x, z, farm.poly_hitpoint * 0.5);
+        assert!(!farm.hexes[n].hidden);
+        assert_eq!(farm.drain_events(), vec![HexFarmEvent::Percent(Poly::Hex(n), Some(50))]);
+        farm.explosion(frame, x, z, farm.poly_hitpoint);
+        assert!(farm.hexes[n].hidden && farm.is_void(x, z));
+        assert_eq!(farm.health(Poly::Hex(n)), -farm.poly_buildpoint);
+        let events = farm.drain_events();
+        assert!(events.contains(&HexFarmEvent::Reshaped(Poly::Hex(n))));
+        for p in events.iter().filter_map(|e| match e {
+            HexFarmEvent::Reshaped(p) => Some(*p),
+            _ => None,
+        }) {
+            farm.write_poly_heights(p, &mut hm);
+        }
+        let (ix, iz) = ((x / 8.0) as usize, (z / 8.0) as usize);
+        assert!((hm[iz * w + ix] as f64) < farm.hexes[n].y - 100.0);
+        // Its bridges went down with it.
+        for &r in &farm.hexes[n].bridge_links {
+            assert!(farm.rects[r].hidden);
+        }
+        // Destroyed towers are not re-explored...
+        sweep(&mut farm, &mut frame, 10, &occupied);
+        assert!(farm.hexes[n].hidden);
+        // ...but building next to them raises them.
+        let (sx, sz) = (farm.hexes[start].x, farm.hexes[start].z);
+        farm.build_step(frame, sx, sz, farm.poly_buildpoint * 0.25);
+        assert!(farm.hexes[n].hidden);
+        farm.build_step(frame, sx, sz, farm.poly_buildpoint);
+        assert!(!farm.hexes[n].hidden && farm.hexes[n].progress == Some(0.0));
+        sweep(&mut farm, &mut frame, 9, &occupied);
+        assert!(!farm.hexes[n].hidden && !farm.is_void(x, z));
+        assert_eq!(farm.health(Poly::Hex(n)), farm.poly_hitpoint);
     }
 }

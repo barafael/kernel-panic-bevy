@@ -32,7 +32,7 @@ use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
 
 // HexFarm Lua-composited towers/bridges (native and web: the data
 // round-trips through `.kpmap` v4).
-mod lua_compositing;
+pub(crate) mod lua_compositing;
 mod mipmap;
 
 // Web-only: maps arrive as fetched `.kpmap` bytes through the asset
@@ -44,7 +44,6 @@ use bytes_asset::BytesAsset;
 #[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/web_map_catalog.rs"));
 
-use lua_compositing::spawn_lua_compositing;
 use mipmap::{build_terrain_material_from_texture, dark_fallback_material, void_ground_material};
 
 pub struct MapLoadingPlugin;
@@ -188,6 +187,12 @@ pub struct PersistentEntity;
 /// mesh itself, unit meshes under the cursor, or order-palette gizmos.
 #[derive(Component)]
 pub struct TerrainChunkMarker;
+
+/// Which chunk (in [`CHUNK_SIZE`](crate::terrain::mesh::CHUNK_SIZE)
+/// squares) a terrain chunk entity is, so runtime height edits can
+/// rebuild just the chunks they touch.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub struct TerrainChunkCoord(pub usize, pub usize);
 
 /// All map archives available in `assets/maps/`, sorted. The menu's map
 /// list and random-map resolution read this.
@@ -730,16 +735,20 @@ fn spawn_map_world(
     );
     let terrain_ms = t_terrain.elapsed().as_secs_f64() * 1000.0;
 
-    if let (Some(compositing), Some(farm)) = (&spring_map.lua_compositing, &hex_farm) {
-        spawn_lua_compositing(
-            compositing,
-            &farm.layout(),
-            &mut ctx.commands,
-            &mut ctx.meshes,
-            &mut ctx.materials,
-            &mut ctx.images,
-        );
-    }
+    // Hex Farm's footprint minimap (no ground texture) — taken before
+    // the farm moves into its runtime state.
+    let lua_minimap = hex_farm.as_ref().map(|farm| {
+        lua_compositing::minimap_pixels(farm, crate::map_events::hex_farm::MINIMAP_RES)
+    });
+    // Towers/bridges drawing + dynamic mode (or clear a previous match's).
+    crate::map_events::hex_farm::install(
+        hex_farm,
+        spring_map.lua_compositing.as_ref().map(|c| &c.atlas),
+        &mut ctx.commands,
+        &mut ctx.meshes,
+        &mut ctx.materials,
+        &mut ctx.images,
+    );
 
     // One pathfinding grid per distinct unit `MaxSlope`. Caps and
     // slope-mods are in Spring's encoding — see `cost.rs`.
@@ -818,11 +827,7 @@ fn spawn_map_world(
     // Setup minimap from ground texture (a voidGround map has none:
     // paint its towers and bridges instead).
     {
-        const LUA_MINIMAP_RES: usize = 400;
-        let lua_minimap = hex_farm.as_ref().map(|farm| {
-            let world = Vec2::new(parsed.header.world_width(), parsed.header.world_depth());
-            lua_compositing::minimap_pixels(&farm.layout(), world, LUA_MINIMAP_RES)
-        });
+        const LUA_MINIMAP_RES: usize = crate::map_events::hex_farm::MINIMAP_RES;
         let (gp, gw, gh) = match (&lua_minimap, &spring_map.ground_texture) {
             (Some(px), _) => (Some(px.as_slice()), LUA_MINIMAP_RES, LUA_MINIMAP_RES),
             (None, Some(g)) => (Some(g.pixels.as_slice()), g.width, g.height),
@@ -921,10 +926,12 @@ fn spawn_terrain(
     let chunks = generate_terrain_chunks(map);
     info!("  Spawning {} terrain chunks", chunks.len());
 
-    for chunk in chunks {
+    let chunks_x = (map.header.heightmap_width() - 1).div_ceil(crate::terrain::mesh::CHUNK_SIZE);
+    for (i, chunk) in chunks.into_iter().enumerate() {
         let mesh_handle = meshes.add(chunk.mesh);
         commands.spawn((
             TerrainChunkMarker,
+            TerrainChunkCoord(i % chunks_x, i / chunks_x),
             Mesh3d(mesh_handle),
             MeshMaterial3d(terrain_material.clone()),
             Transform::from_translation(chunk.translation),

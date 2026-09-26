@@ -209,6 +209,7 @@ pub fn production_system(
     unit_count: Res<super::bookkeeping::TotalUnitCount>,
     mut pending_attacks: ResMut<PendingAttacks>,
     mut ctx: SpawnContext,
+    mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
     // `Local` so the allocation is reused across frames — production
     // completions are sparse (most ticks push nothing), but fresh Vecs on
     // every frame cost allocator churn for no gain.
@@ -269,6 +270,15 @@ pub fn production_system(
         producer.progress += dt * speed_mult;
 
         let factory_pos = global_tf.translation();
+        // Spring's factory build step goes through `AllowUnitBuildStep`
+        // with the buildee (on the factory pad) — Hex Farm rebuilds
+        // sunk neighbours with it.
+        if let (Some(inbox), Some(kind)) = (hex_farm.as_deref_mut(), producer.current_production()) {
+            inbox.build_step(
+                factory_pos,
+                dt * speed_mult / build_time * ctx.unit_registry.raw_build_time(kind),
+            );
+        }
         let pad_pos = factory_pieces
             .and_then(|fp| piece_world_pos(fp.pad, animator, &piece_transforms))
             .unwrap_or(factory_pos);

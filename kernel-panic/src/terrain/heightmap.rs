@@ -41,6 +41,22 @@ impl Heightmap {
         }
     }
 
+    /// Raw row-major heights (`width × height` vertices).
+    pub fn heights(&self) -> &[f32] {
+        &self.heights
+    }
+
+    /// Mutable heights, for runtime terrain edits (Hex Farm). Callers
+    /// re-sync the nav grids / terrain mesh for what they touch.
+    pub fn heights_mut(&mut self) -> &mut [f32] {
+        &mut self.heights
+    }
+
+    /// Heightmap vertex columns / rows.
+    pub fn grid_size(&self) -> (usize, usize) {
+        (self.width, self.height)
+    }
+
     /// Bilinearly sample the terrain Y at world position `(x, z)`. Out-of-bounds
     /// queries clamp to the nearest edge cell.
     pub fn sample(&self, x: f32, z: f32) -> f32 {

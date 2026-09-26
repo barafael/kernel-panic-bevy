@@ -11,6 +11,7 @@
 use bevy::prelude::*;
 
 pub mod circular_flow;
+pub mod hex_farm;
 pub use circular_flow::CircularFlow;
 
 use crate::rng::{next_f32, next_signed, xorshift32};
@@ -139,6 +140,7 @@ pub struct MapEventsPlugin;
 
 impl Plugin for MapEventsPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(hex_farm::HexFarmPlugin);
         app.init_resource::<EruptionSpawnQueue>().add_systems(
             Update,
             (

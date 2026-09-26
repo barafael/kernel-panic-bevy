@@ -151,6 +151,17 @@ pub fn setup_minimap(
     });
 }
 
+impl MinimapState {
+    /// Replace the terrain layer (for maps whose ground changes during
+    /// play — Hex Farm). Every pixel is marked dirty so the next refresh
+    /// repaints the whole image from the new base.
+    pub fn set_base(&mut self, pixels: &[u8], width: usize, height: usize) {
+        self.base_pixels =
+            downsample_terrain(Some(pixels), width, height, self.width, self.height);
+        self.dirty_byte_indices = (0..self.base_pixels.len()).step_by(4).collect();
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn update_minimap(
     time: Res<Time>,
