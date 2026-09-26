@@ -29,6 +29,40 @@ const DEFAULT_WORKER_TIME: f32 = 128.0;
 /// threshold sits well below that range.
 const DAMAGE_MODIFIER_DISABLED_THRESHOLD: f32 = 0.01;
 
+/// A ground unit's Spring `MoveDef` geometry (`MoveDefHandler.cpp`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveDefParams {
+    /// Footprint half-size in heightmap squares: MOVEINFO `FootprintX
+    /// × 2`, made odd (`xsize -= !(xsize & 1)`, `MoveDefHandler.cpp:
+    /// 314-319`), halved — LIGHT 1 (3 squares), MEDIUM/HEAVY 3 (7).
+    pub xsizeh: i32,
+    pub zsizeh: i32,
+    /// `CalcFootPrintMaxInteriorRadius`: collision radius (LIGHT 12).
+    pub collision_radius: f32,
+    /// `CalcFootPrintMinExteriorRadius`: `ownerRadius`, used for goal
+    /// tolerance and avoidance (LIGHT ≈ 17).
+    pub owner_radius: f32,
+    /// MOVEINFO `CrushStrength`.
+    pub crush_strength: f32,
+}
+
+impl MoveDefParams {
+    pub fn from_class(class: &super::moveinfo::MoveClassDef) -> Self {
+        let odd = |fp: f32| {
+            let size = (fp.round() as i32).max(1) * 2;
+            size - if size & 1 == 1 { 0 } else { 1 }
+        };
+        let (xs, zs) = (odd(class.footprint_x), odd(class.footprint_z));
+        Self {
+            xsizeh: xs >> 1,
+            zsizeh: zs >> 1,
+            collision_radius: xs.max(zs) as f32 * 0.5 * 8.0,
+            owner_radius: ((xs * xs + zs * zs) as f32).sqrt() * 0.5 * 8.0,
+            crush_strength: class.crush_strength,
+        }
+    }
+}
+
 /// Default FBI `MaxSlope` (degrees) for KP movement classes, taken
 /// from upstream `gamedata/MOVEINFO.TDF` where every entry
 /// (LIGHT/MEDIUM/HEAVY) sets `MaxSlope=36`. Mobile units in KP don't
@@ -205,25 +239,16 @@ impl UnitRegistry {
         self.move_classes.params_for(class)
     }
 
-    /// Maximum turn speed in radians per second. Spring's FBI `TurnRate` is
-    /// in 16-bit heading units per sim frame (65536 = 360°, 30 fps), so
-    /// `rad/sec = TurnRate / 65536 * 2π * 30`. A TurnRate of 0 means the
-    /// unit can't rotate (buildings); our movement system treats that as
-    /// "snap instantly" so the face-target step is still coherent but
-    /// doesn't produce a divide-by-zero.
-    ///
-    /// Multiplied by `TURN_RATE_MULT` to make units feel responsive: raw
-    /// Spring values assumed a 30 Hz sim tick and engine-level heading
-    /// interpolation we don't reproduce, which left modest TurnRates
-    /// (200-500) visibly sluggish at 60 fps.
+    /// Maximum turn speed in radians per second. Spring's FBI `TurnRate`
+    /// is in 16-bit heading units per sim frame (65536 = 360°) —
+    /// `CGroundMoveType::turnRate` (GroundMoveType.cpp:514) applies it
+    /// once per frame — so `rad/s = TurnRate / 65536 · 2π · 30`. A Bit's
+    /// 480 turns 2.6°/frame, a half turn in ~2.3 s. A TurnRate of 0
+    /// (buildings) is treated as "snap" by the movement code.
     pub fn turn_rate(&self, kind: UnitKind) -> f32 {
         const SPRING_ANGLE_UNITS_PER_REV: f32 = 65536.0;
-        const TURN_RATE_MULT: f32 = 3.0;
         self.def(kind).map_or(0.0, |d| {
-            d.turn_rate / SPRING_ANGLE_UNITS_PER_REV
-                * std::f32::consts::TAU
-                * SPRING_SIM_FPS
-                * TURN_RATE_MULT
+            d.turn_rate / SPRING_ANGLE_UNITS_PER_REV * std::f32::consts::TAU * SPRING_SIM_FPS
         })
     }
 
@@ -341,31 +366,61 @@ impl UnitRegistry {
         self.def(kind).map_or(0.0, |d| d.cruise_alt)
     }
 
-    /// Approximate collision radius in world units (elmos) derived from the
-    /// FBI footprint. Spring's `FootprintX` / `FootprintZ` are in map squares
-    /// (1 square = 8 elmos), so half the larger dimension is a reasonable
-    /// in-plane circular radius for both hit testing and hard collision.
-    /// Returns a small minimum so an unparsed or zero-footprint unit still
-    /// has a non-zero radius.
+    /// The Spring `MoveDef` of a ground unit (its FBI `MovementClass`
+    /// looked up in MOVEINFO.TDF), or `None` for structures and
+    /// aircraft.
+    pub fn move_def(&self, kind: UnitKind) -> Option<MoveDefParams> {
+        let d = self.def(kind)?;
+        if d.can_fly || d.movement_class.is_empty() {
+            return None;
+        }
+        let class = self.move_classes.def_for(&d.movement_class)?;
+        Some(MoveDefParams::from_class(&class))
+    }
+
+    /// `UnitDef::mass` (`UnitDef.cpp:351`): FBI `Mass`, defaulting to
+    /// the metal cost, clamped to `[1, 1e6]`.
+    pub fn mass(&self, kind: UnitKind) -> f32 {
+        self.def(kind)
+            .map_or(1.0, |d| d.mass.unwrap_or(d.build_cost_metal))
+            .clamp(1.0, 1e6)
+    }
+
+    /// Collision radius (elmos) in the plane — what unit-unit
+    /// collision, separation and group spacing use.
+    ///
+    /// - Ground units: the MoveDef footprint's
+    ///   `CalcFootPrintMaxInteriorRadius` (`MoveDefHandler.cpp:734`,
+    ///   used by `CGroundMoveType::HandleObjectCollisions`): LIGHT 12,
+    ///   MEDIUM/HEAVY 28 — MOVEINFO footprints, not FBI ones.
+    /// - Structures: the FBI footprint's max interior radius,
+    ///   `FootprintX × SPRING_FOOTPRINT_SCALE(2) × 8 / 2`
+    ///   (`UnitDef.cpp:671`) — e.g. 64 for an 8×8 homebase.
+    /// - Aircraft keep the historical half-footprint radius the air
+    ///   movement port was tuned against.
     pub fn collision_radius(&self, kind: UnitKind) -> f32 {
-        const ELMOS_PER_SQUARE: f32 = 8.0;
         const MIN_RADIUS: f32 = 6.0;
+        if let Some(md) = self.move_def(kind) {
+            return md.collision_radius;
+        }
         self.def(kind).map_or(MIN_RADIUS, |d| {
             let larger = d.footprint_x.max(d.footprint_z);
-            (larger * ELMOS_PER_SQUARE * 0.5).max(MIN_RADIUS)
+            let per_unit = if d.can_fly { 4.0 } else { 8.0 };
+            (larger * per_unit).max(MIN_RADIUS)
         })
     }
 
-    /// Footprint in world elmos (`FootprintX × FootprintZ × 8`). Used by
-    /// the placement ghost to sample the slope a building would sit on.
-    /// Falls back to a 2×2-square footprint when FBI data is missing so
-    /// the gate has *some* extent to test rather than a zero-area point.
+    /// Footprint in world elmos: FBI `FootprintX × SPRING_FOOTPRINT_SCALE
+    /// (2)` heightmap squares of 8 elmos (`UnitDef.cpp:671`), i.e. ×16.
+    /// Used by the placement ghost's slope gate
+    /// (`CGameHelper::TestUnitBuildSquare` tests the same squares).
+    /// Falls back to a 2×2 FBI footprint when FBI data is missing.
     pub fn footprint_elmos(&self, kind: UnitKind) -> Vec2 {
-        const ELMOS_PER_SQUARE: f32 = 8.0;
-        self.def(kind).map_or(Vec2::splat(16.0), |d| {
+        const ELMOS_PER_FOOTPRINT_UNIT: f32 = 16.0;
+        self.def(kind).map_or(Vec2::splat(32.0), |d| {
             Vec2::new(
-                d.footprint_x * ELMOS_PER_SQUARE,
-                d.footprint_z * ELMOS_PER_SQUARE,
+                d.footprint_x.max(1.0) * ELMOS_PER_FOOTPRINT_UNIT,
+                d.footprint_z.max(1.0) * ELMOS_PER_FOOTPRINT_UNIT,
             )
         })
     }

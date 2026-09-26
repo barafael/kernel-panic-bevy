@@ -429,10 +429,7 @@ pub fn advance_pending_casts(
                 let mut caster = commands.entity(entity);
                 caster.remove::<PendingCommandFire>();
                 if moving {
-                    caster.insert(MovePath {
-                        waypoints: Vec::new(),
-                        current: 0,
-                    });
+                    caster.insert(MovePath::finished());
                 }
                 events.write(CommandFireEvent {
                     attacker: entity,

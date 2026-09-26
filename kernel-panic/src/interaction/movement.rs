@@ -1,24 +1,17 @@
-use std::collections::HashMap;
-
 use bevy::prelude::*;
 
-use spring_pathfinding::{HeatMap, SpeedMap, find_path_with_heat, slope_from_rise_run};
+use spring_pathfinding::{BlockMask, SpeedMap, find_path_masked};
 
 use super::selection::Selected;
-use crate::map_events::CircularFlow;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{
-    AimTarget, AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, DeployState,
-    Deployable, Dying, ForcedTarget,
+    AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, Dying, ForcedTarget,
 };
 use crate::units::components::{UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 
-/// Rate at which the pitch/roll component of a unit's rotation relaxes
-/// toward the slope-aligned target. Higher = snappier tilt, lower = more
-/// sluggish. Yaw is set directly (unaffected by this constant).
-const TILT_SMOOTH_RATE: f32 = 8.0;
+pub use super::ground_move::{GroundMover, ground_collision_system, movement_system};
 
 /// Dedicated gizmo config for command-line overlays so the dashed path
 /// renders thinner than the default 2-px gizmo width used elsewhere.
@@ -29,20 +22,11 @@ pub struct CommandLineGizmos;
 #[derive(Component)]
 pub struct MoveTarget(pub Vec3);
 
-/// The unit's current longitudinal speed in elmos/s. Ramps from 0 at
-/// `UnitStats::accel` while under way, brakes at `UnitStats::brake` when
-/// the order completes or is dropped, and is clamped near the final
-/// waypoint so a unit arrives at rest instead of overshooting —
-/// Spring's `CGroundMoveType` speed control in miniature. Units without
-/// the component (tests, pre-existing spawns) run speed directly.
-#[derive(Component, Default)]
-pub struct CurrentSpeed(pub f32);
-
 /// The per-unit movement-state components every spawned unit carries.
 /// Shared by `spawn_unit` and the headless movement harness so both
 /// build movers identically.
-pub(crate) fn ground_mover_components(_kind: UnitKind, _registry: &UnitRegistry) -> impl Bundle {
-    CurrentSpeed::default()
+pub(crate) fn ground_mover_components(kind: UnitKind, registry: &UnitRegistry) -> impl Bundle {
+    GroundMover::new(kind, registry, &UnitStats::from_registry(kind, registry, 0.0))
 }
 
 /// The fixed-tick ground-movement chain, in the order
@@ -54,7 +38,7 @@ pub(crate) fn add_ground_sim_systems(schedule: &mut Schedule) {
         (
             update_path_heat,
             movement_system,
-            unit_separation_system,
+            ground_collision_system,
             ground_clamp_system,
             orient_stationary_to_terrain,
         )
@@ -87,11 +71,41 @@ const GUARD_DISTANCE: f32 = 48.0;
 pub struct SlopeTilt(pub Quat);
 
 /// A computed path the unit follows waypoint-by-waypoint.
-#[derive(Component)]
+#[derive(Component, Clone, Debug)]
 pub struct MovePath {
     pub waypoints: Vec<Vec3>,
-    /// Index of the next waypoint to reach.
+    /// Index of the current waypoint (`currWayPoint`); `>= len` means
+    /// the leg is complete.
     pub current: usize,
+    /// The goal this path was searched for. A `MoveTarget` that differs
+    /// makes the movement system search a new path, following this one
+    /// until it arrives (Spring's `nextPathId` swap).
+    pub goal: Vec3,
+    /// `false` when the goal is unreachable and the path ends at the
+    /// closest reachable point (QTPFS partial path): reaching that end
+    /// fails the order instead of arriving.
+    pub reached_goal: bool,
+    /// [`NavGridSet::revision`] the path was checked against.
+    pub revision: u64,
+}
+
+impl MovePath {
+    /// A path through `waypoints` toward `goal`.
+    pub fn new(waypoints: Vec<Vec3>, goal: Vec3) -> Self {
+        Self {
+            waypoints,
+            current: 0,
+            goal,
+            reached_goal: true,
+            revision: 0,
+        }
+    }
+
+    /// An empty path: tells the movement system the leg is over (it
+    /// promotes the next queued command, or stops).
+    pub fn finished() -> Self {
+        Self::new(Vec::new(), Vec3::ZERO)
+    }
 }
 
 /// A queued command waiting to become the unit's active order.
@@ -174,6 +188,9 @@ pub struct NavBucket {
 #[derive(Resource, Default)]
 pub struct NavGridSet {
     pub buckets: Vec<NavBucket>,
+    /// Bumped whenever the structure layer changes, so paths made
+    /// before can be re-checked (QTPFS `PathUpdated`).
+    pub revision: u64,
 }
 
 impl NavGridSet {
@@ -201,26 +218,41 @@ impl NavGridSet {
         cx >= 0.0 && cz >= 0.0 && map.get(cx as u32, cz as u32) > 0.0
     }
 
-    /// Spring's ground move types never step (or get pushed) from a
-    /// passable square onto an impassable one — e.g. a Hex Farm unit
-    /// cutting a corner or jostled off a tower edge would otherwise walk
-    /// into the void. Slide along the blocked axis instead, or stay.
-    /// A unit already on an impassable square may move freely (so it can
-    /// walk out).
-    pub fn gate_step(&self, cap: f32, current: Vec3, step: Vec3) -> Vec3 {
-        let ok = |d: Vec3| self.passable(cap, current.x + d.x, current.z + d.z);
-        if !ok(Vec3::ZERO) || ok(step) {
-            return step;
-        }
-        let along_x = Vec3::new(step.x, step.y, 0.0);
-        if ok(along_x) {
-            return along_x;
-        }
-        let along_z = Vec3::new(0.0, step.y, step.z);
-        if ok(along_z) {
-            return along_z;
-        }
-        Vec3::new(0.0, step.y, 0.0)
+    /// The grid of the bucket for slope cap `cap`.
+    fn speed_map(&self, cap: f32) -> Option<&SpeedMap> {
+        (!self.buckets.is_empty()).then(|| &self.buckets[self.bucket_for(cap)].speed_map)
+    }
+
+    /// Does a structure block any square of a `xsizeh`-footprint mover
+    /// centred at `(x, z)` (`MoveDef::TestMovePositionForObjects`)?
+    pub fn footprint_blocked(&self, _x: f32, _z: f32, _xsizeh: i32, _crush_strength: f32) -> bool {
+        false
+    }
+
+    /// The structure mask a mover class paths against, if any.
+    pub fn block_mask(&self, _xsizeh: i32, _crush_strength: f32) -> Option<&BlockMask> {
+        None
+    }
+
+    /// `MoveDef::DoRawSearch`: can a mover drive straight `a → b`?
+    /// Every square the segment crosses must be passable terrain and
+    /// open for the mover's footprint.
+    pub fn line_clear(&self, cap: f32, xsizeh: i32, crush_strength: f32, a: Vec2, b: Vec2) -> bool {
+        let Some(map) = self.speed_map(cap) else {
+            return true;
+        };
+        spring_pathfinding::line_clear(
+            a.to_array(),
+            b.to_array(),
+            map,
+            self.block_mask(xsizeh, crush_strength),
+            None,
+        )
+    }
+
+    /// Terrain speed multiplier for a mover at `pos` heading `dir`.
+    pub fn speed_mod(&self, _cap: f32, _pos: Vec2, _dir: Vec2) -> f32 {
+        1.0
     }
 }
 
@@ -274,34 +306,10 @@ pub fn update_path_heat(
     }
 }
 
-/// Per-frame snapshot of every unit, used by the movement pass to resolve
-/// collisions and decide when a waypoint is blocked by an "arrived" unit.
-pub struct UnitSnapshot {
-    entity: Entity,
-    pos: Vec3,
-    radius: f32,
-    /// Whether this unit kind is capable of moving (speed > 0).
-    mobile: bool,
-    /// Flying units pass over ground units without pushing or being pushed
-    /// in the XZ plane, so the collision resolver skips air↔ground pairs.
-    flying: bool,
-    /// Whether this specific unit has no active move order right now — i.e.
-    /// it has reached its goal (or never had one). Used by the deadlock
-    /// breaker to skip waypoints that a stationary unit is standing on.
-    stationary: bool,
-}
-
 /// How far above the sampled ground height to draw command-line gizmos
 /// so they don't z-fight with the terrain.
 const GIZMO_LIFT: f32 = 1.5;
 
-/// Cap on the number of fresh paths `movement_system` will compute in a
-/// single frame. Extra units keep their stationary state until a later
-/// frame picks them up; prevents a 30-unit AI army launch from burning
-/// one frame on pathfinding and causing a visible hang.
-const PATHFIND_BUDGET_PER_FRAME: usize = 3;
-
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 /// Exact surface-aligned orientation: local up = terrain `normal`,
 /// local forward = `forward_xz` projected into the surface plane.
 ///
@@ -346,431 +354,6 @@ pub fn surface_aligned_rotation(forward_xz: Vec3, normal: Vec3) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(right, up, -fwd))
 }
 
-/// The movement god-query, bundled: one struct instead of a 14-slot
-/// tuple plus seven loose params (the old signature needed
-/// `clippy::too_many_arguments` + `clippy::type_complexity` waivers).
-#[derive(bevy::ecs::system::SystemParam)]
-#[allow(clippy::type_complexity)]
-pub struct MovementQuery<'w, 's> {
-    pub query: Query<
-        'w,
-        's,
-        (
-            Entity,
-            &'static UnitType,
-            &'static UnitStats,
-            &'static mut Transform,
-            Option<&'static MoveTarget>,
-            Option<&'static mut MovePath>,
-            Option<&'static mut CommandQueue>,
-            Option<&'static Deployable>,
-            Option<&'static mut SlopeTilt>,
-            Option<&'static crate::units::combat::Stunned>,
-            Option<&'static crate::units::mechanics::network_buffer::SpeedBoost>,
-            Option<&'static AttackMoveActive>,
-            Option<&'static AimTarget>,
-            Option<&'static crate::units::assets::animation::UnitAnimator>,
-            (
-                Option<&'static mut CurrentSpeed>,
-                Option<&'static crate::units::lifecycle::construction::PendingBuild>,
-            ),
-        ),
-        Without<Dying>,
-    >,
-    pub unit_registry: Res<'w, UnitRegistry>,
-}
-
-pub fn movement_system(
-    mut commands: Commands,
-    time: Res<Time>,
-    nav_set: Option<Res<NavGridSet>>,
-    heightmap: Option<Res<Heightmap>>,
-    circular_flow: Option<Res<CircularFlow>>,
-    path_heat: Option<Res<PathHeat>>,
-    mut m: MovementQuery,
-    // Reused across frames so the full-unit snapshot doesn't reallocate
-    // each tick.
-    mut snapshot: Local<Vec<UnitSnapshot>>,
-    // Retained grid buckets over `snapshot` — same hoist trick.
-    mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
-) {
-    let MovementQuery {
-        ref mut query,
-        ref unit_registry,
-    } = m;
-    let unit_registry = &**unit_registry;
-    // Snapshot every unit's position and collision radius so each proposed
-    // movement can be resolved against all others without query aliasing.
-    // `mobile` is "this unit kind *could* move", `stationary` is "this
-    // specific unit has no active move order right now" — the deadlock
-    // breaker uses the latter to decide whether a blocker counts as
-    // "already at its goal".
-    snapshot.clear();
-    snapshot.extend(
-        query.iter().map(
-            |(e, _, stats, tf, target, _, _, _, _, _, _, _, _, _, _)| UnitSnapshot {
-                entity: e,
-                pos: tf.translation,
-                radius: stats.radius,
-                mobile: stats.speed > 0.0,
-                flying: stats.can_fly,
-                stationary: target.is_none(),
-            },
-        ),
-    );
-
-    // Index the snapshot into a retained cell grid so each moving unit
-    // resolves against its neighbours instead of the whole army. Buckets
-    // clear (not reallocate) each frame, mirroring `unit_separation_system`.
-    grid.clear();
-    let mut max_ground_radius = 0.0_f32;
-    for (idx, entry) in snapshot.iter().enumerate() {
-        if !entry.flying {
-            grid.entry(cell_of(entry.pos.x, entry.pos.z))
-                .or_default()
-                .push(idx);
-            max_ground_radius = max_ground_radius.max(entry.radius);
-        }
-    }
-    let grid = SnapshotGrid {
-        entries: &snapshot,
-        cells: &grid,
-        max_ground_radius,
-    };
-
-    let mut pathfinds_used: usize = 0;
-
-    for (
-        entity,
-        unit_type,
-        stats,
-        mut transform,
-        move_target,
-        move_path,
-        mut queue,
-        deployable,
-        mut slope_tilt,
-        stunned,
-        speed_boost,
-        attack_move_active,
-        aim_target,
-        animator,
-        (mut current_speed, pending_build),
-    ) in &mut *query
-    {
-        // Aircraft fly `CHoverAirMoveType` in `air_movement`.
-        if stunned.is_some() || stats.can_fly {
-            continue;
-        }
-
-        let speed = stats.speed + speed_boost.map_or(0.0, |b| b.0);
-        if speed == 0.0 {
-            // Buildings can't move — remove any movement components.
-            commands.entity(entity).remove::<MoveTarget>();
-            commands.entity(entity).remove::<MovePath>();
-            commands.entity(entity).remove::<CommandQueue>();
-            continue;
-        }
-
-        // No live order: coast down to rest so a fresh order starts
-        // from a stopped state instead of teleporting into motion.
-        if move_target.is_none() && move_path.is_none() {
-            if let Some(cs) = current_speed.as_deref_mut() {
-                cs.0 = (cs.0 - stats.brake * time.delta_secs()).max(0.0);
-            }
-            continue;
-        }
-
-        // Deployable units (e.g. Pointer) cannot move until they have fully
-        // closed up — this is what makes them "stop, pack, then drive". The
-        // state machine in `tick_deploy_state` triggers `Close()` as soon as
-        // a move order arrives; movement waits for the close animation to
-        // finish before stepping the unit forward.
-        if let Some(d) = deployable
-            && d.state != DeployState::Closed
-        {
-            continue;
-        }
-
-        // Attack-move: hold position and fight while a hostile is in
-        // weapon range (an `AimTarget` is stamped by `combat_system`),
-        // then resume marching toward the destination once it clears.
-        if attack_move_active.is_some() && aim_target.is_some() {
-            continue;
-        }
-
-        // If we have a MoveTarget but no MovePath, compute the path.
-        // Pathfinds cost real CPU, so cap how many we do per frame —
-        // surplus units just wait one extra frame for their turn.
-        if let Some(target) = move_target
-            && move_path.is_none()
-        {
-            // Outcome of this frame's pathing attempt for this unit:
-            // - `Route(waypoints)` → follow them.
-            // - `Unreachable` → the goal cannot be reached at all;
-            //   refuse the order (upstream `pathingFailed`) instead of
-            //   walking into the nearest wall and camping there.
-            // - `None` → nothing decided this frame (no nav grid yet
-            //   mid-load, or the per-frame search budget ran out);
-            //   keep the order and retry next frame.
-            let outcome = if let Some(nav) = nav_set.as_deref() {
-                if pathfinds_used < PATHFIND_BUDGET_PER_FRAME {
-                    pathfinds_used += 1;
-                    compute_path(
-                        Some(nav),
-                        unit_registry,
-                        unit_type.0,
-                        transform.translation,
-                        target.0,
-                        path_heat.as_deref().map(|h| &h.0),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            match outcome {
-                Some(PathOutcome::Route(waypoints)) if !waypoints.is_empty() => {
-                    commands.entity(entity).insert(MovePath {
-                        waypoints,
-                        current: 0,
-                    });
-                }
-                Some(PathOutcome::Unreachable) => {
-                    commands.entity(entity).remove::<MoveTarget>();
-                }
-                _ => {}
-            }
-        }
-
-        // Follow the path waypoint by waypoint.
-        let Some(mut path) = move_path else {
-            continue;
-        };
-
-        // `CMobileCAI::ExecuteMove` (MobileCAI.cpp:423): with more
-        // move-type commands queued, a move finishes as soon as the unit
-        // is inside `cancelDistance` of its goal, so consecutive legs
-        // chain without braking. Build orders must reach their site.
-        let more_moves = queue.as_deref().is_some_and(|q| !q.commands.is_empty());
-        let finish_early = more_moves
-            && pending_build.is_none()
-            && move_target.is_some_and(|t| {
-                t.0.xz().distance_squared(transform.translation.xz())
-                    < cancel_distance_sq(stats.speed, stats.turn_rate)
-            });
-        if path.current >= path.waypoints.len() || finish_early {
-            // Leg complete — promote the next queued command if any.
-            // Momentum carries over (Spring's `StopEngine` keeps
-            // `currentSpeed`; only an empty queue brakes, below).
-            commands.entity(entity).remove::<MovePath>();
-            promote_next_command(
-                &mut commands,
-                entity,
-                transform.translation,
-                queue.as_deref_mut(),
-            );
-            continue;
-        }
-
-        let current = transform.translation;
-        let waypoint = path.waypoints[path.current];
-        let goal = Vec3::new(waypoint.x, current.y, waypoint.z);
-        let diff = goal - current;
-        let distance = diff.length();
-
-        let self_radius = stats.radius;
-
-        // Arrival is "within my own footprint of the waypoint" — this lets
-        // crowds converging on the same target settle at the boundary of
-        // their neighbours rather than jittering on top of it.
-        //
-        // Deadlock breaker: if the waypoint is occupied by a unit that has
-        // already stopped (no move order of its own), also count it as
-        // reached so we don't keep pushing through a crowd that's arrived.
-        let arrival_threshold = (self_radius + 2.0).max(8.0);
-        if distance < arrival_threshold
-            || waypoint_blocked_by_arrived_unit(entity, goal, self_radius, &grid)
-        {
-            // Completing the *final* waypoint ends the leg at rest
-            // (mid-path waypoints stay fly-through — braking for those
-            // would make every path choppy stop-and-go).
-            path.current += 1;
-            continue;
-        }
-
-        let direction = diff / distance;
-        let dt = time.delta_secs();
-
-        // Rotate toward the desired heading at the unit's FBI TurnRate.
-        // Spring ties forward motion to facing: while the unit is still
-        // swinging around, it moves at reduced speed (falling to zero for a
-        // full-reverse heading). We reproduce that with a cos(error) gate
-        // so high-TurnRate units snap-and-drive and clunky ones (Pointer,
-        // Worm, Dos) visibly pivot before committing to the new heading.
-        let desired_forward = Vec3::new(direction.x, 0.0, direction.z);
-        let current_forward = transform.forward().as_vec3();
-        let current_xz = {
-            let mut f = Vec3::new(current_forward.x, 0.0, current_forward.z);
-            if f.length_squared() < 1e-6 {
-                f = Vec3::Z;
-            }
-            f.normalize()
-        };
-
-        let turn_rate = stats.turn_rate;
-        let max_turn = if turn_rate > 0.0 {
-            turn_rate * dt
-        } else {
-            // TurnRate=0 means "no rotation delay in the FBI" — snap.
-            std::f32::consts::TAU
-        };
-        let new_forward = rotate_toward_xz(current_xz, desired_forward, max_turn);
-
-        // Apply the rotation before considering whether the unit translates.
-        // Sharp turns (cos_err < 0.5 below) skip translation entirely so the
-        // unit pivots in place; if we gated the rotation behind translation
-        // too, the unit would freeze and never finish the turn.
-        if new_forward.length_squared() > 1e-6 {
-            // Target orientation: heading = rate-limited new_forward,
-            // up = terrain normal — one exact basis (see
-            // `surface_aligned_rotation`).
-            let target = match heightmap.as_deref() {
-                Some(hm) => {
-                    let normal = hm.normal(transform.translation.x, transform.translation.z);
-                    surface_aligned_rotation(new_forward, normal)
-                }
-                None => {
-                    Transform::default()
-                        .looking_to(new_forward, Vec3::Y)
-                        .rotation
-                }
-            };
-            // Smooth in WORLD space. A local-space tilt buffer applied
-            // after a yaw change re-interprets a buffered downhill pitch
-            // as a sideways lean mid-turn; smoothing the world
-            // orientation keeps the unit glued to the surface plane
-            // through turns.
-            let blend = 1.0 - (-TILT_SMOOTH_RATE * dt).exp();
-            let smoothed = match slope_tilt.as_deref_mut() {
-                Some(t) => {
-                    t.0 = t.0.slerp(target, blend);
-                    t.0
-                }
-                None => {
-                    commands.entity(entity).insert(SlopeTilt(target));
-                    target
-                }
-            };
-            transform.rotation = smoothed;
-        }
-
-        // Facing-gated forward speed. Within ~60° of the target heading,
-        // drive at cos(err); beyond that, pivot in place (no translation)
-        // so the unit doesn't arc wide during sharp turns.
-        let cos_err = new_forward.dot(desired_forward);
-        let align = if cos_err > 0.5 { cos_err } else { 0.0 };
-
-        // Longitudinal speed control: accelerate toward the FBI speed,
-        // brake for the final waypoint so the unit arrives at rest
-        // (`v = √(2·a·d)` is the fastest speed that can still stop in
-        // `distance`), and record the result for the next frame.
-        let mut target_speed = speed;
-        // Spring brakes for the goal only when this is the last command
-        // (`UNIT_CMD_QUE_SIZE(owner) <= 1`, GroundMoveType.cpp:1325);
-        // with more queued the unit keeps its speed into the next leg.
-        if !more_moves && path.current == path.waypoints.len() - 1 {
-            let stop_speed = (2.0 * stats.brake * distance).sqrt();
-            target_speed = target_speed.min(stop_speed);
-        }
-        let drive_speed = match current_speed.as_deref_mut() {
-            Some(cs) => {
-                if cs.0 < target_speed {
-                    cs.0 = (cs.0 + stats.accel * dt).min(target_speed);
-                } else {
-                    cs.0 = (cs.0 - stats.brake * dt).max(target_speed);
-                }
-                cs.0
-            }
-            // No component (tests, legacy spawns): run at full speed.
-            None => target_speed,
-        };
-        let mut step = drive_speed * dt * align;
-        // Animation gate: a driver holds its unit in place while a fold
-        // choreography must complete before driving (Byte: fold-to-move).
-        step *= animator.map_or(1.0, |a| a.rig.move_gate);
-        if let Some(flow) = circular_flow.as_deref() {
-            step *= flow.step_multiplier(current, new_forward);
-        }
-        if step < 1e-4 {
-            continue;
-        }
-        let desired = new_forward * step.min(distance);
-
-        // Resolve desired motion against every other unit. Spring-style:
-        // units push each other with radial + lateral slide, weighted by
-        // mass/speed/head-on factor. See `resolve_motion`.
-        let resolved = resolve_motion(entity, current, desired, self_radius, speed, &grid);
-
-        // Slope gate for the no-navgrid straight-line fallback only.
-        // Signed, so descents always pass — a unit can step off a
-        // ledge it can't climb back up.
-        //
-        // Why not while following a real path: the pathfinder already
-        // guarantees every crossed cell is within the unit's MaxSlope
-        // (that's what the nav bucket encodes — same as upstream
-        // Spring, which has no per-step slope re-check). This gate
-        // used to run unconditionally and re-deriving slope from the
-        // *bilinear* per-step sample measures stepped terrain at up to
-        // twice the pathfinder's cell-average — so the first uphill
-        // tick on a legal ramp got refused, the waypoint-skip burned
-        // the whole path within a few ticks, and the unit froze at the
-        // base of slopes it was supposed to cross. Nobody Advanced.
-        if nav_set.is_none()
-            && let Some(ref hm) = heightmap
-        {
-            let dxz = Vec3::new(resolved.x, 0.0, resolved.z).length();
-            if dxz > 1e-4 {
-                let proposed = current + resolved;
-                let rise = hm.sample(proposed.x, proposed.z) - hm.sample(current.x, current.z);
-                if rise > 0.0 {
-                    let step_slope = slope_from_rise_run(rise, dxz);
-                    let cap = unit_registry.max_slope_ratio(unit_type.0);
-                    if step_slope > cap * 1.2 {
-                        path.current += 1;
-                        continue;
-                    }
-                }
-            }
-        }
-
-        let resolved = match nav_set.as_deref() {
-            Some(nav) => {
-                nav.gate_step(unit_registry.max_slope_ratio(unit_type.0), current, resolved)
-            }
-            _ => resolved,
-        };
-        transform.translation += resolved;
-
-        // Altitude: ground units hug the terrain.
-        if let Some(ref hm) = heightmap {
-            transform.translation.y = hm.sample(transform.translation.x, transform.translation.z);
-        }
-    }
-}
-
-/// Squared `CMobileCAI::cancelDistance` (MobileCAI.cpp:1316): the
-/// static turn radius (`AMoveType::CalcStaticTurnRadius`,
-/// MoveType.cpp:125 — `maxSpeed·(65536/turnRate)/2π` in elmos) plus two
-/// squares, squared and clamped to `[1024, 2048]` (32–45 elmos). Inputs
-/// are the port's per-second `speed` (elmos/s) and `turn_rate` (rad/s),
-/// whose ratio is the same per frame.
-pub(crate) fn cancel_distance_sq(speed: f32, turn_rate: f32) -> f32 {
-    let turn_radius = if turn_rate > 0.0 { speed / turn_rate } else { 0.0 };
-    (turn_radius + 16.0).powi(2).clamp(1024.0, 2048.0)
-}
-
 /// An order leg is done: promote the next queued command to the active
 /// order, or — queue empty — drop the order entirely. Shared by the
 /// ground walker ([`movement_system`]) and the aircraft
@@ -781,13 +364,17 @@ pub(crate) fn promote_next_command(
     entity: Entity,
     translation: Vec3,
     mut queue: Option<&mut CommandQueue>,
-) {
+) -> Option<Vec3> {
     let next = queue.as_deref_mut().and_then(|q| {
         if q.commands.is_empty() {
             None
         } else {
             Some(q.commands.remove(0))
         }
+    });
+    let goal = next.and_then(|c| match c {
+        QueuedCommand::AttackUnit { .. } => None,
+        c => Some(c.position()),
     });
     match next {
         Some(QueuedCommand::Move(pos) | QueuedCommand::Guard(pos)) => {
@@ -844,6 +431,7 @@ pub(crate) fn promote_next_command(
                 .remove::<AttackMoveActive>();
         }
     }
+    goal
 }
 
 /// Guard orders: trail [`GuardTarget`] at `GUARD_DISTANCE` beyond the
@@ -885,10 +473,8 @@ pub fn guard_follow_system(
                     .is_none_or(|w| w.distance(target_pos) > CHASE_REPATH_DISTANCE)
             });
             if stale {
-                commands
-                    .entity(entity)
-                    .insert(MoveTarget(target_pos))
-                    .remove::<MovePath>();
+                // The old path is followed until the new one is ready.
+                commands.entity(entity).insert(MoveTarget(target_pos));
             }
         } else {
             commands
@@ -918,300 +504,6 @@ pub fn rotate_toward_xz(from: Vec3, to: Vec3, max_turn: f32) -> Vec3 {
     let sign = if cross_y >= 0.0 { -1.0 } else { 1.0 };
     let rot = Quat::from_axis_angle(Vec3::Y, sign * max_turn);
     (rot * from).normalize()
-}
-
-/// Resolve `desired` motion against neighbouring units using a Spring-style
-/// push + lateral slide. Inspired by `CGroundMoveType::CalculatePushVector`
-/// in the Recoil engine: units don't hard-stop at contact, they slide past
-/// each other, with head-on collisions weighted more heavily (so the
-/// side-crosser yields to the head-on runner) and heavier/faster units
-/// pushing lighter/slower ones.
-///
-/// Returns the delta to add to the unit's position this frame. Only the XZ
-/// plane is considered.
-/// Cell size for the movement snapshot grid. Generous enough that a
-/// typical query (self radius + largest footprint + one frame's step,
-/// ~90 elmos worst case) touches at most the 5×5 block around its cell.
-const SNAPSHOT_CELL: f32 = 64.0;
-
-fn cell_of(x: f32, z: f32) -> (i32, i32) {
-    (
-        (x / SNAPSHOT_CELL).floor() as i32,
-        (z / SNAPSHOT_CELL).floor() as i32,
-    )
-}
-
-/// Uniform grid over a frame's [`UnitSnapshot`]s. `resolve_motion` and
-/// `waypoint_blocked_by_arrived_unit` used to scan the entire snapshot
-/// per moving unit — O(moving × N), the dominant cost in big battles.
-/// A query visits only the cells its search circle overlaps, so the
-/// scan shrinks to the units actually nearby.
-struct SnapshotGrid<'a> {
-    entries: &'a [UnitSnapshot],
-    cells: &'a HashMap<(i32, i32), Vec<usize>>,
-    /// Largest radius among non-flying entries — lets callers bound a
-    /// search circle without a second pass.
-    max_ground_radius: f32,
-}
-
-impl SnapshotGrid<'_> {
-    /// Invoke `f` for every non-flying entry whose center lies within
-    /// `radius` elmos of (x, z) *by cell distance* — i.e. a superset of
-    /// the true circle. Callers do the exact distance test inside `f`.
-    fn for_each_near(&self, x: f32, z: f32, radius: f32, mut f: impl FnMut(&UnitSnapshot)) {
-        let (cx, cz) = cell_of(x, z);
-        let r = (radius / SNAPSHOT_CELL).ceil() as i32;
-        for dx in -r..=r {
-            for dz in -r..=r {
-                let Some(bucket) = self.cells.get(&(cx + dx, cz + dz)) else {
-                    continue;
-                };
-                for &i in bucket {
-                    f(&self.entries[i]);
-                }
-            }
-        }
-    }
-}
-
-fn resolve_motion(
-    self_entity: Entity,
-    origin: Vec3,
-    desired: Vec3,
-    self_radius: f32,
-    self_speed: f32,
-    snapshot: &SnapshotGrid,
-) -> Vec3 {
-    let desired_xz = Vec3::new(desired.x, 0.0, desired.z);
-    let desired_len = desired_xz.length();
-    if desired_len < 1e-6 {
-        return desired;
-    }
-    let front = desired_xz / desired_len;
-
-    // Self's momentum proxy. Spring uses `mass * max(1, speed)`; we use
-    // area (radius²) as a stand-in for mass since the FBI data we surface
-    // doesn't include an explicit mass.
-    let self_mass = self_radius * self_radius;
-
-    let mut push = Vec3::ZERO;
-
-    // Contact is tested at the *end* of the desired step, so the search
-    // circle must cover the step length too.
-    let search_radius = desired_len + self_radius + snapshot.max_ground_radius;
-    let new_origin = origin + desired_xz;
-    snapshot.for_each_near(new_origin.x, new_origin.z, search_radius, |other| {
-        if other.entity == self_entity || other.flying {
-            // Skip self and any airborne unit: the caller only invokes
-            // this for ground units (fliers bypass collision entirely),
-            // and a flier overhead shouldn't obstruct a walker below.
-            return;
-        }
-        let sum_r = self_radius + other.radius;
-
-        // Penetration depth once we take the step. Capped at sum_r so
-        // a deep overlap (e.g. from a spawn on top of someone) still
-        // produces a bounded correction.
-        let sep = Vec3::new(new_origin.x - other.pos.x, 0.0, new_origin.z - other.pos.z);
-        let dist = sep.length();
-        if dist >= sum_r {
-            return;
-        }
-        let penetration = (sum_r - dist).min(sum_r);
-
-        // Direction from the obstacle toward us. If we're exactly on
-        // top of the obstacle, bias away from our front so the tie is
-        // broken cleanly.
-        let away = if dist > 1e-4 { sep / dist } else { -front };
-
-        // Head-on factor: perpendicular approach ≈ 1, direct head-on
-        // approach ≈ 6. The sign is from the obstacle's perspective, so
-        // we dot our forward with the vector *toward* them (−away).
-        let head_on = 1.0 + (1.0 - front.dot(-away).abs().min(1.0)) * 5.0;
-
-        // Other's mass proxy and weight. Static obstacles (buildings,
-        // speed=0) behave like infinite mass — our share of the push
-        // is effectively zero, so we take the full correction.
-        let other_mass = other.radius * other.radius;
-        let weight_self = self_mass * self_speed.max(1.0) * head_on;
-        let other_effective_speed = if other.mobile { 1.0 } else { 1e6 };
-        let weight_other = other_mass * other_effective_speed * head_on;
-        let total = weight_self + weight_other;
-        let other_share = if total > 1e-6 {
-            weight_other / total
-        } else {
-            0.5
-        };
-
-        // Radial push: shove ourselves out by our share of the penetration.
-        push += away * penetration * other_share;
-
-        // Lateral slide — this is the "deflection" piece. Pick the side
-        // that aligns with our forward so we slide *past* the obstacle
-        // instead of bouncing back. `right` is the XZ perpendicular of
-        // `front`; slide amount scales with penetration so shallow
-        // grazes barely nudge, deep head-ons slip noticeably sideways.
-        let right = Vec3::new(front.z, 0.0, -front.x);
-        let side_sign = if right.dot(away) >= 0.0 { 1.0 } else { -1.0 };
-        let slide_strength = penetration * 0.6 * other_share;
-        push += right * side_sign * slide_strength;
-    });
-
-    // The final displacement is the desired step plus the accumulated
-    // push. Cap total motion to desired_len so the resolver never moves
-    // us *faster* than our speed would allow.
-    let combined = desired_xz + push;
-    let combined_len = combined.length();
-    let capped = if combined_len > desired_len {
-        combined * (desired_len / combined_len)
-    } else {
-        combined
-    };
-
-    Vec3::new(capped.x, desired.y, capped.z)
-}
-
-/// Spring's deadlock breaker: if the unit we'd be walking toward is
-/// already sitting on the next waypoint and has no move order of its
-/// own, don't keep shoving — declare that waypoint reached and advance.
-/// Prevents pile-ups when a group converges on a target and the lead
-/// units arrive while followers keep pushing.
-fn waypoint_blocked_by_arrived_unit(
-    self_entity: Entity,
-    waypoint: Vec3,
-    self_radius: f32,
-    snapshot: &SnapshotGrid,
-) -> bool {
-    let mut blocked = false;
-    snapshot.for_each_near(
-        waypoint.x,
-        waypoint.z,
-        self_radius + snapshot.max_ground_radius,
-        |other| {
-            if blocked || other.entity == self_entity || !other.stationary {
-                return;
-            }
-            let r = self_radius + other.radius;
-            let dx = other.pos.x - waypoint.x;
-            let dz = other.pos.z - waypoint.z;
-            if dx * dx + dz * dz < r * r {
-                blocked = true;
-            }
-        },
-    );
-    blocked
-}
-
-/// Safety-net that unsticks mobile units that *are already overlapping*,
-/// which can happen on spawn, when a factory ejects onto a busy tile, or
-/// when the terrain pushes a unit into a building. `movement_system` now
-/// does the primary hard-collision work, so this only needs to correct
-/// residual overlap with a gentle nudge — not drive the main separation.
-#[allow(clippy::too_many_arguments)]
-pub fn unit_separation_system(
-    mut units: Query<
-        (Entity, &mut Transform, &UnitStats),
-        Without<crate::units::lifecycle::spawning::Emerging>,
-    >,
-    kinds: Query<&UnitType>,
-    time: Res<Time>,
-    heightmap: Option<Res<Heightmap>>,
-    nav_set: Option<Res<NavGridSet>>,
-    unit_registry: Res<UnitRegistry>,
-    mut snapshot: Local<Vec<SeparationEntry>>,
-    mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
-    mut pushes: Local<Vec<(Entity, Vec3)>>,
-) {
-    let dt = time.delta_secs();
-    let push_strength = 30.0_f32;
-
-    // Snapshot + per-frame bucket grid. Buckets are retained between frames
-    // (`Local`), only the contents clear, so the allocator stays quiet after
-    // warmup. `SEP_CELL` matches the largest footprint we see in practice
-    // (~32 elmos), so each ground unit touches ≤9 neighbouring cells and
-    // the inner loop shrinks from O(N²) to ~O(N·k) with k≈8.
-    const SEP_CELL: f32 = 32.0;
-    let to_cell = |x: f32, z: f32| -> (i32, i32) {
-        ((x / SEP_CELL).floor() as i32, (z / SEP_CELL).floor() as i32)
-    };
-
-    snapshot.clear();
-    for bucket in grid.values_mut() {
-        bucket.clear();
-    }
-    for (e, tf, stats) in units.iter() {
-        let idx = snapshot.len();
-        snapshot.push(SeparationEntry {
-            entity: e,
-            pos: tf.translation,
-            radius: stats.radius,
-            mobile: stats.speed > 0.0,
-            flying: stats.can_fly,
-        });
-        if !stats.can_fly {
-            // Flyers don't participate in ground separation — omit from
-            // the bucket so ground units don't scan through them.
-            let key = to_cell(tf.translation.x, tf.translation.z);
-            grid.entry(key).or_default().push(idx);
-        }
-    }
-
-    pushes.clear();
-    for i in 0..snapshot.len() {
-        let me = &snapshot[i];
-        if !me.mobile || me.flying {
-            continue;
-        }
-        let (cx, cz) = to_cell(me.pos.x, me.pos.z);
-        let mut push = Vec3::ZERO;
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                let Some(bucket) = grid.get(&(cx + dx, cz + dz)) else {
-                    continue;
-                };
-                for &j in bucket {
-                    if i == j {
-                        continue;
-                    }
-                    let other = &snapshot[j];
-                    let sum_r = me.radius + other.radius;
-                    let diff = Vec3::new(me.pos.x - other.pos.x, 0.0, me.pos.z - other.pos.z);
-                    let dist = diff.length();
-                    if dist < sum_r && dist > 0.01 {
-                        let overlap = sum_r - dist;
-                        push += (diff / dist) * overlap;
-                    }
-                }
-            }
-        }
-        if push.length_squared() > 0.01 {
-            pushes.push((me.entity, push));
-        }
-    }
-
-    for (entity, push) in pushes.drain(..) {
-        if let Ok((_, mut tf, _)) = units.get_mut(entity) {
-            let mut step = push * push_strength * dt;
-            // Pushes respect impassable squares too (see `gate_step`).
-            if let (Some(nav), Ok(kind)) = (nav_set.as_deref(), kinds.get(entity)) {
-                step = nav.gate_step(unit_registry.max_slope_ratio(kind.0), tf.translation, step);
-            }
-            tf.translation += step;
-            if let Some(ref hm) = heightmap {
-                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z);
-            }
-        }
-    }
-}
-
-/// One snapshot row for `unit_separation_system`. Named so the neighbour
-/// lookup reads `.pos` / `.radius` instead of tuple indices.
-pub struct SeparationEntry {
-    entity: Entity,
-    pos: Vec3,
-    radius: f32,
-    mobile: bool,
-    flying: bool,
 }
 
 /// Re-clamp every ground unit's Y to the heightmap surface. The
@@ -1313,46 +605,46 @@ pub fn orient_stationary_to_terrain(
     }
 }
 
-/// Compute a path through the nav bucket matching the unit's `MaxSlope`,
-/// falling back to straight-line if no nav set is loaded or the unit kind
-/// is blocked-everywhere in its bucket.
-/// Outcome of one pathing attempt.
-enum PathOutcome {
-    /// A route exists — follow these waypoints.
-    Route(Vec<Vec3>),
-    /// The goal is unreachable (upstream `pathingFailed`): refuse the
-    /// order instead of walking the unit into the nearest wall and
-    /// parking it there.
+/// Outcome of one path search.
+pub(crate) enum PathOutcome {
+    /// Follow this path. When the goal is unreachable it ends at the
+    /// closest reachable point (`reached_goal == false`) — QTPFS hands
+    /// out such partial paths and the unit fails the order on arrival
+    /// there (`CGroundMoveType::CanSetNextWayPoint`'s `lastWaypoint`).
+    Route(MovePath),
+    /// No route from here at all (source enclosed).
     Unreachable,
 }
 
-/// `None` means nothing was decided this frame — no nav grid yet — and
-/// the caller should keep the order and retry.
-fn compute_path(
+/// Search a path through the nav bucket matching the unit's `MaxSlope`,
+/// against the structure mask of its MoveDef footprint and crush
+/// strength. `None` means nothing could be decided (no nav grid yet).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_path(
     nav_set: Option<&NavGridSet>,
     unit_registry: &UnitRegistry,
     kind: UnitKind,
+    xsizeh: i32,
+    crush_strength: f32,
     from: Vec3,
     to: Vec3,
     heat: Option<&spring_pathfinding::HeatMap>,
 ) -> Option<PathOutcome> {
     let nav = nav_set?;
-    if nav.buckets.is_empty() {
-        return None;
-    }
-    let cap = unit_registry.max_slope_ratio(kind);
-    let idx = nav.bucket_for(cap);
-    let speed_map = &nav.buckets[idx].speed_map;
-    let path = find_path_with_heat(speed_map, heat, [from.x, from.z], [to.x, to.z])?;
-    if !path.reached_goal {
+    let speed_map = nav.speed_map(unit_registry.max_slope_ratio(kind))?;
+    let mask = nav.block_mask(xsizeh, crush_strength);
+    let Some(path) = find_path_masked(speed_map, mask, heat, [from.x, from.z], [to.x, to.z]) else {
         return Some(PathOutcome::Unreachable);
-    }
-    Some(PathOutcome::Route(
-        path.points
-            .iter()
-            .map(|p| Vec3::new(p[0], 0.0, p[1]))
-            .collect(),
-    ))
+    };
+    let waypoints: Vec<Vec3> = path.points.iter().map(|p| Vec3::new(p[0], 0.0, p[1])).collect();
+    Some(PathOutcome::Route(MovePath {
+        // Point 0 is the start position itself.
+        current: 1.min(waypoints.len().saturating_sub(1)),
+        waypoints,
+        goal: to,
+        reached_goal: path.reached_goal,
+        revision: nav.revision,
+    }))
 }
 
 /// Dash-pattern segment lengths (long dash, gap, short dot, gap), in elmos.
@@ -1695,140 +987,9 @@ mod tests {
 }
 
 #[cfg(test)]
-mod inertia_tests {
-    use super::*;
-    use bevy::ecs::system::RunSystemOnce;
-    use std::time::Duration;
-
-    fn moving_unit(speed: f32, accel: f32, brake: f32, waypoint: Vec3) -> (World, Entity) {
-        let mut world = World::new();
-        world.init_resource::<Time>();
-        world.insert_resource(UnitRegistry::empty());
-        let unit = world
-            .spawn((
-                UnitType(UnitKind::Bit),
-                UnitStats {
-                    radius: 12.0,
-                    hit_radius: 20.0,
-                    speed,
-                    accel,
-                    brake,
-                    turn_rate: 100.0,
-                    can_fly: false,
-                    no_chase_vtol: true,
-                },
-                // Facing +X so the heading gate (align=1) doesn't gate
-                // translation away from the speed math under test.
-                Transform::from_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X)),
-                MoveTarget(waypoint),
-                MovePath {
-                    waypoints: vec![waypoint],
-                    current: 0,
-                },
-                CurrentSpeed::default(),
-            ))
-            .id();
-        (world, unit)
-    }
-
-    fn tick(world: &mut World) {
-        world
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_millis(33));
-        world.run_system_once(movement_system).unwrap();
-    }
-
-    /// A Bit (`Acceleration=0.9` elmo/frame² → 810 elmo/s²) reaches
-    /// its 90 elmo/s top speed in ~3.3 sim frames, as in Spring
-    /// (`IPathController::GetDeltaSpeed` adds `min(Δ, accRate)` per
-    /// frame).
-    #[test]
-    fn bit_reaches_top_speed_in_four_frames() {
-        let (mut world, unit) = moving_unit(90.0, 810.0, 1080.0, Vec3::new(2000.0, 0.0, 0.0));
-        let mut speeds = Vec::new();
-        for _ in 0..4 {
-            tick(&mut world);
-            speeds.push(world.get::<CurrentSpeed>(unit).unwrap().0);
-        }
-        assert!(
-            (speeds[0] - 810.0 * 0.033).abs() < 0.5,
-            "one frame of accel from rest: {speeds:?}"
-        );
-        assert!(speeds[2] < 90.0, "not yet at speed after 3 frames: {speeds:?}");
-        assert_eq!(speeds[3], 90.0, "top speed on frame 4: {speeds:?}");
-    }
-
-    /// Approaching the final goal with nothing queued, the unit brakes
-    /// and never overshoots.
-    #[test]
-    fn unit_brakes_for_the_final_waypoint() {
-        let (mut world, unit) = moving_unit(90.0, 810.0, 1080.0, Vec3::new(24.0, 0.0, 0.0));
-        world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
-        for _ in 0..40 {
-            tick(&mut world);
-            let x = world.get::<Transform>(unit).unwrap().translation.x;
-            assert!(x <= 24.0 + 1e-3, "must not overshoot the waypoint: x={x}");
-        }
-        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
-        assert_eq!(cs, 0.0, "arrival ends the leg at rest: {cs}");
-        assert!(world.get::<MoveTarget>(unit).is_none());
-    }
-
-    /// With another move queued, Spring does not brake for the goal
-    /// (`startBraking` needs `UNIT_CMD_QUE_SIZE <= 1`) and MobileCAI
-    /// finishes the leg inside `cancelDistance`, so the unit carries its
-    /// full speed into the next leg.
-    #[test]
-    fn queued_legs_chain_without_braking() {
-        let goal = Vec3::new(200.0, 0.0, 0.0);
-        let (mut world, unit) = moving_unit(90.0, 810.0, 1080.0, goal);
-        world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
-        world.entity_mut(unit).insert(CommandQueue {
-            commands: vec![QueuedCommand::Move(Vec3::new(400.0, 0.0, 0.0))],
-        });
-        let mut promoted_at = None;
-        for i in 0..80 {
-            tick(&mut world);
-            let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
-            assert!(cs > 89.0, "tick {i}: speed dropped to {cs} before the leg ended");
-            if world.get::<MoveTarget>(unit).is_some_and(|t| t.0.x == 400.0) {
-                promoted_at = Some(world.get::<Transform>(unit).unwrap().translation.x);
-                break;
-            }
-        }
-        let x = promoted_at.expect("next leg must be promoted");
-        let left = goal.x - x;
-        assert!(
-            (0.0..=46.0).contains(&left),
-            "leg finishes inside cancelDistance (32–45 elmos): {left} left"
-        );
-    }
-
-    /// An idle unit (no order) coasts down to rest at the brake rate,
-    /// so a fresh order starts from a stopped state.
-    #[test]
-    fn idle_unit_coasts_to_rest() {
-        let (mut world, unit) = moving_unit(90.0, 810.0, 60.0, Vec3::new(2000.0, 0.0, 0.0));
-        world.get_mut::<CurrentSpeed>(unit).unwrap().0 = 90.0;
-        world
-            .entity_mut(unit)
-            .remove::<MoveTarget>()
-            .remove::<MovePath>();
-
-        for _ in 0..60 {
-            tick(&mut world);
-        }
-        let cs = world.get::<CurrentSpeed>(unit).unwrap().0;
-        assert_eq!(
-            cs, 0.0,
-            "2 s of braking from 90 at 60 elmo/s² stops the unit"
-        );
-    }
-}
-
-#[cfg(test)]
 mod heat_tests {
     use super::*;
+    use spring_pathfinding::HeatMap;
     use crate::units::components::TeamId;
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
@@ -1858,10 +1019,7 @@ mod heat_tests {
                 },
                 TeamId(0),
                 GlobalTransform::from_xyz(32.0, 0.0, 8.0),
-                MovePath {
-                    waypoints: vec![Vec3::new(500.0, 0.0, 8.0)],
-                    current: 0,
-                },
+                MovePath::new(vec![Vec3::new(500.0, 0.0, 8.0)], Vec3::new(500.0, 0.0, 8.0)),
             ))
             .id();
         let flyer = world
@@ -1879,10 +1037,7 @@ mod heat_tests {
                 },
                 TeamId(0),
                 GlobalTransform::from_xyz(40.0, 0.0, 8.0),
-                MovePath {
-                    waypoints: vec![Vec3::new(500.0, 0.0, 8.0)],
-                    current: 0,
-                },
+                MovePath::new(vec![Vec3::new(500.0, 0.0, 8.0)], Vec3::new(500.0, 0.0, 8.0)),
             ))
             .id();
 
@@ -1936,6 +1091,7 @@ mod heat_tests {
 #[cfg(test)]
 mod cross_map_tests {
     use super::*;
+    use spring_pathfinding::HeatMap;
     use crate::units::components::TeamId;
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
@@ -2018,7 +1174,7 @@ mod cross_map_tests {
                     },
                     TeamId(0),
                     Transform::from_translation(start),
-                    CurrentSpeed::default(),
+                    GroundMover::new(UnitKind::Bit, &UnitRegistry::load(), &UnitStats::from_registry(UnitKind::Bit, &UnitRegistry::load(), 20.0)),
                 ))
                 .id();
 
@@ -2130,45 +1286,5 @@ mod cross_map_tests {
             }
             println!("{map_name}: {reached}/{total} targets reached");
         }
-    }
-}
-
-#[cfg(test)]
-mod gate_step_tests {
-    use super::*;
-
-    /// 4×4 cells, the right half (x ≥ 16) impassable.
-    fn half_blocked() -> NavGridSet {
-        let mut speed_map = SpeedMap::uniform(4, 4, 1.0);
-        for z in 0..4 {
-            for x in 2..4 {
-                speed_map.speeds[(z * 4 + x) as usize] = 0.0;
-            }
-        }
-        NavGridSet {
-            buckets: vec![NavBucket {
-                max_slope: 0.5,
-                speed_map,
-            }],
-        }
-    }
-
-    #[test]
-    fn step_into_impassable_slides_or_stops() {
-        let nav = half_blocked();
-        let at = Vec3::new(12.0, 0.0, 12.0);
-        // Straight in: refused.
-        assert_eq!(nav.gate_step(0.5, at, Vec3::new(6.0, 0.0, 0.0)), Vec3::ZERO);
-        // Diagonal in: keeps the passable (z) component.
-        assert_eq!(
-            nav.gate_step(0.5, at, Vec3::new(6.0, 0.0, 3.0)),
-            Vec3::new(0.0, 0.0, 3.0)
-        );
-        // Within passable ground: untouched.
-        let s = Vec3::new(-3.0, 0.0, 2.0);
-        assert_eq!(nav.gate_step(0.5, at, s), s);
-        // Already on impassable ground: free to walk out.
-        let s = Vec3::new(-6.0, 0.0, 0.0);
-        assert_eq!(nav.gate_step(0.5, Vec3::new(20.0, 0.0, 12.0), s), s);
     }
 }

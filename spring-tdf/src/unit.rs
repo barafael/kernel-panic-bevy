@@ -153,6 +153,16 @@ pub struct UnitDef {
     pub max_slope: f32,
     /// Initial cloaked state.
     pub init_cloaked: bool,
+    /// FBI `Mass`; `None` when absent (Spring then uses the metal
+    /// cost, `UnitDef.cpp:351`).
+    pub mass: Option<f32>,
+    /// FBI `Upright`: the model never tilts with the terrain.
+    pub upright: bool,
+    /// FBI `YardMap`, whitespace included (`UnitDef::CreateYardMap`).
+    pub yard_map: String,
+    /// FBI `IsFeature`: the finished unit turns into a feature
+    /// (`CUnit::FinishedBuilding`, `Unit.cpp:447`).
+    pub is_feature: bool,
 
     /// Indexed particle-effect tags from the unit's `[SFXTypes]` block.
     ///
@@ -275,6 +285,10 @@ impl UnitDef {
             idle_time: s.f32("idletime"),
             max_slope: s.f32("maxslope"),
             init_cloaked: s.bool("init_cloaked"),
+            mass: s.get("mass").and_then(|v| v.trim().parse().ok()),
+            upright: s.bool("upright"),
+            yard_map: s.string("yardmap"),
+            is_feature: s.bool("isfeature"),
             sfx_types: parse_sfx_types(s),
         }
     }

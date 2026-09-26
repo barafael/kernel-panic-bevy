@@ -763,15 +763,12 @@ pub fn hover_air_system(
             (Some(t), Some(mut p)) => {
                 let wp = Vec3::new(t.0.x, 0.0, t.0.z);
                 if p.waypoints.len() != 1 || p.waypoints[0] != wp {
-                    p.waypoints = vec![wp];
-                    p.current = 0;
+                    *p = MovePath::new(vec![wp], wp);
                 }
             }
             (Some(t), None) => {
-                commands.entity(entity).insert(MovePath {
-                    waypoints: vec![Vec3::new(t.0.x, 0.0, t.0.z)],
-                    current: 0,
-                });
+                let wp = Vec3::new(t.0.x, 0.0, t.0.z);
+                commands.entity(entity).insert(MovePath::new(vec![wp], wp));
             }
             (None, Some(_)) => {
                 commands.entity(entity).remove::<MovePath>();

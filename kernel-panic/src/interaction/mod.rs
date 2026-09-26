@@ -2,6 +2,7 @@ pub mod ability;
 pub mod air_movement;
 pub mod cursor;
 pub mod debug_movement;
+pub mod ground_move;
 pub mod movement;
 #[cfg(test)]
 mod movement_harness;
@@ -18,8 +19,9 @@ pub use selection::Selected;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, guard_follow_system,
-    movement_system, orient_stationary_to_terrain, unit_separation_system, update_path_heat,
+    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system,
+    ground_collision_system, guard_follow_system, movement_system, orient_stationary_to_terrain,
+    update_path_heat,
 };
 use selection::SelectionPlugin;
 
@@ -76,10 +78,12 @@ impl Plugin for InteractionPlugin {
                 crate::terrain::smooth_ground::update_smooth_ground
                     .before(air_movement::hover_air_system),
                 air_movement::hover_air_system.after(movement_system),
-                unit_separation_system.after(movement_system),
+                // `HandleObjectCollisions` for every ground unit reads
+                // the positions all movers reached this frame.
+                ground_collision_system.after(movement_system),
                 // Runs last so any Y drift introduced by the two
                 // preceding systems is corrected in the same frame.
-                ground_clamp_system.after(unit_separation_system),
+                ground_clamp_system.after(ground_collision_system),
                 // Tilt idle units and buildings after clamping so
                 // the slope normal is sampled at the final Y.
                 orient_stationary_to_terrain.after(ground_clamp_system),

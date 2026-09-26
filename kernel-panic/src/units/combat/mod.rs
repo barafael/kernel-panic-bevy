@@ -1013,10 +1013,11 @@ pub fn attack_target_system(
                     .is_none_or(|w| w.distance(target_pos) > CHASE_REPATH_DISTANCE)
             });
             if stale {
+                // The old path is followed until the new one is ready
+                // (Spring's `nextPathId` swap) — no standstill per repath.
                 commands
                     .entity(entity)
-                    .insert(crate::interaction::movement::MoveTarget(target_pos))
-                    .remove::<crate::interaction::movement::MovePath>();
+                    .insert(crate::interaction::movement::MoveTarget(target_pos));
             }
         } else {
             // In range: hold position and fire.

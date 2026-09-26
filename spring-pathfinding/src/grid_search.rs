@@ -61,22 +61,112 @@ pub fn find_path_with_heat(
     src: [f32; 2],
     dst: [f32; 2],
 ) -> Option<Path> {
+    find_path_masked(speed_map, None, heat, src, dst)
+}
+
+/// Per-cell blocking overlay on top of a [`SpeedMap`] — structures
+/// (QTPFS `NodeLayer::Update` closes every node whose mover-footprint
+/// window contains a `BLOCK_STRUCTURE` square, `NodeLayer.cpp:163-190`).
+/// Same grid as the speed map; `true` = closed for this mover class.
+#[derive(Debug, Clone)]
+pub struct BlockMask {
+    pub width: u32,
+    pub height: u32,
+    pub cells: Vec<bool>,
+}
+
+impl BlockMask {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self {
+            width,
+            height,
+            cells: vec![false; (width * height) as usize],
+        }
+    }
+
+    #[inline]
+    pub fn blocked(&self, x: u32, z: u32) -> bool {
+        x < self.width && z < self.height && self.cells[(z * self.width + x) as usize]
+    }
+}
+
+/// Can a mover stand on cell `(x, z)`: terrain passable and not closed
+/// by the mask.
+#[inline]
+fn open(speed_map: &SpeedMap, mask: Option<&BlockMask>, x: u32, z: u32) -> bool {
+    speed_map.get(x, z) > 0.0 && !mask.is_some_and(|m| m.blocked(x, z))
+}
+
+/// Nearest open cell to `(x, z)` within `max_ring` rings (Chebyshev),
+/// closest by Euclidean distance within the first ring that has one.
+fn nearest_open(
+    speed_map: &SpeedMap,
+    mask: Option<&BlockMask>,
+    x: u32,
+    z: u32,
+    max_ring: i32,
+) -> Option<(u32, u32)> {
+    if open(speed_map, mask, x, z) {
+        return Some((x, z));
+    }
+    for r in 1..=max_ring {
+        let mut best: Option<((u32, u32), i32)> = None;
+        for dz in -r..=r {
+            for dx in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                let (nx, nz) = (x as i32 + dx, z as i32 + dz);
+                if nx < 0 || nz < 0 {
+                    continue;
+                }
+                let (nx, nz) = (nx as u32, nz as u32);
+                if open(speed_map, mask, nx, nz) {
+                    let d = dx * dx + dz * dz;
+                    if best.is_none_or(|(_, bd)| d < bd) {
+                        best = Some(((nx, nz), d));
+                    }
+                }
+            }
+        }
+        if let Some((c, _)) = best {
+            return Some(c);
+        }
+    }
+    None
+}
+
+/// Cells a unit standing on a closed square searches outward for an
+/// open one to start from (it walks out of the structure's shadow or
+/// off the steep patch it was pushed onto).
+const START_ESCAPE_RINGS: i32 = 8;
+
+/// [`find_path_with_heat`] with an optional structure [`BlockMask`]:
+/// masked cells are impassable like blocked terrain. A source cell that
+/// is closed (a unit jostled against a building, standing in a yard)
+/// starts the search from the nearest open cell instead of failing.
+pub fn find_path_masked(
+    speed_map: &SpeedMap,
+    mask: Option<&BlockMask>,
+    heat: Option<&crate::heat::HeatMap>,
+    src: [f32; 2],
+    dst: [f32; 2],
+) -> Option<Path> {
     let width = speed_map.width;
     let height = speed_map.height;
     if width == 0 || height == 0 {
         return None;
     }
 
-    let sx = world_to_cell(src[0], width);
-    let sz = world_to_cell(src[1], height);
+    let (sx, sz) = nearest_open(
+        speed_map,
+        mask,
+        world_to_cell(src[0], width),
+        world_to_cell(src[1], height),
+        START_ESCAPE_RINGS,
+    )?;
     let dx = world_to_cell(dst[0], width);
     let dz = world_to_cell(dst[1], height);
-
-    // The source must be standable; the goal may be blocked — the
-    // search then converges on the closest reachable cell instead.
-    if speed_map.get(sx, sz) <= 0.0 {
-        return None;
-    }
 
     // Same cell: identical passability by construction, walk straight.
     if (sx, sz) == (dx, dz) {
@@ -138,6 +228,9 @@ pub fn find_path_with_heat(
 
         for (nx, nz, step_len) in neighbors(cx, cz, width, height) {
             let n_idx = cell_idx(nx, nz, width);
+            if mask.is_some_and(|m| m.cells[n_idx]) {
+                continue;
+            }
             let mut speed = speed_map.speeds[n_idx];
             if let Some(hm) = heat {
                 let cell_heat = hm.heat[n_idx];
@@ -155,7 +248,8 @@ pub fn find_path_with_heat(
             if step_len > SQUARE_SIZE + 0.5 {
                 let ax = cell_idx(nx, cz, width);
                 let az = cell_idx(cx, nz, width);
-                if speed_map.speeds[ax] <= 0.0 || speed_map.speeds[az] <= 0.0 {
+                let closed = |i: usize| speed_map.speeds[i] <= 0.0 || mask.is_some_and(|m| m.cells[i]);
+                if closed(ax) || closed(az) {
                     continue;
                 }
             }
@@ -198,8 +292,12 @@ pub fn find_path_with_heat(
         ]
     };
 
-    let mut points: Vec<[f32; 2]> = Vec::with_capacity(cells.len());
+    let mut points: Vec<[f32; 2]> = Vec::with_capacity(cells.len() + 1);
     points.push(src);
+    // Escaping a closed start cell: walk to the open cell first.
+    if cell_idx(world_to_cell(src[0], width), world_to_cell(src[1], height), width) != start {
+        points.push(world(start));
+    }
     for &c in &cells[1..] {
         points.push(world(c));
     }
@@ -210,7 +308,7 @@ pub fn find_path_with_heat(
         *last = dst;
     }
 
-    smooth(&mut points, speed_map, heat);
+    smooth(&mut points, speed_map, mask, heat);
     Some(Path {
         points,
         reached_goal,
@@ -289,9 +387,13 @@ fn octile(x: u32, z: u32, dx: u32, dz: u32) -> f32 {
 
 /// Greedy line-of-sight smoothing (Spring's `CPathOptimizer`): walk the
 /// waypoint list dropping any intermediate point while a straight ray
-/// to the furthest visible successor crosses only passable cells
-/// (supercover walk so corners can't be clipped diagonally).
-fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap, heat: Option<&crate::heat::HeatMap>) {
+/// to the furthest visible successor crosses only open cells.
+fn smooth(
+    points: &mut Vec<[f32; 2]>,
+    speed_map: &SpeedMap,
+    mask: Option<&BlockMask>,
+    heat: Option<&crate::heat::HeatMap>,
+) {
     if points.len() <= 2 {
         return;
     }
@@ -302,7 +404,7 @@ fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap, heat: Option<&crate:
         // Furthest j ≥ i+2 visible from points[i]; default to the
         // immediate successor.
         let mut j = i + 1;
-        while j + 1 < points.len() && line_clear(points[i], points[j + 1], speed_map, heat) {
+        while j + 1 < points.len() && line_clear(points[i], points[j + 1], speed_map, mask, heat) {
             j += 1;
         }
         out.push(points[j]);
@@ -311,35 +413,90 @@ fn smooth(points: &mut Vec<[f32; 2]>, speed_map: &SpeedMap, heat: Option<&crate:
     *points = out;
 }
 
-/// Sample the straight segment every half-square and require every
-/// touched cell to be passable — and, when a heat overlay is present,
-/// not hot enough to defeat the shortcut.
-fn line_clear(
-    a: [f32; 2],
-    b: [f32; 2],
-    speed_map: &SpeedMap,
-    heat: Option<&crate::heat::HeatMap>,
-) -> bool {
-    let dist = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
-    let steps = (dist / (SQUARE_SIZE * 0.5)).ceil() as usize;
-    for s in 1..steps {
-        let t = s as f32 / steps as f32;
-        let x = a[0] + (b[0] - a[0]) * t;
-        let z = a[1] + (b[1] - a[1]) * t;
-        if speed_map.get(
-            world_to_cell(x, speed_map.width),
-            world_to_cell(z, speed_map.height),
-        ) <= 0.0
-        {
-            return false;
+/// Visit every grid cell the segment `a → b` passes through, in order
+/// (Amanatides & Woo exact traversal). Where the segment crosses a
+/// cell corner exactly, both side cells are visited too (supercover),
+/// so a diagonal can't slip between two blocked squares. Stops early
+/// when `visit` returns `false`; returns whether it ran to the end.
+pub fn traverse_cells(a: [f32; 2], b: [f32; 2], mut visit: impl FnMut(i32, i32) -> bool) -> bool {
+    let (x0, z0) = (a[0] / SQUARE_SIZE, a[1] / SQUARE_SIZE);
+    let (x1, z1) = (b[0] / SQUARE_SIZE, b[1] / SQUARE_SIZE);
+    let (mut cx, mut cz) = (x0.floor() as i32, z0.floor() as i32);
+    let (ex, ez) = (x1.floor() as i32, z1.floor() as i32);
+    if !visit(cx, cz) {
+        return false;
+    }
+    let (dx, dz) = (x1 - x0, z1 - z0);
+    let step_x = if dx > 0.0 { 1 } else { -1 };
+    let step_z = if dz > 0.0 { 1 } else { -1 };
+    let t_delta_x = if dx != 0.0 { 1.0 / dx.abs() } else { f32::INFINITY };
+    let t_delta_z = if dz != 0.0 { 1.0 / dz.abs() } else { f32::INFINITY };
+    let mut t_max_x = if dx > 0.0 {
+        (x0.floor() + 1.0 - x0) * t_delta_x
+    } else if dx < 0.0 {
+        (x0 - x0.floor()) * t_delta_x
+    } else {
+        f32::INFINITY
+    };
+    let mut t_max_z = if dz > 0.0 {
+        (z0.floor() + 1.0 - z0) * t_delta_z
+    } else if dz < 0.0 {
+        (z0 - z0.floor()) * t_delta_z
+    } else {
+        f32::INFINITY
+    };
+    // Advance while the next boundary crossing lies strictly inside the
+    // segment (t < 1): an endpoint exactly on a boundary does not enter
+    // the next cell. Bounded by the cell count so float noise can never
+    // loop forever.
+    let max_steps = ((ex - cx).abs() + (ez - cz).abs()) as usize + 2;
+    for _ in 0..max_steps {
+        let t_next = t_max_x.min(t_max_z);
+        if t_next >= 1.0 {
+            break;
         }
-        if let Some(hm) = heat {
-            if hm.get_with_neighbors([x, z]) * HEAT_COST_SOFTNESS > HEAT_SMOOTH_TOLERANCE {
+        let diff = t_max_x - t_max_z;
+        if diff.abs() < 1e-6 {
+            // Exactly through a corner: the two side cells are touched.
+            if !visit(cx + step_x, cz) || !visit(cx, cz + step_z) {
                 return false;
             }
+            cx += step_x;
+            cz += step_z;
+            t_max_x += t_delta_x;
+            t_max_z += t_delta_z;
+        } else if diff < 0.0 {
+            cx += step_x;
+            t_max_x += t_delta_x;
+        } else {
+            cz += step_z;
+            t_max_z += t_delta_z;
+        }
+        if !visit(cx, cz) {
+            return false;
         }
     }
     true
+}
+
+/// Is the straight segment `a → b` walkable: every cell it passes
+/// through (exact traversal, see [`traverse_cells`]) open for the mover
+/// — terrain passable, not closed by `mask` — and, with a heat overlay,
+/// not hot enough to defeat a shortcut.
+pub fn line_clear(
+    a: [f32; 2],
+    b: [f32; 2],
+    speed_map: &SpeedMap,
+    mask: Option<&BlockMask>,
+    heat: Option<&crate::heat::HeatMap>,
+) -> bool {
+    traverse_cells(a, b, |x, z| {
+        if x < 0 || z < 0 || !open(speed_map, mask, x as u32, z as u32) {
+            return false;
+        }
+        let centre = [(x as f32 + 0.5) * SQUARE_SIZE, (z as f32 + 0.5) * SQUARE_SIZE];
+        !heat.is_some_and(|hm| hm.get_with_neighbors(centre) * HEAT_COST_SOFTNESS > HEAT_SMOOTH_TOLERANCE)
+    })
 }
 
 #[cfg(test)]
@@ -421,11 +578,54 @@ mod tests {
         }
     }
 
+    /// A unit standing on a closed cell (pushed onto a steep patch,
+    /// standing in a structure's shadow) walks out via the nearest open
+    /// cell instead of being refused a path.
     #[test]
-    fn impassable_source_returns_none() {
+    fn closed_source_starts_from_nearest_open_cell() {
         let mut map = flat(8, 8);
         map.speeds[0] = 0.0;
-        assert!(find_path(&map, [1.0, 1.0], [60.0, 60.0]).is_none());
+        let path = find_path(&map, [1.0, 1.0], [60.0, 60.0]).expect("escape path");
+        assert!(path.reached_goal);
+        assert_eq!(path.points[0], [1.0, 1.0]);
+        // Fully enclosed in closed cells: nothing to escape to.
+        let sealed = SpeedMap::uniform(20, 20, 0.0);
+        assert!(find_path(&sealed, [80.0, 80.0], [100.0, 100.0]).is_none());
+    }
+
+    /// Structure masks close cells for the search and the smoother.
+    #[test]
+    fn mask_blocks_the_search() {
+        let map = flat(32, 32);
+        let mut mask = BlockMask::new(32, 32);
+        for z in 4..28 {
+            mask.cells[(z * 32 + 16) as usize] = true;
+        }
+        let path = find_path_masked(&map, Some(&mask), None, [40.0, 128.0], [240.0, 128.0])
+            .expect("path around the masked wall");
+        assert!(path.reached_goal);
+        for w in path.points.windows(2) {
+            assert!(line_clear(w[0], w[1], &map, Some(&mask), None), "segment {w:?} crosses the mask");
+        }
+        assert!(path.total_length() > 220.0);
+    }
+
+    /// Exact traversal: a segment that grazes a blocked cell's corner
+    /// region is refused, one that stays clear is accepted.
+    #[test]
+    fn line_clear_is_exact() {
+        let mut map = flat(8, 8);
+        map.speeds[(3 * 8 + 3) as usize] = 0.0; // cell (3,3) = [24,32)²
+        // Passes through (3,3) near its corner: 4-elmo sampling missed it.
+        assert!(!line_clear([4.0, 4.0], [33.0, 31.5], &map, None, None));
+        // Clear of the cell.
+        assert!(line_clear([4.0, 4.0], [60.0, 20.0], &map, None, None));
+        // Diagonal exactly through the corner between (2,3) and (3,2)
+        // when both are blocked must be refused.
+        let mut map = flat(8, 8);
+        map.speeds[(3 * 8 + 2) as usize] = 0.0;
+        map.speeds[(2 * 8 + 3) as usize] = 0.0;
+        assert!(!line_clear([12.0, 12.0], [36.0, 36.0], &map, None, None));
     }
 
     #[test]

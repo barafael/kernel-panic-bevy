@@ -1,10 +1,11 @@
 //! Upstream `gamedata/MOVEINFO.TDF` — movement-class pathing params.
 //!
-//! The port only consumes the heat-mapping fields (`HeatMapping`,
-//! `HeatProduced`, `HeatMod`); everything else in the file (footprints,
-//! crush strength, water depth) is either read from the FBIs or unused
-//! here. These params drive [`crate::interaction::movement::PathHeat`],
-//! the congestion grid that makes marching columns fan out.
+//! Two consumers: the heat-mapping fields (`HeatMapping`,
+//! `HeatProduced`, `HeatMod`) drive
+//! [`crate::interaction::movement::PathHeat`]; `FootprintX/Z` and
+//! `CrushStrength` define each class's `MoveDef` — the footprint every
+//! ground unit of the class collides and paths with
+//! (`MoveDefHandler.cpp:314-319`), whatever its FBI footprint says.
 
 use bevy::prelude::*;
 use spring_tdf::Tdf;
@@ -31,9 +32,23 @@ pub const DEFAULT_HEAT_PARAMS: MoveClassParams = MoveClassParams {
     heat_retention: 0.1,
 };
 
+/// The `MoveDef` fields of one MOVEINFO.TDF class.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveClassDef {
+    /// `FootprintX` / `FootprintZ` in FBI footprint units (16 elmos).
+    pub footprint_x: f32,
+    pub footprint_z: f32,
+    /// `CrushStrength`: features/units with a lower crush resistance
+    /// are driven over and crushed (`CMoveMath::CrushResistant`).
+    pub crush_strength: f32,
+    /// `MaxSlope` in degrees (FBI encoding, before `DegreesToMaxSlope`).
+    pub max_slope_deg: f32,
+}
+
 #[derive(Resource, Debug, Clone, Default)]
 pub struct MoveClassTable {
     classes: HashMap<String, MoveClassParams>,
+    defs: HashMap<String, MoveClassDef>,
 }
 
 impl MoveClassTable {
@@ -62,9 +77,27 @@ impl MoveClassTable {
         };
 
         let mut classes = HashMap::new();
+        let mut defs = HashMap::new();
         for section in &tdf.sections {
             let name = section.string_clean("name").to_ascii_lowercase();
-            if name.is_empty() || !section.bool("heatmapping") {
+            if name.is_empty() {
+                continue;
+            }
+            let fx = section.f32("footprintx").max(1.0);
+            let fz = match section.f32("footprintz") {
+                z if z > 0.0 => z,
+                _ => fx,
+            };
+            defs.insert(
+                name.clone(),
+                MoveClassDef {
+                    footprint_x: fx,
+                    footprint_z: fz,
+                    crush_strength: section.f32("crushstrength"),
+                    max_slope_deg: section.f32("maxslope"),
+                },
+            );
+            if !section.bool("heatmapping") {
                 continue;
             }
             let produced = section.f32("heatproduced");
@@ -81,7 +114,13 @@ impl MoveClassTable {
             "MoveClassTable: {} heat-producing classes from MOVEINFO.TDF",
             classes.len(),
         );
-        Self { classes }
+        Self { classes, defs }
+    }
+
+    /// The `MoveDef` of class `class` (FBI `MovementClass`),
+    /// case-insensitive.
+    pub fn def_for(&self, class: &str) -> Option<MoveClassDef> {
+        self.defs.get(&class.to_ascii_lowercase()).copied()
     }
 
     /// Params for a class name (FBI `MovementClass`, e.g. "LIGHT"),
@@ -114,6 +153,19 @@ mod tests {
         let heavy = table.params_for("Heavy");
         assert!((heavy.heat_produced - 500.0).abs() < 1e-4);
         assert!((heavy.heat_retention - 0.002).abs() < 1e-4);
+    }
+
+    /// The KP classes' MoveDefs: LIGHT 2×2 crush 40, MEDIUM 4×4 crush
+    /// 60, HEAVY 4×4 crush 300, all MaxSlope 36.
+    #[test]
+    fn loads_upstream_move_defs() {
+        let table = MoveClassTable::load();
+        let light = table.def_for("light").unwrap();
+        assert_eq!((light.footprint_x, light.crush_strength), (2.0, 40.0));
+        let medium = table.def_for("MEDIUM").unwrap();
+        assert_eq!((medium.footprint_x, medium.crush_strength), (4.0, 60.0));
+        let heavy = table.def_for("heavy").unwrap();
+        assert_eq!((heavy.footprint_z, heavy.crush_strength, heavy.max_slope_deg), (4.0, 300.0, 36.0));
     }
 
     /// Unknown classes fall back to the LIGHT defaults.

@@ -22,6 +22,8 @@ mod heat;
 mod path;
 
 pub use cost::{SpeedMap, max_slope_from_degrees, slope_from_rise_run, slope_mod_from_max_slope};
-pub use grid_search::{find_path, find_path_with_heat};
+pub use grid_search::{
+    BlockMask, find_path, find_path_masked, find_path_with_heat, line_clear, traverse_cells,
+};
 pub use heat::HeatMap;
 pub use path::Path;
