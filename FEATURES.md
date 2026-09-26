@@ -97,7 +97,8 @@ read the resulting state.
   highlight clears as soon as the cursor leaves the unit.
 - Selected units brighten more strongly to mark the selection
   (material-tint selection highlight).
-- Right-click empty ground → units walk there (move order).
+- Right-click empty ground → units walk there (move order); right-drag
+  draws a line the selection lines up along (formation move).
 - Right-click an enemy → units engage it (attack-move auto-target
   pickup). Units also keep the target unit selection and chase it, as
   long as it is in their field of view.
@@ -155,33 +156,65 @@ read the resulting state.
 
 ## 5. Movement
 
-- Units find their way around terrain instead of through it (QTPFS
-  pathfinding).
+Ground movement is a port of Spring's `CGroundMoveType` with KP's
+modrules (QTPFS, `allowUnitCollisionOverlap=1`,
+`allowPushingEnemyUnits=1`) and MOVEINFO move classes.
+
+- Units find their way around terrain and buildings instead of through
+  them (grid pathfinding with QTPFS's structure blocking). Buildings
+  block the squares of their yardmap at Spring scale — a homebase's
+  yard cross and a Socket's middle lane stay walkable, Terminals /
+  Firewalls / Obelisks / Ports are solid — and paths keep a unit's
+  footprint clear of them (Bits one square, Bytes/Pointers/Assemblers
+  three). A path that a new building (or Hex Farm terrain) cuts is
+  re-searched.
 - Each unit obeys its own slope cap: some units refuse cliffs that
   others roll straight up (per-unit `MaxSlope` nav-grid buckets).
-- Units in a crowd push each other apart instead of overlapping
-  (XZ spatial-hash collision separation).
-- A crowd converging on the same waypoint bunches up at its boundary
-  instead of jittering on top of one another (waypoint deadlock
-  breaker).
-- Ground units don't go into the terrain. They can be blown away by
-  some weapons; flying units (Flow) cruise at their altitude above a
-  smoothed version of the terrain (Spring's smooth height mesh), so
-  they glide over hills and pits instead of bobbing along every bump,
-  climbing early for ridges ahead; the Worm is
-  subterranean — it is allowed to sink below ground level while
-  cloaked and surfaces to attack.
-- Ground units smoothly tilt their pitch and roll to match the slope
-  they're standing on (terrain-normal slope tilt).
-- Units with high turn rate snap toward a new heading; sluggish ones
-  (Pointer, Worm, Dos) visibly pivot before driving forward, and lose
-  forward speed during the turn (turn-rate gating with cos(error)
-  forward-speed scaling).
+  Climbing slows a unit down (a 30° ramp to ~0.43× speed); going
+  downhill doesn't (directional slope speed mod).
+- Units get up to speed in a few frames and stop within a few elmos
+  (FBI `Acceleration` / `BrakeRate` per sim frame²). With more orders
+  shift-queued they don't brake between legs: each leg ends ~32–45
+  elmos early and the next one starts at full speed.
+- Turning costs speed but never stops a unit: the sharper the turn
+  still to make, the slower it drives (down to 10% of top speed), so
+  units arc through corners; heavy units (Byte, Pointer, Worm) swing
+  round slowly, light ones quickly (FBI `TurnRate` per frame, with
+  turn inertia). Near a waypoint a unit cuts the corner to the next
+  one when it can see it.
+- A new order or a chase repath doesn't make a unit stand still: it
+  keeps following its old path until the new one is ready.
+- Right-clicking one spot sends the whole selection to that spot; the
+  group spreads out around it by pushing, and units that bump into
+  already-arrived units on the goal consider themselves arrived.
+  Drawing a line (right-drag) lines the units up along it, each taking
+  the nearest free spot without paths crossing.
+- Units in a crowd may overlap a little but push each other apart,
+  heavier/faster units shoving lighter/slower ones aside; idle units
+  are pushed out of the way. Units walking at each other steer apart
+  early (obstacle avoidance). Units slide round buildings instead of
+  grinding into them.
+- A unit that can't get anywhere repaths, and after ~8 s of no
+  progress gives the order up. An unreachable goal is walked to the
+  closest reachable point and then abandoned.
+- Heavy units (Byte, Connection) drive straight over Bad Blocks and
+  crush them; lighter units have to go round.
+- Ground units stay on the drawn terrain surface (also when idle and
+  when Hex Farm terrain sinks); flying units (Flow) cruise at their
+  altitude above a smoothed version of the terrain (Spring's smooth
+  height mesh), so they glide over hills and pits instead of bobbing
+  along every bump, climbing early for ridges ahead; the Worm burrows
+  its head below ground while cloaked and surfaces to attack.
+- Ground units tilt to the slope they're on, moving or idle; buildings
+  stand upright.
+- Everything the 30 Hz simulation moves (units, their animated parts,
+  projectiles, particles) is drawn smoothly between sim frames, at any
+  frame rate (render interpolation).
 - Buildings can't move. A move order on a **factory** sets the
   delivery point (rally point) for newly produced units; queueing
   multiple delivery points works. Mobile constructors (which are units,
   not buildings) actually move and accept normal move/build orders.
-- Stunned (DOS-paralyzed) units freeze in place and can't fire
+- Stunned (DOS-paralyzed) units coast to a stop and can't fire
   (paralysis lockdown).
 - The Byte traveling visibly reads as a moving pyramid with a
   rectangular base.

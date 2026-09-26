@@ -27,6 +27,9 @@ use crate::units::content::unit_registry::UnitRegistry;
 /// Map edge in heightmap squares (8 elmos each).
 const MAP_SQUARES: u32 = 256;
 const DT: f64 = 1.0 / 30.0;
+/// Heading-rate threshold for the wiggle count: half a degree per frame
+/// (smaller corrections are invisible).
+const WIGGLE_MIN: f32 = 0.5 * std::f32::consts::PI / 180.0;
 
 pub(crate) struct Harness {
     pub world: World,
@@ -238,10 +241,10 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
                     rate += std::f32::consts::TAU;
                 }
                 turned += rate.abs();
-                if rate.abs() > 1e-3 && prev_rate[i].abs() > 1e-3 && rate.signum() != prev_rate[i].signum() {
+                if rate.abs() > WIGGLE_MIN && prev_rate[i].abs() > WIGGLE_MIN && rate.signum() != prev_rate[i].signum() {
                     flips += 1;
                 }
-                if rate.abs() > 1e-3 {
+                if rate.abs() > WIGGLE_MIN {
                     prev_rate[i] = rate;
                 }
             }

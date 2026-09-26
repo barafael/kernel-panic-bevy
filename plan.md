@@ -293,8 +293,9 @@ weapon = 30 frames; was 6 s host-side default before).
 - ✅ **Logic Bomb**: already cloaked (§3.3); `tick_kamikaze` detonates it when an enemy
   enters the 64-elmo radius, queuing a `logic_bomb`-weapon self-hit so the existing
   splash + armor-class pipeline handles the blast (3000 vs Subterranean).
-- ✅ **BadBlock**: spawned at 100 HP; being a building it blocks movement via the
-  existing collision pipeline. Crushable by Bytes is deferred.
+- ✅ **BadBlock**: spawned at 100 HP; a crushable feature in the structure layer
+  (`interaction::structures`, crush resistance 65.6): LIGHT/MEDIUM path round it,
+  HEAVY (Byte, Connection) paths through and crushes it on contact.
 - ✅ **Debug**: buildable by every constructor (Assembler / Trojan /
   Gateway build lists already include it) as a stationary Minekiller
   turret. Weapon1=Minekiller auto-fires through the regular
@@ -635,6 +636,41 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
 
 ---
 
+## Ground movement — Spring `CGroundMoveType` port (Sept 2026)
+
+Done (see FEATURES.md §5, `interaction/ground_move.rs`,
+`interaction/structures.rs`, `rendering/interpolation.rs`; the headless
+harness `interaction/movement_harness.rs` measures group moves —
+`cargo test -p kernel-panic movement_harness -- --ignored --nocapture`):
+accel/brake per frame², queued legs chained via `cancelDistance`,
+render interpolation of everything FixedUpdate moves, ChangeSpeed's
+turn-limited target speed, turn inertia, Spring TurnRate (the ×3 hack
+is gone), CanSetNextWayPoint corner cutting with raw-search LOS,
+path swap without standstill, time-budgeted searches, MoveDef radii
+(LIGHT 12 / MEDIUM-HEAVY 28), CalculatePushVector with UCO,
+HandleUnitCollisionsAux, OwnerMoved/SlowUpdate idle → repath → Fail,
+UpdatePos gating, partial paths, QTPFS-style structure masks and
+HandleStaticObjectCollision's yardmap branch, Bad Block crushing,
+directional slope speed, triangle-consistent heights, smooth-normal
+tilt / upright, obstacle avoidance, Spring single-click group moves,
+CustomFormations2 drag matching.
+
+Deviations / open:
+- [ ] Factory yards (`c`) are always open; Spring opens them only while
+  the factory builds (`YARD_OPEN` in the scripts). KP homebases build
+  continuously, so this rarely differs.
+- [ ] Path searches run synchronously (2 ms budget/frame, ≥1 search);
+  QTPFS searches on worker threads.
+- [ ] Unit↔unit crush (`allowCrushingAlliedUnits`, unit `crushable`) is
+  not ported — no KP unit is crushable.
+- [ ] No reversing (`rSpeed`): no KP unit has one.
+- [ ] `HandleStaticObjectCollision`'s push-out for squares inside the
+  footprint is dead code in the engine (loop offsets compared with
+  absolute squares) and is not ported; `positionStuck` is only set by
+  UpdatePos.
+- [ ] Path heat (`PathHeat`) is kept although QTPFS ignores it; the
+  harness shows no effect on group moves.
+
 ## Technical Debt
 
 ### Architecture
@@ -735,7 +771,6 @@ Clean separation between engine-agnostic parsers (`spring-*`) and the Bevy game.
   selection, `combat::apply_damage` splash radius, `combat::tick_kamikaze` trigger
   check, `command_fire::tick_area_denial`. Still linear and pending retrofit:
   `command_fire::apply_firewall` (cold path — per-cast only),
-  `interaction::movement::resolve_motion` + `unit_separation_system`,
   `cloak::update_cloak_visibility`, `ai::nearest_unclaimed_datavent`.
 - [x] ~~`movement::movement_system` and `unit_separation_system` each allocate a fresh
   `Vec<UnitSnapshot>` over all units every frame~~ — both now take
@@ -937,7 +972,8 @@ behaviour; plan.md holds the engineering work to get there.
      near-immunity back it should come from a dedicated per-kind
      multiplier table rather than the FBI engine-disable value.
 - [x] ~~**Movement ignores per-unit `MaxSlope`**~~ — done.
-  - Terrain penetration: `ground_clamp_system` + `UnitKind::is_subterranean`.
+  - Terrain penetration: `ground_clamp_system` (both directions for
+    mobile units, spawn `GroundLift` kept).
   - Cliff climbing: caps and slope penalties match upstream's Spring
     encoding exactly (commit `8d81187`). `SpeedMap::from_heightmap`
     computes `1 - cos(angle)` per cell (matching `ReadMap::UpdateSlopemap`),
@@ -948,17 +984,17 @@ behaviour; plan.md holds the engineering work to get there.
     = 36` (MOVEINFO LIGHT/MEDIUM/HEAVY default), giving an effective
     54° geometric cap. `NavGridSet` still holds one bucket per
     distinct cap; `compute_path` picks the tightest bucket whose cap
-    ≥ the unit's. The per-step rise gate in `movement_system` uses
-    the same encoding via `slope_from_rise_run`.
+    ≥ the unit's. Uphill travel is slowed by the directional
+    `GetPosSpeedMod` (`ground_move::ground_speed_mod`).
   - Building-placement MaxSlope is still a separate concern (FBI
     values on Socket / Firewall / Terminal / Obelisk = 10, BadBlock
     = 32, Kernel / Hole = 60 govern where you can drop the build
     ghost, orthogonal to nav) — tracked under §3.1.
 
   Sub-bugs still watching:
-  - QTPFS doesn't observe heightmap edits (Technical Debt →
-    Architecture "QTPFS terrain-change repathing"). Lua gadgets that
-    pave on build invalidate every bucket grid.
+  - Heightmap edits (Hex Farm) bump `NavGridSet::revision`; paths
+    whose remainder is no longer walkable are re-searched. Lua
+    gadgets that pave on build still need to call `update_region`.
   - The nav-grid build needs to happen *after* upstream Lua gadgets
     run their init-time heightmap edits, otherwise `map_loading`'s
     view of terrain is stale. Verify ordering on map load.
@@ -966,8 +1002,8 @@ behaviour; plan.md holds the engineering work to get there.
 - [x] ~~Rally point / delivery point for factories~~ — `Emerging.rally_point` wired
 - [x] ~~Terrain height not sampled during movement~~ — ground clamping in recent walking
   improvements (5046fd2) + spawn clamp (6e043ba)
-- [ ] No unit collision avoidance — units overlap when crowded (partial: walking improvements
-  address some cases, revisit)
+- [x] ~~No unit collision avoidance~~ — `GetObstacleAvoidanceDir` +
+  `CalculatePushVector` ported (`interaction::ground_move`).
 - [ ] Attack-move (`A` hotkey) is wired in HUD but handler is empty (TODO at `hud.rs:849`).
   Structural blocker: we have `MoveTarget` + implicit-attack, not a Spring-style
   command queue. Attack-move, Shift-queued orders, Patrol, Guard all share the
@@ -1182,10 +1218,8 @@ equivalents) directly. No grep hits for either type anywhere in the tree.
 
 ### 11.8 Smaller wins
 
-- [ ] **`unit_separation_system`** ([interaction/movement.rs](kernel-panic/src/interaction/movement.rs))
-  is still O(N²) — builds a full snapshot and nested-loops it. Route each
-  mobile unit through `SpatialIndex::query_radius` instead. Expected ~40×
-  fewer distance checks at N=300 units.
+- [x] ~~**`unit_separation_system`** O(N²)~~ — removed; collision response
+  is `ground_move::ground_collision_system` over a 64-elmo cell grid.
 - [x] ~~**`gunbase` / `body` piece-name scans**~~ — done. `GunbasePiece`,
   `AimerPiece`, and `HatchPiece` are resolved once at spawn via
   `cob.piece_names.iter().position(...)` ([spawning/mod.rs](kernel-panic/src/units/lifecycle/spawning/mod.rs))
