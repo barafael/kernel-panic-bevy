@@ -285,6 +285,16 @@ pub fn spawn_unit(
         }
     }
 
+    // Worm bites detonate Weapon2 (worm.bos `emit-sfx 4097`); cache its
+    // id like the primary binding so the fire path never hashes names.
+    if kind.has_autohold()
+        && let Some(splash) = ctx.weapon_registry.intern(unit_registry.weapon2(kind))
+    {
+        commands
+            .entity(unit_entity)
+            .insert(crate::units::mechanics::worm::WormSplash(splash));
+    }
+
     if kind.spawns_cloaked() {
         commands
             .entity(unit_entity)

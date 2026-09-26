@@ -258,6 +258,13 @@ impl UnitKind {
         matches!(self, UnitKind::Worm | UnitKind::LogicBomb)
     }
 
+    /// Units carrying the AutoHold toggle and the surface-to-bite cloak
+    /// cycle (upstream autohold.lua `autoholdDefs`; the Hole entry only
+    /// exists there to hand its state down to the Worms it builds).
+    pub fn has_autohold(self) -> bool {
+        matches!(self, UnitKind::Worm)
+    }
+
     /// Burrowing units — allowed to sit below the heightmap surface.
     /// Every other ground unit is re-clamped to terrain height each
     /// frame so physics/collision pushes can't slide it into the mesh.
