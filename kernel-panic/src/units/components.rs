@@ -142,6 +142,28 @@ pub struct UnitStats {
     pub no_chase_vtol: bool,
 }
 
+impl UnitStats {
+    /// The per-kind stats `spawn_unit` caches, from the FBI registry.
+    /// `hit_radius` comes from the S3O model, which the registry
+    /// doesn't know.
+    pub fn from_registry(
+        kind: UnitKind,
+        registry: &crate::units::content::unit_registry::UnitRegistry,
+        hit_radius: f32,
+    ) -> Self {
+        Self {
+            radius: registry.collision_radius(kind),
+            hit_radius,
+            speed: registry.speed(kind),
+            accel: registry.acceleration(kind),
+            brake: registry.brake_rate(kind),
+            turn_rate: registry.turn_rate(kind),
+            can_fly: registry.can_fly(kind),
+            no_chase_vtol: registry.no_chase_vtol(kind),
+        }
+    }
+}
+
 /// Two units count as friendly when they share a team. `TeamId` is the
 /// ally team (upstream's allyteam): every seat the menu places on the
 /// same side shares it, so mirror matches (System vs System) fight and

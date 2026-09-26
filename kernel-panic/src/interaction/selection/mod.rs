@@ -6,7 +6,7 @@ mod core;
 mod groups;
 mod health_bars;
 mod highlight;
-mod right_click;
+pub(crate) mod right_click;
 
 use bevy::prelude::*;
 

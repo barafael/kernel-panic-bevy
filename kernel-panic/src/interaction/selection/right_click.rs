@@ -263,12 +263,12 @@ fn handle_right_click(
             // Plain ground move: fan the group out around the clicked
             // point (single units go exactly there).
             let target = drag_path.points[0];
-            let max_radius = selected_q
+            let movers: Vec<(Entity, Vec3, f32)> = selected_q
                 .iter()
-                .map(|(_, _, _, stats)| stats.radius)
-                .fold(0.0_f32, f32::max);
-            let targets = spread_targets(target, units.len(), 1.6 * max_radius);
-            for ((entity, _), slot) in units.iter().zip(targets.iter()) {
+                .map(|(e, tf, _, stats)| (e, tf.translation, stats.radius))
+                .collect();
+            let orders = group_move_slots(&movers, target);
+            for (entity, slot) in &orders {
                 apply_ordered_command(
                     *entity,
                     QueuedCommand::Move(*slot),
@@ -279,7 +279,7 @@ fn handle_right_click(
             }
             pending
                 .markers
-                .extend(targets.into_iter().map(|t| (t, OrderMarker::Move)));
+                .extend(orders.into_iter().map(|(_, t)| (t, OrderMarker::Move)));
         } else {
             // Path-based formation: sort units by projection onto the drag's
             // principal axis (start → end) so the nearest-to-start unit gets
@@ -488,6 +488,13 @@ fn update_formation_preview(
     }
 }
 
+/// Group move to one point: one slot per unit, as `(unit, slot)`.
+pub(crate) fn group_move_slots(units: &[(Entity, Vec3, f32)], target: Vec3) -> Vec<(Entity, Vec3)> {
+    let max_radius = units.iter().map(|u| u.2).fold(0.0_f32, f32::max);
+    let targets = spread_targets(target, units.len(), 1.6 * max_radius);
+    units.iter().map(|u| u.0).zip(targets).collect()
+}
+
 /// Sunflower-spiral slot layout for a multi-unit move to a single
 /// point: slot 0 sits on the point, slot i at `r = spacing·√i`,
 /// `θ = i·goldenAngle`. Neighbor slots stay roughly `spacing` apart
@@ -495,7 +502,7 @@ fn update_formation_preview(
 /// disc instead of a shove-match that only the collision push can
 /// untangle. Units sorted by the caller land on slots in ECS order;
 /// the spiral keeps them apart either way.
-fn spread_targets(center: Vec3, count: usize, spacing: f32) -> Vec<Vec3> {
+pub(crate) fn spread_targets(center: Vec3, count: usize, spacing: f32) -> Vec<Vec3> {
     const GOLDEN_ANGLE: f32 = 2.399_963_2;
     (0..count)
         .map(|i| {

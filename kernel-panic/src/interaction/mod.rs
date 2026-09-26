@@ -3,6 +3,8 @@ pub mod air_movement;
 pub mod cursor;
 pub mod debug_movement;
 pub mod movement;
+#[cfg(test)]
+mod movement_harness;
 pub(crate) mod selection;
 
 use bevy::gizmos::config::GizmoConfigStore;

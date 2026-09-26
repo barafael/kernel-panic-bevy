@@ -298,16 +298,7 @@ pub fn spawn_unit(
             faction,
             TeamId(team),
             Health::full(unit_registry.max_health(kind)),
-            UnitStats {
-                radius: unit_registry.collision_radius(kind),
-                hit_radius: radius,
-                speed: unit_registry.speed(kind),
-                accel: unit_registry.acceleration(kind),
-                brake: unit_registry.brake_rate(kind),
-                turn_rate: unit_registry.turn_rate(kind),
-                can_fly: unit_registry.can_fly(kind),
-                no_chase_vtol: unit_registry.no_chase_vtol(kind),
-            },
+            UnitStats::from_registry(kind, unit_registry, radius),
             Transform::from_translation(lifted_position),
             Visibility::default(),
         ))
@@ -316,7 +307,7 @@ pub fn spawn_unit(
     commands.entity(unit_entity).insert((
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
-        crate::interaction::movement::CurrentSpeed::default(),
+        crate::interaction::movement::ground_mover_components(kind, unit_registry),
         // §1.8 first slice: cache a typed collision volume so
         // projectile / shield / per-shot-miss systems can do
         // volume-aware tests without re-deriving from the S3O on

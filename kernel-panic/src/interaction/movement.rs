@@ -38,6 +38,30 @@ pub struct MoveTarget(pub Vec3);
 #[derive(Component, Default)]
 pub struct CurrentSpeed(pub f32);
 
+/// The per-unit movement-state components every spawned unit carries.
+/// Shared by `spawn_unit` and the headless movement harness so both
+/// build movers identically.
+pub(crate) fn ground_mover_components(_kind: UnitKind, _registry: &UnitRegistry) -> impl Bundle {
+    CurrentSpeed::default()
+}
+
+/// The fixed-tick ground-movement chain, in the order
+/// [`super::InteractionPlugin`] runs it. The headless harness runs the
+/// same list.
+#[cfg(test)]
+pub(crate) fn add_ground_sim_systems(schedule: &mut Schedule) {
+    schedule.add_systems(
+        (
+            update_path_heat,
+            movement_system,
+            unit_separation_system,
+            ground_clamp_system,
+            orient_stationary_to_terrain,
+        )
+            .chain(),
+    );
+}
+
 /// Marks an active attack-move order. While it is present AND the unit
 /// has an `AimTarget` (an in-range hostile), movement halts so the unit
 /// stops and fights; it resumes marching when the threat clears.
