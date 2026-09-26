@@ -484,6 +484,21 @@ loads through `spring_map::baked::read_baked_map` with no archive / mlua /
 SMT-tile dependencies. The runtime now prefers a `.kpmap` over the source
 `.sd7` of the same stem — see `dedupe_prefer_baked` and `load_map_dispatch`.
 
+v4 (`kpmapv4\0`) appends `Option<LuaCompositing>` (Hex Farm's skin atlas);
+v1-v3 still load. Re-bake `Hex_Farm_8` after upgrading — an old bake
+loads without the atlas and draws no towers.
+
+Hex Farm 8 no longer replays a captured gadget run: `spring_map::hexfarm`
+ports `HexFarm8.lua` (layout, start positions, heightmap/terrain writers,
+dynamic mode) and runs per match; `map_events::hex_farm` is the engine
+glue and renderer. Known deviations: `math.random` stream differs (own
+RNG); no metal map / air SmoothMesh; startPosType 2/3 (`GoHideAllEmpty`)
+not ported (KP uses fixed); vents parked in the sky before frame 25 are
+simply absent; tower ownership (team-coloured games) is polled (nearest
+finished ≥5×5 building) rather than event-driven; animations interpolate
+between sim frames. Open: the attract demo still loses some units to the
+void early on (to confirm after the void-impassable nav fix).
+
 Texture is currently raw RGBA, ~16 MB for a 2k² map. PNG/DXT compression is
 deferred until §8.2 actually requires it (file size only matters when we ship
 over HTTP).

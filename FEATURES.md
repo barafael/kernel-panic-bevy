@@ -18,6 +18,31 @@ read the resulting state.
   reflect map-script edits, meaning some maps change shape during load
   (Lua heightmap gadgets).
 - The sky is uniform black (no skybox).
+- **Hex Farm 8** is generated anew every match, like the original's
+  Lua gadget: a random lattice of hexagonal towers (random tower size,
+  spacing, bridge width/slope, lattice angle and boundary shape —
+  circle, hexagon, star, rectangle, losange or triangle) joined by
+  bridges, standing in a black void (no ground is drawn). Towers wear
+  the "Digital" skin: hex-tiled tops (a green datavent emblem on vent
+  towers) and red-circuit walls fading to black; one match in five the
+  towers are greyscale, tinted with the colour of the side whose big
+  building stands on them. Each side starts on its own tower; only the
+  starting towers exist at first.
+  - Standing on a tower makes the neighbouring towers rise out of the
+    void over 10 s (top sliding up, fading in); a rising tower nobody
+    stands next to sinks back. Once two neighbouring towers stand, the
+    bridge between them swings up over 5 s. Datavents appear on risen
+    vent towers.
+  - Every explosion wears down the tower or bridge it hits; after
+    1000× a typical unit's health, it sinks (a tower takes its bridges
+    down with it) and its datavent vanishes. Sunk polygons are rebuilt
+    by building or producing units on a neighbouring tower (1000× a
+    typical build time of work). A "NN%" label over the polygon shows
+    the damage (red→yellow) or rebuild progress (cyan→green).
+  - Ground units can't path or be pushed into the void; any that end
+    up there (the ground sank under them) are pushed back onto a nearby
+    tower or bridge, or self-destruct ("fell into the void").
+  - The minimap shows the standing towers, bridges and vents.
 - The entire map is rendered every frame — no fog-of-war hides any
   region.
 - **Geovents ("datavents")** spawn animated streams of rising "0/1"
