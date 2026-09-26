@@ -26,10 +26,13 @@ read the resulting state.
   geovent emits about 18 puffs per second; each puff lives ~1.7–1.9 s
   while it drifts upward, grows, and fades to nothing.
 - Three faction homebases (System=Kernel, Hacker=Hole, Network=
-  Stationary Connection) are possible. A toml file read on startup
-  contains info about which player is which faction. The homebases are
-  then placed on the map's start positions. Right now, there are only
-  AI players. Player names are in the toml.
+  Carrier) are possible. The skirmish menu picks your faction, the
+  enemy faction, the grouping (Duel = 1 AI, Outgunned = 2–5 allied AI
+  seats) and the difficulty. Seat *i* gets its side's homebase on the
+  map's *i*-th start position (upstream `game_spawn.lua`); seats past
+  the map's start positions are spread on a ring around the centre.
+- Friend-or-foe is by ally team only, so mirror matches (System vs
+  System) fight normally.
 - The game loads one map at startup and never switches maps. To play
   a different map you have to close the game and reopen it.
 
