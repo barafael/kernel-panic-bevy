@@ -114,71 +114,45 @@ pub struct FactoryPieces {
     pub pad: Option<usize>,
 }
 
-/// Per-faction starting entry: the team slot, faction tag, and the
-/// homebase kind to plant at the map's declared start position.
-struct FactionRoster {
-    faction: Faction,
-    homebase: UnitKind,
-}
-
 /// Margin from the map edge when clamping a homebase's start position.
 /// Keeps a Kernel/Hole/Carrier footprint clear of the world boundary
 /// even when the map's declared start position sits right on it.
 const HOMEBASE_EDGE_MARGIN: f32 = 100.0;
 
-/// Sandbox mode roster: only the three homebases, each on its own team
-/// (and faction), all human-controllable. Different teams + factions
-/// means [`is_friendly`](super::super::components::is_friendly) returns
-/// false across pairs, so units produced by these bases will engage on
-/// sight as enemies.
-const ROSTERS: [FactionRoster; 3] = [
-    FactionRoster {
-        faction: Faction::System,
-        homebase: UnitKind::Kernel,
-    },
-    FactionRoster {
-        faction: Faction::Hacker,
-        homebase: UnitKind::Hole,
-    },
-    FactionRoster {
-        faction: Faction::Network,
-        homebase: UnitKind::Carrier,
-    },
-];
-
-/// Spawn one homebase per faction at the map's declared start position.
-/// No datavent buildings, no mobile-unit clusters — anything past the
-/// three bases comes from in-game production.
-pub fn spawn_homebases(heightmap: &Heightmap, map_info: &MapInfo, ctx: &mut SpawnContext) {
+/// Spawn one homebase per seat of the match, like upstream
+/// `game_spawn.lua`: seat `i` takes the map's `i`-th start position and
+/// gets its side's start unit (System → Kernel, Hacker → Hole,
+/// Network → Carrier) on the seat's ally team. Seats beyond the map's
+/// declared start positions fall back to a ring around the map centre.
+pub fn spawn_homebases(
+    heightmap: &Heightmap,
+    map_info: &MapInfo,
+    players: &[crate::game_setup::PlayerSpec],
+    ctx: &mut SpawnContext,
+) {
     let (world_w, world_d) = heightmap.world_size();
     let cx = world_w * 0.5;
     let cz = world_d * 0.5;
     let radius = world_w.min(world_d) * 0.30;
-    let fallback_positions = [
-        (cx + radius, cz),
-        (cx - radius * 0.5, cz - radius * 0.866),
-        (cx - radius * 0.5, cz + radius * 0.866),
-    ];
+    let seats = players.len().max(1) as f32;
 
-    for (i, roster) in ROSTERS.iter().enumerate() {
-        let team = i as u8;
+    for (i, seat) in players.iter().enumerate() {
         let (fx, fz) = map_info
             .start_positions
             .get(i)
             .map(|sp| (sp.x, sp.z))
-            .unwrap_or(fallback_positions[i]);
+            .unwrap_or_else(|| {
+                let theta = std::f32::consts::TAU * i as f32 / seats;
+                (cx + radius * theta.cos(), cz + radius * theta.sin())
+            });
         let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
         let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
         let home_pos = heightmap.place(fx, fz);
 
-        spawn_unit(roster.homebase, roster.faction, team, home_pos, ctx);
+        spawn_unit(seat.faction.homebase(), seat.faction, seat.team, home_pos, ctx);
     }
 
-    info!(
-        "Spawned starter roster: {} homebases across {} factions",
-        ROSTERS.len(),
-        ROSTERS.len(),
-    );
+    info!("Spawned {} homebases", players.len());
 }
 
 /// Showcase mode: spawn exactly one homebase for `faction` on team 0 at

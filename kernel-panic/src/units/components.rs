@@ -143,17 +143,12 @@ pub struct UnitStats {
     pub no_chase_vtol: bool,
 }
 
-/// Two units count as friendly when they share a team *or* a faction.
-/// In normal games teams and factions align 1:1 so this reduces to a
-/// team comparison; the faction-share path keeps mixed-faction sandbox
-/// setups (everyone on team 0) from shooting each other.
-pub fn is_friendly(
-    unit_team: u8,
-    unit_faction: Faction,
-    other_team: u8,
-    other_faction: Faction,
-) -> bool {
-    unit_team == other_team || unit_faction == other_faction
+/// Two units count as friendly when they share a team. `TeamId` is the
+/// ally team (upstream's allyteam): every seat the menu places on the
+/// same side shares it, so mirror matches (System vs System) fight and
+/// Outgunned's AI seats cooperate.
+pub fn is_friendly(unit_team: u8, other_team: u8) -> bool {
+    unit_team == other_team
 }
 
 /// Invisible child mesh used as a click target for unit selection.

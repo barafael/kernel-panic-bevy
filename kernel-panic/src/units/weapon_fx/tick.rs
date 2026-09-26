@@ -709,8 +709,8 @@ fn broad_phase_volume_hit(
         if Some(entry.entity) == skip_target {
             return;
         }
-        if let Some((atk_team, atk_faction)) = attacker_info
-            && is_friendly(entry.team, entry.faction, atk_team.0, *atk_faction)
+        if let Some((atk_team, _)) = attacker_info
+            && is_friendly(entry.team, atk_team.0)
         {
             return;
         }
@@ -1222,12 +1222,11 @@ mod tests {
             (intended, Vec3::new(0.0, 0.0, 100.0), 1u8, Faction::Hacker),
         ];
         let mut spatial = app.world_mut().resource_mut::<SpatialIndex>();
-        for (entity, pos, team, faction) in entries {
+        for (entity, pos, team, _) in entries {
             spatial.insert_for_test(SpatialEntry {
                 entity,
                 pos,
                 team,
-                faction,
                 kind: UnitKind::Bit,
                 hp_positive: true,
                 is_flying: false,

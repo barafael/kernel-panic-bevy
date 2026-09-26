@@ -23,11 +23,9 @@ pub enum AppState {
 /// One seat in the match.
 #[derive(Debug, Clone)]
 pub struct PlayerSpec {
-    #[allow(dead_code)]
     pub faction: Faction,
     /// Ally team. Players sharing a team are friendly (the local player
     /// is always team 0).
-    #[allow(dead_code)]
     pub team: u8,
     /// AI seats never run the local input path; reserved for future
     /// ally support (an AI seat on the local team).
@@ -42,12 +40,9 @@ pub struct GameSetup {
     #[allow(dead_code)]
     pub map: String,
     /// Player 0 is the local player (team 0); the rest are AI seats.
-    #[allow(dead_code)]
     pub players: Vec<PlayerSpec>,
     /// 1 Easy … 4 Extreme. Drives the AI fairness slack (`AiDifficulty`
     /// mirrors it at match start); enemy count comes from the grouping.
-    /// (Not yet consumed at runtime — kept as part of the match spec.)
-    #[allow(dead_code)]
     pub difficulty: u8,
     /// Menu attract-mode demo: no homebases, no win/lose — the menu's
     /// demo director spawns the cast instead (`ui::menu::demo_director`).

@@ -322,7 +322,6 @@ pub fn process_command_fire(
             apply_firewall(
                 event.target,
                 team.0,
-                *faction,
                 &protect_targets,
                 &mut commands,
             );
@@ -469,13 +468,12 @@ fn fire_minelauncher(
 fn apply_firewall(
     center: Vec3,
     caster_team: u8,
-    caster_faction: Faction,
     targets: &Query<(Entity, &TeamId, &Faction, &GlobalTransform), With<Health>>,
     commands: &mut Commands,
 ) {
     let radius_sq = FIREWALL_RADIUS * FIREWALL_RADIUS;
-    for (entity, team, faction, gtf) in targets.iter() {
-        if !crate::units::components::is_friendly(team.0, *faction, caster_team, caster_faction) {
+    for (entity, team, _, gtf) in targets.iter() {
+        if !crate::units::components::is_friendly(team.0, caster_team) {
             continue;
         }
         if gtf.translation().distance_squared(center) > radius_sq {
@@ -544,12 +542,7 @@ pub fn tick_area_denial(
 
         hits.clear();
         spatial.query_radius(zone.center, zone.radius, |candidate| {
-            let friendly = crate::units::components::is_friendly(
-                candidate.team,
-                candidate.faction,
-                zone.owner_team,
-                zone.owner_faction,
-            );
+            let friendly = crate::units::components::is_friendly(candidate.team, zone.owner_team);
             if friendly && !zone.damage_friendly {
                 return;
             }

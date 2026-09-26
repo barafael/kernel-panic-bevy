@@ -530,7 +530,7 @@ fn trigger_set_target_click(
     selected_q: Query<(Entity, &UnitType, &TeamId, &Faction), With<Selected>>,
     unit_root_q: Query<Entity, With<UnitType>>,
     parent_q: Query<&ChildOf>,
-    unit_info_q: Query<(&TeamId, &Faction)>,
+    unit_info_q: Query<&TeamId>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
@@ -548,17 +548,14 @@ fn trigger_set_target_click(
     };
     // Manual fire must only ever designate hostiles — the forced-target
     // combat path bypasses the auto-targeter's friend filters.
-    let Ok((t_team, t_faction)) = unit_info_q.get(target) else {
+    let Ok(t_team) = unit_info_q.get(target) else {
         return;
     };
-    let Some((sel_team, sel_faction)) = selected_q
-        .iter()
-        .next()
-        .map(|(_, _, team, faction)| (team.0, *faction))
+    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team, _)| team.0)
     else {
         return;
     };
-    if is_friendly(sel_team, sel_faction, t_team.0, *t_faction) {
+    if is_friendly(sel_team, t_team.0) {
         return;
     }
     for (entity, unit, _, _) in &selected_q {
@@ -746,7 +743,7 @@ fn trigger_guard_click(
     selected_q: Query<(Entity, &UnitType, &TeamId, &Faction), With<Selected>>,
     unit_root_q: Query<Entity, With<UnitType>>,
     parent_q: Query<&ChildOf>,
-    unit_info_q: Query<(&TeamId, &Faction)>,
+    unit_info_q: Query<&TeamId>,
     target_gtf_q: Query<&GlobalTransform>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
@@ -762,18 +759,15 @@ fn trigger_guard_click(
     let Some(target) = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q) else {
         return;
     };
-    let Ok((t_team, t_faction)) = unit_info_q.get(target) else {
+    let Ok(t_team) = unit_info_q.get(target) else {
         return;
     };
     // Guarding makes sense only on a friendly unit.
-    let Some((sel_team, sel_faction)) = selected_q
-        .iter()
-        .next()
-        .map(|(_, _, team, faction)| (team.0, *faction))
+    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team, _)| team.0)
     else {
         return;
     };
-    if !is_friendly(sel_team, sel_faction, t_team.0, *t_faction) {
+    if !is_friendly(sel_team, t_team.0) {
         return;
     }
 

@@ -188,9 +188,9 @@ fn resolve_context_cursor(
     }
 
     match hovered.iter().next() {
-        Some((hover_team, hover_faction)) => {
+        Some((hover_team, _)) => {
             let is_enemy = selection_team_faction
-                .is_some_and(|(t, f)| !is_friendly(t, f, hover_team.0, *hover_faction));
+                .is_some_and(|(t, _)| !is_friendly(t, hover_team.0));
             if is_enemy {
                 if has_weapon {
                     request.set(CursorKind::Attack, 0);

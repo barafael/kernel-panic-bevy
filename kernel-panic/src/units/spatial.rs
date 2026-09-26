@@ -8,7 +8,7 @@
 //! (~256 elmos) which matches the engagement distances encoded in
 //! Kernel Panic's weapon ranges.
 //!
-//! The snapshot carries just enough per-entity state (team, faction,
+//! The snapshot carries just enough per-entity state (team,
 //! hp-is-positive) that the hot loops in `combat_system` and `apply_damage`
 //! can skip a second `Query::get` per candidate.
 //!
@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use super::combat::Dying;
-use super::components::{Faction, Health, TeamId, UnitType};
+use super::components::{Health, TeamId, UnitType};
 use super::content::definitions::UnitKind;
 use super::lifecycle::spawning::Emerging;
 
@@ -38,7 +38,6 @@ pub struct SpatialEntry {
     pub entity: Entity,
     pub pos: Vec3,
     pub team: u8,
-    pub faction: Faction,
     pub kind: UnitKind,
     pub hp_positive: bool,
     /// Mirrored from the FBI `canFly=1` flag so ground weapons can cheaply
@@ -113,7 +112,6 @@ pub fn rebuild_spatial_index(
             &UnitType,
             &super::components::UnitStats,
             &TeamId,
-            &Faction,
             &GlobalTransform,
             &Health,
         ),
@@ -121,12 +119,11 @@ pub fn rebuild_spatial_index(
     >,
 ) {
     index.clear();
-    for (entity, unit_type, stats, team, faction, gtf, health) in &units {
+    for (entity, unit_type, stats, team, gtf, health) in &units {
         index.push(SpatialEntry {
             entity,
             pos: gtf.translation(),
             team: team.0,
-            faction: *faction,
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
             is_flying: stats.can_fly,
@@ -143,7 +140,6 @@ mod tests {
             entity,
             pos,
             team: 0,
-            faction: Faction::System,
             kind: UnitKind::Bit,
             hp_positive: true,
             is_flying: false,

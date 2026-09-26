@@ -209,8 +209,8 @@ fn handle_right_click(
                             .get(target)
                             .ok()
                             .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
-                            .is_some_and(|((t_team, t_faction), (m_team, m_faction))| {
-                                !is_friendly(m_team.0, *m_faction, t_team.0, *t_faction)
+                            .is_some_and(|((t_team, _), (m_team, _))| {
+                                !is_friendly(m_team.0, t_team.0)
                             })
                     },
                 );

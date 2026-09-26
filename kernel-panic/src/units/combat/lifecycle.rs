@@ -148,7 +148,7 @@ pub fn tick_kamikaze(
     spatial: Res<SpatialIndex>,
     mut damage_queue: ResMut<DamageQueue>,
 ) {
-    for (entity, unit, team, faction, gtf) in &bombs {
+    for (entity, unit, team, _, gtf) in &bombs {
         let trigger_radius = unit_registry.kamikaze_distance(unit.0);
         if trigger_radius <= 0.0 {
             continue;
@@ -160,7 +160,7 @@ pub fn tick_kamikaze(
             if triggered || !candidate.hp_positive {
                 return;
             }
-            let enemy = candidate.team != team.0 && candidate.faction != *faction;
+            let enemy = candidate.team != team.0;
             if enemy && candidate.pos.distance_squared(self_pos) <= trigger_sq {
                 triggered = true;
             }

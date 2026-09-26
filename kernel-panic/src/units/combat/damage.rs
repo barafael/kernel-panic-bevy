@@ -453,13 +453,8 @@ pub fn apply_damage(
                     return;
                 }
                 if avoid_friendly
-                    && let Some((_, a_faction, a_team)) = attacker_info
-                    && crate::units::components::is_friendly(
-                        candidate.team,
-                        candidate.faction,
-                        a_team.0,
-                        *a_faction,
-                    )
+                    && let Some((_, _, a_team)) = attacker_info
+                    && crate::units::components::is_friendly(candidate.team, a_team.0)
                 {
                     return;
                 }

@@ -18,7 +18,7 @@
 use bevy::prelude::*;
 
 use super::assets::animation::{MuzzlePiece, UnitAnimator};
-use super::components::{Faction, TeamId, UnitStats, UnitType};
+use super::components::{TeamId, UnitStats, UnitType};
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
 use super::lifecycle::script_triggers::JustFired;
@@ -223,7 +223,6 @@ pub fn combat_system(
             Entity,
             &UnitType,
             &UnitStats,
-            &Faction,
             &TeamId,
             &GlobalTransform,
             Option<&Deployable>,
@@ -279,7 +278,6 @@ pub fn combat_system(
         entity,
         unit_type,
         stats,
-        attacker_faction,
         attacker_team,
         attacker_gtf,
         deployable,
@@ -383,7 +381,7 @@ pub fn combat_system(
                 if !candidate.hp_positive {
                     return;
                 }
-                if candidate.team == attacker_team.0 || candidate.faction == *attacker_faction {
+                if candidate.team == attacker_team.0 {
                     return;
                 }
                 if skip_flying && candidate.is_flying {
@@ -951,7 +949,7 @@ pub fn attack_target_system(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::components::{TeamId, UnitStats};
+    use crate::units::components::{Faction, TeamId, UnitStats};
     use crate::units::content::definitions::UnitKind;
     use crate::units::spatial::{SpatialEntry, SpatialIndex};
     use bevy::ecs::system::RunSystemOnce;
@@ -1049,7 +1047,6 @@ mod tests {
                 entity: socket,
                 pos: Vec3::new(100.0, 0.0, 0.0),
                 team: 1,
-                faction: Faction::Hacker,
                 kind: UnitKind::Socket,
                 hp_positive: true,
                 is_flying: false,
@@ -1091,7 +1088,6 @@ mod tests {
                 entity: enemy_bit,
                 pos: Vec3::new(100.0, 0.0, 0.0),
                 team: 1,
-                faction: Faction::Hacker,
                 kind: UnitKind::Bit,
                 hp_positive: true,
                 is_flying: false,

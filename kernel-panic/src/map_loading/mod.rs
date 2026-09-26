@@ -218,9 +218,15 @@ fn prepare_game_entry(world: &mut World) {
     use crate::game_setup::GameOverDismissed;
     use crate::units::lifecycle::game_over::GameState;
 
-    // The local player is always seat 0 / team 0 in the setups the menu
-    // builds.
-    world.resource_mut::<crate::units::player::LocalTeam>().0 = 0;
+    // Seat 0 is the local player; its ally team drives input, the
+    // game-over check and the fog/cloak perspective. The difficulty
+    // the menu picked drives the AI.
+    let setup = world.resource::<GameSetup>().clone();
+    let local_team = setup.players.first().map_or(0, |p| p.team);
+    world.resource_mut::<crate::units::player::LocalTeam>().0 = local_team;
+    world.resource_mut::<crate::units::mechanics::cloak::PlayerTeam>().0 =
+        crate::units::components::TeamId(local_team);
+    world.insert_resource(crate::game_setup::AiDifficulty(setup.difficulty));
 
     // Fresh in-game state: `Playing`, game-over panel re-armed.
     world
@@ -229,7 +235,6 @@ fn prepare_game_entry(world: &mut World) {
     world.resource_mut::<GameOverDismissed>().0 = false;
 
     // Resolve the setup's map name against the catalog.
-    let setup = world.resource::<GameSetup>().clone();
     let catalog = world.resource::<MapCatalog>().0.clone();
     let path = resolve_catalog_path(&setup.map, &catalog);
     match path {
@@ -782,7 +787,7 @@ fn spawn_map_world(
                 .insert_resource(crate::showcase::ShowcaseDirector::new(faction));
             info!("  Showcase({:?}) — skipping full roster", faction);
         } else {
-            spawn_homebases(&heightmap, map_info, ctx);
+            spawn_homebases(&heightmap, map_info, &setup.players, ctx);
             // Clear any leftover showcase director from a previous game.
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();

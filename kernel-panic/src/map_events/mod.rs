@@ -357,11 +357,8 @@ fn fire_nibbles(
     }
 }
 
-/// Synthetic team id far from any player team. Eruption units share a
-/// faction with one of the players (and `is_friendly` returns true on
-/// faction match), so a System player will see eruption-spawned bad
-/// blocks as allied — but bad blocks are inert walls, mines auto-target
-/// non-allies, and the asymmetry evens out across the three factions.
+/// Synthetic team id far from any player team: eruption spawns are a
+/// hostile neutral party that every side can (and will) shoot.
 const ERUPTION_TEAM: u8 = 99;
 
 /// Pick a random point on the X-Z plane in the annulus
