@@ -82,13 +82,71 @@ impl Default for GameSetup {
 /// and the player only watches.
 pub const SPECTATOR_TEAM: u8 = u8::MAX;
 
+/// Developer hooks from environment variables, read once at startup
+/// ([`DevOptions::from_env`]; all off on wasm, which has no env).
+#[derive(Resource, Debug, Clone, Default)]
+pub struct DevOptions {
+    /// `KP_DEMO_FACTIONS=Network,System`: the attract-mode seats'
+    /// factions, one seat per name (two or more) — e.g. to watch a
+    /// specific unit's weapons in `KP_MENU_SHOTS` visual checks.
+    pub demo_factions: Option<Vec<Faction>>,
+    /// `KP_DEMO_MAP=<stem>`: the attract-mode map (for `KP_MENU_SHOTS`
+    /// visual checks of one map).
+    pub demo_map: Option<String>,
+    /// `KP_MENU_SHOTS=<dir>`: screenshot every launch-menu page there,
+    /// then quit (`ui::menu_shots`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub menu_shots: Option<std::path::PathBuf>,
+    /// `KP_MENU_SHOTS_WARMUP=<frames>` of demo before the first shot.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub menu_shots_warmup: Option<u32>,
+    /// `KP_GAME_SHOTS=<dir>`: screenshot the in-game HUD there, then
+    /// quit (`ui::game_shots`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub game_shots: Option<std::path::PathBuf>,
+    /// `KP_GAME_SHOTS_MAP=<stem>` for the HUD shots' skirmish.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub game_shots_map: Option<String>,
+}
+
+impl DevOptions {
+    #[cfg(target_arch = "wasm32")]
+    pub fn from_env() -> Self {
+        Self::default()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_env() -> Self {
+        let var = |name: &str| std::env::var(name).ok();
+        let demo_factions = var("KP_DEMO_FACTIONS").and_then(|list| {
+            let pinned: Vec<Faction> = list
+                .split(',')
+                .filter_map(|name| {
+                    Faction::ALL
+                        .into_iter()
+                        .find(|f| format!("{f:?}").eq_ignore_ascii_case(name.trim()))
+                })
+                .collect();
+            (pinned.len() >= 2).then_some(pinned)
+        });
+        Self {
+            demo_factions,
+            demo_map: var("KP_DEMO_MAP"),
+            menu_shots: var("KP_MENU_SHOTS").map(Into::into),
+            menu_shots_warmup: var("KP_MENU_SHOTS_WARMUP").and_then(|w| w.parse().ok()),
+            game_shots: var("KP_GAME_SHOTS").map(Into::into),
+            game_shots_map: var("KP_GAME_SHOTS_MAP"),
+        }
+    }
+}
+
 /// The main-menu attract-mode setup: a random all-AI skirmish on a
 /// weighted-random map — 2 to 4 seats of random factions, each on its
 /// own team, played by the AI while the player spectates. The menu's
 /// demo director restarts it with a fresh roll once it's decided.
-pub fn demo_setup() -> GameSetup {
+/// [`DevOptions`] can pin the factions and the map.
+pub fn demo_setup(dev: &DevOptions) -> GameSetup {
     let seats = 2 + (clock_f64() * 3.0) as u8;
-    #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut players: Vec<PlayerSpec> = (0..seats)
         .map(|i| PlayerSpec {
             faction: Faction::ALL[(clock_f64() * 3.0) as usize % 3],
@@ -96,37 +154,18 @@ pub fn demo_setup() -> GameSetup {
             ai: true,
         })
         .collect();
-    // Dev override: `KP_DEMO_FACTIONS=Network,System` pins the seats'
-    // factions (one seat per name) — e.g. to watch a specific unit's
-    // weapons in `KP_MENU_SHOTS` visual checks.
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Ok(list) = std::env::var("KP_DEMO_FACTIONS") {
-        let pinned: Vec<Faction> = list
-            .split(',')
-            .filter_map(|name| {
-                Faction::ALL
-                    .into_iter()
-                    .find(|f| format!("{f:?}").eq_ignore_ascii_case(name.trim()))
+    if let Some(pinned) = &dev.demo_factions {
+        players = pinned
+            .iter()
+            .enumerate()
+            .map(|(i, &faction)| PlayerSpec {
+                faction,
+                team: 1 + i as u8,
+                ai: true,
             })
             .collect();
-        if pinned.len() >= 2 {
-            players = pinned
-                .into_iter()
-                .enumerate()
-                .map(|(i, faction)| PlayerSpec {
-                    faction,
-                    team: 1 + i as u8,
-                    ai: true,
-                })
-                .collect();
-        }
     }
-    // Dev override: `KP_DEMO_MAP=<stem>` pins the attract-mode map (for
-    // `KP_MENU_SHOTS` visual checks of one map). Not on wasm (no env).
-    #[cfg(not(target_arch = "wasm32"))]
-    let map = std::env::var("KP_DEMO_MAP").unwrap_or_else(|_| random_weighted_map());
-    #[cfg(target_arch = "wasm32")]
-    let map = random_weighted_map();
+    let map = dev.demo_map.clone().unwrap_or_else(random_weighted_map);
     GameSetup {
         map,
         players,

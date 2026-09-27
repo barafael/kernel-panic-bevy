@@ -1,15 +1,17 @@
 //! Dev tool: screenshot every launch-menu page, then quit.
 //!
 //! Set `KP_MENU_SHOTS=<dir>` to enable (and optionally
-//! `KP_MENU_SHOTS_WARMUP=<frames>` to let the demo play longer first).
+//! `KP_MENU_SHOTS_WARMUP=<frames>` to let the demo play longer first;
+//! both read into [`DevOptions`] at startup).
 //! After the attract-mode demo has had time to load, the tool flips through each [`MenuPage`], saves
 //! `<dir>/<page>.png`, and exits — a quick way to review menu layout
 //! without clicking through by hand. Not compiled for wasm (no disk).
 
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
 use super::menu::MenuPage;
+use super::save_screenshot;
+use crate::game_setup::DevOptions;
 
 /// Default frames to let the demo world load before the first shot.
 const WARMUP_FRAMES: u32 = 600;
@@ -30,12 +32,12 @@ pub struct MenuShotsPlugin;
 
 impl Plugin for MenuShotsPlugin {
     fn build(&self, app: &mut App) {
-        if let Ok(dir) = std::env::var("KP_MENU_SHOTS") {
-            let warmup = std::env::var("KP_MENU_SHOTS_WARMUP")
-                .ok()
-                .and_then(|w| w.parse().ok())
-                .unwrap_or(WARMUP_FRAMES);
-            app.insert_resource(ShotDir(dir.into(), warmup))
+        let Some(dev) = app.world().get_resource::<DevOptions>() else {
+            return;
+        };
+        if let Some(dir) = dev.menu_shots.clone() {
+            let warmup = dev.menu_shots_warmup.unwrap_or(WARMUP_FRAMES);
+            app.insert_resource(ShotDir(dir, warmup))
                 .add_systems(Update, take_menu_shots);
         }
     }
@@ -61,10 +63,7 @@ fn take_menu_shots(
             if phase == 0 {
                 *page = *p;
             } else if phase == SETTLE_FRAMES - 1 {
-                let path = dir.0.join(format!("{name}.png"));
-                commands
-                    .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(path));
+                save_screenshot(&mut commands, dir.0.join(format!("{name}.png")));
             }
         }
         // One extra settle period so the last save lands before exit.

@@ -15,19 +15,18 @@
 //! skewed parallelogram; `bevy_ui` has no transforms on nodes, so panels
 //! are bevelled rectangles with the same colour system instead.
 //!
-//! Input follows the original's model: clicks go through `bevy_picking`
-//! observers (`Pointer<Click>`), and actions are funnelled through one
-//! [`MenuAction`] message so all state changes live in
-//! [`handle_menu_actions`]. The game is never paused by the Esc menu.
+//! Input: buttons are hit-tested against the cursor in
+//! [`mouse_menu_input`] and driven from the keyboard by
+//! [`keyboard_menu_nav`]; both funnel into one [`MenuAction`] message so
+//! all state changes live in [`handle_menu_actions`]. The game is never
+//! paused by the Esc menu.
 
-use bevy::ecs::observer::On;
-use bevy::picking::events::{Click, Out, Over};
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
 use crate::game_setup::{
-    build_setup, describe_setup, demo_setup, showcase_setup, AppState, GameOverDismissed,
-    Grouping, RunGame, SkirmishConfig,
+    build_setup, describe_setup, demo_setup, showcase_setup, AppState, DevOptions,
+    GameOverDismissed, Grouping, RunGame, SkirmishConfig,
 };
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
@@ -110,7 +109,7 @@ struct ReadmeScroll(usize);
 struct MenuFocus {
     entity: Option<Entity>,
     /// Which input drives the highlight. Keyboard mode paints the focused
-    /// button bright; mouse mode lets the `Over`/`Out` observers paint.
+    /// button bright; mouse mode leaves it to [`mouse_menu_input`]'s hover.
     mode: InputMode,
 }
 
@@ -119,15 +118,6 @@ enum InputMode {
     #[default]
     Mouse,
     Keyboard,
-}
-
-impl MenuFocus {
-    fn on_keyboard(&mut self) {
-        self.mode = InputMode::Keyboard;
-    }
-    fn on_mouse(&mut self) {
-        self.mode = InputMode::Mouse;
-    }
 }
 
 /// Marker on every menu root (launch menu, Esc overlay, game-over panel).
@@ -304,70 +294,91 @@ fn frame_border(font_size: f32) -> UiRect {
     UiRect::all(Val::Px((font_size * 0.09).max(1.0)))
 }
 
-/// A clickable frame at original coordinates (see [`anchored`]).
-/// Clicks go to the central action router.
-#[allow(clippy::too_many_arguments)]
-fn button(
-    commands: &mut Commands,
-    parent: Entity,
-    label: &str,
-    color: Color,
-    font_size: f32,
-    (x, y): (f32, f32),
-    anchor: Anchor,
-    action: MenuAction,
-) -> Entity {
-    let text = spawn_button_text(commands, label, font_size);
-    let (mut node, transform) = anchored(x, y, anchor);
-    node.padding = frame_padding(font_size);
-    node.border = frame_border(font_size);
-    node.justify_content = JustifyContent::Center;
-    let entity = commands
-        .spawn((
-            MenuButton { action, base: color },
-            node,
-            transform,
-            fill(color),
-            border(color),
-        ))
-        .id();
-    finish_button(commands, parent, entity, text)
-}
-
-/// A [`button`] for one option of a choice group (grouping,
-/// difficulty): the current pick is drawn brightened with a heavier
-/// border, so the page shows the configuration at a glance.
-#[allow(clippy::too_many_arguments)]
-fn choice_button(
-    commands: &mut Commands,
-    parent: Entity,
-    label: &str,
+/// A clickable frame at original coordinates (see [`anchored`]); clicks
+/// go to the central action router. Built with [`ButtonSpec::spawn`].
+struct ButtonSpec<'a> {
+    label: &'a str,
     color: Color,
     font_size: f32,
     pos: (f32, f32),
     anchor: Anchor,
     action: MenuAction,
+    /// Minimum width in percent of the window, so a column of frames
+    /// lines up as even boxes instead of a ragged edge.
+    min_width: Option<f32>,
+    /// The current pick of a choice group (grouping, difficulty): drawn
+    /// brightened with a heavier border, so the page shows the
+    /// configuration at a glance.
     chosen: bool,
-) -> Entity {
-    let base = if chosen { brighten(color) } else { color };
-    let e = button(commands, parent, label, base, font_size, pos, anchor, action);
-    if chosen {
-        let heavy = UiRect::all(Val::Px((font_size * 0.18).max(2.0)));
-        commands
-            .entity(e)
-            .entry::<Node>()
-            .and_modify(move |mut n| n.border = heavy);
-    }
-    e
 }
 
-/// Give a frame a minimum width (percent of the window) so a column of
-/// frames lines up as even boxes instead of a ragged edge.
-fn min_width(commands: &mut Commands, entity: Entity, pct: f32) {
-    commands
-        .entity(entity)
-        .entry::<Node>()
-        .and_modify(move |mut n| n.min_width = Val::Percent(pct));
+impl<'a> ButtonSpec<'a> {
+    fn new(
+        label: &'a str,
+        color: Color,
+        font_size: f32,
+        pos: (f32, f32),
+        anchor: Anchor,
+        action: MenuAction,
+    ) -> Self {
+        Self {
+            label,
+            color,
+            font_size,
+            pos,
+            anchor,
+            action,
+            min_width: None,
+            chosen: false,
+        }
+    }
+
+    fn min_width(self, pct: f32) -> Self {
+        Self {
+            min_width: Some(pct),
+            ..self
+        }
+    }
+
+    fn chosen(self, chosen: bool) -> Self {
+        Self { chosen, ..self }
+    }
+
+    fn spawn(self, commands: &mut Commands, parent: Entity) -> Entity {
+        let font_size = self.font_size;
+        let base = if self.chosen {
+            brighten(self.color)
+        } else {
+            self.color
+        };
+        let text = spawn_button_text(commands, self.label, font_size);
+        let (mut node, transform) = anchored(self.pos.0, self.pos.1, self.anchor);
+        node.padding = frame_padding(font_size);
+        node.border = if self.chosen {
+            UiRect::all(Val::Px((font_size * 0.18).max(2.0)))
+        } else {
+            frame_border(font_size)
+        };
+        node.justify_content = JustifyContent::Center;
+        if let Some(pct) = self.min_width {
+            node.min_width = Val::Percent(pct);
+        }
+        let entity = commands
+            .spawn((
+                MenuButton {
+                    action: self.action,
+                    base,
+                },
+                node,
+                transform,
+                fill(base),
+                border(base),
+            ))
+            .add_child(text)
+            .id();
+        commands.entity(parent).add_child(entity);
+        entity
+    }
 }
 
 fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> Entity {
@@ -388,52 +399,26 @@ fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> En
         .id()
 }
 
-/// Wire click/hover observers, attach the text, and parent to `parent`.
-fn finish_button(
+/// A centred column of `min_width` 18 % buttons stepping down from
+/// y=60 % (the quick-battle and showcase pages).
+fn centre_column<'a>(
     commands: &mut Commands,
-    parent: Entity,
-    entity: Entity,
-    text: Entity,
-) -> Entity {
-    commands.entity(entity).add_child(text);
-
-    // Click + hover hit-tested manually in `mouse_menu_input` —
-    // bevy_picking's pointer pipeline does not populate in this app's
-    // runtime, so the observers only exist for parity with the HUD.
-    commands.entity(entity).observe(
-        |click: On<Pointer<Click>>,
-         buttons: Query<&MenuButton>,
-         mut ev: MessageWriter<MenuActionMessage>| {
-            if let Ok(b) = buttons.get(click.entity) {
-                ev.write(MenuActionMessage { action: b.action });
-            }
-        },
-    );
-    commands.entity(entity).observe(
-        |over: On<Pointer<Over>>,
-         mut buttons: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>,
-         mut focus: ResMut<MenuFocus>| {
-            if let Ok((b, mut bc, mut bg)) = buttons.get_mut(over.entity) {
-                // A pointer is over a button: the mouse owns the current
-                // highlight from here on.
-                focus.on_mouse();
-                *bc = border(brighten(b.base));
-                *bg = fill(brighten(b.base));
-            }
-        },
-    );
-    commands.entity(entity).observe(
-        |out: On<Pointer<Out>>,
-         mut buttons: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>| {
-            if let Ok((b, mut bc, mut bg)) = buttons.get_mut(out.entity) {
-                *bc = border(b.base);
-                *bg = fill(b.base);
-            }
-        },
-    );
-
-    commands.entity(parent).add_child(entity);
-    entity
+    root: Entity,
+    font_size: f32,
+    entries: impl IntoIterator<Item = (&'a str, Color, MenuAction)>,
+) {
+    for (i, (name, color, action)) in entries.into_iter().enumerate() {
+        ButtonSpec::new(
+            name,
+            color,
+            font_size,
+            (0.5, 0.6 - 0.1 * i as f32),
+            Anchor::Cc,
+            action,
+        )
+        .min_width(18.0)
+        .spawn(commands, root);
+    }
 }
 
 /// Non-interactive frame (headings, description lines, text blocks).
@@ -526,6 +511,7 @@ fn handle_menu_actions(
     mut game_state: ResMut<NextState<GameState>>,
     mut run_game: MessageWriter<RunGame>,
     catalog: Res<MapCatalog>,
+    dev: Res<DevOptions>,
     mut commands: Commands,
 ) {
     for msg in ev.read() {
@@ -564,7 +550,7 @@ fn handle_menu_actions(
                 *page = MenuPage::Main;
                 // Reload the attract-mode demo behind the menu (the real
                 // match's world is torn down by the RunGame handler).
-                commands.insert_resource(demo_setup());
+                commands.insert_resource(demo_setup(&dev));
                 run_game.write(RunGame);
             }
             MenuAction::Resume => {
@@ -633,57 +619,39 @@ fn keyboard_menu_nav(
     mut colors: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>,
     mut ev: MessageWriter<MenuActionMessage>,
 ) {
-    // Build the spatially-ordered list of buttons currently on screen.
-    let mut list: Vec<(Entity, &MenuButton, f32, f32)> = Vec::new();
-    for (e, b, node) in &buttons {
-        let x = if let Val::Auto = node.left {
-            100.0 - val_percent(&node.right)
-        } else {
-            val_percent(&node.left)
-        };
-        list.push((e, b, val_percent(&node.top), x));
-    }
+    // The buttons on screen (all placed by [`anchored`]: `left`/`top`
+    // percentages), top-to-bottom, then left-to-right.
+    let mut list: Vec<(Entity, &MenuButton, f32, f32)> = buttons
+        .iter()
+        .map(|(e, b, node)| (e, b, val_percent(&node.top), val_percent(&node.left)))
+        .collect();
     if list.is_empty() {
         focus.entity = None;
         return;
     }
-    // Top-to-bottom, then left-to-right.
-    list.sort_by(|a, b| {
-        a.2.partial_cmp(&b.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
-    });
+    list.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.3.total_cmp(&b.3)));
 
     // Validate/resolve the focused index (defaults to the first button).
     let mut idx = list
         .iter()
-        .position(|(e, _, _, _)| Some(*e) == focus.entity)
+        .position(|(e, ..)| Some(*e) == focus.entity)
         .unwrap_or(0);
 
-    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    let nav_key = keys.just_pressed(KeyCode::Tab)
-        || keys.just_pressed(KeyCode::ArrowUp)
-        || keys.just_pressed(KeyCode::ArrowDown)
-        || keys.just_pressed(KeyCode::ArrowLeft)
-        || keys.just_pressed(KeyCode::ArrowRight)
-        || keys.just_pressed(KeyCode::Enter)
-        || keys.just_pressed(KeyCode::Space);
-    let confirm = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space);
-
-    if nav_key {
-        focus.on_keyboard();
-        // Movement keys: Shift+Tab or Up/Left go back, Tab/Down/Right go on.
-        if keys.just_pressed(KeyCode::Tab) && shift {
-            idx = (idx + list.len() - 1) % list.len();
-        } else if keys.just_pressed(KeyCode::Tab) {
-            idx = (idx + 1) % list.len();
-        } else if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft) {
-            idx = (idx + list.len() - 1) % list.len();
-        } else if keys.just_pressed(KeyCode::ArrowDown)
-            || keys.just_pressed(KeyCode::ArrowRight)
-        {
-            idx = (idx + 1) % list.len();
-        }
+    // Shift+Tab or Up/Left go back, Tab/Down/Right go on.
+    let shift = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let step: isize = if keys.just_pressed(KeyCode::Tab) {
+        if shift { -1 } else { 1 }
+    } else if keys.any_just_pressed([KeyCode::ArrowUp, KeyCode::ArrowLeft]) {
+        -1
+    } else if keys.any_just_pressed([KeyCode::ArrowDown, KeyCode::ArrowRight]) {
+        1
+    } else {
+        0
+    };
+    let confirm = keys.any_just_pressed([KeyCode::Enter, KeyCode::Space]);
+    if step != 0 || confirm {
+        focus.mode = InputMode::Keyboard;
+        idx = (idx as isize + step).rem_euclid(list.len() as isize) as usize;
     }
 
     focus.entity = Some(list[idx].0);
@@ -765,7 +733,7 @@ fn mouse_menu_input(
         // Entering/keeping mouse mode: the keyboard focus no longer paints.
         if focus.entity != Some(ent) {
             focus.entity = Some(ent);
-            focus.on_mouse();
+            focus.mode = InputMode::Mouse;
         }
         if mouse.just_pressed(MouseButton::Left)
             && let Ok((_, b, ..)) = buttons.get(ent)
@@ -837,7 +805,7 @@ fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_s
         } else {
             (0.54, Anchor::Lb)
         };
-        button(commands, root, name, color, menu_size, (x, y), anchor, action);
+        ButtonSpec::new(name, color, menu_size, (x, y), anchor, action).spawn(commands, root);
     }
 }
 
@@ -870,40 +838,26 @@ fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
         Anchor::Cc,
         Justify::Center,
     );
-    for (i, (name, color, faction)) in [
-        ("System", EASY_CYAN, Faction::System),
-        ("Hacker", VERY_HARD_RED, Faction::Hacker),
-        ("Network", DESC_BLUE, Faction::Network),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let e = button(
-            commands,
-            root,
-            name,
-            color,
-            page_size,
-            (0.5, 0.6 - 0.1 * i as f32),
-            Anchor::Cc,
-            MenuAction::Showcase(faction),
-        );
-        min_width(commands, e, 18.0);
-    }
-    back_button(commands, root, page_size, (0.5, 0.2), MenuPage::Main);
+    centre_column(
+        commands,
+        root,
+        page_size,
+        [
+            ("System", EASY_CYAN, MenuAction::Showcase(Faction::System)),
+            (
+                "Hacker",
+                VERY_HARD_RED,
+                MenuAction::Showcase(Faction::Hacker),
+            ),
+            ("Network", DESC_BLUE, MenuAction::Showcase(Faction::Network)),
+        ],
+    );
+    back_button(page_size, (0.5, 0.2), MenuPage::Main).spawn(commands, root);
 }
 
 /// Blue `Back` plate, centred on `pos`.
-fn back_button(
-    commands: &mut Commands,
-    root: Entity,
-    font_size: f32,
-    pos: (f32, f32),
-    to: MenuPage,
-) -> Entity {
-    button(
-        commands,
-        root,
+fn back_button(font_size: f32, pos: (f32, f32), to: MenuPage) -> ButtonSpec<'static> {
+    ButtonSpec::new(
         "Back",
         NAV_BLUE,
         font_size,
@@ -917,39 +871,28 @@ fn back_button(
 /// buttons that each start a random-map Duel at once. The heading
 /// plate toggles to the advanced page, like the original's.
 fn quick_skirmish_page(commands: &mut Commands, root: Entity, page_size: f32) {
-    let heading = button(
-        commands,
-        root,
+    ButtonSpec::new(
         "Kernel Panic!\nSingle Player",
         NAV_BLUE,
         page_size,
         (0.5, 0.8),
         Anchor::Cc,
         MenuAction::Goto(MenuPage::AdvancedSkirmish),
+    )
+    .min_width(24.0)
+    .spawn(commands, root);
+    centre_column(
+        commands,
+        root,
+        page_size,
+        [
+            ("Easy", MEDIUM_GREEN, MenuAction::QuickStart(1)),
+            ("Medium", HARD_YELLOW, MenuAction::QuickStart(2)),
+            ("Hard", EXTREME_ORANGE, MenuAction::QuickStart(3)),
+            ("Very Hard", VERY_HARD_RED, MenuAction::QuickStart(4)),
+        ],
     );
-    min_width(commands, heading, 24.0);
-    for (i, (name, color, difficulty)) in [
-        ("Easy", MEDIUM_GREEN, 1),
-        ("Medium", HARD_YELLOW, 2),
-        ("Hard", EXTREME_ORANGE, 3),
-        ("Very Hard", VERY_HARD_RED, 4),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let e = button(
-            commands,
-            root,
-            name,
-            color,
-            page_size,
-            (0.5, 0.6 - 0.1 * i as f32),
-            Anchor::Cc,
-            MenuAction::QuickStart(difficulty),
-        );
-        min_width(commands, e, 18.0);
-    }
-    back_button(commands, root, page_size, (0.5, 0.2), MenuPage::Main);
+    back_button(page_size, (0.5, 0.2), MenuPage::Main).spawn(commands, root);
     label(
         commands,
         root,
@@ -973,40 +916,39 @@ fn advanced_skirmish_page(
     config: &SkirmishConfig,
     map_names: &[String],
 ) {
-    let heading = button(
-        commands,
-        root,
+    ButtonSpec::new(
         "Kernel Panic!\nSingle Player",
         NAV_BLUE,
         page_size,
         (0.5, 0.9),
         Anchor::Cc,
         MenuAction::Goto(MenuPage::QuickSkirmish),
-    );
-    min_width(commands, heading, 24.0);
+    )
+    .min_width(24.0)
+    .spawn(commands, root);
 
     let map_name = match config.map {
         Some(i) => map_names.get(i).map(String::as_str).unwrap_or("random"),
         None => "random",
     };
-    let map = button(
-        commands,
-        root,
+    ButtonSpec::new(
         &format!("Map: {map_name}"),
         MAP_GREEN,
         page_size,
         (0.5, 0.75),
         Anchor::Cc,
         MenuAction::Goto(MenuPage::MapList),
-    );
-    min_width(commands, map, 24.0);
+    )
+    .min_width(24.0)
+    .spawn(commands, root);
 
     for (text, y, action) in [
         (format!("You:\n{:?}", config.your_faction), 0.6, MenuAction::CycleYourFaction),
         (format!("Enemy:\n{:?}", config.enemy_faction), 0.45, MenuAction::CycleEnemyFaction),
     ] {
-        let e = button(commands, root, &text, EASY_CYAN, page_size, (0.5, y), Anchor::Cc, action);
-        min_width(commands, e, 24.0);
+        ButtonSpec::new(&text, EASY_CYAN, page_size, (0.5, y), Anchor::Cc, action)
+            .min_width(24.0)
+            .spawn(commands, root);
     }
 
     // Grouping presets: left column. (Spectate / Team Game / Heroic are
@@ -1018,18 +960,17 @@ fn advanced_skirmish_page(
     .into_iter()
     .enumerate()
     {
-        let e = choice_button(
-            commands,
-            root,
+        ButtonSpec::new(
             g.label(),
             color,
             page_size,
             (0.1, 0.55 - 0.1 * i as f32),
             Anchor::Lc,
             MenuAction::SetGrouping(g),
-            config.grouping == g,
-        );
-        min_width(commands, e, 16.0);
+        )
+        .min_width(16.0)
+        .chosen(config.grouping == g)
+        .spawn(commands, root);
     }
 
     // Difficulty: right column.
@@ -1043,33 +984,32 @@ fn advanced_skirmish_page(
     .enumerate()
     {
         let difficulty = 1 + i as u8;
-        let e = choice_button(
-            commands,
-            root,
+        ButtonSpec::new(
             name,
             color,
             page_size,
             (0.9, 0.6 - 0.1 * i as f32),
             Anchor::Rc,
             MenuAction::SetDifficulty(difficulty),
-            config.difficulty == difficulty,
-        );
-        min_width(commands, e, 16.0);
+        )
+        .min_width(16.0)
+        .chosen(config.difficulty == difficulty)
+        .spawn(commands, root);
     }
 
-    let run = button(
-        commands,
-        root,
+    ButtonSpec::new(
         "Run!",
         NAV_BLUE,
         page_size,
         (0.4, 0.2),
         Anchor::Cc,
         MenuAction::StartSkirmish,
-    );
-    min_width(commands, run, 12.0);
-    let back = back_button(commands, root, page_size, (0.6, 0.2), MenuPage::Main);
-    min_width(commands, back, 12.0);
+    )
+    .min_width(12.0)
+    .spawn(commands, root);
+    back_button(page_size, (0.6, 0.2), MenuPage::Main)
+        .min_width(12.0)
+        .spawn(commands, root);
 
     label(
         commands,
@@ -1099,17 +1039,16 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
         Justify::Center,
     );
     let nav_size = list_size * 28.0 / 24.0;
-    let random = button(
-        commands,
-        root,
+    ButtonSpec::new(
         "Random map",
         TEAL,
         nav_size,
         (0.4, 0.05),
         Anchor::Cc,
         MenuAction::PickRandomMap,
-    );
-    min_width(commands, random, 16.0);
+    )
+    .min_width(16.0)
+    .spawn(commands, root);
 
     let names = catalog.names();
     let rows = names.len().div_ceil(2).max(1);
@@ -1123,20 +1062,20 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
         } else {
             (0.9, Anchor::Rc)
         };
-        let e = button(
-            commands,
-            root,
+        ButtonSpec::new(
             name,
             BUTTON_GREEN,
             list_size,
             (x, 0.85 - step * row as f32),
             anchor,
             MenuAction::PickMap(i),
-        );
-        min_width(commands, e, 30.0);
+        )
+        .min_width(30.0)
+        .spawn(commands, root);
     }
-    let back = back_button(commands, root, nav_size, (0.6, 0.05), MenuPage::AdvancedSkirmish);
-    min_width(commands, back, 16.0);
+    back_button(nav_size, (0.6, 0.05), MenuPage::AdvancedSkirmish)
+        .min_width(16.0)
+        .spawn(commands, root);
 }
 
 /// The original's `Credits`: heading plate sitting on y=80%, the credit
@@ -1193,7 +1132,7 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
         Anchor::Ct,
         Justify::Center,
     );
-    back_button(commands, root, page_size * 24.0 / 30.0, (0.5, 0.1), MenuPage::Main);
+    back_button(page_size * 24.0 / 30.0, (0.5, 0.1), MenuPage::Main).spawn(commands, root);
 }
 
 /// The original's `PrintReadMe`: file name plate at the top centre, the
@@ -1261,42 +1200,39 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
     let page = (lines_per_screen.saturating_sub(1)) as i32;
     if scroll > 0 {
         for (x, anchor) in [(0.0, Anchor::Lt), (1.0, Anchor::Rt)] {
-            button(
-                commands,
-                root,
+            ButtonSpec::new(
                 "Up",
                 README_UPDOWN,
                 page_size,
                 (x, 1.0),
                 anchor,
                 MenuAction::ScrollReadme(-page),
-            );
+            )
+            .spawn(commands, root);
         }
     }
     if scroll < max_scroll {
         for x in [0.3, 0.7] {
-            button(
-                commands,
-                root,
+            ButtonSpec::new(
                 "Down",
                 README_UPDOWN,
                 page_size,
                 (x, 0.0),
                 Anchor::Cb,
                 MenuAction::ScrollReadme(page),
-            );
+            )
+            .spawn(commands, root);
         }
     }
-    button(
-        commands,
-        root,
+    ButtonSpec::new(
         "Back",
         NAV_BLUE,
         page_size,
         (0.5, 0.0),
         Anchor::Cb,
         MenuAction::Goto(MenuPage::Main),
-    );
+    )
+    .spawn(commands, root);
 }
 
 /// Readme content, cached; falls back to a friendly note if the asset is
@@ -1417,8 +1353,9 @@ fn maintain_esc_menu(
         ("Menu", (0.45, 0.5), Anchor::Rt, MenuAction::GoToMenu),
         ("Quit", (0.55, 0.5), Anchor::Lt, MenuAction::Quit),
     ] {
-        let e = button(&mut commands, root, text, BUTTON_GREEN, size, pos, anchor, action);
-        min_width(&mut commands, e, 22.0);
+        ButtonSpec::new(text, BUTTON_GREEN, size, pos, anchor, action)
+            .min_width(22.0)
+            .spawn(&mut commands, root);
     }
 }
 
@@ -1498,38 +1435,39 @@ fn maintain_game_over(
         Anchor::Cc,
         Justify::Center,
     );
-    let keep = if won { "Keep on playing" } else { "Keep on watching" };
-    button(
-        &mut commands,
-        root,
+    let keep = if won {
+        "Keep on playing"
+    } else {
+        "Keep on watching"
+    };
+    ButtonSpec::new(
         keep,
         BUTTON_GREEN,
         menu_size,
         (0.48, 0.25),
         Anchor::Rc,
         MenuAction::KeepPlaying,
-    );
-    button(
-        &mut commands,
-        root,
+    )
+    .spawn(&mut commands, root);
+    ButtonSpec::new(
         "Go to Menu",
         BUTTON_GREEN,
         menu_size,
         (0.52, 0.25),
         Anchor::Lc,
         MenuAction::GoToMenu,
-    );
+    )
+    .spawn(&mut commands, root);
     if !won {
-        button(
-            &mut commands,
-            root,
+        ButtonSpec::new(
             "Restart",
             BUTTON_GREEN,
             menu_size,
             (0.5, 0.35),
             Anchor::Cc,
             MenuAction::Restart,
-        );
+        )
+        .spawn(&mut commands, root);
     }
 }
 
@@ -1566,6 +1504,7 @@ fn demo_director(
     setup: Res<crate::game_setup::GameSetup>,
     mut director: ResMut<DemoDirector>,
     homebases: Query<&TeamId, With<Homebase>>,
+    dev: Res<DevOptions>,
     mut commands: Commands,
     mut run_game: MessageWriter<RunGame>,
 ) {
@@ -1587,7 +1526,7 @@ fn demo_director(
         0.0
     };
     if director.decided_for > DEMO_DECIDED_GRACE || director.age > DEMO_MAX_AGE {
-        commands.insert_resource(demo_setup());
+        commands.insert_resource(demo_setup(&dev));
         run_game.write(RunGame);
         *director = DemoDirector::default();
     }
@@ -1666,6 +1605,7 @@ fn attract_camera(
 /// the reload must observe the `demo_setup` insert this writes.
 pub fn boot_demo(
     mut done: Local<bool>,
+    dev: Res<DevOptions>,
     mut commands: Commands,
     mut run_game: MessageWriter<RunGame>,
 ) {
@@ -1673,6 +1613,6 @@ pub fn boot_demo(
         return;
     }
     *done = true;
-    commands.insert_resource(demo_setup());
+    commands.insert_resource(demo_setup(&dev));
     run_game.write(RunGame);
 }

@@ -1,7 +1,8 @@
 //! Dev tool: screenshot the in-game HUD, then quit.
 //!
 //! Set `KP_GAME_SHOTS=<dir>` to enable (optionally `KP_GAME_SHOTS_MAP=<map
-//! stem>`, default `Data_Cache_L1`). The tool starts a quick skirmish as
+//! stem>`, default `Data_Cache_L1`; both read into [`DevOptions`] at
+//! startup). The tool starts a quick skirmish as
 //! System, then saves
 //!
 //! 1. `<dir>/homebase.png` — the Kernel selected with a few units queued
@@ -14,9 +15,9 @@
 //! compiled for wasm (no disk).
 
 use bevy::prelude::*;
-use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 
-use crate::game_setup::{AppState, SkirmishConfig, build_setup};
+use super::save_screenshot;
+use crate::game_setup::{AppState, DevOptions, SkirmishConfig, build_setup};
 use crate::interaction::selection::Selected;
 use crate::map_loading::MapCatalog;
 use crate::units::components::{Homebase, TeamId, UnitType};
@@ -39,10 +40,16 @@ pub struct GameShotsPlugin;
 
 impl Plugin for GameShotsPlugin {
     fn build(&self, app: &mut App) {
-        if let Ok(dir) = std::env::var("KP_GAME_SHOTS") {
-            let map = std::env::var("KP_GAME_SHOTS_MAP").unwrap_or_else(|_| "Data_Cache_L1".into());
+        let Some(dev) = app.world().get_resource::<DevOptions>() else {
+            return;
+        };
+        if let Some(dir) = dev.game_shots.clone() {
+            let map = dev
+                .game_shots_map
+                .clone()
+                .unwrap_or_else(|| "Data_Cache_L1".into());
             app.insert_resource(Shots {
-                dir: dir.into(),
+                dir,
                 map,
                 step: Step::Menu,
                 frame: 0,
@@ -80,9 +87,7 @@ impl Shots {
     fn shoot(&self, commands: &mut Commands, name: &str) {
         let path = self.dir.join(name);
         info!("KP_GAME_SHOTS: saving {}", path.display());
-        commands
-            .spawn(Screenshot::primary_window())
-            .observe(save_to_disk(path));
+        save_screenshot(commands, path);
     }
 }
 

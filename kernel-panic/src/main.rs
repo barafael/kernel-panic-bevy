@@ -169,6 +169,8 @@ fn main() {
                 })
                 .set(render_plugin),
         )
+        // Before the game plugins: the dev-tool plugins read it at build.
+        .insert_resource(game_setup::DevOptions::from_env())
         .add_plugins((
             RenderingPlugin,
             InteractionPlugin,

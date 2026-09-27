@@ -26,3 +26,13 @@ impl Plugin for UiPlugin {
         app.add_plugins((menu_shots::MenuShotsPlugin, game_shots::GameShotsPlugin));
     }
 }
+
+/// Save a screenshot of the primary window to `path` (the dev
+/// screenshot tools).
+#[cfg(not(target_arch = "wasm32"))]
+fn save_screenshot(commands: &mut Commands, path: std::path::PathBuf) {
+    use bevy::render::view::screenshot::{Screenshot, save_to_disk};
+    commands
+        .spawn(Screenshot::primary_window())
+        .observe(save_to_disk(path));
+}
