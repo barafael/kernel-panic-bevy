@@ -1028,12 +1028,18 @@ pub fn movement_system(
             {
                 // Structures appeared or vanished since the path was
                 // made (QTPFS `PathUpdated`): repath if its remainder is
-                // no longer walkable.
+                // no longer walkable. Only the segments crossing the
+                // changed squares can have become blocked.
+                let area = n.changed_since(p.revision);
                 p.revision = n.revision;
                 let mut from = pos.xz();
                 let ok = p.waypoints[p.current.min(p.waypoints.len())..].iter().all(|w| {
-                    let clear = map.raw_search(from, w.xz());
-                    from = w.xz();
+                    let to = w.xz();
+                    let clear = match area {
+                        Some(bbox) if !NavGridSet::segment_touches(bbox, from, to) => true,
+                        _ => map.raw_search(from, to),
+                    };
+                    from = to;
                     clear
                 });
                 if !ok {

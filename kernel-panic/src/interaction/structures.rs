@@ -162,7 +162,9 @@ impl StructureLayer {
     }
 
     /// Add (`add`) or remove a stamp and rebuild the masks around it.
-    fn apply(&mut self, stamp: &Stamp, add: bool) {
+    /// Returns the squares whose masks changed (dilated by the widest
+    /// footprint), or `None` for an empty stamp.
+    fn apply(&mut self, stamp: &Stamp, add: bool) -> Option<[i32; 4]> {
         let (mut x0, mut z0, mut x1, mut z1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for &(x, z) in &stamp.squares {
             let i = (z * self.width + x) as usize;
@@ -174,7 +176,7 @@ impl StructureLayer {
             z1 = z1.max(z as i32);
         }
         if stamp.squares.is_empty() {
-            return;
+            return None;
         }
         let mut masks = std::mem::take(&mut self.masks);
         for m in &mut masks {
@@ -182,6 +184,13 @@ impl StructureLayer {
             self.fill_mask(m, x0 - h, z0 - h, x1 + h, z1 + h);
         }
         self.masks = masks;
+        let h = self.max_xsizeh();
+        Some([x0 - h, z0 - h, x1 + h, z1 + h])
+    }
+
+    /// The widest mover half-footprint any mask is dilated by.
+    pub fn max_xsizeh(&self) -> i32 {
+        self.masks.iter().map(|m| m.xsizeh).max().unwrap_or(0)
     }
 
     /// The squares a structure of `kind` centred at `pos` blocks: its FBI
@@ -257,7 +266,7 @@ pub fn update_structure_layer(
     for &(xsizeh, crushes) in classes.get_or_insert_with(|| mover_classes(&registry)).iter() {
         layer.ensure_mask(xsizeh, crushes);
     }
-    let mut changed = false;
+    let mut changed: Option<[i32; 4]> = None;
     let candidates = if fresh { all.iter().collect::<Vec<_>>() } else { spawned.iter().collect() };
     for entity in candidates {
         let Ok((kind, stats, tf, dying)) = units.get(entity) else { continue };
@@ -268,18 +277,23 @@ pub fn update_structure_layer(
             squares: layer.squares_of(&registry, kind.0, tf.translation),
             crushable: registry.is_feature(kind.0),
         };
-        layer.apply(&stamp, true);
+        changed = union(changed, layer.apply(&stamp, true));
         layer.stamps.insert(entity, stamp);
-        changed = true;
     }
     for entity in died.iter().chain(despawned.read()) {
         if let Some(stamp) = layer.stamps.remove(&entity) {
-            layer.apply(&stamp, false);
-            changed = true;
+            changed = union(changed, layer.apply(&stamp, false));
         }
     }
-    if changed {
-        nav.revision += 1;
+    if let Some(bbox) = changed {
+        nav.bump(bbox);
+    }
+}
+
+fn union(a: Option<[i32; 4]>, b: Option<[i32; 4]>) -> Option<[i32; 4]> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]),
+        (a, b) => a.or(b),
     }
 }
 

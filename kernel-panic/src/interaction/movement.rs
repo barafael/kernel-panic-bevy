@@ -173,11 +173,58 @@ pub struct NavGridSet {
     /// Bumped whenever the structure layer changes, so paths made
     /// before can be re-checked (QTPFS `PathUpdated`).
     pub revision: u64,
+    /// The squares each recent revision changed, `[x0, z0, x1, z1]`
+    /// inclusive and already dilated by the widest mover footprint,
+    /// oldest first. A path only re-checks the segments crossing the
+    /// area changed since its own revision (QTPFS `PathUpdated` tests
+    /// paths against the dirty node rectangle, not the whole map).
+    pub changes: std::collections::VecDeque<(u64, [i32; 4])>,
     /// Squares blocked by buildings, and per-mover-class path masks.
     pub structures: super::structures::StructureLayer,
 }
 
+/// Revisions remembered for partial re-checks; older paths re-check
+/// in full.
+const REMEMBERED_CHANGES: usize = 64;
+
 impl NavGridSet {
+    /// A new revision that changed the squares in `bbox` (see
+    /// [`Self::changed_since`]).
+    pub fn bump(&mut self, bbox: [i32; 4]) {
+        self.revision += 1;
+        self.changes.push_back((self.revision, bbox));
+        if self.changes.len() > REMEMBERED_CHANGES {
+            self.changes.pop_front();
+        }
+    }
+
+    /// The square rectangle changed since revision `since`, or `None`
+    /// when that reaches further back than remembered (treat all
+    /// squares as changed).
+    pub fn changed_since(&self, since: u64) -> Option<[i32; 4]> {
+        let (oldest, _) = *self.changes.front()?;
+        if oldest > since + 1 {
+            return None;
+        }
+        let mut area: Option<[i32; 4]> = None;
+        for &(rev, b) in self.changes.iter().rev() {
+            if rev <= since {
+                break;
+            }
+            area = Some(area.map_or(b, |a| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]));
+        }
+        area
+    }
+
+    /// Does the segment `a → b` (world XZ) touch the square rectangle?
+    pub fn segment_touches(bbox: [i32; 4], a: Vec2, b: Vec2) -> bool {
+        let sq = |v: f32| (v / SQUARE_SIZE).floor() as i32;
+        sq(a.x.min(b.x)) <= bbox[2]
+            && sq(a.x.max(b.x)) >= bbox[0]
+            && sq(a.y.min(b.y)) <= bbox[3]
+            && sq(a.y.max(b.y)) >= bbox[1]
+    }
+
     /// Pick the tightest bucket whose cap ≥ `cap`. If none qualifies
     /// (the unit needs a looser grid than any we built), return the
     /// loosest bucket. `None` only with no grids built (no map loaded —
@@ -839,6 +886,23 @@ mod tilt_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_area_unions_recent_revisions_and_forgets_old_ones() {
+        let mut nav = NavGridSet::default();
+        assert_eq!(nav.changed_since(0), None, "no changes remembered");
+        nav.bump([10, 10, 12, 12]);
+        nav.bump([20, 5, 21, 6]);
+        assert_eq!(nav.changed_since(2), None, "nothing since the newest");
+        assert_eq!(nav.changed_since(1), Some([20, 5, 21, 6]));
+        assert_eq!(nav.changed_since(0), Some([10, 5, 21, 12]));
+        for i in 0..REMEMBERED_CHANGES as i32 {
+            nav.bump([i, i, i, i]);
+        }
+        assert_eq!(nav.changed_since(1), None, "older than the ring");
+        assert!(NavGridSet::segment_touches([10, 10, 12, 12], Vec2::new(0.0, 88.0), Vec2::new(200.0, 88.0)));
+        assert!(!NavGridSet::segment_touches([10, 10, 12, 12], Vec2::new(0.0, 60.0), Vec2::new(200.0, 60.0)));
+    }
     use spring_pathfinding::SpeedMap;
 
     fn bucket_with(cap: f32) -> NavBucket {
