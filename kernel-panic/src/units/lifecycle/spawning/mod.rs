@@ -5,12 +5,12 @@
 //! animator with resolved muzzle/gunbase/hatch piece indices), and
 //! registers faction-specific build-FX pieces for factories. Helpers on
 //! top of it — [`spawn_homebases`], [`spawn_queued_viruses`],
-//! [`spawn_queued_mines`] — wire in the assets, registry, and invisible
-//! selection-volume material once at the system boundary.
+//! [`spawn_queued_mines`] — wire in the assets and registry once at the
+//! system boundary.
 //!
 //! Split into:
 //! - [`emerge`] — [`Emerging`] / [`FadeMaterials`] lifecycle.
-//! - [`s3o_mount`] — piece-tree walking helpers used by `spawn_unit`.
+//! - [`s3o_mount`] — the per-model [`PieceLayout`] `spawn_unit` mounts.
 //! - [`mod`](self) — [`spawn_unit`] + the top-level spawners.
 
 use bevy::ecs::system::SystemParam;
@@ -21,7 +21,9 @@ use spring_map::smd_parser::MapInfo;
 
 use super::production::default_production;
 use crate::terrain::heightmap::Heightmap;
-use crate::units::assets::meshes::{S3OModelCache, unit_material, unit_radius};
+use crate::units::assets::meshes::{
+    S3OModelCache, piece_layout, selection_sphere, unit_material, unit_radius,
+};
 use crate::units::combat::Deployable;
 use crate::units::components::{
     Faction, Health, Homebase, SelectionVolume, TeamId, UnitStats, UnitType,
@@ -35,29 +37,15 @@ mod s3o_mount;
 pub use emerge::{
     EMERGE_DEPTH, EMERGE_LEAD_TIME, EmergeStyle, Emerging, FadeMaterials, emerge_system,
 };
-
-use s3o_mount::{
-    compute_ground_lift, find_piece_index_by_name, flatten_pieces, get_piece_by_index,
-    piece_to_mesh,
-};
-
-/// Shared handle to the fully-transparent material applied to every
-/// unit's `SelectionVolume` child. Lazily created on first spawn so
-/// maps with no units never mint a material asset.
-#[derive(Resource, Clone)]
-pub struct SelectionVolumeMaterial(pub Handle<StandardMaterial>);
+pub use s3o_mount::PieceLayout;
 
 /// Bundles the asset / cache / registry resources `spawn_unit` needs.
 ///
-/// Every system that calls `spawn_unit` previously had to declare 8
+/// Every system that calls `spawn_unit` previously had to declare 7
 /// separate `Commands` / `ResMut<Assets<…>>` / `ResMut<…Cache>` params
 /// and forward them through; bundling them as one `SystemParam` shrinks
 /// each call site to a single argument and lets helper functions reborrow
-/// `&mut SpawnContext` without re-listing the same eight types.
-///
-/// `sel_mat` is `Option` because the resource is lazily created on the
-/// first spawn — a fresh app boot has no `SelectionVolumeMaterial` until
-/// `ensure_invisible_material` mints it.
+/// `&mut SpawnContext` without re-listing the same seven types.
 #[derive(SystemParam)]
 pub struct SpawnContext<'w, 's> {
     pub commands: Commands<'w, 's>,
@@ -65,29 +53,8 @@ pub struct SpawnContext<'w, 's> {
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
-    pub sel_mat: Option<Res<'w, SelectionVolumeMaterial>>,
     pub unit_registry: Res<'w, UnitRegistry>,
     pub weapon_registry: Res<'w, crate::units::content::weapons::WeaponRegistry>,
-}
-
-impl SpawnContext<'_, '_> {
-    /// Get the shared invisible-selection material, lazy-initialising the
-    /// resource on first call. Mirrors the previous standalone helper so
-    /// the first spawn on a fresh app boot still works without requiring
-    /// a startup system to plant the resource.
-    fn ensure_invisible_material(&mut self) -> SelectionVolumeMaterial {
-        if let Some(m) = &self.sel_mat {
-            return SelectionVolumeMaterial(m.0.clone());
-        }
-        let mat = SelectionVolumeMaterial(self.materials.add(StandardMaterial {
-            base_color: Color::srgba(0.0, 0.0, 0.0, 0.0),
-            alpha_mode: AlphaMode::Blend,
-            unlit: true,
-            ..default()
-        }));
-        self.commands.insert_resource(mat.clone());
-        mat
-    }
 }
 
 /// Cached piece-index lookup for animated factories. Set once when a
@@ -242,6 +209,13 @@ pub fn spawn_showcase_homebase(
 
 /// Spawn a single unit with per-piece children and COB animation.
 /// Returns the root entity of the spawned unit.
+///
+/// Every GPU asset comes from `S3OModelCache` (shared material, shared
+/// piece meshes, shared picking sphere), so a spawn is entity work only.
+/// Components known up front go in as few bundles as possible — each
+/// separate `insert` on a live entity is an archetype move — and every
+/// child spawns with its `ChildOf` in the bundle instead of a follow-up
+/// `add_child` command.
 pub fn spawn_unit(
     kind: UnitKind,
     faction: Faction,
@@ -249,30 +223,27 @@ pub fn spawn_unit(
     position: Vec3,
     ctx: &mut SpawnContext,
 ) -> Entity {
-    let invisible_mat = ctx.ensure_invisible_material();
     // Reborrow each `SpawnContext` field as a plain `&mut` to its inner
-    // value so the existing body — which threads `&mut Assets<…>` /
-    // `&mut S3OModelCache` / `&UnitRegistry` to helper functions — works
-    // unchanged. Disjoint-field borrow rules let us hold these
-    // simultaneously.
+    // value so the body — which threads `&mut Assets<…>` /
+    // `&mut S3OModelCache` / `&UnitRegistry` to helper functions — can
+    // hold them simultaneously (disjoint-field borrow rules).
     let commands = &mut ctx.commands;
     let meshes = &mut *ctx.meshes;
     let materials = &mut *ctx.materials;
     let images = &mut *ctx.images;
     let model_cache = &mut *ctx.model_cache;
     let unit_registry = &*ctx.unit_registry;
-    let invisible_mat = &invisible_mat;
     let model_name = unit_registry.model(kind);
     let material = unit_material(kind, faction, materials, images, model_cache, model_name);
     let radius = unit_radius(kind, model_cache, unit_registry);
-    let selection_sphere = meshes.add(Sphere::new(radius).mesh().ico(3).unwrap());
+    let selection_sphere = selection_sphere(radius, meshes, model_cache);
+    let layout = piece_layout(model_name, meshes, model_cache);
 
     // Some s3o models are authored with their root at the mesh CENTER
     // rather than at the bottom (octaeder.s3o, used by Byte, has blade
     // vertices spanning y∈[-48,48]). If we plant the root at the
     // heightmap, half the model sinks below ground. Lift the spawn point
     // by however much the lowest vertex extends below piece-tree origin.
-    let s3o_model = crate::units::assets::meshes::load_s3o_model(model_name, model_cache);
     let ground_lift = match kind {
         // network_base.s3o (Network homebase) is authored as a flat pad
         // hanging entirely below its origin (mover spans y −22..+2), so
@@ -280,11 +251,9 @@ pub fn spawn_unit(
         // 22 elmos in the air. Plant it at origin — Spring parity, where
         // the pad reads as sitting flush on the terrain.
         UnitKind::Carrier => 0.0,
-        _ => s3o_model.as_ref().map(compute_ground_lift).unwrap_or(0.0),
+        _ => layout.as_ref().map(|l| l.ground_lift).unwrap_or(0.0),
     };
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
-    #[cfg(target_arch = "wasm32")]
-    let _ = ground_lift;
     if matches!(kind, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier) {
         info!(
             "spawn {kind:?}: ground y={:.1}, lift={ground_lift:.1}, root y={:.1}",
@@ -294,30 +263,31 @@ pub fn spawn_unit(
 
     let unit_entity = commands
         .spawn((
-            UnitType(kind),
-            faction,
-            TeamId(team),
-            Health::full(unit_registry.max_health(kind)),
-            UnitStats::from_registry(kind, unit_registry, radius),
-            Transform::from_translation(lifted_position),
-            Visibility::default(),
+            (
+                UnitType(kind),
+                faction,
+                TeamId(team),
+                Health::full(unit_registry.max_health(kind)),
+                UnitStats::from_registry(kind, unit_registry, radius),
+                Transform::from_translation(lifted_position),
+                Visibility::default(),
+            ),
+            (
+                crate::units::combat::IdleTimer(0.0),
+                crate::units::combat::StunCharge(0.0),
+                crate::interaction::movement::ground_mover_components(kind, unit_registry),
+                crate::interaction::movement::GroundLift(ground_lift),
+                // §1.8 first slice: cache a typed collision volume so
+                // projectile / shield / per-shot-miss systems can do
+                // volume-aware tests without re-deriving from the S3O on
+                // every check. Today every unit spawns a Sphere matching
+                // the existing `hit_radius`; future per-unit overrides
+                // (Cylinder for tall thin units, AABB for boxes) only need
+                // to update this classifier.
+                crate::units::combat::CollisionVolume::from_s3o_radius(radius),
+            ),
         ))
         .id();
-
-    commands.entity(unit_entity).insert((
-        crate::units::combat::IdleTimer(0.0),
-        crate::units::combat::StunCharge(0.0),
-        crate::interaction::movement::ground_mover_components(kind, unit_registry),
-        crate::interaction::movement::GroundLift(ground_lift),
-        // §1.8 first slice: cache a typed collision volume so
-        // projectile / shield / per-shot-miss systems can do
-        // volume-aware tests without re-deriving from the S3O on
-        // every check. Today every unit spawns a Sphere matching
-        // the existing `hit_radius`; future per-unit overrides
-        // (Cylinder for tall thin units, AABB for boxes) only need
-        // to update this classifier.
-        crate::units::combat::CollisionVolume::from_s3o_radius(radius),
-    ));
 
     // Cache the weapon-id binding once so the per-frame combat hot
     // path can read it directly without hashing strings against the
@@ -325,12 +295,12 @@ pub fn spawn_unit(
     // whose only weapon is BuildLaser, filtered by `unit_registry.weapon`)
     // get no binding — combat skips them via `Option<&WeaponBinding>`.
     let weapon_name = unit_registry.weapon(kind);
-    if !weapon_name.is_empty() {
-        if let Some(weapon_id) = ctx.weapon_registry.intern(weapon_name) {
-            commands
-                .entity(unit_entity)
-                .insert(crate::units::combat::WeaponBinding(weapon_id));
-        }
+    if !weapon_name.is_empty()
+        && let Some(weapon_id) = ctx.weapon_registry.intern(weapon_name)
+    {
+        commands
+            .entity(unit_entity)
+            .insert(crate::units::combat::WeaponBinding(weapon_id));
     }
 
     // Worm bites detonate Weapon2 (worm.bos `emit-sfx 4097`); cache its
@@ -397,29 +367,21 @@ pub fn spawn_unit(
         commands.entity(unit_entity).insert(Deployable::initial());
     }
 
-    // Selection volume child.
-    let sel_child = commands
-        .spawn((
-            SelectionVolume,
-            Mesh3d(selection_sphere),
-            MeshMaterial3d(invisible_mat.0.clone()),
-            Transform::from_xyz(0.0, radius * 0.5, 0.0),
-        ))
-        .id();
-    commands.entity(unit_entity).add_child(sel_child);
+    // Selection volume child: a mesh with no material. It is never
+    // drawn — Bevy only queues an entity for a render phase through its
+    // material — but `Mesh3d` still gets it an `Aabb`, a
+    // `VisibilityClass` and a `ViewVisibility`, which is all
+    // `MeshRayCast` needs to pick it (hover / click in
+    // `selection::core`). `Visibility` stays inherited so a cloaked unit
+    // (root `Visibility::Hidden`) is unpickable along with its model.
+    commands.spawn((
+        SelectionVolume,
+        Mesh3d(selection_sphere),
+        Transform::from_xyz(0.0, radius * 0.5, 0.0),
+        ChildOf(unit_entity),
+    ));
 
-    if let Some(model) = &s3o_model {
-        // Flatten the piece tree into a list, spawning each as a child entity.
-        let mut piece_entities = Vec::new();
-        let mut piece_parents: Vec<Option<usize>> = Vec::new();
-        let mut piece_offsets: Vec<[f32; 3]> = Vec::new();
-        flatten_pieces(
-            &model.root_piece,
-            None,
-            &mut piece_parents,
-            &mut piece_offsets,
-        );
-
+    if let Some(layout) = &layout {
         // S3O models author their visual front along local +Z (Spring's
         // `frontdir` convention from `SolidObject::ComposeMatrix`), but
         // Bevy's `Transform::look_to` aligns local -Z with the requested
@@ -432,49 +394,39 @@ pub fn spawn_unit(
             .spawn((
                 Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
                 Visibility::default(),
+                ChildOf(unit_entity),
             ))
             .id();
-        commands.entity(unit_entity).add_child(model_root);
 
-        // Spawn piece entities.
-        for (idx, parent_idx) in piece_parents.iter().enumerate() {
-            let piece = get_piece_by_index(&model.root_piece, idx);
-            let has_geometry = piece.is_some_and(|p| !p.vertices.is_empty());
-            let offset = piece_offsets[idx];
-
-            let mut piece_cmd = if has_geometry {
-                let piece = piece.unwrap();
-                let mesh = piece_to_mesh(piece);
-                let mesh_handle = meshes.add(mesh);
-                commands.spawn((
-                    PieceIndex,
-                    Mesh3d(mesh_handle),
-                    MeshMaterial3d(material.clone()),
-                    Transform::from_xyz(offset[0], offset[1], offset[2]),
-                    Visibility::default(),
-                ))
-            } else {
-                commands.spawn((
-                    PieceIndex,
-                    Transform::from_xyz(offset[0], offset[1], offset[2]),
-                    Visibility::default(),
-                ))
+        // Spawn piece entities in layout (depth-first) order, so every
+        // parent precedes its children.
+        let mut piece_entities = Vec::with_capacity(layout.pieces.len());
+        for spec in &layout.pieces {
+            let parent = spec.parent.map_or(model_root, |pi| piece_entities[pi]);
+            let transform = Transform::from_xyz(spec.offset[0], spec.offset[1], spec.offset[2]);
+            let piece_entity = match &spec.mesh {
+                Some(mesh) => commands
+                    .spawn((
+                        PieceIndex,
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        transform,
+                        Visibility::default(),
+                        spec.emit,
+                        ChildOf(parent),
+                    ))
+                    .id(),
+                None => commands
+                    .spawn((
+                        PieceIndex,
+                        transform,
+                        Visibility::default(),
+                        spec.emit,
+                        ChildOf(parent),
+                    ))
+                    .id(),
             };
-            let emit_vertices: Vec<[f32; 3]> = piece
-                .map(|p| p.vertices.iter().take(2).map(|v| v.position).collect())
-                .unwrap_or_default();
-            let piece_entity = piece_cmd
-                .insert(crate::units::assets::animation::PieceEmit::from_vertices(
-                    &emit_vertices,
-                ))
-                .id();
             piece_entities.push(piece_entity);
-
-            let bevy_parent = match parent_idx {
-                Some(pi) => piece_entities[*pi],
-                None => model_root,
-            };
-            commands.entity(bevy_parent).add_child(piece_entity);
         }
 
         // Attach the animation rig. The rig is keyed on the unit's
@@ -489,18 +441,17 @@ pub fn spawn_unit(
             let mut table_entities = Vec::with_capacity(table.len());
             let mut table_offsets = Vec::with_capacity(table.len());
             for table_name in table {
-                match find_piece_index_by_name(&model.root_piece, table_name) {
+                match layout.index_by_name(table_name) {
                     Some(s3o_idx) => {
                         table_entities.push(piece_entities[s3o_idx]);
-                        table_offsets.push(piece_offsets[s3o_idx]);
+                        table_offsets.push(layout.pieces[s3o_idx].offset);
                     }
                     None => {
                         // Stub entity so animation ops on this slot don't
                         // accidentally hit a real piece.
                         let stub = commands
-                            .spawn((Transform::default(), Visibility::default()))
+                            .spawn((Transform::default(), Visibility::default(), ChildOf(unit_entity)))
                             .id();
-                        commands.entity(unit_entity).add_child(stub);
                         table_entities.push(stub);
                         table_offsets.push([0.0; 3]);
                     }
