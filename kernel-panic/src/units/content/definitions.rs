@@ -131,7 +131,18 @@ use strum::VariantArray;
 /// automatically appears here without a second edit.
 pub const ALL_UNIT_KINDS: &[UnitKind] = UnitKind::VARIANTS;
 
+/// Number of `UnitKind` variants: the length of per-kind lookup tables
+/// indexed by [`UnitKind::index`].
+pub const UNIT_KIND_COUNT: usize = ALL_UNIT_KINDS.len();
+
 impl UnitKind {
+    /// Dense 0-based index in declaration order (== position in
+    /// [`ALL_UNIT_KINDS`]), for O(1) per-kind tables such as the
+    /// [`UnitRegistry`](super::unit_registry::UnitRegistry)'s.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
     /// The FBI `unitname` key for this kind (used to look up stats in the registry).
     pub fn unitname(self) -> &'static str {
         self.into()
@@ -236,16 +247,6 @@ impl UnitKind {
         self.is_homebase() || self.is_minifac()
     }
 
-    /// Per-team unit cap (FBI `UnitRestricted`). Only `logic_bomb.fbi`
-    /// declares one (64); upstream `Launcher.lua` and `byte.bos`
-    /// (`lua_GetLogicBombLeft`) honour it for launched mines too.
-    pub fn team_limit(self) -> Option<u32> {
-        match self {
-            UnitKind::LogicBomb => Some(64),
-            _ => None,
-        }
-    }
-
     /// Mobile constructors that can erect secondary factories on
     /// datavents. Mirrors upstream KP's `SIDEDATA.TDF` builder list.
     pub fn is_constructor(self) -> bool {
@@ -284,11 +285,6 @@ impl UnitKind {
             UnitKind::Exploit => Some(UnitKind::Bug),
             _ => None,
         }
-    }
-
-    /// Units that carry the `Cloaked` marker at spawn time (§3.3).
-    pub fn spawns_cloaked(self) -> bool {
-        matches!(self, UnitKind::Worm | UnitKind::LogicBomb)
     }
 
     /// Units carrying the AutoHold toggle and the surface-to-bite cloak
@@ -499,6 +495,13 @@ mod tests {
         }
     }
 
+    #[test]
+    fn index_matches_all_unit_kinds_order() {
+        for (i, kind) in ALL_UNIT_KINDS.iter().enumerate() {
+            assert_eq!(kind.index(), i, "{kind:?}");
+        }
+    }
+
     /// Upstream `game_over.lua` keeps a team alive on homebases +
     /// MiniFacs only — special buildings and constructors don't count.
     #[test]
@@ -516,29 +519,11 @@ mod tests {
     }
 
     #[test]
-    fn only_logic_bomb_has_team_limit() {
-        assert_eq!(UnitKind::LogicBomb.team_limit(), Some(64));
-        for kind in ALL_UNIT_KINDS {
-            if *kind != UnitKind::LogicBomb {
-                assert_eq!(kind.team_limit(), None, "{kind:?}");
-            }
-        }
-    }
-
-    #[test]
     fn teleporter_classifier() {
         assert!(UnitKind::Port.is_teleporter());
         assert!(UnitKind::Connection.is_teleporter());
         assert!(!UnitKind::Packet.is_teleporter());
         assert!(!UnitKind::Kernel.is_teleporter());
-    }
-
-    #[test]
-    fn spawns_cloaked_classifier() {
-        assert!(UnitKind::Worm.spawns_cloaked());
-        assert!(UnitKind::LogicBomb.spawns_cloaked());
-        assert!(!UnitKind::Bit.spawns_cloaked());
-        assert!(!UnitKind::Assembler.spawns_cloaked());
     }
 
     #[test]

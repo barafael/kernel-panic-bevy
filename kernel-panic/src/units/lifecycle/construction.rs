@@ -156,7 +156,7 @@ pub fn tick_construction(
 
     for (entity, gtf, mut transform, faction, team, mut constructing) in &mut builders {
         if constructing.building.is_none()
-            && let Some(limit) = constructing.kind.team_limit()
+            && let Some(limit) = ctx.unit_registry.team_limit(constructing.kind)
         {
             let kind = constructing.kind;
             let counts = capped_counts.entry(kind).or_insert_with(|| {

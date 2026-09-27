@@ -7,8 +7,9 @@
 //!
 //! Everything here runs once per 30 Hz sim frame and works in Spring's
 //! per-frame units: speeds in elmos/frame, accelerations in
-//! elmos/frame², turn rates in radians/frame. [`UnitStats`] keeps the
-//! per-second values the rest of the port uses; [`FrameStats`] converts.
+//! elmos/frame², turn rates in radians/frame. [`UnitStats`] keeps speed
+//! and turn rate per second for the rest of the port (acceleration is
+//! already per frame); [`FrameStats`] converts.
 //!
 //! The per-frame order mirrors `GroundMoveSystem::Update`
 //! (`Sim/MoveTypes/Systems/GroundMoveSystem.cpp`):
@@ -311,8 +312,8 @@ impl FrameStats {
         Self {
             max_speed: speed / GAME_SPEED,
             // `accRate = max(0.01, maxAcc)` (GroundMoveType.cpp:518-519).
-            acc: (stats.accel / (GAME_SPEED * GAME_SPEED)).max(0.01),
-            dec: (stats.brake / (GAME_SPEED * GAME_SPEED)).max(0.01),
+            acc: stats.acc_rate.max(0.01),
+            dec: stats.dec_rate.max(0.01),
             // `turnRate = clamp(ud->turnRate, 1, 32767)` heading units;
             // a TurnRate of 0 in the FBI means "snap" in the port.
             turn_rate: if stats.turn_rate > 0.0 {
@@ -1397,7 +1398,7 @@ pub fn ground_collision_system(
             radius,
             owner_radius,
             mobile,
-            crushable: !mobile && registry.def(kind.0).is_some_and(|d| d.is_feature),
+            crushable: !mobile && registry.is_feature(kind.0),
             mass,
             speed,
             front,

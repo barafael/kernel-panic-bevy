@@ -156,6 +156,9 @@ pub struct UnitDef {
     /// FBI `Mass`; `None` when absent (Spring then uses the metal
     /// cost, `UnitDef.cpp:351`).
     pub mass: Option<f32>,
+    /// FBI `UnitRestricted`: per-team cap on live units of this kind
+    /// (Spring's `maxThisUnit`); `None` when absent (unlimited).
+    pub unit_restricted: Option<u32>,
     /// FBI `Upright`: the model never tilts with the terrain.
     pub upright: bool,
     /// FBI `YardMap`, whitespace included (`UnitDef::CreateYardMap`).
@@ -286,6 +289,7 @@ impl UnitDef {
             max_slope: s.f32("maxslope"),
             init_cloaked: s.bool("init_cloaked"),
             mass: s.get("mass").and_then(|v| v.trim().parse().ok()),
+            unit_restricted: s.get("unitrestricted").and_then(|v| v.trim().parse().ok()),
             upright: s.bool("upright"),
             yard_map: s.string("yardmap"),
             is_feature: s.bool("isfeature"),

@@ -261,7 +261,7 @@ pub fn update_structure_layer(
         }
         let stamp = Stamp {
             squares: layer.squares_of(&registry, kind.0, tf.translation),
-            crushable: registry.def(kind.0).is_some_and(|d| d.is_feature),
+            crushable: registry.is_feature(kind.0),
         };
         layer.apply(&stamp, true);
         layer.stamps.insert(entity, stamp);

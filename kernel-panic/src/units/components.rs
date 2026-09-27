@@ -133,30 +133,35 @@ pub fn health_color(frac: f32) -> Color {
 pub struct TeamId(pub u8);
 
 /// Static per-unit stats cached at spawn so hot-path systems (movement,
-/// combat, spatial index) don't re-hit `UnitRegistry`'s string-keyed
-/// BTreeMap every frame per unit.
+/// combat, spatial index) read them straight off the entity.
 ///
 /// Values are derived from the FBI at spawn time; the registry stays
 /// authoritative for any stat not captured here (build time, HP max,
 /// auto-heal parameters — none of which are queried per frame per unit).
 #[derive(Debug, Clone, Copy, Component)]
 pub struct UnitStats {
-    /// Footprint-derived collision radius used by unit-unit separation
-    /// physics (`interaction::movement::resolve_motion`). Tighter than
-    /// the mesh bounds so units can pack in formation without overlap.
+    /// Footprint-derived collision radius used by unit-unit collision
+    /// (`ground_move::ground_collision_system`, the air movement's
+    /// `HandleCollisions`). Tighter than the mesh bounds so units can
+    /// pack in formation without overlap.
     pub radius: f32,
     /// Volumetric hit radius from the S3O bounding sphere — what Spring's
     /// `CCollisionHandler` tests. Used by `apply_damage` to decide whether
     /// a `spray_angle`-perturbed shot landed on the primary target.
     /// Typically 2-3× larger than `radius` for the same unit.
     pub hit_radius: f32,
+    /// Top speed in elmos/s (FBI `MaxVelocity` × 30).
     pub speed: f32,
-    /// Acceleration in elmos/s² (from FBI `Acceleration`). Drives the
-    /// ramp from standstill to `speed` in `movement_system`.
-    pub accel: f32,
-    /// Braking deceleration in elmos/s² (from FBI `BrakeRate`). Both
-    /// the standstill→speed ramp and the stop-distance clamp read it.
-    pub brake: f32,
+    /// `maxAcc` in elmos/frame² (FBI `Acceleration`), kept in Spring's
+    /// per-frame unit because the ground move type applies it per sim
+    /// frame ([`UnitRegistry::acc_rate`]).
+    ///
+    /// [`UnitRegistry::acc_rate`]: crate::units::content::unit_registry::UnitRegistry::acc_rate
+    pub acc_rate: f32,
+    /// `maxDec` in elmos/frame² (FBI `BrakeRate`, defaulting to
+    /// `acc_rate`) — the braking side of the same ramp.
+    pub dec_rate: f32,
+    /// Turn speed in rad/s (FBI `TurnRate`); 0 means "snap".
     pub turn_rate: f32,
     pub can_fly: bool,
     pub no_chase_vtol: bool,
@@ -175,8 +180,8 @@ impl UnitStats {
             radius: registry.collision_radius(kind),
             hit_radius,
             speed: registry.speed(kind),
-            accel: registry.acceleration(kind),
-            brake: registry.brake_rate(kind),
+            acc_rate: registry.acc_rate(kind),
+            dec_rate: registry.dec_rate(kind),
             turn_rate: registry.turn_rate(kind),
             can_fly: registry.can_fly(kind),
             no_chase_vtol: registry.no_chase_vtol(kind),

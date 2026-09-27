@@ -33,6 +33,7 @@ use crate::interaction::selection::{Selected, SelectionSet};
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::bookkeeping::team_kind_count;
 use crate::units::lifecycle::production::Producer;
 use crate::units::mechanics::command_fire::CommandFireCooldown;
@@ -230,6 +231,7 @@ type SelectionQuery<'w, 's> = Query<
 fn collect_commands(
     selected: SelectionQuery,
     team_units: Query<(&UnitType, &TeamId), Without<Dying>>,
+    registry: Res<UnitRegistry>,
     mut panel: ResMut<PanelCommands>,
     mut page: ResMut<PanelPage>,
 ) {
@@ -241,7 +243,7 @@ fn collect_commands(
         .map(|(_, ut, team, producer, autohold, cooldown)| {
             if let Some(team) = team {
                 for kind in [UnitKind::LogicBomb] {
-                    if let Some(limit) = kind.team_limit()
+                    if let Some(limit) = registry.team_limit(kind)
                         && !capped.contains(&kind)
                         && team_kind_count(kind, team.0, &team_units) >= limit
                     {
@@ -790,6 +792,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<PanelCommands>();
         world.init_resource::<PanelPage>();
+        world.insert_resource(UnitRegistry::empty());
         let kernel = world
             .spawn((
                 UnitType(UnitKind::Kernel),

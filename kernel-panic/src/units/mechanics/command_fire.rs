@@ -532,7 +532,8 @@ pub fn process_command_fire(
             // Why: `spawn_queued_mines` drops every mine past the Logic
             // Bomb cap, so a cast with no room left would burn 6000 HP
             // and the reload for nothing — refuse it up front instead.
-            if logic_bombs_at_cap(team.0, &live_units, &mine_spawns) {
+            let limit = unit_registry.team_limit(UnitKind::LogicBomb);
+            if logic_bombs_at_cap(team.0, limit, &live_units, &mine_spawns) {
                 continue;
             }
             let Ok(mut health) = health_q.get_mut(event.attacker) else {
@@ -626,13 +627,15 @@ pub fn process_command_fire(
 }
 
 /// Whether `team` has no room left under the Logic Bomb `UnitRestricted`
-/// cap, counting live mines plus mines already queued this frame.
+/// cap `limit` ([`UnitRegistry::team_limit`]; `None` = uncapped),
+/// counting live mines plus mines already queued this frame.
 fn logic_bombs_at_cap(
     team: u8,
+    limit: Option<u32>,
     live_units: &Query<(&UnitType, &TeamId), Without<Dying>>,
     mine_spawns: &MineSpawnQueue,
 ) -> bool {
-    let Some(limit) = UnitKind::LogicBomb.team_limit() else {
+    let Some(limit) = limit else {
         return false;
     };
     let live =
@@ -1262,7 +1265,8 @@ mod tests {
     #[test]
     fn logic_bomb_cap_counts_live_and_queued_mines() {
         use bevy::ecs::system::RunSystemOnce;
-        let limit = UnitKind::LogicBomb.team_limit().unwrap();
+        // logic_bomb.fbi `UnitRestricted=64`.
+        let limit = 64;
         let mut app = App::new();
         for _ in 0..limit - 1 {
             app.world_mut()
@@ -1271,7 +1275,10 @@ mod tests {
         let mut queue = MineSpawnQueue::default();
         let check = move |queue: MineSpawnQueue| {
             move |live: Query<(&UnitType, &TeamId), Without<Dying>>| {
-                (logic_bombs_at_cap(0, &live, &queue), logic_bombs_at_cap(1, &live, &queue))
+                (
+                    logic_bombs_at_cap(0, Some(limit), &live, &queue),
+                    logic_bombs_at_cap(1, Some(limit), &live, &queue),
+                )
             }
         };
         let (own, other) = app.world_mut().run_system_once(check(queue.clone())).unwrap();

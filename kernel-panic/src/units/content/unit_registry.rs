@@ -7,8 +7,8 @@
 use bevy::prelude::*;
 use spring_tdf::{UnitDef, UnitDefs};
 
-use super::definitions::{ALL_UNIT_KINDS, UnitKind};
-use super::moveinfo::MoveClassTable;
+use super::definitions::{ALL_UNIT_KINDS, UNIT_KIND_COUNT, UnitKind};
+use super::moveinfo::{MoveClassParams, MoveClassTable};
 use super::tdf_loader;
 use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
@@ -82,14 +82,68 @@ fn categories_intersect(tokens: &str, categories: &str) -> bool {
     })
 }
 
+/// [`UnitRegistry::auto_target_allowed`] for one attacker FBI against a
+/// candidate's `Category` list.
+fn auto_target_gate(attacker: &UnitDef, categories: &str) -> bool {
+    manual_target_gate(attacker, categories)
+        && !categories_intersect(&attacker.bad_target_category1, categories)
+}
+
+/// [`UnitRegistry::can_attack`] for one attacker FBI against a
+/// candidate's `Category` list: the `OnlyTargetCategory1` half only.
+fn manual_target_gate(attacker: &UnitDef, categories: &str) -> bool {
+    let only = attacker.only_target_category1.as_str();
+    only.is_empty() || categories_intersect(only, categories)
+}
+
+/// `UnitDef::maxAcc` (elmos/frame²) with Spring's 0.5 default — see
+/// [`UnitRegistry::acc_rate`].
+fn max_acc(d: Option<&UnitDef>) -> f32 {
+    const DEFAULT_MAX_ACC: f32 = 0.5;
+    d.map(|d| d.acceleration).filter(|&a| a > 0.0).unwrap_or(DEFAULT_MAX_ACC)
+}
+
+/// `UnitDef::maxDec` (elmos/frame²), defaulting to `maxAcc` — see
+/// [`UnitRegistry::dec_rate`].
+fn max_dec(d: Option<&UnitDef>) -> f32 {
+    d.map(|d| d.brake_rate).filter(|&b| b > 0.0).unwrap_or_else(|| max_acc(d))
+}
+
+/// Per-kind values derived from the FBI + MOVEINFO once at load, so the
+/// per-unit-per-tick callers (movement, heat, pathing) don't re-resolve
+/// the movement class or re-parse degrees each frame.
+#[derive(Debug, Clone, Copy)]
+struct KindData {
+    /// MOVEINFO heat params of the kind's `MovementClass` (LIGHT
+    /// defaults when it has none).
+    heat: MoveClassParams,
+    /// See [`UnitRegistry::move_def`].
+    move_def: Option<MoveDefParams>,
+    /// See [`UnitRegistry::max_slope_ratio`].
+    max_slope_ratio: f32,
+}
+
 /// All parsed unit definitions, accessible by `UnitKind`.
+///
+/// Everything is resolved at load into dense tables indexed by
+/// [`UnitKind::index`]: [`Self::def`] is an array index, not a map
+/// lookup, and the pairwise target-category gates are precomputed
+/// matrices — cheap enough for per-candidate / per-tick hot paths.
 #[derive(Resource)]
 pub struct UnitRegistry {
-    defs: UnitDefs,
-    /// Upstream MOVEINFO.TDF movement-class heat params, keyed by the
-    /// FBI `MovementClass` name. Lookups go through
-    /// [`Self::heat_params`].
-    move_classes: MoveClassTable,
+    /// The FBI definition of each kind (`None` when its file is missing).
+    defs: Box<[Option<UnitDef>]>,
+    /// Derived per-kind data, parallel to `defs`.
+    kinds: Box<[KindData]>,
+    /// [`Self::auto_target_allowed`], row-major `[attacker][candidate]`.
+    auto_target: Box<[bool]>,
+    /// [`Self::can_attack`], row-major `[attacker][candidate]`.
+    manual_target: Box<[bool]>,
+    /// See [`Self::shared_heat_retention`].
+    shared_heat_retention: f32,
+    /// See [`Self::hexfarm_medians`] — over *every* loaded FBI, not just
+    /// the ones bound to a `UnitKind`.
+    hexfarm_medians: (f64, f64),
 }
 
 impl UnitRegistry {
@@ -97,10 +151,7 @@ impl UnitRegistry {
     pub fn load() -> Self {
         let Some(dir) = tdf_loader::find_upstream_dir("units") else {
             warn!("Upstream units directory not found — using empty registry");
-            return Self {
-                defs: UnitDefs::default(),
-                move_classes: MoveClassTable::default(),
-            };
+            return Self::build(UnitDefs::default(), MoveClassTable::default());
         };
 
         let mut merged = UnitDefs::default();
@@ -112,12 +163,61 @@ impl UnitRegistry {
         }
 
         info!("Unit registry: {} definitions total", merged.units.len());
-        let registry = Self {
-            defs: merged,
-            move_classes: MoveClassTable::load(),
-        };
+        let registry = Self::build(merged, MoveClassTable::load());
         registry.validate_unit_bindings();
         registry
+    }
+
+    /// Resolve parsed FBIs (keyed by lowercase `unitname`, as
+    /// `UnitDefs::from_tdf` stores them) and the MOVEINFO table into the
+    /// per-kind tables.
+    fn build(defs: UnitDefs, move_classes: MoveClassTable) -> Self {
+        let all = || defs.units.values();
+        let hexfarm_medians = (
+            spring_map::hexfarm::lua_median(all().map(|d| d.max_health as f64)),
+            spring_map::hexfarm::lua_median(all().map(|d| d.build_time as f64)),
+        );
+        let mut units = defs.units;
+        let defs: Box<[Option<UnitDef>]> =
+            ALL_UNIT_KINDS.iter().map(|k| units.remove(k.unitname())).collect();
+        let kinds = defs
+            .iter()
+            .map(|d| KindData {
+                heat: move_classes.params_for(d.as_ref().map_or("", |d| &d.movement_class)),
+                move_def: d
+                    .as_ref()
+                    .filter(|d| !d.can_fly && !d.movement_class.is_empty())
+                    .and_then(|d| move_classes.def_for(&d.movement_class))
+                    .map(|class| MoveDefParams::from_class(&class)),
+                max_slope_ratio: spring_pathfinding::max_slope_from_degrees(
+                    d.as_ref()
+                        .map(|d| d.max_slope)
+                        .filter(|&deg| deg > 0.0)
+                        .unwrap_or(DEFAULT_MAX_SLOPE_DEGREES),
+                ),
+            })
+            .collect();
+        let pairs = |gate: fn(&UnitDef, &str) -> bool| -> Box<[bool]> {
+            defs.iter()
+                .flat_map(|attacker| {
+                    defs.iter().map(move |candidate| {
+                        // No FBI for the attacker: unfiltered, like a
+                        // unit that declares no category restrictions.
+                        attacker.as_ref().is_none_or(|a| {
+                            gate(a, candidate.as_ref().map_or("", |c| c.category.as_str()))
+                        })
+                    })
+                })
+                .collect()
+        };
+        Self {
+            auto_target: pairs(auto_target_gate),
+            manual_target: pairs(manual_target_gate),
+            defs,
+            kinds,
+            shared_heat_retention: move_classes.shared_heat_retention(),
+            hexfarm_medians,
+        }
     }
 
     /// An empty registry — tests that instantiate systems without
@@ -126,10 +226,7 @@ impl UnitRegistry {
     /// known `UnitKind`.
     #[cfg(test)]
     pub fn empty() -> Self {
-        Self {
-            defs: UnitDefs::default(),
-            move_classes: MoveClassTable::default(),
-        }
+        Self::for_test(UnitDefs::default())
     }
 
     /// Test-only: build a registry from hand-authored defs, so systems
@@ -137,19 +234,21 @@ impl UnitRegistry {
     /// gates, speed conversion) without loading disk data.
     #[cfg(test)]
     pub fn for_test(defs: UnitDefs) -> Self {
-        Self {
-            defs,
-            move_classes: MoveClassTable::default(),
-        }
+        Self::build(defs, MoveClassTable::default())
     }
 
-    /// Look up the raw FBI definition for a unit kind.
-    ///
-    /// Uses direct BTreeMap lookup since `UnitKind::unitname()` returns
-    /// already-lowercase keys, avoiding the `to_ascii_lowercase()` allocation
-    /// in `UnitDefs::get()`.
+    /// Look up the raw FBI definition for a unit kind (O(1)).
     pub fn def(&self, kind: UnitKind) -> Option<&UnitDef> {
-        self.defs.units.get(kind.unitname())
+        self.defs[kind.index()].as_ref()
+    }
+
+    fn kind(&self, kind: UnitKind) -> &KindData {
+        &self.kinds[kind.index()]
+    }
+
+    /// Index of an `(attacker, candidate)` pair in the gate matrices.
+    fn pair(attacker: UnitKind, candidate: UnitKind) -> usize {
+        attacker.index() * UNIT_KIND_COUNT + candidate.index()
     }
 
     // -- Convenience accessors that map FBI fields to game-usable values --
@@ -167,11 +266,7 @@ impl UnitRegistry {
     /// (`HexFarm8.lua` l.214-245). Raw FBI values (`MaxDamage`,
     /// `BuildTime`), not the port's derived seconds.
     pub fn hexfarm_medians(&self) -> (f64, f64) {
-        let defs = || self.defs.units.values();
-        (
-            spring_map::hexfarm::lua_median(defs().map(|d| d.max_health as f64)),
-            spring_map::hexfarm::lua_median(defs().map(|d| d.build_time as f64)),
-        )
+        self.hexfarm_medians
     }
 
     /// Maximum health (FBI `MaxDamage`).
@@ -185,62 +280,41 @@ impl UnitRegistry {
             .map_or(0.0, |d| d.max_velocity * GAME_SPEED)
     }
 
-    /// Acceleration in elmos/s². FBI `Acceleration` is Spring's
-    /// `UnitDef::maxAcc` in elmos/frame² (`UnitDef.cpp:455`, default
-    /// 0.5), which `CGroundMoveType` applies once per sim frame as
-    /// `accRate` (`GroundMoveType.cpp:518`, `IPathController.cpp:33`).
-    /// Per-second² is therefore `× GAME_SPEED²` = ×900: a Bit's 0.9
-    /// gains 810 elmo/s², reaching its 90 elmo/s top speed in ~3.3
-    /// frames — Spring units snap to speed, they don't ramp for seconds.
-    pub fn acceleration(&self, kind: UnitKind) -> f32 {
-        const DEFAULT_MAX_ACC: f32 = 0.5;
-        let acc = self
-            .def(kind)
-            .map(|d| d.acceleration)
-            .filter(|&a| a > 0.0)
-            .unwrap_or(DEFAULT_MAX_ACC);
-        acc * GAME_SPEED * GAME_SPEED
+    /// `UnitDef::maxAcc` in elmos/frame²: FBI `Acceleration`, default
+    /// 0.5 (`UnitDef.cpp:455`; the TDF parser reads a missing tag as 0).
+    /// Both move types apply it once per sim frame as `accRate`
+    /// (`GroundMoveType.cpp:518`, `IPathController.cpp:33`): a Bit's 0.9
+    /// reaches its 3 elmos/frame top speed in ~3.3 frames — Spring units
+    /// snap to speed, they don't ramp for seconds.
+    pub fn acc_rate(&self, kind: UnitKind) -> f32 {
+        max_acc(self.def(kind))
     }
 
-    /// Braking deceleration in elmos/s². FBI `BrakeRate` is Spring's
-    /// `maxDec` (elmos/frame², defaulting to `maxAcc`, `UnitDef.cpp:459`),
-    /// same ×900 conversion as [`Self::acceleration`]: a Bit's 1.2
-    /// stops it from full speed within `v²/2a` = 3.75 elmos.
-    pub fn brake_rate(&self, kind: UnitKind) -> f32 {
-        let dec = self.def(kind).map_or(0.0, |d| d.brake_rate);
-        if dec > 0.0 {
-            dec * GAME_SPEED * GAME_SPEED
-        } else {
-            self.acceleration(kind)
-        }
+    /// `UnitDef::maxDec` in elmos/frame²: FBI `BrakeRate`, defaulting to
+    /// [`Self::acc_rate`] (`UnitDef.cpp:459`). A Bit's 1.2 stops it from
+    /// full speed within `v²/2a` = 3.75 elmos.
+    pub fn dec_rate(&self, kind: UnitKind) -> f32 {
+        max_dec(self.def(kind))
     }
 
     /// Path-heat deposit rate (per second of walking) for this kind,
     /// from its FBI `MovementClass` via MOVEINFO.TDF. Units without a
     /// class use the upstream LIGHT defaults.
     pub fn heat_produced(&self, kind: UnitKind) -> f32 {
-        self.heat_params(kind).heat_produced
+        self.kind(kind).heat.heat_produced
     }
 
     /// Fraction of this kind's heat that survives one second — see
     /// [`Self::heat_produced`].
     #[cfg(test)]
     pub fn heat_retention(&self, kind: UnitKind) -> f32 {
-        self.heat_params(kind).heat_retention
+        self.kind(kind).heat.heat_retention
     }
 
     /// Per-second retention of the shared path-heat grid — see
     /// [`MoveClassTable::shared_heat_retention`].
     pub fn shared_heat_retention(&self) -> f32 {
-        self.move_classes.shared_heat_retention()
-    }
-
-    fn heat_params(&self, kind: UnitKind) -> super::moveinfo::MoveClassParams {
-        let class = self
-            .def(kind)
-            .map(|d| d.movement_class.as_str())
-            .unwrap_or_default();
-        self.move_classes.params_for(class)
+        self.shared_heat_retention
     }
 
     /// Maximum turn speed in radians per second. Spring's FBI `TurnRate`
@@ -288,16 +362,10 @@ impl UnitRegistry {
     /// Missing FBI entries (tests with an empty registry, unnamed kinds)
     /// leave the weapon unfiltered, matching a unit that declares no
     /// category restrictions.
+    ///
+    /// Precomputed per kind pair at load: an array index.
     pub fn auto_target_allowed(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
-        let Some(attacker_def) = self.def(attacker) else {
-            return true;
-        };
-        let categories = self.def(candidate).map_or("", |d| d.category.as_str());
-        let only = attacker_def.only_target_category1.as_str();
-        if !only.is_empty() && !categories_intersect(only, categories) {
-            return false;
-        }
-        !categories_intersect(&attacker_def.bad_target_category1, categories)
+        self.auto_target[Self::pair(attacker, candidate)]
     }
 
     /// Manual-order gate for the primary weapon. `OnlyTargetCategory1`
@@ -306,15 +374,7 @@ impl UnitRegistry {
     /// `BadTargetCategory1` only affects auto-acquisition. This checks
     /// the OnlyTarget half only.
     pub fn can_attack(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
-        let Some(attacker_def) = self.def(attacker) else {
-            return true;
-        };
-        let only = attacker_def.only_target_category1.as_str();
-        only.is_empty()
-            || categories_intersect(
-                only,
-                self.def(candidate).map_or("", |d| d.category.as_str()),
-            )
+        self.manual_target[Self::pair(attacker, candidate)]
     }
 
     /// Max traversable slope in **Spring's encoding**: `1 - cos(deg ×
@@ -330,25 +390,23 @@ impl UnitRegistry {
     /// would have accepted, leaving units stuck on plateaus that have
     /// 50° ramps the original game routes them through.
     pub fn max_slope_ratio(&self, kind: UnitKind) -> f32 {
-        let deg = self
-            .def(kind)
-            .map(|d| d.max_slope)
-            .filter(|&deg| deg > 0.0)
-            .unwrap_or(DEFAULT_MAX_SLOPE_DEGREES);
-        spring_pathfinding::max_slope_from_degrees(deg)
+        self.kind(kind).max_slope_ratio
     }
 
     /// `CHoverAirMoveType` constants for a flying unit, in Spring's
     /// per-frame units (`AAirMoveType` / `CHoverAirMoveType` ctors).
     pub fn hover_air_params(&self, kind: UnitKind) -> crate::interaction::air_movement::HoverAirParams {
-        let d = self.def(kind).cloned().unwrap_or_default();
-        // `maxAcc = acceleration (default 0.5)`, `maxDec = brakeRate
-        // (default maxAcc)`; the TDF parser reads a missing tag as 0.
-        let acc = if d.acceleration > 0.0 { d.acceleration } else { 0.5 };
-        let dec = if d.brake_rate > 0.0 { d.brake_rate } else { acc };
+        let fallback;
+        let d = match self.def(kind) {
+            Some(d) => d,
+            None => {
+                fallback = UnitDef::default();
+                &fallback
+            }
+        };
         crate::interaction::air_movement::HoverAirParams {
-            acc_rate: acc.max(0.01),
-            dec_rate: dec.max(0.01),
+            acc_rate: max_acc(Some(d)).max(0.01),
+            dec_rate: max_dec(Some(d)).max(0.01),
             altitude_rate: d.vertical_speed.max(0.01),
             turn_rate: d.turn_rate * SHORT_ANGLE_TO_RAD,
             cruise_alt: d.cruise_alt,
@@ -370,12 +428,7 @@ impl UnitRegistry {
     /// looked up in MOVEINFO.TDF), or `None` for structures and
     /// aircraft.
     pub fn move_def(&self, kind: UnitKind) -> Option<MoveDefParams> {
-        let d = self.def(kind)?;
-        if d.can_fly || d.movement_class.is_empty() {
-            return None;
-        }
-        let class = self.move_classes.def_for(&d.movement_class)?;
-        Some(MoveDefParams::from_class(&class))
+        self.kind(kind).move_def
     }
 
     /// `UnitDef::mass` (`UnitDef.cpp:351`): FBI `Mass`, defaulting to
@@ -435,6 +488,26 @@ impl UnitRegistry {
     pub fn build_time(&self, kind: UnitKind) -> f32 {
         self.def(kind)
             .map_or(0.0, |d| d.build_time / DEFAULT_WORKER_TIME)
+    }
+
+    /// Per-team cap on live units of this kind (FBI `UnitRestricted`,
+    /// Spring's `maxThisUnit`). Only `logic_bomb.fbi` declares one (64);
+    /// upstream `Launcher.lua` and `byte.bos` (`lua_GetLogicBombLeft`)
+    /// honour it for launched mines too.
+    pub fn team_limit(&self, kind: UnitKind) -> Option<u32> {
+        self.def(kind).and_then(|d| d.unit_restricted)
+    }
+
+    /// FBI `Init_Cloaked`: the unit is cloaked from the moment it spawns
+    /// (the Logic Bomb; the Worm's cloak is driven by its script cycle).
+    pub fn init_cloaked(&self, kind: UnitKind) -> bool {
+        self.def(kind).is_some_and(|d| d.init_cloaked)
+    }
+
+    /// FBI `IsFeature`: the unit turns into a crushable feature (the Bad
+    /// Block wall).
+    pub fn is_feature(&self, kind: UnitKind) -> bool {
+        self.def(kind).is_some_and(|d| d.is_feature)
     }
 
     /// Whether this unit is a building (cannot move or has zero velocity).
@@ -587,10 +660,7 @@ mod tests {
             ..UnitDef::default()
         };
         defs.units.insert(kind.unitname().to_string(), def);
-        UnitRegistry {
-            defs,
-            move_classes: MoveClassTable::default(),
-        }
+        UnitRegistry::for_test(defs)
     }
 
     /// Upstream KP ships every combat unit with `DamageModifier=0.000001`
@@ -615,10 +685,7 @@ mod tests {
     /// Missing FBI entry falls back to neutral `1.0`.
     #[test]
     fn missing_unit_defaults_to_one() {
-        let reg = UnitRegistry {
-            defs: UnitDefs::default(),
-            move_classes: MoveClassTable::default(),
-        };
+        let reg = UnitRegistry::empty();
         assert_eq!(reg.damage_modifier(UnitKind::Bit), 1.0);
     }
 
@@ -629,10 +696,7 @@ mod tests {
             ..UnitDef::default()
         };
         defs.units.insert(kind.unitname().to_string(), def);
-        UnitRegistry {
-            defs,
-            move_classes: MoveClassTable::default(),
-        }
+        UnitRegistry::for_test(defs)
     }
 
     /// FBI MaxSlope=20 should produce Spring's encoded value
@@ -656,10 +720,7 @@ mod tests {
     /// `MaxSlope=36`, encoded as `1 - cos(54°) ≈ 0.412`.
     #[test]
     fn max_slope_ratio_default_is_kp_class_default() {
-        let reg = UnitRegistry {
-            defs: UnitDefs::default(),
-            move_classes: MoveClassTable::default(),
-        };
+        let reg = UnitRegistry::empty();
         let expected = 1.0 - 54.0_f32.to_radians().cos();
         let got = reg.max_slope_ratio(UnitKind::Bit);
         assert!(
@@ -668,10 +729,10 @@ mod tests {
         );
     }
 
-    /// FBI `Acceleration=0.9` / `BrakeRate=1.2` (bit.fbi) are
-    /// elmos/frame²; at 30 frames/s that is 810 / 1080 elmo/s².
-    /// Missing fields fall back to Spring's defaults (`maxAcc` 0.5,
-    /// `maxDec = maxAcc`).
+    /// FBI `Acceleration=0.9` / `BrakeRate=1.2` (bit.fbi) are Spring's
+    /// per-frame `maxAcc` / `maxDec` as-is; `MaxVelocity` converts to
+    /// elmos/s. Missing fields fall back to Spring's defaults (`maxAcc`
+    /// 0.5, `maxDec = maxAcc`).
     #[test]
     fn accel_brake_conversion_matches_fbi_frame_convention() {
         let mut defs = UnitDefs::default();
@@ -687,8 +748,8 @@ mod tests {
         let reg = UnitRegistry::for_test(defs);
 
         assert_eq!(reg.speed(UnitKind::Bit), 90.0);
-        assert!((reg.acceleration(UnitKind::Bit) - 810.0).abs() < 1e-2);
-        assert!((reg.brake_rate(UnitKind::Bit) - 1080.0).abs() < 1e-2);
+        assert_eq!(reg.acc_rate(UnitKind::Bit), 0.9);
+        assert_eq!(reg.dec_rate(UnitKind::Bit), 1.2);
 
         let mut defs = UnitDefs::default();
         defs.units.insert(
@@ -699,8 +760,8 @@ mod tests {
             },
         );
         let reg = UnitRegistry::for_test(defs);
-        assert!((reg.acceleration(UnitKind::Bit) - 450.0).abs() < 1e-2);
-        assert!((reg.brake_rate(UnitKind::Bit) - 450.0).abs() < 1e-2);
+        assert_eq!(reg.acc_rate(UnitKind::Bit), 0.5);
+        assert_eq!(reg.dec_rate(UnitKind::Bit), 0.5);
     }
 
     /// `max_slope_from_degrees` clamps the FBI input to `[0, 60]`
@@ -740,9 +801,18 @@ mod tests {
         defs.units.insert("bit".into(), bit);
         defs.units.insert("socket".into(), socket);
         defs.units.insert("dos".into(), dos);
-        UnitRegistry {
-            defs,
-            move_classes: MoveClassTable::default(),
+        UnitRegistry::for_test(defs)
+    }
+
+    /// Per-kind flags read from the real FBIs: only `logic_bomb.fbi`
+    /// declares `UnitRestricted` (64) and `Init_Cloaked`.
+    #[test]
+    fn team_limit_and_init_cloaked_come_from_the_logic_bomb_fbi() {
+        let reg = UnitRegistry::load();
+        for &kind in ALL_UNIT_KINDS {
+            let bomb = kind == UnitKind::LogicBomb;
+            assert_eq!(reg.team_limit(kind), bomb.then_some(64), "{kind:?}");
+            assert_eq!(reg.init_cloaked(kind), bomb, "{kind:?}");
         }
     }
 

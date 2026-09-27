@@ -343,7 +343,9 @@ pub fn spawn_unit(
             .insert(crate::units::mechanics::worm::WormSplash(splash));
     }
 
-    if kind.spawns_cloaked() {
+    // Logic Bombs spawn cloaked per their FBI; the Worm starts its
+    // surface-to-bite cycle submerged (worm.bos Create), so it does too.
+    if kind == UnitKind::Worm || unit_registry.init_cloaked(kind) {
         commands
             .entity(unit_entity)
             .insert(crate::units::mechanics::cloak::Cloaked);
@@ -670,7 +672,7 @@ pub fn spawn_queued_viruses(
 /// positions. Sibling of `spawn_queued_viruses`; runs in the same
 /// `Resolve` set so a Byte's `LaunchMines` cast in frame N produces
 /// mines visible in frame N+1's Simulate pass. Logic Bombs auto-pick
-/// up `Cloaked` via `UnitKind::spawns_cloaked`, so they behave like
+/// up `Cloaked` from their FBI `Init_Cloaked`, so they behave like
 /// factory-built mines the moment they appear.
 ///
 /// Each mine is dropped when its team already fields the Logic Bomb
@@ -682,7 +684,7 @@ pub fn spawn_queued_mines(
     live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
     mut ctx: SpawnContext,
 ) {
-    let limit = UnitKind::LogicBomb.team_limit().unwrap_or(u32::MAX);
+    let limit = ctx.unit_registry.team_limit(UnitKind::LogicBomb).unwrap_or(u32::MAX);
     let mut counts =
         crate::units::lifecycle::bookkeeping::team_kind_counts(UnitKind::LogicBomb, &live_units);
     for spawn in mine_spawns.drain() {
