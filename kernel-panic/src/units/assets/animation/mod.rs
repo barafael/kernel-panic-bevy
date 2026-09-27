@@ -216,9 +216,15 @@ pub enum FxEvent {
     },
     /// Piece detonation (`explode piece type ...`). Every explode class
     /// renders the same burst, so the class isn't carried.
-    Explode { piece: usize },
-    Show { piece: usize },
-    Hide { piece: usize },
+    Explode {
+        piece: usize,
+    },
+    Show {
+        piece: usize,
+    },
+    Hide {
+        piece: usize,
+    },
 }
 
 /// What a driver wants an `emit-sfx` to look like, replacing the raw COB
@@ -842,7 +848,12 @@ pub fn sync_muzzle_pieces(
 /// rendering half. Sizes follow the old range-bucketing so the visual
 /// language is unchanged (see the [`SfxKind`] docs for the upstream
 /// constant ranges each kind stands in for).
-fn dispatch_emit_sfx(kind: SfxKind, pos: Vec3, faction: Faction, explosions: &mut PendingExplosions) {
+fn dispatch_emit_sfx(
+    kind: SfxKind,
+    pos: Vec3,
+    faction: Faction,
+    explosions: &mut PendingExplosions,
+) {
     let (radius, intensity) = match kind {
         SfxKind::FireFlash => (4.0, 0.8),
         SfxKind::Puff => (2.5, 0.6),

@@ -21,11 +21,11 @@
 use bevy::prelude::*;
 
 use super::movement::{CommandQueue, GuardTarget, MoveTarget, QueuedCommand};
-use super::{clear_orders, replace_order};
 use super::selection::{
     OrderMarker, PendingMoveIndicators, PickRayCast, Selected, apply_ordered_command, ground_hit,
     unit_hit,
 };
+use super::{clear_orders, replace_order};
 use crate::interaction::cursor::{CursorKind, CursorRequest};
 use crate::rendering::camera::RtsCamera;
 use crate::ui::hud::command_panel::commands::CmdId;
@@ -315,7 +315,6 @@ fn trigger_ability_click(
     modes.committed(&keys);
 }
 
-
 /// Ground-target click: while [`Mode::AttackGround`] is
 /// armed, the next left-click issues an [`AttackGroundOrder`] for every
 /// selected unit. `attack_ground_system` moves the unit into weapon range
@@ -365,7 +364,6 @@ fn trigger_attack_ground_click(
         modes.clear();
     }
 }
-
 
 /// Click handler for the move mode: the next left-click issues a plain
 /// move order. Shift queues it behind the active order and stays armed.
@@ -439,8 +437,7 @@ fn trigger_set_target_click(
     let Ok(t_team) = unit_info_q.get(target) else {
         return;
     };
-    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0)
-    else {
+    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0) else {
         return;
     };
     if is_friendly(sel_team, t_team.0) {
@@ -569,10 +566,6 @@ fn trigger_attack_move_click(
     }
 }
 
-
-
-
-
 /// Click handler: while [`Mode::Guard`] is armed, the next
 /// left-click on a friendly unit makes every selected mobile unit guard
 /// it — trail it at close range while the auto-attack path defends it.
@@ -604,8 +597,7 @@ fn trigger_guard_click(
         return;
     };
     // Guarding makes sense only on a friendly unit.
-    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0)
-    else {
+    let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0) else {
         return;
     };
     if !is_friendly(sel_team, t_team.0) {
@@ -625,4 +617,3 @@ fn trigger_guard_click(
     }
     modes.committed(&keys);
 }
-

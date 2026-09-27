@@ -152,7 +152,14 @@ pub fn find_path_masked(
     src: [f32; 2],
     dst: [f32; 2],
 ) -> Option<Path> {
-    find_path_masked_in(&mut SearchScratch::default(), speed_map, mask, heat, src, dst)
+    find_path_masked_in(
+        &mut SearchScratch::default(),
+        speed_map,
+        mask,
+        heat,
+        src,
+        dst,
+    )
 }
 
 /// Reusable A\* working memory: per-cell cost / parent / closed state,
@@ -196,7 +203,11 @@ impl SearchScratch {
 
     fn node(&self, cell: usize) -> Node {
         let n = self.nodes[cell];
-        if n.stamp >= self.generation { n } else { UNSEEN }
+        if n.stamp >= self.generation {
+            n
+        } else {
+            UNSEEN
+        }
     }
 
     /// Record a cell's cost and parent (a closed cell stays closed).
@@ -204,7 +215,11 @@ impl SearchScratch {
         self.nodes[cell] = Node {
             stamp: self.nodes[cell].stamp.max(self.generation),
             g_cost,
-            came_from: if came_from == usize::MAX { u32::MAX } else { came_from as u32 },
+            came_from: if came_from == usize::MAX {
+                u32::MAX
+            } else {
+                came_from as u32
+            },
         };
     }
 
@@ -330,7 +345,9 @@ impl ComponentLabels {
 
     /// Number of components (roots).
     pub fn count(&self) -> u32 {
-        (1..self.alias.len() as u32).filter(|&l| self.alias[l as usize] == l).count() as u32
+        (1..self.alias.len() as u32)
+            .filter(|&l| self.alias[l as usize] == l)
+            .count() as u32
     }
 
     fn fresh_label(&mut self) -> u32 {
@@ -367,7 +384,12 @@ impl ComponentLabels {
     /// the open cells around them must still reach each other within
     /// [`RECONNECT_WINDOW`] — otherwise the change may have split a
     /// component and everything is rebuilt. Returns whether it rebuilt.
-    pub fn update_region(&mut self, speed_map: &SpeedMap, mask: Option<&BlockMask>, bbox: [i32; 4]) -> bool {
+    pub fn update_region(
+        &mut self,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        bbox: [i32; 4],
+    ) -> bool {
         if self.width != speed_map.width || self.height != speed_map.height {
             // Not the grid these labels were built on.
             *self = Self::build(speed_map, mask);
@@ -432,7 +454,9 @@ impl ComponentLabels {
         // Also blocked cells' neighbours may have been bridged only
         // through the (now closed) diagonal rule; the window check below
         // covers every case: all frontier cells must reach each other.
-        if frontier.len() > 1 && !self.connected_within(speed_map, mask, &frontier, [x0, z0, x1, z1]) {
+        if frontier.len() > 1
+            && !self.connected_within(speed_map, mask, &frontier, [x0, z0, x1, z1])
+        {
             *self = Self::build(speed_map, mask);
             return true;
         }
@@ -442,7 +466,13 @@ impl ComponentLabels {
     /// Do all `cells` reach each other by open cells inside the window
     /// `bbox` grown by [`RECONNECT_WINDOW`]? (Reaching each other inside
     /// the window proves they still share a component.)
-    fn connected_within(&self, speed_map: &SpeedMap, mask: Option<&BlockMask>, cells: &[usize], bbox: [i32; 4]) -> bool {
+    fn connected_within(
+        &self,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        cells: &[usize],
+        bbox: [i32; 4],
+    ) -> bool {
         let (w, h) = (self.width as i32, self.height as i32);
         let wx0 = (bbox[0] - RECONNECT_WINDOW).max(0);
         let wz0 = (bbox[1] - RECONNECT_WINDOW).max(0);
@@ -618,8 +648,7 @@ impl SearchScratch {
                 if start_label == 0 || l.at(dx, dz) == start_label {
                     return None;
                 }
-                l.nearest_distance(start_label, dx, dz)
-                    .map(|h| h * h_scale)
+                l.nearest_distance(start_label, dx, dz).map(|h| h * h_scale)
             });
 
         self.begin((width * height) as usize);
@@ -721,7 +750,8 @@ impl SearchScratch {
                 if step_len > SQUARE_SIZE + 0.5 {
                     let ax = cell_idx(nx, cz, width);
                     let az = cell_idx(cx, nz, width);
-                    let closed = |i: usize| speed_map.speeds[i] <= 0.0 || mask.is_some_and(|m| m.cells[i]);
+                    let closed =
+                        |i: usize| speed_map.speeds[i] <= 0.0 || mask.is_some_and(|m| m.cells[i]);
                     if closed(ax) || closed(az) {
                         continue;
                     }
@@ -789,7 +819,12 @@ impl SearchScratch {
         let mut points: Vec<[f32; 2]> = Vec::with_capacity(cells.len() + 1);
         points.push(src);
         // Escaping a closed start cell: walk to the open cell first.
-        if cell_idx(world_to_cell(src[0], width), world_to_cell(src[1], height), width) != start {
+        if cell_idx(
+            world_to_cell(src[0], width),
+            world_to_cell(src[1], height),
+            width,
+        ) != start
+        {
             points.push(world(start));
         }
         for &c in &cells[1..] {
@@ -924,8 +959,16 @@ pub fn traverse_cells(a: [f32; 2], b: [f32; 2], mut visit: impl FnMut(i32, i32) 
     let (dx, dz) = (x1 - x0, z1 - z0);
     let step_x = if dx > 0.0 { 1 } else { -1 };
     let step_z = if dz > 0.0 { 1 } else { -1 };
-    let t_delta_x = if dx != 0.0 { 1.0 / dx.abs() } else { f32::INFINITY };
-    let t_delta_z = if dz != 0.0 { 1.0 / dz.abs() } else { f32::INFINITY };
+    let t_delta_x = if dx != 0.0 {
+        1.0 / dx.abs()
+    } else {
+        f32::INFINITY
+    };
+    let t_delta_z = if dz != 0.0 {
+        1.0 / dz.abs()
+    } else {
+        f32::INFINITY
+    };
     let mut t_max_x = if dx > 0.0 {
         (x0.floor() + 1.0 - x0) * t_delta_x
     } else if dx < 0.0 {
@@ -989,8 +1032,13 @@ pub fn line_clear(
         if x < 0 || z < 0 || !open(speed_map, mask, x as u32, z as u32) {
             return false;
         }
-        let centre = [(x as f32 + 0.5) * SQUARE_SIZE, (z as f32 + 0.5) * SQUARE_SIZE];
-        !heat.is_some_and(|hm| hm.get_with_neighbors(centre) * HEAT_COST_SOFTNESS > HEAT_SMOOTH_TOLERANCE)
+        let centre = [
+            (x as f32 + 0.5) * SQUARE_SIZE,
+            (z as f32 + 0.5) * SQUARE_SIZE,
+        ];
+        !heat.is_some_and(|hm| {
+            hm.get_with_neighbors(centre) * HEAT_COST_SOFTNESS > HEAT_SMOOTH_TOLERANCE
+        })
     })
 }
 
@@ -1026,7 +1074,8 @@ mod tests {
         ];
         for (src, dst) in queries {
             let fresh = find_path_masked(&map, None, None, src, dst).expect("path");
-            let reused = find_path_masked_in(&mut scratch, &map, None, None, src, dst).expect("path");
+            let reused =
+                find_path_masked_in(&mut scratch, &map, None, None, src, dst).expect("path");
             assert_eq!(fresh.points, reused.points);
             assert_eq!(fresh.reached_goal, reused.reached_goal);
         }
@@ -1046,9 +1095,15 @@ mod tests {
             }
         }
         let mut scratch = SearchScratch::default();
-        for (src, dst) in [([20.0, 20.0], [300.0, 40.0]), ([20.0, 300.0], [260.0, 260.0])] {
+        for (src, dst) in [
+            ([20.0, 20.0], [300.0, 40.0]),
+            ([20.0, 300.0], [260.0, 260.0]),
+        ] {
             let one_shot = find_path_masked(&map, None, None, src, dst).expect("path");
-            let mut search = scratch.begin_search(&map, None, src, dst).ok().expect("needs a search");
+            let mut search = scratch
+                .begin_search(&map, None, src, dst)
+                .ok()
+                .expect("needs a search");
             let mut steps = 0;
             let stepped = loop {
                 steps += 1;
@@ -1083,16 +1138,20 @@ mod tests {
             }
         }
         let labels = ComponentLabels::build(&map, None);
-        assert!(labels.count() >= 3, "left, right, pocket: {}", labels.count());
+        assert!(
+            labels.count() >= 3,
+            "left, right, pocket: {}",
+            labels.count()
+        );
         let mut plain = SearchScratch::default();
         let mut labelled = SearchScratch::default();
         let cases = [
-            ([20.0, 20.0], [260.0, 260.0]),   // into the pocket
-            ([260.0, 260.0], [20.0, 20.0]),   // out of the pocket
-            ([20.0, 300.0], [380.0, 300.0]),  // across the wall (gap sealed)
-            ([380.0, 20.0], [60.0, 200.0]),   // across, other way
-            ([20.0, 20.0], [196.0, 100.0]),   // reachable: no change
-            ([20.0, 20.0], [196.0, 44.0]),    // goal on the wall itself
+            ([20.0, 20.0], [260.0, 260.0]),  // into the pocket
+            ([260.0, 260.0], [20.0, 20.0]),  // out of the pocket
+            ([20.0, 300.0], [380.0, 300.0]), // across the wall (gap sealed)
+            ([380.0, 20.0], [60.0, 200.0]),  // across, other way
+            ([20.0, 20.0], [196.0, 100.0]),  // reachable: no change
+            ([20.0, 20.0], [196.0, 44.0]),   // goal on the wall itself
         ];
         for (src, dst) in cases {
             let flood = find_path_masked_in(&mut plain, &map, None, None, src, dst).expect("path");
@@ -1100,7 +1159,9 @@ mod tests {
                 .begin_search_labelled(&map, None, Some(&labels), src, dst)
                 .ok()
                 .expect("needs a search");
-            let SearchStatus::Done(Some(fast)) = labelled.step(&mut search, &map, None, None, usize::MAX) else {
+            let SearchStatus::Done(Some(fast)) =
+                labelled.step(&mut search, &map, None, None, usize::MAX)
+            else {
                 panic!("labelled search failed");
             };
             assert_eq!(flood.reached_goal, fast.reached_goal, "{src:?} → {dst:?}");
@@ -1154,7 +1215,11 @@ mod tests {
             map.refresh_max_speed();
             labels.update_region(&map, None, bbox);
             let fresh = ComponentLabels::build(&map, None);
-            assert_eq!(partition(&labels), partition(&fresh), "after {bbox:?} = {v}");
+            assert_eq!(
+                partition(&labels),
+                partition(&fresh),
+                "after {bbox:?} = {v}"
+            );
         }
     }
 
@@ -1256,7 +1321,10 @@ mod tests {
             .expect("path around the masked wall");
         assert!(path.reached_goal);
         for w in path.points.windows(2) {
-            assert!(line_clear(w[0], w[1], &map, Some(&mask), None), "segment {w:?} crosses the mask");
+            assert!(
+                line_clear(w[0], w[1], &map, Some(&mask), None),
+                "segment {w:?} crosses the mask"
+            );
         }
         assert!(path.total_length() > 220.0);
     }

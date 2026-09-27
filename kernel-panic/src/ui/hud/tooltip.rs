@@ -510,7 +510,12 @@ mod tests {
                 current: hp,
                 max: 100.0,
             };
-            tooltip_lines(&hover, 1, Some((UnitKind::Bit, Some(&health), packets)), &registry)
+            tooltip_lines(
+                &hover,
+                1,
+                Some((UnitKind::Bit, Some(&health), packets)),
+                &registry,
+            )
         };
         let full = at(100.0, None);
         let hurt = at(99.4, None);

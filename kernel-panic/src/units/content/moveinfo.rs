@@ -131,7 +131,9 @@ impl MoveClassTable {
         self.classes
             .values()
             .map(|p| p.heat_retention)
-            .fold(None, |max: Option<f32>, r| Some(max.map_or(r, |m| m.max(r))))
+            .fold(None, |max: Option<f32>, r| {
+                Some(max.map_or(r, |m| m.max(r)))
+            })
             .unwrap_or(DEFAULT_HEAT_PARAMS.heat_retention)
     }
 }
@@ -168,7 +170,10 @@ mod tests {
         let medium = table.def_for("MEDIUM").unwrap();
         assert_eq!((medium.footprint_x, medium.crush_strength), (4.0, 60.0));
         let heavy = table.def_for("heavy").unwrap();
-        assert_eq!((heavy.footprint_z, heavy.crush_strength, heavy.max_slope_deg), (4.0, 300.0, 36.0));
+        assert_eq!(
+            (heavy.footprint_z, heavy.crush_strength, heavy.max_slope_deg),
+            (4.0, 300.0, 36.0)
+        );
     }
 
     /// Unknown classes fall back to the LIGHT defaults.

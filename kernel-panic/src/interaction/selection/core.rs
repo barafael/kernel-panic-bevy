@@ -29,7 +29,11 @@ impl Plugin for SelectionCorePlugin {
             // the menu buttons, and the demo behind it is all-AI.
             .configure_sets(
                 Update,
-                (SelectionSet::Hover, SelectionSet::Select, SelectionSet::RightClick)
+                (
+                    SelectionSet::Hover,
+                    SelectionSet::Select,
+                    SelectionSet::RightClick,
+                )
                     .run_if(in_state(crate::game_setup::AppState::InGame)),
             )
             .add_systems(
@@ -471,10 +475,10 @@ pub(crate) fn unit_hit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::MinimalPlugins;
     use bevy::camera::CameraPlugin;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::transform::TransformPlugin;
-    use bevy::MinimalPlugins;
 
     /// The selection volume is a `Mesh3d` with no material: Bevy's
     /// visibility pass must still give it an `Aabb` and mark it
@@ -498,7 +502,11 @@ mod tests {
         ));
         let spawn_unit = |world: &mut World, x: f32, vis: Visibility| {
             let unit = world
-                .spawn((UnitType(crate::units::content::definitions::UnitKind::Bit), Transform::from_xyz(x, 0.0, 0.0), vis))
+                .spawn((
+                    UnitType(crate::units::content::definitions::UnitKind::Bit),
+                    Transform::from_xyz(x, 0.0, 0.0),
+                    vis,
+                ))
                 .id();
             world.spawn((
                 SelectionVolume,
@@ -526,7 +534,11 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(hit(app.world_mut(), 0.0), Some(visible));
-        assert_eq!(hit(app.world_mut(), 100.0), None, "hidden root: {cloaked:?} unpickable");
+        assert_eq!(
+            hit(app.world_mut(), 100.0),
+            None,
+            "hidden root: {cloaked:?} unpickable"
+        );
         assert_eq!(hit(app.world_mut(), 50.0), None);
     }
 }

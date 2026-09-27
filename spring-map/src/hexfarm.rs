@@ -363,8 +363,7 @@ impl HexFarm {
         let density = if rng.random() > 0.75 { 1 } else { 2 };
         let tower_radius = (192.5 + 576.0 * rng.random()).floor();
         let inter_length = 2.0 * tower_radius + (4.5 + 380.0 * rng.random()).floor();
-        let rect_width =
-            (64.5 + (tower_radius - 64.0).max(0.0) * rng.random().powf(0.4)).floor();
+        let rect_width = (64.5 + (tower_radius - 64.0).max(0.0) * rng.random().powf(0.4)).floor();
         let mut bridge_angle = rng.range(-45, 60) as f64 * PI / 180.0;
         if (bridge_angle * 180.0 / PI).abs() < 1.9 {
             bridge_angle = 0.0;
@@ -373,9 +372,8 @@ impl HexFarm {
         let (cx, cz) = (setup.map_size_x / 2.0, setup.map_size_z / 2.0);
         let half_x = 16.0 * (map_dim_scale * setup.map_size_x / 32.0).ceil();
         let half_z = 16.0 * (map_dim_scale * setup.map_size_z / 32.0).ceil();
-        let height_diff = half_x.max(half_z)
-            * (1.0 - 2.0 * tower_radius / inter_length)
-            * bridge_angle.tan();
+        let height_diff =
+            half_x.max(half_z) * (1.0 - 2.0 * tower_radius / inter_length) * bridge_angle.tan();
         let pit_depth = 128.0 + tower_radius / cx.max(cz) * height_diff.abs();
         let (center_height, edge_height) = if height_diff > 0.0 {
             let center = pit_depth + 512.0;
@@ -532,8 +530,8 @@ impl HexFarm {
         let r = &self.rects[k];
         let (a, b) = (&self.hexes[r.hex1], &self.hexes[r.hex2]);
         let (x1, y1, z1, x2, y2, z2) = (a.x, a.y, a.z, b.x, b.y, b.z);
-        let mut p = ((z1 - z) * (z1 - z2) - (x1 - x) * (x2 - x1))
-            / ((z2 - z1).powi(2) + (x2 - x1).powi(2));
+        let mut p =
+            ((z1 - z) * (z1 - z2) - (x1 - x) * (x2 - x1)) / ((z2 - z1).powi(2) + (x2 - x1).powi(2));
         let d = ((z2 - z1).powi(2) + (x2 - x1).powi(2)).sqrt() / 2.0;
         let med = self.tower_radius * (PI / 6.0).cos();
         p = ((2.0 * p - 1.0) * d / (d - med) + 1.0) / 2.0;
@@ -670,9 +668,7 @@ impl HexFarm {
                 for j in 0..self.hexes.len() {
                     let (a, b) = (&self.hexes[i], &self.hexes[j]);
                     let d = ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt();
-                    if d < il * 2.1
-                        && d > il * 1.9
-                        && (bridged[i].is_empty() || bridged[i][0] != j)
+                    if d < il * 2.1 && d > il * 1.9 && (bridged[i].is_empty() || bridged[i][0] != j)
                     {
                         self.push_rect(i, j);
                         bridged[i].push(j);
@@ -842,8 +838,16 @@ impl HexFarm {
 
     fn poly_shape(&self, p: Poly) -> (&[[f64; 2]], &Bounds, bool) {
         match p {
-            Poly::Hex(k) => (&self.hexes[k].c, &self.hexes[k].bounds, self.hexes[k].hidden),
-            Poly::Rect(k) => (&self.rects[k].c, &self.rects[k].bounds, self.rects[k].hidden),
+            Poly::Hex(k) => (
+                &self.hexes[k].c,
+                &self.hexes[k].bounds,
+                self.hexes[k].hidden,
+            ),
+            Poly::Rect(k) => (
+                &self.rects[k].c,
+                &self.rects[k].bounds,
+                self.rects[k].hidden,
+            ),
         }
     }
 
@@ -1128,11 +1132,15 @@ impl HexFarm {
         let bp = self.poly_buildpoint;
         for r in self.hexes[k].bridge_links.clone() {
             let p = Poly::Rect(r);
-            if !(self.rects[r].hidden && self.rects[r].progress.is_none() && self.health(p) <= 0.0) {
+            if !(self.rects[r].hidden && self.rects[r].progress.is_none() && self.health(p) <= 0.0)
+            {
                 continue;
             }
             *self.health_mut(p) += points;
-            self.set_percent(p, Some((0.5 + 100.0 * (bp + self.health(p)) / bp).floor() as i32));
+            self.set_percent(
+                p,
+                Some((0.5 + 100.0 * (bp + self.health(p)) / bp).floor() as i32),
+            );
             if self.health(p) >= 0.0 {
                 *self.health_mut(p) = self.poly_hitpoint;
                 self.set_percent(p, None);
@@ -1149,11 +1157,15 @@ impl HexFarm {
         }
         for h in self.hexes[k].tower_links.clone() {
             let p = Poly::Hex(h);
-            if !(self.hexes[h].hidden && self.hexes[h].progress.is_none() && self.health(p) <= 0.0) {
+            if !(self.hexes[h].hidden && self.hexes[h].progress.is_none() && self.health(p) <= 0.0)
+            {
                 continue;
             }
             *self.health_mut(p) += points;
-            self.set_percent(p, Some((0.5 + 100.0 * (bp + self.health(p)) / bp).floor() as i32));
+            self.set_percent(
+                p,
+                Some((0.5 + 100.0 * (bp + self.health(p)) / bp).floor() as i32),
+            );
             if self.health(p) >= 0.0 {
                 *self.health_mut(p) = self.poly_hitpoint;
                 self.set_percent(p, None);
@@ -1441,7 +1453,10 @@ mod tests {
 
     #[test]
     fn same_seed_same_layout() {
-        let (a, b) = (HexFarm::generate(7, setup(2)), HexFarm::generate(7, setup(2)));
+        let (a, b) = (
+            HexFarm::generate(7, setup(2)),
+            HexFarm::generate(7, setup(2)),
+        );
         assert_eq!(a.hexes.len(), b.hexes.len());
         assert_eq!(a.rects.len(), b.rects.len());
         assert_eq!(a.start_positions, b.start_positions);
@@ -1458,18 +1473,25 @@ mod tests {
             let step = 7.0;
             let p = farm.smooth_mesh_profile(step);
             let void_floor = farm.center_height.min(farm.edge_height) - farm.pit_depth;
-            let (lo, hi) = farm.hexes.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), h| {
-                (lo.min(h.y), hi.max(h.y))
-            });
+            let (lo, hi) = farm
+                .hexes
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), h| {
+                    (lo.min(h.y), hi.max(h.y))
+                });
             for h in &farm.hexes {
-                let s = ((h.x - farm.map_center_x).powi(2) + (h.z - farm.map_center_z).powi(2)).sqrt();
+                let s =
+                    ((h.x - farm.map_center_x).powi(2) + (h.z - farm.map_center_z).powi(2)).sqrt();
                 let k = (s / step).round() as usize;
                 assert!(p[k] >= h.y - 1e-9, "seed {seed}: ring below its tower");
             }
             for &y in &p {
                 // Interpolation between rings stays within the towers'
                 // span (bar extrapolation off the outer ring's edge).
-                assert!(y > void_floor, "seed {seed}: profile dips into the void ({y})");
+                assert!(
+                    y > void_floor,
+                    "seed {seed}: profile dips into the void ({y})"
+                );
                 assert!(y <= hi + (hi - lo) + 1.0);
             }
         }
@@ -1485,7 +1507,10 @@ mod tests {
         let (mx, my) = mesh.dims();
         let mut hit = vec![false; mx * my];
         farm.set_whole_smooth_mesh(|x, z, h| {
-            if mesh.set_smooth_mesh(x as f32, z as f32, h as f32, None).is_some() {
+            if mesh
+                .set_smooth_mesh(x as f32, z as f32, h as f32, None)
+                .is_some()
+            {
                 hit[(z / 16.0) as usize * mx + (x / 16.0) as usize] = true;
             }
         });
@@ -1530,7 +1555,8 @@ mod tests {
                 let (a, b) = (&farm.hexes[r.hex1], &farm.hexes[r.hex2]);
                 let d = ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt();
                 assert!(
-                    d < farm.inter_length * 1.2 || (d > farm.inter_length * 1.9 && d < farm.inter_length * 2.1),
+                    d < farm.inter_length * 1.2
+                        || (d > farm.inter_length * 1.9 && d < farm.inter_length * 2.1),
                     "seed {seed}: bridge spans {d} (inter {})",
                     farm.inter_length
                 );
@@ -1550,7 +1576,10 @@ mod tests {
                 let h = &farm.hexes[k];
                 assert!(!h.hidden, "seed {seed}: start tower sunk");
                 assert!(!farm.is_void(sp[0], sp[1]));
-                let (ix, iz) = ((sp[0] / 8.0).round() as usize, (sp[1] / 8.0).round() as usize);
+                let (ix, iz) = (
+                    (sp[0] / 8.0).round() as usize,
+                    (sp[1] / 8.0).round() as usize,
+                );
                 for dz in 0..3 {
                     for dx in 0..3 {
                         let y = hm[(iz + dz - 1) * w + ix + dx - 1];
@@ -1617,7 +1646,12 @@ mod tests {
     }
 
     /// Run sweeps (every 41 frames from 25) with `occupied` fixed.
-    fn sweep(farm: &mut HexFarm, frames: &mut f64, count: usize, occupied: &std::collections::HashSet<Poly>) {
+    fn sweep(
+        farm: &mut HexFarm,
+        frames: &mut f64,
+        count: usize,
+        occupied: &std::collections::HashSet<Poly>,
+    ) {
         for _ in 0..count {
             *frames += 41.0;
             farm.game_frame(*frames, occupied);
@@ -1673,7 +1707,12 @@ mod tests {
         let n = farm.hexes[start].tower_links[0];
         let mut frame = 25.0;
         farm.game_frame(frame, &std::collections::HashSet::from([Poly::Hex(start)]));
-        sweep(&mut farm, &mut frame, 2, &std::collections::HashSet::from([Poly::Hex(start)]));
+        sweep(
+            &mut farm,
+            &mut frame,
+            2,
+            &std::collections::HashSet::from([Poly::Hex(start)]),
+        );
         sweep(&mut farm, &mut frame, 10, &Default::default());
         assert!(farm.hexes[n].hidden && farm.hexes[n].progress.is_none());
     }
@@ -1694,7 +1733,10 @@ mod tests {
         let (x, z) = (farm.hexes[n].x, farm.hexes[n].z);
         farm.explosion(frame, x, z, farm.poly_hitpoint * 0.5);
         assert!(!farm.hexes[n].hidden);
-        assert_eq!(farm.drain_events(), vec![HexFarmEvent::Percent(Poly::Hex(n), Some(50))]);
+        assert_eq!(
+            farm.drain_events(),
+            vec![HexFarmEvent::Percent(Poly::Hex(n), Some(50))]
+        );
         farm.explosion(frame, x, z, farm.poly_hitpoint);
         assert!(farm.hexes[n].hidden && farm.is_void(x, z));
         assert_eq!(farm.health(Poly::Hex(n)), -farm.poly_buildpoint);

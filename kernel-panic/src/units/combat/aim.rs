@@ -74,9 +74,11 @@ impl AimLaunch {
             return Self::Direct;
         };
         match w.category() {
-            C::MissileLauncher | C::StarburstLauncher if w.trajectory_height > 0.0 => Self::Missile {
-                trajectory_height: w.trajectory_height,
-            },
+            C::MissileLauncher | C::StarburstLauncher if w.trajectory_height > 0.0 => {
+                Self::Missile {
+                    trajectory_height: w.trajectory_height,
+                }
+            }
             C::Cannon if w.weapon_velocity > 0.0 => Self::Cannon {
                 speed: w.weapon_velocity / crate::sim::GAME_SPEED,
             },
@@ -248,8 +250,11 @@ pub fn drive_aim_script(
     >,
 ) {
     for (mut aim, mut animator, gtf, target, move_target, move_path, deployable) in &mut query {
-        let (rel_heading, pitch_rad) =
-            local_aim_angles(gtf.rotation(), target.pos - gtf.translation(), target.launch);
+        let (rel_heading, pitch_rad) = local_aim_angles(
+            gtf.rotation(),
+            target.pos - gtf.translation(),
+            target.launch,
+        );
 
         let dh = (rel_heading - aim.last_heading_rad).abs();
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
@@ -484,7 +489,13 @@ mod tests {
         let target = Vec3::new(0.0, 0.0, -1000.0);
         let (_, p) = local_aim_angles(level, target, AimLaunch::Direct);
         assert!(p.abs() < 1e-6);
-        let (_, p) = local_aim_angles(level, target, AimLaunch::Missile { trajectory_height: 1.0 });
+        let (_, p) = local_aim_angles(
+            level,
+            target,
+            AimLaunch::Missile {
+                trajectory_height: 1.0,
+            },
+        );
         assert!((p - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{p}");
         let v = 400.0 / crate::sim::GAME_SPEED;
         let (_, p) = local_aim_angles(level, target, AimLaunch::Cannon { speed: v });

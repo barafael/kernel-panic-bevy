@@ -145,9 +145,9 @@ pub fn showcase_director(
     // Phase 1 — find the team-0 homebase once.
     // ------------------------------------------------------------------
     if d.homebase.is_none() {
-        let found = homebases.iter_mut().find(|(_, ut, team, ..)| {
-            team.0 == 0 && ut.0.is_homebase()
-        });
+        let found = homebases
+            .iter_mut()
+            .find(|(_, ut, team, ..)| team.0 == 0 && ut.0.is_homebase());
         if let Some((entity, _ut, _team, gtf, _prod, _homebase)) = found {
             d.homebase = Some(entity);
             d.home_pos = Some(gtf.translation());
@@ -219,8 +219,7 @@ pub fn showcase_director(
             let cx = home_pos.x.clamp(RING_RADIUS, world_w - RING_RADIUS);
             let cz = home_pos.z.clamp(RING_RADIUS, world_d - RING_RADIUS);
             for i in 0..missing {
-                let angle =
-                    std::f32::consts::TAU * i as f32 / missing as f32;
+                let angle = std::f32::consts::TAU * i as f32 / missing as f32;
                 let r = RING_RADIUS + (i as f32) * RING_SPACING;
                 let rx = (cx + r * angle.cos()).clamp(0.0, world_w);
                 let rz = (cz + r * angle.sin()).clamp(0.0, world_d);
@@ -242,20 +241,15 @@ pub fn showcase_director(
     // ------------------------------------------------------------------
     if d.primed && d.build_index < d.builds.len() {
         let team0 = TeamId(0);
-        if let Some((entity, _team, _ut, _mt, _pb, _c)) = constructors.iter().find(|(
-            _entity,
-            team,
-            ut,
-            mt,
-            pb,
-            c,
-        )| {
-            team.0 == team0.0
-                && ut.0 == d.faction.constructor()
-                && mt.is_none()
-                && pb.is_none()
-                && c.is_none()
-        }) {
+        if let Some((entity, _team, _ut, _mt, _pb, _c)) =
+            constructors.iter().find(|(_entity, team, ut, mt, pb, c)| {
+                team.0 == team0.0
+                    && ut.0 == d.faction.constructor()
+                    && mt.is_none()
+                    && pb.is_none()
+                    && c.is_none()
+            })
+        {
             let site = d.sites[d.build_index];
             let kind = d.builds[d.build_index];
             crate::interaction::replace_order(

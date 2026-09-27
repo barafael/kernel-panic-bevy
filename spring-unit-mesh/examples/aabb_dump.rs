@@ -3,7 +3,7 @@
 //!   cargo run --release --example aabb_dump -- <objects3d-dir> <name.s3o> ...
 //! Set PIECES=1 to also print the per-piece tree with y extents.
 
-use spring_unit_mesh::{parse_s3o, S3OPiece};
+use spring_unit_mesh::{S3OPiece, parse_s3o};
 
 fn walk(piece: &S3OPiece, parent: [f32; 3], mins: &mut [f32; 3], maxs: &mut [f32; 3]) {
     let world = [

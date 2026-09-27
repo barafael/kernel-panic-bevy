@@ -113,14 +113,15 @@ impl CegExpr {
         if !self.is_literal() {
             return None;
         }
-        Some(self
-            .0
-            .iter()
-            .filter_map(|op| match op {
-                CegOp::Add(v) => Some(*v),
-                _ => None,
-            })
-            .sum())
+        Some(
+            self.0
+                .iter()
+                .filter_map(|op| match op {
+                    CegOp::Add(v) => Some(*v),
+                    _ => None,
+                })
+                .sum(),
+        )
     }
 
     /// True if this expression reduces to a single literal (no
@@ -556,7 +557,9 @@ impl EffectLayer {
             EffectClass::ExpGenSpawner => {
                 EffectProperties::Spawner(SpawnerProperties::from_section(props))
             }
-            EffectClass::ExploSpike => EffectProperties::Spike(SpikeProperties::from_section(props)),
+            EffectClass::ExploSpike => {
+                EffectProperties::Spike(SpikeProperties::from_section(props))
+            }
             EffectClass::Stars | EffectClass::Other(_) => {
                 EffectProperties::Raw(props.map(|p| p.entries.clone()).unwrap_or_default())
             }

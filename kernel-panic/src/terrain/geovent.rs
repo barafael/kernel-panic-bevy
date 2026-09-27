@@ -437,12 +437,22 @@ pub fn tick_geovent_smoke(
         let pos = puff.pos;
         batches.push_quad(
             &puff.material,
-            [pos - right - up, pos + right - up, pos + right + up, pos - right + up],
+            [
+                pos - right - up,
+                pos + right - up,
+                pos + right + up,
+                pos - right + up,
+            ],
             PUFF_UVS,
             // White: the glyph material's green tint is its `base_color`.
             [[1.0; 4]; 4],
         );
     }
 
-    flush_quad_batches(&mut batches, &mut meshes, &mut batch_visibility, &mut commands);
+    flush_quad_batches(
+        &mut batches,
+        &mut meshes,
+        &mut batch_visibility,
+        &mut commands,
+    );
 }

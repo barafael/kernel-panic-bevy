@@ -45,8 +45,8 @@ use crate::rendering::camera::RtsCamera;
 use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, spawn_smoker_at};
 use crate::terrain::heightmap::Heightmap;
-use crate::terrain::smooth_ground::SmoothGround;
 use crate::terrain::mesh::{CHUNK_SIZE, build_chunk};
+use crate::terrain::smooth_ground::SmoothGround;
 use crate::ui::minimap::MinimapState;
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, Health, UnitType};
@@ -178,7 +178,8 @@ pub fn install(
     let team_colored = farm.team_colored;
     let material = atlas_material(images.add(atlas), materials);
     let first = &layout.hexes[0].corners;
-    let side_hex = ((first[1][0] - first[0][0]).powi(2) + (first[1][2] - first[0][2]).powi(2)).sqrt();
+    let side_hex =
+        ((first[1][0] - first[0][0]).powi(2) + (first[1][2] - first[0][2]).powi(2)).sqrt();
     // The meshes are rebuilt in place, so their bounds would go stale:
     // opt out of culling (the gadget draws them unculled too).
     let mut spawn_mesh = |commands: &mut Commands| {
@@ -226,7 +227,10 @@ pub fn mask_void(
     for z in z0..=z1.min(map.height - 1) {
         for x in x0..=x1.min(map.width - 1) {
             let sq = (z / 2) as usize * type_w + (x / 2) as usize;
-            if terrain.get(sq).is_none_or(|&t| t == spring_map::hexfarm::TERRAIN_VOID) {
+            if terrain
+                .get(sq)
+                .is_none_or(|&t| t == spring_map::hexfarm::TERRAIN_VOID)
+            {
                 map.speeds[(z * map.width + x) as usize] = 0.0;
             }
         }
@@ -300,7 +304,10 @@ fn hex_farm_sim(
                 None => {
                     // `Spring.DestroyUnit(u, true)`: self-destructed,
                     // so it goes out with its death explosion.
-                    info!("Hex Farm: a {:?} fell into the void at ({x:.0}, {z:.0})", kind.0);
+                    info!(
+                        "Hex Farm: a {:?} fell into the void at ({x:.0}, {z:.0})",
+                        kind.0
+                    );
                     health.current = 0.0;
                 }
             }
@@ -370,7 +377,8 @@ fn hex_farm_sim(
             }
             HexFarmEvent::VentsRemoved(k) => {
                 for (e, smoker) in &smokers {
-                    if farm.poly_at(smoker.pos.x as f64, smoker.pos.z as f64) == Some(Poly::Hex(k)) {
+                    if farm.poly_at(smoker.pos.x as f64, smoker.pos.z as f64) == Some(Poly::Hex(k))
+                    {
                         commands.entity(e).despawn();
                     }
                 }
@@ -488,7 +496,10 @@ fn hex_farm_owners(
     destroyed: Query<(Entity, &Transform, &UnitType), Added<Dying>>,
     live: Query<(Entity, &Transform, &UnitType, &Faction), (Without<Emerging>, Without<Dying>)>,
 ) {
-    let finished: Vec<Entity> = spawned_finished.iter().chain(finished_building.read()).collect();
+    let finished: Vec<Entity> = spawned_finished
+        .iter()
+        .chain(finished_building.read())
+        .collect();
     if !view.team_colored || (finished.is_empty() && destroyed.is_empty()) {
         return;
     }
@@ -609,7 +620,13 @@ fn hex_farm_draw(
         for k in 0..view.hexes.len() {
             let v = view.hexes[k];
             if !v.hidden && v.anim.is_none() {
-                push_hex(&mut still, &view.hex_draw(k), view.side_hex, view.team_colored, None);
+                push_hex(
+                    &mut still,
+                    &view.hex_draw(k),
+                    view.side_hex,
+                    view.team_colored,
+                    None,
+                );
             }
         }
         for k in 0..view.rects.len() {
@@ -730,7 +747,13 @@ mod tests {
         let (hx, hz) = (farm.hexes[0].x as f32, farm.hexes[0].z as f32);
         let mut world = World::new();
         world.insert_resource(HexFarmView {
-            hexes: vec![PolyView { hidden: false, anim: None }; n],
+            hexes: vec![
+                PolyView {
+                    hidden: false,
+                    anim: None
+                };
+                n
+            ],
             rects: vec![],
             owners: vec![WHITE; n],
             layout,

@@ -113,7 +113,11 @@ pub(super) fn base_level(image: &Image) -> (&[u8], usize, usize) {
 /// Full mip chain for an RGBA8 image at its native size: the chained
 /// pixel buffer (`pixels` become level 0) and its level count. Used for
 /// Lua skin atlases.
-pub(super) fn generate_mipmaps_rgba8(pixels: Vec<u8>, width: usize, height: usize) -> (Vec<u8>, u32) {
+pub(super) fn generate_mipmaps_rgba8(
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+) -> (Vec<u8>, u32) {
     let MipmapData {
         pixels,
         level_count,
@@ -124,7 +128,14 @@ pub(super) fn generate_mipmaps_rgba8(pixels: Vec<u8>, width: usize, height: usiz
 /// 2×2 box-filter `src` (`src_w`×`src_h`) into `dst` (`dst_w`×`dst_h`
 /// RGBA8, exactly `dst_w * dst_h * 4` bytes). Used by both the initial
 /// size-cap pass and the mipmap-chain build.
-fn box_filter_2x(src: &[u8], src_w: usize, src_h: usize, dst: &mut [u8], dst_w: usize, dst_h: usize) {
+fn box_filter_2x(
+    src: &[u8],
+    src_w: usize,
+    src_h: usize,
+    dst: &mut [u8],
+    dst_w: usize,
+    dst_h: usize,
+) {
     debug_assert_eq!(dst.len(), dst_w * dst_h * 4);
     for y in 0..dst_h {
         for x in 0..dst_w {
@@ -214,7 +225,14 @@ fn generate_mipmaps(
         let dst_start = all_data.len();
         all_data.resize(dst_start + next_w * next_h * 4, 0);
         let (done, dst) = all_data.split_at_mut(dst_start);
-        box_filter_2x(&done[src_start..], current_w, current_h, dst, next_w, next_h);
+        box_filter_2x(
+            &done[src_start..],
+            current_w,
+            current_h,
+            dst,
+            next_w,
+            next_h,
+        );
 
         src_start = dst_start;
         levels += 1;

@@ -65,7 +65,9 @@ fn census(world: &mut World) {
     let now = Instant::now();
     let due = {
         let mut s = world.resource_mut::<Samples>();
-        if s.census_at.is_none_or(|t| now.duration_since(t).as_secs_f32() >= 2.0) {
+        if s.census_at
+            .is_none_or(|t| now.duration_since(t).as_secs_f32() >= 2.0)
+        {
             s.census_at = Some(now);
             true
         } else {
@@ -75,13 +77,26 @@ fn census(world: &mut World) {
     if !due {
         return;
     }
-    let worst = std::mem::take(&mut world.resource_mut::<Samples>().worst_since_census) as f32 / 1000.0;
+    let worst =
+        std::mem::take(&mut world.resource_mut::<Samples>().worst_since_census) as f32 / 1000.0;
     let entities = world.entities().len();
-    let units = world.query::<&crate::units::components::UnitType>().iter(world).count();
-    let dying = world.query::<&crate::units::combat::Dying>().iter(world).count();
-    let deaths = world.query::<&crate::units::assets::animation::DeathParticle>().iter(world).count();
+    let units = world
+        .query::<&crate::units::components::UnitType>()
+        .iter(world)
+        .count();
+    let dying = world
+        .query::<&crate::units::combat::Dying>()
+        .iter(world)
+        .count();
+    let deaths = world
+        .query::<&crate::units::assets::animation::DeathParticle>()
+        .iter(world)
+        .count();
     let fx = crate::units::weapon_fx::effect_counts(world);
-    let pending = world.resource::<crate::units::weapon_fx::PendingExplosions>().events.len();
+    let pending = world
+        .resource::<crate::units::weapon_fx::PendingExplosions>()
+        .events
+        .len();
     println!(
         "KP_PROFILE census worst_frame={worst:.1}ms entities={entities} units={units} dying={dying} death_bursts={deaths} pending_explosions={pending} {fx:?}"
     );

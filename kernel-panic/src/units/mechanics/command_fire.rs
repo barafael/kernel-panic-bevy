@@ -19,11 +19,11 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
+use crate::units::combat::Dying;
 use crate::units::combat::{Infected, splash_falloff, weapon_infection_duration};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
-use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::units::combat::Dying;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::WeaponRegistry;
@@ -518,12 +518,7 @@ pub fn process_command_fire(
         }
 
         if unit.0 == UnitKind::Firewall {
-            apply_firewall(
-                event.target,
-                team.0,
-                &protect_targets,
-                &mut commands,
-            );
+            apply_firewall(event.target, team.0, &protect_targets, &mut commands);
             commands.entity(event.attacker).insert(CommandFireCooldown {
                 remaining: FIREWALL_COOLDOWN,
             });
@@ -640,8 +635,11 @@ fn logic_bombs_at_cap(
     let Some(limit) = limit else {
         return false;
     };
-    let live =
-        crate::units::lifecycle::bookkeeping::team_kind_count(UnitKind::LogicBomb, team, live_units);
+    let live = crate::units::lifecycle::bookkeeping::team_kind_count(
+        UnitKind::LogicBomb,
+        team,
+        live_units,
+    );
     let queued = mine_spawns.0.iter().filter(|m| m.team == team).count() as u32;
     live + queued >= limit
 }
@@ -1008,10 +1006,22 @@ mod tests {
     fn cast_reach_classifies_orders() {
         let far = Vec3::new(2000.0, 0.0, 0.0);
         let near = Vec3::new(500.0, 300.0, 0.0);
-        assert_eq!(cast_reach(Some(1400.0), Vec3::ZERO, near, false), CastReach::Fire);
-        assert_eq!(cast_reach(Some(1400.0), Vec3::ZERO, far, true), CastReach::Approach);
-        assert_eq!(cast_reach(Some(1400.0), Vec3::ZERO, far, false), CastReach::Refuse);
-        assert_eq!(cast_reach(None, Vec3::ZERO, far * 10.0, false), CastReach::Fire);
+        assert_eq!(
+            cast_reach(Some(1400.0), Vec3::ZERO, near, false),
+            CastReach::Fire
+        );
+        assert_eq!(
+            cast_reach(Some(1400.0), Vec3::ZERO, far, true),
+            CastReach::Approach
+        );
+        assert_eq!(
+            cast_reach(Some(1400.0), Vec3::ZERO, far, false),
+            CastReach::Refuse
+        );
+        assert_eq!(
+            cast_reach(None, Vec3::ZERO, far * 10.0, false),
+            CastReach::Fire
+        );
     }
 
     /// Terminal and Firewall start with a full recharge (upstream
@@ -1068,7 +1078,9 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         app.world_mut()
             .write_message(CommandFireEvent { attacker, target });
-        app.world_mut().run_system_once(process_command_fire).unwrap();
+        app.world_mut()
+            .run_system_once(process_command_fire)
+            .unwrap();
         // Each `run_system_once` builds a fresh reader that would replay
         // this event; drop it so later runs see only new casts.
         app.world_mut()
@@ -1110,7 +1122,9 @@ mod tests {
         cast(&mut app, pointer, target);
         assert_eq!(zone_count(&mut app), 0);
         assert_eq!(
-            app.world().get::<PendingCommandFire>(pointer).map(|p| p.target),
+            app.world()
+                .get::<PendingCommandFire>(pointer)
+                .map(|p| p.target),
             Some(target)
         );
         assert_eq!(
@@ -1127,11 +1141,15 @@ mod tests {
         // Walked on to 1300 elmos from the target — inside NX's 1400.
         app.world_mut()
             .entity_mut(pointer)
-            .insert(GlobalTransform::from_translation(Vec3::new(1700.0, 0.0, 0.0)));
+            .insert(GlobalTransform::from_translation(Vec3::new(
+                1700.0, 0.0, 0.0,
+            )));
         app.world_mut()
             .run_system_once(advance_pending_casts)
             .unwrap();
-        app.world_mut().run_system_once(process_command_fire).unwrap();
+        app.world_mut()
+            .run_system_once(process_command_fire)
+            .unwrap();
         assert_eq!(zone_count(&mut app), 1);
         assert!(app.world().get::<PendingCommandFire>(pointer).is_none());
         // The approach leg is ended (empty path), leaving the movement
@@ -1152,9 +1170,11 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut app = cast_app(&[("pointer", 2.0)]);
         let pointer = spawn_caster(&mut app, UnitKind::Pointer, Vec3::ZERO);
-        app.world_mut().entity_mut(pointer).insert(PendingCommandFire {
-            target: Vec3::new(5000.0, 0.0, 0.0),
-        });
+        app.world_mut()
+            .entity_mut(pointer)
+            .insert(PendingCommandFire {
+                target: Vec3::new(5000.0, 0.0, 0.0),
+            });
         app.world_mut()
             .run_system_once(advance_pending_casts)
             .unwrap();
@@ -1282,7 +1302,10 @@ mod tests {
                 )
             }
         };
-        let (own, other) = app.world_mut().run_system_once(check(queue.clone())).unwrap();
+        let (own, other) = app
+            .world_mut()
+            .run_system_once(check(queue.clone()))
+            .unwrap();
         assert!(!own, "one slot left");
         assert!(!other);
 

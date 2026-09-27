@@ -164,8 +164,7 @@ impl MinimapState {
     /// play — Hex Farm). Every pixel is marked dirty so the next refresh
     /// repaints the whole image from the new base.
     pub fn set_base(&mut self, pixels: &[u8], width: usize, height: usize) {
-        self.base_pixels =
-            downsample_terrain(Some(pixels), width, height, self.width, self.height);
+        self.base_pixels = downsample_terrain(Some(pixels), width, height, self.width, self.height);
         self.painted = (0..self.base_pixels.len())
             .step_by(4)
             .map(|idx| (idx, [0; 4]))

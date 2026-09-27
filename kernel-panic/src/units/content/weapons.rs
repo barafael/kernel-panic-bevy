@@ -160,7 +160,10 @@ impl WeaponRegistry {
     /// The registry of the baked `weapons/*.tdf` (the unit bundle).
     pub fn load() -> Self {
         let registry = Self::from_defs(&super::bundle::bundle().weapons);
-        info!("Weapon registry: {} definitions total", registry.defs.len() - 1);
+        info!(
+            "Weapon registry: {} definitions total",
+            registry.defs.len() - 1
+        );
         registry
     }
 
@@ -303,7 +306,10 @@ mod tests {
         let registry = WeaponRegistry::default();
         assert_eq!(registry.intern("BuildLaser"), Some(WeaponId::BUILD_LASER));
         assert_eq!(registry.intern("buildlaser"), Some(WeaponId::BUILD_LASER));
-        assert_eq!(registry.names[WeaponId::BUILD_LASER.0 as usize], "BuildLaser");
+        assert_eq!(
+            registry.names[WeaponId::BUILD_LASER.0 as usize],
+            "BuildLaser"
+        );
     }
 
     #[test]

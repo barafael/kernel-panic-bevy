@@ -25,8 +25,8 @@ use bevy::picking::Pickable;
 use bevy::prelude::*;
 
 use crate::game_setup::{
-    build_setup, describe_setup, demo_setup, showcase_setup, AppState, DevOptions,
-    GameOverDismissed, Grouping, RunGame, SkirmishConfig,
+    AppState, DevOptions, GameOverDismissed, Grouping, RunGame, SkirmishConfig, build_setup,
+    demo_setup, describe_setup, showcase_setup,
 };
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
@@ -47,7 +47,10 @@ impl Plugin for MenuPlugin {
             .init_resource::<AttractCamera>()
             .init_resource::<MenuFocus>()
             .add_message::<MenuActionMessage>()
-            .add_systems(OnEnter(AppState::InGame), (close_all_overlays, despawn_launch_menu))
+            .add_systems(
+                OnEnter(AppState::InGame),
+                (close_all_overlays, despawn_launch_menu),
+            )
             .add_systems(OnExit(AppState::InGame), close_all_overlays)
             .add_systems(
                 Update,
@@ -57,8 +60,7 @@ impl Plugin for MenuPlugin {
                     mouse_menu_input
                         .run_if(in_state(AppState::Menu).or(in_state(AppState::InGame))),
                     esc_in_menu.run_if(in_state(AppState::Menu)),
-                    boot_demo
-                        .run_if(in_state(AppState::Menu).and(resource_exists::<MapCatalog>)),
+                    boot_demo.run_if(in_state(AppState::Menu).and(resource_exists::<MapCatalog>)),
                     demo_director.run_if(
                         in_state(AppState::Menu)
                             .and(resource_exists::<crate::game_setup::GameSetup>),
@@ -192,7 +194,11 @@ fn border(color: Color) -> BorderColor {
 /// original's `DrawFrame` selected state.
 fn brighten(color: Color) -> Color {
     let c = color.to_srgba();
-    Color::srgb(1.0 - (1.0 - c.red) / 2.0, 1.0 - (1.0 - c.green) / 2.0, 1.0 - (1.0 - c.blue) / 2.0)
+    Color::srgb(
+        1.0 - (1.0 - c.red) / 2.0,
+        1.0 - (1.0 - c.green) / 2.0,
+        1.0 - (1.0 - c.blue) / 2.0,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -735,7 +741,9 @@ fn mouse_menu_input(
     mut ev: MessageWriter<MenuActionMessage>,
 ) {
     let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
     // `ComputedNode::size`/`UiGlobalTransform` are in physical pixels, whereas
     // `cursor_position()` is logical — convert so the hit test is in one space.
     let phys = cursor * window.scale_factor();
@@ -756,12 +764,16 @@ fn mouse_menu_input(
 
     // If the hovered button changed, repaint the visual state.
     if *hovered != hit {
-        if let Some(prev) = *hovered && let Ok((b, mut bc, mut bg)) = colors.get_mut(prev) {
+        if let Some(prev) = *hovered
+            && let Ok((b, mut bc, mut bg)) = colors.get_mut(prev)
+        {
             *bc = border(b.base);
             *bg = fill(b.base);
         }
         *hovered = hit;
-        if let Some(cur) = hit && let Ok((b, mut bc, mut bg)) = colors.get_mut(cur) {
+        if let Some(cur) = hit
+            && let Ok((b, mut bc, mut bg)) = colors.get_mut(cur)
+        {
             *bc = border(brighten(b.base));
             *bg = fill(brighten(b.base));
         }
@@ -809,13 +821,9 @@ fn maintain_launch_menu(
     match *page {
         MenuPage::Main => main_menu_page(&mut commands, root, title_size, menu_size),
         MenuPage::QuickSkirmish => quick_skirmish_page(&mut commands, root, page_size),
-        MenuPage::AdvancedSkirmish => advanced_skirmish_page(
-            &mut commands,
-            root,
-            page_size,
-            &config,
-            &catalog.names(),
-        ),
+        MenuPage::AdvancedSkirmish => {
+            advanced_skirmish_page(&mut commands, root, page_size, &config, &catalog.names())
+        }
         MenuPage::MapList => map_list_page(&mut commands, root, list_size, &catalog),
         MenuPage::Showcase => showcase_page(&mut commands, root, page_size),
         MenuPage::Credits => credits_page(&mut commands, root, page_size),
@@ -829,8 +837,16 @@ fn maintain_launch_menu(
 fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_size: f32) {
     title(commands, root, title_size);
     let entries: [(&str, Color, MenuAction); 6] = [
-        ("Skirmish", BUTTON_GREEN, MenuAction::Goto(MenuPage::AdvancedSkirmish)),
-        ("Quick Battle", BUTTON_GREEN, MenuAction::Goto(MenuPage::QuickSkirmish)),
+        (
+            "Skirmish",
+            BUTTON_GREEN,
+            MenuAction::Goto(MenuPage::AdvancedSkirmish),
+        ),
+        (
+            "Quick Battle",
+            BUTTON_GREEN,
+            MenuAction::Goto(MenuPage::QuickSkirmish),
+        ),
         ("Showcase", EASY_CYAN, MenuAction::Goto(MenuPage::Showcase)),
         ("Credits", BUTTON_GREEN, MenuAction::Goto(MenuPage::Credits)),
         ("Readme", BUTTON_GREEN, MenuAction::Goto(MenuPage::Readme)),
@@ -981,8 +997,16 @@ fn advanced_skirmish_page(
     .spawn(commands, root);
 
     for (text, y, action) in [
-        (format!("You:\n{:?}", config.your_faction), 0.6, MenuAction::CycleYourFaction),
-        (format!("Enemy:\n{:?}", config.enemy_faction), 0.45, MenuAction::CycleEnemyFaction),
+        (
+            format!("You:\n{:?}", config.your_faction),
+            0.6,
+            MenuAction::CycleYourFaction,
+        ),
+        (
+            format!("Enemy:\n{:?}", config.enemy_faction),
+            0.45,
+            MenuAction::CycleEnemyFaction,
+        ),
     ] {
         ButtonSpec::new(&text, EASY_CYAN, page_size, (0.5, y), Anchor::Cc, action)
             .min_width(24.0)
@@ -1290,11 +1314,7 @@ fn readme_lines() -> Vec<String> {
                     // non-UTF-8 bytes by widening them — umlauts and
                     // friends survive intact.
                     let text = String::from_utf8(bytes).unwrap_or_else(|error| {
-                        error
-                            .into_bytes()
-                            .into_iter()
-                            .map(|b| b as char)
-                            .collect()
+                        error.into_bytes().into_iter().map(|b| b as char).collect()
                     });
                     let mut out: Vec<String> = Vec::new();
                     for line in text.replace("\r\n", "\n").split('\n') {

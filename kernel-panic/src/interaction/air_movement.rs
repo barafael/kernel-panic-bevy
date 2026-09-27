@@ -205,7 +205,9 @@ impl HoverAir {
         self.wanted_speed = Vec3::ZERO;
         self.set_goal(pos, 0.0);
         match self.state {
-            AircraftState::Takeoff | AircraftState::Flying => self.set_state(AircraftState::Hovering),
+            AircraftState::Takeoff | AircraftState::Flying => {
+                self.set_state(AircraftState::Hovering)
+            }
             AircraftState::Hovering => {}
         }
     }
@@ -322,7 +324,12 @@ fn check_for_collision(me: usize, flyers: &[Flyer]) -> Option<Entity> {
 }
 
 /// `UpdateVerticalSpeed(spd, curRelHeight, curVertSpeed)`.
-fn update_vertical_speed(f: &mut Flyer, others: &[(Entity, Vec3, Vec3)], cur_rel_height: f32, cur_vert_speed: f32) {
+fn update_vertical_speed(
+    f: &mut Flyer,
+    others: &[(Entity, Vec3, Vec3)],
+    cur_rel_height: f32,
+    cur_vert_speed: f32,
+) {
     let air = &mut f.air;
     let p = air.params;
     let mut wh = air.wanted_height;
@@ -386,7 +393,11 @@ fn update_air_physics(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, V
     let mut spd = Vec3::new(spd.x, 0.0, spd.z);
     let delta = f.air.wanted_speed - spd;
     let dsq = delta.length_squared();
-    let rate = if delta.dot(spd) < 0.0 { p.dec_rate } else { p.acc_rate };
+    let rate = if delta.dot(spd) < 0.0 {
+        p.dec_rate
+    } else {
+        p.acc_rate
+    };
     if dsq < rate * rate {
         spd = f.air.wanted_speed;
     } else {
@@ -424,7 +435,11 @@ fn update_hovering(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, Vec3
     air.random_wind.x = air.random_wind.x * 0.9 + (next_f32(&mut air.rng) - 0.5) * 0.5;
     air.random_wind.z = air.random_wind.z * 0.9 + (next_f32(&mut air.rng) - 0.5) * 0.5;
     let drift = air.params.dont_land() || cur_sq > GOAL_RADIUS * GOAL_RADIUS;
-    let mut wanted = if drift { air.random_wind * abs_hover } else { Vec3::ZERO };
+    let mut wanted = if drift {
+        air.random_wind * abs_hover
+    } else {
+        Vec3::ZERO
+    };
     let d = air.goal - f.pos;
     wanted += Vec3::new(
         smoothstep(0.0, 400.0, d.x.abs()),
@@ -448,7 +463,8 @@ fn update_flying(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, Vec3)]
     let smooth = f.air.use_smooth_mesh();
     let ground_height = ground.flying_base(smooth, pos.x, pos.z);
     let md = f.air.max_drift;
-    let close = goal_dist_sq_2d < md * md && (ground_height + f.air.wanted_height - pos.y).abs() < md;
+    let close =
+        goal_dist_sq_2d < md * md && (ground_height + f.air.wanted_height - pos.y).abs() < md;
     if close && f.orders.point_at.is_none() {
         // FLY_CRUISING, can't land, not a transport.
         f.air.wanted_speed = Vec3::ZERO;
@@ -498,7 +514,8 @@ fn update_heading(air: &mut HoverAir) {
         return; // !factoryHeadingTakeoff: keep the factory's heading
     }
     let tau = std::f32::consts::TAU;
-    let delta = (air.wanted_heading - air.heading + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
+    let delta = (air.wanted_heading - air.heading + std::f32::consts::PI).rem_euclid(tau)
+        - std::f32::consts::PI;
     air.heading += delta.clamp(-air.params.turn_rate, air.params.turn_rate);
     air.heading = (air.heading + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
 }
@@ -570,7 +587,13 @@ fn handle_collisions(flyers: &mut [Flyer], me: usize, world: Vec2) {
 
 /// `CHoverAirMoveType::Update()` plus the command AI's per-frame part,
 /// for aircraft `me` at sim frame `frame`.
-fn update_one(flyers: &mut [Flyer], others: &[(Entity, Vec3, Vec3)], me: usize, frame: u32, ground: &Ground) {
+fn update_one(
+    flyers: &mut [Flyer],
+    others: &[(Entity, Vec3, Vec3)],
+    me: usize,
+    frame: u32,
+    ground: &Ground,
+) {
     if (frame.wrapping_add(flyers[me].air.phase)) & 3 == 0 {
         flyers[me].air.collidee = check_for_collision(me, flyers);
     }
@@ -630,7 +653,12 @@ fn update_one(flyers: &mut [Flyer], others: &[(Entity, Vec3, Vec3)], me: usize, 
 /// the frame-start positions/speeds the collision-avoidance altitude
 /// bump reads (a `Local` in [`hover_air_system`], so no per-tick
 /// allocation). Exposed for tests via [`step`].
-fn step_with(flyers: &mut [Flyer], frame: u32, ground: &Ground, others: &mut Vec<(Entity, Vec3, Vec3)>) {
+fn step_with(
+    flyers: &mut [Flyer],
+    frame: u32,
+    ground: &Ground,
+    others: &mut Vec<(Entity, Vec3, Vec3)>,
+) {
     others.clear();
     others.extend(flyers.iter().map(|f| (f.entity, f.pos, f.air.speed)));
     for me in 0..flyers.len() {
@@ -655,7 +683,10 @@ pub fn attitude(heading: f32, bank: f32) -> Quat {
 }
 
 /// Builds the per-kind [`HoverAirParams`] for a flyer.
-pub fn params_for(registry: &UnitRegistry, kind: crate::units::content::definitions::UnitKind) -> HoverAirParams {
+pub fn params_for(
+    registry: &UnitRegistry,
+    kind: crate::units::content::definitions::UnitKind,
+) -> HoverAirParams {
     registry.hover_air_params(kind)
 }
 
@@ -711,14 +742,37 @@ pub fn hover_air_system(
             return true;
         }
         let fwd = tf.forward().as_vec3();
-        let heading = if fwd.xz().length_squared() > 1e-6 { heading_of(fwd.xz()) } else { 0.0 };
-        let air = HoverAir::new(params_for(&registry, kind.0), tf.translation, heading, entity.to_bits() as u32);
+        let heading = if fwd.xz().length_squared() > 1e-6 {
+            heading_of(fwd.xz())
+        } else {
+            0.0
+        };
+        let air = HoverAir::new(
+            params_for(&registry, kind.0),
+            tf.translation,
+            heading,
+            entity.to_bits() as u32,
+        );
         commands.entity(entity).insert(air);
         false
     });
 
     flyers.clear();
-    for (entity, stats, tf, air, target, _, queue, boost, stunned, aim, attack_unit, attack_ground) in &q {
+    for (
+        entity,
+        stats,
+        tf,
+        air,
+        target,
+        _,
+        queue,
+        boost,
+        stunned,
+        aim,
+        attack_unit,
+        attack_ground,
+    ) in &q
+    {
         let more_moves = queue.is_some_and(|q| q.commands.iter().any(is_move_command));
         let attacking = attack_unit || attack_ground;
         flyers.push(Flyer {
@@ -729,8 +783,14 @@ pub fn hover_air_system(
             orders: Orders {
                 target: target.map(|t| t.0),
                 more_moves,
-                busy: target.is_some() || queue.is_some_and(|q| !q.commands.is_empty()) || attacking,
-                point_at: if attacking && target.is_none() { aim.map(|a| a.pos) } else { None },
+                busy: target.is_some()
+                    || queue.is_some_and(|q| !q.commands.is_empty())
+                    || attacking,
+                point_at: if attacking && target.is_none() {
+                    aim.map(|a| a.pos)
+                } else {
+                    None
+                },
                 stunned,
                 max_speed: (stats.speed + boost.map_or(0.0, |b| b.0)) / GAME_SPEED,
             },
@@ -753,7 +813,8 @@ pub fn hover_air_system(
     step_with(&mut flyers, *frame, &ground, &mut others);
 
     for f in flyers.iter() {
-        let Ok((entity, _, mut tf, mut air, target, path, mut queue, ..)) = q.get_mut(f.entity) else {
+        let Ok((entity, _, mut tf, mut air, target, path, mut queue, ..)) = q.get_mut(f.entity)
+        else {
             continue;
         };
         tf.translation = f.pos;
@@ -886,7 +947,11 @@ mod tests {
         }
         let f = &fl[0];
         // Stopped within the goal radius, hovering at cruise height.
-        assert!((f.pos.xz() - goal.xz()).length() < GOAL_RADIUS + 2.0, "{:?}", f.pos);
+        assert!(
+            (f.pos.xz() - goal.xz()).length() < GOAL_RADIUS + 2.0,
+            "{:?}",
+            f.pos
+        );
         assert_eq!(f.air.state, AircraftState::Hovering);
         let target = sg.get_height(f.pos.x, f.pos.z) + f.air.wanted_height;
         assert!((f.pos.y - target).abs() < 2.5);
@@ -895,7 +960,11 @@ mod tests {
         assert!(max_h_speed <= 1.0 + 1e-4, "{max_h_speed}");
         assert!(min_clearance > 60.0, "clearance {min_clearance}");
         // It faces where it flew.
-        assert!((f.air.heading - 0.0).abs() < 0.05, "heading {}", f.air.heading);
+        assert!(
+            (f.air.heading - 0.0).abs() < 0.05,
+            "heading {}",
+            f.air.heading
+        );
     }
 
     /// `wh *= (1 - IsStunned())` only runs after the climb/sink target
@@ -941,7 +1010,10 @@ mod tests {
             world_size: Vec2::splat(1024.0),
         };
         let a = Vec3::new(300.0, 250.0, 300.0);
-        let mut fl = vec![flyer(a, orders(None)), flyer(a + Vec3::X * 10.0, orders(None))];
+        let mut fl = vec![
+            flyer(a, orders(None)),
+            flyer(a + Vec3::X * 10.0, orders(None)),
+        ];
         fl[1].entity = Entity::from_raw_u32(2).unwrap();
         for f in &mut fl {
             f.air.state = AircraftState::Hovering;

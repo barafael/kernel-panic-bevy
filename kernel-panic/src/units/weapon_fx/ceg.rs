@@ -27,8 +27,8 @@ use std::collections::HashMap;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use spring_tdf::{
-    CegExpr, ColorMap, EffectProperties, EmitVector, EvalCtx, ExplosionDef, ExplosionDefs, FlameProperties,
-    ParticleProperties, SpawnerProperties,
+    CegExpr, ColorMap, EffectProperties, EmitVector, EvalCtx, ExplosionDef, ExplosionDefs,
+    FlameProperties, ParticleProperties, SpawnerProperties,
 };
 
 use super::batch::FxQuadBatches;
@@ -1013,18 +1013,25 @@ mod tests {
         let texture = Handle::<Image>::default();
         let red_to_blue = ColorMap::parse("1 0 0 1   0 0 1 0.5");
         let world = app.world_mut();
-        let (palette, material) = world.resource_scope(|world, mut assets: Mut<CegRenderAssets>| {
-            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
-            let palette = assets.palette(&texture, &red_to_blue, &mut materials);
-            // Same texture, same map: same palette; same texture,
-            // other map: same material, other palette.
-            assert_eq!(assets.palette(&texture, &red_to_blue, &mut materials), palette);
-            let other = assets.palette(&texture, &ColorMap::parse("0 1 0 1"), &mut materials);
-            assert_ne!(other, palette);
-            assert_eq!(assets.palette_at(other).material, assets.palette_at(palette).material);
-            assert_eq!(materials.len(), 1, "one material per texture");
-            (palette, assets.palette_at(palette).material.clone())
-        });
+        let (palette, material) =
+            world.resource_scope(|world, mut assets: Mut<CegRenderAssets>| {
+                let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+                let palette = assets.palette(&texture, &red_to_blue, &mut materials);
+                // Same texture, same map: same palette; same texture,
+                // other map: same material, other palette.
+                assert_eq!(
+                    assets.palette(&texture, &red_to_blue, &mut materials),
+                    palette
+                );
+                let other = assets.palette(&texture, &ColorMap::parse("0 1 0 1"), &mut materials);
+                assert_ne!(other, palette);
+                assert_eq!(
+                    assets.palette_at(other).material,
+                    assets.palette_at(palette).material
+                );
+                assert_eq!(materials.len(), 1, "one material per texture");
+                (palette, assets.palette_at(palette).material.clone())
+            });
         let particle = |life: f32| CegParticle {
             pos: Vec3::ZERO,
             velocity: Vec3::ZERO,
@@ -1058,7 +1065,11 @@ mod tests {
         let colors = batches.pending_colors(&material);
         assert_eq!(colors.len(), 12);
         assert_eq!(colors[0], [1.0, 0.0, 0.0, 1.0], "born: first stop");
-        assert_eq!(colors[3], [1.0, 0.0, 0.0, 1.0], "same colour on every corner");
+        assert_eq!(
+            colors[3],
+            [1.0, 0.0, 0.0, 1.0],
+            "same colour on every corner"
+        );
         assert_eq!(colors[4], [0.5, 0.0, 0.5, 0.75], "half way: midpoint");
         assert_eq!(colors[8], [1.0, 0.0, 0.0, 1.0], "flame just born");
         let mut live = world.query::<&CegParticle>();

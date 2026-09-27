@@ -34,9 +34,7 @@ use crate::units::content::unit_registry::UnitRegistry;
 mod emerge;
 mod s3o_mount;
 
-pub use emerge::{
-    EMERGE_DEPTH, EmergeStyle, Emerging, FadeMaterials, emerge_system,
-};
+pub use emerge::{EMERGE_DEPTH, EmergeStyle, Emerging, FadeMaterials, emerge_system};
 pub use s3o_mount::PieceLayout;
 
 /// Bundles the asset / cache / registry resources `spawn_unit` needs.
@@ -118,7 +116,13 @@ pub fn spawn_homebases(
         let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
         let home_pos = heightmap.place(fx, fz);
 
-        spawn_unit(seat.faction.homebase(), seat.faction, seat.team, home_pos, ctx);
+        spawn_unit(
+            seat.faction.homebase(),
+            seat.faction,
+            seat.team,
+            home_pos,
+            ctx,
+        );
         bases.push((seat.faction, seat.team, home_pos));
     }
 
@@ -147,8 +151,8 @@ pub fn spawn_demo_squads(
         else {
             continue;
         };
-        let squad = std::iter::repeat_n(roster.spam, SPAM)
-            .chain([roster.arty, roster.arty, roster.heavy]);
+        let squad =
+            std::iter::repeat_n(roster.spam, SPAM).chain([roster.arty, roster.arty, roster.heavy]);
         let to_centre = (centre - base).with_y(0.0).normalize_or(Vec3::X);
         let heading = to_centre.z.atan2(to_centre.x);
         let count = SPAM + 3;
@@ -160,8 +164,10 @@ pub fn spawn_demo_squads(
             // keeps squads off cliffs.
             let a = heading + (i as f32 / (count - 1) as f32 - 0.5) * 2.1;
             let spot = |r: f32| {
-                let x = (base.x + r * a.cos()).clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
-                let z = (base.z + r * a.sin()).clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
+                let x =
+                    (base.x + r * a.cos()).clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
+                let z =
+                    (base.z + r * a.sin()).clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
                 heightmap.place(x, z)
             };
             let Some(mut pos) = [RING, RING * 0.65, RING * 0.4]
@@ -457,7 +463,11 @@ pub fn spawn_unit(
                         // Stub entity so animation ops on this slot don't
                         // accidentally hit a real piece.
                         let stub = commands
-                            .spawn((Transform::default(), Visibility::default(), ChildOf(unit_entity)))
+                            .spawn((
+                                Transform::default(),
+                                Visibility::default(),
+                                ChildOf(unit_entity),
+                            ))
                             .id();
                         table_entities.push(stub);
                         table_offsets.push([0.0; 3]);
@@ -640,7 +650,10 @@ pub fn spawn_queued_mines(
     live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
     mut ctx: SpawnContext,
 ) {
-    let limit = ctx.unit_registry.team_limit(UnitKind::LogicBomb).unwrap_or(u32::MAX);
+    let limit = ctx
+        .unit_registry
+        .team_limit(UnitKind::LogicBomb)
+        .unwrap_or(u32::MAX);
     let mut counts =
         crate::units::lifecycle::bookkeeping::team_kind_counts(UnitKind::LogicBomb, &live_units);
     for spawn in mine_spawns.drain() {

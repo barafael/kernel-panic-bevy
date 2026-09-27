@@ -3,8 +3,7 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 use super::spawning::{
-    EMERGE_DEPTH, EmergeStyle, Emerging, FactoryPieces, FadeMaterials,
-    SpawnContext, spawn_unit,
+    EMERGE_DEPTH, EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext, spawn_unit,
 };
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
 use crate::units::components::{Faction, TeamId, UnitType};
@@ -87,8 +86,13 @@ impl Producer {
     /// Fraction of the current build done, `0..=1` (the build bar's
     /// progress pie).
     pub fn progress_fraction(&self, registry: &UnitRegistry) -> Option<f32> {
-        self.current_build_time(registry)
-            .map(|t| if t > 0.0 { (self.progress / t).clamp(0.0, 1.0) } else { 0.0 })
+        self.current_build_time(registry).map(|t| {
+            if t > 0.0 {
+                (self.progress / t).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
     }
 
     /// What is currently being built, if anything.
@@ -201,7 +205,11 @@ pub fn factory_roster(factory: UnitKind) -> &'static [UnitKind] {
 /// teleporters: they tick the packet buffer instead of producing, so
 /// they have no spam unit.
 pub fn minifac_spam(minifac: UnitKind) -> Option<UnitKind> {
-    if minifac.is_minifac() { factory_roster(minifac).first().copied() } else { None }
+    if minifac.is_minifac() {
+        factory_roster(minifac).first().copied()
+    } else {
+        None
+    }
 }
 
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
@@ -351,7 +359,8 @@ pub fn production_system(
         // Spring's factory build step goes through `AllowUnitBuildStep`
         // with the buildee (on the factory pad) — Hex Farm rebuilds
         // sunk neighbours with it.
-        if let (Some(inbox), Some(kind)) = (hex_farm.as_deref_mut(), producer.current_production()) {
+        if let (Some(inbox), Some(kind)) = (hex_farm.as_deref_mut(), producer.current_production())
+        {
             inbox.build_step(
                 factory_pos,
                 dt * speed_mult / build_time * ctx.unit_registry.raw_build_time(kind),
@@ -655,15 +664,30 @@ mod tests {
     fn factory_rosters_follow_sidedata() {
         assert_eq!(
             factory_roster(UnitKind::Kernel),
-            &[UnitKind::Bit, UnitKind::Pointer, UnitKind::Byte, UnitKind::Assembler]
+            &[
+                UnitKind::Bit,
+                UnitKind::Pointer,
+                UnitKind::Byte,
+                UnitKind::Assembler
+            ]
         );
         assert_eq!(
             factory_roster(UnitKind::Hole),
-            &[UnitKind::Bug, UnitKind::Dos, UnitKind::Worm, UnitKind::Trojan]
+            &[
+                UnitKind::Bug,
+                UnitKind::Dos,
+                UnitKind::Worm,
+                UnitKind::Trojan
+            ]
         );
         assert_eq!(
             factory_roster(UnitKind::Carrier),
-            &[UnitKind::Packet, UnitKind::Connection, UnitKind::Flow, UnitKind::Gateway]
+            &[
+                UnitKind::Packet,
+                UnitKind::Connection,
+                UnitKind::Flow,
+                UnitKind::Gateway
+            ]
         );
         assert!(factory_roster(UnitKind::Port).is_empty());
         for f in [UnitKind::Kernel, UnitKind::Hole, UnitKind::Carrier] {
@@ -694,7 +718,12 @@ mod tests {
         p.enqueue_front(UnitKind::Pointer, 2);
         assert_eq!(
             p.queue().iter().copied().collect::<Vec<_>>(),
-            vec![UnitKind::Byte, UnitKind::Pointer, UnitKind::Pointer, UnitKind::Bit]
+            vec![
+                UnitKind::Byte,
+                UnitKind::Pointer,
+                UnitKind::Pointer,
+                UnitKind::Bit
+            ]
         );
         let mut idle = Producer::new();
         idle.enqueue(UnitKind::Bit);

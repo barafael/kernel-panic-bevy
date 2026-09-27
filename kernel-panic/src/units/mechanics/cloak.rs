@@ -35,8 +35,8 @@ use crate::units::assets::animation::PieceIndex;
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::player::LocalTeam;
 use crate::units::lifecycle::bookkeeping::Detector;
+use crate::units::player::LocalTeam;
 
 /// Master switch for fog-of-war / cloak-hiding from the [`LocalTeam`]'s
 /// perspective. Defaults to off and nothing enables it yet, so the
@@ -389,8 +389,7 @@ pub fn update_fog_visibility(
         .map(|(_, ut, gtf)| (gtf.translation(), unit_registry.sight_distance(ut.0)))
         .for_each(|(vp, sight)| {
             spatial.query_radius(vp, sight, |candidate| {
-                if candidate.team != player.0
-                    && candidate.pos.distance_squared(vp) <= sight * sight
+                if candidate.team != player.0 && candidate.pos.distance_squared(vp) <= sight * sight
                 {
                     in_sight.insert(candidate.entity);
                 }

@@ -156,12 +156,7 @@ fn main() -> Result<(), MapViewerError> {
         .add_systems(Startup, load_map_system.after(setup_camera))
         .add_systems(
             Update,
-            (
-                camera_control,
-                weapon_fire_demo,
-                tick_weapon_fx,
-                update_hud,
-            ),
+            (camera_control, weapon_fire_demo, tick_weapon_fx, update_hud),
         )
         .run();
     Ok(())
@@ -484,7 +479,6 @@ fn camera_control(
 
     *tf = cam_transform(&s);
 }
-
 
 // ── Weapon fire demo ───────────────────────────────────────────────────
 

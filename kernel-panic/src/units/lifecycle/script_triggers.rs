@@ -41,9 +41,14 @@ pub fn trigger_movement_scripts(
     )>,
     mut commands: Commands,
 ) {
-    for (entity, mut animator, move_target, move_path, attack_move, aiming, was_moving) in &mut query {
-        let is_moving =
-            moving_for_script(move_target.is_some() || move_path.is_some(), attack_move, aiming);
+    for (entity, mut animator, move_target, move_path, attack_move, aiming, was_moving) in
+        &mut query
+    {
+        let is_moving = moving_for_script(
+            move_target.is_some() || move_path.is_some(),
+            attack_move,
+            aiming,
+        );
         match (is_moving, was_moving) {
             (true, false) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;

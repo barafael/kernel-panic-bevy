@@ -26,9 +26,8 @@ pub use cost::{
     slope_mod_from_max_slope,
 };
 pub use grid_search::{
-    BlockMask, ComponentLabels, PathSearch, SearchScratch, SearchStatus, find_path, find_path_masked,
-    find_path_masked_in,
-    find_path_with_heat, line_clear, traverse_cells,
+    BlockMask, ComponentLabels, PathSearch, SearchScratch, SearchStatus, find_path,
+    find_path_masked, find_path_masked_in, find_path_with_heat, line_clear, traverse_cells,
 };
 pub use heat::HeatMap;
 pub use path::Path;

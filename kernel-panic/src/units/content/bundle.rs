@@ -323,12 +323,13 @@ pub mod bake {
         }
 
         let moveinfo = upstream_dir("gamedata")?.join("MOVEINFO.TDF");
-        let move_classes = MoveClassTable::from_tdf(
-            &tdf_loader::load_tdf_file(&moveinfo).map_err(|error| BakeError::Parse {
-                path: moveinfo.clone(),
-                error: error.to_string(),
-            })?,
-        );
+        let move_classes =
+            MoveClassTable::from_tdf(&tdf_loader::load_tdf_file(&moveinfo).map_err(|error| {
+                BakeError::Parse {
+                    path: moveinfo.clone(),
+                    error: error.to_string(),
+                }
+            })?);
 
         let mut weapons = WeaponDefs::default();
         for (_, tdf) in tdf_loader::load_all_tdf_files(&upstream_dir("weapons")?, "tdf") {
@@ -336,8 +337,7 @@ pub mod bake {
         }
 
         let mut explosions = ExplosionDefs::default();
-        for (_, tdf) in
-            tdf_loader::load_all_tdf_files(&upstream_dir("gamedata/explosions")?, "tdf")
+        for (_, tdf) in tdf_loader::load_all_tdf_files(&upstream_dir("gamedata/explosions")?, "tdf")
         {
             explosions.merge(ExplosionDefs::from_tdf(&tdf));
         }
@@ -362,10 +362,15 @@ pub mod bake {
 
         let mut texture_files: Vec<PathBuf> = Vec::new();
         for dir in TEXTURE_DIRS {
-            texture_files.extend(files_with_ext(&crate::paths::from_project_root(dir), "tga")?);
+            texture_files.extend(files_with_ext(
+                &crate::paths::from_project_root(dir),
+                "tga",
+            )?);
         }
         for name in ENGINE_BITMAPS {
-            texture_files.push(crate::paths::from_project_root(&format!("{ENGINE_BITMAP_DIR}/{name}")));
+            texture_files.push(crate::paths::from_project_root(&format!(
+                "{ENGINE_BITMAP_DIR}/{name}"
+            )));
         }
         for path in texture_files {
             let key = file_key(&path);
@@ -406,7 +411,11 @@ pub mod bake {
             let model = weapon.model.trim().trim_end_matches(';');
             models.push((model.to_string(), format!("weapon {name}")));
         }
-        models.extend(CODE_MODELS.iter().map(|m| (m.to_string(), "code".to_string())));
+        models.extend(
+            CODE_MODELS
+                .iter()
+                .map(|m| (m.to_string(), "code".to_string())),
+        );
         for (name, from) in models {
             if !name.is_empty() && bundle.model(&name).is_none() {
                 missing.push(format!("model {name} ({from})"));
@@ -481,7 +490,10 @@ mod tests {
     #[test]
     fn bundle_covers_every_unit_kind() {
         let bundle = bundle();
-        assert!(!bundle.units.units.is_empty(), "empty bundle — re-bake with KP_BAKE_UNITS");
+        assert!(
+            !bundle.units.units.is_empty(),
+            "empty bundle — re-bake with KP_BAKE_UNITS"
+        );
         for kind in ALL_UNIT_KINDS {
             let def = bundle
                 .units
@@ -531,7 +543,13 @@ mod tests {
         for name in ["signal.s3o", "sigterm.s3o", "octashot.s3o"] {
             assert!(bundle.model(name).is_some(), "{name} not bundled");
         }
-        for name in ["laserend.tga", "hexgrid.tga", "whitecircle.tga", "arrow.tga", "dosray.tga"] {
+        for name in [
+            "laserend.tga",
+            "hexgrid.tga",
+            "whitecircle.tga",
+            "arrow.tga",
+            "dosray.tga",
+        ] {
             assert!(bundle.has_texture(name), "{name} not bundled");
         }
         // Lookups are case-insensitive, like the original game's VFS.
@@ -558,15 +576,28 @@ mod tests {
             format!("{:?}", baked.units),
             "unit defs differ — re-bake with KP_BAKE_UNITS"
         );
-        assert_eq!(format!("{:?}", fresh.move_classes), format!("{:?}", baked.move_classes));
-        assert_eq!(format!("{:?}", fresh.weapons), format!("{:?}", baked.weapons));
-        assert_eq!(format!("{:?}", fresh.explosions), format!("{:?}", baked.explosions));
+        assert_eq!(
+            format!("{:?}", fresh.move_classes),
+            format!("{:?}", baked.move_classes)
+        );
+        assert_eq!(
+            format!("{:?}", fresh.weapons),
+            format!("{:?}", baked.weapons)
+        );
+        assert_eq!(
+            format!("{:?}", fresh.explosions),
+            format!("{:?}", baked.explosions)
+        );
         assert_eq!(
             fresh.models.keys().collect::<Vec<_>>(),
             baked.models.keys().collect::<Vec<_>>()
         );
         for (name, model) in &fresh.models {
-            assert_eq!(format!("{model:?}"), format!("{:?}", baked.models[name]), "{name}");
+            assert_eq!(
+                format!("{model:?}"),
+                format!("{:?}", baked.models[name]),
+                "{name}"
+            );
         }
         assert_eq!(
             fresh.textures.keys().collect::<Vec<_>>(),
@@ -609,9 +640,16 @@ mod tests {
                 "{kind:?}"
             );
             assert_eq!(units.move_def(kind), tdf_units.move_def(kind), "{kind:?}");
-            assert_eq!(units.heat_produced(kind), tdf_units.heat_produced(kind), "{kind:?}");
+            assert_eq!(
+                units.heat_produced(kind),
+                tdf_units.heat_produced(kind),
+                "{kind:?}"
+            );
         }
-        let (weapons, tdf_weapons) = (WeaponRegistry::load(), WeaponRegistry::from_defs(&fresh.weapons));
+        let (weapons, tdf_weapons) = (
+            WeaponRegistry::load(),
+            WeaponRegistry::from_defs(&fresh.weapons),
+        );
         for name in fresh.weapons.weapons.keys() {
             assert_eq!(
                 format!("{:?}", weapons.get(name)),
@@ -619,16 +657,29 @@ mod tests {
                 "{name}"
             );
         }
-        let (cegs, tdf_cegs) = (CegRegistry::load(), CegRegistry::from_defs(fresh.explosions.clone()));
+        let (cegs, tdf_cegs) = (
+            CegRegistry::load(),
+            CegRegistry::from_defs(fresh.explosions.clone()),
+        );
         for name in fresh.explosions.explosions.keys() {
-            assert_eq!(format!("{:?}", cegs.get(name)), format!("{:?}", tdf_cegs.get(name)), "{name}");
+            assert_eq!(
+                format!("{:?}", cegs.get(name)),
+                format!("{:?}", tdf_cegs.get(name)),
+                "{name}"
+            );
         }
     }
 
     #[test]
     fn rejects_foreign_and_truncated_blobs() {
-        assert!(matches!(decode(b"kpmapv4\0\0\0\0\0"), Err(BundleError::BadMagic)));
-        assert!(matches!(decode(b"kpunit1\0\xff\0\0\0abc"), Err(BundleError::Truncated { .. })));
+        assert!(matches!(
+            decode(b"kpmapv4\0\0\0\0\0"),
+            Err(BundleError::BadMagic)
+        ));
+        assert!(matches!(
+            decode(b"kpunit1\0\xff\0\0\0abc"),
+            Err(BundleError::Truncated { .. })
+        ));
         assert!(matches!(decode(b""), Err(BundleError::Truncated { .. })));
     }
 }

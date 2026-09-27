@@ -639,7 +639,11 @@ fn bar_name(kind: UnitKind) -> String {
 
 /// How many of `kind` the homebase `e` has queued.
 fn queued_of(e: &BarEntry, kind: UnitKind) -> u32 {
-    e.runs.iter().filter(|(k, _)| *k == kind).map(|(_, n)| n).sum()
+    e.runs
+        .iter()
+        .filter(|(k, _)| *k == kind)
+        .map(|(_, n)| n)
+        .sum()
 }
 
 /// The control-panel description of build option `j` of `e` (for the

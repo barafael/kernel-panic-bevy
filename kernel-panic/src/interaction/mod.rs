@@ -17,9 +17,8 @@ use bevy::prelude::*;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system,
-    ground_collision_system, guard_follow_system, movement_system, orient_stationary_to_terrain,
-    update_path_heat,
+    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, ground_collision_system,
+    guard_follow_system, movement_system, orient_stationary_to_terrain, update_path_heat,
 };
 use selection::SelectionPlugin;
 
@@ -131,8 +130,7 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
         movement_system,
         // `smoothGround.UpdateSmoothMesh()` precedes the unit
         // updates in the engine's frame.
-        crate::terrain::smooth_ground::update_smooth_ground
-            .before(air_movement::hover_air_system),
+        crate::terrain::smooth_ground::update_smooth_ground.before(air_movement::hover_air_system),
         air_movement::hover_air_system.after(movement_system),
         // `HandleObjectCollisions` for every ground unit reads
         // the positions all movers reached this frame.

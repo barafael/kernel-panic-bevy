@@ -47,9 +47,9 @@ use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{LuaCompositing, SpringMap};
 use crate::map_types::{GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError};
 use crate::smd_parser::MapInfo;
+use crate::{LuaCompositing, SpringMap};
 
 const MAGIC_V1: &[u8; 8] = b"kpmapv1\0";
 const MAGIC_V2: &[u8; 8] = b"kpmapv2\0";
@@ -143,7 +143,10 @@ impl<'de: 'a, 'a> Deserialize<'de> for Bytes<'a> {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a borrowed byte run")
             }
-            fn visit_borrowed_bytes<E: serde::de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
+            fn visit_borrowed_bytes<E: serde::de::Error>(
+                self,
+                v: &'de [u8],
+            ) -> Result<Self::Value, E> {
                 Ok(v)
             }
         }

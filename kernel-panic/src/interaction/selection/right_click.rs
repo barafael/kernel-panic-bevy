@@ -193,9 +193,7 @@ fn handle_right_click(
                             .get(target)
                             .ok()
                             .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
-                            .is_some_and(|(t_team, m_team)| {
-                                !is_friendly(m_team.0, t_team.0)
-                            })
+                            .is_some_and(|(t_team, m_team)| !is_friendly(m_team.0, t_team.0))
                     },
                 );
 
@@ -583,7 +581,12 @@ fn no_crossings(units: &[Vec3], nodes: &[Vec3]) -> Vec<usize> {
         let mut swapped = false;
         for a in 0..n {
             for b in a + 1..n {
-                if segments_cross(units[a].xz(), nodes[m[a]].xz(), units[b].xz(), nodes[m[b]].xz()) {
+                if segments_cross(
+                    units[a].xz(),
+                    nodes[m[a]].xz(),
+                    units[b].xz(),
+                    nodes[m[b]].xz(),
+                ) {
                     m.swap(a, b);
                     swapped = true;
                 }
@@ -773,8 +776,9 @@ mod tests {
             (seed >> 8) as f32 / (1u32 << 24) as f32
         };
         for n in [5usize, 16, 40] {
-            let units: Vec<Vec3> =
-                (0..n).map(|_| Vec3::new(rnd() * 200.0, 0.0, rnd() * 200.0)).collect();
+            let units: Vec<Vec3> = (0..n)
+                .map(|_| Vec3::new(rnd() * 200.0, 0.0, rnd() * 200.0))
+                .collect();
             let line = [Vec3::new(400.0, 0.0, 0.0), Vec3::new(500.0, 0.0, 300.0)];
             let nodes = sample_path_evenly(&line, n);
             let m = assign_formation(&units, &nodes);
@@ -784,7 +788,12 @@ mod tests {
             for a in 0..n {
                 for b in a + 1..n {
                     assert!(
-                        !segments_cross(units[a].xz(), nodes[m[a]].xz(), units[b].xz(), nodes[m[b]].xz()),
+                        !segments_cross(
+                            units[a].xz(),
+                            nodes[m[a]].xz(),
+                            units[b].xz(),
+                            nodes[m[b]].xz()
+                        ),
                         "n={n}: paths {a} and {b} cross"
                     );
                 }
@@ -795,8 +804,16 @@ mod tests {
     /// The optimal matcher finds the minimum-total-distance assignment.
     #[test]
     fn hungarian_is_optimal() {
-        let units = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 0.0, 0.0), Vec3::new(20.0, 0.0, 0.0)];
-        let nodes = [Vec3::new(21.0, 0.0, 5.0), Vec3::new(1.0, 0.0, 5.0), Vec3::new(11.0, 0.0, 5.0)];
+        let units = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(10.0, 0.0, 0.0),
+            Vec3::new(20.0, 0.0, 0.0),
+        ];
+        let nodes = [
+            Vec3::new(21.0, 0.0, 5.0),
+            Vec3::new(1.0, 0.0, 5.0),
+            Vec3::new(11.0, 0.0, 5.0),
+        ];
         assert_eq!(assign_formation(&units, &nodes), vec![1, 2, 0]);
     }
 
@@ -804,7 +821,10 @@ mod tests {
     /// point (Spring), not to invented slots.
     #[test]
     fn single_click_shares_the_goal() {
-        let e = [Entity::from_raw_u32(1).unwrap(), Entity::from_raw_u32(2).unwrap()];
+        let e = [
+            Entity::from_raw_u32(1).unwrap(),
+            Entity::from_raw_u32(2).unwrap(),
+        ];
         let t = Vec3::new(5.0, 0.0, 9.0);
         let orders = group_move_slots(&[(e[0], Vec3::ZERO, 12.0), (e[1], Vec3::X, 12.0)], t);
         assert!(orders.iter().all(|(_, g)| *g == t));

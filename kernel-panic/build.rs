@@ -21,8 +21,7 @@ fn main() {
         .filter_map(|entry| {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("kpmap") {
-                path.file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
+                path.file_stem().map(|s| s.to_string_lossy().into_owned())
             } else {
                 None
             }

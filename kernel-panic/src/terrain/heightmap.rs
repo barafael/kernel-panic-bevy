@@ -123,8 +123,16 @@ impl Heightmap {
         let sz = (fz.floor() as isize).clamp(1, mz as isize - 2) as usize;
         let dx = fx - sx as f32;
         let dz = fz - sz as f32;
-        let (sx2, wx) = if dx > 0.5 { (sx + 1, dx - 0.5) } else { (sx - 1, 0.5 - dx) };
-        let (sz2, wz) = if dz > 0.5 { (sz + 1, dz - 0.5) } else { (sz - 1, 0.5 - dz) };
+        let (sx2, wx) = if dx > 0.5 {
+            (sx + 1, dx - 0.5)
+        } else {
+            (sx - 1, 0.5 - dx)
+        };
+        let (sz2, wz) = if dz > 0.5 {
+            (sz + 1, dz - 0.5)
+        } else {
+            (sz - 1, 0.5 - dz)
+        };
         let (wx, wz) = (wx.clamp(0.0, 1.0), wz.clamp(0.0, 1.0));
         let n = self.center_normal(sx, sz) * (1.0 - wx) * (1.0 - wz)
             + self.center_normal(sx2, sz) * wx * (1.0 - wz)

@@ -75,9 +75,12 @@ impl Harness {
     pub fn spawn(&mut self, kind: UnitKind, team: u8, pos: Vec3) -> Entity {
         let registry = self.world.resource::<UnitRegistry>();
         let stats = UnitStats::from_registry(kind, registry, 20.0);
-        let transform =
-            Transform::from_translation(pos).with_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X));
-        let e = self.world.spawn((UnitType(kind), TeamId(team), stats, transform)).id();
+        let transform = Transform::from_translation(pos)
+            .with_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X));
+        let e = self
+            .world
+            .spawn((UnitType(kind), TeamId(team), stats, transform))
+            .id();
         let registry = self.world.resource::<UnitRegistry>();
         let mover = super::movement::ground_mover_components(kind, registry, e, &transform);
         self.world.entity_mut(e).insert(mover);
@@ -90,16 +93,18 @@ impl Harness {
             .world
             .resource::<UnitRegistry>()
             .def(kind)
-            .map_or(Vec2::splat(2.0), |d| Vec2::new(d.footprint_x, d.footprint_z));
+            .map_or(Vec2::splat(2.0), |d| {
+                Vec2::new(d.footprint_x, d.footprint_z)
+            });
         self.structures.push((pos, fp * 8.0));
         self.spawn(kind, team, pos)
     }
 
     /// Is `p` inside any spawned structure's footprint?
     pub fn inside_structure(&self, p: Vec3) -> bool {
-        self.structures.iter().any(|(c, half)| {
-            (p.x - c.x).abs() < half.x && (p.z - c.z).abs() < half.y
-        })
+        self.structures
+            .iter()
+            .any(|(c, half)| (p.x - c.x).abs() < half.x && (p.z - c.z).abs() < half.y)
     }
 
     /// Plain right-click on `target` for `units` (the game's group-move
@@ -115,7 +120,8 @@ impl Harness {
                 )
             })
             .collect();
-        let orders = crate::interaction::selection::right_click::group_move_slots(&snapshot, target);
+        let orders =
+            crate::interaction::selection::right_click::group_move_slots(&snapshot, target);
         for (e, slot) in orders {
             self.world
                 .entity_mut(e)
@@ -237,7 +243,10 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
                     rate += std::f32::consts::TAU;
                 }
                 turned += rate.abs();
-                if rate.abs() > WIGGLE_MIN && prev_rate[i].abs() > WIGGLE_MIN && rate.signum() != prev_rate[i].signum() {
+                if rate.abs() > WIGGLE_MIN
+                    && prev_rate[i].abs() > WIGGLE_MIN
+                    && rate.signum() != prev_rate[i].signum()
+                {
                     flips += 1;
                 }
                 if rate.abs() > WIGGLE_MIN {
@@ -396,7 +405,10 @@ pub(crate) fn average(runs: &[Metrics]) -> Metrics {
             .then(|| finished.iter().sum::<f32>() / finished.len() as f32),
         first_arrival_s: Some(mean(&|m| m.first_arrival_s.unwrap_or(0.0))),
         stuck: runs.iter().map(|m| m.stuck).sum(),
-        min_pair_dist: runs.iter().map(|m| m.min_pair_dist).fold(f32::MAX, f32::min),
+        min_pair_dist: runs
+            .iter()
+            .map(|m| m.min_pair_dist)
+            .fold(f32::MAX, f32::min),
         path_ratio: mean(&|m| m.path_ratio),
         wiggle_per_s: mean(&|m| m.wiggle_per_s),
         turn_deg_per_s: mean(&|m| m.turn_deg_per_s),
@@ -414,7 +426,11 @@ pub(crate) fn print(name: &str, m: &Metrics) {
         m.last_arrival_s.map_or("-".into(), |s| format!("{s:.2}s")),
         m.first_arrival_s.map_or("-".into(), |s| format!("{s:.2}s")),
         m.stuck,
-        if m.min_pair_dist == f32::MAX { 0.0 } else { m.min_pair_dist },
+        if m.min_pair_dist == f32::MAX {
+            0.0
+        } else {
+            m.min_pair_dist
+        },
         m.path_ratio,
         m.wiggle_per_s,
         m.turn_deg_per_s,
@@ -430,13 +446,26 @@ pub(crate) fn print(name: &str, m: &Metrics) {
 fn report() {
     // Blob scenarios: mean over five scatters (stuck: total).
     let seeds = 1..=5;
-    print("blob16 bit", &average(&seeds.clone().map(|s| scenario_blob(UnitKind::Bit, 16, s)).collect::<Vec<_>>()));
-    print("blob9 byte", &average(&seeds.map(|s| scenario_blob(UnitKind::Byte, 9, s)).collect::<Vec<_>>()));
+    print(
+        "blob16 bit",
+        &average(
+            &seeds
+                .clone()
+                .map(|s| scenario_blob(UnitKind::Bit, 16, s))
+                .collect::<Vec<_>>(),
+        ),
+    );
+    print(
+        "blob9 byte",
+        &average(
+            &seeds
+                .map(|s| scenario_blob(UnitKind::Byte, 9, s))
+                .collect::<Vec<_>>(),
+        ),
+    );
     print("crossing", &scenario_crossing());
     print("building", &scenario_building());
     print("headon bit", &scenario_head_on(UnitKind::Bit));
     print("headon byt", &scenario_head_on(UnitKind::Byte));
     print("chain", &scenario_chain());
 }
-
-

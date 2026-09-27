@@ -129,7 +129,13 @@ impl StructureLayer {
             crushes,
             mask: BlockMask::new(self.width, self.height),
         };
-        self.fill_mask(&mut mask, 0, 0, self.width as i32 - 1, self.height as i32 - 1);
+        self.fill_mask(
+            &mut mask,
+            0,
+            0,
+            self.width as i32 - 1,
+            self.height as i32 - 1,
+        );
         self.masks.push(mask);
     }
 
@@ -168,8 +174,16 @@ impl StructureLayer {
         let (mut x0, mut z0, mut x1, mut z1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
         for &(x, z) in &stamp.squares {
             let i = (z * self.width + x) as usize;
-            let cell = if stamp.crushable { &mut self.crushable[i] } else { &mut self.solid[i] };
-            *cell = if add { cell.saturating_add(1) } else { cell.saturating_sub(1) };
+            let cell = if stamp.crushable {
+                &mut self.crushable[i]
+            } else {
+                &mut self.solid[i]
+            };
+            *cell = if add {
+                cell.saturating_add(1)
+            } else {
+                cell.saturating_sub(1)
+            };
             x0 = x0.min(x as i32);
             z0 = z0.min(z as i32);
             x1 = x1.max(x as i32);
@@ -203,7 +217,10 @@ impl StructureLayer {
         let Some(def) = registry.def(kind) else {
             return Vec::new();
         };
-        let (fx, fz) = (def.footprint_x.max(1.0) as i32, def.footprint_z.max(1.0) as i32);
+        let (fx, fz) = (
+            def.footprint_x.max(1.0) as i32,
+            def.footprint_z.max(1.0) as i32,
+        );
         let (xsize, zsize) = (fx * 2, fz * 2);
         let x0 = ((pos.x - xsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
         let z0 = ((pos.z - zsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
@@ -216,7 +233,10 @@ impl StructureLayer {
         let mut out = Vec::new();
         for sz in 0..zsize {
             for sx in 0..xsize {
-                let c = chars.get(((sx / 2) + (sz / 2) * fx) as usize).copied().unwrap_or('o');
+                let c = chars
+                    .get(((sx / 2) + (sz / 2) * fx) as usize)
+                    .copied()
+                    .unwrap_or('o');
                 let blocks = !matches!(c, 'y' | 'c' | 'e' | 'i' | 's' | 'b' | 'u');
                 let (x, z) = (x0 + sx, z0 + sz);
                 if blocks && self.idx(x, z).is_some() {
@@ -258,18 +278,29 @@ pub fn update_structure_layer(
     mut classes: Local<Option<Vec<(i32, bool)>>>,
 ) {
     let Some(mut nav) = nav else { return };
-    let Some(bucket) = nav.buckets.first() else { return };
+    let Some(bucket) = nav.buckets.first() else {
+        return;
+    };
     let (w, h) = (bucket.speed_map.width, bucket.speed_map.height);
     let nav = &mut *nav;
     let layer = &mut nav.structures;
     let fresh = layer.ensure_size(w, h);
-    for &(xsizeh, crushes) in classes.get_or_insert_with(|| mover_classes(&registry)).iter() {
+    for &(xsizeh, crushes) in classes
+        .get_or_insert_with(|| mover_classes(&registry))
+        .iter()
+    {
         layer.ensure_mask(xsizeh, crushes);
     }
     let mut changed: Option<[i32; 4]> = None;
-    let candidates = if fresh { all.iter().collect::<Vec<_>>() } else { spawned.iter().collect() };
+    let candidates = if fresh {
+        all.iter().collect::<Vec<_>>()
+    } else {
+        spawned.iter().collect()
+    };
     for entity in candidates {
-        let Ok((kind, stats, tf, dying)) = units.get(entity) else { continue };
+        let Ok((kind, stats, tf, dying)) = units.get(entity) else {
+            continue;
+        };
         if stats.speed > 0.0 || stats.can_fly || dying || layer.stamps.contains_key(&entity) {
             continue;
         }
@@ -292,7 +323,12 @@ pub fn update_structure_layer(
 
 fn union(a: Option<[i32; 4]>, b: Option<[i32; 4]>) -> Option<[i32; 4]> {
     match (a, b) {
-        (Some(a), Some(b)) => Some([a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]),
+        (Some(a), Some(b)) => Some([
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]),
         (a, b) => a.or(b),
     }
 }
@@ -330,13 +366,18 @@ mod tests {
 
         let bit = h.spawn(UnitKind::Bit, 0, Vec3::new(700.0, 0.0, 600.0));
         h.step();
-        h.world.entity_mut(bit).insert(MoveTarget(Vec3::new(900.0, 0.0, 600.0)));
+        h.world
+            .entity_mut(bit)
+            .insert(MoveTarget(Vec3::new(900.0, 0.0, 600.0)));
         h.step();
         let path = h.world.get::<MovePath>(bit).unwrap().clone();
         assert!(path.waypoints.len() > 2, "detours: {:?}", path.waypoints);
         for w in path.waypoints.windows(2) {
             let nav = h.world.resource::<NavGridSet>();
-            assert!(nav.line_clear(1.0, 1, 40.0, w[0].xz(), w[1].xz()), "segment {w:?} crosses it");
+            assert!(
+                nav.line_clear(1.0, 1, 40.0, w[0].xz(), w[1].xz()),
+                "segment {w:?} crosses it"
+            );
         }
 
         h.world.entity_mut(terminal).insert(Dying { timer: 1.0 });
@@ -364,7 +405,11 @@ mod tests {
             h.step();
         }
         assert!(h.world.get::<Dying>(bb).is_none(), "a Bit can't crush it");
-        assert!(h.pos(bit).xz().distance(goal.xz()) < 20.0, "went round it: {}", h.pos(bit));
+        assert!(
+            h.pos(bit).xz().distance(goal.xz()) < 20.0,
+            "went round it: {}",
+            h.pos(bit)
+        );
 
         let mut h = Harness::flat();
         let bb = h.spawn_structure(UnitKind::BadBlock, 1, block_at);
@@ -372,7 +417,11 @@ mod tests {
         h.step();
         h.world.entity_mut(byte).insert(MoveTarget(goal));
         h.step();
-        assert_eq!(h.world.get::<MovePath>(byte).unwrap().waypoints.len(), 2, "straight through");
+        assert_eq!(
+            h.world.get::<MovePath>(byte).unwrap().waypoints.len(),
+            2,
+            "straight through"
+        );
         let mut crushed = false;
         for _ in 0..300 {
             h.step();

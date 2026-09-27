@@ -34,6 +34,7 @@ use super::movement::{
     PathOutcome, PathRequest, begin_path_search, nav_class, nav_component_labels,
     promote_next_command, step_path_search,
 };
+use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
 use crate::sim::{
     GAME_SPEED, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SQUARE_SIZE, dir_of, dir3_of, heading_of,
@@ -45,7 +46,6 @@ use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
-use super::structures::crushes_features;
 
 /// Goal radius of a plain move order (`CMobileCAI::SetGoal`'s default
 /// `goalRadius = SQUARE_SIZE`, MobileCAI.h:25).
@@ -146,7 +146,10 @@ impl PathQueue {
     ) -> Result<spring_pathfinding::PathSearch, Option<PathOutcome>> {
         let labels = nav.and_then(|n| {
             let (key, speed_map, mask) = nav_class(n, registry, req)?;
-            let stale = self.labels.get(&key).is_none_or(|(rev, _)| *rev != n.revision);
+            let stale = self
+                .labels
+                .get(&key)
+                .is_none_or(|(rev, _)| *rev != n.revision);
             if stale {
                 // Labels from before this revision: apply the changed
                 // rectangles since (a rebuild only when a change may
@@ -274,7 +277,15 @@ impl PathQueue {
         let mut left = budget;
         while left > 0 {
             let pops = left.min(PATH_SEARCH_STEP);
-            let done = step_path_search(&mut self.scratch, &mut search, nav, registry, &req, heat, pops);
+            let done = step_path_search(
+                &mut self.scratch,
+                &mut search,
+                nav,
+                registry,
+                &req,
+                heat,
+                pops,
+            );
             left -= pops;
             self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
@@ -574,7 +585,11 @@ pub fn braking_distance(speed: f32, rate: f32) -> f32 {
 /// `target` by at most `acc` (speeding up) or `dec` (slowing down).
 pub fn delta_speed(target: f32, current: f32, acc: f32, dec: f32) -> f32 {
     let diff = target - current;
-    if diff < 0.0 { -(-diff).min(dec) } else { diff.min(acc) }
+    if diff < 0.0 {
+        -(-diff).min(dec)
+    } else {
+        diff.min(acc)
+    }
 }
 
 /// `GMTDefaultPathController::GetDeltaHeading` with rotational inertia
@@ -635,7 +650,9 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
             // slows to `maxSpeed · clamp(maxTurn/reqTurn, 0.1, 1)`
             // (never below 10%), so it arcs through turns instead of
             // pivoting then lurching.
-            let req_turn = wrap_angle(m.heading - inp.wanted_heading).abs().to_degrees();
+            let req_turn = wrap_angle(m.heading - inp.wanted_heading)
+                .abs()
+                .to_degrees();
             let max_turn = fs.turn_rate.to_degrees();
             let mut turn_mod_speed = fs.max_speed;
             if req_turn != 0.0 {
@@ -711,14 +728,23 @@ pub fn update_pos(
     facing: Vec2,
     position_stuck: bool,
 ) -> Vec2 {
-    let sq = |p: Vec2| ((p.x / SQUARE_SIZE).floor() as i32, (p.y / SQUARE_SIZE).floor() as i32);
+    let sq = |p: Vec2| {
+        (
+            (p.x / SQUARE_SIZE).floor() as i32,
+            (p.y / SQUARE_SIZE).floor() as i32,
+        )
+    };
     let new_pos = pos + step;
     let (prev_sq, new_sq) = (sq(pos), sq(new_pos));
     if !position_stuck && prev_sq == new_sq {
         return step;
     }
-    let to_pos =
-        |s: (i32, i32)| Vec2::new(s.0 as f32 * SQUARE_SIZE + 1.0, s.1 as f32 * SQUARE_SIZE + 1.0);
+    let to_pos = |s: (i32, i32)| {
+        Vec2::new(
+            s.0 as f32 * SQUARE_SIZE + 1.0,
+            s.1 as f32 * SQUARE_SIZE + 1.0,
+        )
+    };
     if map.square_open(new_pos) {
         let diff = (new_sq.0 - prev_sq.0, new_sq.1 - prev_sq.1);
         if diff.0 != 0 && diff.1 != 0 {
@@ -762,8 +788,16 @@ pub fn update_pos(
         let displacement = if along_z { moved.y } else { moved.x };
         let side = sign(displacement);
         let amount = (displacement * side).min(speed) * side;
-        let offset = if along_z { Vec2::new(0.0, amount) } else { Vec2::new(amount, 0.0) };
-        return if map.square_open(pos + offset) { offset } else { Vec2::ZERO };
+        let offset = if along_z {
+            Vec2::new(0.0, amount)
+        } else {
+            Vec2::new(amount, 0.0)
+        };
+        return if map.square_open(pos + offset) {
+            offset
+        } else {
+            Vec2::ZERO
+        };
     }
     if moved.length_squared() > speed * speed {
         return try_move(pos, moved, speed).unwrap_or(Vec2::ZERO);
@@ -899,7 +933,11 @@ pub fn step_mover(
         pos: pos2,
         wanted_heading,
         last_command: order.last_command,
-        ground_speed_mod: if steering { ground_speed_mod(pos2, m.front()) } else { 1.0 },
+        ground_speed_mod: if steering {
+            ground_speed_mod(pos2, m.front())
+        } else {
+            1.0
+        },
     };
     let wanted_speed = if steering { fs.max_speed } else { 0.0 };
     let delta = change_speed(m, fs, wanted_speed, &inputs);
@@ -961,9 +999,8 @@ fn set_next_waypoint(
             // Turn-radius check: a waypoint outside our turning circle
             // can be steered at and passed without slowing — keep it.
             // The circle's DIAMETER is used so paths don't snake.
-            let turn_radius = (m.current_speed * fs.frames_to_turn() / TAU)
-                .max(m.current_speed * 1.05)
-                * 2.0;
+            let turn_radius =
+                (m.current_speed * fs.frames_to_turn() / TAU).max(m.current_speed * 1.05) * 2.0;
             let waypoint_dot = m.waypoint_dir.dot(m.front()).clamp(-1.0, 1.0);
             if m.curr_wp_dist > turn_radius {
                 return;
@@ -1055,7 +1092,10 @@ pub fn movement_system(
             continue;
         }
         let pos = u.transform.translation.xz();
-        avoid_grid.entry(cell_of(pos)).or_default().push(avoidees.len());
+        avoid_grid
+            .entry(cell_of(pos))
+            .or_default()
+            .push(avoidees.len());
         avoidees.push(Avoidee {
             entity: u.entity,
             pos,
@@ -1159,11 +1199,20 @@ pub fn movement_system(
                     && more_moves
                     && !u.pending_build
                     && m.goal.is_some_and(|g| {
-                        g.distance_squared(pos.xz()) < cancel_distance_sq(fs.max_speed, fs.turn_rate)
+                        g.distance_squared(pos.xz())
+                            < cancel_distance_sq(fs.max_speed, fs.turn_rate)
                     })));
         if early {
             m.stop_engine(Progress::Done);
-            finish_leg(&mut commands, u.entity, u.queue.as_deref_mut(), m, &map, pos, clamp);
+            finish_leg(
+                &mut commands,
+                u.entity,
+                u.queue.as_deref_mut(),
+                m,
+                &map,
+                pos,
+                clamp,
+            );
         }
 
         // --- Path requests (QTPFS `RequestPath`, answered in-frame
@@ -1182,15 +1231,17 @@ pub fn movement_system(
                 let area = n.changed_since(p.revision);
                 p.revision = n.revision;
                 let mut from = pos.xz();
-                let ok = p.waypoints[p.current.min(p.waypoints.len())..].iter().all(|w| {
-                    let to = w.xz();
-                    let clear = match area {
-                        Some(bbox) if !NavGridSet::segment_touches(bbox, from, to) => true,
-                        _ => map.raw_search(from, to),
-                    };
-                    from = to;
-                    clear
-                });
+                let ok = p.waypoints[p.current.min(p.waypoints.len())..]
+                    .iter()
+                    .all(|w| {
+                        let to = w.xz();
+                        let clear = match area {
+                            Some(bbox) if !NavGridSet::segment_touches(bbox, from, to) => true,
+                            _ => map.raw_search(from, to),
+                        };
+                        from = to;
+                        clear
+                    });
                 if !ok {
                     m.re_request_path(true);
                 }
@@ -1236,7 +1287,15 @@ pub fn movement_system(
                         Some(PathOutcome::Unreachable) | None => {
                             // No path from here at all: `Fail`.
                             m.stop_engine(Progress::Failed);
-                            finish_leg(&mut commands, u.entity, u.queue.as_deref_mut(), m, &map, pos, clamp);
+                            finish_leg(
+                                &mut commands,
+                                u.entity,
+                                u.queue.as_deref_mut(),
+                                m,
+                                &map,
+                                pos,
+                                clamp,
+                            );
                         }
                     }
                 }
@@ -1304,7 +1363,15 @@ pub fn movement_system(
 
         if result.finished.is_some() {
             // `Arrived` / `Fail` run the CAI's SlowUpdate right away.
-            finish_leg(&mut commands, u.entity, u.queue.as_deref_mut(), m, &map, new_pos, clamp);
+            finish_leg(
+                &mut commands,
+                u.entity,
+                u.queue.as_deref_mut(),
+                m,
+                &map,
+                new_pos,
+                clamp,
+            );
         }
     }
 }
@@ -1385,7 +1452,9 @@ pub fn obstacle_avoidance_dir(
     let reach = (avoidance_radius / COLLISION_CELL).ceil() as i32;
     for dz in -reach..=reach {
         for dx in -reach..=reach {
-            let Some(bucket) = view.cells.get(&(cx + dx, cz + dz)) else { continue };
+            let Some(bucket) = view.cells.get(&(cx + dx, cz + dz)) else {
+                continue;
+            };
             for &i in bucket {
                 let o = &view.entries[i];
                 if o.entity == me.entity || o.crushable {
@@ -1422,14 +1491,22 @@ pub fn obstacle_avoidance_dir(
                 if cos_angle < 0.0 {
                     avoider_turn_sign = avoider_turn_sign.max(avoidee_turn_sign);
                 }
-                avoidance_vec +=
-                    right * AVOIDER_DIR_WEIGHT * avoider_turn_sign * response * fall_off * mass_scale;
+                avoidance_vec += right
+                    * AVOIDER_DIR_WEIGHT
+                    * avoider_turn_sign
+                    * response
+                    * fall_off
+                    * mass_scale;
                 m.avoiding_units = true;
             }
         }
     }
-    let dir = desired.lerp(avoidance_vec, DESIRED_DIR_WEIGHT).normalize_or_zero();
-    let dir = dir.lerp(m.last_avoidance_dir, LAST_DIR_MIX_ALPHA).normalize_or_zero();
+    let dir = desired
+        .lerp(avoidance_vec, DESIRED_DIR_WEIGHT)
+        .normalize_or_zero();
+    let dir = dir
+        .lerp(m.last_avoidance_dir, LAST_DIR_MIX_ALPHA)
+        .normalize_or_zero();
     m.last_avoidance_dir = if dir == Vec2::ZERO { desired } else { dir };
     m.last_avoidance_dir
 }
@@ -1455,7 +1532,10 @@ pub fn ground_speed_mod(
         let Some(slope) = nav.square_slope(cap, p) else {
             return 0.0;
         };
-        let sq = ((p.x / SQUARE_SIZE).floor() as i32, (p.y / SQUARE_SIZE).floor() as i32);
+        let sq = (
+            (p.x / SQUARE_SIZE).floor() as i32,
+            (p.y / SQUARE_SIZE).floor() as i32,
+        );
         let Some(grad) = hm.square_gradient(sq.0, sq.1) else {
             return 1.0;
         };
@@ -1465,7 +1545,11 @@ pub fn ground_speed_mod(
         1.0 / (1.0 + (slope * dir_slope).max(0.0) * nav.slope_mod(cap))
     };
     let m = at(pos);
-    if m == 0.0 { at(pos + dir * SQUARE_SIZE) } else { m }
+    if m == 0.0 {
+        at(pos + dir * SQUARE_SIZE)
+    } else {
+        m
+    }
 }
 
 /// The CAI side of a finished leg (`CMobileCAI::ExecuteMove` →
@@ -1504,7 +1588,9 @@ fn up_dir(m: &GroundMover, heightmap: Option<&Heightmap>, pos: Vec3) -> Vec3 {
 /// `CSolidObject::UpdateDirVectors` (SolidObject.cpp:435): the flat
 /// heading rotated by the shortest arc from straight up to `up`.
 pub fn attitude(heading: f32, up: Vec3) -> Quat {
-    let yaw = Transform::default().looking_to(dir3_of(heading), Vec3::Y).rotation;
+    let yaw = Transform::default()
+        .looking_to(dir3_of(heading), Vec3::Y)
+        .rotation;
     Quat::from_rotation_arc(Vec3::Y, up.normalize_or(Vec3::Y)) * yaw
 }
 
@@ -1514,7 +1600,9 @@ pub fn attitude(heading: f32, up: Vec3) -> Quat {
 /// and clamped to `[1024, 2048]` (32–45 elmos). Per-frame inputs.
 pub fn cancel_distance_sq(max_speed: f32, turn_rate: f32) -> f32 {
     let turn_radius = max_speed * (TAU / turn_rate.max(1e-4)) / TAU;
-    (turn_radius + 2.0 * SQUARE_SIZE).powi(2).clamp(1024.0, 2048.0)
+    (turn_radius + 2.0 * SQUARE_SIZE)
+        .powi(2)
+        .clamp(1024.0, 2048.0)
 }
 
 /// One ground unit, as the collision pass sees every other.
@@ -1714,7 +1802,9 @@ pub fn ground_collision_system(
             let reach = (search / COLLISION_CELL).ceil() as i32;
             for dz in -reach..=reach {
                 for dx in -reach..=reach {
-                    let Some(bucket) = cells.get(&(cx + dx, cz + dz)) else { continue };
+                    let Some(bucket) = cells.get(&(cx + dx, cz + dz)) else {
+                        continue;
+                    };
                     for &i in bucket {
                         let o = &entries[i];
                         let r2 = o.radius;
@@ -1788,7 +1878,8 @@ pub fn ground_collision_system(
             tf.translation.x += applied.x;
             tf.translation.z += applied.y;
             if let Some(hm) = heightmap.as_deref() {
-                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z) + lift.map_or(0.0, |l| l.0);
+                tf.translation.y =
+                    hm.sample(tf.translation.x, tf.translation.z) + lift.map_or(0.0, |l| l.0);
             }
         }
 
@@ -1811,7 +1902,8 @@ pub fn ground_collision_system(
         // `SlowUpdate` (GroundMoveType.cpp:767).
         if m.is_slow_update() && m.progress == Progress::Active {
             if m.idling {
-                m.num_idling_slow_updates = (m.num_idling_slow_updates + 1).min(MAX_IDLING_SLOWUPDATES);
+                m.num_idling_slow_updates =
+                    (m.num_idling_slow_updates + 1).min(MAX_IDLING_SLOWUPDATES);
             } else {
                 m.num_idling_slow_updates = m.num_idling_slow_updates.saturating_sub(1);
             }
@@ -1883,7 +1975,12 @@ fn fs_max_speed(stats: &UnitStats) -> f32 {
 /// engine's push-out term for squares inside the footprint compares
 /// loop offsets with absolute squares and never fires, so it is not
 /// ported.)
-fn static_square_push(m: &GroundMover, pos: Vec2, nav: Option<&NavGridSet>, max_speed: f32) -> Vec2 {
+fn static_square_push(
+    m: &GroundMover,
+    pos: Vec2,
+    nav: Option<&NavGridSet>,
+    max_speed: f32,
+) -> Vec2 {
     let Some(nav) = nav else { return Vec2::ZERO };
     // Radius of a square: sqrt(2·4²).
     const SQUARE_RADIUS: f32 = 5.656_854;
@@ -1963,7 +2060,8 @@ fn collision_aux(m: &mut GroundMover, pos: Vec2, cwp: Vec2, nwp: Vec2, o: &Colli
                 || at_goal_pos(o.pos, o.owner_radius * ADJUST_FOR_DIAGONAL)
             {
                 m.trigger_call_arrived();
-            } else if cwp.distance_squared(o.pos) <= (o.owner_radius * ADJUST_FOR_DIAGONAL).powi(2) {
+            } else if cwp.distance_squared(o.pos) <= (o.owner_radius * ADJUST_FOR_DIAGONAL).powi(2)
+            {
                 m.skip_waypoint = true;
             }
         }
@@ -1993,15 +2091,23 @@ mod tests {
         let mut h = Harness::flat();
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(400.0, 0.0, 400.0));
         h.step();
-        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(1400.0, 0.0, 400.0)));
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(1400.0, 0.0, 400.0)));
         let speeds: Vec<f32> = (0..5)
             .map(|_| {
                 h.step();
                 mover_speed(&h, e)
             })
             .collect();
-        assert!((speeds[0] - 27.0).abs() < 0.1, "0.9 elmo/frame after one frame: {speeds:?}");
-        assert!(speeds[2] < 90.0 && (speeds[3] - 90.0).abs() < 1e-3, "{speeds:?}");
+        assert!(
+            (speeds[0] - 27.0).abs() < 0.1,
+            "0.9 elmo/frame after one frame: {speeds:?}"
+        );
+        assert!(
+            speeds[2] < 90.0 && (speeds[3] - 90.0).abs() < 1e-3,
+            "{speeds:?}"
+        );
     }
 
     /// With nothing queued, Spring brakes inside the braking distance
@@ -2020,7 +2126,11 @@ mod tests {
         }
         assert!(!h.has_order(e), "order finished");
         assert_eq!(mover_speed(&h, e), 0.0);
-        assert!((h.pos(e).x - goal.x).abs() <= MOVE_GOAL_RADIUS + 4.0, "stops at the goal: {}", h.pos(e));
+        assert!(
+            (h.pos(e).x - goal.x).abs() <= MOVE_GOAL_RADIUS + 4.0,
+            "stops at the goal: {}",
+            h.pos(e)
+        );
         assert!(max_x <= goal.x + 4.0, "no overshoot: {max_x}");
     }
 
@@ -2050,7 +2160,10 @@ mod tests {
         assert!(second_leg, "second leg promoted");
         assert!(min_speed > 89.0, "no braking between legs: {min_speed}");
         let x = h.pos(e).x;
-        assert!((600.0 - 46.0..=600.0).contains(&x), "promoted inside cancelDistance: x={x}");
+        assert!(
+            (600.0 - 46.0..=600.0).contains(&x),
+            "promoted inside cancelDistance: x={x}"
+        );
     }
 
     /// Turning slows to `maxSpeed · clamp(maxTurn/reqTurn, 0.1, 1)`: a
@@ -2063,11 +2176,15 @@ mod tests {
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(800.0, 0.0, 800.0));
         h.step();
         // Get up to speed heading +X.
-        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(1800.0, 0.0, 800.0)));
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(1800.0, 0.0, 800.0)));
         for _ in 0..10 {
             h.step();
         }
-        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(100.0, 0.0, 800.0)));
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(100.0, 0.0, 800.0)));
         let fs = bit_frame_stats();
         let mut frames_turning = 0;
         let mut min_speed = f32::MAX;
@@ -2088,7 +2205,10 @@ mod tests {
             (frames_turning as f32) > expected * 0.9 && (frames_turning as f32) < expected * 1.6,
             "half turn takes ~{expected:.0} frames, took {frames_turning}"
         );
-        assert!(min_speed >= fs.max_speed * 0.1 - 1e-3, "keeps ≥10% speed: {min_speed}");
+        assert!(
+            min_speed >= fs.max_speed * 0.1 - 1e-3,
+            "keeps ≥10% speed: {min_speed}"
+        );
     }
 
     /// `CanSetNextWayPoint`: inside the turning circle with a clear line
@@ -2108,7 +2228,10 @@ mod tests {
                 }
             }
             let nav = NavGridSet {
-                buckets: vec![super::super::movement::NavBucket { max_slope: 1.0, speed_map }],
+                buckets: vec![super::super::movement::NavBucket {
+                    max_slope: 1.0,
+                    speed_map,
+                }],
                 ..Default::default()
             };
             let mut m = GroundMover::new(UnitKind::Bit, &reg, &stats);
@@ -2118,16 +2241,44 @@ mod tests {
             let goal = Vec3::new(300.0, 0.0, 100.0);
             m.start_moving(goal.xz(), MOVE_GOAL_RADIUS, pos, false);
             let mut path = MovePath::new(
-                vec![pos, Vec3::new(140.0, 0.0, 200.0), Vec3::new(260.0, 0.0, 320.0), goal],
+                vec![
+                    pos,
+                    Vec3::new(140.0, 0.0, 200.0),
+                    Vec3::new(260.0, 0.0, 320.0),
+                    goal,
+                ],
                 goal,
             );
             path.current = 1;
-            let map = MoveMap { nav: Some(&nav), max_slope: 1.0, xsizeh: 1, crush_strength: 0.0 };
-            let order = OrderView { has_move_cmd: true, last_command: true, hold: false };
-            step_mover(&mut m, &fs, pos, &order, Some(&mut path), &map, Vec3::Y, |_, d| d, |_, _| 1.0);
+            let map = MoveMap {
+                nav: Some(&nav),
+                max_slope: 1.0,
+                xsizeh: 1,
+                crush_strength: 0.0,
+            };
+            let order = OrderView {
+                has_move_cmd: true,
+                last_command: true,
+                hold: false,
+            };
+            step_mover(
+                &mut m,
+                &fs,
+                pos,
+                &order,
+                Some(&mut path),
+                &map,
+                Vec3::Y,
+                |_, d| d,
+                |_, _| 1.0,
+            );
             path.current
         };
-        assert_eq!(run(false), 2, "40 elmos ahead, inside the turn circle, clear LOS: skip");
+        assert_eq!(
+            run(false),
+            2,
+            "40 elmos ahead, inside the turn circle, clear LOS: skip"
+        );
         assert_eq!(run(true), 1, "LOS to the next waypoint blocked: keep");
     }
 
@@ -2153,7 +2304,10 @@ mod tests {
         // Byte (mass 100) at speed 1.5/frame vs an idle Bit (mass 10).
         let byte_yields = push(6.0, 100.0, 10.0, 1.5, 0.0);
         let bit_yields = push(-6.0, 10.0, 100.0, 0.0, 1.5).abs();
-        assert!(bit_yields > 5.0 * byte_yields, "bit {bit_yields} vs byte {byte_yields}");
+        assert!(
+            bit_yields > 5.0 * byte_yields,
+            "bit {bit_yields} vs byte {byte_yields}"
+        );
     }
 
     /// `update_pos` slides along a closed square instead of freezing,
@@ -2163,10 +2317,18 @@ mod tests {
         let mut speed_map = spring_pathfinding::SpeedMap::uniform(8, 8, 1.0);
         speed_map.speeds[(2 * 8 + 3) as usize] = 0.0; // (3,2)
         let nav = NavGridSet {
-            buckets: vec![super::super::movement::NavBucket { max_slope: 1.0, speed_map }],
+            buckets: vec![super::super::movement::NavBucket {
+                max_slope: 1.0,
+                speed_map,
+            }],
             ..Default::default()
         };
-        let map = MoveMap { nav: Some(&nav), max_slope: 1.0, xsizeh: 1, crush_strength: 0.0 };
+        let map = MoveMap {
+            nav: Some(&nav),
+            max_slope: 1.0,
+            xsizeh: 1,
+            crush_strength: 0.0,
+        };
         // Heading +X into (3,2) from (2,2): slides to an open neighbour.
         let pos = Vec2::new(23.0, 20.0);
         let step = Vec2::new(2.0, 0.0);
@@ -2180,12 +2342,23 @@ mod tests {
         speed_map.speeds[(2 * 8 + 3) as usize] = 0.0;
         speed_map.speeds[(3 * 8 + 2) as usize] = 0.0;
         let nav = NavGridSet {
-            buckets: vec![super::super::movement::NavBucket { max_slope: 1.0, speed_map }],
+            buckets: vec![super::super::movement::NavBucket {
+                max_slope: 1.0,
+                speed_map,
+            }],
             ..Default::default()
         };
-        let map = MoveMap { nav: Some(&nav), max_slope: 1.0, xsizeh: 1, crush_strength: 0.0 };
+        let map = MoveMap {
+            nav: Some(&nav),
+            max_slope: 1.0,
+            xsizeh: 1,
+            crush_strength: 0.0,
+        };
         let d = Vec2::new(2.0, 2.0);
-        assert_eq!(update_pos(&map, Vec2::new(23.0, 23.0), d, right, d.normalize(), false), Vec2::ZERO);
+        assert_eq!(
+            update_pos(&map, Vec2::new(23.0, 23.0), d, right, d.normalize(), false),
+            Vec2::ZERO
+        );
     }
 
     /// A unit pressing against terrain it cannot pass (a path made stale
@@ -2220,7 +2393,11 @@ mod tests {
         }
         assert!(repathed, "a detour path was searched");
         assert!(!h.has_order(e), "arrived after repathing");
-        assert!(h.pos(e).xz().distance(goal.xz()) < 30.0, "at the goal: {}", h.pos(e));
+        assert!(
+            h.pos(e).xz().distance(goal.xz()) < 30.0,
+            "at the goal: {}",
+            h.pos(e)
+        );
     }
 
     /// A unit that cannot get anywhere any more (sealed in after its
@@ -2235,9 +2412,14 @@ mod tests {
         let mut h = Harness::flat();
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(404.0, 0.0, 404.0));
         h.step();
-        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(1500.0, 0.0, 1500.0)));
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(1500.0, 0.0, 1500.0)));
         h.step();
-        assert!(h.world.get::<MovePath>(e).is_some(), "path on the first map");
+        assert!(
+            h.world.get::<MovePath>(e).is_some(),
+            "path on the first map"
+        );
         // A quarter-size map with a wall, so the component labels and
         // scratch of the old grid are all wrong for it.
         let mut small = spring_pathfinding::SpeedMap::uniform(48, 48, 1.0);
@@ -2252,9 +2434,13 @@ mod tests {
         });
         h.world.insert_resource(nav);
         for _ in 0..10 {
-            h.world.entity_mut(e).insert(MoveTarget(Vec3::new(300.0, 0.0, 100.0)));
+            h.world
+                .entity_mut(e)
+                .insert(MoveTarget(Vec3::new(300.0, 0.0, 100.0)));
             h.step();
-            h.world.entity_mut(e).insert(MoveTarget(Vec3::new(20.0, 0.0, 300.0)));
+            h.world
+                .entity_mut(e)
+                .insert(MoveTarget(Vec3::new(20.0, 0.0, 300.0)));
             h.step();
         }
     }
@@ -2266,7 +2452,9 @@ mod tests {
         let mut h = Harness::flat();
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(404.0, 0.0, 404.0));
         h.step();
-        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(700.0, 0.0, 404.0)));
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(700.0, 0.0, 404.0)));
         h.step();
         assert!(h.world.get::<MovePath>(e).is_some(), "path planned");
         let start = h.pos(e);
@@ -2298,7 +2486,10 @@ mod tests {
         assert!(!h.has_order(e), "gave up");
         assert!(requested, "re-requested a path before giving up");
         let fs = bit_frame_stats();
-        assert!(ticks as f32 > PI / fs.turn_rate, "not before the idle limit: {ticks}");
+        assert!(
+            ticks as f32 > PI / fs.turn_rate,
+            "not before the idle limit: {ticks}"
+        );
         assert!(h.pos(e).xz().distance(start.xz()) < 16.0);
     }
 
@@ -2322,9 +2513,14 @@ mod tests {
         }
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(500.0, 0.0, 640.0));
         h.step();
-        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(880.0, 0.0, 640.0)));
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(880.0, 0.0, 640.0)));
         h.step();
-        assert!(!h.world.get::<MovePath>(e).unwrap().reached_goal, "partial path");
+        assert!(
+            !h.world.get::<MovePath>(e).unwrap().reached_goal,
+            "partial path"
+        );
         for _ in 0..600 {
             h.step();
             if !h.has_order(e) {
@@ -2332,13 +2528,19 @@ mod tests {
             }
         }
         assert!(!h.has_order(e), "order ended");
-        assert_eq!(h.world.get::<GroundMover>(e).unwrap().progress, Progress::Failed);
+        assert_eq!(
+            h.world.get::<GroundMover>(e).unwrap().progress,
+            Progress::Failed
+        );
         let p = h.pos(e);
         let inside = (800.0..960.0).contains(&p.x) && (560.0..720.0).contains(&p.z);
         assert!(!inside, "never entered the box: {p}");
         // The closest reachable cell is just outside the box, 10 cells
         // from the goal.
-        assert!(p.xz().distance(Vec2::new(880.0, 640.0)) < 100.0, "stopped at the box: {p}");
+        assert!(
+            p.xz().distance(Vec2::new(880.0, 640.0)) < 100.0,
+            "stopped at the box: {p}"
+        );
     }
 
     /// `GetPosSpeedMod`: climbing a 30° ramp runs at
@@ -2349,7 +2551,9 @@ mod tests {
         let mut h = Harness::flat();
         let verts = 257usize;
         let rise = 8.0 * 30.0_f32.to_radians().tan();
-        let heights: Vec<f32> = (0..verts * verts).map(|i| (i % verts) as f32 * rise).collect();
+        let heights: Vec<f32> = (0..verts * verts)
+            .map(|i| (i % verts) as f32 * rise)
+            .collect();
         let cap = h.world.resource::<NavGridSet>().buckets[0].max_slope;
         let map = spring_pathfinding::SpeedMap::from_heightmap(
             &heights,
@@ -2359,11 +2563,14 @@ mod tests {
             spring_pathfinding::slope_mod_from_max_slope(cap),
         );
         h.world.resource_mut::<NavGridSet>().buckets[0].speed_map = map;
-        h.world.insert_resource(Heightmap::from_raw(heights, verts, verts));
+        h.world
+            .insert_resource(Heightmap::from_raw(heights, verts, verts));
         let steady = |h: &mut Harness, from: f32, to: f32| {
             let e = h.spawn(UnitKind::Bit, 0, Vec3::new(from, 0.0, 1000.0));
             h.step();
-            h.world.entity_mut(e).insert(MoveTarget(Vec3::new(to, 0.0, 1000.0)));
+            h.world
+                .entity_mut(e)
+                .insert(MoveTarget(Vec3::new(to, 0.0, 1000.0)));
             // Long enough to turn round (the harness spawns facing +X).
             for _ in 0..150 {
                 h.step();
@@ -2375,8 +2582,7 @@ mod tests {
         let up = steady(&mut h, 600.0, 1400.0);
         let down = steady(&mut h, 1400.0, 600.0);
         let slope = 1.0 - 30.0_f32.to_radians().cos();
-        let expected =
-            90.0 / (1.0 + slope * spring_pathfinding::slope_mod_from_max_slope(cap));
+        let expected = 90.0 / (1.0 + slope * spring_pathfinding::slope_mod_from_max_slope(cap));
         assert!((up - expected).abs() < 2.0, "uphill {up} vs {expected}");
         assert!((down - 90.0).abs() < 0.5, "downhill full speed: {down}");
     }
@@ -2387,13 +2593,19 @@ mod tests {
     fn idle_units_follow_the_ground_down_and_structures_stay_upright() {
         let mut h = Harness::flat();
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(400.0, 0.0, 400.0));
-        h.world.entity_mut(e).insert(crate::interaction::movement::GroundLift(3.0));
+        h.world
+            .entity_mut(e)
+            .insert(crate::interaction::movement::GroundLift(3.0));
         let kernel = h.spawn_structure(UnitKind::Kernel, 0, Vec3::new(800.0, 0.0, 800.0));
         for hgt in h.world.resource_mut::<Heightmap>().heights_mut() {
             *hgt = -20.0;
         }
         h.step();
-        assert!((h.pos(e).y - (-17.0)).abs() < 1e-4, "on the lowered ground + lift: {}", h.pos(e));
+        assert!(
+            (h.pos(e).y - (-17.0)).abs() < 1e-4,
+            "on the lowered ground + lift: {}",
+            h.pos(e)
+        );
         let up = h.world.get::<Transform>(kernel).unwrap().rotation * Vec3::Y;
         assert!((up - Vec3::Y).length() < 1e-5);
     }
@@ -2408,8 +2620,12 @@ mod tests {
         h.step();
         // Face each other first.
         h.world.get_mut::<GroundMover>(b).unwrap().heading = heading_of(-Vec2::X);
-        h.world.entity_mut(a).insert(MoveTarget(Vec3::new(1000.0, 0.0, 600.0)));
-        h.world.entity_mut(b).insert(MoveTarget(Vec3::new(600.0, 0.0, 600.0)));
+        h.world
+            .entity_mut(a)
+            .insert(MoveTarget(Vec3::new(1000.0, 0.0, 600.0)));
+        h.world
+            .entity_mut(b)
+            .insert(MoveTarget(Vec3::new(600.0, 0.0, 600.0)));
         let mut min_d = f32::MAX;
         for _ in 0..400 {
             h.step();
@@ -2428,7 +2644,11 @@ mod tests {
         let units: Vec<Entity> = (0..9)
             .map(|i| {
                 let (x, z) = ((i % 3) as f32, (i / 3) as f32);
-                h.spawn(UnitKind::Byte, 0, Vec3::new(560.0 + x * 40.0, 0.0, 560.0 + z * 40.0))
+                h.spawn(
+                    UnitKind::Byte,
+                    0,
+                    Vec3::new(560.0 + x * 40.0, 0.0, 560.0 + z * 40.0),
+                )
             })
             .collect();
         h.step();

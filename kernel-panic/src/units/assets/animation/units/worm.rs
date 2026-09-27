@@ -56,8 +56,14 @@ impl WormPieces {
     /// tail order (head → rings → end).
     fn segments(&self) -> [usize; 8] {
         [
-            self.head, self.ring[0], self.ring[1], self.ring[2], self.ring[3], self.ring[4],
-            self.ring[5], self.end,
+            self.head,
+            self.ring[0],
+            self.ring[1],
+            self.ring[2],
+            self.ring[3],
+            self.ring[4],
+            self.ring[5],
+            self.end,
         ]
     }
 }
@@ -90,12 +96,27 @@ impl WormAnim {
         // trough while the rest return to 0. Head crests on the first
         // half of the loop; `end` trails a step behind the last ring.
         let s = self.phase % 6;
-        rig.move_to(self.pieces.head, Axis::Z, if s < 3 { 3.0 * WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
+        rig.move_to(
+            self.pieces.head,
+            Axis::Z,
+            if s < 3 { 3.0 * WAVE_DEPTH } else { 0.0 },
+            WAVE_SPEED,
+        );
         for (i, ring) in self.pieces.ring.into_iter().enumerate() {
             let active = (s + 6 - i) % 6 < 3;
-            rig.move_to(ring, Axis::Z, if active { -WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
+            rig.move_to(
+                ring,
+                Axis::Z,
+                if active { -WAVE_DEPTH } else { 0.0 },
+                WAVE_SPEED,
+            );
         }
-        rig.move_to(self.pieces.end, Axis::Z, if (s + 5) % 6 < 3 { -WAVE_DEPTH } else { 0.0 }, WAVE_SPEED);
+        rig.move_to(
+            self.pieces.end,
+            Axis::Z,
+            if (s + 5) % 6 < 3 { -WAVE_DEPTH } else { 0.0 },
+            WAVE_SPEED,
+        );
     }
 
     fn flatten(&mut self, rig: &mut AnimRig) {
@@ -220,7 +241,12 @@ impl UnitAnim for WormAnim {
         }
         self.strike = Some(0.0);
         self.walking = false;
-        rig.move_to(self.pieces.head, Axis::Z, 7.0 * STRIKE_DEPTH, 7.0 * STRIKE_SPEED);
+        rig.move_to(
+            self.pieces.head,
+            Axis::Z,
+            7.0 * STRIKE_DEPTH,
+            7.0 * STRIKE_SPEED,
+        );
         for ring in self.pieces.ring {
             rig.move_to(ring, Axis::Z, -STRIKE_DEPTH, STRIKE_SPEED);
         }

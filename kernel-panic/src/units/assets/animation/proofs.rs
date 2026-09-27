@@ -33,7 +33,7 @@
 //! - `move_visual_conventions` — translations render identically on all
 //!   axes (X mirror preserved, Y/Z verbatim).
 
-use super::{tick_rig, AnimRig};
+use super::{AnimRig, tick_rig};
 
 // ---------------------------------------------------------------------------
 // Reference: the VM-era pipeline, quoted from the pre-harvest code
@@ -87,13 +87,7 @@ fn new_visual(axis: u8, stored: f32) -> f32 {
 /// Old per-axis interpolation, quoted from the VM-era
 /// `animation_system` loop (spin integrate, then turn toward target).
 /// Returns the resulting rotation and whether the turn arrived.
-fn old_step_turn_axis(
-    spin: f32,
-    turn_speed: f32,
-    target: f32,
-    rot: f32,
-    dt: f32,
-) -> (f32, bool) {
+fn old_step_turn_axis(spin: f32, turn_speed: f32, target: f32, rot: f32, dt: f32) -> (f32, bool) {
     let mut rot = rot;
     if spin != 0.0 {
         rot += spin * dt;
@@ -114,12 +108,7 @@ fn old_step_turn_axis(
 }
 
 /// Old per-axis move interpolation. Returns (position, arrived).
-fn old_step_move_axis(
-    move_speed: f32,
-    target: f32,
-    pos: f32,
-    dt: f32,
-) -> (f32, bool) {
+fn old_step_move_axis(move_speed: f32, target: f32, pos: f32, dt: f32) -> (f32, bool) {
     let mut pos = pos;
     let mut arrived = false;
     if move_speed > 0.0 {
@@ -331,13 +320,13 @@ fn spin_now_matches_turn() {
 
     // New: spin and turn stores are both the identity, so their renders
     // agree on every axis.
-    assert!(
-        new_visual(axis, new_spin_store(axis, v)) == new_visual(axis, new_turn_store(axis, v))
-    );
+    assert!(new_visual(axis, new_spin_store(axis, v)) == new_visual(axis, new_turn_store(axis, v)));
 
     // Old: on X they disagreed — the bug this refactor fixed.
     if axis == 0 && v != 0.0 {
-        assert!(old_visual(axis, old_spin_store(axis, v)) == -old_visual(axis, old_turn_store(axis, v)));
+        assert!(
+            old_visual(axis, old_spin_store(axis, v)) == -old_visual(axis, old_turn_store(axis, v))
+        );
     }
 }
 

@@ -140,10 +140,7 @@ pub struct TotalUnitCount(pub u32);
 /// counter is exact as long as every unit despawn passes through
 /// `Dying` (the same lifecycle assumption the small-building counts
 /// document).
-pub fn track_added_units(
-    added: Query<(), Added<UnitType>>,
-    mut count: ResMut<TotalUnitCount>,
-) {
+pub fn track_added_units(added: Query<(), Added<UnitType>>, mut count: ResMut<TotalUnitCount>) {
     count.0 += added.iter().count() as u32;
 }
 

@@ -45,7 +45,9 @@ struct Highlighted(f32);
 /// emerge-fade / cloak clones of units highlighted mid-fade; entries
 /// whose source asset is gone are pruned whenever a new one is added.
 #[derive(Resource, Default)]
-struct BrightMaterials(HashMap<(AssetId<StandardMaterial>, Faction, u32), Handle<StandardMaterial>>);
+struct BrightMaterials(
+    HashMap<(AssetId<StandardMaterial>, Faction, u32), Handle<StandardMaterial>>,
+);
 
 /// Two epsilon for the `f32` factor comparison so we treat `HOVER_BRIGHTNESS`
 /// vs `SELECTED_BRIGHTNESS` as unambiguously different without triggering on
@@ -87,7 +89,11 @@ fn update_unit_highlight(
     let pending: Vec<(Entity, Faction, f32)> = hovered_q
         .iter()
         .map(|(e, f, h)| (e, f, h, HOVER_BRIGHTNESS))
-        .chain(selected_q.iter().map(|(e, f, h)| (e, f, h, SELECTED_BRIGHTNESS)))
+        .chain(
+            selected_q
+                .iter()
+                .map(|(e, f, h)| (e, f, h, SELECTED_BRIGHTNESS)),
+        )
         .filter(|(_, _, current, factor)| needs_rebrighten(*current, *factor))
         .map(|(e, f, _, factor)| (e, *f, factor))
         .collect();
@@ -237,7 +243,9 @@ fn apply_brightness(
             return;
         };
         let handle = materials.add(variant);
-        bright.0.retain(|(source, _, _), _| materials.contains(*source));
+        bright
+            .0
+            .retain(|(source, _, _), _| materials.contains(*source));
         bright.0.insert(key, handle.clone());
         handle
     };

@@ -233,15 +233,7 @@ pub fn camera_control(
     settings: Res<CameraSettings>,
     bounds: Res<MapBounds>,
     windows: Query<&Window>,
-    mut query: Query<
-        (
-            &Camera,
-            &GlobalTransform,
-            &mut RtsCameraState,
-            &Transform,
-        ),
-        With<RtsCamera>,
-    >,
+    mut query: Query<(&Camera, &GlobalTransform, &mut RtsCameraState, &Transform), With<RtsCamera>>,
     mut drag: Local<MiddleDrag>,
 ) {
     let Ok((camera, cam_gxf, mut state, transform)) = query.single_mut() else {
@@ -364,7 +356,6 @@ pub fn camera_control(
     if keys.pressed(KeyCode::KeyE) {
         state.yaw -= settings.rotate_speed_keys * delta_time;
     }
-
 }
 
 /// Ease the rendered camera toward the target state and write its
@@ -417,5 +408,9 @@ const SNAP_RADIANS: f32 = 1e-5;
 /// One lerp step toward `target`, snapping when within `eps`.
 fn ease(current: f32, target: f32, t: f32, eps: f32) -> f32 {
     let next = current.lerp(target, t);
-    if (next - target).abs() < eps { target } else { next }
+    if (next - target).abs() < eps {
+        target
+    } else {
+        next
+    }
 }

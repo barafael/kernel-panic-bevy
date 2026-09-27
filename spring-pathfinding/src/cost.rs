@@ -86,7 +86,12 @@ impl SpeedMap {
     /// Recompute [`Self::max_speed`] after writing [`Self::speeds`]
     /// directly.
     pub fn refresh_max_speed(&mut self) {
-        self.max_speed = self.speeds.iter().copied().fold(0.0f32, f32::max).max(0.001);
+        self.max_speed = self
+            .speeds
+            .iter()
+            .copied()
+            .fold(0.0f32, f32::max)
+            .max(0.001);
     }
 
     /// Build a speed map from a precomputed slope field
@@ -195,7 +200,14 @@ pub fn slope_map(heights: &[f32], heightmap_width: u32, heightmap_height: u32) -
 
 /// Relative speed of heightmap cell `(x, z)`, from the slope of its
 /// four corner vertices (see [`SpeedMap::from_heightmap`]).
-fn cell_speed(heights: &[f32], hw: usize, x: usize, z: usize, max_slope: f32, slope_mod: f32) -> f32 {
+fn cell_speed(
+    heights: &[f32],
+    hw: usize,
+    x: usize,
+    z: usize,
+    max_slope: f32,
+    slope_mod: f32,
+) -> f32 {
     speed_from_slope(cell_slope(heights, hw, x, z), max_slope, slope_mod)
 }
 

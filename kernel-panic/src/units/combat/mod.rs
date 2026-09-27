@@ -18,8 +18,8 @@
 use bevy::prelude::*;
 
 use super::assets::animation::{MuzzlePiece, PieceEmit, UnitAnimator};
-use super::content::definitions::UnitKind;
 use super::components::{TeamId, UnitStats, UnitType};
+use super::content::definitions::UnitKind;
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
 use super::lifecycle::bookkeeping::NoAutoTarget;
@@ -145,7 +145,10 @@ impl TargetCachePick<'_, '_> {
         if self.cloaked.get(target).is_ok_and(|d| !d.contains(team)) {
             return None;
         }
-        self.alive.get(target).ok().map(GlobalTransform::translation)
+        self.alive
+            .get(target)
+            .ok()
+            .map(GlobalTransform::translation)
     }
 }
 
@@ -173,7 +176,11 @@ pub struct PieceLookup<'w, 's> {
     pub piece_tf: Query<
         'w,
         's,
-        (&'static Transform, &'static ChildOf, Option<&'static PieceEmit>),
+        (
+            &'static Transform,
+            &'static ChildOf,
+            Option<&'static PieceEmit>,
+        ),
         Without<UnitType>,
     >,
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
@@ -843,10 +850,15 @@ fn aim_gates_pass(
         // projected to the ground drifts from it by several degrees on
         // a slope, which kept Pointers on ramps from ever passing.
         let error = match pieces.mover.get(entity) {
-            Ok(m) => crate::sim::wrap_angle(crate::sim::heading_of(to_target_xz.xz()) - m.heading).abs(),
+            Ok(m) => {
+                crate::sim::wrap_angle(crate::sim::heading_of(to_target_xz.xz()) - m.heading).abs()
+            }
             Err(_) => {
                 let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
-                forward_xz.dot(to_target_xz.normalize()).clamp(-1.0, 1.0).acos()
+                forward_xz
+                    .dot(to_target_xz.normalize())
+                    .clamp(-1.0, 1.0)
+                    .acos()
             }
         };
         if error > AIM_HEADING_TOLERANCE {
@@ -1445,7 +1457,11 @@ mod tests {
     fn undetected_cloaked_enemy_is_not_auto_targeted() {
         // --- Detected only by team 1 (its own side): ignored. ---
         let mut app = combat_app(line_weapon_registry());
-        let line = app.world().resource::<WeaponRegistry>().intern("Line").unwrap();
+        let line = app
+            .world()
+            .resource::<WeaponRegistry>()
+            .intern("Line")
+            .unwrap();
         let bit = spawn_bit_shooter(&mut app, line);
         enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), true, 0b10);
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -1485,10 +1501,24 @@ mod tests {
             enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), false, 0);
             app.world_mut().run_system_once(combat_system).unwrap();
 
-            assert_eq!(app.world().get::<AimTarget>(worm).is_some(), !hold, "hold={hold}");
-            assert_eq!(app.world().get::<TargetCache>(worm).is_some(), !hold, "hold={hold}");
-            assert!(app.world().resource::<DamageQueue>().is_empty(), "hold={hold}");
-            assert!(app.world().get::<AttackCooldown>(worm).is_none(), "hold={hold}");
+            assert_eq!(
+                app.world().get::<AimTarget>(worm).is_some(),
+                !hold,
+                "hold={hold}"
+            );
+            assert_eq!(
+                app.world().get::<TargetCache>(worm).is_some(),
+                !hold,
+                "hold={hold}"
+            );
+            assert!(
+                app.world().resource::<DamageQueue>().is_empty(),
+                "hold={hold}"
+            );
+            assert!(
+                app.world().get::<AttackCooldown>(worm).is_none(),
+                "hold={hold}"
+            );
         }
     }
 
@@ -1501,7 +1531,10 @@ mod tests {
         let mut app = combat_app(weapons);
         let enemy = app
             .world_mut()
-            .spawn((UnitType(UnitKind::Bit), GlobalTransform::from_xyz(100.0, 0.0, 0.0)))
+            .spawn((
+                UnitType(UnitKind::Bit),
+                GlobalTransform::from_xyz(100.0, 0.0, 0.0),
+            ))
             .id();
         let worm = app
             .world_mut()
@@ -1553,8 +1586,16 @@ mod tests {
         assert_eq!(hits[0].target, Some(enemy));
         let splashes: Vec<_> = hits.iter().filter(|h| h.weapon == splash).collect();
         assert_eq!(splashes.len(), 2);
-        assert!(splashes.iter().all(|h| h.target.is_none() && h.attacker == worm));
-        assert!(splashes.iter().any(|h| h.impact_pos == Vec3::new(100.0, 0.0, 0.0)));
+        assert!(
+            splashes
+                .iter()
+                .all(|h| h.target.is_none() && h.attacker == worm)
+        );
+        assert!(
+            splashes
+                .iter()
+                .any(|h| h.impact_pos == Vec3::new(100.0, 0.0, 0.0))
+        );
     }
 
     /// A Flow banked in flight and aimed by its `base` piece: every
@@ -1575,11 +1616,14 @@ mod tests {
             .init_resource::<DamageQueue>()
             .insert_resource(UnitRegistry::empty());
 
-        let unit_tf = Transform::from_xyz(300.0, 140.0, 200.0).with_rotation(
-            crate::interaction::air_movement::attitude(0.7, 0.25),
-        );
+        let unit_tf = Transform::from_xyz(300.0, 140.0, 200.0)
+            .with_rotation(crate::interaction::air_movement::attitude(0.7, 0.25));
         let target = Vec3::new(420.0, 20.0, 150.0);
-        let (h, p) = aim::local_aim_angles(unit_tf.rotation, target - unit_tf.translation, AimLaunch::Direct);
+        let (h, p) = aim::local_aim_angles(
+            unit_tf.rotation,
+            target - unit_tf.translation,
+            AimLaunch::Direct,
+        );
         // Rig → Bevy mapping (`apply_and_drain`): euler YXZ (y, x, −z).
         let base_tf = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, h, -p, 0.0));
         let wing_tf = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.0, 0.0, -0.8));
@@ -1589,13 +1633,25 @@ mod tests {
 
         let world = app.world_mut();
         let unit = world
-            .spawn((unit_tf, GlobalTransform::from(unit_tf), UnitType(UnitKind::Flow)))
+            .spawn((
+                unit_tf,
+                GlobalTransform::from(unit_tf),
+                UnitType(UnitKind::Flow),
+            ))
             .id();
         let root = world.spawn((root_tf, ChildOf(unit))).id();
-        let base = world.spawn((base_tf, ChildOf(root), PieceEmit::default())).id();
-        let wing1 = world.spawn((wing_tf, ChildOf(base), PieceEmit::default())).id();
-        let gp0 = world.spawn((gp0_tf, ChildOf(wing1), PieceEmit::default())).id();
-        let gp1 = world.spawn((gp1_tf, ChildOf(wing1), PieceEmit::default())).id();
+        let base = world
+            .spawn((base_tf, ChildOf(root), PieceEmit::default()))
+            .id();
+        let wing1 = world
+            .spawn((wing_tf, ChildOf(base), PieceEmit::default()))
+            .id();
+        let gp0 = world
+            .spawn((gp0_tf, ChildOf(wing1), PieceEmit::default()))
+            .id();
+        let gp1 = world
+            .spawn((gp1_tf, ChildOf(wing1), PieceEmit::default()))
+            .id();
         let stub = || (Transform::default(), ChildOf(unit));
         let monolith = world.spawn(stub()).id();
         let wing2 = world.spawn(stub()).id();
@@ -1651,7 +1707,11 @@ mod tests {
                 * leaf.compute_affine()
         };
         let events = &app.world().resource::<PendingAttacks>().events;
-        assert_eq!(events.len(), 2, "projectiles=2 → two projectiles per salvo shot");
+        assert_eq!(
+            events.len(),
+            2,
+            "projectiles=2 → two projectiles per salvo shot"
+        );
         for (event, leaf) in events.iter().zip([gp0_tf, gp1_tf]) {
             let expected = chain(leaf).transform_point3(Vec3::ZERO);
             assert!(
@@ -1671,5 +1731,3 @@ mod tests {
         assert_eq!(animator.rig.muzzle, 5, "two Shot1s: gp0 then gp1");
     }
 }
-
-

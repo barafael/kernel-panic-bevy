@@ -43,6 +43,7 @@ use super::{
     production::{Producer, minifac_spam},
     spatial::SpatialIndex,
 };
+use crate::units::spatial::flat_dist_sq;
 use crate::{
     game_setup::AiDifficulty,
     interaction::movement::{MovePath, MoveTarget, QueuedCommand},
@@ -60,16 +61,13 @@ use crate::{
     },
 };
 use army::{EnemyStructure, attack_move, is_army, pick_attack_target, scatter};
-use build_orders::{
-    HomebaseOrder, Lack, RoleCounts, choose_homebase_order, homebase_roster,
-};
+use build_orders::{HomebaseOrder, Lack, RoleCounts, choose_homebase_order, homebase_roster};
 use expansion::{choose_building, pick_datavent};
 use specials::{
     COUNTER_DISPATCH_RANGE, CROWD_RADIUS, NX_CROWD_MIN, NX_RANGE, OBELISK_RANGE, SIGTERM_CROWD_MIN,
     SIGTERM_INTERVAL, UNDEPLOY_MAX, bug_should_deploy, crowded_cluster, exploit_should_undeploy,
     should_counter_dispatch,
 };
-use crate::units::spatial::flat_dist_sq;
 
 /// Seconds between AI decisions. Upstream's slow update runs every 128
 /// frames (~4 s); a faster cadence keeps factories from idling.

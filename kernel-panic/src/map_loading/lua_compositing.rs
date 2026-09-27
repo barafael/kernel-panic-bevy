@@ -364,7 +364,10 @@ pub fn minimap_pixels(farm: &HexFarm, size: usize) -> Vec<u8> {
     }
     let r = (size as f64 * 64.0 / w).ceil().max(1.0) as i64;
     for v in farm.datavents() {
-        let (cx, cz) = ((v[0] / w * size as f64) as i64, (v[2] / d * size as f64) as i64);
+        let (cx, cz) = (
+            (v[0] / w * size as f64) as i64,
+            (v[2] / d * size as f64) as i64,
+        );
         for pz in cz - r..=cz + r {
             for pxx in cx - r..=cx + r {
                 if (0..size as i64).contains(&pxx) && (0..size as i64).contains(&pz) {

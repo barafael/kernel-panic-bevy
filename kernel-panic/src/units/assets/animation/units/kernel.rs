@@ -373,8 +373,8 @@ mod tests {
     //! (not crawl at the initial slow speeds forever), and `is_open()`
     //! must only go true once every pillar is fully unfolded.
 
-    use super::KernelAnim;
     use super::super::super::{AnimCtx, AnimRig, Axis, UnitAnim, tick_rig};
+    use super::KernelAnim;
 
     /// The eight animated kernel pieces, one rig array each.
     fn kernel_rig() -> AnimRig {

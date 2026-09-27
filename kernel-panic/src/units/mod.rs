@@ -154,10 +154,7 @@ impl Plugin for UnitsPlugin {
                     // Bevy's 21-system tuple-arity cap; `after` puts
                     // them behind the regen pass so a shell's tint
                     // reflects this frame's regeneration.
-                    (
-                        shield::spawn_shield_shells,
-                        shield::tick_shield_shells,
-                    )
+                    (shield::spawn_shield_shells, shield::tick_shield_shells)
                         .chain()
                         .after(shield::regen_shields)
                         .in_set(GameplaySet::Produce),

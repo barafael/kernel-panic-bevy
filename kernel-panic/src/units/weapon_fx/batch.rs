@@ -112,9 +112,7 @@ impl QuadBatches {
                 uvs: Vec::new(),
                 colors: Vec::new(),
             });
-        batch
-            .positions
-            .extend(corners.iter().map(|c| c.to_array()));
+        batch.positions.extend(corners.iter().map(|c| c.to_array()));
         batch.uvs.extend_from_slice(&uvs);
         batch.colors.extend_from_slice(&colors);
     }
@@ -391,12 +389,18 @@ mod tests {
         assert_eq!(vis, Visibility::Inherited);
 
         flush(&mut app);
-        assert_eq!(*app.world().get::<Visibility>(entity).unwrap(), Visibility::Hidden);
+        assert_eq!(
+            *app.world().get::<Visibility>(entity).unwrap(),
+            Visibility::Hidden
+        );
         assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 1);
 
         push(&mut app, &mat, 1);
         flush(&mut app);
-        assert_eq!(*app.world().get::<Visibility>(entity).unwrap(), Visibility::Inherited);
+        assert_eq!(
+            *app.world().get::<Visibility>(entity).unwrap(),
+            Visibility::Inherited
+        );
         assert_eq!(batch_entities(&mut app).len(), 1, "no second entity");
     }
 

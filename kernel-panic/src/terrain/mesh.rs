@@ -40,7 +40,13 @@ pub fn generate_terrain_chunks(heights: &[f32], hm_w: usize, hm_h: usize) -> Vec
 /// Mesh of chunk `(cx, cz)` from a `hm_w × hm_h` height grid. Public
 /// so runtime terrain edits (Hex Farm) can rebuild just the chunks they
 /// touched.
-pub fn build_chunk(heights: &[f32], hm_w: usize, hm_h: usize, cx: usize, cz: usize) -> TerrainChunk {
+pub fn build_chunk(
+    heights: &[f32],
+    hm_w: usize,
+    hm_h: usize,
+    cx: usize,
+    cz: usize,
+) -> TerrainChunk {
     let sq_size = spring_map::map_types::SQUARE_SIZE as f32;
 
     let vx_start = cx * CHUNK_SIZE;

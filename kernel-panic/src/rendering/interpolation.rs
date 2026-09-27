@@ -62,7 +62,12 @@ impl Plugin for SimInterpolationPlugin {
 /// `FixedFirst`: undo the render blend so the tick starts from the
 /// true sim pose.
 pub fn restore_sim_pose(
-    mut q: Query<(&mut Transform, &mut SimPose, Option<&mut GlobalTransform>, Has<ChildOf>)>,
+    mut q: Query<(
+        &mut Transform,
+        &mut SimPose,
+        Option<&mut GlobalTransform>,
+        Has<ChildOf>,
+    )>,
 ) {
     for (mut tf, mut pose, gtf, is_child) in &mut q {
         if pose.written != Some(*tf) {
@@ -131,7 +136,9 @@ mod tests {
     fn world_with(tf: Transform) -> (World, Entity) {
         let mut world = World::new();
         world.insert_resource(Time::<Fixed>::from_hz(crate::sim::SIMULATION_HZ));
-        let e = world.spawn((tf, GlobalTransform::from(tf), SimPose::default())).id();
+        let e = world
+            .spawn((tf, GlobalTransform::from(tf), SimPose::default()))
+            .id();
         (world, e)
     }
 
@@ -163,7 +170,10 @@ mod tests {
 
         world.run_system_once(restore_sim_pose).unwrap();
         assert_eq!(world.get::<Transform>(e).unwrap().translation.x, 3.0);
-        assert_eq!(world.get::<GlobalTransform>(e).unwrap().translation().x, 3.0);
+        assert_eq!(
+            world.get::<GlobalTransform>(e).unwrap().translation().x,
+            3.0
+        );
     }
 
     /// A pose written outside the sim (teleport / spawn placement) is

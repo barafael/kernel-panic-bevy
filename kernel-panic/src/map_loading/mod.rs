@@ -760,16 +760,18 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
             },
         );
         farm.write_whole_heightmap(&mut parsed.heights);
-        parsed.features.extend(farm.datavents().into_iter().map(|v| {
-            MapFeature::new(
-                spring_map::map_types::FeatureType::GeoVent,
-                v[0] as f32,
-                v[1] as f32,
-                v[2] as f32,
-                0.0,
-                1.0,
-            )
-        }));
+        parsed
+            .features
+            .extend(farm.datavents().into_iter().map(|v| {
+                MapFeature::new(
+                    spring_map::map_types::FeatureType::GeoVent,
+                    v[0] as f32,
+                    v[1] as f32,
+                    v[2] as f32,
+                    0.0,
+                    1.0,
+                )
+            }));
         if let Some(info) = &mut map_info {
             // The mapinfo's `teams` are dummies; `SetStartPos` decides.
             info.start_positions = farm
@@ -845,7 +847,9 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     let mut smooth_ground = SmoothGround::from_heightmap(&heightmap);
     if let Some((farm, _)) = hex_farm.as_ref() {
         farm.set_whole_smooth_mesh(|x, z, h| {
-            smooth_ground.mesh.set_smooth_mesh(x as f32, z as f32, h as f32, None);
+            smooth_ground
+                .mesh
+                .set_smooth_mesh(x as f32, z as f32, h as f32, None);
         });
     }
     let chunks = generate_terrain_chunks(heightmap.heights(), hm_w, hm_h);

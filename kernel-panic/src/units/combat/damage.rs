@@ -771,7 +771,11 @@ mod tests {
         };
 
         step(&mut app, 6);
-        assert_eq!(app.world().resource::<DamageQueue>().len(), 0, "not due before frame 7");
+        assert_eq!(
+            app.world().resource::<DamageQueue>().len(),
+            0,
+            "not due before frame 7"
+        );
         step(&mut app, 1);
         assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
         assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
@@ -786,7 +790,6 @@ mod tests {
         assert_eq!(app.world().resource::<DamageQueue>().len(), 3);
         assert!(app.world().get::<BurstFire>(attacker).is_none());
     }
-
 
     fn death_boom_weapon() -> (WeaponRegistry, WeaponId) {
         let mut weapons = WeaponRegistry::default();

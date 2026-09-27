@@ -180,7 +180,10 @@ mod tests {
             Some(GameState::Victory)
         );
         // Every opponent must be out, not just one of them.
-        assert_eq!(outcome(&census(&[(0, 1, 1), (1, 1, 0), (2, 1, 1)]), 0), None);
+        assert_eq!(
+            outcome(&census(&[(0, 1, 1), (1, 1, 0), (2, 1, 1)]), 0),
+            None
+        );
         // No factories anywhere: sandbox, never decided.
         assert_eq!(outcome(&census(&[(0, 4, 0), (1, 4, 0)]), 0), None);
     }

@@ -96,7 +96,12 @@ impl UnitAnim for HoleAnim {
         self.arm_timer = (ARM_FAR - ARM_NEAR) / ARM_SPEED;
         rig.show(self.pieces.nanoarm);
         rig.show(self.pieces.nanomover);
-        rig.move_to(self.pieces.nanomover, Axis::Z, -SHUTTLE_DEPTH, SHUTTLE_SPEED);
+        rig.move_to(
+            self.pieces.nanomover,
+            Axis::Z,
+            -SHUTTLE_DEPTH,
+            SHUTTLE_SPEED,
+        );
         rig.move_to(self.pieces.nanoarm, Axis::X, -ARM_FAR, ARM_SPEED);
     }
 

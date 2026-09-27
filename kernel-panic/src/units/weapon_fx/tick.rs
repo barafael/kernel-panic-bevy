@@ -14,12 +14,12 @@ use crate::sim::{GAME_SPEED, secs_to_frames};
 use bevy::ecs::system::SystemParam;
 
 use super::ceg::{CegTrailCtx, spawn_ceg};
+use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
 use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
 #[cfg(test)]
 use crate::units::content::weapons::WeaponId;
 use crate::units::content::weapons::WeaponRegistry;
-use crate::terrain::heightmap::Heightmap;
 use crate::units::spatial::SpatialIndex;
 
 /// Upper bound on a guided projectile's life (seconds). Missiles end on
@@ -767,7 +767,12 @@ fn despawn_projectile(entity: Entity, proj: &mut ProjectileVisual, commands: &mu
 /// position as the new head and drop samples older than `smokeTime`.
 /// The launch point (first sample) and the impact point (`last`) draw at
 /// zero alpha (`firstSegment` / `lastSegment`).
-pub(super) fn push_trail_sample(trail: &mut ProjectileTrail, pos: Vec3, velocity: Vec3, last: bool) {
+pub(super) fn push_trail_sample(
+    trail: &mut ProjectileTrail,
+    pos: Vec3,
+    velocity: Vec3,
+    last: bool,
+) {
     age_trail(trail);
     let first = trail.samples.is_empty();
     let dir = velocity
@@ -1029,7 +1034,6 @@ mod tests {
             ))
             .id();
 
-
         app.world_mut().spawn((
             LaserBolt {
                 origin: Vec3::ZERO,
@@ -1162,7 +1166,6 @@ mod tests {
             });
         }
 
-
         app.world_mut().spawn((
             LaserBolt {
                 origin: Vec3::ZERO,
@@ -1240,7 +1243,6 @@ mod tests {
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();
-
 
         app.world_mut().spawn((
             LaserBolt {
@@ -1392,13 +1394,15 @@ mod tests {
         };
         let target = Vec3::new(400.0, 0.0, 0.0);
         let origin = Vec3::new(0.0, 10.0, 0.0);
-        let (flight, pos) = super::super::flight::MissileFlight::launch(super::super::flight::Launch {
-            weapon: &w,
-            muzzle_pos: origin,
-            muzzle_dir: Vec3::X,
-            target_pos: target,
-        });
-        let proj = spawn_flight_projectile(&mut app, Flight::Missile(flight), pos, target, 400.0, None);
+        let (flight, pos) =
+            super::super::flight::MissileFlight::launch(super::super::flight::Launch {
+                weapon: &w,
+                muzzle_pos: origin,
+                muzzle_dir: Vec3::X,
+                target_pos: target,
+            });
+        let proj =
+            spawn_flight_projectile(&mut app, Flight::Missile(flight), pos, target, 400.0, None);
 
         let mut max_y = 0.0f32;
         let mut arrived = false;
@@ -1445,13 +1449,21 @@ mod tests {
             .id();
         let w = flow_missile();
         let origin = Vec3::new(0.0, 140.0, 0.0);
-        let (flight, pos) = super::super::flight::StarburstFlight::launch(super::super::flight::Launch {
-            weapon: &w,
-            muzzle_pos: origin,
-            muzzle_dir: Vec3::X,
+        let (flight, pos) =
+            super::super::flight::StarburstFlight::launch(super::super::flight::Launch {
+                weapon: &w,
+                muzzle_pos: origin,
+                muzzle_dir: Vec3::X,
+                target_pos,
+            });
+        let proj = spawn_flight_projectile(
+            &mut app,
+            Flight::Starburst(flight),
+            pos,
             target_pos,
-        });
-        let proj = spawn_flight_projectile(&mut app, Flight::Starburst(flight), pos, target_pos, 400.0, None);
+            400.0,
+            None,
+        );
         app.world_mut().get_mut::<DelayedHit>(proj).unwrap().target = Some(target);
 
         let mut path = vec![pos];
@@ -1465,7 +1477,10 @@ mod tests {
             path.push(tf.translation);
             let model_fwd = tf.rotation * Vec3::Z;
             let vel = app.world().get::<ProjectileVisual>(proj).unwrap().velocity;
-            assert!(model_fwd.dot(vel.normalize()) > 0.999, "model faces its flight");
+            assert!(
+                model_fwd.dot(vel.normalize()) > 0.999,
+                "model faces its flight"
+            );
         }
         assert!(hit, "missile must reach its target");
         // Frames 1-2 go straight along the muzzle (+X).
@@ -1477,7 +1492,11 @@ mod tests {
             .next()
             .expect("damage");
         assert_eq!(dmg.target, Some(target));
-        assert!(dmg.impact_pos.distance(target_pos) < 14.0, "hit at {}", dmg.impact_pos);
+        assert!(
+            dmg.impact_pos.distance(target_pos) < 14.0,
+            "hit at {}",
+            dmg.impact_pos
+        );
     }
 
     #[test]

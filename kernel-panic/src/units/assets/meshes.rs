@@ -107,7 +107,8 @@ pub fn piece_layout(
     if let Some(layout) = cache.piece_layouts.get(filename) {
         return layout.clone();
     }
-    let layout = load_s3o_cached(filename, cache).map(|model| Arc::new(PieceLayout::build(model, meshes)));
+    let layout =
+        load_s3o_cached(filename, cache).map(|model| Arc::new(PieceLayout::build(model, meshes)));
     cache
         .piece_layouts
         .insert(filename.to_string(), layout.clone());
@@ -117,7 +118,11 @@ pub fn piece_layout(
 /// Shared picking sphere for a unit's `SelectionVolume`, one per
 /// distinct radius. Never drawn (the volume has no material), only ray
 /// cast against, so its resolution is a hit-shape choice.
-pub fn selection_sphere(radius: f32, meshes: &mut Assets<Mesh>, cache: &mut S3OModelCache) -> Handle<Mesh> {
+pub fn selection_sphere(
+    radius: f32,
+    meshes: &mut Assets<Mesh>,
+    cache: &mut S3OModelCache,
+) -> Handle<Mesh> {
     cache
         .selection_spheres
         .entry(radius.to_bits())
@@ -453,4 +458,3 @@ fn collect_piece(
         collect_piece(child, world_offset, scale, positions, normals, uvs, indices);
     }
 }
-

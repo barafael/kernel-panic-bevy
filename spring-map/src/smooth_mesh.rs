@@ -206,7 +206,13 @@ impl SmoothHeightMesh {
     /// a cell (discarding off-mesh ones → `None`), then set it to
     /// `height`, or move it `terraform` of the way there. Returns the
     /// height difference applied.
-    pub fn set_smooth_mesh(&mut self, x: f32, z: f32, h: f32, terraform: Option<f32>) -> Option<f32> {
+    pub fn set_smooth_mesh(
+        &mut self,
+        x: f32,
+        z: f32,
+        h: f32,
+        terraform: Option<f32>,
+    ) -> Option<f32> {
         // `(int)(xl / res)`: truncation toward zero.
         let xi = (x / self.fresolution) as i64;
         let zi = (z / self.fresolution) as i64;
@@ -268,7 +274,14 @@ impl SmoothHeightMesh {
     }
 
     /// `BlurHorizontal(map, min, max, blurSize, resolution, src, dst)`.
-    fn blur_horizontal(&self, heights: &[f32], src: &[f32], dst: &mut [f32], min: [usize; 2], max: [usize; 2]) {
+    fn blur_horizontal(
+        &self,
+        heights: &[f32],
+        src: &[f32],
+        dst: &mut [f32],
+        min: [usize; 2],
+        max: [usize; 2],
+    ) {
         let line = self.maxx;
         let map_max_x = self.maxx as i64 - 1;
         let b = self.blur_size() as i64;
@@ -296,7 +309,14 @@ impl SmoothHeightMesh {
     }
 
     /// `BlurVertical(map, min, max, blurSize, resolution, src, dst)`.
-    fn blur_vertical(&self, heights: &[f32], src: &[f32], dst: &mut [f32], min: [usize; 2], max: [usize; 2]) {
+    fn blur_vertical(
+        &self,
+        heights: &[f32],
+        src: &[f32],
+        dst: &mut [f32],
+        min: [usize; 2],
+        max: [usize; 2],
+    ) {
         let line = self.maxx;
         let map_max_y = self.maxy as i64 - 1;
         let b = self.blur_size() as i64;
@@ -350,7 +370,10 @@ impl SmoothHeightMesh {
         let (w, h) = (t.width as i64, t.height as i64);
         // C++ integer division truncates toward zero, as does Rust's.
         let min = [((x1 - r) / res).max(0), ((z1 - r) / res).max(0)];
-        let max = [((x2 + r - 1) / res).min(w - 1), ((z2 + r - 1) / res).min(h - 1)];
+        let max = [
+            ((x2 + r - 1) / res).min(w - 1),
+            ((z2 + r - 1) / res).min(h - 1),
+        ];
         for y in min[1]..=max[1] {
             for x in min[0]..=max[0] {
                 let i = (x + y * w) as usize;
@@ -441,7 +464,14 @@ impl SmoothHeightMesh {
 /// Sliding-window maximum over `line` (whose first element is at index
 /// `base`), window `±w` clamped to the line, reported for indices
 /// `out0..=out1` via `emit(index, max)`. Monotonic deque, O(n).
-fn sliding_max(line: &[f32], base: usize, w: usize, out0: usize, out1: usize, mut emit: impl FnMut(usize, f32)) {
+fn sliding_max(
+    line: &[f32],
+    base: usize,
+    w: usize,
+    out0: usize,
+    out1: usize,
+    mut emit: impl FnMut(usize, f32),
+) {
     let last = base + line.len() - 1;
     let mut dq: VecDeque<usize> = VecDeque::new();
     let mut next = out0.saturating_sub(w).max(base);
@@ -514,7 +544,11 @@ mod tests {
         let (hm, w, h) = terrain();
         let m = SmoothHeightMesh::new(&hm, w, h);
         for &(x, y) in &[(0, 0), (5, 90), (60, 30), (127, 127), (64, 64), (20, 100)] {
-            assert_eq!(m.maxima_mesh[x + y * m.maxx], brute_max(&m, &hm, x, y), "({x},{y})");
+            assert_eq!(
+                m.maxima_mesh[x + y * m.maxx],
+                brute_max(&m, &hm, x, y),
+                "({x},{y})"
+            );
         }
     }
 
@@ -555,7 +589,11 @@ mod tests {
         let (hm, w, h) = terrain();
         let m = SmoothHeightMesh::new(&hm, w, h);
         let lo = m.maxima_mesh.iter().cloned().fold(f32::INFINITY, f32::min);
-        let hi = m.maxima_mesh.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let hi = m
+            .maxima_mesh
+            .iter()
+            .cloned()
+            .fold(f32::NEG_INFINITY, f32::max);
         let bound = (hi - lo) / (2 * m.blur_size() + 1) as f32 * 2.0 + 1e-2;
         let mut checked = 0;
         for y in 0..m.maxy {
@@ -582,7 +620,10 @@ mod tests {
                 sliding_max(&line, 0, w, o0, o1, |i, v| {
                     let lo = i.saturating_sub(w);
                     let hi = (i + w).min(49);
-                    let b = line[lo..=hi].iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                    let b = line[lo..=hi]
+                        .iter()
+                        .cloned()
+                        .fold(f32::NEG_INFINITY, f32::max);
                     assert_eq!(v, b, "w={w} i={i}");
                 });
             }
@@ -650,12 +691,18 @@ mod tests {
         let (hm, w, h) = terrain();
         let mut m = SmoothHeightMesh::new(&hm, w, h);
         let old = m.mesh[3 + 2 * 128];
-        assert_eq!(m.set_smooth_mesh(63.9, 47.0, 500.0, None), Some(500.0 - old));
+        assert_eq!(
+            m.set_smooth_mesh(63.9, 47.0, 500.0, None),
+            Some(500.0 - old)
+        );
         assert_eq!(m.mesh[3 + 2 * 128], 500.0);
         assert_eq!(m.set_smooth_mesh(2048.0, 0.0, 1.0, None), None);
         // `(int)(-1 / 16)` truncates to cell 0, like the engine.
         let m0 = m.mesh[0];
-        assert_eq!(m.set_smooth_mesh(-1.0, 0.0, 1.0, Some(0.5)), Some(0.5 * (1.0 - m0)));
+        assert_eq!(
+            m.set_smooth_mesh(-1.0, 0.0, 1.0, Some(0.5)),
+            Some(0.5 * (1.0 - m0))
+        );
         let before = m.mesh[5];
         m.set_smooth_mesh(80.0, 0.0, before + 10.0, Some(0.5));
         assert!((m.mesh[5] - (before + 5.0)).abs() < 1e-4);

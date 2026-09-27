@@ -97,7 +97,8 @@ pub(crate) fn edit_queue(producer: &mut Producer, kind: UnitKind, msg: &Activate
 /// The minifac each constructor builds (`kp_hotkeys.lua` binds the
 /// keypad keys to `buildunit_socket` / `_window` / `_port`).
 fn minifac_of(kind: UnitKind) -> Option<UnitKind> {
-    kind.is_constructor().then(|| kind.faction().secondary_factory())
+    kind.is_constructor()
+        .then(|| kind.faction().secondary_factory())
 }
 
 /// Order hotkeys → activations. `D` (cast at the cursor / deploy) stays

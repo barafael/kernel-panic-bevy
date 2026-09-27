@@ -36,8 +36,12 @@ pub(crate) fn ground_mover_components(
     entity: Entity,
     transform: &Transform,
 ) -> impl Bundle {
-    GroundMover::new(kind, registry, &UnitStats::from_registry(kind, registry, 0.0))
-        .seeded(entity, transform)
+    GroundMover::new(
+        kind,
+        registry,
+        &UnitStats::from_registry(kind, registry, 0.0),
+    )
+    .seeded(entity, transform)
 }
 
 /// Marks an active attack-move order. While it is present AND the unit
@@ -133,9 +137,7 @@ pub enum QueuedCommand {
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
-            QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => {
-                *p
-            }
+            QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => *p,
             QueuedCommand::AttackUnit { pos, .. } => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
         }
@@ -232,7 +234,14 @@ impl NavGridSet {
             if rev <= since {
                 break;
             }
-            area = Some(area.map_or(b, |a| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]));
+            area = Some(area.map_or(b, |a| {
+                [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]
+            }));
         }
         area
     }
@@ -346,7 +355,9 @@ impl NavGridSet {
         if pos.x < 0.0 || pos.y < 0.0 {
             return None;
         }
-        let s = b.speed_map.get((pos.x / SQUARE_SIZE) as u32, (pos.y / SQUARE_SIZE) as u32);
+        let s = b
+            .speed_map
+            .get((pos.x / SQUARE_SIZE) as u32, (pos.y / SQUARE_SIZE) as u32);
         (s > 0.0).then(|| {
             (1.0 / s - 1.0).max(0.0) / spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
         })
@@ -354,8 +365,9 @@ impl NavGridSet {
 
     /// `slopeMod` of the bucket for cap `cap`.
     pub fn slope_mod(&self, cap: f32) -> f32 {
-        self.bucket(cap)
-            .map_or(0.0, |b| spring_pathfinding::slope_mod_from_max_slope(b.max_slope))
+        self.bucket(cap).map_or(0.0, |b| {
+            spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
+        })
     }
 }
 
@@ -579,7 +591,11 @@ pub fn orient_stationary_to_terrain(
         }
         let forward = transform.forward().as_vec3();
         let f = Vec3::new(forward.x, 0.0, forward.z);
-        let f = if f.length_squared() < 1e-6 { -Vec3::Z } else { f.normalize() };
+        let f = if f.length_squared() < 1e-6 {
+            -Vec3::Z
+        } else {
+            f.normalize()
+        };
         let target = Transform::default().looking_to(f, Vec3::Y).rotation;
         if transform.rotation != target {
             transform.rotation = target;
@@ -686,14 +702,22 @@ pub(crate) fn nav_class<'a>(
     let bucket = nav.bucket_index(cap)?;
     let crushes = super::structures::crushes_features(req.crush_strength);
     let mask = nav.structures.mask(req.xsizeh, crushes);
-    Some(((bucket, req.xsizeh, crushes), &nav.buckets[bucket].speed_map, mask))
+    Some((
+        (bucket, req.xsizeh, crushes),
+        &nav.buckets[bucket].speed_map,
+        mask,
+    ))
 }
 
 fn path_outcome(path: Option<Path>, to: Vec3, revision: u64) -> PathOutcome {
     let Some(path) = path else {
         return PathOutcome::Unreachable;
     };
-    let waypoints: Vec<Vec3> = path.points.iter().map(|p| Vec3::new(p[0], 0.0, p[1])).collect();
+    let waypoints: Vec<Vec3> = path
+        .points
+        .iter()
+        .map(|p| Vec3::new(p[0], 0.0, p[1]))
+        .collect();
     PathOutcome::Route(MovePath {
         // Point 0 is the start position itself.
         current: 1.min(waypoints.len().saturating_sub(1)),
@@ -1008,7 +1032,11 @@ mod tilt_tests {
 
     /// 30° slope descending along +Z: surface normal tilts toward +Z.
     fn downhill_normal() -> Vec3 {
-        Vec3::new(0.0, 30.0_f32.to_radians().cos(), 30.0_f32.to_radians().sin())
+        Vec3::new(
+            0.0,
+            30.0_f32.to_radians().cos(),
+            30.0_f32.to_radians().sin(),
+        )
     }
 
     #[test]
@@ -1057,8 +1085,16 @@ mod tests {
             nav.bump([i, i, i, i]);
         }
         assert_eq!(nav.changed_since(1), None, "older than the ring");
-        assert!(NavGridSet::segment_touches([10, 10, 12, 12], Vec2::new(0.0, 88.0), Vec2::new(200.0, 88.0)));
-        assert!(!NavGridSet::segment_touches([10, 10, 12, 12], Vec2::new(0.0, 60.0), Vec2::new(200.0, 60.0)));
+        assert!(NavGridSet::segment_touches(
+            [10, 10, 12, 12],
+            Vec2::new(0.0, 88.0),
+            Vec2::new(200.0, 88.0)
+        ));
+        assert!(!NavGridSet::segment_touches(
+            [10, 10, 12, 12],
+            Vec2::new(0.0, 60.0),
+            Vec2::new(200.0, 60.0)
+        ));
     }
     use spring_pathfinding::SpeedMap;
 
@@ -1095,9 +1131,9 @@ mod tests {
 #[cfg(test)]
 mod heat_tests {
     use super::*;
-    use spring_pathfinding::HeatMap;
     use crate::units::components::TeamId;
     use bevy::ecs::system::RunSystemOnce;
+    use spring_pathfinding::HeatMap;
     use std::time::Duration;
 
     /// Walking ground units deposit heat at their cell; a full decay
@@ -1200,9 +1236,9 @@ mod heat_tests {
 #[cfg(test)]
 mod cross_map_tests {
     use super::*;
-    use spring_pathfinding::HeatMap;
     use crate::units::components::TeamId;
     use bevy::ecs::system::RunSystemOnce;
+    use spring_pathfinding::HeatMap;
     use std::time::Duration;
 
     /// Ground-truth diagnostic: load a real shipped map, build the nav

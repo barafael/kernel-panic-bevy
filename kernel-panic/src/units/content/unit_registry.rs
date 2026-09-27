@@ -99,13 +99,17 @@ fn manual_target_gate(attacker: &UnitDef, categories: &str) -> bool {
 /// [`UnitRegistry::acc_rate`].
 fn max_acc(d: Option<&UnitDef>) -> f32 {
     const DEFAULT_MAX_ACC: f32 = 0.5;
-    d.map(|d| d.acceleration).filter(|&a| a > 0.0).unwrap_or(DEFAULT_MAX_ACC)
+    d.map(|d| d.acceleration)
+        .filter(|&a| a > 0.0)
+        .unwrap_or(DEFAULT_MAX_ACC)
 }
 
 /// `UnitDef::maxDec` (elmos/frame²), defaulting to `maxAcc` — see
 /// [`UnitRegistry::dec_rate`].
 fn max_dec(d: Option<&UnitDef>) -> f32 {
-    d.map(|d| d.brake_rate).filter(|&b| b > 0.0).unwrap_or_else(|| max_acc(d))
+    d.map(|d| d.brake_rate)
+        .filter(|&b| b > 0.0)
+        .unwrap_or_else(|| max_acc(d))
 }
 
 /// Per-kind values derived from the FBI + MOVEINFO once at load, so the
@@ -150,7 +154,10 @@ impl UnitRegistry {
     /// unit bundle).
     pub fn load() -> Self {
         let bundle = super::bundle::bundle();
-        info!("Unit registry: {} definitions total", bundle.units.units.len());
+        info!(
+            "Unit registry: {} definitions total",
+            bundle.units.units.len()
+        );
         let registry = Self::from_defs(bundle.units.clone(), bundle.move_classes.clone());
         registry.validate_unit_bindings();
         registry
@@ -166,8 +173,10 @@ impl UnitRegistry {
             spring_map::hexfarm::lua_median(all().map(|d| d.build_time as f64)),
         );
         let mut units = defs.units;
-        let defs: Box<[Option<UnitDef>]> =
-            ALL_UNIT_KINDS.iter().map(|k| units.remove(k.unitname())).collect();
+        let defs: Box<[Option<UnitDef>]> = ALL_UNIT_KINDS
+            .iter()
+            .map(|k| units.remove(k.unitname()))
+            .collect();
         let kinds = defs
             .iter()
             .map(|d| KindData {
@@ -262,8 +271,7 @@ impl UnitRegistry {
 
     /// Movement speed in elmos per second.
     pub fn speed(&self, kind: UnitKind) -> f32 {
-        self.def(kind)
-            .map_or(0.0, |d| d.max_velocity * GAME_SPEED)
+        self.def(kind).map_or(0.0, |d| d.max_velocity * GAME_SPEED)
     }
 
     /// `UnitDef::maxAcc` in elmos/frame²: FBI `Acceleration`, default
@@ -310,7 +318,8 @@ impl UnitRegistry {
     /// 480 turns 2.6°/frame, a half turn in ~2.3 s. A TurnRate of 0
     /// (buildings) is treated as "snap" by the movement code.
     pub fn turn_rate(&self, kind: UnitKind) -> f32 {
-        self.def(kind).map_or(0.0, |d| d.turn_rate * SHORT_ANGLE_TO_RAD * GAME_SPEED)
+        self.def(kind)
+            .map_or(0.0, |d| d.turn_rate * SHORT_ANGLE_TO_RAD * GAME_SPEED)
     }
 
     /// Whether this unit flies (FBI `canFly=1`). Flying units ignore the
@@ -381,7 +390,10 @@ impl UnitRegistry {
 
     /// `CHoverAirMoveType` constants for a flying unit, in Spring's
     /// per-frame units (`AAirMoveType` / `CHoverAirMoveType` ctors).
-    pub fn hover_air_params(&self, kind: UnitKind) -> crate::interaction::air_movement::HoverAirParams {
+    pub fn hover_air_params(
+        &self,
+        kind: UnitKind,
+    ) -> crate::interaction::air_movement::HoverAirParams {
         let fallback;
         let d = match self.def(kind) {
             Some(d) => d,

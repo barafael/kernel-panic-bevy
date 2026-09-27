@@ -246,13 +246,20 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
             })
             .collect();
     }
-    let map = dev.demo_map.as_deref().map_or_else(random_weighted_map, |list| {
-        // A comma list rotates: one map per demo restart.
-        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let maps: Vec<&str> = list.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
-        let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        maps[i % maps.len().max(1)].to_string()
-    });
+    let map = dev
+        .demo_map
+        .as_deref()
+        .map_or_else(random_weighted_map, |list| {
+            // A comma list rotates: one map per demo restart.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let maps: Vec<&str> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .collect();
+            let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            maps[i % maps.len().max(1)].to_string()
+        });
     GameSetup {
         map,
         players,

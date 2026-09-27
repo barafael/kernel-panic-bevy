@@ -996,7 +996,14 @@ fn bolt_cap_material(
     let (handle, _, _) = load_beam_texture(filename, model_cache, images)?;
 
     // Keyed by the texture so different texture2 weapons don't collide.
-    Some(cache.get_or_create_tiled(edge_color, true, weapon.intensity, Some(handle), 0, materials))
+    Some(cache.get_or_create_tiled(
+        edge_color,
+        true,
+        weapon.intensity,
+        Some(handle),
+        0,
+        materials,
+    ))
 }
 
 /// Smoke-trail state for a projectile (upstream `CSmokeTrailProjectile`,
