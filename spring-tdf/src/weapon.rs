@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::Section;
 
 /// All weapon definitions from one or more TDF files.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WeaponDefs {
     pub weapons: BTreeMap<String, WeaponDef>,
 }
@@ -13,7 +15,7 @@ pub struct WeaponDefs {
 /// A single weapon definition with the most commonly used fields.
 ///
 /// Fields that don't appear in the TDF default to `0.0` / `false` / `""`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WeaponDef {
     /// Internal identifier (the section name, e.g. "Rock", "BugShot").
     pub id: String,
@@ -151,7 +153,7 @@ pub struct WeaponDef {
 /// Damage values keyed by armor type (lowercased).
 ///
 /// `default` is the fallback used when no specific armor type matches.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DamageMap {
     pub default: f32,
     pub types: BTreeMap<String, f32>,

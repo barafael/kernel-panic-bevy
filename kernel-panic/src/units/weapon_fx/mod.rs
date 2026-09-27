@@ -28,7 +28,8 @@ use bevy::prelude::*;
 
 use crate::rendering::interpolation::SimPose;
 use batch::FxQuadBatches;
-use ceg::{CegRegistry, CegRenderAssets};
+pub(crate) use ceg::CegRegistry;
+use ceg::CegRenderAssets;
 use shared::{
     BeamMaterialCache, BuildSparkleAssets, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes,
 };

@@ -8,13 +8,11 @@
 //! (`MoveDefHandler.cpp:314-319`), whatever its FBI footprint says.
 
 use bevy::prelude::*;
-use spring_tdf::Tdf;
-use std::collections::HashMap;
-
-use super::tdf_loader;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Heat params for one movement class, verbatim from MOVEINFO.TDF.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MoveClassParams {
     /// Heat deposited per second of walking across a cell.
     pub heat_produced: f32,
@@ -33,7 +31,7 @@ pub const DEFAULT_HEAT_PARAMS: MoveClassParams = MoveClassParams {
 };
 
 /// The `MoveDef` fields of one MOVEINFO.TDF class.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MoveClassDef {
     /// `FootprintX` / `FootprintZ` in FBI footprint units (16 elmos).
     pub footprint_x: f32,
@@ -45,39 +43,32 @@ pub struct MoveClassDef {
     pub max_slope_deg: f32,
 }
 
-#[derive(Resource, Debug, Clone, Default)]
+/// Baked into the unit bundle; `BTreeMap`s so the bake is reproducible.
+#[derive(Resource, Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MoveClassTable {
-    classes: HashMap<String, MoveClassParams>,
-    defs: HashMap<String, MoveClassDef>,
+    classes: BTreeMap<String, MoveClassParams>,
+    defs: BTreeMap<String, MoveClassDef>,
 }
 
 impl MoveClassTable {
-    /// Parse `gamedata/MOVEINFO.TDF` from the upstream tree. Missing
-    /// file or parse errors degrade to an empty table (all lookups
-    /// fall back to [`DEFAULT_HEAT_PARAMS`]) so the game still boots.
+    /// The baked `gamedata/MOVEINFO.TDF` from the unit bundle (the
+    /// registry takes it from the bundle directly; tests read it here).
+    #[cfg(test)]
     pub fn load() -> Self {
-        let Some(dir) = tdf_loader::find_upstream_dir("gamedata") else {
-            warn!("Upstream gamedata directory not found — heat pathing uses defaults");
-            return Self::default();
-        };
-        let path = dir.join("MOVEINFO.TDF");
-        let text = match std::fs::read_to_string(&path) {
-            Ok(text) => text,
-            Err(err) => {
-                warn!("MOVEINFO.TDF unreadable at {path:?}: {err} — heat pathing uses defaults");
-                return Self::default();
-            }
-        };
-        let tdf = match Tdf::parse(&text) {
-            Ok(tdf) => tdf,
-            Err(err) => {
-                warn!("MOVEINFO.TDF unparsable: {err} — heat pathing uses defaults");
-                return Self::default();
-            }
-        };
+        super::bundle::bundle().move_classes.clone()
+    }
 
-        let mut classes = HashMap::new();
-        let mut defs = HashMap::new();
+    /// Number of classes in the table (the bake's report).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn len(&self) -> usize {
+        self.defs.len()
+    }
+
+    /// Parse a `MOVEINFO.TDF` tree (the bake side of `bundle`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn from_tdf(tdf: &spring_tdf::Tdf) -> Self {
+        let mut classes = BTreeMap::new();
+        let mut defs = BTreeMap::new();
         for section in &tdf.sections {
             let name = section.string_clean("name").to_ascii_lowercase();
             if name.is_empty() {

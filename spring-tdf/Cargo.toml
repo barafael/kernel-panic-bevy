@@ -7,6 +7,8 @@ description = "Parser for Spring RTS engine TDF (Tag Definition Format) files"
 [dependencies]
 better_default = { workspace = true }
 thiserror = { workspace = true }
+# The game bakes the parsed defs into its unit bundle (`units.kpu`).
+serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

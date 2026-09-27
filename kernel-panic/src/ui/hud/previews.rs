@@ -7,9 +7,11 @@
 //! unitname for units without a declared `BuildPic` keeps the simple
 //! mapping working for shared assets like `bit.png`.
 //!
-//! Missing files fall back to a procedural faction-tinted shape so the
-//! menu never shows a blank slot.
+//! The pictures go through the `AssetServer` (a file read on native, an
+//! HTTP fetch on web); a picture that fails to load falls back to a
+//! procedural faction-tinted shape so the menu never shows a blank slot.
 
+use bevy::asset::LoadState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
@@ -22,7 +24,11 @@ pub(super) struct PreviewsPlugin;
 impl Plugin for PreviewsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<UnitPreviews>()
-            .add_systems(Startup, load_previews);
+            .add_systems(Startup, load_previews)
+            .add_systems(
+                Update,
+                replace_failed_previews.run_if(|p: Res<UnitPreviews>| !p.pending.is_empty()),
+            );
     }
 }
 
@@ -32,6 +38,9 @@ impl Plugin for PreviewsPlugin {
 #[derive(Resource, Default)]
 pub(super) struct UnitPreviews {
     cache: Vec<(UnitKind, Handle<Image>)>,
+    /// Kinds whose picture is still loading; a failed load swaps the
+    /// placeholder in.
+    pending: Vec<UnitKind>,
 }
 
 impl UnitPreviews {
@@ -42,12 +51,9 @@ impl UnitPreviews {
 
 fn load_previews(
     mut previews: ResMut<UnitPreviews>,
-    mut images: ResMut<Assets<Image>>,
     asset_server: Res<AssetServer>,
     unit_registry: Res<UnitRegistry>,
 ) {
-    let assets_root = crate::paths::from_project_root("kernel-panic/assets/unitpics");
-
     for &kind in ALL_UNIT_KINDS {
         // Resolve filename via the FBI BuildPic (without extension), then
         // fall back to the unitname so units that don't declare one still
@@ -61,21 +67,40 @@ fn load_previews(
                 .map(|s| s.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_else(|| kind.unitname().to_string())
         };
-        let relative = format!("unitpics/{stem}.png");
-        let exists = assets_root.join(format!("{stem}.png")).is_file();
-
-        let handle = if exists {
-            asset_server.load(&relative)
-        } else {
-            warn!(
-                "No buildpic for {:?} (looked for {}), using procedural placeholder",
-                kind, relative,
-            );
-            let is_building = unit_registry.is_building(kind);
-            images.add(synthesise_placeholder(kind.faction(), is_building))
-        };
+        let handle = asset_server.load(format!("unitpics/{stem}.png"));
         previews.cache.push((kind, handle));
+        previews.pending.push(kind);
     }
+}
+
+/// Swap the procedural placeholder in for every picture whose load
+/// failed (no such file natively, a 404 on web).
+fn replace_failed_previews(
+    mut previews: ResMut<UnitPreviews>,
+    mut images: ResMut<Assets<Image>>,
+    asset_server: Res<AssetServer>,
+    unit_registry: Res<UnitRegistry>,
+) {
+    let mut still_loading = Vec::new();
+    for kind in std::mem::take(&mut previews.pending) {
+        let Some((_, handle)) = previews.cache.iter_mut().find(|(k, _)| *k == kind) else {
+            continue;
+        };
+        match asset_server.load_state(handle.id()) {
+            LoadState::Loaded => {}
+            LoadState::Failed(_) => {
+                warn!(
+                    "No buildpic for {:?} (looked for {:?}), using procedural placeholder",
+                    kind,
+                    handle.path(),
+                );
+                let is_building = unit_registry.is_building(kind);
+                *handle = images.add(synthesise_placeholder(kind.faction(), is_building));
+            }
+            _ => still_loading.push(kind),
+        }
+    }
+    previews.pending = still_loading;
 }
 
 /// 48×48 procedural fallback. Buildings get a diamond, units get a

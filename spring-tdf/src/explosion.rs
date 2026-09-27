@@ -49,16 +49,18 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::Section;
 
 // ── Typed values ────────────────────────────────────────────────────
 
 /// A parsed CEG expression. See the module docs for the grammar.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CegExpr(pub Vec<CegOp>);
 
 /// One operation in a [`CegExpr`] program.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum CegOp {
     /// Literal add.
     Add(f32),
@@ -213,7 +215,7 @@ fn parse_float(s: &str) -> Option<(f32, usize)> {
 }
 
 /// A [`CegExpr`] per axis (`x, y, z`). Comma-separated in the source.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CegVec3 {
     pub x: CegExpr,
     pub y: CegExpr,
@@ -249,7 +251,7 @@ impl CegVec3 {
 
 /// Emitter orientation: either a fixed axis or the keyword `dir` which
 /// the engine replaces with the owning weapon's firing direction.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum EmitVector {
     /// Use the weapon's firing direction at spawn time.
     Direction,
@@ -279,7 +281,7 @@ impl EmitVector {
 }
 
 /// A gradient of RGBA stops sampled across a particle's lifetime.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ColorMap {
     pub stops: Vec<[f32; 4]>,
 }
@@ -328,13 +330,13 @@ impl ColorMap {
 // ── Aggregate tree ──────────────────────────────────────────────────
 
 /// All explosion definitions from one or more TDF files.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExplosionDefs {
     pub explosions: BTreeMap<String, ExplosionDef>,
 }
 
 /// A single named explosion generator, composed of effect layers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExplosionDef {
     /// The explosion name (e.g. "corruption_burst", "oldskool_shot1").
     pub id: String,
@@ -345,7 +347,7 @@ pub struct ExplosionDef {
 }
 
 /// One visual effect layer within an explosion.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectLayer {
     /// Subsection name (e.g. "burst", "squarecloud", "tracers").
     pub name: String,
@@ -362,7 +364,7 @@ pub struct EffectLayer {
 }
 
 /// The rendering class for an effect layer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EffectClass {
     /// Burst of particles with physics (gravity, drag, lifetime).
     SimpleParticleSystem,
@@ -380,7 +382,7 @@ pub enum EffectClass {
 }
 
 /// Properties for a `CSimpleParticleSystem` effect.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ParticleProperties {
     pub texture: String,
     pub color_map: ColorMap,
@@ -404,7 +406,7 @@ pub struct ParticleProperties {
 }
 
 /// Properties for a `CBitmapMuzzleFlame` effect.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FlameProperties {
     pub side_texture: String,
     pub front_texture: String,
@@ -421,7 +423,7 @@ pub struct FlameProperties {
 }
 
 /// Properties for a `CExpGenSpawner` (chains to another explosion).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpawnerProperties {
     /// Name of the nested CEG, without the `custom:` prefix.
     pub explosion_generator: String,
@@ -435,7 +437,7 @@ pub struct SpawnerProperties {
 
 /// Properties for a `CExploSpikeProjectile` (`explspike`) effect —
 /// upstream `ExploSpikeProjectile.cpp`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpikeProperties {
     pub length: CegExpr,
     pub width: CegExpr,
@@ -450,7 +452,7 @@ pub struct SpikeProperties {
 }
 
 /// Union of effect-specific properties.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EffectProperties {
     Particle(ParticleProperties),
     Flame(FlameProperties),
@@ -461,7 +463,7 @@ pub enum EffectProperties {
 }
 
 /// Ground flash effect (simple circle/ring on the terrain).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GroundFlash {
     pub flash_size: f32,
     pub flash_alpha: f32,

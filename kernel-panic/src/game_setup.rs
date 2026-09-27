@@ -147,6 +147,11 @@ pub struct DevOptions {
     /// `KP_RECORD_SECONDS=<seconds>` of video.
     #[cfg(not(target_arch = "wasm32"))]
     pub record_seconds: Option<f32>,
+    /// `KP_BAKE_UNITS=<out path>`: bake the upstream unit data into a
+    /// unit bundle at that path and exit without starting the game
+    /// (`units::content::bundle`; normally `kernel-panic/assets/units.kpu`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub bake_units: Option<std::path::PathBuf>,
 }
 
 impl DevOptions {
@@ -187,6 +192,7 @@ impl DevOptions {
             record: var("KP_RECORD").map(Into::into),
             record_warmup: var("KP_RECORD_WARMUP").and_then(|n| n.parse().ok()),
             record_seconds: var("KP_RECORD_SECONDS").and_then(|n| n.parse().ok()),
+            bake_units: var("KP_BAKE_UNITS").map(Into::into),
         }
     }
 }

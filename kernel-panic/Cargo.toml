@@ -14,6 +14,17 @@ thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }
 # Async `Reader::read_to_end` for the BytesAsset loader (web map fetch).
 futures-lite = "2"
+# The embedded unit bundle (`assets/units.kpu`, see `units::content::bundle`):
+# postcard payload in a zstd frame, decoded by the pure-Rust ruzstd on
+# native and wasm alike.
+serde = { workspace = true }
+postcard = { workspace = true }
+ruzstd = "0.8"
+
+# `KP_BAKE_UNITS` encoder side: the bake reads the upstream checkout and
+# runs native only.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+zstd = "0.13"
 
 # The kani proof harnesses (animation/proofs.rs) are compiled only under
 # `cargo kani`, which sets cfg(kani). Declare it so normal builds don't

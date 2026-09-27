@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A parsed `.s3o` unit model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3OModel {
     /// Bounding sphere radius. Falls back to half the AABB diagonal when the
     /// header value is <= 0.01 (matches upstream `S3OParser::Load`).
@@ -32,7 +33,7 @@ pub struct S3OModel {
 ///
 /// Each piece has its own vertex/index data and an offset relative to its
 /// parent. The full model is a tree of pieces rooted at [`S3OModel::root_piece`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct S3OPiece {
     /// Piece name (e.g. "base", "turret", "barrel").
     pub name: String,
@@ -57,7 +58,7 @@ pub struct S3OPiece {
 }
 
 /// A single vertex with position, normal, and texture coordinates.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct S3OVertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
