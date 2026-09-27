@@ -4,7 +4,7 @@
 //! `spawn_weapon_visuals` drains the buffer and spawns the right visual;
 //! `tick_weapon_fx` fades/moves/despawns them each frame.
 
-mod batch;
+pub(crate) mod batch;
 mod ceg;
 mod flight;
 mod shared;
@@ -43,17 +43,15 @@ impl Plugin for WeaponFxPlugin {
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
             .insert_resource(CegRegistry::load())
-            // Projectiles and particles move in the fixed sim; draw
-            // them interpolated (`rendering::interpolation`). Beams,
-            // bolts, arcs, spikes and trails have no Transform at all:
-            // they are quads in the world-space batch meshes
-            // (`batch`), rewritten every tick.
+            // Projectiles and the synthesised bursts move in the fixed
+            // sim; draw them interpolated (`rendering::interpolation`).
+            // Beams, bolts, arcs, spikes, trails and CEG particles /
+            // flames have no Transform at all: they are quads in the
+            // world-space batch meshes (`batch`), rewritten every tick.
             .register_required_components::<shared::ProjectileVisual, SimPose>()
             .register_required_components::<shared::BuildSparkle, SimPose>()
             .register_required_components::<shared::ImpactBurst, SimPose>()
             .register_required_components::<shared::GroundFlash, SimPose>()
-            .register_required_components::<ceg::CegParticle, SimPose>()
-            .register_required_components::<ceg::CegFlame, SimPose>()
             .add_systems(
                 FixedUpdate,
                 (
