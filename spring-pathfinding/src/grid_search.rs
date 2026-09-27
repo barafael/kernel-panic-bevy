@@ -368,6 +368,11 @@ impl ComponentLabels {
     /// [`RECONNECT_WINDOW`] — otherwise the change may have split a
     /// component and everything is rebuilt. Returns whether it rebuilt.
     pub fn update_region(&mut self, speed_map: &SpeedMap, mask: Option<&BlockMask>, bbox: [i32; 4]) -> bool {
+        if self.width != speed_map.width || self.height != speed_map.height {
+            // Not the grid these labels were built on.
+            *self = Self::build(speed_map, mask);
+            return true;
+        }
         let (w, h) = (self.width as i32, self.height as i32);
         let x0 = bbox[0].clamp(0, w - 1);
         let z0 = bbox[1].clamp(0, h - 1);

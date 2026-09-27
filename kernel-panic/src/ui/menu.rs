@@ -1563,7 +1563,8 @@ fn demo_director(
     } else {
         0.0
     };
-    if director.decided_for > DEMO_DECIDED_GRACE || director.age > DEMO_MAX_AGE {
+    let max_age = dev.demo_cycle.unwrap_or(DEMO_MAX_AGE);
+    if director.decided_for > DEMO_DECIDED_GRACE || director.age > max_age {
         commands.insert_resource(demo_setup(&dev));
         run_game.write(RunGame);
         *director = DemoDirector::default();

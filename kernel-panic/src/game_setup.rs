@@ -91,8 +91,13 @@ pub struct DevOptions {
     /// specific unit's weapons in `KP_MENU_SHOTS` visual checks.
     pub demo_factions: Option<Vec<Faction>>,
     /// `KP_DEMO_MAP=<stem>`: the attract-mode map (for `KP_MENU_SHOTS`
-    /// visual checks of one map).
+    /// visual checks of one map). With commas, a rotation of maps: each
+    /// demo restart takes the next one.
     pub demo_map: Option<String>,
+    /// `KP_DEMO_CYCLE=<secs>`: restart the attract demo (next map of the
+    /// rotation, fresh seats) that often, decided or not — for a
+    /// recording that tours several maps.
+    pub demo_cycle: Option<f32>,
     /// `KP_MENU_SHOTS=<dir>`: screenshot every launch-menu page there,
     /// then quit (`ui::menu_shots`).
     #[cfg(not(target_arch = "wasm32"))]
@@ -157,6 +162,7 @@ impl DevOptions {
         Self {
             demo_factions,
             demo_map: var("KP_DEMO_MAP"),
+            demo_cycle: var("KP_DEMO_CYCLE").and_then(|n| n.parse().ok()),
             menu_shots: var("KP_MENU_SHOTS").map(Into::into),
             menu_shots_warmup: var("KP_MENU_SHOTS_WARMUP").and_then(|w| w.parse().ok()),
             game_shots: var("KP_GAME_SHOTS").map(Into::into),
@@ -221,7 +227,13 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
             })
             .collect();
     }
-    let map = dev.demo_map.clone().unwrap_or_else(random_weighted_map);
+    let map = dev.demo_map.as_deref().map_or_else(random_weighted_map, |list| {
+        // A comma list rotates: one map per demo restart.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let maps: Vec<&str> = list.split(',').map(str::trim).filter(|m| !m.is_empty()).collect();
+        let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        maps[i % maps.len().max(1)].to_string()
+    });
     GameSetup {
         map,
         players,

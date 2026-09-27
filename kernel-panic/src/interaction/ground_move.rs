@@ -118,6 +118,10 @@ impl PathStats {
 #[derive(Default)]
 pub struct PathQueue {
     stats: PathStats,
+    /// [`NavGridSet::epoch`] everything below belongs to; a new map
+    /// drops it all (labels, the search in flight and its scratch are
+    /// sized to the old grid).
+    epoch: u64,
     /// [`ComponentLabels`] per (nav bucket, footprint, crushes) with the
     /// nav revision they were built for; rebuilt on the first request
     /// after a revision.
@@ -195,6 +199,17 @@ impl PathQueue {
         heat: Option<&spring_pathfinding::HeatMap>,
         describe: impl Fn(Entity) -> Option<PathRequest>,
     ) -> usize {
+        if let Some(n) = nav
+            && n.epoch != self.epoch
+        {
+            self.epoch = n.epoch;
+            self.pending.clear();
+            self.queued.clear();
+            self.in_flight = None;
+            self.results.clear();
+            self.labels.clear();
+            self.scratch = Default::default();
+        }
         loop {
             if self.in_flight.is_none() {
                 let Some(entity) = self.pending.pop_front() else {
@@ -2210,6 +2225,40 @@ mod tests {
 
     /// A unit that cannot get anywhere any more (sealed in after its
     /// path was planned) idles, re-requests a path at a SlowUpdate once
+    /// A new map replaces the nav grid with one of another size: the
+    /// path service must drop its labels, queue and search in flight
+    /// (all sized to the old grid) instead of indexing the new grid
+    /// with them.
+    #[test]
+    fn path_service_survives_a_map_change() {
+        use super::super::movement::{NavBucket, NavGridSet};
+        let mut h = Harness::flat();
+        let e = h.spawn(UnitKind::Bit, 0, Vec3::new(404.0, 0.0, 404.0));
+        h.step();
+        h.world.entity_mut(e).insert(MoveTarget(Vec3::new(1500.0, 0.0, 1500.0)));
+        h.step();
+        assert!(h.world.get::<MovePath>(e).is_some(), "path on the first map");
+        // A quarter-size map with a wall, so the component labels and
+        // scratch of the old grid are all wrong for it.
+        let mut small = spring_pathfinding::SpeedMap::uniform(48, 48, 1.0);
+        for z in 0..40 {
+            small.speeds[(z * 48 + 24) as usize] = 0.0;
+        }
+        small.refresh_max_speed();
+        let mut nav = NavGridSet::default();
+        nav.buckets.push(NavBucket {
+            max_slope: 1.0,
+            speed_map: small,
+        });
+        h.world.insert_resource(nav);
+        for _ in 0..10 {
+            h.world.entity_mut(e).insert(MoveTarget(Vec3::new(300.0, 0.0, 100.0)));
+            h.step();
+            h.world.entity_mut(e).insert(MoveTarget(Vec3::new(20.0, 0.0, 300.0)));
+            h.step();
+        }
+    }
+
     /// `numIdlingUpdates` passes `SPRING_MAX_HEADING / turnRate`, gets
     /// none, and gives the order up (`Fail`) instead of pushing forever.
     #[test]

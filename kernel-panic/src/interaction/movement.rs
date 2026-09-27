@@ -171,8 +171,12 @@ pub struct NavBucket {
 /// Upstream Spring does the same thing via per-`MoveDef` grids
 /// (`rts/Sim/MoveTypes/MoveDefHandler.cpp`); see plan.md §Gameplay Bugs
 /// "Movement ignores per-unit `MaxSlope`" for the full motivation.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct NavGridSet {
+    /// Identity of this grid set: a new map gets a new value, so
+    /// per-map caches (a mover's component labels, searches in flight)
+    /// can tell a replaced grid from a revised one.
+    pub epoch: u64,
     pub buckets: Vec<NavBucket>,
     /// Bumped whenever the structure layer changes, so paths made
     /// before can be re-checked (QTPFS `PathUpdated`).
@@ -190,6 +194,19 @@ pub struct NavGridSet {
 /// Revisions remembered for partial re-checks; older paths re-check
 /// in full.
 const REMEMBERED_CHANGES: usize = 64;
+
+impl Default for NavGridSet {
+    fn default() -> Self {
+        static NEXT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            epoch: NEXT_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            buckets: Vec::new(),
+            revision: 0,
+            changes: Default::default(),
+            structures: Default::default(),
+        }
+    }
+}
 
 impl NavGridSet {
     /// A new revision that changed the squares in `bbox` (see
