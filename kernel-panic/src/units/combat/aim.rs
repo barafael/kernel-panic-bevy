@@ -14,7 +14,7 @@
 use bevy::prelude::*;
 
 use super::Dying;
-use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::interaction::movement::{AttackMoveActive, MovePath, MoveTarget};
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
 
@@ -390,20 +390,21 @@ pub fn tick_deploy_state(
 /// Units currently moving (have a `MoveTarget`) are excluded — the
 /// movement system owns their heading.
 #[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity)]
 pub fn aim_weapons_system(
     time: Res<Time>,
-    mut query: Query<
-        (
-            &mut Transform,
-            &UnitStats,
-            &AimTarget,
-            Option<&crate::units::assets::animation::AimerPiece>,
-        ),
-        Without<crate::interaction::movement::MoveTarget>,
-    >,
+    mut query: Query<(
+        &mut Transform,
+        &UnitStats,
+        &AimTarget,
+        Option<&crate::units::assets::animation::AimerPiece>,
+        Option<&mut crate::interaction::ground_move::GroundMover>,
+        Has<MoveTarget>,
+        Has<AttackMoveActive>,
+    )>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, stats, aim, aimer) in &mut query {
+    for (mut transform, stats, aim, aimer, mover, has_move, attack_move) in &mut query {
         // HoverAttack aircraft (Flow) never turn their body for an
         // auto-acquired target: `HoverAirMoveType` owns the heading (it
         // only faces `circlingPos` under an explicit attack order), and
@@ -411,6 +412,12 @@ pub fn aim_weapons_system(
         // Turning the body here also fought `hover_air_system`, which
         // rewrites the attitude every tick.
         if aimer.is_some() || stats.can_fly {
+            continue;
+        }
+        // A plain move order owns the heading; a fight order that has
+        // engaged is holding (see `moving_for_script`) and turns to
+        // shoot, like pointer.bos's `set HEADING` loop in AimWeapon1.
+        if has_move && !attack_move {
             continue;
         }
         let to_target = Vec3::new(
@@ -423,6 +430,29 @@ pub fn aim_weapons_system(
             continue;
         }
         let desired_forward = to_target / horizontal_dist;
+        let max_turn = if stats.turn_rate > 0.0 {
+            stats.turn_rate * dt
+        } else {
+            std::f32::consts::TAU
+        };
+
+        // Ground units: the mover writes the body rotation from its
+        // heading every tick, so the script's `set HEADING` turns that
+        // — a `look_to` on the transform alone was undone next tick.
+        if let Some(mut mover) = mover {
+            let wanted = crate::sim::heading_of(desired_forward.xz());
+            let delta = crate::sim::wrap_angle(wanted - mover.heading);
+            let step = delta.clamp(-max_turn, max_turn);
+            if step != 0.0 {
+                mover.heading = crate::sim::wrap_angle(mover.heading + step);
+            }
+            let up = transform.up().as_vec3();
+            let rotation = crate::interaction::ground_move::attitude(mover.heading, up);
+            if transform.rotation != rotation {
+                transform.rotation = rotation;
+            }
+            continue;
+        }
 
         let forward_vec = transform.forward().as_vec3();
         let current_xz = {
@@ -432,11 +462,6 @@ pub fn aim_weapons_system(
             } else {
                 f.normalize()
             }
-        };
-        let max_turn = if stats.turn_rate > 0.0 {
-            stats.turn_rate * dt
-        } else {
-            std::f32::consts::TAU
         };
         let new_forward =
             crate::interaction::movement::rotate_toward_xz(current_xz, desired_forward, max_turn);

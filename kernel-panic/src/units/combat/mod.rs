@@ -178,6 +178,7 @@ pub struct PieceLookup<'w, 's> {
     >,
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
     pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
+    pub mover: Query<'w, 's, &'static crate::interaction::ground_move::GroundMover>,
 }
 
 /// World-space weapon muzzle of a unit: position and emit direction.
@@ -837,9 +838,18 @@ fn aim_gates_pass(
     // body to aim, so wait for that turn to finish. Byte uses an aimer
     // piece and skips this branch.
     if deployable && to_target_xz.length() > 1e-3 {
-        let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
-        let align = forward_xz.dot(to_target_xz.normalize()).clamp(-1.0, 1.0);
-        if align.acos() > AIM_HEADING_TOLERANCE {
+        // A ground unit's yaw is its mover heading (what `set HEADING`
+        // and `aim_weapons_system` turn); the body's forward vector
+        // projected to the ground drifts from it by several degrees on
+        // a slope, which kept Pointers on ramps from ever passing.
+        let error = match pieces.mover.get(entity) {
+            Ok(m) => crate::sim::wrap_angle(crate::sim::heading_of(to_target_xz.xz()) - m.heading).abs(),
+            Err(_) => {
+                let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
+                forward_xz.dot(to_target_xz.normalize()).clamp(-1.0, 1.0).acos()
+            }
+        };
+        if error > AIM_HEADING_TOLERANCE {
             return false;
         }
     }
@@ -1661,4 +1671,5 @@ mod tests {
         assert_eq!(animator.rig.muzzle, 5, "two Shot1s: gp0 then gp1");
     }
 }
+
 
