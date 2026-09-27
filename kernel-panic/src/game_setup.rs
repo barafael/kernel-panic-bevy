@@ -137,6 +137,16 @@ pub struct DevOptions {
     /// `KP_ATTRACT_DISTANCE=<elmos>`: orbit the attract camera this close
     /// (unit close-ups in `KP_SHOT_EVERY` runs).
     pub attract_distance: Option<f32>,
+    /// `KP_RECORD=<file.mp4>`: record a camera fly-over of an AI match
+    /// on `KP_DEMO_MAP`, then quit (`ui::record`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub record: Option<std::path::PathBuf>,
+    /// `KP_RECORD_WARMUP=<game seconds>` played before recording.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub record_warmup: Option<f32>,
+    /// `KP_RECORD_SECONDS=<seconds>` of video.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub record_seconds: Option<f32>,
 }
 
 impl DevOptions {
@@ -174,6 +184,9 @@ impl DevOptions {
             shot_every: var("KP_SHOT_EVERY").and_then(|n| n.parse().ok()),
             shot_dir: var("KP_SHOT_DIR").map(Into::into),
             attract_distance: var("KP_ATTRACT_DISTANCE").and_then(|n| n.parse().ok()),
+            record: var("KP_RECORD").map(Into::into),
+            record_warmup: var("KP_RECORD_WARMUP").and_then(|n| n.parse().ok()),
+            record_seconds: var("KP_RECORD_SECONDS").and_then(|n| n.parse().ok()),
         }
     }
 }

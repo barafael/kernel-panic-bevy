@@ -6,3 +6,6 @@
 trace-kp*
 trace-*.json
 /dist
+
+# Dev fly-over videos (`KP_RECORD`)
+/recordings

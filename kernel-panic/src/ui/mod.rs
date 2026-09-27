@@ -13,6 +13,8 @@ pub(crate) mod menu;
 #[cfg(not(target_arch = "wasm32"))]
 mod menu_shots;
 pub mod minimap;
+#[cfg(not(target_arch = "wasm32"))]
+mod record;
 pub mod theme;
 
 use bevy::prelude::*;
@@ -23,13 +25,17 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((hud::HudPlugin, menu::MenuPlugin, minimap::MinimapPlugin));
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins((menu_shots::MenuShotsPlugin, game_shots::GameShotsPlugin))
-            .add_systems(
-                Update,
-                periodic_shots.run_if(|d: Res<crate::game_setup::DevOptions>| {
-                    d.shot_every.is_some() && d.shot_dir.is_some()
-                }),
-            );
+        app.add_plugins((
+            menu_shots::MenuShotsPlugin,
+            game_shots::GameShotsPlugin,
+            record::RecordPlugin,
+        ))
+        .add_systems(
+            Update,
+            periodic_shots.run_if(|d: Res<crate::game_setup::DevOptions>| {
+                d.shot_every.is_some() && d.shot_dir.is_some()
+            }),
+        );
     }
 }
 
