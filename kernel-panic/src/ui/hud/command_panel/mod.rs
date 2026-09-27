@@ -67,7 +67,7 @@ impl Plugin for CommandPanelPlugin {
             .add_systems(
                 Update,
                 (
-                    collect_commands,
+                    collect_commands.run_if(in_state(AppState::InGame)),
                     order_hotkeys.run_if(in_state(AppState::InGame)),
                     apply_activations,
                     sync_active,
@@ -87,13 +87,17 @@ impl Plugin for CommandPanelPlugin {
 pub(crate) struct CommandPanelSet;
 
 /// The selection's commands and their page layout (Spring's `commands`
-/// and `icons`), refreshed every frame.
+/// and `icons`), rebuilt whenever the selection's command state changes.
 #[derive(Resource, Default)]
 pub(crate) struct PanelCommands {
     pub list: Vec<CmdDesc>,
     pub pages: Vec<Vec<Option<SlotCmd>>>,
     /// Identity of the selection the list was built for.
     selection: Vec<Entity>,
+    /// The per-unit states and capped kinds `list` was built from;
+    /// `collect_commands` skips the rebuild while they are unchanged.
+    states: Vec<UnitCmdState>,
+    capped: Vec<UnitKind>,
 }
 
 impl PanelCommands {
@@ -236,17 +240,23 @@ fn collect_commands(
     let mut rows: Vec<_> = selected.iter().collect();
     rows.sort_by_key(|r| r.0);
     let mut capped: Vec<UnitKind> = Vec::new();
+    // Teams whose limits were already checked: the count is a scan over
+    // every unit of the team, so do it once per team, not per selected
+    // unit.
+    let mut checked_teams: Vec<u8> = Vec::new();
     let states: Vec<UnitCmdState> = rows
         .iter()
         .map(|(_, ut, team, producer, autohold, cooldown)| {
-            if let Some(team) = team {
-                for kind in [UnitKind::LogicBomb] {
-                    if let Some(limit) = kind.team_limit()
-                        && !capped.contains(&kind)
-                        && team_kind_count(kind, team.0, &team_units) >= limit
-                    {
-                        capped.push(kind);
-                    }
+            if let Some(team) = team
+                && !checked_teams.contains(&team.0)
+            {
+                checked_teams.push(team.0);
+                let kind = UnitKind::LogicBomb;
+                if let Some(limit) = kind.team_limit()
+                    && !capped.contains(&kind)
+                    && team_kind_count(kind, team.0, &team_units) >= limit
+                {
+                    capped.push(kind);
                 }
             }
             let mut queued: Vec<(UnitKind, u32)> = Vec::new();
@@ -263,19 +273,29 @@ fn collect_commands(
                 repeat: producer.map(|p| p.repeat()),
                 queued,
                 autohold: autohold.map(|a| a.0),
-                recharge: cooldown.map(|c| c.remaining),
+                // The button only ever shows whole seconds
+                // (`recharge_label` ceils), so round here: the state
+                // then changes once a second instead of every frame.
+                recharge: cooldown.map(|c| c.remaining.ceil()),
             }
         })
         .collect();
-    panel.list = available_commands(&states, &capped);
-    panel.pages = KP_CTRL_PANEL.layout(panel.list.len());
     let ids: Vec<Entity> = rows.iter().map(|r| r.0).collect();
     if ids != panel.selection {
         // A new selection starts on its first page.
         panel.selection = ids;
         page.0 = 0;
     }
-    page.0 = page.0.min(panel.pages.len().saturating_sub(1));
+    if states != panel.states || capped != panel.capped {
+        panel.list = available_commands(&states, &capped);
+        panel.pages = KP_CTRL_PANEL.layout(panel.list.len());
+        panel.states = states;
+        panel.capped = capped;
+    }
+    let clamped = page.0.min(panel.pages.len().saturating_sub(1));
+    if clamped != page.0 {
+        page.0 = clamped;
+    }
 }
 
 #[derive(Component)]
@@ -803,5 +823,38 @@ mod tests {
         world.entity_mut(kernel).remove::<Selected>();
         world.run_system_once(collect_commands).unwrap();
         assert!(world.resource::<PanelCommands>().list.is_empty());
+    }
+
+    /// A recharging Terminal's state is kept in whole seconds, so the
+    /// command list is only rebuilt when the shown countdown changes.
+    #[test]
+    fn recharge_state_changes_once_a_second() {
+        let mut world = World::new();
+        world.init_resource::<PanelCommands>();
+        world.init_resource::<PanelPage>();
+        let terminal = world
+            .spawn((
+                UnitType(UnitKind::Terminal),
+                TeamId(0),
+                CommandFireCooldown { remaining: 41.2 },
+                Selected,
+            ))
+            .id();
+        world.run_system_once(collect_commands).unwrap();
+        let first = world.resource::<PanelCommands>().states.clone();
+        assert_eq!(first[0].recharge, Some(42.0));
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "42s");
+
+        world
+            .entity_mut(terminal)
+            .insert(CommandFireCooldown { remaining: 41.7 });
+        world.run_system_once(collect_commands).unwrap();
+        assert_eq!(world.resource::<PanelCommands>().states, first);
+
+        world
+            .entity_mut(terminal)
+            .insert(CommandFireCooldown { remaining: 40.9 });
+        world.run_system_once(collect_commands).unwrap();
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "41s");
     }
 }

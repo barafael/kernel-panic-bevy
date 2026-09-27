@@ -178,7 +178,7 @@ impl CmdDesc {
 }
 
 /// What the panel needs to know about one selected unit.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct UnitCmdState {
     pub kind: Option<UnitKind>,
     /// Factory: its repeat state and queued-count per kind.

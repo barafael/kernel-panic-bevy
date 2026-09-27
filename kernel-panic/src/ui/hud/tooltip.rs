@@ -242,6 +242,41 @@ fn tooltip_lines(
 #[derive(Component)]
 struct TooltipRoot;
 
+/// The spawned tooltip tree: its root, the `TextSpan` entity behind
+/// every segment (per line), and the lines they currently show. The
+/// tree is kept as long as the *shape* (line and segment counts) and
+/// the font size hold; the segment texts and colours are then updated
+/// in place, so a unit's health ticking down or the selection count
+/// changing never respawns the ~20 UI entities.
+struct TipTree {
+    root: Entity,
+    spans: Vec<Vec<Entity>>,
+    lines: Vec<Line>,
+    font_size: u32,
+    widest: usize,
+}
+
+/// Same number of lines with the same number of segments each: the
+/// existing text entities can take the new lines' content in place.
+fn same_shape(a: &[Line], b: &[Line]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.len() == y.len())
+}
+
+/// Character count of the widest line.
+fn widest(lines: &[Line]) -> usize {
+    lines
+        .iter()
+        .map(|l| l.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Box width for `widest` characters at `font_size` (before the 1.2×
+/// background stretch).
+fn box_width(font_size: f32, widest: usize) -> f32 {
+    font_size * (1.0 + widest as f32 * FONT_ADVANCE_EM)
+}
+
 type UnitInfo<'w, 's> = Query<
     'w,
     's,
@@ -266,18 +301,20 @@ fn refresh_tooltip(
     local: Option<Res<LocalTeam>>,
     state: Option<Res<State<AppState>>>,
     asset_server: Res<AssetServer>,
-    roots: Query<Entity, With<TooltipRoot>>,
-    mut last: Local<Option<(Vec<Line>, u32)>>,
+    mut roots: Query<(Entity, &mut Node), With<TooltipRoot>>,
+    mut spans: Query<(&mut TextSpan, &mut TextColor)>,
+    mut tree: Local<Option<TipTree>>,
+    mut bg: Local<Option<Handle<Image>>>,
 ) {
     let in_game = state.is_some_and(|s| *s.get() == AppState::InGame);
     let Ok(window) = windows.single() else {
         return;
     };
     if !in_game {
-        for e in &roots {
+        for (e, _) in &roots {
             commands.entity(e).despawn();
         }
-        *last = None;
+        *tree = None;
         return;
     }
     let selected = units.iter().filter(|u| u.4).count();
@@ -298,22 +335,54 @@ fn refresh_tooltip(
     });
     let lines = tooltip_lines(&hover, selected, unit, &registry);
     let font_size = (4.0 + window.height() / 100.0).max(8.0);
-    let key = (lines.clone(), font_size as u32);
-    if last.as_ref() == Some(&key) && !roots.is_empty() {
+
+    // Same shape as the tree on screen: refresh the changed segments in
+    // place (and the box width when the widest line changed).
+    if let Some(t) = tree.as_mut()
+        && t.font_size == font_size as u32
+        && roots.contains(t.root)
+        && same_shape(&t.lines, &lines)
+    {
+        if t.lines == lines {
+            return;
+        }
+        for (li, l) in lines.iter().enumerate() {
+            for (si, (s, c)) in l.iter().enumerate() {
+                let (old_s, old_c) = &t.lines[li][si];
+                if (old_s, old_c) == (s, c) {
+                    continue;
+                }
+                if let Ok((mut span, mut color)) = spans.get_mut(t.spans[li][si]) {
+                    if old_s != s {
+                        span.0.clone_from(s);
+                    }
+                    if old_c != c {
+                        color.0 = *c;
+                    }
+                }
+            }
+        }
+        let wide = widest(&lines);
+        if wide != t.widest
+            && let Ok((_, mut node)) = roots.get_mut(t.root)
+        {
+            node.width = Val::Px(box_width(font_size, wide) * 1.2);
+            t.widest = wide;
+        }
+        t.lines = lines;
         return;
     }
-    *last = Some(key);
-    for e in &roots {
+
+    for (e, _) in &roots {
         commands.entity(e).despawn();
     }
 
-    let widest = lines
-        .iter()
-        .map(|l| l.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
-        .max()
-        .unwrap_or(0) as f32;
-    let w = font_size * (1.0 + widest * FONT_ADVANCE_EM);
+    let wide = widest(&lines);
+    let w = box_width(font_size, wide);
     let h = font_size * (1.0 + lines.len() as f32);
+    let bg = bg
+        .get_or_insert_with(|| asset_server.load("bitmaps/tooltipbg.png"))
+        .clone();
     let root = commands
         .spawn((
             TooltipRoot,
@@ -325,7 +394,7 @@ fn refresh_tooltip(
                 height: Val::Px(h * 1.2),
                 ..default()
             },
-            ImageNode::new(asset_server.load("bitmaps/tooltipbg.png")),
+            ImageNode::new(bg),
             GlobalZIndex(-1),
         ))
         .id();
@@ -341,31 +410,46 @@ fn refresh_tooltip(
             },
         ))
         .id();
+    let mut spans: Vec<Vec<Entity>> = Vec::with_capacity(lines.len());
     for l in &lines {
-        let mut text = commands.spawn((
-            ChildOf(column),
-            Text::default(),
-            TextFont::from_font_size(font_size),
-            TextLayout::new(Justify::Left, LineBreak::NoWrap),
-            TextShadow {
-                offset: Vec2::splat(1.0),
-                color: Color::BLACK,
-            },
-            Node {
-                height: Val::Px(font_size),
-                ..default()
-            },
-        ));
-        text.with_children(|t| {
-            for (s, c) in l {
-                t.spawn((
-                    TextSpan::new(s.clone()),
-                    TextFont::from_font_size(font_size),
-                    TextColor(*c),
-                ));
-            }
-        });
+        let text = commands
+            .spawn((
+                ChildOf(column),
+                Text::default(),
+                TextFont::from_font_size(font_size),
+                TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                TextShadow {
+                    offset: Vec2::splat(1.0),
+                    color: Color::BLACK,
+                },
+                Node {
+                    height: Val::Px(font_size),
+                    ..default()
+                },
+            ))
+            .id();
+        spans.push(
+            l.iter()
+                .map(|(s, c)| {
+                    commands
+                        .spawn((
+                            ChildOf(text),
+                            TextSpan::new(s.clone()),
+                            TextFont::from_font_size(font_size),
+                            TextColor(*c),
+                        ))
+                        .id()
+                })
+                .collect(),
+        );
     }
+    *tree = Some(TipTree {
+        root,
+        spans,
+        lines,
+        font_size: font_size as u32,
+        widest: wide,
+    });
 }
 
 #[cfg(test)]
@@ -411,6 +495,28 @@ mod tests {
             text(&[selection_line(7).unwrap()]),
             vec!["7 units selected"]
         );
+    }
+
+    /// A health tick keeps the tooltip's shape (the tree is updated in
+    /// place); a new line — a teleporter's packets — changes it.
+    #[test]
+    fn health_tick_keeps_tooltip_shape() {
+        let registry = UnitRegistry::empty();
+        let hover = HoverTip::default();
+        let at = |hp: f32, packets: Option<u32>| {
+            let health = Health {
+                current: hp,
+                max: 100.0,
+            };
+            tooltip_lines(&hover, 1, Some((UnitKind::Bit, Some(&health), packets)), &registry)
+        };
+        let full = at(100.0, None);
+        let hurt = at(99.4, None);
+        assert_ne!(full, hurt);
+        assert!(same_shape(&full, &hurt));
+        assert!(!same_shape(&full, &at(100.0, Some(3))));
+        assert_eq!(widest(&full), widest(&hurt));
+        assert!(widest(&at(7.0, None)) <= widest(&full));
     }
 
     #[test]

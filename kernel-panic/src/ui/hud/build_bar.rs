@@ -57,7 +57,7 @@ impl Plugin for BuildBarPlugin {
             )
             .add_systems(
                 Update,
-                (collect_bar, render_bar)
+                (collect_bar.run_if(in_state(AppState::InGame)), render_bar)
                     .chain()
                     .before(super::command_panel::CommandPanelSet)
                     .after(crate::map_loading::GameWorldRebuild),
@@ -166,12 +166,23 @@ fn collect_bar(
     local: Option<Res<LocalTeam>>,
     registry: Res<UnitRegistry>,
     mut state: ResMut<BarState>,
+    mut factories: Local<Vec<BarEntry>>,
 ) {
-    let team = local.map(|l| l.0);
-    let mut specials = Vec::new();
-    let mut factories = Vec::new();
+    let Some(team) = local.map(|l| l.0) else {
+        if !state.entries.is_empty() {
+            state.entries.clear();
+            state.opened = None;
+        }
+        return;
+    };
+    // Specials are collected straight into the (emptied) entries Vec
+    // and the homebases into a scratch Vec; both keep their capacity
+    // across frames.
+    let mut specials = std::mem::take(&mut state.entries);
+    specials.clear();
+    factories.clear();
     for (entity, ut, t, producer, cooldown, emerging) in &units {
-        if Some(t.0) != team || emerging {
+        if t.0 != team || emerging {
             continue;
         }
         let kind = ut.0;
@@ -212,7 +223,7 @@ fn collect_bar(
     // Newest specials first (`table.insert(facs, 1, …)`), then homebases.
     specials.sort_by_key(|e| std::cmp::Reverse(e.entity));
     factories.sort_by_key(|e| e.entity);
-    specials.extend(factories);
+    specials.append(&mut factories);
     state.entries = specials;
     if state
         .opened
@@ -339,6 +350,7 @@ fn render_bar(
     mut tip: ResMut<HoverTip>,
     roots: Query<Entity, With<BarRoot>>,
     mut last: Local<u64>,
+    mut last_tip: Local<Option<TipKey>>,
 ) {
     let playing = app_state.is_some_and(|s| *s.get() == AppState::InGame);
     let Ok(window) = windows.single() else {
@@ -352,23 +364,31 @@ fn render_bar(
     let mouse_down =
         mouse.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]);
 
-    // Tooltip.
-    let new_tip = match hit {
+    // Tooltip: the text is a fresh `String` / a whole command list, so
+    // only rebuild it when what is under the cursor changes.
+    let opened = state
+        .entries
+        .iter()
+        .find(|e| Some(e.entity) == state.opened);
+    let tip_key = match hit {
         Some(Hit::Icon(i)) => state
             .entries
             .get(i)
-            .and_then(|e| units.get(e.entity).ok())
-            .map(|_| BarTip::Text(bar_name(state.entries[i].kind))),
-        Some(Hit::Option(j)) => state
-            .entries
-            .iter()
-            .find(|e| Some(e.entity) == state.opened)
-            .and_then(|e| option_desc(e, j))
-            .map(BarTip::Command),
+            .filter(|e| units.contains(e.entity))
+            .map(|e| (hit, e.entity, e.kind, 0)),
+        Some(Hit::Option(j)) => opened.and_then(|e| {
+            let kind = *e.options().get(j)?;
+            Some((hit, e.entity, e.kind, queued_of(e, kind)))
+        }),
         None => None,
     };
-    if tip.bar != new_tip {
-        tip.bar = new_tip;
+    if *last_tip != tip_key {
+        *last_tip = tip_key;
+        tip.bar = match hit {
+            Some(Hit::Icon(i)) => tip_key.map(|_| BarTip::Text(bar_name(state.entries[i].kind))),
+            Some(Hit::Option(j)) => opened.and_then(|e| option_desc(e, j)).map(BarTip::Command),
+            None => None,
+        };
     }
 
     use std::hash::{Hash, Hasher};
@@ -536,12 +556,7 @@ fn render_bar(
                         .entity(o)
                         .insert(pie(e.building.map_or(0.0, |b| b.1)));
                 }
-                let queued: u32 = e
-                    .runs
-                    .iter()
-                    .filter(|(k, _)| *k == kind)
-                    .map(|(_, n)| n)
-                    .sum();
+                let queued = queued_of(e, kind);
                 if queued > 0 {
                     text(&mut commands, o, queued.to_string(), font, 2.0, 2.0);
                 }
@@ -571,9 +586,18 @@ fn render_bar(
     }
 }
 
+/// What the bar tooltip depends on: the hit, the unit behind it, its
+/// kind and (for a build option) that option's queued count.
+type TipKey = (Option<Hit>, Entity, UnitKind, u32);
+
 /// kp_buildbar's icon tooltip: the unit's name.
 fn bar_name(kind: UnitKind) -> String {
     kind.unitname().to_string()
+}
+
+/// How many of `kind` the homebase `e` has queued.
+fn queued_of(e: &BarEntry, kind: UnitKind) -> u32 {
+    e.runs.iter().filter(|(k, _)| *k == kind).map(|(_, n)| n).sum()
 }
 
 /// The control-panel description of build option `j` of `e` (for the
