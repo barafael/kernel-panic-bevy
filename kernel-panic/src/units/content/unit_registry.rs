@@ -1,7 +1,7 @@
-//! Unit registry loaded from upstream FBI files.
+//! Unit registry loaded from the upstream FBI files (via the unit bundle).
 //!
-//! At startup we read every `.fbi` file from the upstream units directory
-//! and merge them into a single [`UnitRegistry`] resource. Game systems
+//! At startup the bundle's merged `units/*.fbi` definitions become a
+//! single [`UnitRegistry`] resource. Game systems
 //! resolve unit stats through this registry instead of hardcoded values.
 
 use bevy::prelude::*;
@@ -9,7 +9,6 @@ use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UNIT_KIND_COUNT, UnitKind};
 use super::moveinfo::{MoveClassParams, MoveClassTable};
-use super::tdf_loader;
 use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// Spring engine `BuildTime` is in "build ticks" at 30 fps.
@@ -147,23 +146,12 @@ pub struct UnitRegistry {
 }
 
 impl UnitRegistry {
-    /// Load all `.fbi` files from the upstream units directory.
+    /// The registry of the baked `units/*.fbi` + `MOVEINFO.TDF` (the
+    /// unit bundle).
     pub fn load() -> Self {
-        let Some(dir) = tdf_loader::find_upstream_dir("units") else {
-            warn!("Upstream units directory not found — using empty registry");
-            return Self::build(UnitDefs::default(), MoveClassTable::default());
-        };
-
-        let mut merged = UnitDefs::default();
-        for (filename, tdf) in tdf_loader::load_all_tdf_files(&dir, "fbi") {
-            let defs = UnitDefs::from_tdf(&tdf);
-            let count = defs.units.len();
-            merged.units.extend(defs.units);
-            info!("  Loaded {count} units from {filename}");
-        }
-
-        info!("Unit registry: {} definitions total", merged.units.len());
-        let registry = Self::build(merged, MoveClassTable::load());
+        let bundle = super::bundle::bundle();
+        info!("Unit registry: {} definitions total", bundle.units.units.len());
+        let registry = Self::from_defs(bundle.units.clone(), bundle.move_classes.clone());
         registry.validate_unit_bindings();
         registry
     }
@@ -171,7 +159,7 @@ impl UnitRegistry {
     /// Resolve parsed FBIs (keyed by lowercase `unitname`, as
     /// `UnitDefs::from_tdf` stores them) and the MOVEINFO table into the
     /// per-kind tables.
-    fn build(defs: UnitDefs, move_classes: MoveClassTable) -> Self {
+    pub fn from_defs(defs: UnitDefs, move_classes: MoveClassTable) -> Self {
         let all = || defs.units.values();
         let hexfarm_medians = (
             spring_map::hexfarm::lua_median(all().map(|d| d.max_health as f64)),
@@ -234,7 +222,7 @@ impl UnitRegistry {
     /// gates, speed conversion) without loading disk data.
     #[cfg(test)]
     pub fn for_test(defs: UnitDefs) -> Self {
-        Self::build(defs, MoveClassTable::default())
+        Self::from_defs(defs, MoveClassTable::default())
     }
 
     /// Look up the raw FBI definition for a unit kind (O(1)).

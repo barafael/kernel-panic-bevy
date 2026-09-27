@@ -1,4 +1,5 @@
-//! Shared helpers for loading TDF-format files from upstream directories.
+//! Shared helpers for loading TDF-format files from upstream directories
+//! (the bake side of `bundle`; the runtime reads the baked bundle).
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +30,8 @@ pub fn load_tdf_file(path: &Path) -> Result<Tdf, TdfLoadError> {
 }
 
 /// Load and parse all files with the given extension from a directory.
-/// Returns a vec of `(filename, parsed_tdf)` pairs. Logs warnings for failures.
+/// Returns a vec of `(filename, parsed_tdf)` pairs sorted by filename (so
+/// a bake is reproducible). Logs warnings for failures.
 pub fn load_all_tdf_files(dir: &Path, extension: &str) -> Vec<(String, Tdf)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         warn!("Failed to read directory: {}", dir.display());
@@ -62,5 +64,6 @@ pub fn load_all_tdf_files(dir: &Path, extension: &str) -> Vec<(String, Tdf)> {
             }
         }
     }
+    results.sort_by(|a, b| a.0.cmp(&b.0));
     results
 }

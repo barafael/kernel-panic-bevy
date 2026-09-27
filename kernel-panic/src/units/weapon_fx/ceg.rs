@@ -3,8 +3,8 @@
 //! Parsing now lives in [`spring_tdf::ExplosionDefs`] (typed `CegExpr`,
 //! `ColorMap`, `EmitVector`, …). This module keeps only:
 //!
-//! - [`CegRegistry`]: loads every `gamedata/explosions/*.tdf` into a
-//!   merged [`spring_tdf::ExplosionDefs`] and exposes atlas-alias
+//! - [`CegRegistry`]: the merged [`spring_tdf::ExplosionDefs`] of every
+//!   `gamedata/explosions/*.tdf` (from the unit bundle) plus atlas-alias
 //!   resolution (`circle` → `whitecircle.tga`).
 //! - [`spawn_ceg`]: walks an [`ExplosionDef`]'s effect layers and
 //!   instantiates the right runtime object for each class —
@@ -32,7 +32,6 @@ use super::batch::FxQuadBatches;
 use crate::rng;
 use crate::sim::GAME_SPEED;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
-use crate::units::content::tdf_loader;
 
 /// Registry of every parsed CEG. Internally wraps
 /// [`spring_tdf::ExplosionDefs`] so parsing stays in one place.
@@ -182,22 +181,18 @@ pub(super) struct CegTrailCtx<'w, 's> {
 }
 
 impl CegRegistry {
-    /// Load every `explosions/*.tdf` under `upstream/Kernel-Panic/`.
+    /// The baked `gamedata/explosions/*.tdf` from the unit bundle.
     pub fn load() -> Self {
-        let Some(dir) = tdf_loader::find_upstream_dir("gamedata/explosions") else {
-            warn!("Upstream CEG directory not found — using empty registry");
-            return Self::default();
-        };
-
-        let mut defs = ExplosionDefs::default();
-        for (_filename, tdf) in tdf_loader::load_all_tdf_files(&dir, "tdf") {
-            defs.merge(ExplosionDefs::from_tdf(&tdf));
-        }
-
+        let registry = Self::from_defs(crate::units::content::bundle::bundle().explosions.clone());
         info!(
             "CEG registry: {} explosion generators loaded",
-            defs.explosions.len()
+            registry.defs.explosions.len()
         );
+        registry
+    }
+
+    /// Wrap parsed explosion defs (bundle-decoded or freshly parsed).
+    pub fn from_defs(defs: ExplosionDefs) -> Self {
         Self { defs }
     }
 

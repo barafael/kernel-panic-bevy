@@ -3393,12 +3393,16 @@ dependencies = [
  "better_default",
  "bevy",
  "futures-lite",
+ "postcard",
+ "ruzstd",
+ "serde",
  "spring-map",
  "spring-pathfinding",
  "spring-tdf",
  "spring-unit-mesh",
  "strum",
  "thiserror 2.0.20",
+ "zstd",
 ]
 
 [[package]]
@@ -5017,6 +5021,7 @@ version = "0.1.0"
 dependencies = [
  "better_default",
  "proptest",
+ "serde",
  "thiserror 2.0.20",
 ]
 
@@ -5025,6 +5030,7 @@ name = "spring-unit-mesh"
 version = "0.1.0"
 dependencies = [
  "binrw",
+ "serde",
  "thiserror 2.0.20",
 ]
 

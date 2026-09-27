@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use bevy::{
     mesh::{Indices, PrimitiveTopology},
@@ -7,6 +7,7 @@ use bevy::{
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 
 use crate::units::components::Faction;
+use crate::units::content::bundle::bundle;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::PieceLayout;
@@ -15,7 +16,8 @@ use crate::units::lifecycle::spawning::PieceLayout;
 // Caches
 // ---------------------------------------------------------------------------
 
-/// Cached s3o model data, textures, and Bevy handles loaded from disk.
+/// Cached s3o model data, textures, and Bevy handles, sourced from the
+/// embedded unit bundle (`content::bundle`).
 ///
 /// Every GPU asset a unit needs is minted once and shared: the
 /// faction-tinted material per texture, the per-piece meshes per model,
@@ -25,7 +27,10 @@ use crate::units::lifecycle::spawning::PieceLayout;
 /// pair (which is what lets Bevy batch their draws).
 #[derive(Resource, Default)]
 pub struct S3OModelCache {
-    models: HashMap<String, Option<S3OModel>>,
+    /// Bundle models by the name they were asked for (`&str` probe, no
+    /// lower-casing per lookup); `None` caches a miss.
+    models: HashMap<String, Option<&'static S3OModel>>,
+    /// Textures decoded from their bundle frames on first use.
     raw_textures: HashMap<String, Option<TgaImage>>,
     colored_textures: HashMap<(String, Faction), Handle<Image>>,
     /// Unit materials keyed by (tex1 filename, faction); the flat
@@ -205,26 +210,29 @@ pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache, unit_registry: &Un
 }
 
 // ---------------------------------------------------------------------------
-// Model / texture loading with shared disk-read helper
+// Model / texture loading from the unit bundle
 // ---------------------------------------------------------------------------
 
-fn load_s3o_cached<'a>(filename: &str, cache: &'a mut S3OModelCache) -> Option<&'a S3OModel> {
+fn load_s3o_cached(filename: &str, cache: &mut S3OModelCache) -> Option<&'static S3OModel> {
     // Two-phase lookup: check first to avoid String allocation on cache hits.
     if !cache.models.contains_key(filename) {
-        let model = load_asset_from_disk(filename, spring_unit_mesh::parse_s3o);
+        let model = bundle().model(filename);
+        if model.is_none() {
+            warn!("Model not in the unit bundle: {filename}");
+        }
         cache.models.insert(filename.to_string(), model);
     }
-    cache.models.get(filename).and_then(|m| m.as_ref())
+    cache.models.get(filename).copied().flatten()
 }
 
-/// Load a raw TGA from disk and upload it as a Bevy [`Image`], keyed
-/// by filename. Used by beam spawners to texture their meshes with
-/// upstream weapon bitmaps (`arrow`, `dosray`, `bytemegabeam`). The
-/// TGA alpha channel maps to the image's alpha, so additive-blended
+/// Decode a raw TGA from the bundle and upload it as a Bevy [`Image`],
+/// keyed by filename. Used by beam spawners to texture their meshes
+/// with upstream weapon bitmaps (`arrow`, `dosray`, `bytemegabeam`).
+/// The TGA alpha channel maps to the image's alpha, so additive-blended
 /// materials see the weapon glyph cut cleanly.
 ///
-/// Returns `None` (and caches that verdict) when the file is missing
-/// or unparseable, so a subsequent call doesn't retry the disk hit.
+/// Returns `None` (and caches that verdict) when the texture was not
+/// baked, so a subsequent call doesn't retry the lookup.
 /// Load a beam texture with a Repeat address-mode sampler so material
 /// `uv_transform` scales beyond 1.0 tile the texture instead of
 /// clamping. Returns the TGA's pixel dimensions alongside the handle so
@@ -265,38 +273,13 @@ fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Opti
     // Probe by `&str` first: this runs for every beam / bolt / trail
     // spawn, and the key is only allocated on the one insert.
     if !cache.raw_textures.contains_key(tex_name) {
-        let loaded = load_asset_from_disk(tex_name, spring_unit_mesh::parse_tga);
+        let loaded = bundle().texture(tex_name);
+        if loaded.is_none() {
+            warn!("Texture not in the unit bundle: {tex_name}");
+        }
         cache.raw_textures.insert(tex_name.to_string(), loaded);
     }
     cache.raw_textures.get(tex_name)?.as_ref()
-}
-
-/// Try each candidate path, read the file, and parse it. Returns `None` with
-/// a warning if no path succeeds.
-pub fn load_asset_from_disk<T, E: fmt::Display>(
-    filename: &str,
-    parse: impl Fn(&[u8]) -> Result<T, E>,
-) -> Option<T> {
-    for path in find_asset_paths(filename) {
-        match std::fs::read(&path) {
-            Ok(data) => match parse(&data) {
-                Ok(result) => {
-                    info!("Loaded asset: {filename} ({} bytes)", data.len());
-                    return Some(result);
-                }
-                Err(error) => {
-                    warn!("Failed to parse {filename}: {error}");
-                }
-            },
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
-                warn!("I/O error reading {}: {error}", path.display());
-            }
-            Err(_) => {}
-        }
-    }
-
-    warn!("Asset not found: {filename}");
-    None
 }
 
 // ---------------------------------------------------------------------------
@@ -400,30 +383,6 @@ fn create_rgba8_image(width: u32, height: u32, pixels: Vec<u8>) -> Image {
         ..default()
     });
     image
-}
-
-// ---------------------------------------------------------------------------
-// Path resolution
-// ---------------------------------------------------------------------------
-
-const ASSET_DIRS: &[&str] = &[
-    "upstream/Kernel-Panic/objects3d",
-    "upstream/Kernel-Panic/unittextures",
-    "upstream/Kernel-Panic/scripts",
-    // Beam textures (arrow, dosray, bytemegabeam) live here. Added so
-    // `spring_unit_mesh::parse_tga` can resolve them through the same
-    // on-disk lookup the unit textures already use.
-    "upstream/Kernel-Panic/bitmaps/kpsfx",
-    // Engine default textures the game relies on without shipping
-    // (`laserend` for `explspike` CEG streaks).
-    "upstream/RecoilEngine/cont/base/bitmaps/bitmaps",
-];
-
-/// Lazily find the first existing asset path for a filename.
-fn find_asset_paths(filename: &str) -> impl Iterator<Item = PathBuf> + '_ {
-    ASSET_DIRS
-        .iter()
-        .map(move |dir| crate::paths::from_project_root(&format!("{dir}/{filename}")))
 }
 
 // ---------------------------------------------------------------------------

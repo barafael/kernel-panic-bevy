@@ -1,7 +1,7 @@
-//! Weapon registry loaded from upstream TDF files.
+//! Weapon registry loaded from the upstream TDF files (via the unit bundle).
 //!
-//! At startup we read every `.tdf` file from the upstream weapons directory
-//! and merge them into a single [`WeaponRegistry`] resource. The combat system
+//! At startup the bundle's merged `weapons/*.tdf` definitions become a
+//! single [`WeaponRegistry`] resource. The combat system
 //! resolves weapon stats through this registry instead of hardcoded values.
 //!
 //! Weapons are addressable two ways:
@@ -18,7 +18,6 @@ use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
 
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
-use super::tdf_loader;
 use crate::sim::frames_to_secs;
 
 /// Compact identifier for a weapon. `Copy` so it can be cloned freely
@@ -158,27 +157,19 @@ impl WeaponRegistry {
         registry
     }
 
-    /// Load all `.tdf` files from the upstream weapons directory.
+    /// The registry of the baked `weapons/*.tdf` (the unit bundle).
     pub fn load() -> Self {
+        let registry = Self::from_defs(&super::bundle::bundle().weapons);
+        info!("Weapon registry: {} definitions total", registry.defs.len() - 1);
+        registry
+    }
+
+    /// Build from parsed weapon TDFs (bundle-decoded or freshly parsed).
+    pub fn from_defs(defs: &WeaponDefs) -> Self {
         let mut registry = Self::with_seed();
-
-        let Some(dir) = tdf_loader::find_upstream_dir("weapons") else {
-            warn!("Upstream weapons directory not found — using empty registry");
-            return registry;
-        };
-
-        let mut total = 0usize;
-        for (filename, tdf) in tdf_loader::load_all_tdf_files(&dir, "tdf") {
-            let defs = WeaponDefs::from_tdf(&tdf);
-            let count = defs.weapons.len();
-            for (name, def) in defs.weapons {
-                registry.insert(&name, def);
-            }
-            total += count;
-            info!("  Loaded {count} weapons from {filename}");
+        for (name, def) in &defs.weapons {
+            registry.insert(name, def.clone());
         }
-
-        info!("Weapon registry: {} definitions total", total);
         registry
     }
 

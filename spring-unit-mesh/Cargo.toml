@@ -7,6 +7,8 @@ description = "Parser for Spring RTS engine unit models (.s3o)"
 [dependencies]
 binrw = "0.15.1"
 thiserror = { workspace = true }
+# Parsed models are baked into the game's unit bundle (`units.kpu`).
+serde = { workspace = true }
 
 [lib]
 doctest = false

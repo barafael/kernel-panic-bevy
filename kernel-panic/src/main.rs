@@ -36,6 +36,21 @@ use ui::UiPlugin;
 use units::UnitsPlugin;
 
 fn main() {
+    // Dev options come from the environment; the dev-tool plugins read
+    // them at build, and the unit bake runs before any App exists.
+    let dev_options = game_setup::DevOptions::from_env();
+
+    // `KP_BAKE_UNITS=<out>`: write the unit bundle from the upstream
+    // checkout and exit (see `units::content::bundle`, `unit-bundle.md`).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(out) = &dev_options.bake_units {
+        if let Err(error) = units::content::bundle::bake::run(out) {
+            eprintln!("bake-units: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     // TODO(windows-resize): four linked workarounds for the Bevy 0.18 +
     // Windows "freeze on resize" bug. Each is noted inline; they can
     // be reverted independently when the upstream fix lands.
@@ -181,7 +196,7 @@ fn main() {
             .set(render_plugin),
     )
     // Before the game plugins: the dev-tool plugins read it at build.
-    .insert_resource(game_setup::DevOptions::from_env())
+    .insert_resource(dev_options)
     .add_plugins((
         RenderingPlugin,
         InteractionPlugin,

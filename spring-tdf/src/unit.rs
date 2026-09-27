@@ -5,10 +5,12 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::Section;
 
 /// All unit definitions loaded from FBI files, keyed by `unitname` (lowercased).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UnitDefs {
     pub units: BTreeMap<String, UnitDef>,
 }
@@ -17,7 +19,7 @@ pub struct UnitDefs {
 ///
 /// Fields that don't appear in the TDF default to `0.0` / `false` / `""`,
 /// except `damage_modifier` which defaults to 1.0 (no scaling).
-#[derive(Debug, Clone, better_default::Default)]
+#[derive(Debug, Clone, better_default::Default, Serialize, Deserialize)]
 pub struct UnitDef {
     /// Display name from `Name=`.
     pub name: String,

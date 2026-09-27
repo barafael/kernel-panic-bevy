@@ -137,6 +137,11 @@ pub struct DevOptions {
     /// `KP_ATTRACT_DISTANCE=<elmos>`: orbit the attract camera this close
     /// (unit close-ups in `KP_SHOT_EVERY` runs).
     pub attract_distance: Option<f32>,
+    /// `KP_BAKE_UNITS=<out path>`: bake the upstream unit data into a
+    /// unit bundle at that path and exit without starting the game
+    /// (`units::content::bundle`; normally `kernel-panic/assets/units.kpu`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub bake_units: Option<std::path::PathBuf>,
 }
 
 impl DevOptions {
@@ -174,6 +179,7 @@ impl DevOptions {
             shot_every: var("KP_SHOT_EVERY").and_then(|n| n.parse().ok()),
             shot_dir: var("KP_SHOT_DIR").map(Into::into),
             attract_distance: var("KP_ATTRACT_DISTANCE").and_then(|n| n.parse().ok()),
+            bake_units: var("KP_BAKE_UNITS").map(Into::into),
         }
     }
 }

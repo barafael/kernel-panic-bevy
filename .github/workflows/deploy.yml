@@ -46,6 +46,11 @@ jobs:
       # bake every source map to the compressed .kpmap format first. The
       # kernel-panic build script embeds the resulting catalog at compile
       # time, and index.html's copy-dir ships the .kpmap files.
+      #
+      # The unit data (FBIs, weapons, CEGs, models, textures) needs no
+      # step here: it is the committed `kernel-panic/assets/units.kpu`,
+      # embedded in the binary (see unit-bundle.md) — the upstream
+      # submodules it is baked from are not checked out in CI.
       - name: Bake maps (.kpmap)
         run: |
           cargo build --release -p spring-map --bin bake-map
