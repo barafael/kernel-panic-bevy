@@ -41,13 +41,21 @@ pub enum EmergeStyle {
     Fade,
 }
 
-/// Per-piece original-material handles, restored when an entity finishes
-/// fading in. Spawned alongside `Emerging { Fade }` so the per-unit
-/// alpha ramp doesn't bleed into the shared faction-colored material.
+/// Per-unit faded material clones plus the per-piece originals to put
+/// back when the entity finishes fading in. Spawned alongside
+/// `Emerging { Fade }` so the per-unit alpha ramp doesn't bleed into the
+/// shared faction-colored material.
 #[derive(Component)]
 pub struct FadeMaterials {
-    /// (piece_entity, faded_clone, original) tuples.
-    pub overrides: Vec<(Entity, Handle<StandardMaterial>, Handle<StandardMaterial>)>,
+    /// The faded clones `emerge_system` ramps — one per *distinct*
+    /// source material the unit's pieces used, shared by every piece
+    /// that used it. A unit's pieces all carry the same (model,
+    /// faction) material, so this is one handle: one clone and one
+    /// `get_mut` (re-upload) per tick per unit, not one per piece.
+    pub faded: Vec<Handle<StandardMaterial>>,
+    /// (piece_entity, original) — the shared material each piece gets
+    /// back once the fade completes.
+    pub overrides: Vec<(Entity, Handle<StandardMaterial>)>,
 }
 
 /// Distance below ground that a freshly-built unit starts at. The
@@ -88,7 +96,7 @@ pub fn emerge_system(
             EmergeStyle::Fade => {
                 // Linear alpha ramp; pieces stay at surface y throughout.
                 if let Some(fade) = fade {
-                    for (_, faded_handle, _) in &fade.overrides {
+                    for faded_handle in &fade.faded {
                         if let Some(mat) = materials.get_mut(faded_handle) {
                             mat.base_color = mat.base_color.with_alpha(t);
                         }
@@ -103,10 +111,11 @@ pub fn emerge_system(
             }
             // Restore the shared faction material on every piece we
             // overrode, so future asset swaps / faction recolors take
-            // effect on this unit too. The cloned faded handle leaks
-            // into the assets pool until despawn — fine, it's small.
+            // effect on this unit too. With the pieces back on their
+            // originals and `FadeMaterials` gone, the faded clone's
+            // last strong handle drops and the asset is freed.
             if let Some(fade) = fade {
-                for (piece_entity, _, original) in &fade.overrides {
+                for (piece_entity, original) in &fade.overrides {
                     if piece_mats.get(*piece_entity).is_ok() {
                         commands
                             .entity(*piece_entity)

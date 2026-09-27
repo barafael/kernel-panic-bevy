@@ -562,11 +562,18 @@ pub fn animate_connection_hatch(
 }
 
 /// Run after `production_system`: for each entity tagged
-/// `PendingFadeInstall`, walk its piece children, clone each shared
-/// StandardMaterial into a per-unit handle (with `AlphaMode::Blend` and
-/// alpha=0), and install a `FadeMaterials` component holding the swap
-/// records so `emerge_system` can both fade them in and revert them
-/// when emergence completes.
+/// `PendingFadeInstall`, walk its piece children, clone each *distinct*
+/// shared StandardMaterial into one per-unit handle (with
+/// `AlphaMode::Blend` and alpha=0) that every piece using it shares,
+/// and install a `FadeMaterials` component holding the swap records so
+/// `emerge_system` can both fade them in and revert them when emergence
+/// completes.
+///
+/// A unit's pieces all carry the same (model, faction) material, so
+/// this is one clone per unit. Cloning per piece instead cost a Kernel
+/// 23 clones, each re-uploaded every sim tick of its build — and
+/// nanoframes live for the whole build, so a busy Hacker / Network
+/// factory kept dozens of materials churning.
 pub fn install_fade_materials(
     mut commands: Commands,
     pending: Query<(Entity, &Children), With<PendingFadeInstall>>,
@@ -575,12 +582,14 @@ pub fn install_fade_materials(
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     for (entity, children) in &pending {
+        // (source id, faded clone) — a Vec, not a map: it holds one entry.
+        let mut faded: Vec<(AssetId<StandardMaterial>, Handle<StandardMaterial>)> = Vec::new();
         let mut overrides = Vec::new();
         let mut stack: Vec<Entity> = children.iter().collect();
         while let Some(node) = stack.pop() {
             // Recurse into nested piece children first so deep s3o
             // hierarchies (gunbase → gun → gunpoint, etc) all get
-            // their own per-unit alpha.
+            // the per-unit alpha.
             if let Ok(grand) = piece_q.get(node) {
                 stack.extend(grand.iter());
             }
@@ -588,23 +597,34 @@ pub fn install_fade_materials(
                 continue;
             };
             let original = mat_handle.0.clone();
-            let Some(src) = materials.get(&original).cloned() else {
-                continue;
+            let shared = match faded.iter().find(|(id, _)| *id == original.id()) {
+                Some((_, handle)) => handle.clone(),
+                None => {
+                    let Some(src) = materials.get(&original) else {
+                        continue;
+                    };
+                    let clone = StandardMaterial {
+                        base_color: src.base_color.with_alpha(0.0),
+                        base_color_texture: src.base_color_texture.clone(),
+                        emissive: src.emissive,
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: src.unlit,
+                        ..default()
+                    };
+                    let handle = materials.add(clone);
+                    faded.push((original.id(), handle.clone()));
+                    handle
+                }
             };
-            let faded = materials.add(StandardMaterial {
-                base_color: src.base_color.with_alpha(0.0),
-                base_color_texture: src.base_color_texture.clone(),
-                emissive: src.emissive,
-                alpha_mode: AlphaMode::Blend,
-                unlit: src.unlit,
-                ..default()
-            });
-            commands.entity(node).insert(MeshMaterial3d(faded.clone()));
-            overrides.push((node, faded, original));
+            commands.entity(node).insert(MeshMaterial3d(shared));
+            overrides.push((node, original));
         }
         commands
             .entity(entity)
-            .insert(FadeMaterials { overrides })
+            .insert(FadeMaterials {
+                faded: faded.into_iter().map(|(_, handle)| handle).collect(),
+                overrides,
+            })
             .remove::<PendingFadeInstall>();
     }
 }

@@ -225,15 +225,18 @@ const CLOAK_FADE_ALPHA: f32 = 0.5;
 /// re-installed so the unit pops back to fully opaque.
 #[derive(Component)]
 pub struct CloakFadeMaterials {
+    /// (piece_entity, original) — the shared material to put back.
     overrides: Vec<(Entity, Handle<StandardMaterial>)>,
 }
 
-/// Clone each piece's material for freshly-`Added<Cloaked>` friendly
-/// units and install a half-alpha variant, mirroring the pattern
+/// Clone the material of freshly-`Added<Cloaked>` friendly units and
+/// install a half-alpha variant on every piece, mirroring the pattern
 /// [`production::install_fade_materials`] already uses for
-/// emerge-fade. Enemy cloaked units are either hidden entirely or
-/// revealed at full opacity (detector reveal), so they skip this
-/// pass.
+/// emerge-fade: one clone per *distinct* source material (a unit's
+/// pieces all share one, so one per unit), not one per piece — a
+/// Worm re-cloaks after every bite, and it has a piece hierarchy.
+/// Enemy cloaked units are either hidden entirely or revealed at full
+/// opacity (detector reveal), so they skip this pass.
 #[allow(clippy::type_complexity)]
 pub fn install_cloak_fade_materials(
     mut commands: Commands,
@@ -250,6 +253,8 @@ pub fn install_cloak_fade_materials(
         if fog.0 && team.0 != player.0 {
             continue;
         }
+        // (source id, faded clone) — a Vec, not a map: it holds one entry.
+        let mut faded: Vec<(AssetId<StandardMaterial>, Handle<StandardMaterial>)> = Vec::new();
         let mut overrides = Vec::new();
         let mut stack: Vec<Entity> = children.iter().collect();
         while let Some(node) = stack.pop() {
@@ -260,18 +265,26 @@ pub fn install_cloak_fade_materials(
                 continue;
             };
             let original = mat_handle.0.clone();
-            let Some(src) = materials.get(&original).cloned() else {
-                continue;
+            let shared = match faded.iter().find(|(id, _)| *id == original.id()) {
+                Some((_, handle)) => handle.clone(),
+                None => {
+                    let Some(src) = materials.get(&original) else {
+                        continue;
+                    };
+                    let clone = StandardMaterial {
+                        base_color: src.base_color.with_alpha(CLOAK_FADE_ALPHA),
+                        base_color_texture: src.base_color_texture.clone(),
+                        emissive: src.emissive,
+                        alpha_mode: AlphaMode::Blend,
+                        unlit: src.unlit,
+                        ..default()
+                    };
+                    let handle = materials.add(clone);
+                    faded.push((original.id(), handle.clone()));
+                    handle
+                }
             };
-            let faded = materials.add(StandardMaterial {
-                base_color: src.base_color.with_alpha(CLOAK_FADE_ALPHA),
-                base_color_texture: src.base_color_texture.clone(),
-                emissive: src.emissive,
-                alpha_mode: AlphaMode::Blend,
-                unlit: src.unlit,
-                ..default()
-            });
-            commands.entity(node).insert(MeshMaterial3d(faded));
+            commands.entity(node).insert(MeshMaterial3d(shared));
             overrides.push((node, original));
         }
         if !overrides.is_empty() {
