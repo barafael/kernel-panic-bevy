@@ -116,13 +116,20 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Kernel Panic".to_string(),
-                    // TODO(windows-resize): Immediate is pinned
-                    // explicitly instead of AutoNoVsync. AutoNoVsync
-                    // would pick Mailbox where available, and Intel
-                    // Vulkan Mailbox has its own resize-reconfigure
-                    // quirks on this hardware. Restore AutoVsync
-                    // once the winit modal-loop fix is in.
-                    present_mode: PresentMode::Immediate,
+                    // TODO(windows-resize): on Windows, Immediate is
+                    // pinned explicitly instead of AutoNoVsync.
+                    // AutoNoVsync would pick Mailbox where available,
+                    // and Intel Vulkan Mailbox has its own
+                    // resize-reconfigure quirks on that hardware.
+                    // Elsewhere the swapchain is vsynced (Fifo): with
+                    // the render thread back on, an uncapped
+                    // Immediate loop presents frames at uneven
+                    // intervals, which reads as a stuttering camera.
+                    present_mode: if cfg!(target_os = "windows") {
+                        PresentMode::Immediate
+                    } else {
+                        PresentMode::AutoVsync
+                    },
                     // TODO(windows-resize): launch directly into
                     // borderless fullscreen on the primary monitor.
                     // Prior attempts (windowed + Startup-maximize,

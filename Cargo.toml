@@ -84,12 +84,11 @@ panic = "abort"
 
 [profile.wasm-release]
 inherits = "release"
-# Deploy-only build: full optimisation is worth its compile time on
-# the single-threaded web target (wasm-opt in index.html also runs
-# post-build).
-opt-level = 3
-lto = "fat"
-codegen-units = 1
+# Optimize for speed. wasm-opt (data-wasm-opt="2" in index.html) also
+# runs -O2 post-build. No LTO: linking Bevy for wasm with LTO needs
+# more memory than this machine has to spare during a `trunk serve`.
+opt-level = 2
+lto = false
 # Strip all debugging information from the binary to slightly reduce
 # file size.
 strip = "debuginfo"
