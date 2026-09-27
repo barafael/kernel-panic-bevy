@@ -15,6 +15,13 @@
 //!
 //! Translated to wall-clock time: 30 Hz emission, lifetime ≈ 1.7 s, size
 //! grows by 10.5 elmos/s (0.35 * 30), puffs drawn as camera-facing quads.
+//!
+//! The puffs are plain data: [`tick_geovent_smoke`] moves them every
+//! render frame and pushes one quad each into a [`QuadBatches`] — one
+//! dynamic mesh and draw call per glyph material, like the weapon fx
+//! ribbons — instead of every puff being its own `Transform` +
+//! `Mesh3d` entity propagated and extracted per frame (a busy map runs
+//! several hundred at once).
 
 use bevy::prelude::*;
 
@@ -29,6 +36,7 @@ use crate::{
         components::UnitType,
         content::unit_registry::UnitRegistry,
         lifecycle::construction::{Constructing, PendingBuild},
+        weapon_fx::batch::{FxQuadBatch, QuadBatches, flush_quad_batches},
     },
 };
 
@@ -63,12 +71,15 @@ pub struct VentClaim;
 /// A single rising smoke puff.
 #[derive(Component)]
 pub struct GeoventSmoke {
+    pub pos: Vec3,
     pub lifetime: f32,
     pub max_lifetime: f32,
     pub velocity: Vec3,
     pub start_size: f32,
     /// Growth rate in world units / s.
     pub size_expansion: f32,
+    /// The "0" or "1" glyph material this puff is drawn with.
+    pub material: Handle<StandardMaterial>,
 }
 
 /// Assets shared by every puff. Two materials — one textured with a "0"
@@ -76,10 +87,14 @@ pub struct GeoventSmoke {
 /// read as a stream of binary digits venting from the ground.
 #[derive(Resource, Default)]
 pub struct GeoventAssets {
-    pub mesh: Option<Handle<Mesh>>,
     pub material_zero: Option<Handle<StandardMaterial>>,
     pub material_one: Option<Handle<StandardMaterial>>,
 }
+
+/// Corner UVs in the batch's `[bl, br, tr, tl]` order with the glyph's
+/// top edge along `+up` — the layout of the `Rectangle` mesh the puffs
+/// used to be drawn with, so a "1" still stands upright.
+const PUFF_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
 
 // Spring sim runs at 30 Hz; engine emits one puff per feature per frame.
 // KP slows that down — at full rate the digit puffs cluster too thickly and
@@ -107,11 +122,10 @@ pub fn spawn_geovent_smokers(
     heightmap: &Heightmap,
     commands: &mut Commands,
     assets: &mut GeoventAssets,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    ensure_assets(assets, meshes, materials, images);
+    ensure_assets(assets, materials, images);
 
     let mut count = 0u32;
 
@@ -152,13 +166,9 @@ pub fn spawn_smoker_at(commands: &mut Commands, pos: Vec3) {
 
 fn ensure_assets(
     assets: &mut GeoventAssets,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    if assets.mesh.is_none() {
-        assets.mesh = Some(meshes.add(Rectangle::new(1.0, 1.0)));
-    }
     if assets.material_zero.is_none() {
         assets.material_zero = Some(make_glyph_material(GLYPH_ZERO, materials, images));
     }
@@ -248,9 +258,6 @@ pub fn emit_geovent_smoke(
     if dt <= 0.0 {
         return;
     }
-    let Some(mesh) = assets.mesh.clone() else {
-        return;
-    };
     let Some(material_zero) = assets.material_zero.clone() else {
         return;
     };
@@ -284,18 +291,15 @@ pub fn emit_geovent_smoke(
                 material_one.clone()
             };
 
-            commands.spawn((
-                GeoventSmoke {
-                    lifetime: ttl,
-                    max_lifetime: ttl,
-                    velocity,
-                    start_size: START_SIZE,
-                    size_expansion: SIZE_EXPANSION_PER_S,
-                },
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(glyph_material),
-                Transform::from_translation(spawn_pos).with_scale(Vec3::splat(START_SIZE)),
-            ));
+            commands.spawn(GeoventSmoke {
+                pos: spawn_pos,
+                lifetime: ttl,
+                max_lifetime: ttl,
+                velocity,
+                start_size: START_SIZE,
+                size_expansion: SIZE_EXPANSION_PER_S,
+                material: glyph_material,
+            });
         }
     }
 }
@@ -382,10 +386,16 @@ pub fn reconcile_vent_claims(
     }
 }
 
+/// Move, grow and fade every puff, then rebuild the two glyph batch
+/// meshes from them. Runs in `Update`, so the batch is a `Local` here
+/// rather than the weapon-fx chain's per-sim-tick resource.
 pub fn tick_geovent_smoke(
     time: Res<Time>,
-    mut puffs: Query<(Entity, &mut GeoventSmoke, &mut Transform)>,
+    mut puffs: Query<(Entity, &mut GeoventSmoke)>,
     camera_q: Query<&GlobalTransform, With<RtsCamera>>,
+    mut batches: Local<QuadBatches>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut batch_visibility: Query<&mut Visibility, With<FxQuadBatch>>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -398,30 +408,41 @@ pub fn tick_geovent_smoke(
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
 
-    for (entity, mut puff, mut transform) in &mut puffs {
+    for (entity, mut puff) in &mut puffs {
         puff.lifetime -= dt;
         if puff.lifetime <= 0.0 {
             commands.entity(entity).despawn();
             continue;
         }
 
-        transform.translation += puff.velocity * dt;
+        let velocity = puff.velocity;
+        puff.pos += velocity * dt;
 
         let elapsed = puff.max_lifetime - puff.lifetime;
         let size = puff.start_size + puff.size_expansion * elapsed;
         let age_frac = (elapsed / puff.max_lifetime).clamp(0.0, 1.0);
 
-        // Upstream draw fades alpha linearly as (1 - age). We share materials
-        // across puffs so per-particle alpha isn't possible; bake the fade
-        // into quad size. Combined with the growth term above, puffs swell
-        // then shrink back to nothing.
+        // Upstream draw fades alpha linearly as (1 - age). The fade is
+        // baked into quad size instead (kept from the shared-material
+        // days): combined with the growth term above, puffs swell then
+        // shrink back to nothing.
         let fade = 1.0 - age_frac;
-        let visible_size = size * fade;
+        // The quad used to be a unit `Rectangle` scaled by this, so its
+        // half extent is half of it.
+        let half = size * fade * 0.5;
 
-        let to_cam = (cam_pos - transform.translation).normalize_or(Vec3::Z);
-        let right = Vec3::Y.cross(to_cam).normalize_or(Vec3::X);
-        let up = to_cam.cross(right).normalize_or(Vec3::Y);
-        transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, to_cam));
-        transform.scale = Vec3::splat(visible_size);
+        let to_cam = (cam_pos - puff.pos).normalize_or(Vec3::Z);
+        let right = Vec3::Y.cross(to_cam).normalize_or(Vec3::X) * half;
+        let up = to_cam.cross(right).normalize_or(Vec3::Y) * half;
+        let pos = puff.pos;
+        batches.push_quad(
+            &puff.material,
+            [pos - right - up, pos + right - up, pos + right + up, pos - right + up],
+            PUFF_UVS,
+            // White: the glyph material's green tint is its `base_color`.
+            [[1.0; 4]; 4],
+        );
     }
+
+    flush_quad_batches(&mut batches, &mut meshes, &mut batch_visibility, &mut commands);
 }
