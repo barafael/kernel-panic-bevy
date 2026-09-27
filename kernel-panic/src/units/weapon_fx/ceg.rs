@@ -13,7 +13,10 @@
 //!   `CExpGenSpawner` becomes a [`CegDelayedSpawn`] timer that replays
 //!   its target CEG on fire.
 //! - [`tick_ceg_particles`] + [`tick_ceg_flames`] + [`tick_ceg_delayed_spawns`]:
-//!   per-frame integration + despawn.
+//!   per-frame integration + despawn. Particles and flames are plain
+//!   data drawn as camera-facing quads in the shared
+//!   [`FxQuadBatches`] mesh of their texture's material, their
+//!   `colorMap` colour on the vertices.
 //!
 //! All ambient "spread" math (`X rN`, `X iN`, `X dN`) is handled by
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
@@ -41,105 +44,60 @@ pub struct CegRegistry {
     defs: ExplosionDefs,
 }
 
-/// Render assets every CEG spawn shares: the particle quad, the spike
-/// material and the colour-map material palettes.
+/// Render assets every CEG spawn shares: one additive material per
+/// texture (particles, flames), the spike material, and the colour
+/// maps the live particles sample.
 #[derive(Resource, Default)]
 pub(super) struct CegRenderAssets {
-    /// Shared particle quad mesh: corners at `±1` on X and Y so the
-    /// spawner can set `Transform::scale = Vec3::splat(size)` and get
-    /// upstream's `±xdir*size ± ydir*size` total extent (full width =
-    /// `2 * size`). Using `Rectangle::new(1.0, 1.0)` instead would halve
-    /// every particle relative to its CEG-authored size — that's the bug
-    /// that made every impact look puny vs. upstream footage.
-    pub handle: Option<Handle<Mesh>>,
     /// Shared additive `laserend` material for [`CegSpike`] streaks
     /// (per-spike colour rides on vertex colours).
     pub spike_material: Option<Handle<StandardMaterial>>,
+    /// Texture → its white additive material. Particles and flames of
+    /// every colour map draw through the same one — the colour is a
+    /// vertex attribute of the batch quad — so a fight's whole particle
+    /// load is one draw call per texture in use.
+    materials_by_texture: HashMap<AssetId<Image>, Handle<StandardMaterial>>,
     palettes: Vec<CegPalette>,
-    /// Texture → indices into `palettes` using it.
-    palettes_by_texture: HashMap<AssetId<Image>, Vec<usize>>,
 }
 
-/// Steps a `colorMap` is quantised to over a particle's life. Upstream
-/// interpolates continuously; at 64 steps adjacent materials differ by
-/// under 2% of the map's range — imperceptible under additive blending —
-/// and every particle of a (texture, colour map) pair shares at most 65
-/// materials instead of owning one it rewrites every tick.
-const COLOR_MAP_STEPS: f32 = 64.0;
-
-/// One (texture, `colorMap`) pair's lazily-built additive materials,
-/// one per quantised life step.
-struct CegPalette {
-    texture: Handle<Image>,
+/// One (texture, `colorMap`) pair: the material its particles draw
+/// with and the map they sample their vertex colour from. Deduplicated
+/// so a particle only carries an index.
+pub(super) struct CegPalette {
+    material: Handle<StandardMaterial>,
     color_map: ColorMap,
-    materials: Vec<Option<Handle<StandardMaterial>>>,
 }
 
-/// Index of a colour-map life step in `[0, COLOR_MAP_STEPS]`.
-fn color_step(frac: f32) -> u8 {
-    (frac.clamp(0.0, 1.0) * COLOR_MAP_STEPS).round() as u8
-}
-
-/// A particle's handle into [`CegRenderAssets`]' palettes: which
-/// palette, and the life step its current material shows.
-#[derive(Clone, Copy)]
-pub(super) struct PaletteSlot {
-    palette: usize,
-    step: u8,
+impl CegPalette {
+    /// Upstream `colorMap[life]`: the colour at life fraction `frac`
+    /// (0 = born, 1 = dead), interpolated between the map's stops.
+    pub(super) fn sample(&self, frac: f32) -> [f32; 4] {
+        self.color_map.sample(frac)
+    }
 }
 
 impl CegRenderAssets {
-    fn get(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
-        self.handle
-            .get_or_insert_with(|| meshes.add(Rectangle::new(2.0, 2.0)))
-            .clone()
-    }
-
-    /// Palette for `texture` × `stops`, created on first use. Looked up
-    /// once per effect spawn, not per particle.
-    fn palette(&mut self, texture: &Handle<Image>, color_map: &ColorMap) -> usize {
-        let same_texture = self.palettes_by_texture.entry(texture.id()).or_default();
-        if let Some(&i) = same_texture
-            .iter()
-            .find(|&&i| self.palettes[i].color_map == *color_map)
-        {
-            return i;
-        }
-        let i = self.palettes.len();
-        same_texture.push(i);
-        self.palettes.push(CegPalette {
-            texture: texture.clone(),
-            color_map: color_map.clone(),
-            materials: vec![None; COLOR_MAP_STEPS as usize + 1],
-        });
-        i
-    }
-
-    /// Material showing `slot`'s palette at its life step — upstream
-    /// `colorMap[life]` multiplied into the texture, additive, unlit.
-    fn material(
+    /// The additive, unlit material for `texture`, created on first use.
+    ///
+    /// `base_color` stays white: upstream multiplies the texture by
+    /// `colorMap[life]` with no emissive boost — the colour IS the
+    /// brightness under additive (GL_ONE/GL_ONE) blending, where
+    /// brightness comes from stacking translucent particles. That
+    /// colour is the batch quad's vertex colour here, which
+    /// `StandardMaterial` multiplies into `base_color` the same way.
+    /// An emissive multiplier would over-saturate every particle after
+    /// tonemapping and turn the faint blue shot1 puff into a flashbang.
+    fn texture_material(
         &mut self,
-        slot: PaletteSlot,
+        texture: &Handle<Image>,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        let palette = &mut self.palettes[slot.palette];
-        palette.materials[slot.step as usize]
-            .get_or_insert_with(|| {
-                // `unlit=true` means StandardMaterial ignores lighting,
-                // so colour is driven entirely via `base_color`. Upstream
-                // multiplies the texture by `colorMap[life]` with no
-                // emissive boost — the colour IS the brightness under
-                // additive (GL_ONE/GL_ONE) blending, where brightness
-                // comes from stacking translucent particles. An emissive
-                // multiplier would over-saturate every particle after
-                // tonemapping and turn the faint blue shot1 puff into a
-                // flashbang.
-                let c = palette
-                    .color_map
-                    .sample(f32::from(slot.step) / COLOR_MAP_STEPS);
+        self.materials_by_texture
+            .entry(texture.id())
+            .or_insert_with(|| {
                 materials.add(StandardMaterial {
-                    base_color: Color::linear_rgba(c[0], c[1], c[2], c[3]),
-                    base_color_texture: Some(palette.texture.clone()),
+                    base_color: Color::WHITE,
+                    base_color_texture: Some(texture.clone()),
                     unlit: true,
                     alpha_mode: AlphaMode::Add,
                     cull_mode: None,
@@ -149,21 +107,61 @@ impl CegRenderAssets {
             .clone()
     }
 
-    /// Advance `slot` to the step for life fraction `frac`; returns the
-    /// new material only when the step changed.
-    fn restep(
+    /// Palette for `texture` × `color_map`, created on first use. Looked
+    /// up once per effect spawn, not per particle.
+    fn palette(
         &mut self,
-        slot: &mut PaletteSlot,
-        frac: f32,
+        texture: &Handle<Image>,
+        color_map: &ColorMap,
         materials: &mut Assets<StandardMaterial>,
-    ) -> Option<Handle<StandardMaterial>> {
-        let step = color_step(frac);
-        if step == slot.step {
-            return None;
+    ) -> usize {
+        let material = self.texture_material(texture, materials);
+        if let Some(i) = self
+            .palettes
+            .iter()
+            .position(|p| p.material == material && p.color_map == *color_map)
+        {
+            return i;
         }
-        slot.step = step;
-        Some(self.material(*slot, materials))
+        self.palettes.push(CegPalette {
+            material,
+            color_map: color_map.clone(),
+        });
+        self.palettes.len() - 1
     }
+
+    /// The palette a particle was spawned with.
+    pub(super) fn palette_at(&self, index: usize) -> &CegPalette {
+        &self.palettes[index]
+    }
+}
+
+/// Corner UVs for a particle or flame billboard, in the batch's
+/// `[bl, br, tr, tl]` corner order: the image's top edge lies along
+/// `+ydir`, as it did on the `Rectangle` quad these used to be drawn
+/// with, so `hline` / `arrow` / `dosray` sprites keep their orientation.
+const BILLBOARD_UVS: [[f32; 2]; 4] = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+/// Push one billboard centred on `pos` spanning `±xdir·size ± ydir·size`
+/// — `CSimpleParticleSystem::Draw`'s four `AddVertexTC` calls — with
+/// `color` on every corner.
+fn push_billboard(
+    batches: &mut FxQuadBatches,
+    material: &Handle<StandardMaterial>,
+    pos: Vec3,
+    xdir: Vec3,
+    ydir: Vec3,
+    size: f32,
+    color: [f32; 4],
+) {
+    let x = xdir * size;
+    let y = ydir * size;
+    batches.push_quad(
+        material,
+        [pos - x - y, pos + x - y, pos + x + y, pos - x + y],
+        BILLBOARD_UVS,
+        [color; 4],
+    );
 }
 
 /// Bundled CEG-spawn dependencies so `tick_weapon_fx` can replay
@@ -173,7 +171,6 @@ impl CegRenderAssets {
 #[derive(SystemParam)]
 pub(super) struct CegTrailCtx<'w, 's> {
     pub ceg_registry: Res<'w, CegRegistry>,
-    pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
@@ -257,30 +254,37 @@ const CEG_TEXTURES: &[(&str, &str)] = &[
 
 // ─── Runtime components ─────────────────────────────────────────────
 
-/// One live particle spawned from a `CSimpleParticleSystem`.
+/// One live particle spawned from a `CSimpleParticleSystem`. Plain
+/// data: no `Transform` or mesh — [`tick_ceg_particles`] pushes it into
+/// the quad batch of its palette's material every sim tick.
 #[derive(Component)]
 pub(super) struct CegParticle {
+    pub pos: Vec3,
     pub velocity: Vec3,
     pub gravity: Vec3,
     pub airdrag_per_sec: f32,
     pub size: f32,
     pub size_growth_per_sec: f32,
     pub size_mod_per_sec: f32,
-    pub color: PaletteSlot,
+    /// Index into [`CegRenderAssets`]' palettes.
+    pub palette: usize,
     pub life: f32,
     pub max_life: f32,
     pub directional: bool,
 }
 
 /// One live `CBitmapMuzzleFlame` billboard — used for shockwaves
-/// (expanding circle ring) and muzzle-exhaust cones.
+/// (expanding circle ring) and muzzle-exhaust cones. Batched like
+/// [`CegParticle`].
 #[derive(Component)]
 pub(super) struct CegFlame {
+    pub pos: Vec3,
     pub life_frames: f32,
     pub max_life_frames: f32,
     pub base_size: f32,
     pub size_growth_per_frame: f32,
-    pub color: PaletteSlot,
+    /// Index into [`CegRenderAssets`]' palettes.
+    pub palette: usize,
 }
 
 /// One live `CExploSpikeProjectile` (`class=explspike`) — upstream
@@ -331,7 +335,6 @@ pub(super) fn spawn_ceg(
     registry: &CegRegistry,
     rng: &mut u32,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
@@ -342,7 +345,6 @@ pub(super) fn spawn_ceg(
     };
 
     let dir = dir.normalize_or(Vec3::Y);
-    let mesh = ceg_assets.get(meshes);
 
     for effect in &def.effects {
         match &effect.properties {
@@ -357,7 +359,6 @@ pub(super) fn spawn_ceg(
                 images,
                 model_cache,
                 ceg_assets,
-                &mesh,
             ),
             EffectProperties::Flame(f) => spawn_flame(
                 effect.count,
@@ -368,7 +369,6 @@ pub(super) fn spawn_ceg(
                 images,
                 model_cache,
                 ceg_assets,
-                &mesh,
             ),
             EffectProperties::Spawner(s) => {
                 spawn_delayed(effect.count, s, pos, dir, commands);
@@ -404,7 +404,6 @@ fn spawn_particle_system(
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
-    mesh: &Handle<Mesh>,
 ) {
     let Some(filename) = CegRegistry::resolve_texture(&props.texture) else {
         return;
@@ -412,11 +411,7 @@ fn spawn_particle_system(
     let Some((tex, _w, _h)) = load_beam_texture(filename, model_cache, images) else {
         return;
     };
-    let color = PaletteSlot {
-        palette: ceg_assets.palette(&tex, &props.color_map),
-        step: 0,
-    };
-    let material = ceg_assets.material(color, materials);
+    let palette = ceg_assets.palette(&tex, &props.color_map, materials);
 
     let base_dir = match &props.emit_vector {
         EmitVector::Direction => dir,
@@ -509,23 +504,19 @@ fn spawn_particle_system(
             };
             let size_growth_per_sec = props.size_growth.eval(&ctx_base) * GAME_SPEED;
 
-            commands.spawn((
-                CegParticle {
-                    velocity,
-                    gravity: gravity_per_sec,
-                    airdrag_per_sec,
-                    size,
-                    size_growth_per_sec,
-                    size_mod_per_sec,
-                    color,
-                    life: life_secs,
-                    max_life: life_secs,
-                    directional: props.directional,
-                },
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(material.clone()),
-                Transform::from_translation(particle_pos).with_scale(Vec3::splat(size)),
-            ));
+            commands.spawn(CegParticle {
+                pos: particle_pos,
+                velocity,
+                gravity: gravity_per_sec,
+                airdrag_per_sec,
+                size,
+                size_growth_per_sec,
+                size_mod_per_sec,
+                palette,
+                life: life_secs,
+                max_life: life_secs,
+                directional: props.directional,
+            });
         }
     }
 }
@@ -540,7 +531,6 @@ fn spawn_flame(
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
-    mesh: &Handle<Mesh>,
 ) {
     // We render only the `frontTexture` plane — the camera-facing
     // billboard — which is what every upstream shockwave
@@ -559,25 +549,17 @@ fn spawn_flame(
     let ttl = props.ttl.eval(&ctx).max(1.0);
     let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
 
-    let color = PaletteSlot {
-        palette: ceg_assets.palette(&tex, &props.color_map),
-        step: 0,
-    };
-    let material = ceg_assets.material(color, materials);
+    let palette = ceg_assets.palette(&tex, &props.color_map, materials);
 
     for _ in 0..count {
-        commands.spawn((
-            CegFlame {
-                life_frames: ttl,
-                max_life_frames: ttl,
-                base_size,
-                size_growth_per_frame,
-                color,
-            },
-            Mesh3d(mesh.clone()),
-            MeshMaterial3d(material.clone()),
-            Transform::from_translation(origin + pos_offset).with_scale(Vec3::splat(base_size)),
-        ));
+        commands.spawn(CegFlame {
+            pos: origin + pos_offset,
+            life_frames: ttl,
+            max_life_frames: ttl,
+            base_size,
+            size_growth_per_frame,
+            palette,
+        });
     }
 }
 
@@ -732,17 +714,18 @@ fn spawn_delayed(
 
 // ─── Tick ───────────────────────────────────────────────────────────
 
-/// Physics + colour update for live CEG particles.
+/// Physics update for live CEG particles, then one camera-facing quad
+/// each into the batch (`CSimpleParticleSystem::Update` + `Draw`).
+///
+/// The batch mesh is rebuilt per sim tick and drawn as-is until the
+/// next one, so a particle's position is not interpolated between
+/// ticks the way the old per-particle `Transform` + `SimPose` was —
+/// same trade the beams and spikes made.
 pub(super) fn tick_ceg_particles(
     time: Res<Time>,
-    mut particles: Query<(
-        Entity,
-        &mut CegParticle,
-        &mut Transform,
-        &mut MeshMaterial3d<StandardMaterial>,
-    )>,
-    mut ceg_assets: ResMut<CegRenderAssets>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut particles: Query<(Entity, &mut CegParticle)>,
+    ceg_assets: Res<CegRenderAssets>,
+    mut batches: ResMut<FxQuadBatches>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
 ) {
@@ -769,7 +752,7 @@ pub(super) fn tick_ceg_particles(
         })
         .unwrap_or_else(|_| (Vec3::Y * 1000.0, Vec3::X, Vec3::Y, Vec3::Z));
 
-    for (entity, mut p, mut transform, mut material) in &mut particles {
+    for (entity, mut p) in &mut particles {
         p.life -= dt;
         if p.life <= 0.0 {
             commands.entity(entity).despawn();
@@ -783,56 +766,52 @@ pub(super) fn tick_ceg_particles(
         let gravity = p.gravity;
         p.velocity += gravity * dt;
         let velocity = p.velocity;
-        transform.translation += velocity * dt;
+        p.pos += velocity * dt;
 
         p.size += p.size_growth_per_sec * dt;
         if p.size_mod_per_sec > 0.0 && p.size_mod_per_sec != 1.0 {
             p.size *= p.size_mod_per_sec.powf(dt);
         }
-        transform.scale = Vec3::splat(p.size.max(0.01));
 
-        // Build a rotation whose local axes map to the camera-facing
-        // (xdir, ydir) pair upstream uses. The shared particle mesh
-        // is a 2×2 rectangle in the XY plane; with cam_right → local X
-        // and cam_up → local Y, the post-scale extent at each corner
-        // matches `±xdir*size ± ydir*size` verbatim.
-        let (right, up, normal) = if p.directional && p.velocity.length_squared() > 1e-3 {
+        // The camera-facing (xdir, ydir) pair upstream spans the quad
+        // with: corners at `±xdir*size ± ydir*size`.
+        let (xdir, ydir) = if p.directional && p.velocity.length_squared() > 1e-3 {
             // `directional=1` (hline tracers): align Y with velocity,
             // X with the camera-facing perpendicular.
-            let zdir = (transform.translation - cam_pos).normalize_or(-cam_fwd);
+            let zdir = (p.pos - cam_pos).normalize_or(-cam_fwd);
             let fwd = p.velocity.normalize();
             let xdir = zdir.cross(fwd).normalize_or(cam_right);
             let ydir = xdir.cross(zdir).normalize_or(fwd);
-            (xdir, ydir, zdir)
+            (xdir, ydir)
         } else {
-            (cam_right, cam_up, cam_fwd)
+            (cam_right, cam_up)
         };
-        transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, normal));
 
         let frac = 1.0 - (p.life / p.max_life).clamp(0.0, 1.0);
-        if let Some(handle) = ceg_assets.restep(&mut p.color, frac, &mut materials) {
-            material.0 = handle;
-        }
+        let palette = ceg_assets.palette_at(p.palette);
+        push_billboard(
+            &mut batches,
+            &palette.material,
+            p.pos,
+            xdir,
+            ydir,
+            p.size.max(0.01),
+            palette.sample(frac),
+        );
     }
 }
 
-/// Drop the emissive-over-boost on the per-frame colour rewrite so
-/// the shockwave's faint peach→transparent gradient looks like a
-/// wispy ring rather than a pulsing ember.
-///
-/// Grow + fade `CBitmapMuzzleFlame` billboards. Ticked in sim-frame
-/// terms: `size_growth` is authored per frame, `ttl` is authored in
-/// frames, so we advance `life_frames` by `dt * GAME_SPEED`.
+/// Grow + fade `CBitmapMuzzleFlame` billboards and push their quads.
+/// Ticked in sim-frame terms: `size_growth` is authored per frame,
+/// `ttl` is authored in frames, so we advance `life_frames` by
+/// `dt * GAME_SPEED`. No emissive boost on the colour, so the
+/// shockwave's faint peach→transparent gradient looks like a wispy
+/// ring rather than a pulsing ember.
 pub(super) fn tick_ceg_flames(
     time: Res<Time>,
-    mut flames: Query<(
-        Entity,
-        &mut CegFlame,
-        &mut Transform,
-        &mut MeshMaterial3d<StandardMaterial>,
-    )>,
-    mut ceg_assets: ResMut<CegRenderAssets>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut flames: Query<(Entity, &mut CegFlame)>,
+    ceg_assets: Res<CegRenderAssets>,
+    mut batches: ResMut<FxQuadBatches>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
 ) {
@@ -845,7 +824,7 @@ pub(super) fn tick_ceg_flames(
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
 
-    for (entity, mut f, mut transform, mut material) in &mut flames {
+    for (entity, mut f) in &mut flames {
         f.life_frames -= dt_frames;
         if f.life_frames <= 0.0 {
             commands.entity(entity).despawn();
@@ -855,18 +834,23 @@ pub(super) fn tick_ceg_flames(
         // Grow: size = base + growth * frames_elapsed.
         let frames_elapsed = f.max_life_frames - f.life_frames;
         let size = f.base_size + f.size_growth_per_frame * frames_elapsed;
-        transform.scale = Vec3::splat(size.max(0.01));
 
         // Face the camera.
-        let to_cam = (cam_pos - transform.translation).normalize_or(Vec3::Z);
+        let to_cam = (cam_pos - f.pos).normalize_or(Vec3::Z);
         let right = Vec3::Y.cross(to_cam).normalize_or(Vec3::X);
         let up = to_cam.cross(right).normalize_or(Vec3::Y);
-        transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, to_cam));
 
         let frac = 1.0 - (f.life_frames / f.max_life_frames).clamp(0.0, 1.0);
-        if let Some(handle) = ceg_assets.restep(&mut f.color, frac, &mut materials) {
-            material.0 = handle;
-        }
+        let palette = ceg_assets.palette_at(f.palette);
+        push_billboard(
+            &mut batches,
+            &palette.material,
+            f.pos,
+            right,
+            up,
+            size.max(0.01),
+            palette.sample(frac),
+        );
     }
 }
 
@@ -878,7 +862,6 @@ pub(super) fn tick_ceg_delayed_spawns(
     mut timers: Query<(Entity, &mut CegDelayedSpawn)>,
     registry: Res<CegRegistry>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
@@ -903,7 +886,6 @@ pub(super) fn tick_ceg_delayed_spawns(
             &registry,
             &mut rng,
             &mut commands,
-            &mut meshes,
             &mut materials,
             &mut images,
             &mut model_cache,
@@ -1018,6 +1000,74 @@ mod tests {
         assert_eq!(CegRegistry::resolve_texture("none"), None);
         assert_eq!(CegRegistry::resolve_texture(""), None);
         assert_eq!(CegRegistry::resolve_texture("nonsense"), None);
+    }
+
+    /// Live particles and flames become one quad each in the batch of
+    /// their texture's material, coloured by the colour map at their
+    /// life fraction; a dead particle is despawned without a quad.
+    #[test]
+    fn particles_and_flames_batch_with_palette_colours() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>();
+
+        let texture = Handle::<Image>::default();
+        let red_to_blue = ColorMap::parse("1 0 0 1   0 0 1 0.5");
+        let world = app.world_mut();
+        let (palette, material) = world.resource_scope(|world, mut assets: Mut<CegRenderAssets>| {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            let palette = assets.palette(&texture, &red_to_blue, &mut materials);
+            // Same texture, same map: same palette; same texture,
+            // other map: same material, other palette.
+            assert_eq!(assets.palette(&texture, &red_to_blue, &mut materials), palette);
+            let other = assets.palette(&texture, &ColorMap::parse("0 1 0 1"), &mut materials);
+            assert_ne!(other, palette);
+            assert_eq!(assets.palette_at(other).material, assets.palette_at(palette).material);
+            assert_eq!(materials.len(), 1, "one material per texture");
+            (palette, assets.palette_at(palette).material.clone())
+        });
+        let particle = |life: f32| CegParticle {
+            pos: Vec3::ZERO,
+            velocity: Vec3::ZERO,
+            gravity: Vec3::ZERO,
+            airdrag_per_sec: 1.0,
+            size: 4.0,
+            size_growth_per_sec: 0.0,
+            size_mod_per_sec: 1.0,
+            palette,
+            life,
+            max_life: 2.0,
+            directional: false,
+        };
+        world.spawn(particle(2.0)); // just born
+        world.spawn(particle(1.0)); // half way
+        world.spawn(particle(0.0)); // dead: despawned, no quad
+        world.spawn(CegFlame {
+            pos: Vec3::X * 10.0,
+            life_frames: 30.0,
+            max_life_frames: 30.0,
+            base_size: 8.0,
+            size_growth_per_frame: 1.0,
+            palette,
+        });
+
+        world.run_system_once(tick_ceg_particles).unwrap();
+        world.run_system_once(tick_ceg_flames).unwrap();
+
+        let batches = world.resource::<FxQuadBatches>();
+        assert_eq!(batches.pending_quads(&material), 3);
+        let colors = batches.pending_colors(&material);
+        assert_eq!(colors.len(), 12);
+        assert_eq!(colors[0], [1.0, 0.0, 0.0, 1.0], "born: first stop");
+        assert_eq!(colors[3], [1.0, 0.0, 0.0, 1.0], "same colour on every corner");
+        assert_eq!(colors[4], [0.5, 0.0, 0.5, 0.75], "half way: midpoint");
+        assert_eq!(colors[8], [1.0, 0.0, 0.0, 1.0], "flame just born");
+        let mut live = world.query::<&CegParticle>();
+        assert_eq!(live.iter(world).count(), 2, "the dead particle is gone");
     }
 
     #[test]

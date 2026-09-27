@@ -1,14 +1,20 @@
-//! One dynamic quad mesh per material for the camera-facing ribbon
-//! effects: hit-scan beams, laser bolts and their end caps, lightning
-//! arcs, CEG `explspike` streaks and smoke trails.
+//! One dynamic quad mesh per material for the camera-facing effects:
+//! hit-scan beams, laser bolts and their end caps, lightning arcs, CEG
+//! `explspike` streaks, smoke trails, and the CEG particle / flame
+//! billboards.
 //!
-//! Why: each of those used to own a private `Mesh` asset that the sim
-//! tick rewrote every frame and that died with the effect a few frames
-//! later. The renderer paid for every one of them in
+//! Why: each of the ribbons used to own a private `Mesh` asset that
+//! the sim tick rewrote every frame and that died with the effect a
+//! few frames later. The renderer paid for every one of them in
 //! `allocate_and_free_meshes` + extraction, plus one draw call per
 //! quad — and build lasers made it permanent background churn (one
 //! 0.08 s beam per emitter piece per sim frame while a factory
 //! produces, ~120 mesh adds and frees per second for a Socket alone).
+//! CEG particles were one entity each — a unit death is ~48, a SIGTERM
+//! ~320 — every one carrying a `Transform` rewritten per tick, an
+//! interpolation pose, transform propagation and render extraction,
+//! and a material swap per colour-map step that broke instancing
+//! between neighbours.
 //!
 //! Now the tick systems push each effect's corners into
 //! [`FxQuadBatches`] under the material it draws with, and
@@ -17,7 +23,11 @@
 //! one draw call per material per sim tick, no asset churn. The batch
 //! entities sit at the origin with world-space vertices, exactly like
 //! the per-effect meshes did, so nothing is interpolated between sim
-//! ticks (`SimPose`) — same as before.
+//! ticks (`SimPose`) — same as before. Per-effect colour rides on the
+//! vertex colours, so one material per texture serves every colour.
+//!
+//! [`QuadBatches`] is the buffer set itself; `terrain::geovent` keeps
+//! its own instance for the smoke puffs it moves every render frame.
 
 use std::collections::HashMap;
 
@@ -45,17 +55,23 @@ const QUAD_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
 /// under the materials' default back-face culling.
 const QUAD_INDICES: [u32; 12] = [0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2];
 
-/// The quads every ribbon effect pushed this sim tick, grouped by the
+/// The quads every effect pushed since the last flush, grouped by the
 /// material they render with. Filled by the tick systems, drained by
-/// [`flush_fx_quad_batches`].
-#[derive(Resource, Default)]
-pub(super) struct FxQuadBatches {
+/// [`flush_quad_batches`].
+#[derive(Default)]
+pub(crate) struct QuadBatches {
     batches: HashMap<AssetId<StandardMaterial>, QuadBatch>,
 }
 
+/// The weapon-fx chain's [`QuadBatches`]: filled by every system in
+/// the `FixedUpdate` fx chain, flushed once per sim tick by
+/// [`flush_fx_quad_batches`].
+#[derive(Resource, Default, Deref, DerefMut)]
+pub(super) struct FxQuadBatches(QuadBatches);
+
 /// Marker on a batch's render entity.
 #[derive(Component)]
-pub(super) struct FxQuadBatch;
+pub(crate) struct FxQuadBatch;
 
 struct QuadBatch {
     material: Handle<StandardMaterial>,
@@ -74,10 +90,10 @@ struct QuadBatch {
     colors: Vec<[f32; 4]>,
 }
 
-impl FxQuadBatches {
+impl QuadBatches {
     /// Queue one quad (`[bl, br, tr, tl]` world corners, see
     /// [`QUAD_UVS`]) with per-vertex UVs and colours.
-    pub(super) fn push_quad(
+    pub(crate) fn push_quad(
         &mut self,
         material: &Handle<StandardMaterial>,
         corners: [Vec3; 4],
@@ -105,7 +121,7 @@ impl FxQuadBatches {
 
     /// [`push_quad`](Self::push_quad) with the default UVs and one
     /// colour for all four corners — beams, spikes, caps, arcs.
-    pub(super) fn push_flat_quad(
+    pub(crate) fn push_flat_quad(
         &mut self,
         material: &Handle<StandardMaterial>,
         corners: [Vec3; 4],
@@ -116,10 +132,18 @@ impl FxQuadBatches {
 
     /// Quads queued for `material` since the last flush.
     #[cfg(test)]
-    pub(super) fn pending_quads(&self, material: &Handle<StandardMaterial>) -> usize {
+    pub(crate) fn pending_quads(&self, material: &Handle<StandardMaterial>) -> usize {
         self.batches
             .get(&material.id())
             .map_or(0, |b| b.positions.len() / 4)
+    }
+
+    /// Corner colours of the quads queued for `material`, four per quad.
+    #[cfg(test)]
+    pub(crate) fn pending_colors(&self, material: &Handle<StandardMaterial>) -> &[[f32; 4]] {
+        self.batches
+            .get(&material.id())
+            .map_or(&[], |b| b.colors.as_slice())
     }
 }
 
@@ -131,6 +155,18 @@ pub(super) fn flush_fx_quad_batches(
     mut meshes: ResMut<Assets<Mesh>>,
     mut visibility: Query<&mut Visibility, With<FxQuadBatch>>,
     mut commands: Commands,
+) {
+    flush_quad_batches(&mut batches, &mut meshes, &mut visibility, &mut commands);
+}
+
+/// [`flush_fx_quad_batches`] for any [`QuadBatches`]: write every
+/// batch's quads into its mesh, show or hide its entity, and clear the
+/// buffers.
+pub(crate) fn flush_quad_batches(
+    batches: &mut QuadBatches,
+    meshes: &mut Assets<Mesh>,
+    visibility: &mut Query<&mut Visibility, With<FxQuadBatch>>,
+    commands: &mut Commands,
 ) {
     for batch in batches.batches.values_mut() {
         if batch.positions.is_empty() {

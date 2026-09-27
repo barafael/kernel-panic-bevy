@@ -1127,7 +1127,6 @@ fn spawn_terrain(
         heightmap,
         commands,
         geovent_assets,
-        meshes,
         std_materials,
         images,
     );

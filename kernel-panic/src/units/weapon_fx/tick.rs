@@ -540,7 +540,6 @@ pub(super) fn tick_weapon_fx(
                 &ceg_ctx.ceg_registry,
                 &mut proj.trail_seed,
                 &mut commands,
-                &mut ceg_ctx.meshes,
                 &mut ceg_ctx.materials,
                 &mut ceg_ctx.images,
                 &mut ceg_ctx.model_cache,
