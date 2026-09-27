@@ -69,7 +69,7 @@ impl Plugin for CommandPanelPlugin {
             .add_systems(
                 Update,
                 (
-                    collect_commands,
+                    collect_commands.run_if(in_state(AppState::InGame)),
                     order_hotkeys.run_if(in_state(AppState::InGame)),
                     apply_activations,
                     render_panel.run_if(in_state(AppState::InGame)),
@@ -88,7 +88,7 @@ impl Plugin for CommandPanelPlugin {
 pub(crate) struct CommandPanelSet;
 
 /// The selection's commands and their page layout (Spring's `commands`
-/// and `icons`), refreshed every frame.
+/// and `icons`), rebuilt whenever the selection's command state changes.
 #[derive(Resource, Default)]
 pub(crate) struct PanelCommands {
     pub list: Vec<CmdDesc>,
@@ -247,7 +247,10 @@ fn collect_commands(
                 repeat: producer.map(|p| p.repeat()),
                 queued,
                 autohold: autohold.map(|a| a.0),
-                recharge: cooldown.map(|c| c.remaining),
+                // The button only ever shows whole seconds
+                // (`recharge_label` ceils), so round here: the state
+                // then changes once a second instead of every frame.
+                recharge: cooldown.map(|c| c.remaining.ceil()),
             }
         })
         .collect();
@@ -283,7 +286,10 @@ fn collect_commands(
         panel.selection = ids;
         page.0 = 0;
     }
-    page.0 = page.0.min(panel.pages.len().saturating_sub(1));
+    let clamped = page.0.min(panel.pages.len().saturating_sub(1));
+    if clamped != page.0 {
+        page.0 = clamped;
+    }
 }
 
 #[derive(Component)]
@@ -766,5 +772,39 @@ mod tests {
         world.entity_mut(kernel).remove::<Selected>();
         world.run_system_once(collect_commands).unwrap();
         assert!(world.resource::<PanelCommands>().list.is_empty());
+    }
+
+    /// A recharging Terminal's state is kept in whole seconds, so the
+    /// command list is only rebuilt when the shown countdown changes.
+    #[test]
+    fn recharge_state_changes_once_a_second() {
+        let mut world = World::new();
+        world.init_resource::<PanelCommands>();
+        world.init_resource::<PanelPage>();
+        world.insert_resource(UnitRegistry::empty());
+        let terminal = world
+            .spawn((
+                UnitType(UnitKind::Terminal),
+                TeamId(0),
+                CommandFireCooldown { remaining: 41.2 },
+                Selected,
+            ))
+            .id();
+        world.run_system_once(collect_commands).unwrap();
+        let first = world.resource::<PanelCommands>().states.clone();
+        assert_eq!(first[0].recharge, Some(42.0));
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "42s");
+
+        world
+            .entity_mut(terminal)
+            .insert(CommandFireCooldown { remaining: 41.7 });
+        world.run_system_once(collect_commands).unwrap();
+        assert_eq!(world.resource::<PanelCommands>().states, first);
+
+        world
+            .entity_mut(terminal)
+            .insert(CommandFireCooldown { remaining: 40.9 });
+        world.run_system_once(collect_commands).unwrap();
+        assert_eq!(world.resource::<PanelCommands>().list[0].label(), "41s");
     }
 }
