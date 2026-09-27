@@ -1,9 +1,9 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
 //! projectile arcs, drift + billboard build-sparkles, despawn at end of life.
 
-use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 
+use super::batch::FxQuadBatches;
 use super::shared::{
     BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, FadingTrail, Flight, GroundFlash,
     ImpactBurst, LaserBolt, LightningArc, PendingExplosions, ProjectileTrail, ProjectileVisual,
@@ -49,30 +49,39 @@ pub(super) struct VolumeHitCtx<'w, 's> {
     heightmap: Option<Res<'w, Heightmap>>,
 }
 
+/// The camera the ribbon effects face and the quad batches they draw
+/// into, bundled so `tick_weapon_fx` stays under Bevy's 16-param limit.
+#[derive(SystemParam)]
+pub(super) struct RibbonDrawCtx<'w, 's> {
+    camera_q: Query<'w, 's, &'static GlobalTransform, With<RtsCamera>>,
+    batches: ResMut<'w, FxQuadBatches>,
+}
+
+impl RibbonDrawCtx<'_, '_> {
+    fn cam_pos(&self) -> Vec3 {
+        self.camera_q
+            .single()
+            .map(|gt| gt.translation())
+            .unwrap_or(Vec3::Y * 1000.0)
+    }
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn tick_weapon_fx(
     time: Res<Time>,
     mut arcs: Query<(Entity, &mut LightningArc)>,
     mut beams: Query<(Entity, &mut BeamVisual)>,
     mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
-    mut bolts: Query<(Entity, &mut LaserBolt, &mut Transform), Without<ProjectileVisual>>,
-    mut sparkles: Query<
-        (Entity, &mut BuildSparkle, &mut Transform),
-        (Without<ProjectileVisual>, Without<LaserBolt>),
-    >,
+    mut bolts: Query<(Entity, &mut LaserBolt)>,
+    mut sparkles: Query<(Entity, &mut BuildSparkle, &mut Transform), Without<ProjectileVisual>>,
     mut impacts: Query<
         (Entity, &mut ImpactBurst, &mut Transform),
-        (
-            Without<ProjectileVisual>,
-            Without<LaserBolt>,
-            Without<BuildSparkle>,
-        ),
+        (Without<ProjectileVisual>, Without<BuildSparkle>),
     >,
     mut flashes: Query<
         (Entity, &mut GroundFlash, &mut Transform),
         (
             Without<ProjectileVisual>,
-            Without<LaserBolt>,
             Without<BuildSparkle>,
             Without<ImpactBurst>,
         ),
@@ -81,23 +90,19 @@ pub(super) fn tick_weapon_fx(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_explosions: ResMut<PendingExplosions>,
     weapon_registry: Res<WeaponRegistry>,
-    camera_q: Query<&GlobalTransform, With<RtsCamera>>,
+    mut draw: RibbonDrawCtx,
     volume_ctx: VolumeHitCtx,
     mut ceg_ctx: CegTrailCtx,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    // Projectile trails + build-sparkle billboards both need the
-    // camera's world position; resolve it once per frame.
-    let cam_pos = camera_q
-        .single()
-        .map(|gt| gt.translation())
-        .unwrap_or(Vec3::Y * 1000.0);
+    // Every ribbon and the build-sparkle billboards need the camera's
+    // world position; resolve it once per frame.
+    let cam_pos = draw.cam_pos();
 
     // GaussCannon lightning arcs (upstream network_arceffect.lua).
-    // Rewrite each segment's 4 corners as a camera-facing ribbon and
-    // fade via vertex colors — the shared additive material is never
-    // touched.
+    // Push each segment as a camera-facing quad and fade via vertex
+    // colors — the shared additive material is never touched.
     for (entity, mut arc) in &mut arcs {
         arc.lifetime -= dt;
         if arc.lifetime <= 0.0 {
@@ -106,21 +111,9 @@ pub(super) fn tick_weapon_fx(
         }
         let fade = (arc.lifetime / arc.max_lifetime).clamp(0.0, 1.0);
         let half = arc.width;
-        let Some((positions, colors)) = ceg_ctx
-            .meshes
-            .get_mut(&arc.mesh)
-            .and_then(|mesh| positions_and_colors(mesh))
-        else {
-            continue;
-        };
         let c = arc.tint.to_f32_array();
         let color = [c[0], c[1], c[2], c[3] * fade];
-        for ((pair, quad), quad_colors) in arc
-            .points
-            .windows(2)
-            .zip(positions.chunks_exact_mut(4))
-            .zip(colors.chunks_exact_mut(4))
-        {
+        for pair in arc.points.windows(2) {
             let (a, b) = (pair[0], pair[1]);
             let seg_dir = (b - a).try_normalize().unwrap_or(Vec3::Z);
             let to_cam = cam_pos - a;
@@ -129,17 +122,17 @@ pub(super) fn tick_weapon_fx(
                 .try_normalize()
                 .unwrap_or_else(|| Vec3::Y.cross(seg_dir).try_normalize().unwrap_or(Vec3::X));
             let offset = perp * half;
-            quad[0] = (a - offset).to_array();
-            quad[1] = (a + offset).to_array();
-            quad[2] = (b + offset).to_array();
-            quad[3] = (b - offset).to_array();
-            quad_colors.fill(color);
+            draw.batches.push_flat_quad(
+                &arc.material,
+                [a - offset, a + offset, b + offset, b - offset],
+                color,
+            );
         }
     }
 
-    // Hit-scan beams (BeamLaser / BuildLaser). Rewrite the 4 corners
+    // Hit-scan beams (BeamLaser / BuildLaser). Push the 4 corners
     // each frame so the ribbon always faces the camera — same xdir
-    // math as the bolt path above.
+    // math as the bolt path below.
     for (entity, mut beam) in &mut beams {
         beam.lifetime -= dt;
         if beam.lifetime <= 0.0 {
@@ -176,25 +169,29 @@ pub(super) fn tick_weapon_fx(
         // any texture's "arrow tip" / "hit end" should read), U=1 at
         // `start` (shooter-side). Keeps a textured BeamLaser like the
         // future DOS_Beam showing its `dosray` stream flowing from
-        // builder to target rather than backwards.
-        if let Some(mesh) = ceg_ctx.meshes.get_mut(&beam.mesh) {
-            let bl = beam.end - offset;
-            let br = beam.start - offset;
-            let tr = beam.start + offset;
-            let tl = beam.end + offset;
-            rewrite_quad_positions(mesh, bl, br, tr, tl);
-            rewrite_quad_color(mesh, [intensity, intensity, intensity, 1.0]);
-        }
+        // builder to target rather than backwards. The vertex colour
+        // carries the `beamdecay` intensity so the cached material is
+        // never cloned per beam.
+        draw.batches.push_flat_quad(
+            &beam.material,
+            [
+                beam.end - offset,
+                beam.start - offset,
+                beam.start + offset,
+                beam.end + offset,
+            ],
+            [intensity, intensity, intensity, 1.0],
+        );
     }
 
     // Traveling laser bolts — Spring's `CLaserProjectile::Draw`. Lead
     // advances from `origin` at `speed` until reaching the target; the
     // tail trails by up to `max_length`, then catches up once the lead
-    // stops. For each live bolt we rewrite the quad's 4 vertices with
-    // camera-facing corners — `dir1 = ((midpoint - cam) × beam_dir).normalize()`
+    // stops. For each live bolt we push a quad with camera-facing
+    // corners — `dir1 = ((midpoint - cam) × beam_dir).normalize()`
     // is the width axis; the quad spans `±dir1 * thickness` at lead
     // and tail. Despawns once both ends pass the target.
-    for (entity, mut bolt, _transform) in &mut bolts {
+    for (entity, mut bolt) in &mut bolts {
         let prev_lead_raw = (bolt.speed * bolt.elapsed).min(bolt.total_distance);
         bolt.elapsed += dt;
         let lead_raw = bolt.speed * bolt.elapsed;
@@ -262,10 +259,6 @@ pub(super) fn tick_weapon_fx(
         }
         let tail_raw = (lead_raw - bolt.max_length).max(0.0);
         if tail_raw >= bolt.total_distance {
-            if let Some(caps) = bolt.caps.as_ref() {
-                commands.entity(caps.lead_entity).despawn();
-                commands.entity(caps.tail_entity).despawn();
-            }
             commands.entity(entity).despawn();
             continue;
         }
@@ -291,60 +284,70 @@ pub(super) fn tick_weapon_fx(
             });
         let offset = dir1 * bolt.thickness;
 
-        // Mesh UVs are fixed: bl=(0,0), br=(1,0), tr=(1,1), tl=(0,1).
-        // Upstream assigns `tex1->xstart` (U=0) to the LEAD and
-        // `tex1->xend` (U=1) to the TAIL (see `LaserProjectile.cpp::Draw`,
-        // where `drawPos` — the lead — gets `tex1->xstart` and `pos2` —
-        // the tail — gets `tex1->xend`). The `arrow.tga` atlas has its
+        // Quad UVs: bl=(0,0), br=(u,0), tr=(u,1), tl=(0,1). Upstream
+        // assigns `tex1->xstart` (U=0) to the LEAD and `tex1->xend`
+        // (U=1) to the TAIL (see `LaserProjectile.cpp::Draw`, where
+        // `drawPos` — the lead — gets `tex1->xstart` and `pos2` — the
+        // tail — gets `tex1->xend`). The `arrow.tga` atlas has its
         // chevron tips at low U, so that mapping makes the arrows read
         // as `>>>>` pointing at the target. Inverting it (tail-at-U=0)
         // flipped them to face the shooter — the regression the user
         // caught. So: LEAD corners go to bl/tl (U=0), TAIL corners go
-        // to br/tr (U=1).
-        if let Some(mesh) = ceg_ctx.meshes.get_mut(&bolt.mesh) {
-            let bl = lead_pos - offset;
-            let br = tail_pos - offset;
-            let tr = tail_pos + offset;
-            let tl = lead_pos + offset;
-            rewrite_quad_positions(mesh, bl, br, tr, tl);
-            // LaserProjectile.cpp expansion: while still growing
-            // (stayTime==0), the tail UV slides from the tile start to
-            // the tile end (texEndOffset = (1 - curDrawLen/maxLength) *
-            // (xstart - xend)) so the arrow texture materialises at the
-            // muzzle and stretches with the bolt. Standalone TGA turns
-            // xstart=0, xend=1, so tail U = curDrawLen / maxLength.
-            let drawn_len = (lead_dist - tail_dist).max(0.0);
-            let grow = (drawn_len / bolt.max_length.max(1e-3)).clamp(0.0, 1.0);
-            rewrite_quad_uvs(mesh, 0.0, grow);
-        }
+        // to br/tr.
+        //
+        // LaserProjectile.cpp expansion: while still growing
+        // (stayTime==0), the tail UV slides from the tile start to the
+        // tile end (texEndOffset = (1 - curDrawLen/maxLength) *
+        // (xstart - xend)) so the arrow texture materialises at the
+        // muzzle and stretches with the bolt. Standalone TGA turns
+        // xstart=0, xend=1, so tail U = curDrawLen / maxLength.
+        let drawn_len = (lead_dist - tail_dist).max(0.0);
+        let grow = (drawn_len / bolt.max_length.max(1e-3)).clamp(0.0, 1.0);
+        draw.batches.push_quad(
+            &bolt.material,
+            [
+                lead_pos - offset,
+                tail_pos - offset,
+                tail_pos + offset,
+                lead_pos + offset,
+            ],
+            [[0.0, 0.0], [grow, 0.0], [grow, 1.0], [0.0, 1.0]],
+            [[1.0; 4]; 4],
+        );
 
-        // Rewrite endcap quads (texture2). Upstream's `dir2` is the
+        // Endcap quads (texture2). Upstream's `dir2` is the
         // camera-aligned forward axis: perpendicular to dir1 and to
         // the camera ray, pointing roughly along the bolt. Each cap
         // is a `2*thickness × thickness` quad anchored at the bolt's
         // tip, extending one thickness *outward* (forward at the
         // lead, backward at the tail).
-        if let Some(caps) = bolt.caps.as_ref() {
+        if let Some(cap_material) = &bolt.cap_material {
             let dir2 = to_cam.cross(dir1).try_normalize().unwrap_or(bolt.direction);
             let cap_depth = dir2 * bolt.thickness;
             // Lead cap: extends *past* the lead in the forward direction
             // so it reads as a rounded tip at the leading edge.
-            if let Some(mesh) = ceg_ctx.meshes.get_mut(&caps.lead_mesh) {
-                let bl = lead_pos - offset + cap_depth;
-                let br = lead_pos - offset;
-                let tr = lead_pos + offset;
-                let tl = lead_pos + offset + cap_depth;
-                rewrite_quad_positions(mesh, bl, br, tr, tl);
-            }
+            draw.batches.push_flat_quad(
+                cap_material,
+                [
+                    lead_pos - offset + cap_depth,
+                    lead_pos - offset,
+                    lead_pos + offset,
+                    lead_pos + offset + cap_depth,
+                ],
+                [1.0; 4],
+            );
             // Tail cap: extends *past* the tail in the backward direction
             // for the trailing tip.
-            if let Some(mesh) = ceg_ctx.meshes.get_mut(&caps.tail_mesh) {
-                let bl = tail_pos - offset;
-                let br = tail_pos - offset - cap_depth;
-                let tr = tail_pos + offset - cap_depth;
-                let tl = tail_pos + offset;
-                rewrite_quad_positions(mesh, bl, br, tr, tl);
-            }
+            draw.batches.push_flat_quad(
+                cap_material,
+                [
+                    tail_pos - offset,
+                    tail_pos - offset - cap_depth,
+                    tail_pos + offset - cap_depth,
+                    tail_pos + offset,
+                ],
+                [1.0; 4],
+            );
         }
     }
 
@@ -521,7 +524,7 @@ pub(super) fn tick_weapon_fx(
         // One smoke-trail segment per sim frame.
         if let Some(trail) = &mut proj.trail {
             push_trail_sample(trail, pos, proj.velocity, false);
-            rewrite_trail_mesh(&mut ceg_ctx.meshes, trail, cam_pos);
+            push_trail_quads(&mut draw.batches, trail, cam_pos);
         }
 
         // `cegTag`: `explGenHandler.GenExplosion(cegID, pos, dir, …)`
@@ -751,12 +754,12 @@ fn trigger_delayed_hit(
 }
 
 /// Despawn the projectile. Its smoke trail (if any) outlives it: the
-/// trail state moves onto the ribbon entity as a [`FadingTrail`] and
+/// trail state moves onto its own entity as a [`FadingTrail`] and
 /// fades out over `smokeTime` like upstream's free-standing
 /// `CSmokeTrailProjectile` segments.
 fn despawn_projectile(entity: Entity, proj: &mut ProjectileVisual, commands: &mut Commands) {
     if let Some(trail) = proj.trail.take() {
-        commands.entity(trail.ribbon_entity).insert(FadingTrail(trail));
+        commands.spawn(FadingTrail(trail));
     }
     commands.entity(entity).despawn();
 }
@@ -800,49 +803,33 @@ fn age_trail(trail: &mut ProjectileTrail) {
 /// Fade out orphaned trails and despawn them once every segment expired.
 pub(super) fn tick_fading_trails(
     mut trails: Query<(Entity, &mut FadingTrail)>,
-    camera_q: Query<&GlobalTransform, With<RtsCamera>>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut draw: RibbonDrawCtx,
     mut commands: Commands,
 ) {
     if trails.is_empty() {
         return;
     }
-    let cam_pos = camera_q
-        .single()
-        .map(|gt| gt.translation())
-        .unwrap_or(Vec3::Y * 1000.0);
+    let cam_pos = draw.cam_pos();
     for (entity, mut fading) in &mut trails {
         age_trail(&mut fading.0);
         if fading.0.samples.len() < 2 {
             commands.entity(entity).despawn();
             continue;
         }
-        rewrite_trail_mesh(&mut meshes, &fading.0, cam_pos);
+        push_trail_quads(&mut draw.batches, &fading.0, cam_pos);
     }
 }
 
-/// Upstream `CSmokeTrailProjectile::Draw`, one strip vertex pair per
-/// sample: offset `±(camDir × dir)·(1 + t·smokeSize)` with
-/// `t = age / smokeTime`, faded by `(1 − t)·(0.7 + |camDir·dir|)` and
-/// tinted `smokeColor`. Vertex colours are premultiplied (rgb and alpha
-/// both carry the fade). Unused tail slots collapse onto the oldest
-/// sample.
-fn rewrite_trail_mesh(meshes: &mut Assets<Mesh>, trail: &ProjectileTrail, cam_pos: Vec3) {
-    let Some((positions, colors)) = meshes
-        .get_mut(&trail.mesh)
-        .and_then(|mesh| positions_and_colors(mesh))
-    else {
-        return;
-    };
-    // One vertex pair per sample; unused pairs collapse onto the first
-    // vertex, transparent.
-    let mut pos_pairs = positions.chunks_exact_mut(2);
-    let mut color_pairs = colors.chunks_exact_mut(2);
-    let mut pad = [0.0; 3];
+/// Upstream `CSmokeTrailProjectile::Draw`, one vertex pair per sample:
+/// offset `±(camDir × dir)·(1 + t·smokeSize)` with `t = age /
+/// smokeTime`, faded by `(1 − t)·(0.7 + |camDir·dir|)` and tinted
+/// `smokeColor`. Vertex colours are premultiplied (rgb and alpha both
+/// carry the fade). Consecutive pairs form one batched quad each; U
+/// alternates per sample since every upstream segment spans the whole
+/// texture.
+fn push_trail_quads(batches: &mut FxQuadBatches, trail: &ProjectileTrail, cam_pos: Vec3) {
+    let mut prev: Option<(Vec3, Vec3, [f32; 4], f32)> = None;
     for (i, s) in trail.samples.iter().enumerate() {
-        let (Some(pos_pair), Some(color_pair)) = (pos_pairs.next(), color_pairs.next()) else {
-            break;
-        };
         let t = (s.age / SMOKE_TIME_FRAMES).clamp(0.0, 1.0);
         let dif = (s.pos - cam_pos).normalize_or(Vec3::NEG_Y);
         let odir = dif.cross(s.dir).normalize_or(Vec3::X);
@@ -853,79 +840,19 @@ fn rewrite_trail_mesh(meshes: &mut Assets<Mesh>, trail: &ProjectileTrail, cam_po
             ((1.0 - t) * (0.7 + dif.dot(s.dir).abs())).clamp(0.0, 1.0)
         };
         let c = SMOKE_COLOR * fade;
-        pos_pair[0] = (s.pos - odir * size).to_array();
-        pos_pair[1] = (s.pos + odir * size).to_array();
-        color_pair.fill([c, c, c, fade]);
-        if i == 0 {
-            pad = pos_pair[0];
+        let lo = s.pos - odir * size;
+        let hi = s.pos + odir * size;
+        let color = [c, c, c, fade];
+        let u = (i % 2) as f32;
+        if let Some((prev_lo, prev_hi, prev_color, prev_u)) = prev {
+            batches.push_quad(
+                &trail.material,
+                [prev_lo, lo, hi, prev_hi],
+                [[prev_u, 0.0], [u, 0.0], [u, 1.0], [prev_u, 1.0]],
+                [prev_color, color, color, prev_color],
+            );
         }
-    }
-    pos_pairs.for_each(|pair| pair.fill(pad));
-    color_pairs.for_each(|pair| pair.fill([0.0; 4]));
-}
-
-/// A ribbon mesh's position and colour buffers, borrowed together so a
-/// per-tick rewrite fills both in place without allocating.
-fn positions_and_colors(mesh: &mut Mesh) -> Option<(&mut Vec<[f32; 3]>, &mut Vec<[f32; 4]>)> {
-    let (mut positions, mut colors) = (None, None);
-    for (attribute, values) in mesh.attributes_mut() {
-        match values {
-            VertexAttributeValues::Float32x3(p) if attribute.id == Mesh::ATTRIBUTE_POSITION.id => {
-                positions = Some(p);
-            }
-            VertexAttributeValues::Float32x4(c) if attribute.id == Mesh::ATTRIBUTE_COLOR.id => {
-                colors = Some(c);
-            }
-            _ => {}
-        }
-    }
-    Some((positions?, colors?))
-}
-
-/// Rewrite a 4-vertex quad's positions in place (shared by beam + bolt
-/// paths). Uses `Mesh::attribute_mut` to mutate the existing
-/// `Float32x3` buffer instead of allocating a fresh `Vec` every frame.
-/// The vertex order matches [`super::shared::build_billboard_quad_mesh`].
-fn rewrite_quad_positions(mesh: &mut Mesh, bl: Vec3, br: Vec3, tr: Vec3, tl: Vec3) {
-    if let Some(VertexAttributeValues::Float32x3(positions)) =
-        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-        && positions.len() >= 4
-    {
-        positions[0] = bl.to_array();
-        positions[1] = br.to_array();
-        positions[2] = tr.to_array();
-        positions[3] = tl.to_array();
-    }
-}
-
-/// Slide the bolt's U window: lead corners at `u_lead`, tail at
-/// `u_tail` (vertex order is bl, br, tr, tl — lead pair then tail
-/// pair). Mirrors `LaserProjectile.cpp`'s per-frame
-/// `texStartOffset`/`texEndOffset` behaviour.
-fn rewrite_quad_uvs(mesh: &mut Mesh, u_lead: f32, u_tail: f32) {
-    if let Some(VertexAttributeValues::Float32x2(uvs)) = mesh.attribute_mut(Mesh::ATTRIBUTE_UV_0)
-        && uvs.len() >= 4
-    {
-        uvs[0] = [u_lead, 0.0];
-        uvs[1] = [u_tail, 0.0];
-        uvs[2] = [u_tail, 1.0];
-        uvs[3] = [u_lead, 1.0];
-    }
-}
-
-/// Set all 4 quad vertex colors to `rgba`. Used by the beam path to
-/// apply per-frame `beamdecay` intensity without per-beam material
-/// clones: the cached material's `base_color` carries the weapon's
-/// authored RGB, vertex color carries the time-varying multiplier,
-/// and Bevy's StandardMaterial multiplies them on the GPU.
-fn rewrite_quad_color(mesh: &mut Mesh, rgba: [f32; 4]) {
-    if let Some(VertexAttributeValues::Float32x4(colors)) =
-        mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR)
-        && colors.len() >= 4
-    {
-        for slot in colors.iter_mut().take(4) {
-            *slot = rgba;
-        }
+        prev = Some((lo, hi, color, u));
     }
 }
 
@@ -953,6 +880,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -961,10 +889,6 @@ mod tests {
 
         // Bolt geometry: 100 elmos at 100 elmos/s → impact at t=1.0.
         // max_length=50 so tail takes another 0.5 s to clear.
-        let mesh_handle = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(super::super::shared::build_billboard_quad_mesh());
         let bolt_entity = app
             .world_mut()
             .spawn((
@@ -976,8 +900,8 @@ mod tests {
                     max_length: 50.0,
                     thickness: 1.0,
                     elapsed: 0.0,
-                    mesh: mesh_handle,
-                    caps: None,
+                    material: Handle::default(),
+                    cap_material: None,
                 },
                 Transform::IDENTITY,
                 DelayedHit {
@@ -1040,13 +964,10 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
-        let mesh_handle = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(super::super::shared::build_billboard_quad_mesh());
         app.world_mut().spawn((
             LaserBolt {
                 origin: Vec3::ZERO,
@@ -1056,8 +977,8 @@ mod tests {
                 max_length: 20.0,
                 thickness: 1.0,
                 elapsed: 0.0,
-                mesh: mesh_handle,
-                caps: None,
+                material: Handle::default(),
+                cap_material: None,
             },
             Transform::IDENTITY,
         ));
@@ -1094,6 +1015,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1108,10 +1030,6 @@ mod tests {
             ))
             .id();
 
-        let mesh_handle = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(super::super::shared::build_billboard_quad_mesh());
 
         app.world_mut().spawn((
             LaserBolt {
@@ -1122,8 +1040,8 @@ mod tests {
                 max_length: 50.0,
                 thickness: 1.0,
                 elapsed: 0.0,
-                mesh: mesh_handle,
-                caps: None,
+                material: Handle::default(),
+                cap_material: None,
             },
             Transform::IDENTITY,
             DelayedHit {
@@ -1177,6 +1095,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1244,10 +1163,6 @@ mod tests {
             });
         }
 
-        let mesh_handle = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(super::super::shared::build_billboard_quad_mesh());
 
         app.world_mut().spawn((
             LaserBolt {
@@ -1258,8 +1173,8 @@ mod tests {
                 max_length: 50.0,
                 thickness: 1.0,
                 elapsed: 0.0,
-                mesh: mesh_handle,
-                caps: None,
+                material: Handle::default(),
+                cap_material: None,
             },
             Transform::IDENTITY,
             DelayedHit {
@@ -1310,6 +1225,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1326,10 +1242,6 @@ mod tests {
             ))
             .id();
 
-        let mesh_handle = app
-            .world_mut()
-            .resource_mut::<Assets<Mesh>>()
-            .add(super::super::shared::build_billboard_quad_mesh());
 
         app.world_mut().spawn((
             LaserBolt {
@@ -1340,8 +1252,8 @@ mod tests {
                 max_length: 50.0,
                 thickness: 1.0,
                 elapsed: 0.0,
-                mesh: mesh_handle,
-                caps: None,
+                material: Handle::default(),
+                cap_material: None,
             },
             Transform::IDENTITY,
             DelayedHit {
@@ -1393,6 +1305,7 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
         app

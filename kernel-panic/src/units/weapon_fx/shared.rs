@@ -126,54 +126,14 @@ pub(super) struct LightningArc {
     pub width: f32,
     pub lifetime: f32,
     pub max_lifetime: f32,
-    pub mesh: Handle<Mesh>,
+    /// The shared white additive material the arc's quads are batched
+    /// under ([`super::batch::FxQuadBatches`]); one quad per segment,
+    /// re-oriented to the camera every tick.
+    pub material: Handle<StandardMaterial>,
     /// Per-shot tint (electric green with randomized red/blue), applied
     /// through vertex colors so the shared white material in
     /// [`BeamMaterialCache`] is never cloned per arc.
     pub tint: LinearRgba,
-}
-
-/// Build an empty triangle-list mesh for a [`LightningArc`] of
-/// `segments` quads — 4 vertices per segment, both winding orders so
-/// the ribbon reads from either side. `tick_weapon_fx` rewrites the
-/// positions every frame to face the camera (same pattern as
-/// [`BeamVisual`] / [`LaserBolt`]); colors carry the per-arc tint ×
-/// lifetime fade.
-pub(super) fn build_arc_mesh(segments: usize) -> Mesh {
-    use bevy::asset::RenderAssetUsages;
-    use bevy::mesh::{Indices, PrimitiveTopology};
-
-    let verts = segments * 4;
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; verts]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0_f32]; verts]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; verts]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0_f32; 4]; verts]);
-    let mut indices = Vec::with_capacity(segments * 12);
-    for s in 0..segments as u32 {
-        let b = s * 4;
-        // bl, br, tr, tl — both orientations, matching
-        // `build_billboard_quad_mesh`.
-        indices.extend_from_slice(&[
-            b,
-            b + 1,
-            b + 2,
-            b,
-            b + 2,
-            b + 3,
-            b,
-            b + 2,
-            b + 1,
-            b,
-            b + 3,
-            b + 2,
-        ]);
-    }
-    mesh.insert_indices(Indices::U32(indices));
-    mesh
 }
 
 /// A hitscan beam (Spring `BeamLaser`) drawn as a camera-facing
@@ -181,10 +141,10 @@ pub(super) fn build_arc_mesh(segments: usize) -> Mesh {
 ///
 /// Mirrors `rts/Sim/Projectiles/WeaponProjectiles/BeamLaserProjectile.cpp::Draw`:
 /// width axis `xdir = (cameraDir × beam_dir).normalize()`, quad corners
-/// `(start ± xdir * thickness, end ± xdir * thickness)`. Each entity
-/// carries its own 4-vertex mesh the tick system rewrites per frame —
-/// identical pattern to [`LaserBolt`], different only in that `start`
-/// and `end` don't move.
+/// `(start ± xdir * thickness, end ± xdir * thickness)`. The tick
+/// system pushes that quad into the batch for `material` every frame
+/// — identical pattern to [`LaserBolt`], different only in that
+/// `start` and `end` don't move.
 #[derive(Component)]
 pub(super) struct BeamVisual {
     pub start: Vec3,
@@ -192,7 +152,9 @@ pub(super) struct BeamVisual {
     pub thickness: f32,
     pub lifetime: f32,
     pub max_lifetime: f32,
-    pub mesh: Handle<Mesh>,
+    /// Cached beam material ([`BeamMaterialCache`]) the quad is
+    /// batched under.
+    pub material: Handle<StandardMaterial>,
     /// Per-sim-frame RGB multiplier from the weapon's `beamdecay`. Each
     /// tick the beam's vertex colors are scaled by this value raised to
     /// the elapsed-frames power, mirroring upstream
@@ -215,18 +177,16 @@ pub(super) struct BeamVisual {
 /// D = lead  + dir1 * thickness
 /// ```
 ///
-/// We reproduce that exactly: each [`LaserBolt`] entity carries its
-/// own 4-vertex mesh, and `tick_weapon_fx` rewrites `ATTRIBUTE_POSITION`
-/// every frame from the current camera. Transforms stay `IDENTITY` —
-/// the mesh lives in world space. Fixed crossed-quad meshes (the
-/// earlier approach) can't match this: they read the wrong width
-/// from any non-axial angle and disappear entirely when the camera
-/// looks along the beam axis.
+/// We reproduce that exactly: `tick_weapon_fx` computes those corners
+/// from the current camera every frame and pushes the quad into the
+/// batch for `material` — in world space, no transform. Fixed
+/// crossed-quad meshes (the earlier approach) can't match this: they
+/// read the wrong width from any non-axial angle and disappear
+/// entirely when the camera looks along the beam axis.
 ///
 /// The full upstream bolt also includes `texture2` end-caps (two
-/// extra half-quads bent around each end via `dir2`). Bit's `Line`
-/// sets `texture2=none` and Byte's `MegaBeam` uses a round-cap, so
-/// skipping the caps is only wrong for the byte — see §7 TODO.
+/// extra half-quads bent around each end via `dir2`); see
+/// `cap_material`.
 #[derive(Component)]
 pub(super) struct LaserBolt {
     pub origin: Vec3,
@@ -246,27 +206,17 @@ pub(super) struct LaserBolt {
     pub thickness: f32,
     /// Seconds since spawn; drives the lead/tail positions.
     pub elapsed: f32,
-    /// Per-entity mesh the tick system rewrites each frame.
-    pub mesh: Handle<Mesh>,
-    /// Optional `texture2` end-caps that mirror upstream
-    /// `LaserProjectile::Draw`'s endcap pass. When `Some`, the tick
-    /// system rewrites the lead and tail cap quads each frame from the
-    /// same camera math, and despawns the cap entities alongside the
-    /// bolt. Only `Byte`'s `MegaBeam` (`texture2=bytelaser`) sets this
-    /// in the KP roster.
-    pub caps: Option<BoltCaps>,
-}
-
-/// Companion entities + meshes for a [`LaserBolt`]'s `texture2`
-/// endcaps. Each cap is a 4-vertex quad anchored at the lead / tail
-/// of the bolt, extending one `thickness` outward along the
-/// camera-aligned forward axis (`dir2` in upstream
-/// `LaserProjectile::Draw`).
-pub(super) struct BoltCaps {
-    pub lead_entity: Entity,
-    pub tail_entity: Entity,
-    pub lead_mesh: Handle<Mesh>,
-    pub tail_mesh: Handle<Mesh>,
+    /// Cached beam material ([`BeamMaterialCache`]) the body quad is
+    /// batched under.
+    pub material: Handle<StandardMaterial>,
+    /// Material of the optional `texture2` end-caps that mirror
+    /// upstream `LaserProjectile::Draw`'s endcap pass. When `Some`,
+    /// the tick system pushes a lead and a tail cap quad each frame —
+    /// each anchored at the bolt's tip, extending one `thickness`
+    /// outward along the camera-aligned forward axis (`dir2`). Only
+    /// `Byte`'s `MegaBeam` (`texture2=bytelaser`) sets this in the KP
+    /// roster.
+    pub cap_material: Option<Handle<StandardMaterial>>,
 }
 
 /// A projectile traveling from origin to target.
@@ -372,14 +322,15 @@ pub(super) struct TrailSample {
 }
 
 /// State for a projectile's smoke-trail ribbon. Lives on the projectile
-/// while it flies; on impact it moves onto the ribbon entity as a
+/// while it flies; on impact it moves onto its own entity as a
 /// [`FadingTrail`] so the smoke lingers its full `smokeTime` like
 /// upstream's independent trail segments.
 pub(super) struct ProjectileTrail {
-    /// Entity carrying the ribbon's `Mesh3d` / material.
-    pub ribbon_entity: Entity,
-    /// Mesh the tick system rewrites each frame.
-    pub mesh: Handle<Mesh>,
+    /// Premultiplied `texture2` material
+    /// ([`BeamMaterialCache::get_or_create_trail`]) the ribbon's quads
+    /// — one per pair of consecutive samples — are batched under each
+    /// tick.
+    pub material: Handle<StandardMaterial>,
     /// Samples, oldest first.
     pub samples: std::collections::VecDeque<TrailSample>,
 }
@@ -452,8 +403,8 @@ pub(super) struct GroundFlashAssets {
 }
 
 /// Unit-length primitives shared across projectile / impact visuals.
-/// Beams and bolts each own their own per-entity 4-vertex mesh (see
-/// [`build_billboard_quad_mesh`]); only the sphere is still shared.
+/// Beams, bolts and the other ribbons draw through the per-material
+/// quad batches (`super::batch`); only the sphere is a shared asset.
 #[derive(Resource, Default)]
 pub(super) struct WeaponFxMeshes {
     pub unit_sphere: Option<Handle<Mesh>>,
@@ -465,49 +416,6 @@ impl WeaponFxMeshes {
             .get_or_insert_with(|| meshes.add(Sphere::new(1.0)))
             .clone()
     }
-}
-
-/// Build an empty 4-vertex triangle-list mesh ready for per-frame
-/// vertex rewrites (see `LaserBolt` / `BeamVisual` tick paths). The
-/// caller fills `ATTRIBUTE_POSITION` each frame with the camera-facing
-/// corners; UVs are set once at spawn time and never change.
-///
-/// Vertex order is `[bl, br, tr, tl]` — that is:
-///
-/// ```text
-/// tl(3) --- tr(2)       (UV 0,1)    (UV 1,1)
-///   |    \    |           .         .
-///   |     \   |           .         .
-/// bl(0) --- br(1)       (UV 0,0)    (UV 1,0)
-/// ```
-///
-/// Texture U runs from bl→br (along the ribbon's long axis) and V runs
-/// from bl→tl (the ribbon's thickness). With that layout, a single
-/// span of `arrow.tga` (four chevrons baked in) stretches once across
-/// the bolt's length — matching upstream's `CLaserProjectile::Draw`
-/// where `tex1->xstart..xend` is assigned to `tail..lead`.
-pub(super) fn build_billboard_quad_mesh() -> Mesh {
-    use bevy::asset::RenderAssetUsages;
-    use bevy::mesh::{Indices, PrimitiveTopology};
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; 4]);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0_f32]; 4]);
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_UV_0,
-        vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-    );
-    // Vertex colors multiply with the cached material's base color.
-    // `tick_weapon_fx` rewrites these per frame to apply the weapon's
-    // `beamdecay` fade without per-beam material clones; bolts that
-    // never decay leave them at white and the multiply is a no-op.
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0_f32; 4]; 4]);
-    // Two tris, both orientations so the quad is visible from either side.
-    mesh.insert_indices(Indices::U32(vec![0, 1, 2, 0, 2, 3, 0, 2, 1, 0, 3, 2]));
-    mesh
 }
 
 /// Shared material cache to avoid per-frame allocations.
@@ -522,12 +430,16 @@ struct MaterialKey {
     g: u8,
     b: u8,
     additive: bool,
+    /// Smoke trails: premultiplied blend, white — see
+    /// [`BeamMaterialCache::get_or_create_trail`].
+    premultiplied: bool,
     intensity: u8,
-    /// Texture filename or empty for untextured. Keeps per-weapon
-    /// atlas pickings (arrow / dosray / bytemegabeam) on their own
-    /// cache slot so a textured DOS beam doesn't clobber the flat
-    /// Bit line's material.
-    texture: String,
+    /// Texture image, `None` for untextured. Keeps per-weapon atlas
+    /// pickings (arrow / dosray / bytemegabeam) on their own cache
+    /// slot so a textured DOS beam doesn't clobber the flat Bit line's
+    /// material. Keyed by asset id rather than name so the per-shot
+    /// lookup never allocates.
+    texture: Option<AssetId<Image>>,
     /// UV-tile count along the beam length, quantized to integer. Zero
     /// means no tiling (untextured or 1× mapping). Different tile counts
     /// get separate materials so `spawn_beam_laser` can pick a material
@@ -558,22 +470,19 @@ impl BeamMaterialCache {
         color: LinearRgba,
         additive: bool,
         intensity: f32,
-        texture: Option<(&str, Handle<Image>)>,
+        texture: Option<Handle<Image>>,
         tile_count: u32,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
         let emissive_scale = (intensity.max(0.5) * 4.0).clamp(1.0, 40.0);
-        let (tex_name, texture_handle) = match texture {
-            Some((name, handle)) => (name.to_string(), Some(handle)),
-            None => (String::new(), None),
-        };
         let key = MaterialKey {
             r: (color.red.clamp(0.0, 1.0) * 15.0).round() as u8,
             g: (color.green.clamp(0.0, 1.0) * 15.0).round() as u8,
             b: (color.blue.clamp(0.0, 1.0) * 15.0).round() as u8,
             additive,
+            premultiplied: false,
             intensity: (emissive_scale * 2.0).round() as u8,
-            texture: tex_name,
+            texture: texture.as_ref().map(Handle::id),
             tile_count,
         };
         self.entries
@@ -596,11 +505,50 @@ impl BeamMaterialCache {
                 };
                 materials.add(StandardMaterial {
                     base_color: Color::LinearRgba(color),
-                    base_color_texture: texture_handle,
+                    base_color_texture: texture,
                     emissive: color * emissive_scale,
                     unlit: true,
                     alpha_mode,
                     uv_transform,
+                    ..default()
+                })
+            })
+            .clone()
+    }
+
+    /// Smoke-trail material for a weapon's `texture2`: white ×
+    /// texture, premultiplied — upstream's effects pass draws trails
+    /// with `GL_ONE, GL_ONE_MINUS_SRC_ALPHA`, colour and alpha both
+    /// scaled by the per-vertex fade. One per texture, so every trail
+    /// of a weapon (and every weapon sharing the texture) batches into
+    /// one mesh instead of minting a material per projectile.
+    pub(super) fn get_or_create_trail(
+        &mut self,
+        texture: Option<Handle<Image>>,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let key = MaterialKey {
+            r: 15,
+            g: 15,
+            b: 15,
+            additive: false,
+            premultiplied: true,
+            intensity: 0,
+            texture: texture.as_ref().map(Handle::id),
+            tile_count: 0,
+        };
+        self.entries
+            .entry(key)
+            .or_insert_with(|| {
+                // Default (back-face) culling: the batch emits both
+                // windings per quad, so the ribbon reads from either
+                // side while each face is drawn once — the same
+                // coverage as the old unculled triangle strip.
+                materials.add(StandardMaterial {
+                    base_color: Color::WHITE,
+                    base_color_texture: texture,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Premultiplied,
                     ..default()
                 })
             })

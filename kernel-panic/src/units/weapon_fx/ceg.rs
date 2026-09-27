@@ -28,6 +28,7 @@ use spring_tdf::{
     ParticleProperties, SpawnerProperties,
 };
 
+use super::batch::FxQuadBatches;
 use crate::rng;
 use crate::sim::GAME_SPEED;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
@@ -287,7 +288,8 @@ pub(super) struct CegFlame {
 /// camera-facing `laserend` streak from `pos − dir·length` to
 /// `pos + dir·length`, `width` wide, whose length grows by
 /// `length_growth` and alpha drops by `alpha_decay` every frame; gone
-/// at alpha 0. Drawn additively with colour `alpha · color`.
+/// at alpha 0. Drawn additively with colour `alpha · color`, as one
+/// quad per tick in the batch for the shared spike material.
 #[derive(Component)]
 pub(super) struct CegSpike {
     pub pos: Vec3,
@@ -299,7 +301,7 @@ pub(super) struct CegSpike {
     pub alpha: f32,
     pub alpha_decay: f32,
     pub color: Vec3,
-    pub mesh: Handle<Mesh>,
+    pub material: Handle<StandardMaterial>,
 }
 
 /// A scheduled recursive CEG spawn (CExpGenSpawner).
@@ -377,7 +379,6 @@ pub(super) fn spawn_ceg(
                 pos,
                 rng,
                 commands,
-                meshes,
                 materials,
                 images,
                 model_cache,
@@ -590,7 +591,6 @@ fn spawn_spikes(
     origin: Vec3,
     rng: &mut u32,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
@@ -644,32 +644,26 @@ fn spawn_spikes(
         } else {
             raw_dir
         };
-        let mesh = meshes.add(super::shared::build_billboard_quad_mesh());
-        commands.spawn((
-            CegSpike {
-                pos: origin + offset,
-                dir,
-                length: roll(&props.length, rng),
-                length_growth,
-                width: roll(&props.width, rng),
-                alpha: roll(&props.alpha, rng),
-                alpha_decay: roll(&props.alpha_decay, rng).max(1e-3),
-                color,
-                mesh: mesh.clone(),
-            },
-            Mesh3d(mesh),
-            MeshMaterial3d(material.clone()),
-            Transform::IDENTITY,
-        ));
+        commands.spawn(CegSpike {
+            pos: origin + offset,
+            dir,
+            length: roll(&props.length, rng),
+            length_growth,
+            width: roll(&props.width, rng),
+            alpha: roll(&props.alpha, rng),
+            alpha_decay: roll(&props.alpha_decay, rng).max(1e-3),
+            color,
+            material: material.clone(),
+        });
     }
 }
 
-/// Grow / fade [`CegSpike`]s one sim frame per tick and rewrite their
+/// Grow / fade [`CegSpike`]s one sim frame per tick and push their
 /// camera-facing quads (`CExploSpikeProjectile::Update` + `Draw`).
 pub(super) fn tick_ceg_spikes(
     time: Res<Time>,
     mut spikes: Query<(Entity, &mut CegSpike)>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    mut batches: ResMut<FxQuadBatches>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
 ) {
@@ -691,24 +685,17 @@ pub(super) fn tick_ceg_spikes(
         let dif = (spike.pos - cam_pos).normalize_or(Vec3::NEG_Y);
         let w = dif.cross(spike.dir).normalize_or(Vec3::X) * spike.width;
         let l = spike.dir * spike.length;
-        let Some(mesh) = meshes.get_mut(&spike.mesh) else {
-            continue;
-        };
-        use bevy::mesh::VertexAttributeValues;
-        if let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-            && p.len() >= 4
-        {
-            p[0] = (spike.pos - l - w).to_array();
-            p[1] = (spike.pos + l - w).to_array();
-            p[2] = (spike.pos + l + w).to_array();
-            p[3] = (spike.pos - l + w).to_array();
-        }
         let c = spike.color * spike.alpha;
-        if let Some(VertexAttributeValues::Float32x4(col)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
-            for slot in col.iter_mut().take(4) {
-                *slot = [c.x, c.y, c.z, 1.0];
-            }
-        }
+        batches.push_flat_quad(
+            &spike.material,
+            [
+                spike.pos - l - w,
+                spike.pos + l - w,
+                spike.pos + l + w,
+                spike.pos - l + w,
+            ],
+            [c.x, c.y, c.z, 1.0],
+        );
     }
 }
 

@@ -4,6 +4,7 @@
 //! `spawn_weapon_visuals` drains the buffer and spawns the right visual;
 //! `tick_weapon_fx` fades/moves/despawns them each frame.
 
+mod batch;
 mod ceg;
 mod flight;
 mod shared;
@@ -15,6 +16,7 @@ pub use shared::{AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, Pe
 use bevy::prelude::*;
 
 use crate::rendering::interpolation::SimPose;
+use batch::FxQuadBatches;
 use ceg::{CegRegistry, CegRenderAssets};
 use shared::{
     BeamMaterialCache, BuildSparkleAssets, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes,
@@ -39,12 +41,14 @@ impl Plugin for WeaponFxPlugin {
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
             .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>()
             .insert_resource(CegRegistry::load())
             // Projectiles and particles move in the fixed sim; draw
-            // them interpolated (`rendering::interpolation`). Beams
-            // never move their Transform (the tick rewrites vertices).
+            // them interpolated (`rendering::interpolation`). Beams,
+            // bolts, arcs, spikes and trails have no Transform at all:
+            // they are quads in the world-space batch meshes
+            // (`batch`), rewritten every tick.
             .register_required_components::<shared::ProjectileVisual, SimPose>()
-            .register_required_components::<shared::LaserBolt, SimPose>()
             .register_required_components::<shared::BuildSparkle, SimPose>()
             .register_required_components::<shared::ImpactBurst, SimPose>()
             .register_required_components::<shared::GroundFlash, SimPose>()
@@ -64,6 +68,8 @@ impl Plugin for WeaponFxPlugin {
                     ceg::tick_ceg_flames,
                     ceg::tick_ceg_spikes,
                     ceg::tick_ceg_delayed_spawns,
+                    // Last: every ribbon has pushed its quads by now.
+                    batch::flush_fx_quad_batches,
                 )
                     .chain()
                     // Why the explicit anchors: this chain lives in

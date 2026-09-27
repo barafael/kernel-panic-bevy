@@ -11,8 +11,7 @@ use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
     Flight, GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt,
     LightningArc, PendingAttacks, PendingExplosions, ProjectileTrail, ProjectileVisual,
-    TRAIL_SAMPLE_COUNT, WeaponFxMeshes, build_arc_mesh, build_billboard_quad_mesh, tdf_color,
-    weapon_core_color, weapon_edge_color,
+    TRAIL_SAMPLE_COUNT, WeaponFxMeshes, tdf_color, weapon_core_color, weapon_edge_color,
 };
 use crate::rng::{next_f32, next_signed};
 use crate::sim::{GAME_SPEED, frames_to_secs};
@@ -89,7 +88,6 @@ pub(super) fn spawn_weapon_visuals(
                 &event,
                 &mut rng,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut cache,
                 ArcFlavor::BigArc,
@@ -103,7 +101,6 @@ pub(super) fn spawn_weapon_visuals(
                 &event,
                 &mut rng,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut cache,
                 ArcFlavor::BuildArc,
@@ -159,12 +156,10 @@ pub(super) fn spawn_weapon_visuals(
                 &event,
                 weapon,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
                 &mut cache,
-                &mut fx_meshes,
             ));
         } else if is_beam_laser {
             spawn_textured_beam(
@@ -172,12 +167,10 @@ pub(super) fn spawn_weapon_visuals(
                 weapon,
                 true,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
                 &mut cache,
-                &mut fx_meshes,
             );
         } else {
             // Untyped weapon (shouldn't happen for KP's roster). Fall
@@ -187,12 +180,10 @@ pub(super) fn spawn_weapon_visuals(
                 weapon,
                 false,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
                 &mut cache,
-                &mut fx_meshes,
             );
         }
 
@@ -545,21 +536,23 @@ fn spawn_build_sparkle(
 /// the alias itself. We consult [`CegRegistry::resolve_texture`] first
 /// (which mirrors the same alias table) and fall back to a literal
 /// `{name}.tga` lookup for weapon textures that don't happen to be
-/// aliased (e.g. `circle.tga` already lives on disk under that name).
-fn beam_texture<'a>(
-    tex1: &'a str,
+/// aliased. Only that fallback builds a filename; the aliased path
+/// (every KP core weapon) runs allocation-free, which matters because
+/// this is called for every shot.
+fn beam_texture(
+    tex1: &str,
     model_cache: &mut S3OModelCache,
     images: &mut Assets<Image>,
-) -> Option<(&'a str, Handle<Image>, f32)> {
+) -> Option<(Handle<Image>, f32)> {
     if tex1.is_empty() || tex1.eq_ignore_ascii_case("none") {
         return None;
     }
-    let resolved = CegRegistry::resolve_texture(tex1)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| format!("{tex1}.tga"));
-    let (handle, w, h) = load_beam_texture(&resolved, model_cache, images)?;
+    let (handle, w, h) = match CegRegistry::resolve_texture(tex1) {
+        Some(filename) => load_beam_texture(filename, model_cache, images)?,
+        None => load_beam_texture(&format!("{tex1}.tga"), model_cache, images)?,
+    };
     let aspect = if h > 0 { w as f32 / h as f32 } else { 1.0 };
-    Some((tex1, handle, aspect))
+    Some((handle, aspect))
 }
 
 /// Spawn a `BeamLaser` hit-scan ribbon from attacker to target.
@@ -579,12 +572,10 @@ fn spawn_textured_beam(
     weapon: &spring_tdf::WeaponDef,
     is_beam_laser: bool,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
-    fx_meshes: &mut WeaponFxMeshes,
 ) {
     let dir = event.target_pos - event.attacker_pos;
     let length = dir.length();
@@ -623,34 +614,27 @@ fn spawn_textured_beam(
         0
     };
 
-    // Outer (edge) pass: each beam entity owns a 4-vertex mesh that
-    // the tick system rewrites per frame with camera-facing corners.
+    // Outer (edge) pass. The beam entity is pure bookkeeping: the tick
+    // system pushes its camera-facing quad into the batch for
+    // `material` every frame (`super::batch`).
     let edge_color = weapon_edge_color(weapon);
     let outer_mat = cache.get_or_create_tiled(
         edge_color,
         true,
         weapon.intensity,
-        texture
-            .as_ref()
-            .map(|(name, handle, _)| (*name, handle.clone())),
+        texture.as_ref().map(|(handle, _)| handle.clone()),
         tile_count,
         materials,
     );
-    let outer_mesh = meshes.add(build_billboard_quad_mesh());
-    commands.spawn((
-        BeamVisual {
-            start: event.attacker_pos,
-            end: event.target_pos,
-            thickness,
-            lifetime,
-            max_lifetime: lifetime,
-            mesh: outer_mesh.clone(),
-            decay: weapon.beam_decay,
-        },
-        Mesh3d(outer_mesh),
-        MeshMaterial3d(outer_mat),
-        Transform::IDENTITY,
-    ));
+    commands.spawn(BeamVisual {
+        start: event.attacker_pos,
+        end: event.target_pos,
+        thickness,
+        lifetime,
+        max_lifetime: lifetime,
+        material: outer_mat,
+        decay: weapon.beam_decay,
+    });
 
     // Core pass: `corethickness × rgbColor2 (white) × texture`. Always
     // drawn when authored > 0. For `corethickness=1` the core fully
@@ -665,30 +649,20 @@ fn spawn_textured_beam(
             core_color,
             true,
             weapon.intensity.max(1.0),
-            texture.map(|(name, handle, _)| (name, handle)),
+            texture.map(|(handle, _)| handle),
             tile_count,
             materials,
         );
-        let core_mesh = meshes.add(build_billboard_quad_mesh());
-        commands.spawn((
-            BeamVisual {
-                start: event.attacker_pos,
-                end: event.target_pos,
-                thickness: core_thickness,
-                lifetime,
-                max_lifetime: lifetime,
-                mesh: core_mesh.clone(),
-                decay: weapon.beam_decay,
-            },
-            Mesh3d(core_mesh),
-            MeshMaterial3d(core_mat),
-            Transform::IDENTITY,
-        ));
+        commands.spawn(BeamVisual {
+            start: event.attacker_pos,
+            end: event.target_pos,
+            thickness: core_thickness,
+            lifetime,
+            max_lifetime: lifetime,
+            material: core_mat,
+            decay: weapon.beam_decay,
+        });
     }
-    // `fx_meshes` is still shared with other spawners; this path no
-    // longer pulls the old `beam_quad` handle.
-    let _ = fx_meshes;
-    let _ = length;
 }
 
 /// Spawn a traveling laser bolt for `LaserCannon` weapons (Bit `Line`,
@@ -706,17 +680,14 @@ fn spawn_textured_beam(
 /// Same two-pass draw as `spawn_textured_beam`: outer edge with
 /// `rgbColor × texture`, core with white × texture (covered fully
 /// when `corethickness=1`).
-#[allow(clippy::too_many_arguments)]
 fn spawn_laser_bolt(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
-    fx_meshes: &mut WeaponFxMeshes,
 ) -> Entity {
     let delta = event.target_pos - event.attacker_pos;
     let distance = delta.length().max(0.1);
@@ -739,17 +710,15 @@ fn spawn_laser_bolt(
     let has_texture = texture.is_some();
     let tile_count: u32 = if has_texture { 1 } else { 0 };
 
-    // Each bolt instance owns its own 4-vertex mesh; the tick system
-    // rewrites the corners each frame using the current camera. No
-    // transform scaling, no rotation — positions go in world space.
+    // The bolt entity is pure bookkeeping: the tick system computes
+    // the camera-facing corners each frame and pushes them into the
+    // batch for `material` — world-space positions, no transform.
     let edge_color = weapon_edge_color(weapon);
     let outer_mat = cache.get_or_create_tiled(
         edge_color,
         true,
         weapon.intensity,
-        texture
-            .as_ref()
-            .map(|(name, handle, _)| (*name, handle.clone())),
+        texture.as_ref().map(|(handle, _)| handle.clone()),
         tile_count,
         materials,
     );
@@ -759,34 +728,19 @@ fn spawn_laser_bolt(
     // the KP roster that authors this (`texture2=bytelaser`); everyone
     // else either omits texture2 or sets it to `none`. Skipped when the
     // lookup fails so a typo in the TDF doesn't crash the game.
-    let caps = build_bolt_caps(
-        weapon,
-        edge_color,
-        commands,
-        meshes,
-        materials,
-        images,
-        model_cache,
-        cache,
-    );
-    let outer_mesh = meshes.add(build_billboard_quad_mesh());
+    let cap_material = bolt_cap_material(weapon, edge_color, materials, images, model_cache, cache);
     let outer_entity = commands
-        .spawn((
-            LaserBolt {
-                origin: event.attacker_pos,
-                direction,
-                total_distance: distance,
-                speed,
-                max_length,
-                thickness,
-                elapsed: 0.0,
-                mesh: outer_mesh.clone(),
-                caps,
-            },
-            Mesh3d(outer_mesh),
-            MeshMaterial3d(outer_mat),
-            Transform::IDENTITY,
-        ))
+        .spawn(LaserBolt {
+            origin: event.attacker_pos,
+            direction,
+            total_distance: distance,
+            speed,
+            max_length,
+            thickness,
+            elapsed: 0.0,
+            material: outer_mat,
+            cap_material,
+        })
         .id();
 
     // Core pass: `corethickness × white × texture`. For Bit's
@@ -802,33 +756,24 @@ fn spawn_laser_bolt(
             core_color,
             true,
             weapon.intensity.max(1.0),
-            texture.map(|(name, handle, _)| (name, handle)),
+            texture.map(|(handle, _)| handle),
             tile_count,
             materials,
         );
-        let core_mesh = meshes.add(build_billboard_quad_mesh());
-        commands.spawn((
-            LaserBolt {
-                origin: event.attacker_pos,
-                direction,
-                total_distance: distance,
-                speed,
-                max_length,
-                thickness: core_thickness,
-                elapsed: 0.0,
-                mesh: core_mesh.clone(),
-                // Caps live on the outer bolt only — duplicating them on
-                // the core would just sit a second pair on top.
-                caps: None,
-            },
-            Mesh3d(core_mesh),
-            MeshMaterial3d(core_mat),
-            Transform::IDENTITY,
-        ));
+        commands.spawn(LaserBolt {
+            origin: event.attacker_pos,
+            direction,
+            total_distance: distance,
+            speed,
+            max_length,
+            thickness: core_thickness,
+            elapsed: 0.0,
+            material: core_mat,
+            // Caps live on the outer bolt only — duplicating them on
+            // the core would just sit a second pair on top.
+            cap_material: None,
+        });
     }
-    // `fx_meshes` remains in the signature for the other spawners;
-    // this path no longer pulls the shared `beam_quad` handle.
-    let _ = fx_meshes;
     outer_entity
 }
 
@@ -985,7 +930,13 @@ fn spawn_projectile(
     // textured with the weapon's `texture2` (`pointertrail` /
     // `flowtrail` / `firetrail`).
     let trail = if weapon.smoke_trail {
-        build_projectile_trail(weapon, commands, meshes, materials, images, model_cache)
+        Some(build_projectile_trail(
+            weapon,
+            materials,
+            images,
+            model_cache,
+            cache,
+        ))
     } else {
         None
     };
@@ -1030,136 +981,54 @@ fn spawn_projectile(
         .id()
 }
 
-/// Resolve `weapon.texture2` and spawn the lead + tail endcap entities
-/// for a [`LaserBolt`]. Returns `None` when the texture is unset / not
-/// in the resolver, so callers fall back cleanly to a body-only bolt.
-#[allow(clippy::too_many_arguments)]
-fn build_bolt_caps(
+/// Resolve `weapon.texture2` into the material a [`LaserBolt`]'s lead
+/// and tail endcap quads are batched under. Returns `None` when the
+/// texture is unset / not in the resolver, so callers fall back
+/// cleanly to a body-only bolt.
+fn bolt_cap_material(
     weapon: &spring_tdf::WeaponDef,
     edge_color: bevy::color::LinearRgba,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
-) -> Option<super::shared::BoltCaps> {
+) -> Option<Handle<StandardMaterial>> {
     if weapon.texture2.is_empty() || weapon.texture2.eq_ignore_ascii_case("none") {
         return None;
     }
-    let filename = super::ceg::CegRegistry::resolve_texture(&weapon.texture2)?;
-    let (handle, _, _) =
-        crate::units::assets::meshes::load_beam_texture(filename, model_cache, images)?;
+    let filename = CegRegistry::resolve_texture(&weapon.texture2)?;
+    let (handle, _, _) = load_beam_texture(filename, model_cache, images)?;
 
-    // Caps share a material across the bolt's lifetime; key it by the
-    // texture filename so different texture2 weapons don't collide.
-    let cap_mat = cache.get_or_create_tiled(
-        edge_color,
-        true,
-        weapon.intensity,
-        Some((filename, handle)),
-        0,
-        materials,
-    );
-
-    let lead_mesh = meshes.add(build_billboard_quad_mesh());
-    let tail_mesh = meshes.add(build_billboard_quad_mesh());
-
-    let lead_entity = commands
-        .spawn((
-            Mesh3d(lead_mesh.clone()),
-            MeshMaterial3d(cap_mat.clone()),
-            Transform::IDENTITY,
-        ))
-        .id();
-    let tail_entity = commands
-        .spawn((
-            Mesh3d(tail_mesh.clone()),
-            MeshMaterial3d(cap_mat),
-            Transform::IDENTITY,
-        ))
-        .id();
-
-    Some(super::shared::BoltCaps {
-        lead_entity,
-        tail_entity,
-        lead_mesh,
-        tail_mesh,
-    })
+    // Keyed by the texture so different texture2 weapons don't collide.
+    Some(cache.get_or_create_tiled(edge_color, true, weapon.intensity, Some(handle), 0, materials))
 }
 
-/// Spawn a companion entity that carries the projectile's smoke-trail
-/// mesh (upstream `CSmokeTrailProjectile`, one segment per sim frame).
-///
-/// The mesh starts empty — the tick system rewrites it every frame from
-/// the trail samples. Colour follows upstream: grey `smokeColor` (0.65)
-/// times the weapon's `texture2`, faded per vertex through premultiplied
-/// vertex colours (the effects pass draws `GL_ONE, GL_ONE_MINUS_SRC_ALPHA`
-/// with colour and alpha both scaled by the fade). The weapon's `rgbColor`
-/// plays no part.
+/// Smoke-trail state for a projectile (upstream `CSmokeTrailProjectile`,
+/// one segment per sim frame). The samples start empty — the tick
+/// system pushes one quad per consecutive sample pair into the batch
+/// for `material` every frame. Colour follows upstream: grey
+/// `smokeColor` (0.65) times the weapon's `texture2`, faded per vertex
+/// through premultiplied vertex colours (the effects pass draws
+/// `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` with colour and alpha both scaled
+/// by the fade). The weapon's `rgbColor` plays no part.
 fn build_projectile_trail(
     weapon: &spring_tdf::WeaponDef,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
-) -> Option<ProjectileTrail> {
-    let mut mesh = Mesh::new(
-        bevy::mesh::PrimitiveTopology::TriangleStrip,
-        bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD,
-    );
-    let vert_count = TRAIL_SAMPLE_COUNT * 2;
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0_f32; 3]; vert_count]);
-    mesh.insert_attribute(
-        Mesh::ATTRIBUTE_NORMAL,
-        vec![[0.0, 1.0, 0.0_f32]; vert_count],
-    );
-    // V runs across the ribbon; U alternates per segment (each upstream
-    // segment spans the whole texture).
-    let mut uvs = Vec::with_capacity(vert_count);
-    for i in 0..TRAIL_SAMPLE_COUNT {
-        let u = (i % 2) as f32;
-        uvs.push([u, 0.0]);
-        uvs.push([u, 1.0]);
-    }
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[0.0_f32; 4]; vert_count]);
-    let mesh_handle = meshes.add(mesh);
-
+    cache: &mut BeamMaterialCache,
+) -> ProjectileTrail {
     let texture = if !weapon.texture2.is_empty() && weapon.texture2 != "none" {
         CegRegistry::resolve_texture(&weapon.texture2)
-            .and_then(|filename| {
-                crate::units::assets::meshes::load_beam_texture(filename, model_cache, images)
-            })
+            .and_then(|filename| load_beam_texture(filename, model_cache, images))
             .map(|(handle, _, _)| handle)
     } else {
         None
     };
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        base_color_texture: texture,
-        unlit: true,
-        alpha_mode: AlphaMode::Premultiplied,
-        cull_mode: None,
-        ..default()
-    });
-
-    let ribbon_entity = commands
-        .spawn((
-            Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(material),
-            // Mesh is already in world space — the ribbon doesn't ride
-            // the projectile's transform.
-            Transform::IDENTITY,
-        ))
-        .id();
-
-    Some(ProjectileTrail {
-        ribbon_entity,
-        mesh: mesh_handle,
+    ProjectileTrail {
+        material: cache.get_or_create_trail(texture, materials),
         samples: std::collections::VecDeque::with_capacity(TRAIL_SAMPLE_COUNT),
-    })
+    }
 }
 
 /// Melee flash (Wormbite): a short-lived orange `ImpactBurst` at the
@@ -1198,7 +1067,6 @@ fn spawn_lightning_arc(
     event: &AttackEvent,
     rng: &mut Local<u32>,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
     flavor: ArcFlavor,
@@ -1235,21 +1103,15 @@ fn spawn_lightning_arc(
         );
     }
 
-    let mesh = meshes.add(build_arc_mesh(ARC_SEGMENTS));
     let material = cache.get_or_create(LinearRgba::WHITE, true, materials);
-    commands.spawn((
-        LightningArc {
-            points,
-            width,
-            lifetime,
-            max_lifetime: lifetime,
-            mesh: mesh.clone(),
-            tint,
-        },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::IDENTITY,
-    ));
+    commands.spawn(LightningArc {
+        points,
+        width,
+        lifetime,
+        max_lifetime: lifetime,
+        material,
+        tint,
+    });
 }
 
 /// The two arc flavors of upstream `network_arceffect.lua`: the Gauss

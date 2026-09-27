@@ -212,12 +212,13 @@ pub fn load_beam_texture(
 }
 
 fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Option<&'a TgaImage> {
-    let key = tex_name.to_string();
-    cache
-        .raw_textures
-        .entry(key)
-        .or_insert_with(|| load_asset_from_disk(tex_name, spring_unit_mesh::parse_tga))
-        .as_ref()
+    // Probe by `&str` first: this runs for every beam / bolt / trail
+    // spawn, and the key is only allocated on the one insert.
+    if !cache.raw_textures.contains_key(tex_name) {
+        let loaded = load_asset_from_disk(tex_name, spring_unit_mesh::parse_tga);
+        cache.raw_textures.insert(tex_name.to_string(), loaded);
+    }
+    cache.raw_textures.get(tex_name)?.as_ref()
 }
 
 /// Try each candidate path, read the file, and parse it. Returns `None` with
