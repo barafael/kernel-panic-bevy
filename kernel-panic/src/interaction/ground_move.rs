@@ -171,9 +171,34 @@ impl PathQueue {
                     Some(true) => self.stats.labellings += 1,
                     Some(false) => self.stats.label_updates += 1,
                     None => {
-                        let (key, labels) = nav_component_labels(n, registry, req)?;
-                        self.labels.insert(key, (n.revision, labels));
-                        self.stats.labellings += 1;
+                        // Start from the map's bare-terrain labels (built
+                        // with the map, off-thread) and apply every
+                        // structure change since; label from scratch
+                        // only when the change ring no longer reaches
+                        // back to the map's own revision.
+                        let seeded =
+                            n.buckets[key.0]
+                                .terrain_labels
+                                .as_deref()
+                                .and_then(|terrain| {
+                                    let changes = n.changes_since_each(0)?;
+                                    let mut labels = terrain.clone();
+                                    for bbox in changes {
+                                        labels.update_region(speed_map, mask, bbox);
+                                    }
+                                    Some(labels)
+                                });
+                        match seeded {
+                            Some(labels) => {
+                                self.labels.insert(key, (n.revision, labels));
+                                self.stats.label_updates += 1;
+                            }
+                            None => {
+                                let (key, labels) = nav_component_labels(n, registry, req)?;
+                                self.labels.insert(key, (n.revision, labels));
+                                self.stats.labellings += 1;
+                            }
+                        }
                     }
                 }
             }
@@ -2231,6 +2256,7 @@ mod tests {
                 buckets: vec![super::super::movement::NavBucket {
                     max_slope: 1.0,
                     speed_map,
+                    terrain_labels: None,
                 }],
                 ..Default::default()
             };
@@ -2320,6 +2346,7 @@ mod tests {
             buckets: vec![super::super::movement::NavBucket {
                 max_slope: 1.0,
                 speed_map,
+                terrain_labels: None,
             }],
             ..Default::default()
         };
@@ -2345,6 +2372,7 @@ mod tests {
             buckets: vec![super::super::movement::NavBucket {
                 max_slope: 1.0,
                 speed_map,
+                terrain_labels: None,
             }],
             ..Default::default()
         };
@@ -2431,6 +2459,7 @@ mod tests {
         nav.buckets.push(NavBucket {
             max_slope: 1.0,
             speed_map: small,
+            terrain_labels: None,
         });
         h.world.insert_resource(nav);
         for _ in 0..10 {

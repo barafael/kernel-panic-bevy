@@ -888,9 +888,14 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
                 speed_map.width,
                 speed_map.height,
             );
+            // Labelled here, off the main thread: the first search of a
+            // 1500²-cell map would otherwise spend ~30 ms per mover
+            // class inside one sim tick.
+            let terrain_labels = spring_pathfinding::ComponentLabels::build(&speed_map, None);
             nav_set.buckets.push(interaction::movement::NavBucket {
                 max_slope: cap,
                 speed_map,
+                terrain_labels: Some(std::sync::Arc::new(terrain_labels)),
             });
         }
     }

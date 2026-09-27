@@ -163,6 +163,12 @@ impl CommandQueue {
 pub struct NavBucket {
     pub max_slope: f32,
     pub speed_map: SpeedMap,
+    /// Connected components of the bare terrain (no structure mask),
+    /// built with the map off the main thread so the first path search
+    /// on a large map doesn't label a million cells in one tick. The
+    /// path service starts each mover class from a copy and brings it
+    /// up to date through the structure change ring.
+    pub terrain_labels: Option<std::sync::Arc<ComponentLabels>>,
 }
 
 /// A set of pathfinding grids, one per distinct `MaxSlope` in the unit
@@ -1104,6 +1110,7 @@ mod tests {
         NavBucket {
             max_slope: cap,
             speed_map: SpeedMap::uniform(2, 2, 1.0),
+            terrain_labels: None,
         }
     }
 
@@ -1280,6 +1287,7 @@ mod cross_map_tests {
             nav.buckets.push(NavBucket {
                 max_slope: cap,
                 speed_map,
+                terrain_labels: None,
             });
 
             let mut world = World::new();

@@ -52,6 +52,7 @@ impl Harness {
         nav.buckets.push(NavBucket {
             max_slope: cap,
             speed_map: SpeedMap::uniform(MAP_SQUARES, MAP_SQUARES, 1.0),
+            terrain_labels: None,
         });
         world.insert_resource(nav);
         let verts = (MAP_SQUARES + 1) as usize;
