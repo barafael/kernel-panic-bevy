@@ -66,11 +66,12 @@ use mipmap::{build_terrain_image, dark_fallback_material, void_ground_material};
 
 pub struct MapLoadingPlugin;
 
-/// Set containing the world teardown+rebuild pair. UI systems that hold
-/// entity references across frames (command panel, build bar, tooltip,
-/// placement ghost) must order themselves `.after(Self::*)` this —
-/// otherwise a rebuild in the same frame can despawn entities their
-/// queued commands still reference, which panics at command-apply time.
+/// Set containing the game-entry request (`Update`) and the world
+/// teardown+rebuild pair (`First`). The swap running in `First` means
+/// no `Update` system's queued commands can straddle it; UI systems
+/// that hold entity references across frames (command panel, build bar,
+/// tooltip, placement ghost) still order `.after` this set so they see
+/// a rerun request's state reset in the same frame.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GameWorldRebuild;
 
@@ -97,14 +98,25 @@ impl Plugin for MapLoadingPlugin {
                 // (non-demo) setup and spawn homebases.
                 .add_systems(
                     Update,
+                    prepare_game_entry
+                        .run_if(rerun_requested)
+                        .in_set(GameWorldRebuild)
+                        .after(crate::ui::menu::boot_demo),
+                )
+                // The swap runs in `First`: every despawn command the old
+                // world's Update systems queued has been applied by then.
+                // In `Update` the exclusive teardown could land between
+                // an unordered system queueing a despawn and that
+                // command's end-of-schedule flush, which then hit an
+                // already-despawned entity.
+                .add_systems(
+                    First,
                     (
-                        prepare_game_entry.run_if(rerun_requested),
                         poll_map_load.run_if(|pending: Res<PendingMapLoad>| pending.0.is_some()),
                         spawn_prepared_map,
                     )
                         .chain()
-                        .in_set(GameWorldRebuild)
-                        .after(crate::ui::menu::boot_demo),
+                        .in_set(GameWorldRebuild),
                 );
         }
 
@@ -126,14 +138,21 @@ impl Plugin for MapLoadingPlugin {
                     Update,
                     (
                         prepare_game_entry.run_if(rerun_requested),
-                        poll_map_load
-                            .run_if(|pending: Res<PendingWebMapLoad>| pending.0.is_some()),
-                        spawn_prepared_map,
                         prefetch_selected_map.run_if(resource_exists_and_changed::<GameSetup>),
                     )
                         .chain()
                         .in_set(GameWorldRebuild)
                         .after(crate::ui::menu::boot_demo),
+                )
+                // Swap in `First` — see the native branch.
+                .add_systems(
+                    First,
+                    (
+                        poll_map_load.run_if(|pending: Res<PendingWebMapLoad>| pending.0.is_some()),
+                        spawn_prepared_map,
+                    )
+                        .chain()
+                        .in_set(GameWorldRebuild),
                 );
         }
     }
@@ -333,7 +352,7 @@ fn load_and_prepare(map_path: &Path, inputs: PrepareInputs) -> Option<PreparedMa
 
 /// Native: once the compute task has the prepared map, swap worlds —
 /// tear the old one down and hand the map to [`spawn_prepared_map`]
-/// (same frame, right after this system).
+/// (same frame, right after this system, both in `First`).
 #[cfg(not(target_arch = "wasm32"))]
 fn poll_map_load(world: &mut World) {
     let prepared = {
