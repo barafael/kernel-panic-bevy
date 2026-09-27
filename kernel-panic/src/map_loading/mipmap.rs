@@ -1,11 +1,9 @@
-//! Terrain-texture material construction: ground-texture pyramid, mipmap
-//! chain, and the dark fallback used when the map has no ground texture.
+//! Terrain-texture construction: ground-texture pyramid, mipmap chain,
+//! and the dark fallback used when the map has no ground texture.
 
 use bevy::prelude::*;
 
 use spring_map::map_types::{GroundTexture, MipmapData};
-
-use crate::terrain::material::create_terrain_material;
 
 /// Cap the base ground texture at 8192² before building the mip chain.
 ///
@@ -45,23 +43,27 @@ pub(super) fn void_ground_material(
     })
 }
 
-pub(super) fn build_terrain_material_from_texture(
-    ground: &GroundTexture,
-    images: &mut ResMut<Assets<Image>>,
-    materials: &mut ResMut<Assets<StandardMaterial>>,
-) -> Handle<StandardMaterial> {
-    // Build the mip chain straight out of the baked texture — no
-    // intermediate copies. Every map ships at ≤8192² already (the bake
-    // caps it), so the common path is a single chained-buffer
-    // allocation; the old code made two full extra copies of the base
-    // level (~100 MB of memcpy on a 4096×3072 map, all on the wasm main
-    // thread).
-    let (base_w, base_h) = downsample_dims(ground.width, ground.height, MAX_GROUND_TEX_DIM);
+/// The ground texture as a mipmapped `Image`, ready for `Assets<Image>`.
+///
+/// The baked pixels become mip level 0 in place — the chain is appended
+/// to the texture's own buffer, so the only bulk allocation is the
+/// buffer growing by a third. Render-world only: nothing reads the
+/// terrain texture back (the minimap is painted from level 0 before the
+/// image is handed over), so the CPU copy — a third of a gigabyte on
+/// the biggest maps — is released as soon as the GPU has it. Pure, so
+/// the loader runs it off the main thread.
+pub(super) fn build_terrain_image(ground: GroundTexture) -> Image {
+    let GroundTexture {
+        width,
+        height,
+        pixels,
+    } = ground;
+    let (base_w, base_h) = downsample_dims(width, height, MAX_GROUND_TEX_DIM);
 
     let MipmapData {
         pixels: mipmap_pixels,
         level_count: mip_levels,
-    } = generate_mipmaps(&ground.pixels, ground.width, ground.height, base_w, base_h);
+    } = generate_mipmaps(pixels, width, height, base_w, base_h);
 
     let size = bevy::render::render_resource::Extent3d {
         width: base_w as u32,
@@ -69,14 +71,12 @@ pub(super) fn build_terrain_material_from_texture(
         depth_or_array_layers: 1,
     };
     let format = bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb;
-    let usage =
-        bevy::asset::RenderAssetUsages::RENDER_WORLD | bevy::asset::RenderAssetUsages::MAIN_WORLD;
 
     let mut image = Image::new_uninit(
         size,
         bevy::render::render_resource::TextureDimension::D2,
         format,
-        usage,
+        bevy::asset::RenderAssetUsages::RENDER_WORLD,
     );
     image.data = Some(mipmap_pixels);
     image.texture_descriptor.mip_level_count = mip_levels;
@@ -88,22 +88,32 @@ pub(super) fn build_terrain_material_from_texture(
         ..default()
     });
 
-    if (base_w, base_h) != (ground.width, ground.height) {
+    if (base_w, base_h) != (width, height) {
         info!(
-            "  Texture: {}x{} → {base_w}x{base_h} (capped at {MAX_GROUND_TEX_DIM}), {mip_levels} mip levels",
-            ground.width, ground.height,
+            "  Texture: {width}x{height} → {base_w}x{base_h} (capped at {MAX_GROUND_TEX_DIM}), {mip_levels} mip levels",
         );
     } else {
         info!("  Texture: {base_w}x{base_h}, {mip_levels} mip levels");
     }
 
-    let texture_handle = images.add(image);
-    create_terrain_material(texture_handle, materials)
+    image
+}
+
+/// Mip level 0 of a terrain image built by [`build_terrain_image`]:
+/// the base pixels and their size.
+pub(super) fn base_level(image: &Image) -> (&[u8], usize, usize) {
+    let (w, h) = (
+        image.texture_descriptor.size.width as usize,
+        image.texture_descriptor.size.height as usize,
+    );
+    let data = image.data.as_deref().unwrap_or_default();
+    (&data[..w * h * 4], w, h)
 }
 
 /// Full mip chain for an RGBA8 image at its native size: the chained
-/// pixel buffer and its level count. Used for Lua skin atlases.
-pub(super) fn generate_mipmaps_rgba8(pixels: &[u8], width: usize, height: usize) -> (Vec<u8>, u32) {
+/// pixel buffer (`pixels` become level 0) and its level count. Used for
+/// Lua skin atlases.
+pub(super) fn generate_mipmaps_rgba8(pixels: Vec<u8>, width: usize, height: usize) -> (Vec<u8>, u32) {
     let MipmapData {
         pixels,
         level_count,
@@ -111,10 +121,11 @@ pub(super) fn generate_mipmaps_rgba8(pixels: &[u8], width: usize, height: usize)
     (pixels, level_count)
 }
 
-/// 2×2 box-filter `src` (`src_w`×`src_h`) into a buffer sized `dst_w`×`dst_h`.
-/// Used by both the initial size-cap pass and the mipmap-chain build.
-fn box_filter_2x(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: usize) -> Vec<u8> {
-    let mut dst = vec![0u8; dst_w * dst_h * 4];
+/// 2×2 box-filter `src` (`src_w`×`src_h`) into `dst` (`dst_w`×`dst_h`
+/// RGBA8, exactly `dst_w * dst_h * 4` bytes). Used by both the initial
+/// size-cap pass and the mipmap-chain build.
+fn box_filter_2x(src: &[u8], src_w: usize, src_h: usize, dst: &mut [u8], dst_w: usize, dst_h: usize) {
+    debug_assert_eq!(dst.len(), dst_w * dst_h * 4);
     for y in 0..dst_h {
         for x in 0..dst_w {
             let src_x = (x * 2).min(src_w - 1);
@@ -137,7 +148,6 @@ fn box_filter_2x(src: &[u8], src_w: usize, src_h: usize, dst_w: usize, dst_h: us
             }
         }
     }
-    dst
 }
 
 /// Halve `width`/`height` (min 1) until both are ≤ `max_dim`.
@@ -150,35 +160,48 @@ fn downsample_dims(width: usize, height: usize, max_dim: usize) -> (usize, usize
     (cw, ch)
 }
 
+/// Bytes of the full RGBA8 mip chain from a `w × h` level down to 1×1.
+fn mip_chain_len(mut w: usize, mut h: usize) -> usize {
+    let mut len = 0;
+    loop {
+        len += w * h * 4;
+        if w == 1 && h == 1 {
+            return len;
+        }
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+}
+
 /// Build a full mipmap chain by 2×2 box-filtering the source texture
 /// down to 1×1. When `base_w/base_h` are smaller than `width/height`
 /// (size-cap path), the chain starts with the box-filtered base level.
 ///
-/// Levels are read back out of the chained buffer via index ranges, so
-/// the source is never duplicated: one allocation holds the whole
-/// chain, and each level is filtered straight from the previous level's
-/// slice. Returns the chained pixel buffer and the level count, ready
-/// for Bevy's `texture_descriptor.mip_level_count`.
+/// The chain lives in one buffer: `pixels` is grown (once, to the exact
+/// chain size) and each level is filtered straight from the previous
+/// level's slice into the space after it, so the source is never
+/// duplicated. Returns the chained pixel buffer and the level count,
+/// ready for Bevy's `texture_descriptor.mip_level_count`.
 fn generate_mipmaps(
-    pixels: &[u8],
+    pixels: Vec<u8>,
     width: usize,
     height: usize,
     base_w: usize,
     base_h: usize,
 ) -> MipmapData {
-    // Level 0: the base (box-filtered once up front if capping applied).
-    let (base, w0, h0) = if (base_w, base_h) == (width, height) {
-        (pixels.to_vec(), width, height)
+    // Level 0: the base (box-filtered once up front if capping applied;
+    // the uncapped source is dropped right after).
+    let (mut all_data, w0, h0) = if (base_w, base_h) == (width, height) {
+        (pixels, width, height)
     } else {
-        (
-            box_filter_2x(pixels, width, height, base_w, base_h),
-            base_w,
-            base_h,
-        )
+        let mut base = vec![0u8; base_w * base_h * 4];
+        box_filter_2x(&pixels, width, height, &mut base, base_w, base_h);
+        drop(pixels);
+        (base, base_w, base_h)
     };
+    debug_assert_eq!(all_data.len(), w0 * h0 * 4);
 
-    let mut all_data = Vec::with_capacity(base.len() * 4 / 3);
-    all_data.extend_from_slice(&base);
+    all_data.reserve_exact(mip_chain_len(w0, h0) - all_data.len());
     let mut levels = 1u32;
 
     let mut current_w = w0;
@@ -188,11 +211,12 @@ fn generate_mipmaps(
     while current_w > 1 || current_h > 1 {
         let next_w = (current_w / 2).max(1);
         let next_h = (current_h / 2).max(1);
-        let src = &all_data[src_start..];
-        let dst = box_filter_2x(src, current_w, current_h, next_w, next_h);
+        let dst_start = all_data.len();
+        all_data.resize(dst_start + next_w * next_h * 4, 0);
+        let (done, dst) = all_data.split_at_mut(dst_start);
+        box_filter_2x(&done[src_start..], current_w, current_h, dst, next_w, next_h);
 
-        src_start += current_w * current_h * 4;
-        all_data.extend_from_slice(&dst);
+        src_start = dst_start;
         levels += 1;
         current_w = next_w;
         current_h = next_h;
@@ -201,5 +225,32 @@ fn generate_mipmaps(
     MipmapData {
         pixels: all_data,
         level_count: levels,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The in-place chain matches a level-by-level rebuild: each level
+    /// is the 2×2 box filter of the previous one, ending at 1×1.
+    #[test]
+    fn chain_levels_are_box_filtered_in_place() {
+        let (w, h) = (4usize, 2usize);
+        let pixels: Vec<u8> = (0..w * h * 4).map(|i| (i * 13 % 251) as u8).collect();
+        let MipmapData {
+            pixels: chain,
+            level_count,
+        } = generate_mipmaps(pixels.clone(), w, h, w, h);
+        assert_eq!(level_count, 3);
+        assert_eq!(chain.len(), mip_chain_len(w, h));
+        assert_eq!(&chain[..pixels.len()], &pixels[..]);
+
+        let mut l1 = vec![0u8; 2 * 1 * 4];
+        box_filter_2x(&pixels, w, h, &mut l1, 2, 1);
+        assert_eq!(&chain[pixels.len()..pixels.len() + l1.len()], &l1[..]);
+        let mut l2 = vec![0u8; 4];
+        box_filter_2x(&l1, 2, 1, &mut l2, 1, 1);
+        assert_eq!(&chain[pixels.len() + l1.len()..], &l2[..]);
     }
 }

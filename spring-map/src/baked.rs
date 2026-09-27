@@ -43,6 +43,7 @@
 
 use std::io::{Read, Write};
 
+use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -89,7 +90,7 @@ pub enum BakedMapError {
 /// must be `Option<…>` (or behind a version bump) so older readers fail
 /// with the explicit `BadMagic` error rather than mis-decoding.
 #[derive(Serialize, Deserialize)]
-struct BakedMap {
+struct BakedMap<'a> {
     map_x: i32,
     map_y: i32,
     min_height: f32,
@@ -105,21 +106,65 @@ struct BakedMap {
     /// `.smt`. Pixels are RGBA8, row-major. Stored raw — PNG / DXT
     /// compression can come later when filesize matters (i.e. when we
     /// actually ship over HTTP for the WASM build).
-    ground_texture: Option<BakedTexture>,
+    #[serde(borrow)]
+    ground_texture: Option<BakedTexture<'a>>,
 }
 
 #[derive(Serialize, Deserialize)]
-struct BakedTexture {
+struct BakedTexture<'a> {
     width: u32,
     height: u32,
-    pixels: Vec<u8>,
+    #[serde(borrow)]
+    pixels: Bytes<'a>,
+}
+
+/// A byte run borrowed from the decoded payload.
+///
+/// Wire-identical to the `Vec<u8>` earlier bakes wrote (postcard encodes
+/// both as a varint length followed by the raw bytes), but decoded as a
+/// slice of the payload instead of an owned copy: `Vec<u8>` goes through
+/// serde's generic sequence path, one `visit_u8` per pixel byte — over a
+/// second for Memory_Bank_v3's 268 MB texture — and doubles the peak
+/// memory while the copy is made. The reader then moves the pixels out
+/// of the payload in place (see [`read_baked_map`]).
+struct Bytes<'a>(&'a [u8]);
+
+impl Serialize for Bytes<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
+
+impl<'de: 'a, 'a> Deserialize<'de> for Bytes<'a> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct BytesVisitor;
+        impl<'de> Visitor<'de> for BytesVisitor {
+            type Value = &'de [u8];
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a borrowed byte run")
+            }
+            fn visit_borrowed_bytes<E: serde::de::Error>(self, v: &'de [u8]) -> Result<Self::Value, E> {
+                Ok(v)
+            }
+        }
+        deserializer.deserialize_bytes(BytesVisitor).map(Bytes)
+    }
 }
 
 /// Encode a zstd frame. The encoder (C zstd) only links on native —
 /// baking is a native-only job; wasm builds just need the reader.
+///
+/// The frame carries its decompressed size (`Frame_Content_Size`), so
+/// the reader can allocate the payload buffer exactly once instead of
+/// growing it by doubling — a quarter-gigabyte texture otherwise ends
+/// up in a half-gigabyte allocation.
 #[cfg(not(target_arch = "wasm32"))]
 fn encode_zstd(body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
-    Ok(zstd::stream::encode_all(body, 19)?)
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 19)?;
+    encoder.set_pledged_src_size(Some(body.len() as u64))?;
+    encoder.include_contentsize(true)?;
+    encoder.write_all(body)?;
+    Ok(encoder.finish()?)
 }
 
 /// wasm stub: `write_baked_map` is only called by the native bake bin.
@@ -144,7 +189,7 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
         ground_texture: map.ground_texture.as_ref().map(|g| BakedTexture {
             width: g.width as u32,
             height: g.height as u32,
-            pixels: g.pixels.clone(),
+            pixels: Bytes(&g.pixels),
         }),
     };
 
@@ -173,6 +218,14 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
 /// Deserialize a `.kpmap` blob back into the same shape `load_map`
 /// returns for a `.sd7` — the rest of the engine doesn't need to know
 /// which path the data took. Accepts v1 (raw body) and v2 (deflated).
+///
+/// The ground texture dominates the payload (a quarter gigabyte on the
+/// biggest maps), so it is never copied out: the pixels are shifted to
+/// the front of the payload buffer, which becomes the texture's own
+/// `Vec` — peak memory is one payload, not payload + copy. A
+/// Lua-composited map (v4 with compositing data) gets no ground texture
+/// at all: its SMT is hidden under `voidGround` and never drawn, so
+/// materializing it would only cost memory.
 pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     let magic = bytes
         .get(..MAGIC.len())
@@ -214,48 +267,75 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         Codec::Zstd => {
             let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
                 .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
-            let mut decoded = Vec::new();
+            // Exact when the bake pledged the size (0 for older bakes,
+            // which then grow the buffer as before).
+            let content_size = decoder.decoder.content_size() as usize;
+            let mut decoded = Vec::with_capacity(content_size);
             decoder.read_to_end(&mut decoded)?;
             decoded
         }
     };
 
-    let (baked, lua_compositing): (BakedMap, Option<LuaCompositing>) =
+    let (baked, lua_compositing): (BakedMap<'_>, Option<LuaCompositing>) =
         if magic == MAGIC_V4.as_slice() {
             postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?
         } else {
             let core = postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
             (core, None)
         };
+    let BakedMap {
+        map_x,
+        map_y,
+        min_height,
+        max_height,
+        heights,
+        metalmap,
+        features,
+        map_info,
+        ground_texture,
+    } = baked;
 
     // Validate texture byte count before constructing GroundTexture so a
     // corrupt file fails loudly instead of producing a silently malformed
-    // image asset later.
-    let ground_texture = if let Some(t) = baked.ground_texture {
-        let expected = t.width as usize * t.height as usize * 4;
-        if t.pixels.len() != expected {
-            return Err(BakedMapError::TextureSizeMismatch {
-                expected,
-                actual: t.pixels.len(),
-            });
-        }
-        Some(GroundTexture {
-            width: t.width as usize,
-            height: t.height as usize,
-            pixels: t.pixels,
+    // image asset later. Only the pixel slice still borrows `payload`:
+    // note where it sits, then reuse the payload buffer as the pixel
+    // buffer (an in-place shift, no second allocation).
+    let texture_span = ground_texture
+        .map(|t| {
+            let expected = t.width as usize * t.height as usize * 4;
+            if t.pixels.0.len() != expected {
+                return Err(BakedMapError::TextureSizeMismatch {
+                    expected,
+                    actual: t.pixels.0.len(),
+                });
+            }
+            let offset = t.pixels.0.as_ptr() as usize - payload.as_ptr() as usize;
+            Ok((t.width as usize, t.height as usize, offset, expected))
         })
-    } else {
-        None
+        .transpose()?;
+    let ground_texture = match texture_span {
+        Some((width, height, offset, len)) if lua_compositing.is_none() => {
+            debug_assert!(offset + len <= payload.len());
+            let mut pixels = payload;
+            pixels.drain(..offset);
+            pixels.truncate(len);
+            Some(GroundTexture {
+                width,
+                height,
+                pixels,
+            })
+        }
+        _ => None,
     };
 
-    let header = SmfHeader::new_flat(baked.map_x, baked.map_y, baked.min_height, baked.max_height);
+    let header = SmfHeader::new_flat(map_x, map_y, min_height, max_height);
     let expected_heights = header.heightmap_len();
-    if baked.heights.len() != expected_heights {
+    if heights.len() != expected_heights {
         return Err(BakedMapError::Io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             SmfParseError::HeightmapTruncated {
                 expected: expected_heights,
-                actual: baked.heights.len(),
+                actual: heights.len(),
             }
             .to_string(),
         )));
@@ -264,12 +344,12 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     Ok(SpringMap {
         parsed: ParsedMap {
             header,
-            heights: baked.heights,
-            features: baked.features,
-            metalmap: baked.metalmap,
+            heights,
+            features,
+            metalmap,
         },
         ground_texture,
-        map_info: baked.map_info,
+        map_info,
         // No raw .smf bytes round-trip: the only consumer that ever
         // looked at them was the SMT decoder, which already ran during
         // bake. Anyone needing this in future would add it here.
@@ -360,6 +440,23 @@ mod tests {
         let loaded = read_baked_map(&write_baked_map(&original).unwrap()).unwrap();
         let lua = loaded.lua_compositing.expect("v4 keeps the compositing");
         assert_eq!(lua.atlas.pixels, vec![1, 2, 3, 255]);
+        // The composited map's SMT is hidden under `voidGround`: not
+        // materialized.
+        assert!(loaded.ground_texture.is_none());
+    }
+
+    /// The pixel run is moved out of the payload in place; the bytes
+    /// that came after it (mapinfo, compositing) must not leak in.
+    #[test]
+    fn ground_texture_pixels_survive_the_in_place_move() {
+        let mut original = sample_map();
+        let pixels: Vec<u8> = (0..16u8).map(|i| i.wrapping_mul(37)).collect();
+        original.ground_texture.as_mut().unwrap().pixels = pixels.clone();
+        let loaded = read_baked_map(&write_baked_map(&original).unwrap()).unwrap();
+        let g = loaded.ground_texture.unwrap();
+        assert_eq!((g.width, g.height), (2, 2));
+        assert_eq!(g.pixels, pixels);
+        assert_eq!(loaded.map_info.unwrap().gravity, 130.0);
     }
 
     /// Pre-v4 bakes (no trailing compositing field) must still load.

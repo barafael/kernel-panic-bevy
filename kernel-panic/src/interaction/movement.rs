@@ -1026,7 +1026,6 @@ mod cross_map_tests {
                 .map(|info| info.start_positions.clone())
                 .unwrap_or_default();
             let parsed = baked.parsed;
-            let heightmap = Heightmap::from_parsed(&parsed);
 
             let cap = spring_pathfinding::max_slope_from_degrees(36.0);
             let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
@@ -1035,6 +1034,11 @@ mod cross_map_tests {
                 parsed.header.heightmap_height() as u32,
                 cap,
                 spring_pathfinding::slope_mod_from_max_slope(cap),
+            );
+            let heightmap = Heightmap::from_raw(
+                parsed.heights,
+                parsed.header.heightmap_width(),
+                parsed.header.heightmap_height(),
             );
 
             let mut nav = NavGridSet::default();

@@ -40,7 +40,6 @@ use crate::interaction::movement::NavGridSet;
 use crate::map_loading::TerrainChunkCoord;
 use crate::map_loading::lua_compositing::{
     HexDraw, QuadBuffer, Rgba, WHITE, atlas_material, minimap_pixels, push_hex, push_rect,
-    team_colored_atlas, upload_atlas,
 };
 use crate::rendering::camera::RtsCamera;
 use crate::terrain::geovent::{GeoventSmoker, spawn_smoker_at};
@@ -153,16 +152,17 @@ impl Plugin for HexFarmPlugin {
 }
 
 /// Map-load hook: spawn the drawing entities and install the resources
-/// (or clear a previous Hex Farm's when `farm` is `None`).
+/// (or clear a previous Hex Farm's when `farm` is `None`). The image is
+/// the skin atlas the loader built for this farm
+/// (`lua_compositing::atlas_image`, team-coloured when the farm is).
 pub fn install(
-    farm: Option<HexFarm>,
-    atlas: Option<&spring_map::lua_skin::SkinAtlas>,
+    farm: Option<(HexFarm, Image)>,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
 ) {
-    let (Some(farm), Some(atlas)) = (farm, atlas) else {
+    let Some((farm, atlas)) = farm else {
         commands.remove_resource::<HexFarmState>();
         commands.remove_resource::<HexFarmInbox>();
         commands.remove_resource::<HexFarmView>();
@@ -170,12 +170,7 @@ pub fn install(
     };
     let layout = farm.layout();
     let team_colored = farm.team_colored;
-    let atlas = if team_colored {
-        upload_atlas(&team_colored_atlas(atlas), images)
-    } else {
-        upload_atlas(atlas, images)
-    };
-    let material = atlas_material(atlas, materials);
+    let material = atlas_material(images.add(atlas), materials);
     let first = &layout.hexes[0].corners;
     let side_hex = ((first[1][0] - first[0][0]).powi(2) + (first[1][2] - first[0][2]).powi(2)).sqrt();
     // The meshes are rebuilt in place, so their bounds would go stale:

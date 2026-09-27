@@ -4,8 +4,6 @@ use bevy::{
     prelude::*,
 };
 
-use spring_map::map_types::ParsedMap;
-
 /// Heightmap squares per terrain chunk side.
 pub const CHUNK_SIZE: usize = 32;
 
@@ -14,11 +12,8 @@ pub struct TerrainChunk {
     pub translation: Vec3,
 }
 
-/// Generate chunked terrain meshes from a parsed SMF map.
-pub fn generate_terrain_chunks(map: &ParsedMap) -> Vec<TerrainChunk> {
-    let hm_w = map.header.heightmap_width();
-    let hm_h = map.header.heightmap_height();
-
+/// Generate chunked terrain meshes from a `hm_w × hm_h` height grid.
+pub fn generate_terrain_chunks(heights: &[f32], hm_w: usize, hm_h: usize) -> Vec<TerrainChunk> {
     let chunks_x = (hm_w - 1).div_ceil(CHUNK_SIZE);
     let chunks_z = (hm_h - 1).div_ceil(CHUNK_SIZE);
 
@@ -26,7 +21,7 @@ pub fn generate_terrain_chunks(map: &ParsedMap) -> Vec<TerrainChunk> {
 
     for cz in 0..chunks_z {
         for cx in 0..chunks_x {
-            chunks.push(build_chunk(&map.heights, hm_w, hm_h, cx, cz));
+            chunks.push(build_chunk(heights, hm_w, hm_h, cx, cz));
         }
     }
 
