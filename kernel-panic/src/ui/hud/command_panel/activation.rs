@@ -21,25 +21,19 @@
 use bevy::prelude::*;
 
 use crate::interaction::ability::{Mode, OrderCursorModes};
-use crate::interaction::movement::{
-    AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget,
-};
+use crate::interaction::clear_orders;
 use crate::interaction::selection::Selected;
-use crate::units::combat::{
-    AttackGroundOrder, AttackTargetOrder, ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown,
-};
+use crate::units::combat::{ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
-use crate::units::lifecycle::construction::PendingBuild;
 use crate::units::lifecycle::production::{Producer, factory_roster};
-use crate::units::mechanics::command_fire::PendingCommandFire;
 use crate::units::mechanics::deploy::DeployEvent;
 use crate::units::mechanics::network_buffer::EnterEvent;
 use crate::units::mechanics::worm::AutoHold;
 
 use super::super::placement::PlacementMode;
 use super::commands::{CmdId, CmdType};
-use super::{ActiveCommand, PanelCommands, PanelPage};
+use super::{PanelCommands, PanelPage};
 
 /// Request to run / arm a command, from the panel, the build bar or a
 /// hotkey.
@@ -156,30 +150,31 @@ pub(super) fn order_hotkeys(
 
 /// Stop: strip every order component off `entity`.
 fn stop_unit(commands: &mut Commands, entity: Entity) {
-    commands
-        .entity(entity)
-        .remove::<MoveTarget>()
-        .remove::<MovePath>()
-        .remove::<CommandQueue>()
-        .remove::<AttackGroundOrder>()
-        .remove::<AttackMoveActive>()
-        .remove::<AttackTargetOrder>()
-        .remove::<GuardTarget>()
-        .remove::<ForcedTarget>()
-        .remove::<PendingBuild>()
-        .remove::<PendingCommandFire>()
-        .remove::<SelfDestructCountdown>();
+    clear_orders(&mut commands.entity(entity)).remove::<SelfDestructCountdown>();
+}
+
+/// The armed command (`inCommand`), highlighted on its button: derived
+/// from the armed placement / cursor mode, so it ends with them (order
+/// committed, cancelled, builder deselected).
+pub(crate) fn active_command(modes: &OrderCursorModes, placement: &PlacementMode) -> Option<CmdId> {
+    if let Some(kind) = placement.kind {
+        return Some(CmdId::Build(kind));
+    }
+    modes.mode.map(|mode| match mode {
+        Mode::AttackGround => CmdId::Attack,
+        Mode::AttackMove => CmdId::Fight,
+        Mode::Patrol => CmdId::Patrol,
+        Mode::Guard => CmdId::Guard,
+        Mode::Move => CmdId::Move,
+        Mode::SetTarget => CmdId::SetTarget,
+        Mode::Ability(id) => id,
+    })
 }
 
 /// Disarm whatever command is armed.
-pub(super) fn disarm(
-    modes: &mut OrderCursorModes,
-    placement: &mut PlacementMode,
-    active: &mut ActiveCommand,
-) {
+pub(super) fn disarm(modes: &mut OrderCursorModes, placement: &mut PlacementMode) {
     modes.clear();
     placement.kind = None;
-    active.0 = None;
 }
 
 type SelectedUnits<'w, 's> = Query<
@@ -199,7 +194,6 @@ pub(super) fn apply_activations(
     mut msgs: MessageReader<ActivateCommand>,
     panel: Res<PanelCommands>,
     mut page: ResMut<PanelPage>,
-    mut active: ResMut<ActiveCommand>,
     mut modes: ResMut<OrderCursorModes>,
     mut placement: ResMut<PlacementMode>,
     mut units: SelectedUnits,
@@ -229,18 +223,16 @@ pub(super) fn apply_activations(
             _ => {}
         }
 
-        let arm = |mode: Mode,
-                   modes: &mut OrderCursorModes,
-                   placement: &mut PlacementMode,
-                   active: &mut ActiveCommand| {
-            if msg.hotkey && active.0 == Some(msg.id) {
-                disarm(modes, placement, active);
-                return;
+        // A hotkey pressed again disarms its armed command; a click
+        // (re-)arms.
+        let toggled_off = msg.hotkey && active_command(&modes, &placement) == Some(msg.id);
+        let mut arm = |mode: Mode| {
+            if toggled_off {
+                disarm(&mut modes, &mut placement);
+            } else {
+                modes.arm(mode);
+                placement.kind = None;
             }
-            modes.arm(mode);
-            modes.ability_for = msg.id.ability_caster();
-            placement.kind = None;
-            active.0 = Some(msg.id);
         };
 
         match msg.id {
@@ -248,27 +240,26 @@ pub(super) fn apply_activations(
                 for (entity, ..) in &units {
                     stop_unit(&mut commands, entity);
                 }
-                disarm(&mut modes, &mut placement, &mut active);
+                disarm(&mut modes, &mut placement);
             }
-            CmdId::Attack => arm(Mode::AttackGround, &mut modes, &mut placement, &mut active),
-            CmdId::Move => arm(Mode::Move, &mut modes, &mut placement, &mut active),
-            CmdId::Patrol => arm(Mode::Patrol, &mut modes, &mut placement, &mut active),
-            CmdId::Fight => arm(Mode::AttackMove, &mut modes, &mut placement, &mut active),
-            CmdId::Guard => arm(Mode::Guard, &mut modes, &mut placement, &mut active),
-            CmdId::SetTarget => arm(Mode::SetTarget, &mut modes, &mut placement, &mut active),
+            CmdId::Attack => arm(Mode::AttackGround),
+            CmdId::Move => arm(Mode::Move),
+            CmdId::Patrol => arm(Mode::Patrol),
+            CmdId::Fight => arm(Mode::AttackMove),
+            CmdId::Guard => arm(Mode::Guard),
+            CmdId::SetTarget => arm(Mode::SetTarget),
             CmdId::NxFlag
             | CmdId::Infection
             | CmdId::LaunchMines
             | CmdId::Sigterm
             | CmdId::Firewall
-            | CmdId::Dispatch => arm(Mode::Ability, &mut modes, &mut placement, &mut active),
+            | CmdId::Dispatch => arm(Mode::Ability(msg.id)),
             CmdId::Build(kind) => {
-                if msg.hotkey && active.0 == Some(msg.id) {
-                    disarm(&mut modes, &mut placement, &mut active);
+                if toggled_off {
+                    disarm(&mut modes, &mut placement);
                 } else {
                     modes.clear();
                     placement.kind = Some(kind);
-                    active.0 = Some(msg.id);
                 }
             }
             CmdId::Produce(kind) => {
@@ -323,8 +314,8 @@ pub(super) fn apply_activations(
                 for (entity, ..) in &units {
                     commands.entity(entity).remove::<ForcedTarget>();
                 }
-                if modes.set_target {
-                    disarm(&mut modes, &mut placement, &mut active);
+                if modes.is(Mode::SetTarget) {
+                    disarm(&mut modes, &mut placement);
                 }
             }
             CmdId::SelfDestruct => {
@@ -346,24 +337,6 @@ pub(super) fn apply_activations(
     }
 }
 
-/// Keep [`ActiveCommand`] honest: once the armed mode / placement ends
-/// (order committed, cancelled, builder deselected) nothing is active.
-pub(super) fn sync_active(
-    modes: Res<OrderCursorModes>,
-    placement: Res<PlacementMode>,
-    mut active: ResMut<ActiveCommand>,
-) {
-    match placement.kind {
-        Some(kind) => {
-            if active.0 != Some(CmdId::Build(kind)) {
-                active.0 = Some(CmdId::Build(kind));
-            }
-        }
-        None if !modes.any_active() && active.0.is_some() => active.0 = None,
-        None => {}
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::super::commands::{UnitCmdState, available_commands};
@@ -374,7 +347,6 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<PanelCommands>();
         world.init_resource::<PanelPage>();
-        world.init_resource::<ActiveCommand>();
         world.init_resource::<OrderCursorModes>();
         world.init_resource::<PlacementMode>();
         world.init_resource::<Messages<ActivateCommand>>();
@@ -477,7 +449,7 @@ mod tests {
         );
         world.spawn((UnitType(UnitKind::Assembler), Selected));
         send(&mut world, msg(CmdId::Move));
-        assert!(world.resource::<OrderCursorModes>().move_order);
+        assert!(world.resource::<OrderCursorModes>().is(Mode::Move));
         send(&mut world, msg(CmdId::Build(UnitKind::Socket)));
         assert_eq!(
             world.resource::<PlacementMode>().kind,
@@ -485,7 +457,10 @@ mod tests {
         );
         assert!(!world.resource::<OrderCursorModes>().any_active());
         assert_eq!(
-            world.resource::<ActiveCommand>().0,
+            active_command(
+                world.resource::<OrderCursorModes>(),
+                world.resource::<PlacementMode>()
+            ),
             Some(CmdId::Build(UnitKind::Socket))
         );
         send(&mut world, msg(CmdId::Build(UnitKind::Socket)));
@@ -527,6 +502,6 @@ mod tests {
             &[],
         );
         send(&mut world, msg(CmdId::Sigterm));
-        assert!(!world.resource::<OrderCursorModes>().ability);
+        assert!(!world.resource::<OrderCursorModes>().any_active());
     }
 }

@@ -72,7 +72,7 @@ impl CmdId {
     }
 
     /// Unit kinds whose aimed ability this command casts, for
-    /// [`crate::interaction::ability::OrderCursorModes::ability_for`].
+    /// [`crate::interaction::ability::Mode::Ability`].
     pub fn ability_caster(self) -> Option<fn(UnitKind) -> bool> {
         Some(match self {
             CmdId::NxFlag => |k| k == UnitKind::Pointer,

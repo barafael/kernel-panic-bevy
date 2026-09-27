@@ -42,7 +42,7 @@ use crate::units::mechanics::worm::AutoHold;
 use super::placement::PlacementMode;
 use super::previews::UnitPreviews;
 use super::tooltip::HoverTip;
-use activation::{ActivateCommand, apply_activations, disarm, order_hotkeys, sync_active};
+use activation::{ActivateCommand, active_command, apply_activations, disarm, order_hotkeys};
 use commands::{CmdDesc, CmdId, CmdType, Texture, UnitCmdState, available_commands};
 use layout::{KP_CTRL_PANEL, SlotCmd, fit_font_size};
 
@@ -53,7 +53,6 @@ impl Plugin for CommandPanelPlugin {
         app.add_message::<ActivateCommand>()
             .init_resource::<PanelCommands>()
             .init_resource::<PanelPage>()
-            .init_resource::<ActiveCommand>()
             .init_resource::<PanelInput>()
             .init_resource::<PanelPics>()
             // Mouse input runs before every Update system so the presses
@@ -71,7 +70,6 @@ impl Plugin for CommandPanelPlugin {
                     collect_commands,
                     order_hotkeys.run_if(in_state(AppState::InGame)),
                     apply_activations,
-                    sync_active,
                     render_panel,
                 )
                     .chain()
@@ -117,10 +115,6 @@ impl PanelCommands {
 #[derive(Resource, Default)]
 pub(crate) struct PanelPage(pub usize);
 
-/// The armed command (`inCommand`), highlighted on its button.
-#[derive(Resource, Default, Debug)]
-pub(crate) struct ActiveCommand(pub Option<CmdId>);
-
 /// Press tracking (`activeMousePress` / `curIconCommand`).
 #[derive(Resource, Default)]
 struct PanelInput {
@@ -162,13 +156,12 @@ fn panel_mouse_input(
     mut input: ResMut<PanelInput>,
     mut modes: ResMut<OrderCursorModes>,
     mut placement: ResMut<PlacementMode>,
-    mut active: ResMut<ActiveCommand>,
     mut out: MessageWriter<ActivateCommand>,
 ) {
     let armed = modes.any_active() || placement.kind.is_some();
     if armed && keys.just_pressed(KeyCode::Escape) {
         keys.clear_just_pressed(KeyCode::Escape);
-        disarm(&mut modes, &mut placement, &mut active);
+        disarm(&mut modes, &mut placement);
     }
 
     let slot = command_slot(&windows, &panel, page.0);
@@ -178,7 +171,7 @@ fn panel_mouse_input(
                 mouse.clear_just_pressed(button);
                 input.pressed = Some((button, slot));
                 if button == MouseButton::Right {
-                    disarm(&mut modes, &mut placement, &mut active);
+                    disarm(&mut modes, &mut placement);
                 }
             } else if button == MouseButton::Right && armed {
                 // Right-click on the map with a command armed: cancel it
@@ -186,7 +179,7 @@ fn panel_mouse_input(
                 // command to run).
                 mouse.clear_just_pressed(button);
                 input.swallowed_right = true;
-                disarm(&mut modes, &mut placement, &mut active);
+                disarm(&mut modes, &mut placement);
             }
         }
         if mouse.just_released(button) {
@@ -334,7 +327,8 @@ fn render_panel(
     panel: Res<PanelCommands>,
     page: Res<PanelPage>,
     input: Res<PanelInput>,
-    active: Res<ActiveCommand>,
+    modes: Res<OrderCursorModes>,
+    placement: Res<PlacementMode>,
     previews: Res<UnitPreviews>,
     mut pics: ResMut<PanelPics>,
     asset_server: Res<AssetServer>,
@@ -364,8 +358,9 @@ fn render_panel(
         tip.panel = hover_desc;
     }
 
+    let active = active_command(&modes, &placement);
     let sig = if playing && !panel.list.is_empty() {
-        render_signature(&panel, page.0, view, hovered, input.pressed, active.0)
+        render_signature(&panel, page.0, view, hovered, input.pressed, active)
     } else {
         0
     };
@@ -411,7 +406,7 @@ fn render_panel(
         };
         let rect = cfg.icon_px(slot, view);
         let size = rect.size();
-        let is_active = active.0.is_some_and(|a| a == desc.id);
+        let is_active = active == Some(desc.id);
         let is_hovered = hovered == Some(slot);
         let highlight = is_hovered || is_active;
         let pressed_here = input.pressed.is_some_and(|(_, s)| s == slot) && mouse_down;
@@ -650,7 +645,6 @@ mod tests {
         world.init_resource::<PanelInput>();
         world.init_resource::<OrderCursorModes>();
         world.init_resource::<PlacementMode>();
-        world.init_resource::<ActiveCommand>();
         world.init_resource::<Messages<ActivateCommand>>();
         world
     }
@@ -772,7 +766,9 @@ mod tests {
     #[test]
     fn escape_disarms() {
         let mut world = world_with_window(None);
-        world.resource_mut::<OrderCursorModes>().move_order = true;
+        world
+            .resource_mut::<OrderCursorModes>()
+            .arm(crate::interaction::ability::Mode::Move);
         world
             .resource_mut::<ButtonInput<KeyCode>>()
             .press(KeyCode::Escape);
