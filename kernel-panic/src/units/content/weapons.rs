@@ -312,7 +312,7 @@ mod tests {
         let registry = WeaponRegistry::default();
         assert_eq!(registry.intern("BuildLaser"), Some(WeaponId::BUILD_LASER));
         assert_eq!(registry.intern("buildlaser"), Some(WeaponId::BUILD_LASER));
-        assert_eq!(registry.name(WeaponId::BUILD_LASER), "BuildLaser");
+        assert_eq!(registry.names[WeaponId::BUILD_LASER.0 as usize], "BuildLaser");
     }
 
     #[test]

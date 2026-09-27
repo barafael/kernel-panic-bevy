@@ -185,6 +185,10 @@ pub(super) fn flush_fx_quad_batches(
                     // Vertices are world-space and the mesh's Aabb is
                     // never recomputed, so culling must be off.
                     Transform::IDENTITY,
+                    // Explicit: `Mesh3d` only requires `Visibility`
+                    // through the render plugins' registered
+                    // requirements, and the hide/show below needs it.
+                    Visibility::default(),
                     NoFrustumCulling,
                 ))
                 .id();
