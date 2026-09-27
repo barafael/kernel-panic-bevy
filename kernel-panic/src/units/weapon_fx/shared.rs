@@ -2,19 +2,13 @@
 //! visual marker components, the cached beam-material registry, and the
 //! TDF-colour normaliser.
 
-use std::borrow::Cow;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 
 use crate::units::content::weapons::WeaponId;
 
 /// Describes a single attack for the visual system.
-///
-/// `weapon_name` is `Cow<'static, str>` so the hot build-laser path
-/// (production.rs pushes `"BuildLaser"` per emitter per factory per
-/// frame — 4×/kernel in steady state) uses a static borrow instead of
-/// allocating a fresh `String` for each ray; combat's per-shot path
-/// still allocates once per shot via `Cow::Owned`.
 ///
 /// `muzzle_ceg` is the attacker's FBI-authored `[SFXTypes]` entry for
 /// the index the COB `FireWeaponN` emits — e.g. Bit's `FireWeapon1`
@@ -39,7 +33,9 @@ pub struct AttackEvent {
     /// `WeaponBinding` (or the unit's FBI weapon name) before pushing,
     /// so the fx side never string-matches the registry.
     pub weapon_id: WeaponId,
-    pub muzzle_ceg: Option<Cow<'static, str>>,
+    /// Shared per salvo shot, so a multi-projectile shot clones a
+    /// refcount rather than the name.
+    pub muzzle_ceg: Option<Arc<str>>,
     pub delayed_hit: Option<DelayedHitInfo>,
     /// True for the Gateway's factory build ray: render the upstream
     /// `BuildArc` white lightning strand (gateway.bos `lua_BuildArc`)
@@ -298,7 +294,9 @@ pub(super) struct ProjectileVisual {
     /// frame while it has fuel (`explGenHandler.GenExplosion(cegID, …)`
     /// in each projectile's `Update`) — FlowMissile's
     /// `network_flowtrail` spikes, BugCannon's `corruption_BCtrail`.
-    pub trail_ceg: Option<Cow<'static, str>>,
+    /// Holds the weapon whose `cegTag` it is; the tick reads the name
+    /// from the registry instead of carrying a copy.
+    pub trail_ceg: Option<WeaponId>,
     /// Per-projectile PRNG seed so ticks can call `spawn_ceg` without a
     /// system `Local` (each projectile gets a stable-but-different roll).
     pub trail_seed: u32,

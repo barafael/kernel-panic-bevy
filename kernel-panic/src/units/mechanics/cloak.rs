@@ -1,14 +1,12 @@
 //! Visibility: cloak + fog-of-war.
 //!
-//! Both systems are gated on [`FogEnabled`] (off by default — the
-//! current sandbox build lets the player drive every faction, so
-//! hiding any team's units is a UX bug). When off, every unit stays
-//! `Visible` and gets `Spotted`. Flip the resource to `true` once
-//! proper player/AI ownership lands and the systems below take over.
+//! Both systems are gated on [`FogEnabled`] (off by default: nothing
+//! turns fog on yet). When off, every unit stays `Visible` and gets
+//! `Spotted`.
 //!
 //! Two compose-able visibility systems live here, both throttled to
-//! the same [`VISIBILITY_REFRESH_INTERVAL`] and both anchored on the
-//! [`PlayerTeam`] resource (defaults to team 0):
+//! the same [`VISIBILITY_REFRESH_INTERVAL`] and both seen from the
+//! human player's [`LocalTeam`]:
 //!
 //! - **Cloak** ([`update_cloak_visibility`]) — Logic Bombs
 //!   (`Init_Cloaked=1`) and Worms (stealth ambushers per upstream)
@@ -37,27 +35,13 @@ use crate::units::assets::animation::PieceIndex;
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::player::LocalTeam;
 
-/// Which team's perspective the fog-of-war pass applies from. In
-/// sandbox mode (every faction human-controllable) this picks the
-/// "player" — defaults to team 0. A future MP build would set this
-/// per client.
-#[derive(Resource, Debug, Clone, Copy, Default)]
-pub struct PlayerTeam(pub TeamId);
-
-impl PlayerTeam {
-    fn matches(self, team: &TeamId) -> bool {
-        self.0 == *team
-    }
-}
-
-/// Master switch for fog-of-war / cloak-hiding. Off in the current
-/// sandbox build because every faction is human-controllable — hiding
-/// "enemy" units would mean the player loses sight of teams they're
-/// also driving. The visibility systems still run (and keep `Spotted`
-/// in sync) but treat every team as friendly until this flips on.
-///
-/// Wire to `true` once proper player/AI ownership exists per §6.
+/// Master switch for fog-of-war / cloak-hiding from the [`LocalTeam`]'s
+/// perspective. Defaults to off and nothing enables it yet, so the
+/// visibility systems keep `Spotted` in sync but treat every team as
+/// friendly. Cloak *detection* (and the targeting rule it feeds) runs
+/// regardless.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct FogEnabled(pub bool);
 
@@ -96,7 +80,7 @@ pub fn hidden_from(cloaked: bool, detected_by: u64, team: u8) -> bool {
     cloaked && detected_by & team_bit(team) == 0
 }
 
-/// Marker: this unit is currently visible to the [`PlayerTeam`].
+/// Marker: this unit is currently visible to the [`LocalTeam`].
 /// Friendly units always carry it (they're always visible); enemies
 /// have it added when they enter sight and removed when they leave.
 /// Maintained in lockstep with [`Visibility`] by
@@ -174,7 +158,7 @@ pub fn update_cloak_detection(
 }
 
 /// Visibility for cloaked units (Worms / Logic Bombs) from the
-/// [`PlayerTeam`]'s perspective.
+/// [`LocalTeam`]'s perspective.
 ///
 /// - Friendly cloaked: always visible (`install_cloak_fade_materials`
 ///   handles the half-alpha rendering).
@@ -186,7 +170,7 @@ pub fn update_cloak_visibility(
     time: Res<Time>,
     mut timer: ResMut<VisibilityRefreshTimer>,
     fog: Res<FogEnabled>,
-    player: Res<PlayerTeam>,
+    player: Res<LocalTeam>,
     mut cloaked_q: Query<(&TeamId, &DetectedBy, &mut Visibility), With<Cloaked>>,
 ) {
     timer.0 += time.delta_secs();
@@ -198,7 +182,7 @@ pub fn update_cloak_visibility(
     for (team, detected_by, mut vis) in &mut cloaked_q {
         // Sandbox mode (fog off): nothing hides, every cloaked unit
         // just stays visible.
-        let target = if !fog.0 || player.matches(team) || detected_by.contains(player.0.0) {
+        let target = if !fog.0 || team.0 == player.0 || detected_by.contains(player.0) {
             Visibility::Visible
         } else {
             Visibility::Hidden
@@ -233,7 +217,7 @@ pub struct CloakFadeMaterials {
 pub fn install_cloak_fade_materials(
     mut commands: Commands,
     fog: Res<FogEnabled>,
-    player: Res<PlayerTeam>,
+    player: Res<LocalTeam>,
     new_cloaked: Query<(Entity, &TeamId, &Children), (Added<Cloaked>, Without<CloakFadeMaterials>)>,
     piece_q: Query<&Children, With<PieceIndex>>,
     leaf_q: Query<&MeshMaterial3d<StandardMaterial>>,
@@ -242,7 +226,7 @@ pub fn install_cloak_fade_materials(
     for (entity, team, children) in &new_cloaked {
         // While fog is off, every team is "friendly" — fade them all so
         // the player can see at a glance which units are cloaked.
-        if fog.0 && !player.matches(team) {
+        if fog.0 && team.0 != player.0 {
             continue;
         }
         let mut overrides = Vec::new();
@@ -299,7 +283,7 @@ pub fn restore_cloak_fade_materials(
 }
 
 /// Active fog-of-war over non-cloaked units, applied from the
-/// [`PlayerTeam`]'s perspective. Friendly units (team == player)
+/// [`LocalTeam`]'s perspective. Friendly units (team == player)
 /// stay visible. Enemy units are visible iff *currently* within
 /// any friendly unit's FBI `SightDistance`; the [`Spotted`] marker
 /// is added/removed in lockstep with that visibility so downstream
@@ -318,7 +302,7 @@ pub fn update_fog_visibility(
     time: Res<Time>,
     mut timer: Local<f32>,
     fog: Res<FogEnabled>,
-    player: Res<PlayerTeam>,
+    player: Res<LocalTeam>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<crate::units::spatial::SpatialIndex>,
     viewers_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
@@ -367,11 +351,11 @@ pub fn update_fog_visibility(
     in_sight.clear();
     viewers_q
         .iter()
-        .filter(|(team, _, _)| player.matches(team))
+        .filter(|(team, _, _)| team.0 == player.0)
         .map(|(_, ut, gtf)| (gtf.translation(), unit_registry.sight_distance(ut.0)))
         .for_each(|(vp, sight)| {
             spatial.query_radius(vp, sight, |candidate| {
-                if candidate.team != player.0 .0
+                if candidate.team != player.0
                     && candidate.pos.distance_squared(vp) <= sight * sight
                 {
                     in_sight.insert(candidate.entity);
@@ -382,7 +366,7 @@ pub fn update_fog_visibility(
     for (entity, team, _gtf, mut vis, was_spotted) in &mut targets_q {
         // Friendly units always visible to the player; their Spotted
         // marker stays in sync so the minimap shows them.
-        if player.matches(team) {
+        if team.0 == player.0 {
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }

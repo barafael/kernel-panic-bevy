@@ -42,6 +42,7 @@ pub use aim::{
     AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, Byte, ByteOpen, DeployState,
     Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state, tick_deploy_state,
 };
+pub(crate) use damage::splash_falloff;
 pub use damage::{
     BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage,
     tick_burst_fire, tick_infections, weapon_infection_duration,
@@ -125,11 +126,10 @@ pub struct TargetCache {
     pub expires_at: f32,
 }
 
-/// Grouped queries for target caching, bundled into one `SystemParam`
+/// Grouped queries for target validation, bundled into one `SystemParam`
 /// so `combat_system` stays under Bevy's 16-param limit.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct TargetCachePick<'w, 's> {
-    pub cache: Query<'w, 's, &'static TargetCache>,
     pub alive: Query<'w, 's, &'static GlobalTransform, (With<UnitType>, Without<Dying>)>,
     /// Detection mask of every currently cloaked unit — a cached or
     /// designated target that burrows out of detector range is dropped.
@@ -274,7 +274,7 @@ pub(super) fn fire_salvo_shot(
 ) {
     let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(shot.kind)
         .and_then(|index| unit_registry.sfx_type(shot.kind, index))
-        .map(|s| std::borrow::Cow::Owned(s.to_string()));
+        .map(std::sync::Arc::<str>::from);
     let distance = attacker_gtf.translation().distance(shot.impact_pos);
     for _ in 0..shot.projectiles.max(1) {
         if let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {
@@ -371,7 +371,7 @@ pub struct StunCharge(pub f32);
 pub fn combat_system(
     time: Res<Time>,
     mut cooldowns: Query<&mut AttackCooldown>,
-    attackers: Query<
+    mut attackers: Query<
         (
             Entity,
             &UnitType,
@@ -384,6 +384,8 @@ pub fn combat_system(
             Has<Cloaked>,
             Option<&AutoHold>,
             Option<&WormSplash>,
+            Option<&mut AimTarget>,
+            Option<&mut TargetCache>,
         ),
         (
             Without<Dying>,
@@ -439,7 +441,9 @@ pub fn combat_system(
         cloaked,
         autohold,
         worm_splash,
-    ) in &attackers
+        mut aim_slot,
+        mut cache_slot,
+    ) in &mut attackers
     {
         // Why: a cloaked unit without a surfacing script (Logic Bomb)
         // never fires — it detonates via `tick_kamikaze`. A cloaked Worm
@@ -482,7 +486,7 @@ pub fn combat_system(
         let command_fire = weapon_def.is_some_and(|w| w.command_fire);
 
         if range == 0.0 || command_fire {
-            commands.entity(entity).remove::<AimTarget>();
+            clear(&mut commands, entity, &aim_slot);
             continue;
         }
 
@@ -515,11 +519,12 @@ pub fn combat_system(
                     if dist_sq <= range_sq {
                         best = Some((forced.0, t_pos, dist_sq));
                     } else {
-                        commands.entity(entity).insert(AimTarget {
+                        let aim = AimTarget {
                             pos: t_pos,
                             arc_height: weapon_def.map_or(0.0, |w| w.trajectory_height),
-                        });
-                        commands.entity(entity).remove::<TargetCache>();
+                        };
+                        put(&mut commands, entity, &mut aim_slot, aim);
+                        clear(&mut commands, entity, &cache_slot);
                         continue;
                     }
                 }
@@ -544,10 +549,8 @@ pub fn combat_system(
         }
 
         if best.is_none() && !hold_fire {
-            best = target_pick
-                .cache
-                .get(entity)
-                .ok()
+            best = cache_slot
+                .as_deref()
                 .filter(|cache| cache.expires_at > now)
                 .and_then(|cache| {
                     let pos = target_pick.visible_pos(cache.target, attacker_team.0)?;
@@ -575,16 +578,16 @@ pub fn combat_system(
                 if targets_mines_only && !candidate.kind.is_minekiller_target() {
                     return;
                 }
+                let dist_sq = attacker_pos.distance_squared(candidate.pos);
+                if dist_sq > range_sq {
+                    return;
+                }
                 // Upstream `OnlyTargetCategory1` / `BadTargetCategory1`:
                 // Bits/Bytes/Packets ignore buildings until ordered not
                 // to, the Dos beam only ever looks at mobile units, and
                 // artillery won't chase FAST spam. Manual attack orders
                 // bypass this via the `can_attack` gate at order time.
                 if !unit_registry.auto_target_allowed(unit_type.0, candidate.kind) {
-                    return;
-                }
-                let dist_sq = attacker_pos.distance_squared(candidate.pos);
-                if dist_sq > range_sq {
                     return;
                 }
                 if enforce_los
@@ -611,26 +614,26 @@ pub fn combat_system(
         }
 
         let Some((target_entity, target_pos, _)) = best else {
-            commands
-                .entity(entity)
-                .remove::<AimTarget>()
-                .remove::<TargetCache>();
+            clear(&mut commands, entity, &aim_slot);
+            clear(&mut commands, entity, &cache_slot);
             continue;
         };
-        commands.entity(entity).insert(TargetCache {
+        let cache = TargetCache {
             target: target_entity,
             expires_at: now + TARGET_RESCAN_INTERVAL,
-        });
+        };
+        put(&mut commands, entity, &mut cache_slot, cache);
 
         let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
 
         // Stamp aim target unconditionally so `aim_weapons_system`
         // keeps steering through cooldown/opening — the weapon is on
         // target the moment firing is allowed.
-        commands.entity(entity).insert(AimTarget {
+        let aim = AimTarget {
             pos: target_pos,
             arc_height,
-        });
+        };
+        put(&mut commands, entity, &mut aim_slot, aim);
 
         // A cloaked Worm never bites from under cover: the aim request
         // above surfaces it (`tick_worm_surfacing`, worm.bos AimWeapon1
@@ -716,6 +719,29 @@ pub fn combat_system(
                 attacker_pos,
             );
         }
+    }
+}
+
+/// Overwrite `slot`'s component in place, or insert it when absent —
+/// units that keep a target skip the per-tick archetype move.
+fn put<C: Component<Mutability = bevy::ecs::component::Mutable>>(
+    commands: &mut Commands,
+    entity: Entity,
+    slot: &mut Option<Mut<C>>,
+    value: C,
+) {
+    match slot {
+        Some(c) => **c = value,
+        None => {
+            commands.entity(entity).insert(value);
+        }
+    }
+}
+
+/// Remove `C` only when the unit actually carries it.
+fn clear<C: Component>(commands: &mut Commands, entity: Entity, slot: &Option<Mut<C>>) {
+    if slot.is_some() {
+        commands.entity(entity).remove::<C>();
     }
 }
 

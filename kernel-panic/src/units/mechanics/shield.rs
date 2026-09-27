@@ -283,14 +283,20 @@ pub fn tick_shield_shells(
             let Ok((_, material, mut visibility)) = shells.get_mut(*child) else {
                 continue;
             };
-            if let Some(mat) = materials.get_mut(&material.0) {
+            // `get_mut` marks the asset changed (re-upload), so only
+            // take it when the tint actually moved.
+            if materials
+                .get(&material.0)
+                .is_some_and(|mat| mat.base_color != tinted)
+                && let Some(mat) = materials.get_mut(&material.0)
+            {
                 mat.base_color = tinted;
             }
-            *visibility = if ratio <= 0.0 {
+            visibility.set_if_neq(if ratio <= 0.0 {
                 Visibility::Hidden
             } else {
                 Visibility::Inherited
-            };
+            });
         }
     }
 }

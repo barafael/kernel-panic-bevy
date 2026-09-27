@@ -19,10 +19,12 @@
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
 //! runtime never touches the raw TDF strings.
 
-use bevy::prelude::*;
+use std::collections::HashMap;
+
 use bevy::ecs::system::SystemParam;
+use bevy::prelude::*;
 use spring_tdf::{
-    CegExpr, EffectProperties, EmitVector, EvalCtx, ExplosionDef, ExplosionDefs, FlameProperties,
+    CegExpr, ColorMap, EffectProperties, EmitVector, EvalCtx, ExplosionDef, ExplosionDefs, FlameProperties,
     ParticleProperties, SpawnerProperties,
 };
 
@@ -38,25 +40,128 @@ pub struct CegRegistry {
     defs: ExplosionDefs,
 }
 
-/// Shared particle quad mesh: corners at `±1` on X and Y so the
-/// spawner can set `Transform::scale = Vec3::splat(size)` and get
-/// upstream's `±xdir*size ± ydir*size` total extent (full width =
-/// `2 * size`). Using `Rectangle::new(1.0, 1.0)` instead would halve
-/// every particle relative to its CEG-authored size — that's the bug
-/// that made every impact look puny vs. upstream footage.
+/// Render assets every CEG spawn shares: the particle quad, the spike
+/// material and the colour-map material palettes.
 #[derive(Resource, Default)]
-pub(super) struct CegParticleMesh {
+pub(super) struct CegRenderAssets {
+    /// Shared particle quad mesh: corners at `±1` on X and Y so the
+    /// spawner can set `Transform::scale = Vec3::splat(size)` and get
+    /// upstream's `±xdir*size ± ydir*size` total extent (full width =
+    /// `2 * size`). Using `Rectangle::new(1.0, 1.0)` instead would halve
+    /// every particle relative to its CEG-authored size — that's the bug
+    /// that made every impact look puny vs. upstream footage.
     pub handle: Option<Handle<Mesh>>,
     /// Shared additive `laserend` material for [`CegSpike`] streaks
     /// (per-spike colour rides on vertex colours).
     pub spike_material: Option<Handle<StandardMaterial>>,
+    palettes: Vec<CegPalette>,
+    /// Texture → indices into `palettes` using it.
+    palettes_by_texture: HashMap<AssetId<Image>, Vec<usize>>,
 }
 
-impl CegParticleMesh {
+/// Steps a `colorMap` is quantised to over a particle's life. Upstream
+/// interpolates continuously; at 64 steps adjacent materials differ by
+/// under 2% of the map's range — imperceptible under additive blending —
+/// and every particle of a (texture, colour map) pair shares at most 65
+/// materials instead of owning one it rewrites every tick.
+const COLOR_MAP_STEPS: f32 = 64.0;
+
+/// One (texture, `colorMap`) pair's lazily-built additive materials,
+/// one per quantised life step.
+struct CegPalette {
+    texture: Handle<Image>,
+    color_map: ColorMap,
+    materials: Vec<Option<Handle<StandardMaterial>>>,
+}
+
+/// Index of a colour-map life step in `[0, COLOR_MAP_STEPS]`.
+fn color_step(frac: f32) -> u8 {
+    (frac.clamp(0.0, 1.0) * COLOR_MAP_STEPS).round() as u8
+}
+
+/// A particle's handle into [`CegRenderAssets`]' palettes: which
+/// palette, and the life step its current material shows.
+#[derive(Clone, Copy)]
+pub(super) struct PaletteSlot {
+    palette: usize,
+    step: u8,
+}
+
+impl CegRenderAssets {
     fn get(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
         self.handle
             .get_or_insert_with(|| meshes.add(Rectangle::new(2.0, 2.0)))
             .clone()
+    }
+
+    /// Palette for `texture` × `stops`, created on first use. Looked up
+    /// once per effect spawn, not per particle.
+    fn palette(&mut self, texture: &Handle<Image>, color_map: &ColorMap) -> usize {
+        let same_texture = self.palettes_by_texture.entry(texture.id()).or_default();
+        if let Some(&i) = same_texture
+            .iter()
+            .find(|&&i| self.palettes[i].color_map == *color_map)
+        {
+            return i;
+        }
+        let i = self.palettes.len();
+        same_texture.push(i);
+        self.palettes.push(CegPalette {
+            texture: texture.clone(),
+            color_map: color_map.clone(),
+            materials: vec![None; COLOR_MAP_STEPS as usize + 1],
+        });
+        i
+    }
+
+    /// Material showing `slot`'s palette at its life step — upstream
+    /// `colorMap[life]` multiplied into the texture, additive, unlit.
+    fn material(
+        &mut self,
+        slot: PaletteSlot,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Handle<StandardMaterial> {
+        let palette = &mut self.palettes[slot.palette];
+        palette.materials[slot.step as usize]
+            .get_or_insert_with(|| {
+                // `unlit=true` means StandardMaterial ignores lighting,
+                // so colour is driven entirely via `base_color`. Upstream
+                // multiplies the texture by `colorMap[life]` with no
+                // emissive boost — the colour IS the brightness under
+                // additive (GL_ONE/GL_ONE) blending, where brightness
+                // comes from stacking translucent particles. An emissive
+                // multiplier would over-saturate every particle after
+                // tonemapping and turn the faint blue shot1 puff into a
+                // flashbang.
+                let c = palette
+                    .color_map
+                    .sample(f32::from(slot.step) / COLOR_MAP_STEPS);
+                materials.add(StandardMaterial {
+                    base_color: Color::linear_rgba(c[0], c[1], c[2], c[3]),
+                    base_color_texture: Some(palette.texture.clone()),
+                    unlit: true,
+                    alpha_mode: AlphaMode::Add,
+                    cull_mode: None,
+                    ..default()
+                })
+            })
+            .clone()
+    }
+
+    /// Advance `slot` to the step for life fraction `frac`; returns the
+    /// new material only when the step changed.
+    fn restep(
+        &mut self,
+        slot: &mut PaletteSlot,
+        frac: f32,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> Option<Handle<StandardMaterial>> {
+        let step = color_step(frac);
+        if step == slot.step {
+            return None;
+        }
+        slot.step = step;
+        Some(self.material(*slot, materials))
     }
 }
 
@@ -71,7 +176,7 @@ pub(super) struct CegTrailCtx<'w, 's> {
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
-    pub particle_mesh: ResMut<'w, CegParticleMesh>,
+    pub ceg_assets: ResMut<'w, CegRenderAssets>,
     pub _marker: std::marker::PhantomData<&'s ()>,
 }
 
@@ -107,41 +212,47 @@ impl CegRegistry {
     /// texture referenced by CEGs KP actually ships; anything else
     /// returns `None`.
     pub fn resolve_texture(tex_name: &str) -> Option<&'static str> {
-        match tex_name.trim().to_ascii_lowercase().as_str() {
-            "circle" => Some("whitecircle.tga"),
-            "hcircle" => Some("hollowcircle.tga"),
-            "square" => Some("solidwhite.tga"),
-            "squarehollow" => Some("hollowsquare.tga"),
-            "squaretrans" => Some("transparentwhite.tga"),
-            "hline" => Some("horizontalline.tga"),
-            "vline" => Some("verticalline.tga"),
-            "dosray" => Some("dosray.tga"),
-            "arrow" => Some("arrow.tga"),
-            "arrownoends" => Some("arrownoends.tga"),
-            "arrowflare" => Some("arrowflare.tga"),
-            "bytelaser" => Some("bytemegabeam.tga"),
-            "bytelasermid" => Some("bytemegabeammid.tga"),
-            "heart" => Some("heart.tga"),
-            "shockwave" => Some("shockwave.tga"),
-            "black" => Some("black.tga"),
-            "linkbeam" => Some("linkbeam.tga"),
-            "hexgrid" => Some("hexgrid.tga"),
-            "hexgridhole" => Some("hexgridhole.tga"),
-            "hexastar" => Some("hexastar.tga"),
-            "pointertrail" => Some("pointershottrail.tga"),
-            "flowtrail" => Some("flowtrail1.tga"),
-            "firetrail" => Some("firetrail.tga"),
-            "sparkle" => Some("sparkle.tga"),
-            "bubbles" => Some("bubbles.tga"),
-            "lobedincantation" => Some("lobedincantation.tga"),
-            // Engine default atlas (`ProjectileDrawer`'s `laserendtex`),
-            // used by `explspike` streaks.
-            "laserend" => Some("laserend.tga"),
-            "none" | "" => None,
-            _ => None,
-        }
+        let name = tex_name.trim();
+        CEG_TEXTURES
+            .iter()
+            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
+            .map(|&(_, file)| file)
     }
 }
+
+/// CEG texture alias → atlas file (`RESOURCES.TDF` subset). `none`
+/// and unknown aliases resolve to nothing.
+const CEG_TEXTURES: &[(&str, &str)] = &[
+    ("circle", "whitecircle.tga"),
+    ("hcircle", "hollowcircle.tga"),
+    ("square", "solidwhite.tga"),
+    ("squarehollow", "hollowsquare.tga"),
+    ("squaretrans", "transparentwhite.tga"),
+    ("hline", "horizontalline.tga"),
+    ("vline", "verticalline.tga"),
+    ("dosray", "dosray.tga"),
+    ("arrow", "arrow.tga"),
+    ("arrownoends", "arrownoends.tga"),
+    ("arrowflare", "arrowflare.tga"),
+    ("bytelaser", "bytemegabeam.tga"),
+    ("bytelasermid", "bytemegabeammid.tga"),
+    ("heart", "heart.tga"),
+    ("shockwave", "shockwave.tga"),
+    ("black", "black.tga"),
+    ("linkbeam", "linkbeam.tga"),
+    ("hexgrid", "hexgrid.tga"),
+    ("hexgridhole", "hexgridhole.tga"),
+    ("hexastar", "hexastar.tga"),
+    ("pointertrail", "pointershottrail.tga"),
+    ("flowtrail", "flowtrail1.tga"),
+    ("firetrail", "firetrail.tga"),
+    ("sparkle", "sparkle.tga"),
+    ("bubbles", "bubbles.tga"),
+    ("lobedincantation", "lobedincantation.tga"),
+    // Engine default atlas (`ProjectileDrawer`'s `laserendtex`), used by
+    // `explspike` streaks.
+    ("laserend", "laserend.tga"),
+];
 
 // ─── Runtime components ─────────────────────────────────────────────
 
@@ -154,10 +265,9 @@ pub(super) struct CegParticle {
     pub size: f32,
     pub size_growth_per_sec: f32,
     pub size_mod_per_sec: f32,
-    pub color_map_stops: Vec<[f32; 4]>,
+    pub color: PaletteSlot,
     pub life: f32,
     pub max_life: f32,
-    pub material: Handle<StandardMaterial>,
     pub directional: bool,
 }
 
@@ -169,8 +279,7 @@ pub(super) struct CegFlame {
     pub max_life_frames: f32,
     pub base_size: f32,
     pub size_growth_per_frame: f32,
-    pub color_map_stops: Vec<[f32; 4]>,
-    pub material: Handle<StandardMaterial>,
+    pub color: PaletteSlot,
 }
 
 /// One live `CExploSpikeProjectile` (`class=explspike`) — upstream
@@ -224,14 +333,14 @@ pub(super) fn spawn_ceg(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
-    particle_mesh: &mut CegParticleMesh,
+    ceg_assets: &mut CegRenderAssets,
 ) -> bool {
     let Some(def) = registry.get(ceg_name) else {
         return false;
     };
 
     let dir = dir.normalize_or(Vec3::Y);
-    let mesh = particle_mesh.get(meshes);
+    let mesh = ceg_assets.get(meshes);
 
     for effect in &def.effects {
         match &effect.properties {
@@ -245,17 +354,18 @@ pub(super) fn spawn_ceg(
                 materials,
                 images,
                 model_cache,
+                ceg_assets,
                 &mesh,
             ),
             EffectProperties::Flame(f) => spawn_flame(
                 effect.count,
                 f,
                 pos,
-                dir,
                 commands,
                 materials,
                 images,
                 model_cache,
+                ceg_assets,
                 &mesh,
             ),
             EffectProperties::Spawner(s) => {
@@ -271,7 +381,7 @@ pub(super) fn spawn_ceg(
                 materials,
                 images,
                 model_cache,
-                particle_mesh,
+                ceg_assets,
             ),
             EffectProperties::Raw(_) => {
                 // Unsupported class (CStars, etc.) — silently skipped.
@@ -292,6 +402,7 @@ fn spawn_particle_system(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
+    ceg_assets: &mut CegRenderAssets,
     mesh: &Handle<Mesh>,
 ) {
     let Some(filename) = CegRegistry::resolve_texture(&props.texture) else {
@@ -300,6 +411,11 @@ fn spawn_particle_system(
     let Some((tex, _w, _h)) = load_beam_texture(filename, model_cache, images) else {
         return;
     };
+    let color = PaletteSlot {
+        palette: ceg_assets.palette(&tex, &props.color_map),
+        step: 0,
+    };
+    let material = ceg_assets.material(color, materials);
 
     let base_dir = match &props.emit_vector {
         EmitVector::Direction => dir,
@@ -392,23 +508,6 @@ fn spawn_particle_system(
             };
             let size_growth_per_sec = props.size_growth.eval(&ctx_base) * GAME_SPEED;
 
-            // Material: `unlit=true` means StandardMaterial ignores
-            // lighting, so we can drive colour entirely via `base_color`.
-            // Upstream multiplies the texture by `colorMap[life]` with
-            // no emissive boost — the colour IS the brightness under
-            // additive blending. An emissive multiplier would over-
-            // saturate every particle after tonemapping and turn the
-            // faint blue shot1 puff into a flashbang.
-            let initial = props.color_map.sample(0.0);
-            let material = materials.add(StandardMaterial {
-                base_color: Color::linear_rgba(initial[0], initial[1], initial[2], initial[3]),
-                base_color_texture: Some(tex.clone()),
-                unlit: true,
-                alpha_mode: AlphaMode::Add,
-                cull_mode: None,
-                ..default()
-            });
-
             commands.spawn((
                 CegParticle {
                     velocity,
@@ -417,14 +516,13 @@ fn spawn_particle_system(
                     size,
                     size_growth_per_sec,
                     size_mod_per_sec,
-                    color_map_stops: props.color_map.stops.clone(),
+                    color,
                     life: life_secs,
                     max_life: life_secs,
-                    material: material.clone(),
                     directional: props.directional,
                 },
                 Mesh3d(mesh.clone()),
-                MeshMaterial3d(material),
+                MeshMaterial3d(material.clone()),
                 Transform::from_translation(particle_pos).with_scale(Vec3::splat(size)),
             ));
         }
@@ -436,11 +534,11 @@ fn spawn_flame(
     count: u32,
     props: &FlameProperties,
     origin: Vec3,
-    _dir: Vec3,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
+    ceg_assets: &mut CegRenderAssets,
     mesh: &Handle<Mesh>,
 ) {
     // We render only the `frontTexture` plane — the camera-facing
@@ -460,15 +558,11 @@ fn spawn_flame(
     let ttl = props.ttl.eval(&ctx).max(1.0);
     let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
 
-    let initial = props.color_map.sample(0.0);
-    let material = materials.add(StandardMaterial {
-        base_color: Color::linear_rgba(initial[0], initial[1], initial[2], initial[3]),
-        base_color_texture: Some(tex),
-        unlit: true,
-        alpha_mode: AlphaMode::Add,
-        cull_mode: None,
-        ..default()
-    });
+    let color = PaletteSlot {
+        palette: ceg_assets.palette(&tex, &props.color_map),
+        step: 0,
+    };
+    let material = ceg_assets.material(color, materials);
 
     for _ in 0..count {
         commands.spawn((
@@ -477,8 +571,7 @@ fn spawn_flame(
                 max_life_frames: ttl,
                 base_size,
                 size_growth_per_frame,
-                color_map_stops: props.color_map.stops.clone(),
-                material: material.clone(),
+                color,
             },
             Mesh3d(mesh.clone()),
             MeshMaterial3d(material.clone()),
@@ -501,12 +594,12 @@ fn spawn_spikes(
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
-    particle_mesh: &mut CegParticleMesh,
+    ceg_assets: &mut CegRenderAssets,
 ) {
     if count == 0 {
         return;
     }
-    let material = match &particle_mesh.spike_material {
+    let material = match &ceg_assets.spike_material {
         Some(m) => m.clone(),
         None => {
             let texture = CegRegistry::resolve_texture("laserend")
@@ -520,7 +613,7 @@ fn spawn_spikes(
                 cull_mode: None,
                 ..default()
             });
-            particle_mesh.spike_material = Some(m.clone());
+            ceg_assets.spike_material = Some(m.clone());
             m
         }
     };
@@ -655,7 +748,13 @@ fn spawn_delayed(
 /// Physics + colour update for live CEG particles.
 pub(super) fn tick_ceg_particles(
     time: Res<Time>,
-    mut particles: Query<(Entity, &mut CegParticle, &mut Transform)>,
+    mut particles: Query<(
+        Entity,
+        &mut CegParticle,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut ceg_assets: ResMut<CegRenderAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
@@ -683,7 +782,7 @@ pub(super) fn tick_ceg_particles(
         })
         .unwrap_or_else(|_| (Vec3::Y * 1000.0, Vec3::X, Vec3::Y, Vec3::Z));
 
-    for (entity, mut p, mut transform) in &mut particles {
+    for (entity, mut p, mut transform, mut material) in &mut particles {
         p.life -= dt;
         if p.life <= 0.0 {
             commands.entity(entity).despawn();
@@ -724,13 +823,8 @@ pub(super) fn tick_ceg_particles(
         transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, normal));
 
         let frac = 1.0 - (p.life / p.max_life).clamp(0.0, 1.0);
-        let c = sample_stops(&p.color_map_stops, frac);
-        if let Some(mat) = materials.get_mut(&p.material) {
-            // Additive blend: final_color = texture × base_color, no
-            // emissive multiplier. Matches upstream's GL_ONE/GL_ONE
-            // pass where brightness comes from stacking translucent
-            // particles rather than from per-particle amplification.
-            mat.base_color = Color::linear_rgba(c[0], c[1], c[2], c[3]);
+        if let Some(handle) = ceg_assets.restep(&mut p.color, frac, &mut materials) {
+            material.0 = handle;
         }
     }
 }
@@ -744,7 +838,13 @@ pub(super) fn tick_ceg_particles(
 /// frames, so we advance `life_frames` by `dt * GAME_SPEED`.
 pub(super) fn tick_ceg_flames(
     time: Res<Time>,
-    mut flames: Query<(Entity, &mut CegFlame, &mut Transform)>,
+    mut flames: Query<(
+        Entity,
+        &mut CegFlame,
+        &mut Transform,
+        &mut MeshMaterial3d<StandardMaterial>,
+    )>,
+    mut ceg_assets: ResMut<CegRenderAssets>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
@@ -758,7 +858,7 @@ pub(super) fn tick_ceg_flames(
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
 
-    for (entity, mut f, mut transform) in &mut flames {
+    for (entity, mut f, mut transform, mut material) in &mut flames {
         f.life_frames -= dt_frames;
         if f.life_frames <= 0.0 {
             commands.entity(entity).despawn();
@@ -777,9 +877,8 @@ pub(super) fn tick_ceg_flames(
         transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, to_cam));
 
         let frac = 1.0 - (f.life_frames / f.max_life_frames).clamp(0.0, 1.0);
-        let c = sample_stops(&f.color_map_stops, frac);
-        if let Some(mat) = materials.get_mut(&f.material) {
-            mat.base_color = Color::linear_rgba(c[0], c[1], c[2], c[3]);
+        if let Some(handle) = ceg_assets.restep(&mut f.color, frac, &mut materials) {
+            material.0 = handle;
         }
     }
 }
@@ -796,7 +895,7 @@ pub(super) fn tick_ceg_delayed_spawns(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
-    mut particle_mesh: ResMut<CegParticleMesh>,
+    mut ceg_assets: ResMut<CegRenderAssets>,
     mut rng: Local<u32>,
 ) {
     if timers.is_empty() {
@@ -804,20 +903,16 @@ pub(super) fn tick_ceg_delayed_spawns(
     }
     let dt = time.delta_secs();
 
-    // Clone out the ready targets so we can mutate commands freely.
-    let mut ready: Vec<(Entity, String, Vec3, Vec3)> = Vec::new();
     for (entity, mut timer) in &mut timers {
         timer.delay_secs -= dt;
-        if timer.delay_secs <= 0.0 {
-            ready.push((entity, timer.target_ceg.clone(), timer.pos, timer.dir));
+        if timer.delay_secs > 0.0 {
+            continue;
         }
-    }
-    for (entity, target, pos, dir) in ready {
         commands.entity(entity).despawn();
         spawn_ceg(
-            &target,
-            pos,
-            dir,
+            &timer.target_ceg,
+            timer.pos,
+            timer.dir,
             &registry,
             &mut rng,
             &mut commands,
@@ -825,7 +920,7 @@ pub(super) fn tick_ceg_delayed_spawns(
             &mut materials,
             &mut images,
             &mut model_cache,
-            &mut particle_mesh,
+            &mut ceg_assets,
         );
     }
 }
@@ -869,28 +964,6 @@ fn perpendicular_to(dir: Vec3, rand: f32) -> Vec3 {
     let tangent = dir.cross(ref_axis).normalize_or(Vec3::X);
     let angle = rand * std::f32::consts::PI;
     Quat::from_axis_angle(dir.normalize_or(Vec3::Y), angle) * tangent
-}
-
-fn sample_stops(stops: &[[f32; 4]], t: f32) -> [f32; 4] {
-    match stops.len() {
-        0 => [1.0, 1.0, 1.0, 1.0],
-        1 => stops[0],
-        n => {
-            let t = t.clamp(0.0, 1.0);
-            let segs = n - 1;
-            let scaled = t * segs as f32;
-            let idx = (scaled as usize).min(segs - 1);
-            let local = scaled - idx as f32;
-            let a = stops[idx];
-            let b = stops[idx + 1];
-            [
-                a[0] + (b[0] - a[0]) * local,
-                a[1] + (b[1] - a[1]) * local,
-                a[2] + (b[2] - a[2]) * local,
-                a[3] + (b[3] - a[3]) * local,
-            ]
-        }
-    }
 }
 
 /// [`rng::next_f32`] for a stream that may arrive unseeded: CEG
@@ -967,30 +1040,6 @@ mod tests {
         // then depends on the auto-seeded state (`0xA3C59AC3`).
         let _ = next_unit(&mut s);
         assert_ne!(s, 0);
-    }
-
-    #[test]
-    fn sample_stops_empty_is_white() {
-        assert_eq!(sample_stops(&[], 0.5), [1.0, 1.0, 1.0, 1.0]);
-    }
-
-    #[test]
-    fn sample_stops_single_returns_that_stop() {
-        let stops = vec![[0.1, 0.2, 0.3, 0.4]];
-        assert_eq!(sample_stops(&stops, 0.7), [0.1, 0.2, 0.3, 0.4]);
-    }
-
-    #[test]
-    fn sample_stops_interpolates_across_segments() {
-        let stops = vec![
-            [1.0, 0.0, 0.0, 1.0],
-            [0.0, 1.0, 0.0, 1.0],
-            [0.0, 0.0, 1.0, 1.0],
-        ];
-        // t=0.5 → exactly on stop[1].
-        let mid = sample_stops(&stops, 0.5);
-        assert!((mid[0] - 0.0).abs() < 1e-4);
-        assert!((mid[1] - 1.0).abs() < 1e-4);
     }
 
     #[test]

@@ -53,24 +53,16 @@ pub(super) struct VolumeHitCtx<'w, 's> {
 pub(super) fn tick_weapon_fx(
     time: Res<Time>,
     mut arcs: Query<(Entity, &mut LightningArc)>,
-    mut beams: Query<(Entity, &mut BeamVisual, &mut Transform), Without<ProjectileVisual>>,
+    mut beams: Query<(Entity, &mut BeamVisual)>,
     mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
-    mut bolts: Query<
-        (Entity, &mut LaserBolt, &mut Transform),
-        (Without<BeamVisual>, Without<ProjectileVisual>),
-    >,
+    mut bolts: Query<(Entity, &mut LaserBolt, &mut Transform), Without<ProjectileVisual>>,
     mut sparkles: Query<
         (Entity, &mut BuildSparkle, &mut Transform),
-        (
-            Without<BeamVisual>,
-            Without<ProjectileVisual>,
-            Without<LaserBolt>,
-        ),
+        (Without<ProjectileVisual>, Without<LaserBolt>),
     >,
     mut impacts: Query<
         (Entity, &mut ImpactBurst, &mut Transform),
         (
-            Without<BeamVisual>,
             Without<ProjectileVisual>,
             Without<LaserBolt>,
             Without<BuildSparkle>,
@@ -79,7 +71,6 @@ pub(super) fn tick_weapon_fx(
     mut flashes: Query<
         (Entity, &mut GroundFlash, &mut Transform),
         (
-            Without<BeamVisual>,
             Without<ProjectileVisual>,
             Without<LaserBolt>,
             Without<BuildSparkle>,
@@ -115,16 +106,21 @@ pub(super) fn tick_weapon_fx(
         }
         let fade = (arc.lifetime / arc.max_lifetime).clamp(0.0, 1.0);
         let half = arc.width;
-        let Some(mesh) = ceg_ctx.meshes.get_mut(&arc.mesh) else {
+        let Some((positions, colors)) = ceg_ctx
+            .meshes
+            .get_mut(&arc.mesh)
+            .and_then(|mesh| positions_and_colors(mesh))
+        else {
             continue;
         };
-        let segments = arc.points.len().saturating_sub(1);
-        if segments == 0 {
-            continue;
-        }
-        let mut positions = Vec::with_capacity(segments * 4);
-        let mut colors = Vec::with_capacity(segments * 4);
-        for pair in arc.points.windows(2) {
+        let c = arc.tint.to_f32_array();
+        let color = [c[0], c[1], c[2], c[3] * fade];
+        for ((pair, quad), quad_colors) in arc
+            .points
+            .windows(2)
+            .zip(positions.chunks_exact_mut(4))
+            .zip(colors.chunks_exact_mut(4))
+        {
             let (a, b) = (pair[0], pair[1]);
             let seg_dir = (b - a).try_normalize().unwrap_or(Vec3::Z);
             let to_cam = cam_pos - a;
@@ -133,23 +129,18 @@ pub(super) fn tick_weapon_fx(
                 .try_normalize()
                 .unwrap_or_else(|| Vec3::Y.cross(seg_dir).try_normalize().unwrap_or(Vec3::X));
             let offset = perp * half;
-            positions.push([a.x - offset.x, a.y - offset.y, a.z - offset.z]);
-            positions.push([a.x + offset.x, a.y + offset.y, a.z + offset.z]);
-            positions.push([b.x + offset.x, b.y + offset.y, b.z + offset.z]);
-            positions.push([b.x - offset.x, b.y - offset.y, b.z - offset.z]);
-            let c = arc.tint.to_f32_array();
-            for _ in 0..4 {
-                colors.push([c[0], c[1], c[2], c[3] * fade]);
-            }
+            quad[0] = (a - offset).to_array();
+            quad[1] = (a + offset).to_array();
+            quad[2] = (b + offset).to_array();
+            quad[3] = (b - offset).to_array();
+            quad_colors.fill(color);
         }
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     }
 
     // Hit-scan beams (BeamLaser / BuildLaser). Rewrite the 4 corners
     // each frame so the ribbon always faces the camera — same xdir
     // math as the bolt path above.
-    for (entity, mut beam, _transform) in &mut beams {
+    for (entity, mut beam) in &mut beams {
         beam.lifetime -= dt;
         if beam.lifetime <= 0.0 {
             commands.entity(entity).despawn();
@@ -535,12 +526,12 @@ pub(super) fn tick_weapon_fx(
 
         // `cegTag`: `explGenHandler.GenExplosion(cegID, pos, dir, …)`
         // every sim frame while the projectile has fuel.
-        if let Some(ceg) = proj.trail_ceg.clone()
+        if let Some(weapon) = proj.trail_ceg
             && proj.flight.has_fuel()
         {
             let dir = proj.velocity.normalize_or(Vec3::Y);
             spawn_ceg(
-                &ceg,
+                &weapon_registry.by_id(weapon).ceg_tag,
                 pos,
                 dir,
                 &ceg_ctx.ceg_registry,
@@ -550,7 +541,7 @@ pub(super) fn tick_weapon_fx(
                 &mut ceg_ctx.materials,
                 &mut ceg_ctx.images,
                 &mut ceg_ctx.model_cache,
-                &mut ceg_ctx.particle_mesh,
+                &mut ceg_ctx.ceg_assets,
             );
         }
     }
@@ -837,13 +828,21 @@ pub(super) fn tick_fading_trails(
 /// both carry the fade). Unused tail slots collapse onto the oldest
 /// sample.
 fn rewrite_trail_mesh(meshes: &mut Assets<Mesh>, trail: &ProjectileTrail, cam_pos: Vec3) {
-    let Some(mesh) = meshes.get_mut(&trail.mesh) else {
+    let Some((positions, colors)) = meshes
+        .get_mut(&trail.mesh)
+        .and_then(|mesh| positions_and_colors(mesh))
+    else {
         return;
     };
-    let expected = TRAIL_SAMPLE_COUNT * 2;
-    let mut verts: Vec<[f32; 3]> = Vec::with_capacity(expected);
-    let mut colors: Vec<[f32; 4]> = Vec::with_capacity(expected);
-    for s in &trail.samples {
+    // One vertex pair per sample; unused pairs collapse onto the first
+    // vertex, transparent.
+    let mut pos_pairs = positions.chunks_exact_mut(2);
+    let mut color_pairs = colors.chunks_exact_mut(2);
+    let mut pad = [0.0; 3];
+    for (i, s) in trail.samples.iter().enumerate() {
+        let (Some(pos_pair), Some(color_pair)) = (pos_pairs.next(), color_pairs.next()) else {
+            break;
+        };
         let t = (s.age / SMOKE_TIME_FRAMES).clamp(0.0, 1.0);
         let dif = (s.pos - cam_pos).normalize_or(Vec3::NEG_Y);
         let odir = dif.cross(s.dir).normalize_or(Vec3::X);
@@ -854,22 +853,33 @@ fn rewrite_trail_mesh(meshes: &mut Assets<Mesh>, trail: &ProjectileTrail, cam_po
             ((1.0 - t) * (0.7 + dif.dot(s.dir).abs())).clamp(0.0, 1.0)
         };
         let c = SMOKE_COLOR * fade;
-        verts.push((s.pos - odir * size).to_array());
-        verts.push((s.pos + odir * size).to_array());
-        colors.push([c, c, c, fade]);
-        colors.push([c, c, c, fade]);
+        pos_pair[0] = (s.pos - odir * size).to_array();
+        pos_pair[1] = (s.pos + odir * size).to_array();
+        color_pair.fill([c, c, c, fade]);
+        if i == 0 {
+            pad = pos_pair[0];
+        }
     }
-    let pad_pos = verts.first().copied().unwrap_or([0.0; 3]);
-    verts.resize(expected, pad_pos);
-    colors.resize(expected, [0.0; 4]);
-    if let Some(VertexAttributeValues::Float32x3(positions)) =
-        mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
-    {
-        positions.copy_from_slice(&verts);
+    pos_pairs.for_each(|pair| pair.fill(pad));
+    color_pairs.for_each(|pair| pair.fill([0.0; 4]));
+}
+
+/// A ribbon mesh's position and colour buffers, borrowed together so a
+/// per-tick rewrite fills both in place without allocating.
+fn positions_and_colors(mesh: &mut Mesh) -> Option<(&mut Vec<[f32; 3]>, &mut Vec<[f32; 4]>)> {
+    let (mut positions, mut colors) = (None, None);
+    for (attribute, values) in mesh.attributes_mut() {
+        match values {
+            VertexAttributeValues::Float32x3(p) if attribute.id == Mesh::ATTRIBUTE_POSITION.id => {
+                positions = Some(p);
+            }
+            VertexAttributeValues::Float32x4(c) if attribute.id == Mesh::ATTRIBUTE_COLOR.id => {
+                colors = Some(c);
+            }
+            _ => {}
+        }
     }
-    if let Some(VertexAttributeValues::Float32x4(dst)) = mesh.attribute_mut(Mesh::ATTRIBUTE_COLOR) {
-        dst.copy_from_slice(&colors);
-    }
+    Some((positions?, colors?))
 }
 
 /// Rewrite a 4-vertex quad's positions in place (shared by beam + bolt
@@ -921,7 +931,7 @@ fn rewrite_quad_color(mesh: &mut Mesh, rgba: [f32; 4]) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::ceg::{CegParticleMesh, CegRegistry};
+    use super::super::ceg::{CegRegistry, CegRenderAssets};
     use super::*;
     use crate::units::assets::meshes::S3OModelCache;
     use bevy::ecs::system::RunSystemOnce;
@@ -942,7 +952,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1029,7 +1039,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1083,7 +1093,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1093,7 +1103,7 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 70.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 70.0))),
-                CollisionVolume::sphere(5.0),
+                CollisionVolume { radius: 5.0 },
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();
@@ -1166,7 +1176,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1180,7 +1190,7 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 30.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 30.0))),
-                CollisionVolume::sphere(5.0),
+                CollisionVolume { radius: 5.0 },
                 UnitType(UnitKind::Bit),
                 TeamId(0),
                 Faction::System,
@@ -1194,7 +1204,7 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 50.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 50.0))),
-                CollisionVolume::sphere(5.0),
+                CollisionVolume { radius: 5.0 },
                 UnitType(UnitKind::Bug),
                 TeamId(1),
                 Faction::Hacker,
@@ -1207,7 +1217,7 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 100.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 100.0))),
-                CollisionVolume::sphere(5.0),
+                CollisionVolume { radius: 5.0 },
                 UnitType(UnitKind::Bug),
                 TeamId(1),
                 Faction::Hacker,
@@ -1299,7 +1309,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
 
@@ -1311,7 +1321,7 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(50.0, 0.0, 70.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(50.0, 0.0, 70.0))),
-                CollisionVolume::sphere(5.0),
+                CollisionVolume { radius: 5.0 },
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();
@@ -1382,7 +1392,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .insert_resource(CegRegistry::load());
         app
@@ -1517,7 +1527,7 @@ mod tests {
             .world_mut()
             .spawn((
                 GlobalTransform::from_translation(target_pos),
-                CollisionVolume::sphere(12.0),
+                CollisionVolume { radius: 12.0 },
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
-use crate::units::combat::{Infected, weapon_infection_duration};
+use crate::units::combat::{Infected, splash_falloff, weapon_infection_duration};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::combat::Dying;
@@ -889,8 +889,7 @@ pub fn tick_sigterm_bombs(
                 return;
             }
             if let Ok(mut health) = health_q.get_mut(candidate.entity) {
-                let t = (d_sq.sqrt() / SIGTERM_BLAST_RADIUS).clamp(0.0, 1.0);
-                let falloff = 1.0 - t * (1.0 - SIGTERM_BLAST_EDGE);
+                let falloff = splash_falloff(d_sq.sqrt(), SIGTERM_BLAST_RADIUS, SIGTERM_BLAST_EDGE);
                 health.current -= SIGTERM_BLAST_DAMAGE * falloff;
             }
         });

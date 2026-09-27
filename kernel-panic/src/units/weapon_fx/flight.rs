@@ -37,11 +37,6 @@ pub fn engine_turn_rate(tdf_turnrate: f32) -> f32 {
     tdf_turnrate * SHORT_ANGLE_TO_RAD / GAME_SPEED
 }
 
-/// Spring `float3::SafeNormalize`: leave near-zero vectors alone.
-fn safe_normalize(v: Vec3) -> Vec3 {
-    v.try_normalize().unwrap_or(v)
-}
-
 /// Where the target is this frame, for `tracks=1` weapons
 /// (`UpdateTargeting`: the target's aim position and its velocity).
 #[derive(Clone, Copy, Debug, Default)]
@@ -148,7 +143,8 @@ impl MissileFlight {
                 target_vel = t.vel;
             }
             let org_target_pos = self.target_pos;
-            let target_dir = safe_normalize(self.target_pos - pos);
+            // `normalize_or_zero` is Spring's `SafeNormalize` (zero stays zero).
+            let target_dir = (self.target_pos - pos).normalize_or_zero();
             let target_dist = pos.distance(self.target_pos) + 0.1;
 
             if self.extra_height_time > 0 {
@@ -177,13 +173,13 @@ impl MissileFlight {
             }
 
             let target_lead = target_vel * (target_dist / self.max_speed) * 0.7;
-            let lead_dir = safe_normalize(self.target_pos + target_lead - pos);
+            let lead_dir = (self.target_pos + target_lead - pos).normalize_or_zero();
             let mut dif = lead_dir - self.dir;
             if dif.length_squared() < self.turn_rate * self.turn_rate {
                 self.dir = lead_dir;
             } else {
-                dif = safe_normalize(dif - self.dir * dif.dot(self.dir));
-                self.dir = safe_normalize(self.dir + dif * self.turn_rate);
+                dif = (dif - self.dir * dif.dot(self.dir)).normalize_or_zero();
+                self.dir = (self.dir + dif * self.turn_rate).normalize_or_zero();
             }
             self.target_pos = org_target_pos;
             self.dir * self.speed
@@ -191,7 +187,7 @@ impl MissileFlight {
             // Out of fuel: `speed = speed·0.98 + up·mygravity`.
             let v = self.dir * self.speed * 0.98 + Vec3::Y * self.gravity;
             self.speed = v.length();
-            self.dir = safe_normalize(v);
+            self.dir = v.normalize_or_zero();
             v
         }
     }
@@ -296,13 +292,13 @@ impl StarburstFlight {
         if self.turn_to_target && alive {
             // Stage 2: swing onto the target at `turnrate` — no
             // acceleration while turning.
-            let target_err = safe_normalize(self.target_pos - pos);
+            let target_err = (self.target_pos - pos).normalize_or_zero();
             if target_err.dot(self.dir) > 0.99 {
                 self.dir = target_err;
                 self.turn_to_target = false;
             } else {
                 let mut e = target_err - self.dir;
-                e = safe_normalize(e - self.dir * e.dot(self.dir));
+                e = (e - self.dir * e.dot(self.dir)).normalize_or_zero();
                 let gain = if self.turn_rate != 0.0 {
                     self.turn_rate
                 } else {
@@ -319,13 +315,13 @@ impl StarburstFlight {
 
         if alive {
             // Stage 3: home (snap inside `maxGoodDif`) and accelerate.
-            let target_err = safe_normalize(self.target_pos - pos);
+            let target_err = (self.target_pos - pos).normalize_or_zero();
             if target_err.dot(self.dir) > self.max_good_dif {
                 self.dir = target_err;
             } else {
                 let mut e = target_err - self.dir;
-                e = safe_normalize(e - self.dir * e.dot(self.dir));
-                self.dir = safe_normalize(self.dir + e * self.tracking);
+                e = (e - self.dir * e.dot(self.dir)).normalize_or_zero();
+                self.dir = (self.dir + e * self.tracking).normalize_or_zero();
             }
             self.speed = (self.speed + self.acceleration).min(self.max_speed);
             let v = self.dir * self.speed;

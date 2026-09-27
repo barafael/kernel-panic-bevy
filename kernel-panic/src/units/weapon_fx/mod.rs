@@ -15,7 +15,7 @@ pub use shared::{AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, Pe
 use bevy::prelude::*;
 
 use crate::rendering::interpolation::SimPose;
-use ceg::{CegParticleMesh, CegRegistry};
+use ceg::{CegRegistry, CegRenderAssets};
 use shared::{
     BeamMaterialCache, BuildSparkleAssets, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes,
 };
@@ -38,13 +38,13 @@ impl Plugin for WeaponFxPlugin {
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .insert_resource(CegRegistry::load())
             // Projectiles and particles move in the fixed sim; draw
-            // them interpolated (`rendering::interpolation`).
+            // them interpolated (`rendering::interpolation`). Beams
+            // never move their Transform (the tick rewrites vertices).
             .register_required_components::<shared::ProjectileVisual, SimPose>()
             .register_required_components::<shared::LaserBolt, SimPose>()
-            .register_required_components::<shared::BeamVisual, SimPose>()
             .register_required_components::<shared::BuildSparkle, SimPose>()
             .register_required_components::<shared::ImpactBurst, SimPose>()
             .register_required_components::<shared::GroundFlash, SimPose>()

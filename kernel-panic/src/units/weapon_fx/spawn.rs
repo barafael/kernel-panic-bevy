@@ -2,13 +2,11 @@
 //! event to the appropriate effect spawner (beam, burst, projectile, melee,
 //! plus the bonus nanoframe sparkle for build lasers).
 
-use std::borrow::Cow;
-
 use bevy::prelude::*;
 
 use crate::units::content::weapons::WeaponId;
 
-use super::ceg::{CegParticleMesh, CegRegistry, spawn_ceg};
+use super::ceg::{CegRegistry, CegRenderAssets, spawn_ceg};
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
     Flight, GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt,
@@ -49,7 +47,7 @@ pub(super) fn spawn_weapon_visuals(
     mut impact_assets: ResMut<ImpactBurstAssets>,
     mut flash_assets: ResMut<GroundFlashAssets>,
     mut fx_meshes: ResMut<WeaponFxMeshes>,
-    mut particle_mesh: ResMut<CegParticleMesh>,
+    mut ceg_assets: ResMut<CegRenderAssets>,
     asset_server: Res<AssetServer>,
     mut rng: Local<u32>,
 ) {
@@ -84,9 +82,7 @@ pub(super) fn spawn_weapon_visuals(
         // with the gadget-drawn lightning arc (upstream
         // `network_arceffect.lua`): the TDF beam has `intensity=0`
         // (invisible by design) and `explosiongenerator=custom:none`.
-        let is_gauss_arc = weapon_registry
-            .name(event.weapon_id)
-            .eq_ignore_ascii_case("gausscannon");
+        let is_gauss_arc = weapon_registry.is_gauss_cannon(event.weapon_id);
 
         if is_gauss_arc {
             spawn_lightning_arc(
@@ -121,9 +117,7 @@ pub(super) fn spawn_weapon_visuals(
             // that CEG at the impact point; the generic melee flash is
             // only the fallback for registries without the splash.
             let bite_dir = dir / length.max(1e-6);
-            let splash_played = weapon_registry
-                .name(event.weapon_id)
-                .eq_ignore_ascii_case("wormbite")
+            let splash_played = weapon_registry.is_worm_bite(event.weapon_id)
                 && spawn_ceg(
                     "corruption_worm_splash",
                     event.target_pos,
@@ -135,7 +129,7 @@ pub(super) fn spawn_weapon_visuals(
                     &mut materials,
                     &mut images,
                     &mut model_cache,
-                    &mut particle_mesh,
+                    &mut ceg_assets,
                 );
             if !splash_played {
                 spawn_melee_flash(
@@ -238,7 +232,7 @@ pub(super) fn spawn_weapon_visuals(
                 &mut materials,
                 &mut images,
                 &mut model_cache,
-                &mut particle_mesh,
+                &mut ceg_assets,
             );
             if !ceg_spawned {
                 spawn_impact_burst(
@@ -288,7 +282,7 @@ pub(super) fn spawn_weapon_visuals(
                     &mut materials,
                     &mut images,
                     &mut model_cache,
-                    &mut particle_mesh,
+                    &mut ceg_assets,
                 );
             if !used_ceg {
                 let aoe = weapon.area_of_effect.max(4.0);
@@ -334,7 +328,7 @@ pub(super) fn spawn_pending_explosions(
     mut cache: ResMut<BeamMaterialCache>,
     mut impact_assets: ResMut<ImpactBurstAssets>,
     mut flash_assets: ResMut<GroundFlashAssets>,
-    mut particle_mesh: ResMut<CegParticleMesh>,
+    mut ceg_assets: ResMut<CegRenderAssets>,
     ceg_registry: Res<CegRegistry>,
     mut rng: Local<u32>,
 ) {
@@ -356,7 +350,7 @@ pub(super) fn spawn_pending_explosions(
                 &mut materials,
                 &mut images,
                 &mut model_cache,
-                &mut particle_mesh,
+                &mut ceg_assets,
             );
         if !used_ceg {
             let aoe = event.radius.max(4.0);
@@ -996,7 +990,7 @@ fn spawn_projectile(
         None
     };
     // The authored per-frame `cegTag` CEG, emitted by `tick_weapon_fx`.
-    let trail_ceg = (!weapon.ceg_tag.is_empty()).then(|| Cow::Owned(weapon.ceg_tag.clone()));
+    let trail_ceg = (!weapon.ceg_tag.is_empty()).then_some(event.weapon_id);
 
     // Initial velocity for integrated flights (the tick takes over).
     let (velocity, speed) = match flight {
@@ -1297,7 +1291,7 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
-            .init_resource::<CegParticleMesh>()
+            .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .init_resource::<BeamMaterialCache>()
             .init_resource::<BuildSparkleAssets>()

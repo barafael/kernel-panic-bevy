@@ -236,8 +236,6 @@ fn prepare_game_entry(world: &mut World) {
         .find(|p| !p.ai)
         .map_or(crate::game_setup::SPECTATOR_TEAM, |p| p.team);
     world.resource_mut::<crate::units::player::LocalTeam>().0 = local_team;
-    world.resource_mut::<crate::units::mechanics::cloak::PlayerTeam>().0 =
-        crate::units::components::TeamId(local_team);
     world.insert_resource(crate::game_setup::AiDifficulty(setup.difficulty));
 
     // Fresh in-game state: `Playing`, game-over panel re-armed.

@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use super::definitions::ALL_UNIT_KINDS;
 use super::tdf_loader;
+use crate::sim::frames_to_secs;
 
 /// Compact identifier for a weapon. `Copy` so it can be cloned freely
 /// in events and components without heap traffic.
@@ -43,6 +44,28 @@ pub struct WeaponRegistry {
     /// Lower-case name → id, mirrors `WeaponDefs::get`'s case-insensitive
     /// lookup contract.
     index: HashMap<String, WeaponId>,
+    /// Parallel `defs[i]` → [`weapon_infection_duration`] of its name,
+    /// resolved once so the damage path never string-matches.
+    infection_secs: Vec<Option<f32>>,
+    /// Weapons the fx path special-cases, resolved at insert.
+    gauss_cannon: Option<WeaponId>,
+    worm_bite: Option<WeaponId>,
+}
+
+/// Per-weapon infection window in seconds. Mirrors upstream
+/// `LuaRules/Gadgets/infection.lua`, which expresses the window in sim
+/// frames at 30 fps. Keys match weapon TDF section names as-authored
+/// (the TDF parser preserves case for section names even though it
+/// lowercases inner keys). Returns `None` for weapons that don't infect.
+pub fn weapon_infection_duration(weapon: &str) -> Option<f32> {
+    let frames = match weapon {
+        "VirusBeam" => 90.0,
+        "VirusDeath" => 180.0,
+        "Wormsplash" => 200.0,
+        "Infection" => 30.0,
+        _ => return None,
+    };
+    Some(frames_to_secs(frames))
 }
 
 impl Default for WeaponRegistry {
@@ -57,6 +80,9 @@ impl WeaponRegistry {
             defs: Vec::new(),
             names: Vec::new(),
             index: HashMap::new(),
+            infection_secs: Vec::new(),
+            gauss_cannon: None,
+            worm_bite: None,
         };
         // Reserve slot 0 for BuildLaser. Stub def stays at engine
         // defaults — the build-laser path special-cases this id before
@@ -104,6 +130,12 @@ impl WeaponRegistry {
         let id = WeaponId(self.defs.len() as u16);
         self.defs.push(def);
         self.names.push(name.to_string());
+        self.infection_secs.push(weapon_infection_duration(name));
+        match key.as_str() {
+            "gausscannon" => self.gauss_cannon = Some(id),
+            "wormbite" => self.worm_bite = Some(id),
+            _ => {}
+        }
         self.index.insert(key, id);
         id
     }
@@ -126,6 +158,22 @@ impl WeaponRegistry {
     /// The TDF section name behind a [`WeaponId`].
     pub fn name(&self, id: WeaponId) -> &str {
         &self.names[id.0 as usize]
+    }
+
+    /// [`weapon_infection_duration`] of the weapon behind `id`.
+    pub fn infection_duration(&self, id: WeaponId) -> Option<f32> {
+        self.infection_secs[id.0 as usize]
+    }
+
+    /// True for the Connection's `GaussCannon`, drawn as the gadget's
+    /// lightning arc instead of any engine visual.
+    pub fn is_gauss_cannon(&self, id: WeaponId) -> bool {
+        self.gauss_cannon == Some(id)
+    }
+
+    /// True for the Worm's `Wormbite` melee weapon.
+    pub fn is_worm_bite(&self, id: WeaponId) -> bool {
+        self.worm_bite == Some(id)
     }
 
     /// Test-only: register an ad-hoc weapon under a chosen name and

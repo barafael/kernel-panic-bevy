@@ -10,7 +10,6 @@
 use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
-use crate::sim::frames_to_secs;
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -118,21 +117,7 @@ pub struct Infected {
     pub attacker_team: u8,
 }
 
-/// Per-weapon infection window in seconds. Mirrors upstream
-/// `LuaRules/Gadgets/infection.lua`, which expresses the window in sim
-/// frames at 30 fps. Keys match weapon TDF section names as-authored
-/// (the TDF parser preserves case for section names even though it
-/// lowercases inner keys). Returns `None` for weapons that don't infect.
-pub fn weapon_infection_duration(weapon: &str) -> Option<f32> {
-    let frames = match weapon {
-        "VirusBeam" => 90.0,
-        "VirusDeath" => 180.0,
-        "Wormsplash" => 200.0,
-        "Infection" => 30.0,
-        _ => return None,
-    };
-    Some(frames_to_secs(frames))
-}
+pub use crate::units::content::weapons::weapon_infection_duration;
 
 /// Queued virus spawns from infected unit deaths.
 #[derive(Debug, Clone, Copy)]
@@ -218,7 +203,7 @@ const AOE_SPLASH_THRESHOLD: f32 = 48.0;
 /// `radius` is the weapon's `area_of_effect`; `edge_mult` is the weapon's
 /// `edge_effectiveness` (1.0 = full damage at the edge, 0.0 = no damage
 /// at the edge). Callers must ensure `dist < radius`.
-pub(super) fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
+pub(crate) fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
     let t = (dist / radius).clamp(0.0, 1.0);
     1.0 - t * (1.0 - edge_mult)
 }
@@ -358,7 +343,7 @@ pub fn apply_damage(
             inbox.explosion(pending.impact_pos, weapon_def.damage.default);
         }
         let weapon_name = weapon_registry.name(pending.weapon);
-        let infection_window = weapon_infection_duration(weapon_name);
+        let infection_window = weapon_registry.infection_duration(pending.weapon);
 
         let base = |kind: UnitKind| {
             weapon_def.damage.for_type(kind.armor_class().key())

@@ -536,7 +536,7 @@ impl UnitRegistry {
     /// Detector radius (elmos) — a unit reveals cloaked enemies within
     /// this range. Maps to the FBI `RadarDistance` field; zero means
     /// this unit kind does not detect cloaked targets. Read by
-    /// `update_cloak_visibility` against the [`PlayerTeam`].
+    /// `update_cloak_visibility` against the [`LocalTeam`](crate::units::player::LocalTeam).
     pub fn radar_distance(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.radar_distance)
     }

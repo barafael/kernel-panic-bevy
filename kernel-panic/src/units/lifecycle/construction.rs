@@ -25,6 +25,7 @@ use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SpawnContext, spawn_u
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
+use crate::units::spatial::flat_dist_sq;
 use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// Marks a constructor unit that the player has ordered to build `kind`
@@ -104,10 +105,7 @@ pub fn start_construction(
     >,
 ) {
     for (entity, transform, pending) in &pending_q {
-        let dx = transform.translation.x - pending.site.x;
-        let dz = transform.translation.z - pending.site.z;
-        let dist_sq = dx * dx + dz * dz;
-        if dist_sq <= BUILD_DISTANCE * BUILD_DISTANCE {
+        if flat_dist_sq(transform.translation, pending.site) <= BUILD_DISTANCE * BUILD_DISTANCE {
             commands
                 .entity(entity)
                 .insert(Constructing {
