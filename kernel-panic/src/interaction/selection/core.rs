@@ -94,6 +94,8 @@ pub struct DragState {
 pub struct SelectionBoxNode;
 
 /// Update `Hovered` component each frame based on cursor position.
+/// Only a change of target touches the components (no per-frame
+/// remove / re-insert churn).
 fn update_hover(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
@@ -103,17 +105,16 @@ fn update_hover(
     hovered_q: Query<Entity, With<Hovered>>,
     mut commands: Commands,
 ) {
-    // Clear previous hover.
+    let target = cursor_ray(&windows, &camera_q)
+        .and_then(|ray| resolve_unit_hit(ray_cast.cast_ray(ray, &default()), &unit_q, &parent_q));
     for entity in &hovered_q {
-        commands.entity(entity).remove::<Hovered>();
+        if Some(entity) != target {
+            commands.entity(entity).remove::<Hovered>();
+        }
     }
-
-    let Some(ray) = cursor_ray(&windows, &camera_q) else {
-        return;
-    };
-
-    let hits = ray_cast.cast_ray(ray, &default());
-    if let Some(entity) = resolve_unit_hit(hits, &unit_q, &parent_q) {
+    if let Some(entity) = target
+        && !hovered_q.contains(entity)
+    {
         commands.entity(entity).insert(Hovered);
     }
 }

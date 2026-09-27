@@ -357,11 +357,7 @@ pub fn reconcile_vent_claims(
     // 16-elmo sphere the moment its root Y diverges by 16+. Restrict
     // the check to the XZ plane so the occupancy test tracks the
     // building's footprint rather than its current emerge height.
-    let horiz_dist_sq = |a: Vec3, b: Vec3| {
-        let dx = a.x - b.x;
-        let dz = a.z - b.z;
-        dx * dx + dz * dz
-    };
+    let horiz_dist_sq = crate::units::spatial::flat_dist_sq;
     for (vent_entity, vent, claim) in &vents {
         let builder_committed = pending
             .iter()

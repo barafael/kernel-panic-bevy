@@ -542,8 +542,7 @@ pub(crate) fn compute_path(
 const DASH_PATTERN: [(f32, bool); 4] = [(16.0, true), (6.0, false), (4.0, true), (6.0, false)];
 
 fn sample_at_ground(x: f32, z: f32, heightmap: Option<&Heightmap>) -> Vec3 {
-    let y = heightmap.map(|h| h.sample(x, z)).unwrap_or(0.0);
-    Vec3::new(x, y + GIZMO_LIFT, z)
+    heightmap.map_or(Vec3::new(x, 0.0, z), |h| h.place(x, z)) + Vec3::Y * GIZMO_LIFT
 }
 
 /// Draw each selected unit's order overlay in Spring's per-command colors:
