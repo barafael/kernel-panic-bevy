@@ -18,13 +18,13 @@
 //! ground click casts the aimed abilities, as `D` over that point would
 //! ([`deploy_units`] / [`cast_aimed_abilities`] are shared).
 
-use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use super::movement::{CommandQueue, GuardTarget, MoveTarget, QueuedCommand};
 use super::{clear_orders, replace_order};
 use super::selection::{
-    OrderMarker, PendingMoveIndicators, Selected, apply_ordered_command, ground_hit, unit_hit,
+    OrderMarker, PendingMoveIndicators, PickRayCast, Selected, apply_ordered_command, ground_hit,
+    unit_hit,
 };
 use crate::interaction::cursor::{CursorKind, CursorRequest};
 use crate::rendering::camera::RtsCamera;
@@ -242,7 +242,7 @@ fn trigger_aimed_ability_on_hotkey(
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
     mut command_fire: MessageWriter<CommandFireEvent>,
     mut dispatch: MessageWriter<DispatchEvent>,
@@ -283,7 +283,7 @@ fn trigger_ability_click(
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut command_fire: MessageWriter<CommandFireEvent>,
@@ -329,7 +329,7 @@ fn trigger_attack_ground_click(
     selected_q: Query<Entity, With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     move_target_q: Query<(), With<MoveTarget>>,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
@@ -376,7 +376,7 @@ fn trigger_move_click(
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     move_target_q: Query<(), With<MoveTarget>>,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
@@ -421,7 +421,7 @@ fn trigger_set_target_click(
     unit_info_q: Query<&TeamId>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     target_gtf_q: Query<&GlobalTransform>,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
@@ -473,7 +473,7 @@ fn trigger_patrol_click(
     transform_q: Query<&Transform>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     move_target_q: Query<(), With<MoveTarget>>,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
@@ -536,7 +536,7 @@ fn trigger_attack_move_click(
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     move_target_q: Query<(), With<MoveTarget>>,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
@@ -588,7 +588,7 @@ fn trigger_guard_click(
     target_gtf_q: Query<&GlobalTransform>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,

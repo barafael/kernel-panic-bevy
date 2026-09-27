@@ -5,10 +5,9 @@
 
 use std::collections::HashMap;
 
-use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use super::core::{Selected, SelectionSet, ground_hit, unit_hit};
+use super::core::{PickRayCast, Selected, SelectionSet, ground_hit, unit_hit};
 use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
 use crate::rendering::camera::RtsCamera;
 use crate::units::combat::AttackTargetOrder;
@@ -98,7 +97,7 @@ impl OrderMarker {
 
 /// Buffered order-commit markers written by `handle_right_click` (and the
 /// ability order modes), consumed by `spawn_move_indicator_visuals`.
-/// Separated into two systems because `MeshRayCast` holds
+/// Separated into two systems because `PickRayCast` holds
 /// `Res<Assets<Mesh>>` which conflicts with `ResMut`.
 #[derive(Resource, Default)]
 pub struct PendingMoveIndicators {
@@ -129,7 +128,7 @@ struct RightClickLookups<'w, 's> {
 fn handle_right_click(
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     selected_q: Query<(Entity, &Transform, &UnitType, &UnitStats), With<Selected>>,
     lookups: RightClickLookups,
     unit_registry: Res<UnitRegistry>,
@@ -342,7 +341,7 @@ pub(crate) fn apply_ordered_command(
 /// Drains `PendingMoveIndicators` and creates torus visuals colored by
 /// order kind (move green / attack red / patrol blue / guard white).
 ///
-/// Separated from `handle_right_click` because `MeshRayCast` holds an
+/// Separated from `handle_right_click` because its `PickRayCast` holds an
 /// immutable `Res<Assets<Mesh>>` that conflicts with `ResMut<Assets<Mesh>>`.
 #[allow(clippy::type_complexity)]
 fn spawn_move_indicator_visuals(
@@ -394,21 +393,26 @@ pub(crate) struct FormationPreviewAssets {
     material: Handle<StandardMaterial>,
 }
 
-/// Show/update/remove preview dots during a right-drag formation draw.
+/// Show/update/hide preview dots during a right-drag formation draw.
+///
+/// The tori are pooled: a drag reuses the entities of the last one
+/// (moving them, unhiding as many as the selection needs) and spawns
+/// only when the selection outgrew the pool. Respawning them per frame
+/// churned archetypes and render-world extraction for every torus.
 fn update_formation_preview(
     drag_path: Res<RightDragPath>,
     selected_q: Query<Entity, With<Selected>>,
-    preview_q: Query<Entity, With<FormationPreview>>,
+    mut preview_q: Query<(&mut Transform, &mut Visibility), With<FormationPreview>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     assets: Option<Res<FormationPreviewAssets>>,
 ) {
-    // If drag is not active or path has fewer than 2 points, despawn any existing previews.
+    // If drag is not active or path has fewer than 2 points, hide any existing previews.
     let unit_count = selected_q.iter().count();
     if !drag_path.active || drag_path.points.len() < 2 || unit_count == 0 {
-        for entity in &preview_q {
-            commands.entity(entity).despawn();
+        for (_, mut vis) in &mut preview_q {
+            vis.set_if_neq(Visibility::Hidden);
         }
         return;
     }
@@ -432,18 +436,30 @@ fn update_formation_preview(
     };
 
     let targets = sample_path_evenly(&drag_path.points, unit_count);
+    let placement = |target: &Vec3| {
+        Transform::from_translation(*target + Vec3::Y * 1.0)
+            .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
+    };
 
-    // Despawn old previews and spawn fresh ones.
-    for entity in &preview_q {
-        commands.entity(entity).despawn();
+    // Reuse pooled tori first, hide the surplus, spawn the shortfall.
+    let mut targets = targets.iter();
+    for (mut transform, mut vis) in &mut preview_q {
+        match targets.next() {
+            Some(target) => {
+                transform.set_if_neq(placement(target));
+                vis.set_if_neq(Visibility::Inherited);
+            }
+            None => {
+                vis.set_if_neq(Visibility::Hidden);
+            }
+        }
     }
-    for target in &targets {
+    for target in targets {
         commands.spawn((
             FormationPreview,
             Mesh3d(preview_assets.mesh.clone()),
             MeshMaterial3d(preview_assets.material.clone()),
-            Transform::from_translation(*target + Vec3::Y * 1.0)
-                .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
+            placement(target),
         ));
     }
 }

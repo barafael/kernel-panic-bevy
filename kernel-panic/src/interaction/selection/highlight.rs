@@ -1,18 +1,26 @@
 //! Material brightening for hovered/selected units. When a unit enters a
-//! highlighted state we clone its material and crank the emissive boost up,
-//! stashing the original handle in `OriginalMaterial` so we can restore it
-//! when the highlight ends.
+//! highlighted state we swap each piece's material for a brightened
+//! variant, stashing the original handle in `OriginalMaterial` so we can
+//! restore it when the highlight ends.
+//!
+//! Brightened variants are minted once per (source material, faction,
+//! factor) and reused: all pieces of a unit share one material and all
+//! units of a faction share a handful, so hovering across an army costs
+//! a few asset adds in total instead of one per piece per state change.
+
+use std::collections::HashMap;
 
 use bevy::prelude::*;
 
 use super::core::{Hovered, Selected, SelectionSet};
-use crate::units::components::{Faction, SelectionVolume, UnitType};
+use crate::units::components::{Faction, UnitType};
 
 pub(super) struct HighlightPlugin;
 
 impl Plugin for HighlightPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, update_unit_highlight.in_set(SelectionSet::Visuals));
+        app.init_resource::<BrightMaterials>()
+            .add_systems(Update, update_unit_highlight.in_set(SelectionSet::Visuals));
     }
 }
 
@@ -28,9 +36,16 @@ struct OriginalMaterial(Handle<StandardMaterial>);
 
 /// Tracks the brightness factor currently baked into a unit's materials.
 /// The system skips re-applying when this matches the desired factor, so a
-/// steady selection doesn't mint a fresh `StandardMaterial` every frame.
+/// steady selection doesn't touch materials every frame.
 #[derive(Component)]
 struct Highlighted(f32);
+
+/// Brightened variants keyed by (source material, faction tint, factor
+/// bits). Sources are the shared faction materials, plus the per-unit
+/// emerge-fade / cloak clones of units highlighted mid-fade; entries
+/// whose source asset is gone are pruned whenever a new one is added.
+#[derive(Resource, Default)]
+struct BrightMaterials(HashMap<(AssetId<StandardMaterial>, Faction, u32), Handle<StandardMaterial>>);
 
 /// Two epsilon for the `f32` factor comparison so we treat `HOVER_BRIGHTNESS`
 /// vs `SELECTED_BRIGHTNESS` as unambiguously different without triggering on
@@ -56,10 +71,10 @@ fn update_unit_highlight(
         ),
     >,
     children_q: Query<&Children>,
-    mesh_mat_q: Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
-    volume_q: Query<(), With<SelectionVolume>>,
+    mesh_mat_q: Query<&MeshMaterial3d<StandardMaterial>>,
     original_q: Query<&OriginalMaterial>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut bright: ResMut<BrightMaterials>,
     mut commands: Commands,
 ) {
     for unit_entity in &unhighlighted_q {
@@ -67,47 +82,28 @@ fn update_unit_highlight(
         commands.entity(unit_entity).try_remove::<Highlighted>();
     }
 
-    // Apply hover brightness only when the state actually changed. Skipping
-    // otherwise is the whole point: `apply_brightness` clones+inserts a new
-    // `StandardMaterial` per piece, and doing that 60×/s leaks asset handles.
-    for (unit_entity, faction, current) in &hovered_q {
-        if !needs_rebrighten(current, HOVER_BRIGHTNESS) {
-            continue;
-        }
+    // Apply brightness only when the state actually changed — a steady
+    // hover/selection must not re-insert materials every frame.
+    let pending: Vec<(Entity, Faction, f32)> = hovered_q
+        .iter()
+        .map(|(e, f, h)| (e, f, h, HOVER_BRIGHTNESS))
+        .chain(selected_q.iter().map(|(e, f, h)| (e, f, h, SELECTED_BRIGHTNESS)))
+        .filter(|(_, _, current, factor)| needs_rebrighten(*current, *factor))
+        .map(|(e, f, _, factor)| (e, *f, factor))
+        .collect();
+    for (unit_entity, faction, factor) in pending {
         brighten_unit(
             unit_entity,
-            faction,
-            HOVER_BRIGHTNESS,
+            &faction,
+            factor,
             &children_q,
             &mesh_mat_q,
-            &volume_q,
             &original_q,
             &mut materials,
+            &mut bright,
             &mut commands,
         );
-        commands
-            .entity(unit_entity)
-            .insert(Highlighted(HOVER_BRIGHTNESS));
-    }
-
-    for (unit_entity, faction, current) in &selected_q {
-        if !needs_rebrighten(current, SELECTED_BRIGHTNESS) {
-            continue;
-        }
-        brighten_unit(
-            unit_entity,
-            faction,
-            SELECTED_BRIGHTNESS,
-            &children_q,
-            &mesh_mat_q,
-            &volume_q,
-            &original_q,
-            &mut materials,
-            &mut commands,
-        );
-        commands
-            .entity(unit_entity)
-            .insert(Highlighted(SELECTED_BRIGHTNESS));
+        commands.entity(unit_entity).insert(Highlighted(factor));
     }
 }
 
@@ -122,24 +118,23 @@ fn brighten_unit(
     faction: &Faction,
     factor: f32,
     children_q: &Query<&Children>,
-    mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
-    volume_q: &Query<(), With<SelectionVolume>>,
+    mesh_mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
     original_q: &Query<&OriginalMaterial>,
     materials: &mut Assets<StandardMaterial>,
+    bright: &mut BrightMaterials,
     commands: &mut Commands,
 ) {
-    // Collect all entities to brighten: the unit itself + all descendants with meshes.
-    // Skip the invisible selection-volume sphere — its material has low
-    // alpha, and tinting base_color would turn it into a solid coloured blob
-    // over the unit.
+    // The unit itself (flat-mesh fallback) + every descendant with a
+    // material. The selection volume has none, so it is skipped
+    // naturally.
     let mut targets = Vec::new();
-    if mesh_mat_q.contains(unit_entity) && !volume_q.contains(unit_entity) {
+    if mesh_mat_q.contains(unit_entity) {
         targets.push(unit_entity);
     }
-    collect_mesh_descendants(unit_entity, children_q, mesh_mat_q, volume_q, &mut targets);
+    collect_mesh_descendants(unit_entity, children_q, mesh_mat_q, &mut targets);
 
     for entity in targets {
-        let Ok((_, current_mat)) = mesh_mat_q.get(entity) else {
+        let Ok(current_mat) = mesh_mat_q.get(entity) else {
             continue;
         };
         apply_brightness(
@@ -149,6 +144,7 @@ fn brighten_unit(
             factor,
             original_q,
             materials,
+            bright,
             commands,
         );
     }
@@ -180,16 +176,15 @@ fn restore_unit_materials(
 fn collect_mesh_descendants(
     entity: Entity,
     children_q: &Query<&Children>,
-    mesh_mat_q: &Query<(Entity, &MeshMaterial3d<StandardMaterial>)>,
-    volume_q: &Query<(), With<SelectionVolume>>,
+    mesh_mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
     targets: &mut Vec<Entity>,
 ) {
     if let Ok(children) = children_q.get(entity) {
         for child in children.iter() {
-            if mesh_mat_q.contains(child) && !volume_q.contains(child) {
+            if mesh_mat_q.contains(child) {
                 targets.push(child);
             }
-            collect_mesh_descendants(child, children_q, mesh_mat_q, volume_q, targets);
+            collect_mesh_descendants(child, children_q, mesh_mat_q, targets);
         }
     }
 }
@@ -210,6 +205,7 @@ fn collect_original_descendants(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_brightness(
     entity: Entity,
     current_handle: &Handle<StandardMaterial>,
@@ -217,8 +213,12 @@ fn apply_brightness(
     factor: f32,
     original_q: &Query<&OriginalMaterial>,
     materials: &mut Assets<StandardMaterial>,
+    bright: &mut BrightMaterials,
     commands: &mut Commands,
 ) {
+    // The source is whatever the piece wore before its first highlight —
+    // the shared faction material, or a per-unit fade/cloak clone if
+    // the unit was highlighted mid-fade — and is what gets restored.
     let source_handle = if let Ok(orig) = original_q.get(entity) {
         orig.0.clone()
     } else {
@@ -229,17 +229,35 @@ fn apply_brightness(
         h
     };
 
-    let Some(source) = materials.get(&source_handle) else {
-        return;
+    let key = (source_handle.id(), *faction, factor.to_bits());
+    let handle = if let Some(handle) = bright.0.get(&key) {
+        handle.clone()
+    } else {
+        let Some(variant) = brightened(materials.get(&source_handle), faction, factor) else {
+            return;
+        };
+        let handle = materials.add(variant);
+        bright.0.retain(|(source, _, _), _| materials.contains(*source));
+        bright.0.insert(key, handle.clone());
+        handle
     };
+    commands.entity(entity).try_insert(MeshMaterial3d(handle));
+}
 
+/// The brightened variant of `source`, or `None` if the asset is gone.
+fn brightened(
+    source: Option<&StandardMaterial>,
+    faction: &Faction,
+    factor: f32,
+) -> Option<StandardMaterial> {
+    let source = source?;
     // Unit materials are `unlit: true`, so the fragment shader only scales
     // `base_color_texture * base_color`. Blend the source `base_color`
     // toward the faction tint so the brightening is faction-coloured
     // without saturating away the texture's own hues, and scale overall
     // brightness by `factor`. Preserve alpha from the source so semi-
-    // transparent materials (e.g. the invisible selection volume) don't
-    // turn into opaque coloured blobs.
+    // transparent materials (fade / cloak clones) don't turn into opaque
+    // coloured blobs.
     let mut bright = source.clone();
     let src = LinearRgba::from(source.base_color);
     let tint = LinearRgba::from(faction.color());
@@ -252,6 +270,5 @@ fn apply_brightness(
     };
     bright.base_color = Color::LinearRgba(mixed);
     bright.emissive = mixed;
-    let handle = materials.add(bright);
-    commands.entity(entity).try_insert(MeshMaterial3d(handle));
+    Some(bright)
 }

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt, path::PathBuf};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc};
 
 use bevy::{
     mesh::{Indices, PrimitiveTopology},
@@ -9,17 +9,33 @@ use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 use crate::units::components::Faction;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::lifecycle::spawning::PieceLayout;
 
 // ---------------------------------------------------------------------------
 // Caches
 // ---------------------------------------------------------------------------
 
 /// Cached s3o model data, textures, and Bevy handles loaded from disk.
+///
+/// Every GPU asset a unit needs is minted once and shared: the
+/// faction-tinted material per texture, the per-piece meshes per model,
+/// and the picking sphere per radius. A spawn only clones handles, so a
+/// 12-Packet `Dispatch` or a 5-mine `LaunchMines` adds no asset uploads
+/// and every unit of a model renders through the same mesh/material
+/// pair (which is what lets Bevy batch their draws).
 #[derive(Resource, Default)]
 pub struct S3OModelCache {
     models: HashMap<String, Option<S3OModel>>,
     raw_textures: HashMap<String, Option<TgaImage>>,
     colored_textures: HashMap<(String, Faction), Handle<Image>>,
+    /// Unit materials keyed by (tex1 filename, faction); the flat
+    /// fallback for texture-less models uses an empty filename.
+    unit_materials: HashMap<(String, Faction), Handle<StandardMaterial>>,
+    /// Flattened piece layouts (with per-piece mesh handles) per model
+    /// filename; `None` caches a missing / unparseable model.
+    piece_layouts: HashMap<String, Option<Arc<PieceLayout>>>,
+    /// Picking spheres per radius (`f32::to_bits`).
+    selection_spheres: HashMap<u32, Handle<Mesh>>,
     mesh_handles: HashMap<String, Handle<Mesh>>,
     /// Bevy image handles for raw (un-tinted) beam / sfx textures.
     /// Populated lazily by [`load_beam_texture`].
@@ -30,12 +46,17 @@ pub struct S3OModelCache {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Create a material for a unit. Builds a faction-colored texture from the
-/// s3o model's tex1 alpha channel, falling back to a flat emissive material.
+/// Material for a unit — shared by every unit drawing the same tex1 in
+/// the same faction. Builds a faction-colored texture from the s3o
+/// model's tex1 alpha channel, falling back to a flat emissive material.
 ///
 /// Spring's s3o shader uses tex1's alpha as the detail pattern and RGB=black
 /// to mean "100% team color". We bake the faction color into the texture so
 /// that Bevy's standard unlit material renders it correctly.
+///
+/// The returned handle is shared, so callers that want a per-unit
+/// variant (emerge fade, cloak, highlight) must clone the asset into
+/// their own handle rather than `get_mut` this one.
 pub fn unit_material(
     _kind: UnitKind,
     faction: Faction,
@@ -45,24 +66,58 @@ pub fn unit_material(
     model_filename: &str,
 ) -> Handle<StandardMaterial> {
     let tex1_name = load_s3o_cached(model_filename, cache).map(|model| model.texture1.clone());
+    let key = (tex1_name.clone().unwrap_or_default(), faction);
+    if let Some(handle) = cache.unit_materials.get(&key) {
+        return handle.clone();
+    }
 
-    if let Some(tex1_name) = tex1_name
+    let handle = if let Some(tex1_name) = tex1_name
         && let Some(handle) = build_faction_texture(&tex1_name, faction, images, cache)
     {
-        return materials.add(StandardMaterial {
+        materials.add(StandardMaterial {
             base_color_texture: Some(handle),
             unlit: true,
             ..default()
-        });
-    }
+        })
+    } else {
+        let color = faction.color();
+        materials.add(StandardMaterial {
+            base_color: color,
+            emissive: LinearRgba::from(color) * 4.0,
+            unlit: true,
+            ..default()
+        })
+    };
+    cache.unit_materials.insert(key, handle.clone());
+    handle
+}
 
-    let color = faction.color();
-    materials.add(StandardMaterial {
-        base_color: color,
-        emissive: LinearRgba::from(color) * 4.0,
-        unlit: true,
-        ..default()
-    })
+/// Flattened piece layout (parents, offsets, shared piece meshes) of an
+/// s3o model, built on first use. `None` when the model is missing.
+pub fn piece_layout(
+    filename: &str,
+    meshes: &mut Assets<Mesh>,
+    cache: &mut S3OModelCache,
+) -> Option<Arc<PieceLayout>> {
+    if let Some(layout) = cache.piece_layouts.get(filename) {
+        return layout.clone();
+    }
+    let layout = load_s3o_cached(filename, cache).map(|model| Arc::new(PieceLayout::build(model, meshes)));
+    cache
+        .piece_layouts
+        .insert(filename.to_string(), layout.clone());
+    layout
+}
+
+/// Shared picking sphere for a unit's `SelectionVolume`, one per
+/// distinct radius. Never drawn (the volume has no material), only ray
+/// cast against, so its resolution is a hit-shape choice.
+pub fn selection_sphere(radius: f32, meshes: &mut Assets<Mesh>, cache: &mut S3OModelCache) -> Handle<Mesh> {
+    cache
+        .selection_spheres
+        .entry(radius.to_bits())
+        .or_insert_with(|| meshes.add(Sphere::new(radius).mesh().ico(3).unwrap()))
+        .clone()
 }
 
 /// Create a mesh for a unit type, loading the real s3o model if available.
@@ -115,11 +170,6 @@ pub fn unit_mesh(
         UnitKind::Byte => Cylinder::new(12.0 * scale, 10.0 * scale),
     };
     meshes.add(mesh)
-}
-
-/// Load and return a clone of the s3o model for a given filename.
-pub fn load_s3o_model(filename: &str, cache: &mut S3OModelCache) -> Option<S3OModel> {
-    load_s3o_cached(filename, cache).cloned()
 }
 
 /// Return a cached [`Handle<Mesh>`] built from the given .s3o filename.
@@ -440,3 +490,4 @@ fn collect_piece(
         collect_piece(child, world_offset, scale, positions, normals, uvs, indices);
     }
 }
+
