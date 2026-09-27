@@ -375,7 +375,7 @@ mod tests {
         let root = Quat::from_rotation_y(std::f32::consts::PI);
         for heading in [0.0f32, 0.9, 2.6, -1.7] {
             for bank in [0.0f32, 0.35] {
-                let front = Vec3::new(heading.sin(), 0.0, heading.cos());
+                let front = crate::sim::dir3_of(heading);
                 let right = front.cross(Vec3::Y);
                 let up = (Vec3::Y * bank.cos() + right * bank.sin()).normalize();
                 let body = Transform::default().looking_to(front, up).rotation;

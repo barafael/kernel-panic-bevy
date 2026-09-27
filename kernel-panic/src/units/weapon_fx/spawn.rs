@@ -17,6 +17,7 @@ use super::shared::{
     weapon_core_color, weapon_edge_color,
 };
 use crate::rng::{next_f32, next_signed};
+use crate::sim::{GAME_SPEED, frames_to_secs};
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_mesh};
 use crate::units::content::weapons::WeaponRegistry;
 
@@ -518,7 +519,7 @@ fn spawn_build_sparkle(
     // particleSize=3 ± 4 → roughly 1..7 world units. Clamp so we don't get tiny invisible specks.
     let size = (3.0 + (r0 - 0.5) * 4.0).clamp(1.5, 7.0);
     // particleLife=16 ± 8 frames @ 30fps → 0.27..0.80s.
-    let life = (16.0 + (r1 - 0.5) * 8.0) / 30.0;
+    let life = frames_to_secs(16.0 + (r1 - 0.5) * 8.0);
     // Slight horizontal scatter and upward drift (emitVector y=1, speed≈2 elmos/frame).
     let scatter = Vec3::new((r2 - 0.5) * 4.0, 1.0, (r3 - 0.5) * 4.0);
     let velocity = scatter.normalize_or(Vec3::Y) * 30.0; // ~2 elmos/frame * 30fps
@@ -609,7 +610,7 @@ fn spawn_textured_beam(
     // an earlier port-ism. 0.08 s is a pragmatic floor so single-frame
     // shots still visibly flash.
     let lifetime = if is_beam_laser {
-        let ttl_sec = weapon.beam_ttl / 30.0; // beam_ttl is frames @ 30fps
+        let ttl_sec = frames_to_secs(weapon.beam_ttl);
         weapon.beam_time.max(ttl_sec).max(0.08)
     } else {
         weapon.duration.max(0.08)
@@ -999,8 +1000,8 @@ fn spawn_projectile(
 
     // Initial velocity for integrated flights (the tick takes over).
     let (velocity, speed) = match flight {
-        Flight::Missile(m) => (m.dir * m.speed * super::flight::GAME_SPEED, m.speed * 30.0),
-        Flight::Starburst(s) => (s.dir * s.speed * super::flight::GAME_SPEED, s.speed * 30.0),
+        Flight::Missile(m) => (m.dir * m.speed * GAME_SPEED, m.speed * GAME_SPEED),
+        Flight::Starburst(s) => (s.dir * s.speed * GAME_SPEED, s.speed * GAME_SPEED),
         Flight::Ballistic { velocity, .. } => (velocity, velocity.length()),
         Flight::Direct => (Vec3::ZERO, speed),
     };
@@ -1217,7 +1218,7 @@ fn spawn_lightning_arc(
         ),
         // gateway.bos BuildArc: `gl.Color(1,1,1)`, drawArc called with
         // width 2 / spray 5, arc lives 16 frames.
-        ArcFlavor::BuildArc => (2.0, 5.0, 16.0 / 30.0, LinearRgba::WHITE),
+        ArcFlavor::BuildArc => (2.0, 5.0, frames_to_secs(16.0), LinearRgba::WHITE),
     };
     let start = event.attacker_pos;
     let end = event.target_pos;

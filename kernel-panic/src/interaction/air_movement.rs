@@ -42,6 +42,7 @@
 use bevy::prelude::*;
 
 use super::movement::{CommandQueue, MovePath, MoveTarget, QueuedCommand, promote_next_command};
+use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
 use crate::terrain::heightmap::Heightmap;
 use crate::terrain::smooth_ground::SmoothGround;
 use crate::units::combat::{AimTarget, AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
@@ -52,9 +53,7 @@ use crate::units::mechanics::network_buffer::SpeedBoost;
 
 /// `CHoverAirMoveType::GetGoalRadius()` (`SQUARE_SIZE * SQUARE_SIZE`):
 /// a move order counts as done within this 2D distance.
-pub const GOAL_RADIUS: f32 = 64.0;
-/// `UNIT_SLOWUPDATE_RATE`: the command AI checks for arrival this often.
-const SLOW_UPDATE_RATE: u32 = 16;
+pub const GOAL_RADIUS: f32 = SQUARE_SIZE * SQUARE_SIZE;
 /// `CSolidObject::DEFAULT_MASS`: at or above it a unit is pushed out of,
 /// never shoved.
 const DEFAULT_MASS: f32 = 1e5;
@@ -157,7 +156,7 @@ impl HoverAir {
     }
 
     fn forward(&self) -> Vec3 {
-        Vec3::new(self.heading.sin(), 0.0, self.heading.cos())
+        dir3_of(self.heading)
     }
 
     /// `SetGoal(pos, distance)`.
@@ -188,7 +187,7 @@ impl HoverAir {
             AircraftState::Takeoff | AircraftState::Flying => {}
             AircraftState::Hovering => self.set_state(AircraftState::Flying),
         }
-        self.set_goal(pos, 8.0);
+        self.set_goal(pos, SQUARE_SIZE);
         self.moving_to = Some(pos);
     }
 
@@ -222,11 +221,6 @@ fn next_float(state: &mut u32) -> f32 {
     *state ^= *state >> 17;
     *state ^= *state << 5;
     (*state >> 8) as f32 / (1u32 << 24) as f32
-}
-
-/// Heading from a direction (`GetHeadingFromVector(dx, dz)`).
-fn heading_of(v: Vec3) -> f32 {
-    v.x.atan2(v.z)
 }
 
 /// Spring's `smoothstep(e0, e1, x)`.
@@ -482,7 +476,7 @@ fn update_flying(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, Vec3)]
         cur_speed - p.dec_rate
     };
     if goal_dist > goal_speed {
-        f.air.wanted_heading = heading_of(goal_vec);
+        f.air.wanted_heading = heading_of(goal_vec.xz());
         // `maxWantedSpeed` follows `maxSpeed` here: Kernel Panic's Flow
         // bonus (`network_flowspeed.lua`, COB `MAX_SPEED`) raised the
         // speed limit in the engines it was written for.
@@ -501,7 +495,7 @@ fn update_flying(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, Vec3)]
         None => f.air.goal - f.pos,
     };
     if face.xz().length_squared() > 1.0 {
-        f.air.wanted_heading = heading_of(face);
+        f.air.wanted_heading = heading_of(face.xz());
     }
 }
 
@@ -652,7 +646,7 @@ fn step(flyers: &mut [Flyer], frame: u32, ground: &Ground) {
 /// Orientation for a heading and bank angle: roll the level up-vector
 /// toward the right side by `bank`.
 pub fn attitude(heading: f32, bank: f32) -> Quat {
-    let front = Vec3::new(heading.sin(), 0.0, heading.cos());
+    let front = dir3_of(heading);
     let right = front.cross(Vec3::Y);
     let up = (Vec3::Y * bank.cos() + right * bank.sin()).normalize();
     Transform::default().looking_to(front, up).rotation
@@ -705,7 +699,7 @@ pub fn hover_air_system(
             continue;
         }
         let fwd = tf.forward().as_vec3();
-        let heading = if fwd.xz().length_squared() > 1e-6 { heading_of(fwd) } else { 0.0 };
+        let heading = if fwd.xz().length_squared() > 1e-6 { heading_of(fwd.xz()) } else { 0.0 };
         let air = HoverAir::new(params_for(&registry, kind.0), tf.translation, heading, entity.to_bits() as u32);
         commands.entity(entity).insert(air);
     }
@@ -725,7 +719,7 @@ pub fn hover_air_system(
                 busy: target.is_some() || queue.is_some_and(|q| !q.commands.is_empty()) || attacking,
                 point_at: if attacking && target.is_none() { aim.map(|a| a.pos) } else { None },
                 stunned,
-                max_speed: (stats.speed + boost.map_or(0.0, |b| b.0)) / 30.0,
+                max_speed: (stats.speed + boost.map_or(0.0, |b| b.0)) / GAME_SPEED,
             },
             finished_leg: false,
         });
@@ -789,7 +783,7 @@ mod tests {
             acc_rate: 0.3,
             dec_rate: 0.9,
             altitude_rate: 3.0,
-            turn_rate: 1280.0 / 65536.0 * std::f32::consts::TAU,
+            turn_rate: 1280.0 * crate::sim::SHORT_ANGLE_TO_RAD,
             cruise_alt: 140.0,
             hover_factor: 0.0,
             banking_allowed: true,

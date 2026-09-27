@@ -10,10 +10,7 @@ use spring_tdf::{UnitDef, UnitDefs};
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
 use super::moveinfo::MoveClassTable;
 use super::tdf_loader;
-
-/// Spring engine simulation runs at 30 frames per second.
-/// FBI `MaxVelocity` is in elmos/frame; multiply by this to get elmos/second.
-const SPRING_SIM_FPS: f32 = 30.0;
+use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// Spring engine `BuildTime` is in "build ticks" at 30 fps.
 /// The actual build duration depends on the factory's `WorkerTime`.
@@ -185,7 +182,7 @@ impl UnitRegistry {
     /// Movement speed in elmos per second.
     pub fn speed(&self, kind: UnitKind) -> f32 {
         self.def(kind)
-            .map_or(0.0, |d| d.max_velocity * SPRING_SIM_FPS)
+            .map_or(0.0, |d| d.max_velocity * GAME_SPEED)
     }
 
     /// Acceleration in elmos/s². FBI `Acceleration` is Spring's
@@ -202,7 +199,7 @@ impl UnitRegistry {
             .map(|d| d.acceleration)
             .filter(|&a| a > 0.0)
             .unwrap_or(DEFAULT_MAX_ACC);
-        acc * SPRING_SIM_FPS * SPRING_SIM_FPS
+        acc * GAME_SPEED * GAME_SPEED
     }
 
     /// Braking deceleration in elmos/s². FBI `BrakeRate` is Spring's
@@ -212,7 +209,7 @@ impl UnitRegistry {
     pub fn brake_rate(&self, kind: UnitKind) -> f32 {
         let dec = self.def(kind).map_or(0.0, |d| d.brake_rate);
         if dec > 0.0 {
-            dec * SPRING_SIM_FPS * SPRING_SIM_FPS
+            dec * GAME_SPEED * GAME_SPEED
         } else {
             self.acceleration(kind)
         }
@@ -253,10 +250,7 @@ impl UnitRegistry {
     /// 480 turns 2.6°/frame, a half turn in ~2.3 s. A TurnRate of 0
     /// (buildings) is treated as "snap" by the movement code.
     pub fn turn_rate(&self, kind: UnitKind) -> f32 {
-        const SPRING_ANGLE_UNITS_PER_REV: f32 = 65536.0;
-        self.def(kind).map_or(0.0, |d| {
-            d.turn_rate / SPRING_ANGLE_UNITS_PER_REV * std::f32::consts::TAU * SPRING_SIM_FPS
-        })
+        self.def(kind).map_or(0.0, |d| d.turn_rate * SHORT_ANGLE_TO_RAD * GAME_SPEED)
     }
 
     /// Whether this unit flies (FBI `canFly=1`). Flying units ignore the
@@ -347,7 +341,6 @@ impl UnitRegistry {
     /// `CHoverAirMoveType` constants for a flying unit, in Spring's
     /// per-frame units (`AAirMoveType` / `CHoverAirMoveType` ctors).
     pub fn hover_air_params(&self, kind: UnitKind) -> crate::interaction::air_movement::HoverAirParams {
-        const HEADING_UNITS_PER_REV: f32 = 65536.0;
         let d = self.def(kind).cloned().unwrap_or_default();
         // `maxAcc = acceleration (default 0.5)`, `maxDec = brakeRate
         // (default maxAcc)`; the TDF parser reads a missing tag as 0.
@@ -357,7 +350,7 @@ impl UnitRegistry {
             acc_rate: acc.max(0.01),
             dec_rate: dec.max(0.01),
             altitude_rate: d.vertical_speed.max(0.01),
-            turn_rate: d.turn_rate / HEADING_UNITS_PER_REV * std::f32::consts::TAU,
+            turn_rate: d.turn_rate * SHORT_ANGLE_TO_RAD,
             cruise_alt: d.cruise_alt,
             hover_factor: d.air_hover_factor,
             banking_allowed: d.banking_allowed,

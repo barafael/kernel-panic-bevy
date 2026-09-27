@@ -33,6 +33,10 @@ use super::movement::{
     PathOutcome, compute_path, promote_next_command,
 };
 use crate::map_events::CircularFlow;
+use crate::sim::{
+    GAME_SPEED, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SQUARE_SIZE, dir_of, dir3_of, heading_of,
+    wrap_angle,
+};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AimTarget, DeployState, Deployable, Dying, Stunned};
 use crate::units::components::{TeamId, UnitStats, UnitType};
@@ -41,17 +45,11 @@ use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
 use super::structures::crushes_features;
 
-/// Spring's sim frame rate (`GAME_SPEED`).
-pub const GAME_SPEED: f32 = 30.0;
-/// Heightmap square edge in elmos (`SQUARE_SIZE`).
-pub const SQUARE_SIZE: f32 = 8.0;
 /// Goal radius of a plain move order (`CMobileCAI::SetGoal`'s default
 /// `goalRadius = SQUARE_SIZE`, MobileCAI.h:25).
 pub const MOVE_GOAL_RADIUS: f32 = SQUARE_SIZE;
 /// `MAX_IDLING_SLOWUPDATES` (GroundMoveType.cpp:84).
 pub const MAX_IDLING_SLOWUPDATES: u32 = 16;
-/// `UNIT_SLOWUPDATE_RATE`: frames between a unit's `SlowUpdate`s.
-pub const SLOW_UPDATE_RATE: u32 = 16;
 /// `modInfo.pfRepathDelayInFrames` / `pfRepathMaxRateInFrames` defaults
 /// (ModInfo.cpp:133-134).
 pub const REPATH_DELAY_FRAMES: u32 = 60;
@@ -318,7 +316,7 @@ impl FrameStats {
             // `turnRate = clamp(ud->turnRate, 1, 32767)` heading units;
             // a TurnRate of 0 in the FBI means "snap" in the port.
             turn_rate: if stats.turn_rate > 0.0 {
-                (stats.turn_rate / GAME_SPEED).clamp(TAU / 65536.0, PI)
+                (stats.turn_rate / GAME_SPEED).clamp(SHORT_ANGLE_TO_RAD, PI)
             } else {
                 PI
             },
@@ -329,22 +327,6 @@ impl FrameStats {
     pub fn frames_to_turn(&self) -> f32 {
         TAU / self.turn_rate
     }
-}
-
-/// Facing for a heading.
-pub fn dir_of(heading: f32) -> Vec2 {
-    Vec2::new(heading.sin(), heading.cos())
-}
-
-/// `GetHeadingFromVector`.
-pub fn heading_of(v: Vec2) -> f32 {
-    v.x.atan2(v.y)
-}
-
-/// Wrap an angle to `(-π, π]` (short-heading arithmetic wraps).
-pub fn wrap_angle(a: f32) -> f32 {
-    let w = (a + PI).rem_euclid(TAU) - PI;
-    if w <= -PI { w + TAU } else { w }
 }
 
 /// Spring's `Sign` (≥ 0 → +1).
@@ -1263,8 +1245,7 @@ fn up_dir(m: &GroundMover, heightmap: Option<&Heightmap>, pos: Vec3) -> Vec3 {
 /// `CSolidObject::UpdateDirVectors` (SolidObject.cpp:435): the flat
 /// heading rotated by the shortest arc from straight up to `up`.
 pub fn attitude(heading: f32, up: Vec3) -> Quat {
-    let f = dir_of(heading);
-    let yaw = Transform::default().looking_to(Vec3::new(f.x, 0.0, f.y), Vec3::Y).rotation;
+    let yaw = Transform::default().looking_to(dir3_of(heading), Vec3::Y).rotation;
     Quat::from_rotation_arc(Vec3::Y, up.normalize_or(Vec3::Y)) * yaw
 }
 

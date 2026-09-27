@@ -23,6 +23,7 @@ use spring_map::map_types::ParsedMap;
 use crate::{
     rendering::camera::RtsCamera,
     rng::{next_f32, random_unit_sphere, xorshift32},
+    sim::{GAME_SPEED, frames_to_secs},
     terrain::heightmap::Heightmap,
     units::{
         components::UnitType,
@@ -89,13 +90,13 @@ const EMIT_INTERVAL: f32 = 1.0 / 18.0;
 // `startSize=6` elmos; `sizeExpansion=0.35` per frame → 10.5 elmos/s.
 // `ttl=50..57` frames → 1.667..1.9 s.
 const START_SIZE: f32 = 6.0;
-const SIZE_EXPANSION_PER_S: f32 = 0.35 * 30.0;
-const TTL_MIN_S: f32 = 50.0 / 30.0;
-const TTL_MAX_S: f32 = 57.0 / 30.0;
+const SIZE_EXPANSION_PER_S: f32 = 0.35 * GAME_SPEED;
+const TTL_MIN_S: f32 = frames_to_secs(50.0);
+const TTL_MAX_S: f32 = frames_to_secs(57.0);
 
 // Initial speed: UpVector*2 elmos/frame + random sphere of radius 0.5/frame.
-const UP_SPEED: f32 = 2.0 * 30.0;
-const LATERAL_JITTER: f32 = 0.5 * 30.0;
+const UP_SPEED: f32 = 2.0 * GAME_SPEED;
+const LATERAL_JITTER: f32 = 0.5 * GAME_SPEED;
 
 // Spawn position: random sphere of radius 10 centred 10 elmos below the vent.
 const SPAWN_RADIUS: f32 = 10.0;

@@ -4,6 +4,7 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
 use super::DeathFx;
+use crate::sim::angle_delta;
 
 /// WALK_WAVEDIST [-8] — wave trough depth in elmos.
 const WAVE_DEPTH: f32 = 8.0;
@@ -25,12 +26,6 @@ const RESET_AIM_SLEEP: f32 = 2.0;
 /// the host re-issues the heading every frame against a moving target,
 /// so an exact match would never settle.
 const AIM_BODY_TOLERANCE: f32 = 0.2;
-
-/// Absolute shortest-arc difference between two angles (rad).
-fn angle_delta(a: f32, b: f32) -> f32 {
-    let d = (a - b).rem_euclid(std::f32::consts::TAU);
-    d.min(std::f32::consts::TAU - d)
-}
 
 #[derive(Clone, Copy, Default)]
 struct WormPieces {

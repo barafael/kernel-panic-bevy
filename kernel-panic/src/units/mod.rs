@@ -12,11 +12,7 @@ pub mod weapon_fx;
 use bevy::prelude::*;
 
 use crate::rendering::interpolation::SimPose;
-
-/// The fixed simulation tick rate (ticks/second) for the gameplay
-/// chain — Spring's own sim frame rate. Every cooldown, burst rate and
-/// production speed in the registries is authored against this cadence.
-const SIMULATION_HZ: f64 = 30.0;
+use crate::sim::SIMULATION_HZ;
 
 use assets::animation;
 use content::{unit_registry, weapons};

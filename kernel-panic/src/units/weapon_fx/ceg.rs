@@ -26,6 +26,7 @@ use spring_tdf::{
     ParticleProperties, SpawnerProperties,
 };
 
+use crate::sim::GAME_SPEED;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::content::tdf_loader;
 
@@ -142,11 +143,6 @@ impl CegRegistry {
 }
 
 // ─── Runtime components ─────────────────────────────────────────────
-
-/// Upstream sim runs at 30 fps; frame-denominated CEG fields
-/// (life/speed/gravity/sizegrowth) get multiplied by this to match
-/// Bevy's per-second `Time::delta_secs` convention.
-const CEG_FRAME_RATE: f32 = 30.0;
 
 /// One live particle spawned from a `CSimpleParticleSystem`.
 #[derive(Component)]
@@ -335,7 +331,7 @@ fn spawn_particle_system(
                 ctx_base,
             )
             .max(1.0);
-            let life_secs = life_frames / CEG_FRAME_RATE;
+            let life_secs = life_frames / GAME_SPEED;
 
             let size = eval_with_spread(
                 &props.particle_size,
@@ -351,7 +347,7 @@ fn spawn_particle_system(
                 rng,
                 ctx_base,
             );
-            let speed_per_sec = speed_per_frame * CEG_FRAME_RATE;
+            let speed_per_sec = speed_per_frame * GAME_SPEED;
 
             let rot_deg = eval_with_spread(&props.emit_rot, &props.emit_rot_spread, rng, ctx_base);
             let rot_rad = rot_deg.to_radians();
@@ -377,23 +373,23 @@ fn spawn_particle_system(
             let particle_pos = origin + Vec3::new(pos_x, pos_y, pos_z);
 
             let gravity_per_frame = Vec3::from_array(props.gravity.eval(&ctx_base));
-            let gravity_per_sec = gravity_per_frame * CEG_FRAME_RATE;
+            let gravity_per_sec = gravity_per_frame * GAME_SPEED;
 
             let airdrag = props.airdrag.eval(&ctx_base);
             let airdrag_per_sec = if airdrag <= 0.0 || airdrag >= 1.0 {
                 1.0
             } else {
                 // v(t) = v0 * drag^(t*fps) → per-sec scale = drag^fps
-                airdrag.powf(CEG_FRAME_RATE)
+                airdrag.powf(GAME_SPEED)
             };
 
             let size_mod = props.size_mod.eval(&ctx_base);
             let size_mod_per_sec = if size_mod > 0.0 && size_mod != 1.0 {
-                size_mod.powf(CEG_FRAME_RATE)
+                size_mod.powf(GAME_SPEED)
             } else {
                 1.0
             };
-            let size_growth_per_sec = props.size_growth.eval(&ctx_base) * CEG_FRAME_RATE;
+            let size_growth_per_sec = props.size_growth.eval(&ctx_base) * GAME_SPEED;
 
             // Material: `unlit=true` means StandardMaterial ignores
             // lighting, so we can drive colour entirely via `base_color`.
@@ -586,7 +582,7 @@ pub(super) fn tick_ceg_spikes(
     if spikes.is_empty() {
         return;
     }
-    let frames = time.delta_secs() * CEG_FRAME_RATE;
+    let frames = time.delta_secs() * GAME_SPEED;
     let cam_pos = camera_q
         .single()
         .map(|gt| gt.translation())
@@ -642,7 +638,7 @@ fn spawn_delayed(
             ..Default::default()
         };
         let delay_frames = props.delay.eval(&ctx).max(0.0);
-        let delay_secs = delay_frames / CEG_FRAME_RATE;
+        let delay_secs = delay_frames / GAME_SPEED;
         let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
         commands.spawn(CegDelayedSpawn {
             delay_secs,
@@ -744,7 +740,7 @@ pub(super) fn tick_ceg_particles(
 ///
 /// Grow + fade `CBitmapMuzzleFlame` billboards. Ticked in sim-frame
 /// terms: `size_growth` is authored per frame, `ttl` is authored in
-/// frames, so we advance `life_frames` by `dt * CEG_FRAME_RATE`.
+/// frames, so we advance `life_frames` by `dt * GAME_SPEED`.
 pub(super) fn tick_ceg_flames(
     time: Res<Time>,
     mut flames: Query<(Entity, &mut CegFlame, &mut Transform)>,
@@ -755,7 +751,7 @@ pub(super) fn tick_ceg_flames(
     if flames.is_empty() {
         return;
     }
-    let dt_frames = time.delta_secs() * CEG_FRAME_RATE;
+    let dt_frames = time.delta_secs() * GAME_SPEED;
     let cam_pos = camera_q
         .single()
         .map(|gt| gt.translation())

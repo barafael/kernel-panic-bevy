@@ -43,7 +43,7 @@ pub const DEFAULT_RES_DIVIDER: usize = 2;
 /// `modInfo.smoothMeshSmoothRadius` default (heightmap squares).
 pub const DEFAULT_SMOOTH_RADIUS: usize = 40;
 /// Spring's `SQUARE_SIZE` in elmos.
-const SQUARE_SIZE: f32 = 8.0;
+const SQUARE_SIZE: f32 = crate::map_types::SQUARE_SIZE as f32;
 
 /// `SmoothHeightMesh::MapChangeTrack`.
 #[derive(Debug, Clone, Default)]

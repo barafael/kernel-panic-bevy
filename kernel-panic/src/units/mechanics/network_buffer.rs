@@ -13,13 +13,14 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use crate::sim::{GAME_SPEED, frames_to_secs};
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 
 /// Seconds between per-Port buffer increments. Upstream uses 164 sim
 /// frames at 30 fps ≈ 5.47s.
-const PORT_TICK_INTERVAL: f32 = 164.0 / 30.0;
+const PORT_TICK_INTERVAL: f32 = frames_to_secs(164.0);
 
 /// Max packets that can spawn in a single Dispatch — matches upstream's
 /// 12-slot offset list.
@@ -27,7 +28,7 @@ pub const DISPATCH_MAX: usize = 12;
 
 /// Seconds a freshly-spawned Packet must wait before it can re-enter
 /// the buffer via the Enter command. Upstream `stunTime=180` frames.
-pub const SPAWN_STUN_SECONDS: f32 = 180.0 / 30.0;
+pub const SPAWN_STUN_SECONDS: f32 = frames_to_secs(180.0);
 
 /// Max distance (elmos) at which a Packet can enter a teleporter.
 /// Upstream `enterDist=150`.
@@ -248,7 +249,7 @@ pub const FLOW_BONUS_PER_BUILDING: f32 = 30.0;
 /// Upstream caps Flow at MAX_SPEED=75; our registry speed lookup is in
 /// elmos/second (MaxVelocity * 30), so we cap the *bonus* portion so
 /// the combined speed never exceeds 75 elmos/frame equivalents.
-const FLOW_MAX_SPEED: f32 = 75.0 * 30.0;
+const FLOW_MAX_SPEED: f32 = 75.0 * GAME_SPEED;
 
 /// Per-Flow multiplier applied on top of `unit_registry.speed`. Updated
 /// once per second by `tick_flow_speed` based on the Flow's team's

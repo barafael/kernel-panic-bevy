@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use spring_pathfinding::{BlockMask, SpeedMap, find_path_masked};
 
 use super::selection::Selected;
+use crate::sim::SQUARE_SIZE;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{
     AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, Dying, ForcedTarget,
@@ -217,7 +218,7 @@ impl NavGridSet {
             return true;
         }
         let map = &self.buckets[self.bucket_for(cap)].speed_map;
-        let (cx, cz) = ((x / 8.0).floor(), (z / 8.0).floor());
+        let (cx, cz) = ((x / SQUARE_SIZE).floor(), (z / SQUARE_SIZE).floor());
         cx >= 0.0 && cz >= 0.0 && map.get(cx as u32, cz as u32) > 0.0
     }
 
@@ -230,8 +231,8 @@ impl NavGridSet {
     /// centred at `(x, z)` (`MoveDef::TestMovePositionForObjects`)?
     pub fn footprint_blocked(&self, x: f32, z: f32, xsizeh: i32, crush_strength: f32) -> bool {
         self.structures.footprint_blocked(
-            (x / 8.0).floor() as i32,
-            (z / 8.0).floor() as i32,
+            (x / SQUARE_SIZE).floor() as i32,
+            (z / SQUARE_SIZE).floor() as i32,
             xsizeh,
             super::structures::crushes_features(crush_strength),
         )
@@ -275,7 +276,7 @@ impl NavGridSet {
         if pos.x < 0.0 || pos.y < 0.0 {
             return None;
         }
-        let s = b.speed_map.get((pos.x / 8.0) as u32, (pos.y / 8.0) as u32);
+        let s = b.speed_map.get((pos.x / SQUARE_SIZE) as u32, (pos.y / SQUARE_SIZE) as u32);
         (s > 0.0).then(|| {
             (1.0 / s - 1.0).max(0.0) / spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
         })
@@ -821,7 +822,8 @@ fn draw_dashed_polyline(
 
 #[cfg(test)]
 mod tilt_tests {
-    use super::super::ground_move::{attitude, heading_of};
+    use super::super::ground_move::attitude;
+    use crate::sim::heading_of;
     use bevy::prelude::*;
 
     const EPS: f32 = 1e-4;

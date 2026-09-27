@@ -19,8 +19,7 @@
 
 use bevy::prelude::*;
 
-/// Spring `GAME_SPEED` — sim frames per second.
-pub const GAME_SPEED: f32 = 30.0;
+use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// `CProjectile::mygravity` for these projectiles: the map's gravity per
 /// frame² (negative = down). Kernel Panic maps use `gravity=50`
@@ -35,7 +34,7 @@ const MAX_PROJECTILE_RANGE: f32 = 1e20;
 /// `weaponDef->turnrate` (`scaleValue(TAANG2RAD * INV_GAME_SPEED)`,
 /// `WeaponDef.cpp:124`).
 pub fn engine_turn_rate(tdf_turnrate: f32) -> f32 {
-    tdf_turnrate * std::f32::consts::TAU / 65536.0 / GAME_SPEED
+    tdf_turnrate * SHORT_ANGLE_TO_RAD / GAME_SPEED
 }
 
 /// Spring `float3::SafeNormalize`: leave near-zero vectors alone.

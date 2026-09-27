@@ -26,7 +26,7 @@ use std::f64::consts::PI;
 use crate::lua_layout::{HexBridge, HexFarmLayout, HexTower};
 
 /// Heightmap / terrain granularity (`SQUARE_SIZE`).
-const SQUARE: f64 = 8.0;
+const SQUARE: f64 = crate::map_types::SQUARE_SIZE as f64;
 /// Spring's terrain-type map is one entry per 2×2 squares.
 const TYPE_SQUARE: f64 = 16.0;
 

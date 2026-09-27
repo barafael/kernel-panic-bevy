@@ -28,6 +28,7 @@ use super::mechanics::worm::{AutoHold, WormSplash, queue_wormsplash};
 use super::spatial::SpatialIndex;
 use super::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
 use crate::rng::next_signed;
+use crate::sim::{SHORT_ANGLE_TO_RAD, SIMULATION_HZ, angle_delta, secs_to_frames};
 use crate::terrain::heightmap::Heightmap;
 
 mod aim;
@@ -105,10 +106,6 @@ const LOS_MARGIN: f32 = 4.0;
 /// 32-tall body); bigger units (byte, pointer) sit higher but we
 /// err on the conservative side so a genuine wall still blocks.
 const LOS_MUZZLE_HEIGHT: f32 = 16.0;
-
-/// Spring encodes per-shot spread in "short" angular units where a full
-/// revolution is 65536. Conversion to radians for aim-offset math.
-const SHORT_ANGLE_TO_RAD: f32 = std::f32::consts::TAU / 65536.0;
 
 /// Seconds between full spatial scans for a unit that already has a
 /// cached target. Matches Spring's `CWeapon::lastTargetRetry + 65`
@@ -317,13 +314,13 @@ pub(super) fn fire_salvo_shot(
 /// Spring sim frame number of the current fixed tick (`gs->frameNum`),
 /// from the fixed clock (30 Hz — `GAME_SPEED`).
 pub(crate) fn sim_frame(time: &Time) -> u64 {
-    (time.elapsed_secs_f64() * 30.0).round() as u64
+    (time.elapsed_secs_f64() * SIMULATION_HZ).round() as u64
 }
 
 /// `salvoDelay = int(burstRate * GAME_SPEED)` (`WeaponLoader.cpp:171`):
 /// whole sim frames between a salvo's shots.
 pub(crate) fn salvo_delay_frames(burst_rate: f32) -> u64 {
-    (burst_rate * 30.0).max(0.0) as u64
+    secs_to_frames(burst_rate).max(0.0) as u64
 }
 
 /// XZ-flatten and normalise a forward vector. Falls back to +Z
@@ -812,10 +809,7 @@ fn aim_gates_pass(
         && let Some(rot) = animator.rig.piece_rotations.get(ap.0)
     {
         let target_x = -std::f32::consts::FRAC_PI_2 - pitch;
-        let mut dy = (rot[1] - heading).rem_euclid(std::f32::consts::TAU);
-        if dy > std::f32::consts::PI {
-            dy = std::f32::consts::TAU - dy;
-        }
+        let dy = angle_delta(rot[1], heading);
         let dx = (rot[0] - target_x).abs();
         if dy > AIM_HEADING_TOLERANCE || dx > AIM_PITCH_TOLERANCE {
             return false;

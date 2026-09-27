@@ -31,6 +31,7 @@ use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
 use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit_filtered};
 use crate::map_loading::TerrainChunkMarker;
 use crate::rendering::camera::RtsCamera;
+use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, unit_material, unit_mesh};
@@ -74,8 +75,6 @@ pub(crate) struct PlacementMode {
 
 /// Max XZ distance from the cursor to a datavent for the ghost to snap.
 const SNAP_RADIUS: f32 = 64.0;
-/// Spring's `SQUARE_SIZE` (elmos per heightmap square).
-const SQUARE: f32 = 8.0;
 /// Spring's `BUILD_SQUARE_SIZE` (the 16-elmo build grid).
 const BUILD_SQUARE: f32 = 16.0;
 
@@ -127,7 +126,7 @@ fn mods(keys: &ButtonInput<KeyCode>) -> Mods {
 /// Spring footprint in heightmap squares (`UnitDef::xsize` =
 /// `FootprintX × 2`).
 fn footprint_squares(footprint_elmos: Vec2) -> IVec2 {
-    (footprint_elmos / SQUARE)
+    (footprint_elmos / SQUARE_SIZE)
         .round()
         .as_ivec2()
         .max(IVec2::ONE)
@@ -139,9 +138,9 @@ fn footprint_squares(footprint_elmos: Vec2) -> IVec2 {
 fn build_pos(p: Vec2, size: IVec2) -> Vec2 {
     let snap = |v: f32, s: i32| {
         if s & 2 != 0 {
-            (v / BUILD_SQUARE).floor() * BUILD_SQUARE + SQUARE
+            (v / BUILD_SQUARE).floor() * BUILD_SQUARE + SQUARE_SIZE
         } else {
-            ((v + SQUARE) / BUILD_SQUARE).floor() * BUILD_SQUARE
+            ((v + SQUARE_SIZE) / BUILD_SQUARE).floor() * BUILD_SQUARE
         }
     };
     Vec2::new(snap(p.x, size.x), snap(p.y, size.y))
@@ -160,8 +159,8 @@ fn row_positions(start: Vec2, end: Vec2, size: IVec2, m: Mods) -> Vec<Vec2> {
     let start = build_pos(start, size);
     let end = build_pos(end, size);
     let delta = end - start;
-    let xsize = SQUARE * size.x as f32;
-    let zsize = SQUARE * size.y as f32;
+    let xsize = SQUARE_SIZE * size.x as f32;
+    let zsize = SQUARE_SIZE * size.y as f32;
     let xnum = ((delta.x.abs() + xsize * 1.4) / xsize) as i32;
     let znum = ((delta.y.abs() + zsize * 1.4) / zsize) as i32;
     let mut xstep = if delta.x > 0.0 { xsize } else { -xsize };

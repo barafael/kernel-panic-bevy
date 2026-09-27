@@ -25,13 +25,11 @@ use bevy::prelude::*;
 use spring_pathfinding::BlockMask;
 
 use super::movement::NavGridSet;
+use crate::sim::SQUARE_SIZE;
 use crate::units::combat::Dying;
 use crate::units::components::{UnitStats, UnitType};
 use crate::units::content::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::units::content::unit_registry::UnitRegistry;
-
-/// Heightmap square edge (elmos).
-const SQUARE: f32 = 8.0;
 
 /// Crush resistance of a KP Bad Block once it turned into its feature:
 /// `defMass = metal·0.4 + health·0.1` with the feature's `metal=64`,
@@ -194,8 +192,8 @@ impl StructureLayer {
         };
         let (fx, fz) = (def.footprint_x.max(1.0) as i32, def.footprint_z.max(1.0) as i32);
         let (xsize, zsize) = (fx * 2, fz * 2);
-        let x0 = ((pos.x - xsize as f32 * SQUARE * 0.5) / SQUARE).round() as i32;
-        let z0 = ((pos.z - zsize as f32 * SQUARE * 0.5) / SQUARE).round() as i32;
+        let x0 = ((pos.x - xsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
+        let z0 = ((pos.z - zsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
         let chars: Vec<char> = def
             .yard_map
             .chars()

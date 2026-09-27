@@ -27,6 +27,7 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
 use super::DeathFx;
+use crate::sim::angle_delta;
 
 /// `ResetAim()`'s `sleep 1000` before the base swings back to rest.
 const RESET_AIM_DELAY: f32 = 1.0;
@@ -171,12 +172,6 @@ impl UnitAnim for FlowAnim {
     fn busy(&self) -> bool {
         self.death.busy()
     }
-}
-
-/// Shortest absolute angular distance between two angles (radians).
-fn angle_delta(a: f32, b: f32) -> f32 {
-    let d = (a - b).rem_euclid(std::f32::consts::TAU);
-    d.min(std::f32::consts::TAU - d)
 }
 
 #[cfg(test)]

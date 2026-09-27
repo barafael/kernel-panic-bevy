@@ -26,7 +26,7 @@ use crate::units::content::unit_registry::UnitRegistry;
 
 /// Map edge in heightmap squares (8 elmos each).
 const MAP_SQUARES: u32 = 256;
-const DT: f64 = 1.0 / 30.0;
+const DT: f64 = 1.0 / crate::sim::SIMULATION_HZ;
 /// Heading-rate threshold for the wiggle count: half a degree per frame
 /// (smaller corrections are invisible).
 const WIGGLE_MIN: f32 = 0.5 * std::f32::consts::PI / 180.0;

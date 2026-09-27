@@ -10,6 +10,7 @@
 use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
+use crate::sim::frames_to_secs;
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -130,7 +131,7 @@ pub fn weapon_infection_duration(weapon: &str) -> Option<f32> {
         "Infection" => 30.0,
         _ => return None,
     };
-    Some(frames / 30.0)
+    Some(frames_to_secs(frames))
 }
 
 /// Queued virus spawns from infected unit deaths.

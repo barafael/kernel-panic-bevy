@@ -131,7 +131,7 @@ mod tests {
 
     fn world_with(tf: Transform) -> (World, Entity) {
         let mut world = World::new();
-        world.insert_resource(Time::<Fixed>::from_hz(30.0));
+        world.insert_resource(Time::<Fixed>::from_hz(crate::sim::SIMULATION_HZ));
         let e = world.spawn((tf, GlobalTransform::from(tf), SimPose::default())).id();
         (world, e)
     }

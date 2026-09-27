@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
 use super::{AimTarget, IdleTimer, StunCharge};
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::sim::frames_to_secs;
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
@@ -60,10 +61,6 @@ pub struct Stunned {
 /// dissipate if no further paralyzer damage lands.
 const STUN_CHARGE_DECAY: f32 = 4.0;
 
-/// Spring encodes FBI `IdleTime` in sim frames at 30 fps; convert to
-/// seconds so we can compare against a `Time`-driven timer.
-const IDLE_FRAMES_PER_SECOND: f32 = 30.0;
-
 /// Regenerate HP on units that have been idle long enough.
 /// A unit counts as idle when it has no move order and no current aim
 /// target. The idle timer is reset in `apply_damage` whenever the unit
@@ -98,7 +95,7 @@ pub fn auto_heal(
         }
 
         idle.0 += dt;
-        let threshold = unit_registry.idle_time(unit.0) / IDLE_FRAMES_PER_SECOND;
+        let threshold = frames_to_secs(unit_registry.idle_time(unit.0));
         if idle.0 >= threshold && health.current < health.max {
             health.current = (health.current + heal_rate * dt).min(health.max);
         }

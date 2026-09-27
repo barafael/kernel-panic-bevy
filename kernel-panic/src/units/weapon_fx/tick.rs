@@ -10,6 +10,7 @@ use super::shared::{
     SMOKE_COLOR, SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
 };
 use crate::rendering::camera::RtsCamera;
+use crate::sim::{GAME_SPEED, secs_to_frames};
 use bevy::ecs::system::SystemParam;
 
 use super::ceg::{CegTrailCtx, spawn_ceg};
@@ -168,7 +169,7 @@ pub(super) fn tick_weapon_fx(
         // without authored decay (default 1.0) we keep the legacy
         // sqrt-thickness shrink so a single-frame `beamtime` weapon
         // still reads as a smooth flash rather than a hard pop.
-        let elapsed_frames = (beam.max_lifetime - beam.lifetime).max(0.0) * 30.0;
+        let elapsed_frames = secs_to_frames((beam.max_lifetime - beam.lifetime).max(0.0));
         let intensity = if beam.decay < 1.0 {
             beam.decay.powf(elapsed_frames)
         } else {
@@ -356,7 +357,7 @@ pub(super) fn tick_weapon_fx(
         }
     }
 
-    let frames = dt * super::flight::GAME_SPEED;
+    let frames = secs_to_frames(dt);
     for (entity, mut proj, mut transform) in &mut projectiles {
         // Plain `&mut` so the flight-state and bookkeeping fields borrow
         // disjointly.
@@ -425,7 +426,7 @@ pub(super) fn tick_weapon_fx(
                     proj.target = t;
                 }
                 proj.elapsed += dt;
-                proj.velocity = v * super::flight::GAME_SPEED;
+                proj.velocity = v * GAME_SPEED;
                 let new_pos = prev + v * frames;
                 let ground = ground_y(new_pos);
                 let hit_ground = new_pos.y <= ground;
@@ -1396,8 +1397,8 @@ mod tests {
         entity: Option<Entity>,
     ) -> Entity {
         let velocity = match flight {
-            Flight::Missile(m) => m.dir * m.speed * 30.0,
-            Flight::Starburst(s) => s.dir * s.speed * 30.0,
+            Flight::Missile(m) => m.dir * m.speed * GAME_SPEED,
+            Flight::Starburst(s) => s.dir * s.speed * GAME_SPEED,
             Flight::Ballistic { velocity, .. } => velocity,
             Flight::Direct => Vec3::ZERO,
         };

@@ -20,6 +20,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::game_setup::AppState;
 use crate::interaction::selection::{Hovered, Selected};
+use crate::sim::GAME_SPEED;
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -151,7 +152,7 @@ fn build_lines(kind: UnitKind, registry: &UnitRegistry) -> Vec<Line> {
         .unwrap_or_default();
     let build_time = registry.raw_build_time(kind);
     let workertime = 128.0;
-    let secs = ((29.0 + (31.0 + build_time / (workertime / 32.0)).floor()) / 30.0).floor();
+    let secs = ((29.0 + (31.0 + build_time / (workertime / 32.0)).floor()) / GAME_SPEED).floor();
     let mut out = vec![
         line(&[(&format!("{name} ({desc})"), Color::WHITE)]),
         line(&[

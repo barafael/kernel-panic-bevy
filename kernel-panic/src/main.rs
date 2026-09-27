@@ -6,6 +6,7 @@ mod paths;
 mod rendering;
 mod rng;
 mod showcase;
+mod sim;
 mod terrain;
 mod ui;
 mod units;

@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
+use crate::sim::INV_GAME_SPEED;
 use crate::units::components::{TeamId, UnitType, is_friendly};
 use crate::units::content::unit_registry::UnitRegistry;
 
@@ -212,7 +213,10 @@ fn resolve_context_cursor(
 }
 
 fn load_cursor_frames(asset_server: Res<AssetServer>, mut state: ResMut<CursorState>) {
-    state.timer = Timer::from_seconds(FRAME_PERIOD_SECS, TimerMode::Repeating);
+    // One cursor frame per sim frame, ~30 fps (FEATURES.md §25). Matches
+    // Spring's default; at 5 fps the Move/Attack sprites visibly stepped
+    // through frames.
+    state.timer = Timer::from_seconds(INV_GAME_SPEED, TimerMode::Repeating);
     for &kind in CursorKind::all() {
         let frames: Vec<Handle<Image>> = (0..kind.frame_count())
             .map(|i| asset_server.load(format!("cursors/{}_{:02}.png", kind.stem(), i)))
@@ -220,10 +224,6 @@ fn load_cursor_frames(asset_server: Res<AssetServer>, mut state: ResMut<CursorSt
         state.frames.insert(kind, frames);
     }
 }
-
-/// ~30 fps animation (FEATURES.md §25). Matches Spring's default; at
-/// 5 fps the Move/Attack sprites visibly stepped through frames.
-const FRAME_PERIOD_SECS: f32 = 1.0 / 30.0;
 
 fn frame_advance(time: Res<Time>, mut state: ResMut<CursorState>) {
     state.timer.tick(time.delta());
