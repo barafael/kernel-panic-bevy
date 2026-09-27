@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 use spring_pathfinding::{BlockMask, SpeedMap, find_path_masked};
@@ -605,6 +607,42 @@ fn sample_at_ground(x: f32, z: f32, heightmap: Option<&Heightmap>) -> Vec3 {
     Vec3::new(x, y + GIZMO_LIFT, z)
 }
 
+/// Orientation that lays a gizmo circle flat on the ground:
+/// `Quat::from_rotation_arc(Vec3::Z, Vec3::Y)`, a −90° turn about X.
+const GROUND_RING: Quat = Quat::from_xyzw(
+    -std::f32::consts::FRAC_1_SQRT_2,
+    0.0,
+    0.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+);
+
+/// Segments per order ring. A 6-elmo disc needs no more than this to
+/// read as round at any zoom; the default 32 costs 5× the lines.
+const RING_RESOLUTION: u32 = 12;
+
+/// One selected unit's dashed order line from its current waypoint on,
+/// kept between frames. Walking the dash pattern samples the heightmap
+/// four times per 32 elmos of path, so for a long path this is hundreds
+/// of samples and lines per unit per frame; the path itself only changes
+/// on a repath or when a waypoint is reached, while the unit's own
+/// movement only affects the lead-in segment (unit → current waypoint),
+/// which is walked live every frame.
+pub(crate) struct CachedDashes {
+    key: DashKey,
+    /// The current waypoint on the ground (where the lead-in ends).
+    first: Vec3,
+    /// The last waypoint on the ground (where the ring goes).
+    end: Vec3,
+    dashes: Vec<(Vec3, Vec3)>,
+    /// Touched this frame; stale entries (deselected / arrived units)
+    /// are dropped at the end of the frame.
+    seen: bool,
+}
+
+/// What the cached dashes depend on: the waypoint index, count, nav
+/// revision, and the first and last remaining waypoints.
+pub(crate) type DashKey = (usize, usize, u64, Vec3, Vec3);
+
 /// Draw each selected unit's order overlay in Spring's per-command colors:
 /// the active path polyline plus a disc at the destination, follow-up queue
 /// segments, and — for unit-targeted orders — a line and ring on the
@@ -615,6 +653,7 @@ pub fn draw_selected_command_lines(
     mut gizmos: Gizmos<CommandLineGizmos>,
     query: Query<
         (
+            Entity,
             &Transform,
             Option<&MoveTarget>,
             Option<&MovePath>,
@@ -629,6 +668,8 @@ pub fn draw_selected_command_lines(
     >,
     targets: Query<&GlobalTransform>,
     heightmap: Option<Res<Heightmap>>,
+    mut cache: Local<HashMap<Entity, CachedDashes>>,
+    mut points: Local<Vec<Vec3>>,
 ) {
     const MOVE_COLOR: Color = Color::srgb(0.2, 1.0, 0.3);
     const BUILD_COLOR: Color = Color::srgb(1.0, 0.8, 0.2);
@@ -638,9 +679,15 @@ pub fn draw_selected_command_lines(
     const TARGET_COLOR: Color = Color::srgb(1.0, 0.65, 0.2);
     const DISC_RADIUS: f32 = 6.0;
 
+    // The cached dashes hug the terrain: a new or reshaped heightmap
+    // (Hex Farm) invalidates them all.
+    if heightmap.as_ref().is_some_and(|h| h.is_changed()) {
+        cache.clear();
+    }
     let hm = heightmap.as_deref();
 
     for (
+        entity,
         transform,
         target,
         path,
@@ -661,22 +708,18 @@ pub fn draw_selected_command_lines(
         {
             let tp = sample_at_ground(t_gtf.translation().x, t_gtf.translation().z, hm);
             draw_dashed_polyline(&mut gizmos, &[unit_pt, tp], FIGHT_COLOR, hm);
-            gizmos.circle(
-                Isometry3d::new(tp, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
-                DISC_RADIUS,
-                FIGHT_COLOR,
-            );
+            gizmos
+                .circle(Isometry3d::new(tp, GROUND_RING), DISC_RADIUS, FIGHT_COLOR)
+                .resolution(RING_RESOLUTION);
         }
         if let Some(guard) = guard
             && let Ok(t_gtf) = targets.get(guard.0)
         {
             let tp = sample_at_ground(t_gtf.translation().x, t_gtf.translation().z, hm);
             draw_dashed_polyline(&mut gizmos, &[unit_pt, tp], GUARD_COLOR, hm);
-            gizmos.circle(
-                Isometry3d::new(tp, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
-                DISC_RADIUS,
-                GUARD_COLOR,
-            );
+            gizmos
+                .circle(Isometry3d::new(tp, GROUND_RING), DISC_RADIUS, GUARD_COLOR)
+                .resolution(RING_RESOLUTION);
         }
 
         // Manual target designation (T): amber line + ring on the forced
@@ -686,30 +729,14 @@ pub fn draw_selected_command_lines(
         {
             let tp = sample_at_ground(t_gtf.translation().x, t_gtf.translation().z, hm);
             draw_dashed_polyline(&mut gizmos, &[unit_pt, tp], TARGET_COLOR, hm);
-            gizmos.circle(
-                Isometry3d::new(tp, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
-                DISC_RADIUS,
-                TARGET_COLOR,
-            );
+            gizmos
+                .circle(Isometry3d::new(tp, GROUND_RING), DISC_RADIUS, TARGET_COLOR)
+                .resolution(RING_RESOLUTION);
         }
 
         let Some(current) = target else {
             continue;
         };
-
-        // Collect the sequence of polyline vertices: unit → remaining
-        // waypoints. If no path exists yet (freshly-issued order), fall
-        // back to unit → current target so the player sees something.
-        let mut points: Vec<Vec3> = vec![unit_pt];
-        if let Some(path) = path
-            && path.current < path.waypoints.len()
-        {
-            for wp in &path.waypoints[path.current..] {
-                points.push(sample_at_ground(wp.x, wp.z, hm));
-            }
-        } else {
-            points.push(sample_at_ground(current.0.x, current.0.z, hm));
-        }
 
         // Active-order line color: fight/attack red, patrol blue, guard
         // white — detected from the order markers riding along with the
@@ -729,15 +756,56 @@ pub fn draw_selected_command_lines(
             MOVE_COLOR
         };
 
-        draw_dashed_polyline(&mut gizmos, &points, active_color, hm);
+        // The polyline runs unit → remaining waypoints. If no path exists
+        // yet (freshly-issued order), fall back to unit → current target
+        // so the player sees something.
+        let end = if let Some(path) = path
+            && path.current < path.waypoints.len()
+        {
+            let remaining = &path.waypoints[path.current..];
+            let key = (
+                path.current,
+                path.waypoints.len(),
+                path.revision,
+                remaining[0],
+                remaining[remaining.len() - 1],
+            );
+            if !cache.get(&entity).is_some_and(|c| c.key == key) {
+                points.clear();
+                points.extend(remaining.iter().map(|wp| sample_at_ground(wp.x, wp.z, hm)));
+                let mut dashes = cache.remove(&entity).map_or_else(Vec::new, |c| c.dashes);
+                dashes.clear();
+                walk_dashes(&points, hm, |a, b| dashes.push((a, b)));
+                cache.insert(
+                    entity,
+                    CachedDashes {
+                        key,
+                        first: points[0],
+                        end: points[points.len() - 1],
+                        dashes,
+                        seen: false,
+                    },
+                );
+            }
+            let c = cache.get_mut(&entity).expect("inserted above");
+            c.seen = true;
+            // Lead-in from the unit to its current waypoint: the only
+            // part that moves with the unit, so it is walked live.
+            draw_dashed_polyline(&mut gizmos, &[unit_pt, c.first], active_color, hm);
+            for &(a, b) in &c.dashes {
+                gizmos.line(a, b, active_color);
+            }
+            c.end
+        } else {
+            let to = sample_at_ground(current.0.x, current.0.z, hm);
+            draw_dashed_polyline(&mut gizmos, &[unit_pt, to], active_color, hm);
+            to
+        };
 
         // Ring at the final point of the active order.
-        let end = *points.last().unwrap();
-        gizmos.circle(
-            Isometry3d::new(end, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
-            DISC_RADIUS,
-            active_color,
-        );
+        gizmos
+            .circle(Isometry3d::new(end, GROUND_RING), DISC_RADIUS, active_color)
+            .resolution(RING_RESOLUTION);
 
         // Queued follow-ups: straight dashed segments between successive
         // targets plus a ring at each.
@@ -755,15 +823,16 @@ pub fn draw_selected_command_lines(
                     QueuedCommand::Guard(_) => GUARD_COLOR,
                 };
                 draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
-                gizmos.circle(
-                    Isometry3d::new(to, Quat::from_rotation_arc(Vec3::Z, Vec3::Y)),
-                    DISC_RADIUS,
-                    color,
-                );
+                gizmos
+                    .circle(Isometry3d::new(to, GROUND_RING), DISC_RADIUS, color)
+                    .resolution(RING_RESOLUTION);
                 prev = to;
             }
         }
     }
+
+    // Drop the dashes of units that are no longer selected or moving.
+    cache.retain(|_, c| std::mem::take(&mut c.seen));
 }
 
 /// Draw a polyline in world space as a repeating `-.-.` dash pattern,
@@ -775,6 +844,12 @@ fn draw_dashed_polyline(
     color: Color,
     heightmap: Option<&Heightmap>,
 ) {
+    walk_dashes(points, heightmap, |a, b| gizmos.line(a, b, color));
+}
+
+/// Walk `points` in the `-.-.` dash pattern, handing every visible dash
+/// (ground-sampled at both ends) to `emit`.
+fn walk_dashes(points: &[Vec3], heightmap: Option<&Heightmap>, mut emit: impl FnMut(Vec3, Vec3)) {
     // Pattern walker: `cursor` is how far into the current pattern entry
     // we've consumed. Persisting across segments keeps the `-.-.` rhythm
     // continuous through waypoint corners.
@@ -806,7 +881,7 @@ fn draw_dashed_polyline(
                     start.z + step_z * (t + advance),
                     heightmap,
                 );
-                gizmos.line(a, b, color);
+                emit(a, b);
             }
 
             t += advance;
