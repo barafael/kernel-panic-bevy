@@ -54,6 +54,21 @@ impl Plugin for UnitsPlugin {
         app.world_mut()
             .resource_mut::<Time<Virtual>>()
             .set_max_delta(std::time::Duration::from_millis(100));
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(kind) = app
+            .world()
+            .get_resource::<crate::game_setup::DevOptions>()
+            .and_then(|d| d.sim_executor.clone())
+        {
+            use bevy::ecs::schedule::ExecutorKind;
+            let kind = match kind.as_str() {
+                "single" => ExecutorKind::SingleThreaded,
+                _ => ExecutorKind::MultiThreaded,
+            };
+            app.edit_schedule(FixedUpdate, move |s| {
+                s.set_executor_kind(kind);
+            });
+        }
         app.insert_resource(Time::<Fixed>::from_hz(SIMULATION_HZ))
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()

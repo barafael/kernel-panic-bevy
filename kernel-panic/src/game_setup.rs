@@ -119,6 +119,10 @@ pub struct DevOptions {
     /// (`profile`).
     #[cfg(not(target_arch = "wasm32"))]
     pub profile: bool,
+    /// `KP_SIM_EXECUTOR=single|multi`: run `FixedUpdate` on that
+    /// executor (an A/B switch for the schedule overhead).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub sim_executor: Option<String>,
 }
 
 impl DevOptions {
@@ -151,6 +155,7 @@ impl DevOptions {
             exit_after: var("KP_EXIT_AFTER").and_then(|n| n.parse().ok()),
             time_scale: var("KP_TIME_SCALE").and_then(|n| n.parse().ok()),
             profile: var("KP_PROFILE").is_some_and(|v| v != "0"),
+            sim_executor: var("KP_SIM_EXECUTOR"),
         }
     }
 }
@@ -169,6 +174,10 @@ pub fn dev_run_control(
         && time.relative_speed() != scale
     {
         time.set_relative_speed(scale);
+        // Keep the catch-up cap at three sim ticks per frame in game
+        // time, so a scaled run profiles frames like real ones.
+        let cap = time.max_delta().div_f32(scale);
+        time.set_max_delta(cap);
     }
     if dev.exit_after.is_some_and(|n| *frames >= n) {
         exit.write(AppExit::Success);
