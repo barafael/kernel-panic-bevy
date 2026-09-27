@@ -23,6 +23,10 @@ impl Plugin for ProfilePlugin {
             return;
         }
         app.init_resource::<Samples>()
+            // GPU timestamps per render pass (elapsed_gpu diagnostics),
+            // printed at exit: tells a fill-rate-bound frame from a
+            // CPU-bound one.
+            .add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin)
             .add_systems(First, (frame_start, census).chain())
             .add_systems(FixedFirst, tick_start)
             .add_systems(FixedLast, tick_end)
@@ -118,9 +122,20 @@ fn report_on_exit(
     mut exit: MessageReader<AppExit>,
     mut s: ResMut<Samples>,
     paths: Option<Res<crate::interaction::ground_move::PathStats>>,
+    diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) {
     if exit.read().next().is_none() {
         return;
+    }
+    // Render pass GPU times (ms, averaged over the diagnostic's history).
+    let mut gpu: Vec<(String, f64)> = diagnostics
+        .iter()
+        .filter(|d| d.path().as_str().ends_with("elapsed_gpu"))
+        .filter_map(|d| d.average().map(|v| (d.path().as_str().to_string(), v)))
+        .collect();
+    gpu.sort_by(|a, b| b.1.total_cmp(&a.1));
+    for (path, ms) in gpu.iter().take(12) {
+        println!("KP_PROFILE gpu {ms:7.2} ms  {path}");
     }
     if let Some(p) = paths {
         println!("KP_PROFILE paths {p:?}");

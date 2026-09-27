@@ -129,13 +129,19 @@ impl StructureLayer {
             crushes,
             mask: BlockMask::new(self.width, self.height),
         };
-        self.fill_mask(
-            &mut mask,
-            0,
-            0,
-            self.width as i32 - 1,
-            self.height as i32 - 1,
-        );
+        // A layer without stamps closes nothing: the fresh mask is
+        // already right, and the full-grid window scan it would
+        // otherwise run (2.4M cells × 49 squares on Hex Farm, per
+        // class) is what made the first sim tick of a match stall.
+        if !self.stamps.is_empty() {
+            self.fill_mask(
+                &mut mask,
+                0,
+                0,
+                self.width as i32 - 1,
+                self.height as i32 - 1,
+            );
+        }
         self.masks.push(mask);
     }
 

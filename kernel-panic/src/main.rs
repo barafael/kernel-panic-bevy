@@ -169,11 +169,28 @@ fn main() {
                     mode: {
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+                            if dev_options.window.is_some() {
+                                WindowMode::Windowed
+                            } else {
+                                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+                            }
                         }
                         #[cfg(target_arch = "wasm32")]
                         {
                             WindowMode::Windowed
+                        }
+                    },
+                    resolution: {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            dev_options
+                                .window
+                                .map(|(w, h)| bevy::window::WindowResolution::new(w, h))
+                                .unwrap_or_default()
+                        }
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            Default::default()
                         }
                     },
                     // Web: fill the Trunk page's canvas element.

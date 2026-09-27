@@ -128,6 +128,15 @@ pub struct DevOptions {
     /// executor (an A/B switch for the schedule overhead).
     #[cfg(not(target_arch = "wasm32"))]
     pub sim_executor: Option<String>,
+    /// `KP_MSAA=0|2|4`: override the camera's MSAA sample count (A/B
+    /// runs of the GPU cost).
+    pub msaa: Option<u8>,
+    /// `KP_BLOOM=0`: no bloom pass (A/B runs of the GPU cost).
+    pub bloom: Option<bool>,
+    /// `KP_WINDOW=<w>x<h>`: start windowed at that size instead of
+    /// borderless fullscreen (A/B runs of the fill-rate cost).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub window: Option<(u32, u32)>,
     /// `KP_SHOT_EVERY=<frames>` + `KP_SHOT_DIR=<dir>`: save a screenshot
     /// every N frames while running (watching a run without a screen).
     #[cfg(not(target_arch = "wasm32"))]
@@ -186,6 +195,12 @@ impl DevOptions {
             time_scale: var("KP_TIME_SCALE").and_then(|n| n.parse().ok()),
             profile: var("KP_PROFILE").is_some_and(|v| v != "0"),
             sim_executor: var("KP_SIM_EXECUTOR"),
+            msaa: var("KP_MSAA").and_then(|n| n.parse().ok()),
+            bloom: var("KP_BLOOM").map(|v| v != "0"),
+            window: var("KP_WINDOW").and_then(|s| {
+                let (w, h) = s.split_once('x')?;
+                Some((w.parse().ok()?, h.parse().ok()?))
+            }),
             shot_every: var("KP_SHOT_EVERY").and_then(|n| n.parse().ok()),
             shot_dir: var("KP_SHOT_DIR").map(Into::into),
             attract_distance: var("KP_ATTRACT_DISTANCE").and_then(|n| n.parse().ok()),

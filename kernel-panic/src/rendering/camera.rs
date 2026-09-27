@@ -122,37 +122,55 @@ const CAMERA_MSAA: Msaa = Msaa::Off;
 #[cfg(not(target_arch = "wasm32"))]
 const CAMERA_MSAA: Msaa = Msaa::Sample4;
 
-pub fn spawn_camera(mut commands: Commands) {
+pub fn spawn_camera(mut commands: Commands, dev: Res<crate::game_setup::DevOptions>) {
+    let msaa = match dev.msaa {
+        Some(0) | Some(1) => Msaa::Off,
+        Some(2) => Msaa::Sample2,
+        Some(4) => Msaa::Sample4,
+        Some(8) => Msaa::Sample8,
+        _ => CAMERA_MSAA,
+    };
     let state = RtsCameraState::default();
     let transform = compute_transform_from_state(&state);
 
-    commands.spawn((
-        RtsCamera,
-        state,
-        Camera3d::default(),
-        CAMERA_MSAA,
-        // Default Bevy far plane is 1000, which clips large maps long
-        // before the map fog takes over. `apply_fog` sizes the fog to
-        // the map diagonal, so push the far plane past any sensible map.
-        Projection::Perspective(PerspectiveProjection {
-            far: 40_000.0,
-            ..default()
-        }),
-        transform,
-        Hdr,
-        bevy::post_process::bloom::Bloom {
-            intensity: 0.15,
-            ..default()
-        },
-        DistanceFog {
-            color: Color::BLACK,
-            falloff: FogFalloff::Linear {
-                start: 3600.0,
-                end: 4000.0,
+    let camera = commands
+        .spawn((
+            RtsCamera,
+            state,
+            Camera3d::default(),
+            msaa,
+            // Default Bevy far plane is 1000, which clips large maps long
+            // before the map fog takes over. `apply_fog` sizes the fog to
+            // the map diagonal, so push the far plane past any sensible map.
+            Projection::Perspective(PerspectiveProjection {
+                far: 40_000.0,
+                ..default()
+            }),
+            transform,
+            Hdr,
+            bevy::post_process::bloom::Bloom {
+                intensity: 0.15,
+                ..default()
             },
-            ..default()
-        },
-    ));
+            DistanceFog {
+                color: Color::BLACK,
+                falloff: FogFalloff::Linear {
+                    start: 3600.0,
+                    end: 4000.0,
+                },
+                ..default()
+            },
+        ))
+        .id();
+    // Bloom is the look; `KP_BLOOM=0` drops it for GPU A/B runs.
+    if dev.bloom.unwrap_or(true) {
+        commands
+            .entity(camera)
+            .insert(bevy::post_process::bloom::Bloom {
+                intensity: 0.15,
+                ..default()
+            });
+    }
 }
 
 /// Build a `Transform` from the *smoothed* state values.
