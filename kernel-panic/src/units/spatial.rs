@@ -17,8 +17,8 @@
 //! movement system runs in between, so the snapshot is live for both
 //! phases.
 
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
-use std::collections::HashMap;
 
 use super::combat::Dying;
 use super::components::{Health, TeamId, UnitType};
@@ -105,17 +105,15 @@ impl SpatialIndex {
         self.push(entry);
     }
 
-    /// Invoke `f` for every entry whose bucket could intersect a sphere
-    /// centered at `center` with XZ `radius`. Callers still need to do
-    /// the real distance check — this only trims the outer loop.
+    /// Invoke `f` for every entry whose bucket intersects the XZ square
+    /// bounding a circle of `radius` around `center`. Callers still need
+    /// to do the real distance check — this only trims the outer loop.
     pub fn query_radius<F: FnMut(&SpatialEntry)>(&self, center: Vec3, radius: f32, mut f: F) {
-        let (cx, cz) = Self::cell(center.x, center.z);
-        // +1 to cover the case where `center` sits near a cell edge and a
-        // candidate in the next cell is still within `radius`.
-        let reach = (radius / SPATIAL_CELL).ceil() as i32 + 1;
-        for dx in -reach..=reach {
-            for dz in -reach..=reach {
-                if let Some(bucket) = self.cells.get(&(cx + dx, cz + dz)) {
+        let (x0, z0) = Self::cell(center.x - radius, center.z - radius);
+        let (x1, z1) = Self::cell(center.x + radius, center.z + radius);
+        for x in x0..=x1 {
+            for z in z0..=z1 {
+                if let Some(bucket) = self.cells.get(&(x, z)) {
                     for entry in bucket {
                         f(entry);
                     }
@@ -187,8 +185,8 @@ mod tests {
         let mut index = SpatialIndex::default();
         index.push(entry(ents[0], Vec3::new(10.0, 0.0, 10.0)));
         index.push(entry(ents[1], Vec3::new(500.0, 0.0, 500.0)));
-        // Far enough that its cell sits well outside ceil(600/256)+1 = 4
-        // cells from the origin cell (cell at ~(11, 11) vs query reach 4).
+        // Far enough that its cell (11, 11) lies outside the query's
+        // bounding cells -3..=2.
         index.push(entry(ents[2], Vec3::new(3000.0, 0.0, 3000.0)));
 
         let mut hit = Vec::new();

@@ -65,20 +65,17 @@ pub fn restore_sim_pose(
     mut q: Query<(&mut Transform, &mut SimPose, Option<&mut GlobalTransform>, Has<ChildOf>)>,
 ) {
     for (mut tf, mut pose, gtf, is_child) in &mut q {
-        match pose.written {
-            Some(w) if w == *tf => {
-                if *tf != pose.curr {
-                    *tf = pose.curr;
-                }
-                pose.written = Some(pose.curr);
-            }
+        if pose.written != Some(*tf) {
             // Changed outside the sim (or never seen): that is the pose.
-            _ => pose.snap(*tf),
+            pose.snap(*tf);
+        } else if *tf != pose.curr {
+            *tf = pose.curr;
+            pose.written = Some(pose.curr);
         }
         // Roots: global == local, so sim systems reading
         // `GlobalTransform` see the sim pose too.
         if !is_child && let Some(mut g) = gtf {
-            *g = GlobalTransform::from(*tf);
+            g.set_if_neq(GlobalTransform::from(*tf));
         }
     }
 }
@@ -100,18 +97,20 @@ pub fn record_sim_pose(mut q: Query<(&Transform, &mut SimPose)>) {
 pub fn interpolate_sim_pose(fixed: Res<Time<Fixed>>, mut q: Query<(&mut Transform, &mut SimPose)>) {
     let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
     for (mut tf, mut pose) in &mut q {
-        match pose.written {
-            Some(w) if w == *tf => {}
-            _ => {
-                pose.snap(*tf);
-                continue;
-            }
+        if pose.written != Some(*tf) {
+            pose.snap(*tf);
+            continue;
         }
-        let blended = blend(&pose.prev, &pose.curr, alpha);
+        // A pose that didn't change over the last tick needs no blend.
+        let blended = if pose.prev == pose.curr {
+            pose.curr
+        } else {
+            blend(&pose.prev, &pose.curr, alpha)
+        };
         if blended != *tf {
             *tf = blended;
+            pose.written = Some(blended);
         }
-        pose.written = Some(blended);
     }
 }
 

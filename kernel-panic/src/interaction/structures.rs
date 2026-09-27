@@ -73,16 +73,20 @@ pub fn crushes_features(crush_strength: f32) -> bool {
 }
 
 impl StructureLayer {
-    fn ensure_size(&mut self, width: u32, height: u32) {
-        if self.width != width || self.height != height {
-            *self = Self {
-                width,
-                height,
-                solid: vec![0; (width * height) as usize],
-                crushable: vec![0; (width * height) as usize],
-                ..Self::default()
-            };
+    /// Size the layer for a `width × height` grid; `true` when it was
+    /// (re)built empty.
+    fn ensure_size(&mut self, width: u32, height: u32) -> bool {
+        if self.width == width && self.height == height {
+            return false;
         }
+        *self = Self {
+            width,
+            height,
+            solid: vec![0; (width * height) as usize],
+            crushable: vec![0; (width * height) as usize],
+            ..Self::default()
+        };
+        true
     }
 
     #[inline]
@@ -228,35 +232,36 @@ fn mover_classes(registry: &UnitRegistry) -> Vec<(i32, bool)> {
 }
 
 /// Keep [`StructureLayer`] in step with the living structures: stamp
-/// new ones, clear the dead / despawned, and bump
+/// new ones, clear the dying / despawned, and bump
 /// [`NavGridSet::revision`] so paths through the change are re-checked.
-/// Runs before the movement systems each sim frame.
-#[allow(clippy::type_complexity)]
+/// Runs before the movement systems each sim frame. Only a freshly
+/// (re)built layer scans every unit; after that spawns, deaths and
+/// despawns drive it.
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_structure_layer(
     nav: Option<ResMut<NavGridSet>>,
     registry: Res<UnitRegistry>,
-    structures: Query<(Entity, &UnitType, &UnitStats, &Transform, Has<Dying>)>,
+    units: Query<(&UnitType, &UnitStats, &Transform, Has<Dying>)>,
+    all: Query<Entity, With<UnitType>>,
+    spawned: Query<Entity, Added<UnitType>>,
+    died: Query<Entity, Added<Dying>>,
+    mut despawned: RemovedComponents<UnitType>,
+    mut classes: Local<Option<Vec<(i32, bool)>>>,
 ) {
     let Some(mut nav) = nav else { return };
     let Some(bucket) = nav.buckets.first() else { return };
     let (w, h) = (bucket.speed_map.width, bucket.speed_map.height);
     let nav = &mut *nav;
     let layer = &mut nav.structures;
-    layer.ensure_size(w, h);
-    for (xsizeh, crushes) in mover_classes(&registry) {
+    let fresh = layer.ensure_size(w, h);
+    for &(xsizeh, crushes) in classes.get_or_insert_with(|| mover_classes(&registry)).iter() {
         layer.ensure_mask(xsizeh, crushes);
     }
     let mut changed = false;
-    let mut alive: Vec<Entity> = Vec::new();
-    for (entity, kind, stats, tf, dying) in &structures {
-        if stats.speed > 0.0 || stats.can_fly {
-            continue;
-        }
-        if dying {
-            continue;
-        }
-        alive.push(entity);
-        if layer.stamps.contains_key(&entity) {
+    let candidates = if fresh { all.iter().collect::<Vec<_>>() } else { spawned.iter().collect() };
+    for entity in candidates {
+        let Ok((kind, stats, tf, dying)) = units.get(entity) else { continue };
+        if stats.speed > 0.0 || stats.can_fly || dying || layer.stamps.contains_key(&entity) {
             continue;
         }
         let stamp = Stamp {
@@ -267,19 +272,10 @@ pub fn update_structure_layer(
         layer.stamps.insert(entity, stamp);
         changed = true;
     }
-    if layer.stamps.len() > alive.len() {
-        alive.sort();
-        let gone: Vec<Entity> = layer
-            .stamps
-            .keys()
-            .filter(|e| alive.binary_search(e).is_err())
-            .copied()
-            .collect();
-        for e in gone {
-            if let Some(stamp) = layer.stamps.remove(&e) {
-                layer.apply(&stamp, false);
-                changed = true;
-            }
+    for entity in died.iter().chain(despawned.read()) {
+        if let Some(stamp) = layer.stamps.remove(&entity) {
+            layer.apply(&stamp, false);
+            changed = true;
         }
     }
     if changed {

@@ -666,7 +666,9 @@ pub fn hover_air_system(
     registry: Res<UnitRegistry>,
     heightmap: Option<Res<Heightmap>>,
     smooth: Option<Res<SmoothGround>>,
-    uninit: Query<(Entity, &UnitType, &UnitStats, &Transform), (Without<HoverAir>, Without<Emerging>, Without<Dying>)>,
+    spawned: Query<(Entity, &UnitStats), Added<UnitStats>>,
+    uninit: Query<(&UnitType, &Transform, Has<Emerging>), (Without<HoverAir>, Without<Dying>)>,
+    mut awaiting_air: Local<Vec<Entity>>,
     mut q: Query<
         (
             Entity,
@@ -687,15 +689,23 @@ pub fn hover_air_system(
     mut flyers: Local<Vec<Flyer>>,
 ) {
     *frame = frame.wrapping_add(1);
-    for (entity, kind, stats, tf) in &uninit {
-        if !stats.can_fly {
-            continue;
+    // New aircraft get their move type once they have emerged (from
+    // their pose then); only freshly spawned flyers are tracked, so the
+    // ground roster isn't rescanned every frame.
+    awaiting_air.extend(spawned.iter().filter(|(_, s)| s.can_fly).map(|(e, _)| e));
+    awaiting_air.retain(|&entity| {
+        let Ok((kind, tf, emerging)) = uninit.get(entity) else {
+            return false;
+        };
+        if emerging {
+            return true;
         }
         let fwd = tf.forward().as_vec3();
         let heading = if fwd.xz().length_squared() > 1e-6 { heading_of(fwd.xz()) } else { 0.0 };
         let air = HoverAir::new(params_for(&registry, kind.0), tf.translation, heading, entity.to_bits() as u32);
         commands.entity(entity).insert(air);
-    }
+        false
+    });
 
     flyers.clear();
     for (entity, stats, tf, air, target, _, queue, boost, stunned, aim, attack_unit, attack_ground) in &q {
