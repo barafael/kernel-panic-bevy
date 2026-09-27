@@ -40,8 +40,9 @@ mod lifecycle;
 pub use collision_volume::CollisionVolume;
 
 pub use aim::{
-    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimScript, AimTarget, Byte, ByteOpen, DeployState,
-    Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state, tick_deploy_state,
+    AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimLaunch, AimScript, AimTarget, Byte, ByteOpen,
+    DeployState, Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state,
+    tick_deploy_state,
 };
 pub(crate) use damage::splash_falloff;
 pub use damage::{
@@ -528,7 +529,7 @@ pub fn combat_system(
                     } else {
                         let aim = AimTarget {
                             pos: t_pos,
-                            arc_height: weapon_def.map_or(0.0, |w| w.trajectory_height),
+                            launch: AimLaunch::of(weapon_def),
                         };
                         put(&mut commands, entity, &mut aim_slot, aim);
                         clear(&mut commands, entity, &cache_slot);
@@ -650,14 +651,14 @@ pub fn combat_system(
         };
         put(&mut commands, entity, &mut cache_slot, cache);
 
-        let arc_height = weapon_def.map_or(0.0, |w| w.trajectory_height);
+        let launch = AimLaunch::of(weapon_def);
 
         // Stamp aim target unconditionally so `aim_weapons_system`
         // keeps steering through cooldown/opening — the weapon is on
         // target the moment firing is allowed.
         let aim = AimTarget {
             pos: target_pos,
-            arc_height,
+            launch,
         };
         put(&mut commands, entity, &mut aim_slot, aim);
 
@@ -688,7 +689,7 @@ pub fn combat_system(
             unit_type.0,
             attacker_gtf,
             target_pos,
-            arc_height,
+            launch,
             deployable.is_some(),
             &pieces,
         ) {
@@ -821,14 +822,14 @@ fn aim_gates_pass(
     kind: UnitKind,
     attacker_gtf: &GlobalTransform,
     target_pos: Vec3,
-    arc_height: f32,
+    launch: AimLaunch,
     deployable: bool,
     pieces: &PieceLookup,
 ) -> bool {
     let (heading, pitch) = aim::local_aim_angles(
         attacker_gtf.rotation(),
         target_pos - attacker_gtf.translation(),
-        arc_height,
+        launch,
     );
     let to_target_xz = (target_pos - attacker_gtf.translation()) * Vec3::new(1.0, 0.0, 1.0);
 
@@ -999,11 +1000,11 @@ pub fn attack_ground_system(
         // Aim at ground target so the barrel sweeps visibly. The order
         // position is fixed, so the stamp is only queued when it is
         // missing or differs (nothing reads `Changed<AimTarget>`).
-        let arc_height = weapon_def.trajectory_height * 0.4;
-        if aim.is_none_or(|a| a.pos != order.pos || a.arc_height != arc_height) {
+        let launch = AimLaunch::of(Some(weapon_def));
+        if aim.is_none_or(|a| a.pos != order.pos || a.launch != launch) {
             commands.entity(entity).insert(AimTarget {
                 pos: order.pos,
-                arc_height,
+                launch,
             });
         }
         // Same surfacing rule as `combat_system`: the aim request above
@@ -1019,7 +1020,7 @@ pub fn attack_ground_system(
             unit_type.0,
             gtf,
             order.pos,
-            arc_height,
+            launch,
             deployable.is_some(),
             &pieces,
         ) {
@@ -1568,7 +1569,7 @@ mod tests {
             crate::interaction::air_movement::attitude(0.7, 0.25),
         );
         let target = Vec3::new(420.0, 20.0, 150.0);
-        let (h, p) = aim::local_aim_angles(unit_tf.rotation, target - unit_tf.translation, 0.0);
+        let (h, p) = aim::local_aim_angles(unit_tf.rotation, target - unit_tf.translation, AimLaunch::Direct);
         // Rig → Bevy mapping (`apply_and_drain`): euler YXZ (y, x, −z).
         let base_tf = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, h, -p, 0.0));
         let wing_tf = Transform::from_rotation(Quat::from_euler(EulerRot::YXZ, 0.0, 0.0, -0.8));

@@ -55,13 +55,6 @@ pub struct FadeMaterials {
 /// typical unit so the model is fully hidden underground at t=0.
 pub const EMERGE_DEPTH: f32 = 40.0;
 
-/// How long before the build cycle completes the unit appears underground
-/// and starts rising. Picked so the rise feels like part of the build
-/// rather than an after-effect — the player sees ~1.5s of "the laser
-/// drew this thing into being". Clamped against `build_time` so very
-/// short cycles still finish naturally.
-pub const EMERGE_LEAD_TIME: f32 = 1.5;
-
 /// Tick `Emerging` units forward — either lerping Y upward (Rise style)
 /// or ramping per-piece alpha (Fade style). When the timer expires the
 /// component is removed, faded materials are restored to the shared

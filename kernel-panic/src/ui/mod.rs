@@ -23,7 +23,29 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((hud::HudPlugin, menu::MenuPlugin, minimap::MinimapPlugin));
         #[cfg(not(target_arch = "wasm32"))]
-        app.add_plugins((menu_shots::MenuShotsPlugin, game_shots::GameShotsPlugin));
+        app.add_plugins((menu_shots::MenuShotsPlugin, game_shots::GameShotsPlugin))
+            .add_systems(
+                Update,
+                periodic_shots.run_if(|d: Res<crate::game_setup::DevOptions>| {
+                    d.shot_every.is_some() && d.shot_dir.is_some()
+                }),
+            );
+    }
+}
+
+/// `KP_SHOT_EVERY` / `KP_SHOT_DIR`: a screenshot every N frames.
+#[cfg(not(target_arch = "wasm32"))]
+fn periodic_shots(
+    dev: Res<crate::game_setup::DevOptions>,
+    mut frame: Local<u32>,
+    mut commands: Commands,
+) {
+    *frame += 1;
+    if let (Some(every), Some(dir)) = (dev.shot_every, &dev.shot_dir)
+        && every > 0
+        && *frame % every == 0
+    {
+        save_screenshot(&mut commands, dir.join(format!("shot_{:05}.png", *frame)));
     }
 }
 

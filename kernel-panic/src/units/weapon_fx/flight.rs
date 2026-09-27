@@ -21,10 +21,7 @@ use bevy::prelude::*;
 
 use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
-/// `CProjectile::mygravity` for these projectiles: the map's gravity per
-/// frame² (negative = down). Kernel Panic maps use `gravity=50`
-/// (see the ballistic solve in `spawn.rs`).
-pub const MAP_GRAVITY_PER_FRAME2: f32 = -50.0 / (GAME_SPEED * GAME_SPEED);
+use crate::sim::MAP_GRAVITY_PER_FRAME2;
 
 /// `MAX_PROJECTILE_RANGE` — `distanceToTravel` for `fixedLauncher` /
 /// timed starbursts, which never run out of range.

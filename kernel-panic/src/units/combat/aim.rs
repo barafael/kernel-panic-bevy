@@ -45,9 +45,88 @@ pub struct Deployable {
 #[derive(Component, Clone, Copy, Debug)]
 pub struct AimTarget {
     pub pos: Vec3,
-    /// Arc height for ballistic weapons (passed through from the
-    /// WeaponDef so the gun elevates for the lob, not the direct line).
-    pub arc_height: f32,
+    /// How the weapon's projectile leaves the muzzle, which is the
+    /// direction the script is asked to aim at.
+    pub launch: AimLaunch,
+}
+
+/// The launch direction a weapon's `AimWeapon` script receives —
+/// `CWeapon::UpdateAim` hands the script the pitch of `wantedDir`, and
+/// each weapon type has its own idea of that (`Weapon.cpp:417`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AimLaunch {
+    /// Straight at the target (beams, lasers, melee).
+    Direct,
+    /// `CMissileLauncher::UpdateWantedDir`: the target direction lifted
+    /// by `trajectoryHeight` and renormalised — the Pointer's Geometric
+    /// (`trajectoryheight=1`) leaves at ~45° up, and so does its gun.
+    Missile { trajectory_height: f32 },
+    /// `CCannon::CalcWantedDir`: the ballistic solution for the shell's
+    /// speed (elmos/frame) under the map's gravity, low trajectory.
+    Cannon { speed: f32 },
+}
+
+impl AimLaunch {
+    /// The launch of `weapon`'s projectile, per its Spring weapon type.
+    pub fn of(weapon: Option<&spring_tdf::WeaponDef>) -> Self {
+        use spring_tdf::WeaponCategory as C;
+        let Some(w) = weapon else {
+            return Self::Direct;
+        };
+        match w.category() {
+            C::MissileLauncher | C::StarburstLauncher if w.trajectory_height > 0.0 => Self::Missile {
+                trajectory_height: w.trajectory_height,
+            },
+            C::Cannon if w.weapon_velocity > 0.0 => Self::Cannon {
+                speed: w.weapon_velocity / crate::sim::GAME_SPEED,
+            },
+            _ => Self::Direct,
+        }
+    }
+
+    /// Pitch (radians, up positive) of the launch toward a target
+    /// `horizontal` elmos away and `up` elmos higher.
+    fn pitch(self, horizontal: f32, up: f32) -> f32 {
+        match self {
+            Self::Direct => up.atan2(horizontal.max(1e-6)),
+            Self::Missile { trajectory_height } => {
+                let dist = (horizontal * horizontal + up * up).sqrt().max(1e-6);
+                let dir = Vec3::new(horizontal / dist, up / dist + trajectory_height, 0.0)
+                    .normalize_or(Vec3::Y);
+                dir.y.clamp(-1.0, 1.0).asin()
+            }
+            Self::Cannon { speed } => cannon_pitch(horizontal, up, speed),
+        }
+    }
+}
+
+/// `CCannon::CalcWantedDir` for a shell of `v` elmos/frame under the
+/// map's gravity: the low-trajectory launch pitch; level (0) when the
+/// target is out of ballistic reach, as the engine's fallback leaves
+/// `wantedDir` horizontal.
+fn cannon_pitch(dxz: f32, dy: f32, v: f32) -> f32 {
+    let g = crate::sim::MAP_GRAVITY_PER_FRAME2;
+    let dfsq = dxz * dxz;
+    let dsq = dfsq + dy * dy;
+    if dsq == 0.0 {
+        return -std::f32::consts::FRAC_PI_2;
+    }
+    let vsq = v * v;
+    let root1 = vsq * vsq + 2.0 * vsq * g * dy - g * g * dfsq;
+    if root1 < 0.0 {
+        return 0.0;
+    }
+    let root2 = 2.0 * dfsq * dsq * (vsq + g * dy + root1.sqrt());
+    if root2 < 0.0 {
+        return 0.0;
+    }
+    let vxz = root2.sqrt() / (2.0 * dsq);
+    let vy = if dxz == 0.0 || vxz == 0.0 {
+        v
+    } else {
+        vxz * dy / dxz - dxz * g / (2.0 * vxz)
+    };
+    vy.atan2(vxz)
 }
 
 /// Max heading error (radians) at which a Deployable is allowed to fire.
@@ -137,20 +216,14 @@ pub const AIM_SCRIPT_RETARGET_THRESHOLD: f32 = 0.2;
 /// Bevy yaw here — which is `heading + π` for a `looking_to` rotation —
 /// turned every aiming piece 180° away from its target.)
 ///
-/// `arc_height` adds the ballistic elevation bias the Pointer's gun
-/// uses for its lob (`(4·h/d).atan()`), measured in the unit frame.
-pub fn local_aim_angles(unit_rot: Quat, to_target: Vec3, arc_height: f32) -> (f32, f32) {
+/// The pitch is that of the weapon's launch direction ([`AimLaunch`]),
+/// measured in the unit frame.
+pub fn local_aim_angles(unit_rot: Quat, to_target: Vec3, launch: AimLaunch) -> (f32, f32) {
     let local = unit_rot.inverse() * to_target;
     let (right, up, front) = (local.x, local.y, -local.z);
     let heading = (-right).atan2(front);
     let horizontal = (right * right + front * front).sqrt();
-    let direct_pitch = up.atan2(horizontal.max(1e-6));
-    let arc_pitch = if arc_height > 0.0 && horizontal > 1.0 {
-        (4.0 * arc_height / horizontal).atan()
-    } else {
-        0.0
-    };
-    (heading, direct_pitch + arc_pitch)
+    (heading, launch.pitch(horizontal, up))
 }
 
 /// Advance every unit's aim cycle. Call the unit's animation driver
@@ -176,7 +249,7 @@ pub fn drive_aim_script(
 ) {
     for (mut aim, mut animator, gtf, target, move_target, move_path, deployable) in &mut query {
         let (rel_heading, pitch_rad) =
-            local_aim_angles(gtf.rotation(), target.pos - gtf.translation(), target.arc_height);
+            local_aim_angles(gtf.rotation(), target.pos - gtf.translation(), target.launch);
 
         let dh = (rel_heading - aim.last_heading_rad).abs();
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
@@ -235,13 +308,11 @@ pub fn tick_deploy_state(
 ) {
     let dt = time.delta_secs();
     for (mut deployable, move_target, move_path, attack_move, aiming) in &mut query {
-        // A fight order pauses the move while there is something to
-        // shoot (`CMobileCAI::ExecuteFight` stops the unit, which calls
-        // the script's `StopMoving`): the Pointer opens and fires, then
-        // resumes. `movement_system` holds the unit on the same
-        // condition.
-        let held = attack_move && aiming;
-        let is_moving = (move_target.is_some() || move_path.is_some()) && !held;
+        let is_moving = crate::interaction::movement::moving_for_script(
+            move_target.is_some() || move_path.is_some(),
+            attack_move,
+            aiming,
+        );
 
         // Steady-state fast path: if no transition is in flight and the
         // deploy state already matches the movement state, there is
@@ -379,6 +450,24 @@ pub fn aim_weapons_system(
 mod tests {
     use super::*;
 
+    /// A missile with `trajectoryheight=1` leaves at 45° toward a level
+    /// target; a cannon shell's pitch is the low ballistic solution
+    /// (`sin 2θ = g·d / v²` on flat ground); a beam aims straight.
+    #[test]
+    fn launch_pitches_follow_the_engine_weapon_types() {
+        let level = Quat::IDENTITY;
+        let target = Vec3::new(0.0, 0.0, -1000.0);
+        let (_, p) = local_aim_angles(level, target, AimLaunch::Direct);
+        assert!(p.abs() < 1e-6);
+        let (_, p) = local_aim_angles(level, target, AimLaunch::Missile { trajectory_height: 1.0 });
+        assert!((p - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{p}");
+        let v = 400.0 / crate::sim::GAME_SPEED;
+        let (_, p) = local_aim_angles(level, target, AimLaunch::Cannon { speed: v });
+        let g = -crate::sim::MAP_GRAVITY_PER_FRAME2;
+        let expected = 0.5 * (g * 1000.0 / (v * v)).asin();
+        assert!((p - expected).abs() < 1e-3, "{p} vs {expected}");
+    }
+
     /// The `AimWeapon1(h, p)` a unit receives must turn a piece's S3O +Z
     /// (under the 180° model root) onto the target, whatever the body's
     /// heading, bank or pitch — the old yaw-based heading was off by π
@@ -397,7 +486,7 @@ mod tests {
                     Vec3::new(80.0, -60.0, 10.0),
                     Vec3::new(-30.0, 25.0, -90.0),
                 ] {
-                    let (h, p) = local_aim_angles(body, to_target, 0.0);
+                    let (h, p) = local_aim_angles(body, to_target, AimLaunch::Direct);
                     let piece = Quat::from_euler(EulerRot::YXZ, h, -p, 0.0);
                     let gun = body * root * piece * Vec3::Z;
                     assert!(
@@ -406,7 +495,7 @@ mod tests {
                     );
                 }
                 // Dead ahead is h = 0.
-                let (h, _) = local_aim_angles(body, front * 50.0, 0.0);
+                let (h, _) = local_aim_angles(body, front * 50.0, AimLaunch::Direct);
                 assert!(h.abs() < 0.2, "ahead should be ~0, got {h}");
             }
         }

@@ -35,7 +35,7 @@ mod emerge;
 mod s3o_mount;
 
 pub use emerge::{
-    EMERGE_DEPTH, EMERGE_LEAD_TIME, EmergeStyle, Emerging, FadeMaterials, emerge_system,
+    EMERGE_DEPTH, EmergeStyle, Emerging, FadeMaterials, emerge_system,
 };
 pub use s3o_mount::PieceLayout;
 

@@ -199,9 +199,7 @@ pub fn tick_construction(
             let new_entity = spawn_unit(constructing.kind, *faction, team.0, spawn_pos, &mut ctx);
             // Emerging runs for the full build_time so the rise/fade
             // tracks the build progress 1:1 — both decay at `dt` per
-            // frame. `EMERGE_LEAD_TIME` is the *factory* convention
-            // (last 1.5 s of a build) and is deliberately not used
-            // here; mobile-constructor builds want the slower visual.
+            // frame.
             ctx.commands.entity(new_entity).insert(Emerging {
                 target_y,
                 remaining: build_time,

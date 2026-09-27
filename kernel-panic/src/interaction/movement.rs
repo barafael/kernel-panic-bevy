@@ -570,6 +570,15 @@ pub fn orient_stationary_to_terrain(
     }
 }
 
+/// Whether a unit's orders have it moving, as its script and deploy
+/// state see it: a move order that is not paused by a fight order
+/// engaging (`CMobileCAI::ExecuteFight` stops the unit to shoot, which
+/// is the script's `StopMoving`; `movement_system` holds it on the same
+/// condition).
+pub fn moving_for_script(has_order: bool, attack_move: bool, aiming: bool) -> bool {
+    has_order && !(attack_move && aiming)
+}
+
 /// Outcome of one path search.
 pub(crate) enum PathOutcome {
     /// Follow this path. When the goal is unreachable it ends at the

@@ -195,7 +195,7 @@ mod tests {
                 stats(63.0),
                 AimTarget {
                     pos: Vec3::X * 100.0,
-                    arc_height: 0.0,
+                    launch: crate::units::combat::AimLaunch::Direct,
                 },
             ))
             .id();

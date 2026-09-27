@@ -8,9 +8,9 @@
 use bevy::prelude::*;
 
 use super::production::Producer;
-use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::interaction::movement::{AttackMoveActive, MovePath, MoveTarget, moving_for_script};
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
-use crate::units::combat::Dying;
+use crate::units::combat::{AimTarget, Dying};
 
 /// Marks a unit that fired its start-moving animation and has not yet
 /// fired stop-moving. Presence means "previously observed moving"; the
@@ -35,12 +35,15 @@ pub fn trigger_movement_scripts(
         &mut UnitAnimator,
         Option<&MoveTarget>,
         Option<&MovePath>,
+        Has<AttackMoveActive>,
+        Has<AimTarget>,
         Has<WasMoving>,
     )>,
     mut commands: Commands,
 ) {
-    for (entity, mut animator, move_target, move_path, was_moving) in &mut query {
-        let is_moving = move_target.is_some() || move_path.is_some();
+    for (entity, mut animator, move_target, move_path, attack_move, aiming, was_moving) in &mut query {
+        let is_moving =
+            moving_for_script(move_target.is_some() || move_path.is_some(), attack_move, aiming);
         match (is_moving, was_moving) {
             (true, false) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;

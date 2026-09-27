@@ -123,6 +123,15 @@ pub struct DevOptions {
     /// executor (an A/B switch for the schedule overhead).
     #[cfg(not(target_arch = "wasm32"))]
     pub sim_executor: Option<String>,
+    /// `KP_SHOT_EVERY=<frames>` + `KP_SHOT_DIR=<dir>`: save a screenshot
+    /// every N frames while running (watching a run without a screen).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub shot_every: Option<u32>,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub shot_dir: Option<std::path::PathBuf>,
+    /// `KP_ATTRACT_DISTANCE=<elmos>`: orbit the attract camera this close
+    /// (unit close-ups in `KP_SHOT_EVERY` runs).
+    pub attract_distance: Option<f32>,
 }
 
 impl DevOptions {
@@ -156,6 +165,9 @@ impl DevOptions {
             time_scale: var("KP_TIME_SCALE").and_then(|n| n.parse().ok()),
             profile: var("KP_PROFILE").is_some_and(|v| v != "0"),
             sim_executor: var("KP_SIM_EXECUTOR"),
+            shot_every: var("KP_SHOT_EVERY").and_then(|n| n.parse().ok()),
+            shot_dir: var("KP_SHOT_DIR").map(Into::into),
+            attract_distance: var("KP_ATTRACT_DISTANCE").and_then(|n| n.parse().ok()),
         }
     }
 }

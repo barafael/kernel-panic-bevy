@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 use super::spawning::{
-    EMERGE_DEPTH, EMERGE_LEAD_TIME, EmergeStyle, Emerging, FactoryPieces, FadeMaterials,
+    EMERGE_DEPTH, EmergeStyle, Emerging, FactoryPieces, FadeMaterials,
     SpawnContext, spawn_unit,
 };
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
@@ -393,14 +393,13 @@ pub fn production_system(
             );
         }
 
-        // Two-phase spawn: when the producer's progress reaches the
-        // spawn threshold (build_time - EMERGE_LEAD_TIME), drop the
-        // unit underground and let the emerge system lift it. The
-        // *queue* doesn't pop until the full build_time has elapsed,
-        // which gives the rising unit something to ride on (and keeps
-        // the build laser firing on its emitters until completion).
-        let emerge_lead = EMERGE_LEAD_TIME.min(build_time);
-        let spawn_threshold = (build_time - emerge_lead).max(0.0);
+        // The unit exists for its whole build, as Spring's nanoframe
+        // does: it is spawned the moment its build starts and rises out
+        // of the pad over `build_time` (its script's `Create()` loop
+        // tracks `BUILD_PERCENT_LEFT`). The *queue* only pops once the
+        // full build_time has elapsed.
+        let emerge_lead = build_time;
+        let spawn_threshold = 0.0;
 
         if !producer.unit_spawned && producer.progress >= spawn_threshold {
             // O(1) via the bookkeeping-maintained counter — the old

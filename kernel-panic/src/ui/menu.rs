@@ -1619,12 +1619,14 @@ fn attract_camera(
     fighters: Query<&GlobalTransform, (With<AimTarget>, With<UnitType>)>,
     bases: Query<&GlobalTransform, With<Homebase>>,
     mut cam: Query<&mut RtsCameraState, With<RtsCamera>>,
+    dev: Res<DevOptions>,
 ) {
     let Ok(mut state) = cam.single_mut() else {
         return;
     };
     let dt = time.delta_secs();
     director.clock += dt;
+    let zoom = dev.attract_distance.map_or(1.0, |d| d / 1250.0);
     // A freshly loaded map invalidates the old point of interest.
     if bounds.is_changed() {
         director.target = None;
@@ -1662,7 +1664,7 @@ fn attract_camera(
         state.focus = pass.start.lerp(pass.end, eased);
         state.yaw = pass.yaw;
         state.pitch = PASS_PITCH;
-        state.distance = PASS_DISTANCE;
+        state.distance = PASS_DISTANCE * zoom;
         return;
     }
     if let Some(target) = director.target {
@@ -1677,7 +1679,7 @@ fn attract_camera(
     state.yaw += ATTRACT_ORBIT_SPEED * dt;
     state.pitch = 0.62;
     // Slow breathing zoom so the shot doesn't feel static.
-    state.distance = 1250.0 + 250.0 * (director.clock * 0.07).sin();
+    state.distance = (1250.0 + 250.0 * (director.clock * 0.07).sin()) * zoom;
 }
 
 impl LowPass {

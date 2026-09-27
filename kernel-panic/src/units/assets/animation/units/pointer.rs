@@ -39,6 +39,8 @@ pub struct PointerAnim {
     pieces: PointerPieces,
     /// Last deploy state seen — choreography fires on transitions.
     last_state: Option<DeployState>,
+    /// The body is rolling (`spin body`).
+    rolling: bool,
     death: DeathFx,
 }
 
@@ -99,17 +101,23 @@ impl UnitAnim for PointerAnim {
             }
             self.last_state = ctx.deploy;
         }
-    }
 
-    fn start_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // StartMoving(): Close(), then spin body around x-axis <180>.
-        rig.spin_dps(self.pieces.body, Axis::X, ROLL_DPS);
-    }
-
-    fn stop_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
-        // StopMoving(): turn body to x 0 now; stop-spin; Open().
-        rig.stop_spin(self.pieces.body, Axis::X);
-        rig.turn_deg(self.pieces.body, Axis::X, 0.0, 0.0);
+        // StartMoving(): `sleep 50; call-script Close(); spin body` —
+        // the roll starts once the shell has folded, so a Pointer that
+        // is ordered off while deployed folds first and rolls after.
+        // StopMoving() stops the spin at once (`turn body to x-axis 0
+        // now; stop-spin`), so it never rolls while parked or firing.
+        let folded = ctx.deploy.is_none_or(|s| s == DeployState::Closed);
+        let should_roll = ctx.moving && folded;
+        if should_roll != self.rolling {
+            if should_roll {
+                rig.spin_dps(self.pieces.body, Axis::X, ROLL_DPS);
+            } else {
+                rig.stop_spin(self.pieces.body, Axis::X);
+                rig.turn_deg(self.pieces.body, Axis::X, 0.0, 0.0);
+            }
+            self.rolling = should_roll;
+        }
     }
 
     fn aim(&mut self, rig: &mut AnimRig, h: f32, p: f32, ctx: AnimCtx) -> bool {

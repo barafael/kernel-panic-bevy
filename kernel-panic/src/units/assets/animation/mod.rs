@@ -616,6 +616,7 @@ pub struct AnimDrivers<'w, 's> {
             Option<&'static crate::units::combat::AimTarget>,
             Option<&'static crate::units::combat::AttackGroundOrder>,
             Option<&'static crate::units::combat::AttackTargetOrder>,
+            Has<crate::interaction::movement::AttackMoveActive>,
         ),
     >,
 }
@@ -641,6 +642,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
         aim_target,
         attack_ground,
         attack_target,
+        attack_move,
     ) in &mut drivers.animators
     {
         let build_percent = emerging
@@ -656,7 +658,11 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
         let ctx = AnimCtx {
             dt,
             build_percent,
-            moving: move_target.is_some() || move_path.is_some(),
+            moving: crate::interaction::movement::moving_for_script(
+                move_target.is_some() || move_path.is_some(),
+                attack_move,
+                aim_target.is_some(),
+            ),
             producing: producer.is_some_and(|p| p.current_production().is_some()),
             deploy: deployable.map(|d| d.state),
             aim_active: aim_target.is_some(),

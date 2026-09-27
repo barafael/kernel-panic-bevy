@@ -27,6 +27,10 @@ pub const SIMULATION_HZ: f64 = GAME_SPEED as f64;
 /// `UNIT_SLOWUPDATE_RATE`: frames between a unit's `SlowUpdate`s.
 pub const SLOW_UPDATE_RATE: u32 = 16;
 
+/// The map's gravity per frame² (negative = down): Kernel Panic maps
+/// all set `gravity=50` (`mapInfo->map.gravity = -50 / GAME_SPEED²`).
+pub const MAP_GRAVITY_PER_FRAME2: f32 = -50.0 / (GAME_SPEED * GAME_SPEED);
+
 /// Heightmap square edge in elmos (`SQUARE_SIZE`). Re-exported from the
 /// pathfinder so the speed grid and the game can never disagree.
 pub use spring_pathfinding::SQUARE_SIZE;
