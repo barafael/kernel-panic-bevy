@@ -50,8 +50,8 @@ use mipmap::{build_terrain_material_from_texture, dark_fallback_material, void_g
 pub struct MapLoadingPlugin;
 
 /// Set containing the world teardown+rebuild pair. UI systems that hold
-/// entity references across frames (info panel, order palette, build
-/// menu, placement ghost) must order themselves `.after(Self::*)` this —
+/// entity references across frames (command panel, build bar, tooltip,
+/// placement ghost) must order themselves `.after(Self::*)` this —
 /// otherwise a rebuild in the same frame can despawn entities their
 /// queued commands still reference, which panics at command-apply time.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]

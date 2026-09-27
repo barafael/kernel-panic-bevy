@@ -1,4 +1,4 @@
-//! Per-unit thumbnail cache for the build menu / info panel.
+//! Per-unit thumbnail cache for the command panel's build buttons.
 //!
 //! Loads one image per `UnitKind` at startup. Filename comes from the
 //! FBI `BuildPic` field (e.g. Network units declare `network_big.png`,

@@ -37,7 +37,6 @@ pub struct PlayerSpec {
 #[derive(Debug, Clone, Resource)]
 pub struct GameSetup {
     /// Map file stem, resolved against the map catalog (`assets/maps/`).
-    #[allow(dead_code)]
     pub map: String,
     /// Player 0 is the local player (team 0); the rest are AI seats.
     pub players: Vec<PlayerSpec>,
@@ -249,8 +248,8 @@ pub struct RunGame;
 
 /// Turn the menu's skirmish config into a concrete [`GameSetup`].
 ///
-/// `map_count` is the map-catalog length so `None` (random) can pick a
-/// weighted map without the menu knowing the list.
+/// `map_names` is the map catalog, so `None` (random) can pick a weighted
+/// map without the menu knowing the list.
 pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
     let map = match config.map {
         Some(i) => map_names

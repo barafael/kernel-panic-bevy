@@ -102,14 +102,14 @@ impl Producer {
             .map(|kind| registry.build_time(kind))
     }
 
-    /// The queued build orders. Read by the build menu's queue-summary
-    /// UI and the AI's refill check.
+    /// The queued build orders. Read by the build bar's queue counts,
+    /// the command panel and the AI's refill check.
     pub fn queue(&self) -> &VecDeque<UnitKind> {
         &self.queue
     }
 
     /// Enqueue a unit to be built. The queue is unbounded; the player
-    /// can stack as many orders as they want (build menu, AI).
+    /// can stack as many orders as they want (build bar, command panel, AI).
     pub fn enqueue(&mut self, kind: UnitKind) {
         self.queue.push_back(kind);
     }
@@ -150,13 +150,6 @@ impl Producer {
                 self.progress = 0.0;
             }
         }
-    }
-
-    /// Pop and return the next unit to build, if any. Used by tests to
-    /// assert on the AI's build sequencing.
-    #[allow(dead_code)]
-    pub fn dequeue_front(&mut self) -> Option<UnitKind> {
-        self.queue.pop_front()
     }
 }
 

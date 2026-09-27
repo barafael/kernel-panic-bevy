@@ -1,7 +1,7 @@
 //! Mobile-builder construction pipeline.
 //!
-//! When the player clicks a building in a constructor's build menu and then
-//! a datavent on the map, a `BuildAt { kind, site }` command is queued onto
+//! When the player picks a building on a constructor's command panel and
+//! then a datavent on the map, a `BuildAt { kind, site }` command is queued onto
 //! the builder (shift to append, plain click to replace). The movement
 //! system walks the builder toward the site; this module takes over once
 //! the unit is within its FBI `BuildDistance`:
@@ -55,8 +55,8 @@ pub struct Constructing {
 }
 
 /// Buildings the constructor `kind` can erect on a datavent. Pulled from
-/// upstream `[CANBUILD]` in `SIDEDATA.TDF`. The build menu renders these
-/// as its constructor roster.
+/// upstream `[CANBUILD]` in `SIDEDATA.TDF`. The command panel lists these
+/// as the constructor's build options.
 pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
     match kind {
         UnitKind::Assembler => &[

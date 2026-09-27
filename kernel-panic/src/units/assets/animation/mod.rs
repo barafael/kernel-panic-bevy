@@ -63,7 +63,7 @@ pub const PIECE_MISSING: usize = usize::MAX;
 /// compiled `.cob` (65536). Pinned by the regression tests below —
 /// drivers work in degrees/elmos directly, so this only guards the
 /// historical "byte animations 2.5× too small" bug against a comeback.
-#[allow(dead_code)]
+#[cfg(test)]
 pub const COBSCALE: f32 = 65536.0;
 
 // ---------------------------------------------------------------------------
@@ -214,15 +214,9 @@ pub enum FxEvent {
         piece: usize,
         kind: SfxKind,
     },
-    /// Piece detonation. `severity` mirrors the upstream
-    /// `explode ... type FALL/SHATTER/...` class (3 = FALL, 4 = SHATTER
-    /// in the constant encoding we inherit); currently all classes
-    /// render the same burst, so the value is carried for parity only.
-    Explode {
-        piece: usize,
-        #[allow(dead_code)]
-        severity: i32,
-    },
+    /// Piece detonation (`explode piece type ...`). Every explode class
+    /// renders the same burst, so the class isn't carried.
+    Explode { piece: usize },
     Show { piece: usize },
     Hide { piece: usize },
 }
@@ -231,7 +225,11 @@ pub enum FxEvent {
 /// integer opcodes (`2048`, `4097`, ...) drivers used to push. Upstream
 /// scripts OR a weapon index into the constant (`emit-sfx
 /// SFX_DETONATE_WEAPON + 1`); the current renderer buckets by range only,
-/// so the index is dropped here rather than carried dead.
+/// so the index is dropped here rather than carried dead. Only the two
+/// ranges a driver emits are encoded: explicit weapon detonations
+/// (`SFX_DETONATE_WEAPON_BASE..`) go through the combat path (worm
+/// bite / Wormsplash) and named CEGs (`SFX_CEG_BASE..`) through
+/// `weapon_fx`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SfxKind {
     /// `0..SFX_FIRE_WEAPON_BASE` — generic SFX (wake, smoke, ground
@@ -240,18 +238,6 @@ pub enum SfxKind {
     /// `SFX_FIRE_WEAPON_BASE..SFX_DETONATE_WEAPON_BASE` — weapon-fire
     /// flash at the piece (builder beams, idle turret flares). Small pop.
     FireFlash,
-    /// `SFX_DETONATE_WEAPON_BASE..SFX_CEG_BASE` — explicit weapon
-    /// detonation (the worm's bite). Full explosion radius. No driver
-    /// emits it yet — upstream's `emit-sfx 4097 from head` (exploit.bos)
-    /// is the first candidate when per-weapon detonation is wired.
-    #[allow(dead_code)]
-    Detonate,
-    /// `SFX_CEG_BASE..` — named-CEG spawn, treated as a medium puff so
-    /// ambient dust still reads without faking the particle system. No
-    /// driver emits it yet (named CEGs render through `weapon_fx`
-    /// instead); kept so the opcode space stays fully encoded.
-    #[allow(dead_code)]
-    Ceg,
 }
 
 /// The per-unit animation hardware: piece table, interpolation arrays and
@@ -433,9 +419,12 @@ impl AnimRig {
         }
     }
 
-    pub fn explode(&mut self, piece: usize, severity: i32) {
+    /// `explode piece type <severity>`. `_severity` is the upstream
+    /// `FALL/SHATTER/...` class, taken so drivers transcribe the `.bos`
+    /// 1:1; every class currently renders the same burst.
+    pub fn explode(&mut self, piece: usize, _severity: i32) {
         if self.live(piece) {
-            self.outbox.push(FxEvent::Explode { piece, severity });
+            self.outbox.push(FxEvent::Explode { piece });
         }
     }
 
@@ -849,8 +838,6 @@ pub fn sync_muzzle_pieces(
 /// constant ranges each kind stands in for).
 fn dispatch_emit_sfx(kind: SfxKind, pos: Vec3, faction: Faction, explosions: &mut PendingExplosions) {
     let (radius, intensity) = match kind {
-        SfxKind::Ceg => (6.0, 0.9),
-        SfxKind::Detonate => (32.0, 1.0),
         SfxKind::FireFlash => (4.0, 0.8),
         SfxKind::Puff => (2.5, 0.6),
     };

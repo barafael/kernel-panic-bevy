@@ -12,11 +12,6 @@ pub mod structures;
 use bevy::gizmos::config::GizmoConfigStore;
 use bevy::prelude::*;
 
-// Kept for the UI rewrite: the deleted `ui/hud/placement.rs` and other
-// HUD modules referenced this re-export.
-#[allow(unused_imports)]
-pub use selection::Selected;
-
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{

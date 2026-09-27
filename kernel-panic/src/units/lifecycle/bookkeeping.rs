@@ -39,7 +39,7 @@ pub fn team_kind_counts(
 }
 
 /// Live units of `kind` on `team` — the single-team form of
-/// [`team_kind_counts`], shared by the build menu's cap indicator and
+/// [`team_kind_counts`], shared by the command panel's cap indicator and
 /// the Mine Launcher's cap check so both agree with the enforcement.
 pub fn team_kind_count(
     kind: UnitKind,
