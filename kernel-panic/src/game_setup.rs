@@ -107,6 +107,14 @@ pub struct DevOptions {
     /// `KP_GAME_SHOTS_MAP=<stem>` for the HUD shots' skirmish.
     #[cfg(not(target_arch = "wasm32"))]
     pub game_shots_map: Option<String>,
+    /// `KP_EXIT_AFTER=<frames>`: quit after that many rendered frames
+    /// (profiling runs: a bounded trace of the attract-mode demo).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub exit_after: Option<u32>,
+    /// `KP_TIME_SCALE=<factor>`: run the game clock that much faster
+    /// (profiling runs reach a late-game army count sooner).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub time_scale: Option<f32>,
 }
 
 impl DevOptions {
@@ -136,7 +144,29 @@ impl DevOptions {
             menu_shots_warmup: var("KP_MENU_SHOTS_WARMUP").and_then(|w| w.parse().ok()),
             game_shots: var("KP_GAME_SHOTS").map(Into::into),
             game_shots_map: var("KP_GAME_SHOTS_MAP"),
+            exit_after: var("KP_EXIT_AFTER").and_then(|n| n.parse().ok()),
+            time_scale: var("KP_TIME_SCALE").and_then(|n| n.parse().ok()),
         }
+    }
+}
+
+/// `KP_EXIT_AFTER` / `KP_TIME_SCALE`: quit once that many frames have
+/// rendered; run the clock scaled.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn dev_run_control(
+    dev: Res<DevOptions>,
+    mut frames: Local<u32>,
+    mut time: ResMut<Time<Virtual>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    *frames += 1;
+    if let Some(scale) = dev.time_scale
+        && time.relative_speed() != scale
+    {
+        time.set_relative_speed(scale);
+    }
+    if dev.exit_after.is_some_and(|n| *frames >= n) {
+        exit.write(AppExit::Success);
     }
 }
 

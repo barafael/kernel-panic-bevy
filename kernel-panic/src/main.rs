@@ -106,85 +106,92 @@ fn main() {
     #[cfg(not(target_arch = "wasm32"))]
     let default_plugins = default_plugins.disable::<PipelinedRenderingPlugin>();
 
-    App::new()
-        .add_plugins(
-            default_plugins
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        title: "Kernel Panic".to_string(),
-                        // TODO(windows-resize): Immediate is pinned
-                        // explicitly instead of AutoNoVsync. AutoNoVsync
-                        // would pick Mailbox where available, and Intel
-                        // Vulkan Mailbox has its own resize-reconfigure
-                        // quirks on this hardware. Restore AutoVsync
-                        // once the winit modal-loop fix is in.
-                        present_mode: PresentMode::Immediate,
-                        // TODO(windows-resize): launch directly into
-                        // borderless fullscreen on the primary monitor.
-                        // Prior attempts (windowed + Startup-maximize,
-                        // with or without visible:false gymnastics) all
-                        // triggered a live swapchain reconfigure at
-                        // startup, which on Intel Iris Xe (Vulkan)
-                        // either wedges the surface ("gray screen, no
-                        // HUD") or flashes brief gray/white rectangles
-                        // as the window transitions. Borderless-
-                        // fullscreen sets winit's fullscreen attribute
-                        // at window creation time, so the surface is
-                        // born at monitor size and no reconfigure
-                        // happens. Trade-off: no title bar / no
-                        // built-in minimize-restore chrome. Acceptable
-                        // for an RTS; swap back to `Windowed` once the
-                        // upstream fix lands so the "windowed-maximize"
-                        // UX returns.
-                        // Native: borderless fullscreen on the primary
-                        // monitor. Web: windowed + canvas-fill — there
-                        // is no monitor selection on wasm, and the
-                        // canvas is sized by the page.
-                        mode: {
-                            #[cfg(not(target_arch = "wasm32"))]
-                            {
-                                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-                            }
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                WindowMode::Windowed
-                            }
-                        },
-                        // Web: fill the Trunk page's canvas element.
+    let mut app = App::new();
+    app.add_plugins(
+        default_plugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "Kernel Panic".to_string(),
+                    // TODO(windows-resize): Immediate is pinned
+                    // explicitly instead of AutoNoVsync. AutoNoVsync
+                    // would pick Mailbox where available, and Intel
+                    // Vulkan Mailbox has its own resize-reconfigure
+                    // quirks on this hardware. Restore AutoVsync
+                    // once the winit modal-loop fix is in.
+                    present_mode: PresentMode::Immediate,
+                    // TODO(windows-resize): launch directly into
+                    // borderless fullscreen on the primary monitor.
+                    // Prior attempts (windowed + Startup-maximize,
+                    // with or without visible:false gymnastics) all
+                    // triggered a live swapchain reconfigure at
+                    // startup, which on Intel Iris Xe (Vulkan)
+                    // either wedges the surface ("gray screen, no
+                    // HUD") or flashes brief gray/white rectangles
+                    // as the window transitions. Borderless-
+                    // fullscreen sets winit's fullscreen attribute
+                    // at window creation time, so the surface is
+                    // born at monitor size and no reconfigure
+                    // happens. Trade-off: no title bar / no
+                    // built-in minimize-restore chrome. Acceptable
+                    // for an RTS; swap back to `Windowed` once the
+                    // upstream fix lands so the "windowed-maximize"
+                    // UX returns.
+                    // Native: borderless fullscreen on the primary
+                    // monitor. Web: windowed + canvas-fill — there
+                    // is no monitor selection on wasm, and the
+                    // canvas is sized by the page.
+                    mode: {
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
+                        }
                         #[cfg(target_arch = "wasm32")]
-                        fit_canvas_to_parent: true,
-                        // TODO(windows-resize): 320x240 floor keeps the
-                        // swapchain from ever reconfiguring at 0x0
-                        // during a fast drag-to-nothing, which panics
-                        // wgpu. Remove once wgpu handles 0x0
-                        // reconfigure gracefully.
-                        resize_constraints: WindowResizeConstraints {
-                            min_width: 320.0,
-                            min_height: 240.0,
-                            ..default()
-                        },
+                        {
+                            WindowMode::Windowed
+                        }
+                    },
+                    // Web: fill the Trunk page's canvas element.
+                    #[cfg(target_arch = "wasm32")]
+                    fit_canvas_to_parent: true,
+                    // TODO(windows-resize): 320x240 floor keeps the
+                    // swapchain from ever reconfiguring at 0x0
+                    // during a fast drag-to-nothing, which panics
+                    // wgpu. Remove once wgpu handles 0x0
+                    // reconfigure gracefully.
+                    resize_constraints: WindowResizeConstraints {
+                        min_width: 320.0,
+                        min_height: 240.0,
                         ..default()
-                    }),
+                    },
                     ..default()
-                })
-                .set(render_plugin),
-        )
-        // Before the game plugins: the dev-tool plugins read it at build.
-        .insert_resource(game_setup::DevOptions::from_env())
-        .add_plugins((
-            RenderingPlugin,
-            InteractionPlugin,
-            UiPlugin,
-            UnitsPlugin,
-            TerrainPlugin,
-            MapLoadingPlugin,
-            MapEventsPlugin,
-            ShowcasePlugin,
-        ))
-        .init_state::<game_setup::AppState>()
-        .init_resource::<game_setup::SkirmishConfig>()
-        .init_resource::<game_setup::GameOverDismissed>()
-        .insert_resource(game_setup::AiDifficulty(2))
-        .add_message::<game_setup::RunGame>()
-        .run();
+                }),
+                ..default()
+            })
+            .set(render_plugin),
+    )
+    // Before the game plugins: the dev-tool plugins read it at build.
+    .insert_resource(game_setup::DevOptions::from_env())
+    .add_plugins((
+        RenderingPlugin,
+        InteractionPlugin,
+        UiPlugin,
+        UnitsPlugin,
+        TerrainPlugin,
+        MapLoadingPlugin,
+        MapEventsPlugin,
+        ShowcasePlugin,
+    ))
+    .init_state::<game_setup::AppState>()
+    .init_resource::<game_setup::SkirmishConfig>()
+    .init_resource::<game_setup::GameOverDismissed>()
+    .insert_resource(game_setup::AiDifficulty(2))
+    .add_message::<game_setup::RunGame>();
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(
+        Update,
+        game_setup::dev_run_control.run_if(|d: Res<game_setup::DevOptions>| {
+            d.exit_after.is_some() || d.time_scale.is_some()
+        }),
+    );
+    app.run();
 }
