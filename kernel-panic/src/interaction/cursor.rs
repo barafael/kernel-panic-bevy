@@ -240,19 +240,22 @@ fn apply_cursor(
         .take()
         .map(|c| c.kind)
         .unwrap_or(CursorKind::Normal);
-    let frames = state.frames.get(&kind).cloned();
-    let Some(frames) = frames else { return };
-    if frames.is_empty() {
+    // Only the frame count is needed to decide; the handle is cloned
+    // once the cursor actually changes (most frames it doesn't).
+    let Some(frame_count) = state.frames.get(&kind).map(Vec::len) else {
+        return;
+    };
+    if frame_count == 0 {
         return;
     }
 
     let prev_frame = state.current.map(|(_, f)| f).unwrap_or(0);
     let frame = if state.timer.just_finished() {
-        (prev_frame + 1) % frames.len()
+        (prev_frame + 1) % frame_count
     } else if state.current.is_none_or(|(k, _)| k != kind) {
         0
     } else {
-        prev_frame.min(frames.len() - 1)
+        prev_frame.min(frame_count - 1)
     };
 
     if state.current == Some((kind, frame)) {
@@ -264,7 +267,7 @@ fn apply_cursor(
     commands
         .entity(*primary)
         .insert(CursorIcon::Custom(CustomCursor::Image(CustomCursorImage {
-            handle: frames[frame].clone(),
+            handle: state.frames[&kind][frame].clone(),
             hotspot: (hx, hy),
             flip_x: false,
             flip_y: false,

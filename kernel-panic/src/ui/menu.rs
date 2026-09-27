@@ -625,42 +625,30 @@ fn val_percent(v: &Val) -> f32 {
 /// Full keyboard navigation over every live menu button (launch menu,
 /// Esc overlay, and game-over panel all spawn `MenuButton`s). Arrow keys
 /// and Tab move focus, Shift+Tab/opposite arrows move it back, and Enter
-/// or Space activates the focused button. The focused button is drawn
-/// brightened every frame, overriding transient mouse hover, so keyboard
-/// users always see where they are.
+/// or Space activates the focused button. In keyboard mode the focused
+/// button is drawn brightened and every other one at its base colour,
+/// overriding transient mouse hover, so keyboard users always see where
+/// they are.
+///
+/// The spatially sorted button list is only built when a key moves the
+/// focus or the focused button is gone (buttons respawn on page
+/// changes), and the buttons are repainted only when the focus or the
+/// input mode changed — not every frame.
 fn keyboard_menu_nav(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Query<(Entity, &MenuButton, &Node)>,
     mut focus: ResMut<MenuFocus>,
-    mut colors: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>,
+    mut colors: Query<(Entity, &MenuButton, &mut BorderColor, &mut BackgroundColor)>,
     mut ev: MessageWriter<MenuActionMessage>,
+    mut painted: Local<Option<(Entity, InputMode)>>,
 ) {
-    // Build the spatially-ordered list of buttons currently on screen.
-    let mut list: Vec<(Entity, &MenuButton, f32, f32)> = Vec::new();
-    for (e, b, node) in &buttons {
-        let x = if let Val::Auto = node.left {
-            100.0 - val_percent(&node.right)
-        } else {
-            val_percent(&node.left)
-        };
-        list.push((e, b, val_percent(&node.top), x));
-    }
-    if list.is_empty() {
-        focus.entity = None;
+    if buttons.is_empty() {
+        if focus.entity.is_some() {
+            focus.entity = None;
+        }
+        *painted = None;
         return;
     }
-    // Top-to-bottom, then left-to-right.
-    list.sort_by(|a, b| {
-        a.2.partial_cmp(&b.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
-    });
-
-    // Validate/resolve the focused index (defaults to the first button).
-    let mut idx = list
-        .iter()
-        .position(|(e, _, _, _)| Some(*e) == focus.entity)
-        .unwrap_or(0);
 
     let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
     let nav_key = keys.just_pressed(KeyCode::Tab)
@@ -672,41 +660,73 @@ fn keyboard_menu_nav(
         || keys.just_pressed(KeyCode::Space);
     let confirm = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space);
 
-    if nav_key {
-        focus.on_keyboard();
-        // Movement keys: Shift+Tab or Up/Left go back, Tab/Down/Right go on.
-        if keys.just_pressed(KeyCode::Tab) && shift {
-            idx = (idx + list.len() - 1) % list.len();
-        } else if keys.just_pressed(KeyCode::Tab) {
-            idx = (idx + 1) % list.len();
-        } else if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft) {
-            idx = (idx + list.len() - 1) % list.len();
-        } else if keys.just_pressed(KeyCode::ArrowDown)
-            || keys.just_pressed(KeyCode::ArrowRight)
-        {
-            idx = (idx + 1) % list.len();
+    let focus_live = focus.entity.is_some_and(|e| buttons.contains(e));
+    if nav_key || !focus_live {
+        // Build the spatially-ordered list of buttons currently on screen.
+        let mut list: Vec<(Entity, &MenuButton, f32, f32)> = Vec::new();
+        for (e, b, node) in &buttons {
+            let x = if let Val::Auto = node.left {
+                100.0 - val_percent(&node.right)
+            } else {
+                val_percent(&node.left)
+            };
+            list.push((e, b, val_percent(&node.top), x));
         }
-    }
-
-    focus.entity = Some(list[idx].0);
-
-    // Confirm the focused button.
-    if confirm {
-        ev.write(MenuActionMessage {
-            action: list[idx].1.action,
+        // Top-to-bottom, then left-to-right.
+        list.sort_by(|a, b| {
+            a.2.partial_cmp(&b.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
         });
-    }
 
-    // Paint only in keyboard mode, so mouse hover keeps working untouched.
-    if focus.mode == InputMode::Keyboard {
-        let (fidx, _, _, _) = list[idx];
-        for (e, b, _, _) in &list {
-            if let Ok((_, mut bc, mut bg)) = colors.get_mut(*e) {
-                let c = if *e == fidx { brighten(b.base) } else { b.base };
-                *bc = border(c);
-                *bg = fill(c);
+        // Validate/resolve the focused index (defaults to the first button).
+        let mut idx = list
+            .iter()
+            .position(|(e, _, _, _)| Some(*e) == focus.entity)
+            .unwrap_or(0);
+
+        if nav_key {
+            focus.on_keyboard();
+            // Movement keys: Shift+Tab or Up/Left go back, Tab/Down/Right go on.
+            if keys.just_pressed(KeyCode::Tab) && shift {
+                idx = (idx + list.len() - 1) % list.len();
+            } else if keys.just_pressed(KeyCode::Tab) {
+                idx = (idx + 1) % list.len();
+            } else if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft) {
+                idx = (idx + list.len() - 1) % list.len();
+            } else if keys.just_pressed(KeyCode::ArrowDown)
+                || keys.just_pressed(KeyCode::ArrowRight)
+            {
+                idx = (idx + 1) % list.len();
             }
         }
+
+        if focus.entity != Some(list[idx].0) {
+            focus.entity = Some(list[idx].0);
+        }
+
+        // Confirm the focused button.
+        if confirm {
+            ev.write(MenuActionMessage {
+                action: list[idx].1.action,
+            });
+        }
+    }
+
+    // Paint only in keyboard mode, so mouse hover keeps working untouched,
+    // and only when the focus or the mode changed since the last paint.
+    if focus.mode == InputMode::Keyboard
+        && let Some(fidx) = focus.entity
+        && *painted != Some((fidx, InputMode::Keyboard))
+    {
+        *painted = Some((fidx, InputMode::Keyboard));
+        for (e, b, mut bc, mut bg) in &mut colors {
+            let c = if e == fidx { brighten(b.base) } else { b.base };
+            *bc = border(c);
+            *bg = fill(c);
+        }
+    } else if focus.mode != InputMode::Keyboard {
+        *painted = None;
     }
 }
 
