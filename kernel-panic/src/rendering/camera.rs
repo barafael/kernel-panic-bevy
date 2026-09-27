@@ -263,7 +263,13 @@ pub fn camera_control(
         state.focus += pan.normalize() * speed * delta_time;
     }
 
-    state.focus = bounds.clamp_focus(state.focus);
+    // Only write back when the clamp actually moved the focus: `state`
+    // is a `Mut`, and an unconditional write flags it changed every
+    // frame even while the camera sits still.
+    let clamped = bounds.clamp_focus(state.focus);
+    if clamped != state.focus {
+        state.focus = clamped;
+    }
 
     // --- Zoom (scroll wheel) ---
     // Accumulate all scroll ticks into one factor so a single big scroll
@@ -360,11 +366,43 @@ pub fn camera_smoothing(
     let Ok((mut state, mut transform)) = query.single_mut() else {
         return;
     };
-    let t = (settings.smoothing * time.delta_secs()).min(1.0);
-    state.smooth_focus = state.smooth_focus.lerp(state.focus, t);
-    state.smooth_distance = state.smooth_distance.lerp(state.distance, t);
-    state.smooth_yaw = state.smooth_yaw.lerp(state.yaw, t);
-    state.smooth_pitch = state.smooth_pitch.lerp(state.pitch, t);
+    // An asymptotic lerp never reaches its target in f32, which would
+    // keep the state and the camera `Transform` (and so every
+    // `GlobalTransform` propagation and culling pass downstream) flagged
+    // changed on every idle frame. Snap once within an invisible epsilon
+    // and touch nothing while the smoothed values already sit on target;
+    // the `Mut` is only dereferenced mutably when something moves.
+    let settled = state.smooth_focus == state.focus
+        && state.smooth_distance == state.distance
+        && state.smooth_yaw == state.yaw
+        && state.smooth_pitch == state.pitch;
+    if !settled {
+        let t = (settings.smoothing * time.delta_secs()).min(1.0);
+        let s = state.as_mut();
+        let focus = s.smooth_focus.lerp(s.focus, t);
+        s.smooth_focus = if (focus - s.focus).abs().max_element() < SNAP_ELMOS {
+            s.focus
+        } else {
+            focus
+        };
+        s.smooth_distance = ease(s.smooth_distance, s.distance, t, SNAP_ELMOS);
+        s.smooth_yaw = ease(s.smooth_yaw, s.yaw, t, SNAP_RADIANS);
+        s.smooth_pitch = ease(s.smooth_pitch, s.pitch, t, SNAP_RADIANS);
+    }
 
-    *transform = compute_transform_from_state(&state);
+    // `snap_to` / the orbit re-anchor write the smoothed values directly,
+    // so the transform is always recomputed; `set_if_neq` keeps it
+    // unflagged while nothing changed.
+    transform.set_if_neq(compute_transform_from_state(&state));
+}
+
+/// Below this the lerp is snapped onto its target (a thousandth of an
+/// elmo / of a radian: well under a pixel at any zoom).
+const SNAP_ELMOS: f32 = 1e-3;
+const SNAP_RADIANS: f32 = 1e-5;
+
+/// One lerp step toward `target`, snapping when within `eps`.
+fn ease(current: f32, target: f32, t: f32, eps: f32) -> f32 {
+    let next = current.lerp(target, t);
+    if (next - target).abs() < eps { target } else { next }
 }
