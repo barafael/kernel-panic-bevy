@@ -115,6 +115,10 @@ pub struct DevOptions {
     /// (profiling runs reach a late-game army count sooner).
     #[cfg(not(target_arch = "wasm32"))]
     pub time_scale: Option<f32>,
+    /// `KP_PROFILE=1`: print frame / sim-tick time percentiles at exit
+    /// (`profile`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub profile: bool,
 }
 
 impl DevOptions {
@@ -146,6 +150,7 @@ impl DevOptions {
             game_shots_map: var("KP_GAME_SHOTS_MAP"),
             exit_after: var("KP_EXIT_AFTER").and_then(|n| n.parse().ok()),
             time_scale: var("KP_TIME_SCALE").and_then(|n| n.parse().ok()),
+            profile: var("KP_PROFILE").is_some_and(|v| v != "0"),
         }
     }
 }

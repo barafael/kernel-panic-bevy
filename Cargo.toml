@@ -76,11 +76,20 @@ debug = false
 # The wasm-release profile: optimize for runtime speed on web (not size
 # exclusively). Selected by `index.html`'s `data-cargo-profile` for the
 # Trunk build; GitHub Pages deploys it via .github/workflows/deploy.yml.
+[profile.release]
+# Cross-crate inlining between the game and Bevy without the full
+# link-time cost of fat LTO; unwinding is never caught by the game.
+lto = "thin"
+panic = "abort"
+
 [profile.wasm-release]
 inherits = "release"
-# Optimize for speed. wasm-opt (data-wasm-opt="2" in index.html) also
-# runs -O2 post-build.
-opt-level = 2
+# Deploy-only build: full optimisation is worth its compile time on
+# the single-threaded web target (wasm-opt in index.html also runs
+# post-build).
+opt-level = 3
+lto = "fat"
+codegen-units = 1
 # Strip all debugging information from the binary to slightly reduce
 # file size.
 strip = "debuginfo"

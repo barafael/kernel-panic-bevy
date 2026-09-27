@@ -47,6 +47,13 @@ impl Plugin for UnitsPlugin {
         // gameplay chain on `Time<Fixed>` makes those constants
         // frame-rate-independent; `Res<Time>` inside `FixedUpdate`
         // reads the fixed clock, while rendering/UI keep variable dt.
+        // A long frame (map load, a browser tab switch) must not be
+        // followed by a burst of catch-up ticks that makes the next
+        // frame long too: at most three ticks per frame — the sim
+        // briefly runs slow instead of stalling.
+        app.world_mut()
+            .resource_mut::<Time<Virtual>>()
+            .set_max_delta(std::time::Duration::from_millis(100));
         app.insert_resource(Time::<Fixed>::from_hz(SIMULATION_HZ))
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()

@@ -3,6 +3,8 @@ mod interaction;
 mod map_events;
 mod map_loading;
 mod paths;
+#[cfg(not(target_arch = "wasm32"))]
+mod profile;
 mod rendering;
 mod rng;
 mod showcase;
@@ -16,7 +18,7 @@ use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 // Pipelined rendering and explicit backend selection are native-only;
 // the web build uses the platform's own WebGPU/WebGL path.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(target_os = "windows")]
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
@@ -101,9 +103,11 @@ fn main() {
     // the render world runs inline on the main thread. The
     // second thread is what deadlocks during
     // WM_ENTERSIZEMOVE — without it, resize is a sequence
-    // of plain frames, slow but correct. (Native-only: the
-    // plugin doesn't exist on wasm.)
-    #[cfg(not(target_arch = "wasm32"))]
+    // of plain frames, slow but correct. Windows only: the
+    // modal loop is a Win32 thing, and elsewhere the render
+    // thread overlaps a frame's extract/render with the next
+    // sim tick — a sim spike and a render spike no longer add.
+    #[cfg(target_os = "windows")]
     let default_plugins = default_plugins.disable::<PipelinedRenderingPlugin>();
 
     let mut app = App::new();
@@ -192,6 +196,7 @@ fn main() {
         game_setup::dev_run_control.run_if(|d: Res<game_setup::DevOptions>| {
             d.exit_after.is_some() || d.time_scale.is_some()
         }),
-    );
+    )
+    .add_plugins(profile::ProfilePlugin);
     app.run();
 }
