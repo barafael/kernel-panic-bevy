@@ -78,9 +78,11 @@ const PATH_SEARCH_NODES_PER_FRAME: usize = 6000;
 pub struct PathSearchBudget(pub usize);
 
 /// The path service: requests answered across sim frames (QTPFS
-/// `QueueSearch` / `ExecuteQueuedSearches`). Requests are served in
-/// order, one search in flight at a time, and a finished path waits
-/// here until its mover picks it up on its next update.
+/// `QueueSearch` / `ExecuteQueuedSearches`). A request is answered in
+/// the mover's own update while the frame's node budget lasts; once it
+/// is spent the search stays in flight and later requests queue, served
+/// in order at the head of the following frames, one search at a time.
+/// A finished path waits here until its mover picks it up.
 #[derive(Default)]
 pub struct PathQueue {
     pending: std::collections::VecDeque<Entity>,
@@ -100,9 +102,10 @@ impl PathQueue {
         }
     }
 
-    /// Run queued searches until `budget` nodes are spent. `describe`
-    /// gives a mover's current request (`None`: it no longer wants a
-    /// path — despawned, order gone — so the request is dropped).
+    /// Run queued searches until `budget` nodes are spent; returns the
+    /// nodes left. `describe` gives a mover's current request (`None`:
+    /// it no longer wants a path — despawned, order gone — so the
+    /// request is dropped).
     fn service(
         &mut self,
         mut budget: usize,
@@ -110,11 +113,11 @@ impl PathQueue {
         registry: &UnitRegistry,
         heat: Option<&spring_pathfinding::HeatMap>,
         describe: impl Fn(Entity) -> Option<PathRequest>,
-    ) {
+    ) -> usize {
         loop {
             if self.in_flight.is_none() {
                 let Some(entity) = self.pending.pop_front() else {
-                    return;
+                    return budget;
                 };
                 self.queued.remove(&entity);
                 let Some(req) = describe(entity) else {
@@ -129,7 +132,7 @@ impl PathQueue {
                 }
             }
             if budget == 0 {
-                return;
+                return 0;
             }
             let (_, req, search) = self.in_flight.as_mut().expect("search in flight");
             let pops = budget.min(PATH_SEARCH_STEP);
@@ -140,6 +143,41 @@ impl PathQueue {
                 self.results.insert(entity, (req.to.xz(), outcome));
             }
         }
+    }
+
+    /// Answer `req` for `entity` right now if the service is idle and
+    /// the frame's `budget` covers the whole search — the common case,
+    /// and what a synchronous `GetNewPath` did. Otherwise the search is
+    /// queued (or left in flight) and answered on a later frame.
+    /// Returns the outcome and the nodes left.
+    fn request_now(
+        &mut self,
+        entity: Entity,
+        req: PathRequest,
+        budget: usize,
+        nav: Option<&NavGridSet>,
+        registry: &UnitRegistry,
+        heat: Option<&spring_pathfinding::HeatMap>,
+    ) -> (Option<Option<PathOutcome>>, usize) {
+        if self.in_flight.is_some() || self.queued.contains(&entity) || budget == 0 {
+            self.request(entity);
+            return (None, budget);
+        }
+        let mut search = match begin_path_search(&mut self.scratch, nav, registry, &req) {
+            Ok(search) => search,
+            Err(outcome) => return (Some(outcome), budget),
+        };
+        let mut left = budget;
+        while left > 0 {
+            let pops = left.min(PATH_SEARCH_STEP);
+            let done = step_path_search(&mut self.scratch, &mut search, nav, registry, &req, heat, pops);
+            left -= pops;
+            if let Some(outcome) = done {
+                return (Some(outcome), left);
+            }
+        }
+        self.in_flight = Some((entity, req, search));
+        (None, 0)
     }
 }
 
@@ -932,7 +970,7 @@ pub fn movement_system(
     // anyone moves (QTPFS `PathManager::Update` precedes the unit
     // updates in `CGame::SimFrame`), from where each mover stands.
     let node_budget = budget.map_or(PATH_SEARCH_NODES_PER_FRAME, |b| b.0);
-    path_queue.service(
+    let mut nodes_left = path_queue.service(
         node_budget,
         nav,
         &registry,
@@ -1048,34 +1086,48 @@ pub fn movement_system(
             }
             let stale = u.path.as_deref().is_none_or(|p| p.goal.xz() != g);
             if (m.path_requested || stale) && nav.is_some() {
-                match path_queue.results.remove(&u.entity) {
-                    // An answer for the goal still wanted.
-                    Some((searched_for, outcome)) if searched_for == g => {
-                        m.path_requested = false;
-                        match outcome {
-                            Some(PathOutcome::Route(new_path)) => {
-                                // `GetNewPath` / the path swap in
-                                // `UpdateTraversalPlan`.
-                                m.at_goal = false;
-                                m.at_end_of_path = false;
-                                m.last_waypoint = false;
-                                m.want_repath = false;
-                                match u.path.as_deref_mut() {
-                                    Some(p) => *p = new_path,
-                                    None => {
-                                        commands.entity(u.entity).insert(new_path);
-                                    }
+                // An answer from the service for the goal still wanted,
+                // else search now while the frame's budget lasts.
+                let outcome = match path_queue.results.remove(&u.entity) {
+                    Some((searched_for, outcome)) if searched_for == g => Some(outcome),
+                    _ => {
+                        let req = PathRequest {
+                            kind: u.kind.0,
+                            xsizeh: m.xsizeh,
+                            crush_strength: m.crush_strength,
+                            from: pos,
+                            to: Vec3::new(g.x, 0.0, g.y),
+                        };
+                        let heat = path_heat.as_deref().map(|h| &h.0);
+                        let (outcome, left) =
+                            path_queue.request_now(u.entity, req, nodes_left, nav, &registry, heat);
+                        nodes_left = left;
+                        outcome
+                    }
+                };
+                if let Some(outcome) = outcome {
+                    m.path_requested = false;
+                    match outcome {
+                        Some(PathOutcome::Route(new_path)) => {
+                            // `GetNewPath` / the path swap in
+                            // `UpdateTraversalPlan`.
+                            m.at_goal = false;
+                            m.at_end_of_path = false;
+                            m.last_waypoint = false;
+                            m.want_repath = false;
+                            match u.path.as_deref_mut() {
+                                Some(p) => *p = new_path,
+                                None => {
+                                    commands.entity(u.entity).insert(new_path);
                                 }
                             }
-                            Some(PathOutcome::Unreachable) | None => {
-                                // No path from here at all: `Fail`.
-                                m.stop_engine(Progress::Failed);
-                                finish_leg(&mut commands, u.entity, u.queue.as_deref_mut(), m, &map, pos, clamp);
-                            }
+                        }
+                        Some(PathOutcome::Unreachable) | None => {
+                            // No path from here at all: `Fail`.
+                            m.stop_engine(Progress::Failed);
+                            finish_leg(&mut commands, u.entity, u.queue.as_deref_mut(), m, &map, pos, clamp);
                         }
                     }
-                    // Answered for an older goal, or not yet: (re)queue.
-                    _ => path_queue.request(u.entity),
                 }
             }
         }
@@ -2070,8 +2122,6 @@ mod tests {
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(404.0, 0.0, 404.0));
         h.step();
         h.world.entity_mut(e).insert(MoveTarget(Vec3::new(700.0, 0.0, 404.0)));
-        // The order requests a path; the service answers it next frame.
-        h.step();
         h.step();
         assert!(h.world.get::<MovePath>(e).is_some(), "path planned");
         let start = h.pos(e);
@@ -2128,7 +2178,6 @@ mod tests {
         let e = h.spawn(UnitKind::Bit, 0, Vec3::new(500.0, 0.0, 640.0));
         h.step();
         h.world.entity_mut(e).insert(MoveTarget(Vec3::new(880.0, 0.0, 640.0)));
-        h.step();
         h.step();
         assert!(!h.world.get::<MovePath>(e).unwrap().reached_goal, "partial path");
         for _ in 0..600 {
