@@ -9,6 +9,8 @@ mod movement_harness;
 pub(crate) mod selection;
 pub mod structures;
 
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::gizmos::config::GizmoConfigStore;
 use bevy::prelude::*;
 
@@ -107,36 +109,41 @@ impl Plugin for InteractionPlugin {
         // systems stay on variable dt in `Update` — their commands
         // land in the next sim tick (Bevy runs FixedUpdate before
         // Update within a frame).
-        .add_systems(
-            FixedUpdate,
-            (
-                guard_follow_system,
-                // Buildings stamped / cleared before anyone paths.
-                structures::update_structure_layer.before(movement_system),
-                update_path_heat.before(movement_system),
-                movement_system,
-                // `smoothGround.UpdateSmoothMesh()` precedes the unit
-                // updates in the engine's frame.
-                crate::terrain::smooth_ground::update_smooth_ground
-                    .before(air_movement::hover_air_system),
-                air_movement::hover_air_system.after(movement_system),
-                // `HandleObjectCollisions` for every ground unit reads
-                // the positions all movers reached this frame.
-                ground_collision_system.after(movement_system),
-                // Runs last so any Y drift introduced by the two
-                // preceding systems is corrected in the same frame.
-                ground_clamp_system.after(ground_collision_system),
-                // Tilt idle units and buildings after clamping so
-                // the slope normal is sampled at the final Y.
-                orient_stationary_to_terrain.after(ground_clamp_system),
-            ),
-        )
+        .add_systems(FixedUpdate, unit_motion_systems())
         // Command-line gizmos draw from `Update` on variable dt —
         // pure visuals. No ordering edge against `movement_system`
         // (that lives in `FixedUpdate` now); worst case the overlay
         // trails the moved units by one frame.
         .add_systems(Update, draw_selected_command_lines);
     }
+}
+
+/// The fixed-tick unit-motion systems, in order. [`InteractionPlugin`]
+/// runs them on `FixedUpdate`; the headless movement harness runs the
+/// same list.
+pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        guard_follow_system,
+        // Buildings stamped / cleared before anyone paths.
+        structures::update_structure_layer.before(movement_system),
+        update_path_heat.before(movement_system),
+        movement_system,
+        // `smoothGround.UpdateSmoothMesh()` precedes the unit
+        // updates in the engine's frame.
+        crate::terrain::smooth_ground::update_smooth_ground
+            .before(air_movement::hover_air_system),
+        air_movement::hover_air_system.after(movement_system),
+        // `HandleObjectCollisions` for every ground unit reads
+        // the positions all movers reached this frame.
+        ground_collision_system.after(movement_system),
+        // Runs last so any Y drift introduced by the two
+        // preceding systems is corrected in the same frame.
+        ground_clamp_system.after(ground_collision_system),
+        // Tilt idle units and buildings after clamping so
+        // the slope normal is sampled at the final Y.
+        orient_stationary_to_terrain.after(ground_clamp_system),
+    )
+        .into_configs()
 }
 
 /// Thin out the command-line gizmo group so the dashed move-order overlay

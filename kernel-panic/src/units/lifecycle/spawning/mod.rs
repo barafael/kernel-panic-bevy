@@ -292,6 +292,7 @@ pub fn spawn_unit(
         );
     }
 
+    let transform = Transform::from_translation(lifted_position);
     let unit_entity = commands
         .spawn((
             UnitType(kind),
@@ -299,7 +300,7 @@ pub fn spawn_unit(
             TeamId(team),
             Health::full(unit_registry.max_health(kind)),
             UnitStats::from_registry(kind, unit_registry, radius),
-            Transform::from_translation(lifted_position),
+            transform,
             Visibility::default(),
         ))
         .id();
@@ -307,7 +308,12 @@ pub fn spawn_unit(
     commands.entity(unit_entity).insert((
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
-        crate::interaction::movement::ground_mover_components(kind, unit_registry),
+        crate::interaction::movement::ground_mover_components(
+            kind,
+            unit_registry,
+            unit_entity,
+            &transform,
+        ),
         crate::interaction::movement::GroundLift(ground_lift),
         // §1.8 first slice: cache a typed collision volume so
         // projectile / shield / per-shot-miss systems can do

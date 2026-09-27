@@ -23,29 +23,17 @@ pub struct CommandLineGizmos;
 #[derive(Component)]
 pub struct MoveTarget(pub Vec3);
 
-/// The per-unit movement-state components every spawned unit carries.
-/// Shared by `spawn_unit` and the headless movement harness so both
-/// build movers identically.
-pub(crate) fn ground_mover_components(kind: UnitKind, registry: &UnitRegistry) -> impl Bundle {
+/// The per-unit movement-state components every spawned unit carries,
+/// seeded from its spawn pose. Shared by `spawn_unit` and the headless
+/// movement harness so both build movers identically.
+pub(crate) fn ground_mover_components(
+    kind: UnitKind,
+    registry: &UnitRegistry,
+    entity: Entity,
+    transform: &Transform,
+) -> impl Bundle {
     GroundMover::new(kind, registry, &UnitStats::from_registry(kind, registry, 0.0))
-}
-
-/// The fixed-tick ground-movement chain, in the order
-/// [`super::InteractionPlugin`] runs it. The headless harness runs the
-/// same list.
-#[cfg(test)]
-pub(crate) fn add_ground_sim_systems(schedule: &mut Schedule) {
-    schedule.add_systems(
-        (
-            super::structures::update_structure_layer,
-            update_path_heat,
-            movement_system,
-            ground_collision_system,
-            ground_clamp_system,
-            orient_stationary_to_terrain,
-        )
-            .chain(),
-    );
+        .seeded(entity, transform)
 }
 
 /// Marks an active attack-move order. While it is present AND the unit
@@ -192,31 +180,29 @@ pub struct NavGridSet {
 impl NavGridSet {
     /// Pick the tightest bucket whose cap ≥ `cap`. If none qualifies
     /// (the unit needs a looser grid than any we built), return the
-    /// loosest bucket. Panics if empty — the map loader always pushes
-    /// at least the default 45° bucket.
-    pub fn bucket_for(&self, cap: f32) -> usize {
-        debug_assert!(!self.buckets.is_empty(), "NavGridSet::bucket_for: empty");
+    /// loosest bucket. `None` only with no grids built (no map loaded —
+    /// the map loader always pushes at least the default 45° bucket).
+    pub fn bucket(&self, cap: f32) -> Option<&NavBucket> {
         self.buckets
             .iter()
-            .position(|b| b.max_slope >= cap)
-            .unwrap_or(self.buckets.len() - 1)
+            .find(|b| b.max_slope >= cap)
+            .or(self.buckets.last())
     }
 
     /// Can a ground unit with slope cap `cap` stand on the heightmap
     /// square under `(x, z)`? Off-map squares are not. With no grids
     /// built everything is.
     pub fn passable(&self, cap: f32, x: f32, z: f32) -> bool {
-        if self.buckets.is_empty() {
+        let Some(map) = self.speed_map(cap) else {
             return true;
-        }
-        let map = &self.buckets[self.bucket_for(cap)].speed_map;
+        };
         let (cx, cz) = ((x / SQUARE_SIZE).floor(), (z / SQUARE_SIZE).floor());
         cx >= 0.0 && cz >= 0.0 && map.get(cx as u32, cz as u32) > 0.0
     }
 
     /// The grid of the bucket for slope cap `cap`.
     fn speed_map(&self, cap: f32) -> Option<&SpeedMap> {
-        (!self.buckets.is_empty()).then(|| &self.buckets[self.bucket_for(cap)].speed_map)
+        self.bucket(cap).map(|b| &b.speed_map)
     }
 
     /// Does a structure block any square of a `xsizeh`-footprint mover
@@ -263,8 +249,7 @@ impl NavGridSet {
     /// bucket has it impassable. Recovered from the stored speed
     /// `1/(1 + slope·slopeMod)`.
     pub fn square_slope(&self, cap: f32, pos: Vec2) -> Option<f32> {
-        let idx = (!self.buckets.is_empty()).then(|| self.bucket_for(cap))?;
-        let b = &self.buckets[idx];
+        let b = self.bucket(cap)?;
         if pos.x < 0.0 || pos.y < 0.0 {
             return None;
         }
@@ -276,10 +261,8 @@ impl NavGridSet {
 
     /// `slopeMod` of the bucket for cap `cap`.
     pub fn slope_mod(&self, cap: f32) -> f32 {
-        if self.buckets.is_empty() {
-            return 0.0;
-        }
-        spring_pathfinding::slope_mod_from_max_slope(self.buckets[self.bucket_for(cap)].max_slope)
+        self.bucket(cap)
+            .map_or(0.0, |b| spring_pathfinding::slope_mod_from_max_slope(b.max_slope))
     }
 }
 
@@ -832,21 +815,23 @@ mod tests {
     }
 
     #[test]
-    fn bucket_for_picks_first_cap_at_or_above_unit_cap() {
+    fn bucket_picks_first_cap_at_or_above_unit_cap() {
         let mut set = NavGridSet::default();
+        assert!(set.bucket(0.5).is_none());
         set.buckets
             .extend([bucket_with(0.2), bucket_with(0.5), bucket_with(1.0)]);
+        let cap_of = |cap| set.bucket(cap).unwrap().max_slope;
 
         // Bit with MaxSlope=21° (tan ≈ 0.384) gets the 0.5 bucket —
         // tightest grid whose cap still covers what the unit can climb.
-        assert_eq!(set.bucket_for(0.384), 1);
+        assert_eq!(cap_of(0.384), 0.5);
         // Exact match picks that bucket.
-        assert_eq!(set.bucket_for(0.5), 1);
+        assert_eq!(cap_of(0.5), 0.5);
         // Byte with MaxSlope=60° (tan ≈ 1.73) exceeds every cap; fall
         // back to the loosest so it's not falsely blocked.
-        assert_eq!(set.bucket_for(1.73), 2);
+        assert_eq!(cap_of(1.73), 1.0);
         // A cap below the tightest still resolves to the tightest.
-        assert_eq!(set.bucket_for(0.1), 0);
+        assert_eq!(cap_of(0.1), 0.2);
     }
 }
 
@@ -1026,6 +1011,8 @@ mod cross_map_tests {
                 enemy_spawn.map(|e| (e.x, e.z)),
             );
 
+            let registry = UnitRegistry::load();
+            let transform = Transform::from_translation(start);
             let unit = world
                 .spawn((
                     UnitType(UnitKind::Bit),
@@ -1040,10 +1027,15 @@ mod cross_map_tests {
                         no_chase_vtol: true,
                     },
                     TeamId(0),
-                    Transform::from_translation(start),
-                    GroundMover::new(UnitKind::Bit, &UnitRegistry::load(), &UnitStats::from_registry(UnitKind::Bit, &UnitRegistry::load(), 20.0)),
+                    transform,
                 ))
                 .id();
+            world.entity_mut(unit).insert(ground_mover_components(
+                UnitKind::Bit,
+                &registry,
+                unit,
+                &transform,
+            ));
 
             let max_cell = (heat_dims.0 as usize).min(504);
             let mut reached = 0usize;

@@ -61,7 +61,7 @@ impl Harness {
         world.insert_resource(super::ground_move::PathSearchBudget(f64::INFINITY));
 
         let mut schedule = Schedule::default();
-        super::movement::add_ground_sim_systems(&mut schedule);
+        schedule.add_systems(super::unit_motion_systems());
         Self {
             world,
             schedule,
@@ -75,17 +75,13 @@ impl Harness {
     pub fn spawn(&mut self, kind: UnitKind, team: u8, pos: Vec3) -> Entity {
         let registry = self.world.resource::<UnitRegistry>();
         let stats = UnitStats::from_registry(kind, registry, 20.0);
-        let mover = super::movement::ground_mover_components(kind, registry);
-        self.world
-            .spawn((
-                UnitType(kind),
-                TeamId(team),
-                stats,
-                mover,
-                Transform::from_translation(pos)
-                    .with_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X)),
-            ))
-            .id()
+        let transform =
+            Transform::from_translation(pos).with_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X));
+        let e = self.world.spawn((UnitType(kind), TeamId(team), stats, transform)).id();
+        let registry = self.world.resource::<UnitRegistry>();
+        let mover = super::movement::ground_mover_components(kind, registry, e, &transform);
+        self.world.entity_mut(e).insert(mover);
+        e
     }
 
     /// Spawn a finished structure of `kind` at `pos`.

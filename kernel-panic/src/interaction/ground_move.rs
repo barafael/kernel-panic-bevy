@@ -24,9 +24,9 @@
 //! 5. `Update` — apply the collision push, `OwnerMoved` idle test; and
 //!    every 16th frame per unit `SlowUpdate` (repath / give up).
 
-use std::collections::HashMap;
 use std::f32::consts::{PI, TAU};
 
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use super::movement::{
@@ -145,8 +145,6 @@ pub struct GroundMover {
     /// Frame counter; `SlowUpdate` runs when it is a multiple of
     /// `SLOW_UPDATE_RATE` (seeded per unit so they stagger).
     pub frame: u32,
-    /// Heading was initialised from the `Transform`.
-    pub initialised: bool,
 }
 
 impl GroundMover {
@@ -193,8 +191,20 @@ impl GroundMover {
             position_stuck: false,
             old_pos: Vec3::ZERO,
             frame: 0,
-            initialised: false,
         }
+    }
+
+    /// Seed the dynamic state from the unit's spawn pose: heading from
+    /// the `Transform`'s facing, `oldPos`, and the `SlowUpdate` phase
+    /// from the entity index so units stagger.
+    pub fn seeded(mut self, entity: Entity, tf: &Transform) -> Self {
+        let f = tf.forward().as_vec3();
+        if f.xz().length_squared() > 1e-6 {
+            self.heading = heading_of(f.xz());
+        }
+        self.old_pos = tf.translation;
+        self.frame = entity.index_u32() % SLOW_UPDATE_RATE;
+        self
     }
 
     /// `flatFrontDir`.
@@ -779,7 +789,7 @@ pub struct MoverData {
     kind: &'static UnitType,
     stats: &'static UnitStats,
     transform: &'static mut Transform,
-    mover: Option<&'static mut GroundMover>,
+    mover: &'static mut GroundMover,
     target: Option<&'static MoveTarget>,
     path: Option<&'static mut MovePath>,
     queue: Option<&'static mut CommandQueue>,
@@ -817,8 +827,8 @@ pub fn movement_system(
         bucket.clear();
     }
     for u in &query {
-        let Some(m) = u.mover else { continue };
-        if u.stats.can_fly || u.stats.speed <= 0.0 || !m.initialised {
+        let m = u.mover;
+        if u.stats.can_fly || u.stats.speed <= 0.0 {
             continue;
         }
         let pos = u.transform.translation.xz();
@@ -855,27 +865,15 @@ pub fn movement_system(
         let speed = u.stats.speed + u.boost.map_or(0.0, |b| b.0);
         if u.stats.speed <= 0.0 {
             // Buildings can't move — drop any movement order.
-            commands
-                .entity(u.entity)
-                .remove::<(MoveTarget, MovePath, CommandQueue)>();
+            if u.target.is_some() || u.path.is_some() || u.queue.is_some() {
+                commands
+                    .entity(u.entity)
+                    .remove::<(MoveTarget, MovePath, CommandQueue)>();
+            }
             continue;
         }
-        // Work on a copy; written back (or inserted) at the end.
-        let mut state = match u.mover.as_deref() {
-            Some(m) => m.clone(),
-            None => GroundMover::new(u.kind.0, &registry, u.stats),
-        };
-        let m = &mut state;
+        let m = &mut *u.mover;
         let pos = u.transform.translation;
-        if !m.initialised {
-            let f = u.transform.forward().as_vec3();
-            if f.xz().length_squared() > 1e-6 {
-                m.heading = heading_of(f.xz());
-            }
-            m.old_pos = pos;
-            m.frame = u.entity.index_u32() % SLOW_UPDATE_RATE;
-            m.initialised = true;
-        }
         m.frame = m.frame.wrapping_add(1);
         let fs = FrameStats::new(u.stats, speed);
         let max_slope = registry.max_slope_ratio(u.kind.0);
@@ -998,6 +996,7 @@ pub fn movement_system(
             last_command: !u.queue.as_deref().is_some_and(|q| !q.commands.is_empty()),
             hold,
         };
+        let up = up_dir(m, heightmap.as_deref(), pos);
         // A path belongs to the order only once it has been searched
         // for that goal; a stale one is still followed meanwhile.
         let result = step_mover(
@@ -1007,7 +1006,7 @@ pub fn movement_system(
             &order,
             u.path.as_deref_mut().filter(|p| !p.waypoints.is_empty()),
             &map,
-            up_dir(m, heightmap.as_deref(), pos),
+            up,
             |m, d| {
                 let me = AvoiderInfo {
                     entity: u.entity,
@@ -1027,26 +1026,30 @@ pub fn movement_system(
         if let Some(flow) = circular_flow.as_deref() {
             step *= flow.step_multiplier(pos, Vec3::new(m.front().x, 0.0, m.front().y));
         }
-        let new_pos = {
-            let tf = &mut *u.transform;
-            tf.translation.x += step.x;
-            tf.translation.z += step.y;
-            if let Some(hm) = heightmap.as_deref() {
-                tf.translation.y = hm.sample(tf.translation.x, tf.translation.z) + u.lift.map_or(0.0, |l| l.0);
-            }
-            tf.translation
+        let mut new_pos = pos;
+        new_pos.x += step.x;
+        new_pos.z += step.y;
+        if let Some(hm) = heightmap.as_deref() {
+            new_pos.y = hm.sample(new_pos.x, new_pos.z) + u.lift.map_or(0.0, |l| l.0);
+        }
+        // An idle unit keeps its square: reuse the slope normal.
+        let new_up = if new_pos.xz() == pos.xz() {
+            up
+        } else {
+            up_dir(m, heightmap.as_deref(), new_pos)
         };
-        u.transform.rotation = attitude(m.heading, up_dir(m, heightmap.as_deref(), new_pos));
+        let rotation = attitude(m.heading, new_up);
+        // Only touch the `Transform` when the pose changed, so idle
+        // units don't trigger change detection / propagation.
+        if u.transform.translation != new_pos || u.transform.rotation != rotation {
+            let tf = &mut *u.transform;
+            tf.translation = new_pos;
+            tf.rotation = rotation;
+        }
 
         if result.finished.is_some() {
             // `Arrived` / `Fail` run the CAI's SlowUpdate right away.
             finish_leg(&mut commands, u.entity, u.queue.as_deref_mut(), m, &map, new_pos, clamp);
-        }
-        match u.mover.as_deref_mut() {
-            Some(c) => *c = state,
-            None => {
-                commands.entity(u.entity).insert(state);
-            }
         }
     }
 }
@@ -1282,6 +1285,20 @@ pub struct CollisionEntry {
 
 /// Cell size of the collision broad-phase grid.
 const COLLISION_CELL: f32 = 64.0;
+/// Slack around a static collider's circle when filing it under every
+/// cell it reaches: covers `CheckCollisionExclSAT`'s `0.01` tolerance
+/// (≤ 0.1 elmo).
+const STATIC_CELL_PAD: f32 = 1.0;
+
+/// The collision pass's broad phase: movers filed under the cell of
+/// their centre, static colliders (structures, features) under every
+/// cell their circle reaches — so a mover's search only has to span the
+/// largest *mobile* radius, not the largest building's.
+#[derive(Default)]
+pub struct CollisionGrid {
+    mobile: HashMap<(i32, i32), Vec<usize>>,
+    fixed: HashMap<(i32, i32), Vec<usize>>,
+}
 
 fn cell_of(p: Vec2) -> (i32, i32) {
     (
@@ -1347,7 +1364,7 @@ pub fn ground_collision_system(
             &UnitType,
             &UnitStats,
             &mut Transform,
-            Option<&mut GroundMover>,
+            &mut GroundMover,
             Option<&MovePath>,
             Has<MoveTarget>,
             Option<&mut CommandQueue>,
@@ -1357,63 +1374,63 @@ pub fn ground_collision_system(
         Without<crate::units::lifecycle::spawning::Emerging>,
     >,
     mut entries: Local<Vec<CollisionEntry>>,
-    mut grid: Local<HashMap<(i32, i32), Vec<usize>>>,
+    mut grid: Local<CollisionGrid>,
+    mut candidates: Local<Vec<(i32, i32, usize)>>,
 ) {
     let nav = nav_set.as_deref();
     entries.clear();
-    for bucket in grid.values_mut() {
+    let grid = &mut *grid;
+    for bucket in grid.mobile.values_mut().chain(grid.fixed.values_mut()) {
         bucket.clear();
     }
-    let mut max_radius = 0.0_f32;
-    for (entity, kind, stats, tf, mover, path, has_target, queue, dying, _) in &movers {
+    let mut max_mobile_radius = 0.0_f32;
+    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _) in &movers {
         if stats.can_fly || dying {
             continue;
         }
-        let mobile = stats.speed > 0.0 && mover.is_some();
+        let mobile = stats.speed > 0.0;
         let pos = tf.translation.xz();
-        let (radius, owner_radius, mass, speed, front, progress) = match mover.as_deref() {
-            Some(m) => (
-                m.collision_radius,
-                m.owner_radius,
-                m.mass,
-                m.current_speed,
-                m.front(),
-                m.progress,
-            ),
-            None => (stats.radius, stats.radius, 1e6, 0.0, Vec2::Y, Progress::Done),
-        };
+        let radius = m.collision_radius;
         // A pending `TriggerSkipWayPoint` marks `currWayPoint.y = -2`,
         // so that waypoint no longer compares equal to anyone's in the
         // traffic-jam test (at the end of a path the mark stays).
-        let curr_waypoint = mover.as_deref().and_then(|m| {
-            if m.skip_waypoint {
-                return None;
-            }
+        let curr_waypoint = if m.skip_waypoint {
+            None
+        } else {
             m.goal.map(|g| current_waypoints(path, pos, g).0)
-        });
+        };
         let idx = entries.len();
         entries.push(CollisionEntry {
             entity,
             pos,
             radius,
-            owner_radius,
+            owner_radius: m.owner_radius,
             mobile,
             crushable: !mobile && registry.is_feature(kind.0),
-            mass,
-            speed,
-            front,
-            progress,
+            mass: m.mass,
+            speed: m.current_speed,
+            front: m.front(),
+            progress: m.progress,
             has_commands: has_target || queue.is_some_and(|q| !q.commands.is_empty()),
             curr_waypoint,
         });
-        grid.entry(cell_of(pos)).or_default().push(idx);
-        max_radius = max_radius.max(radius);
+        if mobile {
+            grid.mobile.entry(cell_of(pos)).or_default().push(idx);
+            max_mobile_radius = max_mobile_radius.max(radius);
+        } else {
+            let (x0, z0) = cell_of(pos - Vec2::splat(radius + STATIC_CELL_PAD));
+            let (x1, z1) = cell_of(pos + Vec2::splat(radius + STATIC_CELL_PAD));
+            for cz in z0..=z1 {
+                for cx in x0..=x1 {
+                    grid.fixed.entry((cx, cz)).or_default().push(idx);
+                }
+            }
+        }
     }
     let mut crushed: Vec<Entity> = Vec::new();
 
-    for (entity, kind, stats, mut tf, mover, path, _, mut queue, dying, lift) in &mut movers {
-        let Some(mut m) = mover else { continue };
-        if stats.can_fly || stats.speed <= 0.0 || !m.initialised || dying {
+    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift) in &mut movers {
+        if stats.can_fly || stats.speed <= 0.0 || dying {
             continue;
         }
         let pos = tf.translation.xz();
@@ -1432,56 +1449,69 @@ pub fn ground_collision_system(
         let mut force_moving = Vec2::ZERO;
         let mut force_static = Vec2::ZERO;
         let r1 = m.collision_radius;
-        let search = m.current_speed + r1 + max_radius;
         let (cx, cz) = cell_of(pos);
-        let reach = (search / COLLISION_CELL).ceil() as i32;
-        let mut request_path = false;
-        for dz in -reach..=reach {
-            for dx in -reach..=reach {
-                let Some(bucket) = grid.get(&(cx + dx, cz + dz)) else { continue };
-                for &i in bucket {
-                    let o = entries[i];
-                    if o.entity == entity {
-                        continue;
-                    }
-                    let sep = pos - o.pos;
-                    let r2 = o.radius;
-                    // `CheckCollisionExclSAT`: overlap of the footprint
-                    // circles (square footprints never need SAT).
-                    if sep.length_squared() - (r1 + r2) * (r1 + r2) > 0.01 {
-                        continue;
-                    }
-                    if o.mobile {
-                        collision_aux(&mut m, pos, cwp, nwp, &o);
-                        force_moving += push_vector(
-                            r1,
-                            r2,
-                            sep,
-                            m.mass,
-                            o.mass,
-                            m.current_speed,
-                            o.speed,
-                            front,
-                            o.front,
-                            right,
-                        );
-                    } else if o.crushable && crushes_features(m.crush_strength) {
-                        // `HandleFeatureCollisions`: a feature we are
-                        // not crush-resistant against is crushed
-                        // (`FeatureCrushEvents` → `Kill`); its squares
-                        // never blocked us.
-                        crushed.push(o.entity);
-                    } else {
-                        // Structure (always static): strafe round its
-                        // blocked yardmap squares.
-                        let f = static_square_push(&m, pos, map.nav, fs_max_speed(stats));
-                        force_static += f;
-                        if f != Vec2::ZERO {
-                            m.limit_speed_for_turning = 2;
-                            if !m.at_end_of_path && !m.at_goal {
-                                request_path = true;
-                            }
+        // Every overlapping collider (`CheckCollisionExclSAT`: overlap
+        // of the footprint circles — square footprints never need SAT),
+        // keyed by its centre cell (row-major) then snapshot index: the
+        // order a single centre-bucketed grid scan would visit them.
+        candidates.clear();
+        let mut gather = |cells: &HashMap<(i32, i32), Vec<usize>>, search: f32| {
+            let reach = (search / COLLISION_CELL).ceil() as i32;
+            for dz in -reach..=reach {
+                for dx in -reach..=reach {
+                    let Some(bucket) = cells.get(&(cx + dx, cz + dz)) else { continue };
+                    for &i in bucket {
+                        let o = &entries[i];
+                        let r2 = o.radius;
+                        if o.entity == entity
+                            || (pos - o.pos).length_squared() - (r1 + r2) * (r1 + r2) > 0.01
+                        {
+                            continue;
                         }
+                        let (ox, oz) = cell_of(o.pos);
+                        candidates.push((oz, ox, i));
+                    }
+                }
+            }
+        };
+        gather(&grid.mobile, m.current_speed + r1 + max_mobile_radius);
+        gather(&grid.fixed, m.current_speed + r1);
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut request_path = false;
+        for &(_, _, i) in candidates.iter() {
+            let o = entries[i];
+            let sep = pos - o.pos;
+            let r2 = o.radius;
+            if o.mobile {
+                collision_aux(&mut m, pos, cwp, nwp, &o);
+                force_moving += push_vector(
+                    r1,
+                    r2,
+                    sep,
+                    m.mass,
+                    o.mass,
+                    m.current_speed,
+                    o.speed,
+                    front,
+                    o.front,
+                    right,
+                );
+            } else if o.crushable && crushes_features(m.crush_strength) {
+                // `HandleFeatureCollisions`: a feature we are
+                // not crush-resistant against is crushed
+                // (`FeatureCrushEvents` → `Kill`); its squares
+                // never blocked us.
+                crushed.push(o.entity);
+            } else {
+                // Structure (always static): strafe round its
+                // blocked yardmap squares.
+                let f = static_square_push(&m, pos, map.nav, fs_max_speed(stats));
+                force_static += f;
+                if f != Vec2::ZERO {
+                    m.limit_speed_for_turning = 2;
+                    if !m.at_end_of_path && !m.at_goal {
+                        request_path = true;
                     }
                 }
             }
@@ -1827,7 +1857,6 @@ mod tests {
                 ..Default::default()
             };
             let mut m = GroundMover::new(UnitKind::Bit, &reg, &stats);
-            m.initialised = true;
             m.current_speed = fs.max_speed;
             m.heading = heading_of(Vec2::X);
             let pos = Vec3::new(100.0, 0.0, 200.0);
