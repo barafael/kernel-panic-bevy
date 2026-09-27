@@ -42,6 +42,7 @@
 use bevy::prelude::*;
 
 use super::movement::{CommandQueue, MovePath, MoveTarget, QueuedCommand, promote_next_command};
+use crate::rng::next_f32;
 use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
 use crate::terrain::heightmap::Heightmap;
 use crate::terrain::smooth_ground::SmoothGround;
@@ -131,7 +132,7 @@ impl HoverAir {
     /// one spawned already at altitude finishes take-off at once).
     pub fn new(params: HoverAirParams, pos: Vec3, heading: f32, seed: u32) -> Self {
         let mut rng = seed.wrapping_mul(0x9E37_79B9) | 1;
-        let wanted_height = params.cruise_alt + next_float(&mut rng) * 5.0;
+        let wanted_height = params.cruise_alt + next_f32(&mut rng) * 5.0;
         Self {
             params,
             state: AircraftState::Takeoff,
@@ -213,14 +214,6 @@ impl HoverAir {
     fn use_smooth_mesh(&self) -> bool {
         matches!(self.state, AircraftState::Flying | AircraftState::Hovering)
     }
-}
-
-/// Deterministic per-unit random stream (`gsRNG` stand-in).
-fn next_float(state: &mut u32) -> f32 {
-    *state ^= *state << 13;
-    *state ^= *state >> 17;
-    *state ^= *state << 5;
-    (*state >> 8) as f32 / (1u32 << 24) as f32
 }
 
 /// Spring's `smoothstep(e0, e1, x)`.
@@ -428,8 +421,8 @@ fn update_hovering(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, Vec3
     let air = &mut f.air;
     let cur_sq = (air.goal - f.pos).xz().length_squared();
     let abs_hover = air.params.hover_factor.abs() * 0.5;
-    air.random_wind.x = air.random_wind.x * 0.9 + (next_float(&mut air.rng) - 0.5) * 0.5;
-    air.random_wind.z = air.random_wind.z * 0.9 + (next_float(&mut air.rng) - 0.5) * 0.5;
+    air.random_wind.x = air.random_wind.x * 0.9 + (next_f32(&mut air.rng) - 0.5) * 0.5;
+    air.random_wind.z = air.random_wind.z * 0.9 + (next_f32(&mut air.rng) - 0.5) * 0.5;
     let drift = air.params.dont_land() || cur_sq > GOAL_RADIUS * GOAL_RADIUS;
     let mut wanted = if drift { air.random_wind * abs_hover } else { Vec3::ZERO };
     let d = air.goal - f.pos;

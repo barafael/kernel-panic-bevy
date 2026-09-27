@@ -31,6 +31,7 @@ use crate::game_setup::{
 };
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
+use crate::rng::clock_f64;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
 use crate::units::lifecycle::game_over::GameState;
@@ -1635,7 +1636,7 @@ fn attract_camera(
     director.retarget_in -= dt;
     if director.retarget_in <= 0.0 || director.target.is_none() {
         director.retarget_in = ATTRACT_DWELL;
-        let pick = |n: usize| ((rand_01() * n as f32) as usize).min(n.saturating_sub(1));
+        let pick = |n: usize| ((clock_f64() * n as f64) as usize).min(n.saturating_sub(1));
         let fighting: Vec<Vec3> = fighters.iter().map(|g| g.translation()).collect();
         let homes: Vec<Vec3> = bases.iter().map(|g| g.translation()).collect();
         director.target = if !fighting.is_empty() {
@@ -1659,35 +1660,6 @@ fn attract_camera(
     state.pitch = 0.62;
     // Slow breathing zoom so the shot doesn't feel static.
     state.distance = 1250.0 + 250.0 * (director.clock * 0.07).sin();
-}
-
-/// Deterministic-enough per-call jitter (menu demo only; gameplay uses
-/// no randomness).
-///
-/// Uses Bevy's `Instant`, not `std::time`: `SystemTime`/`Instant` panic
-/// with "time not supported on this platform" on wasm32, where Bevy's
-/// is `performance.now()`-backed instead.
-fn rand_01() -> f32 {
-    use bevy::platform::time::Instant;
-    thread_local! {
-        static STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        static ANCHOR: Instant = Instant::now();
-    }
-    STATE.with(|s| {
-        let mut x = s.get();
-        if x == 0 {
-            // No epoch on Instant — seed from nanos elapsed since this
-            // thread's first call, mixed with a fixed odd constant.
-            let elapsed = ANCHOR.with(|a| a.elapsed());
-            x = ((elapsed.subsec_nanos() as u64) ^ (elapsed.as_secs() << 17) ^ 0x853C49E6748FEA9B)
-                | 1;
-        }
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        (x >> 40) as f32 / (1u64 << 24) as f32
-    })
 }
 
 /// On first boot: once the map catalog exists, load the demo world

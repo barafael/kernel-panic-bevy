@@ -26,6 +26,7 @@ use spring_tdf::{
     ParticleProperties, SpawnerProperties,
 };
 
+use crate::rng;
 use crate::sim::GAME_SPEED;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::content::tdf_loader;
@@ -892,20 +893,20 @@ fn sample_stops(stops: &[[f32; 4]], t: f32) -> [f32; 4] {
     }
 }
 
-fn next_signed(state: &mut u32) -> f32 {
-    next_unit(state) * 2.0 - 1.0
-}
-
+/// [`rng::next_f32`] for a stream that may arrive unseeded: CEG
+/// streams live in zero-initialised `Local<u32>`s / projectile fields,
+/// so a zero state (which xorshift would never leave) is seeded on the
+/// first draw.
 fn next_unit(state: &mut u32) -> f32 {
     if *state == 0 {
         *state = 0xA3C59AC3;
     }
-    let mut x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    (x as f32 / u32::MAX as f32).clamp(0.0, 1.0)
+    rng::next_f32(state)
+}
+
+/// [`next_unit`] mapped to `[-1, 1)` (`rng::next_signed` with the seed guard).
+fn next_signed(state: &mut u32) -> f32 {
+    next_unit(state) * 2.0 - 1.0
 }
 
 #[cfg(test)]
@@ -957,24 +958,6 @@ mod tests {
         assert_eq!(CegRegistry::resolve_texture("none"), None);
         assert_eq!(CegRegistry::resolve_texture(""), None);
         assert_eq!(CegRegistry::resolve_texture("nonsense"), None);
-    }
-
-    #[test]
-    fn rng_next_unit_range() {
-        let mut s = 0xDEADBEEF;
-        for _ in 0..1000 {
-            let v = next_unit(&mut s);
-            assert!((0.0..=1.0).contains(&v));
-        }
-    }
-
-    #[test]
-    fn rng_next_signed_range() {
-        let mut s = 0xA5A5A5A5;
-        for _ in 0..1000 {
-            let v = next_signed(&mut s);
-            assert!((-1.0..=1.0).contains(&v));
-        }
     }
 
     #[test]

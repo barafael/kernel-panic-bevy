@@ -1,6 +1,12 @@
 //! Deterministic xorshift32 PRNG. Cheap, seedable, replayable — used by
-//! combat spread jitter, geovent puffs, and anywhere else the sim needs
-//! a few random-looking f32s without pulling in a full RNG crate.
+//! combat spread jitter, geovent puffs, CEG particles, aircraft wobble
+//! and anywhere else the sim needs a few random-looking f32s without
+//! pulling in a full RNG crate. States are plain `u32`s owned by the
+//! caller (a component field or a `Local`).
+//!
+//! [`clock_f64`] is the one *non*-deterministic source: a clock-seeded
+//! stream for choices that should differ per launch (match setup, the
+//! menu's attract demo). Gameplay never draws from it.
 
 use bevy::prelude::Vec3;
 
@@ -39,6 +45,35 @@ pub fn random_unit_sphere(state: &mut u32) -> Vec3 {
     Vec3::Y
 }
 
+/// Uniform `f64` in `[0.0, 1.0)` from a thread-local xorshift64 seeded
+/// from the clock on first use — differs every launch.
+///
+/// Uses Bevy's `Instant`, not `std::time`: `SystemTime`/`Instant` panic
+/// with "time not supported on this platform" on wasm32, where Bevy's
+/// is `performance.now()`-backed instead.
+pub fn clock_f64() -> f64 {
+    use bevy::platform::time::Instant;
+    thread_local! {
+        static STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        static ANCHOR: Instant = Instant::now();
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        if x == 0 {
+            // No epoch on Instant — seed from nanos elapsed since this
+            // thread's first call, mixed with a fixed odd constant.
+            let elapsed = ANCHOR.with(|a| a.elapsed());
+            x = ((elapsed.subsec_nanos() as u64) ^ (elapsed.as_secs() << 20) ^ 0x9E3779B97F4A7C15)
+                | 1;
+        }
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        (x >> 11) as f64 / (1u64 << 53) as f64
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -49,6 +84,14 @@ mod tests {
         for _ in 0..10_000 {
             let v = next_signed(&mut s);
             assert!((-1.0..1.0).contains(&v), "out-of-range draw: {v}");
+        }
+    }
+
+    #[test]
+    fn clock_f64_stays_in_unit_range() {
+        for _ in 0..1000 {
+            let v = clock_f64();
+            assert!((0.0..1.0).contains(&v), "out-of-range draw: {v}");
         }
     }
 

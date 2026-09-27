@@ -9,6 +9,7 @@
 
 use bevy::prelude::*;
 
+use crate::rng::clock_f64;
 use crate::units::components::Faction;
 
 /// Top-level app state: the menu system owns `Menu`; the simulation runs
@@ -88,11 +89,11 @@ pub const SPECTATOR_TEAM: u8 = u8::MAX;
 /// demo director restarts it with a fresh roll once it's decided.
 pub fn demo_setup() -> GameSetup {
     const FACTIONS: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
-    let seats = 2 + (rand_f64() * 3.0) as u8;
+    let seats = 2 + (clock_f64() * 3.0) as u8;
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut players: Vec<PlayerSpec> = (0..seats)
         .map(|i| PlayerSpec {
-            faction: FACTIONS[(rand_f64() * 3.0) as usize % 3],
+            faction: FACTIONS[(clock_f64() * 3.0) as usize % 3],
             team: 1 + i,
             ai: true,
         })
@@ -316,7 +317,7 @@ pub fn random_weighted_map() -> String {
         ("Palladium_0.5_(beta)", 3),
     ];
     let total: u32 = WEIGHTS.iter().map(|(_, w)| w).sum();
-    let mut d = (total as f64 * rand_f64()) as u32;
+    let mut d = (total as f64 * clock_f64()) as u32;
     for (name, w) in WEIGHTS {
         if d < *w {
             return (*name).to_string();
@@ -329,38 +330,9 @@ pub fn random_weighted_map() -> String {
 /// A fresh seed for per-match procedural content (Hex Farm's layout,
 /// which the original gadget re-rolls every game).
 pub fn match_seed() -> u64 {
-    let hi = (rand_f64() * (1u64 << 32) as f64) as u64;
-    let lo = (rand_f64() * (1u64 << 32) as f64) as u64;
+    let hi = (clock_f64() * (1u64 << 32) as f64) as u64;
+    let lo = (clock_f64() * (1u64 << 32) as f64) as u64;
     (hi << 32) | lo
-}
-
-/// Tiny XOR-shift PRNG so we don't need a rand dependency. Seeded from
-/// the clock once per call site chain.
-///
-/// Uses Bevy's `Instant`, not `std::time`: `SystemTime`/`Instant` panic
-/// with "time not supported on this platform" on wasm32, where Bevy's
-/// is `performance.now()`-backed instead.
-fn rand_f64() -> f64 {
-    use bevy::platform::time::Instant;
-    thread_local! {
-        static STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        static ANCHOR: Instant = Instant::now();
-    }
-    STATE.with(|s| {
-        let mut x = s.get();
-        if x == 0 {
-            // No epoch on Instant — seed from nanos elapsed since this
-            // thread's first call, mixed with a fixed odd constant.
-            let elapsed = ANCHOR.with(|a| a.elapsed());
-            x = ((elapsed.subsec_nanos() as u64) ^ (elapsed.as_secs() << 20) ^ 0x9E3779B97F4A7C15)
-                | 1;
-        }
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        s.set(x);
-        (x >> 11) as f64 / (1u64 << 53) as f64
-    })
 }
 
 #[cfg(test)]
