@@ -1579,6 +1579,21 @@ struct AttractCamera {
     retarget_in: f32,
     target: Option<Vec3>,
     clock: f32,
+    /// A low fly-by in progress instead of the orbit.
+    pass: Option<LowPass>,
+    /// Battles shown since the last fly-by: every other one gets a pass.
+    fights_since_pass: u32,
+}
+
+/// A low, fast sweep across a battle: the focus travels `start → end`
+/// through the fight while the camera sits low behind it, looking along
+/// the direction of travel — a helicopter shot between the wide orbits.
+struct LowPass {
+    start: Vec3,
+    end: Vec3,
+    /// Camera yaw that looks along `start → end`.
+    yaw: f32,
+    elapsed: f32,
 }
 
 /// Seconds between points of interest.
@@ -1587,6 +1602,14 @@ const ATTRACT_DWELL: f32 = 14.0;
 const ATTRACT_GLIDE_SPEED: f32 = 260.0;
 /// Orbit speed (rad/s).
 const ATTRACT_ORBIT_SPEED: f32 = 0.06;
+/// Half-length of a fly-by's ground track (elmos) and its duration.
+const PASS_HALF_LENGTH: f32 = 480.0;
+const PASS_SECONDS: f32 = 9.0;
+/// Camera pitch and distance during a fly-by: ~20° above the ground
+/// plane, ~210 elmos up — low enough to skim the fight, high enough to
+/// clear Kernel Panic's terrain and towers.
+const PASS_PITCH: f32 = 0.34;
+const PASS_DISTANCE: f32 = 620.0;
 
 #[allow(clippy::too_many_arguments)]
 fn attract_camera(
@@ -1610,16 +1633,37 @@ fn attract_camera(
     director.retarget_in -= dt;
     if director.retarget_in <= 0.0 || director.target.is_none() {
         director.retarget_in = ATTRACT_DWELL;
+        director.pass = None;
         let pick = |n: usize| ((clock_f64() * n as f64) as usize).min(n.saturating_sub(1));
         let fighting: Vec<Vec3> = fighters.iter().map(|g| g.translation()).collect();
         let homes: Vec<Vec3> = bases.iter().map(|g| g.translation()).collect();
         director.target = if !fighting.is_empty() {
-            Some(fighting[pick(fighting.len())])
+            let target = fighting[pick(fighting.len())];
+            director.fights_since_pass += 1;
+            if director.fights_since_pass >= 2 {
+                director.fights_since_pass = 0;
+                director.pass = Some(LowPass::across(target, &bounds));
+                director.retarget_in = PASS_SECONDS;
+            }
+            Some(target)
         } else if !homes.is_empty() {
             Some(homes[pick(homes.len())])
         } else {
             Some((bounds.min + bounds.max) * 0.5)
         };
+    }
+    if let Some(pass) = director.pass.as_mut() {
+        // The camera smoothing eases the swoop in and out; the focus
+        // itself runs the track with a smoothstep so the pass slows as
+        // it enters and leaves the fight.
+        pass.elapsed += dt;
+        let t = (pass.elapsed / PASS_SECONDS).clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        state.focus = pass.start.lerp(pass.end, eased);
+        state.yaw = pass.yaw;
+        state.pitch = PASS_PITCH;
+        state.distance = PASS_DISTANCE;
+        return;
     }
     if let Some(target) = director.target {
         let to = target - state.focus;
@@ -1634,6 +1678,28 @@ fn attract_camera(
     state.pitch = 0.62;
     // Slow breathing zoom so the shot doesn't feel static.
     state.distance = 1250.0 + 250.0 * (director.clock * 0.07).sin();
+}
+
+impl LowPass {
+    /// A pass through `target` along a random heading, kept inside the
+    /// map. The camera looks along the track from behind: with the
+    /// eye at `focus + (sin yaw, ·, cos yaw)`, the ground forward is
+    /// `(-sin yaw, -cos yaw)`, so `yaw = atan2(-d.x, -d.z)` for track
+    /// direction `d`.
+    fn across(target: Vec3, bounds: &MapBounds) -> Self {
+        let angle = clock_f64() as f32 * std::f32::consts::TAU;
+        let d = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let clamp = |p: Vec3| {
+            let xz = p.xz().clamp(bounds.min.xz(), bounds.max.xz());
+            Vec3::new(xz.x, p.y, xz.y)
+        };
+        Self {
+            start: clamp(target - d * PASS_HALF_LENGTH),
+            end: clamp(target + d * PASS_HALF_LENGTH),
+            yaw: (-d.x).atan2(-d.z),
+            elapsed: 0.0,
+        }
+    }
 }
 
 /// On first boot: once the map catalog exists, load the demo world
