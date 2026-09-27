@@ -67,9 +67,16 @@ fn tick_end(mut s: ResMut<Samples>) {
     }
 }
 
-fn report_on_exit(mut exit: MessageReader<AppExit>, mut s: ResMut<Samples>) {
+fn report_on_exit(
+    mut exit: MessageReader<AppExit>,
+    mut s: ResMut<Samples>,
+    paths: Option<Res<crate::interaction::ground_move::PathStats>>,
+) {
     if exit.read().next().is_none() {
         return;
+    }
+    if let Some(p) = paths {
+        println!("KP_PROFILE paths {p:?}");
     }
     // Skip the load: the first 5% of frames are start-up.
     let skip = s.frames.len() / 20;

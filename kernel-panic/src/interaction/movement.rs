@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use spring_pathfinding::{BlockMask, Path, PathSearch, SearchScratch, SearchStatus, SpeedMap};
+use spring_pathfinding::{
+    BlockMask, ComponentLabels, Path, PathSearch, SearchScratch, SearchStatus, SpeedMap,
+};
 
 use super::selection::Selected;
 use crate::sim::SQUARE_SIZE;
@@ -218,6 +220,22 @@ impl NavGridSet {
         area
     }
 
+    /// The square rectangles changed by each revision after `since`,
+    /// oldest first, or `None` when that reaches further back than
+    /// remembered.
+    pub fn changes_since_each(&self, since: u64) -> Option<impl Iterator<Item = [i32; 4]> + '_> {
+        let (oldest, _) = *self.changes.front()?;
+        if oldest > since + 1 {
+            return None;
+        }
+        Some(
+            self.changes
+                .iter()
+                .filter(move |(rev, _)| *rev > since)
+                .map(|(_, b)| *b),
+        )
+    }
+
     /// Does the segment `a → b` (world XZ) touch the square rectangle?
     pub fn segment_touches(bbox: [i32; 4], a: Vec2, b: Vec2) -> bool {
         let sq = |v: f32| (v / SQUARE_SIZE).floor() as i32;
@@ -247,6 +265,15 @@ impl NavGridSet {
         };
         let (cx, cz) = ((x / SQUARE_SIZE).floor(), (z / SQUARE_SIZE).floor());
         cx >= 0.0 && cz >= 0.0 && map.get(cx as u32, cz as u32) > 0.0
+    }
+
+    /// Index into `buckets` of the bucket for slope cap `cap` (see
+    /// [`Self::bucket`]).
+    pub fn bucket_index(&self, cap: f32) -> Option<usize> {
+        self.buckets
+            .iter()
+            .position(|b| b.max_slope >= cap)
+            .or_else(|| self.buckets.len().checked_sub(1))
     }
 
     /// The grid of the bucket for slope cap `cap`.
@@ -566,12 +593,15 @@ pub(crate) struct PathRequest {
 
 /// Start a search through the nav bucket matching the unit's `MaxSlope`,
 /// against the structure mask of its MoveDef footprint and crush
-/// strength. `Err` carries an outcome that needed no search: `None`
-/// when nothing could be decided (no nav grid yet).
+/// strength, with that grid's [`ComponentLabels`] if the caller has
+/// them (see [`nav_component_labels`]). `Err` carries an outcome that
+/// needed no search: `None` when nothing could be decided (no nav grid
+/// yet).
 pub(crate) fn begin_path_search(
     scratch: &mut SearchScratch,
     nav_set: Option<&NavGridSet>,
     unit_registry: &UnitRegistry,
+    labels: Option<&ComponentLabels>,
     req: &PathRequest,
 ) -> Result<PathSearch, Option<PathOutcome>> {
     let Some(nav) = nav_set else {
@@ -581,7 +611,8 @@ pub(crate) fn begin_path_search(
         return Err(None);
     };
     let mask = nav.block_mask(req.xsizeh, req.crush_strength);
-    match scratch.begin_search(speed_map, mask, [req.from.x, req.from.z], [req.to.x, req.to.z]) {
+    let (src, dst) = ([req.from.x, req.from.z], [req.to.x, req.to.z]);
+    match scratch.begin_search_labelled(speed_map, mask, labels, src, dst) {
         Ok(search) => Ok(search),
         Err(path) => Err(Some(path_outcome(path, req.to, nav.revision))),
     }
@@ -605,6 +636,31 @@ pub(crate) fn step_path_search(
         SearchStatus::Running => None,
         SearchStatus::Done(path) => Some(Some(path_outcome(path, req.to, nav.revision))),
     }
+}
+
+/// The connectivity a request is searched under: its nav bucket and
+/// mask class, keyed for a labels cache, and the labels' content.
+pub(crate) fn nav_component_labels(
+    nav: &NavGridSet,
+    unit_registry: &UnitRegistry,
+    req: &PathRequest,
+) -> Option<((usize, i32, bool), ComponentLabels)> {
+    let (key, speed_map, mask) = nav_class(nav, unit_registry, req)?;
+    Some((key, ComponentLabels::build(speed_map, mask)))
+}
+
+/// The nav bucket and mask a request searches under, keyed as
+/// `(bucket, xsizeh, crushes)`.
+pub(crate) fn nav_class<'a>(
+    nav: &'a NavGridSet,
+    unit_registry: &UnitRegistry,
+    req: &PathRequest,
+) -> Option<((usize, i32, bool), &'a SpeedMap, Option<&'a BlockMask>)> {
+    let cap = unit_registry.max_slope_ratio(req.kind);
+    let bucket = nav.bucket_index(cap)?;
+    let crushes = super::structures::crushes_features(req.crush_strength);
+    let mask = nav.structures.mask(req.xsizeh, crushes);
+    Some(((bucket, req.xsizeh, crushes), &nav.buckets[bucket].speed_map, mask))
 }
 
 fn path_outcome(path: Option<Path>, to: Vec3, revision: u64) -> PathOutcome {

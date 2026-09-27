@@ -4,6 +4,98 @@ use spring_pathfinding::*;
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
 
+    /// Random rectangles blocked and reopened one after another: the
+    /// incrementally updated labels always partition the cells like a
+    /// rebuild from scratch.
+    #[test]
+    fn incremental_labels_equal_rebuild(
+        seed in any::<u64>(),
+        edits in proptest::collection::vec((0u32..40, 0u32..40, 1u32..6, 1u32..6, any::<bool>()), 1..12),
+    ) {
+        let size = 40u32;
+        let mut speed_map = SpeedMap::uniform(size, size, 1.0);
+        let mut state = seed | 1;
+        for cell in speed_map.speeds.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let r = (state >> 11) as f32 / (1u64 << 53) as f32;
+            if r < 0.3 {
+                *cell = 0.0;
+            }
+        }
+        let mut labels = ComponentLabels::build(&speed_map, None);
+        for (x0, z0, w, h, open) in edits {
+            let x1 = (x0 + w).min(size - 1);
+            let z1 = (z0 + h).min(size - 1);
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    speed_map.speeds[(z * size + x) as usize] = if open { 1.0 } else { 0.0 };
+                }
+            }
+            labels.update_region(&speed_map, None, [x0 as i32, z0 as i32, x1 as i32, z1 as i32]);
+            let fresh = ComponentLabels::build(&speed_map, None);
+            let canon = |l: &ComponentLabels| {
+                let mut map = std::collections::HashMap::new();
+                let mut out = Vec::new();
+                for z in 0..size {
+                    for x in 0..size {
+                        let r = l.at(x, z);
+                        out.push(if r == 0 { 0 } else { let n = map.len() as u32 + 1; *map.entry(r).or_insert(n) });
+                    }
+                }
+                out
+            };
+            prop_assert_eq!(canon(&labels), canon(&fresh));
+        }
+    }
+
+    /// On random obstacle fields the labelled search (unreachable goals
+    /// detected up front, search stopped at the closest reachable cell)
+    /// returns exactly the flooding search's path, reachable or not.
+    #[test]
+    fn labelled_search_equals_flood(
+        seed in any::<u64>(),
+        density in 0.1f32..0.55,
+        src_x in 0.0f32..255.0,
+        src_z in 0.0f32..255.0,
+        dst_x in 0.0f32..255.0,
+        dst_z in 0.0f32..255.0,
+    ) {
+        let size = 32u32;
+        let mut speed_map = SpeedMap::uniform(size, size, 1.0);
+        // Cheap deterministic noise.
+        let mut state = seed | 1;
+        for cell in speed_map.speeds.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let r = (state >> 11) as f32 / (1u64 << 53) as f32;
+            if r < density {
+                *cell = 0.0;
+            } else if r < density + 0.2 {
+                *cell = 0.3 + r;
+            }
+        }
+        speed_map.refresh_max_speed();
+        let labels = ComponentLabels::build(&speed_map, None);
+        let src = [src_x, src_z];
+        let dst = [dst_x, dst_z];
+        let flood = find_path_masked(&speed_map, None, None, src, dst);
+        let mut scratch = SearchScratch::default();
+        let fast = match scratch.begin_search_labelled(&speed_map, None, Some(&labels), src, dst) {
+            Err(result) => result,
+            Ok(mut search) => match scratch.step(&mut search, &speed_map, None, None, usize::MAX) {
+                SearchStatus::Done(path) => path,
+                SearchStatus::Running => unreachable!(),
+            },
+        };
+        prop_assert_eq!(
+            flood.as_ref().map(|p| (p.reached_goal, p.points.clone())),
+            fast.as_ref().map(|p| (p.reached_goal, p.points.clone()))
+        );
+    }
+
     /// Any path found on a uniform map should be no longer than sqrt(2) * straight-line distance.
     #[test]
     fn uniform_map_path_near_optimal(

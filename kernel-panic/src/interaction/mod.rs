@@ -101,6 +101,7 @@ impl Plugin for InteractionPlugin {
             AbilityHotkeyPlugin,
             crate::interaction::debug_movement::DebugMovementPlugin,
         ))
+        .init_resource::<ground_move::PathStats>()
         .init_gizmo_group::<CommandLineGizmos>()
         .add_systems(Startup, configure_command_line_gizmos)
         // Unit motion is simulation: it runs on the fixed 30 Hz

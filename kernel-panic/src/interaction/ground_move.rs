@@ -31,7 +31,8 @@ use bevy::prelude::*;
 
 use super::movement::{
     AttackMoveActive, CommandQueue, GroundLift, MovePath, MoveTarget, NavGridSet, PathHeat,
-    PathOutcome, PathRequest, begin_path_search, promote_next_command, step_path_search,
+    PathOutcome, PathRequest, begin_path_search, nav_class, nav_component_labels,
+    promote_next_command, step_path_search,
 };
 use crate::map_events::CircularFlow;
 use crate::sim::{
@@ -83,8 +84,44 @@ pub struct PathSearchBudget(pub usize);
 /// is spent the search stays in flight and later requests queue, served
 /// in order at the head of the following frames, one search at a time.
 /// A finished path waits here until its mover picks it up.
+/// Path-service counters for the `KP_PROFILE` report: what the searches
+/// cost and how they ended.
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq)]
+pub struct PathStats {
+    pub searches: u64,
+    /// Searches that did not fit the frame budget and were resumed.
+    pub deferred: u64,
+    /// Requests that found the service busy and queued.
+    pub queued: u64,
+    /// Nodes expanded (budget spent).
+    pub nodes: u64,
+    /// Outcomes: goal reached / partial (closest cell) / no start.
+    pub reached: u64,
+    pub partial: u64,
+    pub unreachable: u64,
+    /// Component labellings built from scratch, and brought up to date
+    /// from the changed squares of a revision instead.
+    pub labellings: u64,
+    pub label_updates: u64,
+}
+
+impl PathStats {
+    fn outcome(&mut self, outcome: &Option<PathOutcome>) {
+        match outcome {
+            Some(PathOutcome::Route(p)) if p.reached_goal => self.reached += 1,
+            Some(PathOutcome::Route(_)) => self.partial += 1,
+            _ => self.unreachable += 1,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct PathQueue {
+    stats: PathStats,
+    /// [`ComponentLabels`] per (nav bucket, footprint, crushes) with the
+    /// nav revision they were built for; rebuilt on the first request
+    /// after a revision.
+    labels: HashMap<(usize, i32, bool), (u64, spring_pathfinding::ComponentLabels)>,
     pending: std::collections::VecDeque<Entity>,
     queued: bevy::platform::collections::HashSet<Entity>,
     in_flight: Option<(Entity, PathRequest, spring_pathfinding::PathSearch)>,
@@ -95,10 +132,54 @@ pub struct PathQueue {
 }
 
 impl PathQueue {
+    /// Begin `req`'s search with the current labels of its nav bucket
+    /// and mask class (rebuilt after a nav revision).
+    fn begin(
+        &mut self,
+        nav: Option<&NavGridSet>,
+        registry: &UnitRegistry,
+        req: &PathRequest,
+    ) -> Result<spring_pathfinding::PathSearch, Option<PathOutcome>> {
+        let labels = nav.and_then(|n| {
+            let (key, speed_map, mask) = nav_class(n, registry, req)?;
+            let stale = self.labels.get(&key).is_none_or(|(rev, _)| *rev != n.revision);
+            if stale {
+                // Labels from before this revision: apply the changed
+                // rectangles since (a rebuild only when a change may
+                // have split a component, or the ring is too short).
+                let updated = match self.labels.get_mut(&key) {
+                    Some((rev, labels)) if *rev < n.revision => {
+                        n.changes_since_each(*rev).map(|changes| {
+                            let mut rebuilt = false;
+                            for bbox in changes {
+                                rebuilt |= labels.update_region(speed_map, mask, bbox);
+                            }
+                            *rev = n.revision;
+                            rebuilt
+                        })
+                    }
+                    _ => None,
+                };
+                match updated {
+                    Some(true) => self.stats.labellings += 1,
+                    Some(false) => self.stats.label_updates += 1,
+                    None => {
+                        let (key, labels) = nav_component_labels(n, registry, req)?;
+                        self.labels.insert(key, (n.revision, labels));
+                        self.stats.labellings += 1;
+                    }
+                }
+            }
+            self.labels.get(&key).map(|(_, l)| l)
+        });
+        begin_path_search(&mut self.scratch, nav, registry, labels, req)
+    }
+
     /// Queue a search for `entity` unless one is already pending.
     fn request(&mut self, entity: Entity) {
         if self.queued.insert(entity) {
             self.pending.push_back(entity);
+            self.stats.queued += 1;
         }
     }
 
@@ -123,9 +204,11 @@ impl PathQueue {
                 let Some(req) = describe(entity) else {
                     continue;
                 };
-                match begin_path_search(&mut self.scratch, nav, registry, &req) {
+                self.stats.searches += 1;
+                match self.begin(nav, registry, &req) {
                     Ok(search) => self.in_flight = Some((entity, req, search)),
                     Err(outcome) => {
+                        self.stats.outcome(&outcome);
                         self.results.insert(entity, (req.to.xz(), outcome));
                         continue;
                     }
@@ -138,8 +221,10 @@ impl PathQueue {
             let pops = budget.min(PATH_SEARCH_STEP);
             let done = step_path_search(&mut self.scratch, search, nav, registry, req, heat, pops);
             budget -= pops;
+            self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
                 let (entity, req, _) = self.in_flight.take().expect("search in flight");
+                self.stats.outcome(&outcome);
                 self.results.insert(entity, (req.to.xz(), outcome));
             }
         }
@@ -163,19 +248,26 @@ impl PathQueue {
             self.request(entity);
             return (None, budget);
         }
-        let mut search = match begin_path_search(&mut self.scratch, nav, registry, &req) {
+        self.stats.searches += 1;
+        let mut search = match self.begin(nav, registry, &req) {
             Ok(search) => search,
-            Err(outcome) => return (Some(outcome), budget),
+            Err(outcome) => {
+                self.stats.outcome(&outcome);
+                return (Some(outcome), budget);
+            }
         };
         let mut left = budget;
         while left > 0 {
             let pops = left.min(PATH_SEARCH_STEP);
             let done = step_path_search(&mut self.scratch, &mut search, nav, registry, &req, heat, pops);
             left -= pops;
+            self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
+                self.stats.outcome(&outcome);
                 return (Some(outcome), left);
             }
         }
+        self.stats.deferred += 1;
         self.in_flight = Some((entity, req, search));
         (None, 0)
     }
@@ -930,7 +1022,11 @@ pub fn movement_system(
     mut avoidees: Local<Vec<Avoidee>>,
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
     mut path_queue: Local<PathQueue>,
+    stats: Option<ResMut<PathStats>>,
 ) {
+    if let Some(mut stats) = stats {
+        stats.set_if_neq(path_queue.stats);
+    }
     let nav = nav_set.as_deref();
     // Avoidance reads everyone's pose from before this frame's moves
     // (Spring evaluates it in the parallel traversal-plan pass).

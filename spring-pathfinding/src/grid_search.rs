@@ -236,6 +236,284 @@ pub fn find_path_masked_in(
     }
 }
 
+#[inline]
+fn closed_cell(speed_map: &SpeedMap, mask: Option<&BlockMask>, i: usize) -> bool {
+    speed_map.speeds[i] <= 0.0 || mask.is_some_and(|m| m.cells[i])
+}
+
+/// The open cells A\* may step to from `cell` (8-connected, diagonals
+/// only past two open orthogonal neighbours) — the search's move rule,
+/// shared with the component labelling so both agree on reachability.
+fn open_neighbors<'a>(
+    speed_map: &'a SpeedMap,
+    mask: Option<&'a BlockMask>,
+    cell: usize,
+) -> impl Iterator<Item = usize> + 'a {
+    let (width, height) = (speed_map.width, speed_map.height);
+    let cx = (cell as u32) % width;
+    let cz = (cell as u32) / width;
+    neighbors(cx, cz, width, height).filter_map(move |(nx, nz, step_len)| {
+        let n_idx = cell_idx(nx, nz, width);
+        if closed_cell(speed_map, mask, n_idx) {
+            return None;
+        }
+        if step_len > SQUARE_SIZE + 0.5
+            && (closed_cell(speed_map, mask, cell_idx(nx, cz, width))
+                || closed_cell(speed_map, mask, cell_idx(cx, nz, width)))
+        {
+            return None;
+        }
+        Some(n_idx)
+    })
+}
+
+/// Connected components of the open cells of one speed map / mask
+/// pair, under the search's own move rule (8-connected, no corner
+/// cutting): two open cells share a label exactly when A\* can reach
+/// one from the other. Label `0` marks closed cells.
+///
+/// Lets a host tell an unreachable goal apart before searching: the
+/// plain search of such a goal floods the mover's whole component
+/// (hundreds of thousands of nodes on a Kernel Panic map) to find the
+/// closest reachable cell. With labels the closest cell's distance is
+/// found by a ring walk around the goal, and the search stops at the
+/// first cell that close — closing the same cells in the same order,
+/// so the path is the one the flood would have returned.
+#[derive(Debug, Clone)]
+pub struct ComponentLabels {
+    pub width: u32,
+    pub height: u32,
+    /// Raw label per cell; resolve through [`Self::find`] — components
+    /// merged by [`Self::update_region`] keep their cells' raw labels
+    /// and are joined through `alias`.
+    labels: Vec<u32>,
+    /// Union-find parent per raw label (`alias[l] == l` for a root).
+    alias: Vec<u32>,
+}
+
+/// Cells around a changed rectangle within which the open cells next to
+/// newly blocked squares must still reach each other for the labels to
+/// stay valid without a rebuild; a structure's footprint is a few
+/// squares, so a detour round it fits easily.
+const RECONNECT_WINDOW: i32 = 32;
+
+impl ComponentLabels {
+    /// Label the open cells of `speed_map` under `mask`.
+    pub fn build(speed_map: &SpeedMap, mask: Option<&BlockMask>) -> Self {
+        let (width, height) = (speed_map.width, speed_map.height);
+        let cells = (width * height) as usize;
+        let mut this = Self {
+            width,
+            height,
+            labels: vec![0u32; cells],
+            alias: vec![0],
+        };
+        let mut stack: Vec<usize> = Vec::new();
+        for seed in 0..cells {
+            if this.labels[seed] != 0 || closed_cell(speed_map, mask, seed) {
+                continue;
+            }
+            let label = this.fresh_label();
+            this.labels[seed] = label;
+            stack.push(seed);
+            while let Some(cell) = stack.pop() {
+                for n_idx in open_neighbors(speed_map, mask, cell) {
+                    if this.labels[n_idx] == 0 {
+                        this.labels[n_idx] = label;
+                        stack.push(n_idx);
+                    }
+                }
+            }
+        }
+        this
+    }
+
+    /// Number of components (roots).
+    pub fn count(&self) -> u32 {
+        (1..self.alias.len() as u32).filter(|&l| self.alias[l as usize] == l).count() as u32
+    }
+
+    fn fresh_label(&mut self) -> u32 {
+        let label = self.alias.len() as u32;
+        self.alias.push(label);
+        label
+    }
+
+    /// Root of raw label `l` (path-halving).
+    fn find(&self, mut l: u32) -> u32 {
+        while self.alias[l as usize] != l {
+            l = self.alias[l as usize];
+        }
+        l
+    }
+
+    fn union(&mut self, a: u32, b: u32) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.alias[rb.max(ra) as usize] = rb.min(ra);
+        }
+    }
+
+    /// Component of the cell at `(x, z)`; `0` when closed.
+    #[inline]
+    pub fn at(&self, x: u32, z: u32) -> u32 {
+        self.find(self.labels[cell_idx(x, z, self.width)])
+    }
+
+    /// Bring the labels up to date after the cells in the rectangle
+    /// `[x0, z0, x1, z1]` (inclusive, clamped to the grid) changed
+    /// passability. Newly open cells join their neighbours' components
+    /// (merging any they connect); newly blocked cells are dropped, and
+    /// the open cells around them must still reach each other within
+    /// [`RECONNECT_WINDOW`] — otherwise the change may have split a
+    /// component and everything is rebuilt. Returns whether it rebuilt.
+    pub fn update_region(&mut self, speed_map: &SpeedMap, mask: Option<&BlockMask>, bbox: [i32; 4]) -> bool {
+        let (w, h) = (self.width as i32, self.height as i32);
+        let x0 = bbox[0].clamp(0, w - 1);
+        let z0 = bbox[1].clamp(0, h - 1);
+        let x1 = bbox[2].clamp(0, w - 1);
+        let z1 = bbox[3].clamp(0, h - 1);
+        if x0 > x1 || z0 > z1 {
+            return false;
+        }
+        let mut opened: Vec<usize> = Vec::new();
+        let mut blocked: Vec<usize> = Vec::new();
+        for z in z0..=z1 {
+            for x in x0..=x1 {
+                let i = cell_idx(x as u32, z as u32, self.width);
+                let was_open = self.labels[i] != 0;
+                let is_open = !closed_cell(speed_map, mask, i);
+                match (was_open, is_open) {
+                    (false, true) => opened.push(i),
+                    (true, false) => blocked.push(i),
+                    _ => {}
+                }
+            }
+        }
+        // Blocked cells leave their component; their open neighbours
+        // are the cells whose mutual connectivity decides a split.
+        let mut frontier: Vec<usize> = Vec::new();
+        for &i in &blocked {
+            self.labels[i] = 0;
+        }
+        for &i in &blocked {
+            for n in open_neighbors(speed_map, mask, i) {
+                if self.labels[n] != 0 && !frontier.contains(&n) {
+                    frontier.push(n);
+                }
+            }
+        }
+        // Opened cells: adopt a neighbouring component, merging the
+        // ones they bridge; a cell with no labelled neighbour starts a
+        // component of its own (later cells of the same opening join it).
+        for &i in &opened {
+            let mut label = 0u32;
+            for n in open_neighbors(speed_map, mask, i) {
+                let l = self.labels[n];
+                if l == 0 {
+                    continue;
+                }
+                if label == 0 {
+                    label = l;
+                } else {
+                    self.union(label, l);
+                }
+            }
+            if label == 0 {
+                label = self.fresh_label();
+            }
+            self.labels[i] = label;
+        }
+        // Also blocked cells' neighbours may have been bridged only
+        // through the (now closed) diagonal rule; the window check below
+        // covers every case: all frontier cells must reach each other.
+        if frontier.len() > 1 && !self.connected_within(speed_map, mask, &frontier, [x0, z0, x1, z1]) {
+            *self = Self::build(speed_map, mask);
+            return true;
+        }
+        false
+    }
+
+    /// Do all `cells` reach each other by open cells inside the window
+    /// `bbox` grown by [`RECONNECT_WINDOW`]? (Reaching each other inside
+    /// the window proves they still share a component.)
+    fn connected_within(&self, speed_map: &SpeedMap, mask: Option<&BlockMask>, cells: &[usize], bbox: [i32; 4]) -> bool {
+        let (w, h) = (self.width as i32, self.height as i32);
+        let wx0 = (bbox[0] - RECONNECT_WINDOW).max(0);
+        let wz0 = (bbox[1] - RECONNECT_WINDOW).max(0);
+        let wx1 = (bbox[2] + RECONNECT_WINDOW).min(w - 1);
+        let wz1 = (bbox[3] + RECONNECT_WINDOW).min(h - 1);
+        let ww = (wx1 - wx0 + 1) as usize;
+        let wh = (wz1 - wz0 + 1) as usize;
+        let mut seen = vec![false; ww * wh];
+        let local = |i: usize| -> Option<usize> {
+            let x = (i as u32 % self.width) as i32;
+            let z = (i as u32 / self.width) as i32;
+            (x >= wx0 && x <= wx1 && z >= wz0 && z <= wz1)
+                .then(|| (z - wz0) as usize * ww + (x - wx0) as usize)
+        };
+        let mut stack = vec![cells[0]];
+        seen[local(cells[0]).expect("frontier cell inside the window")] = true;
+        let mut reached = 1usize;
+        while let Some(cell) = stack.pop() {
+            for n in open_neighbors(speed_map, mask, cell) {
+                let Some(li) = local(n) else { continue };
+                if !seen[li] {
+                    seen[li] = true;
+                    if cells.contains(&n) {
+                        reached += 1;
+                        if reached == cells.len() {
+                            return true;
+                        }
+                    }
+                    stack.push(n);
+                }
+            }
+        }
+        false
+    }
+
+    /// The smallest octile distance from `(dx, dz)` to any cell of
+    /// component `label`: rings of growing Chebyshev radius `r` are
+    /// walked until `r` alone exceeds the best distance found (a ring's
+    /// cells are all at least `r` squares away).
+    fn nearest_distance(&self, label: u32, dx: u32, dz: u32) -> Option<f32> {
+        let max_r = self.width.max(self.height) as i32;
+        let mut best: Option<f32> = None;
+        for r in 0..=max_r {
+            if best.is_some_and(|b| r as f32 * SQUARE_SIZE > b) {
+                break;
+            }
+            let (x0, x1) = (dx as i32 - r, dx as i32 + r);
+            let (z0, z1) = (dz as i32 - r, dz as i32 + r);
+            let mut visit = |x: i32, z: i32| {
+                if x < 0 || z < 0 || x >= self.width as i32 || z >= self.height as i32 {
+                    return;
+                }
+                if self.at(x as u32, z as u32) == label {
+                    let h = octile(x as u32, z as u32, dx, dz);
+                    if best.is_none_or(|b| h < b) {
+                        best = Some(h);
+                    }
+                }
+            };
+            for x in x0..=x1 {
+                visit(x, z0);
+                if r > 0 {
+                    visit(x, z1);
+                }
+            }
+            for z in (z0 + 1)..z1 {
+                visit(x0, z);
+                if r > 0 {
+                    visit(x1, z);
+                }
+            }
+        }
+        best
+    }
+}
+
 /// A search in progress inside a [`SearchScratch`] (see
 /// [`SearchScratch::begin_search`]): the A\* frontier lives in the
 /// scratch, this holds the endpoints and the best-so-far bookkeeping,
@@ -255,6 +533,10 @@ pub struct PathSearch {
     h_scale: f32,
     best: usize,
     best_h: f32,
+    /// Heuristic of the closest reachable cell when the goal is known
+    /// to be unreachable: the search stops at the first closed cell
+    /// this close instead of flooding the component.
+    stop_h: Option<f32>,
 }
 
 /// Result of [`SearchScratch::step`].
@@ -275,6 +557,21 @@ impl SearchScratch {
         &mut self,
         speed_map: &SpeedMap,
         mask: Option<&BlockMask>,
+        src: [f32; 2],
+        dst: [f32; 2],
+    ) -> Result<PathSearch, Option<Path>> {
+        self.begin_search_labelled(speed_map, mask, None, src, dst)
+    }
+
+    /// [`Self::begin_search`] with [`ComponentLabels`] of the same map
+    /// and mask: an unreachable goal is detected up front and the
+    /// search then ends at the closest reachable cell instead of
+    /// flooding — same result, a fraction of the work.
+    pub fn begin_search_labelled(
+        &mut self,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        labels: Option<&ComponentLabels>,
         src: [f32; 2],
         dst: [f32; 2],
     ) -> Result<PathSearch, Option<Path>> {
@@ -309,6 +606,16 @@ impl SearchScratch {
         // `1/speed ≥ 1/max_speed`.
         let h_scale = 1.0 / speed_map.max_speed();
         let start_h = octile(sx, sz, dx, dz) * h_scale;
+        let stop_h = labels
+            .filter(|l| l.width == width && l.height == height)
+            .and_then(|l| {
+                let start_label = l.at(sx, sz);
+                if start_label == 0 || l.at(dx, dz) == start_label {
+                    return None;
+                }
+                l.nearest_distance(start_label, dx, dz)
+                    .map(|h| h * h_scale)
+            });
 
         self.begin((width * height) as usize);
         let start = cell_idx(sx, sz, width);
@@ -330,6 +637,7 @@ impl SearchScratch {
             h_scale,
             best: start,
             best_h: start_h,
+            stop_h,
         })
     }
 
@@ -376,6 +684,12 @@ impl SearchScratch {
             if cell_h < search.best_h {
                 search.best_h = cell_h;
                 search.best = cell;
+            }
+            // Unreachable goal: the first cell closed this near the
+            // goal is the one a full flood would settle on (cells close
+            // in `f` order, and no cell of the component is nearer).
+            if search.stop_h.is_some_and(|h| cell_h <= h) {
+                break;
             }
 
             let g_here = self.node(cell).g_cost;
@@ -740,6 +1054,102 @@ mod tests {
             assert!(steps > 3, "resumed across steps");
             assert_eq!(one_shot.points, stepped.points);
             assert_eq!(one_shot.reached_goal, stepped.reached_goal);
+        }
+    }
+
+    /// With component labels an unreachable goal skips the flood and
+    /// still yields the flood's exact path (to the same closest cell),
+    /// whichever side of the wall the mover starts on.
+    #[test]
+    fn labelled_search_matches_flood_for_unreachable_goals() {
+        let mut map = flat(48, 40);
+        // A wall with one gap, and a sealed pocket.
+        for z in 0..40 {
+            if z != 12 {
+                map.speeds[(z * 48 + 24) as usize] = 0.0;
+            }
+        }
+        for z in 5..15 {
+            map.speeds[(z * 48 + 24) as usize] = 0.0;
+        }
+        for i in 0..6 {
+            for (x, z) in [(30 + i, 30), (30 + i, 35), (30, 30 + i), (35, 30 + i)] {
+                map.speeds[(z * 48 + x) as usize] = 0.0;
+            }
+        }
+        let labels = ComponentLabels::build(&map, None);
+        assert!(labels.count() >= 3, "left, right, pocket: {}", labels.count());
+        let mut plain = SearchScratch::default();
+        let mut labelled = SearchScratch::default();
+        let cases = [
+            ([20.0, 20.0], [260.0, 260.0]),   // into the pocket
+            ([260.0, 260.0], [20.0, 20.0]),   // out of the pocket
+            ([20.0, 300.0], [380.0, 300.0]),  // across the wall (gap sealed)
+            ([380.0, 20.0], [60.0, 200.0]),   // across, other way
+            ([20.0, 20.0], [196.0, 100.0]),   // reachable: no change
+            ([20.0, 20.0], [196.0, 44.0]),    // goal on the wall itself
+        ];
+        for (src, dst) in cases {
+            let flood = find_path_masked_in(&mut plain, &map, None, None, src, dst).expect("path");
+            let mut search = labelled
+                .begin_search_labelled(&map, None, Some(&labels), src, dst)
+                .ok()
+                .expect("needs a search");
+            let SearchStatus::Done(Some(fast)) = labelled.step(&mut search, &map, None, None, usize::MAX) else {
+                panic!("labelled search failed");
+            };
+            assert_eq!(flood.reached_goal, fast.reached_goal, "{src:?} → {dst:?}");
+            assert_eq!(flood.points, fast.points, "{src:?} → {dst:?}");
+        }
+    }
+
+    /// Same-component relation of `a` and `b`, as canonical arrays.
+    fn partition(l: &ComponentLabels) -> Vec<u32> {
+        let mut canon = std::collections::HashMap::new();
+        let mut out = Vec::with_capacity((l.width * l.height) as usize);
+        for z in 0..l.height {
+            for x in 0..l.width {
+                let root = l.at(x, z);
+                if root == 0 {
+                    out.push(0);
+                } else {
+                    let n = canon.len() as u32 + 1;
+                    out.push(*canon.entry(root).or_insert(n));
+                }
+            }
+        }
+        out
+    }
+
+    /// Blocking and opening rectangles keeps the incremental labels
+    /// equal to a rebuild: a wall that splits, a gap that merges, a
+    /// pocket that seals, and an isolated opening.
+    #[test]
+    fn incremental_labels_match_rebuild() {
+        let mut map = flat(40, 40);
+        let mut labels = ComponentLabels::build(&map, None);
+        let set = |map: &mut SpeedMap, x0: u32, z0: u32, x1: u32, z1: u32, v: f32| {
+            for z in z0..=z1 {
+                for x in x0..=x1 {
+                    map.speeds[(z * 40 + x) as usize] = v;
+                }
+            }
+            [x0 as i32, z0 as i32, x1 as i32, z1 as i32]
+        };
+        let steps: [(u32, u32, u32, u32, f32); 6] = [
+            (20, 0, 20, 30, 0.0),  // long wall, still connected round the end
+            (20, 31, 20, 39, 0.0), // sealed: split → rebuild
+            (5, 5, 8, 8, 0.0),     // a block inside one half
+            (20, 12, 20, 12, 1.0), // a gap: merge
+            (30, 30, 34, 34, 0.0), // pocket walls…
+            (31, 31, 33, 33, 1.0), // …stay blocked here, so this reopens a pocket interior
+        ];
+        for (x0, z0, x1, z1, v) in steps {
+            let bbox = set(&mut map, x0, z0, x1, z1, v);
+            map.refresh_max_speed();
+            labels.update_region(&map, None, bbox);
+            let fresh = ComponentLabels::build(&map, None);
+            assert_eq!(partition(&labels), partition(&fresh), "after {bbox:?} = {v}");
         }
     }
 
