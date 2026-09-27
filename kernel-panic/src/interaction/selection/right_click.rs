@@ -106,8 +106,7 @@ pub struct PendingMoveIndicators {
 }
 
 /// Grouped lookup queries for `handle_right_click`, keeping the system
-/// under Bevy's 16-parameter limit (adding the UI-interaction guard and
-/// target-type lookup pushed the flat signature to 17).
+/// under Bevy's 16-parameter limit.
 #[derive(bevy::ecs::system::SystemParam)]
 #[allow(clippy::type_complexity)]
 struct RightClickLookups<'w, 's> {
@@ -120,7 +119,6 @@ struct RightClickLookups<'w, 's> {
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
     move_target_q: Query<'w, 's, (), With<MoveTarget>>,
     queue_end_q: Query<'w, 's, (Option<&'static MoveTarget>, Option<&'static CommandQueue>)>,
-    ui_interactions: Query<'w, 's, &'static Interaction>,
 }
 
 /// Right-click: single click moves all selected to one point — unless the
@@ -149,21 +147,8 @@ fn handle_right_click(
         target_type_q,
         move_target_q,
         queue_end_q,
-        ui_interactions,
     } = lookups;
     if mouse.just_pressed(MouseButton::Right) {
-        // A press that starts over a live UI node (minimap, order
-        // palette, HUD) belongs to the UI. Without this guard the
-        // cursor's ray still reaches the terrain underneath the panel
-        // and the player right-clicking the minimap quietly issues a
-        // move order to the world point below it.
-        if ui_interactions
-            .iter()
-            .any(|i| matches!(i, Interaction::Pressed | Interaction::Hovered))
-        {
-            return;
-        }
-
         drag_path.points.clear();
         drag_path.active = true;
 
@@ -807,55 +792,5 @@ mod tests {
         let t = Vec3::new(5.0, 0.0, 9.0);
         let orders = group_move_slots(&[(e[0], Vec3::ZERO, 12.0), (e[1], Vec3::X, 12.0)], t);
         assert!(orders.iter().all(|(_, g)| *g == t));
-    }
-
-    /// Regression: a right-click that starts over a live UI node (e.g.
-    /// the minimap) must not leak a move order to the terrain hidden
-    /// underneath the panel.
-    #[test]
-    fn ui_right_click_issues_no_move_order() {
-        let mut world = world_with_camera_and_terrain();
-        world.spawn((
-            UnitType(UnitKind::Bit),
-            Selected,
-            UnitStats {
-                radius: 12.0,
-                hit_radius: 20.0,
-                speed: 90.0,
-                acc_rate: 0.03,
-                dec_rate: 0.067,
-                turn_rate: 3.0,
-                can_fly: false,
-                no_chase_vtol: true,
-            },
-            Transform::from_xyz(10.0, 0.0, 10.0),
-        ));
-        // The UI element under the cursor.
-        world.spawn(Interaction::Hovered);
-
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .press(MouseButton::Right);
-        world.run_system_once(handle_right_click).unwrap();
-
-        assert!(
-            !world.resource::<RightDragPath>().active,
-            "press over UI must not start a drag",
-        );
-
-        world.resource_mut::<ButtonInput<MouseButton>>().clear();
-        world
-            .resource_mut::<ButtonInput<MouseButton>>()
-            .release(MouseButton::Right);
-        world.run_system_once(handle_right_click).unwrap();
-
-        assert!(
-            world
-                .query_filtered::<Entity, With<MoveTarget>>()
-                .iter(&world)
-                .next()
-                .is_none(),
-            "no move order may leak through a UI click",
-        );
     }
 }

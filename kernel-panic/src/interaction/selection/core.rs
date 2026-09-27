@@ -77,11 +77,11 @@ pub struct DragState {
     start: Option<Vec2>,
     /// Whether we're actively dragging (past threshold).
     dragging: bool,
-    /// True when the press that opened the current mouse-down happened
-    /// over a UI button. The release then skips world-space selection so
-    /// clicking a build icon doesn't also deselect the constructor the
-    /// click was targeting. Cleared on the matching release.
-    started_on_ui: bool,
+    /// True when the press that opened the current mouse-down belonged to
+    /// an armed order cursor mode. The release then skips world-space
+    /// selection so the order click doesn't also clear the selection it
+    /// was issued to. Cleared on the matching release.
+    swallowed: bool,
     /// (timestamp, entity) of the last click that landed on a unit. A
     /// second click on the same entity within
     /// [`DOUBLE_CLICK_INTERVAL`] expands the selection to all visible
@@ -138,7 +138,6 @@ fn handle_selection(
     local: Res<crate::units::player::LocalTeam>,
     same_kind_q: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
     box_nodes: Query<Entity, With<SelectionBoxNode>>,
-    ui_interactions: Query<&Interaction>,
     modes: Res<crate::interaction::ability::OrderCursorModes>,
     mut drag_state: ResMut<DragState>,
     mut commands: Commands,
@@ -153,27 +152,17 @@ fn handle_selection(
 
     // --- Left press: start tracking ---
     if mouse.just_pressed(MouseButton::Left) {
-        // If the press landed on a UI button (build icon, order palette,
-        // etc.), swallow the whole click cycle — otherwise the matching
-        // release later drops `Selected` off every unit and the click on
-        // the build icon also deselects the constructor it was meant
-        // to command. `Interaction::Pressed` is set on the UI node for
-        // exactly the frame the button is pressed-and-held, which makes
-        // this a cheap O(button-count) scan.
-        let on_ui = ui_interactions
-            .iter()
-            .any(|i| *i == Interaction::Pressed || *i == Interaction::Hovered);
-        drag_state.started_on_ui = on_ui || cursor_mode_active;
-        if on_ui || cursor_mode_active {
+        drag_state.swallowed = cursor_mode_active;
+        if cursor_mode_active {
             return;
         }
         drag_state.start = cursor_pos;
         drag_state.dragging = false;
     }
 
-    if drag_state.started_on_ui {
+    if drag_state.swallowed {
         if mouse.just_released(MouseButton::Left) {
-            drag_state.started_on_ui = false;
+            drag_state.swallowed = false;
         }
         return;
     }
