@@ -12,8 +12,13 @@ pub const NUM_SPEEDMOD_BINS: u8 = 10;
 pub struct SpeedMap {
     pub width: u32,
     pub height: u32,
-    /// Relative speed modifier per cell, 0.0..=1.0. Row-major.
+    /// Relative speed modifier per cell, 0.0..=1.0. Row-major. A direct
+    /// write that *raises* a cell above [`Self::max_speed`] must call
+    /// [`Self::refresh_max_speed`] (lowering only loosens the A\*
+    /// heuristic, which stays admissible).
     pub speeds: Vec<f32>,
+    /// Cached `max(speeds)` (≥ 0.001) scaling the A\* heuristic.
+    max_speed: f32,
 }
 
 impl SpeedMap {
@@ -58,11 +63,30 @@ impl SpeedMap {
             }
         }
 
-        Self {
+        Self::new(width, height, speeds)
+    }
+
+    fn new(width: u32, height: u32, speeds: Vec<f32>) -> Self {
+        let mut map = Self {
             width,
             height,
             speeds,
-        }
+            max_speed: 0.0,
+        };
+        map.refresh_max_speed();
+        map
+    }
+
+    /// The fastest cell's speed (at least 0.001): the A\* heuristic's
+    /// scale, cached so a search doesn't rescan the whole grid.
+    pub fn max_speed(&self) -> f32 {
+        self.max_speed
+    }
+
+    /// Recompute [`Self::max_speed`] after writing [`Self::speeds`]
+    /// directly.
+    pub fn refresh_max_speed(&mut self) {
+        self.max_speed = self.speeds.iter().copied().fold(0.0f32, f32::max).max(0.001);
     }
 
     /// Recompute the cells touching heightmap vertices `x0..=x1`,
@@ -83,22 +107,28 @@ impl SpeedMap {
         z1: u32,
     ) {
         let hw = heightmap_width as usize;
+        let old_max = self.max_speed;
+        let mut lowered_max = false;
         // A vertex belongs to the up-to-four cells around it.
         for z in z0.saturating_sub(1)..=z1.min(self.height - 1) {
             for x in x0.saturating_sub(1)..=x1.min(self.width - 1) {
-                self.speeds[(z * self.width + x) as usize] =
-                    cell_speed(heights, hw, x as usize, z as usize, max_slope, slope_mod);
+                let cell = &mut self.speeds[(z * self.width + x) as usize];
+                let speed = cell_speed(heights, hw, x as usize, z as usize, max_slope, slope_mod);
+                lowered_max |= *cell >= old_max && speed < old_max;
+                self.max_speed = self.max_speed.max(speed);
+                *cell = speed;
             }
+        }
+        // A cell at the maximum slowed down: the maximum only drops if
+        // no other cell still reaches it.
+        if lowered_max && self.max_speed == old_max && !self.speeds.iter().any(|&s| s >= old_max) {
+            self.refresh_max_speed();
         }
     }
 
     /// Build a uniform speed map (all cells have the same speed).
     pub fn uniform(width: u32, height: u32, speed: f32) -> Self {
-        Self {
-            width,
-            height,
-            speeds: vec![speed; (width * height) as usize],
-        }
+        Self::new(width, height, vec![speed; (width * height) as usize])
     }
 
     /// Get speed at grid position, or 0.0 if out of bounds.

@@ -152,6 +152,81 @@ pub fn find_path_masked(
     src: [f32; 2],
     dst: [f32; 2],
 ) -> Option<Path> {
+    find_path_masked_in(&mut SearchScratch::default(), speed_map, mask, heat, src, dst)
+}
+
+/// Reusable A\* working memory: per-cell cost / parent / closed state,
+/// sized to the grid on first use and invalidated between searches by
+/// bumping a generation stamp instead of clearing it — a search only
+/// pays for the cells it touches. Keep one per caller and hand it to
+/// [`find_path_masked_in`].
+#[derive(Default)]
+pub struct SearchScratch {
+    /// Even; this search's stamps are `generation` (seen) and
+    /// `generation + 1` (closed). Anything lower is a previous search.
+    generation: u32,
+    nodes: Vec<Node>,
+    open: BinaryHeap<Open>,
+}
+
+#[derive(Clone, Copy)]
+struct Node {
+    stamp: u32,
+    g_cost: f32,
+    came_from: u32,
+}
+
+const UNSEEN: Node = Node {
+    stamp: 0,
+    g_cost: f32::INFINITY,
+    came_from: u32::MAX,
+};
+
+impl SearchScratch {
+    /// Start a search over `cells` cells: every cell reads as unseen.
+    fn begin(&mut self, cells: usize) {
+        if self.nodes.len() != cells || self.generation >= u32::MAX - 2 {
+            self.nodes.clear();
+            self.nodes.resize(cells, UNSEEN);
+            self.generation = 0;
+        }
+        self.generation += 2;
+        self.open.clear();
+    }
+
+    fn node(&self, cell: usize) -> Node {
+        let n = self.nodes[cell];
+        if n.stamp >= self.generation { n } else { UNSEEN }
+    }
+
+    /// Record a cell's cost and parent (a closed cell stays closed).
+    fn set(&mut self, cell: usize, g_cost: f32, came_from: usize) {
+        self.nodes[cell] = Node {
+            stamp: self.nodes[cell].stamp.max(self.generation),
+            g_cost,
+            came_from: if came_from == usize::MAX { u32::MAX } else { came_from as u32 },
+        };
+    }
+
+    fn is_closed(&self, cell: usize) -> bool {
+        self.nodes[cell].stamp == self.generation + 1
+    }
+
+    /// Close a seen cell.
+    fn close(&mut self, cell: usize) {
+        self.nodes[cell].stamp = self.generation + 1;
+    }
+}
+
+/// [`find_path_masked`] reusing `scratch` across searches.
+pub fn find_path_masked_in(
+    scratch: &mut SearchScratch,
+    speed_map: &SpeedMap,
+    mask: Option<&BlockMask>,
+    heat: Option<&crate::heat::HeatMap>,
+    src: [f32; 2],
+    dst: [f32; 2],
+) -> Option<Path> {
     let width = speed_map.width;
     let height = speed_map.height;
     if width == 0 || height == 0 {
@@ -179,24 +254,13 @@ pub fn find_path_masked(
     // Admissible octile heuristic scaled by the slowest possible travel:
     // never overestimates because every cell's cost-per-elmo is
     // `1/speed ≥ 1/max_speed`.
-    let max_speed = speed_map
-        .speeds
-        .iter()
-        .cloned()
-        .fold(0.0f32, f32::max)
-        .max(0.001);
-    let h_scale = 1.0 / max_speed;
+    let h_scale = 1.0 / speed_map.max_speed();
     let heuristic = |x: u32, z: u32| octile(x, z, dx, dz) * h_scale;
 
-    let cell_count = (width * height) as usize;
-    let mut g_cost = vec![f32::INFINITY; cell_count];
-    let mut came_from = vec![usize::MAX; cell_count];
-    let mut closed = vec![false; cell_count];
-
-    let mut open = BinaryHeap::with_capacity(1024);
+    scratch.begin((width * height) as usize);
     let start = cell_idx(sx, sz, width);
-    g_cost[start] = 0.0;
-    open.push(Open {
+    scratch.set(start, 0.0, usize::MAX);
+    scratch.open.push(Open {
         f: heuristic(sx, sz),
         cell: start,
     });
@@ -205,11 +269,11 @@ pub fn find_path_masked(
     let mut best = start;
     let mut best_h = heuristic(sx, sz);
 
-    while let Some(Open { cell, .. }) = open.pop() {
-        if closed[cell] {
+    while let Some(Open { cell, .. }) = scratch.open.pop() {
+        if scratch.is_closed(cell) {
             continue; // stale heap entry
         }
-        closed[cell] = true;
+        scratch.close(cell);
 
         if cell == goal {
             best = goal;
@@ -224,7 +288,7 @@ pub fn find_path_masked(
             best = cell;
         }
 
-        let g_here = g_cost[cell];
+        let g_here = scratch.node(cell).g_cost;
 
         for (nx, nz, step_len) in neighbors(cx, cz, width, height) {
             let n_idx = cell_idx(nx, nz, width);
@@ -255,10 +319,9 @@ pub fn find_path_masked(
             }
 
             let g_new = g_here + step_len / speed;
-            if g_new < g_cost[n_idx] {
-                g_cost[n_idx] = g_new;
-                came_from[n_idx] = cell;
-                open.push(Open {
+            if g_new < scratch.node(n_idx).g_cost {
+                scratch.set(n_idx, g_new, cell);
+                scratch.open.push(Open {
                     f: g_new + heuristic(nx, nz),
                     cell: n_idx,
                 });
@@ -268,7 +331,7 @@ pub fn find_path_masked(
     // Goal reachable → trace it; otherwise trace the closest reachable
     // cell and flag the order as failed so the host can refuse it
     // (upstream `pathingFailed`) instead of parking units at the wall.
-    let reached_goal = closed[goal];
+    let reached_goal = scratch.is_closed(goal);
     let end = if reached_goal { goal } else { best };
     if end == start {
         return None;
@@ -281,7 +344,10 @@ pub fn find_path_masked(
         if cur == start {
             break;
         }
-        cur = came_from[cur];
+        cur = match scratch.node(cur).came_from {
+            u32::MAX => usize::MAX,
+            c => c as usize,
+        };
     }
     cells.reverse();
 
@@ -505,6 +571,36 @@ mod tests {
 
     fn flat(w: u32, h: u32) -> SpeedMap {
         SpeedMap::uniform(w, h, 1.0)
+    }
+
+    /// A reused scratch answers every search exactly like a fresh one,
+    /// including after an unreachable (flooding) search.
+    #[test]
+    fn reused_scratch_matches_fresh_searches() {
+        let mut map = flat(40, 40);
+        for z in 0..30 {
+            map.speeds[(z * 40 + 20) as usize] = 0.0;
+            map.speeds[(z * 40 + 7) as usize] = 0.5;
+        }
+        // A sealed pocket makes one goal unreachable.
+        for i in 0..5 {
+            for (x, z) in [(30 + i, 30), (30 + i, 34), (30, 30 + i), (34, 30 + i)] {
+                map.speeds[(z * 40 + x) as usize] = 0.0;
+            }
+        }
+        let mut scratch = SearchScratch::default();
+        let queries = [
+            ([20.0, 20.0], [300.0, 40.0]),
+            ([20.0, 300.0], [260.0, 260.0]),
+            ([300.0, 20.0], [20.0, 200.0]),
+            ([20.0, 20.0], [300.0, 40.0]),
+        ];
+        for (src, dst) in queries {
+            let fresh = find_path_masked(&map, None, None, src, dst).expect("path");
+            let reused = find_path_masked_in(&mut scratch, &map, None, None, src, dst).expect("path");
+            assert_eq!(fresh.points, reused.points);
+            assert_eq!(fresh.reached_goal, reused.reached_goal);
+        }
     }
 
     #[test]

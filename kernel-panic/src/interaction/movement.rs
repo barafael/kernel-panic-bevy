@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use spring_pathfinding::{BlockMask, SpeedMap, find_path_masked};
+use spring_pathfinding::{BlockMask, SearchScratch, SpeedMap, find_path_masked_in};
 
 use super::selection::Selected;
 use crate::sim::SQUARE_SIZE;
@@ -510,6 +510,7 @@ pub(crate) enum PathOutcome {
 /// strength. `None` means nothing could be decided (no nav grid yet).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_path(
+    scratch: &mut SearchScratch,
     nav_set: Option<&NavGridSet>,
     unit_registry: &UnitRegistry,
     kind: UnitKind,
@@ -522,7 +523,7 @@ pub(crate) fn compute_path(
     let nav = nav_set?;
     let speed_map = nav.speed_map(unit_registry.max_slope_ratio(kind))?;
     let mask = nav.block_mask(xsizeh, crush_strength);
-    let Some(path) = find_path_masked(speed_map, mask, heat, [from.x, from.z], [to.x, to.z]) else {
+    let Some(path) = find_path_masked_in(scratch, speed_map, mask, heat, [from.x, from.z], [to.x, to.z]) else {
         return Some(PathOutcome::Unreachable);
     };
     let waypoints: Vec<Vec3> = path.points.iter().map(|p| Vec3::new(p[0], 0.0, p[1])).collect();

@@ -10,6 +10,10 @@
 //! deliberately soft — heat slows a cell, it never blocks it — so a
 //! fully congested map still routes.
 
+/// Heat below this after a decay step is flushed to zero (it would
+/// slow a cell by < 0.0002 %).
+pub const HEAT_FLUSH: f32 = 1e-4;
+
 /// Per-cell heat, same grid resolution as [`crate::SpeedMap`] (one cell
 /// per `SQUARE_SIZE`).
 #[derive(Debug, Clone)]
@@ -45,13 +49,16 @@ impl HeatMap {
 
     /// Multiply every cell's heat by `retention` (the per-decay-step
     /// fraction that survives). Callers choose the step period; a
-    /// plain multiply keeps a full-grid pass at memcpy cost.
+    /// plain multiply keeps a full-grid pass at memcpy cost. Heat that
+    /// decays below [`HEAT_FLUSH`] snaps to zero, so a faded trail
+    /// reads as untouched instead of lingering as denormals.
     pub fn decay(&mut self, retention: f32) {
         if retention >= 1.0 {
             return;
         }
         for h in &mut self.heat {
-            *h *= retention;
+            let v = *h * retention;
+            *h = if v < HEAT_FLUSH { 0.0 } else { v };
         }
     }
 
@@ -118,6 +125,8 @@ mod tests {
         assert!((hm.get([4.0, 4.0]) - 8.0).abs() < 1e-5, "identity no-op");
         hm.decay(0.25);
         assert!((hm.get([4.0, 4.0]) - 2.0).abs() < 1e-5);
+        hm.decay(1e-5);
+        assert_eq!(hm.get([4.0, 4.0]), 0.0, "faded heat flushes to zero");
     }
 
     #[test]

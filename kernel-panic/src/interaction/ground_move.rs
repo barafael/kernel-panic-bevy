@@ -818,6 +818,7 @@ pub fn movement_system(
     mut query: Query<MoverData, Without<Dying>>,
     mut avoidees: Local<Vec<Avoidee>>,
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
+    mut path_scratch: Local<spring_pathfinding::SearchScratch>,
 ) {
     let nav = nav_set.as_deref();
     // Avoidance reads everyone's pose from before this frame's moves
@@ -956,6 +957,7 @@ pub fn movement_system(
                 searches += 1;
                 m.path_requested = false;
                 match compute_path(
+                    &mut path_scratch,
                     nav,
                     &registry,
                     u.kind.0,
