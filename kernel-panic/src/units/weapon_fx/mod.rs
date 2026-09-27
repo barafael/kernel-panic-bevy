@@ -14,6 +14,7 @@ mod tick;
 pub use shared::{AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, PendingExplosions};
 
 /// Live effect counts for the `KP_PROFILE` census.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn effect_counts(world: &mut World) -> [(&'static str, usize); 5] {
     [
         ("ceg_particles", world.query::<&ceg::CegParticle>().iter(world).count()),
