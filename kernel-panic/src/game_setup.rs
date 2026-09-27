@@ -88,12 +88,11 @@ pub const SPECTATOR_TEAM: u8 = u8::MAX;
 /// own team, played by the AI while the player spectates. The menu's
 /// demo director restarts it with a fresh roll once it's decided.
 pub fn demo_setup() -> GameSetup {
-    const FACTIONS: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
     let seats = 2 + (clock_f64() * 3.0) as u8;
     #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
     let mut players: Vec<PlayerSpec> = (0..seats)
         .map(|i| PlayerSpec {
-            faction: FACTIONS[(clock_f64() * 3.0) as usize % 3],
+            faction: Faction::ALL[(clock_f64() * 3.0) as usize % 3],
             team: 1 + i,
             ai: true,
         })
@@ -106,7 +105,7 @@ pub fn demo_setup() -> GameSetup {
         let pinned: Vec<Faction> = list
             .split(',')
             .filter_map(|name| {
-                FACTIONS
+                Faction::ALL
                     .into_iter()
                     .find(|f| format!("{f:?}").eq_ignore_ascii_case(name.trim()))
             })

@@ -146,7 +146,7 @@ pub fn showcase_director(
     // ------------------------------------------------------------------
     if d.homebase.is_none() {
         let found = homebases.iter_mut().find(|(_, ut, team, ..)| {
-            team.0 == 0 && matches!(ut.0, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier)
+            team.0 == 0 && ut.0.is_homebase()
         });
         if let Some((entity, _ut, _team, gtf, _prod, _homebase)) = found {
             d.homebase = Some(entity);

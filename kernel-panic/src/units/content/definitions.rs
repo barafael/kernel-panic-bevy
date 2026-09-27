@@ -215,19 +215,25 @@ impl UnitKind {
         )
     }
 
+    /// A faction's homebase (`kpunittypes.lua` `isHomeBase`: kernel,
+    /// hole, carrier) — the stationary main factory each team starts
+    /// with; see [`Faction::homebase`].
+    pub fn is_homebase(self) -> bool {
+        matches!(self, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier)
+    }
+
+    /// A datavent minifac (`kpunittypes.lua` `isMiniFac`: socket,
+    /// window, port) — what each faction's constructor erects on
+    /// datavents; see [`Faction::secondary_factory`].
+    pub fn is_minifac(self) -> bool {
+        matches!(self, UnitKind::Socket | UnitKind::Window | UnitKind::Port)
+    }
+
     /// "Factory" per upstream `game_over.lua` (gamemode 1, the default):
     /// `kpunittypes.lua`'s `isHomeBase` + `isMiniFac`. A team that owns
     /// none of these is out of the game.
     pub fn is_factory(self) -> bool {
-        matches!(
-            self,
-            UnitKind::Kernel
-                | UnitKind::Hole
-                | UnitKind::Carrier
-                | UnitKind::Socket
-                | UnitKind::Window
-                | UnitKind::Port
-        )
+        self.is_homebase() || self.is_minifac()
     }
 
     /// Per-team unit cap (FBI `UnitRestricted`). Only `logic_bomb.fbi`

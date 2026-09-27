@@ -285,7 +285,7 @@ pub fn spawn_unit(
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
     #[cfg(target_arch = "wasm32")]
     let _ = ground_lift;
-    if matches!(kind, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier) {
+    if kind.is_homebase() {
         info!(
             "spawn {kind:?}: ground y={:.1}, lift={ground_lift:.1}, root y={:.1}",
             position.y, lifted_position.y
@@ -370,7 +370,7 @@ pub fn spawn_unit(
     if let Some(producer) = default_production(kind) {
         commands.entity(unit_entity).insert(producer);
     }
-    if matches!(kind, UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier) {
+    if kind.is_homebase() {
         commands.entity(unit_entity).insert(Homebase);
     }
     // Why: visibility is now driven by `update_fog_visibility` from

@@ -203,22 +203,29 @@ pub fn factory_roster(factory: UnitKind) -> &'static [UnitKind] {
     }
 }
 
+/// The swarm unit a minifac spams — its single `SIDEDATA.TDF` build
+/// option (upstream `AddMiniFac` / `kp_autospam.lua`). Ports are
+/// teleporters: they tick the packet buffer instead of producing, so
+/// they have no spam unit.
+pub fn minifac_spam(minifac: UnitKind) -> Option<UnitKind> {
+    if minifac.is_minifac() { factory_roster(minifac).first().copied() } else { None }
+}
+
 pub fn default_production(kind: UnitKind) -> Option<Producer> {
-    match kind {
-        UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier => Some(Producer::new()),
-        // Minifacs autospam from the moment they finish building:
-        // upstream `kp_autospam.lua` gives every socket `REPEAT` + `bit`
-        // and every window `REPEAT` + `bug`. The player can still add to
-        // or toggle the queue; production waits for `Emerging` to end,
-        // mirroring the widget's `UnitFinished` hook.
-        UnitKind::Socket => Some(Producer::spamming(UnitKind::Bit)),
-        UnitKind::Window => Some(Producer::spamming(UnitKind::Bug)),
-        // Port is a teleporter, not a factory — it tops up its team's
-        // PacketBuffer every 5.5s rather than spawning units directly.
-        // Connection (mobile) is likewise a teleporter — it dispatches
-        // Packets from the buffer but does not build new units.
-        _ => None,
+    if kind.is_homebase() {
+        return Some(Producer::new());
     }
+    // Minifacs autospam from the moment they finish building:
+    // upstream `kp_autospam.lua` gives every socket `REPEAT` + `bit`
+    // and every window `REPEAT` + `bug`. The player can still add to
+    // or toggle the queue; production waits for `Emerging` to end,
+    // mirroring the widget's `UnitFinished` hook.
+    //
+    // Port is a teleporter, not a factory — it tops up its team's
+    // PacketBuffer every 5.5s rather than spawning units directly.
+    // Connection (mobile) is likewise a teleporter — it dispatches
+    // Packets from the buffer but does not build new units.
+    minifac_spam(kind).map(Producer::spamming)
 }
 
 /// Push one frame's worth of a build-laser strand from `start` to `end`,
@@ -464,10 +471,7 @@ pub fn production_system(
             // System units rise out of the ground (start underground at
             // `pad_y - EMERGE_DEPTH`); Hacker / Network units materialize
             // at-surface with an alpha ramp. Style picks both behaviors.
-            let style = match faction {
-                Faction::System => EmergeStyle::Rise,
-                Faction::Hacker | Faction::Network => EmergeStyle::Fade,
-            };
+            let style = faction.emerge_style();
             let spawn_pos = match style {
                 EmergeStyle::Rise => Vec3::new(pad_pos.x, pad_pos.y - EMERGE_DEPTH, pad_pos.z),
                 EmergeStyle::Fade => Vec3::new(pad_pos.x, pad_pos.y, pad_pos.z),

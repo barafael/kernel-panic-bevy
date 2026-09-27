@@ -40,7 +40,7 @@ use super::{
     components::{TeamId, UnitStats, UnitType},
     construction::{Constructing, PendingBuild},
     player::LocalTeam,
-    production::Producer,
+    production::{Producer, minifac_spam},
     spatial::SpatialIndex,
 };
 use crate::{
@@ -61,7 +61,7 @@ use crate::{
 };
 use army::{EnemyStructure, attack_move, is_army, pick_attack_target, scatter};
 use build_orders::{
-    HomebaseOrder, Lack, RoleCounts, choose_homebase_order, homebase_roster, minifac_spam,
+    HomebaseOrder, Lack, RoleCounts, choose_homebase_order, homebase_roster,
 };
 use expansion::{choose_building, pick_datavent};
 use specials::{
@@ -293,7 +293,7 @@ fn snapshot(
         s.counts.entry(team.0).or_default().add(kind);
         // KPAI `forceSize`: one per unit of any kind, buildings included.
         *s.force.entry(team.0).or_default() += 1;
-        let homebase = homebase_roster(kind).is_some();
+        let homebase = kind.is_homebase();
         if homebase && team.0 != local_team && !s.ai_teams.contains(&team.0) {
             s.ai_teams.push(team.0);
         }
@@ -392,9 +392,7 @@ fn run_constructors(
     let mut owned_minifacs = s
         .units
         .iter()
-        .filter(|u| {
-            u.team == team && matches!(u.kind, UnitKind::Socket | UnitKind::Window | UnitKind::Port)
-        })
+        .filter(|u| u.team == team && u.kind.is_minifac())
         .count();
     let mut vent_positions: Vec<Vec3> = s.vents.iter().map(|(_, p)| *p).collect();
     for ctor in s
@@ -427,7 +425,7 @@ fn run_constructors(
         // player's placement ghost can stack on the same vent.
         commands.entity(vent_entity).insert(VentClaim);
         lack.buildings -= 1;
-        if matches!(kind, UnitKind::Socket | UnitKind::Window | UnitKind::Port) {
+        if kind.is_minifac() {
             owned_minifacs += 1;
         }
     }
@@ -470,7 +468,7 @@ fn run_army(
     let homes: Vec<Vec3> = s
         .units
         .iter()
-        .filter(|u| u.team == team && homebase_roster(u.kind).is_some())
+        .filter(|u| u.team == team && u.kind.is_homebase())
         .map(|u| u.pos)
         .collect();
     let home = *homes.first()?;

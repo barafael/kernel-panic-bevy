@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use super::content::definitions::UnitKind;
+use super::lifecycle::spawning::EmergeStyle;
 
 /// Which faction a unit belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
@@ -11,11 +12,19 @@ pub enum Faction {
 }
 
 impl Faction {
+    /// Every faction, in the original's cycle order: System → Hacker →
+    /// Network.
+    pub const ALL: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
+
     /// Map a map-team-id to a faction, System → Hacker → Network, wrapping.
     /// Used to seed homebase factions at map load.
     pub fn from_team_id(team: u8) -> Self {
-        const ORDER: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
-        ORDER[team as usize % ORDER.len()]
+        Self::ALL[team as usize % Self::ALL.len()]
+    }
+
+    /// The faction whose homebase is `kind`, if it is one.
+    pub fn of_homebase(kind: UnitKind) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.homebase() == kind)
     }
 
     /// The signature color for this faction (used for wireframe glow).
@@ -58,12 +67,23 @@ impl Faction {
         }
     }
 
-    /// The datavent-built secondary factory for this faction.
+    /// The datavent-built secondary factory (minifac) for this faction.
     pub fn secondary_factory(&self) -> UnitKind {
         match self {
             Faction::System => UnitKind::Socket,
             Faction::Hacker => UnitKind::Window,
             Faction::Network => UnitKind::Port,
+        }
+    }
+
+    /// How this faction's units appear while being built: System units
+    /// rise out of the ground (`BUILD_PERCENT_LEFT` lifts in the
+    /// `.bos`), Hacker / Network units materialize in place with an alpha
+    /// ramp.
+    pub fn emerge_style(self) -> EmergeStyle {
+        match self {
+            Faction::System => EmergeStyle::Rise,
+            Faction::Hacker | Faction::Network => EmergeStyle::Fade,
         }
     }
 

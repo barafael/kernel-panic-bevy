@@ -334,7 +334,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
     if kind.is_constructor() {
         for &b in buildings_for(kind) {
             let mut d = CmdDesc::new(CmdId::Build(b), Building, b.unitname(), "", "");
-            if matches!(b, UnitKind::Socket | UnitKind::Window | UnitKind::Port) {
+            if b.is_minifac() {
                 d.hotkeys = MINIFAC_KEYS;
             }
             d.texture = Some(Texture::Buildpic(b));

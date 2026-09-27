@@ -65,13 +65,8 @@ impl ShieldState {
 /// slots), and `minifacshieldgood` into the small structures.
 pub fn shield_weapon_for(kind: UnitKind) -> Option<&'static str> {
     match kind {
-        UnitKind::Kernel | UnitKind::Hole | UnitKind::Carrier => Some("homebaseshieldgood"),
-        UnitKind::Socket
-        | UnitKind::Window
-        | UnitKind::Port
-        | UnitKind::Firewall
-        | UnitKind::Terminal
-        | UnitKind::Obelisk => Some("minifacshieldgood"),
+        k if k.is_homebase() => Some("homebaseshieldgood"),
+        k if k.is_small_building() => Some("minifacshieldgood"),
         _ => None,
     }
 }

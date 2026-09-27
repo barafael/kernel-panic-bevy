@@ -3,6 +3,7 @@
 //! (`KPAI_Fair.lua::UpdateFairness` → `Lack`), and the minifac spam
 //! toggle (`KPAI_Fair.lua::OrderMiniFac`).
 
+use crate::units::components::Faction;
 use crate::units::content::definitions::UnitKind;
 
 /// What one homebase can build, split into the four roles KPAI's
@@ -17,46 +18,21 @@ pub struct Roster {
 
 /// Upstream `OrderHomeBase` role table: kernel → assembler / bit /
 /// pointer / byte, hole → trojan / bug / dos / worm, carrier → gateway
-/// / packet / flow / connection.
+/// / packet / flow / connection. Constructor and spam unit come from the
+/// faction tables; arty / heavy are KPAI's own role split.
 pub fn homebase_roster(homebase: UnitKind) -> Option<Roster> {
-    let (constructor, spam, arty, heavy) = match homebase {
-        UnitKind::Kernel => (
-            UnitKind::Assembler,
-            UnitKind::Bit,
-            UnitKind::Pointer,
-            UnitKind::Byte,
-        ),
-        UnitKind::Hole => (
-            UnitKind::Trojan,
-            UnitKind::Bug,
-            UnitKind::Dos,
-            UnitKind::Worm,
-        ),
-        UnitKind::Carrier => (
-            UnitKind::Gateway,
-            UnitKind::Packet,
-            UnitKind::Flow,
-            UnitKind::Connection,
-        ),
-        _ => return None,
+    let faction = Faction::of_homebase(homebase)?;
+    let (arty, heavy) = match faction {
+        Faction::System => (UnitKind::Pointer, UnitKind::Byte),
+        Faction::Hacker => (UnitKind::Dos, UnitKind::Worm),
+        Faction::Network => (UnitKind::Flow, UnitKind::Connection),
     };
     Some(Roster {
-        constructor,
-        spam,
+        constructor: faction.constructor(),
+        spam: faction.basic_combat_unit(),
         arty,
         heavy,
     })
-}
-
-/// The swarm unit a minifac spams (upstream `AddMiniFac` /
-/// `kp_autospam.lua`). Ports are teleporters: they tick the packet
-/// buffer instead of producing, so they have no spam unit.
-pub fn minifac_spam(minifac: UnitKind) -> Option<UnitKind> {
-    match minifac {
-        UnitKind::Socket => Some(UnitKind::Bit),
-        UnitKind::Window => Some(UnitKind::Bug),
-        _ => None,
-    }
 }
 
 /// Upstream `kpunittypes.lua` buckets the fairness budget counts in.

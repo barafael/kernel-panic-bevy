@@ -607,11 +607,8 @@ fn handle_menu_actions(
 
 /// Faction cycle order from the original: System → Hacker → Network.
 fn next_faction(f: Faction) -> Faction {
-    match f {
-        Faction::System => Faction::Hacker,
-        Faction::Hacker => Faction::Network,
-        Faction::Network => Faction::System,
-    }
+    let i = Faction::ALL.iter().position(|&g| g == f).unwrap_or(0);
+    Faction::ALL[(i + 1) % Faction::ALL.len()]
 }
 
 /// Read a `Val` percent, treating `Auto`/`Px` as 0. Used to order buttons

@@ -188,10 +188,7 @@ pub fn tick_construction(
         // build_time is degenerate (would otherwise produce a frozen
         // emerge with `total = 0` that divides by zero downstream).
         if constructing.building.is_none() && build_time > 0.0 {
-            let style = match faction {
-                Faction::System => EmergeStyle::Rise,
-                Faction::Hacker | Faction::Network => EmergeStyle::Fade,
-            };
+            let style = faction.emerge_style();
             let target_y = constructing.site.y;
             let spawn_pos = match style {
                 EmergeStyle::Rise => Vec3::new(
