@@ -24,6 +24,9 @@
 //! `CSelectedUnitsHandler::GetAvailableCommands`: every non-build command
 //! in unit order (first occurrence wins), then every build command.
 
+use std::borrow::Cow;
+use std::collections::HashSet;
+
 use crate::units::content::definitions::UnitKind;
 use crate::units::lifecycle::construction::buildings_for;
 use crate::units::lifecycle::production::factory_roster;
@@ -116,7 +119,7 @@ pub(crate) struct CmdDesc {
     pub id: CmdId,
     pub ty: CmdType,
     /// Text drawn on the button (unless `only_texture`).
-    pub name: String,
+    pub name: Cow<'static, str>,
     /// Spring `tooltip` (for build options the tooltip module renders the
     /// unit's stats instead).
     pub tooltip: &'static str,
@@ -137,14 +140,14 @@ impl CmdDesc {
     fn new(
         id: CmdId,
         ty: CmdType,
-        name: &str,
+        name: &'static str,
         tooltip: &'static str,
         hotkeys: &'static str,
     ) -> Self {
         Self {
             id,
             ty,
-            name: name.to_string(),
+            name: Cow::Borrowed(name),
             tooltip,
             hotkeys,
             disabled: false,
@@ -153,6 +156,15 @@ impl CmdDesc {
             count: None,
             options: &[],
             state: 0,
+        }
+    }
+
+    /// Drawn as `texture` alone (the name only shows without it).
+    fn with_pic(self, texture: Texture) -> Self {
+        Self {
+            texture: Some(texture),
+            only_texture: true,
+            ..self
         }
     }
 
@@ -178,7 +190,7 @@ impl CmdDesc {
 }
 
 /// What the panel needs to know about one selected unit.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct UnitCmdState {
     pub kind: Option<UnitKind>,
     /// Factory: its repeat state and queued-count per kind.
@@ -333,21 +345,19 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
     // --- Build options (CBuilderCAI / CFactoryCAI) ---
     if kind.is_constructor() {
         for &b in buildings_for(kind) {
-            let mut d = CmdDesc::new(CmdId::Build(b), Building, b.unitname(), "", "");
+            let mut d = CmdDesc::new(CmdId::Build(b), Building, b.unitname(), "", "")
+                .with_pic(Texture::Buildpic(b));
             if b.is_minifac() {
                 d.hotkeys = MINIFAC_KEYS;
             }
-            d.texture = Some(Texture::Buildpic(b));
-            d.only_texture = true;
             d.disabled = capped.contains(&b);
             out.push(d);
         }
     }
     if unit.repeat.is_some() {
         for &b in factory_roster(kind) {
-            let mut d = CmdDesc::new(CmdId::Produce(b), Icon, b.unitname(), "", "");
-            d.texture = Some(Texture::Buildpic(b));
-            d.only_texture = true;
+            let mut d = CmdDesc::new(CmdId::Produce(b), Icon, b.unitname(), "", "")
+                .with_pic(Texture::Buildpic(b));
             d.count = unit
                 .queued
                 .iter()
@@ -361,18 +371,16 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
     // --- Gadget commands (InsertUnitCmdDesc appends) ---
     let recharging = unit.recharge.filter(|r| *r > 0.0);
     match kind {
-        UnitKind::Pointer => {
-            let mut d = CmdDesc::new(
+        UnitKind::Pointer => out.push(
+            CmdDesc::new(
                 CmdId::NxFlag,
                 Targeted,
                 "NX Flag",
                 "Set the target area on fire",
                 "d",
-            );
-            d.texture = Some(Texture::Pic("nxflag"));
-            d.only_texture = true;
-            out.push(d);
-        }
+            )
+            .with_pic(Texture::Pic("nxflag")),
+        ),
         UnitKind::Obelisk => out.push(CmdDesc::new(
             CmdId::Infection,
             Targeted,
@@ -394,18 +402,16 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
             "Transform into bug",
             "d u",
         )),
-        UnitKind::Byte => {
-            let mut d = CmdDesc::new(
+        UnitKind::Byte => out.push(
+            CmdDesc::new(
                 CmdId::LaunchMines,
                 Targeted,
                 "Launch Mines",
                 "Launches several mines in a forward arc,\nat the cost of 6000 hitpoints. 10s reload.",
                 "d",
-            );
-            d.texture = Some(Texture::Buildpic(UnitKind::LogicBomb));
-            d.only_texture = true;
-            out.push(d);
-        }
+            )
+            .with_pic(Texture::Buildpic(UnitKind::LogicBomb)),
+        ),
         UnitKind::Terminal => {
             let mut d = CmdDesc::new(
                 CmdId::Sigterm,
@@ -413,11 +419,10 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
                 "SIGTERM",
                 "Send a signal that terminates anything in the target area.",
                 "d",
-            );
-            d.texture = Some(Texture::Pic("sigterm"));
-            d.only_texture = true;
+            )
+            .with_pic(Texture::Pic("sigterm"));
             if let Some(r) = recharging {
-                d.name = recharge_label(r);
+                d.name = recharge_label(r).into();
                 d.disabled = true;
                 d.only_texture = false;
             }
@@ -432,7 +437,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
                 "d",
             );
             if let Some(r) = recharging {
-                d.name = recharge_label(r);
+                d.name = recharge_label(r).into();
                 d.disabled = true;
             }
             out.push(d);
@@ -460,14 +465,21 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
 /// every selected unit in order (duplicates dropped, first unit's
 /// description wins), then the build options.
 pub(crate) fn available_commands(units: &[UnitCmdState], capped: &[UnitKind]) -> Vec<CmdDesc> {
-    let per_unit: Vec<Vec<CmdDesc>> = units.iter().map(|u| unit_commands(u, capped)).collect();
+    // Units in the same state list the same commands: describe each
+    // distinct state once (in first-seen order, so the first wins).
+    let mut distinct: Vec<&UnitCmdState> = Vec::new();
+    for u in units {
+        if !distinct.contains(&u) {
+            distinct.push(u);
+        }
+    }
+    let per_unit: Vec<Vec<CmdDesc>> = distinct.iter().map(|u| unit_commands(u, capped)).collect();
+    let mut seen: HashSet<CmdId> = HashSet::new();
     let mut out: Vec<CmdDesc> = Vec::new();
     for build_pass in [false, true] {
-        for cmds in &per_unit {
-            for d in cmds {
-                if d.id.is_build_option() == build_pass && !out.iter().any(|o| o.id == d.id) {
-                    out.push(d.clone());
-                }
+        for d in per_unit.iter().flatten() {
+            if d.id.is_build_option() == build_pass && seen.insert(d.id) {
+                out.push(d.clone());
             }
         }
     }

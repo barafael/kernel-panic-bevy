@@ -34,7 +34,8 @@ use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::bookkeeping::team_kind_count;
+use crate::units::lifecycle::bookkeeping::team_kind_counts;
+use crate::units::lifecycle::construction::buildings_for;
 use crate::units::lifecycle::production::Producer;
 use crate::units::mechanics::command_fire::CommandFireCooldown;
 use crate::units::mechanics::worm::AutoHold;
@@ -42,6 +43,7 @@ use crate::units::mechanics::worm::AutoHold;
 use super::placement::PlacementMode;
 use super::previews::UnitPreviews;
 use super::tooltip::HoverTip;
+use super::widgets::{cover, hud_root, needs_rebuild, view_and_cursor};
 use activation::{ActivateCommand, active_command, apply_activations, disarm, order_hotkeys};
 use commands::{CmdDesc, CmdId, CmdType, Texture, UnitCmdState, available_commands};
 use layout::{KP_CTRL_PANEL, SlotCmd, fit_font_size};
@@ -70,7 +72,7 @@ impl Plugin for CommandPanelPlugin {
                     collect_commands,
                     order_hotkeys.run_if(in_state(AppState::InGame)),
                     apply_activations,
-                    render_panel,
+                    render_panel.run_if(in_state(AppState::InGame)),
                 )
                     .chain()
                     .in_set(CommandPanelSet)
@@ -93,6 +95,9 @@ pub(crate) struct PanelCommands {
     pub pages: Vec<Vec<Option<SlotCmd>>>,
     /// Identity of the selection the list was built for.
     selection: Vec<Entity>,
+    /// What the list was built from, to skip unchanged frames.
+    states: Vec<UnitCmdState>,
+    capped: Vec<UnitKind>,
 }
 
 impl PanelCommands {
@@ -129,11 +134,6 @@ struct PanelInput {
 #[derive(Resource, Default)]
 struct PanelPics(Vec<(&'static str, Handle<Image>)>);
 
-fn cursor(windows: &Query<&Window, With<PrimaryWindow>>) -> Option<(Vec2, Vec2)> {
-    let w = windows.single().ok()?;
-    Some((w.cursor_position()?, Vec2::new(w.width(), w.height())))
-}
-
 /// The page slot under the cursor that holds a command (`IconAtPos` with
 /// `selectThrough`: empty slots let clicks through to the map).
 fn command_slot(
@@ -141,8 +141,8 @@ fn command_slot(
     panel: &PanelCommands,
     page: usize,
 ) -> Option<usize> {
-    let (pos, view) = cursor(windows)?;
-    let slot = KP_CTRL_PANEL.slot_at(pos, view)?;
+    let (view, pos) = view_and_cursor(windows)?;
+    let slot = KP_CTRL_PANEL.slot_at(pos?, view)?;
     panel.slot_cmd(page, slot).map(|_| slot)
 }
 
@@ -230,20 +230,9 @@ fn collect_commands(
 ) {
     let mut rows: Vec<_> = selected.iter().collect();
     rows.sort_by_key(|r| r.0);
-    let mut capped: Vec<UnitKind> = Vec::new();
     let states: Vec<UnitCmdState> = rows
         .iter()
-        .map(|(_, ut, team, producer, autohold, cooldown)| {
-            if let Some(team) = team {
-                for kind in [UnitKind::LogicBomb] {
-                    if let Some(limit) = registry.team_limit(kind)
-                        && !capped.contains(&kind)
-                        && team_kind_count(kind, team.0, &team_units) >= limit
-                    {
-                        capped.push(kind);
-                    }
-                }
-            }
+        .map(|(_, ut, _, producer, autohold, cooldown)| {
             let mut queued: Vec<(UnitKind, u32)> = Vec::new();
             if let Some(p) = producer {
                 for k in p.queue() {
@@ -262,8 +251,32 @@ fn collect_commands(
             }
         })
         .collect();
-    panel.list = available_commands(&states, &capped);
-    panel.pages = KP_CTRL_PANEL.layout(panel.list.len());
+    // Team caps grey out build buttons, so only a selected builder of
+    // the kind needs the census — one per kind, not per selected unit.
+    let mut teams: Vec<u8> = rows.iter().filter_map(|r| r.2.map(|t| t.0)).collect();
+    teams.sort_unstable();
+    teams.dedup();
+    let capped: Vec<UnitKind> = [UnitKind::LogicBomb]
+        .into_iter()
+        .filter(|&kind| {
+            let Some(limit) = registry.team_limit(kind) else {
+                return false;
+            };
+            if teams.is_empty() || !rows.iter().any(|r| buildings_for(r.1.0).contains(&kind)) {
+                return false;
+            }
+            let counts = team_kind_counts(kind, &team_units);
+            teams
+                .iter()
+                .any(|t| counts.get(t).copied().unwrap_or(0) >= limit)
+        })
+        .collect();
+    if states != panel.states || capped != panel.capped {
+        panel.list = available_commands(&states, &capped);
+        panel.pages = KP_CTRL_PANEL.layout(panel.list.len());
+        panel.states = states;
+        panel.capped = capped;
+    }
     let ids: Vec<Entity> = rows.iter().map(|r| r.0).collect();
     if ids != panel.selection {
         // A new selection starts on its first page.
@@ -303,10 +316,13 @@ fn render_signature(
             };
             slot.hash(&mut h);
             cmd.hash(&mut h);
-            if let Some(d) = panel.desc_at(page, slot) {
+            // Page arrows are fully described by their `SlotCmd`.
+            if let SlotCmd::Command(i) = cmd
+                && let Some(d) = panel.list.get(*i)
+            {
                 (
                     d.id,
-                    d.label().to_string(),
+                    d.label(),
                     d.disabled,
                     d.texture,
                     d.only_texture,
@@ -335,43 +351,25 @@ fn render_panel(
     mut tip: ResMut<HoverTip>,
     roots: Query<Entity, With<CommandPanelRoot>>,
     mut last: Local<u64>,
-    in_game: Option<Res<State<AppState>>>,
 ) {
-    let playing = in_game.is_some_and(|s| *s.get() == AppState::InGame);
-    let Some((cursor_pos, view)) = cursor(&windows).or_else(|| {
-        windows
-            .single()
-            .ok()
-            .map(|w| (Vec2::splat(-1.0), Vec2::new(w.width(), w.height())))
-    }) else {
+    let Some((view, cursor)) = view_and_cursor(&windows) else {
         return;
     };
-    let hovered = if playing {
-        KP_CTRL_PANEL
-            .slot_at(cursor_pos, view)
-            .filter(|s| panel.slot_cmd(page.0, *s).is_some())
-    } else {
-        None
-    };
+    let hovered = cursor
+        .and_then(|c| KP_CTRL_PANEL.slot_at(c, view))
+        .filter(|s| panel.slot_cmd(page.0, *s).is_some());
     let hover_desc = hovered.and_then(|s| panel.desc_at(page.0, s));
     if tip.panel != hover_desc {
         tip.panel = hover_desc;
     }
 
     let active = active_command(&modes, &placement);
-    let sig = if playing && !panel.list.is_empty() {
-        render_signature(&panel, page.0, view, hovered, input.pressed, active)
-    } else {
+    let sig = if panel.list.is_empty() {
         0
+    } else {
+        render_signature(&panel, page.0, view, hovered, input.pressed, active)
     };
-    if sig == *last && (sig == 0 || !roots.is_empty()) {
-        return;
-    }
-    *last = sig;
-    for e in &roots {
-        commands.entity(e).despawn();
-    }
-    if sig == 0 {
+    if !needs_rebuild(&mut commands, sig, &mut last, &roots) || sig == 0 {
         return;
     }
 
@@ -379,20 +377,7 @@ fn render_panel(
     let text_border = Vec2::new(cfg.text_border * view.x, cfg.text_border * view.y);
     let mouse_down = mouse.pressed(MouseButton::Left) || mouse.pressed(MouseButton::Right);
 
-    let root = commands
-        .spawn((
-            CommandPanelRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Px(0.0),
-                height: Val::Px(0.0),
-                ..default()
-            },
-            GlobalZIndex(-1),
-        ))
-        .id();
+    let root = hud_root(&mut commands, CommandPanelRoot);
 
     let Some(slots) = panel.pages.get(page.0) else {
         return;
@@ -435,18 +420,7 @@ fn render_panel(
         let icon = icon.id();
 
         let overlay = |commands: &mut Commands, color: Color| {
-            commands.spawn((
-                ChildOf(icon),
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
-                    ..default()
-                },
-                BackgroundColor(color),
-            ));
+            commands.spawn((ChildOf(icon), cover(), BackgroundColor(color)));
         };
         // `DrawHilightQuad` (additive in Spring; a translucent wash here).
         if highlight {
@@ -568,13 +542,8 @@ fn render_panel(
             commands.spawn((
                 ChildOf(icon),
                 Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(0.0),
-                    top: Val::Px(0.0),
-                    width: Val::Percent(100.0),
-                    height: Val::Percent(100.0),
                     border: UiRect::all(Val::Px(1.5)),
-                    ..default()
+                    ..cover()
                 },
                 BorderColor::all(color),
             ));
@@ -596,15 +565,10 @@ fn spawn_label(
         .spawn((
             ChildOf(icon),
             Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
                 padding: UiRect::bottom(Val::Px(lift)),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
-                ..default()
+                ..cover()
             },
         ))
         .with_child((

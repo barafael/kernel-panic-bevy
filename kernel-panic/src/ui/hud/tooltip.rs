@@ -37,6 +37,7 @@ impl Plugin for TooltipPlugin {
         app.init_resource::<HoverTip>().add_systems(
             Update,
             refresh_tooltip
+                .run_if(in_state(AppState::InGame))
                 .after(super::command_panel::CommandPanelSet)
                 .after(crate::map_loading::GameWorldRebuild),
         );
@@ -116,7 +117,7 @@ fn selection_line(count: usize) -> Option<Line> {
 /// green, then the hotkeys.
 fn command_lines(desc: &CmdDesc) -> Vec<Line> {
     let text = if desc.tooltip.is_empty() {
-        desc.name.as_str()
+        desc.name.as_ref()
     } else {
         desc.tooltip
     };
@@ -243,52 +244,46 @@ fn tooltip_lines(
 #[derive(Component)]
 struct TooltipRoot;
 
-type UnitInfo<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static UnitType,
-        Option<&'static Health>,
-        Option<&'static TeamId>,
-        Has<Selected>,
-        Has<Hovered>,
-    ),
->;
+type UnitInfo = (
+    Entity,
+    &'static UnitType,
+    Option<&'static Health>,
+    Option<&'static TeamId>,
+);
+
+/// What the tooltip says, short of formatting it: skip unchanged frames
+/// before building any text.
+#[derive(PartialEq)]
+struct TipKey {
+    selected: usize,
+    unit: Option<(UnitKind, Option<(i64, i64)>, Option<u32>)>,
+    font_size: u32,
+}
 
 #[allow(clippy::too_many_arguments)]
 fn refresh_tooltip(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
     hover: Res<HoverTip>,
-    units: UnitInfo,
+    selected: Query<UnitInfo, With<Selected>>,
+    hovered: Query<UnitInfo, With<Hovered>>,
     registry: Res<UnitRegistry>,
     buffer: Option<Res<PacketBuffer>>,
     local: Option<Res<LocalTeam>>,
-    state: Option<Res<State<AppState>>>,
     asset_server: Res<AssetServer>,
     roots: Query<Entity, With<TooltipRoot>>,
-    mut last: Local<Option<(Vec<Line>, u32)>>,
+    mut last: Local<Option<TipKey>>,
 ) {
-    let in_game = state.is_some_and(|s| *s.get() == AppState::InGame);
     let Ok(window) = windows.single() else {
         return;
     };
-    if !in_game {
-        for e in &roots {
-            commands.entity(e).despawn();
-        }
-        *last = None;
-        return;
-    }
-    let selected = units.iter().filter(|u| u.4).count();
     // The unit under the cursor, else the last selected one.
-    let shown = units
+    let shown = hovered
         .iter()
-        .find(|u| u.5)
-        .or_else(|| units.iter().filter(|u| u.4).max_by_key(|u| u.0));
+        .next()
+        .or_else(|| selected.iter().max_by_key(|u| u.0));
     let local_team = local.map(|l| l.0);
-    let unit = shown.map(|(_, ut, health, team, ..)| {
+    let unit = shown.map(|(_, ut, health, team)| {
         let packets =
             (ut.0.is_teleporter() && team.is_some_and(|t| Some(t.0) == local_team)).then(|| {
                 buffer
@@ -297,12 +292,19 @@ fn refresh_tooltip(
             });
         (ut.0, health, packets)
     });
-    let lines = tooltip_lines(&hover, selected, unit, &registry);
     let font_size = (4.0 + window.height() / 100.0).max(8.0);
-    let key = (lines.clone(), font_size as u32);
-    if last.as_ref() == Some(&key) && !roots.is_empty() {
+    let key = TipKey {
+        selected: selected.iter().len(),
+        unit: unit.map(|(kind, health, packets)| {
+            let health = health.map(|h| (h.current.floor() as i64, h.max.floor() as i64));
+            (kind, health, packets)
+        }),
+        font_size: font_size as u32,
+    };
+    if !hover.is_changed() && last.as_ref() == Some(&key) && !roots.is_empty() {
         return;
     }
+    let lines = tooltip_lines(&hover, key.selected, unit, &registry);
     *last = Some(key);
     for e in &roots {
         commands.entity(e).despawn();
@@ -328,6 +330,7 @@ fn refresh_tooltip(
             },
             ImageNode::new(asset_server.load("bitmaps/tooltipbg.png")),
             GlobalZIndex(-1),
+            DespawnOnExit(AppState::InGame),
         ))
         .id();
     let column = commands

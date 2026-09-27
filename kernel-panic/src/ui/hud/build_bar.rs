@@ -43,6 +43,7 @@ use super::command_panel::activation::{ActivateCommand, edit_queue};
 use super::command_panel::commands::{CmdDesc, CmdId, UnitCmdState, unit_commands};
 use super::previews::UnitPreviews;
 use super::tooltip::{BarTip, HoverTip};
+use super::widgets::{cover, hud_root, needs_rebuild, view_and_cursor};
 
 pub(super) struct BuildBarPlugin;
 
@@ -57,7 +58,7 @@ impl Plugin for BuildBarPlugin {
             )
             .add_systems(
                 Update,
-                (collect_bar, render_bar)
+                (collect_bar, render_bar.run_if(in_state(AppState::InGame)))
                     .chain()
                     .before(super::command_panel::CommandPanelSet)
                     .after(crate::map_loading::GameWorldRebuild),
@@ -233,11 +234,9 @@ fn bar_mouse_input(
     mut out: MessageWriter<ActivateCommand>,
     mut commands: Commands,
 ) {
-    let Ok(window) = windows.single() else {
+    let Some((view, cursor)) = view_and_cursor(&windows) else {
         return;
     };
-    let view = Vec2::new(window.width(), window.height());
-    let cursor = window.cursor_position();
     let hit = cursor.and_then(|c| hit_test(c, view, &state));
 
     // `IsAbove_`: hovering a homebase icon opens its options.
@@ -309,6 +308,20 @@ fn bar_mouse_input(
 #[derive(Component)]
 struct BarRoot;
 
+/// A progress pie on an icon, kept current in place between rebuilds.
+#[derive(Component)]
+struct BarPie {
+    unit: Entity,
+    key: u32,
+}
+
+/// A Terminal / Firewall recharge countdown, kept current in place.
+#[derive(Component)]
+struct BarCountdown {
+    unit: Entity,
+    secs: u32,
+}
+
 const GREEN: Color = Color::srgb(0.0, 0.8, 0.0);
 const DARK_GREEN: Color = Color::srgb(0.0, 0.5, 0.0);
 
@@ -327,7 +340,39 @@ fn pie(progress: f32) -> BackgroundGradient {
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
+impl BarEntry {
+    /// The entry's pie: its progress and a quantised key that changes
+    /// when the pie visibly does. `None` when no pie is drawn.
+    fn pie(&self) -> Option<(f32, u32)> {
+        if let Some((_, p)) = self.building {
+            return Some((p, (p * 360.0) as u32));
+        }
+        let (left, total) = self.recharge?;
+        (left > 0.0).then(|| (1.0 - left / total.max(1e-3), (left * 4.0) as u32))
+    }
+
+    /// Whole seconds left on a recharging Terminal / Firewall.
+    fn countdown(&self) -> Option<u32> {
+        let (left, _) = self.recharge?;
+        (left > 0.0).then(|| left.ceil() as u32)
+    }
+}
+
+/// Everything the bar's node tree depends on apart from the pies and
+/// countdowns, which [`render_bar`] updates in place.
+fn structure_signature(state: &BarState, view: Vec2, hit: Option<Hit>, mouse_down: bool) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (view.x as u32, view.y as u32, hit, mouse_down, state.opened).hash(&mut h);
+    for e in &state.entries {
+        (e.entity, e.kind, &e.runs).hash(&mut h);
+        e.building.map(|(k, _)| k).hash(&mut h);
+        e.countdown().is_some().hash(&mut h);
+    }
+    h.finish() | 1
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn render_bar(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
@@ -335,20 +380,16 @@ fn render_bar(
     state: Res<BarState>,
     previews: Res<UnitPreviews>,
     units: Query<&UnitType>,
-    app_state: Option<Res<State<AppState>>>,
     mut tip: ResMut<HoverTip>,
     roots: Query<Entity, With<BarRoot>>,
+    mut pies: Query<(&mut BarPie, &mut BackgroundGradient)>,
+    mut countdowns: Query<(&mut BarCountdown, &mut Text)>,
     mut last: Local<u64>,
 ) {
-    let playing = app_state.is_some_and(|s| *s.get() == AppState::InGame);
-    let Ok(window) = windows.single() else {
+    let Some((view, cursor)) = view_and_cursor(&windows) else {
         return;
     };
-    let view = Vec2::new(window.width(), window.height());
-    let hit = window
-        .cursor_position()
-        .filter(|_| playing)
-        .and_then(|c| hit_test(c, view, &state));
+    let hit = cursor.and_then(|c| hit_test(c, view, &state));
     let mouse_down =
         mouse.any_pressed([MouseButton::Left, MouseButton::Right, MouseButton::Middle]);
 
@@ -371,29 +412,31 @@ fn render_bar(
         tip.bar = new_tip;
     }
 
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    if playing {
-        (view.x as u32, view.y as u32, hit, mouse_down, state.opened).hash(&mut h);
-        for e in &state.entries {
-            (e.entity, e.kind, &e.runs).hash(&mut h);
-            e.building
-                .map(|(k, p)| (k, (p * 360.0) as u32))
-                .hash(&mut h);
-            e.recharge.map(|(r, _)| (r * 4.0) as u32).hash(&mut h);
-        }
-    }
-    let sig = if playing && !state.entries.is_empty() {
-        h.finish() | 1
-    } else {
+    let sig = if state.entries.is_empty() {
         0
+    } else {
+        structure_signature(&state, view, hit, mouse_down)
     };
-    if sig == *last && (sig == 0 || !roots.is_empty()) {
+    if !needs_rebuild(&mut commands, sig, &mut last, &roots) {
+        // Same layout: advance the pies and countdowns in place.
+        let entry = |unit: Entity| state.entries.iter().find(|e| e.entity == unit);
+        for (mut p, mut gradient) in &mut pies {
+            if let Some((progress, key)) = entry(p.unit).and_then(BarEntry::pie)
+                && key != p.key
+            {
+                p.key = key;
+                *gradient = pie(progress);
+            }
+        }
+        for (mut c, mut text) in &mut countdowns {
+            if let Some(secs) = entry(c.unit).and_then(BarEntry::countdown)
+                && secs != c.secs
+            {
+                c.secs = secs;
+                text.0 = format!("{secs}s");
+            }
+        }
         return;
-    }
-    *last = sig;
-    for e in &roots {
-        commands.entity(e).despawn();
     }
     if sig == 0 {
         return;
@@ -402,20 +445,7 @@ fn render_bar(
     let s = icon_size(view);
     let font = s.y * 0.25;
     let n = state.entries.len();
-    let root = commands
-        .spawn((
-            BarRoot,
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                top: Val::Px(0.0),
-                width: Val::Px(0.0),
-                height: Val::Px(0.0),
-                ..default()
-            },
-            GlobalZIndex(-1),
-        ))
-        .id();
+    let root = hud_root(&mut commands, BarRoot);
 
     let cell = |commands: &mut Commands, pos: Vec2, pic: Option<Handle<Image>>, alpha: f32| {
         let mut c = commands.spawn((
@@ -435,33 +465,27 @@ fn render_bar(
         c.id()
     };
     let fill = |commands: &mut Commands, parent: Entity, color: Color| {
-        commands.spawn((
-            ChildOf(parent),
-            Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
-                ..default()
-            },
-            BackgroundColor(color),
-        ));
+        commands.spawn((ChildOf(parent), cover(), BackgroundColor(color)));
     };
     let frame = |commands: &mut Commands, parent: Entity, color: Color, width: f32| {
         commands.spawn((
             ChildOf(parent),
             Node {
-                position_type: PositionType::Absolute,
-                width: Val::Percent(100.0),
-                height: Val::Percent(100.0),
                 border: UiRect::all(Val::Px(width)),
-                ..default()
+                ..cover()
             },
             BorderColor::all(color),
         ));
     };
-    let text =
-        |commands: &mut Commands, parent: Entity, t: String, size: f32, left: f32, bottom: f32| {
-            commands.spawn((
+    let text = |commands: &mut Commands,
+                parent: Entity,
+                t: String,
+                size: f32,
+                left: f32,
+                bottom: f32|
+     -> Entity {
+        commands
+            .spawn((
                 ChildOf(parent),
                 Node {
                     position_type: PositionType::Absolute,
@@ -476,8 +500,9 @@ fn render_bar(
                     offset: Vec2::splat(1.0),
                     color: Color::BLACK,
                 },
-            ));
-        };
+            ))
+            .id()
+    };
     let hover_wash = |commands: &mut Commands, parent: Entity, hovered: bool| {
         if hovered {
             let c = if mouse_down {
@@ -488,34 +513,50 @@ fn render_bar(
             fill(commands, parent, c);
         }
     };
+    let with_pie = |commands: &mut Commands, node: Entity, e: &BarEntry| {
+        if let Some((progress, key)) = e.pie() {
+            commands.entity(node).insert((
+                pie(progress),
+                BarPie {
+                    unit: e.entity,
+                    key,
+                },
+            ));
+        }
+    };
 
     for (i, e) in state.entries.iter().enumerate() {
         let pos = icon_pos(i, n, view);
         let opened = state.opened == Some(e.entity);
         let shown = e.building.map_or(e.kind, |(k, _)| k);
         let c = cell(&mut commands, pos, previews.get(shown).cloned(), 1.0);
-        if let Some((_, p)) = e.building {
-            commands.entity(c).insert(pie(p));
-        } else if let Some((left, total)) = e.recharge {
-            if left > 0.0 {
-                commands.entity(c).insert(pie(1.0 - left / total.max(1e-3)));
-                text(
-                    &mut commands,
-                    c,
-                    format!("{}s", left.ceil() as u32),
-                    s.y / 3.0,
-                    s.x / 4.0,
-                    s.y / 6.0,
-                );
-            } else {
-                text(
-                    &mut commands,
-                    c,
-                    "Ready!".into(),
-                    s.y / 4.0,
-                    s.x / 6.0,
-                    s.y / 4.0,
-                );
+        with_pie(&mut commands, c, e);
+        if e.recharge.is_some() {
+            match e.countdown() {
+                Some(secs) => {
+                    let t = text(
+                        &mut commands,
+                        c,
+                        format!("{secs}s"),
+                        s.y / 3.0,
+                        s.x / 4.0,
+                        s.y / 6.0,
+                    );
+                    commands.entity(t).insert(BarCountdown {
+                        unit: e.entity,
+                        secs,
+                    });
+                }
+                None => {
+                    text(
+                        &mut commands,
+                        c,
+                        "Ready!".into(),
+                        s.y / 4.0,
+                        s.x / 6.0,
+                        s.y / 4.0,
+                    );
+                }
             }
         }
         hover_wash(&mut commands, c, hit == Some(Hit::Icon(i)));
@@ -532,9 +573,7 @@ fn render_bar(
                 let q = pos + Vec2::new(0.0, s.y * (j + 1) as f32);
                 let o = cell(&mut commands, q, previews.get(kind).cloned(), 0.75);
                 if e.building.is_some_and(|(k, _)| k == kind) {
-                    commands
-                        .entity(o)
-                        .insert(pie(e.building.map_or(0.0, |b| b.1)));
+                    with_pie(&mut commands, o, e);
                 }
                 let queued: u32 = e
                     .runs
