@@ -145,8 +145,14 @@ fn update_health_bars(
         transform.scale.x = HEALTH_BAR_WIDTH * frac;
         transform.translation.x = -HEALTH_BAR_WIDTH * (1.0 - frac) * 0.5;
 
+        // `get_mut` marks the material modified (a GPU re-upload every
+        // frame per bar): only take it when the colour changes.
         let color = health_color(frac);
-        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+        if materials
+            .get(&mat_handle.0)
+            .is_some_and(|mat| mat.base_color != color)
+            && let Some(mat) = materials.get_mut(&mat_handle.0)
+        {
             mat.base_color = color;
             mat.emissive = LinearRgba::from(color) * 2.0;
         }

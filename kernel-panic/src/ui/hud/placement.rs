@@ -272,7 +272,7 @@ fn resolve_site(
     registry: &UnitRegistry,
 ) -> PlannedSite {
     let footprint = registry.footprint_elmos(kind);
-    let height = |p: Vec2| heightmap.map_or(0.0, |h| h.sample(p.x, p.y));
+    let ground = |p: Vec2| heightmap.map_or(Vec3::new(p.x, 0.0, p.y), |h| h.place(p.x, p.y));
     let slope_ok = |pos: Vec3| {
         heightmap.is_none_or(|h| {
             h.max_slope_in_footprint(pos, footprint) <= registry.max_slope_ratio(kind)
@@ -295,13 +295,13 @@ fn resolve_site(
                 }
             }
             None => PlannedSite {
-                pos: raw.extend(height(raw)).xzy(),
+                pos: ground(raw),
                 valid: false,
             },
         };
     }
     let pos2 = build_pos(raw, footprint_squares(footprint));
-    let pos = Vec3::new(pos2.x, height(pos2), pos2.y);
+    let pos = ground(pos2);
     let half = footprint * 0.5;
     let blocked = obstacles.iter().any(|(c, h)| {
         (c.x - pos2.x).abs() < h.x + half.x - 0.01 && (c.y - pos2.y).abs() < h.y + half.y - 0.01
@@ -492,15 +492,17 @@ fn sync_ghosts(
                 // Lift slightly so the mesh doesn't z-fight the ground.
                 tf.translation = site.pos + Vec3::Y * 0.5;
                 *vis = Visibility::Inherited;
-                if let Some(m) = materials.get_mut(&mat.0) {
-                    let want = if site.valid {
-                        GHOST_VALID_COLOR
-                    } else {
-                        GHOST_INVALID_COLOR
-                    };
-                    if m.base_color != want {
-                        m.base_color = want;
-                    }
+                let want = if site.valid {
+                    GHOST_VALID_COLOR
+                } else {
+                    GHOST_INVALID_COLOR
+                };
+                // `get_mut` marks the material modified (a GPU
+                // re-upload): only take it on an actual change.
+                if materials.get(&mat.0).is_some_and(|m| m.base_color != want)
+                    && let Some(m) = materials.get_mut(&mat.0)
+                {
+                    m.base_color = want;
                 }
             }
             None => *vis = Visibility::Hidden,
@@ -518,19 +520,11 @@ fn place_on_release(
     builders: Query<(Entity, &UnitType), With<Selected>>,
     move_target_q: Query<(), With<MoveTarget>>,
     vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
-    ui_interactions: Query<&Interaction>,
 ) {
     let Some(kind) = placement.kind else {
         return;
     };
     if mouse.just_pressed(MouseButton::Left) {
-        // A press over another UI node (minimap, HUD) belongs to it.
-        if ui_interactions
-            .iter()
-            .any(|i| matches!(i, Interaction::Pressed | Interaction::Hovered))
-        {
-            return;
-        }
         mouse.clear_just_pressed(MouseButton::Left);
         state.press_owned = true;
         state.anchor = state.sites.first().map(|s| s.pos);
