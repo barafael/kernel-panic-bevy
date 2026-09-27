@@ -112,6 +112,16 @@ pub struct CameraSettings {
     pub smoothing: f32,
 }
 
+/// Multisampling on the main camera. Native keeps Bevy's default 4×.
+/// On the web (WebGL2 / WebGPU, usually an integrated GPU) HDR + Bloom
+/// at 4× MSAA is the dominant frame cost — the HDR colour target is
+/// rendered at four samples and resolved every frame — so it goes off
+/// there; bloom stays. Web only supports 1 or 4 samples anyway.
+#[cfg(target_arch = "wasm32")]
+const CAMERA_MSAA: Msaa = Msaa::Off;
+#[cfg(not(target_arch = "wasm32"))]
+const CAMERA_MSAA: Msaa = Msaa::Sample4;
+
 pub fn spawn_camera(mut commands: Commands) {
     let state = RtsCameraState::default();
     let transform = compute_transform_from_state(&state);
@@ -120,6 +130,7 @@ pub fn spawn_camera(mut commands: Commands) {
         RtsCamera,
         state,
         Camera3d::default(),
+        CAMERA_MSAA,
         // Default Bevy far plane is 1000, which clips large maps long
         // before the map fog takes over. `apply_fog` sizes the fog to
         // the map diagonal, so push the far plane past any sensible map.
