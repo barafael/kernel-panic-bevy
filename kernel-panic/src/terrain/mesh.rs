@@ -5,7 +5,16 @@ use bevy::{
 };
 
 /// Heightmap squares per terrain chunk side.
-pub const CHUNK_SIZE: usize = 32;
+///
+/// Each chunk is one entity / mesh / draw call, so this sets the
+/// terrain's draw count: at 32 a 16×16 map (1025² heights) was 1024
+/// chunks and Hex Farm (12288 elmos, 1537²) 2304; at 64 they are 256
+/// and 576. Frustum culling gets coarser, which an RTS camera
+/// looking at a few hundred squares never notices. A full chunk is
+/// 65×65 = 4225 vertices, far inside even a u16 index range (the
+/// builder uses u32 anyway). Hex Farm's rebuild-on-reshape and the
+/// chunk coords in `map_loading` derive from this constant.
+pub const CHUNK_SIZE: usize = 64;
 
 pub struct TerrainChunk {
     pub mesh: Mesh,
@@ -126,5 +135,31 @@ pub fn build_chunk(heights: &[f32], hm_w: usize, hm_h: usize, cx: usize, cz: usi
     TerrainChunk {
         mesh,
         translation: Vec3::new(origin_x, 0.0, origin_z),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Chunk counts the draw budget is sized on: a 16×16 map (8192
+    /// elmos, 1025² heights) and Hex Farm (12288 elmos, 1537²). Also
+    /// pins the per-chunk vertex count under the u16 index limit so
+    /// the builder's u32 indices are never a hidden requirement.
+    #[test]
+    fn chunk_counts_and_vertex_budget() {
+        let side = |elmos: usize| elmos / spring_map::map_types::SQUARE_SIZE as usize + 1;
+        let (w, hex) = (side(8192), side(12288));
+        assert_eq!(w, 1025);
+        assert_eq!(hex, 1537);
+        let count = |n: usize| (n - 1).div_ceil(CHUNK_SIZE).pow(2);
+        assert_eq!(count(w), 256);
+        assert_eq!(count(hex), 576);
+        assert!((CHUNK_SIZE + 1).pow(2) < usize::from(u16::MAX));
+
+        let heights = vec![0.0; w * w];
+        let chunks = generate_terrain_chunks(&heights, w, w);
+        assert_eq!(chunks.len(), count(w));
+        assert_eq!(chunks[0].mesh.count_vertices(), (CHUNK_SIZE + 1).pow(2));
     }
 }
