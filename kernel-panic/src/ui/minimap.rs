@@ -18,7 +18,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use crate::rendering::camera::RtsCamera;
+use crate::rendering::camera::{RtsCamera, intersect_ground_y};
 use crate::units::components::Faction;
 use crate::units::mechanics::cloak::Spotted;
 
@@ -233,7 +233,7 @@ fn update_minimap(
         let mut filled = 0;
         for screen_pos in &corners {
             if let Ok(ray) = camera.viewport_to_world(camera_global, *screen_pos)
-                && let Some(world_point) = ray_ground_intersect(&ray)
+                && let Some(world_point) = intersect_ground_y(ray, 0.0)
             {
                 let mx = (world_point.x / state.world_width * mm_w as f32) as i32;
                 let mz = (world_point.z / state.world_depth * mm_h as f32) as i32;
@@ -269,22 +269,6 @@ fn update_minimap(
 fn write_dirty_pixel(pixels: &mut [u8], dirty: &mut Vec<usize>, idx: usize, rgba: [u8; 4]) {
     pixels[idx..idx + 4].copy_from_slice(&rgba);
     dirty.push(idx);
-}
-
-fn ray_ground_intersect(ray: &Ray3d) -> Option<Vec3> {
-    let origin = ray.origin;
-    let dir = *ray.direction;
-    if dir.y.abs() < 1e-6 {
-        return None;
-    }
-    let t = -origin.y / dir.y;
-    if t < 0.0 {
-        return None;
-    }
-    // Cap distant intersections so a near-horizontal ray doesn't blow
-    // out the int conversion further down.
-    let t = t.min(50_000.0);
-    Some(origin + dir * t)
 }
 
 #[allow(clippy::too_many_arguments)]

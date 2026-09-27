@@ -43,6 +43,7 @@ use crate::map_loading::lua_compositing::{
     team_colored_atlas, upload_atlas,
 };
 use crate::rendering::camera::RtsCamera;
+use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, spawn_smoker_at};
 use crate::terrain::heightmap::Heightmap;
 use crate::terrain::smooth_ground::SmoothGround;
@@ -53,6 +54,7 @@ use crate::units::components::{Faction, Health, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::Emerging;
+use crate::units::spatial::flat_dist_sq;
 
 /// Resolution of the footprint image the minimap is painted from.
 pub const MINIMAP_RES: usize = 400;
@@ -130,7 +132,11 @@ pub struct HexFarmView {
 
 /// A `%` indicator label.
 #[derive(Component)]
-struct PercentLabel(Poly);
+struct PercentLabel {
+    poly: Poly,
+    /// The value its text shows.
+    shown: Option<i32>,
+}
 
 pub struct HexFarmPlugin;
 
@@ -427,7 +433,10 @@ impl HexFarmView {
             (Some(v), None) => {
                 let label = commands
                     .spawn((
-                        PercentLabel(p),
+                        PercentLabel {
+                            poly: p,
+                            shown: None,
+                        },
                         Text::new(""),
                         TextFont::from_font_size(16.0),
                         Node {
@@ -495,16 +504,15 @@ fn hex_farm_owners(
     let big = |kind: UnitKind| {
         registry.is_building(kind)
             && registry
-                .def(kind)
-                .is_some_and(|d| d.footprint_x * 2.0 >= 5.0 && d.footprint_z * 2.0 >= 5.0)
+                .footprint_elmos(kind)
+                .cmpge(Vec2::splat(5.0 * SQUARE_SIZE))
+                .all()
     };
     // `for n,h in ipairs(hex)`: the first tower whose centre is within
     // `TowerRadius`.
-    let tower_of = |pos: Vec3| {
-        farm.hexes.iter().position(|h| {
-            (pos.x - h.x as f32).powi(2) + (pos.z - h.z as f32).powi(2) <= r2
-        })
-    };
+    let centre = |n: usize| Vec3::new(farm.hexes[n].x as f32, 0.0, farm.hexes[n].z as f32);
+    let tower_of =
+        |pos: Vec3| (0..farm.hexes.len()).position(|n| flat_dist_sq(pos, centre(n)) <= r2);
     let mut owners = view.owners.clone();
 
     // `UnitFinished`: the finisher's team owns the tower.
@@ -528,13 +536,12 @@ fn hex_farm_owners(
         let Some(n) = tower_of(tf.translation) else {
             continue;
         };
-        let h = &farm.hexes[n];
         let mut best: Option<(f32, Rgba)> = None;
         for (e, otf, okind, faction) in &live {
             if e == dead || !big(okind.0) {
                 continue;
             }
-            let d2 = (otf.translation.x - h.x as f32).powi(2) + (otf.translation.z - h.z as f32).powi(2);
+            let d2 = flat_dist_sq(otf.translation, centre(n));
             if d2 <= r2 && best.is_none_or(|(b, _)| d2 < b) {
                 best = Some((d2, faction.color().to_linear().to_f32_array()));
             }
@@ -652,39 +659,44 @@ fn set_mesh(
 fn hex_farm_labels(
     view: Res<HexFarmView>,
     camera: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut labels: Query<(&PercentLabel, &mut Text, &mut TextColor, &mut Node, &mut Visibility)>,
+    mut labels: Query<(
+        &mut PercentLabel,
+        &mut Text,
+        &mut TextColor,
+        &mut Node,
+        &mut Visibility,
+    )>,
 ) {
     let Ok((camera, cam_tf)) = camera.single() else {
         return;
     };
-    for (label, mut text, mut color, mut node, mut vis) in &mut labels {
-        let Some(&(value, _)) = view.percent.get(&label.0) else {
+    for (mut label, mut text, mut color, mut node, mut vis) in &mut labels {
+        let Some(&(value, _)) = view.percent.get(&label.poly) else {
             continue;
         };
-        let corners: Vec<[f32; 3]> = match label.0 {
-            Poly::Hex(k) => view.layout.hexes[k].corners.to_vec(),
-            Poly::Rect(k) => view.layout.bridges[k].corners.to_vec(),
+        let (corners, hidden): (&[[f32; 3]], bool) = match label.poly {
+            Poly::Hex(k) => (&view.layout.hexes[k].corners, view.hexes[k].hidden),
+            Poly::Rect(k) => (&view.layout.bridges[k].corners, view.rects[k].hidden),
         };
-        let center = corners.iter().fold(Vec3::ZERO, |a, c| a + Vec3::from_array(*c))
-            / corners.len() as f32;
-        let hidden = match label.0 {
-            Poly::Hex(k) => view.hexes[k].hidden,
-            Poly::Rect(k) => view.rects[k].hidden,
-        };
+        let center =
+            corners.iter().map(|c| Vec3::from_array(*c)).sum::<Vec3>() / corners.len() as f32;
         let v = (value as f32 * 2.5 / 255.0).clamp(0.0, 1.0);
-        color.0 = if hidden {
+        color.set_if_neq(TextColor(if hidden {
             Color::srgb(0.0, 1.0, (253.0 / 255.0 - v).max(0.0))
         } else {
             Color::srgb(1.0, v, 0.0)
-        };
-        let text_now = format!("{value}%");
-        if text.0 != text_now {
-            text.0 = text_now;
+        }));
+        if label.shown != Some(value) {
+            label.shown = Some(value);
+            text.0 = format!("{value}%");
         }
         match camera.world_to_viewport(cam_tf, center) {
             Ok(pos) => {
-                node.left = Val::Px(pos.x);
-                node.top = Val::Px(pos.y);
+                let (left, top) = (Val::Px(pos.x), Val::Px(pos.y));
+                if node.left != left || node.top != top {
+                    node.left = left;
+                    node.top = top;
+                }
                 vis.set_if_neq(Visibility::Inherited);
             }
             Err(_) => {

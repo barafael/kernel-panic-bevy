@@ -181,7 +181,9 @@ pub enum MiddleDrag {
     Rotate,
 }
 
-fn intersect_ground_y(ray: Ray3d, plane_y: f32) -> Option<Vec3> {
+/// Where `ray` meets the horizontal plane at height `plane_y`, if ahead
+/// of it (none for a ray parallel to the plane).
+pub(crate) fn intersect_ground_y(ray: Ray3d, plane_y: f32) -> Option<Vec3> {
     let dir = *ray.direction;
     if dir.y.abs() < 1e-6 {
         return None;
