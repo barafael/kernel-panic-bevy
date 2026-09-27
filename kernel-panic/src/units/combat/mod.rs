@@ -685,6 +685,7 @@ pub fn combat_system(
         // the two converge cleanly.
         if !aim_gates_pass(
             entity,
+            unit_type.0,
             attacker_gtf,
             target_pos,
             arc_height,
@@ -814,8 +815,10 @@ fn open_salvo(
 /// the Pointer's `gunbase` pitch, the Byte's `aimer` yaw/pitch. Uses the
 /// same unit-relative [`aim::local_aim_angles`] the aim script receives,
 /// so gate and slew converge on the same numbers.
+#[allow(clippy::too_many_arguments)]
 fn aim_gates_pass(
     entity: Entity,
+    kind: UnitKind,
     attacker_gtf: &GlobalTransform,
     target_pos: Vec3,
     arc_height: f32,
@@ -840,9 +843,13 @@ fn aim_gates_pass(
         }
     }
 
-    // Gunbase pitch gate (Pointer). pointer.bos's `AimWeapon1` writes
-    // `turn gunbase to x-axis (<90>-p)`.
-    if let Ok(gb) = pieces.gunbase.get(entity)
+    // Gunbase pitch gate (Pointer only). pointer.bos's `AimWeapon1`
+    // slews `turn gunbase to x-axis (<90>-p) speed <50>`, so wait for
+    // that turn. The Bit has a gunbase too, but bit.bos turns it to
+    // `(0-p)` instantly (`now`) — the `<90>-p` test could never pass
+    // for it and kept every Bit from ever firing.
+    if kind == UnitKind::Pointer
+        && let Ok(gb) = pieces.gunbase.get(entity)
         && let Ok(animator) = pieces.animator.get(entity)
         && let Some(rot) = animator.rig.piece_rotations.get(gb.0)
     {
@@ -1009,6 +1016,7 @@ pub fn attack_ground_system(
         // aimer per piece markers.
         if !aim_gates_pass(
             entity,
+            unit_type.0,
             gtf,
             order.pos,
             arc_height,
@@ -1652,3 +1660,4 @@ mod tests {
         assert_eq!(animator.rig.muzzle, 5, "two Shot1s: gp0 then gp1");
     }
 }
+

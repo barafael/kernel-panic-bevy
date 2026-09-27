@@ -169,11 +169,12 @@ pub fn drive_aim_script(
             &AimTarget,
             Option<&MoveTarget>,
             Option<&MovePath>,
+            Option<&Deployable>,
         ),
         Without<Dying>,
     >,
 ) {
-    for (mut aim, mut animator, gtf, target, move_target, move_path) in &mut query {
+    for (mut aim, mut animator, gtf, target, move_target, move_path, deployable) in &mut query {
         let (rel_heading, pitch_rad) =
             local_aim_angles(gtf.rotation(), target.pos - gtf.translation(), target.arc_height);
 
@@ -181,9 +182,13 @@ pub fn drive_aim_script(
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
         let retarget = dh > AIM_SCRIPT_RETARGET_THRESHOLD || dp > AIM_SCRIPT_RETARGET_THRESHOLD;
 
+        // The deploy state is what a Deployable's `AimWeapon1` checks
+        // (pointer.bos `if (isOpen)`): without it the Pointer's aim
+        // never reported ready.
         let ctx = AnimCtx {
             moving: move_target.is_some() || move_path.is_some(),
             aim_active: true,
+            deploy: deployable.map(|d| d.state),
             ..AnimCtx::minimal()
         };
         let UnitAnimator { rig, driver, .. } = &mut *animator;
@@ -222,13 +227,21 @@ pub fn tick_deploy_state(
             &mut Deployable,
             Option<&MoveTarget>,
             Option<&MovePath>,
+            Has<crate::interaction::movement::AttackMoveActive>,
+            Has<AimTarget>,
         ),
         Without<Dying>,
     >,
 ) {
     let dt = time.delta_secs();
-    for (mut deployable, move_target, move_path) in &mut query {
-        let is_moving = move_target.is_some() || move_path.is_some();
+    for (mut deployable, move_target, move_path, attack_move, aiming) in &mut query {
+        // A fight order pauses the move while there is something to
+        // shoot (`CMobileCAI::ExecuteFight` stops the unit, which calls
+        // the script's `StopMoving`): the Pointer opens and fires, then
+        // resumes. `movement_system` holds the unit on the same
+        // condition.
+        let held = attack_move && aiming;
+        let is_moving = (move_target.is_some() || move_path.is_some()) && !held;
 
         // Steady-state fast path: if no transition is in flight and the
         // deploy state already matches the movement state, there is
