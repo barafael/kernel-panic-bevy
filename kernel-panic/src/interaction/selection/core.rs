@@ -1,11 +1,14 @@
 //! Core selection state: hover detection, left-click + drag-box selection,
 //! and the resolve-unit-under-cursor logic shared across the sub-module.
 
+use bevy::ecs::system::SystemParam;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayMeshHit};
 use bevy::prelude::*;
 
+use crate::map_loading::TerrainChunkMarker;
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::{TeamId, UnitType};
+use crate::units::assets::animation::PieceIndex;
+use crate::units::components::{SelectionVolume, TeamId, UnitType};
 
 pub(super) struct SelectionCorePlugin;
 
@@ -93,27 +96,94 @@ pub struct DragState {
 #[derive(Component)]
 pub struct SelectionBoxNode;
 
-/// Update `Hovered` component each frame based on cursor position.
+/// Cursor ray cast restricted to what selection actually targets: unit
+/// picking spheres, unit model pieces and terrain chunks. Everything
+/// else with a mesh — health bars, move rings, shield shells, CEG
+/// particles, hex-farm overlays, formation previews — is skipped before
+/// its triangles are tested. Pieces stay in because several models poke
+/// out of their sphere (a Bit's ball reaches y=33 over an r=16 sphere
+/// centred at y=8; the Obelisk is 86 tall on r=35), and ground points
+/// come from the heightmap chunks, which Hex Farm rebuilds in step with
+/// its tower overlays.
+#[derive(SystemParam)]
+pub(crate) struct PickRayCast<'w, 's> {
+    ray_cast: MeshRayCast<'w, 's>,
+    pickable: Query<
+        'w,
+        's,
+        (),
+        Or<(
+            With<SelectionVolume>,
+            With<PieceIndex>,
+            With<TerrainChunkMarker>,
+        )>,
+    >,
+}
+
+impl PickRayCast<'_, '_> {
+    /// Nearest-first hits of `ray` against units and terrain.
+    pub(crate) fn cast(&mut self, ray: Ray3d) -> &[(Entity, RayMeshHit)] {
+        let Self { ray_cast, pickable } = self;
+        let filter = |e: Entity| pickable.contains(e);
+        ray_cast.cast_ray(ray, &MeshRayCastSettings::default().with_filter(&filter))
+    }
+}
+
+/// What the last hover cast saw, so a still cursor over a still camera
+/// doesn't re-cast every frame.
+#[derive(Default)]
+struct HoverCache {
+    cursor: Option<Vec2>,
+    camera: Option<GlobalTransform>,
+    /// Frames since the last cast; units moving under a still cursor are
+    /// picked up when this reaches [`HOVER_RECAST_FRAMES`].
+    frames_since_cast: u32,
+}
+
+/// Re-cast at least this often even when nothing on our side moved.
+const HOVER_RECAST_FRAMES: u32 = 4;
+
+/// Update the `Hovered` component from the cursor position.
+///
+/// Casts only when the cursor or camera moved (or every
+/// [`HOVER_RECAST_FRAMES`] frames), and only touches `Hovered` when the
+/// unit under the cursor changes — a steady hover is free of archetype
+/// moves.
 fn update_hover(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
+    mut ray_cast: PickRayCast,
     unit_q: Query<Entity, With<UnitType>>,
     parent_q: Query<&ChildOf>,
     hovered_q: Query<Entity, With<Hovered>>,
+    mut cache: Local<HoverCache>,
     mut commands: Commands,
 ) {
-    // Clear previous hover.
-    for entity in &hovered_q {
-        commands.entity(entity).remove::<Hovered>();
-    }
-
-    let Some(ray) = cursor_ray(&windows, &camera_q) else {
+    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
+    let camera = camera_q.single().ok().map(|(_, gt)| *gt);
+    let unchanged = cursor == cache.cursor && camera == cache.camera;
+    if unchanged && cursor.is_some() && cache.frames_since_cast < HOVER_RECAST_FRAMES {
+        cache.frames_since_cast += 1;
         return;
-    };
+    }
+    cache.cursor = cursor;
+    cache.camera = camera;
+    cache.frames_since_cast = 0;
 
-    let hits = ray_cast.cast_ray(ray, &default());
-    if let Some(entity) = resolve_unit_hit(hits, &unit_q, &parent_q) {
+    let target = cursor_ray(&windows, &camera_q)
+        .and_then(|ray| resolve_unit_hit(ray_cast.cast(ray), &unit_q, &parent_q));
+
+    let mut already = false;
+    for entity in &hovered_q {
+        if Some(entity) == target {
+            already = true;
+        } else {
+            commands.entity(entity).remove::<Hovered>();
+        }
+    }
+    if let Some(entity) = target
+        && !already
+    {
         commands.entity(entity).insert(Hovered);
     }
 }
@@ -137,7 +207,7 @@ fn handle_selection(
     kind_team_q: Query<(&UnitType, &TeamId)>,
     local: Res<crate::units::player::LocalTeam>,
     same_kind_q: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
-    box_nodes: Query<Entity, With<SelectionBoxNode>>,
+    mut box_nodes: Query<&mut Node, With<SelectionBoxNode>>,
     ui_interactions: Query<&Interaction>,
     modes: Res<crate::interaction::ability::OrderCursorModes>,
     mut drag_state: ResMut<DragState>,
@@ -191,24 +261,35 @@ fn handle_selection(
             let width = (current.x - start.x).abs();
             let height = (current.y - start.y).abs();
 
-            for entity in &box_nodes {
-                commands.entity(entity).despawn();
+            // One overlay node, spawned on the first drag and reshaped
+            // in place afterwards (`Display::None` between drags) — a UI
+            // node respawned every frame relayouts the whole tree.
+            let layout = Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(min_x),
+                top: Val::Px(min_y),
+                width: Val::Px(width),
+                height: Val::Px(height),
+                border: UiRect::all(Val::Px(1.0)),
+                ..default()
+            };
+            match box_nodes.single_mut() {
+                Ok(mut node) => {
+                    node.left = layout.left;
+                    node.top = layout.top;
+                    node.width = layout.width;
+                    node.height = layout.height;
+                    node.display = Display::DEFAULT;
+                }
+                Err(_) => {
+                    commands.spawn((
+                        SelectionBoxNode,
+                        layout,
+                        BorderColor::all(Color::WHITE),
+                        BackgroundColor(Color::NONE),
+                    ));
+                }
             }
-
-            commands.spawn((
-                SelectionBoxNode,
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: Val::Px(min_x),
-                    top: Val::Px(min_y),
-                    width: Val::Px(width),
-                    height: Val::Px(height),
-                    border: UiRect::all(Val::Px(1.0)),
-                    ..default()
-                },
-                BorderColor::all(Color::WHITE),
-                BackgroundColor(Color::NONE),
-            ));
         }
     }
 
@@ -219,8 +300,10 @@ fn handle_selection(
 
     // --- Left release ---
     if mouse.just_released(MouseButton::Left) {
-        for entity in &box_nodes {
-            commands.entity(entity).despawn();
+        for mut node in &mut box_nodes {
+            if node.display != Display::None {
+                node.display = Display::None;
+            }
         }
 
         let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
@@ -321,10 +404,10 @@ pub(super) fn resolve_unit_hit(
     unit_q: &Query<Entity, With<UnitType>>,
     parent_q: &Query<&ChildOf>,
 ) -> Option<Entity> {
-    // A ray can land on the unit root, its invisible selection-volume
-    // sphere, or any visible S3O piece — which can be nested several
-    // levels deep via COB piece parenting. Walk up the hierarchy from
-    // whatever we hit until we find an ancestor with `UnitType`.
+    // A ray lands on a unit's selection-volume sphere (a child of the
+    // unit root; the flat-mesh fallback carries the mesh on the root
+    // itself). Walk up the hierarchy from whatever we hit until we find
+    // an ancestor with `UnitType`.
     hits.iter().find_map(|(entity, _)| {
         let mut cur = *entity;
         loop {
@@ -350,15 +433,15 @@ pub(super) fn cursor_ray(
 }
 
 /// Cast a ray from the cursor into the world and return the first
-/// mesh hit. Used by right-click orders and ability targeting.
+/// pickable hit (unit sphere or terrain). Used by right-click orders
+/// and ability targeting.
 pub(crate) fn ground_hit(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    ray_cast: &mut MeshRayCast,
+    ray_cast: &mut PickRayCast,
 ) -> Option<Vec3> {
     let ray = cursor_ray(windows, camera_q)?;
-    let hits = ray_cast.cast_ray(ray, &default());
-    hits.first().map(|(_, hit)| hit.point)
+    ray_cast.cast(ray).first().map(|(_, hit)| hit.point)
 }
 
 /// Like [`ground_hit`], but only meshes passing `filter` are considered.
@@ -388,11 +471,73 @@ pub(crate) fn ground_hit_filtered(
 pub(crate) fn unit_hit(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    ray_cast: &mut MeshRayCast,
+    ray_cast: &mut PickRayCast,
     unit_q: &Query<Entity, With<UnitType>>,
     parent_q: &Query<&ChildOf>,
 ) -> Option<Entity> {
     let ray = cursor_ray(windows, camera_q)?;
-    let hits = ray_cast.cast_ray(ray, &default());
-    resolve_unit_hit(hits, unit_q, parent_q)
+    resolve_unit_hit(ray_cast.cast(ray), unit_q, parent_q)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::camera::CameraPlugin;
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::transform::TransformPlugin;
+    use bevy::MinimalPlugins;
+
+    /// The selection volume is a `Mesh3d` with no material: Bevy's
+    /// visibility pass must still give it an `Aabb` and mark it
+    /// `ViewVisibility`, and the filtered cast must hit it through a
+    /// hidden-root check (a cloaked unit's sphere stays unpickable).
+    #[test]
+    fn materialless_selection_volume_is_picked() {
+        // `cast_ray` culls candidates with `par_iter`.
+        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, TransformPlugin, CameraPlugin))
+            .insert_resource(Assets::<Mesh>::default());
+
+        let sphere = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Sphere::new(10.0).mesh().ico(3).unwrap());
+        app.world_mut().spawn((
+            Camera3d::default(),
+            Transform::from_xyz(0.0, 200.0, 0.0).looking_at(Vec3::ZERO, Vec3::Z),
+        ));
+        let spawn_unit = |world: &mut World, x: f32, vis: Visibility| {
+            let unit = world
+                .spawn((UnitType(crate::units::content::definitions::UnitKind::Bit), Transform::from_xyz(x, 0.0, 0.0), vis))
+                .id();
+            world.spawn((
+                SelectionVolume,
+                Mesh3d(sphere.clone()),
+                Transform::from_xyz(0.0, 5.0, 0.0),
+                ChildOf(unit),
+            ));
+            unit
+        };
+        let visible = spawn_unit(app.world_mut(), 0.0, Visibility::Inherited);
+        let cloaked = spawn_unit(app.world_mut(), 100.0, Visibility::Hidden);
+        // One frame: transform propagation, bounds, frusta, visibility.
+        app.update();
+
+        let hit = |world: &mut World, x: f32| {
+            world
+                .run_system_once(
+                    move |mut ray_cast: PickRayCast,
+                          unit_q: Query<Entity, With<UnitType>>,
+                          parent_q: Query<&ChildOf>| {
+                        let ray = Ray3d::new(Vec3::new(x, 100.0, 0.0), Dir3::NEG_Y);
+                        resolve_unit_hit(ray_cast.cast(ray), &unit_q, &parent_q)
+                    },
+                )
+                .unwrap()
+        };
+        assert_eq!(hit(app.world_mut(), 0.0), Some(visible));
+        assert_eq!(hit(app.world_mut(), 100.0), None, "hidden root: {cloaked:?} unpickable");
+        assert_eq!(hit(app.world_mut(), 50.0), None);
+    }
 }

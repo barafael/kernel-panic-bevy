@@ -11,6 +11,7 @@ pub(crate) mod right_click;
 use bevy::prelude::*;
 
 pub(crate) use self::core::Hovered;
+pub(crate) use self::core::PickRayCast;
 pub use self::core::Selected;
 pub(crate) use self::core::SelectionSet;
 pub(crate) use self::core::ground_hit;
