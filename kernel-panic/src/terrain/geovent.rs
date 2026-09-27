@@ -18,7 +18,7 @@
 
 use bevy::prelude::*;
 
-use spring_map::map_types::ParsedMap;
+use spring_map::map_types::MapFeature;
 
 use crate::{
     rendering::camera::RtsCamera,
@@ -103,7 +103,7 @@ const SPAWN_RADIUS: f32 = 10.0;
 const SPAWN_Y_OFFSET: f32 = -10.0;
 
 pub fn spawn_geovent_smokers(
-    map: &ParsedMap,
+    features: &[MapFeature],
     heightmap: &Heightmap,
     commands: &mut Commands,
     assets: &mut GeoventAssets,
@@ -115,7 +115,7 @@ pub fn spawn_geovent_smokers(
 
     let mut count = 0u32;
 
-    for feature in &map.features {
+    for feature in features {
         if !feature.feature_type.is_geovent() {
             continue;
         }

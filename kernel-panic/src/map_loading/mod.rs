@@ -7,6 +7,17 @@
 //! (restart / demo reload), so one code path serves fresh games,
 //! restarts, and the menu's attract-mode reload.
 //!
+//! A load is two halves. [`prepare_map`] turns a decoded `SpringMap`
+//! into a [`PreparedMap`] — the mipmapped ground texture, terrain chunk
+//! meshes, heightmap, aircraft smooth mesh, nav grids and minimap layer,
+//! all plain data — and on native runs in an `AsyncComputeTaskPool`
+//! task so the frame keeps rendering (the attract demo behind the menu
+//! reloads a random map every time a match ends; a quarter-gigabyte
+//! texture used to freeze it for seconds). [`spawn_prepared_map`] then
+//! does only the ECS work: asset inserts, entities, resources, the
+//! unit spawn burst. Web (single-threaded wasm) runs the same
+//! preparation synchronously once the fetched bytes land.
+//!
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
@@ -24,12 +35,18 @@ use crate::{
     terrain::{
         geovent::{GeoventAssets, spawn_geovent_smokers},
         heightmap::Heightmap,
-        mesh::generate_terrain_chunks,
+        mesh::{TerrainChunk, generate_terrain_chunks},
+        smooth_ground::SmoothGround,
     },
     ui,
+    units::content::unit_registry::UnitRegistry,
     units::lifecycle::spawning::{spawn_demo_squads, spawn_homebases, spawn_showcase_homebase},
 };
-use spring_map::{map_types::ParsedMap, smd_parser::MapInfo};
+use spring_map::{
+    hexfarm::HexFarm,
+    map_types::{MapFeature, SmfHeader},
+    smd_parser::MapInfo,
+};
 
 // HexFarm Lua-composited towers/bridges (native and web: the data
 // round-trips through `.kpmap` v4).
@@ -45,7 +62,7 @@ use bytes_asset::BytesAsset;
 #[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/web_map_catalog.rs"));
 
-use mipmap::{build_terrain_material_from_texture, dark_fallback_material, void_ground_material};
+use mipmap::{build_terrain_image, dark_fallback_material, void_ground_material};
 
 pub struct MapLoadingPlugin;
 
@@ -59,38 +76,41 @@ pub struct GameWorldRebuild;
 
 impl Plugin for MapLoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(
+        app.init_resource::<ReadyMap>().add_systems(
             Startup,
             pick_map.after(crate::rendering::camera::spawn_camera),
         );
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            app.add_systems(
-                OnEnter(crate::game_setup::AppState::InGame),
-                (prepare_game_entry, load_map)
-                    .chain()
-                    .in_set(GameWorldRebuild),
-            )
-            // Restart / demo reload while in any state: the menu writes
-            // `RunGame` (optionally with a fresh `GameSetup`) and we tear
-            // down + rebuild the world in-place. Ordered after the menu's
-            // writers so their `GameSetup` inserts are applied before we
-            // read it — otherwise the boot demo would run with the
-            // default (non-demo) setup and spawn homebases.
-            .add_systems(
-                Update,
-                (prepare_game_entry, load_map)
-                    .chain()
-                    .in_set(GameWorldRebuild)
-                    .run_if(rerun_requested)
-                    .after(crate::ui::menu::boot_demo),
-            );
+            app.init_resource::<PendingMapLoad>()
+                .add_systems(
+                    OnEnter(crate::game_setup::AppState::InGame),
+                    prepare_game_entry.in_set(GameWorldRebuild),
+                )
+                // Restart / demo reload while in any state: the menu
+                // writes `RunGame` (optionally with a fresh `GameSetup`)
+                // and we tear down + rebuild the world in-place once the
+                // prepared map lands. Ordered after the menu's writers so
+                // their `GameSetup` inserts are applied before we read it
+                // — otherwise the boot demo would run with the default
+                // (non-demo) setup and spawn homebases.
+                .add_systems(
+                    Update,
+                    (
+                        prepare_game_entry.run_if(rerun_requested),
+                        poll_map_load.run_if(|pending: Res<PendingMapLoad>| pending.0.is_some()),
+                        spawn_prepared_map,
+                    )
+                        .chain()
+                        .in_set(GameWorldRebuild)
+                        .after(crate::ui::menu::boot_demo),
+                );
         }
 
         // Web: no filesystem — the world is built from a fetched
-        // `.kpmap`. `prepare_game_entry` requests the asset; the arrival
-        // system polls every frame and spawns once the bytes land.
+        // `.kpmap`. `prepare_game_entry` requests the asset; the poll
+        // system prepares + spawns once the bytes land.
         #[cfg(target_arch = "wasm32")]
         {
             use bevy::asset::AssetApp;
@@ -106,8 +126,10 @@ impl Plugin for MapLoadingPlugin {
                     Update,
                     (
                         prepare_game_entry.run_if(rerun_requested),
-                        web_map_arrival,
-                        prefetch_selected_map,
+                        poll_map_load
+                            .run_if(|pending: Res<PendingWebMapLoad>| pending.0.is_some()),
+                        spawn_prepared_map,
+                        prefetch_selected_map.run_if(resource_exists_and_changed::<GameSetup>),
                     )
                         .chain()
                         .in_set(GameWorldRebuild)
@@ -123,13 +145,20 @@ fn rerun_requested(mut reader: MessageReader<RunGame>) -> bool {
     reader.read().next().is_some()
 }
 
-/// Path to the map archive loaded for this session.
+/// Native: the map being read, decoded and prepared off the main thread.
+/// Replacing it drops (cancels) the previous load — a skirmish started
+/// while the demo's next map is still preparing simply wins.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Resource)]
-struct SelectedMap(PathBuf);
+#[derive(Resource, Default)]
+struct PendingMapLoad(Option<bevy::tasks::Task<Option<PreparedMap>>>);
+
+/// A prepared map whose world has just been torn down; the frame's
+/// [`spawn_prepared_map`] builds it.
+#[derive(Resource, Default)]
+struct ReadyMap(Option<PreparedMap>);
 
 /// Web: in-flight `.kpmap` fetch, requested by [`prepare_game_entry`]
-/// and consumed by [`web_map_arrival`] when the payload lands.
+/// and consumed by [`poll_map_load`] when the payload lands.
 #[cfg(target_arch = "wasm32")]
 #[derive(Resource, Default)]
 struct PendingWebMapLoad(Option<Handle<BytesAsset>>);
@@ -160,7 +189,8 @@ fn resolve_catalog_path(setup_map: &str, catalog: &[PathBuf]) -> Option<PathBuf>
 /// Web: fetch the selected map's `.kpmap` while the player is still in
 /// the menu, so the bytes are already local when Play is clicked. The
 /// asset server dedupes loads of the same path, so `prepare_game_entry`
-/// re-requesting it later is free.
+/// re-requesting it later is free. Runs only when the setup changes —
+/// the selected map can't change otherwise.
 #[cfg(target_arch = "wasm32")]
 fn prefetch_selected_map(
     setup: Res<GameSetup>,
@@ -218,9 +248,11 @@ impl MapCatalog {
 }
 
 /// Every transition into `InGame` (fresh game, Restart, re-run after
-/// defeat) passes through here: tear down any previous game world, reset
-/// the in-game state machine, resolve the map path from the setup.
-/// Exclusive system — it mutates the world directly for the teardown.
+/// defeat) passes through here: reset the in-game state machine,
+/// resolve the map path from the setup and start the load. The previous
+/// game world keeps running until the new map is prepared;
+/// [`finish_map_load`] tears it down right before the swap.
+/// Exclusive system — it reads the registry and pools directly.
 fn prepare_game_entry(world: &mut World) {
     use crate::game_setup::GameOverDismissed;
     use crate::units::lifecycle::game_over::GameState;
@@ -243,41 +275,142 @@ fn prepare_game_entry(world: &mut World) {
         .resource_mut::<NextState<GameState>>()
         .set(GameState::Playing);
     world.resource_mut::<GameOverDismissed>().0 = false;
+
+    // Resolve the setup's map name against the catalog.
+    let catalog = world.resource::<MapCatalog>().0.clone();
+    let Some(path) = resolve_catalog_path(&setup.map, &catalog) else {
+        error!("Map catalog is empty — cannot start a game");
+        return;
+    };
+    info!("Preparing match on {} ({})", setup.map, path.display());
+    // A load already in flight is superseded.
+    world.resource_mut::<ReadyMap>().0 = None;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let map_name = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let inputs = PrepareInputs::gather(setup, world.resource::<UnitRegistry>(), map_name);
+        let task = bevy::tasks::AsyncComputeTaskPool::get()
+            .spawn(async move { load_and_prepare(&path, inputs) });
+        // Dropping the previous task cancels it.
+        world.resource_mut::<PendingMapLoad>().0 = Some(task);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        // Catalog entries are already asset-relative paths
+        // (`maps/<stem>.kpmap`) — request the fetch.
+        let handle: Handle<BytesAsset> = world
+            .resource::<AssetServer>()
+            .load(path.to_string_lossy().into_owned());
+        world.resource_mut::<PendingWebMapLoad>().0 = Some(handle);
+    }
+}
+
+/// Native: read the selected archive (baked `.kpmap` preferred) and
+/// prepare it. Runs on the compute pool; a failure is logged here and
+/// leaves the current world in place.
+#[cfg(not(target_arch = "wasm32"))]
+fn load_and_prepare(map_path: &Path, inputs: PrepareInputs) -> Option<PreparedMap> {
+    info!("Loading map: {}", inputs.map_name);
+    let decode_start = bevy::platform::time::Instant::now();
+    let spring_map = match load_map_dispatch(map_path) {
+        Ok(m) => m,
+        Err(error) => {
+            error!("Failed to load {}: {error}", map_path.display());
+            return None;
+        }
+    };
+    info!(
+        "  decoded in {:.0}ms",
+        decode_start.elapsed().as_secs_f64() * 1000.0
+    );
+    Some(prepare_map(spring_map, inputs))
+}
+
+/// Native: once the compute task has the prepared map, swap worlds —
+/// tear the old one down and hand the map to [`spawn_prepared_map`]
+/// (same frame, right after this system).
+#[cfg(not(target_arch = "wasm32"))]
+fn poll_map_load(world: &mut World) {
+    let prepared = {
+        let mut pending = world.resource_mut::<PendingMapLoad>();
+        let Some(task) = pending.0.as_mut() else {
+            return;
+        };
+        let Some(result) = bevy::tasks::futures::check_ready(task) else {
+            return;
+        };
+        pending.0 = None;
+        result
+    };
+    if let Some(prepared) = prepared {
+        finish_map_load(world, prepared);
+    }
+}
+
+/// Web: poll the in-flight `.kpmap` fetch; once the bytes have landed,
+/// decode and prepare the map on the spot (wasm is single-threaded),
+/// then swap worlds. A failed fetch logs an error and clears the pending
+/// state so the menu can retry.
+#[cfg(target_arch = "wasm32")]
+fn poll_map_load(world: &mut World) {
+    use bevy::asset::LoadState;
+
+    let Some(handle) = world.resource::<PendingWebMapLoad>().0.clone() else {
+        return;
+    };
+    match world.resource::<AssetServer>().load_state(&handle) {
+        LoadState::Loaded => {}
+        LoadState::Failed(error) => {
+            error!("Map fetch failed: {error}");
+            world.resource_mut::<PendingWebMapLoad>().0 = None;
+            return;
+        }
+        _ => return, // still fetching / deps loading
+    }
+    let Some(asset) = world.resource::<Assets<BytesAsset>>().get(&handle) else {
+        return;
+    };
+    let bytes = asset.0.clone();
+    world.resource_mut::<PendingWebMapLoad>().0 = None;
+
+    let setup = world.resource::<GameSetup>().clone();
+    let map_name = setup.map.clone();
+    info!("Received {} ({} baked bytes)", map_name, bytes.len());
+    let decode_start = bevy::platform::time::Instant::now();
+    let spring_map = match spring_map::baked::read_baked_map(&bytes) {
+        Ok(m) => m,
+        Err(error) => {
+            error!("Failed to decode baked map {map_name}: {error}");
+            return;
+        }
+    };
+    info!(
+        "  decoded in {:.0}ms",
+        decode_start.elapsed().as_secs_f64() * 1000.0
+    );
+    let inputs = PrepareInputs::gather(setup, world.resource::<UnitRegistry>(), map_name);
+    let prepared = prepare_map(spring_map, inputs);
+    finish_map_load(world, prepared);
+}
+
+/// The swap: the old world goes, and [`spawn_prepared_map`] builds the
+/// new one in the same frame.
+fn finish_map_load(world: &mut World, prepared: PreparedMap) {
     // The teardown below despawns units without the `Dying` pass the
     // event-driven tallies decrement on — start the new match from zero.
     world.insert_resource(crate::units::lifecycle::bookkeeping::SmallBuildingCounts::default());
     world.insert_resource(crate::units::lifecycle::bookkeeping::TotalUnitCount::default());
 
-    // Resolve the setup's map name against the catalog.
-    let catalog = world.resource::<MapCatalog>().0.clone();
-    let path = resolve_catalog_path(&setup.map, &catalog);
-    match path {
-        Some(p) => {
-            info!("Preparing match on {} ({})", setup.map, p.display());
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                world.resource_mut::<SelectedMap>().0 = p;
-            }
-            #[cfg(target_arch = "wasm32")]
-            {
-                // Catalog entries are already asset-relative paths
-                // (`maps/<stem>.kpmap`) — request the fetch.
-                let handle: Handle<BytesAsset> = world
-                    .resource::<AssetServer>()
-                    .load(p.to_string_lossy().into_owned());
-                world.resource_mut::<PendingWebMapLoad>().0 = Some(handle);
-            }
-        }
-        None => {
-            error!("Map catalog is empty — cannot start a game");
-            return;
-        }
-    }
-
     // Tear down the previous game world (no-op on first entry). Kept
     // entities: windows, the RTS camera (and its children), and anything
     // tagged `PersistentEntity` (menu UI).
     despawn_game_world(world);
+    world.resource_mut::<ReadyMap>().0 = Some(prepared);
 }
 
 fn despawn_game_world(world: &mut World) {
@@ -421,10 +554,7 @@ fn pick_map(mut commands: Commands) {
             info!("CLI showcase argument: {:?}", faction);
         }
 
-        commands.insert_resource(MapCatalog(maps.clone()));
-        commands.insert_resource(SelectedMap(
-            maps.first().cloned().expect("maps is non-empty"),
-        ));
+        commands.insert_resource(MapCatalog(maps));
         commands.insert_resource(setup);
         if auto_enter {
             commands.insert_resource(NextState::Pending(crate::game_setup::AppState::InGame));
@@ -503,155 +633,116 @@ fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
         !baked_stems.contains(&stem)
     });
 }
-/// Native: read the selected archive (baked `.kpmap` preferred), then
-/// build the world. Web uses [`web_map_arrival`] instead.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
-fn load_map(
-    selected: Res<SelectedMap>,
-    setup: Res<GameSetup>,
-    mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
-    mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
-    mut map_bounds: ResMut<MapBounds>,
-    mut geovent_assets: ResMut<GeoventAssets>,
-    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
-) {
-    let map_path = &selected.0;
-    let map_name = map_path
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .into_owned();
 
-    info!("Loading map: {map_name}");
-
-    let decode_start = bevy::platform::time::Instant::now();
-    let spring_map = match load_map_dispatch(map_path) {
-        Ok(m) => m,
-        Err(error) => {
-            error!("Failed to load {}: {error}", map_path.display());
-            return;
-        }
-    };
-    info!(
-        "  decoded in {:.0}ms",
-        decode_start.elapsed().as_secs_f64() * 1000.0
-    );
-
-    spawn_map_world(
-        spring_map,
-        &setup,
-        &map_name,
-        &mut camera_query,
-        &mut fog_query,
-        &mut map_bounds,
-        &mut geovent_assets,
-        &mut ctx,
-    );
+/// What [`prepare_map`] needs from the ECS side, snapshotted when the
+/// load is requested so the preparation can run without the world.
+struct PrepareInputs {
+    setup: GameSetup,
+    map_name: String,
+    /// Distinct nav slope caps in Spring's encoding, ascending — one
+    /// pathfinding grid each (see `cost.rs`; `compute_path` picks the
+    /// tightest bucket whose cap ≥ the unit's).
+    nav_caps: Vec<f32>,
+    /// `UnitRegistry::hexfarm_medians`: Hex Farm rolls its layout from
+    /// the roster's median health / build time.
+    hexfarm_medians: (f64, f64),
+    match_seed: u64,
 }
 
-/// Web: poll the in-flight `.kpmap` fetch; once the bytes have landed,
-/// decode and build the world. A failed fetch logs an error and clears
-/// the pending state so the menu can retry.
-#[cfg(target_arch = "wasm32")]
-#[allow(clippy::too_many_arguments)]
-fn web_map_arrival(
-    mut pending: ResMut<PendingWebMapLoad>,
-    assets: Res<Assets<BytesAsset>>,
-    server: Res<AssetServer>,
-    setup: Res<GameSetup>,
-    mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
-    mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
-    mut map_bounds: ResMut<MapBounds>,
-    mut geovent_assets: ResMut<GeoventAssets>,
-    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
-) {
-    use bevy::asset::LoadState;
+impl PrepareInputs {
+    fn gather(setup: GameSetup, registry: &UnitRegistry, map_name: String) -> Self {
+        use std::collections::BTreeSet;
 
-    let Some(handle) = pending.0.as_ref() else {
-        return;
-    };
-    match server.load_state(handle) {
-        LoadState::Loaded => {}
-        LoadState::Failed(error) => {
-            error!("Map fetch failed: {error}");
-            pending.0 = None;
-            return;
+        use crate::units::content::definitions::ALL_UNIT_KINDS;
+        use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_DEGREES;
+
+        // Why: bin to 4 decimals so float jitter doesn't split
+        // near-identical buckets.
+        const BUCKET_QUANTUM: f32 = 10_000.0;
+
+        let mut distinct_caps = BTreeSet::<u32>::new();
+        for &kind in ALL_UNIT_KINDS {
+            let cap = registry.max_slope_ratio(kind);
+            distinct_caps.insert((cap * BUCKET_QUANTUM).round() as u32);
         }
-        _ => return, // still fetching / deps loading
+        // Always keep the KP-default bucket (FBI MaxSlope=36 from
+        // `MOVEINFO.TDF`'s LIGHT/MEDIUM/HEAVY) available for units
+        // whose FBI omits `MaxSlope`.
+        let default_cap = spring_pathfinding::max_slope_from_degrees(DEFAULT_MAX_SLOPE_DEGREES);
+        distinct_caps.insert((default_cap * BUCKET_QUANTUM).round() as u32);
+
+        Self {
+            setup,
+            map_name,
+            // Ascending because BTreeSet iteration is sorted.
+            nav_caps: distinct_caps
+                .into_iter()
+                .map(|cap_q| cap_q as f32 / BUCKET_QUANTUM)
+                .collect(),
+            hexfarm_medians: registry.hexfarm_medians(),
+            match_seed: crate::game_setup::match_seed(),
+        }
     }
-    let Some(asset) = assets.get(handle) else {
-        return;
-    };
-
-    let map_name = setup.map.clone();
-    info!("Received {} ({} baked bytes)", map_name, asset.0.len());
-    let decode_start = bevy::platform::time::Instant::now();
-    let spring_map = match spring_map::baked::read_baked_map(&asset.0) {
-        Ok(m) => m,
-        Err(error) => {
-            error!("Failed to decode baked map {map_name}: {error}");
-            pending.0 = None;
-            return;
-        }
-    };
-    info!(
-        "  decoded in {:.0}ms",
-        decode_start.elapsed().as_secs_f64() * 1000.0
-    );
-
-    spawn_map_world(
-        spring_map,
-        &setup,
-        &map_name,
-        &mut camera_query,
-        &mut fog_query,
-        &mut map_bounds,
-        &mut geovent_assets,
-        &mut ctx,
-    );
-    pending.0 = None;
 }
 
-/// Everything after "I have a `SpringMap` in hand": terrain, atmosphere,
-/// fog, nav grids, minimap, homebases, per-map events, heightmap
-/// resource. Shared by the native file path and the web baked-bytes
-/// path.
-#[allow(clippy::too_many_arguments)]
-fn spawn_map_world(
-    spring_map: spring_map::SpringMap,
-    setup: &GameSetup,
-    map_name: &str,
-    camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
-    fog_query: &mut Query<&mut DistanceFog, With<RtsCamera>>,
-    map_bounds: &mut ResMut<MapBounds>,
-    geovent_assets: &mut GeoventAssets,
-    ctx: &mut crate::units::lifecycle::spawning::SpawnContext,
-) {
-    let mut spring_map = spring_map;
-    // A Lua-composited map (Hex Farm) is drawn entirely by its gadget
-    // over a hidden (`voidGround`) ground — see `lua_compositing`.
-    let void_ground = spring_map.lua_compositing.is_some();
+/// A map ready to spawn: everything [`spawn_prepared_map`] inserts,
+/// computed by [`prepare_map`] from a decoded `SpringMap` without
+/// touching the ECS.
+struct PreparedMap {
+    setup: GameSetup,
+    map_name: String,
+    header: SmfHeader,
+    features: Vec<MapFeature>,
+    map_info: Option<MapInfo>,
+    /// A Lua-composited map (Hex Farm) is drawn entirely by its gadget
+    /// over a hidden (`voidGround`) ground — see `lua_compositing`.
+    void_ground: bool,
+    /// The mipmapped ground texture; `None` on a void-ground map or one
+    /// that shipped no `.smt`.
+    terrain_image: Option<Image>,
+    chunks: Vec<TerrainChunk>,
+    heightmap: Heightmap,
+    smooth_ground: SmoothGround,
+    nav_set: interaction::movement::NavGridSet,
+    /// Minimap terrain layer, already at minimap size.
+    minimap: (Vec<u8>, u32, u32),
+    /// Hex Farm: this match's layout and its skin atlas.
+    hex_farm: Option<(HexFarm, Image)>,
+}
+
+/// Everything after "I have a `SpringMap` in hand" that is pure data:
+/// the Hex Farm roll, texture mip chain, heightmap, aircraft smooth
+/// mesh, terrain chunk meshes, nav grids and minimap layer. Shared by
+/// the native compute task and the web arrival path.
+fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> PreparedMap {
+    let t_prepare = bevy::platform::time::Instant::now();
+    let spring_map::SpringMap {
+        mut parsed,
+        ground_texture,
+        mut map_info,
+        lua_compositing,
+        ..
+    } = spring_map;
+    let void_ground = lua_compositing.is_some();
     // Hex Farm: roll this match's layout the way the gadget's
     // `Initialize()` does, and apply what it writes to the engine —
     // heightmap, datavents, start positions — before anything reads
     // the map.
-    let hex_farm = spring_map.lua_compositing.is_some().then(|| {
-        let (median_health, median_build_time) = ctx.unit_registry.hexfarm_medians();
-        let parsed = &mut spring_map.parsed;
-        let farm = spring_map::hexfarm::HexFarm::generate(
-            crate::game_setup::match_seed(),
+    let hex_farm = lua_compositing.map(|compositing| {
+        let (median_health, median_build_time) = inputs.hexfarm_medians;
+        let farm = HexFarm::generate(
+            inputs.match_seed,
             spring_map::hexfarm::HexFarmSetup {
                 map_size_x: parsed.header.world_width() as f64,
                 map_size_z: parsed.header.world_depth() as f64,
-                teams: setup.players.len().max(1),
+                teams: inputs.setup.players.len().max(1),
                 median_health,
                 median_build_time,
             },
         );
         farm.write_whole_heightmap(&mut parsed.heights);
         parsed.features.extend(farm.datavents().into_iter().map(|v| {
-            spring_map::map_types::MapFeature::new(
+            MapFeature::new(
                 spring_map::map_types::FeatureType::GeoVent,
                 v[0] as f32,
                 v[1] as f32,
@@ -660,7 +751,7 @@ fn spawn_map_world(
                 1.0,
             )
         }));
-        if let Some(info) = &mut spring_map.map_info {
+        if let Some(info) = &mut map_info {
             // The mapinfo's `teams` are dummies; `SetStartPos` decides.
             info.start_positions = farm
                 .start_positions
@@ -681,41 +772,44 @@ fn spawn_map_world(
             farm.tower_radius,
             farm.datavents().len(),
         );
-        farm
+        // Kernel Panic's team-coloured variant of the skin, rolled 1 in 5.
+        let atlas = if farm.team_colored {
+            lua_compositing::team_colored_atlas(compositing.atlas)
+        } else {
+            compositing.atlas
+        };
+        (farm, lua_compositing::atlas_image(atlas))
     });
-    let parsed = &spring_map.parsed;
+    let spring_map::map_types::ParsedMap {
+        header,
+        heights,
+        features,
+        metalmap: _,
+    } = parsed;
 
     info!(
         "  {}x{} (heightmap {}x{}), {} features",
-        parsed.header.map_x,
-        parsed.header.map_y,
-        parsed.header.heightmap_width(),
-        parsed.header.heightmap_height(),
-        parsed.features.len(),
+        header.map_x,
+        header.map_y,
+        header.heightmap_width(),
+        header.heightmap_height(),
+        features.len(),
     );
 
     let t_texture = bevy::platform::time::Instant::now();
-    let terrain_material = match &spring_map.ground_texture {
-        _ if void_ground => void_ground_material(&mut ctx.materials),
-        Some(ground) => {
-            build_terrain_material_from_texture(ground, &mut ctx.images, &mut ctx.materials)
-        }
+    let terrain_image = match ground_texture {
+        _ if void_ground => None,
+        Some(ground) => Some(build_terrain_image(ground)),
         None => {
             warn!("No ground texture — using fallback");
-            dark_fallback_material(&mut *ctx.materials)
+            None
         }
     };
     let texture_ms = t_texture.elapsed().as_secs_f64() * 1000.0;
 
-    setup_camera(parsed, camera_query, &mut **map_bounds);
-
     // Check actual height variance, not header values (gadgets may have modified the terrain).
-    let min_actual = parsed.heights.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_actual = parsed
-        .heights
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let min_actual = heights.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_actual = heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
     if (max_actual - min_actual) < 1.0 {
         warn!(
             "  Terrain is effectively flat (height range: {:.1})",
@@ -724,87 +818,42 @@ fn spawn_map_world(
     }
 
     let t_terrain = bevy::platform::time::Instant::now();
-    let heightmap = Heightmap::from_parsed(parsed);
+    let (hm_w, hm_h) = (header.heightmap_width(), header.heightmap_height());
+    let heightmap = Heightmap::from_raw(heights, hm_w, hm_h);
     // The aircraft's smoothed ground (`smoothGround.Init` at
     // `PreLoadSimulation`); Hex Farm replaces it with its own flight
     // profile (`SetWholeSmoothMesh` in the gadget's `Initialize`).
-    let mut smooth_ground = crate::terrain::smooth_ground::SmoothGround::from_heightmap(&heightmap);
-    if let Some(farm) = hex_farm.as_ref() {
+    let mut smooth_ground = SmoothGround::from_heightmap(&heightmap);
+    if let Some((farm, _)) = hex_farm.as_ref() {
         farm.set_whole_smooth_mesh(|x, z, h| {
             smooth_ground.mesh.set_smooth_mesh(x as f32, z as f32, h as f32, None);
         });
     }
-    ctx.commands.insert_resource(smooth_ground);
-
-    spawn_terrain(
-        parsed,
-        &heightmap,
-        terrain_material,
-        &mut ctx.commands,
-        &mut ctx.meshes,
-        &mut ctx.materials,
-        &mut ctx.images,
-        geovent_assets,
-    );
+    let chunks = generate_terrain_chunks(heightmap.heights(), hm_w, hm_h);
     let terrain_ms = t_terrain.elapsed().as_secs_f64() * 1000.0;
 
-    // Hex Farm's footprint minimap (no ground texture) — taken before
-    // the farm moves into its runtime state.
-    let lua_minimap = hex_farm.as_ref().map(|farm| {
-        lua_compositing::minimap_pixels(farm, crate::map_events::hex_farm::MINIMAP_RES)
-    });
-    // Void squares are impassable to every move class (see `mask_void`).
-    let void_terrain = hex_farm.as_ref().map(|farm| (farm.terrain.clone(), farm.type_w));
-    // Towers/bridges drawing + dynamic mode (or clear a previous match's).
-    crate::map_events::hex_farm::install(
-        hex_farm,
-        spring_map.lua_compositing.as_ref().map(|c| &c.atlas),
-        &mut ctx.commands,
-        &mut ctx.meshes,
-        &mut ctx.materials,
-        &mut ctx.images,
-    );
-
-    // One pathfinding grid per distinct unit `MaxSlope`. Caps and
-    // slope-mods are in Spring's encoding — see `cost.rs`.
-    // `compute_path` picks the tightest bucket whose cap ≥ the unit's.
+    // One pathfinding grid per distinct unit `MaxSlope`. A cell's slope
+    // is the same for every bucket, so it is computed once and
+    // thresholded per cap. Void squares are impassable to every move
+    // class (see `mask_void`).
     let t_nav = bevy::platform::time::Instant::now();
+    let mut nav_set = interaction::movement::NavGridSet::default();
     {
-        use spring_pathfinding::{SpeedMap, slope_mod_from_max_slope};
-        use std::collections::BTreeSet;
+        use spring_pathfinding::{SpeedMap, slope_map, slope_mod_from_max_slope};
 
-        use crate::units::content::definitions::ALL_UNIT_KINDS;
-        use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_DEGREES;
-
-        // Why: bin to 4 decimals so float jitter doesn't split
-        // near-identical buckets.
-        const BUCKET_QUANTUM: f32 = 10_000.0;
-
-        let mut distinct_caps = BTreeSet::<u32>::new();
-        for &kind in ALL_UNIT_KINDS {
-            let cap = ctx.unit_registry.max_slope_ratio(kind);
-            distinct_caps.insert((cap * BUCKET_QUANTUM).round() as u32);
-        }
-        // Always keep the KP-default bucket (FBI MaxSlope=36 from
-        // `MOVEINFO.TDF`'s LIGHT/MEDIUM/HEAVY) available for units
-        // whose FBI omits `MaxSlope`.
-        let default_cap = spring_pathfinding::max_slope_from_degrees(DEFAULT_MAX_SLOPE_DEGREES);
-        distinct_caps.insert((default_cap * BUCKET_QUANTUM).round() as u32);
-
-        let mut nav_set = interaction::movement::NavGridSet::default();
-        for cap_q in distinct_caps {
-            let cap = cap_q as f32 / BUCKET_QUANTUM;
+        let slopes = slope_map(heightmap.heights(), hm_w as u32, hm_h as u32);
+        for &cap in &inputs.nav_caps {
             let slope_mod = slope_mod_from_max_slope(cap);
-            let mut speed_map = SpeedMap::from_heightmap(
-                &parsed.heights,
-                parsed.header.heightmap_width() as u32,
-                parsed.header.heightmap_height() as u32,
-                cap,
-                slope_mod,
-            );
-            if let Some((terrain, type_w)) = &void_terrain {
+            let mut speed_map =
+                SpeedMap::from_slopes(&slopes, hm_w as u32 - 1, hm_h as u32 - 1, cap, slope_mod);
+            if let Some((farm, _)) = hex_farm.as_ref() {
                 let all = [0, 0, speed_map.width - 1, speed_map.height - 1];
-                crate::map_events::hex_farm::mask_void(terrain, *type_w, &mut speed_map, all);
+                crate::map_events::hex_farm::mask_void(
+                    &farm.terrain,
+                    farm.type_w,
+                    &mut speed_map,
+                    all,
+                );
             }
             let blocked = speed_map.speeds.iter().filter(|&&s| s <= 0.0).count();
             info!(
@@ -821,79 +870,170 @@ fn spawn_map_world(
                 speed_map,
             });
         }
-        // Buckets already ascending because BTreeSet iteration is sorted.
-        let bucket_count = nav_set.buckets.len();
-        // One shared congestion grid across all nav buckets — every
-        // bucket is built from the same heightmap, so the dimensions
-        // match. (Bucket 0 exists by construction; if somehow none
-        // were built, the Option<Res> paths degrade gracefully.)
-        if let Some(bucket) = nav_set.buckets.first() {
-            let (w, h) = (bucket.speed_map.width, bucket.speed_map.height);
-            ctx.commands
-                .insert_resource(interaction::movement::PathHeat(
-                    spring_pathfinding::HeatMap::new(w, h),
-                ));
-        }
-        ctx.commands.insert_resource(nav_set);
-        info!(
-            "  built {bucket_count} nav buckets in {:.0}ms",
-            t_nav.elapsed().as_secs_f64() * 1000.0
-        );
     }
+    let nav_ms = t_nav.elapsed().as_secs_f64() * 1000.0;
 
-    info!("  world built: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, nav (see above)");
+    // Minimap terrain layer from the ground texture's base level (a
+    // voidGround map has none: paint its towers and bridges instead).
+    let (mm_w, mm_h) = ui::minimap::minimap_dims(header.world_width(), header.world_depth());
+    let minimap_pixels = match (&hex_farm, &terrain_image) {
+        (Some((farm, _)), _) => {
+            const RES: usize = crate::map_events::hex_farm::MINIMAP_RES;
+            let px = lua_compositing::minimap_pixels(farm, RES);
+            ui::minimap::downsample_terrain(Some(&px), RES, RES, mm_w, mm_h)
+        }
+        (None, Some(image)) => {
+            let (base, w, h) = mipmap::base_level(image);
+            ui::minimap::downsample_terrain(Some(base), w, h, mm_w, mm_h)
+        }
+        (None, None) => ui::minimap::downsample_terrain(None, 0, 0, mm_w, mm_h),
+    };
 
-    // Setup minimap from ground texture (a voidGround map has none:
-    // paint its towers and bridges instead).
+    info!(
+        "  prepared in {:.0}ms: texture {texture_ms:.0}ms, terrain {terrain_ms:.0}ms, {} nav buckets {nav_ms:.0}ms",
+        t_prepare.elapsed().as_secs_f64() * 1000.0,
+        nav_set.buckets.len(),
+    );
+
+    PreparedMap {
+        setup: inputs.setup,
+        map_name: inputs.map_name,
+        header,
+        features,
+        map_info,
+        void_ground,
+        terrain_image,
+        chunks,
+        heightmap,
+        smooth_ground,
+        nav_set,
+        minimap: (minimap_pixels, mm_w, mm_h),
+        hex_farm,
+    }
+}
+
+/// The ECS half of a load, in the frame the old world was torn down:
+/// terrain, atmosphere, fog, nav grids, minimap, homebases, per-map
+/// events, heightmap resource.
+#[allow(clippy::too_many_arguments)]
+fn spawn_prepared_map(
+    mut ready: ResMut<ReadyMap>,
+    mut camera_query: Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
+    mut fog_query: Query<&mut DistanceFog, With<RtsCamera>>,
+    mut map_bounds: ResMut<MapBounds>,
+    mut geovent_assets: ResMut<GeoventAssets>,
+    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
+) {
+    let Some(prepared) = ready.0.take() else {
+        return;
+    };
+    let t_spawn = bevy::platform::time::Instant::now();
+    let PreparedMap {
+        setup,
+        map_name,
+        header,
+        features,
+        map_info,
+        void_ground,
+        terrain_image,
+        chunks,
+        heightmap,
+        smooth_ground,
+        nav_set,
+        minimap,
+        hex_farm,
+    } = prepared;
+
+    let terrain_material = match terrain_image {
+        _ if void_ground => void_ground_material(&mut ctx.materials),
+        Some(image) => {
+            let texture = ctx.images.add(image);
+            crate::terrain::material::create_terrain_material(texture, &mut ctx.materials)
+        }
+        None => dark_fallback_material(&mut ctx.materials),
+    };
+
+    setup_camera(&header, &heightmap, &mut camera_query, &mut map_bounds);
+
+    ctx.commands.insert_resource(smooth_ground);
+
+    spawn_terrain(
+        chunks,
+        &features,
+        &heightmap,
+        terrain_material,
+        &mut ctx.commands,
+        &mut ctx.meshes,
+        &mut ctx.materials,
+        &mut ctx.images,
+        &mut geovent_assets,
+    );
+
+    // Towers/bridges drawing + dynamic mode (or clear a previous match's).
+    crate::map_events::hex_farm::install(
+        hex_farm,
+        &mut ctx.commands,
+        &mut ctx.meshes,
+        &mut ctx.materials,
+        &mut ctx.images,
+    );
+
+    // One shared congestion grid across all nav buckets — every bucket
+    // is built from the same heightmap, so the dimensions match.
+    // (Bucket 0 exists by construction; if somehow none were built,
+    // the Option<Res> paths degrade gracefully.)
+    if let Some(bucket) = nav_set.buckets.first() {
+        let (w, h) = (bucket.speed_map.width, bucket.speed_map.height);
+        ctx.commands
+            .insert_resource(interaction::movement::PathHeat(
+                spring_pathfinding::HeatMap::new(w, h),
+            ));
+    }
+    ctx.commands.insert_resource(nav_set);
+
     {
-        const LUA_MINIMAP_RES: usize = crate::map_events::hex_farm::MINIMAP_RES;
-        let (gp, gw, gh) = match (&lua_minimap, &spring_map.ground_texture) {
-            (Some(px), _) => (Some(px.as_slice()), LUA_MINIMAP_RES, LUA_MINIMAP_RES),
-            (None, Some(g)) => (Some(g.pixels.as_slice()), g.width, g.height),
-            (None, None) => (None, 0, 0),
-        };
+        let (pixels, mm_w, mm_h) = &minimap;
         ui::minimap::setup_minimap(
             &mut ctx.commands,
-            &mut *ctx.images,
-            gp,
-            gw,
-            gh,
-            parsed.header.world_width(),
-            parsed.header.world_depth(),
+            &mut ctx.images,
+            Some(pixels),
+            *mm_w as usize,
+            *mm_h as usize,
+            header.world_width(),
+            header.world_depth(),
         );
     }
 
-    if let Some(map_info) = &spring_map.map_info {
+    if let Some(map_info) = &map_info {
         apply_atmosphere(map_info, &mut ctx.commands);
         if void_ground {
             // The gadget turns sky and water off (`SetDrawSky(false)`,
             // `SetDrawWater(false)`): the void is black.
             ctx.commands.insert_resource(ClearColor(Color::BLACK));
         }
-        apply_fog(map_info, parsed, fog_query);
+        apply_fog(map_info, &header, &mut fog_query);
         if setup.demo {
             // Attract-mode demo: an all-AI skirmish behind the menu.
             // Each seat gets a starting squad so there is action to
             // watch before the first production cycle completes; the
             // menu's demo director restarts the match once it's decided.
-            let bases = spawn_homebases(&heightmap, map_info, &setup.players, ctx);
-            spawn_demo_squads(&heightmap, &bases, ctx);
+            let bases = spawn_homebases(&heightmap, map_info, &setup.players, &mut ctx);
+            spawn_demo_squads(&heightmap, &bases, &mut ctx);
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();
         } else if let Some(faction) = setup.showcase {
-            spawn_showcase_homebase(&heightmap, map_info, faction, ctx);
+            spawn_showcase_homebase(&heightmap, map_info, faction, &mut ctx);
             ctx.commands
                 .insert_resource(crate::showcase::ShowcaseDirector::new(faction));
             info!("  Showcase({:?}) — skipping full roster", faction);
         } else {
-            spawn_homebases(&heightmap, map_info, &setup.players, ctx);
+            spawn_homebases(&heightmap, map_info, &setup.players, &mut ctx);
             // Clear any leftover showcase director from a previous game.
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();
         }
-        configure_map_events(map_name, map_info, &heightmap, &mut ctx.commands);
-        let datavent_count = parsed
-            .features
+        configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
+        let datavent_count = features
             .iter()
             .filter(|f| f.feature_type.is_geovent())
             .count();
@@ -906,18 +1046,23 @@ fn spawn_map_world(
     }
 
     ctx.commands.insert_resource(heightmap);
+    info!(
+        "  world spawned in {:.0}ms (main thread)",
+        t_spawn.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 fn setup_camera(
-    parsed: &ParsedMap,
+    header: &SmfHeader,
+    heightmap: &Heightmap,
     camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     map_bounds: &mut MapBounds,
 ) {
-    let world_w = parsed.header.world_width();
-    let world_d = parsed.header.world_depth();
-    let heightmap_w = parsed.header.heightmap_width();
-    let heightmap_h = parsed.header.heightmap_height();
-    let center_height = parsed.heights[(heightmap_h / 2) * heightmap_w + heightmap_w / 2];
+    let world_w = header.world_width();
+    let world_d = header.world_depth();
+    let heightmap_w = header.heightmap_width();
+    let heightmap_h = header.heightmap_height();
+    let center_height = heightmap.heights()[(heightmap_h / 2) * heightmap_w + heightmap_w / 2];
 
     *map_bounds =
         MapBounds::from_map_extents(Vec3::new(0.0, 0.0, 0.0), Vec3::new(world_w, 0.0, world_d));
@@ -933,7 +1078,8 @@ fn setup_camera(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_terrain(
-    map: &ParsedMap,
+    chunks: Vec<TerrainChunk>,
+    features: &[MapFeature],
     heightmap: &Heightmap,
     terrain_material: Handle<StandardMaterial>,
     commands: &mut Commands,
@@ -942,10 +1088,10 @@ fn spawn_terrain(
     images: &mut ResMut<Assets<Image>>,
     geovent_assets: &mut GeoventAssets,
 ) {
-    let chunks = generate_terrain_chunks(map);
     info!("  Spawning {} terrain chunks", chunks.len());
 
-    let chunks_x = (map.header.heightmap_width() - 1).div_ceil(crate::terrain::mesh::CHUNK_SIZE);
+    let (hm_w, _) = heightmap.grid_size();
+    let chunks_x = (hm_w - 1).div_ceil(crate::terrain::mesh::CHUNK_SIZE);
     for (i, chunk) in chunks.into_iter().enumerate() {
         let mesh_handle = meshes.add(chunk.mesh);
         commands.spawn((
@@ -958,7 +1104,7 @@ fn spawn_terrain(
     }
 
     spawn_geovent_smokers(
-        map,
+        features,
         heightmap,
         commands,
         geovent_assets,
@@ -1032,7 +1178,7 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
 /// fraction of that end distance.
 fn apply_fog(
     map_info: &MapInfo,
-    parsed: &ParsedMap,
+    header: &SmfHeader,
     fog_query: &mut Query<&mut DistanceFog, With<RtsCamera>>,
 ) {
     let Ok(mut fog) = fog_query.single_mut() else {
@@ -1040,8 +1186,8 @@ fn apply_fog(
     };
     let color = map_info.atmosphere.fog_color;
     let fog_start_frac = map_info.atmosphere.fog_start;
-    let world_w = parsed.header.world_width();
-    let world_d = parsed.header.world_depth();
+    let world_w = header.world_width();
+    let world_d = header.world_depth();
     let diagonal = (world_w * world_w + world_d * world_d).sqrt();
     // Cover the full map diagonal + a bit more so the far edge never fogs
     // completely. Floor at 4000 elmos for small maps.

@@ -89,6 +89,30 @@ impl SpeedMap {
         self.max_speed = self.speeds.iter().copied().fold(0.0f32, f32::max).max(0.001);
     }
 
+    /// Build a speed map from a precomputed slope field
+    /// ([`slope_map`]), for the same `max_slope` / `slope_mod` encoding
+    /// as [`Self::from_heightmap`]. The slope of a cell does not depend
+    /// on the move class, so a game with several slope buckets computes
+    /// the field once and thresholds it per bucket — cell for cell the
+    /// same values `from_heightmap` produces.
+    pub fn from_slopes(
+        slopes: &[f32],
+        width: u32,
+        height: u32,
+        max_slope: f32,
+        slope_mod: f32,
+    ) -> Self {
+        assert_eq!(slopes.len(), (width * height) as usize);
+        Self::new(
+            width,
+            height,
+            slopes
+                .iter()
+                .map(|&slope| speed_from_slope(slope, max_slope, slope_mod))
+                .collect(),
+        )
+    }
+
     /// Recompute the cells touching heightmap vertices `x0..=x1`,
     /// `z0..=z1` after the heights there changed (terrain edited at
     /// runtime, e.g. Hex Farm's towers rising and sinking), with the
@@ -152,9 +176,31 @@ impl SpeedMap {
     }
 }
 
+/// Slope of every cell of a `heightmap_width × heightmap_height` vertex
+/// grid, row-major over the `(width-1) × (height-1)` cells, in Spring's
+/// `1 - cos(angle)` encoding (see [`SpeedMap::from_heightmap`]). The
+/// move-class-independent half of a speed map.
+pub fn slope_map(heights: &[f32], heightmap_width: u32, heightmap_height: u32) -> Vec<f32> {
+    let width = (heightmap_width - 1) as usize;
+    let height = (heightmap_height - 1) as usize;
+    let hw = heightmap_width as usize;
+    let mut slopes = Vec::with_capacity(width * height);
+    for z in 0..height {
+        for x in 0..width {
+            slopes.push(cell_slope(heights, hw, x, z));
+        }
+    }
+    slopes
+}
+
 /// Relative speed of heightmap cell `(x, z)`, from the slope of its
 /// four corner vertices (see [`SpeedMap::from_heightmap`]).
 fn cell_speed(heights: &[f32], hw: usize, x: usize, z: usize, max_slope: f32, slope_mod: f32) -> f32 {
+    speed_from_slope(cell_slope(heights, hw, x, z), max_slope, slope_mod)
+}
+
+/// Slope of heightmap cell `(x, z)` in Spring's `1 - cos(angle)` encoding.
+fn cell_slope(heights: &[f32], hw: usize, x: usize, z: usize) -> f32 {
     let h00 = heights[z * hw + x];
     let h10 = heights[z * hw + x + 1];
     let h01 = heights[(z + 1) * hw + x];
@@ -167,8 +213,12 @@ fn cell_speed(heights: &[f32], hw: usize, x: usize, z: usize, max_slope: f32, sl
     // Spring's encoding: `slope = 1 - cos(angle)` where
     // `cos(angle) = 1 / sqrt(1 + tan²(angle))`. Matches
     // `1.0 - faceNormal.y` in `ReadMap::UpdateSlopemap`.
-    let slope = 1.0 - 1.0 / (1.0 + tan_slope * tan_slope).sqrt();
+    1.0 - 1.0 / (1.0 + tan_slope * tan_slope).sqrt()
+}
 
+/// The move class's view of a cell slope: impassable past its cap, else
+/// Spring's `1 / (1 + slope * slopeMod)` penalty.
+fn speed_from_slope(slope: f32, max_slope: f32, slope_mod: f32) -> f32 {
     if slope > max_slope {
         0.0 // impassable
     } else {
@@ -279,6 +329,24 @@ mod tests {
         let mod_ = slope_mod_from_max_slope(cap);
         let map = SpeedMap::from_heightmap(&heights, 3, 2, cap, mod_);
         assert_eq!(map.get(0, 0), 0.0, "60° ramp should be blocked");
+    }
+
+    /// Thresholding a shared slope field per bucket is bit-identical
+    /// to rebuilding each bucket from the heightmap.
+    #[test]
+    fn from_slopes_matches_from_heightmap() {
+        let (w, h) = (17u32, 11u32);
+        let heights: Vec<f32> = (0..w * h)
+            .map(|i| ((i * 7919) % 97) as f32 * 1.7 - (i % 13) as f32 * 3.1)
+            .collect();
+        let slopes = slope_map(&heights, w, h);
+        for degrees in [5.0, 20.0, 36.0, 45.0, 60.0] {
+            let cap = max_slope_from_degrees(degrees);
+            let mod_ = slope_mod_from_max_slope(cap);
+            let full = SpeedMap::from_heightmap(&heights, w, h, cap, mod_);
+            let thresholded = SpeedMap::from_slopes(&slopes, w - 1, h - 1, cap, mod_);
+            assert_eq!(full.speeds, thresholded.speeds, "MaxSlope {degrees}");
+        }
     }
 
     #[test]

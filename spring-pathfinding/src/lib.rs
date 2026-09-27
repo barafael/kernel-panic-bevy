@@ -22,7 +22,8 @@ mod heat;
 mod path;
 
 pub use cost::{
-    SQUARE_SIZE, SpeedMap, max_slope_from_degrees, slope_from_rise_run, slope_mod_from_max_slope,
+    SQUARE_SIZE, SpeedMap, max_slope_from_degrees, slope_from_rise_run, slope_map,
+    slope_mod_from_max_slope,
 };
 pub use grid_search::{
     BlockMask, PathSearch, SearchScratch, SearchStatus, find_path, find_path_masked, find_path_masked_in,

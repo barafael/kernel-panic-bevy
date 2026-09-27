@@ -112,12 +112,7 @@ pub fn setup_minimap(
     world_width: f32,
     world_depth: f32,
 ) {
-    let aspect = world_width / world_depth;
-    let (mm_w, mm_h) = if aspect >= 1.0 {
-        (MINIMAP_SIZE as u32, (MINIMAP_SIZE / aspect) as u32)
-    } else {
-        ((MINIMAP_SIZE * aspect) as u32, MINIMAP_SIZE as u32)
-    };
+    let (mm_w, mm_h) = minimap_dims(world_width, world_depth);
 
     let base_pixels = downsample_terrain(ground_pixels, ground_width, ground_height, mm_w, mm_h);
 
@@ -331,7 +326,22 @@ fn faction_rgb(faction: Faction) -> (u8, u8, u8) {
     )
 }
 
-fn downsample_terrain(
+/// Minimap image size for a `world_width × world_depth` map: the longer
+/// side is [`MINIMAP_SIZE`], the other keeps the map's aspect.
+pub fn minimap_dims(world_width: f32, world_depth: f32) -> (u32, u32) {
+    let aspect = world_width / world_depth;
+    if aspect >= 1.0 {
+        (MINIMAP_SIZE as u32, (MINIMAP_SIZE / aspect) as u32)
+    } else {
+        ((MINIMAP_SIZE * aspect) as u32, MINIMAP_SIZE as u32)
+    }
+}
+
+/// Point-sample `source` (`src_w × src_h` RGBA8) down to `dst_w × dst_h`.
+/// Public so the map loader can paint the terrain layer off the main
+/// thread, before the full-size ground texture is handed to the GPU;
+/// [`setup_minimap`] then receives pixels already at minimap size.
+pub fn downsample_terrain(
     source: Option<&[u8]>,
     src_w: usize,
     src_h: usize,

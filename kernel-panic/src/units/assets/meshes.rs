@@ -320,7 +320,11 @@ fn build_faction_texture(
     let pixels = colorize_texture(tga, faction);
     let (w, h) = (tga.width, tga.height);
 
-    let image = create_rgba8_image(w, h, pixels);
+    let mut image = create_rgba8_image(w, h, pixels);
+    // Nothing reads the coloured pixels back on the CPU — the cache
+    // only hands out the handle — so let the render world take the
+    // buffer instead of keeping a 4 MB copy per (texture, faction).
+    image.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
     info!("Built faction texture: {tex_name} x {faction:?} ({w}x{h})");
 
     let handle = images.add(image);

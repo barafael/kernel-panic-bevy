@@ -13,7 +13,7 @@
 
 use bevy::prelude::*;
 
-use spring_map::map_types::{ParsedMap, SQUARE_SIZE};
+use spring_map::map_types::SQUARE_SIZE;
 
 /// Floor so short shots still sample meaningfully; cap so pathologically
 /// long shots don't burn cycles on samples finer than the terrain resolution.
@@ -32,17 +32,9 @@ pub struct Heightmap {
 }
 
 impl Heightmap {
-    pub fn from_parsed(parsed: &ParsedMap) -> Self {
-        Self {
-            heights: parsed.heights.clone(),
-            width: parsed.header.heightmap_width(),
-            height: parsed.header.heightmap_height(),
-            square_size: SQUARE_SIZE as f32,
-        }
-    }
-
     /// A heightmap from raw row-major vertex heights (8-elmo squares).
-    #[cfg(test)]
+    /// Takes the map's height grid over — the loader hands it off once
+    /// nothing else needs the `ParsedMap` copy.
     pub fn from_raw(heights: Vec<f32>, width: usize, height: usize) -> Self {
         assert_eq!(heights.len(), width * height);
         Self {

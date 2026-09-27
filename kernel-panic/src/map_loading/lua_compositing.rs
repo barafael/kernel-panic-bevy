@@ -278,24 +278,26 @@ pub fn push_rect(
     ]);
 }
 
-/// Upload the skin atlas with a full mip chain. Both axes repeat, as the
-/// gadget's texture does (wall V runs past 1 on tall towers; bridge V
-/// can run below 0 on long bridges).
-pub fn upload_atlas(atlas: &SkinAtlas, images: &mut Assets<Image>) -> Handle<Image> {
-    let (pixels, levels) = super::mipmap::generate_mipmaps_rgba8(
-        &atlas.pixels,
-        atlas.width as usize,
-        atlas.height as usize,
-    );
+/// The skin atlas as a texture with a full mip chain, ready for
+/// `Assets<Image>`. Both axes repeat, as the gadget's texture does (wall
+/// V runs past 1 on tall towers; bridge V can run below 0 on long
+/// bridges). Render-world only: nothing reads the atlas back — the
+/// farm's meshes only reference it through the material — so the CPU
+/// copy goes with the upload. Pure, so the loader builds it off the
+/// main thread.
+pub fn atlas_image(atlas: SkinAtlas) -> Image {
+    let (width, height) = (atlas.width, atlas.height);
+    let (pixels, levels) =
+        super::mipmap::generate_mipmaps_rgba8(atlas.pixels, width as usize, height as usize);
     let mut image = Image::new_uninit(
         Extent3d {
-            width: atlas.width,
-            height: atlas.height,
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
         TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+        RenderAssetUsages::RENDER_WORLD,
     );
     image.data = Some(pixels);
     image.texture_descriptor.mip_level_count = levels;
@@ -309,7 +311,7 @@ pub fn upload_atlas(atlas: &SkinAtlas, images: &mut Assets<Image>) -> Handle<Ima
         anisotropy_clamp: 16,
         ..default()
     });
-    images.add(image)
+    image
 }
 
 /// The atlas material: unlit (the gadget draws with lighting off),
@@ -330,18 +332,13 @@ pub fn atlas_material(
 /// rolled 1 in 5): the gadget loads the atlas as `:at3,3,3g:` —
 /// greyscaled (Rec.601 luma), then tinted ×3 (clamped) — so the owner's
 /// team colour, multiplied in as vertex colour, reads strongly.
-pub fn team_colored_atlas(atlas: &SkinAtlas) -> SkinAtlas {
-    let mut pixels = atlas.pixels.clone();
-    for px in pixels.chunks_exact_mut(4) {
+pub fn team_colored_atlas(mut atlas: SkinAtlas) -> SkinAtlas {
+    for px in atlas.pixels.chunks_exact_mut(4) {
         let luma = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
         let v = (luma * 3.0).min(255.0) as u8;
         px[..3].fill(v);
     }
-    SkinAtlas {
-        width: atlas.width,
-        height: atlas.height,
-        pixels,
-    }
+    atlas
 }
 
 /// Minimap for a voidGround map: there is no ground texture, so paint
