@@ -36,6 +36,7 @@ use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::player::LocalTeam;
+use crate::units::lifecycle::bookkeeping::Detector;
 
 /// Master switch for fog-of-war / cloak-hiding from the [`LocalTeam`]'s
 /// perspective. Defaults to off and nothing enables it yet, so the
@@ -95,17 +96,41 @@ pub struct Spotted;
 /// 60 Hz. Matches the cadence of `count_small_buildings`.
 pub const VISIBILITY_REFRESH_INTERVAL: f32 = 0.1;
 
+/// One 30 Hz sim tick, in seconds — the phase step that spreads the
+/// three visibility scans over different ticks. All three used to
+/// accumulate from zero and so all fired on the same tick, stacking
+/// their spatial sweeps on top of each other every third frame.
+const SCAN_PHASE_STEP: f32 = 1.0 / 30.0;
+
 /// Refresh timer for `update_cloak_visibility`. `update_fog_visibility`
-/// uses its own `Local<f32>`; the two ticks may land on adjacent
-/// frames, which is fine — both feed `Visibility` and don't depend
+/// uses its own [`FogRefreshTimer`]; the two ticks land on different
+/// frames by construction — both feed `Visibility` and don't depend
 /// on each other.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct VisibilityRefreshTimer(pub f32);
+
+impl Default for VisibilityRefreshTimer {
+    /// One tick ahead of `update_cloak_detection` (which starts at 0).
+    fn default() -> Self {
+        Self(SCAN_PHASE_STEP)
+    }
+}
+
+/// Refresh timer for `update_fog_visibility`, two ticks ahead of
+/// `update_cloak_detection`.
+pub struct FogRefreshTimer(f32);
+
+impl Default for FogRefreshTimer {
+    fn default() -> Self {
+        Self(2.0 * SCAN_PHASE_STEP)
+    }
+}
 
 /// Recompute every cloaked unit's [`DetectedBy`] mask: bit `t` is set
 /// while any living team-`t` unit with FBI `RadarDistance > 0`
-/// (Assembler, Trojan, Gateway, Byte, Connection, Worm, …) is within
-/// that distance and `t` is hostile to the cloaked unit.
+/// (Assembler, Trojan, Gateway, Byte, Connection, Worm, … — tagged
+/// [`Detector`] by `bookkeeping::tag_unit_kinds`) is within that
+/// distance and `t` is hostile to the cloaked unit.
 ///
 /// Runs for every team independently of [`FogEnabled`] — it feeds
 /// combat targeting, not just the player's rendering. Throttled to
@@ -115,9 +140,8 @@ pub struct VisibilityRefreshTimer(pub f32);
 pub fn update_cloak_detection(
     time: Res<Time>,
     mut timer: Local<f32>,
-    unit_registry: Res<UnitRegistry>,
     spatial: Res<crate::units::spatial::SpatialIndex>,
-    detectors_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
+    detectors_q: Query<(&TeamId, &Detector, &GlobalTransform), Without<Dying>>,
     mut cloaked_q: Query<(Entity, &mut DetectedBy), With<Cloaked>>,
     // Retained across frames so the refresh tick doesn't reallocate.
     mut detected: Local<std::collections::HashMap<Entity, u64>>,
@@ -132,11 +156,8 @@ pub fn update_cloak_detection(
     // every detector, radius-query the shared spatial index once per
     // detector and OR its team bit into each hostile cloaked entry.
     detected.clear();
-    for (team, ut, gtf) in &detectors_q {
-        let radar = unit_registry.radar_distance(ut.0);
-        if radar <= 0.0 {
-            continue;
-        }
+    for (team, detector, gtf) in &detectors_q {
+        let radar = detector.radius;
         let dp = gtf.translation();
         let bit = team_bit(team.0);
         spatial.query_radius(dp, radar, |candidate| {
@@ -300,7 +321,7 @@ pub fn restore_cloak_fade_materials(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_fog_visibility(
     time: Res<Time>,
-    mut timer: Local<f32>,
+    mut timer: Local<FogRefreshTimer>,
     fog: Res<FogEnabled>,
     player: Res<LocalTeam>,
     unit_registry: Res<UnitRegistry>,
@@ -320,11 +341,11 @@ pub fn update_fog_visibility(
     // Retained across frames so the refresh tick doesn't reallocate.
     mut in_sight: Local<std::collections::HashSet<Entity>>,
 ) {
-    *timer += time.delta_secs();
-    if *timer < VISIBILITY_REFRESH_INTERVAL {
+    timer.0 += time.delta_secs();
+    if timer.0 < VISIBILITY_REFRESH_INTERVAL {
         return;
     }
-    *timer = 0.0;
+    timer.0 = 0.0;
 
     // Sandbox mode: every unit visible + spotted, no enemy distinction.
     // Keeping the same loop (vs. just early-returning) ensures the

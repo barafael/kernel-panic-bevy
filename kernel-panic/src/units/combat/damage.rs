@@ -144,19 +144,20 @@ impl VirusSpawnQueue {
     }
 }
 
-/// Upstream SIGTERM bomb weaponID is `168` in `retroweapons.tdf` —
-/// byte.bos's `HitByWeaponId` checks that literal ID to bypass the
-/// closed-state damage reduction. Our weapons are identified by
-/// section name rather than numeric ID, so we compare against
-/// `"SigTerm"` (the section tag in `retroweapons.tdf`).
-const SIGTERM_WEAPON_NAME: &str = "SigTerm";
-
 /// Pure form of the Byte armor rule, decoupled from Bevy queries so
 /// it can be unit-tested without a live world. See
 /// [`byte_closed_damage_multiplier`] for the Query wrapper.
+///
+/// `is_sigterm`: upstream SIGTERM bomb weaponID is `168` in
+/// `retroweapons.tdf` — byte.bos's `HitByWeaponId` checks that literal
+/// ID to bypass the closed-state damage reduction. Our weapons are
+/// identified by section name rather than numeric ID; the `[SigTerm]`
+/// section's id is resolved once at registry load
+/// (`WeaponRegistry::known().sigterm`) rather than compared by name
+/// per hit.
 fn byte_armor_multiplier(
     target_kind: UnitKind,
-    weapon: &str,
+    is_sigterm: bool,
     is_open: bool,
     is_stunned: bool,
 ) -> f32 {
@@ -165,7 +166,7 @@ fn byte_armor_multiplier(
     }
     // Why: SigTerm bypasses the armor bonus (upstream `id == 168`);
     // paralysis forces the Byte open (`!get LUA2` branch returns 100%).
-    if weapon == SIGTERM_WEAPON_NAME || is_stunned || is_open {
+    if is_sigterm || is_stunned || is_open {
         1.0
     } else {
         0.3
@@ -176,7 +177,7 @@ fn byte_armor_multiplier(
 /// from anything except the SIGTERM bomb, and only while not paralyzed.
 fn byte_closed_damage_multiplier(
     target: Entity,
-    weapon: &str,
+    is_sigterm: bool,
     target_unit_q: &Query<&UnitType>,
     byte_open_q: &Query<&ByteOpen>,
     stunned_q: &Query<&Stunned>,
@@ -186,10 +187,36 @@ fn byte_closed_damage_multiplier(
     };
     byte_armor_multiplier(
         unit.0,
-        weapon,
+        is_sigterm,
         byte_open_q.get(target).is_ok(),
         stunned_q.get(target).is_ok(),
     )
+}
+
+/// The per-victim state one hit touches, bundled so `apply_damage`
+/// stays under Bevy's system-param limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct HitQueries<'w, 's> {
+    health: Query<'w, 's, &'static mut Health>,
+    stun: Query<'w, 's, &'static mut StunCharge>,
+    shield: Query<'w, 's, &'static mut crate::units::mechanics::shield::ShieldState>,
+    protected: Query<'w, 's, (), With<crate::units::mechanics::command_fire::Protected>>,
+    idle: Query<'w, 's, &'static mut IdleTimer>,
+}
+
+impl HitQueries<'_, '_> {
+    /// Reset the victim's idle clock (auto-heal) in place. Every spawned
+    /// unit carries an [`IdleTimer`]; the command fallback covers a
+    /// target that lacks one (and, via `try_insert`, one despawned by
+    /// an earlier command in the same flush).
+    fn reset_idle(&mut self, target: Entity, commands: &mut Commands) {
+        match self.idle.get_mut(target) {
+            Ok(mut idle) => idle.0 = 0.0,
+            Err(_) => {
+                commands.entity(target).try_insert(IdleTimer(0.0));
+            }
+        }
+    }
 }
 
 /// Minimum `area_of_effect` (elmos) at which a weapon triggers a splash
@@ -255,19 +282,22 @@ pub fn tick_burst_fire(
 /// the attacker; paralyzer weapons accumulate the final amount on the
 /// stun charge, promoting to `Stunned` once it exceeds max HP;
 /// non-paralyzer leak subtracts from `Health`.
-#[allow(clippy::too_many_arguments)]
 fn apply_hit(
     target: Entity,
     attacker: Entity,
     amount: f32,
     paralyzer: bool,
     paralyze_time: f32,
-    health_q: &mut Query<&mut Health>,
-    stun_q: &mut Query<&mut StunCharge>,
-    shield_q: &mut Query<&mut crate::units::mechanics::shield::ShieldState>,
-    protected_q: &Query<(), With<crate::units::mechanics::command_fire::Protected>>,
+    hit: &mut HitQueries,
     commands: &mut Commands,
 ) {
+    let HitQueries {
+        health: health_q,
+        stun: stun_q,
+        shield: shield_q,
+        protected: protected_q,
+        ..
+    } = hit;
     let leak = shield_q
         .get_mut(target)
         .map(|mut shield| shield.absorb(amount))
@@ -318,13 +348,10 @@ fn apply_hit(
 #[allow(clippy::too_many_arguments)]
 pub fn apply_damage(
     mut damage_queue: ResMut<DamageQueue>,
-    mut health_q: Query<&mut Health>,
-    mut stun_q: Query<&mut StunCharge>,
-    mut shield_q: Query<&mut crate::units::mechanics::shield::ShieldState>,
+    mut victims: HitQueries,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
     target_pos_q: Query<(&GlobalTransform, &UnitStats), With<UnitType>>,
-    protected_q: Query<(), With<crate::units::mechanics::command_fire::Protected>>,
     byte_open_q: Query<&ByteOpen>,
     stunned_q: Query<&Stunned>,
     weapon_registry: Res<WeaponRegistry>,
@@ -342,8 +369,8 @@ pub fn apply_damage(
         if let Some(inbox) = hex_farm.as_deref_mut() {
             inbox.explosion(pending.impact_pos, weapon_def.damage.default);
         }
-        let weapon_name = weapon_registry.name(pending.weapon);
         let infection_window = weapon_registry.infection_duration(pending.weapon);
+        let is_sigterm = weapon_registry.known().sigterm == Some(pending.weapon);
 
         let base = |kind: UnitKind| {
             weapon_def.damage.for_type(kind.armor_class().key())
@@ -383,7 +410,7 @@ pub fn apply_damage(
                     let primary_damage = raw_damage
                         * byte_closed_damage_multiplier(
                             target,
-                            weapon_name,
+                            is_sigterm,
                             &target_unit_q,
                             &byte_open_q,
                             &stunned_q,
@@ -394,17 +421,10 @@ pub fn apply_damage(
                         primary_damage,
                         paralyzer,
                         paralyze_time,
-                        &mut health_q,
-                        &mut stun_q,
-                        &mut shield_q,
-                        &protected_q,
+                        &mut victims,
                         &mut commands,
                     );
-                    // Why `try_insert` on hit markers: a victim can be
-                    // despawned by an earlier command in the same flush
-                    // (death cleanup, Bug/Exploit morph), and a plain
-                    // insert on a dead entity panics the app.
-                    commands.entity(target).try_insert(IdleTimer(0.0));
+                    victims.reset_idle(target, &mut commands);
                 }
                 hit
             }
@@ -454,7 +474,7 @@ pub fn apply_damage(
                 let amount = splash
                     * byte_closed_damage_multiplier(
                         entity,
-                        weapon_name,
+                        is_sigterm,
                         &target_unit_q,
                         &byte_open_q,
                         &stunned_q,
@@ -465,13 +485,14 @@ pub fn apply_damage(
                     amount,
                     paralyzer,
                     paralyze_time,
-                    &mut health_q,
-                    &mut stun_q,
-                    &mut shield_q,
-                    &protected_q,
+                    &mut victims,
                     &mut commands,
                 );
-                commands.entity(entity).try_insert(IdleTimer(0.0));
+                victims.reset_idle(entity, &mut commands);
+                // Why `try_insert` on hit markers: a victim can be
+                // despawned by an earlier command in the same flush
+                // (death cleanup, Bug/Exploit morph), and a plain
+                // insert on a dead entity panics the app.
                 if infect
                     && let (Some(duration), Some((_, attacker_faction, attacker_team))) =
                         (infection_window, attacker_info)
@@ -532,34 +553,34 @@ mod tests {
 
     #[test]
     fn byte_closed_takes_30_percent_from_normal_weapons() {
-        let m = byte_armor_multiplier(UnitKind::Byte, "BitShot", false, false);
+        let m = byte_armor_multiplier(UnitKind::Byte, false, false, false);
         assert!((m - 0.3).abs() < 1e-5);
     }
 
     #[test]
     fn byte_open_takes_full_damage() {
-        let m = byte_armor_multiplier(UnitKind::Byte, "BitShot", true, false);
+        let m = byte_armor_multiplier(UnitKind::Byte, false, true, false);
         assert!((m - 1.0).abs() < 1e-5);
     }
 
     /// Upstream: paralyzed bytes lose the armor bonus (forced open).
     #[test]
     fn byte_closed_but_stunned_takes_full_damage() {
-        let m = byte_armor_multiplier(UnitKind::Byte, "BitShot", false, true);
+        let m = byte_armor_multiplier(UnitKind::Byte, false, false, true);
         assert!((m - 1.0).abs() < 1e-5);
     }
 
     /// Upstream: `id == 168` (SIGTERM bomb) bypasses the 30% gate.
     #[test]
     fn byte_closed_takes_full_damage_from_sigterm() {
-        let m = byte_armor_multiplier(UnitKind::Byte, SIGTERM_WEAPON_NAME, false, false);
+        let m = byte_armor_multiplier(UnitKind::Byte, true, false, false);
         assert!((m - 1.0).abs() < 1e-5);
     }
 
     /// Non-Byte targets are unaffected by the armor rule.
     #[test]
     fn non_byte_targets_take_full_damage() {
-        let m = byte_armor_multiplier(UnitKind::Bit, "BitShot", false, false);
+        let m = byte_armor_multiplier(UnitKind::Bit, false, false, false);
         assert!((m - 1.0).abs() < 1e-5);
     }
 

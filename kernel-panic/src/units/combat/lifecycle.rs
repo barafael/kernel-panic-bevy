@@ -13,11 +13,11 @@ use bevy::prelude::*;
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
 use super::{AimTarget, IdleTimer, StunCharge};
 use crate::interaction::movement::{MovePath, MoveTarget};
-use crate::sim::frames_to_secs;
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::content::weapons::WeaponRegistry;
+use crate::units::content::weapons::{DeathBlast, WeaponRegistry};
+use crate::units::lifecycle::bookkeeping::{IdleAutoHeal, Kamikaze};
 use crate::units::spatial::SpatialIndex;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
@@ -64,14 +64,14 @@ const STUN_CHARGE_DECAY: f32 = 4.0;
 /// Regenerate HP on units that have been idle long enough.
 /// A unit counts as idle when it has no move order and no current aim
 /// target. The idle timer is reset in `apply_damage` whenever the unit
-/// takes damage. Units whose FBI lacks `IdleAutoHeal` (value 0) opt out.
+/// takes damage. Units whose FBI lacks `IdleAutoHeal` (value 0) carry no
+/// [`IdleAutoHeal`] marker (`bookkeeping::tag_unit_kinds`) and opt out.
 #[allow(clippy::type_complexity)]
 pub fn auto_heal(
     time: Res<Time>,
-    unit_registry: Res<UnitRegistry>,
     mut query: Query<
         (
-            &UnitType,
+            &IdleAutoHeal,
             &mut Health,
             &mut IdleTimer,
             Option<&MoveTarget>,
@@ -82,12 +82,7 @@ pub fn auto_heal(
     >,
 ) {
     let dt = time.delta_secs();
-    for (unit, mut health, mut idle, move_target, move_path, aim) in &mut query {
-        let heal_rate = unit_registry.idle_auto_heal(unit.0);
-        if heal_rate <= 0.0 {
-            continue;
-        }
-
+    for (heal, mut health, mut idle, move_target, move_path, aim) in &mut query {
         let is_active = move_target.is_some() || move_path.is_some() || aim.is_some();
         if is_active {
             idle.0 = 0.0;
@@ -95,9 +90,8 @@ pub fn auto_heal(
         }
 
         idle.0 += dt;
-        let threshold = frames_to_secs(unit_registry.idle_time(unit.0));
-        if idle.0 >= threshold && health.current < health.max {
-            health.current = (health.current + heal_rate * dt).min(health.max);
+        if idle.0 >= heal.threshold && health.current < health.max {
+            health.current = (health.current + heal.rate * dt).min(health.max);
         }
     }
 }
@@ -138,18 +132,14 @@ pub fn tick_stun(
 /// `apply_damage` handle the splash and the corpse teardown.
 #[allow(clippy::type_complexity)]
 pub fn tick_kamikaze(
-    unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
-    bombs: Query<(Entity, &UnitType, &TeamId, &Faction, &GlobalTransform), Without<Dying>>,
+    bombs: Query<(Entity, &Kamikaze, &TeamId, &GlobalTransform), Without<Dying>>,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
     mut damage_queue: ResMut<DamageQueue>,
 ) {
-    for (entity, unit, team, _, gtf) in &bombs {
-        let trigger_radius = unit_registry.kamikaze_distance(unit.0);
-        if trigger_radius <= 0.0 {
-            continue;
-        }
+    for (entity, bomb, team, gtf) in &bombs {
+        let trigger_radius = bomb.trigger_radius;
         let trigger_sq = trigger_radius * trigger_radius;
         let self_pos = gtf.translation();
         let mut triggered = false;
@@ -166,7 +156,7 @@ pub fn tick_kamikaze(
             continue;
         }
 
-        let Some(logic_bomb) = weapon_registry.intern("logic_bomb") else {
+        let Some(logic_bomb) = weapon_registry.known().logic_bomb else {
             continue;
         };
         damage_queue.push(PendingDamage {
@@ -244,35 +234,33 @@ pub fn death_system(
             // own `rgb_color` so Virus / Logic Bomb / RetroDeathBig each
             // read differently. Fall back to faction colour for weapons
             // without a configured colour so the ring still pops.
+            //
+            // The resolution is cached per kind (`WeaponRegistry::
+            // bind_units`, run at startup); a registry that was never
+            // bound (tests) resolves it here, per death, as before.
             let pos = gtf.translation();
-            if let Some((weapon_name, weapon_id)) = unit_registry
-                .def(unit.0)
-                .map(|d| d.explode_as.as_str())
-                .filter(|s| !s.is_empty() && weapon_registry.get(s).is_some())
-                .and_then(|s| weapon_registry.intern(s).map(|id| (s, id)))
-            {
+            let resolved;
+            let blast: Option<&DeathBlast> = match weapon_registry.death_blast(unit.0) {
+                Some(cached) => cached,
+                None => {
+                    resolved = DeathBlast::resolve(unit.0, &unit_registry, &weapon_registry);
+                    resolved.as_ref()
+                }
+            };
+            if let Some(blast) = blast {
                 damage_queue.push(PendingDamage {
                     target: Some(entity),
                     attacker: entity,
-                    weapon: weapon_id,
+                    weapon: blast.weapon,
                     impact_pos: pos,
                     attacker_distance: 0.0,
                 });
 
-                let weapon = weapon_registry.get(weapon_name);
-                let radius = weapon.map_or(24.0, |w| w.area_of_effect.max(24.0));
-                let rgb = weapon
-                    .map(|w| w.rgb_color)
-                    .filter(|c| c[0] + c[1] + c[2] > 0.01)
-                    .unwrap_or_else(|| faction.rgb_f32());
-                let ceg_name = weapon
-                    .map(|w| w.explosion_generator.clone())
-                    .unwrap_or_default();
                 explosions.events.push(ExplosionEvent {
                     pos,
-                    rgb,
-                    radius,
-                    ceg_name,
+                    rgb: blast.rgb.unwrap_or_else(|| faction.rgb_f32()),
+                    radius: blast.radius,
+                    ceg_name: blast.ceg_name.clone(),
                 });
             } else {
                 // Even units without an ExplodeAs get a small faction-

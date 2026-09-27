@@ -302,16 +302,18 @@ const INFECTION_RANGE: f32 = 2000.0; // corruptionweapons.tdf [Infection]
 /// distance check: the Signal bomber flies to the target, the Firewall
 /// shield lands wherever the player clicked.
 pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
+    // Ids resolved once at registry load (`KnownWeapons`) — this runs
+    // per pending caster per tick, so no name hashing here.
+    let known = weapons.known();
     let (weapon, fallback) = match kind {
-        UnitKind::Pointer => ("nx", NX_RANGE),
-        UnitKind::Byte => ("MineLauncher", MINELAUNCHER_RANGE),
-        UnitKind::Obelisk => ("Infection", INFECTION_RANGE),
+        UnitKind::Pointer => (known.nx, NX_RANGE),
+        UnitKind::Byte => (known.mine_launcher, MINELAUNCHER_RANGE),
+        UnitKind::Obelisk => (known.infection, INFECTION_RANGE),
         _ => return None,
     };
     Some(
-        weapons
-            .get(weapon)
-            .map(|def| def.range)
+        weapon
+            .map(|id| weapons.by_id(id).range)
             .filter(|r| *r > 0.0)
             .unwrap_or(fallback),
     )
