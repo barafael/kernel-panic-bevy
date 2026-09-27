@@ -23,7 +23,7 @@ impl Plugin for ProfilePlugin {
             return;
         }
         app.init_resource::<Samples>()
-            .add_systems(First, frame_start)
+            .add_systems(First, (frame_start, census).chain())
             .add_systems(FixedFirst, tick_start)
             .add_systems(FixedLast, tick_end)
             .add_systems(Last, report_on_exit);
@@ -41,6 +41,9 @@ struct Samples {
     ticks_this_frame: u32,
     /// Frames that ran more than one sim tick.
     catch_up_frames: u32,
+    census_at: Option<Instant>,
+    /// Longest frame (µs) since the last census line.
+    worst_since_census: u32,
 }
 
 fn frame_start(mut s: ResMut<Samples>) {
@@ -48,11 +51,40 @@ fn frame_start(mut s: ResMut<Samples>) {
     if let Some(started) = s.frame_started.replace(now) {
         let us = now.duration_since(started).as_micros() as u32;
         s.frames.push(us);
+        s.worst_since_census = s.worst_since_census.max(us);
     }
     if s.ticks_this_frame > 1 {
         s.catch_up_frames += 1;
     }
     s.ticks_this_frame = 0;
+}
+
+/// Every two seconds: entity totals and the live effect / unit counts,
+/// so a spike in the frame log can be matched to what was alive.
+fn census(world: &mut World) {
+    let now = Instant::now();
+    let due = {
+        let mut s = world.resource_mut::<Samples>();
+        if s.census_at.is_none_or(|t| now.duration_since(t).as_secs_f32() >= 2.0) {
+            s.census_at = Some(now);
+            true
+        } else {
+            false
+        }
+    };
+    if !due {
+        return;
+    }
+    let worst = std::mem::take(&mut world.resource_mut::<Samples>().worst_since_census) as f32 / 1000.0;
+    let entities = world.entities().len();
+    let units = world.query::<&crate::units::components::UnitType>().iter(world).count();
+    let dying = world.query::<&crate::units::combat::Dying>().iter(world).count();
+    let deaths = world.query::<&crate::units::assets::animation::DeathParticle>().iter(world).count();
+    let fx = crate::units::weapon_fx::effect_counts(world);
+    let pending = world.resource::<crate::units::weapon_fx::PendingExplosions>().events.len();
+    println!(
+        "KP_PROFILE census worst_frame={worst:.1}ms entities={entities} units={units} dying={dying} death_bursts={deaths} pending_explosions={pending} {fx:?}"
+    );
 }
 
 fn tick_start(mut s: ResMut<Samples>) {

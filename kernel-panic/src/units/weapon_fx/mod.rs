@@ -13,6 +13,17 @@ mod tick;
 
 pub use shared::{AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, PendingExplosions};
 
+/// Live effect counts for the `KP_PROFILE` census.
+pub fn effect_counts(world: &mut World) -> [(&'static str, usize); 5] {
+    [
+        ("ceg_particles", world.query::<&ceg::CegParticle>().iter(world).count()),
+        ("ceg_flames", world.query::<&ceg::CegFlame>().iter(world).count()),
+        ("ceg_spikes", world.query::<&ceg::CegSpike>().iter(world).count()),
+        ("ceg_delayed", world.query::<&ceg::CegDelayedSpawn>().iter(world).count()),
+        ("laser_bolts", world.query::<&shared::LaserBolt>().iter(world).count()),
+    ]
+}
+
 use bevy::prelude::*;
 
 use crate::rendering::interpolation::SimPose;
