@@ -22,6 +22,18 @@ pub enum GameState {
 /// once a second (`f % 30 == 25`), never on the first frame.
 const CHECK_INTERVAL: f32 = 1.0;
 
+/// Accumulator for [`check_game_over`], seeded so the first census lands
+/// on sim frame 25 and then every 30 (upstream's `f % 30 == 25`) — and
+/// not on the same tick as the other 1 Hz passes (AI brain at phase 0,
+/// Flow speed recount at phase 15).
+pub struct CheckTimer(f32);
+
+impl Default for CheckTimer {
+    fn default() -> Self {
+        Self(CHECK_INTERVAL - 25.0 / 30.0)
+    }
+}
+
 /// One team's standing for the elimination rule.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct TeamCensus {
@@ -77,7 +89,7 @@ fn outcome(census: &HashMap<u8, TeamCensus>, local: u8) -> Option<GameState> {
 #[allow(clippy::too_many_arguments)]
 pub fn check_game_over(
     time: Res<Time>,
-    mut since_check: Local<f32>,
+    mut since_check: Local<CheckTimer>,
     local: Res<LocalTeam>,
     dismissed: Res<GameOverDismissed>,
     setup: Res<GameSetup>,
@@ -90,11 +102,11 @@ pub fn check_game_over(
     if setup.showcase.is_some() {
         return;
     }
-    *since_check += time.delta_secs();
-    if *since_check < CHECK_INTERVAL {
+    since_check.0 += time.delta_secs();
+    if since_check.0 < CHECK_INTERVAL {
         return;
     }
-    *since_check = 0.0;
+    since_check.0 = 0.0;
 
     // Only seated teams can be eliminated — upstream exempts the Gaia
     // team the same way. Neutral parties such as the map-event eruption

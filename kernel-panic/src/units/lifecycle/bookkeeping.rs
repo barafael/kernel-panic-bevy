@@ -19,7 +19,86 @@ use std::collections::HashMap;
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::content::weapons::WeaponRegistry;
 use crate::units::lifecycle::spawning::Emerging;
+
+/// Kamikaze unit (FBI `Kamikaze=1`, the Logic Bomb): detonates when an
+/// enemy comes within `trigger_radius` elmos (`KamikazeDistance`).
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct Kamikaze {
+    pub trigger_radius: f32,
+}
+
+/// FBI `IdleAutoHeal > 0`: regenerates `rate` HP/s once idle for
+/// `threshold` seconds (`IdleTime` sim frames / 30).
+#[derive(Component, Clone, Copy, Debug)]
+pub struct IdleAutoHeal {
+    pub rate: f32,
+    pub threshold: f32,
+}
+
+/// FBI `RadarDistance > 0`: reveals cloaked enemies within `radius`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct Detector {
+    pub radius: f32,
+}
+
+/// The kind's primary weapon never auto-acquires: unarmed (no weapon,
+/// BuildLaser only, unregistered TDF, `range=0`) or command-fire (NX
+/// Flag, Infection, …). `combat_system` skips these instead of walking
+/// every building and Packet just to `continue`.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct NoAutoTarget;
+
+/// Spring encodes FBI `IdleTime` in sim frames at 30 fps.
+const IDLE_FRAMES_PER_SECOND: f32 = 30.0;
+
+/// Stamps the per-kind markers above on every newly-added unit, from
+/// the registries — the values are constant per kind, so the per-tick
+/// systems query `With<Marker>` instead of resolving every unit's FBI
+/// entry each tick. Runs at the head of Simulate so a unit whose spawn
+/// flushed this tick is tagged before the consumers run.
+pub fn tag_unit_kinds(
+    added: Query<(Entity, &UnitType), Added<UnitType>>,
+    unit_registry: Res<UnitRegistry>,
+    weapon_registry: Res<WeaponRegistry>,
+    mut commands: Commands,
+) {
+    for (entity, unit) in &added {
+        let kind = unit.0;
+        let mut entity = commands.entity(entity);
+        let kamikaze = unit_registry.kamikaze_distance(kind);
+        if kamikaze > 0.0 {
+            entity.insert(Kamikaze {
+                trigger_radius: kamikaze,
+            });
+        }
+        let heal = unit_registry.idle_auto_heal(kind);
+        if heal > 0.0 {
+            entity.insert(IdleAutoHeal {
+                rate: heal,
+                threshold: unit_registry.idle_time(kind) / IDLE_FRAMES_PER_SECOND,
+            });
+        }
+        let radar = unit_registry.radar_distance(kind);
+        if radar > 0.0 {
+            entity.insert(Detector { radius: radar });
+        }
+        // Same resolution `combat_system` applies: `unit_registry.weapon`
+        // already filters BuildLaser; a name missing from the TDFs
+        // resolves to no weapon (range 0).
+        let name = unit_registry.weapon(kind);
+        let auto_targets = !name.is_empty()
+            && weapon_registry
+                .get(name)
+                .is_some_and(|w| w.range != 0.0 && !w.command_fire);
+        if !auto_targets {
+            entity.insert(NoAutoTarget);
+        }
+    }
+}
 
 /// Per-team number of live `kind` units, nanoframes included — the
 /// same census as upstream `Spring.GetTeamUnitsByDefs`. Used by the

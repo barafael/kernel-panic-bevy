@@ -261,8 +261,17 @@ pub struct SpeedBoost(pub f32);
 /// every frame.
 const FLOW_TICK_INTERVAL: f32 = 1.0;
 
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub struct FlowSpeedTicker(pub f32);
+
+impl Default for FlowSpeedTicker {
+    /// Starts half an interval in so the recount lands between the AI
+    /// brain's tick (phase 0) and the game-over census (phase 5/6)
+    /// instead of on the same frame as both.
+    fn default() -> Self {
+        Self(FLOW_TICK_INTERVAL * 0.5)
+    }
+}
 
 /// Periodically recount small buildings per team and update
 /// every Flow's `SpeedBoost` so movement can apply the bonus.

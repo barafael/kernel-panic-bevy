@@ -639,14 +639,23 @@ fn update_one(flyers: &mut [Flyer], others: &[(Entity, Vec3, Vec3)], me: usize, 
     handle_collisions(flyers, me, ground.world_size);
 }
 
-/// Advance a set of aircraft by one sim frame. Exposed for tests; the
-/// ECS wrapper is [`hover_air_system`].
-fn step(flyers: &mut [Flyer], frame: u32, ground: &Ground) {
-    // Positions/speeds the collision-avoidance altitude bump reads.
-    let others: Vec<(Entity, Vec3, Vec3)> = flyers.iter().map(|f| (f.entity, f.pos, f.air.speed)).collect();
+/// Advance a set of aircraft by one sim frame. `others` is scratch for
+/// the frame-start positions/speeds the collision-avoidance altitude
+/// bump reads (a `Local` in [`hover_air_system`], so no per-tick
+/// allocation). Exposed for tests via [`step`].
+fn step_with(flyers: &mut [Flyer], frame: u32, ground: &Ground, others: &mut Vec<(Entity, Vec3, Vec3)>) {
+    others.clear();
+    others.extend(flyers.iter().map(|f| (f.entity, f.pos, f.air.speed)));
     for me in 0..flyers.len() {
-        update_one(flyers, &others, me, frame, ground);
+        update_one(flyers, others, me, frame, ground);
     }
+}
+
+/// [`step_with`] with fresh scratch; the ECS wrapper is
+/// [`hover_air_system`].
+#[cfg(test)]
+fn step(flyers: &mut [Flyer], frame: u32, ground: &Ground) {
+    step_with(flyers, frame, ground, &mut Vec::new());
 }
 
 /// Orientation for a heading and bank angle: roll the level up-vector
@@ -698,6 +707,7 @@ pub fn hover_air_system(
         (Without<Emerging>, Without<Dying>),
     >,
     mut flyers: Local<Vec<Flyer>>,
+    mut others: Local<Vec<(Entity, Vec3, Vec3)>>,
 ) {
     *frame = frame.wrapping_add(1);
     for (entity, kind, stats, tf) in &uninit {
@@ -743,7 +753,7 @@ pub fn hover_air_system(
         heightmap: heightmap.as_deref(),
         world_size,
     };
-    step(&mut flyers, *frame, &ground);
+    step_with(&mut flyers, *frame, &ground, &mut others);
 
     for f in flyers.iter() {
         let Ok((entity, _, mut tf, mut air, target, path, mut queue, ..)) = q.get_mut(f.entity) else {

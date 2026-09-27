@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
 
-use super::definitions::ALL_UNIT_KINDS;
+use super::definitions::{ALL_UNIT_KINDS, UnitKind};
 use super::tdf_loader;
 
 /// Compact identifier for a weapon. `Copy` so it can be cloned freely
@@ -34,6 +34,63 @@ impl WeaponId {
 
 const BUILD_LASER_NAME: &str = "BuildLaser";
 
+/// Ids of the weapons the sim used to look up by name on per-tick paths
+/// (`weapon_registry.get("nx")` per pending caster, `intern("logic_bomb")`
+/// per bomb, the `"SigTerm"` compare per hit). Resolved once when the
+/// weapon's TDF section is inserted; `None` until then, which is exactly
+/// what the name lookup returned.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct KnownWeapons {
+    /// `retroweapons.tdf` `[SigTerm]` — upstream weaponID 168.
+    pub sigterm: Option<WeaponId>,
+    /// Logic Bomb's ExplodeAs / kamikaze detonation.
+    pub logic_bomb: Option<WeaponId>,
+    /// Pointer's NX Flag.
+    pub nx: Option<WeaponId>,
+    /// Byte's Mine Launcher.
+    pub mine_launcher: Option<WeaponId>,
+    /// Obelisk's Infection.
+    pub infection: Option<WeaponId>,
+}
+
+/// A unit kind's FBI `ExplodeAs` resolved for `death_system`: the
+/// self-hit weapon plus the visual explosion derived from its TDF.
+#[derive(Clone, Debug)]
+pub struct DeathBlast {
+    pub weapon: WeaponId,
+    /// Visual ring radius: `area_of_effect`, at least 24 elmos.
+    pub radius: f32,
+    /// The weapon's `rgb_color` when it configures one; `None` → the
+    /// dying unit's faction colour.
+    pub rgb: Option<[f32; 3]>,
+    /// The weapon's `explosiongenerator` (empty when unset).
+    pub ceg_name: String,
+}
+
+impl DeathBlast {
+    /// Resolve `kind`'s `ExplodeAs` against `weapons` the way
+    /// `death_system` used to per death: absent, empty, or unregistered
+    /// names yield `None`.
+    pub fn resolve(
+        kind: UnitKind,
+        units: &super::unit_registry::UnitRegistry,
+        weapons: &WeaponRegistry,
+    ) -> Option<Self> {
+        let name = units.def(kind).map(|d| d.explode_as.as_str())?;
+        if name.is_empty() {
+            return None;
+        }
+        let weapon = weapons.intern(name)?;
+        let def = weapons.by_id(weapon);
+        Some(Self {
+            weapon,
+            radius: def.area_of_effect.max(24.0),
+            rgb: Some(def.rgb_color).filter(|c| c[0] + c[1] + c[2] > 0.01),
+            ceg_name: def.explosion_generator.clone(),
+        })
+    }
+}
+
 #[derive(Resource)]
 pub struct WeaponRegistry {
     /// Indexed by [`WeaponId`]; slot 0 is the build-laser stub.
@@ -43,6 +100,10 @@ pub struct WeaponRegistry {
     /// Lower-case name → id, mirrors `WeaponDefs::get`'s case-insensitive
     /// lookup contract.
     index: HashMap<String, WeaponId>,
+    known: KnownWeapons,
+    /// Per-`UnitKind` (indexed by discriminant) `ExplodeAs` resolution,
+    /// filled by [`Self::bind_units`]; empty until then.
+    death_blasts: Vec<Option<DeathBlast>>,
 }
 
 impl Default for WeaponRegistry {
@@ -57,6 +118,8 @@ impl WeaponRegistry {
             defs: Vec::new(),
             names: Vec::new(),
             index: HashMap::new(),
+            known: KnownWeapons::default(),
+            death_blasts: Vec::new(),
         };
         // Reserve slot 0 for BuildLaser. Stub def stays at engine
         // defaults — the build-laser path special-cases this id before
@@ -104,8 +167,39 @@ impl WeaponRegistry {
         let id = WeaponId(self.defs.len() as u16);
         self.defs.push(def);
         self.names.push(name.to_string());
+        match key.as_str() {
+            "sigterm" => self.known.sigterm = Some(id),
+            "logic_bomb" => self.known.logic_bomb = Some(id),
+            "nx" => self.known.nx = Some(id),
+            "minelauncher" => self.known.mine_launcher = Some(id),
+            "infection" => self.known.infection = Some(id),
+            _ => {}
+        }
         self.index.insert(key, id);
         id
+    }
+
+    /// Ids of the weapons the sim addresses by name (see [`KnownWeapons`]).
+    pub fn known(&self) -> &KnownWeapons {
+        &self.known
+    }
+
+    /// Resolve every unit kind's `ExplodeAs` once (a startup system runs
+    /// this after both registries are loaded) so `death_system` reads a
+    /// `Vec` slot per death instead of two name hashes and a CEG string
+    /// clone. Tests that skip this keep the per-death resolution.
+    pub fn bind_units(&mut self, units: &super::unit_registry::UnitRegistry) {
+        self.death_blasts = ALL_UNIT_KINDS
+            .iter()
+            .map(|&kind| DeathBlast::resolve(kind, units, self))
+            .collect();
+    }
+
+    /// `kind`'s cached [`DeathBlast`] — outer `None` when
+    /// [`Self::bind_units`] has not run, inner `None` when the kind has
+    /// no (registered) `ExplodeAs`.
+    pub fn death_blast(&self, kind: UnitKind) -> Option<Option<&DeathBlast>> {
+        self.death_blasts.get(kind as usize).map(Option::as_ref)
     }
 
     /// Look up a weapon by its TDF section name (case-insensitive).

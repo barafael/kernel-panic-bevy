@@ -150,6 +150,10 @@ impl Plugin for UnitsPlugin {
                     // is 21.
                     (
                         (
+                            // First so every unit whose spawn flushed
+                            // before Simulate carries its kind markers
+                            // (kamikaze, detector, …) this same tick.
+                            bookkeeping::tag_unit_kinds,
                             worm::init_autohold,
                             cloak::update_cloak_detection,
                             spatial::rebuild_spatial_index,
@@ -214,8 +218,9 @@ impl Plugin for UnitsPlugin {
 }
 
 fn validate_registries(
-    weapon_registry: Res<weapons::WeaponRegistry>,
+    mut weapon_registry: ResMut<weapons::WeaponRegistry>,
     unit_registry: Res<unit_registry::UnitRegistry>,
 ) {
     weapon_registry.validate_unit_weapon_bindings(&unit_registry);
+    weapon_registry.bind_units(&unit_registry);
 }

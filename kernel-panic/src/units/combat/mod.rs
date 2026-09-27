@@ -22,6 +22,7 @@ use super::content::definitions::UnitKind;
 use super::components::{TeamId, UnitStats, UnitType};
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
+use super::lifecycle::bookkeeping::NoAutoTarget;
 use super::lifecycle::script_triggers::JustFired;
 use super::mechanics::cloak::{Cloaked, DetectedBy};
 use super::mechanics::worm::{AutoHold, WormSplash, queue_wormsplash};
@@ -392,6 +393,10 @@ pub fn combat_system(
             Without<Dying>,
             Without<super::lifecycle::spawning::Emerging>,
             Without<Stunned>,
+            // Unarmed / command-fire kinds (tagged by
+            // `bookkeeping::tag_unit_kinds`) never reach the pick below;
+            // an untagged unit still takes the `range == 0` exit.
+            Without<NoAutoTarget>,
         ),
     >,
     mut commands: Commands,
@@ -405,6 +410,8 @@ pub fn combat_system(
     mut pieces: PieceLookup,
     target_pick: TargetCachePick,
     mut rng: Local<u32>,
+    // `(dist_sq, entity, pos)` scratch for the deferred LOS pick.
+    mut los_candidates: Local<Vec<(f32, Entity, Vec3)>>,
 ) {
     if *rng == 0 {
         // Seed lazily on first tick so we never produce the all-zero
@@ -560,6 +567,12 @@ pub fn combat_system(
         }
 
         if best.is_none() && !hold_fire {
+            // Direct-fire weapons defer the LOS ray march: candidates
+            // passing the cheap filters are collected, ranked exactly as
+            // the inline pick below ranks them, and ray-marched in that
+            // order — only the winner (and the blocked candidates ahead
+            // of it) pays for `has_line_of_sight`, not the whole crowd.
+            los_candidates.clear();
             spatial.query_radius(attacker_pos, range, |candidate| {
                 if !candidate.hp_positive {
                     return;
@@ -590,14 +603,8 @@ pub fn combat_system(
                 if dist_sq > range_sq {
                     return;
                 }
-                if enforce_los
-                    && let Some(hm) = heightmap.as_deref()
-                    && !hm.has_line_of_sight(
-                        attacker_pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
-                        candidate.pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
-                        LOS_MARGIN,
-                    )
-                {
+                if enforce_los {
+                    los_candidates.push((dist_sq, candidate.entity, candidate.pos));
                     return;
                 }
                 let better = best.is_none_or(|(_, _, d)| {
@@ -611,6 +618,25 @@ pub fn combat_system(
                     best = Some((candidate.entity, candidate.pos, dist_sq));
                 }
             });
+            if enforce_los && let Some(hm) = heightmap.as_deref() {
+                // Stable sort: equal distances keep the scan order, so
+                // the same unit wins as the strict `<` / `>` pick.
+                if prefer_distant {
+                    los_candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+                } else {
+                    los_candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+                }
+                best = los_candidates
+                    .iter()
+                    .find(|(_, _, pos)| {
+                        hm.has_line_of_sight(
+                            attacker_pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
+                            *pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
+                            LOS_MARGIN,
+                        )
+                    })
+                    .map(|&(dist_sq, entity, pos)| (entity, pos, dist_sq));
+            }
         }
 
         let Some((target_entity, target_pos, _)) = best else {
@@ -849,6 +875,8 @@ pub fn attack_ground_system(
             Option<&WeaponBinding>,
             Has<Cloaked>,
             Option<&WormSplash>,
+            Option<&crate::interaction::movement::MoveTarget>,
+            Option<&AimTarget>,
         ),
         Without<Dying>,
     >,
@@ -859,8 +887,18 @@ pub fn attack_ground_system(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
 ) {
-    for (entity, unit_type, gtf, order, deployable, weapon_binding, cloaked, worm_splash) in
-        &attackers
+    for (
+        entity,
+        unit_type,
+        gtf,
+        order,
+        deployable,
+        weapon_binding,
+        cloaked,
+        worm_splash,
+        move_target,
+        aim,
+    ) in &attackers
     {
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
@@ -906,11 +944,19 @@ pub fn attack_ground_system(
         if dist > range {
             // Move toward the target, stopping just inside weapon range so
             // the unit doesn't walk through the blast zone of its own AoE.
+            // The stop point only drifts as the approach bearing changes,
+            // so — like `attack_target_system`'s chase — the goal is
+            // re-issued only once it lags by `CHASE_REPATH_DISTANCE`: a
+            // `MoveTarget` that changes every tick is a full path search
+            // every tick per approaching unit.
             let dir = (order.pos - attacker_pos).normalize_or(Vec3::NEG_Z);
             let stop_at = attacker_pos + dir * (dist - range * 0.85);
-            commands
-                .entity(entity)
-                .insert(crate::interaction::movement::MoveTarget(stop_at));
+            let stale = move_target.is_none_or(|t| t.0.distance(stop_at) > CHASE_REPATH_DISTANCE);
+            if stale {
+                commands
+                    .entity(entity)
+                    .insert(crate::interaction::movement::MoveTarget(stop_at));
+            }
             continue;
         }
 
@@ -923,12 +969,16 @@ pub fn attack_ground_system(
             continue;
         }
 
-        // Aim at ground target so the barrel sweeps visibly.
+        // Aim at ground target so the barrel sweeps visibly. The order
+        // position is fixed, so the stamp is only queued when it is
+        // missing or differs (nothing reads `Changed<AimTarget>`).
         let arc_height = weapon_def.trajectory_height * 0.4;
-        commands.entity(entity).insert(AimTarget {
-            pos: order.pos,
-            arc_height,
-        });
+        if aim.is_none_or(|a| a.pos != order.pos || a.arc_height != arc_height) {
+            commands.entity(entity).insert(AimTarget {
+                pos: order.pos,
+                arc_height,
+            });
+        }
         // Same surfacing rule as `combat_system`: the aim request above
         // decloaks a Worm; the bite waits for it to be out of cover.
         if cloaked {
@@ -1015,6 +1065,7 @@ pub fn attack_target_system(
             Option<&Deployable>,
             Option<&UnitAnimator>,
             Option<&WeaponBinding>,
+            Has<crate::interaction::movement::MoveTarget>,
         ),
         Without<Dying>,
     >,
@@ -1022,7 +1073,9 @@ pub fn attack_target_system(
     move_path_q: Query<&crate::interaction::movement::MovePath>,
     mut commands: Commands,
 ) {
-    for (entity, unit_type, stats, gtf, order, deployable, animator, weapon_binding) in &attackers {
+    for (entity, unit_type, stats, gtf, order, deployable, animator, weapon_binding, has_move) in
+        &attackers
+    {
         // Same deploy / opening gates as `attack_ground_system`.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
             continue;
@@ -1050,11 +1103,14 @@ pub fn attack_target_system(
 
         let Ok(target_gtf) = target_q.get(order.target) else {
             // Target died / despawned: stand down and clear movement.
-            commands
-                .entity(entity)
-                .remove::<AttackTargetOrder>()
-                .remove::<crate::interaction::movement::MoveTarget>()
-                .remove::<crate::interaction::movement::MovePath>();
+            let mut ec = commands.entity(entity);
+            ec.remove::<AttackTargetOrder>();
+            if has_move {
+                ec.remove::<crate::interaction::movement::MoveTarget>();
+            }
+            if move_path_q.contains(entity) {
+                ec.remove::<crate::interaction::movement::MovePath>();
+            }
             continue;
         };
         let target_pos = target_gtf.translation();
@@ -1085,11 +1141,19 @@ pub fn attack_target_system(
                     .insert(crate::interaction::movement::MoveTarget(target_pos));
             }
         } else {
-            // In range: hold position and fire.
-            commands
-                .entity(entity)
-                .remove::<crate::interaction::movement::MoveTarget>()
-                .remove::<crate::interaction::movement::MovePath>();
+            // In range: hold position and fire. Only queue the removals
+            // while there is something to remove — a unit holding in
+            // range would otherwise push two no-op commands every tick.
+            if has_move {
+                commands
+                    .entity(entity)
+                    .remove::<crate::interaction::movement::MoveTarget>();
+            }
+            if move_path_q.contains(entity) {
+                commands
+                    .entity(entity)
+                    .remove::<crate::interaction::movement::MovePath>();
+            }
         }
     }
 }

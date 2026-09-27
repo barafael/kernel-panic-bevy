@@ -549,6 +549,13 @@ pub fn animate_connection_hatch(
         } else {
             0.0
         };
+        // Only (re)issue the move when the target flips: `tick_rig`
+        // carries an in-flight move to its target and flags the rig
+        // dirty itself while it moves. Re-arming the speed every tick
+        // made the resting hatch re-dirty the whole rig each frame.
+        if animator.rig.target_translations[idx][1] == target_y {
+            continue;
+        }
         let rig = &mut animator.rig;
         rig.target_translations[idx][1] = target_y;
         rig.move_speeds[idx][1] = HATCH_SPEED_ELMOS_PER_SEC;
