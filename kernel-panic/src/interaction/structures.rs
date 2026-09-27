@@ -317,6 +317,8 @@ mod tests {
         let bit = h.spawn(UnitKind::Bit, 0, Vec3::new(700.0, 0.0, 600.0));
         h.step();
         h.world.entity_mut(bit).insert(MoveTarget(Vec3::new(900.0, 0.0, 600.0)));
+        // The order requests a path; the service answers it next frame.
+        h.step();
         h.step();
         let path = h.world.get::<MovePath>(bit).unwrap().clone();
         assert!(path.waypoints.len() > 2, "detours: {:?}", path.waypoints);
@@ -357,6 +359,7 @@ mod tests {
         let byte = h.spawn(UnitKind::Byte, 0, Vec3::new(700.0, 0.0, 604.0));
         h.step();
         h.world.entity_mut(byte).insert(MoveTarget(goal));
+        h.step();
         h.step();
         assert_eq!(h.world.get::<MovePath>(byte).unwrap().waypoints.len(), 2, "straight through");
         let mut crushed = false;

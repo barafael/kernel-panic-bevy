@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-use spring_pathfinding::{BlockMask, SearchScratch, SpeedMap, find_path_masked_in};
+use spring_pathfinding::{BlockMask, Path, PathSearch, SearchScratch, SearchStatus, SpeedMap};
 
 use super::selection::Selected;
 use crate::sim::SQUARE_SIZE;
@@ -505,36 +505,72 @@ pub(crate) enum PathOutcome {
     Unreachable,
 }
 
-/// Search a path through the nav bucket matching the unit's `MaxSlope`,
+/// One mover's path request: the search inputs it was issued with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PathRequest {
+    pub kind: UnitKind,
+    pub xsizeh: i32,
+    pub crush_strength: f32,
+    pub from: Vec3,
+    pub to: Vec3,
+}
+
+/// Start a search through the nav bucket matching the unit's `MaxSlope`,
 /// against the structure mask of its MoveDef footprint and crush
-/// strength. `None` means nothing could be decided (no nav grid yet).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn compute_path(
+/// strength. `Err` carries an outcome that needed no search: `None`
+/// when nothing could be decided (no nav grid yet).
+pub(crate) fn begin_path_search(
     scratch: &mut SearchScratch,
     nav_set: Option<&NavGridSet>,
     unit_registry: &UnitRegistry,
-    kind: UnitKind,
-    xsizeh: i32,
-    crush_strength: f32,
-    from: Vec3,
-    to: Vec3,
+    req: &PathRequest,
+) -> Result<PathSearch, Option<PathOutcome>> {
+    let Some(nav) = nav_set else {
+        return Err(None);
+    };
+    let Some(speed_map) = nav.speed_map(unit_registry.max_slope_ratio(req.kind)) else {
+        return Err(None);
+    };
+    let mask = nav.block_mask(req.xsizeh, req.crush_strength);
+    match scratch.begin_search(speed_map, mask, [req.from.x, req.from.z], [req.to.x, req.to.z]) {
+        Ok(search) => Ok(search),
+        Err(path) => Err(Some(path_outcome(path, req.to, nav.revision))),
+    }
+}
+
+/// Expand up to `max_pops` nodes of a search begun by
+/// [`begin_path_search`]; `None` while it is still running.
+pub(crate) fn step_path_search(
+    scratch: &mut SearchScratch,
+    search: &mut PathSearch,
+    nav_set: Option<&NavGridSet>,
+    unit_registry: &UnitRegistry,
+    req: &PathRequest,
     heat: Option<&spring_pathfinding::HeatMap>,
-) -> Option<PathOutcome> {
+    max_pops: usize,
+) -> Option<Option<PathOutcome>> {
     let nav = nav_set?;
-    let speed_map = nav.speed_map(unit_registry.max_slope_ratio(kind))?;
-    let mask = nav.block_mask(xsizeh, crush_strength);
-    let Some(path) = find_path_masked_in(scratch, speed_map, mask, heat, [from.x, from.z], [to.x, to.z]) else {
-        return Some(PathOutcome::Unreachable);
+    let speed_map = nav.speed_map(unit_registry.max_slope_ratio(req.kind))?;
+    let mask = nav.block_mask(req.xsizeh, req.crush_strength);
+    match scratch.step(search, speed_map, mask, heat, max_pops) {
+        SearchStatus::Running => None,
+        SearchStatus::Done(path) => Some(Some(path_outcome(path, req.to, nav.revision))),
+    }
+}
+
+fn path_outcome(path: Option<Path>, to: Vec3, revision: u64) -> PathOutcome {
+    let Some(path) = path else {
+        return PathOutcome::Unreachable;
     };
     let waypoints: Vec<Vec3> = path.points.iter().map(|p| Vec3::new(p[0], 0.0, p[1])).collect();
-    Some(PathOutcome::Route(MovePath {
+    PathOutcome::Route(MovePath {
         // Point 0 is the start position itself.
         current: 1.min(waypoints.len().saturating_sub(1)),
         waypoints,
         goal: to,
         reached_goal: path.reached_goal,
-        revision: nav.revision,
-    }))
+        revision,
+    })
 }
 
 /// Dash-pattern segment lengths (long dash, gap, short dot, gap), in elmos.

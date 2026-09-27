@@ -25,8 +25,8 @@ pub use cost::{
     SQUARE_SIZE, SpeedMap, max_slope_from_degrees, slope_from_rise_run, slope_mod_from_max_slope,
 };
 pub use grid_search::{
-    BlockMask, SearchScratch, find_path, find_path_masked, find_path_masked_in, find_path_with_heat,
-    line_clear, traverse_cells,
+    BlockMask, PathSearch, SearchScratch, SearchStatus, find_path, find_path_masked, find_path_masked_in,
+    find_path_with_heat, line_clear, traverse_cells,
 };
 pub use heat::HeatMap;
 pub use path::Path;

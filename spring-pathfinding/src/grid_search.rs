@@ -227,158 +227,268 @@ pub fn find_path_masked_in(
     src: [f32; 2],
     dst: [f32; 2],
 ) -> Option<Path> {
-    let width = speed_map.width;
-    let height = speed_map.height;
-    if width == 0 || height == 0 {
-        return None;
+    match scratch.begin_search(speed_map, mask, src, dst) {
+        Err(result) => result,
+        Ok(mut search) => match scratch.step(&mut search, speed_map, mask, heat, usize::MAX) {
+            SearchStatus::Done(path) => path,
+            SearchStatus::Running => unreachable!("unbounded step always finishes"),
+        },
     }
+}
 
-    let (sx, sz) = nearest_open(
-        speed_map,
-        mask,
-        world_to_cell(src[0], width),
-        world_to_cell(src[1], height),
-        START_ESCAPE_RINGS,
-    )?;
-    let dx = world_to_cell(dst[0], width);
-    let dz = world_to_cell(dst[1], height);
+/// A search in progress inside a [`SearchScratch`] (see
+/// [`SearchScratch::begin_search`]): the A\* frontier lives in the
+/// scratch, this holds the endpoints and the best-so-far bookkeeping,
+/// so a host can expand a bounded number of nodes per sim frame and
+/// resume next frame — the way QTPFS executes queued searches across
+/// `PathManager::Update` calls — with a result identical to running
+/// the search in one go.
+pub struct PathSearch {
+    src: [f32; 2],
+    dst: [f32; 2],
+    width: u32,
+    height: u32,
+    start: usize,
+    goal: usize,
+    dx: u32,
+    dz: u32,
+    h_scale: f32,
+    best: usize,
+    best_h: f32,
+}
 
-    // Same cell: identical passability by construction, walk straight.
-    if (sx, sz) == (dx, dz) {
-        return Some(Path {
-            points: vec![src, dst],
-            reached_goal: true,
+/// Result of [`SearchScratch::step`].
+pub enum SearchStatus {
+    /// The node budget ran out before the search settled.
+    Running,
+    /// Finished: the path (see [`find_path_masked`]) or `None` when
+    /// the source has no open cell to start from.
+    Done(Option<Path>),
+}
+
+impl SearchScratch {
+    /// Start a search from world-space `src` to `dst`. Only one search
+    /// may be in flight per scratch: beginning another invalidates it.
+    /// `Err` carries a result that needed no search (same cell: a
+    /// straight walk; no open start cell: `None`).
+    pub fn begin_search(
+        &mut self,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        src: [f32; 2],
+        dst: [f32; 2],
+    ) -> Result<PathSearch, Option<Path>> {
+        let width = speed_map.width;
+        let height = speed_map.height;
+        if width == 0 || height == 0 {
+            return Err(None);
+        }
+
+        let Some((sx, sz)) = nearest_open(
+            speed_map,
+            mask,
+            world_to_cell(src[0], width),
+            world_to_cell(src[1], height),
+            START_ESCAPE_RINGS,
+        ) else {
+            return Err(None);
+        };
+        let dx = world_to_cell(dst[0], width);
+        let dz = world_to_cell(dst[1], height);
+
+        // Same cell: identical passability by construction, walk straight.
+        if (sx, sz) == (dx, dz) {
+            return Err(Some(Path {
+                points: vec![src, dst],
+                reached_goal: true,
+            }));
+        }
+
+        // Admissible octile heuristic scaled by the slowest possible travel:
+        // never overestimates because every cell's cost-per-elmo is
+        // `1/speed ≥ 1/max_speed`.
+        let h_scale = 1.0 / speed_map.max_speed();
+        let start_h = octile(sx, sz, dx, dz) * h_scale;
+
+        self.begin((width * height) as usize);
+        let start = cell_idx(sx, sz, width);
+        self.set(start, 0.0, usize::MAX);
+        self.open.push(Open {
+            f: start_h,
+            cell: start,
         });
+
+        Ok(PathSearch {
+            src,
+            dst,
+            width,
+            height,
+            start,
+            goal: cell_idx(dx, dz, width),
+            dx,
+            dz,
+            h_scale,
+            best: start,
+            best_h: start_h,
+        })
     }
 
-    // Admissible octile heuristic scaled by the slowest possible travel:
-    // never overestimates because every cell's cost-per-elmo is
-    // `1/speed ≥ 1/max_speed`.
-    let h_scale = 1.0 / speed_map.max_speed();
-    let heuristic = |x: u32, z: u32| octile(x, z, dx, dz) * h_scale;
+    /// Expand up to `max_pops` frontier nodes of `search`. The maps must
+    /// be the ones the search began on (same grid); their contents may
+    /// have changed in between — the search simply sees the new values
+    /// from here on, as a QTPFS search resumed after a node-layer
+    /// update does.
+    pub fn step(
+        &mut self,
+        search: &mut PathSearch,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        heat: Option<&crate::heat::HeatMap>,
+        max_pops: usize,
+    ) -> SearchStatus {
+        let width = search.width;
+        let height = search.height;
+        let goal = search.goal;
+        let heuristic = |x: u32, z: u32| octile(x, z, search.dx, search.dz) * search.h_scale;
 
-    scratch.begin((width * height) as usize);
-    let start = cell_idx(sx, sz, width);
-    scratch.set(start, 0.0, usize::MAX);
-    scratch.open.push(Open {
-        f: heuristic(sx, sz),
-        cell: start,
-    });
-
-    let goal = cell_idx(dx, dz, width);
-    let mut best = start;
-    let mut best_h = heuristic(sx, sz);
-
-    while let Some(Open { cell, .. }) = scratch.open.pop() {
-        if scratch.is_closed(cell) {
-            continue; // stale heap entry
-        }
-        scratch.close(cell);
-
-        if cell == goal {
-            best = goal;
-            break;
-        }
-
-        let cx = (cell as u32) % width;
-        let cz = (cell as u32) / width;
-        let cell_h = heuristic(cx, cz);
-        if cell_h < best_h {
-            best_h = cell_h;
-            best = cell;
-        }
-
-        let g_here = scratch.node(cell).g_cost;
-
-        for (nx, nz, step_len) in neighbors(cx, cz, width, height) {
-            let n_idx = cell_idx(nx, nz, width);
-            if mask.is_some_and(|m| m.cells[n_idx]) {
-                continue;
+        let mut pops = 0usize;
+        loop {
+            if pops >= max_pops {
+                return SearchStatus::Running;
             }
-            let mut speed = speed_map.speeds[n_idx];
-            if let Some(hm) = heat {
-                let cell_heat = hm.heat[n_idx];
-                if cell_heat > 0.0 {
-                    speed /= 1.0 + cell_heat * HEAT_COST_SOFTNESS;
-                }
+            let Some(Open { cell, .. }) = self.open.pop() else {
+                break;
+            };
+            pops += 1;
+            if self.is_closed(cell) {
+                continue; // stale heap entry
             }
-            if speed <= 0.0 {
-                continue; // impassable
+            self.close(cell);
+
+            if cell == goal {
+                search.best = goal;
+                break;
             }
-            // No corner cutting: diagonals need both orthogonal
-            // neighbours passable. Diagonal steps carry √2·SQUARE_SIZE
-            // length; orthogonals SQUARE_SIZE, so > SQUARE_SIZE + ½
-            // selects exactly the diagonals.
-            if step_len > SQUARE_SIZE + 0.5 {
-                let ax = cell_idx(nx, cz, width);
-                let az = cell_idx(cx, nz, width);
-                let closed = |i: usize| speed_map.speeds[i] <= 0.0 || mask.is_some_and(|m| m.cells[i]);
-                if closed(ax) || closed(az) {
+
+            let cx = (cell as u32) % width;
+            let cz = (cell as u32) / width;
+            let cell_h = heuristic(cx, cz);
+            if cell_h < search.best_h {
+                search.best_h = cell_h;
+                search.best = cell;
+            }
+
+            let g_here = self.node(cell).g_cost;
+
+            for (nx, nz, step_len) in neighbors(cx, cz, width, height) {
+                let n_idx = cell_idx(nx, nz, width);
+                if mask.is_some_and(|m| m.cells[n_idx]) {
                     continue;
                 }
-            }
+                let mut speed = speed_map.speeds[n_idx];
+                if let Some(hm) = heat {
+                    let cell_heat = hm.heat[n_idx];
+                    if cell_heat > 0.0 {
+                        speed /= 1.0 + cell_heat * HEAT_COST_SOFTNESS;
+                    }
+                }
+                if speed <= 0.0 {
+                    continue; // impassable
+                }
+                // No corner cutting: diagonals need both orthogonal
+                // neighbours passable. Diagonal steps carry √2·SQUARE_SIZE
+                // length; orthogonals SQUARE_SIZE, so > SQUARE_SIZE + ½
+                // selects exactly the diagonals.
+                if step_len > SQUARE_SIZE + 0.5 {
+                    let ax = cell_idx(nx, cz, width);
+                    let az = cell_idx(cx, nz, width);
+                    let closed = |i: usize| speed_map.speeds[i] <= 0.0 || mask.is_some_and(|m| m.cells[i]);
+                    if closed(ax) || closed(az) {
+                        continue;
+                    }
+                }
 
-            let g_new = g_here + step_len / speed;
-            if g_new < scratch.node(n_idx).g_cost {
-                scratch.set(n_idx, g_new, cell);
-                scratch.open.push(Open {
-                    f: g_new + heuristic(nx, nz),
-                    cell: n_idx,
-                });
+                let g_new = g_here + step_len / speed;
+                if g_new < self.node(n_idx).g_cost {
+                    self.set(n_idx, g_new, cell);
+                    self.open.push(Open {
+                        f: g_new + heuristic(nx, nz),
+                        cell: n_idx,
+                    });
+                }
             }
         }
-    }
-    // Goal reachable → trace it; otherwise trace the closest reachable
-    // cell and flag the order as failed so the host can refuse it
-    // (upstream `pathingFailed`) instead of parking units at the wall.
-    let reached_goal = scratch.is_closed(goal);
-    let end = if reached_goal { goal } else { best };
-    if end == start {
-        return None;
+        SearchStatus::Done(self.trace(search, speed_map, mask, heat))
     }
 
-    let mut cells: Vec<usize> = Vec::new();
-    let mut cur = end;
-    while cur != usize::MAX {
-        cells.push(cur);
-        if cur == start {
-            break;
+    /// Goal reachable → trace it; otherwise trace the closest reachable
+    /// cell and flag the order as failed so the host can refuse it
+    /// (upstream `pathingFailed`) instead of parking units at the wall.
+    fn trace(
+        &self,
+        search: &PathSearch,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        heat: Option<&crate::heat::HeatMap>,
+    ) -> Option<Path> {
+        let PathSearch {
+            src,
+            dst,
+            width,
+            height,
+            start,
+            goal,
+            ..
+        } = *search;
+        let reached_goal = self.is_closed(goal);
+        let end = if reached_goal { goal } else { search.best };
+        if end == start {
+            return None;
         }
-        cur = match scratch.node(cur).came_from {
-            u32::MAX => usize::MAX,
-            c => c as usize,
+
+        let mut cells: Vec<usize> = Vec::new();
+        let mut cur = end;
+        while cur != usize::MAX {
+            cells.push(cur);
+            if cur == start {
+                break;
+            }
+            cur = match self.node(cur).came_from {
+                u32::MAX => usize::MAX,
+                c => c as usize,
+            };
+        }
+        cells.reverse();
+
+        let world = |cell: usize| -> [f32; 2] {
+            [
+                (((cell as u32) % width) as f32 + 0.5) * SQUARE_SIZE,
+                (((cell as u32) / width) as f32 + 0.5) * SQUARE_SIZE,
+            ]
         };
-    }
-    cells.reverse();
 
-    let world = |cell: usize| -> [f32; 2] {
-        [
-            (((cell as u32) % width) as f32 + 0.5) * SQUARE_SIZE,
-            (((cell as u32) / width) as f32 + 0.5) * SQUARE_SIZE,
-        ]
-    };
+        let mut points: Vec<[f32; 2]> = Vec::with_capacity(cells.len() + 1);
+        points.push(src);
+        // Escaping a closed start cell: walk to the open cell first.
+        if cell_idx(world_to_cell(src[0], width), world_to_cell(src[1], height), width) != start {
+            points.push(world(start));
+        }
+        for &c in &cells[1..] {
+            points.push(world(c));
+        }
+        // Replace the goal cell centre with the exact clicked position so
+        // units arrive where the player pointed.
+        if end == goal {
+            let last = points.last_mut().expect("non-empty");
+            *last = dst;
+        }
 
-    let mut points: Vec<[f32; 2]> = Vec::with_capacity(cells.len() + 1);
-    points.push(src);
-    // Escaping a closed start cell: walk to the open cell first.
-    if cell_idx(world_to_cell(src[0], width), world_to_cell(src[1], height), width) != start {
-        points.push(world(start));
+        smooth(&mut points, speed_map, mask, heat);
+        Some(Path {
+            points,
+            reached_goal,
+        })
     }
-    for &c in &cells[1..] {
-        points.push(world(c));
-    }
-    // Replace the goal cell centre with the exact clicked position so
-    // units arrive where the player pointed.
-    if end == goal {
-        let last = points.last_mut().expect("non-empty");
-        *last = dst;
-    }
-
-    smooth(&mut points, speed_map, mask, heat);
-    Some(Path {
-        points,
-        reached_goal,
-    })
 }
 
 #[derive(Clone, Copy)]
@@ -600,6 +710,36 @@ mod tests {
             let reused = find_path_masked_in(&mut scratch, &map, None, None, src, dst).expect("path");
             assert_eq!(fresh.points, reused.points);
             assert_eq!(fresh.reached_goal, reused.reached_goal);
+        }
+    }
+
+    /// Expanding a search a few nodes at a time (the host's per-frame
+    /// budget) ends in exactly the one-shot path.
+    #[test]
+    fn stepped_search_matches_one_shot() {
+        let mut map = flat(40, 40);
+        for z in 0..30 {
+            map.speeds[(z * 40 + 20) as usize] = 0.0;
+        }
+        for i in 0..5 {
+            for (x, z) in [(30 + i, 30), (30 + i, 34), (30, 30 + i), (34, 30 + i)] {
+                map.speeds[(z * 40 + x) as usize] = 0.0;
+            }
+        }
+        let mut scratch = SearchScratch::default();
+        for (src, dst) in [([20.0, 20.0], [300.0, 40.0]), ([20.0, 300.0], [260.0, 260.0])] {
+            let one_shot = find_path_masked(&map, None, None, src, dst).expect("path");
+            let mut search = scratch.begin_search(&map, None, src, dst).ok().expect("needs a search");
+            let mut steps = 0;
+            let stepped = loop {
+                steps += 1;
+                if let SearchStatus::Done(path) = scratch.step(&mut search, &map, None, None, 7) {
+                    break path.expect("path");
+                }
+            };
+            assert!(steps > 3, "resumed across steps");
+            assert_eq!(one_shot.points, stepped.points);
+            assert_eq!(one_shot.reached_goal, stepped.reached_goal);
         }
     }
 
