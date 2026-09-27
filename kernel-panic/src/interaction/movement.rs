@@ -125,16 +125,9 @@ pub enum QueuedCommand {
     /// Walk to `target`, then return to the origin, repeating. Issued by
     /// the patrol (P) order.
     Patrol(Vec3),
-    /// Walk to `target`, then fight anything hostile on the way. The
-    /// attack-move keybind was removed upstream; the variant remains so
-    /// AI / future keybinds can issue it.
-    #[allow(dead_code)]
+    /// Walk to `target`, then fight anything hostile on the way (Spring
+    /// `CMD.FIGHT`). Issued by the AI; no player keybind.
     AttackMove(Vec3),
-    /// Hold position at `point`, engaging hostile units that come within
-    /// weapon range. The guard keybind was removed upstream; the variant
-    /// remains so AI / future keybinds can issue it.
-    #[allow(dead_code)]
-    Guard(Vec3),
     /// Walk to `pos`, then attack the unit `target` (shift-chained
     /// right-click attack). `pos` is the target's position at enqueue
     /// time, used only for command-line drawing; the live chase targets
@@ -148,10 +141,9 @@ pub enum QueuedCommand {
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
-            QueuedCommand::Move(p)
-            | QueuedCommand::Patrol(p)
-            | QueuedCommand::AttackMove(p)
-            | QueuedCommand::Guard(p) => *p,
+            QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => {
+                *p
+            }
             QueuedCommand::AttackUnit { pos, .. } => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
         }
@@ -361,68 +353,32 @@ pub(crate) fn promote_next_command(
     translation: Vec3,
     mut queue: Option<&mut CommandQueue>,
 ) -> Option<Vec3> {
-    let next = queue.as_deref_mut().and_then(|q| {
-        if q.commands.is_empty() {
-            None
-        } else {
-            Some(q.commands.remove(0))
-        }
-    });
+    let next = queue
+        .as_deref_mut()
+        .filter(|q| !q.commands.is_empty())
+        .map(|q| q.commands.remove(0));
     let goal = next.and_then(|c| match c {
         QueuedCommand::AttackUnit { .. } => None,
         c => Some(c.position()),
     });
+    let mut ec = commands.entity(entity);
     match next {
-        Some(QueuedCommand::Move(pos) | QueuedCommand::Guard(pos)) => {
-            commands
-                .entity(entity)
-                .insert(MoveTarget(pos))
-                .remove::<crate::units::lifecycle::construction::PendingBuild>();
-        }
         Some(QueuedCommand::Patrol(pos)) => {
             // Patrol shuttles between two points forever: the unit
             // just arrived at `pos`'s predecessor, so record where it
             // is now and re-queue that as the opposing waypoint.
             // Mirrors upstream CommandAI.cpp pushing `owner->pos` as
             // the first patrol point when none is queued.
-            let origin = Vec3::new(translation.x, 0.0, translation.z);
-            commands
-                .entity(entity)
-                .insert(MoveTarget(pos))
-                .remove::<crate::units::lifecycle::construction::PendingBuild>();
+            super::install_command(&mut ec, QueuedCommand::Patrol(pos));
             if let Some(queue) = queue {
+                let origin = Vec3::new(translation.x, 0.0, translation.z);
                 queue.commands.push(QueuedCommand::Patrol(origin));
             }
         }
-        Some(QueuedCommand::AttackMove(pos)) => {
-            commands
-                .entity(entity)
-                .insert(MoveTarget(pos))
-                .insert(AttackMoveActive)
-                .remove::<crate::units::lifecycle::construction::PendingBuild>();
-        }
-        Some(QueuedCommand::AttackUnit { target, .. }) => {
-            // Explicit attack supersedes a manual (T) designation,
-            // and the attack system owns movement from here — no
-            // MoveTarget, so the finished leg can't re-route.
-            commands
-                .entity(entity)
-                .remove::<crate::units::lifecycle::construction::PendingBuild>()
-                .remove::<MoveTarget>()
-                .remove::<crate::units::combat::ForcedTarget>()
-                .insert(crate::units::combat::AttackTargetOrder { target });
-        }
-        Some(QueuedCommand::BuildAt { kind, site }) => {
-            commands
-                .entity(entity)
-                .insert(MoveTarget(site))
-                .insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
-        }
+        Some(cmd) => super::install_command(&mut ec, cmd),
         None => {
-            commands.entity(entity).remove::<MoveTarget>();
-            commands.entity(entity).remove::<CommandQueue>();
-            commands
-                .entity(entity)
+            ec.remove::<MoveTarget>()
+                .remove::<CommandQueue>()
                 .remove::<crate::units::lifecycle::construction::PendingBuild>()
                 .remove::<AttackMoveActive>();
         }
@@ -753,7 +709,6 @@ pub fn draw_selected_command_lines(
                     QueuedCommand::Patrol(_) => PATROL_COLOR,
                     QueuedCommand::AttackMove(_) => FIGHT_COLOR,
                     QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
-                    QueuedCommand::Guard(_) => GUARD_COLOR,
                 };
                 draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
                 gizmos.circle(

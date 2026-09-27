@@ -2,10 +2,9 @@
 
 use bevy::prelude::*;
 
-use crate::interaction::movement::{AttackMoveActive, CommandQueue, MovePath, MoveTarget};
+use crate::interaction::movement::QueuedCommand;
 use crate::rng::next_f32;
 use crate::units::content::definitions::UnitKind;
-use crate::units::lifecycle::construction::PendingBuild;
 
 /// Upstream `minifacLimit`: an enemy team with fewer small buildings
 /// than this is weak enough that a big army goes straight for its
@@ -78,19 +77,14 @@ pub fn scatter(target: Vec3, rng: &mut u32) -> Vec3 {
 }
 
 /// Issue a fight order (Spring `CMD.FIGHT`): walk to `target`, but stop
-/// and engage anything hostile in weapon range on the way. Mirrors the
-/// replace branch of the player's attack-move path so the movement
-/// system treats AI and player orders identically.
+/// and engage anything hostile in weapon range on the way. Goes through
+/// the player's replace path so the movement system treats AI and player
+/// orders identically.
 pub fn attack_move(entity: Entity, target: Vec3, commands: &mut Commands) {
-    commands
-        .entity(entity)
-        .insert((
-            MoveTarget(target),
-            AttackMoveActive,
-            CommandQueue::default(),
-        ))
-        .remove::<MovePath>()
-        .remove::<PendingBuild>();
+    crate::interaction::replace_order(
+        &mut commands.entity(entity),
+        QueuedCommand::AttackMove(target),
+    );
 }
 
 #[cfg(test)]

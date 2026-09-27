@@ -654,7 +654,7 @@ pub fn params_for(registry: &UnitRegistry, kind: crate::units::content::definiti
 fn is_move_command(cmd: &QueuedCommand) -> bool {
     matches!(
         cmd,
-        QueuedCommand::Move(_) | QueuedCommand::Patrol(_) | QueuedCommand::AttackMove(_) | QueuedCommand::Guard(_)
+        QueuedCommand::Move(_) | QueuedCommand::Patrol(_) | QueuedCommand::AttackMove(_)
     )
 }
 

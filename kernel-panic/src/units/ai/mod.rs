@@ -45,7 +45,7 @@ use super::{
 };
 use crate::{
     game_setup::AiDifficulty,
-    interaction::movement::{AttackMoveActive, CommandQueue, MovePath, MoveTarget},
+    interaction::movement::{MovePath, MoveTarget, QueuedCommand},
     rng::xorshift32,
     terrain::geovent::{GeoventSmoker, VentClaim},
     units::{
@@ -412,15 +412,10 @@ fn run_constructors(
         };
         let (vent_entity, site) = s.vents.swap_remove(idx);
         vent_positions.swap_remove(idx);
-        commands
-            .entity(ctor.entity)
-            .insert((
-                MoveTarget(site),
-                PendingBuild { kind, site },
-                CommandQueue::default(),
-            ))
-            .remove::<MovePath>()
-            .remove::<AttackMoveActive>();
+        crate::interaction::replace_order(
+            &mut commands.entity(ctor.entity),
+            QueuedCommand::BuildAt { kind, site },
+        );
         // Claim now so neither another constructor this tick nor the
         // player's placement ghost can stack on the same vent.
         commands.entity(vent_entity).insert(VentClaim);

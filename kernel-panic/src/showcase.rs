@@ -22,7 +22,7 @@
 use bevy::prelude::*;
 
 use crate::{
-    interaction::movement::MoveTarget,
+    interaction::movement::{MoveTarget, QueuedCommand},
     terrain::geovent::{GeoventSmoker, VentClaim},
     terrain::heightmap::Heightmap,
     units::{
@@ -258,10 +258,10 @@ pub fn showcase_director(
         }) {
             let site = d.sites[d.build_index];
             let kind = d.builds[d.build_index];
-            commands
-                .entity(entity)
-                .insert(MoveTarget(site))
-                .insert(PendingBuild { kind, site });
+            crate::interaction::replace_order(
+                &mut commands.entity(entity),
+                QueuedCommand::BuildAt { kind, site },
+            );
             d.build_index += 1;
             info!(
                 "Showcase({:?}): builder → {:?} at ({:.0}, {:.0}, {:.0})",

@@ -9,9 +9,7 @@ use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use super::core::{Selected, SelectionSet, ground_hit, unit_hit};
-use crate::interaction::movement::{
-    AttackMoveActive, CommandQueue, GuardTarget, MovePath, MoveTarget, QueuedCommand,
-};
+use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
 use crate::rendering::camera::RtsCamera;
 use crate::units::combat::AttackTargetOrder;
 use crate::units::components::{TeamId, UnitStats, UnitType, is_friendly};
@@ -350,38 +348,9 @@ pub(crate) fn apply_ordered_command(
                 queue.push(cmd);
             });
     } else {
-        // Replace (or enqueue with no active order): install as active order,
-        // reset the queue, and invalidate any computed path. For BuildAt
-        // orders we also stamp PendingBuild so the construction system can
-        // pick the unit up once it has arrived at the site. Any stale
-        // PendingBuild from a previous order is cleared on plain moves.
-        let mut ec = commands.entity(entity);
-        ec.insert(MoveTarget(cmd.position()))
-            .insert(CommandQueue::default())
-            .remove::<MovePath>()
-            .remove::<crate::units::combat::AttackGroundOrder>()
-            .remove::<crate::units::combat::AttackTargetOrder>()
-            .remove::<GuardTarget>()
-            .remove::<AttackMoveActive>()
-            .remove::<crate::units::mechanics::command_fire::PendingCommandFire>();
-        match cmd {
-            QueuedCommand::BuildAt { kind, site } => {
-                ec.insert(crate::units::lifecycle::construction::PendingBuild { kind, site });
-            }
-            QueuedCommand::Move(_) | QueuedCommand::Patrol(_) | QueuedCommand::Guard(_) => {
-                ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
-            }
-            QueuedCommand::AttackMove(_) => {
-                ec.remove::<crate::units::lifecycle::construction::PendingBuild>()
-                    .insert(AttackMoveActive);
-            }
-            QueuedCommand::AttackUnit { target, .. } => {
-                ec.remove::<crate::units::lifecycle::construction::PendingBuild>()
-                    .remove::<MoveTarget>()
-                    .remove::<crate::units::combat::ForcedTarget>()
-                    .insert(crate::units::combat::AttackTargetOrder { target });
-            }
-        }
+        // Replace (or enqueue with no active order): install as active
+        // order behind an empty queue, invalidating any computed path.
+        crate::interaction::replace_order(&mut commands.entity(entity), cmd);
     }
 }
 
