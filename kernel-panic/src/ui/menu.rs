@@ -442,44 +442,69 @@ fn centre_column<'a>(
     }
 }
 
-/// Non-interactive frame (headings, description lines, text blocks).
-/// `frame` draws the original's coloured plate behind the text; `None`
-/// leaves bare text. `justify` aligns multi-line text inside the frame.
-#[allow(clippy::too_many_arguments)]
-fn label(
-    commands: &mut Commands,
-    parent: Entity,
-    text: &str,
-    frame: Option<Color>,
+/// Non-interactive frame (headings, description lines, text blocks),
+/// the counterpart of [`ButtonSpec`]: bare centred text by default,
+/// `frame` draws the original's coloured plate behind it, `justify`
+/// aligns multi-line text inside the frame.
+struct LabelSpec<'a> {
+    text: &'a str,
     font_size: f32,
-    (x, y): (f32, f32),
+    pos: (f32, f32),
     anchor: Anchor,
+    frame: Option<Color>,
     justify: Justify,
-) -> Entity {
-    let text = commands
-        .spawn((
-            Text::new(text),
-            TextColor(TEXT_WHITE),
-            TextFont {
-                font_size,
-                ..default()
-            },
-            TextLayout::new(justify, LineBreak::NoWrap),
-            Pickable::IGNORE,
-        ))
-        .id();
-    let (mut node, transform) = anchored(x, y, anchor);
-    node.padding = frame_padding(font_size);
-    if frame.is_some() {
-        node.border = frame_border(font_size);
+}
+
+impl<'a> LabelSpec<'a> {
+    fn new(text: &'a str, font_size: f32, pos: (f32, f32), anchor: Anchor) -> Self {
+        Self {
+            text,
+            font_size,
+            pos,
+            anchor,
+            frame: None,
+            justify: Justify::Center,
+        }
     }
-    let entity = commands.spawn((node, transform, Pickable::IGNORE)).id();
-    if let Some(color) = frame {
-        commands.entity(entity).insert((fill(color), border(color)));
+
+    fn frame(self, color: Color) -> Self {
+        Self {
+            frame: Some(color),
+            ..self
+        }
     }
-    commands.entity(entity).add_child(text);
-    commands.entity(parent).add_child(entity);
-    entity
+
+    fn justify(self, justify: Justify) -> Self {
+        Self { justify, ..self }
+    }
+
+    fn spawn(self, commands: &mut Commands, parent: Entity) -> Entity {
+        let font_size = self.font_size;
+        let text = commands
+            .spawn((
+                Text::new(self.text),
+                TextColor(TEXT_WHITE),
+                TextFont {
+                    font_size,
+                    ..default()
+                },
+                TextLayout::new(self.justify, LineBreak::NoWrap),
+                Pickable::IGNORE,
+            ))
+            .id();
+        let (mut node, transform) = anchored(self.pos.0, self.pos.1, self.anchor);
+        node.padding = frame_padding(font_size);
+        if self.frame.is_some() {
+            node.border = frame_border(font_size);
+        }
+        let entity = commands.spawn((node, transform, Pickable::IGNORE)).id();
+        if let Some(color) = self.frame {
+            commands.entity(entity).insert((fill(color), border(color)));
+        }
+        commands.entity(entity).add_child(text);
+        commands.entity(parent).add_child(entity);
+        entity
+    }
 }
 
 /// The `Kernel Panic!` title: cyan, top-centre, like the original main
@@ -972,32 +997,27 @@ fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_s
 /// Page heading in the original's style: a blue plate at the top
 /// centre (`AddFrame("Kernel Panic!\n<page>", {x=0.5, y=0.9}, vsy/24, {0,0,1}, "cc")`).
 fn page_heading(commands: &mut Commands, root: Entity, page_size: f32, text: &str) {
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         &format!("Kernel Panic!\n{text}"),
-        Some(NAV_BLUE),
         page_size,
         (0.5, 0.9),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .frame(NAV_BLUE)
+    .spawn(commands, root);
 }
 
 /// Pick a faction to see one of each of its units and buildings built
 /// live on Data_Cache_L1. Laid out like the quick-battle column.
 fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
     page_heading(commands, root, page_size, "Showcase");
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         "Pick a faction to see its full unit tree built live",
-        None,
         page_size * 0.7,
         (0.5, 0.72),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .spawn(commands, root);
     centre_column(
         commands,
         root,
@@ -1123,16 +1143,9 @@ fn settings_page(
             .max()
             .unwrap_or(0);
         let step = ((longest as f32 + 2.5) * glyph).max(0.12);
-        label(
-            commands,
-            root,
-            name,
-            Some(color),
-            size,
-            (0.3, y),
-            Anchor::Rc,
-            Justify::Center,
-        );
+        LabelSpec::new(name, size, (0.3, y), Anchor::Rc)
+            .frame(color)
+            .spawn(commands, root);
         for (j, (text, action, chosen)) in choices.into_iter().enumerate() {
             ButtonSpec::new(
                 &text,
@@ -1151,16 +1164,13 @@ fn settings_page(
     ButtonSpec::new("Back", NAV_BLUE, page_size, (0.5, 0.15), Anchor::Cc, back)
         .min_width(12.0)
         .spawn(commands, root);
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         "Changes apply at once and are kept for next time",
-        None,
         page_size * 0.6,
         (0.5, 0.06),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .spawn(commands, root);
 }
 
 /// Blue `Back` plate, centred on `pos`.
@@ -1201,16 +1211,13 @@ fn quick_skirmish_page(commands: &mut Commands, root: Entity, page_size: f32) {
         ],
     );
     back_button(page_size, (0.5, 0.2), MenuPage::Main).spawn(commands, root);
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         "Click the heading for the advanced setup",
-        None,
         page_size * 0.6,
         (0.5, 0.1),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .spawn(commands, root);
 }
 
 /// The original's `SinglePlayer` advanced page, at its coordinates:
@@ -1327,16 +1334,14 @@ fn advanced_skirmish_page(
         .min_width(12.0)
         .spawn(commands, root);
 
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         &describe_setup(config),
-        Some(DESC_BLUE),
         page_size * 0.8,
         (0.5, 0.05),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .frame(DESC_BLUE)
+    .spawn(commands, root);
 }
 
 /// The original's `ListMap`: two columns of map plates (`lc` at x=10%,
@@ -1344,16 +1349,14 @@ fn advanced_skirmish_page(
 /// — paired with the weighted-random pick like Run!/Back, since long
 /// map names reach into the centre column.
 fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog: &MapCatalog) {
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         "Choose a map:",
-        Some(NAV_BLUE),
         list_size * 28.0 / 24.0,
         (0.5, 0.95),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .frame(NAV_BLUE)
+    .spawn(commands, root);
     let nav_size = list_size * 28.0 / 24.0;
     ButtonSpec::new(
         "Random map",
@@ -1397,16 +1400,9 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
 /// The original's `Credits`: heading plate sitting on y=80%, the credit
 /// lines hanging below it, the engine credit around y=30%, Back at 10%.
 fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
-    label(
-        commands,
-        root,
-        "Kernel Panic!\nCredits:",
-        Some(MEDIUM_GREEN),
-        page_size,
-        (0.5, 0.8),
-        Anchor::Cb,
-        Justify::Center,
-    );
+    LabelSpec::new("Kernel Panic!\nCredits:", page_size, (0.5, 0.8), Anchor::Cb)
+        .frame(MEDIUM_GREEN)
+        .spawn(commands, root);
     const CREDITS: &str = "\
 - Original concept by Boirunner
 - About all the work done by KDR_11k
@@ -1418,36 +1414,21 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 - The Touhou faction characters were inspired by ZUN's works
 - Many thanks to lurker, Quantum, and the rest of #lua crew
 - Reimplementation in Rust + Bevy, from the original Spring mod";
-    label(
-        commands,
-        root,
-        CREDITS,
-        Some(TEAL),
-        page_size * 24.0 / 30.0,
-        (0.5, 0.78),
-        Anchor::Ct,
-        Justify::Left,
-    );
-    label(
-        commands,
-        root,
-        "Spring Engine by:",
-        Some(EXTREME_ORANGE),
-        page_size,
-        (0.5, 0.28),
-        Anchor::Cb,
-        Justify::Center,
-    );
-    label(
-        commands,
-        root,
+    LabelSpec::new(CREDITS, page_size * 24.0 / 30.0, (0.5, 0.78), Anchor::Ct)
+        .frame(TEAL)
+        .justify(Justify::Left)
+        .spawn(commands, root);
+    LabelSpec::new("Spring Engine by:", page_size, (0.5, 0.28), Anchor::Cb)
+        .frame(EXTREME_ORANGE)
+        .spawn(commands, root);
+    LabelSpec::new(
         "Swedish Yankspankers",
-        Some(README_UPDOWN),
         page_size * 24.0 / 30.0,
         (0.5, 0.28),
         Anchor::Ct,
-        Justify::Center,
-    );
+    )
+    .frame(README_UPDOWN)
+    .spawn(commands, root);
     back_button(page_size * 24.0 / 30.0, (0.5, 0.1), MenuPage::Main).spawn(commands, root);
 }
 
@@ -1456,16 +1437,14 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 /// at 30% / 70% along the bottom edge and Back between them.
 fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usize) {
     let page_size = window_h / 24.0;
-    label(
-        commands,
-        root,
+    LabelSpec::new(
         "Kernel_Panic_readme.txt",
-        Some(Color::srgb(1.0, 1.0, 0.5)),
         window_h / 32.0,
         (0.5, 1.0),
         Anchor::Ct,
-        Justify::Center,
-    );
+    )
+    .frame(Color::srgb(1.0, 1.0, 0.5))
+    .spawn(commands, root);
 
     // The original prints 16 px lines at ~1080p; scale with the window.
     let line_px = (window_h / 64.0).max(12.0);
@@ -1783,16 +1762,14 @@ fn maintain_game_over(
     // The original's `GameOverMenu`: result plate at y=70%, then
     // "Keep on playing/watching" ending at x=48% and "Go to Menu"
     // starting at x=52% on the y=25% line; a loss adds Restart above.
-    label(
-        &mut commands,
-        root,
+    LabelSpec::new(
         if won { "You won!" } else { "You lost!" },
-        Some(if won { WON_GREEN } else { LOST_RED }),
         title_size,
         (0.5, 0.7),
         Anchor::Cc,
-        Justify::Center,
-    );
+    )
+    .frame(if won { WON_GREEN } else { LOST_RED })
+    .spawn(&mut commands, root);
     let keep = if won {
         "Keep on playing"
     } else {
