@@ -21,6 +21,7 @@
 //! all state changes live in [`handle_menu_actions`]. The game is never
 //! paused by the Esc menu.
 
+use bevy::ecs::system::SystemParam;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
@@ -518,25 +519,67 @@ struct MenuActionMessage {
     action: MenuAction,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What the menu pages show and the buttons edit: the current page,
+/// the skirmish setup, the readme scroll and the render settings.
+#[derive(SystemParam)]
+struct MenuState<'w> {
+    page: ResMut<'w, MenuPage>,
+    config: ResMut<'w, SkirmishConfig>,
+    readme_scroll: ResMut<'w, ReadmeScroll>,
+    render: ResMut<'w, RenderSettings>,
+}
+
+/// The in-match overlays' open flags (Esc menu, its Settings page, the
+/// game-over panel and its dismissal).
+#[derive(SystemParam)]
+struct Overlays<'w> {
+    esc_open: ResMut<'w, EscMenuOpen>,
+    esc_settings: ResMut<'w, EscSettingsOpen>,
+    game_over_open: ResMut<'w, GameOverOpen>,
+    dismissed: ResMut<'w, GameOverDismissed>,
+}
+
+impl Overlays<'_> {
+    fn close_all(&mut self) {
+        *self.esc_open = EscMenuOpen(false);
+        *self.esc_settings = EscSettingsOpen(false);
+        *self.game_over_open = GameOverOpen(false);
+    }
+}
+
+/// The transitions a button can trigger: app / game state changes, a
+/// match (re)start, quitting.
+#[derive(SystemParam)]
+struct MenuFlow<'w> {
+    app_state: ResMut<'w, NextState<AppState>>,
+    game_state: ResMut<'w, NextState<GameState>>,
+    run_game: MessageWriter<'w, RunGame>,
+    exit: MessageWriter<'w, AppExit>,
+}
+
+/// The render settings as the Settings page draws them: the values and
+/// the sample counts this GPU offers.
+#[derive(SystemParam)]
+struct SettingsView<'w> {
+    render: Res<'w, RenderSettings>,
+    msaa_support: Res<'w, MsaaSupport>,
+}
+
 fn handle_menu_actions(
     mut ev: MessageReader<MenuActionMessage>,
-    mut page: ResMut<MenuPage>,
-    mut config: ResMut<SkirmishConfig>,
-    mut esc_open: ResMut<EscMenuOpen>,
-    mut esc_settings: ResMut<EscSettingsOpen>,
-    mut game_over_open: ResMut<GameOverOpen>,
-    mut dismissed: ResMut<GameOverDismissed>,
-    mut readme_scroll: ResMut<ReadmeScroll>,
-    mut render: ResMut<RenderSettings>,
-    mut app_state: ResMut<NextState<AppState>>,
-    mut game_state: ResMut<NextState<GameState>>,
-    mut run_game: MessageWriter<RunGame>,
-    mut exit: MessageWriter<AppExit>,
+    mut state: MenuState,
+    mut overlays: Overlays,
+    mut flow: MenuFlow,
     catalog: Res<MapCatalog>,
     dev: Res<DevOptions>,
     mut commands: Commands,
 ) {
+    let MenuState {
+        page,
+        config,
+        readme_scroll,
+        render,
+    } = &mut state;
     for msg in ev.read() {
         let action = msg.action;
         // Any config-affecting action invalidates the current page; the
@@ -544,55 +587,51 @@ fn handle_menu_actions(
         match action {
             MenuAction::Goto(p) => {
                 if p == MenuPage::Readme {
-                    *readme_scroll = ReadmeScroll(0);
+                    **readme_scroll = ReadmeScroll(0);
                 }
-                *page = p;
+                **page = p;
             }
             MenuAction::QuickStart(difficulty) => {
                 config.difficulty = difficulty;
                 config.grouping = Grouping::Duel;
                 config.map = None; // weighted random, like RunRandomGame
-                commands.insert_resource(build_setup(&config, &catalog.names()));
+                commands.insert_resource(build_setup(config, &catalog.names()));
                 // No RunGame here — OnEnter(InGame) performs the single
                 // prepare+load pass.
-                app_state.set(AppState::InGame);
+                flow.app_state.set(AppState::InGame);
             }
             MenuAction::StartSkirmish => {
-                commands.insert_resource(build_setup(&config, &catalog.names()));
-                app_state.set(AppState::InGame);
+                commands.insert_resource(build_setup(config, &catalog.names()));
+                flow.app_state.set(AppState::InGame);
             }
             MenuAction::Restart => {
-                run_game.write(RunGame);
-                *esc_open = EscMenuOpen(false);
-                *esc_settings = EscSettingsOpen(false);
-                *game_over_open = GameOverOpen(false);
+                flow.run_game.write(RunGame);
+                overlays.close_all();
             }
             MenuAction::GoToMenu => {
-                app_state.set(AppState::Menu);
-                *esc_open = EscMenuOpen(false);
-                *esc_settings = EscSettingsOpen(false);
-                *game_over_open = GameOverOpen(false);
-                *page = MenuPage::Main;
+                flow.app_state.set(AppState::Menu);
+                overlays.close_all();
+                **page = MenuPage::Main;
                 // Reload the attract-mode demo behind the menu (the real
                 // match's world is torn down by the RunGame handler).
                 commands.insert_resource(demo_setup(&dev));
-                run_game.write(RunGame);
+                flow.run_game.write(RunGame);
             }
             MenuAction::Resume => {
-                *esc_open = EscMenuOpen(false);
-                *esc_settings = EscSettingsOpen(false);
+                *overlays.esc_open = EscMenuOpen(false);
+                *overlays.esc_settings = EscSettingsOpen(false);
             }
             MenuAction::KeepPlaying => {
-                dismissed.0 = true;
-                game_state.set(GameState::Playing);
-                *game_over_open = GameOverOpen(false);
+                overlays.dismissed.0 = true;
+                flow.game_state.set(GameState::Playing);
+                *overlays.game_over_open = GameOverOpen(false);
             }
             MenuAction::Quit => {
                 // Through the app, not `process::exit`: on the web that
                 // is `abort` (a trapped module, frozen canvas), and
                 // natively it would skip destructors such as the
                 // recorder's child process.
-                exit.write(AppExit::Success);
+                flow.exit.write(AppExit::Success);
             }
             MenuAction::CycleYourFaction => {
                 config.your_faction = next_faction(config.your_faction);
@@ -604,20 +643,20 @@ fn handle_menu_actions(
             MenuAction::SetDifficulty(d) => config.difficulty = d,
             MenuAction::PickMap(i) => {
                 config.map = Some(i);
-                *page = MenuPage::AdvancedSkirmish;
+                **page = MenuPage::AdvancedSkirmish;
             }
             MenuAction::PickRandomMap => {
                 config.map = None;
-                *page = MenuPage::AdvancedSkirmish;
+                **page = MenuPage::AdvancedSkirmish;
             }
             MenuAction::ScrollReadme(lines) => {
                 readme_scroll.0 = (readme_scroll.0 as isize + lines as isize).max(0) as usize;
             }
             MenuAction::Showcase(faction) => {
                 commands.insert_resource(showcase_setup(faction));
-                app_state.set(AppState::InGame);
+                flow.app_state.set(AppState::InGame);
             }
-            MenuAction::EscSettings(open) => esc_settings.0 = open,
+            MenuAction::EscSettings(open) => overlays.esc_settings.0 = open,
             // The render settings are applied to the camera and window
             // (and saved) by `rendering::settings::apply_render_settings`
             // on the next frame.
@@ -829,23 +868,33 @@ fn mouse_menu_input(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What the launch-menu pages draw from.
+#[derive(SystemParam)]
+struct LaunchMenuInputs<'w> {
+    catalog: Res<'w, MapCatalog>,
+    config: Res<'w, SkirmishConfig>,
+    readme: Res<'w, ReadmeScroll>,
+    settings: SettingsView<'w>,
+}
+
 fn maintain_launch_menu(
     page: Res<MenuPage>,
     mut commands: Commands,
     existing_root: Query<Entity, With<MenuRoot>>,
     windows: Query<&Window>,
     mut last_page: Local<Option<MenuPage>>,
-    catalog: Res<MapCatalog>,
-    config: Res<SkirmishConfig>,
-    readme: Res<ReadmeScroll>,
-    render: Res<RenderSettings>,
-    msaa_support: Res<MsaaSupport>,
+    inputs: LaunchMenuInputs,
 ) {
+    let LaunchMenuInputs {
+        catalog,
+        config,
+        readme,
+        settings,
+    } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings)
     // changed under it.
-    let stale = config.is_changed() || render.is_changed();
+    let stale = config.is_changed() || settings.render.is_changed();
     if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }
@@ -864,9 +913,9 @@ fn maintain_launch_menu(
         MenuPage::Main => main_menu_page(&mut commands, root, title_size, menu_size),
         MenuPage::QuickSkirmish => quick_skirmish_page(&mut commands, root, page_size),
         MenuPage::AdvancedSkirmish => {
-            advanced_skirmish_page(&mut commands, root, page_size, &config, &catalog.names())
+            advanced_skirmish_page(&mut commands, root, page_size, config, &catalog.names())
         }
-        MenuPage::MapList => map_list_page(&mut commands, root, list_size, &catalog),
+        MenuPage::MapList => map_list_page(&mut commands, root, list_size, catalog),
         MenuPage::Showcase => showcase_page(&mut commands, root, page_size),
         MenuPage::Credits => credits_page(&mut commands, root, page_size),
         MenuPage::Readme => readme_page(&mut commands, root, window.height(), readme.0),
@@ -874,8 +923,7 @@ fn maintain_launch_menu(
             &mut commands,
             root,
             (window.width(), page_size),
-            &render,
-            &msaa_support,
+            settings,
             MenuAction::Goto(MenuPage::Main),
         ),
     }
@@ -980,10 +1028,13 @@ fn settings_page(
     commands: &mut Commands,
     root: Entity,
     (window_width, page_size): (f32, f32),
-    render: &RenderSettings,
-    msaa_support: &MsaaSupport,
+    settings: &SettingsView,
     back: MenuAction,
 ) {
+    let SettingsView {
+        render,
+        msaa_support,
+    } = settings;
     page_heading(commands, root, page_size, "Settings");
 
     let msaa_label = |n: u8| match n {
@@ -1591,12 +1642,10 @@ fn close_all_overlays(
     *game_over = GameOverOpen(false);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn maintain_esc_menu(
     esc_open: Res<EscMenuOpen>,
     esc_settings: Res<EscSettingsOpen>,
-    render: Res<RenderSettings>,
-    msaa_support: Res<MsaaSupport>,
+    settings: SettingsView,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
@@ -1605,7 +1654,7 @@ fn maintain_esc_menu(
     // Redrawn when the overlay opens or closes, when it switches to or
     // from its Settings page, and when a setting changed (its choice
     // rows show the current pick).
-    let now = (esc_open.0, esc_settings.0, *render);
+    let now = (esc_open.0, esc_settings.0, *settings.render);
     if *last == Some(now) {
         return;
     }
@@ -1629,8 +1678,7 @@ fn maintain_esc_menu(
             &mut commands,
             root,
             (window.width(), window.height() / 24.0),
-            &render,
-            &msaa_support,
+            &settings,
             MenuAction::EscSettings(false),
         );
         return;
@@ -1884,7 +1932,6 @@ const PASS_SECONDS: f32 = 9.0;
 const PASS_PITCH: f32 = 0.34;
 const PASS_DISTANCE: f32 = 620.0;
 
-#[allow(clippy::too_many_arguments)]
 fn attract_camera(
     time: Res<Time>,
     mut director: ResMut<AttractCamera>,
