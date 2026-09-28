@@ -147,6 +147,9 @@ fn build_pos(p: Vec2, size: IVec2) -> Vec2 {
 }
 
 /// `FillRowOfBuildPos`: `n` grid-snapped positions stepping from `p`.
+/// Most sites one placement drag may plan (and ghost) per frame.
+const MAX_PLANNED_SITES: usize = 256;
+
 fn fill_row(out: &mut Vec<Vec2>, p: Vec2, step: Vec2, n: i32, size: IVec2) {
     for i in 0..n.max(0) {
         out.push(build_pos(p + step * i as f32, size));
@@ -333,6 +336,10 @@ fn plan(
         _ => vec![end.xz()],
     };
     let single = raws.len() == 1;
+    // A corner-to-corner filled rectangle on a big map plans tens of
+    // thousands of sites (and ghosts, one material each) every drag
+    // frame; the engine's own limit is in that spirit.
+    let raws = raws.into_iter().take(MAX_PLANNED_SITES);
     let mut taken = Vec::new();
     let mut out: Vec<PlannedSite> = Vec::new();
     for raw in raws {

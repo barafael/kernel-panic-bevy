@@ -52,6 +52,9 @@ pub(crate) fn parse_tilemap(smf_data: &[u8], map: &ParsedMap) -> Result<TileMap,
 }
 
 /// Parse all tiles from an SMT file's raw bytes.
+/// Size of the SMT file header preceding the tile data.
+const SMT_HEADER_BYTES: usize = 32;
+
 pub fn parse_smt_tiles(smt_data: &[u8]) -> Result<Vec<Tile>, SmtParseError> {
     let mut cursor = Cursor::new(smt_data);
 
@@ -62,7 +65,10 @@ pub fn parse_smt_tiles(smt_data: &[u8]) -> Result<Vec<Tile>, SmtParseError> {
     })?;
     let num_tiles = usize::try_from(header.num_tiles).unwrap_or(0);
 
-    let mut tiles = Vec::with_capacity(num_tiles);
+    // The header's count is a claim; size the buffer by what the file
+    // can actually hold so a corrupt count cannot request terabytes.
+    let possible = smt_data.len().saturating_sub(SMT_HEADER_BYTES) / TILE_BYTES;
+    let mut tiles = Vec::with_capacity(num_tiles.min(possible));
     let mut tile_buf = [0u8; TILE_BYTES];
 
     for _ in 0..num_tiles {

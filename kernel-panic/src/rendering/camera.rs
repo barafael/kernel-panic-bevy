@@ -1,6 +1,6 @@
 use bevy::{input::mouse::MouseWheel, prelude::*, render::view::Hdr};
 
-use crate::rendering::settings::RenderSettings;
+use crate::rendering::settings::{MsaaSupport, RenderSettings};
 
 /// Marker component for the main RTS camera.
 #[derive(Component)]
@@ -116,7 +116,11 @@ pub struct CameraSettings {
 
 /// The main camera, built from the player's [`RenderSettings`] (MSAA,
 /// bloom); `apply_render_settings` keeps it in step with later changes.
-pub fn spawn_camera(mut commands: Commands, settings: Res<RenderSettings>) {
+pub fn spawn_camera(
+    mut commands: Commands,
+    settings: Res<RenderSettings>,
+    support: Res<MsaaSupport>,
+) {
     let state = RtsCameraState::default();
     let transform = compute_transform_from_state(&state);
 
@@ -125,7 +129,7 @@ pub fn spawn_camera(mut commands: Commands, settings: Res<RenderSettings>) {
             RtsCamera,
             state,
             Camera3d::default(),
-            settings.msaa(),
+            settings.msaa(&support),
             // Default Bevy far plane is 1000, which clips large maps long
             // before the map fog takes over. `apply_fog` sizes the fog to
             // the map diagonal, so push the far plane past any sensible map.

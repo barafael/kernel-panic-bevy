@@ -7,7 +7,9 @@
 
 use bevy::prelude::*;
 
+use crate::units::combat::Dying;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::units::lifecycle::bookkeeping::TotalUnitCount;
 use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
 
 /// Event: the listed unit should deploy to its paired form. The
@@ -21,13 +23,20 @@ pub struct DeployEvent {
 /// its pair with proportional HP at the same position.
 pub fn process_deploy(
     mut events: MessageReader<DeployEvent>,
-    query: Query<(&UnitType, &Faction, &TeamId, &Transform, &Health)>,
+    // `Without<Dying>`: a unit in its death animation must not be
+    // swapped for a fresh pair (the corpse would be resurrected as a
+    // 1 % pair while the death pipeline still owns it).
+    query: Query<(&UnitType, &Faction, &TeamId, &Transform, &Health), Without<Dying>>,
     mut ctx: SpawnContext,
+    mut count: ResMut<TotalUnitCount>,
 ) {
     for event in events.read() {
         let Ok((unit, faction, team, transform, health)) = query.get(event.entity) else {
             continue;
         };
+        if health.current <= 0.0 {
+            continue;
+        }
         let Some(target_kind) = unit.0.deploy_pair() else {
             continue;
         };
@@ -38,7 +47,11 @@ pub fn process_deploy(
         let new_max = ctx.unit_registry.max_health(target_kind);
         let new_current = (new_max * hp_fraction).max(1.0);
 
+        // The pair is spawned in its place; the source skips `Dying`,
+        // so it leaves the unit count here rather than in
+        // `track_dying_units`.
         ctx.commands.entity(event.entity).despawn();
+        count.0 = count.0.saturating_sub(1);
 
         let spawned = spawn_unit(
             target_kind,

@@ -833,7 +833,7 @@ pub fn sync_muzzle_pieces(
         if current != Some(animator.rig.muzzle) {
             commands
                 .entity(entity)
-                .insert(MuzzlePiece(animator.rig.muzzle));
+                .try_insert(MuzzlePiece(animator.rig.muzzle));
         }
     }
 }

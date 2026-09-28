@@ -31,6 +31,7 @@ fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<SmfHeader, SmfParseError> {
     if header.version != SMF_VERSION {
         return Err(SmfParseError::BadVersion(header.version));
     }
+    header.validate_size()?;
     Ok(header)
 }
 

@@ -30,7 +30,7 @@ use crate::game_setup::{
 };
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
-use crate::rendering::settings::{MSAA_CHOICES, RenderSettings, WINDOW_SIZES};
+use crate::rendering::settings::{MsaaSupport, RenderSettings, WINDOW_SIZES};
 use crate::rng::clock_f64;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
@@ -532,6 +532,7 @@ fn handle_menu_actions(
     mut app_state: ResMut<NextState<AppState>>,
     mut game_state: ResMut<NextState<GameState>>,
     mut run_game: MessageWriter<RunGame>,
+    mut exit: MessageWriter<AppExit>,
     catalog: Res<MapCatalog>,
     dev: Res<DevOptions>,
     mut commands: Commands,
@@ -587,7 +588,11 @@ fn handle_menu_actions(
                 *game_over_open = GameOverOpen(false);
             }
             MenuAction::Quit => {
-                std::process::exit(0);
+                // Through the app, not `process::exit`: on the web that
+                // is `abort` (a trapped module, frozen canvas), and
+                // natively it would skip destructors such as the
+                // recorder's child process.
+                exit.write(AppExit::Success);
             }
             MenuAction::CycleYourFaction => {
                 config.your_faction = next_faction(config.your_faction);
@@ -835,6 +840,7 @@ fn maintain_launch_menu(
     config: Res<SkirmishConfig>,
     readme: Res<ReadmeScroll>,
     render: Res<RenderSettings>,
+    msaa_support: Res<MsaaSupport>,
 ) {
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings)
@@ -869,6 +875,7 @@ fn maintain_launch_menu(
             root,
             (window.width(), page_size),
             &render,
+            &msaa_support,
             MenuAction::Goto(MenuPage::Main),
         ),
     }
@@ -879,7 +886,8 @@ fn maintain_launch_menu(
 /// at x=54% (`lb`), stepping down 10% of the screen per button.
 fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_size: f32) {
     title(commands, root, title_size);
-    let entries: [(&str, Color, MenuAction); 7] = [
+    // No Quit on the web: a page has nothing to quit to.
+    let mut entries: Vec<(&str, Color, MenuAction)> = vec![
         (
             "Skirmish",
             BUTTON_GREEN,
@@ -898,8 +906,10 @@ fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_s
             BUTTON_GREEN,
             MenuAction::Goto(MenuPage::Settings),
         ),
-        ("Quit", BUTTON_GREEN, MenuAction::Quit),
     ];
+    if !cfg!(target_arch = "wasm32") {
+        entries.push(("Quit", BUTTON_GREEN, MenuAction::Quit));
+    }
     for (i, (name, color, action)) in entries.into_iter().enumerate() {
         let y = 0.7 - 0.1 * i as f32;
         let (x, anchor) = if i % 2 == 0 {
@@ -971,6 +981,7 @@ fn settings_page(
     root: Entity,
     (window_width, page_size): (f32, f32),
     render: &RenderSettings,
+    msaa_support: &MsaaSupport,
     back: MenuAction,
 ) {
     page_heading(commands, root, page_size, "Settings");
@@ -980,7 +991,8 @@ fn settings_page(
         n => format!("{n}x"),
     };
     let size_label = |(w, h): (u32, u32)| format!("{w}x{h}");
-    let msaa: Vec<Choice> = MSAA_CHOICES
+    let msaa: Vec<Choice> = msaa_support
+        .0
         .iter()
         .map(|&n| (msaa_label(n), MenuAction::SetMsaa(n), render.msaa == n))
         .collect();
@@ -1579,10 +1591,12 @@ fn close_all_overlays(
     *game_over = GameOverOpen(false);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn maintain_esc_menu(
     esc_open: Res<EscMenuOpen>,
     esc_settings: Res<EscSettingsOpen>,
     render: Res<RenderSettings>,
+    msaa_support: Res<MsaaSupport>,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
@@ -1616,6 +1630,7 @@ fn maintain_esc_menu(
             root,
             (window.width(), window.height() / 24.0),
             &render,
+            &msaa_support,
             MenuAction::EscSettings(false),
         );
         return;
@@ -1625,11 +1640,18 @@ fn maintain_esc_menu(
     // screen centre — Save/Load on top (here Resume/Restart; there is no
     // save system), Menu/Restart below (here Menu/Quit) — plus a
     // Settings plate underneath.
+    // On the web there is nothing to quit to: the fourth plate goes
+    // to the menu as well.
+    let (quit_text, quit) = if cfg!(target_arch = "wasm32") {
+        ("Menu", MenuAction::GoToMenu)
+    } else {
+        ("Quit", MenuAction::Quit)
+    };
     for (text, pos, anchor, action) in [
         ("Resume", (0.45, 0.505), Anchor::Rb, MenuAction::Resume),
         ("Restart", (0.55, 0.505), Anchor::Lb, MenuAction::Restart),
         ("Menu", (0.45, 0.5), Anchor::Rt, MenuAction::GoToMenu),
-        ("Quit", (0.55, 0.5), Anchor::Lt, MenuAction::Quit),
+        (quit_text, (0.55, 0.5), Anchor::Lt, quit),
     ] {
         ButtonSpec::new(text, BUTTON_GREEN, size, pos, anchor, action)
             .min_width(22.0)

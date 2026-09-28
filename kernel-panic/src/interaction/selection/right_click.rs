@@ -480,7 +480,13 @@ const MAX_HUNGARIAN_UNITS: usize = 20;
 /// pair whose straight paths cross until none do) for large ones.
 pub(crate) fn assign_formation(units: &[Vec3], nodes: &[Vec3]) -> Vec<usize> {
     let n = units.len().min(nodes.len());
-    let cost = |u: usize, t: usize| units[u].xz().distance(nodes[t].xz());
+    // A non-finite distance (a NaN position) would make every
+    // comparison in `hungarian` false and its search loop endless;
+    // a large finite cost just ranks that pair last.
+    let cost = |u: usize, t: usize| {
+        let d = units[u].xz().distance(nodes[t].xz());
+        if d.is_finite() { d } else { 1.0e12 }
+    };
     if n <= MAX_HUNGARIAN_UNITS {
         hungarian(n, cost)
     } else {

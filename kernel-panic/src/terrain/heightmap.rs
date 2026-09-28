@@ -70,6 +70,9 @@ impl Heightmap {
     /// units floated or sank on ridges. Out-of-bounds queries clamp to
     /// the nearest edge.
     pub fn sample(&self, x: f32, z: f32) -> f32 {
+        if self.width == 0 || self.height == 0 {
+            return 0.0;
+        }
         let gx = (x / self.square_size).clamp(0.0, (self.width - 1) as f32);
         let gz = (z / self.square_size).clamp(0.0, (self.height - 1) as f32);
 
@@ -202,18 +205,23 @@ impl Heightmap {
         let half_z = footprint.y * 0.5;
         let step = self.square_size;
         let mut max_slope = 0.0_f32;
-        let mut x = center.x - half_x;
-        while x <= center.x + half_x {
-            let mut z = center.z - half_z;
-            while z <= center.z + half_z {
+        // Integer sample counts: a float `while x <= end; x += step`
+        // never ends for a non-finite or huge `x` (the add is a no-op).
+        if !(center.is_finite() && footprint.is_finite()) {
+            return max_slope;
+        }
+        let nx = (footprint.x / step).clamp(0.0, 512.0) as i32;
+        let nz = (footprint.y / step).clamp(0.0, 512.0) as i32;
+        for ix in 0..=nx {
+            let x = center.x - half_x + ix as f32 * step;
+            for iz in 0..=nz {
+                let z = center.z - half_z + iz as f32 * step;
                 let n = self.normal(x, z);
                 let slope = (1.0 - n.y.max(0.0)).max(0.0);
                 if slope > max_slope {
                     max_slope = slope;
                 }
-                z += step;
             }
-            x += step;
         }
         max_slope
     }

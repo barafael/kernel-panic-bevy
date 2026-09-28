@@ -229,6 +229,9 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
 /// Lua-composited map (v4 with compositing data) gets no ground texture
 /// at all: its SMT is hidden under `voidGround` and never drawn, so
 /// materializing it would only cost memory.
+/// Largest buffer preallocated from a size claimed inside the file.
+const MAX_PREALLOC: usize = 512 << 20;
+
 pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     let magic = bytes
         .get(..MAGIC.len())
@@ -272,7 +275,9 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
                 .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
             // Exact when the bake pledged the size (0 for older bakes,
             // which then grow the buffer as before).
-            let content_size = decoder.decoder.content_size() as usize;
+            // Capped: the frame header's pledge is a claim from the
+            // file; anything larger grows as it is read.
+            let content_size = (decoder.decoder.content_size() as usize).min(MAX_PREALLOC);
             let mut decoded = Vec::with_capacity(content_size);
             decoder.read_to_end(&mut decoded)?;
             decoded
@@ -305,7 +310,16 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     // buffer (an in-place shift, no second allocation).
     let texture_span = ground_texture
         .map(|t| {
-            let expected = t.width as usize * t.height as usize * 4;
+            // A zero-extent texture would become a zero-sized GPU image
+            // (fatal) and `checked_mul` keeps a bogus size from wrapping.
+            let expected = (t.width as usize)
+                .checked_mul(t.height as usize)
+                .and_then(|n| n.checked_mul(4))
+                .filter(|_| t.width > 0 && t.height > 0)
+                .ok_or(BakedMapError::TextureSizeMismatch {
+                    expected: 0,
+                    actual: t.pixels.0.len(),
+                })?;
             if t.pixels.0.len() != expected {
                 return Err(BakedMapError::TextureSizeMismatch {
                     expected,
@@ -332,6 +346,20 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     };
 
     let header = SmfHeader::new_flat(map_x, map_y, min_height, max_height);
+    header
+        .validate_size()
+        .map_err(|e| BakedMapError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
+    let expected_metal = header.metalmap_width() * header.metalmap_height();
+    if metalmap.len() != expected_metal {
+        return Err(BakedMapError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            SmfParseError::MetalmapTruncated {
+                expected: expected_metal,
+                actual: metalmap.len(),
+            }
+            .to_string(),
+        )));
+    }
     let expected_heights = header.heightmap_len();
     if heights.len() != expected_heights {
         return Err(BakedMapError::Io(std::io::Error::new(

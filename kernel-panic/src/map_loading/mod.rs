@@ -450,6 +450,15 @@ fn despawn_game_world(world: &mut World) {
     for e in persistent.iter(world) {
         keep.insert(e);
     }
+    // In-flight screenshots: the render world answers them a frame or
+    // two later with a plain `insert(Captured)`, which panics on a
+    // despawned entity (the dev shot tools and the recorder capture
+    // right across demo restarts).
+    let mut shots =
+        world.query_filtered::<Entity, With<bevy::render::view::screenshot::Screenshot>>();
+    for e in shots.iter(world) {
+        keep.insert(e);
+    }
 
     // Pull kept roots' descendants into the keep set (camera children,
     // UI trees). One pass builds a parent→children map, then a DFS from
@@ -1149,6 +1158,11 @@ fn configure_map_events(
     heightmap: &Heightmap,
     commands: &mut Commands,
 ) {
+    // Per-map: the previous map's schedule must not carry over (an
+    // eruption clock aimed at Stack_Overflow's starts, a swirl on a
+    // map without one).
+    commands.remove_resource::<crate::map_events::EruptionConfig>();
+    commands.remove_resource::<crate::map_events::CircularFlow>();
     if map_name.eq_ignore_ascii_case("Stack_Overflow") {
         let starts: Vec<Vec3> = map_info
             .start_positions

@@ -192,15 +192,23 @@ impl DevOptions {
             game_shots: var("KP_GAME_SHOTS").map(Into::into),
             game_shots_map: var("KP_GAME_SHOTS_MAP"),
             exit_after: var("KP_EXIT_AFTER").and_then(|n| n.parse().ok()),
-            time_scale: var("KP_TIME_SCALE").and_then(|n| n.parse().ok()),
+            time_scale: var("KP_TIME_SCALE")
+                .and_then(|n| n.parse::<f32>().ok())
+                // Zero, negative, inf or NaN would trip the clock's asserts.
+                .filter(|s| s.is_finite() && *s > 0.0),
             profile: var("KP_PROFILE").is_some_and(|v| v != "0"),
             sim_executor: var("KP_SIM_EXECUTOR"),
-            msaa: var("KP_MSAA").and_then(|n| n.parse().ok()),
+            msaa: var("KP_MSAA")
+                .and_then(|n| n.parse().ok())
+                .filter(|n| matches!(n, 0 | 1 | 2 | 4)),
             bloom: var("KP_BLOOM").map(|v| v != "0"),
-            window: var("KP_WINDOW").and_then(|s| {
-                let (w, h) = s.split_once('x')?;
-                Some((w.parse().ok()?, h.parse().ok()?))
-            }),
+            window: var("KP_WINDOW")
+                .and_then(|s| {
+                    let (w, h) = s.split_once('x')?;
+                    Some((w.parse().ok()?, h.parse().ok()?))
+                })
+                // The window's resize floor: a 0x0 swapchain panics.
+                .filter(|&(w, h)| w >= 320 && h >= 240),
             shot_every: var("KP_SHOT_EVERY").and_then(|n| n.parse().ok()),
             shot_dir: var("KP_SHOT_DIR").map(Into::into),
             attract_distance: var("KP_ATTRACT_DISTANCE").and_then(|n| n.parse().ok()),
@@ -227,8 +235,12 @@ pub fn dev_run_control(
     {
         time.set_relative_speed(scale);
         // Keep the catch-up cap at three sim ticks per frame in game
-        // time, so a scaled run profiles frames like real ones.
-        let cap = time.max_delta().div_f32(scale);
+        // time, so a scaled run profiles frames like real ones. The
+        // cap is derived from the unscaled default once, not from the
+        // live value: another clock writer (the shot / record tools)
+        // would otherwise have it divided again on every re-apply
+        // until `set_max_delta(ZERO)` asserts.
+        let cap = Time::<Virtual>::default().max_delta().div_f32(scale);
         time.set_max_delta(cap);
     }
     if dev.exit_after.is_some_and(|n| *frames >= n) {
@@ -273,7 +285,8 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
                 .filter(|m| !m.is_empty())
                 .collect();
             let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            maps[i % maps.len().max(1)].to_string()
+            maps.get(i % maps.len().max(1))
+                .map_or_else(random_weighted_map, |m| m.to_string())
         });
     GameSetup {
         map,

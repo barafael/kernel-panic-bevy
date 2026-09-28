@@ -329,11 +329,15 @@ fn faction_rgb(faction: Faction) -> (u8, u8, u8) {
 /// side is [`MINIMAP_SIZE`], the other keeps the map's aspect.
 pub fn minimap_dims(world_width: f32, world_depth: f32) -> (u32, u32) {
     let aspect = world_width / world_depth;
-    if aspect >= 1.0 {
+    // A degenerate map (zero or non-finite extent) still gets a square
+    // image: a zero-sized texture is a fatal wgpu error.
+    let aspect = if aspect.is_finite() { aspect } else { 1.0 };
+    let (w, h) = if aspect >= 1.0 {
         (MINIMAP_SIZE as u32, (MINIMAP_SIZE / aspect) as u32)
     } else {
         ((MINIMAP_SIZE * aspect) as u32, MINIMAP_SIZE as u32)
-    }
+    };
+    (w.max(1), h.max(1))
 }
 
 /// Point-sample `source` (`src_w × src_h` RGBA8) down to `dst_w × dst_h`.

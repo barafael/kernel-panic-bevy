@@ -813,7 +813,7 @@ fn open_salvo(
             shot,
             shots_remaining: burst - 1,
             last_frame: frame,
-            next_frame: frame + delay,
+            next_frame: frame.saturating_add(delay),
             salvo_delay: delay,
         });
     }

@@ -17,6 +17,7 @@ use crate::sim::{GAME_SPEED, frames_to_secs};
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
+use crate::units::lifecycle::bookkeeping::TotalUnitCount;
 
 /// Seconds between per-Port buffer increments. Upstream uses 164 sim
 /// frames at 30 fps ≈ 5.47s.
@@ -218,6 +219,7 @@ pub fn process_enter(
     packets: Query<(&UnitType, &TeamId, &Transform, Option<&PacketSpawnStun>), Without<Dying>>,
     teleporters: Query<(&UnitType, &TeamId, &Transform), Without<Dying>>,
     mut buffer: ResMut<PacketBuffer>,
+    mut count: ResMut<TotalUnitCount>,
     mut commands: Commands,
 ) {
     let enter_sq = ENTER_DISTANCE * ENTER_DISTANCE;
@@ -236,7 +238,10 @@ pub fn process_enter(
             .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         if nearest.is_some_and(|d_sq| d_sq <= enter_sq) {
             buffer.add(packet_team.0, 1);
+            // Absorbed, not killed: no `Dying`, so the unit count is
+            // kept exact here.
             commands.entity(event.packet).despawn();
+            count.0 = count.0.saturating_sub(1);
         }
     }
 }

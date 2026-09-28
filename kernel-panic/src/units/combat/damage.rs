@@ -271,7 +271,7 @@ pub fn tick_burst_fire(
             commands.entity(entity).remove::<BurstFire>();
         } else {
             burst.last_frame = frame;
-            burst.next_frame = frame + burst.salvo_delay;
+            burst.next_frame = frame.saturating_add(burst.salvo_delay);
         }
     }
 }

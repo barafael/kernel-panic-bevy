@@ -40,6 +40,28 @@ pub enum SmfParseError {
     FeatureTruncated,
     #[error("metalmap truncated: expected {expected} bytes, got {actual}")]
     MetalmapTruncated { expected: usize, actual: usize },
+    #[error("map size {map_x}x{map_y} squares is outside 1..={MAX_MAP_SQUARES}")]
+    BadMapSize { map_x: i32, map_y: i32 },
+}
+
+/// Largest map side accepted, in squares (Spring's own maps top out at
+/// 4096; the heightmap allocation is `(x+1)(y+1)` floats).
+pub const MAX_MAP_SQUARES: i32 = 16_384;
+
+impl SmfHeader {
+    /// Reject sizes that would over-allocate or underflow downstream
+    /// (`map_x + 1` as usize, `width - 1`, square-count products).
+    pub fn validate_size(&self) -> Result<(), SmfParseError> {
+        let ok = |n: i32| (1..=MAX_MAP_SQUARES).contains(&n);
+        if ok(self.map_x) && ok(self.map_y) {
+            Ok(())
+        } else {
+            Err(SmfParseError::BadMapSize {
+                map_x: self.map_x,
+                map_y: self.map_y,
+            })
+        }
+    }
 }
 
 #[derive(Debug, Error)]

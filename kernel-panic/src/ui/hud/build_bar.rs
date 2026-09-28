@@ -276,7 +276,10 @@ fn bar_mouse_input(
                                 commands.entity(sel).remove::<Selected>();
                             }
                         }
-                        commands.entity(e.entity).insert(Selected);
+                        // `try_insert`: the entries were refreshed last
+                        // frame and can name a unit the map swap just
+                        // despawned.
+                        commands.entity(e.entity).try_insert(Selected);
                         let arm = match e.kind {
                             UnitKind::Terminal => Some(CmdId::Sigterm),
                             UnitKind::Firewall => Some(CmdId::Firewall),

@@ -11,6 +11,8 @@
 
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::render_resource::TextureFormat;
+use bevy::render::renderer::RenderAdapter;
 use bevy::window::{MonitorSelection, PresentMode, PrimaryWindow, WindowMode, WindowResolution};
 
 use crate::game_setup::DevOptions;
@@ -40,6 +42,38 @@ pub struct RenderSettings {
 pub const MSAA_CHOICES: &[u8] = &[1, 4];
 #[cfg(not(target_arch = "wasm32"))]
 pub const MSAA_CHOICES: &[u8] = &[1, 2, 4];
+
+/// The sample counts of [`MSAA_CHOICES`] this GPU can render the HDR
+/// colour target at. wgpu panics on an unsupported count rather than
+/// falling back (the Vulkan spec only guarantees 1 and 4), so the page
+/// offers, and the camera uses, only these.
+#[derive(Resource, Debug, Clone)]
+pub struct MsaaSupport(pub Vec<u8>);
+
+impl Default for MsaaSupport {
+    fn default() -> Self {
+        Self(vec![1])
+    }
+}
+
+/// Startup, before the camera spawns: ask the adapter.
+pub fn probe_msaa_support(world: &mut World) {
+    let counts = world.get_resource::<RenderAdapter>().map_or_else(
+        || vec![1],
+        |adapter| {
+            let flags = adapter
+                .get_texture_format_features(TextureFormat::Rgba16Float)
+                .flags;
+            MSAA_CHOICES
+                .iter()
+                .copied()
+                .filter(|&n| n == 1 || flags.sample_count_supported(n as u32))
+                .collect()
+        },
+    );
+    info!("MSAA sample counts supported on the HDR target: {counts:?}");
+    world.insert_resource(MsaaSupport(counts));
+}
 
 /// Window sizes the Settings page offers for windowed mode.
 pub const WINDOW_SIZES: &[(u32, u32)] = &[(1280, 720), (1600, 900), (1920, 1080), (2560, 1440)];
@@ -81,8 +115,15 @@ impl RenderSettings {
         s
     }
 
-    pub fn msaa(&self) -> Msaa {
-        match self.msaa {
+    /// The camera's `Msaa`; an unsupported count (a saved file from
+    /// another GPU, a dev override) falls back to off.
+    pub fn msaa(&self, support: &MsaaSupport) -> Msaa {
+        let n = if support.0.contains(&self.msaa) {
+            self.msaa
+        } else {
+            1
+        };
+        match n {
             2 => Msaa::Sample2,
             4 => Msaa::Sample4,
             8 => Msaa::Sample8,
@@ -187,6 +228,7 @@ impl RenderSettings {
 /// resource. Every later change is also saved.
 pub fn apply_render_settings(
     settings: Res<RenderSettings>,
+    support: Res<MsaaSupport>,
     mut cameras: Query<(Entity, &mut Msaa, Has<Bloom>), With<RtsCamera>>,
     mut windows: Query<&mut Window, With<PrimaryWindow>>,
     mut commands: Commands,
@@ -204,8 +246,9 @@ pub fn apply_render_settings(
         return;
     }
 
-    if *msaa != settings.msaa() {
-        *msaa = settings.msaa();
+    let wanted = settings.msaa(&support);
+    if *msaa != wanted {
+        *msaa = wanted;
     }
     match (settings.bloom(), has_bloom) {
         (Some(bloom), false) => {

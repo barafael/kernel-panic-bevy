@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod game_setup;
 mod interaction;
 mod map_events;

@@ -245,6 +245,9 @@ impl PathQueue {
                 };
                 self.queued.remove(&entity);
                 let Some(req) = describe(entity) else {
+                    // Order cancelled or mover gone: an earlier answer
+                    // for it would never be collected.
+                    self.results.remove(&entity);
                     continue;
                 };
                 self.stats.searches += 1;
@@ -1983,7 +1986,9 @@ pub fn ground_collision_system(
     crushed.dedup();
     for e in crushed {
         // A crushed feature just vanishes (no unit death explosion).
-        commands.entity(e).insert(Dying { timer: 0.0 });
+        // `try_insert`: weapon damage may have killed and cleaned it
+        // up in this same tick.
+        commands.entity(e).try_insert(Dying { timer: 0.0 });
     }
 }
 

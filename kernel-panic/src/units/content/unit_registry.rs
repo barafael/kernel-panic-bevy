@@ -406,7 +406,11 @@ impl UnitRegistry {
             acc_rate: max_acc(Some(d)).max(0.01),
             dec_rate: max_dec(Some(d)).max(0.01),
             altitude_rate: d.vertical_speed.max(0.01),
-            turn_rate: d.turn_rate * SHORT_ANGLE_TO_RAD,
+            // Non-negative and finite: `clamp(-rate, rate)` panics on
+            // a negative or NaN bound.
+            turn_rate: (d.turn_rate * SHORT_ANGLE_TO_RAD)
+                .abs()
+                .max(SHORT_ANGLE_TO_RAD),
             cruise_alt: d.cruise_alt,
             hover_factor: d.air_hover_factor,
             banking_allowed: d.banking_allowed,

@@ -144,12 +144,14 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
         let name = entry.name().to_string();
         let lower = name.to_ascii_lowercase().replace('\\', "/");
         if lower.ends_with(".smf") && smf_data.is_none() {
-            let mut buf = Vec::with_capacity(entry.size() as usize);
+            // No prealloc from the declared entry size (a claim from
+            // the file); the reader grows the buffer as it goes.
+            let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             smf_name = name;
             smf_data = Some(buf);
         } else if lower.ends_with(".smt") && smt_data.is_none() {
-            let mut buf = Vec::with_capacity(entry.size() as usize);
+            let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             smt_data = Some(buf);
         } else if lower.ends_with(".smd") && smd_text.is_none() {
@@ -164,7 +166,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
                 content: String::from_utf8_lossy(&buf).into_owned(),
             });
         } else if is_bitmap_path(&lower) {
-            let mut buf = Vec::with_capacity(entry.size() as usize);
+            let mut buf = Vec::new();
             entry.read_to_end(&mut buf)?;
             bitmaps.push(BitmapFile {
                 path: name,

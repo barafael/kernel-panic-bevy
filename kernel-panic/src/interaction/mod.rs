@@ -109,7 +109,19 @@ impl Plugin for InteractionPlugin {
         // systems stay on variable dt in `Update` — their commands
         // land in the next sim tick (Bevy runs FixedUpdate before
         // Update within a frame).
-        .add_systems(FixedUpdate, unit_motion_systems())
+        //
+        // Before the gameplay chain, and not merely alongside it: the
+        // movers queue plain `insert`s (orders, paths) on live units,
+        // and `process_deploy` / `process_enter` in Produce despawn
+        // live units without the `Dying` stage. Unordered, both
+        // buffers could meet at one sync point with the despawn
+        // applied first, and an insert on a missing entity panics.
+        // Ordered first, the motion commands are flushed before
+        // Produce runs.
+        .add_systems(
+            FixedUpdate,
+            unit_motion_systems().before(crate::units::GameplaySet::Produce),
+        )
         // Command-line gizmos draw from `Update` on variable dt —
         // pure visuals. No ordering edge against `movement_system`
         // (that lives in `FixedUpdate` now); worst case the overlay

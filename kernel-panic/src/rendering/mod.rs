@@ -16,7 +16,11 @@ impl Plugin for RenderingPlugin {
         app.add_plugins(interpolation::SimInterpolationPlugin)
             .init_resource::<CameraSettings>()
             .init_resource::<MapBounds>()
-            .add_systems(Startup, spawn_camera)
+            .init_resource::<settings::MsaaSupport>()
+            .add_systems(
+                Startup,
+                (settings::probe_msaa_support, spawn_camera).chain(),
+            )
             .add_systems(Update, settings::apply_render_settings)
             .add_systems(
                 Update,

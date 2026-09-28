@@ -43,6 +43,10 @@ pub fn flat_dist_sq(a: Vec3, b: Vec3) -> f32 {
 /// Flat snapshot carried in each cell. Shape chosen so the common
 /// "is-enemy + is-alive + is-in-range + is-flying" check in target picking
 /// runs without any follow-up ECS lookup.
+/// Largest radius `query_radius` scans (elmos): past the biggest map's
+/// diagonal every bucket is visited anyway.
+const MAX_QUERY_RADIUS: f32 = 65_536.0;
+
 #[derive(Clone, Copy)]
 pub struct SpatialEntry {
     pub entity: Entity,
@@ -109,6 +113,13 @@ impl SpatialIndex {
     /// bounding a circle of `radius` around `center`. Callers still need
     /// to do the real distance check — this only trims the outer loop.
     pub fn query_radius<F: FnMut(&SpatialEntry)>(&self, center: Vec3, radius: f32, mut f: F) {
+        // Bounded: an infinite radius (a definition file's `range=inf`)
+        // would otherwise walk the whole i32 cell range.
+        let radius = if radius.is_finite() {
+            radius.min(MAX_QUERY_RADIUS)
+        } else {
+            MAX_QUERY_RADIUS
+        };
         let (x0, z0) = Self::cell(center.x - radius, center.z - radius);
         let (x1, z1) = Self::cell(center.x + radius, center.z + radius);
         for x in x0..=x1 {
