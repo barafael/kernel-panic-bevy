@@ -18,7 +18,7 @@ const WARMUP_FRAMES: u32 = 600;
 /// Frames between page flip and capture (menu rebuild + render).
 const SETTLE_FRAMES: u32 = 30;
 
-const PAGES: [(MenuPage, &str); 7] = [
+const PAGES: [(MenuPage, &str); 8] = [
     (MenuPage::Main, "main"),
     (MenuPage::QuickSkirmish, "quick"),
     (MenuPage::AdvancedSkirmish, "advanced"),
@@ -26,6 +26,7 @@ const PAGES: [(MenuPage, &str); 7] = [
     (MenuPage::Showcase, "showcase"),
     (MenuPage::Credits, "credits"),
     (MenuPage::Readme, "readme"),
+    (MenuPage::Settings, "settings"),
 ];
 
 pub struct MenuShotsPlugin;

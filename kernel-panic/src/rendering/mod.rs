@@ -1,5 +1,6 @@
 pub mod camera;
 pub mod interpolation;
+pub mod settings;
 
 use bevy::prelude::*;
 
@@ -16,6 +17,7 @@ impl Plugin for RenderingPlugin {
             .init_resource::<CameraSettings>()
             .init_resource::<MapBounds>()
             .add_systems(Startup, spawn_camera)
+            .add_systems(Update, settings::apply_render_settings)
             .add_systems(
                 Update,
                 (

@@ -1,5 +1,7 @@
 use bevy::{input::mouse::MouseWheel, prelude::*, render::view::Hdr};
 
+use crate::rendering::settings::RenderSettings;
+
 /// Marker component for the main RTS camera.
 #[derive(Component)]
 pub struct RtsCamera;
@@ -112,24 +114,9 @@ pub struct CameraSettings {
     pub smoothing: f32,
 }
 
-/// Multisampling on the main camera. Native keeps Bevy's default 4×.
-/// On the web (WebGL2 / WebGPU, usually an integrated GPU) HDR + Bloom
-/// at 4× MSAA is the dominant frame cost — the HDR colour target is
-/// rendered at four samples and resolved every frame — so it goes off
-/// there; bloom stays. Web only supports 1 or 4 samples anyway.
-#[cfg(target_arch = "wasm32")]
-const CAMERA_MSAA: Msaa = Msaa::Off;
-#[cfg(not(target_arch = "wasm32"))]
-const CAMERA_MSAA: Msaa = Msaa::Sample4;
-
-pub fn spawn_camera(mut commands: Commands, dev: Res<crate::game_setup::DevOptions>) {
-    let msaa = match dev.msaa {
-        Some(0) | Some(1) => Msaa::Off,
-        Some(2) => Msaa::Sample2,
-        Some(4) => Msaa::Sample4,
-        Some(8) => Msaa::Sample8,
-        _ => CAMERA_MSAA,
-    };
+/// The main camera, built from the player's [`RenderSettings`] (MSAA,
+/// bloom); `apply_render_settings` keeps it in step with later changes.
+pub fn spawn_camera(mut commands: Commands, settings: Res<RenderSettings>) {
     let state = RtsCameraState::default();
     let transform = compute_transform_from_state(&state);
 
@@ -138,7 +125,7 @@ pub fn spawn_camera(mut commands: Commands, dev: Res<crate::game_setup::DevOptio
             RtsCamera,
             state,
             Camera3d::default(),
-            msaa,
+            settings.msaa(),
             // Default Bevy far plane is 1000, which clips large maps long
             // before the map fog takes over. `apply_fog` sizes the fog to
             // the map diagonal, so push the far plane past any sensible map.
@@ -148,10 +135,6 @@ pub fn spawn_camera(mut commands: Commands, dev: Res<crate::game_setup::DevOptio
             }),
             transform,
             Hdr,
-            bevy::post_process::bloom::Bloom {
-                intensity: 0.15,
-                ..default()
-            },
             DistanceFog {
                 color: Color::BLACK,
                 falloff: FogFalloff::Linear {
@@ -162,14 +145,8 @@ pub fn spawn_camera(mut commands: Commands, dev: Res<crate::game_setup::DevOptio
             },
         ))
         .id();
-    // Bloom is the look; `KP_BLOOM=0` drops it for GPU A/B runs.
-    if dev.bloom.unwrap_or(true) {
-        commands
-            .entity(camera)
-            .insert(bevy::post_process::bloom::Bloom {
-                intensity: 0.15,
-                ..default()
-            });
+    if let Some(bloom) = settings.bloom() {
+        commands.entity(camera).insert(bloom);
     }
 }
 

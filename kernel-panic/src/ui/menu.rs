@@ -30,6 +30,7 @@ use crate::game_setup::{
 };
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
+use crate::rendering::settings::{MSAA_CHOICES, RenderSettings, WINDOW_SIZES};
 use crate::rng::clock_f64;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
@@ -41,6 +42,7 @@ impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuPage>()
             .init_resource::<EscMenuOpen>()
+            .init_resource::<EscSettingsOpen>()
             .init_resource::<GameOverOpen>()
             .init_resource::<ReadmeScroll>()
             .init_resource::<DemoDirector>()
@@ -93,10 +95,15 @@ pub(crate) enum MenuPage {
     Showcase,
     Credits,
     Readme,
+    Settings,
 }
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct EscMenuOpen(bool);
+
+/// The Settings page drawn inside the Esc overlay (in a match).
+#[derive(Debug, Default, Deref, DerefMut, Resource)]
+struct EscSettingsOpen(bool);
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct GameOverOpen(bool);
@@ -157,6 +164,13 @@ enum MenuAction {
     ScrollReadme(i32),
     /// Start showcase mode for the given faction.
     Showcase(Faction),
+    /// Esc overlay: show / hide the Settings page.
+    EscSettings(bool),
+    SetMsaa(u8),
+    SetBloom(bool),
+    SetVsync(bool),
+    SetFullscreen(bool),
+    SetWindowSize(u32, u32),
 }
 
 // ---------------------------------------------------------------------------
@@ -510,9 +524,11 @@ fn handle_menu_actions(
     mut page: ResMut<MenuPage>,
     mut config: ResMut<SkirmishConfig>,
     mut esc_open: ResMut<EscMenuOpen>,
+    mut esc_settings: ResMut<EscSettingsOpen>,
     mut game_over_open: ResMut<GameOverOpen>,
     mut dismissed: ResMut<GameOverDismissed>,
     mut readme_scroll: ResMut<ReadmeScroll>,
+    mut render: ResMut<RenderSettings>,
     mut app_state: ResMut<NextState<AppState>>,
     mut game_state: ResMut<NextState<GameState>>,
     mut run_game: MessageWriter<RunGame>,
@@ -547,11 +563,13 @@ fn handle_menu_actions(
             MenuAction::Restart => {
                 run_game.write(RunGame);
                 *esc_open = EscMenuOpen(false);
+                *esc_settings = EscSettingsOpen(false);
                 *game_over_open = GameOverOpen(false);
             }
             MenuAction::GoToMenu => {
                 app_state.set(AppState::Menu);
                 *esc_open = EscMenuOpen(false);
+                *esc_settings = EscSettingsOpen(false);
                 *game_over_open = GameOverOpen(false);
                 *page = MenuPage::Main;
                 // Reload the attract-mode demo behind the menu (the real
@@ -561,6 +579,7 @@ fn handle_menu_actions(
             }
             MenuAction::Resume => {
                 *esc_open = EscMenuOpen(false);
+                *esc_settings = EscSettingsOpen(false);
             }
             MenuAction::KeepPlaying => {
                 dismissed.0 = true;
@@ -592,6 +611,18 @@ fn handle_menu_actions(
             MenuAction::Showcase(faction) => {
                 commands.insert_resource(showcase_setup(faction));
                 app_state.set(AppState::InGame);
+            }
+            MenuAction::EscSettings(open) => esc_settings.0 = open,
+            // The render settings are applied to the camera and window
+            // (and saved) by `rendering::settings::apply_render_settings`
+            // on the next frame.
+            MenuAction::SetMsaa(n) => render.msaa = n,
+            MenuAction::SetBloom(on) => render.bloom = on,
+            MenuAction::SetVsync(on) => render.vsync = on,
+            MenuAction::SetFullscreen(on) => render.fullscreen = on,
+            MenuAction::SetWindowSize(w, h) => {
+                render.window_size = (w, h);
+                render.fullscreen = false;
             }
         }
     }
@@ -803,8 +834,13 @@ fn maintain_launch_menu(
     catalog: Res<MapCatalog>,
     config: Res<SkirmishConfig>,
     readme: Res<ReadmeScroll>,
+    render: Res<RenderSettings>,
 ) {
-    if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() {
+    // A page redraws when it is entered, and when the configuration it
+    // shows (the skirmish setup's choice rows, the render settings)
+    // changed under it.
+    let stale = config.is_changed() || render.is_changed();
+    if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }
     *last_page = Some(*page);
@@ -828,6 +864,13 @@ fn maintain_launch_menu(
         MenuPage::Showcase => showcase_page(&mut commands, root, page_size),
         MenuPage::Credits => credits_page(&mut commands, root, page_size),
         MenuPage::Readme => readme_page(&mut commands, root, window.height(), readme.0),
+        MenuPage::Settings => settings_page(
+            &mut commands,
+            root,
+            (window.width(), page_size),
+            &render,
+            MenuAction::Goto(MenuPage::Main),
+        ),
     }
 }
 
@@ -836,7 +879,7 @@ fn maintain_launch_menu(
 /// at x=54% (`lb`), stepping down 10% of the screen per button.
 fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_size: f32) {
     title(commands, root, title_size);
-    let entries: [(&str, Color, MenuAction); 6] = [
+    let entries: [(&str, Color, MenuAction); 7] = [
         (
             "Skirmish",
             BUTTON_GREEN,
@@ -850,6 +893,11 @@ fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_s
         ("Showcase", EASY_CYAN, MenuAction::Goto(MenuPage::Showcase)),
         ("Credits", BUTTON_GREEN, MenuAction::Goto(MenuPage::Credits)),
         ("Readme", BUTTON_GREEN, MenuAction::Goto(MenuPage::Readme)),
+        (
+            "Settings",
+            BUTTON_GREEN,
+            MenuAction::Goto(MenuPage::Settings),
+        ),
         ("Quit", BUTTON_GREEN, MenuAction::Quit),
     ];
     for (i, (name, color, action)) in entries.into_iter().enumerate() {
@@ -907,6 +955,149 @@ fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
         ],
     );
     back_button(page_size, (0.5, 0.2), MenuPage::Main).spawn(commands, root);
+}
+
+/// One option of a Settings row: label, action, whether it is the
+/// current pick.
+type Choice = (String, MenuAction, bool);
+
+/// The Settings page: one choice row per render setting, drawn like the
+/// advanced page's grouping / difficulty rows (the current pick
+/// brightened), each taking effect on the next frame. `back` is the
+/// row's exit: the main page in the launch menu, the Esc overlay in a
+/// match.
+fn settings_page(
+    commands: &mut Commands,
+    root: Entity,
+    (window_width, page_size): (f32, f32),
+    render: &RenderSettings,
+    back: MenuAction,
+) {
+    page_heading(commands, root, page_size, "Settings");
+
+    let msaa_label = |n: u8| match n {
+        1 => "Off".to_string(),
+        n => format!("{n}x"),
+    };
+    let size_label = |(w, h): (u32, u32)| format!("{w}x{h}");
+    let msaa: Vec<Choice> = MSAA_CHOICES
+        .iter()
+        .map(|&n| (msaa_label(n), MenuAction::SetMsaa(n), render.msaa == n))
+        .collect();
+    let sizes: Vec<Choice> = WINDOW_SIZES
+        .iter()
+        .map(|&(w, h)| {
+            (
+                size_label((w, h)),
+                MenuAction::SetWindowSize(w, h),
+                !render.fullscreen && render.window_size == (w, h),
+            )
+        })
+        .collect();
+    let on_off = |action: fn(bool) -> MenuAction, on: bool| {
+        vec![
+            ("On".to_string(), action(true), on),
+            ("Off".to_string(), action(false), !on),
+        ]
+    };
+    let display = vec![
+        (
+            "Fullscreen".to_string(),
+            MenuAction::SetFullscreen(true),
+            render.fullscreen,
+        ),
+        (
+            "Windowed".to_string(),
+            MenuAction::SetFullscreen(false),
+            !render.fullscreen,
+        ),
+    ];
+
+    // Web: the canvas is sized by the page, so no window rows.
+    let rows: Vec<(&str, Color, Vec<Choice>)> = if cfg!(target_arch = "wasm32") {
+        vec![
+            ("Antialiasing", EASY_CYAN, msaa),
+            (
+                "Bloom",
+                MEDIUM_GREEN,
+                on_off(MenuAction::SetBloom, render.bloom),
+            ),
+            (
+                "VSync",
+                HARD_YELLOW,
+                on_off(MenuAction::SetVsync, render.vsync),
+            ),
+        ]
+    } else {
+        vec![
+            ("Antialiasing", EASY_CYAN, msaa),
+            (
+                "Bloom",
+                MEDIUM_GREEN,
+                on_off(MenuAction::SetBloom, render.bloom),
+            ),
+            (
+                "VSync",
+                HARD_YELLOW,
+                on_off(MenuAction::SetVsync, render.vsync),
+            ),
+            ("Display", EXTREME_ORANGE, display),
+            ("Window", MAP_GREEN, sizes),
+        ]
+    };
+
+    // Row label on the left (`rc` at x=30%), its choices stepping right
+    // from x=34% in even boxes sized to the row's longest label; rows
+    // 10% apart down from y=70%.
+    let size = page_size * 0.85;
+    // A monospace glyph is ~0.6 em wide; plus the frame's padding.
+    let glyph = 0.6 * size / window_width;
+    for (i, (name, color, choices)) in rows.into_iter().enumerate() {
+        let y = 0.7 - 0.1 * i as f32;
+        let longest = choices
+            .iter()
+            .map(|(text, _, _)| text.chars().count())
+            .max()
+            .unwrap_or(0);
+        let step = ((longest as f32 + 2.5) * glyph).max(0.12);
+        label(
+            commands,
+            root,
+            name,
+            Some(color),
+            size,
+            (0.3, y),
+            Anchor::Rc,
+            Justify::Center,
+        );
+        for (j, (text, action, chosen)) in choices.into_iter().enumerate() {
+            ButtonSpec::new(
+                &text,
+                color,
+                size,
+                (0.34 + step * j as f32, y),
+                Anchor::Lc,
+                action,
+            )
+            .min_width(100.0 * (step - 0.01))
+            .chosen(chosen)
+            .spawn(commands, root);
+        }
+    }
+
+    ButtonSpec::new("Back", NAV_BLUE, page_size, (0.5, 0.15), Anchor::Cc, back)
+        .min_width(12.0)
+        .spawn(commands, root);
+    label(
+        commands,
+        root,
+        "Changes apply at once and are kept for next time",
+        None,
+        page_size * 0.6,
+        (0.5, 0.06),
+        Anchor::Cc,
+        Justify::Center,
+    );
 }
 
 /// Blue `Back` plate, centred on `pos`.
@@ -1344,10 +1535,16 @@ fn readme_lines() -> Vec<String> {
 fn esc_toggle(
     keys: Res<ButtonInput<KeyCode>>,
     mut esc_open: ResMut<EscMenuOpen>,
+    mut esc_settings: ResMut<EscSettingsOpen>,
     game_over_open: Res<GameOverOpen>,
 ) {
     if keys.just_pressed(KeyCode::Escape) && !game_over_open.0 {
-        esc_open.0 = !esc_open.0;
+        if esc_settings.0 {
+            // Back out of the Settings page to the overlay first.
+            esc_settings.0 = false;
+        } else {
+            esc_open.0 = !esc_open.0;
+        }
     }
 }
 
@@ -1372,22 +1569,33 @@ fn despawn_launch_menu(
     }
 }
 
-fn close_all_overlays(mut esc_open: ResMut<EscMenuOpen>, mut game_over: ResMut<GameOverOpen>) {
+fn close_all_overlays(
+    mut esc_open: ResMut<EscMenuOpen>,
+    mut esc_settings: ResMut<EscSettingsOpen>,
+    mut game_over: ResMut<GameOverOpen>,
+) {
     *esc_open = EscMenuOpen(false);
+    *esc_settings = EscSettingsOpen(false);
     *game_over = GameOverOpen(false);
 }
 
 fn maintain_esc_menu(
     esc_open: Res<EscMenuOpen>,
+    esc_settings: Res<EscSettingsOpen>,
+    render: Res<RenderSettings>,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
-    mut last: Local<bool>,
+    mut last: Local<Option<(bool, bool, RenderSettings)>>,
 ) {
-    if *last == esc_open.0 {
+    // Redrawn when the overlay opens or closes, when it switches to or
+    // from its Settings page, and when a setting changed (its choice
+    // rows show the current pick).
+    let now = (esc_open.0, esc_settings.0, *render);
+    if *last == Some(now) {
         return;
     }
-    *last = esc_open.0;
+    *last = Some(now);
     for e in &existing_root {
         // Only despawn Esc-menu roots (game-over panel has its own tag on
         // the same marker set; disambiguated below by GameOverPanel).
@@ -1400,11 +1608,23 @@ fn maintain_esc_menu(
         return;
     };
     let size = window.height() / 14.0;
+    let root = spawn_backdrop(&mut commands, OVERLAY_GLASS);
+
+    if esc_settings.0 {
+        settings_page(
+            &mut commands,
+            root,
+            (window.width(), window.height() / 24.0),
+            &render,
+            MenuAction::EscSettings(false),
+        );
+        return;
+    }
 
     // The original's `SaveLoadMenu`: four big plates meeting around the
     // screen centre — Save/Load on top (here Resume/Restart; there is no
-    // save system), Menu/Restart below (here Menu/Quit).
-    let root = spawn_backdrop(&mut commands, OVERLAY_GLASS);
+    // save system), Menu/Restart below (here Menu/Quit) — plus a
+    // Settings plate underneath.
     for (text, pos, anchor, action) in [
         ("Resume", (0.45, 0.505), Anchor::Rb, MenuAction::Resume),
         ("Restart", (0.55, 0.505), Anchor::Lb, MenuAction::Restart),
@@ -1415,6 +1635,16 @@ fn maintain_esc_menu(
             .min_width(22.0)
             .spawn(&mut commands, root);
     }
+    ButtonSpec::new(
+        "Settings",
+        NAV_BLUE,
+        size * 0.6,
+        (0.5, 0.32),
+        Anchor::Ct,
+        MenuAction::EscSettings(true),
+    )
+    .min_width(20.0)
+    .spawn(&mut commands, root);
 }
 
 #[derive(Component)]

@@ -23,8 +23,7 @@ use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
 #[cfg(not(target_arch = "wasm32"))]
-use bevy::window::MonitorSelection;
-use bevy::window::{PresentMode, WindowMode, WindowResizeConstraints};
+use bevy::window::WindowResizeConstraints;
 
 use interaction::InteractionPlugin;
 use map_events::MapEventsPlugin;
@@ -39,6 +38,7 @@ fn main() {
     // Dev options come from the environment; the dev-tool plugins read
     // them at build, and the unit bake runs before any App exists.
     let dev_options = game_setup::DevOptions::from_env();
+    let render_settings = rendering::settings::RenderSettings::startup(&dev_options);
 
     // `KP_BAKE_UNITS=<out>`: write the unit bundle from the upstream
     // checkout and exit (see `units::content::bundle`, `unit-bundle.md`).
@@ -140,11 +140,10 @@ fn main() {
                     // the render thread back on, an uncapped
                     // Immediate loop presents frames at uneven
                     // intervals, which reads as a stuttering camera.
-                    present_mode: if cfg!(target_os = "windows") {
-                        PresentMode::Immediate
-                    } else {
-                        PresentMode::AutoVsync
-                    },
+                    // Mode, size and vsync come from the player's saved
+                    // settings (`rendering::settings`); the Settings
+                    // page changes them live from then on.
+                    present_mode: render_settings.present_mode(),
                     // TODO(windows-resize): launch directly into
                     // borderless fullscreen on the primary monitor.
                     // Prior attempts (windowed + Startup-maximize,
@@ -162,37 +161,8 @@ fn main() {
                     // for an RTS; swap back to `Windowed` once the
                     // upstream fix lands so the "windowed-maximize"
                     // UX returns.
-                    // Native: borderless fullscreen on the primary
-                    // monitor. Web: windowed + canvas-fill — there
-                    // is no monitor selection on wasm, and the
-                    // canvas is sized by the page.
-                    mode: {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            if dev_options.window.is_some() {
-                                WindowMode::Windowed
-                            } else {
-                                WindowMode::BorderlessFullscreen(MonitorSelection::Primary)
-                            }
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            WindowMode::Windowed
-                        }
-                    },
-                    resolution: {
-                        #[cfg(not(target_arch = "wasm32"))]
-                        {
-                            dev_options
-                                .window
-                                .map(|(w, h)| bevy::window::WindowResolution::new(w, h))
-                                .unwrap_or_default()
-                        }
-                        #[cfg(target_arch = "wasm32")]
-                        {
-                            Default::default()
-                        }
-                    },
+                    mode: render_settings.window_mode(),
+                    resolution: render_settings.resolution(),
                     // Web: fill the Trunk page's canvas element.
                     #[cfg(target_arch = "wasm32")]
                     fit_canvas_to_parent: true,
@@ -214,6 +184,7 @@ fn main() {
     )
     // Before the game plugins: the dev-tool plugins read it at build.
     .insert_resource(dev_options)
+    .insert_resource(render_settings)
     .add_plugins((
         RenderingPlugin,
         InteractionPlugin,
