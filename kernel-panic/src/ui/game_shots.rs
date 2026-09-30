@@ -7,8 +7,10 @@
 //!
 //! 1. `<dir>/homebase.png` — the Kernel selected with a few units queued
 //!    (command panel with queue counts, build bar, tooltip box);
-//! 2. `<dir>/constructor.png` — a freshly built Assembler selected;
-//! 3. `<dir>/constructor_placing.png` — the same with the Socket build
+//! 2. `<dir>/esc.png` and `<dir>/esc_settings.png` — the Esc overlay and
+//!    its Settings page over the running match;
+//! 3. `<dir>/constructor.png` — a freshly built Assembler selected;
+//! 4. `<dir>/constructor_placing.png` — the same with the Socket build
 //!    command armed (active-button highlight, datavent highlight);
 //!
 //! and exits. Game time runs fast while waiting for the Assembler. Not
@@ -16,6 +18,7 @@
 
 use bevy::prelude::*;
 
+use super::menu::{EscMenuOpen, EscSettingsOpen};
 use super::save_screenshot;
 use crate::game_setup::{AppState, DevOptions, SkirmishConfig, build_setup};
 use crate::interaction::selection::Selected;
@@ -64,6 +67,8 @@ enum Step {
     Menu,
     WaitHomebase,
     HomebaseShot,
+    EscShot,
+    EscSettingsShot,
     WaitAssembler,
     ConstructorShot,
     PlacingShot,
@@ -110,6 +115,7 @@ fn run_shots(
     mut time: ResMut<Time<Virtual>>,
     mut activate: MessageWriter<ActivateCommand>,
     keys: Res<ButtonInput<KeyCode>>,
+    mut esc: (ResMut<EscMenuOpen>, ResMut<EscSettingsOpen>),
     mut exit: MessageWriter<AppExit>,
 ) {
     shots.frame += 1;
@@ -164,6 +170,26 @@ fn run_shots(
                 shots.shoot(&mut commands, "homebase.png");
             }
             if shots.frame > SETTLE + 5 {
+                esc.0.0 = true;
+                shots.go(Step::EscShot);
+            }
+        }
+        Step::EscShot => {
+            if shots.frame == SETTLE {
+                shots.shoot(&mut commands, "esc.png");
+            }
+            if shots.frame > SETTLE + 5 {
+                esc.1.0 = true;
+                shots.go(Step::EscSettingsShot);
+            }
+        }
+        Step::EscSettingsShot => {
+            if shots.frame == SETTLE {
+                shots.shoot(&mut commands, "esc_settings.png");
+            }
+            if shots.frame > SETTLE + 5 {
+                esc.1.0 = false;
+                esc.0.0 = false;
                 shots.go(Step::WaitAssembler);
             }
         }

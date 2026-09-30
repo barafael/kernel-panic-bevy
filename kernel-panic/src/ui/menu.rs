@@ -108,11 +108,11 @@ pub(crate) enum MenuPage {
 }
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
-struct EscMenuOpen(bool);
+pub(crate) struct EscMenuOpen(pub(crate) bool);
 
 /// The Settings page drawn inside the Esc overlay (in a match).
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
-struct EscSettingsOpen(bool);
+pub(crate) struct EscSettingsOpen(pub(crate) bool);
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct GameOverOpen(bool);
