@@ -21,6 +21,7 @@
 //! all state changes live in [`handle_menu_actions`]. The game is never
 //! paused by the Esc menu.
 
+use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
@@ -49,6 +50,8 @@ impl Plugin for MenuPlugin {
             .init_resource::<DemoDirector>()
             .init_resource::<AttractCamera>()
             .init_resource::<MenuFocus>()
+            // The Settings page's frame-rate readout.
+            .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_message::<MenuActionMessage>()
             .add_systems(
                 OnEnter(AppState::InGame),
@@ -74,6 +77,11 @@ impl Plugin for MenuPlugin {
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
                     esc_toggle.run_if(in_state(AppState::InGame)),
                     maintain_esc_menu.run_if(in_state(AppState::InGame)),
+                    // After the page builders: a freshly drawn Settings
+                    // page shows the rate this same frame.
+                    fps_readout
+                        .after(maintain_launch_menu)
+                        .after(maintain_esc_menu),
                     game_over_watch.run_if(in_state(AppState::InGame)),
                     maintain_game_over.run_if(in_state(AppState::InGame)),
                 ),
@@ -133,6 +141,11 @@ enum InputMode {
 /// Marker on every menu root (launch menu, Esc overlay, game-over panel).
 #[derive(Component)]
 struct MenuRoot;
+
+/// The Settings page's frame-rate label; [`fps_readout`] keeps its text
+/// current while the page is up.
+#[derive(Component)]
+struct FpsReadout;
 
 /// One menu button: carries its action and base colour (hover restores
 /// exactly this).
@@ -1056,6 +1069,12 @@ fn settings_page(
         msaa_support,
     } = settings;
     page_heading(commands, root, page_size, "Settings");
+    // Frame rate, top-right beside the heading, so a setting's cost
+    // shows as it is toggled. Drawn blank; `fps_readout` fills it in.
+    let readout = LabelSpec::new(&fps_text(None), page_size * 0.85, (0.97, 0.9), Anchor::Rc)
+        .frame(NAV_BLUE)
+        .spawn(commands, root);
+    commands.entity(readout).insert(FpsReadout);
 
     let msaa_label = |n: u8| match n {
         1 => "Off".to_string(),
@@ -1171,6 +1190,37 @@ fn settings_page(
         Anchor::Cc,
     )
     .spawn(commands, root);
+}
+
+/// The frame-rate label's text: the smoothed rate to the frame, or a
+/// dash before the first measurement.
+fn fps_text(fps: Option<f64>) -> String {
+    match fps {
+        Some(fps) => format!("{} fps", fps.round() as u32),
+        None => "-- fps".to_string(),
+    }
+}
+
+/// Keep the Settings page's [`FpsReadout`] current. Only the whole
+/// number is shown, and the text is only written when it changes, so
+/// the label does not re-layout every frame.
+fn fps_readout(
+    diagnostics: Res<DiagnosticsStore>,
+    readouts: Query<&Children, With<FpsReadout>>,
+    mut texts: Query<&mut Text>,
+) {
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|d| d.smoothed());
+    let wanted = fps_text(fps);
+    for children in &readouts {
+        let mut texts = texts.iter_many_mut(children);
+        while let Some(mut text) = texts.fetch_next() {
+            if text.0 != wanted {
+                text.0.clone_from(&wanted);
+            }
+        }
+    }
 }
 
 /// Blue `Back` plate, centred on `pos`.
@@ -2018,4 +2068,43 @@ pub fn boot_demo(
     *done = true;
     commands.insert_resource(demo_setup(&dev));
     run_game.write(RunGame);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::diagnostic::{Diagnostic, RegisterDiagnostic};
+
+    #[test]
+    fn fps_text_rounds_and_dashes_before_first_sample() {
+        assert_eq!(fps_text(None), "-- fps");
+        assert_eq!(fps_text(Some(59.6)), "60 fps");
+        assert_eq!(fps_text(Some(143.2)), "143 fps");
+    }
+
+    /// The readout's child text follows the smoothed FPS diagnostic.
+    #[test]
+    fn fps_readout_writes_the_child_text() {
+        let mut app = App::new();
+        app.init_resource::<DiagnosticsStore>()
+            .register_diagnostic(Diagnostic::new(FrameTimeDiagnosticsPlugin::FPS))
+            .add_systems(Update, fps_readout);
+        let text = app.world_mut().spawn(Text::new(fps_text(None))).id();
+        app.world_mut().spawn(FpsReadout).add_child(text);
+
+        // No measurement yet: the dash stays.
+        app.update();
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, "-- fps");
+
+        app.world_mut()
+            .resource_mut::<DiagnosticsStore>()
+            .get_mut(&FrameTimeDiagnosticsPlugin::FPS)
+            .unwrap()
+            .add_measurement(bevy::diagnostic::DiagnosticMeasurement {
+                time: bevy::platform::time::Instant::now(),
+                value: 61.4,
+            });
+        app.update();
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, "61 fps");
+    }
 }
