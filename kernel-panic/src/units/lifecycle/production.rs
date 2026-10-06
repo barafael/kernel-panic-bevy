@@ -262,6 +262,10 @@ fn emit_build_ray(
     });
 }
 
+/// Farthest a factory's pad piece can be from its root (elmos); a piece
+/// reported further away has an unpropagated (identity) transform.
+const MAX_PAD_OFFSET: f32 = 256.0;
+
 /// Look up the world position of an animated piece on a factory by index.
 /// Returns `None` if the piece doesn't exist or its global transform isn't
 /// available yet (e.g. the same frame the unit was spawned).
@@ -366,8 +370,13 @@ pub fn production_system(
                 dt * speed_mult / build_time * ctx.unit_registry.raw_build_time(kind),
             );
         }
+        // A piece's `GlobalTransform` is still identity on the frame its
+        // factory spawned (propagation runs later), which once placed
+        // the first unit at the map origin: a pad that is nowhere near
+        // its factory is not propagated yet.
         let pad_pos = factory_pieces
             .and_then(|fp| piece_world_pos(fp.pad, animator, &piece_transforms))
+            .filter(|p| p.distance_squared(factory_pos) < MAX_PAD_OFFSET * MAX_PAD_OFFSET)
             .unwrap_or(factory_pos);
 
         // One ray per emitter piece. Kernel has 4 (one per pillar tip),

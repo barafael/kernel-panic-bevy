@@ -49,7 +49,7 @@ fn periodic_shots(
     *frame += 1;
     if let (Some(every), Some(dir)) = (dev.shot_every, &dev.shot_dir)
         && every > 0
-        && *frame % every == 0
+        && (*frame).is_multiple_of(every)
     {
         save_screenshot(&mut commands, dir.join(format!("shot_{:05}.png", *frame)));
     }
@@ -58,7 +58,7 @@ fn periodic_shots(
 /// Save a screenshot of the primary window to `path` (the dev
 /// screenshot tools).
 #[cfg(not(target_arch = "wasm32"))]
-fn save_screenshot(commands: &mut Commands, path: std::path::PathBuf) {
+pub(crate) fn save_screenshot(commands: &mut Commands, path: std::path::PathBuf) {
     use bevy::render::view::screenshot::{Screenshot, save_to_disk};
     commands
         .spawn(Screenshot::primary_window())

@@ -569,13 +569,12 @@ fn pick_map(mut commands: Commands) {
         // straight into that faction's showcase, bypassing the menu.
         if let Some(faction) = cli_arg.as_ref().and_then(|arg| {
             arg.strip_prefix("showcase:")
-                .map(|n| match n.to_ascii_lowercase().as_str() {
+                .and_then(|n| match n.to_ascii_lowercase().as_str() {
                     "system" => Some(crate::units::components::Faction::System),
                     "hacker" => Some(crate::units::components::Faction::Hacker),
                     "network" => Some(crate::units::components::Faction::Network),
                     _ => None,
                 })
-                .flatten()
         }) {
             setup = crate::game_setup::showcase_setup(faction);
             auto_enter = true;
@@ -684,29 +683,26 @@ impl PrepareInputs {
         use crate::units::content::definitions::ALL_UNIT_KINDS;
         use crate::units::content::unit_registry::DEFAULT_MAX_SLOPE_DEGREES;
 
-        // Why: bin to 4 decimals so float jitter doesn't split
-        // near-identical buckets.
-        const BUCKET_QUANTUM: f32 = 10_000.0;
-
+        // Exact caps, not rounded: a cap quantised *below* a unit's own
+        // value made `NavGridSet::bucket` skip its grid and hand every
+        // LIGHT/MEDIUM/HEAVY unit the MaxSlope-60 building grid, on
+        // which nothing is impassable (units climbed sheer cliffs).
+        // Positive finite floats order like their bit patterns.
         let mut distinct_caps = BTreeSet::<u32>::new();
         for &kind in ALL_UNIT_KINDS {
-            let cap = registry.max_slope_ratio(kind);
-            distinct_caps.insert((cap * BUCKET_QUANTUM).round() as u32);
+            distinct_caps.insert(registry.max_slope_ratio(kind).to_bits());
         }
         // Always keep the KP-default bucket (FBI MaxSlope=36 from
         // `MOVEINFO.TDF`'s LIGHT/MEDIUM/HEAVY) available for units
         // whose FBI omits `MaxSlope`.
         let default_cap = spring_pathfinding::max_slope_from_degrees(DEFAULT_MAX_SLOPE_DEGREES);
-        distinct_caps.insert((default_cap * BUCKET_QUANTUM).round() as u32);
+        distinct_caps.insert(default_cap.to_bits());
 
         Self {
             setup,
             map_name,
             // Ascending because BTreeSet iteration is sorted.
-            nav_caps: distinct_caps
-                .into_iter()
-                .map(|cap_q| cap_q as f32 / BUCKET_QUANTUM)
-                .collect(),
+            nav_caps: distinct_caps.into_iter().map(f32::from_bits).collect(),
             hexfarm_medians: registry.hexfarm_medians(),
             match_seed: crate::game_setup::match_seed(),
         }
@@ -1160,8 +1156,13 @@ fn configure_map_events(
 ) {
     // Per-map: the previous map's schedule must not carry over (an
     // eruption clock aimed at Stack_Overflow's starts, a swirl on a
-    // map without one).
+    // map without one). The state resource (clock + rng) goes with the
+    // config, and any spawns still queued for the old world are
+    // dropped rather than drained into the new one.
     commands.remove_resource::<crate::map_events::EruptionConfig>();
+    commands.remove_resource::<crate::map_events::EruptionState>();
+    commands.remove_resource::<crate::map_events::EruptionSpawnQueue>();
+    commands.init_resource::<crate::map_events::EruptionSpawnQueue>();
     commands.remove_resource::<crate::map_events::CircularFlow>();
     if map_name.eq_ignore_ascii_case("Stack_Overflow") {
         let starts: Vec<Vec3> = map_info
@@ -1171,6 +1172,7 @@ fn configure_map_events(
             .collect();
         info!("  Stack_Overflow detected — installing eruption schedule");
         commands.insert_resource(crate::map_events::EruptionConfig::stack_overflow(starts));
+        commands.insert_resource(crate::map_events::EruptionState::default());
     }
     if map_name.eq_ignore_ascii_case("Circular_Buffer") {
         let (w, d) = heightmap.world_size();

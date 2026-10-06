@@ -18,7 +18,7 @@ use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
     CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, ground_collision_system,
-    guard_follow_system, movement_system, orient_stationary_to_terrain, update_path_heat,
+    guard_follow_system, movement_system, orient_stationary_to_terrain,
 };
 use selection::SelectionPlugin;
 
@@ -76,6 +76,16 @@ pub(crate) fn install_command(ec: &mut EntityCommands, cmd: movement::QueuedComm
                 .remove::<crate::units::combat::ForcedTarget>()
                 .insert(crate::units::combat::AttackTargetOrder { target });
         }
+        QueuedCommand::AttackGround(pos) => {
+            // Same contract as `AttackUnit`: the fire-at-ground system
+            // steers the unit itself (a `MoveTarget` at the range
+            // boundary), and an explicit attack supersedes a manual
+            // `(T)` designation.
+            ec.remove::<PendingBuild>()
+                .remove::<MoveTarget>()
+                .remove::<crate::units::combat::ForcedTarget>()
+                .insert(crate::units::combat::AttackGroundOrder { pos });
+        }
         QueuedCommand::BuildAt { kind, site } => {
             ec.insert((MoveTarget(site), PendingBuild { kind, site }));
         }
@@ -100,7 +110,7 @@ impl Plugin for InteractionPlugin {
             AbilityHotkeyPlugin,
             crate::interaction::debug_movement::DebugMovementPlugin,
         ))
-        .init_resource::<ground_move::PathStats>()
+        .init_resource::<ground_move::PathQueue>()
         .init_gizmo_group::<CommandLineGizmos>()
         .add_systems(Startup, configure_command_line_gizmos)
         // Unit motion is simulation: it runs on the fixed 30 Hz
@@ -138,7 +148,6 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
         guard_follow_system,
         // Buildings stamped / cleared before anyone paths.
         structures::update_structure_layer.before(movement_system),
-        update_path_heat.before(movement_system),
         movement_system,
         // `smoothGround.UpdateSmoothMesh()` precedes the unit
         // updates in the engine's frame.

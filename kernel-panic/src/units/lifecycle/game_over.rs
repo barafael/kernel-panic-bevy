@@ -99,7 +99,7 @@ pub fn check_game_over(
     // Showcase: no win/lose — run forever. The menu demo still
     // eliminates beaten seats (so its battles resolve) but never shows
     // a result; its director restarts the match instead.
-    if setup.showcase.is_some() {
+    if setup.showcase.is_some() || setup.sandbox {
         return;
     }
     since_check.0 += time.delta_secs();

@@ -24,8 +24,9 @@ pub const INV_GAME_SPEED: f32 = 1.0 / GAME_SPEED;
 /// [`GAME_SPEED`] as the `Time<Fixed>` tick rate of the gameplay chain.
 pub const SIMULATION_HZ: f64 = GAME_SPEED as f64;
 
-/// `UNIT_SLOWUPDATE_RATE`: frames between a unit's `SlowUpdate`s.
-pub const SLOW_UPDATE_RATE: u32 = 16;
+/// `UNIT_SLOWUPDATE_RATE` (GlobalConstants.h:60): frames between a
+/// unit's `SlowUpdate`s.
+pub const SLOW_UPDATE_RATE: u32 = 15;
 
 /// The map's gravity per frame² (negative = down): Kernel Panic maps
 /// all set `gravity=50` (`mapInfo->map.gravity = -50 / GAME_SPEED²`).

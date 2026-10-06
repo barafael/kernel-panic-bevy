@@ -1,4 +1,6 @@
 #![recursion_limit = "256"]
+#[cfg(not(target_arch = "wasm32"))]
+mod bot;
 mod game_setup;
 mod interaction;
 mod map_events;
@@ -208,6 +210,6 @@ fn main() {
             d.exit_after.is_some() || d.time_scale.is_some()
         }),
     )
-    .add_plugins(profile::ProfilePlugin);
+    .add_plugins((profile::ProfilePlugin, bot::BotPlugin));
     app.run();
 }

@@ -132,6 +132,12 @@ pub enum QueuedCommand {
         target: Entity,
         pos: Vec3,
     },
+    /// Walk to `pos`, then fire at the ground there (shift-chained
+    /// attack-ground, A + click). Promotion inserts an
+    /// `AttackGroundOrder`; `attack_ground_system` owns the approach
+    /// (it issues its own range-boundary `MoveTarget`), so like
+    /// [`QueuedCommand::AttackUnit`] this leg has no path of its own.
+    AttackGround(Vec3),
 }
 
 impl QueuedCommand {
@@ -139,6 +145,7 @@ impl QueuedCommand {
         match self {
             QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => *p,
             QueuedCommand::AttackUnit { pos, .. } => *pos,
+            QueuedCommand::AttackGround(pos) => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
         }
     }
@@ -282,11 +289,13 @@ impl NavGridSet {
     /// loosest bucket. `None` only with no grids built (no map loaded —
     /// the map loader always pushes at least the default 45° bucket).
     pub fn bucket(&self, cap: f32) -> Option<&NavBucket> {
-        self.buckets
-            .iter()
-            .find(|b| b.max_slope >= cap)
-            .or(self.buckets.last())
+        self.bucket_index(cap).map(|i| &self.buckets[i])
     }
+
+    /// Slack in the cap comparison: a bucket built for this unit's
+    /// cap must never be skipped over a rounding difference (that once
+    /// sent every mobile unit to the all-passable building grid).
+    const CAP_TOLERANCE: f32 = 1e-4;
 
     /// Can a ground unit with slope cap `cap` stand on the heightmap
     /// square under `(x, z)`? Off-map squares are not. With no grids
@@ -304,7 +313,7 @@ impl NavGridSet {
     pub fn bucket_index(&self, cap: f32) -> Option<usize> {
         self.buckets
             .iter()
-            .position(|b| b.max_slope >= cap)
+            .position(|b| b.max_slope >= cap - Self::CAP_TOLERANCE)
             .or_else(|| self.buckets.len().checked_sub(1))
     }
 
@@ -452,7 +461,7 @@ pub(crate) fn promote_next_command(
         .filter(|q| !q.commands.is_empty())
         .map(|q| q.commands.remove(0));
     let goal = next.and_then(|c| match c {
-        QueuedCommand::AttackUnit { .. } => None,
+        QueuedCommand::AttackUnit { .. } | QueuedCommand::AttackGround(_) => None,
         c => Some(c.position()),
     });
     let mut ec = commands.entity(entity);
@@ -699,6 +708,8 @@ pub(crate) fn nav_component_labels(
 
 /// The nav bucket and mask a request searches under, keyed as
 /// `(bucket, xsizeh, crushes)`.
+// The triple is a nav-bucket cache key plus its two maps, used once.
+#[allow(clippy::type_complexity)]
 pub(crate) fn nav_class<'a>(
     nav: &'a NavGridSet,
     unit_registry: &UnitRegistry,
@@ -955,6 +966,7 @@ pub fn draw_selected_command_lines(
                     QueuedCommand::Patrol(_) => PATROL_COLOR,
                     QueuedCommand::AttackMove(_) => FIGHT_COLOR,
                     QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
+                    QueuedCommand::AttackGround(_) => FIGHT_COLOR,
                 };
                 draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
                 gizmos
@@ -1132,6 +1144,53 @@ mod tests {
         assert_eq!(cap_of(1.73), 1.0);
         // A cap below the tightest still resolves to the tightest.
         assert_eq!(cap_of(0.1), 0.2);
+    }
+
+    /// The bucket built for a unit's own cap is picked even when the
+    /// stored cap differs by float noise (the map loader once rounded
+    /// caps to four decimals, which rounded LIGHT's 0.412215 *down* and
+    /// sent every mobile unit to the all-passable 1.0 grid).
+    #[test]
+    fn bucket_tolerates_rounding_of_its_own_cap() {
+        let mut set = NavGridSet::default();
+        let light = spring_pathfinding::max_slope_from_degrees(36.0);
+        set.buckets
+            .extend([bucket_with((light * 1e4).round() / 1e4), bucket_with(1.0)]);
+        assert!((set.bucket(light).unwrap().max_slope - light).abs() < 1e-3);
+    }
+
+    /// A shift-queued attack-ground promotes to a live
+    /// `AttackGroundOrder` (not a plain move), with no path goal of
+    /// its own — `attack_ground_system` steers the approach.
+    #[test]
+    fn promoted_attack_ground_inserts_the_order() {
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+        let mut queue = CommandQueue::default();
+        queue.push(QueuedCommand::AttackGround(Vec3::new(40.0, 0.0, 40.0)));
+        world.entity_mut(entity).insert(queue);
+
+        let mut deferred = bevy::ecs::world::CommandQueue::default();
+        let mut taken = world
+            .entity_mut(entity)
+            .take::<CommandQueue>()
+            .expect("queue present");
+        let goal = {
+            let mut commands = Commands::new(&mut deferred, &world);
+            promote_next_command(&mut commands, entity, Vec3::ZERO, Some(&mut taken))
+        };
+        deferred.apply(&mut world);
+
+        assert_eq!(goal, None, "attack-ground legs have no path goal");
+        let order = world
+            .get::<crate::units::combat::AttackGroundOrder>(entity)
+            .expect("order promoted");
+        assert_eq!(order.pos, Vec3::new(40.0, 0.0, 40.0));
+        assert!(world.get::<MoveTarget>(entity).is_none());
+        assert!(
+            world.get::<CommandQueue>(entity).is_none(),
+            "empty queue is dropped after promotion"
+        );
     }
 }
 

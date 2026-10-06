@@ -22,7 +22,7 @@
 //! 4. `HandleObjectCollisions` for every ground unit, moving or not —
 //!    [`ground_collision_system`];
 //! 5. `Update` — apply the collision push, `OwnerMoved` idle test; and
-//!    every 16th frame per unit `SlowUpdate` (repath / give up).
+//!    every 15th frame per unit `SlowUpdate` (repath / give up).
 
 use std::f32::consts::{PI, TAU};
 
@@ -30,9 +30,9 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use super::movement::{
-    AttackMoveActive, CommandQueue, GroundLift, MovePath, MoveTarget, NavGridSet, PathHeat,
-    PathOutcome, PathRequest, begin_path_search, nav_class, nav_component_labels,
-    promote_next_command, step_path_search,
+    AttackMoveActive, CommandQueue, GroundLift, MovePath, MoveTarget, NavGridSet, PathOutcome,
+    PathRequest, begin_path_search, nav_class, nav_component_labels, promote_next_command,
+    step_path_search,
 };
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
@@ -115,9 +115,12 @@ impl PathStats {
     }
 }
 
-#[derive(Default)]
+/// Held as a resource (not a system `Local`): the path service is
+/// game state — inspectable by the profile census and replaceable in
+/// tests — not scratch private to one system.
+#[derive(Resource, Default)]
 pub struct PathQueue {
-    stats: PathStats,
+    pub stats: PathStats,
     /// [`NavGridSet::epoch`] everything below belongs to; a new map
     /// drops it all (labels, the search in flight and its scratch are
     /// sized to the old grid).
@@ -224,7 +227,6 @@ impl PathQueue {
         mut budget: usize,
         nav: Option<&NavGridSet>,
         registry: &UnitRegistry,
-        heat: Option<&spring_pathfinding::HeatMap>,
         describe: impl Fn(Entity) -> Option<PathRequest>,
     ) -> usize {
         if let Some(n) = nav
@@ -265,7 +267,7 @@ impl PathQueue {
             }
             let (_, req, search) = self.in_flight.as_mut().expect("search in flight");
             let pops = budget.min(PATH_SEARCH_STEP);
-            let done = step_path_search(&mut self.scratch, search, nav, registry, req, heat, pops);
+            let done = step_path_search(&mut self.scratch, search, nav, registry, req, None, pops);
             budget -= pops;
             self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
@@ -288,7 +290,6 @@ impl PathQueue {
         budget: usize,
         nav: Option<&NavGridSet>,
         registry: &UnitRegistry,
-        heat: Option<&spring_pathfinding::HeatMap>,
     ) -> (Option<Option<PathOutcome>>, usize) {
         if self.in_flight.is_some() || self.queued.contains(&entity) || budget == 0 {
             self.request(entity);
@@ -311,7 +312,7 @@ impl PathQueue {
                 nav,
                 registry,
                 &req,
-                heat,
+                None,
                 pops,
             );
             left -= pops;
@@ -397,6 +398,11 @@ pub struct GroundMover {
     /// `avoidingUnits`: steered round someone at the last evaluation.
     pub avoiding_units: bool,
     pub position_stuck: bool,
+    /// `forceStaticObjectCheck`: test next collision pass whether the
+    /// unit stands on a closed square / inside a structure footprint
+    /// (`positionStuck`). Set by the constructor, an idle repath, and
+    /// the trap check when a structure appears over the unit.
+    pub force_static_object_check: bool,
     /// `oldPos` at the last `OwnerMoved`.
     pub old_pos: Vec3,
     /// Frame counter; `SlowUpdate` runs when it is a multiple of
@@ -446,6 +452,7 @@ impl GroundMover {
             last_avoidance_dir: Vec2::ZERO,
             avoiding_units: false,
             position_stuck: false,
+            force_static_object_check: true,
             old_pos: Vec3::ZERO,
             frame: 0,
         }
@@ -704,6 +711,11 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
             let frames = (offset / fs.turn_rate.max(1e-4)).max(1e-4);
             max_speed_to_make_turn = (m.curr_wp_dist / frames * 0.95).max(0.01);
         }
+        // GroundMoveType.cpp:1397 — `wantedSpeed *= max(groundSpeedMod,
+        // 1.0)`. With our 0..1 modifiers this is a no-op, exactly as the
+        // engine's own NOTE explains ("raise wantedSpeed iff the
+        // terrain-modifier is larger than 1"); kept verbatim so a future
+        // >1 speed modifier behaves like Spring's.
         let wanted = wanted_speed * inp.ground_speed_mod.max(1.0);
         target *= inp.ground_speed_mod;
         if start_braking {
@@ -733,6 +745,17 @@ impl MoveMap<'_> {
         let Some(nav) = self.nav else { return true };
         nav.passable(self.max_slope, p.x, p.y)
             && !nav.footprint_blocked(p.x, p.y, self.xsizeh, self.crush_strength)
+    }
+
+    /// `SquareIsBlocked(..) & BLOCK_STRUCTURE` for the square under `p`.
+    pub fn structure_at(&self, p: Vec2) -> bool {
+        self.nav.is_some_and(|nav| {
+            nav.structure_square(
+                (p.x / SQUARE_SIZE).floor() as i32,
+                (p.y / SQUARE_SIZE).floor() as i32,
+                self.crush_strength,
+            )
+        })
     }
 
     /// `MoveDef::DoRawSearch`: can the unit drive straight `a → b`?
@@ -889,8 +912,16 @@ pub fn step_mover(
     let want_to_stop = m.progress != Progress::Active || m.goal.is_none();
     let steering = !want_to_stop && !order.hold;
 
-    // --- 1. FollowPath (GroundMoveType.cpp:1085) ---
+    // --- 1. UpdateObstacleAvoidance + FollowPath (GroundMoveType.cpp:
+    // 1081, 1095) ---
+    // Avoidance runs first, on the *previous* frame's `waypointDir` and
+    // `atGoal` (`desired = atGoal ? flatFrontDir : waypointDir`); the
+    // heading `FollowPath` then asks for is `lastAvoidanceDir`.
     let mut wanted_heading = m.heading;
+    if steering {
+        let desired = if m.at_goal { m.front() } else { m.waypoint_dir };
+        avoidance(m, desired);
+    }
     if steering {
         let goal = m.goal.unwrap_or(pos2);
         let (cwp, _) = current_waypoints(path.as_deref(), pos2, goal);
@@ -932,9 +963,7 @@ pub fn step_mover(
         if d.length_squared() > CMP_EPS * CMP_EPS {
             m.waypoint_dir = d.normalize();
         }
-        // Don't chase our own tail once at the goal.
-        let desired = if m.at_goal { ffd } else { m.waypoint_dir };
-        let dir = avoidance(m, desired);
+        let dir = m.last_avoidance_dir;
         if dir.length_squared() > 1e-8 {
             wanted_heading = heading_of(dir);
         }
@@ -942,7 +971,8 @@ pub fn step_mover(
         m.last_avoidance_dir = m.front();
     }
 
-    // --- 2. ChangeHeading ---
+    // --- 2. ChangeHeading --- (not called at all while stopping or
+    // stunned, so the turn speed keeps its last value, as in the engine)
     if steering {
         let d = delta_heading(
             wanted_heading,
@@ -952,8 +982,6 @@ pub fn step_mover(
             &mut m.turn_speed,
         );
         m.heading = wrap_angle(m.heading + d);
-    } else {
-        m.turn_speed = 0.0;
     }
 
     // --- 3. ChangeSpeed + UpdateOwnerPos ---
@@ -1062,6 +1090,12 @@ fn set_next_waypoint(
     m.skip_waypoint = false;
     m.limit_speed_for_turning = m.limit_speed_for_turning.saturating_sub(1);
     m.want_repath = false;
+    // A structure on the new current or next waypoint's square (built
+    // since the path was made): repath (GroundMoveType.cpp:2363-2383).
+    let (cwp, nwp) = current_waypoints(Some(path), pos, goal);
+    if map.structure_at(cwp) || map.structure_at(nwp) {
+        m.re_request_path(false);
+    }
 }
 
 /// The per-unit data [`movement_system`] reads and writes.
@@ -1095,18 +1129,13 @@ pub fn movement_system(
     nav_set: Option<Res<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
     circular_flow: Option<Res<CircularFlow>>,
-    path_heat: Option<Res<PathHeat>>,
     registry: Res<UnitRegistry>,
     budget: Option<Res<PathSearchBudget>>,
     mut query: Query<MoverData, Without<Dying>>,
     mut avoidees: Local<Vec<Avoidee>>,
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
-    mut path_queue: Local<PathQueue>,
-    stats: Option<ResMut<PathStats>>,
+    mut path_queue: ResMut<PathQueue>,
 ) {
-    if let Some(mut stats) = stats {
-        stats.set_if_neq(path_queue.stats);
-    }
     let nav = nav_set.as_deref();
     // Avoidance reads everyone's pose from before this frame's moves
     // (Spring evaluates it in the parallel traversal-plan pass).
@@ -1127,6 +1156,7 @@ pub fn movement_system(
         avoidees.push(Avoidee {
             entity: u.entity,
             pos,
+            pos3: u.transform.translation,
             vel: m.front() * m.current_speed,
             front: m.front(),
             right: m.right(),
@@ -1149,23 +1179,17 @@ pub fn movement_system(
     // anyone moves (QTPFS `PathManager::Update` precedes the unit
     // updates in `CGame::SimFrame`), from where each mover stands.
     let node_budget = budget.map_or(PATH_SEARCH_NODES_PER_FRAME, |b| b.0);
-    let mut nodes_left = path_queue.service(
-        node_budget,
-        nav,
-        &registry,
-        path_heat.as_deref().map(|h| &h.0),
-        |entity| {
-            let u = query.get(entity).ok()?;
-            let goal = u.mover.goal?;
-            (u.mover.progress == Progress::Active && !u.stats.can_fly).then_some(PathRequest {
-                kind: u.kind.0,
-                xsizeh: u.mover.xsizeh,
-                crush_strength: u.mover.crush_strength,
-                from: u.transform.translation,
-                to: Vec3::new(goal.x, 0.0, goal.y),
-            })
-        },
-    );
+    let mut nodes_left = path_queue.service(node_budget, nav, &registry, |entity| {
+        let u = query.get(entity).ok()?;
+        let goal = u.mover.goal?;
+        (u.mover.progress == Progress::Active && !u.stats.can_fly).then_some(PathRequest {
+            kind: u.kind.0,
+            xsizeh: u.mover.xsizeh,
+            crush_strength: u.mover.crush_strength,
+            from: u.transform.translation,
+            to: Vec3::new(goal.x, 0.0, goal.y),
+        })
+    });
 
     for mut u in &mut query {
         if u.stats.can_fly {
@@ -1288,9 +1312,8 @@ pub fn movement_system(
                             from: pos,
                             to: Vec3::new(g.x, 0.0, g.y),
                         };
-                        let heat = path_heat.as_deref().map(|h| &h.0);
                         let (outcome, left) =
-                            path_queue.request_now(u.entity, req, nodes_left, nav, &registry, heat);
+                            path_queue.request_now(u.entity, req, nodes_left, nav, &registry);
                         nodes_left = left;
                         outcome
                     }
@@ -1353,6 +1376,7 @@ pub fn movement_system(
                 let me = AvoiderInfo {
                     entity: u.entity,
                     pos: pos.xz(),
+                    pos3: pos,
                     team: u.team.map_or(0, |t| t.0),
                     model_radius: u.stats.hit_radius,
                 };
@@ -1409,6 +1433,8 @@ pub fn movement_system(
 pub struct Avoidee {
     entity: Entity,
     pos: Vec2,
+    /// `avoidee->pos`: the engine measures avoidee distances in 3D.
+    pos3: Vec3,
     vel: Vec2,
     front: Vec2,
     right: Vec2,
@@ -1425,6 +1451,7 @@ pub struct Avoidee {
 pub struct AvoiderInfo {
     pub entity: Entity,
     pub pos: Vec2,
+    pub pos3: Vec3,
     pub team: u8,
     /// `CSolidObject::radius` (the model radius).
     pub model_radius: f32,
@@ -1495,10 +1522,15 @@ pub fn obstacle_avoidance_dir(
                 if !o.moving && o.team == me.team {
                     continue;
                 }
-                let vector = (me.pos + vel) - (o.pos + o.vel);
+                // `(avoider->pos + avoider->speed) - (avoidee->pos +
+                // avoidee->speed)`: a 3D separation, so units on
+                // different terrain heights count as further apart.
+                let vector3 = (me.pos3 + Vec3::new(vel.x, 0.0, vel.y))
+                    - (o.pos3 + Vec3::new(o.vel.x, 0.0, o.vel.y));
+                let vector = vector3.xz();
                 let radius_sum = m.owner_radius + o.owner_radius;
                 let mass_scale = o.mass / (m.mass + o.mass);
-                let dist_sq = vector.length_squared();
+                let dist_sq = vector3.length_squared();
                 let dist = dist_sq.sqrt() + 0.01;
                 if front.dot(-(vector / dist)) < max_avoidee_cosine {
                     continue;
@@ -1543,7 +1575,9 @@ pub fn obstacle_avoidance_dir(
 /// `GroundMoveMath.cpp:31-50`): `1 / (1 + max(0, slope · dirSlopeMod)
 /// · slopeMod)` where `dirSlopeMod = -dir · centerNormal2D` is +1 when
 /// heading straight up the fall line — only climbing slows, downhill is
-/// full speed. KP's MaxSlope 36 gives `slopeMod ≈ 9.7`, so a 30° climb
+/// full speed. The slope is the half-resolution slope map's value for
+/// the square (see `spring_pathfinding::slope_map`), the direction the
+/// square's own centre normal. KP's MaxSlope 36 gives `slopeMod ≈ 9.7`, so a 30° climb
 /// runs at ~0.43×. Impassable squares give 0; `ChangeSpeed` then looks
 /// one square ahead so a unit on a closed square can drive out.
 pub fn ground_speed_mod(
@@ -1564,11 +1598,11 @@ pub fn ground_speed_mod(
             (p.x / SQUARE_SIZE).floor() as i32,
             (p.y / SQUARE_SIZE).floor() as i32,
         );
-        let Some(grad) = hm.square_gradient(sq.0, sq.1) else {
+        let Some(n2) = hm.center_normal_2d(sq.0, sq.1) else {
             return 1.0;
         };
-        // centerNormals2D = normalize(-grad): pointing downhill.
-        let n2 = (-grad).normalize_or_zero();
+        // `dirSlopeMod = -moveDir.dot(sqrNormal)` (MoveMath.cpp:130):
+        // positive heading up the fall line.
         let dir_slope = -dir.dot(n2);
         1.0 / (1.0 + (slope * dir_slope).max(0.0) * nav.slope_mod(cap))
     };
@@ -1638,6 +1672,9 @@ pub fn cancel_distance_sq(max_speed: f32, turn_rate: f32) -> f32 {
 pub struct CollisionEntry {
     entity: Entity,
     pos: Vec2,
+    /// Full position: `CheckCollisionExclSAT` and the push vector
+    /// measure separation in 3D.
+    pos3: Vec3,
     radius: f32,
     owner_radius: f32,
     mobile: bool,
@@ -1652,6 +1689,10 @@ pub struct CollisionEntry {
     /// Has an order / queued commands (`UNIT_CMD_QUE_SIZE != 0`).
     has_commands: bool,
     curr_waypoint: Option<Vec2>,
+    /// `beingBuilt`: still rising out of its factory. Pushes others
+    /// but is never pushed itself, and runs no collision pass of its
+    /// own (`HandleObjectCollisions` returns early for it).
+    being_built: bool,
 }
 
 /// Cell size of the collision broad-phase grid.
@@ -1690,7 +1731,7 @@ fn cell_of(p: Vec2) -> (i32, i32) {
 pub fn push_vector(
     r1: f32,
     r2: f32,
-    sep: Vec2,
+    sep: Vec3,
     m1: f32,
     m2: f32,
     speed1: f32,
@@ -1702,10 +1743,13 @@ pub fn push_vector(
     let rel1 = r1 / (r1 + r2);
     let rel2 = r2 / (r1 + r2);
     let radius_sum = r1 * rel1 + r2 * rel2;
+    // `sepDistance = separationVector.Length() + 0.1` — 3D, so units
+    // standing at different heights overlap less; the response itself
+    // is applied in the plane (`sepDirection * XZVector`).
     let sep_distance = sep.length() + 0.1;
     let pen = (radius_sum - sep_distance).max(1.0);
     let response = (SQUARE_SIZE * 2.0).min(pen * 0.5);
-    let sep_dir = sep / sep_distance;
+    let sep_dir = (sep / sep_distance).xz();
     let v1 = speed1.max(1.0);
     let v2 = speed2.max(1.0);
     let c1 = 1.0 + (1.0 - front1.dot(-sep_dir).abs()) * 5.0;
@@ -1715,7 +1759,7 @@ pub fn push_vector(
     let q1 = s1 / (s1 + s2 + 1.0);
     let q2 = s2 / (s1 + s2 + 1.0);
     let mass_scale = (1.0 - q1).clamp(0.01, 0.99) / rel1;
-    let slide_sign = sign(sep.dot(right1));
+    let slide_sign = sign(sep.xz().dot(right1));
     sep_dir * response * mass_scale + right1 * slide_sign * (1.0 / pen) * q2
 }
 
@@ -1729,33 +1773,47 @@ pub fn ground_collision_system(
     nav_set: Option<Res<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
     registry: Res<UnitRegistry>,
-    mut movers: Query<
-        (
-            Entity,
-            &UnitType,
-            &UnitStats,
-            &mut Transform,
-            &mut GroundMover,
-            Option<&MovePath>,
-            Has<MoveTarget>,
-            Option<&mut CommandQueue>,
-            Has<Dying>,
-            Option<&GroundLift>,
-        ),
-        Without<crate::units::lifecycle::spawning::Emerging>,
-    >,
+    mut movers: Query<(
+        Entity,
+        &UnitType,
+        &UnitStats,
+        &mut Transform,
+        &mut GroundMover,
+        Option<&MovePath>,
+        Has<MoveTarget>,
+        Option<&mut CommandQueue>,
+        Has<Dying>,
+        Option<&GroundLift>,
+        Has<crate::units::lifecycle::spawning::Emerging>,
+    )>,
     mut entries: Local<Vec<CollisionEntry>>,
     mut grid: Local<CollisionGrid>,
     mut candidates: Local<Vec<(i32, i32, usize)>>,
+    mut seen_revision: Local<u64>,
 ) {
     let nav = nav_set.as_deref();
+    // Squares a structure change touched since the last pass (the trap
+    // check's area), or everything when that is no longer remembered.
+    let trapped_area = nav.and_then(|n| {
+        if n.revision == *seen_revision {
+            return None;
+        }
+        let area = n.changed_since(*seen_revision).or(Some([
+            i32::MIN / 2,
+            i32::MIN / 2,
+            i32::MAX / 2,
+            i32::MAX / 2,
+        ]));
+        *seen_revision = n.revision;
+        area
+    });
     entries.clear();
     let grid = &mut *grid;
     for bucket in grid.mobile.values_mut().chain(grid.fixed.values_mut()) {
         bucket.clear();
     }
     let mut max_mobile_radius = 0.0_f32;
-    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _) in &movers {
+    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _, emerging) in &movers {
         if stats.can_fly || dying {
             continue;
         }
@@ -1774,6 +1832,7 @@ pub fn ground_collision_system(
         entries.push(CollisionEntry {
             entity,
             pos,
+            pos3: tf.translation,
             radius,
             owner_radius: m.owner_radius,
             mobile,
@@ -1784,6 +1843,7 @@ pub fn ground_collision_system(
             progress: m.progress,
             has_commands: has_target || queue.is_some_and(|q| !q.commands.is_empty()),
             curr_waypoint,
+            being_built: emerging,
         });
         if mobile {
             grid.mobile.entry(cell_of(pos)).or_default().push(idx);
@@ -1800,11 +1860,14 @@ pub fn ground_collision_system(
     }
     let mut crushed: Vec<Entity> = Vec::new();
 
-    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift) in &mut movers {
-        if stats.can_fly || stats.speed <= 0.0 || dying {
+    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging) in
+        &mut movers
+    {
+        if stats.can_fly || stats.speed <= 0.0 || dying || emerging {
             continue;
         }
-        let pos = tf.translation.xz();
+        let pos3 = tf.translation;
+        let pos = pos3.xz();
         let map = MoveMap {
             nav,
             max_slope: registry.max_slope_ratio(kind.0),
@@ -1836,8 +1899,10 @@ pub fn ground_collision_system(
                     for &i in bucket {
                         let o = &entries[i];
                         let r2 = o.radius;
+                        // `CheckCollisionExclSAT`: `|p1 - p2|² - (r1 + r2)²
+                        // <= 0.01` on the full 3D positions.
                         if o.entity == entity
-                            || (pos - o.pos).length_squared() - (r1 + r2) * (r1 + r2) > 0.01
+                            || (pos3 - o.pos3).length_squared() - (r1 + r2) * (r1 + r2) > 0.01
                         {
                             continue;
                         }
@@ -1854,10 +1919,13 @@ pub fn ground_collision_system(
         let mut request_path = false;
         for &(_, _, i) in candidates.iter() {
             let o = entries[i];
-            let sep = pos - o.pos;
+            let sep = pos3 - o.pos3;
             let r2 = o.radius;
             if o.mobile {
                 collision_aux(&mut m, pos, cwp, nwp, &o);
+                // A collidee still being built is never pushed, so the
+                // collider takes the whole response (`moveCollider =
+                // pushCollider || !pushCollidee`).
                 force_moving += push_vector(
                     r1,
                     r2,
@@ -1865,7 +1933,7 @@ pub fn ground_collision_system(
                     m.mass,
                     o.mass,
                     m.current_speed,
-                    o.speed,
+                    if o.being_built { 0.0 } else { o.speed },
                     front,
                     o.front,
                     right,
@@ -1893,6 +1961,31 @@ pub fn ground_collision_system(
             m.re_request_path(false);
         }
 
+        // `UnitTrapCheckSystem`: a structure appeared since the last
+        // pass — units whose footprint it covers re-test their square.
+        if let Some(bbox) = trapped_area {
+            let (sx, sz) = (
+                (pos.x / SQUARE_SIZE).floor() as i32,
+                (pos.y / SQUARE_SIZE).floor() as i32,
+            );
+            let h = m.xsizeh;
+            if sx + h >= bbox[0] && sx - h <= bbox[2] && sz + h >= bbox[1] && sz - h <= bbox[3] {
+                m.force_static_object_check = true;
+            }
+        }
+        // `forceStaticObjectCheck` (HandleObjectCollisions, GroundMoveType
+        // .cpp:2540): standing on a closed square or inside a structure's
+        // footprint makes the unit `positionStuck`, so every step is
+        // re-checked and — with no open square beside it — taken anyway
+        // until it is out.
+        if m.force_static_object_check {
+            if let Some(n) = map.nav {
+                m.position_stuck |= !n.passable(map.max_slope, pos.x, pos.y)
+                    || n.footprint_blocked(pos.x, pos.y, m.xsizeh, m.crush_strength);
+            }
+            m.force_static_object_check = false;
+        }
+
         // `Update`: apply what `UpdatePos` lets through.
         let try_force = force_static + force_moving;
         let mut applied = Vec2::ZERO;
@@ -1914,16 +2007,21 @@ pub fn ground_collision_system(
         // `OwnerMoved` (GroundMoveType.cpp:578).
         let new_pos = tf.translation;
         let pos_dif = new_pos - m.old_pos;
-        if pos_dif.xz().abs().max_element() <= CMP_EPS {
+        // `cmpEps = (cmp_eps, cmp_eps · 0.01, cmp_eps)`.
+        let eps_y = CMP_EPS * 0.01;
+        if pos_dif.x.abs() <= CMP_EPS && pos_dif.y.abs() <= eps_y && pos_dif.z.abs() <= CMP_EPS {
             // Didn't move: speed is lost, and not moving toward an
             // unreached goal counts as idling.
             m.current_speed = 0.0;
             m.idling = !m.at_goal;
         } else {
             m.old_pos = new_pos;
-            let dif_sq = pos_dif.xz().length_squared();
+            let dif_sq = pos_dif.length_squared();
             let ffd = m.front() * dif_sq * 0.5;
-            m.idling = (m.curr_wp_dist - m.prev_wp_dist).powi(2) < ffd.dot(m.waypoint_dir)
+            // The engine's height test (`|posDif.y| < |cmpEps.y · pos.y|`)
+            // means a unit climbing or descending never counts as idle.
+            m.idling = pos_dif.y.abs() < (eps_y * new_pos.y).abs()
+                && (m.curr_wp_dist - m.prev_wp_dist).powi(2) < ffd.dot(m.waypoint_dir)
                 && dif_sq < (m.current_speed * 0.5).powi(2);
         }
 
@@ -1941,6 +2039,7 @@ pub fn ground_collision_system(
                 // Has a path but isn't getting anywhere.
                 if m.num_idling_slow_updates < MAX_IDLING_SLOWUPDATES {
                     if m.idling {
+                        m.force_static_object_check = true;
                         m.re_request_path(true);
                     }
                 } else {
@@ -2324,7 +2423,19 @@ mod tests {
         // Separation along the facing, so the sideways slide term
         // (along `right`) doesn't enter the measured component.
         let push = |sep: f32, m1, m2, v1, v2| {
-            push_vector(12.0, 12.0, Vec2::new(sep, 0.0), m1, m2, v1, v2, f, f, r).x
+            push_vector(
+                12.0,
+                12.0,
+                Vec3::new(sep, 0.0, 0.0),
+                m1,
+                m2,
+                v1,
+                v2,
+                f,
+                f,
+                r,
+            )
+            .x
         };
         // Equal idle Bits: minimum-penetration push above 12 elmos apart,
         // growing below.
@@ -2433,6 +2544,46 @@ mod tests {
         );
     }
 
+    /// `forceStaticObjectCheck` → `positionStuck`: a unit standing inside
+    /// a structure's footprint (a factory's yard, a building erected over
+    /// it) walks out — `UpdatePos` lets a stuck unit step even when no
+    /// square beside it is open — and then reaches its goal.
+    #[test]
+    fn unit_inside_a_structure_footprint_walks_out() {
+        let mut h = Harness::flat();
+        let wall = Vec3::new(640.0, 0.0, 640.0);
+        h.spawn_structure(UnitKind::Firewall, 0, wall);
+        h.step();
+        let e = h.spawn(UnitKind::Bit, 0, wall);
+        h.step();
+        assert!(
+            h.world.get::<GroundMover>(e).unwrap().position_stuck,
+            "spawned inside the footprint: stuck"
+        );
+        let goal = Vec3::new(640.0, 0.0, 900.0);
+        h.world.entity_mut(e).insert(MoveTarget(goal));
+        let mut left_footprint_at = None;
+        for tick in 0..900 {
+            h.step();
+            if left_footprint_at.is_none() && !h.inside_structure(h.pos(e)) {
+                left_footprint_at = Some(tick);
+            }
+            if !h.has_order(e) {
+                break;
+            }
+        }
+        assert!(
+            left_footprint_at.is_some_and(|t| t < 120),
+            "walks out of the footprint within 4 s: {left_footprint_at:?}"
+        );
+        assert!(!h.has_order(e), "order finished");
+        assert!(
+            h.pos(e).xz().distance(goal.xz()) < 40.0,
+            "reached the goal: {}",
+            h.pos(e)
+        );
+    }
+
     /// A unit that cannot get anywhere any more (sealed in after its
     /// path was planned) idles, re-requests a path at a SlowUpdate once
     /// A new map replaces the nav grid with one of another size: the
@@ -2467,6 +2618,11 @@ mod tests {
             terrain_labels: None,
         });
         h.world.insert_resource(nav);
+        // Map load rebuilds the heat map at the new grid size too; the
+        // path service asserts the two agree.
+        h.world.insert_resource(super::super::movement::PathHeat(
+            spring_pathfinding::HeatMap::new(48, 48),
+        ));
         for _ in 0..10 {
             h.world
                 .entity_mut(e)

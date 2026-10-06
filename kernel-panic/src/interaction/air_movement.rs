@@ -23,7 +23,7 @@
 //!   `TurnRate`, so it can side-slip. `UpdateBanking` rolls it into its
 //!   lateral acceleration.
 //! - **Orders**: a move order is finished once within
-//!   `GetGoalRadius() = 64` elmos (2D) at a `SlowUpdate` (every 16
+//!   `GetGoalRadius() = 64` elmos (2D) at a `SlowUpdate` (every 15
 //!   frames); with nothing queued the unit stops (`ExecuteStop`) and,
 //!   since `AirHoverFactor=0` means it never lands, hovers — easing back
 //!   to where it stopped (`UpdateHovering`, no drift at hover factor 0).
@@ -606,7 +606,7 @@ fn update_one(
                 if f.air.moving_to != Some(t) {
                     f.air.start_moving(t);
                 }
-                if (frame.wrapping_add(f.air.phase)) % SLOW_UPDATE_RATE == 0
+                if (frame.wrapping_add(f.air.phase)).is_multiple_of(SLOW_UPDATE_RATE)
                     && (t - f.pos).xz().length_squared() < GOAL_RADIUS * GOAL_RADIUS
                 {
                     if !f.orders.more_moves {

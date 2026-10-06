@@ -102,14 +102,21 @@ impl StructureLayer {
             .is_some_and(|i| self.solid[i] > 0 || (!crushes && self.crushable[i] > 0))
     }
 
-    /// Any structure square in the full `(2h+1)²` footprint window
-    /// around square `(x, z)` (`TestMovePositionForObjects`).
+    /// Any structure square in the footprint window around square
+    /// `(x, z)` (`TestMovePositionForObjects` → `RangeIsBlocked`), which
+    /// the engine samples at offsets `-h, -h+2, …, h` on both axes
+    /// (`FOOTPRINT_XSTEP = 2`, MoveMath.cpp:21) — the same window the
+    /// path masks use, so a square open to the pathfinder is open to
+    /// `UpdatePos` too.
     pub fn footprint_blocked(&self, x: i32, z: i32, xsizeh: i32, crushes: bool) -> bool {
         if self.stamps.is_empty() {
             return false;
         }
-        (z - xsizeh..=z + xsizeh)
-            .any(|sz| (x - xsizeh..=x + xsizeh).any(|sx| self.square_blocked(sx, sz, crushes)))
+        (z - xsizeh..=z + xsizeh).step_by(2).any(|sz| {
+            (x - xsizeh..=x + xsizeh)
+                .step_by(2)
+                .any(|sx| self.square_blocked(sx, sz, crushes))
+        })
     }
 
     /// The path mask of a mover class, if one was built.
@@ -215,10 +222,12 @@ impl StructureLayer {
 
     /// The squares a structure of `kind` centred at `pos` blocks: its FBI
     /// footprint at `SPRING_FOOTPRINT_SCALE` (×2 squares), each yardmap
-    /// character covering 2×2 squares. `o`/`g`/`j`/`w`/`x`/`f` (and a
-    /// missing yardmap) block; `y` (open) and `c` (factory yard) don't —
-    /// KP's factories keep their yard open while they produce, which is
-    /// always (`Activate` → `YARD_OPEN`, kernel.bos/socket.bos).
+    /// character covering 2×2 squares. Blocks on everything except the
+    /// engine's open set — `y` (open) and `c` (factory yard, always open
+    /// while producing: `Activate` → `YARD_OPEN`, kernel.bos/socket.bos)
+    /// plus the terrain-style codes `e`/`i`/`s`/`b`/`u` that ship open in
+    /// KP's yardmaps. A missing yardmap blocks everything (the `unwrap_or('o')`
+    /// below matches `CGuiHandler`'s default-blocked reading).
     fn squares_of(&self, registry: &UnitRegistry, kind: UnitKind, pos: Vec3) -> Vec<(u32, u32)> {
         let Some(def) = registry.def(kind) else {
             return Vec::new();

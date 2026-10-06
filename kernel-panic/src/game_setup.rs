@@ -52,6 +52,9 @@ pub struct GameSetup {
     /// unit and its builder to erect one of each building.  The player
     /// controls all units; no AI enemy is present.
     pub showcase: Option<Faction>,
+    /// Sandbox: no win / lose check at all (the `bot` dev tool's match,
+    /// which may have a single seat).
+    pub sandbox: bool,
 }
 
 impl Default for GameSetup {
@@ -73,6 +76,7 @@ impl Default for GameSetup {
             difficulty: 2,
             demo: false,
             showcase: None,
+            sandbox: false,
         }
     }
 }
@@ -161,6 +165,16 @@ pub struct DevOptions {
     /// (`units::content::bundle`; normally `kernel-panic/assets/units.kpu`).
     #[cfg(not(target_arch = "wasm32"))]
     pub bake_units: Option<std::path::PathBuf>,
+    /// `KP_BOT=<dir>`: the file-driven bot (`bot`) — a skirmish played
+    /// from `<dir>/cmd` without a mouse.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub bot: Option<std::path::PathBuf>,
+    /// `KP_BOT_MAP=<stem>` for the bot's skirmish.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub bot_map: Option<String>,
+    /// `KP_BOT_ENEMY=1`: seat an AI opponent in the bot's skirmish.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub bot_enemy: bool,
 }
 
 impl DevOptions {
@@ -216,6 +230,9 @@ impl DevOptions {
             record_warmup: var("KP_RECORD_WARMUP").and_then(|n| n.parse().ok()),
             record_seconds: var("KP_RECORD_SECONDS").and_then(|n| n.parse().ok()),
             bake_units: var("KP_BAKE_UNITS").map(Into::into),
+            bot: var("KP_BOT").map(Into::into),
+            bot_map: var("KP_BOT_MAP"),
+            bot_enemy: var("KP_BOT_ENEMY").is_some_and(|v| v != "0"),
         }
     }
 }
@@ -294,6 +311,7 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
         difficulty: 2,
         demo: true,
         showcase: None,
+        sandbox: false,
     }
 }
 
@@ -311,6 +329,7 @@ pub fn showcase_setup(faction: Faction) -> GameSetup {
         difficulty: 1,
         demo: false,
         showcase: Some(faction),
+        sandbox: false,
     }
 }
 
@@ -438,6 +457,7 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
         difficulty: config.difficulty,
         demo: false,
         showcase: None,
+        sandbox: false,
     }
 }
 
@@ -500,8 +520,10 @@ mod tests {
 
     #[test]
     fn duel_always_one_enemy_outgunned_scales() {
-        let mut config = SkirmishConfig::default();
-        config.grouping = Grouping::Duel;
+        let mut config = SkirmishConfig {
+            grouping: Grouping::Duel,
+            ..Default::default()
+        };
         assert_eq!(build_setup(&config, &[]).players.len(), 2);
         config.grouping = Grouping::Outgunned;
         config.difficulty = 1;

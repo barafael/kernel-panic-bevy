@@ -54,16 +54,8 @@ impl SpeedMap {
     ) -> Self {
         let width = heightmap_width - 1;
         let height = heightmap_height - 1;
-        let hw = heightmap_width as usize;
-
-        let mut speeds = Vec::with_capacity((width * height) as usize);
-        for z in 0..height as usize {
-            for x in 0..width as usize {
-                speeds.push(cell_speed(heights, hw, x, z, max_slope, slope_mod));
-            }
-        }
-
-        Self::new(width, height, speeds)
+        let slopes = slope_map(heights, heightmap_width, heightmap_height);
+        Self::from_slopes(&slopes, width, height, max_slope, slope_mod)
     }
 
     fn new(width: u32, height: u32, speeds: Vec<f32>) -> Self {
@@ -136,13 +128,19 @@ impl SpeedMap {
         z1: u32,
     ) {
         let hw = heightmap_width as usize;
+        let hh = self.height as usize + 1;
         let old_max = self.max_speed;
         let mut lowered_max = false;
-        // A vertex belongs to the up-to-four cells around it.
-        for z in z0.saturating_sub(1)..=z1.min(self.height - 1) {
-            for x in x0.saturating_sub(1)..=x1.min(self.width - 1) {
+        // A vertex belongs to the up-to-four cells around it, and a
+        // cell's slope is shared by its 2×2 half-resolution block.
+        let (z_lo, z_hi) = (z0.saturating_sub(1) & !1, (z1 | 1).min(self.height - 1));
+        let (x_lo, x_hi) = (x0.saturating_sub(1) & !1, (x1 | 1).min(self.width - 1));
+        for z in z_lo..=z_hi {
+            for x in x_lo..=x_hi {
                 let cell = &mut self.speeds[(z * self.width + x) as usize];
-                let speed = cell_speed(heights, hw, x as usize, z as usize, max_slope, slope_mod);
+                let speed = cell_speed(
+                    heights, hw, hh, x as usize, z as usize, max_slope, slope_mod,
+                );
                 lowered_max |= *cell >= old_max && speed < old_max;
                 self.max_speed = self.max_speed.max(speed);
                 *cell = speed;
@@ -185,47 +183,90 @@ impl SpeedMap {
 /// grid, row-major over the `(width-1) × (height-1)` cells, in Spring's
 /// `1 - cos(angle)` encoding (see [`SpeedMap::from_heightmap`]). The
 /// move-class-independent half of a speed map.
+///
+/// Spring's slope map is *half* resolution (`CReadMap::UpdateSlopemap`,
+/// `Map/ReadMap.cpp:741`): one value per 2×2 block of squares, from the
+/// eight face normals of the block's four squares — `avg` and `min` of
+/// their `y`, mixed as `min + (avg − min) · (min / avg)` so one steep
+/// triangle pulls the whole block most of the way toward blocked, and
+/// `CMoveMath::GetPosSpeedMod` reads `slopeMap[(x >> 1) + (z >> 1) ·
+/// hmapx]` for every square. The grid here stays per square; the four
+/// squares of a block simply share its value.
 pub fn slope_map(heights: &[f32], heightmap_width: u32, heightmap_height: u32) -> Vec<f32> {
     let width = (heightmap_width - 1) as usize;
     let height = (heightmap_height - 1) as usize;
     let hw = heightmap_width as usize;
-    let mut slopes = Vec::with_capacity(width * height);
-    for z in 0..height {
-        for x in 0..width {
-            slopes.push(cell_slope(heights, hw, x, z));
+    let hh = heightmap_height as usize;
+    let mut slopes = vec![0.0; width * height];
+    for bz in 0..height.div_ceil(2) {
+        for bx in 0..width.div_ceil(2) {
+            let slope = block_slope(heights, hw, hh, bx, bz);
+            for z in (bz * 2)..(bz * 2 + 2).min(height) {
+                for x in (bx * 2)..(bx * 2 + 2).min(width) {
+                    slopes[z * width + x] = slope;
+                }
+            }
         }
     }
     slopes
 }
 
-/// Relative speed of heightmap cell `(x, z)`, from the slope of its
-/// four corner vertices (see [`SpeedMap::from_heightmap`]).
+/// Relative speed of heightmap cell `(x, z)` (see
+/// [`SpeedMap::from_heightmap`]); `hh` is the vertex-grid height.
 fn cell_speed(
     heights: &[f32],
     hw: usize,
+    hh: usize,
     x: usize,
     z: usize,
     max_slope: f32,
     slope_mod: f32,
 ) -> f32 {
-    speed_from_slope(cell_slope(heights, hw, x, z), max_slope, slope_mod)
+    speed_from_slope(
+        block_slope(heights, hw, hh, x >> 1, z >> 1),
+        max_slope,
+        slope_mod,
+    )
 }
 
-/// Slope of heightmap cell `(x, z)` in Spring's `1 - cos(angle)` encoding.
-fn cell_slope(heights: &[f32], hw: usize, x: usize, z: usize) -> f32 {
-    let h00 = heights[z * hw + x];
-    let h10 = heights[z * hw + x + 1];
-    let h01 = heights[(z + 1) * hw + x];
-    let h11 = heights[(z + 1) * hw + x + 1];
+/// `1 - cos(angle)` slope of the half-resolution block `(bx, bz)` —
+/// squares `2bx..2bx+1 × 2bz..2bz+1` (squares off the map are left
+/// out, as the engine's clamped loops do).
+fn block_slope(heights: &[f32], hw: usize, hh: usize, bx: usize, bz: usize) -> f32 {
+    let (width, height) = (hw - 1, hh - 1);
+    let mut sum = 0.0f32;
+    let mut min = 1.0f32;
+    let mut n = 0.0f32;
+    for z in (bz * 2)..(bz * 2 + 2).min(height) {
+        for x in (bx * 2)..(bx * 2 + 2).min(width) {
+            let (tl, tr) = (heights[z * hw + x], heights[z * hw + x + 1]);
+            let (bl, br) = (heights[(z + 1) * hw + x], heights[(z + 1) * hw + x + 1]);
+            // `fnTL = normalize(-(hTR-hTL), 8, -(hBL-hTL))`,
+            // `fnBR = normalize(hBL-hBR, 8, hTR-hBR)` (ReadMap.cpp:672).
+            for ny in [
+                face_normal_y(tr - tl, bl - tl),
+                face_normal_y(bl - br, tr - br),
+            ] {
+                sum += ny;
+                min = min.min(ny);
+                n += 1.0;
+            }
+        }
+    }
+    if n == 0.0 {
+        return 0.0;
+    }
+    let avg = sum / n;
+    // `lerp = maxslope / avgslope; slope = mix(maxslope, avgslope, lerp)`.
+    let lerp = min / avg;
+    let mixed = min + (avg - min) * lerp;
+    1.0 - mixed
+}
 
-    let dx = ((h10 - h00).abs() + (h11 - h01).abs()) * 0.5 / SQUARE_SIZE;
-    let dz = ((h01 - h00).abs() + (h11 - h10).abs()) * 0.5 / SQUARE_SIZE;
-    // tan(angle) of the steepest slope across the cell.
-    let tan_slope = (dx * dx + dz * dz).sqrt();
-    // Spring's encoding: `slope = 1 - cos(angle)` where
-    // `cos(angle) = 1 / sqrt(1 + tan²(angle))`. Matches
-    // `1.0 - faceNormal.y` in `ReadMap::UpdateSlopemap`.
-    1.0 - 1.0 / (1.0 + tan_slope * tan_slope).sqrt()
+/// `y` of the unit normal of a face with height differences `dx`, `dz`
+/// across one `SQUARE_SIZE` step each: `8 / |(-dx, 8, -dz)|`.
+fn face_normal_y(dx: f32, dz: f32) -> f32 {
+    SQUARE_SIZE / (dx * dx + SQUARE_SIZE * SQUARE_SIZE + dz * dz).sqrt()
 }
 
 /// The move class's view of a cell slope: impassable past its cap, else
@@ -341,6 +382,35 @@ mod tests {
         let mod_ = slope_mod_from_max_slope(cap);
         let map = SpeedMap::from_heightmap(&heights, 3, 2, cap, mod_);
         assert_eq!(map.get(0, 0), 0.0, "60° ramp should be blocked");
+    }
+
+    /// Spring's half-resolution slope map: one steep square makes its
+    /// whole 2×2 block steep (mixed toward the minimum), and the four
+    /// squares of a block share one value.
+    #[test]
+    fn one_steep_square_rates_its_whole_block() {
+        // 5×5 vertices → 4×4 squares → 2×2 blocks; raise one vertex so
+        // only the squares touching it slope.
+        let mut heights = vec![0.0; 25];
+        heights[0] = 40.0; // vertex (0,0): square (0,0) alone is steep
+        let slopes = slope_map(&heights, 5, 5);
+        let s = |x: usize, z: usize| slopes[z * 4 + x];
+        assert_eq!(s(0, 0), s(1, 0));
+        assert_eq!(s(0, 0), s(0, 1));
+        assert_eq!(s(0, 0), s(1, 1));
+        assert_eq!(s(2, 2), 0.0);
+        // Faces: TL of square (0,0) has dx = -40, dz = -40 → y = 8/√3264
+        // ≈ 0.140; its BR face is flat (1.0); the other 6 are flat.
+        let min = 8.0 / (40.0f32 * 40.0 * 2.0 + 64.0).sqrt();
+        let avg = (min + 7.0) / 8.0;
+        let expected = 1.0 - (min + (avg - min) * (min / avg));
+        assert!(
+            (s(0, 0) - expected).abs() < 1e-5,
+            "{} vs {expected}",
+            s(0, 0)
+        );
+        // Far steeper than the LIGHT cap: blocked.
+        assert!(s(0, 0) > max_slope_from_degrees(36.0));
     }
 
     /// Thresholding a shared slope field per bucket is bit-identical
