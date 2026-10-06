@@ -534,7 +534,22 @@ format is the prerequisite that's now in place.
 
 ---
 
-## 9. Multiplayer (Low)
+## 9. Movement parity vs Recoil (October 2026)
+
+Cliff climbing fixed (nav caps rounded below the units' own cap sent
+every mobile unit to the all-passable building grid), slope map,
+`positionStuck`, footprint sampling and collision details ported — see
+`docs/spring-movement-reference.md`. The four remaining differences
+(avoidance velocity `y`, 16-bit headings, QTPFS instead of grid A*,
+impulse/skidding) have a phased plan in
+`docs/movement-parity-plan.md`.
+
+- [ ] Phase 1: 3D velocity in avoidance
+- [ ] Phase 2: 16-bit headings
+- [ ] Phase 3: QTPFS port behind a `PathBackend` switch
+- [ ] Phase 4: impulse / skidding (only with the `homf` hero modoption)
+
+## 10. Multiplayer (Low)
 
 Requires all gameplay to be deterministic first. `lightyear` or `bevy_replicon` for state
 replication. Lockstep or server-authoritative. Lobby system with map/faction selection.
