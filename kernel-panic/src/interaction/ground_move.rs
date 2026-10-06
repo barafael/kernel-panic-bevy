@@ -47,6 +47,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
 use spring_pathfinding::qtpfs::{NodeLayer, QtScratch, QtSearch, Rect as QtRect};
+use spring_pathfinding::{BlockMask, SpeedMap};
 
 /// Goal radius of a plain move order (`CMobileCAI::SetGoal`'s default
 /// `goalRadius = SQUARE_SIZE`, MobileCAI.h:25).
@@ -155,7 +156,10 @@ pub struct PathQueue {
     layers: HashMap<LayerKey, (u64, NodeLayer)>,
     pending: std::collections::VecDeque<Entity>,
     queued: bevy::platform::collections::HashSet<Entity>,
-    in_flight: Option<(Entity, PathRequest, LayerKey, QtSearch)>,
+    /// The search in flight with the nav revision its layer had when it
+    /// began: the result is stamped with that revision, so a change that
+    /// lands mid-search still dirties the path afterwards.
+    in_flight: Option<(Entity, PathRequest, LayerKey, u64, QtSearch)>,
     scratch: QtScratch,
     /// Finished searches, keyed by mover: the goal searched for and
     /// the outcome (`None`: nothing could be decided, no nav grid).
@@ -167,12 +171,12 @@ impl PathQueue {
     /// (`PathManager::UpdateNodeLayer` on every changed rectangle
     /// since), built from scratch when missing or when the change ring
     /// no longer reaches back far enough.
-    fn layer(
+    fn layer<'a>(
         &mut self,
-        nav: &NavGridSet,
+        nav: &'a NavGridSet,
         registry: &UnitRegistry,
         req: &PathRequest,
-    ) -> Option<LayerKey> {
+    ) -> Option<(LayerKey, &'a SpeedMap, Option<&'a BlockMask>)> {
         let (key, speed_map, mask) = nav_class(nav, registry, req)?;
         // Missing: start from the map's bare-terrain layer (built with
         // the map) at revision 0 and replay the changes since.
@@ -182,25 +186,23 @@ impl PathQueue {
             self.layers.insert(key, (0, terrain.clone()));
         }
         let changes = match self.layers.get(&key) {
-            Some((rev, _)) if *rev == nav.revision => return Some(key),
-            Some((rev, _)) => nav.changes_since_each(*rev).map(|c| c.collect::<Vec<_>>()),
+            Some((rev, _)) if *rev == nav.revision => return Some((key, speed_map, mask)),
+            Some((rev, _)) => nav.changes_since_each(*rev),
             None => None,
         };
         match changes {
             Some(changes) => {
                 let (rev, layer) = self.layers.get_mut(&key).expect("checked above");
-                for b in changes {
-                    layer.update(
-                        speed_map,
-                        mask,
-                        QtRect {
-                            x0: b[0],
-                            z0: b[1],
-                            x1: b[2] + 1,
-                            z1: b[3] + 1,
-                        },
-                    );
-                }
+                layer.update(
+                    speed_map,
+                    mask,
+                    changes.map(|b| QtRect {
+                        x0: b[0],
+                        z0: b[1],
+                        x1: b[2] + 1,
+                        z1: b[3] + 1,
+                    }),
+                );
                 *rev = nav.revision;
                 self.stats.label_updates += 1;
             }
@@ -211,7 +213,7 @@ impl PathQueue {
                 self.stats.labellings += 1;
             }
         }
-        Some(key)
+        Some((key, speed_map, mask))
     }
 
     /// Begin `req`'s search on its class's layer. `Err` carries an
@@ -224,10 +226,9 @@ impl PathQueue {
         req: &PathRequest,
     ) -> Result<(LayerKey, QtSearch), Option<PathOutcome>> {
         let Some(nav) = nav else { return Err(None) };
-        let Some(key) = self.layer(nav, registry, req) else {
+        let Some((key, speed_map, mask)) = self.layer(nav, registry, req) else {
             return Err(None);
         };
-        let (_, speed_map, mask) = nav_class(nav, registry, req).expect("layer exists");
         let (_, layer) = self.layers.get_mut(&key).expect("layer exists");
         let src = [req.from.x, req.from.z];
         let dst = [req.to.x, req.to.z];
@@ -254,12 +255,12 @@ impl PathQueue {
     }
 
     /// Advance the search in flight by up to `pops` iterations.
-    fn step_in_flight(&mut self, nav: &NavGridSet, pops: usize) -> Option<Option<PathOutcome>> {
-        let (_, req, key, search) = self.in_flight.as_mut().expect("search in flight");
+    fn step_in_flight(&mut self, pops: usize) -> Option<Option<PathOutcome>> {
+        let (_, req, key, revision, search) = self.in_flight.as_mut().expect("search in flight");
         let (_, layer) = self.layers.get(key).expect("layer exists");
         search
             .step(layer, &mut self.scratch, pops)
-            .map(|path| Some(qt_path_outcome(path, req, nav.revision)))
+            .map(|path| Some(qt_path_outcome(path, req, *revision)))
     }
 
     /// Run queued searches until `budget` nodes are spent; returns the
@@ -297,8 +298,11 @@ impl PathQueue {
                     continue;
                 };
                 self.stats.searches += 1;
+                let revision = nav.map_or(0, |n| n.revision);
                 match self.begin(nav, registry, &req) {
-                    Ok((key, search)) => self.in_flight = Some((entity, req, key, search)),
+                    Ok((key, search)) => {
+                        self.in_flight = Some((entity, req, key, revision, search));
+                    }
                     Err(outcome) => {
                         self.stats.outcome(&outcome);
                         self.results.insert(entity, (req.to.xz(), outcome));
@@ -309,13 +313,12 @@ impl PathQueue {
             if budget == 0 {
                 return 0;
             }
-            let Some(n) = nav else { return budget };
             let pops = budget.min(PATH_SEARCH_STEP);
-            let done = self.step_in_flight(n, pops);
+            let done = self.step_in_flight(pops);
             budget -= pops;
             self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
-                let (entity, req, _, _) = self.in_flight.take().expect("search in flight");
+                let (entity, req, ..) = self.in_flight.take().expect("search in flight");
                 self.stats.outcome(&outcome);
                 self.results.insert(entity, (req.to.xz(), outcome));
             }
@@ -340,6 +343,7 @@ impl PathQueue {
             return (None, budget);
         }
         self.stats.searches += 1;
+        let revision = nav.map_or(0, |n| n.revision);
         let (key, search) = match self.begin(nav, registry, &req) {
             Ok(s) => s,
             Err(outcome) => {
@@ -347,12 +351,11 @@ impl PathQueue {
                 return (Some(outcome), budget);
             }
         };
-        self.in_flight = Some((entity, req, key, search));
-        let Some(n) = nav else { return (None, budget) };
+        self.in_flight = Some((entity, req, key, revision, search));
         let mut left = budget;
         while left > 0 {
             let pops = left.min(PATH_SEARCH_STEP);
-            let done = self.step_in_flight(n, pops);
+            let done = self.step_in_flight(pops);
             left -= pops;
             self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
@@ -1355,6 +1358,7 @@ pub struct MoverData {
     aim: Has<AimTarget>,
     animator: Option<&'static crate::units::assets::animation::UnitAnimator>,
     pending_build: Has<PendingBuild>,
+    emerging: Has<crate::units::lifecycle::spawning::Emerging>,
     lift: Option<&'static GroundLift>,
     team: Option<&'static TeamId>,
 }
@@ -1387,7 +1391,8 @@ pub fn movement_system(
         let Ok(mut u) = query.get_mut(entity) else {
             continue;
         };
-        if u.stats.can_fly || u.stats.speed <= 0.0 {
+        // `CanApplyImpulse` is false while being built.
+        if u.stats.can_fly || u.stats.speed <= 0.0 || u.emerging {
             continue;
         }
         let pos = u.transform.translation;
@@ -1572,13 +1577,20 @@ pub fn movement_system(
                     let area = n.changed_since(p.revision);
                     p.revision = n.revision;
                     let from = p.current.max(2) - 2;
-                    let dirty = p.node_rects[from.min(p.node_rects.len())..]
-                        .iter()
-                        .any(|r| {
-                            area.is_none_or(|b| {
-                                r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1]
-                            })
-                        });
+                    let dirty = match area {
+                        None => true,
+                        Some(b) => {
+                            p.node_rects[from.min(p.node_rects.len())..]
+                                .iter()
+                                .any(|r| r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1])
+                                || p.waypoints[from.min(p.waypoints.len())..]
+                                    // A raw path's two points share one leaf:
+                                    // its segment is tested too
+                                    // (`MarkDeadPaths`' `intersectsPath`).
+                                    .windows(2)
+                                    .any(|w| NavGridSet::segment_touches(b, w[0].xz(), w[1].xz()))
+                        }
+                    };
                     if dirty && p.dirty_at.is_none() {
                         p.dirty_at = Some(m.frame + DEAD_PATH_REFRESH_FRAMES);
                     }

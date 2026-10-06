@@ -397,6 +397,10 @@ pub fn apply_damage(
         // `CalcImpulseScale`: the knock-back uses the *default* damage,
         // scaled by the distance modifier and clamped. KP weapons set
         // `impulseFactor=0`, so only hero-modoption weapons push.
+        let attacker_pos = target_pos_q
+            .get(pending.attacker)
+            .map(|(gtf, _)| gtf.translation())
+            .ok();
         let mut impulse = |entity: Entity, victim_pos: Vec3, falloff: f32| {
             if weapon_def.impulse_factor == 0.0 {
                 return;
@@ -405,7 +409,16 @@ pub fn apply_damage(
                 * falloff
                 * (weapon_def.damage.default + weapon_def.impulse_boost))
                 .clamp(-MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE);
-            let dir = (victim_pos - pending.impact_pos).normalize_or_zero();
+            // `volPos - expPos`; a direct hit's impact point is the
+            // victim's own position here, where the engine's lies on the
+            // collision surface facing the shooter: use the shot's
+            // direction then.
+            let mut dir = (victim_pos - pending.impact_pos).normalize_or_zero();
+            if dir == Vec3::ZERO
+                && let Some(from) = attacker_pos
+            {
+                dir = (victim_pos - from).normalize_or_zero();
+            }
             impulses.0.push((entity, dir * scale));
         };
         // Spray-angle miss gate. `spray_angle > 0` weapons perturbed

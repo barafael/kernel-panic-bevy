@@ -79,6 +79,20 @@ proptest! {
         prop_assert!(length(&path.points) < straight + 2.0 * map_size as f32 * 8.0 + 64.0);
     }
 
+    /// Speed maps from any heights are finite and in `[0, 1]` — the
+    /// node layer quantises them to bytes without checking.
+    #[test]
+    fn speed_map_values_are_sane(
+        heights in proptest::collection::vec(-500.0f32..500.0, 25),
+        degrees in 1.0f32..60.0,
+    ) {
+        let cap = max_slope_from_degrees(degrees);
+        let map = SpeedMap::from_heightmap(&heights, 5, 5, cap, slope_mod_from_max_slope(cap));
+        for &s in &map.speeds {
+            prop_assert!(s.is_finite() && (0.0..=1.0).contains(&s), "{s}");
+        }
+    }
+
     /// Random closed squares: whatever the search returns starts at the
     /// source, every point lies on open ground, and a complete path
     /// ends at the goal.

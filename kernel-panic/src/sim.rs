@@ -126,9 +126,9 @@ impl Heading {
     /// 3 west — quadrants centred on the axes.
     pub fn facing(self) -> u32 {
         match self.0 {
-            -8191..=8191 => 0,
+            -8192..=8191 => 0,
             8192..=24575 => 1,
-            -24575..=-8192 => 3,
+            -24576..=-8193 => 3,
             _ => 2,
         }
     }
@@ -209,6 +209,11 @@ mod tests {
         assert_eq!(Heading(16384).facing(), 1);
         assert_eq!(Heading(-16384).facing(), 3);
         assert_eq!(Heading(i16::MIN).facing(), 2);
+        // Boundaries as `GetFacingFromHeading` draws them.
+        assert_eq!(Heading(-8192).facing(), 0);
+        assert_eq!(Heading(8192).facing(), 1);
+        assert_eq!(Heading(-24576).facing(), 3);
+        assert_eq!(Heading(24576).facing(), 2);
     }
 
     #[test]

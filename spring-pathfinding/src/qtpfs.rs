@@ -270,40 +270,42 @@ impl NodeLayer {
         changed
     }
 
-    /// Terrain or structures changed in `rect` (squares): re-tesselate
-    /// every 16-square block it touches whose squares changed, then
-    /// relink the leaves around them (`PathManager::UpdateNodeLayer`).
-    /// Returns the squares whose nodes were rebuilt, for dirtying paths.
+    /// Terrain or structures changed in `rects` (squares): re-tesselate
+    /// every 16-square block they touch whose squares changed, then
+    /// relink the leaves around them once (`PathManager::UpdateNodeLayer`).
+    /// Returns the squares whose nodes were rebuilt.
     pub fn update(
         &mut self,
         speed_map: &SpeedMap,
         mask: Option<&BlockMask>,
-        rect: Rect,
+        rects: impl IntoIterator<Item = Rect>,
     ) -> Option<Rect> {
-        let rect = rect.clamped(self.width, self.height);
-        if rect.is_empty() {
-            return None;
-        }
         let d = DAMAGE_SIZE as i32;
         let mut rebuilt: Option<Rect> = None;
-        for bz in (rect.z0 / d)..=((rect.z1 - 1) / d) {
-            for bx in (rect.x0 / d)..=((rect.x1 - 1) / d) {
-                let block = Rect {
-                    x0: bx * d,
-                    z0: bz * d,
-                    x1: (bx + 1) * d,
-                    z1: (bz + 1) * d,
-                };
-                if !self.fill_squares(speed_map, mask, block) {
-                    continue;
+        for rect in rects {
+            let rect = rect.clamped(self.width, self.height);
+            if rect.is_empty() {
+                continue;
+            }
+            for bz in (rect.z0 / d)..=((rect.z1 - 1) / d) {
+                for bx in (rect.x0 / d)..=((rect.x1 - 1) / d) {
+                    let block = Rect {
+                        x0: bx * d,
+                        z0: bz * d,
+                        x1: (bx + 1) * d,
+                        z1: (bz + 1) * d,
+                    };
+                    if !self.fill_squares(speed_map, mask, block) {
+                        continue;
+                    }
+                    // `GetNodeThatEncasesPowerOfTwoArea`: the deepest
+                    // node containing the block.
+                    let node = self.encasing_node(block);
+                    let re = self.nodes[node as usize].rect();
+                    self.merge(node);
+                    self.tesselate(node);
+                    rebuilt = Some(rebuilt.map_or(re, |r| r.union(re)));
                 }
-                // `GetNodeThatEncasesPowerOfTwoArea`: the deepest node
-                // containing the block.
-                let node = self.encasing_node(block);
-                let re = self.nodes[node as usize].rect();
-                self.merge(node);
-                self.tesselate(node);
-                rebuilt = Some(rebuilt.map_or(re, |r| r.union(re)));
             }
         }
         if let Some(re) = rebuilt {
@@ -654,9 +656,6 @@ pub struct QtPath {
     /// radius). `false` for a partial path to the node closest to an
     /// unreachable goal, and for a goal redirected out of a closed node.
     pub full: bool,
-    /// Index of the first waypoint to steer at (`NextWayPoint`'s
-    /// first-call scan from the source position).
-    pub first: usize,
     /// `repathAtPointIndex`: re-search once this waypoint is reached.
     pub repath_at: Option<usize>,
     /// Square rectangle of the leaf each point was traced through (the
@@ -821,8 +820,9 @@ impl QtSearch {
                 bad_goal = true;
             }
         }
+        // Source and goal in one leaf: `haveFullPath` with two points.
         if src_node == tgt_node && !bad_goal {
-            return Err(finish_trivial(layer, src, dst, src_node));
+            return Err(finish_raw(layer, src, dst, src_node));
         }
 
         let n = layer.nodes.len();
@@ -972,10 +972,6 @@ impl QtSearch {
             // Met the other search.
             let dir = if fwd { &mut self.fwd } else { &mut self.bwd };
             dir.connected = other_active;
-            if other_active {
-                dir.tgt = cur;
-                dir.heap.clear();
-            }
             if other_active {
                 self.full = true;
                 let other_prev = scratch.get(!fwd, cur).prev;
@@ -1127,7 +1123,6 @@ impl QtSearch {
         let full = self.full && !self.bad_goal;
         let repath_at = if full { None } else { repath_trigger(&points) };
         Some(QtPath {
-            first: 1,
             points,
             full,
             repath_at,
@@ -1140,21 +1135,16 @@ fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
     ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
 }
 
-/// A clear straight line: the two-point raw path.
+/// A two-point path (a clear straight line, or source and goal in one
+/// leaf).
 fn finish_raw(layer: &NodeLayer, src: [f32; 2], dst: [f32; 2], src_node: NodeId) -> QtPath {
     let r = layer.nodes[src_node as usize].rect();
     QtPath {
         points: vec![src, dst],
         full: true,
-        first: 1,
         repath_at: None,
         node_rects: vec![r, r],
     }
-}
-
-/// Source and goal share a leaf: `haveFullPath` with two points.
-fn finish_trivial(layer: &NodeLayer, src: [f32; 2], dst: [f32; 2], node: NodeId) -> QtPath {
-    finish_raw(layer, src, dst, node)
 }
 
 /// `FindNearestPointOnNodeToGoal`: the goal itself when it lies in the
@@ -1417,12 +1407,12 @@ mod tests {
         layer.update(
             &map,
             None,
-            Rect {
+            [Rect {
                 x0: 30,
                 z0: 0,
                 x1: 31,
                 z1: 64,
-            },
+            }],
         );
         assert_eq!(layer.leaf_count(), 16);
         assert!(!layer.free_blocks.is_empty());
