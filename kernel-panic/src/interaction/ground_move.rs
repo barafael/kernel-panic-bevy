@@ -398,6 +398,9 @@ pub struct GroundMover {
     /// `avoidingUnits`: steered round someone at the last evaluation.
     pub avoiding_units: bool,
     pub position_stuck: bool,
+    /// `owner->speed`: this frame's velocity vector along the tilted
+    /// front direction (elmos/frame), zero when the unit did not move.
+    pub velocity: Vec3,
     /// `forceStaticObjectCheck`: test next collision pass whether the
     /// unit stands on a closed square / inside a structure footprint
     /// (`positionStuck`). Set by the constructor, an idle repath, and
@@ -452,6 +455,7 @@ impl GroundMover {
             last_avoidance_dir: Vec2::ZERO,
             avoiding_units: false,
             position_stuck: false,
+            velocity: Vec3::ZERO,
             force_static_object_check: true,
             old_pos: Vec3::ZERO,
             frame: 0,
@@ -1000,7 +1004,8 @@ pub fn step_mover(
     let new_speed = (m.current_speed + delta).max(0.0);
     // `owner->frontdir * speed`: the heading tilted onto the ground,
     // so slopes shorten the horizontal step by the pitch's cosine.
-    let request = attitude(m.heading, up).mul_vec3(Vec3::NEG_Z).xz() * new_speed;
+    m.velocity = attitude(m.heading, up).mul_vec3(Vec3::NEG_Z) * new_speed;
+    let request = m.velocity.xz();
     let mut step = Vec2::ZERO;
     if request.length_squared() > 0.0 {
         let gated = update_pos(map, pos2, request, m.right(), m.front(), m.position_stuck);
@@ -1157,7 +1162,7 @@ pub fn movement_system(
             entity: u.entity,
             pos,
             pos3: u.transform.translation,
-            vel: m.front() * m.current_speed,
+            vel: m.velocity,
             front: m.front(),
             right: m.right(),
             owner_radius: m.owner_radius,
@@ -1435,7 +1440,7 @@ pub struct Avoidee {
     pos: Vec2,
     /// `avoidee->pos`: the engine measures avoidee distances in 3D.
     pos3: Vec3,
-    vel: Vec2,
+    vel: Vec3,
     front: Vec2,
     right: Vec2,
     owner_radius: f32,
@@ -1499,7 +1504,7 @@ pub fn obstacle_avoidance_dir(
     }
     let goal = m.goal.unwrap_or(me.pos);
     let right = m.right();
-    let vel = front * m.current_speed;
+    let vel = m.velocity;
     let avoidance_radius = m.current_speed.max(1.0) * (me.model_radius * 2.0);
     let mut avoidance_vec = Vec2::ZERO;
 
@@ -1523,10 +1528,10 @@ pub fn obstacle_avoidance_dir(
                     continue;
                 }
                 // `(avoider->pos + avoider->speed) - (avoidee->pos +
-                // avoidee->speed)`: a 3D separation, so units on
-                // different terrain heights count as further apart.
-                let vector3 = (me.pos3 + Vec3::new(vel.x, 0.0, vel.y))
-                    - (o.pos3 + Vec3::new(o.vel.x, 0.0, o.vel.y));
+                // avoidee->speed)`: a 3D separation with the full
+                // velocity vectors, so units on different terrain
+                // heights count as further apart.
+                let vector3 = (me.pos3 + vel) - (o.pos3 + o.vel);
                 let vector = vector3.xz();
                 let radius_sum = m.owner_radius + o.owner_radius;
                 let mass_scale = o.mass / (m.mass + o.mass);
@@ -2013,6 +2018,7 @@ pub fn ground_collision_system(
             // Didn't move: speed is lost, and not moving toward an
             // unreached goal counts as idling.
             m.current_speed = 0.0;
+            m.velocity = Vec3::ZERO;
             m.idling = !m.at_goal;
         } else {
             m.old_pos = new_pos;
@@ -2542,6 +2548,38 @@ mod tests {
             "at the goal: {}",
             h.pos(e)
         );
+    }
+
+    /// `owner->speed` is the velocity along the tilted front direction:
+    /// on a slope it has a vertical component, so the avoidance
+    /// prediction `(pos + speed)` sees a climbing unit higher up than
+    /// its flat speed would place it.
+    #[test]
+    fn velocity_follows_the_slope() {
+        let mut h = Harness::flat();
+        let verts = 257usize;
+        let rise = 8.0 * 30.0_f32.to_radians().tan();
+        let heights: Vec<f32> = (0..verts * verts)
+            .map(|i| (i % verts) as f32 * rise)
+            .collect();
+        h.world
+            .insert_resource(Heightmap::from_raw(heights, verts, verts));
+        let e = h.spawn(UnitKind::Bit, 0, Vec3::new(600.0, 0.0, 1000.0));
+        h.step();
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(1400.0, 0.0, 1000.0)));
+        for _ in 0..30 {
+            h.step();
+        }
+        let m = h.world.get::<GroundMover>(e).unwrap();
+        let v = m.velocity;
+        assert!(v.x > 0.0 && v.y > 0.0, "climbing +X: {v}");
+        assert!(
+            (v.y / v.x - 30.0_f32.to_radians().tan()).abs() < 0.05,
+            "{v}"
+        );
+        assert!((v.length() - m.current_speed).abs() < 1e-3, "{v}");
     }
 
     /// `forceStaticObjectCheck` → `positionStuck`: a unit standing inside
