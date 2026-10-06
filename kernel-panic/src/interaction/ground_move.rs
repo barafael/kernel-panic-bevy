@@ -38,8 +38,8 @@ use super::movement::{
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
 use crate::sim::{
-    GAME_SPEED, Heading, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SPRING_CIRCLE_DIVS,
-    SPRING_MAX_HEADING, SQUARE_SIZE,
+    GAME_SPEED, Heading, MAP_GRAVITY_PER_FRAME2, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE,
+    SPRING_CIRCLE_DIVS, SPRING_MAX_HEADING, SQUARE_SIZE,
 };
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AimTarget, DeployState, Deployable, Dying, Stunned};
@@ -65,6 +65,25 @@ const MAX_HEADING: f32 = SPRING_MAX_HEADING as f32;
 const TURN_ACCEL_FRACTION: f32 = 0.333;
 /// `float3::cmp_eps()` — "didn't move" tolerance in `OwnerMoved`.
 const CMP_EPS: f32 = 1e-4;
+/// `sqSkidSpeedMult` (GroundMoveType.h:251): a velocity more than
+/// ~12.9° off the facing starts a skid.
+const SQ_SKID_SPEED_MULT: f32 = 0.95;
+/// `speedReduction` in `UpdateSkid`: elmos/frame lost per frame on
+/// level ground.
+const SKID_SPEED_REDUCTION: f32 = 0.35;
+/// `UnitDef` drag defaults (UnitDef.cpp:434-436) and the map
+/// atmosphere's `fluidDensity` default (MapInfo.cpp:164).
+const ATMOSPHERIC_DRAG_COEFF: f32 = 1.0;
+const GROUND_FRICTION_COEFF: f32 = 0.01;
+const ROLLING_RESISTANCE_COEFF: f32 = 0.05;
+const ATMOSPHERE_DENSITY: f32 = 1.2 * 0.25;
+
+/// Impulses from this frame's explosions, `(unit, impulse)` in
+/// mass-scaled units not yet divided by the unit's mass
+/// (`CUnit::DoDamage` → `ApplyImpulse(impulse / mass)`); the movement
+/// system applies them at the start of the next sim frame.
+#[derive(Resource, Default)]
+pub struct PendingImpulses(pub Vec<(Entity, Vec3)>);
 /// A\* nodes expanded per sim frame across all path searches. Spring's
 /// QTPFS queues `RequestPath` calls and executes them at the head of
 /// the next frame while units drive toward a temporary waypoint; the
@@ -403,6 +422,16 @@ pub struct GroundMover {
     /// `owner->speed`: this frame's velocity vector along the tilted
     /// front direction (elmos/frame), zero when the unit did not move.
     pub velocity: Vec3,
+    /// `PSTATE_BIT_SKIDDING` / `PSTATE_BIT_FLYING`: knocked loose by an
+    /// impulse; `UpdateSkid` runs instead of path following until the
+    /// velocity is back along the facing and the unit is on the ground.
+    pub skidding: bool,
+    pub flying: bool,
+    /// `skidRotVector`, `skidRotSpeed`, `skidRotAccel`: the tumble the
+    /// model shows while skidding (`CalcSkidRot`).
+    pub skid_rot_vector: Vec3,
+    pub skid_rot_speed: f32,
+    pub skid_rot_accel: f32,
     /// `forceStaticObjectCheck`: test next collision pass whether the
     /// unit stands on a closed square / inside a structure footprint
     /// (`positionStuck`). Set by the constructor, an idle repath, and
@@ -458,6 +487,11 @@ impl GroundMover {
             avoiding_units: false,
             position_stuck: false,
             velocity: Vec3::ZERO,
+            skidding: false,
+            flying: false,
+            skid_rot_vector: Vec3::ZERO,
+            skid_rot_speed: 0.0,
+            skid_rot_accel: 0.0,
             force_static_object_check: true,
             old_pos: Vec3::ZERO,
             frame: 0,
@@ -559,6 +593,135 @@ impl GroundMover {
         self.pathing_arrived = true;
     }
 
+    /// `CUnit::ApplyImpulse` + `CGroundMoveType::CanApplyImpulse`
+    /// (Unit.cpp:1392, GroundMoveType.cpp:1454). `impulse` is already
+    /// divided by the mass; its component into the ground is dropped,
+    /// the rest becomes velocity and may start a skid (velocity far off
+    /// the facing) or a flight (velocity up out of the ground).
+    /// `rand` ∈ [0, 1) seeds the tumble of a launched unit.
+    pub fn apply_impulse(&mut self, impulse: Vec3, ground_normal: Vec3, rand: f32) {
+        let into_ground = if self.flying {
+            Vec3::ZERO
+        } else {
+            ground_normal * impulse.dot(ground_normal).min(0.0)
+        };
+        let impulse = impulse - into_ground;
+        if impulse.length_squared() <= 0.01 {
+            return;
+        }
+        self.skid_rot_speed = 0.0;
+        self.skid_rot_accel = 0.0;
+        let new_speed = self.velocity + impulse;
+        let mut skid_dir = self.heading.to_vector3();
+        let start_skidding = signed_square(new_speed.dot(skid_dir)) + 0.01
+            < new_speed.length_squared() * SQ_SKID_SPEED_MULT;
+        let start_flying = new_speed.dot(ground_normal) > 0.2;
+        if new_speed.xz().length_squared() >= 0.01 {
+            skid_dir = new_speed.with_y(0.0).normalize();
+        }
+        self.skid_rot_vector = if start_skidding {
+            skid_dir.cross(Vec3::Y)
+        } else {
+            Vec3::ZERO
+        };
+        self.skid_rot_accel = if start_flying {
+            (rand - 0.5) * 0.04
+        } else {
+            0.0
+        };
+        self.skidding |= start_skidding || start_flying;
+        self.flying |= start_flying;
+        self.velocity = new_speed;
+        self.current_speed = new_speed.length();
+    }
+
+    /// `CGroundMoveType::UpdateSkid` (GroundMoveType.cpp:1504) for one
+    /// frame: drag, the per-frame speed loss, gravity while airborne,
+    /// the ground bounce, and the skid rotation bookkeeping
+    /// (`CalcSkidRot`). `ground_height` / `ground_normal` are taken at
+    /// the current `pos`; the caller re-seats a grounded unit on the
+    /// terrain afterwards (`AdjustPosToWaterLine`). `OnSlope` is never
+    /// true in KP (`slideTolerance` 0), so there is no slope sliding.
+    pub fn update_skid(&mut self, pos: &mut Vec3, ground_height: f32, ground_normal: Vec3) {
+        let gravity = MAP_GRAVITY_PER_FRAME2;
+        let mut v = self.velocity
+            + drag_acceleration(
+                self.velocity,
+                self.mass,
+                !self.flying,
+                GROUND_FRICTION_COEFF,
+            );
+        let neg_altitude = ground_height - pos.y;
+        if self.flying {
+            if neg_altitude > 0.0 {
+                // Landed (collision damage is off in KP).
+                self.flying = false;
+                pos.y += neg_altitude;
+                self.skid_rot_speed = 0.0;
+            } else {
+                v.y += gravity;
+            }
+        } else {
+            let front = self.heading.to_vector3();
+            let stop =
+                signed_square(v.dot(front)) + 0.01 >= v.length_squared() * SQ_SKID_SPEED_MULT;
+            if stop {
+                let rot_speed = (self.skid_rot_speed + self.skid_rot_accel + 0.5).floor();
+                self.skid_rot_accel = (rot_speed - self.skid_rot_speed) * 0.5 * DEG_TO_RAD;
+                self.skidding = false;
+            } else {
+                let speed_scale = v.length();
+                let rot_rem_time = (speed_scale / SKID_SPEED_REDUCTION).max(1.0);
+                v *= 1.0 - (SKID_SPEED_REDUCTION / speed_scale).min(1.0);
+                let rot_speed =
+                    (self.skid_rot_speed + self.skid_rot_accel * (rot_rem_time - 1.0) + 0.5)
+                        .floor();
+                self.skid_rot_accel = (rot_speed - self.skid_rot_speed) / rot_rem_time * DEG_TO_RAD;
+                if self.skid_rot_speed.floor()
+                    != (self.skid_rot_speed + self.skid_rot_accel).floor()
+                {
+                    self.skid_rot_speed = 0.0;
+                    self.skid_rot_accel = 0.0;
+                }
+            }
+            if neg_altitude < v.y + gravity {
+                // Leaving the ground (off a ledge).
+                v.y += gravity;
+                self.flying = true;
+                self.skidding = true;
+            } else if neg_altitude > v.y {
+                let proj = v.dot(ground_normal);
+                if proj > 0.0 {
+                    v *= 0.95;
+                } else {
+                    v += ground_normal * (proj.abs() + 0.1);
+                    v *= 0.8;
+                }
+            }
+        }
+        self.velocity = v;
+        *pos += v;
+        if self.skidding {
+            // `CalcSkidRot`.
+            self.skid_rot_speed += self.skid_rot_accel;
+            self.skid_rot_speed *= 0.999;
+            self.skid_rot_accel *= 0.95;
+        } else {
+            // Back under `ChangeHeading` / `ChangeSpeed`, from the speed
+            // the skid left (`UpdateOwnerSpeed` picks `|speed|` up).
+            self.current_speed = v.length();
+        }
+    }
+
+    /// The tumble `CalcSkidRot` applies on top of the heading frame:
+    /// `skidRotSpeed / GAME_SPEED · 2π` about `skidRotVector`.
+    pub fn skid_rotation(&self) -> Quat {
+        if self.skid_rot_vector == Vec3::ZERO {
+            return Quat::IDENTITY;
+        }
+        Quat::from_axis_angle(self.skid_rot_vector, self.skid_rot_speed / GAME_SPEED * TAU)
+    }
+
     /// `(goalRadius + extraRadius) · (numIdlingSlowUpdates + 1)` for
     /// move commands (`UNIT_HAS_MOVE_CMD`), else unscaled.
     fn goal_tolerance(&self, has_move_cmd: bool) -> f32 {
@@ -612,6 +775,37 @@ impl FrameStats {
 /// Spring's `Sign` (≥ 0 → +1).
 fn sign(x: f32) -> f32 {
     if x >= 0.0 { 1.0 } else { -1.0 }
+}
+
+/// `SignedSquare`.
+fn signed_square(x: f32) -> f32 {
+    x * x.abs()
+}
+
+const DEG_TO_RAD: f32 = PI / 180.0;
+
+/// `CSolidObject::GetDragAccelerationVec` (SolidObject.cpp:328) for a
+/// unit on the ground or in the air (never in water): air drag
+/// `½ρ·Cd·A·v²` on a sphere of the unit's mass at 8000 kg/m³, ground
+/// friction `μ·m·|v|` while grounded, divided by the mass and clamped
+/// per component so it never reverses the velocity. Below 0.5 elmos/s
+/// the velocity is cancelled outright.
+pub fn drag_acceleration(velocity: Vec3, mass: f32, on_ground: bool, friction: f32) -> Vec3 {
+    if velocity.length() * GAME_SPEED < 0.5 {
+        return -velocity;
+    }
+    let radius = (3.0 * mass / (4.0 * PI * 8000.0)).cbrt();
+    let air = 0.5 * ATMOSPHERE_DENSITY * ATMOSPHERIC_DRAG_COEFF * PI * radius * radius;
+    let ground = if on_ground { friction * mass } else { 0.0 };
+    let per_axis = |v: f32| {
+        let a = (v * v * air + v.abs() * ground) * -sign(v) / mass;
+        a.clamp(-v.abs(), v.abs())
+    };
+    Vec3::new(
+        per_axis(velocity.x),
+        per_axis(velocity.y),
+        per_axis(velocity.z),
+    )
 }
 
 /// `AMoveType::BrakingDistance` (MoveType.h:80).
@@ -1008,7 +1202,15 @@ pub fn step_mover(
     };
     let wanted_speed = if steering { fs.max_speed } else { 0.0 };
     let delta = change_speed(m, fs, wanted_speed, &inputs);
-    let new_speed = (m.current_speed + delta).max(0.0);
+    // `CalcSpeedVectorExclGravity`: a speed above the maximum (an
+    // impulse along the facing) decays through rolling resistance.
+    let base_speed = if m.current_speed > fs.max_speed {
+        let drag = drag_acceleration(m.velocity, m.mass, true, ROLLING_RESISTANCE_COEFF);
+        fs.max_speed.max((m.velocity + drag).length())
+    } else {
+        m.current_speed
+    };
+    let new_speed = (base_speed + delta).max(0.0);
     // `owner->frontdir * speed`: the heading tilted onto the ground,
     // so slopes shorten the horizontal step by the pitch's cosine.
     m.velocity = attitude(m.heading, up).mul_vec3(Vec3::NEG_Z) * new_speed;
@@ -1154,8 +1356,31 @@ pub fn movement_system(
     mut avoidees: Local<Vec<Avoidee>>,
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
     mut path_queue: ResMut<PathQueue>,
+    mut impulses: ResMut<PendingImpulses>,
+    mut rng_state: Local<u32>,
 ) {
     let nav = nav_set.as_deref();
+    // Last frame's explosion impulses (`CUnit::ApplyImpulse`), before
+    // anyone moves. Buildings and aircraft take none here
+    // (`CStaticMoveType::CanApplyImpulse` is false; hover air has its own).
+    if *rng_state == 0 {
+        *rng_state = 0x9E37_79B9;
+    }
+    for (entity, impulse) in impulses.0.drain(..) {
+        let Ok(mut u) = query.get_mut(entity) else {
+            continue;
+        };
+        if u.stats.can_fly || u.stats.speed <= 0.0 {
+            continue;
+        }
+        let pos = u.transform.translation;
+        let normal = heightmap
+            .as_deref()
+            .map_or(Vec3::Y, |hm| hm.normal(pos.x, pos.z));
+        let mass = u.mover.mass;
+        let rand = crate::rng::next_f32(&mut rng_state);
+        u.mover.apply_impulse(impulse / mass, normal, rand);
+    }
     // Avoidance reads everyone's pose from before this frame's moves
     // (Spring evaluates it in the parallel traversal-plan pass).
     avoidees.clear();
@@ -1184,6 +1409,7 @@ pub fn movement_system(
             team: u.team.map_or(0, |t| t.0),
             moving: m.is_moving(),
             crushable: false,
+            flying: m.flying,
         });
     }
     let avoid = AvoidanceView {
@@ -1235,6 +1461,30 @@ pub fn movement_system(
             xsizeh: m.xsizeh,
             crush_strength: m.crush_strength,
         };
+
+        if m.skidding {
+            // `UpdatePreCollisions`: a skidding unit only skids — no
+            // path following, no collision response of its own.
+            let hm = heightmap.as_deref();
+            let lift = u.lift.map_or(0.0, |l| l.0);
+            let (ground, normal) = hm.map_or((pos.y, Vec3::Y), |hm| {
+                (hm.sample(pos.x, pos.z) + lift, hm.normal(pos.x, pos.z))
+            });
+            let mut new_pos = pos;
+            m.update_skid(&mut new_pos, ground, normal);
+            if !m.flying
+                && let Some(hm) = hm
+            {
+                // `AdjustPosToWaterLine`.
+                new_pos.y = hm.sample(new_pos.x, new_pos.z) + lift;
+            }
+            let rotation = m.skid_rotation() * attitude(m.heading, up_dir(m, hm, new_pos));
+            let tf = &mut *u.transform;
+            tf.translation = new_pos;
+            tf.rotation = rotation;
+            m.old_pos = new_pos;
+            continue;
+        }
 
         let more_moves = u.queue.as_deref().is_some_and(|q| !q.commands.is_empty());
 
@@ -1464,6 +1714,8 @@ pub struct Avoidee {
     /// Something this mover could crush (never true for units in KP:
     /// `crushable` defaults to false).
     crushable: bool,
+    /// `IsInAir() || IsFlying()`: launched by an impulse — not avoided.
+    flying: bool,
 }
 
 /// The avoider's own identity for [`obstacle_avoidance_dir`].
@@ -1531,7 +1783,7 @@ pub fn obstacle_avoidance_dir(
             };
             for &i in bucket {
                 let o = &view.entries[i];
-                if o.entity == me.entity || o.crushable {
+                if o.entity == me.entity || o.crushable || o.flying {
                     continue;
                 }
                 if o.pos.distance_squared(me.pos) > avoidance_radius * avoidance_radius {
@@ -1713,6 +1965,12 @@ pub struct CollisionEntry {
     /// but is never pushed itself, and runs no collision pass of its
     /// own (`HandleObjectCollisions` returns early for it).
     being_built: bool,
+    /// `IsSkidding()`: skipped by the normal collision pass; met only
+    /// through `CheckCollisionSkid`.
+    skidding: bool,
+    /// `owner->speed` and the model radius, for `CheckCollisionSkid`.
+    vel: Vec3,
+    hit_radius: f32,
 }
 
 /// Cell size of the collision broad-phase grid.
@@ -1864,6 +2122,9 @@ pub fn ground_collision_system(
             has_commands: has_target || queue.is_some_and(|q| !q.commands.is_empty()),
             curr_waypoint,
             being_built: emerging,
+            skidding: m.skidding,
+            vel: m.velocity,
+            hit_radius: stats.hit_radius,
         });
         if mobile {
             grid.mobile.entry(cell_of(pos)).or_default().push(idx);
@@ -1879,11 +2140,51 @@ pub fn ground_collision_system(
         }
     }
     let mut crushed: Vec<Entity> = Vec::new();
+    // `CheckCollisionSkid` moves the units a skidding unit hits too;
+    // applied after the pass (position and velocity deltas).
+    let mut knocked: Vec<(Entity, Vec3)> = Vec::new();
 
     for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging) in
         &mut movers
     {
         if stats.can_fly || stats.speed <= 0.0 || dying || emerging {
+            continue;
+        }
+        if m.skidding {
+            // `CheckCollisionSkid` (GroundMoveType.cpp:1677): sphere
+            // overlap on the model radii. Statics (and features) throw
+            // the skidder back at 1.8× the impact speed; mobile units
+            // split the impact by mass and are shoved themselves.
+            let r1 = stats.hit_radius;
+            let mut pos3 = tf.translation;
+            for o in entries.iter() {
+                let sep = pos3 - o.pos3;
+                let dist_sq = sep.length_squared();
+                let total = r1 + o.hit_radius;
+                if o.entity == entity || dist_sq >= total * total || dist_sq <= 0.01 {
+                    continue;
+                }
+                let dir = sep / dist_sq.sqrt();
+                if !o.mobile {
+                    let impact = -m.velocity.dot(dir);
+                    if impact <= 0.0 {
+                        continue;
+                    }
+                    pos3 += dir * impact;
+                    m.velocity += dir * impact * 1.8;
+                } else {
+                    let impact = (o.vel - m.velocity).dot(dir) * 0.5;
+                    if impact <= 0.0 {
+                        continue;
+                    }
+                    let rel_mass = m.mass / (m.mass + o.mass);
+                    let collider_impulse = dir * (impact * (1.0 - rel_mass));
+                    pos3 += collider_impulse;
+                    m.velocity += collider_impulse;
+                    knocked.push((o.entity, -dir * (impact * rel_mass)));
+                }
+            }
+            tf.translation = pos3;
             continue;
         }
         let pos3 = tf.translation;
@@ -1920,8 +2221,10 @@ pub fn ground_collision_system(
                         let o = &entries[i];
                         let r2 = o.radius;
                         // `CheckCollisionExclSAT`: `|p1 - p2|² - (r1 + r2)²
-                        // <= 0.01` on the full 3D positions.
+                        // <= 0.01` on the full 3D positions. Skidding
+                        // collidees are met only through their own skid.
                         if o.entity == entity
+                            || o.skidding
                             || (pos3 - o.pos3).length_squared() - (r1 + r2) * (r1 + r2) > 0.01
                         {
                             continue;
@@ -2107,6 +2410,14 @@ pub fn ground_collision_system(
                 commands.entity(entity).remove::<MovePath>();
                 promote_next_command(&mut commands, entity, new_pos, queue.as_deref_mut());
             }
+        }
+    }
+    for (entity, impulse) in knocked {
+        if let Ok((_, _, _, mut tf, mut m, ..)) = movers.get_mut(entity) {
+            // `collidee->Move(-impulse); SetVelocityAndSpeed(speed - impulse)`.
+            tf.translation += impulse;
+            m.velocity += impulse;
+            m.current_speed = m.velocity.length();
         }
     }
     crushed.sort();
@@ -2611,6 +2922,72 @@ mod tests {
             "{v}"
         );
         assert!((v.length() - m.current_speed).abs() < 1e-3, "{v}");
+    }
+
+    /// `CanApplyImpulse`: an impulse along the facing only adds speed,
+    /// which then decays back to the maximum (`CalcSpeedVectorExclGravity`
+    /// drag); a sideways one starts a skid that `UpdateSkid` brakes at
+    /// 0.35 elmos/frame² and ends once the velocity is back along the
+    /// facing (here: when it has died down), after which normal driving
+    /// resumes.
+    #[test]
+    fn impulses_add_speed_along_the_facing_and_skid_sideways() {
+        let mut h = Harness::flat();
+        let e = h.spawn(UnitKind::Bit, 0, Vec3::new(400.0, 0.0, 400.0));
+        h.step();
+        h.world
+            .entity_mut(e)
+            .insert(MoveTarget(Vec3::new(1400.0, 0.0, 400.0)));
+        for _ in 0..10 {
+            h.step();
+        }
+        let mass = h.world.get::<GroundMover>(e).unwrap().mass;
+        // Along +X (the facing): a shove of 2 elmos/frame.
+        h.world
+            .resource_mut::<PendingImpulses>()
+            .0
+            .push((e, Vec3::new(2.0 * mass, 0.0, 0.0)));
+        h.step();
+        let m = h.world.get::<GroundMover>(e).unwrap();
+        assert!(!m.skidding, "no skid along the facing");
+        assert!(
+            m.current_speed > 3.0 && m.current_speed < 5.0,
+            "{}",
+            m.current_speed
+        );
+        for _ in 0..60 {
+            h.step();
+        }
+        assert!(
+            (mover_speed(&h, e) - 90.0).abs() < 0.5,
+            "decayed back to max"
+        );
+
+        // Sideways (+Z): a skid.
+        let z0 = h.pos(e).z;
+        h.world
+            .resource_mut::<PendingImpulses>()
+            .0
+            .push((e, Vec3::new(0.0, 0.0, 3.0 * mass)));
+        h.step();
+        assert!(h.world.get::<GroundMover>(e).unwrap().skidding);
+        let mut frames = 0;
+        while h.world.get::<GroundMover>(e).unwrap().skidding && frames < 60 {
+            h.step();
+            frames += 1;
+        }
+        assert!(frames < 20, "3 elmos/frame at 0.35/frame braking: {frames}");
+        let dz = h.pos(e).z - z0;
+        assert!(dz > 8.0 && dz < 25.0, "slid sideways {dz}");
+        let x0 = h.pos(e).x;
+        for _ in 0..60 {
+            h.step();
+        }
+        assert!(
+            h.pos(e).x - x0 > 150.0,
+            "drives on afterwards: {}",
+            h.pos(e)
+        );
     }
 
     /// `forceStaticObjectCheck` → `positionStuck`: a unit standing inside

@@ -77,6 +77,7 @@ impl Plugin for UnitsPlugin {
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<shield::OnsMode>()
             .init_resource::<shield::ShieldShellAssets>()

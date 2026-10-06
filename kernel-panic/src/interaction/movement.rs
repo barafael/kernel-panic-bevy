@@ -1363,6 +1363,8 @@ mod cross_map_tests {
                 parsed.header.heightmap_height() as u32 - 1,
             );
             world.insert_resource(PathHeat(HeatMap::new(heat_dims.0, heat_dims.1)));
+            world.init_resource::<crate::interaction::ground_move::PendingImpulses>();
+            world.init_resource::<crate::interaction::ground_move::PathQueue>();
 
             // Start/target: the map's authored start positions — the
             // places the game actually spawns homebases. If units can't

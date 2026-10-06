@@ -219,20 +219,31 @@ impl HitQueries<'_, '_> {
     }
 }
 
-/// Minimum `area_of_effect` (elmos) at which a weapon triggers a splash
-/// pass. Upstream weapons use tiny AoE values (8/16/32) for impact effects
-/// on single-target weapons; only lob/explosive weapons set AoE high
-/// enough to hit multiple units. This threshold avoids doing an O(n)
-/// position scan for every Bit shot.
-const AOE_SPLASH_THRESHOLD: f32 = 48.0;
+/// `CGameHelper::DoExplosionDamage`'s distance modifier
+/// (GameHelper.cpp:107-172): `dist` is the distance from the explosion
+/// to the victim's collision-volume *surface*, `radius` the damage
+/// radius (`areaOfEffect / 2`), `edge` the weapon's `edgeEffectiveness`.
+/// `(R + 0.001 − d) / (R + 0.001 − d·edge)`: linear at `edge = 0`,
+/// flatter toward the centre as `edge` rises, full damage at `edge = 1`
+/// or within one elmo. Callers must ensure `dist <= radius`.
+pub(crate) fn splash_falloff(dist: f32, radius: f32, edge: f32) -> f32 {
+    if edge == 1.0 || dist < 1.0 {
+        return 1.0;
+    }
+    (radius + 0.001 - dist) / (radius + 0.001 - dist * edge)
+}
 
-/// Linear splash falloff. `dist` is the distance from the impact point;
-/// `radius` is the weapon's `area_of_effect`; `edge_mult` is the weapon's
-/// `edge_effectiveness` (1.0 = full damage at the edge, 0.0 = no damage
-/// at the edge). Callers must ensure `dist < radius`.
-pub(crate) fn splash_falloff(dist: f32, radius: f32, edge_mult: f32) -> f32 {
-    let t = (dist / radius).clamp(0.0, 1.0);
-    1.0 - t * (1.0 - edge_mult)
+/// `MAX_EXPLOSION_IMPULSE` (GlobalConstants.h:136).
+const MAX_EXPLOSION_IMPULSE: f32 = 1e4;
+
+/// One splash victim collected inside the spatial query, applied after.
+pub struct SplashHit {
+    entity: Entity,
+    damage: f32,
+    infect: bool,
+    pos: Vec3,
+    /// The distance modifier, reused for the impulse.
+    falloff: f32,
 }
 
 /// Release follow-up shots for units in the middle of a burst.
@@ -341,8 +352,9 @@ fn apply_hit(
 }
 
 /// Apply queued damage and mark targets as infected when hit by
-/// Worm or Virus weapons. Weapons with `area_of_effect > AOE_SPLASH_THRESHOLD`
-/// also damage other units in radius, with linear falloff from the
+/// Worm or Virus weapons. Every impact is an engine `Explosion`: units
+/// whose collision sphere lies within `areaOfEffect / 2` of the impact
+/// take splash with [`splash_falloff`] from the
 /// weapon's `edge_effectiveness`. `avoidfriendly=1` and `noselfdamage=1`
 /// filter the splash set so allies / the attacker don't eat stray AoE.
 #[allow(clippy::too_many_arguments)]
@@ -357,8 +369,9 @@ pub fn apply_damage(
     weapon_registry: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<SpatialIndex>,
+    mut impulses: ResMut<crate::interaction::ground_move::PendingImpulses>,
     mut commands: Commands,
-    mut splash_hits: Local<Vec<(Entity, f32, bool)>>,
+    mut splash_hits: Local<Vec<SplashHit>>,
     mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
 ) {
     for pending in damage_queue.drain() {
@@ -381,6 +394,20 @@ pub fn apply_damage(
         let paralyze_time = weapon_def.paralyze_time;
 
         let dyn_mult = weapon_def.dyn_damage_multiplier(pending.attacker_distance);
+        // `CalcImpulseScale`: the knock-back uses the *default* damage,
+        // scaled by the distance modifier and clamped. KP weapons set
+        // `impulseFactor=0`, so only hero-modoption weapons push.
+        let mut impulse = |entity: Entity, victim_pos: Vec3, falloff: f32| {
+            if weapon_def.impulse_factor == 0.0 {
+                return;
+            }
+            let scale = (weapon_def.impulse_factor
+                * falloff
+                * (weapon_def.damage.default + weapon_def.impulse_boost))
+                .clamp(-MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE);
+            let dir = (victim_pos - pending.impact_pos).normalize_or_zero();
+            impulses.0.push((entity, dir * scale));
+        };
         // Spray-angle miss gate. `spray_angle > 0` weapons perturbed
         // their `impact_pos` in combat_system; here we check whether the
         // perturbed impact still lands inside the target's volumetric
@@ -425,14 +452,18 @@ pub fn apply_damage(
                         &mut commands,
                     );
                     victims.reset_idle(target, &mut commands);
+                    if let Ok((tgt_xform, _)) = target_pos_q.get(target) {
+                        impulse(target, tgt_xform.translation(), 1.0);
+                    }
                 }
                 hit
             }
         };
 
-        let aoe = weapon_def.area_of_effect;
-        if aoe > AOE_SPLASH_THRESHOLD {
-            let aoe_sq = aoe * aoe;
+        // `damageAreaOfEffect = areaOfEffect · 0.5` (WeaponDef.cpp:71), at
+        // least 1 (`CGameHelper::Explosion`).
+        let aoe = (weapon_def.area_of_effect * 0.5).max(1.0);
+        {
             let edge_mult = weapon_def.edge_effectiveness;
             let avoid_friendly = weapon_def.avoid_friendly;
             let no_self_damage = weapon_def.no_self_damage;
@@ -440,7 +471,8 @@ pub fn apply_damage(
             // so we can't stay inside the spatial callback closure. Re-uses
             // a Local buffer across calls to avoid per-hit allocation.
             splash_hits.clear();
-            spatial.query_radius(pending.impact_pos, aoe, |candidate| {
+            let reach = aoe + spatial.max_hit_radius();
+            spatial.query_radius(pending.impact_pos, reach, |candidate| {
                 if pending.target == Some(candidate.entity) {
                     return;
                 }
@@ -453,14 +485,18 @@ pub fn apply_damage(
                 {
                     return;
                 }
-                let d_sq = candidate.pos.distance_squared(pending.impact_pos);
-                if d_sq >= aoe_sq {
+                // Distance to the collision sphere's surface
+                // (`GetPointSurfaceDistance`), 0 inside it.
+                let d =
+                    (candidate.pos.distance(pending.impact_pos) - candidate.hit_radius).max(0.0);
+                if d > aoe {
                     return;
                 }
                 // The spatial snapshot already carries the target's kind —
                 // no ECS re-fetch needed per splash candidate.
                 let kind = candidate.kind;
-                let splash = base(kind) * splash_falloff(d_sq.sqrt(), aoe, edge_mult);
+                let falloff = splash_falloff(d, aoe, edge_mult);
+                let splash = base(kind) * falloff;
                 // infection.lua keys on `UnitDamaged`, which fires for
                 // every unit an explosion touches — splash victims of an
                 // infector (Wormsplash, VirusDeath) are infected too, as
@@ -468,9 +504,22 @@ pub fn apply_damage(
                 let infect = infection_window.is_some()
                     && kind != UnitKind::Virus
                     && attacker_info.is_some_and(|(_, _, a_team)| candidate.team != a_team.0);
-                splash_hits.push((candidate.entity, splash, infect));
+                splash_hits.push(SplashHit {
+                    entity: candidate.entity,
+                    damage: splash,
+                    infect,
+                    pos: candidate.pos,
+                    falloff,
+                });
             });
-            for (entity, splash, infect) in splash_hits.drain(..) {
+            for SplashHit {
+                entity,
+                damage: splash,
+                infect,
+                pos: victim_pos,
+                falloff,
+            } in splash_hits.drain(..)
+            {
                 let amount = splash
                     * byte_closed_damage_multiplier(
                         entity,
@@ -489,6 +538,7 @@ pub fn apply_damage(
                     &mut commands,
                 );
                 victims.reset_idle(entity, &mut commands);
+                impulse(entity, victim_pos, falloff);
                 // Why `try_insert` on hit markers: a victim can be
                 // despawned by an earlier command in the same flush
                 // (death cleanup, Bug/Exploit morph), and a plain
@@ -602,22 +652,22 @@ mod tests {
         assert!((splash_falloff(0.0, 100.0, 1.0) - 1.0).abs() < 1e-5);
     }
 
+    /// The engine's `expMod`: `edge` shapes the curve rather than
+    /// setting the damage at the rim — the rim always tends to zero
+    /// unless `edge = 1`.
     #[test]
-    fn splash_edge_matches_edge_effectiveness() {
-        // edge_effectiveness = 0.8 → edge damage is 80% of center.
-        assert!((splash_falloff(512.0, 512.0, 0.8) - 0.8).abs() < 1e-5);
-        // edge_effectiveness = 0.0 → edge damage is zero.
+    fn splash_falloff_matches_the_engine() {
+        // Linear at edge 0: half way out → half damage, rim → ~0.
+        assert!((splash_falloff(256.0, 512.0, 0.0) - 0.5).abs() < 1e-4);
         assert!(splash_falloff(512.0, 512.0, 0.0).abs() < 1e-5);
-        // edge_effectiveness = 1.0 → full damage across the radius.
+        // Quarter out at edge 0.4: (512.001 − 128) / (512.001 − 51.2).
+        let expected = (512.001 - 128.0) / (512.001 - 128.0 * 0.4);
+        assert!((splash_falloff(128.0, 512.0, 0.4) - expected).abs() < 1e-5);
+        // Edge 0.8 at the rim is nearly nothing, not 80%.
+        assert!(splash_falloff(512.0, 512.0, 0.8) < 0.01);
+        // Edge 1 is flat; so is anything within an elmo.
         assert!((splash_falloff(256.0, 512.0, 1.0) - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn splash_linear_between_center_and_edge() {
-        // Halfway out at edge_effectiveness=0 → half damage.
-        assert!((splash_falloff(256.0, 512.0, 0.0) - 0.5).abs() < 1e-5);
-        // Quarter out at edge_effectiveness=0.4 → 1 - 0.25 * 0.6 = 0.85.
-        assert!((splash_falloff(128.0, 512.0, 0.4) - 0.85).abs() < 1e-5);
+        assert!((splash_falloff(0.5, 512.0, 0.0) - 1.0).abs() < 1e-5);
     }
 
     /// Upstream salvo cadence in whole sim frames: MegaBeam
@@ -631,6 +681,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
             .init_resource::<WeaponRegistry>();
@@ -706,6 +757,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
             .init_resource::<WeaponRegistry>();
@@ -750,6 +802,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
             .init_resource::<WeaponRegistry>();
@@ -819,6 +872,7 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<SpatialIndex>()
             .insert_resource(UnitRegistry::empty());
         let (weapons, boom_id) = death_boom_weapon();
@@ -880,6 +934,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .init_resource::<SpatialIndex>()
             .insert_resource(UnitRegistry::empty())
@@ -918,6 +973,7 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<DamageQueue>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<SpatialIndex>()
             .insert_resource(UnitRegistry::empty());
         let mut weapons = WeaponRegistry::default();
@@ -948,6 +1004,7 @@ mod tests {
                 .insert_for_test(SpatialEntry {
                     entity,
                     pos: Vec3::new(x, 0.0, 0.0),
+                    hit_radius: 0.0,
                     team,
                     kind: UnitKind::Bit,
                     hp_positive: true,

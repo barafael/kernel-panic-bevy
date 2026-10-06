@@ -51,6 +51,9 @@ const MAX_QUERY_RADIUS: f32 = 65_536.0;
 pub struct SpatialEntry {
     pub entity: Entity,
     pub pos: Vec3,
+    /// Model (collision-volume) radius: explosions measure their
+    /// distance to this sphere's surface.
+    pub hit_radius: f32,
     pub team: u8,
     pub kind: UnitKind,
     pub hp_positive: bool,
@@ -80,6 +83,9 @@ impl SpatialEntry {
 #[derive(Resource, Default)]
 pub struct SpatialIndex {
     cells: HashMap<(i32, i32), Vec<SpatialEntry>>,
+    /// Largest `hit_radius` in the index: a query for every unit whose
+    /// sphere reaches within `r` of a point spans `r + max_hit_radius`.
+    max_hit_radius: f32,
 }
 
 impl SpatialIndex {
@@ -94,11 +100,17 @@ impl SpatialIndex {
         for bucket in self.cells.values_mut() {
             bucket.clear();
         }
+        self.max_hit_radius = 0.0;
     }
 
     fn push(&mut self, entry: SpatialEntry) {
         let key = Self::cell(entry.pos.x, entry.pos.z);
+        self.max_hit_radius = self.max_hit_radius.max(entry.hit_radius);
         self.cells.entry(key).or_default().push(entry);
+    }
+
+    pub fn max_hit_radius(&self) -> f32 {
+        self.max_hit_radius
     }
 
     /// Test-only: insert a fully-formed entry directly. Production
@@ -166,6 +178,7 @@ pub fn rebuild_spatial_index(
         index.push(SpatialEntry {
             entity,
             pos: gtf.translation(),
+            hit_radius: stats.hit_radius,
             team: team.0,
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
@@ -184,6 +197,7 @@ mod tests {
         SpatialEntry {
             entity,
             pos,
+            hit_radius: 0.0,
             team: 0,
             kind: UnitKind::Bit,
             hp_positive: true,

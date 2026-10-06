@@ -672,6 +672,7 @@ mod tests {
         SpatialEntry {
             entity: Entity::from_raw_u32(entity).unwrap(),
             pos: Vec3::new(x, 0.0, 0.0),
+            hit_radius: 0.0,
             team,
             kind,
             hp_positive: true,

@@ -100,6 +100,11 @@ pub struct WeaponDef {
     pub reload_time: f32,
     pub area_of_effect: f32,
     pub edge_effectiveness: f32,
+    /// `impulseFactor` (default 1) / `impulseBoost` (default 0): the
+    /// knock-back an explosion imparts, `impulseFactor · falloff ·
+    /// (defaultDamage + impulseBoost)` (`CGameHelper::CalcImpulseScale`).
+    pub impulse_factor: f32,
+    pub impulse_boost: f32,
     pub tolerance: f32,
     pub spray_angle: f32,
     pub burst: f32,
@@ -685,6 +690,8 @@ impl WeaponDef {
             reload_time: s.f32("reloadtime"),
             area_of_effect: s.f32("areaofeffect"),
             edge_effectiveness: s.f32("edgeeffectiveness"),
+            impulse_factor: s.f32_or("impulsefactor", 1.0),
+            impulse_boost: s.f32("impulseboost"),
             tolerance: s.f32("tolerance"),
             spray_angle: s.f32("sprayangle"),
             // Spring defaults (`WeaponDef.cpp`): `burst` 1,

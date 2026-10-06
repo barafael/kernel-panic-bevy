@@ -1127,6 +1127,7 @@ mod tests {
             spatial.insert_for_test(SpatialEntry {
                 entity,
                 pos,
+                hit_radius: 0.0,
                 team,
                 kind: UnitKind::Bit,
                 hp_positive: true,

@@ -1319,6 +1319,7 @@ mod tests {
             .insert_for_test(SpatialEntry {
                 entity: socket,
                 pos: Vec3::new(100.0, 0.0, 0.0),
+                hit_radius: 0.0,
                 team: 1,
                 kind: UnitKind::Socket,
                 hp_positive: true,
@@ -1362,6 +1363,7 @@ mod tests {
             .insert_for_test(SpatialEntry {
                 entity: enemy_bit,
                 pos: Vec3::new(100.0, 0.0, 0.0),
+                hit_radius: 0.0,
                 team: 1,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -1439,6 +1441,7 @@ mod tests {
             .insert_for_test(SpatialEntry {
                 entity: enemy,
                 pos,
+                hit_radius: 0.0,
                 team: 1,
                 kind: UnitKind::Worm,
                 hp_positive: true,
