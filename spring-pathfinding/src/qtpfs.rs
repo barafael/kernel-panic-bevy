@@ -798,6 +798,8 @@ pub struct QtSearch {
     full: bool,
     use_fwd_only: bool,
     src_impassable: bool,
+    /// A repair search expands no node outside this rectangle.
+    bounds: Option<Rect>,
 }
 
 impl QtSearch {
@@ -815,6 +817,68 @@ impl QtSearch {
         src: [f32; 2],
         dst: [f32; 2],
         goal_dist: f32,
+    ) -> Result<QtSearch, QtPath> {
+        Self::begin_inner(layer, scratch, speed_map, mask, src, dst, goal_dist, None)
+    }
+
+    /// `DoRawSearch` alone: the two-point path when the straight line
+    /// `src → dst` is clear.
+    pub fn raw_path(
+        layer: &NodeLayer,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        src: [f32; 2],
+        dst: [f32; 2],
+    ) -> Option<QtPath> {
+        let sq = |p: [f32; 2]| ((p[0] / SQUARE_SIZE) as i32, (p[1] / SQUARE_SIZE) as i32);
+        let (sx, sz) = sq(src);
+        line_clear(src, dst, speed_map, mask)
+            .then(|| finish_raw(layer, src, dst, layer.leaf_at(sx, sz)))
+    }
+
+    /// Path repair (`LoadRepairPath`): a search from `src` to `target`,
+    /// the first clean point of a dirtied path, confined to the square
+    /// box around them (`mid ± max(|dx|, |dz|)`) and without the goal
+    /// radius exit. A result that is not `full` means the repair failed
+    /// and the whole path must be searched again.
+    pub fn begin_repair(
+        layer: &mut NodeLayer,
+        scratch: &mut QtScratch,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        src: [f32; 2],
+        target: [f32; 2],
+    ) -> Result<QtSearch, QtPath> {
+        let mid = [(src[0] + target[0]) * 0.5, (src[1] + target[1]) * 0.5];
+        let r = ((target[0] - src[0]).abs()).max((target[1] - src[1]).abs()) * 0.5;
+        let bounds = Rect {
+            x0: ((mid[0] - r) / SQUARE_SIZE).floor() as i32,
+            z0: ((mid[1] - r) / SQUARE_SIZE).floor() as i32,
+            x1: ((mid[0] + r) / SQUARE_SIZE).floor() as i32 + 1,
+            z1: ((mid[1] + r) / SQUARE_SIZE).floor() as i32 + 1,
+        };
+        Self::begin_inner(
+            layer,
+            scratch,
+            speed_map,
+            mask,
+            src,
+            target,
+            -1.0,
+            Some(bounds),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin_inner(
+        layer: &mut NodeLayer,
+        scratch: &mut QtScratch,
+        speed_map: &SpeedMap,
+        mask: Option<&BlockMask>,
+        src: [f32; 2],
+        dst: [f32; 2],
+        goal_dist: f32,
+        bounds: Option<Rect>,
     ) -> Result<QtSearch, QtPath> {
         let clamp = |p: [f32; 2]| {
             [
@@ -895,6 +959,7 @@ impl QtSearch {
             full: false,
             use_fwd_only: false,
             src_impassable: layer.nodes[src_node as usize].impassable(),
+            bounds,
         };
         for fwd in [true, false] {
             let dir = if fwd {
@@ -976,7 +1041,11 @@ impl QtSearch {
         let other_active = scratch.active(!fwd, cur);
         let other_touched = scratch.touched(!fwd, cur);
         let cur_state = *scratch.get(fwd, cur);
-        if !other_active {
+        // A repair search never expands outside its box.
+        let in_bounds = self
+            .bounds
+            .is_none_or(|b| layer.nodes[cur as usize].intersects(&b));
+        if !other_active && in_bounds {
             let dir = if fwd { &mut self.fwd } else { &mut self.bwd };
             if cur_state.h < scratch.get(fwd, dir.min_node).h {
                 dir.min_node = cur;
@@ -1259,6 +1328,23 @@ fn sub(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
 
 fn dot(a: [f32; 2], b: [f32; 2]) -> f32 {
     a[0] * b[0] + a[1] * b[1]
+}
+
+/// Join a finished repair search (ending at a dirtied path's first clean
+/// point) with that path's clean remainder.
+pub fn splice_repair(
+    mut repaired: QtPath,
+    tail_points: &[[f32; 2]],
+    tail_rects: &[Rect],
+    full: bool,
+    repath_at: Option<usize>,
+) -> QtPath {
+    let joint = repaired.points.len() - 1;
+    repaired.points.extend_from_slice(&tail_points[1..]);
+    repaired.node_rects.extend_from_slice(&tail_rects[1..]);
+    repaired.full = full;
+    repaired.repath_at = repath_at.map(|i| i + joint);
+    repaired
 }
 
 /// `SmoothPathPoints`: `nn0` holds the segment `p1 → p0`, `nn1` the
@@ -1571,8 +1657,64 @@ mod tests {
         assert_eq!(*shared.points.last().unwrap(), [410.0, 95.0]);
         assert_eq!(shared.points.len(), head.points.len());
         assert!(shared.points[2..shared.points.len() - 1] == head.points[2..head.points.len() - 1]);
-        // Next to the wall the source leaf is one square wide.
-        assert!(layer.share_key([252.0, 100.0], b, 3).is_none());
+        // Beside the wall's closed squares the leaves are one square
+        // wide: too narrow for the Bit's 4-square sharing minimum;
+        // oversized movers never share.
+        assert!(layer.nodes[layer.leaf_at(33, 25) as usize].xsize() < 4);
+        assert!(layer.share_key([268.0, 204.0], b, 3).is_none());
+        assert!(layer.share_key(a, b, 64).is_none());
+    }
+
+    /// Repair: a wall appears across a path; the search from the unit to
+    /// the first clean point stays inside its box and the clean tail is
+    /// spliced on unchanged.
+    #[test]
+    fn repair_search_rejoins_the_clean_tail() {
+        let mut map = flat(64, 64);
+        let mut layer = NodeLayer::new(&map, None);
+        let a = [40.0, 256.0];
+        let b = [480.0, 256.0];
+        let head = search(&mut layer, &map, None, a, b).unwrap();
+        assert_eq!(head.points.len(), 2, "open ground: raw");
+        // A wall with a gap closes the middle of the route.
+        for z in 0..64 {
+            if !(40..44).contains(&z) {
+                map.speeds[(z * 64 + 20) as usize] = 0.0;
+            }
+        }
+        layer.update(
+            &map,
+            None,
+            [Rect {
+                x0: 20,
+                z0: 0,
+                x1: 21,
+                z1: 64,
+            }],
+        );
+        // Pretend the clean remainder starts at (300, 256).
+        let tail = [[300.0, 256.0], [400.0, 256.0], [480.0, 256.0]];
+        let rects = [layer.nodes[layer.leaf_at(37, 32) as usize].rect(); 3];
+        let mut scratch = QtScratch::default();
+        let repaired =
+            match QtSearch::begin_repair(&mut layer, &mut scratch, &map, None, a, tail[0]) {
+                Err(p) => p,
+                Ok(mut s) => s.step(&layer, &mut scratch, usize::MAX).unwrap().unwrap(),
+            };
+        assert!(repaired.full, "{:?}", repaired.points);
+        assert_eq!(*repaired.points.last().unwrap(), tail[0]);
+        let joined = splice_repair(repaired, &tail, &rects, true, None);
+        assert_eq!(*joined.points.last().unwrap(), b);
+        assert_eq!(joined.points.len(), joined.node_rects.len());
+        // Through the gap, inside the box.
+        assert!(
+            joined
+                .points
+                .iter()
+                .any(|q| (152.0..=176.0).contains(&q[0]) && (310.0..=360.0).contains(&q[1])),
+            "{:?}",
+            joined.points
+        );
     }
 
     #[test]

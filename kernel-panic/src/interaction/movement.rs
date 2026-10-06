@@ -92,6 +92,10 @@ pub struct MovePath {
     /// `repathAtPointIndex`: a long partial path re-searches once this
     /// waypoint is reached.
     pub repath_at: Option<usize>,
+    /// `firstNodeIdOfCleanPath`: after a change under the path, the index
+    /// of the first waypoint past the damaged nodes — a repair search
+    /// rejoins the path there (`None`: no damaged node known).
+    pub clean_from: Option<usize>,
 }
 
 impl MovePath {
@@ -106,6 +110,7 @@ impl MovePath {
             node_rects: Vec::new(),
             dirty_at: None,
             repath_at: None,
+            clean_from: None,
         }
     }
 
@@ -598,7 +603,7 @@ pub(crate) enum PathOutcome {
 }
 
 /// One mover's path request: the search inputs it was issued with.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PathRequest {
     pub kind: UnitKind,
     pub xsizeh: i32,
@@ -607,6 +612,46 @@ pub(crate) struct PathRequest {
     pub to: Vec3,
     /// `goalRadius + extraRadius`: the search may stop inside it.
     pub goal_radius: f32,
+    /// A dirtied path's clean remainder, when a repair may rejoin it.
+    pub repair: Option<RepairTail>,
+}
+
+/// The clean remainder of a dirtied path (`LoadRepairPath`): the search
+/// only has to reach `points[0]`.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RepairTail {
+    pub points: Vec<[f32; 2]>,
+    pub rects: Vec<QtRect>,
+    pub full: bool,
+    pub repath_at: Option<usize>,
+}
+
+impl RepairTail {
+    /// The tail of `path` from its first clean waypoint, when the engine
+    /// would repair rather than re-search: not a raw path, the damage
+    /// strictly inside it, and the path complete, trigger-free or still
+    /// long (`qtRefreshPathMinDist`).
+    pub fn of(path: &MovePath) -> Option<Self> {
+        let from = path.clean_from?;
+        let n = path.waypoints.len();
+        if n <= 2 || from == 0 || from >= n - 1 {
+            return None;
+        }
+        let points: Vec<[f32; 2]> = path.waypoints[from..].iter().map(|w| [w.x, w.z]).collect();
+        let length: f32 = points
+            .windows(2)
+            .map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt())
+            .sum();
+        if !(path.reached_goal || path.repath_at.is_none() || length >= 512.0) {
+            return None;
+        }
+        Some(Self {
+            points,
+            rects: path.node_rects[from..].to_vec(),
+            full: path.reached_goal,
+            repath_at: path.repath_at.and_then(|i| i.checked_sub(from)),
+        })
+    }
 }
 
 /// The nav bucket and mask a request searches under, keyed as
@@ -655,6 +700,7 @@ pub(crate) fn qt_path_outcome(
         node_rects: path.node_rects,
         dirty_at: None,
         repath_at: path.repath_at,
+        clean_from: None,
     })
 }
 

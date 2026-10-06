@@ -32,7 +32,7 @@ use bevy::prelude::*;
 
 use super::movement::{
     AttackMoveActive, CommandQueue, GroundLift, LayerKey, MovePath, MoveTarget, NavGridSet,
-    PathOutcome, PathRequest, nav_class, promote_next_command, qt_path_outcome,
+    PathOutcome, PathRequest, RepairTail, nav_class, promote_next_command, qt_path_outcome,
 };
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
@@ -127,6 +127,10 @@ pub struct PathStats {
     /// Requests answered from another unit's finished path
     /// (`SharedFinalize`).
     pub shared: u64,
+    /// Dirtied paths mended by a repair search / repairs that failed and
+    /// searched the whole path.
+    pub repaired: u64,
+    pub repair_failed: u64,
     /// Node layers built from scratch, and brought up to date from the
     /// changed squares of a revision instead.
     pub labellings: u64,
@@ -198,6 +202,9 @@ pub struct PathQueue {
     /// the nav revision it holds for. Later requests with the same key
     /// take the head's path instead of searching.
     shared: HashMap<ShareKey, (u64, Entity, Option<QtPath>)>,
+    /// Movers whose repair search failed: their next request searches
+    /// the whole path.
+    repair_failed: bevy::platform::collections::HashSet<Entity>,
     /// Finished searches, keyed by mover: the goal searched for and
     /// the outcome (`None`: nothing could be decided, no nav grid).
     results: HashMap<Entity, (Vec2, Option<PathOutcome>)>,
@@ -272,6 +279,36 @@ impl PathQueue {
         let (_, layer) = self.layers.get_mut(&key).expect("layer exists");
         let src = [req.from.x, req.from.z];
         let dst = [req.to.x, req.to.z];
+        // A dirtied path: raw line first, then a repair search to its
+        // first clean point (`RequeueSearch(raw, !partial, repair)`).
+        if let Some(tail) = &req.repair
+            && !self.repair_failed.remove(&entity)
+        {
+            if let Some(path) = QtSearch::raw_path(layer, speed_map, mask, src, dst) {
+                return Begun::Done(Some(qt_path_outcome(Some(path), req, nav.revision)));
+            }
+            return match QtSearch::begin_repair(
+                layer,
+                &mut self.scratch,
+                speed_map,
+                mask,
+                src,
+                tail.points[0],
+            ) {
+                Ok(search) => Begun::Search(key, None, search),
+                Err(path) => Begun::Done(Some(qt_path_outcome(
+                    Some(spring_pathfinding::qtpfs::splice_repair(
+                        path,
+                        &tail.points,
+                        &tail.rects,
+                        tail.full,
+                        tail.repath_at,
+                    )),
+                    req,
+                    nav.revision,
+                ))),
+            };
+        }
         let search = match QtSearch::begin(
             layer,
             &mut self.scratch,
@@ -328,18 +365,40 @@ impl PathQueue {
         }
     }
 
-    /// A search ran to its end: publish and convert it.
-    fn complete(&mut self, path: Option<QtPath>) -> Option<PathOutcome> {
+    /// A search ran to its end: publish and convert it. `None` when it
+    /// was a failed repair — the mover is queued again for a whole-path
+    /// search and has no result yet.
+    fn complete(&mut self, path: Option<QtPath>) -> Option<Option<PathOutcome>> {
         let InFlight {
+            entity,
             req,
             revision,
             share,
             ..
         } = self.in_flight.take().expect("search in flight");
+        let path = match (&req.repair, path) {
+            (Some(tail), Some(p)) if p.full => {
+                self.stats.repaired += 1;
+                Some(spring_pathfinding::qtpfs::splice_repair(
+                    p,
+                    &tail.points,
+                    &tail.rects,
+                    tail.full,
+                    tail.repath_at,
+                ))
+            }
+            (Some(_), _) => {
+                self.stats.repair_failed += 1;
+                self.repair_failed.insert(entity);
+                self.request(entity);
+                return None;
+            }
+            (None, p) => p,
+        };
         self.publish(share, path.as_ref());
         let outcome = Some(qt_path_outcome(path, &req, revision));
         self.stats.outcome(&outcome);
-        outcome
+        Some(outcome)
     }
 
     /// Queue a search for `entity` unless one is already pending.
@@ -378,6 +437,7 @@ impl PathQueue {
             self.results.clear();
             self.layers.clear();
             self.shared.clear();
+            self.repair_failed.clear();
             self.scratch = Default::default();
         }
         loop {
@@ -427,8 +487,9 @@ impl PathQueue {
             if let Some(path) = done {
                 let f = self.in_flight.as_ref().expect("search in flight");
                 let (entity, goal) = (f.entity, f.req.to.xz());
-                let outcome = self.complete(path);
-                self.results.insert(entity, (goal, outcome));
+                if let Some(outcome) = self.complete(path) {
+                    self.results.insert(entity, (goal, outcome));
+                }
             }
         }
     }
@@ -478,7 +539,7 @@ impl PathQueue {
             left -= pops;
             self.stats.nodes += pops as u64;
             if let Some(path) = done {
-                return (Some(self.complete(path)), left);
+                return (self.complete(path), left);
             }
         }
         self.stats.deferred += 1;
@@ -1573,6 +1634,7 @@ pub fn movement_system(
             from: u.transform.translation,
             to: Vec3::new(goal.x, 0.0, goal.y),
             goal_radius: u.mover.goal_radius + u.mover.extra_radius,
+            repair: u.path.and_then(RepairTail::of),
         })
     });
 
@@ -1694,12 +1756,23 @@ pub fn movement_system(
                     let area = n.changed_since(p.revision);
                     p.revision = n.revision;
                     let from = p.current.max(2) - 2;
+                    // The last damaged node decides where a repair may
+                    // rejoin the path (`firstNodeIdOfCleanPath`).
+                    let last_damaged = area.and_then(|b| {
+                        p.node_rects
+                            .iter()
+                            .enumerate()
+                            .skip(from)
+                            .rev()
+                            .find(|(_, r)| {
+                                r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1]
+                            })
+                            .map(|(i, _)| i)
+                    });
                     let dirty = match area {
                         None => true,
                         Some(b) => {
-                            p.node_rects[from.min(p.node_rects.len())..]
-                                .iter()
-                                .any(|r| r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1])
+                            last_damaged.is_some()
                                 || p.waypoints[from.min(p.waypoints.len())..]
                                     // A raw path's two points share one leaf:
                                     // its segment is tested too
@@ -1710,6 +1783,15 @@ pub fn movement_system(
                     };
                     if dirty && p.dirty_at.is_none() {
                         p.dirty_at = Some(m.frame + DEAD_PATH_REFRESH_FRAMES);
+                    }
+                    if dirty {
+                        p.clean_from = match (p.clean_from, last_damaged) {
+                            (Some(c), Some(d)) => Some(c.max(d + 1)),
+                            (None, Some(d)) => Some(d + 1),
+                            // Damage without a known node (a raw path, or
+                            // a change older than the ring): no repair.
+                            _ => None,
+                        };
                     }
                 }
                 if p.dirty_at.is_some_and(|f| m.frame >= f) {
@@ -1736,6 +1818,7 @@ pub fn movement_system(
                             from: pos,
                             to: Vec3::new(g.x, 0.0, g.y),
                             goal_radius: m.goal_radius + m.extra_radius,
+                            repair: u.path.as_deref().and_then(RepairTail::of),
                         };
                         let (outcome, left) =
                             path_queue.request_now(u.entity, req, nodes_left, nav, &registry);
@@ -3180,6 +3263,51 @@ mod tests {
         }
         assert!(h.pos(a).xz().distance(goal.xz()) < 60.0, "{}", h.pos(a));
         assert!(h.pos(b).xz().distance(goal.xz()) < 60.0, "{}", h.pos(b));
+    }
+
+    /// Path repair: terrain closing across the first half of a detour
+    /// dirties the path; the re-search runs only up to the first clean
+    /// waypoint and keeps the rest, and the unit still arrives.
+    #[test]
+    fn dirtied_path_is_repaired_up_to_its_clean_tail() {
+        let mut h = Harness::flat();
+        let close = |h: &mut Harness, cells: Vec<(u32, u32)>, bbox: [i32; 4]| {
+            let mut nav = h.world.resource_mut::<NavGridSet>();
+            let map = &mut nav.buckets[0].speed_map;
+            for (x, z) in cells {
+                map.speeds[(z * map.width + x) as usize] = 0.0;
+            }
+            nav.bump(bbox);
+        };
+        // A wall the unit must round at its north end.
+        close(
+            &mut h,
+            (30..100).map(|z| (80, z)).collect(),
+            [80, 30, 80, 99],
+        );
+        let e = h.spawn(UnitKind::Bit, 0, Vec3::new(500.0, 0.0, 500.0));
+        h.step();
+        let goal = Vec3::new(800.0, 0.0, 500.0);
+        h.world.entity_mut(e).insert(MoveTarget(goal));
+        h.step();
+        let before = h.world.get::<MovePath>(e).unwrap().waypoints.clone();
+        assert!(before.len() > 2, "{before:?}");
+        // A second wall across the way north, before the corner.
+        close(
+            &mut h,
+            (60..80).map(|x| (x, 50)).collect(),
+            [60, 50, 79, 50],
+        );
+        for _ in 0..900 {
+            h.step();
+            if !h.has_order(e) {
+                break;
+            }
+        }
+        let stats = h.world.resource::<PathQueue>().stats;
+        assert_eq!(stats.repaired, 1, "{stats:?}");
+        assert!(!h.has_order(e), "arrived");
+        assert!(h.pos(e).xz().distance(goal.xz()) < 60.0, "{}", h.pos(e));
     }
 
     /// `forceStaticObjectCheck` → `positionStuck`: a unit standing inside
