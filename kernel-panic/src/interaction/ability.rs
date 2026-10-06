@@ -216,6 +216,24 @@ fn shift_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight)
 }
 
+/// Shared click-handler prologue: `mode` armed *and* the committing
+/// left-click, plus the ground point under the cursor. `None` = the
+/// handler has nothing to do this frame (mode not armed, no click, or
+/// the ray missed the terrain).
+fn armed_ground_click(
+    modes: &OrderCursorModes,
+    mouse: &ButtonInput<MouseButton>,
+    mode: Mode,
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    ray_cast: &mut PickRayCast,
+) -> Option<Vec3> {
+    if !modes.is(mode) || !mouse.just_pressed(MouseButton::Left) {
+        return None;
+    }
+    ground_hit(windows, camera_q, ray_cast)
+}
+
 /// `D` deploys a selected Bug into an Exploit and packs an Exploit
 /// back into a Bug. Co-exists with command-fire / dispatch on the
 /// same key because the eligibility sets don't overlap — Bug/Exploit
@@ -334,21 +352,26 @@ fn trigger_attack_ground_click(
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
 ) {
-    if !modes.is(Mode::AttackGround) || !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+    let Some(target) = armed_ground_click(
+        &modes,
+        &mouse,
+        Mode::AttackGround,
+        &windows,
+        &camera_q,
+        &mut ray_cast,
+    ) else {
         return;
     };
     let shift = shift_held(&keys);
     for entity in &selected_q {
         if shift && move_target_q.contains(entity) {
-            // Shift-queue: append a move-then-attack-ground sequence
-            // by enqueuing a move order to the target position.
-            // The AttackGroundOrder fires once the unit arrives.
+            // Shift-queue: the attack-ground becomes the next leg —
+            // when the current order finishes, `promote_next_command`
+            // inserts the `AttackGroundOrder` and
+            // `attack_ground_system` walks the unit into range.
             apply_ordered_command(
                 entity,
-                QueuedCommand::Move(target),
+                QueuedCommand::AttackGround(target),
                 true,
                 &move_target_q,
                 &mut commands,
@@ -360,9 +383,7 @@ fn trigger_attack_ground_click(
         }
     }
     pending.markers.push((target, OrderMarker::Attack));
-    if !shift {
-        modes.clear();
-    }
+    modes.committed(&keys);
 }
 
 /// Click handler for the move mode: the next left-click issues a plain
@@ -381,10 +402,14 @@ fn trigger_move_click(
     mut commands: Commands,
     unit_registry: Res<UnitRegistry>,
 ) {
-    if !modes.is(Mode::Move) || !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+    let Some(target) = armed_ground_click(
+        &modes,
+        &mouse,
+        Mode::Move,
+        &windows,
+        &camera_q,
+        &mut ray_cast,
+    ) else {
         return;
     };
     let shift = shift_held(&keys);
@@ -401,9 +426,7 @@ fn trigger_move_click(
         );
     }
     pending.markers.push((target, OrderMarker::Move));
-    if !shift {
-        modes.clear();
-    }
+    modes.committed(&keys);
 }
 
 /// Click handler for the set-target mode: the next left-click on an enemy
@@ -477,10 +500,14 @@ fn trigger_patrol_click(
     mut commands: Commands,
     unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
 ) {
-    if !modes.is(Mode::Patrol) || !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+    let Some(target) = armed_ground_click(
+        &modes,
+        &mouse,
+        Mode::Patrol,
+        &windows,
+        &camera_q,
+        &mut ray_cast,
+    ) else {
         return;
     };
     let shift = shift_held(&keys);
@@ -517,9 +544,7 @@ fn trigger_patrol_click(
         ec.insert(queue);
     }
     pending.markers.push((target, OrderMarker::Patrol));
-    if !shift {
-        modes.clear();
-    }
+    modes.committed(&keys);
 }
 
 /// Click handler: while [`Mode::AttackMove`] is active, the
@@ -540,10 +565,14 @@ fn trigger_attack_move_click(
     mut commands: Commands,
     unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
 ) {
-    if !modes.is(Mode::AttackMove) || !mouse.just_pressed(MouseButton::Left) {
-        return;
-    }
-    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
+    let Some(target) = armed_ground_click(
+        &modes,
+        &mouse,
+        Mode::AttackMove,
+        &windows,
+        &camera_q,
+        &mut ray_cast,
+    ) else {
         return;
     };
     let shift = shift_held(&keys);
@@ -561,9 +590,7 @@ fn trigger_attack_move_click(
         );
     }
     pending.markers.push((target, OrderMarker::Attack));
-    if !shift {
-        modes.clear();
-    }
+    modes.committed(&keys);
 }
 
 /// Click handler: while [`Mode::Guard`] is armed, the next

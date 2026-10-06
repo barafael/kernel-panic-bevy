@@ -339,31 +339,6 @@ pub(super) struct ProjectileTrail {
 #[derive(Component)]
 pub(super) struct FadingTrail(pub ProjectileTrail);
 
-/// One pixelly square spawned at a build-laser impact point.
-///
-/// Mirrors upstream `oldskool_build` CEG: a hollow-square sprite with a
-/// short upward drift, killed quickly by airdrag, fading from opaque white
-/// to transparent over its lifetime. Per-pulse spawn count is 1, but the
-/// production system pulses every frame so ~16 overlap at any moment,
-/// producing the iconic TA "nanoframe pixels" cluster.
-#[derive(Component)]
-pub(super) struct BuildSparkle {
-    pub lifetime: f32,
-    pub max_lifetime: f32,
-    pub velocity: Vec3,
-    /// World-space size at full opacity; the visible scale shrinks below this
-    /// during the second half of the particle's life to fake the colormap fade.
-    pub base_size: f32,
-}
-
-/// Lazily-loaded texture + mesh for `BuildSparkle` particles. Created on first
-/// use so we don't pay the asset load cost on maps that never produce anything.
-#[derive(Resource, Default)]
-pub(super) struct BuildSparkleAssets {
-    pub mesh: Option<Handle<Mesh>>,
-    pub material: Option<Handle<StandardMaterial>>,
-}
-
 /// Short-lived burst spawned at every weapon impact point, colored by
 /// the weapon's `rgb_color`. The sphere scales up and fades over
 /// `max_lifetime`; `decay_impact_bursts` despawns when the timer runs
@@ -382,16 +357,27 @@ pub(super) struct ImpactBurstAssets {
     pub mesh: Option<Handle<Mesh>>,
 }
 
-/// Flat horizontal emissive disc spawned at each ground-level impact —
-/// a visual stand-in for the upstream `GroundFlash` CEG subsection that
-/// most KP explosions mount. Separated from [`ImpactBurst`] (a 3D
-/// fireball) so the two can fade on different curves: the burst rises
-/// and fades, the ring expands and stays bright until the end.
+/// Flat horizontal emissive disc spawned at each ground-level impact.
+/// Two flavours share the component and its tick:
+///
+/// * *Synthetic* (weapon-AoE fallback): fixed 0.25×→1.5× expand curve,
+///   `growth == 0.0`.
+/// * *Authored* (a CEG's `[groundflash]` section, engine
+///   `CGroundFlash`): `base_radius` starts at `flashSize` and grows by
+///   `growth` elmos/second (`circleGrowth` elmos/frame ×
+///   [`GAME_SPEED`]) for `max_lifetime` (`ttl` frames).
+///
+/// Separated from [`ImpactBurst`] (a 3D fireball) so the two can fade
+/// on different curves: the burst rises and fades, the ring expands and
+/// stays bright until the end.
 #[derive(Component)]
 pub(super) struct GroundFlash {
     pub lifetime: f32,
     pub max_lifetime: f32,
     pub base_radius: f32,
+    /// Linear growth in elmos/second on top of `base_radius` (authored
+    /// `circleGrowth`; `0.0` = synthetic ring).
+    pub growth: f32,
 }
 
 /// Shared flat-disc mesh for every [`GroundFlash`]. The mesh is a unit

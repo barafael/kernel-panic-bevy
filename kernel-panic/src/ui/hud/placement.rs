@@ -396,8 +396,7 @@ fn plan_sites(
     // Terrain-only cast: the ghosts hover on the cursor ray and an
     // unfiltered cast would hit them and freeze the preview.
     let terrain_only = |e: Entity| terrain.contains(e);
-    let Some(cursor) = ground_hit_filtered(&windows, &camera_q, &mut ray_cast, &terrain_only)
-    else {
+    let Some(cursor) = ground_hit_filtered(&windows, &camera_q, &mut ray_cast, terrain_only) else {
         state.sites.clear();
         return;
     };

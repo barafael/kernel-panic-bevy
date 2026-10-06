@@ -121,7 +121,7 @@ fn tick_end(mut s: ResMut<Samples>) {
 fn report_on_exit(
     mut exit: MessageReader<AppExit>,
     mut s: ResMut<Samples>,
-    paths: Option<Res<crate::interaction::ground_move::PathStats>>,
+    paths: Option<Res<crate::interaction::ground_move::PathQueue>>,
     diagnostics: Res<bevy::diagnostic::DiagnosticsStore>,
 ) {
     if exit.read().next().is_none() {
@@ -138,7 +138,7 @@ fn report_on_exit(
         println!("KP_PROFILE gpu {ms:7.2} ms  {path}");
     }
     if let Some(p) = paths {
-        println!("KP_PROFILE paths {p:?}");
+        println!("KP_PROFILE paths {:?}", p.stats);
     }
     // Skip the load: the first 5% of frames are start-up.
     let skip = s.frames.len() / 20;

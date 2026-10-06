@@ -333,7 +333,7 @@ pub fn atlas_material(
 /// greyscaled (Rec.601 luma), then tinted ×3 (clamped) — so the owner's
 /// team colour, multiplied in as vertex colour, reads strongly.
 pub fn team_colored_atlas(mut atlas: SkinAtlas) -> SkinAtlas {
-    for px in atlas.pixels.chunks_exact_mut(4) {
+    for px in atlas.pixels.as_chunks_mut::<4>().0 {
         let luma = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
         let v = (luma * 3.0).min(255.0) as u8;
         px[..3].fill(v);
@@ -351,7 +351,7 @@ pub fn minimap_pixels(farm: &HexFarm, size: usize) -> Vec<u8> {
     const VOID: [u8; 4] = [0, 0, 0, 255];
     let (w, d) = (farm.map_size_x, farm.map_size_z);
     let mut px = vec![0u8; size * size * 4];
-    for (i, chunk) in px.chunks_exact_mut(4).enumerate() {
+    for (i, chunk) in px.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let x = ((i % size) as f64 + 0.5) / size as f64 * w;
         let z = ((i / size) as f64 + 0.5) / size as f64 * d;
         let sq = (z / 16.0) as usize * farm.type_w + (x / 16.0) as usize;

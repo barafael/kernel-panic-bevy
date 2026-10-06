@@ -150,6 +150,14 @@ pub fn rebuild_spatial_index(
             Has<Cloaked>,
             Option<&DetectedBy>,
         ),
+        // `Without<Emerging>` is a deliberate divergence from upstream:
+        // Spring nanoframes are targetable mid-build, but here a Rising
+        // unit is up to `EMERGE_DEPTH` elmos underground — shooting at
+        // it means aiming through terrain. Kept out of the index (and
+        // so out of auto-targeting, AI target scans and splash sweeps)
+        // until it surfaces; see `production_system`'s `emerge_lead`
+        // note. Revisit with per-piece aim heights if nanoframe
+        // harassment becomes wanted.
         (Without<Dying>, Without<Emerging>),
     >,
 ) {

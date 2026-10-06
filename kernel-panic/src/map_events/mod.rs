@@ -59,10 +59,14 @@ impl EruptionConfig {
 
 /// Synced clock for the eruption cycle. Tracks how long since map start
 /// and which sub-step of the current eruption fired most recently.
-/// Held as a [`Local`] inside [`tick_eruption`] — there's only one
-/// active volcano at a time, so a per-system Local is enough.
-#[derive(Debug)]
-struct EruptionState {
+///
+/// A resource rather than a system `Local` so the map cycle can reset
+/// it: `configure_map_events` removes it together with
+/// [`EruptionConfig`] on every map load, so a restart can't inherit the
+/// previous match's clock (a `Local` would keep `elapsed` across world
+/// teardowns and ignite a leftover eruption instantly).
+#[derive(Debug, Resource)]
+pub(crate) struct EruptionState {
     /// Seconds since map load.
     elapsed: f32,
     /// `elapsed` value at which the next eruption will begin.
@@ -144,7 +148,9 @@ impl Plugin for MapEventsPlugin {
         app.init_resource::<EruptionSpawnQueue>().add_systems(
             Update,
             (
-                tick_eruption.run_if(resource_exists::<EruptionConfig>),
+                tick_eruption.run_if(
+                    resource_exists::<EruptionConfig>.and(resource_exists::<EruptionState>),
+                ),
                 drain_eruption_queue.run_if(|q: Res<EruptionSpawnQueue>| !q.is_empty()),
             )
                 .chain(),
@@ -158,7 +164,7 @@ fn tick_eruption(
     time: Res<Time>,
     config: Res<EruptionConfig>,
     heightmap: Option<Res<Heightmap>>,
-    mut state: Local<EruptionState>,
+    mut state: ResMut<EruptionState>,
     mut bad_block_queue: ResMut<EruptionSpawnQueue>,
     mut virus_queue: ResMut<VirusSpawnQueue>,
     mut mine_queue: ResMut<MineSpawnQueue>,

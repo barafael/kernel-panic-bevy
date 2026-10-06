@@ -131,7 +131,7 @@ impl Plugin for UnitsPlugin {
                         bookkeeping::track_finished_buildings,
                         bookkeeping::track_dying_buildings,
                         bookkeeping::track_added_units,
-                        bookkeeping::track_dying_units,
+                        bookkeeping::track_removed_units,
                         shield::attach_shields,
                         shield::regen_shields,
                         deploy::process_deploy,

@@ -12,8 +12,6 @@ bevy = { version = "0.18", features = ["debug", "custom_cursor"] }
 better_default = { workspace = true }
 thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }
-# Async `Reader::read_to_end` for the BytesAsset loader (web map fetch).
-futures-lite = "2"
 # The embedded unit bundle (`assets/units.kpu`, see `units::content::bundle`):
 # postcard payload in a zstd frame, decoded by the pure-Rust ruzstd on
 # native and wasm alike.

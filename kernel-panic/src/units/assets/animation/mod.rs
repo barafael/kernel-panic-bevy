@@ -606,6 +606,7 @@ pub struct AnimFxOut<'w, 's> {
 /// choreography) until despawn.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct AnimDrivers<'w, 's> {
+    #[allow(clippy::type_complexity)] // the animator bundle; split params would scatter one loop.
     pub animators: Query<
         'w,
         's,

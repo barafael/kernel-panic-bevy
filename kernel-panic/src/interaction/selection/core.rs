@@ -112,6 +112,7 @@ pub struct SelectionBoxNode;
 #[derive(SystemParam)]
 pub(crate) struct PickRayCast<'w, 's> {
     ray_cast: MeshRayCast<'w, 's>,
+    #[allow(clippy::type_complexity)] // query filters the pickable set; named once.
     pickable: Query<
         'w,
         's,
@@ -153,6 +154,9 @@ const HOVER_RECAST_FRAMES: u32 = 4;
 /// [`HOVER_RECAST_FRAMES`] frames), and only touches `Hovered` when the
 /// unit under the cursor changes — a steady hover is free of archetype
 /// moves.
+// One system per hover concern; splitting the params would spread a
+// single decision across files.
+#[allow(clippy::too_many_arguments)]
 fn update_hover(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,

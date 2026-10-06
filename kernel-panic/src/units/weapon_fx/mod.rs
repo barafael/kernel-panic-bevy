@@ -46,9 +46,7 @@ use crate::rendering::interpolation::SimPose;
 use batch::FxQuadBatches;
 pub(crate) use ceg::CegRegistry;
 use ceg::CegRenderAssets;
-use shared::{
-    BeamMaterialCache, BuildSparkleAssets, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes,
-};
+use shared::{BeamMaterialCache, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes};
 
 use super::GameplaySet;
 
@@ -64,7 +62,6 @@ impl Plugin for WeaponFxPlugin {
         app.init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
             .init_resource::<BeamMaterialCache>()
-            .init_resource::<BuildSparkleAssets>()
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
@@ -77,7 +74,6 @@ impl Plugin for WeaponFxPlugin {
             // flames have no Transform at all: they are quads in the
             // world-space batch meshes (`batch`), rewritten every tick.
             .register_required_components::<shared::ProjectileVisual, SimPose>()
-            .register_required_components::<shared::BuildSparkle, SimPose>()
             .register_required_components::<shared::ImpactBurst, SimPose>()
             .register_required_components::<shared::GroundFlash, SimPose>()
             .add_systems(

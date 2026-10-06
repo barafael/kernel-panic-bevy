@@ -8,10 +8,10 @@ use crate::units::content::weapons::WeaponId;
 
 use super::ceg::{CegRegistry, CegRenderAssets, spawn_ceg};
 use super::shared::{
-    AttackEvent, BeamMaterialCache, BeamVisual, BuildSparkle, BuildSparkleAssets, DelayedHit,
-    Flight, GroundFlash, GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt,
-    LightningArc, PendingAttacks, PendingExplosions, ProjectileTrail, ProjectileVisual,
-    TRAIL_SAMPLE_COUNT, WeaponFxMeshes, tdf_color, weapon_core_color, weapon_edge_color,
+    AttackEvent, BeamMaterialCache, BeamVisual, DelayedHit, Flight, GroundFlash, GroundFlashAssets,
+    ImpactBurst, ImpactBurstAssets, LaserBolt, LightningArc, PendingAttacks, PendingExplosions,
+    ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT, WeaponFxMeshes, tdf_color,
+    weapon_core_color, weapon_edge_color,
 };
 use crate::rng::{next_f32, next_signed};
 use crate::sim::{GAME_SPEED, frames_to_secs};
@@ -42,12 +42,10 @@ pub(super) fn spawn_weapon_visuals(
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
     mut cache: ResMut<BeamMaterialCache>,
-    mut sparkle_assets: ResMut<BuildSparkleAssets>,
     mut impact_assets: ResMut<ImpactBurstAssets>,
     mut flash_assets: ResMut<GroundFlashAssets>,
     mut fx_meshes: ResMut<WeaponFxMeshes>,
     mut ceg_assets: ResMut<CegRenderAssets>,
-    asset_server: Res<AssetServer>,
     mut rng: Local<u32>,
 ) {
     for event in pending.events.drain(..) {
@@ -122,6 +120,7 @@ pub(super) fn spawn_weapon_visuals(
                     &ceg_registry,
                     &mut rng,
                     &mut commands,
+                    &mut meshes,
                     &mut materials,
                     &mut images,
                     &mut model_cache,
@@ -218,6 +217,7 @@ pub(super) fn spawn_weapon_visuals(
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
+                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
@@ -238,16 +238,25 @@ pub(super) fn spawn_weapon_visuals(
         }
 
         // Build lasers also drop a short-lived "nanoframe pixel" sprite at
-        // the target end (upstream `oldskool_build` CEG). The NoEffect variant
-        // intentionally skips this.
+        // the target end: the authored `oldskool_build` CEG, replayed
+        // through the runtime like any other explosion generator (the
+        // NoEffect variant intentionally skips this). Before the CEG
+        // runner this was hand-rolled here — with drifted speed/spread
+        // and hash "jitter" — which is exactly the divergence the
+        // runtime exists to prevent.
         if is_build_laser(event.weapon_id) && !event.build_arc {
-            spawn_build_sparkle(
+            spawn_ceg(
+                "oldskool_build",
                 event.target_pos,
+                Vec3::Y,
+                &ceg_registry,
+                &mut rng,
                 &mut commands,
                 &mut meshes,
                 &mut materials,
-                &mut sparkle_assets,
-                &asset_server,
+                &mut images,
+                &mut model_cache,
+                &mut ceg_assets,
             );
         } else if !is_melee && !is_gauss_arc && event.delayed_hit.is_none() {
             // Upstream CEG is the source of truth for impact particles:
@@ -267,6 +276,7 @@ pub(super) fn spawn_weapon_visuals(
                     &ceg_registry,
                     &mut rng,
                     &mut commands,
+                    &mut meshes,
                     &mut materials,
                     &mut images,
                     &mut model_cache,
@@ -334,6 +344,7 @@ pub(super) fn spawn_pending_explosions(
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
+                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
@@ -410,6 +421,7 @@ fn spawn_ground_flash(
             lifetime: life,
             max_lifetime: life,
             base_radius,
+            growth: 0.0,
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),
@@ -453,70 +465,6 @@ fn spawn_impact_burst(
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::from_translation(target_pos + Vec3::Y * 2.0).with_scale(Vec3::splat(base_size)),
-    ));
-}
-
-/// Mirrors the upstream CEG params:
-///   particleLife=16 ± 8 frames @ 30 fps      → 0.27–0.80 s
-///   particleSize=3 ± 4                       → ~world units across
-///   particleSpeed=2 ± .1, emitVector=(0,1,0) → slight upward drift
-///   airdrag=1                                → kills velocity fast
-///   colorMap=white, white, transparent black → fade to nothing
-fn spawn_build_sparkle(
-    target_pos: Vec3,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    sparkle_assets: &mut BuildSparkleAssets,
-    asset_server: &AssetServer,
-) {
-    let mesh = sparkle_assets
-        .mesh
-        .get_or_insert_with(|| meshes.add(Rectangle::new(1.0, 1.0)))
-        .clone();
-    let material = sparkle_assets
-        .material
-        .get_or_insert_with(|| {
-            materials.add(StandardMaterial {
-                base_color: Color::WHITE,
-                base_color_texture: Some(asset_server.load("sfx/hollowsquare.png")),
-                emissive: LinearRgba::WHITE * 4.0,
-                unlit: true,
-                alpha_mode: AlphaMode::Add,
-                cull_mode: None,
-                ..default()
-            })
-        })
-        .clone();
-
-    // Cheap deterministic-ish jitter: hash position bits + frame for variety
-    // without pulling in `rand`. Stable enough for the eye.
-    let h = (target_pos.x.to_bits() ^ target_pos.z.to_bits().rotate_left(13)) as f32;
-    let r0 = (h * 0.000_000_2).fract();
-    let r1 = ((h * 0.000_001_3).fract() * 7.0).fract();
-    let r2 = ((h * 0.000_011_1).fract() * 13.0).fract();
-    let r3 = ((h * 0.000_111_1).fract() * 17.0).fract();
-
-    // particleSize=3 ± 4 → roughly 1..7 world units. Clamp so we don't get tiny invisible specks.
-    let size = (3.0 + (r0 - 0.5) * 4.0).clamp(1.5, 7.0);
-    // particleLife=16 ± 8 frames @ 30fps → 0.27..0.80s.
-    let life = frames_to_secs(16.0 + (r1 - 0.5) * 8.0);
-    // Slight horizontal scatter and upward drift (emitVector y=1, speed≈2 elmos/frame).
-    let scatter = Vec3::new((r2 - 0.5) * 4.0, 1.0, (r3 - 0.5) * 4.0);
-    let velocity = scatter.normalize_or(Vec3::Y) * 30.0; // ~2 elmos/frame * 30fps
-
-    let spawn_pos = target_pos + Vec3::Y * 1.0; // pos=0,1.0,0 in CEG
-
-    commands.spawn((
-        BuildSparkle {
-            lifetime: life,
-            max_lifetime: life,
-            velocity,
-            base_size: size,
-        },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(spawn_pos).with_scale(Vec3::splat(size)),
     ));
 }
 
@@ -901,7 +849,7 @@ fn spawn_projectile(
     // the weapon's authored `size=`, which matches upstream Spring's
     // sprite-projectile fallback for Cannon weapons.
     let model_name = weapon.model.trim().trim_end_matches(';');
-    let (mesh, visual_scale) = if !model_name.is_empty() && model_name != ";" {
+    let (mesh, visual_scale) = if !model_name.is_empty() {
         if let Some(handle) = load_s3o_mesh(model_name, meshes, model_cache) {
             (handle, 1.0)
         } else {
@@ -1097,7 +1045,9 @@ fn spawn_lightning_arc(
     for i in 0..=ARC_SEGMENTS {
         let t = i as f32 / ARC_SEGMENTS as f32;
         let arch = 1.0 - (2.0 * t - 1.0).powi(2);
-        let taper = 1.0 - (2.0 * t - 1.0).abs();
+        // Same parabola for the jitter envelope — the gadget shakes
+        // the strand most at mid-arc and pins both ends.
+        let taper = arch;
         points.push(
             start.lerp(end, t)
                 + Vec3::Y * (ARC_ARCH_HEIGHT * arch)
@@ -1159,7 +1109,6 @@ mod tests {
             .init_resource::<CegRenderAssets>()
             .init_resource::<S3OModelCache>()
             .init_resource::<BeamMaterialCache>()
-            .init_resource::<BuildSparkleAssets>()
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
@@ -1205,15 +1154,15 @@ mod tests {
         let world = app.world_mut();
         let arcs = world
             .query_filtered::<&LightningArc, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         let beams = world
             .query_filtered::<&BeamVisual, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         let impacts = world
             .query_filtered::<&ImpactBurst, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         assert_eq!(arcs, 1, "gauss shot must spawn exactly one arc");
         assert_eq!(beams, 0, "gauss beam is invisible upstream (intensity=0)");
@@ -1255,11 +1204,11 @@ mod tests {
         let world = app.world_mut();
         let flashes = world
             .query_filtered::<&ImpactBurst, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         let flames = world
             .query_filtered::<&super::super::ceg::CegFlame, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         assert_eq!(
             flashes, 0,
@@ -1301,7 +1250,7 @@ mod tests {
         let world = app.world_mut();
         let arcs: Vec<&LightningArc> = world
             .query_filtered::<&LightningArc, ()>()
-            .iter(&world)
+            .iter(world)
             .collect();
         assert_eq!(arcs.len(), 1);
         assert_eq!(arcs[0].width, 2.0, "BuildArc draws at width 2");
@@ -1309,8 +1258,8 @@ mod tests {
         assert!((arcs[0].max_lifetime - 16.0 / 30.0).abs() < 1e-4);
 
         let sparkles = world
-            .query_filtered::<&BuildSparkle, ()>()
-            .iter(&world)
+            .query_filtered::<&super::super::ceg::CegParticle, ()>()
+            .iter(world)
             .count();
         assert_eq!(
             sparkles, 0,
@@ -1346,11 +1295,11 @@ mod tests {
         let world = app.world_mut();
         let arcs = world
             .query_filtered::<&LightningArc, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         let beams = world
             .query_filtered::<&BeamVisual, ()>()
-            .iter(&world)
+            .iter(world)
             .count();
         assert_eq!(arcs, 0);
         assert!(beams > 0, "BeamLaser weapons must keep their beams");

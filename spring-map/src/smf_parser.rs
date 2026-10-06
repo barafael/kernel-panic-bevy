@@ -52,7 +52,9 @@ fn read_heightmap(
         })?;
 
     let heights = raw_bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| {
             let raw = i16::from_le_bytes([chunk[0], chunk[1]]);
             header.sample_to_world_height(raw)

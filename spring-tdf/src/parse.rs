@@ -180,6 +180,12 @@ struct Parser<'a> {
     text: &'a str,
     bytes: &'a [u8],
     pos: usize,
+    /// 1-based line at `line_start`, maintained incrementally by
+    /// [`Parser::advance`]. Error spans used to rescan the consumed
+    /// prefix per key *and* per value — O(pairs × filesize) over a
+    /// whole document.
+    line: usize,
+    line_start: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -188,16 +194,32 @@ impl<'a> Parser<'a> {
             text,
             bytes: text.as_bytes(),
             pos: 0,
+            line: 1,
+            line_start: 0,
         }
     }
 
-    fn line(&self) -> usize {
-        self.line_at(self.pos)
+    /// Move the cursor forward, carrying the line counter along.
+    fn advance(&mut self, new_pos: usize) {
+        let new_pos = new_pos.min(self.bytes.len());
+        if new_pos > self.line_start {
+            let newlines = self.bytes[self.line_start..new_pos]
+                .iter()
+                .filter(|&&b| b == b'\n')
+                .count();
+            if newlines > 0 {
+                self.line += newlines;
+                self.line_start = self.bytes[..new_pos]
+                    .iter()
+                    .rposition(|&b| b == b'\n')
+                    .map_or(0, |i| i + 1);
+            }
+        }
+        self.pos = new_pos;
     }
 
-    fn line_at(&self, pos: usize) -> usize {
-        let p = pos.min(self.bytes.len());
-        self.bytes[..p].iter().filter(|&&b| b == b'\n').count() + 1
+    fn line(&self) -> usize {
+        self.line
     }
 
     fn peek(&self) -> Option<u8> {
@@ -220,7 +242,7 @@ impl<'a> Parser<'a> {
             // ASCII whitespace (space, tab, CR, LF, FF, VT).
             while let Some(b) = self.peek() {
                 if b.is_ascii_whitespace() {
-                    self.pos += 1;
+                    self.advance(self.pos + 1);
                 } else {
                     break;
                 }
@@ -229,12 +251,12 @@ impl<'a> Parser<'a> {
             // Line comment: `//` to end of line. The newline itself is
             // left for the whitespace pass on the next iteration.
             if self.starts_with(b"//") {
-                self.pos += 2;
+                self.advance(self.pos + 2);
                 while let Some(b) = self.peek() {
                     if b == b'\n' {
                         break;
                     }
-                    self.pos += 1;
+                    self.advance(self.pos + 1);
                 }
                 continue;
             }
@@ -243,16 +265,16 @@ impl<'a> Parser<'a> {
             // first `*/`. May span multiple lines.
             if self.starts_with(b"/*") {
                 let open_line = self.line();
-                self.pos += 2;
+                self.advance(self.pos + 2);
                 loop {
                     if self.pos >= self.bytes.len() {
                         return Err(ParseError::UnterminatedBlockComment { line: open_line });
                     }
                     if self.starts_with(b"*/") {
-                        self.pos += 2;
+                        self.advance(self.pos + 2);
                         break;
                     }
-                    self.pos += 1;
+                    self.advance(self.pos + 1);
                 }
                 continue;
             }
@@ -295,21 +317,21 @@ impl<'a> Parser<'a> {
     fn parse_section(&mut self) -> Result<Section, ParseError> {
         debug_assert_eq!(self.peek(), Some(b'['));
         let header_line = self.line();
-        self.pos += 1;
+        self.advance(self.pos + 1);
 
         let name_start = self.pos;
         while let Some(b) = self.peek() {
             match b {
                 b']' => break,
                 b'\n' => return Err(ParseError::UnclosedSectionHeader { line: header_line }),
-                _ => self.pos += 1,
+                _ => self.advance(self.pos + 1),
             }
         }
         if self.peek() != Some(b']') {
             return Err(ParseError::UnclosedSectionHeader { line: header_line });
         }
         let name = self.text[name_start..self.pos].trim().to_string();
-        self.pos += 1; // consume ']'
+        self.advance(self.pos + 1); // consume ']'
 
         self.eat_white()?;
         if self.peek() != Some(b'{') {
@@ -319,7 +341,7 @@ impl<'a> Parser<'a> {
             });
         }
         let body_line = self.line();
-        self.pos += 1;
+        self.advance(self.pos + 1);
 
         let mut entries = BTreeMap::new();
         let mut children = Vec::new();
@@ -334,7 +356,7 @@ impl<'a> Parser<'a> {
                     });
                 }
                 Some(b'}') => {
-                    self.pos += 1;
+                    self.advance(self.pos + 1);
                     break;
                 }
                 Some(b'[') => children.push(self.parse_section()?),
@@ -367,7 +389,7 @@ impl<'a> Parser<'a> {
             if b == b'=' || b.is_ascii_whitespace() {
                 break;
             }
-            self.pos += 1;
+            self.advance(self.pos + 1);
         }
         if self.pos == start {
             return Err(ParseError::EmptyKey { line });
@@ -380,7 +402,7 @@ impl<'a> Parser<'a> {
         if self.peek() != Some(b'=') {
             return Err(ParseError::MissingEquals { line, key });
         }
-        self.pos += 1;
+        self.advance(self.pos + 1);
         self.eat_inline_ws();
         Ok(key)
     }
@@ -391,19 +413,19 @@ impl<'a> Parser<'a> {
         let line = self.line();
 
         if self.peek() == Some(b'"') {
-            self.pos += 1;
+            self.advance(self.pos + 1);
             let start = self.pos;
             while let Some(b) = self.peek() {
                 if b == b'"' || b == b'\n' {
                     break;
                 }
-                self.pos += 1;
+                self.advance(self.pos + 1);
             }
             if self.peek() != Some(b'"') {
                 return Err(ParseError::UnterminatedString { line });
             }
             let value = self.text[start..self.pos].to_string();
-            self.pos += 1; // consume closing `"`
+            self.advance(self.pos + 1); // consume closing `"`
             self.eat_inline_ws();
             self.consume_semicolons(line)?;
             return Ok(value);
@@ -414,7 +436,7 @@ impl<'a> Parser<'a> {
             if b == b'\n' || b == b';' {
                 break;
             }
-            self.pos += 1;
+            self.advance(self.pos + 1);
         }
         if self.peek() != Some(b';') {
             return Err(ParseError::MissingSemicolon { line });
@@ -433,7 +455,7 @@ impl<'a> Parser<'a> {
     fn eat_inline_ws(&mut self) {
         while let Some(b) = self.peek() {
             if b == b' ' || b == b'\t' {
-                self.pos += 1;
+                self.advance(self.pos + 1);
             } else {
                 break;
             }
@@ -446,7 +468,7 @@ impl<'a> Parser<'a> {
             return Err(ParseError::MissingSemicolon { line });
         }
         while self.peek() == Some(b';') {
-            self.pos += 1;
+            self.advance(self.pos + 1);
         }
         Ok(())
     }

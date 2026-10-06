@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(chain.len(), mip_chain_len(w, h));
         assert_eq!(&chain[..pixels.len()], &pixels[..]);
 
-        let mut l1 = vec![0u8; 2 * 1 * 4];
+        let mut l1 = vec![0u8; 2 * 4];
         box_filter_2x(&pixels, w, h, &mut l1, 2, 1);
         assert_eq!(&chain[pixels.len()..pixels.len() + l1.len()], &l1[..]);
         let mut l2 = vec![0u8; 4];

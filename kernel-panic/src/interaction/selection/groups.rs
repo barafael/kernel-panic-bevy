@@ -79,8 +79,8 @@ fn handle_unit_groups(
         }
     }
     for &entity in members {
-        // Skip stale entities — `Commands::entity` panics on despawned
-        // ids in some Bevy versions; the unit query gates us cleanly.
+        // Skip stale entities — reactivating a slot must not revive
+        // despawned ids; the unit query gates us cleanly.
         if all_units_q.get(entity).is_ok() {
             commands.entity(entity).insert(Selected);
         }

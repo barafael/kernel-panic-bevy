@@ -3392,7 +3392,6 @@ version = "0.1.0"
 dependencies = [
  "better_default",
  "bevy",
- "futures-lite",
  "postcard",
  "ruzstd",
  "serde",

@@ -357,7 +357,7 @@ pub fn downsample_terrain(
 
     let Some(source) = source else {
         // Fill alpha for the dark default so it isn't transparent.
-        for chunk in result.chunks_exact_mut(4) {
+        for chunk in result.as_chunks_mut::<4>().0 {
             chunk[3] = 255;
         }
         return result;
@@ -452,7 +452,7 @@ mod tests {
     /// the restore loop would index out of range next refresh.
     #[test]
     fn draw_line_clipped_writes_skip_paint_list() {
-        let pixels = vec![0u8; 4 * 4 * 4];
+        let pixels = [0u8; 4 * 4 * 4];
         let mut paints = Vec::new();
         // Line crossing partly outside a 4x4 image.
         draw_line(&mut paints, 4, 4, -2, 1, 5, 1, [7, 7, 7, 7]);

@@ -324,8 +324,10 @@ mod tests {
     #[test]
     fn by_id_returns_inserted_def() {
         let mut registry = WeaponRegistry::default();
-        let mut def = WeaponDef::default();
-        def.range = 600.0;
+        let def = WeaponDef {
+            range: 600.0,
+            ..Default::default()
+        };
         let id = registry.insert_for_test("TestLaser", def);
         assert_eq!(registry.by_id(id).range, 600.0);
     }
@@ -333,12 +335,16 @@ mod tests {
     #[test]
     fn duplicate_insert_overwrites_in_place() {
         let mut registry = WeaponRegistry::default();
-        let mut a = WeaponDef::default();
-        a.range = 100.0;
+        let a = WeaponDef {
+            range: 100.0,
+            ..Default::default()
+        };
         let id1 = registry.insert_for_test("Dup", a);
 
-        let mut b = WeaponDef::default();
-        b.range = 999.0;
+        let b = WeaponDef {
+            range: 999.0,
+            ..Default::default()
+        };
         let id2 = registry.insert_for_test("dup", b);
 
         assert_eq!(id1, id2, "same name should reuse slot");

@@ -85,7 +85,7 @@ pub fn parse_s3o(data: &[u8]) -> Result<S3OModel, S3OParseError> {
     // Match upstream: an offset of 0 means "no texture", not "read from byte 0".
     let texture1 = read_optional_string(data, header.texture1_offset as usize)?;
     let texture2 = read_optional_string(data, header.texture2_offset as usize)?;
-    let root_piece = parse_piece(data, header.root_piece_offset as usize)?;
+    let root_piece = parse_piece(data, header.root_piece_offset as usize, 0)?;
 
     let (mins, maxs) = compute_model_aabb(&root_piece, [0.0; 3]).unwrap_or(([0.0; 3], [0.0; 3]));
 
@@ -164,7 +164,16 @@ fn compute_model_aabb(piece: &S3OPiece, parent_off: [f32; 3]) -> Option<([f32; 3
     acc
 }
 
-fn parse_piece(data: &[u8], offset: usize) -> Result<S3OPiece, S3OParseError> {
+/// Maximum piece-tree depth accepted by [`parse_piece`]. Real s3o rigs
+/// are a dozen levels deep at most; the cap turns a malformed (or
+/// hostile) file with cyclic child offsets into an error instead of
+/// unbounded recursion (which aborts under `panic = "abort"`).
+const MAX_PIECE_DEPTH: usize = 32;
+
+fn parse_piece(data: &[u8], offset: usize, depth: usize) -> Result<S3OPiece, S3OParseError> {
+    if depth >= MAX_PIECE_DEPTH {
+        return Err(S3OParseError::PieceTooDeep(MAX_PIECE_DEPTH));
+    }
     let tail = data.get(offset..).ok_or(S3OParseError::PieceTruncated)?;
     let header = S3OPieceHeader::read(&mut Cursor::new(tail)).map_err(map_binrw_err)?;
     let primitive_type = PrimitiveType::from_u32(header.primitive_type_raw)?;
@@ -186,6 +195,7 @@ fn parse_piece(data: &[u8], offset: usize) -> Result<S3OPiece, S3OParseError> {
         data,
         header.children_offset as usize,
         header.num_children as usize,
+        depth + 1,
     )?;
 
     Ok(S3OPiece {
@@ -219,7 +229,7 @@ fn parse_vertices(
     offset: usize,
     count: usize,
 ) -> Result<Vec<S3OVertex>, S3OParseError> {
-    let byte_len = count * 32;
+    let byte_len = byte_len(count, 32)?;
     let slice = data
         .get(offset..offset + byte_len)
         .ok_or(S3OParseError::VertexDataTruncated {
@@ -236,7 +246,7 @@ fn parse_vertices(
 }
 
 fn parse_indices(data: &[u8], offset: usize, count: usize) -> Result<Vec<u32>, S3OParseError> {
-    let byte_len = count * 4;
+    let byte_len = byte_len(count, 4)?;
     let slice = data
         .get(offset..offset + byte_len)
         .ok_or(S3OParseError::IndexDataTruncated {
@@ -245,7 +255,9 @@ fn parse_indices(data: &[u8], offset: usize, count: usize) -> Result<Vec<u32>, S
         })?;
 
     Ok(slice
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect())
 }
@@ -315,7 +327,7 @@ fn to_triangle_indices(
                 });
             }
             let mut tris = Vec::with_capacity(raw.len() / 4 * 6);
-            for quad in raw.chunks_exact(4) {
+            for quad in raw.as_chunks::<4>().0 {
                 tris.extend_from_slice(&[quad[0], quad[1], quad[2]]);
                 tris.extend_from_slice(&[quad[0], quad[2], quad[3]]);
             }
@@ -328,25 +340,38 @@ fn parse_children(
     data: &[u8],
     offset: usize,
     count: usize,
+    depth: usize,
 ) -> Result<Vec<S3OPiece>, S3OParseError> {
     if count == 0 {
         return Ok(vec![]);
     }
 
-    let byte_len = count * 4;
+    let byte_len = byte_len(count, 4)?;
     let slice = data
         .get(offset..offset + byte_len)
         .ok_or(S3OParseError::PieceTruncated)?;
 
     let child_offsets: Vec<usize> = slice
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]) as usize)
         .collect();
 
     child_offsets
         .into_iter()
-        .map(|o| parse_piece(data, o))
+        .map(|o| parse_piece(data, o, depth))
         .collect()
+}
+
+/// `count * elem_size` guarded against wrap on 32-bit targets (wasm32):
+/// the counts come straight from the file, and an overflowed `usize`
+/// multiply would either panic (debug) or wrap into a small slice that
+/// silently misparses (release).
+fn byte_len(count: usize, elem_size: usize) -> Result<usize, S3OParseError> {
+    count
+        .checked_mul(elem_size)
+        .ok_or(S3OParseError::ElementCountOverflow(count))
 }
 
 fn read_null_terminated_string(data: &[u8], offset: usize) -> Result<String, S3OParseError> {
@@ -727,7 +752,13 @@ mod tests {
             let data = std::fs::read(&tex_path).unwrap_or_else(|e| panic!("{tex_name}: {e}"));
             let tga = crate::tga::parse_tga(&data).unwrap_or_else(|e| panic!("{tex_name}: {e}"));
 
-            let alpha_nonzero = tga.pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+            let alpha_nonzero = tga
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[3] > 0)
+                .count();
             let total = (tga.width * tga.height) as usize;
 
             assert!(

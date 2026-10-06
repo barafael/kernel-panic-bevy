@@ -58,6 +58,11 @@ use crate::units::spatial::flat_dist_sq;
 /// Resolution of the footprint image the minimap is painted from.
 pub const MINIMAP_RES: usize = 400;
 
+/// Minimum gap between full minimap repaints while reshapes keep
+/// landing (a sinking tower fires `Reshaped` several times a second;
+/// each full repaint allocates ~640 KB).
+const MINIMAP_REPAINT_INTERVAL: f32 = 0.25;
+
 /// Weapon impacts and build steps since the last sim frame, as the
 /// engine would have called `Explosion` / `AllowUnitBuildStep`.
 #[derive(Resource, Default)]
@@ -265,6 +270,12 @@ fn hex_farm_sim(
     chunks: Query<(Entity, &TerrainChunkCoord, &Mesh3d)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
+    // Full 400×400 repaint allocates ~640 KB and walks ~160 k polygon
+    // lookups, and a busy tower sinking fires `Reshaped` several times
+    // a second — repaint at most every [`MINIMAP_REPAINT_INTERVAL`],
+    // carrying the request forward.
+    mut minimap_pending: Local<bool>,
+    mut minimap_cooldown: Local<f32>,
 ) {
     let state = &mut *state;
     state.frame += 1;
@@ -332,6 +343,9 @@ fn hex_farm_sim(
                 if x0 > x1 {
                     continue; // nothing inside the map
                 }
+                // Keep the precomputed square normals honest wherever a
+                // corner moved (`CReadMap`'s TerrainChange recalc).
+                hm.refresh_center_normals(x0, z0, x1, z1);
                 let (hw, _) = hm.grid_size();
                 // `RecalcArea` → `smoothGround.MapChanged`: the aircraft
                 // mesh catches up over the next frames (and forgets the
@@ -418,8 +432,17 @@ fn hex_farm_sim(
             }
         }
     }
-    if reshaped && let Some(mm) = minimap.as_deref_mut() {
+    if reshaped {
+        *minimap_pending = true;
+    }
+    *minimap_cooldown = (*minimap_cooldown - crate::sim::INV_GAME_SPEED).max(0.0);
+    if *minimap_pending
+        && *minimap_cooldown <= 0.0
+        && let Some(mm) = minimap.as_deref_mut()
+    {
         mm.set_base(&minimap_pixels(farm, MINIMAP_RES), MINIMAP_RES, MINIMAP_RES);
+        *minimap_pending = false;
+        *minimap_cooldown = MINIMAP_REPAINT_INTERVAL;
     }
 }
 

@@ -497,7 +497,7 @@ impl WeaponDef {
                     | WeaponCategory::Cannon
                     | WeaponCategory::AircraftBomb,
             )
-            || (!self.model.is_empty() && self.model != ";")
+            || !self.model.trim().trim_end_matches(';').is_empty()
     }
 
     /// True for weapons whose shot visibly travels across the map before

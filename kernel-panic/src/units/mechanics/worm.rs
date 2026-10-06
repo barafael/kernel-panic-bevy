@@ -67,6 +67,8 @@ pub struct WormSplash(pub WeaponId);
 
 /// Give freshly spawned AutoHold-capable units their initial toggle
 /// state from their team (human vs AI).
+// Three components + one filter on the fresh-spawn pass.
+#[allow(clippy::type_complexity)]
 pub fn init_autohold(
     mut commands: Commands,
     local: Res<LocalTeam>,

@@ -57,6 +57,13 @@ pub(super) struct CegRenderAssets {
     /// load is one draw call per texture in use.
     materials_by_texture: HashMap<AssetId<Image>, Handle<StandardMaterial>>,
     palettes: Vec<CegPalette>,
+    /// Shared unit-circle mesh for authored `[groundflash]` discs; the
+    /// spawn scales it to `flashSize`.
+    ground_flash_mesh: Option<Handle<Mesh>>,
+    /// Authored flash colour (quantised rgb) → its unlit blend
+    /// material. One per colour across every explosion, minted on
+    /// first use.
+    ground_flash_materials: HashMap<[u8; 3], Handle<StandardMaterial>>,
 }
 
 /// One (texture, `colorMap`) pair: the material its particles draw
@@ -133,6 +140,43 @@ impl CegRenderAssets {
     pub(super) fn palette_at(&self, index: usize) -> &CegPalette {
         &self.palettes[index]
     }
+
+    /// Mesh + material for an authored `[groundflash]` disc of
+    /// `rgb`, created on first use and shared across every explosion.
+    /// Unlit `Blend` (the engine's ground flash is an alpha-blended
+    /// billboard, not additive stacking).
+    fn ground_flash_assets(
+        &mut self,
+        rgb: [f32; 3],
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+        let mesh = self
+            .ground_flash_mesh
+            .get_or_insert_with(|| meshes.add(Mesh::from(Circle::new(1.0))))
+            .clone();
+        let key = [
+            (rgb[0].clamp(0.0, 1.0) * 15.0).round() as u8,
+            (rgb[1].clamp(0.0, 1.0) * 15.0).round() as u8,
+            (rgb[2].clamp(0.0, 1.0) * 15.0).round() as u8,
+        ];
+        let material = self
+            .ground_flash_materials
+            .entry(key)
+            .or_insert_with(|| {
+                let color = Color::linear_rgb(rgb[0], rgb[1], rgb[2]);
+                materials.add(StandardMaterial {
+                    base_color: color,
+                    emissive: LinearRgba::from(color),
+                    unlit: true,
+                    alpha_mode: AlphaMode::Blend,
+                    cull_mode: None,
+                    ..default()
+                })
+            })
+            .clone();
+        (mesh, material)
+    }
 }
 
 /// Corner UVs for a particle or flame billboard, in the batch's
@@ -170,6 +214,7 @@ fn push_billboard(
 #[derive(SystemParam)]
 pub(super) struct CegTrailCtx<'w, 's> {
     pub ceg_registry: Res<'w, CegRegistry>,
+    pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
@@ -255,6 +300,12 @@ const CEG_TEXTURES: &[(&str, &str)] = &[
 #[derive(Component)]
 pub(super) struct CegParticle {
     pub pos: Vec3,
+    /// Position at the previous sim tick — the batch draw lerps
+    /// `prev_pos → pos` by `Time<Fixed>::overstep_fraction()` so
+    /// particles render at the render clock, not at 30 Hz steps (the
+    /// old per-particle `Transform` + `SimPose` contract, kept without
+    /// the per-particle render components).
+    pub prev_pos: Vec3,
     pub velocity: Vec3,
     pub gravity: Vec3,
     pub airdrag_per_sec: f32,
@@ -314,7 +365,10 @@ pub(super) struct CegDelayedSpawn {
     pub delay_secs: f32,
     pub pos: Vec3,
     pub dir: Vec3,
-    pub target_ceg: String,
+    /// `Arc<str>` because one spawner fans out into `count` timers
+    /// (`system_nx`: 240 per cast) — a refcount bump each, not a fresh
+    /// `String` allocation each.
+    pub target_ceg: std::sync::Arc<str>,
 }
 
 // ─── Spawning ───────────────────────────────────────────────────────
@@ -330,6 +384,7 @@ pub(super) fn spawn_ceg(
     registry: &CegRegistry,
     rng: &mut u32,
     commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
@@ -384,7 +439,51 @@ pub(super) fn spawn_ceg(
             }
         }
     }
+    // The authored `[groundflash]` section (`CGroundFlash`): a flat
+    // disc at `flashSize` growing by `circleGrowth` elmos/frame for
+    // `ttl` frames. Parsed for a long time before this was rendered —
+    // `oldskool_big`, `mine` and friends ship visible flashes.
+    if let Some(gf) = &def.ground_flash {
+        spawn_authored_ground_flash(gf, pos, commands, meshes, materials, ceg_assets);
+    }
     true
+}
+
+/// One authored ground-flash disc. Lifetime is the TDF's `ttl` frames;
+/// growth `circleGrowth` elmos/frame → elmos/second. Alpha comes from
+/// the shared material (`flashAlpha` is 1.0 in every shipped KP CEG),
+/// and the tick's end-of-life fade stands in for the engine's
+/// `circleAlpha` ramp.
+fn spawn_authored_ground_flash(
+    gf: &spring_tdf::GroundFlash,
+    pos: Vec3,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    ceg_assets: &mut CegRenderAssets,
+) {
+    let (mesh, material) = ceg_assets.ground_flash_assets(gf.color, meshes, materials);
+    let life = gf.ttl / GAME_SPEED;
+    if life <= 0.0 {
+        return;
+    }
+    let radius = gf.flash_size.max(1.0);
+    // `Circle` is XY by default; rotate flat onto XZ, lifted slightly
+    // so it doesn't z-fight the terrain (same as the synthetic ring).
+    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    commands.spawn((
+        super::shared::GroundFlash {
+            lifetime: life,
+            max_lifetime: life,
+            base_radius: radius,
+            growth: gf.circle_growth * GAME_SPEED,
+        },
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::from_translation(pos + Vec3::Y * 0.5)
+            .with_rotation(flat)
+            .with_scale(Vec3::splat(radius)),
+    ));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -501,6 +600,7 @@ fn spawn_particle_system(
 
             commands.spawn(CegParticle {
                 pos: particle_pos,
+                prev_pos: particle_pos,
                 velocity,
                 gravity: gravity_per_sec,
                 airdrag_per_sec,
@@ -690,6 +790,8 @@ fn spawn_delayed(
     if props.explosion_generator.is_empty() {
         return;
     }
+    // One allocation per spawner effect; the `count` timers share it.
+    let target_ceg: std::sync::Arc<str> = props.explosion_generator.as_str().into();
     for i in 0..count {
         let ctx = EvalCtx {
             index: i,
@@ -702,7 +804,7 @@ fn spawn_delayed(
             delay_secs,
             pos: origin + pos_offset,
             dir,
-            target_ceg: props.explosion_generator.clone(),
+            target_ceg: std::sync::Arc::clone(&target_ceg),
         });
     }
 }
@@ -712,12 +814,14 @@ fn spawn_delayed(
 /// Physics update for live CEG particles, then one camera-facing quad
 /// each into the batch (`CSimpleParticleSystem::Update` + `Draw`).
 ///
-/// The batch mesh is rebuilt per sim tick and drawn as-is until the
-/// next one, so a particle's position is not interpolated between
-/// ticks the way the old per-particle `Transform` + `SimPose` was —
-/// same trade the beams and spikes made.
+/// The batch mesh is rebuilt per sim tick, but each particle carries
+/// its previous position and the draw lerps by
+/// `Time<Fixed>::overstep_fraction()` — the same alpha
+/// `interpolate_sim_pose` uses for unit models, so particles glide at
+/// the render rate instead of juddering at 30 Hz.
 pub(super) fn tick_ceg_particles(
     time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
     mut particles: Query<(Entity, &mut CegParticle)>,
     ceg_assets: Res<CegRenderAssets>,
     mut batches: ResMut<FxQuadBatches>,
@@ -747,6 +851,9 @@ pub(super) fn tick_ceg_particles(
         })
         .unwrap_or_else(|_| (Vec3::Y * 1000.0, Vec3::X, Vec3::Y, Vec3::Z));
 
+    // Same render-clock alpha `interpolate_sim_pose` blends models by.
+    let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
+
     for (entity, mut p) in &mut particles {
         p.life -= dt;
         if p.life <= 0.0 {
@@ -754,6 +861,7 @@ pub(super) fn tick_ceg_particles(
             continue;
         }
 
+        p.prev_pos = p.pos;
         if p.airdrag_per_sec > 0.0 && p.airdrag_per_sec != 1.0 {
             let drag_step = p.airdrag_per_sec.powf(dt);
             p.velocity *= drag_step;
@@ -787,7 +895,7 @@ pub(super) fn tick_ceg_particles(
         push_billboard(
             &mut batches,
             &palette.material,
-            p.pos,
+            p.prev_pos.lerp(p.pos, alpha),
             xdir,
             ydir,
             p.size.max(0.01),
@@ -857,6 +965,7 @@ pub(super) fn tick_ceg_delayed_spawns(
     mut timers: Query<(Entity, &mut CegDelayedSpawn)>,
     registry: Res<CegRegistry>,
     mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
@@ -881,6 +990,7 @@ pub(super) fn tick_ceg_delayed_spawns(
             &registry,
             &mut rng,
             &mut commands,
+            &mut meshes,
             &mut materials,
             &mut images,
             &mut model_cache,
@@ -888,7 +998,6 @@ pub(super) fn tick_ceg_delayed_spawns(
         );
     }
 }
-
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 /// Evaluate `base + uniform(0, 1) * spread` — upstream's *exact*
@@ -911,10 +1020,10 @@ pub(super) fn tick_ceg_delayed_spawns(
 fn eval_with_spread(base: &CegExpr, spread: &CegExpr, rng: &mut u32, mut ctx: EvalCtx) -> f32 {
     // Fast path: most properties are folded literals — skip the RNG
     // draws and op loop entirely (the draws would only add 0).
-    if let (Some(b), Some(s)) = (base.literal(), spread.literal()) {
-        if s == 0.0 {
-            return b;
-        }
+    if let (Some(b), Some(s)) = (base.literal(), spread.literal())
+        && s == 0.0
+    {
+        return b;
     }
     ctx.rand01 = next_unit(rng);
     let b = base.eval(&ctx);
@@ -1006,6 +1115,7 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_resource::<Time<Fixed>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>();
@@ -1034,6 +1144,7 @@ mod tests {
             });
         let particle = |life: f32| CegParticle {
             pos: Vec3::ZERO,
+            prev_pos: Vec3::ZERO,
             velocity: Vec3::ZERO,
             gravity: Vec3::ZERO,
             airdrag_per_sec: 1.0,

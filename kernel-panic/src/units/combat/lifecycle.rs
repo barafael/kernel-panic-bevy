@@ -351,9 +351,9 @@ mod tests {
             },
             created: true,
             driver: if busy {
-                Box::new(BusyDeath::default())
+                Box::new(BusyDeath)
             } else {
-                Box::new(crate::units::assets::animation::units::NoAnim::default())
+                Box::new(crate::units::assets::animation::units::NoAnim)
             },
         }
     }

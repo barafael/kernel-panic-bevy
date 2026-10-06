@@ -930,9 +930,9 @@ fn maintain_launch_menu(
         settings,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
-    // shows (the skirmish setup's choice rows, the render settings)
-    // changed under it.
-    let stale = config.is_changed() || settings.render.is_changed();
+    // shows (the skirmish setup's choice rows, the render settings, the
+    // readme scroll) changed under it.
+    let stale = config.is_changed() || settings.render.is_changed() || readme.is_changed();
     if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }

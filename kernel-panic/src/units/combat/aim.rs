@@ -365,36 +365,21 @@ pub fn tick_deploy_state(
 /// the spawn step attached:
 ///
 /// - **Body-rotated aim** — units without an [`AimerPiece`] (Pointer, Bit,
-///   etc.) turn the entire body to face the target via `look_to`. This is
-///   the "non-upstream" path: it's a stand-in because we don't run the
-///   .bos `AimWeapon1` script eagerly enough for those units' aim loops to
-///   produce visible turret rotation in time.
+///   etc.) turn the entire body to face the target via `look_to`. A
+///   host-side stand-in for Spring's `set HEADING`: the .bos
+///   `AimWeapon1` scripts aren't driven eagerly enough for those units'
+///   aim loops to produce visible turret rotation in time.
 /// - **Aimer-piece aim** — units with an [`AimerPiece`] (currently just
-///   Byte's octahedron; WormOLD's turret if/when that ships) leave the
-///   body alone and rotate only the aimer piece. Mirrors `byte.bos`'s
-///   `AimWeapon1(h,p)`: `turn aimer to y-axis h speed <270>` followed
-///   by `turn aimer to x-axis (<-90>-p) speed <270>`, where `h` is the
+///   Byte's octahedron) leave the body alone and rotate only the aimer
+///   piece. Mirrors `byte.bos`'s `AimWeapon1(h,p)`:
+///   `turn aimer to y-axis h speed <270>` then
+///   `turn aimer to x-axis (<-90>-p) speed <270>`, where `h` is the
 ///   **absolute world heading**. Upstream's byte never turns its body
 ///   for aim — only the aimer-rooted firing assembly does.
 ///
 /// Units currently moving (have a `MoveTarget`) are excluded — the
 /// movement system owns their heading, and fighting movement for
 /// rotation control makes Bits spin around mid-stride every frame.
-/// Stand-in for Spring's `set HEADING` engine call: rotates a unit's
-/// body around its world Y axis to face the current `AimTarget`.
-///
-/// Per-piece aim (gunbase / aimer / etc.) is left to the COB
-/// `AimWeapon1` script — `drive_aim_script` runs it every frame and
-/// the VM emits the corresponding `Turn` commands, so there's no
-/// duplicate host-side rotation logic here.
-///
-/// Skipped for units carrying an `AimerPiece` (Byte's octaeder, etc.):
-/// upstream's byte never rotates its body for aim — the aimer-rooted
-/// firing assembly carries the heading on its own.
-///
-/// Units currently moving (have a `MoveTarget`) are excluded — the
-/// movement system owns their heading.
-#[allow(clippy::type_complexity)]
 #[allow(clippy::type_complexity)]
 pub fn aim_weapons_system(
     time: Res<Time>,

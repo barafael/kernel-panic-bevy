@@ -28,6 +28,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::spatial::{SpatialIndex, flat_dist_sq};
+use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
 /// Filename of the SIGTERM bomber's S3O model (`signal.fbi:ObjectName`).
 const SIGNAL_MODEL: &str = "signal.s3o";
@@ -186,10 +187,11 @@ pub const SIGTERM_BLAST_DAMAGE: f32 = 10000.0;
 /// `edgeeffectiveness=0.8`.
 pub const SIGTERM_BLAST_EDGE: f32 = 0.8;
 /// Area-denial tail: `weaponInfo[sigterm]` in upstream
-/// `LuaRules/Gadgets/areadenial.lua`.
+/// `LuaRules/Gadgets/areadenial.lua` — `{ radius=350, damage=2000,
+/// ttl=100, damageFriendly=true }`, ttl in sim frames.
 pub const SIGTERM_DENIAL_RADIUS: f32 = 350.0;
 pub const SIGTERM_DENIAL_DPS: f32 = 2000.0;
-pub const SIGTERM_DENIAL_TTL: f32 = 3.0;
+pub const SIGTERM_DENIAL_TTL: f32 = crate::sim::frames_to_secs(100.0);
 
 /// SIGTERM stage 1: bomber flying from `start` to over `target`.
 /// `tick_sigterm_signals` lerps along the cruise path, then spawns a
@@ -474,6 +476,7 @@ pub fn process_command_fire(
     mut health_q: Query<&mut Health>,
     live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
     mut mine_spawns: ResMut<MineSpawnQueue>,
+    mut pending_explosions: ResMut<PendingExplosions>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -607,6 +610,19 @@ pub fn process_command_fire(
         let Some(ability) = ability_for(unit.0) else {
             continue;
         };
+        // Upstream's NX shell detonates through
+        // `explosiongenerator=custom:system_nx` (retroweapons.tdf:642);
+        // replay that CEG so the cast lands as fire-and-spread, not a
+        // silent debuff. Drained by `spawn_pending_explosions` in the
+        // same tick chain.
+        if let Some(ceg) = ability.explosion_ceg {
+            pending_explosions.events.push(ExplosionEvent {
+                pos: event.target,
+                rgb: faction.rgb_f32(),
+                radius: ability.radius,
+                ceg_name: ceg.to_string(),
+            });
+        }
         commands.spawn(AreaDenialZone {
             center: event.target,
             radius: ability.radius,
@@ -862,6 +878,7 @@ pub fn tick_sigterm_bombs(
     mut bombs: Query<(Entity, &mut SigTermBomb, &mut Transform)>,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
+    mut pending_explosions: ResMut<PendingExplosions>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -893,6 +910,16 @@ pub fn tick_sigterm_bombs(
                 health.current -= SIGTERM_BLAST_DAMAGE * falloff;
             }
         });
+        // The bomb detonates through upstream's
+        // `explosiongenerator=custom:system_sigterm`
+        // (retroweapons.tdf:597) — without this the 900-elmo blast is
+        // completely silent.
+        pending_explosions.events.push(ExplosionEvent {
+            pos: bomb.target,
+            rgb: bomb.owner_faction.rgb_f32(),
+            radius: SIGTERM_BLAST_RADIUS,
+            ceg_name: "system_sigterm".to_string(),
+        });
         commands.spawn(AreaDenialZone {
             center: bomb.target,
             radius: SIGTERM_DENIAL_RADIUS,
@@ -923,10 +950,16 @@ struct Ability {
     cooldown: f32,
     damage_friendly: bool,
     infection_weapon: Option<&'static str>,
+    /// Upstream's `explosiongenerator=custom:…` for the impacting
+    /// shell, replayed through [`PendingExplosions`] on cast. `None`
+    /// where the weapon has no generator (Infection's gas has no CEG
+    /// upstream).
+    explosion_ceg: Option<&'static str>,
 }
 
 fn ability_for(kind: UnitKind) -> Option<Ability> {
     match kind {
+        // areadenial.lua:91 — { radius=120, damage=100, ttl=1800 }.
         UnitKind::Pointer => Some(Ability {
             radius: 120.0,
             dps: 100.0,
@@ -934,14 +967,17 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
             cooldown: 30.0,
             damage_friendly: true,
             infection_weapon: None,
+            explosion_ceg: Some("system_nx"),
         }),
+        // areadenial.lua:92 — { radius=400, damage=120, ttl=400 }.
         UnitKind::Obelisk => Some(Ability {
             radius: 400.0,
             dps: 120.0,
-            ttl: 13.0,
+            ttl: crate::sim::frames_to_secs(400.0),
             cooldown: 40.0,
             damage_friendly: false,
             infection_weapon: Some("Infection"),
+            explosion_ceg: None,
         }),
         _ => None,
     }
@@ -967,7 +1003,8 @@ mod tests {
         let a = ability_for(UnitKind::Obelisk).unwrap();
         assert_eq!(a.radius, 400.0);
         assert_eq!(a.dps, 120.0);
-        assert_eq!(a.ttl, 13.0);
+        // areadenial.lua:92 ttl=400 frames.
+        assert_eq!(a.ttl, 400.0 / 30.0);
         assert_eq!(a.cooldown, 40.0);
         assert!(!a.damage_friendly);
         // Upstream infection.lua: `infector[WeaponDefNames["infection"].id]
@@ -1057,6 +1094,7 @@ mod tests {
             .init_resource::<S3OModelCache>()
             .init_resource::<SigTermAssets>()
             .init_resource::<MineSpawnQueue>()
+            .init_resource::<PendingExplosions>()
             .insert_resource(UnitRegistry::for_test(defs))
             .insert_resource(WeaponRegistry::default());
         app
@@ -1329,7 +1367,7 @@ mod tests {
         assert_eq!(SIGTERM_BLAST_EDGE, 0.8);
         assert_eq!(SIGTERM_DENIAL_RADIUS, 350.0);
         assert_eq!(SIGTERM_DENIAL_DPS, 2_000.0);
-        assert_eq!(SIGTERM_DENIAL_TTL, 3.0);
+        assert_eq!(SIGTERM_DENIAL_TTL, 100.0 / 30.0);
     }
 
     /// A Signal flown to its release point hands off to a SigTermBomb
@@ -1409,7 +1447,9 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut app = App::new();
-        app.init_resource::<Time>().init_resource::<SpatialIndex>();
+        app.init_resource::<Time>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<PendingExplosions>();
 
         let target = Vec3::new(100.0, 0.0, 50.0);
         let start = target + Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0);
@@ -1451,7 +1491,9 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut app = App::new();
-        app.init_resource::<Time>().init_resource::<SpatialIndex>();
+        app.init_resource::<Time>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<PendingExplosions>();
 
         let target = Vec3::new(10.0, 0.0, 20.0);
         app.world_mut().spawn((
@@ -1487,5 +1529,13 @@ mod tests {
         assert_eq!(zones[0].remaining, SIGTERM_DENIAL_TTL);
         assert!(zones[0].damage_friendly);
         assert_eq!(zones[0].owner_team, 1);
+
+        // The detonation replays upstream's `custom:system_sigterm`
+        // explosion generator (retroweapons.tdf:597).
+        let explosions = app.world().resource::<PendingExplosions>();
+        assert_eq!(explosions.events.len(), 1, "detonation plays a CEG");
+        assert_eq!(explosions.events[0].ceg_name, "system_sigterm");
+        assert_eq!(explosions.events[0].pos, target);
+        assert_eq!(explosions.events[0].radius, SIGTERM_BLAST_RADIUS);
     }
 }

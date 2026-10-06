@@ -551,7 +551,8 @@ fn run_network(
             target: attacker,
         });
         ticker.last_dispatch.insert(tp.entity, now);
-        buffer -= buffer.min(DISPATCH_MAX as u32);
+        // Spend up to DISPATCH_MAX charges; never below zero.
+        buffer = buffer.saturating_sub(DISPATCH_MAX as u32);
     }
 
     let Some(target) = target else {

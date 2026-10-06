@@ -191,6 +191,7 @@ const SHELL_HEX_TILES: f32 = 6.0;
 /// Spawn a dome child for every newly-shielded unit. Reads the shield
 /// radius from the unit's shield weapon def so Kernel / Hole / Carrier
 /// (128) and minifacs (64) match upstream's `shieldradius`.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_shield_shells(
     new_shields: Query<(Entity, &UnitType), Added<ShieldState>>,
     weapons: Res<WeaponRegistry>,
@@ -396,8 +397,7 @@ mod shell_tests {
         let (_, mat_handle) = world
             .query::<(&ShieldShell, &MeshMaterial3d<StandardMaterial>)>()
             .single(world)
-            .unwrap()
-            .clone();
+            .unwrap();
         world
             .get_resource::<Assets<StandardMaterial>>()
             .unwrap()
@@ -440,7 +440,7 @@ mod shell_tests {
 
         // Full power (infinite → ratio 1): green dominates.
         app.world_mut().run_system_once(tick_shield_shells).unwrap();
-        let full = shell_base_color(&mut app.world_mut());
+        let full = shell_base_color(app.world_mut());
         assert!(
             full.green > full.red,
             "full shield reads green, got {full:?}"
@@ -453,7 +453,7 @@ mod shell_tests {
             regen_per_sec: 0.0,
         });
         app.world_mut().run_system_once(tick_shield_shells).unwrap();
-        let half = shell_base_color(&mut app.world_mut());
+        let half = shell_base_color(app.world_mut());
         assert!(
             half.red > full.red && half.green < full.green,
             "half power must sit between the green and red anchors: {half:?} vs {full:?}"

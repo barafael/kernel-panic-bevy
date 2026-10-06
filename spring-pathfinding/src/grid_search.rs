@@ -356,7 +356,8 @@ impl ComponentLabels {
         label
     }
 
-    /// Root of raw label `l` (path-halving).
+    /// Root of raw label `l` (read-only walk; `at` is on the hot setup
+    /// path of every labelled search and must not mutate).
     fn find(&self, mut l: u32) -> u32 {
         while self.alias[l as usize] != l {
             l = self.alias[l as usize];
@@ -364,8 +365,23 @@ impl ComponentLabels {
         l
     }
 
+    /// [`Self::find`] with path-halving: every node on the walk is
+    /// re-pointed at its grandparent. `update_region`'s repeated merges
+    /// with min-label unions can grow long chains; halving on the
+    /// mutable paths keeps `at()`'s walks short. (The doc used to
+    /// promise this on the read-only `find`, which cannot mutate.)
+    fn find_mut(&mut self, mut l: u32) -> u32 {
+        while self.alias[l as usize] != l {
+            let parent = self.alias[l as usize];
+            let grandparent = self.alias[parent as usize];
+            self.alias[l as usize] = grandparent;
+            l = grandparent;
+        }
+        l
+    }
+
     fn union(&mut self, a: u32, b: u32) {
-        let (ra, rb) = (self.find(a), self.find(b));
+        let (ra, rb) = (self.find_mut(a), self.find_mut(b));
         if ra != rb {
             self.alias[rb.max(ra) as usize] = rb.min(ra);
         }
@@ -691,6 +707,18 @@ impl SearchScratch {
         let width = search.width;
         let height = search.height;
         let goal = search.goal;
+        // The heat index below is unchecked against the *search's* grid
+        // dimensions; a HeatMap built for a different map would read out
+        // of bounds mid-sim-tick. Fail loudly at the boundary instead.
+        if let Some(hm) = heat {
+            assert!(
+                hm.heat.len() == (width * height) as usize,
+                "HeatMap {:?} does not match the search grid {}x{}",
+                (hm.width, hm.height),
+                width,
+                height
+            );
+        }
         let heuristic = |x: u32, z: u32| octile(x, z, search.dx, search.dz) * search.h_scale;
 
         let mut pops = 0usize;
@@ -1102,7 +1130,6 @@ mod tests {
             let one_shot = find_path_masked(&map, None, None, src, dst).expect("path");
             let mut search = scratch
                 .begin_search(&map, None, src, dst)
-                .ok()
                 .expect("needs a search");
             let mut steps = 0;
             let stepped = loop {
@@ -1157,7 +1184,6 @@ mod tests {
             let flood = find_path_masked_in(&mut plain, &map, None, None, src, dst).expect("path");
             let mut search = labelled
                 .begin_search_labelled(&map, None, Some(&labels), src, dst)
-                .ok()
                 .expect("needs a search");
             let SearchStatus::Done(Some(fast)) =
                 labelled.step(&mut search, &map, None, None, usize::MAX)

@@ -24,6 +24,8 @@ pub enum TgaParseError {
     UnsupportedBitDepth(u8),
     #[error("TGA pixel data truncated")]
     PixelDataTruncated,
+    #[error("TGA id field length {0} extends past end of data")]
+    IdFieldTruncated(usize),
     #[error("TGA image has zero dimensions ({0}x{1})")]
     ZeroDimensions(u16, u16),
 }
@@ -52,7 +54,9 @@ pub fn parse_tga(data: &[u8]) -> Result<TgaImage, TgaParseError> {
     };
 
     let pixel_data_start = 18 + id_length;
-    let pixel_data = &data[pixel_data_start..];
+    let Some(pixel_data) = data.get(pixel_data_start..) else {
+        return Err(TgaParseError::IdFieldTruncated(id_length));
+    };
 
     let w = width as usize;
     let h = height as usize;
@@ -139,6 +143,12 @@ fn decode_rle(
         let header = data[pos];
         pos += 1;
         let count = (header & 0x7F) as usize + 1;
+
+        // Clamp the final packet so a malformed file whose last packet
+        // overshoots the declared dimensions decodes exactly
+        // `pixel_count` pixels instead of padding the output (and
+        // breaking every downstream `w*h*4` indexing assumption).
+        let count = count.min(pixel_count - pixels_decoded);
 
         if header & 0x80 != 0 {
             // RLE packet: one pixel repeated `count` times.
@@ -304,6 +314,47 @@ mod tests {
         ));
     }
 
+    /// An id-field length pointing past the end of the data is an
+    /// error, not a panic (the slice used to be unchecked).
+    #[test]
+    fn reject_id_field_past_end_of_data() {
+        let mut header = [0u8; 18];
+        header[0] = 64; // claims 64 bytes of id after the header
+        header[2] = 2;
+        header[12] = 1;
+        header[15] = 1;
+        header[16] = 32;
+        assert!(matches!(
+            parse_tga(&header),
+            Err(TgaParseError::IdFieldTruncated(64))
+        ));
+    }
+
+    /// An RLE stream whose final packet overshoots the declared
+    /// dimensions decodes exactly `w*h` pixels — trailing garbage in
+    /// the last packet is dropped, so `pixels.len()` stays `w*h*4`.
+    #[test]
+    fn rle_overshoot_clamps_to_declared_dimensions() {
+        let mut buf = Vec::<u8>::new();
+        buf.push(0); // id length
+        buf.push(0); // color map type
+        buf.push(10); // image type: RLE true-color
+        buf.extend_from_slice(&[0; 5]); // color map spec
+        buf.extend_from_slice(&0u16.to_le_bytes()); // x origin
+        buf.extend_from_slice(&0u16.to_le_bytes()); // y origin
+        buf.extend_from_slice(&2u16.to_le_bytes()); // width
+        buf.extend_from_slice(&2u16.to_le_bytes()); // height (4 pixels)
+        buf.push(32); // bpp
+        buf.push(0x20); // top-to-bottom
+        // One RLE packet claiming 8 repeats of one pixel — twice the
+        // image's pixel count.
+        buf.push(0x80 | 7); // RLE, count = 8
+        buf.extend_from_slice(&[1, 2, 3, 4]);
+        let img = parse_tga(&buf).unwrap();
+        assert_eq!(img.pixels.len(), 2 * 2 * 4);
+        assert_eq!(&img.pixels[..4], &[3, 2, 1, 4]); // BGRA→RGBA
+    }
+
     /// Build a 2x2 32bpp uncompressed TGA with a custom descriptor byte and
     /// four distinct BGRA pixels, then verify the decoded pixel layout.
     fn make_2x2_tga(descriptor: u8) -> Vec<u8> {
@@ -331,7 +382,9 @@ mod tests {
 
     fn pixels(img: &TgaImage) -> Vec<[u8; 4]> {
         img.pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2], c[3]])
             .collect()
     }

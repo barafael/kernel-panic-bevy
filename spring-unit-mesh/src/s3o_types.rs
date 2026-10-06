@@ -105,6 +105,10 @@ pub enum S3OParseError {
     },
     #[error("unknown primitive type {0}")]
     UnknownPrimitiveType(u32),
+    #[error("piece tree deeper than {0} levels (cyclic child offsets?)")]
+    PieceTooDeep(usize),
+    #[error("piece declares an impossible count ({0} elements)")]
+    ElementCountOverflow(usize),
     #[error("string offset {offset} is out of bounds")]
     StringOutOfBounds { offset: usize },
 }

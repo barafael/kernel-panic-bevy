@@ -29,7 +29,7 @@ impl SmtBuilder {
     /// Add a solid-color tile and return its index.
     pub fn add_solid_tile(&mut self, color: Rgba) -> u32 {
         let mut rgba = vec![0u8; TILE_PIXELS * TILE_PIXELS * 4];
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[0] = color.r;
             pixel[1] = color.g;
             pixel[2] = color.b;

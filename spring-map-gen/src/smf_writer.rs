@@ -228,7 +228,7 @@ impl SmfBuilder {
     fn generate_minimap(&self) -> Vec<u8> {
         let Rgba { r, g, b, a: _ } = self.minimap_color;
         let mut rgba = vec![0u8; MINIMAP_SIZE * MINIMAP_SIZE * 4];
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0 {
             pixel[0] = r;
             pixel[1] = g;
             pixel[2] = b;

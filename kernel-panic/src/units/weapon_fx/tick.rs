@@ -1,13 +1,13 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
-//! projectile arcs, drift + billboard build-sparkles, despawn at end of life.
+//! projectile arcs, despawn at end of life.
 
 use bevy::prelude::*;
 
 use super::batch::FxQuadBatches;
 use super::shared::{
-    BeamVisual, BuildSparkle, DelayedHit, ExplosionEvent, FadingTrail, Flight, GroundFlash,
-    ImpactBurst, LaserBolt, LightningArc, PendingExplosions, ProjectileTrail, ProjectileVisual,
-    SMOKE_COLOR, SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
+    BeamVisual, DelayedHit, ExplosionEvent, FadingTrail, Flight, GroundFlash, ImpactBurst,
+    LaserBolt, LightningArc, PendingExplosions, ProjectileTrail, ProjectileVisual, SMOKE_COLOR,
+    SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
 };
 use crate::rendering::camera::RtsCamera;
 use crate::sim::{GAME_SPEED, secs_to_frames};
@@ -73,18 +73,10 @@ pub(super) fn tick_weapon_fx(
     mut beams: Query<(Entity, &mut BeamVisual)>,
     mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
     mut bolts: Query<(Entity, &mut LaserBolt)>,
-    mut sparkles: Query<(Entity, &mut BuildSparkle, &mut Transform), Without<ProjectileVisual>>,
-    mut impacts: Query<
-        (Entity, &mut ImpactBurst, &mut Transform),
-        (Without<ProjectileVisual>, Without<BuildSparkle>),
-    >,
+    mut impacts: Query<(Entity, &mut ImpactBurst, &mut Transform), Without<ProjectileVisual>>,
     mut flashes: Query<
         (Entity, &mut GroundFlash, &mut Transform),
-        (
-            Without<ProjectileVisual>,
-            Without<BuildSparkle>,
-            Without<ImpactBurst>,
-        ),
+        (Without<ProjectileVisual>, Without<ImpactBurst>),
     >,
     delayed_hits: Query<&DelayedHit>,
     mut damage_queue: ResMut<DamageQueue>,
@@ -441,7 +433,12 @@ pub(super) fn tick_weapon_fx(
                 let new_pos = prev + step;
                 proj.velocity.y -= gravity * dt;
                 let to_target = (proj.target - proj.origin).normalize_or(Vec3::ZERO);
-                let arrived = (proj.target - new_pos).dot(to_target) <= 0.0 || new_pos.y <= 0.05;
+                // Terrain collision samples the heightmap like the
+                // guided arms above (engine `pos.y < ground`) — a plain
+                // sea-level check let overshooting shells tunnel
+                // through hills before despawning.
+                let arrived =
+                    (proj.target - new_pos).dot(to_target) <= 0.0 || new_pos.y <= ground_y(new_pos);
                 (prev, new_pos, arrived, new_pos)
             }
         };
@@ -540,46 +537,13 @@ pub(super) fn tick_weapon_fx(
                 &ceg_ctx.ceg_registry,
                 &mut proj.trail_seed,
                 &mut commands,
+                &mut ceg_ctx.meshes,
                 &mut ceg_ctx.materials,
                 &mut ceg_ctx.images,
                 &mut ceg_ctx.model_cache,
                 &mut ceg_ctx.ceg_assets,
             );
         }
-    }
-
-    // Build-sparkle particles: drift, decay velocity (airdrag=1 in CEG kills it
-    // fast), fade by shrinking the quad, billboard toward camera, despawn at
-    // end of life. Material is shared, so per-particle alpha must come from
-    // scale rather than mutating colour. `cam_pos` was resolved at the top of
-    // the system — shared with the projectile-trail path.
-    for (entity, mut sparkle, mut transform) in &mut sparkles {
-        sparkle.lifetime -= dt;
-        if sparkle.lifetime <= 0.0 {
-            commands.entity(entity).despawn();
-            continue;
-        }
-        // Drift; airdrag=1 → exponential velocity decay (~half-life 0.1s).
-        transform.translation += sparkle.velocity * dt;
-        sparkle.velocity *= (1.0 - dt * 7.0).max(0.0);
-
-        // Colour map is white, white, transparent — i.e. opaque for first half,
-        // then ramps to zero. Approximate by holding full size for the first
-        // half of life and shrinking smoothly to zero across the second half.
-        let life_frac = sparkle.lifetime / sparkle.max_lifetime;
-        let fade = if life_frac > 0.5 {
-            1.0
-        } else {
-            life_frac * 2.0
-        };
-        let s = sparkle.base_size * fade;
-
-        // Billboard: face the camera while keeping world-up.
-        let to_cam = (cam_pos - transform.translation).normalize_or(Vec3::Z);
-        let right = Vec3::Y.cross(to_cam).normalize_or(Vec3::X);
-        let up = to_cam.cross(right).normalize_or(Vec3::Y);
-        transform.rotation = Quat::from_mat3(&Mat3::from_cols(right, up, to_cam));
-        transform.scale = Vec3::splat(s);
     }
 
     // Impact bursts: scale up while fading, then despawn. Material is
@@ -595,10 +559,12 @@ pub(super) fn tick_weapon_fx(
         transform.scale = Vec3::splat(scale);
     }
 
-    // Ground flash ring: expand outward from 0.25× to 1.5× radius over
-    // the lifetime, then collapse to zero in the final quarter to fade
-    // out cleanly. Flat (XZ) scale keeps the disc hugging the ground;
-    // rotation is set at spawn and never touched.
+    // Ground flash ring. Synthetic rings expand outward from 0.25× to
+    // 1.5× radius over the lifetime; authored `[groundflash]` discs
+    // grow linearly by `growth` elmos/second from `flashSize`. Both
+    // collapse to zero in the final quarter to fade out cleanly. Flat
+    // (XZ) scale keeps the disc hugging the ground; rotation is set at
+    // spawn and never touched.
     for (entity, mut flash, mut transform) in &mut flashes {
         flash.lifetime -= dt;
         if flash.lifetime <= 0.0 {
@@ -606,13 +572,17 @@ pub(super) fn tick_weapon_fx(
             continue;
         }
         let life_frac = 1.0 - flash.lifetime / flash.max_lifetime;
-        let grow = 0.25 + life_frac * 1.25;
+        let radius = if flash.growth != 0.0 {
+            flash.base_radius + flash.growth * (flash.max_lifetime - flash.lifetime)
+        } else {
+            flash.base_radius * (0.25 + life_frac * 1.25)
+        };
         let fade = if life_frac > 0.75 {
             (1.0 - life_frac) * 4.0
         } else {
             1.0
         };
-        let r = flash.base_radius * grow * fade;
+        let r = radius * fade;
         transform.scale = Vec3::splat(r);
     }
 }

@@ -109,8 +109,8 @@ impl SmoothHeightMesh {
         let maxx = mapx / res;
         let maxy = mapy / res;
         let n = maxx * maxy;
-        let tw = maxx / SAMPLES_PER_QUAD + usize::from(maxx % SAMPLES_PER_QUAD != 0);
-        let th = maxy / SAMPLES_PER_QUAD + usize::from(maxy % SAMPLES_PER_QUAD != 0);
+        let tw = maxx / SAMPLES_PER_QUAD + usize::from(!maxx.is_multiple_of(SAMPLES_PER_QUAD));
+        let th = maxy / SAMPLES_PER_QUAD + usize::from(!maxy.is_multiple_of(SAMPLES_PER_QUAD));
         let mut mesh = Self {
             maxx,
             maxy,

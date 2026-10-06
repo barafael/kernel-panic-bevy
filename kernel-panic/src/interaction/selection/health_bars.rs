@@ -109,6 +109,8 @@ fn spawn_health_bars(
 /// rather than scanning every health bar in the world per deselection
 /// (the previous O(removed × total-bars) form). At realistic selection
 /// sizes the difference is two orders of magnitude.
+// One-line membership filter; a named alias would be used once.
+#[allow(clippy::type_complexity)]
 fn despawn_health_bars(
     mut removed_selections: RemovedComponents<Selected>,
     children_q: Query<&Children>,

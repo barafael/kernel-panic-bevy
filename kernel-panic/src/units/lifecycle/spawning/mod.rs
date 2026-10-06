@@ -357,7 +357,7 @@ pub fn spawn_unit(
         commands.entity(unit_entity).insert(Homebase);
     }
     // Why: visibility is now driven by `update_fog_visibility` from
-    // the [`PlayerTeam`] perspective. Friendlies get `Spotted` on the
+    // the [`crate::units::player::LocalTeam`] perspective. Friendlies get `Spotted` on the
     // first fog tick (≤100 ms later); enemies stay un-spotted until
     // a friendly observer enters sight. There's a sub-100 ms flash of
     // a fresh enemy spawn before the next fog tick hides it — at the

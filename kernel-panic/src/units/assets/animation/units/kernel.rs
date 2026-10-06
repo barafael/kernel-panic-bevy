@@ -254,13 +254,17 @@ impl UnitAnim for KernelAnim {
         for (i, yaw) in [45.0, 135.0, -45.0, -135.0].iter().enumerate() {
             rig.turn_deg(p.pillar[i], Axis::Y, *yaw, 0.0);
         }
-        for i in 0..4 {
-            rig.move_to(p.base[i], Axis::Y, -20.0, 0.0);
-            rig.move_to(p.pillar[i], Axis::Y, -80.0, 0.0);
-            rig.move_to(p.head[i], Axis::Y, -80.0, 0.0);
+        for slot in p.base.iter().take(4) {
+            rig.move_to(*slot, Axis::Y, -20.0, 0.0);
         }
-        for i in 0..4 {
-            rig.move_to(p.base[i], Axis::Y, 0.0, 30.0);
+        for slot in p.pillar.iter().take(4) {
+            rig.move_to(*slot, Axis::Y, -80.0, 0.0);
+        }
+        for slot in p.head.iter().take(4) {
+            rig.move_to(*slot, Axis::Y, -80.0, 0.0);
+        }
+        for slot in p.base.iter().take(4) {
+            rig.move_to(*slot, Axis::Y, 0.0, 30.0);
         }
     }
 
@@ -332,8 +336,8 @@ impl UnitAnim for KernelAnim {
             self.build_emit_timer -= ctx.dt;
             if self.build_emit_timer <= 0.0 {
                 self.build_emit_timer = BUILD_EMIT_INTERVAL;
-                for i in 0..4 {
-                    rig.emit(self.pieces.tip[i], super::super::SfxKind::FireFlash);
+                for tip in self.pieces.tip.iter().take(4) {
+                    rig.emit(*tip, super::super::SfxKind::FireFlash);
                 }
             }
         }

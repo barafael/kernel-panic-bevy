@@ -7,11 +7,10 @@
 //! is inserted on a counted entity. There is no per-frame full scan:
 //! only buildings still under construction are revisited.
 //!
-//! Assumption: a small building's `UnitType` is only removed via the
-//! `Dying` death pipeline. If a future code path despawns small
-//! buildings without going through `Dying` (e.g. an explicit map-cycle
-//! teardown), wire it through `Dying` first or extend this module to
-//! observe `RemovedComponents<UnitType>`.
+//! Note: [`TotalUnitCount`] (below) observes `RemovedComponents<UnitType>`
+//! directly, so it has no such lifecycle assumption. The small-building
+//! tally still counts through the `Dying` insertion, since only
+//! *finished* buildings were ever counted.
 
 use bevy::prelude::*;
 use std::collections::HashMap;
@@ -136,17 +135,24 @@ pub fn team_kind_count(
 pub struct TotalUnitCount(pub u32);
 
 /// Bumps [`TotalUnitCount`] for each newly-added `UnitType`. Pairs with
-/// [`track_dying_units`]; both lean on Bevy change detection, so the
-/// counter is exact as long as every unit despawn passes through
-/// `Dying` (the same lifecycle assumption the small-building counts
-/// document).
+/// [`track_removed_units`].
 pub fn track_added_units(added: Query<(), Added<UnitType>>, mut count: ResMut<TotalUnitCount>) {
     count.0 += added.iter().count() as u32;
 }
 
-/// Drops [`TotalUnitCount`] for each unit entering the death pipeline.
-pub fn track_dying_units(dying: Query<(), Added<Dying>>, mut count: ResMut<TotalUnitCount>) {
-    count.0 = count.0.saturating_sub(dying.iter().count() as u32);
+/// Drops [`TotalUnitCount`] for each entity whose `UnitType` went away.
+///
+/// Observed via `RemovedComponents<UnitType>` rather than
+/// `Added<Dying>` so the invariant is structural: every despawn site
+/// counts, including the two that historically skipped the `Dying`
+/// pipeline (deploy pair-swap, packet absorption — their old
+/// hand-decrements are gone). No despawn path needs to remember
+/// anything.
+pub fn track_removed_units(
+    mut removed: RemovedComponents<UnitType>,
+    mut count: ResMut<TotalUnitCount>,
+) {
+    count.0 = count.0.saturating_sub(removed.read().count() as u32);
 }
 
 #[derive(Resource, Default)]

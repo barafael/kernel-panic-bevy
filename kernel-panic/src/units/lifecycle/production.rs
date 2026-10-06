@@ -407,6 +407,12 @@ pub fn production_system(
         // of the pad over `build_time` (its script's `Create()` loop
         // tracks `BUILD_PERCENT_LEFT`). The *queue* only pops once the
         // full build_time has elapsed.
+        //
+        // Divergence: upstream nanoframes can be shot mid-build; here
+        // the whole `Emerging` window doubles as spawn protection —
+        // `rebuild_spatial_index` excludes `Emerging` entities, so
+        // nothing can target a unit that is still (partly) underground.
+        // See the note there before changing either side.
         let emerge_lead = build_time;
         let spawn_threshold = 0.0;
 
@@ -452,7 +458,7 @@ pub fn production_system(
                 // freshly-built units standing "inside" the base.
                 let factory_radius = crate::units::assets::meshes::unit_radius(
                     factory_type.0,
-                    &mut *ctx.model_cache,
+                    &mut ctx.model_cache,
                     &ctx.unit_registry,
                 );
                 let unit_radius = ctx.unit_registry.collision_radius(kind);

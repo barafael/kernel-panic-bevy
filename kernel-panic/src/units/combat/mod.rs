@@ -117,7 +117,7 @@ const LOS_MUZZLE_HEIGHT: f32 = 16.0;
 /// whenever the cached target dies or leaves weapon range, so this
 /// only controls how quickly a unit abandons a valid target for a
 /// newly-arrived closer one — not how fast it reacts to kills.
-const TARGET_RESCAN_INTERVAL: f32 = 2.0;
+const TARGET_RESCAN_INTERVAL: f32 = crate::sim::frames_to_secs(65.0);
 
 /// Cached auto-target for an armed unit. While present and the target
 /// is still alive + in-range, `combat_system` skips its spatial
@@ -380,7 +380,7 @@ pub struct StunCharge(pub f32);
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn combat_system(
     time: Res<Time>,
-    mut cooldowns: Query<&mut AttackCooldown>,
+    mut cooldowns: Query<(Entity, &mut AttackCooldown)>,
     mut attackers: Query<
         (
             Entity,
@@ -422,16 +422,26 @@ pub fn combat_system(
     mut los_candidates: Local<Vec<(f32, Entity, Vec3)>>,
 ) {
     if *rng == 0 {
-        // Seed lazily on first tick so we never produce the all-zero
-        // xorshift state that locks up the PRNG.
+        // First-tick seed only: a non-zero xorshift32 state can never
+        // emit 0, so this guard cannot re-trigger mid-game — it just
+        // keeps the `Local<u32>` default from locking the PRNG up.
         *rng = 0xDEADBEEF;
     }
     let dt = time.delta_secs();
     let now = time.elapsed_secs();
 
-    // Tick cooldowns.
-    for mut cd in &mut cooldowns {
+    // Tick cooldowns. Removed at zero (mirroring
+    // `tick_command_fire_cooldown`): the component used to linger at
+    // 0.0 forever on every unit that had ever fired, rewritten — and
+    // flagged changed — every tick for the rest of the match. All
+    // readiness checks treat absence as ready (`map_or(true, …)` /
+    // `get(..).is_none_or(|cd| cd.remaining <= 0.0)`), so removal is
+    // observably identical.
+    for (entity, mut cd) in &mut cooldowns {
         cd.remaining = (cd.remaining - dt).max(0.0);
+        if cd.remaining <= 0.0 {
+            commands.entity(entity).remove::<AttackCooldown>();
+        }
     }
 
     // Why: no `damage_queue.clear()` here. The queue's lifecycle is
@@ -682,7 +692,7 @@ pub fn combat_system(
             continue;
         }
 
-        if let Ok(cd) = cooldowns.get(entity)
+        if let Ok((_, cd)) = cooldowns.get(entity)
             && cd.remaining > 0.0
         {
             continue;

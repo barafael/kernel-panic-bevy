@@ -60,6 +60,7 @@ impl Harness {
         world.insert_resource(PathHeat(HeatMap::new(MAP_SQUARES, MAP_SQUARES)));
         // Never run out of search budget: reproducible runs.
         world.insert_resource(super::ground_move::PathSearchBudget(usize::MAX));
+        world.init_resource::<super::ground_move::PathQueue>();
 
         let mut schedule = Schedule::default();
         schedule.add_systems(super::unit_motion_systems());
