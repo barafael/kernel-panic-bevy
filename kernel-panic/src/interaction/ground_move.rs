@@ -46,7 +46,7 @@ use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
-use spring_pathfinding::qtpfs::{NodeLayer, QtScratch, QtSearch, Rect as QtRect};
+use spring_pathfinding::qtpfs::{NodeId, NodeLayer, QtPath, QtScratch, QtSearch, Rect as QtRect};
 use spring_pathfinding::{BlockMask, SpeedMap};
 
 /// Goal radius of a plain move order (`CMobileCAI::SetGoal`'s default
@@ -124,6 +124,9 @@ pub struct PathStats {
     pub reached: u64,
     pub partial: u64,
     pub unreachable: u64,
+    /// Requests answered from another unit's finished path
+    /// (`SharedFinalize`).
+    pub shared: u64,
     /// Node layers built from scratch, and brought up to date from the
     /// changed squares of a revision instead.
     pub labellings: u64,
@@ -139,6 +142,35 @@ impl PathStats {
         }
     }
 }
+
+/// `(class, source leaf, goal leaf)`: paths with the same key are shared.
+type ShareKey = (LayerKey, NodeId, NodeId);
+
+/// The search in flight with the nav revision its layer had when it
+/// began (the result is stamped with that revision, so a change that
+/// lands mid-search still dirties the path) and the share key it will
+/// publish under.
+struct InFlight {
+    entity: Entity,
+    req: PathRequest,
+    layer: LayerKey,
+    revision: u64,
+    share: Option<ShareKey>,
+    search: QtSearch,
+}
+
+/// How [`PathQueue::begin`] answered a request.
+enum Begun {
+    Search(LayerKey, Option<ShareKey>, QtSearch),
+    Done(Option<PathOutcome>),
+    /// The head of this request's share key is still searching: ask
+    /// again once it has finished.
+    Wait,
+}
+
+/// Shared paths kept before the table is emptied (a size cap only;
+/// entries also drop on every nav revision).
+const MAX_SHARED_PATHS: usize = 4096;
 
 /// Held as a resource (not a system `Local`): the path service is
 /// game state — inspectable by the profile census and replaceable in
@@ -159,8 +191,13 @@ pub struct PathQueue {
     /// The search in flight with the nav revision its layer had when it
     /// began: the result is stamped with that revision, so a change that
     /// lands mid-search still dirties the path afterwards.
-    in_flight: Option<(Entity, PathRequest, LayerKey, u64, QtSearch)>,
+    in_flight: Option<InFlight>,
     scratch: QtScratch,
+    /// `sharedPaths`: per class, source leaf and goal leaf, the head
+    /// unit's finished path (`None` while it is still searching) and
+    /// the nav revision it holds for. Later requests with the same key
+    /// take the head's path instead of searching.
+    shared: HashMap<ShareKey, (u64, Entity, Option<QtPath>)>,
     /// Finished searches, keyed by mover: the goal searched for and
     /// the outcome (`None`: nothing could be decided, no nav grid).
     results: HashMap<Entity, (Vec2, Option<PathOutcome>)>,
@@ -216,23 +253,26 @@ impl PathQueue {
         Some((key, speed_map, mask))
     }
 
-    /// Begin `req`'s search on its class's layer. `Err` carries an
-    /// outcome that needed no search (a clear straight line, source and
-    /// goal in one leaf, or no nav grid at all: `None`).
+    /// Begin `req`'s search on its class's layer, unless it needs none
+    /// (a clear straight line, source and goal in one leaf, no nav grid
+    /// at all, or another unit's finished path to share).
     fn begin(
         &mut self,
+        entity: Entity,
         nav: Option<&NavGridSet>,
         registry: &UnitRegistry,
         req: &PathRequest,
-    ) -> Result<(LayerKey, QtSearch), Option<PathOutcome>> {
-        let Some(nav) = nav else { return Err(None) };
+    ) -> Begun {
+        let Some(nav) = nav else {
+            return Begun::Done(None);
+        };
         let Some((key, speed_map, mask)) = self.layer(nav, registry, req) else {
-            return Err(None);
+            return Begun::Done(None);
         };
         let (_, layer) = self.layers.get_mut(&key).expect("layer exists");
         let src = [req.from.x, req.from.z];
         let dst = [req.to.x, req.to.z];
-        match QtSearch::begin(
+        let search = match QtSearch::begin(
             layer,
             &mut self.scratch,
             speed_map,
@@ -241,9 +281,65 @@ impl PathQueue {
             dst,
             req.goal_radius,
         ) {
-            Ok(search) => Ok((key, search)),
-            Err(path) => Err(Some(qt_path_outcome(Some(path), req, nav.revision))),
+            Ok(search) => search,
+            Err(path) => return Begun::Done(Some(qt_path_outcome(Some(path), req, nav.revision))),
+        };
+        // Path sharing (`GenerateHash` / `SharedFinalize`).
+        let Some(leaves) = layer.share_key(src, dst, (2 * req.xsizeh + 1) as u32) else {
+            return Begun::Search(key, None, search);
+        };
+        let share = (key, leaves.0, leaves.1);
+        match self.shared.get(&share) {
+            Some((rev, _, Some(head))) if *rev == nav.revision => {
+                self.stats.shared += 1;
+                let path = spring_pathfinding::qtpfs::shared_path(head, src, dst);
+                Begun::Done(Some(qt_path_outcome(Some(path), req, *rev)))
+            }
+            Some((rev, head, None))
+                if *rev == nav.revision
+                    && *head != entity
+                    && self.in_flight.as_ref().is_some_and(|f| f.entity == *head) =>
+            {
+                Begun::Wait
+            }
+            _ => {
+                if self.shared.len() >= MAX_SHARED_PATHS {
+                    self.shared.clear();
+                }
+                self.shared.insert(share, (nav.revision, entity, None));
+                Begun::Search(key, Some(share), search)
+            }
         }
+    }
+
+    /// A search finished (or was dropped): publish a shareable result
+    /// under its key, or forget the key so waiters stop waiting.
+    fn publish(&mut self, share: Option<ShareKey>, path: Option<&QtPath>) {
+        let Some(share) = share else { return };
+        match path {
+            Some(p) if p.points.len() > 2 => {
+                if let Some(entry) = self.shared.get_mut(&share) {
+                    entry.2 = Some(p.clone());
+                }
+            }
+            _ => {
+                self.shared.remove(&share);
+            }
+        }
+    }
+
+    /// A search ran to its end: publish and convert it.
+    fn complete(&mut self, path: Option<QtPath>) -> Option<PathOutcome> {
+        let InFlight {
+            req,
+            revision,
+            share,
+            ..
+        } = self.in_flight.take().expect("search in flight");
+        self.publish(share, path.as_ref());
+        let outcome = Some(qt_path_outcome(path, &req, revision));
+        self.stats.outcome(&outcome);
+        outcome
     }
 
     /// Queue a search for `entity` unless one is already pending.
@@ -255,12 +351,10 @@ impl PathQueue {
     }
 
     /// Advance the search in flight by up to `pops` iterations.
-    fn step_in_flight(&mut self, pops: usize) -> Option<Option<PathOutcome>> {
-        let (_, req, key, revision, search) = self.in_flight.as_mut().expect("search in flight");
-        let (_, layer) = self.layers.get(key).expect("layer exists");
-        search
-            .step(layer, &mut self.scratch, pops)
-            .map(|path| Some(qt_path_outcome(path, req, *revision)))
+    fn step_in_flight(&mut self, pops: usize) -> Option<Option<QtPath>> {
+        let f = self.in_flight.as_mut().expect("search in flight");
+        let (_, layer) = self.layers.get(&f.layer).expect("layer exists");
+        f.search.step(layer, &mut self.scratch, pops)
     }
 
     /// Run queued searches until `budget` nodes are spent; returns the
@@ -283,6 +377,7 @@ impl PathQueue {
             self.in_flight = None;
             self.results.clear();
             self.layers.clear();
+            self.shared.clear();
             self.scratch = Default::default();
         }
         loop {
@@ -299,13 +394,25 @@ impl PathQueue {
                 };
                 self.stats.searches += 1;
                 let revision = nav.map_or(0, |n| n.revision);
-                match self.begin(nav, registry, &req) {
-                    Ok((key, search)) => {
-                        self.in_flight = Some((entity, req, key, revision, search));
+                match self.begin(entity, nav, registry, &req) {
+                    Begun::Search(layer, share, search) => {
+                        self.in_flight = Some(InFlight {
+                            entity,
+                            req,
+                            layer,
+                            revision,
+                            share,
+                            search,
+                        });
                     }
-                    Err(outcome) => {
+                    Begun::Done(outcome) => {
                         self.stats.outcome(&outcome);
                         self.results.insert(entity, (req.to.xz(), outcome));
+                        continue;
+                    }
+                    Begun::Wait => {
+                        // Served once the head's search (in flight) ends.
+                        self.request(entity);
                         continue;
                     }
                 }
@@ -317,10 +424,11 @@ impl PathQueue {
             let done = self.step_in_flight(pops);
             budget -= pops;
             self.stats.nodes += pops as u64;
-            if let Some(outcome) = done {
-                let (entity, req, ..) = self.in_flight.take().expect("search in flight");
-                self.stats.outcome(&outcome);
-                self.results.insert(entity, (req.to.xz(), outcome));
+            if let Some(path) = done {
+                let f = self.in_flight.as_ref().expect("search in flight");
+                let (entity, goal) = (f.entity, f.req.to.xz());
+                let outcome = self.complete(path);
+                self.results.insert(entity, (goal, outcome));
             }
         }
     }
@@ -344,24 +452,33 @@ impl PathQueue {
         }
         self.stats.searches += 1;
         let revision = nav.map_or(0, |n| n.revision);
-        let (key, search) = match self.begin(nav, registry, &req) {
-            Ok(s) => s,
-            Err(outcome) => {
+        let (layer, share, search) = match self.begin(entity, nav, registry, &req) {
+            Begun::Search(layer, share, search) => (layer, share, search),
+            Begun::Done(outcome) => {
                 self.stats.outcome(&outcome);
                 return (Some(outcome), budget);
             }
+            Begun::Wait => {
+                self.request(entity);
+                return (None, budget);
+            }
         };
-        self.in_flight = Some((entity, req, key, revision, search));
+        self.in_flight = Some(InFlight {
+            entity,
+            req,
+            layer,
+            revision,
+            share,
+            search,
+        });
         let mut left = budget;
         while left > 0 {
             let pops = left.min(PATH_SEARCH_STEP);
             let done = self.step_in_flight(pops);
             left -= pops;
             self.stats.nodes += pops as u64;
-            if let Some(outcome) = done {
-                self.in_flight = None;
-                self.stats.outcome(&outcome);
-                return (Some(outcome), left);
+            if let Some(path) = done {
+                return (Some(self.complete(path)), left);
             }
         }
         self.stats.deferred += 1;
@@ -3026,6 +3143,43 @@ mod tests {
             "drives on afterwards: {}",
             h.pos(e)
         );
+    }
+
+    /// Path sharing: two Bits in one leaf ordered round the same wall to
+    /// the same goal leaf — the second takes the first's path instead of
+    /// searching, and both arrive.
+    #[test]
+    fn second_unit_shares_the_first_units_path() {
+        let mut h = Harness::flat();
+        {
+            let mut nav = h.world.resource_mut::<NavGridSet>();
+            let map = &mut nav.buckets[0].speed_map;
+            for z in 30..100 {
+                map.speeds[(z * map.width + 80) as usize] = 0.0;
+            }
+            nav.bump([80, 30, 80, 99]);
+        }
+        let a = h.spawn(UnitKind::Bit, 0, Vec3::new(500.0, 0.0, 500.0));
+        let b = h.spawn(UnitKind::Bit, 0, Vec3::new(508.0, 0.0, 508.0));
+        h.step();
+        let goal = Vec3::new(800.0, 0.0, 500.0);
+        h.world.entity_mut(a).insert(MoveTarget(goal));
+        h.world.entity_mut(b).insert(MoveTarget(goal));
+        h.step();
+        let stats = h.world.resource::<PathQueue>().stats;
+        assert_eq!(stats.shared, 1, "{stats:?}");
+        let pa = h.world.get::<MovePath>(a).unwrap().waypoints.clone();
+        let pb = h.world.get::<MovePath>(b).unwrap().waypoints.clone();
+        assert_eq!(pa.len(), pb.len());
+        assert!(pa.len() > 2, "{pa:?}");
+        for _ in 0..600 {
+            h.step();
+            if !h.has_order(a) && !h.has_order(b) {
+                break;
+            }
+        }
+        assert!(h.pos(a).xz().distance(goal.xz()) < 60.0, "{}", h.pos(a));
+        assert!(h.pos(b).xz().distance(goal.xz()) < 60.0, "{}", h.pos(b));
     }
 
     /// `forceStaticObjectCheck` → `positionStuck`: a unit standing inside

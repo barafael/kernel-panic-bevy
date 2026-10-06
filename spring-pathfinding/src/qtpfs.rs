@@ -53,7 +53,9 @@ const MAX_NODES_RELATIVE: f32 = 0.25;
 /// repath trigger half-way (ModInfo.cpp:137).
 const REFRESH_PATH_MIN_DIST: f32 = 512.0;
 
-type NodeId = u32;
+/// Index of a node in a layer's pool; leaf ids stay valid until the
+/// layer is re-tesselated.
+pub type NodeId = u32;
 const NONE: NodeId = u32::MAX;
 
 #[derive(Clone, Copy, Debug)]
@@ -602,6 +604,28 @@ impl NodeLayer {
             _ => [a.xmin as f32, midz],
         };
         [p[0] * SQUARE_SIZE, p[1] * SQUARE_SIZE]
+    }
+
+    /// `PathSearch::GenerateHash`: the `(source leaf, goal leaf)` key
+    /// under which a finished path from `src` to `dst` may be shared
+    /// with later requests of the same class, or `None` when the source
+    /// leaf is too small — narrower than `max(2, nextPow2(mover xsize))`
+    /// squares — or the mover too large (`QTPFS_SHARE_PATH_MAX_SIZE`).
+    pub fn share_key(
+        &self,
+        src: [f32; 2],
+        dst: [f32; 2],
+        mover_xsize: u32,
+    ) -> Option<(NodeId, NodeId)> {
+        let sq = |p: [f32; 2]| ((p[0] / SQUARE_SIZE) as i32, (p[1] / SQUARE_SIZE) as i32);
+        let (sx, sz) = sq(src);
+        let (tx, tz) = sq(dst);
+        let src_leaf = self.leaf_at(sx, sz);
+        let min_size = mover_xsize.next_power_of_two().max(2);
+        if min_size > 16 || self.nodes[src_leaf as usize].xsize() < min_size {
+            return None;
+        }
+        Some((src_leaf, self.leaf_at(tx, tz)))
     }
 
     /// `hCostMult`: the cheapest leaf's move cost.
@@ -1195,12 +1219,33 @@ fn nearest_point_on_node(node: &Node, net: [f32; 2], goal: [f32; 2]) -> [f32; 2]
 fn smooth(layer: &NodeLayer, points: &mut [[f32; 2]], nodes: &[NodeId]) {
     for i in (1..points.len() - 1).rev() {
         let (p0, p1, p2) = (points[i + 1], points[i], points[i - 1]);
-        let nn0 = &layer.nodes[nodes[i] as usize];
-        let nn1 = &layer.nodes[nodes[i - 1] as usize];
+        let nn0 = layer.nodes[nodes[i] as usize].rect();
+        let nn1 = layer.nodes[nodes[i - 1] as usize].rect();
         if let Some(pi) = smooth_point(nn0, nn1, p0, p1, p2) {
             points[i] = pi;
         }
     }
+}
+
+/// `PathSearch::SharedFinalize` + `SmoothSharedPath`: a later request
+/// with the same source and goal leaves takes `head`'s points, starts
+/// them at its own `src`, ends them at its own `dst` when the head
+/// reached its goal, and smooths the first corner once.
+pub fn shared_path(head: &QtPath, src: [f32; 2], dst: [f32; 2]) -> QtPath {
+    let mut path = head.clone();
+    path.points[0] = src;
+    if path.full
+        && let Some(last) = path.points.last_mut()
+    {
+        *last = dst;
+    }
+    if path.points.len() > 2 {
+        let (p0, p1, p2) = (path.points[2], path.points[1], path.points[0]);
+        if let Some(pi) = smooth_point(path.node_rects[1], path.node_rects[0], p0, p1, p2) {
+            path.points[1] = pi;
+        }
+    }
+    path
 }
 
 fn norm(v: [f32; 2]) -> [f32; 2] {
@@ -1219,8 +1264,8 @@ fn dot(a: [f32; 2], b: [f32; 2]) -> f32 {
 /// `SmoothPathPoints`: `nn0` holds the segment `p1 → p0`, `nn1` the
 /// segment `p2 → p1`; `p1` lies on their shared edge.
 fn smooth_point(
-    nn0: &Node,
-    nn1: &Node,
+    nn0: Rect,
+    nn1: Rect,
     p0: [f32; 2],
     p1: [f32; 2],
     p2: [f32; 2],
@@ -1231,22 +1276,22 @@ fn smooth_point(
     if dotp >= 0.995 {
         return None;
     }
-    let h_edge = nn0.zmin == nn1.zmax || nn0.zmax == nn1.zmin;
-    let v_edge = nn0.xmin == nn1.xmax || nn0.xmax == nn1.xmin;
-    let xmin = nn0.xmin.max(nn1.xmin) as f32 * SQUARE_SIZE;
-    let xmax = nn0.xmax.min(nn1.xmax) as f32 * SQUARE_SIZE;
-    let zmin = nn0.zmin.max(nn1.zmin) as f32 * SQUARE_SIZE;
-    let zmax = nn0.zmax.min(nn1.zmax) as f32 * SQUARE_SIZE;
+    let h_edge = nn0.z0 == nn1.z1 || nn0.z1 == nn1.z0;
+    let v_edge = nn0.x0 == nn1.x1 || nn0.x1 == nn1.x0;
+    let xmin = nn0.x0.max(nn1.x0) as f32 * SQUARE_SIZE;
+    let xmax = nn0.x1.min(nn1.x1) as f32 * SQUARE_SIZE;
+    let zmin = nn0.z0.max(nn1.z0) as f32 * SQUARE_SIZE;
+    let zmax = nn0.z1.min(nn1.z1) as f32 * SQUARE_SIZE;
     let d = norm(sub(p2, p0));
     let dfx = if d[0] > 0.0 {
-        nn0.xmax as f32 * SQUARE_SIZE - p0[0]
+        nn0.x1 as f32 * SQUARE_SIZE - p0[0]
     } else {
-        nn0.xmin as f32 * SQUARE_SIZE - p0[0]
+        nn0.x0 as f32 * SQUARE_SIZE - p0[0]
     };
     let dfz = if d[1] > 0.0 {
-        nn0.zmax as f32 * SQUARE_SIZE - p0[1]
+        nn0.z1 as f32 * SQUARE_SIZE - p0[1]
     } else {
-        nn0.zmin as f32 * SQUARE_SIZE - p0[1]
+        nn0.z0 as f32 * SQUARE_SIZE - p0[1]
     };
     let dx = if d[0].abs() > 0.001 { d[0] } else { 0.001 };
     let dz = if d[1].abs() > 0.001 { d[1] } else { 0.001 };
@@ -1498,6 +1543,36 @@ mod tests {
             end[0] <= 192.0 || end[1] <= 192.0 || end[0] >= 320.0 || end[1] >= 320.0,
             "{end:?}"
         );
+    }
+
+    /// Sharing: a second request from the same source leaf to the same
+    /// goal leaf reuses the head's points with its own ends; a source
+    /// leaf narrower than the mover's power-of-two footprint cannot share.
+    #[test]
+    fn shared_paths_take_the_heads_route_with_own_ends() {
+        let mut map = flat(64, 64);
+        for z in 0..64 {
+            if !(28..32).contains(&z) {
+                map.speeds[(z * 64 + 32) as usize] = 0.0;
+            }
+        }
+        let mut layer = NodeLayer::new(&map, None);
+        let (a, b) = ([100.0, 100.0], [400.0, 100.0]);
+        let head = search(&mut layer, &map, None, a, b).unwrap();
+        let key = layer
+            .share_key(a, b, 3)
+            .expect("16-square source leaf shares");
+        assert_eq!(
+            key,
+            layer.share_key([110.0, 90.0], [410.0, 95.0], 3).unwrap()
+        );
+        let shared = shared_path(&head, [110.0, 90.0], [410.0, 95.0]);
+        assert_eq!(shared.points[0], [110.0, 90.0]);
+        assert_eq!(*shared.points.last().unwrap(), [410.0, 95.0]);
+        assert_eq!(shared.points.len(), head.points.len());
+        assert!(shared.points[2..shared.points.len() - 1] == head.points[2..head.points.len() - 1]);
+        // Next to the wall the source leaf is one square wide.
+        assert!(layer.share_key([252.0, 100.0], b, 3).is_none());
     }
 
     #[test]
