@@ -119,9 +119,13 @@ the footprint mask:
   nodes (from two before the current waypoint) touch the change is
   re-searched 30 frames later (`QueueDeadPathSearches`).
 
-Not ported: path sharing between units with the same start and goal
-leaves (a cache), exit-only yardmap squares (none in KP), path repair
-(dirty paths are re-searched in full), and the per-thread plumbing.
+Path sharing (`GenerateHash` / `SharedFinalize`: a request with the
+same source and goal leaves takes another unit's finished path, with its
+own ends and one smoothing step) and path repair (`LoadRepairPath`: a
+dirtied path is re-searched only up to its first clean waypoint, inside
+the box around unit and waypoint, and the remainder spliced back) are
+ported too. Not ported: exit-only yardmap squares (none in KP) and the
+per-thread plumbing.
 
 ## Damage model (for orientation; not changed by the movement port)
 
@@ -130,7 +134,8 @@ aoeFalloff · (armored ? DamageModifier : 1)`, then Lua gadgets
 (Armor_Bonus, Firewall reflector) and COB `HitByWeaponId` (Byte closed:
 30%). AoE falloff `(R − d) / (R − d · edge)` with `d` the distance to
 the collision-volume surface and `R = areaOfEffect / 2`; hits further
-than `4 · explosionSpeed` are delayed `d / explosionSpeed − 3` frames.
+than `4 · explosionSpeed` are delayed `d / explosionSpeed − 3` frames
+(all ported).
 KP: no experience, no flanking, no cratering, no impulse; every mobile
 unit is `ARMORED` (×1e-6) for a few seconds after construction;
 minifacs take ×4 while being built. Paralysis (DOS) caps at
@@ -138,10 +143,12 @@ minifacs take ×4 while being built. Paralysis (DOS) caps at
 
 ## Known remaining differences (2026-10-06, after the parity phases)
 
-- QTPFS path sharing, exit-only squares and path repair are not
-  ported (see above); none changes where a unit can go.
+- Exit-only yardmap squares are not ported (Kernel Panic has none).
 - Transition points use the engine's single edge midpoint; the port
   keeps duplicate points a smoothing step would have removed (the
   follower skips a waypoint within one square anyway).
+- A repair search seeds its backward half from the first clean leaf
+  only, where the engine preloads the whole clean tail; the result is
+  the same path when the repair succeeds.
 - Impulse exists but no shipped Kernel Panic weapon applies one; the
   hero modoption is not ported.
