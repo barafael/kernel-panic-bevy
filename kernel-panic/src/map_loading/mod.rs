@@ -670,6 +670,9 @@ struct PrepareInputs {
     /// pathfinding grid each (see `cost.rs`; `compute_path` picks the
     /// tightest bucket whose cap ≥ the unit's).
     nav_caps: Vec<f32>,
+    /// `(slope cap, footprint half-size, crushes)` of every mobile
+    /// kind: the QTPFS layers to prebuild.
+    mover_classes: Vec<(f32, i32, bool)>,
     /// `UnitRegistry::hexfarm_medians`: Hex Farm rolls its layout from
     /// the roster's median health / build time.
     hexfarm_medians: (f64, f64),
@@ -698,11 +701,29 @@ impl PrepareInputs {
         let default_cap = spring_pathfinding::max_slope_from_degrees(DEFAULT_MAX_SLOPE_DEGREES);
         distinct_caps.insert(default_cap.to_bits());
 
+        let mut mover_classes: Vec<(u32, i32, bool)> = ALL_UNIT_KINDS
+            .iter()
+            .filter_map(|&kind| {
+                let md = registry.move_def(kind)?;
+                Some((
+                    registry.max_slope_ratio(kind).to_bits(),
+                    md.xsizeh,
+                    crate::interaction::structures::crushes_features(md.crush_strength),
+                ))
+            })
+            .collect();
+        mover_classes.sort_unstable();
+        mover_classes.dedup();
+
         Self {
             setup,
             map_name,
             // Ascending because BTreeSet iteration is sorted.
             nav_caps: distinct_caps.into_iter().map(f32::from_bits).collect(),
+            mover_classes: mover_classes
+                .into_iter()
+                .map(|(cap, h, c)| (f32::from_bits(cap), h, c))
+                .collect(),
             hexfarm_medians: registry.hexfarm_medians(),
             match_seed: crate::game_setup::match_seed(),
         }
@@ -893,15 +914,24 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
                 speed_map.width,
                 speed_map.height,
             );
-            // Labelled here, off the main thread: the first search of a
-            // 1500²-cell map would otherwise spend ~30 ms per mover
-            // class inside one sim tick.
-            let terrain_labels = spring_pathfinding::ComponentLabels::build(&speed_map, None);
             nav_set.buckets.push(interaction::movement::NavBucket {
                 max_slope: cap,
                 speed_map,
-                terrain_labels: Some(std::sync::Arc::new(terrain_labels)),
             });
+        }
+        // The QTPFS layer of every mover class over the bare terrain
+        // (structures come later, as changes), tesselated here off the
+        // main thread rather than in the first path request's tick.
+        for &(cap, xsizeh, crushes) in &inputs.mover_classes {
+            if let Some(bucket) = nav_set.bucket_index(cap) {
+                let layer = spring_pathfinding::qtpfs::NodeLayer::new(
+                    &nav_set.buckets[bucket].speed_map,
+                    None,
+                );
+                nav_set
+                    .terrain_layers
+                    .insert((bucket, xsizeh, crushes), layer);
+            }
         }
     }
     let nav_ms = t_nav.elapsed().as_secs_f64() * 1000.0;
@@ -1011,17 +1041,6 @@ fn spawn_prepared_map(
         &mut ctx.images,
     );
 
-    // One shared congestion grid across all nav buckets — every bucket
-    // is built from the same heightmap, so the dimensions match.
-    // (Bucket 0 exists by construction; if somehow none were built,
-    // the Option<Res> paths degrade gracefully.)
-    if let Some(bucket) = nav_set.buckets.first() {
-        let (w, h) = (bucket.speed_map.width, bucket.speed_map.height);
-        ctx.commands
-            .insert_resource(interaction::movement::PathHeat(
-                spring_pathfinding::HeatMap::new(w, h),
-            ));
-    }
     ctx.commands.insert_resource(nav_set);
 
     {

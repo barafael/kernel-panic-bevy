@@ -142,8 +142,6 @@ pub struct UnitRegistry {
     auto_target: Box<[bool]>,
     /// [`Self::can_attack`], row-major `[attacker][candidate]`.
     manual_target: Box<[bool]>,
-    /// See [`Self::shared_heat_retention`].
-    shared_heat_retention: f32,
     /// See [`Self::hexfarm_medians`] — over *every* loaded FBI, not just
     /// the ones bound to a `UnitKind`.
     hexfarm_medians: (f64, f64),
@@ -212,7 +210,6 @@ impl UnitRegistry {
             manual_target: pairs(manual_target_gate),
             defs,
             kinds,
-            shared_heat_retention: move_classes.shared_heat_retention(),
             hexfarm_medians,
         }
     }
@@ -296,19 +293,6 @@ impl UnitRegistry {
     /// class use the upstream LIGHT defaults.
     pub fn heat_produced(&self, kind: UnitKind) -> f32 {
         self.kind(kind).heat.heat_produced
-    }
-
-    /// Fraction of this kind's heat that survives one second — see
-    /// [`Self::heat_produced`].
-    #[cfg(test)]
-    pub fn heat_retention(&self, kind: UnitKind) -> f32 {
-        self.kind(kind).heat.heat_retention
-    }
-
-    /// Per-second retention of the shared path-heat grid — see
-    /// [`MoveClassTable::shared_heat_retention`].
-    pub fn shared_heat_retention(&self) -> f32 {
-        self.shared_heat_retention
     }
 
     /// Maximum turn speed in radians per second. Spring's FBI `TurnRate`

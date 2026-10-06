@@ -1,33 +1,21 @@
-//! Grid pathfinding for Spring RTS engine maps.
+//! Pathfinding for Spring RTS engine maps, as Kernel Panic's engine
+//! does it (`pathFinderSystem=1`, QTPFS):
 //!
-//! The classic Spring approach, kept deliberately simple:
-//!
-//! 1. [`SpeedMap`] — per-square movement cost from terrain slope, with
-//!    slopes beyond the unit's `MaxSlope` hard-blocked.
-//! 2. [`find_path`] — uniform-grid A* (8-connected) over the speed map,
-//!    then line-of-sight waypoint smoothing. When the goal is
-//!    unreachable, the search converges on the closest reachable cell —
-//!    the upstream `pathingFailed` behaviour (units gather at the
-//!    obstacle instead of walking through it).
-//!
-//! A previous iteration ported Spring 105's QTPFS quad-tree as an
-//! acceleration layer. It was removed: at Kernel Panic map sizes the
-//! plain grid is fast enough by a wide margin, and the quad-tree's
-//! same-leaf straight-line shortcut was the source of units walking
-//! straight over cliffs and walls.
+//! 1. [`SpeedMap`] — per-square movement cost from the terrain slope,
+//!    with slopes beyond the unit's `MaxSlope` hard-blocked
+//!    (`CMoveMath::GetPosSpeedMod`).
+//! 2. [`BlockMask`] — squares a mover class may not enter because a
+//!    structure lies within its footprint.
+//! 3. [`qtpfs`] — the quad-tree pathfinder: tesselation of the speed
+//!    map into leaves, a bidirectional A* over the edges they share,
+//!    one smoothing pass, partial paths toward unreachable goals.
 
+mod block;
 mod cost;
-mod grid_search;
-mod heat;
-mod path;
+pub mod qtpfs;
 
+pub use block::{BlockMask, line_clear, traverse_cells};
 pub use cost::{
     SQUARE_SIZE, SpeedMap, max_slope_from_degrees, slope_from_rise_run, slope_map,
     slope_mod_from_max_slope,
 };
-pub use grid_search::{
-    BlockMask, ComponentLabels, PathSearch, SearchScratch, SearchStatus, find_path,
-    find_path_masked, find_path_masked_in, find_path_with_heat, line_clear, traverse_cells,
-};
-pub use heat::HeatMap;
-pub use path::Path;

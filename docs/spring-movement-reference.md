@@ -86,18 +86,42 @@ how factory-produced units leave a yard. A unit two or more squares
 deep in impassable terrain still stalls, because the speed mod and its
 one-square fallback are both 0.
 
-## Pathing (QTPFS for KP; HAPFS summarised for reference)
+## Pathing: QTPFS (`spring-pathfinding/src/qtpfs.rs`)
 
-- QTPFS: quad-tree over per-square speed mods with structure blocking
-  dilated by the mover footprint; paths are re-requested by the units
-  themselves (`PathUpdated` / `ReRequestPath`), and neither pathfinder
-  ever re-plans an existing path on its own. The port keeps a grid A*
-  with line-of-sight smoothing over the same passability model; the
-  heat map (`HeatMapping` in MOVEINFO) is read only by HAPFS, so the
-  port no longer feeds it into searches.
-- HAPFS (engine default, not KP): 2-square lattice, octile heuristic
-  over 2, three resolution levels stitched lazily 160 elmos ahead,
-  partial paths to the best-heuristic node, goal radius² ≥ 128.
+Kernel Panic selects QTPFS (`pathFinderSystem=1`). The port keeps one
+quad tree per mover class (nav bucket × footprint × crush class) over
+the per-square speed modifiers, with structure squares closed through
+the footprint mask:
+
+- root nodes of 64 squares (32 when the map is not a multiple of 64);
+  every node larger than 16 squares is split, smaller nodes split only
+  while they mix closed and open squares (`QTNode::UpdateMoveCost`);
+- a node's move cost is `1 / mean(relative speed)` (relative = speed
+  mod / 2, as `u8(rel · 255)`), `2²⁴ · closed / xsize²` with closed
+  squares, infinite when all are closed;
+- neighbours: edge-adjacent passable leaves plus corner leaves reached
+  past two fully open edge leaves; transition points are the midpoints
+  of shared edges (`QTPFS_MAX_NETPOINTS_PER_NODE_EDGE = 1`);
+- search: one forward and one backward expansion per iteration, the
+  move cost of the node being left times the distance between
+  transition points, the cheapest leaf's cost as the heuristic
+  multiplier, a per-direction budget of `qtMaxNodesSearched / 2`
+  (lowered when the backward search runs dry), an early exit inside
+  the goal radius, partial paths toward the node that came closest, a
+  goal inside a closed node redirected to the nearest open leaf within
+  `max(goalRadius / 8, 16)` squares;
+- a clear straight line is answered as a two-point raw path first;
+- `TracePath` then one `SmoothPathIter` pass; `NextWayPoint`'s
+  first-call scan picks the first waypoint; long partial paths carry a
+  repath trigger past their midpoint;
+- terrain or structure changes re-tesselate the touched 16-square
+  blocks and relink the leaves around them; a path whose remaining
+  nodes (from two before the current waypoint) touch the change is
+  re-searched 30 frames later (`QueueDeadPathSearches`).
+
+Not ported: path sharing between units with the same start and goal
+leaves (a cache), exit-only yardmap squares (none in KP), path repair
+(dirty paths are re-searched in full), and the per-thread plumbing.
 
 ## Damage model (for orientation; not changed by the movement port)
 
@@ -112,16 +136,12 @@ unit is `ARMORED` (×1e-6) for a few seconds after construction;
 minifacs take ×4 while being built. Paralysis (DOS) caps at
 `health · (1 + paralyzeTime / 40)` and decays `health / 40` per second.
 
-## Known remaining differences (2026-10-06)
+## Known remaining differences (2026-10-06, after the parity phases)
 
-- **Pathfinder**: grid A* with line-of-sight smoothing instead of
-  QTPFS's quad-tree search. Passability and cost per square are the
-  engine's; path *geometry* can differ (QTPFS routes through quad
-  edges, then smooths). Units follow either kind of path with the same
-  `GroundMoveType` rules, so where units can go is identical.
-- **Headings** are `f32` radians, not 16-bit units; turn increments are
-  therefore not quantised to 1/65536 of a circle.
-- **Velocity `y`** is ignored in the avoidance separation prediction
-  (positions use all three axes).
-- **Skidding / impulse** is not ported: no Kernel Panic weapon applies
-  impulse (only the `homf` hero modoption does).
+- QTPFS path sharing, exit-only squares and path repair are not
+  ported (see above); none changes where a unit can go.
+- Transition points use the engine's single edge midpoint; the port
+  keeps duplicate points a smoothing step would have removed (the
+  follower skips a waypoint within one square anyway).
+- Impulse exists but no shipped Kernel Panic weapon applies one; the
+  hero modoption is not ported.

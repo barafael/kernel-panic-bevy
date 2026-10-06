@@ -544,10 +544,11 @@ every mobile unit to the all-passable building grid), slope map,
 impulse/skidding) have a phased plan in
 `docs/movement-parity-plan.md`.
 
-- [ ] Phase 1: 3D velocity in avoidance
-- [ ] Phase 2: 16-bit headings
-- [ ] Phase 3: QTPFS port behind a `PathBackend` switch
-- [ ] Phase 4: impulse / skidding (only with the `homf` hero modoption)
+- [x] Phase 1: 3D velocity in avoidance
+- [x] Phase 2: 16-bit headings
+- [x] Phase 3: QTPFS port (replaced the grid A*, labels and heat map)
+- [x] Phase 4: impulse / skidding, plus the engine's explosion radius
+      and falloff
 
 ## 10. Multiplayer (Low)
 

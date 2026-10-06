@@ -1,11 +1,11 @@
 //! Upstream `gamedata/MOVEINFO.TDF` — movement-class pathing params.
 //!
-//! Two consumers: the heat-mapping fields (`HeatMapping`,
-//! `HeatProduced`, `HeatMod`) drive
-//! [`crate::interaction::movement::PathHeat`]; `FootprintX/Z` and
-//! `CrushStrength` define each class's `MoveDef` — the footprint every
-//! ground unit of the class collides and paths with
-//! (`MoveDefHandler.cpp:314-319`), whatever its FBI footprint says.
+//! `FootprintX/Z` and `CrushStrength` define each class's `MoveDef` —
+//! the footprint every ground unit of the class collides and paths with
+//! (`MoveDefHandler.cpp:314-319`), whatever its FBI footprint says. The
+//! heat-mapping fields (`HeatMapping`, `HeatProduced`, `HeatMod`) are
+//! kept as data; only the engine's legacy HAPFS pathfinder reads them,
+//! and Kernel Panic runs QTPFS.
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -121,20 +121,6 @@ impl MoveClassTable {
             .get(&class.to_ascii_lowercase())
             .copied()
             .unwrap_or(DEFAULT_HEAT_PARAMS)
-    }
-
-    /// Per-second retention of the single shared heat grid: the most
-    /// persistent class (highest `HeatMod`-derived retention), so no
-    /// class's trail fades faster than upstream lets it. LIGHT's 0.10
-    /// in KP's MOVEINFO; the LIGHT default when the table is empty.
-    pub fn shared_heat_retention(&self) -> f32 {
-        self.classes
-            .values()
-            .map(|p| p.heat_retention)
-            .fold(None, |max: Option<f32>, r| {
-                Some(max.map_or(r, |m| m.max(r)))
-            })
-            .unwrap_or(DEFAULT_HEAT_PARAMS.heat_retention)
     }
 }
 

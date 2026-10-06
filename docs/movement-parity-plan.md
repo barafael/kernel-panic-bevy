@@ -1,5 +1,10 @@
 # Movement parity plan: closing the remaining engine differences
 
+> Status 2026-10-06: all four phases landed (see `git log` for the four
+> commits); the grid A* was replaced outright rather than kept behind a
+> switch, and path sharing / exit-only / path repair were left out as
+> documented in `spring-movement-reference.md`.
+
 Follow-up to `spring-movement-reference.md` ("Known remaining
 differences", 2026-10-06). Four gaps remain between the port and
 Recoil's `CGroundMoveType` + QTPFS. Ordered by effort; each phase is

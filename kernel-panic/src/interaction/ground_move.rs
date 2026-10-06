@@ -31,9 +31,8 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use super::movement::{
-    AttackMoveActive, CommandQueue, GroundLift, MovePath, MoveTarget, NavGridSet, PathOutcome,
-    PathRequest, begin_path_search, nav_class, nav_component_labels, promote_next_command,
-    step_path_search,
+    AttackMoveActive, CommandQueue, GroundLift, LayerKey, MovePath, MoveTarget, NavGridSet,
+    PathOutcome, PathRequest, nav_class, promote_next_command, qt_path_outcome,
 };
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
@@ -47,6 +46,7 @@ use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::PendingBuild;
+use spring_pathfinding::qtpfs::{NodeLayer, QtScratch, QtSearch, Rect as QtRect};
 
 /// Goal radius of a plain move order (`CMobileCAI::SetGoal`'s default
 /// `goalRadius = SQUARE_SIZE`, MobileCAI.h:25).
@@ -57,6 +57,9 @@ pub const MAX_IDLING_SLOWUPDATES: u32 = 16;
 /// (ModInfo.cpp:133-134).
 pub const REPATH_DELAY_FRAMES: u32 = 60;
 pub const REPATH_MAX_RATE_FRAMES: u32 = 150;
+/// Frames a dirtied path waits before its re-search
+/// (`QueueDeadPathSearches`, PathManager.cpp:895).
+pub const DEAD_PATH_REFRESH_FRAMES: u32 = 30;
 /// `SPRING_MAX_HEADING` (half a turn) as the float the engine compares
 /// idle counts against.
 const MAX_HEADING: f32 = SPRING_MAX_HEADING as f32;
@@ -120,8 +123,8 @@ pub struct PathStats {
     pub reached: u64,
     pub partial: u64,
     pub unreachable: u64,
-    /// Component labellings built from scratch, and brought up to date
-    /// from the changed squares of a revision instead.
+    /// Node layers built from scratch, and brought up to date from the
+    /// changed squares of a revision instead.
     pub labellings: u64,
     pub label_updates: u64,
 }
@@ -143,92 +146,103 @@ impl PathStats {
 pub struct PathQueue {
     pub stats: PathStats,
     /// [`NavGridSet::epoch`] everything below belongs to; a new map
-    /// drops it all (labels, the search in flight and its scratch are
+    /// drops it all (layers, the search in flight and its scratch are
     /// sized to the old grid).
     epoch: u64,
-    /// [`ComponentLabels`] per (nav bucket, footprint, crushes) with the
-    /// nav revision they were built for; rebuilt on the first request
-    /// after a revision.
-    labels: HashMap<(usize, i32, bool), (u64, spring_pathfinding::ComponentLabels)>,
+    /// One QTPFS [`NodeLayer`] per mover class with the nav revision it
+    /// is current for; built on the first request of a class and
+    /// brought up to date through the change ring.
+    layers: HashMap<LayerKey, (u64, NodeLayer)>,
     pending: std::collections::VecDeque<Entity>,
     queued: bevy::platform::collections::HashSet<Entity>,
-    in_flight: Option<(Entity, PathRequest, spring_pathfinding::PathSearch)>,
-    scratch: spring_pathfinding::SearchScratch,
+    in_flight: Option<(Entity, PathRequest, LayerKey, QtSearch)>,
+    scratch: QtScratch,
     /// Finished searches, keyed by mover: the goal searched for and
     /// the outcome (`None`: nothing could be decided, no nav grid).
     results: HashMap<Entity, (Vec2, Option<PathOutcome>)>,
 }
 
 impl PathQueue {
-    /// Begin `req`'s search with the current labels of its nav bucket
-    /// and mask class (rebuilt after a nav revision).
+    /// The node layer of `req`'s class, current for `nav`'s revision
+    /// (`PathManager::UpdateNodeLayer` on every changed rectangle
+    /// since), built from scratch when missing or when the change ring
+    /// no longer reaches back far enough.
+    fn layer(
+        &mut self,
+        nav: &NavGridSet,
+        registry: &UnitRegistry,
+        req: &PathRequest,
+    ) -> Option<LayerKey> {
+        let (key, speed_map, mask) = nav_class(nav, registry, req)?;
+        // Missing: start from the map's bare-terrain layer (built with
+        // the map) at revision 0 and replay the changes since.
+        if !self.layers.contains_key(&key)
+            && let Some(terrain) = nav.terrain_layers.get(&key)
+        {
+            self.layers.insert(key, (0, terrain.clone()));
+        }
+        let changes = match self.layers.get(&key) {
+            Some((rev, _)) if *rev == nav.revision => return Some(key),
+            Some((rev, _)) => nav.changes_since_each(*rev).map(|c| c.collect::<Vec<_>>()),
+            None => None,
+        };
+        match changes {
+            Some(changes) => {
+                let (rev, layer) = self.layers.get_mut(&key).expect("checked above");
+                for b in changes {
+                    layer.update(
+                        speed_map,
+                        mask,
+                        QtRect {
+                            x0: b[0],
+                            z0: b[1],
+                            x1: b[2] + 1,
+                            z1: b[3] + 1,
+                        },
+                    );
+                }
+                *rev = nav.revision;
+                self.stats.label_updates += 1;
+            }
+            None => {
+                // The change ring no longer reaches back: tesselate anew.
+                self.layers
+                    .insert(key, (nav.revision, NodeLayer::new(speed_map, mask)));
+                self.stats.labellings += 1;
+            }
+        }
+        Some(key)
+    }
+
+    /// Begin `req`'s search on its class's layer. `Err` carries an
+    /// outcome that needed no search (a clear straight line, source and
+    /// goal in one leaf, or no nav grid at all: `None`).
     fn begin(
         &mut self,
         nav: Option<&NavGridSet>,
         registry: &UnitRegistry,
         req: &PathRequest,
-    ) -> Result<spring_pathfinding::PathSearch, Option<PathOutcome>> {
-        let labels = nav.and_then(|n| {
-            let (key, speed_map, mask) = nav_class(n, registry, req)?;
-            let stale = self
-                .labels
-                .get(&key)
-                .is_none_or(|(rev, _)| *rev != n.revision);
-            if stale {
-                // Labels from before this revision: apply the changed
-                // rectangles since (a rebuild only when a change may
-                // have split a component, or the ring is too short).
-                let updated = match self.labels.get_mut(&key) {
-                    Some((rev, labels)) if *rev < n.revision => {
-                        n.changes_since_each(*rev).map(|changes| {
-                            let mut rebuilt = false;
-                            for bbox in changes {
-                                rebuilt |= labels.update_region(speed_map, mask, bbox);
-                            }
-                            *rev = n.revision;
-                            rebuilt
-                        })
-                    }
-                    _ => None,
-                };
-                match updated {
-                    Some(true) => self.stats.labellings += 1,
-                    Some(false) => self.stats.label_updates += 1,
-                    None => {
-                        // Start from the map's bare-terrain labels (built
-                        // with the map, off-thread) and apply every
-                        // structure change since; label from scratch
-                        // only when the change ring no longer reaches
-                        // back to the map's own revision.
-                        let seeded =
-                            n.buckets[key.0]
-                                .terrain_labels
-                                .as_deref()
-                                .and_then(|terrain| {
-                                    let changes = n.changes_since_each(0)?;
-                                    let mut labels = terrain.clone();
-                                    for bbox in changes {
-                                        labels.update_region(speed_map, mask, bbox);
-                                    }
-                                    Some(labels)
-                                });
-                        match seeded {
-                            Some(labels) => {
-                                self.labels.insert(key, (n.revision, labels));
-                                self.stats.label_updates += 1;
-                            }
-                            None => {
-                                let (key, labels) = nav_component_labels(n, registry, req)?;
-                                self.labels.insert(key, (n.revision, labels));
-                                self.stats.labellings += 1;
-                            }
-                        }
-                    }
-                }
-            }
-            self.labels.get(&key).map(|(_, l)| l)
-        });
-        begin_path_search(&mut self.scratch, nav, registry, labels, req)
+    ) -> Result<(LayerKey, QtSearch), Option<PathOutcome>> {
+        let Some(nav) = nav else { return Err(None) };
+        let Some(key) = self.layer(nav, registry, req) else {
+            return Err(None);
+        };
+        let (_, speed_map, mask) = nav_class(nav, registry, req).expect("layer exists");
+        let (_, layer) = self.layers.get_mut(&key).expect("layer exists");
+        let src = [req.from.x, req.from.z];
+        let dst = [req.to.x, req.to.z];
+        match QtSearch::begin(
+            layer,
+            &mut self.scratch,
+            speed_map,
+            mask,
+            src,
+            dst,
+            req.goal_radius,
+        ) {
+            Ok(search) => Ok((key, search)),
+            Err(path) => Err(Some(qt_path_outcome(Some(path), req, nav.revision))),
+        }
     }
 
     /// Queue a search for `entity` unless one is already pending.
@@ -237,6 +251,15 @@ impl PathQueue {
             self.pending.push_back(entity);
             self.stats.queued += 1;
         }
+    }
+
+    /// Advance the search in flight by up to `pops` iterations.
+    fn step_in_flight(&mut self, nav: &NavGridSet, pops: usize) -> Option<Option<PathOutcome>> {
+        let (_, req, key, search) = self.in_flight.as_mut().expect("search in flight");
+        let (_, layer) = self.layers.get(key).expect("layer exists");
+        search
+            .step(layer, &mut self.scratch, pops)
+            .map(|path| Some(qt_path_outcome(path, req, nav.revision)))
     }
 
     /// Run queued searches until `budget` nodes are spent; returns the
@@ -258,7 +281,7 @@ impl PathQueue {
             self.queued.clear();
             self.in_flight = None;
             self.results.clear();
-            self.labels.clear();
+            self.layers.clear();
             self.scratch = Default::default();
         }
         loop {
@@ -275,7 +298,7 @@ impl PathQueue {
                 };
                 self.stats.searches += 1;
                 match self.begin(nav, registry, &req) {
-                    Ok(search) => self.in_flight = Some((entity, req, search)),
+                    Ok((key, search)) => self.in_flight = Some((entity, req, key, search)),
                     Err(outcome) => {
                         self.stats.outcome(&outcome);
                         self.results.insert(entity, (req.to.xz(), outcome));
@@ -286,13 +309,13 @@ impl PathQueue {
             if budget == 0 {
                 return 0;
             }
-            let (_, req, search) = self.in_flight.as_mut().expect("search in flight");
+            let Some(n) = nav else { return budget };
             let pops = budget.min(PATH_SEARCH_STEP);
-            let done = step_path_search(&mut self.scratch, search, nav, registry, req, None, pops);
+            let done = self.step_in_flight(n, pops);
             budget -= pops;
             self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
-                let (entity, req, _) = self.in_flight.take().expect("search in flight");
+                let (entity, req, _, _) = self.in_flight.take().expect("search in flight");
                 self.stats.outcome(&outcome);
                 self.results.insert(entity, (req.to.xz(), outcome));
             }
@@ -317,39 +340,33 @@ impl PathQueue {
             return (None, budget);
         }
         self.stats.searches += 1;
-        let mut search = match self.begin(nav, registry, &req) {
-            Ok(search) => search,
+        let (key, search) = match self.begin(nav, registry, &req) {
+            Ok(s) => s,
             Err(outcome) => {
                 self.stats.outcome(&outcome);
                 return (Some(outcome), budget);
             }
         };
+        self.in_flight = Some((entity, req, key, search));
+        let Some(n) = nav else { return (None, budget) };
         let mut left = budget;
         while left > 0 {
             let pops = left.min(PATH_SEARCH_STEP);
-            let done = step_path_search(
-                &mut self.scratch,
-                &mut search,
-                nav,
-                registry,
-                &req,
-                None,
-                pops,
-            );
+            let done = self.step_in_flight(n, pops);
             left -= pops;
             self.stats.nodes += pops as u64;
             if let Some(outcome) = done {
+                self.in_flight = None;
                 self.stats.outcome(&outcome);
                 return (Some(outcome), left);
             }
         }
         self.stats.deferred += 1;
-        self.in_flight = Some((entity, req, search));
         (None, 0)
     }
 }
 
-/// Nodes expanded per [`PathQueue::service`] step call; only bounds
+/// Search iterations per [`PathQueue::service`] step call; only bounds
 /// how often the budget is re-checked.
 const PATH_SEARCH_STEP: usize = 512;
 
@@ -1433,6 +1450,7 @@ pub fn movement_system(
             crush_strength: u.mover.crush_strength,
             from: u.transform.translation,
             to: Vec3::new(goal.x, 0.0, goal.y),
+            goal_radius: u.mover.goal_radius + u.mover.extra_radius,
         })
     });
 
@@ -1542,28 +1560,36 @@ pub fn movement_system(
         if m.progress == Progress::Active
             && let Some(g) = m.goal
         {
-            if let (Some(p), Some(n)) = (u.path.as_deref_mut(), nav)
-                && p.revision != n.revision
-            {
-                // Structures appeared or vanished since the path was
-                // made (QTPFS `PathUpdated`): repath if its remainder is
-                // no longer walkable. Only the segments crossing the
-                // changed squares can have become blocked.
-                let area = n.changed_since(p.revision);
-                p.revision = n.revision;
-                let mut from = pos.xz();
-                let ok = p.waypoints[p.current.min(p.waypoints.len())..]
-                    .iter()
-                    .all(|w| {
-                        let to = w.xz();
-                        let clear = match area {
-                            Some(bbox) if !NavGridSet::segment_touches(bbox, from, to) => true,
-                            _ => map.raw_search(from, to),
-                        };
-                        from = to;
-                        clear
-                    });
-                if !ok {
+            if let Some(p) = u.path.as_deref_mut() {
+                if let Some(n) = nav
+                    && p.revision != n.revision
+                {
+                    // Terrain or structures changed since the path was
+                    // made: a path whose remaining nodes (from two
+                    // before the current waypoint) touch the changed
+                    // squares is dirty and re-searched a second later
+                    // (`PathCache::MarkDeadPaths`, `QueueDeadPathSearches`).
+                    let area = n.changed_since(p.revision);
+                    p.revision = n.revision;
+                    let from = p.current.max(2) - 2;
+                    let dirty = p.node_rects[from.min(p.node_rects.len())..]
+                        .iter()
+                        .any(|r| {
+                            area.is_none_or(|b| {
+                                r.x0 <= b[2] && r.x1 > b[0] && r.z0 <= b[3] && r.z1 > b[1]
+                            })
+                        });
+                    if dirty && p.dirty_at.is_none() {
+                        p.dirty_at = Some(m.frame + DEAD_PATH_REFRESH_FRAMES);
+                    }
+                }
+                if p.dirty_at.is_some_and(|f| m.frame >= f) {
+                    p.dirty_at = None;
+                    m.re_request_path(true);
+                }
+                // The repath trigger of a long partial path.
+                if p.repath_at.is_some_and(|i| p.current >= i) {
+                    p.repath_at = None;
                     m.re_request_path(true);
                 }
             }
@@ -1580,6 +1606,7 @@ pub fn movement_system(
                             crush_strength: m.crush_strength,
                             from: pos,
                             to: Vec3::new(g.x, 0.0, g.y),
+                            goal_radius: m.goal_radius + m.extra_radius,
                         };
                         let (outcome, left) =
                             path_queue.request_now(u.entity, req, nodes_left, nav, &registry);
@@ -2701,7 +2728,6 @@ mod tests {
                 buckets: vec![super::super::movement::NavBucket {
                     max_slope: 1.0,
                     speed_map,
-                    terrain_labels: None,
                 }],
                 ..Default::default()
             };
@@ -2803,7 +2829,6 @@ mod tests {
             buckets: vec![super::super::movement::NavBucket {
                 max_slope: 1.0,
                 speed_map,
-                terrain_labels: None,
             }],
             ..Default::default()
         };
@@ -2829,7 +2854,6 @@ mod tests {
             buckets: vec![super::super::movement::NavBucket {
                 max_slope: 1.0,
                 speed_map,
-                terrain_labels: None,
             }],
             ..Default::default()
         };
@@ -2871,6 +2895,8 @@ mod tests {
             for z in 40..62 {
                 map.speeds[(z * map.width + 62) as usize] = 0.0;
             }
+            // Terrain edits announce their squares (Hex Farm does).
+            nav.bump([62, 40, 62, 61]);
         }
         let mut repathed = false;
         for _ in 0..900 {
@@ -2991,16 +3017,20 @@ mod tests {
     }
 
     /// `forceStaticObjectCheck` → `positionStuck`: a unit standing inside
-    /// a structure's footprint (a factory's yard, a building erected over
-    /// it) walks out — `UpdatePos` lets a stuck unit step even when no
-    /// square beside it is open — and then reaches its goal.
+    /// the edge of a structure's footprint (a building erected against
+    /// it, a yard closing) walks out — `UpdatePos` lets a stuck unit step
+    /// even when no square beside it is open — and then reaches its
+    /// goal. (A unit buried deep inside a closed block has no passable
+    /// neighbour leaf and fails its path, as in the engine.)
     #[test]
     fn unit_inside_a_structure_footprint_walks_out() {
         let mut h = Harness::flat();
         let wall = Vec3::new(640.0, 0.0, 640.0);
         h.spawn_structure(UnitKind::Firewall, 0, wall);
         h.step();
-        let e = h.spawn(UnitKind::Bit, 0, wall);
+        // Just past the footprint's east edge: inside the squares the
+        // Bit's own footprint closes around the structure.
+        let e = h.spawn(UnitKind::Bit, 0, wall + Vec3::new(36.0, 0.0, 0.0));
         h.step();
         assert!(
             h.world.get::<GroundMover>(e).unwrap().position_stuck,
@@ -3008,19 +3038,19 @@ mod tests {
         );
         let goal = Vec3::new(640.0, 0.0, 900.0);
         h.world.entity_mut(e).insert(MoveTarget(goal));
-        let mut left_footprint_at = None;
+        let mut unstuck_at = None;
         for tick in 0..900 {
             h.step();
-            if left_footprint_at.is_none() && !h.inside_structure(h.pos(e)) {
-                left_footprint_at = Some(tick);
+            if unstuck_at.is_none() && !h.world.get::<GroundMover>(e).unwrap().position_stuck {
+                unstuck_at = Some(tick);
             }
             if !h.has_order(e) {
                 break;
             }
         }
         assert!(
-            left_footprint_at.is_some_and(|t| t < 120),
-            "walks out of the footprint within 4 s: {left_footprint_at:?}"
+            unstuck_at.is_some_and(|t| t < 120),
+            "walks out of the closed squares within 4 s: {unstuck_at:?}"
         );
         assert!(!h.has_order(e), "order finished");
         assert!(
@@ -3061,14 +3091,8 @@ mod tests {
         nav.buckets.push(NavBucket {
             max_slope: 1.0,
             speed_map: small,
-            terrain_labels: None,
         });
         h.world.insert_resource(nav);
-        // Map load rebuilds the heat map at the new grid size too; the
-        // path service asserts the two agree.
-        h.world.insert_resource(super::super::movement::PathHeat(
-            spring_pathfinding::HeatMap::new(48, 48),
-        ));
         for _ in 0..10 {
             h.world
                 .entity_mut(e)

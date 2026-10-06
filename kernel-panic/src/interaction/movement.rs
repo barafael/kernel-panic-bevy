@@ -2,9 +2,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use spring_pathfinding::{
-    BlockMask, ComponentLabels, Path, PathSearch, SearchScratch, SearchStatus, SpeedMap,
-};
+use spring_pathfinding::qtpfs::{QtPath, Rect as QtRect};
+use spring_pathfinding::{BlockMask, SpeedMap};
 
 use super::selection::Selected;
 use crate::sim::SQUARE_SIZE;
@@ -84,6 +83,15 @@ pub struct MovePath {
     pub reached_goal: bool,
     /// [`NavGridSet::revision`] the path was checked against.
     pub revision: u64,
+    /// Square rectangle of the leaf each waypoint was traced through:
+    /// a terrain or structure change under one of the remaining ones
+    /// dirties the path.
+    pub node_rects: Vec<QtRect>,
+    /// Sim frame at which a dirtied path is re-searched.
+    pub dirty_at: Option<u32>,
+    /// `repathAtPointIndex`: a long partial path re-searches once this
+    /// waypoint is reached.
+    pub repath_at: Option<usize>,
 }
 
 impl MovePath {
@@ -95,6 +103,9 @@ impl MovePath {
             goal,
             reached_goal: true,
             revision: 0,
+            node_rects: Vec::new(),
+            dirty_at: None,
+            repath_at: None,
         }
     }
 
@@ -170,12 +181,6 @@ impl CommandQueue {
 pub struct NavBucket {
     pub max_slope: f32,
     pub speed_map: SpeedMap,
-    /// Connected components of the bare terrain (no structure mask),
-    /// built with the map off the main thread so the first path search
-    /// on a large map doesn't label a million cells in one tick. The
-    /// path service starts each mover class from a copy and brings it
-    /// up to date through the structure change ring.
-    pub terrain_labels: Option<std::sync::Arc<ComponentLabels>>,
 }
 
 /// A set of pathfinding grids, one per distinct `MaxSlope` in the unit
@@ -204,7 +209,16 @@ pub struct NavGridSet {
     pub changes: std::collections::VecDeque<(u64, [i32; 4])>,
     /// Squares blocked by buildings, and per-mover-class path masks.
     pub structures: super::structures::StructureLayer,
+    /// QTPFS layers of the bare terrain for every mover class, built
+    /// with the map off the main thread; the path service starts each
+    /// class from a copy (at revision 0) and replays the structure
+    /// changes since, instead of tesselating a whole map in one tick.
+    pub terrain_layers: HashMap<LayerKey, spring_pathfinding::qtpfs::NodeLayer>,
 }
+
+/// A mover class as the path service keys its layers: (nav bucket,
+/// footprint half-size, crushes features).
+pub type LayerKey = (usize, i32, bool);
 
 /// Revisions remembered for partial re-checks; older paths re-check
 /// in full.
@@ -219,6 +233,7 @@ impl Default for NavGridSet {
             revision: 0,
             changes: Default::default(),
             structures: Default::default(),
+            terrain_layers: HashMap::new(),
         }
     }
 }
@@ -357,7 +372,6 @@ impl NavGridSet {
             b.to_array(),
             map,
             self.block_mask(xsizeh, crush_strength),
-            None,
         )
     }
 
@@ -383,61 +397,6 @@ impl NavGridSet {
         self.bucket(cap).map_or(0.0, |b| {
             spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
         })
-    }
-}
-
-/// Spring `MOVEINFO.TDF` HeatMapping: a shared congestion grid the
-/// pathfinder reads as extra cost. Walking ground units deposit heat on
-/// the cell they stand in; later paths bend around hot cells, so
-/// columns marching the same line fan out instead of braiding into a
-/// single rut. Upstream keeps per-class decay rates; a single shared
-/// grid decays at the most persistent class (LIGHT, `HeatMod=0.10`)
-/// while MEDIUM/HEAVY keep their much higher deposits.
-///
-/// Fidelity note: only Spring's legacy HAPFS pathfinder reads heat
-/// (`Path/HAPFS/PathHeatMap`); KP runs QTPFS (`pathFinderSystem=1`),
-/// which ignores it. It is kept as KP's authored data because it does
-/// not fight the Spring movement port: it only biases *where* new paths
-/// run (never blocks), the corner-cutting look-ahead
-/// (`CanSetNextWayPoint`'s raw search) ignores it, and the headless
-/// harness measures identical group-move numbers with and without it.
-#[derive(Resource)]
-pub struct PathHeat(pub spring_pathfinding::HeatMap);
-
-/// Full-grid decay runs in steps of this many seconds (a plain
-/// multiply at `retention^period` — same curve, memcpy cost).
-const HEAT_DECAY_PERIOD: f32 = 0.5;
-
-/// Deposit + decay pass for [`PathHeat`]. Runs before
-/// `movement_system` so freshly-issued paths see this tick's
-/// congestion. No-op when no map (and therefore no grid) is loaded.
-#[allow(clippy::type_complexity)]
-pub fn update_path_heat(
-    time: Res<Time>,
-    movers: Query<(&GlobalTransform, &UnitType, &UnitStats), With<MovePath>>,
-    registry: Res<UnitRegistry>,
-    mut heat: Option<ResMut<PathHeat>>,
-    mut decay_timer: Local<f32>,
-) {
-    let Some(heat) = heat.as_deref_mut() else {
-        return;
-    };
-    let dt = time.delta_secs();
-    for (gtf, unit, stats) in &movers {
-        // Flyers never touch the nav grid — they leave no trail.
-        if stats.can_fly || stats.speed <= 0.0 {
-            continue;
-        }
-        let produced = registry.heat_produced(unit.0);
-        let pos = gtf.translation();
-        heat.0.add_heat([pos.x, pos.z], produced * dt);
-    }
-
-    *decay_timer += dt;
-    if *decay_timer >= HEAT_DECAY_PERIOD {
-        *decay_timer = 0.0;
-        heat.0
-            .decay(registry.shared_heat_retention().powf(HEAT_DECAY_PERIOD));
     }
 }
 
@@ -646,64 +605,8 @@ pub(crate) struct PathRequest {
     pub crush_strength: f32,
     pub from: Vec3,
     pub to: Vec3,
-}
-
-/// Start a search through the nav bucket matching the unit's `MaxSlope`,
-/// against the structure mask of its MoveDef footprint and crush
-/// strength, with that grid's [`ComponentLabels`] if the caller has
-/// them (see [`nav_component_labels`]). `Err` carries an outcome that
-/// needed no search: `None` when nothing could be decided (no nav grid
-/// yet).
-pub(crate) fn begin_path_search(
-    scratch: &mut SearchScratch,
-    nav_set: Option<&NavGridSet>,
-    unit_registry: &UnitRegistry,
-    labels: Option<&ComponentLabels>,
-    req: &PathRequest,
-) -> Result<PathSearch, Option<PathOutcome>> {
-    let Some(nav) = nav_set else {
-        return Err(None);
-    };
-    let Some(speed_map) = nav.speed_map(unit_registry.max_slope_ratio(req.kind)) else {
-        return Err(None);
-    };
-    let mask = nav.block_mask(req.xsizeh, req.crush_strength);
-    let (src, dst) = ([req.from.x, req.from.z], [req.to.x, req.to.z]);
-    match scratch.begin_search_labelled(speed_map, mask, labels, src, dst) {
-        Ok(search) => Ok(search),
-        Err(path) => Err(Some(path_outcome(path, req.to, nav.revision))),
-    }
-}
-
-/// Expand up to `max_pops` nodes of a search begun by
-/// [`begin_path_search`]; `None` while it is still running.
-pub(crate) fn step_path_search(
-    scratch: &mut SearchScratch,
-    search: &mut PathSearch,
-    nav_set: Option<&NavGridSet>,
-    unit_registry: &UnitRegistry,
-    req: &PathRequest,
-    heat: Option<&spring_pathfinding::HeatMap>,
-    max_pops: usize,
-) -> Option<Option<PathOutcome>> {
-    let nav = nav_set?;
-    let speed_map = nav.speed_map(unit_registry.max_slope_ratio(req.kind))?;
-    let mask = nav.block_mask(req.xsizeh, req.crush_strength);
-    match scratch.step(search, speed_map, mask, heat, max_pops) {
-        SearchStatus::Running => None,
-        SearchStatus::Done(path) => Some(Some(path_outcome(path, req.to, nav.revision))),
-    }
-}
-
-/// The connectivity a request is searched under: its nav bucket and
-/// mask class, keyed for a labels cache, and the labels' content.
-pub(crate) fn nav_component_labels(
-    nav: &NavGridSet,
-    unit_registry: &UnitRegistry,
-    req: &PathRequest,
-) -> Option<((usize, i32, bool), ComponentLabels)> {
-    let (key, speed_map, mask) = nav_class(nav, unit_registry, req)?;
-    Some((key, ComponentLabels::build(speed_map, mask)))
+    /// `goalRadius + extraRadius`: the search may stop inside it.
+    pub goal_radius: f32,
 }
 
 /// The nav bucket and mask a request searches under, keyed as
@@ -726,22 +629,32 @@ pub(crate) fn nav_class<'a>(
     ))
 }
 
-fn path_outcome(path: Option<Path>, to: Vec3, revision: u64) -> PathOutcome {
+/// A finished QTPFS search as the mover's path: waypoints at y = 0, the
+/// first one from `NextWayPoint`'s first-call scan at the unit's
+/// position, partial paths flagged so reaching their end fails the
+/// order.
+pub(crate) fn qt_path_outcome(
+    path: Option<QtPath>,
+    req: &PathRequest,
+    revision: u64,
+) -> PathOutcome {
     let Some(path) = path else {
         return PathOutcome::Unreachable;
     };
-    let waypoints: Vec<Vec3> = path
-        .points
-        .iter()
-        .map(|p| Vec3::new(p[0], 0.0, p[1]))
-        .collect();
+    let first = spring_pathfinding::qtpfs::first_waypoint(&path.points, [req.from.x, req.from.z]);
     PathOutcome::Route(MovePath {
-        // Point 0 is the start position itself.
-        current: 1.min(waypoints.len().saturating_sub(1)),
-        waypoints,
-        goal: to,
-        reached_goal: path.reached_goal,
+        waypoints: path
+            .points
+            .iter()
+            .map(|p| Vec3::new(p[0], 0.0, p[1]))
+            .collect(),
+        current: first,
+        goal: req.to,
+        reached_goal: path.full,
         revision,
+        node_rects: path.node_rects,
+        dirty_at: None,
+        repath_at: path.repath_at,
     })
 }
 
@@ -1126,7 +1039,6 @@ mod tests {
         NavBucket {
             max_slope: cap,
             speed_map: SpeedMap::uniform(2, 2, 1.0),
-            terrain_labels: None,
         }
     }
 
@@ -1199,116 +1111,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod heat_tests {
-    use super::*;
-    use crate::units::components::TeamId;
-    use bevy::ecs::system::RunSystemOnce;
-    use spring_pathfinding::HeatMap;
-    use std::time::Duration;
-
-    /// Walking ground units deposit heat at their cell; a full decay
-    /// step multiplies the grid down by `retention^period`. Flyers
-    /// leave no trail.
-    #[test]
-    fn walkers_deposit_heat_and_decay_shrinks_it() {
-        let mut world = World::new();
-        world.init_resource::<Time>();
-        world.insert_resource(UnitRegistry::empty());
-        world.insert_resource(PathHeat(HeatMap::new(8, 8)));
-
-        let walker = world
-            .spawn((
-                UnitType(UnitKind::Bit),
-                UnitStats {
-                    radius: 12.0,
-                    hit_radius: 20.0,
-                    speed: 90.0,
-                    acc_rate: 0.03,
-                    dec_rate: 0.067,
-                    turn_rate: 3.0,
-                    can_fly: false,
-                    no_chase_vtol: true,
-                },
-                TeamId(0),
-                GlobalTransform::from_xyz(32.0, 0.0, 8.0),
-                MovePath::new(vec![Vec3::new(500.0, 0.0, 8.0)], Vec3::new(500.0, 0.0, 8.0)),
-            ))
-            .id();
-        let flyer = world
-            .spawn((
-                UnitType(UnitKind::Flow),
-                UnitStats {
-                    radius: 12.0,
-                    hit_radius: 20.0,
-                    speed: 30.0,
-                    acc_rate: 0.01,
-                    dec_rate: 0.03,
-                    turn_rate: 3.0,
-                    can_fly: true,
-                    no_chase_vtol: false,
-                },
-                TeamId(0),
-                GlobalTransform::from_xyz(40.0, 0.0, 8.0),
-                MovePath::new(vec![Vec3::new(500.0, 0.0, 8.0)], Vec3::new(500.0, 0.0, 8.0)),
-            ))
-            .id();
-
-        world
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_millis(500));
-        world.run_system_once(update_path_heat).unwrap();
-
-        let walker_heat = world.resource::<PathHeat>().0.get([32.0, 8.0]);
-        assert!(
-            walker_heat > 0.0,
-            "walker must deposit heat at its cell, got {walker_heat}"
-        );
-        assert_eq!(
-            world.resource::<PathHeat>().0.get([40.0, 8.0]),
-            0.0,
-            "flyers must leave no heat"
-        );
-        let deposited = walker_heat;
-
-        // Despawn the walkers so the next call is decay-only: a
-        // standing unit would keep re-depositing, and the test wants
-        // the isolated decay step.
-        world.despawn(walker);
-        world.despawn(flyer);
-        world
-            .resource_mut::<Time>()
-            .advance_by(Duration::from_secs_f32(HEAT_DECAY_PERIOD));
-        world.run_system_once(update_path_heat).unwrap();
-
-        let decayed = world.resource::<PathHeat>().0.get([32.0, 8.0]);
-        let expected_factor = world
-            .resource::<UnitRegistry>()
-            .shared_heat_retention()
-            .powf(HEAT_DECAY_PERIOD);
-        assert!(
-            (decayed - deposited * expected_factor).abs() < deposited * 0.05,
-            "decay step must multiply by retention^{HEAT_DECAY_PERIOD}: {deposited} → {decayed}"
-        );
-    }
-
-    /// The real FBI + MOVEINFO.TDF pair drives per-class heat: Bits
-    /// (LIGHT) deposit 10/s, Bytes (HEAVY) 500/s.
-    #[test]
-    fn fbi_movement_class_selects_heat_params() {
-        let registry = crate::units::content::unit_registry::UnitRegistry::load();
-        assert!((registry.heat_produced(UnitKind::Bit) - 10.0).abs() < 1e-4);
-        assert!((registry.heat_retention(UnitKind::Bit) - 0.10).abs() < 1e-4);
-        assert!((registry.heat_produced(UnitKind::Byte) - 500.0).abs() < 1e-4);
-        assert!((registry.heat_retention(UnitKind::Byte) - 0.002).abs() < 1e-4);
-    }
-}
-
-#[cfg(test)]
 mod cross_map_tests {
     use super::*;
     use crate::units::components::TeamId;
     use bevy::ecs::system::RunSystemOnce;
-    use spring_pathfinding::HeatMap;
     use std::time::Duration;
 
     /// Ground-truth diagnostic: load a real shipped map, build the nav
@@ -1350,7 +1156,6 @@ mod cross_map_tests {
             nav.buckets.push(NavBucket {
                 max_slope: cap,
                 speed_map,
-                terrain_labels: None,
             });
 
             let mut world = World::new();
@@ -1358,11 +1163,6 @@ mod cross_map_tests {
             world.insert_resource(UnitRegistry::load());
             world.insert_resource(nav);
             world.insert_resource(heightmap);
-            let heat_dims = (
-                parsed.header.heightmap_width() as u32 - 1,
-                parsed.header.heightmap_height() as u32 - 1,
-            );
-            world.insert_resource(PathHeat(HeatMap::new(heat_dims.0, heat_dims.1)));
             world.init_resource::<crate::interaction::ground_move::PendingImpulses>();
             world.init_resource::<crate::interaction::ground_move::PathQueue>();
 
@@ -1407,7 +1207,7 @@ mod cross_map_tests {
                 &transform,
             ));
 
-            let max_cell = (heat_dims.0 as usize).min(504);
+            let max_cell = (parsed.header.heightmap_width() - 2).min(504);
             let mut reached = 0usize;
             let mut total = 0usize;
             for (tx, tz) in [

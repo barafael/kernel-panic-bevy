@@ -14,11 +14,9 @@
 use std::time::Duration;
 
 use bevy::prelude::*;
-use spring_pathfinding::{HeatMap, SpeedMap};
+use spring_pathfinding::SpeedMap;
 
-use super::movement::{
-    CommandQueue, MovePath, MoveTarget, NavBucket, NavGridSet, PathHeat, QueuedCommand,
-};
+use super::movement::{CommandQueue, MovePath, MoveTarget, NavBucket, NavGridSet, QueuedCommand};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -52,12 +50,10 @@ impl Harness {
         nav.buckets.push(NavBucket {
             max_slope: cap,
             speed_map: SpeedMap::uniform(MAP_SQUARES, MAP_SQUARES, 1.0),
-            terrain_labels: None,
         });
         world.insert_resource(nav);
         let verts = (MAP_SQUARES + 1) as usize;
         world.insert_resource(Heightmap::from_raw(vec![0.0; verts * verts], verts, verts));
-        world.insert_resource(PathHeat(HeatMap::new(MAP_SQUARES, MAP_SQUARES)));
         // Never run out of search budget: reproducible runs.
         world.insert_resource(super::ground_move::PathSearchBudget(usize::MAX));
         world.init_resource::<super::ground_move::PathQueue>();
