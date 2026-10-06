@@ -25,6 +25,7 @@ pub struct MoveClassParams {
 /// Upstream LIGHT class (`HeatProduced=10`, `HeatMod=0.10`) — the
 /// fallback for classes missing from the file and units without a
 /// movement class at all (flyers, unloaded registries).
+#[cfg(test)]
 pub const DEFAULT_HEAT_PARAMS: MoveClassParams = MoveClassParams {
     heat_produced: 10.0,
     heat_retention: 0.1,
@@ -116,6 +117,7 @@ impl MoveClassTable {
 
     /// Params for a class name (FBI `MovementClass`, e.g. "LIGHT"),
     /// case-insensitive, with the LIGHT fallback.
+    #[cfg(test)]
     pub fn params_for(&self, class: &str) -> MoveClassParams {
         self.classes
             .get(&class.to_ascii_lowercase())

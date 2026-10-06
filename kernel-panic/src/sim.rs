@@ -161,12 +161,6 @@ pub fn heading_of(v: Vec2) -> f32 {
     v.x.atan2(v.y)
 }
 
-/// Wrap an angle to `(-π, π]` (short-heading arithmetic wraps).
-pub fn wrap_angle(a: f32) -> f32 {
-    let w = (a + PI).rem_euclid(TAU) - PI;
-    if w <= -PI { w + TAU } else { w }
-}
-
 /// Shortest absolute angular distance between two angles, in `[0, π]`.
 pub fn angle_delta(a: f32, b: f32) -> f32 {
     let d = (a - b).rem_euclid(TAU);
@@ -218,8 +212,6 @@ mod tests {
 
     #[test]
     fn wrap_and_delta_take_the_short_way() {
-        assert!((wrap_angle(3.0 * PI / 2.0) + PI / 2.0).abs() < 1e-5);
-        assert_eq!(wrap_angle(-PI), PI);
         assert!((angle_delta(0.1, TAU - 0.1) - 0.2).abs() < 1e-5);
         assert!((angle_delta(-PI, PI)).abs() < 1e-5);
     }

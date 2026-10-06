@@ -105,6 +105,9 @@ pub struct WeaponDef {
     /// (defaultDamage + impulseBoost)` (`CGameHelper::CalcImpulseScale`).
     pub impulse_factor: f32,
     pub impulse_boost: f32,
+    /// `explosionSpeed` (elmos/frame) as authored, 0 when absent; see
+    /// [`Self::explosion_speed`] for the engine's default.
+    pub explosion_speed_raw: f32,
     pub tolerance: f32,
     pub spray_angle: f32,
     pub burst: f32,
@@ -425,6 +428,19 @@ pub enum WeaponCategory {
 }
 
 impl WeaponDef {
+    /// `explosionSpeed` in elmos per frame: the authored value, or the
+    /// engine's default from the default damage (`WeaponDef.cpp:439`):
+    /// `gd = max(30, damage / 20)`, `(8 + 2.5·gd) / (9 + 0.7·√gd) · 0.5`.
+    pub fn explosion_speed(&self) -> f32 {
+        if self.explosion_speed_raw > 0.0 {
+            return self.explosion_speed_raw;
+        }
+        let gd = (self.damage.default / 20.0).max(30.0);
+        (8.0 + 2.5 * gd) / (9.0 + 0.7 * gd.sqrt()) * 0.5
+    }
+}
+
+impl WeaponDef {
     /// Classify this weapon.
     ///
     /// Honours a literal `weaponType=` if it was set, otherwise runs
@@ -692,6 +708,7 @@ impl WeaponDef {
             edge_effectiveness: s.f32("edgeeffectiveness"),
             impulse_factor: s.f32_or("impulsefactor", 1.0),
             impulse_boost: s.f32("impulseboost"),
+            explosion_speed_raw: s.f32("explosionspeed"),
             tolerance: s.f32("tolerance"),
             spray_angle: s.f32("sprayangle"),
             // Spring defaults (`WeaponDef.cpp`): `burst` 1,

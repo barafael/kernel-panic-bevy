@@ -77,6 +77,7 @@ impl Plugin for UnitsPlugin {
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
+            .init_resource::<combat::DelayedDamage>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<shield::OnsMode>()
@@ -201,7 +202,11 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Simulate),
                     (
-                        combat::apply_damage.run_if(|q: Res<combat::DamageQueue>| !q.is_empty()),
+                        combat::apply_damage.run_if(
+                            |q: Res<combat::DamageQueue>, d: Res<combat::DelayedDamage>| {
+                                !q.is_empty() || !d.is_empty()
+                            },
+                        ),
                         combat::tick_stun,
                         combat::tick_self_destruct,
                         combat::auto_heal,

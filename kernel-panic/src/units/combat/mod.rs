@@ -46,8 +46,8 @@ pub use aim::{
 };
 pub(crate) use damage::splash_falloff;
 pub use damage::{
-    BurstFire, DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue, apply_damage,
-    tick_burst_fire, tick_infections, weapon_infection_duration,
+    BurstFire, DamageQueue, DelayedDamage, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue,
+    apply_damage, tick_burst_fire, tick_infections, weapon_infection_duration,
 };
 pub use lifecycle::{
     Dying, SELF_DESTRUCT_DELAY, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,

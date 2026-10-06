@@ -8,7 +8,7 @@ use bevy::prelude::*;
 use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UNIT_KIND_COUNT, UnitKind};
-use super::moveinfo::{MoveClassParams, MoveClassTable};
+use super::moveinfo::MoveClassTable;
 use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// Spring engine `BuildTime` is in "build ticks" at 30 fps.
@@ -113,13 +113,10 @@ fn max_dec(d: Option<&UnitDef>) -> f32 {
 }
 
 /// Per-kind values derived from the FBI + MOVEINFO once at load, so the
-/// per-unit-per-tick callers (movement, heat, pathing) don't re-resolve
+/// per-unit-per-tick callers (movement, pathing) don't re-resolve
 /// the movement class or re-parse degrees each frame.
 #[derive(Debug, Clone, Copy)]
 struct KindData {
-    /// MOVEINFO heat params of the kind's `MovementClass` (LIGHT
-    /// defaults when it has none).
-    heat: MoveClassParams,
     /// See [`UnitRegistry::move_def`].
     move_def: Option<MoveDefParams>,
     /// See [`UnitRegistry::max_slope_ratio`].
@@ -178,7 +175,6 @@ impl UnitRegistry {
         let kinds = defs
             .iter()
             .map(|d| KindData {
-                heat: move_classes.params_for(d.as_ref().map_or("", |d| &d.movement_class)),
                 move_def: d
                     .as_ref()
                     .filter(|d| !d.can_fly && !d.movement_class.is_empty())
@@ -286,13 +282,6 @@ impl UnitRegistry {
     /// full speed within `v²/2a` = 3.75 elmos.
     pub fn dec_rate(&self, kind: UnitKind) -> f32 {
         max_dec(self.def(kind))
-    }
-
-    /// Path-heat deposit rate (per second of walking) for this kind,
-    /// from its FBI `MovementClass` via MOVEINFO.TDF. Units without a
-    /// class use the upstream LIGHT defaults.
-    pub fn heat_produced(&self, kind: UnitKind) -> f32 {
-        self.kind(kind).heat.heat_produced
     }
 
     /// Maximum turn speed in radians per second. Spring's FBI `TurnRate`

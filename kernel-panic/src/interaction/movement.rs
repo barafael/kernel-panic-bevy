@@ -11,7 +11,7 @@ use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{
     AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, Dying, ForcedTarget,
 };
-use crate::units::components::{UnitStats, UnitType};
+use crate::units::components::UnitStats;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 
@@ -1114,6 +1114,7 @@ mod tests {
 mod cross_map_tests {
     use super::*;
     use crate::units::components::TeamId;
+    use crate::units::components::UnitType;
     use bevy::ecs::system::RunSystemOnce;
     use std::time::Duration;
 

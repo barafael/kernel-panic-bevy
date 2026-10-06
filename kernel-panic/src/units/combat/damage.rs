@@ -106,7 +106,7 @@ pub struct BurstFire {
 /// Marks a unit as infected by a Worm or Virus attack. If the unit dies
 /// while this component is present, a Virus spawns at the death location
 /// for the attacker's team.
-#[derive(Component)]
+#[derive(Component, Clone)]
 #[component(storage = "SparseSet")]
 pub struct Infected {
     /// Remaining seconds before the infection expires.
@@ -244,6 +244,34 @@ pub struct SplashHit {
     pos: Vec3,
     /// The distance modifier, reused for the impulse.
     falloff: f32,
+    /// Distance from the explosion to the victim's collision sphere.
+    dist: f32,
+}
+
+/// A splash hit the explosion front has not reached yet
+/// (`CGameHelper::waitingDamages`): victims further than
+/// `4 · explosionSpeed` take their damage `int(d / explosionSpeed) − 3`
+/// frames later, skipped if they died meanwhile.
+pub struct DelayedHit {
+    due: u64,
+    entity: Entity,
+    attacker: Entity,
+    /// Damage before the victim's own modifiers at apply time.
+    damage: f32,
+    paralyzer: bool,
+    paralyze_time: f32,
+    is_sigterm: bool,
+    infect: Option<Infected>,
+    impulse: Vec3,
+}
+
+#[derive(Resource, Default)]
+pub struct DelayedDamage(Vec<DelayedHit>);
+
+impl DelayedDamage {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Release follow-up shots for units in the middle of a burst.
@@ -359,7 +387,9 @@ fn apply_hit(
 /// filter the splash set so allies / the attacker don't eat stray AoE.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_damage(
+    time: Res<Time>,
     mut damage_queue: ResMut<DamageQueue>,
+    mut delayed: ResMut<DelayedDamage>,
     mut victims: HitQueries,
     attacker_q: Query<(&UnitType, &Faction, &TeamId)>,
     target_unit_q: Query<&UnitType>,
@@ -374,6 +404,56 @@ pub fn apply_damage(
     mut splash_hits: Local<Vec<SplashHit>>,
     mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
 ) {
+    let frame = super::sim_frame(&time);
+    // Explosion fronts that arrive this frame.
+    let mut due = Vec::new();
+    delayed.0.retain(|hit| {
+        if hit.due <= frame {
+            due.push((
+                hit.entity,
+                hit.attacker,
+                hit.damage,
+                hit.paralyzer,
+                hit.paralyze_time,
+                hit.is_sigterm,
+                hit.infect.clone(),
+                hit.impulse,
+            ));
+            false
+        } else {
+            true
+        }
+    });
+    for (entity, attacker, damage, paralyzer, paralyze_time, is_sigterm, infect, impulse) in due {
+        if target_unit_q.get(entity).is_err() {
+            continue;
+        }
+        let amount = damage
+            * byte_closed_damage_multiplier(
+                entity,
+                is_sigterm,
+                &target_unit_q,
+                &byte_open_q,
+                &stunned_q,
+            );
+        apply_hit(
+            entity,
+            attacker,
+            amount,
+            paralyzer,
+            paralyze_time,
+            &mut victims,
+            &mut commands,
+        );
+        victims.reset_idle(entity, &mut commands);
+        if impulse != Vec3::ZERO {
+            impulses.0.push((entity, impulse));
+        }
+        if let Some(infected) = infect {
+            commands.entity(entity).try_insert(infected);
+        }
+    }
+
     for pending in damage_queue.drain() {
         // Ids are interned through this same registry — infallible.
         let weapon_def = weapon_registry.by_id(pending.weapon);
@@ -401,9 +481,9 @@ pub fn apply_damage(
             .get(pending.attacker)
             .map(|(gtf, _)| gtf.translation())
             .ok();
-        let mut impulse = |entity: Entity, victim_pos: Vec3, falloff: f32| {
+        let impulse_of = |victim_pos: Vec3, falloff: f32| -> Vec3 {
             if weapon_def.impulse_factor == 0.0 {
-                return;
+                return Vec3::ZERO;
             }
             let scale = (weapon_def.impulse_factor
                 * falloff
@@ -419,7 +499,13 @@ pub fn apply_damage(
             {
                 dir = (victim_pos - from).normalize_or_zero();
             }
-            impulses.0.push((entity, dir * scale));
+            dir * scale
+        };
+        let mut impulse = |entity: Entity, victim_pos: Vec3, falloff: f32| {
+            let imp = impulse_of(victim_pos, falloff);
+            if imp != Vec3::ZERO {
+                impulses.0.push((entity, imp));
+            }
         };
         // Spray-angle miss gate. `spray_angle > 0` weapons perturbed
         // their `impact_pos` in combat_system; here we check whether the
@@ -523,16 +609,42 @@ pub fn apply_damage(
                     infect,
                     pos: candidate.pos,
                     falloff,
+                    dist: d,
                 });
             });
+            // `DoExplosionDamage`: the front reaches far victims later.
+            let exp_speed = weapon_def.explosion_speed();
             for SplashHit {
                 entity,
                 damage: splash,
                 infect,
                 pos: victim_pos,
                 falloff,
+                dist,
             } in splash_hits.drain(..)
             {
+                if dist >= exp_speed * 4.0 {
+                    let infected = match (infect, infection_window, attacker_info) {
+                        (true, Some(duration), Some((_, faction, team))) => Some(Infected {
+                            timer: duration,
+                            attacker_faction: *faction,
+                            attacker_team: team.0,
+                        }),
+                        _ => None,
+                    };
+                    delayed.0.push(DelayedHit {
+                        due: frame + ((dist / exp_speed) as u64).saturating_sub(3),
+                        entity,
+                        attacker: pending.attacker,
+                        damage: splash,
+                        paralyzer,
+                        paralyze_time,
+                        is_sigterm,
+                        infect: infected,
+                        impulse: impulse_of(victim_pos, falloff),
+                    });
+                    continue;
+                }
                 let amount = splash
                     * byte_closed_damage_multiplier(
                         entity,
@@ -694,6 +806,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<Time>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
@@ -770,6 +884,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<Time>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
@@ -815,6 +931,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<Time>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
@@ -885,6 +1003,8 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<Time>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<SpatialIndex>()
             .insert_resource(UnitRegistry::empty());
@@ -947,6 +1067,8 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<Time>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .init_resource::<SpatialIndex>()
@@ -986,6 +1108,8 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<Time>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<SpatialIndex>()
             .insert_resource(UnitRegistry::empty());
@@ -999,6 +1123,8 @@ mod tests {
                 },
                 area_of_effect: 210.0,
                 edge_effectiveness: 1.0,
+                // `explosionspeed=65535`: the front is instant.
+                explosion_speed_raw: 65535.0,
                 avoid_friendly: true,
                 ..Default::default()
             },
