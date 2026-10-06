@@ -627,7 +627,7 @@ fn bot_trace(bot: Res<Bot>, units: Query<UnitView>) {
             p.x,
             p.y,
             p.z,
-            m.heading.to_degrees(),
+            m.heading.to_radians().to_degrees(),
             m.current_speed * GAME_SPEED,
             m.turn_speed,
             m.curr_wp_dist,

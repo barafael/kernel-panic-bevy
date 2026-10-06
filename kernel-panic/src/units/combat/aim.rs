@@ -430,11 +430,12 @@ pub fn aim_weapons_system(
         // heading every tick, so the script's `set HEADING` turns that
         // — a `look_to` on the transform alone was undone next tick.
         if let Some(mut mover) = mover {
-            let wanted = crate::sim::heading_of(desired_forward.xz());
-            let delta = crate::sim::wrap_angle(wanted - mover.heading);
-            let step = delta.clamp(-max_turn, max_turn);
-            if step != 0.0 {
-                mover.heading = crate::sim::wrap_angle(mover.heading + step);
+            let wanted = crate::sim::Heading::from_vector(desired_forward.x, desired_forward.z);
+            let delta = wanted.wrapping_sub(mover.heading) as f32;
+            let max_units = max_turn / crate::sim::SHORT_ANGLE_TO_RAD;
+            let step = delta.clamp(-max_units, max_units) as i32 as i16;
+            if step != 0 {
+                mover.heading = mover.heading.wrapping_add(step);
             }
             let up = transform.up().as_vec3();
             let rotation = crate::interaction::ground_move::attitude(mover.heading, up);

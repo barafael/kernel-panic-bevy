@@ -7,7 +7,8 @@
 //!
 //! Everything here runs once per 30 Hz sim frame and works in Spring's
 //! per-frame units: speeds in elmos/frame, accelerations in
-//! elmos/frame², turn rates in radians/frame. [`UnitStats`] keeps speed
+//! elmos/frame², headings and turn rates in 16-bit heading units
+//! ([`Heading`], 65536 per turn) per frame. [`UnitStats`] keeps speed
 //! and turn rate per second for the rest of the port (acceleration is
 //! already per frame); [`FrameStats`] converts.
 //!
@@ -37,8 +38,8 @@ use super::movement::{
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
 use crate::sim::{
-    GAME_SPEED, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SQUARE_SIZE, dir_of, dir3_of, heading_of,
-    wrap_angle,
+    GAME_SPEED, Heading, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SPRING_CIRCLE_DIVS,
+    SPRING_MAX_HEADING, SQUARE_SIZE,
 };
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AimTarget, DeployState, Deployable, Dying, Stunned};
@@ -56,8 +57,9 @@ pub const MAX_IDLING_SLOWUPDATES: u32 = 16;
 /// (ModInfo.cpp:133-134).
 pub const REPATH_DELAY_FRAMES: u32 = 60;
 pub const REPATH_MAX_RATE_FRAMES: u32 = 150;
-/// `SPRING_MAX_HEADING` (32768 = half a turn) in radians.
-const MAX_HEADING: f32 = PI;
+/// `SPRING_MAX_HEADING` (half a turn) as the float the engine compares
+/// idle counts against.
+const MAX_HEADING: f32 = SPRING_MAX_HEADING as f32;
 /// Turn inertia: `turnAccel = turnRate · 0.333` for non-ships
 /// (GroundMoveType.cpp:516).
 const TURN_ACCEL_FRACTION: f32 = 0.333;
@@ -360,9 +362,9 @@ pub struct GroundMover {
     pub upright: bool,
 
     // --- dynamic state ---
-    /// `owner->heading`, radians; facing `(sin h, 0, cos h)`.
-    pub heading: f32,
-    /// `turnSpeed` (rad/frame) — turn inertia.
+    /// `owner->heading`: 16-bit, 0 faces +Z.
+    pub heading: Heading,
+    /// `turnSpeed` (heading units/frame) — turn inertia.
     pub turn_speed: f32,
     /// `currentSpeed` (elmos/frame, ≥ 0).
     pub current_speed: f32,
@@ -426,7 +428,7 @@ impl GroundMover {
             mass: registry.mass(kind),
             crush_strength: md.map_or(0.0, |m| m.crush_strength),
             upright,
-            heading: 0.0,
+            heading: Heading::default(),
             turn_speed: 0.0,
             current_speed: 0.0,
             progress: Progress::Done,
@@ -468,16 +470,16 @@ impl GroundMover {
     pub fn seeded(mut self, entity: Entity, tf: &Transform) -> Self {
         let f = tf.forward().as_vec3();
         if f.xz().length_squared() > 1e-6 {
-            self.heading = heading_of(f.xz());
+            self.heading = Heading::from_vector(f.x, f.z);
         }
         self.old_pos = tf.translation;
         self.frame = entity.index_u32() % SLOW_UPDATE_RATE;
         self
     }
 
-    /// `flatFrontDir`.
+    /// `flatFrontDir` (`GetVectorFromHeading`).
     pub fn front(&self) -> Vec2 {
-        dir_of(self.heading)
+        self.heading.to_vector()
     }
 
     /// `rightdir` (XZ): `frontdir × updir`, i.e. facing +Z → −X.
@@ -581,7 +583,8 @@ pub struct FrameStats {
     /// `accRate` / `decRate` (elmos/frame²).
     pub acc: f32,
     pub dec: f32,
-    /// `turnRate` (rad/frame).
+    /// `turnRate`: heading units per frame, `clamp(FBI TurnRate, 1,
+    /// 32767)` (GroundMoveType.cpp:515).
     pub turn_rate: f32,
 }
 
@@ -592,19 +595,17 @@ impl FrameStats {
             // `accRate = max(0.01, maxAcc)` (GroundMoveType.cpp:518-519).
             acc: stats.acc_rate.max(0.01),
             dec: stats.dec_rate.max(0.01),
-            // `turnRate = clamp(ud->turnRate, 1, 32767)` heading units;
-            // a TurnRate of 0 in the FBI means "snap" in the port.
-            turn_rate: if stats.turn_rate > 0.0 {
-                (stats.turn_rate / GAME_SPEED).clamp(SHORT_ANGLE_TO_RAD, PI)
-            } else {
-                PI
-            },
+            // `UnitStats` keeps the FBI value as rad/s; back to units
+            // per frame (the FBI values are integers, so `round` is exact).
+            turn_rate: (stats.turn_rate / (SHORT_ANGLE_TO_RAD * GAME_SPEED))
+                .round()
+                .clamp(1.0, 32767.0),
         }
     }
 
     /// Frames for a full revolution (`SPRING_CIRCLE_DIVS / turnRate`).
     pub fn frames_to_turn(&self) -> f32 {
-        TAU / self.turn_rate
+        SPRING_CIRCLE_DIVS as f32 / self.turn_rate
     }
 }
 
@@ -634,24 +635,27 @@ pub fn delta_speed(target: f32, current: f32, acc: f32, dec: f32) -> f32 {
 /// `GMTDefaultPathController::GetDeltaHeading` with rotational inertia
 /// (IPathController.cpp:66, `MODEL_TURN_INERTIA`): the turn speed
 /// changes by at most `turn_accel` per frame toward the wanted heading,
-/// braking early enough not to overshoot, clamped to `max_turn`.
-/// Returns this frame's heading change.
+/// braking early enough not to overshoot, clamped to `max_turn`. All in
+/// heading units; the engine's `short` casts are kept, so the heading
+/// change is a whole number of units. Returns this frame's change.
 pub fn delta_heading(
-    wanted: f32,
-    heading: f32,
+    wanted: Heading,
+    heading: Heading,
     max_turn: f32,
     turn_accel: f32,
     turn_speed: &mut f32,
-) -> f32 {
+) -> i16 {
     let cur = *turn_speed;
     let braking = cur.abs() >= turn_accel;
     let brake_dist = braking_distance(cur.abs(), turn_accel);
-    let stop_heading = heading + if braking { brake_dist * sign(cur) } else { 0.0 };
-    let cur_delta = wrap_angle(wanted - stop_heading);
+    // `short stopTurnHeading = oldHeading + brakeDist · Sign · factor`.
+    let lookahead = if braking { brake_dist * sign(cur) } else { 0.0 };
+    let stop_heading = heading.wrapping_add(lookahead as i32 as i16);
+    let cur_delta = wanted.wrapping_sub(stop_heading) as f32;
     let step = sign(cur_delta) * cur_delta.abs().min(turn_accel);
     let next = if braking { cur + step } else { step };
     *turn_speed = next.clamp(-max_turn, max_turn);
-    *turn_speed
+    *turn_speed as i32 as i16
 }
 
 /// Everything `ChangeSpeed` (GroundMoveType.cpp:1283) needs beyond the
@@ -659,7 +663,7 @@ pub fn delta_heading(
 pub struct SpeedInputs {
     pub pos: Vec2,
     /// `wantedHeading` of this frame's `ChangeHeading`.
-    pub wanted_heading: f32,
+    pub wanted_heading: Heading,
     /// `UNIT_CMD_QUE_SIZE(owner) <= 1`: nothing queued behind the order.
     pub last_command: bool,
     /// Terrain speed mod at the unit's square in its facing
@@ -683,16 +687,17 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
         let start_braking = inp.last_command && cur_goal_dist_sq <= min_goal_dist_sq;
         let mut max_speed_to_make_turn = f32::INFINITY;
 
-        let turn_delta = wrap_angle(m.heading - heading_of(m.waypoint_dir));
-        if turn_delta != 0.0 {
+        let turn_delta = m
+            .heading
+            .wrapping_sub(Heading::from_vector(m.waypoint_dir.x, m.waypoint_dir.y));
+        if turn_delta != 0 {
             // Remaining turn vs the per-frame turn, in degrees: the unit
             // slows to `maxSpeed · clamp(maxTurn/reqTurn, 0.1, 1)`
             // (never below 10%), so it arcs through turns instead of
             // pivoting then lurching.
-            let req_turn = wrap_angle(m.heading - inp.wanted_heading)
-                .abs()
-                .to_degrees();
-            let max_turn = fs.turn_rate.to_degrees();
+            let req_turn =
+                (180.0 * m.heading.wrapping_sub(inp.wanted_heading) as f32 / MAX_HEADING).abs();
+            let max_turn = fs.turn_rate / SPRING_CIRCLE_DIVS as f32 * 360.0;
             let mut turn_mod_speed = fs.max_speed;
             if req_turn != 0.0 {
                 turn_mod_speed *= (max_turn / req_turn).clamp(0.1, 1.0);
@@ -711,8 +716,9 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
         if m.limit_speed_for_turning > 0 {
             // Deflected off a structure: slow enough to make the turn
             // back to the waypoint without hitting it again.
-            let offset = wrap_angle(heading_of(m.waypoint_dir) - m.heading).abs();
-            let frames = (offset / fs.turn_rate.max(1e-4)).max(1e-4);
+            let offset = Heading::from_vector(m.waypoint_dir.x, m.waypoint_dir.y)
+                .wrapping_sub(m.heading) as f32;
+            let frames = (offset / fs.turn_rate).abs().max(1e-4);
             max_speed_to_make_turn = (m.curr_wp_dist / frames * 0.95).max(0.01);
         }
         // GroundMoveType.cpp:1397 — `wantedSpeed *= max(groundSpeedMod,
@@ -780,7 +786,7 @@ pub fn update_pos(
     pos: Vec2,
     step: Vec2,
     right: Vec2,
-    facing: Vec2,
+    facing: u32,
     position_stuck: bool,
 ) -> Vec2 {
     let sq = |p: Vec2| {
@@ -839,7 +845,7 @@ pub fn update_pos(
         // Axis-aligned slide so the unit cannot clip a corner into a
         // trap: along the axis perpendicular to the facing
         // (`vecs[(facing - 1) % 2]` — facing east/west slides along Z).
-        let along_z = facing.x.abs() > facing.y.abs();
+        let along_z = facing % 2 == 1;
         let displacement = if along_z { moved.y } else { moved.x };
         let side = sign(displacement);
         let amount = (displacement * side).min(speed) * side;
@@ -969,15 +975,16 @@ pub fn step_mover(
         }
         let dir = m.last_avoidance_dir;
         if dir.length_squared() > 1e-8 {
-            wanted_heading = heading_of(dir);
+            wanted_heading = Heading::from_vector(dir.x, dir.y);
         }
     } else {
         m.last_avoidance_dir = m.front();
     }
 
     // --- 2. ChangeHeading --- (not called at all while stopping or
-    // stunned, so the turn speed keeps its last value, as in the engine)
-    if steering {
+    // stunned, and a no-op when already on the wanted heading, so the
+    // turn speed keeps its last value in both cases, as in the engine)
+    if steering && m.heading != wanted_heading {
         let d = delta_heading(
             wanted_heading,
             m.heading,
@@ -985,7 +992,7 @@ pub fn step_mover(
             fs.turn_rate * TURN_ACCEL_FRACTION,
             &mut m.turn_speed,
         );
-        m.heading = wrap_angle(m.heading + d);
+        m.heading = m.heading.wrapping_add(d);
     }
 
     // --- 3. ChangeSpeed + UpdateOwnerPos ---
@@ -1008,7 +1015,14 @@ pub fn step_mover(
     let request = m.velocity.xz();
     let mut step = Vec2::ZERO;
     if request.length_squared() > 0.0 {
-        let gated = update_pos(map, pos2, request, m.right(), m.front(), m.position_stuck);
+        let gated = update_pos(
+            map,
+            pos2,
+            request,
+            m.right(),
+            m.heading.facing(),
+            m.position_stuck,
+        );
         if gated != request {
             // `UpdatePos` bent the move: get a new path if this persists.
             m.re_request_path(false);
@@ -1654,9 +1668,9 @@ fn up_dir(m: &GroundMover, heightmap: Option<&Heightmap>, pos: Vec3) -> Vec3 {
 
 /// `CSolidObject::UpdateDirVectors` (SolidObject.cpp:435): the flat
 /// heading rotated by the shortest arc from straight up to `up`.
-pub fn attitude(heading: f32, up: Vec3) -> Quat {
+pub fn attitude(heading: Heading, up: Vec3) -> Quat {
     let yaw = Transform::default()
-        .looking_to(dir3_of(heading), Vec3::Y)
+        .looking_to(heading.to_vector3(), Vec3::Y)
         .rotation;
     Quat::from_rotation_arc(Vec3::Y, up.normalize_or(Vec3::Y)) * yaw
 }
@@ -1664,9 +1678,10 @@ pub fn attitude(heading: f32, up: Vec3) -> Quat {
 /// Squared `CMobileCAI::cancelDistance` (MobileCAI.cpp:1316): the
 /// static turn radius (`AMoveType::CalcStaticTurnRadius`, MoveType.cpp:
 /// 125 — `maxSpeed · (65536/turnRate) / 2π`) plus two squares, squared
-/// and clamped to `[1024, 2048]` (32–45 elmos). Per-frame inputs.
+/// and clamped to `[1024, 2048]` (32–45 elmos). Per-frame inputs,
+/// `turn_rate` in heading units.
 pub fn cancel_distance_sq(max_speed: f32, turn_rate: f32) -> f32 {
-    let turn_radius = max_speed * (TAU / turn_rate.max(1e-4)) / TAU;
+    let turn_radius = max_speed * (SPRING_CIRCLE_DIVS as f32 / turn_rate.max(1.0)) / TAU;
     (turn_radius + 2.0 * SQUARE_SIZE)
         .powi(2)
         .clamp(1024.0, 2048.0)
@@ -1995,7 +2010,14 @@ pub fn ground_collision_system(
         let try_force = force_static + force_moving;
         let mut applied = Vec2::ZERO;
         if try_force != Vec2::ZERO {
-            applied = update_pos(&map, pos, try_force, right, front, m.position_stuck);
+            applied = update_pos(
+                &map,
+                pos,
+                try_force,
+                right,
+                m.heading.facing(),
+                m.position_stuck,
+            );
             if applied == Vec2::ZERO && m.position_stuck {
                 applied = force_static;
             }
@@ -2326,7 +2348,9 @@ mod tests {
         for _ in 0..200 {
             h.step();
             let m = h.world.get::<GroundMover>(e).unwrap();
-            let err = wrap_angle(m.heading - heading_of(Vec2::new(-1.0, 0.0))).abs();
+            let err = (m.heading.wrapping_sub(Heading::from_vector(-1.0, 0.0)) as f32
+                * SHORT_ANGLE_TO_RAD)
+                .abs();
             if err < 0.05 {
                 break;
             }
@@ -2334,8 +2358,8 @@ mod tests {
             min_speed = min_speed.min(m.current_speed);
         }
         // bit.fbi TurnRate=480 heading units/frame.
-        assert!((fs.turn_rate - 480.0 / 65536.0 * TAU).abs() < 1e-5);
-        let expected = PI / fs.turn_rate;
+        assert_eq!(fs.turn_rate, 480.0);
+        let expected = MAX_HEADING / fs.turn_rate;
         assert!(
             (frames_turning as f32) > expected * 0.9 && (frames_turning as f32) < expected * 1.6,
             "half turn takes ~{expected:.0} frames, took {frames_turning}"
@@ -2372,7 +2396,7 @@ mod tests {
             };
             let mut m = GroundMover::new(UnitKind::Bit, &reg, &stats);
             m.current_speed = fs.max_speed;
-            m.heading = heading_of(Vec2::X);
+            m.heading = Heading::from_vector(1.0, 0.0);
             let pos = Vec3::new(100.0, 0.0, 200.0);
             let goal = Vec3::new(300.0, 0.0, 100.0);
             m.start_moving(goal.xz(), MOVE_GOAL_RADIUS, pos, false);
@@ -2482,7 +2506,7 @@ mod tests {
         let pos = Vec2::new(23.0, 20.0);
         let step = Vec2::new(2.0, 0.0);
         let right = Vec2::new(0.0, 1.0);
-        let out = update_pos(&map, pos, step, right, Vec2::X, false);
+        let out = update_pos(&map, pos, step, right, 1, false);
         assert_ne!(out, Vec2::ZERO, "slides instead of freezing");
         let end = pos + out;
         assert!(map.square_open(end));
@@ -2506,7 +2530,14 @@ mod tests {
         };
         let d = Vec2::new(2.0, 2.0);
         assert_eq!(
-            update_pos(&map, Vec2::new(23.0, 23.0), d, right, d.normalize(), false),
+            update_pos(
+                &map,
+                Vec2::new(23.0, 23.0),
+                d,
+                right,
+                Heading::from_vector(d.x, d.y).facing(),
+                false
+            ),
             Vec2::ZERO
         );
     }
@@ -2715,7 +2746,7 @@ mod tests {
         assert!(requested, "re-requested a path before giving up");
         let fs = bit_frame_stats();
         assert!(
-            ticks as f32 > PI / fs.turn_rate,
+            ticks as f32 > MAX_HEADING / fs.turn_rate,
             "not before the idle limit: {ticks}"
         );
         assert!(h.pos(e).xz().distance(start.xz()) < 16.0);
@@ -2847,7 +2878,7 @@ mod tests {
         let b = h.spawn(UnitKind::Bit, 1, Vec3::new(1000.0, 0.0, 600.0));
         h.step();
         // Face each other first.
-        h.world.get_mut::<GroundMover>(b).unwrap().heading = heading_of(-Vec2::X);
+        h.world.get_mut::<GroundMover>(b).unwrap().heading = Heading::from_vector(-1.0, 0.0);
         h.world
             .entity_mut(a)
             .insert(MoveTarget(Vec3::new(1000.0, 0.0, 600.0)));

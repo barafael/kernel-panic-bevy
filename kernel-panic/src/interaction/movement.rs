@@ -1043,8 +1043,12 @@ fn walk_dashes(points: &[Vec3], heightmap: Option<&Heightmap>, mut emit: impl Fn
 #[cfg(test)]
 mod tilt_tests {
     use super::super::ground_move::attitude;
-    use crate::sim::heading_of;
+    use crate::sim::Heading;
     use bevy::prelude::*;
+
+    fn heading_of(v: Vec2) -> Heading {
+        Heading::from_vector(v.x, v.y)
+    }
 
     const EPS: f32 = 1e-4;
 

@@ -860,9 +860,10 @@ fn aim_gates_pass(
         // projected to the ground drifts from it by several degrees on
         // a slope, which kept Pointers on ramps from ever passing.
         let error = match pieces.mover.get(entity) {
-            Ok(m) => {
-                crate::sim::wrap_angle(crate::sim::heading_of(to_target_xz.xz()) - m.heading).abs()
-            }
+            Ok(m) => (crate::sim::Heading::from_vector(to_target_xz.x, to_target_xz.z)
+                .wrapping_sub(m.heading) as f32
+                * crate::sim::SHORT_ANGLE_TO_RAD)
+                .abs(),
             Err(_) => {
                 let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
                 forward_xz
