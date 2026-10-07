@@ -255,6 +255,37 @@ impl Heightmap {
     /// small positive value to tolerate the shooter standing on a crest
     /// without self-blocking. Ballistic arcs (non-zero trajectory height)
     /// should skip this check entirely.
+    /// Where the segment `from → to` first dips below the terrain, if it
+    /// does (`TraceRay::TraceRay` against the ground, interpolated
+    /// between samples). The endpoints themselves are skipped, as in
+    /// [`Self::has_line_of_sight`].
+    pub fn ground_hit(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
+        let delta = to - from;
+        let horizontal = (delta.x * delta.x + delta.z * delta.z).sqrt();
+        let step_count = ((horizontal / self.square_size).ceil() as usize)
+            .clamp(MIN_LOS_SAMPLES, MAX_LOS_SAMPLES);
+        let mut prev_clearance = from.y - self.sample(from.x, from.z);
+        let mut prev_t = 0.0;
+        for i in 1..step_count {
+            let t = i as f32 / step_count as f32;
+            let p = from + delta * t;
+            let clearance = p.y - self.sample(p.x, p.z);
+            if clearance < 0.0 {
+                let span = prev_clearance - clearance;
+                let frac = if span > 1e-6 {
+                    (prev_clearance / span).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                return Some(from + delta * (prev_t + (t - prev_t) * frac));
+            }
+            prev_clearance = clearance;
+            prev_t = t;
+        }
+        None
+    }
+
+    #[cfg(test)]
     pub fn has_line_of_sight(&self, from: Vec3, to: Vec3, margin: f32) -> bool {
         let dx = to.x - from.x;
         let dz = to.z - from.z;

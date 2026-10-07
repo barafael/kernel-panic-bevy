@@ -1060,6 +1060,7 @@ mod tests {
                 UnitStats {
                     radius: 16.0,
                     hit_radius: 20.0,
+                    mid_y: 0.0,
                     speed: 30.0,
                     acc_rate: 0.01,
                     dec_rate: 0.03,

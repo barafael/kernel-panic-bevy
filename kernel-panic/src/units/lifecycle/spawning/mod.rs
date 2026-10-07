@@ -22,7 +22,7 @@ use spring_map::smd_parser::MapInfo;
 use super::production::default_production;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{
-    S3OModelCache, piece_layout, selection_sphere, unit_material, unit_radius,
+    S3OModelCache, piece_layout, selection_sphere, unit_material, unit_mid_y, unit_radius,
 };
 use crate::units::combat::Deployable;
 use crate::units::components::{
@@ -242,6 +242,7 @@ pub fn spawn_unit(
     let model_name = unit_registry.model(kind);
     let material = unit_material(kind, faction, materials, images, model_cache, model_name);
     let radius = unit_radius(kind, model_cache, unit_registry);
+    let mid_y = unit_mid_y(kind, model_cache, unit_registry);
     let selection_sphere = selection_sphere(radius, meshes, model_cache);
     let layout = piece_layout(model_name, meshes, model_cache);
 
@@ -274,7 +275,7 @@ pub fn spawn_unit(
             faction,
             TeamId(team),
             Health::full(unit_registry.max_health(kind)),
-            UnitStats::from_registry(kind, unit_registry, radius),
+            UnitStats::from_registry(kind, unit_registry, radius, mid_y),
             transform,
             Visibility::default(),
         ))
@@ -297,7 +298,7 @@ pub fn spawn_unit(
         // the existing `hit_radius`; future per-unit overrides
         // (Cylinder for tall thin units, AABB for boxes) only need
         // to update this classifier.
-        crate::units::combat::CollisionVolume::from_s3o_radius(radius),
+        crate::units::combat::CollisionVolume::from_s3o(radius, mid_y),
     ));
 
     // Cache the weapon-id binding once so the per-frame combat hot

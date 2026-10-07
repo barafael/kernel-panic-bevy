@@ -81,11 +81,10 @@ fn categories_intersect(tokens: &str, categories: &str) -> bool {
     })
 }
 
-/// [`UnitRegistry::auto_target_allowed`] for one attacker FBI against a
+/// [`UnitRegistry::bad_target`] for one attacker FBI against a
 /// candidate's `Category` list.
-fn auto_target_gate(attacker: &UnitDef, categories: &str) -> bool {
-    manual_target_gate(attacker, categories)
-        && !categories_intersect(&attacker.bad_target_category1, categories)
+fn bad_target_gate(attacker: &UnitDef, categories: &str) -> bool {
+    categories_intersect(&attacker.bad_target_category1, categories)
 }
 
 /// [`UnitRegistry::can_attack`] for one attacker FBI against a
@@ -136,7 +135,7 @@ pub struct UnitRegistry {
     /// Derived per-kind data, parallel to `defs`.
     kinds: Box<[KindData]>,
     /// [`Self::auto_target_allowed`], row-major `[attacker][candidate]`.
-    auto_target: Box<[bool]>,
+    bad_target: Box<[bool]>,
     /// [`Self::can_attack`], row-major `[attacker][candidate]`.
     manual_target: Box<[bool]>,
     /// See [`Self::hexfarm_medians`] — over *every* loaded FBI, not just
@@ -202,7 +201,7 @@ impl UnitRegistry {
                 .collect()
         };
         Self {
-            auto_target: pairs(auto_target_gate),
+            bad_target: pairs(bad_target_gate),
             manual_target: pairs(manual_target_gate),
             defs,
             kinds,
@@ -314,18 +313,13 @@ impl UnitRegistry {
         })
     }
 
-    /// Auto-target gate for the primary weapon, mirroring upstream FBI
-    /// `OnlyTargetCategory1` / `BadTargetCategory1` against the
-    /// candidate's `Category` list:
-    ///
-    /// - **OnlyTarget** — when non-empty, the weapon may only acquire
-    ///   candidates whose categories share at least one token. `VOID`
-    ///   (Byte's mine launcher, all build lasers) therefore disables
-    ///   auto-targeting entirely.
-    /// - **BadTarget** — candidates sharing a token are skipped by
-    ///   auto-acquisition even though they remain attackable by order
-    ///   (`BadTargetCategory1=FACTORY` on Bit/Byte/Packet: they ignore
-    ///   buildings until the player says otherwise).
+    /// Auto-target gate for the primary weapon: upstream FBI
+    /// `OnlyTargetCategory1` against the candidate's `Category` list.
+    /// When non-empty, the weapon may only acquire candidates whose
+    /// categories share at least one token; `VOID` (Byte's mine
+    /// launcher, all build lasers) therefore disables auto-targeting
+    /// entirely. The same gate applies to explicit orders
+    /// ([`Self::can_attack`]).
     ///
     /// Missing FBI entries (tests with an empty registry, unnamed kinds)
     /// leave the weapon unfiltered, matching a unit that declares no
@@ -333,7 +327,17 @@ impl UnitRegistry {
     ///
     /// Precomputed per kind pair at load: an array index.
     pub fn auto_target_allowed(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
-        self.auto_target[Self::pair(attacker, candidate)]
+        self.manual_target[Self::pair(attacker, candidate)]
+    }
+
+    /// Upstream FBI `BadTargetCategory1`: the candidate is a *bad*
+    /// target for the attacker's primary weapon. The engine does not
+    /// skip such targets, it multiplies their pick priority by 100
+    /// (`CGameHelper::GenerateWeaponTargets`), so a Pointer still shells
+    /// a lone Bit (`FAST`) and a Bit still shoots a Socket (`FACTORY`)
+    /// when nothing better is in range.
+    pub fn bad_target(&self, attacker: UnitKind, candidate: UnitKind) -> bool {
+        self.bad_target[Self::pair(attacker, candidate)]
     }
 
     /// Manual-order gate for the primary weapon. `OnlyTargetCategory1`
@@ -785,14 +789,17 @@ mod tests {
         }
     }
 
-    /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): Bits skip
-    /// buildings during auto-acquisition.
+    /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): a Socket stays
+    /// auto-targetable for a Bit — the engine demotes bad candidates
+    /// behind ordinary ones rather than skipping them — while a Bit
+    /// remains an ordinary (non-bad) auto-target for another Bit.
     #[test]
-    fn bit_auto_target_ignores_factories() {
+    fn bit_ranks_factories_as_bad_targets() {
         let reg = target_registry();
-        assert!(!reg.auto_target_allowed(UnitKind::Bit, UnitKind::Socket));
-        // A Bit remains a perfectly fine auto-target for another Bit.
+        assert!(reg.auto_target_allowed(UnitKind::Bit, UnitKind::Socket));
+        assert!(reg.bad_target(UnitKind::Bit, UnitKind::Socket));
         assert!(reg.auto_target_allowed(UnitKind::Bit, UnitKind::Bit));
+        assert!(!reg.bad_target(UnitKind::Bit, UnitKind::Bit));
     }
 
     /// Upstream `OnlyTargetCategory1=UNIT` (dos.fbi): the DOS beam can
@@ -802,14 +809,16 @@ mod tests {
         let reg = target_registry();
         assert!(!reg.can_attack(UnitKind::Dos, UnitKind::Socket));
         assert!(reg.can_attack(UnitKind::Dos, UnitKind::Bit));
-        // BadTarget=FAST (dos.fbi) only affects auto-acquisition: the
-        // DOS won't *chase* Bits on its own, but a manual order sticks.
-        assert!(!reg.auto_target_allowed(UnitKind::Dos, UnitKind::Bit));
+        // BadTarget=FAST (dos.fbi) neither blocks manual orders nor
+        // auto-acquisition: Bits are picked, just ranked behind any
+        // non-FAST candidate in range.
+        assert!(reg.auto_target_allowed(UnitKind::Dos, UnitKind::Bit));
         assert!(reg.can_attack(UnitKind::Dos, UnitKind::Bit));
+        assert!(reg.bad_target(UnitKind::Dos, UnitKind::Bit));
     }
 
-    /// `BadTargetCategory1` blocks auto-acquisition but NOT manual
-    /// orders (bit.fbi vs a Socket).
+    /// `BadTargetCategory1` demotes a candidate in auto-acquisition but
+    /// never blocks a manual order (bit.fbi vs a Socket).
     #[test]
     fn bad_target_still_allows_manual_orders() {
         let reg = target_registry();

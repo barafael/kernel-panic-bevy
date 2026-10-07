@@ -41,7 +41,7 @@ use crate::sim::{
     SPRING_CIRCLE_DIVS, SPRING_MAX_HEADING, SQUARE_SIZE,
 };
 use crate::terrain::heightmap::Heightmap;
-use crate::units::combat::{AimTarget, DeployState, Deployable, Dying, Stunned};
+use crate::units::combat::{AimTarget, Dying, Stunned};
 use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -1529,7 +1529,6 @@ pub struct MoverData {
     target: Option<&'static MoveTarget>,
     path: Option<&'static mut MovePath>,
     queue: Option<&'static mut CommandQueue>,
-    deployable: Option<&'static Deployable>,
     stunned: Has<Stunned>,
     boost: Option<&'static crate::units::mechanics::network_buffer::SpeedBoost>,
     attack_move: Has<AttackMoveActive>,
@@ -1861,9 +1860,10 @@ pub fn movement_system(
             }
         }
 
-        let hold = u.stunned
-            || u.deployable.is_some_and(|d| d.state != DeployState::Closed)
-            || (u.attack_move && u.aim);
+        // pointer.bos never limits speed while folding (its `set
+        // MAX_SPEED` is commented out): a deployed Pointer drives off at
+        // once and closes on the way.
+        let hold = u.stunned || (u.attack_move && u.aim);
         let order = OrderView {
             has_move_cmd: !u.pending_build,
             last_command: !u.queue.as_deref().is_some_and(|q| !q.commands.is_empty()),
@@ -2783,7 +2783,7 @@ mod tests {
 
     fn bit_frame_stats() -> FrameStats {
         let reg = UnitRegistry::load();
-        let stats = UnitStats::from_registry(UnitKind::Bit, &reg, 20.0);
+        let stats = UnitStats::from_registry(UnitKind::Bit, &reg, 20.0, 0.0);
         FrameStats::new(&stats, stats.speed)
     }
 
@@ -2927,7 +2927,7 @@ mod tests {
     fn waypoint_skipped_only_with_line_of_sight() {
         let fs = bit_frame_stats();
         let reg = UnitRegistry::load();
-        let stats = UnitStats::from_registry(UnitKind::Bit, &reg, 20.0);
+        let stats = UnitStats::from_registry(UnitKind::Bit, &reg, 20.0, 0.0);
         let run = |block: bool| {
             let mut speed_map = spring_pathfinding::SpeedMap::uniform(64, 64, 1.0);
             if block {

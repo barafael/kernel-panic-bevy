@@ -438,6 +438,47 @@ impl WeaponDef {
         let gd = (self.damage.default / 20.0).max(30.0);
         (8.0 + 2.5 * gd) / (9.0 + 0.7 * gd.sqrt()) * 0.5
     }
+
+    /// `projectilespeed`: `weaponVelocity · INV_GAME_SPEED`, elmos per
+    /// sim frame (`WeaponDef.cpp:76`, minimum 0.01 elmos/s).
+    pub fn projectile_speed(&self) -> f32 {
+        self.weapon_velocity.max(0.01) * (1.0 / 30.0)
+    }
+
+    /// The range the weapon actually fires at. A `LaserCannon` rounds
+    /// its range *down* to a whole multiple of the projectile speed
+    /// (`CLaserCannon::UpdateRange`): the bolt lives `ttl` frames and
+    /// damages only where it can reach. MegaBeam: 512 → 14 · 34.13 =
+    /// 477.9 elmos.
+    pub fn effective_range(&self) -> f32 {
+        if self.category() == WeaponCategory::LaserCannon && self.weapon_velocity > 0.0 {
+            let speed = self.projectile_speed();
+            (self.range / speed).floor().max(1.0) * speed
+        } else {
+            self.range
+        }
+    }
+
+    /// `sprayAngle` as the engine stores it: `sin(angle · π / 0xafff)`
+    /// (`AccuracyToSin`, `WeaponDef.cpp:130`), the magnitude of the
+    /// random unit-ball vector added to each shot's direction.
+    pub fn spray_sin(&self) -> f32 {
+        if self.spray_angle <= 0.0 {
+            return 0.0;
+        }
+        (self.spray_angle * std::f32::consts::PI / 0xafff as f32).sin()
+    }
+
+    /// How far a `LaserCannon` bolt flies before it fades without
+    /// exploding (`CLaserCannon::FireImpl` + `CLaserProjectile::Update`):
+    /// `ttl = min(ceil(dist / speed), floor(range / speed) - 1)` frames
+    /// of collision checks, covering `(ttl + 1) · speed` elmos.
+    pub fn laser_travel(&self, dist: f32) -> f32 {
+        let speed = self.projectile_speed();
+        let ttl_req = (dist / speed).ceil();
+        let ttl_max = (self.range / speed).floor() - 1.0;
+        (ttl_req.min(ttl_max).max(0.0) + 1.0) * speed
+    }
 }
 
 impl WeaponDef {

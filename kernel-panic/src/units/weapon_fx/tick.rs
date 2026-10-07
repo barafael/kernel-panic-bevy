@@ -207,7 +207,7 @@ pub(super) fn tick_weapon_fx(
         ) {
             trigger_delayed_hit(
                 entity,
-                None,
+                HitWho::Intended,
                 impact_pos,
                 &delayed_hits,
                 &weapon_registry,
@@ -228,7 +228,7 @@ pub(super) fn tick_weapon_fx(
         {
             trigger_delayed_hit(
                 entity,
-                Some(hit_entity),
+                HitWho::Unit(hit_entity),
                 impact_pos,
                 &delayed_hits,
                 &weapon_registry,
@@ -236,11 +236,15 @@ pub(super) fn tick_weapon_fx(
                 &mut pending_explosions,
                 &mut commands,
             );
-        } else if lead_raw >= bolt.total_distance {
-            let impact_pos = bolt.origin + bolt.direction * bolt.total_distance;
+        } else if hit_meta.is_some()
+            && let Some(hm) = volume_ctx.heightmap.as_deref()
+            && let Some(impact_pos) = hm.ground_hit(prev_lead_pos, curr_lead_pos)
+        {
+            // `CProjectileHandler::CheckGroundCollisions`: the bolt
+            // explodes where it enters the terrain.
             trigger_delayed_hit(
                 entity,
-                None,
+                HitWho::Ground,
                 impact_pos,
                 &delayed_hits,
                 &weapon_registry,
@@ -249,6 +253,9 @@ pub(super) fn tick_weapon_fx(
                 &mut commands,
             );
         }
+        // A bolt that reaches the end of its `ttl` without touching
+        // anything just fades (`CLaserProjectile::Update`): no
+        // explosion, no damage.
         let tail_raw = (lead_raw - bolt.max_length).max(0.0);
         if tail_raw >= bolt.total_distance {
             commands.entity(entity).despawn();
@@ -355,7 +362,7 @@ pub(super) fn tick_weapon_fx(
         if total_dist < 0.1 && proj.flight == Flight::Direct {
             trigger_delayed_hit(
                 entity,
-                None,
+                HitWho::Intended,
                 proj.target,
                 &delayed_hits,
                 &weapon_registry,
@@ -394,9 +401,14 @@ pub(super) fn tick_weapon_fx(
                 (seg_start, seg_end, proj.progress >= 1.0, proj.target)
             }
             Flight::Missile(_) | Flight::Starburst(_) => {
+                // `CMissileProjectile::UpdateTargeting`: track the
+                // target's aimPos — the model midpoint — not its feet.
+                // A missile steered at the ground under a unit dives
+                // short and eats terrain before the swept-volume
+                // intercept can catch the sphere.
                 let target_now = target_entity
                     .and_then(|t| volume_ctx.target_q.get(t).ok())
-                    .map(|(gtf, _)| gtf.translation());
+                    .map(|(gtf, vol)| vol.center(gtf));
                 let sample = target_now.map(|pos| super::flight::TargetSample {
                     pos,
                     vel: proj.last_target_pos.map_or(Vec3::ZERO, |last| pos - last),
@@ -449,7 +461,7 @@ pub(super) fn tick_weapon_fx(
         {
             trigger_delayed_hit(
                 entity,
-                None,
+                HitWho::Intended,
                 impact_pos,
                 &delayed_hits,
                 &weapon_registry,
@@ -471,7 +483,7 @@ pub(super) fn tick_weapon_fx(
         {
             trigger_delayed_hit(
                 entity,
-                Some(hit_entity),
+                HitWho::Unit(hit_entity),
                 impact_pos,
                 &delayed_hits,
                 &weapon_registry,
@@ -485,7 +497,7 @@ pub(super) fn tick_weapon_fx(
             if !intercepted {
                 trigger_delayed_hit(
                     entity,
-                    None,
+                    HitWho::Intended,
                     impact_pos,
                     &delayed_hits,
                     &weapon_registry,
@@ -608,7 +620,7 @@ fn target_volume_hit(
 ) -> Option<Vec3> {
     let target = target?;
     let (tf, volume) = target_q.get(target).ok()?;
-    let t = volume.ray_segment_hit(tf.translation(), seg_start, seg_end)?;
+    let t = volume.ray_segment_hit(volume.center(tf), seg_start, seg_end)?;
     Some(seg_start.lerp(seg_end, t))
 }
 
@@ -665,7 +677,7 @@ fn broad_phase_volume_hit(
         let Ok((tf, volume)) = target_q.get(entry.entity) else {
             return;
         };
-        if let Some(t) = volume.ray_segment_hit(tf.translation(), seg_start, seg_end)
+        if let Some(t) = volume.ray_segment_hit(volume.center(tf), seg_start, seg_end)
             && best.is_none_or(|(_, prev_t)| t < prev_t)
         {
             best = Some((entry.entity, t));
@@ -673,6 +685,15 @@ fn broad_phase_volume_hit(
     });
 
     best.map(|(entity, t)| (entity, seg_start.lerp(seg_end, t)))
+}
+
+/// What a projectile's impact struck: the unit it was fired at, another
+/// unit that crossed its path, or the ground (splash only).
+#[derive(Clone, Copy)]
+enum HitWho {
+    Intended,
+    Unit(Entity),
+    Ground,
 }
 
 /// Fire the one-shot impact payload riding on a traveling visual: push
@@ -684,7 +705,7 @@ fn broad_phase_volume_hit(
 #[allow(clippy::too_many_arguments)]
 fn trigger_delayed_hit(
     entity: Entity,
-    target_override: Option<Entity>,
+    who: HitWho,
     impact_pos: Vec3,
     delayed_hits: &Query<&DelayedHit>,
     weapon_registry: &WeaponRegistry,
@@ -695,11 +716,11 @@ fn trigger_delayed_hit(
     let Ok(hit) = delayed_hits.get(entity) else {
         return;
     };
-    // `target_override` wins when the broad-phase intercepted a unit
-    // other than the originally-aimed-at one. Otherwise stick with
-    // `hit.target` (which may itself be `None` for ground-targeted
-    // shots).
-    let final_target = target_override.or(hit.target);
+    let final_target = match who {
+        HitWho::Intended => hit.target,
+        HitWho::Unit(unit) => Some(unit),
+        HitWho::Ground => None,
+    };
     damage_queue.push(PendingDamage {
         target: final_target,
         attacker: hit.attacker,
@@ -859,7 +880,19 @@ mod tests {
             .insert_resource(CegRegistry::load());
 
         let attacker = app.world_mut().spawn_empty().id();
-        let target = app.world_mut().spawn_empty().id();
+        // The target sits on the flight line, 100 elmos out, with a
+        // 5-elmo sphere: the lead crosses it on the second tick.
+        let target = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_xyz(0.0, 0.0, 100.0),
+                UnitType(crate::units::content::definitions::UnitKind::Bit),
+                CollisionVolume {
+                    radius: 5.0,
+                    mid_y: 0.0,
+                },
+            ))
+            .id();
 
         // Bolt geometry: 100 elmos at 100 elmos/s → impact at t=1.0.
         // max_length=50 so tail takes another 0.5 s to clear.
@@ -999,7 +1032,10 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 70.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 70.0))),
-                CollisionVolume { radius: 5.0 },
+                CollisionVolume {
+                    radius: 5.0,
+                    mid_y: 0.0,
+                },
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();
@@ -1082,7 +1118,10 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 30.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 30.0))),
-                CollisionVolume { radius: 5.0 },
+                CollisionVolume {
+                    radius: 5.0,
+                    mid_y: 0.0,
+                },
                 UnitType(UnitKind::Bit),
                 TeamId(0),
                 Faction::System,
@@ -1096,7 +1135,10 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 50.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 50.0))),
-                CollisionVolume { radius: 5.0 },
+                CollisionVolume {
+                    radius: 5.0,
+                    mid_y: 0.0,
+                },
                 UnitType(UnitKind::Bug),
                 TeamId(1),
                 Faction::Hacker,
@@ -1109,7 +1151,10 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(0.0, 0.0, 100.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(0.0, 0.0, 100.0))),
-                CollisionVolume { radius: 5.0 },
+                CollisionVolume {
+                    radius: 5.0,
+                    mid_y: 0.0,
+                },
                 UnitType(UnitKind::Bug),
                 TeamId(1),
                 Faction::Hacker,
@@ -1128,6 +1173,7 @@ mod tests {
                 entity,
                 pos,
                 hit_radius: 0.0,
+                mid_y: 0.0,
                 team,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -1184,8 +1230,7 @@ mod tests {
     /// Mid-flight interception only fires when the bolt's segment
     /// actually crosses the target volume. A target offset off the
     /// bolt's flight line should NOT receive an early hit; the bolt
-    /// continues to the predicted total_distance and the existing
-    /// fallback path triggers there.
+    /// flies on to the end of its ttl and fades without exploding.
     #[test]
     fn laser_bolt_does_not_intercept_off_axis_target() {
         let mut app = App::new();
@@ -1210,7 +1255,10 @@ mod tests {
             .spawn((
                 Transform::from_translation(Vec3::new(50.0, 0.0, 70.0)),
                 GlobalTransform::from(Transform::from_translation(Vec3::new(50.0, 0.0, 70.0))),
-                CollisionVolume { radius: 5.0 },
+                CollisionVolume {
+                    radius: 5.0,
+                    mid_y: 0.0,
+                },
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();
@@ -1248,19 +1296,23 @@ mod tests {
             "off-axis target must not trigger mid-flight interception",
         );
 
-        // Tick 2: another 0.4 s → lead reaches 110 (clamped 100).
-        // Fallback at total_distance now fires with the predicted
-        // impact at z=100, NOT at the off-axis target's position.
+        // Tick 2: another 0.4 s → lead reaches 110 (clamped 100), the
+        // end of the bolt's ttl. Nothing was struck, so — like
+        // `CLaserProjectile` — the bolt just fades: no damage, no
+        // explosion, anywhere.
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_millis(400));
         app.world_mut().run_system_once(tick_weapon_fx).unwrap();
-        let queue = app.world().resource::<DamageQueue>();
-        assert_eq!(queue.len(), 1);
-        let impact = queue.iter_snapshot_for_test().next().unwrap().impact_pos;
         assert!(
-            (impact.x - 0.0).abs() < 1e-3 && (impact.z - 100.0).abs() < 1e-3,
-            "fallback impact should be at predicted total_distance (0,0,100), got {impact:?}",
+            app.world().resource::<DamageQueue>().is_empty(),
+            "a bolt that reaches the end of its flight without a hit does no damage",
+        );
+        assert!(
+            app.world()
+                .resource::<PendingExplosions>()
+                .events
+                .is_empty()
         );
     }
 
@@ -1401,6 +1453,75 @@ mod tests {
         );
     }
 
+    /// `CMissileProjectile::UpdateTargeting` tracks the target's
+    /// `aimPos` — the collision volume's centre — not its ground
+    /// position. A Geometric fired at a tall unit (small sphere hanging
+    /// well above its root) must steer into the volume mid-air; homing
+    /// on the feet would dive past the sphere and eat terrain under it.
+    #[test]
+    fn geometric_missile_homes_onto_the_targets_midpoint() {
+        let mut app = flight_test_app();
+        let w = spring_tdf::WeaponDef {
+            weapon_type: "MissileLauncher".into(),
+            range: 1400.0,
+            weapon_velocity: 400.0,
+            start_velocity: 400.0,
+            trajectory_height: 1.0,
+            tracks: true,
+            turn_rate: 20000.0,
+            ..Default::default()
+        };
+        // A tall unit: its authored midpoint sits 40 elmos above the
+        // root, the collision sphere is small compared to that offset.
+        let ground_pos = Vec3::new(400.0, 0.0, 0.0);
+        let aim_pos = ground_pos + Vec3::Y * 40.0;
+        let target = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_translation(ground_pos),
+                CollisionVolume {
+                    radius: 14.0,
+                    mid_y: 40.0,
+                },
+                UnitType(crate::units::content::definitions::UnitKind::Pointer),
+            ))
+            .id();
+        let origin = Vec3::new(0.0, 10.0, 0.0);
+        let (flight, pos) =
+            super::super::flight::MissileFlight::launch(super::super::flight::Launch {
+                weapon: &w,
+                muzzle_pos: origin,
+                muzzle_dir: Vec3::X,
+                target_pos: aim_pos,
+            });
+        let proj =
+            spawn_flight_projectile(&mut app, Flight::Missile(flight), pos, aim_pos, 412.0, None);
+        app.world_mut().get_mut::<DelayedHit>(proj).unwrap().target = Some(target);
+
+        let mut arrived = false;
+        for _ in 0..300 {
+            sim_tick(&mut app);
+            if app.world().get::<Transform>(proj).is_none() {
+                arrived = true;
+                break;
+            }
+        }
+        assert!(arrived, "missile should reach the target");
+        assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
+        let dmg = app
+            .world()
+            .resource::<DamageQueue>()
+            .iter_snapshot_for_test()
+            .next()
+            .expect("damage");
+        assert_eq!(dmg.target, Some(target));
+        assert!(
+            dmg.impact_pos.distance(aim_pos) < 32.0,
+            "must intercept the elevated volume (centre {aim_pos}), hit at {}",
+            dmg.impact_pos,
+        );
+    }
+
     /// Flow's FlowMissile, launched level along the muzzle (a flyer's
     /// forward gunpoint) at a unit target *below and behind the launch
     /// line*: it flies out straight for the `weapontimer` frames, swings
@@ -1414,7 +1535,10 @@ mod tests {
             .world_mut()
             .spawn((
                 GlobalTransform::from_translation(target_pos),
-                CollisionVolume { radius: 12.0 },
+                CollisionVolume {
+                    radius: 12.0,
+                    mid_y: 0.0,
+                },
                 UnitType(crate::units::content::definitions::UnitKind::Bit),
             ))
             .id();

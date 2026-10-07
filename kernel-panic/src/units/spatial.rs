@@ -54,6 +54,9 @@ pub struct SpatialEntry {
     /// Model (collision-volume) radius: explosions measure their
     /// distance to this sphere's surface.
     pub hit_radius: f32,
+    /// Height of the collision sphere's centre above `pos` (model
+    /// midpoint, `unit->midPos`).
+    pub mid_y: f32,
     pub team: u8,
     pub kind: UnitKind,
     pub hp_positive: bool,
@@ -73,6 +76,17 @@ impl SpatialEntry {
     /// [`crate::units::mechanics::cloak::hidden_from`].
     pub fn targetable_by(&self, team: u8) -> bool {
         !hidden_from(self.cloaked, self.detected_by, team)
+    }
+
+    /// World-space centre of the collision sphere (`unit->midPos`).
+    pub fn mid_pos(&self) -> Vec3 {
+        self.pos + Vec3::Y * self.mid_y
+    }
+
+    /// `CollisionVolume::GetPointSurfaceDistance`: distance from `point`
+    /// to the sphere's surface, 0 inside it.
+    pub fn surface_distance(&self, point: Vec3) -> f32 {
+        (self.mid_pos().distance(point) - self.hit_radius).max(0.0)
     }
 }
 
@@ -179,6 +193,7 @@ pub fn rebuild_spatial_index(
             entity,
             pos: gtf.translation(),
             hit_radius: stats.hit_radius,
+            mid_y: stats.mid_y,
             team: team.0,
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
@@ -198,6 +213,7 @@ mod tests {
             entity,
             pos,
             hit_radius: 0.0,
+            mid_y: 0.0,
             team: 0,
             kind: UnitKind::Bit,
             hp_positive: true,

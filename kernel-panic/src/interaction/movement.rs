@@ -38,7 +38,7 @@ pub(crate) fn ground_mover_components(
     GroundMover::new(
         kind,
         registry,
-        &UnitStats::from_registry(kind, registry, 0.0),
+        &UnitStats::from_registry(kind, registry, 0.0, 0.0),
     )
     .seeded(entity, transform)
 }
@@ -1236,6 +1236,7 @@ mod cross_map_tests {
                     UnitStats {
                         radius: 12.0,
                         hit_radius: 20.0,
+                        mid_y: 0.0,
                         speed: 90.0,
                         acc_rate: 0.03,
                         dec_rate: 0.067,

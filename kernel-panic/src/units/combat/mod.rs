@@ -28,8 +28,7 @@ use super::mechanics::cloak::{Cloaked, DetectedBy};
 use super::mechanics::worm::{AutoHold, WormSplash, queue_wormsplash};
 use super::spatial::SpatialIndex;
 use super::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
-use crate::rng::next_signed;
-use crate::sim::{SHORT_ANGLE_TO_RAD, SIMULATION_HZ, angle_delta, secs_to_frames};
+use crate::sim::{SIMULATION_HZ, angle_delta, secs_to_frames};
 use crate::terrain::heightmap::Heightmap;
 
 mod aim;
@@ -42,7 +41,7 @@ pub use collision_volume::CollisionVolume;
 pub use aim::{
     AIM_HEADING_TOLERANCE, AIM_PITCH_TOLERANCE, AimLaunch, AimScript, AimTarget, Byte, ByteOpen,
     DeployState, Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state,
-    tick_deploy_state,
+    sync_deploy_state,
 };
 pub(crate) use damage::splash_falloff;
 pub use damage::{
@@ -89,26 +88,14 @@ pub struct AttackTargetOrder {
 #[derive(Component, Clone, Copy)]
 pub struct ForcedTarget(pub Entity);
 
-/// Required clearance (elmos) between the LOS ray and the underlying
-/// terrain at every sample point — the ray passes iff `beam_y >=
-/// terrain_y + LOS_MARGIN`.
-///
-/// Held tight (4 elmos) so actual ridges still block, but **only**
-/// meaningful once the ray itself is lifted above ground by
-/// [`LOS_MUZZLE_HEIGHT`]. Without that lift the shooter and target
-/// stand at ground level, `beam_y == terrain_y` along flat terrain,
-/// and every check fails the `terrain + 4` margin. That was the
-/// observed bit-vs-packet bug: bit saw packet 100 elmos away, well
-/// inside its 256 range, but LOS rejected every tick.
-const LOS_MARGIN: f32 = 4.0;
-
-/// Muzzle height added to both endpoints of the LOS ray — a stand-in
-/// for shooting from the weapon's gun piece rather than from the
-/// unit's feet. 16 elmos is roughly the height of the smallest KP
-/// unit's gun mount (bit ball.s3o has the gunpoint at z=-3 off a
-/// 32-tall body); bigger units (byte, pointer) sit higher but we
-/// err on the conservative side so a genuine wall still blocks.
-const LOS_MUZZLE_HEIGHT: f32 = 16.0;
+/// `CWeapon::HaveFreeLineOfFire`: a ground ray from the shooter's aim
+/// position to the target blocks the shot only when it hits terrain
+/// farther than the explosion radius from the target — a shot that
+/// would splash the target anyway is allowed.
+fn line_of_fire_clear(hm: &Heightmap, from: Vec3, to: Vec3, aoe_radius: f32) -> bool {
+    hm.ground_hit(from, to)
+        .is_none_or(|hit| hit.distance_squared(to) <= aoe_radius * aoe_radius)
+}
 
 /// Seconds between full spatial scans for a unit that already has a
 /// cached target. Matches Spring's `CWeapon::lastTargetRetry + 65`
@@ -128,19 +115,52 @@ pub struct TargetCache {
     pub expires_at: f32,
 }
 
+/// Auto-target pick order (`CGameHelper::GenerateWeaponTargets`): a
+/// `BadTargetCategory1` candidate ranks behind every ordinary one; ties
+/// break on distance (negated for `proximityPriority < 0` weapons, which
+/// prefer far targets).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TargetRank {
+    bad: bool,
+    dist_sq: f32,
+}
+
+impl Eq for TargetRank {}
+
+impl PartialOrd for TargetRank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for TargetRank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bad
+            .cmp(&other.bad)
+            .then_with(|| self.dist_sq.total_cmp(&other.dist_sq))
+    }
+}
+
 /// Grouped queries for target validation, bundled into one `SystemParam`
 /// so `combat_system` stays under Bevy's 16-param limit.
 #[derive(bevy::ecs::system::SystemParam)]
+#[allow(clippy::type_complexity)]
 pub struct TargetCachePick<'w, 's> {
-    pub alive: Query<'w, 's, &'static GlobalTransform, (With<UnitType>, Without<Dying>)>,
+    pub alive: Query<
+        'w,
+        's,
+        (&'static GlobalTransform, &'static UnitStats),
+        (With<UnitType>, Without<Dying>),
+    >,
     /// Detection mask of every currently cloaked unit — a cached or
     /// designated target that burrows out of detector range is dropped.
     pub cloaked: Query<'w, 's, &'static DetectedBy, With<Cloaked>>,
 }
 
 impl TargetCachePick<'_, '_> {
-    /// Position of `target` if it is alive and `team` can currently see
-    /// it (not an undetected cloaked unit).
+    /// Aim position of `target` — its model midpoint, `unit->aimPos`
+    /// (`SolidObject::UpdateMidAndAimPos`) — if it is alive and `team`
+    /// can currently see it (not an undetected cloaked unit).
     fn visible_pos(&self, target: Entity, team: u8) -> Option<Vec3> {
         if self.cloaked.get(target).is_ok_and(|d| !d.contains(team)) {
             return None;
@@ -148,7 +168,7 @@ impl TargetCachePick<'_, '_> {
         self.alive
             .get(target)
             .ok()
-            .map(GlobalTransform::translation)
+            .map(|(gtf, stats)| gtf.translation() + Vec3::Y * stats.mid_y)
     }
 }
 
@@ -186,6 +206,31 @@ pub struct PieceLookup<'w, 's> {
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
     pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
     pub mover: Query<'w, 's, &'static crate::interaction::ground_move::GroundMover>,
+    /// Targets' poses for per-shot aiming.
+    pub target: Query<'w, 's, (&'static GlobalTransform, &'static UnitStats), With<UnitType>>,
+}
+
+impl PieceLookup<'_, '_> {
+    /// `CWeapon::GetUnitLeadTargetPos`: the target's `aimPos` (its model
+    /// midpoint) plus its velocity over the projectile's flight time
+    /// from `from`, scaled by the salvo's `predictSpeedMod`. Hitscan
+    /// weapons get no lead. `None` once the target is gone.
+    pub fn lead_target_pos(
+        &self,
+        target: Entity,
+        from: Vec3,
+        weapon_def: &spring_tdf::WeaponDef,
+        predict_mult: f32,
+    ) -> Option<Vec3> {
+        let (tf, stats) = self.target.get(target).ok()?;
+        let aim_pos = tf.translation() + Vec3::Y * stats.mid_y;
+        if !weapon_def.is_traveling() {
+            return Some(aim_pos);
+        }
+        let velocity = self.mover.get(target).map_or(Vec3::ZERO, |m| m.velocity);
+        let predict_frames = from.distance(aim_pos) / weapon_def.projectile_speed();
+        Some(aim_pos + velocity * predict_frames * predict_mult)
+    }
 }
 
 /// World-space weapon muzzle of a unit: position and emit direction.
@@ -261,55 +306,93 @@ pub struct SalvoShot {
     pub weapon: WeaponId,
     /// Unit target (`None` for attack-ground).
     pub target: Option<Entity>,
-    /// Aim point, including spray.
-    pub impact_pos: Vec3,
+    /// Aim point when no unit target can be resolved: the attack-ground
+    /// position, or where the target was when the salvo opened (used
+    /// when it dies mid-burst).
+    pub aim_pos: Vec3,
     pub is_traveling: bool,
     /// `projectiles=` — projectiles per salvo shot.
     pub projectiles: u32,
+    /// `predictSpeedMod`: the fraction of the target's velocity the
+    /// salvo leads by, uniform in `[0, 2]` (`predictBoost` 0 —
+    /// `CWeapon::SlowUpdate`), re-rolled every `UNIT_SLOWUPDATE_RATE`
+    /// frames.
+    pub predict_mult: f32,
+    /// Sim frame `predict_mult` was rolled on.
+    pub predict_frame: u64,
+}
+
+/// Roll a salvo's `predictSpeedMod`: `1 + (rand − 0.5) · 2`.
+pub(crate) fn roll_predict_mult(rng: &mut u32) -> f32 {
+    crate::rng::next_f32(rng) * 2.0
 }
 
 /// Upstream `CWeapon::UpdateSalvo` for one salvo shot
 /// (`Weapon.cpp:541-608`): for each of the weapon's `projectiles`,
 /// `Shot1` → `QueryWeapon1` → `FireImpl` from the freshly resolved
 /// muzzle; after the salvo's last shot, `EndBurst1`.
+///
+/// Every shot aims anew (`UpdateAim` runs each frame): at the target's
+/// current `aimPos` led by its velocity over the flight time, then the
+/// direction is scattered by `sprayAngle` (`FireImpl`: `dir +=
+/// NextVector() · sprayAngle`). A `LaserCannon` bolt then flies
+/// straight for its `ttl` and fades if it hits nothing; everything else
+/// travels to the aim point.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn fire_salvo_shot(
     shot: &SalvoShot,
+    weapon_def: &spring_tdf::WeaponDef,
     attacker_gtf: &GlobalTransform,
     last_of_salvo: bool,
     pieces: &mut PieceLookup,
     unit_registry: &UnitRegistry,
     pending_attacks: &mut PendingAttacks,
     damage_queue: &mut DamageQueue,
+    rng: &mut u32,
 ) {
     let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(shot.kind)
         .and_then(|index| unit_registry.sfx_type(shot.kind, index))
         .map(std::sync::Arc::<str>::from);
-    let distance = attacker_gtf.translation().distance(shot.impact_pos);
+    let spray = weapon_def.spray_sin();
+    let laser = weapon_def.category() == spring_tdf::WeaponCategory::LaserCannon;
     for _ in 0..shot.projectiles.max(1) {
         if let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {
             let UnitAnimator { rig, driver, .. } = &mut *animator;
             driver.shot(rig);
         }
         let muzzle = pieces.muzzle(shot.attacker, attacker_gtf);
+        let aim = shot
+            .target
+            .and_then(|t| pieces.lead_target_pos(t, muzzle.pos, weapon_def, shot.predict_mult))
+            .unwrap_or(shot.aim_pos);
+        let aim_dist = muzzle.pos.distance(aim);
+        let mut dir = (aim - muzzle.pos).normalize_or(muzzle.dir);
+        if spray > 0.0 {
+            dir = (dir + crate::rng::random_unit_sphere(rng) * spray).normalize_or(dir);
+        }
+        let impact_pos = if laser && shot.is_traveling {
+            muzzle.pos + dir * weapon_def.laser_travel(aim_dist)
+        } else {
+            muzzle.pos + dir * aim_dist
+        };
         if !shot.is_traveling {
             damage_queue.push(PendingDamage {
                 target: shot.target,
                 attacker: shot.attacker,
                 weapon: shot.weapon,
-                impact_pos: shot.impact_pos,
-                attacker_distance: distance,
+                impact_pos,
+                attacker_distance: aim_dist,
             });
         }
         pending_attacks.events.push(AttackEvent {
             attacker_pos: muzzle.pos,
-            target_pos: shot.impact_pos,
+            target_pos: impact_pos,
             weapon_id: shot.weapon,
             muzzle_ceg: muzzle_ceg.clone(),
             delayed_hit: shot.is_traveling.then_some(DelayedHitInfo {
                 target: shot.target,
                 attacker: shot.attacker,
-                attacker_distance: distance,
+                attacker_distance: aim_dist,
                 muzzle_dir: muzzle.dir,
             }),
             build_arc: false,
@@ -418,8 +501,8 @@ pub fn combat_system(
     mut pieces: PieceLookup,
     target_pick: TargetCachePick,
     mut rng: Local<u32>,
-    // `(dist_sq, entity, pos)` scratch for the deferred LOS pick.
-    mut los_candidates: Local<Vec<(f32, Entity, Vec3)>>,
+    // `(rank, entity, aim pos)` scratch for the deferred LOS pick.
+    mut los_candidates: Local<Vec<(TargetRank, Entity, Vec3)>>,
 ) {
     if *rng == 0 {
         // First-tick seed only: a non-zero xorshift32 state can never
@@ -504,7 +587,7 @@ pub fn combat_system(
                 }
             }
         };
-        let range = weapon_def.map_or(0.0, |w| w.range);
+        let range = weapon_def.map_or(0.0, spring_tdf::WeaponDef::effective_range);
         let cooldown = weapon_def.map_or(0.0, |w| w.reload_time);
 
         // Command-fire weapons (NX Flag, Infection, …) need an
@@ -531,7 +614,8 @@ pub fn combat_system(
         let targets_mines_only = unit_type.0.targets_mines_only();
 
         // Cached-target fast path mirrors Spring's `lastTargetRetry`.
-        let mut best: Option<(Entity, Vec3, f32)> = None;
+        // `(entity, aim position, rank)`: lower rank wins.
+        let mut best: Option<(Entity, Vec3, TargetRank)> = None;
 
         // Manual target designation (T / set-target) overrides auto-
         // acquisition: in range → fire at it; out of range → track it
@@ -543,7 +627,14 @@ pub fn combat_system(
                 Some(t_pos) => {
                     let dist_sq = attacker_pos.distance_squared(t_pos);
                     if dist_sq <= range_sq {
-                        best = Some((forced.0, t_pos, dist_sq));
+                        best = Some((
+                            forced.0,
+                            t_pos,
+                            TargetRank {
+                                bad: false,
+                                dist_sq,
+                            },
+                        ));
                     } else {
                         let aim = AimTarget {
                             pos: t_pos,
@@ -570,7 +661,14 @@ pub fn combat_system(
         {
             let dist_sq = attacker_pos.distance_squared(t_pos);
             if dist_sq <= range_sq {
-                best = Some((order.target, t_pos, dist_sq));
+                best = Some((
+                    order.target,
+                    t_pos,
+                    TargetRank {
+                        bad: false,
+                        dist_sq,
+                    },
+                ));
             }
         }
 
@@ -581,7 +679,14 @@ pub fn combat_system(
                 .and_then(|cache| {
                     let pos = target_pick.visible_pos(cache.target, attacker_team.0)?;
                     let dist_sq = attacker_pos.distance_squared(pos);
-                    (dist_sq <= range_sq).then_some((cache.target, pos, dist_sq))
+                    (dist_sq <= range_sq).then_some((
+                        cache.target,
+                        pos,
+                        TargetRank {
+                            bad: false,
+                            dist_sq,
+                        },
+                    ))
                 });
         }
 
@@ -614,47 +719,40 @@ pub fn combat_system(
                 if dist_sq > range_sq {
                     return;
                 }
-                // Upstream `OnlyTargetCategory1` / `BadTargetCategory1`:
-                // Bits/Bytes/Packets ignore buildings until ordered not
-                // to, the Dos beam only ever looks at mobile units, and
-                // artillery won't chase FAST spam. Manual attack orders
-                // bypass this via the `can_attack` gate at order time.
+                // Upstream `OnlyTargetCategory1`: the Dos beam only ever
+                // looks at mobile units. Manual attack orders go through
+                // the same `can_attack` gate at order time.
                 if !unit_registry.auto_target_allowed(unit_type.0, candidate.kind) {
                     return;
                 }
+                // `BadTargetCategory1` (Bits/Bytes/Packets vs FACTORY,
+                // artillery vs FAST spam) ranks behind every good target
+                // but is still shot when nothing better is in range.
+                let rank = TargetRank {
+                    bad: unit_registry.bad_target(unit_type.0, candidate.kind),
+                    dist_sq: if prefer_distant { -dist_sq } else { dist_sq },
+                };
                 if enforce_los {
-                    los_candidates.push((dist_sq, candidate.entity, candidate.pos));
+                    los_candidates.push((rank, candidate.entity, candidate.mid_pos()));
                     return;
                 }
-                let better = best.is_none_or(|(_, _, d)| {
-                    if prefer_distant {
-                        dist_sq > d
-                    } else {
-                        dist_sq < d
-                    }
-                });
-                if better {
-                    best = Some((candidate.entity, candidate.pos, dist_sq));
+                if best.is_none_or(|(_, _, r)| rank < r) {
+                    // Aim at the candidate's midpoint (engine
+                    // `GenerateWeaponTargets` ranks and aims at the
+                    // aimPos), matching the LOS path's `mid_pos`.
+                    best = Some((candidate.entity, candidate.mid_pos(), rank));
                 }
             });
             if enforce_los && let Some(hm) = heightmap.as_deref() {
-                // Stable sort: equal distances keep the scan order, so
-                // the same unit wins as the strict `<` / `>` pick.
-                if prefer_distant {
-                    los_candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
-                } else {
-                    los_candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
-                }
+                // Stable sort: equal ranks keep the scan order, so the
+                // same unit wins as the strict `<` pick.
+                los_candidates.sort_by_key(|a| a.0);
+                let aoe_radius = weapon_def.map_or(0.0, |w| w.area_of_effect * 0.5);
+                let aim_from = attacker_pos + Vec3::Y * stats.mid_y;
                 best = los_candidates
                     .iter()
-                    .find(|(_, _, pos)| {
-                        hm.has_line_of_sight(
-                            attacker_pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
-                            *pos + Vec3::Y * LOS_MUZZLE_HEIGHT,
-                            LOS_MARGIN,
-                        )
-                    })
-                    .map(|&(dist_sq, entity, pos)| (entity, pos, dist_sq));
+                    .find(|(_, _, aim_pos)| line_of_fire_clear(hm, aim_from, *aim_pos, aoe_radius))
+                    .map(|&(rank, entity, aim_pos)| (entity, aim_pos, rank));
             }
         }
 
@@ -714,19 +812,6 @@ pub fn combat_system(
             continue;
         }
 
-        // Why: upstream `sprayangle` is in Spring short-angle units;
-        // small-angle offset at target plane ≈ tan(angle) × distance.
-        let distance = attacker_pos.distance(target_pos);
-        let spray_short = weapon_def.map_or(0.0, |w| w.spray_angle);
-        let mut impact_pos = target_pos;
-        if spray_short > 0.0 && distance > 0.0 {
-            let spray_rad = spray_short * SHORT_ANGLE_TO_RAD;
-            let offset_radius = spray_rad.tan() * distance;
-            let dx = next_signed(&mut rng) * offset_radius;
-            let dz = next_signed(&mut rng) * offset_radius;
-            impact_pos = Vec3::new(target_pos.x + dx, target_pos.y, target_pos.z + dz);
-        }
-
         // Hitscan lands now; traveling bolts defer via `delayed_hit`.
         let is_traveling = weapon_def.is_some_and(spring_tdf::WeaponDef::is_traveling);
         commands.entity(entity).insert((
@@ -736,24 +821,28 @@ pub fn combat_system(
             JustFired,
         ));
         if let (Some(weapon_id), Some(weapon_def)) = (weapon_id, weapon_def) {
+            let frame = sim_frame(&time);
             open_salvo(
                 SalvoShot {
                     attacker: entity,
                     kind: unit_type.0,
                     weapon: weapon_id,
                     target: Some(target_entity),
-                    impact_pos,
+                    aim_pos: target_pos,
                     is_traveling,
                     projectiles: weapon_def.projectiles as u32,
+                    predict_mult: roll_predict_mult(&mut rng),
+                    predict_frame: frame,
                 },
                 weapon_def,
                 attacker_gtf,
-                sim_frame(&time),
+                frame,
                 &mut pieces,
                 &unit_registry,
                 &mut pending_attacks,
                 &mut damage_queue,
                 &mut commands,
+                &mut rng,
             );
         }
         if let Some(splash) = worm_splash {
@@ -761,7 +850,7 @@ pub fn combat_system(
                 &mut damage_queue,
                 entity,
                 splash.0,
-                impact_pos,
+                target_pos,
                 attacker_pos,
             );
         }
@@ -806,16 +895,19 @@ fn open_salvo(
     pending_attacks: &mut PendingAttacks,
     damage_queue: &mut DamageQueue,
     commands: &mut Commands,
+    rng: &mut u32,
 ) {
     let burst = (weapon_def.burst as u32).max(1);
     fire_salvo_shot(
         &shot,
+        weapon_def,
         attacker_gtf,
         burst == 1,
         pieces,
         unit_registry,
         pending_attacks,
         damage_queue,
+        rng,
     );
     if burst > 1 {
         let delay = salvo_delay_frames(weapon_def.burst_rate);
@@ -947,7 +1039,11 @@ pub fn attack_ground_system(
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    mut rng: Local<u32>,
 ) {
+    if *rng == 0 {
+        *rng = 0xBADC0FFE;
+    }
     for (
         entity,
         unit_type,
@@ -994,7 +1090,7 @@ pub fn attack_ground_system(
             continue;
         };
         let weapon_id = weapon_id.expect("registered weapon is interned");
-        let range = weapon_def.range;
+        let range = weapon_def.effective_range();
         if range <= 0.0 {
             continue;
         }
@@ -1071,26 +1167,30 @@ pub fn attack_ground_system(
         // The salvo's remaining shots go through `BurstFire` exactly like
         // `combat_system`'s — a player-commanded byte fires its authored
         // 4-shot MegaBeam burst, not one shot per reload. Attack-ground
-        // has no primary-hit entity; AoE splash at `impact_pos` via
+        // has no primary-hit entity; AoE splash at the impact via
         // `apply_damage` still reaches everything in range.
+        let frame = sim_frame(&time);
         open_salvo(
             SalvoShot {
                 attacker: entity,
                 kind: unit_type.0,
                 weapon: weapon_id,
                 target: None,
-                impact_pos: order.pos,
+                aim_pos: order.pos,
                 is_traveling,
                 projectiles: weapon_def.projectiles as u32,
+                predict_mult: 1.0,
+                predict_frame: frame,
             },
             weapon_def,
             gtf,
-            sim_frame(&time),
+            frame,
             &mut pieces,
             &unit_registry,
             &mut pending_attacks,
             &mut damage_queue,
             &mut commands,
+            &mut rng,
         );
         if let Some(splash) = worm_splash {
             queue_wormsplash(&mut damage_queue, entity, splash.0, order.pos, attacker_pos);
@@ -1161,7 +1261,7 @@ pub fn attack_target_system(
                 }
             }
         };
-        let range = weapon_def.map_or(0.0, |w| w.range);
+        let range = weapon_def.map_or(0.0, spring_tdf::WeaponDef::effective_range);
 
         let Ok(target_gtf) = target_q.get(order.target) else {
             // Target died / despawned: stand down and clear movement.
@@ -1233,6 +1333,7 @@ mod tests {
         UnitStats {
             radius: 12.0,
             hit_radius: 20.0,
+            mid_y: 0.0,
             speed: 90.0,
             acc_rate: 0.03,
             dec_rate: 0.067,
@@ -1285,13 +1386,14 @@ mod tests {
         weapons
     }
 
-    /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): a Bit must not
-    /// auto-acquire a Socket standing in weapon range — auto-targeting
-    /// ignores buildings until the player issues an explicit attack.
-    /// A Bit-vs-Bit scan under identical conditions still acquires.
+    /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): a Socket is
+    /// still auto-acquired when nothing better is in range (the engine
+    /// demotes bad candidates, it doesn't skip them), but a Bit in the
+    /// same crowd ranks ahead of it. Manual orders are unaffected —
+    /// see `bad_target_still_allows_manual_orders`.
     #[test]
-    fn bit_ignores_factories_but_scans_bits() {
-        // --- Socket enemy in range: must NOT be acquired. ---
+    fn bit_prefers_bits_over_factories_but_still_shoots_factories() {
+        // --- Socket enemy alone in range: acquired as a bad target. ---
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
@@ -1320,6 +1422,7 @@ mod tests {
                 entity: socket,
                 pos: Vec3::new(100.0, 0.0, 0.0),
                 hit_radius: 0.0,
+                mid_y: 0.0,
                 team: 1,
                 kind: UnitKind::Socket,
                 hp_positive: true,
@@ -1330,12 +1433,14 @@ mod tests {
 
         app.world_mut().run_system_once(combat_system).unwrap();
 
-        assert!(app.world().get::<TargetCache>(bit).is_none());
-        assert!(app.world().get::<AimTarget>(bit).is_none());
-        assert!(app.world().get::<AttackCooldown>(bit).is_none());
-        assert!(app.world().resource::<DamageQueue>().is_empty());
+        let cache = app.world().get::<TargetCache>(bit).unwrap();
+        assert_eq!(cache.target, socket);
+        // Acquired means aimed at and fired at — a bad target is a
+        // real target, not a tracking-only one.
+        assert!(app.world().get::<AimTarget>(bit).is_some());
+        assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
 
-        // --- Same setup, but the enemy is another Bit: acquired. ---
+        // --- Socket + Bit in range: the Bit ranks ahead. ---
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
@@ -1357,13 +1462,31 @@ mod tests {
                 WeaponBinding(line),
             ))
             .id();
+        let socket = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: socket,
+                pos: Vec3::new(100.0, 0.0, 0.0),
+                hit_radius: 0.0,
+                mid_y: 0.0,
+                team: 1,
+                kind: UnitKind::Socket,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+            });
         let enemy_bit = app.world_mut().spawn_empty().id();
         app.world_mut()
             .resource_mut::<SpatialIndex>()
             .insert_for_test(SpatialEntry {
                 entity: enemy_bit,
-                pos: Vec3::new(100.0, 0.0, 0.0),
+                // Farther than the Socket: only the bad-flag
+                // precedence explains the Bit winning the pick.
+                pos: Vec3::new(200.0, 0.0, 0.0),
                 hit_radius: 0.0,
+                mid_y: 0.0,
                 team: 1,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -1442,6 +1565,7 @@ mod tests {
                 entity: enemy,
                 pos,
                 hit_radius: 0.0,
+                mid_y: 0.0,
                 team: 1,
                 kind: UnitKind::Worm,
                 hp_positive: true,
@@ -1547,6 +1671,7 @@ mod tests {
             .world_mut()
             .spawn((
                 UnitType(UnitKind::Bit),
+                stats(),
                 GlobalTransform::from_xyz(100.0, 0.0, 0.0),
             ))
             .id();
@@ -1627,6 +1752,7 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<PendingAttacks>()
+            .init_resource::<WeaponRegistry>()
             .init_resource::<DamageQueue>()
             .insert_resource(UnitRegistry::empty());
 
@@ -1690,24 +1816,30 @@ mod tests {
             kind: UnitKind::Flow,
             weapon: WeaponId::BUILD_LASER,
             target: None,
-            impact_pos: target,
+            aim_pos: target,
             is_traveling: true,
             projectiles: 2,
+            predict_mult: 1.0,
+            predict_frame: 0,
         };
         app.world_mut()
             .run_system_once(
                 move |mut pieces: PieceLookup,
                       registry: Res<UnitRegistry>,
+                      weapons: Res<WeaponRegistry>,
                       mut attacks: ResMut<PendingAttacks>,
                       mut damage: ResMut<DamageQueue>| {
+                    let mut rng = 1u32;
                     fire_salvo_shot(
                         &shot,
+                        weapons.by_id(shot.weapon),
                         &GlobalTransform::from(unit_tf),
                         false,
                         &mut pieces,
                         &registry,
                         &mut attacks,
                         &mut damage,
+                        &mut rng,
                     );
                 },
             )

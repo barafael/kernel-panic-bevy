@@ -279,29 +279,44 @@ impl DelayedDamage {
 /// `UpdateSalvo` step ([`super::fire_salvo_shot`]: per projectile
 /// `Shot1` → `QueryWeapon1` → fire) once its frame is due, and the last
 /// one also calls `EndBurst1`.
+#[allow(clippy::too_many_arguments)]
 pub fn tick_burst_fire(
     time: Res<Time>,
     mut query: Query<(Entity, &mut BurstFire, &GlobalTransform), Without<Dying>>,
     mut pieces: super::PieceLookup,
     unit_registry: Res<UnitRegistry>,
+    weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    mut rng: Local<u32>,
 ) {
+    if *rng == 0 {
+        *rng = 0xB0B5_7A7E;
+    }
     let frame = super::sim_frame(&time);
+    let slow_rate = crate::sim::SLOW_UPDATE_RATE as u64;
     for (entity, mut burst, gtf) in &mut query {
         if frame < burst.next_frame || frame <= burst.last_frame {
             continue;
         }
+        // `CWeapon::SlowUpdate` re-rolls `predictSpeedMod` every 15
+        // frames, so a 21-frame burst leads with one or two guesses.
+        if frame / slow_rate != burst.shot.predict_frame / slow_rate {
+            burst.shot.predict_mult = super::roll_predict_mult(&mut rng);
+            burst.shot.predict_frame = frame;
+        }
         let last = burst.shots_remaining <= 1;
         super::fire_salvo_shot(
             &burst.shot,
+            weapon_registry.by_id(burst.shot.weapon),
             gtf,
             last,
             &mut pieces,
             &unit_registry,
             &mut pending_attacks,
             &mut damage_queue,
+            &mut rng,
         );
         commands.entity(entity).try_insert(JustFired);
 
@@ -507,55 +522,40 @@ pub fn apply_damage(
                 impulses.0.push((entity, imp));
             }
         };
-        // Spray-angle miss gate. `spray_angle > 0` weapons perturbed
-        // their `impact_pos` in combat_system; here we check whether the
-        // perturbed impact still lands inside the target's volumetric
-        // `hit_radius` (the S3O bounding sphere, which is what Spring's
-        // `CCollisionHandler` sphere test uses — *not* the footprint-
-        // derived `UnitStats.radius`, which is 2-3× tighter and scored
-        // nearly every shot as a miss on the last attempt). Zero-spread
-        // weapons always land; a missed shot still produces splash from
-        // `impact_pos` below for AoE weapons.
+        // `target` is the unit the shot actually struck (a projectile's
+        // collision, or a hitscan beam's target): the explosion sits on
+        // its collision surface, so it takes the full weapon damage
+        // (`DoExplosionDamage`: `expDist < 1 → mod 1`). A bolt that
+        // missed arrives with `target == None` and only splashes.
         let target_hit = match pending.target {
-            None => false, // ground-only hit: no primary target
+            None => false,
             Some(target) => {
                 let kind = target_unit_q.get(target).ok().map(|ut| ut.0);
-                let hit = if weapon_def.spray_angle > 0.0 {
-                    if let Ok((tgt_xform, tgt_stats)) = target_pos_q.get(target) {
-                        tgt_xform.translation().distance(pending.impact_pos) <= tgt_stats.hit_radius
-                    } else {
-                        false
-                    }
-                } else {
-                    true
-                };
-                if hit {
-                    let raw_damage = kind
-                        .map(|k| base(k) * dyn_mult)
-                        .unwrap_or(weapon_def.damage.default * dyn_mult);
-                    let primary_damage = raw_damage
-                        * byte_closed_damage_multiplier(
-                            target,
-                            is_sigterm,
-                            &target_unit_q,
-                            &byte_open_q,
-                            &stunned_q,
-                        );
-                    apply_hit(
+                let raw_damage = kind
+                    .map(|k| base(k) * dyn_mult)
+                    .unwrap_or(weapon_def.damage.default * dyn_mult);
+                let primary_damage = raw_damage
+                    * byte_closed_damage_multiplier(
                         target,
-                        pending.attacker,
-                        primary_damage,
-                        paralyzer,
-                        paralyze_time,
-                        &mut victims,
-                        &mut commands,
+                        is_sigterm,
+                        &target_unit_q,
+                        &byte_open_q,
+                        &stunned_q,
                     );
-                    victims.reset_idle(target, &mut commands);
-                    if let Ok((tgt_xform, _)) = target_pos_q.get(target) {
-                        impulse(target, tgt_xform.translation(), 1.0);
-                    }
+                apply_hit(
+                    target,
+                    pending.attacker,
+                    primary_damage,
+                    paralyzer,
+                    paralyze_time,
+                    &mut victims,
+                    &mut commands,
+                );
+                victims.reset_idle(target, &mut commands);
+                if let Ok((tgt_xform, _)) = target_pos_q.get(target) {
+                    impulse(target, tgt_xform.translation(), 1.0);
                 }
-                hit
+                true
             }
         };
 
@@ -586,8 +586,7 @@ pub fn apply_damage(
                 }
                 // Distance to the collision sphere's surface
                 // (`GetPointSurfaceDistance`), 0 inside it.
-                let d =
-                    (candidate.pos.distance(pending.impact_pos) - candidate.hit_radius).max(0.0);
+                let d = candidate.surface_distance(pending.impact_pos);
                 if d > aoe {
                     return;
                 }
@@ -827,9 +826,11 @@ mod tests {
                     kind: UnitKind::Byte,
                     weapon: WeaponId::BUILD_LASER,
                     target: Some(target),
-                    impact_pos: Vec3::ZERO,
+                    aim_pos: Vec3::ZERO,
                     is_traveling: false,
                     projectiles: 1,
+                    predict_mult: 1.0,
+                    predict_frame: 0,
                 },
                 shots_remaining: 3,
                 last_frame: 0,
@@ -862,9 +863,11 @@ mod tests {
                 kind,
                 weapon: WeaponId::BUILD_LASER,
                 target,
-                impact_pos: Vec3::ZERO,
+                aim_pos: Vec3::ZERO,
                 is_traveling: false,
                 projectiles: 1,
+                predict_mult: 1.0,
+                predict_frame: 0,
             },
             shots_remaining: 3,
             last_frame: 0,
@@ -1144,6 +1147,7 @@ mod tests {
                     entity,
                     pos: Vec3::new(x, 0.0, 0.0),
                     hit_radius: 0.0,
+                    mid_y: 0.0,
                     team,
                     kind: UnitKind::Bit,
                     hp_positive: true,

@@ -73,7 +73,7 @@ impl Harness {
     /// gives it, facing +X.
     pub fn spawn(&mut self, kind: UnitKind, team: u8, pos: Vec3) -> Entity {
         let registry = self.world.resource::<UnitRegistry>();
-        let stats = UnitStats::from_registry(kind, registry, 20.0);
+        let stats = UnitStats::from_registry(kind, registry, 20.0, 0.0);
         let transform = Transform::from_translation(pos)
             .with_rotation(Quat::from_rotation_arc(-Vec3::Z, Vec3::X));
         let e = self

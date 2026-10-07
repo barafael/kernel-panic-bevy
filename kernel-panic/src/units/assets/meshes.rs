@@ -214,6 +214,15 @@ pub fn unit_radius(kind: UnitKind, cache: &mut S3OModelCache, unit_registry: &Un
         .unwrap_or(20.0)
 }
 
+/// Height of a unit's s3o midpoint above its root (`midpoint.y`): the
+/// collision sphere's centre, `unit->midPos` in the engine.
+pub fn unit_mid_y(kind: UnitKind, cache: &mut S3OModelCache, unit_registry: &UnitRegistry) -> f32 {
+    let model_name = unit_registry.model(kind);
+    load_s3o_cached(model_name, cache)
+        .map(|m| m.midpoint[1])
+        .unwrap_or(0.0)
+}
+
 // ---------------------------------------------------------------------------
 // Model / texture loading from the unit bundle
 // ---------------------------------------------------------------------------

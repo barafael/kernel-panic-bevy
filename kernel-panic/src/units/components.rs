@@ -146,10 +146,15 @@ pub struct UnitStats {
     /// pack in formation without overlap.
     pub radius: f32,
     /// Volumetric hit radius from the S3O bounding sphere — what Spring's
-    /// `CCollisionHandler` tests. Used by `apply_damage` to decide whether
-    /// a `spray_angle`-perturbed shot landed on the primary target.
-    /// Typically 2-3× larger than `radius` for the same unit.
+    /// `CCollisionHandler` tests (projectile collisions, explosion
+    /// surface distances). Typically 2-3× larger than `radius` for the
+    /// same unit.
     pub hit_radius: f32,
+    /// Height of the model's midpoint above its root (S3O header
+    /// `midpoint.y`): the collision sphere's centre (`unit->midPos`) and
+    /// the point weapons aim at (`aimPos`). A Bit's ball is 16 above its
+    /// feet; a sphere centred on the feet would be half underground.
+    pub mid_y: f32,
     /// Top speed in elmos/s (FBI `MaxVelocity` × 30).
     pub speed: f32,
     /// `maxAcc` in elmos/frame² (FBI `Acceleration`), kept in Spring's
@@ -169,16 +174,18 @@ pub struct UnitStats {
 
 impl UnitStats {
     /// The per-kind stats `spawn_unit` caches, from the FBI registry.
-    /// `hit_radius` comes from the S3O model, which the registry
-    /// doesn't know.
+    /// `hit_radius` and `mid_y` come from the S3O model, which the
+    /// registry doesn't know.
     pub fn from_registry(
         kind: UnitKind,
         registry: &crate::units::content::unit_registry::UnitRegistry,
         hit_radius: f32,
+        mid_y: f32,
     ) -> Self {
         Self {
             radius: registry.collision_radius(kind),
             hit_radius,
+            mid_y,
             speed: registry.speed(kind),
             acc_rate: registry.acc_rate(kind),
             dec_rate: registry.dec_rate(kind),

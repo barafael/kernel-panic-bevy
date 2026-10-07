@@ -6,21 +6,30 @@
 //! sphere, cached at spawn time so projectile mid-flight collision can
 //! run a segment test without re-walking the piece tree.
 //!
-//! All math is centred on the unit's transform origin: callers pass the
-//! unit's world `center` and a world-space segment.
+//! The sphere is centred on the model midpoint (`unit->midPos`), `mid_y`
+//! above the unit's transform origin; [`CollisionVolume::center`] gives
+//! the world-space centre for a unit transform.
 
 use bevy::prelude::*;
 
-/// Origin-centred bounding sphere used for projectile-collision tests.
+/// Bounding sphere used for projectile-collision tests.
 #[derive(Component, Copy, Clone, Debug, PartialEq)]
 pub struct CollisionVolume {
     pub radius: f32,
+    /// Height of the sphere's centre above the unit origin (S3O
+    /// `midpoint.y`).
+    pub mid_y: f32,
 }
 
 impl CollisionVolume {
     /// The S3O model's authored bounding sphere.
-    pub fn from_s3o_radius(radius: f32) -> Self {
-        Self { radius }
+    pub fn from_s3o(radius: f32, mid_y: f32) -> Self {
+        Self { radius, mid_y }
+    }
+
+    /// World-space centre of the sphere for a unit at `tf`.
+    pub fn center(&self, tf: &GlobalTransform) -> Vec3 {
+        tf.translation() + Vec3::Y * self.mid_y
     }
 
     /// Mid-flight projectile collision. Returns the smallest `t` in
@@ -69,7 +78,7 @@ mod tests {
     }
 
     fn sphere(radius: f32) -> CollisionVolume {
-        CollisionVolume::from_s3o_radius(radius)
+        CollisionVolume::from_s3o(radius, 0.0)
     }
 
     #[test]
