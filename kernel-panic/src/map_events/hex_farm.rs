@@ -825,6 +825,7 @@ mod tests {
                     remaining: 1.0,
                     total: 1.0,
                     rally_point: None,
+                    rally_then: None,
                     style: crate::units::lifecycle::spawning::EmergeStyle::Fade,
                 },
             ))

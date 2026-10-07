@@ -77,14 +77,22 @@ pub fn trigger_movement_scripts(
     }
 }
 
+/// `CFactory::Update`: the yard closes only after this long without a
+/// build step (`GAME_SPEED * (UNIT_SLOWUPDATE_RATE >> 1)` = 210 frames).
+const DEACTIVATE_DELAY: f32 = 7.0;
+
 /// Detect factory activation and drive the driver's
-/// `activate`/`deactivate` hooks.
+/// `activate`/`deactivate` hooks. Activation is immediate (the first
+/// queued unit opens the yard); deactivation waits [`DEACTIVATE_DELAY`]
+/// after the last build step, so a factory between two orders keeps its
+/// arms out instead of folding and unfolding.
 pub fn trigger_production_scripts(
     mut query: Query<(Entity, &mut UnitAnimator, &Producer, Has<WasActive>)>,
     mut commands: Commands,
 ) {
     for (entity, mut animator, producer, was_active) in &mut query {
-        let is_active = producer.current_production().is_some();
+        let is_active = producer.current_production().is_some()
+            || (was_active && producer.idle_time < DEACTIVATE_DELAY);
         match (is_active, was_active) {
             (true, false) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;

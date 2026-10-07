@@ -6,21 +6,23 @@
 //! Lifecycle, faithful to the script:
 //!
 //! - `Create()` — pillars fan out (±45°/135°), everything sinks, bases
-//!   rise, then pillars/heads rise partway. `canbuild` flips true here.
+//!   rise, then (after `sleep 400`) pillars/heads rise partway; `canbuild`
+//!   flips true once pillar0 has settled, about 1.07 s in.
 //! - `Activate()` (production queue becomes non-empty) — wait for
 //!   `canbuild`, then unfold the four nano-arm pillars one per 200 ms
 //!   (`GetPillarNReady`), each staged with the script's re-speeds: tilt
 //!   out to 30°/35° and lift to 0, then pick up the head lift and the
 //!   outward turns once the pillar settles.
-//! - `Deactivate()` (production stops) — fold the pillars back down one
-//!   per **1800 ms** (`GetPillarNRest`): a slow retract that re-speeds
-//!   once the head re-seats, exactly like the script's `wait-for-turn`
-//!   cascades.
-//! - Production is **gated on the unfold**: the base does not start
-//!   building until every pillar is fully open (`is_open() == Some(true)`).
-//!   Upstream lets production begin mid-rise; the port intentionally
-//!   waits so the fold-out is seen in full.
-//! - While producing, the tips spray build sparks (`StartBuilding`).
+//! - `Deactivate()` (the host waits 7 s after the last build step, as
+//!   `CFactory::Update` does) — the `YARD_OPEN` loop holds 300 ms, then
+//!   the pillars fold back down one per **1800 ms** (`GetPillarNRest`): a
+//!   slow retract that re-speeds once the head re-seats, exactly like the
+//!   script's `wait-for-turn` cascades.
+//! - Production is **gated on the unfold**: `INBUILDSTANCE` is set at the
+//!   end of `GetPillar3Ready`, so the base does not start building until
+//!   the last pillar is fully open (`is_open() == Some(true)`).
+//! - While a unit is being built (`StartBuilding`..`StopBuilding`), the
+//!   four tips fire `BuildLaser` beams every 60 ms.
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 
@@ -28,8 +30,12 @@ use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
 const READY_STAGGER: f32 = 0.2;
 /// Deactivate(): `sleep 1800` between pillar folds.
 const REST_STAGGER: f32 = 1.8;
-/// StartBuilding(): emit burst per `sleep 60` (throttled 2×).
-const BUILD_EMIT_INTERVAL: f32 = 0.12;
+/// Deactivate(): `while (YARD_OPEN) { YARD_OPEN = 0; sleep 300 }`.
+const YARD_CLOSE_DELAY: f32 = 0.3;
+/// StartBuilding(): `emit-sfx 2048 from tipN; sleep 60`.
+const BUILD_EMIT_INTERVAL: f32 = 0.06;
+/// Create(): `sleep 400` between the base rise and the pillar rise.
+const PILLAR_RISE_DELAY: f32 = 0.4;
 /// A pillar's choreography is done once its stage passes this.
 const LAST_STAGE: u8 = 3;
 
@@ -103,11 +109,12 @@ struct Stage {
 }
 
 /// Ready stage 1 — the initial tilt/lift: pillar x → 30° @15°/s, head x
-/// → 35° @15°/s, head y → 0 @15, pillar y → 0 @40 elmos/s.
+/// → 35° @15°/s, head y → 0 @[6]=15 for pillars 0/1 but @[8]=20 for 2/3
+/// (`kernel.bos:35,50` vs `:65,80`), pillar y → 0 @40 elmos/s.
 fn pillar_ready_first(p: &Pillars, rig: &mut AnimRig, i: usize) {
     rig.turn_deg(p.pillar[i], Axis::X, 30.0, 15.0);
     rig.turn_deg(p.head[i], Axis::X, 35.0, 15.0);
-    rig.move_to(p.head[i], Axis::Y, 0.0, 15.0);
+    rig.move_to(p.head[i], Axis::Y, 0.0, if i < 2 { 15.0 } else { 20.0 });
     rig.move_to(p.pillar[i], Axis::Y, 0.0, 40.0);
 }
 
@@ -219,8 +226,11 @@ pub struct KernelAnim {
     /// The pillar tree's bound piece indices.
     pieces: Pillars,
     /// Create()'s staged rise: `Some(seconds_until_pillar_rise)` while
-    /// the bases are still coming up, `None` once `canbuild` is set.
+    /// the bases are still coming up (`sleep 400`), `None` once the
+    /// pillars have been sent up.
     rise_wait: Option<f32>,
+    /// `canbuild`: set after `wait-for-move pillar0` in Create().
+    canbuild: bool,
     /// Active Activate/Deactivate choreography, if any.
     choreo: Option<ChoreoState>,
     /// Fully unfolded (`All` pillars through `LAST_STAGE` of a Ready).
@@ -233,7 +243,8 @@ impl Default for KernelAnim {
     fn default() -> Self {
         Self {
             pieces: Pillars::default(),
-            rise_wait: Some(0.4),
+            rise_wait: Some(PILLAR_RISE_DELAY),
+            canbuild: false,
             choreo: None,
             open: false,
             build_emit_timer: 0.0,
@@ -281,11 +292,19 @@ impl UnitAnim for KernelAnim {
             }
         }
 
+        if !self.canbuild
+            && self.rise_wait.is_none()
+            && rig.at_target(self.pieces.pillar[0], Axis::Y)
+        {
+            // Create(): `wait-for-move pillar0 along y-axis; canbuild = 1`.
+            self.canbuild = true;
+        }
+
         // Activate()/Deactivate() staged choreography. Activate waits
         // for the rise (`while(!canbuild) sleep 100`) before the unfold
         // starts.
         if let Some(choreo) = &mut self.choreo
-            && !(choreo.kind == Choreo::Ready && self.rise_wait.is_some())
+            && !(choreo.kind == Choreo::Ready && !self.canbuild)
         {
             let stages = choreo.kind.stages();
             // Cascade stages across every started pillar until no
@@ -331,15 +350,18 @@ impl UnitAnim for KernelAnim {
             }
         }
 
-        // StartBuilding(): spray from all four tips while producing.
-        if ctx.producing {
+        // StartBuilding(): `emit-sfx 2048 from tip0..3; sleep 60` while a
+        // unit is actually being built.
+        if ctx.building {
             self.build_emit_timer -= ctx.dt;
             if self.build_emit_timer <= 0.0 {
                 self.build_emit_timer = BUILD_EMIT_INTERVAL;
                 for tip in self.pieces.tip.iter().take(4) {
-                    rig.emit(*tip, super::super::SfxKind::FireFlash);
+                    rig.emit(*tip, super::super::SfxKind::BuildBeam);
                 }
             }
+        } else {
+            self.build_emit_timer = 0.0;
         }
     }
 
@@ -355,12 +377,13 @@ impl UnitAnim for KernelAnim {
     }
 
     fn deactivate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
-        // Deactivate(): staged pillar-fold (one per 1800 ms across the 4).
+        // Deactivate(): the yard-close loop holds 300 ms, then the staged
+        // pillar-fold (one per 1800 ms across the 4).
         self.open = false;
         self.choreo = Some(ChoreoState {
             kind: Choreo::Rest,
             next: 0,
-            timer: 0.0,
+            timer: YARD_CLOSE_DELAY,
             stage: [0; 4],
         });
     }
@@ -413,6 +436,7 @@ mod tests {
             aim_active: false,
             attack_ordering: false,
             emerging: false,
+            building: false,
         }
     }
 

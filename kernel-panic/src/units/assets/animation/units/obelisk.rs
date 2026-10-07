@@ -77,13 +77,14 @@ impl UnitAnim for ObeliskAnim {
                 self.reloading = false;
                 self.segments_to(rig, 0.0, 8.0);
             }
-        } else {
-            // ChargeFX(): emit-sfx 1024 from tip while !reloading
-            // (script: every 50ms; throttled here for particle budget).
+        } else if self.post_emerge_done {
+            // ChargeFX(): `emit-sfx 1024 from tip` (`corruption_charge`)
+            // every 50 ms while !reloading — started by Create() only
+            // once the build is complete.
             self.charge_timer -= ctx.dt;
             if self.charge_timer <= 0.0 {
-                self.charge_timer = 0.25;
-                rig.emit(self.pieces.tip, SfxKind::Puff);
+                self.charge_timer = 0.05;
+                rig.emit(self.pieces.tip, SfxKind::Ceg("custom:corruption_charge"));
             }
         }
     }

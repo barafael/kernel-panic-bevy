@@ -218,7 +218,7 @@ fn collect_bar(
                 kind,
                 building: p
                     .current_production()
-                    .map(|k| (k, p.progress_fraction(&registry).unwrap_or(0.0))),
+                    .map(|k| (k, p.progress_fraction(&registry, kind).unwrap_or(0.0))),
                 runs,
                 recharge: None,
             });

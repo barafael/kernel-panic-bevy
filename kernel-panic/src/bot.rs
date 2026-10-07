@@ -278,6 +278,7 @@ fn bot_tick(
     heightmap: Option<Res<Heightmap>>,
     nav: Option<Res<NavGridSet>>,
     units: Query<UnitView>,
+    mut producers: Query<&mut crate::units::lifecycle::production::Producer>,
     mut camera: Query<&mut RtsCameraState, With<RtsCamera>>,
     mut time: ResMut<Time<Virtual>>,
     mut exit: MessageWriter<AppExit>,
@@ -376,6 +377,27 @@ fn bot_tick(
                     "attack {} units -> {}",
                     targets.len(),
                     target.index_u32()
+                ));
+            }
+            "build" => {
+                let sel = it.next().unwrap_or("");
+                let kind = it.next().and_then(parse_kind);
+                let count = it.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+                let Some(kind) = kind else {
+                    bot.log(&format!("bad build: {line}"));
+                    continue;
+                };
+                let targets = select(sel, &bot, &units);
+                for e in &targets {
+                    if let Ok(mut producer) = producers.get_mut(*e) {
+                        for _ in 0..count {
+                            producer.enqueue(kind);
+                        }
+                    }
+                }
+                bot.log(&format!(
+                    "build {count}x {kind:?} at {} factories",
+                    targets.len()
                 ));
             }
             "stop" => {

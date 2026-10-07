@@ -284,6 +284,7 @@ mod tests {
             remaining: 10.0,
             total: 10.0,
             rally_point: None,
+            rally_then: None,
             style: EmergeStyle::Rise,
         }
     }

@@ -16,7 +16,7 @@
 //! Linear constant 65536: `[20]` = 20 elmos, `[10]` = 10.
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
-use super::DeathFx;
+use super::{DeathFx, move_time};
 use crate::units::combat::DeployState;
 
 /// StartMoving(): `spin body around x-axis speed <180>`.
@@ -61,17 +61,6 @@ impl PointerPieces {
     }
 }
 
-/// Seconds a `move` needs from the piece's current offset on `axis`
-/// (the rig stores X mirrored, as `move_to` does).
-fn move_time(rig: &AnimRig, piece: usize, axis: Axis, target: f32) -> f32 {
-    let target = if axis == Axis::X { -target } else { target };
-    let current = rig
-        .piece_translations
-        .get(piece)
-        .map_or(0.0, |t| t[axis as usize]);
-    (target - current).abs() / MOVE_SPEED
-}
-
 /// Which script thread a [`Thread`] runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Script {
@@ -96,8 +85,9 @@ struct Thread {
 impl Thread {
     fn open(rig: &AnimRig, p: &PointerPieces, delay: f32) -> Self {
         // sleep; show gun + plates (wait left); gun out (wait); isOpen.
-        let plates = delay + move_time(rig, p.left, Axis::X, PLATE_SPREAD) + WAIT_LATENCY;
-        let gun = plates + move_time(rig, p.gun, Axis::Y, GUN_EXTEND) + WAIT_LATENCY;
+        let plates =
+            delay + move_time(rig, p.left, Axis::X, PLATE_SPREAD, MOVE_SPEED) + WAIT_LATENCY;
+        let gun = plates + move_time(rig, p.gun, Axis::Y, GUN_EXTEND, MOVE_SPEED) + WAIT_LATENCY;
         Self {
             script: Script::Open,
             t: 0.0,
@@ -111,8 +101,8 @@ impl Thread {
         // sleep 50; isOpen=0, gunbase back (wait y: already 0, one
         // frame); gun in (wait); plates in (wait); hide gun + spin.
         let gunbase = CLOSE_DELAY + WAIT_LATENCY;
-        let gun = gunbase + move_time(rig, p.gun, Axis::Y, 0.0) + WAIT_LATENCY;
-        let plates = gun + move_time(rig, p.left, Axis::X, 0.0) + WAIT_LATENCY;
+        let gun = gunbase + move_time(rig, p.gun, Axis::Y, 0.0, MOVE_SPEED) + WAIT_LATENCY;
+        let plates = gun + move_time(rig, p.left, Axis::X, 0.0, MOVE_SPEED) + WAIT_LATENCY;
         Self {
             script: Script::Close,
             t: 0.0,

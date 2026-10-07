@@ -469,6 +469,17 @@ impl UnitRegistry {
             .map_or(0.0, |d| d.build_time / DEFAULT_WORKER_TIME)
     }
 
+    /// FBI `WorkerTime`: build points a factory adds per second
+    /// (`CFactory::buildSpeed = workerTime / GAME_SPEED` per frame).
+    /// Kernel/Hole/Carrier build at 128, Socket/Window at 64 — a Bit
+    /// takes 1.9 s from a Kernel but 3.75 s from a Socket.
+    pub fn worker_time(&self, factory: UnitKind) -> f32 {
+        self.def(factory)
+            .map(|d| d.worker_time)
+            .filter(|w| *w > 0.0)
+            .unwrap_or(DEFAULT_WORKER_TIME)
+    }
+
     /// Per-team cap on live units of this kind (FBI `UnitRestricted`,
     /// Spring's `maxThisUnit`). Only `logic_bomb.fbi` declares one (64);
     /// upstream `Launcher.lua` and `byte.bos` (`lua_GetLogicBombLeft`)

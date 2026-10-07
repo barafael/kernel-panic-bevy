@@ -20,6 +20,7 @@ use crate::units::assets::animation::PieceIndex;
 use spring_map::smd_parser::MapInfo;
 
 use super::production::default_production;
+use crate::sim::Heading;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{
     S3OModelCache, piece_layout, selection_sphere, unit_material, unit_mid_y, unit_radius,
@@ -34,7 +35,7 @@ use crate::units::content::unit_registry::UnitRegistry;
 mod emerge;
 mod s3o_mount;
 
-pub use emerge::{EMERGE_DEPTH, EmergeStyle, Emerging, FadeMaterials, emerge_system};
+pub use emerge::{EmergeStyle, Emerging, FadeMaterials, emerge_system};
 pub use s3o_mount::PieceLayout;
 
 /// Bundles the asset / cache / registry resources `spawn_unit` needs.
@@ -60,22 +61,12 @@ pub struct SpawnContext<'w, 's> {
 /// position of script-driven pieces without rescanning the model every
 /// frame.
 ///
-/// `emitters` is the list of pieces that draw a build laser to `pad`
-/// while the factory is constructing something. The set is faction-
-/// specific:
-/// - **kernel** has `tip0..tip3` on its 4 pillars (4 rays).
-/// - **socket** has `blaser0`/`blaser1` (2 rays).
-/// - **hole**/**window**/**connection**/**port** have a single
-///   `nanoemitter` (or fall back to a root offset).
-/// - **carrier** has `mover` (the lifting hatch — emits from its raised
-///   position).
-///
-/// `pad` is the build target / emergence point. Both fields fall back
-/// to `None` when the model doesn't have the expected pieces, in which
-/// case the production system uses the factory's root transform.
+/// A factory's `QueryBuildInfo` piece: where the buildee stands
+/// (`pad` on Kernel/Hole/Carrier; `None` on Socket/Window, which build
+/// at their origin like the engine's `GetPiecePos(-1)`). Build-laser
+/// effects are the scripts' own (`emit-sfx 2048` from their pieces).
 #[derive(Component, Default)]
 pub struct FactoryPieces {
-    pub emitters: Vec<usize>,
     pub pad: Option<usize>,
 }
 
@@ -103,7 +94,12 @@ pub fn spawn_homebases(
     let seats = players.len().max(1) as f32;
     let mut bases = Vec::with_capacity(players.len());
 
-    for (i, seat) in players.iter().enumerate() {
+    // Resolve every seat's position first: kernel.bos/hole.bos/carrier.bos
+    // `TurnTowardBarycenter` turns each base's front toward the
+    // barycenter of all units (the bases, two ticks after Create) in 90°
+    // steps, so factories exit toward the enemy.
+    let mut positions = Vec::with_capacity(players.len());
+    for i in 0..players.len() {
         let (fx, fz) = map_info
             .start_positions
             .get(i)
@@ -114,13 +110,18 @@ pub fn spawn_homebases(
             });
         let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
         let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
-        let home_pos = heightmap.place(fx, fz);
+        positions.push(heightmap.place(fx, fz));
+    }
+    let barycenter = positions.iter().sum::<Vec3>() / positions.len().max(1) as f32;
 
-        spawn_unit(
+    for (seat, &home_pos) in players.iter().zip(&positions) {
+        let heading = barycenter_heading(home_pos, barycenter);
+        spawn_unit_facing(
             seat.faction.homebase(),
             seat.faction,
             seat.team,
             home_pos,
+            heading,
             ctx,
         );
         bases.push((seat.faction, seat.team, home_pos));
@@ -128,6 +129,20 @@ pub fn spawn_homebases(
 
     info!("Spawned {} homebases", players.len());
     bases
+}
+
+/// `TurnTowardBarycenter`: the heading from `from` toward `barycenter`
+/// snapped to the nearest 90° (`snap90(XZ_ATAN)`), south when the two
+/// coincide.
+pub fn barycenter_heading(from: Vec3, barycenter: Vec3) -> Heading {
+    let (dx, dz) = (barycenter.x - from.x, barycenter.z - from.z);
+    if dx * dx + dz * dz < 1.0 {
+        return Heading::default();
+    }
+    let raw = Heading::from_vector(dx, dz).0 as i32;
+    let quarter = crate::sim::SPRING_CIRCLE_DIVS / 4;
+    let snapped = (raw + quarter / 2).div_euclid(quarter) * quarter;
+    Heading(snapped as i16)
 }
 
 /// Starting squad per seat of the menu's attract-mode demo: the AI's
@@ -229,6 +244,19 @@ pub fn spawn_unit(
     position: Vec3,
     ctx: &mut SpawnContext,
 ) -> Entity {
+    spawn_unit_facing(kind, faction, team, position, Heading::default(), ctx)
+}
+
+/// [`spawn_unit`] with an initial heading (`CUnitLoader::LoadUnit`'s
+/// `facing`): factory products face their pad, homebases their enemy.
+pub fn spawn_unit_facing(
+    kind: UnitKind,
+    faction: Faction,
+    team: u8,
+    position: Vec3,
+    heading: Heading,
+    ctx: &mut SpawnContext,
+) -> Entity {
     // Reborrow each `SpawnContext` field as a plain `&mut` to its inner
     // value so the body — which threads `&mut Assets<…>` /
     // `&mut S3OModelCache` / `&UnitRegistry` to helper functions — can
@@ -268,7 +296,8 @@ pub fn spawn_unit(
         );
     }
 
-    let transform = Transform::from_translation(lifted_position);
+    let transform = Transform::from_translation(lifted_position)
+        .with_rotation(crate::interaction::ground_move::attitude(heading, Vec3::Y));
     let unit_entity = commands
         .spawn((
             UnitType(kind),
@@ -569,39 +598,12 @@ pub fn spawn_unit(
             }
         }
 
-        // For factories, cache the piece indices we need for build FX so
-        // the production system can read their world transforms each frame
-        // without rescanning the model. Indices are into the static piece
-        // table (which is what `AnimRig::piece_entities` is keyed on
-        // above) — `None` if the model has no such piece, in which case
-        // the production system falls back to the factory root.
         if default_production(kind).is_some() {
             let table = crate::units::assets::animation::piece_names(kind);
             let table_index = |name: &str| -> Option<usize> {
                 table.iter().position(|p| p.eq_ignore_ascii_case(name))
             };
-            // Faction-specific emitter piece names, in the order they
-            // appear in the upstream .bos for each factory. Pieces that
-            // don't exist on this model resolve to None and are filtered
-            // out, so unknown factories naturally fall through to the
-            // single-nanoemitter case (or to the synthetic-offset
-            // fallback in production_system if even that's missing).
-            //
-            // Note: upstream's Network homebase is Carrier (with `mover`
-            // hatch); we use Connection instead, which has no production
-            // pieces in its .bos at all. Connection therefore falls
-            // through to the nanoemitter case → synthetic offset.
-            let emitter_names: &[&str] = match kind {
-                UnitKind::Kernel => &["tip0", "tip1", "tip2", "tip3"],
-                UnitKind::Socket => &["blaser0", "blaser1"],
-                _ => &["nanoemitter"],
-            };
-            let emitters: Vec<usize> = emitter_names
-                .iter()
-                .filter_map(|n| table_index(n))
-                .collect();
             commands.entity(unit_entity).insert(FactoryPieces {
-                emitters,
                 pad: table_index("pad"),
             });
         }

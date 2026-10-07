@@ -3,14 +3,14 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 use super::spawning::{
-    EMERGE_DEPTH, EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext, spawn_unit,
+    EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext, spawn_unit_facing,
 };
+use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
-use crate::units::components::{Faction, TeamId, UnitType};
+use crate::units::components::{Faction, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::content::weapons::WeaponId;
-use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
+use crate::units::spatial::{SpatialIndex, flat_dist_sq};
 
 /// Attached to factories/homebases. Builds units from its queue.
 ///
@@ -37,6 +37,12 @@ pub struct Producer {
     /// its queue forever. Minifacs start with it on (upstream
     /// `kp_autospam.lua`); homebases start with it off.
     repeat: bool,
+    /// A build step ran this frame (`CFactory::UpdateBuild`): the window
+    /// between the script's `StartBuilding` and `StopBuilding`.
+    pub building: bool,
+    /// Seconds since the last build step; the yard closes after
+    /// `script_triggers::DEACTIVATE_DELAY` of it.
+    pub idle_time: f32,
 }
 
 impl Producer {
@@ -47,6 +53,8 @@ impl Producer {
             unit_spawned: false,
             spawn_count: 0,
             repeat: false,
+            building: false,
+            idle_time: 0.0,
         }
     }
 
@@ -85,8 +93,8 @@ impl Producer {
 
     /// Fraction of the current build done, `0..=1` (the build bar's
     /// progress pie).
-    pub fn progress_fraction(&self, registry: &UnitRegistry) -> Option<f32> {
-        self.current_build_time(registry).map(|t| {
+    pub fn progress_fraction(&self, registry: &UnitRegistry, factory: UnitKind) -> Option<f32> {
+        self.current_build_time(registry, factory).map(|t| {
             if t > 0.0 {
                 (self.progress / t).clamp(0.0, 1.0)
             } else {
@@ -100,10 +108,12 @@ impl Producer {
         self.queue.front().copied()
     }
 
-    /// Build time for the current production using the unit registry.
-    fn current_build_time(&self, registry: &UnitRegistry) -> Option<f32> {
+    /// Build time of the current production in seconds: the buildee's
+    /// FBI `BuildTime` over this factory's `WorkerTime`
+    /// (`CFactory::UpdateBuild` adds `workerTime / GAME_SPEED` a frame).
+    fn current_build_time(&self, registry: &UnitRegistry, factory: UnitKind) -> Option<f32> {
         self.current_production()
-            .map(|kind| registry.build_time(kind))
+            .map(|kind| registry.raw_build_time(kind) / registry.worker_time(factory))
     }
 
     /// The queued build orders. Read by the build bar's queue counts,
@@ -229,37 +239,74 @@ pub fn default_production(kind: UnitKind) -> Option<Producer> {
     minifac_spam(kind).map(Producer::spamming)
 }
 
-/// Push one frame's worth of a build-laser strand from `start` to `end`,
-/// or — if either is too close to the factory root — synthesise a short
-/// downward strand so something still shows during the first frame after
-/// spawn (before the COB script has had time to position its pieces).
-fn emit_build_ray(
-    start: Vec3,
-    end: Vec3,
-    factory_root: Vec3,
-    pending: &mut PendingAttacks,
-    build_arc: bool,
-) {
-    // Defensive: zero-length rays produce no visible effect and would
-    // generate a NaN normal in spawn_beam — skip them.
-    let length_sq = (end - start).length_squared();
-    let (start, end) = if length_sq < 1.0 {
-        (factory_root + Vec3::new(8.0, 24.0, 0.0), factory_root)
-    } else {
-        (start, end)
-    };
+/// One unit queued for spawning this frame: kind, faction, team, pad
+/// position, facing, `(exit, free spot)` waypoints, build time, style.
+type PendingSpawn = (
+    UnitKind,
+    Faction,
+    u8,
+    Vec3,
+    crate::sim::Heading,
+    Option<(Vec3, Vec3)>,
+    f32,
+    EmergeStyle,
+);
 
-    pending.events.push(AttackEvent {
-        attacker_pos: start,
-        target_pos: end,
-        weapon_id: WeaponId::BUILD_LASER,
-        // BuildLaser pulses don't drive a muzzle CEG — the sparkle at
-        // the target end is the primary fx; strobing the builder every
-        // frame would drown out the rest of the scene.
-        muzzle_ceg: None,
-        delayed_hit: None,
-        build_arc,
-    });
+/// Extra reach of the pad-blocked query beyond the product's own radius:
+/// the largest footprint radius a unit standing on the pad can have.
+const PAD_BLOCK_REACH: f32 = 48.0;
+
+/// `CFactory::SendToEmptySpot`: the first free spot on a half-circle of
+/// radius `4·R + 4·r` in front of the factory, scanning 100 steps from
+/// straight ahead toward the right; failing that, a random spot on the
+/// same arc so units don't pile up. "Free" means no unit within `1.5·r`.
+fn empty_exit_spot(
+    pos: Vec3,
+    forward: Vec3,
+    factory_radius: f32,
+    unit_radius: f32,
+    spatial: &SpatialIndex,
+    heightmap: Option<&Heightmap>,
+    rng: &mut u32,
+) -> Vec3 {
+    const STEPS: usize = 100;
+    let search_radius = factory_radius * 4.0 + unit_radius * 4.0;
+    let step = std::f32::consts::PI / (STEPS as f32 * 0.5);
+    let right = Vec3::new(forward.z, 0.0, -forward.x);
+    let (world_w, world_d) =
+        heightmap.map_or((f32::INFINITY, f32::INFINITY), Heightmap::world_size);
+    let in_bounds = |p: Vec3| p.x >= 0.0 && p.z >= 0.0 && p.x < world_w && p.z < world_d;
+    let on_arc =
+        |a: f32| pos + forward * (search_radius * a.cos()) + right * (search_radius * a.sin());
+    let free = |p: Vec3| {
+        let mut taken = false;
+        spatial.query_radius(p, unit_radius * 1.5, |_| taken = true);
+        !taken
+    };
+    let place = |p: Vec3| heightmap.map_or(p, |hm| hm.place(p.x, p.z));
+    let candidate = (0..STEPS)
+        .map(|i| on_arc(i as f32 * step))
+        .find(|p| in_bounds(*p) && (*p - pos).dot(forward) >= 0.0 && free(*p));
+    if let Some(found) = candidate {
+        return place(found);
+    }
+    for _ in 0..STEPS {
+        let p = on_arc(crate::rng::next_f32(rng) * STEPS as f32 * step);
+        if in_bounds(p) && (p - pos).dot(forward) >= 0.0 {
+            return place(p);
+        }
+    }
+    place(pos + forward * search_radius)
+}
+
+/// XZ-flatten and normalise a forward vector, +Z when degenerate.
+fn flat_forward(forward: Vec3) -> Vec3 {
+    let f = Vec3::new(forward.x, 0.0, forward.z);
+    if f.length_squared() < 1e-6 {
+        Vec3::Z
+    } else {
+        f.normalize()
+    }
 }
 
 /// Farthest a factory's pad piece can be from its root (elmos); a piece
@@ -284,11 +331,13 @@ fn piece_world_pos(
 pub fn production_system(
     time: Res<Time>,
     mut producers: Query<(
+        Entity,
         &mut Producer,
         &UnitType,
         &Faction,
         &TeamId,
-        &GlobalTransform,
+        &Transform,
+        &UnitStats,
         Option<&FactoryPieces>,
         Option<&UnitAnimator>,
         Option<&crate::units::components::Homebase>,
@@ -297,34 +346,30 @@ pub fn production_system(
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
     unit_count: Res<super::bookkeeping::TotalUnitCount>,
-    mut pending_attacks: ResMut<PendingAttacks>,
+    spatial: Res<SpatialIndex>,
+    heightmap: Option<Res<Heightmap>>,
     mut ctx: SpawnContext,
     mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
     // `Local` so the allocation is reused across frames — production
     // completions are sparse (most ticks push nothing), but fresh Vecs on
     // every frame cost allocator churn for no gain.
-    mut spawns: Local<
-        Vec<(
-            UnitKind,
-            Faction,
-            u8,
-            Vec3,
-            f32,
-            Option<Vec3>,
-            f32,
-            EmergeStyle,
-        )>,
-    >,
+    mut spawns: Local<Vec<PendingSpawn>>,
+    mut exit_rng: Local<u32>,
 ) {
+    if *exit_rng == 0 {
+        *exit_rng = 0x5EED_FAC7;
+    }
     let dt = time.delta_secs();
     spawns.clear();
 
     for (
+        factory_entity,
         mut producer,
         factory_type,
         faction,
         team,
-        global_tf,
+        factory_tf,
+        stats,
         factory_pieces,
         animator,
         homebase,
@@ -334,21 +379,60 @@ pub fn production_system(
         // A factory still rising out of its construction site is not
         // finished yet — upstream only hands out orders on
         // `UnitFinished`, so a half-built Socket must not spam Bits.
+        producer.building = false;
         if emerging {
             continue;
         }
-        let Some(build_time) = producer.current_build_time(&ctx.unit_registry) else {
+        let Some(build_time) = producer.current_build_time(&ctx.unit_registry, factory_type.0)
+        else {
             // Queue is empty — idle.
             producer.progress = 0.0;
+            producer.idle_time += dt;
             continue;
         };
 
-        // A fold-capable homebase (the Kernel) must finish its unfold
-        // before production may begin: hold progress at zero until the
-        // driver reports it fully open. Units without a fold cycle
-        // return `None` and pass straight through.
+        // `CFactory::Update` starts a build only once the yard is open
+        // and the script has set `INBUILDSTANCE` (the Kernel's pillars
+        // unfolded, the Hole's 2.3 s fade-in, the Window's flap, the
+        // Carrier's pad lift). Drivers without such a gate return `None`.
         if animator.is_some_and(|a| a.driver.is_open() == Some(false)) {
+            producer.idle_time = 0.0;
             continue;
+        }
+
+        // The factory's own `Transform` (a root entity, so world space):
+        // its `GlobalTransform` is still identity on the frame it
+        // spawned, which placed a freshly spawned Socket's first Bit at
+        // the map origin.
+        let factory_pos = factory_tf.translation;
+        // A piece's `GlobalTransform` is likewise unpropagated on that
+        // frame: a pad that is nowhere near its factory is ignored.
+        let pad_pos = factory_pieces
+            .and_then(|fp| piece_world_pos(fp.pad, animator, &piece_transforms))
+            .filter(|p| p.distance_squared(factory_pos) < MAX_PAD_OFFSET * MAX_PAD_OFFSET)
+            .unwrap_or(factory_pos);
+        let kind = producer.current_production().unwrap();
+
+        // `CFactory::StartBuild` returns early while the pad is
+        // `GroundBlocked`: the next unit waits until the previous one has
+        // walked clear instead of spawning inside it.
+        if !producer.unit_spawned {
+            let product_radius = ctx.unit_registry.collision_radius(kind);
+            let mut blocked = false;
+            spatial.query_radius(pad_pos, product_radius + PAD_BLOCK_REACH, |other| {
+                // The factory's own yard squares are open to its buildee.
+                if other.entity == factory_entity || other.is_flying || blocked {
+                    return;
+                }
+                let reach = product_radius + ctx.unit_registry.collision_radius(other.kind);
+                if flat_dist_sq(other.pos, pad_pos) < reach * reach {
+                    blocked = true;
+                }
+            });
+            if blocked {
+                producer.idle_time = 0.0;
+                continue;
+            }
         }
 
         let speed_mult = if homebase.is_some() {
@@ -358,149 +442,76 @@ pub fn production_system(
             1.0
         };
         producer.progress += dt * speed_mult;
+        producer.building = true;
+        producer.idle_time = 0.0;
 
-        let factory_pos = global_tf.translation();
         // Spring's factory build step goes through `AllowUnitBuildStep`
         // with the buildee (on the factory pad) — Hex Farm rebuilds
         // sunk neighbours with it.
-        if let (Some(inbox), Some(kind)) = (hex_farm.as_deref_mut(), producer.current_production())
-        {
+        if let Some(inbox) = hex_farm.as_deref_mut() {
             inbox.build_step(
                 factory_pos,
                 dt * speed_mult / build_time * ctx.unit_registry.raw_build_time(kind),
             );
         }
-        // A piece's `GlobalTransform` is still identity on the frame its
-        // factory spawned (propagation runs later), which once placed
-        // the first unit at the map origin: a pad that is nowhere near
-        // its factory is not propagated yet.
-        let pad_pos = factory_pieces
-            .and_then(|fp| piece_world_pos(fp.pad, animator, &piece_transforms))
-            .filter(|p| p.distance_squared(factory_pos) < MAX_PAD_OFFSET * MAX_PAD_OFFSET)
-            .unwrap_or(factory_pos);
 
-        // One ray per emitter piece. Kernel has 4 (one per pillar tip),
-        // socket has 2 (the orbiting blasers), most others have 1
-        // (`nanoemitter`). When there are no resolvable emitters at all
-        // — Connection has none — fall back to the synthetic above-root
-        // offset so the player still sees *something* indicating
-        // construction is happening.
-        let mut emitted_any = false;
-        if let Some(fp) = factory_pieces {
-            for &emitter_idx in &fp.emitters {
-                if let Some(pos) = piece_world_pos(Some(emitter_idx), animator, &piece_transforms) {
-                    emit_build_ray(
-                        pos,
-                        pad_pos,
-                        factory_pos,
-                        &mut pending_attacks,
-                        factory_type.0 == UnitKind::Gateway,
-                    );
-                    emitted_any = true;
-                }
-            }
-        }
-        if !emitted_any {
-            let synthetic = factory_pos + Vec3::new(0.0, 24.0, 16.0);
-            emit_build_ray(
-                synthetic,
-                pad_pos,
-                factory_pos,
-                &mut pending_attacks,
-                factory_type.0 == UnitKind::Gateway,
-            );
-        }
-
-        // The unit exists for its whole build, as Spring's nanoframe
-        // does: it is spawned the moment its build starts and rises out
-        // of the pad over `build_time` (its script's `Create()` loop
-        // tracks `BUILD_PERCENT_LEFT`). The *queue* only pops once the
-        // full build_time has elapsed.
+        // The unit exists for its whole build, as the engine's buildee
+        // does: it is spawned the moment its build starts, standing on
+        // the pad at full height (Kernel Panic draws no nanoframe), and
+        // its script's `Create()` loop tracks `BUILD_PERCENT_LEFT`. The
+        // *queue* only pops once the full build_time has elapsed.
         //
-        // Divergence: upstream nanoframes can be shot mid-build; here
-        // the whole `Emerging` window doubles as spawn protection —
-        // `rebuild_spatial_index` excludes `Emerging` entities, so
-        // nothing can target a unit that is still (partly) underground.
-        // See the note there before changing either side.
-        let emerge_lead = build_time;
-        let spawn_threshold = 0.0;
-
-        if !producer.unit_spawned && producer.progress >= spawn_threshold {
+        // Divergence: upstream buildees can be shot mid-build; here the
+        // whole `Emerging` window doubles as spawn protection —
+        // `rebuild_spatial_index` excludes `Emerging` entities. See the
+        // note there before changing either side.
+        if !producer.unit_spawned {
             // O(1) via the bookkeeping-maintained counter — the old
             // `iter().count()` scanned every unit each time a factory
             // sat at the spawn threshold.
             if unit_count.0 > 10_000 {
-                // Don't busy-loop; pin progress at the threshold and
-                // try again next frame.
-                producer.progress = spawn_threshold;
+                // Don't busy-loop; pin progress at zero and try again.
+                producer.progress = 0.0;
                 continue;
             }
 
-            // Compute a rally point that's offset from the factory in
-            // its forward direction so the new unit walks clear of the
-            // hole once it has finished emerging. Stationary units
-            // (speed == 0) get no rally point.
-            //
-            // Per-unit spread: a single rally point makes every Packet
-            // from the same Carrier converge on the same spot and pile
-            // up. Lay out points on a grid in front of the factory —
-            // rows of seven, each row further away, lateral slot picked
-            // from `spawn_count`. Produces a deterministic, non-piling
-            // rally cloud without any RNG or allocation.
-            let kind = producer.current_production().unwrap();
-            let rally_point = if ctx.unit_registry.speed(kind) > 0.0 {
-                let raw_forward = global_tf.forward().as_vec3();
-                let forward = if raw_forward.length_squared() > 0.01 {
-                    Vec3::new(raw_forward.x, 0.0, raw_forward.z).normalize_or(Vec3::Z)
-                } else {
-                    Vec3::Z
-                };
-                // Right-hand perpendicular on XZ (Y-up): (fz, 0, -fx).
-                let right = Vec3::new(forward.z, 0.0, -forward.x);
-                const SLOTS_PER_ROW: u32 = 7;
-                const LATERAL_STEP: f32 = 20.0;
-                const ROW_STEP: f32 = 40.0;
-                // The first row must land beyond the factory's visual
-                // silhouette, not just its gameplay footprint: the
-                // Kernel's model is 128 elmos wide while its footprint
-                // radius is only 32, so a fixed 60-elmo rally left
-                // freshly-built units standing "inside" the base.
-                let factory_radius = crate::units::assets::meshes::unit_radius(
-                    factory_type.0,
+            // `CFactory::SendToEmptySpot`: a waypoint just outside the
+            // factory, then the first free spot on the exit arc.
+            let forward = flat_forward(factory_tf.forward().as_vec3());
+            let heading = crate::sim::Heading::from_vector(forward.x, forward.z);
+            let exit = if ctx.unit_registry.speed(kind) > 0.0 {
+                let factory_radius = stats.hit_radius;
+                let unit_radius = crate::units::assets::meshes::unit_radius(
+                    kind,
                     &mut ctx.model_cache,
                     &ctx.unit_registry,
                 );
-                let unit_radius = ctx.unit_registry.collision_radius(kind);
-                const EXIT_MARGIN: f32 = 24.0;
-                let row0_distance = (factory_radius + unit_radius + EXIT_MARGIN).max(60.0);
-                let n = producer.spawn_count;
-                let slot = (n % SLOTS_PER_ROW) as f32 - (SLOTS_PER_ROW as f32 - 1.0) * 0.5;
-                let ring = (n / SLOTS_PER_ROW) as f32;
-                let offset =
-                    forward * (row0_distance + ring * ROW_STEP) + right * (slot * LATERAL_STEP);
-                Some(pad_pos + offset)
+                let found = empty_exit_spot(
+                    factory_pos,
+                    forward,
+                    factory_radius,
+                    unit_radius,
+                    &spatial,
+                    heightmap.as_deref(),
+                    &mut exit_rng,
+                );
+                let exit = factory_pos + forward * (factory_radius + unit_radius);
+                Some((
+                    heightmap
+                        .as_deref()
+                        .map_or(exit, |hm| hm.place(exit.x, exit.z)),
+                    found,
+                ))
             } else {
                 None
             };
             producer.spawn_count = producer.spawn_count.wrapping_add(1);
 
-            // System units rise out of the ground (start underground at
-            // `pad_y - EMERGE_DEPTH`); Hacker / Network units materialize
-            // at-surface with an alpha ramp. Style picks both behaviors.
+            // System units stand on the pad from the first frame; Hacker /
+            // Network units materialize at-surface with an alpha ramp.
             let style = faction.emerge_style();
-            let spawn_pos = match style {
-                EmergeStyle::Rise => Vec3::new(pad_pos.x, pad_pos.y - EMERGE_DEPTH, pad_pos.z),
-                EmergeStyle::Fade => Vec3::new(pad_pos.x, pad_pos.y, pad_pos.z),
-            };
             spawns.push((
-                kind,
-                *faction,
-                team.0,
-                spawn_pos,
-                pad_pos.y,
-                rally_point,
-                emerge_lead,
-                style,
+                kind, *faction, team.0, pad_pos, heading, exit, build_time, style,
             ));
             producer.unit_spawned = true;
         }
@@ -512,15 +523,15 @@ pub fn production_system(
         }
     }
 
-    for (kind, faction, team, spawn_pos, target_y, rally_point, emerge_duration, style) in
-        spawns.drain(..)
+    for (kind, faction, team, spawn_pos, heading, exit, emerge_duration, style) in spawns.drain(..)
     {
-        let entity = spawn_unit(kind, faction, team, spawn_pos, &mut ctx);
+        let entity = spawn_unit_facing(kind, faction, team, spawn_pos, heading, &mut ctx);
         ctx.commands.entity(entity).insert(Emerging {
-            target_y,
+            target_y: spawn_pos.y,
             remaining: emerge_duration,
             total: emerge_duration,
-            rally_point,
+            rally_point: exit.map(|(e, _)| e),
+            rally_then: exit.map(|(_, found)| found),
             style,
         });
         // Fade-style emergence needs per-unit cloned materials so the

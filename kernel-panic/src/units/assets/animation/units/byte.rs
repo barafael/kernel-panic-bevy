@@ -18,7 +18,7 @@
 //! back to rest, so the armour is off during that return.
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
-use super::DeathFx;
+use super::{DeathFx, move_time, turn_time};
 
 /// Close(): `sleep 3000` before folding after the last aim.
 const IDLE_CLOSE_DELAY: f32 = 3.0;
@@ -83,27 +83,6 @@ impl BytePieces {
             ],
         }
     }
-}
-
-/// Seconds a `move` needs from the piece's current offset on `axis`
-/// (the rig stores X mirrored, as `move_to` does).
-fn move_time(rig: &AnimRig, piece: usize, axis: Axis, target: f32, speed: f32) -> f32 {
-    let target = if axis == Axis::X { -target } else { target };
-    let current = rig
-        .piece_translations
-        .get(piece)
-        .map_or(0.0, |t| t[axis as usize]);
-    (target - current).abs() / speed
-}
-
-/// Seconds a `turn` needs from the piece's current angle on `axis`
-/// (degrees per second).
-fn turn_time(rig: &AnimRig, piece: usize, axis: Axis, target_deg: f32, speed_dps: f32) -> f32 {
-    let current = rig
-        .piece_rotations
-        .get(piece)
-        .map_or(0.0, |r| r[axis as usize].to_degrees());
-    (target_deg - current).abs() / speed_dps
 }
 
 /// Which fold choreography a [`Sequencer`] runs. `fire(i)` issues entry

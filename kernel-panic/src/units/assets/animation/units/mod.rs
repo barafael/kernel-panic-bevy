@@ -170,6 +170,29 @@ impl SquareSweep {
     }
 }
 
+/// Seconds a `move piece to axis target speed` needs from the piece's
+/// current offset — what the script's `wait-for-move` waits for. The
+/// rig stores X mirrored (as `move_to` does), so the target is mirrored
+/// the same way.
+pub fn move_time(rig: &AnimRig, piece: usize, axis: Axis, target: f32, speed: f32) -> f32 {
+    let target = if axis == Axis::X { -target } else { target };
+    let current = rig
+        .piece_translations
+        .get(piece)
+        .map_or(0.0, |t| t[axis as usize]);
+    (target - current).abs() / speed
+}
+
+/// Seconds a `turn piece to axis target speed` needs from the piece's
+/// current angle (degrees per second).
+pub fn turn_time(rig: &AnimRig, piece: usize, axis: Axis, target_deg: f32, speed_dps: f32) -> f32 {
+    let current = rig
+        .piece_rotations
+        .get(piece)
+        .map_or(0.0, |r| r[axis as usize].to_degrees());
+    (target_deg - current).abs() / speed_dps
+}
+
 /// The shared `.bos` build-emerge idiom: `move base to y-axis
 /// ([-depth]*(get BUILD_PERCENT_LEFT)/100) now`. Sinks `piece` by
 /// `depth` elmos proportionally to the build percentage so freshly-built

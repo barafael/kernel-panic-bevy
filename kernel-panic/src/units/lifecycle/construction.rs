@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use crate::units::content::weapons::WeaponId;
 
 use super::production::PendingFadeInstall;
-use super::spawning::{EMERGE_DEPTH, EmergeStyle, Emerging, SpawnContext, spawn_unit};
+use super::spawning::{EmergeStyle, Emerging, SpawnContext, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -188,15 +188,16 @@ pub fn tick_construction(
         if constructing.building.is_none() && build_time > 0.0 {
             let style = faction.emerge_style();
             let target_y = constructing.site.y;
-            let spawn_pos = match style {
-                EmergeStyle::Rise => Vec3::new(
-                    constructing.site.x,
-                    target_y - EMERGE_DEPTH,
-                    constructing.site.z,
-                ),
-                EmergeStyle::Fade => constructing.site,
-            };
-            let new_entity = spawn_unit(constructing.kind, *faction, team.0, spawn_pos, &mut ctx);
+            // The building stands at its final height from the first
+            // frame (no nanoframe in KP); its own script sinks and
+            // raises pieces with `BUILD_PERCENT_LEFT`.
+            let new_entity = spawn_unit(
+                constructing.kind,
+                *faction,
+                team.0,
+                constructing.site,
+                &mut ctx,
+            );
             // Emerging runs for the full build_time so the rise/fade
             // tracks the build progress 1:1 — both decay at `dt` per
             // frame.
@@ -205,6 +206,7 @@ pub fn tick_construction(
                 remaining: build_time,
                 total: build_time,
                 rally_point: None,
+                rally_then: None,
                 style,
             });
             if matches!(style, EmergeStyle::Fade) {

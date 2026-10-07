@@ -244,7 +244,18 @@ pub enum SfxKind {
     /// `SFX_FIRE_WEAPON_BASE..SFX_DETONATE_WEAPON_BASE` — weapon-fire
     /// flash at the piece (builder beams, idle turret flares). Small pop.
     FireFlash,
+    /// `emit-sfx 2048` on a factory: fire the unit's `BuildLaser` beam
+    /// from the piece along its emit direction (`CUnitScript::EmitSfx`
+    /// → `CWeapon::Fire` toward `absPos + absDir`), a 256-elmo white
+    /// beam that stops where it meets the ground.
+    BuildBeam,
+    /// `SFX_CEG_BASE + n` — the unit's n-th `explosiongenerator`, by its
+    /// authored name (`custom:corruption_const`).
+    Ceg(&'static str),
 }
+
+/// `BuildLaser` range (`retroweapons.tdf [BuildLaser] range=256`).
+const BUILD_BEAM_RANGE: f32 = 256.0;
 
 /// The per-unit animation hardware: piece table, interpolation arrays and
 /// the effect outbox. Split from [`UnitAnimator`] so a driver call can
@@ -474,6 +485,11 @@ pub struct AnimCtx {
     /// emergence, the snap-to-rest would fight later choreography on
     /// the same piece (e.g. the byte's base lift on unfold).
     pub emerging: bool,
+    /// The unit (as a factory) advanced a buildee this frame: the window
+    /// between the engine's `StartBuilding` and `StopBuilding` calls,
+    /// which excludes the unfold, a blocked pad and the gap between
+    /// units.
+    pub building: bool,
 }
 
 impl AnimCtx {
@@ -488,6 +504,7 @@ impl AnimCtx {
             aim_active: false,
             attack_ordering: false,
             emerging: false,
+            building: false,
         }
     }
 }
@@ -598,6 +615,12 @@ pub struct UnitAnimator {
 pub struct AnimFxOut<'w, 's> {
     pub transforms:
         Query<'w, 's, (&'static mut Transform, &'static mut Visibility), With<PieceIndex>>,
+    /// Last frame's world pose of each piece, for beams fired along a
+    /// piece's emit direction.
+    pub globals:
+        Query<'w, 's, (&'static GlobalTransform, Option<&'static PieceEmit>), With<PieceIndex>>,
+    pub attacks: ResMut<'w, crate::units::weapon_fx::PendingAttacks>,
+    pub heightmap: Option<Res<'w, crate::terrain::heightmap::Heightmap>>,
     pub commands: Commands<'w, 's>,
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
@@ -654,10 +677,12 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
         attack_move,
     ) in &mut drivers.animators
     {
+        // `BUILD_PERCENT_LEFT` is `int((1 - buildProgress) * 100)`:
+        // truncated, so it reads 0 once the build passes 99 %.
         let build_percent = emerging
             .map(|e| {
                 if e.total > 0.0 {
-                    ((e.remaining / e.total) * 100.0).round() as i32
+                    ((e.remaining / e.total) * 100.0) as i32
                 } else {
                     0
                 }
@@ -673,6 +698,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
                 aim_target.is_some(),
             ),
             producing: producer.is_some_and(|p| p.current_production().is_some()),
+            building: producer.is_some_and(|p| p.building),
             aim_active: aim_target.is_some(),
             attack_ordering: attack_ground.is_some() || attack_target.is_some(),
             emerging: emerging.is_some(),
@@ -803,6 +829,35 @@ fn apply_and_drain(
                     &mut fx.materials,
                 );
             }
+            FxEvent::Emit {
+                piece,
+                kind: SfxKind::BuildBeam,
+            } if in_range(piece) => {
+                let Ok((gtf, emit)) = fx.globals.get(rig.piece_entities[piece]) else {
+                    continue;
+                };
+                let start = gtf.translation();
+                let dir = gtf
+                    .rotation()
+                    .mul_vec3(emit.map_or(Vec3::Z, |e| e.dir))
+                    .normalize_or(Vec3::NEG_Y);
+                let far = start + dir * BUILD_BEAM_RANGE;
+                let end = fx
+                    .heightmap
+                    .as_deref()
+                    .and_then(|hm| hm.ground_hit(start, far))
+                    .unwrap_or(far);
+                fx.attacks
+                    .events
+                    .push(crate::units::weapon_fx::AttackEvent {
+                        attacker_pos: start,
+                        target_pos: end,
+                        weapon_id: crate::units::content::weapons::WeaponId::BUILD_LASER,
+                        muzzle_ceg: None,
+                        delayed_hit: None,
+                        build_arc: false,
+                    });
+            }
             FxEvent::Emit { piece, kind } if in_range(piece) => {
                 let piece_world_pos = fx
                     .transforms
@@ -859,6 +914,17 @@ fn dispatch_emit_sfx(
     let (radius, intensity) = match kind {
         SfxKind::FireFlash => (4.0, 0.8),
         SfxKind::Puff => (2.5, 0.6),
+        SfxKind::Ceg(name) => {
+            explosions.events.push(ExplosionEvent {
+                pos,
+                rgb: faction.rgb_f32(),
+                radius: 8.0,
+                ceg_name: name.to_string(),
+            });
+            return;
+        }
+        // Handled by the caller: it needs the piece's direction.
+        SfxKind::BuildBeam => return,
     };
 
     let base = faction.rgb_f32();

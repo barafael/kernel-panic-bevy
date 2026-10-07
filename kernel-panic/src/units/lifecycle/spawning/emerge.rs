@@ -21,6 +21,10 @@ pub struct Emerging {
     /// World point the unit should walk to once it has emerged. `None` for
     /// stationary units that don't need to clear the factory.
     pub rally_point: Option<Vec3>,
+    /// `CFactory::SendToEmptySpot`'s second waypoint: the free spot on
+    /// the factory's exit arc, queued behind `rally_point` (the point
+    /// just outside the factory).
+    pub rally_then: Option<Vec3>,
     /// How the model becomes visible during the rise window.
     pub style: EmergeStyle,
 }
@@ -58,15 +62,14 @@ pub struct FadeMaterials {
     pub overrides: Vec<(Entity, Handle<StandardMaterial>)>,
 }
 
-/// Distance below ground that a freshly-built unit starts at. The
-/// `emerge_system` lifts it back up by this much. Roughly the height of a
-/// typical unit so the model is fully hidden underground at t=0.
-pub const EMERGE_DEPTH: f32 = 40.0;
-
-/// Tick `Emerging` units forward — either lerping Y upward (Rise style)
-/// or ramping per-piece alpha (Fade style). When the timer expires the
-/// component is removed, faded materials are restored to the shared
-/// originals, and the unit gets its rally-walk command if any.
+/// Tick `Emerging` units forward. A `Rise`-style unit stands at its
+/// final height from the first frame: Kernel Panic sets
+/// `ShowNanoFrame=0` on every unit, so the engine draws the complete
+/// model in place and all construction motion comes from the unit's own
+/// script (`BUILD_PERCENT_LEFT` piece moves). `Fade` ramps per-piece
+/// alpha. When the timer expires the component is removed, faded
+/// materials are restored to the shared originals, and the unit gets its
+/// rally-walk command if any.
 pub fn emerge_system(
     time: Res<Time>,
     mut commands: Commands,
@@ -87,11 +90,9 @@ pub fn emerge_system(
 
         match emerging.style {
             EmergeStyle::Rise => {
-                // Ease-out so the unit decelerates as it reaches the surface
-                // (reads as "machine settling into place").
-                let eased = 1.0 - (1.0 - t).powi(2);
-                let start_y = emerging.target_y - EMERGE_DEPTH;
-                transform.translation.y = start_y + (emerging.target_y - start_y) * eased;
+                if transform.translation.y != emerging.target_y {
+                    transform.translation.y = emerging.target_y;
+                }
             }
             EmergeStyle::Fade => {
                 // Linear alpha ramp; pieces stay at surface y throughout.
@@ -124,13 +125,17 @@ pub fn emerge_system(
                 }
                 commands.entity(entity).remove::<FadeMaterials>();
             }
-            let rally = emerging.rally_point;
+            let (rally, then) = (emerging.rally_point, emerging.rally_then);
             commands.entity(entity).remove::<Emerging>();
             if let Some(target) = rally {
-                commands
-                    .entity(entity)
-                    .insert(crate::interaction::movement::MoveTarget(target))
+                let mut unit = commands.entity(entity);
+                unit.insert(crate::interaction::movement::MoveTarget(target))
                     .remove::<crate::interaction::movement::MovePath>();
+                if let Some(then) = then {
+                    unit.insert(crate::interaction::movement::CommandQueue {
+                        commands: vec![crate::interaction::movement::QueuedCommand::Move(then)],
+                    });
+                }
             }
         }
     }
