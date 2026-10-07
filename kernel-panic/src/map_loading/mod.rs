@@ -1041,8 +1041,6 @@ fn spawn_prepared_map(
         &mut ctx.images,
     );
 
-    ctx.commands.insert_resource(nav_set);
-
     {
         let (pixels, mm_w, mm_h) = &minimap;
         ui::minimap::setup_minimap(
@@ -1069,22 +1067,37 @@ fn spawn_prepared_map(
             // Each seat gets a starting squad so there is action to
             // watch before the first production cycle completes; the
             // menu's demo director restarts the match once it's decided.
-            let bases = spawn_homebases(&heightmap, map_info, &setup.players, &mut ctx);
+            let bases = spawn_homebases(
+                &heightmap,
+                map_info,
+                Some(&nav_set),
+                &setup.players,
+                &mut ctx,
+            );
             spawn_demo_squads(&heightmap, &bases, &mut ctx);
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();
         } else if let Some(faction) = setup.showcase {
-            spawn_showcase_homebase(&heightmap, map_info, faction, &mut ctx);
+            spawn_showcase_homebase(&heightmap, map_info, Some(&nav_set), faction, &mut ctx);
             ctx.commands
                 .insert_resource(crate::showcase::ShowcaseDirector::new(faction));
             info!("  Showcase({:?}) — skipping full roster", faction);
         } else {
-            spawn_homebases(&heightmap, map_info, &setup.players, &mut ctx);
+            spawn_homebases(
+                &heightmap,
+                map_info,
+                Some(&nav_set),
+                &setup.players,
+                &mut ctx,
+            );
             // Clear any leftover showcase director from a previous game.
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();
         }
         configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
+    }
+    ctx.commands.insert_resource(nav_set);
+    if let Some(map_info) = &map_info {
         let datavent_count = features
             .iter()
             .filter(|f| f.feature_type.is_geovent())

@@ -101,6 +101,9 @@ Port: `animation/units/pointer.rs` (owns the deploy cycle),
   on the arc if none is free. The buildee faces the pad's heading.
 - `TurnTowardBarycenter` (kernel, hole, carrier): the base's front snaps
   in 90° steps toward the barycenter of all units two ticks after Create.
+  The port keeps that heading only when its exit arc has room and
+  walkable ground (`spawning::exit_heading`); a corner or lone base turns
+  toward the map instead, so its products never queue at the edge.
 - Per script: Socket `BuildLasers` (±60 square, 1.5 s) only during its
   own construction, `ConLasers` (inner pair bobbing to 35 @40) forever
   after with beams while `building`; Terminal body from 75 under, lasers

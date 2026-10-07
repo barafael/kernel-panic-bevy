@@ -84,6 +84,7 @@ const HOMEBASE_EDGE_MARGIN: f32 = 100.0;
 pub fn spawn_homebases(
     heightmap: &Heightmap,
     map_info: &MapInfo,
+    nav: Option<&crate::interaction::movement::NavGridSet>,
     players: &[crate::game_setup::PlayerSpec],
     ctx: &mut SpawnContext,
 ) -> Vec<(Faction, u8, Vec3)> {
@@ -97,7 +98,8 @@ pub fn spawn_homebases(
     // Resolve every seat's position first: kernel.bos/hole.bos/carrier.bos
     // `TurnTowardBarycenter` turns each base's front toward the
     // barycenter of all units (the bases, two ticks after Create) in 90°
-    // steps, so factories exit toward the enemy.
+    // steps, so factories exit toward the enemy — provided that side has
+    // room and walkable ground; see `exit_heading`.
     let mut positions = Vec::with_capacity(players.len());
     for i in 0..players.len() {
         let (fx, fz) = map_info
@@ -115,7 +117,13 @@ pub fn spawn_homebases(
     let barycenter = positions.iter().sum::<Vec3>() / positions.len().max(1) as f32;
 
     for (seat, &home_pos) in players.iter().zip(&positions) {
-        let heading = barycenter_heading(home_pos, barycenter);
+        let heading = exit_heading(
+            home_pos,
+            barycenter,
+            heightmap,
+            nav,
+            &ExitProducts::of(seat.faction, ctx),
+        );
         spawn_unit_facing(
             seat.faction.homebase(),
             seat.faction,
@@ -129,6 +137,153 @@ pub fn spawn_homebases(
 
     info!("Spawned {} homebases", players.len());
     bases
+}
+
+/// What a homebase's exit has to accommodate: the base's own radius and
+/// its swarm product's radius and slope cap, for the `SendToEmptySpot`
+/// arc (`4R + 4r`) its units will walk to.
+pub struct ExitProducts {
+    pub factory_radius: f32,
+    pub unit_radius: f32,
+    pub slope_cap: f32,
+}
+
+impl ExitProducts {
+    pub fn of(faction: Faction, ctx: &mut SpawnContext) -> Self {
+        let product = match faction {
+            Faction::System => UnitKind::Bit,
+            Faction::Hacker => UnitKind::Bug,
+            Faction::Network => UnitKind::Packet,
+        };
+        let registry = &*ctx.unit_registry;
+        let cache = &mut *ctx.model_cache;
+        Self {
+            factory_radius: unit_radius(faction.homebase(), cache, registry),
+            unit_radius: unit_radius(product, cache, registry),
+            slope_cap: registry.max_slope_ratio(product),
+        }
+    }
+}
+
+/// The 90°-snapped heading a homebase should face so that its products
+/// walk cleanly into the map.
+///
+/// The script's `TurnTowardBarycenter` picks the quarter turn toward the
+/// barycenter of the bases; on a two-sided map that is toward the enemy.
+/// But a base in a map corner, or alone (sandbox, showcase, one seat per
+/// edge), can end up facing the map boundary or a cliff, and then every
+/// product falls back to a random exit spot and jams at the edge. So each
+/// of the four headings is scored by how much of the `SendToEmptySpot`
+/// exit arc (`4R + 4r` ahead, front half) lies inside the map on ground
+/// the product can stand on; a heading whose exit waypoint itself is off
+/// the map or unwalkable scores nothing. Headings scoring at least three
+/// quarters of the best are candidates. The barycenter's heading is kept
+/// while it is a candidate and no other candidate has a quarter more
+/// room to the map edge ahead of it (a corner base turns along the
+/// longer side); otherwise the candidate with the most room wins, ties
+/// going to the one nearest the map centre.
+pub fn exit_heading(
+    from: Vec3,
+    barycenter: Vec3,
+    heightmap: &Heightmap,
+    nav: Option<&crate::interaction::movement::NavGridSet>,
+    products: &ExitProducts,
+) -> Heading {
+    const QUARTER: i32 = crate::sim::SPRING_CIRCLE_DIVS / 4;
+    /// Fraction of the best score a heading must reach to be a candidate.
+    const KEEP_FRACTION: f32 = 0.75;
+    /// Another candidate needs this much more room ahead to override the
+    /// barycenter heading.
+    const ROOM_SWITCH: f32 = 1.25;
+    let (world_w, world_d) = heightmap.world_size();
+    let centre = Vec3::new(world_w * 0.5, 0.0, world_d * 0.5);
+    let preferred = barycenter_heading(from, barycenter);
+    let toward_centre = barycenter_heading(from, centre);
+    let arc = 4.0 * products.factory_radius + 4.0 * products.unit_radius;
+    let exit = products.factory_radius + products.unit_radius;
+
+    let walkable = |x: f32, z: f32| {
+        x >= 0.0
+            && z >= 0.0
+            && x < world_w
+            && z < world_d
+            && nav.is_none_or(|n| n.passable(products.slope_cap, x, z))
+    };
+    let score = |heading: Heading| -> usize {
+        let f = heading.to_vector();
+        let (fx, fz) = (f.x, f.y);
+        // `rightdir = frontdir × updir`: facing +Z, right is −X.
+        let (rx, rz) = (-fz, fx);
+        // Units leave through the exit waypoint first: no exit, no use.
+        if !walkable(from.x + fx * exit, from.z + fz * exit) {
+            return 0;
+        }
+        let mut n = 1;
+        // The half circle `SendToEmptySpot` scans, one sample per step.
+        const STEPS: usize = 100;
+        for i in 0..STEPS {
+            let a = i as f32 * std::f32::consts::PI / (STEPS as f32 * 0.5);
+            let (c, s) = (a.cos(), a.sin());
+            if c < 0.0 {
+                continue;
+            }
+            let x = from.x + fx * (arc * c) + rx * (arc * s);
+            let z = from.z + fz * (arc * c) + rz * (arc * s);
+            if walkable(x, z) {
+                n += 1;
+            }
+        }
+        n
+    };
+
+    // Distance to the map edge straight ahead.
+    let room = |heading: Heading| -> f32 {
+        let f = heading.to_vector();
+        let along_x = if f.x > 0.5 {
+            world_w - from.x
+        } else if f.x < -0.5 {
+            from.x
+        } else {
+            f32::INFINITY
+        };
+        let along_z = if f.y > 0.5 {
+            world_d - from.z
+        } else if f.y < -0.5 {
+            from.z
+        } else {
+            f32::INFINITY
+        };
+        along_x.min(along_z).max(0.0)
+    };
+
+    let scored: Vec<(Heading, usize)> = (0..4)
+        .map(|q| Heading((q * QUARTER) as i16))
+        .map(|h| (h, score(h)))
+        .collect();
+    let best = scored.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    if best == 0 {
+        return preferred;
+    }
+    let band: Vec<Heading> = scored
+        .iter()
+        .filter(|(_, n)| *n as f32 >= best as f32 * KEEP_FRACTION)
+        .map(|(h, _)| *h)
+        .collect();
+    let turn_from_centre = |h: Heading| (h.wrapping_sub(toward_centre) as i32).abs();
+    let roomiest = band
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            room(*a)
+                .total_cmp(&room(*b))
+                .then_with(|| turn_from_centre(*b).cmp(&turn_from_centre(*a)))
+        })
+        .unwrap_or(preferred);
+    if band.contains(&preferred) && room(roomiest) < room(preferred) * ROOM_SWITCH {
+        preferred
+    } else {
+        roomiest
+    }
 }
 
 /// `TurnTowardBarycenter`: the heading from `from` toward `barycenter`
@@ -205,6 +360,7 @@ pub fn spawn_demo_squads(
 pub fn spawn_showcase_homebase(
     heightmap: &Heightmap,
     map_info: &MapInfo,
+    nav: Option<&crate::interaction::movement::NavGridSet>,
     faction: Faction,
     ctx: &mut SpawnContext,
 ) {
@@ -218,7 +374,14 @@ pub fn spawn_showcase_homebase(
     let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
     let home_pos = heightmap.place(fx, fz);
 
-    spawn_unit(faction.homebase(), faction, 0, home_pos, ctx);
+    let heading = exit_heading(
+        home_pos,
+        home_pos,
+        heightmap,
+        nav,
+        &ExitProducts::of(faction, ctx),
+    );
+    spawn_unit_facing(faction.homebase(), faction, 0, home_pos, heading, ctx);
     info!(
         "Showcase({:?}): spawned {:?} homebase at ({:.0}, {:.0})",
         faction,
@@ -678,6 +841,84 @@ pub fn spawn_queued_mines(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::interaction::movement::{NavBucket, NavGridSet};
+
+    const W: usize = 129;
+    const D: usize = 97;
+    const PRODUCTS: ExitProducts = ExitProducts {
+        factory_radius: 64.0,
+        unit_radius: 16.0,
+        slope_cap: 0.412_215,
+    };
+
+    /// 1024 × 768 elmos, flat.
+    fn flat() -> Heightmap {
+        Heightmap::from_raw(vec![100.0; W * D], W, D)
+    }
+
+    /// A base at the west edge facing the enemy to the east keeps that
+    /// heading; alone in the north-west corner, where the script's
+    /// south-facing default would walk its products along the edge, it
+    /// turns east into the map instead.
+    #[test]
+    fn exit_heading_turns_away_from_the_map_edge() {
+        let hm = flat();
+        let centre = Vec3::new(512.0, 100.0, 384.0);
+        let west = Vec3::new(120.0, 100.0, 384.0);
+        assert_eq!(
+            exit_heading(west, centre, &hm, None, &PRODUCTS),
+            Heading(16384)
+        );
+        let corner = Vec3::new(120.0, 100.0, 120.0);
+        assert_eq!(barycenter_heading(corner, corner), Heading(0));
+        assert_eq!(
+            exit_heading(corner, corner, &hm, None, &PRODUCTS),
+            Heading(16384)
+        );
+    }
+
+    /// A cliff across the exit makes the base face a side where its
+    /// units can actually walk out.
+    #[test]
+    fn exit_heading_avoids_an_unwalkable_exit() {
+        let mut heights = vec![100.0; W * D];
+        // Three raised vertex rows at z = 192..208 elmos: the squares on
+        // either side are far too steep for a Bit.
+        for row in [24, 26] {
+            for x in 0..W {
+                heights[row * W + x] = 600.0;
+            }
+        }
+        let hm = Heightmap::from_raw(heights.clone(), W, D);
+        let slope_mod = spring_pathfinding::slope_mod_from_max_slope(PRODUCTS.slope_cap);
+        let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
+            &heights,
+            W as u32,
+            D as u32,
+            PRODUCTS.slope_cap,
+            slope_mod,
+        );
+        let mut nav = NavGridSet::default();
+        nav.buckets.push(NavBucket {
+            max_slope: PRODUCTS.slope_cap,
+            speed_map,
+        });
+        let base = Vec3::new(512.0, 100.0, 120.0);
+        let centre = Vec3::new(512.0, 100.0, 384.0);
+        assert_eq!(barycenter_heading(base, centre), Heading(0));
+        assert!(!nav.passable(PRODUCTS.slope_cap, 512.0, 200.0));
+        // Flat ground: the barycenter heading stands. With the cliff
+        // across it, the base turns to one of the open sides instead.
+        assert_eq!(
+            exit_heading(base, centre, &flat(), None, &PRODUCTS),
+            Heading(0)
+        );
+        let turned = exit_heading(base, centre, &hm, Some(&nav), &PRODUCTS);
+        assert!(
+            matches!(turned, Heading(16384) | Heading(-16384)),
+            "{turned:?}"
+        );
+    }
 
     /// `TurnTowardBarycenter`: the heading toward the barycenter snapped
     /// to 90° steps (0 = +Z, 16384 = +X), wrapping cleanly at the back.
