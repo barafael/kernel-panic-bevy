@@ -461,8 +461,6 @@ pub struct AnimCtx {
     pub moving: bool,
     /// The unit (as a factory) is currently producing something.
     pub producing: bool,
-    /// Deploy cycle state for units with a `Deployable` component.
-    pub deploy: Option<crate::units::combat::DeployState>,
     /// The unit currently has a live aim request (`AimTarget`).
     pub aim_active: bool,
     /// The unit is under an explicit attack order (attack-target /
@@ -487,7 +485,6 @@ impl AnimCtx {
             build_percent: 0,
             moving: false,
             producing: false,
-            deploy: None,
             aim_active: false,
             attack_ordering: false,
             emerging: false,
@@ -568,6 +565,13 @@ pub trait UnitAnim: Send + Sync + 'static {
     fn is_open(&self) -> Option<bool> {
         None
     }
+
+    /// For units with a deploy cycle (the Pointer): where the script's
+    /// `Open()`/`Close()` threads are right now. The host mirrors it into
+    /// [`crate::units::combat::Deployable`] for the fire gates.
+    fn deploy_state(&self) -> Option<crate::units::combat::DeployState> {
+        None
+    }
 }
 
 /// Component holding a unit's animation rig and its per-kind driver.
@@ -618,7 +622,6 @@ pub struct AnimDrivers<'w, 's> {
             Option<&'static MoveTarget>,
             Option<&'static MovePath>,
             Option<&'static crate::units::lifecycle::production::Producer>,
-            Option<&'static crate::units::combat::Deployable>,
             Option<&'static crate::units::lifecycle::spawning::Emerging>,
             Option<&'static crate::units::combat::AimTarget>,
             Option<&'static crate::units::combat::AttackGroundOrder>,
@@ -644,7 +647,6 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
         move_target,
         move_path,
         producer,
-        deployable,
         emerging,
         aim_target,
         attack_ground,
@@ -671,7 +673,6 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
                 aim_target.is_some(),
             ),
             producing: producer.is_some_and(|p| p.current_production().is_some()),
-            deploy: deployable.map(|d| d.state),
             aim_active: aim_target.is_some(),
             attack_ordering: attack_ground.is_some() || attack_target.is_some(),
             emerging: emerging.is_some(),

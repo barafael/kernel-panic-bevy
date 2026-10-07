@@ -410,7 +410,6 @@ mod tests {
             build_percent: 0,
             moving: false,
             producing: false,
-            deploy: None,
             aim_active: false,
             attack_ordering: false,
             emerging: false,

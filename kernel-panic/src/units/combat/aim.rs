@@ -1,11 +1,11 @@
 //! Deploy cycle + host-driven aim for armed units.
 //!
 //! Two concerns:
-//! - **Deploy state machine** — [`Deployable`] / [`DeployState`] track the
-//!   pack/unpack cycle for units that must unfold before firing (Pointer).
-//!   [`tick_deploy_state`] flips between states in response to movement,
-//!   firing the unit's `Open` / `Close` COB scripts so the visible model
-//!   stays in sync with the logical state.
+//! - **Deploy state** — [`Deployable`] / [`DeployState`] mirror the
+//!   pack/unpack cycle of units that must unfold before firing (Pointer).
+//!   The unit's animation driver owns the cycle (it runs the script's
+//!   `Open()` / `Close()` threads off `StartMoving` / `StopMoving`);
+//!   [`sync_deploy_state`] copies its state here for the fire gates.
 //! - **Aim** — [`aim_weapons_system`] points each unit's weapon at its
 //!   [`AimTarget`]. The path branches on whether the unit's COB script
 //!   declares an `aimer` piece: see the function docs for the upstream
@@ -29,12 +29,11 @@ pub enum DeployState {
     Closing,
 }
 
-/// Attached to units with a deploy cycle. `timer` counts down through
-/// transition states; the duration is the animation length in seconds.
+/// Attached to units with a deploy cycle: the driver's state, mirrored
+/// every frame by [`sync_deploy_state`].
 #[derive(Component)]
 pub struct Deployable {
     pub state: DeployState,
-    pub timer: f32,
 }
 
 /// Stamped by `combat_system` each frame an armed unit has picked a target
@@ -143,10 +142,6 @@ pub const AIM_HEADING_TOLERANCE: f32 = 0.09;
 /// a frame and gating every shot.
 pub const AIM_PITCH_TOLERANCE: f32 = 0.09;
 
-/// Open/Close animation length in seconds, matching the upstream COB
-/// script timings (legs move over 0.5s, gun extends over another 1.0s).
-pub const DEPLOY_DURATION: f32 = 1.5;
-
 /// Host-side mirror of the byte's fold state, read by the damage
 /// pipeline for the upstream 30 % closed-state damage reduction
 /// (`byte.bos HitByWeaponId`). Written by [`sync_byte_fold_state`]
@@ -244,12 +239,11 @@ pub fn drive_aim_script(
             &AimTarget,
             Option<&MoveTarget>,
             Option<&MovePath>,
-            Option<&Deployable>,
         ),
         Without<Dying>,
     >,
 ) {
-    for (mut aim, mut animator, gtf, target, move_target, move_path, deployable) in &mut query {
+    for (mut aim, mut animator, gtf, target, move_target, move_path) in &mut query {
         let (rel_heading, pitch_rad) = local_aim_angles(
             gtf.rotation(),
             target.pos - gtf.translation(),
@@ -260,13 +254,9 @@ pub fn drive_aim_script(
         let dp = (pitch_rad - aim.last_pitch_rad).abs();
         let retarget = dh > AIM_SCRIPT_RETARGET_THRESHOLD || dp > AIM_SCRIPT_RETARGET_THRESHOLD;
 
-        // The deploy state is what a Deployable's `AimWeapon1` checks
-        // (pointer.bos `if (isOpen)`): without it the Pointer's aim
-        // never reported ready.
         let ctx = AnimCtx {
             moving: move_target.is_some() || move_path.is_some(),
             aim_active: true,
-            deploy: deployable.map(|d| d.state),
             ..AnimCtx::minimal()
         };
         let UnitAnimator { rig, driver, .. } = &mut *animator;
@@ -279,81 +269,27 @@ pub fn drive_aim_script(
 }
 
 impl Deployable {
-    /// Freshly-spawned deployable units start stowed (`Closed`). The
-    /// `tick_deploy_state` system promotes them to `Opening` as soon as
-    /// they're idle (i.e. have no move order), which triggers the COB
-    /// `Open()` animation.
+    /// Freshly-spawned deployable units start stowed (`Closed`); the
+    /// driver opens them from `Create()` (if built) or after their first
+    /// `StopMoving`.
     pub fn initial() -> Self {
         Self {
             state: DeployState::Closed,
-            timer: 0.0,
         }
     }
 }
 
-/// Drive the deploy state machine from movement state. Stopping
-/// schedules `Open`; starting to move schedules `Close`. The visible
-/// open/close choreography is the animation driver's job — it watches
-/// the deploy state through its [`AnimCtx::deploy`] each frame.
-///
-/// [`AnimCtx::deploy`]: crate::units::assets::animation::AnimCtx::deploy
-#[allow(clippy::type_complexity)]
-pub fn tick_deploy_state(
-    time: Res<Time>,
-    mut query: Query<
-        (
-            &mut Deployable,
-            Option<&MoveTarget>,
-            Option<&MovePath>,
-            Has<crate::interaction::movement::AttackMoveActive>,
-            Has<AimTarget>,
-        ),
-        Without<Dying>,
-    >,
-) {
-    let dt = time.delta_secs();
-    for (mut deployable, move_target, move_path, attack_move, aiming) in &mut query {
-        let is_moving = crate::interaction::movement::moving_for_script(
-            move_target.is_some() || move_path.is_some(),
-            attack_move,
-            aiming,
-        );
-
-        // Steady-state fast path: if no transition is in flight and the
-        // deploy state already matches the movement state, there is
-        // nothing to update. Skips the bulk of branch work in the
-        // common case (a Pointer parked on a hill, every frame, for the
-        // whole game).
-        if deployable.timer == 0.0
-            && matches!(
-                (deployable.state, is_moving),
-                (DeployState::Open, false) | (DeployState::Closed, true)
-            )
-        {
-            continue;
-        }
-
-        if deployable.timer > 0.0 {
-            deployable.timer = (deployable.timer - dt).max(0.0);
-            if deployable.timer == 0.0 {
-                deployable.state = match deployable.state {
-                    DeployState::Opening => DeployState::Open,
-                    DeployState::Closing => DeployState::Closed,
-                    other => other,
-                };
-            }
-        }
-
-        match (deployable.state, is_moving) {
-            (DeployState::Open, true) | (DeployState::Opening, true) => {
-                deployable.state = DeployState::Closing;
-                deployable.timer = DEPLOY_DURATION;
-            }
-            (DeployState::Closed, false) | (DeployState::Closing, false) => {
-                deployable.state = DeployState::Opening;
-                deployable.timer = DEPLOY_DURATION;
-            }
-            _ => {}
+/// Mirror each deployable unit's driver state into [`Deployable`]: the
+/// script's `isOpen` and its running `Open()`/`Close()` thread are the
+/// single source of truth for whether the Pointer may fire.
+pub fn sync_deploy_state(mut query: Query<(&mut Deployable, &UnitAnimator)>) {
+    for (mut deployable, animator) in &mut query {
+        let state = animator
+            .driver
+            .deploy_state()
+            .unwrap_or(DeployState::Closed);
+        if deployable.state != state {
+            deployable.state = state;
         }
     }
 }
@@ -391,10 +327,16 @@ pub fn aim_weapons_system(
         Option<&mut crate::interaction::ground_move::GroundMover>,
         Has<MoveTarget>,
         Has<AttackMoveActive>,
+        Option<&Deployable>,
     )>,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, stats, aim, aimer, mover, has_move, attack_move) in &mut query {
+    for (mut transform, stats, aim, aimer, mover, has_move, attack_move, deployable) in &mut query {
+        // pointer.bos turns the body (`set HEADING`) inside `AimWeapon1`
+        // only `if (isOpen)`: a stowed or unfolding Pointer sits still.
+        if deployable.is_some_and(|d| d.state != DeployState::Open) {
+            continue;
+        }
         // HoverAttack aircraft (Flow) never turn their body for an
         // auto-acquired target: `HoverAirMoveType` owns the heading (it
         // only faces `circlingPos` under an explicit attack order), and

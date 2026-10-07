@@ -74,6 +74,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
             .init_resource::<ai::AiTicker>()
+            .init_resource::<ai::TeamDamageLog>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<combat::DamageQueue>()
@@ -108,8 +109,14 @@ impl Plugin for UnitsPlugin {
                 FixedUpdate,
                 // Also runs in `AppState::Menu`: the attract-mode demo
                 // behind the menu is an all-AI skirmish.
-                ai::ai_brain
-                    .before(GameplaySet::Produce)
+                //
+                // `track_team_damage` must not sit behind `ai_brain`'s
+                // 1 Hz gate: it diffs HP per frame.
+                (
+                    ai::track_team_damage,
+                    ai::ai_brain.before(GameplaySet::Produce),
+                )
+                    .chain()
                     .run_if(in_state(game_over::GameState::Playing)),
             )
             .configure_sets(
@@ -173,7 +180,7 @@ impl Plugin for UnitsPlugin {
                             worm::init_autohold,
                             cloak::update_cloak_detection,
                             spatial::rebuild_spatial_index,
-                            combat::tick_deploy_state,
+                            combat::sync_deploy_state,
                             combat::tick_kamikaze,
                             combat::drive_aim_script,
                             combat::combat_system,

@@ -8,6 +8,7 @@
 use bevy::prelude::*;
 
 use super::production::Producer;
+use crate::interaction::ground_move::GroundMover;
 use crate::interaction::movement::{AttackMoveActive, MovePath, MoveTarget, moving_for_script};
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::combat::{AimTarget, Dying};
@@ -28,6 +29,13 @@ pub struct WasActive;
 
 /// Detect movement start/stop and drive the driver's
 /// `start_moving`/`stop_moving` hooks.
+///
+/// Ground units follow `CGroundMoveType::UpdateOwnerSpeed`: `StartMoving`
+/// when the speed rises above 0.01, `StopMoving` when it falls back —
+/// so a unit that halts mid-path (blocked, or holding to shoot on an
+/// attack-move) gets its stop script, and a Pointer ordered off while
+/// deployed starts folding the moment it rolls. Flyers, which have no
+/// ground mover, keep the order-based rule.
 #[allow(clippy::type_complexity)]
 pub fn trigger_movement_scripts(
     mut query: Query<(
@@ -38,17 +46,21 @@ pub fn trigger_movement_scripts(
         Has<AttackMoveActive>,
         Has<AimTarget>,
         Has<WasMoving>,
+        Option<&GroundMover>,
     )>,
     mut commands: Commands,
 ) {
-    for (entity, mut animator, move_target, move_path, attack_move, aiming, was_moving) in
+    for (entity, mut animator, move_target, move_path, attack_move, aiming, was_moving, mover) in
         &mut query
     {
-        let is_moving = moving_for_script(
-            move_target.is_some() || move_path.is_some(),
-            attack_move,
-            aiming,
-        );
+        let is_moving = match mover {
+            Some(m) => m.is_moving(),
+            None => moving_for_script(
+                move_target.is_some() || move_path.is_some(),
+                attack_move,
+                aiming,
+            ),
+        };
         match (is_moving, was_moving) {
             (true, false) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;
