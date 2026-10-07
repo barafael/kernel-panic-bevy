@@ -80,6 +80,50 @@ Port: `animation/units/pointer.rs` (owns the deploy cycle),
 `aim::sync_deploy_state`, `script_triggers::trigger_movement_scripts`,
 `command_fire::{NxCast, tick_nx_casts}`.
 
+## Build lasers (`[BuildLaser]`, `BeamLaserProjectile.cpp`)
+
+- `emit-sfx 2048 from <piece>` fires weapon 1 from the piece along its
+  emit direction (`CUnitScript::EmitSfx`: target = `absPos + absDir`);
+  the beam ray stops at the first unit (`collidefriendly=1`, so the
+  buildee) or the ground within `range=256`.
+- BuildLaser is a white BeamLaser: `thickness=5` (10 elmos wide),
+  `corethickness` default 0.25, `intensity=5` (alpha clamps to opaque),
+  `beamTTL=2` frames, no decay. Untextured BeamLasers and LaserCannons
+  draw with the engine atlas: `laserfalloff` across the body (a
+  cross-beam gradient), `laserend` half-discs capping each end, and for a
+  BeamLaser a camera-facing `flare` of `thickness · laserflaresize`
+  (default 15) half-size at the emitter. Its impact plays
+  `oldskool_build` (one rising hollow square per hit).
+- Mobile builders aim their emitter first: Assembler `StartBuilding(h,p)`
+  extends the nozzle 8 elmos, turns the rotor onto `h` and the nozzle
+  onto `−p` at 120°/s and only then sets `INBUILDSTANCE` and sprays
+  from `tip` every 60 ms; Trojan pitches `center` to `−p` while the body
+  turns; Gateway sets the stance at once and runs `BuildFX`.
+  `CBuilder::UpdateBuild` adds build power only while in stance.
+
+Port: `weapon_fx::spawn::beam_texture_names`, `BeamVisual::{caps, flare}`,
+`SfxKind::BuildBeam` (stops on `Emerging` units), `UnitAnim::
+{start_building, stop_building, in_build_stance}`,
+`script_triggers::trigger_build_scripts`. The three atlas bitmaps are
+bundled from the engine's `cont/base/bitmaps/bitmaps`.
+
+## Fold gating, as compiled
+
+The shipped `.cob` files are the truth (`spring-cob`'s `cobdump`):
+
+- `pointer.cob` `Open()` sets no `MAX_SPEED` (the `.bos` line is
+  commented out) and `Close()` restores the unchanged `normalSpeed`: the
+  Pointer is never held in place by its script. It *looks* held because
+  `TurnRate=270` (44°/s) makes the mover crawl at a tenth of its speed
+  while turning in place, which outlasts the 1.6 s fold; the port's
+  `ChangeSpeed` reproduces that crawl. Firing needs `isOpen`.
+- `byte.cob` defines no `StartMoving`/`StopMoving` and never touches
+  `MAX_SPEED`: the Byte slides and turns while folded or open, fires on
+  the move, and only `AimWeapon1` opens it.
+- Factories set `INBUILDSTANCE` at the end of their unfold (`GetPillar3Ready`,
+  the Hole's fade, the Window's flap, the Carrier's lift) and
+  `CFactory::StartBuild` waits for it.
+
 ## Construction and factories (`Sim/Units/UnitTypes/Factory.cpp`)
 
 - Every KP unit has `ShowNanoFrame=0` and `ShowNanoSpray=0`: a buildee is

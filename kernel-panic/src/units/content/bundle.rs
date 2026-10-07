@@ -255,11 +255,12 @@ pub mod bake {
         // Beam / CEG textures (arrow, dosray, bytemegabeam, whitecircle…).
         "upstream/Kernel-Panic/bitmaps/kpsfx",
     ];
-    /// Engine default bitmaps the effects rely on (`laserend` for
-    /// `explspike` streaks) — the only files taken from the 24 MB
-    /// RecoilEngine bitmap directory.
+    /// Engine default bitmaps the effects rely on — the beam atlas every
+    /// untextured BeamLaser/LaserCannon draws with (`ProjectileDrawer`:
+    /// `laserfalloff` body, `laserend` caps, `flare` at the emitter) —
+    /// the only files taken from the 24 MB RecoilEngine bitmap directory.
     const ENGINE_BITMAP_DIR: &str = "upstream/RecoilEngine/cont/base/bitmaps/bitmaps";
-    const ENGINE_BITMAPS: &[&str] = &["laserend.tga"];
+    const ENGINE_BITMAPS: &[&str] = &["laserend.tga", "laserfalloff.tga", "flare.tga"];
     /// Models the code names directly rather than through a def
     /// (`command_fire.rs`: the Signal's flag and the SigTerm bomb).
     const CODE_MODELS: &[&str] = &["signal.s3o", "sigterm.s3o"];
@@ -545,6 +546,8 @@ mod tests {
         }
         for name in [
             "laserend.tga",
+            "laserfalloff.tga",
+            "flare.tga",
             "hexgrid.tga",
             "whitecircle.tga",
             "arrow.tga",

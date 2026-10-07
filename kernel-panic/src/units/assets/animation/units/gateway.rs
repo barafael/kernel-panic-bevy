@@ -30,6 +30,8 @@ pub struct GatewayAnim {
     step: usize,
     step_timer: f32,
     death: DeathFx,
+    /// `static-var building`: StartBuilding() .. StopBuilding().
+    building: bool,
 }
 
 impl UnitAnim for GatewayAnim {
@@ -39,7 +41,7 @@ impl UnitAnim for GatewayAnim {
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {
         self.death.tick(ctx.dt);
-        if ctx.producing {
+        if ctx.producing || self.building {
             self.step_timer -= ctx.dt;
             if self.step_timer <= 0.0 {
                 self.step_timer = STEP_INTERVAL;
@@ -56,6 +58,20 @@ impl UnitAnim for GatewayAnim {
             self.step_timer = 0.0;
             rig.turn_deg(self.pieces.center, Axis::Y, 0.0, 90.0);
         }
+    }
+
+    fn start_building(&mut self, _rig: &mut AnimRig, _heading: f32, _pitch: f32) {
+        // StartBuilding(h, p): building = 1; BuildFX(); INBUILDSTANCE = 1.
+        self.building = true;
+    }
+
+    fn stop_building(&mut self, _rig: &mut AnimRig) {
+        // StopBuilding(): building = 0; INBUILDSTANCE = 0.
+        self.building = false;
+    }
+
+    fn in_build_stance(&self) -> Option<bool> {
+        Some(self.building)
     }
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {

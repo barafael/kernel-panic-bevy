@@ -556,6 +556,24 @@ pub trait UnitAnim: Send + Sync + 'static {
     /// `.bos` `EndBurst1()` — after the salvo's last shot.
     fn end_burst(&mut self, _rig: &mut AnimRig) {}
 
+    /// `.bos` `StartBuilding(heading, pitch)` on a mobile builder: aim
+    /// the nano emitter at the build site (`heading`/`pitch` body-relative,
+    /// radians) and start spraying. `CBuilder::UpdateBuild` adds build
+    /// power only once the script has set `INBUILDSTANCE`
+    /// ([`Self::in_build_stance`]).
+    fn start_building(&mut self, _rig: &mut AnimRig, _heading: f32, _pitch: f32) {}
+
+    /// `.bos` `StopBuilding()` on a mobile builder: stop spraying and
+    /// stow the emitter.
+    fn stop_building(&mut self, _rig: &mut AnimRig) {}
+
+    /// A mobile builder's `INBUILDSTANCE`: `Some(false)` while its
+    /// emitter is still turning onto the site. `None` for units without
+    /// a build script.
+    fn in_build_stance(&self) -> Option<bool> {
+        None
+    }
+
     /// `.bos` `Activate()` — factory opens for production.
     fn activate(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {}
 
@@ -621,6 +639,18 @@ pub struct AnimFxOut<'w, 's> {
         Query<'w, 's, (&'static GlobalTransform, Option<&'static PieceEmit>), With<PieceIndex>>,
     pub attacks: ResMut<'w, crate::units::weapon_fx::PendingAttacks>,
     pub heightmap: Option<Res<'w, crate::terrain::heightmap::Heightmap>>,
+    /// Units under construction: a build beam stops on the one it hits
+    /// (`TraceRay` with `collidefriendly=1`; finished units are out of
+    /// a factory's way and the builder's own pieces are skipped).
+    pub buildees: Query<
+        'w,
+        's,
+        (
+            &'static GlobalTransform,
+            &'static crate::units::combat::CollisionVolume,
+        ),
+        With<crate::units::lifecycle::spawning::Emerging>,
+    >,
     pub commands: Commands<'w, 's>,
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
@@ -848,11 +878,26 @@ fn apply_and_drain(
                     .mul_vec3(emit.map_or(Vec3::Z, |e| e.dir))
                     .normalize_or(Vec3::NEG_Y);
                 let far = start + dir * BUILD_BEAM_RANGE;
-                let end = fx
+                let mut end = fx
                     .heightmap
                     .as_deref()
                     .and_then(|hm| hm.ground_hit(start, far))
                     .unwrap_or(far);
+                let mut nearest = 1.0f32;
+                for (tf, volume) in &fx.buildees {
+                    let center = volume.center(tf);
+                    if center.distance_squared(start) > (BUILD_BEAM_RANGE + volume.radius).powi(2) {
+                        continue;
+                    }
+                    if let Some(t) = volume.ray_segment_hit(center, start, end)
+                        && t < nearest
+                    {
+                        nearest = t;
+                    }
+                }
+                if nearest < 1.0 {
+                    end = start.lerp(end, nearest);
+                }
                 fx.attacks
                     .events
                     .push(crate::units::weapon_fx::AttackEvent {

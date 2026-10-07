@@ -287,9 +287,11 @@ const CEG_TEXTURES: &[(&str, &str)] = &[
     ("sparkle", "sparkle.tga"),
     ("bubbles", "bubbles.tga"),
     ("lobedincantation", "lobedincantation.tga"),
-    // Engine default atlas (`ProjectileDrawer`'s `laserendtex`), used by
-    // `explspike` streaks.
+    // Engine default atlas (`ProjectileDrawer`): the beam body, its end
+    // caps (also `explspike` streaks) and the BeamLaser emitter flare.
+    ("laserfalloff", "laserfalloff.tga"),
     ("laserend", "laserend.tga"),
+    ("flare", "flare.tga"),
 ];
 
 // ─── Runtime components ─────────────────────────────────────────────

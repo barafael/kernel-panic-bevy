@@ -175,6 +175,12 @@ pub(super) struct BeamVisual {
     /// the elapsed-frames power, mirroring upstream
     /// `BeamLaserProjectile::Update`. `1.0` means no fade.
     pub decay: f32,
+    /// `texture2` (`laserend` by default): a half-texture cap of
+    /// `thickness` depth rounding off each end of the ribbon.
+    pub caps: Option<Handle<StandardMaterial>>,
+    /// `texture3` (`flare`): a camera-facing glow of this half-size at
+    /// the emitter (`thickness · laserflaresize`), BeamLaser only.
+    pub flare: Option<(Handle<StandardMaterial>, f32)>,
 }
 
 /// A traveling laser bolt from a `LaserCannon`-category weapon (Bit

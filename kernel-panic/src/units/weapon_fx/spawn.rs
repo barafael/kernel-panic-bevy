@@ -500,6 +500,49 @@ fn beam_texture(
     Some((handle, aspect))
 }
 
+/// The beam atlas a weapon draws with: its authored `texture1`/`texture2`,
+/// or the engine's defaults for the category when the TDF leaves them
+/// empty (`ProjectileDrawer::LoadWeaponTextures`: `laserfalloff` body and
+/// `laserend` caps for every LaserCannon and BeamLaser). `none` stays
+/// empty.
+fn beam_texture_names(weapon: &spring_tdf::WeaponDef) -> (String, String) {
+    let defaulted = |authored: &str, default: &str| -> String {
+        let t = authored.trim();
+        if t.eq_ignore_ascii_case("none") {
+            String::new()
+        } else if t.is_empty() {
+            default.to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let beam_type = matches!(
+        weapon.category(),
+        spring_tdf::WeaponCategory::LaserCannon | spring_tdf::WeaponCategory::BeamLaser
+    );
+    if beam_type {
+        (
+            defaulted(&weapon.texture1, "laserfalloff"),
+            defaulted(&weapon.texture2, "laserend"),
+        )
+    } else {
+        (
+            defaulted(&weapon.texture1, ""),
+            defaulted(&weapon.texture2, ""),
+        )
+    }
+}
+
+/// `laserFlareSize` with the engine default of 15: the BeamLaser's
+/// emitter flare is `thickness · laserFlareSize` elmos half-size.
+fn laser_flare_size(weapon: &spring_tdf::WeaponDef) -> f32 {
+    if weapon.laser_flare_size > 0.0 {
+        weapon.laser_flare_size
+    } else {
+        15.0
+    }
+}
+
 /// Spawn a `BeamLaser` hit-scan ribbon from attacker to target.
 ///
 /// Mirrors the upstream two-pass draw in
@@ -551,9 +594,12 @@ fn spawn_textured_beam(
     // rather than one stretched smear. 56 elmos/tile matches the
     // on-screen glyph size in upstream footage at default zoom.
     const ARROW_TILE_LENGTH: f32 = 56.0;
-    let texture = beam_texture(&weapon.texture1, model_cache, images);
+    let (tex1, tex2) = beam_texture_names(weapon);
+    let texture = beam_texture(&tex1, model_cache, images);
     let has_texture = texture.is_some();
-    let tile_count = if has_texture {
+    // The engine's `laserfalloff` is a cross-beam gradient, constant
+    // along the length: drawn once, not tiled like a glyph strip.
+    let tile_count = if has_texture && !tex1.eq_ignore_ascii_case("laserfalloff") {
         ((length / ARROW_TILE_LENGTH).round() as u32).clamp(1, 24)
     } else {
         0
@@ -571,6 +617,35 @@ fn spawn_textured_beam(
         tile_count,
         materials,
     );
+    // End caps (`texture2`) and, for a BeamLaser, the emitter flare
+    // (`texture3`, always the atlas `flare`): `BeamLaserProjectile::Draw`.
+    let cap_material = |color: bevy::color::LinearRgba,
+                        intensity: f32,
+                        materials: &mut Assets<StandardMaterial>,
+                        images: &mut Assets<Image>,
+                        model_cache: &mut S3OModelCache,
+                        cache: &mut BeamMaterialCache|
+     -> Option<Handle<StandardMaterial>> {
+        let (handle, _) = beam_texture(&tex2, model_cache, images)?;
+        Some(cache.get_or_create_tiled(color, true, intensity, Some(handle), 0, materials))
+    };
+    let flare_material = |color: bevy::color::LinearRgba,
+                          intensity: f32,
+                          materials: &mut Assets<StandardMaterial>,
+                          images: &mut Assets<Image>,
+                          model_cache: &mut S3OModelCache,
+                          cache: &mut BeamMaterialCache|
+     -> Option<(Handle<StandardMaterial>, f32)> {
+        if !is_beam_laser {
+            return None;
+        }
+        let (handle, _) = beam_texture("flare", model_cache, images)?;
+        let half = thickness * laser_flare_size(weapon);
+        Some((
+            cache.get_or_create_tiled(color, true, intensity, Some(handle), 0, materials),
+            half,
+        ))
+    };
     commands.spawn(BeamVisual {
         start: event.attacker_pos,
         end: event.target_pos,
@@ -579,6 +654,22 @@ fn spawn_textured_beam(
         max_lifetime: lifetime,
         material: outer_mat,
         decay: weapon.beam_decay,
+        caps: cap_material(
+            edge_color,
+            weapon.intensity,
+            materials,
+            images,
+            model_cache,
+            cache,
+        ),
+        flare: flare_material(
+            edge_color,
+            weapon.intensity,
+            materials,
+            images,
+            model_cache,
+            cache,
+        ),
     });
 
     // Core pass: `corethickness × rgbColor2 (white) × texture`. Always
@@ -606,6 +697,23 @@ fn spawn_textured_beam(
             max_lifetime: lifetime,
             material: core_mat,
             decay: weapon.beam_decay,
+            caps: cap_material(
+                core_color,
+                weapon.intensity,
+                materials,
+                images,
+                model_cache,
+                cache,
+            ),
+            flare: flare_material(
+                core_color,
+                weapon.intensity,
+                materials,
+                images,
+                model_cache,
+                cache,
+            )
+            .map(|(m, half)| (m, half * core_ratio)),
         });
     }
 }
@@ -651,7 +759,8 @@ fn spawn_laser_bolt(
     // `thickness * 3` so very short ticks still read as a bolt.
     let max_length = (speed * duration).max(thickness * 3.0);
 
-    let texture = beam_texture(&weapon.texture1, model_cache, images);
+    let (tex1, _) = beam_texture_names(weapon);
+    let texture = beam_texture(&tex1, model_cache, images);
     let has_texture = texture.is_some();
     let tile_count: u32 = if has_texture { 1 } else { 0 };
 
@@ -938,10 +1047,11 @@ fn bolt_cap_material(
     model_cache: &mut S3OModelCache,
     cache: &mut BeamMaterialCache,
 ) -> Option<Handle<StandardMaterial>> {
-    if weapon.texture2.is_empty() || weapon.texture2.eq_ignore_ascii_case("none") {
+    let (_, tex2) = beam_texture_names(weapon);
+    if tex2.is_empty() {
         return None;
     }
-    let filename = CegRegistry::resolve_texture(&weapon.texture2)?;
+    let filename = CegRegistry::resolve_texture(&tex2)?;
     let (handle, _, _) = load_beam_texture(filename, model_cache, images)?;
 
     // Keyed by the texture so different texture2 weapons don't collide.
@@ -1093,6 +1203,34 @@ const ARC_JITTER: f32 = 15.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Untextured beams draw with the engine atlas (`laserfalloff` body,
+    /// `laserend` caps); `none` opts out; authored names win.
+    #[test]
+    fn beam_textures_default_to_the_engine_atlas() {
+        let beam = spring_tdf::WeaponDef {
+            weapon_type: "BeamLaser".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            beam_texture_names(&beam),
+            ("laserfalloff".to_string(), "laserend".to_string())
+        );
+        let authored = spring_tdf::WeaponDef {
+            texture1: "dosray".into(),
+            texture2: "none".into(),
+            ..beam
+        };
+        assert_eq!(
+            beam_texture_names(&authored),
+            ("dosray".to_string(), String::new())
+        );
+        let missile = spring_tdf::WeaponDef {
+            weapon_type: "MissileLauncher".into(),
+            ..Default::default()
+        };
+        assert_eq!(beam_texture_names(&missile), (String::new(), String::new()));
+    }
     use bevy::MinimalPlugins;
     use bevy::asset::AssetPlugin;
     use bevy::ecs::system::RunSystemOnce;

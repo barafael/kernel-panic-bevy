@@ -31,7 +31,7 @@ use super::weapon_fx::{AttackEvent, DelayedHitInfo, PendingAttacks};
 use crate::sim::{SIMULATION_HZ, angle_delta, secs_to_frames};
 use crate::terrain::heightmap::Heightmap;
 
-mod aim;
+pub(crate) mod aim;
 mod collision_volume;
 mod damage;
 mod lifecycle;

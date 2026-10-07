@@ -64,6 +64,15 @@ impl RibbonDrawCtx<'_, '_> {
             .map(|gt| gt.translation())
             .unwrap_or(Vec3::Y * 1000.0)
     }
+
+    /// The camera's right and up axes, for billboards (`camera->GetRight()`
+    /// / `GetUp()` in the engine's flare draw).
+    fn cam_axes(&self) -> (Vec3, Vec3) {
+        self.camera_q
+            .single()
+            .map(|gt| (gt.right().as_vec3(), gt.up().as_vec3()))
+            .unwrap_or((Vec3::X, Vec3::Z))
+    }
 }
 
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
@@ -125,6 +134,7 @@ pub(super) fn tick_weapon_fx(
     // Hit-scan beams (BeamLaser / BuildLaser). Push the 4 corners
     // each frame so the ribbon always faces the camera — same xdir
     // math as the bolt path below.
+    let (cam_right, cam_up) = draw.cam_axes();
     for (entity, mut beam) in &mut beams {
         beam.lifetime -= dt;
         if beam.lifetime <= 0.0 {
@@ -164,6 +174,7 @@ pub(super) fn tick_weapon_fx(
         // builder to target rather than backwards. The vertex colour
         // carries the `beamdecay` intensity so the cached material is
         // never cloned per beam.
+        let color = [intensity, intensity, intensity, 1.0];
         draw.batches.push_flat_quad(
             &beam.material,
             [
@@ -172,8 +183,52 @@ pub(super) fn tick_weapon_fx(
                 beam.start + offset,
                 beam.end + offset,
             ],
-            [intensity, intensity, intensity, 1.0],
+            color,
         );
+        // `BeamLaserProjectile::Draw` with `texture2`: a cap of the
+        // ribbon's own half-width at each end, the outer half of the
+        // round `laserend` texture facing outward.
+        if let Some(caps) = &beam.caps {
+            let depth = beam_dir * beam.thickness * thickness_fade;
+            const CAP_UVS: [[f32; 2]; 4] = [[0.5, 0.0], [1.0, 0.0], [1.0, 1.0], [0.5, 1.0]];
+            draw.batches.push_quad(
+                caps,
+                [
+                    beam.start - offset,
+                    beam.start - offset - depth,
+                    beam.start + offset - depth,
+                    beam.start + offset,
+                ],
+                CAP_UVS,
+                [color; 4],
+            );
+            draw.batches.push_quad(
+                caps,
+                [
+                    beam.end - offset,
+                    beam.end - offset + depth,
+                    beam.end + offset + depth,
+                    beam.end + offset,
+                ],
+                CAP_UVS,
+                [color; 4],
+            );
+        }
+        // The emitter flare: a camera-facing square of
+        // `thickness · laserflaresize` half-size at the start.
+        if let Some((flare, half)) = &beam.flare {
+            let (r, u) = (cam_right * *half, cam_up * *half);
+            draw.batches.push_flat_quad(
+                flare,
+                [
+                    beam.start - r - u,
+                    beam.start + r - u,
+                    beam.start + r + u,
+                    beam.start - r + u,
+                ],
+                color,
+            );
+        }
     }
 
     // Traveling laser bolts — Spring's `CLaserProjectile::Draw`. Lead

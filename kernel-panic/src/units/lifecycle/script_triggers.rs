@@ -27,6 +27,54 @@ pub struct WasMoving;
 #[component(storage = "SparseSet")]
 pub struct WasActive;
 
+/// Marks a mobile builder whose `StartBuilding` has fired for its
+/// current site and whose `StopBuilding` has not. Toggled by
+/// [`trigger_build_scripts`].
+#[derive(Component, Clone, Copy)]
+#[component(storage = "SparseSet")]
+pub struct WasBuilding {
+    pub site: Vec3,
+}
+
+/// `CBuilder::UpdateBuild`: call the builder's `StartBuilding(heading,
+/// pitch)` when it has a nanoframe to work on (aiming its emitter at the
+/// site), and `StopBuilding()` when the build ends or is dropped.
+#[allow(clippy::type_complexity)]
+pub fn trigger_build_scripts(
+    mut query: Query<(
+        Entity,
+        &mut UnitAnimator,
+        &GlobalTransform,
+        Option<&crate::units::lifecycle::construction::Constructing>,
+        Option<&WasBuilding>,
+    )>,
+    mut commands: Commands,
+) {
+    for (entity, mut animator, gtf, constructing, was) in &mut query {
+        let site = constructing
+            .filter(|c| c.building.is_some())
+            .map(|c| c.site);
+        match (site, was) {
+            (Some(site), was) if was.is_none_or(|w| w.site != site) => {
+                let UnitAnimator { rig, driver, .. } = &mut *animator;
+                let (heading, pitch) = crate::units::combat::aim::local_aim_angles(
+                    gtf.rotation(),
+                    site - gtf.translation(),
+                    crate::units::combat::AimLaunch::Direct,
+                );
+                driver.start_building(rig, heading, pitch);
+                commands.entity(entity).insert(WasBuilding { site });
+            }
+            (None, Some(_)) => {
+                let UnitAnimator { rig, driver, .. } = &mut *animator;
+                driver.stop_building(rig);
+                commands.entity(entity).remove::<WasBuilding>();
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Detect movement start/stop and drive the driver's
 /// `start_moving`/`stop_moving` hooks.
 ///

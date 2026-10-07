@@ -203,6 +203,7 @@ impl Plugin for UnitsPlugin {
                             command_fire::tick_protection,
                             script_triggers::trigger_movement_scripts,
                             script_triggers::trigger_production_scripts,
+                            script_triggers::trigger_build_scripts,
                             script_triggers::trigger_weapon_scripts,
                         )
                             .chain(),

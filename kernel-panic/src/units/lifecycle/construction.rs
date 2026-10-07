@@ -18,15 +18,12 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::units::content::weapons::WeaponId;
-
 use super::production::PendingFadeInstall;
 use super::spawning::{EmergeStyle, Emerging, SpawnContext, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::spatial::flat_dist_sq;
-use crate::units::weapon_fx::{AttackEvent, PendingAttacks};
 
 /// Marks a constructor unit that the player has ordered to build `kind`
 /// at world position `site`. Set by the placement UI / build-menu flow.
@@ -130,7 +127,7 @@ pub fn start_construction(
 /// A kind with a per-team cap (`UnitRestricted`: Logic Bombs) is
 /// refused — construction cancelled before the nanoframe appears — when
 /// the team already fields the cap, as Spring refuses the build order.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn tick_construction(
     time: Res<Time>,
     mut builders: Query<(
@@ -140,8 +137,8 @@ pub fn tick_construction(
         &Faction,
         &TeamId,
         &mut Constructing,
+        Option<&crate::units::assets::animation::UnitAnimator>,
     )>,
-    mut pending_attacks: ResMut<PendingAttacks>,
     live_units: Query<(&UnitType, &TeamId), Without<crate::units::combat::Dying>>,
     mut ctx: SpawnContext,
     mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
@@ -152,7 +149,7 @@ pub fn tick_construction(
     // frame can't both slip under the cap.
     let mut capped_counts: HashMap<UnitKind, HashMap<u8, u32>> = HashMap::new();
 
-    for (entity, gtf, mut transform, faction, team, mut constructing) in &mut builders {
+    for (entity, gtf, mut transform, faction, team, mut constructing, animator) in &mut builders {
         if constructing.building.is_none()
             && let Some(limit) = ctx.unit_registry.team_limit(constructing.kind)
         {
@@ -168,7 +165,13 @@ pub fn tick_construction(
             *count += 1;
         }
 
-        constructing.progress += dt;
+        // `CBuilder::UpdateBuild` adds build power only once the script
+        // has aimed the emitter and set `INBUILDSTANCE`; the nanoframe is
+        // placed first so the script has something to aim at.
+        let in_stance = animator.is_none_or(|a| a.driver.in_build_stance() != Some(false));
+        if constructing.building.is_some() && in_stance {
+            constructing.progress += dt;
+        }
         let build_time = ctx.unit_registry.build_time(constructing.kind);
         // `AllowUnitBuildStep` for Hex Farm: this tick's share of the
         // build, in `buildTime` points, at the building's site.
@@ -225,21 +228,8 @@ pub fn tick_construction(
                 .rotation;
         }
 
-        // Emit a build beam from the builder's root to the site so the
-        // player sees something is happening. Re-uses the factory
-        // nanoemitter visual path — PendingAttacks coalesces them.
-        let start = gtf.translation() + Vec3::new(0.0, 14.0, 0.0);
-        pending_attacks.events.push(AttackEvent {
-            attacker_pos: start,
-            target_pos: constructing.site,
-            weapon_id: WeaponId::BUILD_LASER,
-            // Builder BuildLaser skips the muzzle flash CEG — same
-            // reason as the factory call site.
-            muzzle_ceg: None,
-            delayed_hit: None,
-            build_arc: false,
-        });
-
+        // The build beams are the builder's own script's (`emit-sfx 2048`
+        // from its emitter once `StartBuilding` has aimed it).
         if build_time > 0.0 && constructing.progress >= build_time {
             // The building's `Emerging` was started with
             // `total = build_time`, so its rise/fade finishes naturally
