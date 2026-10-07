@@ -123,12 +123,15 @@ Port: `lifecycle/production.rs`, `spawning/emerge.rs` (no entity rise),
   with their factory.
 - The free-spot search checks units only, not terrain passability
   (`TestMoveSquare`).
-- The NX zone arms after an estimated flight time (`dist / 400 + 0.25 s`)
-  rather than on the shell's actual impact; the shot is not abandoned
-  when the Pointer never gets to open.
+- An NX cast that is never able to fire (the Pointer is kept moving)
+  waits indefinitely; the engine's attack order would be abandoned by
+  the player's next command, which the port also does, but a unit that
+  is pushed around keeps the cast.
 - Lead uses the muzzle as `aimFromPos`; the engine uses the
   `AimFromWeapon` piece (`aimer` / `base`), a few elmos off.
-- Hitscan beams are not led; flying targets are not led.
+- Hitscan beams are not led (the engine leads them by a negligible
+  amount). A sprayed hitscan ray is tested against its target's sphere
+  and the ground only, not against other units in its path.
 - `ARMORED` windows (Pointer 4 s, Byte 6 s after build, buildings under
   construction) and `STANDINGMOVEORDERS=0` (Hold Position) on the Pointer
   are not modelled.

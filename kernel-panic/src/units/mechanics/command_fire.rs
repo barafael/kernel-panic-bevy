@@ -362,9 +362,6 @@ pub struct AreaDenialZone {
     pub radius: f32,
     pub dps: f32,
     pub remaining: f32,
-    /// Seconds until the zone arms: the shell's flight time for a cast
-    /// that is still in the air.
-    pub fuse: f32,
     pub damage_friendly: bool,
     pub infection_duration: Option<f32>,
     pub owner_team: u8,
@@ -612,12 +609,14 @@ pub fn process_command_fire(
 
         if unit.0 == UnitKind::Pointer {
             // The NX Flag is weapon 2 of the Pointer: `specialattack.lua`
-            // turns the order into an attack on the ground, and the
-            // script fires it only once the cube is open and aimed —
-            // [`tick_nx_casts`] does the rest.
-            commands.entity(event.attacker).insert(NxCast {
-                target: event.target,
-            });
+            // turns the order into an attack command (replacing the
+            // current one), and the script fires it only once the cube
+            // is open and aimed — [`tick_nx_casts`] does the rest.
+            crate::interaction::clear_orders(&mut commands.entity(event.attacker)).insert(
+                NxCast::Aiming {
+                    target: event.target,
+                },
+            );
             continue;
         }
 
@@ -641,7 +640,6 @@ pub fn process_command_fire(
             radius: ability.radius,
             dps: ability.dps,
             remaining: ability.ttl,
-            fuse: 0.0,
             damage_friendly: ability.damage_friendly,
             infection_duration: ability.infection_weapon.and_then(weapon_infection_duration),
             owner_team: team.0,
@@ -653,40 +651,58 @@ pub fn process_command_fire(
     }
 }
 
-/// A Pointer's pending NX shot (pointer.bos `aimingSpecial`): the cube
-/// has to be open and turned onto `target` before `FireWeapon2` runs.
-#[derive(Component, Debug, Clone, Copy)]
+/// pointer.bos `aimingSpecial`: the Pointer is busy with its NX shot.
+/// While present, weapon 1 neither aims nor fires (`AimWeapon1`:
+/// `if (aimingSpecial) return 0`). Removed with the unit's orders
+/// ([`crate::interaction::clear_orders`]) and when the recovery ends.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
 #[component(storage = "SparseSet")]
-pub struct NxCast {
-    pub target: Vec3,
+pub enum NxCast {
+    /// Waiting for the cube to open and turn onto `target`.
+    Aiming { target: Vec3 },
+    /// `FireWeapon2`'s `sleep 2000` after the shot.
+    Recovering { left: f32 },
 }
 
 /// pointer.bos `FireWeapon2`: `sleep 2000` (61 frames) before
 /// `aimingSpecial` clears and weapon 1 may aim again.
 const NX_WEAPON1_BLOCK: f32 = 61.0 / 30.0;
-/// `[nx] weaponvelocity=400` for the zone's arming delay; the arc adds a
-/// little over the straight-line time.
-const NX_SHELL_SPEED: f32 = 400.0;
-const NX_ARC_EXTRA: f32 = 0.25;
 
-/// Fire pending NX shots. Each frame the cast re-aims the Pointer at its
-/// target (`AimWeapon2`: body heading and gunbase pitch, launch at 45°
-/// for `trajectoryheight=1`); once the cube is open and on target the
-/// shell leaves the `gunpoint` as a real missile that explodes with the
-/// weapon's damage and `system_nx` CEG where it lands, the denial zone
-/// arms when it does, weapon 1 is blocked for 2 s and the 30 s reload
-/// starts.
+/// The NX Flag's denial zone (`areadenial.lua`: radius 120, 100 dps,
+/// 60 s, hurts allies too), centred where the shell exploded.
+pub fn nx_zone(center: Vec3, owner_team: u8, owner_faction: Faction) -> AreaDenialZone {
+    let ability = ability_for(UnitKind::Pointer).expect("Pointer has the NX ability");
+    AreaDenialZone {
+        center,
+        radius: ability.radius,
+        dps: ability.dps,
+        remaining: ability.ttl,
+        damage_friendly: ability.damage_friendly,
+        infection_duration: None,
+        owner_team,
+        owner_faction,
+    }
+}
+
+/// Drive pending NX shots. An aiming cast re-stamps the Pointer's
+/// `AimTarget` each frame (`AimWeapon2`: body heading and gunbase pitch,
+/// launch at 45° for `trajectoryheight=1`); once the cube is open and on
+/// target the shell leaves the `gunpoint` as a real missile that explodes
+/// with the weapon's damage and `system_nx` CEG where it lands and drops
+/// the denial zone there, the 30 s reload starts, and the cast turns into
+/// the script's 2 s recovery. A cast whose target has left the weapon's
+/// range is dropped.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn tick_nx_casts(
-    casters: Query<
+    time: Res<Time>,
+    mut casters: Query<
         (
             Entity,
-            &NxCast,
+            &mut NxCast,
             &GlobalTransform,
             &UnitType,
             &TeamId,
             &Faction,
-            Option<&crate::units::combat::AttackCooldown>,
         ),
         Without<Dying>,
     >,
@@ -696,18 +712,42 @@ pub fn tick_nx_casts(
     mut pending_attacks: ResMut<crate::units::weapon_fx::PendingAttacks>,
     mut commands: Commands,
 ) {
+    let dt = time.delta_secs();
     let Some(nx) = weapons.known().nx else {
         return;
     };
     let weapon_def = weapons.by_id(nx);
     let launch = crate::units::combat::AimLaunch::of(Some(weapon_def));
-    for (entity, cast, gtf, unit, team, faction, cooldown) in &casters {
+    for (entity, mut cast, gtf, unit, team, faction) in &mut casters {
+        let target = match *cast {
+            NxCast::Recovering { left } => {
+                if left <= dt {
+                    commands.entity(entity).remove::<NxCast>();
+                } else {
+                    *cast = NxCast::Recovering { left: left - dt };
+                }
+                continue;
+            }
+            NxCast::Aiming { target } => target,
+        };
+        if cast_reach(
+            cast_range(unit.0, &weapons),
+            gtf.translation(),
+            target,
+            true,
+        ) != CastReach::Fire
+        {
+            commands
+                .entity(entity)
+                .remove::<(NxCast, crate::units::combat::AimTarget)>();
+            continue;
+        }
         // `AimWeapon2` while closed: nothing turns; the stop that follows
         // the approach walk opens the cube and the aim resumes.
         commands
             .entity(entity)
             .insert(crate::units::combat::AimTarget {
-                pos: cast.target,
+                pos: target,
                 launch,
             });
         let open = pieces
@@ -716,24 +756,17 @@ pub fn tick_nx_casts(
             .ok()
             .and_then(|a| a.driver.is_open())
             .unwrap_or(true);
-        if !open {
+        if !open || pieces.muzzle_buried(entity, gtf) {
             continue;
         }
-        if !crate::units::combat::aim_gates_pass(
-            entity,
-            unit.0,
-            gtf,
-            cast.target,
-            launch,
-            true,
-            &pieces,
-        ) {
+        if !crate::units::combat::aim_gates_pass(entity, unit.0, gtf, target, launch, true, &pieces)
+        {
             continue;
         }
 
         // FireWeapon2: `emit-sfx 1024 from gunpoint`, then the shell.
         let muzzle = pieces.muzzle(entity, gtf);
-        let distance = muzzle.pos.distance(cast.target);
+        let distance = muzzle.pos.distance(target);
         let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(unit.0)
             .and_then(|index| unit_registry.sfx_type(unit.0, index))
             .map(std::sync::Arc::<str>::from);
@@ -741,7 +774,7 @@ pub fn tick_nx_casts(
             .events
             .push(crate::units::weapon_fx::AttackEvent {
                 attacker_pos: muzzle.pos,
-                target_pos: cast.target,
+                target_pos: target,
                 weapon_id: nx,
                 muzzle_ceg,
                 delayed_hit: Some(crate::units::weapon_fx::DelayedHitInfo {
@@ -749,31 +782,28 @@ pub fn tick_nx_casts(
                     attacker: entity,
                     attacker_distance: distance,
                     muzzle_dir: muzzle.dir,
+                    on_impact: Some(crate::units::weapon_fx::ImpactEffect::NxZone {
+                        owner_team: team.0,
+                        owner_faction: *faction,
+                    }),
                 }),
                 build_arc: false,
             });
         let Some(ability) = ability_for(unit.0) else {
             continue;
         };
-        commands.spawn(AreaDenialZone {
-            center: cast.target,
-            radius: ability.radius,
-            dps: ability.dps,
-            remaining: ability.ttl,
-            fuse: distance / NX_SHELL_SPEED + NX_ARC_EXTRA,
-            damage_friendly: ability.damage_friendly,
-            infection_duration: None,
-            owner_team: team.0,
-            owner_faction: *faction,
-        });
-        let block = cooldown.map_or(0.0, |c| c.remaining).max(NX_WEAPON1_BLOCK);
-        commands.entity(entity).remove::<NxCast>().insert((
-            CommandFireCooldown {
-                remaining: ability.cooldown,
-            },
-            crate::units::combat::AttackCooldown { remaining: block },
-            crate::units::lifecycle::script_triggers::JustFired,
-        ));
+        *cast = NxCast::Recovering {
+            left: NX_WEAPON1_BLOCK,
+        };
+        commands
+            .entity(entity)
+            .remove::<crate::units::combat::AimTarget>()
+            .insert((
+                CommandFireCooldown {
+                    remaining: ability.cooldown,
+                },
+                crate::units::lifecycle::script_triggers::JustFired,
+            ));
     }
 }
 
@@ -907,10 +937,6 @@ pub fn tick_area_denial(
     // Reused across zones so repeated casts don't realloc.
     let mut hits: Vec<(Entity, bool)> = Vec::new();
     for (zone_entity, mut zone) in &mut zones {
-        if zone.fuse > 0.0 {
-            zone.fuse -= dt;
-            continue;
-        }
         zone.remaining -= dt;
         if zone.remaining <= 0.0 {
             commands.entity(zone_entity).despawn();
@@ -1067,7 +1093,6 @@ pub fn tick_sigterm_bombs(
             radius: SIGTERM_DENIAL_RADIUS,
             dps: SIGTERM_DENIAL_DPS,
             remaining: SIGTERM_DENIAL_TTL,
-            fuse: 0.0,
             damage_friendly: true,
             infection_duration: None,
             owner_team: bomb.owner_team,
@@ -1291,6 +1316,25 @@ mod tests {
         assert!(app.world().get::<CommandFireCooldown>(obelisk).is_some());
     }
 
+    /// A move or stop order ends a pending NX shot like any other order
+    /// (the engine drops the attack command), so weapon 1 is not held
+    /// hostage by a cast the player abandoned.
+    #[test]
+    fn a_new_order_cancels_a_pending_nx_cast() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let pointer = app
+            .world_mut()
+            .spawn(NxCast::Aiming { target: Vec3::X })
+            .id();
+        app.world_mut()
+            .run_system_once(move |mut commands: Commands| {
+                crate::interaction::clear_orders(&mut commands.entity(pointer));
+            })
+            .unwrap();
+        assert!(app.world().get::<NxCast>(pointer).is_none());
+    }
+
     /// A Pointer ordered beyond NX range walks toward the target instead
     /// of casting; once in range `advance_pending_casts` stops it and
     /// the shot is handed to the script side (`NxCast`): the zone only
@@ -1334,19 +1378,14 @@ mod tests {
             .unwrap();
         assert_eq!(zone_count(&mut app), 0);
         assert_eq!(
-            app.world().get::<NxCast>(pointer).map(|c| c.target),
-            Some(target)
+            app.world().get::<NxCast>(pointer).copied(),
+            Some(NxCast::Aiming { target })
         );
         assert!(app.world().get::<PendingCommandFire>(pointer).is_none());
-        // The approach leg is ended (empty path), leaving the movement
-        // system's path-complete branch to halt the caster and promote
-        // any shift-queued follow-up order.
-        assert!(
-            app.world()
-                .get::<MovePath>(pointer)
-                .is_some_and(|p| p.current >= p.waypoints.len()),
-            "caster stops once it can cast"
-        );
+        // The attack command replaces the approach walk: the caster
+        // stands and aims where it is.
+        assert!(app.world().get::<MoveTarget>(pointer).is_none());
+        assert!(app.world().get::<MovePath>(pointer).is_none());
     }
 
     /// An approach whose move order vanished (new order, stuck) is

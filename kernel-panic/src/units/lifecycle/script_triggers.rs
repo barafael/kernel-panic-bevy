@@ -86,13 +86,23 @@ const DEACTIVATE_DELAY: f32 = 7.0;
 /// queued unit opens the yard); deactivation waits [`DEACTIVATE_DELAY`]
 /// after the last build step, so a factory between two orders keeps its
 /// arms out instead of folding and unfolding.
+#[allow(clippy::type_complexity)]
 pub fn trigger_production_scripts(
-    mut query: Query<(Entity, &mut UnitAnimator, &Producer, Has<WasActive>)>,
+    mut query: Query<(
+        Entity,
+        &mut UnitAnimator,
+        &Producer,
+        Has<WasActive>,
+        Has<crate::units::lifecycle::spawning::Emerging>,
+    )>,
     mut commands: Commands,
 ) {
-    for (entity, mut animator, producer, was_active) in &mut query {
-        let is_active = producer.current_production().is_some()
-            || (was_active && producer.idle_time < DEACTIVATE_DELAY);
+    for (entity, mut animator, producer, was_active, emerging) in &mut query {
+        // `CFactory::Update` does nothing while `beingBuilt`: a spamming
+        // minifac's queue opens its yard only once it stands finished.
+        let is_active = !emerging
+            && (producer.current_production().is_some()
+                || (was_active && producer.idle_time < DEACTIVATE_DELAY));
         match (is_active, was_active) {
             (true, false) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;

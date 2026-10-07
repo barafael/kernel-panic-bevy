@@ -249,12 +249,6 @@ impl Heightmap {
         max_slope
     }
 
-    /// Does a straight line from `from` to `to` clear the terrain?
-    ///
-    /// `margin` is added to each sampled terrain height — callers pass a
-    /// small positive value to tolerate the shooter standing on a crest
-    /// without self-blocking. Ballistic arcs (non-zero trajectory height)
-    /// should skip this check entirely.
     /// Where the segment `from → to` first dips below the terrain, if it
     /// does (`TraceRay::TraceRay` against the ground, interpolated
     /// between samples). The endpoints themselves are skipped, as in
@@ -285,6 +279,12 @@ impl Heightmap {
         None
     }
 
+    /// Does a straight line from `from` to `to` clear the terrain?
+    ///
+    /// `margin` is added to each sampled terrain height — callers pass a
+    /// small positive value to tolerate the shooter standing on a crest
+    /// without self-blocking. Ballistic arcs (non-zero trajectory height)
+    /// should skip this check entirely.
     #[cfg(test)]
     pub fn has_line_of_sight(&self, from: Vec3, to: Vec3, margin: f32) -> bool {
         let dx = to.x - from.x;
@@ -378,6 +378,24 @@ mod tests {
 
     fn flat(h: f32, w: usize, d: usize) -> Heightmap {
         Heightmap::from_raw(vec![h; w * d], w, d)
+    }
+
+    /// A bolt flying level over flat ground never hits it; one descending
+    /// through it is stopped where it crosses the surface, interpolated
+    /// between samples.
+    #[test]
+    fn ground_hit_finds_the_crossing_point() {
+        let hm = flat(10.0, 16, 16);
+        assert!(
+            hm.ground_hit(Vec3::new(8.0, 30.0, 8.0), Vec3::new(100.0, 30.0, 8.0))
+                .is_none()
+        );
+        let hit = hm
+            .ground_hit(Vec3::new(8.0, 30.0, 8.0), Vec3::new(88.0, -10.0, 8.0))
+            .expect("descends through the surface");
+        // Height 30 → −10 over 80 elmos: crosses 10 at x = 48.
+        assert!((hit.x - 48.0).abs() < 2.0, "{hit}");
+        assert!((hit.y - 10.0).abs() < 1.0, "{hit}");
     }
 
     #[test]

@@ -50,6 +50,7 @@ fn clear_active_order<'a, 'w>(ec: &'a mut EntityCommands<'w>) -> &'a mut EntityC
         .remove::<movement::GuardTarget>()
         .remove::<crate::units::lifecycle::construction::PendingBuild>()
         .remove::<crate::units::mechanics::command_fire::PendingCommandFire>()
+        .remove::<crate::units::mechanics::command_fire::NxCast>()
 }
 
 /// Make `cmd` the unit's active order: the order-specific components a

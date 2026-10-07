@@ -80,6 +80,7 @@ impl UnitAnim for TerminalAnim {
         }
         rig.move_to(self.pieces.body, Axis::Y, -BODY_SINK, 0.0);
         self.sweep_timer = self.run_leg(rig, 0);
+        self.emit_timer = EMIT_INTERVAL;
     }
 
     fn update(&mut self, rig: &mut AnimRig, ctx: AnimCtx) {

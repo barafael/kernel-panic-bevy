@@ -206,11 +206,60 @@ pub struct PieceLookup<'w, 's> {
     pub gunbase: Query<'w, 's, &'static crate::units::assets::animation::GunbasePiece>,
     pub aimer: Query<'w, 's, &'static crate::units::assets::animation::AimerPiece>,
     pub mover: Query<'w, 's, &'static crate::interaction::ground_move::GroundMover>,
+    pub air: Query<'w, 's, &'static crate::interaction::air_movement::HoverAir>,
     /// Targets' poses for per-shot aiming.
     pub target: Query<'w, 's, (&'static GlobalTransform, &'static UnitStats), With<UnitType>>,
+    pub heightmap: Option<Res<'w, Heightmap>>,
 }
 
 impl PieceLookup<'_, '_> {
+    /// `owner->speed` of a target in elmos per frame: a ground mover's or
+    /// a hover flyer's velocity, zero for anything that doesn't move.
+    fn target_velocity(&self, target: Entity) -> Vec3 {
+        self.mover
+            .get(target)
+            .map(|m| m.velocity)
+            .or_else(|_| self.air.get(target).map(|a| a.speed))
+            .unwrap_or(Vec3::ZERO)
+    }
+
+    /// `CWeapon::TestTarget`'s pre-fire check: a muzzle below the terrain
+    /// can't fire (`weaponMuzzlePos.y < GetHeightReal`), which also keeps
+    /// a terrain-colliding bolt from exploding in the shooter's own face.
+    pub fn muzzle_buried(&self, attacker: Entity, attacker_gtf: &GlobalTransform) -> bool {
+        let Some(hm) = self.heightmap.as_deref() else {
+            return false;
+        };
+        let muzzle = self.muzzle(attacker, attacker_gtf);
+        muzzle.pos.y < hm.sample(muzzle.pos.x, muzzle.pos.z)
+    }
+
+    /// `CBeamLaser::FireInternal` for a sprayed hitscan shot: trace the
+    /// scattered ray up to `range` against the target's collision sphere,
+    /// then the ground. Returns the unit struck (if any) and the impact.
+    fn hitscan_trace(
+        &self,
+        target: Option<Entity>,
+        muzzle: Vec3,
+        dir: Vec3,
+        range: f32,
+    ) -> (Option<Entity>, Vec3) {
+        let end = muzzle + dir * range;
+        if let Some((t, tf, stats)) =
+            target.and_then(|t| self.target.get(t).ok().map(|(tf, s)| (t, tf, s)))
+        {
+            let volume = CollisionVolume::from_s3o(stats.hit_radius, stats.mid_y);
+            if let Some(hit) = volume.ray_segment_hit(volume.center(tf), muzzle, end) {
+                return (Some(t), muzzle.lerp(end, hit));
+            }
+        }
+        let ground = self
+            .heightmap
+            .as_deref()
+            .and_then(|hm| hm.ground_hit(muzzle, end));
+        (None, ground.unwrap_or(end))
+    }
+
     /// `CWeapon::GetUnitLeadTargetPos`: the target's `aimPos` (its model
     /// midpoint) plus its velocity over the projectile's flight time
     /// from `from`, scaled by the salvo's `predictSpeedMod`. Hitscan
@@ -227,7 +276,7 @@ impl PieceLookup<'_, '_> {
         if !weapon_def.is_traveling() {
             return Some(aim_pos);
         }
-        let velocity = self.mover.get(target).map_or(Vec3::ZERO, |m| m.velocity);
+        let velocity = self.target_velocity(target);
         let predict_frames = from.distance(aim_pos) / weapon_def.projectile_speed();
         Some(aim_pos + velocity * predict_frames * predict_mult)
     }
@@ -354,7 +403,10 @@ pub(super) fn fire_salvo_shot(
         .and_then(|index| unit_registry.sfx_type(shot.kind, index))
         .map(std::sync::Arc::<str>::from);
     let spray = weapon_def.spray_sin();
-    let laser = weapon_def.category() == spring_tdf::WeaponCategory::LaserCannon;
+    // A LaserCannon bolt flies its ttl; a ballistic one (MineLauncher,
+    // `ballistic=1`) is lobbed by the projectile path instead.
+    let laser = weapon_def.category() == spring_tdf::WeaponCategory::LaserCannon
+        && !weapon_def.is_projectile();
     for _ in 0..shot.projectiles.max(1) {
         if let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {
             let UnitAnimator { rig, driver, .. } = &mut *animator;
@@ -370,14 +422,22 @@ pub(super) fn fire_salvo_shot(
         if spray > 0.0 {
             dir = (dir + crate::rng::random_unit_sphere(rng) * spray).normalize_or(dir);
         }
-        let impact_pos = if laser && shot.is_traveling {
+        let mut impact_pos = if laser && shot.is_traveling {
             muzzle.pos + dir * weapon_def.laser_travel(aim_dist)
         } else {
             muzzle.pos + dir * aim_dist
         };
         if !shot.is_traveling {
+            // Hitscan lands now. A scattered beam (Packet's `sprayangle`)
+            // only hits the unit if its ray does; otherwise it strikes
+            // the ground and merely splashes.
+            let mut struck = shot.target;
+            if spray > 0.0 {
+                (struck, impact_pos) =
+                    pieces.hitscan_trace(shot.target, muzzle.pos, dir, weapon_def.range);
+            }
             damage_queue.push(PendingDamage {
-                target: shot.target,
+                target: struck,
                 attacker: shot.attacker,
                 weapon: shot.weapon,
                 impact_pos,
@@ -394,6 +454,7 @@ pub(super) fn fire_salvo_shot(
                 attacker: shot.attacker,
                 attacker_distance: aim_dist,
                 muzzle_dir: muzzle.dir,
+                on_impact: None,
             }),
             build_arc: false,
         });
@@ -819,6 +880,9 @@ pub fn combat_system(
         ) {
             continue;
         }
+        if pieces.muzzle_buried(entity, attacker_gtf) {
+            continue;
+        }
 
         // Hitscan lands now; traveling bolts defer via `delayed_hit`.
         let is_traveling = weapon_def.is_some_and(spring_tdf::WeaponDef::is_traveling);
@@ -1038,6 +1102,7 @@ pub fn attack_ground_system(
             Option<&WormSplash>,
             Option<&crate::interaction::movement::MoveTarget>,
             Option<&AimTarget>,
+            Has<super::mechanics::command_fire::NxCast>,
         ),
         Without<Dying>,
     >,
@@ -1063,8 +1128,13 @@ pub fn attack_ground_system(
         worm_splash,
         move_target,
         aim,
+        nx_cast,
     ) in &attackers
     {
+        // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0`.
+        if nx_cast {
+            continue;
+        }
         // Same deploy / opening gates as `combat_system`. Player-issued
         // attack-ground orders MUST honour them too — otherwise the
         // player can force-fire a Pointer that's still folding open or a
@@ -1160,7 +1230,8 @@ pub fn attack_ground_system(
             launch,
             deployable.is_some(),
             &pieces,
-        ) {
+        ) || pieces.muzzle_buried(entity, gtf)
+        {
             continue;
         }
 
@@ -1752,6 +1823,51 @@ mod tests {
     /// wing — and, `base` having been turned by the unit-relative
     /// `AimWeapon1(h, p)`, the fixed-launcher emit direction (the
     /// gunpoints' +Z) points straight at the target.
+    /// A scattered hitscan beam only strikes the unit whose sphere its
+    /// ray crosses; a ray past it lands on the ground (flat map here: at
+    /// its range) with no unit struck.
+    #[test]
+    fn sprayed_hitscan_strikes_only_what_its_ray_crosses() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let target = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Bit),
+                GlobalTransform::from_xyz(200.0, 0.0, 0.0),
+                UnitStats {
+                    hit_radius: 16.0,
+                    mid_y: 16.0,
+                    ..stats()
+                },
+            ))
+            .id();
+        let (hit, miss) = app
+            .world_mut()
+            .run_system_once(move |pieces: PieceLookup| {
+                let muzzle = Vec3::new(0.0, 16.0, 0.0);
+                let hit = pieces.hitscan_trace(Some(target), muzzle, Vec3::X, 250.0);
+                // 10° off: 200 elmos out the ray is 35 elmos beside the
+                // target's 16-elmo sphere.
+                let dir = Vec3::new(10f32.to_radians().cos(), 0.0, 10f32.to_radians().sin());
+                let miss = pieces.hitscan_trace(Some(target), muzzle, dir, 250.0);
+                (hit, miss)
+            })
+            .unwrap();
+        assert_eq!(hit.0, Some(target));
+        assert!(
+            (hit.1.x - 184.0).abs() < 1e-3,
+            "enters the sphere at its surface: {}",
+            hit.1
+        );
+        assert_eq!(miss.0, None);
+        assert!(
+            (miss.1.length() - 250.0).abs() < 1.0,
+            "runs to its range: {}",
+            miss.1
+        );
+    }
+
     #[test]
     fn flow_salvo_shot_uses_each_gunpoint_through_the_flyer_attitude() {
         use crate::units::assets::animation::{

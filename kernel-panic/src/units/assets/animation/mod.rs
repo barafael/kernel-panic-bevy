@@ -836,6 +836,12 @@ fn apply_and_drain(
                 let Ok((gtf, emit)) = fx.globals.get(rig.piece_entities[piece]) else {
                     continue;
                 };
+                // A unit spawned this frame has no propagated transforms
+                // yet; a beam from the identity pose would start at the
+                // map origin.
+                if unit_gtf.translation() == Vec3::ZERO {
+                    continue;
+                }
                 let start = gtf.translation();
                 let dir = gtf
                     .rotation()

@@ -272,15 +272,25 @@ fn empty_exit_spot(
     const STEPS: usize = 100;
     let search_radius = factory_radius * 4.0 + unit_radius * 4.0;
     let step = std::f32::consts::PI / (STEPS as f32 * 0.5);
-    let right = Vec3::new(forward.z, 0.0, -forward.x);
+    // `rightdir = frontdir × updir`: facing +Z, right is −X.
+    let right = Vec3::new(-forward.z, 0.0, forward.x);
     let (world_w, world_d) =
         heightmap.map_or((f32::INFINITY, f32::INFINITY), Heightmap::world_size);
     let in_bounds = |p: Vec3| p.x >= 0.0 && p.z >= 0.0 && p.x < world_w && p.z < world_d;
     let on_arc =
         |a: f32| pos + forward * (search_radius * a.cos()) + right * (search_radius * a.sin());
+    // `NoSolidsExact(testPos, unit->radius · 1.5)`: nothing's collision
+    // sphere within that reach. The spatial query only trims by cell,
+    // so the distance test here is the real one.
+    let clearance = unit_radius * 1.5;
     let free = |p: Vec3| {
         let mut taken = false;
-        spatial.query_radius(p, unit_radius * 1.5, |_| taken = true);
+        spatial.query_radius(p, clearance, |other| {
+            let reach = clearance + other.hit_radius;
+            if flat_dist_sq(other.pos, p) < reach * reach {
+                taken = true;
+            }
+        });
         !taken
     };
     let place = |p: Vec3| heightmap.map_or(p, |hm| hm.place(p.x, p.z));
@@ -415,13 +425,18 @@ pub fn production_system(
 
         // `CFactory::StartBuild` returns early while the pad is
         // `GroundBlocked`: the next unit waits until the previous one has
-        // walked clear instead of spawning inside it.
+        // walked clear instead of spawning inside it. Only mobile units
+        // can stand on the pad squares — the factory itself, and any
+        // structure placed near it, never block.
         if !producer.unit_spawned {
             let product_radius = ctx.unit_registry.collision_radius(kind);
             let mut blocked = false;
             spatial.query_radius(pad_pos, product_radius + PAD_BLOCK_REACH, |other| {
-                // The factory's own yard squares are open to its buildee.
-                if other.entity == factory_entity || other.is_flying || blocked {
+                if other.entity == factory_entity
+                    || other.is_flying
+                    || blocked
+                    || ctx.unit_registry.speed(other.kind) <= 0.0
+                {
                     return;
                 }
                 let reach = product_radius + ctx.unit_registry.collision_radius(other.kind);
@@ -508,10 +523,20 @@ pub fn production_system(
             producer.spawn_count = producer.spawn_count.wrapping_add(1);
 
             // System units stand on the pad from the first frame; Hacker /
-            // Network units materialize at-surface with an alpha ramp.
+            // Network units materialize at-surface with an alpha ramp. The
+            // buildee's build clock runs at the factory's boosted rate, so
+            // its `BUILD_PERCENT_LEFT` and spawn protection end exactly
+            // when the queue pops and the pad check can see it.
             let style = faction.emerge_style();
             spawns.push((
-                kind, *faction, team.0, pad_pos, heading, exit, build_time, style,
+                kind,
+                *faction,
+                team.0,
+                pad_pos,
+                heading,
+                exit,
+                build_time / speed_mult,
+                style,
             ));
             producer.unit_spawned = true;
         }
@@ -667,6 +692,54 @@ pub fn install_fade_materials(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::spatial::SpatialEntry;
+
+    fn standing(entity: Entity, pos: Vec3) -> SpatialEntry {
+        SpatialEntry {
+            entity,
+            pos,
+            hit_radius: 16.0,
+            mid_y: 0.0,
+            team: 0,
+            kind: UnitKind::Bit,
+            hp_positive: true,
+            is_flying: false,
+            cloaked: false,
+            detected_by: 0,
+        }
+    }
+
+    /// `SendToEmptySpot`: straight ahead on the 4R+4r arc when nothing
+    /// stands there; the next step sweeps toward the factory's right (−X
+    /// for a factory facing +Z) when a unit does — a unit in the same
+    /// 256-elmo spatial cell but 60 elmos away must not count.
+    #[test]
+    fn exit_spot_sweeps_right_past_an_occupied_spot_only() {
+        let pos = Vec3::new(1000.0, 0.0, 1000.0);
+        let forward = Vec3::Z;
+        let (big_r, small_r) = (64.0, 16.0);
+        let arc = 4.0 * big_r + 4.0 * small_r;
+        let mut rng = 1u32;
+
+        let mut empty = SpatialIndex::default();
+        let spot = empty_exit_spot(pos, forward, big_r, small_r, &empty, None, &mut rng);
+        assert!((spot - (pos + forward * arc)).length() < 1e-3, "{spot}");
+
+        // A unit 60 elmos beside the straight-ahead spot shares its cell
+        // but does not block it.
+        let e = Entity::from_raw_u32(7).unwrap();
+        empty.insert_for_test(standing(e, pos + forward * arc + Vec3::X * 60.0));
+        let spot = empty_exit_spot(pos, forward, big_r, small_r, &empty, None, &mut rng);
+        assert!((spot - (pos + forward * arc)).length() < 1e-3, "{spot}");
+
+        // Standing on it: the scan moves one step toward the right.
+        let mut taken = SpatialIndex::default();
+        taken.insert_for_test(standing(e, pos + forward * arc));
+        let spot = empty_exit_spot(pos, forward, big_r, small_r, &taken, None, &mut rng);
+        assert!(spot.x < pos.x, "swept toward −X: {spot}");
+        assert!((spot - pos).dot(forward) > 0.0);
+        assert!(((spot - pos).length() - arc).abs() < 1e-2);
+    }
 
     /// Minifacs start spamming their faction's swarm unit on repeat
     /// (upstream `kp_autospam.lua`); Ports stay teleporters and

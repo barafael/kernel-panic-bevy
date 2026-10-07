@@ -194,6 +194,7 @@ pub(super) fn spawn_weapon_visuals(
                 attacker: delayed.attacker,
                 weapon: event.weapon_id,
                 attacker_distance: delayed.attacker_distance,
+                on_impact: delayed.on_impact,
             });
         }
 

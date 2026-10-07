@@ -51,10 +51,24 @@ pub struct DelayedHitInfo {
     pub target: Option<Entity>,
     pub attacker: Entity,
     pub attacker_distance: f32,
+    /// Gameplay that happens where the shell actually lands, beyond the
+    /// weapon's own damage (the NX Flag's denial zone).
+    pub on_impact: Option<ImpactEffect>,
     /// World-space emit direction of the `QueryWeapon` piece at fire
     /// time (`CWeapon::weaponDir`) — the launch direction of a
     /// `fixedLauncher` missile / starburst.
     pub muzzle_dir: Vec3,
+}
+
+/// A side effect bound to a projectile's point of impact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ImpactEffect {
+    /// `areadenial.lua` on the NX Flag's explosion: spawn the owner's
+    /// denial zone at the impact position.
+    NxZone {
+        owner_team: u8,
+        owner_faction: crate::units::components::Faction,
+    },
 }
 
 /// Attached to every traveling-projectile / laser-bolt visual that
@@ -70,6 +84,7 @@ pub(super) struct DelayedHit {
     pub attacker: Entity,
     pub weapon: WeaponId,
     pub attacker_distance: f32,
+    pub on_impact: Option<ImpactEffect>,
 }
 
 /// Buffer written by the combat system, drained by visual systems.

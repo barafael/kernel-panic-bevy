@@ -199,6 +199,45 @@ mod shim_tests {
         assert_eq!(w.category(), WeaponCategory::BeamLaser);
     }
 
+    /// `CLaserCannon::UpdateRange` rounds the range down to whole
+    /// projectile steps; the bolt then covers `ttl + 1` steps, capped so a
+    /// max-range shot ends at that rounded range.
+    #[test]
+    fn laser_cannon_range_and_travel_follow_the_projectile_speed() {
+        let mega = parse(
+            "[M]\n{\nbeamweapon=1;\nlineofsight=1;\nrange=512;\nweaponvelocity=1024;\nsprayangle=1024;\n}",
+            "M",
+        );
+        assert!((mega.projectile_speed() - 34.133335).abs() < 1e-4);
+        assert!(
+            (mega.effective_range() - 477.8667).abs() < 1e-2,
+            "{}",
+            mega.effective_range()
+        );
+        // 300 elmos: ttl = ceil(300 / 34.13) = 9, travel 10 steps.
+        assert!((mega.laser_travel(300.0) - 10.0 * mega.projectile_speed()).abs() < 1e-3);
+        // Beyond range the ttl caps at floor(512/34.13) − 1 = 13.
+        assert!((mega.laser_travel(600.0) - 14.0 * mega.projectile_speed()).abs() < 1e-3);
+        assert!((mega.laser_travel(0.0) - mega.projectile_speed()).abs() < 1e-3);
+        // sin(1024·π/0xafff)
+        assert!((mega.spray_sin() - 0.07134).abs() < 1e-4);
+
+        let line = parse(
+            "[Line]\n{\nbeamweapon=1;\nlineofsight=1;\nrange=256;\nweaponvelocity=512;\n}",
+            "Line",
+        );
+        assert!(
+            (line.effective_range() - 238.9333).abs() < 1e-2,
+            "{}",
+            line.effective_range()
+        );
+        assert_eq!(line.spray_sin(), 0.0);
+
+        // Anything that is not a LaserCannon keeps its authored range.
+        let beam = parse("[B]\n{\nweapontype=BeamLaser;\nrange=250;\n}", "B");
+        assert_eq!(beam.effective_range(), 250.0);
+    }
+
     #[test]
     fn bit_line_becomes_laser_cannon() {
         // Verbatim-ish `Line` (Bit): `beamweapon=1 lineofsight=1` with

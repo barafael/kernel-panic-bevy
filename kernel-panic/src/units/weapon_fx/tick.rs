@@ -362,7 +362,7 @@ pub(super) fn tick_weapon_fx(
         if total_dist < 0.1 && proj.flight == Flight::Direct {
             trigger_delayed_hit(
                 entity,
-                HitWho::Intended,
+                arrival_hit(target_entity, proj.target, &volume_ctx.target_q),
                 proj.target,
                 &delayed_hits,
                 &weapon_registry,
@@ -497,7 +497,7 @@ pub(super) fn tick_weapon_fx(
             if !intercepted {
                 trigger_delayed_hit(
                     entity,
-                    HitWho::Intended,
+                    arrival_hit(target_entity, impact_pos, &volume_ctx.target_q),
                     impact_pos,
                     &delayed_hits,
                     &weapon_registry,
@@ -624,6 +624,29 @@ fn target_volume_hit(
     Some(seg_start.lerp(seg_end, t))
 }
 
+/// What a projectile that ran its course without crossing a volume hit:
+/// its target, if the impact point is inside that unit's collision
+/// sphere (a homing shell landing on a unit that stands still), else the
+/// ground — splash only. The old behaviour credited every arrival to the
+/// intended target, which let a sprayed shell that landed 70 elmos off
+/// still deal its full damage.
+fn arrival_hit(
+    target: Option<Entity>,
+    impact_pos: Vec3,
+    target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
+) -> HitWho {
+    let inside = target
+        .and_then(|t| target_q.get(t).ok())
+        .is_some_and(|(tf, volume)| {
+            volume.center(tf).distance_squared(impact_pos) <= volume.radius * volume.radius
+        });
+    if inside {
+        HitWho::Intended
+    } else {
+        HitWho::Ground
+    }
+}
+
 /// Broad-phase second pass: find any non-friendly, non-attacker unit
 /// whose `CollisionVolume` the segment crosses, returning the closest
 /// (smallest `t`) candidate. Catches the "friendly walks into the
@@ -728,6 +751,17 @@ fn trigger_delayed_hit(
         impact_pos,
         attacker_distance: hit.attacker_distance,
     });
+    if let Some(super::shared::ImpactEffect::NxZone {
+        owner_team,
+        owner_faction,
+    }) = hit.on_impact
+    {
+        commands.spawn(crate::units::mechanics::command_fire::nx_zone(
+            impact_pos,
+            owner_team,
+            owner_faction,
+        ));
+    }
     let weapon_def = weapon_registry.by_id(hit.weapon);
     let (rgb, radius, ceg_name) = (
         weapon_def.rgb_color,
@@ -916,6 +950,7 @@ mod tests {
                     attacker,
                     weapon: WeaponId::BUILD_LASER,
                     attacker_distance: 100.0,
+                    on_impact: None,
                 },
             ))
             .id();
@@ -1058,6 +1093,7 @@ mod tests {
                 attacker,
                 weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
+                on_impact: None,
             },
         ));
 
@@ -1201,6 +1237,7 @@ mod tests {
                 attacker,
                 weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
+                on_impact: None,
             },
         ));
 
@@ -1281,6 +1318,7 @@ mod tests {
                 attacker,
                 weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
+                on_impact: None,
             },
         ));
 
@@ -1314,6 +1352,41 @@ mod tests {
                 .events
                 .is_empty()
         );
+    }
+
+    /// A shell that runs its course without sweeping a volume struck its
+    /// target only if it came down inside the target's sphere; a sprayed
+    /// shell landing beside it just splashes the ground.
+    #[test]
+    fn arrival_credits_the_target_only_inside_its_sphere() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let target = app
+            .world_mut()
+            .spawn((
+                GlobalTransform::from_xyz(100.0, 0.0, 0.0),
+                UnitType(crate::units::content::definitions::UnitKind::Bit),
+                CollisionVolume {
+                    radius: 16.0,
+                    mid_y: 16.0,
+                },
+            ))
+            .id();
+        let (inside, beside, none) = app
+            .world_mut()
+            .run_system_once(
+                move |q: Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>| {
+                    (
+                        arrival_hit(Some(target), Vec3::new(104.0, 4.0, 0.0), &q),
+                        arrival_hit(Some(target), Vec3::new(140.0, 0.0, 0.0), &q),
+                        arrival_hit(None, Vec3::new(100.0, 0.0, 0.0), &q),
+                    )
+                },
+            )
+            .unwrap();
+        assert!(matches!(inside, HitWho::Intended));
+        assert!(matches!(beside, HitWho::Ground));
+        assert!(matches!(none, HitWho::Ground));
     }
 
     /// Shared app for flight-model integration tests: bare resources
@@ -1371,6 +1444,7 @@ mod tests {
                     attacker: entity.unwrap_or(Entity::PLACEHOLDER),
                     weapon: WeaponId::BUILD_LASER,
                     attacker_distance: target.distance(origin),
+                    on_impact: None,
                 },
             ))
             .id()

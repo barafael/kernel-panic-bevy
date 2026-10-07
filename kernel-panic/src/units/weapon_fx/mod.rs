@@ -11,7 +11,9 @@ mod shared;
 mod spawn;
 mod tick;
 
-pub use shared::{AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, PendingExplosions};
+pub use shared::{
+    AttackEvent, DelayedHitInfo, ExplosionEvent, ImpactEffect, PendingAttacks, PendingExplosions,
+};
 
 /// Live effect counts for the `KP_PROFILE` census.
 #[cfg(not(target_arch = "wasm32"))]

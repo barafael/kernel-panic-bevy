@@ -1265,8 +1265,8 @@ pub struct OrderView {
     pub has_move_cmd: bool,
     /// Nothing queued behind the order (`UNIT_CMD_QUE_SIZE <= 1`).
     pub last_command: bool,
-    /// The unit may not drive this frame (stunned, deploying,
-    /// attack-move holding): `HEADING_CHANGED_STUN` → `ChangeSpeed(0)`.
+    /// The unit may not drive this frame (stunned, attack-move
+    /// holding): `HEADING_CHANGED_STUN` → `ChangeSpeed(0)`.
     pub hold: bool,
 }
 

@@ -70,6 +70,7 @@ pub struct FadeMaterials {
 /// alpha. When the timer expires the component is removed, faded
 /// materials are restored to the shared originals, and the unit gets its
 /// rally-walk command if any.
+#[allow(clippy::type_complexity)]
 pub fn emerge_system(
     time: Res<Time>,
     mut commands: Commands,
@@ -78,12 +79,14 @@ pub fn emerge_system(
         &mut Transform,
         &mut Emerging,
         Option<&FadeMaterials>,
+        Has<crate::interaction::movement::MoveTarget>,
+        Option<&crate::interaction::movement::CommandQueue>,
     )>,
     piece_mats: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut transform, mut emerging, fade) in &mut q {
+    for (entity, mut transform, mut emerging, fade, has_move, queue) in &mut q {
         emerging.remaining = (emerging.remaining - dt).max(0.0);
         // t goes 0 → 1 over the duration.
         let t = (1.0 - emerging.remaining / emerging.total).clamp(0.0, 1.0);
@@ -127,7 +130,10 @@ pub fn emerge_system(
             }
             let (rally, then) = (emerging.rally_point, emerging.rally_then);
             commands.entity(entity).remove::<Emerging>();
-            if let Some(target) = rally {
+            // `CFactory::AssignBuildeeOrders` only sends the unit to an
+            // empty spot when it has no orders of its own yet.
+            let has_orders = has_move || queue.is_some_and(|q| !q.commands.is_empty());
+            if let Some(target) = rally.filter(|_| !has_orders) {
                 let mut unit = commands.entity(entity);
                 unit.insert(crate::interaction::movement::MoveTarget(target))
                     .remove::<crate::interaction::movement::MovePath>();

@@ -70,45 +70,32 @@ enum Script {
     Close,
 }
 
-/// One script thread: entries fire when their `sleep`/`wait` elapses.
+/// One script thread. Entry `fired + 1` runs when `t` reaches `next_at`;
+/// each entry returns how long its `wait-for-*` takes from the pieces'
+/// poses *at that moment* (an interrupted thread's pieces keep moving in
+/// the meantime), and the thread ends after its last entry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Thread {
     script: Script,
     t: f32,
-    /// Elapsed times at which entries 1..=N fire; the thread ends at the
-    /// last one.
-    thresholds: [f32; 4],
-    entries: usize,
+    next_at: f32,
     fired: usize,
 }
 
 impl Thread {
-    fn open(rig: &AnimRig, p: &PointerPieces, delay: f32) -> Self {
-        // sleep; show gun + plates (wait left); gun out (wait); isOpen.
-        let plates =
-            delay + move_time(rig, p.left, Axis::X, PLATE_SPREAD, MOVE_SPEED) + WAIT_LATENCY;
-        let gun = plates + move_time(rig, p.gun, Axis::Y, GUN_EXTEND, MOVE_SPEED) + WAIT_LATENCY;
+    fn new(script: Script, delay: f32) -> Self {
         Self {
-            script: Script::Open,
+            script,
             t: 0.0,
-            thresholds: [delay, plates, gun, gun],
-            entries: 3,
+            next_at: delay,
             fired: 0,
         }
     }
 
-    fn close(rig: &AnimRig, p: &PointerPieces) -> Self {
-        // sleep 50; isOpen=0, gunbase back (wait y: already 0, one
-        // frame); gun in (wait); plates in (wait); hide gun + spin.
-        let gunbase = CLOSE_DELAY + WAIT_LATENCY;
-        let gun = gunbase + move_time(rig, p.gun, Axis::Y, 0.0, MOVE_SPEED) + WAIT_LATENCY;
-        let plates = gun + move_time(rig, p.left, Axis::X, 0.0, MOVE_SPEED) + WAIT_LATENCY;
-        Self {
-            script: Script::Close,
-            t: 0.0,
-            thresholds: [gunbase, gun, plates, plates],
-            entries: 4,
-            fired: 0,
+    fn entries(script: Script) -> usize {
+        match script {
+            Script::Open => 3,
+            Script::Close => 4,
         }
     }
 }
@@ -125,40 +112,56 @@ pub struct PointerAnim {
 }
 
 impl PointerAnim {
-    /// Run `thread`'s entry `i` (1-based; entry `entries` ends it).
-    fn fire(&mut self, rig: &mut AnimRig, script: Script, i: usize) {
+    /// Run `script`'s entry `i` (1-based) and return the wait the script
+    /// does before its next line: the issued move's duration plus the
+    /// frame `wait-for-move` costs, or nothing after the last entry.
+    fn fire(&mut self, rig: &mut AnimRig, script: Script, i: usize) -> f32 {
         let p = self.pieces;
         match (script, i) {
+            // Open(): show gun; plates out; wait-for-move left.
             (Script::Open, 1) => {
                 rig.show(p.gun);
                 rig.move_to(p.left, Axis::X, PLATE_SPREAD, MOVE_SPEED);
                 rig.move_to(p.right, Axis::X, -PLATE_SPREAD, MOVE_SPEED);
+                move_time(rig, p.left, Axis::X, PLATE_SPREAD, MOVE_SPEED) + WAIT_LATENCY
             }
+            // gun out; wait-for-move gun.
             (Script::Open, 2) => {
                 rig.move_to(p.gun, Axis::Y, GUN_EXTEND, MOVE_SPEED);
+                move_time(rig, p.gun, Axis::Y, GUN_EXTEND, MOVE_SPEED) + WAIT_LATENCY
             }
+            // isOpen = 1.
             (Script::Open, 3) => {
                 self.is_open = true;
+                0.0
             }
+            // Close(): isOpen = 0; gunbase back; wait-for-turn gunbase y
+            // (y is already 0: one frame).
             (Script::Close, 1) => {
                 self.is_open = false;
                 rig.turn_deg(p.gunbase, Axis::X, GUNBASE_REST_DEG, GUNBASE_SPEED);
                 rig.turn_deg(p.gunbase, Axis::Y, 0.0, GUNBASE_SPEED);
+                WAIT_LATENCY
             }
+            // gun in; wait-for-move gun.
             (Script::Close, 2) => {
                 rig.move_to(p.gun, Axis::Y, 0.0, MOVE_SPEED);
+                move_time(rig, p.gun, Axis::Y, 0.0, MOVE_SPEED) + WAIT_LATENCY
             }
+            // plates in; wait-for-move left.
             (Script::Close, 3) => {
                 rig.move_to(p.left, Axis::X, 0.0, MOVE_SPEED);
                 rig.move_to(p.right, Axis::X, 0.0, MOVE_SPEED);
+                move_time(rig, p.left, Axis::X, 0.0, MOVE_SPEED) + WAIT_LATENCY
             }
+            // hide gun; back in StartMoving(): `spin body around x-axis <180>`.
             (Script::Close, 4) => {
                 rig.hide(p.gun);
-                // Back in StartMoving(): `spin body around x-axis <180>`.
                 rig.spin_dps(p.body, Axis::X, ROLL_DPS);
                 self.rolling = true;
+                0.0
             }
-            _ => {}
+            _ => 0.0,
         }
     }
 
@@ -167,11 +170,13 @@ impl PointerAnim {
             return;
         };
         thread.t += dt;
-        while thread.fired < thread.entries && thread.t >= thread.thresholds[thread.fired] {
+        let entries = Thread::entries(thread.script);
+        while thread.fired < entries && thread.t >= thread.next_at {
             thread.fired += 1;
-            self.fire(rig, thread.script, thread.fired);
+            let wait = self.fire(rig, thread.script, thread.fired);
+            thread.next_at += wait;
         }
-        self.thread = (thread.fired < thread.entries).then_some(thread);
+        self.thread = (thread.fired < entries).then_some(thread);
     }
 }
 
@@ -189,7 +194,7 @@ impl UnitAnim for PointerAnim {
         rig.turn_deg(self.pieces.gunpoint, Axis::X, -90.0, 0.0);
         rig.turn_deg(self.pieces.gunbase, Axis::X, 90.0, 0.0);
         if !ctx.emerging {
-            self.thread = Some(Thread::open(rig, &self.pieces, 0.0));
+            self.thread = Some(Thread::new(Script::Open, 0.0));
         }
     }
 
@@ -202,11 +207,11 @@ impl UnitAnim for PointerAnim {
         self.tick_thread(rig, ctx.dt);
     }
 
-    fn start_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
+    fn start_moving(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {
         // StartMoving(): `signal SIG_CHANGE` kills a running Open()/
         // StopMoving thread (pieces keep heading where they were sent),
         // then `sleep 50; call-script Close(); spin body`.
-        self.thread = Some(Thread::close(rig, &self.pieces));
+        self.thread = Some(Thread::new(Script::Close, CLOSE_DELAY));
     }
 
     fn stop_moving(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
@@ -215,7 +220,7 @@ impl UnitAnim for PointerAnim {
         rig.stop_spin(self.pieces.body, Axis::X);
         rig.turn_deg(self.pieces.body, Axis::X, 0.0, 0.0);
         self.rolling = false;
-        self.thread = Some(Thread::open(rig, &self.pieces, OPEN_DELAY));
+        self.thread = Some(Thread::new(Script::Open, OPEN_DELAY));
     }
 
     fn aim(&mut self, rig: &mut AnimRig, _h: f32, p: f32, _ctx: AnimCtx) -> bool {
@@ -325,8 +330,9 @@ mod tests {
         assert!(anim.aim(&mut rig, 0.0, 0.0, AnimCtx::minimal()));
     }
 
-    /// StartMoving from open: the gun stays visible while it retracts and
-    /// the plates close; the roll begins only once Close() is through.
+    /// StartMoving from open: 2 frames, then the gun retracts (1.0 s)
+    /// while still shown, then the plates close (0.5 s), and only then the
+    /// gun hides and the roll begins.
     #[test]
     fn closes_before_rolling_and_keeps_the_gun_shown_meanwhile() {
         let (mut anim, mut rig) = pointer(false);
@@ -336,11 +342,53 @@ mod tests {
         step(&mut anim, &mut rig, 10);
         assert_eq!(anim.deploy_state(), Some(DeployState::Closing));
         assert!(!anim.rolling);
-        assert!(rig.piece_translations[4][1] > 0.0, "gun still retracting");
-        step(&mut anim, &mut rig, 40);
-        assert!(!anim.rolling, "plates still closing");
-        step(&mut anim, &mut rig, 10);
+        let gun = rig.piece_translations[4][1];
+        assert!(
+            gun > 0.0 && gun < 20.0,
+            "gun retracting, still shown: {gun}"
+        );
+        assert_eq!(rig.piece_translations[2][0], -10.0, "plates still open");
+        // 1.3 s in: gun retracted, plates closing, no roll yet.
+        step(&mut anim, &mut rig, 29);
+        assert_eq!(rig.piece_translations[4][1], 0.0);
+        let plate = rig.piece_translations[2][0];
+        assert!(plate < 0.0 && plate > -10.0, "plates closing: {plate}");
+        assert!(!anim.rolling);
+        // Plates home at ~1.67 s, hide + spin a frame later.
+        step(&mut anim, &mut rig, 15);
         assert!(anim.rolling);
         assert_eq!(anim.deploy_state(), Some(DeployState::Closed));
+        assert_eq!(rig.piece_translations[2][0], 0.0);
+    }
+
+    /// Re-opening a Pointer that stopped mid-close budgets the gun's wait
+    /// from where the gun actually is when that line runs, not from where
+    /// it was when the stop happened.
+    #[test]
+    fn interrupted_close_reopens_from_the_live_pose() {
+        let (mut anim, mut rig) = pointer(false);
+        step(&mut anim, &mut rig, 60);
+        anim.start_moving(&mut rig, AnimCtx::minimal());
+        // Gun half retracted (0.5 s of its 1.0 s).
+        step(&mut anim, &mut rig, 18);
+        let gun = rig.piece_translations[4][1];
+        assert!(gun > 5.0 && gun < 15.0, "{gun}");
+        anim.stop_moving(&mut rig, AnimCtx::minimal());
+        // The plates never started closing, so Open() only has to wait
+        // out the sleep, a frame for the plates, and the gun's climb back
+        // from wherever it has sunk to by then (~15 elmos, 0.73 s).
+        let mut frames = 0;
+        while anim.deploy_state() != Some(DeployState::Open) && frames < 120 {
+            step(&mut anim, &mut rig, 1);
+            frames += 1;
+        }
+        assert!(
+            (28..=36).contains(&frames),
+            "reopened after {frames} frames"
+        );
+        assert_eq!(
+            rig.piece_translations[4][1], 20.0,
+            "gun fully out when isOpen"
+        );
     }
 }

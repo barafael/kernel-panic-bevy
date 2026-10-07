@@ -674,3 +674,25 @@ pub fn spawn_queued_mines(
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `TurnTowardBarycenter`: the heading toward the barycenter snapped
+    /// to 90° steps (0 = +Z, 16384 = +X), wrapping cleanly at the back.
+    #[test]
+    fn barycenter_heading_snaps_to_quarter_turns() {
+        let from = Vec3::new(500.0, 0.0, 500.0);
+        let toward = |dx: f32, dz: f32| barycenter_heading(from, from + Vec3::new(dx, 0.0, dz));
+        assert_eq!(toward(0.0, 100.0), Heading(0));
+        assert_eq!(toward(100.0, 0.0), Heading(16384));
+        assert_eq!(toward(-100.0, 20.0), Heading(-16384));
+        assert_eq!(toward(5.0, -100.0), Heading(i16::MIN));
+        // A base sitting on the barycenter faces south.
+        assert_eq!(barycenter_heading(from, from), Heading(0));
+        // Slightly past 45° rounds to the nearer axis.
+        assert_eq!(toward(100.0, 120.0), Heading(0));
+        assert_eq!(toward(120.0, 100.0), Heading(16384));
+    }
+}
