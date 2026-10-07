@@ -195,6 +195,7 @@ impl Plugin for UnitsPlugin {
                             combat::tick_infections,
                             command_fire::advance_pending_casts,
                             command_fire::process_command_fire,
+                            command_fire::tick_nx_casts,
                             command_fire::tick_command_fire_cooldown,
                             command_fire::tick_area_denial,
                             command_fire::tick_sigterm_signals,

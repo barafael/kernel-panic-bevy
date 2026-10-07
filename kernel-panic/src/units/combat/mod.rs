@@ -479,6 +479,7 @@ pub fn combat_system(
             Option<&WormSplash>,
             Option<&mut AimTarget>,
             Option<&mut TargetCache>,
+            Has<super::mechanics::command_fire::NxCast>,
         ),
         (
             Without<Dying>,
@@ -552,8 +553,15 @@ pub fn combat_system(
         worm_splash,
         mut aim_slot,
         mut cache_slot,
+        nx_cast,
     ) in &mut attackers
     {
+        // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0` — a
+        // Pointer lining up its NX shot neither aims nor fires weapon 1,
+        // and its aim request belongs to `tick_nx_casts`.
+        if nx_cast {
+            continue;
+        }
         // Why: a cloaked unit without a surfacing script (Logic Bomb)
         // never fires — it detonates via `tick_kamikaze`. A cloaked Worm
         // may still pick a target (below) and surfaces to bite.
@@ -927,7 +935,7 @@ fn open_salvo(
 /// same unit-relative [`aim::local_aim_angles`] the aim script receives,
 /// so gate and slew converge on the same numbers.
 #[allow(clippy::too_many_arguments)]
-fn aim_gates_pass(
+pub(crate) fn aim_gates_pass(
     entity: Entity,
     kind: UnitKind,
     attacker_gtf: &GlobalTransform,

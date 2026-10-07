@@ -279,6 +279,7 @@ fn bot_tick(
     nav: Option<Res<NavGridSet>>,
     units: Query<UnitView>,
     mut producers: Query<&mut crate::units::lifecycle::production::Producer>,
+    mut command_fire: MessageWriter<crate::units::mechanics::command_fire::CommandFireEvent>,
     mut camera: Query<&mut RtsCameraState, With<RtsCamera>>,
     mut time: ResMut<Time<Virtual>>,
     mut exit: MessageWriter<AppExit>,
@@ -399,6 +400,22 @@ fn bot_tick(
                     "build {count}x {kind:?} at {} factories",
                     targets.len()
                 ));
+            }
+            "nx" => {
+                let sel = it.next().unwrap_or("");
+                let (Some(x), Some(z)) = (f(it.next()), f(it.next())) else {
+                    bot.log(&format!("bad nx: {line}"));
+                    continue;
+                };
+                let target = hm.place(x, z);
+                let targets = select(sel, &bot, &units);
+                for e in &targets {
+                    command_fire.write(crate::units::mechanics::command_fire::CommandFireEvent {
+                        attacker: *e,
+                        target,
+                    });
+                }
+                bot.log(&format!("nx {} units -> {x},{z}", targets.len()));
             }
             "stop" => {
                 let targets = select(it.next().unwrap_or(""), &bot, &units);
