@@ -34,6 +34,7 @@ use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use crate::rendering::settings::{MsaaSupport, RenderSettings, WINDOW_SIZES};
 use crate::rng::clock_f64;
+use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
 use crate::units::lifecycle::game_over::GameState;
@@ -2072,11 +2073,17 @@ const PASS_SECONDS: f32 = 9.0;
 /// clear Kernel Panic's terrain and towers.
 const PASS_PITCH: f32 = 0.34;
 const PASS_DISTANCE: f32 = 620.0;
+/// Minimum height of the attract camera's focus above the terrain it
+/// crosses. A glide or fly-by between fights at different altitudes
+/// must clear intervening ridges instead of tunnelling through them.
+const ATTRACT_GROUND_CLEARANCE: f32 = 12.0;
 
+#[allow(clippy::too_many_arguments)]
 fn attract_camera(
     time: Res<Time>,
     mut director: ResMut<AttractCamera>,
     bounds: Res<MapBounds>,
+    heightmap: Option<Res<Heightmap>>,
     fighters: Query<&GlobalTransform, (With<AimTarget>, With<UnitType>)>,
     bases: Query<&GlobalTransform, With<Homebase>>,
     mut cam: Query<&mut RtsCameraState, With<RtsCamera>>,
@@ -2088,6 +2095,20 @@ fn attract_camera(
     let dt = time.delta_secs();
     director.clock += dt;
     let zoom = dev.attract_distance.map_or(1.0, |d| d / 1250.0);
+    // Terrain floor for every focus write below. Fights sit at their
+    // ground height, and a straight glide or fly-by between fights at
+    // different altitudes would tunnel through an intervening ridge
+    // (Data_Cache_L1's mesas are ~1000 elmos tall) — minutes of solid
+    // rock on screen. Riding `terrain + clearance` sweeps the camera
+    // up and over instead; the camera smoothing eases the vertical.
+    let ride_terrain = |focus: &mut Vec3| {
+        if let Some(hm) = heightmap.as_deref() {
+            let floor = hm.sample(focus.x, focus.z) + ATTRACT_GROUND_CLEARANCE;
+            if focus.y < floor {
+                focus.y = floor;
+            }
+        }
+    };
     // A freshly loaded map invalidates the old point of interest.
     if bounds.is_changed() {
         director.target = None;
@@ -2123,6 +2144,21 @@ fn attract_camera(
         let t = (pass.elapsed / PASS_SECONDS).clamp(0.0, 1.0);
         let eased = t * t * (3.0 - 2.0 * t);
         state.focus = pass.start.lerp(pass.end, eased);
+        ride_terrain(&mut state.focus);
+        // The eye trails the focus by the pass offset (same arithmetic
+        // as `compute_transform_from_state`); lift the focus until the
+        // eye clears the terrain it hangs over, too — a ridge behind
+        // the track would otherwise swallow the camera mid-pass.
+        if let Some(hm) = heightmap.as_deref() {
+            let horizontal = PASS_DISTANCE * zoom * PASS_PITCH.cos();
+            let eye_y = state.focus.y + PASS_DISTANCE * zoom * PASS_PITCH.sin();
+            let eye_x = state.focus.x + horizontal * pass.yaw.sin();
+            let eye_z = state.focus.z + horizontal * pass.yaw.cos();
+            let lift = hm.sample(eye_x, eye_z) + ATTRACT_GROUND_CLEARANCE - eye_y;
+            if lift > 0.0 {
+                state.focus.y += lift;
+            }
+        }
         state.yaw = pass.yaw;
         state.pitch = PASS_PITCH;
         state.distance = PASS_DISTANCE * zoom;
@@ -2136,6 +2172,7 @@ fn attract_camera(
         } else {
             state.focus + to.normalize() * step
         };
+        ride_terrain(&mut state.focus);
     }
     state.yaw += ATTRACT_ORBIT_SPEED * dt;
     state.pitch = 0.62;
