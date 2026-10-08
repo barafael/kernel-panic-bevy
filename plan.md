@@ -421,23 +421,46 @@ projectile physics.
 
 ## 5. AI Opponent
 
-### 5.1 Basic AI — ✅ DONE
+### 5.1 Basic AI — ✅ DONE (Fair-KPAI parity pass)
 
-`ai_brain` ticks once/second per non-player team:
+`ai_brain` ticks once/second per non-player team; the port follows upstream
+`KPAI_Fair.lua`:
 
-- **Build**: production queues stay ≤3 deep, mixing basic combat units with a
-  constructor every fifth order.
-- **Expand**: any idle friendly constructor gets routed to the nearest unclaimed
-  datavent (no friendly building within 120 elmos) with a `PendingBuild` for the
-  faction's secondary factory.
-- **Defend**: any non-friendly unit within 700 elmos of a homebase triggers recall
-  — idle combat units target the homebase instead of pushing out.
-- **Attack**: with ≥8 idle combat units and no home threat, everybody charges the
-  nearest enemy homebase.
+- **Fairness**: the `Lack` budget (head start {8,2,1} + enemies − allies) gates
+  every order; `AiDifficulty` widens the head start.
+- **Build**: homebases queue KPAI's `OrderHomeBase` mix — constructor odds fall
+  with every constructor owned (`n*200 < roll`), big armies buy heavies/arty
+  (top `20*(force+buffer)` of the roll), otherwise a `math.random(1,5)` spam
+  batch capped by the budget. Minifacs autospam on repeat while `Lack.spams > 0`.
+- **Expand**: every idle constructor claims a free datavent (`GetNiceGeo`
+  sampling), or the faction special one time in three past three minifacs.
+  Constructors still inside a homebase's exit box, or idling with the building
+  budget spent, are spread on a ring around the base; with every vent taken
+  they walk at the nearest enemy structure and rejoin expansion when a vent
+  frees up.
+- **Defend**: any enemy unit within 700 elmos of a homebase recalls idle army
+  units to fight their way there.
+- **Attack**: with ≥8 idle units gathered and no home threat, the army pushes
+  the nearest enemy minifac (a weak team's homebase once `force+buffer > 50`),
+  split across `1 + (force+buffer)*2%` fronts like upstream's mission loop;
+  units idling in the field reinforce straight away.
+- **Network**: dispatch is a sustained drain (`AutoDispatch` peels 12 packets a
+  frame until the buffer empties); the AI triggers it from the teleporter
+  nearest the push target, and counter-dispatches at close attackers
+  (buffer ≥ 3, `Lack.spams > 5`, 5 s cooldown).
+- **Specials**: SIGTERM the densest enemy cluster (15 s/team), Infection at the
+  nearest enemy, NX Flags on crowds, a Firewall over the last spot allies took
+  damage (`TeamDamageLog` watches HP; ≥3 enemies within 500, ≥7 allies within
+  300, none already shielded), and Bug ↔ Exploit deploy hysteresis.
+- **Late game**: with no enemy team left alive the AI razes itself
+  (`SuicideIfAlone`) so a stale game still ends.
 
-### 5.2 Difficulty Levels (Low)
+### 5.2 Difficulty Levels — Partially done
 
-Easy (slower production), Normal, Hard (faster production, better targeting, multi-prong).
+Fairness slack scales with difficulty (Easy = exact Fair KPAI, Normal/Hard/
+Extreme widen the `Lack` head start). Multi-prong pushes ship at every
+difficulty, matching upstream. Still open: per-difficulty production speed and
+targeting quality.
 
 ---
 

@@ -17,15 +17,23 @@
 //! 3. **Expand**: every idle constructor claims a free datavent
 //!    (`GetNiceGeo` sampling) and builds its minifac there, or — with
 //!    three minifacs owned — the faction special one time in three.
+//!    Constructors still inside a homebase's exit box, or idling with
+//!    the building budget spent, are spread on a ring around the base
+//!    instead of clogging its spawn.
 //! 4. **Army**: if enemy units come within `DEFEND_RADIUS` of a
 //!    homebase, idle army units fight their way there; otherwise, once
-//!    `ARMY_THRESHOLD` units idle at home, the army attack-moves at the
-//!    nearest enemy minifac (or a weak team's homebase once it is big).
-//!    Units idling in the field reinforce the push straight away.
+//!    `ARMY_THRESHOLD` units idle at home, the army attack-moves at
+//!    the nearest enemy minifac (or a weak team's homebase once it is
+//!    big). Units idling in the field reinforce the push straight
+//!    away. Big armies split across `1 + (force + buffer) * 2%`
+//!    fronts, round-robin, like upstream's mission loop.
 //! 5. **Network**: teleporters counter-dispatch packets at nearby
 //!    attackers and dump a full buffer toward the push target.
 //! 6. **Specials**: SIGTERM the densest enemy cluster, Infection at the
-//!    nearest enemy, NX Flags on crowds, and Bug ↔ Exploit deploys.
+//!    nearest enemy, NX Flags on crowds, a Firewall over the last spot
+//!    allies took damage, and Bug ↔ Exploit deploys.
+//! 7. **Late game**: with no enemy team left alive, the AI razes
+//!    itself (`SuicideIfAlone`) so a stale game still ends.
 
 mod army;
 pub(crate) mod build_orders;
@@ -37,7 +45,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use super::{
-    components::{TeamId, UnitStats, UnitType},
+    components::{Health, TeamId, UnitStats, UnitType},
     construction::{Constructing, PendingBuild},
     player::LocalTeam,
     production::{Producer, minifac_spam},
@@ -50,22 +58,26 @@ use crate::{
     rng::xorshift32,
     terrain::geovent::{GeoventSmoker, VentClaim},
     units::{
-        combat::{AttackGroundOrder, AttackTargetOrder, Dying},
+        combat::{AttackGroundOrder, AttackTargetOrder, Dying, SelfDestructCountdown},
         content::definitions::UnitKind,
         lifecycle::spawning::Emerging,
         mechanics::{
-            command_fire::{CommandFireCooldown, CommandFireEvent},
+            command_fire::{CommandFireCooldown, CommandFireEvent, Protected},
             deploy::DeployEvent,
-            network_buffer::{DISPATCH_MAX, DispatchEvent, PacketBuffer},
+            network_buffer::{AutoDispatch, DISPATCH_MAX, DispatchEvent, PacketBuffer},
         },
     },
 };
-use army::{EnemyStructure, attack_move, is_army, pick_attack_target, scatter};
+use army::{
+    EnemyStructure, attack_move, is_army, mission_count, pick_attack_targets, scatter,
+    spread_around,
+};
 use build_orders::{HomebaseOrder, Lack, RoleCounts, choose_homebase_order, homebase_roster};
 use expansion::{choose_building, pick_datavent};
 use specials::{
-    COUNTER_DISPATCH_RANGE, CROWD_RADIUS, NX_CROWD_MIN, NX_RANGE, OBELISK_RANGE, SIGTERM_CROWD_MIN,
-    SIGTERM_INTERVAL, UNDEPLOY_MAX, bug_should_deploy, crowded_cluster, exploit_should_undeploy,
+    COUNTER_DISPATCH_RANGE, CROWD_RADIUS, FIREWALL_ALLY_RADIUS, FIREWALL_ENEMY_RADIUS,
+    NX_CROWD_MIN, NX_RANGE, OBELISK_RANGE, SIGTERM_CROWD_MIN, SIGTERM_INTERVAL, UNDEPLOY_MAX,
+    bug_should_deploy, crowded_cluster, exploit_should_undeploy, firewall_should_cast,
     should_counter_dispatch,
 };
 
@@ -90,6 +102,11 @@ const DATAVENT_CLAIM_RADIUS: f32 = 120.0;
 /// so the factory never idles between two AI ticks.
 const HOMEBASE_REFILL_AT: usize = 1;
 
+/// Upstream `IsItOccupiedByAnyHomeBase`: a constructor this close (XZ)
+/// to any homebase hasn't cleared the exit yet and must not start a
+/// build from inside the base.
+const HOMEBASE_EXIT_RADIUS: f32 = 64.0;
+
 /// AI clock + per-team memory.
 #[derive(Resource)]
 pub struct AiTicker {
@@ -100,6 +117,8 @@ pub struct AiTicker {
     last_sigterm: HashMap<u8, f32>,
     /// Seconds since game start of each teleporter's last dispatch.
     last_dispatch: HashMap<Entity, f32>,
+    /// When this team last saw a living enemy unit (`SuicideIfAlone`).
+    no_enemies_since: HashMap<u8, f32>,
 }
 
 impl Default for AiTicker {
@@ -109,6 +128,7 @@ impl Default for AiTicker {
             rng: 0x2545_F491,
             last_sigterm: HashMap::new(),
             last_dispatch: HashMap::new(),
+            no_enemies_since: HashMap::new(),
         }
     }
 }
@@ -132,6 +152,10 @@ struct Snap {
     idle: bool,
     /// Finished and its command-fire ability is off cooldown.
     ready: bool,
+    /// Still peeling packets off the team buffer (`AutoDispatch`).
+    dispatching: bool,
+    /// Under a Firewall reflector (`Protected`).
+    protected: bool,
 }
 
 /// Scratch buffers reused across AI ticks so the 1 Hz snapshot rebuild
@@ -144,11 +168,19 @@ pub struct AiScratch {
     ai_teams: Vec<u8>,
     structures: Vec<EnemyStructure>,
     vents: Vec<(Entity, Vec3)>,
+    /// Homebase positions per team, for constructor nudges.
+    homes: HashMap<u8, Vec<Vec3>>,
     enemy_pos: Vec<Vec3>,
     friend_pos: Vec<Vec3>,
     /// Indices into `units` of idle army units near / away from home.
     idle_home: Vec<usize>,
     idle_field: Vec<usize>,
+    /// Per-team scratch: homebases of the team being decided.
+    team_homes: Vec<Vec3>,
+    /// Per-team scratch: enemy structures of the team being decided.
+    enemy_structs: Vec<EnemyStructure>,
+    /// Free-vent positions scratch for `run_constructors`.
+    vent_pos: Vec<Vec3>,
 }
 
 type UnitQueryData = (
@@ -165,6 +197,8 @@ type UnitQueryData = (
     Has<Constructing>,
     Has<Emerging>,
     Has<CommandFireCooldown>,
+    Has<AutoDispatch>,
+    Has<Protected>,
 );
 
 /// Message writers the AI issues orders through — the same messages the
@@ -184,11 +218,13 @@ pub fn ai_brain(
     mut scratch: Local<AiScratch>,
     local: Res<LocalTeam>,
     difficulty: Res<AiDifficulty>,
+    mut damage_log: ResMut<TeamDamageLog>,
     packet_buffer: Res<PacketBuffer>,
     spatial: Res<SpatialIndex>,
     units: Query<UnitQueryData, Without<Dying>>,
     mut producers: Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
+    suiciding: Query<(), With<SelfDestructCountdown>>,
     mut orders: AiOrders,
     mut commands: Commands,
 ) {
@@ -235,9 +271,41 @@ pub fn ai_brain(
             target,
             &mut orders,
         );
-        run_specials(team, s, ticker, &spatial, now, &mut orders);
+        run_specials(team, s, ticker, &spatial, &mut damage_log, now, &mut orders);
+        run_late_game(team, s, ticker, &suiciding, now, &mut commands);
     }
     s.ai_teams = teams;
+}
+
+/// Upstream `SuicideIfAlone`: when no enemy team owns a living unit
+/// anymore (someone else finished them, or they never started), the
+/// AI razes itself after `30 + (7*team) % 16` seconds so a stale game
+/// still ends. Units already counting down keep their timer — a fresh
+/// insert every tick would reset the 5 s fuse and it would never fire.
+fn run_late_game(
+    team: u8,
+    s: &AiScratch,
+    ticker: &mut AiTicker,
+    suiciding: &Query<(), With<SelfDestructCountdown>>,
+    now: f32,
+    commands: &mut Commands,
+) {
+    if s.counts.keys().any(|t| *t != team) {
+        ticker.no_enemies_since.remove(&team);
+        return;
+    }
+    let since = *ticker.no_enemies_since.entry(team).or_insert(now);
+    if now - since <= 30.0 + (7 * team as u32 % 16) as f32 {
+        return;
+    }
+    for u in s.units.iter().filter(|u| u.team == team) {
+        if suiciding.contains(u.entity) {
+            continue;
+        }
+        commands.entity(u.entity).try_insert(SelfDestructCountdown {
+            remaining: crate::units::combat::SELF_DESTRUCT_DELAY,
+        });
+    }
 }
 
 /// Capture every live unit, per-team tallies, the AI team list, enemy
@@ -253,6 +321,7 @@ fn snapshot(
     s.force.clear();
     s.ai_teams.clear();
     s.structures.clear();
+    s.homes.clear();
     for (
         e,
         team,
@@ -267,6 +336,8 @@ fn snapshot(
         constructing,
         emerging,
         cooldown,
+        auto_dispatch,
+        protected,
     ) in units
     {
         let kind = ut.0;
@@ -284,6 +355,8 @@ fn snapshot(
                 && !pending
                 && !constructing,
             ready: !emerging && !cooldown,
+            dispatching: auto_dispatch,
+            protected,
         };
         s.units.push(snap);
         // Units still emerging count too, so the budget already sees
@@ -294,6 +367,9 @@ fn snapshot(
         let homebase = kind.is_homebase();
         if homebase && team.0 != local_team && !s.ai_teams.contains(&team.0) {
             s.ai_teams.push(team.0);
+        }
+        if homebase {
+            s.homes.entry(team.0).or_default().push(snap.pos);
         }
         if homebase || kind.is_small_building() {
             s.structures.push(EnemyStructure {
@@ -344,7 +420,11 @@ fn run_factories(
                 .count() as u32;
             let roll = ticker.roll() % 1000 + 1;
             let heavy_coin = ticker.roll() & 1 == 0;
-            match choose_homebase_order(constructors, force, buffer, roll, heavy_coin, lack) {
+            // Fair KPAI's `math.random(1,5)` spam batch. Drawn
+            // unconditionally so the dice stream stays branch-free.
+            let batch = ticker.roll() % 5 + 1;
+            match choose_homebase_order(constructors, force, buffer, roll, heavy_coin, batch, lack)
+            {
                 HomebaseOrder::Constructor => {
                     producer.enqueue(roster.constructor);
                     lack.mediums -= 1;
@@ -379,7 +459,18 @@ fn run_factories(
     }
 }
 
-/// `DispatchCon`: every idle constructor claims a datavent.
+/// `DispatchCon`: every idle constructor claims a datavent. Upstream's
+/// guards come first: a constructor still inside any homebase's exit
+/// box steps out before it may claim (fresh constructors would
+/// otherwise build — and clog — from inside the base), and with the
+/// building budget spent it is spread on a ring around its own home
+/// instead of parking in the exit (upstream re-issues that spread
+/// order every update, so broke constructors keep milling — faithful,
+/// if noisy). With the budget there but every vent taken, the
+/// constructor walks at the nearest enemy structure — upstream
+/// re-colonizes enemy-held vents instead, but our buildings rise from
+/// the ground, so we don't build on occupied sites; it rejoins
+/// expansion the moment a vent frees up and it idles again.
 fn run_constructors(
     team: u8,
     s: &mut AiScratch,
@@ -392,24 +483,67 @@ fn run_constructors(
         .iter()
         .filter(|u| u.team == team && u.kind.is_minifac())
         .count();
-    let mut vent_positions: Vec<Vec3> = s.vents.iter().map(|(_, p)| *p).collect();
+    s.vent_pos.clear();
+    s.vent_pos.extend(s.vents.iter().map(|(_, p)| *p));
+    let exit_sq = HOMEBASE_EXIT_RADIUS * HOMEBASE_EXIT_RADIUS;
     for ctor in s
         .units
         .iter()
         .filter(|u| u.team == team && u.kind.is_constructor() && u.idle && u.mobile)
     {
-        // Fair KPAI: with no building budget the constructor stays put.
-        if lack.buildings <= 0 {
-            break;
+        // Don't start building from inside a base: step out of the
+        // exit box (any team's homebase — enemy bases count too).
+        if let Some(base) = s
+            .structures
+            .iter()
+            .filter(|st| st.homebase)
+            .map(|st| st.pos)
+            .find(|&p| flat_dist_sq(p, ctor.pos) <= exit_sq)
+        {
+            crate::interaction::replace_order(
+                &mut commands.entity(ctor.entity),
+                QueuedCommand::Move(spread_around(base, &mut ticker.rng)),
+            );
+            continue;
         }
-        let Some(idx) = pick_datavent(ctor.pos, &vent_positions, &mut ticker.rng) else {
+        // Fair KPAI: with no building budget the constructor is spread
+        // around the homebase rather than sent to claim.
+        if lack.buildings <= 0 {
+            if let Some(&home) = s.homes.get(&team).and_then(|homes| {
+                homes.iter().min_by(|a, b| {
+                    flat_dist_sq(**a, ctor.pos).total_cmp(&flat_dist_sq(**b, ctor.pos))
+                })
+            }) {
+                crate::interaction::replace_order(
+                    &mut commands.entity(ctor.entity),
+                    QueuedCommand::Move(spread_around(home, &mut ticker.rng)),
+                );
+            }
+            continue;
+        }
+        // No free vent anywhere: walk at the nearest enemy structure
+        // and join the push (KP constructors are unarmed, so the
+        // fight order degrades to a march).
+        if s.vent_pos.is_empty() {
+            if let Some(target) = s
+                .structures
+                .iter()
+                .filter(|st| st.team != team)
+                .map(|st| st.pos)
+                .min_by(|a, b| flat_dist_sq(*a, ctor.pos).total_cmp(&flat_dist_sq(*b, ctor.pos)))
+            {
+                attack_move(ctor.entity, target, commands);
+            }
+            continue;
+        }
+        let Some(idx) = pick_datavent(ctor.pos, &s.vent_pos, &mut ticker.rng) else {
             break;
         };
         let Some(kind) = choose_building(ctor.kind, owned_minifacs, ticker.roll() % 3) else {
             continue;
         };
         let (vent_entity, site) = s.vents.swap_remove(idx);
-        vent_positions.swap_remove(idx);
+        s.vent_pos.swap_remove(idx);
         crate::interaction::replace_order(
             &mut commands.entity(ctor.entity),
             QueuedCommand::BuildAt { kind, site },
@@ -449,7 +583,23 @@ fn nearest_enemy(
     best.map(|(p, d)| (p, d.sqrt()))
 }
 
-/// Defend or push. Returns the push target (also used for dispatch).
+/// Enemies of `team` within `radius` of `pos` (same visibility rules
+/// as [`nearest_enemy`]), for the Firewall's crowd counts.
+fn count_enemies_within(spatial: &SpatialIndex, team: u8, pos: Vec3, radius: f32) -> usize {
+    let mut n = 0;
+    spatial.query_radius(pos, radius, |e| {
+        if e.team != team && e.hp_positive && e.targetable_by(team) {
+            n += 1;
+        }
+    });
+    n
+}
+
+/// Defend or push. Returns the primary push target (also used for
+/// dispatch). Without a home threat the army is split over
+/// [`mission_count`] fronts — upstream's mission loop — with idle
+/// units round-robin assigned; every unit still scatters on its
+/// target's ring.
 fn run_army(
     team: u8,
     s: &mut AiScratch,
@@ -458,12 +608,12 @@ fn run_army(
     force_plus_buffer: u32,
     commands: &mut Commands,
 ) -> Option<Vec3> {
-    let homes: Vec<Vec3> = s
-        .units
-        .iter()
-        .filter(|u| u.team == team && u.kind.is_homebase())
-        .map(|u| u.pos)
-        .collect();
+    let homes = {
+        s.team_homes.clear();
+        s.team_homes
+            .extend(s.homes.get(&team).into_iter().flatten().copied());
+        &s.team_homes
+    };
     let home = *homes.first()?;
 
     // Only enemy *units* count as a threat — an enemy minifac built
@@ -486,39 +636,55 @@ fn run_army(
         }
     }
 
-    let (target, push_home) = match threat {
-        Some(threat) => (threat, true),
+    let (targets, push_home) = match threat {
+        Some(threat) => (vec![threat], true),
         None => {
-            let enemies: Vec<EnemyStructure> = s
-                .structures
-                .iter()
-                .copied()
-                .filter(|e| e.team != team)
-                .collect();
-            let target = pick_attack_target(home, &enemies, force_plus_buffer)?;
-            (target, s.idle_home.len() >= ARMY_THRESHOLD)
+            s.enemy_structs.clear();
+            s.enemy_structs
+                .extend(s.structures.iter().copied().filter(|e| e.team != team));
+            let targets = pick_attack_targets(
+                home,
+                &s.enemy_structs,
+                force_plus_buffer,
+                mission_count(force_plus_buffer),
+                &mut ticker.rng,
+            );
+            if targets.is_empty() {
+                return None;
+            }
+            (targets, s.idle_home.len() >= ARMY_THRESHOLD)
         }
     };
     let home_movers = if push_home { &s.idle_home[..] } else { &[] };
-    for &i in s.idle_field.iter().chain(home_movers) {
+    for (n, &i) in s.idle_field.iter().chain(home_movers).enumerate() {
+        // Round-robin across the mission fronts (upstream dispatches
+        // per-mission quotas; round-robin spreads a mixed army evenly).
         attack_move(
             s.units[i].entity,
-            scatter(target, &mut ticker.rng),
+            scatter(targets[n % targets.len()], &mut ticker.rng),
             commands,
         );
         // Ordered now: later phases this tick (Bug deploy) must not
         // treat it as idle and undo the order.
         s.units[i].idle = false;
     }
-    Some(target)
+    Some(targets[0])
 }
 
 /// Packet dispatch. Counter-dispatch mirrors `KPAI_Fair.lua`'s
 /// `UnitDamaged` teleporter branch (an attacker within 300, ≥3
 /// buffered, `Lack.spams > 5`, 5 s cooldown); we treat any enemy that
-/// close as the attacker. Offensively, a full 12-packet batch goes out
-/// from the teleporter nearest the push target — upstream's mission
-/// loop dispatches ports toward the spot it is attacking.
+/// close as the attacker. Offensively, a dispatch goes out from the
+/// teleporter nearest the push target — upstream's mission loop
+/// dispatches ports toward the spot it is attacking, with no say from
+/// the fairness budget (only counter-dispatch consults `Lack`).
+///
+/// One `DispatchEvent` is not a 12-packet pulse: it flags the
+/// teleporter `AutoDispatch`, and `tick_auto_dispatch` keeps peeling 12
+/// packets per frame off the team buffer until it drains (upstream's
+/// `not opts.alt` continuation rule). So the AI skips teleporters that
+/// are still draining, and its local `buffer` bookkeeping is only a
+/// conservative same-tick approximation — the resource is the truth.
 #[allow(clippy::too_many_arguments)]
 fn run_network(
     team: u8,
@@ -534,7 +700,7 @@ fn run_network(
     let teleporters = || {
         s.units
             .iter()
-            .filter(move |u| u.team == team && u.kind.is_teleporter() && u.ready)
+            .filter(move |u| u.team == team && u.kind.is_teleporter() && u.ready && !u.dispatching)
     };
     for tp in teleporters() {
         let since = ticker.last_dispatch.get(&tp.entity).map(|t| now - t);
@@ -551,14 +717,15 @@ fn run_network(
             target: attacker,
         });
         ticker.last_dispatch.insert(tp.entity, now);
-        // Spend up to DISPATCH_MAX charges; never below zero.
+        // The drain commits the buffer; locally pretend DISPATCH_MAX
+        // of it is gone so a second teleporter this tick stays quiet.
         buffer = buffer.saturating_sub(DISPATCH_MAX as u32);
     }
 
     let Some(target) = target else {
         return;
     };
-    if buffer < DISPATCH_MAX as u32 || lack.spams <= 0 {
+    if buffer < DISPATCH_MAX as u32 {
         return;
     }
     let off_cooldown = |tp: &&Snap| {
@@ -585,11 +752,13 @@ fn run_specials(
     s: &mut AiScratch,
     ticker: &mut AiTicker,
     spatial: &SpatialIndex,
+    damage_log: &mut TeamDamageLog,
     now: f32,
     orders: &mut AiOrders,
 ) {
     s.enemy_pos.clear();
     s.friend_pos.clear();
+    let ally_r_sq = FIREWALL_ALLY_RADIUS * FIREWALL_ALLY_RADIUS;
     for u in &s.units {
         if u.team == team {
             s.friend_pos.push(u.pos);
@@ -632,6 +801,30 @@ fn run_specials(
         }
     }
 
+    // Firewall: drop the reflector over the spot where allies were
+    // last hit, once that fight is big enough to be worth shielding
+    // (upstream `CMD_FIREWALL`). One cast, then the memory is spent.
+    if let Some((t, pos)) = damage_log.latest(team)
+        && let Some(firewall) = ready(UnitKind::Firewall).next()
+        && firewall_should_cast(
+            now - t,
+            count_enemies_within(spatial, team, pos, FIREWALL_ENEMY_RADIUS),
+            s.units
+                .iter()
+                .filter(|u| u.team == team && flat_dist_sq(u.pos, pos) <= ally_r_sq)
+                .count(),
+            s.units
+                .iter()
+                .any(|u| u.team == team && u.protected && flat_dist_sq(u.pos, pos) <= ally_r_sq),
+        )
+    {
+        orders.command_fire.write(CommandFireEvent {
+            attacker: firewall.entity,
+            target: pos,
+        });
+        damage_log.forget(team);
+    }
+
     // Pointer: upstream `DispatchArty` plants an NX Flag instead of a
     // plain attack when the target spot is crowded. One flag per tick.
     if let Some((center, _)) =
@@ -647,11 +840,22 @@ fn run_specials(
 
     // Hacker: idle Bugs bombard from range, Exploits pack up when the
     // fight leaves (or overruns) them.
+    let clear_sq = specials::DEPLOY_CLEAR_RADIUS * specials::DEPLOY_CLEAR_RADIUS;
     for u in s.units.iter().filter(|u| u.team == team) {
         let deploy = match u.kind {
-            UnitKind::Bug if u.idle => bug_should_deploy(
-                nearest_enemy(spatial, team, u.pos, specials::DEPLOY_MAX, |_| true).map(|(_, d)| d),
-            ),
+            UnitKind::Bug if u.idle => {
+                // Upstream `IsItOccupied`: no deploy while standing on
+                // any team's building (homebase / minifac / special).
+                let on_building = s
+                    .structures
+                    .iter()
+                    .any(|st| flat_dist_sq(st.pos, u.pos) <= clear_sq);
+                bug_should_deploy(
+                    nearest_enemy(spatial, team, u.pos, specials::DEPLOY_MAX, |_| true)
+                        .map(|(_, d)| d),
+                    on_building,
+                )
+            }
             UnitKind::Exploit if u.ready => exploit_should_undeploy(
                 nearest_enemy(spatial, team, u.pos, UNDEPLOY_MAX, |_| true).map(|(_, d)| d),
             ),
@@ -660,6 +864,61 @@ fn run_specials(
         if deploy {
             orders.deploy.write(DeployEvent { entity: u.entity });
         }
+    }
+}
+
+/// Upstream's `UnitDamaged` hook, approximated from the outside: watch
+/// every unit's HP and remember where each team was last hurt, so the
+/// Firewall trigger (`run_specials`) can react without combat
+/// internals knowing the AI exists. First sight seeds the cache
+/// without logging; a unit that dies the same frame it is hit is
+/// missed (`Dying` excluded) — every earlier hit of that fight still
+/// registers, which is enough signal.
+#[derive(Resource, Default)]
+pub struct TeamDamageLog {
+    /// (when, where) of each team's most recent landed hit.
+    latest: HashMap<u8, (f32, Vec3)>,
+}
+
+impl TeamDamageLog {
+    /// The team's freshest damage, as `(age_in_seconds, position)`.
+    pub fn latest(&self, team: u8) -> Option<(f32, Vec3)> {
+        self.latest.get(&team).copied()
+    }
+
+    fn record(&mut self, team: u8, when: f32, pos: Vec3) {
+        self.latest.insert(team, (when, pos));
+    }
+
+    fn forget(&mut self, team: u8) {
+        self.latest.remove(&team);
+    }
+}
+
+/// Fills [`TeamDamageLog`] every sim frame. Must stay outside
+/// `ai_brain`'s 1 Hz gate — HP drops between ticks would be missed.
+type DamageWatchData = (
+    Entity,
+    &'static TeamId,
+    &'static Health,
+    &'static GlobalTransform,
+);
+
+pub fn track_team_damage(
+    time: Res<Time>,
+    units: Query<DamageWatchData, (With<UnitType>, Without<Dying>)>,
+    mut last: Local<HashMap<Entity, f32>>,
+    mut log: ResMut<TeamDamageLog>,
+) {
+    let now = time.elapsed_secs();
+    last.retain(|e, _| units.contains(*e));
+    for (e, team, hp, gtf) in &units {
+        if let Some(&prev) = last.get(&e)
+            && hp.current < prev
+        {
+            log.record(team.0, now, gtf.translation());
+        }
+        last.insert(e, hp.current);
     }
 }
 
@@ -673,6 +932,7 @@ mod tests {
             entity: Entity::from_raw_u32(entity).unwrap(),
             pos: Vec3::new(x, 0.0, 0.0),
             hit_radius: 0.0,
+            mid_y: 0.0,
             team,
             kind,
             hp_positive: true,

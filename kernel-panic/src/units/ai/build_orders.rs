@@ -126,9 +126,6 @@ pub enum HomebaseOrder {
     Nothing,
 }
 
-/// Upstream spam batch per `OrderHomeBase` call (`for i = 1,3`).
-const SPAM_BATCH: i32 = 3;
-
 /// `KPAI_Fair.lua::OrderHomeBase`, with the dice passed in so the
 /// decision stays a pure, testable function.
 ///
@@ -137,17 +134,21 @@ const SPAM_BATCH: i32 = 3;
 /// - `buffer`: the team's Network packet buffer (counts as army).
 /// - `roll`: `math.random(1000)`, i.e. 1..=1000.
 /// - `heavy_coin`: `math.random(2) == 1`.
+/// - `batch`: Fair KPAI's spam batch `math.random(1,5)`, 1..=5. (The
+///   non-Fair `KPAI.lua` queues a fixed 3; Fair rolls.)
 ///
 /// With `n` constructors, `n*200 < roll` builds another constructor
 /// (so the 5th never comes); otherwise a roll in the top
 /// `20 * (force + buffer)` builds one heavy or arty — big armies shift
-/// toward them — and the rest queue a batch of spam.
+/// toward them — and the rest queue a batch of spam capped by the
+/// budget.
 pub fn choose_homebase_order(
     constructors: u32,
     force: u32,
     buffer: u32,
     roll: u32,
     heavy_coin: bool,
+    batch: u32,
     lack: &Lack,
 ) -> HomebaseOrder {
     let roll = roll as i64;
@@ -164,7 +165,7 @@ pub fn choose_homebase_order(
         };
     }
     if lack.spams > 0 {
-        return HomebaseOrder::Spam(SPAM_BATCH.min(lack.spams) as u32);
+        return HomebaseOrder::Spam(batch.min(lack.spams as u32));
     }
     HomebaseOrder::Nothing
 }
@@ -219,19 +220,19 @@ mod tests {
     #[test]
     fn constructor_odds_fall_with_count() {
         assert_eq!(
-            choose_homebase_order(0, 0, 0, 1, true, &PLENTY),
+            choose_homebase_order(0, 0, 0, 1, true, 3, &PLENTY),
             HomebaseOrder::Constructor
         );
         assert_eq!(
-            choose_homebase_order(2, 0, 0, 401, true, &PLENTY),
+            choose_homebase_order(2, 0, 0, 401, true, 3, &PLENTY),
             HomebaseOrder::Constructor
         );
         assert_eq!(
-            choose_homebase_order(2, 0, 0, 400, true, &PLENTY),
+            choose_homebase_order(2, 0, 0, 400, true, 3, &PLENTY),
             HomebaseOrder::Spam(3)
         );
         assert_ne!(
-            choose_homebase_order(5, 0, 0, 1000, true, &PLENTY),
+            choose_homebase_order(5, 0, 0, 1000, true, 3, &PLENTY),
             HomebaseOrder::Constructor
         );
     }
@@ -242,20 +243,20 @@ mod tests {
     fn big_armies_buy_heavies() {
         // force 10 → threshold 800.
         assert_eq!(
-            choose_homebase_order(5, 10, 0, 801, true, &PLENTY),
+            choose_homebase_order(5, 10, 0, 801, true, 3, &PLENTY),
             HomebaseOrder::Heavy
         );
         assert_eq!(
-            choose_homebase_order(5, 10, 0, 801, false, &PLENTY),
+            choose_homebase_order(5, 10, 0, 801, false, 3, &PLENTY),
             HomebaseOrder::Arty
         );
         assert_eq!(
-            choose_homebase_order(5, 10, 0, 800, true, &PLENTY),
+            choose_homebase_order(5, 10, 0, 800, true, 3, &PLENTY),
             HomebaseOrder::Spam(3)
         );
         // force 5 + buffer 5 behaves like force 10.
         assert_eq!(
-            choose_homebase_order(5, 5, 5, 801, true, &PLENTY),
+            choose_homebase_order(5, 5, 5, 801, true, 3, &PLENTY),
             HomebaseOrder::Heavy
         );
     }
@@ -271,7 +272,7 @@ mod tests {
             buildings: 0,
         };
         assert_eq!(
-            choose_homebase_order(1, 60, 0, 900, true, &no_mediums),
+            choose_homebase_order(1, 60, 0, 900, true, 3, &no_mediums),
             HomebaseOrder::Spam(2)
         );
         let broke = Lack {
@@ -280,12 +281,35 @@ mod tests {
             buildings: 0,
         };
         assert_eq!(
-            choose_homebase_order(1, 60, 0, 900, true, &broke),
+            choose_homebase_order(1, 60, 0, 900, true, 3, &broke),
             HomebaseOrder::Nothing
         );
         assert_eq!(
-            choose_homebase_order(0, 60, 0, 900, true, &broke),
+            choose_homebase_order(0, 60, 0, 900, true, 3, &broke),
             HomebaseOrder::Constructor
+        );
+    }
+
+    /// Fair KPAI rolls `math.random(1,5)` and caps it at the budget:
+    /// `for i = 1, math.min(math.random(1,5), Lack.spams)`.
+    #[test]
+    fn spam_batch_rolls_one_to_five_and_caps_at_budget() {
+        let tight = Lack {
+            spams: 2,
+            mediums: 0,
+            buildings: 0,
+        };
+        assert_eq!(
+            choose_homebase_order(5, 0, 0, 100, true, 5, &tight),
+            HomebaseOrder::Spam(2)
+        );
+        assert_eq!(
+            choose_homebase_order(5, 0, 0, 100, true, 1, &tight),
+            HomebaseOrder::Spam(1)
+        );
+        assert_eq!(
+            choose_homebase_order(5, 0, 0, 100, true, 5, &PLENTY),
+            HomebaseOrder::Spam(5)
         );
     }
 

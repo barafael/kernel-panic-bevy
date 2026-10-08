@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 use crate::interaction::movement::QueuedCommand;
-use crate::rng::next_f32;
+use crate::rng::{next_f32, xorshift32};
 use crate::units::content::definitions::UnitKind;
 
 /// Upstream `minifacLimit`: an enemy team with fewer small buildings
@@ -68,12 +68,74 @@ pub fn pick_attack_target(
     nearest(&|e| !e.homebase).or_else(|| nearest(&|e| e.homebase))
 }
 
+/// Upstream's mission loop runs `1 + (forceSize + bufferSize) * 0.02`
+/// spot selections per slow update (`for _=1,1+...*.02`), so the army
+/// pushes on more fronts as it grows.
+pub fn mission_count(force_plus_buffer: u32) -> usize {
+    1 + (force_plus_buffer as f32 * 0.02) as usize
+}
+
+/// The push destinations for one AI tick: `missions` targets. The
+/// first comes from [`pick_attack_target`] (keeping the big-army rush
+/// rule and the fallbacks); the rest are spread over the remaining
+/// enemy structures with upstream `GetWeightFor`'s enemy-spot weight
+/// `(1 + 1/dist) * (1 + forceSize)`, sampling `max(n/3, 2)`
+/// candidates per mission the way upstream samples spots. Never
+/// repeats a target within a tick; returns fewer if the map runs out
+/// of enemy structures.
+pub fn pick_attack_targets(
+    from: Vec3,
+    enemies: &[EnemyStructure],
+    force_plus_buffer: u32,
+    missions: usize,
+    rng: &mut u32,
+) -> Vec<Vec3> {
+    let mut targets = Vec::with_capacity(missions);
+    let Some(first) = pick_attack_target(from, enemies, force_plus_buffer) else {
+        return targets;
+    };
+    targets.push(first);
+    let weight = |e: &EnemyStructure| {
+        (1.0 + 1.0 / from.distance(e.pos).max(1.0)) * (1.0 + force_plus_buffer as f32)
+    };
+    while targets.len() < missions {
+        let remaining: Vec<&EnemyStructure> = enemies
+            .iter()
+            .filter(|e| !targets.contains(&e.pos))
+            .collect();
+        if remaining.is_empty() {
+            break;
+        }
+        let samples = (remaining.len() / 3).max(2).min(remaining.len());
+        let pick = (0..samples)
+            .map(|_| xorshift32(rng) as usize % remaining.len())
+            .map(|i| remaining[i])
+            .max_by(|a, b| weight(a).total_cmp(&weight(b)));
+        if let Some(e) = pick {
+            targets.push(e.pos);
+        } else {
+            break;
+        }
+    }
+    targets
+}
+
 /// Upstream `DispatchSpam` scatters each unit's destination on a ring
 /// (`amp = 40 + random(90)`) so a group doesn't converge on one point.
 pub fn scatter(target: Vec3, rng: &mut u32) -> Vec3 {
     let angle = next_f32(rng) * std::f32::consts::TAU;
     let amp = 40.0 + next_f32(rng) * 90.0;
     target + Vec3::new(angle.cos() * amp, 0.0, angle.sin() * amp)
+}
+
+/// Upstream's idle-constructor spread order (`KPAI_Fair.lua`
+/// `DispatchCon`'s no-budget branch): `phase = pi*2*random()`,
+/// `amp = 128 + 128*random()` around the homebase — far enough to
+/// clear the exit, close enough to come back for the next vent.
+pub fn spread_around(center: Vec3, rng: &mut u32) -> Vec3 {
+    let angle = next_f32(rng) * std::f32::consts::TAU;
+    let amp = 128.0 + next_f32(rng) * 128.0;
+    center + Vec3::new(angle.cos() * amp, 0.0, angle.sin() * amp)
 }
 
 /// Issue a fight order (Spring `CMD.FIGHT`): walk to `target`, but stop
@@ -140,6 +202,53 @@ mod tests {
         );
     }
 
+    /// `1 + (force + buffer) * 0.02` missions — Lua's fractional for
+    /// bound floors.
+    #[test]
+    fn mission_count_scales_with_force() {
+        assert_eq!(mission_count(0), 1);
+        assert_eq!(mission_count(49), 1);
+        assert_eq!(mission_count(50), 2);
+        assert_eq!(mission_count(150), 4);
+        assert_eq!(mission_count(1000), 21);
+    }
+
+    /// Multi-prong: first target obeys the single-target rules, extra
+    /// targets are distinct enemy structures, and the set never
+    /// repeats a position.
+    #[test]
+    fn multi_prong_targets_are_distinct_and_from_the_enemy_set() {
+        let enemies = [
+            s(2, 300.0, false),
+            s(2, 600.0, false),
+            s(2, 900.0, false),
+            s(3, 1200.0, false),
+            s(2, 1000.0, true),
+        ];
+        let mut rng = 0x5EED_5EED;
+        let targets = pick_attack_targets(Vec3::ZERO, &enemies, 10, 3, &mut rng);
+        assert_eq!(targets.len(), 3);
+        // The nearest minifac leads; the rest are sampled from the set.
+        assert_eq!(targets[0], Vec3::new(300.0, 0.0, 0.0));
+        for (i, t) in targets.iter().enumerate() {
+            assert!(
+                enemies.iter().any(|e| e.pos == *t),
+                "target {i} not an enemy structure"
+            );
+            assert!(
+                targets[..i].iter().all(|u| *u != *t),
+                "target {i} repeats an earlier one"
+            );
+        }
+        // Asking for everything returns every structure exactly once.
+        let all = pick_attack_targets(Vec3::ZERO, &enemies, 10, 5, &mut rng);
+        assert_eq!(all.len(), 5);
+        // One mission degrades to the classic single target.
+        let one = pick_attack_targets(Vec3::ZERO, &enemies, 10, 1, &mut rng);
+        assert_eq!(one, vec![Vec3::new(300.0, 0.0, 0.0)]);
+        assert!(pick_attack_targets(Vec3::ZERO, &[], 10, 3, &mut rng).is_empty());
+    }
+
     #[test]
     fn scatter_stays_on_upstream_ring() {
         let mut rng = 0xC0FF_EE01;
@@ -147,6 +256,18 @@ mod tests {
             let p = scatter(Vec3::ZERO, &mut rng);
             let r = p.length();
             assert!((40.0..=130.0).contains(&r), "radius {r}");
+        }
+    }
+
+    #[test]
+    fn spread_around_stays_on_the_constructor_ring() {
+        let mut rng = 0xD15_EA5E;
+        for _ in 0..100 {
+            let p = spread_around(Vec3::new(10.0, 5.0, 20.0), &mut rng);
+            assert!((p.x - 10.0).hypot(p.z - 20.0) >= 127.9);
+            assert!((p.x - 10.0).hypot(p.z - 20.0) <= 256.1);
+            // The ring is planar; the center's height carries over.
+            assert_eq!(p.y, 5.0);
         }
     }
 

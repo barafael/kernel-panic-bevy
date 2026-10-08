@@ -33,13 +33,45 @@ pub const COUNTER_DISPATCH_MIN_LACK: i32 = 5;
 
 /// Bugs deploy into Exploits when the nearest enemy is in this band
 /// (`GetUnitNearestEnemy(u,1000)` and separation `> 600`) — far enough
-/// that the distance-scaled Exploit shot pays off.
+/// that the distance-scaled Exploit shot pays off. Upstream also
+/// refuses while the Bug stands within `IsItOccupied`'s ±48 box of any
+/// building (any team) — a stationary Exploit must not clog a
+/// building plot.
 pub const DEPLOY_MIN: f32 = 600.0;
 pub const DEPLOY_MAX: f32 = 1000.0;
+/// `IsItOccupied` clearance (±48 both axes upstream; a circle here).
+pub const DEPLOY_CLEAR_RADIUS: f32 = 48.0;
 /// Exploits pack up when nothing is within this range …
 pub const UNDEPLOY_MAX: f32 = 1100.0;
 /// … or an enemy has closed inside this range (too close to benefit).
 pub const UNDEPLOY_MIN: f32 = 500.0;
+
+/// Firewall (`CMD_FIREWALL`): the reflector drops over the spot where
+/// allies were last hit, once the fight there is worth shielding —
+/// ≥3 enemies within 500 and ≥7 allies within 300, none of them
+/// already `Protected`. Upstream expires `lastAllyDamage` with
+/// `t > GetGameSeconds() + 6`, a comparison a past timestamp can never
+/// pass; we implement the evident intent (damage fresher than 6 s).
+pub const FIREWALL_FRESH: f32 = 6.0;
+pub const FIREWALL_ENEMY_MIN: usize = 3;
+pub const FIREWALL_ALLY_MIN: usize = 7;
+pub const FIREWALL_ENEMY_RADIUS: f32 = 500.0;
+pub const FIREWALL_ALLY_RADIUS: f32 = 300.0;
+
+/// The `CMD_FIREWALL` gate. `damage_age` is seconds since the recorded
+/// ally damage; freshness is part of the pure function so it stays
+/// testable.
+pub fn firewall_should_cast(
+    damage_age: f32,
+    enemies_near: usize,
+    allies_near: usize,
+    protected_near: bool,
+) -> bool {
+    damage_age <= FIREWALL_FRESH
+        && enemies_near >= FIREWALL_ENEMY_MIN
+        && allies_near >= FIREWALL_ALLY_MIN
+        && !protected_near
+}
 
 /// Crowded-cluster pick for area abilities: the enemy position with the
 /// most enemies within `radius`, provided there are at least
@@ -80,9 +112,10 @@ pub fn should_counter_dispatch(buffer: u32, lack_spams: i32, since_last: Option<
         && since_last.is_none_or(|s| s > DISPATCH_COOLDOWN)
 }
 
-/// Idle Bug: deploy iff the nearest enemy distance is in (600, 1000].
-pub fn bug_should_deploy(nearest_enemy: Option<f32>) -> bool {
-    nearest_enemy.is_some_and(|d| d > DEPLOY_MIN && d <= DEPLOY_MAX)
+/// Idle Bug: deploy iff it stands clear of buildings and the nearest
+/// enemy distance is in (600, 1000].
+pub fn bug_should_deploy(nearest_enemy: Option<f32>, on_building: bool) -> bool {
+    !on_building && nearest_enemy.is_some_and(|d| d > DEPLOY_MIN && d <= DEPLOY_MAX)
 }
 
 /// Exploit: undeploy when nothing is within 1100 or the nearest enemy
@@ -137,19 +170,34 @@ mod tests {
         assert!(should_counter_dispatch(3, 6, Some(5.5)));
     }
 
+    /// Upstream `CMD_FIREWALL`: needs a big enough brawl on fresh
+    /// damage, and refuses while any ally in the zone is already
+    /// shielded.
+    #[test]
+    fn firewall_needs_a_fresh_worthwhile_fight() {
+        assert!(firewall_should_cast(1.0, 3, 7, false));
+        assert!(!firewall_should_cast(6.1, 3, 7, false));
+        assert!(!firewall_should_cast(1.0, 2, 7, false));
+        assert!(!firewall_should_cast(1.0, 3, 6, false));
+        assert!(!firewall_should_cast(1.0, 3, 7, true));
+    }
+
     #[test]
     fn deploy_hysteresis_bands_do_not_overlap() {
-        assert!(!bug_should_deploy(None));
-        assert!(!bug_should_deploy(Some(600.0)));
-        assert!(bug_should_deploy(Some(800.0)));
-        assert!(!bug_should_deploy(Some(1001.0)));
+        assert!(!bug_should_deploy(None, false));
+        assert!(!bug_should_deploy(Some(600.0), false));
+        assert!(bug_should_deploy(Some(800.0), false));
+        assert!(!bug_should_deploy(Some(1001.0), false));
+        // A Bug on a building plot never bombard-deploys, whatever the
+        // range (upstream `IsItOccupied` gate).
+        assert!(!bug_should_deploy(Some(800.0), true));
         assert!(exploit_should_undeploy(None));
         assert!(exploit_should_undeploy(Some(1200.0)));
         assert!(exploit_should_undeploy(Some(400.0)));
         assert!(!exploit_should_undeploy(Some(800.0)));
         // Anything a Bug deploys at, an Exploit keeps holding.
         for d in [601.0, 800.0, 1000.0] {
-            assert!(bug_should_deploy(Some(d)) && !exploit_should_undeploy(Some(d)));
+            assert!(bug_should_deploy(Some(d), false) && !exploit_should_undeploy(Some(d)));
         }
     }
 }
