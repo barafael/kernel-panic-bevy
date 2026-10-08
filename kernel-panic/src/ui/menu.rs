@@ -175,6 +175,9 @@ enum MenuAction {
     SetDifficulty(u8),
     PickMap(usize),
     PickRandomMap,
+    /// Main page: step the attract-mode demo's map through the catalog
+    /// (`-1` back, `+1` forward) and restart the demo on it.
+    CycleDemoMap(i32),
     ScrollReadme(i32),
     /// Start showcase mode for the given faction.
     Showcase(Faction),
@@ -595,6 +598,15 @@ struct MenuFlow<'w> {
     exit: MessageWriter<'w, AppExit>,
 }
 
+/// What a match (or the demo behind the menu) is built from: the map
+/// catalog, the dev overrides and the setup currently loaded, if any.
+#[derive(SystemParam)]
+struct MenuWorld<'w> {
+    catalog: Res<'w, MapCatalog>,
+    dev: Res<'w, DevOptions>,
+    demo: Option<Res<'w, crate::game_setup::GameSetup>>,
+}
+
 /// The render settings as the Settings page draws them: the values and
 /// the sample counts this GPU offers.
 #[derive(SystemParam)]
@@ -608,10 +620,10 @@ fn handle_menu_actions(
     mut state: MenuState,
     mut overlays: Overlays,
     mut flow: MenuFlow,
-    catalog: Res<MapCatalog>,
-    dev: Res<DevOptions>,
+    world: MenuWorld,
     mut commands: Commands,
 ) {
+    let MenuWorld { catalog, dev, demo } = &world;
     let MenuState {
         page,
         config,
@@ -652,7 +664,7 @@ fn handle_menu_actions(
                 **page = MenuPage::Main;
                 // Reload the attract-mode demo behind the menu (the real
                 // match's world is torn down by the RunGame handler).
-                commands.insert_resource(demo_setup(&dev));
+                commands.insert_resource(demo_setup(dev));
                 flow.run_game.write(RunGame);
             }
             MenuAction::Resume => {
@@ -687,6 +699,22 @@ fn handle_menu_actions(
                 config.map = None;
                 **page = MenuPage::AdvancedSkirmish;
             }
+            MenuAction::CycleDemoMap(step) => {
+                let names = catalog.names();
+                if names.is_empty() {
+                    continue;
+                }
+                // Step from the map the demo is on now; an unknown (or
+                // absent) map starts the cycle at the first entry.
+                let current = demo
+                    .as_deref()
+                    .and_then(|s| names.iter().position(|n| *n == s.map));
+                let next = step_catalog_index(current, step, names.len());
+                let mut setup = demo_setup(dev);
+                setup.map = names[next].clone();
+                commands.insert_resource(setup);
+                flow.run_game.write(RunGame);
+            }
             MenuAction::ScrollReadme(lines) => {
                 readme_scroll.0 = (readme_scroll.0 as isize + lines as isize).max(0) as usize;
             }
@@ -707,6 +735,19 @@ fn handle_menu_actions(
                 render.fullscreen = false;
             }
         }
+    }
+}
+
+/// The catalog index `step` entries on from `current`, wrapping at both
+/// ends. With no current index (the demo is on a map the catalog no
+/// longer lists, or there is no demo), stepping forward starts at the
+/// first map and stepping back at the last.
+fn step_catalog_index(current: Option<usize>, step: i32, len: usize) -> usize {
+    debug_assert!(len > 0);
+    match current {
+        Some(i) => (i as i32 + step).rem_euclid(len as i32) as usize,
+        None if step < 0 => len - 1,
+        None => 0,
     }
 }
 
@@ -913,6 +954,8 @@ struct LaunchMenuInputs<'w> {
     config: Res<'w, SkirmishConfig>,
     readme: Res<'w, ReadmeScroll>,
     settings: SettingsView<'w>,
+    /// The attract-mode demo behind the menu; the main page names its map.
+    demo: Option<Res<'w, crate::game_setup::GameSetup>>,
 }
 
 fn maintain_launch_menu(
@@ -928,11 +971,15 @@ fn maintain_launch_menu(
         config,
         readme,
         settings,
+        demo,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings, the
-    // readme scroll) changed under it.
-    let stale = config.is_changed() || settings.render.is_changed() || readme.is_changed();
+    // readme scroll, the demo's map) changed under it.
+    let stale = config.is_changed()
+        || settings.render.is_changed()
+        || readme.is_changed()
+        || demo.as_ref().is_some_and(|d| d.is_changed());
     if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }
@@ -948,7 +995,10 @@ fn maintain_launch_menu(
 
     let root = spawn_backdrop(&mut commands, MENU_GLASS);
     match *page {
-        MenuPage::Main => main_menu_page(&mut commands, root, title_size, menu_size),
+        MenuPage::Main => {
+            let demo_map = demo.as_deref().filter(|d| d.demo).map(|d| d.map.as_str());
+            main_menu_page(&mut commands, root, title_size, menu_size, demo_map)
+        }
         MenuPage::QuickSkirmish => quick_skirmish_page(&mut commands, root, page_size),
         MenuPage::AdvancedSkirmish => {
             advanced_skirmish_page(&mut commands, root, page_size, config, &catalog.names())
@@ -970,8 +1020,19 @@ fn maintain_launch_menu(
 /// The original's zigzag main menu (`MainMenu`): `vsy/20` buttons whose
 /// bottom corners alternate between ending at x=46% (`rb`) and starting
 /// at x=54% (`lb`), stepping down 10% of the screen per button.
-fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_size: f32) {
+///
+/// `demo_map` is the map the attract-mode demo is playing behind the
+/// menu, named in the bottom-right corner between small `<` / `>`
+/// buttons that cycle it through the catalog.
+fn main_menu_page(
+    commands: &mut Commands,
+    root: Entity,
+    title_size: f32,
+    menu_size: f32,
+    demo_map: Option<&str>,
+) {
     title(commands, root, title_size);
+    demo_map_cycler(commands, root, menu_size * 0.5, demo_map);
     // No Quit on the web: a page has nothing to quit to.
     let mut entries: Vec<(&str, Color, MenuAction)> = vec![
         (
@@ -1005,6 +1066,59 @@ fn main_menu_page(commands: &mut Commands, root: Entity, title_size: f32, menu_s
         };
         ButtonSpec::new(name, color, menu_size, (x, y), anchor, action).spawn(commands, root);
     }
+}
+
+/// Bottom-right corner of the main page: `< MapName >`. The arrows
+/// restart the demo behind the menu on the previous / next catalog map,
+/// so the backdrop can be browsed without starting a match.
+fn demo_map_cycler(commands: &mut Commands, root: Entity, font_size: f32, demo_map: Option<&str>) {
+    // Right-to-left from the corner: `>` hangs off x=99%, the name off
+    // the arrow's left edge, `<` off the name's. Absolute nodes don't
+    // know each other's widths, so the three sit in one row node
+    // anchored at the corner instead.
+    let (mut node, transform) = anchored(0.99, 0.02, Anchor::Rb);
+    node.flex_direction = FlexDirection::Row;
+    node.align_items = AlignItems::Center;
+    node.column_gap = Val::Px(font_size * 0.4);
+    let row = commands.spawn((node, transform, Pickable::IGNORE)).id();
+    commands.entity(root).add_child(row);
+
+    let arrow = |commands: &mut Commands, label: &str, step: i32| {
+        let text = spawn_button_text(commands, label, font_size);
+        let node = Node {
+            padding: frame_padding(font_size),
+            border: frame_border(font_size),
+            justify_content: JustifyContent::Center,
+            ..default()
+        };
+        commands
+            .spawn((
+                MenuButton {
+                    action: MenuAction::CycleDemoMap(step),
+                    base: MAP_GREEN,
+                },
+                node,
+                fill(MAP_GREEN),
+                border(MAP_GREEN),
+            ))
+            .add_child(text)
+            .id()
+    };
+    let prev = arrow(commands, "<", -1);
+    let name = commands
+        .spawn((
+            Text::new(demo_map.unwrap_or("")),
+            TextColor(TEXT_WHITE),
+            TextFont {
+                font_size,
+                ..default()
+            },
+            TextLayout::new(Justify::Center, LineBreak::NoWrap),
+            Pickable::IGNORE,
+        ))
+        .id();
+    let next = arrow(commands, ">", 1);
+    commands.entity(row).add_children(&[prev, name, next]);
 }
 
 /// Page heading in the original's style: a blue plate at the top
@@ -2074,6 +2188,16 @@ pub fn boot_demo(
 mod tests {
     use super::*;
     use bevy::diagnostic::{Diagnostic, RegisterDiagnostic};
+
+    #[test]
+    fn demo_map_cycle_wraps_both_ways() {
+        assert_eq!(step_catalog_index(Some(0), 1, 5), 1);
+        assert_eq!(step_catalog_index(Some(4), 1, 5), 0);
+        assert_eq!(step_catalog_index(Some(0), -1, 5), 4);
+        assert_eq!(step_catalog_index(None, 1, 5), 0);
+        assert_eq!(step_catalog_index(None, -1, 5), 4);
+        assert_eq!(step_catalog_index(Some(0), 1, 1), 0);
+    }
 
     #[test]
     fn fps_text_rounds_and_dashes_before_first_sample() {
