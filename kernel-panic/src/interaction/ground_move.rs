@@ -37,8 +37,8 @@ use super::movement::{
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
 use crate::sim::{
-    GAME_SPEED, Heading, MAP_GRAVITY_PER_FRAME2, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE,
-    SPRING_CIRCLE_DIVS, SPRING_MAX_HEADING, SQUARE_SIZE,
+    GAME_SPEED, Heading, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SPRING_CIRCLE_DIVS,
+    SPRING_MAX_HEADING, SQUARE_SIZE,
 };
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AimTarget, Dying, Stunned};
@@ -850,8 +850,14 @@ impl GroundMover {
     /// the current `pos`; the caller re-seats a grounded unit on the
     /// terrain afterwards (`AdjustPosToWaterLine`). `OnSlope` is never
     /// true in KP (`slideTolerance` 0), so there is no slope sliding.
-    pub fn update_skid(&mut self, pos: &mut Vec3, ground_height: f32, ground_normal: Vec3) {
-        let gravity = MAP_GRAVITY_PER_FRAME2;
+    /// `gravity` is the map's, per frame² (negative; `MapGravity`).
+    pub fn update_skid(
+        &mut self,
+        pos: &mut Vec3,
+        ground_height: f32,
+        ground_normal: Vec3,
+        gravity: f32,
+    ) {
         let mut v = self.velocity
             + drag_acceleration(
                 self.velocity,
@@ -1560,6 +1566,7 @@ pub fn movement_system(
     circular_flow: Option<Res<CircularFlow>>,
     registry: Res<UnitRegistry>,
     budget: Option<Res<PathSearchBudget>>,
+    map_gravity: Option<Res<crate::sim::MapGravity>>,
     mut query: Query<MoverData, Without<Dying>>,
     mut avoidees: Local<Vec<Avoidee>>,
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
@@ -1568,6 +1575,7 @@ pub fn movement_system(
     mut rng_state: Local<u32>,
 ) {
     let nav = nav_set.as_deref();
+    let gravity = map_gravity.as_deref().copied().unwrap_or_default().0;
     // Last frame's explosion impulses (`CUnit::ApplyImpulse`), before
     // anyone moves. Buildings and aircraft take none here
     // (`CStaticMoveType::CanApplyImpulse` is false; hover air has its own).
@@ -1682,7 +1690,7 @@ pub fn movement_system(
                 (hm.sample(pos.x, pos.z) + lift, hm.normal(pos.x, pos.z))
             });
             let mut new_pos = pos;
-            m.update_skid(&mut new_pos, ground, normal);
+            m.update_skid(&mut new_pos, ground, normal, gravity);
             if !m.flying
                 && let Some(hm) = hm
             {

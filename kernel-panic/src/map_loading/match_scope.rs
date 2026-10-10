@@ -47,7 +47,10 @@ pub struct MatchEntity;
 /// Resets of every match-scoped resource, registered through
 /// [`MatchScopeAppExt::init_match_resource`].
 #[derive(Resource, Default)]
-pub(crate) struct MatchResources(Vec<(TypeId, fn(&mut World))>);
+pub(crate) struct MatchResources(Vec<(TypeId, ResetFn)>);
+
+/// Re-initialises one match-scoped resource.
+type ResetFn = fn(&mut World);
 
 /// Declares per-match resources.
 pub trait MatchScopeAppExt {
@@ -80,7 +83,7 @@ fn reset_resource<R: Resource + FromWorld>(world: &mut World) {
 /// the swap, after the old world's entities are gone (despawn hooks
 /// and observers may still have written to the old tallies).
 pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
-    let resets: Vec<fn(&mut World)> = world
+    let resets: Vec<ResetFn> = world
         .get_resource::<MatchResources>()
         .map(|r| r.0.iter().map(|(_, reset)| *reset).collect())
         .unwrap_or_default();
@@ -336,9 +339,11 @@ mod tests {
     }
 
     fn spectated_demo() -> GameSetup {
-        let mut setup = GameSetup::default();
-        setup.demo = true;
-        setup.difficulty = 4;
+        let mut setup = GameSetup {
+            demo: true,
+            difficulty: 4,
+            ..GameSetup::default()
+        };
         for p in &mut setup.players {
             p.ai = true;
         }

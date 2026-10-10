@@ -333,8 +333,10 @@ mod tests {
     #[test]
     fn pending_setup_does_not_judge_the_running_match() {
         let mut app = world();
-        let mut demo = GameSetup::default();
-        demo.demo = true;
+        let demo = GameSetup {
+            demo: true,
+            ..GameSetup::default()
+        };
         app.insert_resource(ActiveMatch(demo))
             .insert_resource(GameSetup::default())
             .insert_resource(LocalTeam(crate::game_setup::SPECTATOR_TEAM));
