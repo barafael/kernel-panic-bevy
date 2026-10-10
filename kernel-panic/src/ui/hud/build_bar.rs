@@ -50,10 +50,15 @@ pub(super) struct BuildBarPlugin;
 impl Plugin for BuildBarPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<BarState>()
+            // Before the command panel's input: the build bar is a
+            // LuaUI widget, and widgets see a press before
+            // `CGuiHandler` does — so a right-click on the bar with a
+            // command armed selects instead of cancelling, every time.
             .add_systems(
                 PreUpdate,
                 bar_mouse_input
                     .after(InputSystems)
+                    .before(super::command_panel::PanelMouseInput)
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(
