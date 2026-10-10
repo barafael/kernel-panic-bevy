@@ -83,7 +83,10 @@ fn main() {
         // the datavent build sites the showcase director actually uses,
         // and verify no path crosses a blocked cell.
         if name == "Data_Cache_L1" {
-            use spring_pathfinding::{max_slope_from_degrees, slope_mod_from_max_slope};
+            use spring_pathfinding::{
+                max_slope_from_degrees, qtpfs::NodeLayer, qtpfs::QtScratch, qtpfs::QtSearch,
+                slope_mod_from_max_slope,
+            };
             let cap = max_slope_from_degrees(36.0);
             let speed_map = spring_pathfinding::SpeedMap::from_heightmap(
                 &map.parsed.heights,
@@ -92,6 +95,22 @@ fn main() {
                 cap,
                 slope_mod_from_max_slope(cap),
             );
+            let mut layer = NodeLayer::new(&speed_map, None);
+            let mut scratch = QtScratch::default();
+            let mut find_path = |layer: &mut NodeLayer, dst: [f32; 2]| match QtSearch::begin(
+                layer,
+                &mut scratch,
+                &speed_map,
+                None,
+                [224.0, 2848.0],
+                dst,
+                8.0,
+            ) {
+                Err(p) => Some(p),
+                Ok(mut s) => s
+                    .step(layer, &mut scratch, usize::MAX)
+                    .expect("unbounded step finishes"),
+            };
             let targets: [([f32; 2], &str); 6] = [
                 ([224.0, 1374.0], "vent south"),
                 ([932.0, 1243.0], "vent far"),
@@ -102,7 +121,7 @@ fn main() {
             ];
             for (dst, label) in targets {
                 let t = Instant::now();
-                match spring_pathfinding::find_path(&speed_map, [224.0, 2848.0], dst) {
+                match find_path(&mut layer, dst) {
                     Some(path) => {
                         let crossings = path.points.iter().any(|p| {
                             let cx = (p[0] / 8.0) as u32;
@@ -114,9 +133,16 @@ fn main() {
                             ((p[0] - dst[0]).powi(2) + (p[1] - dst[1]).powi(2)).sqrt() < 8.0
                         });
                         println!(
-                            "    path {label:<16} {:>5} waypoints, {:>7.0} elmos, {:>5.1}ms, reached goal: {}, crossings: {}",
-                            path.len(),
-                            path.total_length(),
+                            "    path {label:<16} {:>5} waypoints, {:>7} elmos, {:>5.1}ms, reached goal: {}, crossings: {}",
+                            path.points.len(),
+                            path.points
+                                .windows(2)
+                                .map(|w| {
+                                    let dx = w[1][0] - w[0][0];
+                                    let dz = w[1][1] - w[0][1];
+                                    (dx * dx + dz * dz).sqrt()
+                                })
+                                .sum::<f32>(),
                             t.elapsed().as_secs_f64() * 1000.0,
                             if reached { "yes" } else { "NO (partial)" },
                             if crossings { "YES (BUG)" } else { "no" },

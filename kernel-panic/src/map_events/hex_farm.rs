@@ -424,7 +424,7 @@ fn hex_farm_sim(
         let (hw, hh) = hm.grid_size();
         for (e, coord, mesh) in &chunks {
             if touched_chunks.contains(&(coord.0, coord.1))
-                && let Some(m) = meshes.get_mut(&mesh.0)
+                && let Some(mut m) = meshes.get_mut(&mesh.0)
             {
                 *m = build_chunk(hm.heights(), hw, hh, coord.0, coord.1).mesh;
                 // Recomputed from the new mesh (ray-cast culling).
@@ -683,7 +683,7 @@ fn set_mesh(
         vis.set_if_neq(Visibility::Hidden);
         return;
     }
-    if let Some(mesh) = meshes.get_mut(&handle) {
+    if let Some(mut mesh) = meshes.get_mut(&handle) {
         *mesh = buf.into_mesh();
     }
     vis.set_if_neq(Visibility::Inherited);

@@ -1,4 +1,4 @@
-use bevy::{input::mouse::MouseWheel, prelude::*, render::view::Hdr};
+use bevy::{camera::Hdr, input::mouse::MouseWheel, prelude::*};
 
 use crate::rendering::settings::{MsaaSupport, RenderSettings};
 

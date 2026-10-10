@@ -1233,7 +1233,7 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
         DirectionalLight {
             color: Color::linear_rgb(sun[0], sun[1], sun[2]),
             illuminance: 8000.0,
-            shadows_enabled: false,
+            shadow_maps_enabled: false,
             ..default()
         },
         Transform::default().looking_to(-sun_dir, Vec3::Y),

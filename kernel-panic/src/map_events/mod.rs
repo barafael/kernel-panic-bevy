@@ -149,7 +149,7 @@ impl Plugin for MapEventsPlugin {
             Update,
             (
                 tick_eruption.run_if(
-                    resource_exists::<EruptionConfig>.and(resource_exists::<EruptionState>),
+                    resource_exists::<EruptionConfig>.and_then(resource_exists::<EruptionState>),
                 ),
                 drain_eruption_queue.run_if(|q: Res<EruptionSpawnQueue>| !q.is_empty()),
             )

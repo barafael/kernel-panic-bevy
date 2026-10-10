@@ -101,7 +101,7 @@ pub fn emerge_system(
                 // Linear alpha ramp; pieces stay at surface y throughout.
                 if let Some(fade) = fade {
                     for faded_handle in &fade.faded {
-                        if let Some(mat) = materials.get_mut(faded_handle) {
+                        if let Some(mut mat) = materials.get_mut(faded_handle) {
                             mat.base_color = mat.base_color.with_alpha(t);
                         }
                     }

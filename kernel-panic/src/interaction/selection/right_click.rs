@@ -656,9 +656,9 @@ mod tests {
     use bevy::camera::visibility::SetViewVisibility;
     use bevy::camera::{ComputedCameraValues, RenderTargetInfo, Viewport};
     use bevy::ecs::system::RunSystemOnce;
-    use bevy::math::primitives::Cuboid;
     use bevy::math::{DVec2, Vec3A};
     use bevy::mesh::Mesh;
+    use bevy::shape::Cuboid;
 
     /// Headless scene: 100x100 viewport with the cursor dead-centre,
     /// camera 100 units above the origin looking straight down, and a

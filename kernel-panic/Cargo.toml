@@ -8,7 +8,7 @@ spring-tdf = { path = "../spring-tdf" }
 spring-map = { path = "../spring-map" }
 spring-unit-mesh = { path = "../spring-unit-mesh" }
 spring-pathfinding = { path = "../spring-pathfinding" }
-bevy = { version = "0.18", features = ["debug", "custom_cursor"] }
+bevy = { version = "0.20", features = ["debug", "custom_cursor"] }
 better_default = { workspace = true }
 thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }

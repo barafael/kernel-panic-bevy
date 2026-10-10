@@ -259,7 +259,7 @@ fn update_minimap(
     }
     state.base_replaced = false;
 
-    let Some(image) = images.get_mut(&state.image_handle) else {
+    let Some(mut image) = images.get_mut(&state.image_handle) else {
         return;
     };
     let Some(pixels) = image.data.as_mut() else {

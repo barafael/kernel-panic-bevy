@@ -90,10 +90,10 @@ fn main() {
     // VULKAN|METAL there would select nothing.
     #[cfg(not(target_arch = "wasm32"))]
     let render_plugin = RenderPlugin {
-        render_creation: RenderCreation::Automatic(WgpuSettings {
+        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
             backends: Some(Backends::VULKAN | Backends::METAL),
             ..default()
-        }),
+        })),
         ..default()
     };
     #[cfg(target_arch = "wasm32")]
