@@ -426,39 +426,43 @@ fn finish_map_load(world: &mut World, prepared: PreparedMap) {
     world.insert_resource(crate::units::lifecycle::bookkeeping::TotalUnitCount::default());
 
     // Tear down the previous game world (no-op on first entry). Kept
-    // entities: windows, the RTS camera (and its children), and anything
-    // tagged `PersistentEntity` (menu UI).
+    // entities: windows, the RTS camera (and its children), anything
+    // tagged `PersistentEntity` (menu UI), and the ECS's own resource,
+    // observer and system entities.
     despawn_game_world(world);
     world.resource_mut::<ReadyMap>().0 = Some(prepared);
 }
 
 fn despawn_game_world(world: &mut World) {
     use bevy::ecs::entity::EntityHashSet;
+    use bevy::ecs::observer::Observer;
+    use bevy::ecs::query::QueryFilter;
+    use bevy::ecs::resource::IsResource;
+    use bevy::ecs::system::SystemIdMarker;
+    use bevy::render::view::screenshot::Screenshot;
     use bevy::window::Window;
+
+    fn keep_all<F: QueryFilter>(world: &mut World, keep: &mut EntityHashSet) {
+        let mut query = world.query_filtered::<Entity, F>();
+        keep.extend(query.iter(world));
+    }
 
     // Roots we keep: windows, the RTS camera, persistent UI.
     let mut keep: EntityHashSet = EntityHashSet::default();
-    let mut windows = world.query_filtered::<Entity, With<Window>>();
-    for e in windows.iter(world) {
-        keep.insert(e);
-    }
-    let mut cameras = world.query_filtered::<Entity, With<RtsCamera>>();
-    for e in cameras.iter(world) {
-        keep.insert(e);
-    }
-    let mut persistent = world.query_filtered::<Entity, With<PersistentEntity>>();
-    for e in persistent.iter(world) {
-        keep.insert(e);
-    }
+    keep_all::<With<Window>>(world, &mut keep);
+    keep_all::<With<RtsCamera>>(world, &mut keep);
+    keep_all::<With<PersistentEntity>>(world, &mut keep);
     // In-flight screenshots: the render world answers them a frame or
     // two later with a plain `insert(Captured)`, which panics on a
     // despawned entity (the dev shot tools and the recorder capture
     // right across demo restarts).
-    let mut shots =
-        world.query_filtered::<Entity, With<bevy::render::view::screenshot::Screenshot>>();
-    for e in shots.iter(world) {
-        keep.insert(e);
-    }
+    keep_all::<With<Screenshot>>(world, &mut keep);
+    // The ECS's own entities: every resource, global observer and
+    // registered one-shot system lives on an entity of its own.
+    // Observers watching a doomed entity go with it.
+    keep_all::<With<IsResource>>(world, &mut keep);
+    keep_all::<With<Observer>>(world, &mut keep);
+    keep_all::<With<SystemIdMarker>>(world, &mut keep);
 
     // Pull kept roots' descendants into the keep set (camera children,
     // UI trees). One pass builds a parent→children map, then a DFS from
@@ -1273,4 +1277,37 @@ fn apply_fog(
         start: fog_start_frac * max_view_distance,
         end: max_view_distance,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Resource, Default)]
+    struct Probe(u32);
+
+    /// The teardown clears the match but spares the ECS's own entities:
+    /// resources, global observers and registered systems all keep
+    /// working afterwards.
+    #[test]
+    fn teardown_spares_resources_observers_and_systems() {
+        let mut world = World::new();
+        world.init_resource::<Probe>();
+        world.add_observer(|_: On<Add<PersistentEntity>>, mut probe: ResMut<Probe>| {
+            probe.0 += 1;
+        });
+        let system = world.register_system(|mut probe: ResMut<Probe>| probe.0 += 10);
+        let game = world.spawn(Transform::default()).id();
+        let menu = world.spawn(PersistentEntity).id();
+        world.flush();
+
+        despawn_game_world(&mut world);
+
+        assert!(world.get_entity(game).is_err(), "match entity despawned");
+        assert!(world.get_entity(menu).is_ok(), "persistent entity kept");
+        assert_eq!(world.resource::<Probe>().0, 1);
+        world.spawn(PersistentEntity);
+        world.run_system(system).expect("registered system kept");
+        assert_eq!(world.resource::<Probe>().0, 12, "observer kept");
+    }
 }
