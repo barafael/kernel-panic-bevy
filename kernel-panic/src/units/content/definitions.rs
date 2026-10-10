@@ -341,7 +341,9 @@ impl UnitKind {
     }
 
     /// Armor class used to look up this unit's entry in a weapon's
-    /// `[DAMAGE]` table. Mirrors upstream `armor.txt`.
+    /// `[DAMAGE]` table. Mirrors upstream `armor.txt`; units it doesn't
+    /// list (Bad Block, Signal) get Spring's `default` armour type and
+    /// so the table's `default` entry.
     pub fn armor_class(self) -> ArmorClass {
         match self {
             UnitKind::Bit | UnitKind::Bug | UnitKind::Exploit | UnitKind::Packet => {
@@ -360,11 +362,10 @@ impl UnitKind {
             | UnitKind::Port
             | UnitKind::Firewall
             | UnitKind::Terminal
-            | UnitKind::Obelisk
-            | UnitKind::BadBlock => ArmorClass::Building,
+            | UnitKind::Obelisk => ArmorClass::Building,
             UnitKind::LogicBomb | UnitKind::Debug => ArmorClass::Mine,
             UnitKind::Virus => ArmorClass::Infectious,
-            UnitKind::Signal => ArmorClass::Spam,
+            UnitKind::BadBlock | UnitKind::Signal => ArmorClass::Default,
         }
     }
 }
@@ -392,6 +393,11 @@ pub enum ArmorClass {
     Mine,
     #[strum(serialize = "infectious")]
     Infectious,
+    /// Spring's armour type 0 for units no `armor.txt` class names.
+    /// `default` is never a per-class key in `DamageMap::types` (it is
+    /// the fallback), so the lookup lands on the `default=` value.
+    #[strum(serialize = "default")]
+    Default,
 }
 
 impl ArmorClass {
@@ -418,6 +424,26 @@ mod tests {
         assert_eq!(UnitKind::Virus.armor_class(), ArmorClass::Infectious);
         assert_eq!(UnitKind::Assembler.armor_class(), ArmorClass::Constructor);
         assert_eq!(UnitKind::Kernel.armor_class(), ArmorClass::Building);
+        // Not in armor.txt: Spring's `default` armour type.
+        assert_eq!(UnitKind::BadBlock.armor_class(), ArmorClass::Default);
+        assert_eq!(UnitKind::Signal.armor_class(), ArmorClass::Default);
+    }
+
+    /// Why: the Bad Block was filed under `building`, so weapons with a
+    /// `building=` entry (DOS's 0.1, the Obelisk shell's 200, …) hit it
+    /// with that instead of their `default` damage.
+    #[test]
+    fn unlisted_units_take_the_default_damage_entry() {
+        let mut damage = spring_tdf::DamageMap {
+            default: 50.0,
+            ..Default::default()
+        };
+        damage.types.insert("building".into(), 0.1);
+        assert_eq!(
+            damage.for_type(UnitKind::BadBlock.armor_class().key()),
+            50.0
+        );
+        assert_eq!(damage.for_type(UnitKind::Socket.armor_class().key()), 0.1);
     }
 
     #[test]
