@@ -488,7 +488,7 @@ pub fn aim_weapons_system(
             Option<&mut crate::interaction::ground_move::GroundMover>,
             Has<MoveTarget>,
             Has<AttackMoveActive>,
-            Has<super::TargetCache>,
+            Option<&super::TargetCache>,
             Option<&Deployable>,
         ),
         // A paralyzed unit doesn't turn to aim (`CanUpdateWeapons`).

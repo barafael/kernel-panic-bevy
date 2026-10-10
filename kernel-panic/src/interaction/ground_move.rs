@@ -1543,7 +1543,7 @@ pub struct MoverData {
     boost: Option<&'static crate::units::mechanics::network_buffer::SpeedBoost>,
     attack_move: Has<AttackMoveActive>,
     aim: Has<AimTarget>,
-    target_cache: Has<TargetCache>,
+    target_cache: Option<&'static TargetCache>,
     animator: Option<&'static crate::units::assets::animation::UnitAnimator>,
     order: OrderState,
     emerging: Has<crate::units::lifecycle::spawning::Emerging>,

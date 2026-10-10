@@ -680,7 +680,7 @@ pub struct AnimDrivers<'w, 's> {
             Option<&'static crate::units::combat::AttackGroundOrder>,
             Option<&'static crate::units::combat::AttackTargetOrder>,
             Has<crate::interaction::movement::AttackMoveActive>,
-            Has<crate::units::combat::TargetCache>,
+            Option<&'static crate::units::combat::TargetCache>,
         ),
     >,
 }

@@ -9,7 +9,7 @@ use super::selection::Selected;
 use crate::sim::SQUARE_SIZE;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{
-    AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, Dying, ForcedTarget,
+    AttackGroundOrder, AttackTargetOrder, CHASE_REPATH_DISTANCE, Dying, ForcedTarget, TargetCache,
 };
 use crate::units::components::UnitStats;
 use crate::units::content::definitions::UnitKind;
@@ -598,16 +598,15 @@ pub fn advance_command_queue(
 
 /// Whether a fight order (attack-move, patrol) has engaged and holds:
 /// the unit's weapon is shooting at a target in range. `combat_system`
-/// caches exactly such a pick in [`TargetCache`] next to the
-/// [`AimTarget`]; an `AimTarget` alone may only be the turret tracking a
-/// set-target (T) designation out of range, which must not stop the
-/// march (`CMobileCAI::ExecuteFight` stops only for an enemy it can
-/// engage).
+/// records exactly such a pick as the [`TargetCache`] target next to the
+/// [`AimTarget`]; an `AimTarget` without one may only be the turret
+/// tracking a set-target (T) designation out of range (the cache is
+/// dropped then), which must not stop the march
+/// (`CMobileCAI::ExecuteFight` stops only for an enemy it can engage).
 ///
-/// [`TargetCache`]: crate::units::combat::TargetCache
 /// [`AimTarget`]: crate::units::combat::AimTarget
-pub fn fight_engaged(aim_target: bool, target_cache: bool) -> bool {
-    aim_target && target_cache
+pub fn fight_engaged(aim_target: bool, cache: Option<&TargetCache>) -> bool {
+    aim_target && cache.is_some_and(|c| c.target.is_some())
 }
 
 /// A chase path (attack, guard) is stale when there is none yet or its

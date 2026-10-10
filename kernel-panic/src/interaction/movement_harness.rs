@@ -547,7 +547,7 @@ fn fight_leg_holds_only_when_engaged() {
         CommandQueue::default(),
         AimTarget {
             pos: Vec3::new(600.0, 0.0, 1800.0),
-            launch: AimLaunch::of(None),
+            launch: AimLaunch::Direct,
         },
     ));
     for _ in 0..90 {
@@ -560,8 +560,8 @@ fn fight_leg_holds_only_when_engaged() {
     );
 
     h.world.entity_mut(e).insert(TargetCache {
-        target: enemy,
-        expires_at: f32::MAX,
+        target: Some(enemy),
+        rescan_frame: u64::MAX,
     });
     for _ in 0..60 {
         h.step();
