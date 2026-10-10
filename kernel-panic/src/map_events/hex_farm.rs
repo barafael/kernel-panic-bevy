@@ -213,9 +213,13 @@ pub fn install(
     let side_hex =
         ((first[1][0] - first[0][0]).powi(2) + (first[1][2] - first[0][2]).powi(2)).sqrt();
     // The meshes are rebuilt in place, so their bounds would go stale:
-    // opt out of culling (the gadget draws them unculled too).
-    let mut spawn_mesh = |commands: &mut Commands| {
-        let handle = meshes.add(QuadBuffer::default().into_mesh());
+    // opt out of culling (the gadget draws them unculled too). The
+    // handle is only reserved: `set_mesh` inserts the first non-empty
+    // buffer, since an empty mesh asset makes the renderer warn
+    // ("contains no vertices") — and the moving one stays empty until
+    // a polygon animates.
+    let spawn_mesh = |commands: &mut Commands| {
+        let handle = meshes.reserve_handle();
         let entity = commands
             .spawn((
                 Mesh3d(handle.clone()),
@@ -716,9 +720,9 @@ fn set_mesh(
         vis.set_if_neq(Visibility::Hidden);
         return;
     }
-    if let Some(mut mesh) = meshes.get_mut(&handle) {
-        *mesh = buf.into_mesh();
-    }
+    // Replaces the mesh, or inserts the first one behind the reserved
+    // handle; a live handle always has a valid index generation.
+    let _ = meshes.insert(&handle, buf.into_mesh());
     vis.set_if_neq(Visibility::Inherited);
 }
 
@@ -964,5 +968,53 @@ mod tests {
             TERRAIN_TOWER
         );
         assert!(map.get((sx / 8.0) as u32, (sz / 8.0) as u32) > 0.0);
+    }
+
+    /// Why: the overlay meshes were created as empty mesh assets, and
+    /// the renderer warns about every vertex-less mesh it extracts —
+    /// once per Hex Farm load, and the moving overlay stays empty until
+    /// a polygon animates. The handle is now only reserved; an empty
+    /// buffer hides the entity without creating an asset, and the first
+    /// real buffer is inserted behind the reserved handle.
+    #[test]
+    fn overlay_mesh_exists_only_once_it_has_quads() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<Assets<Mesh>>();
+        let handle = world.resource::<Assets<Mesh>>().reserve_handle();
+        let entity = world.spawn(Visibility::Hidden).id();
+        let write = |world: &mut World, buf: QuadBuffer| {
+            let slot = (entity, handle.clone());
+            let mut buf = Some(buf);
+            world
+                .run_system_once(
+                    move |mut meshes: ResMut<Assets<Mesh>>, mut vis: Query<&mut Visibility>| {
+                        let buf = buf.take().expect("the system runs once");
+                        set_mesh(slot.clone(), buf, &mut meshes, &mut vis);
+                    },
+                )
+                .unwrap();
+        };
+
+        write(&mut world, QuadBuffer::default());
+        assert!(world.resource::<Assets<Mesh>>().get(&handle).is_none());
+        assert_eq!(world.get::<Visibility>(entity), Some(&Visibility::Hidden));
+
+        let mut buf = QuadBuffer::default();
+        let corners = [
+            [0.0, 10.0, 0.0],
+            [16.0, 10.0, 0.0],
+            [16.0, 10.0, 48.0],
+            [0.0, 10.0, 48.0],
+        ];
+        push_rect(&mut buf, &corners, WHITE, WHITE, false, None);
+        assert!(!buf.is_empty());
+        write(&mut world, buf);
+        let mesh = world.resource::<Assets<Mesh>>().get(&handle);
+        assert!(mesh.is_some_and(|m| m.count_vertices() > 0));
+        assert_eq!(
+            world.get::<Visibility>(entity),
+            Some(&Visibility::Inherited)
+        );
     }
 }
