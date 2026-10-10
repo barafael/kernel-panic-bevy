@@ -3696,6 +3696,7 @@ version = "0.1.0"
 dependencies = [
  "better_default",
  "bevy",
+ "js-sys",
  "postcard",
  "ruzstd",
  "serde",
