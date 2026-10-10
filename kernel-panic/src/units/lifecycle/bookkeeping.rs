@@ -1,17 +1,28 @@
-//! Team-scoped small-building counts shared by Kernel Boost and Flow
-//! speed. Both consumers tolerate ~second-scale staleness, but the
-//! count itself is event-driven: a building is counted once it is
-//! *finished* (upstream `kernelboost.lua` / `network_flowspeed.lua`
-//! count in `UnitFinished`), i.e. when it spawns without — or later
-//! loses — its construction [`Emerging`]; it is uncounted when `Dying`
-//! is inserted on a counted entity. There is no per-frame full scan:
-//! only buildings still under construction are revisited.
+//! Per-kind unit markers, and the team-scoped tallies: live units per
+//! team ([`TeamUnitCounts`], the factory cap) and finished small
+//! buildings per team ([`SmallBuildingCounts`], Kernel Boost and Flow
+//! speed).
 //!
-//! Note: [`TotalUnitCount`] (below) observes `RemovedComponents<UnitType>`
-//! directly, so it has no such lifecycle assumption. The small-building
-//! tally still counts through the `Dying` insertion, since only
-//! *finished* buildings were ever counted.
+//! Each tally is kept by a marker component's hooks, not by a system
+//! watching for removals: the marker's `on_add` counts, its `on_remove`
+//! uncounts. `RemovedComponents` and `Added<Dying>` read from
+//! `FixedUpdate` lose events — removal messages are cleared once per
+//! *rendered* frame, which can pass several times between sim ticks,
+//! and a building that gets `Dying` is usually despawned in the same
+//! tick, before any `Added<Dying>` reader runs. Hooks fire at the
+//! command flush itself, in any schedule, and a despawn runs
+//! `on_remove` for every component on every path. Adding is still
+//! driven by `Added<UnitType>`, which is change-tick based and reliable.
+//!
+//! A small building is counted once it is *finished* (upstream
+//! `kernelboost.lua` / `network_flowspeed.lua` count in `UnitFinished`),
+//! i.e. when it spawns without — or later loses — its construction
+//! [`Emerging`]; `Dying` drops the marker at the kill
+//! (`UnitDestroyed`). There is no per-frame full scan: only buildings
+//! still under construction are revisited.
 
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
@@ -127,32 +138,92 @@ pub fn team_kind_count(
         .count() as u32
 }
 
-/// O(1) count of live units (everything carrying a `UnitType`), used by
-/// the factory spawn cap. Replaces an `iter().count()` over the whole
-/// unit query on every spawn-threshold frame — a scan that only gets
-/// more expensive as the battle grows.
-#[derive(Resource, Default, Debug)]
-pub struct TotalUnitCount(pub u32);
+/// Upstream's per-team unit ceiling: KP's `MaxUnits` mod option
+/// (`EngineOptions.lua`, default 1000 — "how many units and buildings
+/// a player is allowed to own at the same time"), which the engine
+/// clamps to `MAX_UNITS / numTeams` (`TeamHandler.cpp:45`, 32000 / n:
+/// never lower for KP's seat counts).
+pub const MAX_UNITS_PER_TEAM: u32 = 1000;
 
-/// Bumps [`TotalUnitCount`] for each newly-added `UnitType`. Pairs with
-/// [`track_removed_units`].
-pub fn track_added_units(added: Query<(), Added<UnitType>>, mut count: ResMut<TotalUnitCount>) {
-    count.0 += added.iter().count() as u32;
+/// Per-team number of live units (everything carrying a `UnitType`,
+/// nanoframes and corpses still playing their death included) —
+/// upstream `CTeam::numUnits`, bumped by `CUnitHandler::AddUnit` and
+/// dropped only by `DeleteUnit` once the death script has finished.
+/// O(1) for the factory spawn cap; maintained by [`CountedUnit`]'s
+/// hooks, so every despawn path counts.
+#[derive(Resource, Default, Debug)]
+pub struct TeamUnitCounts {
+    counts: HashMap<u8, u32>,
 }
 
-/// Drops [`TotalUnitCount`] for each entity whose `UnitType` went away.
-///
-/// Observed via `RemovedComponents<UnitType>` rather than
-/// `Added<Dying>` so the invariant is structural: every despawn site
-/// counts, including the two that historically skipped the `Dying`
-/// pipeline (deploy pair-swap, packet absorption — their old
-/// hand-decrements are gone). No despawn path needs to remember
-/// anything.
-pub fn track_removed_units(
-    mut removed: RemovedComponents<UnitType>,
-    mut count: ResMut<TotalUnitCount>,
+impl TeamUnitCounts {
+    pub fn get(&self, team: u8) -> u32 {
+        self.counts.get(&team).copied().unwrap_or(0)
+    }
+
+    /// `CTeam::AtUnitLimit`: a factory keeps its order but builds
+    /// nothing while this holds (`CFactory::QueueBuild` →
+    /// `FACTORY_KEEP_BUILD_ORDER`).
+    pub fn at_limit(&self, team: u8) -> bool {
+        self.get(team) >= MAX_UNITS_PER_TEAM
+    }
+}
+
+/// `+1` / `-1` on a per-team tally, saturating at zero.
+fn tally(counts: &mut HashMap<u8, u32>, team: u8, add: bool) {
+    let slot = counts.entry(team).or_default();
+    *slot = if add {
+        slot.saturating_add(1)
+    } else {
+        slot.saturating_sub(1)
+    };
+}
+
+/// A unit counted in [`TeamUnitCounts`]. Its hooks are the whole
+/// bookkeeping: `on_add` counts, `on_remove` uncounts — and a despawn
+/// runs `on_remove` on every path (the death pipeline, a deploy
+/// pair-swap, packet absorption, the map teardown), whatever schedule
+/// it happens in. Not removed by `Dying`: upstream keeps counting a
+/// unit until it is deleted.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(on_add = CountedUnit::on_add, on_remove = CountedUnit::on_remove)]
+pub struct CountedUnit {
+    team: u8,
+}
+
+impl CountedUnit {
+    fn on_add(world: DeferredWorld, ctx: HookContext) {
+        Self::hook(world, ctx, true);
+    }
+
+    fn on_remove(world: DeferredWorld, ctx: HookContext) {
+        Self::hook(world, ctx, false);
+    }
+
+    fn hook(mut world: DeferredWorld, ctx: HookContext, add: bool) {
+        let Some(&Self { team }) = world.get::<Self>(ctx.entity) else {
+            return;
+        };
+        if let Some(mut counts) = world.get_resource_mut::<TeamUnitCounts>() {
+            tally(&mut counts.counts, team, add);
+        }
+    }
+}
+
+/// Tags each newly-added unit with [`CountedUnit`]. `Added<UnitType>`
+/// is change-tick based, so no spawn is missed however many frames
+/// pass between sim ticks; a unit despawned before this runs is simply
+/// never counted (and so never uncounted).
+#[allow(clippy::type_complexity)]
+pub fn track_added_units(
+    added: Query<(Entity, &TeamId), (Added<UnitType>, Without<CountedUnit>)>,
+    mut commands: Commands,
 ) {
-    count.0 = count.0.saturating_sub(removed.read().count() as u32);
+    for (entity, team) in &added {
+        commands
+            .entity(entity)
+            .try_insert(CountedUnit { team: team.0 });
+    }
 }
 
 #[derive(Resource, Default)]
@@ -164,27 +235,47 @@ impl SmallBuildingCounts {
     pub fn get(&self, team: u8) -> u32 {
         self.counts.get(&team).copied().unwrap_or(0)
     }
+}
 
-    fn bump(&mut self, team: u8) {
-        *self.counts.entry(team).or_default() += 1;
+/// A finished small building, counted in [`SmallBuildingCounts`]
+/// (`kernelboost.lua::UnitFinished`). The hooks keep the tally: it is
+/// uncounted when this marker goes — `Dying` drops it at the kill
+/// (`UnitDestroyed`), a despawn without the death pipeline drops it
+/// with the entity. A building destroyed mid-construction never
+/// carried it, so it never decrements (`UnitDestroyed` skips
+/// `beingBuilt`).
+#[derive(Component, Clone, Copy, Debug)]
+#[component(
+    storage = "SparseSet",
+    on_add = CountedSmallBuilding::on_add,
+    on_remove = CountedSmallBuilding::on_remove
+)]
+pub struct CountedSmallBuilding {
+    team: u8,
+}
+
+impl CountedSmallBuilding {
+    fn on_add(world: DeferredWorld, ctx: HookContext) {
+        Self::hook(world, ctx, true);
     }
 
-    fn drop(&mut self, team: u8) {
-        if let Some(slot) = self.counts.get_mut(&team) {
-            *slot = slot.saturating_sub(1);
+    fn on_remove(world: DeferredWorld, ctx: HookContext) {
+        Self::hook(world, ctx, false);
+    }
+
+    fn hook(mut world: DeferredWorld, ctx: HookContext, add: bool) {
+        let Some(&Self { team }) = world.get::<Self>(ctx.entity) else {
+            return;
+        };
+        if let Some(mut counts) = world.get_resource_mut::<SmallBuildingCounts>() {
+            tally(&mut counts.counts, team, add);
         }
     }
 }
 
-/// A small building that has been added to [`SmallBuildingCounts`]
-/// (it finished construction). Only these are uncounted on death, so a
-/// building destroyed mid-construction never decrements the tally.
-#[derive(Component)]
-#[component(storage = "SparseSet")]
-pub struct CountedSmallBuilding;
-
 /// A small building still under construction, awaiting its count.
-/// Keeps [`track_finished_buildings`] off the full unit table.
+/// Keeps [`track_finished_buildings`] off the full unit table; `Dying`
+/// drops it, so a corpse whose `Emerging` lapses is never counted.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
 pub struct UncountedSmallBuilding;
@@ -195,7 +286,6 @@ pub struct UncountedSmallBuilding;
 /// command flush as its `UnitType`) waits for [`track_finished_buildings`].
 pub fn track_added_buildings(
     added: Query<(Entity, &UnitType, &TeamId, Has<Emerging>), Added<UnitType>>,
-    mut counts: ResMut<SmallBuildingCounts>,
     mut commands: Commands,
 ) {
     for (entity, unit, team, emerging) in &added {
@@ -203,10 +293,11 @@ pub fn track_added_buildings(
             continue;
         }
         if emerging {
-            commands.entity(entity).insert(UncountedSmallBuilding);
+            commands.entity(entity).try_insert(UncountedSmallBuilding);
         } else {
-            counts.bump(team.0);
-            commands.entity(entity).insert(CountedSmallBuilding);
+            commands
+                .entity(entity)
+                .try_insert(CountedSmallBuilding { team: team.0 });
         }
     }
 }
@@ -224,27 +315,13 @@ pub fn track_finished_buildings(
             Without<Dying>,
         ),
     >,
-    mut counts: ResMut<SmallBuildingCounts>,
     mut commands: Commands,
 ) {
     for (entity, team) in &finished {
-        counts.bump(team.0);
         commands
             .entity(entity)
-            .remove::<UncountedSmallBuilding>()
-            .insert(CountedSmallBuilding);
-    }
-}
-
-/// Drops the per-team count when a *counted* small building enters its
-/// death pipeline. Mirrors upstream `kernelboost.lua::UnitDestroyed`,
-/// which only subtracts buildings its `UnitFinished` had added.
-pub fn track_dying_buildings(
-    dying: Query<&TeamId, (Added<Dying>, With<CountedSmallBuilding>)>,
-    mut counts: ResMut<SmallBuildingCounts>,
-) {
-    for team in &dying {
-        counts.drop(team.0);
+            .try_remove::<UncountedSmallBuilding>()
+            .try_insert(CountedSmallBuilding { team: team.0 });
     }
 }
 
@@ -255,27 +332,19 @@ mod tests {
 
     use crate::units::lifecycle::spawning::EmergeStyle;
 
-    fn run_added(world: &mut World) {
-        let mut sys = IntoSystem::into_system(track_added_buildings);
+    fn run<M>(world: &mut World, system: impl IntoSystem<(), (), M>) {
+        let mut sys = IntoSystem::into_system(system);
         sys.initialize(world);
-        sys.run((), world)
-            .expect("track_added_buildings system run");
+        sys.run((), world).expect("bookkeeping system run");
         sys.apply_deferred(world);
+    }
+
+    fn run_added(world: &mut World) {
+        run(world, track_added_buildings);
     }
 
     fn run_finished(world: &mut World) {
-        let mut sys = IntoSystem::into_system(track_finished_buildings);
-        sys.initialize(world);
-        sys.run((), world)
-            .expect("track_finished_buildings system run");
-        sys.apply_deferred(world);
-    }
-
-    fn run_dying(world: &mut World) {
-        let mut sys = IntoSystem::into_system(track_dying_buildings);
-        sys.initialize(world);
-        sys.run((), world)
-            .expect("track_dying_buildings system run");
+        run(world, track_finished_buildings);
     }
 
     fn nanoframe() -> Emerging {
@@ -289,12 +358,17 @@ mod tests {
         }
     }
 
+    fn buildings_world() -> World {
+        let mut world = World::new();
+        world.init_resource::<SmallBuildingCounts>();
+        world
+    }
+
     /// A building spawned as a construction nanoframe is not counted
     /// until it finishes (`kernelboost.lua::UnitFinished`).
     #[test]
     fn nanoframe_counts_only_when_finished() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         let socket = world
             .spawn((UnitType(UnitKind::Socket), TeamId(0), nanoframe()))
             .id();
@@ -314,8 +388,7 @@ mod tests {
     /// finished buildings' count (`UnitDestroyed` skips `beingBuilt`).
     #[test]
     fn nanoframe_destroyed_does_not_decrement() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         world.spawn((UnitType(UnitKind::Window), TeamId(1)));
         let frame = world
             .spawn((UnitType(UnitKind::Window), TeamId(1), nanoframe()))
@@ -324,17 +397,17 @@ mod tests {
         assert_eq!(world.resource::<SmallBuildingCounts>().get(1), 1);
 
         world.entity_mut(frame).insert(Dying { timer: 1.0 });
-        run_dying(&mut world);
         // Its Emerging later expiring on the corpse must not count it.
         world.entity_mut(frame).remove::<Emerging>();
         run_finished(&mut world);
+        assert_eq!(world.resource::<SmallBuildingCounts>().get(1), 1);
+        world.entity_mut(frame).despawn();
         assert_eq!(world.resource::<SmallBuildingCounts>().get(1), 1);
     }
 
     #[test]
     fn empty_world_yields_zero() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         run_added(&mut world);
         let counts = world.resource::<SmallBuildingCounts>();
         assert_eq!(counts.get(0), 0);
@@ -343,8 +416,7 @@ mod tests {
 
     #[test]
     fn small_building_spawn_bumps_team() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         world.spawn((UnitType(UnitKind::Socket), TeamId(0)));
         world.spawn((UnitType(UnitKind::Window), TeamId(0)));
         world.spawn((UnitType(UnitKind::Bit), TeamId(0))); // not a building
@@ -354,8 +426,7 @@ mod tests {
 
     #[test]
     fn homebase_does_not_count() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         world.spawn((UnitType(UnitKind::Kernel), TeamId(0)));
         world.spawn((UnitType(UnitKind::Hole), TeamId(1)));
         run_added(&mut world);
@@ -366,38 +437,52 @@ mod tests {
 
     #[test]
     fn dying_drops_count() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         let entity = world.spawn((UnitType(UnitKind::Port), TeamId(2))).id();
         run_added(&mut world);
         assert_eq!(world.resource::<SmallBuildingCounts>().get(2), 1);
 
         world.entity_mut(entity).insert(Dying { timer: 1.0 });
-        run_dying(&mut world);
         assert_eq!(world.resource::<SmallBuildingCounts>().get(2), 0);
     }
 
+    /// Why: the old `track_dying_buildings` read `Added<Dying>` at the
+    /// head of the *next* tick's Produce, but `cleanup_dying` despawns a
+    /// building without death choreography in the same tick `Dying` is
+    /// inserted — so it never saw one, and every counted building that
+    /// died kept boosting the Kernel and Flow for the rest of the match.
+    /// Inserting `Dying` and despawning in one go must uncount exactly
+    /// once.
     #[test]
-    fn drop_saturates_at_zero() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
-        // Insert Dying directly without ever counting the spawn —
-        // simulates an entity that bypassed our Added<UnitType> system
-        // (which shouldn't happen, but the saturating drop guards it).
-        world.spawn((
-            UnitType(UnitKind::Firewall),
-            TeamId(0),
-            CountedSmallBuilding,
-            Dying { timer: 1.0 },
-        ));
-        run_dying(&mut world);
+    fn dying_and_despawned_in_one_tick_uncounts_once() {
+        let mut world = buildings_world();
+        let a = world.spawn((UnitType(UnitKind::Socket), TeamId(0))).id();
+        world.spawn((UnitType(UnitKind::Socket), TeamId(0)));
+        run_added(&mut world);
+        assert_eq!(world.resource::<SmallBuildingCounts>().get(0), 2);
+
+        let mut commands = world.commands();
+        commands.entity(a).insert(Dying { timer: 0.0 });
+        commands.entity(a).despawn();
+        world.flush();
+        assert_eq!(world.resource::<SmallBuildingCounts>().get(0), 1);
+    }
+
+    /// A counted building despawned without the death pipeline (the
+    /// Exploit packing up, the map teardown) is uncounted too.
+    #[test]
+    fn despawn_without_dying_drops_count() {
+        let mut world = buildings_world();
+        let entity = world.spawn((UnitType(UnitKind::Firewall), TeamId(0))).id();
+        run_added(&mut world);
+        assert_eq!(world.resource::<SmallBuildingCounts>().get(0), 1);
+        world.entity_mut(entity).despawn();
         assert_eq!(world.resource::<SmallBuildingCounts>().get(0), 0);
     }
 
     #[test]
     fn multi_team_isolation() {
-        let mut world = World::new();
-        world.init_resource::<SmallBuildingCounts>();
+        let mut world = buildings_world();
         world.spawn((UnitType(UnitKind::Socket), TeamId(0)));
         world.spawn((UnitType(UnitKind::Socket), TeamId(0)));
         world.spawn((UnitType(UnitKind::Socket), TeamId(1)));
@@ -405,5 +490,53 @@ mod tests {
         let counts = world.resource::<SmallBuildingCounts>();
         assert_eq!(counts.get(0), 2);
         assert_eq!(counts.get(1), 1);
+    }
+
+    /// Why: `TotalUnitCount` was decremented from
+    /// `RemovedComponents<UnitType>` read in `FixedUpdate`, whose
+    /// messages are cleared every rendered frame — above ~60 fps most
+    /// despawns were never seen while every spawn was counted, and once
+    /// the drifting count passed the cap every factory stopped for the
+    /// rest of the match. Every despawn path must uncount, regardless of
+    /// when (or whether) a system runs afterwards; `Dying` alone must
+    /// not (upstream counts a unit until it is deleted).
+    #[test]
+    fn team_unit_counts_follow_spawn_and_despawn() {
+        let mut world = World::new();
+        world.init_resource::<TeamUnitCounts>();
+        let bit = world.spawn((UnitType(UnitKind::Bit), TeamId(0))).id();
+        let byte = world.spawn((UnitType(UnitKind::Byte), TeamId(0))).id();
+        let other = world.spawn((UnitType(UnitKind::Bit), TeamId(3))).id();
+        run(&mut world, track_added_units);
+        // Idempotent.
+        run(&mut world, track_added_units);
+        let counts = world.resource::<TeamUnitCounts>();
+        assert_eq!((counts.get(0), counts.get(3)), (2, 1));
+
+        world.entity_mut(bit).insert(Dying { timer: 1.0 });
+        assert_eq!(world.resource::<TeamUnitCounts>().get(0), 2);
+        world.entity_mut(bit).despawn();
+        // Absorbed / pair-swapped: no `Dying`, still uncounted.
+        world.entity_mut(byte).despawn();
+        world.entity_mut(other).despawn();
+        let counts = world.resource::<TeamUnitCounts>();
+        assert_eq!((counts.get(0), counts.get(3)), (0, 0));
+    }
+
+    /// `CTeam::AtUnitLimit` is per team: one team at the cap doesn't
+    /// stop another's factories.
+    #[test]
+    fn unit_limit_is_per_team() {
+        let mut world = World::new();
+        world.init_resource::<TeamUnitCounts>();
+        for _ in 0..MAX_UNITS_PER_TEAM {
+            world.spawn((UnitType(UnitKind::Bit), TeamId(1)));
+        }
+        world.spawn((UnitType(UnitKind::Bit), TeamId(2)));
+        run(&mut world, track_added_units);
+        let counts = world.resource::<TeamUnitCounts>();
+        assert!(counts.at_limit(1));
+        assert!(!counts.at_limit(2));
+        assert!(!counts.at_limit(0));
     }
 }

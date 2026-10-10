@@ -10,8 +10,9 @@
 //! steps whose full footprint overlaps one
 //! (`MoveDef::TestMovePositionForObjects`) and collisions strafe units
 //! around them (`HandleStaticObjectCollision`). The layer is rebuilt
-//! locally when a structure appears or dies, and paths crossing the
-//! changed area are re-checked (`NavGridSet::revision`).
+//! locally when a structure appears, moves or dies (see
+//! [`StructureStamped`]), and paths crossing the changed area are
+//! re-checked (`NavGridSet::revision`).
 //!
 //! Features a mover can crush (KP's Bad Block, `IsFeature=1`, crush
 //! resistance `0.4·metal + 0.1·damage` = 65.6,
@@ -21,6 +22,8 @@
 
 use std::collections::HashMap;
 
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use spring_pathfinding::BlockMask;
 
@@ -215,6 +218,31 @@ impl StructureLayer {
         Some([x0 - h, z0 - h, x1 + h, z1 + h])
     }
 
+    /// The stamp a structure of `kind` at `pos` would leave.
+    fn stamp_of(&self, registry: &UnitRegistry, kind: UnitKind, pos: Vec3) -> Stamp {
+        Stamp {
+            squares: self.squares_of(registry, kind, pos),
+            crushable: registry.is_feature(kind),
+        }
+    }
+
+    /// `CSolidObject::Block`: stamp `entity` (once). Returns the squares
+    /// whose masks changed.
+    fn block(&mut self, entity: Entity, stamp: Stamp) -> Option<[i32; 4]> {
+        if self.stamps.contains_key(&entity) {
+            return None;
+        }
+        let changed = self.apply(&stamp, true);
+        self.stamps.insert(entity, stamp);
+        changed
+    }
+
+    /// `CSolidObject::UnBlock`: clear `entity`'s stamp, if it has one.
+    fn unblock(&mut self, entity: Entity) -> Option<[i32; 4]> {
+        let stamp = self.stamps.remove(&entity)?;
+        self.apply(&stamp, false)
+    }
+
     /// The widest mover half-footprint any mask is dilated by.
     pub fn max_xsizeh(&self) -> i32 {
         self.masks.iter().map(|m| m.xsizeh).max().unwrap_or(0)
@@ -275,21 +303,79 @@ fn mover_classes(registry: &UnitRegistry) -> Vec<(i32, bool)> {
     classes
 }
 
-/// Keep [`StructureLayer`] in step with the living structures: stamp
-/// new ones, clear the dying / despawned, and bump
+/// Lifetime handle of an entity's stamp in [`StructureLayer`]: the stamp
+/// exists exactly while this marker does. Its `on_add` hook blocks the
+/// structure's squares (`CSolidObject::Block`), its `on_remove` hook
+/// clears them (`UnBlock`) — `Dying` drops the marker at the kill, and
+/// a despawn on any path (the death pipeline, the Exploit packing up,
+/// the map teardown) drops it with the entity. Hooks run at the command
+/// flush in whatever schedule: the old `Added<Dying>` /
+/// `RemovedComponents<UnitType>` reads in `FixedUpdate` missed every
+/// building despawned in the tick it died, and most despawns above
+/// ~60 fps, leaving phantom obstacles until the next map load.
+#[derive(Component)]
+#[component(
+    storage = "SparseSet",
+    on_add = StructureStamped::on_add,
+    on_remove = StructureStamped::on_remove
+)]
+pub struct StructureStamped;
+
+impl StructureStamped {
+    fn on_add(mut world: DeferredWorld, ctx: HookContext) {
+        let entity = ctx.entity;
+        let (Some(kind), Some(tf)) = (
+            world.get::<UnitType>(entity),
+            world.get::<Transform>(entity),
+        ) else {
+            return;
+        };
+        let (kind, pos) = (kind.0, tf.translation);
+        let (Some(registry), Some(nav)) = (
+            world.get_resource::<UnitRegistry>(),
+            world.get_resource::<NavGridSet>(),
+        ) else {
+            return;
+        };
+        let stamp = nav.structures.stamp_of(registry, kind, pos);
+        let mut nav = world.resource_mut::<NavGridSet>();
+        if let Some(bbox) = nav.structures.block(entity, stamp) {
+            nav.bump(bbox);
+        }
+    }
+
+    fn on_remove(mut world: DeferredWorld, ctx: HookContext) {
+        let Some(mut nav) = world.get_resource_mut::<NavGridSet>() else {
+            return;
+        };
+        if let Some(bbox) = nav.structures.unblock(ctx.entity) {
+            nav.bump(bbox);
+        }
+    }
+}
+
+/// Keep [`StructureLayer`] in step with the living structures: tag new
+/// ones [`StructureStamped`] (whose hooks stamp them, and clear them
+/// when they die or despawn), re-stamp moved ones, and bump
 /// [`NavGridSet::revision`] so paths through the change are re-checked.
 /// Runs before the movement systems each sim frame. Only a freshly
-/// (re)built layer scans every unit; after that spawns, deaths and
-/// despawns drive it.
+/// (re)built layer scans every unit; after that `Added<UnitType>` (change
+/// ticks, never missed) drives it.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_structure_layer(
     nav: Option<ResMut<NavGridSet>>,
     registry: Res<UnitRegistry>,
-    units: Query<(&UnitType, &UnitStats, &Transform, Has<Dying>)>,
+    units: Query<(
+        &UnitType,
+        &UnitStats,
+        &Transform,
+        Has<Dying>,
+        Has<StructureStamped>,
+    )>,
     all: Query<Entity, With<UnitType>>,
     spawned: Query<Entity, Added<UnitType>>,
-    died: Query<Entity, Added<Dying>>,
-    mut despawned: RemovedComponents<UnitType>,
+    moved: Query<(Entity, &UnitType, &Transform), (Changed<Transform>, With<StructureStamped>)>,
+    mut commands: Commands,
     mut classes: Local<Option<Vec<(i32, bool)>>>,
 ) {
     let Some(mut nav) = nav else { return };
@@ -313,22 +399,33 @@ pub fn update_structure_layer(
         spawned.iter().collect()
     };
     for entity in candidates {
-        let Ok((kind, stats, tf, dying)) = units.get(entity) else {
+        let Ok((kind, stats, tf, dying, stamped)) = units.get(entity) else {
             continue;
         };
-        if stats.speed > 0.0 || stats.can_fly || dying || layer.stamps.contains_key(&entity) {
+        if stats.speed > 0.0 || stats.can_fly || dying {
             continue;
         }
-        let stamp = Stamp {
-            squares: layer.squares_of(&registry, kind.0, tf.translation),
-            crushable: registry.is_feature(kind.0),
-        };
-        changed = union(changed, layer.apply(&stamp, true));
-        layer.stamps.insert(entity, stamp);
+        if stamped {
+            // A layer rebuilt under a live, already-tagged structure:
+            // its hook ran against the old layer, so stamp it here.
+            let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
+            changed = union(changed, layer.block(entity, stamp));
+        } else {
+            commands.entity(entity).try_insert(StructureStamped);
+        }
     }
-    for entity in died.iter().chain(despawned.read()) {
-        if let Some(stamp) = layer.stamps.remove(&entity) {
-            changed = union(changed, layer.apply(&stamp, false));
+    // `CUnit::ForcedMove` unblocks, moves and re-blocks: a structure
+    // that was moved (Hex Farm's fall sweep pushes buildings off a
+    // sinking tower) blocks where it stands now, not where it spawned.
+    for (entity, kind, tf) in &moved {
+        let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
+        if layer
+            .stamps
+            .get(&entity)
+            .is_some_and(|old| old.squares != stamp.squares)
+        {
+            changed = union(changed, layer.unblock(entity));
+            changed = union(changed, layer.block(entity, stamp));
         }
     }
     if let Some(bbox) = changed {
@@ -398,6 +495,59 @@ mod tests {
         h.world.entity_mut(terminal).insert(Dying { timer: 1.0 });
         h.step();
         assert!(!mask_at(&h, 1, false, centre), "reopened after death");
+        assert!(h.world.resource::<NavGridSet>().revision > rev);
+    }
+
+    /// Why: stamps were cleared from `Added<Dying>` and
+    /// `RemovedComponents<UnitType>` read in `FixedUpdate`. A building
+    /// without death choreography gets `Dying` and is despawned by
+    /// `cleanup_dying` in the same tick (so `Added<Dying>` never sees
+    /// it), and removal messages are dropped after two rendered frames —
+    /// with no sim tick in between (any frame rate above ~60 fps) the
+    /// despawn was never seen either, leaving a phantom obstacle for the
+    /// rest of the match. Same for a despawn without `Dying` (the Exploit
+    /// packing up).
+    #[test]
+    fn structure_unstamped_when_despawned_between_ticks() {
+        let mut h = Harness::flat();
+        let a = Vec3::new(800.0, 0.0, 600.0);
+        let b = Vec3::new(1200.0, 0.0, 600.0);
+        let killed = h.spawn_structure(UnitKind::Terminal, 1, a);
+        let packed = h.spawn_structure(UnitKind::Terminal, 1, b);
+        h.step();
+        assert!(mask_at(&h, 1, false, a) && mask_at(&h, 1, false, b));
+
+        // `death_system` then `cleanup_dying`, one tick.
+        let mut commands = h.world.commands();
+        commands.entity(killed).insert(Dying { timer: 0.0 });
+        commands.entity(killed).despawn();
+        commands.entity(packed).despawn();
+        h.world.flush();
+        // Two rendered frames pass before the next sim tick.
+        h.world.clear_trackers();
+        h.world.clear_trackers();
+        h.step();
+        assert!(!mask_at(&h, 1, false, a), "killed building reopened");
+        assert!(!mask_at(&h, 1, false, b), "packed-up building reopened");
+        let layer = &h.world.resource::<NavGridSet>().structures;
+        assert!(layer.stamps.is_empty());
+        assert!(layer.solid.iter().all(|&n| n == 0), "no refcount left");
+    }
+
+    /// `CUnit::ForcedMove` re-blocks: a structure moved after it was
+    /// stamped (Hex Farm's void push) blocks its new squares only.
+    #[test]
+    fn moved_structure_is_restamped() {
+        let mut h = Harness::flat();
+        let from = Vec3::new(800.0, 0.0, 600.0);
+        let to = Vec3::new(1200.0, 0.0, 600.0);
+        let terminal = h.spawn_structure(UnitKind::Terminal, 1, from);
+        h.step();
+        let rev = h.world.resource::<NavGridSet>().revision;
+        h.world.get_mut::<Transform>(terminal).unwrap().translation = to;
+        h.step();
+        assert!(!mask_at(&h, 1, false, from), "old squares reopened");
+        assert!(mask_at(&h, 1, false, to), "new squares blocked");
         assert!(h.world.resource::<NavGridSet>().revision > rev);
     }
 

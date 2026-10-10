@@ -355,7 +355,7 @@ pub fn production_system(
     )>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
-    unit_count: Res<super::bookkeeping::TotalUnitCount>,
+    unit_counts: Res<super::bookkeeping::TeamUnitCounts>,
     spatial: Res<SpatialIndex>,
     heightmap: Option<Res<Heightmap>>,
     mut ctx: SpawnContext,
@@ -481,10 +481,10 @@ pub fn production_system(
         // `rebuild_spatial_index` excludes `Emerging` entities. See the
         // note there before changing either side.
         if !producer.unit_spawned {
-            // O(1) via the bookkeeping-maintained counter — the old
-            // `iter().count()` scanned every unit each time a factory
-            // sat at the spawn threshold.
-            if unit_count.0 > 10_000 {
+            // `CFactory::QueueBuild`: a team at its unit limit keeps the
+            // order but builds nothing (`CTeam::AtUnitLimit`). O(1) via
+            // the bookkeeping-maintained per-team count.
+            if unit_counts.at_limit(team.0) {
                 // Don't busy-loop; pin progress at zero and try again.
                 producer.progress = 0.0;
                 continue;

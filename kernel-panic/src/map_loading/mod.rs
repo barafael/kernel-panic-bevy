@@ -420,10 +420,10 @@ fn poll_map_load(world: &mut World) {
 /// The swap: the old world goes, and [`spawn_prepared_map`] builds the
 /// new one in the same frame.
 fn finish_map_load(world: &mut World, prepared: PreparedMap) {
-    // The teardown below despawns units without the `Dying` pass the
-    // event-driven tallies decrement on — start the new match from zero.
+    // The teardown below uncounts every unit through the tallies' marker
+    // hooks anyway; resetting first just makes "from zero" explicit.
     world.insert_resource(crate::units::lifecycle::bookkeeping::SmallBuildingCounts::default());
-    world.insert_resource(crate::units::lifecycle::bookkeeping::TotalUnitCount::default());
+    world.insert_resource(crate::units::lifecycle::bookkeeping::TeamUnitCounts::default());
 
     // Tear down the previous game world (no-op on first entry). Kept
     // entities: windows, the RTS camera (and its children), anything

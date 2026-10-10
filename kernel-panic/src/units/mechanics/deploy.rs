@@ -46,7 +46,7 @@ pub fn process_deploy(
         let new_current = (new_max * hp_fraction).max(1.0);
 
         // The pair is spawned in its place; the source skips `Dying`,
-        // but `track_removed_units` observes the despawn directly.
+        // but its counters' marker hooks run on the despawn itself.
         ctx.commands.entity(event.entity).despawn();
 
         let spawned = spawn_unit(

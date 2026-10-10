@@ -92,7 +92,7 @@ impl Plugin for UnitsPlugin {
             .init_resource::<network_buffer::PacketBuffer>()
             .init_resource::<network_buffer::FlowSpeedTicker>()
             .init_resource::<bookkeeping::SmallBuildingCounts>()
-            .init_resource::<bookkeeping::TotalUnitCount>()
+            .init_resource::<bookkeeping::TeamUnitCounts>()
             .init_resource::<cloak::VisibilityRefreshTimer>()
             .init_resource::<cloak::FogEnabled>()
             .init_resource::<spatial::SpatialIndex>()
@@ -138,9 +138,7 @@ impl Plugin for UnitsPlugin {
                     (
                         bookkeeping::track_added_buildings,
                         bookkeeping::track_finished_buildings,
-                        bookkeeping::track_dying_buildings,
                         bookkeeping::track_added_units,
-                        bookkeeping::track_removed_units,
                         shield::attach_shields,
                         shield::regen_shields,
                         deploy::process_deploy,

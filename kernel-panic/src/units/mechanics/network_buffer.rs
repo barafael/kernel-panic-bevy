@@ -237,7 +237,7 @@ pub fn process_enter(
         if nearest.is_some_and(|d_sq| d_sq <= enter_sq) {
             buffer.add(packet_team.0, 1);
             // Absorbed, not killed: no `Dying`, but
-            // `track_removed_units` observes the despawn directly.
+            // its counters' marker hooks run on the despawn itself.
             commands.entity(event.packet).despawn();
         }
     }

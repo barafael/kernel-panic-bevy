@@ -2,12 +2,14 @@
 //! auto-heal.
 //!
 //! Each system reacts to a different terminal state: [`tick_stun`] decays
-//! the [`Stunned`] marker + [`StunCharge`] pool; [`tick_kamikaze`] fires
-//! proximity bombs into the damage queue; [`death_system`] watches for
-//! zero-HP units and promotes them to [`Dying`]; [`cleanup_dying`]
+//! the [`Stunned`] marker + [`StunCharge`] pool; [`tick_kamikaze`] kills
+//! proximity bombs; [`death_system`] watches for zero-HP units, fires
+//! their death explosion and promotes them to [`Dying`]; [`cleanup_dying`]
 //! despawns once the death anim finishes; [`auto_heal`] regenerates
 //! idle units.
 
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
@@ -23,10 +25,43 @@ use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
 /// Marks a unit that has reached 0 HP and is playing its death animation.
 /// The entity will be despawned once the animation finishes or the timer expires.
+///
+/// Inserting it is the kill — upstream `CUnit::ForcedKillUnit`'s
+/// `UnitDestroyed` call-in, which fires once even though the corpse may
+/// linger for its death script. Its `on_add` hook ends every
+/// [`AliveOnly`] registration right there, at the command flush, in
+/// whatever schedule inserted it; each marker's own `on_remove` hook
+/// does the bookkeeping, which a despawn (with or without this stage)
+/// runs as well. No system has to catch the insertion: a building is
+/// usually despawned in the very tick it gets `Dying`.
 #[derive(Component)]
-#[component(storage = "SparseSet")]
+#[component(storage = "SparseSet", on_add = Dying::on_add)]
 pub struct Dying {
     pub timer: f32,
+}
+
+/// Registrations only a living unit holds, dropped by [`Dying`]:
+/// - its structure-layer stamp (`CSolidObject::UnBlock`),
+/// - the finished small-building tally (`kernelboost.lua::UnitDestroyed`)
+///   and the pending one of a nanoframe,
+/// - its claim on a Hex Farm tower (`SendOwnerShipChangeToUnsynced`).
+///
+/// The per-team unit count is not among them: upstream counts a unit
+/// until it is deleted, so that marker goes with the despawn.
+pub type AliveOnly = (
+    crate::interaction::structures::StructureStamped,
+    crate::units::lifecycle::bookkeeping::CountedSmallBuilding,
+    crate::units::lifecycle::bookkeeping::UncountedSmallBuilding,
+    crate::map_events::hex_farm::TowerClaim,
+);
+
+impl Dying {
+    fn on_add(mut world: DeferredWorld, ctx: HookContext) {
+        world
+            .commands()
+            .entity(ctx.entity)
+            .try_remove::<AliveOnly>();
+    }
 }
 
 /// Maximum time to wait for a death animation before force-despawning (seconds).
@@ -66,6 +101,13 @@ const STUN_CHARGE_DECAY: f32 = 4.0;
 /// target. The idle timer is reset in `apply_damage` whenever the unit
 /// takes damage. Units whose FBI lacks `IdleAutoHeal` (value 0) carry no
 /// [`IdleAutoHeal`] marker (`bookkeeping::tag_unit_kinds`) and opt out.
+///
+/// A unit at 0 HP is already dead — `death_system` just hasn't seen it
+/// yet (self-destruct, kamikaze, game-over `KillTeam` and AI suicides
+/// zero HP directly) — and must not be healed back above zero: upstream
+/// kills the moment HP reaches 0, so there is never a dead unit to
+/// heal. Without the guard an idle unit regenerated `rate × dt` between
+/// the zeroing and `death_system` every tick, and never died.
 #[allow(clippy::type_complexity)]
 pub fn auto_heal(
     time: Res<Time>,
@@ -83,6 +125,9 @@ pub fn auto_heal(
 ) {
     let dt = time.delta_secs();
     for (heal, mut health, mut idle, move_target, move_path, aim) in &mut query {
+        if health.current <= 0.0 {
+            continue;
+        }
         let is_active = move_target.is_some() || move_path.is_some() || aim.is_some();
         if is_active {
             idle.0 = 0.0;
@@ -127,16 +172,18 @@ pub fn tick_stun(
 }
 
 /// Trigger kamikaze units (Logic Bombs) when any enemy enters
-/// their proximity radius. The bomb queues its ExplodeAs weapon as a
-/// self-damage event and forces its own HP to zero; `death_system` +
-/// `apply_damage` handle the splash and the corpse teardown.
+/// their proximity radius. The bomb only forces its own HP to zero:
+/// `death_system` then fires its death explosion — exactly one, as
+/// upstream `SlowUpdateKamikaze` → `KillUnit(.., selfDestruct=true)` →
+/// `ForcedKillUnit` fires the single `SelfDestructAs` blast. Every KP
+/// FBI sets `SelfDestructAs` equal to `ExplodeAs` (logic_bomb.fbi:
+/// both `logic_bomb`), so the `ExplodeAs` blast `death_system` queues
+/// *is* that one; queueing the weapon here as well detonated it twice.
 #[allow(clippy::type_complexity)]
 pub fn tick_kamikaze(
-    weapon_registry: Res<WeaponRegistry>,
     bombs: Query<(Entity, &Kamikaze, &TeamId, &GlobalTransform), Without<Dying>>,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
-    mut damage_queue: ResMut<DamageQueue>,
 ) {
     for (entity, bomb, team, gtf) in &bombs {
         let trigger_radius = bomb.trigger_radius;
@@ -155,17 +202,6 @@ pub fn tick_kamikaze(
         if !triggered {
             continue;
         }
-
-        let Some(logic_bomb) = weapon_registry.known().logic_bomb else {
-            continue;
-        };
-        damage_queue.push(PendingDamage {
-            target: Some(entity),
-            attacker: entity,
-            weapon: logic_bomb,
-            impact_pos: self_pos,
-            attacker_distance: 0.0,
-        });
         if let Ok(mut health) = health_q.get_mut(entity) {
             health.current = 0.0;
         }
@@ -320,6 +356,7 @@ pub fn cleanup_dying(
 mod tests {
     use super::*;
     use crate::units::assets::animation::{AnimRig, UnitAnim};
+    use crate::units::content::definitions::UnitKind;
     use bevy::ecs::system::RunSystemOnce;
 
     /// A driver whose death choreography is still playing.
@@ -388,5 +425,121 @@ mod tests {
             .advance_by(std::time::Duration::from_secs_f32(2.5));
         app.world_mut().run_system_once(cleanup_dying).unwrap();
         assert!(app.world().get_entity(busy_unit).is_err());
+    }
+
+    /// The Resolve-set slice from `tick_self_destruct` to `death_system`,
+    /// in schedule order.
+    fn resolve_world(unit_registry: UnitRegistry, weapon_registry: WeaponRegistry) -> World {
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_secs_f32(1.0 / 30.0));
+        world.insert_resource(time);
+        world.init_resource::<DamageQueue>();
+        world.init_resource::<VirusSpawnQueue>();
+        world.init_resource::<PendingExplosions>();
+        world.insert_resource(unit_registry);
+        world.insert_resource(weapon_registry);
+        world
+    }
+
+    fn run_resolve(world: &mut World) {
+        world.run_system_once(tick_self_destruct).unwrap();
+        world.run_system_once(auto_heal).unwrap();
+        world.run_system_once(death_system).unwrap();
+    }
+
+    /// Why: `auto_heal` runs between `tick_self_destruct` and
+    /// `death_system` with no HP guard, so an idle self-healing unit
+    /// whose countdown expired (Ctrl+D, AI `SuicideIfAlone`, or a
+    /// game-over `KillTeam`, which zero HP the same way) was healed back
+    /// above zero before `death_system` looked — every tick, forever.
+    #[test]
+    fn zeroed_idle_unit_dies_instead_of_healing() {
+        let mut world = resolve_world(UnitRegistry::empty(), WeaponRegistry::default());
+        let unit = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Faction::System,
+                GlobalTransform::default(),
+                Health::full(100.0),
+                IdleAutoHeal {
+                    rate: 50.0,
+                    threshold: 0.0,
+                },
+                IdleTimer(10.0),
+                SelfDestructCountdown { remaining: 0.0 },
+            ))
+            .id();
+        run_resolve(&mut world);
+        assert!(world.get::<Dying>(unit).is_some(), "the countdown kills it");
+        assert_eq!(world.get::<Health>(unit).unwrap().current, 0.0);
+
+        // A unit zeroed from outside (game over) dies on the next pass.
+        let other = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Faction::System,
+                GlobalTransform::default(),
+                Health::full(100.0),
+                IdleAutoHeal {
+                    rate: 50.0,
+                    threshold: 0.0,
+                },
+                IdleTimer(10.0),
+            ))
+            .id();
+        world.get_mut::<Health>(other).unwrap().current = 0.0;
+        run_resolve(&mut world);
+        assert!(world.get::<Dying>(other).is_some());
+    }
+
+    /// Why: a triggered Logic Bomb queued its `logic_bomb` weapon itself
+    /// and zeroed its HP, then `death_system` queued its `ExplodeAs`
+    /// (also `logic_bomb`) — two blasts. Upstream `ForcedKillUnit` fires
+    /// exactly one.
+    #[test]
+    fn kamikaze_detonates_once() {
+        use crate::units::spatial::SpatialEntry;
+        let weapons = WeaponRegistry::load();
+        let logic_bomb = weapons.known().logic_bomb.expect("logic_bomb weapon");
+        let mut world = resolve_world(UnitRegistry::load(), weapons);
+        let bomb = world
+            .spawn((
+                UnitType(UnitKind::LogicBomb),
+                Faction::Hacker,
+                TeamId(0),
+                GlobalTransform::default(),
+                Health::full(100.0),
+                Kamikaze {
+                    trigger_radius: 64.0,
+                },
+            ))
+            .id();
+        let enemy = world.spawn_empty().id();
+        let mut spatial = SpatialIndex::default();
+        spatial.insert_for_test(SpatialEntry {
+            entity: enemy,
+            pos: Vec3::new(30.0, 0.0, 0.0),
+            hit_radius: 8.0,
+            mid_y: 0.0,
+            team: 1,
+            kind: UnitKind::Bit,
+            hp_positive: true,
+            is_flying: false,
+            cloaked: false,
+            detected_by: 0,
+        });
+        world.insert_resource(spatial);
+
+        world.run_system_once(tick_kamikaze).unwrap();
+        assert_eq!(world.get::<Health>(bomb).unwrap().current, 0.0);
+        world.run_system_once(death_system).unwrap();
+        let blasts: Vec<_> = world
+            .resource::<DamageQueue>()
+            .iter_snapshot_for_test()
+            .map(|d| d.weapon)
+            .collect();
+        assert_eq!(blasts, vec![logic_bomb], "exactly one logic_bomb blast");
+        assert!(world.get::<Dying>(bomb).is_some());
     }
 }

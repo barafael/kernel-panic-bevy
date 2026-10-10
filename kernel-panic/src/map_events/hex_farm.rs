@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoFrustumCulling;
+use bevy::ecs::lifecycle::HookContext;
+use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 use spring_map::hexfarm::{HexFarm, HexFarmEvent, Poly};
@@ -132,6 +134,31 @@ pub struct HexFarmView {
     still_dirty: bool,
     /// `%` indicators: value and label entity.
     percent: HashMap<Poly, (i32, Entity)>,
+    /// Towers whose claimant ([`TowerClaim`]) died or went away since
+    /// [`hex_farm_owners`] last ran, with that claimant.
+    released: Vec<(usize, Entity)>,
+}
+
+/// A finished big building within `TowerRadius` of tower `.0`: it took
+/// the tower on `UnitFinished`. Its removal is that building's
+/// `UnitDestroyed` — `Dying` drops it at the kill, a despawn without the
+/// death pipeline with the entity — and queues the tower for
+/// [`hex_farm_owners`] to hand on. A hook, not an `Added<Dying>` read:
+/// a building is usually despawned in the very sim tick it gets `Dying`,
+/// before any later system (let alone one in `Update`) could see it.
+#[derive(Component)]
+#[component(storage = "SparseSet", on_remove = TowerClaim::on_remove)]
+pub struct TowerClaim(usize);
+
+impl TowerClaim {
+    fn on_remove(mut world: DeferredWorld, ctx: HookContext) {
+        let Some(&TowerClaim(tower)) = world.get::<TowerClaim>(ctx.entity) else {
+            return;
+        };
+        if let Some(mut view) = world.get_resource_mut::<HexFarmView>() {
+            view.released.push((tower, ctx.entity));
+        }
+    }
 }
 
 /// A `%` indicator label.
@@ -213,6 +240,7 @@ pub fn install(
         moving,
         still_dirty: true,
         percent: HashMap::new(),
+        released: Vec::new(),
     });
     commands.insert_resource(HexFarmState { farm, frame: 0 });
     commands.insert_resource(HexFarmInbox::default());
@@ -506,9 +534,13 @@ impl HexFarmView {
 /// `SendOwnerShipChangeToUnsynced` (l.1508) from its `UnitFinished` and
 /// `UnitDestroyed` call-ins: a big (≥5×5) immobile unit finishing
 /// within `TowerRadius` of a tower's centre (the first such tower)
-/// makes its team the owner; when one dies the tower goes to the
-/// nearest remaining finished big building within `TowerRadius`, or
-/// back to white.
+/// makes its team the owner (and tags it [`TowerClaim`]); when one dies
+/// the tower goes to the nearest remaining finished big building within
+/// `TowerRadius`, or back to white.
+///
+/// Runs in `Update`, every rendered frame, so `RemovedComponents<Emerging>`
+/// (cleared once per frame) loses nothing; deaths arrive through
+/// [`TowerClaim`]'s hook.
 #[allow(clippy::type_complexity)]
 fn hex_farm_owners(
     mut view: ResMut<HexFarmView>,
@@ -516,14 +548,15 @@ fn hex_farm_owners(
     registry: Res<UnitRegistry>,
     spawned_finished: Query<Entity, (Added<UnitType>, Without<Emerging>)>,
     mut finished_building: RemovedComponents<Emerging>,
-    destroyed: Query<(Entity, &Transform, &UnitType), Added<Dying>>,
     live: Query<(Entity, &Transform, &UnitType, &Faction), (Without<Emerging>, Without<Dying>)>,
+    mut commands: Commands,
 ) {
     let finished: Vec<Entity> = spawned_finished
         .iter()
         .chain(finished_building.read())
         .collect();
-    if !view.team_colored || (finished.is_empty() && destroyed.is_empty()) {
+    let released = std::mem::take(&mut view.released);
+    if !view.team_colored || (finished.is_empty() && released.is_empty()) {
         return;
     }
     let farm = &state.farm;
@@ -555,17 +588,12 @@ fn hex_farm_owners(
         }
         if let Some(n) = tower_of(tf.translation) {
             owners[n] = faction.color().to_linear().to_f32_array();
+            commands.entity(e).try_insert(TowerClaim(n));
         }
     }
 
     // `UnitDestroyed`: the nearest remaining finished big building.
-    for (dead, tf, kind) in &destroyed {
-        if !big(kind.0) {
-            continue;
-        }
-        let Some(n) = tower_of(tf.translation) else {
-            continue;
-        };
+    for (n, dead) in released {
         let mut best: Option<(f32, Rgba)> = None;
         for (e, otf, okind, faction) in &live {
             if e == dead || !big(okind.0) {
@@ -786,6 +814,7 @@ mod tests {
             moving: (Entity::PLACEHOLDER, Handle::default()),
             still_dirty: false,
             percent: HashMap::new(),
+            released: Vec::new(),
         });
         world.insert_resource(HexFarmState { farm, frame: 0 });
         let mut defs = spring_tdf::UnitDefs::default();
@@ -840,6 +869,31 @@ mod tests {
         world.entity_mut(socket).insert(Dying { timer: 1.0 });
         world.run_system(sys).unwrap();
         assert_eq!(owner(&world), color(Faction::System));
+
+        // Why: deaths were read as `Added<Dying>` in `Update`, but a
+        // building without death choreography gets `Dying` and is
+        // despawned in the same sim tick — the tower never reverted.
+        let finished_socket = |world: &mut World| {
+            let e = world
+                .spawn((UnitType(UnitKind::Socket), Faction::Network, at(-10.0)))
+                .id();
+            world.run_system(sys).unwrap();
+            assert_eq!(owner(world), color(Faction::Network));
+            e
+        };
+        let killed = finished_socket(&mut world);
+        let mut commands = world.commands();
+        commands.entity(killed).insert(Dying { timer: 0.0 });
+        commands.entity(killed).despawn();
+        world.flush();
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), color(Faction::System), "killed + despawned");
+        // A despawn without the death pipeline is a `UnitDestroyed` too.
+        let removed = finished_socket(&mut world);
+        world.entity_mut(removed).despawn();
+        world.run_system(sys).unwrap();
+        assert_eq!(owner(&world), color(Faction::System), "despawned");
+
         // ...and with none left it goes back to white.
         world.entity_mut(kernel).insert(Dying { timer: 1.0 });
         world.run_system(sys).unwrap();
