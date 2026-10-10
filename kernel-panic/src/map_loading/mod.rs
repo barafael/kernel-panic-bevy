@@ -516,7 +516,6 @@ fn pick_map(mut commands: Commands) {
             .collect();
         commands.insert_resource(MapCatalog(paths));
         commands.insert_resource(crate::game_setup::GameSetup::default());
-        return;
     }
 
     #[cfg(not(target_arch = "wasm32"))]

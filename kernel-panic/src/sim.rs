@@ -86,6 +86,10 @@ impl Heading {
         Self(ih as i16)
     }
 
+    #[cfg_attr(
+        target_arch = "wasm32",
+        allow(dead_code, reason = "read by the native-only bot")
+    )]
     pub fn to_radians(self) -> f32 {
         self.0 as f32 * SHORT_ANGLE_TO_RAD
     }
