@@ -270,6 +270,32 @@ pub fn mask_void(
     }
 }
 
+/// The nav side of a reshaped polygon: every bucket's cells over the
+/// changed vertices recomputed (slope × terrain-type speed, see
+/// [`NavGridSet::heights_changed`]), then void masked over exactly the
+/// cells that pass rewrote — whole 2×2 slope blocks, wider than the
+/// vertex box. Those cells, padded by the widest mover footprint, are
+/// the change existing paths and QTPFS layers re-check (`PathUpdated` /
+/// `UpdateNodeLayer` on `TerrainChange`).
+fn reshape_nav(
+    nav: &mut NavGridSet,
+    terrain: &[u8],
+    type_w: usize,
+    heights: &[f32],
+    heightmap_width: usize,
+    vertices: [u32; 4],
+) {
+    let Some(cells) = nav.heights_changed(heights, heightmap_width as u32, vertices) else {
+        return;
+    };
+    for bucket in &mut nav.buckets {
+        mask_void(terrain, type_w, &mut bucket.speed_map, cells);
+    }
+    let h = nav.structures.max_xsizeh() + 1;
+    let [x0, z0, x1, z1] = cells.map(|c| c as i32);
+    nav.bump([x0 - h, z0 - h, x1 + h, z1 + h]);
+}
+
 /// Offsets the fall sweep tries, in order (`gadget:GameFrame` l.1788).
 const PUSHES: [(f32, f32); 8] = [
     (-17.0, 0.0),
@@ -382,29 +408,8 @@ fn hex_farm_sim(
                     sg.map_changed(x0, z0, x1, z1);
                 }
                 if let Some(nav) = nav.as_deref_mut() {
-                    // Terrain changed under existing paths: have them
-                    // re-checked (QTPFS `PathUpdated` on `TerrainChange`).
-                    let h = nav.structures.max_xsizeh() + 1;
-                    nav.bump([x0 as i32 - h, z0 as i32 - h, x1 as i32 + h, z1 as i32 + h]);
-                    for bucket in &mut nav.buckets {
-                        bucket.speed_map.update_region(
-                            hm.heights(),
-                            hw as u32,
-                            bucket.max_slope,
-                            spring_pathfinding::slope_mod_from_max_slope(bucket.max_slope),
-                            x0 as u32,
-                            z0 as u32,
-                            x1 as u32,
-                            z1 as u32,
-                        );
-                        let region = [
-                            (x0 as u32).saturating_sub(1),
-                            (z0 as u32).saturating_sub(1),
-                            x1 as u32,
-                            z1 as u32,
-                        ];
-                        mask_void(&farm.terrain, farm.type_w, &mut bucket.speed_map, region);
-                    }
+                    let vertices = [x0 as u32, z0 as u32, x1 as u32, z1 as u32];
+                    reshape_nav(nav, &farm.terrain, farm.type_w, hm.heights(), hw, vertices);
                 }
                 // Vertices on a chunk seam belong to both chunks.
                 for cz in z0.saturating_sub(1) / CHUNK_SIZE..=z1 / CHUNK_SIZE {
@@ -898,6 +903,36 @@ mod tests {
         world.entity_mut(kernel).insert(Dying { timer: 1.0 });
         world.run_system(sys).unwrap();
         assert_eq!(owner(&world), WHITE);
+    }
+
+    /// A reshape re-masks void over every cell the slope pass rewrote:
+    /// `update_region` widens the vertex box to whole 2×2 slope blocks,
+    /// and a cell left out of the mask came back open over the void.
+    #[test]
+    fn reshape_masks_void_over_every_rewritten_cell() {
+        let n = 16u32;
+        let mut nav = NavGridSet::default();
+        nav.buckets.push(crate::interaction::movement::NavBucket {
+            max_slope: 1.0,
+            speed_map: spring_pathfinding::SpeedMap::uniform(n, n, 0.0),
+        });
+        let heights = vec![0.0; ((n + 1) * (n + 1)) as usize];
+        let terrain = vec![spring_map::hexfarm::TERRAIN_VOID; (n / 2 * n / 2) as usize];
+        // Even vertex box: the rewritten cells reach one further out on
+        // the low side (x0 - 2) and the high side (x1 + 1).
+        reshape_nav(
+            &mut nav,
+            &terrain,
+            (n / 2) as usize,
+            &heights,
+            (n + 1) as usize,
+            [4, 4, 6, 6],
+        );
+        let map = &nav.buckets[0].speed_map;
+        assert!(map.speeds.iter().all(|&s| s == 0.0), "{:?}", map.speeds);
+        // The re-check covers every rewritten cell (2..=7), padded.
+        let changed = nav.changed_since(0).expect("bumped");
+        assert!(changed[0] <= 2 && changed[1] <= 2 && changed[2] >= 7 && changed[3] >= 7);
     }
 
     /// Every nav cell over a void square is blocked, even in a bucket

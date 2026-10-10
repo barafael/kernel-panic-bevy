@@ -50,7 +50,7 @@ use spring_map::{
 };
 
 // HexFarm Lua-composited towers/bridges (native and web: the data
-// round-trips through `.kpmap` v4).
+// round-trips through `.kpmap`).
 pub(crate) mod lua_compositing;
 mod match_scope;
 mod mipmap;
@@ -553,22 +553,27 @@ fn load_map_dispatch(path: &Path) -> Result<spring_map::SpringMap, LoadMapError>
             path: path.to_path_buf(),
             error,
         })?;
-        // A bake from an older format version lacks later additions
-        // (terrain types); the source archive next to it has them.
-        if !spring_map::baked::is_current_format(&bytes)
-            && let Some(source) = ["sd7", "sdz"]
-                .iter()
-                .map(|ext| path.with_extension(ext))
-                .find(|p| p.is_file())
-        {
-            warn!(
-                "{} was baked by an older format — loading {} instead (re-bake with bake-map)",
-                path.display(),
-                source.display()
-            );
-            return Ok(spring_map::load_map(&source)?);
+        match spring_map::baked::read_baked_map(&bytes) {
+            // A bake from an older format version is refused (it lacks
+            // later additions such as the terrain types); the source
+            // archive next to it, when there is one, is the real map.
+            Err(error @ spring_map::baked::BakedMapError::Outdated { .. }) => {
+                let Some(source) = ["sd7", "sdz"]
+                    .iter()
+                    .map(|ext| path.with_extension(ext))
+                    .find(|p| p.is_file())
+                else {
+                    return Err(error.into());
+                };
+                warn!(
+                    "{}: {error} — loading {} instead",
+                    path.display(),
+                    source.display()
+                );
+                Ok(spring_map::load_map(&source)?)
+            }
+            result => Ok(result?),
         }
-        Ok(spring_map::baked::read_baked_map(&bytes)?)
     } else {
         Ok(spring_map::load_map(path)?)
     }
@@ -1232,4 +1237,42 @@ fn apply_fog(
         start: fog_start_frac * max_view_distance,
         end: max_view_distance,
     };
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod dispatch_tests {
+    use super::*;
+
+    /// A bake from an older format version is refused: the source
+    /// archive next to it loads instead, and without one the load
+    /// fails with the version error (never a map with neutral terrain).
+    #[test]
+    fn outdated_bake_falls_back_to_its_archive() {
+        let source = Path::new("assets/maps/Marble_Madness_Map.sd7");
+        let map = spring_map::load_map(source).expect("source map");
+        let mut bytes = spring_map::baked::write_baked_map(&map).unwrap();
+        bytes[6] = b'4'; // "kpmapv4\0"
+
+        let dir = std::env::temp_dir().join(format!("kp-dispatch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let baked = dir.join("Marble_Madness_Map.kpmap");
+        std::fs::write(&baked, &bytes).unwrap();
+
+        let alone = load_map_dispatch(&baked);
+        assert!(
+            matches!(
+                alone,
+                Err(LoadMapError::Baked(
+                    spring_map::baked::BakedMapError::Outdated { found: 4 }
+                ))
+            ),
+            "no archive: the version error"
+        );
+
+        std::fs::copy(source, dir.join("Marble_Madness_Map.sd7")).unwrap();
+        let loaded = load_map_dispatch(&baked).expect("archive fallback");
+        assert_eq!(loaded.parsed.heights, map.parsed.heights);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

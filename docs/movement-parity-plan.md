@@ -147,7 +147,7 @@ manager's dead-path refresh (`QueueDeadPathSearches`,
   current "one square toward the goal" stand-in, which is the
   manager's `createTempWaypoint`.
 - Hex Farm: terrain edits call `NodeLayer::update(rect)` for every
-  layer instead of `SpeedMap::update_region` + `mask_void` only.
+  layer instead of `NavGridSet::heights_changed` + `mask_void` only.
 - Delete `ComponentLabels` if the partial-path logic makes the
   reachability pre-check redundant (measure first: it is what keeps a
   flood search for an unreachable goal cheap).

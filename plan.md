@@ -514,9 +514,10 @@ loads through `spring_map::baked::read_baked_map` with no archive / mlua /
 SMT-tile dependencies. The runtime now prefers a `.kpmap` over the source
 `.sd7` of the same stem — see `dedupe_prefer_baked` and `load_map_dispatch`.
 
-v4 (`kpmapv4\0`) appends `Option<LuaCompositing>` (Hex Farm's skin atlas);
-v1-v3 still load. Re-bake `Hex_Farm_8` after upgrading — an old bake
-loads without the atlas and draws no towers.
+v4 (`kpmapv4\0`) appended `Option<LuaCompositing>` (Hex Farm's skin atlas),
+v5 (`kpmapv5\0`) the SMF typemap and terrain types. Only the current version
+loads: an older bake is refused with a "re-bake with bake-map" error, and the
+native loader falls back to the `.sd7` / `.sdz` next to it when there is one.
 
 Hex Farm 8 no longer replays a captured gadget run: `spring_map::hexfarm`
 ports `HexFarm8.lua` (layout, start positions, heightmap/terrain writers,
@@ -1033,7 +1034,8 @@ behaviour; plan.md holds the engineering work to get there.
   Sub-bugs still watching:
   - Heightmap edits (Hex Farm) bump `NavGridSet::revision`; paths
     whose remainder is no longer walkable are re-searched. Lua
-    gadgets that pave on build still need to call `update_region`.
+    gadgets that pave on build still need to call
+    `NavGridSet::heights_changed` (slope × terrain-type speed).
   - The nav-grid build needs to happen *after* upstream Lua gadgets
     run their init-time heightmap edits, otherwise `map_loading`'s
     view of terrain is stale. Verify ordering on map load.
