@@ -53,6 +53,18 @@ pub(super) fn spawn_weapon_visuals(
 ) {
     // The one read of the map's gravity for every shell spawned here.
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
+    // gateway.bos `lua_BuildArc`: the builder's white strand.
+    for arc in pending.build_arcs.drain(..) {
+        spawn_lightning_arc(
+            arc.from,
+            arc.to,
+            ArcStyle::build_arc(),
+            &mut rng,
+            &mut commands,
+            &mut materials,
+            &mut cache,
+        );
+    }
     for event in pending.events.drain(..) {
         // Ids are interned through this same registry at the combat
         // side, so the lookup is infallible.
@@ -87,7 +99,20 @@ pub(super) fn spawn_weapon_visuals(
         let is_gauss_arc = weapon_registry.is_gauss_cannon(event.weapon_id);
 
         if is_gauss_arc {
-            spawn_lightning_arc(&event, &mut rng, &mut commands, &mut materials, &mut cache);
+            let tint = LinearRgba::rgb(
+                0.2 + 0.1 * next_f32(&mut rng),
+                0.9,
+                0.2 + 0.1 * next_f32(&mut rng),
+            );
+            spawn_lightning_arc(
+                event.arc_from.unwrap_or(event.attacker_pos),
+                event.target_pos,
+                ArcStyle::big_arc(tint),
+                &mut rng,
+                &mut commands,
+                &mut materials,
+                &mut cache,
+            );
         } else if is_melee {
             // Upstream worm.bos `FireWeapon1` telescopes the head and
             // detonates the Wormsplash weapon at the bite points
@@ -1082,23 +1107,56 @@ fn spawn_melee_flash(
     );
 }
 
-/// GaussCannon lightning bolt, mirroring upstream
-/// `LuaRules/Gadgets/network_arceffect.lua::BigArc` (`drawArc`): straight
-/// muzzle→impact line, a 160-elmo arch at the midpoint
-/// (`+160 * (1 − (2t−1)²)`), ±15-elmo jitter shrinking toward the
-/// ends, electric-green tint with randomized red/blue channels.
-/// The gadget's arc lives a single sim frame; we hold it for
-/// [`ARC_LIFETIME`] so a 4-second-reload shot still reads on screen.
+/// How one `network_arceffect.lua` strand is drawn: `drawArc`'s width
+/// and spray, plus the gadget's colour and lifetime.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ArcStyle {
+    width: f32,
+    jitter: f32,
+    lifetime: f32,
+    tint: LinearRgba,
+}
+
+impl ArcStyle {
+    /// `BigArc`, the Connection's GaussCannon bolt: `drawArc(.., 4, 15)`
+    /// in green with randomized red / blue (`tint`). The gadget's arc
+    /// lives a single sim frame; we hold it for [`ARC_LIFETIME`] so a
+    /// 4-second-reload shot still reads on screen.
+    fn big_arc(tint: LinearRgba) -> Self {
+        Self {
+            width: ARC_WIDTH,
+            jitter: ARC_JITTER,
+            lifetime: ARC_LIFETIME,
+            tint,
+        }
+    }
+
+    /// `BuildArc`, the Gateway's construction strand: `gl.Color(1,1,1)`,
+    /// `drawArc(.., 2, 5)`, alive for 16 frames (`liveUntil = frame + 16`).
+    fn build_arc() -> Self {
+        Self {
+            width: 2.0,
+            jitter: 5.0,
+            lifetime: frames_to_secs(16.0),
+            tint: LinearRgba::WHITE,
+        }
+    }
+}
+
+/// One `network_arceffect.lua` lightning strand (`drawArc`): the
+/// straight `start`→`end` line, a 160-elmo arch at the midpoint
+/// (`+160 * (1 − (2t−1)²)`), and `style.jitter` of spray shrinking
+/// toward both ends.
+#[allow(clippy::too_many_arguments)]
 fn spawn_lightning_arc(
-    event: &AttackEvent,
+    start: Vec3,
+    end: Vec3,
+    style: ArcStyle,
     rng: &mut Local<u32>,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
 ) {
-    let tint = LinearRgba::rgb(0.2 + 0.1 * next_f32(rng), 0.9, 0.2 + 0.1 * next_f32(rng));
-    let start = event.arc_from.unwrap_or(event.attacker_pos);
-    let end = event.target_pos;
     let dir = (end - start).normalize_or(Vec3::Z);
     // Two world-space perpendiculars to jitter along; the ribbon
     // itself is re-oriented to the camera every tick.
@@ -1115,19 +1173,19 @@ fn spawn_lightning_arc(
         points.push(
             start.lerp(end, t)
                 + Vec3::Y * (ARC_ARCH_HEIGHT * arch)
-                + perp1 * (next_signed(rng) * ARC_JITTER * taper)
-                + perp2 * (next_signed(rng) * ARC_JITTER * taper),
+                + perp1 * (next_signed(rng) * style.jitter * taper)
+                + perp2 * (next_signed(rng) * style.jitter * taper),
         );
     }
 
     let material = cache.get_or_create(LinearRgba::WHITE, true, materials);
     commands.spawn(LightningArc {
         points,
-        width: ARC_WIDTH,
-        lifetime: ARC_LIFETIME,
-        max_lifetime: ARC_LIFETIME,
+        width: style.width,
+        lifetime: style.lifetime,
+        max_lifetime: style.lifetime,
         material,
-        tint,
+        tint: style.tint,
     });
 }
 
@@ -1302,6 +1360,39 @@ mod tests {
             flames > 0,
             "the splash CEG (CBitmapMuzzleFlame class) must spawn"
         );
+    }
+
+    /// gateway.bos `lua_BuildArc` → `network_arceffect.lua` `BuildArc`:
+    /// a white `drawArc(.., 2, 5)` strand from the builder piece to the
+    /// buildee, alive 16 frames, arched 160 elmos at the middle.
+    #[test]
+    fn build_arc_event_spawns_the_white_builder_strand() {
+        use crate::units::weapon_fx::BuildArcEvent;
+        let mut app = fx_app();
+        app.insert_resource(WeaponRegistry::default());
+        let (from, to) = (Vec3::new(0.0, 20.0, 0.0), Vec3::new(80.0, 0.0, 0.0));
+        app.world_mut()
+            .resource_mut::<PendingAttacks>()
+            .build_arcs
+            .push(BuildArcEvent { from, to });
+        app.world_mut()
+            .run_system_once(spawn_weapon_visuals)
+            .unwrap();
+
+        let world = app.world_mut();
+        let arcs: Vec<&LightningArc> = world
+            .query_filtered::<&LightningArc, ()>()
+            .iter(world)
+            .collect();
+        assert_eq!(arcs.len(), 1);
+        let arc = arcs[0];
+        assert_eq!(arc.width, 2.0);
+        assert_eq!(arc.tint, LinearRgba::WHITE);
+        assert!((arc.max_lifetime - 16.0 / 30.0).abs() < 1e-4);
+        assert_eq!((arc.points[0], arc.points[ARC_SEGMENTS]), (from, to));
+        let mid = arc.points[ARC_SEGMENTS / 2];
+        assert!((mid.y - (10.0 + ARC_ARCH_HEIGHT)).abs() <= 5.0 * 2.0_f32.sqrt());
+        assert!(world.resource::<PendingAttacks>().build_arcs.is_empty());
     }
 
     /// Ordinary beam weapons keep their regular visuals — the arc path

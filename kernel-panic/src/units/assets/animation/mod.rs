@@ -245,6 +245,13 @@ pub enum FxEvent {
     Hide {
         piece: usize,
     },
+    /// `call-script lua_BuildArc(piece)` (gateway.bos): the
+    /// `network_arceffect.lua` gadget's white strand from `piece` to the
+    /// unit this builder is building (`Spring.GetUnitIsBuilding`); no
+    /// strand while it builds nothing.
+    BuildArc {
+        piece: usize,
+    },
 }
 
 /// What a driver wants an `emit-sfx` to look like, replacing the raw COB
@@ -514,6 +521,13 @@ impl AnimRig {
             self.outbox.push(FxEvent::Hide { piece });
         }
     }
+
+    /// `call-script lua_BuildArc(piece)`, see [`FxEvent::BuildArc`].
+    pub fn build_arc(&mut self, piece: usize) {
+        if self.live(piece) {
+            self.outbox.push(FxEvent::BuildArc { piece });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,6 +729,9 @@ pub struct AnimFxOut<'w, 's> {
         ),
         With<crate::units::lifecycle::spawning::Emerging>,
     >,
+    /// A builder's current nanoframe (`Constructing::building`, upstream
+    /// `curBuild`), where its [`FxEvent::BuildArc`] strand ends.
+    pub constructing: Query<'w, 's, &'static crate::units::lifecycle::construction::Constructing>,
     pub commands: Commands<'w, 's>,
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
@@ -758,7 +775,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
     let dt = time.delta_secs();
 
     for (
-        _entity,
+        entity,
         mut animator,
         faction,
         unit_gtf,
@@ -815,7 +832,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
 
         tick_rig(rig, dt);
 
-        apply_and_drain(rig, *faction, unit_gtf, &mut fx);
+        apply_and_drain(entity, rig, *faction, unit_gtf, &mut fx);
     }
 }
 
@@ -898,6 +915,7 @@ pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
 /// (no in-flight interpolation, spinning pieces, or fresh commands)
 /// skips the per-piece euler compose entirely.
 fn apply_and_drain(
+    entity: Entity,
     rig: &mut AnimRig,
     faction: Faction,
     unit_gtf: &GlobalTransform,
@@ -1000,6 +1018,24 @@ fn apply_and_drain(
             FxEvent::Emit { piece, kind } if in_range(piece) => {
                 let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
                 dispatch_emit_sfx(kind, piece_world_pos, faction, &mut fx.explosions);
+            }
+            FxEvent::BuildArc { piece } if in_range(piece) => {
+                // `BuildArc(u, ud, team, piece)`: from the piece to the
+                // buildee's base position (`GetUnitPosition(b)`).
+                let Some(to) = fx
+                    .constructing
+                    .get(entity)
+                    .ok()
+                    .and_then(|c| c.building)
+                    .and_then(|b| fx.buildees.get(b).ok())
+                    .map(|(gtf, _)| gtf.translation())
+                else {
+                    continue;
+                };
+                let from = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
+                fx.attacks
+                    .build_arcs
+                    .push(crate::units::weapon_fx::BuildArcEvent { from, to });
             }
             _ => {}
         }
@@ -1268,6 +1304,16 @@ mod turn_semantics {
         }
         assert_eq!(ticks, 3);
         assert_eq!(rig.piece_rotations[0][1], deg2rad(-170.0));
+    }
+
+    /// The system's queries (drivers, piece transforms, buildees, the
+    /// builders' `Constructing`) must not alias — Bevy panics at
+    /// initialisation if they do, which no other test would catch.
+    #[test]
+    fn animation_system_params_are_disjoint() {
+        let mut world = World::new();
+        let mut system = IntoSystem::into_system(animation_system);
+        system.initialize(&mut world);
     }
 
     #[test]

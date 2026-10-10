@@ -101,6 +101,16 @@ pub(super) struct DelayedHit {
 #[derive(Resource, Default)]
 pub struct PendingAttacks {
     pub events: Vec<AttackEvent>,
+    /// Builder strands requested by the unit scripts this tick.
+    pub build_arcs: Vec<BuildArcEvent>,
+}
+
+/// gateway.bos `lua_BuildArc`: one white `network_arceffect.lua`
+/// strand from the builder's `center` piece to its buildee.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuildArcEvent {
+    pub from: Vec3,
+    pub to: Vec3,
 }
 
 /// A standalone explosion — no beam, no flying projectile, just a pop at

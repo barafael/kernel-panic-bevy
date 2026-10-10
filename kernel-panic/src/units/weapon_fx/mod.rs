@@ -12,7 +12,8 @@ mod spawn;
 mod tick;
 
 pub use shared::{
-    AttackEvent, DelayedHitInfo, ExplosionEvent, ImpactEffect, PendingAttacks, PendingExplosions,
+    AttackEvent, BuildArcEvent, DelayedHitInfo, ExplosionEvent, ImpactEffect, PendingAttacks,
+    PendingExplosions,
 };
 
 /// Live effect counts for the `KP_PROFILE` census.
