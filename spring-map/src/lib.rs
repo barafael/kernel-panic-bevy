@@ -40,7 +40,7 @@ pub(crate) fn shipped_map(file_name: &str) -> std::path::PathBuf {
     assert!(path.is_file(), "shipped map not found: {}", path.display());
     path
 }
-use map_types::{GroundTexture, MapError, ParsedMap};
+use map_types::{GroundTexture, MapError, ParsedMap, TerrainTypes};
 #[cfg(not(target_arch = "wasm32"))]
 use sd7_archive::load_map_archive;
 use smd_parser::MapInfo;
@@ -66,6 +66,8 @@ pub struct SpringMap {
     pub parsed: ParsedMap,
     pub ground_texture: Option<GroundTexture>,
     pub map_info: Option<MapInfo>,
+    /// What [`ParsedMap::typemap`] indexes: per-type move speeds.
+    pub terrain_types: TerrainTypes,
     pub smf_data: Vec<u8>,
     pub lua_compositing: Option<LuaCompositing>,
 }
@@ -124,11 +126,18 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
             let info = baked_gadgets?.map_info.clone()?;
             Some(info)
         });
+    // Hex Farm's captured mapinfo.lua defines no terrain types: neutral.
+    let terrain_types = extracted
+        .smd_text
+        .as_deref()
+        .map(smd_parser::parse_terrain_types)
+        .unwrap_or_default();
 
     Ok(SpringMap {
         parsed,
         ground_texture,
         map_info,
+        terrain_types,
         smf_data: extracted.smf_data,
         lua_compositing,
     })
@@ -247,6 +256,26 @@ mod tests {
                             .as_ref()
                             .map(|g| format!("{}x{}", g.width, g.height))
                             .unwrap_or_else(|| "none".into()),
+                    );
+
+                    // Typemap present and sized; report the ground the
+                    // terrain types actually slow down or speed up.
+                    assert_eq!(
+                        p.typemap.len(),
+                        p.header.typemap_width() * p.header.typemap_height(),
+                        "{name}: typemap length mismatch"
+                    );
+                    let mut by_speed: Vec<(f32, usize)> = Vec::new();
+                    for &t in &p.typemap {
+                        let kbot = spring_map.terrain_types.get(t).kbot;
+                        match by_speed.iter_mut().find(|(s, _)| *s == kbot) {
+                            Some((_, n)) => *n += 1,
+                            None => by_speed.push((kbot, 1)),
+                        }
+                    }
+                    eprintln!(
+                        "      gravity {}, kbot speed cells {by_speed:?}",
+                        map_info.gravity
                     );
 
                     count += 1;

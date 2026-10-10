@@ -47,6 +47,8 @@ pub enum SmfParseError {
     FeatureTruncated,
     #[error("metalmap truncated: expected {expected} bytes, got {actual}")]
     MetalmapTruncated { expected: usize, actual: usize },
+    #[error("typemap truncated: expected {expected} bytes")]
+    TypemapTruncated { expected: usize },
     #[error(
         "map size {map_x}x{map_y} squares is not a multiple of {TILE_SQUARES} in \
          {TILE_SQUARES}..={MAX_MAP_SQUARES}"
@@ -191,6 +193,15 @@ impl SmfHeader {
         (self.map_x / 2) as usize
     }
 
+    /// Typemap cells per row: one per 2×2 squares (`mapDims.hmapx`).
+    pub fn typemap_width(&self) -> usize {
+        (self.map_x / 2) as usize
+    }
+
+    pub fn typemap_height(&self) -> usize {
+        (self.map_y / 2) as usize
+    }
+
     pub fn metalmap_height(&self) -> usize {
         (self.map_y / 2) as usize
     }
@@ -290,6 +301,73 @@ pub struct ParsedMap {
     pub heights: Vec<f32>,
     pub features: Vec<MapFeature>,
     pub metalmap: Vec<u8>,
+    /// SMF typemap: one terrain-type index per 2×2 squares,
+    /// `typemap_width() × typemap_height()` bytes, row-major — what
+    /// [`TerrainTypes`] is indexed with. Empty when the source carried
+    /// none (synthetic maps, kpmaps baked before it was kept): every
+    /// square is then terrain type 0 with neutral speeds.
+    pub typemap: Vec<u8>,
+}
+
+/// One terrain type's move-speed multipliers per speed-mod class
+/// (`mapInfo->terrainTypes[i].{tank,kbot,hover,ship}Speed`, read by
+/// `CMapInfo::ReadTerrainTypes`; legacy `.smd` maps spell them
+/// `tankmovespeed=` … under `[TERRAINTYPEi]`, which the engine's
+/// `maphelper/parse_tdf_map.lua` converts). Each defaults to 1 and is
+/// clamped to ≥ 0; 0 makes the type impassable to that class.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TerrainMoveSpeeds {
+    pub tank: f32,
+    pub kbot: f32,
+    pub hover: f32,
+    pub ship: f32,
+}
+
+impl Default for TerrainMoveSpeeds {
+    fn default() -> Self {
+        Self {
+            tank: 1.0,
+            kbot: 1.0,
+            hover: 1.0,
+            ship: 1.0,
+        }
+    }
+}
+
+/// The map's terrain types: what [`ParsedMap::typemap`] indexes
+/// (`CMapInfo::NUM_TERRAIN_TYPES` = 256 entries).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TerrainTypes {
+    pub move_speeds: Vec<TerrainMoveSpeeds>,
+}
+
+impl TerrainTypes {
+    /// `NUM_TERRAIN_TYPES` (MapInfo.h).
+    pub const COUNT: usize = 256;
+
+    /// Speeds of type `index` (neutral for an index the map left out).
+    pub fn get(&self, index: u8) -> TerrainMoveSpeeds {
+        self.move_speeds
+            .get(index as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Does any type change any class's speed? (Most maps leave every
+    /// type at 1.)
+    pub fn is_neutral(&self) -> bool {
+        self.move_speeds
+            .iter()
+            .all(|s| *s == TerrainMoveSpeeds::default())
+    }
+}
+
+impl Default for TerrainTypes {
+    fn default() -> Self {
+        Self {
+            move_speeds: vec![TerrainMoveSpeeds::default(); Self::COUNT],
+        }
+    }
 }
 
 /// A decoded 32x32 RGBA tile from an SMT file.

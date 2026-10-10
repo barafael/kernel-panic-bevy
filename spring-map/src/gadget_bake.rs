@@ -125,6 +125,7 @@ mod tests {
             header,
             features: Vec::new(),
             metalmap: Vec::new(),
+            typemap: Vec::new(),
         };
         assert!(matches!(
             palladium().apply_heights(&mut parsed),

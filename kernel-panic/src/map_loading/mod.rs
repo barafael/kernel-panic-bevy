@@ -81,10 +81,12 @@ pub struct GameWorldRebuild;
 
 impl Plugin for MapLoadingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<ReadyMap>().add_systems(
-            Startup,
-            pick_map.after(crate::rendering::camera::spawn_camera),
-        );
+        app.init_resource::<ReadyMap>()
+            .init_resource::<crate::sim::MapGravity>()
+            .add_systems(
+                Startup,
+                pick_map.after(crate::rendering::camera::spawn_camera),
+            );
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -551,6 +553,21 @@ fn load_map_dispatch(path: &Path) -> Result<spring_map::SpringMap, LoadMapError>
             path: path.to_path_buf(),
             error,
         })?;
+        // A bake from an older format version lacks later additions
+        // (terrain types); the source archive next to it has them.
+        if !spring_map::baked::is_current_format(&bytes)
+            && let Some(source) = ["sd7", "sdz"]
+                .iter()
+                .map(|ext| path.with_extension(ext))
+                .find(|p| p.is_file())
+        {
+            warn!(
+                "{} was baked by an older format — loading {} instead (re-bake with bake-map)",
+                path.display(),
+                source.display()
+            );
+            return Ok(spring_map::load_map(&source)?);
+        }
         Ok(spring_map::baked::read_baked_map(&bytes)?)
     } else {
         Ok(spring_map::load_map(path)?)
@@ -686,6 +703,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         mut parsed,
         ground_texture,
         mut map_info,
+        terrain_types,
         lua_compositing,
         ..
     } = spring_map;
@@ -753,7 +771,19 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         heights,
         features,
         metalmap: _,
+        typemap,
     } = parsed;
+    // The terrain types' speeds (`GetPosSpeedMod`'s `tt.kbotSpeed`),
+    // folded into every nav bucket below and kept for driving.
+    let terrain_speed = crate::terrain::terrain_speed::TerrainSpeedMap::new(
+        &typemap,
+        header.typemap_width(),
+        header.typemap_height(),
+        &terrain_types,
+    );
+    if !terrain_speed.is_neutral() {
+        info!("  terrain types change ground speed");
+    }
 
     info!(
         "  {}x{} (heightmap {}x{}), {} features",
@@ -816,6 +846,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
             let slope_mod = slope_mod_from_max_slope(cap);
             let mut speed_map =
                 SpeedMap::from_slopes(&slopes, hm_w as u32 - 1, hm_h as u32 - 1, cap, slope_mod);
+            terrain_speed.apply(&mut speed_map);
             if let Some((farm, _)) = hex_farm.as_ref() {
                 let all = [0, 0, speed_map.width - 1, speed_map.height - 1];
                 crate::map_events::hex_farm::mask_void(
@@ -855,6 +886,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
             }
         }
     }
+    nav_set.terrain_speed = terrain_speed;
     let nav_ms = t_nav.elapsed().as_secs_f64() * 1000.0;
 
     // Minimap terrain layer from the ground texture's base level (a
@@ -1018,6 +1050,13 @@ fn spawn_prepared_map(
         configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
     }
     ctx.commands.insert_resource(nav_set);
+    // The map's own gravity (a map without map info: the engine's
+    // default, as `MapInfo::default` carries it).
+    let gravity = map_info
+        .as_ref()
+        .map_or(spring_map::smd_parser::DEFAULT_GRAVITY, |info| info.gravity);
+    ctx.commands
+        .insert_resource(crate::sim::MapGravity::from_map_info(gravity));
     if let Some(map_info) = &map_info {
         let datavent_count = features
             .iter()

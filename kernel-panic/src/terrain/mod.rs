@@ -3,6 +3,7 @@ pub mod heightmap;
 pub mod material;
 pub mod mesh;
 pub mod smooth_ground;
+pub mod terrain_speed;
 
 use bevy::prelude::*;
 

@@ -2098,7 +2098,8 @@ pub fn obstacle_avoidance_dir(
 /// full speed. The slope is the half-resolution slope map's value for
 /// the square (see `spring_pathfinding::slope_map`), the direction the
 /// square's own centre normal. KP's MaxSlope 36 gives `slopeMod ≈ 9.7`, so a 30° climb
-/// runs at ~0.43×. Impassable squares give 0; `ChangeSpeed` then looks
+/// runs at ~0.43×. The square's terrain-type speed multiplies in (fast
+/// lanes up to 4×, closed types 0). Impassable squares give 0; `ChangeSpeed` then looks
 /// one square ahead so a unit on a closed square can drive out.
 pub fn ground_speed_mod(
     nav: Option<&NavGridSet>,
@@ -2124,7 +2125,8 @@ pub fn ground_speed_mod(
         // `dirSlopeMod = -moveDir.dot(sqrNormal)` (MoveMath.cpp:130):
         // positive heading up the fall line.
         let dir_slope = -dir.dot(n2);
-        1.0 / (1.0 + (slope * dir_slope).max(0.0) * nav.slope_mod(cap))
+        // `· tt.kbotSpeed` (MoveMath.cpp:135): the square's terrain type.
+        1.0 / (1.0 + (slope * dir_slope).max(0.0) * nav.slope_mod(cap)) * nav.terrain_speed.at(p)
     };
     let m = at(pos);
     if m == 0.0 {

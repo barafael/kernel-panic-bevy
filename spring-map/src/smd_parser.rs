@@ -4,10 +4,17 @@
 //! `[SECTION] { key=value; }` blocks. It predates `mapinfo.lua` and
 //! is used by all legacy Spring maps including the Kernel Panic set.
 
+use crate::map_types::TerrainTypes;
+
 /// Parsed map metadata from an .smd file.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, better_default::Default, serde::Serialize, serde::Deserialize)]
 pub struct MapInfo {
     pub description: String,
+    /// `MAP.gravity` in elmos/s² (positive = down). A map without the
+    /// key gets the engine's default, 130 (`CMapInfo::ReadGlobal`,
+    /// `maphelper/mapdefaults.lua`); the engine clamps it to ≥ 0.001
+    /// and runs it as `-gravity / GAME_SPEED²` per frame².
+    #[default(DEFAULT_GRAVITY)]
     pub gravity: f32,
     pub start_positions: Vec<StartPosition>,
     pub atmosphere: Atmosphere,
@@ -45,10 +52,51 @@ pub struct Lighting {
     pub ground_shadow_density: f32,
 }
 
+/// The engine's gravity for a map that sets none (elmos/s²).
+pub const DEFAULT_GRAVITY: f32 = 130.0;
+
 /// Parse an .smd file from its raw text content.
 pub fn parse_smd(text: &str) -> MapInfo {
     let mut info = MapInfo::default();
+    walk_smd(text, |section, key, value| {
+        apply_value(&mut info, section, key, value);
+    });
+    info
+}
 
+/// The `[TERRAINTYPEi]` blocks of an .smd: per type, the
+/// `tankmovespeed` / `kbotmovespeed` / `hovermovespeed` /
+/// `shipmovespeed` multipliers (the engine's `parse_tdf_map.lua` turns
+/// `<class>movespeed` keys into `moveSpeeds.<class>`). Types and
+/// classes the file leaves out stay at 1; negatives clamp to 0
+/// (`CMapInfo::ReadTerrainTypes`).
+pub fn parse_terrain_types(text: &str) -> TerrainTypes {
+    let mut types = TerrainTypes::default();
+    walk_smd(text, |section, key, value| {
+        let upper = section.to_ascii_uppercase();
+        let Some(index) = upper
+            .strip_prefix("MAP.TERRAINTYPE")
+            .and_then(|n| n.parse::<usize>().ok())
+            .filter(|&n| n < TerrainTypes::COUNT)
+        else {
+            return;
+        };
+        let speeds = &mut types.move_speeds[index];
+        let speed = parse_f32(value).max(0.0);
+        match key {
+            "tankmovespeed" => speeds.tank = speed,
+            "kbotmovespeed" => speeds.kbot = speed,
+            "hovermovespeed" => speeds.hover = speed,
+            "shipmovespeed" => speeds.ship = speed,
+            _ => {}
+        }
+    });
+    types
+}
+
+/// Walk an .smd's `key=value` pairs with the dotted path of the
+/// sections they sit in (`MAP.ATMOSPHERE`, `MAP.TEAM0`, …).
+fn walk_smd(text: &str, mut visit: impl FnMut(&str, &str, &str)) {
     let mut current_section: Vec<String> = vec![];
 
     for line in text.lines() {
@@ -78,11 +126,9 @@ pub fn parse_smd(text: &str) -> MapInfo {
         // Key=Value pair (trailing ; and whitespace stripped)
         if let Some((key, value)) = parse_key_value(&line) {
             let section_path = current_section.join(".");
-            apply_value(&mut info, &section_path, &key, &value);
+            visit(&section_path, &key, &value);
         }
     }
-
-    info
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -265,5 +311,49 @@ mod tests {
         assert!((info.start_positions[0].x - 606.0).abs() < 0.1);
         // KP atmosphere: dark sky
         assert!(info.atmosphere.sky_color[0] < 0.1);
+    }
+
+    /// A map without `gravity=` runs on the engine's default.
+    #[test]
+    fn missing_gravity_is_engine_default() {
+        let info = parse_smd("[MAP]\n{\n  Description=x;\n}\n");
+        assert_eq!(info.gravity, DEFAULT_GRAVITY);
+    }
+
+    #[test]
+    fn parse_terrain_type_speeds() {
+        let text = "[MAP]\n{\n\
+            \t[TERRAINTYPE0]\n\t{\n\t\tname=ROM;\n\t\ttankmovespeed=0;\n\t\tkbotmovespeed=0;\n\t}\n\
+            \t[TERRAINTYPE3] {\n\t\tkbotmovespeed=4;\n\t\thovermovespeed=-2;\n\t}\n\
+            }\n";
+        let types = parse_terrain_types(text);
+        assert_eq!(types.get(0).kbot, 0.0);
+        assert_eq!(types.get(0).tank, 0.0);
+        assert_eq!(types.get(0).ship, 1.0, "unset class stays neutral");
+        assert_eq!(types.get(3).kbot, 4.0);
+        assert_eq!(types.get(3).hover, 0.0, "negative clamps to 0");
+        assert_eq!(types.get(7).kbot, 1.0, "unset type stays neutral");
+        assert!(parse_terrain_types(MARBLE_MADNESS_SMD).is_neutral());
+    }
+
+    /// Direct Memory Access's memory classes — ROM closed, EEPROM slow,
+    /// RAM normal, SDRAM fast — and its typemap paints all four.
+    #[test]
+    fn real_map_terrain_types() {
+        let sd7_path = crate::shipped_map("Direct_Memory_Access_0.5e_beta.sd7");
+        let extracted = crate::sd7_archive::load_map_archive(&sd7_path).unwrap();
+        let types = parse_terrain_types(&extracted.smd_text.unwrap());
+        let kbot: Vec<f32> = (0..4).map(|i| types.get(i).kbot).collect();
+        assert_eq!(kbot, vec![0.0, 0.25, 1.0, 4.0]);
+        let parsed = crate::smf_parser::parse_smf(&extracted.smf_data).unwrap();
+        assert_eq!(
+            parsed.typemap.len(),
+            parsed.header.typemap_width() * parsed.header.typemap_height()
+        );
+        let mut seen = [0usize; 256];
+        for &t in &parsed.typemap {
+            seen[t as usize] += 1;
+        }
+        assert!(seen[..4].iter().all(|&n| n > 0), "{:?}", &seen[..4]);
     }
 }
