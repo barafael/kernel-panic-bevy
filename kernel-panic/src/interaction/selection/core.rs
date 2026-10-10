@@ -482,6 +482,7 @@ mod tests {
     use bevy::MinimalPlugins;
     use bevy::camera::CameraPlugin;
     use bevy::ecs::system::RunSystemOnce;
+    use bevy::mesh::skinning::SkinnedMeshInverseBindposes;
     use bevy::transform::TransformPlugin;
 
     /// The selection volume is a `Mesh3d` with no material: Bevy's
@@ -494,7 +495,9 @@ mod tests {
         bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin, CameraPlugin))
-            .insert_resource(Assets::<Mesh>::default());
+            .insert_resource(Assets::<Mesh>::default())
+            // Bevy 0.20's visibility pass reads this unconditionally.
+            .insert_resource(Assets::<SkinnedMeshInverseBindposes>::default());
 
         let sphere = app
             .world_mut()

@@ -182,8 +182,8 @@ pub(crate) fn flush_quad_batches(
 
         let mesh = match &batch.mesh {
             Some(handle) => {
-                if let Some(mesh) = meshes.get_mut(handle) {
-                    write_batch_mesh(mesh, batch);
+                if let Some(mut mesh) = meshes.get_mut(handle) {
+                    write_batch_mesh(&mut mesh, batch);
                 }
                 handle.clone()
             }

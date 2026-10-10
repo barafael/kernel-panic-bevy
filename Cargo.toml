@@ -40,7 +40,7 @@ members = [
 
 [workspace.dependencies]
 better_default = "1"
-bevy = { version = "0.18", features = ["serialize"] }
+bevy = { version = "0.20", features = ["serialize"] }
 byteorder = "1.5"
 thiserror = "2"
 sevenz-rust = "0.6"

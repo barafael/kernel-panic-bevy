@@ -60,13 +60,13 @@ impl Plugin for UnitsPlugin {
             .get_resource::<crate::game_setup::DevOptions>()
             .and_then(|d| d.sim_executor.clone())
         {
-            use bevy::ecs::schedule::ExecutorKind;
-            let kind = match kind.as_str() {
-                "single" => ExecutorKind::SingleThreaded,
-                _ => ExecutorKind::MultiThreaded,
-            };
+            let single_threaded = kind == "single";
             app.edit_schedule(FixedUpdate, move |s| {
-                s.set_executor_kind(kind);
+                if single_threaded {
+                    s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+                } else {
+                    s.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
+                }
             });
         }
         app.insert_resource(Time::<Fixed>::from_hz(SIMULATION_HZ))

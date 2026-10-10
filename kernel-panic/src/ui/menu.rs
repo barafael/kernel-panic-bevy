@@ -25,6 +25,8 @@ use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
+use bevy::text::FontSize;
+use bevy::ui::ComputedStackIndex;
 
 use crate::game_setup::{
     AppState, DevOptions, GameOverDismissed, Grouping, RunGame, SkirmishConfig, build_setup,
@@ -65,12 +67,13 @@ impl Plugin for MenuPlugin {
                     handle_menu_actions,
                     keyboard_menu_nav,
                     mouse_menu_input
-                        .run_if(in_state(AppState::Menu).or(in_state(AppState::InGame))),
+                        .run_if(in_state(AppState::Menu).or_else(in_state(AppState::InGame))),
                     esc_in_menu.run_if(in_state(AppState::Menu)),
-                    boot_demo.run_if(in_state(AppState::Menu).and(resource_exists::<MapCatalog>)),
+                    boot_demo
+                        .run_if(in_state(AppState::Menu).and_then(resource_exists::<MapCatalog>)),
                     demo_director.run_if(
                         in_state(AppState::Menu)
-                            .and(resource_exists::<crate::game_setup::GameSetup>),
+                            .and_then(resource_exists::<crate::game_setup::GameSetup>),
                     ),
                     attract_camera
                         .run_if(in_state(AppState::Menu))
@@ -425,7 +428,7 @@ fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> En
             Text::new(label),
             TextColor(TEXT_WHITE),
             TextFont {
-                font_size,
+                font_size: FontSize::Px(font_size),
                 ..default()
             },
             // Why no-wrap: an absolute node's available width is what's
@@ -502,7 +505,7 @@ impl<'a> LabelSpec<'a> {
                 Text::new(self.text),
                 TextColor(TEXT_WHITE),
                 TextFont {
-                    font_size,
+                    font_size: FontSize::Px(font_size),
                     ..default()
                 },
                 TextLayout::new(self.justify, LineBreak::NoWrap),
@@ -532,7 +535,7 @@ fn title(commands: &mut Commands, parent: Entity, font_size: f32) {
             Text::new("Kernel Panic!"),
             TextColor(TITLE_CYAN),
             TextFont {
-                font_size,
+                font_size: FontSize::Px(font_size),
                 ..default()
             },
             TextLayout::new(Justify::Center, LineBreak::NoWrap),
@@ -887,7 +890,13 @@ fn keyboard_menu_nav(
 /// node's computed rect. Hover brightens the button under the cursor; a
 /// primary click on a button dispatches its [`MenuAction`].
 fn mouse_menu_input(
-    buttons: Query<(Entity, &MenuButton, &ComputedNode, &UiGlobalTransform)>,
+    buttons: Query<(
+        Entity,
+        &MenuButton,
+        &ComputedNode,
+        &ComputedStackIndex,
+        &UiGlobalTransform,
+    )>,
     windows: Query<&Window>,
     mouse: Res<ButtonInput<MouseButton>>,
     mut focus: ResMut<MenuFocus>,
@@ -904,12 +913,12 @@ fn mouse_menu_input(
     let phys = cursor * window.scale_factor();
 
     // Find the topmost button under the cursor using the UI node's canonical
-    // hit test. Prefer the deepest node (larger `stack_index`).
+    // hit test. Prefer the deepest node (larger stack index).
     let mut hit: Option<Entity> = None;
     let mut hit_stack = 0u32;
-    for (e, _b, cnode, gtf) in &buttons {
+    for (e, _b, cnode, stack, gtf) in &buttons {
         if cnode.contains_point(*gtf, phys) {
-            let idx = cnode.stack_index();
+            let idx = stack.0;
             if idx >= hit_stack {
                 hit_stack = idx;
                 hit = Some(e);
@@ -1111,7 +1120,7 @@ fn demo_map_cycler(commands: &mut Commands, root: Entity, font_size: f32, demo_m
             Text::new(demo_map.unwrap_or("")),
             TextColor(TEXT_WHITE),
             TextFont {
-                font_size,
+                font_size: FontSize::Px(font_size),
                 ..default()
             },
             TextLayout::new(Justify::Center, LineBreak::NoWrap),
@@ -1330,7 +1339,7 @@ fn fps_readout(
     let wanted = fps_text(fps);
     for children in &readouts {
         let mut texts = texts.iter_many_mut(children);
-        while let Some(mut text) = texts.fetch_next() {
+        while let Some(Ok(mut text)) = texts.fetch_next() {
             if text.0 != wanted {
                 text.0.clone_from(&wanted);
             }
@@ -1631,7 +1640,7 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
             Text::new(body),
             TextColor(TEXT_WHITE),
             TextFont {
-                font_size: line_px,
+                font_size: FontSize::Px(line_px),
                 ..default()
             },
             Pickable::IGNORE,

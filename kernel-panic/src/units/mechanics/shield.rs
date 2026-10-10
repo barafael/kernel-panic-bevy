@@ -289,7 +289,7 @@ pub fn tick_shield_shells(
             if materials
                 .get(&material.0)
                 .is_some_and(|mat| mat.base_color != tinted)
-                && let Some(mat) = materials.get_mut(&material.0)
+                && let Some(mut mat) = materials.get_mut(&material.0)
             {
                 mat.base_color = tinted;
             }

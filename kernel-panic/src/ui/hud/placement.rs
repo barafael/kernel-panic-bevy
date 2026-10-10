@@ -506,7 +506,7 @@ fn sync_ghosts(
                 // `get_mut` marks the material modified (a GPU
                 // re-upload): only take it on an actual change.
                 if materials.get(&mat.0).is_some_and(|m| m.base_color != want)
-                    && let Some(m) = materials.get_mut(&mat.0)
+                    && let Some(mut m) = materials.get_mut(&mat.0)
                 {
                     m.base_color = want;
                 }
