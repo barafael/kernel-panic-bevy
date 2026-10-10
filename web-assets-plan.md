@@ -27,7 +27,7 @@ The current loader paths assume native filesystem access in three places:
 |---|---|---|---|
 | Unit/weapon defs | `.fbi` / `.tdf` text | **RON in repo → postcard at runtime** (via Bevy asset processor) | Hand-editable source, fast parse, no parser shipped to wasm |
 | 3D models | `.s3o` + raw `.tga` | **`.glb` + EXT_meshopt_compression + KHR_mesh_quantization** | Bevy-native loader, named nodes preserve COB piece hooks, ~10× smaller than raw, decoder is 20 KB |
-| Textures (in models) | `.tga` (raw, paletted) | **KTX2 + Basis ETC1S** for diffuse, UASTC for normals, mipmapped | GPU-ready, transcodes to BC7/ASTC/ETC2 per-backend, Bevy 0.18 has the loader |
+| Textures (in models) | `.tga` (raw, paletted) | **KTX2 + Basis ETC1S** for diffuse, UASTC for normals, mipmapped | GPU-ready, transcodes to BC7/ASTC/ETC2 per-backend, Bevy 0.20 has the loader |
 | UI buildpics (~64×64) | `.png` | keep `.png` (or WebP — marginal) | Absolute bytes saved are negligible at this size |
 | Audio | `.wav` | **`.ogg` Vorbis** | bevy_audio default; rodio MP3 broken on wasm; Opus needs custom decoder |
 | Maps | `.sd7` / `.sdz` (7z/zip + SMF/SMT/SMD/Lua) | **per-file fetch**: `.glb` for meshes/features, KTX2 for tilesets, RON for metadata, raw `.bin` for the heightmap | Kills runtime decompression; HTTP/2 multiplexes the small fetches; browser cache works |

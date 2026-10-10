@@ -496,7 +496,7 @@ mod tests {
         let mut app = App::new();
         app.add_plugins((MinimalPlugins, TransformPlugin, CameraPlugin))
             .insert_resource(Assets::<Mesh>::default())
-            // Bevy 0.20's visibility pass reads this unconditionally.
+            // The skinned-mesh bounds pass in `CameraPlugin` reads it.
             .insert_resource(Assets::<SkinnedMeshInverseBindposes>::default());
 
         let sphere = app

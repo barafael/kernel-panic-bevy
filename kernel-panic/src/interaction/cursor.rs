@@ -3,7 +3,7 @@
 //! Mirrors Spring/Kernel-Panic conventions: each command kind has its own
 //! cursor (normal, attack, move, repair, ...). Frames are loaded from
 //! `assets/cursors/<name>_NN.png` and cycled by `frame_advance` so animated
-//! sprites work despite Bevy 0.18 having no native animated cursor.
+//! sprites work despite Bevy having no native animated cursor.
 //!
 //! Other systems request a cursor by writing `CursorRequest`; the resolver
 //! picks the highest-priority entry and applies it to the primary window.

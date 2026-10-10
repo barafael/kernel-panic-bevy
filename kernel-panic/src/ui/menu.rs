@@ -1338,8 +1338,8 @@ fn fps_readout(
         .and_then(|d| d.smoothed());
     let wanted = fps_text(fps);
     for children in &readouts {
-        let mut texts = texts.iter_many_mut(children);
-        while let Some(Ok(mut text)) = texts.fetch_next() {
+        let mut texts = texts.iter_many_mut(children).matched();
+        while let Some(mut text) = texts.fetch_next() {
             if text.0 != wanted {
                 text.0.clone_from(&wanted);
             }

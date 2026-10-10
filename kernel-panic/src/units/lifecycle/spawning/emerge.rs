@@ -55,7 +55,7 @@ pub struct FadeMaterials {
     /// source material the unit's pieces used, shared by every piece
     /// that used it. A unit's pieces all carry the same (model,
     /// faction) material, so this is one handle: one clone and one
-    /// `get_mut` (re-upload) per tick per unit, not one per piece.
+    /// material write (re-upload) per tick per unit, not one per piece.
     pub faded: Vec<Handle<StandardMaterial>>,
     /// (piece_entity, original) — the shared material each piece gets
     /// back once the fade completes.

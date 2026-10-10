@@ -133,7 +133,7 @@ fn main() {
                             ((p[0] - dst[0]).powi(2) + (p[1] - dst[1]).powi(2)).sqrt() < 8.0
                         });
                         println!(
-                            "    path {label:<16} {:>5} waypoints, {:>7} elmos, {:>5.1}ms, reached goal: {}, crossings: {}",
+                            "    path {label:<16} {:>5} waypoints, {:>7.0} elmos, {:>5.1}ms, reached goal: {}, crossings: {}",
                             path.points.len(),
                             path.points
                                 .windows(2)

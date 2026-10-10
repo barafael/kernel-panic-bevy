@@ -7,7 +7,7 @@ use spring_map::map_types::{GroundTexture, MipmapData};
 
 /// Cap the base ground texture at 8192² before building the mip chain.
 ///
-/// Why: Bevy 0.18's default `WgpuSettings` widens `max_texture_dimension_2d`
+/// Why: Bevy's default `WgpuSettings` widens `max_texture_dimension_2d`
 /// to the adapter's resolution but leaves `max_buffer_size` at the wgpu
 /// default of 256 MB. Hex_Farm_8 assembles a 12288×12288 SMT whose mip0
 /// alone is ~576 MB, so the staging upload silently fails and the terrain

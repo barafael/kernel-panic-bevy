@@ -24,7 +24,7 @@ use bevy::render::RenderPlugin;
 #[cfg(target_os = "windows")]
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 #[cfg(not(target_arch = "wasm32"))]
-use bevy::render::settings::{Backends, RenderCreation, WgpuSettings};
+use bevy::render::settings::{Backends, WgpuSettings};
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::window::WindowResizeConstraints;
 
@@ -54,7 +54,7 @@ fn main() {
         return;
     }
 
-    // TODO(windows-resize): four linked workarounds for the Bevy 0.18 +
+    // TODO(windows-resize): four linked workarounds for the Bevy +
     // Windows "freeze on resize" bug. Each is noted inline; they can
     // be reverted independently when the upstream fix lands.
     //
@@ -68,8 +68,8 @@ fn main() {
     //      thread. When it tries to coordinate with the main thread
     //      (swapchain acquire, extract sync) it deadlocks against the
     //      modal loop.
-    //   3. Bevy 0.18 ships wgpu ~24, whose DX12 swapchain reconfigure
-    //      has a separate known hang during the same modal loop.
+    //   3. wgpu's DX12 swapchain reconfigure has a separate known hang
+    //      during the same modal loop.
     //   4. wgpu panics if the swapchain is ever reconfigured at 0x0,
     //      which happens naturally during a fast drag-to-nothing and
     //      leaves HDR+Bloom's intermediate render targets in a bad
@@ -90,10 +90,11 @@ fn main() {
     // VULKAN|METAL there would select nothing.
     #[cfg(not(target_arch = "wasm32"))]
     let render_plugin = RenderPlugin {
-        render_creation: RenderCreation::Automatic(Box::new(WgpuSettings {
+        render_creation: WgpuSettings {
             backends: Some(Backends::VULKAN | Backends::METAL),
             ..default()
-        })),
+        }
+        .into(),
         ..default()
     };
     #[cfg(target_arch = "wasm32")]
