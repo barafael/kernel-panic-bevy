@@ -13,7 +13,7 @@
 
 use bevy::prelude::*;
 
-use super::Dying;
+use super::{Dying, Stunned};
 use crate::interaction::movement::{AttackMoveActive, MovePath, MoveTarget};
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
@@ -60,14 +60,17 @@ pub enum AimLaunch {
     /// by `trajectoryHeight` and renormalised — the Pointer's Geometric
     /// (`trajectoryheight=1`) leaves at ~45° up, and so does its gun.
     Missile { trajectory_height: f32 },
-    /// `CCannon::CalcWantedDir`: the ballistic solution for the shell's
-    /// speed (elmos/frame) under the map's gravity, low trajectory.
-    Cannon { speed: f32 },
+    /// `CCannon::CalcWantedDir`: the ballistic solution
+    /// ([`cannon_wanted_dir`]) for the shell's `speed` (elmos/frame)
+    /// under the weapon's `gravity` (elmos/frame², [`weapon_gravity`]),
+    /// low trajectory — the same solve the shell is launched with.
+    Cannon { speed: f32, gravity: f32 },
 }
 
 impl AimLaunch {
-    /// The launch of `weapon`'s projectile, per its Spring weapon type.
-    pub fn of(weapon: Option<&spring_tdf::WeaponDef>) -> Self {
+    /// The launch of `weapon`'s projectile, per its Spring weapon type,
+    /// on a map of `map_gravity` (elmos/frame², negative).
+    pub fn of(weapon: Option<&spring_tdf::WeaponDef>, map_gravity: f32) -> Self {
         use spring_tdf::WeaponCategory as C;
         let Some(w) = weapon else {
             return Self::Direct;
@@ -79,7 +82,8 @@ impl AimLaunch {
                 }
             }
             C::Cannon if w.weapon_velocity > 0.0 => Self::Cannon {
-                speed: w.weapon_velocity / crate::sim::GAME_SPEED,
+                speed: w.projectile_speed(),
+                gravity: weapon_gravity(w, map_gravity),
             },
             _ => Self::Direct,
         }
@@ -96,38 +100,192 @@ impl AimLaunch {
                     .normalize_or(Vec3::Y);
                 dir.y.clamp(-1.0, 1.0).asin()
             }
-            Self::Cannon { speed } => cannon_pitch(horizontal, up, speed),
+            Self::Cannon { speed, gravity } => {
+                let dir = cannon_wanted_dir(Vec3::new(horizontal, up, 0.0), speed, gravity);
+                dir.y.clamp(-1.0, 1.0).asin()
+            }
         }
     }
 }
 
-/// `CCannon::CalcWantedDir` for a shell of `v` elmos/frame under the
-/// map's gravity: the low-trajectory launch pitch; level (0) when the
-/// target is out of ballistic reach, as the engine's fallback leaves
-/// `wantedDir` horizontal.
-fn cannon_pitch(dxz: f32, dy: f32, v: f32) -> f32 {
-    let g = crate::sim::MAP_GRAVITY_PER_FRAME2;
-    let dfsq = dxz * dxz;
-    let dsq = dfsq + dy * dy;
-    if dsq == 0.0 {
-        return -std::f32::consts::FRAC_PI_2;
-    }
-    let vsq = v * v;
-    let root1 = vsq * vsq + 2.0 * vsq * g * dy - g * g * dfsq;
-    if root1 < 0.0 {
-        return 0.0;
-    }
-    let root2 = 2.0 * dfsq * dsq * (vsq + g * dy + root1.sqrt());
-    if root2 < 0.0 {
-        return 0.0;
-    }
-    let vxz = root2.sqrt() / (2.0 * dsq);
-    let vy = if dxz == 0.0 || vxz == 0.0 {
-        v
+// ── Ballistics ────────────────────────────────────────────────────────
+//
+// One model for every ballistic shell, shared by the aim (the pitch the
+// script is asked for), the fire side (the launch direction), the shell's
+// flight (`weapon_fx::flight::CannonFlight`) and the range test — all in
+// Spring's native units: elmos/frame speeds, elmos/frame² gravity.
+
+/// Gravity a weapon's projectile falls under, in elmos/frame² (negative
+/// is down): the map's (`map_gravity`), unless the TDF overrides it with
+/// `myGravity` —
+/// `mix(map.gravity, -myGravity, myGravity != 0)` (`CCannon::Init`,
+/// `CWeapon::GetAccuratePredictedImpactTime`, `CMissileLauncher::
+/// FireImpl`). `myGravity` is already per frame²: the BugCannon's 0.3 is
+/// 270 elmos/s², over five times the map's 50.
+pub fn weapon_gravity(weapon: &spring_tdf::WeaponDef, map_gravity: f32) -> f32 {
+    if weapon.my_gravity != 0.0 {
+        -weapon.my_gravity
     } else {
-        vxz * dy / dxz - dxz * g / (2.0 * vxz)
+        map_gravity
+    }
+}
+
+/// `CCannon::CalcWantedDir` (low trajectory — no Kernel Panic weapon sets
+/// `highTrajectory`): the unit launch direction that puts a shell of
+/// `speed` elmos/frame under `gravity` (elmos/frame², negative) onto a
+/// point `target_vec` away. Out of ballistic reach the engine leaves the
+/// direction level toward the target; a zero vector fires straight down.
+pub fn cannon_wanted_dir(target_vec: Vec3, speed: f32, gravity: f32) -> Vec3 {
+    let dsq = target_vec.length_squared();
+    let dfsq = target_vec.xz().length_squared();
+    let (g, v, dy) = (gravity, speed, target_vec.y);
+    let dxz = dfsq.sqrt();
+
+    let (mut vxz, mut vy) = (0.0f32, 0.0f32);
+    if dsq == 0.0 {
+        vy = -v;
+    } else if dsq < 1e12 && dy.abs() < 1e6 {
+        let vsq = v * v;
+        let root1 = vsq * vsq + 2.0 * vsq * g * dy - g * g * dfsq;
+        if root1 >= 0.0 {
+            let root2 = 2.0 * dfsq * dsq * (vsq + g * dy + root1.sqrt());
+            if root2 >= 0.0 {
+                vxz = root2.sqrt() / (2.0 * dsq);
+                vy = if dxz == 0.0 || vxz == 0.0 {
+                    v
+                } else {
+                    vxz * dy / dxz - dxz * g / (2.0 * vxz)
+                };
+            }
+        }
+    }
+
+    // `SafeNormalize` keeps a zero vector zero.
+    let mut dir = Vec3::new(target_vec.x, 0.0, target_vec.z).normalize_or_zero();
+    if vxz != 0.0 || vy != 0.0 {
+        dir *= vxz;
+        dir.y = vy;
+        dir = dir.normalize_or_zero();
+    }
+    dir
+}
+
+/// `CCannon::FireImpl`'s launch direction before spray: the ballistic
+/// solve, except for a target within 2 elmos of the muzzle (an `emit-sfx`
+/// shot), which is fired straight at.
+pub fn cannon_launch_dir(target_vec: Vec3, speed: f32, gravity: f32) -> Vec3 {
+    if target_vec.length_squared() > 4.0 {
+        cannon_wanted_dir(target_vec, speed, gravity)
+    } else {
+        target_vec
+    }
+}
+
+/// `CCannon::GetStaticRange2D` after `CCannon::UpdateRange`: the 2D reach
+/// of a shell of `speed` under `gravity` toward a target `height_diff`
+/// elmos above (negative: below) the aim point, scaled so that level
+/// ground reaches exactly the authored `range` (`rangeBoostFactor`), with
+/// the engine's derived `heightBoostFactor` (TDF default -1) stretching
+/// it downhill.
+fn cannon_range_2d(range: f32, height_diff: f32, speed: f32, gravity: f32) -> f32 {
+    if gravity >= 0.0 {
+        return range;
+    }
+    // `CalcRange2D`: the 45° (max-range) launch, `speedFactor` √½, with
+    // a 100-elmo smoothing band below the shooter.
+    let calc = |mut height_diff: f32, range_boost: f32, height_boost: f32| -> f32 {
+        const SMOOTH_HEIGHT: f32 = 100.0;
+        let speed_2d = speed * std::f32::consts::FRAC_1_SQRT_2;
+        let sq_speed_2d = speed_2d * speed_2d;
+        if height_diff < -SMOOTH_HEIGHT {
+            height_diff *= height_boost;
+        } else if height_diff < 0.0 {
+            height_diff *= 1.0 + (height_boost - 1.0) * -height_diff / SMOOTH_HEIGHT;
+        }
+        let root = sq_speed_2d + 2.0 * gravity * height_diff;
+        if root < 0.0 {
+            return 0.0;
+        }
+        range_boost * (sq_speed_2d + speed_2d * root.sqrt()) / -gravity
     };
-    vy.atan2(vxz)
+    let range_boost = (range / calc(0.0, 1.0, -1.0)).clamp(0.0, 1.0);
+    let height_boost = if range_boost > 0.0 {
+        (2.0 - range_boost) / range_boost.sqrt()
+    } else {
+        -1.0
+    };
+    calc(height_diff, range_boost, height_boost)
+}
+
+/// `weaponDef->heightmod`: how much of the height difference counts
+/// against the range. No Kernel Panic weapon authors `heightMod`, so this
+/// is the engine's per-type default (`WeaponDef.cpp`).
+fn height_mod(weapon: &spring_tdf::WeaponDef) -> f32 {
+    use spring_tdf::WeaponCategory as C;
+    match weapon.category() {
+        C::Cannon => 0.8,
+        C::BeamLaser | C::LightningCannon => 1.0,
+        _ => 0.2,
+    }
+}
+
+/// `CWeapon::GetRange2D(0, heightDiff · heightmod)` per weapon type: how
+/// far (horizontally) `weapon` reaches toward a target `height_diff`
+/// elmos above its aim point. `ground_target`: an attack-ground position,
+/// which `TestRange` always checks in a sphere (`Target_Pos`).
+pub fn weapon_range_2d(
+    weapon: &spring_tdf::WeaponDef,
+    height_diff: f32,
+    ground_target: bool,
+    map_gravity: f32,
+) -> f32 {
+    use spring_tdf::WeaponCategory as C;
+    let range = weapon.effective_range();
+    let ydiff = height_diff * height_mod(weapon);
+    match weapon.category() {
+        // Melee `cylinderTargeting` defaults to 1: a cylinder `range`
+        // tall instead of a sphere.
+        C::Melee if !ground_target => {
+            if range > ydiff.abs() {
+                range
+            } else {
+                0.0
+            }
+        }
+        C::Cannon if weapon.weapon_velocity > 0.0 => cannon_range_2d(
+            range,
+            ydiff,
+            weapon.projectile_speed(),
+            weapon_gravity(weapon, map_gravity),
+        ),
+        // `CStarburstLauncher::GetRange2D`.
+        C::StarburstLauncher => range + ydiff,
+        _ => (range * range - ydiff * ydiff).max(0.0).sqrt(),
+    }
+}
+
+/// `CWeapon::TestRange`: whether `target` is in reach of `weapon` aimed
+/// from `aim_from` — the 2D distance against [`weapon_range_2d`] for the
+/// height difference. The one range test every fire / chase decision
+/// uses, so a unit that stops chasing is always able to shoot.
+pub fn in_weapon_range(
+    weapon: &spring_tdf::WeaponDef,
+    aim_from: Vec3,
+    target: Vec3,
+    ground_target: bool,
+    map_gravity: f32,
+) -> bool {
+    let reach = weapon_range_2d(weapon, target.y - aim_from.y, ground_target, map_gravity);
+    aim_from.xz().distance_squared(target.xz()) <= reach * reach
+}
+
+/// XZ radius a target scan must cover to find every target
+/// [`in_weapon_range`] could accept from `aim_from` — upstream
+/// `GenerateWeaponTargets`' `scanRadius`, taking the lowest point of the
+/// map as `max(0, minHeight)` = 0.
+pub fn weapon_scan_radius(weapon: &spring_tdf::WeaponDef, aim_from: Vec3, map_gravity: f32) -> f32 {
+    let lowest = weapon_range_2d(weapon, -aim_from.y.max(0.0), false, map_gravity);
+    weapon.effective_range().max(lowest)
 }
 
 /// Max heading error (radians) at which a Deployable is allowed to fire.
@@ -240,7 +398,9 @@ pub fn drive_aim_script(
             Option<&MoveTarget>,
             Option<&MovePath>,
         ),
-        Without<Dying>,
+        // `CUnit::CanUpdateWeapons`: a paralyzed unit's weapons neither
+        // aim nor fire.
+        (Without<Dying>, Without<Stunned>),
     >,
 ) {
     for (mut aim, mut animator, gtf, target, move_target, move_path) in &mut query {
@@ -319,16 +479,20 @@ pub fn sync_deploy_state(mut query: Query<(&mut Deployable, &UnitAnimator)>) {
 #[allow(clippy::type_complexity)]
 pub fn aim_weapons_system(
     time: Res<Time>,
-    mut query: Query<(
-        &mut Transform,
-        &UnitStats,
-        &AimTarget,
-        Option<&crate::units::assets::animation::AimerPiece>,
-        Option<&mut crate::interaction::ground_move::GroundMover>,
-        Has<MoveTarget>,
-        Has<AttackMoveActive>,
-        Option<&Deployable>,
-    )>,
+    mut query: Query<
+        (
+            &mut Transform,
+            &UnitStats,
+            &AimTarget,
+            Option<&crate::units::assets::animation::AimerPiece>,
+            Option<&mut crate::interaction::ground_move::GroundMover>,
+            Has<MoveTarget>,
+            Has<AttackMoveActive>,
+            Option<&Deployable>,
+        ),
+        // A paralyzed unit doesn't turn to aim (`CanUpdateWeapons`).
+        Without<Stunned>,
+    >,
 ) {
     let dt = time.delta_secs();
     for (mut transform, stats, aim, aimer, mover, has_move, attack_move, deployable) in &mut query {
@@ -405,8 +569,10 @@ pub fn aim_weapons_system(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    const G: f32 = crate::sim::MAP_GRAVITY_PER_FRAME2;
 
     /// A missile with `trajectoryheight=1` leaves at 45° toward a level
     /// target; a cannon shell's pitch is the low ballistic solution
@@ -426,10 +592,123 @@ mod tests {
         );
         assert!((p - std::f32::consts::FRAC_PI_4).abs() < 1e-4, "{p}");
         let v = 400.0 / crate::sim::GAME_SPEED;
-        let (_, p) = local_aim_angles(level, target, AimLaunch::Cannon { speed: v });
-        let g = -crate::sim::MAP_GRAVITY_PER_FRAME2;
-        let expected = 0.5 * (g * 1000.0 / (v * v)).asin();
+        let gravity = crate::sim::MAP_GRAVITY_PER_FRAME2;
+        let (_, p) = local_aim_angles(level, target, AimLaunch::Cannon { speed: v, gravity });
+        let expected = 0.5 * (-gravity * 1000.0 / (v * v)).asin();
         assert!((p - expected).abs() < 1e-3, "{p} vs {expected}");
+    }
+
+    /// corruptionweapons.tdf `[BugCannon]`: `weaponvelocity=600`,
+    /// `myGravity=.3`, `range=1200` (`ballistic=1`, no weapon type →
+    /// Cannon). `startvelocity` plays no part in a cannon shot.
+    pub(crate) fn bug_cannon() -> spring_tdf::WeaponDef {
+        spring_tdf::WeaponDef {
+            ballistic: true,
+            range: 1200.0,
+            weapon_velocity: 600.0,
+            start_velocity: 800.0,
+            my_gravity: 0.3,
+            ..Default::default()
+        }
+    }
+
+    /// `myGravity` is elmos/frame² and replaces the map's gravity; the
+    /// shell speed is `weaponvelocity / 30`. The aim the script receives
+    /// is the textbook low-arc solution for those numbers: at 1000 elmos
+    /// `sin 2θ = g·d / v² = 0.3·1000 / 20² = 0.75` → θ ≈ 24.3°.
+    #[test]
+    fn bug_cannon_aims_with_its_own_gravity_and_speed() {
+        let w = bug_cannon();
+        assert_eq!(weapon_gravity(&w, G), -0.3);
+        let launch = AimLaunch::of(Some(&w), G);
+        let AimLaunch::Cannon { speed, gravity } = launch else {
+            panic!("{launch:?}");
+        };
+        assert!((speed - 20.0).abs() < 1e-4 && gravity == -0.3);
+        let (_, p) = local_aim_angles(Quat::IDENTITY, Vec3::new(0.0, 0.0, -1000.0), launch);
+        let expected = 0.5 * 0.75f32.asin();
+        assert!((p - expected).abs() < 1e-4, "{p} vs {expected}");
+        assert!(p.to_degrees() > 24.0 && p.to_degrees() < 24.6);
+        // Map gravity (no myGravity) is the fallback.
+        let plain = spring_tdf::WeaponDef {
+            my_gravity: 0.0,
+            ..w
+        };
+        assert_eq!(weapon_gravity(&plain, G), G);
+    }
+
+    /// `CCannon::CalcWantedDir`: uphill targets need a steeper launch,
+    /// unreachable ones get the level fallback, a zero vector points down.
+    #[test]
+    fn cannon_wanted_dir_edge_cases() {
+        let (v, g) = (20.0, -0.3);
+        let level = cannon_wanted_dir(Vec3::new(800.0, 0.0, 0.0), v, g);
+        let uphill = cannon_wanted_dir(Vec3::new(800.0, 200.0, 0.0), v, g);
+        assert!(uphill.y > level.y);
+        assert!((level.length() - 1.0).abs() < 1e-5);
+        // Max reach on the level is v²/g ≈ 1333 elmos.
+        let far = cannon_wanted_dir(Vec3::new(0.0, 0.0, 2000.0), v, g);
+        assert_eq!(far, Vec3::Z);
+        assert_eq!(cannon_wanted_dir(Vec3::ZERO, v, g), Vec3::NEG_Y);
+    }
+
+    /// `CCannon::UpdateRange` scales the ballistic reach so level ground
+    /// reaches exactly the authored range; shooting downhill reaches
+    /// farther, uphill less. Direct-fire weapons measure 2D with only a
+    /// fifth of the height difference counting (`heightmod` 0.2).
+    #[test]
+    fn weapon_range_follows_test_range() {
+        let w = bug_cannon();
+        assert!((weapon_range_2d(&w, 0.0, false, G) - 1200.0).abs() < 0.5);
+        assert!(weapon_range_2d(&w, -200.0, false, G) > 1250.0);
+        assert!(weapon_range_2d(&w, 200.0, false, G) < 1150.0);
+        assert!(weapon_scan_radius(&w, Vec3::new(0.0, 300.0, 0.0), G) > 1250.0);
+
+        let beam = spring_tdf::WeaponDef {
+            weapon_type: "LaserCannon".into(),
+            weapon_velocity: 512.0,
+            range: 256.0,
+            ..Default::default()
+        };
+        let range = beam.effective_range();
+        let from = Vec3::new(0.0, 10.0, 0.0);
+        // 2D distance at the limit, target 100 elmos below: the 20-elmo
+        // effective height shortens the reach to √(r² − 20²).
+        let reach = (range * range - 20.0 * 20.0).sqrt();
+        assert!(in_weapon_range(
+            &beam,
+            from,
+            Vec3::new(reach - 0.5, -90.0, 0.0),
+            false,
+            G
+        ));
+        assert!(!in_weapon_range(
+            &beam,
+            from,
+            Vec3::new(reach + 0.5, -90.0, 0.0),
+            false,
+            G
+        ));
+        // Melee: a cylinder, the height ignored up to `range`.
+        let melee = spring_tdf::WeaponDef {
+            weapon_type: "Melee".into(),
+            range: 200.0,
+            ..Default::default()
+        };
+        assert!(in_weapon_range(
+            &melee,
+            from,
+            Vec3::new(199.0, 400.0, 0.0),
+            false,
+            G
+        ));
+        assert!(!in_weapon_range(
+            &melee,
+            from,
+            Vec3::new(199.0, 1200.0, 0.0),
+            false,
+            G
+        ));
     }
 
     /// The `AimWeapon1(h, p)` a unit receives must turn a piece's S3O +Z

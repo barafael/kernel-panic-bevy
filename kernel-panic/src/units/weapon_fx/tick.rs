@@ -16,7 +16,7 @@ use bevy::ecs::system::SystemParam;
 use super::ceg::{CegTrailCtx, spawn_ceg};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
-use crate::units::components::{Faction, TeamId, UnitType, is_friendly};
+use crate::units::components::{UnitType, is_friendly};
 #[cfg(test)]
 use crate::units::content::weapons::WeaponId;
 use crate::units::content::weapons::WeaponRegistry;
@@ -37,13 +37,11 @@ pub(super) fn projectile_orientation(dir: Vec3) -> Quat {
 }
 
 /// Grouped read-only inputs for the volumetric mid-flight collision
-/// pass: target volumes, attacker team/faction (for the friendly
-/// filter), and the broad-phase spatial index. Bundled as a
+/// pass: target volumes and the broad-phase spatial index. Bundled as a
 /// `SystemParam` so `tick_weapon_fx` stays under Bevy's 16-arg limit.
 #[derive(SystemParam)]
 pub(super) struct VolumeHitCtx<'w, 's> {
     target_q: Query<'w, 's, (&'static GlobalTransform, &'static CollisionVolume), With<UnitType>>,
-    attacker_q: Query<'w, 's, (&'static TeamId, &'static Faction)>,
     spatial: Res<'w, SpatialIndex>,
     /// Terrain for guided projectiles' ground impacts.
     heightmap: Option<Res<'w, Heightmap>>,
@@ -253,7 +251,6 @@ pub(super) fn tick_weapon_fx(
         let curr_lead_pos = bolt.origin + bolt.direction * lead_dist;
         let hit_meta = delayed_hits.get(entity).ok();
         let target_entity = hit_meta.and_then(|h| h.target);
-        let attacker_entity = hit_meta.map(|h| h.attacker);
         if let Some(impact_pos) = target_volume_hit(
             target_entity,
             prev_lead_pos,
@@ -270,15 +267,13 @@ pub(super) fn tick_weapon_fx(
                 &mut pending_explosions,
                 &mut commands,
             );
-        } else if let Some(attacker) = attacker_entity
+        } else if let Some(hit) = hit_meta
             && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
-                attacker,
-                target_entity,
+                hit,
                 prev_lead_pos,
                 curr_lead_pos,
                 &volume_ctx.spatial,
                 &volume_ctx.target_q,
-                &volume_ctx.attacker_q,
             )
         {
             trigger_delayed_hit(
@@ -413,7 +408,6 @@ pub(super) fn tick_weapon_fx(
         let total_dist = proj.origin.distance(proj.target);
         let hit_meta = delayed_hits.get(entity).ok();
         let target_entity = hit_meta.and_then(|h| h.target);
-        let attacker_entity = hit_meta.map(|h| h.attacker);
         if total_dist < 0.1 && proj.flight == Flight::Direct {
             trigger_delayed_hit(
                 entity,
@@ -435,12 +429,13 @@ pub(super) fn tick_weapon_fx(
         // trigger.
         //
         // `Direct` keeps the legacy parametric lerp (arc height baked
-        // separately below). Guided flights step the engine's per-frame
-        // update ([`super::flight`]) against the target's *current*
-        // position (`tracks=1`), and end on the ground — upstream
-        // missiles never "arrive"; they hit a unit's volume (swept
-        // below) or the terrain. `Ballistic` is `CannonProjectile`
-        // (`velocity.y -= gravity·dt`).
+        // separately below). Integrated flights step the engine's
+        // per-frame update ([`super::flight`]) — guided ones against the
+        // target's *current* position (`tracks=1`), a `Cannon` shell
+        // (`CProjectile::Update`) under its gravity — and end on the
+        // ground, or when their fuel / `ttl` runs out: upstream they
+        // never "arrive"; they hit a unit's volume (swept below) or the
+        // terrain.
         let ground_y = |p: Vec3| {
             volume_ctx
                 .heightmap
@@ -455,58 +450,50 @@ pub(super) fn tick_weapon_fx(
                 let seg_end = proj.origin.lerp(proj.target, proj.progress.min(1.0));
                 (seg_start, seg_end, proj.progress >= 1.0, proj.target)
             }
-            Flight::Missile(_) | Flight::Starburst(_) => {
-                // `CMissileProjectile::UpdateTargeting`: track the
-                // target's aimPos — the model midpoint — not its feet.
-                // A missile steered at the ground under a unit dives
-                // short and eats terrain before the swept-volume
-                // intercept can catch the sphere.
-                let target_now = target_entity
-                    .and_then(|t| volume_ctx.target_q.get(t).ok())
-                    .map(|(gtf, vol)| vol.center(gtf));
-                let sample = target_now.map(|pos| super::flight::TargetSample {
-                    pos,
-                    vel: proj.last_target_pos.map_or(Vec3::ZERO, |last| pos - last),
-                });
-                proj.last_target_pos = target_now;
+            Flight::Missile(_) | Flight::Starburst(_) | Flight::Cannon(_) => {
                 let prev = transform.translation;
-                let v = match &mut proj.flight {
-                    Flight::Missile(m) => m.step(prev, sample),
-                    Flight::Starburst(s) => s.step(prev, sample),
-                    Flight::Direct | Flight::Ballistic { .. } => Vec3::ZERO,
+                let (v, burst) = match &mut proj.flight {
+                    Flight::Cannon(c) => {
+                        let v = c.step();
+                        // `CExplosiveProjectile::Update`: `--ttl == 0`
+                        // bursts the shell where it is.
+                        (v, c.ttl <= 0)
+                    }
+                    guided => {
+                        // `CMissileProjectile::UpdateTargeting`: track the
+                        // target's aimPos — the model midpoint — not its
+                        // feet. A missile steered at the ground under a
+                        // unit dives short and eats terrain before the
+                        // swept-volume intercept can catch the sphere.
+                        let target_now = target_entity
+                            .and_then(|t| volume_ctx.target_q.get(t).ok())
+                            .map(|(gtf, vol)| vol.center(gtf));
+                        let sample = target_now.map(|pos| super::flight::TargetSample {
+                            pos,
+                            vel: proj.last_target_pos.map_or(Vec3::ZERO, |last| pos - last),
+                        });
+                        proj.last_target_pos = target_now;
+                        if let Some(t) = target_now {
+                            proj.target = t;
+                        }
+                        let v = match guided {
+                            Flight::Missile(m) => m.step(prev, sample),
+                            Flight::Starburst(s) => s.step(prev, sample),
+                            Flight::Direct | Flight::Cannon(_) => Vec3::ZERO,
+                        };
+                        (v, false)
+                    }
                 };
-                if let Some(t) = target_now {
-                    proj.target = t;
-                }
                 proj.elapsed += dt;
                 proj.velocity = v * GAME_SPEED;
                 let new_pos = prev + v * frames;
                 let ground = ground_y(new_pos);
                 let hit_ground = new_pos.y <= ground;
-                // A missile that never finds ground (off the map edge)
+                // A projectile that never finds ground (off the map edge)
                 // still can't live forever.
-                let expired = proj.elapsed > GUIDED_MAX_LIFETIME;
+                let expired = burst || proj.elapsed > GUIDED_MAX_LIFETIME;
                 let impact = Vec3::new(new_pos.x, new_pos.y.max(ground), new_pos.z);
                 (prev, new_pos, hit_ground || expired, impact)
-            }
-            Flight::Ballistic { gravity, .. } => {
-                let gravity = *gravity;
-                proj.elapsed += dt;
-                // `CannonProjectile`: `pos += speed·dt` then
-                // `speed.y -= gravity·dt` — the first frame flies on the
-                // pure launch velocity so the apex matches the solve.
-                let prev = transform.translation;
-                let step = proj.velocity * dt;
-                let new_pos = prev + step;
-                proj.velocity.y -= gravity * dt;
-                let to_target = (proj.target - proj.origin).normalize_or(Vec3::ZERO);
-                // Terrain collision samples the heightmap like the
-                // guided arms above (engine `pos.y < ground`) — a plain
-                // sea-level check let overshooting shells tunnel
-                // through hills before despawning.
-                let arrived =
-                    (proj.target - new_pos).dot(to_target) <= 0.0 || new_pos.y <= ground_y(new_pos);
-                (prev, new_pos, arrived, new_pos)
             }
         };
 
@@ -525,15 +512,13 @@ pub(super) fn tick_weapon_fx(
                 &mut commands,
             );
             intercepted = true;
-        } else if let Some(attacker) = attacker_entity
+        } else if let Some(hit) = hit_meta
             && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
-                attacker,
-                target_entity,
+                hit,
                 seg_start,
                 seg_end,
                 &volume_ctx.spatial,
                 &volume_ctx.target_q,
-                &volume_ctx.attacker_q,
             )
         {
             trigger_delayed_hit(
@@ -708,12 +693,13 @@ fn arrival_hit(
 /// bolt" / "an enemy steps into the path" cases the intended-target
 /// check misses.
 ///
-/// `skip_target` is the intended target (already covered by
-/// [`target_volume_hit`]) — passing it here keeps the broad-phase from
-/// double-firing on the same entity. `attacker` is the unit that fired
-/// the bolt; we never let a unit shoot itself, and friendlies are
-/// skipped so the broad pass doesn't unintentionally introduce
-/// friendly fire (matches upstream's default `collidefriendly=0`).
+/// The intended target (already covered by [`target_volume_hit`]) is
+/// skipped so the broad-phase can't double-fire on the same entity; the
+/// unit that fired the shot never shoots itself, and its team's units
+/// are skipped so the broad pass doesn't unintentionally introduce
+/// friendly fire (matches upstream's default `collidefriendly=0`). The
+/// team is the one captured at launch ([`DelayedHit::owner_team`]), so a
+/// shot whose shooter has since died still passes through its allies.
 ///
 /// In the test environment the spatial index is typically empty (no
 /// `rebuild_spatial_index` has run), so this returns `None` and the
@@ -721,34 +707,29 @@ fn arrival_hit(
 /// running game the index is rebuilt at the head of every Simulate
 /// frame, so this catches anyone in path.
 fn broad_phase_volume_hit(
-    attacker: Entity,
-    skip_target: Option<Entity>,
+    hit: &DelayedHit,
     seg_start: Vec3,
     seg_end: Vec3,
     spatial: &SpatialIndex,
     target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
-    attacker_q: &Query<(&TeamId, &Faction)>,
 ) -> Option<(Entity, Vec3)> {
     // Conservative bound on any unit's collision-volume reach; chosen
     // to comfortably exceed every shipped S3O bounding sphere. Used
     // only as a broad-phase culling pad, not as a damage radius.
     const MAX_UNIT_VOLUME_REACH: f32 = 96.0;
 
-    let attacker_info = attacker_q.get(attacker).ok();
     let mid = seg_start.lerp(seg_end, 0.5);
     let half_len = (seg_end - seg_start).length() * 0.5;
     let radius = half_len + MAX_UNIT_VOLUME_REACH;
 
     let mut best: Option<(Entity, f32)> = None;
     spatial.query_radius(mid, radius, |entry| {
-        if entry.entity == attacker {
+        if entry.entity == hit.attacker || Some(entry.entity) == hit.target {
             return;
         }
-        if Some(entry.entity) == skip_target {
-            return;
-        }
-        if let Some((atk_team, _)) = attacker_info
-            && is_friendly(entry.team, atk_team.0)
+        if hit
+            .owner_team
+            .is_some_and(|team| is_friendly(entry.team, team))
         {
             return;
         }
@@ -1003,6 +984,7 @@ mod tests {
                 DelayedHit {
                     target: Some(target),
                     attacker,
+                    owner_team: None,
                     weapon: WeaponId::BUILD_LASER,
                     attacker_distance: 100.0,
                     on_impact: None,
@@ -1146,6 +1128,7 @@ mod tests {
             DelayedHit {
                 target: Some(target),
                 attacker,
+                owner_team: None,
                 weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
                 on_impact: None,
@@ -1181,7 +1164,7 @@ mod tests {
     /// (matches upstream's default `collidefriendly=0`).
     #[test]
     fn laser_bolt_broad_phase_intercepts_enemy_in_path_skips_friendly() {
-        use crate::units::components::Faction;
+        use crate::units::components::{Faction, TeamId};
         use crate::units::content::definitions::UnitKind;
         use crate::units::spatial::SpatialEntry;
 
@@ -1290,6 +1273,7 @@ mod tests {
             DelayedHit {
                 target: Some(intended),
                 attacker,
+                owner_team: Some(0),
                 weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
                 on_impact: None,
@@ -1371,6 +1355,7 @@ mod tests {
             DelayedHit {
                 target: Some(target),
                 attacker,
+                owner_team: None,
                 weapon: WeaponId::BUILD_LASER,
                 attacker_distance: 100.0,
                 on_impact: None,
@@ -1474,7 +1459,7 @@ mod tests {
         let velocity = match flight {
             Flight::Missile(m) => m.dir * m.speed * GAME_SPEED,
             Flight::Starburst(s) => s.dir * s.speed * GAME_SPEED,
-            Flight::Ballistic { velocity, .. } => velocity,
+            Flight::Cannon(c) => c.velocity * GAME_SPEED,
             Flight::Direct => Vec3::ZERO,
         };
         app.world_mut()
@@ -1497,6 +1482,7 @@ mod tests {
                 DelayedHit {
                     target: None,
                     attacker: entity.unwrap_or(Entity::PLACEHOLDER),
+                    owner_team: None,
                     weapon: WeaponId::BUILD_LASER,
                     attacker_distance: target.distance(origin),
                     on_impact: None,
@@ -1548,6 +1534,7 @@ mod tests {
         let origin = Vec3::new(0.0, 10.0, 0.0);
         let (flight, pos) =
             super::super::flight::MissileFlight::launch(super::super::flight::Launch {
+                map_gravity: crate::sim::MAP_GRAVITY_PER_FRAME2,
                 weapon: &w,
                 muzzle_pos: origin,
                 muzzle_dir: Vec3::X,
@@ -1618,6 +1605,7 @@ mod tests {
         let origin = Vec3::new(0.0, 10.0, 0.0);
         let (flight, pos) =
             super::super::flight::MissileFlight::launch(super::super::flight::Launch {
+                map_gravity: crate::sim::MAP_GRAVITY_PER_FRAME2,
                 weapon: &w,
                 muzzle_pos: origin,
                 muzzle_dir: Vec3::X,
@@ -1675,6 +1663,7 @@ mod tests {
         let origin = Vec3::new(0.0, 140.0, 0.0);
         let (flight, pos) =
             super::super::flight::StarburstFlight::launch(super::super::flight::Launch {
+                map_gravity: crate::sim::MAP_GRAVITY_PER_FRAME2,
                 weapon: &w,
                 muzzle_pos: origin,
                 muzzle_dir: Vec3::X,
@@ -1723,51 +1712,61 @@ mod tests {
         );
     }
 
+    /// Exploit's BugCannon end to end through the tick: launched by the
+    /// shared ballistic solve (`weaponvelocity` 600, `myGravity` 0.3 per
+    /// frame²) at a target 1000 elmos out, the shell visibly lobs
+    /// (~110-elmo apex — the old 15-elmo/s² model flew it almost flat)
+    /// and comes down on the ground at the target, one frame of travel
+    /// short at most, like the engine's discrete flight.
     #[test]
     fn ballistic_shell_arcs_and_lands_on_target() {
-        // Exploit's BugCannon: ballistic=1, startvelocity 800, myGravity
-        // 0.3 × map gravity 50 = 15 → the low-arc lob. The shell must
-        // show a real rise mid-flight and detonate at/near the target.
         let mut app = flight_test_app();
-        let origin = Vec3::ZERO;
-        let target = Vec3::new(1200.0, 0.0, 0.0);
-        let v = 800.0_f32;
-        let g = 0.3_f32 * 50.0_f32;
-        let d = 1200.0_f32;
-        let disc = v * v * v * v - g * (g * d * d);
-        let tan_theta = (v * v - disc.sqrt()) / (g * d);
-        let cos_theta = 1.0_f32 / (1.0 + tan_theta * tan_theta).sqrt();
-        let velocity = Vec3::X * (v * cos_theta) + Vec3::Y * (v * cos_theta * tan_theta);
-        let proj = spawn_flight_projectile(
-            &mut app,
-            Flight::Ballistic {
-                velocity,
-                gravity: g,
-            },
+        let w = crate::units::combat::aim::tests::bug_cannon();
+        let origin = Vec3::new(0.0, 10.0, 0.0);
+        let target = Vec3::new(1000.0, 10.0, 0.0);
+        let flight = super::super::flight::CannonFlight::launch(
+            &w,
             origin,
             target,
-            velocity.length(),
+            None,
+            crate::sim::MAP_GRAVITY_PER_FRAME2,
+        );
+        let proj = spawn_flight_projectile(
+            &mut app,
+            Flight::Cannon(flight),
+            origin,
+            target,
+            600.0,
             None,
         );
 
         let mut max_y = 0.0f32;
+        let mut frames = 0;
         let mut arrived = false;
-        for _ in 0..240 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_millis(10));
-            app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+        for _ in 0..200 {
+            sim_tick(&mut app);
+            frames += 1;
             let Some(read) = app.world().get::<Transform>(proj) else {
                 arrived = true;
                 break;
             };
             max_y = max_y.max(read.translation.y);
+            let model_fwd = read.rotation * Vec3::Z;
+            let vel = app.world().get::<ProjectileVisual>(proj).unwrap().velocity;
+            assert!(
+                model_fwd.dot(vel.normalize()) > 0.999,
+                "model faces its flight"
+            );
         }
         assert!(arrived, "ballistic shell must land");
+        assert!(
+            (50..=60).contains(&frames),
+            "~55 frames of flight, got {frames}"
+        );
         assert_eq!(app.world().resource::<DamageQueue>().len(), 1);
         assert!(
-            max_y > 2.0,
-            "BugCannon shell should visibly arc (gravity 15), got max_y={max_y}",
+            max_y > 100.0,
+            "BugCannon shell should lob (myGravity 0.3/frame²), got max_y={max_y}",
         );
         let dmg = app
             .world()
@@ -1776,9 +1775,89 @@ mod tests {
             .next()
             .expect("damage");
         assert!(
-            dmg.impact_pos.distance(target) < 16.0,
-            "low-arc solve should land on the target, got {}/",
+            dmg.impact_pos.distance(Vec3::new(1000.0, 0.0, 0.0)) < 40.0,
+            "the shell should come down on the target, got {}",
             dmg.impact_pos,
         );
+    }
+
+    /// A shot outlives its shooter: once the firing unit is despawned the
+    /// projectile still knows its team (captured at launch) and passes
+    /// through that team's units instead of slamming into the first ally
+    /// on its path with a full direct hit.
+    #[test]
+    fn orphaned_projectile_still_passes_through_its_allies() {
+        use crate::units::content::definitions::UnitKind;
+        use crate::units::spatial::SpatialEntry;
+
+        let mut app = flight_test_app();
+        let attacker = app.world_mut().spawn_empty().id();
+        app.world_mut().despawn(attacker);
+        let unit = |app: &mut App, z: f32, team: u8| {
+            let pos = Vec3::new(0.0, 0.0, z);
+            let e = app
+                .world_mut()
+                .spawn((
+                    GlobalTransform::from_translation(pos),
+                    CollisionVolume {
+                        radius: 5.0,
+                        mid_y: 0.0,
+                    },
+                    UnitType(UnitKind::Bit),
+                ))
+                .id();
+            app.world_mut()
+                .resource_mut::<SpatialIndex>()
+                .insert_for_test(SpatialEntry {
+                    entity: e,
+                    pos,
+                    hit_radius: 5.0,
+                    mid_y: 0.0,
+                    team,
+                    kind: UnitKind::Bit,
+                    hp_positive: true,
+                    is_flying: false,
+                    cloaked: false,
+                    detected_by: 0,
+                });
+            e
+        };
+        let _ally = unit(&mut app, 30.0, 0);
+        let enemy = unit(&mut app, 50.0, 1);
+        app.world_mut().spawn((
+            LaserBolt {
+                origin: Vec3::ZERO,
+                direction: Vec3::Z,
+                total_distance: 100.0,
+                speed: 100.0,
+                max_length: 50.0,
+                thickness: 1.0,
+                elapsed: 0.0,
+                material: Handle::default(),
+                cap_material: None,
+            },
+            DelayedHit {
+                target: None,
+                attacker,
+                owner_team: Some(0),
+                weapon: WeaponId::BUILD_LASER,
+                attacker_distance: 100.0,
+                on_impact: None,
+            },
+        ));
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_millis(600));
+        app.world_mut().run_system_once(tick_weapon_fx).unwrap();
+
+        let queue = app.world().resource::<DamageQueue>();
+        assert_eq!(queue.len(), 1);
+        let hit = queue.iter_snapshot_for_test().next().unwrap();
+        assert_eq!(
+            hit.target,
+            Some(enemy),
+            "the ally at z=30 is passed through"
+        );
+        assert!((hit.impact_pos.z - 45.0).abs() < 0.5);
     }
 }
