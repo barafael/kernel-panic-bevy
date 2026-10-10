@@ -3,7 +3,8 @@
 //! midpoints of the edges leaf nodes share, then smoothed once.
 //!
 //! What is kept from the engine, with its constants:
-//! - root nodes of 64 squares (32 when the map is not a multiple of 64),
+//! - root nodes of 64 squares (on maps that are not a multiple of 64,
+//!   the largest power of two dividing both sides rather than 32),
 //!   every node larger than 16 squares split, smaller nodes split only
 //!   while they mix closed and open squares (`QTNode::UpdateMoveCost`);
 //! - a node's move cost is `1 / mean(relative speed)` over its squares,
@@ -39,9 +40,8 @@ use std::collections::BinaryHeap;
 use crate::block::{BlockMask, line_clear};
 use crate::cost::{SQUARE_SIZE, SpeedMap};
 
-/// `QTPFS_MAX_NODE_SIZE` / `QTPFS_BAD_ROOT_NODE_SIZE`.
+/// `QTPFS_MAX_NODE_SIZE`.
 const MAX_ROOT_SIZE: u32 = 64;
-const BAD_ROOT_SIZE: u32 = 32;
 /// `QTPFS_MAP_DAMAGE_SIZE`: the largest leaf, and the block terrain
 /// changes are applied in.
 pub const DAMAGE_SIZE: u32 = 16;
@@ -189,16 +189,16 @@ impl NodeLayer {
     pub fn new(speed_map: &SpeedMap, mask: Option<&BlockMask>) -> Self {
         let (width, height) = (speed_map.width, speed_map.height);
         // `InitRootSize`: the largest power-of-two factor of both
-        // dimensions up to 64, else 32.
-        let mut root_size = BAD_ROOT_SIZE;
-        let mut factor = MAX_ROOT_SIZE;
-        while factor <= width.min(height) {
-            if width.is_multiple_of(factor) && height.is_multiple_of(factor) {
-                root_size = factor;
-            }
-            factor *= 2;
-        }
-        let root_size = root_size.min(MAX_ROOT_SIZE);
+        // dimensions, up to 64. Below 64 the engine falls back to 32
+        // (and asserts: such maps are smaller than QTPFS is designed
+        // for); its clipped roots then hold non-square nodes, and a
+        // mixed one a single square wide cannot split, leaving closed
+        // squares inside a passable leaf that paths cross. Square roots
+        // keep every node square, so mixed nodes split down to single
+        // squares. Maps that are multiples of 64 squares (every real
+        // one) get the engine's roots.
+        let common = (width | height).trailing_zeros();
+        let root_size = 1u32 << common.min(MAX_ROOT_SIZE.trailing_zeros());
         let x_roots = width.div_ceil(root_size);
         let z_roots = height.div_ceil(root_size);
         let mut layer = Self {
