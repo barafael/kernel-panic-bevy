@@ -321,18 +321,27 @@ pub(super) struct CegParticle {
     pub directional: bool,
 }
 
-/// One live `CBitmapMuzzleFlame` billboard — used for shockwaves
-/// (expanding circle ring) and muzzle-exhaust cones. Batched like
-/// [`CegParticle`].
+/// One live `CBitmapMuzzleFlame` — upstream
+/// `Rendering/Env/Particles/Classes/BitmapMuzzleFlame.cpp`: a
+/// `frontTexture` quad square to `dir` (KP's shockwaves point `dir` up,
+/// so their ring lies flat on the ground) plus, with a `sideTexture`,
+/// two crossed quads along `dir`. Batched like [`CegParticle`].
 #[derive(Component)]
 pub(super) struct CegFlame {
     pub pos: Vec3,
+    /// Unit emit direction (`dir /= dirLen` in `Init`).
+    pub dir: Vec3,
+    pub size: f32,
+    /// `length` × the authored `dir`'s length (`Init`).
+    pub length: f32,
+    pub size_growth: f32,
+    pub front_offset: f32,
     pub life_frames: f32,
     pub max_life_frames: f32,
-    pub base_size: f32,
-    pub size_growth_per_frame: f32,
-    /// Index into [`CegRenderAssets`]' palettes.
-    pub palette: usize,
+    /// Palettes (indices into [`CegRenderAssets`]) of the front and side
+    /// textures; `None` where the CEG says `none`.
+    pub front: Option<usize>,
+    pub side: Option<usize>,
 }
 
 /// One live `CExploSpikeProjectile` (`class=explspike`) — upstream
@@ -416,6 +425,8 @@ pub(super) fn spawn_ceg(
                 effect.count,
                 f,
                 pos,
+                dir,
+                rng,
                 commands,
                 materials,
                 images,
@@ -486,6 +497,12 @@ fn spawn_authored_ground_flash(
             .with_rotation(flat)
             .with_scale(Vec3::splat(radius)),
     ));
+}
+
+/// An acceleration authored per sim frame² (CEG `gravity`, added to
+/// the per-frame speed every frame) in elmos/s².
+fn per_frame_accel_to_per_sec(per_frame: Vec3) -> Vec3 {
+    per_frame * GAME_SPEED * GAME_SPEED
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -581,8 +598,11 @@ fn spawn_particle_system(
             });
             let particle_pos = origin + Vec3::new(pos_x, pos_y, pos_z);
 
-            let gravity_per_frame = Vec3::from_array(props.gravity.eval(&ctx_base));
-            let gravity_per_sec = gravity_per_frame * GAME_SPEED;
+            // `CSimpleParticleSystem::Update` adds `gravity` to the
+            // per-frame speed every frame: elmos/frame², so ×30² for
+            // elmos/s² (×30 alone left every CEG 30× too floaty).
+            let gravity_per_sec =
+                per_frame_accel_to_per_sec(Vec3::from_array(props.gravity.eval(&ctx_base)));
 
             let airdrag = props.airdrag.eval(&ctx_base);
             let airdrag_per_sec = if airdrag <= 0.0 || airdrag >= 1.0 {
@@ -623,39 +643,55 @@ fn spawn_flame(
     count: u32,
     props: &FlameProperties,
     origin: Vec3,
+    spawn_dir: Vec3,
+    rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
 ) {
-    // We render only the `frontTexture` plane — the camera-facing
-    // billboard — which is what every upstream shockwave
-    // (`frontTexture=shockwave`, sideTexture=none) actually uses.
-    let front = props.front_texture.trim();
-    let Some(filename) = CegRegistry::resolve_texture(front) else {
-        return;
+    let mut palette_for = |tex_name: &str| {
+        let filename = CegRegistry::resolve_texture(tex_name)?;
+        let (tex, _w, _h) = load_beam_texture(filename, model_cache, images)?;
+        Some(ceg_assets.palette(&tex, &props.color_map, materials))
     };
-    let Some((tex, _w, _h)) = load_beam_texture(filename, model_cache, images) else {
+    let front = palette_for(&props.front_texture);
+    let side = palette_for(&props.side_texture);
+    if front.is_none() && side.is_none() {
         return;
-    };
-
-    let ctx = EvalCtx::default();
-    let base_size = props.size.eval(&ctx).max(0.1);
-    let size_growth_per_frame = props.size_growth.eval(&ctx);
-    let ttl = props.ttl.eval(&ctx).max(1.0);
-    let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
-
-    let palette = ceg_assets.palette(&tex, &props.color_map, materials);
+    }
 
     for _ in 0..count {
+        // Every CEG expression is rolled per projectile, each `r` term
+        // with its own random number.
+        let mut roll = |e: &CegExpr| {
+            e.eval(&EvalCtx {
+                rand01: next_unit(rng),
+                ..Default::default()
+            })
+        };
+        let pos = Vec3::new(roll(&props.pos.x), roll(&props.pos.y), roll(&props.pos.z));
+        let authored = Vec3::new(roll(&props.dir.x), roll(&props.dir.y), roll(&props.dir.z));
+        // `dir = dir` (the explosion's own direction) parses to no
+        // literal: fall back to the spawn direction.
+        let dir = if authored.length_squared() > 1e-12 {
+            authored
+        } else {
+            spawn_dir
+        };
+        let ttl = roll(&props.ttl).max(1.0);
         commands.spawn(CegFlame {
-            pos: origin + pos_offset,
+            pos: origin + pos,
+            dir: dir.normalize_or(Vec3::Y),
+            size: roll(&props.size),
+            length: roll(&props.length) * dir.length(),
+            size_growth: roll(&props.size_growth),
+            front_offset: roll(&props.front_offset),
             life_frames: ttl,
             max_life_frames: ttl,
-            base_size,
-            size_growth_per_frame,
-            palette,
+            front,
+            side,
         });
     }
 }
@@ -906,28 +942,55 @@ pub(super) fn tick_ceg_particles(
     }
 }
 
-/// Grow + fade `CBitmapMuzzleFlame` billboards and push their quads.
-/// Ticked in sim-frame terms: `size_growth` is authored per frame,
-/// `ttl` is authored in frames, so we advance `life_frames` by
-/// `dt * GAME_SPEED`. No emissive boost on the colour, so the
-/// shockwave's faint peach→transparent gradient looks like a wispy
-/// ring rather than a pulsing ember.
+/// Corner UVs of a muzzle-flame quad in its corner order:
+/// `(xstart, ystart), (xend, ystart), (xend, yend), (xstart, yend)`.
+const FLAME_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+/// `CBitmapMuzzleFlame::Draw`'s quads at life fraction `life`:
+/// `isize = size·(1 + sizeGrowth·(1 − (1 − life)²))` (growth eases out
+/// and scales the authored size — it is not elmos per frame), the
+/// same factor on `length`. With the default `fixedSideDir`, the
+/// planes are oriented by world up (forward when `dir` is vertical),
+/// not by the camera. Returns the front quad (square to `dir`,
+/// `frontOffset·ilength` along it) and the two side quads (along
+/// `dir`).
+fn muzzle_flame_quads(f: &CegFlame, life: f32) -> ([Vec3; 4], [[Vec3; 4]; 2]) {
+    let igrowth = f.size_growth * (1.0 - (1.0 - life).powi(2));
+    let isize = f.size * (igrowth + 1.0);
+    let ilength = f.length * (igrowth + 1.0);
+    let zdir = if f.dir.dot(Vec3::Y).abs() >= 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let xdir = f.dir.cross(zdir).normalize_or(Vec3::X);
+    let ydir = f.dir.cross(xdir).normalize_or(Vec3::Z);
+    let (x, y, along) = (xdir * isize, ydir * isize, f.dir * ilength);
+    let p = f.pos;
+    let fpos = p + f.dir * f.front_offset * ilength;
+    (
+        [fpos - x + y, fpos + x + y, fpos + x - y, fpos - x - y],
+        [
+            [p + x, p + x + along, p - x + along, p - x],
+            [p + y, p + y + along, p - y + along, p - y],
+        ],
+    )
+}
+
+/// Grow + fade `CBitmapMuzzleFlame`s and push their quads. Ticked in
+/// sim-frame terms: `ttl` is authored in frames, so `life_frames`
+/// advances by `dt * GAME_SPEED`.
 pub(super) fn tick_ceg_flames(
     time: Res<Time>,
     mut flames: Query<(Entity, &mut CegFlame)>,
     ceg_assets: Res<CegRenderAssets>,
     mut batches: ResMut<FxQuadBatches>,
-    camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
 ) {
     if flames.is_empty() {
         return;
     }
     let dt_frames = time.delta_secs() * GAME_SPEED;
-    let cam_pos = camera_q
-        .single()
-        .map(|gt| gt.translation())
-        .unwrap_or(Vec3::Y * 1000.0);
 
     for (entity, mut f) in &mut flames {
         f.life_frames -= dt_frames;
@@ -935,27 +998,20 @@ pub(super) fn tick_ceg_flames(
             commands.entity(entity).despawn();
             continue;
         }
-
-        // Grow: size = base + growth * frames_elapsed.
-        let frames_elapsed = f.max_life_frames - f.life_frames;
-        let size = f.base_size + f.size_growth_per_frame * frames_elapsed;
-
-        // Face the camera.
-        let to_cam = (cam_pos - f.pos).normalize_or(Vec3::Z);
-        let right = Vec3::Y.cross(to_cam).normalize_or(Vec3::X);
-        let up = to_cam.cross(right).normalize_or(Vec3::Y);
-
-        let frac = 1.0 - (f.life_frames / f.max_life_frames).clamp(0.0, 1.0);
-        let palette = ceg_assets.palette_at(f.palette);
-        push_billboard(
-            &mut batches,
-            &palette.material,
-            f.pos,
-            right,
-            up,
-            size.max(0.01),
-            palette.sample(frac),
-        );
+        let life = 1.0 - (f.life_frames / f.max_life_frames).clamp(0.0, 1.0);
+        let (front, sides) = muzzle_flame_quads(&f, life);
+        if let Some(palette) = f.front {
+            let palette = ceg_assets.palette_at(palette);
+            let color = palette.sample(life);
+            batches.push_quad(&palette.material, front, FLAME_UVS, [color; 4]);
+        }
+        if let Some(palette) = f.side {
+            let palette = ceg_assets.palette_at(palette);
+            let color = palette.sample(life);
+            for side in sides {
+                batches.push_quad(&palette.material, side, FLAME_UVS, [color; 4]);
+            }
+        }
     }
 }
 
@@ -1163,11 +1219,15 @@ mod tests {
         world.spawn(particle(0.0)); // dead: despawned, no quad
         world.spawn(CegFlame {
             pos: Vec3::X * 10.0,
+            dir: Vec3::Y,
+            size: 8.0,
+            length: 1.0,
+            size_growth: 1.0,
+            front_offset: 0.0,
             life_frames: 30.0,
             max_life_frames: 30.0,
-            base_size: 8.0,
-            size_growth_per_frame: 1.0,
-            palette,
+            front: Some(palette),
+            side: None,
         });
 
         world.run_system_once(tick_ceg_particles).unwrap();
@@ -1187,6 +1247,72 @@ mod tests {
         assert_eq!(colors[8], [1.0, 0.0, 0.0, 1.0], "flame just born");
         let mut live = world.query::<&CegParticle>();
         assert_eq!(live.iter(world).count(), 2, "the dead particle is gone");
+    }
+
+    /// `system_nx`'s shockwave (`size=1 sizeGrowth=120 ttl=6`,
+    /// `dir=0,1,0`): upstream it ends 121 elmos across a flat ring, not
+    /// `1 + 120·6` = 721, and it lies on the ground instead of facing
+    /// the camera.
+    #[test]
+    fn muzzle_flame_grows_by_factor_in_the_plane_square_to_dir() {
+        let flame = CegFlame {
+            pos: Vec3::ZERO,
+            dir: Vec3::Y,
+            size: 1.0,
+            length: 1.0,
+            size_growth: 120.0,
+            front_offset: 0.0,
+            life_frames: 6.0,
+            max_life_frames: 6.0,
+            front: Some(0),
+            side: None,
+        };
+        let (front, _) = muzzle_flame_quads(&flame, 1.0);
+        for corner in front {
+            assert!(corner.y.abs() < 1e-4, "ring lies flat: {corner}");
+        }
+        let half_width = (front[1] - front[0]).length() / 2.0;
+        assert!((half_width - 121.0).abs() < 1e-3, "{half_width}");
+        // Half way through its life the growth has eased to 3/4.
+        let (front, _) = muzzle_flame_quads(&flame, 0.5);
+        let half_width = (front[1] - front[0]).length() / 2.0;
+        assert!((half_width - 91.0).abs() < 1e-3, "{half_width}");
+    }
+
+    /// `corruption_const` (`frontOffset=1 length=4`, `dir` down): the
+    /// front quad sits `length` along `dir`; side quads run along it.
+    #[test]
+    fn muzzle_flame_front_offset_and_sides_follow_dir() {
+        let flame = CegFlame {
+            pos: Vec3::new(0.0, 50.0, 0.0),
+            dir: Vec3::NEG_Y,
+            size: 1.0,
+            length: 4.0,
+            size_growth: 0.0,
+            front_offset: 1.0,
+            life_frames: 12.0,
+            max_life_frames: 12.0,
+            front: Some(0),
+            side: Some(0),
+        };
+        let (front, sides) = muzzle_flame_quads(&flame, 0.0);
+        let centre = front.iter().copied().sum::<Vec3>() / 4.0;
+        assert!(
+            centre.abs_diff_eq(Vec3::new(0.0, 46.0, 0.0), 1e-4),
+            "{centre}"
+        );
+        for side in sides {
+            assert!((side[1] - side[0]).abs_diff_eq(Vec3::NEG_Y * 4.0, 1e-4));
+        }
+    }
+
+    /// `gravity` is elmos/frame² (`speed += gravity` every frame): one
+    /// second of `gravity = 0, -0.1, 0` adds 30 × 0.1 = 3 elmos/frame of
+    /// fall speed — 90 elmos/s, so the acceleration is 90 elmos/s².
+    #[test]
+    fn particle_gravity_is_per_frame_squared() {
+        let g = per_frame_accel_to_per_sec(Vec3::new(0.0, -0.1, 0.0));
+        assert!((g.y + 90.0).abs() < 1e-3, "{g}");
     }
 
     #[test]
