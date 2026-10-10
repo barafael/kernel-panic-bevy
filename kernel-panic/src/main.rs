@@ -201,7 +201,6 @@ fn main() {
     ))
     .init_state::<game_setup::AppState>()
     .init_resource::<game_setup::SkirmishConfig>()
-    .init_resource::<game_setup::GameOverDismissed>()
     .insert_resource(game_setup::AiDifficulty(2))
     .add_message::<game_setup::RunGame>();
     #[cfg(not(target_arch = "wasm32"))]

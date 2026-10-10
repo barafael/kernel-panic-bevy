@@ -19,10 +19,12 @@
 //! [`mouse_menu_input`] and driven from the keyboard by
 //! [`keyboard_menu_nav`]; both funnel into one [`MenuAction`] message so
 //! all state changes live in [`handle_menu_actions`]. The game is never
-//! paused by the Esc menu.
+//! paused by the Esc menu, but the overlay is modal for the mouse: while
+//! it is open no press reaches the HUD or the world.
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
+use bevy::input::InputSystems;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -61,17 +63,23 @@ impl Plugin for MenuPlugin {
                 (close_all_overlays, despawn_launch_menu),
             )
             .add_systems(OnExit(AppState::InGame), close_all_overlays)
+            // A click on a menu button is the menu's, and the Esc overlay
+            // swallows every press: consumed before the HUD's own mouse
+            // input (build bar, command panel, also `PreUpdate`) and
+            // everything in `Update` (placement, order clicks,
+            // selection, right-click orders, camera drag) sees it.
+            .add_systems(
+                PreUpdate,
+                mouse_menu_input
+                    .after(InputSystems)
+                    .in_set(MenuMouseInput)
+                    .run_if(in_state(AppState::Menu).or_else(in_state(AppState::InGame))),
+            )
             .add_systems(
                 Update,
                 (
                     handle_menu_actions,
                     keyboard_menu_nav,
-                    mouse_menu_input
-                        .run_if(in_state(AppState::Menu).or_else(in_state(AppState::InGame)))
-                        // A click on a menu button is the menu's: it is
-                        // consumed before selection and the right-click
-                        // orders could act on it.
-                        .before(crate::interaction::selection::SelectionSet::Select),
                     esc_in_menu.run_if(in_state(AppState::Menu)),
                     boot_demo
                         .run_if(in_state(AppState::Menu).and_then(resource_exists::<MapCatalog>)),
@@ -96,6 +104,11 @@ impl Plugin for MenuPlugin {
             );
     }
 }
+
+/// [`mouse_menu_input`]'s `PreUpdate` slot: the HUD's mouse input runs
+/// after it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct MenuMouseInput;
 
 // ---------------------------------------------------------------------------
 // State
@@ -894,7 +907,12 @@ fn keyboard_menu_nav(
 /// node's computed rect. Hover brightens the button under the cursor; a
 /// primary click on a button dispatches its [`MenuAction`]. Any press on
 /// a button is consumed, so it can't also deselect or order the units
-/// behind the Esc overlay or game-over panel.
+/// behind the game-over panel. The Esc overlay (and its Settings page)
+/// is modal: while it is open every mouse press is consumed, wherever
+/// it lands — no deselect, no order, no HUD button, no camera drag.
+/// Releases pass through, so a drag begun before the overlay opened
+/// still ends cleanly.
+#[allow(clippy::too_many_arguments)]
 fn mouse_menu_input(
     buttons: Query<(
         Entity,
@@ -905,13 +923,29 @@ fn mouse_menu_input(
     )>,
     windows: Query<&Window>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
+    esc: (Res<EscMenuOpen>, Res<EscSettingsOpen>),
     mut focus: ResMut<MenuFocus>,
     mut hovered: Local<Option<Entity>>,
     mut colors: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>,
     mut ev: MessageWriter<MenuActionMessage>,
 ) {
-    let Ok(window) = windows.single() else { return };
-    let Some(cursor) = window.cursor_position() else {
+    const BUTTONS: [MouseButton; 3] = [MouseButton::Left, MouseButton::Right, MouseButton::Middle];
+    let consume = |mouse: &mut ButtonInput<MouseButton>| {
+        for button in BUTTONS {
+            if mouse.just_pressed(button) {
+                mouse.clear_just_pressed(button);
+            }
+        }
+    };
+    let modal = esc.0.0 || esc.1.0;
+    let cursor = windows
+        .single()
+        .ok()
+        .and_then(|w| Some((w.cursor_position()?, w)));
+    let Some((cursor, window)) = cursor else {
+        if modal {
+            consume(&mut mouse);
+        }
         return;
     };
     // `ComputedNode::size`/`UiGlobalTransform` are in physical pixels, whereas
@@ -960,11 +994,9 @@ fn mouse_menu_input(
         {
             ev.write(MenuActionMessage { action: b.action });
         }
-        for button in [MouseButton::Left, MouseButton::Right] {
-            if mouse.just_pressed(button) {
-                mouse.clear_just_pressed(button);
-            }
-        }
+    }
+    if hit.is_some() || modal {
+        consume(&mut mouse);
     }
 }
 
@@ -2245,6 +2277,47 @@ pub fn boot_demo(
 mod tests {
     use super::*;
     use bevy::diagnostic::{Diagnostic, RegisterDiagnostic};
+
+    /// The Esc overlay is modal: with it (or its Settings page) open,
+    /// a press anywhere — no button under the cursor — is consumed
+    /// before the HUD and the world see it; releases pass. Closed, a
+    /// press off the buttons goes through.
+    #[test]
+    fn esc_overlay_swallows_every_press() {
+        use bevy::ecs::system::RunSystemOnce;
+        let run = |esc: bool, settings: bool| {
+            let mut world = World::new();
+            let mut window = Window::default();
+            window.set_cursor_position(Some(Vec2::new(100.0, 100.0)));
+            world.spawn(window);
+            world.init_resource::<MenuFocus>();
+            world.init_resource::<Messages<MenuActionMessage>>();
+            world.insert_resource(EscMenuOpen(esc));
+            world.insert_resource(EscSettingsOpen(settings));
+            let mut mouse = ButtonInput::<MouseButton>::default();
+            mouse.press(MouseButton::Left);
+            mouse.press(MouseButton::Right);
+            mouse.press(MouseButton::Middle);
+            world.insert_resource(mouse);
+            world.run_system_once(mouse_menu_input).unwrap();
+            let mouse = world.resource::<ButtonInput<MouseButton>>();
+            let pressed = [MouseButton::Left, MouseButton::Right, MouseButton::Middle]
+                .map(|b| mouse.just_pressed(b));
+
+            world.resource_mut::<ButtonInput<MouseButton>>().clear();
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .release(MouseButton::Left);
+            world.run_system_once(mouse_menu_input).unwrap();
+            let released = world
+                .resource::<ButtonInput<MouseButton>>()
+                .just_released(MouseButton::Left);
+            (pressed, released)
+        };
+        assert_eq!(run(true, false), ([false; 3], true), "overlay open");
+        assert_eq!(run(true, true), ([false; 3], true), "Settings page");
+        assert_eq!(run(false, false), ([true; 3], true), "closed");
+    }
 
     #[test]
     fn demo_map_cycle_wraps_both_ways() {

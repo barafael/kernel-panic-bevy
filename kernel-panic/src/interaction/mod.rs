@@ -23,7 +23,8 @@ use movement::{
 use selection::SelectionPlugin;
 
 /// Every component of a unit's active order (the table on
-/// [`movement::OrderState`]), as one bundle to remove.
+/// [`movement::OrderState`]) and its per-order state, as one bundle to
+/// remove.
 type ActiveOrder = (
     movement::MoveTarget,
     movement::AttackMoveActive,
@@ -32,6 +33,9 @@ type ActiveOrder = (
     movement::GuardTarget,
     crate::units::lifecycle::construction::PendingBuild,
     crate::units::lifecycle::construction::Constructing,
+    // The build order's footprint wait: a re-issued build starts a
+    // fresh one (`CBuilderCAI`'s retry count is per command).
+    crate::units::lifecycle::construction::BuildSiteWait,
     crate::units::mechanics::command_fire::PendingCommandFire,
     crate::units::mechanics::command_fire::NxCast,
 );
@@ -53,6 +57,16 @@ pub(crate) fn clear_orders<'a, 'w>(ec: &'a mut EntityCommands<'w>) -> &'a mut En
 fn clear_active_order<'a, 'w>(ec: &'a mut EntityCommands<'w>) -> &'a mut EntityCommands<'w> {
     ec.remove::<ActiveOrder>()
         .remove::<(movement::MovePath, movement::CommandQueue)>()
+}
+
+/// End the active order but keep the queue: the next queued command is
+/// promoted on the next sim tick ([`advance_command_queue`]). Spring's
+/// `CMD_STOP` pushed in front of the queue when a queued command
+/// cancels the running one (`CCommandAI::GiveAllowedCommand`).
+pub(crate) fn finish_active_order<'a, 'w>(
+    ec: &'a mut EntityCommands<'w>,
+) -> &'a mut EntityCommands<'w> {
+    ec.remove::<ActiveOrder>().remove::<movement::MovePath>()
 }
 
 /// Make `cmd` the unit's active order: whatever is left of the previous

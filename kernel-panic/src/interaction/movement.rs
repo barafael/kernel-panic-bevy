@@ -575,7 +575,10 @@ pub(crate) fn end_move_leg(
         let mut ec = commands.entity(entity);
         ec.remove::<(MoveTarget, MovePath)>();
         if failed && order.walking_to_build() {
-            ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
+            ec.remove::<(
+                crate::units::lifecycle::construction::PendingBuild,
+                crate::units::lifecycle::construction::BuildSiteWait,
+            )>();
         }
         return None;
     }
@@ -587,7 +590,8 @@ pub(crate) fn end_move_leg(
 /// queued commands but no active order gets the next one; a unit left
 /// with an empty queue (or a stray fight marker) and no order sheds it.
 /// Runs at the head of the fixed-tick unit motion, so a promoted move
-/// starts on the tick it is promoted.
+/// starts on the tick it is promoted. A stunned unit waits: its CAI
+/// doesn't run (`CUnit::SlowUpdate` skips `commandAI->SlowUpdate()`).
 #[allow(clippy::type_complexity)]
 pub fn advance_command_queue(
     mut commands: Commands,
@@ -596,6 +600,7 @@ pub fn advance_command_queue(
         (
             Or<(With<CommandQueue>, With<AttackMoveActive>)>,
             Without<Dying>,
+            Without<crate::units::combat::Stunned>,
         ),
     >,
 ) {
@@ -1339,6 +1344,27 @@ mod tests {
 
     fn advance(world: &mut World) {
         world.run_system_once(advance_command_queue).unwrap();
+    }
+
+    /// A stunned unit's queue waits (the CAI is skipped while stunned);
+    /// the next command is promoted once the stun ends.
+    #[test]
+    fn stunned_units_do_not_advance_their_queue() {
+        let mut world = World::new();
+        let next = Vec3::new(5.0, 0.0, 5.0);
+        let unit = world
+            .spawn((
+                queue_of(&[QueuedCommand::Move(next)]),
+                crate::units::combat::Stunned { remaining: 1.0 },
+            ))
+            .id();
+        advance(&mut world);
+        assert!(world.get::<MoveTarget>(unit).is_none());
+        world
+            .entity_mut(unit)
+            .remove::<crate::units::combat::Stunned>();
+        advance(&mut world);
+        assert_eq!(world.get::<MoveTarget>(unit).map(|t| t.0), Some(next));
     }
 
     /// Move, Shift-attack X, Shift-move B: when X dies (the attack
