@@ -31,7 +31,12 @@
 //!                self-describing, so the extra trailing field needs
 //!                the version bump; v1-v3 bodies still decode as a bare
 //!                `BakedMap` with no compositing.
-//! body_len     : u32      = body length in bytes (post-decode for v1,
+//!   kpmapv5\0  = ZSTD(postcard(BakedMap, Option<LuaCompositing>,
+//!                BakedTerrain)): v4's body followed by the SMF typemap
+//!                and the per-type move speeds (terrain types — fast
+//!                lanes, slow and closed zones on several shipped maps).
+//!                v1-v4 bodies decode with neutral terrain.
+//! body_len    : u32      = body length in bytes (post-decode for v1,
 //!                          compressed for v2/v3)
 //! body         : [u8; N]  = postcard(BakedMap), deflated for v2
 //! ```
@@ -47,7 +52,9 @@ use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::map_types::{GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError};
+use crate::map_types::{
+    GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError, TerrainTypes,
+};
 use crate::smd_parser::MapInfo;
 use crate::{LuaCompositing, SpringMap};
 
@@ -55,10 +62,20 @@ const MAGIC_V1: &[u8; 8] = b"kpmapv1\0";
 const MAGIC_V2: &[u8; 8] = b"kpmapv2\0";
 const MAGIC_V3: &[u8; 8] = b"kpmapv3\0";
 const MAGIC_V4: &[u8; 8] = b"kpmapv4\0";
-/// Current writer version: v4 zstd-encodes the postcard body (level 19
+const MAGIC_V5: &[u8; 8] = b"kpmapv5\0";
+/// Current writer version: v5 zstd-encodes the postcard body (level 19
 /// at bake time — bake is native and offline, so the slowest-but-smallest
-/// setting is free at load) and appends the Lua compositing data.
-const MAGIC: &[u8; 8] = MAGIC_V4;
+/// setting is free at load) and appends the Lua compositing data and
+/// the terrain types.
+const MAGIC: &[u8; 8] = MAGIC_V5;
+
+/// v5's trailing terrain section.
+#[derive(Serialize, Deserialize)]
+struct BakedTerrain {
+    /// `map_x/2 × map_y/2` terrain-type bytes, or empty.
+    typemap: Vec<u8>,
+    types: TerrainTypes,
+}
 
 /// Body codec, keyed off the file magic.
 #[derive(Clone, Copy)]
@@ -197,8 +214,13 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
     };
 
     // v4: the v3 body with the Lua compositing data appended (a postcard
-    // tuple is the plain concatenation of its fields).
-    let body = postcard::to_allocvec(&(core, &map.lua_compositing))
+    // tuple is the plain concatenation of its fields); v5 appends the
+    // terrain types.
+    let terrain = BakedTerrain {
+        typemap: map.parsed.typemap.clone(),
+        types: map.terrain_types.clone(),
+    };
+    let body = postcard::to_allocvec(&(core, &map.lua_compositing, terrain))
         .map_err(BakedMapError::PostcardEncode)?;
 
     // v3: zstd the body at level 19. The payload is dominated by
@@ -229,6 +251,13 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
 /// Lua-composited map (v4 with compositing data) gets no ground texture
 /// at all: its SMT is hidden under `voidGround` and never drawn, so
 /// materializing it would only cost memory.
+/// Was this blob written by the current format version? Older bakes
+/// still load but lack later additions (v5: terrain types) — a caller
+/// that has the source archive at hand can prefer it.
+pub fn is_current_format(bytes: &[u8]) -> bool {
+    bytes.starts_with(MAGIC)
+}
+
 /// Largest buffer preallocated from a size claimed inside the file.
 const MAX_PREALLOC: usize = 512 << 20;
 
@@ -240,7 +269,10 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         Codec::Raw
     } else if magic == MAGIC_V2.as_slice() {
         Codec::Deflate
-    } else if magic == MAGIC_V3.as_slice() || magic == MAGIC_V4.as_slice() {
+    } else if magic == MAGIC_V3.as_slice()
+        || magic == MAGIC_V4.as_slice()
+        || magic == MAGIC_V5.as_slice()
+    {
         Codec::Zstd
     } else {
         return Err(BakedMapError::BadMagic);
@@ -284,13 +316,28 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         }
     };
 
-    let (baked, lua_compositing): (BakedMap<'_>, Option<LuaCompositing>) =
-        if magic == MAGIC_V4.as_slice() {
-            postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?
-        } else {
-            let core = postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
-            (core, None)
-        };
+    let (baked, lua_compositing, terrain): (BakedMap<'_>, Option<LuaCompositing>, _) = if magic
+        == MAGIC_V5.as_slice()
+    {
+        let (core, lua, terrain): (_, _, BakedTerrain) =
+            postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
+        (core, lua, Some(terrain))
+    } else if magic == MAGIC_V4.as_slice() {
+        let (core, lua) = postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
+        (core, lua, None)
+    } else {
+        let core = postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
+        (core, None, None)
+    };
+    // Pre-v5 bakes predate the terrain types: neutral speeds (re-bake
+    // to get a map's fast lanes and closed zones).
+    let BakedTerrain {
+        typemap,
+        types: terrain_types,
+    } = terrain.unwrap_or(BakedTerrain {
+        typemap: Vec::new(),
+        types: TerrainTypes::default(),
+    });
     let BakedMap {
         map_x,
         map_y,
@@ -372,15 +419,28 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         )));
     }
 
+    let expected_types = header.typemap_width() * header.typemap_height();
+    if !typemap.is_empty() && typemap.len() != expected_types {
+        return Err(BakedMapError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            SmfParseError::TypemapTruncated {
+                expected: expected_types,
+            }
+            .to_string(),
+        )));
+    }
+
     Ok(SpringMap {
         parsed: ParsedMap {
             header,
             heights,
             features,
             metalmap,
+            typemap,
         },
         ground_texture,
         map_info,
+        terrain_types,
         // No raw .smf bytes round-trip: the only consumer that ever
         // looked at them was the SMT decoder, which already ran during
         // bake. Anyone needing this in future would add it here.
@@ -414,6 +474,7 @@ mod tests {
                     1.0,
                 )],
                 metalmap,
+                typemap: vec![0, 1, 2, 3],
             },
             ground_texture: Some(GroundTexture {
                 width: 2,
@@ -431,9 +492,50 @@ mod tests {
                 atmosphere: Atmosphere::default(),
                 lighting: Lighting::default(),
             }),
+            terrain_types: {
+                let mut types = TerrainTypes::default();
+                types.move_speeds[0].kbot = 0.0;
+                types.move_speeds[3].kbot = 4.0;
+                types
+            },
             smf_data: Vec::new(),
             lua_compositing: None,
         }
+    }
+
+    #[test]
+    fn roundtrip_preserves_terrain_types() {
+        let original = sample_map();
+        let loaded = read_baked_map(&write_baked_map(&original).unwrap()).unwrap();
+        assert_eq!(loaded.parsed.typemap, vec![0, 1, 2, 3]);
+        assert_eq!(loaded.terrain_types, original.terrain_types);
+    }
+
+    /// v4 bakes (compositing, no terrain section) still load, with
+    /// neutral terrain.
+    #[test]
+    fn reads_v4_body() {
+        let map = sample_map();
+        let core = BakedMap {
+            map_x: map.parsed.header.map_x,
+            map_y: map.parsed.header.map_y,
+            min_height: map.parsed.header.min_height,
+            max_height: map.parsed.header.max_height,
+            heights: map.parsed.heights.clone(),
+            metalmap: map.parsed.metalmap.clone(),
+            features: map.parsed.features.clone(),
+            map_info: map.map_info.clone(),
+            ground_texture: None,
+        };
+        let no_lua: Option<LuaCompositing> = None;
+        let body = encode_zstd(&postcard::to_allocvec(&(core, no_lua)).unwrap()).unwrap();
+        let mut bytes = MAGIC_V4.to_vec();
+        bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&body);
+        let loaded = read_baked_map(&bytes).unwrap();
+        assert_eq!(loaded.parsed.heights, map.parsed.heights);
+        assert!(loaded.parsed.typemap.is_empty());
+        assert!(loaded.terrain_types.is_neutral());
     }
 
     #[test]

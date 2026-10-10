@@ -28,9 +28,32 @@ pub const SIMULATION_HZ: f64 = GAME_SPEED as f64;
 /// unit's `SlowUpdate`s.
 pub const SLOW_UPDATE_RATE: u32 = 15;
 
-/// The map's gravity per frame² (negative = down): Kernel Panic maps
-/// all set `gravity=50` (`mapInfo->map.gravity = -50 / GAME_SPEED²`).
+/// Gravity per frame² (negative = down) of the usual Kernel Panic map,
+/// `gravity=50` (`mapInfo->map.gravity = -50 / GAME_SPEED²`). Not every
+/// shipped map uses it (Speed Balls 40, Major Madness and pacman 100,
+/// Memory Bank 120, Digital Divide the engine default 130): the loaded
+/// map's value is the [`MapGravity`] resource.
 pub const MAP_GRAVITY_PER_FRAME2: f32 = -50.0 / (GAME_SPEED * GAME_SPEED);
+
+/// The loaded map's gravity per frame² (negative = down), from its map
+/// info: `-max(0.001, gravity) / GAME_SPEED²` (`CMapInfo::ReadGlobal`).
+/// `map_loading` replaces it at every map swap; before the first map
+/// (and in tests) it is the usual [`MAP_GRAVITY_PER_FRAME2`].
+#[derive(bevy::prelude::Resource, Clone, Copy, Debug, PartialEq)]
+pub struct MapGravity(pub f32);
+
+impl Default for MapGravity {
+    fn default() -> Self {
+        Self(MAP_GRAVITY_PER_FRAME2)
+    }
+}
+
+impl MapGravity {
+    /// From the map info's `gravity` (elmos/s², positive = down).
+    pub fn from_map_info(gravity: f32) -> Self {
+        Self(-gravity.max(0.001) / (GAME_SPEED * GAME_SPEED))
+    }
+}
 
 /// Heightmap square edge in elmos (`SQUARE_SIZE`). Re-exported from the
 /// pathfinder so the speed grid and the game can never disagree.
@@ -174,6 +197,15 @@ pub fn angle_delta(a: f32, b: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn map_gravity_from_map_info() {
+        assert_eq!(MapGravity::from_map_info(50.0), MapGravity::default());
+        let g = MapGravity::from_map_info(120.0).0 * GAME_SPEED * GAME_SPEED;
+        assert!((g + 120.0).abs() < 1e-3);
+        // The engine clamps to 0.001: never zero or upward.
+        assert!(MapGravity::from_map_info(-5.0).0 < 0.0);
+    }
 
     #[test]
     fn heading_round_trips_through_dir_of() {

@@ -6,7 +6,9 @@
 //! Activation is gated on a [`EruptionConfig`] resource that
 //! [`map_loading`](crate::map_loading) inserts only for matching maps.
 //! When the resource is absent, every system here short-circuits — no
-//! cost on other maps.
+//! cost on other maps. The eruption clock runs in the fixed sim
+//! (`GameplaySet::Produce`), so it is frame-rate independent and stops
+//! with the rest of the gameplay once a match is decided.
 
 use bevy::prelude::*;
 
@@ -14,8 +16,10 @@ pub mod circular_flow;
 pub mod hex_farm;
 pub use circular_flow::CircularFlow;
 
+use crate::map_loading::MatchScopeAppExt;
 use crate::rng::{next_f32, next_signed, xorshift32};
 use crate::terrain::heightmap::Heightmap;
+use crate::units::GameplaySet;
 use crate::units::combat::{VirusSpawn, VirusSpawnQueue};
 use crate::units::components::Faction;
 use crate::units::content::definitions::UnitKind;
@@ -82,11 +86,14 @@ pub(crate) struct EruptionState {
     rng: u32,
 }
 
-impl Default for EruptionState {
-    fn default() -> Self {
+impl EruptionState {
+    /// A fresh match: the first eruption comes one full cycle in
+    /// ("every five minutes"), not on the first tick — the bases need
+    /// time to stand up before the caldera spews into them.
+    pub(crate) fn new(config: &EruptionConfig) -> Self {
         Self {
             elapsed: 0.0,
-            next_eruption_at: 0.0,
+            next_eruption_at: config.cycle_seconds,
             current_eruption_started: None,
             next_step: 0,
             eruption_count: 0,
@@ -145,15 +152,16 @@ pub struct MapEventsPlugin;
 impl Plugin for MapEventsPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(hex_farm::HexFarmPlugin);
-        app.init_resource::<EruptionSpawnQueue>().add_systems(
-            Update,
+        app.init_match_resource::<EruptionSpawnQueue>().add_systems(
+            FixedUpdate,
             (
                 tick_eruption.run_if(
                     resource_exists::<EruptionConfig>.and_then(resource_exists::<EruptionState>),
                 ),
                 drain_eruption_queue.run_if(|q: Res<EruptionSpawnQueue>| !q.is_empty()),
             )
-                .chain(),
+                .chain()
+                .in_set(GameplaySet::Produce),
         );
     }
 }
@@ -389,5 +397,19 @@ fn drain_eruption_queue(mut queue: ResMut<EruptionSpawnQueue>, mut ctx: SpawnCon
             spawn.position,
             &mut ctx,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first eruption lands one cycle into the match, not at t=0.
+    #[test]
+    fn first_eruption_waits_a_full_cycle() {
+        let config = EruptionConfig::stack_overflow(Vec::new());
+        let state = EruptionState::new(&config);
+        assert_eq!(state.next_eruption_at, config.cycle_seconds);
+        assert!(state.current_eruption_started.is_none());
     }
 }

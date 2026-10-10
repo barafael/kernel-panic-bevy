@@ -4,8 +4,8 @@
 //! pulling in a full RNG crate. States are plain `u32`s owned by the
 //! caller (a component field or a `Local`).
 //!
-//! [`clock_f64`] is the one *non*-deterministic source: a clock-seeded
-//! stream for choices that should differ per launch (match setup, the
+//! [`clock_f64`] is the one *non*-deterministic source: a stream seeded
+//! from launch entropy (wall clock, OS randomness) for choices that should differ per launch (match setup, the
 //! menu's attract demo). Gameplay never draws from it.
 
 use bevy::prelude::Vec3;
@@ -46,25 +46,15 @@ pub fn random_unit_sphere(state: &mut u32) -> Vec3 {
 }
 
 /// Uniform `f64` in `[0.0, 1.0)` from a thread-local xorshift64 seeded
-/// from the clock on first use — differs every launch.
-///
-/// Uses Bevy's `Instant`, not `std::time`: `SystemTime`/`Instant` panic
-/// with "time not supported on this platform" on wasm32, where Bevy's
-/// is `performance.now()`-backed instead.
+/// from launch entropy on first use — differs every launch.
 pub fn clock_f64() -> f64 {
-    use bevy::platform::time::Instant;
     thread_local! {
         static STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-        static ANCHOR: Instant = Instant::now();
     }
     STATE.with(|s| {
         let mut x = s.get();
         if x == 0 {
-            // No epoch on Instant — seed from nanos elapsed since this
-            // thread's first call, mixed with a fixed odd constant.
-            let elapsed = ANCHOR.with(|a| a.elapsed());
-            x = ((elapsed.subsec_nanos() as u64) ^ (elapsed.as_secs() << 20) ^ 0x9E3779B97F4A7C15)
-                | 1;
+            x = splitmix64(launch_entropy()) | 1;
         }
         x ^= x << 13;
         x ^= x >> 7;
@@ -72,6 +62,42 @@ pub fn clock_f64() -> f64 {
         s.set(x);
         (x >> 11) as f64 / (1u64 << 53) as f64
     })
+}
+
+/// Bits that differ between launches. The seed used to be the time
+/// elapsed between two adjacent reads of a just-created `Instant` — a
+/// few dozen nanoseconds, nearly the same every launch, so launches
+/// rolled (almost) the same demo seats, maps and Hex Farm layouts.
+///
+/// Native: the wall clock plus the OS-random keys std seeds every
+/// `RandomState` with. Web: `Math.random()` and the wall clock
+/// (`std::time` panics on wasm32).
+fn launch_entropy() -> u64 {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::hash::{BuildHasher, Hasher};
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(wall);
+        hasher.finish() ^ wall
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let random = (js_sys::Math::random() * (1u64 << 53) as f64) as u64;
+        random ^ (js_sys::Date::now() as u64).rotate_left(29)
+    }
+}
+
+/// SplitMix64's finaliser: spreads a seed's entropy over all 64 bits
+/// (xorshift needs many rounds to diffuse a seed that differs in only
+/// a few low bits).
+fn splitmix64(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[cfg(test)]
@@ -93,6 +119,16 @@ mod tests {
             let v = clock_f64();
             assert!((0.0..1.0).contains(&v), "out-of-range draw: {v}");
         }
+    }
+
+    /// Two seedings a moment apart give unrelated streams (the old seed
+    /// was nearly constant per launch).
+    #[test]
+    fn launch_seeds_differ() {
+        let a = splitmix64(launch_entropy());
+        let b = splitmix64(launch_entropy());
+        assert_ne!(a, b);
+        assert!((a ^ b).count_ones() > 8, "{a:x} vs {b:x}");
     }
 
     #[test]

@@ -44,6 +44,7 @@ pub fn effect_counts(world: &mut World) -> [(&'static str, usize); 5] {
 
 use bevy::prelude::*;
 
+use crate::map_loading::{MatchEntity, MatchScopeAppExt};
 use crate::rendering::interpolation::SimPose;
 use batch::FxQuadBatches;
 pub(crate) use ceg::CegRegistry;
@@ -61,8 +62,10 @@ pub struct WeaponFxPlugin;
 
 impl Plugin for WeaponFxPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PendingAttacks>()
-            .init_resource::<PendingExplosions>()
+        // The shot / explosion buffers are drained every tick; a match
+        // swap drops what the old world left in them.
+        app.init_match_resource::<PendingAttacks>()
+            .init_match_resource::<PendingExplosions>()
             .init_resource::<BeamMaterialCache>()
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
@@ -78,6 +81,16 @@ impl Plugin for WeaponFxPlugin {
             .register_required_components::<shared::ProjectileVisual, SimPose>()
             .register_required_components::<shared::ImpactBurst, SimPose>()
             .register_required_components::<shared::GroundFlash, SimPose>()
+            // Without a Transform the match teardown would not see them
+            // (`map_loading::match_scope`): tag them match content.
+            .register_required_components::<shared::BeamVisual, MatchEntity>()
+            .register_required_components::<shared::LaserBolt, MatchEntity>()
+            .register_required_components::<shared::LightningArc, MatchEntity>()
+            .register_required_components::<shared::FadingTrail, MatchEntity>()
+            .register_required_components::<ceg::CegParticle, MatchEntity>()
+            .register_required_components::<ceg::CegFlame, MatchEntity>()
+            .register_required_components::<ceg::CegSpike, MatchEntity>()
+            .register_required_components::<ceg::CegDelayedSpawn, MatchEntity>()
             .add_systems(
                 FixedUpdate,
                 (

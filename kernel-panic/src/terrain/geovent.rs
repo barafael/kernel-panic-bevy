@@ -68,8 +68,10 @@ pub struct GeoventSmoker {
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct VentClaim;
 
-/// A single rising smoke puff.
+/// A single rising smoke puff. Plain data drawn through the effect
+/// batch (no Transform), hence the explicit match tag.
 #[derive(Component)]
+#[require(crate::map_loading::MatchEntity)]
 pub struct GeoventSmoke {
     pub pos: Vec3,
     pub lifetime: f32,

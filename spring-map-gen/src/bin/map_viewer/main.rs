@@ -15,9 +15,9 @@ mod units;
 
 use std::path::PathBuf;
 
+use bevy::camera::Hdr;
 use bevy::input::mouse::MouseWheel;
 use bevy::prelude::*;
-use bevy::render::view::Hdr;
 use clap::Parser;
 use thiserror::Error;
 
@@ -205,7 +205,7 @@ fn setup_hud(mut commands: Commands) {
         HudText,
         Text::new("Loading..."),
         TextFont {
-            font_size: 18.0,
+            font_size: FontSize::Px(18.0),
             ..default()
         },
         TextColor(Color::WHITE),
@@ -371,7 +371,7 @@ fn load_map_system(
             DirectionalLight {
                 color: Color::linear_rgb(sun[0], sun[1], sun[2]),
                 illuminance: 8000.0,
-                shadows_enabled: false,
+                shadow_maps_enabled: false,
                 ..default()
             },
             Transform::default().looking_to(-sun_dir, Vec3::Y),

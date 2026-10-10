@@ -4,8 +4,9 @@
 //! [`AppState`] to `InGame`; `map_loading` consumes it on entry. This
 //! mirrors the original Kernel Panic flow, where the launch menu
 //! generated a start script (`GenerateSkirmish` → `RunGame` → engine
-//! restart) — our "restart" is despawning the game world and re-entering
-//! the `InGame` state.
+//! restart) — our "restart" is preparing the next map and then swapping
+//! worlds: the old match's entities go and every match-level resource
+//! starts over (`map_loading::match_scope`).
 
 use bevy::prelude::*;
 
@@ -418,9 +419,20 @@ impl AiDifficulty {
 
 /// Set once the player dismisses the game-over panel ("Keep on
 /// playing"), so `check_game_over` doesn't immediately re-trigger while
-/// the victory condition still holds.
+/// the victory condition still holds. Match-scoped: re-armed at every
+/// match swap.
 #[derive(Debug, Clone, Copy, Resource, Default)]
 pub struct GameOverDismissed(pub bool);
+
+/// The setup of the match currently in the world. [`GameSetup`] is the
+/// *next* match the menu asked for — it changes the moment Restart or a
+/// demo reroll is requested, while the old world keeps running until
+/// the new map is prepared. Whatever judges the running match (the
+/// game-over census: seats, demo / showcase / sandbox rules) reads this
+/// instead; `map_loading` sets it at the swap. Absent before the first
+/// match.
+#[derive(Debug, Clone, Resource)]
+pub struct ActiveMatch(pub GameSetup);
 
 /// Message written by menu buttons: start/restart the configured match.
 #[derive(Message)]

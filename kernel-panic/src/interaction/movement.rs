@@ -232,6 +232,11 @@ pub struct NavGridSet {
     /// class from a copy (at revision 0) and replays the structure
     /// changes since, instead of tesselating a whole map in one tick.
     pub terrain_layers: HashMap<LayerKey, spring_pathfinding::qtpfs::NodeLayer>,
+    /// The map's terrain-type speed per square (`GetPosSpeedMod`'s
+    /// `tt.kbotSpeed`), already folded into every bucket's speed map;
+    /// kept to split it back out of the slope ([`Self::square_slope`])
+    /// and for the driving speed (`ground_move::ground_speed_mod`).
+    pub terrain_speed: crate::terrain::terrain_speed::TerrainSpeedMap,
 }
 
 /// A mover class as the path service keys its layers: (nav bucket,
@@ -252,6 +257,7 @@ impl Default for NavGridSet {
             changes: Default::default(),
             structures: Default::default(),
             terrain_layers: HashMap::new(),
+            terrain_speed: Default::default(),
         }
     }
 }
@@ -396,15 +402,19 @@ impl NavGridSet {
     /// Spring's slope encoding (`1 - cos(angle)`) of the square under
     /// `pos` as the bucket for cap `cap` rated it, or `None` where that
     /// bucket has it impassable. Recovered from the stored speed
-    /// `1/(1 + slope·slopeMod)`.
+    /// `1/(1 + slope·slopeMod) · terrainSpeed`.
     pub fn square_slope(&self, cap: f32, pos: Vec2) -> Option<f32> {
         let b = self.bucket(cap)?;
         if pos.x < 0.0 || pos.y < 0.0 {
             return None;
         }
-        let s = b
-            .speed_map
-            .get((pos.x / SQUARE_SIZE) as u32, (pos.y / SQUARE_SIZE) as u32);
+        let (x, z) = ((pos.x / SQUARE_SIZE) as u32, (pos.y / SQUARE_SIZE) as u32);
+        let terrain = self.terrain_speed.at_square(x, z);
+        let s = if terrain > 0.0 {
+            b.speed_map.get(x, z) / terrain
+        } else {
+            0.0
+        };
         (s > 0.0).then(|| {
             (1.0 / s - 1.0).max(0.0) / spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
         })

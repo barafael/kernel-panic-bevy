@@ -48,10 +48,11 @@ pub(super) fn spawn_weapon_visuals(
     mut fx_meshes: ResMut<WeaponFxMeshes>,
     mut ceg_assets: ResMut<CegRenderAssets>,
     teams: Query<&TeamId>,
+    gravity: Option<Res<crate::sim::MapGravity>>,
     mut rng: Local<u32>,
 ) {
     // The one read of the map's gravity for every shell spawned here.
-    let map_gravity = crate::sim::MAP_GRAVITY_PER_FRAME2;
+    let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for event in pending.events.drain(..) {
         // Ids are interned through this same registry at the combat
         // side, so the lookup is infallible.

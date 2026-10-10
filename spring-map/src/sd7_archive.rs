@@ -191,26 +191,11 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn maps_dir() -> PathBuf {
-        let candidates = [
-            PathBuf::from("kernel-panic/assets/maps"),
-            PathBuf::from("assets/maps"),
-        ];
-        candidates
-            .into_iter()
-            .find(|p| p.is_dir())
-            .unwrap_or_else(|| PathBuf::from("assets/maps"))
-    }
+    use crate::{shipped_map, shipped_maps_dir};
 
     #[test]
     fn extract_sd7_marble_madness() {
-        let path = maps_dir().join("Marble_Madness_Map.sd7");
-        if !path.exists() {
-            eprintln!("Skipping: {path:?} not found");
-            return;
-        }
+        let path = shipped_map("Marble_Madness_Map.sd7");
         let extracted = load_map_archive(&path).expect("should extract .sd7");
         assert!(extracted.smf_name.ends_with(".smf"));
         assert_eq!(&extracted.smf_data[..16], b"spring map file\0");
@@ -218,11 +203,7 @@ mod tests {
 
     #[test]
     fn extract_sdz_speed_balls() {
-        let path = maps_dir().join("Speed_Balls_16_Way.sdz");
-        if !path.exists() {
-            eprintln!("Skipping: {path:?} not found");
-            return;
-        }
+        let path = shipped_map("Speed_Balls_16_Way.sdz");
         let extracted = load_map_archive(&path).expect("should extract .sdz");
         assert!(extracted.smf_name.ends_with(".smf"));
         assert_eq!(&extracted.smf_data[..16], b"spring map file\0");
@@ -230,11 +211,7 @@ mod tests {
 
     #[test]
     fn extract_all_maps() {
-        let dir = maps_dir();
-        if !dir.exists() {
-            eprintln!("Skipping: maps directory not found");
-            return;
-        }
+        let dir = shipped_maps_dir();
         let mut count = 0;
         for entry in std::fs::read_dir(&dir).unwrap() {
             let entry = entry.unwrap();

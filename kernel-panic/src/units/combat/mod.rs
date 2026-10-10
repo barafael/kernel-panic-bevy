@@ -224,13 +224,14 @@ pub struct PieceLookup<'w, 's> {
     /// Targets' poses for per-shot aiming.
     pub target: Query<'w, 's, (&'static GlobalTransform, &'static UnitStats), With<UnitType>>,
     pub heightmap: Option<Res<'w, Heightmap>>,
+    pub gravity: Option<Res<'w, crate::sim::MapGravity>>,
 }
 
 impl PieceLookup<'_, '_> {
     /// The map's gravity (elmos/frame², negative) — the single read
     /// site for every weapon system that carries a `PieceLookup`.
     pub fn map_gravity(&self) -> f32 {
-        crate::sim::MAP_GRAVITY_PER_FRAME2
+        self.gravity.as_deref().copied().unwrap_or_default().0
     }
 
     /// `owner->speed` of a target in elmos per frame: a ground mover's or
@@ -1447,10 +1448,11 @@ pub fn attack_target_system(
     target_q: Query<&GlobalTransform, Without<Dying>>,
     target_stats: Query<&UnitStats>,
     move_path_q: Query<&crate::interaction::movement::MovePath>,
+    gravity: Option<Res<crate::sim::MapGravity>>,
     mut commands: Commands,
 ) {
     // The one read of the map's gravity here (ballistic weapon range).
-    let map_gravity = crate::sim::MAP_GRAVITY_PER_FRAME2;
+    let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for (entity, unit_type, stats, gtf, order, deployable, animator, weapon_binding, has_move) in
         &attackers
     {

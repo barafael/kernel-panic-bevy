@@ -11,6 +11,7 @@ pub mod weapon_fx;
 
 use bevy::prelude::*;
 
+use crate::map_loading::{MatchEntity, MatchScopeAppExt};
 use crate::rendering::interpolation::SimPose;
 use crate::sim::SIMULATION_HZ;
 
@@ -74,28 +75,33 @@ impl Plugin for UnitsPlugin {
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
             .init_resource::<ai::AiTicker>()
-            .init_resource::<ai::TeamDamageLog>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
-            .init_resource::<combat::DamageQueue>()
-            .init_resource::<combat::DelayedDamage>()
-            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
-            .init_resource::<combat::VirusSpawnQueue>()
             .init_resource::<shield::OnsMode>()
             .init_resource::<shield::ShieldShellAssets>()
-            .init_resource::<command_fire::MineSpawnQueue>()
             .init_resource::<command_fire::SigTermAssets>()
+            // Per-match state, re-initialised at every match swap
+            // (`map_loading::match_scope`): per-team tallies, queues of
+            // pending hits / spawns, timers phased to the match start.
+            .init_match_resource::<ai::TeamDamageLog>()
+            .init_match_resource::<combat::DamageQueue>()
+            .init_match_resource::<combat::DelayedDamage>()
+            .init_match_resource::<crate::interaction::ground_move::PendingImpulses>()
+            .init_match_resource::<combat::VirusSpawnQueue>()
+            .init_match_resource::<command_fire::MineSpawnQueue>()
+            .init_match_resource::<network_buffer::PacketBuffer>()
+            .init_match_resource::<network_buffer::FlowSpeedTicker>()
+            .init_match_resource::<bookkeeping::SmallBuildingCounts>()
+            .init_match_resource::<bookkeeping::TeamUnitCounts>()
+            .init_match_resource::<cloak::VisibilityRefreshTimer>()
+            .init_match_resource::<spatial::SpatialIndex>()
+            .init_match_resource::<game_over::GameOverClock>()
+            .init_match_resource::<crate::game_setup::GameOverDismissed>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<deploy::DeployEvent>()
             .add_message::<network_buffer::DispatchEvent>()
             .add_message::<network_buffer::EnterEvent>()
-            .init_resource::<network_buffer::PacketBuffer>()
-            .init_resource::<network_buffer::FlowSpeedTicker>()
-            .init_resource::<bookkeeping::SmallBuildingCounts>()
-            .init_resource::<bookkeeping::TeamUnitCounts>()
-            .init_resource::<cloak::VisibilityRefreshTimer>()
             .init_resource::<cloak::FogEnabled>()
-            .init_resource::<spatial::SpatialIndex>()
             .init_resource::<animation::DeathParticleAssets>()
             .add_plugins(weapon_fx::WeaponFxPlugin)
             // Everything the fixed sim moves is drawn interpolated
@@ -105,6 +111,10 @@ impl Plugin for UnitsPlugin {
             .register_required_components::<animation::DeathParticle, SimPose>()
             .register_required_components::<command_fire::SigTermSignal, SimPose>()
             .register_required_components::<command_fire::SigTermBomb, SimPose>()
+            // A damage zone is plain data (no Transform): tag it match
+            // content so the match teardown clears it
+            // (`map_loading::match_scope`).
+            .register_required_components::<command_fire::AreaDenialZone, MatchEntity>()
             .add_systems(
                 FixedUpdate,
                 // Also runs in `AppState::Menu`: the attract-mode demo

@@ -3,8 +3,11 @@ pub mod heightmap;
 pub mod material;
 pub mod mesh;
 pub mod smooth_ground;
+pub mod terrain_speed;
 
 use bevy::prelude::*;
+
+use crate::map_loading::MatchScopeAppExt;
 
 use geovent::{
     GeoventAssets, VentClaimReleaseTimer, emit_geovent_smoke, reconcile_vent_claims,
@@ -16,7 +19,7 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GeoventAssets>()
-            .init_resource::<VentClaimReleaseTimer>()
+            .init_match_resource::<VentClaimReleaseTimer>()
             .add_systems(
                 Update,
                 (

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use crate::game_setup::{GameOverDismissed, GameSetup};
+use crate::game_setup::{ActiveMatch, GameOverDismissed};
 use crate::units::combat::Dying;
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::player::LocalTeam;
@@ -25,10 +25,12 @@ const CHECK_INTERVAL: f32 = 1.0;
 /// Accumulator for [`check_game_over`], seeded so the first census lands
 /// on sim frame 25 and then every 30 (upstream's `f % 30 == 25`) — and
 /// not on the same tick as the other 1 Hz passes (AI brain at phase 0,
-/// Flow speed recount at phase 15).
-pub struct CheckTimer(f32);
+/// Flow speed recount at phase 15). Match-scoped, so every match's
+/// first census lands on its own frame 25.
+#[derive(Resource)]
+pub struct GameOverClock(f32);
 
-impl Default for CheckTimer {
+impl Default for GameOverClock {
     fn default() -> Self {
         Self(CHECK_INTERVAL - 25.0 / 30.0)
     }
@@ -82,23 +84,32 @@ fn outcome(census: &HashMap<u8, TeamCensus>, local: u8) -> Option<GameState> {
 /// The local player's **Defeat** / **Victory** follows from it (see
 /// [`outcome`]). Maps with no factories at all (test / sandbox variants)
 /// never kill or flip state; neither does showcase mode. The menu's
-/// all-AI demo eliminates but never flips state. Once the player dismisses the game-over panel ("Keep on playing") the
-/// state stops re-triggering, but eliminations continue. Teams without
-/// a seat in [`GameSetup::players`] (map-event neutrals) are never
-/// counted or killed.
+/// all-AI demo eliminates but never flips state. Once the player
+/// dismisses the game-over panel ("Keep on playing") the state stops
+/// re-triggering, but eliminations continue. Teams without a seat in
+/// the running match's setup ([`ActiveMatch`]; map-event neutrals) are
+/// never counted or killed. The menu's pending [`GameSetup`] is not
+/// consulted: the old world keeps running while the next map loads and
+/// must be judged against its own seats.
+///
+/// [`GameSetup`]: crate::game_setup::GameSetup
 #[allow(clippy::too_many_arguments)]
 pub fn check_game_over(
     time: Res<Time>,
-    mut since_check: Local<CheckTimer>,
+    mut since_check: ResMut<GameOverClock>,
     local: Res<LocalTeam>,
     dismissed: Res<GameOverDismissed>,
-    setup: Res<GameSetup>,
+    active: Option<Res<ActiveMatch>>,
     mut units: Query<(&TeamId, &UnitType, &mut Health), Without<Dying>>,
     mut next_state: ResMut<NextState<GameState>>,
 ) {
     // Showcase: no win/lose — run forever. The menu demo still
     // eliminates beaten seats (so its battles resolve) but never shows
-    // a result; its director restarts the match instead.
+    // a result; its director restarts the match instead. No match in
+    // the world yet: nothing to judge.
+    let Some(ActiveMatch(setup)) = active.as_deref() else {
+        return;
+    };
     if setup.showcase.is_some() || setup.sandbox {
         return;
     }
@@ -148,6 +159,7 @@ pub fn check_game_over(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game_setup::GameSetup;
     use crate::units::content::definitions::UnitKind;
     use bevy::ecs::system::RunSystemOnce;
     use bevy::state::app::StatesPlugin;
@@ -194,7 +206,8 @@ mod tests {
             .init_state::<GameState>()
             .init_resource::<Time>()
             .init_resource::<GameOverDismissed>()
-            .insert_resource(GameSetup::default())
+            .init_resource::<GameOverClock>()
+            .insert_resource(ActiveMatch(GameSetup::default()))
             .insert_resource(LocalTeam(0));
         app
     }
@@ -309,6 +322,39 @@ mod tests {
         let bug = spawn(&mut app, UnitKind::Bug, 1);
         run_check(&mut app);
         assert_eq!(app.world().get::<Health>(bug).unwrap().current, 0.0);
+        assert_eq!(pending_state(&app), None);
+    }
+
+    /// The census judges the match in the world, not the one the menu
+    /// just asked for: while a Restart / demo reroll loads, `GameSetup`
+    /// already names the next match (here a skirmish whose human seat
+    /// owns nothing in this world) but the running demo is spectated
+    /// and never decided.
+    #[test]
+    fn pending_setup_does_not_judge_the_running_match() {
+        let mut app = world();
+        let demo = GameSetup {
+            demo: true,
+            ..GameSetup::default()
+        };
+        app.insert_resource(ActiveMatch(demo))
+            .insert_resource(GameSetup::default())
+            .insert_resource(LocalTeam(crate::game_setup::SPECTATOR_TEAM));
+        spawn(&mut app, UnitKind::Kernel, 1);
+        spawn(&mut app, UnitKind::Hole, 0);
+        run_check(&mut app);
+        assert_eq!(pending_state(&app), None);
+    }
+
+    /// Before the first match there is nothing to judge.
+    #[test]
+    fn no_active_match_no_check() {
+        let mut app = world();
+        app.world_mut().remove_resource::<ActiveMatch>();
+        let bit = spawn(&mut app, UnitKind::Bit, 0);
+        spawn(&mut app, UnitKind::Hole, 1);
+        run_check(&mut app);
+        assert_eq!(app.world().get::<Health>(bit).unwrap().current, 100.0);
         assert_eq!(pending_state(&app), None);
     }
 }

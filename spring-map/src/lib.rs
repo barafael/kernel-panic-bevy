@@ -21,7 +21,26 @@ pub mod smt_parser;
 use std::path::Path;
 
 use lua_skin::SkinAtlas;
-use map_types::{GroundTexture, MapError, ParsedMap};
+
+/// The game's shipped maps (`kernel-panic/assets/maps`, tracked in the
+/// repository), located from this crate's manifest — `cargo test` runs
+/// with the crate directory as cwd, so workspace-relative paths never
+/// resolve. Missing maps fail the test instead of silently skipping it.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn shipped_maps_dir() -> std::path::PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../kernel-panic/assets/maps");
+    assert!(dir.is_dir(), "shipped maps not found at {}", dir.display());
+    dir
+}
+
+/// One shipped map archive by file name (see [`shipped_maps_dir`]).
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn shipped_map(file_name: &str) -> std::path::PathBuf {
+    let path = shipped_maps_dir().join(file_name);
+    assert!(path.is_file(), "shipped map not found: {}", path.display());
+    path
+}
+use map_types::{GroundTexture, MapError, ParsedMap, TerrainTypes};
 #[cfg(not(target_arch = "wasm32"))]
 use sd7_archive::load_map_archive;
 use smd_parser::MapInfo;
@@ -47,6 +66,8 @@ pub struct SpringMap {
     pub parsed: ParsedMap,
     pub ground_texture: Option<GroundTexture>,
     pub map_info: Option<MapInfo>,
+    /// What [`ParsedMap::typemap`] indexes: per-type move speeds.
+    pub terrain_types: TerrainTypes,
     pub smf_data: Vec<u8>,
     pub lua_compositing: Option<LuaCompositing>,
 }
@@ -64,7 +85,7 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
     // used to execute them (see `gadget_bake` for the rationale).
     let baked_gadgets = gadget_bake::lookup(&extracted.lua_files);
     if let Some(baked) = baked_gadgets {
-        baked.apply_heights(&mut parsed);
+        baked.apply_heights(&mut parsed)?;
         eprintln!(
             "Applied baked Lua gadget terrain ({} unsynced message(s))",
             baked.unsynced_messages.len(),
@@ -105,11 +126,18 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
             let info = baked_gadgets?.map_info.clone()?;
             Some(info)
         });
+    // Hex Farm's captured mapinfo.lua defines no terrain types: neutral.
+    let terrain_types = extracted
+        .smd_text
+        .as_deref()
+        .map(smd_parser::parse_terrain_types)
+        .unwrap_or_default();
 
     Ok(SpringMap {
         parsed,
         ground_texture,
         map_info,
+        terrain_types,
         smf_data: extracted.smf_data,
         lua_compositing,
     })
@@ -126,32 +154,13 @@ pub fn load_map(_path: &Path) -> Result<SpringMap, MapError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn maps_dir() -> Option<PathBuf> {
-        // Try relative paths from both workspace root and crate root,
-        // plus an absolute path derived from CARGO_MANIFEST_DIR.
-        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir.parent().unwrap_or(&manifest_dir);
-
-        [
-            workspace_root.join("kernel-panic/assets/maps"),
-            PathBuf::from("kernel-panic/assets/maps"),
-            PathBuf::from("assets/maps"),
-        ]
-        .into_iter()
-        .find(|p| p.is_dir())
-    }
 
     /// Load every .sd7/.sdz map through the full pipeline and verify
     /// the output is sane: heightmap has data, features parsed, texture
     /// assembled, .smd metadata present.
     #[test]
     fn load_all_maps_end_to_end() {
-        let Some(dir) = maps_dir() else {
-            eprintln!("Skipping: maps directory not found");
-            return;
-        };
+        let dir = shipped_maps_dir();
 
         let mut count = 0;
         let mut failures: Vec<String> = Vec::new();
@@ -247,6 +256,26 @@ mod tests {
                             .as_ref()
                             .map(|g| format!("{}x{}", g.width, g.height))
                             .unwrap_or_else(|| "none".into()),
+                    );
+
+                    // Typemap present and sized; report the ground the
+                    // terrain types actually slow down or speed up.
+                    assert_eq!(
+                        p.typemap.len(),
+                        p.header.typemap_width() * p.header.typemap_height(),
+                        "{name}: typemap length mismatch"
+                    );
+                    let mut by_speed: Vec<(f32, usize)> = Vec::new();
+                    for &t in &p.typemap {
+                        let kbot = spring_map.terrain_types.get(t).kbot;
+                        match by_speed.iter_mut().find(|(s, _)| *s == kbot) {
+                            Some((_, n)) => *n += 1,
+                            None => by_speed.push((kbot, 1)),
+                        }
+                    }
+                    eprintln!(
+                        "      gravity {}, kbot speed cells {by_speed:?}",
+                        map_info.gravity
                     );
 
                     count += 1;

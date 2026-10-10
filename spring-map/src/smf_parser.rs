@@ -13,13 +13,31 @@ pub fn parse_smf(data: &[u8]) -> Result<ParsedMap, SmfParseError> {
     let heights = read_heightmap(&mut cursor, &header)?;
     let features = read_features(&mut cursor, &header)?;
     let metalmap = read_metalmap(&mut cursor, &header)?;
+    let typemap = read_typemap(&mut cursor, &header)?;
 
     Ok(ParsedMap {
         header,
         heights,
         features,
         metalmap,
+        typemap,
     })
+}
+
+/// The terrain-type map (`CSMFReadMap`'s `typeMapPtr`, one byte per
+/// 2×2 squares). A zero pointer — a synthetic file without one — reads
+/// as no typemap.
+fn read_typemap(cursor: &mut Cursor<&[u8]>, header: &SmfHeader) -> Result<Vec<u8>, SmfParseError> {
+    if header.type_map_ptr <= 0 {
+        return Ok(Vec::new());
+    }
+    cursor.seek(SeekFrom::Start(header.type_map_ptr as u64))?;
+    let expected = header.typemap_width() * header.typemap_height();
+    let mut typemap = vec![0u8; expected];
+    cursor
+        .read_exact(&mut typemap)
+        .map_err(|_| SmfParseError::TypemapTruncated { expected })?;
+    Ok(typemap)
 }
 
 fn read_header(cursor: &mut Cursor<&[u8]>) -> Result<SmfHeader, SmfParseError> {
@@ -278,18 +296,8 @@ mod tests {
 
     #[test]
     fn parse_real_marble_madness() {
-        let sd7_path = [
-            "kernel-panic/assets/maps/Marble_Madness_Map.sd7",
-            "assets/maps/Marble_Madness_Map.sd7",
-        ]
-        .iter()
-        .map(std::path::Path::new)
-        .find(|p| p.exists());
-        let Some(sd7_path) = sd7_path else {
-            eprintln!("Skipping: sd7 not found");
-            return;
-        };
-        let extracted = crate::sd7_archive::load_map_archive(sd7_path).unwrap();
+        let sd7_path = crate::shipped_map("Marble_Madness_Map.sd7");
+        let extracted = crate::sd7_archive::load_map_archive(&sd7_path).unwrap();
         let parsed = parse_smf(&extracted.smf_data).unwrap();
 
         assert_eq!(parsed.header.map_x, 256);
