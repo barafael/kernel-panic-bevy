@@ -101,6 +101,81 @@ fn line_of_fire_clear(hm: &Heightmap, from: Vec3, to: Vec3, aoe_radius: f32) -> 
         .is_none_or(|hit| hit.distance_squared(to) <= aoe_radius * aoe_radius)
 }
 
+/// Whether `weapon_def` takes the base `CWeapon::HaveFreeLineOfFire`
+/// (Weapon.cpp:1112) — a straight ray or cone to the target — and so
+/// honours `avoidfriendly` along that line. Melee weapons and bombers
+/// always have a line of fire (`MeleeWeapon.h`, `BombDropper.h`),
+/// starburst launchers test a 100-elmo cone straight up, cannons and
+/// trajectory missiles the ballistic arc (`TestTrajectoryCone`); none of
+/// Kernel Panic's `avoidfriendly=1` weapons (BugShot, DOS_Beam,
+/// Wormbite / Wormsplash, VirusDeath) is a cannon or a launcher, so
+/// those arcs aren't ported.
+fn straight_line_of_fire(weapon_def: &spring_tdf::WeaponDef) -> bool {
+    use spring_tdf::WeaponCategory as C;
+    match weapon_def.category() {
+        C::Melee | C::AircraftBomb | C::StarburstLauncher | C::Cannon | C::Shield => false,
+        C::MissileLauncher => weapon_def.trajectory_height <= 0.0,
+        _ => true,
+    }
+}
+
+/// Whether [`free_line_of_fire`] can ever refuse a shot of `weapon_def`.
+fn avoids_allies(weapon_def: &spring_tdf::WeaponDef) -> bool {
+    weapon_def.avoid_friendly && straight_line_of_fire(weapon_def)
+}
+
+/// The friendly half of `CWeapon::HaveFreeLineOfFire`: an
+/// `avoidfriendly=1` weapon holds its fire while a unit of the shooter's
+/// own side (`team`; not the shooter itself) is in the way from `from`
+/// (the aim point) to `to` (the target's aim point). With no spread —
+/// every Kernel Panic `avoidfriendly` weapon — that is
+/// `TraceRay::TraceRay` against the allies' collision spheres
+/// (`avoidFlags | NOENEMIES | NOGROUND`); a spraying weapon tests
+/// `TraceRay::TestCone` (`TestConeHelper`: the ally's surface within
+/// `d · spread + 1` of the muzzle or of the ray point abreast of it).
+/// Allies beyond the target don't count, nor do enemies standing in
+/// front of it. The spread is `sprayAngle` alone: Kernel Panic sets no
+/// `accuracy`.
+pub(crate) fn free_line_of_fire(
+    weapon_def: &spring_tdf::WeaponDef,
+    spatial: &SpatialIndex,
+    owner: Entity,
+    team: u8,
+    from: Vec3,
+    to: Vec3,
+) -> bool {
+    if !avoids_allies(weapon_def) {
+        return true;
+    }
+    let ray = to - from;
+    let length = ray.length();
+    if length == 0.0 {
+        return true;
+    }
+    let dir = ray / length;
+    let spread = weapon_def.spray_sin();
+    let cone = spread >= 0.001;
+    let reach =
+        length * 0.5 + spatial.max_hit_radius() + if cone { length * spread + 1.0 } else { 0.0 };
+    let mut blocked = false;
+    spatial.query_radius(from.lerp(to, 0.5), reach, |unit| {
+        if blocked || unit.entity == owner || !super::components::is_friendly(unit.team, team) {
+            return;
+        }
+        blocked = if cone {
+            let along = (unit.mid_pos() - from).dot(dir).clamp(0.0, length);
+            let cone_size = along * spread + 1.0;
+            unit.surface_distance(from) <= cone_size
+                || unit.surface_distance(from + dir * along) <= cone_size
+        } else {
+            CollisionVolume::from_s3o(unit.hit_radius, unit.mid_y)
+                .ray_segment_hit(unit.mid_pos(), from, to)
+                .is_some()
+        };
+    });
+    !blocked
+}
+
 /// Sim frames before a unit holding a good auto-target scans for a
 /// better one: `CWeapon::AllowWeaponAutoTarget`'s
 /// `frameNum > lastTargetRetry + 65` (`Weapon.cpp`), counted from the
@@ -482,7 +557,6 @@ pub(super) fn fire_salvo_shot(
                     launch_dir: Some(launch.normalize_or(Vec3::Y)),
                     on_impact: None,
                 }),
-                build_arc: false,
                 arc_from,
             });
             continue;
@@ -511,7 +585,6 @@ pub(super) fn fire_salvo_shot(
                 weapon: shot.weapon,
                 impact_pos,
                 attacker_distance: aim_dist,
-                owner_team: None,
             });
         }
         pending_attacks.events.push(AttackEvent {
@@ -527,7 +600,6 @@ pub(super) fn fire_salvo_shot(
                 launch_dir: None,
                 on_impact: None,
             }),
-            build_arc: false,
             arc_from,
         });
     }
@@ -596,10 +668,10 @@ impl AttackCooldown {
 #[derive(Component, Copy, Clone, Debug)]
 pub struct WeaponBinding(pub WeaponId);
 
-/// Seconds since this unit last took damage, moved, or picked a target.
-/// When this exceeds the unit's FBI `IdleTime`, the `auto_heal` system
-/// regenerates HP at `IdleAutoHeal` per second. Reset to zero on every
-/// activity signal.
+/// Seconds since this unit last took damage (upstream `restTime`).
+/// Once it exceeds the unit's FBI `IdleTime`, the `auto_heal` system
+/// regenerates HP at `IdleAutoHeal` per second. Only damage resets it
+/// (`DamageResolver::deliver`); moving and shooting don't.
 #[derive(Component, Default)]
 pub struct IdleTimer(pub f32);
 
@@ -685,14 +757,12 @@ pub fn combat_system(
     let frame = sim_frame(&time);
 
     // Why: no `damage_queue.clear()` here. The queue's lifecycle is
-    // write-then-drain: `apply_damage` (Resolve) drains it empty, and
-    // producers may push on either side of that drain in the same frame
-    // — this system and the weapon fx in Simulate before it, and
-    // `death_system`'s `ExplodeAs` blasts (a triggered Logic Bomb's
-    // included) after it in Resolve. A clear here would wipe the
-    // death-AoE before the next drain. The drain in `apply_damage` is
-    // the only consumer; a frame's damage is always delivered by the
-    // next Resolve.
+    // write-then-drain: this system and the weapon fx push in Simulate,
+    // `apply_damage` (Resolve) drains that; `death_system`'s `ExplodeAs`
+    // blasts (a triggered Logic Bomb's included) push after it and
+    // `apply_death_blasts`, right behind `death_system`, drains those
+    // the same frame. The two drains are the only consumers; a clear
+    // anywhere else could only drop damage.
 
     for (
         entity,
@@ -767,7 +837,6 @@ pub fn combat_system(
                     weapon: id,
                     impact_pos: ground,
                     attacker_distance: 0.0,
-                    owner_team: None,
                 });
                 pending_explosions.events.push(ExplosionEvent {
                     pos: ground,
@@ -802,6 +871,14 @@ pub fn combat_system(
         // Ballistic shots clear ridges; only direct-fire enforces LOS.
         let enforce_los =
             weapon_def.line_of_sight && weapon_def.trajectory_height <= 0.0 && heightmap.is_some();
+        // `avoidfriendly=1` (BugShot, DOS_Beam): no shot while an ally
+        // stands in the line of fire — `TryTarget` → `HaveFreeLineOfFire`
+        // runs for every candidate `AutoTarget` weighs, every user
+        // target, and before every shot (`UpdateFire`).
+        let ally_check = avoids_allies(weapon_def);
+        let lof_clear = |to: Vec3| {
+            free_line_of_fire(weapon_def, &spatial, entity, attacker_team.0, aim_from, to)
+        };
         // Pointer's homing missile is the only ground unit that
         // overrides upstream's `NoChaseCategory=VTOL` and tracks air.
         let skip_flying = stats.no_chase_vtol && !unit_type.0.homing_targets_air();
@@ -812,6 +889,11 @@ pub fn combat_system(
             bad: false,
             dist_sq,
         };
+        // A user target in range whose line of fire is blocked by an
+        // ally: keep tracking it, and — as `AllowWeaponAutoTarget` lets
+        // a weapon whose user target fails `TryTarget` do — shoot
+        // whatever else is free meanwhile.
+        let mut blocked_explicit: Option<Vec3> = None;
 
         // Manual target designation (T / set-target) overrides auto-
         // acquisition: in range → fire at it; out of range → track it
@@ -821,8 +903,12 @@ pub fn combat_system(
         if let Ok(forced) = explicit.forced.get(entity) {
             match target_pick.visible_pos(forced.0, attacker_team.0) {
                 Some(t_pos) if in_range(t_pos) => {
-                    let rank = rank_of(attacker_pos.distance_squared(t_pos));
-                    best = Some((forced.0, t_pos, rank, TargetSource::Explicit));
+                    if lof_clear(t_pos) {
+                        let rank = rank_of(attacker_pos.distance_squared(t_pos));
+                        best = Some((forced.0, t_pos, rank, TargetSource::Explicit));
+                    } else {
+                        blocked_explicit = Some(t_pos);
+                    }
                 }
                 Some(t_pos) => {
                     let aim = AimTarget {
@@ -848,8 +934,12 @@ pub fn combat_system(
             && let Some(t_pos) = target_pick.visible_pos(order.target, attacker_team.0)
             && in_range(t_pos)
         {
-            let rank = rank_of(attacker_pos.distance_squared(t_pos));
-            best = Some((order.target, t_pos, rank, TargetSource::Explicit));
+            if lof_clear(t_pos) {
+                let rank = rank_of(attacker_pos.distance_squared(t_pos));
+                best = Some((order.target, t_pos, rank, TargetSource::Explicit));
+            } else {
+                blocked_explicit = blocked_explicit.or(Some(t_pos));
+            }
         }
 
         // The cached auto-target, kept until its rescan frame (Spring's
@@ -878,11 +968,13 @@ pub fn combat_system(
         let mut scanned = false;
         if best.is_none() && scan_due {
             scanned = true;
-            // Direct-fire weapons defer the LOS ray march: candidates
-            // passing the cheap filters are collected, ranked exactly as
-            // the inline pick below ranks them, and ray-marched in that
-            // order — only the winner (and the blocked candidates ahead
-            // of it) pays for `has_line_of_sight`, not the whole crowd.
+            // Direct-fire and ally-avoiding weapons defer the line-of-
+            // fire tests: candidates passing the cheap filters are
+            // collected, ranked exactly as the inline pick below ranks
+            // them, and tested in that order — only the winner (and the
+            // blocked candidates ahead of it) pays for the terrain ray
+            // march and the ally trace, not the whole crowd.
+            let defer_lof = enforce_los || ally_check;
             los_candidates.clear();
             let scan_radius = aim::weapon_scan_radius(weapon_def, aim_from, map_gravity);
             // `WeaponMainDir1` / `MaxAngleDif1` (`CWeapon::TestTarget` →
@@ -931,7 +1023,7 @@ pub fn combat_system(
                     bad: unit_registry.bad_target(unit_type.0, candidate.kind),
                     dist_sq: if prefer_distant { -dist_sq } else { dist_sq },
                 };
-                if enforce_los {
+                if defer_lof {
                     los_candidates.push((rank, candidate.entity, aim_pos));
                     return;
                 }
@@ -939,20 +1031,35 @@ pub fn combat_system(
                     best = Some((candidate.entity, aim_pos, rank, TargetSource::Scanned));
                 }
             });
-            if enforce_los && let Some(hm) = heightmap.as_deref() {
+            if defer_lof {
                 // Stable sort: equal ranks keep the scan order, so the
                 // same unit wins as the strict `<` pick.
                 los_candidates.sort_by_key(|a| a.0);
                 let aoe_radius = weapon_def.area_of_effect * 0.5;
+                let ground_clear = |aim_pos: Vec3| match heightmap.as_deref() {
+                    Some(hm) if enforce_los => {
+                        line_of_fire_clear(hm, aim_from, aim_pos, aoe_radius)
+                    }
+                    _ => true,
+                };
                 best = los_candidates
                     .iter()
-                    .find(|(_, _, aim_pos)| line_of_fire_clear(hm, aim_from, *aim_pos, aoe_radius))
+                    .find(|(_, _, aim_pos)| ground_clear(*aim_pos) && lof_clear(*aim_pos))
                     .map(|&(rank, entity, aim_pos)| (entity, aim_pos, rank, TargetSource::Scanned));
             }
         }
 
         let Some((target_entity, target_pos, rank, source)) = best else {
-            clear(&mut commands, entity, &aim_slot);
+            match blocked_explicit {
+                Some(pos) => {
+                    let aim = AimTarget {
+                        pos,
+                        launch: AimLaunch::of(Some(weapon_def), map_gravity),
+                    };
+                    put(&mut commands, entity, &mut aim_slot, aim);
+                }
+                None => clear(&mut commands, entity, &aim_slot),
+            }
             if scanned {
                 let cache = TargetCache {
                     target: None,
@@ -1034,6 +1141,17 @@ pub fn combat_system(
             continue;
         }
         if pieces.muzzle_buried(entity, attacker_gtf) {
+            continue;
+        }
+        // `UpdateFire` → `TryTarget(.., preFire)`: an ally has stepped
+        // into the line of the kept auto-target (explicit and freshly
+        // scanned targets were tested this tick). Hold the shot and
+        // rescan now (`AllowWeaponAutoTarget`: a target failing
+        // `TryTarget` may be replaced).
+        if source == TargetSource::Cached && ally_check && !lof_clear(target_pos) {
+            if let Some(cache) = cache_slot.as_deref_mut() {
+                cache.rescan_frame = frame;
+            }
             continue;
         }
 
@@ -1143,11 +1261,19 @@ fn open_salvo(
     }
 }
 
-/// The aim-before-fire gates for units whose script doesn't gate
-/// itself: body heading (Deployable — the Pointer turns its whole body),
-/// the Pointer's `gunbase` pitch, the Byte's `aimer` yaw/pitch. Uses the
+/// The host-side aim-before-fire gates: body heading (Deployable — the
+/// Pointer turns its whole body, which no script waits for), the
+/// Pointer's `gunbase` pitch, the Byte's `aimer` yaw/pitch. Uses the
 /// same unit-relative [`aim::local_aim_angles`] the aim script receives,
 /// so gate and slew converge on the same numbers.
+///
+/// The gunbase / aimer checks repeat the `wait-for-turn`s the Pointer
+/// and Byte drivers now do (`AnimRig::turn_settled`), but are not
+/// redundant: [`AimScript::ready`] is computed by `drive_aim_script`
+/// *before* `combat_system` picks this tick's target, so on a target
+/// switch it still describes the old one; and `attack_ground_system`
+/// never reads it. These checks measure the live target (the role of
+/// the engine's own `angleGood` test in `CWeapon::CanFire`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn aim_gates_pass(
     entity: Entity,
@@ -1254,11 +1380,13 @@ pub fn attack_ground_system(
             Option<&AimTarget>,
             Has<super::mechanics::command_fire::NxCast>,
             Option<&UnitStats>,
+            &TeamId,
         ),
         // `CUnit::CanUpdateWeapons`: a paralyzed unit doesn't fire.
         (Without<Dying>, Without<Stunned>),
     >,
     cooldowns: Query<&AttackCooldown>,
+    spatial: Res<SpatialIndex>,
     mut pieces: PieceLookup,
     time: Res<Time>,
     mut commands: Commands,
@@ -1282,6 +1410,7 @@ pub fn attack_ground_system(
         aim,
         nx_cast,
         stats,
+        team,
     ) in &attackers
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0`.
@@ -1385,6 +1514,11 @@ pub fn attack_ground_system(
             &pieces,
         ) || pieces.muzzle_buried(entity, gtf)
         {
+            continue;
+        }
+        // `TryTarget` → `HaveFreeLineOfFire` holds a ground shot too
+        // while an ally is in the way of an `avoidfriendly=1` weapon.
+        if !free_line_of_fire(weapon_def, &spatial, entity, team.0, aim_from, order.pos) {
             continue;
         }
 
@@ -2340,6 +2474,181 @@ mod tests {
             }
         }
         assert_eq!(shots, vec![0, 15, 30, 45], "{bit:?}");
+    }
+
+    /// The Bug's `BugShot`: a traveling LaserCannon with
+    /// `avoidfriendly=1`, no spray.
+    fn bugshot(avoid_friendly: bool) -> spring_tdf::WeaponDef {
+        spring_tdf::WeaponDef {
+            weapon_type: "LaserCannon".into(),
+            damage: spring_tdf::DamageMap {
+                default: 80.0,
+                ..Default::default()
+            },
+            weapon_velocity: 512.0,
+            range: 256.0,
+            reload_time: 0.5,
+            avoid_friendly,
+            ..Default::default()
+        }
+    }
+
+    /// A unit of team 0 (the shooters' side) in the spatial index.
+    fn ally_entry(app: &mut App, pos: Vec3, hit_radius: f32) -> Entity {
+        let ally = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: ally,
+                pos,
+                hit_radius,
+                mid_y: 0.0,
+                team: 0,
+                kind: UnitKind::Bit,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+            });
+        ally
+    }
+
+    /// `HaveFreeLineOfFire`'s friendly trace: only an ally of the
+    /// shooter whose collision sphere the aim ray crosses, short of the
+    /// target, blocks an `avoidfriendly=1` weapon; enemies, the shooter
+    /// itself and units beside or beyond the line don't, and weapons
+    /// without the tag (or off the straight-line path) never hold fire.
+    #[test]
+    fn free_line_of_fire_traces_allies_only() {
+        let mut app = combat_app(WeaponRegistry::default());
+        let owner = ally_entry(&mut app, Vec3::ZERO, 10.0);
+        ally_entry(&mut app, Vec3::new(0.0, 0.0, 300.0), 10.0); // beyond
+        ally_entry(&mut app, Vec3::new(30.0, 0.0, 100.0), 10.0); // beside
+        enemy_entry(&mut app, Vec3::new(0.0, 0.0, 120.0), false, 0); // in front
+        let spatial = app.world().resource::<SpatialIndex>();
+        let (from, to) = (Vec3::ZERO, Vec3::new(0.0, 0.0, 200.0));
+        let avoid = bugshot(true);
+        assert!(free_line_of_fire(&avoid, spatial, owner, 0, from, to));
+
+        ally_entry(&mut app, Vec3::new(8.0, 0.0, 100.0), 10.0); // grazed
+        let spatial = app.world().resource::<SpatialIndex>();
+        assert!(!free_line_of_fire(&avoid, spatial, owner, 0, from, to));
+        assert!(free_line_of_fire(
+            &bugshot(false),
+            spatial,
+            owner,
+            0,
+            from,
+            to
+        ));
+        let melee = spring_tdf::WeaponDef {
+            weapon_type: "Melee".into(),
+            avoid_friendly: true,
+            ..Default::default()
+        };
+        assert!(free_line_of_fire(&melee, spatial, owner, 0, from, to));
+        // A spraying weapon tests the widening cone instead: at 150
+        // elmos, 1000 `sprayangle` units (sin ≈ 0.07) widen it to
+        // ~11.5 elmos, reaching an ally whose sphere the ray misses.
+        let sprayed = spring_tdf::WeaponDef {
+            spray_angle: 1000.0,
+            ..bugshot(true)
+        };
+        let mut app = combat_app(WeaponRegistry::default());
+        ally_entry(&mut app, Vec3::new(12.0, 0.0, 150.0), 2.0);
+        let spatial = app.world().resource::<SpatialIndex>();
+        let nobody = Entity::PLACEHOLDER;
+        assert!(free_line_of_fire(&avoid, spatial, nobody, 0, from, to));
+        assert!(!free_line_of_fire(&sprayed, spatial, nobody, 0, from, to));
+    }
+
+    /// Why: units with `avoidfriendly=1` weapons happily shot through
+    /// their own crowd. `AutoTarget` → `TryTarget` skips a candidate
+    /// whose line of fire an ally blocks and takes the next free one;
+    /// with none free, the unit holds its fire.
+    #[test]
+    fn avoid_friendly_shooter_picks_a_target_it_can_hit_without_allies_in_the_way() {
+        let mut weapons = WeaponRegistry::default();
+        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let mut app = combat_app(weapons);
+        let bug = spawn_bit_shooter(&mut app, shot);
+        let near = live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
+        let far = live_enemy(&mut app, UnitKind::Bit, Vec3::new(0.0, 0.0, 200.0), 0.0);
+        ally_entry(&mut app, Vec3::new(50.0, 0.0, 0.0), 10.0);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(cached_target(&app, bug), Some(far), "{near:?} is screened");
+        assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
+
+        // Nothing free: no target, no shot.
+        let mut weapons = WeaponRegistry::default();
+        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let mut app = combat_app(weapons);
+        let bug = spawn_bit_shooter(&mut app, shot);
+        live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
+        ally_entry(&mut app, Vec3::new(50.0, 0.0, 0.0), 10.0);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(cached_target(&app, bug), None);
+        assert!(app.world().resource::<PendingAttacks>().events.is_empty());
+    }
+
+    /// `UpdateFire`'s pre-fire `TryTarget`: an ally that walks into the
+    /// line of the kept target stops the next shot and forces a rescan.
+    #[test]
+    fn ally_stepping_into_the_line_holds_the_next_shot() {
+        let mut weapons = WeaponRegistry::default();
+        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let mut app = combat_app(weapons);
+        // A good target, kept for the 65-frame retry window.
+        app.insert_resource(bit_vs_socket_registry());
+        let bug = spawn_bit_shooter(&mut app, shot);
+        let enemy = live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(cached_target(&app, bug), Some(enemy));
+        app.world_mut()
+            .resource_mut::<PendingAttacks>()
+            .events
+            .clear();
+        ally_entry(&mut app, Vec3::new(50.0, 0.0, 0.0), 10.0);
+        advance_frames(&mut app, 15);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert!(
+            app.world().resource::<PendingAttacks>().events.is_empty(),
+            "reloaded, but an ally is in the way"
+        );
+        assert_eq!(
+            app.world().get::<TargetCache>(bug).unwrap().rescan_frame,
+            15
+        );
+        // The rescan finds nothing free and stands down.
+        advance_frames(&mut app, 1);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(cached_target(&app, bug), None);
+    }
+
+    /// A user target screened by an ally is tracked but not shot, and
+    /// the weapon engages a free target meanwhile — `AllowWeaponAutoTarget`
+    /// allows auto-targeting while the user target fails `TryTarget`.
+    #[test]
+    fn screened_user_target_is_tracked_while_a_free_one_is_shot() {
+        let mut weapons = WeaponRegistry::default();
+        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let mut app = combat_app(weapons);
+        let bug = spawn_bit_shooter(&mut app, shot);
+        let ordered = live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
+        ally_entry(&mut app, Vec3::new(50.0, 0.0, 0.0), 10.0);
+        app.world_mut()
+            .entity_mut(bug)
+            .insert(ForcedTarget(ordered));
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert!(app.world().resource::<PendingAttacks>().events.is_empty());
+        let aim = app.world().get::<AimTarget>(bug).expect("still tracking");
+        assert_eq!(aim.pos, Vec3::new(100.0, 0.0, 0.0));
+
+        let other = live_enemy(&mut app, UnitKind::Bit, Vec3::new(0.0, 0.0, 150.0), 0.0);
+        advance_frames(&mut app, 15);
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(cached_target(&app, bug), Some(other));
+        assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
     }
 
     /// mineblaster.bos: the Debug never auto-targets (`AimWeapon1`

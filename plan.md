@@ -57,7 +57,9 @@ bonus (forced open) — see §1.6.
 
 ### 1.6 Damage Modifiers — ✅ DONE
 
-`avoidfriendly=1` and `noselfdamage=1` filter the splash set; FBI `DamageModifier`
+Splash hits every unit in the radius (engine `DoExplosionDamage` has no team filter);
+`noselfdamage=1` spares the attacker, `avoidfriendly=1` only gates firing (an ally in the
+line of fire holds the shot). FBI `DamageModifier`
 applied to every damage event, with values under `0.01` treated as the upstream Spring
 engine-disable hack and normalised to `1.0` while explicit design values like
 Socket/Window/Port/Firewall's `4×` pass through unchanged.
@@ -68,13 +70,13 @@ SIGTERM bombs and stunned Bytes bypass the gate, mirroring upstream's `id == 168
 exception and `lua_IsParalyzed` branch. Infection chain wired via `Infected` +
 `VirusSpawnQueue`.
 
-Deferred: `collidefriendly` on projectile physics (weapons don't have projectile
-collision yet — §4.2). Generalising `HitByWeaponId` for Hole/Carrier/Expbase if those
+`collidefriendly=1` lets traveling projectiles collide with allies in their path (every
+damaging KP weapon sets 0). Deferred: generalising `HitByWeaponId` for Hole/Carrier/Expbase if those
 turn out to need it.
 
 ### 1.7 Auto-Heal — ✅ DONE
 
-`IdleTimer` component tracks seconds since last damage / move order / aim target.
+`IdleTimer` component tracks seconds since the last damage taken (upstream `restTime`).
 Once `IdleTime` (sim frames, 30/s) elapses, `auto_heal` regens at `IdleAutoHeal` HP/s.
 Wires Byte's 400 HP/s after 20s, Worm's 300 HP/s after ~13s, homebase regen, etc.
 

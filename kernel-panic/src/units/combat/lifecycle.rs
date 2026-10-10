@@ -13,14 +13,14 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
-use super::{AimTarget, IdleTimer, StunCharge};
-use crate::interaction::movement::{MovePath, MoveTarget};
+use super::{IdleTimer, StunCharge};
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::{DeathBlast, WeaponRegistry};
 use crate::units::lifecycle::bookkeeping::{IdleAutoHeal, Kamikaze};
+use crate::units::lifecycle::spawning::{BuildDriven, Emerging};
 use crate::units::spatial::SpatialIndex;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
@@ -106,10 +106,19 @@ pub struct Stunned {
 /// dissipate if no further paralyzer damage lands.
 const STUN_CHARGE_DECAY: f32 = 4.0;
 
-/// Regenerate HP on units that have been idle long enough.
-/// A unit counts as idle when it has no move order and no current aim
-/// target. The idle timer is reset in `apply_damage` whenever the unit
-/// takes damage. Units whose FBI lacks `IdleAutoHeal` (value 0) carry no
+/// Regenerate HP: FBI `AutoHeal` always, `IdleAutoHeal` once the unit
+/// has rested past its `IdleTime` (`CUnit::SlowUpdate`:
+/// `health += idleAutoHeal * (restTime > idleTime)`, Unit.cpp:1097).
+/// "Resting" means not bleeding: `restTime` counts every frame
+/// (Unit.cpp:689) and only taking damage resets it
+/// (`DamageResolver::deliver`, Unit.cpp:1336 `bleeding != resting`; the
+/// other reset, reclaim at Unit.cpp:2068, has no Kernel Panic
+/// counterpart). Moving, aiming and shooting don't, so a Flow circling
+/// unhurt, or a Bit marching across the map, heals all the way.
+/// A paralyzed unit neither heals nor rests (`Update` returns before the
+/// `restTime` tick, `SlowUpdate` before the heal), nor does one still
+/// being built ([`Emerging`]: both return early for `beingBuilt`).
+/// Units whose FBI lacks `IdleAutoHeal` (value 0) carry no
 /// [`IdleAutoHeal`] marker (`bookkeeping::tag_unit_kinds`) and opt out.
 ///
 /// A unit at 0 HP is already dead — `death_system` just hasn't seen it
@@ -122,35 +131,22 @@ const STUN_CHARGE_DECAY: f32 = 4.0;
 pub fn auto_heal(
     time: Res<Time>,
     mut query: Query<
-        (
-            &IdleAutoHeal,
-            &mut Health,
-            &mut IdleTimer,
-            Option<&MoveTarget>,
-            Option<&MovePath>,
-            Option<&AimTarget>,
-        ),
-        Without<Dying>,
+        (&IdleAutoHeal, &mut Health, &mut IdleTimer),
+        (Without<Dying>, Without<Stunned>, Without<Emerging>),
     >,
 ) {
     let dt = time.delta_secs();
-    for (heal, mut health, mut idle, move_target, move_path, aim) in &mut query {
+    for (heal, mut health, mut idle) in &mut query {
         if health.current <= 0.0 {
             continue;
         }
-        // FBI `AutoHeal`: heals whether idle or not.
-        if heal.always > 0.0 && health.current < health.max {
-            health.current = (health.current + heal.always * dt).min(health.max);
-        }
-        let is_active = move_target.is_some() || move_path.is_some() || aim.is_some();
-        if is_active {
-            idle.0 = 0.0;
-            continue;
-        }
-
         idle.0 += dt;
-        if idle.0 >= heal.threshold && health.current < health.max {
-            health.current = (health.current + heal.rate * dt).min(health.max);
+        if health.current < health.max {
+            let mut rate = heal.always;
+            if idle.0 > heal.threshold {
+                rate += heal.rate;
+            }
+            health.current = (health.current + rate * dt).min(health.max);
         }
     }
 }
@@ -228,7 +224,9 @@ pub fn tick_kamikaze(
 /// queued as a self-hit at the corpse position so its AoE splash + per-
 /// weapon infection window can chain through nearby units — this is what
 /// spreads the Virus outbreak, flattens the crowd around a dying Byte,
-/// and gives big units their signature death boom.
+/// and gives big units their signature death boom. A unit still being
+/// built ([`BuildDriven`]) dies without blast or Killed() script and is
+/// despawned at once, like upstream's `beingBuilt` kill.
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn death_system(
     query: Query<
@@ -239,6 +237,7 @@ pub fn death_system(
             &Faction,
             &GlobalTransform,
             Option<&Infected>,
+            Has<BuildDriven>,
         ),
         (Without<Dying>, Changed<Health>),
     >,
@@ -250,23 +249,38 @@ pub fn death_system(
     weapon_registry: Res<WeaponRegistry>,
     mut commands: Commands,
 ) {
-    for (entity, unit, health, faction, gtf, infected) in &query {
+    for (entity, unit, health, faction, gtf, infected, being_built) in &query {
         if health.current <= 0.0 {
-            // Drive the Killed() animation if the unit has an animator.
-            if let Ok(mut animator) = animators.get_mut(entity) {
-                let crate::units::assets::animation::UnitAnimator { rig, driver, .. } =
-                    &mut *animator;
-                driver.killed(rig, crate::units::assets::animation::AnimCtx::minimal());
-            }
-
             // If the dying unit was infected, queue a Virus spawn for the
-            // attacker's team at the death location.
+            // attacker's team at the death location (infection.lua's
+            // `UnitDestroyed` fires for nanoframes too).
             if let Some(infected) = infected {
                 virus_spawns.push(VirusSpawn {
                     position: gtf.translation(),
                     faction: infected.attacker_faction,
                     team: infected.attacker_team,
                 });
+            }
+
+            // `ForcedKillUnit` (Unit.cpp:492): `deathScriptFinished =
+            // (reclaimed || beingBuilt)` returns before the death
+            // explosion and `script->Killed()` — a half-built unit (a
+            // nanoframe, a factory product still on the pad) just goes,
+            // as if reclaimed. A game-over `KillTeam` must not detonate
+            // an eliminated team's half-built Logic Bomb.
+            if being_built {
+                commands
+                    .entity(entity)
+                    .remove::<Infected>()
+                    .insert(Dying { timer: 0.0 });
+                continue;
+            }
+
+            // Drive the Killed() animation if the unit has an animator.
+            if let Ok(mut animator) = animators.get_mut(entity) {
+                let crate::units::assets::animation::UnitAnimator { rig, driver, .. } =
+                    &mut *animator;
+                driver.killed(rig, crate::units::assets::animation::AnimCtx::minimal());
             }
 
             // Fire the FBI `ExplodeAs` weapon as a self-hit at the corpse.
@@ -304,7 +318,6 @@ pub fn death_system(
                     weapon: blast.weapon,
                     impact_pos: pos,
                     attacker_distance: 0.0,
-                    owner_team: None,
                 });
 
                 explosions.events.push(ExplosionEvent {
@@ -558,5 +571,85 @@ mod tests {
             .collect();
         assert_eq!(blasts, vec![logic_bomb], "exactly one logic_bomb blast");
         assert!(world.get::<Dying>(bomb).is_some());
+    }
+
+    /// Why: a killed nanoframe fired its `ExplodeAs` — a game-over
+    /// `KillTeam` detonated an eliminated team's half-built Logic Bomb.
+    /// `ForcedKillUnit` returns before the explosion and `Killed()` for
+    /// a `beingBuilt` unit (Unit.cpp:492); an infection still spawns its
+    /// Virus (`UnitDestroyed` fires first).
+    #[test]
+    fn killed_nanoframe_neither_explodes_nor_lingers() {
+        let weapons = WeaponRegistry::load();
+        let mut world = resolve_world(UnitRegistry::load(), weapons);
+        let frame = world
+            .spawn((
+                UnitType(UnitKind::LogicBomb),
+                Faction::Hacker,
+                TeamId(0),
+                GlobalTransform::default(),
+                Health::full(100.0),
+                BuildDriven::default(),
+                Infected {
+                    timer: 3.0,
+                    attacker_faction: Faction::System,
+                    attacker_team: 1,
+                },
+            ))
+            .id();
+        world.get_mut::<Health>(frame).unwrap().current = 0.0;
+        world.run_system_once(death_system).unwrap();
+        assert!(world.resource::<DamageQueue>().is_empty(), "no blast");
+        assert!(world.resource::<PendingExplosions>().events.is_empty());
+        assert!(!world.resource::<VirusSpawnQueue>().is_empty());
+        assert!(world.get::<Dying>(frame).is_some());
+        world.run_system_once(cleanup_dying).unwrap();
+        assert!(world.get_entity(frame).is_err(), "gone at once");
+    }
+
+    fn healer(world: &mut World, hp: f32, rested: f32) -> Entity {
+        let mut health = Health::full(100.0);
+        health.current = hp;
+        world
+            .spawn((
+                health,
+                IdleAutoHeal {
+                    rate: 30.0,
+                    threshold: 20.0,
+                    always: 0.0,
+                },
+                IdleTimer(rested),
+            ))
+            .id()
+    }
+
+    /// Why: `auto_heal` restarted the rest clock on every move order,
+    /// path or aim target, so a moving Flow or a marching Bit never
+    /// idle-healed. Upstream `restTime` ticks every frame and only
+    /// damage resets it (Unit.cpp:689, 1336); the heal needs
+    /// `restTime > idleTime` (Unit.cpp:1097). Paralysis and being built
+    /// freeze both.
+    #[test]
+    fn idle_heal_counts_only_time_since_damage() {
+        let mut world = resolve_world(UnitRegistry::empty(), WeaponRegistry::default());
+        let marching = healer(&mut world, 50.0, 25.0);
+        world.entity_mut(marching).insert((
+            crate::interaction::movement::MoveTarget(Vec3::X * 500.0),
+            super::super::AimTarget {
+                pos: Vec3::X * 100.0,
+                launch: super::super::AimLaunch::Direct,
+            },
+        ));
+        let fresh = healer(&mut world, 50.0, 0.0);
+        let stunned = healer(&mut world, 50.0, 25.0);
+        world.entity_mut(stunned).insert(Stunned { remaining: 5.0 });
+        world.run_system_once(auto_heal).unwrap();
+
+        assert!((world.get::<Health>(marching).unwrap().current - 51.0).abs() < 1e-3);
+        assert!(world.get::<IdleTimer>(marching).unwrap().0 > 25.0);
+        assert_eq!(world.get::<Health>(fresh).unwrap().current, 50.0);
+        assert!(world.get::<IdleTimer>(fresh).unwrap().0 > 0.0, "rests on");
+        assert_eq!(world.get::<Health>(stunned).unwrap().current, 50.0);
+        assert_eq!(world.get::<IdleTimer>(stunned).unwrap().0, 25.0);
     }
 }

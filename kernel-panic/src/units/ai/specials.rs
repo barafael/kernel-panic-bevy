@@ -7,13 +7,14 @@ use crate::units::spatial::flat_dist_sq;
 
 /// Cluster radius for "crowded" (upstream `GetUnitsInCylinder(..,300)`).
 pub const CROWD_RADIUS: f32 = 300.0;
-/// Enemies in [`CROWD_RADIUS`] before a Terminal spends SIGTERM on it
-/// (upstream `crowdedarea` needs `es > 15`).
-pub const SIGTERM_CROWD_MIN: usize = 15;
+/// A spot is `crowdedarea` once more than this many units — of any
+/// team: the `,t)` team filter is commented out — stand within
+/// [`CROWD_RADIUS`] (`SelectForceFor`: `if es > 15`). It gates both the
+/// Terminal's SIGTERM and the Pointers' NX Flags (`DispatchArty(..,
+/// crowdedarea > 0)`).
+pub const CROWDED_ABOVE: usize = 15;
 /// Minimum spacing between one team's SIGTERMs (`lastNuke < f - 15*30`).
 pub const SIGTERM_INTERVAL: f32 = 15.0;
-/// Enemies a Pointer wants in the cluster before planting an NX Flag.
-pub const NX_CROWD_MIN: usize = 8;
 /// NX Flag weapon range (`retroweapons.tdf [nx] range=1400`).
 pub const NX_RANGE: f32 = 1400.0;
 /// Obelisk targets the nearest enemy within this range
@@ -74,21 +75,17 @@ pub fn firewall_should_cast(
 }
 
 /// Crowded-cluster pick for area abilities: the enemy position with the
-/// most enemies within `radius`, provided there are at least
-/// `min_enemies` and the ability (both SIGTERM and NX hurt friends)
-/// would not hit more than half as many of our own units. Returns the
-/// center and its enemy count.
+/// most units — enemies and our own alike — within `radius`, provided
+/// there are more than [`CROWDED_ABOVE`]. Returns the center and its
+/// unit count.
 ///
-/// Upstream fires at the chosen mission spot once `es > 15`; picking
-/// the densest enemy unit instead keeps the logic spot-free. Candidate
-/// centers are strided down to ~64 so the O(n²) count stays cheap at
-/// 1 Hz on large armies.
-pub fn crowded_cluster(
-    enemies: &[Vec3],
-    friends: &[Vec3],
-    radius: f32,
-    min_enemies: usize,
-) -> Option<(Vec3, usize)> {
+/// Upstream fires at the chosen mission spot (an enemy-held one) once
+/// `es > 15`, counting every unit there with no regard for its own
+/// (KPAI.lua / KPAI_Fair.lua `SelectForceFor`); SIGTERM and NX hurt
+/// friends, and KPAI fires them anyway. Picking the densest enemy unit
+/// instead keeps the logic spot-free. Candidate centers are strided
+/// down to ~64 so the O(n²) count stays cheap at 1 Hz on large armies.
+pub fn crowded_cluster(enemies: &[Vec3], friends: &[Vec3], radius: f32) -> Option<(Vec3, usize)> {
     let r_sq = radius * radius;
     let within =
         |c: Vec3, pts: &[Vec3]| pts.iter().filter(|p| flat_dist_sq(**p, c) <= r_sq).count();
@@ -97,8 +94,8 @@ pub fn crowded_cluster(
         .iter()
         .step_by(stride)
         .filter_map(|&c| {
-            let n = within(c, enemies);
-            (n >= min_enemies && within(c, friends) * 2 <= n).then_some((c, n))
+            let n = within(c, enemies) + within(c, friends);
+            (n > CROWDED_ABOVE).then_some((c, n))
         })
         .max_by_key(|&(_, n)| n)
 }
@@ -138,27 +135,31 @@ mod tests {
     fn crowded_cluster_finds_densest_blob() {
         let mut enemies = blob(Vec3::new(2000.0, 0.0, 0.0), 20);
         enemies.extend(blob(Vec3::new(-2000.0, 0.0, 0.0), 10));
-        let (c, n) = crowded_cluster(&enemies, &[], CROWD_RADIUS, SIGTERM_CROWD_MIN).unwrap();
+        let (c, n) = crowded_cluster(&enemies, &[], CROWD_RADIUS).unwrap();
         assert!(c.x > 1000.0);
         assert_eq!(n, 20);
     }
 
+    /// `es > 15`: sixteen units make a crowd, fifteen don't.
     #[test]
-    fn crowded_cluster_needs_minimum() {
-        let enemies = blob(Vec3::ZERO, 14);
-        assert!(crowded_cluster(&enemies, &[], CROWD_RADIUS, SIGTERM_CROWD_MIN).is_none());
-        assert!(crowded_cluster(&enemies, &[], CROWD_RADIUS, NX_CROWD_MIN).is_some());
+    fn crowded_cluster_needs_more_than_fifteen() {
+        assert!(crowded_cluster(&blob(Vec3::ZERO, 15), &[], CROWD_RADIUS).is_none());
+        assert!(crowded_cluster(&blob(Vec3::ZERO, 16), &[], CROWD_RADIUS).is_some());
     }
 
-    /// Friendly fire: a blob tangled up with as many of our own units
-    /// is not worth nuking.
+    /// Why: the port vetoed SIGTERM / NX on a blob tangled up with our
+    /// own units — an ally care KPAI doesn't have. Upstream counts every
+    /// unit at the spot (`GetUnitsInCylinder` without the team filter),
+    /// so our own attackers make the crowd too.
     #[test]
-    fn crowded_cluster_spares_friends() {
-        let enemies = blob(Vec3::ZERO, 16);
+    fn crowded_cluster_counts_our_own_units_like_kpai() {
+        let enemies = blob(Vec3::ZERO, 6);
         let friends = blob(Vec3::new(10.0, 0.0, 10.0), 10);
-        assert!(crowded_cluster(&enemies, &friends, CROWD_RADIUS, SIGTERM_CROWD_MIN).is_none());
-        let few = blob(Vec3::ZERO, 3);
-        assert!(crowded_cluster(&enemies, &few, CROWD_RADIUS, SIGTERM_CROWD_MIN).is_some());
+        let (_, n) = crowded_cluster(&enemies, &friends, CROWD_RADIUS).expect("16 units");
+        assert_eq!(n, 16);
+        assert!(crowded_cluster(&enemies, &friends[..9], CROWD_RADIUS).is_none());
+        // No enemy, no spot to fire at.
+        assert!(crowded_cluster(&[], &blob(Vec3::ZERO, 20), CROWD_RADIUS).is_none());
     }
 
     #[test]

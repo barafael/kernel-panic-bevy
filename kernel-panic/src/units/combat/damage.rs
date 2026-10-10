@@ -8,7 +8,8 @@
 //! - [`DamageQueue`]: weapon impacts. [`apply_damage`] (and
 //!   [`apply_death_blasts`] for `ExplodeAs`) turn each into an engine
 //!   `Explosion`: the struck unit plus every unit within
-//!   `areaOfEffect / 2`, falloff per [`splash_falloff`].
+//!   `areaOfEffect / 2`, whatever its team, falloff per
+//!   [`splash_falloff`].
 //! - [`DelayedDamage`]: single-unit [`Hit`]s — far explosion fronts,
 //!   Firewall reflections, and the `Spring.AddUnitDamage` calls of the
 //!   Lua abilities (area denial, the Mine Launcher's HP cost).
@@ -53,13 +54,6 @@ pub struct PendingDamage {
     /// was queued. Used by dynamic-damage weapons (BugCannon) to scale
     /// the primary hit; zero is fine for single-range weapons.
     pub attacker_distance: f32,
-    /// The attacker's team, captured when the attacker may be gone by
-    /// the time the hit is drained (a projectile whose shooter died in
-    /// flight — the engine keeps the projectile's `teamID`). Used for
-    /// `avoidfriendly` splash filtering; `None` reads it from the live
-    /// attacker. Infection and Firewall reflection still need the
-    /// attacker alive, as upstream (a dead owner is a nil `attackerID`).
-    pub owner_team: Option<u8>,
 }
 
 impl PendingDamage {
@@ -74,14 +68,14 @@ impl PendingDamage {
             weapon,
             impact_pos,
             attacker_distance: 0.0,
-            owner_team: None,
         }
     }
 }
 
 /// Pending damage to apply after combat resolution.
 ///
-/// Lifecycle: producers `push` (combat shots, kamikaze triggers,
+/// Lifecycle: producers `push` (hitscan shots and projectile impacts,
+/// Wormsplash bites, the Debug's Minekiller blast,
 /// death-system `ExplodeAs` self-hits, the SIGTERM bomb), and the two
 /// drains — [`apply_damage`], and [`apply_death_blasts`] right behind
 /// `death_system` — are the only consumers, each emptying the queue. There is
@@ -286,7 +280,10 @@ pub fn update_armored(
     for (entity, mut flag) in &mut armored {
         flag.after_build -= dt;
         if flag.after_build <= 0.0 {
-            commands.entity(entity).remove::<Armored>();
+            // `try_remove`: the unit may be despawned earlier in the
+            // same flush (a Bug packing into an Exploit, a Packet
+            // entering a teleporter).
+            commands.entity(entity).try_remove::<Armored>();
         }
     }
     for (entity, unit, being_built) in &added {
@@ -691,7 +688,6 @@ impl DamagePass<'_, '_> {
                 team: team.0,
                 faction: *faction,
             });
-        let owner_team = attacker.map(|a| a.team).or(pending.owner_team);
         let paralyze_time = weapon_def.paralyzer.then_some(weapon_def.paralyze_time);
         // `GetDynamicDamages` scales the projectile's whole damage array,
         // so the falloff reaches splash victims too.
@@ -760,7 +756,6 @@ impl DamagePass<'_, '_> {
         // least 1 (`CGameHelper::Explosion`).
         let aoe = (weapon_def.area_of_effect * 0.5).max(1.0);
         let edge_mult = weapon_def.edge_effectiveness;
-        let avoid_friendly = weapon_def.avoid_friendly;
         let no_self_damage = weapon_def.no_self_damage;
         // Collect first, then deliver — delivery borrows the victim
         // queries mutably, so it can't run inside the spatial callback.
@@ -773,13 +768,13 @@ impl DamagePass<'_, '_> {
                 if pending.target == Some(candidate.entity) {
                     return;
                 }
+                // `DoExplosionDamage` (GameHelper.cpp:122) skips only the
+                // owner, and only for `ignoreOwner` (`noSelfDamage`; also
+                // `noExplode`, set only by the unused FakeBugCannon).
+                // There is no team filter: allies in the blast take it
+                // like anyone else. `avoidfriendly` is a firing rule
+                // ([`super::free_line_of_fire`]), not a damage one.
                 if no_self_damage && candidate.entity == pending.attacker {
-                    return;
-                }
-                if avoid_friendly
-                    && let Some(team) = owner_team
-                    && crate::units::components::is_friendly(candidate.team, team)
-                {
                     return;
                 }
                 // Distance to the collision sphere's surface
@@ -822,16 +817,19 @@ impl DamagePass<'_, '_> {
 /// engine `Explosion` whose victims — the struck unit, then everything
 /// whose collision sphere lies within `areaOfEffect / 2` of the impact
 /// (falloff per [`splash_falloff`]) — each take one `DoDamage`
-/// ([`DamageResolver::deliver`]). `avoidfriendly=1` and `noselfdamage=1`
-/// filter the splash set so allies / the attacker don't eat stray AoE.
+/// ([`DamageResolver::deliver`]). Allies are hit like enemies, as in the
+/// engine; only `noselfdamage=1` spares the attacker itself. The
+/// friendly-fire rules Kernel Panic's gadgets add live in `deliver`
+/// (infection and Firewall reflection skip the attacker's own team) and
+/// in the area-denial zones (`damageFriendly`).
 pub fn apply_damage(mut pass: DamagePass) {
     pass.run();
 }
 
 /// The same drain, run right behind `death_system`: a dying unit's
 /// `ExplodeAs` goes off in `KillUnit` the frame it dies, while the
-/// corpse is still a unit — so its blast is credited to it (avoid-
-/// friendly filtering, VirusDeath's infection team) before
+/// corpse is still a unit — so its blast is credited to it
+/// (VirusDeath's infection team, `noselfdamage`) before
 /// `cleanup_dying` can despawn it.
 pub fn apply_death_blasts(mut pass: DamagePass) {
     pass.run();
@@ -1183,7 +1181,6 @@ mod tests {
             weapon,
             impact_pos: at,
             attacker_distance: 0.0,
-            owner_team: None,
         }
     }
 
@@ -1268,7 +1265,6 @@ mod tests {
                 weapon: WeaponId::BUILD_LASER,
                 impact_pos: Vec3::ZERO,
                 attacker_distance: 0.0,
-                owner_team: None,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -1284,8 +1280,10 @@ mod tests {
     /// Why: upstream infection.lua infects on every `UnitDamaged` from an
     /// infector weapon, so a target-less Wormsplash detonation (worm.bos
     /// `emit-sfx 4097`) must tag enemy splash victims with `Infected` —
-    /// that is what turns Worm kills into Viruses. Friendlies are
-    /// skipped by `avoidfriendly=1` and never infected.
+    /// that is what turns Worm kills into Viruses. The Worm's allies in
+    /// the blast take the damage too (`DoExplosionDamage` has no team
+    /// filter; `avoidfriendly=1` only governs firing) but are never
+    /// infected (`unitTeam ~= attackerTeam`).
     #[test]
     fn wormsplash_splash_infects_enemy_victims() {
         let mut weapons = WeaponRegistry::default();
@@ -1324,7 +1322,10 @@ mod tests {
         assert_eq!(infected.attacker_faction, Faction::Hacker);
         assert!((infected.timer - 200.0 / 30.0).abs() < 1e-4);
 
-        assert!((hp(&app, friend) - 1000.0).abs() < 1e-3);
+        assert!(
+            (hp(&app, friend) - 200.0).abs() < 1e-3,
+            "splash hurts allies like the engine"
+        );
         assert!(app.world().get::<Infected>(friend).is_none());
     }
 
@@ -1555,8 +1556,8 @@ mod tests {
     }
 
     /// Why: a dying Virus's `VirusDeath` used to be drained the tick
-    /// after `cleanup_dying` despawned it, so the blast had no attacker:
-    /// no infection, no friendly filter. Drained right behind
+    /// after `cleanup_dying` despawned it, so the blast had no attacker
+    /// and infected nobody. Drained right behind
     /// `death_system` (`apply_death_blasts`) the corpse still credits it;
     /// the corpse itself (`Dying`, upstream `isDead`) takes nothing.
     #[test]
@@ -1601,7 +1602,11 @@ mod tests {
             app.world().get::<Infected>(enemy_virus).is_none(),
             "Viruses never"
         );
-        assert!((hp(&app, friend) - 1000.0).abs() < 1e-3);
+        assert!(hp(&app, friend) < 1000.0, "allies in the blast are hit");
+        assert!(
+            app.world().get::<Infected>(friend).is_none(),
+            "but never infected by their own side"
+        );
         assert_eq!(hp(&app, virus), 0.0, "the corpse takes nothing");
     }
 
@@ -1664,13 +1669,12 @@ mod tests {
         assert!((hp(&app, kernel) - 19_000.0).abs() < 1e-2, "homebase, 10%");
     }
 
-    /// Why: the splash filter read the attacker's team from the live
-    /// entity, so a shell whose shooter died in flight splashed the
-    /// shooter's allies. The team captured at launch keeps
-    /// `avoidfriendly` working; infection, which needs a living
-    /// attacker upstream, does not fire.
+    /// A shell whose shooter died in flight still explodes as an
+    /// ordinary `Explosion`: friend and foe in the radius are hit, and
+    /// infection — which needs a living attacker upstream (a dead owner
+    /// is a nil `attackerID`) — does not fire.
     #[test]
-    fn orphaned_shell_keeps_its_team_for_avoid_friendly() {
+    fn orphaned_shell_splashes_everyone_without_infecting() {
         let mut weapons = WeaponRegistry::default();
         let shell = weapons.insert_for_test(
             "VirusBeam",
@@ -1682,7 +1686,6 @@ mod tests {
                 area_of_effect: 200.0,
                 edge_effectiveness: 1.0,
                 explosion_speed_raw: 65535.0,
-                avoid_friendly: true,
                 ..Default::default()
             },
         );
@@ -1691,13 +1694,54 @@ mod tests {
         app.world_mut().despawn(dead_shooter);
         let friend = unit(&mut app, UnitKind::Bit, 1, Vec3::X * 20.0, 1000.0);
         let enemy = unit(&mut app, UnitKind::Bit, 0, Vec3::X * -20.0, 1000.0);
-        let mut hit = shot(None, dead_shooter, shell, Vec3::ZERO);
-        hit.owner_team = Some(1);
-        app.world_mut().resource_mut::<DamageQueue>().push(hit);
+        app.world_mut().resource_mut::<DamageQueue>().push(shot(
+            None,
+            dead_shooter,
+            shell,
+            Vec3::ZERO,
+        ));
         run_damage(&mut app);
-        assert_eq!(hp(&app, friend), 1000.0, "the shooter's ally is spared");
+        assert_eq!(hp(&app, friend), 900.0);
         assert_eq!(hp(&app, enemy), 900.0);
         assert!(app.world().get::<Infected>(enemy).is_none());
+    }
+
+    /// Why: the port filtered `avoidfriendly=1` splash by team, so a
+    /// Bug's or Dos's blast spared every ally. Engine explosions
+    /// (`CGameHelper::DoExplosionDamage`) hit every unit in the radius;
+    /// only `noselfdamage=1` spares the shooter itself.
+    #[test]
+    fn avoid_friendly_splash_still_hits_allies_but_not_a_noselfdamage_shooter() {
+        let mut weapons = WeaponRegistry::default();
+        let beam = weapons.insert_for_test(
+            "DOS_Beam",
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 100.0,
+                    ..Default::default()
+                },
+                area_of_effect: 200.0,
+                edge_effectiveness: 1.0,
+                explosion_speed_raw: 65535.0,
+                avoid_friendly: true,
+                no_self_damage: true,
+                ..Default::default()
+            },
+        );
+        let mut app = damage_app(weapons, UnitRegistry::empty());
+        let shooter = unit(&mut app, UnitKind::Dos, 1, Vec3::X * 60.0, 1000.0);
+        let friend = unit(&mut app, UnitKind::Bit, 1, Vec3::X * 20.0, 1000.0);
+        let target = unit(&mut app, UnitKind::Bit, 0, Vec3::ZERO, 1000.0);
+        app.world_mut().resource_mut::<DamageQueue>().push(shot(
+            Some(target),
+            shooter,
+            beam,
+            Vec3::ZERO,
+        ));
+        run_damage(&mut app);
+        assert_eq!(hp(&app, target), 900.0);
+        assert_eq!(hp(&app, friend), 900.0, "the ally next to the target");
+        assert_eq!(hp(&app, shooter), 1000.0, "noselfdamage");
     }
 
     /// Every hit of half a point or more tells the AI where the team

@@ -340,9 +340,11 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   reference range deal full damage (dynamic damage by distance,
   `dynDamageInverted=1`).
 - AoE weapons splash to nearby units with linear falloff to the edge
-  (`area_of_effect` + `edge_effectiveness`). `avoidfriendly` weapons
-  skip allies in the splash; `noselfdamage` weapons skip the attacker
-  itself.
+  (`area_of_effect` + `edge_effectiveness`). Splash hits allies like
+  enemies, as in the engine; `noselfdamage` weapons skip the attacker
+  itself. `avoidfriendly` weapons (Bug, DOS) instead hold their fire
+  while an ally stands in the line of fire, and pick a target they can
+  hit without one in the way.
 - Shields on secondary factories, Firewall, Terminal, Obelisk,
   Kernel, and Hole soak damage first (shield absorption pass). Finite
   shields regenerate over time when not being hit (`shieldPowerRegen`);
@@ -358,10 +360,11 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   lockdown later (`paralyzer=1` weapons, `StunCharge` accumulator,
   exponential decay).
 - Bits fall over from one DOS hit; Bytes need many.
-- A unit idle long enough (no move order, no aim target) starts
-  regenerating HP. Any incoming damage resets the timer (FBI
-  `IdleAutoHeal` + `IdleTime`). Visible as the unit's health-bar fill
-  creeping back up while the unit stands still.
+- A unit that hasn't been hurt for long enough starts regenerating HP,
+  moving and shooting or not; only incoming damage resets the timer
+  (FBI `IdleAutoHeal` + `IdleTime`, upstream `restTime`). Paralysed
+  units and units still being built don't heal. Visible as the unit's
+  health-bar fill creeping back up.
 - Damage taken visibly drops the world-space HP bar and shifts its
   color toward red.
 
@@ -609,7 +612,7 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 | **Trojan** | Mobile constructor (builds Windows, Obelisks, plus shared Bad Block / Logic Bomb / Debug); detector for mines + cloaked units; same loadout as Assembler with Hacker counterparts |
 | **Bug** | Hacker spam unit. Weaker than the Bit, more range. Can sense movement outside its LOS but can't shoot through friendly units or behind itself. Morphs into Exploit (deploy / bombard command) |
 | **Exploit** | Deployed / morphed form of Bug. Stationary anti-swarm artillery (BugCannon: prefers far targets, *more* damage at range). Even frailer than the Bug |
-| **Worm** | Cloaked stealth assassin. Surfaces to fire a large-AoE bite that turns slain units into Viruses. Splash avoids friendlies (`avoidfriendly=1`). Does practically no damage vs other Worms or Viruses. By default holds fire while cloaked (auto-attack only on manual order; toggle with autohold) |
+| **Worm** | Cloaked stealth assassin. Surfaces to fire a large-AoE bite that turns slain units into Viruses. Splash hurts allies too, but never infects them. Does practically no damage vs other Worms or Viruses. By default holds fire while cloaked (auto-attack only on manual order; toggle with autohold) |
 | **Virus** | Cannot be built. Spawned when units killed by Virus / Worm / Obelisk weapons die. Crappy little swarm unit |
 | **Dos** ("Denial of Service") | Stun-beam unit (DOS_Beam). Bigger targets need longer to stun → use multiple in parallel (a "DDoS"). Target unfreezes quickly once the DOS stops firing. Faster than the Pointer but leaves a long visible particle trail |
 | **Window** | On-datavent secondary factory; builds only Bugs |

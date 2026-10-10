@@ -87,27 +87,7 @@ pub(super) fn spawn_weapon_visuals(
         let is_gauss_arc = weapon_registry.is_gauss_cannon(event.weapon_id);
 
         if is_gauss_arc {
-            spawn_lightning_arc(
-                &event,
-                &mut rng,
-                &mut commands,
-                &mut materials,
-                &mut cache,
-                ArcFlavor::BigArc,
-            );
-        } else if event.build_arc {
-            // Upstream gateway.bos calls lua_BuildArc(center) each frame
-            // it's building — a white, narrower, less jittery cousin of
-            // the shot arc (drawArc shares the geometry; only width,
-            // spray, color differ). Live 16 frames like the gadget.
-            spawn_lightning_arc(
-                &event,
-                &mut rng,
-                &mut commands,
-                &mut materials,
-                &mut cache,
-                ArcFlavor::BuildArc,
-            );
+            spawn_lightning_arc(&event, &mut rng, &mut commands, &mut materials, &mut cache);
         } else if is_melee {
             // Upstream worm.bos `FireWeapon1` telescopes the head and
             // detonates the Wormsplash weapon at the bite points
@@ -255,7 +235,7 @@ pub(super) fn spawn_weapon_visuals(
         // runner this was hand-rolled here — with drifted speed/spread
         // and hash "jitter" — which is exactly the divergence the
         // runtime exists to prevent.
-        if is_build_laser(event.weapon_id) && !event.build_arc {
+        if is_build_laser(event.weapon_id) {
             spawn_ceg(
                 "oldskool_build",
                 event.target_pos,
@@ -1103,7 +1083,7 @@ fn spawn_melee_flash(
 }
 
 /// GaussCannon lightning bolt, mirroring upstream
-/// `LuaRules/Gadgets/network_arceffect.lua::BuildArc`: straight
+/// `LuaRules/Gadgets/network_arceffect.lua::BigArc` (`drawArc`): straight
 /// muzzle→impact line, a 160-elmo arch at the midpoint
 /// (`+160 * (1 − (2t−1)²)`), ±15-elmo jitter shrinking toward the
 /// ends, electric-green tint with randomized red/blue channels.
@@ -1115,19 +1095,8 @@ fn spawn_lightning_arc(
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
-    flavor: ArcFlavor,
 ) {
-    let (width, jitter, lifetime, tint) = match flavor {
-        ArcFlavor::BigArc => (
-            ARC_WIDTH,
-            ARC_JITTER,
-            ARC_LIFETIME,
-            LinearRgba::rgb(0.2 + 0.1 * next_f32(rng), 0.9, 0.2 + 0.1 * next_f32(rng)),
-        ),
-        // gateway.bos BuildArc: `gl.Color(1,1,1)`, drawArc called with
-        // width 2 / spray 5, arc lives 16 frames.
-        ArcFlavor::BuildArc => (2.0, 5.0, frames_to_secs(16.0), LinearRgba::WHITE),
-    };
+    let tint = LinearRgba::rgb(0.2 + 0.1 * next_f32(rng), 0.9, 0.2 + 0.1 * next_f32(rng));
     let start = event.arc_from.unwrap_or(event.attacker_pos);
     let end = event.target_pos;
     let dir = (end - start).normalize_or(Vec3::Z);
@@ -1146,28 +1115,20 @@ fn spawn_lightning_arc(
         points.push(
             start.lerp(end, t)
                 + Vec3::Y * (ARC_ARCH_HEIGHT * arch)
-                + perp1 * (next_signed(rng) * jitter * taper)
-                + perp2 * (next_signed(rng) * jitter * taper),
+                + perp1 * (next_signed(rng) * ARC_JITTER * taper)
+                + perp2 * (next_signed(rng) * ARC_JITTER * taper),
         );
     }
 
     let material = cache.get_or_create(LinearRgba::WHITE, true, materials);
     commands.spawn(LightningArc {
         points,
-        width,
-        lifetime,
-        max_lifetime: lifetime,
+        width: ARC_WIDTH,
+        lifetime: ARC_LIFETIME,
+        max_lifetime: ARC_LIFETIME,
         material,
         tint,
     });
-}
-
-/// The two arc flavors of upstream `network_arceffect.lua`: the Gauss
-/// shot bolt (`BigArc`) and the Gateway's construction strand
-/// (`BuildArc`).
-enum ArcFlavor {
-    BigArc,
-    BuildArc,
 }
 
 /// Arc geometry constants — see [`spawn_lightning_arc`]. Segment count
@@ -1179,9 +1140,9 @@ const ARC_WIDTH: f32 = 3.0;
 /// sim frame; with the port's 4 s reload a single frame would be a
 /// subliminal flicker, so hold it a touch longer.
 const ARC_LIFETIME: f32 = 0.12;
-/// Midpoint arch height, from `BuildArc`'s `+160 * (1 − (2i−1)²)`.
+/// Midpoint arch height, from `drawArc`'s `+160 * (1 − (2i−1)²)`.
 const ARC_ARCH_HEIGHT: f32 = 160.0;
-/// Maximum end-to-end jitter, from `BuildArc`'s ±15 spray.
+/// Maximum end-to-end jitter, from `BigArc`'s ±15 spray.
 const ARC_JITTER: f32 = 15.0;
 
 #[cfg(test)]
@@ -1267,7 +1228,6 @@ mod tests {
                 weapon_id: gauss,
                 muzzle_ceg: None,
                 delayed_hit: None,
-                build_arc: false,
                 arc_from: None,
             });
 
@@ -1318,7 +1278,6 @@ mod tests {
                 weapon_id: bite,
                 muzzle_ceg: None,
                 delayed_hit: None,
-                build_arc: false,
                 arc_from: None,
             });
 
@@ -1345,54 +1304,6 @@ mod tests {
         );
     }
 
-    /// The Gateway's factory build ray renders as the white BuildArc
-    /// (narrower, calmer, no tint randomness) and suppresses the
-    /// standard build sparkle — upstream gateway.bos replaces the
-    /// ordinary build-laser fx with lua_BuildArc.
-    #[test]
-    fn gateway_build_ray_spawns_white_build_arc() {
-        let mut app = fx_app();
-        let weapons = WeaponRegistry::default();
-        let build_laser = weapons.intern("BuildLaser").unwrap();
-        app.insert_resource(weapons);
-
-        app.world_mut()
-            .resource_mut::<PendingAttacks>()
-            .events
-            .push(AttackEvent {
-                attacker_pos: Vec3::ZERO,
-                target_pos: Vec3::new(80.0, 0.0, 0.0),
-                weapon_id: build_laser,
-                muzzle_ceg: None,
-                delayed_hit: None,
-                build_arc: true,
-                arc_from: None,
-            });
-
-        app.world_mut()
-            .run_system_once(spawn_weapon_visuals)
-            .unwrap();
-
-        let world = app.world_mut();
-        let arcs: Vec<&LightningArc> = world
-            .query_filtered::<&LightningArc, ()>()
-            .iter(world)
-            .collect();
-        assert_eq!(arcs.len(), 1);
-        assert_eq!(arcs[0].width, 2.0, "BuildArc draws at width 2");
-        assert_eq!(arcs[0].tint, LinearRgba::WHITE);
-        assert!((arcs[0].max_lifetime - 16.0 / 30.0).abs() < 1e-4);
-
-        let sparkles = world
-            .query_filtered::<&super::super::ceg::CegParticle, ()>()
-            .iter(world)
-            .count();
-        assert_eq!(
-            sparkles, 0,
-            "gateway arcs replace the standard build sparkle"
-        );
-    }
-
     /// Ordinary beam weapons keep their regular visuals — the arc path
     /// must not swallow them.
     #[test]
@@ -1411,7 +1322,6 @@ mod tests {
                 weapon_id: id,
                 muzzle_ceg: None,
                 delayed_hit: None,
-                build_arc: false,
                 arc_from: None,
             });
 

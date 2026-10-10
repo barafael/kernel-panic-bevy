@@ -37,10 +37,6 @@ pub struct AttackEvent {
     /// refcount rather than the name.
     pub muzzle_ceg: Option<Arc<str>>,
     pub delayed_hit: Option<DelayedHitInfo>,
-    /// True for the Gateway's factory build ray: render the upstream
-    /// `BuildArc` white lightning strand (gateway.bos `lua_BuildArc`)
-    /// instead of the standard build-laser beam + sparkle.
-    pub build_arc: bool,
     /// Where the GaussCannon's lightning arc starts, when that isn't
     /// the muzzle: `network_arceffect.lua` draws `BigArc` from the
     /// Connection's piece 3 (`correcter`, on its hull), while the beam
@@ -145,7 +141,7 @@ pub struct PendingExplosions {
 /// positions from muzzle to impact: the straight connecting line plus a
 /// 160-elmo arch at the midpoint (`arch = 160 · (1 − (2t−1)²)`), with
 /// per-point jitter up to ±15 elmos shrinking toward the ends — both
-/// numbers lifted verbatim from the gadget's `BuildArc`.
+/// numbers lifted verbatim from the gadget's `drawArc` / `BigArc`.
 #[derive(Component)]
 pub(super) struct LightningArc {
     pub points: Vec<Vec3>,

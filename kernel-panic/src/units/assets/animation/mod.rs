@@ -994,7 +994,6 @@ fn apply_and_drain(
                         weapon_id: crate::units::content::weapons::WeaponId::BUILD_LASER,
                         muzzle_ceg: None,
                         delayed_hit: None,
-                        build_arc: false,
                         arc_from: None,
                     });
             }

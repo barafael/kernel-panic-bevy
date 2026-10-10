@@ -270,6 +270,7 @@ pub(super) fn tick_weapon_fx(
         } else if let Some(hit) = hit_meta
             && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
                 hit,
+                weapon_registry.by_id(hit.weapon).collide_friendly,
                 prev_lead_pos,
                 curr_lead_pos,
                 &volume_ctx.spatial,
@@ -515,6 +516,7 @@ pub(super) fn tick_weapon_fx(
         } else if let Some(hit) = hit_meta
             && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
                 hit,
+                weapon_registry.by_id(hit.weapon).collide_friendly,
                 seg_start,
                 seg_end,
                 &volume_ctx.spatial,
@@ -687,8 +689,8 @@ fn arrival_hit(
     }
 }
 
-/// Broad-phase second pass: find any non-friendly, non-attacker unit
-/// whose `CollisionVolume` the segment crosses, returning the closest
+/// Broad-phase second pass: find any non-attacker unit whose
+/// `CollisionVolume` the segment crosses, returning the closest
 /// (smallest `t`) candidate. Catches the "friendly walks into the
 /// bolt" / "an enemy steps into the path" cases the intended-target
 /// check misses.
@@ -696,10 +698,12 @@ fn arrival_hit(
 /// The intended target (already covered by [`target_volume_hit`]) is
 /// skipped so the broad-phase can't double-fire on the same entity; the
 /// unit that fired the shot never shoots itself, and its team's units
-/// are skipped so the broad pass doesn't unintentionally introduce
-/// friendly fire (matches upstream's default `collidefriendly=0`). The
-/// team is the one captured at launch ([`DelayedHit::owner_team`]), so a
-/// shot whose shooter has since died still passes through its allies.
+/// are skipped unless the weapon sets `collidefriendly=1`
+/// (`Collision::NOFRIENDLIES` in the projectile's `collisionFlags`,
+/// `CProjectileHandler::CheckUnitCollisions`). Every damaging Kernel
+/// Panic weapon sets `collidefriendly=0`. The team is the one captured
+/// at launch ([`DelayedHit::owner_team`]), so a shot whose shooter has
+/// since died still passes through its allies.
 ///
 /// In the test environment the spatial index is typically empty (no
 /// `rebuild_spatial_index` has run), so this returns `None` and the
@@ -708,6 +712,7 @@ fn arrival_hit(
 /// frame, so this catches anyone in path.
 fn broad_phase_volume_hit(
     hit: &DelayedHit,
+    collide_friendly: bool,
     seg_start: Vec3,
     seg_end: Vec3,
     spatial: &SpatialIndex,
@@ -727,9 +732,10 @@ fn broad_phase_volume_hit(
         if entry.entity == hit.attacker || Some(entry.entity) == hit.target {
             return;
         }
-        if hit
-            .owner_team
-            .is_some_and(|team| is_friendly(entry.team, team))
+        if !collide_friendly
+            && hit
+                .owner_team
+                .is_some_and(|team| is_friendly(entry.team, team))
         {
             return;
         }
@@ -786,7 +792,6 @@ fn trigger_delayed_hit(
         weapon: hit.weapon,
         impact_pos,
         attacker_distance: hit.attacker_distance,
-        owner_team: hit.owner_team,
     });
     if let Some(super::shared::ImpactEffect::NxZone {
         owner_team,
@@ -1159,22 +1164,28 @@ mod tests {
         );
     }
 
-    /// Broad-phase: a hostile unit standing in the bolt's path —
-    /// not the intended target — should intercept the shot, with the
-    /// resolved `PendingDamage::target` pointing at the interloper.
-    /// Friendly units sharing the attacker's team are skipped entirely
-    /// (matches upstream's default `collidefriendly=0`).
-    #[test]
-    fn laser_bolt_broad_phase_intercepts_enemy_in_path_skips_friendly() {
+    /// A bolt from team 0 flying +Z past a friendly (z=30) and an enemy
+    /// interloper (z=50) toward its intended target (z=100), fired from
+    /// a weapon with the given `collidefriendly`. Returns the single
+    /// queued hit's `(target, impact z)` and the friendly / enemy ids.
+    fn broad_phase_bolt_hit(collide_friendly: bool) -> (Option<Entity>, f32, Entity, Entity) {
         use crate::units::components::{Faction, TeamId};
         use crate::units::content::definitions::UnitKind;
         use crate::units::spatial::SpatialEntry;
 
+        let mut weapons = WeaponRegistry::default();
+        let weapon = weapons.insert_for_test(
+            "Bolt",
+            spring_tdf::WeaponDef {
+                collide_friendly,
+                ..Default::default()
+            },
+        );
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingExplosions>()
-            .init_resource::<WeaponRegistry>()
+            .insert_resource(weapons)
             .init_resource::<SpatialIndex>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
@@ -1276,33 +1287,52 @@ mod tests {
                 target: Some(intended),
                 attacker,
                 owner_team: Some(0),
-                weapon: WeaponId::BUILD_LASER,
+                weapon,
                 attacker_distance: 100.0,
                 on_impact: None,
             },
         ));
 
-        // Tick: 0.6 s — lead advances 0..60. Segment crosses
-        // friendly's volume at z=25 first, but the friendly filter
-        // skips it; the enemy at z=50 intercepts at z≈45.
+        // Tick: 0.6 s — lead advances 0..60, crossing the friendly's
+        // volume at z=25 and the enemy's at z=45.
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_millis(600));
         app.world_mut().run_system_once(tick_weapon_fx).unwrap();
 
         let queue = app.world().resource::<DamageQueue>();
-        assert_eq!(queue.len(), 1, "exactly one hit (the enemy interloper)");
+        assert_eq!(queue.len(), 1, "exactly one hit");
         let damage = queue.iter_snapshot_for_test().next().expect("damage entry");
+        (damage.target, damage.impact_pos.z, friendly, enemy)
+    }
+
+    /// Broad-phase: a hostile unit standing in the bolt's path —
+    /// not the intended target — should intercept the shot, with the
+    /// resolved `PendingDamage::target` pointing at the interloper.
+    /// Friendly units sharing the attacker's team are skipped entirely
+    /// under `collidefriendly=0` (every damaging KP weapon).
+    #[test]
+    fn laser_bolt_broad_phase_intercepts_enemy_in_path_skips_friendly() {
+        let (target, impact_z, _, enemy) = broad_phase_bolt_hit(false);
         assert_eq!(
-            damage.target,
+            target,
             Some(enemy),
             "broad-phase must redirect damage to the interloper, NOT the original target",
         );
         assert!(
-            (damage.impact_pos.z - 45.0).abs() < 0.5,
-            "impact should land on enemy's near face (~45), got {}",
-            damage.impact_pos.z,
+            (impact_z - 45.0).abs() < 0.5,
+            "impact should land on enemy's near face (~45), got {impact_z}",
         );
+    }
+
+    /// `collidefriendly=1` (the hero-mode weapons, `homf_collidefriendly`)
+    /// drops `NOFRIENDLIES` from the projectile's collision flags: the
+    /// ally in the path stops the bolt.
+    #[test]
+    fn collide_friendly_bolt_stops_on_the_ally_in_its_path() {
+        let (target, impact_z, friendly, _) = broad_phase_bolt_hit(true);
+        assert_eq!(target, Some(friendly));
+        assert!((impact_z - 25.0).abs() < 0.5, "got {impact_z}");
     }
 
     /// Mid-flight interception only fires when the bolt's segment

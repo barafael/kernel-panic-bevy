@@ -76,10 +76,9 @@ use army::{
 use build_orders::{HomebaseOrder, Lack, RoleCounts, choose_homebase_order, homebase_roster};
 use expansion::{choose_building, pick_datavent};
 use specials::{
-    COUNTER_DISPATCH_RANGE, CROWD_RADIUS, FIREWALL_ALLY_RADIUS, FIREWALL_ENEMY_RADIUS,
-    NX_CROWD_MIN, NX_RANGE, OBELISK_RANGE, SIGTERM_CROWD_MIN, SIGTERM_INTERVAL, UNDEPLOY_MAX,
-    bug_should_deploy, crowded_cluster, exploit_should_undeploy, firewall_should_cast,
-    should_counter_dispatch,
+    COUNTER_DISPATCH_RANGE, CROWD_RADIUS, FIREWALL_ALLY_RADIUS, FIREWALL_ENEMY_RADIUS, NX_RANGE,
+    OBELISK_RANGE, SIGTERM_INTERVAL, UNDEPLOY_MAX, bug_should_deploy, crowded_cluster,
+    exploit_should_undeploy, firewall_should_cast, should_counter_dispatch,
 };
 
 /// Seconds between AI decisions. Upstream's slow update runs every 128
@@ -800,8 +799,7 @@ fn run_specials(
         .is_none_or(|t| now - t >= SIGTERM_INTERVAL);
     if sigterm_due
         && let Some(terminal) = ready(UnitKind::Terminal).next()
-        && let Some((center, _)) =
-            crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS, SIGTERM_CROWD_MIN)
+        && let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
     {
         orders.command_fire.write(CommandFireEvent {
             attacker: terminal.entity,
@@ -847,8 +845,7 @@ fn run_specials(
 
     // Pointer: upstream `DispatchArty` plants an NX Flag instead of a
     // plain attack when the target spot is crowded. One flag per tick.
-    if let Some((center, _)) =
-        crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS, NX_CROWD_MIN)
+    if let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
         && let Some(pointer) =
             ready(UnitKind::Pointer).find(|p| flat_dist_sq(p.pos, center) <= NX_RANGE * NX_RANGE)
     {
