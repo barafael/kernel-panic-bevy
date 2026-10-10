@@ -22,6 +22,7 @@
 //! right-click waypoint modes (the remake's factories have no rally
 //! orders).
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -49,7 +50,8 @@ pub(super) struct BuildBarPlugin;
 
 impl Plugin for BuildBarPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<BarState>()
+        // The bar's icons, open menu and press name the match's units.
+        app.init_match_resource::<BarState>()
             // Before the command panel's input: the build bar is a
             // LuaUI widget, and widgets see a press before
             // `CGuiHandler` does — so a right-click on the bar with a
@@ -58,6 +60,7 @@ impl Plugin for BuildBarPlugin {
                 PreUpdate,
                 bar_mouse_input
                     .after(InputSystems)
+                    .after(crate::ui::menu::MenuMouseInput)
                     .before(super::command_panel::PanelMouseInput)
                     .run_if(in_state(AppState::InGame)),
             )

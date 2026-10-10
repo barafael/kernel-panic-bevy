@@ -45,7 +45,11 @@ pub struct Dying {
 /// - its structure-layer stamp (`CSolidObject::UnBlock`),
 /// - the finished small-building tally (`kernelboost.lua::UnitDestroyed`)
 ///   and the pending one of a nanoframe,
-/// - its claim on a Hex Farm tower (`SendOwnerShipChangeToUnsynced`).
+/// - its claim on a Hex Farm tower (`SendOwnerShipChangeToUnsynced`),
+/// - its place in the player's selection (`CSelectedUnitsHandler::
+///   DependentDied`), so nothing that acts on the selection — orders,
+///   build placement, the command panel — has to skip corpses.
+///   Control groups (`CGroup::RemoveUnit`) skip dying units on recall.
 ///
 /// The per-team unit count is not among them: upstream counts a unit
 /// until it is deleted, so that marker goes with the despawn.
@@ -54,6 +58,7 @@ pub type AliveOnly = (
     crate::units::lifecycle::bookkeeping::CountedSmallBuilding,
     crate::units::lifecycle::bookkeeping::UncountedSmallBuilding,
     crate::map_events::hex_farm::TowerClaim,
+    crate::interaction::selection::Selected,
 );
 
 impl Dying {
@@ -408,6 +413,18 @@ mod tests {
                 Box::new(crate::units::assets::animation::units::NoAnim)
             },
         }
+    }
+
+    /// The kill drops the unit from the selection at once, whatever
+    /// inserted `Dying` (`CSelectedUnitsHandler::DependentDied`).
+    #[test]
+    fn the_kill_deselects() {
+        use crate::interaction::selection::Selected;
+        let mut world = World::new();
+        let unit = world.spawn(Selected).id();
+        world.entity_mut(unit).insert(Dying { timer: 1.0 });
+        world.flush();
+        assert!(world.get::<Selected>(unit).is_none());
     }
 
     /// Why: `busy()` used to be a dormant default — every dying unit

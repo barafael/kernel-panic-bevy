@@ -23,6 +23,7 @@ pub(crate) mod activation;
 pub(crate) mod commands;
 pub(crate) mod layout;
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -53,9 +54,11 @@ pub(super) struct CommandPanelPlugin;
 impl Plugin for CommandPanelPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<ActivateCommand>()
-            .init_resource::<PanelCommands>()
-            .init_resource::<PanelPage>()
-            .init_resource::<PanelInput>()
+            // The selection's commands, page and a press in progress
+            // belong to one match; the button pictures stay loaded.
+            .init_match_resource::<PanelCommands>()
+            .init_match_resource::<PanelPage>()
+            .init_match_resource::<PanelInput>()
             .init_resource::<PanelPics>()
             // Mouse input runs before every Update system so the presses
             // and releases the panel owns are gone before selection,

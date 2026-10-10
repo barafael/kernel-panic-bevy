@@ -349,23 +349,29 @@ fn piece_world_pos(
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn production_system(
     time: Res<Time>,
-    mut producers: Query<(
-        Entity,
-        &mut Producer,
-        &UnitType,
-        &Faction,
-        &TeamId,
-        &Transform,
-        &UnitStats,
-        Option<&FactoryPieces>,
-        Option<&UnitAnimator>,
-        Option<&crate::units::components::Homebase>,
-        Has<Emerging>,
-        Has<crate::units::combat::Stunned>,
-    )>,
+    // A dead factory builds nothing (its buildee went with it,
+    // [`kill_orphaned_buildee`]); a dead buildee ends the build
+    // (`CFactory::DependentDied`).
+    mut producers: Query<
+        (
+            Entity,
+            &mut Producer,
+            &UnitType,
+            &Faction,
+            &TeamId,
+            &Transform,
+            &UnitStats,
+            Option<&FactoryPieces>,
+            Option<&UnitAnimator>,
+            Option<&crate::units::components::Homebase>,
+            Has<Emerging>,
+            Has<crate::units::combat::Stunned>,
+        ),
+        Without<crate::units::combat::Dying>,
+    >,
     // The buildees on the pads, whose build clock their factory drives.
     // (`Has<Emerging>` above takes no component access.)
-    mut buildees: Query<(&mut Emerging, &mut BuildDriven)>,
+    mut buildees: Query<(&mut Emerging, &mut BuildDriven), Without<crate::units::combat::Dying>>,
     mut bugger_off: ResMut<BuggerOffRequests>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
@@ -1203,6 +1209,63 @@ mod tests {
         assert!(
             (remaining(&world) - (decayed - 0.2)).abs() < 1e-3,
             "resumes from the decayed progress"
+        );
+    }
+
+    /// A dead factory starts nothing from its corpse, and a dead
+    /// buildee ends its factory's build (`CFactory::DependentDied`).
+    #[test]
+    fn dead_factories_and_buildees_build_nothing() {
+        let mut world = world();
+        let registry = registry();
+        let factory = |world: &mut World, producer: Producer| {
+            world
+                .spawn((
+                    producer,
+                    UnitType(UnitKind::Kernel),
+                    Faction::System,
+                    TeamId(0),
+                    Transform::from_xyz(500.0, 0.0, 500.0),
+                    UnitStats::from_registry(UnitKind::Kernel, &registry, 64.0, 0.0),
+                ))
+                .id()
+        };
+        let mut queued = Producer::new();
+        queued.enqueue(UnitKind::Bit);
+        let corpse = factory(&mut world, queued);
+        world.entity_mut(corpse).insert(Dying { timer: 1.0 });
+
+        let dead_buildee = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Emerging {
+                    target_y: 0.0,
+                    remaining: 1.0,
+                    total: 1.875,
+                    rally_point: None,
+                    rally_then: None,
+                    style: EmergeStyle::Rise,
+                },
+                BuildDriven::default(),
+                Dying { timer: 1.0 },
+            ))
+            .id();
+        let mut building = Producer::new();
+        building.enqueue(UnitKind::Bit);
+        building.unit_spawned = true;
+        building.buildee = Some(dead_buildee);
+        let live = factory(&mut world, building);
+
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f64(1.0 / 30.0));
+        world.run_system_once(production_system).unwrap();
+        let corpse_producer = world.get::<Producer>(corpse).unwrap();
+        assert!(!corpse_producer.unit_spawned && corpse_producer.buildee.is_none());
+        assert_eq!(world.get::<Emerging>(dead_buildee).unwrap().remaining, 1.0);
+        assert_ne!(
+            world.get::<Producer>(live).unwrap().buildee,
+            Some(dead_buildee)
         );
     }
 

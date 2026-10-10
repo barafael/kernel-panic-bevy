@@ -18,6 +18,14 @@ use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 /// We use 128 as the standard worker speed (homebases).
 const DEFAULT_WORKER_TIME: f32 = 128.0;
 
+/// `UnitDef::buildDistance` when the FBI declares none ("the ancient
+/// default", `UnitDef.cpp:357`).
+const DEFAULT_BUILD_DISTANCE: f32 = 128.0;
+
+/// Floor on `UnitDef::buildDistance` (`UnitDef.cpp:360`: the bare
+/// minimum for a 1×1 constructor not to overlap a 1×1 structure).
+const MIN_BUILD_DISTANCE: f32 = 38.0;
+
 /// A ground unit's Spring `MoveDef` geometry (`MoveDefHandler.cpp`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MoveDefParams {
@@ -134,6 +142,9 @@ pub struct UnitRegistry {
     /// See [`Self::hexfarm_medians`] — over *every* loaded FBI, not just
     /// the ones bound to a `UnitKind`.
     hexfarm_medians: (f64, f64),
+    /// See [`Self::model_radius`], parallel to `defs`. Resolved from the
+    /// bundled s3o headers in [`Self::load`]; zero in test registries.
+    model_radii: Box<[f32]>,
 }
 
 impl UnitRegistry {
@@ -145,7 +156,11 @@ impl UnitRegistry {
             "Unit registry: {} definitions total",
             bundle.units.units.len()
         );
-        let registry = Self::from_defs(bundle.units.clone(), bundle.move_classes.clone());
+        let mut registry = Self::from_defs(bundle.units.clone(), bundle.move_classes.clone());
+        registry.model_radii = ALL_UNIT_KINDS
+            .iter()
+            .map(|&k| bundle.model(registry.model(k)).map_or(0.0, |m| m.radius))
+            .collect();
         registry.validate_unit_bindings();
         registry
     }
@@ -197,6 +212,7 @@ impl UnitRegistry {
         Self {
             bad_target: pairs(bad_target_gate, false),
             manual_target: pairs(manual_target_gate, true),
+            model_radii: vec![0.0; defs.len()].into(),
             defs,
             kinds,
             hexfarm_medians,
@@ -472,6 +488,32 @@ impl UnitRegistry {
             .map(|d| d.worker_time)
             .filter(|w| *w > 0.0)
             .unwrap_or(DEFAULT_WORKER_TIME)
+    }
+
+    /// FBI `BuildDistance` (`UnitDef::buildDistance`, `UnitDef.cpp:
+    /// 357-360`): 128 when absent, never below 38. Kernel Panic's three
+    /// constructors (Assembler, Trojan, Gateway) declare 384.
+    pub fn build_distance(&self, builder: UnitKind) -> f32 {
+        self.def(builder)
+            .map(|d| d.build_distance)
+            .filter(|&d| d > 0.0)
+            .unwrap_or(DEFAULT_BUILD_DISTANCE)
+            .max(MIN_BUILD_DISTANCE)
+    }
+
+    /// Bounding radius of the kind's s3o model (`UnitDef::
+    /// GetModelRadius`), 0 when the model isn't bundled.
+    pub fn model_radius(&self, kind: UnitKind) -> f32 {
+        self.model_radii[kind.index()]
+    }
+
+    /// How close (XZ) `builder` must stand to the centre of a `buildee`
+    /// site to build it: `CBuilderCAI::IsInBuildRange` →
+    /// `GetBuildRange` = `buildDistance` + the buildee's model radius
+    /// (`buildeeBuildRadius` unset in every FBI). Kernel Panic's FBIs
+    /// leave `buildRange3D` off, so the engine measures it in 2D.
+    pub fn build_range(&self, builder: UnitKind, buildee: UnitKind) -> f32 {
+        self.build_distance(builder) + self.model_radius(buildee)
     }
 
     /// Per-team cap on live units of this kind (FBI `UnitRestricted`,
@@ -829,6 +871,37 @@ mod tests {
             assert_eq!(reg.team_limit(kind), bomb.then_some(64), "{kind:?}");
             assert_eq!(reg.init_cloaked(kind), bomb, "{kind:?}");
         }
+    }
+
+    /// The three constructors' FBIs declare `BuildDistance=384`; the
+    /// build range adds the buildee's model radius from the bundle.
+    #[test]
+    fn constructors_build_from_their_fbi_build_distance() {
+        let reg = UnitRegistry::load();
+        for kind in [UnitKind::Assembler, UnitKind::Trojan, UnitKind::Gateway] {
+            assert_eq!(reg.build_distance(kind), 384.0, "{kind:?}");
+            let radius = reg.model_radius(UnitKind::BadBlock);
+            assert!(radius > 0.0, "Bad Block model radius {radius}");
+            assert_eq!(reg.build_range(kind, UnitKind::BadBlock), 384.0 + radius);
+        }
+    }
+
+    /// `UnitDef.cpp:357-360`: 128 when the FBI is silent, floored at 38.
+    #[test]
+    fn build_distance_defaults_and_floor() {
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                build_distance: 10.0,
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert("byte".into(), UnitDef::default());
+        let reg = UnitRegistry::for_test(defs);
+        assert_eq!(reg.build_distance(UnitKind::Bit), 38.0);
+        assert_eq!(reg.build_distance(UnitKind::Byte), 128.0);
+        assert_eq!(reg.model_radius(UnitKind::Byte), 0.0);
     }
 
     /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): a Socket stays

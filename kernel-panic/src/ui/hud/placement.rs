@@ -18,12 +18,18 @@
 //!    to the release point (`GetBuildPositions`: Ctrl keeps the row
 //!    axis-aligned, Alt fills the rectangle, Alt+Ctrl its outline).
 //! 3. Once Shift is let go, the next click only disarms (`needShift`).
+//! 4. A Shift placement on a site the builder already has a build order
+//!    for cancels that order instead (`CCommandAI::GetCancelQueued`), so
+//!    the ghost also snaps to vents the selected builders' own orders
+//!    claim; one partly overlapping such a site is refused
+//!    ([`queue_build`]).
 //!
 //! Right-click / Escape cancel through the command panel's input (as
 //! `CGuiHandler::MousePress` does). The press and release of a placing
 //! click are consumed so they never reach click-to-select — placing a
 //! building keeps the constructor selected.
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
@@ -39,14 +45,18 @@ use crate::units::combat::Dying;
 use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::construction::{buildings_for, footprints_overlap};
+use crate::units::lifecycle::construction::{
+    Constructing, PendingBuild, QueuedBuild, buildings_for, footprints_overlap, queue_build,
+};
 
 pub(super) struct PlacementPlugin;
 
 impl Plugin for PlacementPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlacementMode>()
-            .init_resource::<PlacementState>()
+        // An armed build and its planned sites (ghosts go with the
+        // teardown) belong to one match.
+        app.init_match_resource::<PlacementMode>()
+            .init_match_resource::<PlacementState>()
             .add_systems(
                 Update,
                 (
@@ -371,6 +381,17 @@ fn plan(
     out
 }
 
+/// The vents the ghost may snap to: unclaimed ones, and claimed ones
+/// that are one of `own_sites` (the selected builders' build orders).
+fn placeable_vents(vents: impl Iterator<Item = (Vec3, bool)>, own_sites: &[Vec3]) -> Vec<Vec3> {
+    vents
+        .filter(|&(pos, claimed)| {
+            !claimed || own_sites.iter().any(|s| s.distance_squared(pos) < 1.0)
+        })
+        .map(|(pos, _)| pos)
+        .collect()
+}
+
 /// Disarm when no selected, living constructor can build the armed
 /// kind, or — Spring's `needShift`, checked every frame in
 /// `CGuiHandler::Update` — as soon as Shift is let go after a Shift
@@ -380,7 +401,7 @@ fn disarm_without_builders(
     mut placement: ResMut<PlacementMode>,
     mut state: ResMut<PlacementState>,
     keys: Res<ButtonInput<KeyCode>>,
-    builders: Query<&UnitType, (With<Selected>, Without<Dying>)>,
+    builders: Query<&UnitType, With<Selected>>,
 ) {
     let Some(kind) = placement.kind else {
         return;
@@ -403,7 +424,8 @@ fn plan_sites(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: MeshRayCast,
     terrain: Query<(), With<TerrainChunkMarker>>,
-    vents: Query<&GeoventSmoker, Without<VentClaim>>,
+    vents: Query<(&GeoventSmoker, Has<VentClaim>)>,
+    own_orders: Query<(Option<&PendingBuild>, Option<&CommandQueue>), With<Selected>>,
     structures: Query<(&UnitType, &Transform), Without<Dying>>,
     heightmap: Option<Res<Heightmap>>,
     registry: Res<UnitRegistry>,
@@ -423,7 +445,26 @@ fn plan_sites(
         state.sites.clear();
         return;
     };
-    let vent_pos: Vec<Vec3> = vents.iter().map(|v| v.pos).collect();
+    // Free vents, plus the ones the selected builders' own build orders
+    // claim: placing there again cancels the order (`GetCancelQueued`).
+    // (A running construction's vent is blocked by its nanoframe.)
+    let own_sites: Vec<Vec3> = own_orders
+        .iter()
+        .flat_map(|(pending, queue)| {
+            let queued = queue.into_iter().flat_map(|q| &q.commands);
+            pending
+                .map(|p| p.site)
+                .into_iter()
+                .chain(queued.filter_map(|c| match c {
+                    QueuedCommand::BuildAt { site, .. } => Some(*site),
+                    _ => None,
+                }))
+        })
+        .collect();
+    let vent_pos = placeable_vents(
+        vents.iter().map(|(v, claimed)| (v.pos, claimed)),
+        &own_sites,
+    );
     let obstacles: Obstacles = structures
         .iter()
         .filter(|(u, _)| registry.is_building(u.0) || u.0.is_building())
@@ -557,10 +598,19 @@ fn place_on_release(
     mut state: ResMut<PlacementState>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    builders: Query<(Entity, &UnitType), With<Selected>>,
+    builders: Query<
+        (
+            Entity,
+            &UnitType,
+            Option<&PendingBuild>,
+            Option<&Constructing>,
+            Option<&CommandQueue>,
+        ),
+        With<Selected>,
+    >,
     unit_orders: Orders,
     vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
-    dying: Query<(), With<Dying>>,
+    registry: Res<UnitRegistry>,
 ) {
     let Some(kind) = placement.kind else {
         // Disarmed mid-press (right-click, Escape, Shift let go): the
@@ -601,34 +651,53 @@ fn place_on_release(
         return;
     }
 
-    for (entity, ut) in &builders {
-        // A dying unit keeps `Selected` until it despawns.
-        if !buildings_for(ut.0).contains(&kind) || dying.contains(entity) {
+    // The sites some builder took an order for (not cancelled, refused).
+    let mut ordered: Vec<Vec3> = Vec::new();
+    for (entity, ut, pending, constructing, queue) in &builders {
+        if !buildings_for(ut.0).contains(&kind) {
             continue;
         }
-        let orders = valid
+        if shift && unit_orders.busy(entity) {
+            // Each site is its own queued command (`GetBuildPositions`
+            // gives one per position), cancelling or refused against
+            // the orders the ones before it left.
+            let running = pending
+                .map(|p| (p.kind, p.site))
+                .or(constructing.map(|c| (c.kind, c.site)));
+            let mut active = running;
+            let mut queued = queue.map(|q| q.commands.clone()).unwrap_or_default();
+            for &site in &valid {
+                let outcome = queue_build(&mut active, &mut queued, kind, site, |k| {
+                    registry.footprint_elmos(k)
+                });
+                if outcome == QueuedBuild::Queued {
+                    ordered.push(site);
+                }
+            }
+            let mut ec = commands.entity(entity);
+            if running.is_some() && active.is_none() {
+                crate::interaction::finish_active_order(&mut ec);
+            }
+            ec.insert(CommandQueue { commands: queued });
+            continue;
+        }
+        let mut orders = valid
             .iter()
             .map(|&site| QueuedCommand::BuildAt { kind, site });
-        if shift && unit_orders.busy(entity) {
-            for cmd in orders {
-                apply_ordered_command(entity, cmd, true, &unit_orders, &mut commands);
-            }
-        } else {
-            let mut orders = orders;
-            if let Some(first) = orders.next() {
-                apply_ordered_command(entity, first, false, &unit_orders, &mut commands);
-            }
-            let rest: Vec<QueuedCommand> = orders.collect();
-            if !rest.is_empty() {
-                commands
-                    .entity(entity)
-                    .insert(CommandQueue { commands: rest });
-            }
+        if let Some(first) = orders.next() {
+            apply_ordered_command(entity, first, false, &unit_orders, &mut commands);
         }
+        let rest: Vec<QueuedCommand> = orders.collect();
+        if !rest.is_empty() {
+            commands
+                .entity(entity)
+                .insert(CommandQueue { commands: rest });
+        }
+        ordered.extend_from_slice(&valid);
     }
     // Claim the vents so no second constructor can stack on them.
     for (vent_entity, vent) in &vents {
-        if valid.iter().any(|s| vent.pos.distance_squared(*s) < 1.0) {
+        if ordered.iter().any(|s| vent.pos.distance_squared(*s) < 1.0) {
             commands.entity(vent_entity).insert(VentClaim);
         }
     }
@@ -643,7 +712,7 @@ fn place_on_release(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::units::lifecycle::construction::PendingBuild;
+    use crate::interaction::movement::MoveTarget;
     use bevy::ecs::system::RunSystemOnce;
 
     fn world() -> World {
@@ -652,7 +721,84 @@ mod tests {
         world.init_resource::<PlacementState>();
         world.init_resource::<ButtonInput<MouseButton>>();
         world.init_resource::<ButtonInput<KeyCode>>();
+        world.insert_resource(UnitRegistry::empty());
         world
+    }
+
+    /// `GetCancelQueued`: Shift-placing on one of the builder's own
+    /// queued sites un-queues it (and claims nothing); a free site is
+    /// queued and claimed. The ghost may snap to the vents the selected
+    /// builders' own orders claim, never to another's.
+    #[test]
+    fn shift_placing_on_a_queued_site_cancels_it() {
+        let mut world = world();
+        let queued = Vec3::new(200.0, 0.0, 0.0);
+        let fresh = Vec3::new(400.0, 0.0, 0.0);
+        let fresh_vent = world
+            .spawn(GeoventSmoker {
+                pos: fresh,
+                emit_timer: 0.0,
+                rng: 0,
+            })
+            .id();
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Selected,
+                Transform::default(),
+                MoveTarget(Vec3::X),
+                PendingBuild {
+                    kind: UnitKind::Socket,
+                    site: Vec3::X,
+                },
+                CommandQueue {
+                    commands: vec![QueuedCommand::BuildAt {
+                        kind: UnitKind::Socket,
+                        site: queued,
+                    }],
+                },
+            ))
+            .id();
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+
+        set_site(&mut world, queued, true);
+        click(&mut world);
+        assert!(
+            world
+                .get::<CommandQueue>(builder)
+                .unwrap()
+                .commands
+                .is_empty()
+        );
+        assert!(
+            world.get::<PendingBuild>(builder).is_some(),
+            "running order kept"
+        );
+
+        set_site(&mut world, fresh, true);
+        click(&mut world);
+        let queue = &world.get::<CommandQueue>(builder).unwrap().commands;
+        assert!(matches!(queue[..], [QueuedCommand::BuildAt { site, .. }] if site == fresh));
+        assert!(world.get::<VentClaim>(fresh_vent).is_some());
+
+        // On the running order's site: it stops, the queue stays.
+        set_site(&mut world, Vec3::X, true);
+        click(&mut world);
+        assert!(world.get::<PendingBuild>(builder).is_none());
+        assert!(world.get::<MoveTarget>(builder).is_none());
+        assert_eq!(
+            world.get::<CommandQueue>(builder).unwrap().commands.len(),
+            1
+        );
+
+        let vents = [(queued, true), (fresh, false), (Vec3::Z * 99.0, true)];
+        assert_eq!(
+            placeable_vents(vents.into_iter(), &[queued]),
+            [queued, fresh]
+        );
     }
 
     fn click(world: &mut World) {

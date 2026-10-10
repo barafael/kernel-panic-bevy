@@ -43,7 +43,7 @@ use bevy::prelude::*;
 
 use super::production::{BuggerOff, BuggerOffRequests, PendingFadeInstall};
 use super::spawning::{BuildDriven, EmergeStyle, Emerging, SpawnContext, spawn_unit};
-use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::interaction::movement::{MovePath, MoveTarget, QueuedCommand};
 use crate::sim::SQUARE_SIZE;
 use crate::units::combat::{Dying, Stunned};
 use crate::units::components::{Faction, TeamId, UnitType};
@@ -106,13 +106,6 @@ pub fn buildings_for(kind: UnitKind) -> &'static [UnitKind] {
     }
 }
 
-/// How close (XZ) a builder must get to its site before construction
-/// can start. All three constructor FBIs declare `BuildDistance=384`
-/// (Spring adds the buildee's radius in `IsInBuildRange`); the port
-/// keeps a shorter reach so the build beams read as attached to the
-/// site.
-const BUILD_DISTANCE: f32 = 180.0;
-
 /// How long a builder in range waits for mobile units to clear the
 /// footprint before giving up on the order: `CBuilderCAI::
 /// ExecuteBuildCmd` retries `StartBuild` once a SlowUpdate (16 frames)
@@ -138,6 +131,90 @@ pub struct BuildSiteWait {
 /// edges don't count — Spring tests whole squares.
 pub(crate) fn footprints_overlap(a: Vec2, a_half: Vec2, b: Vec2, b_half: Vec2) -> bool {
     (a.x - b.x).abs() < a_half.x + b_half.x - 0.01 && (a.y - b.y).abs() < a_half.y + b_half.y - 0.01
+}
+
+/// What a Shift-queued build order did to a builder's orders
+/// (`CCommandAI::GiveAllowedCommand`, see [`queue_build`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueuedBuild {
+    /// Appended to the queue.
+    Queued,
+    /// It landed on build orders the builder already has, which are
+    /// cancelled instead (`CancelCommands`); `active` when the running
+    /// one was among them.
+    Cancelled { active: bool },
+    /// Refused: it would partly overlap a build the builder already
+    /// has (`GetOverlapQueued`).
+    Refused,
+}
+
+/// Give a builder a Shift-queued `BuildAt { kind, site }` against its
+/// running build order `active` (walking there or building) and its
+/// `queue`, as `CCommandAI::GiveAllowedCommand` does with the build
+/// command at the end of `commandQue`:
+///
+/// 1. `CancelCommands` → `GetCancelQueued`: every build order of any
+///    kind whose centre lies within half the larger footprint of the
+///    new one (`|Δx|·2 <= max(xsize)·SQUARE_SIZE`, same in z) is
+///    removed and the new order dropped — Shift-placing on one of your
+///    own queued sites un-queues it. If the running order was among
+///    them, `active` is cleared and the caller stops it (the engine
+///    pushes a `CMD_STOP` in front: `StopBuild`, then the next command).
+/// 2. `GetOverlapQueued`: a site that would partly overlap one of the
+///    builder's build orders is refused.
+/// 3. Otherwise the order is appended.
+///
+/// `footprint` gives a kind's footprint in elmos.
+pub(crate) fn queue_build(
+    active: &mut Option<(UnitKind, Vec3)>,
+    queue: &mut Vec<QueuedCommand>,
+    kind: UnitKind,
+    site: Vec3,
+    footprint: impl Fn(UnitKind) -> Vec2,
+) -> QueuedBuild {
+    let size = footprint(kind);
+    // Twice the centre distance, the larger and the summed footprint.
+    let measure = |other: UnitKind, at: Vec3| {
+        let other_size = footprint(other);
+        (
+            (site.xz() - at.xz()).abs() * 2.0,
+            size.max(other_size),
+            size + other_size,
+        )
+    };
+    let cancels = |other: UnitKind, at: Vec3| {
+        let (d2, max, _) = measure(other, at);
+        d2.x <= max.x && d2.y <= max.y
+    };
+    let cancel_active = active.is_some_and(|(k, at)| cancels(k, at));
+    let before = queue.len();
+    queue.retain(|c| !matches!(*c, QueuedCommand::BuildAt { kind: k, site: at } if cancels(k, at)));
+    if cancel_active || queue.len() != before {
+        if cancel_active {
+            *active = None;
+        }
+        return QueuedBuild::Cancelled {
+            active: cancel_active,
+        };
+    }
+    let overlaps = |other: UnitKind, at: Vec3| {
+        let (d2, max, add) = measure(other, at);
+        (d2.x > max.x || d2.y > max.y) && d2.x < add.x && d2.y < add.y
+    };
+    let queued_builds = queue.iter().filter_map(|c| match *c {
+        QueuedCommand::BuildAt { kind, site } => Some((kind, site)),
+        _ => None,
+    });
+    if active
+        .iter()
+        .copied()
+        .chain(queued_builds)
+        .any(|(k, at)| overlaps(k, at))
+    {
+        return QueuedBuild::Refused;
+    }
+    queue.push(QueuedCommand::BuildAt { kind, site });
+    QueuedBuild::Queued
 }
 
 /// Promote `PendingBuild` to `Constructing` once the builder is close
@@ -203,7 +280,10 @@ pub fn start_construction(
                 .remove::<(PendingBuild, MoveTarget, MovePath, BuildSiteWait)>();
             continue;
         }
-        if flat_dist_sq(transform.translation, pending.site) > BUILD_DISTANCE * BUILD_DISTANCE {
+        // `MoveInBuildRange`: FBI `BuildDistance` plus the building's
+        // model radius, in the plane.
+        let range = registry.build_range(builder_kind.0, pending.kind);
+        if flat_dist_sq(transform.translation, pending.site) > range * range {
             continue;
         }
         if unit_counts.at_limit(team.0) {
@@ -248,8 +328,10 @@ pub fn start_construction(
                 bugger_off.push(BuggerOff::rectangle(pending.site, half, team.0, entity));
             }
             if self_inside {
-                // Far enough that the footprint clears before the step
-                // ends (a finished leg would end the build order).
+                // One step, far enough that the footprint is clear when
+                // it ends: the finished leg only stops the builder
+                // (`end_move_leg` keeps the build order), and it doesn't
+                // step again for this wait.
                 if step_aside.is_none() {
                     let away = (transform.translation - pending.site).with_y(0.0);
                     let dir = away.try_normalize().unwrap_or(Vec3::X);
@@ -302,18 +384,24 @@ const MOBILE_FOOTPRINT_REACH: f32 = 48.0;
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn tick_construction(
     time: Res<Time>,
-    mut builders: Query<(
-        Entity,
-        &GlobalTransform,
-        &mut Transform,
-        &UnitType,
-        &Faction,
-        &TeamId,
-        &mut Constructing,
-        Option<&crate::units::assets::animation::UnitAnimator>,
-        Has<Stunned>,
-    )>,
-    mut frames: Query<(&mut Emerging, &mut BuildDriven)>,
+    // A dead builder's CAI never runs again (`CUnit::Update` skips the
+    // dead), and a dead frame takes no build power (`AddBuildPower`
+    // returns false): it ends the build like a vanished one.
+    mut builders: Query<
+        (
+            Entity,
+            &GlobalTransform,
+            &mut Transform,
+            &UnitType,
+            &Faction,
+            &TeamId,
+            &mut Constructing,
+            Option<&crate::units::assets::animation::UnitAnimator>,
+            Has<Stunned>,
+        ),
+        Without<Dying>,
+    >,
+    mut frames: Query<(&mut Emerging, &mut BuildDriven), Without<Dying>>,
     live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
     mut ctx: SpawnContext,
     mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
@@ -552,7 +640,7 @@ mod tests {
     use spring_tdf::{UnitDef, UnitDefs};
     use std::time::Duration;
 
-    /// Assembler (`WorkerTime=128`), Bad Block (`BuildTime=160`, 2×2
+    /// Assembler (`WorkerTime=128`, `BuildDistance=384`), Bad Block (`BuildTime=160`, 2×2
     /// footprint = 32 elmos) and a Bit, from the upstream FBIs.
     fn registry() -> UnitRegistry {
         let mut defs = UnitDefs::default();
@@ -563,6 +651,7 @@ mod tests {
             "assembler",
             UnitDef {
                 worker_time: 128.0,
+                build_distance: 384.0,
                 build_time: 1600.0,
                 footprint_x: 2.0,
                 footprint_z: 2.0,
@@ -662,6 +751,69 @@ mod tests {
         world.run_system_once(start_construction).unwrap();
         assert!(world.get::<PendingBuild>(c).is_none());
         assert!(world.get::<Constructing>(c).is_none());
+    }
+
+    /// `GetCancelQueued`: a Shift-queued build on one of the builder's
+    /// own build sites cancels every build order there (queued or
+    /// running) instead of queueing; one that would partly overlap a
+    /// queued build is refused (`GetOverlapQueued`); others queue.
+    #[test]
+    fn queued_build_cancels_or_refuses_like_the_command_ai() {
+        // 32-elmo footprints (Bad Block, Socket), as the empty registry.
+        let fp = |_: UnitKind| Vec2::splat(32.0);
+        let at = |x: f32| Vec3::new(x, 0.0, 0.0);
+        let bad = |x: f32| QueuedCommand::BuildAt {
+            kind: UnitKind::BadBlock,
+            site: at(x),
+        };
+        let sites = |q: &[QueuedCommand]| q.iter().map(|c| c.position().x).collect::<Vec<_>>();
+
+        let mut active = Some((UnitKind::BadBlock, at(0.0)));
+        let mut queue = vec![QueuedCommand::Move(at(500.0)), bad(100.0), bad(200.0)];
+        // Within half a footprint of the queued site at 100, any kind.
+        assert_eq!(
+            queue_build(&mut active, &mut queue, UnitKind::LogicBomb, at(110.0), fp),
+            QueuedBuild::Cancelled { active: false }
+        );
+        assert_eq!(sites(&queue), [500.0, 200.0]);
+        assert!(active.is_some());
+        // Partly overlapping the site at 200: refused, nothing changes.
+        assert_eq!(
+            queue_build(&mut active, &mut queue, UnitKind::BadBlock, at(225.0), fp),
+            QueuedBuild::Refused
+        );
+        assert_eq!(sites(&queue), [500.0, 200.0]);
+        // Clear of everything: queued.
+        assert_eq!(
+            queue_build(&mut active, &mut queue, UnitKind::BadBlock, at(300.0), fp),
+            QueuedBuild::Queued
+        );
+        assert_eq!(sites(&queue), [500.0, 200.0, 300.0]);
+        // On the running order's site: it is cancelled too.
+        assert_eq!(
+            queue_build(&mut active, &mut queue, UnitKind::BadBlock, at(0.0), fp),
+            QueuedBuild::Cancelled { active: true }
+        );
+        assert!(active.is_none());
+        assert_eq!(sites(&queue), [500.0, 200.0, 300.0]);
+    }
+
+    /// The builder stops and starts building once within its FBI
+    /// `BuildDistance` (384 for the Assembler) of the site — measured
+    /// in the plane (`buildRange3D` off) — not before.
+    #[test]
+    fn construction_starts_within_the_fbi_build_distance() {
+        let mut world = world();
+        let site = Vec3::new(1000.0, 0.0, 1000.0);
+        let far = assembler(&mut world, site + Vec3::X * 390.0, site);
+        // 380 away in the plane, far below the site: still in range.
+        let near = assembler(&mut world, site + Vec3::new(0.0, -300.0, 380.0), site);
+        world.run_system_once(start_construction).unwrap();
+        assert!(world.get::<Constructing>(far).is_none(), "out of range");
+        assert!(world.get::<PendingBuild>(far).is_some());
+        assert!(world.get::<MoveTarget>(far).is_some(), "keeps walking");
+        assert!(world.get::<Constructing>(near).is_some(), "in range");
+        assert!(world.get::<MoveTarget>(near).is_none(), "stopped");
     }
 
     /// #26: a unit standing on the footprint holds the start instead of
@@ -801,6 +953,87 @@ mod tests {
         world.entity_mut(builder).remove::<Stunned>();
         world.run_system_once(tick_construction).unwrap();
         assert!(world.get::<Constructing>(builder).is_none());
+    }
+
+    /// A dead builder adds no build power (its CAI never runs again), and
+    /// a dead frame takes none (`AddBuildPower` refuses it): the build
+    /// ends as if the frame were gone.
+    #[test]
+    fn dead_builders_and_frames_build_nothing() {
+        let mut world = world();
+        let site = Vec3::new(500.0, 0.0, 500.0);
+        let emerging = || Emerging {
+            target_y: 0.0,
+            remaining: 1.0,
+            total: 1.25,
+            rally_point: None,
+            rally_then: None,
+            style: EmergeStyle::Rise,
+        };
+        let constructing = |frame| Constructing {
+            kind: UnitKind::BadBlock,
+            site,
+            building: Some(frame),
+        };
+        // A killed builder's corpse adds no build power.
+        let frame = world
+            .spawn((
+                UnitType(UnitKind::BadBlock),
+                emerging(),
+                BuildDriven::default(),
+            ))
+            .id();
+        let corpse = assembler(&mut world, site, site);
+        world
+            .entity_mut(corpse)
+            .remove::<(PendingBuild, MoveTarget)>()
+            .insert((constructing(frame), Dying { timer: 1.0 }));
+        // A builder of a killed frame stops building it.
+        let dead_frame = world
+            .spawn((
+                UnitType(UnitKind::BadBlock),
+                emerging(),
+                BuildDriven::default(),
+                Dying { timer: 1.0 },
+            ))
+            .id();
+        let builder = assembler(&mut world, site, site);
+        world
+            .entity_mut(builder)
+            .remove::<(PendingBuild, MoveTarget)>()
+            .insert(constructing(dead_frame));
+        advance(&mut world, 0.1);
+        world.run_system_once(tick_construction).unwrap();
+        assert_eq!(world.get::<Emerging>(frame).unwrap().remaining, 1.0);
+        assert_eq!(world.get::<Emerging>(dead_frame).unwrap().remaining, 1.0);
+        assert!(world.get::<Constructing>(builder).is_none());
+    }
+
+    /// A re-issued build order starts a fresh footprint wait: the old
+    /// order's `BuildSiteWait` goes with it.
+    #[test]
+    fn a_new_order_drops_the_site_wait() {
+        let mut world = world();
+        let site = Vec3::new(500.0, 0.0, 500.0);
+        let builder = assembler(&mut world, site, site);
+        world.entity_mut(builder).insert(BuildSiteWait {
+            site,
+            waited: BUILD_WAIT_GIVE_UP - 0.1,
+            step_aside: Some(Vec3::X),
+        });
+        world
+            .run_system_once(move |mut commands: Commands| {
+                crate::interaction::replace_order(
+                    &mut commands.entity(builder),
+                    QueuedCommand::BuildAt {
+                        kind: UnitKind::BadBlock,
+                        site,
+                    },
+                );
+            })
+            .unwrap();
+        assert!(world.get::<BuildSiteWait>(builder).is_none());
+        assert!(world.get::<PendingBuild>(builder).is_some());
     }
 
     /// The build ends the tick the builder completes it.

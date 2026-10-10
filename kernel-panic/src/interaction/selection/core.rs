@@ -1,6 +1,7 @@
 //! Core selection state: hover detection, left-click + drag-box selection,
 //! and the resolve-unit-under-cursor logic shared across the sub-module.
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::ecs::system::SystemParam;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayMeshHit};
 use bevy::prelude::*;
@@ -14,7 +15,8 @@ pub(super) struct SelectionCorePlugin;
 
 impl Plugin for SelectionCorePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DragState>()
+        // A drag and the last click (an entity) belong to one match.
+        app.init_match_resource::<DragState>()
             .configure_sets(
                 Update,
                 (

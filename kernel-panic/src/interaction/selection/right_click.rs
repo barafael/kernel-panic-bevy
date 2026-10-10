@@ -1,24 +1,29 @@
 //! Right-click movement orders: single-click moves the selection to a point,
 //! right-drag samples a path and distributes units along it. Shows a
 //! formation preview during the drag and a move-target torus on release.
-//! A right-click that lands on an enemy unit issues an attack order instead.
+//! A right-click that lands on an enemy unit issues an attack order instead,
+//! and so does a right-drag that starts on one.
 
 use std::collections::HashMap;
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
 
 use super::core::{PickRayCast, Selected, SelectionSet, ground_hit, unit_hit};
 use crate::interaction::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
 use crate::rendering::camera::RtsCamera;
 use crate::units::components::{TeamId, UnitStats, UnitType, is_friendly};
+use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 
 pub(super) struct RightClickPlugin;
 
 impl Plugin for RightClickPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<RightDragPath>()
-            .init_resource::<PendingMoveIndicators>()
+        // A drag's nodes and the unspawned order markers are points on
+        // the old map.
+        app.init_match_resource::<RightDragPath>()
+            .init_match_resource::<PendingMoveIndicators>()
             .add_systems(
                 Update,
                 (
@@ -76,6 +81,12 @@ pub struct RightDragPath {
     active: bool,
     /// Cursor position (window pixels) where the last node was added.
     last_cursor: Option<Vec2>,
+    /// The press landed on an enemy with an attack-capable selection:
+    /// the default command remembered at the press is Attack
+    /// (`CGuiHandler::defaultCmdMemory`), so the drag is no formation —
+    /// CustomFormations2 only takes over a press whose default command
+    /// is Move.
+    attack_from_press: bool,
 }
 
 /// Order-commit marker kinds, rendered as colored torus rings at the
@@ -157,10 +168,28 @@ fn handle_right_click(
         queue_end_q,
     } = lookups;
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
+    // The enemy of the selection under the cursor (`GetDefaultCmd`'s
+    // pointed unit, not allied to the selection).
+    let enemy_under_cursor = |ray_cast: &mut PickRayCast| {
+        let my_team = selected_q
+            .iter()
+            .next()
+            .and_then(|(e, ..)| unit_info_q.get(e).ok())?;
+        unit_hit(&windows, &camera_q, ray_cast, &unit_root_q, &parent_q).filter(|&target| {
+            unit_info_q
+                .get(target)
+                .is_ok_and(|t_team| !is_friendly(my_team.0, t_team.0))
+        })
+    };
+    let armed = |unit: UnitKind| !unit_registry.weapon(unit).is_empty();
     if mouse.just_pressed(MouseButton::Right) {
         drag_path.points.clear();
         drag_path.active = true;
         drag_path.last_cursor = cursor;
+        // `IsAttackCapable` for some selected unit (the engine asks the
+        // selection's leader).
+        drag_path.attack_from_press = selected_q.iter().any(|(_, _, u, _)| armed(u.0))
+            && enemy_under_cursor(&mut ray_cast).is_some();
 
         if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
             drag_path.points.push(point);
@@ -186,6 +215,7 @@ fn handle_right_click(
 
     if released && drag_path.active {
         drag_path.active = false;
+        let attack_drag = std::mem::take(&mut drag_path.attack_from_press);
 
         // Only units that can carry out a move take part
         // (CustomFormations2 `commandApplies`: `canMove`); a selected
@@ -201,25 +231,60 @@ fn handle_right_click(
 
         let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
 
+        if attack_drag && drag_path.points.len() > 1 {
+            // The remembered Attack resolves at the release
+            // (`CMDTYPE_ICON_UNIT_OR_MAP`): the enemy under the cursor,
+            // else the ground there. (The engine would attack an allied
+            // unit under the cursor too; the port's attack order only
+            // ever fires on enemies, so that case attacks the ground.)
+            // Attack-incapable units refuse the order (`AllowedCommand`).
+            if let Some(target_unit) = enemy_under_cursor(&mut ray_cast) {
+                let target_pos = target_gtf_q
+                    .get(target_unit)
+                    .map_or(drag_path.points[0], |t| t.translation());
+                let target_kind = target_type_q.get(target_unit).map(|ut| ut.0).ok();
+                for (entity, _, unit, _) in &selected_q {
+                    if !armed(unit.0)
+                        || target_kind.is_some_and(|k| !unit_registry.can_attack(unit.0, k))
+                    {
+                        continue;
+                    }
+                    apply_ordered_command(
+                        entity,
+                        QueuedCommand::AttackUnit {
+                            target: target_unit,
+                            pos: target_pos,
+                        },
+                        shift,
+                        &orders,
+                        &mut commands,
+                    );
+                }
+                pending.markers.push((target_pos, OrderMarker::Attack));
+            } else if let Some(ground) = ground_hit(&windows, &camera_q, &mut ray_cast) {
+                for (entity, _, unit, _) in &selected_q {
+                    if !crate::ui::hud::command_panel::commands::can_attack(unit.0) {
+                        continue;
+                    }
+                    apply_ordered_command(
+                        entity,
+                        QueuedCommand::AttackGround(ground),
+                        shift,
+                        &orders,
+                        &mut commands,
+                    );
+                }
+                pending.markers.push((ground, OrderMarker::Attack));
+            }
+            drag_path.points.clear();
+            return;
+        }
+
         if drag_path.points.len() == 1 {
             // Single-point order. First check for a right-click ON a unit:
             // an enemy under the cursor turns the order into an attack for
             // every selected armed unit (unarmed units move as usual).
-            let clicked_enemy =
-                unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q).filter(
-                    |&target| {
-                        unit_info_q
-                            .get(target)
-                            .ok()
-                            .zip(
-                                selected_q
-                                    .iter()
-                                    .next()
-                                    .and_then(|(e, ..)| unit_info_q.get(e).ok()),
-                            )
-                            .is_some_and(|(t_team, m_team)| !is_friendly(m_team.0, t_team.0))
-                    },
-                );
+            let clicked_enemy = enemy_under_cursor(&mut ray_cast);
 
             if let Some(target_unit) = clicked_enemy {
                 let target_pos = target_gtf_q
@@ -448,9 +513,14 @@ fn update_formation_preview(
     assets: Option<Res<FormationPreviewAssets>>,
 ) {
     // If drag is not active or path has fewer than 2 points, hide any existing previews.
-    // The units the release will order: the movers.
+    // The units the release will order: the movers. An attack drag
+    // places no formation.
     let unit_count = selected_q.iter().filter(|s| s.speed > 0.0).count();
-    if !drag_path.active || drag_path.points.len() < 2 || unit_count == 0 {
+    if !drag_path.active
+        || drag_path.attack_from_press
+        || drag_path.points.len() < 2
+        || unit_count == 0
+    {
         for (_, mut vis) in &mut preview_q {
             vis.set_if_neq(Visibility::Hidden);
         }
@@ -831,6 +901,120 @@ mod tests {
         // Ray lands on the terrain box top (y=0.5) at the cursor's
         // world point — dead centre of the viewport.
         assert!((target - Vec3::new(0.0, 0.5, 0.0)).length() < 1.0);
+    }
+
+    /// #49: a right-drag that starts on an enemy is no formation move.
+    /// The default command remembered at the press is Attack, resolved
+    /// at the release: the enemy under the cursor, else the ground.
+    #[test]
+    fn right_drag_from_an_enemy_attacks() {
+        use crate::units::combat::{AttackGroundOrder, AttackTargetOrder};
+        use spring_tdf::{UnitDef, UnitDefs};
+
+        let mut world = world_with_camera_and_terrain();
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                weapon1: "BitGun".into(),
+                ..UnitDef::default()
+            },
+        );
+        world.insert_resource(UnitRegistry::for_test(defs));
+        let enemy_mesh = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::from(Cuboid::new(1.0, 1.0, 1.0)));
+        let enemy = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                TeamId(1),
+                crate::units::components::SelectionVolume,
+                Mesh3d(enemy_mesh),
+                Transform::default(),
+                GlobalTransform::default(),
+                InheritedVisibility::VISIBLE,
+                ViewVisibility::default(),
+                Aabb {
+                    center: Vec3A::ZERO,
+                    half_extents: Vec3A::splat(0.5),
+                },
+            ))
+            .id();
+        world
+            .get_mut::<ViewVisibility>(enemy)
+            .unwrap()
+            .set_visible();
+        let stats = UnitStats {
+            radius: 12.0,
+            hit_radius: 20.0,
+            mid_y: 0.0,
+            speed: 90.0,
+            acc_rate: 0.03,
+            dec_rate: 0.067,
+            turn_rate: 3.0,
+            can_fly: false,
+            no_chase_vtol: true,
+        };
+        let mine: Vec<Entity> = (0..2)
+            .map(|i| {
+                world
+                    .spawn((
+                        UnitType(UnitKind::Bit),
+                        TeamId(0),
+                        Selected,
+                        stats,
+                        Transform::from_xyz(60.0, 0.0, 10.0 * i as f32),
+                    ))
+                    .id()
+            })
+            .collect();
+
+        let set_cursor = |world: &mut World, x: f64| {
+            world
+                .query::<&mut Window>()
+                .single_mut(world)
+                .unwrap()
+                .set_physical_cursor_position(Some(DVec2::new(x, 50.0)));
+        };
+        let drag = |world: &mut World, back_on_enemy: bool| {
+            set_cursor(world, 50.0);
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Right);
+            world.run_system_once(handle_right_click).unwrap();
+            assert!(world.resource::<RightDragPath>().attack_from_press);
+            world.resource_mut::<ButtonInput<MouseButton>>().clear();
+            // The headless camera's identity projection maps the
+            // viewport edge to ±1 elmo: 45 px off centre clears the
+            // 1-elmo enemy.
+            set_cursor(world, 95.0);
+            world.run_system_once(handle_right_click).unwrap();
+            if back_on_enemy {
+                set_cursor(world, 50.0);
+            }
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .release(MouseButton::Right);
+            world.run_system_once(handle_right_click).unwrap();
+            world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        };
+
+        // Dragged off the enemy onto bare ground: attack the ground there.
+        drag(&mut world, false);
+        for &unit in &mine {
+            assert!(world.get::<MoveTarget>(unit).is_none(), "no formation move");
+            let order = world.get::<AttackGroundOrder>(unit).expect("attack ground");
+            assert!(
+                order.pos.x.abs() > 0.5,
+                "at the release point: {}",
+                order.pos
+            );
+        }
+        // Released back over the enemy: attack it.
+        drag(&mut world, true);
+        for &unit in &mine {
+            assert_eq!(world.get::<AttackTargetOrder>(unit).unwrap().target, enemy);
+        }
     }
 
     /// Formation assignment never sends two units along crossing

@@ -7,6 +7,7 @@
 //! if the group has any live members). Done as a follow-up to plan
 //! §10.1.
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
 
 use super::core::{Selected, SelectionSet};
@@ -15,7 +16,8 @@ pub(super) struct UnitGroupsPlugin;
 
 impl Plugin for UnitGroupsPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<UnitGroups>()
+        // Control groups hold the old match's units.
+        app.init_match_resource::<UnitGroups>()
             .add_systems(Update, handle_unit_groups.in_set(SelectionSet::Select));
     }
 }
@@ -23,10 +25,12 @@ impl Plugin for UnitGroupsPlugin {
 /// Number of recallable groups, indexed by digit key 1..9.
 pub const GROUP_COUNT: usize = 9;
 
-/// Stored selections, one per digit. Despawned entities stay until the
-/// next assign — `handle_unit_groups` filters via the live entity query
-/// at recall time, so a group whose units have all died recalls to
-/// nothing rather than panicking on a stale `Entity`.
+/// Stored selections, one per digit. Dead entities stay until the next
+/// assign — `handle_unit_groups` filters via the live entity query at
+/// recall time (despawned, or still playing a death script: Spring's
+/// `CGroup::RemoveUnit` drops a unit at its death), so a group whose
+/// units have all died recalls to nothing rather than reselecting
+/// corpses or panicking on a stale `Entity`.
 #[derive(Resource, Default)]
 pub struct UnitGroups {
     slots: [Vec<Entity>; GROUP_COUNT],
@@ -47,7 +51,13 @@ impl UnitGroups {
 fn handle_unit_groups(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<Entity, With<Selected>>,
-    all_units_q: Query<Entity, With<crate::units::components::UnitType>>,
+    all_units_q: Query<
+        Entity,
+        (
+            With<crate::units::components::UnitType>,
+            Without<crate::units::combat::Dying>,
+        ),
+    >,
     mut groups: ResMut<UnitGroups>,
     mut commands: Commands,
 ) {
@@ -118,6 +128,32 @@ mod tests {
         let e2 = Entity::from_raw_u32(2).unwrap();
         groups.assign(0, [e1, e2]);
         assert_eq!(groups.recall(0), &[e1, e2]);
+    }
+
+    /// Recalling a group reselects only living members: a unit playing
+    /// its death script left the group at the kill (`CGroup::RemoveUnit`).
+    #[test]
+    fn recall_skips_dying_members() {
+        use crate::units::components::UnitType;
+        use crate::units::content::definitions::UnitKind;
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let alive = world.spawn(UnitType(UnitKind::Bit)).id();
+        let dying = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                crate::units::combat::Dying { timer: 1.0 },
+            ))
+            .id();
+        let mut groups = UnitGroups::default();
+        groups.assign(0, [alive, dying]);
+        world.insert_resource(groups);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::Digit1);
+        world.insert_resource(keys);
+        world.run_system_once(handle_unit_groups).unwrap();
+        assert!(world.get::<Selected>(alive).is_some());
+        assert!(world.get::<Selected>(dying).is_none());
     }
 
     #[test]

@@ -18,6 +18,7 @@
 //! ground click casts the aimed abilities, as `D` over that point would
 //! ([`deploy_units`] / [`cast_aimed_abilities`] are shared).
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
 
 use super::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
@@ -44,7 +45,8 @@ pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<OrderCursorModes>().add_systems(
+        // An armed order mode doesn't outlive its match.
+        app.init_match_resource::<OrderCursorModes>().add_systems(
             Update,
             (
                 trigger_aimed_ability_on_hotkey,

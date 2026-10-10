@@ -15,6 +15,7 @@
 //!   the last selected unit) — name, description, health, speed, and a
 //!   teleporter's buffered packets.
 
+use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -34,7 +35,7 @@ pub(super) struct TooltipPlugin;
 
 impl Plugin for TooltipPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<HoverTip>().add_systems(
+        app.init_match_resource::<HoverTip>().add_systems(
             Update,
             refresh_tooltip
                 .run_if(in_state(AppState::InGame))
