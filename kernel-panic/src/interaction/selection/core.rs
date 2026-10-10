@@ -84,11 +84,14 @@ pub struct DragState {
     start: Option<Vec2>,
     /// Whether we're actively dragging (past threshold).
     dragging: bool,
-    /// True when the press that opened the current mouse-down belonged to
-    /// an armed order cursor mode. The release then skips world-space
-    /// selection so the order click doesn't also clear the selection it
-    /// was issued to. Cleared on the matching release.
-    swallowed: bool,
+    /// The current mouse-down is a selection click: selection saw its
+    /// press, and no armed order mode claimed it. Only such a click
+    /// selects on release. A press consumed before
+    /// [`SelectionSet::Select`] (`clear_just_pressed`: the command panel,
+    /// build bar, menu buttons, placement, the order-mode click
+    /// handlers) is never seen here, so neither its drag nor its release
+    /// touches the selection. Cleared on the release.
+    tracking: bool,
     /// (timestamp, entity) of the last click that landed on a unit. A
     /// second click on the same entity within
     /// [`DOUBLE_CLICK_INTERVAL`] expands the selection to all visible
@@ -222,26 +225,27 @@ fn handle_selection(
 ) {
     let cursor_pos = windows.single().ok().and_then(|w| w.cursor_position());
 
-    // While any order cursor mode is armed (attack-ground, attack-move,
-    // or patrol), the left-click belongs to that mode's click handler and
-    // must not flow into selection — otherwise the release would clear the
-    // selection before the order could dispatch.
-    let cursor_mode_active = modes.any_active();
-
     // --- Left press: start tracking ---
+    // While an order cursor mode is armed, the left-click belongs to
+    // that mode (its handler consumes a committing click; one it
+    // ignores, like a guard click on bare ground, is swallowed here) and
+    // must not flow into selection.
     if mouse.just_pressed(MouseButton::Left) {
-        drag_state.swallowed = cursor_mode_active;
-        if cursor_mode_active {
-            return;
-        }
+        drag_state.tracking = !modes.any_active();
         drag_state.start = cursor_pos;
         drag_state.dragging = false;
     }
-
-    if drag_state.swallowed {
-        if mouse.just_released(MouseButton::Left) {
-            drag_state.swallowed = false;
+    if !drag_state.tracking {
+        return;
+    }
+    if !mouse.pressed(MouseButton::Left) && !mouse.just_released(MouseButton::Left) {
+        // The release was consumed (or lost with the window focus).
+        for mut node in &mut box_nodes {
+            node.display = Display::None;
         }
+        drag_state.tracking = false;
+        drag_state.start = None;
+        drag_state.dragging = false;
         return;
     }
 
@@ -393,6 +397,7 @@ fn handle_selection(
 
         drag_state.start = None;
         drag_state.dragging = false;
+        drag_state.tracking = false;
     }
 }
 
@@ -547,5 +552,78 @@ mod tests {
             "hidden root: {cloaked:?} unpickable"
         );
         assert_eq!(hit(app.world_mut(), 50.0), None);
+    }
+
+    fn selection_world() -> (World, Entity) {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.init_resource::<ButtonInput<MouseButton>>();
+        world.init_resource::<ButtonInput<KeyCode>>();
+        world.init_resource::<DragState>();
+        world.init_resource::<crate::interaction::ability::OrderCursorModes>();
+        world.insert_resource(crate::units::player::LocalTeam(0));
+        let unit = world
+            .spawn((
+                UnitType(crate::units::content::definitions::UnitKind::Bit),
+                TeamId(0),
+                GlobalTransform::default(),
+                Selected,
+            ))
+            .id();
+        (world, unit)
+    }
+
+    /// One frame of left-button input through `handle_selection`;
+    /// `consumed` = an earlier system (order click, panel, menu) took
+    /// the press with `clear_just_pressed`.
+    fn frame(world: &mut World, press: bool, release: bool, consumed: bool) {
+        {
+            let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+            mouse.clear();
+            if press {
+                mouse.press(MouseButton::Left);
+                if consumed {
+                    mouse.clear_just_pressed(MouseButton::Left);
+                }
+            }
+            if release {
+                mouse.release(MouseButton::Left);
+            }
+        }
+        world.run_system_once(handle_selection).unwrap();
+    }
+
+    /// A click consumed before selection (an order click, a command
+    /// panel or menu button) keeps the selection: its release used to
+    /// clear it.
+    #[test]
+    fn consumed_click_keeps_the_selection() {
+        let (mut world, unit) = selection_world();
+        frame(&mut world, true, false, true);
+        frame(&mut world, false, false, false);
+        frame(&mut world, false, true, false);
+        assert!(world.get::<Selected>(unit).is_some());
+    }
+
+    /// A click on empty ground that selection saw still deselects.
+    #[test]
+    fn plain_click_on_ground_deselects() {
+        let (mut world, unit) = selection_world();
+        frame(&mut world, true, false, false);
+        frame(&mut world, false, true, false);
+        assert!(world.get::<Selected>(unit).is_none());
+    }
+
+    /// A press while an order mode is armed is the mode's even when its
+    /// handler ignored it (a guard click on bare ground).
+    #[test]
+    fn armed_mode_click_is_swallowed() {
+        let (mut world, unit) = selection_world();
+        world
+            .resource_mut::<crate::interaction::ability::OrderCursorModes>()
+            .arm(crate::interaction::ability::Mode::Guard);
+        frame(&mut world, true, false, false);
+        frame(&mut world, false, true, false);
+        assert!(world.get::<Selected>(unit).is_some());
     }
 }

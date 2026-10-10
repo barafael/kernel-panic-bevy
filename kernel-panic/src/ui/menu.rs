@@ -67,7 +67,11 @@ impl Plugin for MenuPlugin {
                     handle_menu_actions,
                     keyboard_menu_nav,
                     mouse_menu_input
-                        .run_if(in_state(AppState::Menu).or_else(in_state(AppState::InGame))),
+                        .run_if(in_state(AppState::Menu).or_else(in_state(AppState::InGame)))
+                        // A click on a menu button is the menu's: it is
+                        // consumed before selection and the right-click
+                        // orders could act on it.
+                        .before(crate::interaction::selection::SelectionSet::Select),
                     esc_in_menu.run_if(in_state(AppState::Menu)),
                     boot_demo
                         .run_if(in_state(AppState::Menu).and_then(resource_exists::<MapCatalog>)),
@@ -888,7 +892,9 @@ fn keyboard_menu_nav(
 /// app's runtime, so we hit-test directly against `window.cursor_position()`
 /// (the same source the RTS selection/placement systems already use) and the
 /// node's computed rect. Hover brightens the button under the cursor; a
-/// primary click on a button dispatches its [`MenuAction`].
+/// primary click on a button dispatches its [`MenuAction`]. Any press on
+/// a button is consumed, so it can't also deselect or order the units
+/// behind the Esc overlay or game-over panel.
 fn mouse_menu_input(
     buttons: Query<(
         Entity,
@@ -898,7 +904,7 @@ fn mouse_menu_input(
         &UiGlobalTransform,
     )>,
     windows: Query<&Window>,
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     mut focus: ResMut<MenuFocus>,
     mut hovered: Local<Option<Entity>>,
     mut colors: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>,
@@ -953,6 +959,11 @@ fn mouse_menu_input(
             && let Ok((_, b, ..)) = buttons.get(ent)
         {
             ev.write(MenuActionMessage { action: b.action });
+        }
+        for button in [MouseButton::Left, MouseButton::Right] {
+            if mouse.just_pressed(button) {
+                mouse.clear_just_pressed(button);
+            }
         }
     }
 }
