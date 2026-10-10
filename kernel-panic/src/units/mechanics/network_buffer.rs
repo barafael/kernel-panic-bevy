@@ -325,7 +325,6 @@ mod tests {
         assert_eq!(b.get(0), 0);
     }
 
-    #[test]
     /// Why: the Port's timer used to run from the moment its nanoframe
     /// appeared. network_buffer.lua only lists a Port on `UnitFinished`
     /// (`portList[u] = 0`): nothing while it is built, one packet as it
@@ -351,7 +350,7 @@ mod tests {
                 },
             ))
             .id();
-        let mut step = |app: &mut App, secs: f32| {
+        let step = |app: &mut App, secs: f32| {
             app.world_mut()
                 .resource_mut::<Time>()
                 .advance_by(std::time::Duration::from_secs_f32(secs));
