@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c478e5c71ea2f6c756094d9fc0279eaa6b9e4ff06016f29f024b524979dd9d1d # shrinks to seed = 4074107387253435417, blocked = [(44, 10)]
+cc 23570bfa29497f43e1c041f521acd1c889a753744e061320b6d96325291acad5 # shrinks to seed = 18140191453764596531, blocked = [(30, 39), (29, 39)]

@@ -118,9 +118,37 @@ proptest! {
             for p in &path.points[..path.points.len() - 1] {
                 prop_assert!(near_open(&map, *p), "{:?}", p);
             }
+            // A complete path ends at the goal or inside its radius (8):
+            // the forward search may stop in a leaf within the radius,
+            // and the path then ends at that leaf's point nearest the
+            // goal (`useFwdPathOnly`) — e.g. for a goal on a closed square.
             if path.full {
-                prop_assert_eq!(*path.points.last().unwrap(), dst);
+                let end = *path.points.last().unwrap();
+                let d = ((end[0] - dst[0]).powi(2) + (end[1] - dst[1]).powi(2)).sqrt();
+                prop_assert!(d <= 8.0 + 1e-3, "{:?} vs {:?}", end, dst);
             }
         }
+    }
+}
+
+/// A shrunk `paths_never_enter_closed_squares` case: on a 48-square map
+/// the engine's 32-square fallback roots, clipped to 16 x 32, split into
+/// non-square nodes down to 1 x 2 leaves, and a mixed one could not
+/// split further: the path crossed the closed squares (36, 21) and
+/// (36, 22) at (290, 176). Square roots split them to single squares.
+#[test]
+fn narrow_mixed_leaves_do_not_carry_paths_over_closed_squares() {
+    let size = 48u32;
+    let mut map = SpeedMap::uniform(size, size, 1.0);
+    for (x, z) in [(36u32, 22u32), (0, 0), (36, 21), (33, 35)] {
+        map.speeds[(z * size + x) as usize] = 0.0;
+    }
+    let (src, dst) = ([292.88, 97.84], [280.736, 286.256]);
+    let path = search(&map, src, dst).expect("open map");
+    assert!(path.full, "{:?}", path.points);
+    assert_eq!(path.points[0], src);
+    assert_eq!(*path.points.last().unwrap(), dst);
+    for p in &path.points {
+        assert!(near_open(&map, *p), "{p:?} in {:?}", path.points);
     }
 }
