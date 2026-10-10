@@ -794,6 +794,7 @@ fn trigger_delayed_hit(
     {
         commands.spawn(crate::units::mechanics::command_fire::nx_zone(
             impact_pos,
+            hit.attacker,
             owner_team,
             owner_faction,
         ));

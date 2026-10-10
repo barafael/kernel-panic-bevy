@@ -762,6 +762,74 @@ fn unit_def_kamikaze() {
     assert_eq!(bomb.weapon1, "end_game_logic_bomb");
 }
 
+/// The engine adds 25 to `KamikazeDistance` (`UnitDef.cpp:508`): the
+/// Logic Bomb's 64 triggers at 89 elmos; units without the tag get 0.
+#[test]
+fn unit_def_kamikaze_distance_adds_engine_fudge() {
+    let tdf = Tdf::parse(
+        "[UNITINFO]\n{\nUnitname=logic_bomb;\nKamikaze=1;\nKamikazeDistance=64;\n}\n\
+         [UNITINFO]\n{\nUnitname=bit;\n}",
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    assert_eq!(defs.get("logic_bomb").unwrap().kamikaze_distance, 89.0);
+    assert_eq!(defs.get("bit").unwrap().kamikaze_distance, 0.0);
+}
+
+/// `AutoHeal` is parsed (Flow: 30 HP/s always) and the idle pair takes
+/// the engine defaults (10 HP/s after 600 frames) when absent, as for
+/// the Flow and the Logic Bomb; an explicit `IdleAutoHeal=0` stays 0.
+#[test]
+fn unit_def_auto_heal_and_engine_idle_defaults() {
+    let tdf = Tdf::parse(
+        "[UNITINFO]\n{\nUnitname=flow;\nAutoHeal=30;\n}\n\
+         [UNITINFO]\n{\nUnitname=mineblaster;\nIdleAutoHeal=0;\nIdleTime=900;\n}",
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let flow = defs.get("flow").unwrap();
+    assert_eq!(flow.auto_heal, 30.0);
+    assert_eq!(flow.idle_auto_heal, 10.0);
+    assert_eq!(flow.idle_time, 600.0);
+    let debug = defs.get("mineblaster").unwrap();
+    assert_eq!(debug.auto_heal, 0.0);
+    assert_eq!(debug.idle_auto_heal, 0.0);
+    assert_eq!(debug.idle_time, 900.0);
+}
+
+/// `SelfDestructCountdown` is parsed (1 on KP's mobile units) with the
+/// engine default 5 when absent (the buildings).
+#[test]
+fn unit_def_self_destruct_countdown() {
+    let tdf = Tdf::parse(
+        "[UNITINFO]\n{\nUnitname=bit;\nSelfDestructCountdown=1;\n}\n\
+         [UNITINFO]\n{\nUnitname=kernel;\n}",
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    assert_eq!(defs.get("bit").unwrap().self_destruct_countdown, 1.0);
+    assert_eq!(defs.get("kernel").unwrap().self_destruct_countdown, 5.0);
+}
+
+/// bug.fbi `WeaponMainDir1=0 0 1; MaxAngleDif1=270;` → a forward arc
+/// whose cosine limit is `cos(135°)`; without the tags the arc is the
+/// whole sphere (`cos 180° = -1`).
+#[test]
+fn unit_def_weapon_arc() {
+    let tdf = Tdf::parse(
+        "[UNITINFO]\n{\nUnitname=bug;\nWeaponMainDir1=0 0 2;\nMaxAngleDif1=270;\n}\n\
+         [UNITINFO]\n{\nUnitname=bit;\n}",
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    let bug = defs.get("bug").unwrap();
+    assert_eq!(bug.weapon_main_dir1, [0.0, 0.0, 1.0]);
+    assert!((bug.max_angle_dif1_cos - 135f32.to_radians().cos()).abs() < 1e-6);
+    let bit = defs.get("bit").unwrap();
+    assert_eq!(bit.weapon_main_dir1, [0.0, 0.0, 1.0]);
+    assert!((bit.max_angle_dif1_cos + 1.0).abs() < 1e-6);
+}
+
 #[test]
 fn unit_def_case_insensitive_lookup() {
     let tdf = Tdf::parse(

@@ -18,7 +18,9 @@ pub struct UnitDefs {
 /// A single unit definition parsed from an FBI file.
 ///
 /// Fields that don't appear in the TDF default to `0.0` / `false` / `""`,
-/// except `damage_modifier` which defaults to 1.0 (no scaling).
+/// except where Spring's `UnitDef` parser has a non-zero default
+/// (`damage_modifier`, the idle auto-heal pair, the weapon arc, the
+/// flight tags), which is applied here so consumers see engine values.
 #[derive(Debug, Clone, better_default::Default, Serialize, Deserialize)]
 pub struct UnitDef {
     /// Display name from `Name=`.
@@ -72,6 +74,16 @@ pub struct UnitDef {
     pub weapon2: String,
     /// Third weapon (`Weapon3=`).
     pub weapon3: String,
+    /// `WeaponMainDir1`: the primary weapon's arc centre in unit space
+    /// (`UnitDef.cpp:50`, default forward `0 0 1`), normalised.
+    #[default([0.0, 0.0, 1.0])]
+    pub weapon_main_dir1: [f32; 3],
+    /// `MaxAngleDif1` resolved like the engine (`UnitDef.cpp:42`):
+    /// `cos(maxAngleDif / 2)`, the full-width arc around
+    /// [`Self::weapon_main_dir1`] the weapon may fire into. The default
+    /// 360° gives `-1` (no restriction); the Bug's 270° gives `cos 135°`.
+    #[default(-1.0)]
+    pub max_angle_dif1_cos: f32,
 
     // --- Abilities ---
     /// Is a builder/constructor (`Builder=1`).
@@ -89,7 +101,9 @@ pub struct UnitDef {
     pub damage_modifier: f32,
     /// Is a kamikaze / suicide unit.
     pub kamikaze: bool,
-    /// Proximity trigger distance in elmos for kamikaze units.
+    /// Proximity trigger distance in elmos for kamikaze units, as the
+    /// engine resolves it: `kamikazeDistance + 25` (`UnitDef.cpp:508`,
+    /// default `-25 + 25 = 0`).
     pub kamikaze_distance: f32,
 
     // --- Sight ---
@@ -126,6 +140,11 @@ pub struct UnitDef {
     pub explode_as: String,
     /// Explosion type on self-destruct.
     pub self_destruct_as: String,
+    /// `SelfDestructCountdown`: seconds from a self-destruct order to the
+    /// blast as authored (`UnitDef.cpp:438`, default 5; the engine counts
+    /// `2·n + 1` slow updates, see the game's registry accessor).
+    #[default(5.0)]
+    pub self_destruct_countdown: f32,
 
     // --- Misc ---
     /// Can fly (`canFly=1`).
@@ -147,9 +166,16 @@ pub struct UnitDef {
     pub banking_allowed: bool,
     /// `AirStrafe`.
     pub air_strafe: bool,
-    /// Auto-heal rate when idle (HP/sec).
+    /// `AutoHeal`: HP/sec regenerated at all times (`UnitDef.cpp:329`,
+    /// default 0; the Flow's 30).
+    pub auto_heal: f32,
+    /// `IdleAutoHeal`: HP/sec regenerated once idle (`UnitDef.cpp:330`,
+    /// default 10).
+    #[default(10.0)]
     pub idle_auto_heal: f32,
-    /// Seconds before idle auto-heal kicks in.
+    /// `IdleTime`: sim frames without damage before idle auto-heal
+    /// kicks in (`UnitDef.cpp:331`, default 600).
+    #[default(600.0)]
     pub idle_time: f32,
     /// Max terrain slope for building placement.
     pub max_slope: f32,
@@ -254,6 +280,8 @@ impl UnitDef {
             weapon1: s.string_clean("weapon1"),
             weapon2: s.string_clean("weapon2"),
             weapon3: s.string_clean("weapon3"),
+            weapon_main_dir1: main_dir(s.get("weaponmaindir1")),
+            max_angle_dif1_cos: (s.f32_or("maxangledif1", 360.0) * 0.5).to_radians().cos(),
 
             builder: s.bool("builder"),
             commander: s.bool("commander"),
@@ -265,7 +293,7 @@ impl UnitDef {
                 if v == 0.0 { 1.0 } else { v }
             },
             kamikaze: s.bool("kamikaze"),
-            kamikaze_distance: s.f32("kamikazedistance"),
+            kamikaze_distance: s.f32_or("kamikazedistance", -25.0) + 25.0,
 
             sight_distance: s.f32("sightdistance"),
             radar_distance: s.f32("radardistance"),
@@ -278,6 +306,7 @@ impl UnitDef {
 
             explode_as: s.string("explodeas"),
             self_destruct_as: s.string("selfdestructas"),
+            self_destruct_countdown: s.f32_or("selfdestructcountdown", 5.0),
 
             can_fly: s.bool("canfly"),
             cruise_alt: s.f32("cruisealt"),
@@ -286,8 +315,9 @@ impl UnitDef {
             vertical_speed: s.f32_or("verticalspeed", 3.0),
             banking_allowed: s.get("bankingallowed").is_none_or(|v| v.trim() == "1"),
             air_strafe: s.bool("airstrafe"),
-            idle_auto_heal: s.f32("idleautoheal"),
-            idle_time: s.f32("idletime"),
+            auto_heal: s.f32("autoheal"),
+            idle_auto_heal: s.f32_or("idleautoheal", 10.0),
+            idle_time: s.f32_or("idletime", 600.0),
             max_slope: s.f32("maxslope"),
             init_cloaked: s.bool("init_cloaked"),
             mass: s.get("mass").and_then(|v| v.trim().parse().ok()),
@@ -297,6 +327,26 @@ impl UnitDef {
             is_feature: s.bool("isfeature"),
             sfx_types: parse_sfx_types(s),
         }
+    }
+}
+
+/// `WeaponMainDir<N>` (`weaponTable.GetFloat3("mainDir", FwdVector)`
+/// then `SafeNormalize`): forward when absent, malformed or zero.
+fn main_dir(value: Option<&str>) -> [f32; 3] {
+    let parts: Vec<f32> = value
+        .unwrap_or_default()
+        .split_whitespace()
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    let [x, y, z] = match parts[..] {
+        [x, y, z, ..] => [x, y, z],
+        _ => return [0.0, 0.0, 1.0],
+    };
+    let len = (x * x + y * y + z * z).sqrt();
+    if len > 1e-6 {
+        [x / len, y / len, z / len]
+    } else {
+        [0.0, 0.0, 1.0]
     }
 }
 

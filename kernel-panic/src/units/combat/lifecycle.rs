@@ -78,10 +78,10 @@ pub struct SelfDestructCountdown {
     pub remaining: f32,
 }
 
-/// Seconds between ordering self-destruct and detonation. Matches the
-/// 5 s number called out in FEATURES.md §3 — long enough to walk the
-/// unit away from allies, short enough that the player doesn't feel
-/// the command is lagging.
+/// The countdown an order stamps (the engine default
+/// `selfDestructCountdown=5`). [`tick_self_destruct`] replaces it with
+/// the unit's own FBI `SelfDestructCountdown`
+/// ([`UnitRegistry::self_destruct_delay`]) on its first tick.
 pub const SELF_DESTRUCT_DELAY: f32 = 5.0;
 
 /// Marks a unit as paralyzed: the combat and movement systems treat it
@@ -127,6 +127,10 @@ pub fn auto_heal(
     for (heal, mut health, mut idle, move_target, move_path, aim) in &mut query {
         if health.current <= 0.0 {
             continue;
+        }
+        // FBI `AutoHeal`: heals whether idle or not.
+        if heal.always > 0.0 && health.current < health.max {
+            health.current = (health.current + heal.always * dt).min(health.max);
         }
         let is_active = move_target.is_some() || move_path.is_some() || aim.is_some();
         if is_active {
@@ -323,10 +327,15 @@ pub fn death_system(
 /// a tiny bridge instead of a parallel detonation path.
 pub fn tick_self_destruct(
     time: Res<Time>,
-    mut query: Query<(&mut SelfDestructCountdown, &mut Health), Without<Dying>>,
+    unit_registry: Res<UnitRegistry>,
+    mut query: Query<(&mut SelfDestructCountdown, &mut Health, &UnitType), Without<Dying>>,
 ) {
     let dt = time.delta_secs();
-    for (mut countdown, mut health) in &mut query {
+    for (mut countdown, mut health, unit) in &mut query {
+        if countdown.is_added() {
+            // A fresh order: the unit's own countdown, not the default.
+            countdown.remaining = unit_registry.self_destruct_delay(unit.0);
+        }
         countdown.remaining -= dt;
         if countdown.remaining <= 0.0 {
             health.current = 0.0;
@@ -465,6 +474,7 @@ mod tests {
                 IdleAutoHeal {
                     rate: 50.0,
                     threshold: 0.0,
+                    always: 0.0,
                 },
                 IdleTimer(10.0),
                 SelfDestructCountdown { remaining: 0.0 },
@@ -484,6 +494,7 @@ mod tests {
                 IdleAutoHeal {
                     rate: 50.0,
                     threshold: 0.0,
+                    always: 0.0,
                 },
                 IdleTimer(10.0),
             ))

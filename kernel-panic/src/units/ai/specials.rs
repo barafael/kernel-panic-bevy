@@ -39,8 +39,8 @@ pub const COUNTER_DISPATCH_MIN_LACK: i32 = 5;
 /// building plot.
 pub const DEPLOY_MIN: f32 = 600.0;
 pub const DEPLOY_MAX: f32 = 1000.0;
-/// `IsItOccupied` clearance (±48 both axes upstream; a circle here).
-pub const DEPLOY_CLEAR_RADIUS: f32 = 48.0;
+/// `IsItOccupied` clearance: the ±48 XZ box half-extent.
+pub const DEPLOY_CLEAR_HALF: f32 = 48.0;
 /// Exploits pack up when nothing is within this range …
 pub const UNDEPLOY_MAX: f32 = 1100.0;
 /// … or an enemy has closed inside this range (too close to benefit).

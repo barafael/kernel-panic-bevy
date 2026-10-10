@@ -45,10 +45,12 @@ pub use aim::{
     DeployState, Deployable, aim_weapons_system, drive_aim_script, sync_byte_fold_state,
     sync_deploy_state,
 };
-pub(crate) use damage::splash_falloff;
+#[cfg(test)]
+pub use damage::Infected;
 pub use damage::{
-    BurstFire, DamageQueue, DelayedDamage, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue,
-    apply_damage, tick_burst_fire, tick_infections, weapon_infection_duration,
+    Armored, Attacker, BurstFire, DamageQueue, DelayedDamage, Hit, PendingDamage, VirusSpawn,
+    VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire, tick_infections,
+    update_armored,
 };
 pub use lifecycle::{
     Dying, SELF_DESTRUCT_DELAY, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
@@ -881,8 +883,19 @@ pub fn combat_system(
             // of it) pays for `has_line_of_sight`, not the whole crowd.
             los_candidates.clear();
             let scan_radius = aim::weapon_scan_radius(weapon_def, aim_from, map_gravity);
+            // `WeaponMainDir1` / `MaxAngleDif1` (`CWeapon::TestTarget` →
+            // `CheckTargetAngleConstraint`): the Bug's turret can't fire
+            // into its rear 90°.
+            let arc = unit_registry
+                .weapon_arc(unit_type.0)
+                .map(|(dir, cos)| (attacker_gtf.rotation() * dir, cos));
             spatial.query_radius(attacker_pos, scan_radius, |candidate| {
                 if !candidate.hp_positive {
+                    return;
+                }
+                if let Some((dir, cos)) = arc
+                    && (candidate.pos - attacker_pos).normalize_or_zero().dot(dir) < cos
+                {
                     return;
                 }
                 if candidate.team == attacker_team.0 {

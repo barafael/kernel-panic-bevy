@@ -18,13 +18,6 @@ use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
 /// We use 128 as the standard worker speed (homebases).
 const DEFAULT_WORKER_TIME: f32 = 128.0;
 
-/// Below this cutoff, an FBI `DamageModifier` is treated as the Spring
-/// engine-disable hack (`0.000001`) rather than a real gameplay value
-/// and is normalised to `1.0`. Any legitimate designer-set vulnerability
-/// or resistance we've seen in KP is O(1) — 0.5 through 4.0 — so the
-/// threshold sits well below that range.
-const DAMAGE_MODIFIER_DISABLED_THRESHOLD: f32 = 0.01;
-
 /// A ground unit's Spring `MoveDef` geometry (`MoveDefHandler.cpp`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MoveDefParams {
@@ -538,41 +531,58 @@ impl UnitRegistry {
         self.def(kind).map_or(0.0, |d| d.sight_distance)
     }
 
-    /// HP per second regenerated once a unit has been idle for `idle_time`.
-    /// Zero means the unit never auto-heals.
+    /// HP per second regenerated once a unit has been idle for `idle_time`
+    /// (FBI `IdleAutoHeal`, engine default 10). Zero means the unit never
+    /// idle-heals.
     pub fn idle_auto_heal(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.idle_auto_heal)
     }
 
-    /// Sim frames (30/s) the unit must be idle before auto-heal kicks in.
+    /// Sim frames (30/s) without damage before idle auto-heal kicks in
+    /// (FBI `IdleTime`, engine default 600).
     pub fn idle_time(&self, kind: UnitKind) -> f32 {
         self.def(kind).map_or(0.0, |d| d.idle_time)
     }
 
-    /// Incoming-damage multiplier from the FBI `DamageModifier` field.
-    ///
-    /// Spring-engine trick: upstream Kernel Panic sets
-    /// `DamageModifier=0.000001` on every combat unit as a way to *disable*
-    /// Spring's default damage path — the real damage formula lives in
-    /// KP's LuaRules gadget. Our reimplementation resolves damage
-    /// directly in [`super::combat::apply_damage`], so treating the FBI
-    /// near-zero value literally zeroes out every hit (a Bit takes
-    /// `80 × 1e-6 ≈ 8e-5` HP per Line shot — it lives forever).
-    ///
-    /// Pragmatic rule: values below [`DAMAGE_MODIFIER_DISABLED_THRESHOLD`]
-    /// are treated as the engine-disable hack and round to `1.0`.
-    /// Explicit design values like `4.0` (Socket / Firewall: deliberately
-    /// fragile) pass through unchanged. A missing field also defaults to
-    /// `1.0`. If we ever want homebase / Byte near-immunity back, it
-    /// should come from a dedicated per-kind multiplier table rather
-    /// than the FBI engine-hack value.
-    pub fn damage_modifier(&self, kind: UnitKind) -> f32 {
-        let raw = self.def(kind).map_or(1.0, |d| d.damage_modifier);
-        if raw < DAMAGE_MODIFIER_DISABLED_THRESHOLD {
-            1.0
-        } else {
-            raw
-        }
+    /// Seconds from a self-destruct order to the blast. The FBI's
+    /// `SelfDestructCountdown` `n` (engine default 5) arms
+    /// `selfDCountdown = 2n + 1`, decremented once per 15-frame slow
+    /// update until it hits zero (`CommandAI.cpp:971`, `Unit.cpp:1019`):
+    /// 1.5 s for KP's mobile units (`n = 1`), 5.5 s for buildings.
+    pub fn self_destruct_delay(&self, kind: UnitKind) -> f32 {
+        let n = self.def(kind).map_or(5.0, |d| d.self_destruct_countdown);
+        crate::sim::frames_to_secs((2.0 * n + 1.0) * crate::sim::SLOW_UPDATE_RATE as f32)
+    }
+
+    /// HP per second regenerated at all times (FBI `AutoHeal`: the
+    /// Flow's 30), on top of any idle heal (`CUnit::SlowUpdate`).
+    pub fn auto_heal(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.auto_heal)
+    }
+
+    /// The primary weapon's firing arc (`WeaponMainDir1` /
+    /// `MaxAngleDif1`): the arc centre in the unit's local frame — the
+    /// port's models face local `-Z`, Spring's unit space faces `+Z`, so
+    /// the FBI vector is turned half way round Y — and the cosine limit.
+    /// `None` when the weapon may fire all round (the default 360°).
+    pub fn weapon_arc(&self, kind: UnitKind) -> Option<(Vec3, f32)> {
+        let def = self.def(kind)?;
+        (def.max_angle_dif1_cos > -1.0).then(|| {
+            let [x, y, z] = def.weapon_main_dir1;
+            (Vec3::new(-x, y, -z), def.max_angle_dif1_cos)
+        })
+    }
+
+    /// The FBI `DamageModifier` — Spring's `armoredMultiple`
+    /// (`UnitDef.cpp:474`, default 1): the factor on incoming damage
+    /// *while the unit's script holds `ARMORED`* (`curArmorMultiple`),
+    /// never otherwise. Kernel Panic's scripts raise the flag only while
+    /// a unit is being built and briefly after, so the `0.000001` on
+    /// mobile units is spawn protection and the `4` on the datavent
+    /// buildings makes their nanoframes fragile; see
+    /// [`crate::units::combat::Armored`].
+    pub fn armored_multiple(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(1.0, |d| d.damage_modifier)
     }
 
     /// Indexed CEG name for one of the unit's FBI `[SFXTypes]` entries.
@@ -647,30 +657,22 @@ mod tests {
         UnitRegistry::for_test(defs)
     }
 
-    /// Upstream KP ships every combat unit with `DamageModifier=0.000001`
-    /// as a Spring engine-disable hack. If we applied that literally
-    /// every hit would shave off 1e-6 of the weapon's damage and no unit
-    /// would ever die (observed pre-fix). The accessor must normalise
-    /// those sub-threshold values to `1.0`.
+    /// `DamageModifier` is read verbatim: the `0.000001` spawn
+    /// protection and the buildings' `4` only apply while `ARMORED`
+    /// (the damage pipeline gates them), so nothing is normalised here.
     #[test]
-    fn near_zero_damage_modifier_is_treated_as_spring_engine_hack() {
+    fn armored_multiple_is_the_raw_damage_modifier() {
         let reg = registry_with(UnitKind::Bit, 0.000_001);
-        assert_eq!(reg.damage_modifier(UnitKind::Bit), 1.0);
-    }
-
-    /// Design-intent values (Socket / Firewall take 4× damage) must
-    /// survive normalisation unchanged.
-    #[test]
-    fn designer_set_multiplier_passes_through() {
+        assert_eq!(reg.armored_multiple(UnitKind::Bit), 0.000_001);
         let reg = registry_with(UnitKind::Socket, 4.0);
-        assert_eq!(reg.damage_modifier(UnitKind::Socket), 4.0);
+        assert_eq!(reg.armored_multiple(UnitKind::Socket), 4.0);
     }
 
     /// Missing FBI entry falls back to neutral `1.0`.
     #[test]
     fn missing_unit_defaults_to_one() {
         let reg = UnitRegistry::empty();
-        assert_eq!(reg.damage_modifier(UnitKind::Bit), 1.0);
+        assert_eq!(reg.armored_multiple(UnitKind::Bit), 1.0);
     }
 
     fn registry_with_slope(kind: UnitKind, raw_max_slope_deg: f32) -> UnitRegistry {
