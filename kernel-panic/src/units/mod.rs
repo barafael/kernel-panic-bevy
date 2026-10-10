@@ -103,6 +103,8 @@ impl Plugin for UnitsPlugin {
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<cloak::FogEnabled>()
             .init_resource::<animation::DeathParticleAssets>()
+            .init_match_resource::<production::BuggerOffRequests>()
+            .add_observer(production::kill_orphaned_buildee)
             .add_plugins(weapon_fx::WeaponFxPlugin)
             // Everything the fixed sim moves is drawn interpolated
             // between the last two sim poses (`rendering::interpolation`).
@@ -161,8 +163,14 @@ impl Plugin for UnitsPlugin {
                         production::production_system,
                         production::install_fade_materials,
                         production::animate_connection_hatch,
-                        construction::start_construction,
-                        construction::tick_construction,
+                        // Nested to stay under the tuple-arity cap.
+                        (
+                            construction::start_construction,
+                            production::apply_bugger_off,
+                            construction::tick_construction,
+                            construction::decay_nanoframes,
+                        )
+                            .chain(),
                         spawning::emerge_system,
                     )
                         .chain()

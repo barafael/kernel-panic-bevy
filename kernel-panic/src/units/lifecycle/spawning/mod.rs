@@ -35,7 +35,7 @@ use crate::units::content::unit_registry::UnitRegistry;
 mod emerge;
 mod s3o_mount;
 
-pub use emerge::{EmergeStyle, Emerging, FadeMaterials, emerge_system};
+pub use emerge::{BuildDriven, EmergeStyle, Emerging, FadeMaterials, emerge_system};
 pub use s3o_mount::PieceLayout;
 
 /// Bundles the asset / cache / registry resources `spawn_unit` needs.

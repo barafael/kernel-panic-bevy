@@ -1389,7 +1389,6 @@ mod tests {
                 Constructing {
                     kind: UnitKind::BadBlock,
                     site: site(0.0),
-                    progress: 0.0,
                     building: None,
                 },
                 queue_of(&[build(100.0), build(200.0)]),
@@ -1413,7 +1412,6 @@ mod tests {
                 .insert(Constructing {
                     kind: UnitKind::BadBlock,
                     site: site(x),
-                    progress: 0.0,
                     building: None,
                 });
             advance(&mut world);

@@ -45,6 +45,17 @@ pub enum EmergeStyle {
     Fade,
 }
 
+/// An [`Emerging`] unit whose build clock its builder drives (Spring's
+/// `AddBuildPower`): `emerge_system` leaves `remaining` alone and only
+/// applies it, so the build stalls when the builder does — and
+/// `construction::decay_nanoframes` winds it back once nobody builds.
+#[derive(Component, Default, Debug)]
+#[component(storage = "SparseSet")]
+pub struct BuildDriven {
+    /// Seconds since a builder last tended this frame (`lastNanoAdd`).
+    pub unpowered: f32,
+}
+
 /// Per-unit faded material clones plus the per-piece originals to put
 /// back when the entity finishes fading in. Spawned alongside
 /// `Emerging { Fade }` so the per-unit alpha ramp doesn't bleed into the
@@ -81,13 +92,16 @@ pub fn emerge_system(
         Option<&FadeMaterials>,
         Has<crate::interaction::movement::MoveTarget>,
         Option<&crate::interaction::movement::CommandQueue>,
+        Has<BuildDriven>,
     )>,
     piece_mats: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut transform, mut emerging, fade, has_move, queue) in &mut q {
-        emerging.remaining = (emerging.remaining - dt).max(0.0);
+    for (entity, mut transform, mut emerging, fade, has_move, queue, driven) in &mut q {
+        if !driven {
+            emerging.remaining = (emerging.remaining - dt).max(0.0);
+        }
         // t goes 0 → 1 over the duration.
         let t = (1.0 - emerging.remaining / emerging.total).clamp(0.0, 1.0);
 
@@ -129,7 +143,7 @@ pub fn emerge_system(
                 commands.entity(entity).remove::<FadeMaterials>();
             }
             let (rally, then) = (emerging.rally_point, emerging.rally_then);
-            commands.entity(entity).remove::<Emerging>();
+            commands.entity(entity).remove::<(Emerging, BuildDriven)>();
             // `CFactory::AssignBuildeeOrders` only sends the unit to an
             // empty spot when it has no orders of its own yet.
             let has_orders = has_move || queue.is_some_and(|q| !q.commands.is_empty());
