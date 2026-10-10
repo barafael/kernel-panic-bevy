@@ -162,6 +162,15 @@ impl SpatialIndex {
 
 /// Rebuild the index from the current unit pool. Runs at the head of the
 /// Simulate set so every downstream system sees a fresh snapshot.
+///
+/// Positions come from `Transform`, not `GlobalTransform`: units are
+/// hierarchy roots, and during the sim their `Transform` is the true sim
+/// pose (`rendering::interpolation::restore_sim_pose`), while
+/// `GlobalTransform` is only refreshed at `FixedFirst` and in
+/// `PostUpdate` — a unit spawned earlier this tick (a deploy pair-swap
+/// in Produce) still has an identity one and was indexed at the map
+/// origin. `Transform` also carries this tick's movement, as Spring's
+/// quad field does (`quadField.MovedUnit` on every move).
 #[allow(clippy::type_complexity)]
 pub fn rebuild_spatial_index(
     mut index: ResMut<SpatialIndex>,
@@ -171,7 +180,7 @@ pub fn rebuild_spatial_index(
             &UnitType,
             &super::components::UnitStats,
             &TeamId,
-            &GlobalTransform,
+            &Transform,
             &Health,
             Has<Cloaked>,
             Option<&DetectedBy>,
@@ -186,10 +195,10 @@ pub fn rebuild_spatial_index(
     >,
 ) {
     index.clear();
-    for (entity, unit_type, stats, team, gtf, health, cloaked, detected_by) in &units {
+    for (entity, unit_type, stats, team, tf, health, cloaked, detected_by) in &units {
         index.push(SpatialEntry {
             entity,
-            pos: gtf.translation(),
+            pos: tf.translation,
             hit_radius: stats.hit_radius,
             mid_y: stats.mid_y,
             team: team.0,
@@ -274,5 +283,43 @@ mod tests {
         assert_eq!(hit, 0);
         // Buckets retained — steady-state rebuilds shouldn't realloc.
         assert!(!index.cells.is_empty());
+    }
+
+    /// Why: the index read `GlobalTransform`, which a unit spawned
+    /// earlier in the same sim tick (a deploy pair-swap in Produce)
+    /// doesn't have propagated yet — it was indexed at the map origin.
+    #[test]
+    fn unit_spawned_this_tick_is_indexed_where_it_stands() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.init_resource::<SpatialIndex>();
+        let registry = crate::units::content::unit_registry::UnitRegistry::empty();
+        let unit = world
+            .spawn((
+                UnitType(UnitKind::Exploit),
+                super::super::components::UnitStats::from_registry(
+                    UnitKind::Exploit,
+                    &registry,
+                    10.0,
+                    0.0,
+                ),
+                TeamId(0),
+                Transform::from_xyz(1500.0, 0.0, 900.0),
+                GlobalTransform::IDENTITY,
+                Health::full(100.0),
+            ))
+            .id();
+        world.run_system_once(rebuild_spatial_index).unwrap();
+        let index = world.resource::<SpatialIndex>();
+        let mut at_origin = false;
+        index.query_radius(Vec3::ZERO, 100.0, |e| at_origin |= e.entity == unit);
+        let mut found = None;
+        index.query_radius(Vec3::new(1500.0, 0.0, 900.0), 10.0, |e| {
+            if e.entity == unit {
+                found = Some(e.pos);
+            }
+        });
+        assert!(!at_origin);
+        assert_eq!(found, Some(Vec3::new(1500.0, 0.0, 900.0)));
     }
 }
