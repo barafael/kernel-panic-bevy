@@ -24,6 +24,10 @@
 //! - `NextWayPoint`'s first-call scan, and the repath trigger placed
 //!   half-way along a long partial path.
 //!
+//! Added: a closed leaf also links to its closed neighbours, so a unit
+//! buried deep under a structure walks out the shortest way through
+//! them (the engine escapes only from a closed leaf beside open ground).
+//!
 //! Left out: per-thread registries, path sharing between units with the
 //! same start and goal leaves (a cache, not a behaviour), exit-only
 //! yardmap squares (Kernel Panic has none) and path repair (the dead
@@ -173,6 +177,9 @@ pub struct NodeLayer {
     /// `relSpeedModinfos[layer].max` as its reciprocal: the cheapest
     /// leaf's move cost (`hCostMult`), recomputed after changes.
     min_move_cost: Option<f32>,
+    /// `numLeafNodes` and the passable ones among them (`numOpenNodes`),
+    /// kept up to date as subtrees are rebuilt.
+    leaves: usize,
     open_leaves: usize,
 }
 
@@ -203,6 +210,7 @@ impl NodeLayer {
             free_blocks: Vec::new(),
             speed_u8: vec![0; (width * height) as usize],
             min_move_cost: None,
+            leaves: 0,
             open_leaves: 0,
         };
         for rz in 0..z_roots {
@@ -228,6 +236,9 @@ impl NodeLayer {
         layer.fill_squares(speed_map, mask, all);
         for root in 0..(x_roots * z_roots) {
             layer.tesselate(root);
+            let (leaves, open) = layer.count_leaves(root);
+            layer.leaves += leaves;
+            layer.open_leaves += open;
         }
         layer.relink(all);
         layer
@@ -242,10 +253,19 @@ impl NodeLayer {
 
     /// Number of leaves (the engine's `numLeafNodes`).
     pub fn leaf_count(&self) -> usize {
-        self.nodes
-            .iter()
-            .filter(|n| n.is_leaf() && n.xmin != u16::MAX)
-            .count()
+        self.leaves
+    }
+
+    /// Leaves under `node`, and how many of them are passable.
+    fn count_leaves(&self, node: NodeId) -> (usize, usize) {
+        let n = &self.nodes[node as usize];
+        if n.is_leaf() {
+            return (1, !n.impassable() as usize);
+        }
+        (0..4).fold((0, 0), |(l, o), i| {
+            let (cl, co) = self.count_leaves(n.child_base + i);
+            (l + cl, o + co)
+        })
     }
 
     /// `NodeLayer::Update` for `rect`: the per-square relative speed
@@ -274,8 +294,9 @@ impl NodeLayer {
 
     /// Terrain or structures changed in `rects` (squares): re-tesselate
     /// every 16-square block they touch whose squares changed, then
-    /// relink the leaves around them once (`PathManager::UpdateNodeLayer`).
-    /// Returns the squares whose nodes were rebuilt.
+    /// relink the leaves around the rebuilt nodes once they all stand
+    /// (`PathManager::UpdateNodeLayer`). Returns the squares whose nodes
+    /// were rebuilt.
     pub fn update(
         &mut self,
         speed_map: &SpeedMap,
@@ -283,7 +304,7 @@ impl NodeLayer {
         rects: impl IntoIterator<Item = Rect>,
     ) -> Option<Rect> {
         let d = DAMAGE_SIZE as i32;
-        let mut rebuilt: Option<Rect> = None;
+        let mut rebuilt: Vec<Rect> = Vec::new();
         for rect in rects {
             let rect = rect.clamped(self.width, self.height);
             if rect.is_empty() {
@@ -303,18 +324,39 @@ impl NodeLayer {
                     // `GetNodeThatEncasesPowerOfTwoArea`: the deepest
                     // node containing the block.
                     let node = self.encasing_node(block);
-                    let re = self.nodes[node as usize].rect();
+                    let (leaves, open) = self.count_leaves(node);
                     self.merge(node);
                     self.tesselate(node);
-                    rebuilt = Some(rebuilt.map_or(re, |r| r.union(re)));
+                    let (new_leaves, new_open) = self.count_leaves(node);
+                    self.leaves = self.leaves + new_leaves - leaves;
+                    self.open_leaves = self.open_leaves + new_open - open;
+                    rebuilt.push(self.nodes[node as usize].rect());
                 }
             }
         }
-        if let Some(re) = rebuilt {
+        // Each rebuilt node on its own: the bounding box of changes far
+        // apart would relink every leaf between them.
+        for &re in &rebuilt {
             self.relink(re);
+        }
+        if !rebuilt.is_empty() {
             self.min_move_cost = None;
         }
-        rebuilt
+        rebuilt.into_iter().reduce(Rect::union)
+    }
+
+    /// Bring the layer up to `speed_map` and `mask` without knowing
+    /// where they changed: every square is compared, and only the
+    /// 16-square blocks that differ are rebuilt — the same tree as
+    /// [`NodeLayer::new`] for a fraction of the work when little changed.
+    pub fn refresh(&mut self, speed_map: &SpeedMap, mask: Option<&BlockMask>) -> Option<Rect> {
+        let all = Rect {
+            x0: 0,
+            z0: 0,
+            x1: self.width as i32,
+            z1: self.height as i32,
+        };
+        self.update(speed_map, mask, [all])
     }
 
     fn root_at(&self, x: i32, z: i32) -> NodeId {
@@ -409,33 +451,36 @@ impl NodeLayer {
     }
 
     fn split(&mut self, node: NodeId) {
-        let n = self.nodes[node as usize].clone();
+        let n = &self.nodes[node as usize];
         let (xmid, zmid) = ((n.xmin + n.xmax) >> 1, (n.zmin + n.zmax) >> 1);
-        let rects = [
+        let children = [
             (n.xmin, n.zmin, xmid, zmid),
             (xmid, n.zmin, n.xmax, zmid),
             (n.xmin, zmid, xmid, n.zmax),
             (xmid, zmid, n.xmax, n.zmax),
-        ];
+        ]
+        .map(|(xmin, zmin, xmax, zmax)| Node {
+            xmin,
+            zmin,
+            xmax,
+            zmax,
+            child_base: NONE,
+            move_cost: f32::INFINITY,
+            neighbors: Vec::new(),
+        });
         let base = match self.free_blocks.pop() {
-            Some(b) => b,
+            Some(b) => {
+                for (i, c) in children.into_iter().enumerate() {
+                    self.nodes[b as usize + i] = c;
+                }
+                b
+            }
             None => {
                 let b = self.nodes.len() as NodeId;
-                self.nodes.extend(std::iter::repeat_n(n.clone(), 4));
+                self.nodes.extend(children);
                 b
             }
         };
-        for (i, (xmin, zmin, xmax, zmax)) in rects.into_iter().enumerate() {
-            self.nodes[base as usize + i] = Node {
-                xmin,
-                zmin,
-                xmax,
-                zmax,
-                child_base: NONE,
-                move_cost: f32::INFINITY,
-                neighbors: Vec::new(),
-            };
-        }
         let n = &mut self.nodes[node as usize];
         n.child_base = base;
         n.neighbors.clear();
@@ -486,14 +531,29 @@ impl NodeLayer {
     /// only), corner neighbours past two fully open edge leaves. Each
     /// transition point is the midpoint of the shared edge segment, or
     /// the shared corner.
+    ///
+    /// Unlike the engine, a closed leaf also links to its closed edge
+    /// neighbours. Open leaves never link to closed ones, so only a
+    /// search starting in a closed leaf can use these: the engine lets
+    /// such a unit escape (`IterateNodeNeighbors` costs leaving a closed
+    /// node at `QTPFS_CLOSED_NODE_COST` rather than infinity), but only
+    /// when its leaf touches open ground — a unit buried deeper inside a
+    /// block that a structure closed found no path at all.
     fn relink(&mut self, rect: Rect) {
         let mut leaves = Vec::new();
         self.leaves_in(rect.dilated(1), &mut leaves);
         for &id in &leaves {
-            let n = self.nodes[id as usize].clone();
+            // The rectangle and cost only (not the old neighbour list,
+            // whose allocation is reused for the new one).
+            let n = Node {
+                neighbors: Vec::new(),
+                ..self.nodes[id as usize]
+            };
+            let closed = n.impassable();
             let (xmin, zmin, xmax, zmax) =
                 (n.xmin as i32, n.zmin as i32, n.xmax as i32, n.zmax as i32);
-            let mut list = Vec::new();
+            let mut list = std::mem::take(&mut self.nodes[id as usize].neighbors);
+            list.clear();
             let side = |this: &Self,
                         list: &mut Vec<Neighbor>,
                         outside_x: Option<i32>,
@@ -508,7 +568,7 @@ impl NodeLayer {
                         while z < zmax {
                             let ngb = this.leaf_at(x, z);
                             let nn = &this.nodes[ngb as usize];
-                            if !nn.impassable() {
+                            if closed || !nn.impassable() {
                                 list.push(Neighbor {
                                     node: ngb,
                                     net: this.transition(&n, nn),
@@ -525,7 +585,7 @@ impl NodeLayer {
                         while x < xmax {
                             let ngb = this.leaf_at(x, z);
                             let nn = &this.nodes[ngb as usize];
-                            if !nn.impassable() {
+                            if closed || !nn.impassable() {
                                 list.push(Neighbor {
                                     node: ngb,
                                     net: this.transition(&n, nn),
@@ -573,11 +633,6 @@ impl NodeLayer {
             }
             self.nodes[id as usize].neighbors = list;
         }
-        self.open_leaves = self
-            .nodes
-            .iter()
-            .filter(|n| n.xmin != u16::MAX && n.is_leaf() && !n.impassable())
-            .count();
     }
 
     /// `GetNeighborEdgeTransitionPoint(ngb, .., alpha = 0.5)`: the
@@ -798,6 +853,9 @@ pub struct QtSearch {
     full: bool,
     use_fwd_only: bool,
     src_impassable: bool,
+    /// The forward search has popped an open leaf: a closed source has
+    /// found its way out, and closed leaves are no longer expanded.
+    escaped: bool,
     /// A repair search expands no node outside this rectangle.
     bounds: Option<Rect>,
 }
@@ -959,6 +1017,7 @@ impl QtSearch {
             full: false,
             use_fwd_only: false,
             src_impassable: layer.nodes[src_node as usize].impassable(),
+            escaped: !layer.nodes[src_node as usize].impassable(),
             bounds,
         };
         for fwd in [true, false] {
@@ -1045,12 +1104,20 @@ impl QtSearch {
         let in_bounds = self
             .bounds
             .is_none_or(|b| layer.nodes[cur as usize].intersects(&b));
-        if !other_active && in_bounds {
+        // A closed leaf past a closed source: only a way out, never the
+        // node nearest the goal nor an arrival inside the goal radius,
+        // and no longer expanded once the search has reached open ground.
+        let closed = layer.nodes[cur as usize].impassable();
+        let transit = fwd && closed && cur != self.fwd.src;
+        if fwd && !closed {
+            self.escaped = true;
+        }
+        if !other_active && in_bounds && !(transit && self.escaped) {
             let dir = if fwd { &mut self.fwd } else { &mut self.bwd };
-            if cur_state.h < scratch.get(fwd, dir.min_node).h {
+            if !transit && cur_state.h < scratch.get(fwd, dir.min_node).h {
                 dir.min_node = cur;
             }
-            let at_goal = fwd && cur_state.h <= adjusted_goal;
+            let at_goal = fwd && !transit && cur_state.h <= adjusted_goal;
             if !at_goal {
                 self.expand(layer, scratch, fwd, cur, cur_state);
             }
@@ -1062,10 +1129,18 @@ impl QtSearch {
             }
         }
         if other_touched {
-            // Met the other search.
+            // Met the other search: the meeting direction stops at once
+            // (`tgtSearchNode = curSearchNode; ResetQueue(dir)`), then the
+            // joint is set and the other direction stops too. Without
+            // the first reset the forward search keeps flooding past the
+            // joint and re-meets the backward tree further on, each time
+            // re-anchoring the path there: longer paths for many more
+            // expansions.
             let dir = if fwd { &mut self.fwd } else { &mut self.bwd };
             dir.connected = other_active;
             if other_active {
+                dir.tgt = cur;
+                dir.heap.clear();
                 self.full = true;
                 let other_prev = scratch.get(!fwd, cur).prev;
                 let other_net = scratch.get(!fwd, cur).net;
@@ -1092,7 +1167,7 @@ impl QtSearch {
                     self.fwd.heap.clear();
                 }
             }
-        } else if fwd && cur_state.h <= adjusted_goal {
+        } else if fwd && !transit && cur_state.h <= adjusted_goal {
             // Inside the goal radius: done with the forward path alone.
             self.use_fwd_only = true;
             self.full = true;
@@ -1124,6 +1199,13 @@ impl QtSearch {
         };
         for ngb in &node.neighbors {
             if ngb.node == cur_state.prev {
+                continue;
+            }
+            // Closed leaves link to closed neighbours only so that a
+            // closed source can find its way out: the backward search
+            // (from an open goal leaf, or a closed one with no open leaf
+            // near it) never enters them.
+            if !fwd && layer.nodes[ngb.node as usize].impassable() {
                 continue;
             }
             let g_dist = dist(cur_state.net, ngb.net);
@@ -1591,6 +1673,159 @@ mod tests {
                 "{q:?}"
             );
         }
+    }
+
+    /// The search stops both directions where they meet
+    /// (`ResetQueue(SEARCH_FORWARD)` on the forward meeting). Letting the
+    /// forward search run on past the joint re-met the backward tree
+    /// further along: on this map a 433-elmo path for 151 forward
+    /// expansions instead of 400 elmos for 11.
+    #[test]
+    fn meeting_stops_both_searches() {
+        let mut map = flat(64, 64);
+        for z in 0..64 {
+            if !(28..32).contains(&z) {
+                map.speeds[(z * 64 + 32) as usize] = 0.0;
+            }
+        }
+        let mut layer = NodeLayer::new(&map, None);
+        let mut scratch = QtScratch::default();
+        let (a, b) = ([100.0, 100.0], [400.0, 100.0]);
+        let Ok(mut s) = QtSearch::begin(&mut layer, &mut scratch, &map, None, a, b, 8.0) else {
+            panic!("the wall blocks the straight line");
+        };
+        let p = s.step(&layer, &mut scratch, usize::MAX).unwrap().unwrap();
+        assert!(p.full);
+        assert_eq!(*p.points.last().unwrap(), b);
+        assert!(path_len(&p) < 402.0, "{} {:?}", path_len(&p), p.points);
+        assert!(
+            s.fwd.searched <= 12,
+            "forward expansions {}",
+            s.fwd.searched
+        );
+        assert!(
+            s.bwd.searched <= 12,
+            "backward expansions {}",
+            s.bwd.searched
+        );
+    }
+
+    /// A 48-square closed block (a structure erected over a unit): the
+    /// leaves in its middle touch only closed leaves.
+    fn buried_map() -> SpeedMap {
+        let mut map = flat(64, 64);
+        for z in 8..56 {
+            for x in 8..56 {
+                map.speeds[(z * 64 + x) as usize] = 0.0;
+            }
+        }
+        map
+    }
+
+    /// A unit buried deep inside a closed block walks out by the
+    /// shortest way through closed leaves and then on to its goal,
+    /// instead of finding no path at all.
+    #[test]
+    fn buried_source_walks_out() {
+        let map = buried_map();
+        let mut layer = NodeLayer::new(&map, None);
+        let src = [196.0, 180.0];
+        let src_leaf = &layer.nodes[layer.leaf_at(24, 22) as usize];
+        assert!(src_leaf.impassable());
+        assert!(
+            src_leaf
+                .neighbors
+                .iter()
+                .all(|n| layer.nodes[n.node as usize].impassable()),
+            "no open leaf beside the source"
+        );
+        let goal = [500.0, 300.0];
+        let p = search(&mut layer, &map, None, src, goal).expect("a way out");
+        assert!(p.full, "{:?}", p.points);
+        assert_eq!(p.points[0], src);
+        assert_eq!(*p.points.last().unwrap(), goal);
+        // Out through the nearest side (x = 64, 132 elmos away), not the
+        // far one toward the goal; then never back into the block.
+        let open = |q: &[f32; 2]| !(64.0..448.0).contains(&q[0]) || !(64.0..448.0).contains(&q[1]);
+        let exit = p.points.iter().position(open).expect("reaches open ground");
+        assert!(dist(src, p.points[exit]) < 140.0, "{:?}", p.points);
+        assert!(p.points[exit..].iter().all(open), "{:?}", p.points);
+    }
+
+    /// A buried unit whose goal cannot be reached gets a partial path to
+    /// the open leaf nearest the goal — never one ending inside the
+    /// closed block it started in.
+    #[test]
+    fn buried_source_with_an_enclosed_goal_ends_on_open_ground() {
+        let mut map = buried_map();
+        // A closed ring around the far corner.
+        for i in 57..64 {
+            map.speeds[(57 * 64 + i) as usize] = 0.0;
+            map.speeds[(i * 64 + 57) as usize] = 0.0;
+        }
+        let mut layer = NodeLayer::new(&map, None);
+        let goal = [488.0, 488.0];
+        let p = search(&mut layer, &map, None, [256.0, 256.0], goal).expect("a way out");
+        assert!(!p.full);
+        let end = *p.points.last().unwrap();
+        let in_block = (64.0..448.0).contains(&end[0]) && (64.0..448.0).contains(&end[1]);
+        assert!(!in_block, "{:?}", p.points);
+        assert!(dist(end, goal) < 120.0, "{:?}", p.points);
+    }
+
+    /// Leaves by rectangle with their neighbour rectangles, for comparing
+    /// trees whose node ids differ.
+    fn shape(layer: &NodeLayer) -> Vec<(Rect, Vec<Rect>)> {
+        let key = |r: &Rect| (r.z0, r.x0, r.z1, r.x1);
+        let mut v: Vec<_> = layer
+            .nodes
+            .iter()
+            .filter(|n| n.xmin != u16::MAX && n.is_leaf())
+            .map(|n| {
+                let mut ngb: Vec<Rect> = n
+                    .neighbors
+                    .iter()
+                    .map(|g| layer.nodes[g.node as usize].rect())
+                    .collect();
+                ngb.sort_by_key(key);
+                (n.rect(), ngb)
+            })
+            .collect();
+        v.sort_by_key(|(r, _)| key(r));
+        v
+    }
+
+    /// `refresh` (a change the change log no longer covers) rebuilds the
+    /// tree a fresh tesselation would build, and keeps the leaf counts.
+    #[test]
+    fn refresh_matches_a_fresh_tesselation() {
+        let map = flat(128, 64);
+        let mut layer = NodeLayer::new(&map, None);
+        let changed = buried_map();
+        let mut wide = flat(128, 64);
+        for z in 0..64 {
+            for x in 0..64 {
+                wide.speeds[(z * 128 + x) as usize] = changed.speeds[(z * 64 + x) as usize];
+            }
+        }
+        // A wall far from the block too.
+        for z in 0..40 {
+            wide.speeds[(z * 128 + 100) as usize] = 0.0;
+        }
+        let re = layer.refresh(&wide, None).expect("something changed");
+        assert_eq!((re.x0, re.z0, re.x1, re.z1), (0, 0, 112, 64));
+        let fresh = NodeLayer::new(&wide, None);
+        assert!(shape(&layer) == shape(&fresh));
+        assert_eq!(layer.leaf_count(), fresh.leaf_count());
+        assert_eq!(layer.open_leaves, fresh.open_leaves);
+        let scan = |l: &NodeLayer| {
+            l.nodes
+                .iter()
+                .filter(|n| n.xmin != u16::MAX && n.is_leaf() && !n.impassable())
+                .count()
+        };
+        assert_eq!(layer.open_leaves, scan(&fresh));
+        assert!(layer.refresh(&wide, None).is_none(), "nothing left to do");
     }
 
     /// An enclosed goal gives a partial path ending in the open leaf

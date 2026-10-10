@@ -251,9 +251,19 @@ impl PathQueue {
                 self.stats.label_updates += 1;
             }
             None => {
-                // The change ring no longer reaches back: tesselate anew.
-                self.layers
-                    .insert(key, (nav.revision, NodeLayer::new(speed_map, mask)));
+                // The change ring no longer reaches back: compare every
+                // square and rebuild only the blocks that differ (the
+                // same tree as tesselating anew, for far less work).
+                match self.layers.get_mut(&key) {
+                    Some((rev, layer)) => {
+                        layer.refresh(speed_map, mask);
+                        *rev = nav.revision;
+                    }
+                    None => {
+                        self.layers
+                            .insert(key, (nav.revision, NodeLayer::new(speed_map, mask)));
+                    }
+                }
                 self.stats.labellings += 1;
             }
         }
@@ -3314,8 +3324,7 @@ mod tests {
     /// the edge of a structure's footprint (a building erected against
     /// it, a yard closing) walks out — `UpdatePos` lets a stuck unit step
     /// even when no square beside it is open — and then reaches its
-    /// goal. (A unit buried deep inside a closed block has no passable
-    /// neighbour leaf and fails its path, as in the engine.)
+    /// goal. (For a unit buried deeper see the next test.)
     #[test]
     fn unit_inside_a_structure_footprint_walks_out() {
         let mut h = Harness::flat();
@@ -3346,6 +3355,34 @@ mod tests {
             unstuck_at.is_some_and(|t| t < 120),
             "walks out of the closed squares within 4 s: {unstuck_at:?}"
         );
+        assert!(!h.has_order(e), "order finished");
+        assert!(
+            h.pos(e).xz().distance(goal.xz()) < 40.0,
+            "reached the goal: {}",
+            h.pos(e)
+        );
+    }
+
+    /// A unit in the middle of a Terminal's footprint (erected over it):
+    /// its leaf touches only closed leaves, where the engine's search
+    /// finds no path at all. The path search walks it out through the
+    /// closed leaves instead, so it still obeys orders.
+    #[test]
+    fn unit_buried_under_a_structure_walks_out() {
+        let mut h = Harness::flat();
+        let site = Vec3::new(640.0, 0.0, 640.0);
+        h.spawn_structure(UnitKind::Terminal, 0, site);
+        h.step();
+        let e = h.spawn(UnitKind::Bit, 0, site + Vec3::new(4.0, 0.0, 4.0));
+        h.step();
+        let goal = Vec3::new(640.0, 0.0, 900.0);
+        h.world.entity_mut(e).insert(MoveTarget(goal));
+        for _ in 0..900 {
+            h.step();
+            if !h.has_order(e) {
+                break;
+            }
+        }
         assert!(!h.has_order(e), "order finished");
         assert!(
             h.pos(e).xz().distance(goal.xz()) < 40.0,
