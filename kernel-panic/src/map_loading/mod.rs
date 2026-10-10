@@ -21,6 +21,7 @@
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
+#[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -51,7 +52,10 @@ use spring_map::{
 // HexFarm Lua-composited towers/bridges (native and web: the data
 // round-trips through `.kpmap` v4).
 pub(crate) mod lua_compositing;
+mod match_scope;
 mod mipmap;
+
+pub use match_scope::{MatchEntity, MatchScopeAppExt};
 
 // Web-only: maps arrive as fetched `.kpmap` bytes through the asset
 // server, and the deploy's map list is embedded at build time.
@@ -229,9 +233,9 @@ fn prefetch_selected_map(
     info!("Prefetching {}", setup.map);
 }
 
-/// Marker for entities that survive game-world teardown (menu UI):
-/// the launch menu, Esc overlay, and game-over panel all carry it so
-/// [`despawn_game_world`] spares them while clearing the match.
+/// Marker for UI that survives the match teardown: the launch menu, Esc
+/// overlay, and game-over panel all carry it so the swap spares their
+/// whole tree while clearing the match (see [`match_scope`]).
 #[derive(Component)]
 pub struct PersistentEntity;
 
@@ -267,33 +271,14 @@ impl MapCatalog {
 }
 
 /// Every transition into `InGame` (fresh game, Restart, re-run after
-/// defeat) passes through here: reset the in-game state machine,
-/// resolve the map path from the setup and start the load. The previous
-/// game world keeps running until the new map is prepared;
-/// [`finish_map_load`] tears it down right before the swap.
+/// defeat) passes through here: resolve the map path from the setup and
+/// start the load. Nothing match-level changes yet — the previous game
+/// world keeps running, against its own seats and state, until the new
+/// map is prepared; [`finish_map_load`] swaps worlds and switches the
+/// match state in one place ([`match_scope::begin_match`]).
 /// Exclusive system — it reads the registry and pools directly.
 fn prepare_game_entry(world: &mut World) {
-    use crate::game_setup::GameOverDismissed;
-    use crate::units::lifecycle::game_over::GameState;
-
-    // The human seat's ally team drives input, the game-over check and
-    // the fog/cloak perspective; with no human seat (the menu's
-    // attract-mode demo) the local player spectates. The difficulty the
-    // menu picked drives the AI.
     let setup = world.resource::<GameSetup>().clone();
-    let local_team = setup
-        .players
-        .iter()
-        .find(|p| !p.ai)
-        .map_or(crate::game_setup::SPECTATOR_TEAM, |p| p.team);
-    world.resource_mut::<crate::units::player::LocalTeam>().0 = local_team;
-    world.insert_resource(crate::game_setup::AiDifficulty(setup.difficulty));
-
-    // Fresh in-game state: `Playing`, game-over panel re-armed.
-    world
-        .resource_mut::<NextState<GameState>>()
-        .set(GameState::Playing);
-    world.resource_mut::<GameOverDismissed>().0 = false;
 
     // Resolve the setup's map name against the catalog.
     let catalog = world.resource::<MapCatalog>().0.clone();
@@ -417,86 +402,19 @@ fn poll_map_load(world: &mut World) {
     finish_map_load(world, prepared);
 }
 
-/// The swap: the old world goes, and [`spawn_prepared_map`] builds the
-/// new one in the same frame.
+/// The swap: the old world goes, the match-level state switches to the
+/// prepared map's setup, and [`spawn_prepared_map`] builds the new world
+/// in the same frame.
 fn finish_map_load(world: &mut World, prepared: PreparedMap) {
-    // The teardown below uncounts every unit through the tallies' marker
-    // hooks anyway; resetting first just makes "from zero" explicit.
-    world.insert_resource(crate::units::lifecycle::bookkeeping::SmallBuildingCounts::default());
-    world.insert_resource(crate::units::lifecycle::bookkeeping::TeamUnitCounts::default());
-
-    // Tear down the previous game world (no-op on first entry). Kept
-    // entities: windows, the RTS camera (and its children), anything
-    // tagged `PersistentEntity` (menu UI), and the ECS's own resource,
-    // observer and system entities.
-    despawn_game_world(world);
+    // Tear down the previous match's entities (no-op on first entry):
+    // scene and UI content, never the camera, persistent menu UI or
+    // anything the engine owns.
+    match_scope::despawn_match_entities(world);
+    // Then every match-scoped resource, the seats and the game state —
+    // after the teardown, whose despawn hooks may still write to the
+    // old match's tallies.
+    match_scope::begin_match(world, &prepared.setup);
     world.resource_mut::<ReadyMap>().0 = Some(prepared);
-}
-
-fn despawn_game_world(world: &mut World) {
-    use bevy::ecs::entity::EntityHashSet;
-    use bevy::ecs::observer::Observer;
-    use bevy::ecs::query::QueryFilter;
-    use bevy::ecs::resource::IsResource;
-    use bevy::ecs::system::SystemIdMarker;
-    use bevy::render::view::screenshot::Screenshot;
-    use bevy::window::Window;
-
-    fn keep_all<F: QueryFilter>(world: &mut World, keep: &mut EntityHashSet) {
-        let mut query = world.query_filtered::<Entity, F>();
-        keep.extend(query.iter(world));
-    }
-
-    // Roots we keep: windows, the RTS camera, persistent UI.
-    let mut keep: EntityHashSet = EntityHashSet::default();
-    keep_all::<With<Window>>(world, &mut keep);
-    keep_all::<With<RtsCamera>>(world, &mut keep);
-    keep_all::<With<PersistentEntity>>(world, &mut keep);
-    // In-flight screenshots: the render world answers them a frame or
-    // two later with a plain `insert(Captured)`, which panics on a
-    // despawned entity (the dev shot tools and the recorder capture
-    // right across demo restarts).
-    keep_all::<With<Screenshot>>(world, &mut keep);
-    // The ECS's own entities: every resource, global observer and
-    // registered one-shot system lives on an entity of its own.
-    // Observers watching a doomed entity go with it.
-    keep_all::<With<IsResource>>(world, &mut keep);
-    keep_all::<With<Observer>>(world, &mut keep);
-    keep_all::<With<SystemIdMarker>>(world, &mut keep);
-
-    // Pull kept roots' descendants into the keep set (camera children,
-    // UI trees). One pass builds a parent→children map, then a DFS from
-    // the roots — the old fixed-point loop rescanned every `ChildOf` in
-    // the world once per hierarchy level, O(E · depth).
-    {
-        let mut children_of: HashMap<Entity, Vec<Entity>> = HashMap::new();
-        let mut relations = world.query::<(Entity, Option<&ChildOf>)>();
-        for (e, child_of) in relations.iter(world) {
-            if let Some(child_of) = child_of {
-                children_of.entry(child_of.parent()).or_default().push(e);
-            }
-        }
-        let mut stack: Vec<Entity> = keep.iter().copied().collect();
-        while let Some(parent) = stack.pop() {
-            if let Some(children) = children_of.get(&parent) {
-                for &child in children {
-                    if keep.insert(child) {
-                        stack.push(child);
-                    }
-                }
-            }
-        }
-    }
-
-    // Everything not kept goes. `despawn` on the remaining roots takes
-    // care of subtrees; existence checks tolerate overlaps.
-    let mut all = world.query_filtered::<Entity, ()>();
-    let doomed: Vec<Entity> = all.iter(world).filter(|e| !keep.contains(e)).collect();
-    for e in doomed {
-        if world.get_entity(e).is_ok() {
-            world.entity_mut(e).despawn();
-        }
-    }
 }
 
 /// Discover the map archives in `assets/maps/` into the menu-facing
@@ -1192,12 +1110,10 @@ fn configure_map_events(
     // Per-map: the previous map's schedule must not carry over (an
     // eruption clock aimed at Stack_Overflow's starts, a swirl on a
     // map without one). The state resource (clock + rng) goes with the
-    // config, and any spawns still queued for the old world are
-    // dropped rather than drained into the new one.
+    // config; spawns still queued for the old world are dropped with
+    // the other match-scoped queues at the swap.
     commands.remove_resource::<crate::map_events::EruptionConfig>();
     commands.remove_resource::<crate::map_events::EruptionState>();
-    commands.remove_resource::<crate::map_events::EruptionSpawnQueue>();
-    commands.init_resource::<crate::map_events::EruptionSpawnQueue>();
     commands.remove_resource::<crate::map_events::CircularFlow>();
     if map_name.eq_ignore_ascii_case("Stack_Overflow") {
         let starts: Vec<Vec3> = map_info
@@ -1206,8 +1122,9 @@ fn configure_map_events(
             .map(|sp| heightmap.place(sp.x, sp.z))
             .collect();
         info!("  Stack_Overflow detected — installing eruption schedule");
-        commands.insert_resource(crate::map_events::EruptionConfig::stack_overflow(starts));
-        commands.insert_resource(crate::map_events::EruptionState::default());
+        let config = crate::map_events::EruptionConfig::stack_overflow(starts);
+        commands.insert_resource(crate::map_events::EruptionState::new(&config));
+        commands.insert_resource(config);
     }
     if map_name.eq_ignore_ascii_case("Circular_Buffer") {
         let (w, d) = heightmap.world_size();
@@ -1276,37 +1193,4 @@ fn apply_fog(
         start: fog_start_frac * max_view_distance,
         end: max_view_distance,
     };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[derive(Resource, Default)]
-    struct Probe(u32);
-
-    /// The teardown clears the match but spares the ECS's own entities:
-    /// resources, global observers and registered systems all keep
-    /// working afterwards.
-    #[test]
-    fn teardown_spares_resources_observers_and_systems() {
-        let mut world = World::new();
-        world.init_resource::<Probe>();
-        world.add_observer(|_: On<Add<PersistentEntity>>, mut probe: ResMut<Probe>| {
-            probe.0 += 1;
-        });
-        let system = world.register_system(|mut probe: ResMut<Probe>| probe.0 += 10);
-        let game = world.spawn(Transform::default()).id();
-        let menu = world.spawn(PersistentEntity).id();
-        world.flush();
-
-        despawn_game_world(&mut world);
-
-        assert!(world.get_entity(game).is_err(), "match entity despawned");
-        assert!(world.get_entity(menu).is_ok(), "persistent entity kept");
-        assert_eq!(world.resource::<Probe>().0, 1);
-        world.spawn(PersistentEntity);
-        world.run_system(system).expect("registered system kept");
-        assert_eq!(world.resource::<Probe>().0, 12, "observer kept");
-    }
 }
