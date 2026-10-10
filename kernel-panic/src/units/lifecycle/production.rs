@@ -622,68 +622,25 @@ pub fn animate_connection_hatch(
 }
 
 /// Run after `production_system`: for each entity tagged
-/// `PendingFadeInstall`, walk its piece children, clone each *distinct*
-/// shared StandardMaterial into one per-unit handle (with
-/// `AlphaMode::Blend` and alpha=0) that every piece using it shares,
-/// and install a `FadeMaterials` component holding the swap records so
+/// `PendingFadeInstall`, give its model pieces a per-unit alpha=0 clone
+/// of their shared material ([`ModelMaterials::fade`](crate::units::assets::model_fade::ModelMaterials::fade):
+/// one clone per unit, not per piece — nanoframes live for the whole
+/// build and the clone is re-uploaded every tick of it) and install a
+/// `FadeMaterials` component holding the swap records so
 /// `emerge_system` can both fade them in and revert them when emergence
 /// completes.
-///
-/// A unit's pieces all carry the same (model, faction) material, so
-/// this is one clone per unit. Cloning per piece instead cost a Kernel
-/// 23 clones, each re-uploaded every sim tick of its build — and
-/// nanoframes live for the whole build, so a busy Hacker / Network
-/// factory kept dozens of materials churning.
 pub fn install_fade_materials(
     mut commands: Commands,
     pending: Query<(Entity, &Children), With<PendingFadeInstall>>,
-    piece_q: Query<&Children, With<PieceIndex>>,
-    leaf_q: Query<&MeshMaterial3d<StandardMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut model: crate::units::assets::model_fade::ModelMaterials,
 ) {
     for (entity, children) in &pending {
-        // (source id, faded clone) — a Vec, not a map: it holds one entry.
-        let mut faded: Vec<(AssetId<StandardMaterial>, Handle<StandardMaterial>)> = Vec::new();
-        let mut overrides = Vec::new();
-        let mut stack: Vec<Entity> = children.iter().collect();
-        while let Some(node) = stack.pop() {
-            // Recurse into nested piece children first so deep s3o
-            // hierarchies (gunbase → gun → gunpoint, etc) all get
-            // the per-unit alpha.
-            if let Ok(grand) = piece_q.get(node) {
-                stack.extend(grand.iter());
-            }
-            let Ok(mat_handle) = leaf_q.get(node) else {
-                continue;
-            };
-            let original = mat_handle.0.clone();
-            let shared = match faded.iter().find(|(id, _)| *id == original.id()) {
-                Some((_, handle)) => handle.clone(),
-                None => {
-                    let Some(src) = materials.get(&original) else {
-                        continue;
-                    };
-                    let clone = StandardMaterial {
-                        base_color: src.base_color.with_alpha(0.0),
-                        base_color_texture: src.base_color_texture.clone(),
-                        emissive: src.emissive,
-                        alpha_mode: AlphaMode::Blend,
-                        unlit: src.unlit,
-                        ..default()
-                    };
-                    let handle = materials.add(clone);
-                    faded.push((original.id(), handle.clone()));
-                    handle
-                }
-            };
-            commands.entity(node).insert(MeshMaterial3d(shared));
-            overrides.push((node, original));
-        }
+        let faded = model.fade(children, 0.0, &mut commands);
         commands
             .entity(entity)
             .insert(FadeMaterials {
-                faded: faded.into_iter().map(|(_, handle)| handle).collect(),
-                overrides,
+                faded: faded.faded,
+                overrides: faded.overrides,
             })
             .remove::<PendingFadeInstall>();
     }

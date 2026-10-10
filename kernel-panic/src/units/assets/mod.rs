@@ -5,3 +5,4 @@
 
 pub mod animation;
 pub mod meshes;
+pub mod model_fade;
