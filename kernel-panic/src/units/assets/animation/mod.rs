@@ -59,6 +59,15 @@ pub const fn deg2rad(deg: f32) -> f32 {
 /// bounds-checks and bails on this value.
 pub const PIECE_MISSING: usize = usize::MAX;
 
+/// How close (radians) an aim turn must be for [`AnimRig::turn_settled`]
+/// to report the script's `wait-for-turn` done: ~5°, the same slack the
+/// host-side aim gates allow (`combat::aim::AIM_HEADING_TOLERANCE` /
+/// `AIM_PITCH_TOLERANCE`), so driver and host agree on "on target". It
+/// is under one tick's turn for the fast turrets (Packet 24°, Flow 16°,
+/// Byte 9°) and well inside what the shots correct (homing missiles,
+/// splash).
+pub const WAIT_FOR_TURN_TOLERANCE: f32 = 0.09;
+
 /// Spring's fixed runtime scale for linear and angular values in a
 /// compiled `.cob` (65536). Pinned by the regression tests below —
 /// drivers work in degrees/elmos directly, so this only guards the
@@ -142,6 +151,8 @@ pub fn muzzle_piece_names(kind: UnitKind) -> Option<&'static [&'static str]> {
         Obelisk | Assembler => &["tip"],
         Bug => &["nose"],
         Bit | Pointer | Dos | Exploit => &["gunpoint"],
+        // virus.bos `QueryWeapon1`: gun1 until the first `Shot1` flips it.
+        Virus => &["gun1", "gun0"],
         _ => return None,
     })
 }
@@ -164,6 +175,15 @@ pub fn fire_weapon_sfx(kind: UnitKind) -> Option<usize> {
         Byte | Pointer => Some(0),
         _ => None,
     }
+}
+
+/// The piece a unit's gadget-drawn weapon arc starts from, when that is
+/// not its muzzle. `network_arceffect.lua` `gadget:Explosion` calls
+/// `BigArc(owner, nil, nil, 3, x,y,z)`: Lua piece 3 of the Connection
+/// is `correcter` (on the hull, where `gp` pivots) — its beam leaves
+/// `gp2`, slid out above the target.
+pub fn arc_origin_piece(kind: UnitKind) -> Option<&'static str> {
+    (kind == UnitKind::Connection).then_some("correcter")
 }
 
 /// Cached COB piece index for the deploy/aim gun pivot (`gunbase`). Set at
@@ -412,6 +432,44 @@ impl AnimRig {
             && (self.piece_translations[piece][a] - self.target_translations[piece][a]).abs() < EPS
     }
 
+    /// `wait-for-turn` as `AimWeapon` polls it: true once `piece` sits
+    /// within [`WAIT_FOR_TURN_TOLERANCE`] of the last turn issued on
+    /// `axis` (measured the short way round). Missing pieces are always
+    /// settled.
+    ///
+    /// Why a tolerance instead of [`Self::at_target`]: the host re-runs
+    /// a driver's `aim()` every tick with the target's current bearing,
+    /// *before* the rig ticks, so a turret tracking a moving target is
+    /// always one tick of drift behind the freshly issued angle — an
+    /// exact compare would hold its fire for as long as the target
+    /// moves. Upstream re-aims only every 15 frames
+    /// (`CWeapon::CanCallAimingScript`), so its wait lands on a stale
+    /// bearing and the shot commits anyway.
+    pub fn turn_settled(&self, piece: usize, axis: Axis) -> bool {
+        if !self.live(piece) {
+            return true;
+        }
+        let a = axis.index();
+        short_arc(
+            self.target_rotations[piece][a],
+            self.piece_rotations[piece][a],
+        )
+        .abs()
+            <= WAIT_FOR_TURN_TOLERANCE
+    }
+
+    /// `wait-for-move` as `AimWeapon` polls it: true once `piece` is
+    /// within `tolerance` elmos of the last move issued along `axis` —
+    /// the translation twin of [`Self::turn_settled`], for slides whose
+    /// target follows a moving unit. Missing pieces are always settled.
+    pub fn move_settled(&self, piece: usize, axis: Axis, tolerance: f32) -> bool {
+        if !self.live(piece) {
+            return true;
+        }
+        let a = axis.index();
+        (self.target_translations[piece][a] - self.piece_translations[piece][a]).abs() <= tolerance
+    }
+
     /// Continuous spin in degrees/sec (`.bos` `spin <piece> around <axis>
     /// speed <n>`). Direction follows the same convention as turns.
     pub fn spin_dps(&mut self, piece: usize, axis: Axis, deg_per_sec: f32) {
@@ -490,6 +548,11 @@ pub struct AnimCtx {
     /// which excludes the unfold, a blocked pad and the gap between
     /// units.
     pub building: bool,
+    /// Horizontal distance from the unit to its aim target, for scripts
+    /// that size a piece to it (connection.bos `move gp2 to z-axis (get
+    /// XZ_HYPOT(get UNIT_XZ(get TARGET_ID(1)) - get PIECE_XZ(gp)))`).
+    /// Set only on `aim()` calls (`combat::drive_aim_script`).
+    pub target_xz_dist: Option<f32>,
 }
 
 impl AnimCtx {
@@ -505,6 +568,7 @@ impl AnimCtx {
             attack_ordering: false,
             emerging: false,
             building: false,
+            target_xz_dist: None,
         }
     }
 }
@@ -732,6 +796,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
             aim_active: aim_target.is_some(),
             attack_ordering: attack_ground.is_some() || attack_target.is_some(),
             emerging: emerging.is_some(),
+            target_xz_dist: None,
         };
 
         let UnitAnimator {
@@ -752,9 +817,34 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
     }
 }
 
+/// Signed angle (radians) a turn from `current` to `target` covers on
+/// the short way round, in `[-π, π)` — upstream
+/// `CUnitScript::TurnToward` (`Sim/Units/Scripts/UnitScript.cpp`):
+/// `delta = fmod(dest - cur + 3π, 2π) - π`. A turn is an orientation
+/// change, never a wind-up: a turret at +170° aiming at −170° swings
+/// 20°, not 340°. An exact half turn goes the negative way, as the
+/// engine's formula does.
+///
+/// A difference already inside `[-π, π)` is returned as is (no
+/// round trip through the modulo), so a turn that doesn't cross the
+/// wrap steps bit-for-bit like a plain linear interpolation — what the
+/// Kani harnesses in `proofs.rs` pin against the retired VM.
+pub fn short_arc(target: f32, current: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let d = target - current;
+    if (-PI..PI).contains(&d) {
+        d
+    } else {
+        (d + PI).rem_euclid(TAU) - PI
+    }
+}
+
 /// Advance a rig's interpolation: spins integrate continuously; turns and
-/// moves step toward their targets and stop when they arrive. Flags the
-/// rig dirty whenever anything actually moved.
+/// moves step toward their targets and stop when they arrive. Turns take
+/// the [`short_arc`] like the engine's; stored angles aren't wrapped
+/// (drivers and tests read them back as issued), so an arriving turn
+/// lands on its target value exactly — the same orientation the short
+/// arc reached. Flags the rig dirty whenever anything actually moved.
 pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
     let mut changed = false;
     for p in 0..rig.piece_rotations.len() {
@@ -770,7 +860,7 @@ pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
                 let target = rig.target_rotations[p][a];
                 let current = rig.piece_rotations[p][a];
                 let step = speed * dt;
-                let diff = target - current;
+                let diff = short_arc(target, current);
                 if diff.abs() <= step {
                     rig.piece_rotations[p][a] = target;
                     rig.turn_speeds[p][a] = 0.0;
@@ -845,11 +935,7 @@ fn apply_and_drain(
                 if let Ok((_, mut vis)) = fx.transforms.get_mut(rig.piece_entities[piece]) {
                     *vis = Visibility::Hidden;
                 }
-                let piece_world_pos = fx
-                    .transforms
-                    .get(rig.piece_entities[piece])
-                    .map(|(tf, _)| unit_gtf.translation() + tf.translation)
-                    .unwrap_or_else(|_| unit_gtf.translation());
+                let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
                 spawn_death_particle(
                     piece_world_pos,
                     faction,
@@ -907,19 +993,32 @@ fn apply_and_drain(
                         muzzle_ceg: None,
                         delayed_hit: None,
                         build_arc: false,
+                        arc_from: None,
                     });
             }
             FxEvent::Emit { piece, kind } if in_range(piece) => {
-                let piece_world_pos = fx
-                    .transforms
-                    .get(rig.piece_entities[piece])
-                    .map(|(tf, _)| unit_gtf.translation() + tf.translation)
-                    .unwrap_or_else(|_| unit_gtf.translation());
+                let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
                 dispatch_emit_sfx(kind, piece_world_pos, faction, &mut fx.explosions);
             }
             _ => {}
         }
     }
+}
+
+/// Where an `explode` / `emit-sfx` piece is in the world: its
+/// propagated pose (last frame's — a tick stale at most, invisible for a
+/// burst). The piece's local translation added to the unit origin, which
+/// this used to be, ignored the unit's facing, the model root's 180° yaw
+/// and every parent piece, so a Kernel's death bursts all went off near
+/// its root instead of at its tips. A unit spawned this frame has no
+/// propagated pose yet (identity): fall back to the unit origin.
+fn piece_world_pos(fx: &AnimFxOut, piece: Entity, unit_gtf: &GlobalTransform) -> Vec3 {
+    fx.globals
+        .get(piece)
+        .map(|(gtf, _)| gtf.translation())
+        .ok()
+        .filter(|pos| *pos != Vec3::ZERO)
+        .unwrap_or_else(|| unit_gtf.translation())
 }
 
 /// Mirror driver-cycled muzzle indices ([`AnimRig::muzzle`]) into the
@@ -1117,5 +1216,77 @@ mod cobscale_regression {
         // Spring's TA-angle unit: 65536 = 2π. Half circle = 32768.
         let half_circle = 32768.0 * std::f32::consts::TAU / COBSCALE;
         assert!((half_circle - std::f32::consts::PI).abs() < 1e-3);
+    }
+}
+
+#[cfg(test)]
+mod turn_semantics {
+    //! Engine turn semantics (`CUnitScript::TurnToward`): every turn
+    //! takes the short way round.
+
+    use super::*;
+    use std::f32::consts::{PI, TAU};
+
+    #[test]
+    fn short_arc_wraps_into_minus_pi_to_pi() {
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(close(
+            short_arc(deg2rad(-170.0), deg2rad(170.0)),
+            deg2rad(20.0)
+        ));
+        assert!(close(
+            short_arc(deg2rad(170.0), deg2rad(-170.0)),
+            deg2rad(-20.0)
+        ));
+        assert!(close(
+            short_arc(deg2rad(30.0), deg2rad(10.0)),
+            deg2rad(20.0)
+        ));
+        // A piece that spun many turns still takes the short way.
+        assert!(close(short_arc(0.0, 10.0 * TAU + 0.25), -0.25));
+        // An exact half turn goes negative, as the engine's formula does.
+        assert!(close(short_arc(PI, 0.0), -PI));
+    }
+
+    /// Regression: a Byte aimer at +170° tracking a target that crosses
+    /// behind it to −170° swung 340° the long way (1.26 s at <270>/s)
+    /// and held its fire the whole time. The short arc is 20°: 3 ticks.
+    #[test]
+    fn a_turn_across_the_back_takes_the_short_arc() {
+        let mut rig = AnimRig::for_test(&["aimer"]);
+        rig.turn_deg(0, Axis::Y, 170.0, 0.0);
+        rig.turn_deg(0, Axis::Y, -170.0, 270.0);
+        let mut ticks = 0;
+        while !rig.at_target(0, Axis::Y) {
+            tick_rig(&mut rig, 1.0 / 30.0);
+            ticks += 1;
+            assert!(ticks < 10, "turned the long way round");
+            // Never strays from the 20° arc between the two headings.
+            let r = rig.piece_rotations[0][1];
+            assert!(short_arc(PI, r).abs() <= deg2rad(10.0) + 1e-4);
+        }
+        assert_eq!(ticks, 3);
+        assert_eq!(rig.piece_rotations[0][1], deg2rad(-170.0));
+    }
+
+    #[test]
+    fn turn_settled_measures_the_short_way() {
+        let mut rig = AnimRig::for_test(&["turret"]);
+        rig.turn_deg(0, Axis::Y, 179.0, 0.0);
+        rig.turn_deg(0, Axis::Y, -179.0, 90.0);
+        // 2° apart across ±180°: inside the wait tolerance.
+        assert!(rig.turn_settled(0, Axis::Y));
+        rig.turn_deg(0, Axis::Y, 0.0, 90.0);
+        assert!(!rig.turn_settled(0, Axis::Y));
+        // Missing pieces never block a wait.
+        assert!(rig.turn_settled(PIECE_MISSING, Axis::Y));
+    }
+
+    #[test]
+    fn turn_time_counts_the_short_arc() {
+        let mut rig = AnimRig::for_test(&["rotor"]);
+        rig.turn_deg(0, Axis::Y, 170.0, 0.0);
+        let t = units::turn_time(&rig, 0, Axis::Y, -170.0, 20.0);
+        assert!((t - 1.0).abs() < 1e-3, "{t}");
     }
 }

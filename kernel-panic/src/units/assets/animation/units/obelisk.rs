@@ -91,12 +91,13 @@ impl UnitAnim for ObeliskAnim {
 
     fn aim(&mut self, rig: &mut AnimRig, _h: f32, _p: f32, _ctx: AnimCtx) -> bool {
         // AimWeapon1: `if(reloading) return 0`; otherwise part the four
-        // segments and return 1 once segf arrives.
+        // segments and return 1 once segf arrives (`wait-for-move segf
+        // along z-axis` — a second from rest at [8]/s).
         if self.reloading {
             return false;
         }
         self.segments_to(rig, 8.0, 8.0);
-        true
+        rig.at_target(self.pieces.segf, Axis::Z)
     }
 
     fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {

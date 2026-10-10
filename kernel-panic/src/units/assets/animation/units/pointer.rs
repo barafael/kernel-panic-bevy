@@ -236,7 +236,9 @@ impl UnitAnim for PointerAnim {
             GUNBASE_REST_DEG - p.to_degrees(),
             GUNBASE_SPEED,
         );
-        true
+        // `wait-for-turn gunbase around x-axis; return 1` (the body turn
+        // is gated host-side, see `combat::aim_gates_pass`).
+        rig.turn_settled(self.pieces.gunbase, Axis::X)
     }
 
     fn fire(&mut self, _rig: &mut AnimRig, _ctx: AnimCtx) {

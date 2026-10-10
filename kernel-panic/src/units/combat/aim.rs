@@ -417,6 +417,7 @@ pub fn drive_aim_script(
         let ctx = AnimCtx {
             moving: move_target.is_some() || move_path.is_some(),
             aim_active: true,
+            target_xz_dist: Some((target.pos - gtf.translation()).xz().length()),
             ..AnimCtx::minimal()
         };
         let UnitAnimator { rig, driver, .. } = &mut *animator;

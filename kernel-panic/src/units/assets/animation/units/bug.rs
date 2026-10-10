@@ -74,7 +74,8 @@ impl UnitAnim for ExploitAnim {
         // returns 1 once the turns settle.
         rig.turn_rad(self.pieces.turret, Axis::Y, h, deg2rad(180.0));
         rig.turn_rad(self.pieces.turret, Axis::X, -p, deg2rad(180.0));
-        true
+        rig.turn_settled(self.pieces.turret, Axis::Y)
+            && rig.turn_settled(self.pieces.turret, Axis::X)
     }
 
     // exploit.bos declares no Killed() — the flip pose dies with it.

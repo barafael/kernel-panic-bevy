@@ -1127,7 +1127,7 @@ fn spawn_lightning_arc(
         // width 2 / spray 5, arc lives 16 frames.
         ArcFlavor::BuildArc => (2.0, 5.0, frames_to_secs(16.0), LinearRgba::WHITE),
     };
-    let start = event.attacker_pos;
+    let start = event.arc_from.unwrap_or(event.attacker_pos);
     let end = event.target_pos;
     let dir = (end - start).normalize_or(Vec3::Z);
     // Two world-space perpendiculars to jitter along; the ribbon
@@ -1267,6 +1267,7 @@ mod tests {
                 muzzle_ceg: None,
                 delayed_hit: None,
                 build_arc: false,
+                arc_from: None,
             });
 
         app.world_mut()
@@ -1317,6 +1318,7 @@ mod tests {
                 muzzle_ceg: None,
                 delayed_hit: None,
                 build_arc: false,
+                arc_from: None,
             });
 
         app.world_mut()
@@ -1363,6 +1365,7 @@ mod tests {
                 muzzle_ceg: None,
                 delayed_hit: None,
                 build_arc: true,
+                arc_from: None,
             });
 
         app.world_mut()
@@ -1408,6 +1411,7 @@ mod tests {
                 muzzle_ceg: None,
                 delayed_hit: None,
                 build_arc: false,
+                arc_from: None,
             });
 
         app.world_mut()

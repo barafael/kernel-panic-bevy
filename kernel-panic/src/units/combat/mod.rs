@@ -336,12 +336,22 @@ impl PieceLookup<'_, '_> {
         let Ok(animator) = self.animator.get(attacker) else {
             return fallback;
         };
-        let Some(&piece) = animator.rig.piece_entities.get(animator.rig.muzzle) else {
-            return fallback;
-        };
-        let Ok((_, _, emit)) = self.piece_tf.get(piece) else {
-            return fallback;
-        };
+        self.piece_emit(attacker, attacker_gtf, animator.rig.muzzle)
+            .unwrap_or(fallback)
+    }
+
+    /// World-space emit point and direction of rig piece `index` (see
+    /// [`Self::muzzle`]), or `None` when the unit has no such piece.
+    pub fn piece_emit(
+        &self,
+        attacker: Entity,
+        attacker_gtf: &GlobalTransform,
+        index: usize,
+    ) -> Option<Muzzle> {
+        let fallback_dir = attacker_gtf.forward().as_vec3();
+        let animator = self.animator.get(attacker).ok()?;
+        let &piece = animator.rig.piece_entities.get(index)?;
+        let (_, _, emit) = self.piece_tf.get(piece).ok()?;
         let emit = emit.copied().unwrap_or_default();
         // Accumulate local transforms piece → … → model root → unit.
         let mut local = bevy::math::Affine3A::IDENTITY;
@@ -349,13 +359,13 @@ impl PieceLookup<'_, '_> {
         for _ in 0..64 {
             if cur == attacker {
                 let world = attacker_gtf.affine() * local;
-                return Muzzle {
+                return Some(Muzzle {
                     pos: world.transform_point3(emit.pos),
                     dir: world
                         .transform_vector3(emit.dir)
                         .try_normalize()
-                        .unwrap_or(fallback.dir),
-                };
+                        .unwrap_or(fallback_dir),
+                });
             }
             let Ok((tf, parent, _)) = self.piece_tf.get(cur) else {
                 break;
@@ -363,7 +373,7 @@ impl PieceLookup<'_, '_> {
             local = tf.compute_affine() * local;
             cur = parent.parent();
         }
-        fallback
+        None
     }
 }
 
@@ -435,6 +445,11 @@ pub(super) fn fire_salvo_shot(
             driver.shot(rig);
         }
         let muzzle = pieces.muzzle(shot.attacker, attacker_gtf);
+        // The GaussCannon arc's own start piece (`arc_origin_piece`).
+        let arc_from = crate::units::assets::animation::arc_origin_piece(shot.kind)
+            .and_then(|name| pieces.animator.get(shot.attacker).ok()?.rig.piece(name))
+            .and_then(|index| pieces.piece_emit(shot.attacker, attacker_gtf, index))
+            .map(|emit| emit.pos);
         let aim = shot
             .target
             .and_then(|t| pieces.lead_target_pos(t, muzzle.pos, weapon_def, shot.predict_mult))
@@ -465,6 +480,7 @@ pub(super) fn fire_salvo_shot(
                     on_impact: None,
                 }),
                 build_arc: false,
+                arc_from,
             });
             continue;
         }
@@ -508,6 +524,7 @@ pub(super) fn fire_salvo_shot(
                 on_impact: None,
             }),
             build_arc: false,
+            arc_from,
         });
     }
     if last_of_salvo && let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {

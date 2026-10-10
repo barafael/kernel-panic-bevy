@@ -437,11 +437,11 @@ pub fn spawn_unit_facing(
     let selection_sphere = selection_sphere(radius, meshes, model_cache);
     let layout = piece_layout(model_name, meshes, model_cache);
 
-    // Some s3o models are authored with their root at the mesh CENTER
-    // rather than at the bottom (octaeder.s3o, used by Byte, has blade
-    // vertices spanning y∈[-48,48]). If we plant the root at the
-    // heightmap, half the model sinks below ground. Lift the spawn point
-    // by however much the lowest vertex extends below piece-tree origin.
+    // Some s3o models dip a little below their root (the Connection's
+    // hull by ~10 elmos, the DOS by half an elmo); planted at the
+    // heightmap, that part would poke through the ground. Lift the spawn
+    // point by however much the lowest vertex extends below piece-tree
+    // origin — except where sinking is the authored look (the Byte).
     let ground_lift = match kind {
         // network_base.s3o (Network homebase) is authored as a flat pad
         // hanging entirely below its origin (mover spans y −22..+2), so
@@ -449,6 +449,14 @@ pub fn spawn_unit_facing(
         // 22 elmos in the air. Plant it at origin — Spring parity, where
         // the pad reads as sitting flush on the terrain.
         UnitKind::Carrier => 0.0,
+        // octaeder.s3o is centred on its origin (blades span y −48..48)
+        // and that is the authored look: closed, the Byte shows the top
+        // half as a pyramid on the ground; byte.bos `Open()` raises
+        // `base` [24] (60 elmos) to stand the octahedron up. Lifting the
+        // root 48 elmos instead floated the model — and its collision
+        // sphere, s3o midpoint 30 above the root — that high (Spring:
+        // centre at ground + 30, r 48).
+        UnitKind::Byte => 0.0,
         _ => layout.as_ref().map(|l| l.ground_lift).unwrap_or(0.0),
     };
     let lifted_position = position + Vec3::new(0.0, ground_lift, 0.0);
@@ -598,6 +606,7 @@ pub fn spawn_unit_facing(
         // contract.
         let model_root = commands
             .spawn((
+                crate::units::assets::model_fade::ModelRoot,
                 Transform::from_rotation(Quat::from_rotation_y(std::f32::consts::PI)),
                 Visibility::default(),
                 ChildOf(unit_entity),

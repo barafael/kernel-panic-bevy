@@ -41,6 +41,12 @@ pub struct AttackEvent {
     /// `BuildArc` white lightning strand (gateway.bos `lua_BuildArc`)
     /// instead of the standard build-laser beam + sparkle.
     pub build_arc: bool,
+    /// Where the GaussCannon's lightning arc starts, when that isn't
+    /// the muzzle: `network_arceffect.lua` draws `BigArc` from the
+    /// Connection's piece 3 (`correcter`, on its hull), while the beam
+    /// itself leaves `gp2`, slid out above the target. `None` draws
+    /// from `attacker_pos`.
+    pub arc_from: Option<Vec3>,
 }
 
 /// Damage bookkeeping moved onto a traveling visual. The fields match

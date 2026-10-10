@@ -430,13 +430,7 @@ mod tests {
     fn ctx(dt: f32) -> AnimCtx {
         AnimCtx {
             dt,
-            build_percent: 0,
-            moving: false,
-            producing: false,
-            aim_active: false,
-            attack_ordering: false,
-            emerging: false,
-            building: false,
+            ..AnimCtx::minimal()
         }
     }
 

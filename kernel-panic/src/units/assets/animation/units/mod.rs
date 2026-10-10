@@ -30,13 +30,14 @@ mod signal;
 mod socket;
 mod terminal;
 mod trojan;
+mod virus;
 mod window;
 mod worm;
 
-use super::{AnimRig, Axis, UnitAnim};
+use super::{AnimRig, Axis, UnitAnim, short_arc};
 use crate::units::content::definitions::UnitKind;
 
-/// A unit whose script drives nothing we render (Port, Firewall, Virus,
+/// A unit whose script drives nothing we render (Port, Firewall, Debug,
 /// the mineblaster, ...). Kept as an explicit variant so the registry
 /// documents the omission instead of silently falling through.
 #[derive(Default)]
@@ -60,7 +61,7 @@ pub fn driver_for(kind: UnitKind) -> Box<dyn UnitAnim> {
         Bug => Box::new(bug::BugAnim::default()),
         Exploit => Box::new(bug::ExploitAnim::default()),
         Worm => Box::new(worm::WormAnim::default()),
-        Virus => Box::new(NoAnim),
+        Virus => Box::new(virus::VirusAnim::default()),
         Dos => Box::new(dos::DosAnim::default()),
         Window => Box::new(window::WindowAnim::default()),
         LogicBomb => Box::new(logic_bomb::LogicBombAnim::default()),
@@ -184,13 +185,17 @@ pub fn move_time(rig: &AnimRig, piece: usize, axis: Axis, target: f32, speed: f3
 }
 
 /// Seconds a `turn piece to axis target speed` needs from the piece's
-/// current angle (degrees per second).
+/// current angle (degrees per second), along the [`short_arc`] the
+/// turn takes.
 pub fn turn_time(rig: &AnimRig, piece: usize, axis: Axis, target_deg: f32, speed_dps: f32) -> f32 {
     let current = rig
         .piece_rotations
         .get(piece)
-        .map_or(0.0, |r| r[axis as usize].to_degrees());
-    (target_deg - current).abs() / speed_dps
+        .map_or(0.0, |r| r[axis as usize]);
+    short_arc(target_deg.to_radians(), current)
+        .abs()
+        .to_degrees()
+        / speed_dps
 }
 
 /// The shared `.bos` build-emerge idiom: `move base to y-axis
