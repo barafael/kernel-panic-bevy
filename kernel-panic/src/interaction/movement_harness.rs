@@ -468,3 +468,110 @@ fn report() {
     print("headon byt", &scenario_head_on(UnitKind::Byte));
     print("chain", &scenario_chain());
 }
+
+/// A two-point patrol shuttles between its ends for minutes without
+/// the route drifting: the queue keeps exactly the two patrol points
+/// (each arrival used to re-queue the arrival point instead, so the
+/// route crept and collapsed).
+#[test]
+fn patrol_keeps_its_route() {
+    let mut h = Harness::flat();
+    let a = Vec3::new(600.0, 0.0, 600.0);
+    let b = Vec3::new(900.0, 0.0, 700.0);
+    let e = h.spawn(UnitKind::Bit, 0, a);
+    h.step();
+    // What the patrol click gives a unit at `a` clicking `b`.
+    {
+        let mut deferred = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut deferred, &h.world);
+        let mut ec = commands.entity(e);
+        crate::interaction::replace_order(&mut ec, QueuedCommand::Patrol(b));
+        ec.insert(CommandQueue {
+            commands: vec![QueuedCommand::Patrol(a), QueuedCommand::Patrol(b)],
+        });
+        deferred.apply(&mut h.world);
+    }
+    let (mut visits_a, mut visits_b, mut last) = (0, 0, None);
+    for _ in 0..(120.0 / DT) as u32 {
+        h.step();
+        let p = h.pos(e).xz();
+        let at = if p.distance(a.xz()) < 24.0 {
+            Some(true)
+        } else if p.distance(b.xz()) < 24.0 {
+            Some(false)
+        } else {
+            None
+        };
+        if at.is_some() && at != last {
+            if at == Some(true) {
+                visits_a += 1;
+            } else {
+                visits_b += 1;
+            }
+            last = at;
+        }
+        let queued: Vec<Vec3> = h
+            .world
+            .get::<CommandQueue>(e)
+            .expect("a patrol never ends")
+            .commands
+            .iter()
+            .map(QueuedCommand::position)
+            .collect();
+        assert_eq!(queued.len(), 2, "{queued:?}");
+        assert!(
+            queued.iter().all(|q| *q == a || *q == b),
+            "route drifted: {queued:?}"
+        );
+    }
+    assert!(
+        visits_a >= 3 && visits_b >= 3,
+        "shuttled a={visits_a} b={visits_b}"
+    );
+}
+
+/// A fight leg holds only while its weapon engages a target in range:
+/// an `AimTarget` alone (the turret tracking a far set-target) must not
+/// freeze the march.
+#[test]
+fn fight_leg_holds_only_when_engaged() {
+    use crate::units::combat::{AimLaunch, AimTarget, TargetCache};
+    let mut h = Harness::flat();
+    let start = Vec3::new(600.0, 0.0, 600.0);
+    let e = h.spawn(UnitKind::Bit, 0, start);
+    let enemy = h.world.spawn_empty().id();
+    h.step();
+    h.world.entity_mut(e).insert((
+        MoveTarget(Vec3::new(1400.0, 0.0, 600.0)),
+        super::movement::AttackMoveActive,
+        CommandQueue::default(),
+        AimTarget {
+            pos: Vec3::new(600.0, 0.0, 1800.0),
+            launch: AimLaunch::of(None),
+        },
+    ));
+    for _ in 0..90 {
+        h.step();
+    }
+    let marched = h.pos(e).distance(start);
+    assert!(
+        marched > 100.0,
+        "tracking a far T target froze it: {marched}"
+    );
+
+    h.world.entity_mut(e).insert(TargetCache {
+        target: enemy,
+        expires_at: f32::MAX,
+    });
+    for _ in 0..60 {
+        h.step();
+    }
+    let held_at = h.pos(e);
+    for _ in 0..60 {
+        h.step();
+    }
+    assert!(
+        h.pos(e).distance(held_at) < 1.0,
+        "an engaged fight leg holds"
+    );
+}

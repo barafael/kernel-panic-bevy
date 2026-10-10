@@ -17,22 +17,32 @@ use bevy::prelude::*;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, draw_selected_command_lines, ground_clamp_system, ground_collision_system,
-    guard_follow_system, movement_system, orient_stationary_to_terrain,
+    CommandLineGizmos, advance_command_queue, draw_selected_command_lines, ground_clamp_system,
+    ground_collision_system, guard_follow_system, movement_system, orient_stationary_to_terrain,
 };
 use selection::SelectionPlugin;
 
-/// Wipe every order component an explicit player command supersedes.
+/// Every component of a unit's active order (the table on
+/// [`movement::OrderState`]), as one bundle to remove.
+type ActiveOrder = (
+    movement::MoveTarget,
+    movement::AttackMoveActive,
+    crate::units::combat::AttackTargetOrder,
+    crate::units::combat::AttackGroundOrder,
+    movement::GuardTarget,
+    crate::units::lifecycle::construction::PendingBuild,
+    crate::units::lifecycle::construction::Constructing,
+    crate::units::mechanics::command_fire::PendingCommandFire,
+    crate::units::mechanics::command_fire::NxCast,
+);
+
+/// Wipe the unit's orders: the active order, its path, the queue and a
+/// manual (T) `ForcedTarget` (Spring's `CMD_STOP`, and what any
+/// non-queued command does first: `StopBuild`, queue cleared).
 ///
-/// Used by the replace-style command paths (attack, attack-ground,
-/// guard) before inserting their new order component. Queue-promotion
-/// and path-completion sites in the movement system intentionally clear
-/// narrower subsets — don't switch them over.
-///
-/// Centralized because the previous six hand-rolled chains had drifted:
-/// attack-ground left a stale `AttackMoveActive`/`PendingBuild` behind
-/// and guard left a stale `ForcedTarget`, while their sibling attack
-/// path cleared all three.
+/// Used by Stop and the replace-style command paths that install an
+/// order component directly (casts, the bot); the queued-command paths
+/// go through [`replace_order`].
 pub(crate) fn clear_orders<'a, 'w>(ec: &'a mut EntityCommands<'w>) -> &'a mut EntityCommands<'w> {
     clear_active_order(ec).remove::<crate::units::combat::ForcedTarget>()
 }
@@ -41,51 +51,44 @@ pub(crate) fn clear_orders<'a, 'w>(ec: &'a mut EntityCommands<'w>) -> &'a mut En
 /// which survives a positional order (Spring's set-target keeps firing
 /// while the unit moves).
 fn clear_active_order<'a, 'w>(ec: &'a mut EntityCommands<'w>) -> &'a mut EntityCommands<'w> {
-    ec.remove::<movement::MoveTarget>()
-        .remove::<movement::MovePath>()
-        .remove::<movement::CommandQueue>()
-        .remove::<crate::units::combat::AttackGroundOrder>()
-        .remove::<crate::units::combat::AttackTargetOrder>()
-        .remove::<movement::AttackMoveActive>()
-        .remove::<movement::GuardTarget>()
-        .remove::<crate::units::lifecycle::construction::PendingBuild>()
-        .remove::<crate::units::mechanics::command_fire::PendingCommandFire>()
-        .remove::<crate::units::mechanics::command_fire::NxCast>()
+    ec.remove::<ActiveOrder>()
+        .remove::<(movement::MovePath, movement::CommandQueue)>()
 }
 
-/// Make `cmd` the unit's active order: the order-specific components a
-/// queued command installs when it is promoted, or a fresh command
-/// installs over a cleared unit ([`replace_order`]). Leaves the queue
-/// and any other order state alone.
+/// Make `cmd` the unit's active order: whatever is left of the previous
+/// order goes (one active order at a time: a fight marker must not leak
+/// into a promoted move), then the components `cmd` runs on are
+/// inserted. Used when a queued command is promoted and, behind a
+/// cleared unit, by [`replace_order`]. Leaves the queue and the computed
+/// path alone: the mover follows the old path until the new one is
+/// searched.
 pub(crate) fn install_command(ec: &mut EntityCommands, cmd: movement::QueuedCommand) {
+    use crate::units::combat::{AttackGroundOrder, AttackTargetOrder, ForcedTarget};
     use crate::units::lifecycle::construction::PendingBuild;
-    use movement::{AttackMoveActive, MoveTarget, QueuedCommand};
+    use movement::{AttackMoveActive, GuardTarget, MoveTarget, QueuedCommand};
+    ec.remove::<ActiveOrder>();
     match cmd {
-        QueuedCommand::Move(pos) | QueuedCommand::Patrol(pos) => {
-            ec.insert(MoveTarget(pos)).remove::<PendingBuild>();
+        QueuedCommand::Move(pos) => {
+            ec.insert(MoveTarget(pos));
         }
-        QueuedCommand::AttackMove(pos) => {
-            ec.insert((MoveTarget(pos), AttackMoveActive))
-                .remove::<PendingBuild>();
+        // A patrol leg is an internal fight order
+        // (`CMobileCAI::ExecutePatrol` pushes a `CMD_FIGHT` to the point).
+        QueuedCommand::AttackMove(pos) | QueuedCommand::Patrol(pos) => {
+            ec.insert((MoveTarget(pos), AttackMoveActive));
         }
+        // The orders below steer the unit themselves (their systems
+        // issue their own `MoveTarget`s), and an explicit attack or
+        // guard supersedes a manual (T) designation.
         QueuedCommand::AttackUnit { target, .. } => {
-            // Explicit attack supersedes a manual (T) designation, and
-            // the attack system owns movement from here — no
-            // `MoveTarget`, so a finished leg can't re-route.
-            ec.remove::<PendingBuild>()
-                .remove::<MoveTarget>()
-                .remove::<crate::units::combat::ForcedTarget>()
-                .insert(crate::units::combat::AttackTargetOrder { target });
+            ec.remove::<ForcedTarget>()
+                .insert(AttackTargetOrder { target });
         }
         QueuedCommand::AttackGround(pos) => {
-            // Same contract as `AttackUnit`: the fire-at-ground system
-            // steers the unit itself (a `MoveTarget` at the range
-            // boundary), and an explicit attack supersedes a manual
-            // `(T)` designation.
-            ec.remove::<PendingBuild>()
-                .remove::<MoveTarget>()
-                .remove::<crate::units::combat::ForcedTarget>()
-                .insert(crate::units::combat::AttackGroundOrder { pos });
+            ec.remove::<ForcedTarget>()
+                .insert(AttackGroundOrder { pos });
+        }
+        QueuedCommand::Guard { target, .. } => {
+            ec.remove::<ForcedTarget>().insert(GuardTarget(target));
         }
         QueuedCommand::BuildAt { kind, site } => {
             ec.insert((MoveTarget(site), PendingBuild { kind, site }));
@@ -146,6 +149,12 @@ impl Plugin for InteractionPlugin {
 /// same list.
 pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
     (
+        // Orders that ended since the last tick (attack target died,
+        // build finished, ...) hand over to the next queued command
+        // before anyone moves.
+        advance_command_queue
+            .before(guard_follow_system)
+            .before(movement_system),
         guard_follow_system,
         // Buildings stamped / cleared before anyone paths.
         structures::update_structure_layer.before(movement_system),

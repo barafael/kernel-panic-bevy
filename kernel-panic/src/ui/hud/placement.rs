@@ -27,7 +27,7 @@
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
+use crate::interaction::movement::{CommandQueue, Orders, QueuedCommand};
 use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit_filtered};
 use crate::map_loading::TerrainChunkMarker;
 use crate::rendering::camera::RtsCamera;
@@ -524,7 +524,7 @@ fn place_on_release(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     builders: Query<(Entity, &UnitType), With<Selected>>,
-    move_target_q: Query<(), With<MoveTarget>>,
+    unit_orders: Orders,
     vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
 ) {
     let Some(kind) = placement.kind else {
@@ -568,14 +568,14 @@ fn place_on_release(
         let orders = valid
             .iter()
             .map(|&site| QueuedCommand::BuildAt { kind, site });
-        if shift && move_target_q.contains(entity) {
+        if shift && unit_orders.busy(entity) {
             for cmd in orders {
-                apply_ordered_command(entity, cmd, true, &move_target_q, &mut commands);
+                apply_ordered_command(entity, cmd, true, &unit_orders, &mut commands);
             }
         } else {
             let mut orders = orders;
             if let Some(first) = orders.next() {
-                apply_ordered_command(entity, first, false, &move_target_q, &mut commands);
+                apply_ordered_command(entity, first, false, &unit_orders, &mut commands);
             }
             let rest: Vec<QueuedCommand> = orders.collect();
             if !rest.is_empty() {

@@ -1500,12 +1500,10 @@ pub fn attack_target_system(
             // Out of range: chase. Only repath when the current path's
             // endpoint lags the target beyond `CHASE_REPATH_DISTANCE` —
             // or when there is no path at all (fresh order / budget stall).
-            let stale = move_path_q.get(entity).map_or(true, |p| {
-                p.waypoints
-                    .last()
-                    .is_none_or(|w| w.distance(target_pos) > CHASE_REPATH_DISTANCE)
-            });
-            if stale {
+            if crate::interaction::movement::chase_path_stale(
+                move_path_q.get(entity).ok(),
+                target_pos,
+            ) {
                 // The old path is followed until the new one is ready
                 // (Spring's `nextPathId` swap) — no standstill per repath.
                 commands

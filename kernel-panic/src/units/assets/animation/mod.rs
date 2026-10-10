@@ -680,6 +680,7 @@ pub struct AnimDrivers<'w, 's> {
             Option<&'static crate::units::combat::AttackGroundOrder>,
             Option<&'static crate::units::combat::AttackTargetOrder>,
             Has<crate::interaction::movement::AttackMoveActive>,
+            Has<crate::units::combat::TargetCache>,
         ),
     >,
 }
@@ -705,6 +706,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
         attack_ground,
         attack_target,
         attack_move,
+        target_cache,
     ) in &mut drivers.animators
     {
         // `BUILD_PERCENT_LEFT` is `int((1 - buildProgress) * 100)`:
@@ -725,7 +727,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
             moving: crate::interaction::movement::moving_for_script(
                 move_target.is_some() || move_path.is_some(),
                 attack_move,
-                aim_target.is_some(),
+                crate::interaction::movement::fight_engaged(aim_target.is_some(), target_cache),
             ),
             producing: producer.is_some_and(|p| p.current_production().is_some()),
             building: producer.is_some_and(|p| p.building),

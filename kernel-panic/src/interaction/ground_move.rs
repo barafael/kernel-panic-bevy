@@ -32,7 +32,8 @@ use bevy::prelude::*;
 
 use super::movement::{
     AttackMoveActive, CommandQueue, GroundLift, LayerKey, MovePath, MoveTarget, NavGridSet,
-    PathOutcome, PathRequest, RepairTail, nav_class, promote_next_command, qt_path_outcome,
+    OrderState, OrderStateItem, PathOutcome, PathRequest, RepairTail, end_move_leg, fight_engaged,
+    nav_class, qt_path_outcome,
 };
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
@@ -41,11 +42,10 @@ use crate::sim::{
     SPRING_CIRCLE_DIVS, SPRING_MAX_HEADING, SQUARE_SIZE,
 };
 use crate::terrain::heightmap::Heightmap;
-use crate::units::combat::{AimTarget, Dying, Stunned};
+use crate::units::combat::{AimTarget, Dying, Stunned, TargetCache};
 use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::construction::PendingBuild;
 use spring_pathfinding::qtpfs::{NodeId, NodeLayer, QtPath, QtScratch, QtSearch, Rect as QtRect};
 use spring_pathfinding::{BlockMask, SpeedMap};
 
@@ -1543,8 +1543,9 @@ pub struct MoverData {
     boost: Option<&'static crate::units::mechanics::network_buffer::SpeedBoost>,
     attack_move: Has<AttackMoveActive>,
     aim: Has<AimTarget>,
+    target_cache: Has<TargetCache>,
     animator: Option<&'static crate::units::assets::animation::UnitAnimator>,
-    pending_build: Has<PendingBuild>,
+    order: OrderState,
     emerging: Has<crate::units::lifecycle::spawning::Emerging>,
     lift: Option<&'static GroundLift>,
     team: Option<&'static TeamId>,
@@ -1643,7 +1644,7 @@ pub fn movement_system(
             from: u.transform.translation,
             to: Vec3::new(goal.x, 0.0, goal.y),
             goal_radius: u.mover.goal_radius + u.mover.extra_radius,
-            repair: u.path.and_then(RepairTail::of),
+            repair: u.path.and_then(|p| RepairTail::of(p, goal)),
         })
     });
 
@@ -1697,7 +1698,11 @@ pub fn movement_system(
             continue;
         }
 
-        let more_moves = u.queue.as_deref().is_some_and(|q| !q.commands.is_empty());
+        // Follow-up move legs (`HasMoreMoveCommands`): only behind a
+        // plain move leg; an attack / guard / build order owns its
+        // `MoveTarget` and finishes on its own terms.
+        let more_moves =
+            !u.order.steers() && u.queue.as_deref().is_some_and(|q| !q.commands.is_empty());
 
         // --- Orders → StartMoving / StopMoving ---
         let clamp = |p: Vec3| {
@@ -1729,7 +1734,6 @@ pub fn movement_system(
                 || path_emptied
                 || (m.is_slow_update()
                     && more_moves
-                    && !u.pending_build
                     && m.goal.is_some_and(|g| {
                         g.distance_squared(pos.xz())
                             < cancel_distance_sq(fs.max_speed, fs.turn_rate)
@@ -1739,7 +1743,9 @@ pub fn movement_system(
             finish_leg(
                 &mut commands,
                 u.entity,
+                &u.order,
                 u.queue.as_deref_mut(),
+                false,
                 m,
                 &map,
                 pos,
@@ -1827,7 +1833,7 @@ pub fn movement_system(
                             from: pos,
                             to: Vec3::new(g.x, 0.0, g.y),
                             goal_radius: m.goal_radius + m.extra_radius,
-                            repair: u.path.as_deref().and_then(RepairTail::of),
+                            repair: u.path.as_deref().and_then(|p| RepairTail::of(p, g)),
                         };
                         let (outcome, left) =
                             path_queue.request_now(u.entity, req, nodes_left, nav, &registry);
@@ -1858,7 +1864,9 @@ pub fn movement_system(
                             finish_leg(
                                 &mut commands,
                                 u.entity,
+                                &u.order,
                                 u.queue.as_deref_mut(),
+                                true,
                                 m,
                                 &map,
                                 pos,
@@ -1873,9 +1881,11 @@ pub fn movement_system(
         // pointer.bos never limits speed while folding (its `set
         // MAX_SPEED` is commented out): a deployed Pointer drives off at
         // once and closes on the way.
-        let hold = u.stunned || (u.attack_move && u.aim);
+        // A fight leg holds while its weapon engages a target in range
+        // (not while the turret merely tracks a far T designation).
+        let hold = u.stunned || (u.attack_move && fight_engaged(u.aim, u.target_cache));
         let order = OrderView {
-            has_move_cmd: !u.pending_build,
+            has_move_cmd: !u.order.steers(),
             last_command: !u.queue.as_deref().is_some_and(|q| !q.commands.is_empty()),
             hold,
         };
@@ -1931,12 +1941,14 @@ pub fn movement_system(
             tf.rotation = rotation;
         }
 
-        if result.finished.is_some() {
+        if let Some(arrived) = result.finished {
             // `Arrived` / `Fail` run the CAI's SlowUpdate right away.
             finish_leg(
                 &mut commands,
                 u.entity,
+                &u.order,
                 u.queue.as_deref_mut(),
+                !arrived,
                 m,
                 &map,
                 new_pos,
@@ -2134,20 +2146,24 @@ pub fn ground_speed_mod(
     }
 }
 
-/// The CAI side of a finished leg (`CMobileCAI::ExecuteMove` →
-/// `FinishCommand`): promote the next queued command and, when it is a
-/// move, start it now so the unit keeps its momentum; with nothing
-/// queued the unit's path is dropped and it brakes to a stop.
+/// The CAI side of a finished leg ([`end_move_leg`]: `CMobileCAI::
+/// ExecuteMove` → `FinishCommand`): a move leg promotes the next queued
+/// command and, when that is a move, starts it now so the unit keeps
+/// its momentum; otherwise the unit's path is dropped and it brakes to
+/// a stop.
+#[allow(clippy::too_many_arguments)]
 fn finish_leg(
     commands: &mut Commands,
     entity: Entity,
+    order: &OrderStateItem,
     queue: Option<&mut CommandQueue>,
+    failed: bool,
     m: &mut GroundMover,
     map: &MoveMap,
     pos: Vec3,
     clamp: impl Fn(Vec3) -> Vec2,
 ) {
-    match promote_next_command(commands, entity, pos, queue) {
+    match end_move_leg(commands, entity, order, queue, failed) {
         Some(next) => {
             let g = clamp(next);
             m.start_moving(g, MOVE_GOAL_RADIUS, pos, !map.square_open(g));
@@ -2312,6 +2328,7 @@ pub fn ground_collision_system(
         Has<Dying>,
         Option<&GroundLift>,
         Has<crate::units::lifecycle::spawning::Emerging>,
+        OrderState,
     )>,
     mut entries: Local<Vec<CollisionEntry>>,
     mut grid: Local<CollisionGrid>,
@@ -2340,7 +2357,7 @@ pub fn ground_collision_system(
         bucket.clear();
     }
     let mut max_mobile_radius = 0.0_f32;
-    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _, emerging) in &movers {
+    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _, emerging, _) in &movers {
         if stats.can_fly || dying {
             continue;
         }
@@ -2393,7 +2410,7 @@ pub fn ground_collision_system(
     // applied after the pass (position and velocity deltas).
     let mut knocked: Vec<(Entity, Vec3)> = Vec::new();
 
-    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging) in
+    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order) in
         &mut movers
     {
         if stats.can_fly || stats.speed <= 0.0 || dying || emerging {
@@ -2657,7 +2674,7 @@ pub fn ground_collision_system(
             if fail {
                 m.stop_engine(Progress::Failed);
                 commands.entity(entity).remove::<MovePath>();
-                promote_next_command(&mut commands, entity, new_pos, queue.as_deref_mut());
+                end_move_leg(&mut commands, entity, &order, queue.as_deref_mut(), true);
             }
         }
     }

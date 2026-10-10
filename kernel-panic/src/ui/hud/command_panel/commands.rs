@@ -206,7 +206,7 @@ pub(crate) struct UnitCmdState {
 /// `UnitDef::CanAttack`: `canAttack` and at least one weapon). Factories
 /// also qualify upstream, as an order passed to their new units — the
 /// remake has no such rally orders, so they are left out.
-fn can_attack(kind: UnitKind) -> bool {
+pub(crate) fn can_attack(kind: UnitKind) -> bool {
     matches!(
         kind,
         UnitKind::Bit

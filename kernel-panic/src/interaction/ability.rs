@@ -20,16 +20,15 @@
 
 use bevy::prelude::*;
 
-use super::movement::{CommandQueue, GuardTarget, MoveTarget, QueuedCommand};
+use super::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
 use super::selection::{
-    OrderMarker, PendingMoveIndicators, PickRayCast, Selected, apply_ordered_command, ground_hit,
-    unit_hit,
+    OrderMarker, PendingMoveIndicators, PickRayCast, Selected, SelectionSet, apply_ordered_command,
+    ground_hit, unit_hit,
 };
-use super::{clear_orders, replace_order};
 use crate::interaction::cursor::{CursorKind, CursorRequest};
 use crate::rendering::camera::RtsCamera;
-use crate::ui::hud::command_panel::commands::CmdId;
-use crate::units::combat::{AttackGroundOrder, ForcedTarget};
+use crate::ui::hud::command_panel::commands::{CmdId, can_attack};
+use crate::units::combat::ForcedTarget;
 use crate::units::components::{TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -50,13 +49,21 @@ impl Plugin for AbilityHotkeyPlugin {
             (
                 trigger_aimed_ability_on_hotkey,
                 trigger_deploy_on_hotkey,
-                trigger_ability_click,
-                trigger_patrol_click,
-                trigger_attack_ground_click,
-                trigger_attack_move_click,
-                trigger_guard_click,
-                trigger_move_click,
-                trigger_set_target_click,
+                // The armed-mode click handlers run before selection and
+                // consume the press they commit, so the click never also
+                // reaches click-to-select (a plain order click used to
+                // deselect everything, a guard click select the guarded
+                // unit).
+                (
+                    trigger_ability_click,
+                    trigger_patrol_click,
+                    trigger_attack_ground_click,
+                    trigger_attack_move_click,
+                    trigger_guard_click,
+                    trigger_move_click,
+                    trigger_set_target_click,
+                )
+                    .before(SelectionSet::Select),
                 update_mode_cursor,
             ),
         );
@@ -234,6 +241,13 @@ fn armed_ground_click(
     ground_hit(windows, camera_q, ray_cast)
 }
 
+/// A click handler committed its order: the press is used up, so
+/// selection (which runs after the handlers) never sees this click and
+/// its release can't deselect the units just ordered.
+fn consume_click(mouse: &mut ButtonInput<MouseButton>) {
+    mouse.clear_just_pressed(MouseButton::Left);
+}
+
 /// `D` deploys a selected Bug into an Exploit and packs an Exploit
 /// back into a Bug. Co-exists with command-fire / dispatch on the
 /// same key because the eligibility sets don't overlap — Bug/Exploit
@@ -296,7 +310,7 @@ fn trigger_aimed_ability_on_hotkey(
 /// what `D` would do with the cursor at that point. Shift stays armed.
 #[allow(clippy::too_many_arguments)]
 fn trigger_ability_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
@@ -331,23 +345,27 @@ fn trigger_ability_click(
     );
     pending.markers.push((target, OrderMarker::Attack));
     modes.committed(&keys);
+    consume_click(&mut mouse);
 }
 
-/// Ground-target click: while [`Mode::AttackGround`] is
-/// armed, the next left-click issues an [`AttackGroundOrder`] for every
-/// selected unit. `attack_ground_system` moves the unit into weapon range
-/// if needed, then fires each reload cycle at the ground position. Shift
-/// queues a move to the same point first. Commits exit the mode (Shift
-/// stays in mode).
+/// Ground-target click: while [`Mode::AttackGround`] is armed, the next
+/// left-click issues an attack-ground order to every selected unit that
+/// has the Attack command (armed, non-command-fire primary weapon:
+/// Spring sends a command only to units that list it, and a
+/// command-fire weapon such as the Obelisk's Infection never fires on
+/// an attack order). `attack_ground_system` moves the unit into weapon
+/// range if needed, then fires each reload cycle at the ground
+/// position. Shift queues it behind the current orders. Commits exit
+/// the mode (Shift stays in mode).
 #[allow(clippy::too_many_arguments)]
 fn trigger_attack_ground_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<Entity, With<Selected>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    move_target_q: Query<(), With<MoveTarget>>,
+    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
@@ -363,40 +381,34 @@ fn trigger_attack_ground_click(
         return;
     };
     let shift = shift_held(&keys);
-    for entity in &selected_q {
-        if shift && move_target_q.contains(entity) {
-            // Shift-queue: the attack-ground becomes the next leg —
-            // when the current order finishes, `promote_next_command`
-            // inserts the `AttackGroundOrder` and
-            // `attack_ground_system` walks the unit into range.
-            apply_ordered_command(
-                entity,
-                QueuedCommand::AttackGround(target),
-                true,
-                &move_target_q,
-                &mut commands,
-            );
-        } else {
-            // Immediate: cancel any current order, issue AttackGroundOrder.
-            // attack_ground_system handles movement if needed.
-            clear_orders(&mut commands.entity(entity)).insert(AttackGroundOrder { pos: target });
+    for (entity, unit) in &selected_q {
+        if !can_attack(unit.0) {
+            continue;
         }
+        apply_ordered_command(
+            entity,
+            QueuedCommand::AttackGround(target),
+            shift,
+            &orders,
+            &mut commands,
+        );
     }
     pending.markers.push((target, OrderMarker::Attack));
     modes.committed(&keys);
+    consume_click(&mut mouse);
 }
 
 /// Click handler for the move mode: the next left-click issues a plain
 /// move order. Shift queues it behind the active order and stays armed.
 #[allow(clippy::too_many_arguments)]
 fn trigger_move_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    move_target_q: Query<(), With<MoveTarget>>,
+    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
@@ -421,25 +433,29 @@ fn trigger_move_click(
             entity,
             QueuedCommand::Move(target),
             shift,
-            &move_target_q,
+            &orders,
             &mut commands,
         );
     }
     pending.markers.push((target, OrderMarker::Move));
     modes.committed(&keys);
+    consume_click(&mut mouse);
 }
 
 /// Click handler for the set-target mode: the next left-click on an enemy
 /// unit designates it as the selection's manual target. This is an aim
-/// designation only — current orders are left untouched. Shift stays armed.
+/// designation only — current orders are left untouched. Only units whose
+/// weapon may target that unit take it (`OnlyTargetCategory1`: a DOS
+/// can't be pointed at a building, as it can't be ordered to attack
+/// one). Shift stays armed.
 #[allow(clippy::too_many_arguments)]
 fn trigger_set_target_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
     unit_root_q: Query<Entity, With<UnitType>>,
     parent_q: Query<&ChildOf>,
-    unit_info_q: Query<&TeamId>,
+    unit_info_q: Query<(&TeamId, &UnitType)>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
@@ -457,7 +473,7 @@ fn trigger_set_target_click(
     };
     // Manual fire must only ever designate hostiles — the forced-target
     // combat path bypasses the auto-targeter's friend filters.
-    let Ok(t_team) = unit_info_q.get(target) else {
+    let Ok((t_team, t_kind)) = unit_info_q.get(target) else {
         return;
     };
     let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0) else {
@@ -467,7 +483,7 @@ fn trigger_set_target_click(
         return;
     }
     for (entity, unit, _) in &selected_q {
-        if unit_registry.weapon(unit.0).is_empty() {
+        if unit_registry.weapon(unit.0).is_empty() || !unit_registry.can_attack(unit.0, t_kind.0) {
             continue;
         }
         commands.entity(entity).insert(ForcedTarget(target));
@@ -478,27 +494,29 @@ fn trigger_set_target_click(
             .push((t_gtf.translation(), OrderMarker::Target));
     }
     modes.committed(&keys);
+    consume_click(&mut mouse);
 }
 
-/// Click handler: while [`Mode::Patrol`] is armed, the next
-/// left-click issues a patrol order for every selected unit. The unit
-/// will patrol between its current location and the clicked location. Shift queues a
-/// follow-up patrol waypoint behind the unit's active order instead of
-/// replacing it (and stays armed for chain-patrolling).
+/// Click handler: while [`Mode::Patrol`] is armed, the next left-click
+/// issues a patrol order for every selected mobile unit: a route
+/// between where the unit starts and the clicked point, walked as fight
+/// legs forever (the patrol points cycle through the queue, see
+/// [`QueuedCommand::Patrol`]). Shift adds the clicked point behind the
+/// unit's orders instead (and stays armed for chain-patrolling).
 #[allow(clippy::too_many_arguments)]
 fn trigger_patrol_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    transform_q: Query<&Transform>,
+    selected_q: Query<(Entity, &UnitType, &Transform), With<Selected>>,
+    queue_q: Query<(Option<&CommandQueue>, Option<&MoveTarget>)>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    move_target_q: Query<(), With<MoveTarget>>,
+    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
-    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+    unit_registry: Res<UnitRegistry>,
 ) {
     let Some(target) = armed_ground_click(
         &modes,
@@ -512,39 +530,64 @@ fn trigger_patrol_click(
     };
     let shift = shift_held(&keys);
 
-    for (entity, unit) in &selected_q {
-        let speed = unit_registry.speed(unit.0);
-        if speed <= 0.0 {
+    for (entity, unit, tf) in &selected_q {
+        if unit_registry.speed(unit.0) <= 0.0 {
             continue;
         }
-
-        if shift && move_target_q.contains(entity) {
-            // Shift-queue: walk to the clicked point once the current
-            // order finishes, then patrol back & forth from there.
-            apply_ordered_command(
-                entity,
-                QueuedCommand::Patrol(target),
-                true,
-                &move_target_q,
-                &mut commands,
-            );
-            continue;
+        let (queue, move_target) = queue_q.get(entity).unwrap_or_default();
+        let append = shift && orders.busy(entity);
+        for cmd in patrol_commands(
+            append,
+            queue.map_or(&[][..], |q| &q.commands),
+            move_target.map(|t| t.0),
+            tf.translation,
+            target,
+        ) {
+            apply_ordered_command(entity, cmd, append, &orders, &mut commands);
         }
-
-        // Immediate: cancel the current order, march to the target, then
-        // return to the starting position — `movement_system` re-queues
-        // the opposing waypoint on arrival so this shuttles indefinitely.
-        let Ok(current_tf) = transform_q.get(entity) else {
-            continue;
-        };
-        let mut queue = CommandQueue::default();
-        queue.push(QueuedCommand::Patrol(current_tf.translation));
-        let mut ec = commands.entity(entity);
-        replace_order(&mut ec, QueuedCommand::Patrol(target));
-        ec.insert(queue);
+        if !append {
+            // The route's second point: the active leg walks to the
+            // click, the queue holds the start and the click.
+            commands.entity(entity).insert(CommandQueue {
+                commands: vec![
+                    QueuedCommand::Patrol(tf.translation),
+                    QueuedCommand::Patrol(target),
+                ],
+            });
+        }
     }
     pending.markers.push((target, OrderMarker::Patrol));
     modes.committed(&keys);
+    consume_click(&mut mouse);
+}
+
+/// The commands a patrol click to `target` gives one unit (Spring's
+/// `CCommandAI::GiveAllowedCommand` for `CMD_PATROL`). A fresh patrol
+/// (`append == false`) is just the leg to `target`; the caller queues
+/// the route behind it. Appended behind other orders, the first patrol
+/// point pairs with where those orders end, the last queued position,
+/// else the active order's goal, else the unit itself, so the route
+/// has two ends to shuttle between.
+fn patrol_commands(
+    append: bool,
+    queue: &[QueuedCommand],
+    active_goal: Option<Vec3>,
+    unit_pos: Vec3,
+    target: Vec3,
+) -> Vec<QueuedCommand> {
+    let has_patrol = queue.iter().any(|c| matches!(c, QueuedCommand::Patrol(_)));
+    if !append || has_patrol {
+        return vec![QueuedCommand::Patrol(target)];
+    }
+    let route_start = queue
+        .last()
+        .map(QueuedCommand::position)
+        .or(active_goal)
+        .unwrap_or(unit_pos);
+    vec![
+        QueuedCommand::Patrol(route_start),
+        QueuedCommand::Patrol(target),
+    ]
 }
 
 /// Click handler: while [`Mode::AttackMove`] is active, the
@@ -553,17 +596,17 @@ fn trigger_patrol_click(
 /// queues the march behind the active order and stays armed.
 #[allow(clippy::too_many_arguments)]
 fn trigger_attack_move_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    move_target_q: Query<(), With<MoveTarget>>,
+    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
-    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+    unit_registry: Res<UnitRegistry>,
 ) {
     let Some(target) = armed_ground_click(
         &modes,
@@ -577,29 +620,31 @@ fn trigger_attack_move_click(
     };
     let shift = shift_held(&keys);
     for (entity, unit) in &selected_q {
-        let speed = unit_registry.speed(unit.0);
-        if speed <= 0.0 {
+        if unit_registry.speed(unit.0) <= 0.0 {
             continue;
         }
         apply_ordered_command(
             entity,
             QueuedCommand::AttackMove(target),
             shift,
-            &move_target_q,
+            &orders,
             &mut commands,
         );
     }
     pending.markers.push((target, OrderMarker::Attack));
     modes.committed(&keys);
+    consume_click(&mut mouse);
 }
 
 /// Click handler: while [`Mode::Guard`] is armed, the next
 /// left-click on a friendly unit makes every selected mobile unit guard
 /// it — trail it at close range while the auto-attack path defends it.
-/// Clicking an enemy or bare ground is ignored (the mode stays armed).
+/// Shift queues the guard behind the current orders. Clicking an enemy
+/// or bare ground is ignored (the mode stays armed, and selection
+/// swallows the click).
 #[allow(clippy::too_many_arguments)]
 fn trigger_guard_click(
-    mouse: Res<ButtonInput<MouseButton>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
     unit_root_q: Query<Entity, With<UnitType>>,
@@ -609,6 +654,7 @@ fn trigger_guard_click(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
+    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut commands: Commands,
@@ -631,16 +677,58 @@ fn trigger_guard_click(
         return;
     }
 
+    let pos = target_gtf_q
+        .get(target)
+        .map_or(Vec3::ZERO, |t| t.translation());
+    let shift = shift_held(&keys);
     for (entity, unit, _) in &selected_q {
-        if unit_registry.speed(unit.0) <= 0.0 {
+        // A unit can't guard itself.
+        if entity == target || unit_registry.speed(unit.0) <= 0.0 {
             continue;
         }
-        clear_orders(&mut commands.entity(entity)).insert(GuardTarget(target));
+        apply_ordered_command(
+            entity,
+            QueuedCommand::Guard { target, pos },
+            shift,
+            &orders,
+            &mut commands,
+        );
     }
-    if let Ok(t_gtf) = target_gtf_q.get(target) {
-        pending
-            .markers
-            .push((t_gtf.translation(), OrderMarker::Guard));
-    }
+    pending.markers.push((pos, OrderMarker::Guard));
     modes.committed(&keys);
+    consume_click(&mut mouse);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh patrol is the leg to the click; queued behind other
+    /// orders, the first patrol point pairs with where they end.
+    #[test]
+    fn patrol_route_ends() {
+        let unit = Vec3::new(1.0, 0.0, 1.0);
+        let goal = Vec3::new(50.0, 0.0, 0.0);
+        let click = Vec3::new(90.0, 0.0, 90.0);
+        let patrol = |c: &QueuedCommand| match c {
+            QueuedCommand::Patrol(p) => *p,
+            other => panic!("not a patrol: {other:?}"),
+        };
+        let fresh = patrol_commands(false, &[], Some(goal), unit, click);
+        assert_eq!(fresh.iter().map(patrol).collect::<Vec<_>>(), [click]);
+        let behind_move = patrol_commands(true, &[], Some(goal), unit, click);
+        assert_eq!(
+            behind_move.iter().map(patrol).collect::<Vec<_>>(),
+            [goal, click]
+        );
+        let queued = [QueuedCommand::Move(Vec3::X * 7.0)];
+        let behind_queue = patrol_commands(true, &queued, Some(goal), unit, click);
+        assert_eq!(
+            behind_queue.iter().map(patrol).collect::<Vec<_>>(),
+            [Vec3::X * 7.0, click]
+        );
+        let chained = [QueuedCommand::Patrol(goal), QueuedCommand::Patrol(unit)];
+        let more = patrol_commands(true, &chained, Some(goal), unit, click);
+        assert_eq!(more.iter().map(patrol).collect::<Vec<_>>(), [click]);
+    }
 }

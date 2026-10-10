@@ -8,9 +8,8 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use super::core::{PickRayCast, Selected, SelectionSet, ground_hit, unit_hit};
-use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
+use crate::interaction::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
 use crate::rendering::camera::RtsCamera;
-use crate::units::combat::AttackTargetOrder;
 use crate::units::components::{TeamId, UnitStats, UnitType, is_friendly};
 use crate::units::content::unit_registry::UnitRegistry;
 
@@ -57,8 +56,16 @@ fn decay_move_indicators(
     }
 }
 
-/// Minimum distance between sampled path points (world units).
-const PATH_SAMPLE_MIN_DISTANCE: f32 = 20.0;
+/// Squared screen distance (pixels²) the cursor must travel before the
+/// drag adds a formation node (CustomFormations2 `MouseMove`'s
+/// `totaldxy > 40`). A press that never moves this far is a plain
+/// click, however far the cursor's ground point moved, so a zoomed-out
+/// click with a pixel of jitter doesn't become a formation line.
+const NODE_SCREEN_STEP_SQ: f32 = 40.0;
+
+/// Waypoint spacing when a single unit is given a drawn path
+/// (CustomFormations2 `minPathSpacingSq = 50 * 50`).
+const SINGLE_UNIT_PATH_SPACING: f32 = 50.0;
 
 /// Tracks right-click drag path for move commands.
 #[derive(Resource, Default)]
@@ -67,6 +74,8 @@ pub struct RightDragPath {
     points: Vec<Vec3>,
     /// Whether we're actively dragging.
     active: bool,
+    /// Cursor position (window pixels) where the last node was added.
+    last_cursor: Option<Vec2>,
 }
 
 /// Order-commit marker kinds, rendered as colored torus rings at the
@@ -116,7 +125,7 @@ struct RightClickLookups<'w, 's> {
     unit_info_q: Query<'w, 's, &'static TeamId>,
     target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
-    move_target_q: Query<'w, 's, (), With<MoveTarget>>,
+    orders: Orders<'w, 's>,
     queue_end_q: Query<'w, 's, (Option<&'static MoveTarget>, Option<&'static CommandQueue>)>,
 }
 
@@ -144,39 +153,49 @@ fn handle_right_click(
         unit_info_q,
         target_gtf_q,
         target_type_q,
-        move_target_q,
+        orders,
         queue_end_q,
     } = lookups;
+    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
     if mouse.just_pressed(MouseButton::Right) {
         drag_path.points.clear();
         drag_path.active = true;
+        drag_path.last_cursor = cursor;
 
         if let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast) {
             drag_path.points.push(point);
         }
     }
 
-    if mouse.pressed(MouseButton::Right)
+    // A node per stretch of cursor travel on screen (`MouseMove`); on
+    // the release frame too (`MouseRelease` adds the release point to a
+    // drawn line), but a release never turns a click into a line.
+    let released = mouse.just_released(MouseButton::Right);
+    let moved_enough = match (cursor, drag_path.last_cursor) {
+        (Some(c), Some(last)) => c.distance_squared(last) > NODE_SCREEN_STEP_SQ,
+        _ => false,
+    };
+    if (mouse.pressed(MouseButton::Right) || (released && drag_path.points.len() > 1))
         && drag_path.active
+        && moved_enough
         && let Some(point) = ground_hit(&windows, &camera_q, &mut ray_cast)
     {
-        let dominated = drag_path
-            .points
-            .last()
-            .is_some_and(|last| last.distance(point) < PATH_SAMPLE_MIN_DISTANCE);
-        if !dominated {
-            drag_path.points.push(point);
-        }
+        drag_path.points.push(point);
+        drag_path.last_cursor = cursor;
     }
 
-    if mouse.just_released(MouseButton::Right) && drag_path.active {
+    if released && drag_path.active {
         drag_path.active = false;
 
+        // Only units that can carry out a move take part
+        // (CustomFormations2 `commandApplies`: `canMove`); a selected
+        // building would claim a formation node and leave a gap.
         let units: Vec<(Entity, Vec3)> = selected_q
             .iter()
+            .filter(|(_, _, _, stats)| stats.speed > 0.0)
             .map(|(e, tf, _, _)| (e, tf.translation))
             .collect();
-        if units.is_empty() || drag_path.points.is_empty() {
+        if selected_q.is_empty() || drag_path.points.is_empty() {
             return;
         }
 
@@ -192,7 +211,12 @@ fn handle_right_click(
                         unit_info_q
                             .get(target)
                             .ok()
-                            .zip(units.first().and_then(|(e, _)| unit_info_q.get(*e).ok()))
+                            .zip(
+                                selected_q
+                                    .iter()
+                                    .next()
+                                    .and_then(|(e, ..)| unit_info_q.get(e).ok()),
+                            )
                             .is_some_and(|(t_team, m_team)| !is_friendly(m_team.0, t_team.0))
                     },
                 );
@@ -218,22 +242,18 @@ fn handle_right_click(
                         continue;
                     }
                     any_armed = true;
-                    if shift && move_target_q.contains(entity) {
-                        // Shift-queue: walk to the target's current position
-                        // first, then attack it (the chase retargets live).
-                        commands
-                            .entity(entity)
-                            .entry::<CommandQueue>()
-                            .or_default()
-                            .and_modify(move |mut queue: Mut<CommandQueue>| {
-                                queue.push(QueuedCommand::AttackUnit {
-                                    target: target_unit,
-                                    pos: target_pos,
-                                });
-                            });
-                    } else {
-                        issue_attack_order(entity, target_unit, &mut commands);
-                    }
+                    // Shift queues the attack behind the current orders
+                    // (the chase retargets live when it is promoted).
+                    apply_ordered_command(
+                        entity,
+                        QueuedCommand::AttackUnit {
+                            target: target_unit,
+                            pos: target_pos,
+                        },
+                        shift,
+                        &orders,
+                        &mut commands,
+                    );
                 }
                 if any_armed {
                     pending.markers.push((target_pos, OrderMarker::Attack));
@@ -252,18 +272,39 @@ fn handle_right_click(
                 .iter()
                 .map(|(e, tf, _, stats)| (e, tf.translation, stats.radius))
                 .collect();
-            let orders = group_move_slots(&movers, target);
-            for (entity, slot) in &orders {
+            for (entity, slot) in group_move_slots(&movers, target) {
                 apply_ordered_command(
-                    *entity,
-                    QueuedCommand::Move(*slot),
+                    entity,
+                    QueuedCommand::Move(slot),
                     shift,
-                    &move_target_q,
+                    &orders,
                     &mut commands,
                 );
             }
             pending.markers.push((target, OrderMarker::Move));
-        } else {
+        } else if let [(entity, _)] = units[..] {
+            // A single unit follows the drawn path itself: one move per
+            // `minPathSpacing` of line, queued behind the first
+            // (CustomFormations2's `draggingPath`).
+            let waypoints = path_waypoints(&drag_path.points, SINGLE_UNIT_PATH_SPACING);
+            if let Some((&first, rest)) = waypoints.split_first() {
+                apply_ordered_command(
+                    entity,
+                    QueuedCommand::Move(first),
+                    shift,
+                    &orders,
+                    &mut commands,
+                );
+                // Behind the first whatever `orders` said: it reads the
+                // world before this frame's commands land.
+                for &point in rest {
+                    queue_command(entity, QueuedCommand::Move(point), &mut commands);
+                }
+            }
+            pending
+                .markers
+                .extend(waypoints.into_iter().map(|t| (t, OrderMarker::Move)));
+        } else if !units.is_empty() {
             // Drawn formation (KP `unit_customformations2.lua`): nodes
             // evenly spaced along the drag, matched to units by
             // `GetOrdersHungarian` (min total distance) up to 20 units,
@@ -290,7 +331,7 @@ fn handle_right_click(
                     *entity,
                     QueuedCommand::Move(targets[assignment[i]]),
                     shift,
-                    &move_target_q,
+                    &orders,
                     &mut commands,
                 );
             }
@@ -303,37 +344,37 @@ fn handle_right_click(
     }
 }
 
-/// Replace a unit's current order with an attack on `target`. Mirrors the
-/// replace branch of [`apply_ordered_command`] for every order component
-/// attack supersedes. The explicit attack also supersedes a manual (T)
-/// target designation.
-fn issue_attack_order(entity: Entity, target: Entity, commands: &mut Commands) {
-    super::super::clear_orders(&mut commands.entity(entity)).insert(AttackTargetOrder { target });
-}
-
-/// Apply a positional command to a unit, either replacing its current order
-/// or enqueuing it behind the currently running order (and any already queued).
+/// Give a unit a command: with `enqueue` (Shift) it goes behind
+/// whatever the unit is doing (any active order or queued commands,
+/// [`Orders::busy`]), otherwise it replaces the unit's orders — Spring's
+/// `CCommandAI::GiveAllowedCommand` with and without `SHIFT_KEY`.
 pub(crate) fn apply_ordered_command(
     entity: Entity,
     cmd: QueuedCommand,
     enqueue: bool,
-    move_target_q: &Query<(), With<MoveTarget>>,
+    orders: &Orders,
     commands: &mut Commands,
 ) {
-    if enqueue && move_target_q.contains(entity) {
-        // Unit has an active order — append to (or create) the queue.
-        commands
-            .entity(entity)
-            .entry::<CommandQueue>()
-            .or_default()
-            .and_modify(move |mut queue: Mut<CommandQueue>| {
-                queue.push(cmd);
-            });
+    if enqueue && orders.busy(entity) {
+        queue_command(entity, cmd, commands);
     } else {
         // Replace (or enqueue with no active order): install as active
         // order behind an empty queue, invalidating any computed path.
         crate::interaction::replace_order(&mut commands.entity(entity), cmd);
     }
+}
+
+/// Append `cmd` to the unit's queue (creating it); `advance_command_queue`
+/// promotes it when the orders ahead of it end. For follow-ups of a
+/// command just given this frame, which [`Orders::busy`] can't see yet.
+pub(crate) fn queue_command(entity: Entity, cmd: QueuedCommand, commands: &mut Commands) {
+    commands
+        .entity(entity)
+        .entry::<CommandQueue>()
+        .or_default()
+        .and_modify(move |mut queue: Mut<CommandQueue>| {
+            queue.push(cmd);
+        });
 }
 
 /// Drains `PendingMoveIndicators` and creates torus visuals colored by
@@ -399,7 +440,7 @@ pub(crate) struct FormationPreviewAssets {
 /// churned archetypes and render-world extraction for every torus.
 fn update_formation_preview(
     drag_path: Res<RightDragPath>,
-    selected_q: Query<Entity, With<Selected>>,
+    selected_q: Query<&UnitStats, With<Selected>>,
     mut preview_q: Query<(&mut Transform, &mut Visibility), With<FormationPreview>>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -407,7 +448,8 @@ fn update_formation_preview(
     assets: Option<Res<FormationPreviewAssets>>,
 ) {
     // If drag is not active or path has fewer than 2 points, hide any existing previews.
-    let unit_count = selected_q.iter().count();
+    // The units the release will order: the movers.
+    let unit_count = selected_q.iter().filter(|s| s.speed > 0.0).count();
     if !drag_path.active || drag_path.points.len() < 2 || unit_count == 0 {
         for (_, mut vis) in &mut preview_q {
             vis.set_if_neq(Visibility::Hidden);
@@ -433,7 +475,11 @@ fn update_formation_preview(
         a
     };
 
-    let targets = sample_path_evenly(&drag_path.points, unit_count);
+    let targets = if unit_count == 1 {
+        path_waypoints(&drag_path.points, SINGLE_UNIT_PATH_SPACING)
+    } else {
+        sample_path_evenly(&drag_path.points, unit_count)
+    };
     let placement = |target: &Vec3| {
         Transform::from_translation(*target + Vec3::Y * 1.0)
             .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2))
@@ -603,6 +649,21 @@ fn no_crossings(units: &[Vec3], nodes: &[Vec3]) -> Vec<usize> {
         }
     }
     m
+}
+
+/// A drawn path as one unit's waypoints: its start, then every point at
+/// least `spacing` from the last waypoint kept.
+fn path_waypoints(path: &[Vec3], spacing: f32) -> Vec<Vec3> {
+    let mut out: Vec<Vec3> = Vec::new();
+    for &p in path {
+        if out
+            .last()
+            .is_none_or(|last| last.xz().distance(p.xz()) > spacing)
+        {
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn sample_path_evenly(path: &[Vec3], count: usize) -> Vec<Vec3> {
@@ -822,6 +883,76 @@ mod tests {
             Vec3::new(11.0, 0.0, 5.0),
         ];
         assert_eq!(assign_formation(&units, &nodes), vec![1, 2, 0]);
+    }
+
+    /// Shift appends behind any active order: an attack or a build in
+    /// progress keeps running with the move queued after it (it used to
+    /// be replaced unless the unit had a `MoveTarget`). Without an order
+    /// or queue the command starts at once.
+    #[test]
+    fn shift_queues_behind_any_active_order() {
+        use crate::units::combat::AttackTargetOrder;
+        use crate::units::lifecycle::construction::Constructing;
+        let mut world = World::new();
+        let enemy = world.spawn_empty().id();
+        let attacker = world.spawn(AttackTargetOrder { target: enemy }).id();
+        let builder = world
+            .spawn(Constructing {
+                kind: UnitKind::BadBlock,
+                site: Vec3::ZERO,
+                progress: 0.0,
+                building: None,
+            })
+            .id();
+        let idle = world.spawn_empty().id();
+        let goal = Vec3::new(50.0, 0.0, 50.0);
+        world
+            .run_system_once(move |orders: Orders, mut commands: Commands| {
+                for e in [attacker, builder, idle] {
+                    apply_ordered_command(
+                        e,
+                        QueuedCommand::Move(goal),
+                        true,
+                        &orders,
+                        &mut commands,
+                    );
+                }
+            })
+            .unwrap();
+        assert!(world.get::<AttackTargetOrder>(attacker).is_some());
+        assert!(world.get::<Constructing>(builder).is_some());
+        for e in [attacker, builder] {
+            assert!(world.get::<MoveTarget>(e).is_none());
+            let queue = world.get::<CommandQueue>(e).expect("queued");
+            assert!(matches!(queue.commands[..], [QueuedCommand::Move(g)] if g == goal));
+        }
+        assert_eq!(world.get::<MoveTarget>(idle).map(|t| t.0), Some(goal));
+
+        // Without Shift the order is replaced, build included.
+        world
+            .run_system_once(move |orders: Orders, mut commands: Commands| {
+                apply_ordered_command(
+                    builder,
+                    QueuedCommand::Move(goal),
+                    false,
+                    &orders,
+                    &mut commands,
+                );
+            })
+            .unwrap();
+        assert!(world.get::<Constructing>(builder).is_none());
+        assert_eq!(world.get::<MoveTarget>(builder).map(|t| t.0), Some(goal));
+    }
+
+    /// A single unit's drawn path keeps a waypoint per 50 elmos of line.
+    #[test]
+    fn single_unit_path_spacing() {
+        let line: Vec<Vec3> = (0..=10)
+            .map(|i| Vec3::new(i as f32 * 20.0, 0.0, 0.0))
+            .collect();
+        let wps = path_waypoints(&line, SINGLE_UNIT_PATH_SPACING);
+        let xs: Vec<f32> = wps.iter().map(|w| w.x).collect();
+        assert_eq!(xs, [0.0, 60.0, 120.0, 180.0]);
     }
 
     /// A plain right-click sends every selected unit to the clicked

@@ -488,6 +488,7 @@ pub fn aim_weapons_system(
             Option<&mut crate::interaction::ground_move::GroundMover>,
             Has<MoveTarget>,
             Has<AttackMoveActive>,
+            Has<super::TargetCache>,
             Option<&Deployable>,
         ),
         // A paralyzed unit doesn't turn to aim (`CanUpdateWeapons`).
@@ -495,7 +496,9 @@ pub fn aim_weapons_system(
     >,
 ) {
     let dt = time.delta_secs();
-    for (mut transform, stats, aim, aimer, mover, has_move, attack_move, deployable) in &mut query {
+    for (mut transform, stats, aim, aimer, mover, has_move, attack_move, engaged, deployable) in
+        &mut query
+    {
         // pointer.bos turns the body (`set HEADING`) inside `AimWeapon1`
         // only `if (isOpen)`: a stowed or unfolding Pointer sits still.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
@@ -512,8 +515,10 @@ pub fn aim_weapons_system(
         }
         // A plain move order owns the heading; a fight order that has
         // engaged is holding (see `moving_for_script`) and turns to
-        // shoot, like pointer.bos's `set HEADING` loop in AimWeapon1.
-        if has_move && !attack_move {
+        // shoot, like pointer.bos's `set HEADING` loop in AimWeapon1. A
+        // fight leg merely tracking an out-of-range T target marches on.
+        let holding = attack_move && crate::interaction::movement::fight_engaged(true, engaged);
+        if has_move && !holding {
             continue;
         }
         let to_target = Vec3::new(

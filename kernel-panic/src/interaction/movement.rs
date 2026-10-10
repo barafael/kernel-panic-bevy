@@ -122,7 +122,8 @@ impl MovePath {
 }
 
 /// A queued command waiting to become the unit's active order.
-/// Consumed in FIFO order when the current order completes.
+/// Consumed in FIFO order when the current order completes (see
+/// [`OrderState`] for what "the active order" is and how it ends).
 #[derive(Clone, Copy, Debug)]
 pub enum QueuedCommand {
     Move(Vec3),
@@ -134,8 +135,11 @@ pub enum QueuedCommand {
         kind: UnitKind,
         site: Vec3,
     },
-    /// Walk to `target`, then return to the origin, repeating. Issued by
-    /// the patrol (P) order.
+    /// One point of a patrol route (P), walked as a fight leg. Every
+    /// patrol point that becomes the active order is re-appended to the
+    /// queue (`CMobileCAI::ExecutePatrol`'s `push_back(c)`), so the
+    /// queued points cycle forever; the click handler queues the
+    /// unit's start point next to the clicked one.
     Patrol(Vec3),
     /// Walk to `target`, then fight anything hostile on the way (Spring
     /// `CMD.FIGHT`). Issued by the AI; no player keybind.
@@ -154,22 +158,31 @@ pub enum QueuedCommand {
     /// (it issues its own range-boundary `MoveTarget`), so like
     /// [`QueuedCommand::AttackUnit`] this leg has no path of its own.
     AttackGround(Vec3),
+    /// Guard (follow and protect) the friendly unit `target` (G +
+    /// click). `pos` is where it stood at enqueue time, for drawing
+    /// only. Promotion inserts a [`GuardTarget`]; like Spring's
+    /// `CMD_GUARD` it never finishes on its own, only when the target
+    /// dies.
+    Guard {
+        target: Entity,
+        pos: Vec3,
+    },
 }
 
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
             QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => *p,
-            QueuedCommand::AttackUnit { pos, .. } => *pos,
+            QueuedCommand::AttackUnit { pos, .. } | QueuedCommand::Guard { pos, .. } => *pos,
             QueuedCommand::AttackGround(pos) => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
         }
     }
 }
 
-/// FIFO queue of follow-up commands. When the unit finishes its current
-/// order (e.g. reaches its `MoveTarget`), the next command is popped and
-/// promoted to the active order.
+/// FIFO queue of follow-up commands behind the unit's active order.
+/// When the active order ends, however it ends, the next command is
+/// popped and promoted ([`promote_next_command`]; see [`OrderState`]).
 #[derive(Component, Default)]
 pub struct CommandQueue {
     pub commands: Vec<QueuedCommand>,
@@ -409,55 +422,211 @@ impl NavGridSet {
 /// so they don't z-fight with the terrain.
 const GIZMO_LIFT: f32 = 1.5;
 
-/// An order leg is done: promote the next queued command to the active
-/// order, or — queue empty — drop the order entirely. Shared by the
-/// ground walker ([`movement_system`]) and the aircraft
-/// (`air_movement::hover_air_system`). `translation` is where the unit
-/// is now (the patrol return point).
+/// What a unit's *active order* is: Spring's front-of-queue command
+/// (`CCommandAI::commandQue.front()`), held as components next to the
+/// follow-ups in [`CommandQueue`]. Exactly these count:
+///
+/// | component | order |
+/// |---|---|
+/// | [`MoveTarget`] alone (± [`AttackMoveActive`]) | move / fight / patrol leg |
+/// | [`AttackTargetOrder`] | attack a unit |
+/// | [`AttackGroundOrder`] | attack the ground |
+/// | [`GuardTarget`] | guard a unit |
+/// | `PendingBuild`, then `Constructing` | walk to a build site, then build |
+/// | `PendingCommandFire`, `NxCast` | walk into range of an ability cast, then cast |
+///
+/// The contract every order system follows (`CCommandAI::FinishCommand`):
+/// - An order **ends** when its system removes its component: the
+///   attack or guard target died, the build finished or was refused,
+///   the cast went off. That system never touches the queue.
+/// - [`advance_command_queue`] then promotes the next queued command on
+///   the next sim tick (or drops the emptied queue), whatever ended the
+///   order.
+/// - A plain move leg is finished by the movement systems themselves
+///   ([`end_move_leg`]), which promote at once so the unit keeps its
+///   momentum (`ExecuteMove` → `FinishCommand` → `SlowUpdate`). Every
+///   other order merely steers the unit through a `MoveTarget` of its
+///   own ([`OrderStateItem::steers`]); when such a leg ends the unit
+///   just stops and the order decides what happens next.
+/// - [`crate::interaction::install_command`] /
+///   [`crate::interaction::replace_order`] install an order, removing
+///   whatever was left of the previous one;
+///   [`crate::interaction::clear_orders`] (Stop, a non-queued command)
+///   removes the order and its queue.
+#[derive(bevy::ecs::query::QueryData)]
+pub struct OrderState {
+    move_target: Has<MoveTarget>,
+    attack_unit: Has<AttackTargetOrder>,
+    attack_ground: Has<AttackGroundOrder>,
+    guard: Has<GuardTarget>,
+    pending_build: Has<crate::units::lifecycle::construction::PendingBuild>,
+    constructing: Has<crate::units::lifecycle::construction::Constructing>,
+    pending_cast: Has<crate::units::mechanics::command_fire::PendingCommandFire>,
+    nx_cast: Has<crate::units::mechanics::command_fire::NxCast>,
+}
+
+impl OrderStateItem<'_, '_> {
+    /// The unit is executing an order.
+    pub fn active(&self) -> bool {
+        self.move_target || self.steers()
+    }
+
+    /// The active order is one that steers the unit through a
+    /// `MoveTarget` of its own (attack, guard, build, cast) rather than
+    /// a plain move leg: a finished leg does not finish it, and nothing
+    /// queued behind it is a follow-up *move* (`UNIT_HAS_MOVE_CMD` is
+    /// false for it).
+    pub fn steers(&self) -> bool {
+        self.attack_unit
+            || self.attack_ground
+            || self.guard
+            || self.pending_build
+            || self.constructing
+            || self.pending_cast
+            || self.nx_cast
+    }
+
+    /// The active order walks to a build site (`PendingBuild`).
+    pub fn walking_to_build(&self) -> bool {
+        self.pending_build
+    }
+}
+
+/// Order state for the input handlers: does a Shift-click append behind
+/// what the unit is doing, or start a new order?
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct Orders<'w, 's> {
+    units: Query<'w, 's, (OrderState, Has<CommandQueue>)>,
+}
+
+impl Orders<'_, '_> {
+    /// The unit has an active order or queued commands, so a queued
+    /// command goes behind them. A queue without an active order (the
+    /// tick between an order ending and [`advance_command_queue`])
+    /// counts too: replacing it would drop the queued commands.
+    pub fn busy(&self, entity: Entity) -> bool {
+        self.units
+            .get(entity)
+            .is_ok_and(|(order, queue)| queue || order.active())
+    }
+}
+
+/// The active order ended: promote the next queued command to the
+/// active order, or (queue empty) drop what is left of the order: the
+/// move target, the empty queue, a fight marker. Returns the promoted
+/// command's movement goal when the movement systems drive to it (not
+/// attack / guard, which steer themselves).
 pub(crate) fn promote_next_command(
     commands: &mut Commands,
     entity: Entity,
-    translation: Vec3,
     mut queue: Option<&mut CommandQueue>,
 ) -> Option<Vec3> {
     let next = queue
         .as_deref_mut()
         .filter(|q| !q.commands.is_empty())
         .map(|q| q.commands.remove(0));
-    let goal = next.and_then(|c| match c {
-        QueuedCommand::AttackUnit { .. } | QueuedCommand::AttackGround(_) => None,
-        c => Some(c.position()),
-    });
     let mut ec = commands.entity(entity);
-    match next {
-        Some(QueuedCommand::Patrol(pos)) => {
-            // Patrol shuttles between two points forever: the unit
-            // just arrived at `pos`'s predecessor, so record where it
-            // is now and re-queue that as the opposing waypoint.
-            // Mirrors upstream CommandAI.cpp pushing `owner->pos` as
-            // the first patrol point when none is queued.
-            super::install_command(&mut ec, QueuedCommand::Patrol(pos));
-            if let Some(queue) = queue {
-                let origin = Vec3::new(translation.x, 0.0, translation.z);
-                queue.commands.push(QueuedCommand::Patrol(origin));
-            }
+    let Some(cmd) = next else {
+        ec.remove::<(MoveTarget, CommandQueue, AttackMoveActive)>();
+        return None;
+    };
+    if let (QueuedCommand::Patrol(_), Some(queue)) = (cmd, queue) {
+        // `CMobileCAI::ExecutePatrol`: the patrol point goes back to
+        // the end of the queue as it starts, so the route cycles
+        // through its points forever.
+        queue.commands.push(cmd);
+    }
+    super::install_command(&mut ec, cmd);
+    match cmd {
+        QueuedCommand::AttackUnit { .. }
+        | QueuedCommand::AttackGround(_)
+        | QueuedCommand::Guard { .. } => None,
+        c => Some(c.position()),
+    }
+}
+
+/// A movement leg is over: arrived, or `failed`. A plain move / fight
+/// / patrol leg *is* the order, so it finishes and the next queued
+/// command is promoted at once (its goal is returned so the mover can
+/// start it without braking). Any other order only steered the unit
+/// through this leg ([`OrderStateItem::steers`]): the unit just stops
+/// (its `MoveTarget` and path go) and the order keeps running until its
+/// own system ends it. A build order whose walk failed is given up
+/// (`CBuilderCAI` finishes a build command it cannot reach), and
+/// [`advance_command_queue`] follows with the next queued command.
+pub(crate) fn end_move_leg(
+    commands: &mut Commands,
+    entity: Entity,
+    order: &OrderStateItem,
+    queue: Option<&mut CommandQueue>,
+    failed: bool,
+) -> Option<Vec3> {
+    if order.steers() {
+        let mut ec = commands.entity(entity);
+        ec.remove::<(MoveTarget, MovePath)>();
+        if failed && order.walking_to_build() {
+            ec.remove::<crate::units::lifecycle::construction::PendingBuild>();
         }
-        Some(cmd) => super::install_command(&mut ec, cmd),
-        None => {
-            ec.remove::<MoveTarget>()
-                .remove::<CommandQueue>()
-                .remove::<crate::units::lifecycle::construction::PendingBuild>()
-                .remove::<AttackMoveActive>();
+        return None;
+    }
+    promote_next_command(commands, entity, queue)
+}
+
+/// `CCommandAI::FinishCommand` → next command, for every way an order
+/// ends that is not a movement leg (see [`OrderState`]): a unit with
+/// queued commands but no active order gets the next one; a unit left
+/// with an empty queue (or a stray fight marker) and no order sheds it.
+/// Runs at the head of the fixed-tick unit motion, so a promoted move
+/// starts on the tick it is promoted.
+#[allow(clippy::type_complexity)]
+pub fn advance_command_queue(
+    mut commands: Commands,
+    mut units: Query<
+        (Entity, Option<&mut CommandQueue>, OrderState),
+        (
+            Or<(With<CommandQueue>, With<AttackMoveActive>)>,
+            Without<Dying>,
+        ),
+    >,
+) {
+    for (entity, mut queue, order) in &mut units {
+        if !order.active() {
+            promote_next_command(&mut commands, entity, queue.as_deref_mut());
         }
     }
-    goal
+}
+
+/// Whether a fight order (attack-move, patrol) has engaged and holds:
+/// the unit's weapon is shooting at a target in range. `combat_system`
+/// caches exactly such a pick in [`TargetCache`] next to the
+/// [`AimTarget`]; an `AimTarget` alone may only be the turret tracking a
+/// set-target (T) designation out of range, which must not stop the
+/// march (`CMobileCAI::ExecuteFight` stops only for an enemy it can
+/// engage).
+///
+/// [`TargetCache`]: crate::units::combat::TargetCache
+/// [`AimTarget`]: crate::units::combat::AimTarget
+pub fn fight_engaged(aim_target: bool, target_cache: bool) -> bool {
+    aim_target && target_cache
+}
+
+/// A chase path (attack, guard) is stale when there is none yet or its
+/// end lags the chased unit by more than [`CHASE_REPATH_DISTANCE`],
+/// measured on the ground plane: paths are stored at y = 0 while the
+/// target stands on the terrain.
+pub fn chase_path_stale(path: Option<&MovePath>, target: Vec3) -> bool {
+    path.is_none_or(|p| {
+        p.waypoints
+            .last()
+            .is_none_or(|w| w.xz().distance(target.xz()) > CHASE_REPATH_DISTANCE)
+    })
 }
 
 /// Guard orders: trail [`GuardTarget`] at `GUARD_DISTANCE` beyond the
-/// target's footprint. Farther than that, chase (repathing only when the
-/// current path endpoint lags the target, sharing [`CHASE_REPATH_DISTANCE`]
-/// with the attack-chase); inside it, settle and let the auto-attack path
-/// engage anything in range. When the target dies the guard stands down.
+/// target's footprint. Farther than that, chase (repathing only when
+/// [`chase_path_stale`], like the attack chase); inside it, settle and
+/// let the auto-attack path engage anything in range. When the target
+/// dies the guard order ends and the queue moves on.
 pub fn guard_follow_system(
     mut commands: Commands,
     guards: Query<(Entity, &GlobalTransform, &UnitStats, &GuardTarget), Without<Dying>>,
@@ -470,12 +639,11 @@ pub fn guard_follow_system(
             continue;
         }
         let Ok((target_gtf, target_stats)) = targets.get(guard.0) else {
-            // Target gone: stand down and clear movement.
+            // Target gone: the order ends; `advance_command_queue`
+            // promotes whatever is queued behind it.
             commands
                 .entity(entity)
-                .remove::<GuardTarget>()
-                .remove::<MoveTarget>()
-                .remove::<MovePath>();
+                .remove::<(GuardTarget, MoveTarget, MovePath)>();
             continue;
         };
 
@@ -484,22 +652,12 @@ pub fn guard_follow_system(
         let dist = gtf.translation().distance(target_pos);
 
         if dist > keep {
-            // Trail the target; repath when there's no path yet or the
-            // path endpoint lags the target's current position.
-            let stale = move_path_q.get(entity).map_or(true, |p| {
-                p.waypoints
-                    .last()
-                    .is_none_or(|w| w.distance(target_pos) > CHASE_REPATH_DISTANCE)
-            });
-            if stale {
-                // The old path is followed until the new one is ready.
+            // The old path is followed until the new one is ready.
+            if chase_path_stale(move_path_q.get(entity).ok(), target_pos) {
                 commands.entity(entity).insert(MoveTarget(target_pos));
             }
         } else {
-            commands
-                .entity(entity)
-                .remove::<MoveTarget>()
-                .remove::<MovePath>();
+            commands.entity(entity).remove::<(MoveTarget, MovePath)>();
         }
     }
 }
@@ -630,8 +788,13 @@ impl RepairTail {
     /// The tail of `path` from its first clean waypoint, when the engine
     /// would repair rather than re-search: not a raw path, the damage
     /// strictly inside it, and the path complete, trigger-free or still
-    /// long (`qtRefreshPathMinDist`).
-    pub fn of(path: &MovePath) -> Option<Self> {
+    /// long (`qtRefreshPathMinDist`). Only for the goal the path was
+    /// searched for: once the order moved on (a promoted queue leg, a
+    /// new chase goal) the old tail leads to the old goal.
+    pub fn of(path: &MovePath, goal: Vec2) -> Option<Self> {
+        if path.goal.xz() != goal {
+            return None;
+        }
         let from = path.clean_from?;
         let n = path.waypoints.len();
         if n <= 2 || from == 0 || from >= n - 1 {
@@ -845,16 +1008,15 @@ pub fn draw_selected_command_lines(
 
         // Active-order line color: fight/attack red, patrol blue, guard
         // white — detected from the order markers riding along with the
-        // plain `MoveTarget`.
-        let has_patrol_queued = queue.is_some_and(|q| {
-            q.commands
-                .iter()
-                .any(|c| matches!(c, QueuedCommand::Patrol(_)))
-        });
-        let active_color = if attack_move.is_some() || attack_ground.is_some() {
-            FIGHT_COLOR
-        } else if has_patrol_queued {
+        // plain `MoveTarget`. An active patrol leg re-queued its own
+        // point last (`promote_next_command`).
+        let patrolling = queue.is_some_and(
+            |q| matches!(q.commands.last(), Some(QueuedCommand::Patrol(p)) if *p == current.0),
+        );
+        let active_color = if patrolling {
             PATROL_COLOR
+        } else if attack_move.is_some() || attack_ground.is_some() {
+            FIGHT_COLOR
         } else if guard.is_some() {
             GUARD_COLOR
         } else {
@@ -926,6 +1088,7 @@ pub fn draw_selected_command_lines(
                     QueuedCommand::AttackMove(_) => FIGHT_COLOR,
                     QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
                     QueuedCommand::AttackGround(_) => FIGHT_COLOR,
+                    QueuedCommand::Guard { .. } => GUARD_COLOR,
                 };
                 draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
                 gizmos
@@ -1139,7 +1302,7 @@ mod tests {
             .expect("queue present");
         let goal = {
             let mut commands = Commands::new(&mut deferred, &world);
-            promote_next_command(&mut commands, entity, Vec3::ZERO, Some(&mut taken))
+            promote_next_command(&mut commands, entity, Some(&mut taken))
         };
         deferred.apply(&mut world);
 
@@ -1153,6 +1316,251 @@ mod tests {
             world.get::<CommandQueue>(entity).is_none(),
             "empty queue is dropped after promotion"
         );
+    }
+
+    use crate::units::combat::{AttackTargetOrder, Dying};
+    use crate::units::lifecycle::construction::{Constructing, PendingBuild};
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn queue_of(cmds: &[QueuedCommand]) -> CommandQueue {
+        CommandQueue {
+            commands: cmds.to_vec(),
+        }
+    }
+
+    fn advance(world: &mut World) {
+        world.run_system_once(advance_command_queue).unwrap();
+    }
+
+    /// Move, Shift-attack X, Shift-move B: when X dies (the attack
+    /// system drops `AttackTargetOrder`), the queued move to B starts
+    /// instead of the unit standing still with a stranded queue.
+    #[test]
+    fn queue_advances_when_an_attack_order_ends() {
+        let mut world = World::new();
+        let x = world.spawn_empty().id();
+        let b = Vec3::new(300.0, 0.0, 40.0);
+        let unit = world
+            .spawn((
+                AttackTargetOrder { target: x },
+                queue_of(&[QueuedCommand::Move(b)]),
+            ))
+            .id();
+        advance(&mut world);
+        assert!(
+            world.get::<MoveTarget>(unit).is_none(),
+            "the attack is still the active order"
+        );
+        assert_eq!(world.get::<CommandQueue>(unit).unwrap().commands.len(), 1);
+
+        world.entity_mut(unit).remove::<AttackTargetOrder>();
+        advance(&mut world);
+        assert_eq!(world.get::<MoveTarget>(unit).map(|t| t.0), Some(b));
+        assert!(world.get::<CommandQueue>(unit).unwrap().commands.is_empty());
+
+        // The move leg's own end drops the order and the empty queue.
+        world.entity_mut(unit).remove::<MoveTarget>();
+        advance(&mut world);
+        assert!(world.get::<CommandQueue>(unit).is_none());
+    }
+
+    /// Shift-placing three buildings: the next `BuildAt` is installed
+    /// only once construction of the current one ends (S3 ends a build
+    /// by removing `Constructing`), the tick after.
+    #[test]
+    fn queued_build_waits_for_construction_to_end() {
+        let mut world = World::new();
+        let site = |x: f32| Vec3::new(x, 0.0, 0.0);
+        let build = |x: f32| QueuedCommand::BuildAt {
+            kind: UnitKind::BadBlock,
+            site: site(x),
+        };
+        let unit = world
+            .spawn((
+                Constructing {
+                    kind: UnitKind::BadBlock,
+                    site: site(0.0),
+                    progress: 0.0,
+                    building: None,
+                },
+                queue_of(&[build(100.0), build(200.0)]),
+            ))
+            .id();
+        advance(&mut world);
+        assert!(world.get::<PendingBuild>(unit).is_none());
+
+        for x in [100.0, 200.0] {
+            world.entity_mut(unit).remove::<Constructing>();
+            advance(&mut world);
+            let pending = world
+                .get::<PendingBuild>(unit)
+                .expect("next build promoted");
+            assert_eq!(pending.site, site(x));
+            assert_eq!(world.get::<MoveTarget>(unit).map(|t| t.0), Some(site(x)));
+            // `start_construction` swaps the walk for `Constructing`.
+            world
+                .entity_mut(unit)
+                .remove::<(PendingBuild, MoveTarget)>()
+                .insert(Constructing {
+                    kind: UnitKind::BadBlock,
+                    site: site(x),
+                    progress: 0.0,
+                    building: None,
+                });
+            advance(&mut world);
+            assert!(world.get::<PendingBuild>(unit).is_none(), "still building");
+        }
+    }
+
+    /// A dying unit's queue is left alone.
+    #[test]
+    fn dying_units_keep_their_queue() {
+        let mut world = World::new();
+        let unit = world
+            .spawn((
+                Dying { timer: 0.0 },
+                queue_of(&[QueuedCommand::Move(Vec3::X)]),
+            ))
+            .id();
+        advance(&mut world);
+        assert!(world.get::<MoveTarget>(unit).is_none());
+    }
+
+    /// A promoted plain move doesn't inherit the fight marker of the
+    /// attack-move before it.
+    #[test]
+    fn promoted_move_drops_the_fight_marker() {
+        let mut world = World::new();
+        let unit = world
+            .spawn((AttackMoveActive, queue_of(&[QueuedCommand::Move(Vec3::X)])))
+            .id();
+        advance(&mut world);
+        assert!(world.get::<MoveTarget>(unit).is_some());
+        assert!(world.get::<AttackMoveActive>(unit).is_none());
+    }
+
+    /// Ending a movement leg finishes a plain move, but an order that
+    /// steers its own legs (guard, build) keeps running: the unit just
+    /// stops. A build walk that failed gives the build up.
+    #[test]
+    fn leg_end_only_finishes_plain_moves() {
+        fn end_leg(world: &mut World, unit: Entity, failed: bool) {
+            world
+                .run_system_once(
+                    move |mut commands: Commands,
+                          mut q: Query<(OrderState, Option<&mut CommandQueue>)>| {
+                        let (order, mut queue) = q.get_mut(unit).unwrap();
+                        end_move_leg(&mut commands, unit, &order, queue.as_deref_mut(), failed);
+                    },
+                )
+                .unwrap();
+        }
+        let next = Vec3::new(500.0, 0.0, 0.0);
+        let mut world = World::new();
+        let friend = world.spawn_empty().id();
+        let guard = world
+            .spawn((
+                GuardTarget(friend),
+                MoveTarget(Vec3::X),
+                queue_of(&[QueuedCommand::Move(next)]),
+            ))
+            .id();
+        end_leg(&mut world, guard, false);
+        assert!(world.get::<GuardTarget>(guard).is_some());
+        assert!(world.get::<MoveTarget>(guard).is_none());
+        assert_eq!(world.get::<CommandQueue>(guard).unwrap().commands.len(), 1);
+
+        let builder = world
+            .spawn((
+                PendingBuild {
+                    kind: UnitKind::BadBlock,
+                    site: Vec3::X,
+                },
+                MoveTarget(Vec3::X),
+                queue_of(&[QueuedCommand::Move(next)]),
+            ))
+            .id();
+        end_leg(&mut world, builder, false);
+        assert!(world.get::<PendingBuild>(builder).is_some(), "arrived");
+        world.entity_mut(builder).insert(MoveTarget(Vec3::X));
+        end_leg(&mut world, builder, true);
+        assert!(world.get::<PendingBuild>(builder).is_none(), "unreachable");
+        advance(&mut world);
+        assert_eq!(world.get::<MoveTarget>(builder).map(|t| t.0), Some(next));
+
+        let mover = world
+            .spawn((MoveTarget(Vec3::X), queue_of(&[QueuedCommand::Move(next)])))
+            .id();
+        end_leg(&mut world, mover, false);
+        assert_eq!(world.get::<MoveTarget>(mover).map(|t| t.0), Some(next));
+    }
+
+    /// Patrol points cycle: promoting one re-queues it at the back.
+    #[test]
+    fn patrol_points_cycle_through_the_queue() {
+        let (a, b) = (Vec3::new(10.0, 0.0, 0.0), Vec3::new(400.0, 0.0, 0.0));
+        let mut world = World::new();
+        let unit = world
+            .spawn(queue_of(&[
+                QueuedCommand::Patrol(a),
+                QueuedCommand::Patrol(b),
+            ]))
+            .id();
+        for want in [a, b, a, b] {
+            advance(&mut world);
+            assert_eq!(world.get::<MoveTarget>(unit).map(|t| t.0), Some(want));
+            assert!(world.get::<AttackMoveActive>(unit).is_some(), "fight leg");
+            let queued: Vec<Vec3> = world
+                .get::<CommandQueue>(unit)
+                .unwrap()
+                .commands
+                .iter()
+                .map(QueuedCommand::position)
+                .collect();
+            assert_eq!(queued.len(), 2);
+            assert_eq!(queued[1], want, "the active point went to the back");
+            world.entity_mut(unit).remove::<MoveTarget>();
+        }
+    }
+
+    /// The chase repath test compares ground-plane distances: a path
+    /// (stored at y = 0) ending at a target on a 100-elmo plateau is
+    /// current, not stale every tick.
+    #[test]
+    fn chase_staleness_ignores_height() {
+        let target = Vec3::new(200.0, 100.0, 200.0);
+        let path = MovePath::new(vec![Vec3::ZERO, Vec3::new(200.0, 0.0, 205.0)], target);
+        assert!(!chase_path_stale(Some(&path), target));
+        assert!(chase_path_stale(
+            Some(&path),
+            target + Vec3::X * (CHASE_REPATH_DISTANCE + 10.0)
+        ));
+        assert!(chase_path_stale(None, target));
+    }
+
+    /// A dirtied path's tail is only spliced into a search for the goal
+    /// it was made for, not into the next queued leg's.
+    #[test]
+    fn repair_tail_only_for_its_own_goal() {
+        let goal = Vec3::new(400.0, 0.0, 0.0);
+        let mut path = MovePath::new(
+            (0..5)
+                .map(|i| Vec3::new(i as f32 * 100.0, 0.0, 0.0))
+                .collect(),
+            goal,
+        );
+        path.node_rects = vec![
+            QtRect {
+                x0: 0,
+                z0: 0,
+                x1: 1,
+                z1: 1
+            };
+            5
+        ];
+        path.clean_from = Some(2);
+        assert!(RepairTail::of(&path, goal.xz()).is_some());
+        assert!(RepairTail::of(&path, Vec2::new(0.0, 900.0)).is_none());
     }
 }
 

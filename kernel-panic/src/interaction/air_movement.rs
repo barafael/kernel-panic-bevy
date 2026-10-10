@@ -41,7 +41,9 @@
 
 use bevy::prelude::*;
 
-use super::movement::{CommandQueue, MovePath, MoveTarget, QueuedCommand, promote_next_command};
+use super::movement::{
+    CommandQueue, MovePath, MoveTarget, OrderState, QueuedCommand, end_move_leg,
+};
 use crate::rng::next_f32;
 use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
 use crate::terrain::heightmap::Heightmap;
@@ -723,6 +725,7 @@ pub fn hover_air_system(
             Option<&AimTarget>,
             Has<AttackTargetOrder>,
             Has<AttackGroundOrder>,
+            OrderState,
         ),
         (Without<Emerging>, Without<Dying>),
     >,
@@ -771,9 +774,13 @@ pub fn hover_air_system(
         aim,
         attack_unit,
         attack_ground,
+        order,
     ) in &q
     {
-        let more_moves = queue.is_some_and(|q| q.commands.iter().any(is_move_command));
+        // Follow-up moves only behind a plain move leg (see
+        // `OrderState::steers`).
+        let more_moves =
+            !order.steers() && queue.is_some_and(|q| q.commands.iter().any(is_move_command));
         let attacking = attack_unit || attack_ground;
         flyers.push(Flyer {
             entity,
@@ -813,7 +820,8 @@ pub fn hover_air_system(
     step_with(&mut flyers, *frame, &ground, &mut others);
 
     for f in flyers.iter() {
-        let Ok((entity, _, mut tf, mut air, target, path, mut queue, ..)) = q.get_mut(f.entity)
+        let Ok((entity, _, mut tf, mut air, target, path, mut queue, .., order)) =
+            q.get_mut(f.entity)
         else {
             continue;
         };
@@ -822,7 +830,7 @@ pub fn hover_air_system(
         *air = f.air.clone();
         if f.finished_leg {
             commands.entity(entity).remove::<MovePath>();
-            promote_next_command(&mut commands, entity, f.pos, queue.as_deref_mut());
+            end_move_leg(&mut commands, entity, &order, queue.as_deref_mut(), false);
             continue;
         }
         // Keep a one-waypoint path for everything that reads orders off
