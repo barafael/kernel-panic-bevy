@@ -786,6 +786,7 @@ fn trigger_delayed_hit(
         weapon: hit.weapon,
         impact_pos,
         attacker_distance: hit.attacker_distance,
+        owner_team: hit.owner_team,
     });
     if let Some(super::shared::ImpactEffect::NxZone {
         owner_team,
@@ -794,6 +795,7 @@ fn trigger_delayed_hit(
     {
         commands.spawn(crate::units::mechanics::command_fire::nx_zone(
             impact_pos,
+            hit.attacker,
             owner_team,
             owner_faction,
         ));

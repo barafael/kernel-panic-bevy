@@ -44,7 +44,7 @@ use super::moveinfo::MoveClassTable;
 
 /// File magic; the version digit is bumped whenever the payload layout
 /// changes so a stale bundle fails loudly instead of mis-decoding.
-const MAGIC: &[u8; 8] = b"kpunit3\0";
+const MAGIC: &[u8; 8] = b"kpunit4\0";
 
 /// The committed bake. `include_bytes!` keeps the runtime free of any
 /// filesystem or asset-server plumbing: the bundle is part of the
@@ -675,7 +675,7 @@ mod tests {
             Err(BundleError::BadMagic)
         ));
         assert!(matches!(
-            decode(b"kpunit3\0\xff\0\0\0abc"),
+            decode(b"kpunit4\0\xff\0\0\0abc"),
             Err(BundleError::Truncated { .. })
         ));
         assert!(matches!(decode(b""), Err(BundleError::Truncated { .. })));

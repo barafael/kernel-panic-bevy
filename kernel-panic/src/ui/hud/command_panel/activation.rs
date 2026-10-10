@@ -23,7 +23,7 @@ use bevy::prelude::*;
 use crate::interaction::ability::{Mode, OrderCursorModes};
 use crate::interaction::clear_orders;
 use crate::interaction::selection::Selected;
-use crate::units::combat::{ForcedTarget, SELF_DESTRUCT_DELAY, SelfDestructCountdown};
+use crate::units::combat::{ForcedTarget, SelfDestructCountdown};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 use crate::units::lifecycle::production::{Producer, factory_roster};
@@ -200,6 +200,7 @@ pub(super) fn apply_activations(
     mut units: SelectedUnits,
     mut deploy: MessageWriter<DeployEvent>,
     mut enter: MessageWriter<EnterEvent>,
+    unit_registry: Option<Res<crate::units::content::unit_registry::UnitRegistry>>,
     mut commands: Commands,
 ) {
     for msg in msgs.read() {
@@ -320,10 +321,14 @@ pub(super) fn apply_activations(
                 }
             }
             CmdId::SelfDestruct => {
-                for (entity, ..) in &units {
-                    commands.entity(entity).insert(SelfDestructCountdown {
-                        remaining: SELF_DESTRUCT_DELAY,
-                    });
+                for (entity, unit, ..) in &units {
+                    // The unit's own FBI `SelfDestructCountdown`.
+                    commands
+                        .entity(entity)
+                        .insert(SelfDestructCountdown::ordered(
+                            unit.0,
+                            unit_registry.as_deref(),
+                        ));
                 }
             }
             CmdId::PrevPage | CmdId::NextPage => {

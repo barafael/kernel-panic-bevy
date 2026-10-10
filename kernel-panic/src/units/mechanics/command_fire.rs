@@ -7,13 +7,20 @@
 //!
 //! The shared mechanism is the `AreaDenialZone` entity: a volume that
 //! deals DPS to units in radius until its TTL expires. Zone parameters
-//! mirror upstream `LuaRules/Gadgets/areadenial.lua`:
+//! mirror upstream `LuaRules/Gadgets/areadenial.lua` ([`DenialWeapon`]):
 //!
 //! | Weapon    | Radius | DPS | TTL | Friendly-fire | Infects |
 //! |-----------|--------|-----|-----|---------------|---------|
 //! | nx        | 120    | 100 | 60s | yes           | no      |
 //! | infection | 400    | 120 | 13s | no            | yes     |
 //! | sigterm   | 350    | 2000| 3s  | yes           | no      |
+//!
+//! None of these abilities touch `Health` directly: the SIGTERM bomb is
+//! a [`PendingDamage`] explosion of the `[SigTerm]` weapon, and the
+//! zones' ticks and the Mine Launcher's HP cost are `Spring.AddUnitDamage`
+//! calls upstream, queued here as [`Hit`]s — so the Firewall, `ARMORED`,
+//! the scripts' `HitByWeaponId`, the idle-heal reset and infection all
+//! apply to them exactly as to weapon fire.
 
 use std::collections::HashMap;
 
@@ -22,11 +29,11 @@ use bevy::prelude::*;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::Dying;
-use crate::units::combat::{Infected, splash_falloff, weapon_infection_duration};
+use crate::units::combat::{Armored, Attacker, DamageQueue, DelayedDamage, Hit, PendingDamage};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::content::weapons::WeaponRegistry;
+use crate::units::content::weapons::{KnownWeapons, WeaponId, WeaponRegistry};
 use crate::units::spatial::{SpatialIndex, flat_dist_sq};
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
@@ -120,6 +127,41 @@ impl SigTermAssets {
     }
 }
 
+/// Everything spawning a SIGTERM stage's visual needs, bundled so the
+/// systems that spawn them stay under Bevy's system-param limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub struct SigTermVisuals<'w> {
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+    model_cache: ResMut<'w, S3OModelCache>,
+    assets: ResMut<'w, SigTermAssets>,
+}
+
+impl SigTermVisuals<'_> {
+    fn signal(&mut self, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+        let Self {
+            meshes,
+            materials,
+            images,
+            model_cache,
+            assets,
+        } = self;
+        assets.signal(faction, meshes, materials, images, model_cache)
+    }
+
+    fn bomb(&mut self, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+        let Self {
+            meshes,
+            materials,
+            images,
+            model_cache,
+            assets,
+        } = self;
+        assets.bomb(faction, meshes, materials, images, model_cache)
+    }
+}
+
 /// Recharge of the two Lua-driven abilities, in seconds. Upstream
 /// `airstrike.lua` (`airstrike_reload_time = 90`) and
 /// `network_reflectorshield.lua` (`reloadTime = 90`) both count it as
@@ -137,9 +179,10 @@ pub const LUA_ABILITY_RELOAD: f32 = 90.0 * 32.0 / 30.0;
 pub const FIREWALL_RADIUS: f32 = 300.0;
 pub const FIREWALL_DURATION: f32 = 20.0;
 pub const FIREWALL_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
-/// Fraction of incoming damage that a Protected unit *takes*. The
-/// remaining `1.0 - DAMAGE_TAKEN_FRACTION` is reflected back to the
-/// attacker.
+/// Fraction of incoming non-paralyzer damage that a Protected unit
+/// *takes* (`network_reflectorshield.lua` `UnitPreDamaged`: `damage*0.5`).
+/// The rest is reflected back to an attacker of another team; the
+/// damage pipeline (`DamageResolver::deliver`) applies both.
 pub const FIREWALL_DAMAGE_TAKEN: f32 = 0.5;
 
 /// Byte `LaunchMines` ability (§3.5): suicide-cast that drops a fan of
@@ -148,6 +191,10 @@ pub const FIREWALL_DAMAGE_TAKEN: f32 = 0.5;
 /// > "Launches several mines in a forward arc, at the cost of 6000
 /// >  hitpoints. 10s reload."
 pub const MINELAUNCHER_COOLDOWN: f32 = 10.0;
+/// byte.bos `HITPOINT_COST`, paid through `lua_Damage` →
+/// `Spring.AddUnitDamage(u, 6000, 0, -1, sigterm)` (LuaCOB.lua): a real
+/// hit with the SIGTERM weapon id, so the Firewall halves it and the
+/// closed Byte's 30% rule does not.
 pub const MINELAUNCHER_HP_COST: f32 = 6000.0;
 /// Below this remaining HP the Byte refuses to cast so a mis-click
 /// can't instantly end it. Upstream lets the Byte suicide-cast; we
@@ -178,21 +225,6 @@ pub const SIGTERM_SIGNAL_SPEED: f32 = 240.0;
 /// Matches upstream's `myGravity=0.3` — `sqrt(2 * 200 / (0.3 * 30²))`
 /// works out to roughly 1.2 s from `cruiseAlt=200`.
 pub const SIGTERM_FALL_DURATION: f32 = 1.2;
-/// One-shot blast radius, matching upstream `SigTerm.areaofeffect=900`.
-pub const SIGTERM_BLAST_RADIUS: f32 = 900.0;
-/// Blast damage at the centre, pre armor-class / `damage_modifier`.
-/// Matches `DAMAGE.default=10000` in `retroweapons.tdf`.
-pub const SIGTERM_BLAST_DAMAGE: f32 = 10000.0;
-/// Blast edge damage as a fraction of centre damage. Matches
-/// `edgeeffectiveness=0.8`.
-pub const SIGTERM_BLAST_EDGE: f32 = 0.8;
-/// Area-denial tail: `weaponInfo[sigterm]` in upstream
-/// `LuaRules/Gadgets/areadenial.lua` — `{ radius=350, damage=2000,
-/// ttl=100, damageFriendly=true }`, ttl in sim frames.
-pub const SIGTERM_DENIAL_RADIUS: f32 = 350.0;
-pub const SIGTERM_DENIAL_DPS: f32 = 2000.0;
-pub const SIGTERM_DENIAL_TTL: f32 = crate::sim::frames_to_secs(100.0);
-
 /// SIGTERM stage 1: bomber flying from `start` to over `target`.
 /// `tick_sigterm_signals` lerps along the cruise path, then spawns a
 /// [`SigTermBomb`] on arrival.
@@ -255,7 +287,8 @@ impl MineSpawnQueue {
 }
 
 /// While present, the unit takes `FIREWALL_DAMAGE_TAKEN` of any
-/// incoming damage and the rest is reflected to the attacker.
+/// incoming non-paralyzer damage and the rest is reflected to an
+/// attacker of another team (see `DamageResolver::deliver`).
 #[derive(Component, Debug, Clone)]
 pub struct Protected {
     pub remaining: f32,
@@ -294,16 +327,26 @@ const NX_RANGE: f32 = 1400.0; // retroweapons.tdf [nx]
 const MINELAUNCHER_RANGE: f32 = 1100.0; // retroweapons.tdf [MineLauncher]
 const INFECTION_RANGE: f32 = 2000.0; // corruptionweapons.tdf [Infection]
 
-/// How far from the caster `kind`'s ability may land, or `None` when it
-/// reaches anywhere on the map.
+/// What bounds where `kind`'s ability may land.
 ///
 /// NX Flag, Infection and Mine Launch are real weapons upstream, so the
-/// engine only fires them at targets inside the weapon's `range` (the
-/// unit walks into range first if it can move). SIGTERM and Firewall are
-/// Lua `ICON_MAP` commands executed in `CommandFallback` without any
+/// engine only fires them at targets its `TestRange` accepts (the unit
+/// walks into range first if it can move) — for the Obelisk's ballistic
+/// Infection that reach depends on the height difference (about 1780
+/// elmos on level ground, not its `range=2000`). SIGTERM and Firewall
+/// are Lua `ICON_MAP` commands executed in `CommandFallback` without any
 /// distance check: the Signal bomber flies to the target, the Firewall
 /// shield lands wherever the player clicked.
-pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
+#[derive(Clone, Copy)]
+enum CastReachLimit<'a> {
+    MapWide,
+    Weapon(&'a spring_tdf::WeaponDef),
+    /// The weapon is missing from the registry: its TDF `range=` as a
+    /// flat cylinder.
+    Fallback(f32),
+}
+
+fn cast_limit(kind: UnitKind, weapons: &WeaponRegistry) -> CastReachLimit<'_> {
     // Ids resolved once at registry load (`KnownWeapons`) — this runs
     // per pending caster per tick, so no name hashing here.
     let known = weapons.known();
@@ -311,19 +354,17 @@ pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
         UnitKind::Pointer => (known.nx, NX_RANGE),
         UnitKind::Byte => (known.mine_launcher, MINELAUNCHER_RANGE),
         UnitKind::Obelisk => (known.infection, INFECTION_RANGE),
-        _ => return None,
+        _ => return CastReachLimit::MapWide,
     };
-    Some(
-        weapon
-            .map(|id| weapons.by_id(id).range)
-            .filter(|r| *r > 0.0)
-            .unwrap_or(fallback),
-    )
+    match weapon.map(|id| weapons.by_id(id)) {
+        Some(def) if def.range > 0.0 => CastReachLimit::Weapon(def),
+        _ => CastReachLimit::Fallback(fallback),
+    }
 }
 
 /// A mobile caster walking toward an out-of-range ability target.
 /// [`advance_pending_casts`] fires the ability once the target is
-/// within [`cast_range`], mirroring how Spring's command-fire attack
+/// in reach ([`cast_limit`]), mirroring how Spring's command-fire attack
 /// order approaches before shooting. Any new order clears it
 /// (`interaction::clear_orders`, the replace-branch of
 /// `apply_ordered_command`, Stop); losing its `MoveTarget` without
@@ -344,28 +385,90 @@ pub struct CommandFireEvent {
     pub target: Vec3,
 }
 
-/// A persistent area-denial volume. Applies `dps` damage per second to
-/// every unit in `radius` until `remaining` hits zero, then despawns.
-///
-/// `owner_team` / `owner_faction` are copied from the caster so friendly
-/// filtering still works after the caster dies (upstream's gadget
-/// reassigns ownership to a random homebase; we just cache it).
-///
-/// `infection_duration` is `Some(window_seconds)` for zones that tag
-/// units with [`Infected`] on every DPS tick — matches upstream's
-/// `areadenial.lua` re-applying the source weapon's `UnitDamaged`
-/// event, which re-arms the infection window via `infection.lua`.
-/// `None` means the zone does not infect at all.
-#[derive(Component)]
-pub struct AreaDenialZone {
-    pub center: Vec3,
+/// The weapons `areadenial.lua` watches (`weaponInfo`): their explosion
+/// leaves a zone that keeps dealing their damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialWeapon {
+    SigTerm,
+    Nx,
+    Infection,
+}
+
+/// One `weaponInfo` row of `areadenial.lua`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DenialParams {
+    /// `GetUnitsInSphere` radius around the explosion.
     pub radius: f32,
+    /// `damage` per second (the gadget deals `damage / 30` per frame).
     pub dps: f32,
-    pub remaining: f32,
+    /// Zone lifetime in seconds (`ttl` sim frames).
+    pub ttl: f32,
+    /// `damageFriendly`: allies of the owner are hit too.
     pub damage_friendly: bool,
-    pub infection_duration: Option<f32>,
+}
+
+impl DenialWeapon {
+    /// `areadenial.lua` `gadget:Initialize`.
+    pub fn params(self) -> DenialParams {
+        let (radius, dps, ttl_frames, damage_friendly) = match self {
+            DenialWeapon::SigTerm => (350.0, 2000.0, 100.0, true),
+            DenialWeapon::Nx => (120.0, 100.0, 1800.0, true),
+            DenialWeapon::Infection => (400.0, 120.0, 400.0, false),
+        };
+        DenialParams {
+            radius,
+            dps,
+            ttl: crate::sim::frames_to_secs(ttl_frames),
+            damage_friendly,
+        }
+    }
+
+    /// The weapon whose id the zone's `AddUnitDamage` reports (the
+    /// Infection gas infects through it; SIGTERM's bypasses a closed
+    /// Byte's armour and hits homebases for 10%).
+    fn weapon(self, known: &KnownWeapons) -> Option<WeaponId> {
+        match self {
+            DenialWeapon::SigTerm => known.sigterm,
+            DenialWeapon::Nx => known.nx,
+            DenialWeapon::Infection => known.infection,
+        }
+    }
+}
+
+/// A persistent area-denial volume ([`DenialWeapon::params`]): until its
+/// TTL runs out, every unit within the radius takes the weapon's damage
+/// per second, as `Spring.AddUnitDamage` calls credited to `owner`.
+#[derive(Component, Debug, Clone)]
+pub struct AreaDenialZone {
+    pub weapon: DenialWeapon,
+    pub center: Vec3,
+    /// Seconds left.
+    pub remaining: f32,
+    /// The unit credited with the damage (`w.owner`): the caster, and —
+    /// once that is gone — a homebase or minifac of `owner_team`
+    /// (the gadget's handicap workaround), else nobody.
+    pub owner: Option<Entity>,
     pub owner_team: u8,
     pub owner_faction: Faction,
+}
+
+impl AreaDenialZone {
+    pub fn new(
+        weapon: DenialWeapon,
+        center: Vec3,
+        owner: Option<Entity>,
+        owner_team: u8,
+        owner_faction: Faction,
+    ) -> Self {
+        Self {
+            weapon,
+            center,
+            remaining: weapon.params().ttl,
+            owner,
+            owner_team,
+            owner_faction,
+        }
+    }
 }
 
 /// What to do with a cast order given the caster's position.
@@ -380,18 +483,27 @@ enum CastReach {
     Refuse,
 }
 
-fn cast_reach(range: Option<f32>, caster: Vec3, target: Vec3, mobile: bool) -> CastReach {
-    match range {
-        // Ranges are checked on the ground plane so a caster on a ridge
-        // isn't penalised for the height gap.
-        Some(range) if flat_dist_sq(caster, target) > range * range => {
-            if mobile {
-                CastReach::Approach
-            } else {
-                CastReach::Refuse
-            }
+/// `gravity`: the map's ([`crate::sim::MapGravity`]), for ballistic reach.
+fn cast_reach(
+    limit: CastReachLimit,
+    caster: Vec3,
+    target: Vec3,
+    mobile: bool,
+    gravity: f32,
+) -> CastReach {
+    let in_reach = match limit {
+        CastReachLimit::MapWide => true,
+        // `CWeapon::TestRange` against a ground position. The caster's
+        // origin stands in for its aim-from piece.
+        CastReachLimit::Weapon(def) => {
+            crate::units::combat::aim::in_weapon_range(def, caster, target, true, gravity)
         }
-        _ => CastReach::Fire,
+        CastReachLimit::Fallback(range) => flat_dist_sq(caster, target) <= range * range,
+    };
+    match (in_reach, mobile) {
+        (true, _) => CastReach::Fire,
+        (false, true) => CastReach::Approach,
+        (false, false) => CastReach::Refuse,
     }
 }
 
@@ -402,6 +514,7 @@ fn cast_reach(range: Option<f32>, caster: Vec3, target: Vec3, mobile: bool) -> C
 #[allow(clippy::type_complexity)]
 pub fn advance_pending_casts(
     weapons: Res<WeaponRegistry>,
+    gravity: Option<Res<crate::sim::MapGravity>>,
     casters: Query<
         (
             Entity,
@@ -415,21 +528,22 @@ pub fn advance_pending_casts(
     mut events: MessageWriter<CommandFireEvent>,
     mut commands: Commands,
 ) {
+    let gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for (entity, unit, gtf, pending, moving) in &casters {
         match cast_reach(
-            cast_range(unit.0, &weapons),
+            cast_limit(unit.0, &weapons),
             gtf.translation(),
             pending.target,
             true,
+            gravity,
         ) {
             CastReach::Fire => {
                 // In range: stop the approach walk where it stands and
                 // cast — Spring halts an attacking unit once it can fire.
                 // Why an empty path instead of removing the order: the
-                // movement system's path-complete branch is the one place
-                // that promotes shift-queued follow-ups (or clears the
-                // order when none are queued); bypassing it would strand
-                // the queue behind a vanished MoveTarget.
+                // walk then ends the way any move order does, and the
+                // command queue advances to a shift-queued follow-up
+                // (`movement::advance_command_queue`) as usual.
                 let mut caster = commands.entity(entity);
                 caster.remove::<PendingCommandFire>();
                 if moving {
@@ -453,7 +567,7 @@ pub fn advance_pending_casts(
 /// weapon by looking at its `UnitKind` — NX Flag for Pointer, Infection
 /// for Obelisk. Units without a registered ability are ignored.
 ///
-/// Weapon-backed abilities honour their TDF range ([`cast_range`]): a
+/// Weapon-backed abilities honour their weapon's reach ([`cast_limit`]): a
 /// mobile caster ordered beyond it walks into range first (see
 /// [`PendingCommandFire`]), a stationary one refuses the order.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -467,35 +581,37 @@ pub fn process_command_fire(
             &GlobalTransform,
             Option<&CommandFireCooldown>,
             Has<PendingCommandFire>,
+            Has<Armored>,
         ),
         Without<Dying>,
     >,
     unit_registry: Res<UnitRegistry>,
     weapons: Res<WeaponRegistry>,
     protect_targets: Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
-    mut health_q: Query<&mut Health>,
+    health_q: Query<&Health>,
     live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
     mut mine_spawns: ResMut<MineSpawnQueue>,
     mut pending_explosions: ResMut<PendingExplosions>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut sigterm_assets: ResMut<SigTermAssets>,
+    mut delayed_damage: ResMut<DelayedDamage>,
+    mut visuals: SigTermVisuals,
+    gravity: Option<Res<crate::sim::MapGravity>>,
     mut commands: Commands,
 ) {
+    let gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for event in events.read() {
-        let Ok((unit, team, faction, gtf, cd, was_pending)) = casters.get(event.attacker) else {
+        let Ok((unit, team, faction, gtf, cd, was_pending, armored)) = casters.get(event.attacker)
+        else {
             continue;
         };
         if cd.is_some_and(|c| c.remaining > 0.0) {
             continue;
         }
         match cast_reach(
-            cast_range(unit.0, &weapons),
+            cast_limit(unit.0, &weapons),
             gtf.translation(),
             event.target,
             unit_registry.speed(unit.0) > 0.0,
+            gravity,
         ) {
             CastReach::Fire => {}
             CastReach::Approach => {
@@ -529,6 +645,11 @@ pub fn process_command_fire(
         }
 
         if unit.0 == UnitKind::Byte {
+            // byte.bos `LaunchMines`: `if(get ARMORED) return 0` — a
+            // Byte still in its post-build spawn protection can't cast.
+            if armored {
+                continue;
+            }
             // Why: `spawn_queued_mines` drops every mine past the Logic
             // Bomb cap, so a cast with no room left would burn 6000 HP
             // and the reload for nothing — refuse it up front instead.
@@ -536,19 +657,20 @@ pub fn process_command_fire(
             if logic_bombs_at_cap(team.0, limit, &live_units, &mine_spawns) {
                 continue;
             }
-            let Ok(mut health) = health_q.get_mut(event.attacker) else {
+            let Ok(health) = health_q.get(event.attacker) else {
                 continue;
             };
             if !fire_minelauncher(
                 event.target,
                 gtf.translation(),
-                &mut health,
+                health,
                 *faction,
                 team.0,
                 &mut mine_spawns,
             ) {
                 continue;
             }
+            delayed_damage.push_now(minelauncher_cost(event.attacker, weapons.known()));
             commands.entity(event.attacker).insert(CommandFireCooldown {
                 remaining: MINELAUNCHER_COOLDOWN,
             });
@@ -575,13 +697,7 @@ pub fn process_command_fire(
             );
             let distance = start.distance(release);
 
-            let (signal_mesh, signal_material) = sigterm_assets.signal(
-                *faction,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut model_cache,
-            );
+            let (signal_mesh, signal_material) = visuals.signal(*faction);
             let facing = if distance > 1e-3 {
                 Transform::from_translation(start).looking_at(release, Vec3::Y)
             } else {
@@ -631,20 +747,17 @@ pub fn process_command_fire(
             pending_explosions.events.push(ExplosionEvent {
                 pos: event.target,
                 rgb: faction.rgb_f32(),
-                radius: ability.radius,
+                radius: ability.weapon.params().radius,
                 ceg_name: ceg.to_string(),
             });
         }
-        commands.spawn(AreaDenialZone {
-            center: event.target,
-            radius: ability.radius,
-            dps: ability.dps,
-            remaining: ability.ttl,
-            damage_friendly: ability.damage_friendly,
-            infection_duration: ability.infection_weapon.and_then(weapon_infection_duration),
-            owner_team: team.0,
-            owner_faction: *faction,
-        });
+        commands.spawn(AreaDenialZone::new(
+            ability.weapon,
+            event.target,
+            Some(event.attacker),
+            team.0,
+            *faction,
+        ));
         commands.entity(event.attacker).insert(CommandFireCooldown {
             remaining: ability.cooldown,
         });
@@ -669,19 +782,21 @@ pub enum NxCast {
 const NX_WEAPON1_BLOCK: f32 = 61.0 / 30.0;
 
 /// The NX Flag's denial zone (`areadenial.lua`: radius 120, 100 dps,
-/// 60 s, hurts allies too), centred where the shell exploded.
-pub fn nx_zone(center: Vec3, owner_team: u8, owner_faction: Faction) -> AreaDenialZone {
-    let ability = ability_for(UnitKind::Pointer).expect("Pointer has the NX ability");
-    AreaDenialZone {
+/// 60 s, hurts allies too), centred where the shell exploded and
+/// credited to the Pointer that fired it.
+pub fn nx_zone(
+    center: Vec3,
+    owner: Entity,
+    owner_team: u8,
+    owner_faction: Faction,
+) -> AreaDenialZone {
+    AreaDenialZone::new(
+        DenialWeapon::Nx,
         center,
-        radius: ability.radius,
-        dps: ability.dps,
-        remaining: ability.ttl,
-        damage_friendly: ability.damage_friendly,
-        infection_duration: None,
+        Some(owner),
         owner_team,
         owner_faction,
-    }
+    )
 }
 
 /// Drive pending NX shots. An aiming cast re-stamps the Pointer's
@@ -704,7 +819,8 @@ pub fn tick_nx_casts(
             &TeamId,
             &Faction,
         ),
-        Without<Dying>,
+        // A paralyzed Pointer's script doesn't run its weapons.
+        (Without<Dying>, Without<crate::units::combat::Stunned>),
     >,
     weapons: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
@@ -731,10 +847,11 @@ pub fn tick_nx_casts(
             NxCast::Aiming { target } => target,
         };
         if cast_reach(
-            cast_range(unit.0, &weapons),
+            cast_limit(unit.0, &weapons),
             gtf.translation(),
             target,
             true,
+            pieces.map_gravity(),
         ) != CastReach::Fire
         {
             commands
@@ -830,14 +947,15 @@ fn logic_bombs_at_cap(
     live + queued >= limit
 }
 
-/// Queue a fan of Logic Bombs at `target` and deduct the HP cost from
-/// the casting Byte. Returns `false` (so the caller skips the cooldown
-/// stamp) when the cast is refused — not enough HP, or caster and
-/// target share a position so we can't derive a forward direction.
+/// Queue a fan of Logic Bombs at `target`; the caller charges the HP
+/// cost ([`minelauncher_cost`]). Returns `false` (so the caller skips
+/// the cooldown stamp and the cost) when the cast is refused — not
+/// enough HP, or caster and target share a position so we can't derive
+/// a forward direction.
 fn fire_minelauncher(
     target: Vec3,
     caster_pos: Vec3,
-    caster_health: &mut Health,
+    caster_health: &Health,
     faction: Faction,
     team: u8,
     mine_spawns: &mut MineSpawnQueue,
@@ -869,8 +987,21 @@ fn fire_minelauncher(
         });
     }
 
-    caster_health.current -= MINELAUNCHER_HP_COST;
     true
+}
+
+/// byte.bos `lua_Damage(HITPOINT_COST)` → LuaCOB.lua `Damage`:
+/// `Spring.AddUnitDamage(u, 6000, 0, -1, sigterm)` — no attacker, and
+/// the SIGTERM weapon id.
+fn minelauncher_cost(byte: Entity, known: &KnownWeapons) -> Hit {
+    Hit {
+        target: byte,
+        attacker: None,
+        damage: MINELAUNCHER_HP_COST,
+        weapon: known.sigterm,
+        paralyze_time: None,
+        impulse: Vec3::ZERO,
+    }
 }
 
 fn apply_firewall(
@@ -923,58 +1054,79 @@ pub fn tick_command_fire_cooldown(
     }
 }
 
-/// Tick every active `AreaDenialZone`. Applies `dps*dt` raw HP
-/// damage directly to each unit in radius (matching upstream's
-/// `Spring.AddUnitDamage` in areadenial.lua, which bypasses the armor
-/// multiplier table), optionally infects, and despawns expired zones.
-#[allow(clippy::too_many_arguments)]
+/// Tick every active `AreaDenialZone` (`areadenial.lua` `GameFrame`):
+/// each unit within the radius takes `dps·dt` as an `AddUnitDamage`
+/// hit — the flat amount for every armour class, but through the whole
+/// damage pipeline ([`DelayedDamage`] → `DamageResolver::deliver`), so
+/// the Firewall, `ARMORED`, the scripts and infection (Infection gas)
+/// all apply. A zone whose owner died is handed to a homebase, else a
+/// minifac, of the owner's team (upstream picks one at random; the
+/// first found here), else credited to nobody.
 pub fn tick_area_denial(
     time: Res<Time>,
     mut zones: Query<(Entity, &mut AreaDenialZone)>,
-    mut health_q: Query<&mut Health>,
+    units: Query<(Entity, &UnitType, &TeamId), Without<Dying>>,
     spatial: Res<SpatialIndex>,
+    weapons: Res<WeaponRegistry>,
+    mut delayed: ResMut<DelayedDamage>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    // Reused across zones so repeated casts don't realloc.
-    let mut hits: Vec<(Entity, bool)> = Vec::new();
     for (zone_entity, mut zone) in &mut zones {
         zone.remaining -= dt;
         if zone.remaining <= 0.0 {
             commands.entity(zone_entity).despawn();
             continue;
         }
-
-        let radius_sq = zone.radius * zone.radius;
-        let tick_damage = zone.dps * dt;
-
-        hits.clear();
-        spatial.query_radius(zone.center, zone.radius, |candidate| {
-            let friendly = crate::units::components::is_friendly(candidate.team, zone.owner_team);
-            if friendly && !zone.damage_friendly {
-                return;
-            }
-            if candidate.pos.distance_squared(zone.center) >= radius_sq {
-                return;
-            }
-            hits.push((candidate.entity, friendly));
-        });
-
-        for (unit_entity, friendly) in hits.drain(..) {
-            if let Ok(mut health) = health_q.get_mut(unit_entity) {
-                health.current -= tick_damage;
-            }
-            if let Some(window) = zone.infection_duration
-                && !friendly
-            {
-                commands.entity(unit_entity).insert(Infected {
-                    timer: window,
-                    attacker_faction: zone.owner_faction,
-                    attacker_team: zone.owner_team,
-                });
-            }
+        if zone.owner.is_none_or(|owner| !units.contains(owner)) {
+            zone.owner = substitute_owner(zone.owner_team, &units);
         }
+
+        let params = zone.weapon.params();
+        let (center, owner_team) = (zone.center, zone.owner_team);
+        let attacker = zone.owner.map(|entity| Attacker {
+            entity,
+            team: owner_team,
+            faction: zone.owner_faction,
+        });
+        let weapon = zone.weapon.weapon(weapons.known());
+        let damage = params.dps * dt;
+        let radius_sq = params.radius * params.radius;
+        spatial.query_radius(center, params.radius, |candidate| {
+            if !params.damage_friendly
+                && crate::units::components::is_friendly(candidate.team, owner_team)
+            {
+                return;
+            }
+            // `GetUnitsInSphere`: the unit's position within the sphere.
+            if candidate.pos.distance_squared(center) > radius_sq {
+                return;
+            }
+            delayed.push_now(Hit {
+                target: candidate.entity,
+                attacker,
+                damage,
+                weapon,
+                paralyze_time: None,
+                impulse: Vec3::ZERO,
+            });
+        });
     }
+}
+
+/// `areadenial.lua`'s stand-in owner: a homebase of `team`, else a
+/// minifac, else nobody.
+fn substitute_owner(
+    team: u8,
+    units: &Query<(Entity, &UnitType, &TeamId), Without<Dying>>,
+) -> Option<Entity> {
+    let of_team = |pick: fn(UnitKind) -> bool| {
+        units
+            .iter()
+            .find(|(_, unit, t)| t.0 == team && pick(unit.0))
+            .map(|(entity, _, _)| entity)
+    };
+    of_team(UnitKind::is_homebase).or_else(|| of_team(UnitKind::is_minifac))
 }
 
 /// Fly every in-flight Signal bomber. On arrival, drop a
@@ -983,11 +1135,7 @@ pub fn tick_area_denial(
 pub fn tick_sigterm_signals(
     time: Res<Time>,
     mut signals: Query<(Entity, &mut SigTermSignal, &mut Transform)>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
-    mut model_cache: ResMut<S3OModelCache>,
-    mut sigterm_assets: ResMut<SigTermAssets>,
+    mut visuals: SigTermVisuals,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -1003,13 +1151,7 @@ pub fn tick_sigterm_signals(
         if total_time <= 0.0 || signal.elapsed >= total_time {
             // Arrived — drop the bomb from cruise altitude. Free-fall
             // duration is canonical, not recalculated per altitude.
-            let (bomb_mesh, bomb_material) = sigterm_assets.bomb(
-                signal.owner_faction,
-                &mut meshes,
-                &mut materials,
-                &mut images,
-                &mut model_cache,
-            );
+            let (bomb_mesh, bomb_material) = visuals.bomb(signal.owner_faction);
             commands.spawn((
                 SigTermBomb {
                     target: signal.target,
@@ -1040,18 +1182,21 @@ pub fn tick_sigterm_signals(
 ///
 /// Each frame, lerps the bomb's transform from its spawn altitude
 /// toward the clicked ground target. When `time_to_detonate` drops
-/// below zero, delivers the blast (one pass over [`SpatialIndex`] at
-/// [`SIGTERM_BLAST_RADIUS`] applying linearly-falloff damage),
-/// leaves an [`AreaDenialZone`] tail behind, then despawns the bomb.
+/// below zero the `[SigTerm]` weapon explodes there — an ordinary
+/// [`PendingDamage`] explosion (450 elmo damage radius from
+/// `areaofeffect=900`, `edgeeffectiveness=.8`, the armour table), owned
+/// by nobody since the Signal destroyed itself on release — and leaves
+/// its [`AreaDenialZone`] tail behind; the bomb then despawns.
 pub fn tick_sigterm_bombs(
     time: Res<Time>,
     mut bombs: Query<(Entity, &mut SigTermBomb, &mut Transform)>,
-    mut health_q: Query<&mut Health>,
-    spatial: Res<SpatialIndex>,
+    weapons: Res<WeaponRegistry>,
+    mut damage_queue: ResMut<DamageQueue>,
     mut pending_explosions: ResMut<PendingExplosions>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
+    let sigterm = weapons.known().sigterm;
     for (entity, mut bomb, mut transform) in &mut bombs {
         bomb.time_to_detonate -= dt;
 
@@ -1067,59 +1212,37 @@ pub fn tick_sigterm_bombs(
             continue;
         }
 
-        // Detonate. One-shot damage pass across BLAST_RADIUS with
-        // edge-falloff, then drop the denial tail.
-        let radius_sq = SIGTERM_BLAST_RADIUS * SIGTERM_BLAST_RADIUS;
-        spatial.query_radius(bomb.target, SIGTERM_BLAST_RADIUS, |candidate| {
-            let d_sq = candidate.pos.distance_squared(bomb.target);
-            if d_sq >= radius_sq {
-                return;
-            }
-            if let Ok(mut health) = health_q.get_mut(candidate.entity) {
-                let falloff = splash_falloff(d_sq.sqrt(), SIGTERM_BLAST_RADIUS, SIGTERM_BLAST_EDGE);
-                health.current -= SIGTERM_BLAST_DAMAGE * falloff;
-            }
-        });
+        if let Some(sigterm) = sigterm {
+            damage_queue.push(PendingDamage::unowned_explosion(sigterm, bomb.target));
+        }
         // The bomb detonates through upstream's
         // `explosiongenerator=custom:system_sigterm`
-        // (retroweapons.tdf:597) — without this the 900-elmo blast is
-        // completely silent.
+        // (retroweapons.tdf:597) — without this the blast is silent.
         pending_explosions.events.push(ExplosionEvent {
             pos: bomb.target,
             rgb: bomb.owner_faction.rgb_f32(),
-            radius: SIGTERM_BLAST_RADIUS,
+            radius: sigterm.map_or(0.0, |id| weapons.by_id(id).area_of_effect),
             ceg_name: "system_sigterm".to_string(),
         });
-        commands.spawn(AreaDenialZone {
-            center: bomb.target,
-            radius: SIGTERM_DENIAL_RADIUS,
-            dps: SIGTERM_DENIAL_DPS,
-            remaining: SIGTERM_DENIAL_TTL,
-            damage_friendly: true,
-            infection_duration: None,
-            owner_team: bomb.owner_team,
-            owner_faction: bomb.owner_faction,
-        });
+        // `areadenial.lua` `Explosion`: the Signal is dead, so the zone
+        // goes to `LastSignalTeam` and the first tick finds it an owner.
+        commands.spawn(AreaDenialZone::new(
+            DenialWeapon::SigTerm,
+            bomb.target,
+            None,
+            bomb.owner_team,
+            bomb.owner_faction,
+        ));
         commands.entity(entity).despawn();
     }
 }
 
-/// Definition of a unit's command-fire ability. Values come from
-/// upstream `LuaRules/Gadgets/areadenial.lua` (radius / dps / ttl /
-/// friendly-fire) and the weapon's own `reloadtime` for cooldown.
-///
-/// `infection_weapon` names the source weapon whose `UnitDamaged`
-/// event upstream's `infection.lua` watches — for Obelisk's gas that
-/// is the `"Infection"` weapon (1 s window). `None` means the zone
-/// doesn't infect.
+/// Definition of a unit's command-fire ability: the denial weapon it
+/// drops ([`DenialWeapon::params`]) and the weapon's own `reloadtime`
+/// for cooldown.
 struct Ability {
-    radius: f32,
-    dps: f32,
-    /// Zone lifetime in seconds.
-    ttl: f32,
+    weapon: DenialWeapon,
     cooldown: f32,
-    damage_friendly: bool,
-    infection_weapon: Option<&'static str>,
     /// Upstream's `explosiongenerator=custom:…` for the impacting
     /// shell, replayed through [`PendingExplosions`] on cast. `None`
     /// where the weapon has no generator (Infection's gas has no CEG
@@ -1129,24 +1252,14 @@ struct Ability {
 
 fn ability_for(kind: UnitKind) -> Option<Ability> {
     match kind {
-        // areadenial.lua:91 — { radius=120, damage=100, ttl=1800 }.
         UnitKind::Pointer => Some(Ability {
-            radius: 120.0,
-            dps: 100.0,
-            ttl: 60.0,
+            weapon: DenialWeapon::Nx,
             cooldown: 30.0,
-            damage_friendly: true,
-            infection_weapon: None,
             explosion_ceg: Some("system_nx"),
         }),
-        // areadenial.lua:92 — { radius=400, damage=120, ttl=400 }.
         UnitKind::Obelisk => Some(Ability {
-            radius: 400.0,
-            dps: 120.0,
-            ttl: crate::sim::frames_to_secs(400.0),
+            weapon: DenialWeapon::Infection,
             cooldown: 40.0,
-            damage_friendly: false,
-            infection_weapon: Some("Infection"),
             explosion_ceg: None,
         }),
         _ => None,
@@ -1160,75 +1273,96 @@ mod tests {
     #[test]
     fn nx_flag_ability_matches_upstream() {
         let a = ability_for(UnitKind::Pointer).unwrap();
-        assert_eq!(a.radius, 120.0);
-        assert_eq!(a.dps, 100.0);
-        assert_eq!(a.ttl, 60.0);
+        assert_eq!(a.weapon, DenialWeapon::Nx);
         assert_eq!(a.cooldown, 30.0);
-        assert!(a.damage_friendly);
-        assert_eq!(a.infection_weapon, None);
     }
 
     #[test]
     fn infection_ability_matches_upstream() {
         let a = ability_for(UnitKind::Obelisk).unwrap();
-        assert_eq!(a.radius, 400.0);
-        assert_eq!(a.dps, 120.0);
-        // areadenial.lua:92 ttl=400 frames.
-        assert_eq!(a.ttl, 400.0 / 30.0);
+        assert_eq!(a.weapon, DenialWeapon::Infection);
         assert_eq!(a.cooldown, 40.0);
-        assert!(!a.damage_friendly);
         // Upstream infection.lua: `infector[WeaponDefNames["infection"].id]
         // = 30` frames @ 30 fps → 1 s infection window per DPS tick.
-        assert_eq!(a.infection_weapon, Some("Infection"));
         assert_eq!(
-            weapon_infection_duration(a.infection_weapon.unwrap()),
+            crate::units::content::weapons::weapon_infection_duration("Infection"),
             Some(1.0)
         );
     }
 
-    /// Weapon abilities are range-limited to their TDF `range=` (with
-    /// fallbacks when the registry lacks the weapon); the two Lua
-    /// abilities reach anywhere.
+    /// `areadenial.lua` `weaponInfo`, ttl in sim frames.
     #[test]
-    fn cast_range_matches_tdf() {
-        let empty = WeaponRegistry::default();
-        assert_eq!(cast_range(UnitKind::Pointer, &empty), Some(1400.0));
-        assert_eq!(cast_range(UnitKind::Byte, &empty), Some(1100.0));
-        assert_eq!(cast_range(UnitKind::Obelisk, &empty), Some(2000.0));
-        assert_eq!(cast_range(UnitKind::Terminal, &empty), None);
-        assert_eq!(cast_range(UnitKind::Firewall, &empty), None);
-
-        let mut weapons = WeaponRegistry::default();
-        weapons.insert_for_test(
-            "nx",
-            spring_tdf::WeaponDef {
-                range: 900.0,
-                ..Default::default()
-            },
-        );
-        assert_eq!(cast_range(UnitKind::Pointer, &weapons), Some(900.0));
+    fn denial_params_match_areadenial_lua() {
+        let p = DenialWeapon::SigTerm.params();
+        assert_eq!((p.radius, p.dps, p.damage_friendly), (350.0, 2000.0, true));
+        assert_eq!(p.ttl, 100.0 / 30.0);
+        let p = DenialWeapon::Nx.params();
+        assert_eq!((p.radius, p.dps, p.damage_friendly), (120.0, 100.0, true));
+        assert_eq!(p.ttl, 60.0);
+        let p = DenialWeapon::Infection.params();
+        assert_eq!((p.radius, p.dps, p.damage_friendly), (400.0, 120.0, false));
+        assert_eq!(p.ttl, 400.0 / 30.0);
     }
 
+    /// Weapon abilities are limited by their weapon's reach — the TDF
+    /// `range=` as a fallback when the registry lacks the weapon — and
+    /// the two Lua abilities reach anywhere.
     #[test]
     fn cast_reach_classifies_orders() {
-        let far = Vec3::new(2000.0, 0.0, 0.0);
+        let empty = WeaponRegistry::default();
+        let reach = |kind, target: Vec3, mobile| {
+            cast_reach(
+                cast_limit(kind, &empty),
+                Vec3::ZERO,
+                target,
+                mobile,
+                crate::sim::MAP_GRAVITY_PER_FRAME2,
+            )
+        };
         let near = Vec3::new(500.0, 300.0, 0.0);
+        let far = Vec3::new(2000.0, 0.0, 0.0);
+        assert_eq!(reach(UnitKind::Pointer, near, false), CastReach::Fire);
+        assert_eq!(reach(UnitKind::Pointer, far, true), CastReach::Approach);
+        assert_eq!(reach(UnitKind::Pointer, far, false), CastReach::Refuse);
         assert_eq!(
-            cast_reach(Some(1400.0), Vec3::ZERO, near, false),
+            reach(UnitKind::Byte, Vec3::X * 1050.0, false),
             CastReach::Fire
         );
         assert_eq!(
-            cast_reach(Some(1400.0), Vec3::ZERO, far, true),
-            CastReach::Approach
-        );
-        assert_eq!(
-            cast_reach(Some(1400.0), Vec3::ZERO, far, false),
+            reach(UnitKind::Byte, Vec3::X * 1150.0, false),
             CastReach::Refuse
         );
-        assert_eq!(
-            cast_reach(None, Vec3::ZERO, far * 10.0, false),
-            CastReach::Fire
-        );
+        for kind in [UnitKind::Terminal, UnitKind::Firewall] {
+            assert_eq!(reach(kind, far * 10.0, false), CastReach::Fire);
+        }
+    }
+
+    /// The Obelisk's Infection is a ballistic Cannon: `TestRange` gives
+    /// it about 1780 elmos on level ground, not its `range=2000`.
+    #[test]
+    fn infection_reach_follows_the_cannon_range() {
+        let tdf = spring_tdf::Tdf::parse(
+            "[Infection]\n{\nballistic=1;\nturret=1;\nrange=2000;\nweaponvelocity=800;\n\
+             startvelocity=800;\nmyGravity=.4;\ncommandfire=1;\n}",
+        )
+        .unwrap();
+        let mut weapons = WeaponRegistry::default();
+        let def = spring_tdf::WeaponDefs::from_tdf(&tdf)
+            .get("Infection")
+            .cloned()
+            .unwrap();
+        weapons.insert_for_test("Infection", def);
+        let reach = |x: f32| {
+            cast_reach(
+                cast_limit(UnitKind::Obelisk, &weapons),
+                Vec3::ZERO,
+                Vec3::X * x,
+                false,
+                crate::sim::MAP_GRAVITY_PER_FRAME2,
+            )
+        };
+        assert_eq!(reach(1700.0), CastReach::Fire);
+        assert_eq!(reach(1900.0), CastReach::Refuse);
     }
 
     /// Terminal and Firewall start with a full recharge (upstream
@@ -1265,6 +1399,7 @@ mod tests {
             .init_resource::<SigTermAssets>()
             .init_resource::<MineSpawnQueue>()
             .init_resource::<PendingExplosions>()
+            .init_resource::<DelayedDamage>()
             .insert_resource(UnitRegistry::for_test(defs))
             .insert_resource(WeaponRegistry::default());
         app
@@ -1429,25 +1564,14 @@ mod tests {
     }
 
     /// A healthy Byte enqueues exactly `MINELAUNCHER_FAN_COUNT` Logic
-    /// Bombs, centred on the clicked target, and loses
-    /// `MINELAUNCHER_HP_COST` HP in the process.
+    /// Bombs, centred on the clicked target.
     #[test]
-    fn minelauncher_queues_fan_and_deducts_hp() {
-        let mut health = Health {
-            current: 15_000.0,
-            max: 15_000.0,
-        };
+    fn minelauncher_queues_fan() {
+        let health = Health::full(15_000.0);
         let mut queue = MineSpawnQueue::default();
         let target = Vec3::new(200.0, 0.0, 0.0);
 
-        let fired = fire_minelauncher(
-            target,
-            Vec3::ZERO,
-            &mut health,
-            Faction::System,
-            0,
-            &mut queue,
-        );
+        let fired = fire_minelauncher(target, Vec3::ZERO, &health, Faction::System, 0, &mut queue);
         assert!(fired);
         assert_eq!(queue.len(), MINELAUNCHER_FAN_COUNT);
 
@@ -1460,37 +1584,66 @@ mod tests {
         }
         let sum: f32 = zs.iter().sum();
         assert!(sum.abs() < 1e-3, "fan is not centred on target: {zs:?}");
-        assert!((health.current - (15_000.0 - MINELAUNCHER_HP_COST)).abs() < 1e-3);
+    }
+
+    /// The cast's 6000 HP is an `AddUnitDamage` hit with the SIGTERM
+    /// weapon id and no attacker, queued for the damage pipeline; a
+    /// Byte still `ARMORED` from its build refuses to cast.
+    #[test]
+    fn minelauncher_charges_its_hp_through_the_damage_pipeline() {
+        let mut app = cast_app(&[]);
+        let byte = spawn_caster(&mut app, UnitKind::Byte, Vec3::ZERO);
+        app.world_mut()
+            .entity_mut(byte)
+            .insert(Armored { after_build: 6.0 });
+        cast(&mut app, byte, Vec3::new(300.0, 0.0, 0.0));
+        assert_eq!(app.world().resource::<MineSpawnQueue>().len(), 0);
+        assert!(app.world().resource::<DelayedDamage>().is_empty());
+
+        app.world_mut().entity_mut(byte).remove::<Armored>();
+        cast(&mut app, byte, Vec3::new(300.0, 0.0, 0.0));
+        assert_eq!(
+            app.world().resource::<MineSpawnQueue>().len(),
+            MINELAUNCHER_FAN_COUNT
+        );
+        let hits: Vec<_> = app
+            .world()
+            .resource::<DelayedDamage>()
+            .iter_for_test()
+            .map(|(_, hit)| hit.clone())
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].target, byte);
+        assert_eq!(hits[0].damage, MINELAUNCHER_HP_COST);
+        assert!(hits[0].attacker.is_none());
+        // The HP itself only drops when the pipeline delivers the hit.
+        assert_eq!(app.world().get::<Health>(byte).unwrap().current, 15_000.0);
     }
 
     /// Casting on your own position leaves no forward direction — the
     /// fan can't be oriented so the cast is refused.
     #[test]
     fn minelauncher_refuses_self_cast() {
-        let mut health = Health {
-            current: 15_000.0,
-            max: 15_000.0,
-        };
+        let health = Health::full(15_000.0);
         let mut queue = MineSpawnQueue::default();
 
         let fired = fire_minelauncher(
             Vec3::ZERO,
             Vec3::ZERO,
-            &mut health,
+            &health,
             Faction::System,
             0,
             &mut queue,
         );
         assert!(!fired);
         assert_eq!(queue.len(), 0);
-        assert_eq!(health.current, 15_000.0);
     }
 
     /// A Byte without enough remaining HP to survive the cast refuses.
     /// Prevents mis-clicks from one-shotting your own Byte.
     #[test]
     fn minelauncher_refuses_when_low_hp() {
-        let mut health = Health {
+        let health = Health {
             current: MINELAUNCHER_HP_COST - 1.0,
             max: 15_000.0,
         };
@@ -1499,7 +1652,7 @@ mod tests {
         let fired = fire_minelauncher(
             Vec3::new(200.0, 0.0, 0.0),
             Vec3::ZERO,
-            &mut health,
+            &health,
             Faction::System,
             0,
             &mut queue,
@@ -1544,19 +1697,6 @@ mod tests {
         let (own, other) = app.world_mut().run_system_once(check(queue)).unwrap();
         assert!(own, "the queued mine fills the last slot");
         assert!(!other);
-    }
-
-    /// SIGTERM values line up with upstream's `SigTerm` weapon +
-    /// `areadenial.lua` — sanity-checks the constants as a block so
-    /// future tuning changes are visible in the test.
-    #[test]
-    fn sigterm_constants_match_upstream() {
-        assert_eq!(SIGTERM_BLAST_RADIUS, 900.0);
-        assert_eq!(SIGTERM_BLAST_DAMAGE, 10_000.0);
-        assert_eq!(SIGTERM_BLAST_EDGE, 0.8);
-        assert_eq!(SIGTERM_DENIAL_RADIUS, 350.0);
-        assert_eq!(SIGTERM_DENIAL_DPS, 2_000.0);
-        assert_eq!(SIGTERM_DENIAL_TTL, 100.0 / 30.0);
     }
 
     /// A Signal flown to its release point hands off to a SigTermBomb
@@ -1637,8 +1777,9 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
-            .init_resource::<SpatialIndex>()
-            .init_resource::<PendingExplosions>();
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .insert_resource(WeaponRegistry::default());
 
         let target = Vec3::new(100.0, 0.0, 50.0);
         let start = target + Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0);
@@ -1671,18 +1812,38 @@ mod tests {
         );
     }
 
-    /// On detonation the bomb entity despawns and an `AreaDenialZone`
-    /// tail appears at the impact site. The blast pass itself needs a
-    /// populated `SpatialIndex` and `Health` entities to be visible;
-    /// those are exercised in the playtest, not here.
+    fn sigterm_weapons() -> (WeaponRegistry, WeaponId) {
+        let mut weapons = WeaponRegistry::default();
+        let id = weapons.insert_for_test(
+            "SigTerm",
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 10_000.0,
+                    ..Default::default()
+                },
+                area_of_effect: 900.0,
+                edge_effectiveness: 0.8,
+                ..Default::default()
+            },
+        );
+        (weapons, id)
+    }
+
+    /// On detonation the bomb entity despawns, the `[SigTerm]` weapon
+    /// explodes at the impact site as an unowned [`PendingDamage`] (the
+    /// damage pipeline resolves its 450 elmo blast), and the
+    /// `AreaDenialZone` tail appears, owned by nobody until its first
+    /// tick finds the team a stand-in.
     #[test]
-    fn sigterm_bomb_spawns_denial_zone_on_detonation() {
+    fn sigterm_bomb_explodes_and_spawns_denial_zone_on_detonation() {
         use bevy::ecs::system::RunSystemOnce;
 
+        let (weapons, sigterm) = sigterm_weapons();
         let mut app = App::new();
         app.init_resource::<Time>()
-            .init_resource::<SpatialIndex>()
-            .init_resource::<PendingExplosions>();
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingExplosions>()
+            .insert_resource(weapons);
 
         let target = Vec3::new(10.0, 0.0, 20.0);
         app.world_mut().spawn((
@@ -1710,13 +1871,23 @@ mod tests {
             .count();
         assert_eq!(bombs_left, 0, "bomb should have despawned after detonate");
 
+        let blasts: Vec<_> = app
+            .world()
+            .resource::<DamageQueue>()
+            .iter_snapshot_for_test()
+            .cloned()
+            .collect();
+        assert_eq!(blasts.len(), 1);
+        assert_eq!(blasts[0].weapon, sigterm);
+        assert_eq!(blasts[0].target, None);
+        assert_eq!(blasts[0].impact_pos, target);
+
         let mut zones_q = app.world_mut().query::<&AreaDenialZone>();
-        let zones: Vec<_> = zones_q.iter(app.world()).collect();
+        let zones: Vec<_> = zones_q.iter(app.world()).cloned().collect();
         assert_eq!(zones.len(), 1);
-        assert_eq!(zones[0].radius, SIGTERM_DENIAL_RADIUS);
-        assert_eq!(zones[0].dps, SIGTERM_DENIAL_DPS);
-        assert_eq!(zones[0].remaining, SIGTERM_DENIAL_TTL);
-        assert!(zones[0].damage_friendly);
+        assert_eq!(zones[0].weapon, DenialWeapon::SigTerm);
+        assert_eq!(zones[0].remaining, DenialWeapon::SigTerm.params().ttl);
+        assert_eq!(zones[0].owner, None);
         assert_eq!(zones[0].owner_team, 1);
 
         // The detonation replays upstream's `custom:system_sigterm`
@@ -1725,6 +1896,135 @@ mod tests {
         assert_eq!(explosions.events.len(), 1, "detonation plays a CEG");
         assert_eq!(explosions.events[0].ceg_name, "system_sigterm");
         assert_eq!(explosions.events[0].pos, target);
-        assert_eq!(explosions.events[0].radius, SIGTERM_BLAST_RADIUS);
+        assert_eq!(explosions.events[0].radius, 900.0);
+    }
+
+    /// World for running zones through the real damage pipeline.
+    fn zone_app(weapons: WeaponRegistry) -> App {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<DamageQueue>()
+            .init_resource::<DelayedDamage>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<crate::interaction::ground_move::PendingImpulses>()
+            .insert_resource(UnitRegistry::empty())
+            .insert_resource(weapons);
+        app
+    }
+
+    fn zone_unit(app: &mut App, kind: UnitKind, team: u8, pos: Vec3) -> Entity {
+        use crate::units::spatial::SpatialEntry;
+        let entity = app
+            .world_mut()
+            .spawn((
+                UnitType(kind),
+                TeamId(team),
+                Faction::Hacker,
+                GlobalTransform::from_translation(pos),
+                Health::full(1000.0),
+            ))
+            .id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity,
+                pos,
+                hit_radius: 0.0,
+                mid_y: 0.0,
+                team,
+                kind,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+            });
+        entity
+    }
+
+    /// Why: zone ticks used to subtract HP directly, skipping the
+    /// Firewall, the idle-heal reset and infection's rules (they
+    /// infected enemy Viruses). As `AddUnitDamage` hits they go through
+    /// `DamageResolver::deliver`: an Infection-gas tick halves on a
+    /// protected unit, infects the enemy for the Obelisk's team but
+    /// never a Virus, and spares allies (`damageFriendly=false`).
+    #[test]
+    fn denial_ticks_go_through_the_damage_pipeline() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut weapons = WeaponRegistry::default();
+        weapons.insert_for_test("Infection", spring_tdf::WeaponDef::default());
+        let mut app = zone_app(weapons);
+        let obelisk = zone_unit(&mut app, UnitKind::Obelisk, 1, Vec3::X * 1000.0);
+        let enemy = zone_unit(&mut app, UnitKind::Bit, 0, Vec3::X * 10.0);
+        let shielded = zone_unit(&mut app, UnitKind::Bit, 0, Vec3::X * -10.0);
+        let virus = zone_unit(&mut app, UnitKind::Virus, 0, Vec3::Z * 10.0);
+        let ally = zone_unit(&mut app, UnitKind::Bit, 1, Vec3::Z * -10.0);
+        app.world_mut()
+            .entity_mut(shielded)
+            .insert(Protected { remaining: 20.0 });
+        app.world_mut().spawn(AreaDenialZone::new(
+            DenialWeapon::Infection,
+            Vec3::ZERO,
+            Some(obelisk),
+            1,
+            Faction::Hacker,
+        ));
+
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs(1));
+        app.world_mut().run_system_once(tick_area_denial).unwrap();
+        app.world_mut()
+            .run_system_once(crate::units::combat::apply_damage)
+            .unwrap();
+
+        let hp = |app: &App, e: Entity| app.world().get::<Health>(e).unwrap().current;
+        assert!((hp(&app, enemy) - 880.0).abs() < 1e-3);
+        assert!((hp(&app, shielded) - 940.0).abs() < 1e-3, "Firewall halves");
+        assert!((hp(&app, ally) - 1000.0).abs() < 1e-3, "gas spares allies");
+        let infected = app
+            .world()
+            .get::<crate::units::combat::Infected>(enemy)
+            .expect("gas infects");
+        assert_eq!(infected.attacker_team, 1);
+        assert!(
+            app.world()
+                .get::<crate::units::combat::Infected>(virus)
+                .is_none()
+        );
+        // Reflected onto the Obelisk next frame.
+        assert!(!app.world().resource::<DelayedDamage>().is_empty());
+    }
+
+    /// `areadenial.lua`: once the owner is gone the zone is credited to
+    /// a homebase of the team (else a minifac, else nobody).
+    #[test]
+    fn orphaned_zone_finds_a_stand_in_owner() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = zone_app(WeaponRegistry::default());
+        let socket = zone_unit(&mut app, UnitKind::Socket, 1, Vec3::X * 2000.0);
+        let zone = app
+            .world_mut()
+            .spawn(AreaDenialZone::new(
+                DenialWeapon::SigTerm,
+                Vec3::ZERO,
+                None,
+                1,
+                Faction::System,
+            ))
+            .id();
+        let tick = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(33));
+            app.world_mut().run_system_once(tick_area_denial).unwrap();
+            app.world().get::<AreaDenialZone>(zone).unwrap().owner
+        };
+        assert_eq!(tick(&mut app), Some(socket), "minifac when no homebase");
+        let kernel = zone_unit(&mut app, UnitKind::Kernel, 1, Vec3::Z * 2000.0);
+        assert_eq!(tick(&mut app), Some(socket), "a live stand-in is kept");
+        app.world_mut()
+            .entity_mut(socket)
+            .insert(Dying { timer: 1.0 });
+        assert_eq!(tick(&mut app), Some(kernel));
     }
 }

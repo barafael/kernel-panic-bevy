@@ -17,6 +17,7 @@ use super::{AimTarget, IdleTimer, StunCharge};
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::{DeathBlast, WeaponRegistry};
 use crate::units::lifecycle::bookkeeping::{IdleAutoHeal, Kamikaze};
@@ -78,11 +79,20 @@ pub struct SelfDestructCountdown {
     pub remaining: f32,
 }
 
-/// Seconds between ordering self-destruct and detonation. Matches the
-/// 5 s number called out in FEATURES.md §3 — long enough to walk the
-/// unit away from allies, short enough that the player doesn't feel
-/// the command is lagging.
-pub const SELF_DESTRUCT_DELAY: f32 = 5.0;
+impl SelfDestructCountdown {
+    /// A fresh self-destruct order for a `kind` unit: its FBI
+    /// `SelfDestructCountdown` ([`UnitRegistry::self_destruct_delay`]),
+    /// or [`SELF_DESTRUCT_DELAY`] without a registry.
+    pub fn ordered(kind: UnitKind, unit_registry: Option<&UnitRegistry>) -> Self {
+        Self {
+            remaining: unit_registry.map_or(SELF_DESTRUCT_DELAY, |r| r.self_destruct_delay(kind)),
+        }
+    }
+}
+
+/// The countdown of a unit without an FBI entry: the engine default
+/// `selfDestructCountdown=5` armed as `2·5 + 1` slow updates.
+pub const SELF_DESTRUCT_DELAY: f32 = 5.5;
 
 /// Marks a unit as paralyzed: the combat and movement systems treat it
 /// as inert until `remaining` elapses.
@@ -127,6 +137,10 @@ pub fn auto_heal(
     for (heal, mut health, mut idle, move_target, move_path, aim) in &mut query {
         if health.current <= 0.0 {
             continue;
+        }
+        // FBI `AutoHeal`: heals whether idle or not.
+        if heal.always > 0.0 && health.current < health.max {
+            health.current = (health.current + heal.always * dt).min(health.max);
         }
         let is_active = move_target.is_some() || move_path.is_some() || aim.is_some();
         if is_active {
@@ -290,6 +304,7 @@ pub fn death_system(
                     weapon: blast.weapon,
                     impact_pos: pos,
                     attacker_distance: 0.0,
+                    owner_team: None,
                 });
 
                 explosions.events.push(ExplosionEvent {
@@ -465,6 +480,7 @@ mod tests {
                 IdleAutoHeal {
                     rate: 50.0,
                     threshold: 0.0,
+                    always: 0.0,
                 },
                 IdleTimer(10.0),
                 SelfDestructCountdown { remaining: 0.0 },
@@ -484,6 +500,7 @@ mod tests {
                 IdleAutoHeal {
                     rate: 50.0,
                     threshold: 0.0,
+                    always: 0.0,
                 },
                 IdleTimer(10.0),
             ))

@@ -45,8 +45,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use super::{
-    components::{Health, TeamId, UnitStats, UnitType},
-    construction::{Constructing, PendingBuild},
+    components::{TeamId, UnitStats, UnitType},
     player::LocalTeam,
     production::{Producer, minifac_spam},
     spatial::SpatialIndex,
@@ -54,15 +53,17 @@ use super::{
 use crate::units::spatial::flat_dist_sq;
 use crate::{
     game_setup::AiDifficulty,
-    interaction::movement::{MovePath, MoveTarget, QueuedCommand},
+    interaction::movement::{MovePath, OrderState, QueuedCommand},
     rng::xorshift32,
     terrain::geovent::{GeoventSmoker, VentClaim},
     units::{
-        combat::{AttackGroundOrder, AttackTargetOrder, Dying, SelfDestructCountdown},
+        combat::{Dying, SelfDestructCountdown},
         content::definitions::UnitKind,
         lifecycle::spawning::Emerging,
         mechanics::{
-            command_fire::{CommandFireCooldown, CommandFireEvent, Protected},
+            command_fire::{
+                CommandFireCooldown, CommandFireEvent, NxCast, PendingCommandFire, Protected,
+            },
             deploy::DeployEvent,
             network_buffer::{AutoDispatch, DISPATCH_MAX, DispatchEvent, PacketBuffer},
         },
@@ -102,12 +103,31 @@ const DATAVENT_CLAIM_RADIUS: f32 = 120.0;
 /// so the factory never idles between two AI ticks.
 const HOMEBASE_REFILL_AT: usize = 1;
 
-/// Upstream `IsItOccupiedByAnyHomeBase`: a constructor this close (XZ)
-/// to any homebase hasn't cleared the exit yet and must not start a
-/// build from inside the base.
-const HOMEBASE_EXIT_RADIUS: f32 = 64.0;
+/// Upstream `IsItOccupiedByAnyHomeBase`: a constructor within this
+/// box half-extent (XZ) of any homebase hasn't cleared the exit yet and
+/// must not start a build from inside the base.
+const HOMEBASE_EXIT_HALF: f32 = 64.0;
 
-/// AI clock + per-team memory.
+/// KPAI's `IsItOccupied*` tests: the first structure (homebases only
+/// when `homebases_only`) whose position lies strictly inside the
+/// `half`-extent XZ box around `pos` (`abs(ux - x) < half and
+/// abs(uz - z) < half`).
+fn occupied_by(
+    structures: &[EnemyStructure],
+    pos: Vec3,
+    half: f32,
+    homebases_only: bool,
+) -> Option<Vec3> {
+    structures
+        .iter()
+        .filter(|st| st.homebase || !homebases_only)
+        .map(|st| st.pos)
+        .find(|p| (p.x - pos.x).abs() < half && (p.z - pos.z).abs() < half)
+}
+
+/// AI clock + per-team memory. Match-scoped: re-created (with a fresh
+/// dice seed) at every match swap, so no team's memory leaks into the
+/// next game.
 #[derive(Resource)]
 pub struct AiTicker {
     accumulated: f32,
@@ -125,7 +145,8 @@ impl Default for AiTicker {
     fn default() -> Self {
         Self {
             accumulated: 0.0,
-            rng: 0x2545_F491,
+            // xorshift32 must not start at 0.
+            rng: (crate::game_setup::match_seed() as u32).max(1),
             last_sigterm: HashMap::new(),
             last_dispatch: HashMap::new(),
             no_enemies_since: HashMap::new(),
@@ -148,9 +169,11 @@ struct Snap {
     pos: Vec3,
     /// Can move at all (speed > 0).
     mobile: bool,
-    /// Finished and carrying no order the AI would clobber.
+    /// Finished and carrying no order the AI would clobber (a pending
+    /// ability cast counts as an order).
     idle: bool,
-    /// Finished and its command-fire ability is off cooldown.
+    /// Finished, its command-fire ability off cooldown and not already
+    /// being cast.
     ready: bool,
     /// Still peeling packets off the team buffer (`AutoDispatch`).
     dispatching: bool,
@@ -189,16 +212,18 @@ type UnitQueryData = (
     &'static UnitType,
     &'static GlobalTransform,
     &'static UnitStats,
-    Option<&'static MoveTarget>,
+    // Any active order — moves, attacks, guard, builds and ability casts
+    // (`NxCast`, the walk into cast range) — makes the unit busy, so the
+    // army phase never replaces it with an attack-move (which would,
+    // for one, cancel the cast the AI just ordered).
+    OrderState,
     Option<&'static MovePath>,
-    Has<AttackTargetOrder>,
-    Has<AttackGroundOrder>,
-    Has<PendingBuild>,
-    Has<Constructing>,
     Has<Emerging>,
     Has<CommandFireCooldown>,
     Has<AutoDispatch>,
     Has<Protected>,
+    // A cast in progress: not ready for another one.
+    (Has<NxCast>, Has<PendingCommandFire>),
 );
 
 /// Message writers the AI issues orders through — the same messages the
@@ -225,6 +250,7 @@ pub fn ai_brain(
     mut producers: Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
     mut orders: AiOrders,
     mut commands: Commands,
 ) {
@@ -272,7 +298,15 @@ pub fn ai_brain(
             &mut orders,
         );
         run_specials(team, s, ticker, &spatial, &mut damage_log, now, &mut orders);
-        run_late_game(team, s, ticker, &suiciding, now, &mut commands);
+        run_late_game(
+            team,
+            s,
+            ticker,
+            &suiciding,
+            &unit_registry,
+            now,
+            &mut commands,
+        );
     }
     s.ai_teams = teams;
 }
@@ -281,12 +315,13 @@ pub fn ai_brain(
 /// anymore (someone else finished them, or they never started), the
 /// AI razes itself after `30 + (7*team) % 16` seconds so a stale game
 /// still ends. Units already counting down keep their timer — a fresh
-/// insert every tick would reset the 5 s fuse and it would never fire.
+/// insert every tick would reset the fuse and it would never fire.
 fn run_late_game(
     team: u8,
     s: &AiScratch,
     ticker: &mut AiTicker,
     suiciding: &Query<(), With<SelfDestructCountdown>>,
+    unit_registry: &crate::units::content::unit_registry::UnitRegistry,
     now: f32,
     commands: &mut Commands,
 ) {
@@ -302,9 +337,9 @@ fn run_late_game(
         if suiciding.contains(u.entity) {
             continue;
         }
-        commands.entity(u.entity).try_insert(SelfDestructCountdown {
-            remaining: crate::units::combat::SELF_DESTRUCT_DELAY,
-        });
+        commands
+            .entity(u.entity)
+            .try_insert(SelfDestructCountdown::ordered(u.kind, Some(unit_registry)));
     }
 }
 
@@ -328,33 +363,25 @@ fn snapshot(
         ut,
         gtf,
         stats,
-        mt,
+        order,
         mp,
-        attack,
-        attack_ground,
-        pending,
-        constructing,
         emerging,
         cooldown,
         auto_dispatch,
         protected,
+        (nx_cast, pending_cast),
     ) in units
     {
         let kind = ut.0;
+        let casting = nx_cast || pending_cast;
         let snap = Snap {
             entity: e,
             team: team.0,
             kind,
             pos: gtf.translation(),
             mobile: stats.speed > 0.0,
-            idle: !emerging
-                && mt.is_none()
-                && mp.is_none()
-                && !attack
-                && !attack_ground
-                && !pending
-                && !constructing,
-            ready: !emerging && !cooldown,
+            idle: !emerging && mp.is_none() && !order.active(),
+            ready: !emerging && !cooldown && !casting,
             dispatching: auto_dispatch,
             protected,
         };
@@ -485,7 +512,6 @@ fn run_constructors(
         .count();
     s.vent_pos.clear();
     s.vent_pos.extend(s.vents.iter().map(|(_, p)| *p));
-    let exit_sq = HOMEBASE_EXIT_RADIUS * HOMEBASE_EXIT_RADIUS;
     for ctor in s
         .units
         .iter()
@@ -493,13 +519,7 @@ fn run_constructors(
     {
         // Don't start building from inside a base: step out of the
         // exit box (any team's homebase — enemy bases count too).
-        if let Some(base) = s
-            .structures
-            .iter()
-            .filter(|st| st.homebase)
-            .map(|st| st.pos)
-            .find(|&p| flat_dist_sq(p, ctor.pos) <= exit_sq)
-        {
+        if let Some(base) = occupied_by(&s.structures, ctor.pos, HOMEBASE_EXIT_HALF, true) {
             crate::interaction::replace_order(
                 &mut commands.entity(ctor.entity),
                 QueuedCommand::Move(spread_around(base, &mut ticker.rng)),
@@ -840,16 +860,13 @@ fn run_specials(
 
     // Hacker: idle Bugs bombard from range, Exploits pack up when the
     // fight leaves (or overruns) them.
-    let clear_sq = specials::DEPLOY_CLEAR_RADIUS * specials::DEPLOY_CLEAR_RADIUS;
     for u in s.units.iter().filter(|u| u.team == team) {
         let deploy = match u.kind {
             UnitKind::Bug if u.idle => {
                 // Upstream `IsItOccupied`: no deploy while standing on
                 // any team's building (homebase / minifac / special).
-                let on_building = s
-                    .structures
-                    .iter()
-                    .any(|st| flat_dist_sq(st.pos, u.pos) <= clear_sq);
+                let on_building =
+                    occupied_by(&s.structures, u.pos, specials::DEPLOY_CLEAR_HALF, false).is_some();
                 bug_should_deploy(
                     nearest_enemy(spatial, team, u.pos, specials::DEPLOY_MAX, |_| true)
                         .map(|(_, d)| d),
@@ -867,13 +884,10 @@ fn run_specials(
     }
 }
 
-/// Upstream's `UnitDamaged` hook, approximated from the outside: watch
-/// every unit's HP and remember where each team was last hurt, so the
-/// Firewall trigger (`run_specials`) can react without combat
-/// internals knowing the AI exists. First sight seeds the cache
-/// without logging; a unit that dies the same frame it is hit is
-/// missed (`Dying` excluded) — every earlier hit of that fight still
-/// registers, which is enough signal.
+/// Upstream KPAI_Fair's `UnitDamaged` hook: where each team was last
+/// hurt (`lastAllyDamage`), so the Firewall trigger (`run_specials`)
+/// can react. Fed by the damage pipeline itself
+/// (`DamageResolver::deliver`) for every hit of at least half a point.
 #[derive(Resource, Default)]
 pub struct TeamDamageLog {
     /// (when, where) of each team's most recent landed hit.
@@ -886,39 +900,13 @@ impl TeamDamageLog {
         self.latest.get(&team).copied()
     }
 
-    fn record(&mut self, team: u8, when: f32, pos: Vec3) {
+    /// A unit of `team` at `pos` took damage at `when` (seconds).
+    pub(crate) fn record(&mut self, team: u8, when: f32, pos: Vec3) {
         self.latest.insert(team, (when, pos));
     }
 
     fn forget(&mut self, team: u8) {
         self.latest.remove(&team);
-    }
-}
-
-/// Fills [`TeamDamageLog`] every sim frame. Must stay outside
-/// `ai_brain`'s 1 Hz gate — HP drops between ticks would be missed.
-type DamageWatchData = (
-    Entity,
-    &'static TeamId,
-    &'static Health,
-    &'static GlobalTransform,
-);
-
-pub fn track_team_damage(
-    time: Res<Time>,
-    units: Query<DamageWatchData, (With<UnitType>, Without<Dying>)>,
-    mut last: Local<HashMap<Entity, f32>>,
-    mut log: ResMut<TeamDamageLog>,
-) {
-    let now = time.elapsed_secs();
-    last.retain(|e, _| units.contains(*e));
-    for (e, team, hp, gtf) in &units {
-        if let Some(&prev) = last.get(&e)
-            && hp.current < prev
-        {
-            log.record(team.0, now, gtf.translation());
-        }
-        last.insert(e, hp.current);
     }
 }
 
@@ -940,6 +928,81 @@ mod tests {
             cloaked: false,
             detected_by: 0,
         }
+    }
+
+    /// Why: an NX cast (`NxCast`, or the walk into range) carries no
+    /// move/attack order, so the snapshot called the Pointer idle and the
+    /// next tick's army phase attack-moved it — `clear_orders` then
+    /// cancelled the cast the AI had just ordered. A casting unit is
+    /// busy, and not ready to be ordered another cast.
+    #[test]
+    fn casting_units_are_neither_idle_nor_ready() {
+        use crate::units::mechanics::command_fire::{NxCast, PendingCommandFire};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        let pointer = |app: &mut App| {
+            app.world_mut()
+                .spawn((
+                    TeamId(1),
+                    UnitType(UnitKind::Pointer),
+                    GlobalTransform::default(),
+                    UnitStats {
+                        radius: 8.0,
+                        hit_radius: 8.0,
+                        mid_y: 0.0,
+                        speed: 2.0,
+                        acc_rate: 0.1,
+                        dec_rate: 0.1,
+                        turn_rate: 1.0,
+                        can_fly: false,
+                        no_chase_vtol: true,
+                    },
+                ))
+                .id()
+        };
+        let plain = pointer(&mut app);
+        let aiming = pointer(&mut app);
+        let walking = pointer(&mut app);
+        app.world_mut()
+            .entity_mut(aiming)
+            .insert(NxCast::Aiming { target: Vec3::X });
+        app.world_mut()
+            .entity_mut(walking)
+            .insert(PendingCommandFire { target: Vec3::X });
+        let snaps = app
+            .world_mut()
+            .run_system_once(
+                |units: Query<UnitQueryData, Without<Dying>>,
+                 vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>| {
+                    let mut s = AiScratch::default();
+                    snapshot(&mut s, &units, &vents, 0);
+                    s.units
+                        .iter()
+                        .map(|u| (u.entity, u.idle, u.ready))
+                        .collect::<Vec<_>>()
+                },
+            )
+            .unwrap();
+        let get = |e: Entity| snaps.iter().find(|s| s.0 == e).map(|s| (s.1, s.2));
+        assert_eq!(get(plain), Some((true, true)));
+        assert_eq!(get(aiming), Some((false, false)));
+        assert_eq!(get(walking), Some((false, false)));
+    }
+
+    /// KPAI's `IsItOccupied*` are boxes, not circles: a corner offset of
+    /// (47, 47) is inside the ±48 box, (48, 0) is not.
+    #[test]
+    fn occupancy_is_a_strict_box() {
+        let st = |x: f32, z: f32, homebase: bool| EnemyStructure {
+            team: 0,
+            pos: Vec3::new(x, 0.0, z),
+            homebase,
+        };
+        let structures = [st(47.0, 47.0, false), st(200.0, 0.0, true)];
+        assert!(occupied_by(&structures, Vec3::ZERO, 48.0, false).is_some());
+        assert!(occupied_by(&structures, Vec3::ZERO, 48.0, true).is_none());
+        assert!(occupied_by(&[st(48.0, 0.0, false)], Vec3::ZERO, 48.0, false).is_none());
+        assert!(occupied_by(&structures, Vec3::X * 150.0, 64.0, true).is_some());
     }
 
     /// `nearest_enemy` skips friends, applies the kind filter and the

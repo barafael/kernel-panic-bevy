@@ -41,12 +41,14 @@ pub struct Kamikaze {
     pub trigger_radius: f32,
 }
 
-/// FBI `IdleAutoHeal > 0`: regenerates `rate` HP/s once idle for
-/// `threshold` seconds (`IdleTime` sim frames / 30).
+/// FBI `IdleAutoHeal > 0` or `AutoHeal > 0`: regenerates `rate` HP/s
+/// once idle for `threshold` seconds (`IdleTime` sim frames / 30), plus
+/// `always` HP/s regardless (`AutoHeal`, the Flow's 30).
 #[derive(Component, Clone, Copy, Debug)]
 pub struct IdleAutoHeal {
     pub rate: f32,
     pub threshold: f32,
+    pub always: f32,
 }
 
 /// FBI `RadarDistance > 0`: reveals cloaked enemies within `radius`.
@@ -83,10 +85,12 @@ pub fn tag_unit_kinds(
             });
         }
         let heal = unit_registry.idle_auto_heal(kind);
-        if heal > 0.0 {
+        let always = unit_registry.auto_heal(kind);
+        if heal > 0.0 || always > 0.0 {
             entity.insert(IdleAutoHeal {
                 rate: heal,
                 threshold: crate::sim::frames_to_secs(unit_registry.idle_time(kind)),
+                always,
             });
         }
         let radar = unit_registry.radar_distance(kind);

@@ -74,7 +74,7 @@ impl Plugin for UnitsPlugin {
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
-            .init_resource::<ai::AiTicker>()
+            .init_match_resource::<ai::AiTicker>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<shield::OnsMode>()
@@ -121,14 +121,8 @@ impl Plugin for UnitsPlugin {
                 FixedUpdate,
                 // Also runs in `AppState::Menu`: the attract-mode demo
                 // behind the menu is an all-AI skirmish.
-                //
-                // `track_team_damage` must not sit behind `ai_brain`'s
-                // 1 Hz gate: it diffs HP per frame.
-                (
-                    ai::track_team_damage,
-                    ai::ai_brain.before(GameplaySet::Produce),
-                )
-                    .chain()
+                ai::ai_brain
+                    .before(GameplaySet::Produce)
                     .run_if(in_state(game_over::GameState::Playing)),
             )
             .configure_sets(
@@ -257,6 +251,20 @@ impl Plugin for UnitsPlugin {
                         .chain()
                         .in_set(GameplaySet::Animate),
                     combat::cleanup_dying.in_set(GameplaySet::Cleanup),
+                ),
+            )
+            .add_systems(
+                FixedUpdate,
+                (
+                    // The COB `ARMORED` flag, raised on new units and
+                    // lowered after their build (`damage::armored_script`).
+                    combat::update_armored.in_set(GameplaySet::Produce),
+                    // `ExplodeAs` goes off the frame the unit dies, while
+                    // it is still a unit to credit the blast to.
+                    combat::apply_death_blasts
+                        .after(combat::death_system)
+                        .in_set(GameplaySet::Resolve)
+                        .run_if(|q: Res<combat::DamageQueue>| !q.is_empty()),
                 ),
             );
     }
