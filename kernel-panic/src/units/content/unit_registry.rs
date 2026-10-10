@@ -180,13 +180,14 @@ impl UnitRegistry {
                 ),
             })
             .collect();
-        let pairs = |gate: fn(&UnitDef, &str) -> bool| -> Box<[bool]> {
+        // `unrestricted`: the gate's answer for an attacker without an
+        // FBI, i.e. one that declares no category tags — every target
+        // allowed (`manual_target`), none ranked bad (`bad_target`).
+        let pairs = |gate: fn(&UnitDef, &str) -> bool, unrestricted: bool| -> Box<[bool]> {
             defs.iter()
                 .flat_map(|attacker| {
                     defs.iter().map(move |candidate| {
-                        // No FBI for the attacker: unfiltered, like a
-                        // unit that declares no category restrictions.
-                        attacker.as_ref().is_none_or(|a| {
+                        attacker.as_ref().map_or(unrestricted, |a| {
                             gate(a, candidate.as_ref().map_or("", |c| c.category.as_str()))
                         })
                     })
@@ -194,8 +195,8 @@ impl UnitRegistry {
                 .collect()
         };
         Self {
-            bad_target: pairs(bad_target_gate),
-            manual_target: pairs(manual_target_gate),
+            bad_target: pairs(bad_target_gate, false),
+            manual_target: pairs(manual_target_gate, true),
             defs,
             kinds,
             hexfarm_medians,
@@ -673,6 +674,17 @@ mod tests {
     fn missing_unit_defaults_to_one() {
         let reg = UnitRegistry::empty();
         assert_eq!(reg.armored_multiple(UnitKind::Bit), 1.0);
+    }
+
+    /// An attacker without an FBI declares no category tags: it may
+    /// target anything and ranks nothing as a bad target (the bad gate
+    /// used to default to `true`, making every target "bad").
+    #[test]
+    fn attacker_without_fbi_is_unrestricted() {
+        let reg = UnitRegistry::empty();
+        assert!(reg.can_attack(UnitKind::Bit, UnitKind::Socket));
+        assert!(reg.auto_target_allowed(UnitKind::Bit, UnitKind::Socket));
+        assert!(!reg.bad_target(UnitKind::Bit, UnitKind::Socket));
     }
 
     fn registry_with_slope(kind: UnitKind, raw_max_slope_deg: f32) -> UnitRegistry {

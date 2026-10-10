@@ -327,16 +327,26 @@ const NX_RANGE: f32 = 1400.0; // retroweapons.tdf [nx]
 const MINELAUNCHER_RANGE: f32 = 1100.0; // retroweapons.tdf [MineLauncher]
 const INFECTION_RANGE: f32 = 2000.0; // corruptionweapons.tdf [Infection]
 
-/// How far from the caster `kind`'s ability may land, or `None` when it
-/// reaches anywhere on the map.
+/// What bounds where `kind`'s ability may land.
 ///
 /// NX Flag, Infection and Mine Launch are real weapons upstream, so the
-/// engine only fires them at targets inside the weapon's `range` (the
-/// unit walks into range first if it can move). SIGTERM and Firewall are
-/// Lua `ICON_MAP` commands executed in `CommandFallback` without any
+/// engine only fires them at targets its `TestRange` accepts (the unit
+/// walks into range first if it can move) — for the Obelisk's ballistic
+/// Infection that reach depends on the height difference (about 1780
+/// elmos on level ground, not its `range=2000`). SIGTERM and Firewall
+/// are Lua `ICON_MAP` commands executed in `CommandFallback` without any
 /// distance check: the Signal bomber flies to the target, the Firewall
 /// shield lands wherever the player clicked.
-pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
+#[derive(Clone, Copy)]
+enum CastReachLimit<'a> {
+    MapWide,
+    Weapon(&'a spring_tdf::WeaponDef),
+    /// The weapon is missing from the registry: its TDF `range=` as a
+    /// flat cylinder.
+    Fallback(f32),
+}
+
+fn cast_limit(kind: UnitKind, weapons: &WeaponRegistry) -> CastReachLimit<'_> {
     // Ids resolved once at registry load (`KnownWeapons`) — this runs
     // per pending caster per tick, so no name hashing here.
     let known = weapons.known();
@@ -344,19 +354,17 @@ pub fn cast_range(kind: UnitKind, weapons: &WeaponRegistry) -> Option<f32> {
         UnitKind::Pointer => (known.nx, NX_RANGE),
         UnitKind::Byte => (known.mine_launcher, MINELAUNCHER_RANGE),
         UnitKind::Obelisk => (known.infection, INFECTION_RANGE),
-        _ => return None,
+        _ => return CastReachLimit::MapWide,
     };
-    Some(
-        weapon
-            .map(|id| weapons.by_id(id).range)
-            .filter(|r| *r > 0.0)
-            .unwrap_or(fallback),
-    )
+    match weapon.map(|id| weapons.by_id(id)) {
+        Some(def) if def.range > 0.0 => CastReachLimit::Weapon(def),
+        _ => CastReachLimit::Fallback(fallback),
+    }
 }
 
 /// A mobile caster walking toward an out-of-range ability target.
 /// [`advance_pending_casts`] fires the ability once the target is
-/// within [`cast_range`], mirroring how Spring's command-fire attack
+/// in reach ([`cast_limit`]), mirroring how Spring's command-fire attack
 /// order approaches before shooting. Any new order clears it
 /// (`interaction::clear_orders`, the replace-branch of
 /// `apply_ordered_command`, Stop); losing its `MoveTarget` without
@@ -475,18 +483,24 @@ enum CastReach {
     Refuse,
 }
 
-fn cast_reach(range: Option<f32>, caster: Vec3, target: Vec3, mobile: bool) -> CastReach {
-    match range {
-        // Ranges are checked on the ground plane so a caster on a ridge
-        // isn't penalised for the height gap.
-        Some(range) if flat_dist_sq(caster, target) > range * range => {
-            if mobile {
-                CastReach::Approach
-            } else {
-                CastReach::Refuse
-            }
-        }
-        _ => CastReach::Fire,
+fn cast_reach(limit: CastReachLimit, caster: Vec3, target: Vec3, mobile: bool) -> CastReach {
+    let in_reach = match limit {
+        CastReachLimit::MapWide => true,
+        // `CWeapon::TestRange` against a ground position. The caster's
+        // origin stands in for its aim-from piece.
+        CastReachLimit::Weapon(def) => crate::units::combat::aim::in_weapon_range(
+            def,
+            caster,
+            target,
+            true,
+            crate::sim::MAP_GRAVITY_PER_FRAME2,
+        ),
+        CastReachLimit::Fallback(range) => flat_dist_sq(caster, target) <= range * range,
+    };
+    match (in_reach, mobile) {
+        (true, _) => CastReach::Fire,
+        (false, true) => CastReach::Approach,
+        (false, false) => CastReach::Refuse,
     }
 }
 
@@ -512,7 +526,7 @@ pub fn advance_pending_casts(
 ) {
     for (entity, unit, gtf, pending, moving) in &casters {
         match cast_reach(
-            cast_range(unit.0, &weapons),
+            cast_limit(unit.0, &weapons),
             gtf.translation(),
             pending.target,
             true,
@@ -548,7 +562,7 @@ pub fn advance_pending_casts(
 /// weapon by looking at its `UnitKind` — NX Flag for Pointer, Infection
 /// for Obelisk. Units without a registered ability are ignored.
 ///
-/// Weapon-backed abilities honour their TDF range ([`cast_range`]): a
+/// Weapon-backed abilities honour their weapon's reach ([`cast_limit`]): a
 /// mobile caster ordered beyond it walks into range first (see
 /// [`PendingCommandFire`]), a stationary one refuses the order.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -586,7 +600,7 @@ pub fn process_command_fire(
             continue;
         }
         match cast_reach(
-            cast_range(unit.0, &weapons),
+            cast_limit(unit.0, &weapons),
             gtf.translation(),
             event.target,
             unit_registry.speed(unit.0) > 0.0,
@@ -797,7 +811,8 @@ pub fn tick_nx_casts(
             &TeamId,
             &Faction,
         ),
-        Without<Dying>,
+        // A paralyzed Pointer's script doesn't run its weapons.
+        (Without<Dying>, Without<crate::units::combat::Stunned>),
     >,
     weapons: Res<WeaponRegistry>,
     unit_registry: Res<UnitRegistry>,
@@ -824,7 +839,7 @@ pub fn tick_nx_casts(
             NxCast::Aiming { target } => target,
         };
         if cast_reach(
-            cast_range(unit.0, &weapons),
+            cast_limit(unit.0, &weapons),
             gtf.translation(),
             target,
             true,
@@ -1280,49 +1295,58 @@ mod tests {
         assert_eq!(p.ttl, 400.0 / 30.0);
     }
 
-    /// Weapon abilities are range-limited to their TDF `range=` (with
-    /// fallbacks when the registry lacks the weapon); the two Lua
-    /// abilities reach anywhere.
-    #[test]
-    fn cast_range_matches_tdf() {
-        let empty = WeaponRegistry::default();
-        assert_eq!(cast_range(UnitKind::Pointer, &empty), Some(1400.0));
-        assert_eq!(cast_range(UnitKind::Byte, &empty), Some(1100.0));
-        assert_eq!(cast_range(UnitKind::Obelisk, &empty), Some(2000.0));
-        assert_eq!(cast_range(UnitKind::Terminal, &empty), None);
-        assert_eq!(cast_range(UnitKind::Firewall, &empty), None);
-
-        let mut weapons = WeaponRegistry::default();
-        weapons.insert_for_test(
-            "nx",
-            spring_tdf::WeaponDef {
-                range: 900.0,
-                ..Default::default()
-            },
-        );
-        assert_eq!(cast_range(UnitKind::Pointer, &weapons), Some(900.0));
-    }
-
+    /// Weapon abilities are limited by their weapon's reach — the TDF
+    /// `range=` as a fallback when the registry lacks the weapon — and
+    /// the two Lua abilities reach anywhere.
     #[test]
     fn cast_reach_classifies_orders() {
-        let far = Vec3::new(2000.0, 0.0, 0.0);
+        let empty = WeaponRegistry::default();
+        let reach = |kind, target: Vec3, mobile| {
+            cast_reach(cast_limit(kind, &empty), Vec3::ZERO, target, mobile)
+        };
         let near = Vec3::new(500.0, 300.0, 0.0);
+        let far = Vec3::new(2000.0, 0.0, 0.0);
+        assert_eq!(reach(UnitKind::Pointer, near, false), CastReach::Fire);
+        assert_eq!(reach(UnitKind::Pointer, far, true), CastReach::Approach);
+        assert_eq!(reach(UnitKind::Pointer, far, false), CastReach::Refuse);
         assert_eq!(
-            cast_reach(Some(1400.0), Vec3::ZERO, near, false),
+            reach(UnitKind::Byte, Vec3::X * 1050.0, false),
             CastReach::Fire
         );
         assert_eq!(
-            cast_reach(Some(1400.0), Vec3::ZERO, far, true),
-            CastReach::Approach
-        );
-        assert_eq!(
-            cast_reach(Some(1400.0), Vec3::ZERO, far, false),
+            reach(UnitKind::Byte, Vec3::X * 1150.0, false),
             CastReach::Refuse
         );
-        assert_eq!(
-            cast_reach(None, Vec3::ZERO, far * 10.0, false),
-            CastReach::Fire
-        );
+        for kind in [UnitKind::Terminal, UnitKind::Firewall] {
+            assert_eq!(reach(kind, far * 10.0, false), CastReach::Fire);
+        }
+    }
+
+    /// The Obelisk's Infection is a ballistic Cannon: `TestRange` gives
+    /// it about 1780 elmos on level ground, not its `range=2000`.
+    #[test]
+    fn infection_reach_follows_the_cannon_range() {
+        let tdf = spring_tdf::Tdf::parse(
+            "[Infection]\n{\nballistic=1;\nturret=1;\nrange=2000;\nweaponvelocity=800;\n\
+             startvelocity=800;\nmyGravity=.4;\ncommandfire=1;\n}",
+        )
+        .unwrap();
+        let mut weapons = WeaponRegistry::default();
+        let def = spring_tdf::WeaponDefs::from_tdf(&tdf)
+            .get("Infection")
+            .cloned()
+            .unwrap();
+        weapons.insert_for_test("Infection", def);
+        let reach = |x: f32| {
+            cast_reach(
+                cast_limit(UnitKind::Obelisk, &weapons),
+                Vec3::ZERO,
+                Vec3::X * x,
+                false,
+            )
+        };
+        assert_eq!(reach(1700.0), CastReach::Fire);
+        assert_eq!(reach(1900.0), CastReach::Refuse);
     }
 
     /// Terminal and Firewall start with a full recharge (upstream

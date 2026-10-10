@@ -294,6 +294,7 @@ pub fn death_system(
                     weapon: blast.weapon,
                     impact_pos: pos,
                     attacker_distance: 0.0,
+                    owner_team: None,
                 });
 
                 explosions.events.push(ExplosionEvent {

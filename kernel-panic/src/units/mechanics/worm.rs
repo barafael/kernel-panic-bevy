@@ -155,6 +155,7 @@ pub fn queue_wormsplash(
             weapon: splash,
             impact_pos,
             attacker_distance: 0.0,
+            owner_team: None,
         });
     }
 }

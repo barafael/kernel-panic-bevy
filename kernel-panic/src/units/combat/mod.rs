@@ -511,6 +511,7 @@ pub(super) fn fire_salvo_shot(
                 weapon: shot.weapon,
                 impact_pos,
                 attacker_distance: aim_dist,
+                owner_team: None,
             });
         }
         pending_attacks.events.push(AttackEvent {
@@ -766,6 +767,7 @@ pub fn combat_system(
                     weapon: id,
                     impact_pos: ground,
                     attacker_distance: 0.0,
+                    owner_team: None,
                 });
                 pending_explosions.events.push(ExplosionEvent {
                     pos: ground,

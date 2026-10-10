@@ -53,6 +53,13 @@ pub struct PendingDamage {
     /// was queued. Used by dynamic-damage weapons (BugCannon) to scale
     /// the primary hit; zero is fine for single-range weapons.
     pub attacker_distance: f32,
+    /// The attacker's team, captured when the attacker may be gone by
+    /// the time the hit is drained (a projectile whose shooter died in
+    /// flight — the engine keeps the projectile's `teamID`). Used for
+    /// `avoidfriendly` splash filtering; `None` reads it from the live
+    /// attacker. Infection and Firewall reflection still need the
+    /// attacker alive, as upstream (a dead owner is a nil `attackerID`).
+    pub owner_team: Option<u8>,
 }
 
 impl PendingDamage {
@@ -67,6 +74,7 @@ impl PendingDamage {
             weapon,
             impact_pos,
             attacker_distance: 0.0,
+            owner_team: None,
         }
     }
 }
@@ -683,6 +691,7 @@ impl DamagePass<'_, '_> {
                 team: team.0,
                 faction: *faction,
             });
+        let owner_team = attacker.map(|a| a.team).or(pending.owner_team);
         let paralyze_time = weapon_def.paralyzer.then_some(weapon_def.paralyze_time);
         // `GetDynamicDamages` scales the projectile's whole damage array,
         // so the falloff reaches splash victims too.
@@ -768,8 +777,8 @@ impl DamagePass<'_, '_> {
                     return;
                 }
                 if avoid_friendly
-                    && let Some(attacker) = attacker
-                    && crate::units::components::is_friendly(candidate.team, attacker.team)
+                    && let Some(team) = owner_team
+                    && crate::units::components::is_friendly(candidate.team, team)
                 {
                     return;
                 }
@@ -1174,6 +1183,7 @@ mod tests {
             weapon,
             impact_pos: at,
             attacker_distance: 0.0,
+            owner_team: None,
         }
     }
 
@@ -1258,6 +1268,7 @@ mod tests {
                 weapon: WeaponId::BUILD_LASER,
                 impact_pos: Vec3::ZERO,
                 attacker_distance: 0.0,
+                owner_team: None,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -1651,6 +1662,42 @@ mod tests {
             "closed Byte, full damage"
         );
         assert!((hp(&app, kernel) - 19_000.0).abs() < 1e-2, "homebase, 10%");
+    }
+
+    /// Why: the splash filter read the attacker's team from the live
+    /// entity, so a shell whose shooter died in flight splashed the
+    /// shooter's allies. The team captured at launch keeps
+    /// `avoidfriendly` working; infection, which needs a living
+    /// attacker upstream, does not fire.
+    #[test]
+    fn orphaned_shell_keeps_its_team_for_avoid_friendly() {
+        let mut weapons = WeaponRegistry::default();
+        let shell = weapons.insert_for_test(
+            "VirusBeam",
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 100.0,
+                    ..Default::default()
+                },
+                area_of_effect: 200.0,
+                edge_effectiveness: 1.0,
+                explosion_speed_raw: 65535.0,
+                avoid_friendly: true,
+                ..Default::default()
+            },
+        );
+        let mut app = damage_app(weapons, UnitRegistry::empty());
+        let dead_shooter = app.world_mut().spawn_empty().id();
+        app.world_mut().despawn(dead_shooter);
+        let friend = unit(&mut app, UnitKind::Bit, 1, Vec3::X * 20.0, 1000.0);
+        let enemy = unit(&mut app, UnitKind::Bit, 0, Vec3::X * -20.0, 1000.0);
+        let mut hit = shot(None, dead_shooter, shell, Vec3::ZERO);
+        hit.owner_team = Some(1);
+        app.world_mut().resource_mut::<DamageQueue>().push(hit);
+        run_damage(&mut app);
+        assert_eq!(hp(&app, friend), 1000.0, "the shooter's ally is spared");
+        assert_eq!(hp(&app, enemy), 900.0);
+        assert!(app.world().get::<Infected>(enemy).is_none());
     }
 
     /// Every hit of half a point or more tells the AI where the team
