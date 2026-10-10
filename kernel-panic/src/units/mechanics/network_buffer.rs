@@ -1,7 +1,7 @@
 //! Network faction's packet-buffer mechanic.
 //!
-//! Ports don't spawn Packets directly. Instead each Port ticks a shared
-//! per-team counter every `PORT_TICK_INTERVAL` seconds; the player
+//! Ports don't spawn Packets directly. Instead each finished Port adds
+//! one to a shared per-team counter every `PORT_TICK_INTERVAL`; the player
 //! dispatches stored packets from any teleporter (Port or Connection)
 //! by hotkey. Packets near a friendly teleporter can return to the
 //! buffer, giving Network players mobile spawn points.
@@ -17,10 +17,13 @@ use crate::sim::{GAME_SPEED, frames_to_secs};
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
+use crate::units::lifecycle::spawning::Emerging;
 
-/// Seconds between per-Port buffer increments. Upstream uses 164 sim
-/// frames at 30 fps ≈ 5.47s.
-const PORT_TICK_INTERVAL: f32 = frames_to_secs(164.0);
+/// Seconds between per-Port buffer increments. network_buffer.lua
+/// re-arms a Port `delayFrames=164` after each packet but only checks
+/// on every 8th frame (`(t + 1) % 8`), so the period rounds up to the
+/// next multiple of 8: 168 frames (5.6 s).
+const PORT_TICK_INTERVAL: f32 = frames_to_secs(168.0);
 
 /// Max packets that can spawn in a single Dispatch — matches upstream's
 /// 12-slot offset list.
@@ -68,8 +71,10 @@ impl PacketBuffer {
     }
 }
 
-/// Per-Port timer component: when it reaches `PORT_TICK_INTERVAL`, the
-/// Port increments its team's buffer and resets.
+/// Per-Port timer component: seconds until the Port's next packet.
+/// Starts due: network_buffer.lua's `UnitFinished` sets
+/// `portList[u] = 0`, so a Port pays its first packet as soon as it is
+/// built, then one every [`PORT_TICK_INTERVAL`].
 #[derive(Component, Default)]
 pub struct PortTimer(pub f32);
 
@@ -107,9 +112,12 @@ pub struct EnterEvent {
     pub packet: Entity,
 }
 
+/// Pay out every finished Port's packets. A Port under construction
+/// (still [`Emerging`]) is not in network_buffer.lua's `portList` yet
+/// — it joins on `UnitFinished` — so its timer doesn't run.
 pub fn tick_port_buffers(
     time: Res<Time>,
-    mut ports: Query<(&UnitType, &TeamId, &mut PortTimer), Without<Dying>>,
+    mut ports: Query<(&UnitType, &TeamId, &mut PortTimer), (Without<Dying>, Without<Emerging>)>,
     mut buffer: ResMut<PacketBuffer>,
 ) {
     let dt = time.delta_secs();
@@ -117,9 +125,9 @@ pub fn tick_port_buffers(
         if unit.0 != UnitKind::Port {
             continue;
         }
-        timer.0 += dt;
-        if timer.0 >= PORT_TICK_INTERVAL {
-            timer.0 -= PORT_TICK_INTERVAL;
+        timer.0 -= dt;
+        if timer.0 <= 0.0 {
+            timer.0 += PORT_TICK_INTERVAL;
             buffer.add(team.0, 1);
         }
     }
@@ -315,6 +323,46 @@ mod tests {
         assert_eq!(b.get(0), 2);
         assert_eq!(b.take(0, 10), 2);
         assert_eq!(b.get(0), 0);
+    }
+
+    #[test]
+    /// Why: the Port's timer used to run from the moment its nanoframe
+    /// appeared. network_buffer.lua only lists a Port on `UnitFinished`
+    /// (`portList[u] = 0`): nothing while it is built, one packet as it
+    /// finishes, then one per 168-frame period.
+    #[test]
+    fn port_pays_only_once_finished() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut app = App::new();
+        app.init_resource::<Time>().init_resource::<PacketBuffer>();
+        let port = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Port),
+                TeamId(2),
+                PortTimer::default(),
+                Emerging {
+                    target_y: 0.0,
+                    remaining: 30.0,
+                    total: 30.0,
+                    rally_point: None,
+                    rally_then: None,
+                    style: crate::units::lifecycle::spawning::EmergeStyle::Fade,
+                },
+            ))
+            .id();
+        let mut step = |app: &mut App, secs: f32| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(secs));
+            app.world_mut().run_system_once(tick_port_buffers).unwrap();
+            app.world().resource::<PacketBuffer>().get(2)
+        };
+        assert_eq!(step(&mut app, 20.0), 0, "under construction");
+        app.world_mut().entity_mut(port).remove::<Emerging>();
+        assert_eq!(step(&mut app, 0.1), 1, "first packet on completion");
+        assert_eq!(step(&mut app, 5.0), 1);
+        assert_eq!(step(&mut app, 0.6), 2, "then every 5.6 s");
     }
 
     #[test]
