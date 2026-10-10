@@ -115,18 +115,22 @@ impl SpeedMap {
     /// runtime, e.g. Hex Farm's towers rising and sinking), with the
     /// same `max_slope` / `slope_mod` the map was built with. Cheaper
     /// than a full [`Self::from_heightmap`] rebuild for local edits.
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// `cell_mod(x, z)` multiplies each recomputed cell, as whatever
+    /// built the map folded a per-square factor into it (the terrain
+    /// type's speed in `CMoveMath::GetPosSpeedMod`); pass `|_, _| 1.0`
+    /// for a slope-only map. Returns the cell rectangle
+    /// `[x_lo, z_lo, x_hi, z_hi]` (inclusive) that was rewritten, so a
+    /// caller can re-apply any other overlay to exactly those cells.
     pub fn update_region(
         &mut self,
         heights: &[f32],
         heightmap_width: u32,
         max_slope: f32,
         slope_mod: f32,
-        x0: u32,
-        z0: u32,
-        x1: u32,
-        z1: u32,
-    ) {
+        [x0, z0, x1, z1]: [u32; 4],
+        cell_mod: impl Fn(u32, u32) -> f32,
+    ) -> [u32; 4] {
         let hw = heightmap_width as usize;
         let hh = self.height as usize + 1;
         let old_max = self.max_speed;
@@ -140,7 +144,7 @@ impl SpeedMap {
                 let cell = &mut self.speeds[(z * self.width + x) as usize];
                 let speed = cell_speed(
                     heights, hw, hh, x as usize, z as usize, max_slope, slope_mod,
-                );
+                ) * cell_mod(x, z);
                 lowered_max |= *cell >= old_max && speed < old_max;
                 self.max_speed = self.max_speed.max(speed);
                 *cell = speed;
@@ -151,6 +155,7 @@ impl SpeedMap {
         if lowered_max && self.max_speed == old_max && !self.speeds.iter().any(|&s| s >= old_max) {
             self.refresh_max_speed();
         }
+        [x_lo, z_lo, x_hi, z_hi]
     }
 
     /// Build a uniform speed map (all cells have the same speed).
@@ -458,8 +463,34 @@ mod update_region_tests {
         let mut heights: Vec<f32> = (0..w * h).map(|i| (i % 5) as f32).collect();
         let mut map = SpeedMap::from_heightmap(&heights, w, h, 0.4, 10.0);
         heights[(3 * w + 4) as usize] = 90.0;
-        map.update_region(&heights, w, 0.4, 10.0, 4, 3, 4, 3);
+        let rect = map.update_region(&heights, w, 0.4, 10.0, [4, 3, 4, 3], |_, _| 1.0);
         let full = SpeedMap::from_heightmap(&heights, w, h, 0.4, 10.0);
         assert_eq!(map.speeds, full.speeds);
+        // The vertex's four cells, widened to whole 2×2 slope blocks.
+        assert_eq!(rect, [2, 2, 5, 3]);
+    }
+
+    /// A per-cell factor folded into the map at build time (terrain
+    /// types) is folded into the recomputed cells too, and a raised
+    /// cell lifts the cached maximum.
+    #[test]
+    fn update_region_applies_the_cell_factor() {
+        let (w, h) = (9u32, 7u32);
+        let factor = |x: u32, _z: u32| if x < 4 { 4.0 } else { 0.5 };
+        let mut heights = vec![0.0f32; (w * h) as usize];
+        let mut map = SpeedMap::uniform(w - 1, h - 1, 1.0);
+        heights[(3 * w + 4) as usize] = 1.0;
+        map.update_region(&heights, w, 0.4, 10.0, [4, 3, 4, 3], factor);
+        let mut full = SpeedMap::from_heightmap(&heights, w, h, 0.4, 10.0);
+        for x in 2..=5 {
+            for z in 2..=3 {
+                full.speeds[(z * (w - 1) + x) as usize] *= factor(x, z);
+            }
+        }
+        assert_eq!(map.speeds, full.speeds);
+        assert_eq!(
+            map.max_speed(),
+            full.speeds.iter().copied().fold(0.0, f32::max)
+        );
     }
 }

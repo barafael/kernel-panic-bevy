@@ -273,6 +273,33 @@ impl NavGridSet {
         }
     }
 
+    /// The heights at vertices `[x0, z0, x1, z1]` (inclusive) changed:
+    /// recompute every bucket's cells there as the map loader built
+    /// them, slope speed times the square's terrain-type speed
+    /// (`CMoveMath::GetPosSpeedMod` reads both live). Returns the cell
+    /// rectangle rewritten (the same for every bucket), `None` without
+    /// buckets. Re-checking paths ([`Self::bump`]) is the caller's.
+    pub fn heights_changed(
+        &mut self,
+        heights: &[f32],
+        heightmap_width: u32,
+        vertices: [u32; 4],
+    ) -> Option<[u32; 4]> {
+        let terrain = &self.terrain_speed;
+        let mut rect = None;
+        for bucket in &mut self.buckets {
+            rect = Some(bucket.speed_map.update_region(
+                heights,
+                heightmap_width,
+                bucket.max_slope,
+                spring_pathfinding::slope_mod_from_max_slope(bucket.max_slope),
+                vertices,
+                |x, z| terrain.at_square(x, z),
+            ));
+        }
+        rect
+    }
+
     /// The square rectangle changed since revision `since`, or `None`
     /// when that reaches further back than remembered (treat all
     /// squares as changed).
@@ -1254,6 +1281,44 @@ mod tests {
             Vec2::new(200.0, 60.0)
         ));
     }
+
+    /// Runtime terrain edits rebuild the touched cells the way the map
+    /// loader built them: slope speed times the terrain type's speed.
+    /// Slope alone dropped a 4× lane back to 1× (and opened closed
+    /// ground) wherever the heights changed.
+    #[test]
+    fn heights_changed_keeps_the_terrain_type_speed() {
+        use spring_map::map_types::TerrainTypes;
+        let n = 8u32;
+        let mut types = TerrainTypes::default();
+        types.move_speeds[1].kbot = 4.0;
+        types.move_speeds[2].kbot = 0.0;
+        // 4×4 typemap cells over 8×8 squares: column 0 fast, 1 closed.
+        let typemap: Vec<u8> = (0..16).map(|i| [1, 2, 0, 0][i % 4]).collect();
+        let mut nav = NavGridSet {
+            terrain_speed: crate::terrain::terrain_speed::TerrainSpeedMap::new(
+                &typemap, 4, 4, &types,
+            ),
+            ..Default::default()
+        };
+        let heights = vec![0.0; ((n + 1) * (n + 1)) as usize];
+        let mut speed_map = SpeedMap::from_heightmap(&heights, n + 1, n + 1, 1.0, 4.0);
+        nav.terrain_speed.apply(&mut speed_map);
+        let built = speed_map.speeds.clone();
+        nav.buckets.push(NavBucket {
+            max_slope: 1.0,
+            speed_map,
+        });
+        let cells = nav.heights_changed(&heights, n + 1, [0, 0, n, n]);
+        assert_eq!(cells, Some([0, 0, n - 1, n - 1]));
+        let map = &nav.buckets[0].speed_map;
+        assert_eq!(map.speeds, built);
+        assert_eq!(map.get(0, 0), 4.0);
+        assert_eq!(map.get(2, 0), 0.0);
+        assert_eq!(map.get(4, 0), 1.0);
+        assert_eq!(map.max_speed(), 4.0);
+    }
+
     use spring_pathfinding::SpeedMap;
 
     fn bucket_with(cap: f32) -> NavBucket {

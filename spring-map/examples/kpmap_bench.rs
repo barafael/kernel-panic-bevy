@@ -178,20 +178,20 @@ fn main() {
 }
 
 /// Split a kpmap into its raw postcard payload (v1 raw, v2 deflate,
-/// v3 zstd).
+/// v3 and later zstd).
 fn inflate_body(bytes: &[u8]) -> (Vec<u8>, bool) {
     let magic = &bytes[..8];
     let len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let body = &bytes[12..12 + len];
     if magic == b"kpmapv1\0" {
         (body.to_vec(), true)
-    } else if magic == b"kpmapv3\0" {
-        let mut decoder = ruzstd::decoding::StreamingDecoder::new(body).unwrap();
+    } else if magic == b"kpmapv2\0" {
+        let mut decoder = flate2::read::DeflateDecoder::new(body);
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         (out, false)
     } else {
-        let mut decoder = flate2::read::DeflateDecoder::new(body);
+        let mut decoder = ruzstd::decoding::StreamingDecoder::new(body).unwrap();
         let mut out = Vec::new();
         decoder.read_to_end(&mut out).unwrap();
         (out, false)

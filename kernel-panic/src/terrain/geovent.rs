@@ -357,32 +357,46 @@ pub fn reconcile_vent_claims(
     }
     timer.0 = 0.0;
 
-    let occupancy_sq = BUILDING_OCCUPANCY_RADIUS * BUILDING_OCCUPANCY_RADIUS;
-    // Horizontal-only distance: `spawn_unit` lifts a building's root
-    // by its model's `ground_lift`, and `Emerging` sinks it further
-    // for the rise animation — both apply to Y only. Measuring 3D
-    // distance to the vent (which sits at ground level) pushes a
-    // building whose XZ *exactly* matches the vent outside a tight
-    // 16-elmo sphere the moment its root Y diverges by 16+. Restrict
-    // the check to the XZ plane so the occupancy test tracks the
-    // building's footprint rather than its current emerge height.
-    let horiz_dist_sq = crate::units::spatial::flat_dist_sq;
-    for (vent_entity, vent, claim) in &vents {
-        let builder_committed = pending
-            .iter()
-            .any(|p| horiz_dist_sq(p.site, vent.pos) < 1.0)
-            || constructing
+    // Index the vents once, then visit them from each site and
+    // building: O(vents + sites + units) per tick, not their product
+    // (a Hex Farm match runs hundreds of vents against every unit).
+    let mut grid = VentGrid::default();
+    let mut claimed: Vec<bool> = Vec::new();
+    for (i, (_, vent, _)) in vents.iter().enumerate() {
+        grid.insert(i, vent.pos);
+        claimed.push(false);
+    }
+    if claimed.is_empty() {
+        return;
+    }
+    // A committed builder claims the vent its site coincides with
+    // (a, b, b′ above)…
+    let sites = pending
+        .iter()
+        .map(|p| p.site)
+        .chain(constructing.iter().map(|c| c.site))
+        .chain(
+            queues
                 .iter()
-                .any(|c| horiz_dist_sq(c.site, vent.pos) < 1.0)
-            || queues.iter().flat_map(|q| &q.commands).any(|c| {
-                matches!(c, crate::interaction::movement::QueuedCommand::BuildAt { site, .. }
-                    if horiz_dist_sq(*site, vent.pos) < 1.0)
-            });
-        let building_present = buildings.iter().any(|(ut, gtf)| {
-            unit_registry.is_building(ut.0)
-                && horiz_dist_sq(gtf.translation(), vent.pos) <= occupancy_sq
-        });
-        let should_claim = builder_committed || building_present;
+                .flat_map(|q| &q.commands)
+                .filter_map(|c| match c {
+                    crate::interaction::movement::QueuedCommand::BuildAt { site, .. } => {
+                        Some(*site)
+                    }
+                    _ => None,
+                }),
+        );
+    for site in sites {
+        grid.for_each_near(site, SITE_MATCH_SQ, false, |i| claimed[i] = true);
+    }
+    // …and a finished building near it does (c).
+    let occupancy_sq = BUILDING_OCCUPANCY_RADIUS * BUILDING_OCCUPANCY_RADIUS;
+    for (ut, gtf) in &buildings {
+        if unit_registry.is_building(ut.0) {
+            grid.for_each_near(gtf.translation(), occupancy_sq, true, |i| claimed[i] = true);
+        }
+    }
+    for ((vent_entity, _, claim), should_claim) in vents.iter().zip(claimed) {
         match (should_claim, claim.is_some()) {
             (true, false) => {
                 commands.entity(vent_entity).insert(VentClaim);
@@ -391,6 +405,64 @@ pub fn reconcile_vent_claims(
                 commands.entity(vent_entity).remove::<VentClaim>();
             }
             _ => {}
+        }
+    }
+}
+
+/// A build site "coincides" with a vent within one elmo (squared,
+/// exclusive): placement snaps the site onto the vent's position.
+const SITE_MATCH_SQ: f32 = 1.0;
+
+/// Vents bucketed by [`BUILDING_OCCUPANCY_RADIUS`]-sized XZ cells, so a
+/// lookup within that radius only reads the 3×3 cells around it.
+///
+/// Distances are horizontal-only: `spawn_unit` lifts a building's root
+/// by its model's `ground_lift`, and `Emerging` sinks it further for the
+/// rise animation — both apply to Y only. Measuring 3D distance to the
+/// vent (which sits at ground level) pushes a building whose XZ
+/// *exactly* matches the vent outside a tight 16-elmo sphere the moment
+/// its root Y diverges by 16+, so the occupancy test tracks the
+/// building's footprint rather than its current emerge height.
+#[derive(Default)]
+struct VentGrid {
+    cells: std::collections::HashMap<(i32, i32), Vec<(usize, Vec3)>>,
+}
+
+impl VentGrid {
+    const CELL: f32 = BUILDING_OCCUPANCY_RADIUS;
+
+    fn cell(pos: Vec3) -> (i32, i32) {
+        (
+            (pos.x / Self::CELL).floor() as i32,
+            (pos.z / Self::CELL).floor() as i32,
+        )
+    }
+
+    fn insert(&mut self, index: usize, pos: Vec3) {
+        self.cells
+            .entry(Self::cell(pos))
+            .or_default()
+            .push((index, pos));
+    }
+
+    /// Call `f` with every vent horizontally within `sqrt(range_sq)` of
+    /// `pos` (`inclusive`: `<=`, else `<`). The range must not exceed
+    /// one cell.
+    fn for_each_near(&self, pos: Vec3, range_sq: f32, inclusive: bool, mut f: impl FnMut(usize)) {
+        debug_assert!(range_sq <= Self::CELL * Self::CELL);
+        let (cx, cz) = Self::cell(pos);
+        for dz in -1..=1 {
+            for dx in -1..=1 {
+                let Some(bucket) = self.cells.get(&(cx + dx, cz + dz)) else {
+                    continue;
+                };
+                for &(i, vent) in bucket {
+                    let d = crate::units::spatial::flat_dist_sq(pos, vent);
+                    if d < range_sq || (inclusive && d == range_sq) {
+                        f(i);
+                    }
+                }
+            }
         }
     }
 }
@@ -464,4 +536,116 @@ pub fn tick_geovent_smoke(
         &mut batch_visibility,
         &mut commands,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interaction::movement::{CommandQueue, QueuedCommand};
+    use crate::units::content::definitions::UnitKind;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn vent(world: &mut World, x: f32, z: f32, claimed: bool) -> Entity {
+        let mut e = world.spawn(GeoventSmoker {
+            pos: Vec3::new(x, 10.0, z),
+            emit_timer: 0.0,
+            rng: 1,
+        });
+        if claimed {
+            e.insert(VentClaim);
+        }
+        e.id()
+    }
+
+    /// Every claim source of the position rule, and its boundaries.
+    #[test]
+    fn claims_follow_sites_and_buildings() {
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(VentClaimReleaseTimer(1.0));
+        world.insert_resource(UnitRegistry::load());
+        let pending = vent(&mut world, 100.0, 100.0, false);
+        let building = vent(&mut world, 300.0, 100.0, false);
+        let queued = vent(&mut world, 500.0, 100.0, false);
+        let constructing = vent(&mut world, -40.0, -8.0, false);
+        let far_building = vent(&mut world, 700.0, 100.0, true);
+        let mobile_only = vent(&mut world, 900.0, 100.0, false);
+        let near_miss_site = vent(&mut world, 1100.0, 100.0, true);
+
+        world.spawn(PendingBuild {
+            kind: UnitKind::Socket,
+            site: Vec3::new(100.0, 0.0, 100.0),
+        });
+        world.spawn(Constructing {
+            kind: UnitKind::Socket,
+            site: Vec3::new(-40.5, 3.0, -8.5),
+            building: None,
+        });
+        world.spawn(CommandQueue {
+            commands: vec![
+                QueuedCommand::BuildAt {
+                    kind: UnitKind::Socket,
+                    site: Vec3::new(1101.0, 0.0, 100.0), // exactly 1 elmo: no
+                },
+                QueuedCommand::BuildAt {
+                    kind: UnitKind::Socket,
+                    site: Vec3::new(500.0, 0.0, 100.5),
+                },
+            ],
+        });
+        // A building exactly 16 elmos off (inclusive) and lifted well
+        // above the vent: horizontal distance only.
+        world.spawn((
+            UnitType(UnitKind::Socket),
+            GlobalTransform::from_translation(Vec3::new(316.0, 80.0, 100.0)),
+        ));
+        world.spawn((
+            UnitType(UnitKind::Socket),
+            GlobalTransform::from_translation(Vec3::new(716.5, 0.0, 100.0)),
+        ));
+        world.spawn((
+            UnitType(UnitKind::Bit),
+            GlobalTransform::from_translation(Vec3::new(900.0, 0.0, 100.0)),
+        ));
+
+        world.run_system_once(reconcile_vent_claims).unwrap();
+        let claimed = |e| world.get::<VentClaim>(e).is_some();
+        assert!(claimed(pending));
+        assert!(claimed(building));
+        assert!(claimed(queued));
+        assert!(claimed(constructing));
+        assert!(!claimed(far_building), "released");
+        assert!(!claimed(mobile_only), "units don't claim");
+        assert!(!claimed(near_miss_site), "released");
+    }
+
+    /// The grid lookup finds exactly what a scan of every vent finds,
+    /// across cell seams and negative coordinates.
+    #[test]
+    fn grid_lookup_matches_a_full_scan() {
+        let mut rng = 0x9e37_79b9u32;
+        let coord = |rng: &mut u32| (next_f32(rng) - 0.5) * 400.0;
+        let vents: Vec<Vec3> = (0..300)
+            .map(|_| Vec3::new(coord(&mut rng), 0.0, coord(&mut rng)))
+            .collect();
+        let mut grid = VentGrid::default();
+        for (i, &v) in vents.iter().enumerate() {
+            grid.insert(i, v);
+        }
+        for _ in 0..500 {
+            let q = Vec3::new(coord(&mut rng), 50.0, coord(&mut rng));
+            for (range_sq, inclusive) in [(1.0, false), (256.0, true), (100.0, false)] {
+                let mut found = Vec::new();
+                grid.for_each_near(q, range_sq, inclusive, |i| found.push(i));
+                found.sort_unstable();
+                let expected: Vec<usize> = (0..vents.len())
+                    .filter(|&i| {
+                        let d = crate::units::spatial::flat_dist_sq(q, vents[i]);
+                        d < range_sq || (inclusive && d == range_sq)
+                    })
+                    .collect();
+                assert_eq!(found, expected);
+            }
+        }
+    }
 }
