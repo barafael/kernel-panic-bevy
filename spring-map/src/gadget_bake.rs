@@ -44,17 +44,24 @@ pub struct BakedGadgets {
 impl BakedGadgets {
     /// Overwrite `parsed.heights` with the captured post-gadget terrain.
     /// No-op for a capture without terrain (Hex Farm's is generated per
-    /// match).
-    pub fn apply_heights(&self, parsed: &mut crate::map_types::ParsedMap) {
+    /// match). Captures are matched by gadget file name, so a different
+    /// build of the map (another size) can reach here: that is a load
+    /// error, not a panic on the loader thread.
+    pub fn apply_heights(
+        &self,
+        parsed: &mut crate::map_types::ParsedMap,
+    ) -> Result<(), crate::map_types::MapError> {
         if self.heights.is_empty() {
-            return;
+            return Ok(());
         }
-        assert_eq!(
-            parsed.heights.len(),
-            self.heights.len(),
-            "baked heightmap size mismatch — archive and capture disagree"
-        );
+        if parsed.heights.len() != self.heights.len() {
+            return Err(crate::map_types::MapError::GadgetCaptureMismatch {
+                expected: self.heights.len(),
+                actual: parsed.heights.len(),
+            });
+        }
         parsed.heights.copy_from_slice(&self.heights);
+        Ok(())
     }
 }
 
@@ -100,5 +107,31 @@ pub fn lookup(lua_files: &[LuaFile]) -> Option<&'static BakedGadgets> {
         Some(hexfarm8())
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map_types::{MapError, ParsedMap, SmfHeader};
+
+    /// A capture applied to a map of another size is a load error the
+    /// caller can report, not a panic on the loader thread.
+    #[test]
+    fn mismatched_capture_is_an_error() {
+        let header = SmfHeader::new_flat(4, 4, 0.0, 1.0);
+        let mut parsed = ParsedMap {
+            heights: vec![0.0; header.heightmap_len()],
+            header,
+            features: Vec::new(),
+            metalmap: Vec::new(),
+        };
+        assert!(matches!(
+            palladium().apply_heights(&mut parsed),
+            Err(MapError::GadgetCaptureMismatch { .. })
+        ));
+        assert!(parsed.heights.iter().all(|&h| h == 0.0), "left untouched");
+        // Hex Farm's capture carries no terrain: always a no-op.
+        assert!(hexfarm8().apply_heights(&mut parsed).is_ok());
     }
 }

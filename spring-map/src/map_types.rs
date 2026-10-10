@@ -19,6 +19,13 @@ pub enum MapError {
     Smf(#[from] SmfParseError),
     #[error("SMT parse error: {0}")]
     Smt(#[from] SmtParseError),
+    /// A captured Lua gadget (`gadget_bake`) matched the archive by
+    /// gadget name but was captured from a map of another size.
+    #[error(
+        "baked gadget heightmap has {expected} samples, the archive's {actual} \
+         — archive and capture disagree"
+    )]
+    GadgetCaptureMismatch { expected: usize, actual: usize },
     /// Web builds cannot extract source archives (no sevenz / mlua on
     /// wasm32); callers must load baked `.kpmap` files instead.
     #[cfg(target_arch = "wasm32")]
@@ -40,7 +47,10 @@ pub enum SmfParseError {
     FeatureTruncated,
     #[error("metalmap truncated: expected {expected} bytes, got {actual}")]
     MetalmapTruncated { expected: usize, actual: usize },
-    #[error("map size {map_x}x{map_y} squares is outside 1..={MAX_MAP_SQUARES}")]
+    #[error(
+        "map size {map_x}x{map_y} squares is not a multiple of {TILE_SQUARES} in \
+         {TILE_SQUARES}..={MAX_MAP_SQUARES}"
+    )]
     BadMapSize { map_x: i32, map_y: i32 },
 }
 
@@ -48,11 +58,20 @@ pub enum SmfParseError {
 /// 4096; the heightmap allocation is `(x+1)(y+1)` floats).
 pub const MAX_MAP_SQUARES: i32 = 16_384;
 
+/// Map squares per SMT tile side (32 texels at `texelPerSquare` 8): the
+/// tilemap is `(map_x / 4) × (map_y / 4)` tiles, the type and metal
+/// maps `(map_x / 2) × (map_y / 2)` cells.
+pub const TILE_SQUARES: i32 = 4;
+
 impl SmfHeader {
     /// Reject sizes that would over-allocate or underflow downstream
-    /// (`map_x + 1` as usize, `width - 1`, square-count products).
+    /// (`map_x + 1` as usize, `width - 1`, square-count products), and
+    /// sides the tile / type / metal maps can't cover: a side of 1..3
+    /// squares has no tile at all (an empty ground texture), and a
+    /// non-multiple of 4 leaves the last squares without one. Spring's
+    /// mapconv only produces multiples of 128.
     pub fn validate_size(&self) -> Result<(), SmfParseError> {
-        let ok = |n: i32| (1..=MAX_MAP_SQUARES).contains(&n);
+        let ok = |n: i32| (TILE_SQUARES..=MAX_MAP_SQUARES).contains(&n) && n % TILE_SQUARES == 0;
         if ok(self.map_x) && ok(self.map_y) {
             Ok(())
         } else {
@@ -374,4 +393,21 @@ pub struct GroundTexture {
     pub height: usize,
     /// RGBA8 pixel data, row-major, `width * height * 4` bytes.
     pub pixels: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_sides_must_cover_whole_tiles() {
+        let size = |x, y| SmfHeader::new_flat(x, y, 0.0, 1.0).validate_size();
+        assert!(size(128, 256).is_ok());
+        assert!(size(4, 4).is_ok());
+        assert!(size(MAX_MAP_SQUARES, 4).is_ok());
+        for bad in [0, 1, 3, 6, 130, -128, MAX_MAP_SQUARES + 4] {
+            assert!(size(bad, 128).is_err(), "map_x {bad} accepted");
+            assert!(size(128, bad).is_err(), "map_y {bad} accepted");
+        }
+    }
 }

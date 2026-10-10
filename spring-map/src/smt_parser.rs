@@ -213,19 +213,8 @@ mod tests {
 
     #[test]
     fn load_marble_madness_tiles() {
-        let sd7_path = [
-            "kernel-panic/assets/maps/Marble_Madness_Map.sd7",
-            "assets/maps/Marble_Madness_Map.sd7",
-        ]
-        .iter()
-        .map(std::path::Path::new)
-        .find(|p| p.exists());
-        let Some(sd7_path) = sd7_path else {
-            eprintln!("Skipping: map not found");
-            return;
-        };
-
-        let extracted = crate::sd7_archive::load_map_archive(sd7_path).unwrap();
+        let sd7_path = crate::shipped_map("Marble_Madness_Map.sd7");
+        let extracted = crate::sd7_archive::load_map_archive(&sd7_path).unwrap();
         let parsed = crate::smf_parser::parse_smf(&extracted.smf_data).unwrap();
 
         let smt_data = extracted.smt_data.expect("should have SMT data");

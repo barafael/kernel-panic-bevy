@@ -254,18 +254,8 @@ mod tests {
 
     #[test]
     fn parse_real_map() {
-        let sd7_path = [
-            "kernel-panic/assets/maps/Central_Hub.sd7",
-            "assets/maps/Central_Hub.sd7",
-        ]
-        .iter()
-        .map(std::path::Path::new)
-        .find(|p| p.exists());
-        let Some(sd7_path) = sd7_path else {
-            eprintln!("Skipping: map not found");
-            return;
-        };
-        let extracted = crate::sd7_archive::load_map_archive(sd7_path).unwrap();
+        let sd7_path = crate::shipped_map("Central_Hub.sd7");
+        let extracted = crate::sd7_archive::load_map_archive(&sd7_path).unwrap();
         let smd_text = extracted.smd_text.expect("Central Hub should have .smd");
         let info = parse_smd(&smd_text);
 
