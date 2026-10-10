@@ -876,7 +876,7 @@ Deviations / open:
 ### Upstream-waiting workarounds
 
 - [ ] `main.rs` carries four `TODO(windows-resize)` markers
-  compensating for the Bevy 0.18 + Windows "freeze on resize" bug
+  compensating for the Bevy + Windows "freeze on resize" bug
   stack:
   1. Vulkan-only backend (no DX12 fallback) — DX12 swapchain
      reconfigure hangs during `WM_ENTERSIZEMOVE`.
@@ -1273,7 +1273,7 @@ equivalents) directly. No grep hits for either type anywhere in the tree.
   fade via scale rather than per-particle material mutation.
 - [ ] **Observer-style one-shot markers**: `PendingFadeInstall` and
   `JustFired` are "send one message to this entity next frame". Convert to
-  Bevy 0.18 entity-scoped events / observers — stops the component-churn
+  Bevy 0.20 entity-scoped events / observers — stops the component-churn
   that sparse-set storage is compensating for.
 - [ ] **Three bespoke queue types** (`DamageQueue`, `VirusSpawnQueue`,
   `PendingAttacks`) are identical `Vec<T>`-wrapped resources. Either migrate

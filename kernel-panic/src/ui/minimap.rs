@@ -252,8 +252,8 @@ fn update_minimap(
     }
 
     // Nothing moved since the last refresh: the image already shows
-    // exactly this, so skip `get_mut` (which re-uploads the whole
-    // texture) altogether.
+    // exactly this, so leave it untouched (a write re-uploads the whole
+    // texture).
     if !state.base_replaced && state.scratch == state.painted {
         return;
     }
@@ -421,7 +421,7 @@ mod tests {
     }
 
     /// An identical paint list means the image needs no update — the
-    /// refresh skips `Assets::get_mut` and the texture upload; any
+    /// refresh leaves the image untouched and uploads nothing; any
     /// moved pixel repaints.
     #[test]
     fn identical_paint_list_is_a_no_op() {

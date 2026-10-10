@@ -284,12 +284,10 @@ pub fn tick_shield_shells(
             let Ok((_, material, mut visibility)) = shells.get_mut(*child) else {
                 continue;
             };
-            // `get_mut` marks the asset changed (re-upload), so only
-            // take it when the tint actually moved.
-            if materials
-                .get(&material.0)
-                .is_some_and(|mat| mat.base_color != tinted)
-                && let Some(mut mat) = materials.get_mut(&material.0)
+            // A write marks the material modified (a GPU re-upload), so
+            // only write when the tint actually moved.
+            if let Some(mut mat) = materials.get_mut(&material.0)
+                && mat.base_color != tinted
             {
                 mat.base_color = tinted;
             }
