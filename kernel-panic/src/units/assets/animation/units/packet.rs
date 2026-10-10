@@ -35,7 +35,8 @@ impl UnitAnim for PacketAnim {
         // muzzle cycles via ResetAim in the script — a single `gp` piece
         // here, so no cycling needed.
         rig.turn_rad(self.pieces.turret, Axis::Y, h, deg2rad(720.0));
-        true
+        // `wait-for-turn turret around y-axis; return 1`.
+        rig.turn_settled(self.pieces.turret, Axis::Y)
     }
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {

@@ -4,10 +4,21 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim, deg2rad};
 
-/// dos.bos AimWeapon1 aims over ~0.35s of waits before returning 1.
-const AIM_SETTLE: f32 = 0.35;
 /// dos.bos ResetAim(): `sleep 3000` before relaxing the pose.
 const AIM_RESET_DELAY: f32 = 3.0;
+
+/// Where dos.bos `ResetAim()` is: started by a completed `AimWeapon1`,
+/// killed (`signal SIG_AIM`) by the next one.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+enum Reset {
+    #[default]
+    Idle,
+    /// `sleep 3000`, seconds elapsed.
+    Sleeping(f32),
+    /// `turn slash to y-axis 0 speed <270>; wait-for-turn slash around
+    /// y-axis`, then x home, center home, `aimed=0`.
+    Unwinding,
+}
 
 #[derive(Clone, Copy, Default)]
 struct DosPieces {
@@ -31,11 +42,10 @@ impl DosPieces {
 #[derive(Default)]
 pub struct DosAnim {
     pieces: DosPieces,
-    /// Seconds since the last aim request (drives ResetAim).
-    since_aim: f32,
-    /// Seconds since aim started (fire gate).
-    since_aim_start: f32,
-    /// True while the slash/center pose is extended.
+    /// The script's `ResetAim()` thread.
+    reset: Reset,
+    /// The script's `aimed` static: set once the first aim's x-axis
+    /// tilt has landed, cleared when `ResetAim()` finishes.
     aimed: bool,
     /// Ground-spark timer while moving.
     spark_timer: f32,
@@ -63,15 +73,25 @@ impl UnitAnim for DosAnim {
             self.spark_timer = 0.0;
         }
 
-        if self.aimed {
-            self.since_aim += ctx.dt;
-            self.since_aim_start += ctx.dt;
-            if self.since_aim > AIM_RESET_DELAY {
-                // ResetAim(): relax the pose.
-                self.aimed = false;
+        match self.reset {
+            Reset::Idle => {}
+            Reset::Sleeping(t) if t + ctx.dt < AIM_RESET_DELAY => {
+                self.reset = Reset::Sleeping(t + ctx.dt);
+            }
+            Reset::Sleeping(_) => {
+                // ResetAim(): turn slash to y-axis 0 speed <270>.
                 rig.turn_deg(self.pieces.slash, Axis::Y, 0.0, 270.0);
-                rig.turn_deg(self.pieces.slash, Axis::X, 0.0, 180.0);
-                rig.move_to(self.pieces.center, Axis::Z, 0.0, 16.0);
+                self.reset = Reset::Unwinding;
+            }
+            Reset::Unwinding => {
+                // wait-for-turn slash around y-axis; then x and the hub
+                // home, aimed=0.
+                if rig.at_target(self.pieces.slash, Axis::Y) {
+                    rig.turn_deg(self.pieces.slash, Axis::X, 0.0, 180.0);
+                    rig.move_to(self.pieces.center, Axis::Z, 0.0, 16.0);
+                    self.aimed = false;
+                    self.reset = Reset::Idle;
+                }
             }
         }
     }
@@ -87,20 +107,27 @@ impl UnitAnim for DosAnim {
     }
 
     fn aim(&mut self, rig: &mut AnimRig, h: f32, p: f32, _ctx: AnimCtx) -> bool {
-        // AimWeapon1(h,p): slash x to (<-67>-p) @<180>; center z to [8]
-        // @16; slash y to h @<270>.
+        // AimWeapon1(h,p): its `signal SIG_AIM` kills a pending ResetAim().
+        self.reset = Reset::Idle;
+        // slash x to (<-67>-p) @<180>; center z to [8] @16.
         rig.turn_deg(self.pieces.slash, Axis::X, -67.0 - p.to_degrees(), 180.0);
         rig.move_to(self.pieces.center, Axis::Z, 8.0, 16.0);
-        rig.turn_rad(self.pieces.slash, Axis::Y, h, deg2rad(270.0));
-
+        // `if (!aimed) wait-for-turn slash around x-axis; aimed=1;` — the
+        // first aim tilts the blade up before it swings round.
         if !self.aimed {
+            if !rig.turn_settled(self.pieces.slash, Axis::X) {
+                return false;
+            }
             self.aimed = true;
-            self.since_aim = 0.0;
-            self.since_aim_start = 0.0;
-        } else {
-            // Retarget: keep the settle window honest.
-            self.since_aim = 0.0;
         }
-        self.since_aim_start >= AIM_SETTLE
+        // slash y to h @<270>; wait for both turns; start ResetAim();
+        // return 1.
+        rig.turn_rad(self.pieces.slash, Axis::Y, h, deg2rad(270.0));
+        let ready = rig.turn_settled(self.pieces.slash, Axis::Y)
+            && rig.turn_settled(self.pieces.slash, Axis::X);
+        if ready {
+            self.reset = Reset::Sleeping(0.0);
+        }
+        ready
     }
 }

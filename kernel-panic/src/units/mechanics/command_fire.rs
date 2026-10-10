@@ -789,6 +789,7 @@ pub fn tick_nx_casts(
                     }),
                 }),
                 build_arc: false,
+                arc_from: None,
             });
         let Some(ability) = ability_for(unit.0) else {
             continue;

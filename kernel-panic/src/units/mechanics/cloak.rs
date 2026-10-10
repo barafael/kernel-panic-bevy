@@ -31,11 +31,13 @@
 
 use bevy::prelude::*;
 
-use crate::units::assets::animation::PieceIndex;
+use crate::units::assets::model_fade::{ModelMaterials, restore_model_materials};
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::bookkeeping::Detector;
+use crate::units::lifecycle::production::PendingFadeInstall;
+use crate::units::lifecycle::spawning::FadeMaterials;
 use crate::units::player::LocalTeam;
 
 /// Master switch for fog-of-war / cloak-hiding from the [`LocalTeam`]'s
@@ -219,7 +221,7 @@ pub fn update_cloak_visibility(
 const CLOAK_FADE_ALPHA: f32 = 0.5;
 
 /// Swap records produced by [`install_cloak_fade_materials`]: each
-/// piece-entity gets a per-unit `StandardMaterial` clone with alpha
+/// model piece wears a per-unit `StandardMaterial` clone with alpha
 /// ramped down to [`CLOAK_FADE_ALPHA`]. On de-cloak
 /// ([`restore_cloak_fade_materials`]) the original handles are
 /// re-installed so the unit pops back to fully opaque.
@@ -229,23 +231,34 @@ pub struct CloakFadeMaterials {
     overrides: Vec<(Entity, Handle<StandardMaterial>)>,
 }
 
-/// Clone the material of freshly-`Added<Cloaked>` friendly units and
-/// install a half-alpha variant on every piece, mirroring the pattern
-/// [`production::install_fade_materials`] already uses for
-/// emerge-fade: one clone per *distinct* source material (a unit's
-/// pieces all share one, so one per unit), not one per piece — a
-/// Worm re-cloaks after every bite, and it has a piece hierarchy.
-/// Enemy cloaked units are either hidden entirely or revealed at full
-/// opacity (detector reveal), so they skip this pass.
+/// Give friendly cloaked units a half-alpha clone of their model
+/// material ([`ModelMaterials::fade`]). Enemy cloaked units are either
+/// hidden entirely or revealed at full opacity (detector reveal), so
+/// they skip this pass.
+///
+/// Waits out a running emerge fade (`FadeMaterials` /
+/// `PendingFadeInstall`): both swap the same piece materials, and
+/// whichever restored second would have put the other's clone back for
+/// good — a Worm or Logic Bomb leaving its factory would have ended up
+/// opaque while cloaked, or translucent forever. Not keyed on
+/// `Added<Cloaked>` for the same reason: a unit cloaked while emerging
+/// gets its cloak look as soon as the emerge fade is done. A Worm
+/// re-cloaks after every bite, which makes one fresh clone per cycle.
 #[allow(clippy::type_complexity)]
 pub fn install_cloak_fade_materials(
     mut commands: Commands,
     fog: Res<FogEnabled>,
     player: Res<LocalTeam>,
-    new_cloaked: Query<(Entity, &TeamId, &Children), (Added<Cloaked>, Without<CloakFadeMaterials>)>,
-    piece_q: Query<&Children, With<PieceIndex>>,
-    leaf_q: Query<&MeshMaterial3d<StandardMaterial>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    new_cloaked: Query<
+        (Entity, &TeamId, &Children),
+        (
+            With<Cloaked>,
+            Without<CloakFadeMaterials>,
+            Without<FadeMaterials>,
+            Without<PendingFadeInstall>,
+        ),
+    >,
+    mut model: ModelMaterials,
 ) {
     for (entity, team, children) in &new_cloaked {
         // While fog is off, every team is "friendly" — fade them all so
@@ -253,65 +266,27 @@ pub fn install_cloak_fade_materials(
         if fog.0 && team.0 != player.0 {
             continue;
         }
-        // (source id, faded clone) — a Vec, not a map: it holds one entry.
-        let mut faded: Vec<(AssetId<StandardMaterial>, Handle<StandardMaterial>)> = Vec::new();
-        let mut overrides = Vec::new();
-        let mut stack: Vec<Entity> = children.iter().collect();
-        while let Some(node) = stack.pop() {
-            if let Ok(grand) = piece_q.get(node) {
-                stack.extend(grand.iter());
-            }
-            let Ok(mat_handle) = leaf_q.get(node) else {
-                continue;
-            };
-            let original = mat_handle.0.clone();
-            let shared = match faded.iter().find(|(id, _)| *id == original.id()) {
-                Some((_, handle)) => handle.clone(),
-                None => {
-                    let Some(src) = materials.get(&original) else {
-                        continue;
-                    };
-                    let clone = StandardMaterial {
-                        base_color: src.base_color.with_alpha(CLOAK_FADE_ALPHA),
-                        base_color_texture: src.base_color_texture.clone(),
-                        emissive: src.emissive,
-                        alpha_mode: AlphaMode::Blend,
-                        unlit: src.unlit,
-                        ..default()
-                    };
-                    let handle = materials.add(clone);
-                    faded.push((original.id(), handle.clone()));
-                    handle
-                }
-            };
-            commands.entity(node).insert(MeshMaterial3d(shared));
-            overrides.push((node, original));
-        }
-        if !overrides.is_empty() {
-            commands
-                .entity(entity)
-                .insert(CloakFadeMaterials { overrides });
-        }
+        let faded = model.fade(children, CLOAK_FADE_ALPHA, &mut commands);
+        // Inserted even when nothing was swapped (a unit without model
+        // pieces), so the unit isn't re-walked every tick.
+        commands.entity(entity).insert(CloakFadeMaterials {
+            overrides: faded.overrides,
+        });
     }
 }
 
-/// Revert each swapped piece back to its pre-cloak material as soon as
-/// [`Cloaked`] is removed (e.g. a Logic Bomb detonating or a Worm
-/// surfacing). Paired with [`install_cloak_fade_materials`].
+/// Revert each swapped piece back to its pre-cloak material once
+/// [`Cloaked`] is gone (a Logic Bomb detonating, a Worm surfacing).
+/// Paired with [`install_cloak_fade_materials`]. A query rather than
+/// `RemovedComponents<Cloaked>`: removal messages are cleared once per
+/// app frame, so a `FixedUpdate` reader misses most of them whenever
+/// the frame rate exceeds the 30 Hz tick.
 pub fn restore_cloak_fade_materials(
     mut commands: Commands,
-    mut removed: RemovedComponents<Cloaked>,
-    fade_q: Query<&CloakFadeMaterials>,
+    uncloaked: Query<(Entity, &CloakFadeMaterials), Without<Cloaked>>,
 ) {
-    for entity in removed.read() {
-        let Ok(fade) = fade_q.get(entity) else {
-            continue;
-        };
-        for (piece, original) in &fade.overrides {
-            commands
-                .entity(*piece)
-                .insert(MeshMaterial3d(original.clone()));
-        }
+    for (entity, fade) in &uncloaked {
+        restore_model_materials(&fade.overrides, &mut commands);
         commands.entity(entity).remove::<CloakFadeMaterials>();
     }
 }
@@ -426,5 +401,73 @@ pub fn update_fog_visibility(
                 *vis = Visibility::Hidden;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units::assets::animation::PieceIndex;
+    use crate::units::assets::model_fade::ModelRoot;
+    use bevy::ecs::system::RunSystemOnce;
+
+    fn world_with_cloaked_unit() -> (World, Entity, Entity, Handle<StandardMaterial>) {
+        let mut world = World::new();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.insert_resource(FogEnabled(false));
+        world.insert_resource(LocalTeam(0));
+        let shared = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let unit = world.spawn((TeamId(0), Cloaked)).id();
+        let root = world.spawn((ModelRoot, ChildOf(unit))).id();
+        let piece = world
+            .spawn((PieceIndex, MeshMaterial3d(shared.clone()), ChildOf(root)))
+            .id();
+        (world, unit, piece, shared)
+    }
+
+    fn piece_alpha(world: &World, piece: Entity) -> f32 {
+        let handle = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(piece)
+            .unwrap()
+            .0;
+        world
+            .resource::<Assets<StandardMaterial>>()
+            .get(handle)
+            .unwrap()
+            .base_color
+            .alpha()
+    }
+
+    /// The cloak look reaches the S3O pieces under the model root, waits
+    /// for a running emerge fade, and comes off once `Cloaked` is gone.
+    #[test]
+    fn cloak_fade_waits_for_emerge_and_restores_on_decloak() {
+        let (mut world, unit, piece, shared) = world_with_cloaked_unit();
+        world.entity_mut(unit).insert(FadeMaterials {
+            faded: Vec::new(),
+            overrides: Vec::new(),
+        });
+        world.run_system_once(install_cloak_fade_materials).unwrap();
+        assert_eq!(
+            piece_alpha(&world, piece),
+            1.0,
+            "emerge fade owns the pieces"
+        );
+
+        world.entity_mut(unit).remove::<FadeMaterials>();
+        world.run_system_once(install_cloak_fade_materials).unwrap();
+        assert_eq!(piece_alpha(&world, piece), CLOAK_FADE_ALPHA);
+        assert!(world.get::<CloakFadeMaterials>(unit).is_some());
+
+        world.entity_mut(unit).remove::<Cloaked>();
+        world.run_system_once(restore_cloak_fade_materials).unwrap();
+        let handle = &world
+            .get::<MeshMaterial3d<StandardMaterial>>(piece)
+            .unwrap()
+            .0;
+        assert_eq!(*handle, shared);
+        assert!(world.get::<CloakFadeMaterials>(unit).is_none());
     }
 }

@@ -8,6 +8,14 @@
 //! wrong-direction rotation fixes (spin-X unified with turn-X, Z spin
 //! de-double-negated) and nothing else.
 //!
+//! One stepping delta is intentional too: the VM interpolated a turn
+//! linearly, so a turn across the ±180° seam went the long way round.
+//! The engine's `CUnitScript::TurnToward` (`Sim/Units/Scripts/
+//! UnitScript.cpp`) always takes the short arc, and so does `tick_rig`
+//! now ([`super::short_arc`]). The equivalence harnesses therefore cover
+//! every turn that doesn't cross the seam (`|target − angle| < π`), and
+//! `turn_across_the_seam_takes_the_short_arc` pins the new behaviour.
+//!
 //! Run individually:
 //!
 //! ```sh
@@ -19,7 +27,11 @@
 //! - `interp_turn_matches_vm` / `interp_move_matches_vm` /
 //!   `interp_spin_then_turn_matches_vm` — the shared interpolation
 //!   stepper `tick_rig` reproduces the VM-era per-axis stepping
-//!   (spin integrate, turn toward target at speed, arrive exactly).
+//!   (spin integrate, turn toward target at speed, arrive exactly) for
+//!   every turn that doesn't cross the ±180° seam.
+//! - `turn_across_the_seam_takes_the_short_arc` — a turn whose linear
+//!   path is longer than half a circle steps the other way (the engine's
+//!   short arc), where the VM stepped forward.
 //! - `turn_visual_conventions` — for turns, the new store-`+θ` pipeline
 //!   renders identically to the old `cobwtf_turn_axis` pipeline on X and
 //!   Y, and is its exact negation on Z (the intentional Trojan
@@ -34,6 +46,7 @@
 //!   axes (X mirror preserved, Y/Z verbatim).
 
 use super::{AnimRig, tick_rig};
+use std::f32::consts::PI;
 
 // ---------------------------------------------------------------------------
 // Reference: the VM-era pipeline, quoted from the pre-harvest code
@@ -203,6 +216,19 @@ fn symbolic_turn_state() -> (f32, f32, f32, f32, f32) {
     (spin, turn_speed, target, rot, dt)
 }
 
+/// The angle the turn interpolation starts from: `rot` after this
+/// frame's spin, exactly as both steppers compute it.
+fn spun(spin: f32, rot: f32, dt: f32) -> f32 {
+    if spin != 0.0 { rot + spin * dt } else { rot }
+}
+
+/// Restrict a turn state to the domain the VM and the engine agree on:
+/// the turn doesn't cross the ±180° seam.
+fn assume_no_seam_crossing(spin: f32, target: f32, rot: f32, dt: f32) {
+    let d = target - spun(spin, rot, dt);
+    kani::assume((-PI..PI).contains(&d));
+}
+
 fn symbolic_move_state() -> (f32, f32, f32, f32) {
     let move_speed = symbolic_finite();
     kani::assume(0.0 <= move_speed && move_speed < 1000.0);
@@ -218,11 +244,13 @@ fn symbolic_move_state() -> (f32, f32, f32, f32) {
 // Harnesses: interpolation equivalence
 // ---------------------------------------------------------------------------
 
-/// With no movement programmed, `tick_rig` steps the rotation exactly as
-/// the VM-era loop did, and reports arrival by zeroing the speed.
+/// With no movement programmed, `tick_rig` steps a turn that doesn't
+/// cross the seam exactly as the VM-era loop did, and reports arrival
+/// by zeroing the speed.
 #[kani::proof]
 fn interp_turn_matches_vm() {
     let (spin, turn_speed, target, rot, dt) = symbolic_turn_state();
+    assume_no_seam_crossing(spin, target, rot, dt);
     let mut rig = one_axis_rig(spin, turn_speed, target, rot, 0.0, 0.0, 0.0);
 
     tick_rig(&mut rig, dt);
@@ -258,12 +286,39 @@ fn interp_move_matches_vm() {
 #[kani::proof]
 fn interp_spin_then_turn_matches_vm() {
     let (spin, turn_speed, target, rot, dt) = symbolic_turn_state();
+    assume_no_seam_crossing(spin, target, rot, dt);
     let mut rig = one_axis_rig(spin, turn_speed, target, rot, 0.0, 0.0, 0.0);
 
     tick_rig(&mut rig, dt);
 
     let (expected, _) = old_step_turn_axis(spin, turn_speed, target, rot, dt);
     assert!(rig.piece_rotations[0][0] == expected);
+}
+
+/// The intentional delta: a turn whose linear path is between half and
+/// three quarters of a circle (`target − angle ∈ [π, 1.5π]`) is a short
+/// backwards turn for the engine. `tick_rig` steps backwards (or lands
+/// on the target), where the VM stepped forwards.
+#[kani::proof]
+fn turn_across_the_seam_takes_the_short_arc() {
+    let (spin, turn_speed, target, rot, dt) = symbolic_turn_state();
+    kani::assume(turn_speed > 0.0);
+    let start = spun(spin, rot, dt);
+    let d = target - start;
+    kani::assume((PI..=1.5 * PI).contains(&d));
+    let mut rig = one_axis_rig(spin, turn_speed, target, rot, 0.0, 0.0, 0.0);
+
+    tick_rig(&mut rig, dt);
+
+    let step = turn_speed * dt;
+    if rig.turn_speeds[0][0] == 0.0 {
+        assert!(rig.piece_rotations[0][0] == target);
+    } else {
+        assert!(rig.piece_rotations[0][0] == start - step);
+        // The VM went the long way: forwards.
+        let (old, _) = old_step_turn_axis(spin, turn_speed, target, rot, dt);
+        assert!(old == start + step);
+    }
 }
 
 // ---------------------------------------------------------------------------

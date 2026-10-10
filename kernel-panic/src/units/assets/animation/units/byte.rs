@@ -340,7 +340,8 @@ impl UnitAnim for ByteAnim {
         // regardless of which way the hull is facing.
         rig.turn_deg(self.pieces.aimer, Axis::X, -90.0 - p.to_degrees(), 270.0);
         rig.turn_rad(self.pieces.aimer, Axis::Y, h, deg2rad(270.0));
-        true
+        // `wait-for-turn aimer around x-axis; ... y-axis; return 1`.
+        rig.turn_settled(self.pieces.aimer, Axis::X) && rig.turn_settled(self.pieces.aimer, Axis::Y)
     }
 
     fn shot(&mut self, rig: &mut AnimRig) {
@@ -432,6 +433,18 @@ mod tests {
         }
     }
 
+    /// Re-run `AimWeapon1` every tick (as the host does) until it
+    /// returns 1; the ticks that took.
+    fn aim_until_ready(anim: &mut ByteAnim, rig: &mut AnimRig, h: f32, p: f32) -> usize {
+        let mut frames = 0;
+        while !anim.aim(rig, h, p, AnimCtx::minimal()) {
+            super::super::super::tick_rig(rig, 1.0 / 30.0);
+            frames += 1;
+            assert!(frames < 60, "the aimer never reached the target");
+        }
+        frames
+    }
+
     /// Open() takes the base lift (0.5 s) plus the blade fan (0.25 s);
     /// the Byte is `isOpen` and may aim just after 0.75 s — moving or not.
     #[test]
@@ -442,7 +455,10 @@ mod tests {
         assert_eq!(anim.is_open(), Some(false));
         step(&mut anim, &mut rig, 6, true, true);
         assert_eq!(anim.is_open(), Some(true));
-        assert!(anim.aim(&mut rig, 0.3, 0.1, AnimCtx::minimal()));
+        // Open, but `wait-for-turn aimer`: x swings 0 → -95.7° at
+        // <270>/s, about a third of a second before the shot commits.
+        let frames = aim_until_ready(&mut anim, &mut rig, 0.3, 0.1);
+        assert!((9..=11).contains(&frames), "took {frames} frames");
         assert_eq!(rig.move_gate, 1.0);
     }
 
@@ -452,7 +468,7 @@ mod tests {
     fn close_keeps_armour_off_until_blades_fold_and_aim_cancels_it() {
         let (mut anim, mut rig) = byte();
         step(&mut anim, &mut rig, 30, true, false);
-        assert!(anim.aim(&mut rig, 0.0, deg2rad(-30.0), AnimCtx::minimal()));
+        aim_until_ready(&mut anim, &mut rig, 0.0, deg2rad(-30.0));
         step(&mut anim, &mut rig, 10, true, false);
         // 3 s idle: Close() begins; aimer x is at -60°, 70°/s ≈ 0.86 s.
         step(&mut anim, &mut rig, 92, false, false);

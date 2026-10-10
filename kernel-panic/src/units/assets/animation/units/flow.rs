@@ -27,18 +27,9 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
 use super::DeathFx;
-use crate::sim::angle_delta;
 
 /// `ResetAim()`'s `sleep 1000` before the base swings back to rest.
 const RESET_AIM_DELAY: f32 = 1.0;
-
-/// `wait-for-turn` tolerance. The script's wait completes once the
-/// turn lands and `AimWeapon1` isn't re-run for a while; the host
-/// re-issues it every tick with a target that has drifted a little
-/// (a hovering Flow circling a moving target), so accept the base as
-/// "there" within 2° — a fraction of one tick's turn (12°–16°) and well
-/// inside what the homing missiles correct in their first frames.
-const WAIT_FOR_TURN_TOLERANCE: f32 = 2.0 * std::f32::consts::PI / 180.0;
 
 #[derive(Clone, Copy, Default)]
 struct FlowPieces {
@@ -139,11 +130,7 @@ impl UnitAnim for FlowAnim {
         self.since_aim = Some(0.0);
         rig.turn_rad(self.pieces.base, Axis::X, -p, deg2rad(360.0));
         rig.turn_rad(self.pieces.base, Axis::Y, h, deg2rad(480.0));
-        let Some(r) = rig.piece_rotations.get(self.pieces.base) else {
-            return true;
-        };
-        angle_delta(r[1], h) <= WAIT_FOR_TURN_TOLERANCE
-            && angle_delta(r[0], -p) <= WAIT_FOR_TURN_TOLERANCE
+        rig.turn_settled(self.pieces.base, Axis::Y) && rig.turn_settled(self.pieces.base, Axis::X)
     }
 
     fn shot(&mut self, rig: &mut AnimRig) {

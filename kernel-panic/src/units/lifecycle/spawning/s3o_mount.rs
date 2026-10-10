@@ -88,7 +88,8 @@ fn flatten_pieces(
 /// Return the Y-offset that lands the model's lowest vertex on the
 /// heightmap, in elmos. Positive values lift the model up (the root sits
 /// above the lowest vertex — e.g. Byte's octaeder.s3o has blade vertices
-/// spanning y∈[-48,48], so `lift = 48`). Negative values sink the model
+/// spanning y∈[-48,48], so `lift = 48`, which `spawn_unit_facing`
+/// overrides to 0 for that unit). Negative values sink the model
 /// down (the root sits *below* the lowest vertex — e.g.
 /// `carrier.s3o / network_base.s3o` is authored with its base above the
 /// piece-tree origin, which reads as "floating" when planted at heightmap
