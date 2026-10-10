@@ -3,8 +3,10 @@ use std::collections::VecDeque;
 use bevy::prelude::*;
 
 use super::spawning::{
-    EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext, spawn_unit_facing,
+    BuildDriven, EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext,
+    spawn_unit_facing,
 };
+use crate::sim::SQUARE_SIZE;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
 use crate::units::components::{Faction, TeamId, UnitStats, UnitType};
@@ -43,6 +45,9 @@ pub struct Producer {
     /// Seconds since the last build step; the yard closes after
     /// `script_triggers::DEACTIVATE_DELAY` of it.
     pub idle_time: f32,
+    /// The unit under construction on the pad (`CFactory::curBuild`),
+    /// from its spawn until the queue pops.
+    buildee: Option<Entity>,
 }
 
 impl Producer {
@@ -55,6 +60,7 @@ impl Producer {
             repeat: false,
             building: false,
             idle_time: 0.0,
+            buildee: None,
         }
     }
 
@@ -239,9 +245,11 @@ pub fn default_production(kind: UnitKind) -> Option<Producer> {
     minifac_spam(kind).map(Producer::spamming)
 }
 
-/// One unit queued for spawning this frame: kind, faction, team, pad
-/// position, facing, `(exit, free spot)` waypoints, build time, style.
+/// One unit queued for spawning this frame: its factory, kind,
+/// faction, team, pad position, facing, `(exit, free spot)` waypoints,
+/// build time, style, and whether the factory drives its build.
 type PendingSpawn = (
+    Entity,
     UnitKind,
     Faction,
     u8,
@@ -250,6 +258,7 @@ type PendingSpawn = (
     Option<(Vec3, Vec3)>,
     f32,
     EmergeStyle,
+    bool,
 );
 
 /// Extra reach of the pad-blocked query beyond the product's own radius:
@@ -352,7 +361,12 @@ pub fn production_system(
         Option<&UnitAnimator>,
         Option<&crate::units::components::Homebase>,
         Has<Emerging>,
+        Has<crate::units::combat::Stunned>,
     )>,
+    // The buildees on the pads, whose build clock their factory drives.
+    // (`Has<Emerging>` above takes no component access.)
+    mut buildees: Query<(&mut Emerging, &mut BuildDriven)>,
+    mut bugger_off: ResMut<BuggerOffRequests>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
     piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
     unit_counts: Res<super::bookkeeping::TeamUnitCounts>,
@@ -365,12 +379,17 @@ pub fn production_system(
     // every frame cost allocator churn for no gain.
     mut spawns: Local<Vec<PendingSpawn>>,
     mut exit_rng: Local<u32>,
+    mut frame: Local<u32>,
 ) {
     if *exit_rng == 0 {
         *exit_rng = 0x5EED_FAC7;
     }
     let dt = time.delta_secs();
     spawns.clear();
+    *frame = frame.wrapping_add(1);
+    // `(gs->frameNum & (UNIT_SLOWUPDATE_RATE >> 1)) == 0`: eight frames
+    // on, eight off.
+    let bugger_off_frame = *frame & 8 == 0;
 
     for (
         factory_entity,
@@ -384,6 +403,7 @@ pub fn production_system(
         animator,
         homebase,
         emerging,
+        stunned,
     ) in &mut producers
     {
         // A factory still rising out of its construction site is not
@@ -401,11 +421,57 @@ pub fn production_system(
             continue;
         };
 
+        // `CFactory::Update`: while the next build waits to start, the
+        // factory periodically asks its own idle units to clear the
+        // exit — even stunned, and whatever its yard is doing.
+        let forward = flat_forward(factory_tf.forward().as_vec3());
+        if !producer.unit_spawned && bugger_off_frame {
+            bugger_off.push(BuggerOff::factory(
+                factory_tf.translation,
+                forward,
+                stats.hit_radius,
+                team.0,
+                factory_entity,
+            ));
+        }
+
+        // The buildee's clock is the build's progress (`buildProgress`
+        // lives on the unit): pick up what it lost to decay while the
+        // factory was stunned. A buildee that is gone — decayed away or
+        // destroyed — ends the build, and the queue front starts over
+        // (`CFactory::DependentDied`).
+        if producer.unit_spawned
+            && let Some(buildee) = producer.buildee
+        {
+            match buildees.get(buildee) {
+                Ok((clock, _)) => {
+                    producer.progress =
+                        (1.0 - clock.remaining / clock.total.max(f32::EPSILON)) * build_time;
+                }
+                Err(_) => {
+                    producer.unit_spawned = false;
+                    producer.buildee = None;
+                    producer.progress = 0.0;
+                }
+            }
+        }
+
         // `CFactory::Update` starts a build only once the yard is open
         // and the script has set `INBUILDSTANCE` (the Kernel's pillars
         // unfolded, the Hole's 2.3 s fade-in, the Window's flap, the
         // Carrier's pad lift). Drivers without such a gate return `None`.
-        if animator.is_some_and(|a| a.driver.is_open() == Some(false)) {
+        // A build under way continues whatever the yard does
+        // (`UpdateBuild` has no yard test).
+        if !producer.unit_spawned && animator.is_some_and(|a| a.driver.is_open() == Some(false)) {
+            producer.idle_time = 0.0;
+            continue;
+        }
+
+        // A stunned factory neither starts nor advances a build
+        // (`CFactory::Update` / `UpdateBuild` bail while stunned), so its
+        // buildee gets no build power and decays. The yard stays open
+        // (`wantClose` needs `!IsStunned()`).
+        if stunned {
             producer.idle_time = 0.0;
             continue;
         }
@@ -445,6 +511,18 @@ pub fn production_system(
                 }
             });
             if blocked {
+                // The periodic call above covers the front half of the
+                // factory; the pad squares the port tests are cleared
+                // the same way, so a parked unit can't stall the queue.
+                if bugger_off_frame {
+                    bugger_off.push(BuggerOff {
+                        center: pad_pos,
+                        radius: product_radius + SQUARE_SIZE,
+                        add_footprint: false,
+                        team: team.0,
+                        exclude: Some(factory_entity),
+                    });
+                }
                 producer.idle_time = 0.0;
                 continue;
             }
@@ -492,7 +570,6 @@ pub fn production_system(
 
             // `CFactory::SendToEmptySpot`: a waypoint just outside the
             // factory, then the first free spot on the exit arc.
-            let forward = flat_forward(factory_tf.forward().as_vec3());
             let heading = crate::sim::Heading::from_vector(forward.x, forward.z);
             let exit = if ctx.unit_registry.speed(kind) > 0.0 {
                 let factory_radius = stats.hit_radius;
@@ -527,8 +604,14 @@ pub fn production_system(
             // buildee's build clock runs at the factory's boosted rate, so
             // its `BUILD_PERCENT_LEFT` and spawn protection end exactly
             // when the queue pops and the pad check can see it.
+            //
+            // From the next tick on the factory drives the buildee's
+            // clock itself (`BuildDriven`, below): a changed boost keeps
+            // both in step, and a stunned factory's buildee decays. A
+            // build that completes on its spawn tick runs its own clock.
             let style = faction.emerge_style();
             spawns.push((
+                factory_entity,
                 kind,
                 *faction,
                 team.0,
@@ -537,18 +620,28 @@ pub fn production_system(
                 exit,
                 build_time / speed_mult,
                 style,
+                producer.progress < build_time,
             ));
             producer.unit_spawned = true;
+        } else if let Some((mut clock, mut driven)) =
+            producer.buildee.and_then(|b| buildees.get_mut(b).ok())
+        {
+            // In the buildee's own seconds at the current rate.
+            clock.total = build_time / speed_mult;
+            clock.remaining = (build_time - producer.progress).max(0.0) / speed_mult;
+            driven.unpowered = 0.0;
         }
 
         if producer.progress >= build_time {
             producer.progress -= build_time;
             producer.unit_spawned = false;
+            producer.buildee = None;
             producer.complete_front();
         }
     }
 
-    for (kind, faction, team, spawn_pos, heading, exit, emerge_duration, style) in spawns.drain(..)
+    for (factory, kind, faction, team, spawn_pos, heading, exit, emerge_duration, style, driven) in
+        spawns.drain(..)
     {
         let entity = spawn_unit_facing(kind, faction, team, spawn_pos, heading, &mut ctx);
         ctx.commands.entity(entity).insert(Emerging {
@@ -559,6 +652,12 @@ pub fn production_system(
             rally_then: exit.map(|(_, found)| found),
             style,
         });
+        if driven {
+            ctx.commands.entity(entity).insert(BuildDriven::default());
+            if let Ok((_, mut producer, ..)) = producers.get_mut(factory) {
+                producer.buildee = Some(entity);
+            }
+        }
         // Fade-style emergence needs per-unit cloned materials so the
         // alpha ramp doesn't leak onto every other unit sharing the
         // shared faction texture. We can't read the freshly-spawned
@@ -568,6 +667,178 @@ pub fn production_system(
         if matches!(style, EmergeStyle::Fade) {
             ctx.commands.entity(entity).insert(PendingFadeInstall);
         }
+    }
+}
+
+/// One `CGameHelper::BuggerOff` call: allied idle mobile units near
+/// `center` are asked to step clear of it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuggerOff {
+    pub center: Vec3,
+    /// Clearance radius around `center` (elmos), as the CAI receives it.
+    pub radius: f32,
+    /// `BuggerOffRectangle`: each unit's own footprint radius is added
+    /// to `radius`.
+    pub add_footprint: bool,
+    pub team: u8,
+    /// The unit the call comes from, which is never moved by it.
+    pub exclude: Option<Entity>,
+}
+
+impl BuggerOff {
+    /// `CFactory::Update`'s periodic call: a circle of half the
+    /// factory's radius, centred half a radius out of its front
+    /// (`boOffset = boRadius = radius / 2`), widened by a square in
+    /// `BuggerOffImpl`.
+    pub fn factory(pos: Vec3, forward: Vec3, radius: f32, team: u8, factory: Entity) -> Self {
+        Self {
+            center: pos + forward * (radius * 0.5),
+            radius: radius * 0.5 + SQUARE_SIZE,
+            add_footprint: false,
+            team,
+            exclude: Some(factory),
+        }
+    }
+
+    /// `CGameHelper::BuggerOffRectangle` over a build site of `half`
+    /// extents: the rectangle's half-diagonal plus a square, plus each
+    /// unit's footprint.
+    pub fn rectangle(site: Vec3, half: Vec2, team: u8, builder: Entity) -> Self {
+        Self {
+            center: site,
+            radius: half.length() + SQUARE_SIZE,
+            add_footprint: true,
+            team,
+            exclude: Some(builder),
+        }
+    }
+}
+
+/// This tick's [`BuggerOff`] calls, drained by [`apply_bugger_off`].
+#[derive(Resource, Default, Debug)]
+pub struct BuggerOffRequests(Vec<BuggerOff>);
+
+impl BuggerOffRequests {
+    pub fn push(&mut self, request: BuggerOff) {
+        self.0.push(request);
+    }
+}
+
+/// Units that run their CAI at all: not being built, dying or stunned.
+/// Of those, `CMobileCAI::NonMoving` only runs for the ones with no
+/// order (`!Orders::busy`).
+type RunsCai = (
+    Without<Emerging>,
+    Without<crate::units::combat::Dying>,
+    Without<crate::units::combat::Stunned>,
+);
+
+/// Reach of the candidate scan beyond a request's radius: the largest
+/// unit's `1.4·r` plus its footprint.
+const BUGGER_OFF_SCAN_MARGIN: f32 = 96.0;
+
+/// `CMobileCAI::BuggerOff` + `NonMoving`: every allied idle mobile unit
+/// within `radius + 1.4·r` of a request's centre gets a move order to
+/// `radius + r` straight out from it — the nearest way out of the
+/// circle — turning in 45° steps when that point is off the map.
+/// Spring pushes an internal move onto the empty queue; here the idle
+/// unit just gets a plain move.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_bugger_off(
+    mut requests: ResMut<BuggerOffRequests>,
+    spatial: Res<SpatialIndex>,
+    units: Query<&Transform, RunsCai>,
+    orders: crate::interaction::movement::Orders,
+    registry: Res<UnitRegistry>,
+    heightmap: Option<Res<Heightmap>>,
+    mut commands: Commands,
+    mut ordered: Local<Vec<Entity>>,
+) {
+    if requests.0.is_empty() {
+        return;
+    }
+    ordered.clear();
+    let (world_w, world_d) = heightmap
+        .as_deref()
+        .map_or((f32::INFINITY, f32::INFINITY), Heightmap::world_size);
+    let in_map = |p: Vec3| p.x >= 0.0 && p.z >= 0.0 && p.x < world_w && p.z < world_d;
+    for request in requests.0.drain(..) {
+        let mut candidates: Vec<(Entity, UnitKind, f32)> = Vec::new();
+        spatial.query_radius(
+            request.center,
+            request.radius + BUGGER_OFF_SCAN_MARGIN,
+            |other| {
+                if other.team == request.team
+                    && Some(other.entity) != request.exclude
+                    && !other.is_flying
+                    && other.hp_positive
+                    && registry.speed(other.kind) > 0.0
+                {
+                    candidates.push((other.entity, other.kind, other.hit_radius));
+                }
+            },
+        );
+        for (entity, kind, radius) in candidates {
+            if ordered.contains(&entity) {
+                continue;
+            }
+            let Ok(tf) = units.get(entity) else {
+                continue;
+            };
+            if orders.busy(entity) {
+                continue;
+            }
+            let clearance = if request.add_footprint {
+                let half = registry.footprint_elmos(kind) * 0.5 + Vec2::splat(SQUARE_SIZE);
+                request.radius + half.length()
+            } else {
+                request.radius
+            };
+            let pos = tf.translation;
+            if flat_dist_sq(pos, request.center) >= (clearance + radius * 1.4).powi(2) {
+                continue;
+            }
+            let mut dir = (pos - request.center)
+                .with_y(0.0)
+                .try_normalize()
+                .unwrap_or(Vec3::X);
+            let mut target = request.center + dir * (clearance + radius);
+            for _ in 0..8 {
+                if in_map(target) {
+                    break;
+                }
+                dir = Quat::from_rotation_y(std::f32::consts::FRAC_PI_4) * dir;
+                target = request.center + dir * (clearance + radius);
+            }
+            if !in_map(target) {
+                continue;
+            }
+            let target = heightmap
+                .as_deref()
+                .map_or(target, |hm| hm.place(target.x, target.z));
+            crate::interaction::replace_order(
+                &mut commands.entity(entity),
+                crate::interaction::movement::QueuedCommand::Move(target),
+            );
+            ordered.push(entity);
+        }
+    }
+}
+
+/// `CFactory::KillUnit`: a factory's death takes its unfinished buildee
+/// with it, as a silent (reclaimed) kill — no death blast. An observer,
+/// so a factory despawned on the tick it dies still counts.
+pub fn kill_orphaned_buildee(
+    add: On<Add<crate::units::combat::Dying>>,
+    producers: Query<&Producer>,
+    building: Query<(), With<Emerging>>,
+    mut commands: Commands,
+) {
+    if let Ok(producer) = producers.get(add.entity)
+        && let Some(buildee) = producer.buildee
+        && building.contains(buildee)
+    {
+        commands.entity(buildee).try_despawn();
     }
 }
 
@@ -806,5 +1077,198 @@ mod tests {
         p.complete_front();
         p.complete_front();
         assert!(p.queue().is_empty());
+    }
+
+    // --- factory build power, BuggerOff, buildee death ---------------------
+
+    use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
+    use crate::units::combat::{Dying, Stunned};
+    use bevy::ecs::system::RunSystemOnce;
+    use spring_tdf::{UnitDef, UnitDefs};
+    use std::time::Duration;
+
+    /// Kernel (`WorkerTime=128`) building Bits (`BuildTime=240`).
+    fn registry() -> UnitRegistry {
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "kernel".into(),
+            UnitDef {
+                worker_time: 128.0,
+                footprint_x: 8.0,
+                footprint_z: 8.0,
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                build_time: 240.0,
+                footprint_x: 1.0,
+                footprint_z: 1.0,
+                max_velocity: 3.0,
+                can_move: true,
+                ..UnitDef::default()
+            },
+        );
+        UnitRegistry::for_test(defs)
+    }
+
+    fn world() -> World {
+        let mut world = World::new();
+        world.insert_resource(registry());
+        world.init_resource::<SpatialIndex>();
+        world.init_resource::<BuggerOffRequests>();
+        world.init_resource::<super::super::bookkeeping::TeamUnitCounts>();
+        world.init_resource::<super::super::bookkeeping::SmallBuildingCounts>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<StandardMaterial>>();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<crate::units::assets::meshes::S3OModelCache>();
+        world.init_resource::<crate::units::content::weapons::WeaponRegistry>();
+        world.insert_resource(Time::<()>::default());
+        world
+    }
+
+    fn bit_entry(entity: Entity, pos: Vec3, team: u8) -> SpatialEntry {
+        SpatialEntry {
+            team,
+            ..standing(entity, pos)
+        }
+    }
+
+    /// #57 / #27 for factories: the buildee's clock is the build; a
+    /// stunned factory adds no build power (`CFactory::UpdateBuild`) and
+    /// its buildee decays, and the factory picks the loss back up.
+    #[test]
+    fn stunned_factory_stalls_and_its_buildee_decays() {
+        let mut world = world();
+        // 240 points at 128 a second.
+        let build_time = 240.0 / 128.0;
+        let buildee = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Emerging {
+                    target_y: 0.0,
+                    remaining: build_time,
+                    total: build_time,
+                    rally_point: None,
+                    rally_then: None,
+                    style: EmergeStyle::Rise,
+                },
+                BuildDriven::default(),
+            ))
+            .id();
+        let mut producer = Producer::new();
+        producer.enqueue(UnitKind::Bit);
+        producer.unit_spawned = true;
+        producer.buildee = Some(buildee);
+        let registry = registry();
+        let factory = world
+            .spawn((
+                producer,
+                UnitType(UnitKind::Kernel),
+                Faction::System,
+                TeamId(0),
+                Transform::from_xyz(500.0, 0.0, 500.0),
+                UnitStats::from_registry(UnitKind::Kernel, &registry, 64.0, 0.0),
+            ))
+            .id();
+        let remaining = |world: &World| world.get::<Emerging>(buildee).unwrap().remaining;
+        // Six sim ticks (0.2 s).
+        let ticks = |world: &mut World| {
+            for _ in 0..6 {
+                world
+                    .resource_mut::<Time>()
+                    .advance_by(Duration::from_secs_f64(1.0 / 30.0));
+                world.run_system_once(production_system).unwrap();
+                world
+                    .run_system_once(super::super::construction::decay_nanoframes)
+                    .unwrap();
+            }
+        };
+
+        for _ in 0..3 {
+            ticks(&mut world);
+        }
+        assert!((remaining(&world) - (build_time - 0.6)).abs() < 1e-3);
+
+        world.entity_mut(factory).insert(Stunned { remaining: 5.0 });
+        let before = remaining(&world);
+        ticks(&mut world);
+        assert!(remaining(&world) > before, "the buildee decays");
+        let decayed = remaining(&world);
+
+        world.entity_mut(factory).remove::<Stunned>();
+        ticks(&mut world);
+        assert!(
+            (remaining(&world) - (decayed - 0.2)).abs() < 1e-3,
+            "resumes from the decayed progress"
+        );
+    }
+
+    /// `CFactory::KillUnit`: the factory's death takes its buildee.
+    #[test]
+    fn factory_death_kills_its_buildee() {
+        let mut world = World::new();
+        world.add_observer(kill_orphaned_buildee);
+        let buildee = world
+            .spawn(Emerging {
+                target_y: 0.0,
+                remaining: 1.0,
+                total: 1.0,
+                rally_point: None,
+                rally_then: None,
+                style: EmergeStyle::Rise,
+            })
+            .id();
+        let mut producer = Producer::new();
+        producer.buildee = Some(buildee);
+        let factory = world.spawn(producer).id();
+        world.entity_mut(factory).insert(Dying { timer: 0.0 });
+        world.flush();
+        assert!(world.get_entity(buildee).is_err());
+    }
+
+    /// #14: a factory waiting to start asks its idle units off the exit
+    /// (`CFactory::Update` → `BuggerOff`) — not busy ones, not enemies.
+    #[test]
+    fn factory_buggers_off_idle_allies_only() {
+        let mut world = world();
+        let pos = Vec3::new(500.0, 0.0, 500.0);
+        let center = pos + Vec3::Z * 32.0;
+        let idle = world.spawn(Transform::from_translation(center)).id();
+        let busy = world
+            .spawn((Transform::from_translation(center), MoveTarget(Vec3::ZERO)))
+            .id();
+        let queued = world
+            .spawn((
+                Transform::from_translation(center),
+                CommandQueue {
+                    commands: vec![QueuedCommand::Move(Vec3::ZERO)],
+                },
+            ))
+            .id();
+        let enemy = world.spawn(Transform::from_translation(center)).id();
+        {
+            let mut spatial = world.resource_mut::<SpatialIndex>();
+            for (e, team) in [(idle, 0), (busy, 0), (queued, 0), (enemy, 1)] {
+                spatial.insert_for_test(bit_entry(e, center, team));
+            }
+        }
+        let factory = world.spawn_empty().id();
+        world
+            .resource_mut::<BuggerOffRequests>()
+            .push(BuggerOff::factory(pos, Vec3::Z, 64.0, 0, factory));
+        world.run_system_once(apply_bugger_off).unwrap();
+
+        let goal = world
+            .get::<MoveTarget>(idle)
+            .expect("idle unit moves off")
+            .0;
+        assert!(goal.xz().distance(center.xz()) >= 32.0 + SQUARE_SIZE);
+        assert_eq!(world.get::<MoveTarget>(busy).unwrap().0, Vec3::ZERO);
+        assert!(world.get::<MoveTarget>(queued).is_none());
+        assert!(world.get::<MoveTarget>(enemy).is_none());
+        assert!(world.resource::<BuggerOffRequests>().0.is_empty());
     }
 }

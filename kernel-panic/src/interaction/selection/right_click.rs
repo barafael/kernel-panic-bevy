@@ -900,7 +900,6 @@ mod tests {
             .spawn(Constructing {
                 kind: UnitKind::BadBlock,
                 site: Vec3::ZERO,
-                progress: 0.0,
                 building: None,
             })
             .id();

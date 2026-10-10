@@ -64,6 +64,7 @@ impl Plugin for CommandPanelPlugin {
                 PreUpdate,
                 panel_mouse_input
                     .after(InputSystems)
+                    .in_set(PanelMouseInput)
                     .run_if(in_state(AppState::InGame)),
             )
             .add_systems(
@@ -81,6 +82,10 @@ impl Plugin for CommandPanelPlugin {
             );
     }
 }
+
+/// The panel's `PreUpdate` mouse input (the build bar's runs first).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct PanelMouseInput;
 
 /// The panel's Update systems (command collection, hotkeys, activation,
 /// drawing); the tooltip reads what they report.

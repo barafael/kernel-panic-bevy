@@ -39,7 +39,7 @@ use crate::units::combat::Dying;
 use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::construction::buildings_for;
+use crate::units::lifecycle::construction::{buildings_for, footprints_overlap};
 
 pub(super) struct PlacementPlugin;
 
@@ -77,6 +77,9 @@ pub(crate) struct PlacementMode {
 const SNAP_RADIUS: f32 = 64.0;
 /// Spring's `BUILD_SQUARE_SIZE` (the 16-elmo build grid).
 const BUILD_SQUARE: f32 = 16.0;
+
+/// Height of the footprint slab drawn for a model-less building.
+const GHOST_SLAB_HEIGHT: f32 = 2.0;
 
 const GHOST_VALID_COLOR: Color = Color::srgba(0.30, 1.00, 0.40, 0.55);
 const GHOST_INVALID_COLOR: Color = Color::srgba(1.00, 0.30, 0.30, 0.55);
@@ -281,6 +284,19 @@ fn resolve_site(
             h.max_slope_in_footprint(pos, footprint) <= registry.max_slope_ratio(kind)
         })
     };
+    let half = footprint * 0.5;
+    // `TestUnitBuildSquare`: the whole footprint on the map and clear of
+    // every structure, whatever snapped it there.
+    let open = |p: Vec2| {
+        let on_map = heightmap.is_none_or(|h| {
+            let (w, d) = h.world_size();
+            p.x - half.x >= 0.0 && p.y - half.y >= 0.0 && p.x + half.x <= w && p.y + half.y <= d
+        });
+        on_map
+            && !obstacles
+                .iter()
+                .any(|&(c, h)| footprints_overlap(p, half, c, h))
+    };
     if kind.is_small_building() {
         // Nearest free vent in XZ within the snap radius.
         let best = vents
@@ -294,7 +310,7 @@ fn resolve_site(
                 taken_vents.push(vent);
                 PlannedSite {
                     pos: vent,
-                    valid: slope_ok(vent),
+                    valid: open(vent.xz()) && slope_ok(vent),
                 }
             }
             None => PlannedSite {
@@ -305,13 +321,9 @@ fn resolve_site(
     }
     let pos2 = build_pos(raw, footprint_squares(footprint));
     let pos = ground(pos2);
-    let half = footprint * 0.5;
-    let blocked = obstacles.iter().any(|(c, h)| {
-        (c.x - pos2.x).abs() < h.x + half.x - 0.01 && (c.y - pos2.y).abs() < h.y + half.y - 0.01
-    });
     PlannedSite {
         pos,
-        valid: !blocked && slope_ok(pos),
+        valid: open(pos2) && slope_ok(pos),
     }
 }
 
@@ -359,14 +371,24 @@ fn plan(
     out
 }
 
+/// Disarm when no selected, living constructor can build the armed
+/// kind, or — Spring's `needShift`, checked every frame in
+/// `CGuiHandler::Update` — as soon as Shift is let go after a Shift
+/// placement.
 #[allow(clippy::type_complexity)]
 fn disarm_without_builders(
     mut placement: ResMut<PlacementMode>,
-    builders: Query<&UnitType, With<Selected>>,
+    mut state: ResMut<PlacementState>,
+    keys: Res<ButtonInput<KeyCode>>,
+    builders: Query<&UnitType, (With<Selected>, Without<Dying>)>,
 ) {
-    if let Some(kind) = placement.kind
-        && !builders.iter().any(|u| buildings_for(u.0).contains(&kind))
-    {
+    let Some(kind) = placement.kind else {
+        return;
+    };
+    if state.need_shift && !mods(&keys).shift {
+        placement.kind = None;
+        state.need_shift = false;
+    } else if !builders.iter().any(|u| buildings_for(u.0).contains(&kind)) {
         placement.kind = None;
     }
 }
@@ -386,10 +408,11 @@ fn plan_sites(
     heightmap: Option<Res<Heightmap>>,
     registry: Res<UnitRegistry>,
 ) {
+    // `press_owned` outlives a disarm mid-press: its release is still
+    // placement's to consume (`place_on_release`).
     let Some(kind) = placement.kind else {
         state.sites.clear();
         state.anchor = None;
-        state.press_owned = false;
         state.need_shift = false;
         return;
     };
@@ -406,7 +429,11 @@ fn plan_sites(
         .filter(|(u, _)| registry.is_building(u.0) || u.0.is_building())
         .map(|(u, tf)| (tf.translation.xz(), registry.footprint_elmos(u.0) * 0.5))
         .collect();
-    let anchor = if state.press_owned && mouse.pressed(MouseButton::Left) {
+    // Held — or let go this very frame: `ButtonInput` drops `pressed`
+    // in `PreUpdate`, so the release frame, which commits the row, would
+    // otherwise plan a single site.
+    let held = mouse.pressed(MouseButton::Left) || mouse.just_released(MouseButton::Left);
+    let anchor = if state.press_owned && held {
         state.anchor
     } else {
         None
@@ -457,7 +484,14 @@ fn sync_ghosts(
     };
     while state.ghosts.len() < state.sites.len() {
         let faction = selected_q.iter().next().copied().unwrap_or(Faction::System);
-        let mesh = unit_mesh(kind, &mut meshes, &mut model_cache, &registry);
+        let mut mesh = unit_mesh(kind, &mut meshes, &mut model_cache, &registry);
+        if meshes.get(&mesh).is_none_or(|m| m.count_vertices() == 0) {
+            // The Debug is a `nullobject.s3o`: nothing to draw, and
+            // Spring's preview then shows only the build squares. A
+            // flat footprint slab stands in for them.
+            let foot = registry.footprint_elmos(kind);
+            mesh = meshes.add(Cuboid::new(foot.x, GHOST_SLAB_HEIGHT, foot.y));
+        }
         let model_name = registry.model(kind).to_string();
         let base = unit_material(
             kind,
@@ -526,15 +560,26 @@ fn place_on_release(
     builders: Query<(Entity, &UnitType), With<Selected>>,
     unit_orders: Orders,
     vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
+    dying: Query<(), With<Dying>>,
 ) {
     let Some(kind) = placement.kind else {
+        // Disarmed mid-press (right-click, Escape, Shift let go): the
+        // release still belongs to placement, not to click-to-select.
+        if state.press_owned && mouse.just_released(MouseButton::Left) {
+            mouse.clear_just_released(MouseButton::Left);
+            state.press_owned = false;
+        }
         return;
     };
     if mouse.just_pressed(MouseButton::Left) {
         mouse.clear_just_pressed(MouseButton::Left);
         state.press_owned = true;
         state.anchor = state.sites.first().map(|s| s.pos);
-        return;
+        // A press and release inside one frame is a whole click: place
+        // now, or the release is lost and reaches click-to-select.
+        if !mouse.just_released(MouseButton::Left) {
+            return;
+        }
     }
     if !(state.press_owned && mouse.just_released(MouseButton::Left)) {
         return;
@@ -543,14 +588,9 @@ fn place_on_release(
     state.press_owned = false;
     state.anchor = None;
 
+    // (`needShift` — Shift let go after a Shift placement — already
+    // disarmed in `disarm_without_builders`.)
     let shift = mods(&keys).shift;
-    if state.need_shift && !shift {
-        // Placed with Shift before and Shift is up now: this click only
-        // ends the command (Spring's `needShift`).
-        placement.kind = None;
-        state.need_shift = false;
-        return;
-    }
     let sites = std::mem::take(&mut state.sites);
     if sites.len() == 1 && !sites[0].valid {
         // CMD_FAILED: nothing placed, the command stays armed.
@@ -562,7 +602,8 @@ fn place_on_release(
     }
 
     for (entity, ut) in &builders {
-        if !buildings_for(ut.0).contains(&kind) {
+        // A dying unit keeps `Selected` until it despawns.
+        if !buildings_for(ut.0).contains(&kind) || dying.contains(entity) {
             continue;
         }
         let orders = valid
@@ -745,10 +786,11 @@ mod tests {
         assert!(world.get::<Selected>(builder).is_some());
     }
 
-    /// Shift keeps the command armed; after Shift is released the next
-    /// click only disarms (`needShift`).
+    /// Shift keeps the command armed; letting Shift go disarms it at
+    /// once (`needShift`, checked every frame in `CGuiHandler::Update`),
+    /// so the next click places nothing.
     #[test]
-    fn shift_keeps_armed_until_a_plain_click() {
+    fn shift_keeps_armed_until_shift_is_released() {
         let mut world = world();
         let builder = world
             .spawn((UnitType(UnitKind::Trojan), Selected, Transform::default()))
@@ -765,9 +807,17 @@ mod tests {
             Some(UnitKind::BadBlock)
         );
 
+        world.run_system_once(disarm_without_builders).unwrap();
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            Some(UnitKind::BadBlock),
+            "still armed while Shift is held"
+        );
         world
             .resource_mut::<ButtonInput<KeyCode>>()
             .release(KeyCode::ShiftLeft);
+        world.run_system_once(disarm_without_builders).unwrap();
+        assert_eq!(world.resource::<PlacementMode>().kind, None);
         world.entity_mut(builder).remove::<PendingBuild>();
         set_site(&mut world, Vec3::new(80.0, 1.0, 40.0), true);
         click(&mut world);
@@ -775,7 +825,90 @@ mod tests {
             world.get::<PendingBuild>(builder).is_none(),
             "no second building"
         );
-        assert_eq!(world.resource::<PlacementMode>().kind, None);
+    }
+
+    /// #38: a press and release inside one frame is a whole click — it
+    /// places, and neither half reaches click-to-select.
+    #[test]
+    fn press_and_release_in_one_frame_places() {
+        let mut world = world();
+        let builder = world
+            .spawn((UnitType(UnitKind::Trojan), Selected, Transform::default()))
+            .id();
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::BadBlock);
+        set_site(&mut world, Vec3::new(40.0, 1.0, 40.0), true);
+        {
+            let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+            mouse.press(MouseButton::Left);
+            mouse.release(MouseButton::Left);
+        }
+        world.run_system_once(place_on_release).unwrap();
+        let mouse = world.resource::<ButtonInput<MouseButton>>();
+        assert!(!mouse.just_pressed(MouseButton::Left));
+        assert!(!mouse.just_released(MouseButton::Left));
+        assert!(world.get::<PendingBuild>(builder).is_some());
+        assert!(!world.resource::<PlacementState>().press_owned);
+    }
+
+    /// Disarmed between the placing press and its release (right-click,
+    /// Escape, Shift let go): the release is still consumed, so it never
+    /// deselects the builder.
+    #[test]
+    fn disarm_mid_press_still_consumes_the_release() {
+        let mut world = world();
+        world.spawn((UnitType(UnitKind::Trojan), Selected, Transform::default()));
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::BadBlock);
+        set_site(&mut world, Vec3::new(40.0, 1.0, 40.0), true);
+        world
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        world.run_system_once(place_on_release).unwrap();
+        world.resource_mut::<PlacementMode>().kind = None;
+        {
+            let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+            mouse.clear();
+            mouse.release(MouseButton::Left);
+        }
+        world.run_system_once(place_on_release).unwrap();
+        assert!(
+            !world
+                .resource::<ButtonInput<MouseButton>>()
+                .just_released(MouseButton::Left)
+        );
+        assert!(!world.resource::<PlacementState>().press_owned);
+    }
+
+    /// A grid site must fit on the map and a vent site must be clear of
+    /// other structures (`TestUnitBuildSquare`), not just snap there.
+    #[test]
+    fn sites_must_fit_the_map_and_clear_structures() {
+        let registry = UnitRegistry::empty(); // 32-elmo footprints
+        // 64×64 squares = 512 elmos a side, flat.
+        let hm = Heightmap::from_raw(vec![0.0; 65 * 65], 65, 65);
+        let none: Obstacles = Vec::new();
+        let site = |raw: Vec2, kind, vents: &[Vec3], obstacles: &Obstacles| {
+            resolve_site(
+                kind,
+                raw,
+                vents,
+                &mut Vec::new(),
+                obstacles,
+                Some(&hm),
+                &registry,
+            )
+        };
+        assert!(site(Vec2::new(256.0, 256.0), UnitKind::BadBlock, &[], &none).valid);
+        assert!(
+            !site(Vec2::new(4.0, 256.0), UnitKind::BadBlock, &[], &none).valid,
+            "hangs over the map edge"
+        );
+        let vent = Vec3::new(256.0, 0.0, 256.0);
+        assert!(site(vent.xz(), UnitKind::Socket, &[vent], &none).valid);
+        let wall: Obstacles = vec![(Vec2::new(272.0, 256.0), Vec2::splat(16.0))];
+        assert!(
+            !site(vent.xz(), UnitKind::Socket, &[vent], &wall).valid,
+            "a Bad Block on the vent's footprint blocks it"
+        );
     }
 
     /// A click on an invalid site places nothing and stays armed.
@@ -848,12 +981,10 @@ mod tests {
         world.run_system_once(disarm_without_builders).unwrap();
         assert_eq!(world.resource::<PlacementMode>().kind, None);
     }
-    /// Regression: the cursor ray must hit terrain only. The ghosts hover
-    /// on the cursor ray, so an unfiltered cast hits a ghost first — the
-    /// preview froze at its spawn point instead of following the cursor,
-    /// which made every placement land (or fail) at a stale spot.
-    #[test]
-    fn sites_track_terrain_not_ghosts() {
+    /// A headless camera over a flat terrain slab, the cursor in the
+    /// middle of a 100×100 viewport, looking down at 45° so the ray meets
+    /// the ground at the origin — and a ghost parked on that ray.
+    fn cursor_world() -> World {
         use bevy::camera::primitives::Aabb;
         use bevy::camera::visibility::SetViewVisibility;
         use bevy::camera::{ComputedCameraValues, RenderTargetInfo, Viewport};
@@ -923,6 +1054,16 @@ mod tests {
             Vec3::new(0.0, 50.0, 50.0),
             false,
         );
+        world
+    }
+
+    /// Regression: the cursor ray must hit terrain only. The ghosts hover
+    /// on the cursor ray, so an unfiltered cast hits a ghost first — the
+    /// preview froze at its spawn point instead of following the cursor,
+    /// which made every placement land (or fail) at a stale spot.
+    #[test]
+    fn sites_track_terrain_not_ghosts() {
+        let mut world = cursor_world();
 
         world.resource_mut::<PlacementMode>().kind = Some(UnitKind::BadBlock);
         world.run_system_once(plan_sites).unwrap();
@@ -933,5 +1074,36 @@ mod tests {
             "the site sits on the terrain under the cursor, not under the ghost: {sites:?}",
         );
         assert!(sites[0].valid, "free flat ground is a valid Bad Block site");
+    }
+
+    /// #8 regression: the release frame commits the row, and on that
+    /// frame `pressed()` is already false (`ButtonInput` updates in
+    /// `PreUpdate`). The anchor must survive it, or Shift+drag rows, Alt
+    /// rectangles and outlines all placed a single building.
+    #[test]
+    fn release_frame_plans_the_whole_row() {
+        let mut world = cursor_world();
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::BadBlock);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        {
+            let mut state = world.resource_mut::<PlacementState>();
+            state.press_owned = true;
+            state.anchor = Some(Vec3::new(-96.0, 0.0, 0.0));
+        }
+        {
+            let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+            mouse.press(MouseButton::Left);
+            mouse.clear();
+            mouse.release(MouseButton::Left);
+        }
+        world.run_system_once(plan_sites).unwrap();
+        let sites = &world.resource::<PlacementState>().sites;
+        assert_eq!(
+            sites.len(),
+            4,
+            "the row from the anchor to the cursor: {sites:?}"
+        );
     }
 }

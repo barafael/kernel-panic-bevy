@@ -323,7 +323,8 @@ pub struct VentClaimReleaseTimer(pub f32);
 ///
 /// The rule is **position-based**: a vent is claimed iff
 /// (a) there's a `PendingBuild` whose `site` coincides with the vent,
-/// (b) there's a `Constructing` whose `site` coincides with the vent, or
+/// (b) there's a `Constructing` whose `site` coincides with the vent,
+/// (b′) a queued `BuildAt` in some `CommandQueue` targets it, or
 /// (c) a finished building sits within [`BUILDING_OCCUPANCY_RADIUS`] of the vent.
 ///
 /// Adding the stamp side (previously only release was implemented) is
@@ -347,6 +348,8 @@ pub fn reconcile_vent_claims(
     constructing: Query<&Constructing>,
     buildings: Query<(&UnitType, &GlobalTransform)>,
     unit_registry: Res<UnitRegistry>,
+    // Queued build orders (Shift-placed sites) keep their vents too.
+    queues: Query<&crate::interaction::movement::CommandQueue>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < VENT_CLAIM_RECONCILE_INTERVAL {
@@ -370,7 +373,11 @@ pub fn reconcile_vent_claims(
             .any(|p| horiz_dist_sq(p.site, vent.pos) < 1.0)
             || constructing
                 .iter()
-                .any(|c| horiz_dist_sq(c.site, vent.pos) < 1.0);
+                .any(|c| horiz_dist_sq(c.site, vent.pos) < 1.0)
+            || queues.iter().flat_map(|q| &q.commands).any(|c| {
+                matches!(c, crate::interaction::movement::QueuedCommand::BuildAt { site, .. }
+                    if horiz_dist_sq(*site, vent.pos) < 1.0)
+            });
         let building_present = buildings.iter().any(|(ut, gtf)| {
             unit_registry.is_building(ut.0)
                 && horiz_dist_sq(gtf.translation(), vent.pos) <= occupancy_sq
