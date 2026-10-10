@@ -797,6 +797,19 @@ fn unit_def_auto_heal_and_engine_idle_defaults() {
     assert_eq!(debug.idle_time, 900.0);
 }
 
+/// `CanAttack` defaults to on (`UnitDef.cpp:381`); the builders'
+/// `CanAttack=0` turns it off.
+#[test]
+fn unit_def_can_attack_defaults_on() {
+    let tdf = Tdf::parse(
+        "[UNITINFO]\n{\nUnitname=gateway;\n}\n[UNITINFO]\n{\nUnitname=trojan;\nCanAttack=0;\n}",
+    )
+    .unwrap();
+    let defs = UnitDefs::from_tdf(&tdf);
+    assert!(defs.get("gateway").unwrap().can_attack);
+    assert!(!defs.get("trojan").unwrap().can_attack);
+}
+
 /// `SelfDestructCountdown` is parsed (1 on KP's mobile units) with the
 /// engine default 5 when absent (the buildings).
 #[test]

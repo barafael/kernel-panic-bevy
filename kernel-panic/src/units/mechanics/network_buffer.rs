@@ -115,6 +115,7 @@ pub struct EnterEvent {
 /// Pay out every finished Port's packets. A Port under construction
 /// (still [`Emerging`]) is not in network_buffer.lua's `portList` yet
 /// — it joins on `UnitFinished` — so its timer doesn't run.
+#[allow(clippy::type_complexity)]
 pub fn tick_port_buffers(
     time: Res<Time>,
     mut ports: Query<(&UnitType, &TeamId, &mut PortTimer), (Without<Dying>, Without<Emerging>)>,

@@ -17,6 +17,7 @@ use super::{AimTarget, IdleTimer, StunCharge};
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::{DeathBlast, WeaponRegistry};
 use crate::units::lifecycle::bookkeeping::{IdleAutoHeal, Kamikaze};
@@ -78,11 +79,20 @@ pub struct SelfDestructCountdown {
     pub remaining: f32,
 }
 
-/// The countdown an order stamps (the engine default
-/// `selfDestructCountdown=5`). [`tick_self_destruct`] replaces it with
-/// the unit's own FBI `SelfDestructCountdown`
-/// ([`UnitRegistry::self_destruct_delay`]) on its first tick.
-pub const SELF_DESTRUCT_DELAY: f32 = 5.0;
+impl SelfDestructCountdown {
+    /// A fresh self-destruct order for a `kind` unit: its FBI
+    /// `SelfDestructCountdown` ([`UnitRegistry::self_destruct_delay`]),
+    /// or [`SELF_DESTRUCT_DELAY`] without a registry.
+    pub fn ordered(kind: UnitKind, unit_registry: Option<&UnitRegistry>) -> Self {
+        Self {
+            remaining: unit_registry.map_or(SELF_DESTRUCT_DELAY, |r| r.self_destruct_delay(kind)),
+        }
+    }
+}
+
+/// The countdown of a unit without an FBI entry: the engine default
+/// `selfDestructCountdown=5` armed as `2·5 + 1` slow updates.
+pub const SELF_DESTRUCT_DELAY: f32 = 5.5;
 
 /// Marks a unit as paralyzed: the combat and movement systems treat it
 /// as inert until `remaining` elapses.
@@ -328,15 +338,10 @@ pub fn death_system(
 /// a tiny bridge instead of a parallel detonation path.
 pub fn tick_self_destruct(
     time: Res<Time>,
-    unit_registry: Res<UnitRegistry>,
-    mut query: Query<(&mut SelfDestructCountdown, &mut Health, &UnitType), Without<Dying>>,
+    mut query: Query<(&mut SelfDestructCountdown, &mut Health), Without<Dying>>,
 ) {
     let dt = time.delta_secs();
-    for (mut countdown, mut health, unit) in &mut query {
-        if countdown.is_added() {
-            // A fresh order: the unit's own countdown, not the default.
-            countdown.remaining = unit_registry.self_destruct_delay(unit.0);
-        }
+    for (mut countdown, mut health) in &mut query {
         countdown.remaining -= dt;
         if countdown.remaining <= 0.0 {
             health.current = 0.0;

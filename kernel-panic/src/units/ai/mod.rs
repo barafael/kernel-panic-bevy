@@ -46,7 +46,6 @@ use bevy::prelude::*;
 
 use super::{
     components::{TeamId, UnitStats, UnitType},
-    construction::{Constructing, PendingBuild},
     player::LocalTeam,
     production::{Producer, minifac_spam},
     spatial::SpatialIndex,
@@ -54,11 +53,11 @@ use super::{
 use crate::units::spatial::flat_dist_sq;
 use crate::{
     game_setup::AiDifficulty,
-    interaction::movement::{MovePath, MoveTarget, QueuedCommand},
+    interaction::movement::{MovePath, OrderState, QueuedCommand},
     rng::xorshift32,
     terrain::geovent::{GeoventSmoker, VentClaim},
     units::{
-        combat::{AttackGroundOrder, AttackTargetOrder, Dying, SelfDestructCountdown},
+        combat::{Dying, SelfDestructCountdown},
         content::definitions::UnitKind,
         lifecycle::spawning::Emerging,
         mechanics::{
@@ -126,7 +125,9 @@ fn occupied_by(
         .find(|p| (p.x - pos.x).abs() < half && (p.z - pos.z).abs() < half)
 }
 
-/// AI clock + per-team memory.
+/// AI clock + per-team memory. Match-scoped: re-created (with a fresh
+/// dice seed) at every match swap, so no team's memory leaks into the
+/// next game.
 #[derive(Resource)]
 pub struct AiTicker {
     accumulated: f32,
@@ -144,7 +145,8 @@ impl Default for AiTicker {
     fn default() -> Self {
         Self {
             accumulated: 0.0,
-            rng: 0x2545_F491,
+            // xorshift32 must not start at 0.
+            rng: (crate::game_setup::match_seed() as u32).max(1),
             last_sigterm: HashMap::new(),
             last_dispatch: HashMap::new(),
             no_enemies_since: HashMap::new(),
@@ -210,20 +212,18 @@ type UnitQueryData = (
     &'static UnitType,
     &'static GlobalTransform,
     &'static UnitStats,
-    Option<&'static MoveTarget>,
+    // Any active order — moves, attacks, guard, builds and ability casts
+    // (`NxCast`, the walk into cast range) — makes the unit busy, so the
+    // army phase never replaces it with an attack-move (which would,
+    // for one, cancel the cast the AI just ordered).
+    OrderState,
     Option<&'static MovePath>,
-    Has<AttackTargetOrder>,
-    Has<AttackGroundOrder>,
-    Has<PendingBuild>,
-    Has<Constructing>,
     Has<Emerging>,
     Has<CommandFireCooldown>,
     Has<AutoDispatch>,
-    // `Protected`, then an ability cast in progress (`NxCast` aiming /
-    // recovering, or the walk into cast range): busy, so the army phase
-    // must not replace it with an attack-move — that would cancel the
-    // cast. Nested to stay within Bevy's 15-element query tuples.
-    (Has<Protected>, Has<NxCast>, Has<PendingCommandFire>),
+    Has<Protected>,
+    // A cast in progress: not ready for another one.
+    (Has<NxCast>, Has<PendingCommandFire>),
 );
 
 /// Message writers the AI issues orders through — the same messages the
@@ -250,6 +250,7 @@ pub fn ai_brain(
     mut producers: Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
+    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
     mut orders: AiOrders,
     mut commands: Commands,
 ) {
@@ -297,7 +298,15 @@ pub fn ai_brain(
             &mut orders,
         );
         run_specials(team, s, ticker, &spatial, &mut damage_log, now, &mut orders);
-        run_late_game(team, s, ticker, &suiciding, now, &mut commands);
+        run_late_game(
+            team,
+            s,
+            ticker,
+            &suiciding,
+            &unit_registry,
+            now,
+            &mut commands,
+        );
     }
     s.ai_teams = teams;
 }
@@ -306,12 +315,13 @@ pub fn ai_brain(
 /// anymore (someone else finished them, or they never started), the
 /// AI razes itself after `30 + (7*team) % 16` seconds so a stale game
 /// still ends. Units already counting down keep their timer — a fresh
-/// insert every tick would reset the 5 s fuse and it would never fire.
+/// insert every tick would reset the fuse and it would never fire.
 fn run_late_game(
     team: u8,
     s: &AiScratch,
     ticker: &mut AiTicker,
     suiciding: &Query<(), With<SelfDestructCountdown>>,
+    unit_registry: &crate::units::content::unit_registry::UnitRegistry,
     now: f32,
     commands: &mut Commands,
 ) {
@@ -327,9 +337,9 @@ fn run_late_game(
         if suiciding.contains(u.entity) {
             continue;
         }
-        commands.entity(u.entity).try_insert(SelfDestructCountdown {
-            remaining: crate::units::combat::SELF_DESTRUCT_DELAY,
-        });
+        commands
+            .entity(u.entity)
+            .try_insert(SelfDestructCountdown::ordered(u.kind, Some(unit_registry)));
     }
 }
 
@@ -353,16 +363,13 @@ fn snapshot(
         ut,
         gtf,
         stats,
-        mt,
+        order,
         mp,
-        attack,
-        attack_ground,
-        pending,
-        constructing,
         emerging,
         cooldown,
         auto_dispatch,
-        (protected, nx_cast, pending_cast),
+        protected,
+        (nx_cast, pending_cast),
     ) in units
     {
         let kind = ut.0;
@@ -373,14 +380,7 @@ fn snapshot(
             kind,
             pos: gtf.translation(),
             mobile: stats.speed > 0.0,
-            idle: !emerging
-                && mt.is_none()
-                && mp.is_none()
-                && !attack
-                && !attack_ground
-                && !pending
-                && !constructing
-                && !casting,
+            idle: !emerging && mp.is_none() && !order.active(),
             ready: !emerging && !cooldown && !casting,
             dispatching: auto_dispatch,
             protected,

@@ -483,18 +483,21 @@ enum CastReach {
     Refuse,
 }
 
-fn cast_reach(limit: CastReachLimit, caster: Vec3, target: Vec3, mobile: bool) -> CastReach {
+/// `gravity`: the map's ([`crate::sim::MapGravity`]), for ballistic reach.
+fn cast_reach(
+    limit: CastReachLimit,
+    caster: Vec3,
+    target: Vec3,
+    mobile: bool,
+    gravity: f32,
+) -> CastReach {
     let in_reach = match limit {
         CastReachLimit::MapWide => true,
         // `CWeapon::TestRange` against a ground position. The caster's
         // origin stands in for its aim-from piece.
-        CastReachLimit::Weapon(def) => crate::units::combat::aim::in_weapon_range(
-            def,
-            caster,
-            target,
-            true,
-            crate::sim::MAP_GRAVITY_PER_FRAME2,
-        ),
+        CastReachLimit::Weapon(def) => {
+            crate::units::combat::aim::in_weapon_range(def, caster, target, true, gravity)
+        }
         CastReachLimit::Fallback(range) => flat_dist_sq(caster, target) <= range * range,
     };
     match (in_reach, mobile) {
@@ -511,6 +514,7 @@ fn cast_reach(limit: CastReachLimit, caster: Vec3, target: Vec3, mobile: bool) -
 #[allow(clippy::type_complexity)]
 pub fn advance_pending_casts(
     weapons: Res<WeaponRegistry>,
+    gravity: Option<Res<crate::sim::MapGravity>>,
     casters: Query<
         (
             Entity,
@@ -524,21 +528,22 @@ pub fn advance_pending_casts(
     mut events: MessageWriter<CommandFireEvent>,
     mut commands: Commands,
 ) {
+    let gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for (entity, unit, gtf, pending, moving) in &casters {
         match cast_reach(
             cast_limit(unit.0, &weapons),
             gtf.translation(),
             pending.target,
             true,
+            gravity,
         ) {
             CastReach::Fire => {
                 // In range: stop the approach walk where it stands and
                 // cast — Spring halts an attacking unit once it can fire.
                 // Why an empty path instead of removing the order: the
-                // movement system's path-complete branch is the one place
-                // that promotes shift-queued follow-ups (or clears the
-                // order when none are queued); bypassing it would strand
-                // the queue behind a vanished MoveTarget.
+                // walk then ends the way any move order does, and the
+                // command queue advances to a shift-queued follow-up
+                // (`movement::advance_command_queue`) as usual.
                 let mut caster = commands.entity(entity);
                 caster.remove::<PendingCommandFire>();
                 if moving {
@@ -589,8 +594,10 @@ pub fn process_command_fire(
     mut pending_explosions: ResMut<PendingExplosions>,
     mut delayed_damage: ResMut<DelayedDamage>,
     mut visuals: SigTermVisuals,
+    gravity: Option<Res<crate::sim::MapGravity>>,
     mut commands: Commands,
 ) {
+    let gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for event in events.read() {
         let Ok((unit, team, faction, gtf, cd, was_pending, armored)) = casters.get(event.attacker)
         else {
@@ -604,6 +611,7 @@ pub fn process_command_fire(
             gtf.translation(),
             event.target,
             unit_registry.speed(unit.0) > 0.0,
+            gravity,
         ) {
             CastReach::Fire => {}
             CastReach::Approach => {
@@ -843,6 +851,7 @@ pub fn tick_nx_casts(
             gtf.translation(),
             target,
             true,
+            pieces.map_gravity(),
         ) != CastReach::Fire
         {
             commands
@@ -1302,7 +1311,13 @@ mod tests {
     fn cast_reach_classifies_orders() {
         let empty = WeaponRegistry::default();
         let reach = |kind, target: Vec3, mobile| {
-            cast_reach(cast_limit(kind, &empty), Vec3::ZERO, target, mobile)
+            cast_reach(
+                cast_limit(kind, &empty),
+                Vec3::ZERO,
+                target,
+                mobile,
+                crate::sim::MAP_GRAVITY_PER_FRAME2,
+            )
         };
         let near = Vec3::new(500.0, 300.0, 0.0);
         let far = Vec3::new(2000.0, 0.0, 0.0);
@@ -1343,6 +1358,7 @@ mod tests {
                 Vec3::ZERO,
                 Vec3::X * x,
                 false,
+                crate::sim::MAP_GRAVITY_PER_FRAME2,
             )
         };
         assert_eq!(reach(1700.0), CastReach::Fire);

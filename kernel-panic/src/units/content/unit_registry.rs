@@ -676,6 +676,23 @@ mod tests {
         assert_eq!(reg.armored_multiple(UnitKind::Bit), 1.0);
     }
 
+    /// `SelfDestructCountdown=n` arms `2n + 1` slow updates of 15
+    /// frames: 1.5 s for KP's mobile units, 5.5 s at the default 5.
+    #[test]
+    fn self_destruct_delay_counts_slow_updates() {
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                self_destruct_countdown: 1.0,
+                ..UnitDef::default()
+            },
+        );
+        let reg = UnitRegistry::for_test(defs);
+        assert!((reg.self_destruct_delay(UnitKind::Bit) - 1.5).abs() < 1e-5);
+        assert!((reg.self_destruct_delay(UnitKind::Kernel) - 5.5).abs() < 1e-5);
+    }
+
     /// An attacker without an FBI declares no category tags: it may
     /// target anything and ranks nothing as a bad target (the bad gate
     /// used to default to `true`, making every target "bad").

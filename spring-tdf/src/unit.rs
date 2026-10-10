@@ -90,7 +90,9 @@ pub struct UnitDef {
     pub builder: bool,
     /// Is a commander unit (`Commander=1`).
     pub commander: bool,
-    /// Can attack (`CanAttack=1`).
+    /// `CanAttack` (`UnitDef.cpp:381`, default on): may take attack
+    /// orders. KP's Assembler and Trojan set it to 0.
+    #[default(true)]
     pub can_attack: bool,
     /// Worker construction speed (`WorkerTime=`).
     pub worker_time: f32,
@@ -285,7 +287,7 @@ impl UnitDef {
 
             builder: s.bool("builder"),
             commander: s.bool("commander"),
-            can_attack: s.bool("canattack"),
+            can_attack: s.get("canattack").is_none_or(|v| v.trim() == "1"),
             worker_time: s.f32("workertime"),
             build_distance: s.f32("builddistance"),
             damage_modifier: {

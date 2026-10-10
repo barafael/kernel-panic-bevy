@@ -53,8 +53,8 @@ pub use damage::{
     update_armored,
 };
 pub use lifecycle::{
-    Dying, SELF_DESTRUCT_DELAY, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
-    death_system, tick_kamikaze, tick_self_destruct, tick_stun,
+    Dying, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying, death_system, tick_kamikaze,
+    tick_self_destruct, tick_stun,
 };
 
 /// Player-issued order to fire the unit's weapon at a fixed ground position.

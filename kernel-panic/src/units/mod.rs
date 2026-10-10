@@ -74,7 +74,7 @@ impl Plugin for UnitsPlugin {
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
-            .init_resource::<ai::AiTicker>()
+            .init_match_resource::<ai::AiTicker>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<shield::OnsMode>()
