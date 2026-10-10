@@ -178,212 +178,6 @@ fn normalise_legacy_rgb(rgb: [f32; 3]) -> [f32; 3] {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod shim_tests {
-    use super::*;
-    use crate::Tdf;
-
-    fn parse(src: &str, name: &str) -> WeaponDef {
-        let tdf = Tdf::parse(src).unwrap();
-        let defs = WeaponDefs::from_tdf(&tdf);
-        defs.get(name).cloned().expect("section")
-    }
-
-    #[test]
-    fn explicit_weapon_type_wins() {
-        let w = parse("[W]\n{\nweapontype=BeamLaser;\nbeamweapon=1;\n}", "W");
-        // Even though beamweapon=1 would map to LaserCannon in the
-        // legacy shim, the explicit weaponType takes precedence.
-        assert_eq!(w.category(), WeaponCategory::BeamLaser);
-    }
-
-    /// `CLaserCannon::UpdateRange` rounds the range down to whole
-    /// projectile steps; the bolt then covers `ttl + 1` steps, capped so a
-    /// max-range shot ends at that rounded range.
-    #[test]
-    fn laser_cannon_range_and_travel_follow_the_projectile_speed() {
-        let mega = parse(
-            "[M]\n{\nbeamweapon=1;\nlineofsight=1;\nrange=512;\nweaponvelocity=1024;\nsprayangle=1024;\n}",
-            "M",
-        );
-        assert!((mega.projectile_speed() - 34.133335).abs() < 1e-4);
-        assert!(
-            (mega.effective_range() - 477.8667).abs() < 1e-2,
-            "{}",
-            mega.effective_range()
-        );
-        // 300 elmos: ttl = ceil(300 / 34.13) = 9, travel 10 steps.
-        assert!((mega.laser_travel(300.0) - 10.0 * mega.projectile_speed()).abs() < 1e-3);
-        // Beyond range the ttl caps at floor(512/34.13) − 1 = 13.
-        assert!((mega.laser_travel(600.0) - 14.0 * mega.projectile_speed()).abs() < 1e-3);
-        assert!((mega.laser_travel(0.0) - mega.projectile_speed()).abs() < 1e-3);
-        // sin(1024·π/0xafff)
-        assert!((mega.spray_sin() - 0.07134).abs() < 1e-4);
-
-        let line = parse(
-            "[Line]\n{\nbeamweapon=1;\nlineofsight=1;\nrange=256;\nweaponvelocity=512;\n}",
-            "Line",
-        );
-        assert!(
-            (line.effective_range() - 238.9333).abs() < 1e-2,
-            "{}",
-            line.effective_range()
-        );
-        assert_eq!(line.spray_sin(), 0.0);
-
-        // Anything that is not a LaserCannon keeps its authored range.
-        let beam = parse("[B]\n{\nweapontype=BeamLaser;\nrange=250;\n}", "B");
-        assert_eq!(beam.effective_range(), 250.0);
-    }
-
-    #[test]
-    fn bit_line_becomes_laser_cannon() {
-        // Verbatim-ish `Line` (Bit): `beamweapon=1 lineofsight=1` with
-        // no literal `weaponType=`. Must resolve to LaserCannon so
-        // weapon_fx spawns a traveling bolt, not a hitscan beam.
-        let w = parse(
-            "[Line]\n{\nbeamweapon=1;\nlineofsight=1;\nthickness=4;\n}",
-            "Line",
-        );
-        assert_eq!(w.category(), WeaponCategory::LaserCannon);
-        assert!(!w.is_projectile());
-    }
-
-    #[test]
-    fn byte_megabeam_becomes_laser_cannon() {
-        let w = parse(
-            "[MegaBeam]\n{\nbeamweapon=1;\nlineofsight=1;\nburst=4;\n}",
-            "MegaBeam",
-        );
-        assert_eq!(w.category(), WeaponCategory::LaserCannon);
-    }
-
-    #[test]
-    fn pointer_geometric_becomes_missile_launcher() {
-        // `smoketrail=1` with `lineofsight=1` → MissileLauncher,
-        // regardless of whether a `model=` is set. The model-check in
-        // `is_projectile` is a secondary guard.
-        let w = parse(
-            "[Geo]\n{\nsmoketrail=1;\nlineofsight=1;\nmodel=octashot.s3o;\ntracks=1;\n}",
-            "Geo",
-        );
-        assert_eq!(w.category(), WeaponCategory::MissileLauncher);
-        assert!(w.is_projectile());
-    }
-
-    #[test]
-    fn build_laser_becomes_beam_laser() {
-        let w = parse(
-            "[BuildLaser]\n{\nbeamlaser=1;\nbeamtime=0.06;\n}",
-            "BuildLaser",
-        );
-        assert_eq!(w.category(), WeaponCategory::BeamLaser);
-    }
-
-    #[test]
-    fn mine_launcher_honors_explicit_laser_cannon() {
-        // MineLauncher: `WeaponType=LaserCannon; ballistic=1;`. The
-        // explicit weaponType keeps it a LaserCannon; ballistic makes
-        // `is_projectile()` true separately (gravity-affected bolt).
-        let w = parse(
-            "[M]\n{\nweapontype=LaserCannon;\nballistic=1;\nmygravity=.4;\n}",
-            "M",
-        );
-        assert_eq!(w.category(), WeaponCategory::LaserCannon);
-        assert!(w.is_projectile());
-    }
-
-    #[test]
-    fn sigterm_becomes_aircraft_bomb() {
-        let w = parse(
-            "[Sig]\n{\nweapontype=AircraftBomb;\nmodel=sigterm.s3o;\n}",
-            "Sig",
-        );
-        assert_eq!(w.category(), WeaponCategory::AircraftBomb);
-    }
-
-    #[test]
-    fn shield_flag_wins_over_everything() {
-        // Weapons marked `isshield=1` must resolve to Shield even if
-        // they also carry `beamweapon=1` etc — those flags describe
-        // the projectile template the shield uses on collision.
-        let w = parse("[S]\n{\nisshield=1;\nbeamweapon=1;\n}", "S");
-        assert_eq!(w.category(), WeaponCategory::Shield);
-    }
-
-    #[test]
-    fn pure_cannon_fallback() {
-        // Nothing set → Cannon (upstream default in weapondefs_post).
-        let w = parse("[C]\n{\n}", "C");
-        assert_eq!(w.category(), WeaponCategory::Cannon);
-    }
-
-    // Palette resolution -------------------------------------------------
-
-    fn rgb_close(a: [f32; 3], b: [f32; 3]) {
-        for i in 0..3 {
-            assert!(
-                (a[i] - b[i]).abs() < 1e-2,
-                "channel {i}: got {} expected {}",
-                a[i],
-                b[i],
-            );
-        }
-    }
-
-    #[test]
-    fn retrodeath_color_40_synthesises_yellow() {
-        // Upstream `RetroDeath` authors only `color=40` (hue ≈
-        // 40/255 = 0.157, which is in the first 1/6 of the wheel).
-        // The hs2rgb shim produces r=1, g=40/255*6 ≈ 0.94, b=0.
-        let w = parse("[RD]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=40;\n}", "RD");
-        let rgb = w.palette_rgb().expect("color=40 must synth");
-        rgb_close(rgb, [1.0, 0.941, 0.0]);
-        // `resolved_rgb` must prefer the palette over white.
-        rgb_close(w.resolved_rgb(), [1.0, 0.941, 0.0]);
-    }
-
-    #[test]
-    fn palette_hue_high_bumps_by_0_1() {
-        // Upstream applies a `+0.1` bump when hue > 0.5. At `color=128`
-        // (hue ≈ 0.5019), the bump pushes hue into the 0.6+ range,
-        // which lands in the 2/3..5/6 segment → blue-heavy.
-        let w = parse("[P]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=128;\n}", "P");
-        let rgb = w.palette_rgb().expect("synth");
-        assert!(rgb[2] > 0.5, "expected blue-dominant, got {rgb:?}");
-    }
-
-    #[test]
-    fn palette_zero_color_returns_none() {
-        let w = parse("[P]\n{\nbeamweapon=1;\nlineofsight=1;\n}", "P");
-        assert!(w.palette_rgb().is_none());
-    }
-
-    #[test]
-    fn resolved_rgb_prefers_rgb_color_over_palette() {
-        let w = parse(
-            "[P]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=40;\nrgbcolor=0.1 0.2 0.3;\n}",
-            "P",
-        );
-        rgb_close(w.resolved_rgb(), [0.1, 0.2, 0.3]);
-    }
-
-    #[test]
-    fn resolved_rgb_normalises_0_255_rgb() {
-        let w = parse("[P]\n{\nrgbcolor=255 128 64;\n}", "P");
-        rgb_close(w.resolved_rgb(), [1.0, 0.502, 0.251]);
-    }
-
-    #[test]
-    fn resolved_rgb_cannon_default_is_orange() {
-        // No rgbColor, no color palette → Cannon default (1.0, 0.5, 0.0).
-        let w = parse("[P]\n{\n}", "P");
-        rgb_close(w.resolved_rgb(), [1.0, 0.5, 0.0]);
-    }
-}
-
 impl WeaponDefs {
     /// Extract weapon definitions from a parsed TDF.
     ///
@@ -823,5 +617,211 @@ impl WeaponDef {
 
             damage,
         }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod shim_tests {
+    use super::*;
+    use crate::Tdf;
+
+    fn parse(src: &str, name: &str) -> WeaponDef {
+        let tdf = Tdf::parse(src).unwrap();
+        let defs = WeaponDefs::from_tdf(&tdf);
+        defs.get(name).cloned().expect("section")
+    }
+
+    #[test]
+    fn explicit_weapon_type_wins() {
+        let w = parse("[W]\n{\nweapontype=BeamLaser;\nbeamweapon=1;\n}", "W");
+        // Even though beamweapon=1 would map to LaserCannon in the
+        // legacy shim, the explicit weaponType takes precedence.
+        assert_eq!(w.category(), WeaponCategory::BeamLaser);
+    }
+
+    /// `CLaserCannon::UpdateRange` rounds the range down to whole
+    /// projectile steps; the bolt then covers `ttl + 1` steps, capped so a
+    /// max-range shot ends at that rounded range.
+    #[test]
+    fn laser_cannon_range_and_travel_follow_the_projectile_speed() {
+        let mega = parse(
+            "[M]\n{\nbeamweapon=1;\nlineofsight=1;\nrange=512;\nweaponvelocity=1024;\nsprayangle=1024;\n}",
+            "M",
+        );
+        assert!((mega.projectile_speed() - 34.133335).abs() < 1e-4);
+        assert!(
+            (mega.effective_range() - 477.8667).abs() < 1e-2,
+            "{}",
+            mega.effective_range()
+        );
+        // 300 elmos: ttl = ceil(300 / 34.13) = 9, travel 10 steps.
+        assert!((mega.laser_travel(300.0) - 10.0 * mega.projectile_speed()).abs() < 1e-3);
+        // Beyond range the ttl caps at floor(512/34.13) − 1 = 13.
+        assert!((mega.laser_travel(600.0) - 14.0 * mega.projectile_speed()).abs() < 1e-3);
+        assert!((mega.laser_travel(0.0) - mega.projectile_speed()).abs() < 1e-3);
+        // sin(1024·π/0xafff)
+        assert!((mega.spray_sin() - 0.07134).abs() < 1e-4);
+
+        let line = parse(
+            "[Line]\n{\nbeamweapon=1;\nlineofsight=1;\nrange=256;\nweaponvelocity=512;\n}",
+            "Line",
+        );
+        assert!(
+            (line.effective_range() - 238.9333).abs() < 1e-2,
+            "{}",
+            line.effective_range()
+        );
+        assert_eq!(line.spray_sin(), 0.0);
+
+        // Anything that is not a LaserCannon keeps its authored range.
+        let beam = parse("[B]\n{\nweapontype=BeamLaser;\nrange=250;\n}", "B");
+        assert_eq!(beam.effective_range(), 250.0);
+    }
+
+    #[test]
+    fn bit_line_becomes_laser_cannon() {
+        // Verbatim-ish `Line` (Bit): `beamweapon=1 lineofsight=1` with
+        // no literal `weaponType=`. Must resolve to LaserCannon so
+        // weapon_fx spawns a traveling bolt, not a hitscan beam.
+        let w = parse(
+            "[Line]\n{\nbeamweapon=1;\nlineofsight=1;\nthickness=4;\n}",
+            "Line",
+        );
+        assert_eq!(w.category(), WeaponCategory::LaserCannon);
+        assert!(!w.is_projectile());
+    }
+
+    #[test]
+    fn byte_megabeam_becomes_laser_cannon() {
+        let w = parse(
+            "[MegaBeam]\n{\nbeamweapon=1;\nlineofsight=1;\nburst=4;\n}",
+            "MegaBeam",
+        );
+        assert_eq!(w.category(), WeaponCategory::LaserCannon);
+    }
+
+    #[test]
+    fn pointer_geometric_becomes_missile_launcher() {
+        // `smoketrail=1` with `lineofsight=1` → MissileLauncher,
+        // regardless of whether a `model=` is set. The model-check in
+        // `is_projectile` is a secondary guard.
+        let w = parse(
+            "[Geo]\n{\nsmoketrail=1;\nlineofsight=1;\nmodel=octashot.s3o;\ntracks=1;\n}",
+            "Geo",
+        );
+        assert_eq!(w.category(), WeaponCategory::MissileLauncher);
+        assert!(w.is_projectile());
+    }
+
+    #[test]
+    fn build_laser_becomes_beam_laser() {
+        let w = parse(
+            "[BuildLaser]\n{\nbeamlaser=1;\nbeamtime=0.06;\n}",
+            "BuildLaser",
+        );
+        assert_eq!(w.category(), WeaponCategory::BeamLaser);
+    }
+
+    #[test]
+    fn mine_launcher_honors_explicit_laser_cannon() {
+        // MineLauncher: `WeaponType=LaserCannon; ballistic=1;`. The
+        // explicit weaponType keeps it a LaserCannon; ballistic makes
+        // `is_projectile()` true separately (gravity-affected bolt).
+        let w = parse(
+            "[M]\n{\nweapontype=LaserCannon;\nballistic=1;\nmygravity=.4;\n}",
+            "M",
+        );
+        assert_eq!(w.category(), WeaponCategory::LaserCannon);
+        assert!(w.is_projectile());
+    }
+
+    #[test]
+    fn sigterm_becomes_aircraft_bomb() {
+        let w = parse(
+            "[Sig]\n{\nweapontype=AircraftBomb;\nmodel=sigterm.s3o;\n}",
+            "Sig",
+        );
+        assert_eq!(w.category(), WeaponCategory::AircraftBomb);
+    }
+
+    #[test]
+    fn shield_flag_wins_over_everything() {
+        // Weapons marked `isshield=1` must resolve to Shield even if
+        // they also carry `beamweapon=1` etc — those flags describe
+        // the projectile template the shield uses on collision.
+        let w = parse("[S]\n{\nisshield=1;\nbeamweapon=1;\n}", "S");
+        assert_eq!(w.category(), WeaponCategory::Shield);
+    }
+
+    #[test]
+    fn pure_cannon_fallback() {
+        // Nothing set → Cannon (upstream default in weapondefs_post).
+        let w = parse("[C]\n{\n}", "C");
+        assert_eq!(w.category(), WeaponCategory::Cannon);
+    }
+
+    // Palette resolution -------------------------------------------------
+
+    fn rgb_close(a: [f32; 3], b: [f32; 3]) {
+        for i in 0..3 {
+            assert!(
+                (a[i] - b[i]).abs() < 1e-2,
+                "channel {i}: got {} expected {}",
+                a[i],
+                b[i],
+            );
+        }
+    }
+
+    #[test]
+    fn retrodeath_color_40_synthesises_yellow() {
+        // Upstream `RetroDeath` authors only `color=40` (hue ≈
+        // 40/255 = 0.157, which is in the first 1/6 of the wheel).
+        // The hs2rgb shim produces r=1, g=40/255*6 ≈ 0.94, b=0.
+        let w = parse("[RD]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=40;\n}", "RD");
+        let rgb = w.palette_rgb().expect("color=40 must synth");
+        rgb_close(rgb, [1.0, 0.941, 0.0]);
+        // `resolved_rgb` must prefer the palette over white.
+        rgb_close(w.resolved_rgb(), [1.0, 0.941, 0.0]);
+    }
+
+    #[test]
+    fn palette_hue_high_bumps_by_0_1() {
+        // Upstream applies a `+0.1` bump when hue > 0.5. At `color=128`
+        // (hue ≈ 0.5019), the bump pushes hue into the 0.6+ range,
+        // which lands in the 2/3..5/6 segment → blue-heavy.
+        let w = parse("[P]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=128;\n}", "P");
+        let rgb = w.palette_rgb().expect("synth");
+        assert!(rgb[2] > 0.5, "expected blue-dominant, got {rgb:?}");
+    }
+
+    #[test]
+    fn palette_zero_color_returns_none() {
+        let w = parse("[P]\n{\nbeamweapon=1;\nlineofsight=1;\n}", "P");
+        assert!(w.palette_rgb().is_none());
+    }
+
+    #[test]
+    fn resolved_rgb_prefers_rgb_color_over_palette() {
+        let w = parse(
+            "[P]\n{\nbeamweapon=1;\nlineofsight=1;\ncolor=40;\nrgbcolor=0.1 0.2 0.3;\n}",
+            "P",
+        );
+        rgb_close(w.resolved_rgb(), [0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn resolved_rgb_normalises_0_255_rgb() {
+        let w = parse("[P]\n{\nrgbcolor=255 128 64;\n}", "P");
+        rgb_close(w.resolved_rgb(), [1.0, 0.502, 0.251]);
+    }
+
+    #[test]
+    fn resolved_rgb_cannon_default_is_orange() {
+        // No rgbColor, no color palette → Cannon default (1.0, 0.5, 0.0).
+        let w = parse("[P]\n{\n}", "P");
+        rgb_close(w.resolved_rgb(), [1.0, 0.5, 0.0]);
     }
 }
