@@ -283,7 +283,7 @@ fn colorize(tga: &TgaImage, faction: Faction) -> Vec<u8> {
     let fb = (fc.blue.clamp(0.0, 1.0) * 255.0) as u8;
 
     let mut out = Vec::with_capacity(tga.pixels.len());
-    for chunk in tga.pixels.chunks_exact(4) {
+    for chunk in tga.pixels.as_chunks::<4>().0 {
         let (sr, sg, sb) = (chunk[0], chunk[1], chunk[2]);
         let alpha = chunk[3] as u16;
         let brightness = sr.max(sg).max(sb);
