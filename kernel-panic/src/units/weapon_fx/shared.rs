@@ -58,6 +58,10 @@ pub struct DelayedHitInfo {
     /// time (`CWeapon::weaponDir`) — the launch direction of a
     /// `fixedLauncher` missile / starburst.
     pub muzzle_dir: Vec3,
+    /// The direction the weapon launched the shell, when the fire side
+    /// solved it (`CCannon::FireImpl`: the ballistic solve plus spray).
+    /// `None` lets the flight model derive it from the target.
+    pub launch_dir: Option<Vec3>,
 }
 
 /// A side effect bound to a projectile's point of impact.
@@ -82,6 +86,10 @@ pub enum ImpactEffect {
 pub(super) struct DelayedHit {
     pub target: Option<Entity>,
     pub attacker: Entity,
+    /// The firing unit's team, captured at launch (`CProjectile`'s
+    /// `teamID`): the shot keeps its allegiance — and keeps passing
+    /// through its own side — after the shooter dies.
+    pub owner_team: Option<u8>,
     pub weapon: WeaponId,
     pub attacker_distance: f32,
     pub on_impact: Option<ImpactEffect>,
@@ -288,19 +296,20 @@ pub enum Flight {
     /// `CStarburstProjectile` (`weapontype=StarburstLauncher` — Flow's
     /// FlowMissile).
     Starburst(super::flight::StarburstFlight),
-    /// Ballistic shell (`ballistic=1` + `myGravity` — Exploit's
-    /// BugCannon): fixed launch velocity from the ballistic solve +
-    /// constant gravity `g` elmos/s² (`myGravity × map gravity`).
-    Ballistic { velocity: Vec3, gravity: f32 },
+    /// `CExplosiveProjectile` (`weapontype=Cannon`, or legacy
+    /// `ballistic=1` — Exploit's BugCannon): a ballistic shell.
+    Cannon(super::flight::CannonFlight),
 }
 
 impl Flight {
-    /// Unit flight direction of a guided projectile.
+    /// Unit flight direction of an integrated (guided or ballistic)
+    /// projectile, which its model faces.
     pub fn guided_dir(&self) -> Option<Vec3> {
         match self {
             Flight::Missile(m) => Some(m.dir),
             Flight::Starburst(s) => Some(s.dir),
-            _ => None,
+            Flight::Cannon(c) => c.velocity.try_normalize(),
+            Flight::Direct => None,
         }
     }
 
@@ -310,7 +319,7 @@ impl Flight {
         match self {
             Flight::Missile(m) => m.ttl > 0,
             Flight::Starburst(s) => s.ttl > 0,
-            Flight::Ballistic { .. } => true,
+            Flight::Cannon(c) => c.ttl > 0,
             Flight::Direct => false,
         }
     }

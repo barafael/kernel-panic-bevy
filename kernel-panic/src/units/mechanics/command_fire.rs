@@ -717,7 +717,7 @@ pub fn tick_nx_casts(
         return;
     };
     let weapon_def = weapons.by_id(nx);
-    let launch = crate::units::combat::AimLaunch::of(Some(weapon_def));
+    let launch = crate::units::combat::AimLaunch::of(Some(weapon_def), pieces.map_gravity());
     for (entity, mut cast, gtf, unit, team, faction) in &mut casters {
         let target = match *cast {
             NxCast::Recovering { left } => {
@@ -782,6 +782,7 @@ pub fn tick_nx_casts(
                     attacker: entity,
                     attacker_distance: distance,
                     muzzle_dir: muzzle.dir,
+                    launch_dir: None,
                     on_impact: Some(crate::units::weapon_fx::ImpactEffect::NxZone {
                         owner_team: team.0,
                         owner_faction: *faction,

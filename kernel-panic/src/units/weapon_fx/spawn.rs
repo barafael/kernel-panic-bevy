@@ -16,6 +16,7 @@ use super::shared::{
 use crate::rng::{next_f32, next_signed};
 use crate::sim::{GAME_SPEED, frames_to_secs};
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_mesh};
+use crate::units::components::TeamId;
 use crate::units::content::weapons::WeaponRegistry;
 
 /// True for `BuildLaser` (the upstream build-laser weapon name). The
@@ -46,8 +47,11 @@ pub(super) fn spawn_weapon_visuals(
     mut flash_assets: ResMut<GroundFlashAssets>,
     mut fx_meshes: ResMut<WeaponFxMeshes>,
     mut ceg_assets: ResMut<CegRenderAssets>,
+    teams: Query<&TeamId>,
     mut rng: Local<u32>,
 ) {
+    // The one read of the map's gravity for every shell spawned here.
+    let map_gravity = crate::sim::MAP_GRAVITY_PER_FRAME2;
     for event in pending.events.drain(..) {
         // Ids are interned through this same registry at the combat
         // side, so the lookup is infallible.
@@ -141,6 +145,7 @@ pub(super) fn spawn_weapon_visuals(
             primary_visual = Some(spawn_projectile(
                 &event,
                 weapon,
+                map_gravity,
                 &mut commands,
                 &mut meshes,
                 &mut materials,
@@ -189,9 +194,13 @@ pub(super) fn spawn_weapon_visuals(
         // will process on impact. The weapon's name is enough to
         // recover rgb / AoE / explosion CEG via the registry then.
         if let (Some(visual), Some(delayed)) = (primary_visual, event.delayed_hit.as_ref()) {
+            // The shooter is still alive here (shots are queued and
+            // drained within one tick, before `cleanup_dying`), so its
+            // team rides along for the rest of the flight.
             commands.entity(visual).insert(DelayedHit {
                 target: delayed.target,
                 attacker: delayed.attacker,
+                owner_team: teams.get(delayed.attacker).ok().map(|t| t.0),
                 weapon: event.weapon_id,
                 attacker_distance: delayed.attacker_distance,
                 on_impact: delayed.on_impact,
@@ -853,16 +862,18 @@ fn spawn_laser_bolt(
 ///   the muzzle along the muzzle piece's emit dir (`fixedLauncher`; else
 ///   straight up), `weapontimer` frames of ascent, a `turnrate` swing
 ///   onto the target, then homing + acceleration to `weaponvelocity`.
-/// - `ballistic=1` + `myGravity` (Exploit's BugCannon):
-///   `CannonProjectile` integrates `myGravity × map gravity`; the
-///   launch angle is the low-arc ballistic solve so the shell lands on
-///   the target.
-/// - everything else (AircraftBomb, plain cannons): direct parametric
-///   lerp as before.
+/// - `Cannon` (`ballistic=1` — Exploit's BugCannon): `CCannon::FireImpl`
+///   and `CExplosiveProjectile` — launched at `weaponvelocity` along the
+///   low-arc ballistic solve (or the fire side's sprayed launch
+///   direction) and falling under `myGravity` (else the map's gravity),
+///   per sim frame.
+/// - everything else (AircraftBomb, a `ballistic=1` LaserCannon):
+///   direct parametric lerp as before.
 #[allow(clippy::too_many_arguments)]
 fn spawn_projectile(
     event: &AttackEvent,
     weapon: &spring_tdf::WeaponDef,
+    map_gravity: f32,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
@@ -888,66 +899,38 @@ fn spawn_projectile(
     let arc_height = weapon.trajectory_height * 0.4;
 
     // ── Flight model (see the doc comment above) ──
-    let to_target = event.target_pos - event.attacker_pos;
     let up = Vec3::Y;
-    const MAP_GRAVITY: f32 = 50.0; // elmos/s², from the map's gravity=
-    let muzzle_dir = event
-        .delayed_hit
-        .as_ref()
-        .map_or_else(|| to_target.normalize_or(up), |d| d.muzzle_dir);
+    let muzzle_dir = event.delayed_hit.as_ref().map_or_else(
+        || (event.target_pos - event.attacker_pos).normalize_or(up),
+        |d| d.muzzle_dir,
+    );
     let launch = super::flight::Launch {
         weapon,
         muzzle_pos: event.attacker_pos,
         muzzle_dir,
         target_pos: event.target_pos,
+        map_gravity,
     };
     let mut spawn_pos = event.attacker_pos;
-    let flight = if weapon.category() == spring_tdf::WeaponCategory::StarburstLauncher {
-        let (f, pos) = super::flight::StarburstFlight::launch(launch);
-        spawn_pos = pos;
-        Flight::Starburst(f)
-    } else if weapon.category() == spring_tdf::WeaponCategory::MissileLauncher {
-        let (f, pos) = super::flight::MissileFlight::launch(launch);
-        spawn_pos = pos;
-        Flight::Missile(f)
-    // `myGravity > 0` is the discriminator: every KPK ballistic shell
-    // carries a gravity multiplier (BugCannon .3, WMD .4). A
-    // `ballistic=1` tag with no gravity (SwallowDamage's burnblow) is a
-    // point-blank damage weapon, not a lobbed projectile — solving with
-    // g = 0 would divide by zero.
-    } else if weapon.category() == spring_tdf::WeaponCategory::Cannon
-        && weapon.ballistic
-        && weapon.my_gravity > 0.0
-    {
-        // Low-arc ballistic solve: sin(2θ) = g·d / v²  (+ height term).
-        let g = weapon.my_gravity * MAP_GRAVITY;
-        let horizontal = Vec3::new(to_target.x, 0.0, to_target.z);
-        let d = horizontal.length();
-        let h = to_target.y;
-        let v = if weapon.start_velocity > 0.0 {
-            weapon.start_velocity
-        } else {
-            speed
-        };
-        // tanθ = (v² − √(v⁴ − g(g·d² + 2·h·v²))) / (g·d) — low arc.
-        let disc = v * v * v * v - g * (g * d * d + 2.0 * h * v * v);
-        let velocity = if d > 1.0 && disc >= 0.0 {
-            let tan_theta = (v * v - disc.sqrt()) / (g * d);
-            let cos_theta = 1.0 / (1.0 + tan_theta * tan_theta).sqrt();
-            let dir = horizontal / d;
-            dir * (v * cos_theta) + up * (v * cos_theta * tan_theta)
-        } else {
-            // Out of ballistic reach — 45° max-range lob.
-            let v45 = (g * d * d).max(v * v * 0.5).sqrt();
-            (horizontal / d.max(1.0)) * (v45 * std::f32::consts::FRAC_1_SQRT_2)
-                + up * (v45 * std::f32::consts::FRAC_1_SQRT_2)
-        };
-        Flight::Ballistic {
-            velocity,
-            gravity: g,
+    let flight = match weapon.category() {
+        spring_tdf::WeaponCategory::StarburstLauncher => {
+            let (f, pos) = super::flight::StarburstFlight::launch(launch);
+            spawn_pos = pos;
+            Flight::Starburst(f)
         }
-    } else {
-        Flight::Direct
+        spring_tdf::WeaponCategory::MissileLauncher => {
+            let (f, pos) = super::flight::MissileFlight::launch(launch);
+            spawn_pos = pos;
+            Flight::Missile(f)
+        }
+        spring_tdf::WeaponCategory::Cannon => Flight::Cannon(super::flight::CannonFlight::launch(
+            weapon,
+            event.attacker_pos,
+            event.target_pos,
+            event.delayed_hit.as_ref().and_then(|d| d.launch_dir),
+            map_gravity,
+        )),
+        _ => Flight::Direct,
     };
 
     // Prefer the authored S3O model (octashot, sigterm, etc.). The s3o
@@ -1001,7 +984,7 @@ fn spawn_projectile(
     let (velocity, speed) = match flight {
         Flight::Missile(m) => (m.dir * m.speed * GAME_SPEED, m.speed * GAME_SPEED),
         Flight::Starburst(s) => (s.dir * s.speed * GAME_SPEED, s.speed * GAME_SPEED),
-        Flight::Ballistic { velocity, .. } => (velocity, velocity.length()),
+        Flight::Cannon(c) => (c.velocity * GAME_SPEED, c.velocity.length() * GAME_SPEED),
         Flight::Direct => (Vec3::ZERO, speed),
     };
     let rotation = flight

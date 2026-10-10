@@ -279,10 +279,15 @@ impl DelayedDamage {
 /// `UpdateSalvo` step ([`super::fire_salvo_shot`]: per projectile
 /// `Shot1` → `QueryWeapon1` → fire) once its frame is due, and the last
 /// one also calls `EndBurst1`.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn tick_burst_fire(
     time: Res<Time>,
-    mut query: Query<(Entity, &mut BurstFire, &GlobalTransform), Without<Dying>>,
+    // `CUnit::CanUpdateWeapons`: a paralyzed unit's salvo pauses (its
+    // `nextSalvo` frame passes; the rest fires once the stun ends).
+    mut query: Query<
+        (Entity, &mut BurstFire, &GlobalTransform),
+        (Without<Dying>, Without<Stunned>),
+    >,
     mut pieces: super::PieceLookup,
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
@@ -1075,6 +1080,7 @@ mod tests {
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::weapon_fx::PendingExplosions>()
             .insert_resource(UnitRegistry::empty())
             .insert_resource(WeaponRegistry::default());
 

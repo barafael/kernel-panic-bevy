@@ -9,6 +9,10 @@
 //!   `UpdateTrajectory` (`StarburstProjectile.cpp:136-257`), launched by
 //!   `CStarburstLauncher::FireImpl` (`StarburstLauncher.cpp:31-50`).
 //!   Flow's FlowMissile.
+//! - [`CannonFlight`] — `CExplosiveProjectile` (`CProjectile::Update`),
+//!   launched by `CCannon::FireImpl` (`Cannon.cpp`). Exploit's BugCannon,
+//!   the Obelisk's Infection shell. Aimed with the same ballistic solve
+//!   ([`crate::units::combat::aim::cannon_wanted_dir`]).
 //!
 //! Everything runs in Spring's native units: one [`step`] per 30 Hz sim
 //! frame, speeds in elmos/frame, accelerations in elmos/frame², turn
@@ -20,8 +24,7 @@
 use bevy::prelude::*;
 
 use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
-
-use crate::sim::MAP_GRAVITY_PER_FRAME2;
+use crate::units::combat::aim::{cannon_launch_dir, weapon_gravity};
 
 /// `MAX_PROJECTILE_RANGE` — `distanceToTravel` for `fixedLauncher` /
 /// timed starbursts, which never run out of range.
@@ -70,6 +73,9 @@ pub struct Launch<'a> {
     /// World-space emit direction of the `QueryWeapon` piece.
     pub muzzle_dir: Vec3,
     pub target_pos: Vec3,
+    /// The map's gravity, elmos/frame² (negative): what a missile falls
+    /// under once out of fuel unless the TDF sets `myGravity`.
+    pub map_gravity: f32,
 }
 
 impl MissileFlight {
@@ -98,11 +104,7 @@ impl MissileFlight {
         } else {
             (0.0, 0.0, 0)
         };
-        let gravity = if w.my_gravity != 0.0 {
-            -w.my_gravity
-        } else {
-            MAP_GRAVITY_PER_FRAME2
-        };
+        let gravity = weapon_gravity(w, l.map_gravity);
         (
             Self {
                 dir,
@@ -241,11 +243,7 @@ impl StarburstFlight {
         } else {
             w.range
         };
-        let gravity = if w.my_gravity != 0.0 {
-            -w.my_gravity
-        } else {
-            MAP_GRAVITY_PER_FRAME2
-        };
+        let gravity = weapon_gravity(w, l.map_gravity);
         (
             Self {
                 dir,
@@ -335,9 +333,148 @@ impl StarburstFlight {
     }
 }
 
+/// `CExplosiveProjectile` state: a ballistic shell.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CannonFlight {
+    /// `speed`, elmos/frame.
+    pub velocity: Vec3,
+    /// `mygravity`, elmos/frame² (negative is down).
+    pub gravity: f32,
+    /// Frames left before the shell bursts in the air.
+    pub ttl: i32,
+}
+
+impl CannonFlight {
+    /// `CCannon::FireImpl`: the shell leaves the muzzle at the weapon's
+    /// `projectileSpeed` (`weaponvelocity / 30` — `startvelocity` is a
+    /// missile tag) along `launch_dir`, the fire side's (sprayed)
+    /// ballistic solution, or — when the shot comes without one — the
+    /// same solve for `target_pos` here. It lives twice the frames it
+    /// needs to cover the horizontal distance (`ttl = predict · 2`).
+    pub fn launch(
+        weapon: &spring_tdf::WeaponDef,
+        muzzle_pos: Vec3,
+        target_pos: Vec3,
+        launch_dir: Option<Vec3>,
+        map_gravity: f32,
+    ) -> Self {
+        let speed = weapon.projectile_speed();
+        let gravity = weapon_gravity(weapon, map_gravity);
+        let target_vec = target_pos - muzzle_pos;
+        let dir = launch_dir
+            .unwrap_or_else(|| cannon_launch_dir(target_vec, speed, gravity))
+            .normalize_or(Vec3::Y);
+        let sq_speed_2d = dir.xz().length_squared() * speed * speed;
+        let predict = if sq_speed_2d == 0.0 {
+            -2.0 * speed * dir.y / gravity
+        } else {
+            (target_vec.xz().length_squared() / sq_speed_2d).sqrt()
+        };
+        Self {
+            velocity: dir * speed,
+            gravity,
+            ttl: predict.ceil() as i32 * 2,
+        }
+    }
+
+    /// One sim frame of `CProjectile::Update`: gravity first
+    /// (`speed += up · mygravity`), then the caller moves by the returned
+    /// velocity (elmos/frame) — the discrete step `CCannon::
+    /// HaveFreeLineOfFire`'s `gravity · 0.5` term accounts for.
+    pub fn step(&mut self) -> Vec3 {
+        self.ttl -= 1;
+        self.velocity.y += self.gravity;
+        self.velocity
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const G: f32 = crate::sim::MAP_GRAVITY_PER_FRAME2;
+
+    /// Fly a shell frame by frame until it comes down through `ground_y`
+    /// (or bursts); returns the landing point and the apex height.
+    fn fly_shell(mut f: CannonFlight, from: Vec3, ground_y: f32) -> (Vec3, f32) {
+        let mut pos = from;
+        let mut apex = pos.y;
+        while f.ttl > 0 {
+            let next = pos + f.step();
+            apex = apex.max(next.y);
+            if next.y <= ground_y {
+                let t = (pos.y - ground_y) / (pos.y - next.y);
+                return (pos.lerp(next, t), apex);
+            }
+            pos = next;
+        }
+        (pos, apex)
+    }
+
+    /// The BugCannon's shell, launched by the shared solve at a target
+    /// 1000 elmos out on level ground: a real lob (≈ 24° launch, ~113
+    /// elmos apex — the old model flew it under 1° almost flat) that
+    /// comes down on the target, short by about one frame of travel as
+    /// in the engine (the solve is continuous, the flight discrete).
+    #[test]
+    fn bug_cannon_shell_lobs_onto_its_target() {
+        let w = crate::units::combat::aim::tests::bug_cannon();
+        let target = Vec3::new(1000.0, 0.0, 0.0);
+        let f = CannonFlight::launch(&w, Vec3::ZERO, target, None, G);
+        assert!((f.velocity.length() - 20.0).abs() < 1e-4);
+        let pitch = f.velocity.y.atan2(f.velocity.x).to_degrees();
+        assert!((pitch - 24.3).abs() < 0.2, "launch pitch {pitch}°");
+        // predict = ceil(1000 / (20·cos θ)) = 55 → ttl 110.
+        assert_eq!(f.ttl, 110);
+        let (landed, apex) = fly_shell(f, Vec3::ZERO, 0.0);
+        assert!(apex > 100.0 && apex < 125.0, "apex {apex}");
+        let short = target.x - landed.x;
+        assert!(
+            (0.0..=20.0).contains(&short),
+            "landed at {landed}, {short} elmos short"
+        );
+        assert!(landed.z.abs() < 1e-3);
+    }
+
+    /// Aim and flight are one model: the pitch the script is asked for
+    /// (`AimLaunch`) is exactly the shell's launch pitch.
+    #[test]
+    fn cannon_aim_pitch_matches_the_launch() {
+        use crate::units::combat::aim::{AimLaunch, local_aim_angles};
+        let w = crate::units::combat::aim::tests::bug_cannon();
+        for target in [
+            Vec3::new(300.0, 40.0, -200.0),
+            Vec3::new(-900.0, -150.0, 100.0),
+            Vec3::new(50.0, 0.0, 1100.0),
+        ] {
+            let f = CannonFlight::launch(&w, Vec3::ZERO, target, None, G);
+            let dir = f.velocity.normalize();
+            let (_, pitch) = local_aim_angles(Quat::IDENTITY, target, AimLaunch::of(Some(&w), G));
+            assert!(
+                (dir.y.asin() - pitch).abs() < 1e-5,
+                "{target}: launch {} vs aim {pitch}",
+                dir.y.asin()
+            );
+        }
+    }
+
+    /// A fire-side launch direction (the sprayed solve) wins over the
+    /// shell's own solve, and an unreachable target bursts in the air
+    /// after its ttl rather than flying forever.
+    #[test]
+    fn cannon_launch_dir_and_ttl() {
+        let w = crate::units::combat::aim::tests::bug_cannon();
+        let dir = Vec3::new(1.0, 1.0, 0.0).normalize();
+        let f = CannonFlight::launch(&w, Vec3::ZERO, Vec3::new(500.0, 0.0, 0.0), Some(dir), G);
+        assert!((f.velocity.normalize() - dir).length() < 1e-6);
+        let mut far = CannonFlight::launch(&w, Vec3::ZERO, Vec3::new(5000.0, 0.0, 0.0), None, G);
+        assert_eq!(far.velocity.y, 0.0, "out of reach: level launch");
+        let ttl = far.ttl;
+        for _ in 0..ttl {
+            far.step();
+        }
+        assert_eq!(far.ttl, 0);
+    }
 
     fn flow_missile() -> spring_tdf::WeaponDef {
         // networkweapons.tdf [FlowMissile].
@@ -369,6 +506,7 @@ mod tests {
         let w = flow_missile();
         let dir = Vec3::new(0.5, -0.2, 0.8).normalize();
         let (f, pos) = StarburstFlight::launch(Launch {
+            map_gravity: G,
             weapon: &w,
             muzzle_pos: Vec3::new(10.0, 150.0, 5.0),
             muzzle_dir: dir,
@@ -391,6 +529,7 @@ mod tests {
     fn starburst_stages_and_turn_rate_per_frame() {
         let w = flow_missile();
         let (mut f, mut pos) = StarburstFlight::launch(Launch {
+            map_gravity: G,
             weapon: &w,
             muzzle_pos: Vec3::ZERO,
             muzzle_dir: Vec3::Y,
@@ -437,6 +576,7 @@ mod tests {
     fn starburst_tracks_a_moving_target() {
         let w = flow_missile();
         let (mut f, mut pos) = StarburstFlight::launch(Launch {
+            map_gravity: G,
             weapon: &w,
             muzzle_pos: Vec3::ZERO,
             muzzle_dir: Vec3::X,
@@ -478,6 +618,7 @@ mod tests {
         };
         let target = Vec3::new(600.0, 0.0, 0.0);
         let (mut f, mut pos) = MissileFlight::launch(Launch {
+            map_gravity: G,
             weapon: &w,
             muzzle_pos: Vec3::ZERO,
             muzzle_dir: Vec3::X,
