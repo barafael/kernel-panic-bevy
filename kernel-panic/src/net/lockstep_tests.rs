@@ -19,7 +19,7 @@ use bevy::prelude::*;
 use super::*;
 use crate::interaction::movement::{AttackMoveActive, CommandQueue, MovePath, MoveTarget};
 use crate::interaction::movement_harness::Harness;
-use crate::units::components::TeamId;
+use crate::units::components::{TeamId, UnitType};
 use crate::units::lifecycle::production::Producer;
 use crate::units::player::LocalTeam;
 

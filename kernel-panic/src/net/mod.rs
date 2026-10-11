@@ -36,11 +36,10 @@ use serde::{Deserialize, Serialize};
 pub use codec::{IdList, NetPos, PosList};
 
 use crate::map_loading::MatchScopeAppExt;
-use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 
 /// A unit's id: the per-match spawn counter value it got when its
-/// `UnitType` was first inserted (a required component of `UnitType`,
+/// `UnitType` was first inserted (`UnitType` requires it,
 /// numbered by the `on_add` hook) — Spring's unit id. Deterministic as
 /// long as the sim spawns units in the same order everywhere (it must
 /// anyway): command buffers apply in schedule order, so the hooks fire
@@ -574,8 +573,7 @@ pub struct CommandBusPlugin;
 
 impl Plugin for CommandBusPlugin {
     fn build(&self, app: &mut App) {
-        app.register_required_components::<UnitType, NetId>()
-            .init_match_resource::<NetIdAllocator>()
+        app.init_match_resource::<NetIdAllocator>()
             .init_match_resource::<NetIdIndex>()
             .init_match_resource::<CommandBus>()
             .configure_sets(
@@ -589,7 +587,6 @@ impl Plugin for CommandBusPlugin {
 /// Register the bus on a bare test `World` (no `App`).
 #[cfg(test)]
 pub(crate) fn init_test_world(world: &mut World) {
-    world.register_required_components::<UnitType, NetId>();
     world.init_resource::<NetIdAllocator>();
     world.init_resource::<NetIdIndex>();
     world.init_resource::<CommandBus>();
