@@ -170,6 +170,6 @@ after the first menu click.
    bank load and effects fire without asset errors, and a listen on the
    web build for the autoplay shim. Unit tests cover the name resolution,
    the bank ↔ TDF coverage, the gain curve and the selection replies.
-6. **Later — tips voice-over**: needs the tip dispenser itself (94 tips
-   with game-state conditions, 10 s cadence, click-to-mute); the clips are
-   ready to drop in under `assets/sounds/tips/`.
+6. **Later**: the tip dispenser and its voice-over, `FailedCommand`,
+   marker/chat beeps, stereo panning and the verification debt are
+   planned in `docs/audio-followups.md`.
