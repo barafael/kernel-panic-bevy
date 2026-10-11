@@ -576,3 +576,197 @@ fn fixed_ambiguities() {
     top.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     eprintln!("most contended: {:?}", &top[..top.len().min(15)]);
 }
+
+/// One tick of a Pointer's fold state next to what it did.
+#[derive(Debug, Clone, Copy)]
+struct PointerTick {
+    tick: u64,
+    speed: f32,
+    is_open: bool,
+    state: crate::units::combat::DeployState,
+    /// `gun` y offset (`[20]` when out) and `left` plate x (`[10]` when
+    /// open; the rig mirrors the s3o x axis, so −10 here).
+    gun_y: f32,
+    plate_x: f32,
+    fired: bool,
+}
+
+/// pointer.bos: `AimWeapon1` returns 1 only `if (isOpen)`, and `Open()`
+/// sets `isOpen` after the gun is all the way out, so a Pointer never
+/// fires while stowed, folding or unfolding — whatever it was ordered
+/// to do meanwhile. Its movement is never held (the script's
+/// `set MAX_SPEED` is commented out): it rolls off while still folding.
+///
+/// A Pointer and an enemy Byte 600 elmos apart (in the Pointer's 1400
+/// range and 768 sight, out of the Byte's 512; the Byte's 15000 HP
+/// outlast the test): the Pointer opens from its spawn and shoots; a
+/// move order folds it mid-roll; arriving reopens it; a one-elmo nudge
+/// (speed above 0.01 for a frame or two) swaps the Close thread for
+/// Open with `isOpen` still set. Every shot in the timeline must come
+/// from a fully open Pointer.
+#[test]
+fn pointer_only_fires_fully_open() {
+    use crate::interaction::ground_move::GroundMover;
+    use crate::interaction::movement::QueuedCommand;
+    use crate::terrain::heightmap::Heightmap;
+    use crate::units::assets::animation::UnitAnimator;
+    use crate::units::combat::{AttackCooldown, AttackTargetOrder, DeployState, Deployable};
+    use crate::units::components::{Faction, Homebase, TeamId};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
+    use bevy::ecs::system::SystemState;
+
+    let mut scenario = Scenario::ai_match("Speed_Balls_16_Way", 2, 1, 7);
+    for seat in &mut scenario.seats {
+        seat.ai = false;
+    }
+    scenario.sandbox = true;
+    let mut h = SimHarness::new(scenario);
+
+    // Next to team 0's Kernel, on its side of the map centre so the
+    // ground between is the start area's.
+    let (pointer, target, nudge, away, far) = {
+        let world = h.world_mut();
+        let kernel = world
+            .query_filtered::<(&Transform, &TeamId), With<Homebase>>()
+            .iter(world)
+            .find(|(_, team)| team.0 == 0)
+            .map(|(tf, _)| tf.translation)
+            .expect("team 0 homebase");
+        let (w, d) = world.resource::<Heightmap>().world_size();
+        let toward = (Vec3::new(w * 0.5, 0.0, d * 0.5) - kernel)
+            .with_y(0.0)
+            .normalize_or(Vec3::Z);
+        let side = Vec3::new(-toward.z, 0.0, toward.x);
+        let at = |world: &World, p: Vec3| world.resource::<Heightmap>().place(p.x, p.z);
+        let p0 = at(world, kernel + toward * 200.0);
+        let p1 = at(world, kernel + toward * 800.0);
+        let away = at(world, kernel + toward * 200.0 + side * 250.0);
+        let nudge = at(world, kernel + toward * 200.0 + side * 251.0);
+        let far = at(world, kernel + toward * 1100.0 + side * 250.0);
+        let mut state: SystemState<SpawnContext> = SystemState::new(world);
+        let mut ctx = state.get_mut(world).expect("spawn context");
+        let pointer = spawn_unit(UnitKind::Pointer, Faction::System, 0, p0, &mut ctx);
+        let target = spawn_unit(UnitKind::Byte, Faction::System, 1, p1, &mut ctx);
+        state.apply(world);
+        (pointer, target, nudge, away, far)
+    };
+
+    let mut timeline: Vec<PointerTick> = Vec::new();
+    let mut last_ready: Option<u64> = None;
+    let record = |h: &mut SimHarness, last_ready: &mut Option<u64>| {
+        let tick = h.tick;
+        let world = h.world_mut();
+        let mut q = world.query::<(
+            &GroundMover,
+            &UnitAnimator,
+            &Deployable,
+            Option<&AttackCooldown>,
+        )>();
+        let (mover, animator, deployable, cooldown) = q.get(world, pointer).expect("pointer");
+        let rig = &animator.rig;
+        let gun = rig.piece("gun").expect("gun piece");
+        let left = rig.piece("left").expect("left piece");
+        let ready = cooldown.map(|c| c.ready_frame);
+        let fired = ready.is_some() && ready != *last_ready;
+        *last_ready = ready;
+        PointerTick {
+            tick,
+            speed: mover.current_speed,
+            is_open: animator.driver.is_open().unwrap_or(false),
+            state: deployable.state,
+            gun_y: rig.piece_translations[gun][1],
+            plate_x: rig.piece_translations[left][0],
+            fired,
+        }
+    };
+    let mut run = |h: &mut SimHarness, ticks: u32, timeline: &mut Vec<PointerTick>| {
+        for _ in 0..ticks {
+            h.step();
+            timeline.push(record(h, &mut last_ready));
+        }
+    };
+    let order_move = |h: &mut SimHarness, to: Vec3| {
+        let world = h.world_mut();
+        {
+            let mut commands = world.commands();
+            let mut ec = commands.entity(pointer);
+            crate::interaction::replace_order(&mut ec, QueuedCommand::Move(to));
+        }
+        world.flush();
+    };
+
+    // Phase 1: spawned complete, it opens at once and engages the Bug.
+    {
+        let world = h.world_mut();
+        {
+            let mut commands = world.commands();
+            let mut ec = commands.entity(pointer);
+            crate::interaction::clear_orders(&mut ec).insert(AttackTargetOrder { target });
+        }
+        world.flush();
+    }
+    run(&mut h, 240, &mut timeline);
+    let shots_idle = timeline.iter().filter(|t| t.fired).count();
+    // Phase 2: a move order while open: it rolls off folding, stops,
+    // reopens, engages again.
+    order_move(&mut h, away);
+    run(&mut h, 420, &mut timeline);
+    let moved = timeline.iter().map(|t| t.speed).fold(0.0, f32::max);
+    // Phase 3: a one-elmo nudge (speed crosses 0.01 and drops back
+    // within the Close delay).
+    order_move(&mut h, nudge);
+    run(&mut h, 300, &mut timeline);
+    // Phase 4: an attack-move past the Byte: it rolls, stops to engage
+    // (`AttackMoveActive` halts the mover for a target in range),
+    // reopens and fires.
+    {
+        let world = h.world_mut();
+        {
+            let mut commands = world.commands();
+            let mut ec = commands.entity(pointer);
+            crate::interaction::replace_order(&mut ec, QueuedCommand::AttackMove(far));
+        }
+        world.flush();
+    }
+    run(&mut h, 420, &mut timeline);
+    let shots_total = timeline.iter().filter(|t| t.fired).count();
+
+    let dump = || {
+        timeline
+            .iter()
+            .filter(|t| t.fired || t.speed > 0.01 || t.state != DeployState::Open)
+            .map(|t| format!("{t:?}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    // The transitions and shots, for the record (`--nocapture`).
+    let mut last: Option<(bool, DeployState)> = None;
+    for t in &timeline {
+        let now = (t.is_open, t.state);
+        if t.fired || last != Some(now) {
+            eprintln!("{t:?}");
+        }
+        last = Some(now);
+    }
+    assert!(shots_idle >= 1, "no shot while idle and open:\n{}", dump());
+    assert!(moved > 0.5, "the Pointer never rolled:\n{}", dump());
+    assert!(
+        shots_total > shots_idle,
+        "no shot after moving:\n{}",
+        dump()
+    );
+    for t in &timeline {
+        if !t.fired {
+            continue;
+        }
+        assert!(
+            t.is_open
+                && t.state == DeployState::Open
+                && (t.gun_y - 20.0).abs() < 1e-3
+                && (t.plate_x.abs() - 10.0).abs() < 1e-3,
+            "shot from a Pointer that is not fully open: {t:?}\n{}",
+            dump()
+        );
+    }
+}

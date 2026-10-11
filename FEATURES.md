@@ -465,11 +465,19 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 
 ## 12. Pointer (system artillery unit)
 
-- Idle Pointers automatically open up (deploy state machine
-  Closed → Opening → Open).
-- Issuing a move order makes them close before they can drive
-  (auto-Close on move order).
-- A Pointer can't fire while not fully open (deploy-gate fire lock).
+- A Pointer runs `pointer.bos`'s threads: `Create()` opens a unit placed
+  complete at once, a factory product stays stowed until its first stop;
+  `StartMoving()` (speed above 0.01) sleeps 50 ms then `Close()`s and
+  spins the body; `StopMoving()` sleeps 200 ms then `Open()`s.
+- Movement is never held: the script's `set MAX_SPEED` is commented
+  out upstream, so a Pointer rolls off while still folding (and crawls
+  at a tenth of its speed while it turns in place, which is what makes
+  the fold look like a wait).
+- A Pointer can't fire while not fully open: `AimWeapon1` returns 0
+  unless `isOpen`, which `Open()` sets only after the gun is all the way
+  out (deploy-gate fire lock, mirrored in `Deployable`). The headless
+  test `pointer_only_fires_fully_open` drives idle / move / stop / nudge
+  / attack-move and checks every shot against the gun and plate poses.
 - A Pointer waits until its body has rotated to face the target before
   firing — visible as a noticeable "swing then shoot" rhythm
   (heading-tolerance fire gate).
