@@ -28,6 +28,7 @@ use bevy::prelude::*;
 use spring_pathfinding::BlockMask;
 
 use super::movement::NavGridSet;
+use crate::net::NetId;
 use crate::sim::SQUARE_SIZE;
 use crate::units::combat::Dying;
 use crate::units::components::{UnitStats, UnitType};
@@ -361,6 +362,14 @@ impl StructureStamped {
 /// Runs before the movement systems each sim frame. Only a freshly
 /// (re)built layer scans every unit; after that `Added<UnitType>` (change
 /// ticks, never missed) drives it.
+///
+/// In [`NetId`] order: every stamp bumps the nav revision with its own
+/// rectangle, and the QTPFS node layers replay those rectangles in
+/// revision order (`NodeLayer::update`), which shapes the quad tree. In
+/// query order, two machines with different archetype histories built
+/// different trees from the same blocked squares, and their paths
+/// parted on the first tie (the golden replay's archetype fuzz,
+/// `net-experiments/m0-golden-replay.md`).
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_structure_layer(
     nav: Option<ResMut<NavGridSet>>,
@@ -372,9 +381,12 @@ pub fn update_structure_layer(
         Has<Dying>,
         Has<StructureStamped>,
     )>,
-    all: Query<Entity, With<UnitType>>,
-    spawned: Query<Entity, Added<UnitType>>,
-    moved: Query<(Entity, &UnitType, &Transform), (Changed<Transform>, With<StructureStamped>)>,
+    all: Query<(Entity, &NetId), With<UnitType>>,
+    spawned: Query<(Entity, &NetId), Added<UnitType>>,
+    moved: Query<
+        (Entity, &NetId, &UnitType, &Transform),
+        (Changed<Transform>, With<StructureStamped>),
+    >,
     mut commands: Commands,
     mut classes: Local<Option<Vec<(i32, bool)>>>,
 ) {
@@ -393,12 +405,13 @@ pub fn update_structure_layer(
         layer.ensure_mask(xsizeh, crushes);
     }
     let mut changed: Option<[i32; 4]> = None;
-    let candidates = if fresh {
-        all.iter().collect::<Vec<_>>()
+    let mut candidates: Vec<(Entity, &NetId)> = if fresh {
+        all.iter().collect()
     } else {
         spawned.iter().collect()
     };
-    for entity in candidates {
+    candidates.sort_by_key(|(_, id)| **id);
+    for (entity, _) in candidates {
         let Ok((kind, stats, tf, dying, stamped)) = units.get(entity) else {
             continue;
         };
@@ -417,7 +430,7 @@ pub fn update_structure_layer(
     // `CUnit::ForcedMove` unblocks, moves and re-blocks: a structure
     // that was moved (Hex Farm's fall sweep pushes buildings off a
     // sinking tower) blocks where it stands now, not where it spawned.
-    for (entity, kind, tf) in &moved {
+    for (entity, _, kind, tf) in moved.iter().sort::<&NetId>() {
         let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
         if layer
             .stamps

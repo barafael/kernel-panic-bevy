@@ -37,6 +37,18 @@ zstd = "0.13"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
 js-sys = "0.3"
+# The `replay` feature's `kp_replay` export and its event-loop yields
+# (`headless`). Both are already linked through Bevy on the web.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[features]
+# The golden-replay matrix (`docs/multiplayer-plan.md` M0.4,
+# `net-experiments/m0-golden-replay.md`): compiles the headless harness
+# into the binary. Native: `kernel-panic --replay <log>…` and
+# `--record-golden`; wasm32: the module exports `kp_replay` instead of
+# starting the game. Off for the game itself.
+replay = []
 
 # The kani proof harnesses (animation/proofs.rs) are compiled only under
 # `cargo kani`, which sets cfg(kani). Declare it so normal builds don't

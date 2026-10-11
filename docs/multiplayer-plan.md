@@ -27,8 +27,12 @@ commands only from the host's turn stream).
 
 ## Will different hardware compute the same results?
 
-**Not proven yet. It is achievable, and Milestone 0 proves it before any netcode is
-built.** What is known:
+**Yes, proven by M0.4's golden-replay matrix** (`net-experiments/m0-golden-replay.md`):
+three golden logs (two 18 000-tick AI matches, one scripted-command match) give
+byte-identical per-tick state hashes on Linux x86_64 (glibc, musl), Linux arm64,
+Windows x86_64, macOS arm64, macOS x86_64 under Rosetta, and the web build in Node,
+Chromium, Firefox and WebKit. The matrix runs on every push (`determinism.yml`). What
+made it so:
 
 | Source of difference | Status | Remedy |
 |---|---|---|
@@ -36,15 +40,15 @@ built.** What is known:
 | Fused multiply-add | rustc never contracts `a*b+c` on its own (no fast-math); only explicit `mul_add` fuses | **Done (M0.3):** `mul_add` banned by `clippy.toml`; no fast-math or contraction flags anywhere |
 | Transcendentals (`sin cos tan atan2 asin acos powf exp ln hypot`) | **Differ**: measured glibc vs wasm: sin/cos 1.2 %, atan2 16 %, powf 9 %, hypot 12.5 % of inputs. Native uses each OS's libm (glibc, macOS, MSVC all different); wasm uses Rust's bundled musl-derived libm — identical in every browser on every CPU | pure-Rust `libm` everywhere: Bevy's `libm` feature (→ `bevy_math/libm` → `glam/libm`, and `bevy::math::ops`); clippy `disallowed-methods` for `f32::sin` & co. in sim code. **Done (M0.3):** probe shows 0 differing bits across glibc, musl, wasm32 (Node, wasm-opt), an MSVC build |
 | SIMD code paths (glam SSE2 vs NEON vs wasm simd128 vs scalar) | **Differ**: different summation order; measured glam slerp 48 %, `Vec3A::normalize` 29 % between targets, and `target-cpu=native` alone changes 20 % of slerp results | glam `scalar-math` feature (one code path everywhere); no `target-cpu`/`target-feature` flags for release builds. **Done (M0.3):** 0 differing bits, even with `target-cpu=native` |
-| NaN payload bits | nondeterministic on wasm | never hash or branch on NaN bits; assert no NaN in the state hash |
+| NaN payload bits | nondeterministic on wasm | never hash or branch on NaN bits. **Done (M0.4):** the state hash canonicalises NaNs and counts them (0 in every golden run) |
 | Denormals / FPU modes | Rust never sets flush-to-zero; a driver or library could on its thread | debug assertion of MXCSR at the start of each sim tick (x86_64) — **done (M0.3)**, plus FPCR on arm64 |
-| HashMap iteration (RandomState), query order, entity ids, wall clock, multithreaded executor | found and partly fixed in X-sim / X-commands (see M0) | ordered collections, canonical sorts, sim ids, tick counter, single-threaded sim executor. **Done (M0.2):** `BTreeMap`s, `NetId`-order iteration, match tick and seed, single-threaded `FixedUpdate` |
+| HashMap iteration (RandomState), query order, entity ids, wall clock, multithreaded executor | found and partly fixed in X-sim / X-commands (see M0) | ordered collections, canonical sorts, sim ids, tick counter, single-threaded sim executor. **Done (M0.2):** `BTreeMap`s, `NetId`-order iteration, match tick and seed, single-threaded `FixedUpdate`. **M0.4:** wasm and native (and native peers with different devices) hold different archetype orders; a query-order fuzz test (storage reshuffled every tick) guards it in CI, and found the nav-grid stamping order |
 
-Web-to-web is already identical across hardware (same wasm, same bundled libm,
-strict IEEE in every engine). Native-to-native across operating systems and native-
-to-web need the remedies above. Proof: the golden-replay matrix in M0.4. If some
-subsystem still diverges after that, it moves to fixed-point (cake's approach) —
-a decision gate, not the default.
+Web-to-web is identical across hardware (same wasm, same bundled libm, strict IEEE
+in every engine). Native-to-native across operating systems and native-to-web needed
+the remedies above; with them, no subsystem needs fixed-point. Left to watch:
+`f32::max`/`min` on ±0 differ between x86_64 and aarch64 (not hit by the golden logs;
+see the M0.4 write-up).
 
 ## Milestones
 
@@ -118,6 +122,16 @@ Estimates are focused-work rough guesses.
 
     **Gate:** identical trails everywhere → M1. Otherwise bisect with the per-tick
     hash, fix or move the subsystem to fixed-point.
+
+    **Done — gate passed** (`net-experiments/m0-golden-replay.md`). `.kpreplay`
+    (setup with seed, compat stamp, human command frames; postcard), native
+    `kernel-panic --replay` and a wasm `kp_replay` export (feature `replay`), Node and
+    Playwright runners, golden logs in `kernel-panic/tests/golden/` (4v4 and 8-player
+    FFA, 18 000 ticks each; a 3 000-tick match through every command kind). All 11
+    platform rows identical over every tick, plus the query-order fuzz row. wasm costs
+    ~2× native per sim tick in V8/JSC (6× in Firefox). One more query-order dependence
+    fixed: nav-grid structure stamping (`update_structure_layer`) now runs in `NetId`
+    order.
 
 ### M1 — Lockstep core · ~1.5 weeks
 
@@ -210,5 +224,6 @@ prevent map hacks (every peer holds full state), as in the original.
 - ~~Determinism remedies cost sim speed (scalar glam, software libm).~~ M0.3: no
   measurable change in 4v4 and 8-AI FFA headless games (within ±10 % noise;
   `net-experiments/m0-deterministic-math.md`).
-- macOS and Windows libm were not testable locally; the M0.4 CI matrix covers them.
+- ~~macOS and Windows libm were not testable locally.~~ M0.4: the CI float probe and
+  golden trails are bit-identical on Windows (MSVC), macOS arm64 and macOS x86_64.
 - No browser was in the WebRTC benchmark; M2 adds a browser↔native test.

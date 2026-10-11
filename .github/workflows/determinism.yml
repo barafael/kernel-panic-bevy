@@ -1,40 +1,40 @@
 name: Determinism
 
-# Cross-platform golden-replay matrix (docs/multiplayer-plan.md, M0.4).
+# Cross-platform golden-replay matrix (docs/multiplayer-plan.md, M0.4;
+# net-experiments/m0-golden-replay.md).
 #
 # Every platform replays the same golden command logs headless and writes
 # the per-tick state-hash trail; the `compare` job then requires every
 # trail to be byte-identical to the Linux x86_64 (glibc) reference and
 # reports the first diverging tick otherwise.
 #
-# STATUS: skeleton. The matrix, the artifact plumbing and the comparison
-# (.github/scripts/compare-trails.sh) are live; the replay itself is not
-# written yet. Until golden logs exist every job finds none and skips its
-# build, so this costs seconds. Once logs land but the replay command
-# below is still the placeholder, the jobs fail loudly instead of passing.
-#
-# CONTRACT — what the M0.4 replay has to provide:
-#
-# 1. Golden logs: `kernel-panic/tests/golden/*.kpreplay` (GOLDEN_DIR and
-#    GOLDEN_EXT below; rename freely, they are only used here). Each holds
-#    (match setup, seed, command log).
-# 2. A native entry point that replays one log and writes its trail, e.g.
-#      cargo run --release --locked -p kernel-panic --bin kp-replay -- \
-#        <log> --trail <out>
-#    (or an #[ignore]d test driven by env vars, as X-sim's
-#    `headless::tests::determinism` with KP_NET_TRACE). Replace the body of
-#    the "Replay (native)" step with it.
-# 3. A wasm32 entry point for the same replay, run in Node and in headless
-#    Chromium/Firefox/WebKit (wasm-bindgen-test or Playwright): fill in the
-#    "Replay (wasm)" step. The log has to be embedded or fetched, wasm has
-#    no filesystem.
-# 4. Trail format: one line per tick, `<tick> <hash as hex>`, LF line
-#    endings, written to `trails/<log stem>.trail`. The compare script
-#    diffs files byte for byte and prints the first differing line, so
-#    extra per-tick columns (part hashes: positions/health/orders) are
-#    welcome and make bisecting easier.
-#
-# Each job uploads its `trails/` directory as artifact `trail-<platform>`.
+# - Golden logs: kernel-panic/tests/golden/*.kpreplay (match setup, seed,
+#   compat stamp, command log; `headless::replay`). Re-record with
+#   `cargo run --release -p kernel-panic --features replay -- --record-golden`.
+# - Maps: baked once (`maps` job) and shared, as release.yml does; a
+#   replay refuses to run on map bytes other than the ones it recorded.
+# - Native: the game binary built with `--features replay`, run as
+#   `kernel-panic --replay <logs> --trail-dir trails`.
+# - wasm32-unknown-unknown: the same build for the web (profile
+#   wasm-release + wasm-bindgen --target web + wasm-opt -O2, as Trunk
+#   ships it), built once (`wasm-build`) and run by
+#   .github/scripts/kp-replay.mjs in Node and, through Playwright, in
+#   headless Chromium, Firefox and WebKit.
+# - Trail: one line per tick, `<tick> <sim hash> <positions> <health>
+#   <orders> <projectiles> <units> <projectile count> <NaNs>`, LF,
+#   `trails/<log stem>.trail`, uploaded as artifact `trail-<platform>`.
+#   .github/scripts/compare-trails.sh diffs them byte for byte and prints
+#   the first differing line.
+# - The query-order fuzz: linux-x86_64-gnu replays every log a second
+#   time with the ECS storage order reshuffled every tick (`--shuffle 1`)
+#   and uploads it as platform `linux-x86_64-gnu-shuffled`. The sim must
+#   never depend on query order (archetype histories differ between wasm
+#   and native, and between native peers); this is the guard.
+# - Also on every native platform and in Node: M0.3's float probe
+#   (net-experiments/m0-floatprobe), compared in the `compare` job (the
+#   `det:` rows must match; the `std:` rows show what the platform libms
+#   would have done).
+# - Result and write-up: net-experiments/m0-golden-replay.md.
 
 on:
   workflow_call:
@@ -48,10 +48,48 @@ env:
   CARGO_INCREMENTAL: 0
   GOLDEN_DIR: kernel-panic/tests/golden
   GOLDEN_EXT: kpreplay
+  # Browsers replay this many ticks of each log (0 = all of it); the
+  # comparison then covers the same prefix of the reference.
+  BROWSER_TICKS: 0
+  PLAYWRIGHT_VERSION: 1.56.1
+  BINARYEN_VERSION: version_123
 
 jobs:
+  maps:
+    name: bake maps
+    runs-on: ubuntu-latest
+    outputs:
+      found: ${{ steps.golden.outputs.found }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Find golden logs
+        id: golden
+        shell: bash
+        run: |
+          shopt -s nullglob
+          logs=("$GOLDEN_DIR"/*."$GOLDEN_EXT")
+          echo "found=$([ ${#logs[@]} -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          echo "${#logs[@]} golden log(s) in $GOLDEN_DIR"
+      - if: steps.golden.outputs.found == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.golden.outputs.found == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: bake
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - if: steps.golden.outputs.found == 'true'
+        uses: ./.github/actions/bake-maps
+      - if: steps.golden.outputs.found == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kpmaps-determinism
+          path: kernel-panic/assets/maps/*.kpmap
+          if-no-files-found: error
+
   native:
     name: replay (${{ matrix.platform }})
+    needs: maps
+    if: needs.maps.outputs.found == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -62,6 +100,8 @@ jobs:
             target: x86_64-unknown-linux-gnu
           # musl ships its own libm: a different transcendental
           # implementation unless the sim routes through `libm`/bevy_math.
+          # Built and run natively in Alpine (ALSA and udev have to be
+          # musl libraries too), see the steps below.
           - platform: linux-x86_64-musl
             os: ubuntu-latest
             target: x86_64-unknown-linux-musl
@@ -82,51 +122,151 @@ jobs:
             os: macos-latest
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
+    env:
+      MUSL: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
     steps:
       - uses: actions/checkout@v7
-      - name: Find golden logs
-        id: golden
-        shell: bash
-        run: |
-          shopt -s nullglob
-          logs=("$GOLDEN_DIR"/*."$GOLDEN_EXT")
-          echo "found=$([ ${#logs[@]} -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "${#logs[@]} golden log(s) in $GOLDEN_DIR"
-      - if: steps.golden.outputs.found == 'true' && runner.os == 'Linux'
+      - uses: actions/download-artifact@v8
+        with:
+          name: kpmaps-determinism
+          path: kernel-panic/assets/maps
+      - if: runner.os == 'Linux' && env.MUSL != 'true'
         uses: ./.github/actions/linux-deps
-      - if: steps.golden.outputs.found == 'true' && matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get install -y -q --no-install-recommends musl-tools
-      - if: steps.golden.outputs.found == 'true'
+      - if: env.MUSL != 'true'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - if: steps.golden.outputs.found == 'true'
+      - if: env.MUSL != 'true'
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: replay-${{ matrix.target }}
           save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Replay (native)
-        if: steps.golden.outputs.found == 'true'
+      - name: Build the replay binary
+        if: env.MUSL != 'true'
         shell: bash
         run: |
-          mkdir -p trails
-          for log in "$GOLDEN_DIR"/*."$GOLDEN_EXT"; do
-            stem=$(basename "$log" ".$GOLDEN_EXT")
-            # TODO(M0.4): the real replay, e.g.
-            # cargo run --release --locked -p kernel-panic --bin kp-replay \
-            #   --target ${{ matrix.target }} -- "$log" --trail "trails/$stem.trail"
-            echo "::error::golden log $stem present, but the replay command in determinism.yml is still a placeholder"
-            exit 1
-          done
-      - if: steps.golden.outputs.found == 'true'
+          cargo build --release --locked -p kernel-panic --features replay --target ${{ matrix.target }}
+          cd net-experiments/m0-floatprobe
+          cargo build --release --locked --target ${{ matrix.target }}
+      - name: Replay (native)
+        if: env.MUSL != 'true'
+        shell: bash
+        run: |
+          mkdir -p trails floatprobe
+          bin=target/${{ matrix.target }}/release/kernel-panic
+          probe=net-experiments/m0-floatprobe/target/${{ matrix.target }}/release/floatprobe
+          if [ "${{ matrix.platform }}" = macos-x86_64-rosetta ]; then
+            # Explicitly the x86_64 slice, under Rosetta 2.
+            run=(arch -x86_64)
+          else
+            run=()
+          fi
+          file "$bin" "$probe" 2>/dev/null || true
+          "${run[@]}" "$bin" --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" --trail-dir trails
+          "${run[@]}" "$probe" run "floatprobe/${{ matrix.platform }}.bin"
+      # The query-order fuzz: the same replays with the ECS storage order
+      # of every unit and projectile reshuffled every tick
+      # (`headless::replay::shuffle_storage`), compared like a platform of
+      # its own. Any sim system that depends on query order (archetype
+      # history differs between wasm and native, and between native
+      # peers with different devices) shows up here, natively.
+      - name: Replay (query-order fuzz)
+        if: matrix.platform == 'linux-x86_64-gnu'
+        shell: bash
+        run: |
+          target/${{ matrix.target }}/release/kernel-panic --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" \
+            --trail-dir trails-shuffled --shuffle 1
+      - if: matrix.platform == 'linux-x86_64-gnu'
         uses: actions/upload-artifact@v7
+        with:
+          name: trail-linux-x86_64-gnu-shuffled
+          path: trails-shuffled/
+          if-no-files-found: error
+      # musl: Alpine's own toolchain, dynamically linked (Bevy links ALSA
+      # and udev, which only exist as shared libraries there).
+      - name: Build and replay (musl, Alpine)
+        if: env.MUSL == 'true'
+        shell: bash
+        run: |
+          mkdir -p trails floatprobe
+          docker run --rm -v "$PWD:/w" -w /w \
+            -e CARGO_TERM_COLOR=always -e CARGO_INCREMENTAL=0 \
+            -e RUSTFLAGS="-C target-feature=-crt-static" \
+            -e GOLDEN_DIR -e GOLDEN_EXT \
+            rust:alpine sh -euc '
+              apk add --no-cache build-base pkgconf alsa-lib-dev eudev-dev wayland-dev libxkbcommon-dev file
+              rustc -vV
+              cargo build --release --locked -p kernel-panic --features replay
+              file target/release/kernel-panic
+              target/release/kernel-panic --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" --trail-dir trails
+              cd net-experiments/m0-floatprobe
+              cargo build --release --locked
+              target/release/floatprobe run /w/floatprobe/linux-x86_64-musl.bin
+            '
+      - uses: actions/upload-artifact@v7
         with:
           name: trail-${{ matrix.platform }}
           path: trails/
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: floatprobe-${{ matrix.platform }}
+          path: floatprobe/
+          if-no-files-found: error
+
+  wasm-build:
+    name: build replay (wasm32)
+    needs: maps
+    if: needs.maps.outputs.found == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: replay-wasm
+          save-if: ${{ github.event_name != 'pull_request' }}
+      # The CLI must match the wasm-bindgen crate in Cargo.lock exactly.
+      - name: Install wasm-bindgen and wasm-opt
+        shell: bash
+        run: |
+          v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+          echo "wasm-bindgen $v, binaryen $BINARYEN_VERSION"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz --strip-components=1 -C "$HOME/.local/bin" "wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen"
+          curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_VERSION/binaryen-$BINARYEN_VERSION-x86_64-linux.tar.gz" \
+            | tar -xz -C "$HOME"
+          ln -sf "$HOME/binaryen-$BINARYEN_VERSION/bin/wasm-opt" "$HOME/.local/bin/wasm-opt"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build (wasm-release, wasm-bindgen, wasm-opt -O2)
+        shell: bash
+        run: |
+          cargo build --profile wasm-release --locked -p kernel-panic --features replay --target wasm32-unknown-unknown
+          wasm-bindgen --version
+          wasm-bindgen --target web --no-typescript --out-dir pkg --out-name kernel-panic \
+            target/wasm32-unknown-unknown/wasm-release/kernel-panic.wasm
+          # Trunk's data-wasm-opt="2" on the shipped build.
+          wasm-opt --version
+          wasm-opt -O2 --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
+            --enable-mutable-globals --enable-multivalue --enable-reference-types \
+            pkg/kernel-panic_bg.wasm -o pkg/kernel-panic_bg.wasm
+          ls -l pkg
+          # The float probe's wasm, for the Node job.
+          cd net-experiments/m0-floatprobe
+          cargo build --release --locked --lib --target wasm32-unknown-unknown
+          cp target/wasm32-unknown-unknown/release/m0_floatprobe.wasm ../../pkg/
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kp-replay-wasm
+          path: pkg/
+          if-no-files-found: error
 
   wasm:
     name: replay (wasm-${{ matrix.runtime }})
+    needs: [maps, wasm-build]
     strategy:
       fail-fast: false
       matrix:
@@ -136,46 +276,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Find golden logs
-        id: golden
-        shell: bash
-        run: |
-          shopt -s nullglob
-          logs=("$GOLDEN_DIR"/*."$GOLDEN_EXT")
-          echo "found=$([ ${#logs[@]} -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-      - if: steps.golden.outputs.found == 'true'
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v8
         with:
-          targets: wasm32-unknown-unknown
-      - if: steps.golden.outputs.found == 'true'
-        uses: Swatinem/rust-cache@v2
+          name: kpmaps-determinism
+          path: kernel-panic/assets/maps
+      - uses: actions/download-artifact@v8
         with:
-          key: wasm
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - if: steps.golden.outputs.found == 'true'
-        uses: actions/setup-node@v7
+          name: kp-replay-wasm
+          path: pkg
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - name: Replay (wasm)
-        if: steps.golden.outputs.found == 'true'
+      - name: Install Playwright and ${{ matrix.runtime }}
+        if: matrix.runtime != 'node'
         shell: bash
         run: |
-          mkdir -p trails
-          # TODO(M0.4): build the replay for wasm32-unknown-unknown and run it
-          # in ${{ matrix.runtime }}, writing trails/<log stem>.trail:
-          # - node: wasm-bindgen --target nodejs + a small runner script, or
-          #   `wasm-bindgen-test-runner` (CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER);
-          # - browsers: `npx playwright install --with-deps ${{ matrix.runtime }}`
-          #   and a page that runs the replay and posts the trail back, or
-          #   wasm-bindgen-test with WASM_BINDGEN_TEST_ONLY_WEB and the
-          #   matching WebDriver (chromedriver/geckodriver; WebKit via Playwright).
-          echo "::error::golden logs present, but the wasm replay in determinism.yml is still a placeholder"
-          exit 1
-      - if: steps.golden.outputs.found == 'true'
-        uses: actions/upload-artifact@v7
+          npm install --no-save --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION"
+          npx playwright install --with-deps ${{ matrix.runtime }}
+      - name: Replay (wasm)
+        shell: bash
+        run: |
+          mkdir -p trails floatprobe
+          ticks=0
+          [ "${{ matrix.runtime }}" = node ] || ticks=$BROWSER_TICKS
+          for log in "$GOLDEN_DIR"/*."$GOLDEN_EXT"; do
+            stem=$(basename "$log" ".$GOLDEN_EXT")
+            node .github/scripts/kp-replay.mjs ${{ matrix.runtime }} pkg kernel-panic/assets/maps \
+              "$log" "trails/$stem.trail" "$ticks"
+          done
+          if [ "${{ matrix.runtime }}" = node ]; then
+            node net-experiments/m0-floatprobe/run.mjs pkg/m0_floatprobe.wasm floatprobe/wasm-node.bin
+          fi
+      - uses: actions/upload-artifact@v7
         with:
           name: trail-wasm-${{ matrix.runtime }}
           path: trails/
+          if-no-files-found: error
+      - if: matrix.runtime == 'node'
+        uses: actions/upload-artifact@v7
+        with:
+          name: floatprobe-wasm-node
+          path: floatprobe/
           if-no-files-found: error
 
   compare:
@@ -193,3 +334,29 @@ jobs:
           path: trails
       - name: Compare hash trails against linux-x86_64-gnu
         run: bash .github/scripts/compare-trails.sh trails linux-x86_64-gnu
+      - uses: actions/download-artifact@v8
+        if: ${{ !cancelled() }}
+        with:
+          pattern: floatprobe-*
+          path: floatprobe
+          merge-multiple: true
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ !cancelled() }}
+      - name: Compare float probes against linux-x86_64-gnu
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(floatprobe/*.bin)
+          [ ${#files[@]} -gt 1 ] || { echo "no float probes"; exit 0; }
+          cd net-experiments/m0-floatprobe
+          cargo build --release --locked
+          ref=../../floatprobe/linux-x86_64-gnu.bin
+          status=0
+          for f in "${files[@]}"; do
+            [ "$f" = floatprobe/linux-x86_64-gnu.bin ] && continue
+            # Only the rows that differ, and the verdict.
+            target/release/floatprobe compare "$ref" "../../$f" > out.txt || status=1
+            grep -v ' 0 / ' out.txt
+          done
+          exit $status

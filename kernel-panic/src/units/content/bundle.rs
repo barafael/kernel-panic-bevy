@@ -52,6 +52,12 @@ const MAGIC: &[u8; 8] = b"kpunit4\0";
 /// placeholder for a first bake (decoding it yields the empty bundle).
 static BUNDLE_BYTES: &[u8] = include_bytes!("../../../assets/units.kpu");
 
+/// The embedded bundle as committed (a replay stamps its hash).
+#[cfg(any(test, feature = "replay"))]
+pub fn bundle_bytes() -> &'static [u8] {
+    BUNDLE_BYTES
+}
+
 /// One baked texture: decoded RGBA8 pixels in their own zstd frame.
 #[derive(Serialize, Deserialize, Default)]
 pub struct BakedTexture {
