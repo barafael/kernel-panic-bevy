@@ -17,6 +17,10 @@
 //! 3. The exe's directory, walking upward — handles the common case
 //!    where someone ships `target/release/kernel-panic.exe` or copies
 //!    the exe next to its assets.
+//!
+//! Release packages (`.github/workflows/release.yml`) are not a
+//! checkout: they ship the binary with an `assets/` directory beside
+//! it, which [`assets_dir`] checks before the checkout layout.
 
 use std::path::{Path, PathBuf};
 
@@ -71,4 +75,22 @@ fn looks_like_project_root(dir: &Path) -> bool {
 /// Join `relative` onto [`project_root`] and return the absolute path.
 pub fn from_project_root(relative: &str) -> PathBuf {
     project_root().join(relative)
+}
+
+/// The game's asset directory (maps, shaders, sounds, cursors, readme).
+///
+/// A release package puts `assets/` next to the executable (on Linux and
+/// macOS a `kernel-panic/` directory can't sit beside the
+/// `kernel-panic` binary), so that wins when present. Everywhere else —
+/// `cargo run`, `cargo test`, a copied `target/release` binary inside a
+/// checkout — it is `<project root>/kernel-panic/assets`.
+pub fn assets_dir() -> PathBuf {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("assets")))
+        .filter(|dir| dir.join("maps").is_dir())
+    {
+        return dir;
+    }
+    from_project_root("kernel-panic/assets")
 }

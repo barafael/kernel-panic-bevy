@@ -108,7 +108,7 @@ fn main() {
     let mut asset_plugin = AssetPlugin::default();
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let assets_dir = paths::from_project_root("kernel-panic/assets");
+        let assets_dir = paths::assets_dir();
         asset_plugin.file_path = assets_dir.to_string_lossy().into_owned();
     }
     #[cfg(target_arch = "wasm32")]

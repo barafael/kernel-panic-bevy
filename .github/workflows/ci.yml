@@ -1,0 +1,101 @@
+name: CI
+
+# Basic Rust checks on every push, pull request and merge-queue entry:
+# rustfmt, clippy (warnings are errors), the workspace tests on Linux,
+# Windows and macOS, and the wasm32 check of the game. The cross-platform
+# determinism matrix (determinism.yml) hangs off the end.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One run per branch / PR: a newer push cancels the older run, except on
+# main, where every commit gets a full run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # Dependencies already build without debug info (`[profile.dev.package."*"]`);
+  # drop it for the workspace crates too. CI never attaches a debugger, and
+  # it halves the target dir that the cache saves and restores.
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      # Linux runs the tests that read upstream/ (the bundle-vs-checkout
+      # comparisons bundle_matches_upstream_checkout and
+      # registries_from_bundle_match_tdf_built, spring-tdf's real_files,
+      # spring-unit-mesh's S3O/TGA parsers) against the pinned submodule;
+      # elsewhere they skip themselves, which keeps that path tested too.
+      # Everything else (moveinfo, heat, CEG tests…) reads the embedded
+      # units.kpu and needs no upstream data.
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/upstream-data
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo test --workspace --locked
+
+  wasm:
+    name: wasm32 check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - run: cargo check --target wasm32-unknown-unknown -p kernel-panic --locked
+
+  # Golden-replay hash trails on every platform (plan M0.4). A no-op until
+  # golden logs exist; see the contract at the top of determinism.yml.
+  determinism:
+    name: determinism
+    uses: ./.github/workflows/determinism.yml
