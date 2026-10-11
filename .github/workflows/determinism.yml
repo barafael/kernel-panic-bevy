@@ -156,6 +156,24 @@ jobs:
           file "$bin" "$probe" 2>/dev/null || true
           "${run[@]}" "$bin" --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" --trail-dir trails
           "${run[@]}" "$probe" run "floatprobe/${{ matrix.platform }}.bin"
+      # The query-order fuzz: the same replays with the ECS storage order
+      # of every unit and projectile reshuffled every tick
+      # (`headless::replay::shuffle_storage`), compared like a platform of
+      # its own. Any sim system that depends on query order (archetype
+      # history differs between wasm and native, and between native
+      # peers with different devices) shows up here, natively.
+      - name: Replay (query-order fuzz)
+        if: matrix.platform == 'linux-x86_64-gnu'
+        shell: bash
+        run: |
+          target/${{ matrix.target }}/release/kernel-panic --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" \
+            --trail-dir trails-shuffled --shuffle 1
+      - if: matrix.platform == 'linux-x86_64-gnu'
+        uses: actions/upload-artifact@v7
+        with:
+          name: trail-linux-x86_64-gnu-shuffled
+          path: trails-shuffled/
+          if-no-files-found: error
       # musl: Alpine's own toolchain, dynamically linked (Bevy links ALSA
       # and udev, which only exist as shared libraries there).
       - name: Build and replay (musl, Alpine)

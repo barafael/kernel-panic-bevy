@@ -382,6 +382,18 @@ pub fn describe(world: &mut World) -> Vec<String> {
             },
         )
         .collect();
+    // The movers' full state too (velocity, heading, path), one line
+    // each, right after their unit's line once sorted.
+    let mut mq = world.query::<(
+        &NetId,
+        Option<&crate::interaction::ground_move::GroundMover>,
+        Option<&crate::interaction::movement::MovePath>,
+    )>();
+    for (id, mover, path) in mq.iter(world) {
+        if mover.is_some() || path.is_some() {
+            out.push(format!("#{:06} ~ mover {mover:?} path {path:?}", id.0));
+        }
+    }
     out.sort();
     // Query iteration order, as unit ids (deterministic), with each
     // unit's archetype: what canonical sorts guard against.

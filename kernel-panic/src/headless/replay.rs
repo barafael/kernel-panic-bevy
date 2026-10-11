@@ -564,4 +564,67 @@ mod tests {
         assert_eq!(first_difference(&t, &trail_text(&[h, other])), Some(2));
         assert_eq!(first_difference(&t, &trail_text(&[h])), Some(2));
     }
+
+    /// The query-order fuzz on the golden logs: every replay again with
+    /// the ECS storage order reshuffled every tick ([`shuffle_storage`])
+    /// must leave the same trail. Needs the baked maps; `KP_FUZZ_TICKS`
+    /// (default 3000) per log, `KP_FUZZ_LOGS=a,b` to pick logs. CI runs
+    /// the full-length version (`determinism.yml`, `--shuffle 1`).
+    ///
+    /// ```text
+    /// cargo test --release -p kernel-panic headless::replay::tests::query_order_fuzz -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "replays the golden logs on the baked maps; --ignored"]
+    fn query_order_fuzz() {
+        let ticks: u32 = std::env::var("KP_FUZZ_TICKS")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(3000);
+        let only = std::env::var("KP_FUZZ_LOGS").ok();
+        let dir = crate::paths::from_project_root("kernel-panic/tests/golden");
+        let mut logs: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "kpreplay"))
+            .filter(|p| {
+                only.as_deref().is_none_or(|o| {
+                    let stem = p.file_stem().unwrap().to_string_lossy();
+                    o.split(',').any(|n| n == stem)
+                })
+            })
+            .collect();
+        logs.sort();
+        assert!(!logs.is_empty(), "no golden logs in {}", dir.display());
+        for log in logs {
+            let replay = Replay::decode(&std::fs::read(&log).unwrap()).unwrap();
+            let run = |shuffle_every| {
+                let options = PlayOptions {
+                    ticks: Some(ticks.min(replay.ticks)),
+                    shuffle_every,
+                    ..Default::default()
+                };
+                let map = MapInput::checkout(&replay.setup.map).unwrap();
+                trail_text(
+                    &bevy::tasks::block_on(play(&replay, map, &options))
+                        .unwrap()
+                        .hashes,
+                )
+            };
+            let (plain, shuffled) = (run(0), run(1));
+            let name = log.file_stem().unwrap().to_string_lossy().into_owned();
+            if let Some(line) = first_difference(&plain, &shuffled) {
+                panic!(
+                    "{name}: the sim depends on ECS query order from tick {line}:\n  plain    {}\n  shuffled {}",
+                    plain.lines().nth(line - 1).unwrap_or("<end>"),
+                    shuffled.lines().nth(line - 1).unwrap_or("<end>"),
+                );
+            }
+            eprintln!(
+                "{name}: {} ticks, same trail with the storage shuffled",
+                plain.lines().count()
+            );
+        }
+    }
 }
