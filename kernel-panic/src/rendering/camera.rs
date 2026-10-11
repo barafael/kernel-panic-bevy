@@ -121,6 +121,7 @@ pub fn spawn_camera(
     mut commands: Commands,
     settings: Res<RenderSettings>,
     support: Res<MsaaSupport>,
+    dev: Res<crate::game_setup::DevOptions>,
 ) {
     let state = RtsCameraState::default();
     let transform = compute_transform_from_state(&state);
@@ -152,6 +153,11 @@ pub fn spawn_camera(
         .id();
     if let Some(bloom) = settings.bloom() {
         commands.entity(camera).insert(bloom);
+    }
+    if dev.no_indirect {
+        commands
+            .entity(camera)
+            .insert(bevy::render::view::NoIndirectDrawing);
     }
 }
 

@@ -76,15 +76,17 @@ impl Faction {
         }
     }
 
-    /// How this faction's units appear while being built: System units
-    /// rise out of the ground (`BUILD_PERCENT_LEFT` lifts in the
-    /// `.bos`), Hacker / Network units materialize in place with an alpha
-    /// ramp.
+    /// How this faction's units appear while being built. Every KP unit
+    /// has `ShowNanoFrame=0`: the engine draws a buildee complete from
+    /// its first frame and whatever motion there is comes from the
+    /// unit's own `.bos` (`BUILD_PERCENT_LEFT` sinks System units into
+    /// the ground). The port's earlier Hacker / Network alpha ramp
+    /// ([`EmergeStyle::Fade`]) was an invention, and its per-unit
+    /// material clones, re-uploaded every tick, churned the renderer's
+    /// material slots (pieces flickering or drawn in the wrong colour
+    /// early in a match, while production is at full tilt).
     pub fn emerge_style(self) -> EmergeStyle {
-        match self {
-            Faction::System => EmergeStyle::Rise,
-            Faction::Hacker | Faction::Network => EmergeStyle::Fade,
-        }
+        EmergeStyle::Rise
     }
 
     /// Faction color as linear `[r, g, b]` in 0-1 range. Shared by weapon-fx

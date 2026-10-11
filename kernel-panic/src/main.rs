@@ -28,7 +28,7 @@ use bevy::render::RenderPlugin;
 #[cfg(target_os = "windows")]
 use bevy::render::pipelined_rendering::PipelinedRenderingPlugin;
 #[cfg(not(target_arch = "wasm32"))]
-use bevy::render::settings::{Backends, WgpuSettings};
+use bevy::render::settings::{Backends, WgpuFeatures, WgpuSettings};
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::window::WindowResizeConstraints;
 
@@ -104,10 +104,20 @@ fn main() {
     //
     // Web picks its own backend (WebGPU with WebGL2 fallback) — pinning
     // VULKAN|METAL there would select nothing.
+    //
+    // `KP_NO_BINDLESS=1` leaves the binding-array features off, so
+    // Bevy's materials fall back from bindless slabs to one bind group
+    // per material (`DevOptions::no_bindless`).
     #[cfg(not(target_arch = "wasm32"))]
     let render_plugin = RenderPlugin {
         render_creation: WgpuSettings {
             backends: Some(Backends::VULKAN | Backends::METAL),
+            disabled_features: dev_options.no_bindless.then_some(
+                WgpuFeatures::BUFFER_BINDING_ARRAY
+                    | WgpuFeatures::TEXTURE_BINDING_ARRAY
+                    | WgpuFeatures::PARTIALLY_BOUND_BINDING_ARRAY
+                    | WgpuFeatures::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+            ),
             ..default()
         }
         .into(),

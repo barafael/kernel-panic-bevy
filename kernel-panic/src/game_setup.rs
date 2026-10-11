@@ -181,6 +181,14 @@ pub struct DevOptions {
     /// `KP_BOT_ENEMY=1`: seat an AI opponent in the bot's skirmish.
     #[cfg(not(target_arch = "wasm32"))]
     pub bot_enemy: bool,
+    /// `KP_NO_BINDLESS=1`: run the renderer without bindless materials
+    /// (the wgpu binding-array features are left off), to tell a
+    /// material-slot problem from a driver one when pieces flicker.
+    pub no_bindless: bool,
+    /// `KP_NO_INDIRECT=1`: draw every mesh with a direct draw call
+    /// (Bevy's `NoIndirectDrawing` on the camera) instead of the
+    /// GPU-driven indirect path; the other half of that bisect.
+    pub no_indirect: bool,
 }
 
 impl DevOptions {
@@ -238,6 +246,8 @@ impl DevOptions {
             bot: var("KP_BOT").map(Into::into),
             bot_map: var("KP_BOT_MAP"),
             bot_enemy: var("KP_BOT_ENEMY").is_some_and(|v| v != "0"),
+            no_bindless: var("KP_NO_BINDLESS").is_some_and(|v| v != "0"),
+            no_indirect: var("KP_NO_INDIRECT").is_some_and(|v| v != "0"),
         }
     }
 }
