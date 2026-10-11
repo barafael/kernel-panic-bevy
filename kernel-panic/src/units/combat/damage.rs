@@ -592,8 +592,11 @@ pub fn tick_burst_fire(
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut rng: Local<u32>,
 ) {
+    let mut scratch_sounds = crate::audio::SoundQueue::default();
+    let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
     if *rng == 0 {
         *rng = 0xB0B5_7A7E;
     }
@@ -619,6 +622,7 @@ pub fn tick_burst_fire(
             &unit_registry,
             &mut pending_attacks,
             &mut damage_queue,
+            sounds,
             &mut rng,
         );
         commands.entity(entity).try_insert(JustFired);

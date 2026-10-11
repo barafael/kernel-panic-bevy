@@ -1,0 +1,29 @@
+name: Soundtrack (Git LFS)
+description: >
+  Fetch the soundtrack (`kernel-panic/assets/music/*.ogg`, ~74 MB, Git LFS)
+  through a cache keyed on the LFS object list, so LFS bandwidth is only
+  spent when a track changes, and refuse to continue with pointer files.
+
+# Without this step the checkout holds 130-byte pointers: build.rs would
+# bake them into the web music catalog, packages would ship them, and
+# `audio::music::tests::music_catalog_matches_the_folder` fails loudly.
+# One cache entry serves every OS (enableCrossOsArchive).
+
+runs:
+  using: composite
+  steps:
+    - name: LFS object list
+      shell: bash
+      run: git lfs ls-files -l | cut -d' ' -f1 | sort > .lfs-objects
+    - uses: actions/cache@v4
+      with:
+        path: .git/lfs
+        key: lfs-${{ hashFiles('.lfs-objects') }}
+        enableCrossOsArchive: true
+    - name: Fetch music (LFS)
+      shell: bash
+      run: |
+        git lfs pull
+        # every tracked file must be real content ('*'), never a pointer ('-')
+        ! git lfs ls-files | grep -q '^[0-9a-f]* - '
+        rm .lfs-objects

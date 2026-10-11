@@ -409,6 +409,9 @@ pub(crate) fn apply_ordered_command(
     orders: &Orders,
     commands: &mut Commands,
 ) {
+    // Every call here is a player command (the AI drives `replace_order`
+    // directly): `GiveCommand` plays the selection's `ok` reply.
+    crate::audio::ack_order(commands);
     if enqueue && orders.busy(entity) {
         queue_command(entity, cmd, commands);
     } else {

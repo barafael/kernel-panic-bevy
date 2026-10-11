@@ -1306,8 +1306,13 @@ impl QtSearch {
     }
 }
 
+/// `x * x`: `powi(2)` has unspecified precision (workspace `clippy.toml`).
+fn sq(x: f32) -> f32 {
+    x * x
+}
+
 fn dist(a: [f32; 2], b: [f32; 2]) -> f32 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt()
+    (sq(a[0] - b[0]) + sq(a[1] - b[1])).sqrt()
 }
 
 /// A two-point path (a clear straight line, or source and goal in one
@@ -1471,8 +1476,7 @@ fn smooth_point(
     if v_edge {
         pi = [p1[0], p0[1] + d[1] * tx];
     }
-    let moved =
-        |q: [f32; 2]| ((q[0] - p1[0]).powi(2) + (q[1] - p1[1]).powi(2) > 0.05 * 0.05).then_some(q);
+    let moved = |q: [f32; 2]| (sq(q[0] - p1[0]) + sq(q[1] - p1[1]) > 0.05 * 0.05).then_some(q);
     if pi[0] >= xmin && pi[0] <= xmax && pi[1] >= zmin && pi[1] <= zmax {
         return moved(pi);
     }

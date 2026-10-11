@@ -1,0 +1,29 @@
+name: Bake maps
+description: >
+  Bake every source map archive (.sd7/.sdz) in kernel-panic/assets/maps to
+  the compressed .kpmap format, next to its source. The .kpmap files are
+  gitignored, so every build that ships maps runs this first.
+
+# Why: the web build can't extract .sd7/.sdz archives (no sevenz on wasm),
+# so it only loads .kpmap; kernel-panic's build.rs embeds the list of
+# .kpmap files it finds here as the web map catalog. Native builds prefer a
+# .kpmap over its source archive (`dedupe_prefer_baked`), so the release
+# packages ship the baked maps too.
+#
+# Used by deploy.yml (GitHub Pages) and release.yml (one bake job whose
+# output every package shares, so all platforms ship byte-identical maps:
+# lockstep peers must agree on the terrain).
+
+runs:
+  using: composite
+  steps:
+    - name: Bake maps (.kpmap)
+      shell: bash
+      run: |
+        cargo build --release --locked -p spring-map --bin bake-map
+        bake="${CARGO_TARGET_DIR:-target}/release/bake-map"
+        shopt -s nullglob
+        for f in kernel-panic/assets/maps/*.sd7 kernel-panic/assets/maps/*.sdz; do
+          "$bake" "$f"
+        done
+        ls -l kernel-panic/assets/maps/*.kpmap

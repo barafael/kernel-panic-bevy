@@ -1,9 +1,8 @@
 name: Deploy to GitHub Pages
 
 # Web build of the Bevy remake, deployed to GitHub Pages via trunk.
-# Source archives (.sd7/.sdz) don't exist on wasm (plan §8.1) — the web
-# build boots with an empty map catalog until the baked-map (`.kpmap`)
-# path is wired to the asset server.
+# Source archives (.sd7/.sdz) can't be read on wasm (plan §8.1), so the
+# maps are baked to `.kpmap` first (.github/actions/bake-maps).
 on:
   push:
     branches: [main]
@@ -24,6 +23,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The soundtrack is in Git LFS; build.rs bakes the music catalog
+      # from the folder and index.html's copy-dir publishes it.
+      - uses: ./.github/actions/lfs-music
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -42,8 +45,8 @@ jobs:
           curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
-      # Web can't extract .sd7/.sdz archives (no sevenz/mlua on wasm), so
-      # bake every source map to the compressed .kpmap format first. The
+      # Web can't extract .sd7/.sdz archives (no sevenz on wasm), so bake
+      # every source map to .kpmap first (shared with release.yml). The
       # kernel-panic build script embeds the resulting catalog at compile
       # time, and index.html's copy-dir ships the .kpmap files.
       #
@@ -51,13 +54,7 @@ jobs:
       # step here: it is the committed `kernel-panic/assets/units.kpu`,
       # embedded in the binary (see unit-bundle.md) — the upstream
       # submodules it is baked from are not checked out in CI.
-      - name: Bake maps (.kpmap)
-        run: |
-          cargo build --release -p spring-map --bin bake-map
-          for f in kernel-panic/assets/maps/*.sd7 kernel-panic/assets/maps/*.sdz; do
-            [ -e "$f" ] || continue
-            ./target/release/bake-map "$f"
-          done
+      - uses: ./.github/actions/bake-maps
 
       - name: Build
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"

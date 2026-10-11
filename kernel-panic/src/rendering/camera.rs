@@ -1,3 +1,4 @@
+use bevy::math::ops;
 use bevy::{camera::Hdr, input::mouse::MouseWheel, prelude::*};
 
 use crate::rendering::settings::{MsaaSupport, RenderSettings};
@@ -156,13 +157,13 @@ pub fn spawn_camera(
 
 /// Build a `Transform` from the *smoothed* state values.
 pub fn compute_transform_from_state(state: &RtsCameraState) -> Transform {
-    let horizontal = state.smooth_distance * state.smooth_pitch.cos();
-    let vertical = state.smooth_distance * state.smooth_pitch.sin();
+    let horizontal = state.smooth_distance * ops::cos(state.smooth_pitch);
+    let vertical = state.smooth_distance * ops::sin(state.smooth_pitch);
 
     let offset = Vec3::new(
-        horizontal * state.smooth_yaw.sin(),
+        horizontal * ops::sin(state.smooth_yaw),
         vertical,
-        horizontal * state.smooth_yaw.cos(),
+        horizontal * ops::cos(state.smooth_yaw),
     );
 
     let eye = state.smooth_focus + offset;
@@ -171,7 +172,11 @@ pub fn compute_transform_from_state(state: &RtsCameraState) -> Transform {
 
 /// Forward direction on the XZ ground plane for the current *smooth* yaw.
 fn fwd_ground(state: &RtsCameraState) -> Vec3 {
-    Vec3::new(-state.smooth_yaw.sin(), 0.0, -state.smooth_yaw.cos())
+    Vec3::new(
+        -ops::sin(state.smooth_yaw),
+        0.0,
+        -ops::cos(state.smooth_yaw),
+    )
 }
 
 fn right_ground(state: &RtsCameraState) -> Vec3 {
@@ -302,8 +307,8 @@ pub fn camera_control(
                 let offset = eye - pivot;
                 let horizontal = (offset.x * offset.x + offset.z * offset.z).sqrt();
                 let new_distance = offset.length();
-                let new_pitch = offset.y.atan2(horizontal);
-                let new_yaw = offset.x.atan2(offset.z);
+                let new_pitch = ops::atan2(offset.y, horizontal);
+                let new_yaw = ops::atan2(offset.x, offset.z);
                 if (settings.min_distance..=settings.max_distance).contains(&new_distance)
                     && (settings.min_pitch..=settings.max_pitch).contains(&new_pitch)
                 {

@@ -21,6 +21,7 @@
 //!
 //! [`step`]: MissileFlight::step
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
@@ -252,7 +253,7 @@ impl StarburstFlight {
                 acceleration: w.weapon_acceleration / (GAME_SPEED * GAME_SPEED),
                 turn_rate,
                 tracking,
-                max_good_dif: (tracking * 0.6).cos(),
+                max_good_dif: ops::cos(tracking * 0.6),
                 uptime,
                 ttl,
                 turn_to_target: true,
@@ -422,7 +423,7 @@ mod tests {
         let target = Vec3::new(1000.0, 0.0, 0.0);
         let f = CannonFlight::launch(&w, Vec3::ZERO, target, None, G);
         assert!((f.velocity.length() - 20.0).abs() < 1e-4);
-        let pitch = f.velocity.y.atan2(f.velocity.x).to_degrees();
+        let pitch = ops::atan2(f.velocity.y, f.velocity.x).to_degrees();
         assert!((pitch - 24.3).abs() < 0.2, "launch pitch {pitch}°");
         // predict = ceil(1000 / (20·cos θ)) = 55 → ttl 110.
         assert_eq!(f.ttl, 110);
@@ -451,9 +452,9 @@ mod tests {
             let dir = f.velocity.normalize();
             let (_, pitch) = local_aim_angles(Quat::IDENTITY, target, AimLaunch::of(Some(&w), G));
             assert!(
-                (dir.y.asin() - pitch).abs() < 1e-5,
+                (ops::asin(dir.y) - pitch).abs() < 1e-5,
                 "{target}: launch {} vs aim {pitch}",
-                dir.y.asin()
+                ops::asin(dir.y)
             );
         }
     }
@@ -545,7 +546,7 @@ mod tests {
             assert!((f.speed - (v0 + accel * k as f32)).abs() < 1e-4);
         }
         // Turn stage: constant speed, ~10.85° per frame toward +X.
-        let turn = engine_turn_rate(60000.0).atan();
+        let turn = ops::atan(engine_turn_rate(60000.0));
         let speed = f.speed;
         let mut prev = f.dir;
         let mut frames = 0;
@@ -633,7 +634,7 @@ mod tests {
             pos += v;
             // Heading change per frame is bounded by atan(gain) plus the
             // extraHeight pitch bias.
-            assert!(prev.angle_between(f.dir) < gain.atan() + 0.2);
+            assert!(prev.angle_between(f.dir) < ops::atan(gain) + 0.2);
             prev = f.dir;
             max_y = max_y.max(pos.y);
             if pos.y <= 0.0 {

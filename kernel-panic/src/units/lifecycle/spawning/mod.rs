@@ -14,6 +14,7 @@
 //! - [`mod`](self) — [`spawn_unit`] + the top-level spawners.
 
 use bevy::ecs::system::SystemParam;
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::units::assets::animation::PieceIndex;
@@ -108,7 +109,7 @@ pub fn spawn_homebases(
             .map(|sp| (sp.x, sp.z))
             .unwrap_or_else(|| {
                 let theta = std::f32::consts::TAU * i as f32 / seats;
-                (cx + radius * theta.cos(), cz + radius * theta.sin())
+                (cx + radius * ops::cos(theta), cz + radius * ops::sin(theta))
             });
         let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
         let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
@@ -223,7 +224,7 @@ pub fn exit_heading(
         const STEPS: usize = 100;
         for i in 0..STEPS {
             let a = i as f32 * std::f32::consts::PI / (STEPS as f32 * 0.5);
-            let (c, s) = (a.cos(), a.sin());
+            let (c, s) = (ops::cos(a), ops::sin(a));
             if c < 0.0 {
                 continue;
             }
@@ -324,7 +325,7 @@ pub fn spawn_demo_squads(
         let squad =
             std::iter::repeat_n(roster.spam, SPAM).chain([roster.arty, roster.arty, roster.heavy]);
         let to_centre = (centre - base).with_y(0.0).normalize_or(Vec3::X);
-        let heading = to_centre.z.atan2(to_centre.x);
+        let heading = ops::atan2(to_centre.z, to_centre.x);
         let count = SPAM + 3;
         for (i, kind) in squad.enumerate() {
             // Spread over a 120° arc facing the centre, pulled inward
@@ -334,10 +335,10 @@ pub fn spawn_demo_squads(
             // keeps squads off cliffs.
             let a = heading + (i as f32 / (count - 1) as f32 - 0.5) * 2.1;
             let spot = |r: f32| {
-                let x =
-                    (base.x + r * a.cos()).clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
-                let z =
-                    (base.z + r * a.sin()).clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
+                let x = (base.x + r * ops::cos(a))
+                    .clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
+                let z = (base.z + r * ops::sin(a))
+                    .clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
                 heightmap.place(x, z)
             };
             let Some(mut pos) = [RING, RING * 0.65, RING * 0.4]

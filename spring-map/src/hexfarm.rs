@@ -228,6 +228,12 @@ pub struct HexFarmSetup {
     pub median_build_time: f64,
 }
 
+/// `x * x`: the deterministic spelling of the gadget's `x^2` (`powi`'s
+/// precision is unspecified; workspace `clippy.toml`).
+fn sq(x: f64) -> f64 {
+    x * x
+}
+
 /// `hp={1}; for ... hp[#hp+1]=v; table.sort(hp); hp[floor(1+#hp/2)]`
 /// (l.214): the gadget seeds its list with a 1 before taking the
 /// median.
@@ -363,7 +369,8 @@ impl HexFarm {
         let density = if rng.random() > 0.75 { 1 } else { 2 };
         let tower_radius = (192.5 + 576.0 * rng.random()).floor();
         let inter_length = 2.0 * tower_radius + (4.5 + 380.0 * rng.random()).floor();
-        let rect_width = (64.5 + (tower_radius - 64.0).max(0.0) * rng.random().powf(0.4)).floor();
+        let rect_width =
+            (64.5 + (tower_radius - 64.0).max(0.0) * libm::pow(rng.random(), 0.4)).floor();
         let mut bridge_angle = rng.range(-45, 60) as f64 * PI / 180.0;
         if (bridge_angle * 180.0 / PI).abs() < 1.9 {
             bridge_angle = 0.0;
@@ -372,8 +379,9 @@ impl HexFarm {
         let (cx, cz) = (setup.map_size_x / 2.0, setup.map_size_z / 2.0);
         let half_x = 16.0 * (map_dim_scale * setup.map_size_x / 32.0).ceil();
         let half_z = 16.0 * (map_dim_scale * setup.map_size_z / 32.0).ceil();
-        let height_diff =
-            half_x.max(half_z) * (1.0 - 2.0 * tower_radius / inter_length) * bridge_angle.tan();
+        let height_diff = half_x.max(half_z)
+            * (1.0 - 2.0 * tower_radius / inter_length)
+            * libm::tan(bridge_angle);
         let pit_depth = 128.0 + tower_radius / cx.max(cz) * height_diff.abs();
         let (center_height, edge_height) = if height_diff > 0.0 {
             let center = pit_depth + 512.0;
@@ -444,7 +452,7 @@ impl HexFarm {
         let mut c = [[0.0; 2]; 6];
         let mut a = self.lattice_angle;
         for corner in &mut c {
-            *corner = [x + r * a.cos(), z + r * a.sin()];
+            *corner = [x + r * libm::cos(a), z + r * libm::sin(a)];
             a += PI / 3.0;
         }
         c
@@ -474,7 +482,7 @@ impl HexFarm {
     /// `GetHexRadius` (l.308): side length of a tower.
     fn hex_radius(&self, h: usize) -> f64 {
         let c = &self.hexes[h].c;
-        ((c[1][0] - c[0][0]).powi(2) + (c[1][1] - c[0][1]).powi(2)).sqrt()
+        (sq(c[1][0] - c[0][0]) + sq(c[1][1] - c[0][1])).sqrt()
     }
 
     /// `GetBetterRectCornersList` (l.332): a `width` wide bridge from
@@ -483,7 +491,7 @@ impl HexFarm {
         let (a, b) = (&self.hexes[h1], &self.hexes[h2]);
         let r1 = self.hex_radius(h1) * 3f64.sqrt() / 2.0;
         let r2 = self.hex_radius(h2) * 3f64.sqrt() / 2.0;
-        let len = ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt();
+        let len = (sq(b.x - a.x) + sq(b.z - a.z)).sqrt();
         let (dx, dz) = ((b.x - a.x) / len, (b.z - a.z) / len);
         let w = width / 2.0;
         [
@@ -510,7 +518,7 @@ impl HexFarm {
     /// `GetConeHeight` (l.346): towers sit on a cone around the centre
     /// (rising or falling outwards with the rolled bridge slope).
     pub fn cone_height(&self, x: f64, z: f64) -> f64 {
-        ((x - self.map_center_x).powi(2) + (z - self.map_center_z).powi(2)).sqrt()
+        (sq(x - self.map_center_x) + sq(z - self.map_center_z)).sqrt()
             / self.map_center_x.max(self.map_center_z)
             * (self.edge_height - self.center_height)
             + self.center_height
@@ -530,10 +538,9 @@ impl HexFarm {
         let r = &self.rects[k];
         let (a, b) = (&self.hexes[r.hex1], &self.hexes[r.hex2]);
         let (x1, y1, z1, x2, y2, z2) = (a.x, a.y, a.z, b.x, b.y, b.z);
-        let mut p =
-            ((z1 - z) * (z1 - z2) - (x1 - x) * (x2 - x1)) / ((z2 - z1).powi(2) + (x2 - x1).powi(2));
-        let d = ((z2 - z1).powi(2) + (x2 - x1).powi(2)).sqrt() / 2.0;
-        let med = self.tower_radius * (PI / 6.0).cos();
+        let mut p = ((z1 - z) * (z1 - z2) - (x1 - x) * (x2 - x1)) / (sq(z2 - z1) + sq(x2 - x1));
+        let d = (sq(z2 - z1) + sq(x2 - x1)).sqrt() / 2.0;
+        let med = self.tower_radius * libm::cos(PI / 6.0);
         p = ((2.0 * p - 1.0) * d / (d - med) + 1.0) / 2.0;
         y1 * (1.0 - p) + y2 * p
     }
@@ -544,13 +551,13 @@ impl HexFarm {
         let la = self.lattice_angle;
         let (min_x, max_x, min_z, max_z) = self.map_min_max();
         let (cx, cz) = (self.map_center_x, self.map_center_z);
-        let (dx1, dz1) = (il * (la + PI / 6.0).cos(), il * (la + PI / 6.0).sin());
-        let (dx2, dz2) = (il * (la - PI / 6.0).cos(), il * (la - PI / 6.0).sin());
-        let m0 = il * 2.0 * (PI / 6.0).cos();
+        let (dx1, dz1) = (il * libm::cos(la + PI / 6.0), il * libm::sin(la + PI / 6.0));
+        let (dx2, dz2) = (il * libm::cos(la - PI / 6.0), il * libm::sin(la - PI / 6.0));
+        let m0 = il * 2.0 * libm::cos(PI / 6.0);
         let r0 = m0 * ((max_x - min_x).max(max_z - min_z) * 1.5 / m0).floor();
-        let x0 = cx - r0 * la.cos();
-        let z0 = cz - r0 * la.sin();
-        let rms = ((max_x - min_x).min(max_z - min_z) / 2.0 - self.tower_radius).powi(2);
+        let x0 = cx - r0 * libm::cos(la);
+        let z0 = cz - r0 * libm::sin(la);
+        let rms = sq((max_x - min_x).min(max_z - min_z) / 2.0 - self.tower_radius);
         let limit = (2.0 * (max_x - min_x).max(max_z - min_z) / il).floor() as i64;
         let com = match self.centered_on {
             CenteredOn::Hole => 0,
@@ -561,8 +568,8 @@ impl HexFarm {
         // Bounding polygon, unit-sized then scaled and centred.
         let unit = |k: f64, scale: f64| {
             [
-                (la + PI * k / 6.0).cos() * scale,
-                (la + PI * k / 6.0).sin() * scale,
+                libm::cos(la + PI * k / 6.0) * scale,
+                libm::sin(la + PI * k / 6.0) * scale,
             ]
         };
         let mut poly: Vec<[f64; 2]> = match self.boundary {
@@ -571,7 +578,7 @@ impl HexFarm {
                 .flat_map(|k| [unit((2 * k) as f64, 0.5), unit((1 + 2 * k) as f64, 1.0)])
                 .collect(),
             Boundary::Losange => {
-                let smaller = (PI / 6.0).sin();
+                let smaller = libm::sin(PI / 6.0);
                 vec![
                     unit(1.0, 1.0),
                     unit(4.0, smaller),
@@ -603,7 +610,7 @@ impl HexFarm {
         let tr = self.tower_radius;
         let boundary = self.boundary;
         let boundary_check = |x: f64, z: f64| match boundary {
-            Boundary::Circle => (x - cx).powi(2) + (z - cz).powi(2) < rms,
+            Boundary::Circle => sq(x - cx) + sq(z - cz) < rms,
             Boundary::Rectangle => {
                 x > min_x + tr && z > min_z + tr && x < max_x - tr && z < max_z - tr
             }
@@ -642,11 +649,11 @@ impl HexFarm {
         }
 
         // "Placing Rects"
-        let ceiled = (il * 1.2).powi(2);
+        let ceiled = sq(il * 1.2);
         for i in 0..self.hexes.len() {
             for j in i + 1..self.hexes.len() {
                 let (a, b) = (&self.hexes[i], &self.hexes[j]);
-                if (b.x - a.x).powi(2) + (b.z - a.z).powi(2) < ceiled {
+                if sq(b.x - a.x) + sq(b.z - a.z) < ceiled {
                     self.push_rect(i, j);
                 }
             }
@@ -667,7 +674,7 @@ impl HexFarm {
                 }
                 for j in 0..self.hexes.len() {
                     let (a, b) = (&self.hexes[i], &self.hexes[j]);
-                    let d = ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt();
+                    let d = (sq(b.x - a.x) + sq(b.z - a.z)).sqrt();
                     if d < il * 2.1 && d > il * 1.9 && (bridged[i].is_empty() || bridged[i][0] != j)
                     {
                         self.push_rect(i, j);
@@ -705,12 +712,12 @@ impl HexFarm {
             ];
             for (i, j) in ends {
                 let (hi, hj) = (&self.hexes[i], &self.hexes[j]);
-                let dir = (hj.z - hi.z).atan2(hj.x - hi.x);
+                let dir = libm::atan2(hj.z - hi.z, hj.x - hi.x);
                 let mut hits = Vec::new();
                 for p in 0..6 {
                     let (c1, c2) = (hi.c[p], hi.c[(p + 1) % 6]);
-                    let a1 = (c1[1] - hi.z).atan2(c1[0] - hi.x);
-                    let a2 = (c2[1] - hi.z).atan2(c2[0] - hi.x);
+                    let a1 = libm::atan2(c1[1] - hi.z, c1[0] - hi.x);
+                    let a2 = libm::atan2(c2[1] - hi.z, c2[0] - hi.x);
                     let mean = if a1 - a2 > 4.0 {
                         (a1 + a2 - 2.0 * PI) / 2.0
                     } else {
@@ -742,7 +749,7 @@ impl HexFarm {
         let n = self.hexes.len();
         let team_list = teams + 1; // with Gaia in front
         let (cx, cz) = (self.map_center_x, self.map_center_z);
-        let sd_center = |h: &Hex| (h.x - cx).powi(2) + (h.z - cz).powi(2);
+        let sd_center = |h: &Hex| sq(h.x - cx) + sq(h.z - cz);
         let mut used = vec![false; n];
         let mut team_hex: Vec<usize> = Vec::new();
 
@@ -772,7 +779,7 @@ impl HexFarm {
                 let (x1, z1) = (self.hexes[h1].x, self.hexes[h1].z);
                 let sd2 = team_hex[1..]
                     .iter()
-                    .map(|&t| (self.hexes[t].x - x1).powi(2) + (self.hexes[t].z - z1).powi(2))
+                    .map(|&t| sq(self.hexes[t].x - x1) + sq(self.hexes[t].z - z1))
                     .fold(f64::INFINITY, f64::min);
                 if sd2 > best_sd {
                     best_sd = sd2;
@@ -800,7 +807,7 @@ impl HexFarm {
                     let a = self.lattice_angle + (t1 as f64 / n as f64).ceil() * angle_between;
                     let h = &self.hexes[team_hex[t1 % n]];
                     let r = self.tower_radius / 2.0;
-                    [h.x + r * a.cos(), h.z + r * a.sin()]
+                    [h.x + r * libm::cos(a), h.z + r * libm::sin(a)]
                 }
             })
             .collect();
@@ -1295,7 +1302,7 @@ impl HexFarm {
             .hexes
             .iter()
             .map(|h| Elem {
-                s: ((h.x - xc).powi(2) + (h.z - zc).powi(2)).sqrt(),
+                s: (sq(h.x - xc) + sq(h.z - zc)).sqrt(),
                 y: h.y,
                 r: self.tower_radius,
             })
@@ -1355,7 +1362,7 @@ impl HexFarm {
         while x <= self.map_size_x {
             let mut z = 0.0;
             while z <= self.map_size_z {
-                let d = ((x - xc).powi(2) + (z - zc).powi(2)).sqrt();
+                let d = (sq(x - xc) + sq(z - zc)).sqrt();
                 let k = (PROFILE_STEP / 2.0 + d / PROFILE_STEP).floor() as usize;
                 // Out of the profile: the gadget echoes an error and skips.
                 if let Some(&h) = profile.get(k) {
@@ -1480,8 +1487,7 @@ mod tests {
                     (lo.min(h.y), hi.max(h.y))
                 });
             for h in &farm.hexes {
-                let s =
-                    ((h.x - farm.map_center_x).powi(2) + (h.z - farm.map_center_z).powi(2)).sqrt();
+                let s = (sq(h.x - farm.map_center_x) + sq(h.z - farm.map_center_z)).sqrt();
                 let k = (s / step).round() as usize;
                 assert!(p[k] >= h.y - 1e-9, "seed {seed}: ring below its tower");
             }
@@ -1519,7 +1525,7 @@ mod tests {
         // of the surrounding cliffs.
         let t = &farm.hexes[0];
         let flat = farm.smooth_mesh_profile(7.0);
-        let d = ((t.x - farm.map_center_x).powi(2) + (t.z - farm.map_center_z).powi(2)).sqrt();
+        let d = (sq(t.x - farm.map_center_x) + sq(t.z - farm.map_center_z)).sqrt();
         let k = (3.5 + d / 7.0).floor() as usize;
         let cell = (t.z / 16.0) as usize * mx + (t.x / 16.0) as usize;
         assert!((mesh.mesh()[cell] as f64 - flat[k]).abs() < 1e-3);
@@ -1553,7 +1559,7 @@ mod tests {
             // Bridges join neighbouring towers (1 or ~2 lattice steps).
             for (k, r) in farm.rects.iter().enumerate() {
                 let (a, b) = (&farm.hexes[r.hex1], &farm.hexes[r.hex2]);
-                let d = ((b.x - a.x).powi(2) + (b.z - a.z).powi(2)).sqrt();
+                let d = (sq(b.x - a.x) + sq(b.z - a.z)).sqrt();
                 assert!(
                     d < farm.inter_length * 1.2
                         || (d > farm.inter_length * 1.9 && d < farm.inter_length * 2.1),

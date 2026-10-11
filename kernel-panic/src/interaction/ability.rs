@@ -163,7 +163,12 @@ pub(crate) fn ability_is_aimed(kind: UnitKind) -> bool {
 
 /// Deploy / pack up every Bug / Exploit in `units` — the untargeted half
 /// of the `D` ability.
-pub(crate) fn deploy_units(units: impl IntoIterator<Item = (Entity, UnitKind)>, net: &mut Issue) {
+pub(crate) fn deploy_units(
+    units: impl IntoIterator<Item = (Entity, UnitKind)>,
+    net: &mut Issue,
+    commands: &mut Commands,
+) {
+    crate::audio::ack_order(commands);
     let units = net.units(
         units
             .into_iter()
@@ -186,7 +191,9 @@ pub(crate) fn cast_aimed_abilities(
     target: Vec3,
     alt_held: bool,
     net: &mut Issue,
+    commands: &mut Commands,
 ) {
+    crate::audio::ack_order(commands);
     let units = net.units(
         units
             .into_iter()
@@ -241,6 +248,7 @@ fn trigger_deploy_on_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     mut net: Issue,
+    mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::KeyD) {
         return;
@@ -248,7 +256,11 @@ fn trigger_deploy_on_hotkey(
     if ctrl_held(&keys) {
         return;
     }
-    deploy_units(selected_q.iter().map(|(e, u)| (e, u.0)), &mut net);
+    deploy_units(
+        selected_q.iter().map(|(e, u)| (e, u.0)),
+        &mut net,
+        &mut commands,
+    );
 }
 
 /// `D` casts the selection's aimed abilities (command-fire, Dispatch)
@@ -262,6 +274,7 @@ fn trigger_aimed_ability_on_hotkey(
     mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
     mut net: Issue,
+    mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::KeyD) || ctrl_held(&keys) {
         return;
@@ -283,6 +296,7 @@ fn trigger_aimed_ability_on_hotkey(
         target,
         alt_held(&keys),
         &mut net,
+        &mut commands,
     );
 }
 
@@ -300,6 +314,7 @@ fn trigger_ability_click(
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut net: Issue,
+    mut commands: Commands,
 ) {
     let Some(Mode::Ability(cmd)) = modes.mode else {
         return;
@@ -319,6 +334,7 @@ fn trigger_ability_click(
         target,
         alt_held(&keys),
         &mut net,
+        &mut commands,
     );
     pending.markers.push((target, OrderMarker::Attack));
     modes.committed(&keys);

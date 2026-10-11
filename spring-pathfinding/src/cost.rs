@@ -293,7 +293,7 @@ fn speed_from_slope(slope: f32, max_slope: f32, slope_mod: f32) -> f32 {
 pub fn max_slope_from_degrees(degrees: f32) -> f32 {
     let deg = degrees.clamp(0.0, 60.0) * 1.5;
     let rad = deg.to_radians();
-    1.0 - rad.cos()
+    1.0 - libm::cosf(rad)
 }
 
 /// Encode a single rise/run step in Spring's `1 - cos(angle)` form
@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn fbi_max_slope_36_matches_upstream_encoding() {
         let s = max_slope_from_degrees(36.0);
-        let expected = 1.0 - (54.0_f32.to_radians()).cos();
+        let expected = 1.0 - libm::cosf(54.0_f32.to_radians());
         assert!(
             (s - expected).abs() < 1e-5,
             "max_slope_from_degrees(36) = {s}, expected {expected}",
@@ -361,7 +361,7 @@ mod tests {
     /// through with a sensible (slow but non-zero) speed.
     #[test]
     fn ramp_under_effective_cap_is_passable() {
-        let dh = 8.0 * 50.0_f32.to_radians().tan();
+        let dh = 8.0 * libm::tanf(50.0_f32.to_radians());
         let heights = vec![0.0, 0.0, 0.0, dh, dh, dh];
         let cap = max_slope_from_degrees(36.0);
         let mod_ = slope_mod_from_max_slope(cap);
@@ -381,7 +381,7 @@ mod tests {
     /// effective cap (54°) and the cell is hard-blocked.
     #[test]
     fn ramp_above_effective_cap_is_blocked() {
-        let dh = 8.0 * 60.0_f32.to_radians().tan();
+        let dh = 8.0 * libm::tanf(60.0_f32.to_radians());
         let heights = vec![0.0, 0.0, 0.0, dh, dh, dh];
         let cap = max_slope_from_degrees(36.0);
         let mod_ = slope_mod_from_max_slope(cap);

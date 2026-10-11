@@ -40,7 +40,22 @@ members = [
 
 [workspace.dependencies]
 better_default = "1"
-bevy = { version = "0.20", features = ["serialize"] }
+bevy = { version = "0.20", features = ["serialize", "libm"] }
+# Deterministic math for lockstep multiplayer (docs/multiplayer-plan.md,
+# "Will different hardware compute the same results?"): every client must
+# compute bit-identical floats on Linux, Windows and macOS, x86_64 and
+# arm64, and wasm32 in every browser.
+# - `libm`: glam's own `sin cos atan2 powf ...` (and, through bevy's
+#   `libm` feature, `bevy::math::ops`) call the pure-Rust `libm` crate
+#   instead of each OS's C library, which round differently.
+# - `scalar-math`: one scalar code path for Vec3A/Vec4/Quat/Mat4/Affine3A
+#   on every target, instead of SSE2 on x86_64, NEON on arm64 and scalar
+#   on wasm32 (different operation orders, different last bits).
+# Cargo unifies features per build, so naming glam here and depending on
+# it from every crate that links Bevy turns both on for Bevy's copy too.
+glam = { version = "0.33", default-features = false, features = ["std", "libm", "scalar-math"] }
+# Deterministic f64 math, and f32 functions `bevy::math::ops` lacks.
+libm = "0.2"
 byteorder = "1.5"
 thiserror = "2"
 sevenz-rust = "0.6"

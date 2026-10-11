@@ -1,5 +1,9 @@
 //! Integration tests: generate a test map and validate it through spring-map.
 
+// Generator tests build synthetic heightmaps offline; nothing here
+// reaches a client (workspace clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use crate::sdz_writer::package_sdz_to_memory;
 use crate::smd_writer::SmdBuilder;
 use crate::smf_writer::SmfBuilder;

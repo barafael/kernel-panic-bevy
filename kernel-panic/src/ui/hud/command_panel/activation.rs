@@ -183,6 +183,7 @@ pub(super) fn apply_activations(
     mut placement: ResMut<PlacementMode>,
     units: SelectedUnits,
     mut net: Issue,
+    mut commands: Commands,
 ) {
     for msg in msgs.read() {
         let hotkey_only = matches!(
@@ -222,6 +223,7 @@ pub(super) fn apply_activations(
             CmdId::Stop => {
                 let units = net.units(units.iter().map(|(e, ..)| e));
                 net.issue(SimCommand::Stop { units });
+                crate::audio::ack_order(&mut commands);
                 disarm(&mut modes, &mut placement);
             }
             CmdId::Attack => arm(Mode::AttackGround),
@@ -253,6 +255,9 @@ pub(super) fn apply_activations(
                         })
                         .map(|(e, ..)| e),
                 );
+                if factories.list().is_some_and(|l| !l.is_empty()) {
+                    crate::audio::ack_order(&mut commands);
+                }
                 net.issue(SimCommand::Factory {
                     factories,
                     kind,

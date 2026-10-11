@@ -11,6 +11,7 @@
 //! `cargo test -p kernel-panic movement_harness -- --ignored --nocapture`.
 //! The non-ignored tests assert the behaviour Spring exhibits.
 
+use bevy::math::ops;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -164,7 +165,7 @@ impl Harness {
 
     fn yaw(&self, e: Entity) -> f32 {
         let f = self.world.get::<Transform>(e).unwrap().forward().as_vec3();
-        f.x.atan2(f.z)
+        ops::atan2(f.x, f.z)
     }
 }
 

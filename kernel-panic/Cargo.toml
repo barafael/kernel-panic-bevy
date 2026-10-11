@@ -8,7 +8,15 @@ spring-tdf = { path = "../spring-tdf" }
 spring-map = { path = "../spring-map" }
 spring-unit-mesh = { path = "../spring-unit-mesh" }
 spring-pathfinding = { path = "../spring-pathfinding" }
-bevy = { version = "0.20", features = ["debug", "custom_cursor"] }
+# `libm`: deterministic `bevy::math::ops` (see the workspace `glam` entry).
+bevy = { version = "0.20", features = ["debug", "custom_cursor", "libm"] }
+# Never imported: depending on glam turns its `libm` + `scalar-math`
+# features on for Bevy's copy (workspace Cargo.toml explains why).
+glam = { workspace = true }
+# For `sim::tests::deterministic_math_is_configured` (`ops` vs libm);
+# a regular dependency so it doesn't add a second dev-dependencies
+# table for merges to trip over. Already in the tree via bevy_math.
+libm = { workspace = true }
 better_default = { workspace = true }
 thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }
@@ -33,5 +41,9 @@ js-sys = "0.3"
 # The kani proof harnesses (animation/proofs.rs) are compiled only under
 # `cargo kani`, which sets cfg(kani). Declare it so normal builds don't
 # warn about an unknown cfg.
+[dev-dependencies]
+# The music catalog test parses `assets/music/catalog.json`.
+serde_json = "1"
+
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(kani)'] }

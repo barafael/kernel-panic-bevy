@@ -144,6 +144,8 @@ impl Plugin for UnitsPlugin {
                     .run_if(in_state(game_over::GameState::Playing)),
             )
             .add_systems(Startup, validate_registries)
+            // Debug builds: the FPU is still in IEEE default mode.
+            .add_systems(FixedFirst, crate::sim::assert_float_env)
             .add_systems(
                 FixedUpdate,
                 (

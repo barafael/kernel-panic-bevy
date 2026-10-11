@@ -25,6 +25,8 @@
 //! 5. `Update` — apply the collision push, `OwnerMoved` idle test; and
 //!    every 15th frame per unit `SlowUpdate` (repath / give up).
 
+use crate::sim::sq;
+use bevy::math::ops;
 use std::f32::consts::{PI, TAU};
 
 use bevy::platform::collections::HashMap;
@@ -749,8 +751,7 @@ impl GroundMover {
         } else {
             0.0
         };
-        self.at_goal =
-            goal.distance_squared(pos.xz()) < (self.goal_radius + self.extra_radius).powi(2);
+        self.at_goal = goal.distance_squared(pos.xz()) < sq(self.goal_radius + self.extra_radius);
         self.at_end_of_path = false;
         self.last_waypoint = false;
         self.progress = Progress::Active;
@@ -1011,7 +1012,7 @@ pub fn drag_acceleration(velocity: Vec3, mass: f32, on_ground: bool, friction: f
     if velocity.length() * GAME_SPEED < 0.5 {
         return -velocity;
     }
-    let radius = (3.0 * mass / (4.0 * PI * 8000.0)).cbrt();
+    let radius = ops::cbrt(3.0 * mass / (4.0 * PI * 8000.0));
     let air = 0.5 * ATMOSPHERE_DENSITY * ATMOSPHERIC_DRAG_COEFF * PI * radius * radius;
     let ground = if on_ground { friction * mass } else { 0.0 };
     let per_axis = |v: f32| {
@@ -1093,7 +1094,7 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
     if wanted_speed > 0.0 {
         let goal = m.goal.unwrap_or(inp.pos);
         let cur_goal_dist_sq = inp.pos.distance_squared(goal);
-        let min_goal_dist_sq = braking_distance(m.current_speed, fs.dec).powi(2);
+        let min_goal_dist_sq = sq(braking_distance(m.current_speed, fs.dec));
         // Brake for the goal only when this is the last command.
         let start_braking = inp.last_command && cur_goal_dist_sq <= min_goal_dist_sq;
         let mut max_speed_to_make_turn = f32::INFINITY;
@@ -1351,7 +1352,7 @@ pub fn step_mover(
 
         let cur_goal_dist_sq = pos2.distance_squared(goal);
         let min_goal_dist = m.goal_tolerance(order.has_move_cmd);
-        let spd_goal_dist_sq = (m.current_speed * 1.05).powi(2);
+        let spd_goal_dist_sq = sq(m.current_speed * 1.05);
         let ffd = m.front();
         let vel = ffd * m.current_speed;
         m.at_goal |= cur_goal_dist_sq <= min_goal_dist * min_goal_dist;
@@ -1487,7 +1488,7 @@ fn set_next_waypoint(
     let (cwp, nwp) = current_waypoints(Some(path), pos, goal);
     let cwp_dist_sq = cwp.distance_squared(pos);
     // Within a square: always allowed to switch.
-    let allow_skip = cwp_dist_sq < (SQUARE_SIZE - 1.0).powi(2);
+    let allow_skip = cwp_dist_sq < sq(SQUARE_SIZE - 1.0);
     if !allow_skip {
         if !m.skip_waypoint {
             // Turn-radius check: a waypoint outside our turning circle
@@ -1576,6 +1577,8 @@ pub fn movement_system(
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
     mut path_queue: ResMut<PathQueue>,
     mut impulses: ResMut<PendingImpulses>,
+    local_team: Option<Res<crate::units::player::LocalTeam>>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut rng_state: Local<u32>,
 ) {
     let nav = nav_set.as_deref();
@@ -1953,6 +1956,19 @@ pub fn movement_system(
         }
 
         if let Some(arrived) = result.finished {
+            // `CGroundMoveType::Arrived` (`GroundMoveType.cpp:2474`): the
+            // local team's units answer with `arrived1`.
+            if arrived
+                && let (Some(local), Some(sounds)) = (local_team.as_deref(), sounds.as_deref_mut())
+                && u.team.is_some_and(|t| t.0 == local.0)
+                && crate::audio::has_reply_sounds(u.kind.0)
+            {
+                sounds.play(
+                    crate::audio::SoundId::COMMAND_GIVEN,
+                    crate::audio::Channel::General,
+                    Some(new_pos),
+                );
+            }
             // `Arrived` / `Fail` run the CAI's SlowUpdate right away.
             finish_leg(
                 &mut commands,
@@ -2025,7 +2041,7 @@ pub fn obstacle_avoidance_dir(
     const AVOIDER_DIR_WEIGHT: f32 = 1.0;
     const DESIRED_DIR_WEIGHT: f32 = 0.5;
     const LAST_DIR_MIX_ALPHA: f32 = 0.7;
-    let max_avoidee_cosine = 120.0_f32.to_radians().cos();
+    let max_avoidee_cosine = ops::cos(120.0_f32.to_radians());
 
     if !m.frame.is_multiple_of(AVOIDANCE_UPDATE_RATE) {
         if !m.avoiding_units {
@@ -2078,7 +2094,7 @@ pub fn obstacle_avoidance_dir(
                 if front.dot(-(vector / dist)) < max_avoidee_cosine {
                     continue;
                 }
-                if dist_sq >= (m.current_speed.max(1.0) * GAME_SPEED + radius_sum).powi(2) {
+                if dist_sq >= sq(m.current_speed.max(1.0) * GAME_SPEED + radius_sum) {
                     continue;
                 }
                 if dist_sq >= me.pos.distance_squared(goal) {
@@ -2212,9 +2228,7 @@ pub fn attitude(heading: Heading, up: Vec3) -> Quat {
 /// `turn_rate` in heading units.
 pub fn cancel_distance_sq(max_speed: f32, turn_rate: f32) -> f32 {
     let turn_radius = max_speed * (SPRING_CIRCLE_DIVS as f32 / turn_rate.max(1.0)) / TAU;
-    (turn_radius + 2.0 * SQUARE_SIZE)
-        .powi(2)
-        .clamp(1024.0, 2048.0)
+    sq(turn_radius + 2.0 * SQUARE_SIZE).clamp(1024.0, 2048.0)
 }
 
 /// One ground unit, as the collision pass sees every other.
@@ -2631,8 +2645,8 @@ pub fn ground_collision_system(
             // The engine's height test (`|posDif.y| < |cmpEps.y · pos.y|`)
             // means a unit climbing or descending never counts as idle.
             m.idling = pos_dif.y.abs() < (eps_y * new_pos.y).abs()
-                && (m.curr_wp_dist - m.prev_wp_dist).powi(2) < ffd.dot(m.waypoint_dir)
-                && dif_sq < (m.current_speed * 0.5).powi(2);
+                && sq(m.curr_wp_dist - m.prev_wp_dist) < ffd.dot(m.waypoint_dir)
+                && dif_sq < sq(m.current_speed * 0.5);
         }
 
         // `SlowUpdate` (GroundMoveType.cpp:767).
@@ -2807,8 +2821,7 @@ fn collision_aux(m: &mut GroundMover, pos: Vec2, cwp: Vec2, nwp: Vec2, o: &Colli
                 || at_goal_pos(o.pos, o.owner_radius * ADJUST_FOR_DIAGONAL)
             {
                 m.trigger_call_arrived();
-            } else if cwp.distance_squared(o.pos) <= (o.owner_radius * ADJUST_FOR_DIAGONAL).powi(2)
-            {
+            } else if cwp.distance_squared(o.pos) <= sq(o.owner_radius * ADJUST_FOR_DIAGONAL) {
                 m.skip_waypoint = true;
             }
         }
@@ -3178,7 +3191,7 @@ mod tests {
     fn velocity_follows_the_slope() {
         let mut h = Harness::flat();
         let verts = 257usize;
-        let rise = 8.0 * 30.0_f32.to_radians().tan();
+        let rise = 8.0 * ops::tan(30.0_f32.to_radians());
         let heights: Vec<f32> = (0..verts * verts)
             .map(|i| (i % verts) as f32 * rise)
             .collect();
@@ -3196,7 +3209,7 @@ mod tests {
         let v = m.velocity;
         assert!(v.x > 0.0 && v.y > 0.0, "climbing +X: {v}");
         assert!(
-            (v.y / v.x - 30.0_f32.to_radians().tan()).abs() < 0.05,
+            (v.y / v.x - ops::tan(30.0_f32.to_radians())).abs() < 0.05,
             "{v}"
         );
         assert!((v.length() - m.current_speed).abs() < 1e-3, "{v}");
@@ -3571,7 +3584,7 @@ mod tests {
     fn uphill_slope_slows_downhill_does_not() {
         let mut h = Harness::flat();
         let verts = 257usize;
-        let rise = 8.0 * 30.0_f32.to_radians().tan();
+        let rise = 8.0 * ops::tan(30.0_f32.to_radians());
         let heights: Vec<f32> = (0..verts * verts)
             .map(|i| (i % verts) as f32 * rise)
             .collect();
@@ -3602,7 +3615,7 @@ mod tests {
         };
         let up = steady(&mut h, 600.0, 1400.0);
         let down = steady(&mut h, 1400.0, 600.0);
-        let slope = 1.0 - 30.0_f32.to_radians().cos();
+        let slope = 1.0 - ops::cos(30.0_f32.to_radians());
         let expected = 90.0 / (1.0 + slope * spring_pathfinding::slope_mod_from_max_slope(cap));
         assert!((up - expected).abs() < 2.0, "uphill {up} vs {expected}");
         assert!((down - 90.0).abs() < 0.5, "downhill full speed: {down}");

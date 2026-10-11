@@ -440,7 +440,7 @@ fn pick_map(mut commands: Commands) {
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let maps_dir = crate::paths::from_project_root("kernel-panic/assets/maps");
+        let maps_dir = crate::paths::assets_dir().join("maps");
         let mut maps: Vec<PathBuf> = std::fs::read_dir(&maps_dir)
             .into_iter()
             .flatten()

@@ -10,6 +10,7 @@
 //! (`GameplaySet::Produce`), so it is frame-rate independent and stops
 //! with the rest of the gameplay once a match is decided.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 pub mod circular_flow;
@@ -388,7 +389,10 @@ fn ring_point(center: Vec2, inner_r: f32, outer_r: f32, rng: &mut u32) -> Vec2 {
     // Force the rng to advance even if the area math is degenerate, so
     // back-to-back calls with equal inner/outer don't lock to one angle.
     let _ = xorshift32(rng);
-    Vec2::new(center.x + r * theta.cos(), center.y + r * theta.sin())
+    Vec2::new(
+        center.x + r * ops::cos(theta),
+        center.y + r * ops::sin(theta),
+    )
 }
 
 fn drain_eruption_queue(mut queue: ResMut<EruptionSpawnQueue>, mut ctx: SpawnContext) {

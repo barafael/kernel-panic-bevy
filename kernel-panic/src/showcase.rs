@@ -19,6 +19,7 @@
 //! showcase is player-controllable. No AI enemies exist; game-over is
 //! gated off so the mode runs forever until the player quits.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::{
@@ -221,8 +222,8 @@ pub fn showcase_director(
             for i in 0..missing {
                 let angle = std::f32::consts::TAU * i as f32 / missing as f32;
                 let r = RING_RADIUS + (i as f32) * RING_SPACING;
-                let rx = (cx + r * angle.cos()).clamp(0.0, world_w);
-                let rz = (cz + r * angle.sin()).clamp(0.0, world_d);
+                let rx = (cx + r * ops::cos(angle)).clamp(0.0, world_w);
+                let rz = (cz + r * ops::sin(angle)).clamp(0.0, world_d);
                 d.sites.push(hm.place(rx, rz));
             }
         }

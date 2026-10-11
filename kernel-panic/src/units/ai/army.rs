@@ -1,5 +1,6 @@
 //! Army decisions: where to push, and the fight-order the push uses.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::net::{CommandBus, NetId, NetPos, Order, SimCommand};
@@ -125,7 +126,7 @@ pub fn pick_attack_targets(
 pub fn scatter(target: Vec3, rng: &mut u32) -> Vec3 {
     let angle = next_f32(rng) * std::f32::consts::TAU;
     let amp = 40.0 + next_f32(rng) * 90.0;
-    target + Vec3::new(angle.cos() * amp, 0.0, angle.sin() * amp)
+    target + Vec3::new(ops::cos(angle) * amp, 0.0, ops::sin(angle) * amp)
 }
 
 /// Upstream's idle-constructor spread order (`KPAI_Fair.lua`
@@ -135,7 +136,7 @@ pub fn scatter(target: Vec3, rng: &mut u32) -> Vec3 {
 pub fn spread_around(center: Vec3, rng: &mut u32) -> Vec3 {
     let angle = next_f32(rng) * std::f32::consts::TAU;
     let amp = 128.0 + next_f32(rng) * 128.0;
-    center + Vec3::new(angle.cos() * amp, 0.0, angle.sin() * amp)
+    center + Vec3::new(ops::cos(angle) * amp, 0.0, ops::sin(angle) * amp)
 }
 
 /// Issue a fight order (Spring `CMD.FIGHT`): walk to `target`, but stop
@@ -264,8 +265,8 @@ mod tests {
         let mut rng = 0xD15_EA5E;
         for _ in 0..100 {
             let p = spread_around(Vec3::new(10.0, 5.0, 20.0), &mut rng);
-            assert!((p.x - 10.0).hypot(p.z - 20.0) >= 127.9);
-            assert!((p.x - 10.0).hypot(p.z - 20.0) <= 256.1);
+            assert!(ops::hypot(p.x - 10.0, p.z - 20.0) >= 127.9);
+            assert!(ops::hypot(p.x - 10.0, p.z - 20.0) <= 256.1);
             // The ring is planar; the center's height carries over.
             assert_eq!(p.y, 5.0);
         }

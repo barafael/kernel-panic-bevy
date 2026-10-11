@@ -1,0 +1,257 @@
+name: Release
+
+# Build and package the game for Linux x86_64, Windows x86_64, macOS
+# (universal: arm64 + x86_64) and the web, and attach the archives to the
+# GitHub release.
+#
+# - A published release builds its tag and uploads to it.
+# - Pushing a `v*` tag builds it and creates the release if there is none
+#   (a release created here with GITHUB_TOKEN does not re-trigger this
+#   workflow). Publishing a release from the UI with a new tag can fire
+#   both events; the per-tag concurrency group runs them one after the
+#   other and the upload overwrites (--clobber), so the result is the same.
+# - workflow_dispatch builds everything from the chosen branch and keeps the
+#   archives as workflow artifacts only; it never touches a release.
+#
+# Package layout (all platforms):
+#
+#   kernel-panic-<version>-<platform>/
+#     kernel-panic[.exe]      the game; finds `assets/` next to itself
+#                             (`paths::assets_dir`)
+#     assets/                 maps (baked .kpmap only), shaders, sounds, music,
+#                             cursors, bitmaps, unit pictures, readme.txt
+#     README.txt, original-game-license-info.txt
+#
+# The unit data (`assets/units.kpu`) is embedded in the binary and not
+# shipped separately; the .sd7/.sdz sources are replaced by their baked
+# .kpmap (the game prefers those anyway), so every platform loads the
+# same map bytes.
+on:
+  release:
+    types: [published]
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  # Bake once, ship everywhere: one set of .kpmap bytes for all packages.
+  maps:
+    name: bake maps
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: version
+        name: Version string
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            version="${{ github.event.release.tag_name }}"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="dev-${GITHUB_SHA::8}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Packaging $version"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bake
+      - uses: ./.github/actions/bake-maps
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kpmaps
+          path: kernel-panic/assets/maps/*.kpmap
+          if-no-files-found: error
+
+  native:
+    name: package (${{ matrix.platform }})
+    needs: maps
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 22.04 rather than latest: binaries built against the older
+          # glibc (2.35) run on more distributions.
+          - platform: linux-x86_64
+            os: ubuntu-22.04
+            targets: x86_64-unknown-linux-gnu
+          - platform: windows-x86_64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          # One universal binary (lipo) for Apple silicon and Intel Macs.
+          - platform: macos-universal
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.maps.outputs.version }}
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+      # Drop the symbol tables: 181 -> 111 MB on Linux. panic = "abort",
+      # so there are no unwinding backtraces to symbolize anyway.
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/lfs-music
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.platform }}
+
+      - name: Build
+        shell: bash
+        run: |
+          IFS=, read -ra targets <<< "${{ matrix.targets }}"
+          for target in "${targets[@]}"; do
+            cargo build --release --locked -p kernel-panic --target "$target"
+          done
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: kpmaps
+          path: kpmaps
+
+      - name: Package
+        shell: bash
+        run: |
+          name="kernel-panic-$VERSION-${{ matrix.platform }}"
+          pkg="package/$name"
+          mkdir -p "$pkg"
+
+          IFS=, read -ra targets <<< "${{ matrix.targets }}"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/${targets[0]}/release/kernel-panic.exe" "$pkg/"
+          elif [ ${#targets[@]} -gt 1 ]; then
+            lipo -create -output "$pkg/kernel-panic" \
+              $(for t in "${targets[@]}"; do echo "target/$t/release/kernel-panic"; done)
+            lipo -info "$pkg/kernel-panic"
+          else
+            cp "target/${targets[0]}/release/kernel-panic" "$pkg/"
+          fi
+
+          cp -R kernel-panic/assets "$pkg/assets"
+          rm -f "$pkg/assets/units.kpu" "$pkg"/assets/maps/*.sd7 "$pkg"/assets/maps/*.sdz
+          cp kpmaps/*.kpmap "$pkg/assets/maps/"
+          cp original-game-license-info.txt "$pkg/"
+          cat > "$pkg/README.txt" <<EOF
+          Kernel Panic $VERSION (${{ matrix.platform }})
+          Rust/Bevy remake of the Spring RTS game Kernel Panic.
+          https://github.com/${{ github.repository }}
+
+          Run kernel-panic (kernel-panic.exe on Windows). Keep the assets/
+          directory next to it. Passing a map name starts that map directly,
+          e.g.  kernel-panic Central_Hub
+
+          macOS: the binary is not signed. If macOS refuses to open it, run
+            xattr -dr com.apple.quarantine <this directory>
+          once, or right-click it in Finder and choose Open.
+          EOF
+
+          cd package
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z a -tzip "$name.zip" "$name" > /dev/null
+          else
+            tar -czf "$name.tar.gz" "$name"
+          fi
+          ls -l
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-${{ matrix.platform }}
+          path: |
+            package/*.zip
+            package/*.tar.gz
+          if-no-files-found: error
+
+  web:
+    name: package (web)
+    needs: maps
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.maps.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/lfs-music
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-web
+      - name: Install trunk
+        run: |
+          curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C ~/.cargo/bin
+      # Before the build: build.rs embeds the list of .kpmap files present
+      # as the web map catalog.
+      - uses: actions/download-artifact@v8
+        with:
+          name: kpmaps
+          path: kernel-panic/assets/maps
+      # Relative public URL: the site works from any directory or host.
+      - name: Build
+        run: trunk build --release --public-url ./
+      - name: Package
+        run: |
+          name="kernel-panic-$VERSION-web"
+          # The browser only ever fetches the .kpmap files; drop the source
+          # archives and the (embedded) unit bundle that copy-dir brought in.
+          rm -f dist/assets/units.kpu dist/assets/maps/*.sd7 dist/assets/maps/*.sdz
+          mkdir -p package
+          mv dist "package/$name"
+          cd package
+          zip -qr "$name.zip" "$name"
+          ls -l
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pkg-web
+          path: package/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [native, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: out
+      - name: Checksums
+        working-directory: out
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v7
+        with:
+          name: SHA256SUMS
+          path: out/SHA256SUMS.txt
+      - name: Upload to the release
+        if: github.event_name == 'release' || github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          gh release view "$TAG" > /dev/null 2>&1 \
+            || gh release create "$TAG" --verify-tag --title "$TAG" --generate-notes
+          gh release upload "$TAG" out/* --clobber

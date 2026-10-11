@@ -11,6 +11,9 @@
 //! argument) ruzstd decode timing of `<stem>.payload.zst` files produced
 //! by the zstd CLI for codec comparisons.
 
+// Dev benchmark, not part of the game (workspace clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use ruzstd::decoding::StreamingDecoder;
 use std::io::Read;
 use std::path::PathBuf;

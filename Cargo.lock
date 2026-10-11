@@ -3696,10 +3696,13 @@ version = "0.1.0"
 dependencies = [
  "better_default",
  "bevy",
+ "glam",
  "js-sys",
+ "libm",
  "postcard",
  "ruzstd",
  "serde",
+ "serde_json",
  "spring-map",
  "spring-pathfinding",
  "spring-tdf",
@@ -5502,6 +5505,7 @@ dependencies = [
  "byteorder",
  "flate2",
  "image",
+ "libm",
  "postcard",
  "proptest",
  "ruzstd",
@@ -5520,6 +5524,7 @@ dependencies = [
  "bevy",
  "byteorder",
  "clap",
+ "glam",
  "spring-map",
  "spring-tdf",
  "spring-unit-mesh",
@@ -5531,6 +5536,7 @@ dependencies = [
 name = "spring-pathfinding"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "proptest",
 ]
 
@@ -5539,6 +5545,7 @@ name = "spring-tdf"
 version = "0.1.0"
 dependencies = [
  "better_default",
+ "libm",
  "proptest",
  "serde",
  "thiserror 2.0.20",

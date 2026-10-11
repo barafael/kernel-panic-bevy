@@ -1,3 +1,5 @@
+use crate::sim::sq;
+use bevy::math::ops;
 use std::collections::VecDeque;
 
 use bevy::prelude::*;
@@ -286,8 +288,9 @@ fn empty_exit_spot(
     let (world_w, world_d) =
         heightmap.map_or((f32::INFINITY, f32::INFINITY), Heightmap::world_size);
     let in_bounds = |p: Vec3| p.x >= 0.0 && p.z >= 0.0 && p.x < world_w && p.z < world_d;
-    let on_arc =
-        |a: f32| pos + forward * (search_radius * a.cos()) + right * (search_radius * a.sin());
+    let on_arc = |a: f32| {
+        pos + forward * (search_radius * ops::cos(a)) + right * (search_radius * ops::sin(a))
+    };
     // `NoSolidsExact(testPos, unit->radius · 1.5)`: nothing's collision
     // sphere within that reach. The spatial query only trims by cell,
     // so the distance test here is the real one.
@@ -826,7 +829,7 @@ pub fn apply_bugger_off(
                 request.radius
             };
             let pos = tf.translation;
-            if flat_dist_sq(pos, request.center) >= (clearance + radius * 1.4).powi(2) {
+            if flat_dist_sq(pos, request.center) >= sq(clearance + radius * 1.4) {
                 continue;
             }
             let mut dir = (pos - request.center)

@@ -164,7 +164,7 @@ impl Units {
         Units::List(IdList::new(ids))
     }
 
-    fn list(&self) -> Option<&IdList> {
+    pub(crate) fn list(&self) -> Option<&IdList> {
         match self {
             Units::List(l) => Some(l),
             Units::Prev => None,

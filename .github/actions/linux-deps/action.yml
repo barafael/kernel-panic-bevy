@@ -1,0 +1,14 @@
+name: Linux build dependencies
+description: >
+  System libraries Bevy links against on Linux: ALSA (bevy_audio/cpal),
+  udev (gilrs gamepads), Wayland and xkbcommon (winit), plus pkg-config.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Bevy's system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -q
+        sudo apt-get install -y -q --no-install-recommends \
+          pkg-config libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev

@@ -595,6 +595,7 @@ pub fn process_command_fire(
     mut delayed_damage: ResMut<DelayedDamage>,
     mut visuals: SigTermVisuals,
     gravity: Option<Res<crate::sim::MapGravity>>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
 ) {
     let gravity = gravity.as_deref().copied().unwrap_or_default().0;
@@ -638,6 +639,14 @@ pub fn process_command_fire(
 
         if unit.0 == UnitKind::Firewall {
             apply_firewall(event.target, team.0, &protect_targets, &mut commands);
+            // `network_reflectorshield.lua:99`: `PlaySoundFile("sounds/built.wav")`.
+            if let Some(sounds) = sounds.as_deref_mut() {
+                sounds.play(
+                    crate::audio::SoundId::BUILT,
+                    crate::audio::Channel::General,
+                    None,
+                );
+            }
             commands.entity(event.attacker).insert(CommandFireCooldown {
                 remaining: FIREWALL_COOLDOWN,
             });
@@ -750,6 +759,13 @@ pub fn process_command_fire(
                 radius: ability.weapon.params().radius,
                 ceg_name: ceg.to_string(),
             });
+            // The blast is a `CGameHelper::Explosion` of the ability weapon.
+            if let (Some(sounds), Some(id)) = (
+                sounds.as_deref_mut(),
+                ability.weapon.weapon(weapons.known()),
+            ) {
+                sounds.explosion(weapons.by_id(id), event.target);
+            }
         }
         commands.spawn(AreaDenialZone::new(
             ability.weapon,
@@ -826,6 +842,7 @@ pub fn tick_nx_casts(
     unit_registry: Res<UnitRegistry>,
     pieces: crate::units::combat::PieceLookup,
     mut pending_attacks: ResMut<crate::units::weapon_fx::PendingAttacks>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -907,6 +924,9 @@ pub fn tick_nx_casts(
                 }),
                 arc_from: None,
             });
+        if let Some(sounds) = sounds.as_deref_mut() {
+            sounds.weapon_fired(weapons.by_id(nx), muzzle.pos);
+        }
         let Some(ability) = ability_for(unit.0) else {
             continue;
         };

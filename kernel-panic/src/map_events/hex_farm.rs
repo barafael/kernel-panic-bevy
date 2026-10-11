@@ -27,6 +27,7 @@
 //!
 //! Everything is inert unless the map loader inserted [`HexFarmState`].
 
+use crate::sim::sq;
 use std::collections::{HashMap, HashSet};
 
 use bevy::camera::primitives::Aabb;
@@ -210,8 +211,7 @@ pub fn install(
     let team_colored = farm.team_colored;
     let material = atlas_material(images.add(atlas), materials);
     let first = &layout.hexes[0].corners;
-    let side_hex =
-        ((first[1][0] - first[0][0]).powi(2) + (first[1][2] - first[0][2]).powi(2)).sqrt();
+    let side_hex = (sq(first[1][0] - first[0][0]) + sq(first[1][2] - first[0][2])).sqrt();
     // The meshes are rebuilt in place, so their bounds would go stale:
     // opt out of culling (the gadget draws them unculled too). The
     // handle is only reserved: `set_mesh` inserts the first non-empty

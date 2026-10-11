@@ -13,6 +13,7 @@
 //! `cargo test -p kernel-panic net::lockstep -- --nocapture` prints the
 //! numbers (stalls, frame sizes, bandwidth).
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::*;
@@ -236,7 +237,10 @@ fn script(world: &mut World) -> Vec<(u32, u8, SimCommand)> {
             0,
             SimCommand::Order {
                 units: Units::of(bits.clone()),
-                order: Order::Move(p(1000.0 + 300.0 * a.cos(), 1000.0 + 300.0 * a.sin())),
+                order: Order::Move(p(
+                    1000.0 + 300.0 * ops::cos(a),
+                    1000.0 + 300.0 * ops::sin(a),
+                )),
                 queue: true,
             },
         ));

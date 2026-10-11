@@ -1,6 +1,7 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
 //! projectile arcs, despawn at end of life.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::batch::FxQuadBatches;
@@ -92,8 +93,11 @@ pub(super) fn tick_weapon_fx(
     mut draw: RibbonDrawCtx,
     volume_ctx: VolumeHitCtx,
     mut ceg_ctx: CegTrailCtx,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
 ) {
+    let mut scratch_sounds = crate::audio::SoundQueue::default();
+    let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
     let dt = time.delta_secs();
     // Every ribbon and the build-sparkle billboards need the camera's
     // world position; resolve it once per frame.
@@ -155,7 +159,7 @@ pub(super) fn tick_weapon_fx(
         // still reads as a smooth flash rather than a hard pop.
         let elapsed_frames = secs_to_frames((beam.max_lifetime - beam.lifetime).max(0.0));
         let intensity = if beam.decay < 1.0 {
-            beam.decay.powf(elapsed_frames)
+            ops::powf(beam.decay, elapsed_frames)
         } else {
             1.0
         };
@@ -265,6 +269,7 @@ pub(super) fn tick_weapon_fx(
                 &weapon_registry,
                 &mut damage_queue,
                 &mut pending_explosions,
+                sounds,
                 &mut commands,
             );
         } else if let Some(hit) = hit_meta
@@ -285,6 +290,7 @@ pub(super) fn tick_weapon_fx(
                 &weapon_registry,
                 &mut damage_queue,
                 &mut pending_explosions,
+                sounds,
                 &mut commands,
             );
         } else if hit_meta.is_some()
@@ -301,6 +307,7 @@ pub(super) fn tick_weapon_fx(
                 &weapon_registry,
                 &mut damage_queue,
                 &mut pending_explosions,
+                sounds,
                 &mut commands,
             );
         }
@@ -418,6 +425,7 @@ pub(super) fn tick_weapon_fx(
                 &weapon_registry,
                 &mut damage_queue,
                 &mut pending_explosions,
+                sounds,
                 &mut commands,
             );
             despawn_projectile(entity, proj, &mut commands);
@@ -510,6 +518,7 @@ pub(super) fn tick_weapon_fx(
                 &weapon_registry,
                 &mut damage_queue,
                 &mut pending_explosions,
+                sounds,
                 &mut commands,
             );
             intercepted = true;
@@ -531,6 +540,7 @@ pub(super) fn tick_weapon_fx(
                 &weapon_registry,
                 &mut damage_queue,
                 &mut pending_explosions,
+                sounds,
                 &mut commands,
             );
             intercepted = true;
@@ -545,6 +555,7 @@ pub(super) fn tick_weapon_fx(
                     &weapon_registry,
                     &mut damage_queue,
                     &mut pending_explosions,
+                    sounds,
                     &mut commands,
                 );
             }
@@ -776,6 +787,7 @@ fn trigger_delayed_hit(
     weapon_registry: &WeaponRegistry,
     damage_queue: &mut DamageQueue,
     pending_explosions: &mut PendingExplosions,
+    sounds: &mut crate::audio::SoundQueue,
     commands: &mut Commands,
 ) {
     let Ok(hit) = delayed_hits.get(entity) else {
@@ -806,6 +818,8 @@ fn trigger_delayed_hit(
         ));
     }
     let weapon_def = weapon_registry.by_id(hit.weapon);
+    // `CGameHelper::Explosion` plays `soundhit` where the shot lands.
+    sounds.explosion(weapon_def, impact_pos);
     let (rgb, radius, ceg_name) = (
         weapon_def.rgb_color,
         weapon_def.area_of_effect,
