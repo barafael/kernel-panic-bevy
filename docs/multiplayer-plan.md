@@ -1,0 +1,182 @@
+# Multiplayer plan
+
+Up to 4v4 (8 players), native and web players in the same match.
+
+Based on the October 2026 investigation (experiment branches listed at the end):
+the original's netcode (Spring/Recoil + Kernel Panic), the sibling projects
+`../cake` and `../omdurman`, a headless determinism/bandwidth harness, a lockstep
+command-layer prototype and a matchbox WebRTC benchmark.
+
+## Decision
+
+**Deterministic lockstep, host-sequenced, over matchbox WebRTC** — the original's
+model (CGameServer: relay + frame clock, every client simulates) in cake's shape
+(the lowest-PeerId peer sequences every command; everyone, host included, applies
+commands only from the host's turn stream).
+
+- Only commands travel: ~250–430 B/s payload per player, ~3–4 KB/s per client
+  through the host including WebRTC overhead, independent of unit count.
+- The AI runs inside the sim on every peer (as KP's synced Lua AIs did): zero
+  traffic, survives any player dropping.
+- Replays are free (setup + seed + command log); the per-tick state hash doubles
+  as desync detection and as the cross-platform determinism test.
+- Rejected: host- or server-authoritative state replication. Measured 13–66 KB/s
+  per client at 30 Hz (extrapolated ~340 KB/s for 1600 units), 0.16–0.6 MB/s host
+  upload, plus weapon/impact events and COB piece animation the clients would have
+  to reproduce; WebRTC under 0.5–1 % loss sustains only ~120–500 KB/s per client.
+
+## Will different hardware compute the same results?
+
+**Not proven yet. It is achievable, and Milestone 0 proves it before any netcode is
+built.** What is known:
+
+| Source of difference | Status | Remedy |
+|---|---|---|
+| `+ − × ÷ sqrt`, conversions | IEEE-754 correctly rounded on x86_64, aarch64 and wasm32 — bit-identical on every CPU | none needed |
+| Fused multiply-add | rustc never contracts `a*b+c` on its own (no fast-math); only explicit `mul_add` fuses | forbid `mul_add` and `fast-math` features in sim code |
+| Transcendentals (`sin cos tan atan2 asin acos powf exp ln hypot`) | **Differ**: measured glibc vs wasm: sin/cos 1.2 %, atan2 16 %, powf 9 %, hypot 12.5 % of inputs. Native uses each OS's libm (glibc, macOS, MSVC all different); wasm uses Rust's bundled musl-derived libm — identical in every browser on every CPU | pure-Rust `libm` everywhere: Bevy's `libm` feature (→ `bevy_math/libm` → `glam/libm`, and `bevy::math::ops`); clippy `disallowed-methods` for `f32::sin` & co. in sim code |
+| SIMD code paths (glam SSE2 vs NEON vs wasm simd128 vs scalar) | **Differ**: different summation order; measured glam slerp 48 %, `Vec3A::normalize` 29 % between targets, and `target-cpu=native` alone changes 20 % of slerp results | glam `scalar-math` feature (one code path everywhere); no `target-cpu`/`target-feature` flags for release builds |
+| NaN payload bits | nondeterministic on wasm | never hash or branch on NaN bits; assert no NaN in the state hash |
+| Denormals / FPU modes | Rust never sets flush-to-zero; a driver or library could on its thread | debug assertion of MXCSR at the start of each sim tick (x86_64) |
+| HashMap iteration (RandomState), query order, entity ids, wall clock, multithreaded executor | found and partly fixed in X-sim / X-commands (see M0) | ordered collections, canonical sorts, sim ids, tick counter, single-threaded sim executor |
+
+Web-to-web is already identical across hardware (same wasm, same bundled libm,
+strict IEEE in every engine). Native-to-native across operating systems and native-
+to-web need the remedies above. Proof: the golden-replay matrix in M0.4. If some
+subsystem still diverges after that, it moves to fixed-point (cake's approach) —
+a decision gate, not the default.
+
+## Milestones
+
+Estimates are focused-work rough guesses.
+
+### M0 — Determinism foundation and proof (gate) · ~2 weeks
+
+0.1 **Harvest the experiments.** Bring in X-sim's headless harness, state hash,
+    and six determinism fixes, and X-commands' `NetId`. Unify `SimSerial` (X-sim)
+    and `NetId` (X-commands) into one sim id assigned in spawn order, used for
+    slow-update phases, RNG seeds, AI ordering and network references.
+
+0.2 **Remove the remaining nondeterminism found by X-sim:**
+    - the match seed comes from the match setup (host-chosen), never per-launch entropy;
+    - ~10 system `Local`s acting as RNGs/frame counters → match-scoped resources
+      (fixes the rematch divergence; the attract demo must not leak state into a match);
+    - sim time = integer tick counter (`sim_frame()` and the AI's `elapsed_secs()`
+      currently count from app start, as f32);
+    - std `HashMap`s holding sim state → `BTreeMap` / fixed-hasher maps;
+    - Hex Farm tower ownership out of the frame loop;
+    - the remaining 8 ambiguous system pairs in `FixedUpdate`;
+    - run `FixedUpdate` on the single-threaded executor (it is also faster at
+      these unit counts: 1.12 vs 1.69 ms median at ~400 units), or root-cause the
+      executor divergence at tick 7188;
+    - `AutoHold::initial` depending on `LocalTeam`; anything else the harness finds
+      when `LocalTeam` varies between peers.
+
+0.3 **Deterministic math.** Enable Bevy's `libm` feature and glam `scalar-math`;
+    route every transcendental in sim code (kernel-panic sim modules,
+    spring-pathfinding; offline bakers excepted) through `bevy::math::ops`/`libm`;
+    enforce with `clippy.toml` `disallowed-methods`; audit `mul_add` and build flags
+    (Trunk/wasm-opt flags, `.cargo/config.toml`). Measure the sim cost change.
+
+0.4 **Golden-replay matrix.** A headless `replay` test/binary takes
+    (setup, seed, command log), runs it, and prints the per-tick hash trail.
+    Record golden logs from headless 4v4 and FFA games (≥18 000 ticks), then
+    compare trails on:
+    - Linux x86_64 (glibc and musl), Windows x86_64, macOS arm64 — GitHub Actions
+      matrix (new CI workflow; Intel and AMD runners give CPU variety);
+    - wasm32 in Node, and in headless Chromium, Firefox and WebKit (wasm-bindgen-test
+      or Playwright).
+
+    **Gate:** identical trails everywhere → M1. Otherwise bisect with the per-tick
+    hash, fix or move the subsystem to fixed-point.
+
+### M1 — Lockstep core · ~1.5 weeks
+
+- Merge the command layer (`net::{SimCommand, CommandFrame, CommandBus}`, one
+  apply system at the head of `FixedUpdate`, postcard with gap-coded ids and
+  1/8-elmo positions). Route the rest: dev tools, game speed/pause, resign.
+- Validate commands at apply time (ownership, unit alive, ally), as the original
+  validated on the receiving clients.
+- **Seats and alliances.** 4v4 needs ally teams: `is_friendly` by alliance,
+  shared victory/defeat, KP's FixedAllies. AI seats come from the match setup
+  (`AiSeats`), not "every team except the local one".
+- **Decouple the sim from local UI state.** Local defeat must not stop the sim
+  (today it flips `GameState`, which gates the gameplay chain); the losing player
+  keeps simulating as a spectator.
+- **Tick driver.** `FixedUpdate` advances only when `CommandBus::ready()` for the
+  next tick; adaptive input delay (start at 3 ticks = 100 ms, follow the measured
+  RTT/jitter); the host gets the same delay as everyone (no host advantage); a
+  peer that falls behind runs extra ticks to catch up (cake's TARGET_BACKLOG).
+- **Desync detection.** Every peer sends its state hash every 30 ticks; the host
+  compares (Spring's "dictatorship"), announces a desync, and all peers write a
+  state dump for the hash bisect. Policy: pause and show the error (Spring keeps
+  playing broken; we stop).
+- In-process multi-peer tests (several headless apps, simulated latency/loss) —
+  the X-commands lockstep test grown to the full sim.
+
+### M2 — Transport and lobby · ~1–1.5 weeks
+
+- Port cake-net (~500 lines: `Sequencer`, `TurnBuffer`, `HashLog`, `RoomId`,
+  envelope, zero-length guard) and its lobby pattern (host election = lowest
+  PeerId, roster, `Start`; single player is a solo host on the same code path).
+- matchbox fork at rev `27b5e50` (Bevy 0.20, socket hardening), as cake/omdurman.
+- **Channels** (X-transport findings):
+  - turns on the **unreliable** channel, every packet repeating the last 5 turns
+    (webrtc-rs SCTP has a 1 s minimum retransmission timeout, so a lost packet on
+    a reliable channel freezes lockstep for seconds); a reliable channel for
+    lobby/control, hashes, chat and gap fills;
+  - message size ≤ 16 KiB, fragment above (65 536 bytes exactly kills the
+    connection; larger messages vanish silently);
+  - bounded send queues and our own flow control (matchbox has none);
+  - `try_update_peers()` only (`update_peers()` panics once the loop has ended).
+- **Signaling:** omdurman's server `wss://omdurman-matchbox.fly.dev`, rooms
+  `kp-<room>` (namespaced like cake's `cake-<room>`); room code in the URL fragment
+  on the web, an argument/env natively; overridable at build time (`MATCHBOX_SERVER`).
+  That server is full-mesh: peers also connect guest↔guest, which we ignore
+  (only host links carry traffic; a failed guest↔guest link is harmless). It
+  auto-stops when idle, so the first join may take a few seconds.
+- **Match start handshake:** map, seed, options, seats, and a compatibility hash
+  (sim version + `units.kpu` hash + map hash); mismatches are refused, as Spring
+  refused mismatched versions and archives.
+- **TURN-ready, not deployed:** one `IceConfig` (list of `RtcIceServerConfig`:
+  urls, username, credential) read from build-time env / a settings field and
+  passed to `WebRtcSocketBuilder::ice_server`; default STUN only (Google, as
+  cake/omdurman). Adding coturn later is configuration, not code.
+- Localhost matchbox tests with netem loss/latency (X-transport's `unshare -rn`
+  setup) in CI-able form.
+
+### M3 — Robustness · ~1.5–2 weeks
+
+- **Speed control** (Spring's LagProtection): peers report sim load once a second;
+  the host sets game speed from the median; the web build is the likely slowest
+  simulator — measure wasm tick cost at 4v4 first.
+- **Browser tabs:** a hidden tab throttles timers to ~1 Hz. On `visibilitychange`
+  warn, then treat the peer as dropped after N seconds. Investigate running the
+  sim in a Web Worker so it keeps ticking in the background.
+- **Drops:** a dropped player's units stay (as in Spring); allies may take them.
+  Host leaving ends the match for now (host migration later).
+- **Rejoin:** replay the command log from tick 0 at max speed (Spring's approach).
+  ~54 000 ticks for 30 minutes ≈ 80 s natively at ~1.5 ms/tick; snapshot rejoin is
+  a later optimisation.
+- Spectators (receive the turn stream, never send), replay files and a replay
+  viewer.
+
+### Later
+
+TURN deployment, host migration, snapshot rejoin, reconnect polish (omdurman's
+findings: stable player keys, retransmit until echoed, uid dedup). Lockstep cannot
+prevent map hacks (every peer holds full state), as in the original.
+
+## Experiment branches to harvest
+
+| Branch | Contents |
+|---|---|
+| `worktree-agent-a54879b76d9ed827f` (X-sim) | headless harness (`kernel-panic/src/headless/`), state hash, 6 determinism fixes, float probe, `net-experiments/x-sim.md` |
+| `worktree-agent-a00e3ba806652b7c0` (X-commands) | `kernel-panic/src/net/` command layer, all inputs + AI routed, in-process lockstep test, `net-experiments/x-commands.md` |
+| `worktree-agent-a2b197a1c62028710` (X-transport) | `net-experiments/transport-bench/` matchbox benchmark, netem scripts, `net-experiments/x-transport.md` |
+
+## Open questions
+
+- Determinism remedies cost sim speed (scalar glam, software libm); M0.3 measures it.
+- macOS and Windows libm were not testable locally; the M0.4 CI matrix covers them.
+- No browser was in the WebRTC benchmark; M2 adds a browser↔native test.
