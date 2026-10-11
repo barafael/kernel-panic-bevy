@@ -122,6 +122,7 @@ impl Plugin for UnitsPlugin {
                 // Also runs in `AppState::Menu`: the attract-mode demo
                 // behind the menu is an all-AI skirmish.
                 ai::ai_brain
+                    .after(crate::net::SimCommandSet)
                     .before(GameplaySet::Produce)
                     .run_if(in_state(game_over::GameState::Playing)),
             )

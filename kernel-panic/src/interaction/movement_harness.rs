@@ -31,6 +31,9 @@ const WIGGLE_MIN: f32 = 0.5 * std::f32::consts::PI / 180.0;
 
 pub(crate) struct Harness {
     pub world: World,
+    /// Runs before the motion chain each step (the command bus apply in
+    /// `net`'s lockstep tests).
+    pub pre_schedule: Schedule,
     schedule: Schedule,
     pub tick: u32,
     /// Spring footprints (`FootprintX × 16` elmos square) of the
@@ -63,6 +66,7 @@ impl Harness {
         schedule.add_systems(super::unit_motion_systems());
         Self {
             world,
+            pre_schedule: Schedule::default(),
             schedule,
             tick: 0,
             structures: Vec::new(),
@@ -145,6 +149,7 @@ impl Harness {
         self.world
             .resource_mut::<Time>()
             .advance_by(Duration::from_secs_f64(DT));
+        self.pre_schedule.run(&mut self.world);
         self.schedule.run(&mut self.world);
         self.tick += 1;
     }

@@ -40,7 +40,7 @@ use crate::units::mechanics::command_fire::{
 };
 use crate::units::player::LocalTeam;
 
-use super::command_panel::activation::{ActivateCommand, edit_queue};
+use super::command_panel::activation::{ActivateCommand, factory_op};
 use super::command_panel::commands::{CmdDesc, CmdId, UnitCmdState, unit_commands};
 use super::previews::UnitPreviews;
 use super::tooltip::{BarTip, HoverTip};
@@ -251,7 +251,7 @@ fn bar_mouse_input(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     mut state: ResMut<BarState>,
-    mut producers: Query<&mut Producer>,
+    mut net: crate::net::Issue,
     selected: Query<(Entity, &UnitType), With<Selected>>,
     mut out: MessageWriter<ActivateCommand>,
     mut commands: Commands,
@@ -317,14 +317,18 @@ fn bar_mouse_input(
                     .iter()
                     .find(|e| Some(e.entity) == state.opened)
                 && let Some(&kind) = e.options().get(j)
-                && let Ok(mut producer) = producers.get_mut(e.entity)
+                && let Some(factory) = net.id(e.entity)
             {
                 let msg = ActivateCommand::click(
                     CmdId::Produce(kind),
                     button == MouseButton::Right,
                     &keys,
                 );
-                edit_queue(&mut producer, kind, &msg);
+                net.issue(crate::net::SimCommand::Factory {
+                    factories: crate::net::Units::of([factory]),
+                    kind,
+                    op: factory_op(&msg),
+                });
             }
         }
     }
