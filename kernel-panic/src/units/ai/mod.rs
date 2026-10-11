@@ -241,7 +241,8 @@ type UnitQueryData = (
     Has<Protected>,
     // A cast in progress: not ready for another one.
     (Has<NxCast>, Has<PendingCommandFire>),
-    Option<&'static NetId>,
+    // The unit id: names it in the AI's commands, orders the snapshot.
+    &'static NetId,
 );
 
 /// Every AI order goes through the command bus as its team's player
@@ -272,7 +273,7 @@ pub fn ai_brain(
     packet_buffer: Res<PacketBuffer>,
     spatial: Res<SpatialIndex>,
     units: Query<UnitQueryData, Without<Dying>>,
-    producers: Query<(&TeamId, &UnitType, &Producer, Option<&NetId>), Without<Dying>>,
+    producers: Query<(&TeamId, &UnitType, &Producer, &NetId), Without<Dying>>,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
     ai_seats: Option<Res<AiSeats>>,
@@ -393,7 +394,7 @@ fn snapshot(
     // ECS's query order, which depends on archetype history the frame
     // loop also shapes (`headless` determinism experiments).
     let mut sorted: Vec<_> = units.iter().collect();
-    sorted.sort_unstable_by_key(|item| item.12.copied().unwrap_or_default());
+    sorted.sort_unstable_by_key(|item| *item.12);
     for (
         e,
         team,
@@ -414,7 +415,7 @@ fn snapshot(
         let casting = nx_cast || pending_cast;
         let snap = Snap {
             entity: e,
-            net: net.copied().unwrap_or_default(),
+            net: *net,
             team: team.0,
             kind,
             pos: gtf.translation(),
@@ -470,7 +471,7 @@ fn run_factories(
     team: u8,
     s: &AiScratch,
     ticker: &mut AiTicker,
-    producers: &Query<(&TeamId, &UnitType, &Producer, Option<&NetId>), Without<Dying>>,
+    producers: &Query<(&TeamId, &UnitType, &Producer, &NetId), Without<Dying>>,
     lack: &mut Lack,
     force: u32,
     buffer: u32,
@@ -478,9 +479,9 @@ fn run_factories(
 ) {
     // `NetId` order (see `snapshot`): each factory draws dice.
     let mut own: Vec<_> = producers.iter().filter(|(t, ..)| t.0 == team).collect();
-    own.sort_unstable_by_key(|(.., net)| net.copied().unwrap_or_default());
+    own.sort_unstable_by_key(|(.., net)| **net);
     for (_, ut, producer, net) in own {
-        let factory = net.copied().unwrap_or_default();
+        let factory = *net;
         let order = |orders: &mut CommandBus, kind: UnitKind, n: u16| {
             orders.issue_as(
                 team,

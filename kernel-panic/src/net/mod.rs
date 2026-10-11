@@ -39,11 +39,23 @@ use crate::map_loading::MatchScopeAppExt;
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 
-/// A unit's network identity: the per-match spawn counter value it got
-/// when its `UnitType` was first inserted. Deterministic as long as the
-/// sim spawns units in the same order everywhere (it must anyway).
-/// `0` = unassigned; a non-zero id inserted explicitly (a client
-/// mirroring a server's ids) is kept.
+/// A unit's id: the per-match spawn counter value it got when its
+/// `UnitType` was first inserted (a required component of `UnitType`,
+/// numbered by the `on_add` hook) — Spring's unit id. Deterministic as
+/// long as the sim spawns units in the same order everywhere (it must
+/// anyway): command buffers apply in schedule order, so the hooks fire
+/// in the same order on every peer.
+///
+/// Anything the sim derives from "the unit's id" uses this, never the
+/// `Entity`, whose index is shared with every UI / FX entity the frame
+/// loop spawns and so differs between machines: network references in
+/// [`SimCommand`]s, the `SlowUpdate` phase ([`rephase_ground_mover`]),
+/// the `HoverAir` RNG seed, the AI's canonical iteration order and the
+/// headless state hash.
+///
+/// `0` = unassigned (a world without a [`NetIdAllocator`], i.e. unit
+/// tests); a non-zero id inserted explicitly (a client mirroring a
+/// server's ids) is kept.
 #[derive(
     Component,
     Clone,
@@ -104,12 +116,13 @@ fn on_add_net_id(mut world: DeferredWorld, ctx: HookContext) {
     rephase(&mut world, entity, id);
 }
 
-/// `GroundMover::seeded` staggers the `SlowUpdate` phase by the
-/// *entity index* — which differs between machines (every render / UI
-/// entity a machine spawned shifts it), so two lockstep peers ran their
+/// The `SlowUpdate` phase of a ground mover is its `NetId` modulo the
+/// slow-update rate, Spring's stagger by unit id. It used to be the
+/// *entity index*, which differs between machines (every render / UI
+/// entity a machine spawned shifts it): two lockstep peers ran their
 /// slow updates on different ticks and drifted apart within ~7 ticks of
-/// the first group move. Spring staggers by unit id; the `NetId` is
-/// ours. Whichever of the two components lands second fixes the phase.
+/// the first group move. Whichever of the two components lands second
+/// sets the phase (`spawn_unit` adds the mover after the `UnitType`).
 pub(crate) fn rephase_ground_mover(mut world: DeferredWorld, ctx: HookContext) {
     if let Some(id) = world.get::<NetId>(ctx.entity).copied() {
         rephase(&mut world, ctx.entity, id);

@@ -54,27 +54,6 @@ pub struct SpawnContext<'w, 's> {
     pub model_cache: ResMut<'w, S3OModelCache>,
     pub unit_registry: Res<'w, UnitRegistry>,
     pub weapon_registry: Res<'w, crate::units::content::weapons::WeaponRegistry>,
-    pub serials: ResMut<'w, SimSerials>,
-}
-
-/// A unit's sim-side serial number, in spawn order within the match
-/// (Spring's unit id). Anything the sim derives from "the unit's id" —
-/// `SlowUpdate` phase, per-unit RNG seeds — must use this, never the
-/// `Entity`: entity indices are shared with every UI / visual entity
-/// the frame loop spawns, so they depend on the frame rate and the HUD
-/// (`headless` determinism experiments).
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SimSerial(pub u32);
-
-/// Next [`SimSerial`]. Match-scoped (restarts at every match).
-#[derive(Resource, Default)]
-pub struct SimSerials(u32);
-
-impl SimSerials {
-    pub fn next(&mut self) -> SimSerial {
-        self.0 = self.0.wrapping_add(1);
-        SimSerial(self.0)
-    }
 }
 
 /// Cached piece-index lookup for animated factories. Set once when a
@@ -445,7 +424,6 @@ pub fn spawn_unit_facing(
     // value so the body — which threads `&mut Assets<…>` /
     // `&mut S3OModelCache` / `&UnitRegistry` to helper functions — can
     // hold them simultaneously (disjoint-field borrow rules).
-    let serial = ctx.serials.next();
     let commands = &mut ctx.commands;
     let meshes = &mut *ctx.meshes;
     let materials = &mut *ctx.materials;
@@ -500,19 +478,13 @@ pub fn spawn_unit_facing(
             UnitStats::from_registry(kind, unit_registry, radius, mid_y),
             transform,
             Visibility::default(),
-            serial,
         ))
         .id();
 
     commands.entity(unit_entity).insert((
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
-        crate::interaction::movement::ground_mover_components(
-            kind,
-            unit_registry,
-            serial.0,
-            &transform,
-        ),
+        crate::interaction::movement::ground_mover_components(kind, unit_registry, &transform),
         crate::interaction::movement::GroundLift(ground_lift),
         // §1.8 first slice: cache a typed collision volume so
         // projectile / shield / per-shot-miss systems can do

@@ -1155,7 +1155,6 @@ mod tests {
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<crate::units::assets::meshes::S3OModelCache>();
-        world.init_resource::<crate::units::lifecycle::spawning::SimSerials>();
         world.init_resource::<crate::units::content::weapons::WeaponRegistry>();
         world.insert_resource(Time::<()>::default());
         world

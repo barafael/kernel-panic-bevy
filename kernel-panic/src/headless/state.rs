@@ -1,6 +1,6 @@
-//! What the harness reads out of the sim each tick: a canonical,
-//! entity-id-independent state hash, an entity census, and the
-//! replicated-state records the snapshot encoders size.
+//! What the harness reads out of the sim each tick: a canonical state
+//! hash keyed by [`NetId`] (never by `Entity`, whose index differs
+//! between machines), an entity census, and per-unit records.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -8,6 +8,7 @@ use bevy::ecs::component::ComponentId;
 use bevy::prelude::*;
 
 use crate::interaction::movement::{AttackMoveActive, CommandQueue, GuardTarget, MoveTarget};
+use crate::net::NetId;
 use crate::rendering::interpolation::SimPose;
 use crate::units::combat::{AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
 use crate::units::components::{Health, TeamId, UnitType};
@@ -117,7 +118,13 @@ pub struct Capture {
 }
 
 type UnitQ = (
-    (Entity, &'static UnitType, &'static TeamId, &'static SimPose),
+    (
+        Entity,
+        &'static NetId,
+        &'static UnitType,
+        &'static TeamId,
+        &'static SimPose,
+    ),
     (
         Option<&'static Health>,
         Has<Dying>,
@@ -191,20 +198,15 @@ pub fn capture(world: &mut World) -> Capture {
     // --- units -----------------------------------------------------------
     let mut q = world.query::<UnitQ>();
     let mut units = Vec::new();
-    // Entity → (kind, pose bits) so references hash id-independently.
-    let mut key_of: HashMap<Entity, [u8; 14]> = HashMap::new();
-    for ((e, ut, _, pose), _, _) in q.iter(world) {
-        let mut k = [0u8; 14];
-        k[0..2].copy_from_slice(&(ut.0 as u16).to_le_bytes());
-        k[2..14].copy_from_slice(&bits3(pose.sim().translation));
-        key_of.insert(e, k);
-    }
-    let reference = |e: Entity| key_of.get(&e).copied().unwrap_or([0xff; 14]);
+    // References to other units hash as their `NetId` (`u32::MAX`: not
+    // a live unit).
+    let id_of: HashMap<Entity, NetId> = q.iter(world).map(|((e, id, ..), ..)| (e, *id)).collect();
+    let reference = |e: Entity| id_of.get(&e).map_or(u32::MAX, |id| id.0).to_le_bytes();
     let mut pos_recs: Vec<Vec<u8>> = Vec::new();
     let mut hp_recs: Vec<Vec<u8>> = Vec::new();
     let mut order_recs: Vec<Vec<u8>> = Vec::new();
     for (
-        (e, ut, team, pose),
+        (e, id, ut, team, pose),
         (health, dying, emerging, cloaked, stunned),
         (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
     ) in q.iter(world)
@@ -239,9 +241,14 @@ pub fn capture(world: &mut World) -> Capture {
             build,
         });
 
-        let me = reference(e);
+        // Every record leads with the unit's id: sorted, the records are
+        // in `NetId` order, and a unit that spawned under another id
+        // (a different spawn order) changes the hash.
+        let me = id.0.to_le_bytes();
         let mut p = me.to_vec();
+        p.extend((ut.0 as u16).to_le_bytes());
         p.push(team.0);
+        p.extend(bits3(tf.translation));
         for c in tf.rotation.to_array() {
             p.extend(c.to_bits().to_le_bytes());
         }
@@ -358,20 +365,22 @@ pub fn capture(world: &mut World) -> Capture {
 }
 
 /// Readable, sorted per-unit state (for diffing two runs at the tick
-/// they diverge): kind, team, pose, health, flags and orders.
+/// they diverge), in `NetId` order: kind, team, pose, health, flags
+/// and orders.
 pub fn describe(world: &mut World) -> Vec<String> {
     let mut q = world.query::<UnitQ>();
     let mut out: Vec<String> = q
         .iter(world)
         .map(
             |(
-                (e, ut, team, pose),
+                (e, id, ut, team, pose),
                 (health, dying, emerging, _, stunned),
                 (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
             )| {
                 let tf = pose.sim();
                 format!(
-                    "{:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} | {e:?}",
+                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} | {e:?}",
+                    id.0,
                     ut.0,
                     team.0,
                     tf.translation,
@@ -394,8 +403,9 @@ pub fn describe(world: &mut World) -> Vec<String> {
         )
         .collect();
     out.sort();
-    // Query iteration order, as unit serials (deterministic ids).
-    let mut sq = world.query::<(Entity, &crate::units::lifecycle::spawning::SimSerial)>();
+    // Query iteration order, as unit ids (deterministic), with each
+    // unit's archetype: what canonical sorts guard against.
+    let mut sq = world.query::<(Entity, &NetId)>();
     let order: Vec<String> = sq
         .iter(world)
         .map(|(e, s)| {

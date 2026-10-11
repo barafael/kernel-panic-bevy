@@ -32,7 +32,6 @@ pub struct MoveTarget(pub Vec3);
 pub(crate) fn ground_mover_components(
     kind: UnitKind,
     registry: &UnitRegistry,
-    serial: u32,
     transform: &Transform,
 ) -> impl Bundle {
     GroundMover::new(
@@ -40,7 +39,7 @@ pub(crate) fn ground_mover_components(
         registry,
         &UnitStats::from_registry(kind, registry, 0.0, 0.0),
     )
-    .seeded(serial, transform)
+    .seeded(transform)
 }
 
 /// Marks an active attack-move order. While it is present AND the unit
@@ -1765,7 +1764,6 @@ mod cross_map_tests {
             world.entity_mut(unit).insert(ground_mover_components(
                 UnitKind::Bit,
                 &registry,
-                unit.index_u32(),
                 &transform,
             ));
 

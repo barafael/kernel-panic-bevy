@@ -95,7 +95,6 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<bookkeeping::TeamUnitCounts>()
             .init_match_resource::<cloak::VisibilityRefreshTimer>()
             .init_match_resource::<spatial::SpatialIndex>()
-            .init_match_resource::<spawning::SimSerials>()
             .init_match_resource::<game_over::GameOverClock>()
             .init_match_resource::<crate::game_setup::GameOverDismissed>()
             .add_message::<command_fire::CommandFireEvent>()
