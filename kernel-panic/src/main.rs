@@ -8,7 +8,6 @@ mod interaction;
 mod map_events;
 mod map_loading;
 mod net;
-mod netprobe;
 mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 mod profile;

@@ -25,7 +25,6 @@
 //! seats, entered through `AppState::InGame`, loaded by `map_loading`
 //! from `assets/maps` (a baked `.kpmap` when present).
 
-pub mod encode;
 pub mod state;
 #[cfg(test)]
 mod tests;
@@ -143,8 +142,8 @@ fn log_hash(world: &mut World) {
         sim: c.sim_hash,
         fx: c.fx_hash,
         parts: c.part_hashes,
-        units: c.units.len() as u32,
-        projectiles: c.projectiles.len() as u32,
+        units: c.units as u32,
+        projectiles: c.projectiles as u32,
     });
 }
 

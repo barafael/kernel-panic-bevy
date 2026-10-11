@@ -1,5 +1,6 @@
-//! The network experiments. All `#[ignore]`d (they load real maps and
-//! run thousands of ticks); run one at a time, release for timings:
+//! The determinism experiments and sim measurements. All `#[ignore]`d
+//! (they load real maps and run thousands of ticks); run one at a
+//! time, release for timings:
 //!
 //! ```text
 //! cargo test --release -p kernel-panic headless::tests::determinism -- --ignored --nocapture
@@ -7,17 +8,20 @@
 //!
 //! Knobs (environment): `KP_NET_MAP` (default `Speed_Balls_16_Way`),
 //! `KP_NET_TEAMS` × `KP_NET_PER_TEAM` (default 2 × 4 = a 4v4),
-//! `KP_NET_SEED`, `KP_NET_TICKS`, `KP_NET_EXEC=single|multi`,
-//! `KP_NET_PACING=uneven` (second run of `determinism` renders uneven
-//! frames: 0–3 ticks each), `KP_NET_TRACE=<file>` (per-tick hashes of
-//! the first run, for cross-process diffs), `KP_NET_CSV=<file>`
-//! (per-tick numbers of `bandwidth`).
+//! `KP_NET_SEED`, `KP_NET_TICKS`, `KP_NET_DIFFICULTY`,
+//! `KP_NET_EXEC=single|multi`, `KP_NET_PACING=uneven|zeros|multi|even`
+//! (pacing of the second `determinism` run), `KP_NET_ID_SHIFT=<n>`
+//! (shift the second run's entity ids), `KP_NET_RUNS=1` (first run
+//! only), `KP_NET_TRACE=<file>` (per-tick hashes of the first run, for
+//! cross-process diffs), `KP_NET_DUMP=<ticks>` + `KP_NET_DUMP_DIR`
+//! (readable unit dumps), `KP_NET_CSV=<file>` (per-tick numbers of
+//! `match_stats`), `KP_NET_WARMUP` / `KP_NET_RESET_FIXED` (`rematch`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 
-use super::encode::{self, NetIds, QState};
 use super::*;
+use crate::net::CommandBus;
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name)
@@ -187,42 +191,27 @@ fn pct(v: &mut [f64], p: f64) -> f64 {
     v[i]
 }
 
-/// Per-update size samples of one encoding at one rate.
-#[derive(Default)]
-struct Series(Vec<f64>);
-
-impl Series {
-    fn push(&mut self, n: usize) {
-        self.0.push(n as f64);
-    }
-    fn summary(&self, hz: f64) -> String {
-        let mut v = self.0.clone();
-        let med = pct(&mut v, 0.5);
-        let p95 = pct(&mut v, 0.95);
-        let max = pct(&mut v, 1.0);
-        format!(
-            "median {:>7.0} B  p95 {:>7.0} B  max {:>7.0} B | {:>6.1} / {:>6.1} KB/s (median / p95 x {hz} Hz)",
-            med,
-            p95,
-            max,
-            med * hz / 1000.0,
-            p95 * hz / 1000.0,
-        )
-    }
+/// The variant name of a command (`Order`, `PerUnit`, `Factory`, …).
+fn command_name(cmd: &crate::net::SimCommand) -> String {
+    let dbg = format!("{cmd:?}");
+    dbg.split([' ', '{', '('])
+        .next()
+        .unwrap_or_default()
+        .to_string()
 }
 
-/// A long AI match: entity counts, snapshot sizes (full / delta, raw /
-/// quantized / compressed, at 30, 15 and 10 Hz), AI command volume and
-/// sim cost per tick.
+/// A long AI match: entity counts, the AI's command volume (the frames
+/// the command bus applies, sized as postcard `CommandFrame`s — what a
+/// host-run AI would send) and the sim cost per tick.
 #[test]
 #[ignore = "runs a long match; --ignored, --release for timings"]
-fn bandwidth() {
+fn match_stats() {
     let scenario = scenario_from_env();
     let ticks: u64 = env("KP_NET_TICKS", 30 * 60 * 8);
     let players = scenario.seats.len();
     let teams: HashSet<u8> = scenario.seats.iter().map(|s| s.team).collect();
     eprintln!(
-        "bandwidth: {} seats ({} teams) on {}, {:?}, {} ticks ({:.1} game min)",
+        "match_stats: {} seats ({} teams) on {}, {:?}, {} ticks ({:.1} game min)",
         players,
         teams.len(),
         scenario.map,
@@ -236,36 +225,25 @@ fn bandwidth() {
     if let Some(f) = csv.as_mut() {
         writeln!(
             f,
-            "tick,sim_ms,frame_ms,units,projectiles,entities,full_raw,full_q,full_q_zstd,\
-             d30_units,d30_units_zstd,d30_all,d30_all_zstd,d30_all_lz4,cmds,cmd_bytes,census"
+            "tick,sim_ms,frame_ms,units,projectiles,entities,cmds,frame_bytes,census"
         )
         .unwrap();
     }
 
-    crate::netprobe::imp::start();
     let mut h = SimHarness::new(scenario);
-    let mut ids = NetIds::default();
-    let mut proj_ids = NetIds::default();
-    // Baselines per update rate (every 1, 2, 3 ticks).
-    let rates = [(1u64, 30.0), (2, 15.0), (3, 10.0)];
-    let mut bases: Vec<QState> = vec![QState::default(); 3];
-    let mut series: BTreeMap<String, Series> = BTreeMap::new();
+    // The bus is match-scoped: log from the match's own bus.
+    h.world_mut().resource_mut::<CommandBus>().log = Some(Vec::new());
     let mut sim_ms: Vec<f64> = Vec::new();
     let mut frame_ms: Vec<f64> = Vec::new();
     let mut peak: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut peak_units = (0usize, 0u64);
     let mut peak_entities = 0usize;
-    // Commands.
     let mut cmd_total = 0usize;
-    let mut cmd_bytes_total = 0usize;
-    let mut cmd_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut cmd_tick_max_team = (0usize, 0u64);
-    let mut cmd_tick_max_bytes_team = 0usize;
-    let mut cmd_ticks_nonempty = 0usize;
-    let mut cmd_per_team: HashMap<u8, usize> = HashMap::new();
-    let mut prev_fx: HashMap<&'static str, HashSet<Entity>> = HashMap::new();
-    let mut fx_spawns: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut fx_spawn_tick_max = 0usize;
+    let mut bytes_total = 0usize;
+    let mut cmd_by_kind: BTreeMap<String, usize> = BTreeMap::new();
+    let mut frame_max = (0usize, 0usize, 0u64);
+    let mut ticks_nonempty = 0usize;
+    let mut cmd_per_team: BTreeMap<u8, usize> = BTreeMap::new();
     let mut units_series: Vec<(u64, usize, usize, f64)> = Vec::new();
 
     while h.tick < ticks {
@@ -276,146 +254,52 @@ fn bandwidth() {
         frame_ms.push(h.last_frame.as_secs_f64() * 1000.0);
         let tick = h.tick;
         let c = state::capture(h.world_mut());
-
-        // --- census -------------------------------------------------
         for (cat, n) in &c.census {
             let p = peak.entry(cat).or_default();
             *p = (*p).max(*n);
         }
-        if c.units.len() > peak_units.0 {
-            peak_units = (c.units.len(), tick);
+        if c.units > peak_units.0 {
+            peak_units = (c.units, tick);
         }
         peak_entities = peak_entities.max(c.total_entities);
-        // New visual-effect entities this tick = fire / explosion
-        // events a client would need.
-        let mut spawned_this_tick = 0;
-        for cat in [
-            "projectile",
-            "beam",
-            "laser_bolt",
-            "arc",
-            "impact",
-            "ground_flash",
-        ] {
-            let now: HashSet<Entity> = c
-                .category_entities
-                .get(cat)
-                .map(|v| v.iter().copied().collect())
-                .unwrap_or_default();
-            let prev = prev_fx.entry(cat).or_default();
-            let new = now.difference(prev).count();
-            *fx_spawns.entry(cat).or_default() += new;
-            spawned_this_tick += new;
-            *prev = now;
-        }
-        fx_spawn_tick_max = fx_spawn_tick_max.max(spawned_this_tick);
 
-        // --- snapshots ----------------------------------------------
-        let live: HashSet<Entity> = c.units.iter().map(|u| u.entity).collect();
-        ids.forget_missing(&live);
-        let live_p: HashSet<Entity> = c.projectiles.iter().map(|p| p.entity).collect();
-        proj_ids.forget_missing(&live_p);
-        let q = QState::from_capture(&c, &mut ids, &mut proj_ids);
-        let full_raw = encode::full_raw(&c, true);
-        let full_q = encode::full_quant(&q, true);
-        let full_q_units = encode::full_quant(&q, false);
-        let full_q_zstd = encode::zstd_len(&full_q);
-        series
-            .entry("full raw f32 (units+proj)".into())
-            .or_default()
-            .push(full_raw.len());
-        series
-            .entry("full quant (units+proj)".into())
-            .or_default()
-            .push(full_q.len());
-        series
-            .entry("full quant (units only)".into())
-            .or_default()
-            .push(full_q_units.len());
-        series
-            .entry("full quant+zstd (units+proj)".into())
-            .or_default()
-            .push(full_q_zstd);
-        series
-            .entry("full quant+lz4 (units+proj)".into())
-            .or_default()
-            .push(encode::lz4_len(&full_q));
-        let mut d30 = (0, 0, 0, 0, 0);
-        for (k, (every, hz)) in rates.iter().enumerate() {
-            if tick % every != 0 {
-                continue;
+        // --- commands: the frames applied this tick -------------------
+        let frames = h
+            .world_mut()
+            .resource_mut::<CommandBus>()
+            .log
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let (mut cmds_tick, mut bytes_tick) = (0, 0);
+        for frame in &frames {
+            let bytes = frame.encode().len();
+            cmds_tick += frame.commands.len();
+            bytes_tick += bytes;
+            if frame.commands.len() > frame_max.0 {
+                frame_max = (frame.commands.len(), bytes, tick);
             }
-            let du = encode::delta_quant(&bases[k], &q, false);
-            let da = encode::delta_quant(&bases[k], &q, true);
-            let (du_z, da_z, da_l) = (
-                encode::zstd_len(&du),
-                encode::zstd_len(&da),
-                encode::lz4_len(&da),
-            );
-            series
-                .entry(format!("{hz:>2} Hz delta quant (units)"))
-                .or_default()
-                .push(du.len());
-            series
-                .entry(format!("{hz:>2} Hz delta quant+zstd (units)"))
-                .or_default()
-                .push(du_z);
-            series
-                .entry(format!("{hz:>2} Hz delta quant (units+proj)"))
-                .or_default()
-                .push(da.len());
-            series
-                .entry(format!("{hz:>2} Hz delta quant+zstd (units+proj)"))
-                .or_default()
-                .push(da_z);
-            series
-                .entry(format!("{hz:>2} Hz delta quant+lz4 (units+proj)"))
-                .or_default()
-                .push(da_l);
-            if k == 0 {
-                d30 = (du.len(), du_z, da.len(), da_z, da_l);
+            *cmd_per_team.entry(frame.player).or_default() += frame.commands.len();
+            for cmd in &frame.commands {
+                *cmd_by_kind.entry(command_name(cmd)).or_default() += 1;
             }
-            bases[k] = q.clone();
         }
-
-        // --- commands -----------------------------------------------
-        let cmds = crate::netprobe::imp::drain();
-        let mut per_team_tick: HashMap<u8, (usize, usize)> = HashMap::new();
-        let mut bytes_tick = 0;
-        for cmd in &cmds {
-            let size = encode::command_size(cmd);
-            let e = per_team_tick.entry(cmd.team).or_default();
-            e.0 += 1;
-            e.1 += size;
-            bytes_tick += size;
-            *cmd_by_kind.entry(encode::kind_name(cmd.kind)).or_default() += 1;
-            *cmd_per_team.entry(cmd.team).or_default() += 1;
+        if cmds_tick > 0 {
+            ticks_nonempty += 1;
         }
-        for (_, (n, b)) in &per_team_tick {
-            if *n > cmd_tick_max_team.0 {
-                cmd_tick_max_team = (*n, tick);
-            }
-            cmd_tick_max_bytes_team = cmd_tick_max_bytes_team.max(b + encode::COMMAND_HEADER);
-        }
-        if !cmds.is_empty() {
-            cmd_ticks_nonempty += 1;
-        }
-        cmd_total += cmds.len();
-        cmd_bytes_total += bytes_tick + per_team_tick.len() * encode::COMMAND_HEADER;
+        cmd_total += cmds_tick;
+        bytes_total += bytes_tick;
 
         if tick % 300 == 0 {
             let s = sim_ms.last().copied().unwrap_or(0.0);
-            units_series.push((tick, c.units.len(), c.projectiles.len(), s));
+            units_series.push((tick, c.units, c.projectiles, s));
             eprintln!(
-                "  t={:>5} ({:>4.1} min) units {:>4} proj {:>4} entities {:>6} | full_q {:>6} B, d30 {:>6} B ({:>5} zstd) | sim {:>6.2} ms frame {:>6.2} ms",
+                "  t={:>5} ({:>4.1} min) units {:>4} proj {:>4} entities {:>6} | sim {:>6.2} ms frame {:>6.2} ms",
                 tick,
                 tick as f64 / 1800.0,
-                c.units.len(),
-                c.projectiles.len(),
+                c.units,
+                c.projectiles,
                 c.total_entities,
-                full_q.len(),
-                d30.2,
-                d30.3,
                 s,
                 h.last_frame.as_secs_f64() * 1000.0
             );
@@ -424,29 +308,20 @@ fn bandwidth() {
             let census: Vec<String> = c.census.iter().map(|(k, v)| format!("{k}={v}")).collect();
             writeln!(
                 f,
-                "{},{:.3},{:.3},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                "{},{:.3},{:.3},{},{},{},{},{},{}",
                 tick,
                 sim_ms.last().copied().unwrap_or(0.0),
                 h.last_frame.as_secs_f64() * 1000.0,
-                c.units.len(),
-                c.projectiles.len(),
+                c.units,
+                c.projectiles,
                 c.total_entities,
-                full_raw.len(),
-                full_q.len(),
-                full_q_zstd,
-                d30.0,
-                d30.1,
-                d30.2,
-                d30.3,
-                d30.4,
-                cmds.len(),
+                cmds_tick,
                 bytes_tick,
                 census.join(" ")
             )
             .unwrap();
         }
     }
-    crate::netprobe::imp::stop();
 
     // --- report -------------------------------------------------------
     let secs = ticks as f64 / 30.0;
@@ -461,23 +336,7 @@ fn bandwidth() {
     for (cat, n) in &peak {
         eprintln!("  {cat:>15}: peak {n}");
     }
-    eprintln!("\n=== fx spawn events (fire / impact events a client needs) ===");
-    for (cat, n) in &fx_spawns {
-        eprintln!("  {cat:>15}: {n} total, {:.1}/s", *n as f64 / secs);
-    }
-    eprintln!("  per-tick max (all kinds): {fx_spawn_tick_max}");
-    eprintln!("\n=== snapshot sizes per update ===");
-    for (name, s) in &series {
-        let hz = if name.starts_with("15") {
-            15.0
-        } else if name.starts_with("10") {
-            10.0
-        } else {
-            30.0
-        };
-        eprintln!("  {name:<38} {}", s.summary(hz));
-    }
-    eprintln!("\n=== AI commands (lockstep input) ===");
+    eprintln!("\n=== AI commands (applied CommandFrames, postcard) ===");
     eprintln!(
         "total {cmd_total} over {secs:.0} s = {:.2}/s all players, {:.2}/s per team, {:.2}/s per seat",
         cmd_total as f64 / secs,
@@ -485,28 +344,25 @@ fn bandwidth() {
         cmd_total as f64 / secs / players as f64
     );
     eprintln!(
-        "bytes {} = {:.1} B/s all players ({:.1} B/s per team); ticks with any command: {} of {}",
-        cmd_bytes_total,
-        cmd_bytes_total as f64 / secs,
-        cmd_bytes_total as f64 / secs / teams.len() as f64,
-        cmd_ticks_nonempty,
+        "frame bytes {} = {:.1} B/s all players ({:.1} B/s per team); ticks with any command: {} of {}",
+        bytes_total,
+        bytes_total as f64 / secs,
+        bytes_total as f64 / secs / teams.len() as f64,
+        ticks_nonempty,
         ticks
     );
     eprintln!(
-        "per-tick max for one team: {} commands (tick {}), {} B incl. header",
-        cmd_tick_max_team.0, cmd_tick_max_team.1, cmd_tick_max_bytes_team
+        "largest frame: {} commands, {} B (tick {})",
+        frame_max.0, frame_max.1, frame_max.2
     );
     for (k, n) in &cmd_by_kind {
         eprintln!("  {k:>16}: {n}");
     }
-    let mut per_team: Vec<_> = cmd_per_team.into_iter().collect();
-    per_team.sort();
-    eprintln!("  per team: {per_team:?}");
+    eprintln!("  per team: {cmd_per_team:?}");
     eprintln!("\n=== sim cost (FixedFirst..FixedLast wall time) ===");
     let late_from = sim_ms.len().saturating_sub(30 * 120);
     let mut all = sim_ms.clone();
     let mut late = sim_ms[late_from..].to_vec();
-    let mut frames = frame_ms.clone();
     eprintln!(
         "all ticks: median {:.2} ms p95 {:.2} ms p99 {:.2} ms max {:.2} ms",
         pct(&mut all, 0.5),
@@ -523,41 +379,14 @@ fn bandwidth() {
     );
     eprintln!(
         "whole headless frame: median {:.2} ms p95 {:.2} ms",
-        pct(&mut frames, 0.5),
-        pct(&mut frames, 0.95)
+        pct(&mut frame_ms, 0.5),
+        pct(&mut frame_ms, 0.95)
     );
-    // Units over time (every 10 s).
     eprintln!("\n=== units over time (every 10 s): tick units proj sim_ms ===");
     for (t, u, p, s) in units_series {
         eprint!("{t}:{u}/{p}/{s:.1} ");
     }
     eprintln!();
-}
-
-/// Start-position counts of the shipped maps (which maps seat 8).
-#[test]
-#[ignore = "reads every map; --ignored"]
-fn map_seats() {
-    let dir = crate::paths::from_project_root("kernel-panic/assets/maps");
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .map(|e| e.path())
-        .collect();
-    entries.sort();
-    for p in entries {
-        if p.extension().is_some_and(|e| e == "kpmap") {
-            let bytes = std::fs::read(&p).unwrap();
-            match spring_map::baked::read_baked_map(&bytes) {
-                Ok(m) => eprintln!(
-                    "{:<40} start positions {:?}",
-                    p.file_name().unwrap().to_string_lossy(),
-                    m.map_info.as_ref().map(|i| i.start_positions.len())
-                ),
-                Err(e) => eprintln!("{}: {e}", p.display()),
-            }
-        }
-    }
 }
 
 /// Boots a 4v4 and runs ten seconds: the harness works headless.
@@ -571,12 +400,9 @@ fn smoke() {
     let c = state::capture(h.world_mut());
     eprintln!(
         "tick {} units {} census {:?} hash {:016x}",
-        h.tick,
-        c.units.len(),
-        c.census,
-        c.sim_hash
+        h.tick, c.units, c.census, c.sim_hash
     );
-    assert!(c.units.len() >= 8);
+    assert!(c.units >= 8);
 }
 
 /// The game's systems outside the fixed sim (they run once per render
@@ -643,35 +469,6 @@ fn rematch() {
                 "  {name:>9}: identical for all {} ticks",
                 a.len().min(b.len())
             ),
-        }
-    }
-}
-
-/// Component names on a unit root after a few seconds: which of them a
-/// frame (not a tick) system inserts decides the unit's archetype moves.
-#[test]
-#[ignore = "boots the app; --ignored"]
-fn unit_components() {
-    let mut h = SimHarness::new(scenario_from_env());
-    for _ in 0..600 {
-        h.step();
-    }
-    let world = h.world_mut();
-    let mut q = world.query_filtered::<Entity, With<crate::units::components::UnitType>>();
-    let units: Vec<Entity> = q.iter(world).collect();
-    let mut seen = HashSet::new();
-    for e in units {
-        let names: Vec<String> = world
-            .inspect_entity(e)
-            .unwrap()
-            .map(|(_, info)| info.name().to_string())
-            .collect();
-        let kind = world
-            .get::<crate::units::components::UnitType>(e)
-            .unwrap()
-            .0;
-        if seen.insert(format!("{kind:?}")) {
-            eprintln!("{kind:?}: {}", names.join(", "));
         }
     }
 }

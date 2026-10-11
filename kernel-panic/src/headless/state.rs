@@ -1,6 +1,6 @@
 //! What the harness reads out of the sim each tick: a canonical state
 //! hash keyed by [`NetId`] (never by `Entity`, whose index differs
-//! between machines), an entity census, and per-unit records.
+//! between machines), an entity census, and readable per-unit dumps.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -72,40 +72,14 @@ const SIM_CATEGORIES: &[&str] = &[
     "area_denial",
 ];
 
-/// One unit as a client needs it to draw it, plus the sim-only order
-/// state the hash covers.
-#[derive(Clone, Copy, Debug)]
-pub struct UnitRec {
-    pub entity: Entity,
-    pub kind: u16,
-    pub team: u8,
-    pub pos: Vec3,
-    pub rot: Quat,
-    pub health: f32,
-    pub max_health: f32,
-    /// bit 0 dying, 1 emerging/being built, 2 cloaked, 3 stunned,
-    /// 4 moving (has a move target), 5 fight order, 6 constructing,
-    /// 7 has attack / guard order.
-    pub flags: u8,
-    /// Build / emerge progress 0..1 (1 when done).
-    pub build: f32,
-}
-
-/// A projectile (sim-moved, carries its hit).
-#[derive(Clone, Copy, Debug)]
-pub struct ProjRec {
-    pub entity: Entity,
-    pub pos: Vec3,
-}
-
 /// Everything read from one tick.
 pub struct Capture {
-    pub units: Vec<UnitRec>,
-    pub projectiles: Vec<ProjRec>,
+    /// Live units (anything with a `UnitType`).
+    pub units: usize,
+    /// Sim-moved projectiles.
+    pub projectiles: usize,
     /// Entity count per category ("other" for the rest).
     pub census: BTreeMap<&'static str, usize>,
-    /// Entities per category (for spawn-event counting).
-    pub category_entities: HashMap<&'static str, Vec<Entity>>,
     /// Hash of the sim state: units (pose, health, flags, orders,
     /// queues), projectiles, and sim-entity counts.
     pub sim_hash: u64,
@@ -174,7 +148,7 @@ pub fn capture(world: &mut World) -> Capture {
     // --- census by archetype -------------------------------------------
     let cats = category_ids(world);
     let mut census: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut category_entities: HashMap<&'static str, Vec<Entity>> = HashMap::new();
+    let mut projectile_entities: Vec<Entity> = Vec::new();
     let mut total_entities = 0;
     for archetype in world.archetypes().iter() {
         if archetype.is_empty() {
@@ -187,17 +161,14 @@ pub fn capture(world: &mut World) -> Capture {
             .min_by_key(|(_, _, rank)| *rank)
             .map_or("other", |(_, c, _)| *c);
         *census.entry(cat).or_default() += archetype.len() as usize;
-        if cat != "other" && cat != "piece" {
-            category_entities
-                .entry(cat)
-                .or_default()
-                .extend(archetype.entities().iter().map(|e| e.id()));
+        if cat == "projectile" {
+            projectile_entities.extend(archetype.entities().iter().map(|e| e.id()));
         }
     }
 
     // --- units -----------------------------------------------------------
     let mut q = world.query::<UnitQ>();
-    let mut units = Vec::new();
+    let mut units = 0;
     // References to other units hash as their `NetId` (`u32::MAX`: not
     // a live unit).
     let id_of: HashMap<Entity, NetId> = q.iter(world).map(|((e, id, ..), ..)| (e, *id)).collect();
@@ -206,13 +177,17 @@ pub fn capture(world: &mut World) -> Capture {
     let mut hp_recs: Vec<Vec<u8>> = Vec::new();
     let mut order_recs: Vec<Vec<u8>> = Vec::new();
     for (
-        (e, id, ut, team, pose),
+        (_, id, ut, team, pose),
         (health, dying, emerging, cloaked, stunned),
         (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
     ) in q.iter(world)
     {
+        units += 1;
         let tf = pose.sim();
         let (hp, max) = health.map_or((0.0, 0.0), |h| (h.current, h.max));
+        // bit 0 dying, 1 emerging / being built, 2 cloaked, 3 stunned,
+        // 4 moving (has a move target), 5 fight order, 6 constructing,
+        // 7 attack / guard order.
         let mut flags = 0u8;
         flags |= dying as u8;
         flags |= (emerging.is_some() as u8) << 1;
@@ -222,25 +197,6 @@ pub fn capture(world: &mut World) -> Capture {
         flags |= (fight as u8) << 5;
         flags |= (constructing.is_some() as u8) << 6;
         flags |= ((attack.is_some() || guard.is_some() || attack_ground.is_some()) as u8) << 7;
-        let build = emerging.map_or(1.0, |em| {
-            if em.total > 0.0 {
-                (1.0 - em.remaining / em.total).clamp(0.0, 1.0)
-            } else {
-                1.0
-            }
-        });
-        units.push(UnitRec {
-            entity: e,
-            kind: ut.0 as u16,
-            team: team.0,
-            pos: tf.translation,
-            rot: tf.rotation,
-            health: hp,
-            max_health: max,
-            flags,
-            build,
-        });
-
         // Every record leads with the unit's id: sorted, the records are
         // in `NetId` order, and a unit that spawned under another id
         // (a different spawn order) changes the hash.
@@ -308,18 +264,15 @@ pub fn capture(world: &mut World) -> Capture {
     }
 
     // --- projectiles -----------------------------------------------------
-    let mut projectiles = Vec::new();
+    let projectiles = projectile_entities.len();
     let mut proj_recs: Vec<Vec<u8>> = Vec::new();
-    if let Some(list) = category_entities.get("projectile") {
-        for &e in list {
-            let pos = world
-                .get::<SimPose>(e)
-                .map(|p| p.sim().translation)
-                .or_else(|| world.get::<Transform>(e).map(|t| t.translation))
-                .unwrap_or_default();
-            projectiles.push(ProjRec { entity: e, pos });
-            proj_recs.push(bits3(pos).to_vec());
-        }
+    for e in projectile_entities {
+        let pos = world
+            .get::<SimPose>(e)
+            .map(|p| p.sim().translation)
+            .or_else(|| world.get::<Transform>(e).map(|t| t.translation))
+            .unwrap_or_default();
+        proj_recs.push(bits3(pos).to_vec());
     }
 
     let hash_sorted = |mut recs: Vec<Vec<u8>>| {
@@ -356,7 +309,6 @@ pub fn capture(world: &mut World) -> Capture {
         units,
         projectiles,
         census,
-        category_entities,
         sim_hash: sim.finish(),
         fx_hash: fx.finish(),
         part_hashes,
