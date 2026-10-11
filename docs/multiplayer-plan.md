@@ -33,11 +33,11 @@ built.** What is known:
 | Source of difference | Status | Remedy |
 |---|---|---|
 | `+ − × ÷ sqrt`, conversions | IEEE-754 correctly rounded on x86_64, aarch64 and wasm32 — bit-identical on every CPU | none needed |
-| Fused multiply-add | rustc never contracts `a*b+c` on its own (no fast-math); only explicit `mul_add` fuses | forbid `mul_add` and `fast-math` features in sim code |
-| Transcendentals (`sin cos tan atan2 asin acos powf exp ln hypot`) | **Differ**: measured glibc vs wasm: sin/cos 1.2 %, atan2 16 %, powf 9 %, hypot 12.5 % of inputs. Native uses each OS's libm (glibc, macOS, MSVC all different); wasm uses Rust's bundled musl-derived libm — identical in every browser on every CPU | pure-Rust `libm` everywhere: Bevy's `libm` feature (→ `bevy_math/libm` → `glam/libm`, and `bevy::math::ops`); clippy `disallowed-methods` for `f32::sin` & co. in sim code |
-| SIMD code paths (glam SSE2 vs NEON vs wasm simd128 vs scalar) | **Differ**: different summation order; measured glam slerp 48 %, `Vec3A::normalize` 29 % between targets, and `target-cpu=native` alone changes 20 % of slerp results | glam `scalar-math` feature (one code path everywhere); no `target-cpu`/`target-feature` flags for release builds |
+| Fused multiply-add | rustc never contracts `a*b+c` on its own (no fast-math); only explicit `mul_add` fuses | **Done (M0.3):** `mul_add` banned by `clippy.toml`; no fast-math or contraction flags anywhere |
+| Transcendentals (`sin cos tan atan2 asin acos powf exp ln hypot`) | **Differ**: measured glibc vs wasm: sin/cos 1.2 %, atan2 16 %, powf 9 %, hypot 12.5 % of inputs. Native uses each OS's libm (glibc, macOS, MSVC all different); wasm uses Rust's bundled musl-derived libm — identical in every browser on every CPU | pure-Rust `libm` everywhere: Bevy's `libm` feature (→ `bevy_math/libm` → `glam/libm`, and `bevy::math::ops`); clippy `disallowed-methods` for `f32::sin` & co. in sim code. **Done (M0.3):** probe shows 0 differing bits across glibc, musl, wasm32 (Node, wasm-opt), an MSVC build |
+| SIMD code paths (glam SSE2 vs NEON vs wasm simd128 vs scalar) | **Differ**: different summation order; measured glam slerp 48 %, `Vec3A::normalize` 29 % between targets, and `target-cpu=native` alone changes 20 % of slerp results | glam `scalar-math` feature (one code path everywhere); no `target-cpu`/`target-feature` flags for release builds. **Done (M0.3):** 0 differing bits, even with `target-cpu=native` |
 | NaN payload bits | nondeterministic on wasm | never hash or branch on NaN bits; assert no NaN in the state hash |
-| Denormals / FPU modes | Rust never sets flush-to-zero; a driver or library could on its thread | debug assertion of MXCSR at the start of each sim tick (x86_64) |
+| Denormals / FPU modes | Rust never sets flush-to-zero; a driver or library could on its thread | debug assertion of MXCSR at the start of each sim tick (x86_64) — **done (M0.3)**, plus FPCR on arm64 |
 | HashMap iteration (RandomState), query order, entity ids, wall clock, multithreaded executor | found and partly fixed in X-sim / X-commands (see M0) | ordered collections, canonical sorts, sim ids, tick counter, single-threaded sim executor |
 
 Web-to-web is already identical across hardware (same wasm, same bundled libm,
@@ -77,6 +77,10 @@ Estimates are focused-work rough guesses.
     spring-pathfinding; offline bakers excepted) through `bevy::math::ops`/`libm`;
     enforce with `clippy.toml` `disallowed-methods`; audit `mul_add` and build flags
     (Trunk/wasm-opt flags, `.cargo/config.toml`). Measure the sim cost change.
+    **Done** — `net-experiments/m0-deterministic-math.md`: 182 call sites converted,
+    `clippy.toml` enforcement, flag audit (no risky flags; wasm-opt is float-safe),
+    `net-experiments/m0-floatprobe` (0 differing bits on every target available
+    locally), no measurable sim cost change.
 
 0.4 **Golden-replay matrix.** A headless `replay` test/binary takes
     (setup, seed, command log), runs it, and prints the per-tick hash trail.
@@ -182,6 +186,8 @@ prevent map hacks (every peer holds full state), as in the original.
 
 ## Open questions
 
-- Determinism remedies cost sim speed (scalar glam, software libm); M0.3 measures it.
+- ~~Determinism remedies cost sim speed (scalar glam, software libm).~~ M0.3: no
+  measurable change in 4v4 and 8-AI FFA headless games (within ±10 % noise;
+  `net-experiments/m0-deterministic-math.md`).
 - macOS and Windows libm were not testable locally; the M0.4 CI matrix covers them.
 - No browser was in the WebRTC benchmark; M2 adds a browser↔native test.

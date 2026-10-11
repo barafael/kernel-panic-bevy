@@ -14,6 +14,7 @@
 //! plays at game speed however slowly the capture runs. Not compiled
 //! for wasm (no disk, no processes).
 
+use bevy::math::ops;
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::Duration;
@@ -191,8 +192,8 @@ fn run_recorder(
                 let Recorder { path, glide, .. } = rec.as_mut();
                 state.focus = glide.advance(path, state.focus, dt);
                 state.yaw = 0.3 + ORBIT_SPEED * secs;
-                state.pitch = 0.66 + 0.05 * (secs * 0.1).sin();
-                state.distance = 1150.0 + 150.0 * (secs * 0.08).sin();
+                state.pitch = 0.66 + 0.05 * ops::sin(secs * 0.1);
+                state.distance = 1150.0 + 150.0 * ops::sin(secs * 0.08);
             }
             commands
                 .spawn(Screenshot::primary_window())

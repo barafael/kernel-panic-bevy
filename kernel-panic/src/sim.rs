@@ -10,6 +10,7 @@
 //! Headings follow Spring's `GetHeadingFromVector(dx, dz)` convention:
 //! 0 faces +Z, +π/2 faces +X.
 
+use bevy::math::ops;
 use std::f32::consts::{PI, TAU};
 
 use bevy::math::{Vec2, Vec3};
@@ -126,7 +127,7 @@ impl Heading {
             (0..NUM_HEADINGS)
                 .map(|a| {
                     let ang = (a - NUM_HEADINGS / 2) as f32 * TAU / NUM_HEADINGS as f32;
-                    Vec2::new(ang.sin(), ang.cos())
+                    Vec2::new(ops::sin(ang), ops::cos(ang))
                 })
                 .collect()
         });
@@ -171,9 +172,19 @@ pub const fn secs_to_frames(secs: f32) -> f32 {
     secs * GAME_SPEED
 }
 
-/// Unit facing (x, z) for a heading.
+/// `x * x`: the deterministic spelling of `x.powi(2)`, whose precision
+/// std leaves unspecified (banned in `clippy.toml`). Bit-identical to
+/// what `powi(2)` compiles to today.
+#[inline]
+pub const fn sq(x: f32) -> f32 {
+    x * x
+}
+
+/// Unit facing (x, z) for a heading. `ops::sin`/`ops::cos` rather than
+/// the std methods: the sim's trigonometry must round the same on every
+/// target (`clippy.toml`).
 pub fn dir_of(heading: f32) -> Vec2 {
-    Vec2::new(heading.sin(), heading.cos())
+    Vec2::new(ops::sin(heading), ops::cos(heading))
 }
 
 /// Level 3D facing (y = 0) for a heading — [`dir_of`] on the XZ plane.
@@ -185,7 +196,7 @@ pub fn dir3_of(heading: f32) -> Vec3 {
 /// Heading of an (x, z) direction (`GetHeadingFromVector`). For a 3D
 /// vector pass `v.xz()`.
 pub fn heading_of(v: Vec2) -> f32 {
-    v.x.atan2(v.y)
+    ops::atan2(v.x, v.y)
 }
 
 /// Shortest absolute angular distance between two angles, in `[0, π]`.
@@ -194,9 +205,101 @@ pub fn angle_delta(a: f32, b: f32) -> f32 {
     d.min(TAU - d)
 }
 
+/// Debug builds: assert at the start of every sim tick that the CPU's
+/// floating-point mode is still the IEEE default the whole deterministic
+/// math plan assumes: round-to-nearest-even, denormals neither flushed
+/// to zero on output (FTZ) nor read as zero on input (DAZ). Rust never
+/// changes these, but a driver, audio library or injected overlay can on
+/// the thread it runs on, and a desync from that is invisible
+/// otherwise. Upstream checks the same at the top of every
+/// `CGame::SimFrame` (`rts/Game/Game.cpp:1684` →
+/// `good_fpu_control_registers`, `rts/System/Sync/FPUCheck.cpp`, whose
+/// accepted MXCSR values all have FZ, DAZ and rounding bits clear).
+///
+/// Checks only the thread running `FixedFirst`; one register read, so
+/// it costs nothing measurable. Release builds and wasm32 (which has no
+/// float modes at all) get an empty system.
+pub fn assert_float_env() {
+    #[cfg(all(debug_assertions, target_arch = "x86_64"))]
+    {
+        let mut mxcsr: u32 = 0;
+        // SAFETY: `stmxcsr` only stores the 32-bit MXCSR register into
+        // the pointed-to local; SSE is baseline on x86_64.
+        unsafe {
+            std::arch::asm!(
+                "stmxcsr [{}]",
+                in(reg) &mut mxcsr,
+                options(nostack, preserves_flags)
+            );
+        }
+        // Bit 15 FTZ, bits 13-14 rounding control (00 = nearest), bit 6 DAZ.
+        const FTZ: u32 = 1 << 15;
+        const ROUNDING: u32 = 0b11 << 13;
+        const DAZ: u32 = 1 << 6;
+        debug_assert_eq!(
+            mxcsr & (FTZ | ROUNDING | DAZ),
+            0,
+            "MXCSR {mxcsr:#06x}: FTZ/DAZ or a non-nearest rounding mode is set; \
+             the sim would desync from other clients"
+        );
+    }
+    #[cfg(all(debug_assertions, target_arch = "aarch64"))]
+    {
+        let fpcr: u64;
+        // SAFETY: `mrs` only copies FPCR into a register.
+        unsafe {
+            std::arch::asm!("mrs {}, fpcr", out(reg) fpcr, options(nomem, nostack, preserves_flags));
+        }
+        // Bit 24 FZ, bits 22-23 RMode (00 = nearest), bit 19 FZ16.
+        const FZ: u64 = 1 << 24;
+        const RMODE: u64 = 0b11 << 22;
+        const FZ16: u64 = 1 << 19;
+        debug_assert_eq!(
+            fpcr & (FZ | RMODE | FZ16),
+            0,
+            "FPCR {fpcr:#x}: flush-to-zero or a non-nearest rounding mode is set; \
+             the sim would desync from other clients"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Guards the build configuration lockstep depends on: `ops` and
+    /// glam really route through the pure-Rust `libm` (bevy's `libm`
+    /// feature), and glam really is scalar (`scalar-math`). Dropping
+    /// either feature makes this fail on glibc, where the platform
+    /// `powf`/`atan2`/`sinf` differ from libm on 1-16 % of inputs.
+    #[test]
+    fn deterministic_math_is_configured() {
+        use bevy::math::{Quat, Vec4};
+        // scalar-math gives Vec4 and Quat native (4-byte) alignment
+        // instead of the 16 bytes of the SSE2/NEON/simd128 versions.
+        assert_eq!(std::mem::align_of::<Vec4>(), 4, "glam scalar-math is off");
+        assert_eq!(std::mem::align_of::<Quat>(), 4, "glam scalar-math is off");
+        let mut s = 1u32;
+        for _ in 0..20_000 {
+            let a = crate::rng::next_signed(&mut s) * 12.0;
+            let b = crate::rng::next_signed(&mut s) * 2000.0;
+            let p = crate::rng::next_f32(&mut s);
+            assert_eq!(ops::sin(a).to_bits(), libm::sinf(a).to_bits());
+            assert_eq!(ops::atan2(a, b).to_bits(), libm::atan2f(a, b).to_bits());
+            assert_eq!(
+                ops::powf(p, b.abs() * 0.03).to_bits(),
+                libm::powf(p, b.abs() * 0.03).to_bits()
+            );
+            // glam's own trigonometry (`libm` feature): from_rotation_y
+            // is (0, sin(a/2), 0, cos(a/2)).
+            let q = Quat::from_rotation_y(a);
+            let (sin, cos) = libm::sincosf(a * 0.5);
+            assert_eq!(
+                (q.y.to_bits(), q.w.to_bits()),
+                (sin.to_bits(), cos.to_bits())
+            );
+        }
+    }
 
     #[test]
     fn map_gravity_from_map_info() {
@@ -228,7 +331,7 @@ mod tests {
         assert_eq!(Heading::from_vector(0.0, -1.0).0, -32767);
         for deg in (-179..180).step_by(7) {
             let r = (deg as f32).to_radians();
-            let h = Heading::from_vector(r.sin(), r.cos());
+            let h = Heading::from_vector(ops::sin(r), ops::cos(r));
             let back = h.to_radians().to_degrees();
             let err = ((back - deg as f32 + 540.0) % 360.0 - 180.0).abs();
             assert!(err < 0.35, "{deg}° → {} ({back}°)", h.0);

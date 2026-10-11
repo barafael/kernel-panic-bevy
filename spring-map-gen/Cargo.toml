@@ -12,6 +12,8 @@ spring-map = { path = "../spring-map", optional = true }
 
 # Viewer binary dependencies (optional, only for the map-viewer binary).
 bevy = { workspace = true, optional = true }
+# Same deterministic-math glam features as the game (workspace Cargo.toml).
+glam = { workspace = true, optional = true }
 spring-tdf = { path = "../spring-tdf", optional = true }
 spring-unit-mesh = { path = "../spring-unit-mesh", optional = true }
 clap = { version = "4.6.1", features = ["derive"] }
@@ -21,7 +23,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 spring-map = { path = "../spring-map" }
 
 [features]
-viewer = ["dep:bevy", "dep:spring-map", "dep:spring-tdf", "dep:spring-unit-mesh"]
+viewer = ["dep:bevy", "dep:glam", "dep:spring-map", "dep:spring-tdf", "dep:spring-unit-mesh"]
 
 [[bin]]
 name = "map-viewer"

@@ -25,6 +25,7 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::input::InputSystems;
+use bevy::math::ops;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -2313,10 +2314,10 @@ fn attract_camera(
         // eye clears the terrain it hangs over, too — a ridge behind
         // the track would otherwise swallow the camera mid-pass.
         if let Some(hm) = heightmap.as_deref() {
-            let horizontal = PASS_DISTANCE * zoom * PASS_PITCH.cos();
-            let eye_y = state.focus.y + PASS_DISTANCE * zoom * PASS_PITCH.sin();
-            let eye_x = state.focus.x + horizontal * pass.yaw.sin();
-            let eye_z = state.focus.z + horizontal * pass.yaw.cos();
+            let horizontal = PASS_DISTANCE * zoom * ops::cos(PASS_PITCH);
+            let eye_y = state.focus.y + PASS_DISTANCE * zoom * ops::sin(PASS_PITCH);
+            let eye_x = state.focus.x + horizontal * ops::sin(pass.yaw);
+            let eye_z = state.focus.z + horizontal * ops::cos(pass.yaw);
             let lift = hm.sample(eye_x, eye_z) + ATTRACT_GROUND_CLEARANCE - eye_y;
             if lift > 0.0 {
                 state.focus.y += lift;
@@ -2340,7 +2341,7 @@ fn attract_camera(
     state.yaw += ATTRACT_ORBIT_SPEED * dt;
     state.pitch = 0.62;
     // Slow breathing zoom so the shot doesn't feel static.
-    state.distance = (1250.0 + 250.0 * (director.clock * 0.07).sin()) * zoom;
+    state.distance = (1250.0 + 250.0 * ops::sin(director.clock * 0.07)) * zoom;
 }
 
 impl LowPass {
@@ -2351,7 +2352,7 @@ impl LowPass {
     /// direction `d`.
     fn across(target: Vec3, bounds: &MapBounds) -> Self {
         let angle = clock_f64() as f32 * std::f32::consts::TAU;
-        let d = Vec3::new(angle.cos(), 0.0, angle.sin());
+        let d = Vec3::new(ops::cos(angle), 0.0, ops::sin(angle));
         let clamp = |p: Vec3| {
             let xz = p.xz().clamp(bounds.min.xz(), bounds.max.xz());
             Vec3::new(xz.x, p.y, xz.y)
@@ -2359,7 +2360,7 @@ impl LowPass {
         Self {
             start: clamp(target - d * PASS_HALF_LENGTH),
             end: clamp(target + d * PASS_HALF_LENGTH),
-            yaw: (-d.x).atan2(-d.z),
+            yaw: ops::atan2(-d.x, -d.z),
             elapsed: 0.0,
         }
     }

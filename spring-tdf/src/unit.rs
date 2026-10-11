@@ -283,7 +283,7 @@ impl UnitDef {
             weapon2: s.string_clean("weapon2"),
             weapon3: s.string_clean("weapon3"),
             weapon_main_dir1: main_dir(s.get("weaponmaindir1")),
-            max_angle_dif1_cos: (s.f32_or("maxangledif1", 360.0) * 0.5).to_radians().cos(),
+            max_angle_dif1_cos: libm::cosf((s.f32_or("maxangledif1", 360.0) * 0.5).to_radians()),
 
             builder: s.bool("builder"),
             commander: s.bool("commander"),

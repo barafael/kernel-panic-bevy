@@ -25,8 +25,10 @@
 //! The live state (which polygons are up, animations, owners) is
 //! [`crate::map_events::hex_farm`]'s; this module is the drawing kit.
 
+use crate::sim::sq;
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+use bevy::math::ops;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -150,7 +152,7 @@ pub fn push_hex(
         } else {
             let p2 = 1.0 - (1.0 - progress) * (1.0 - progress);
             y = y * p2 - VISUAL_PIT_DEPTH * (1.0 - p2);
-            top = scale(top, p2.powi(4));
+            top = scale(top, sq(sq(p2)));
         }
     }
     let v_depth = (y + VISUAL_PIT_DEPTH) / (2.0 * side_hex);
@@ -200,9 +202,8 @@ pub fn push_rect(
     anim: Option<(f32, u8)>,
 ) {
     let [mut p1, mut p2, mut p3, mut p4] = *corners;
-    let dist = |a: [f32; 3], b: [f32; 3]| {
-        ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt()
-    };
+    let dist =
+        |a: [f32; 3], b: [f32; 3]| (sq(b[0] - a[0]) + sq(b[1] - a[1]) + sq(b[2] - a[2])).sqrt();
     let void_side = dist(p1, p2);
     let tower_side = dist(p2, p3);
     let thickness = tower_side / 3.0;
@@ -218,9 +219,9 @@ pub fn push_rect(
             c1 = scale(c1, p);
             c2 = scale(c2, p);
         } else {
-            let side_rect = ((p2[0] - p1[0]).powi(2) + (p2[2] - p1[2]).powi(2)).sqrt();
-            let sinus = ((1.0 - progress) * std::f32::consts::FRAC_PI_2).sin();
-            let cosinus = ((1.0 - progress) * std::f32::consts::FRAC_PI_2).cos();
+            let side_rect = (sq(p2[0] - p1[0]) + sq(p2[2] - p1[2])).sqrt();
+            let sinus = ops::sin((1.0 - progress) * std::f32::consts::FRAC_PI_2);
+            let cosinus = ops::cos((1.0 - progress) * std::f32::consts::FRAC_PI_2);
             let v2 = v * thickness / void_side;
             // Lerp `a` toward the hinge `b` by the swing, dropping it
             // below the hinge by the swung length.

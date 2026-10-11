@@ -22,10 +22,14 @@ fn near_open(map: &SpeedMap, p: [f32; 2]) -> bool {
     })
 }
 
+fn sq(x: f32) -> f32 {
+    x * x
+}
+
 fn length(points: &[[f32; 2]]) -> f32 {
     points
         .windows(2)
-        .map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt())
+        .map(|w| (sq(w[1][0] - w[0][0]) + sq(w[1][1] - w[0][1])).sqrt())
         .sum()
 }
 
@@ -124,7 +128,7 @@ proptest! {
             // goal (`useFwdPathOnly`) — e.g. for a goal on a closed square.
             if path.full {
                 let end = *path.points.last().unwrap();
-                let d = ((end[0] - dst[0]).powi(2) + (end[1] - dst[1]).powi(2)).sqrt();
+                let d = (sq(end[0] - dst[0]) + sq(end[1] - dst[1])).sqrt();
                 prop_assert!(d <= 8.0 + 1e-3, "{:?} vs {:?}", end, dst);
             }
         }

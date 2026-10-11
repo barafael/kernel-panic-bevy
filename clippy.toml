@@ -1,0 +1,77 @@
+# Deterministic math (docs/multiplayer-plan.md, "Will different hardware
+# compute the same results?"). Lockstep multiplayer needs every client to
+# compute bit-identical simulation floats on every OS, CPU and browser.
+# `+ - * / sqrt`, rounding and conversions are IEEE-754 exact everywhere;
+# the std transcendentals below are not: they call the platform's C math
+# library (glibc, macOS libm, the MSVC CRT; Rust's bundled libm on
+# wasm32), and those round differently on 1-16 % of inputs.
+#
+# Use `bevy::math::ops::*` for f32 (the pure-Rust `libm` crate, because
+# the workspace enables bevy's `libm` feature) and `libm::*` for f64 and
+# for the f32 functions `ops` lacks. `x.powi(2)` is `x * x`. glam's own
+# methods (`Quat::from_rotation_y`, `Vec2::from_angle`, `slerp`, ...) are
+# fine: the workspace builds glam with `libm` + `scalar-math`.
+#
+# `mul_add` is banned too: Rust never contracts `a * b + c` by itself, so
+# an explicit fused multiply-add is the only way FMA rounding enters the
+# sim, and it is software-emulated (slow) on wasm32.
+#
+# Render-only and offline-bake code may opt out with a targeted
+# `#[allow(clippy::disallowed_methods)]` and a comment saying why the
+# value never reaches the simulation.
+disallowed-methods = [
+    { path = "f32::sin", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::cos", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::tan", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::asin", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::acos", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::atan", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::atan2", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::sin_cos", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::exp", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::exp2", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::exp_m1", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::ln", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::ln_1p", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::log", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::log2", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::log10", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::powf", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::hypot", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::cbrt", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::sinh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::cosh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::tanh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::asinh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::acosh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::atanh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
+    { path = "f32::powi", reason = "unspecified precision: multiply explicitly" },
+    { path = "f32::mul_add", reason = "no fused multiply-add in the sim (clippy.toml)" },
+    { path = "f64::sin", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::cos", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::tan", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::asin", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::acos", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::atan", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::atan2", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::sin_cos", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::exp", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::exp2", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::exp_m1", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::ln", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::ln_1p", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::log", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::log2", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::log10", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::powf", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::hypot", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::cbrt", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::sinh", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::cosh", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::tanh", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::asinh", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::acosh", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::atanh", reason = "platform libm, differs across targets: use libm" },
+    { path = "f64::powi", reason = "unspecified precision: multiply explicitly" },
+    { path = "f64::mul_add", reason = "no fused multiply-add in the sim (clippy.toml)" },
+]

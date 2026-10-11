@@ -11,6 +11,7 @@
 //!   declares an `aimer` piece: see the function docs for the upstream
 //!   conventions each branch reproduces.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::{Dying, Stunned};
@@ -93,16 +94,16 @@ impl AimLaunch {
     /// `horizontal` elmos away and `up` elmos higher.
     fn pitch(self, horizontal: f32, up: f32) -> f32 {
         match self {
-            Self::Direct => up.atan2(horizontal.max(1e-6)),
+            Self::Direct => ops::atan2(up, horizontal.max(1e-6)),
             Self::Missile { trajectory_height } => {
                 let dist = (horizontal * horizontal + up * up).sqrt().max(1e-6);
                 let dir = Vec3::new(horizontal / dist, up / dist + trajectory_height, 0.0)
                     .normalize_or(Vec3::Y);
-                dir.y.clamp(-1.0, 1.0).asin()
+                ops::asin(dir.y.clamp(-1.0, 1.0))
             }
             Self::Cannon { speed, gravity } => {
                 let dir = cannon_wanted_dir(Vec3::new(horizontal, up, 0.0), speed, gravity);
-                dir.y.clamp(-1.0, 1.0).asin()
+                ops::asin(dir.y.clamp(-1.0, 1.0))
             }
         }
     }
@@ -376,7 +377,7 @@ pub const AIM_SCRIPT_RETARGET_THRESHOLD: f32 = 0.2;
 pub fn local_aim_angles(unit_rot: Quat, to_target: Vec3, launch: AimLaunch) -> (f32, f32) {
     let local = unit_rot.inverse() * to_target;
     let (right, up, front) = (local.x, local.y, -local.z);
-    let heading = (-right).atan2(front);
+    let heading = ops::atan2(-right, front);
     let horizontal = (right * right + front * front).sqrt();
     (heading, launch.pitch(horizontal, up))
 }
@@ -600,7 +601,7 @@ pub(crate) mod tests {
         let v = 400.0 / crate::sim::GAME_SPEED;
         let gravity = crate::sim::MAP_GRAVITY_PER_FRAME2;
         let (_, p) = local_aim_angles(level, target, AimLaunch::Cannon { speed: v, gravity });
-        let expected = 0.5 * (-gravity * 1000.0 / (v * v)).asin();
+        let expected = 0.5 * ops::asin(-gravity * 1000.0 / (v * v));
         assert!((p - expected).abs() < 1e-3, "{p} vs {expected}");
     }
 
@@ -632,7 +633,7 @@ pub(crate) mod tests {
         };
         assert!((speed - 20.0).abs() < 1e-4 && gravity == -0.3);
         let (_, p) = local_aim_angles(Quat::IDENTITY, Vec3::new(0.0, 0.0, -1000.0), launch);
-        let expected = 0.5 * 0.75f32.asin();
+        let expected = 0.5 * ops::asin(0.75f32);
         assert!((p - expected).abs() < 1e-4, "{p} vs {expected}");
         assert!(p.to_degrees() > 24.0 && p.to_degrees() < 24.6);
         // Map gravity (no myGravity) is the fallback.
@@ -728,7 +729,7 @@ pub(crate) mod tests {
             for bank in [0.0f32, 0.35] {
                 let front = crate::sim::dir3_of(heading);
                 let right = front.cross(Vec3::Y);
-                let up = (Vec3::Y * bank.cos() + right * bank.sin()).normalize();
+                let up = (Vec3::Y * ops::cos(bank) + right * ops::sin(bank)).normalize();
                 let body = Transform::default().looking_to(front, up).rotation;
                 for to_target in [
                     front * 100.0,

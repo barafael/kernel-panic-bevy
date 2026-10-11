@@ -505,7 +505,7 @@ mod tests {
         for z in 0..h {
             for x in 0..w {
                 let (fx, fz) = (x as f32, z as f32);
-                let mut y = 100.0 + 60.0 * (fx * 0.05).sin() * (fz * 0.07).cos();
+                let mut y = 100.0 + 60.0 * libm::sinf(fx * 0.05) * libm::cosf(fz * 0.07);
                 if (120..124).contains(&x) && (60..64).contains(&z) {
                     y += 400.0; // spike
                 }

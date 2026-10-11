@@ -37,6 +37,7 @@
 //!
 //! Not compiled for wasm (no disk).
 
+use bevy::math::ops;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::fs;
@@ -601,7 +602,7 @@ fn dump_state(bot: &Bot, units: &Query<UnitView>) {
     for u in rows {
         let p = u.transform.translation;
         let fwd = u.transform.forward().as_vec3();
-        let heading = fwd.x.atan2(fwd.z).to_degrees();
+        let heading = ops::atan2(fwd.x, fwd.z).to_degrees();
         let _ = write!(
             s,
             "id={} {:?} team={} pos=({:.1},{:.1},{:.1}) hdg={:.0} hp={:.0}",
