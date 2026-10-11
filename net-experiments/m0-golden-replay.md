@@ -34,7 +34,8 @@ full logs (no shorter prefix was needed).
 CI runs (branch `m0-determinism`, deleted afterwards):
 - https://github.com/barafael/kernel-panic-bevy/actions/runs/38157446933 — the first run, all 19
   jobs green, every trail identical;
-- FINAL_RUN
+- https://github.com/barafael/kernel-panic-bevy/actions/runs/38160485346 — the final branch state
+  (write-up and workflow notes on top), again all green and identical (30 of 30 trail pairs).
 
 M0.3's float probe ran on the same runners: every `det:` row (the `libm` / `bevy::math::ops` /
 scalar-glam paths the sim uses) is bit-identical on all seven targets. The `std:` rows show what
