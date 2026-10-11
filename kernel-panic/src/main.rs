@@ -3,7 +3,7 @@ mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod bot;
 mod game_setup;
-#[cfg(test)]
+#[cfg(any(test, feature = "replay"))]
 mod headless;
 mod interaction;
 mod map_events;
@@ -42,6 +42,18 @@ use ui::UiPlugin;
 use units::UnitsPlugin;
 
 fn main() {
+    // The replay build of the wasm module runs no game: the golden-replay
+    // runner calls its `kp_replay` export (`headless::web`).
+    if cfg!(all(feature = "replay", target_arch = "wasm32")) {
+        return;
+    }
+    // `--replay <log>…` / `--record-golden`: the golden-replay matrix,
+    // headless (`headless::cli`).
+    #[cfg(all(feature = "replay", not(target_arch = "wasm32")))]
+    if let Some(code) = headless::cli::run() {
+        std::process::exit(code);
+    }
+
     // Dev options come from the environment; the dev-tool plugins read
     // them at build, and the unit bake runs before any App exists.
     let dev_options = game_setup::DevOptions::from_env();

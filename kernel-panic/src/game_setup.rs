@@ -522,7 +522,7 @@ pub fn random_weighted_map() -> String {
 /// which the original gadget re-rolls every game).
 pub fn match_seed() -> u64 {
     // The headless harness pins the seed so a scenario replays.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "replay"))]
     if let Some(seed) = test_seed::get() {
         return seed;
     }
@@ -531,9 +531,10 @@ pub fn match_seed() -> u64 {
     (hi << 32) | lo
 }
 
-/// Test builds: a fixed [`match_seed`] (the headless harness's seeded
-/// scenarios). Process-global, like the launch entropy it replaces.
-#[cfg(test)]
+/// Test and replay builds: a fixed [`match_seed`] (the headless
+/// harness's seeded scenarios and replays, `headless::apply_setup`).
+/// Process-global, like the launch entropy it replaces.
+#[cfg(any(test, feature = "replay"))]
 pub mod test_seed {
     use std::sync::atomic::{AtomicU64, Ordering};
 

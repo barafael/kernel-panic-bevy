@@ -41,7 +41,7 @@ pub struct SimPose {
 impl SimPose {
     /// The latest sim pose (the headless harness hashes this, not the
     /// render-blended `Transform`).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "replay"))]
     pub fn sim(&self) -> Transform {
         self.curr
     }

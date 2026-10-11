@@ -1,5 +1,6 @@
 //! Headless simulation harness for the network experiments
-//! (`net-experiments/x-sim.md`).
+//! (`net-experiments/x-sim.md`) and the golden replays
+//! (`net-experiments/m0-golden-replay.md`).
 //!
 //! The whole game — every plugin `main` adds, through [`crate::add_game`]
 //! — runs in an `App` with Bevy's `DefaultPlugins` minus the window,
@@ -22,17 +23,38 @@
 //! loads (off-thread, like the game) the clock stands still, so the
 //! match always starts at fixed-clock time 0.
 //!
-//! The match is the normal skirmish path: a [`GameSetup`] with only AI
-//! seats, entered through `AppState::InGame`, loaded by `map_loading`
-//! from `assets/maps` (a baked `.kpmap` when present).
+//! The match is the normal skirmish path: a [`GameSetup`] (all AI
+//! seats, or a replay's seats), entered through `AppState::InGame`,
+//! loaded by `map_loading` from `assets/maps` (a baked `.kpmap` when
+//! present).
+//!
+//! Test builds always have the harness; the `replay` feature compiles it
+//! into the game binary too, for the golden-replay matrix ([`replay`]):
+//! `--replay` on native (`cli`), the `kp_replay` export on wasm32
+//! (`web`). The same plugin set runs on both. wasm has no filesystem
+//! and must never block: the assets come from an in-memory source
+//! ([`AssetRoot::Memory`]), and every wait yields to the JS event loop
+//! ([`pause`]), which is where Bevy runs its tasks on the web.
 
+// A toolkit: the tests, the CLI and the wasm export each use part of it.
+#![cfg_attr(not(test), allow(dead_code))]
+
+#[cfg(all(feature = "replay", not(target_arch = "wasm32")))]
+pub mod cli;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod golden;
+pub mod replay;
 pub mod state;
 #[cfg(test)]
 mod tests;
+#[cfg(all(feature = "replay", target_arch = "wasm32"))]
+mod web;
 
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::Duration;
 
 use bevy::app::PluginsState;
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
 use bevy::render::settings::WgpuSettings;
@@ -42,6 +64,8 @@ use bevy::window::ExitCondition;
 use crate::game_setup::{
     ActiveMatch, AppState, DevOptions, GameOverDismissed, GameSetup, PlayerSpec,
 };
+use crate::map_loading::MapCatalog;
+use crate::units::ai::AiSeats;
 use crate::units::components::{Faction, Homebase};
 
 /// One sim tick.
@@ -54,7 +78,7 @@ pub enum Executor {
     Multi,
 }
 
-/// A seeded all-AI match.
+/// A seeded match: all AI, or a replay's seats.
 #[derive(Clone, Debug)]
 pub struct Scenario {
     pub map: String,
@@ -62,6 +86,13 @@ pub struct Scenario {
     pub seed: u64,
     pub executor: Executor,
     pub difficulty: u8,
+    /// No win / lose check ([`GameSetup::sandbox`]).
+    pub sandbox: bool,
+    /// Pin the map catalog to exactly this entry (a `.kpmap` path in the
+    /// catalog's form), so the match loads these bytes or nothing: never
+    /// another archive of the same name, never the catalog's fallback
+    /// first map. `None`: the normal catalog lookup.
+    pub map_file: Option<PathBuf>,
 }
 
 impl Scenario {
@@ -85,7 +116,44 @@ impl Scenario {
             seed,
             executor: Executor::Multi,
             difficulty: 2,
+            sandbox: false,
+            map_file: None,
         }
+    }
+
+    /// The ally teams the in-sim AI drives: every team with an AI seat
+    /// and no human seat (a human's team takes input, never AI orders).
+    pub fn ai_teams(&self) -> Vec<u8> {
+        let human = |team: u8| self.seats.iter().any(|s| !s.ai && s.team == team);
+        let mut teams: Vec<u8> = self
+            .seats
+            .iter()
+            .filter(|s| s.ai && !human(s.team))
+            .map(|s| s.team)
+            .collect();
+        teams.sort_unstable();
+        teams.dedup();
+        teams
+    }
+}
+
+/// Where the harness's asset server reads from.
+#[derive(Clone)]
+pub enum AssetRoot {
+    /// A directory on disk (native: `kernel-panic/assets`).
+    Dir(String),
+    /// An in-memory tree (wasm: the replay's `.kpmap`, handed in by JS).
+    /// Whatever else the game asks the asset server for (sounds, fonts,
+    /// cursor images) fails to load; only the frame loop reads those.
+    Memory(bevy::asset::io::memory::Dir),
+}
+
+impl AssetRoot {
+    /// `kernel-panic/assets` of this checkout.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn checkout() -> Self {
+        let dir = crate::paths::from_project_root("kernel-panic/assets");
+        AssetRoot::Dir(dir.to_string_lossy().into_owned())
     }
 }
 
@@ -123,10 +191,12 @@ pub struct HashLog {
 pub struct TickHash {
     pub sim: u64,
     pub fx: u64,
-    /// Positions, health / flags, orders.
-    pub parts: [u64; 3],
+    /// Positions, health / flags, orders, projectiles.
+    pub parts: [u64; 4],
     pub units: u32,
     pub projectiles: u32,
+    /// NaNs met while hashing (see [`state::Capture::nans`]).
+    pub nans: u32,
 }
 
 fn log_hash(world: &mut World) {
@@ -145,14 +215,80 @@ fn log_hash(world: &mut World) {
         parts: c.part_hashes,
         units: c.units as u32,
         projectiles: c.projectiles as u32,
+        nans: c.nans as u32,
     });
 }
 
 /// The game app without a window or renderer, plugins finished, nothing
-/// run yet.
+/// run yet, reading assets from this checkout.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn build_app(executor: Executor) -> App {
+    let mut app = add_plugins(executor, AssetRoot::checkout());
+    while app.plugins_state() == PluginsState::Adding {
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// [`build_app`] for any [`AssetRoot`] on any target: waits for the
+/// plugins by yielding ([`pause`]).
+pub async fn build_app_async(executor: Executor, assets: AssetRoot) -> App {
+    let mut app = add_plugins(executor, assets);
+    while app.plugins_state() == PluginsState::Adding {
+        #[cfg(not(target_arch = "wasm32"))]
+        bevy::tasks::tick_global_task_pools_on_main_thread();
+        pause().await;
+    }
+    app.finish();
+    app.cleanup();
+    app
+}
+
+/// Let background work run. Native: sleep briefly (the task pools have
+/// their own threads). wasm: hand control back to the JS event loop for
+/// one macrotask; Bevy's tasks (`wasm_bindgen_futures::spawn_local`,
+/// e.g. asset loads) only make progress there.
+pub async fn pause() {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::sleep(Duration::from_millis(2));
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+            // `setTimeout` is a global in browsers and in Node alike
+            // (Node has no `window`).
+            let global = js_sys::global();
+            let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into())
+                .ok()
+                .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+                .expect("no global setTimeout");
+            let _ = set_timeout.call2(&global, &resolve, &0.into());
+        });
+        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    }
+}
+
+/// The harness's plugin set, the same on every target: the whole game
+/// on `DefaultPlugins` minus window, log and audio output, renderer
+/// disabled. Plugins added, not finished.
+fn add_plugins(executor: Executor, assets: AssetRoot) -> App {
     let mut app = App::new();
-    let assets_dir = crate::paths::from_project_root("kernel-panic/assets");
+    let file_path = match &assets {
+        AssetRoot::Dir(dir) => dir.clone(),
+        AssetRoot::Memory(_) => String::new(),
+    };
+    if let AssetRoot::Memory(dir) = assets {
+        // Registered before `AssetPlugin` builds, so it becomes the
+        // default source instead of the platform's (files / HTTP).
+        use bevy::asset::AssetApp;
+        use bevy::asset::io::{AssetSourceBuilder, AssetSourceId, memory::MemoryAssetReader};
+        app.register_asset_source(
+            AssetSourceId::Default,
+            AssetSourceBuilder::new(move || Box::new(MemoryAssetReader { root: dir.clone() })),
+        );
+    }
     app.add_plugins(
         DefaultPlugins
             .build()
@@ -174,7 +310,9 @@ pub fn build_app(executor: Executor) -> App {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: assets_dir.to_string_lossy().into_owned(),
+                file_path,
+                // No `.meta` lookups, as the web build.
+                meta_check: bevy::asset::AssetMetaCheck::Never,
                 ..default()
             }),
     )
@@ -201,11 +339,6 @@ pub fn build_app(executor: Executor) -> App {
             s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
         });
     }
-    while app.plugins_state() == PluginsState::Adding {
-        bevy::tasks::tick_global_task_pools_on_main_thread();
-    }
-    app.finish();
-    app.cleanup();
     app
 }
 
@@ -221,9 +354,20 @@ pub struct SimHarness {
 impl SimHarness {
     /// Build the app, load the scenario's map and spawn the match. The
     /// first [`Self::step`] runs the match's first tick.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(scenario: Scenario) -> Self {
-        crate::game_setup::test_seed::set(Some(scenario.seed));
-        let mut app = build_app(scenario.executor);
+        Self::new_with(scenario, AssetRoot::checkout())
+    }
+
+    /// [`Self::new`] reading assets from `assets`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new_with(scenario: Scenario, assets: AssetRoot) -> Self {
+        bevy::tasks::block_on(Self::start(scenario, assets))
+    }
+
+    /// [`Self::new`] for any [`AssetRoot`], on any target.
+    pub async fn start(scenario: Scenario, assets: AssetRoot) -> Self {
+        let mut app = build_app_async(scenario.executor, assets).await;
 
         // Startup (map catalog, the menu's boot demo request) …
         app.update();
@@ -232,7 +376,7 @@ impl SimHarness {
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
             .set(AppState::InGame);
-        enter_match(&mut app, &scenario, false);
+        enter_match(&mut app, &scenario, false).await;
         Self {
             app,
             tick: 0,
@@ -275,10 +419,34 @@ impl SimHarness {
     }
 }
 
+/// Everything the match setup decides, applied before the match loads:
+/// the [`GameSetup`] the map loader reads, the AI's seats and the match
+/// seed. The one place that knows how today's game takes its seed (a
+/// process-global override of `game_setup::match_seed`); when the seed
+/// moves into the match setup (M0.2), only this function changes.
+pub fn apply_setup(world: &mut World, scenario: &Scenario) {
+    crate::game_setup::test_seed::set(Some(scenario.seed));
+    world.insert_resource(GameSetup {
+        map: scenario.map.clone(),
+        players: scenario.seats.clone(),
+        difficulty: scenario.difficulty,
+        demo: false,
+        showcase: None,
+        sandbox: scenario.sandbox,
+    });
+    // From the seats, not "every team but the local one": the same on
+    // every machine, whoever watches (and for an all-AI match the same
+    // teams as that default).
+    world.insert_resource(AiSeats(scenario.ai_teams()));
+    if let Some(file) = &scenario.map_file {
+        world.insert_resource(MapCatalog(vec![file.clone()]));
+    }
+}
+
 /// Load `scenario`'s map with the clock stopped (zero-length frames run
 /// no tick) and wait for its world. `rematch`: the app is already in a
 /// match; ask for a new one the way the in-game Restart does.
-fn enter_match(app: &mut App, scenario: &Scenario, rematch: bool) {
+async fn enter_match(app: &mut App, scenario: &Scenario, rematch: bool) {
     let old: Vec<Entity> = {
         let world = app.world_mut();
         world
@@ -287,14 +455,7 @@ fn enter_match(app: &mut App, scenario: &Scenario, rematch: bool) {
             .collect()
     };
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
-    app.world_mut().insert_resource(GameSetup {
-        map: scenario.map.clone(),
-        players: scenario.seats.clone(),
-        difficulty: scenario.difficulty,
-        demo: false,
-        showcase: None,
-        sandbox: false,
-    });
+    apply_setup(app.world_mut(), scenario);
     if rematch {
         app.world_mut()
             .resource_mut::<Messages<crate::game_setup::RunGame>>()
@@ -321,7 +482,7 @@ fn enter_match(app: &mut App, scenario: &Scenario, rematch: bool) {
             "map {} never loaded",
             scenario.map
         );
-        std::thread::sleep(Duration::from_millis(2));
+        pause().await;
     }
     // All seats are AI: the local "player" spectates, and a spectator
     // owns no factory — keep the Defeat panel from freezing the sim
@@ -336,9 +497,9 @@ impl SimHarness {
     /// whatever the previous match left behind outside the match-scoped
     /// state carries over. `reset_fixed_clock`: also restart the fixed
     /// clock at 0, as a fresh app has it.
+    #[cfg(test)]
     pub fn rematch(&mut self, scenario: Scenario, reset_fixed_clock: bool) {
-        crate::game_setup::test_seed::set(Some(scenario.seed));
-        enter_match(&mut self.app, &scenario, true);
+        bevy::tasks::block_on(enter_match(&mut self.app, &scenario, true));
         if reset_fixed_clock {
             self.app
                 .insert_resource(Time::<Fixed>::from_hz(crate::sim::SIMULATION_HZ));

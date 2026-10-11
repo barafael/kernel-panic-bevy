@@ -86,8 +86,11 @@ pub struct Capture {
     /// Hash of the visual-only entity counts.
     pub fx_hash: u64,
     /// Separate hashes of the parts of `sim_hash`, to see what diverged
-    /// first: positions, health, orders.
-    pub part_hashes: [u64; 3],
+    /// first: positions, health, orders, projectiles.
+    pub part_hashes: [u64; 4],
+    /// NaN floats met while hashing (hashed as one canonical NaN). A
+    /// healthy sim has none.
+    pub nans: usize,
     pub total_entities: usize,
 }
 
@@ -119,12 +122,35 @@ type UnitQ = (
     ),
 );
 
-fn bits3(v: Vec3) -> [u8; 12] {
-    let mut out = [0; 12];
-    out[0..4].copy_from_slice(&v.x.to_bits().to_le_bytes());
-    out[4..8].copy_from_slice(&v.y.to_bits().to_le_bytes());
-    out[8..12].copy_from_slice(&v.z.to_bits().to_le_bytes());
-    out
+/// The quiet NaN every NaN hashes as. A NaN's payload and sign bits are
+/// not deterministic across targets (wasm engines may canonicalise or
+/// keep them), so the hash never sees them; [`Capture::nans`] counts
+/// the NaNs instead.
+const CANONICAL_NAN: u32 = 0x7fc0_0000;
+
+/// f32 → hashable bits, NaNs canonicalised and counted.
+#[derive(Default)]
+struct Bits {
+    nans: usize,
+}
+
+impl Bits {
+    fn f32(&mut self, x: f32) -> [u8; 4] {
+        if x.is_nan() {
+            self.nans += 1;
+            CANONICAL_NAN.to_le_bytes()
+        } else {
+            x.to_bits().to_le_bytes()
+        }
+    }
+
+    fn vec3(&mut self, v: Vec3) -> [u8; 12] {
+        let mut out = [0; 12];
+        out[0..4].copy_from_slice(&self.f32(v.x));
+        out[4..8].copy_from_slice(&self.f32(v.y));
+        out[8..12].copy_from_slice(&self.f32(v.z));
+        out
+    }
 }
 
 /// Category of each component id whose type name matches.
@@ -176,6 +202,7 @@ pub fn capture(world: &mut World) -> Capture {
     let mut pos_recs: Vec<Vec<u8>> = Vec::new();
     let mut hp_recs: Vec<Vec<u8>> = Vec::new();
     let mut order_recs: Vec<Vec<u8>> = Vec::new();
+    let mut bits = Bits::default();
     for (
         (_, id, ut, team, pose),
         (health, dying, emerging, cloaked, stunned),
@@ -204,25 +231,25 @@ pub fn capture(world: &mut World) -> Capture {
         let mut p = me.to_vec();
         p.extend((ut.0 as u16).to_le_bytes());
         p.push(team.0);
-        p.extend(bits3(tf.translation));
+        p.extend(bits.vec3(tf.translation));
         for c in tf.rotation.to_array() {
-            p.extend(c.to_bits().to_le_bytes());
+            p.extend(bits.f32(c));
         }
         pos_recs.push(p);
 
         let mut h = me.to_vec();
-        h.extend(hp.to_bits().to_le_bytes());
-        h.extend(max.to_bits().to_le_bytes());
+        h.extend(bits.f32(hp));
+        h.extend(bits.f32(max));
         h.push(flags);
         if let Some(em) = emerging {
-            h.extend(em.remaining.to_bits().to_le_bytes());
+            h.extend(bits.f32(em.remaining));
         }
         hp_recs.push(h);
 
         let mut o = me.to_vec();
         if let Some(mt) = mt {
             o.push(1);
-            o.extend(bits3(mt.0));
+            o.extend(bits.vec3(mt.0));
         }
         if let Some(g) = guard {
             o.push(2);
@@ -234,23 +261,23 @@ pub fn capture(world: &mut World) -> Capture {
         }
         if let Some(a) = attack_ground {
             o.push(4);
-            o.extend(bits3(a.pos));
+            o.extend(bits.vec3(a.pos));
         }
         if let Some(b) = pending_build {
             o.push(5);
             o.extend((b.kind as u16).to_le_bytes());
-            o.extend(bits3(b.site));
+            o.extend(bits.vec3(b.site));
         }
         if let Some(c) = constructing {
             o.push(6);
             o.extend((c.kind as u16).to_le_bytes());
-            o.extend(bits3(c.site));
+            o.extend(bits.vec3(c.site));
         }
         if let Some(q) = queue {
             o.push(7);
             o.extend((q.commands.len() as u32).to_le_bytes());
             for c in &q.commands {
-                o.extend(bits3(c.position()));
+                o.extend(bits.vec3(c.position()));
             }
         }
         if let Some(p) = producer {
@@ -272,7 +299,7 @@ pub fn capture(world: &mut World) -> Capture {
             .map(|p| p.sim().translation)
             .or_else(|| world.get::<Transform>(e).map(|t| t.translation))
             .unwrap_or_default();
-        proj_recs.push(bits3(pos).to_vec());
+        proj_recs.push(bits.vec3(pos).to_vec());
     }
 
     let hash_sorted = |mut recs: Vec<Vec<u8>>| {
@@ -288,12 +315,12 @@ pub fn capture(world: &mut World) -> Capture {
         hash_sorted(pos_recs),
         hash_sorted(hp_recs),
         hash_sorted(order_recs),
+        hash_sorted(proj_recs),
     ];
     let mut sim = Fnv::default();
     for p in part_hashes {
         sim.bytes(&p.to_le_bytes());
     }
-    sim.bytes(&hash_sorted(proj_recs).to_le_bytes());
     let mut fx = Fnv::default();
     for (cat, n) in census.iter().filter(|(c, _)| **c != "other") {
         let target = if SIM_CATEGORIES.contains(cat) {
@@ -312,6 +339,7 @@ pub fn capture(world: &mut World) -> Capture {
         sim_hash: sim.finish(),
         fx_hash: fx.finish(),
         part_hashes,
+        nans: bits.nans,
         total_entities,
     }
 }
@@ -368,5 +396,31 @@ pub fn describe(world: &mut World) -> Vec<String> {
     out.push(format!("qorder {}", order.join(" ")));
     let census = capture(world).census;
     out.push(format!("census {census:?}"));
+    out.extend(archetypes(world));
     out
+}
+
+/// Every archetype in creation order, with its entity count and its
+/// components (short type names): diffing two machines' lists shows
+/// where their archetype histories (and so their query orders) part.
+pub fn archetypes(world: &World) -> Vec<String> {
+    world
+        .archetypes()
+        .iter()
+        .map(|a| {
+            let mut names: Vec<String> = a
+                .components()
+                .iter()
+                .filter_map(|id| world.components().get_name(*id))
+                .map(|n| n.shortname().to_string())
+                .collect();
+            names.sort();
+            format!(
+                "archetype a{} n{} [{}]",
+                a.id().index(),
+                a.len(),
+                names.join(" ")
+            )
+        })
+        .collect()
 }
