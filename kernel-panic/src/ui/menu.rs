@@ -1935,6 +1935,7 @@ fn close_all_overlays(
     *game_over = GameOverOpen(false);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn maintain_esc_menu(
     esc_open: Res<EscMenuOpen>,
     esc_settings: Res<EscSettingsOpen>,

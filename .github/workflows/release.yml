@@ -18,7 +18,7 @@ name: Release
 #   kernel-panic-<version>-<platform>/
 #     kernel-panic[.exe]      the game; finds `assets/` next to itself
 #                             (`paths::assets_dir`)
-#     assets/                 maps (baked .kpmap only), shaders, sounds,
+#     assets/                 maps (baked .kpmap only), shaders, sounds, music,
 #                             cursors, bitmaps, unit pictures, readme.txt
 #     README.txt, original-game-license-info.txt
 #
@@ -104,6 +104,7 @@ jobs:
       CARGO_PROFILE_RELEASE_STRIP: symbols
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/lfs-music
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
       - uses: dtolnay/rust-toolchain@stable
@@ -186,6 +187,7 @@ jobs:
       VERSION: ${{ needs.maps.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+      - uses: ./.github/actions/lfs-music
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown

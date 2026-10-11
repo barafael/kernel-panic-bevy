@@ -75,6 +75,8 @@ jobs:
       # units.kpu and needs no upstream data.
       - if: runner.os == 'Linux'
         uses: ./.github/actions/upstream-data
+      # The soundtrack (Git LFS) for the music-catalog test, on every OS.
+      - uses: ./.github/actions/lfs-music
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

@@ -23,22 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The soundtrack (kernel-panic/assets/music/*.ogg, 74 MB) is in Git
-      # LFS. Pull it through a cache keyed on the object list so LFS
-      # bandwidth is only spent when a track changes, and refuse to ship
-      # pointer files: build.rs bakes the catalog from this folder and
-      # index.html's copy-dir publishes it.
-      - name: LFS object list
-        run: git lfs ls-files -l | cut -d' ' -f1 | sort > .lfs-objects
-      - uses: actions/cache@v4
-        with:
-          path: .git/lfs
-          key: lfs-${{ hashFiles('.lfs-objects') }}
-      - name: Fetch music (LFS)
-        run: |
-          git lfs pull
-          # every tracked file must be real content ('*'), never a pointer ('-')
-          ! git lfs ls-files | grep -q '^[0-9a-f]* - '
+      # The soundtrack is in Git LFS; build.rs bakes the music catalog
+      # from the folder and index.html's copy-dir publishes it.
+      - uses: ./.github/actions/lfs-music
 
       - uses: dtolnay/rust-toolchain@stable
         with:

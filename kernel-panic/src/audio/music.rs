@@ -58,7 +58,7 @@ fn scan_music(mut commands: Commands) {
     let mut tracks = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let dir = crate::paths::from_project_root("kernel-panic/assets/music");
+        let dir = crate::paths::assets_dir().join("music");
         let mut names: Vec<String> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -95,6 +95,7 @@ fn pick_track(rng: &mut u32, count: usize, previous: Option<usize>) -> usize {
 
 /// Queue the next track and start its load, keep the playing track's
 /// volume on the knobs, and start the queued track once the gap passed.
+#[allow(clippy::too_many_arguments)]
 fn play_music(
     time: Res<Time>,
     catalog: Res<MusicCatalog>,
