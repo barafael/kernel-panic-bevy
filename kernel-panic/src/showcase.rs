@@ -312,6 +312,11 @@ impl Plugin for ShowcasePlugin {
             FixedUpdate,
             showcase_director
                 .before(crate::units::GameplaySet::Produce)
+                // A fixed place in the tick (`headless` ambiguity
+                // check): after the commands, before the AI (both
+                // edit factory queues).
+                .after(crate::net::SimCommandSet)
+                .before(crate::units::ai::ai_brain)
                 .run_if(in_state(crate::game_setup::AppState::InGame))
                 .run_if(resource_exists::<ShowcaseDirector>),
         );

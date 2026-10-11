@@ -13,7 +13,7 @@ use bevy::prelude::*;
 
 use crate::map_loading::{MatchEntity, MatchScopeAppExt};
 use crate::rendering::interpolation::SimPose;
-use crate::sim::SIMULATION_HZ;
+use crate::sim::{SIMULATION_HZ, SimRng};
 
 use assets::animation;
 use content::{unit_registry, weapons};
@@ -55,26 +55,27 @@ impl Plugin for UnitsPlugin {
         app.world_mut()
             .resource_mut::<Time<Virtual>>()
             .set_max_delta(std::time::Duration::from_millis(100));
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(kind) = app
-            .world()
-            .get_resource::<crate::game_setup::DevOptions>()
-            .and_then(|d| d.sim_executor.clone())
-        {
-            let single_threaded = kind == "single";
-            app.edit_schedule(FixedUpdate, move |s| {
-                if single_threaded {
-                    s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
-                } else {
-                    s.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
-                }
-            });
-        }
+        // The sim runs on the single-threaded executor, always: lockstep
+        // peers must run the fixed tick's systems in one fixed order,
+        // and the multi-threaded executor (which only parallelises
+        // unordered systems) diverged from it in the headless
+        // experiments (`net-experiments/x-sim.md` §1, item 11). It is
+        // also cheaper at these unit counts (§4: 1.12 vs 1.69 ms median
+        // at ~400 units), and wasm has no other.
+        app.edit_schedule(FixedUpdate, |s| {
+            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
         app.insert_resource(Time::<Fixed>::from_hz(SIMULATION_HZ))
+            // The match's clock and seed (`sim`): reset / set at every
+            // match swap.
+            .init_match_resource::<crate::sim::SimTick>()
+            .init_resource::<crate::sim::MatchSeed>()
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
             .init_match_resource::<ai::AiTicker>()
+            // Set from the seats at every match swap (`begin_match`).
+            .init_resource::<ai::AiSeats>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<shield::OnsMode>()
@@ -94,6 +95,8 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<bookkeeping::SmallBuildingCounts>()
             .init_match_resource::<bookkeeping::TeamUnitCounts>()
             .init_match_resource::<cloak::VisibilityRefreshTimer>()
+            .init_match_resource::<cloak::CloakDetectionTimer>()
+            .init_match_resource::<cloak::FogRefreshTimer>()
             .init_match_resource::<spatial::SpatialIndex>()
             .init_match_resource::<game_over::GameOverClock>()
             .init_match_resource::<crate::game_setup::GameOverDismissed>()
@@ -104,6 +107,12 @@ impl Plugin for UnitsPlugin {
             .init_resource::<cloak::FogEnabled>()
             .init_resource::<animation::DeathParticleAssets>()
             .init_match_resource::<production::BuggerOffRequests>()
+            // The sim's random streams, re-seeded from the match seed
+            // at every swap (`sim::SimRng`).
+            .init_match_resource::<SimRng<combat::TargetingRng>>()
+            .init_match_resource::<SimRng<combat::GroundFireRng>>()
+            .init_match_resource::<SimRng<combat::BurstRng>>()
+            .init_match_resource::<SimRng<production::FactoryExitRng>>()
             .add_observer(production::kill_orphaned_buildee)
             .add_plugins(weapon_fx::WeaponFxPlugin)
             // Everything the fixed sim moves is drawn interpolated
@@ -144,8 +153,12 @@ impl Plugin for UnitsPlugin {
                     .run_if(in_state(game_over::GameState::Playing)),
             )
             .add_systems(Startup, validate_registries)
-            // Debug builds: the FPU is still in IEEE default mode.
-            .add_systems(FixedFirst, crate::sim::assert_float_env)
+            // Debug builds: the FPU is still in IEEE default mode. Then
+            // the tick's frame number.
+            .add_systems(
+                FixedFirst,
+                (crate::sim::assert_float_env, crate::sim::advance_sim_tick),
+            )
             .add_systems(
                 FixedUpdate,
                 (
@@ -184,6 +197,11 @@ impl Plugin for UnitsPlugin {
                     (shield::spawn_shield_shells, shield::tick_shield_shells)
                         .chain()
                         .after(shield::regen_shields)
+                        // Behind every spawner of the set too: they all
+                        // add meshes / materials, and asset ids are
+                        // handed out in the order they run.
+                        .after(spawning::emerge_system)
+                        .after(crate::map_events::drain_eruption_queue)
                         .in_set(GameplaySet::Produce),
                     // Why: MuzzlePiece + AimScript must update before
                     // `combat_system` reads them. The Simulate set is

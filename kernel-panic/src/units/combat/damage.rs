@@ -21,6 +21,8 @@
 use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
+use crate::net::NetId;
+use crate::sim::{RngStream, SimRng, SimTick};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -360,7 +362,9 @@ type VictimData = (
 /// [`Hit`] into [`DelayedDamage`].
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct DamageResolver<'w, 's> {
-    time: Res<'w, Time>,
+    tick: Res<'w, SimTick>,
+    /// Unit ids: the canonical order of the due hits.
+    ids: Query<'w, 's, &'static NetId>,
     delayed: ResMut<'w, DelayedDamage>,
     hits: HitQueries<'w, 's>,
     weapons: Res<'w, WeaponRegistry>,
@@ -420,7 +424,7 @@ impl DamageResolver<'_, '_> {
                 && attacker.team != team
                 && self.hits.victim.get(attacker.entity).is_ok_and(|v| !v.8)
             {
-                let frame = super::sim_frame(&self.time);
+                let frame = self.tick.frame();
                 self.delayed.push(
                     frame + 1,
                     Hit {
@@ -485,14 +489,26 @@ impl DamageResolver<'_, '_> {
         if damage >= 0.5
             && let Some(log) = self.damage_log.as_deref_mut()
         {
-            log.record(team, self.time.elapsed_secs(), pos);
+            log.record(team, self.tick.secs(), pos);
         }
     }
 
     /// Deliver every queued hit that is due this frame.
     fn deliver_due(&mut self) {
-        let frame = super::sim_frame(&self.time);
-        let due = self.delayed.take_due(frame);
+        let frame = self.tick.frame();
+        let mut due = self.delayed.take_due(frame);
+        // A canonical order whoever queued them (`sim`): health sums
+        // the hits in it. Stable, so exact duplicates keep theirs.
+        let id = |e: Entity| self.ids.get(e).map_or(0, |n| n.0);
+        due.sort_by_cached_key(|h| {
+            (
+                id(h.target),
+                h.attacker.as_ref().map_or(0, |a| id(a.entity)),
+                h.weapon,
+                h.damage.to_bits(),
+                h.paralyze_time.map(f32::to_bits),
+            )
+        });
         for hit in due {
             self.deliver(hit);
         }
@@ -572,6 +588,12 @@ impl DelayedDamage {
     }
 }
 
+/// [`tick_burst_fire`]'s random stream (`predictSpeedMod` re-rolls).
+pub struct BurstRng;
+impl RngStream for BurstRng {
+    const SALT: u64 = 0xB0B5_7A7E;
+}
+
 /// Release follow-up shots for units in the middle of a burst.
 /// The first shot fires where the salvo opens; each follow-up runs one
 /// `UpdateSalvo` step ([`super::fire_salvo_shot`]: per projectile
@@ -579,11 +601,11 @@ impl DelayedDamage {
 /// one also calls `EndBurst1`.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn tick_burst_fire(
-    time: Res<Time>,
+    tick: Res<SimTick>,
     // `CUnit::CanUpdateWeapons`: a paralyzed unit's salvo pauses (its
     // `nextSalvo` frame passes; the rest fires once the stun ends).
     mut query: Query<
-        (Entity, &mut BurstFire, &GlobalTransform),
+        (Entity, &mut BurstFire, &GlobalTransform, &NetId),
         (Without<Dying>, Without<Stunned>),
     >,
     mut pieces: super::PieceLookup,
@@ -593,16 +615,14 @@ pub fn tick_burst_fire(
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
-    mut rng: Local<u32>,
+    mut rng: ResMut<SimRng<BurstRng>>,
 ) {
     let mut scratch_sounds = crate::audio::SoundQueue::default();
     let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
-    if *rng == 0 {
-        *rng = 0xB0B5_7A7E;
-    }
-    let frame = super::sim_frame(&time);
+    let frame = tick.frame();
     let slow_rate = crate::sim::SLOW_UPDATE_RATE as u64;
-    for (entity, mut burst, gtf) in &mut query {
+    // Unit-id order: the dice and the damage queue follow it (`sim`).
+    for (entity, mut burst, gtf, _) in query.iter_mut().sort::<&NetId>() {
         if frame < burst.next_frame || frame <= burst.last_frame {
             continue;
         }
@@ -661,9 +681,23 @@ impl DamagePass<'_, '_> {
     fn run(&mut self) {
         // Explosion fronts, reflections and `AddUnitDamage` hits due now.
         self.resolver.deliver_due();
-        let frame = super::sim_frame(&self.resolver.time);
+        let frame = self.resolver.tick.frame();
 
-        let pending: Vec<PendingDamage> = self.queue.drain().collect();
+        let mut pending: Vec<PendingDamage> = self.queue.drain().collect();
+        // The queue fills in whatever order its producers ran — some
+        // iterate projectiles or zones, which have no unit id. Resolve
+        // it in a canonical order (`sim`): victims' health sums the
+        // hits, and the impulses and delayed fronts queue, in it.
+        let id = |e: Entity| self.resolver.ids.get(e).map_or(0, |n| n.0);
+        pending.sort_by_cached_key(|p| {
+            (
+                id(p.attacker),
+                p.weapon,
+                p.impact_pos.to_array().map(f32::to_bits),
+                p.attacker_distance.to_bits(),
+                p.target.map_or(0, id),
+            )
+        });
         for pending in pending {
             self.explode(pending, frame);
         }
@@ -858,6 +892,7 @@ pub fn tick_infections(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::test_support::InitSim;
 
     #[test]
     fn byte_closed_takes_30_percent_from_normal_weapons() {
@@ -938,9 +973,11 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<Time>()
+            .init_sim()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
@@ -976,9 +1013,7 @@ mod tests {
         let mut fired_on = Vec::new();
         for frame in 0..=30u64 {
             if frame > 0 {
-                app.world_mut()
-                    .resource_mut::<Time>()
-                    .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+                crate::sim::test_support::next_frame(app.world_mut());
             }
             let before = app.world().resource::<DamageQueue>().len();
             app.world_mut().run_system_once(tick_burst_fire).unwrap();
@@ -1020,9 +1055,11 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<Time>()
+            .init_sim()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
@@ -1037,9 +1074,7 @@ mod tests {
 
         // Advance past the entire burst (a second of sim frames).
         for _ in 0..30 {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+            crate::sim::test_support::next_frame(app.world_mut());
             app.world_mut().run_system_once(tick_burst_fire).unwrap();
         }
         // All 3 follow-up shots must fire. Each pushes a PendingDamage
@@ -1067,9 +1102,11 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<Time>()
+            .init_sim()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .insert_resource(UnitRegistry::empty())
@@ -1084,9 +1121,7 @@ mod tests {
         ));
         let step = |app: &mut App, frames: u32| {
             for _ in 0..frames {
-                app.world_mut()
-                    .resource_mut::<Time>()
-                    .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+                crate::sim::test_support::next_frame(app.world_mut());
                 app.world_mut().run_system_once(tick_burst_fire).unwrap();
             }
         };
@@ -1133,6 +1168,7 @@ mod tests {
         app.init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<Time>()
+            .init_sim()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<SpatialIndex>()
             .init_resource::<crate::units::ai::TeamDamageLog>()
@@ -1190,9 +1226,7 @@ mod tests {
 
     /// Advance the sim clock by one 30 Hz frame.
     fn next_frame(app: &mut App) {
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+        crate::sim::test_support::next_frame(app.world_mut());
     }
 
     fn run_damage(app: &mut App) {
@@ -1249,9 +1283,11 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<Time>()
+            .init_sim()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .init_resource::<SpatialIndex>()
@@ -1477,7 +1513,7 @@ mod tests {
     #[test]
     fn armored_flag_follows_the_scripts() {
         let mut app = App::new();
-        app.init_resource::<Time>();
+        app.init_resource::<Time>().init_sim();
         let bit = app.world_mut().spawn(UnitType(UnitKind::Bit)).id();
         let built_bug = app
             .world_mut()

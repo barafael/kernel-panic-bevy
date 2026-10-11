@@ -65,13 +65,14 @@ use crate::game_setup::{
     ActiveMatch, AppState, DevOptions, GameOverDismissed, GameSetup, PlayerSpec,
 };
 use crate::map_loading::MapCatalog;
-use crate::units::ai::AiSeats;
 use crate::units::components::{Faction, Homebase};
 
 /// One sim tick.
 pub const TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
-/// Which executor runs `FixedUpdate`.
+/// Which executor runs `FixedUpdate`. The game always uses the
+/// single-threaded one (`UnitsPlugin`); `Multi` is the experiment's
+/// comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Executor {
     Single,
@@ -114,26 +115,11 @@ impl Scenario {
             map: map.to_string(),
             seats,
             seed,
-            executor: Executor::Multi,
+            executor: Executor::Single,
             difficulty: 2,
             sandbox: false,
             map_file: None,
         }
-    }
-
-    /// The ally teams the in-sim AI drives: every team with an AI seat
-    /// and no human seat (a human's team takes input, never AI orders).
-    pub fn ai_teams(&self) -> Vec<u8> {
-        let human = |team: u8| self.seats.iter().any(|s| !s.ai && s.team == team);
-        let mut teams: Vec<u8> = self
-            .seats
-            .iter()
-            .filter(|s| s.ai && !human(s.team))
-            .map(|s| s.team)
-            .collect();
-        teams.sort_unstable();
-        teams.dedup();
-        teams
     }
 }
 
@@ -334,9 +320,9 @@ fn add_plugins(executor: Executor, assets: AssetRoot) -> App {
                 .chain()
                 .after(crate::rendering::interpolation::record_sim_pose),
         );
-    if executor == Executor::Single {
+    if executor == Executor::Multi {
         app.edit_schedule(FixedUpdate, |s| {
-            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            s.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
         });
     }
     app
@@ -420,12 +406,10 @@ impl SimHarness {
 }
 
 /// Everything the match setup decides, applied before the match loads:
-/// the [`GameSetup`] the map loader reads, the AI's seats and the match
-/// seed. The one place that knows how today's game takes its seed (a
-/// process-global override of `game_setup::match_seed`); when the seed
-/// moves into the match setup (M0.2), only this function changes.
+/// the [`GameSetup`] the map loader reads (seats, difficulty, the match
+/// seed; `begin_match` derives the AI seats and the match-scoped seed
+/// from it) and, for a replay, the one map file it may load.
 pub fn apply_setup(world: &mut World, scenario: &Scenario) {
-    crate::game_setup::test_seed::set(Some(scenario.seed));
     world.insert_resource(GameSetup {
         map: scenario.map.clone(),
         players: scenario.seats.clone(),
@@ -433,11 +417,8 @@ pub fn apply_setup(world: &mut World, scenario: &Scenario) {
         demo: false,
         showcase: None,
         sandbox: scenario.sandbox,
+        seed: scenario.seed,
     });
-    // From the seats, not "every team but the local one": the same on
-    // every machine, whoever watches (and for an all-AI match the same
-    // teams as that default).
-    world.insert_resource(AiSeats(scenario.ai_teams()));
     if let Some(file) = &scenario.map_file {
         world.insert_resource(MapCatalog(vec![file.clone()]));
     }
@@ -507,11 +488,5 @@ impl SimHarness {
         self.tick = 0;
         self.scenario = scenario;
         self.world_mut().resource_mut::<HashLog>().ticks.clear();
-    }
-}
-
-impl Drop for SimHarness {
-    fn drop(&mut self) {
-        crate::game_setup::test_seed::set(None);
     }
 }

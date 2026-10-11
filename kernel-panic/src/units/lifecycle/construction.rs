@@ -37,13 +37,14 @@
 //!
 //! [`advance_command_queue`]: crate::interaction::movement::advance_command_queue
 
-use std::collections::HashMap;
+use bevy::platform::collections::HashMap;
 
 use bevy::prelude::*;
 
 use super::production::{BuggerOff, BuggerOffRequests, PendingFadeInstall};
 use super::spawning::{BuildDriven, EmergeStyle, Emerging, SpawnContext, spawn_unit};
 use crate::interaction::movement::{MovePath, MoveTarget, QueuedCommand};
+use crate::net::NetId;
 use crate::sim::SQUARE_SIZE;
 use crate::units::combat::{Dying, Stunned};
 use crate::units::components::{Faction, TeamId, UnitType};
@@ -244,6 +245,7 @@ pub fn start_construction(
             &TeamId,
             &PendingBuild,
             Option<&BuildSiteWait>,
+            &NetId,
         ),
         (Without<Constructing>, Without<Dying>, Without<Stunned>),
     >,
@@ -263,7 +265,10 @@ pub fn start_construction(
         .map(|c| (c.site.xz(), half_of(c.kind)))
         .collect();
 
-    for (entity, transform, builder_kind, team, pending, wait) in &pending_q {
+    // Unit-id order: the first builder claims a contested site (`sim`).
+    for (entity, transform, builder_kind, team, pending, wait, _) in
+        pending_q.iter().sort::<&NetId>()
+    {
         let site = pending.site.xz();
         let half = half_of(pending.kind);
         let taken = claimed
@@ -398,6 +403,7 @@ pub fn tick_construction(
             &mut Constructing,
             Option<&crate::units::assets::animation::UnitAnimator>,
             Has<Stunned>,
+            &NetId,
         ),
         Without<Dying>,
     >,
@@ -410,7 +416,7 @@ pub fn tick_construction(
     // Lazily-built per-(kind, team) census for capped kinds, bumped as
     // this pass starts nanoframes so two builders starting on the same
     // frame can't both slip under the cap.
-    let mut capped_counts: HashMap<UnitKind, HashMap<u8, u32>> = HashMap::new();
+    let mut capped_counts: HashMap<UnitKind, std::collections::BTreeMap<u8, u32>> = HashMap::new();
 
     for (
         entity,
@@ -422,7 +428,8 @@ pub fn tick_construction(
         mut constructing,
         animator,
         stunned,
-    ) in &mut builders
+        _,
+    ) in builders.iter_mut().sort::<&NetId>()
     {
         if stunned {
             continue;

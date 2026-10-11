@@ -395,7 +395,7 @@ fn ring_point(center: Vec2, inner_r: f32, outer_r: f32, rng: &mut u32) -> Vec2 {
     )
 }
 
-fn drain_eruption_queue(mut queue: ResMut<EruptionSpawnQueue>, mut ctx: SpawnContext) {
+pub(crate) fn drain_eruption_queue(mut queue: ResMut<EruptionSpawnQueue>, mut ctx: SpawnContext) {
     for spawn in queue.0.drain(..) {
         spawn_unit(
             spawn.kind,

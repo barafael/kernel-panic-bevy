@@ -69,6 +69,20 @@ pub struct MatchSetup {
 }
 
 impl MatchSetup {
+    /// The game's form of this setup.
+    pub fn game_setup(&self) -> crate::game_setup::GameSetup {
+        let s = self.scenario(None);
+        crate::game_setup::GameSetup {
+            map: s.map,
+            players: s.seats,
+            difficulty: s.difficulty,
+            demo: false,
+            showcase: None,
+            sandbox: s.sandbox,
+            seed: s.seed,
+        }
+    }
+
     /// The harness scenario for this setup, loading `map_file`.
     pub fn scenario(&self, map_file: Option<PathBuf>) -> Scenario {
         Scenario {
@@ -172,10 +186,10 @@ impl Replay {
         ticks: u32,
         applied: impl IntoIterator<Item = CommandFrame>,
     ) -> Self {
-        let ai = setup.scenario(None).ai_teams();
+        let ai = crate::units::ai::AiSeats::from_setup(&setup.game_setup());
         let mut frames: Vec<CommandFrame> = applied
             .into_iter()
-            .filter(|f| !ai.contains(&f.player) && !f.commands.is_empty())
+            .filter(|f| !ai.contains(f.player) && !f.commands.is_empty())
             .collect();
         frames.sort_by_key(|f| (f.tick, f.player));
         Self {

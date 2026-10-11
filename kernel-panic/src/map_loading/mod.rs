@@ -619,7 +619,6 @@ struct PrepareInputs {
     /// `UnitRegistry::hexfarm_medians`: Hex Farm rolls its layout from
     /// the roster's median health / build time.
     hexfarm_medians: (f64, f64),
-    match_seed: u64,
 }
 
 impl PrepareInputs {
@@ -668,7 +667,6 @@ impl PrepareInputs {
                 .map(|(cap, h, c)| (f32::from_bits(cap), h, c))
                 .collect(),
             hexfarm_medians: registry.hexfarm_medians(),
-            match_seed: crate::game_setup::match_seed(),
         }
     }
 }
@@ -720,7 +718,8 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     let hex_farm = lua_compositing.map(|compositing| {
         let (median_health, median_build_time) = inputs.hexfarm_medians;
         let farm = HexFarm::generate(
-            inputs.match_seed,
+            // The match seed: every peer rolls the same farm.
+            inputs.setup.seed,
             spring_map::hexfarm::HexFarmSetup {
                 map_size_x: parsed.header.world_width() as f64,
                 map_size_z: parsed.header.world_depth() as f64,

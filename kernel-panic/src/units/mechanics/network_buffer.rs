@@ -10,7 +10,7 @@
 //! dispatch / enter companion gadgets).
 
 use bevy::math::ops;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
@@ -45,7 +45,7 @@ pub const DISPATCH_RING_RADIUS: f32 = 48.0;
 /// Shared across-team packet counters. A team's Ports tick into it;
 /// dispatch drains it; Packets re-entering top it back up.
 #[derive(Resource, Default)]
-pub struct PacketBuffer(HashMap<u8, u32>);
+pub struct PacketBuffer(BTreeMap<u8, u32>);
 
 impl PacketBuffer {
     pub fn add(&mut self, team: u8, n: u32) {
@@ -156,12 +156,14 @@ pub fn tick_spawn_stun(
 /// stays "active" until the buffer drains, peeling 12 Packets per
 /// frame off the top.
 pub fn tick_auto_dispatch(
-    auto_q: Query<(Entity, &TeamId, &AutoDispatch), Without<Dying>>,
+    auto_q: Query<(Entity, &TeamId, &AutoDispatch, &crate::net::NetId), Without<Dying>>,
     buffer: Res<PacketBuffer>,
     mut ev: MessageWriter<DispatchEvent>,
     mut commands: Commands,
 ) {
-    for (entity, team, auto) in &auto_q {
+    // Unit-id order: teleporters of one team share its buffer, and the
+    // first dispatch takes what is there (`sim`).
+    for (entity, team, auto, _) in auto_q.iter().sort::<&crate::net::NetId>() {
         if buffer.peek(team.0) == 0 {
             commands.entity(entity).remove::<AutoDispatch>();
             continue;

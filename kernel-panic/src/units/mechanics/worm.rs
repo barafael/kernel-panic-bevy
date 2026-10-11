@@ -22,11 +22,11 @@
 
 use bevy::prelude::*;
 
+use crate::units::ai::AiSeats;
 use crate::units::combat::{AimTarget, DamageQueue, Dying, PendingDamage};
 use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::weapons::WeaponId;
 use crate::units::mechanics::cloak::Cloaked;
-use crate::units::player::LocalTeam;
 
 /// Upstream `ResetAim`: `sleep 2000`, then `move head to y-axis [-16]
 /// speed [12]` + `wait-for-move` (16/12 s) before `MAX_SPEED` is
@@ -45,10 +45,11 @@ const SURFACED_SPEED_FACTOR: f32 = 0.5;
 pub struct AutoHold(pub bool);
 
 impl AutoHold {
-    /// autohold.lua's `init`: ON for the human player's team, OFF for
-    /// AI-driven teams.
-    pub fn initial(team: u8, local: u8) -> Self {
-        Self(team == local)
+    /// autohold.lua's `init` (`AddAutoHoldUnit`): ON for a human
+    /// player's team, OFF for an AI team (`Spring.GetTeamInfo`'s
+    /// `isAiTeam`, synced: the seat, never who is watching).
+    pub fn initial(ai_team: bool) -> Self {
+        Self(!ai_team)
     }
 }
 
@@ -71,14 +72,14 @@ pub struct WormSplash(pub WeaponId);
 #[allow(clippy::type_complexity)]
 pub fn init_autohold(
     mut commands: Commands,
-    local: Res<LocalTeam>,
+    ai_seats: Res<AiSeats>,
     new_units: Query<(Entity, &UnitType, &TeamId), (Added<UnitType>, Without<AutoHold>)>,
 ) {
     for (entity, unit_type, team) in &new_units {
         if unit_type.0.has_autohold() {
             commands
                 .entity(entity)
-                .insert(AutoHold::initial(team.0, local.0));
+                .insert(AutoHold::initial(ai_seats.contains(team.0)));
         }
     }
 }
@@ -180,8 +181,8 @@ mod tests {
 
     #[test]
     fn autohold_defaults_on_for_human_off_for_ai() {
-        assert_eq!(AutoHold::initial(0, 0), AutoHold(true));
-        assert_eq!(AutoHold::initial(1, 0), AutoHold(false));
+        assert_eq!(AutoHold::initial(false), AutoHold(true));
+        assert_eq!(AutoHold::initial(true), AutoHold(false));
     }
 
     /// AimWeapon1 decloaks + halves speed; ResetAim restores both once

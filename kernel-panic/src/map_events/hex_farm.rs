@@ -44,6 +44,7 @@ use crate::map_loading::TerrainChunkCoord;
 use crate::map_loading::lua_compositing::{
     HexDraw, QuadBuffer, Rgba, WHITE, atlas_material, minimap_pixels, push_hex, push_rect,
 };
+use crate::net::NetId;
 use crate::rendering::camera::RtsCamera;
 use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, spawn_smoker_at};
@@ -138,6 +139,9 @@ pub struct HexFarmView {
     /// Towers whose claimant ([`TowerClaim`]) died or went away since
     /// [`hex_farm_owners`] last ran, with that claimant.
     released: Vec<(usize, Entity)>,
+    /// Units that finished being built since [`hex_farm_owners`] last
+    /// ran (their [`Emerging`] went: [`queue_finished`]).
+    finished: Vec<Entity>,
 }
 
 /// A finished big building within `TowerRadius` of tower `.0`: it took
@@ -177,13 +181,19 @@ impl Plugin for HexFarmPlugin {
         use crate::units::GameplaySet;
         app.add_systems(
             FixedUpdate,
-            hex_farm_sim
-                .in_set(GameplaySet::Cleanup)
-                .run_if(resource_exists::<HexFarmState>),
+            (
+                hex_farm_sim.run_if(resource_exists::<HexFarmState>),
+                // Tower ownership is decided in the sim tick, on every
+                // peer alike, never on the render clock.
+                hex_farm_owners.run_if(resource_exists::<HexFarmView>),
+            )
+                .chain()
+                .in_set(GameplaySet::Cleanup),
         )
+        .add_observer(queue_finished)
         .add_systems(
             Update,
-            (hex_farm_owners, hex_farm_draw, hex_farm_labels)
+            (hex_farm_draw, hex_farm_labels)
                 .chain()
                 .run_if(resource_exists::<HexFarmView>),
         );
@@ -245,6 +255,7 @@ pub fn install(
         still_dirty: true,
         percent: HashMap::new(),
         released: Vec::new(),
+        finished: Vec::new(),
     });
     commands.insert_resource(HexFarmState { farm, frame: 0 });
     commands.insert_resource(HexFarmInbox::default());
@@ -547,23 +558,30 @@ impl HexFarmView {
 /// the tower goes to the nearest remaining finished big building within
 /// `TowerRadius`, or back to white.
 ///
-/// Runs in `Update`, every rendered frame, so `RemovedComponents<Emerging>`
-/// (cleared once per frame) loses nothing; deaths arrive through
-/// [`TowerClaim`]'s hook.
+/// Runs in the fixed tick (`Cleanup`), so every peer decides the same
+/// owners on the same tick. Builds that finish arrive through
+/// [`queue_finished`] (an observer: a `FixedUpdate` reader of
+/// `RemovedComponents` would miss removals whenever the frame rate
+/// exceeds the tick rate), deaths through [`TowerClaim`]'s hook. Units
+/// spawned already finished (map start) are `Added<UnitType>` without
+/// [`Emerging`]. Same-tick finishers claim in unit-id order (`NetId`,
+/// upstream's `UnitFinished` order), not ECS query order.
 #[allow(clippy::type_complexity)]
 fn hex_farm_owners(
     mut view: ResMut<HexFarmView>,
     state: Res<HexFarmState>,
     registry: Res<UnitRegistry>,
     spawned_finished: Query<Entity, (Added<UnitType>, Without<Emerging>)>,
-    mut finished_building: RemovedComponents<Emerging>,
     live: Query<(Entity, &Transform, &UnitType, &Faction), (Without<Emerging>, Without<Dying>)>,
+    ids: Query<&NetId>,
     mut commands: Commands,
 ) {
-    let finished: Vec<Entity> = spawned_finished
+    let mut finished: Vec<Entity> = spawned_finished
         .iter()
-        .chain(finished_building.read())
+        .chain(std::mem::take(&mut view.finished))
         .collect();
+    finished.sort_by_key(|&e| ids.get(e).ok().copied());
+    finished.dedup();
     let released = std::mem::take(&mut view.released);
     if !view.team_colored || (finished.is_empty() && released.is_empty()) {
         return;
@@ -619,6 +637,16 @@ fn hex_farm_owners(
     if owners != view.owners {
         view.owners = owners;
         view.still_dirty = true;
+    }
+}
+
+/// `UnitFinished` of a unit that was being built: its [`Emerging`] went
+/// (also on a despawn mid-build; [`hex_farm_owners`] skips the dead).
+fn queue_finished(remove: On<Remove<Emerging>>, view: Option<ResMut<HexFarmView>>) {
+    if let Some(mut view) = view
+        && view.team_colored
+    {
+        view.finished.push(remove.entity);
     }
 }
 
@@ -824,6 +852,7 @@ mod tests {
             still_dirty: false,
             percent: HashMap::new(),
             released: Vec::new(),
+            finished: Vec::new(),
         });
         world.insert_resource(HexFarmState { farm, frame: 0 });
         let mut defs = spring_tdf::UnitDefs::default();
@@ -839,6 +868,7 @@ mod tests {
             );
         }
         world.insert_resource(UnitRegistry::for_test(defs));
+        world.add_observer(queue_finished);
         let sys = world.register_system(hex_farm_owners);
         let owner = |w: &World| w.resource::<HexFarmView>().owners[0];
         let color = |f: Faction| f.color().to_linear().to_f32_array();
