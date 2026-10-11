@@ -22,7 +22,7 @@ use crate::sim::frames_to_secs;
 
 /// Compact identifier for a weapon. `Copy` so it can be cloned freely
 /// in events and components without heap traffic.
-#[derive(Component, Copy, Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(Component, Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct WeaponId(u16);
 
 impl WeaponId {

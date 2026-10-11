@@ -11,11 +11,15 @@
 //! `KP_NET_SEED`, `KP_NET_TICKS`, `KP_NET_DIFFICULTY`,
 //! `KP_NET_EXEC=single|multi`, `KP_NET_PACING=uneven|zeros|multi|even`
 //! (pacing of the second `determinism` run), `KP_NET_ID_SHIFT=<n>`
-//! (shift the second run's entity ids), `KP_NET_RUNS=1` (first run
+//! (shift the second run's entity ids), `KP_NET_LOCAL=<team>` (the
+//! second run watches as that team: its `LocalTeam`, the seats stay all
+//! AI), `KP_NET_SELECT=1` (the second run's player keeps selecting
+//! units), `KP_NET_RUNS=1` (first run
 //! only), `KP_NET_TRACE=<file>` (per-tick hashes of the first run, for
 //! cross-process diffs), `KP_NET_DUMP=<ticks>` + `KP_NET_DUMP_DIR`
 //! (readable unit dumps), `KP_NET_CSV=<file>` (per-tick numbers of
-//! `match_stats`), `KP_NET_WARMUP` / `KP_NET_RESET_FIXED` (`rematch`).
+//! `match_stats`), `KP_NET_WARMUP` / `KP_NET_WARMUP_MAP` /
+//! `KP_NET_RESET_FIXED` (`rematch`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
@@ -39,9 +43,9 @@ fn scenario_from_env() -> Scenario {
         env("KP_NET_SEED", 0x5eed_u64),
     );
     s.difficulty = env("KP_NET_DIFFICULTY", 2);
-    s.executor = match env("KP_NET_EXEC", "multi".to_string()).as_str() {
-        "single" => Executor::Single,
-        _ => Executor::Multi,
+    s.executor = match env("KP_NET_EXEC", "single".to_string()).as_str() {
+        "multi" => Executor::Multi,
+        _ => Executor::Single,
     };
     s
 }
@@ -82,15 +86,29 @@ fn run_hashes(scenario: Scenario, ticks: u64, pattern: Option<&[u32]>) -> Vec<Ti
     // nothing else changes. Divergence then means the sim depends on
     // entity ids.
     if pattern.is_some() {
+        // `KP_NET_LOCAL=t`: this peer watches as team `t` (fog, cloak
+        // fades, sounds follow it); the sim must not notice.
+        if let Ok(t) = std::env::var("KP_NET_LOCAL") {
+            let t: u8 = t.parse().expect("KP_NET_LOCAL: a team number");
+            h.world_mut()
+                .insert_resource(crate::units::player::LocalTeam(t));
+        }
         let n: usize = env("KP_NET_ID_SHIFT", 0);
         let ids: Vec<Entity> = (0..n).map(|_| h.world_mut().spawn_empty().id()).collect();
         for e in ids.into_iter().step_by(2) {
             h.world_mut().despawn(e);
         }
     }
+    // `KP_NET_SELECT=1` (paced run): this peer's player keeps selecting
+    // a different seventh of the units every frame — UI markers on sim
+    // entities, which move them between ECS tables.
+    let select = pattern.is_some() && env("KP_NET_SELECT", 0u8) == 1;
     let mut i = 0;
     while h.tick < ticks {
         if let Some(pattern) = pattern {
+            if select {
+                reselect(h.world_mut(), i);
+            }
             let want = pattern[i % pattern.len()].min((ticks - h.tick) as u32);
             h.frame(want);
             i += 1;
@@ -105,6 +123,25 @@ fn run_hashes(scenario: Scenario, ticks: u64, pattern: Option<&[u32]>) -> Vec<Ti
         }
     }
     std::mem::take(&mut h.world_mut().resource_mut::<HashLog>().ticks)
+}
+
+/// Select the units whose `NetId` is `frame` mod 7, deselect the rest.
+fn reselect(world: &mut World, frame: usize) {
+    use crate::interaction::selection::Selected;
+    use crate::net::NetId;
+    let units: Vec<(Entity, u32, bool)> = world
+        .query::<(Entity, &NetId, Has<Selected>)>()
+        .iter(world)
+        .map(|(e, id, sel)| (e, id.0, sel))
+        .collect();
+    for (e, id, selected) in units {
+        let want = id as usize % 7 == frame % 7;
+        if want && !selected {
+            world.entity_mut(e).insert(Selected);
+        } else if !want && selected {
+            world.entity_mut(e).remove::<Selected>();
+        }
+    }
 }
 
 fn first_divergence(a: &[TickHash], b: &[TickHash], f: impl Fn(&TickHash) -> u64) -> Option<usize> {
@@ -446,6 +483,11 @@ fn rematch() {
     let a = run_hashes(scenario.clone(), ticks, None);
     let mut warm = scenario.clone();
     warm.seed ^= 0xdead_beef;
+    // `KP_NET_WARMUP_MAP`: the earlier match on another map (another
+    // archetype history, like the menu's attract demo would leave).
+    if let Ok(map) = std::env::var("KP_NET_WARMUP_MAP") {
+        warm.map = map;
+    }
     let mut h = SimHarness::new(warm);
     for _ in 0..warmup {
         h.step();

@@ -152,7 +152,8 @@ After the fixes:
 Visual-only entities (CEG particles etc.) still differ under uneven pacing from about tick 1 700,
 because `Update` spawns some of them (geovent smoke). They don't feed back into the sim hash.
 
-Not fixed (listed for whoever does lockstep):
+Not fixed here (listed for whoever does lockstep). **M0.2 settled items 7–12** (11 by pinning the single-threaded executor), plus the query-order
+dependence the rematch exposed: `net-experiments/m0-nondeterminism.md`.
 
 7. **Match seed**: `game_setup::match_seed()` uses the per-launch `clock_f64`
    (`game_setup.rs:523`). It seeds the AI dice (`ai/mod.rs:148`) and the Hex Farm layout

@@ -243,6 +243,7 @@ pub fn death_system(
             &GlobalTransform,
             Option<&Infected>,
             Has<BuildDriven>,
+            &crate::net::NetId,
         ),
         (Without<Dying>, Changed<Health>),
     >,
@@ -255,7 +256,11 @@ pub fn death_system(
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
 ) {
-    for (entity, unit, health, faction, gtf, infected, being_built) in &query {
+    // Unit-id order: the death blasts and Virus spawns queue in it
+    // (`sim`).
+    for (entity, unit, health, faction, gtf, infected, being_built, _) in
+        query.iter().sort::<&crate::net::NetId>()
+    {
         if health.current <= 0.0 {
             // If the dying unit was infected, queue a Virus spawn for the
             // attacker's team at the death location (infection.lua's

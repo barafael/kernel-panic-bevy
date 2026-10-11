@@ -705,7 +705,7 @@ fn is_move_command(cmd: &QueuedCommand) -> bool {
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn hover_air_system(
     mut commands: Commands,
-    mut frame: Local<u32>,
+    tick: Res<crate::sim::SimTick>,
     registry: Res<UnitRegistry>,
     heightmap: Option<Res<Heightmap>>,
     smooth: Option<Res<SmoothGround>>,
@@ -730,13 +730,15 @@ pub fn hover_air_system(
             Has<AttackTargetOrder>,
             Has<AttackGroundOrder>,
             OrderState,
+            &crate::net::NetId,
         ),
         (Without<Emerging>, Without<Dying>),
     >,
     mut flyers: Local<Vec<Flyer>>,
     mut others: Local<Vec<(Entity, Vec3, Vec3)>>,
 ) {
-    *frame = frame.wrapping_add(1);
+    // The match's frame number: the slow-update and `& 3` phases.
+    let frame = tick.frame() as u32;
     // New aircraft get their move type once they have emerged (from
     // their pose then); only freshly spawned flyers are tracked, so the
     // ground roster isn't rescanned every frame.
@@ -767,6 +769,8 @@ pub fn hover_air_system(
     });
 
     flyers.clear();
+    // Unit-id order: each aircraft's step sees the ones flown before it
+    // (`sim`).
     for (
         entity,
         stats,
@@ -781,7 +785,8 @@ pub fn hover_air_system(
         attack_unit,
         attack_ground,
         order,
-    ) in &q
+        _,
+    ) in q.iter().sort::<&crate::net::NetId>()
     {
         // Follow-up moves only behind a plain move leg (see
         // `OrderState::steers`).
@@ -823,10 +828,10 @@ pub fn hover_air_system(
         heightmap: heightmap.as_deref(),
         world_size,
     };
-    step_with(&mut flyers, *frame, &ground, &mut others);
+    step_with(&mut flyers, frame, &ground, &mut others);
 
     for f in flyers.iter() {
-        let Ok((entity, _, mut tf, mut air, target, path, mut queue, .., order)) =
+        let Ok((entity, _, mut tf, mut air, target, path, mut queue, .., order, _)) =
             q.get_mut(f.entity)
         else {
             continue;
@@ -1066,6 +1071,7 @@ mod tests {
             },
         );
         world.insert_resource(UnitRegistry::for_test(defs));
+        world.init_resource::<crate::sim::SimTick>();
         let first = Vec3::new(200.0, 0.0, 500.0);
         let second = Vec3::new(600.0, 0.0, 500.0);
         let e = world
@@ -1090,10 +1096,12 @@ mod tests {
             ))
             .id();
         let sys = world.register_system(hover_air_system);
+        world.resource_mut::<crate::sim::SimTick>().0 += 1;
         world.run_system(sys).unwrap();
         assert!(world.get::<HoverAir>(e).is_some());
         let mut saw_second = false;
         for _ in 0..2000 {
+            world.resource_mut::<crate::sim::SimTick>().0 += 1;
             world.run_system(sys).unwrap();
             if let Some(t) = world.get::<MoveTarget>(e) {
                 saw_second |= t.0 == second;

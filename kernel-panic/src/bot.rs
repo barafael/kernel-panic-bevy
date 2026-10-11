@@ -202,6 +202,7 @@ fn bot_boot(
         demo: false,
         showcase: None,
         sandbox: true,
+        seed: crate::game_setup::random_seed(),
     });
     app_state.set(AppState::InGame);
     bot.started = true;

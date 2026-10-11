@@ -25,6 +25,7 @@ use super::components::{Health, TeamId, UnitType};
 use super::content::definitions::UnitKind;
 use super::lifecycle::spawning::Emerging;
 use super::mechanics::cloak::{Cloaked, DetectedBy, hidden_from};
+use crate::net::NetId;
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)
@@ -184,6 +185,7 @@ pub fn rebuild_spatial_index(
             &Health,
             Has<Cloaked>,
             Option<&DetectedBy>,
+            &NetId,
         ),
         // `Without<Emerging>` is a deliberate divergence from upstream:
         // Spring buildees are targetable mid-build; here the build
@@ -195,7 +197,13 @@ pub fn rebuild_spatial_index(
     >,
 ) {
     index.clear();
-    for (entity, unit_type, stats, team, tf, health, cloaked, detected_by) in &units {
+    // In unit-id order, not the ECS's (which follows the app's whole
+    // archetype history, a match or attract demo ago included): every
+    // radius query then visits a cell's units in the same order on
+    // every peer, and so do the target picks and sweeps built on it.
+    for (entity, unit_type, stats, team, tf, health, cloaked, detected_by, _) in
+        units.iter().sort::<&NetId>()
+    {
         index.push(SpatialEntry {
             entity,
             pos: tf.translation,

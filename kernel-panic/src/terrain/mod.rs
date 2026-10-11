@@ -28,6 +28,8 @@ impl Plugin for TerrainPlugin {
             .add_systems(
                 FixedUpdate,
                 reconcile_vent_claims
+                    // After this tick's commands: a `Build` claims vents.
+                    .after(crate::net::SimCommandSet)
                     .before(crate::units::ai::ai_brain)
                     .before(crate::interaction::movement::advance_command_queue)
                     .run_if(in_state(

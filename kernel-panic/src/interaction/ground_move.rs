@@ -39,9 +39,10 @@ use super::movement::{
 };
 use super::structures::crushes_features;
 use crate::map_events::CircularFlow;
+use crate::net::NetId;
 use crate::sim::{
-    GAME_SPEED, Heading, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SPRING_CIRCLE_DIVS,
-    SPRING_MAX_HEADING, SQUARE_SIZE,
+    GAME_SPEED, Heading, RngStream, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SPRING_CIRCLE_DIVS,
+    SPRING_MAX_HEADING, SQUARE_SIZE, SimRng,
 };
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AimTarget, Dying, Stunned, TargetCache};
@@ -1559,6 +1560,14 @@ pub struct MoverData {
     emerging: Has<crate::units::lifecycle::spawning::Emerging>,
     lift: Option<&'static GroundLift>,
     team: Option<&'static TeamId>,
+    /// Iteration order (`sim`).
+    net: &'static NetId,
+}
+
+/// [`movement_system`]'s random stream (impulse skid rolls).
+pub struct ImpulseRng;
+impl RngStream for ImpulseRng {
+    const SALT: u64 = 0x9E37_79B9;
 }
 
 /// Steps 1–3 for every ground unit (see the module docs); flyers are
@@ -1579,16 +1588,13 @@ pub fn movement_system(
     mut impulses: ResMut<PendingImpulses>,
     local_team: Option<Res<crate::units::player::LocalTeam>>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
-    mut rng_state: Local<u32>,
+    mut rng_state: ResMut<SimRng<ImpulseRng>>,
 ) {
     let nav = nav_set.as_deref();
     let gravity = map_gravity.as_deref().copied().unwrap_or_default().0;
     // Last frame's explosion impulses (`CUnit::ApplyImpulse`), before
     // anyone moves. Buildings and aircraft take none here
     // (`CStaticMoveType::CanApplyImpulse` is false; hover air has its own).
-    if *rng_state == 0 {
-        *rng_state = 0x9E37_79B9;
-    }
     for (entity, impulse) in impulses.0.drain(..) {
         let Ok(mut u) = query.get_mut(entity) else {
             continue;
@@ -1611,7 +1617,9 @@ pub fn movement_system(
     for bucket in avoid_grid.values_mut() {
         bucket.clear();
     }
-    for u in &query {
+    // Unit-id order here and below: avoidance sums its neighbours in
+    // snapshot order, and path requests queue in turn (`sim`).
+    for u in query.iter().sort::<&NetId>() {
         let m = u.mover;
         if u.stats.can_fly || u.stats.speed <= 0.0 {
             continue;
@@ -1662,7 +1670,7 @@ pub fn movement_system(
         })
     });
 
-    for mut u in &mut query {
+    for mut u in query.iter_mut().sort::<&NetId>() {
         if u.stats.can_fly {
             continue;
         }
@@ -2333,6 +2341,13 @@ pub fn push_vector(
     sep_dir * response * mass_scale + right1 * slide_sign * (1.0 / pen) * q2
 }
 
+/// The [`NavGridSet::revision`] [`ground_collision_system`]'s trap check
+/// has seen. Match-scoped: a new map's nav grids count from 0 again, and
+/// a revision left over from an earlier match could equal the new one
+/// and skip the first check.
+#[derive(Resource, Default)]
+pub struct TrapCheckRevision(u64);
+
 /// Steps 4–5 for every ground unit: collision response
 /// (`HandleObjectCollisions` → `HandleUnitCollisions`,
 /// `HandleStaticObjectCollision`), the `Update` that applies it,
@@ -2356,15 +2371,17 @@ pub fn ground_collision_system(
         Option<&GroundLift>,
         Has<crate::units::lifecycle::spawning::Emerging>,
         OrderState,
+        &NetId,
     )>,
     mut entries: Local<Vec<CollisionEntry>>,
     mut grid: Local<CollisionGrid>,
     mut candidates: Local<Vec<(i32, i32, usize)>>,
-    mut seen_revision: Local<u64>,
+    mut seen: ResMut<TrapCheckRevision>,
 ) {
     let nav = nav_set.as_deref();
     // Squares a structure change touched since the last pass (the trap
     // check's area), or everything when that is no longer remembered.
+    let seen_revision = &mut seen.0;
     let trapped_area = nav.and_then(|n| {
         if n.revision == *seen_revision {
             return None;
@@ -2384,7 +2401,12 @@ pub fn ground_collision_system(
         bucket.clear();
     }
     let mut max_mobile_radius = 0.0_f32;
-    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _, emerging, _) in &movers {
+    // Unit-id order, here and in the pass below: the snapshot index
+    // breaks ties between colliders, and every unit's response sees the
+    // positions the units before it reached (`sim`).
+    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _, emerging, _, _) in
+        movers.iter().sort::<&NetId>()
+    {
         if stats.can_fly || dying {
             continue;
         }
@@ -2437,8 +2459,8 @@ pub fn ground_collision_system(
     // applied after the pass (position and velocity deltas).
     let mut knocked: Vec<(Entity, Vec3)> = Vec::new();
 
-    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order) in
-        &mut movers
+    for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order, _) in
+        movers.iter_mut().sort::<&NetId>()
     {
         if stats.can_fly || stats.speed <= 0.0 || dying || emerging {
             continue;

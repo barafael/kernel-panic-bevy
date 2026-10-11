@@ -35,7 +35,7 @@ use spring_tdf::{
 
 use super::batch::FxQuadBatches;
 use crate::rng;
-use crate::sim::GAME_SPEED;
+use crate::sim::{GAME_SPEED, RngStream, SimRng};
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 
 /// Registry of every parsed CEG. Internally wraps
@@ -1023,6 +1023,13 @@ pub(super) fn tick_ceg_flames(
     }
 }
 
+/// [`tick_ceg_delayed_spawns`]'s random stream (visual, match-scoped
+/// like [`super::spawn::WeaponVisualRng`]).
+pub struct DelayedCegRng;
+impl RngStream for DelayedCegRng {
+    const SALT: u64 = 0xA3C5_9AC3;
+}
+
 /// Count down each pending recursive spawn and fire its target CEG when
 /// the timer hits zero. Despawns the timer entity after firing.
 #[allow(clippy::too_many_arguments)]
@@ -1036,7 +1043,7 @@ pub(super) fn tick_ceg_delayed_spawns(
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
     mut ceg_assets: ResMut<CegRenderAssets>,
-    mut rng: Local<u32>,
+    mut rng: ResMut<SimRng<DelayedCegRng>>,
 ) {
     if timers.is_empty() {
         return;
@@ -1106,7 +1113,7 @@ fn perpendicular_to(dir: Vec3, rand: f32) -> Vec3 {
 }
 
 /// [`rng::next_f32`] for a stream that may arrive unseeded: CEG
-/// streams live in zero-initialised `Local<u32>`s / projectile fields,
+/// streams live in zero-initialised projectile fields,
 /// so a zero state (which xorshift would never leave) is seeded on the
 /// first draw.
 fn next_unit(state: &mut u32) -> f32 {

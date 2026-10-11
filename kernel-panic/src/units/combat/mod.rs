@@ -31,7 +31,8 @@ use super::spatial::SpatialIndex;
 use super::weapon_fx::{
     AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, PendingExplosions,
 };
-use crate::sim::{SIMULATION_HZ, angle_delta, secs_to_frames};
+use crate::net::NetId;
+use crate::sim::{RngStream, SimRng, SimTick, angle_delta, secs_to_frames};
 use crate::terrain::heightmap::Heightmap;
 
 pub(crate) mod aim;
@@ -49,9 +50,9 @@ pub use aim::{
 #[cfg(test)]
 pub use damage::Infected;
 pub use damage::{
-    Armored, Attacker, BurstFire, DamageQueue, DelayedDamage, Hit, PendingDamage, VirusSpawn,
-    VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire, tick_infections,
-    update_armored,
+    Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, PendingDamage,
+    VirusSpawn, VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire,
+    tick_infections, update_armored,
 };
 pub use lifecycle::{
     Dying, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying, death_system, tick_kamikaze,
@@ -618,10 +619,16 @@ pub(super) fn fire_salvo_shot(
     }
 }
 
-/// Spring sim frame number of the current fixed tick (`gs->frameNum`),
-/// from the fixed clock (30 Hz — `GAME_SPEED`).
-pub(crate) fn sim_frame(time: &Time) -> u64 {
-    (time.elapsed_secs_f64() * SIMULATION_HZ).round() as u64
+/// `combat_system`'s random stream (`predictSpeedMod` rolls, spray).
+pub struct TargetingRng;
+impl RngStream for TargetingRng {
+    const SALT: u64 = 0xDEAD_BEEF;
+}
+
+/// `attack_ground_system`'s random stream.
+pub struct GroundFireRng;
+impl RngStream for GroundFireRng {
+    const SALT: u64 = 0xBADC_0FFE;
 }
 
 /// `salvoDelay = int(burstRate * GAME_SPEED)` (`WeaponLoader.cpp:171`):
@@ -712,7 +719,7 @@ pub struct DebugBlasted;
 /// Armed units auto-attack the nearest enemy in range.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn combat_system(
-    time: Res<Time>,
+    tick: Res<SimTick>,
     cooldowns: Query<&AttackCooldown>,
     mut attackers: Query<
         (
@@ -729,8 +736,11 @@ pub fn combat_system(
             Option<&WormSplash>,
             Option<&mut AimTarget>,
             Option<&mut TargetCache>,
-            Has<super::mechanics::command_fire::NxCast>,
-            Has<DebugBlasted>,
+            (
+                Has<super::mechanics::command_fire::NxCast>,
+                Has<DebugBlasted>,
+                &NetId,
+            ),
         ),
         (
             Without<Dying>,
@@ -754,19 +764,16 @@ pub fn combat_system(
     mut pieces: PieceLookup,
     target_pick: TargetCachePick,
     // Tupled: Bevy systems take at most 16 parameters.
-    (mut sounds, mut rng): (Option<ResMut<crate::audio::SoundQueue>>, Local<u32>),
+    (mut sounds, mut rng): (
+        Option<ResMut<crate::audio::SoundQueue>>,
+        ResMut<SimRng<TargetingRng>>,
+    ),
     // `(rank, entity, aim pos)` scratch for the deferred LOS pick.
     mut los_candidates: Local<Vec<(TargetRank, Entity, Vec3)>>,
 ) {
     let mut scratch_sounds = crate::audio::SoundQueue::default();
     let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
-    if *rng == 0 {
-        // First-tick seed only: a non-zero xorshift32 state can never
-        // emit 0, so this guard cannot re-trigger mid-game — it just
-        // keeps the `Local<u32>` default from locking the PRNG up.
-        *rng = 0xDEADBEEF;
-    }
-    let frame = sim_frame(&time);
+    let frame = tick.frame();
 
     // Why: no `damage_queue.clear()` here. The queue's lifecycle is
     // write-then-drain: this system and the weapon fx push in Simulate,
@@ -790,9 +797,8 @@ pub fn combat_system(
         worm_splash,
         mut aim_slot,
         mut cache_slot,
-        nx_cast,
-        debug_blasted,
-    ) in &mut attackers
+        (nx_cast, debug_blasted, _),
+    ) in attackers.iter_mut().sort::<&NetId>()
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0` — a
         // Pointer lining up its NX shot neither aims nor fires weapon 1,
@@ -1393,6 +1399,7 @@ pub fn attack_ground_system(
             Has<super::mechanics::command_fire::NxCast>,
             Option<&UnitStats>,
             &TeamId,
+            &NetId,
         ),
         // `CUnit::CanUpdateWeapons`: a paralyzed unit doesn't fire.
         (Without<Dying>, Without<Stunned>),
@@ -1400,18 +1407,15 @@ pub fn attack_ground_system(
     cooldowns: Query<&AttackCooldown>,
     spatial: Res<SpatialIndex>,
     mut pieces: PieceLookup,
-    time: Res<Time>,
+    tick: Res<SimTick>,
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
-    mut rng: Local<u32>,
+    mut rng: ResMut<SimRng<GroundFireRng>>,
 ) {
     let mut scratch_sounds = crate::audio::SoundQueue::default();
     let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
-    if *rng == 0 {
-        *rng = 0xBADC0FFE;
-    }
     for (
         entity,
         unit_type,
@@ -1426,7 +1430,8 @@ pub fn attack_ground_system(
         nx_cast,
         stats,
         team,
-    ) in &attackers
+        _,
+    ) in attackers.iter().sort::<&NetId>()
     {
         // pointer.bos `AimWeapon1`: `if (aimingSpecial) return 0`.
         if nx_cast {
@@ -1496,7 +1501,7 @@ pub fn attack_ground_system(
 
         // The reload is shared with `combat_system`: one weapon, one
         // `reloadStatus`.
-        let frame = sim_frame(&time);
+        let frame = tick.frame();
         if cooldowns.get(entity).is_ok_and(|cd| !cd.ready(frame)) {
             continue;
         }
@@ -1715,6 +1720,7 @@ pub fn attack_target_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::test_support::InitSim;
     use crate::units::components::{Faction, TeamId, UnitStats};
     use crate::units::content::definitions::UnitKind;
     use crate::units::spatial::{SpatialEntry, SpatialIndex};
@@ -1788,6 +1794,7 @@ mod tests {
         // --- Socket enemy alone in range: acquired as a bad target. ---
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
@@ -1836,6 +1843,7 @@ mod tests {
         // --- Socket + Bit in range: the Bit ranks ahead. ---
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
@@ -1943,6 +1951,7 @@ mod tests {
     fn combat_app(weapons: WeaponRegistry) -> App {
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
@@ -2387,9 +2396,7 @@ mod tests {
 
     fn advance_frames(app: &mut App, frames: u32) {
         for _ in 0..frames {
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_secs_f64(1.0 / 30.0));
+            crate::sim::test_support::next_frame(app.world_mut());
         }
     }
 

@@ -29,6 +29,7 @@
 //! [`Visibility`] don't race. The fog only affects rendering; the
 //! cloak's targeting rule applies to every team, AI included.
 
+use bevy::ecs::entity::{EntityHashMap, EntityHashSet};
 use bevy::prelude::*;
 
 use crate::units::assets::model_fade::{ModelMaterials, restore_model_materials};
@@ -119,7 +120,8 @@ impl Default for VisibilityRefreshTimer {
 }
 
 /// Refresh timer for `update_fog_visibility`, two ticks ahead of
-/// `update_cloak_detection`.
+/// `update_cloak_detection`. Match-scoped like the other two.
+#[derive(Resource)]
 pub struct FogRefreshTimer(f32);
 
 impl Default for FogRefreshTimer {
@@ -127,6 +129,12 @@ impl Default for FogRefreshTimer {
         Self(2.0 * SCAN_PHASE_STEP)
     }
 }
+
+/// Refresh timer for `update_cloak_detection`, whose [`DetectedBy`]
+/// masks feed targeting: sim state, so match-scoped (every match scans
+/// on the same ticks, whatever ran before).
+#[derive(Resource, Default)]
+pub struct CloakDetectionTimer(f32);
 
 /// Recompute every cloaked unit's [`DetectedBy`] mask: bit `t` is set
 /// while any living team-`t` unit with FBI `RadarDistance > 0`
@@ -141,18 +149,19 @@ impl Default for FogRefreshTimer {
 #[allow(clippy::type_complexity)]
 pub fn update_cloak_detection(
     time: Res<Time>,
-    mut timer: Local<f32>,
+    mut timer: ResMut<CloakDetectionTimer>,
     spatial: Res<crate::units::spatial::SpatialIndex>,
     detectors_q: Query<(&TeamId, &Detector, &GlobalTransform), Without<Dying>>,
     mut cloaked_q: Query<(Entity, &mut DetectedBy), With<Cloaked>>,
-    // Retained across frames so the refresh tick doesn't reallocate.
-    mut detected: Local<std::collections::HashMap<Entity, u64>>,
+    // Retained across frames so the refresh tick doesn't reallocate;
+    // cleared on every scan and only looked up (the OR is commutative).
+    mut detected: Local<EntityHashMap<u64>>,
 ) {
-    *timer += time.delta_secs();
-    if *timer < VISIBILITY_REFRESH_INTERVAL {
+    timer.0 += time.delta_secs();
+    if timer.0 < VISIBILITY_REFRESH_INTERVAL {
         return;
     }
-    *timer = 0.0;
+    timer.0 = 0.0;
 
     // Invert the scan: instead of testing every cloaked unit against
     // every detector, radius-query the shared spatial index once per
@@ -309,7 +318,7 @@ pub fn restore_cloak_fade_materials(
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn update_fog_visibility(
     time: Res<Time>,
-    mut timer: Local<FogRefreshTimer>,
+    mut timer: ResMut<FogRefreshTimer>,
     fog: Res<FogEnabled>,
     player: Res<LocalTeam>,
     unit_registry: Res<UnitRegistry>,
@@ -327,7 +336,7 @@ pub fn update_fog_visibility(
     >,
     mut commands: Commands,
     // Retained across frames so the refresh tick doesn't reallocate.
-    mut in_sight: Local<std::collections::HashSet<Entity>>,
+    mut in_sight: Local<EntityHashSet>,
 ) {
     timer.0 += time.delta_secs();
     if timer.0 < VISIBILITY_REFRESH_INTERVAL {
