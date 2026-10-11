@@ -87,6 +87,11 @@ Estimates are focused-work rough guesses.
     - wasm32 in Node, and in headless Chromium, Firefox and WebKit (wasm-bindgen-test
       or Playwright).
 
+    The workflow skeleton exists: `.github/workflows/determinism.yml` (called from
+    `ci.yml`) has the matrix, the `trail-<platform>` artifacts and the comparison
+    (`.github/scripts/compare-trails.sh`); the contract at its top says where the
+    golden logs go and which two steps the replay fills in.
+
     **Gate:** identical trails everywhere → M1. Otherwise bisect with the per-tick
     hash, fix or move the subsystem to fixed-point.
 

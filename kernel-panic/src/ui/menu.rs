@@ -1755,7 +1755,7 @@ fn readme_lines() -> Vec<String> {
     static CACHE: OnceLock<Vec<String>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let path = crate::paths::from_project_root("kernel-panic/assets/readme.txt");
+            let path = crate::paths::assets_dir().join("readme.txt");
             match std::fs::read(&path) {
                 Ok(bytes) => {
                     // The upstream readme is ISO-8859-1, which
