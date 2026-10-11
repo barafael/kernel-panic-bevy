@@ -76,6 +76,21 @@ fn run() -> Result<(), BakeError> {
             .unwrap_or_else(|| "none".into()),
     );
 
+    if !map.datavents.is_empty() {
+        let mut by_facing = [0usize; 4];
+        for vent in &map.datavents {
+            by_facing[(vent.facing % 4) as usize] += 1;
+        }
+        eprintln!(
+            "  {} datavents facing S {} / E {} / N {} / W {}",
+            map.datavents.len(),
+            by_facing[0],
+            by_facing[1],
+            by_facing[2],
+            by_facing[3],
+        );
+    }
+
     let bytes = write_baked_map(&map)?;
     std::fs::write(&output, &bytes).map_err(|error| BakeError::Write {
         path: output.clone(),

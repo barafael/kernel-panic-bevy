@@ -5,6 +5,9 @@ edition = "2024"
 description = "Parser for Spring RTS engine map files (.smf/.smt/.sd7)"
 
 [dependencies]
+# Datavent facings at bake time (`datavent`): the movers' slope limit
+# and the heightmap's slopes, the same code the game's nav grid uses.
+spring-pathfinding = { path = "../spring-pathfinding" }
 # Deterministic transcendentals: the native `.sd7` load and the `.kpmap`
 # bake run the same terrain code, and both feed the sim (workspace
 # clippy.toml).

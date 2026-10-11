@@ -25,8 +25,6 @@
 
 use bevy::prelude::*;
 
-use spring_map::map_types::MapFeature;
-
 use crate::{
     rendering::camera::RtsCamera,
     rng::{next_f32, random_unit_sphere, xorshift32},
@@ -52,6 +50,9 @@ const BUILDING_OCCUPANCY_RADIUS: f32 = 16.0;
 pub struct GeoventSmoker {
     /// World position of the vent (at ground level).
     pub pos: Vec3,
+    /// The facing a factory built here takes (`spring_map::datavent`:
+    /// `0` south … `3` west), baked with the map.
+    pub facing: u8,
     /// Seconds until the next particle emission.
     pub emit_timer: f32,
     /// Per-smoker PRNG state so each vent's jitter is independent.
@@ -120,7 +121,7 @@ const SPAWN_RADIUS: f32 = 10.0;
 const SPAWN_Y_OFFSET: f32 = -10.0;
 
 pub fn spawn_geovent_smokers(
-    features: &[MapFeature],
+    datavents: &[spring_map::map_types::Datavent],
     heightmap: &Heightmap,
     commands: &mut Commands,
     assets: &mut GeoventAssets,
@@ -131,12 +132,9 @@ pub fn spawn_geovent_smokers(
 
     let mut count = 0u32;
 
-    for feature in features {
-        if !feature.feature_type.is_geovent() {
-            continue;
-        }
-        let pos = heightmap.place(feature.x, feature.z);
-        spawn_smoker_at(commands, pos);
+    for vent in datavents {
+        let pos = heightmap.place(vent.x, vent.z);
+        spawn_smoker_at(commands, pos, vent.facing);
         count += 1;
     }
 
@@ -145,10 +143,10 @@ pub fn spawn_geovent_smokers(
     }
 }
 
-/// Spawn one [`GeoventSmoker`] at `pos`. Public so dynamic placers
-/// (HexFarm's Lua-driven `g`-flagged hexes) can route through the same
-/// path as static SMF features.
-pub fn spawn_smoker_at(commands: &mut Commands, pos: Vec3) {
+/// Spawn one [`GeoventSmoker`] at `pos` with its factory `facing`.
+/// Public so dynamic placers (HexFarm's Lua-driven `g`-flagged hexes)
+/// can route through the same path as static SMF features.
+pub fn spawn_smoker_at(commands: &mut Commands, pos: Vec3, facing: u8) {
     // Seed the per-smoker PRNG deterministically from coords so
     // identical maps produce identical jitter across runs.
     let seed = pos.x.to_bits() ^ pos.z.to_bits().rotate_left(13);
@@ -158,6 +156,7 @@ pub fn spawn_smoker_at(commands: &mut Commands, pos: Vec3) {
     commands.spawn((
         GeoventSmoker {
             pos,
+            facing,
             emit_timer: initial_timer,
             rng,
         },
@@ -549,6 +548,7 @@ mod tests {
 
     fn vent(world: &mut World, x: f32, z: f32, claimed: bool) -> Entity {
         let mut e = world.spawn(GeoventSmoker {
+            facing: 0,
             pos: Vec3::new(x, 10.0, z),
             emit_timer: 0.0,
             rng: 1,

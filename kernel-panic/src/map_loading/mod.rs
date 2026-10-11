@@ -45,7 +45,7 @@ use crate::{
 };
 use spring_map::{
     hexfarm::HexFarm,
-    map_types::{MapFeature, SmfHeader},
+    map_types::{Datavent, MapFeature, SmfHeader},
     smd_parser::MapInfo,
 };
 
@@ -690,6 +690,9 @@ struct PreparedMap {
     heightmap: Heightmap,
     smooth_ground: SmoothGround,
     nav_set: interaction::movement::NavGridSet,
+    /// Every datavent with its factory facing: the bake's, plus the
+    /// ones a Hex Farm roll added, scored against this match's nav.
+    datavents: Vec<Datavent>,
     /// Minimap terrain layer, already at minimap size.
     minimap: (Vec<u8>, u32, u32),
     /// Hex Farm: this match's layout and its skin atlas.
@@ -708,6 +711,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         mut map_info,
         terrain_types,
         lua_compositing,
+        mut datavents,
         ..
     } = spring_map;
     let void_ground = lua_compositing.is_some();
@@ -893,6 +897,34 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     nav_set.terrain_speed = terrain_speed;
     let nav_ms = t_nav.elapsed().as_secs_f64() * 1000.0;
 
+    // Vents the bake did not know (a Hex Farm roll's) get their facing
+    // from the same rule, against this match's nav grid.
+    {
+        use spring_map::datavent::{
+            MOVER_MAX_SLOPE_DEGREES, SECONDARY_FACTORY, exit_facing, facing_toward,
+        };
+        let world = (header.world_width(), header.world_depth());
+        let cap = spring_pathfinding::max_slope_from_degrees(MOVER_MAX_SLOPE_DEGREES);
+        for feature in features.iter().filter(|f| f.feature_type.is_geovent()) {
+            let known = datavents
+                .iter()
+                .any(|v| (v.x - feature.x).abs() < 1.0 && (v.z - feature.z).abs() < 1.0);
+            if known {
+                continue;
+            }
+            let from = (feature.x, feature.z);
+            let preferred = facing_toward(from, (world.0 * 0.5, world.1 * 0.5));
+            let facing = exit_facing(from, preferred, world, &SECONDARY_FACTORY, |x, z| {
+                nav_set.passable(cap, x, z)
+            });
+            datavents.push(Datavent {
+                x: feature.x,
+                z: feature.z,
+                facing,
+            });
+        }
+    }
+
     // Minimap terrain layer from the ground texture's base level (a
     // voidGround map has none: paint its towers and bridges instead).
     let (mm_w, mm_h) = ui::minimap::minimap_dims(header.world_width(), header.world_depth());
@@ -927,6 +959,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
         heightmap,
         smooth_ground,
         nav_set,
+        datavents,
         minimap: (minimap_pixels, mm_w, mm_h),
         hex_farm,
     }
@@ -960,6 +993,7 @@ fn spawn_prepared_map(
         heightmap,
         smooth_ground,
         nav_set,
+        datavents,
         minimap,
         hex_farm,
     } = prepared;
@@ -979,7 +1013,7 @@ fn spawn_prepared_map(
 
     spawn_terrain(
         chunks,
-        &features,
+        &datavents,
         &heightmap,
         terrain_material,
         &mut ctx.commands,
@@ -1108,7 +1142,7 @@ fn setup_camera(
 #[allow(clippy::too_many_arguments)]
 fn spawn_terrain(
     chunks: Vec<TerrainChunk>,
-    features: &[MapFeature],
+    datavents: &[Datavent],
     heightmap: &Heightmap,
     terrain_material: Handle<StandardMaterial>,
     commands: &mut Commands,
@@ -1133,7 +1167,7 @@ fn spawn_terrain(
     }
 
     spawn_geovent_smokers(
-        features,
+        datavents,
         heightmap,
         commands,
         geovent_assets,

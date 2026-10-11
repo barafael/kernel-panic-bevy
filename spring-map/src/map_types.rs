@@ -257,6 +257,15 @@ impl std::fmt::Display for FeatureType {
     }
 }
 
+/// A datavent (geovent feature) with the facing a factory built on it
+/// takes (`crate::datavent`): `0` south, `1` east, `2` north, `3` west.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Datavent {
+    pub x: f32,
+    pub z: f32,
+    pub facing: u8,
+}
+
 /// A single feature placement on the map.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MapFeature {

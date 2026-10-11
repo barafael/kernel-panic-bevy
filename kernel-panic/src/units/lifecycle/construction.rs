@@ -42,10 +42,10 @@ use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use super::production::{BuggerOff, BuggerOffRequests, PendingFadeInstall};
-use super::spawning::{BuildDriven, EmergeStyle, Emerging, SpawnContext, spawn_unit};
+use super::spawning::{BuildDriven, EmergeStyle, Emerging, SpawnContext, spawn_unit_facing};
 use crate::interaction::movement::{MovePath, MoveTarget, QueuedCommand};
 use crate::net::NetId;
-use crate::sim::SQUARE_SIZE;
+use crate::sim::{Heading, SQUARE_SIZE};
 use crate::units::combat::{Dying, Stunned};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -409,6 +409,7 @@ pub fn tick_construction(
     >,
     mut frames: Query<(&mut Emerging, &mut BuildDriven), Without<Dying>>,
     live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
+    vents: Query<&crate::terrain::geovent::GeoventSmoker>,
     mut ctx: SpawnContext,
     mut hex_farm: Option<ResMut<crate::map_events::hex_farm::HexFarmInbox>>,
 ) {
@@ -462,11 +463,19 @@ pub fn tick_construction(
                 // script sinks and raises pieces with
                 // `BUILD_PERCENT_LEFT`.
                 let style = faction.emerge_style();
-                let new_entity = spawn_unit(
+                // A factory on a datavent fronts the vent's baked facing
+                // (`spring_map::datavent`); anything else keeps the
+                // engine's default, south.
+                let heading = vents
+                    .iter()
+                    .find(|v| v.pos.distance_squared(constructing.site) < 1.0)
+                    .map_or(Heading::default(), |v| Heading::from_facing(v.facing));
+                let new_entity = spawn_unit_facing(
                     constructing.kind,
                     *faction,
                     team.0,
                     constructing.site,
+                    heading,
                     &mut ctx,
                 );
                 ctx.commands.entity(new_entity).insert((

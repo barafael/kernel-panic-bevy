@@ -1,4 +1,5 @@
 pub mod baked;
+pub mod datavent;
 pub mod gadget_bake;
 pub mod hexfarm;
 // Source-archive extraction is native-only: `sevenz-rust` assumes
@@ -70,6 +71,9 @@ pub struct SpringMap {
     pub terrain_types: TerrainTypes,
     pub smf_data: Vec<u8>,
     pub lua_compositing: Option<LuaCompositing>,
+    /// Every geovent with the facing a factory on it takes
+    /// ([`datavent::datavent_facings`]).
+    pub datavents: Vec<map_types::Datavent>,
 }
 
 /// Load a Spring map from a .sd7, .sdz, or raw .smf file.
@@ -132,6 +136,7 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         .as_deref()
         .map(smd_parser::parse_terrain_types)
         .unwrap_or_default();
+    let datavents = datavent::datavent_facings(&parsed, &terrain_types);
 
     Ok(SpringMap {
         parsed,
@@ -140,6 +145,7 @@ pub fn load_map(path: &Path) -> Result<SpringMap, MapError> {
         terrain_types,
         smf_data: extracted.smf_data,
         lua_compositing,
+        datavents,
     })
 }
 

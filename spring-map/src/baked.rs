@@ -31,6 +31,8 @@
 //!                self-describing, so the extra trailing field needs
 //!                the version bump; v1-v3 bodies still decode as a bare
 //!                `BakedMap` with no compositing.
+//!   kpmapv6\0  = as v5, plus every geovent's factory facing in
+//!                `BakedMap::datavents` (`crate::datavent`).
 //!   kpmapv5\0  = ZSTD(postcard(BakedMap, Option<LuaCompositing>,
 //!                BakedTerrain)): v4's body followed by the SMF typemap
 //!                and the per-type move speeds (terrain types — fast
@@ -54,7 +56,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::map_types::{
-    GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError, TerrainTypes,
+    Datavent, GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError, TerrainTypes,
 };
 use crate::smd_parser::MapInfo;
 use crate::{LuaCompositing, SpringMap};
@@ -65,8 +67,8 @@ const MAGIC_PREFIX: &[u8; 6] = b"kpmapv";
 /// (level 19 at bake time — bake is native and offline, so the
 /// slowest-but-smallest setting is free at load) and appends the Lua
 /// compositing data and the terrain types.
-pub const FORMAT_VERSION: u8 = 5;
-const MAGIC: &[u8; 8] = b"kpmapv5\0";
+pub const FORMAT_VERSION: u8 = 6;
+const MAGIC: &[u8; 8] = b"kpmapv6\0";
 
 /// v5's trailing terrain section.
 #[derive(Serialize, Deserialize)]
@@ -120,6 +122,8 @@ struct BakedMap<'a> {
     /// actually ship over HTTP for the WASM build).
     #[serde(borrow)]
     ground_texture: Option<BakedTexture<'a>>,
+    /// v6: every geovent with its factory facing (`crate::datavent`).
+    datavents: Vec<Datavent>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -201,6 +205,7 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
         metalmap: map.parsed.metalmap.clone(),
         features: map.parsed.features.clone(),
         map_info: map.map_info.clone(),
+        datavents: map.datavents.clone(),
         ground_texture: map.ground_texture.as_ref().map(|g| BakedTexture {
             width: g.width as u32,
             height: g.height as u32,
@@ -296,6 +301,7 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         types: terrain_types,
     } = terrain;
     let BakedMap {
+        datavents,
         map_x,
         map_y,
         min_height,
@@ -398,6 +404,7 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         ground_texture,
         map_info,
         terrain_types,
+        datavents,
         // No raw .smf bytes round-trip: the only consumer that ever
         // looked at them was the SMT decoder, which already ran during
         // bake. Anyone needing this in future would add it here.
@@ -431,6 +438,11 @@ mod tests {
                 metalmap,
                 typemap: vec![0, 1, 2, 3],
             },
+            datavents: vec![Datavent {
+                x: 100.0,
+                z: 100.0,
+                facing: 1,
+            }],
             ground_texture: Some(GroundTexture {
                 width: 2,
                 height: 2,
@@ -503,6 +515,7 @@ mod tests {
         assert_eq!(loaded.parsed.metalmap, original.parsed.metalmap);
         assert_eq!(loaded.parsed.features.len(), 1);
         assert_eq!(loaded.parsed.features[0].feature_type, FeatureType::GeoVent);
+        assert_eq!(loaded.datavents, sample_map().datavents);
 
         let g = loaded.ground_texture.as_ref().unwrap();
         assert_eq!(g.width, 2);

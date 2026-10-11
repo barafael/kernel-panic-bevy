@@ -179,6 +179,17 @@ impl Heading {
             _ => 2,
         }
     }
+
+    /// `GetHeadingFromFacing`: a build facing (`0` south … `3` west,
+    /// `spring_map::datavent`) as the heading it fronts.
+    pub fn from_facing(facing: u8) -> Self {
+        Heading(match facing % 4 {
+            0 => 0,
+            1 => 16384,
+            2 => i16::MIN,
+            _ => -16384,
+        })
+    }
 }
 
 /// Duration in seconds of `frames` sim frames.
@@ -422,6 +433,21 @@ pub fn assert_float_env() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A build facing fronts the quarter heading `facing()` reads back.
+    #[test]
+    fn facing_round_trips_through_heading() {
+        for facing in 0..4u8 {
+            let heading = Heading::from_facing(facing);
+            assert_eq!(heading.facing(), facing as u32, "facing {facing}");
+            let v = heading.to_vector();
+            let (fx, fz) = spring_map::datavent::facing_vector(facing);
+            assert!(
+                (v.x - fx).abs() < 1e-3 && (v.y - fz).abs() < 1e-3,
+                "{facing}: {v:?}"
+            );
+        }
+    }
 
     /// Guards the build configuration lockstep depends on: `ops` and
     /// glam really route through the pure-Rust `libm` (bevy's `libm`

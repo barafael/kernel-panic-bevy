@@ -435,7 +435,14 @@ fn hex_farm_sim(
             }
             HexFarmEvent::VentAdded(k) => {
                 let h = &farm.hexes[k];
-                spawn_smoker_at(&mut commands, Vec3::new(h.x as f32, h.y as f32, h.z as f32));
+                let pos = Vec3::new(h.x as f32, h.y as f32, h.z as f32);
+                // A vent the farm adds mid-match: the original's rule
+                // alone (the hex ring is open all round).
+                let facing = heightmap.as_deref().map_or(0, |hm| {
+                    let (w, d) = hm.world_size();
+                    spring_map::datavent::facing_toward((pos.x, pos.z), (w * 0.5, d * 0.5))
+                });
+                spawn_smoker_at(&mut commands, pos, facing);
             }
             HexFarmEvent::VentsRemoved(k) => {
                 for (e, smoker) in &smokers {

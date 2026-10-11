@@ -695,6 +695,7 @@ mod tests {
         let fresh = Vec3::new(400.0, 0.0, 0.0);
         let fresh_vent = world
             .spawn(GeoventSmoker {
+                facing: 0,
                 pos: fresh,
                 emit_timer: 0.0,
                 rng: 0,
@@ -841,6 +842,7 @@ mod tests {
         let site = Vec3::new(10.0, 2.0, -4.0);
         let vent = world
             .spawn(GeoventSmoker {
+                facing: 0,
                 pos: site,
                 emit_timer: 0.0,
                 rng: 0,

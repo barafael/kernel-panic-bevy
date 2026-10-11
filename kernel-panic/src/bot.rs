@@ -19,7 +19,9 @@
 //! - `move <sel> <x> <z>` — replace the selection's orders with a move;
 //!   `queue <sel> <x> <z>` appends one instead (shift-move).
 //! - `attackmove <sel> <x> <z>`, `attack <sel> <id>`, `stop <sel>`,
-//!   `kill <sel>` (removes the units outright).
+//!   `kill <sel>` (removes the units outright: no death blast, no death
+//!   script), `hp <sel> <value>` (sets health; `0` kills through the
+//!   normal death path, blast and all).
 //! - `cam <x> <z> [distance]` — snap the camera onto that ground point.
 //! - `shot <name>` — screenshot to `<dir>/<name>.png`.
 //! - `speed <factor>`, `pause`, `resume` — the game clock.
@@ -425,6 +427,23 @@ fn bot_tick(
                     crate::interaction::clear_orders(&mut ctx.commands.entity(*e));
                 }
                 bot.log(&format!("stop {} units", targets.len()));
+            }
+            "hp" => {
+                let sel = it.next().unwrap_or("");
+                let Some(value) = f(it.next()) else {
+                    bot.log(&format!("bad hp: {line}"));
+                    continue;
+                };
+                let targets = select(sel, &bot, &units);
+                for e in &targets {
+                    if let Some(max) = units.get(*e).ok().and_then(|u| u.health.map(|h| h.max)) {
+                        ctx.commands.entity(*e).try_insert(Health {
+                            current: value,
+                            max,
+                        });
+                    }
+                }
+                bot.log(&format!("hp {value} on {} units", targets.len()));
             }
             "kill" => {
                 let targets = select(it.next().unwrap_or(""), &bot, &units);

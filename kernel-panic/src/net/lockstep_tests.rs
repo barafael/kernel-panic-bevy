@@ -133,6 +133,7 @@ fn spawn_units(h: &mut Harness, ai: bool) {
             .enumerate()
         {
             h.world.spawn(crate::terrain::geovent::GeoventSmoker {
+                facing: 0,
                 pos: Vec3::new(pos.0, 0.0, pos.1),
                 emit_timer: 0.0,
                 rng: i as u32 + 1,
