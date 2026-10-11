@@ -217,6 +217,7 @@ impl SoundQueue {
     }
 
     /// Requests waiting for the next drain (tests).
+    #[cfg(test)]
     pub fn pending(&self) -> &[SoundRequest] {
         &self.requests
     }

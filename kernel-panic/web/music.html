@@ -96,7 +96,7 @@
 <main>
   <header>
     <h1>Kernel Panic<small>soundtrack &amp; sounds</small></h1>
-    <a class="back" href="./">← back to the game</a>
+    <a class="back" href="./">&laquo; back to the game</a>
   </header>
 
   <nav role="tablist" aria-label="Sections">
@@ -200,11 +200,11 @@
       t.setAttribute('aria-selected', on ? 'true' : 'false');
       $(t.getAttribute('aria-controls')).hidden = !on;
     });
-    if (location.hash.slice(1) !== id) history.replaceState(null, '', '#' + id);
+    if (location.hash !== '#/' + id) history.replaceState(null, '', '#/' + id);
   }
   tabs.forEach(function (t) { t.addEventListener('click', function () { showTab(t.getAttribute('aria-controls')); }); });
-  var hash = location.hash.slice(1);
-  if (['music', 'sfx', 'credits'].indexOf(hash) >= 0) showTab(hash);
+  var hash = (location.hash.match(/^#\/(music|sfx|credits)/) || [])[1];
+  if (hash) showTab(hash);
 
   // --- music list ---
   function rebuildOrder() {
@@ -398,7 +398,7 @@
   fetch(MUSIC + 'catalog.json').then(function (r) { if (!r.ok) throw r; return r.json(); }).then(function (cat) {
     state.tracks = (cat.tracks || []).map(function (t, i) { t.index = i; return t; });
     rebuildOrder(); renderTracks();
-    var want = (location.hash.match(/t=([^&]+)/) || [])[1];
+    var want = (location.hash.match(/[?&]t=([^&]+)/) || [])[1];
     if (want) {
       var t = state.tracks.filter(function (x) { return x.file === decodeURIComponent(want); })[0];
       if (t) { state.pos = state.order.indexOf(t.index); markCurrent(); }

@@ -1723,7 +1723,7 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 - The Touhou faction characters were inspired by ZUN's works
 - Many thanks to lurker, Quantum, and the rest of #lua crew
 - Reimplementation in Rust + Bevy, from the original Spring mod";
-    LabelSpec::new(CREDITS, page_size * 24.0 / 30.0, (0.5, 0.78), Anchor::Ct)
+    LabelSpec::new(CREDITS, page_size * 22.0 / 30.0, (0.5, 0.78), Anchor::Ct)
         .frame(TEAL)
         .justify(Justify::Left)
         .spawn(commands, root);
