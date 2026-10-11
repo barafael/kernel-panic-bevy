@@ -293,6 +293,14 @@ pub fn spatial_gain(distance: f32, camera_height: f32) -> f32 {
     REFERENCE_DIST / (REFERENCE_DIST + rolloff * (distance.max(REFERENCE_DIST) - REFERENCE_DIST))
 }
 
+/// Port tuning on top of the engine's falloff: OpenAL's inverse
+/// distance model with the engine's rolloff of 5 leaves a unit at the
+/// camera's focus at a gain of 0.06 from the default camera (800 elmos
+/// out), inaudible under the music. Every positioned sound is boosted
+/// by this much and capped at 1, so the battle under the camera is
+/// heard at normal zoom and nothing clips when zoomed right in.
+const SPATIAL_BOOST: f32 = 6.0;
+
 /// Below this linear gain a sound is dropped rather than spawned: it
 /// would be inaudible and the mixer has `MAX_SOUNDS` slots.
 const MIN_GAIN: f32 = 0.005;
@@ -350,10 +358,20 @@ fn play_queued_sounds(
             break;
         }
         let gain = match (request.pos, listener) {
-            (Some(pos), Some(cam)) => spatial_gain(pos.distance(cam), camera_height),
+            (Some(pos), Some(cam)) => {
+                (spatial_gain(pos.distance(cam), camera_height) * SPATIAL_BOOST).min(1.0)
+            }
             _ => 1.0,
         };
         let volume = gain * settings.audio.linear(request.channel.knob());
+        // `RUST_LOG=kernel_panic::audio=debug` lists every effect with
+        // the gain it plays at (or is dropped at), for tuning the mix.
+        debug!(
+            "audio: {} on {:?} gain {volume:.3}{}",
+            request.sound.name(),
+            request.channel,
+            if volume < MIN_GAIN { " (dropped)" } else { "" }
+        );
         if volume < MIN_GAIN {
             continue;
         }

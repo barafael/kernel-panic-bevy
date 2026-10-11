@@ -31,6 +31,7 @@ use bevy::prelude::*;
 use bevy::text::FontSize;
 use bevy::ui::ComputedStackIndex;
 
+use crate::audio::music::{MusicCatalog, MusicControl, MusicPlayer};
 use crate::game_setup::{
     AppState, DevOptions, GameOverDismissed, Grouping, RunGame, SkirmishConfig, build_setup,
     demo_setup, describe_setup, showcase_setup,
@@ -97,7 +98,7 @@ impl Plugin for MenuPlugin {
                     maintain_esc_menu.run_if(in_state(AppState::InGame)),
                     // After the page builders: a freshly drawn Settings
                     // page shows the rate this same frame.
-                    fps_readout
+                    (fps_readout, music_readout)
                         .after(maintain_launch_menu)
                         .after(maintain_esc_menu),
                     game_over_watch.run_if(in_state(AppState::InGame)),
@@ -221,6 +222,8 @@ enum MenuAction {
     SetVolume(VolumeKnob, u8),
     /// Esc overlay: show / hide the Audio page inside Settings.
     EscAudio(bool),
+    /// The music cluster (main page, Esc overlay): previous / pause / next.
+    Music(MusicControl),
 }
 
 // ---------------------------------------------------------------------------
@@ -578,10 +581,13 @@ fn title(commands: &mut Commands, parent: Entity, font_size: f32) {
     commands.entity(parent).add_child(entity);
 }
 
-/// Window-height-derived font sizes, matching the original's vsy ratios:
-/// `vsy/14` title, `vsy/20` main menu, `vsy/24` pages, `vsy/28` lists.
+/// Window-height-derived font sizes. The original's ratios are `vsy/14`
+/// title, `vsy/20` main menu, `vsy/24` pages, `vsy/28` lists; the
+/// title and the main menu's plates are a quarter larger here (the
+/// original's were sized for 4:3 screens at 1024×768 and read small on
+/// a widescreen window), the dense pages keep the original ratios.
 fn vsizes(height: f32) -> (f32, f32, f32, f32) {
-    (height / 14.0, height / 20.0, height / 24.0, height / 28.0)
+    (height / 11.0, height / 16.0, height / 24.0, height / 28.0)
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +637,7 @@ struct MenuFlow<'w> {
     game_state: ResMut<'w, NextState<GameState>>,
     run_game: MessageWriter<'w, RunGame>,
     exit: MessageWriter<'w, AppExit>,
+    music: MessageWriter<'w, MusicControl>,
 }
 
 /// What a match (or the demo behind the menu) is built from: the map
@@ -772,6 +779,9 @@ fn handle_menu_actions(
                 render.fullscreen = false;
             }
             MenuAction::SetVolume(knob, v) => render.audio.set(knob, v),
+            MenuAction::Music(control) => {
+                flow.music.write(control);
+            }
         }
     }
 }
@@ -1026,6 +1036,9 @@ struct LaunchMenuInputs<'w> {
     settings: SettingsView<'w>,
     /// The attract-mode demo behind the menu; the main page names its map.
     demo: Option<Res<'w, crate::game_setup::GameSetup>>,
+    /// The music player; the main page's bottom-left cluster drives it.
+    music: Res<'w, MusicPlayer>,
+    music_catalog: Res<'w, MusicCatalog>,
 }
 
 fn maintain_launch_menu(
@@ -1042,6 +1055,8 @@ fn maintain_launch_menu(
         readme,
         settings,
         demo,
+        music,
+        music_catalog,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings, the
@@ -1067,7 +1082,14 @@ fn maintain_launch_menu(
     match *page {
         MenuPage::Main => {
             let demo_map = demo.as_deref().filter(|d| d.demo).map(|d| d.map.as_str());
-            main_menu_page(&mut commands, root, title_size, menu_size, demo_map)
+            main_menu_page(
+                &mut commands,
+                root,
+                title_size,
+                menu_size,
+                demo_map,
+                (music, music_catalog),
+            )
         }
         MenuPage::QuickSkirmish => quick_skirmish_page(&mut commands, root, page_size),
         MenuPage::AdvancedSkirmish => {
@@ -1101,16 +1123,19 @@ fn maintain_launch_menu(
 ///
 /// `demo_map` is the map the attract-mode demo is playing behind the
 /// menu, named in the bottom-right corner between small `<` / `>`
-/// buttons that cycle it through the catalog.
+/// buttons that cycle it through the catalog. The bottom-left corner
+/// holds the music cluster.
 fn main_menu_page(
     commands: &mut Commands,
     root: Entity,
     title_size: f32,
     menu_size: f32,
     demo_map: Option<&str>,
+    music: (&MusicPlayer, &MusicCatalog),
 ) {
     title(commands, root, title_size);
     demo_map_cycler(commands, root, menu_size * 0.5, demo_map);
+    music_controls(commands, root, menu_size * 0.5, music.0, music.1);
     // No Quit on the web: a page has nothing to quit to.
     let mut entries: Vec<(&str, Color, MenuAction)> = vec![
         (
@@ -1197,6 +1222,112 @@ fn demo_map_cycler(commands: &mut Commands, root: Entity, font_size: f32, demo_m
         .id();
     let next = arrow(commands, ">", 1);
     commands.entity(row).add_children(&[prev, name, next]);
+}
+
+/// The track name in the music cluster, rewritten in place by
+/// [`music_readout`].
+#[derive(Component)]
+struct MusicTrackReadout;
+
+/// The cluster's play / pause button; its label follows the player.
+#[derive(Component)]
+struct MusicPauseButton;
+
+/// The play / pause button shows what a press will do.
+fn pause_label(paused: bool) -> &'static str {
+    if paused { ">" } else { "||" }
+}
+
+/// Bottom-left corner: `|<  >/||  >|  Artist - Title`. Previous, pause /
+/// play and next for the music player, which runs behind the menu as
+/// well as in a match (`audio::music`). Only the texts change
+/// afterwards, in place, so the page is not redrawn for it.
+fn music_controls(
+    commands: &mut Commands,
+    root: Entity,
+    font_size: f32,
+    player: &MusicPlayer,
+    catalog: &MusicCatalog,
+) {
+    let (mut node, transform) = anchored(0.01, 0.02, Anchor::Lb);
+    node.flex_direction = FlexDirection::Row;
+    node.align_items = AlignItems::Center;
+    node.column_gap = Val::Px(font_size * 0.4);
+    let row = commands.spawn((node, transform, Pickable::IGNORE)).id();
+    commands.entity(root).add_child(row);
+
+    let button = |commands: &mut Commands, label: &str, control: MusicControl| {
+        let text = spawn_button_text(commands, label, font_size);
+        let node = Node {
+            padding: frame_padding(font_size),
+            border: frame_border(font_size),
+            justify_content: JustifyContent::Center,
+            ..default()
+        };
+        commands
+            .spawn((
+                MenuButton {
+                    action: MenuAction::Music(control),
+                    base: TEAL,
+                },
+                node,
+                fill(TEAL),
+                border(TEAL),
+            ))
+            .add_child(text)
+            .id()
+    };
+    let prev = button(commands, "|<", MusicControl::Previous);
+    let pause = button(
+        commands,
+        pause_label(player.paused),
+        MusicControl::TogglePause,
+    );
+    commands.entity(pause).insert(MusicPauseButton);
+    let next = button(commands, ">|", MusicControl::Next);
+    let name = commands
+        .spawn((
+            MusicTrackReadout,
+            Text::new(player.track_label(catalog)),
+            TextColor(TEXT_WHITE),
+            TextFont {
+                font_size: FontSize::Px(font_size),
+                ..default()
+            },
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
+            Pickable::IGNORE,
+        ))
+        .id();
+    commands
+        .entity(row)
+        .add_children(&[prev, pause, next, name]);
+}
+
+/// Keep the music cluster's texts current: the track name and the
+/// pause button's label. Written only when they change, like
+/// [`fps_readout`].
+fn music_readout(
+    player: Res<MusicPlayer>,
+    catalog: Res<MusicCatalog>,
+    mut names: Query<&mut Text, With<MusicTrackReadout>>,
+    toggles: Query<&Children, With<MusicPauseButton>>,
+    mut texts: Query<&mut Text, Without<MusicTrackReadout>>,
+) {
+    let label = player.track_label(&catalog);
+    for mut text in &mut names {
+        if text.0 != label {
+            text.0.clone_from(&label);
+        }
+    }
+    let wanted = pause_label(player.paused);
+    for children in &toggles {
+        let mut texts = texts.iter_many_mut(children).matched();
+        while let Some(mut text) = texts.fetch_next() {
+            if text.0 != wanted {
+                text.0 = wanted.to_string();
+            }
+        }
+    }
 }
 
 /// Page heading in the original's style: a blue plate at the top
@@ -1411,11 +1542,19 @@ fn audio_page(
     .spawn(commands, root);
 }
 
+/// The choices of a [`choice_rows`] row run from this x to
+/// [`CHOICES_END`]: 80 % of the width, the label right-aligned just
+/// left of it.
+const CHOICES_START: f32 = 0.18;
+const CHOICES_END: f32 = 0.98;
+
 /// Draw labelled rows of mutually exclusive choices, the current pick
-/// brightened. Row label on the left (`rc` at x=30%), its choices stepping
-/// right from x=34% in even boxes sized to the row's longest label; rows
-/// 9.5% apart down from y=72%. A monospace glyph is ~0.6 em wide, plus
-/// the frame's padding.
+/// brightened. Row label on the left (`rc` just before
+/// [`CHOICES_START`]), its choices stepping right from there in even
+/// boxes sized to the row's longest label, never wider than what fits
+/// before [`CHOICES_END`] (six volume steps on a wide window used to
+/// run off the screen); rows 9.5% apart down from y=72%. A monospace
+/// glyph is ~0.6 em wide, plus the frame's padding.
 fn choice_rows(
     commands: &mut Commands,
     root: Entity,
@@ -1432,8 +1571,8 @@ fn choice_rows(
             .map(|(text, _, _)| text.chars().count())
             .max()
             .unwrap_or(0);
-        let step = ((longest as f32 + 2.5) * glyph).max(0.12);
-        LabelSpec::new(name, size, (0.3, y), Anchor::Rc)
+        let step = choice_step(longest, glyph, choices.len());
+        LabelSpec::new(name, size, (CHOICES_START - 0.04, y), Anchor::Rc)
             .frame(color)
             .spawn(commands, root);
         for (j, (text, action, chosen)) in choices.into_iter().enumerate() {
@@ -1441,7 +1580,7 @@ fn choice_rows(
                 &text,
                 color,
                 size,
-                (0.34 + step * j as f32, y),
+                (CHOICES_START + step * j as f32, y),
                 Anchor::Lc,
                 action,
             )
@@ -1450,6 +1589,14 @@ fn choice_rows(
             .spawn(commands, root);
         }
     }
+}
+
+/// The x step (window fraction) between a row's `count` choice boxes:
+/// the longest label plus padding at `glyph` width each, at least 12 %,
+/// and never more than an even share of the choices' span.
+fn choice_step(longest: usize, glyph: f32, count: usize) -> f32 {
+    let natural = ((longest as f32 + 2.5) * glyph).max(0.12);
+    natural.min((CHOICES_END - CHOICES_START) / count.max(1) as f32)
 }
 
 fn fps_text(fps: Option<f64>) -> String {
@@ -1942,6 +2089,8 @@ fn maintain_esc_menu(
     esc_settings: Res<EscSettingsOpen>,
     esc_audio: Res<EscAudioOpen>,
     settings: SettingsView,
+    music: Res<MusicPlayer>,
+    music_catalog: Res<MusicCatalog>,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
@@ -2023,6 +2172,9 @@ fn maintain_esc_menu(
     )
     .min_width(20.0)
     .spawn(&mut commands, root);
+    // The same music cluster as the main page: skipping a track mid-match
+    // is what the overlay is for.
+    music_controls(&mut commands, root, size * 0.5, &music, &music_catalog);
 }
 
 #[derive(Component)]
@@ -2439,6 +2591,51 @@ mod tests {
         assert_eq!(step_catalog_index(None, 1, 5), 0);
         assert_eq!(step_catalog_index(None, -1, 5), 4);
         assert_eq!(step_catalog_index(Some(0), 1, 1), 0);
+    }
+
+    /// Six volume steps on a 2560-wide window fit before the right
+    /// edge; four short MSAA choices keep their natural 12 % boxes.
+    #[test]
+    fn choice_rows_fit_the_window() {
+        let glyph = 0.6 * (1440.0 / 24.0 * 0.85) / 2560.0;
+        let volume = choice_step(4, glyph, 6);
+        assert!(CHOICES_START + volume * 6.0 <= CHOICES_END + 1e-6);
+        assert!(volume > 0.1);
+        assert_eq!(choice_step(3, glyph, 4), 0.12);
+    }
+
+    #[test]
+    fn pause_label_shows_what_a_press_does() {
+        assert_eq!(pause_label(false), "||");
+        assert_eq!(pause_label(true), ">");
+    }
+
+    /// The cluster's name text and pause label follow the player.
+    #[test]
+    fn music_readout_writes_the_cluster_texts() {
+        let mut app = App::new();
+        app.insert_resource(MusicCatalog {
+            tracks: vec!["music/lo-bat--hello.ogg".into()],
+        })
+        .init_resource::<MusicPlayer>()
+        .add_systems(Update, music_readout);
+        let name = app
+            .world_mut()
+            .spawn((MusicTrackReadout, Text::new("")))
+            .id();
+        let label = app.world_mut().spawn(Text::new(pause_label(false))).id();
+        app.world_mut().spawn(MusicPauseButton).add_child(label);
+
+        app.update();
+        assert_eq!(app.world().get::<Text>(name).unwrap().0, "");
+        assert_eq!(app.world().get::<Text>(label).unwrap().0, "||");
+
+        let mut player = app.world_mut().resource_mut::<MusicPlayer>();
+        player.current = Some(0);
+        player.paused = true;
+        app.update();
+        assert_eq!(app.world().get::<Text>(name).unwrap().0, "Lo Bat - Hello");
+        assert_eq!(app.world().get::<Text>(label).unwrap().0, ">");
     }
 
     #[test]
