@@ -5,6 +5,7 @@ mod game_setup;
 mod interaction;
 mod map_events;
 mod map_loading;
+mod net;
 mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 mod profile;
@@ -192,6 +193,7 @@ fn main() {
     .add_plugins((
         RenderingPlugin,
         InteractionPlugin,
+        net::CommandBusPlugin,
         UiPlugin,
         UnitsPlugin,
         TerrainPlugin,

@@ -5,7 +5,7 @@ pub mod debug_movement;
 pub mod ground_move;
 pub mod movement;
 #[cfg(test)]
-mod movement_harness;
+pub(crate) mod movement_harness;
 pub(crate) mod selection;
 pub mod structures;
 
@@ -148,7 +148,9 @@ impl Plugin for InteractionPlugin {
         // Produce runs.
         .add_systems(
             FixedUpdate,
-            unit_motion_systems().before(crate::units::GameplaySet::Produce),
+            unit_motion_systems()
+                .after(crate::net::SimCommandSet)
+                .before(crate::units::GameplaySet::Produce),
         )
         // Command-line gizmos draw from `Update` on variable dt —
         // pure visuals. No ordering edge against `movement_system`

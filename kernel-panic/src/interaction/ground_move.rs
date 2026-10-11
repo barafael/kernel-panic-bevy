@@ -573,6 +573,7 @@ pub enum Progress {
 /// Per-unit ground move state (`CGroundMoveType`'s members) plus the
 /// unit's `MoveDef` geometry.
 #[derive(Component, Clone, Debug)]
+#[component(on_add = crate::net::rephase_ground_mover)]
 pub struct GroundMover {
     // --- MoveDef / UnitDef (static) ---
     /// Footprint half-size in heightmap squares (`MoveDef::xsizeh`).

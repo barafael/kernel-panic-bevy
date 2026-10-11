@@ -33,8 +33,8 @@ use crate::map_loading::MatchScopeAppExt;
 use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
-use crate::interaction::movement::{CommandQueue, Orders, QueuedCommand};
-use crate::interaction::selection::{Selected, apply_ordered_command, ground_hit_filtered};
+use crate::interaction::movement::{CommandQueue, QueuedCommand};
+use crate::interaction::selection::{Selected, ground_hit_filtered};
 use crate::map_loading::TerrainChunkMarker;
 use crate::rendering::camera::RtsCamera;
 use crate::sim::SQUARE_SIZE;
@@ -45,9 +45,7 @@ use crate::units::combat::Dying;
 use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::construction::{
-    Constructing, PendingBuild, QueuedBuild, buildings_for, footprints_overlap, queue_build,
-};
+use crate::units::lifecycle::construction::{PendingBuild, buildings_for, footprints_overlap};
 
 pub(super) struct PlacementPlugin;
 
@@ -593,24 +591,12 @@ fn sync_ghosts(
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn place_on_release(
-    mut commands: Commands,
     mut placement: ResMut<PlacementMode>,
     mut state: ResMut<PlacementState>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    builders: Query<
-        (
-            Entity,
-            &UnitType,
-            Option<&PendingBuild>,
-            Option<&Constructing>,
-            Option<&CommandQueue>,
-        ),
-        With<Selected>,
-    >,
-    unit_orders: Orders,
-    vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
-    registry: Res<UnitRegistry>,
+    builders: Query<(Entity, &UnitType), With<Selected>>,
+    mut net: crate::net::Issue,
 ) {
     let Some(kind) = placement.kind else {
         // Disarmed mid-press (right-click, Escape, Shift let go): the
@@ -651,56 +637,21 @@ fn place_on_release(
         return;
     }
 
-    // The sites some builder took an order for (not cancelled, refused).
-    let mut ordered: Vec<Vec3> = Vec::new();
-    for (entity, ut, pending, constructing, queue) in &builders {
-        if !buildings_for(ut.0).contains(&kind) {
-            continue;
-        }
-        if shift && unit_orders.busy(entity) {
-            // Each site is its own queued command (`GetBuildPositions`
-            // gives one per position), cancelling or refused against
-            // the orders the ones before it left.
-            let running = pending
-                .map(|p| (p.kind, p.site))
-                .or(constructing.map(|c| (c.kind, c.site)));
-            let mut active = running;
-            let mut queued = queue.map(|q| q.commands.clone()).unwrap_or_default();
-            for &site in &valid {
-                let outcome = queue_build(&mut active, &mut queued, kind, site, |k| {
-                    registry.footprint_elmos(k)
-                });
-                if outcome == QueuedBuild::Queued {
-                    ordered.push(site);
-                }
-            }
-            let mut ec = commands.entity(entity);
-            if running.is_some() && active.is_none() {
-                crate::interaction::finish_active_order(&mut ec);
-            }
-            ec.insert(CommandQueue { commands: queued });
-            continue;
-        }
-        let mut orders = valid
+    // Every capable builder gets the sites; Shift-queueing against each
+    // builder's orders (cancelling / refusing overlaps) and the vent
+    // claims happen when the command is applied (`net::apply`).
+    let builders = net.units(
+        builders
             .iter()
-            .map(|&site| QueuedCommand::BuildAt { kind, site });
-        if let Some(first) = orders.next() {
-            apply_ordered_command(entity, first, false, &unit_orders, &mut commands);
-        }
-        let rest: Vec<QueuedCommand> = orders.collect();
-        if !rest.is_empty() {
-            commands
-                .entity(entity)
-                .insert(CommandQueue { commands: rest });
-        }
-        ordered.extend_from_slice(&valid);
-    }
-    // Claim the vents so no second constructor can stack on them.
-    for (vent_entity, vent) in &vents {
-        if ordered.iter().any(|s| vent.pos.distance_squared(*s) < 1.0) {
-            commands.entity(vent_entity).insert(VentClaim);
-        }
-    }
+            .filter(|(_, ut)| buildings_for(ut.0).contains(&kind))
+            .map(|(e, _)| e),
+    );
+    net.issue(crate::net::SimCommand::Build {
+        builders,
+        kind,
+        sites: crate::net::PosList::quantize(valid),
+        queue: shift,
+    });
     // FinishCommand.
     if shift {
         state.need_shift = true;
@@ -722,7 +673,15 @@ mod tests {
         world.init_resource::<ButtonInput<MouseButton>>();
         world.init_resource::<ButtonInput<KeyCode>>();
         world.insert_resource(UnitRegistry::empty());
+        crate::net::init_test_world(&mut world);
         world
+    }
+
+    /// One `place_on_release` frame, then the sim tick that applies
+    /// whatever it issued.
+    fn run_place(world: &mut World) {
+        world.run_system_once(place_on_release).unwrap();
+        crate::net::apply_now(world);
     }
 
     /// `GetCancelQueued`: Shift-placing on one of the builder's own
@@ -805,11 +764,11 @@ mod tests {
         world
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Left);
-        world.run_system_once(place_on_release).unwrap();
+        run_place(world);
         let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
         mouse.clear();
         mouse.release(MouseButton::Left);
-        world.run_system_once(place_on_release).unwrap();
+        run_place(world);
         world.resource_mut::<ButtonInput<MouseButton>>().clear();
     }
 
@@ -900,7 +859,7 @@ mod tests {
         world
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Left);
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         assert!(
             !world
                 .resource::<ButtonInput<MouseButton>>()
@@ -917,7 +876,7 @@ mod tests {
             mouse.release(MouseButton::Left);
         }
         set_site(&mut world, site, true);
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         assert!(
             !world
                 .resource::<ButtonInput<MouseButton>>()
@@ -988,7 +947,7 @@ mod tests {
             mouse.press(MouseButton::Left);
             mouse.release(MouseButton::Left);
         }
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         let mouse = world.resource::<ButtonInput<MouseButton>>();
         assert!(!mouse.just_pressed(MouseButton::Left));
         assert!(!mouse.just_released(MouseButton::Left));
@@ -1008,14 +967,14 @@ mod tests {
         world
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Left);
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         world.resource_mut::<PlacementMode>().kind = None;
         {
             let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
             mouse.clear();
             mouse.release(MouseButton::Left);
         }
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         assert!(
             !world
                 .resource::<ButtonInput<MouseButton>>()
@@ -1098,7 +1057,7 @@ mod tests {
         world
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Left);
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         {
             let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
             mouse.clear();
@@ -1110,7 +1069,7 @@ mod tests {
                 valid: true,
             })
             .collect();
-        world.run_system_once(place_on_release).unwrap();
+        run_place(&mut world);
         assert_eq!(world.get::<PendingBuild>(builder).unwrap().site, Vec3::ZERO);
         assert_eq!(
             world.get::<CommandQueue>(builder).unwrap().commands.len(),
