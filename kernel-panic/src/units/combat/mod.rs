@@ -506,6 +506,7 @@ pub(super) fn fire_salvo_shot(
     unit_registry: &UnitRegistry,
     pending_attacks: &mut PendingAttacks,
     damage_queue: &mut DamageQueue,
+    sounds: &mut crate::audio::SoundQueue,
     rng: &mut u32,
 ) {
     let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(shot.kind)
@@ -517,12 +518,17 @@ pub(super) fn fire_salvo_shot(
     let laser = weapon_def.category() == spring_tdf::WeaponCategory::LaserCannon
         && !weapon_def.is_projectile();
     let cannon = shot.is_traveling && weapon_def.category() == spring_tdf::WeaponCategory::Cannon;
-    for _ in 0..shot.projectiles.max(1) {
+    for projectile in 0..shot.projectiles.max(1) {
         if let Ok(mut animator) = pieces.animator.get_mut(shot.attacker) {
             let UnitAnimator { rig, driver, .. } = &mut *animator;
             driver.shot(rig);
         }
         let muzzle = pieces.muzzle(shot.attacker, attacker_gtf);
+        // `CWeapon::Fire` plays `soundstart` once per salvo shot, however
+        // many projectiles the shot carries.
+        if projectile == 0 {
+            sounds.weapon_fired(weapon_def, muzzle.pos);
+        }
         // The GaussCannon arc's own start piece (`arc_origin_piece`).
         let arc_from = crate::units::assets::animation::arc_origin_piece(shot.kind)
             .and_then(|name| pieces.animator.get(shot.attacker).ok()?.rig.piece(name))
@@ -586,6 +592,8 @@ pub(super) fn fire_salvo_shot(
                 impact_pos,
                 attacker_distance: aim_dist,
             });
+            // Hitscan explodes at fire time (`CGameHelper::Explosion`).
+            sounds.explosion(weapon_def, impact_pos);
         }
         pending_attacks.events.push(AttackEvent {
             attacker_pos: muzzle.pos,
@@ -744,10 +752,13 @@ pub fn combat_system(
     heightmap: Option<Res<Heightmap>>,
     mut pieces: PieceLookup,
     target_pick: TargetCachePick,
-    mut rng: Local<u32>,
+    // Tupled: Bevy systems take at most 16 parameters.
+    (mut sounds, mut rng): (Option<ResMut<crate::audio::SoundQueue>>, Local<u32>),
     // `(rank, entity, aim pos)` scratch for the deferred LOS pick.
     mut los_candidates: Local<Vec<(TargetRank, Entity, Vec3)>>,
 ) {
+    let mut scratch_sounds = crate::audio::SoundQueue::default();
+    let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
     if *rng == 0 {
         // First-tick seed only: a non-zero xorshift32 state can never
         // emit 0, so this guard cannot re-trigger mid-game — it just
@@ -1181,6 +1192,7 @@ pub fn combat_system(
                 &unit_registry,
                 &mut pending_attacks,
                 &mut damage_queue,
+                sounds,
                 &mut commands,
                 &mut rng,
             );
@@ -1234,6 +1246,7 @@ fn open_salvo(
     unit_registry: &UnitRegistry,
     pending_attacks: &mut PendingAttacks,
     damage_queue: &mut DamageQueue,
+    sounds: &mut crate::audio::SoundQueue,
     commands: &mut Commands,
     rng: &mut u32,
 ) {
@@ -1247,6 +1260,7 @@ fn open_salvo(
         unit_registry,
         pending_attacks,
         damage_queue,
+        sounds,
         rng,
     );
     if burst > 1 {
@@ -1392,8 +1406,11 @@ pub fn attack_ground_system(
     mut commands: Commands,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_attacks: ResMut<PendingAttacks>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut rng: Local<u32>,
 ) {
+    let mut scratch_sounds = crate::audio::SoundQueue::default();
+    let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
     if *rng == 0 {
         *rng = 0xBADC0FFE;
     }
@@ -1552,6 +1569,7 @@ pub fn attack_ground_system(
             &unit_registry,
             &mut pending_attacks,
             &mut damage_queue,
+            sounds,
             &mut commands,
             &mut rng,
         );
@@ -2266,6 +2284,7 @@ mod tests {
                       mut attacks: ResMut<PendingAttacks>,
                       mut damage: ResMut<DamageQueue>| {
                     let mut rng = 1u32;
+                    let mut sounds = crate::audio::SoundQueue::default();
                     fire_salvo_shot(
                         &shot,
                         weapons.by_id(shot.weapon),
@@ -2275,6 +2294,7 @@ mod tests {
                         &registry,
                         &mut attacks,
                         &mut damage,
+                        &mut sounds,
                         &mut rng,
                     );
                 },

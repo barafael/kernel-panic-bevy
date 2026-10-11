@@ -9,3 +9,6 @@ trace-*.json
 
 # Dev fly-over videos (`KP_RECORD`)
 /recordings
+
+# CI helper: the list of LFS objects the deploy workflow keys its cache on
+.lfs-objects

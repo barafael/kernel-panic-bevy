@@ -36,7 +36,7 @@ use crate::game_setup::{
 };
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
-use crate::rendering::settings::{MsaaSupport, RenderSettings, WINDOW_SIZES};
+use crate::rendering::settings::{MsaaSupport, RenderSettings, VolumeKnob, WINDOW_SIZES};
 use crate::rng::clock_f64;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::AimTarget;
@@ -50,6 +50,7 @@ impl Plugin for MenuPlugin {
         app.init_resource::<MenuPage>()
             .init_resource::<EscMenuOpen>()
             .init_resource::<EscSettingsOpen>()
+            .init_resource::<EscAudioOpen>()
             .init_resource::<GameOverOpen>()
             .init_resource::<ReadmeScroll>()
             .init_resource::<DemoDirector>()
@@ -126,6 +127,8 @@ pub(crate) enum MenuPage {
     Credits,
     Readme,
     Settings,
+    /// The volume knobs, reached from Settings.
+    Audio,
 }
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
@@ -134,6 +137,10 @@ pub(crate) struct EscMenuOpen(pub(crate) bool);
 /// The Settings page drawn inside the Esc overlay (in a match).
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 pub(crate) struct EscSettingsOpen(pub(crate) bool);
+
+/// The Audio page drawn inside the Esc overlay's Settings page.
+#[derive(Debug, Default, Deref, DerefMut, Resource)]
+pub(crate) struct EscAudioOpen(pub(crate) bool);
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct GameOverOpen(bool);
@@ -209,6 +216,10 @@ enum MenuAction {
     SetVsync(bool),
     SetFullscreen(bool),
     SetWindowSize(u32, u32),
+    /// One Audio page knob, in percent.
+    SetVolume(VolumeKnob, u8),
+    /// Esc overlay: show / hide the Audio page inside Settings.
+    EscAudio(bool),
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +608,7 @@ struct MenuState<'w> {
 struct Overlays<'w> {
     esc_open: ResMut<'w, EscMenuOpen>,
     esc_settings: ResMut<'w, EscSettingsOpen>,
+    esc_audio: ResMut<'w, EscAudioOpen>,
     game_over_open: ResMut<'w, GameOverOpen>,
     dismissed: ResMut<'w, GameOverDismissed>,
 }
@@ -605,6 +617,7 @@ impl Overlays<'_> {
     fn close_all(&mut self) {
         *self.esc_open = EscMenuOpen(false);
         *self.esc_settings = EscSettingsOpen(false);
+        *self.esc_audio = EscAudioOpen(false);
         *self.game_over_open = GameOverOpen(false);
     }
 }
@@ -691,6 +704,7 @@ fn handle_menu_actions(
             MenuAction::Resume => {
                 *overlays.esc_open = EscMenuOpen(false);
                 *overlays.esc_settings = EscSettingsOpen(false);
+                *overlays.esc_audio = EscAudioOpen(false);
             }
             MenuAction::KeepPlaying => {
                 overlays.dismissed.0 = true;
@@ -744,6 +758,7 @@ fn handle_menu_actions(
                 flow.app_state.set(AppState::InGame);
             }
             MenuAction::EscSettings(open) => overlays.esc_settings.0 = open,
+            MenuAction::EscAudio(open) => overlays.esc_audio.0 = open,
             // The render settings are applied to the camera and window
             // (and saved) by `rendering::settings::apply_render_settings`
             // on the next frame.
@@ -755,6 +770,7 @@ fn handle_menu_actions(
                 render.window_size = (w, h);
                 render.fullscreen = false;
             }
+            MenuAction::SetVolume(knob, v) => render.audio.set(knob, v),
         }
     }
 }
@@ -1065,7 +1081,15 @@ fn maintain_launch_menu(
             root,
             (window.width(), page_size),
             settings,
+            MenuAction::Goto(MenuPage::Audio),
             MenuAction::Goto(MenuPage::Main),
+        ),
+        MenuPage::Audio => audio_page(
+            &mut commands,
+            root,
+            (window.width(), page_size),
+            settings,
+            MenuAction::Goto(MenuPage::Settings),
         ),
     }
 }
@@ -1219,6 +1243,10 @@ fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
 /// current pick.
 type Choice = (String, MenuAction, bool);
 
+/// The volumes the Audio page offers, in percent (KP's installer
+/// defaults everything to 100).
+const VOLUME_CHOICES: &[u8] = &[0, 20, 40, 60, 80, 100];
+
 /// The Settings page: one choice row per render setting, drawn like the
 /// advanced page's grouping / difficulty rows (the current pick
 /// brightened), each taking effect on the next frame. `back` is the
@@ -1229,6 +1257,7 @@ fn settings_page(
     root: Entity,
     (window_width, page_size): (f32, f32),
     settings: &SettingsView,
+    audio: MenuAction,
     back: MenuAction,
 ) {
     let SettingsView {
@@ -1314,15 +1343,89 @@ fn settings_page(
             ("Window", MAP_GREEN, sizes),
         ]
     };
+    choice_rows(commands, root, window_width, page_size, rows);
+    ButtonSpec::new("Audio", TEAL, page_size, (0.5, 0.26), Anchor::Cc, audio)
+        .min_width(12.0)
+        .spawn(commands, root);
+    ButtonSpec::new("Back", NAV_BLUE, page_size, (0.5, 0.15), Anchor::Cc, back)
+        .min_width(12.0)
+        .spawn(commands, root);
+    LabelSpec::new(
+        "Changes apply at once and are kept for next time",
+        page_size * 0.6,
+        (0.5, 0.06),
+        Anchor::Cc,
+    )
+    .spawn(commands, root);
+}
 
-    // Row label on the left (`rc` at x=30%), its choices stepping right
-    // from x=34% in even boxes sized to the row's longest label; rows
-    // 10% apart down from y=70%.
+/// The frame-rate label's text: the smoothed rate to the frame, or a
+/// dash before the first measurement.
+/// The Audio page: one row per mixer knob (Spring's `snd_vol*` settings),
+/// in percent, laid out like the Settings page.
+fn audio_page(
+    commands: &mut Commands,
+    root: Entity,
+    (window_width, page_size): (f32, f32),
+    settings: &SettingsView,
+    back: MenuAction,
+) {
+    let audio = settings.render.audio;
+    page_heading(commands, root, page_size, "Audio");
+    let colors = [
+        EASY_CYAN,
+        MEDIUM_GREEN,
+        HARD_YELLOW,
+        EXTREME_ORANGE,
+        MAP_GREEN,
+    ];
+    let rows: Vec<(&str, Color, Vec<Choice>)> = VolumeKnob::ALL
+        .iter()
+        .zip(colors)
+        .map(|(&knob, color)| {
+            let choices = VOLUME_CHOICES
+                .iter()
+                .map(|&v| {
+                    let label = if v == 0 {
+                        "Off".to_string()
+                    } else {
+                        format!("{v}%")
+                    };
+                    (label, MenuAction::SetVolume(knob, v), audio.get(knob) == v)
+                })
+                .collect();
+            (knob.label(), color, choices)
+        })
+        .collect();
+    choice_rows(commands, root, window_width, page_size, rows);
+    ButtonSpec::new("Back", NAV_BLUE, page_size, (0.5, 0.15), Anchor::Cc, back)
+        .min_width(12.0)
+        .spawn(commands, root);
+    LabelSpec::new(
+        "Master scales every channel; music plays the .ogg files in assets/music",
+        page_size * 0.6,
+        (0.5, 0.06),
+        Anchor::Cc,
+    )
+    .spawn(commands, root);
+}
+
+/// Draw labelled rows of mutually exclusive choices, the current pick
+/// brightened. Row label on the left (`rc` at x=30%), its choices stepping
+/// right from x=34% in even boxes sized to the row's longest label; rows
+/// 9.5% apart down from y=72%. A monospace glyph is ~0.6 em wide, plus
+/// the frame's padding.
+fn choice_rows(
+    commands: &mut Commands,
+    root: Entity,
+    window_width: f32,
+    page_size: f32,
+    rows: Vec<(&str, Color, Vec<Choice>)>,
+) {
     let size = page_size * 0.85;
-    // A monospace glyph is ~0.6 em wide; plus the frame's padding.
     let glyph = 0.6 * size / window_width;
     for (i, (name, color, choices)) in rows.into_iter().enumerate() {
-        let y = 0.7 - 0.1 * i as f32;
+        let y = 0.72 - 0.095 * i as f32;
         let longest = choices
             .iter()
             .map(|(text, _, _)| text.chars().count())
@@ -1346,21 +1449,8 @@ fn settings_page(
             .spawn(commands, root);
         }
     }
-
-    ButtonSpec::new("Back", NAV_BLUE, page_size, (0.5, 0.15), Anchor::Cc, back)
-        .min_width(12.0)
-        .spawn(commands, root);
-    LabelSpec::new(
-        "Changes apply at once and are kept for next time",
-        page_size * 0.6,
-        (0.5, 0.06),
-        Anchor::Cc,
-    )
-    .spawn(commands, root);
 }
 
-/// The frame-rate label's text: the smoothed rate to the frame, or a
-/// dash before the first measurement.
 fn fps_text(fps: Option<f64>) -> String {
     match fps {
         Some(fps) => format!("{} fps", fps.round() as u32),
@@ -1626,12 +1716,14 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 - Maintenance and silly mod options by zwzsg
 - Sounds by Noruas and Pendrokar
 - Voices by Eva and Panda
+- Music by Mister Beep, Lo-bat. and ParagonX9
+- C64/Amiga remixes by Radix, Dreamfish, Stalker, Warwick Gaetjens, Wire and Front 6
 - Maps by Boirunner, Runecrafter, zwzsg, TradeMark, KDR_11k and FireStorm
 - Some LUA interface upgrade based of jK and trepan code
 - The Touhou faction characters were inspired by ZUN's works
 - Many thanks to lurker, Quantum, and the rest of #lua crew
 - Reimplementation in Rust + Bevy, from the original Spring mod";
-    LabelSpec::new(CREDITS, page_size * 24.0 / 30.0, (0.5, 0.78), Anchor::Ct)
+    LabelSpec::new(CREDITS, page_size * 22.0 / 30.0, (0.5, 0.78), Anchor::Ct)
         .frame(TEAL)
         .justify(Justify::Left)
         .spawn(commands, root);
@@ -1795,10 +1887,13 @@ fn esc_toggle(
     keys: Res<ButtonInput<KeyCode>>,
     mut esc_open: ResMut<EscMenuOpen>,
     mut esc_settings: ResMut<EscSettingsOpen>,
+    mut esc_audio: ResMut<EscAudioOpen>,
     game_over_open: Res<GameOverOpen>,
 ) {
     if keys.just_pressed(KeyCode::Escape) && !game_over_open.0 {
-        if esc_settings.0 {
+        if esc_audio.0 {
+            esc_audio.0 = false;
+        } else if esc_settings.0 {
             // Back out of the Settings page to the overlay first.
             esc_settings.0 = false;
         } else {
@@ -1831,26 +1926,29 @@ fn despawn_launch_menu(
 fn close_all_overlays(
     mut esc_open: ResMut<EscMenuOpen>,
     mut esc_settings: ResMut<EscSettingsOpen>,
+    mut esc_audio: ResMut<EscAudioOpen>,
     mut game_over: ResMut<GameOverOpen>,
 ) {
     *esc_open = EscMenuOpen(false);
     *esc_settings = EscSettingsOpen(false);
+    *esc_audio = EscAudioOpen(false);
     *game_over = GameOverOpen(false);
 }
 
 fn maintain_esc_menu(
     esc_open: Res<EscMenuOpen>,
     esc_settings: Res<EscSettingsOpen>,
+    esc_audio: Res<EscAudioOpen>,
     settings: SettingsView,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
-    mut last: Local<Option<(bool, bool, RenderSettings)>>,
+    mut last: Local<Option<(bool, bool, bool, RenderSettings)>>,
 ) {
     // Redrawn when the overlay opens or closes, when it switches to or
     // from its Settings page, and when a setting changed (its choice
     // rows show the current pick).
-    let now = (esc_open.0, esc_settings.0, *settings.render);
+    let now = (esc_open.0, esc_settings.0, esc_audio.0, *settings.render);
     if *last == Some(now) {
         return;
     }
@@ -1870,13 +1968,25 @@ fn maintain_esc_menu(
     let root = spawn_backdrop(&mut commands, OVERLAY_GLASS);
 
     if esc_settings.0 {
-        settings_page(
-            &mut commands,
-            root,
-            (window.width(), window.height() / 24.0),
-            &settings,
-            MenuAction::EscSettings(false),
-        );
+        let layout = (window.width(), window.height() / 24.0);
+        if esc_audio.0 {
+            audio_page(
+                &mut commands,
+                root,
+                layout,
+                &settings,
+                MenuAction::EscAudio(false),
+            );
+        } else {
+            settings_page(
+                &mut commands,
+                root,
+                layout,
+                &settings,
+                MenuAction::EscAudio(true),
+                MenuAction::EscSettings(false),
+            );
+        }
         return;
     }
 

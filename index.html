@@ -26,6 +26,7 @@
       touch-action: none;
     }
     /* Shown until the wasm module takes over the page. */
+    #boot a { color: #0ff; text-decoration: none; font-size: 13px; }
     #boot {
       position: absolute; inset: 0;
       display: flex; align-items: center; justify-content: center;
@@ -36,11 +37,13 @@
   </style>
 </head>
 <body>
-  <div id="boot">Loading…</div>
+  <div id="boot">Loading…<br><a href="music.html">soundtrack &amp; sounds</a></div>
 
   <link data-trunk rel="rust" href="kernel-panic/Cargo.toml" data-bin="kernel-panic"
         data-cargo-profile="wasm-release" data-wasm-opt="2" />
   <link data-trunk rel="copy-dir" href="kernel-panic/assets" />
+  <!-- The soundtrack & sound-effects player, a standalone page. -->
+  <link data-trunk rel="copy-file" href="kernel-panic/web/music.html" />
 
   <script>
     // Bevy takes over the page once it spawns a canvas; drop the boot notice.
@@ -63,6 +66,32 @@
         c.addEventListener('webgpucontextlost', onLost);
       }
     }).observe(document.body, { childList: true, subtree: true });
+
+    // Browsers create every AudioContext suspended until a user gesture, and
+    // the game's audio backend (cpal) opens its context at startup, before
+    // the first click, so it would stay silent. Remember each context and
+    // resume them all on the first gesture.
+    (function () {
+      var contexts = [];
+      var Native = window.AudioContext || window.webkitAudioContext;
+      if (!Native) return;
+      function Patched() {
+        var ctx = new (Function.prototype.bind.apply(Native, [null].concat([].slice.call(arguments))))();
+        contexts.push(ctx);
+        return ctx;
+      }
+      Patched.prototype = Native.prototype;
+      window.AudioContext = Patched;
+      if (window.webkitAudioContext) window.webkitAudioContext = Patched;
+      function unlock() {
+        contexts.forEach(function (ctx) {
+          if (ctx.state === 'suspended') ctx.resume();
+        });
+      }
+      ['pointerdown', 'keydown', 'touchend'].forEach(function (ev) {
+        document.addEventListener(ev, unlock, { capture: true, passive: true });
+      });
+    })();
 
     // The RTS uses right-click for orders; keep the browser menu out of the way.
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });

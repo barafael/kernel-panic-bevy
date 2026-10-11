@@ -1,0 +1,4 @@
+# The 72-track soundtrack from the KP 4.4 installer (scripts/bake-music.sh)
+# lives in Git LFS: `git lfs pull` after cloning, or the files are 130-byte
+# pointers that the game cannot decode.
+kernel-panic/assets/music/*.ogg filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111">
+  <title>Kernel Panic soundtrack</title>
+  <!--
+    The soundtrack and sound-effects player, published next to the game
+    by Trunk (index.html: copy-file). Plain HTML, no build step, no
+    frameworks, no fonts fetched. Reads assets/music/catalog.json and
+    assets/music/credits.txt (written by scripts/bake-music.sh) and plays
+    assets/music/<file>.ogg through an <audio> element, so the browser
+    streams with range requests. The Sound effects tab lists the 26
+    originals in assets/sounds/ (kernel-panic/src/audio/mod.rs
+    SOUND_FILES); a test keeps that list in sync with this page.
+  -->
+  <style>
+    :root {
+      --bg: #111; --text: #c8c8d0; --dim: #8a8a95;
+      --cyan: #0ff; --green: #0f0; --blue: #00f; --teal: #00ff80;
+      --desc: #3380e6; --yellow: #e0c900; --orange: #e06600; --red: #e00500;
+      --olive: rgba(33, 33, 0, 0.55); --line: rgba(0, 255, 255, 0.25);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--text);
+      font: 15px/1.5 ui-monospace, "Fira Mono", SFMono-Regular, Menlo, monospace; }
+    body { padding: 0 16px 120px; }
+    body::before { content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+      background:
+        repeating-linear-gradient(0deg, rgba(0,255,255,.045) 0 1px, transparent 1px 32px),
+        repeating-linear-gradient(90deg, rgba(0,255,255,.045) 0 1px, transparent 1px 32px); }
+    a { color: var(--cyan); }
+    main { max-width: 900px; margin: 0 auto; }
+    header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; padding: 24px 0 12px; }
+    h1 { margin: 0; color: var(--cyan); font-size: 28px; font-weight: 700; letter-spacing: .04em; }
+    h1 small { color: var(--teal); font-size: 15px; font-weight: 400; margin-left: 8px; }
+    header a.back { margin-left: auto; color: var(--blue); background: rgba(0,0,255,.12);
+      border: 1px solid var(--blue); padding: 4px 10px; text-decoration: none; }
+    header a.back:hover { background: rgba(0,0,255,.3); color: #fff; }
+    nav[role=tablist] { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0 16px; }
+    button { font: inherit; cursor: pointer; }
+    nav button { color: var(--green); background: rgba(0,255,0,.08); border: 1px solid var(--green);
+      padding: 6px 14px; }
+    nav button[aria-selected=true] { background: var(--green); color: #000; font-weight: 700; }
+    section[role=tabpanel] { background: var(--olive); border: 1px solid var(--line); padding: 12px; }
+    section[hidden] { display: none; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+    .toolbar input { font: inherit; background: #000; color: var(--text); border: 1px solid var(--line);
+      padding: 6px 8px; flex: 1 1 200px; min-width: 0; }
+    .toolbar .count { color: var(--dim); }
+    h2.artist { margin: 16px 0 4px; font-size: 15px; color: var(--yellow); }
+    h2.artist small { color: var(--dim); font-weight: 400; }
+    h2.artist:nth-of-type(even) { color: var(--orange); }
+    button.track { display: grid; grid-template-columns: 2.5em 1fr auto auto; gap: 8px; width: 100%;
+      text-align: left; background: transparent; border: 1px solid transparent; color: var(--text);
+      padding: 4px 8px; }
+    button.track:hover { border-color: var(--line); }
+    button.track .n { color: var(--dim); }
+    button.track .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    button.track .d, button.track .s { color: var(--dim); font-size: 13px; }
+    button.track .s { display: none; }
+    @media (min-width: 600px) { button.track .s { display: inline; } }
+    button.track[aria-current=true] { color: var(--cyan); border-color: var(--cyan); background: rgba(0,255,255,.08); }
+    button.track[aria-current=true] .n::before { content: "▶ "; }
+    button.track.broken { color: var(--red); }
+    .empty { color: var(--dim); padding: 24px 0; text-align: center; }
+    .sfx { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+    button.fx { display: grid; grid-template-columns: 32px 1fr; gap: 8px; align-items: center; text-align: left;
+      background: rgba(0,0,0,.35); border: 1px solid var(--line); color: var(--green); padding: 8px; }
+    button.fx img { width: 32px; height: 32px; image-rendering: pixelated; }
+    button.fx .ph { width: 32px; height: 32px; border: 1px dashed var(--line); }
+    button.fx .desc { display: block; color: var(--desc); font-size: 13px; white-space: normal; }
+    button.fx .only { color: var(--dim); }
+    button.fx.flash { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+    .credits p { white-space: pre-wrap; margin: 0 0 12px; }
+    .credits h3 { color: var(--teal); margin: 16px 0 4px; font-size: 15px; }
+    .credits .note { color: var(--dim); font-size: 13px; }
+    kbd { border: 1px solid var(--line); padding: 0 4px; color: var(--dim); font-size: 12px; }
+    #bar { position: fixed; left: 0; right: 0; bottom: 0; background: #111; border-top: 1px solid var(--cyan);
+      padding: 8px 16px; }
+    #bar .inner { max-width: 900px; margin: 0 auto; display: grid; gap: 6px; }
+    #now { color: var(--cyan); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #now .a { color: var(--yellow); }
+    #prog { height: 10px; background: #000; border: 1px solid var(--line); cursor: pointer; position: relative; }
+    #prog div { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--teal); }
+    .ctl { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .ctl button { color: var(--green); background: rgba(0,255,0,.08); border: 1px solid var(--green);
+      min-width: 40px; padding: 4px 8px; }
+    .ctl button[aria-pressed=true] { background: var(--green); color: #000; }
+    .ctl .time { color: var(--dim); font-size: 13px; margin-left: auto; }
+    .ctl input[type=range] { width: 100px; accent-color: var(--teal); }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Kernel Panic<small>soundtrack &amp; sounds</small></h1>
+    <a class="back" href="./">&laquo; back to the game</a>
+  </header>
+
+  <nav role="tablist" aria-label="Sections">
+    <button role="tab" id="tab-music" aria-controls="music" aria-selected="true">Music</button>
+    <button role="tab" id="tab-sfx" aria-controls="sfx" aria-selected="false">Sound effects</button>
+    <button role="tab" id="tab-credits" aria-controls="credits" aria-selected="false">Credits</button>
+  </nav>
+
+  <section role="tabpanel" id="music" aria-labelledby="tab-music">
+    <div class="toolbar">
+      <input id="filter" type="search" placeholder="filter by artist or title" aria-label="Filter tracks">
+      <span class="count" id="count"></span>
+    </div>
+    <div id="tracks"><div class="empty">Loading the catalog…</div></div>
+    <p class="credits note">Keys: <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> seek ±5 s ·
+      <kbd>N</kbd>/<kbd>P</kbd> next/previous · <kbd>S</kbd> shuffle · <kbd>L</kbd> loop · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> tabs</p>
+  </section>
+
+  <section role="tabpanel" id="sfx" aria-labelledby="tab-sfx" hidden>
+    <p class="credits note">The 26 effects the original ships, by Noruas and Pendrokar. Click to play; they overlap like in a battle.
+      "Original only" marks sounds the port has no trigger for yet.</p>
+    <div class="sfx" id="fxgrid"></div>
+  </section>
+
+  <section role="tabpanel" id="credits" aria-labelledby="tab-credits" hidden>
+    <div class="credits" id="creditsbox"><p class="note">Loading…</p></div>
+  </section>
+</main>
+
+<div id="bar">
+  <div class="inner">
+    <div id="now">Nothing playing — pick a track</div>
+    <div id="prog" role="slider" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0"><div></div></div>
+    <div class="ctl">
+      <button id="prev" title="Previous (P)">⏮</button>
+      <button id="toggle" title="Play / pause (Space)">▶</button>
+      <button id="next" title="Next (N)">⏭</button>
+      <button id="shuffle" title="Shuffle (S)" aria-pressed="false">shuffle</button>
+      <button id="loop" title="Loop (L)" aria-pressed="false">loop</button>
+      <label>vol <input id="vol" type="range" min="0" max="1" step="0.02" value="0.8" aria-label="Volume"></label>
+      <span class="time" id="time">0:00 / 0:00</span>
+    </div>
+  </div>
+</div>
+<audio id="a" preload="none"></audio>
+
+<script>
+(function () {
+  'use strict';
+  var MUSIC = 'assets/music/';
+  var SOUNDS = 'assets/sounds/';
+
+  // The 26 originals (kernel-panic/src/audio/mod.rs SOUND_FILES) and
+  // what fires them: weapon TDF soundstart / soundhit, SOUND.TDF unit
+  // replies, sounds.lua GUI beeps, the Firewall gadget's built.wav.
+  var EFFECTS = [
+    ['bitfire', 'bit', 'Bit, Virus, Fairy and the R.P.S. hands fire (soundstart)'],
+    ['bytefire', 'byte', "Byte's DOOM!!! beam fires"],
+    ['bytehit', 'byte', "Byte's beam hits"],
+    ['pointerfire', 'pointer', "Pointer's shapes fire — also NX Flag, mines, Touhou lasers"],
+    ['pointerhit', 'pointer', "Pointer's shapes hit"],
+    ['packetfire', 'network_spam', 'Packet and Gateway beams fire'],
+    ['flowfire', 'network_medium', 'Flow missiles launch'],
+    ['flowhit', 'network_medium', 'Flow missiles hit'],
+    ['obeliskfire', 'obelisk', "Obelisk's WMD infection fires"],
+    ['obeliskhit', 'obelisk', "Obelisk's infection lands"],
+    ['bugartifire', 'bug', "Bug's spit artillery fires"],
+    ['bugartihit', 'bug', "Bug's spit lands"],
+    ['netelectricarc', 'network_super', 'Particle Whip (Gauss cannon) arcs'],
+    ['bitdeath', 'bit', 'A small unit dies (RetroDeath, Minekiller)'],
+    ['bytedeath', 'byte', 'A big unit dies (RetroDeathBig / VBig) — also the Logic Bomb arming'],
+    ['pointerdeath', 'pointer', 'A Pointer dies'],
+    ['assemblerdeath', 'assembler', 'An Assembler dies'],
+    ['explosion5', 'logic_bomb', 'Logic Bomb and Bug bomb blast'],
+    ['sigtermhit', 'sigterm', 'SIGTERM detonates'],
+    ['select', 'socket', 'One unit selected (SOUND.TDF select1)'],
+    ['button9', 'kernel', 'Several units selected (MultiSelect)'],
+    ['commandgiven', 'network_builder', 'Order given / own unit arrived (ok1, arrived1)'],
+    ['built', 'network_minifac', 'Firewall cast (network_reflectorshield.lua)'],
+    ['commandfailed', null, 'Order rejected (FailedCommand) — original only'],
+    ['beep4', null, 'Incoming chat (IncomingChat) — original only'],
+    ['beep6', null, 'Map marker placed (MapPoint) — original only']
+  ];
+
+  var $ = function (id) { return document.getElementById(id); };
+  var audio = $('a');
+  var state = { tracks: [], order: [], pos: -1, shuffle: false, loop: 'off', volume: 0.8, last: null };
+  try { Object.assign(state, JSON.parse(localStorage.getItem('kp-music') || '{}')); } catch (e) {}
+  state.tracks = []; state.order = []; state.pos = -1;
+  function save() {
+    try { localStorage.setItem('kp-music', JSON.stringify({ shuffle: state.shuffle, loop: state.loop, volume: state.volume, last: state.last })); } catch (e) {}
+  }
+  function mmss(s) { s = Math.max(0, Math.floor(s || 0)); return Math.floor(s / 60) + ':' + ('0' + s % 60).slice(-2); }
+  function mb(b) { return (b / 1048576).toFixed(1) + ' MB'; }
+
+  // --- tabs ---
+  var tabs = Array.prototype.slice.call(document.querySelectorAll('[role=tab]'));
+  function showTab(id) {
+    tabs.forEach(function (t) {
+      var on = t.getAttribute('aria-controls') === id;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      $(t.getAttribute('aria-controls')).hidden = !on;
+    });
+    if (location.hash !== '#/' + id) history.replaceState(null, '', '#/' + id);
+  }
+  tabs.forEach(function (t) { t.addEventListener('click', function () { showTab(t.getAttribute('aria-controls')); }); });
+  var hash = (location.hash.match(/^#\/(music|sfx|credits)/) || [])[1];
+  if (hash) showTab(hash);
+
+  // --- music list ---
+  function rebuildOrder() {
+    var n = state.tracks.length, i, j, t;
+    state.order = [];
+    for (i = 0; i < n; i++) state.order.push(i);
+    if (state.shuffle) {
+      for (i = n - 1; i > 0; i--) { j = Math.floor(Math.random() * (i + 1)); t = state.order[i]; state.order[i] = state.order[j]; state.order[j] = t; }
+    }
+    if (state.pos >= 0) {
+      var cur = current();
+      if (cur) state.pos = state.order.indexOf(cur.index);
+    }
+  }
+  function current() { return state.pos >= 0 ? state.tracks[state.order[state.pos]] : null; }
+  function renderTracks() {
+    var box = $('tracks'), q = ($('filter').value || '').toLowerCase();
+    box.innerHTML = '';
+    if (!state.tracks.length) { box.innerHTML = '<div class="empty">No soundtrack in this build.</div>'; $('count').textContent = ''; return; }
+    var shown = 0, artist = null, group = null, total = 0;
+    state.tracks.forEach(function (t) {
+      if (q && (t.artist + ' ' + t.title).toLowerCase().indexOf(q) < 0) return;
+      if (t.artist !== artist) {
+        artist = t.artist;
+        var mine = state.tracks.filter(function (x) { return x.artist === artist; });
+        var mins = Math.round(mine.reduce(function (s, x) { return s + x.seconds; }, 0) / 60);
+        var h = document.createElement('h2'); h.className = 'artist';
+        h.innerHTML = artist + ' <small>· ' + mine.length + (mine.length === 1 ? ' track · ' : ' tracks · ') + mins + ' min</small>';
+        box.appendChild(h);
+      }
+      var b = document.createElement('button'); b.className = 'track'; b.dataset.index = t.index;
+      b.innerHTML = '<span class="n">' + (t.index + 1) + '</span><span class="t"></span><span class="d">' + mmss(t.seconds) + '</span><span class="s">' + mb(t.bytes) + '</span>';
+      b.querySelector('.t').textContent = t.title;
+      if (current() === t) b.setAttribute('aria-current', 'true');
+      if (t.broken) b.classList.add('broken');
+      b.addEventListener('click', function () { playIndex(t.index); });
+      box.appendChild(b); shown++; total += t.seconds;
+    });
+    $('count').textContent = shown + ' of ' + state.tracks.length + ' tracks · ' + Math.round(total / 60) + ' min';
+  }
+  $('filter').addEventListener('input', renderTracks);
+
+  function markCurrent() {
+    var cur = current();
+    Array.prototype.forEach.call(document.querySelectorAll('button.track'), function (b) {
+      if (cur && +b.dataset.index === cur.index) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+    });
+    $('now').innerHTML = cur ? '<span class="a"></span> — <span class="t"></span>' : 'Nothing playing — pick a track';
+    if (cur) {
+      $('now').querySelector('.a').textContent = cur.artist;
+      $('now').querySelector('.t').textContent = cur.title;
+      document.title = cur.artist + ' — ' + cur.title + ' · Kernel Panic';
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: cur.title, artist: cur.artist, album: 'Kernel Panic' });
+      }
+    } else document.title = 'Kernel Panic soundtrack';
+  }
+  function playIndex(index) {
+    state.pos = state.order.indexOf(index);
+    var t = current(); if (!t) return;
+    audio.src = MUSIC + encodeURIComponent(t.file);
+    audio.volume = state.volume;
+    var p = audio.play(); if (p && p.catch) p.catch(function () {});
+    state.last = t.file; save(); markCurrent();
+  }
+  function step(delta) {
+    if (!state.tracks.length) return;
+    var n = state.order.length, next = state.pos + delta;
+    if (state.loop === 'one' && delta > 0 && audio.ended) { next = state.pos; }
+    if (next >= n || next < 0) {
+      if (state.loop === 'off' && delta > 0) { audio.pause(); state.pos = -1; markCurrent(); $('toggle').textContent = '▶'; return; }
+      next = (next + n) % n;
+      if (state.shuffle && delta > 0) rebuildOrder();
+    }
+    playIndex(state.order[next]);
+  }
+  audio.addEventListener('ended', function () { step(1); });
+  audio.addEventListener('error', function () {
+    var t = current(); if (!t) return;
+    t.broken = true; renderTracks();
+    setTimeout(function () { step(1); }, 1000);
+  });
+  audio.addEventListener('timeupdate', function () {
+    var d = audio.duration || (current() ? current().seconds : 0), c = audio.currentTime || 0;
+    $('prog').firstElementChild.style.width = d ? (100 * c / d) + '%' : '0';
+    $('prog').setAttribute('aria-valuenow', d ? Math.round(100 * c / d) : 0);
+    $('time').textContent = mmss(c) + ' / ' + mmss(d);
+  });
+  audio.addEventListener('play', function () { $('toggle').textContent = '⏸'; });
+  audio.addEventListener('pause', function () { $('toggle').textContent = '▶'; });
+
+  function toggle() {
+    if (!current()) { if (state.order.length) playIndex(state.order[0]); return; }
+    if (audio.paused) { var p = audio.play(); if (p && p.catch) p.catch(function () {}); } else audio.pause();
+  }
+  $('toggle').addEventListener('click', toggle);
+  $('next').addEventListener('click', function () { step(1); });
+  $('prev').addEventListener('click', function () { if (audio.currentTime > 3) audio.currentTime = 0; else step(-1); });
+  $('shuffle').addEventListener('click', function () {
+    state.shuffle = !state.shuffle; $('shuffle').setAttribute('aria-pressed', state.shuffle); rebuildOrder(); save();
+  });
+  $('loop').addEventListener('click', function () {
+    state.loop = state.loop === 'off' ? 'all' : state.loop === 'all' ? 'one' : 'off';
+    $('loop').textContent = state.loop === 'off' ? 'loop' : 'loop: ' + state.loop;
+    $('loop').setAttribute('aria-pressed', state.loop !== 'off'); save();
+  });
+  $('vol').addEventListener('input', function () { state.volume = +$('vol').value; audio.volume = state.volume; save(); });
+  function seekTo(ev) {
+    var r = $('prog').getBoundingClientRect(), x = (ev.touches ? ev.touches[0].clientX : ev.clientX) - r.left;
+    var d = audio.duration; if (d) audio.currentTime = Math.max(0, Math.min(1, x / r.width)) * d;
+  }
+  var seeking = false;
+  $('prog').addEventListener('mousedown', function (e) { seeking = true; seekTo(e); });
+  window.addEventListener('mousemove', function (e) { if (seeking) seekTo(e); });
+  window.addEventListener('mouseup', function () { seeking = false; });
+  $('prog').addEventListener('touchstart', seekTo, { passive: true });
+  $('prog').addEventListener('touchmove', seekTo, { passive: true });
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.setActionHandler('play', toggle);
+      navigator.mediaSession.setActionHandler('pause', toggle);
+      navigator.mediaSession.setActionHandler('previoustrack', function () { step(-1); });
+      navigator.mediaSession.setActionHandler('nexttrack', function () { step(1); });
+    } catch (e) {}
+  }
+  document.addEventListener('keydown', function (e) {
+    if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    switch (e.key) {
+      case ' ': e.preventDefault(); toggle(); break;
+      case 'ArrowLeft': audio.currentTime = Math.max(0, audio.currentTime - 5); break;
+      case 'ArrowRight': audio.currentTime = Math.min(audio.duration || 0, audio.currentTime + 5); break;
+      case 'n': case 'N': step(1); break;
+      case 'p': case 'P': step(-1); break;
+      case 's': case 'S': $('shuffle').click(); break;
+      case 'l': case 'L': $('loop').click(); break;
+      case '1': showTab('music'); break;
+      case '2': showTab('sfx'); break;
+      case '3': showTab('credits'); break;
+    }
+  });
+
+  // restore prefs
+  $('vol').value = state.volume; audio.volume = state.volume;
+  $('shuffle').setAttribute('aria-pressed', state.shuffle);
+  $('loop').textContent = state.loop === 'off' ? 'loop' : 'loop: ' + state.loop;
+  $('loop').setAttribute('aria-pressed', state.loop !== 'off');
+
+  // --- sound effects ---
+  var grid = $('fxgrid');
+  EFFECTS.forEach(function (fx) {
+    var name = fx[0], pic = fx[1], desc = fx[2];
+    var b = document.createElement('button'); b.className = 'fx'; b.title = SOUNDS + name + '.ogg';
+    b.innerHTML = (pic ? '<img alt="" src="assets/unitpics/' + pic + '.png">' : '<span class="ph"></span>') +
+      '<span><span class="name"></span><span class="desc"></span></span>';
+    b.querySelector('.name').textContent = name;
+    var d = b.querySelector('.desc');
+    if (/original only$/.test(desc)) { d.innerHTML = '<span class="only"></span>'; d.firstChild.textContent = desc; } else d.textContent = desc;
+    b.addEventListener('click', function () {
+      var s = new Audio(SOUNDS + name + '.ogg'); s.volume = state.volume;
+      b.classList.add('flash');
+      s.addEventListener('ended', function () { b.classList.remove('flash'); });
+      s.addEventListener('error', function () { b.classList.remove('flash'); b.classList.add('broken'); });
+      var p = s.play(); if (p && p.catch) p.catch(function () { b.classList.remove('flash'); });
+    });
+    grid.appendChild(b);
+  });
+
+  // --- catalog + credits ---
+  function renderCredits(text) {
+    var box = $('creditsbox'); box.innerHTML = '';
+    var h = document.createElement('h3'); h.textContent = 'Music'; box.appendChild(h);
+    text.split(/\n\s*\n/).forEach(function (para) {
+      if (!para.trim()) return;
+      var p = document.createElement('p');
+      para.split('\n').forEach(function (line, i) {
+        if (i) p.appendChild(document.createElement('br'));
+        if (/^https?:\/\//.test(line.trim())) {
+          var a = document.createElement('a'); a.href = line.trim(); a.textContent = line.trim(); a.target = '_blank'; a.rel = 'noopener';
+          p.appendChild(a);
+        } else p.appendChild(document.createTextNode(line));
+      });
+      box.appendChild(p);
+    });
+    var h2 = document.createElement('h3'); h2.textContent = 'Sound effects'; box.appendChild(h2);
+    var p2 = document.createElement('p'); p2.textContent = 'Sounds by Noruas and Pendrokar. Voices by Eva and Panda.'; box.appendChild(p2);
+    var note = document.createElement('p'); note.className = 'note';
+    note.textContent = 'The tracks are the files the Kernel Panic 4.4 installer shipped in Music/KP, unmodified; the credits above are reproduced from its __Music_Credits__.txt. Kernel Panic is a Spring RTS game by Boirunner, KDR_11k and zwzsg, reimplemented in Rust + Bevy.';
+    box.appendChild(note);
+  }
+  fetch(MUSIC + 'catalog.json').then(function (r) { if (!r.ok) throw r; return r.json(); }).then(function (cat) {
+    state.tracks = (cat.tracks || []).map(function (t, i) { t.index = i; return t; });
+    rebuildOrder(); renderTracks();
+    var want = (location.hash.match(/[?&]t=([^&]+)/) || [])[1];
+    if (want) {
+      var t = state.tracks.filter(function (x) { return x.file === decodeURIComponent(want); })[0];
+      if (t) { state.pos = state.order.indexOf(t.index); markCurrent(); }
+    }
+    return fetch(MUSIC + (cat.credits || 'credits.txt'));
+  }).then(function (r) { return r && r.ok ? r.text() : ''; }).then(function (text) {
+    renderCredits(text || 'No credits file in this build.');
+  }).catch(function () {
+    state.tracks = []; renderTracks();
+    renderCredits('No soundtrack in this build.');
+  });
+})();
+</script>
+</body>
+</html>

@@ -497,11 +497,11 @@ so we know when a Worm is choosing to attack).
 
 ---
 
-## 7. Audio (Low)
+## 7. Audio (Low) — ✅ Done (effects)
 
-`sound_start`/`sound_hit` parsed in every weapon but no audio system exists. Original KP
-sound files are in the mod archive. Use `bevy_audio` for spatial sound: weapon fire, death,
-unit acknowledgements, ambient, UI feedback.
+`kernel-panic/src/audio/`: the original 26 `.wav` effects, triggered and attenuated the way
+the engine did (`docs/audio-plan.md`), plus the `music.lua` player over `assets/music/` and an Audio
+settings page. Open: the tip dispenser voice-over (140 `.ogg` clips).
 
 ---
 
