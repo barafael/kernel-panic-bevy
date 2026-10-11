@@ -50,6 +50,8 @@ use super::{
     production::{Producer, minifac_spam},
     spatial::SpatialIndex,
 };
+use crate::netprobe::{self, ProbeCmd, ProbeKind, ProbeTarget};
+use crate::units::lifecycle::spawning::SimSerial;
 use crate::units::spatial::flat_dist_sq;
 use crate::{
     game_setup::AiDifficulty,
@@ -223,6 +225,7 @@ type UnitQueryData = (
     Has<Protected>,
     // A cast in progress: not ready for another one.
     (Has<NxCast>, Has<PendingCommandFire>),
+    Option<&'static SimSerial>,
 );
 
 /// Message writers the AI issues orders through — the same messages the
@@ -246,7 +249,16 @@ pub fn ai_brain(
     packet_buffer: Res<PacketBuffer>,
     spatial: Res<SpatialIndex>,
     units: Query<UnitQueryData, Without<Dying>>,
-    mut producers: Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
+    mut producers: Query<
+        (
+            Entity,
+            &TeamId,
+            &UnitType,
+            &mut Producer,
+            Option<&SimSerial>,
+        ),
+        Without<Dying>,
+    >,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
     unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
@@ -336,6 +348,12 @@ fn run_late_game(
         if suiciding.contains(u.entity) {
             continue;
         }
+        netprobe::record(|| ProbeCmd {
+            team,
+            unit: u.entity,
+            kind: ProbeKind::SelfDestruct,
+            target: ProbeTarget::None,
+        });
         commands
             .entity(u.entity)
             .try_insert(SelfDestructCountdown::ordered(u.kind, Some(unit_registry)));
@@ -356,6 +374,12 @@ fn snapshot(
     s.ai_teams.clear();
     s.structures.clear();
     s.homes.clear();
+    // Canonical order (unit serials, Spring's unit ids): the dice the
+    // AI rolls per unit, and every "first" it picks, must not follow
+    // the ECS's query order, which depends on archetype history the
+    // frame loop also shapes (`headless` determinism experiments).
+    let mut sorted: Vec<_> = units.iter().collect();
+    sorted.sort_by_key(|item| item.12.map_or(u32::MAX, |s| s.0));
     for (
         e,
         team,
@@ -369,7 +393,8 @@ fn snapshot(
         auto_dispatch,
         protected,
         (nx_cast, pending_cast),
-    ) in units
+        _,
+    ) in sorted
     {
         let kind = ut.0;
         let casting = nx_cast || pending_cast;
@@ -418,6 +443,9 @@ fn snapshot(
             s.vents.push((entity, vent.pos));
         }
     }
+    // Vents are map features (no serial): position order.
+    s.vents
+        .sort_by(|a, b| (a.1.x, a.1.z).partial_cmp(&(b.1.x, b.1.z)).unwrap());
 }
 
 /// Homebase mix (`OrderHomeBase`) and the minifac spam toggle
@@ -426,15 +454,31 @@ fn run_factories(
     team: u8,
     s: &AiScratch,
     ticker: &mut AiTicker,
-    producers: &mut Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
+    producers: &mut Query<
+        (
+            Entity,
+            &TeamId,
+            &UnitType,
+            &mut Producer,
+            Option<&SimSerial>,
+        ),
+        Without<Dying>,
+    >,
     lack: &mut Lack,
     force: u32,
     buffer: u32,
 ) {
-    for (t, ut, mut producer) in producers.iter_mut() {
-        if t.0 != team {
+    // Serial order (see `snapshot`): each factory draws dice.
+    let mut order: Vec<(u32, Entity)> = producers
+        .iter()
+        .filter(|(_, t, _, _, _)| t.0 == team)
+        .map(|(e, _, _, _, serial)| (serial.map_or(u32::MAX, |s| s.0), e))
+        .collect();
+    order.sort_unstable();
+    for (_, factory) in order {
+        let Ok((_, _, ut, mut producer, _)) = producers.get_mut(factory) else {
             continue;
-        }
+        };
         if let Some(roster) = homebase_roster(ut.0) {
             if producer.queue().len() > HOMEBASE_REFILL_AT {
                 continue;
@@ -449,8 +493,10 @@ fn run_factories(
             // Fair KPAI's `math.random(1,5)` spam batch. Drawn
             // unconditionally so the dice stream stays branch-free.
             let batch = ticker.roll() % 5 + 1;
-            match choose_homebase_order(constructors, force, buffer, roll, heavy_coin, batch, lack)
-            {
+            let order =
+                choose_homebase_order(constructors, force, buffer, roll, heavy_coin, batch, lack);
+            probe_homebase_order(team, factory, &roster, order);
+            match order {
                 HomebaseOrder::Constructor => {
                     producer.enqueue(roster.constructor);
                     lack.mediums -= 1;
@@ -476,13 +522,49 @@ fn run_factories(
             // one spam at a time while `Lack.spams > 0`; toggling our
             // repeat flag on the budget is the same thing.
             let want = lack.spams > 0;
+            if producer.repeat() != want {
+                netprobe::record(|| ProbeCmd {
+                    team,
+                    unit: factory,
+                    kind: ProbeKind::FactoryRepeat,
+                    target: ProbeTarget::Flag(want),
+                });
+            }
             producer.set_repeat(want);
             if want && producer.queue().is_empty() {
+                netprobe::record(|| ProbeCmd {
+                    team,
+                    unit: factory,
+                    kind: ProbeKind::FactoryEnqueue,
+                    target: ProbeTarget::Kind(spam, 1),
+                });
                 producer.enqueue(spam);
                 lack.spams -= 1;
             }
         }
     }
+}
+
+/// Report a homebase's queue order to the net probe.
+fn probe_homebase_order(
+    team: u8,
+    factory: Entity,
+    roster: &build_orders::Roster,
+    order: HomebaseOrder,
+) {
+    let (kind, count) = match order {
+        HomebaseOrder::Constructor => (roster.constructor, 1),
+        HomebaseOrder::Heavy => (roster.heavy, 1),
+        HomebaseOrder::Arty => (roster.arty, 1),
+        HomebaseOrder::Spam(n) => (roster.spam, n),
+        HomebaseOrder::Nothing => return,
+    };
+    netprobe::record(|| ProbeCmd {
+        team,
+        unit: factory,
+        kind: ProbeKind::FactoryEnqueue,
+        target: ProbeTarget::Kind(kind, count),
+    });
 }
 
 /// `DispatchCon`: every idle constructor claims a datavent. Upstream's
@@ -519,10 +601,9 @@ fn run_constructors(
         // Don't start building from inside a base: step out of the
         // exit box (any team's homebase — enemy bases count too).
         if let Some(base) = occupied_by(&s.structures, ctor.pos, HOMEBASE_EXIT_HALF, true) {
-            crate::interaction::replace_order(
-                &mut commands.entity(ctor.entity),
-                QueuedCommand::Move(spread_around(base, &mut ticker.rng)),
-            );
+            let cmd = QueuedCommand::Move(spread_around(base, &mut ticker.rng));
+            netprobe::record(|| ProbeCmd::order(team, ctor.entity, &cmd));
+            crate::interaction::replace_order(&mut commands.entity(ctor.entity), cmd);
             continue;
         }
         // Fair KPAI: with no building budget the constructor is spread
@@ -533,10 +614,9 @@ fn run_constructors(
                     flat_dist_sq(**a, ctor.pos).total_cmp(&flat_dist_sq(**b, ctor.pos))
                 })
             }) {
-                crate::interaction::replace_order(
-                    &mut commands.entity(ctor.entity),
-                    QueuedCommand::Move(spread_around(home, &mut ticker.rng)),
-                );
+                let cmd = QueuedCommand::Move(spread_around(home, &mut ticker.rng));
+                netprobe::record(|| ProbeCmd::order(team, ctor.entity, &cmd));
+                crate::interaction::replace_order(&mut commands.entity(ctor.entity), cmd);
             }
             continue;
         }
@@ -551,6 +631,9 @@ fn run_constructors(
                 .map(|st| st.pos)
                 .min_by(|a, b| flat_dist_sq(*a, ctor.pos).total_cmp(&flat_dist_sq(*b, ctor.pos)))
             {
+                netprobe::record(|| {
+                    ProbeCmd::order(team, ctor.entity, &QueuedCommand::AttackMove(target))
+                });
                 attack_move(ctor.entity, target, commands);
             }
             continue;
@@ -563,10 +646,9 @@ fn run_constructors(
         };
         let (vent_entity, site) = s.vents.swap_remove(idx);
         s.vent_pos.swap_remove(idx);
-        crate::interaction::replace_order(
-            &mut commands.entity(ctor.entity),
-            QueuedCommand::BuildAt { kind, site },
-        );
+        let cmd = QueuedCommand::BuildAt { kind, site };
+        netprobe::record(|| ProbeCmd::order(team, ctor.entity, &cmd));
+        crate::interaction::replace_order(&mut commands.entity(ctor.entity), cmd);
         // Claim now so neither another constructor this tick nor the
         // player's placement ghost can stack on the same vent.
         commands.entity(vent_entity).insert(VentClaim);
@@ -678,11 +760,10 @@ fn run_army(
     for (n, &i) in s.idle_field.iter().chain(home_movers).enumerate() {
         // Round-robin across the mission fronts (upstream dispatches
         // per-mission quotas; round-robin spreads a mixed army evenly).
-        attack_move(
-            s.units[i].entity,
-            scatter(targets[n % targets.len()], &mut ticker.rng),
-            commands,
-        );
+        let goal = scatter(targets[n % targets.len()], &mut ticker.rng);
+        let unit = s.units[i].entity;
+        netprobe::record(|| ProbeCmd::order(team, unit, &QueuedCommand::AttackMove(goal)));
+        attack_move(unit, goal, commands);
         // Ordered now: later phases this tick (Bug deploy) must not
         // treat it as idle and undo the order.
         s.units[i].idle = false;
@@ -731,6 +812,12 @@ fn run_network(
         else {
             continue;
         };
+        netprobe::record(|| ProbeCmd {
+            team,
+            unit: tp.entity,
+            kind: ProbeKind::Dispatch,
+            target: ProbeTarget::Pos(attacker),
+        });
         orders.dispatch.write(DispatchEvent {
             teleporter: tp.entity,
             target: attacker,
@@ -757,6 +844,12 @@ fn run_network(
         .filter(off_cooldown)
         .min_by(|a, b| flat_dist_sq(a.pos, target).total_cmp(&flat_dist_sq(b.pos, target)))
     {
+        netprobe::record(|| ProbeCmd {
+            team,
+            unit: tp.entity,
+            kind: ProbeKind::Dispatch,
+            target: ProbeTarget::Pos(target),
+        });
         orders.dispatch.write(DispatchEvent {
             teleporter: tp.entity,
             target,
@@ -801,6 +894,12 @@ fn run_specials(
         && let Some(terminal) = ready(UnitKind::Terminal).next()
         && let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
     {
+        netprobe::record(|| ProbeCmd {
+            team,
+            unit: terminal.entity,
+            kind: ProbeKind::CommandFire,
+            target: ProbeTarget::Pos(center),
+        });
         orders.command_fire.write(CommandFireEvent {
             attacker: terminal.entity,
             target: center,
@@ -812,6 +911,12 @@ fn run_specials(
     // spares friends, so no crowd check is needed.
     for obelisk in ready(UnitKind::Obelisk) {
         if let Some((pos, _)) = nearest_enemy(spatial, team, obelisk.pos, OBELISK_RANGE, |_| true) {
+            netprobe::record(|| ProbeCmd {
+                team,
+                unit: obelisk.entity,
+                kind: ProbeKind::CommandFire,
+                target: ProbeTarget::Pos(pos),
+            });
             orders.command_fire.write(CommandFireEvent {
                 attacker: obelisk.entity,
                 target: pos,
@@ -836,6 +941,12 @@ fn run_specials(
                 .any(|u| u.team == team && u.protected && flat_dist_sq(u.pos, pos) <= ally_r_sq),
         )
     {
+        netprobe::record(|| ProbeCmd {
+            team,
+            unit: firewall.entity,
+            kind: ProbeKind::CommandFire,
+            target: ProbeTarget::Pos(pos),
+        });
         orders.command_fire.write(CommandFireEvent {
             attacker: firewall.entity,
             target: pos,
@@ -849,6 +960,12 @@ fn run_specials(
         && let Some(pointer) =
             ready(UnitKind::Pointer).find(|p| flat_dist_sq(p.pos, center) <= NX_RANGE * NX_RANGE)
     {
+        netprobe::record(|| ProbeCmd {
+            team,
+            unit: pointer.entity,
+            kind: ProbeKind::CommandFire,
+            target: ProbeTarget::Pos(center),
+        });
         orders.command_fire.write(CommandFireEvent {
             attacker: pointer.entity,
             target: center,
@@ -876,6 +993,12 @@ fn run_specials(
             _ => false,
         };
         if deploy {
+            netprobe::record(|| ProbeCmd {
+                team,
+                unit: u.entity,
+                kind: ProbeKind::Deploy,
+                target: ProbeTarget::None,
+            });
             orders.deploy.write(DeployEvent { entity: u.entity });
         }
     }

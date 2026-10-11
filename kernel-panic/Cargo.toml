@@ -30,6 +30,11 @@ zstd = "0.13"
 web-sys = { version = "0.3", features = ["Window", "Storage"] }
 js-sys = "0.3"
 
+# The headless net experiments (`src/headless`) size snapshots with
+# lz4 next to zstd.
+[dev-dependencies]
+lz4_flex = "0.12"
+
 # The kani proof harnesses (animation/proofs.rs) are compiled only under
 # `cargo kani`, which sets cfg(kani). Declare it so normal builds don't
 # warn about an unknown cfg.

@@ -169,7 +169,9 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
         advance_command_queue
             .before(guard_follow_system)
             .before(movement_system),
-        guard_follow_system,
+        // Before the movers it shares paths with: unordered, the
+        // executor picks the order (`headless` ambiguity check).
+        guard_follow_system.before(movement_system),
         // Buildings stamped / cleared before anyone paths.
         structures::update_structure_layer.before(movement_system),
         movement_system,
@@ -179,7 +181,9 @@ pub(crate) fn unit_motion_systems() -> ScheduleConfigs<ScheduleSystem> {
         air_movement::hover_air_system.after(movement_system),
         // `HandleObjectCollisions` for every ground unit reads
         // the positions all movers reached this frame.
-        ground_collision_system.after(movement_system),
+        ground_collision_system
+            .after(movement_system)
+            .after(air_movement::hover_air_system),
         // Runs last so any Y drift introduced by the two
         // preceding systems is corrected in the same frame.
         ground_clamp_system.after(ground_collision_system),

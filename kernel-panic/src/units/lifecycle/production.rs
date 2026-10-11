@@ -332,18 +332,35 @@ fn flat_forward(forward: Vec3) -> Vec3 {
 /// reported further away has an unpropagated (identity) transform.
 const MAX_PAD_OFFSET: f32 = 256.0;
 
-/// Look up the world position of an animated piece on a factory by index.
-/// Returns `None` if the piece doesn't exist or its global transform isn't
-/// available yet (e.g. the same frame the unit was spawned).
+/// World position of an animated piece on a factory, by index.
+///
+/// Composed from the pieces' *local* `Transform`s up to the factory
+/// root (whose `Transform` is world space), never from the pieces'
+/// `GlobalTransform`s: those are propagated once per render frame, so a
+/// frame that runs two sim ticks would read a stale pad (and a factory
+/// spawned this frame an identity one) — the sim then depends on the
+/// frame rate (`headless` determinism experiments).
 fn piece_world_pos(
     piece_idx: Option<usize>,
     animator: Option<&UnitAnimator>,
-    piece_transforms: &Query<&GlobalTransform, With<PieceIndex>>,
+    factory: Entity,
+    factory_tf: &Transform,
+    piece_transforms: &Query<(&Transform, &ChildOf), With<PieceIndex>>,
 ) -> Option<Vec3> {
     let idx = piece_idx?;
     let animator = animator?;
-    let entity = *animator.rig.piece_entities.get(idx)?;
-    piece_transforms.get(entity).ok().map(|gt| gt.translation())
+    let piece = *animator.rig.piece_entities.get(idx)?;
+    let mut local = bevy::math::Affine3A::IDENTITY;
+    let mut cur = piece;
+    for _ in 0..64 {
+        if cur == factory {
+            return Some((factory_tf.compute_affine() * local).translation.into());
+        }
+        let (tf, parent) = piece_transforms.get(cur).ok()?;
+        local = tf.compute_affine() * local;
+        cur = parent.parent();
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -374,7 +391,7 @@ pub fn production_system(
     mut buildees: Query<(&mut Emerging, &mut BuildDriven), Without<crate::units::combat::Dying>>,
     mut bugger_off: ResMut<BuggerOffRequests>,
     small_building_counts: Res<super::bookkeeping::SmallBuildingCounts>,
-    piece_transforms: Query<&GlobalTransform, With<PieceIndex>>,
+    piece_transforms: Query<(&Transform, &ChildOf), With<PieceIndex>>,
     unit_counts: Res<super::bookkeeping::TeamUnitCounts>,
     spatial: Res<SpatialIndex>,
     heightmap: Option<Res<Heightmap>>,
@@ -490,7 +507,15 @@ pub fn production_system(
         // A piece's `GlobalTransform` is likewise unpropagated on that
         // frame: a pad that is nowhere near its factory is ignored.
         let pad_pos = factory_pieces
-            .and_then(|fp| piece_world_pos(fp.pad, animator, &piece_transforms))
+            .and_then(|fp| {
+                piece_world_pos(
+                    fp.pad,
+                    animator,
+                    factory_entity,
+                    factory_tf,
+                    &piece_transforms,
+                )
+            })
             .filter(|p| p.distance_squared(factory_pos) < MAX_PAD_OFFSET * MAX_PAD_OFFSET)
             .unwrap_or(factory_pos);
         let kind = producer.current_production().unwrap();
@@ -1130,6 +1155,7 @@ mod tests {
         world.init_resource::<Assets<StandardMaterial>>();
         world.init_resource::<Assets<Image>>();
         world.init_resource::<crate::units::assets::meshes::S3OModelCache>();
+        world.init_resource::<crate::units::lifecycle::spawning::SimSerials>();
         world.init_resource::<crate::units::content::weapons::WeaponRegistry>();
         world.insert_resource(Time::<()>::default());
         world

@@ -708,14 +708,14 @@ impl GroundMover {
 
     /// Seed the dynamic state from the unit's spawn pose: heading from
     /// the `Transform`'s facing, `oldPos`, and the `SlowUpdate` phase
-    /// from the entity index so units stagger.
-    pub fn seeded(mut self, entity: Entity, tf: &Transform) -> Self {
+    /// from the unit's serial (`SimSerial`) so units stagger.
+    pub fn seeded(mut self, serial: u32, tf: &Transform) -> Self {
         let f = tf.forward().as_vec3();
         if f.xz().length_squared() > 1e-6 {
             self.heading = Heading::from_vector(f.x, f.z);
         }
         self.old_pos = tf.translation;
-        self.frame = entity.index_u32() % SLOW_UPDATE_RATE;
+        self.frame = serial % SLOW_UPDATE_RATE;
         self
     }
 
