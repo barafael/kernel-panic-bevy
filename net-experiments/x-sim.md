@@ -3,6 +3,28 @@
 Experiment branch `worktree-agent-a54879b76d9ed827f` (from `main` @ efd0724).
 Machine: AMD Ryzen 7 7840HS (8C/16T), 28 GB, Linux, release builds.
 
+> **Harvested (M0.1, together with X-commands).** The harness, the state hash, the six
+> determinism fixes and the experiments are in the tree. Changes since this write-up:
+>
+> - `SimSerial` is gone: X-commands' `NetId` (a required component of `UnitType`, numbered by
+>   its `on_add` hook from the match-scoped `NetIdAllocator`) is the one unit id. It drives the
+>   `SlowUpdate` phase, the `HoverAir` seed, the AI's canonical order and the state hash.
+> - The state hash keys each unit record by its `NetId` and hashes references to other units as
+>   their `NetId` (it used to use a (kind, pose) key). A different spawn order now also changes
+>   the hash.
+> - The AI issues every order through the command bus (X-commands). `netprobe.rs` and the probes
+>   are removed, and the AI command volume is now read from the bus's log of applied
+>   `CommandFrame`s (`match_stats`). The numbers in §3 were measured with the probes, before
+>   the bus.
+> - `encode.rs` (the snapshot encoders) and the `bandwidth` test are removed. Server-authoritative
+>   replication was not chosen (`docs/multiplayer-plan.md`); the §2 numbers stay as the record,
+>   and the code is at commit 3a095b1. `bandwidth` is now `match_stats` (entity peaks, AI
+>   command volume, sim cost per tick). `map_seats` and `unit_components` are removed too.
+> - The float probe stays in `net-experiments/x-sim-floatprobe/` (outside the workspace), as
+>   the quick check for the deterministic-math work in M0.3.
+>
+> The re-run after the harvest is in [M0.1 re-run](#m01-re-run-after-the-harvest) at the end.
+
 ## What was built
 
 `kernel-panic/src/headless/` (test-only, `#[cfg(test)] mod headless`):
@@ -24,14 +46,15 @@ Machine: AMD Ryzen 7 7840HS (8C/16T), 28 GB, Linux, release builds.
 - `state.rs`: a canonical, **entity-id-independent state hash**. Each unit becomes a record of
   kind, team, the f32 bits of its sim pose (`SimPose::sim()`, not the render-blended
   `Transform`), health, flags, orders, command queue and factory queue. References to other
-  units are replaced by the referenced unit's (kind, pose) key. Records are sorted, then hashed
+  units are replaced by the referenced unit's (kind, pose) key (since M0.1: records and
+  references use the `NetId`). Records are sorted, then hashed
   with FNV-1a. There are three part hashes (positions / health / orders), plus projectiles, plus
   sim-entity counts. A separate "fx" hash covers visual-only entity counts. It also produces a
   census by component type, and a readable per-unit dump for diffing.
-- `encode.rs`: snapshot encoders (full raw f32, full quantized, delta vs. baseline,
-  zstd / lz4) and the lockstep command encoder.
-- `tests.rs`: `determinism`, `rematch`, `bandwidth`, `fixed_ambiguities`, `frame_systems`,
-  `unit_components`, `map_seats`, `smoke`. All `#[ignore]`d, all configured through env vars
+- `encode.rs` (removed in M0.1): snapshot encoders (full raw f32, full quantized, delta vs.
+  baseline, zstd / lz4) and the lockstep command encoder.
+- `tests.rs`: `determinism`, `rematch`, `bandwidth` (M0.1: `match_stats`), `fixed_ambiguities`,
+  `frame_systems`, `unit_components` and `map_seats` (both removed in M0.1), `smoke`. All `#[ignore]`d, all configured through env vars
   (`KP_NET_MAP`, `KP_NET_TEAMS`×`KP_NET_PER_TEAM`, `KP_NET_SEED`, `KP_NET_TICKS`,
   `KP_NET_EXEC=single|multi`, `KP_NET_PACING=uneven|multi|zeros|even`, `KP_NET_ID_SHIFT`,
   `KP_NET_DIFFICULTY`, `KP_NET_TRACE`, `KP_NET_CSV`, `KP_NET_DUMP`).
@@ -39,11 +62,11 @@ Machine: AMD Ryzen 7 7840HS (8C/16T), 28 GB, Linux, release builds.
 ```
 cargo test --release -p kernel-panic headless::tests::determinism -- --ignored --nocapture --test-threads=1
 KP_NET_MAP=Quad_Core KP_NET_TEAMS=8 KP_NET_PER_TEAM=1 KP_NET_DIFFICULTY=4 KP_NET_TICKS=27000 \
-  cargo test --release -p kernel-panic headless::tests::bandwidth -- --ignored --nocapture
+  cargo test --release -p kernel-panic headless::tests::match_stats -- --ignored --nocapture
 ```
 
 Production-code changes not related to determinism: `main.rs` moves the game plugin list into
-`add_game()`. `netprobe.rs` adds order-funnel probes: the closure only runs under `cfg(test)`,
+`add_game()`. `netprobe.rs` (removed in M0.1) adds order-funnel probes: the closure only runs under `cfg(test)`,
 so the game build is unchanged. `game_setup::test_seed` is a test-only `match_seed` override.
 `SimPose::sim()` is a test-only accessor.
 
@@ -89,7 +112,8 @@ Fixed in this branch:
    `entity.index()` (`ground_move.rs:718`), and `HoverAir` seeds its RNG with `entity.to_bits()`
    (`air_movement.rs:757`). Entity indices are shared with every UI and FX entity the frame loop
    spawns, so they depend on the frame rate and the HUD. Added a match-scoped `SimSerial` (spawn
-   order, Spring's unit id) through `SpawnContext`, and used it for both.
+   order, Spring's unit id) through `SpawnContext`, and used it for both. (M0.1: merged into
+   `NetId`.)
 3. **`Changed<Transform>` polluted by the render interpolation**: `orient_stationary_to_terrain`
    (`movement.rs:764`) re-derived upright rotations whenever `Transform` "changed". The
    interpolation writes `Transform` once per *frame*, and each re-derivation can land an ulp off.
@@ -98,7 +122,7 @@ Fixed in this branch:
 4. **ECS query order used as sim order**: the AI rolls dice per unit and per factory, and picks
    "first" homes and vents, all in query iteration order (`ai/mod.rs:359`, `:435`, the datavent
    loop). Two Packets swapped targets because archetype history differed. The snapshot, the
-   factories and the vents are now sorted by `SimSerial` (vents by position).
+   factories and the vents are now sorted by `SimSerial` (M0.1: `NetId`; vents by position).
 5. **Unordered systems with conflicting access** (counted by the new `fixed_ambiguities` test:
    **21 pairs → 8**):
    - `ai_brain` vs `movement_system` / `hover_air_system` (MovePath);
@@ -265,7 +289,8 @@ Per client, payload, delta+zstd (median / p95):
 
 ## 3. Command volume (lockstep input)
 
-Probes sit at the AI's order funnels (`netprobe::record` in `units/ai/mod.rs`):
+Probes sat at the AI's order funnels (`netprobe::record` in `units/ai/mod.rs`; removed in
+M0.1, where the AI issues through the command bus and `match_stats` sizes the bus's frames):
 
 - every `replace_order` the AI issues (move, attack-move, build-at);
 - factory queue appends and repeat-flag flips (flips counted only when the flag actually
@@ -349,12 +374,38 @@ KP_NET_TICKS=18000 KP_NET_PACING=uneven cargo test --release -p kernel-panic hea
 # rematch / ambiguity count
 KP_NET_TICKS=6000 cargo test --release -p kernel-panic headless::tests::rematch -- --ignored --nocapture
 cargo test --release -p kernel-panic headless::tests::fixed_ambiguities -- --ignored --nocapture
-# bandwidth + commands + sim cost (scenario D)
+# entity peaks + AI commands + sim cost (scenario D; the snapshot sizes need commit 3a095b1)
 KP_NET_MAP=Quad_Core KP_NET_TEAMS=8 KP_NET_PER_TEAM=1 KP_NET_DIFFICULTY=4 KP_NET_TICKS=27000 KP_NET_CSV=d.csv \
-  cargo test --release -p kernel-panic headless::tests::bandwidth -- --ignored --nocapture
+  cargo test --release -p kernel-panic headless::tests::match_stats -- --ignored --nocapture
 # float probe
 cd net-experiments/x-sim-floatprobe && cargo build --release && cargo build --release --target x86_64-unknown-linux-musl \
   && cargo build --release --lib --target wasm32-unknown-unknown
 target/release/floatprobe gnu.bin; node run.mjs target/wasm32-unknown-unknown/release/floatprobe.wasm wasm.bin
 python3 compare.py gnu.bin wasm.bin
+```
+
+## M0.1 re-run (after the harvest)
+
+The merged tree: X-commands' command bus (every AI order applied one tick later through
+`CommandBus`), `NetId` as the only unit id, the state hash keyed by `NetId`. Release build, multi-
+threaded `FixedUpdate`, on a heavily loaded machine (load average ~60 from parallel builds), so
+no timings here.
+
+| comparison | result |
+|---|---|
+| 4v4 Speed_Balls_16_Way, seed `0x5eed`, 18 000 ticks; second run uneven pacing **and** entity ids shifted (`KP_NET_PACING=uneven KP_NET_ID_SHIFT=101`) | sim, positions, health, orders identical for all 18 000 ticks; fx (visual-only) from tick 1 795, as before |
+| seed 24301 vs 24302 (sanity: the hash sees a difference) | first divergence at tick 497 |
+| rematch after the default 900-tick warmup, 6 000 ticks | identical for all 6 000 ticks (X-sim measured 1 636) |
+| rematch after a 4 000-tick warmup that includes combat, 3 000 ticks | **1 561** (health first, then orders 1 930) |
+
+The rematch with the short warmup no longer diverges. The warmup now ends before any combat, so
+the combat RNG `Local`s haven't moved yet. Why X-sim's run diverged at 1 636 is not
+root-caused: candidates are its `SimSerial` counter and the AI's direct order writes, both
+replaced here. With combat in the warmup, the run still diverges at 1 561, so the stale-`Local`
+hazard (item 8) is real and stays M0.2 work.
+
+```
+KP_NET_TICKS=18000 KP_NET_PACING=uneven KP_NET_ID_SHIFT=101 \
+  cargo test --release -p kernel-panic headless::tests::determinism -- --ignored --nocapture
+KP_NET_WARMUP=4000 KP_NET_TICKS=3000 cargo test --release -p kernel-panic headless::tests::rematch -- --ignored --nocapture
 ```

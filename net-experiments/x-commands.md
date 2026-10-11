@@ -5,6 +5,13 @@ Code: `kernel-panic/src/net/` (`mod.rs` types and bus, `apply.rs` sim side,
 `codec.rs` wire shapes, `lockstep_tests.rs` the in-process lockstep tests and
 the size measurements).
 
+> **Harvested (M0.1, together with X-sim).** The command layer is in the tree as
+> described here. X-sim's `SimSerial` was merged into `NetId`, which is now the
+> only unit id: besides network references it sets the `SlowUpdate` phase, seeds
+> `HoverAir` (§5.2 fixed), orders the AI's snapshot and factories, and keys the
+> headless state hash. `GroundMover::seeded` no longer takes an id; the phase
+> comes from the `NetId` / `GroundMover` hooks alone.
+
 **Summary.** All lockstep, host and server designs need the same thing:
 everything a player (or the AI) does to the simulation becomes a `SimCommand`
 that names units by a stable `NetId`. Commands travel in a per-player,
@@ -275,8 +282,8 @@ belongs to X-sim.
 
 ## 5. Determinism hazards found on the way (handed to X-sim / the lobby)
 1. **Fixed here:** `GroundMover` slow-update phase from `Entity` index (above).
-2. **Open:** `air_movement.rs:757` seeds `HoverAir` from `entity.to_bits()`.
-   Same class of bug; use `NetId`.
+2. **Fixed in M0.1:** `air_movement.rs:757` seeded `HoverAir` from
+   `entity.to_bits()`. Same class of bug; it uses the `NetId` now.
 3. **Fixed opt-in:** the AI took "every homebase team except `LocalTeam`" as
    AI (`ai/mod.rs` `snapshot`). On a networked peer, each machine would play
    the AI for every *other human*. New `AiSeats` resource; the lobby must
@@ -322,7 +329,7 @@ belongs to X-sim.
 | Game speed and pause as commands (`SetSpeed`, `Pause`) instead of `Time<Virtual>` pokes; the lockstep driver honours them | 2–4 h |
 | Resign / leave as `SimCommand::Resign` → the existing `KillTeam` path; decouple the sim run gate from local Victory/Defeat (§5.6) | 3 h |
 | Seat-derived sim state: `AiSeats` from the lobby, shared AI seed, `AutoHold` initial from the seat (§5.3–5.5) | 1–2 h |
-| `HoverAir` seed from `NetId` (§5.2) | 30 min |
+| ~~`HoverAir` seed from `NetId` (§5.2)~~ done in M0.1 | — |
 | Lockstep fixed-step driver: run `FixedUpdate` only while `bus.ready()`, replacing `Time<Fixed>` accumulation when networked; adaptive input delay from measured RTT | 1 day |
 | Transport glue: drain `outbox`, `deliver` remote frames (matchbox / relay); handshake with build + content hash, seed, seats | 1–2 days (the transport agent's work) |
 | Desync detection: a state hash every N ticks in the frame stream (Spring's sync checksum) and a log dump on mismatch | 3 h |
