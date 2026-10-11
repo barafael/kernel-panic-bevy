@@ -388,6 +388,12 @@ fn snapshot(
     s.ai_teams.clear();
     s.structures.clear();
     s.homes.clear();
+    // Canonical order (`NetId`, Spring's unit ids): the dice the AI
+    // rolls per unit, and every "first" it picks, must not follow the
+    // ECS's query order, which depends on archetype history the frame
+    // loop also shapes (`headless` determinism experiments).
+    let mut sorted: Vec<_> = units.iter().collect();
+    sorted.sort_unstable_by_key(|item| item.12.copied().unwrap_or_default());
     for (
         e,
         team,
@@ -402,7 +408,7 @@ fn snapshot(
         protected,
         (nx_cast, pending_cast),
         net,
-    ) in units
+    ) in sorted
     {
         let kind = ut.0;
         let casting = nx_cast || pending_cast;
@@ -452,6 +458,9 @@ fn snapshot(
             s.vents.push((entity, vent.pos));
         }
     }
+    // Vents are map features (no `NetId`): position order.
+    s.vents
+        .sort_by(|a, b| (a.1.x, a.1.z).partial_cmp(&(b.1.x, b.1.z)).unwrap());
 }
 
 /// Homebase mix (`OrderHomeBase`) and the minifac spam toggle
@@ -467,10 +476,10 @@ fn run_factories(
     buffer: u32,
     orders: &mut CommandBus,
 ) {
-    for (t, ut, producer, net) in producers.iter() {
-        if t.0 != team {
-            continue;
-        }
+    // `NetId` order (see `snapshot`): each factory draws dice.
+    let mut own: Vec<_> = producers.iter().filter(|(t, ..)| t.0 == team).collect();
+    own.sort_unstable_by_key(|(.., net)| net.copied().unwrap_or_default());
+    for (_, ut, producer, net) in own {
         let factory = net.copied().unwrap_or_default();
         let order = |orders: &mut CommandBus, kind: UnitKind, n: u16| {
             orders.issue_as(

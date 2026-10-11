@@ -95,6 +95,7 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<bookkeeping::TeamUnitCounts>()
             .init_match_resource::<cloak::VisibilityRefreshTimer>()
             .init_match_resource::<spatial::SpatialIndex>()
+            .init_match_resource::<spawning::SimSerials>()
             .init_match_resource::<game_over::GameOverClock>()
             .init_match_resource::<crate::game_setup::GameOverDismissed>()
             .add_message::<command_fire::CommandFireEvent>()
@@ -124,6 +125,11 @@ impl Plugin for UnitsPlugin {
                 ai::ai_brain
                     .after(crate::net::SimCommandSet)
                     .before(GameplaySet::Produce)
+                    // Before the movers: it reads their paths, and an
+                    // unordered pair runs in whatever order the
+                    // executor picks (single- vs multi-threaded runs
+                    // diverged; `headless` determinism experiments).
+                    .before(crate::interaction::movement::advance_command_queue)
                     .run_if(in_state(game_over::GameState::Playing)),
             )
             .configure_sets(

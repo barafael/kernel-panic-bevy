@@ -521,9 +521,32 @@ pub fn random_weighted_map() -> String {
 /// A fresh seed for per-match procedural content (Hex Farm's layout,
 /// which the original gadget re-rolls every game).
 pub fn match_seed() -> u64 {
+    // The headless harness pins the seed so a scenario replays.
+    #[cfg(test)]
+    if let Some(seed) = test_seed::get() {
+        return seed;
+    }
     let hi = (clock_f64() * (1u64 << 32) as f64) as u64;
     let lo = (clock_f64() * (1u64 << 32) as f64) as u64;
     (hi << 32) | lo
+}
+
+/// Test builds: a fixed [`match_seed`] (the headless harness's seeded
+/// scenarios). Process-global, like the launch entropy it replaces.
+#[cfg(test)]
+pub mod test_seed {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// 0 = unset.
+    static SEED: AtomicU64 = AtomicU64::new(0);
+
+    pub fn set(seed: Option<u64>) {
+        SEED.store(seed.map_or(0, |s| s.max(1)), Ordering::SeqCst);
+    }
+
+    pub fn get() -> Option<u64> {
+        Some(SEED.load(Ordering::SeqCst)).filter(|&s| s != 0)
+    }
 }
 
 #[cfg(test)]

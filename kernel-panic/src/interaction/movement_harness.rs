@@ -85,7 +85,8 @@ impl Harness {
             .spawn((UnitType(kind), TeamId(team), stats, transform))
             .id();
         let registry = self.world.resource::<UnitRegistry>();
-        let mover = super::movement::ground_mover_components(kind, registry, e, &transform);
+        let mover =
+            super::movement::ground_mover_components(kind, registry, e.index_u32(), &transform);
         self.world.entity_mut(e).insert(mover);
         e
     }

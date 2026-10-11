@@ -39,6 +39,13 @@ pub struct SimPose {
 }
 
 impl SimPose {
+    /// The latest sim pose (the headless harness hashes this, not the
+    /// render-blended `Transform`).
+    #[cfg(test)]
+    pub fn sim(&self) -> Transform {
+        self.curr
+    }
+
     fn snap(&mut self, tf: Transform) {
         self.prev = tf;
         self.curr = tf;
