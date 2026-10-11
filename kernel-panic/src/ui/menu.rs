@@ -170,7 +170,13 @@ enum InputMode {
 
 /// Marker on every menu root (launch menu, Esc overlay, game-over panel).
 #[derive(Component)]
-struct MenuRoot;
+pub(super) struct MenuRoot;
+
+/// Marker on every placed menu frame that is not a button (labels,
+/// headings, readouts): with [`MenuButton`], the set `menu_shots`
+/// audits for overlaps and off-window rects.
+#[derive(Component)]
+pub(super) struct MenuFrame;
 
 /// The Settings page's frame-rate label; [`fps_readout`] keeps its text
 /// current while the page is up.
@@ -180,7 +186,7 @@ struct FpsReadout;
 /// One menu button: carries its action and base colour (hover restores
 /// exactly this).
 #[derive(Component)]
-struct MenuButton {
+pub(super) struct MenuButton {
     action: MenuAction,
     base: Color,
 }
@@ -363,8 +369,12 @@ fn frame_padding(font_size: f32) -> UiRect {
     UiRect::axes(Val::Px(font_size * 0.5), Val::Px(font_size * 0.25))
 }
 
+fn frame_border_px(font_size: f32) -> f32 {
+    (font_size * 0.09).max(1.0)
+}
+
 fn frame_border(font_size: f32) -> UiRect {
-    UiRect::all(Val::Px((font_size * 0.09).max(1.0)))
+    UiRect::all(Val::Px(frame_border_px(font_size)))
 }
 
 /// A clickable frame at original coordinates (see [`anchored`]); clicks
@@ -418,7 +428,7 @@ impl<'a> ButtonSpec<'a> {
     }
 
     fn spawn(self, commands: &mut Commands, parent: Entity) -> Entity {
-        let font_size = self.font_size;
+        let font_size = readable(self.font_size);
         let base = if self.chosen {
             brighten(self.color)
         } else {
@@ -531,7 +541,7 @@ impl<'a> LabelSpec<'a> {
     }
 
     fn spawn(self, commands: &mut Commands, parent: Entity) -> Entity {
-        let font_size = self.font_size;
+        let font_size = readable(self.font_size);
         let text = commands
             .spawn((
                 Text::new(self.text),
@@ -549,7 +559,9 @@ impl<'a> LabelSpec<'a> {
         if self.frame.is_some() {
             node.border = frame_border(font_size);
         }
-        let entity = commands.spawn((node, transform, Pickable::IGNORE)).id();
+        let entity = commands
+            .spawn((MenuFrame, node, transform, Pickable::IGNORE))
+            .id();
         if let Some(color) = self.frame {
             commands.entity(entity).insert((fill(color), border(color)));
         }
@@ -575,10 +587,19 @@ fn title(commands: &mut Commands, parent: Entity, font_size: f32) {
         ))
         .id();
     let entity = commands
-        .spawn((anchored(0.5, 0.98, Anchor::Ct), Pickable::IGNORE))
+        .spawn((MenuFrame, anchored(0.5, 0.98, Anchor::Ct), Pickable::IGNORE))
         .id();
     commands.entity(entity).add_child(t);
     commands.entity(parent).add_child(entity);
+}
+
+/// No label on any sane window goes below this: the original's ratios
+/// put a hint at 9 px on an 800×600 window.
+const MIN_FONT_PX: f32 = 11.5;
+
+/// `px`, or [`MIN_FONT_PX`] when the window is too small for it.
+fn readable(px: f32) -> f32 {
+    px.max(MIN_FONT_PX)
 }
 
 /// Window-height-derived font sizes. The original's ratios are `vsy/14`
@@ -1095,9 +1116,11 @@ fn maintain_launch_menu(
         MenuPage::AdvancedSkirmish => {
             advanced_skirmish_page(&mut commands, root, page_size, config, &catalog.names())
         }
-        MenuPage::MapList => map_list_page(&mut commands, root, list_size, catalog),
+        MenuPage::MapList => {
+            map_list_page(&mut commands, root, (window.width(), list_size), catalog)
+        }
         MenuPage::Showcase => showcase_page(&mut commands, root, page_size),
-        MenuPage::Credits => credits_page(&mut commands, root, page_size),
+        MenuPage::Credits => credits_page(&mut commands, root, (window.width(), page_size)),
         MenuPage::Readme => readme_page(&mut commands, root, window.height(), readme.0),
         MenuPage::Settings => settings_page(
             &mut commands,
@@ -1175,6 +1198,7 @@ fn main_menu_page(
 /// restart the demo behind the menu on the previous / next catalog map,
 /// so the backdrop can be browsed without starting a match.
 fn demo_map_cycler(commands: &mut Commands, root: Entity, font_size: f32, demo_map: Option<&str>) {
+    let font_size = readable(font_size);
     // Right-to-left from the corner: `>` hangs off x=99%, the name off
     // the arrow's left edge, `<` off the name's. Absolute nodes don't
     // know each other's widths, so the three sit in one row node
@@ -1249,6 +1273,7 @@ fn music_controls(
     player: &MusicPlayer,
     catalog: &MusicCatalog,
 ) {
+    let font_size = readable(font_size);
     let (mut node, transform) = anchored(0.01, 0.02, Anchor::Lb);
     node.flex_direction = FlexDirection::Row;
     node.align_items = AlignItems::Center;
@@ -1534,7 +1559,7 @@ fn audio_page(
         .min_width(12.0)
         .spawn(commands, root);
     LabelSpec::new(
-        "Master scales every channel; music plays the .ogg files in assets/music",
+        "Master scales every channel;\nmusic plays the .ogg files in assets/music",
         page_size * 0.6,
         (0.5, 0.06),
         Anchor::Cc,
@@ -1542,19 +1567,28 @@ fn audio_page(
     .spawn(commands, root);
 }
 
-/// The choices of a [`choice_rows`] row run from this x to
-/// [`CHOICES_END`]: 80 % of the width, the label right-aligned just
-/// left of it.
-const CHOICES_START: f32 = 0.18;
+/// The choices of a [`choice_rows`] row run from [`choices_start`] to
+/// this x; the row labels sit at [`LABEL_X`] on the left.
 const CHOICES_END: f32 = 0.98;
+const LABEL_X: f32 = 0.02;
+/// The choices start no further left than this (80 % of the width),
+/// and further right only when a row label needs the room.
+const CHOICES_MIN_START: f32 = 0.18;
+
+/// Where a page's choices start: past its longest label (`glyph` wide
+/// per character, plus the frame's padding and a gap).
+fn choices_start(longest_label: usize, glyph: f32) -> f32 {
+    (LABEL_X + (longest_label as f32 + 3.0) * glyph).max(CHOICES_MIN_START)
+}
 
 /// Draw labelled rows of mutually exclusive choices, the current pick
-/// brightened. Row label on the left (`rc` just before
-/// [`CHOICES_START`]), its choices stepping right from there in even
-/// boxes sized to the row's longest label, never wider than what fits
-/// before [`CHOICES_END`] (six volume steps on a wide window used to
-/// run off the screen); rows 9.5% apart down from y=72%. A monospace
-/// glyph is ~0.6 em wide, plus the frame's padding.
+/// brightened. Row labels on the left at [`LABEL_X`], the choices
+/// stepping right from [`choices_start`] in even boxes sized to the
+/// row's longest choice, never wider than what fits before
+/// [`CHOICES_END`] (six volume steps on a wide window used to run off
+/// the screen, and a long label off the left edge of a small one);
+/// rows 9.5% apart down from y=72%. A monospace glyph is ~0.6 em
+/// wide, plus the frame's padding.
 fn choice_rows(
     commands: &mut Commands,
     root: Entity,
@@ -1562,8 +1596,14 @@ fn choice_rows(
     page_size: f32,
     rows: Vec<(&str, Color, Vec<Choice>)>,
 ) {
-    let size = page_size * 0.85;
+    let size = readable(page_size * 0.85);
     let glyph = 0.6 * size / window_width;
+    let longest_label = rows
+        .iter()
+        .map(|(name, _, _)| name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let start = choices_start(longest_label, glyph);
     for (i, (name, color, choices)) in rows.into_iter().enumerate() {
         let y = 0.72 - 0.095 * i as f32;
         let longest = choices
@@ -1571,8 +1611,8 @@ fn choice_rows(
             .map(|(text, _, _)| text.chars().count())
             .max()
             .unwrap_or(0);
-        let step = choice_step(longest, glyph, choices.len());
-        LabelSpec::new(name, size, (CHOICES_START - 0.04, y), Anchor::Rc)
+        let step = choice_step(longest, glyph, choices.len(), start);
+        LabelSpec::new(name, size, (LABEL_X, y), Anchor::Lc)
             .frame(color)
             .spawn(commands, root);
         for (j, (text, action, chosen)) in choices.into_iter().enumerate() {
@@ -1580,7 +1620,7 @@ fn choice_rows(
                 &text,
                 color,
                 size,
-                (CHOICES_START + step * j as f32, y),
+                (start + step * j as f32, y),
                 Anchor::Lc,
                 action,
             )
@@ -1591,12 +1631,13 @@ fn choice_rows(
     }
 }
 
-/// The x step (window fraction) between a row's `count` choice boxes:
-/// the longest label plus padding at `glyph` width each, at least 12 %,
-/// and never more than an even share of the choices' span.
-fn choice_step(longest: usize, glyph: f32, count: usize) -> f32 {
+/// The x step (window fraction) between a row's `count` choice boxes
+/// from `start`: the longest choice plus padding at `glyph` width each,
+/// at least 12 %, and never more than an even share of the span left
+/// before [`CHOICES_END`].
+fn choice_step(longest: usize, glyph: f32, count: usize, start: f32) -> f32 {
     let natural = ((longest as f32 + 2.5) * glyph).max(0.12);
-    natural.min((CHOICES_END - CHOICES_START) / count.max(1) as f32)
+    natural.min((CHOICES_END - start) / count.max(1) as f32)
 }
 
 fn fps_text(fps: Option<f64>) -> String {
@@ -1803,7 +1844,17 @@ fn advanced_skirmish_page(
 /// `rc` at x=90%) under a "Choose a map:" heading, Back at the bottom
 /// — paired with the weighted-random pick like Run!/Back, since long
 /// map names reach into the centre column.
-fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog: &MapCatalog) {
+/// Two columns of map plates, 45 % of the width each: the list font
+/// shrinks until the longest name fits its column.
+fn map_list_page(
+    commands: &mut Commands,
+    root: Entity,
+    (window_w, list_size): (f32, f32),
+    catalog: &MapCatalog,
+) {
+    let names = catalog.names();
+    let longest = names.iter().map(|n| n.chars().count()).max().unwrap_or(1);
+    let list_size = list_size.min(0.45 * window_w / (0.6 * longest as f32 + 2.0));
     LabelSpec::new(
         "Choose a map:",
         list_size * 28.0 / 24.0,
@@ -1824,7 +1875,6 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
     .min_width(16.0)
     .spawn(commands, root);
 
-    let names = catalog.names();
     let rows = names.len().div_ceil(2).max(1);
     // The original steps 10% per row from y=85%; longer catalogs
     // squeeze to keep the last row clear of Back.
@@ -1832,9 +1882,9 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
     for (i, name) in names.iter().enumerate() {
         let (col, row) = (i / rows, i % rows);
         let (x, anchor) = if col == 0 {
-            (0.1, Anchor::Lc)
+            (0.05, Anchor::Lc)
         } else {
-            (0.9, Anchor::Rc)
+            (0.95, Anchor::Rc)
         };
         ButtonSpec::new(
             name,
@@ -1844,7 +1894,7 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
             anchor,
             MenuAction::PickMap(i),
         )
-        .min_width(30.0)
+        .min_width(40.0)
         .spawn(commands, root);
     }
     back_button(nav_size, (0.6, 0.05), MenuPage::AdvancedSkirmish)
@@ -1854,10 +1904,20 @@ fn map_list_page(commands: &mut Commands, root: Entity, list_size: f32, catalog:
 
 /// The original's `Credits`: heading plate sitting on y=80%, the credit
 /// lines hanging below it, the engine credit around y=30%, Back at 10%.
-fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
-    LabelSpec::new("Kernel Panic!\nCredits:", page_size, (0.5, 0.8), Anchor::Cb)
-        .frame(MEDIUM_GREEN)
-        .spawn(commands, root);
+/// The credits block hangs from y=80%; its font is whatever fits the
+/// window's width and the height left above the engine plates and
+/// Back (under the page's `22/30`), and the engine plates sit right
+/// under it, wherever that is: a small window cannot hold fourteen
+/// readable lines over a plate fixed at the original's y=28%.
+fn credits_page(commands: &mut Commands, root: Entity, (window_w, page_size): (f32, f32)) {
+    LabelSpec::new(
+        "Kernel Panic!\nCredits:",
+        page_size,
+        (0.5, 0.82),
+        Anchor::Cb,
+    )
+    .frame(MEDIUM_GREEN)
+    .spawn(commands, root);
     const CREDITS: &str = "\
 - Original concept by Boirunner
 - About all the work done by KDR_11k
@@ -1865,28 +1925,63 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 - Sounds by Noruas and Pendrokar
 - Voices by Eva and Panda
 - Music by Mister Beep, Lo-bat. and ParagonX9
-- C64/Amiga remixes by Radix, Dreamfish, Stalker, Warwick Gaetjens, Wire and Front 6
-- Maps by Boirunner, Runecrafter, zwzsg, TradeMark, KDR_11k and FireStorm
+- C64/Amiga remixes by Radix, Dreamfish, Stalker,
+  Warwick Gaetjens, Wire and Front 6
+- Maps by Boirunner, Runecrafter, zwzsg, TradeMark,
+  KDR_11k and FireStorm
 - Some LUA interface upgrade based of jK and trepan code
 - The Touhou faction characters were inspired by ZUN's works
 - Many thanks to lurker, Quantum, and the rest of #lua crew
 - Reimplementation in Rust + Bevy, from the original Spring mod";
-    LabelSpec::new(CREDITS, page_size * 22.0 / 30.0, (0.5, 0.78), Anchor::Ct)
+    const BLOCK_TOP: f32 = 0.80;
+    const BACK_Y: f32 = 0.06;
+    const GAP: f32 = 0.015;
+    let window_h = page_size * 24.0;
+    let small_font = readable(page_size * 24.0 / 30.0);
+    // A plate is its font plus half an em of padding and the border tall.
+    let plate = |font: f32| font * 1.5 + 2.0 * frame_border_px(font);
+    let engine_h = plate(readable(page_size)) + plate(small_font);
+    let budget_h = (BLOCK_TOP - BACK_Y - 2.0 * GAP) * window_h - plate(small_font) * 0.5 - engine_h;
+    let credits_font = readable(fitted_font(
+        page_size * 22.0 / 30.0,
+        CREDITS,
+        (0.9 * window_w, budget_h),
+    ));
+    let block_h = (1.2 * CREDITS.lines().count() as f32 + 0.5) * credits_font
+        + 2.0 * frame_border_px(credits_font);
+    LabelSpec::new(CREDITS, credits_font, (0.5, BLOCK_TOP), Anchor::Ct)
         .frame(TEAL)
         .justify(Justify::Left)
         .spawn(commands, root);
-    LabelSpec::new("Spring Engine by:", page_size, (0.5, 0.28), Anchor::Cb)
+    let engine_y = BLOCK_TOP - (block_h + plate(readable(page_size))) / window_h - GAP;
+    LabelSpec::new("Spring Engine by:", page_size, (0.5, engine_y), Anchor::Cb)
         .frame(EXTREME_ORANGE)
         .spawn(commands, root);
     LabelSpec::new(
         "Swedish Yankspankers",
-        page_size * 24.0 / 30.0,
-        (0.5, 0.28),
+        small_font,
+        (0.5, engine_y),
         Anchor::Ct,
     )
     .frame(README_UPDOWN)
     .spawn(commands, root);
-    back_button(page_size * 24.0 / 30.0, (0.5, 0.1), MenuPage::Main).spawn(commands, root);
+    back_button(small_font, (0.5, BACK_Y), MenuPage::Main).spawn(commands, root);
+}
+
+/// The largest font up to `wanted` at which `text` (monospace glyphs
+/// ~0.6 em wide, lines 1.2 em tall, half an em of frame padding per
+/// side) fits in a `(width, height)` box, in pixels.
+fn fitted_font(wanted: f32, text: &str, (width, height): (f32, f32)) -> f32 {
+    let lines = text.lines().count().max(1) as f32;
+    let longest = text
+        .lines()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(1)
+        .max(1) as f32;
+    let by_width = width / (0.6 * longest + 1.2);
+    let by_height = height / (1.2 * lines + 0.7);
+    wanted.min(by_width).min(by_height)
 }
 
 /// The original's `PrintReadMe`: file name plate at the top centre, the
@@ -2598,10 +2693,24 @@ mod tests {
     #[test]
     fn choice_rows_fit_the_window() {
         let glyph = 0.6 * (1440.0 / 24.0 * 0.85) / 2560.0;
-        let volume = choice_step(4, glyph, 6);
-        assert!(CHOICES_START + volume * 6.0 <= CHOICES_END + 1e-6);
+        assert_eq!(
+            choices_start(6, glyph),
+            CHOICES_MIN_START,
+            "short labels keep the 80 % span"
+        );
+        let start = choices_start(12, glyph);
+        assert!(start >= CHOICES_MIN_START && start < 0.22, "{start}");
+        let volume = choice_step(4, glyph, 6, start);
+        assert!(start + volume * 6.0 <= CHOICES_END + 1e-6);
         assert!(volume > 0.1);
-        assert_eq!(choice_step(3, glyph, 4), 0.12);
+        assert_eq!(choice_step(3, glyph, 4, start), 0.12);
+        // An 800×600 window (376 logical rows at 1.5×): "Antialiasing"
+        // pushes the choices right instead of running off the left edge.
+        let glyph = 0.6 * readable(376.0 / 24.0 * 0.85) / 533.0;
+        let start = choices_start(12, glyph);
+        assert!(start > CHOICES_MIN_START && start < 0.4, "{start}");
+        let step = choice_step(4, glyph, 6, start);
+        assert!(start + step * 6.0 <= CHOICES_END + 1e-6);
     }
 
     #[test]
