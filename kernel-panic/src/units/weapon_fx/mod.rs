@@ -18,7 +18,7 @@ pub use shared::{
 
 /// Live effect counts for the `KP_PROFILE` census.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn effect_counts(world: &mut World) -> [(&'static str, usize); 5] {
+pub fn effect_counts(world: &mut World) -> [(&'static str, usize); 6] {
     [
         (
             "ceg_particles",
@@ -27,6 +27,10 @@ pub fn effect_counts(world: &mut World) -> [(&'static str, usize); 5] {
         (
             "ceg_flames",
             world.query::<&ceg::CegFlame>().iter(world).count(),
+        ),
+        (
+            "ceg_ground_flashes",
+            world.query::<&ceg::CegGroundFlash>().iter(world).count(),
         ),
         (
             "ceg_spikes",
@@ -102,6 +106,7 @@ impl Plugin for WeaponFxPlugin {
             .register_required_components::<shared::FadingTrail, MatchEntity>()
             .register_required_components::<ceg::CegParticle, MatchEntity>()
             .register_required_components::<ceg::CegFlame, MatchEntity>()
+            .register_required_components::<ceg::CegGroundFlash, MatchEntity>()
             .register_required_components::<ceg::CegSpike, MatchEntity>()
             .register_required_components::<ceg::CegDelayedSpawn, MatchEntity>()
             .add_systems(
@@ -116,6 +121,7 @@ impl Plugin for WeaponFxPlugin {
                     spawn::spawn_pending_explosions,
                     ceg::tick_ceg_particles,
                     ceg::tick_ceg_flames,
+                    ceg::tick_ceg_ground_flashes,
                     ceg::tick_ceg_spikes,
                     ceg::tick_ceg_delayed_spawns,
                     // Last: every ribbon has pushed its quads by now.

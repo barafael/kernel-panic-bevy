@@ -602,11 +602,11 @@ pub(super) fn tick_weapon_fx(
                 &ceg_ctx.ceg_registry,
                 &mut proj.trail_seed,
                 &mut commands,
-                &mut ceg_ctx.meshes,
                 &mut ceg_ctx.materials,
                 &mut ceg_ctx.images,
                 &mut ceg_ctx.model_cache,
                 &mut ceg_ctx.ceg_assets,
+                ceg_ctx.heightmap.as_deref(),
             );
         }
     }
@@ -624,12 +624,11 @@ pub(super) fn tick_weapon_fx(
         transform.scale = Vec3::splat(scale);
     }
 
-    // Ground flash ring. Synthetic rings expand outward from 0.25× to
-    // 1.5× radius over the lifetime; authored `[groundflash]` discs
-    // grow linearly by `growth` elmos/second from `flashSize`. Both
-    // collapse to zero in the final quarter to fade out cleanly. Flat
-    // (XZ) scale keeps the disc hugging the ground; rotation is set at
-    // spawn and never touched.
+    // Synthetic ground flash ring: expands outward from 0.25× to 1.5×
+    // radius over the lifetime and collapses to zero in the final
+    // quarter to fade out cleanly. Flat (XZ) scale keeps the disc
+    // hugging the ground; rotation is set at spawn and never touched.
+    // (Authored `[groundflash]`es are `ceg::CegGroundFlash`.)
     for (entity, mut flash, mut transform) in &mut flashes {
         flash.lifetime -= dt;
         if flash.lifetime <= 0.0 {
@@ -637,11 +636,7 @@ pub(super) fn tick_weapon_fx(
             continue;
         }
         let life_frac = 1.0 - flash.lifetime / flash.max_lifetime;
-        let radius = if flash.growth != 0.0 {
-            flash.base_radius + flash.growth * (flash.max_lifetime - flash.lifetime)
-        } else {
-            flash.base_radius * (0.25 + life_frac * 1.25)
-        };
+        let radius = flash.base_radius * (0.25 + life_frac * 1.25);
         let fade = if life_frac > 0.75 {
             (1.0 - life_frac) * 4.0
         } else {

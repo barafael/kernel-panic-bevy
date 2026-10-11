@@ -11,12 +11,13 @@
 //!   `CSimpleParticleSystem` becomes a batch of [`CegParticle`]s,
 //!   `CBitmapMuzzleFlame` becomes a [`CegFlame`] billboard,
 //!   `CExpGenSpawner` becomes a [`CegDelayedSpawn`] timer that replays
-//!   its target CEG on fire.
-//! - [`tick_ceg_particles`] + [`tick_ceg_flames`] + [`tick_ceg_delayed_spawns`]:
-//!   per-frame integration + despawn. Particles and flames are plain
-//!   data drawn as camera-facing quads in the shared
-//!   [`FxQuadBatches`] mesh of their texture's material, their
-//!   `colorMap` colour on the vertices.
+//!   its target CEG on fire, the `[groundflash]` section a
+//!   [`CegGroundFlash`] (the engine's `CStandardGroundFlash`).
+//! - [`tick_ceg_particles`], [`tick_ceg_flames`], [`tick_ceg_ground_flashes`]
+//!   and [`tick_ceg_delayed_spawns`]: per-frame integration + despawn.
+//!   Particles, flames and ground flashes are plain data drawn as quads
+//!   in the shared [`FxQuadBatches`] mesh of their texture's material,
+//!   their colour (and alpha) on the vertices.
 //!
 //! All ambient "spread" math (`X rN`, `X iN`, `X dN`) is handled by
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
@@ -36,6 +37,7 @@ use spring_tdf::{
 use super::batch::FxQuadBatches;
 use crate::rng;
 use crate::sim::{GAME_SPEED, RngStream, SimRng};
+use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 
 /// Registry of every parsed CEG. Internally wraps
@@ -59,13 +61,18 @@ pub(super) struct CegRenderAssets {
     /// load is one draw call per texture in use.
     materials_by_texture: HashMap<AssetId<Image>, Handle<StandardMaterial>>,
     palettes: Vec<CegPalette>,
-    /// Shared unit-circle mesh for authored `[groundflash]` discs; the
-    /// spawn scales it to `flashSize`.
-    ground_flash_mesh: Option<Handle<Mesh>>,
-    /// Authored flash colour (quantised rgb) → its unlit blend
-    /// material. One per colour across every explosion, minted on
-    /// first use.
-    ground_flash_materials: HashMap<[u8; 3], Handle<StandardMaterial>>,
+    /// The `[groundflash]` materials, minted on first use.
+    ground_flash: Option<GroundFlashMaterials>,
+}
+
+/// The two ground-flash textures as additive materials: `groundring`
+/// and `groundflash`, which KP's `RESOURCES.TDF [groundfx]` points at
+/// `kpsfx/hollowsquare.tga` and `kpsfx/solidwhite.tga`. Colour and
+/// alpha ride on the vertex colour, so one pair serves every CEG.
+#[derive(Clone)]
+pub(super) struct GroundFlashMaterials {
+    pub ring: Handle<StandardMaterial>,
+    pub flash: Handle<StandardMaterial>,
 }
 
 /// One (texture, `colorMap`) pair: the material its particles draw
@@ -143,41 +150,27 @@ impl CegRenderAssets {
         &self.palettes[index]
     }
 
-    /// Mesh + material for an authored `[groundflash]` disc of
-    /// `rgb`, created on first use and shared across every explosion.
-    /// Unlit `Blend` (the engine's ground flash is an alpha-blended
-    /// billboard, not additive stacking).
-    fn ground_flash_assets(
+    /// The ring and flash materials, loading their textures on first
+    /// use; `None` when the bundle has no such textures (headless).
+    fn ground_flash_materials(
         &mut self,
-        rgb: [f32; 3],
-        meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
-    ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
-        let mesh = self
-            .ground_flash_mesh
-            .get_or_insert_with(|| meshes.add(Mesh::from(Circle::new(1.0))))
-            .clone();
-        let key = [
-            (rgb[0].clamp(0.0, 1.0) * 15.0).round() as u8,
-            (rgb[1].clamp(0.0, 1.0) * 15.0).round() as u8,
-            (rgb[2].clamp(0.0, 1.0) * 15.0).round() as u8,
-        ];
-        let material = self
-            .ground_flash_materials
-            .entry(key)
-            .or_insert_with(|| {
-                let color = Color::linear_rgb(rgb[0], rgb[1], rgb[2]);
-                materials.add(StandardMaterial {
-                    base_color: color,
-                    emissive: LinearRgba::from(color),
-                    unlit: true,
-                    alpha_mode: AlphaMode::Blend,
-                    cull_mode: None,
-                    ..default()
-                })
-            })
-            .clone();
-        (mesh, material)
+        images: &mut Assets<Image>,
+        model_cache: &mut S3OModelCache,
+    ) -> Option<GroundFlashMaterials> {
+        if let Some(found) = &self.ground_flash {
+            return Some(found.clone());
+        }
+        let mut material = |alias: &str| {
+            let file = CegRegistry::resolve_texture(alias)?;
+            let (texture, _, _) = load_beam_texture(file, model_cache, images)?;
+            Some(self.texture_material(&texture, materials))
+        };
+        let ring = material("squarehollow")?;
+        let flash = material("square")?;
+        let found = GroundFlashMaterials { ring, flash };
+        self.ground_flash = Some(found.clone());
+        Some(found)
     }
 }
 
@@ -216,11 +209,11 @@ fn push_billboard(
 #[derive(SystemParam)]
 pub(super) struct CegTrailCtx<'w, 's> {
     pub ceg_registry: Res<'w, CegRegistry>,
-    pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
     pub ceg_assets: ResMut<'w, CegRenderAssets>,
+    pub heightmap: Option<Res<'w, Heightmap>>,
     pub _marker: std::marker::PhantomData<&'s ()>,
 }
 
@@ -384,11 +377,83 @@ pub(super) struct CegDelayedSpawn {
     pub target_ceg: std::sync::Arc<str>,
 }
 
+/// One live `CStandardGroundFlash` (`Rendering/GroundFlash.cpp`): two
+/// additive quads flat on the ground at `pos` (ground height + 1). The
+/// `groundring` square is `circleGrowth` (half-size) at birth and grows
+/// that much every frame while its alpha falls from `circleAlpha` to 0
+/// over `ttl`; the `groundflash` square stays `flashSize` and its alpha
+/// ramps up over the first 9 % of `ttl`, then fades out. The engine
+/// draws nothing for `ttl = 0` (`flashAgeSpeed = 0`, `Update` ends it).
+#[derive(Component)]
+pub(super) struct CegGroundFlash {
+    pub pos: Vec3,
+    pub flash_size: f32,
+    pub flash_alpha: f32,
+    pub circle_growth: f32,
+    pub circle_alpha: f32,
+    pub ttl: f32,
+    pub color: [f32; 3],
+    /// Sim frames since spawn.
+    pub age_frames: f32,
+}
+
+impl CegGroundFlash {
+    fn new(gf: &spring_tdf::GroundFlash, pos: Vec3) -> Self {
+        Self {
+            pos,
+            flash_size: gf.flash_size,
+            flash_alpha: gf.flash_alpha,
+            circle_growth: gf.circle_growth,
+            circle_alpha: gf.circle_alpha,
+            ttl: gf.ttl,
+            color: gf.color,
+            age_frames: 0.0,
+        }
+    }
+
+    /// `circleSize`: `circleGrowth` at birth, `+= circleGrowth` per frame.
+    fn ring_half_size(&self, age: f32) -> f32 {
+        self.circle_growth * (age + 1.0)
+    }
+
+    /// `circleAlpha -= circleAlpha / ttl` per frame.
+    fn ring_alpha(&self, age: f32) -> f32 {
+        (self.circle_alpha * (1.0 - age / self.ttl)).clamp(0.0, 1.0)
+    }
+
+    /// `flashAge += 1 / ttl` per frame: `flashAlpha · age · 10` while
+    /// under 0.091, `flashAlpha · (1 − age)` after, nothing from 1.
+    fn flash_alpha(&self, age: f32) -> f32 {
+        let i_age = age / self.ttl;
+        if i_age >= 1.0 {
+            return 0.0;
+        }
+        let alpha = if i_age < 0.091 {
+            self.flash_alpha * i_age * 10.0
+        } else {
+            self.flash_alpha * (1.0 - i_age)
+        };
+        alpha.clamp(0.0, 1.0)
+    }
+}
+
+/// A square of half-size `s` flat on the ground around `pos`, corners
+/// in `push_quad`'s `[bl, br, tr, tl]` order.
+fn ground_square(pos: Vec3, s: f32) -> [Vec3; 4] {
+    [
+        pos + Vec3::new(-s, 0.0, -s),
+        pos + Vec3::new(s, 0.0, -s),
+        pos + Vec3::new(s, 0.0, s),
+        pos + Vec3::new(-s, 0.0, s),
+    ]
+}
+
 // ─── Spawning ───────────────────────────────────────────────────────
 
 /// Spawn a CEG at `pos` with firing direction `dir`. Returns true iff
 /// the CEG name was found; a missing entry lets callers fall back to a
-/// synthesised burst.
+/// synthesised burst. `ground` puts the `[groundflash]` on the terrain
+/// (`CGround::GetHeightReal`); without it the flash sits at `pos`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_ceg(
     ceg_name: &str,
@@ -397,11 +462,11 @@ pub(super) fn spawn_ceg(
     registry: &CegRegistry,
     rng: &mut u32,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
+    ground: Option<&Heightmap>,
 ) -> bool {
     let Some(def) = registry.get(ceg_name) else {
         return false;
@@ -454,51 +519,21 @@ pub(super) fn spawn_ceg(
             }
         }
     }
-    // The authored `[groundflash]` section (`CGroundFlash`): a flat
-    // disc at `flashSize` growing by `circleGrowth` elmos/frame for
-    // `ttl` frames. Parsed for a long time before this was rendered —
-    // `oldskool_big`, `mine` and friends ship visible flashes.
-    if let Some(gf) = &def.ground_flash {
-        spawn_authored_ground_flash(gf, pos, commands, meshes, materials, ceg_assets);
+    // The `[groundflash]` section (`oldskool_vbig`, `oldskool_big`,
+    // `mine`, `network_dissolve` ship visible ones; the rest `ttl=0`).
+    if let Some(gf) = &def.ground_flash
+        && gf.ttl > 0.0
+        && ceg_assets
+            .ground_flash_materials(materials, images, model_cache)
+            .is_some()
+    {
+        let ground_y = ground.map_or(pos.y, |h| h.sample(pos.x, pos.z));
+        commands.spawn(CegGroundFlash::new(
+            gf,
+            Vec3::new(pos.x, ground_y + 1.0, pos.z),
+        ));
     }
     true
-}
-
-/// One authored ground-flash disc. Lifetime is the TDF's `ttl` frames;
-/// growth `circleGrowth` elmos/frame → elmos/second. Alpha comes from
-/// the shared material (`flashAlpha` is 1.0 in every shipped KP CEG),
-/// and the tick's end-of-life fade stands in for the engine's
-/// `circleAlpha` ramp.
-fn spawn_authored_ground_flash(
-    gf: &spring_tdf::GroundFlash,
-    pos: Vec3,
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    ceg_assets: &mut CegRenderAssets,
-) {
-    let (mesh, material) = ceg_assets.ground_flash_assets(gf.color, meshes, materials);
-    let life = gf.ttl / GAME_SPEED;
-    if life <= 0.0 {
-        return;
-    }
-    let radius = gf.flash_size.max(1.0);
-    // `Circle` is XY by default; rotate flat onto XZ, lifted slightly
-    // so it doesn't z-fight the terrain (same as the synthetic ring).
-    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
-    commands.spawn((
-        super::shared::GroundFlash {
-            lifetime: life,
-            max_lifetime: life,
-            base_radius: radius,
-            growth: gf.circle_growth * GAME_SPEED,
-        },
-        Mesh3d(mesh),
-        MeshMaterial3d(material),
-        Transform::from_translation(pos + Vec3::Y * 0.5)
-            .with_rotation(flat)
-            .with_scale(Vec3::splat(radius)),
-    ));
 }
 
 /// An acceleration authored per sim frame² (CEG `gravity`, added to
@@ -1023,6 +1058,43 @@ pub(super) fn tick_ceg_flames(
     }
 }
 
+/// Age every [`CegGroundFlash`] and push its ring and flash quads for
+/// this frame; gone once `ttl` frames old.
+pub(super) fn tick_ceg_ground_flashes(
+    time: Res<Time>,
+    mut flashes: Query<(Entity, &mut CegGroundFlash)>,
+    ceg_assets: Res<CegRenderAssets>,
+    mut batches: ResMut<FxQuadBatches>,
+    mut commands: Commands,
+) {
+    if flashes.is_empty() {
+        return;
+    }
+    let dt_frames = time.delta_secs() * GAME_SPEED;
+    for (entity, mut f) in &mut flashes {
+        let age = f.age_frames;
+        f.age_frames += dt_frames;
+        if age >= f.ttl {
+            commands.entity(entity).despawn();
+            continue;
+        }
+        let Some(mats) = &ceg_assets.ground_flash else {
+            continue;
+        };
+        let [r, g, b] = f.color;
+        let ring_alpha = f.ring_alpha(age);
+        if ring_alpha > 0.0 {
+            let corners = ground_square(f.pos, f.ring_half_size(age));
+            batches.push_flat_quad(&mats.ring, corners, [r, g, b, ring_alpha]);
+        }
+        let flash_alpha = f.flash_alpha(age);
+        if flash_alpha > 0.0 {
+            let corners = ground_square(f.pos, f.flash_size);
+            batches.push_flat_quad(&mats.flash, corners, [r, g, b, flash_alpha]);
+        }
+    }
+}
+
 /// [`tick_ceg_delayed_spawns`]'s random stream (visual, match-scoped
 /// like [`super::spawn::WeaponVisualRng`]).
 pub struct DelayedCegRng;
@@ -1038,12 +1110,12 @@ pub(super) fn tick_ceg_delayed_spawns(
     mut timers: Query<(Entity, &mut CegDelayedSpawn)>,
     registry: Res<CegRegistry>,
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
     mut ceg_assets: ResMut<CegRenderAssets>,
     mut rng: ResMut<SimRng<DelayedCegRng>>,
+    heightmap: Option<Res<Heightmap>>,
 ) {
     if timers.is_empty() {
         return;
@@ -1063,11 +1135,11 @@ pub(super) fn tick_ceg_delayed_spawns(
             &registry,
             &mut rng,
             &mut commands,
-            &mut meshes,
             &mut materials,
             &mut images,
             &mut model_cache,
             &mut ceg_assets,
+            heightmap.as_deref(),
         );
     }
 }
@@ -1262,6 +1334,107 @@ mod tests {
         assert_eq!(colors[8], [1.0, 0.0, 0.0, 1.0], "flame just born");
         let mut live = world.query::<&CegParticle>();
         assert_eq!(live.iter(world).count(), 2, "the dead particle is gone");
+    }
+
+    /// `oldskool_vbig`'s `[groundflash]` (flashSize 96, circleGrowth
+    /// 6.4, ttl 64, both alphas 1) as `CGroundFlash.cpp` runs it.
+    fn vbig_flash() -> CegGroundFlash {
+        CegGroundFlash::new(
+            &spring_tdf::GroundFlash {
+                flash_size: 96.0,
+                flash_alpha: 1.0,
+                circle_growth: 6.4,
+                circle_alpha: 1.0,
+                ttl: 64.0,
+                color: [1.0; 3],
+            },
+            Vec3::new(100.0, 5.0, 200.0),
+        )
+    }
+
+    #[test]
+    fn ground_ring_grows_one_step_per_frame_and_fades_over_ttl() {
+        let f = vbig_flash();
+        assert!((f.ring_half_size(0.0) - 6.4).abs() < 1e-3);
+        assert!((f.ring_half_size(63.0) - 409.6).abs() < 1e-3);
+        assert_eq!(f.ring_alpha(0.0), 1.0);
+        assert!((f.ring_alpha(63.0) - 1.0 / 64.0).abs() < 1e-5);
+        assert_eq!(f.ring_alpha(64.0), 0.0);
+    }
+
+    #[test]
+    fn ground_flash_alpha_ramps_up_then_fades() {
+        let f = vbig_flash();
+        assert_eq!(f.flash_alpha(0.0), 0.0);
+        // Up to 0.091 of the life (frame 5.8), then down.
+        let peak = f.flash_alpha(0.091 * 64.0);
+        assert!((peak - 0.909).abs() < 1e-3, "{peak}");
+        assert!(f.flash_alpha(5.0) < peak && f.flash_alpha(7.0) < peak);
+        assert!(f.flash_alpha(32.0) > f.flash_alpha(48.0));
+        assert_eq!(f.flash_alpha(64.0), 0.0);
+        // `flashAlpha=0` (the impact CEGs): no flash quad at all.
+        let mut dark = vbig_flash();
+        dark.flash_alpha = 0.0;
+        assert_eq!(dark.flash_alpha(6.0), 0.0);
+    }
+
+    /// A newborn flash batches its ring (full alpha) but no flash quad
+    /// yet (alpha ramps from 0); a flash at `ttl` is gone.
+    #[test]
+    fn ground_flash_batches_two_quads_then_dies() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_resource::<Assets<StandardMaterial>>()
+            .init_resource::<CegRenderAssets>()
+            .init_resource::<FxQuadBatches>();
+        let world = app.world_mut();
+        let (ring, flash) = {
+            let mut materials = world.resource_mut::<Assets<StandardMaterial>>();
+            (
+                materials.add(StandardMaterial::default()),
+                materials.add(StandardMaterial::default()),
+            )
+        };
+        world.resource_mut::<CegRenderAssets>().ground_flash = Some(GroundFlashMaterials {
+            ring: ring.clone(),
+            flash: flash.clone(),
+        });
+        let born = world.spawn(vbig_flash()).id();
+        let mut mid = vbig_flash();
+        mid.age_frames = 6.0;
+        world.spawn(mid);
+        let mut dead = vbig_flash();
+        dead.age_frames = 64.0;
+        let dead = world.spawn(dead).id();
+
+        world.run_system_once(tick_ceg_ground_flashes).unwrap();
+
+        let batches = world.resource::<FxQuadBatches>();
+        assert_eq!(batches.pending_quads(&ring), 2, "born and mid rings");
+        assert_eq!(batches.pending_quads(&flash), 1, "only mid has a flash yet");
+        let ring_colors = batches.pending_colors(&ring);
+        assert_eq!(
+            ring_colors[0],
+            [1.0, 1.0, 1.0, 1.0],
+            "born ring at circleAlpha"
+        );
+        let flash_colors = batches.pending_colors(&flash);
+        assert!((flash_colors[0][3] - vbig_flash().flash_alpha(6.0)).abs() < 1e-6);
+        assert!(world.get::<CegGroundFlash>(born).is_some());
+        assert!(world.get::<CegGroundFlash>(dead).is_none(), "ttl reached");
+    }
+
+    #[test]
+    fn ground_square_lies_flat_around_pos() {
+        let [bl, br, tr, tl] = ground_square(Vec3::new(10.0, 1.0, 20.0), 6.4);
+        for c in [bl, br, tr, tl] {
+            assert_eq!(c.y, 1.0);
+        }
+        assert_eq!(bl, Vec3::new(3.6, 1.0, 13.6));
+        assert_eq!(tr, Vec3::new(16.4, 1.0, 26.4));
+        assert!((br.x - tl.x - 12.8).abs() < 1e-5);
     }
 
     /// `system_nx`'s shockwave (`size=1 sizeGrowth=120 ttl=6`,

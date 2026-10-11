@@ -5,6 +5,8 @@
 use crate::sim::sq;
 use bevy::prelude::*;
 
+use crate::terrain::heightmap::Heightmap;
+
 use crate::units::content::weapons::WeaponId;
 
 use super::ceg::{CegRegistry, CegRenderAssets, spawn_ceg};
@@ -146,11 +148,11 @@ pub(super) fn spawn_weapon_visuals(
                     &ceg_registry,
                     &mut rng,
                     &mut commands,
-                    &mut meshes,
                     &mut materials,
                     &mut images,
                     &mut model_cache,
                     &mut ceg_assets,
+                    None,
                 );
             if !splash_played {
                 spawn_melee_flash(
@@ -249,11 +251,11 @@ pub(super) fn spawn_weapon_visuals(
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
                 &mut ceg_assets,
+                None,
             );
             if !ceg_spawned {
                 spawn_impact_burst(
@@ -284,11 +286,11 @@ pub(super) fn spawn_weapon_visuals(
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
                 &mut ceg_assets,
+                None,
             );
         } else if !is_melee && !is_gauss_arc && event.delayed_hit.is_none() {
             // Upstream CEG is the source of truth for impact particles:
@@ -308,11 +310,11 @@ pub(super) fn spawn_weapon_visuals(
                     &ceg_registry,
                     &mut rng,
                     &mut commands,
-                    &mut meshes,
                     &mut materials,
                     &mut images,
                     &mut model_cache,
                     &mut ceg_assets,
+                    None,
                 );
             if !used_ceg {
                 let aoe = weapon.area_of_effect.max(4.0);
@@ -361,6 +363,7 @@ pub(super) fn spawn_pending_explosions(
     mut ceg_assets: ResMut<CegRenderAssets>,
     ceg_registry: Res<CegRegistry>,
     mut rng: ResMut<SimRng<ExplosionVisualRng>>,
+    heightmap: Option<Res<Heightmap>>,
 ) {
     for event in pending.events.drain(..) {
         // Drive standalone explosions through the same CEG lookup: if
@@ -376,11 +379,11 @@ pub(super) fn spawn_pending_explosions(
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
-                &mut meshes,
                 &mut materials,
                 &mut images,
                 &mut model_cache,
                 &mut ceg_assets,
+                heightmap.as_deref(),
             );
         if !used_ceg {
             let aoe = event.radius.max(4.0);
@@ -453,7 +456,6 @@ fn spawn_ground_flash(
             lifetime: life,
             max_lifetime: life,
             base_radius,
-            growth: 0.0,
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),

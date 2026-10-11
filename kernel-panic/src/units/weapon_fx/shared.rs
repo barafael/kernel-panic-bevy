@@ -399,15 +399,10 @@ pub(super) struct ImpactBurstAssets {
     pub mesh: Option<Handle<Mesh>>,
 }
 
-/// Flat horizontal emissive disc spawned at each ground-level impact.
-/// Two flavours share the component and its tick:
-///
-/// * *Synthetic* (weapon-AoE fallback): fixed 0.25×→1.5× expand curve,
-///   `growth == 0.0`.
-/// * *Authored* (a CEG's `[groundflash]` section, engine
-///   `CGroundFlash`): `base_radius` starts at `flashSize` and grows by
-///   `growth` elmos/second (`circleGrowth` elmos/frame ×
-///   [`GAME_SPEED`]) for `max_lifetime` (`ttl` frames).
+/// Flat horizontal emissive disc spawned at each ground-level impact
+/// of a weapon without a CEG (the synthetic fallback): a fixed
+/// 0.25×→1.5× expand curve. Authored `[groundflash]` sections are
+/// `ceg::CegGroundFlash`, the engine's two-quad ground flash.
 ///
 /// Separated from [`ImpactBurst`] (a 3D fireball) so the two can fade
 /// on different curves: the burst rises and fades, the ring expands and
@@ -417,9 +412,6 @@ pub(super) struct GroundFlash {
     pub lifetime: f32,
     pub max_lifetime: f32,
     pub base_radius: f32,
-    /// Linear growth in elmos/second on top of `base_radius` (authored
-    /// `circleGrowth`; `0.0` = synthetic ring).
-    pub growth: f32,
 }
 
 /// Shared flat-disc mesh for every [`GroundFlash`]. The mesh is a unit
