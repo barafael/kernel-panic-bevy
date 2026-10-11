@@ -770,7 +770,21 @@ context. Most variants animate over their frames at a fixed rate
 
 ## 27. Audio
 
-- None.
+- The 26 original sound effects (`assets/sounds/`, public domain) play
+  the way the Spring engine played them: weapon `soundstart` per salvo
+  shot, `soundhit` per explosion (impacts and `ExplodeAs` deaths), the
+  `COMPUTER` unit replies (`select`, `commandgiven` on orders and on
+  arrival), the `MultiSelect` beep, the Firewall's `built`. Gain follows
+  the engine's inverse-distance model from the camera with its
+  height-based rolloff. Effects ship as Vorbis (`scripts/bake-sounds.sh`).
+- Music: like the upstream `music.lua` widget, a random `.ogg` from
+  `assets/music/` plays during a match, one after another; the original
+  shipped no tracks, so the folder starts empty.
+- Audio page (from Settings, also in the Esc overlay): master plus
+  battle, unit-reply, interface and music knobs, all defaulting to 100 %
+  like KP's installer settings, all persisted. See `docs/audio-plan.md`.
+- Not yet: the tip dispenser and its 140 voice-over clips, `FailedCommand`,
+  map-marker / chat beeps (no such features), stereo panning.
 
 ## 28. Multiplayer / persistence
 

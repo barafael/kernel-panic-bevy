@@ -33,6 +33,109 @@ pub struct RenderSettings {
     /// `window_size`.
     pub fullscreen: bool,
     pub window_size: (u32, u32),
+    pub audio: AudioSettings,
+}
+
+/// One of the mixer volumes on the Audio page, matching Spring's
+/// `snd_volmaster` / `snd_volbattle` / `snd_volunitreply` / `snd_volui` /
+/// `snd_volmusic` (the General channel has no knob of its own in KP's
+/// settings widget and follows the master here).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VolumeKnob {
+    Master,
+    Battle,
+    UnitReply,
+    Interface,
+    Music,
+}
+
+impl VolumeKnob {
+    pub const ALL: [VolumeKnob; 5] = [
+        VolumeKnob::Master,
+        VolumeKnob::Battle,
+        VolumeKnob::UnitReply,
+        VolumeKnob::Interface,
+        VolumeKnob::Music,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            VolumeKnob::Master => "Master",
+            VolumeKnob::Battle => "Battle",
+            VolumeKnob::UnitReply => "Unit replies",
+            VolumeKnob::Interface => "Interface",
+            VolumeKnob::Music => "Music",
+        }
+    }
+
+    /// The `settings.txt` key.
+    fn key(self) -> &'static str {
+        match self {
+            VolumeKnob::Master => "volume",
+            VolumeKnob::Battle => "vol_battle",
+            VolumeKnob::UnitReply => "vol_unitreply",
+            VolumeKnob::Interface => "vol_ui",
+            VolumeKnob::Music => "vol_music",
+        }
+    }
+}
+
+/// Mixer volumes in percent, 0–100. Kernel Panic's installer ships
+/// `springsettings.cfg` with `snd_volmaster=100` and every channel at
+/// 100 (the bare engine's master default is 60), so 100 is what KP
+/// players heard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AudioSettings {
+    pub master: u8,
+    pub battle: u8,
+    pub unit_reply: u8,
+    pub interface: u8,
+    pub music: u8,
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            master: 100,
+            battle: 100,
+            unit_reply: 100,
+            interface: 100,
+            music: 100,
+        }
+    }
+}
+
+impl AudioSettings {
+    pub fn get(&self, knob: VolumeKnob) -> u8 {
+        match knob {
+            VolumeKnob::Master => self.master,
+            VolumeKnob::Battle => self.battle,
+            VolumeKnob::UnitReply => self.unit_reply,
+            VolumeKnob::Interface => self.interface,
+            VolumeKnob::Music => self.music,
+        }
+    }
+
+    pub fn set(&mut self, knob: VolumeKnob, percent: u8) {
+        let percent = percent.min(100);
+        match knob {
+            VolumeKnob::Master => self.master = percent,
+            VolumeKnob::Battle => self.battle = percent,
+            VolumeKnob::UnitReply => self.unit_reply = percent,
+            VolumeKnob::Interface => self.interface = percent,
+            VolumeKnob::Music => self.music = percent,
+        }
+    }
+
+    /// A channel's linear gain under the master, for `bevy_audio`.
+    /// `Master` itself is the master alone (the General channel).
+    pub fn linear(&self, knob: VolumeKnob) -> f32 {
+        let master = f32::from(self.master) / 100.0;
+        match knob {
+            VolumeKnob::Master => master,
+            other => master * f32::from(self.get(other)) / 100.0,
+        }
+    }
 }
 
 /// The sample counts the Settings page offers. WebGL2 knows only 1 and
@@ -91,6 +194,7 @@ impl Default for RenderSettings {
             vsync: true,
             fullscreen: !cfg!(target_arch = "wasm32"),
             window_size: (1600, 900),
+            audio: AudioSettings::default(),
         }
     }
 }
@@ -174,15 +278,19 @@ impl RenderSettings {
     }
 
     fn to_text(self) -> String {
-        format!(
+        let mut text = format!(
             "msaa={}\nbloom={}\nvsync={}\nfullscreen={}\nwindow={}x{}\n",
             self.msaa,
             self.bloom as u8,
             self.vsync as u8,
             self.fullscreen as u8,
             self.window_size.0,
-            self.window_size.1
-        )
+            self.window_size.1,
+        );
+        for knob in VolumeKnob::ALL {
+            text.push_str(&format!("{}={}\n", knob.key(), self.audio.get(knob)));
+        }
+        text
     }
 
     /// Parse the `key=value` lines of [`Self::to_text`]; unknown keys and
@@ -215,7 +323,14 @@ impl RenderSettings {
                         s.window_size = (w, h);
                     }
                 }
-                _ => {}
+                // The Audio page knobs (`volume`, `vol_battle`, ...).
+                key => {
+                    if let Some(knob) = VolumeKnob::ALL.iter().find(|k| k.key() == key)
+                        && let Ok(v) = value.parse::<u8>()
+                    {
+                        s.audio.set(*knob, v);
+                    }
+                }
             }
         }
         s
@@ -359,6 +474,13 @@ mod tests {
             vsync: false,
             fullscreen: false,
             window_size: (1920, 1080),
+            audio: AudioSettings {
+                master: 35,
+                battle: 80,
+                unit_reply: 0,
+                interface: 100,
+                music: 20,
+            },
         };
         assert_eq!(RenderSettings::from_text(&s.to_text()), s);
     }

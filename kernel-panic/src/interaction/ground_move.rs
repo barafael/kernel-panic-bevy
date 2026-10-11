@@ -1573,6 +1573,8 @@ pub fn movement_system(
     mut avoid_grid: Local<HashMap<(i32, i32), Vec<usize>>>,
     mut path_queue: ResMut<PathQueue>,
     mut impulses: ResMut<PendingImpulses>,
+    local_team: Option<Res<crate::units::player::LocalTeam>>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut rng_state: Local<u32>,
 ) {
     let nav = nav_set.as_deref();
@@ -1950,6 +1952,19 @@ pub fn movement_system(
         }
 
         if let Some(arrived) = result.finished {
+            // `CGroundMoveType::Arrived` (`GroundMoveType.cpp:2474`): the
+            // local team's units answer with `arrived1`.
+            if arrived
+                && let (Some(local), Some(sounds)) = (local_team.as_deref(), sounds.as_deref_mut())
+                && u.team.is_some_and(|t| t.0 == local.0)
+                && crate::audio::has_reply_sounds(u.kind.0)
+            {
+                sounds.play(
+                    crate::audio::SoundId::COMMAND_GIVEN,
+                    crate::audio::Channel::General,
+                    Some(new_pos),
+                );
+            }
             // `Arrived` / `Fail` run the CAI's SlowUpdate right away.
             finish_leg(
                 &mut commands,

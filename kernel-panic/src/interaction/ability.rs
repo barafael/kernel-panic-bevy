@@ -170,7 +170,9 @@ pub(crate) fn ability_is_aimed(kind: UnitKind) -> bool {
 pub(crate) fn deploy_units(
     units: impl IntoIterator<Item = (Entity, UnitKind)>,
     ev: &mut MessageWriter<DeployEvent>,
+    commands: &mut Commands,
 ) {
+    crate::audio::ack_order(commands);
     for (entity, kind) in units {
         if kind.deploy_pair().is_some() {
             ev.write(DeployEvent { entity });
@@ -196,6 +198,7 @@ pub(crate) fn cast_aimed_abilities(
     dispatch: &mut MessageWriter<DispatchEvent>,
     commands: &mut Commands,
 ) {
+    crate::audio::ack_order(commands);
     for (entity, kind) in units {
         if kind.has_command_fire_ability() {
             command_fire.write(CommandFireEvent {
@@ -258,6 +261,7 @@ fn trigger_deploy_on_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
     mut ev: MessageWriter<DeployEvent>,
+    mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::KeyD) {
         return;
@@ -265,7 +269,11 @@ fn trigger_deploy_on_hotkey(
     if ctrl_held(&keys) {
         return;
     }
-    deploy_units(selected_q.iter().map(|(e, u)| (e, u.0)), &mut ev);
+    deploy_units(
+        selected_q.iter().map(|(e, u)| (e, u.0)),
+        &mut ev,
+        &mut commands,
+    );
 }
 
 /// `D` casts the selection's aimed abilities (command-fire, Dispatch)

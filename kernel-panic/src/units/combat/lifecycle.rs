@@ -252,6 +252,7 @@ pub fn death_system(
     mut explosions: ResMut<PendingExplosions>,
     unit_registry: Res<UnitRegistry>,
     weapon_registry: Res<WeaponRegistry>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
 ) {
     for (entity, unit, health, faction, gtf, infected, being_built) in &query {
@@ -317,6 +318,10 @@ pub fn death_system(
                 }
             };
             if let Some(blast) = blast {
+                // `DoExplosion` -> `Explosion`: the ExplodeAs weapon's `soundhit`.
+                if let Some(sounds) = sounds.as_deref_mut() {
+                    sounds.explosion(weapon_registry.by_id(blast.weapon), pos);
+                }
                 damage_queue.push(PendingDamage {
                     target: Some(entity),
                     attacker: entity,

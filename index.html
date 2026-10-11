@@ -64,6 +64,32 @@
       }
     }).observe(document.body, { childList: true, subtree: true });
 
+    // Browsers create every AudioContext suspended until a user gesture, and
+    // the game's audio backend (cpal) opens its context at startup, before
+    // the first click, so it would stay silent. Remember each context and
+    // resume them all on the first gesture.
+    (function () {
+      var contexts = [];
+      var Native = window.AudioContext || window.webkitAudioContext;
+      if (!Native) return;
+      function Patched() {
+        var ctx = new (Function.prototype.bind.apply(Native, [null].concat([].slice.call(arguments))))();
+        contexts.push(ctx);
+        return ctx;
+      }
+      Patched.prototype = Native.prototype;
+      window.AudioContext = Patched;
+      if (window.webkitAudioContext) window.webkitAudioContext = Patched;
+      function unlock() {
+        contexts.forEach(function (ctx) {
+          if (ctx.state === 'suspended') ctx.resume();
+        });
+      }
+      ['pointerdown', 'keydown', 'touchend'].forEach(function (ev) {
+        document.addEventListener(ev, unlock, { capture: true, passive: true });
+      });
+    })();
+
     // The RTS uses right-click for orders; keep the browser menu out of the way.
     document.addEventListener('contextmenu', function (e) { e.preventDefault(); });
     window.addEventListener('beforeunload', function () {

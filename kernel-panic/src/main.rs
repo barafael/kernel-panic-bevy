@@ -1,4 +1,5 @@
 #![recursion_limit = "256"]
+mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod bot;
 mod game_setup;
@@ -191,6 +192,7 @@ fn main() {
     .insert_resource(render_settings)
     .add_plugins((
         RenderingPlugin,
+        audio::GameAudioPlugin,
         InteractionPlugin,
         UiPlugin,
         UnitsPlugin,

@@ -242,6 +242,7 @@ pub(super) fn apply_activations(
                 for (entity, ..) in &units {
                     stop_unit(&mut commands, entity);
                 }
+                crate::audio::ack_order(&mut commands);
                 disarm(&mut modes, &mut placement);
             }
             CmdId::Attack => arm(Mode::AttackGround),
@@ -270,6 +271,7 @@ pub(super) fn apply_activations(
                         && factory_roster(ut.0).contains(&kind)
                     {
                         edit_queue(&mut producer, kind, msg);
+                        crate::audio::ack_order(&mut commands);
                     }
                 }
             }
