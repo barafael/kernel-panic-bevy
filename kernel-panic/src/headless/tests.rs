@@ -290,7 +290,7 @@ fn match_stats() {
         cmd_total += cmds_tick;
         bytes_total += bytes_tick;
 
-        if tick % 300 == 0 {
+        if tick.is_multiple_of(300) {
             let s = sim_ms.last().copied().unwrap_or(0.0);
             units_series.push((tick, c.units, c.projectiles, s));
             eprintln!(
