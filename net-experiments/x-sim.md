@@ -394,6 +394,7 @@ no timings here.
 | comparison | result |
 |---|---|
 | 4v4 Speed_Balls_16_Way, seed `0x5eed`, 18 000 ticks; second run uneven pacing **and** entity ids shifted (`KP_NET_PACING=uneven KP_NET_ID_SHIFT=101`) | sim, positions, health, orders identical for all 18 000 ticks; fx (visual-only) from tick 1 795, as before |
+| the same, after merging M0.3 (libm + scalar glam) and the audio module | identical for all 18 000 ticks; fx from tick 1 795 |
 | seed 24301 vs 24302 (sanity: the hash sees a difference) | first divergence at tick 497 |
 | rematch after the default 900-tick warmup, 6 000 ticks | identical for all 6 000 ticks (X-sim measured 1 636) |
 | rematch after a 4 000-tick warmup that includes combat, 3 000 ticks | **1 561** (health first, then orders 1 930) |
