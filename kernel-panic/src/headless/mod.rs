@@ -36,8 +36,9 @@
 //! ([`AssetRoot::Memory`]), and every wait yields to the JS event loop
 //! ([`pause`]), which is where Bevy runs its tasks on the web.
 
-// A toolkit: the tests, the CLI and the wasm export each use part of it.
-#![cfg_attr(not(test), allow(dead_code))]
+// A toolkit: the tests, the CLI and the wasm export each use their own
+// part of it, so each build leaves some of it unused.
+#![allow(dead_code)]
 
 #[cfg(all(feature = "replay", not(target_arch = "wasm32")))]
 pub mod cli;

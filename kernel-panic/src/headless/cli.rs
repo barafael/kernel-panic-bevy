@@ -37,12 +37,16 @@ pub fn run() -> Option<i32> {
     })
 }
 
-/// `--flag value` pairs and the positional rest.
+/// Parsed arguments: `--flag value` pairs, the switches set, the
+/// positional rest.
+type Args<'a> = (Vec<(&'a str, &'a str)>, Vec<&'a str>, Vec<&'a str>);
+
+/// Split `args` by the known flags (with a value) and switches.
 fn split_args<'a>(
     args: &'a [String],
     flags: &[&str],
     switches: &[&str],
-) -> Result<(Vec<(&'a str, &'a str)>, Vec<&'a str>, Vec<&'a str>), String> {
+) -> Result<Args<'a>, String> {
     let (mut values, mut set, mut rest) = (Vec::new(), Vec::new(), Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {

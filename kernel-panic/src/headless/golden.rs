@@ -73,7 +73,7 @@ pub fn all() -> Vec<Golden> {
                 map: "Quad_Core".into(),
                 seats: (0..8).map(|i| ai(i % 3, i)).collect(),
                 difficulty: 4,
-                seed: 0x0ff_a8,
+                seed: 0xffa8,
                 sandbox: false,
             },
             ticks: 18_000,
