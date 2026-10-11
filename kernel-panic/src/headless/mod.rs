@@ -3,7 +3,8 @@
 //!
 //! The whole game — every plugin `main` adds, through [`crate::add_game`]
 //! — runs in an `App` with Bevy's `DefaultPlugins` minus the window,
-//! the log and audio, and with the renderer *disabled* rather than
+//! the log and the audio output (the audio asset type and loader stay
+//! registered), and with the renderer *disabled* rather than
 //! removed: `RenderPlugin` gets `WgpuSettings { backends: None }`, so no
 //! GPU device and no render sub-app exist, but every asset type
 //! (`Mesh`, `Image`, `StandardMaterial`, the custom materials, shaders)
@@ -179,6 +180,11 @@ pub fn build_app(executor: Executor) -> App {
     )
     .insert_resource(DevOptions::default())
     .insert_resource(crate::rendering::settings::RenderSettings::default());
+    // No audio output (and no music playing through the speakers during
+    // a test), but the asset type and its loader the game's audio
+    // module loads its sound bank and playlist through.
+    app.init_asset::<bevy::audio::AudioSource>()
+        .init_asset_loader::<bevy::audio::AudioLoader>();
     crate::add_game(&mut app);
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
         .init_resource::<TickTimer>()
