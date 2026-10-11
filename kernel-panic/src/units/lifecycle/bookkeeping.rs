@@ -24,7 +24,7 @@
 use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
@@ -118,8 +118,8 @@ pub fn tag_unit_kinds(
 pub fn team_kind_counts(
     kind: UnitKind,
     units: &Query<(&UnitType, &TeamId), Without<Dying>>,
-) -> HashMap<u8, u32> {
-    let mut counts = HashMap::new();
+) -> BTreeMap<u8, u32> {
+    let mut counts = BTreeMap::new();
     for (unit, team) in units {
         if unit.0 == kind {
             *counts.entry(team.0).or_default() += 1;
@@ -157,7 +157,7 @@ pub const MAX_UNITS_PER_TEAM: u32 = 1000;
 /// hooks, so every despawn path counts.
 #[derive(Resource, Default, Debug)]
 pub struct TeamUnitCounts {
-    counts: HashMap<u8, u32>,
+    counts: BTreeMap<u8, u32>,
 }
 
 impl TeamUnitCounts {
@@ -174,7 +174,7 @@ impl TeamUnitCounts {
 }
 
 /// `+1` / `-1` on a per-team tally, saturating at zero.
-fn tally(counts: &mut HashMap<u8, u32>, team: u8, add: bool) {
+fn tally(counts: &mut BTreeMap<u8, u32>, team: u8, add: bool) {
     let slot = counts.entry(team).or_default();
     *slot = if add {
         slot.saturating_add(1)
@@ -232,7 +232,7 @@ pub fn track_added_units(
 
 #[derive(Resource, Default)]
 pub struct SmallBuildingCounts {
-    counts: HashMap<u8, u32>,
+    counts: BTreeMap<u8, u32>,
 }
 
 impl SmallBuildingCounts {

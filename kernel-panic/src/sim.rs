@@ -9,11 +9,30 @@
 //!
 //! Headings follow Spring's `GetHeadingFromVector(dx, dz)` convention:
 //! 0 faces +Z, +π/2 faces +X.
+//!
+//! Also the match's sim clock ([`SimTick`]) and its seeded random
+//! streams ([`MatchSeed`], [`SimRng`]): everything the fixed tick may
+//! read as time or chance, all match-scoped, so a match replays from
+//! its setup alone (`docs/multiplayer-plan.md`, M0.2).
+//!
+//! **Iteration order.** A query visits its tables in the order the
+//! *app* created them, which depends on everything the app ran before
+//! (the attract demo, an earlier match) and on per-peer components
+//! (selection, fog markers). A sim system whose result depends on the
+//! order it visits units — dice drawn per unit, spawns (each draws the
+//! next `NetId`), queued hits summed into health, path requests served
+//! in turn, sequential pushes — iterates in unit-id order instead:
+//! `query.iter().sort::<&NetId>()`, Spring's fixed unit-list order.
+//! Systems that update each unit from its own state alone keep the
+//! cheaper ECS order.
 
 use bevy::math::ops;
 use std::f32::consts::{PI, TAU};
+use std::marker::PhantomData;
+use std::ops::{Deref, DerefMut};
 
 use bevy::math::{Vec2, Vec3};
+use bevy::prelude::{FromWorld, ResMut, Resource, World};
 
 /// Sim frames per second (`GAME_SPEED`). FBI/TDF speeds are elmos per
 /// frame, accelerations elmos per frame², reload/burst/TTL values frames.
@@ -203,6 +222,143 @@ pub fn heading_of(v: Vec2) -> f32 {
 pub fn angle_delta(a: f32, b: f32) -> f32 {
     let d = (a - b).rem_euclid(TAU);
     d.min(TAU - d)
+}
+
+/// The match's sim clock: fixed ticks since the match began, Spring's
+/// `gs->frameNum`. Match-scoped (0 at every match swap, so nothing that
+/// ran before — the menu's attract demo, an earlier game, loading time —
+/// shifts it) and advanced once at the head of every fixed tick
+/// ([`advance_sim_tick`]), so the match's first tick is frame 1. Sim
+/// code reads time from here, never from `Time<Fixed>::elapsed`, which
+/// counts from app start.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SimTick(pub u64);
+
+impl SimTick {
+    /// The sim frame number (`gs->frameNum`).
+    pub fn frame(self) -> u64 {
+        self.0
+    }
+
+    /// Game seconds since the match began (`frameNum / GAME_SPEED`),
+    /// for the timers upstream keeps in seconds (KPAI's).
+    pub fn secs(self) -> f32 {
+        (self.0 as f64 / SIMULATION_HZ) as f32
+    }
+}
+
+/// `FixedFirst`: one more sim frame. Runs on every fixed tick, frozen
+/// gameplay (a decided match) included, as the fixed clock it replaces
+/// did.
+pub fn advance_sim_tick(mut tick: ResMut<SimTick>) {
+    tick.0 += 1;
+}
+
+/// The running match's seed ([`GameSetup::seed`](crate::game_setup::GameSetup::seed)),
+/// set by `begin_match` before the match-scoped resources are
+/// re-initialised, so their `FromWorld` (the AI's dice, every
+/// [`SimRng`]) seeds from it.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MatchSeed(pub u64);
+
+impl MatchSeed {
+    /// A non-zero xorshift32 state for one random stream, decorrelated
+    /// from the match's other streams by `salt`.
+    pub fn stream(self, salt: u64) -> u32 {
+        (crate::rng::splitmix64(self.0 ^ salt) as u32).max(1)
+    }
+}
+
+/// Names one of the sim's random streams ([`SimRng`]).
+pub trait RngStream: Send + Sync + 'static {
+    /// Mixed into the match seed, so every stream rolls differently.
+    const SALT: u64;
+}
+
+/// One of the sim's random streams: an xorshift32 state seeded from the
+/// [`MatchSeed`] and the stream's salt, owned by one system (each its
+/// own stream, so systems that run unordered never share a state).
+/// Match-scoped (`init_match_resource`): every match restarts every
+/// stream from its seed, whatever ran before. Derefs to the `u32` state
+/// the [`crate::rng`] helpers take.
+#[derive(Resource)]
+pub struct SimRng<S: RngStream> {
+    state: u32,
+    _stream: PhantomData<S>,
+}
+
+impl<S: RngStream> FromWorld for SimRng<S> {
+    fn from_world(world: &mut World) -> Self {
+        let seed = world
+            .get_resource::<MatchSeed>()
+            .copied()
+            .unwrap_or_default();
+        Self {
+            state: seed.stream(S::SALT),
+            _stream: PhantomData,
+        }
+    }
+}
+
+impl<S: RngStream> Deref for SimRng<S> {
+    type Target = u32;
+    fn deref(&self) -> &u32 {
+        &self.state
+    }
+}
+
+impl<S: RngStream> DerefMut for SimRng<S> {
+    fn deref_mut(&mut self) -> &mut u32 {
+        &mut self.state
+    }
+}
+
+/// Tests that run sim systems on a bare `World`: the match-level sim
+/// state a `begin_match` would leave, and a tick that advances it.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::time::Duration;
+
+    use bevy::prelude::{Time, World};
+
+    use super::{MatchSeed, SimRng, SimTick};
+    use crate::interaction::ground_move::ImpulseRng;
+    use crate::units::combat::{BurstRng, GroundFireRng, TargetingRng};
+    use crate::units::lifecycle::production::FactoryExitRng;
+
+    /// The sim clock at frame 0, a zero match seed and every random
+    /// stream the gameplay systems draw from.
+    pub fn init(world: &mut World) {
+        world.init_resource::<MatchSeed>();
+        world.init_resource::<SimTick>();
+        world.init_resource::<SimRng<TargetingRng>>();
+        world.init_resource::<SimRng<GroundFireRng>>();
+        world.init_resource::<SimRng<BurstRng>>();
+        world.init_resource::<SimRng<FactoryExitRng>>();
+        world.init_resource::<SimRng<ImpulseRng>>();
+        crate::units::weapon_fx::init_test_rngs(world);
+    }
+
+    /// [`init`] in an `App` builder chain.
+    pub trait InitSim {
+        fn init_sim(&mut self) -> &mut Self;
+    }
+
+    impl InitSim for bevy::prelude::App {
+        fn init_sim(&mut self) -> &mut Self {
+            init(self.world_mut());
+            self
+        }
+    }
+
+    /// One 30 Hz tick: `Time` (the systems' `delta`) and the frame
+    /// number (`SimTick`), as `FixedFirst` would advance them.
+    pub fn next_frame(world: &mut World) {
+        world
+            .resource_mut::<Time>()
+            .advance_by(Duration::from_secs_f64(1.0 / 30.0));
+        world.resource_mut::<SimTick>().0 += 1;
+    }
 }
 
 /// Debug builds: assert at the start of every sim tick that the CPU's

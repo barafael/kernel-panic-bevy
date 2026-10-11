@@ -47,7 +47,9 @@ use crate::units::components::{Faction, Homebase};
 /// One sim tick.
 pub const TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
-/// Which executor runs `FixedUpdate`.
+/// Which executor runs `FixedUpdate`. The game always uses the
+/// single-threaded one (`UnitsPlugin`); `Multi` is the experiment's
+/// comparison.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Executor {
     Single,
@@ -83,7 +85,7 @@ impl Scenario {
             map: map.to_string(),
             seats,
             seed,
-            executor: Executor::Multi,
+            executor: Executor::Single,
             difficulty: 2,
         }
     }
@@ -196,9 +198,9 @@ pub fn build_app(executor: Executor) -> App {
                 .chain()
                 .after(crate::rendering::interpolation::record_sim_pose),
         );
-    if executor == Executor::Single {
+    if executor == Executor::Multi {
         app.edit_schedule(FixedUpdate, |s| {
-            s.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+            s.set_executor(bevy::ecs::schedule::MultiThreadedExecutor::new());
         });
     }
     while app.plugins_state() == PluginsState::Adding {
@@ -222,7 +224,6 @@ impl SimHarness {
     /// Build the app, load the scenario's map and spawn the match. The
     /// first [`Self::step`] runs the match's first tick.
     pub fn new(scenario: Scenario) -> Self {
-        crate::game_setup::test_seed::set(Some(scenario.seed));
         let mut app = build_app(scenario.executor);
 
         // Startup (map catalog, the menu's boot demo request) …
@@ -294,6 +295,7 @@ fn enter_match(app: &mut App, scenario: &Scenario, rematch: bool) {
         demo: false,
         showcase: None,
         sandbox: false,
+        seed: scenario.seed,
     });
     if rematch {
         app.world_mut()
@@ -337,7 +339,6 @@ impl SimHarness {
     /// state carries over. `reset_fixed_clock`: also restart the fixed
     /// clock at 0, as a fresh app has it.
     pub fn rematch(&mut self, scenario: Scenario, reset_fixed_clock: bool) {
-        crate::game_setup::test_seed::set(Some(scenario.seed));
         enter_match(&mut self.app, &scenario, true);
         if reset_fixed_clock {
             self.app
@@ -346,11 +347,5 @@ impl SimHarness {
         self.tick = 0;
         self.scenario = scenario;
         self.world_mut().resource_mut::<HashLog>().ticks.clear();
-    }
-}
-
-impl Drop for SimHarness {
-    fn drop(&mut self) {
-        crate::game_setup::test_seed::set(None);
     }
 }

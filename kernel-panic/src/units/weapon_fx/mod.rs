@@ -47,6 +47,7 @@ use bevy::prelude::*;
 
 use crate::map_loading::{MatchEntity, MatchScopeAppExt};
 use crate::rendering::interpolation::SimPose;
+use crate::sim::SimRng;
 use batch::FxQuadBatches;
 pub(crate) use ceg::CegRegistry;
 use ceg::CegRenderAssets;
@@ -59,6 +60,14 @@ use super::GameplaySet;
 /// The spawn and tick systems both land in `GameplaySet::Simulate` (the
 /// fixed 30 Hz sim schedule) with the spawn system running first so the
 /// tick system sees newly-spawned visuals on the same frame.
+/// Tests: the effect spawners' random streams (`sim::test_support`).
+#[cfg(test)]
+pub(crate) fn init_test_rngs(world: &mut World) {
+    world.init_resource::<SimRng<spawn::WeaponVisualRng>>();
+    world.init_resource::<SimRng<spawn::ExplosionVisualRng>>();
+    world.init_resource::<SimRng<ceg::DelayedCegRng>>();
+}
+
 pub struct WeaponFxPlugin;
 
 impl Plugin for WeaponFxPlugin {
@@ -67,6 +76,9 @@ impl Plugin for WeaponFxPlugin {
         // swap drops what the old world left in them.
         app.init_match_resource::<PendingAttacks>()
             .init_match_resource::<PendingExplosions>()
+            .init_match_resource::<SimRng<spawn::WeaponVisualRng>>()
+            .init_match_resource::<SimRng<spawn::ExplosionVisualRng>>()
+            .init_match_resource::<SimRng<ceg::DelayedCegRng>>()
             .init_resource::<BeamMaterialCache>()
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()

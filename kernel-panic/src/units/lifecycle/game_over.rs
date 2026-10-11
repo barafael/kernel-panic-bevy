@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
@@ -49,7 +49,7 @@ struct TeamCensus {
 
 /// Teams that still field units but own no factory: upstream gamemode
 /// 1 ("Kill all factories", the default) `KillTeam`s them.
-fn eliminated(census: &HashMap<u8, TeamCensus>) -> impl Iterator<Item = u8> + '_ {
+fn eliminated(census: &BTreeMap<u8, TeamCensus>) -> impl Iterator<Item = u8> + '_ {
     census
         .iter()
         .filter(|(_, c)| c.units > 0 && c.factories == 0)
@@ -61,7 +61,7 @@ fn eliminated(census: &HashMap<u8, TeamCensus>) -> impl Iterator<Item = u8> + '_
 /// (every opponent has been — or is being — killed). `None` while the
 /// match is live, and for a census without any factory at all (test /
 /// sandbox maps, which never flip state).
-fn outcome(census: &HashMap<u8, TeamCensus>, local: u8) -> Option<GameState> {
+fn outcome(census: &BTreeMap<u8, TeamCensus>, local: u8) -> Option<GameState> {
     if census.values().all(|c| c.factories == 0) {
         return None;
     }
@@ -123,7 +123,7 @@ pub fn check_game_over(
     // team the same way. Neutral parties such as the map-event eruption
     // spawns (`map_events::ERUPTION_TEAM`) own no factory by design.
     let seated = |team: u8| setup.players.iter().any(|p| p.team == team);
-    let mut census: HashMap<u8, TeamCensus> = HashMap::new();
+    let mut census: BTreeMap<u8, TeamCensus> = BTreeMap::new();
     for (team, unit, _) in &units {
         if !seated(team.0) {
             continue;
@@ -164,7 +164,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use bevy::state::app::StatesPlugin;
 
-    fn census(entries: &[(u8, u32, u32)]) -> HashMap<u8, TeamCensus> {
+    fn census(entries: &[(u8, u32, u32)]) -> BTreeMap<u8, TeamCensus> {
         entries
             .iter()
             .map(|&(team, units, factories)| (team, TeamCensus { units, factories }))

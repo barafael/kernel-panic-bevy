@@ -16,6 +16,7 @@ use super::shared::{
 };
 use crate::rng::{next_f32, next_signed};
 use crate::sim::{GAME_SPEED, frames_to_secs};
+use crate::sim::{RngStream, SimRng};
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_mesh};
 use crate::units::components::TeamId;
 use crate::units::content::weapons::WeaponRegistry;
@@ -32,6 +33,20 @@ fn is_build_laser(weapon_id: WeaponId) -> bool {
 /// unit itself; the underlying [`ImpactBurst`] decays over its fixed
 /// lifetime so there's nothing to tune per weapon.
 const MUZZLE_FLASH_RADIUS: f32 = 6.0;
+
+/// [`spawn_weapon_visuals`]'s random stream (CEG rolls, arc jitter).
+/// Visual only, but match-scoped and seeded like the sim's streams, so
+/// a replay draws the same effects.
+pub struct WeaponVisualRng;
+impl RngStream for WeaponVisualRng {
+    const SALT: u64 = 0xF1_A5E5;
+}
+
+/// [`spawn_pending_explosions`]'s random stream.
+pub struct ExplosionVisualRng;
+impl RngStream for ExplosionVisualRng {
+    const SALT: u64 = 0xB1_A575;
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_weapon_visuals(
@@ -50,7 +65,7 @@ pub(super) fn spawn_weapon_visuals(
     mut ceg_assets: ResMut<CegRenderAssets>,
     teams: Query<&TeamId>,
     gravity: Option<Res<crate::sim::MapGravity>>,
-    mut rng: Local<u32>,
+    mut rng: ResMut<SimRng<WeaponVisualRng>>,
 ) {
     // The one read of the map's gravity for every shell spawned here.
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
@@ -345,7 +360,7 @@ pub(super) fn spawn_pending_explosions(
     mut flash_assets: ResMut<GroundFlashAssets>,
     mut ceg_assets: ResMut<CegRenderAssets>,
     ceg_registry: Res<CegRegistry>,
-    mut rng: Local<u32>,
+    mut rng: ResMut<SimRng<ExplosionVisualRng>>,
 ) {
     for event in pending.events.drain(..) {
         // Drive standalone explosions through the same CEG lookup: if
@@ -1153,7 +1168,7 @@ fn spawn_lightning_arc(
     start: Vec3,
     end: Vec3,
     style: ArcStyle,
-    rng: &mut Local<u32>,
+    rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
@@ -1207,6 +1222,7 @@ const ARC_JITTER: f32 = 15.0;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::test_support::InitSim;
 
     /// Untextured beams draw with the engine atlas (`laserfalloff` body,
     /// `laserend` caps); `none` opts out; authored names win.
@@ -1255,7 +1271,8 @@ mod tests {
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
-            .insert_resource(CegRegistry::load());
+            .insert_resource(CegRegistry::load())
+            .init_sim();
         app
     }
 

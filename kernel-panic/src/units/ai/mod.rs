@@ -1,7 +1,7 @@
 //! Enemy AI — a port of upstream Kernel Panic's Lua AI
 //! (`LuaRules/Gadgets/KPAI.lua`, in its `KPAI_Fair.lua` flavour),
-//! ticking once per second for every non-local team that owns a
-//! homebase.
+//! ticking once per second for every AI-seated team ([`AiSeats`]) that
+//! owns a homebase.
 //!
 //! Each tick, per AI team:
 //!
@@ -40,13 +40,12 @@ pub(crate) mod build_orders;
 mod expansion;
 mod specials;
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
 use super::{
     components::{TeamId, UnitStats, UnitType},
-    player::LocalTeam,
     production::{Producer, minifac_spam},
     spatial::SpatialIndex,
 };
@@ -56,6 +55,7 @@ use crate::{
     interaction::movement::{MovePath, OrderState},
     net::{CommandBus, FactoryOp, NetId, NetPos, Order, PointOrder, SimCommand, Units},
     rng::xorshift32,
+    sim::{MatchSeed, SimTick},
     terrain::geovent::{GeoventSmoker, VentClaim},
     units::{
         combat::{Dying, SelfDestructCountdown},
@@ -122,44 +122,47 @@ fn occupied_by(
         .find(|p| (p.x - pos.x).abs() < half && (p.z - pos.z).abs() < half)
 }
 
-/// AI clock + per-team memory. Match-scoped: re-created (with a fresh
-/// dice seed) at every match swap, so no team's memory leaks into the
-/// next game.
+/// AI clock + per-team memory. Match-scoped: re-created at every match
+/// swap, its dice seeded from the match seed ([`MatchSeed`]), so no
+/// team's memory leaks into the next game and every peer rolls the
+/// same dice. Ordered maps: nothing here iterates in hash order.
 #[derive(Resource)]
 pub struct AiTicker {
     accumulated: f32,
     /// Deterministic xorshift state for every dice roll the AI makes.
     rng: u32,
     /// Seconds since game start of each team's last SIGTERM.
-    last_sigterm: HashMap<u8, f32>,
-    /// Seconds since game start of each teleporter's last dispatch.
-    last_dispatch: HashMap<Entity, f32>,
+    last_sigterm: BTreeMap<u8, f32>,
+    /// Seconds since game start of each teleporter's last dispatch, by
+    /// the teleporter's unit id.
+    last_dispatch: BTreeMap<NetId, f32>,
     /// When this team last saw a living enemy unit (`SuicideIfAlone`).
-    no_enemies_since: HashMap<u8, f32>,
+    no_enemies_since: BTreeMap<u8, f32>,
 }
 
-impl Default for AiTicker {
-    fn default() -> Self {
-        Self {
-            accumulated: 0.0,
-            // xorshift32 must not start at 0.
-            rng: (crate::game_setup::match_seed() as u32).max(1),
-            last_sigterm: HashMap::new(),
-            last_dispatch: HashMap::new(),
-            no_enemies_since: HashMap::new(),
-        }
+impl FromWorld for AiTicker {
+    fn from_world(world: &mut World) -> Self {
+        let seed = world
+            .get_resource::<MatchSeed>()
+            .copied()
+            .unwrap_or_default();
+        Self::with_seed(seed.stream(AI_DICE_SALT))
     }
 }
 
+/// [`MatchSeed::stream`] salt of the AI's dice.
+const AI_DICE_SALT: u64 = 0xA1_D1CE;
+
 impl AiTicker {
-    /// A ticker rolling from `seed`. Lockstep peers must all use the
-    /// match's shared seed: the default draws a per-launch one
-    /// (`match_seed`), which would desync every AI decision.
-    #[cfg(test)]
+    /// A ticker rolling from `seed`.
     pub(crate) fn with_seed(seed: u32) -> Self {
         Self {
+            accumulated: 0.0,
+            // xorshift32 must not start at 0.
             rng: seed.max(1),
-            ..Self::default()
+            last_sigterm: BTreeMap::new(),
+            last_dispatch: BTreeMap::new(),
+            no_enemies_since: BTreeMap::new(),
         }
     }
 
@@ -168,13 +171,34 @@ impl AiTicker {
     }
 }
 
-/// One unit's state captured at the top of an AI tick.
-/// The teams the AI plays, when the match says so explicitly. Without
-/// it every homebase team but the local one is AI — fine for a single
-/// local player, wrong on a networked peer (each machine would run the
-/// AI for every *other* human). A lobby must insert this from its seats.
-#[derive(Resource, Clone, Debug, Default)]
+/// The teams the AI plays, from the match's seats (`begin_match`):
+/// every team seated with AI players only (upstream `isAiTeam`). Never
+/// derived from the [`LocalTeam`](crate::units::player::LocalTeam):
+/// every peer runs the same AI brains, whoever is watching. Sorted.
+#[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AiSeats(pub Vec<u8>);
+
+impl AiSeats {
+    /// The AI teams of `setup`: a team with a human seat is the human's.
+    pub fn from_setup(setup: &crate::game_setup::GameSetup) -> Self {
+        let mut teams: Vec<u8> = setup
+            .players
+            .iter()
+            .filter(|p| p.ai && !setup.players.iter().any(|h| !h.ai && h.team == p.team))
+            .map(|p| p.team)
+            .collect();
+        teams.sort_unstable();
+        teams.dedup();
+        Self(teams)
+    }
+
+    /// Does the AI play `team`?
+    pub fn contains(&self, team: u8) -> bool {
+        self.0.binary_search(&team).is_ok()
+    }
+}
+
+/// One unit's state captured at the top of an AI tick.
 
 #[derive(Clone, Copy)]
 struct Snap {
@@ -203,13 +227,13 @@ struct Snap {
 #[derive(Default)]
 pub struct AiScratch {
     units: Vec<Snap>,
-    counts: HashMap<u8, RoleCounts>,
-    force: HashMap<u8, u32>,
+    counts: BTreeMap<u8, RoleCounts>,
+    force: BTreeMap<u8, u32>,
     ai_teams: Vec<u8>,
     structures: Vec<EnemyStructure>,
     vents: Vec<(Entity, Vec3)>,
     /// Homebase positions per team, for constructor nudges.
-    homes: HashMap<u8, Vec<Vec3>>,
+    homes: BTreeMap<u8, Vec<Vec3>>,
     enemy_pos: Vec<Vec3>,
     friend_pos: Vec<Vec3>,
     /// Indices into `units` of idle army units near / away from home.
@@ -265,9 +289,10 @@ fn cast(orders: &mut CommandBus, team: u8, caster: NetId, target: Vec3) {
 #[allow(clippy::too_many_arguments)]
 pub fn ai_brain(
     time: Res<Time>,
+    tick: Res<SimTick>,
     mut ticker: ResMut<AiTicker>,
+    // Scratch only: `snapshot` rebuilds all of it every AI tick.
     mut scratch: Local<AiScratch>,
-    local: Res<LocalTeam>,
     difficulty: Res<AiDifficulty>,
     mut damage_log: ResMut<TeamDamageLog>,
     packet_buffer: Res<PacketBuffer>,
@@ -276,7 +301,7 @@ pub fn ai_brain(
     producers: Query<(&TeamId, &UnitType, &Producer, &NetId), Without<Dying>>,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
-    ai_seats: Option<Res<AiSeats>>,
+    ai_seats: Res<AiSeats>,
     mut orders: AiOrders,
 ) {
     ticker.accumulated += time.delta_secs();
@@ -284,19 +309,16 @@ pub fn ai_brain(
         return;
     }
     ticker.accumulated = 0.0;
-    let now = time.elapsed_secs();
+    let now = tick.secs();
     let ticker: &mut AiTicker = &mut ticker;
     let s: &mut AiScratch = &mut scratch;
 
-    snapshot(
-        s,
-        &units,
-        &datavents,
-        local.0,
-        ai_seats.as_deref().map(|a| &a.0[..]),
-    );
-    // Forget dispatch timers of dead teleporters.
-    ticker.last_dispatch.retain(|e, _| units.contains(*e));
+    snapshot(s, &units, &datavents, &ai_seats);
+    // Forget dispatch timers of dead teleporters (the snapshot holds
+    // every living unit, sorted by id).
+    ticker
+        .last_dispatch
+        .retain(|id, _| s.units.binary_search_by_key(id, |u| u.net).is_ok());
 
     let teams = std::mem::take(&mut s.ai_teams);
     for &team in &teams {
@@ -379,10 +401,9 @@ fn snapshot(
     s: &mut AiScratch,
     units: &Query<UnitQueryData, Without<Dying>>,
     datavents: &Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
-    local_team: u8,
-    ai_seats: Option<&[u8]>,
+    ai_seats: &AiSeats,
 ) {
-    let is_ai = |team: u8| ai_seats.map_or(team != local_team, |seats| seats.contains(&team));
+    let is_ai = |team: u8| ai_seats.contains(team);
     s.units.clear();
     s.counts.clear();
     s.force.clear();
@@ -794,7 +815,7 @@ fn run_network(
             .filter(move |u| u.team == team && u.kind.is_teleporter() && u.ready && !u.dispatching)
     };
     for tp in teleporters() {
-        let since = ticker.last_dispatch.get(&tp.entity).map(|t| now - t);
+        let since = ticker.last_dispatch.get(&tp.net).map(|t| now - t);
         if !should_counter_dispatch(buffer, lack.spams, since) {
             continue;
         }
@@ -804,7 +825,7 @@ fn run_network(
             continue;
         };
         cast(orders, team, tp.net, attacker);
-        ticker.last_dispatch.insert(tp.entity, now);
+        ticker.last_dispatch.insert(tp.net, now);
         // The drain commits the buffer; locally pretend DISPATCH_MAX
         // of it is gone so a second teleporter this tick stays quiet.
         buffer = buffer.saturating_sub(DISPATCH_MAX as u32);
@@ -819,7 +840,7 @@ fn run_network(
     let off_cooldown = |tp: &&Snap| {
         ticker
             .last_dispatch
-            .get(&tp.entity)
+            .get(&tp.net)
             .is_none_or(|t| now - t > specials::DISPATCH_COOLDOWN)
     };
     if let Some(tp) = teleporters()
@@ -827,7 +848,7 @@ fn run_network(
         .min_by(|a, b| flat_dist_sq(a.pos, target).total_cmp(&flat_dist_sq(b.pos, target)))
     {
         cast(orders, team, tp.net, target);
-        ticker.last_dispatch.insert(tp.entity, now);
+        ticker.last_dispatch.insert(tp.net, now);
     }
 }
 
@@ -947,7 +968,7 @@ fn run_specials(
 #[derive(Resource, Default)]
 pub struct TeamDamageLog {
     /// (when, where) of each team's most recent landed hit.
-    latest: HashMap<u8, (f32, Vec3)>,
+    latest: BTreeMap<u8, (f32, Vec3)>,
 }
 
 impl TeamDamageLog {
@@ -1031,7 +1052,7 @@ mod tests {
                 |units: Query<UnitQueryData, Without<Dying>>,
                  vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>| {
                     let mut s = AiScratch::default();
-                    snapshot(&mut s, &units, &vents, 0, None);
+                    snapshot(&mut s, &units, &vents, &AiSeats::default());
                     s.units
                         .iter()
                         .map(|u| (u.entity, u.idle, u.ready))
@@ -1043,6 +1064,33 @@ mod tests {
         assert_eq!(get(plain), Some((true, true)));
         assert_eq!(get(aiming), Some((false, false)));
         assert_eq!(get(walking), Some((false, false)));
+    }
+
+    /// The AI plays the teams seated with AI players only, from the
+    /// setup alone (never from the watching `LocalTeam`).
+    #[test]
+    fn ai_seats_come_from_the_setup() {
+        use crate::game_setup::{GameSetup, PlayerSpec};
+        use crate::units::components::Faction;
+        let seat = |team, ai| PlayerSpec {
+            faction: Faction::System,
+            team,
+            ai,
+        };
+        let setup = GameSetup {
+            players: vec![
+                seat(3, true),
+                seat(0, false),
+                seat(1, true),
+                seat(1, true),
+                seat(2, true),
+                seat(2, false),
+            ],
+            ..GameSetup::default()
+        };
+        let seats = AiSeats::from_setup(&setup);
+        assert_eq!(seats.0, vec![1, 3]);
+        assert!(seats.contains(3) && !seats.contains(0) && !seats.contains(2));
     }
 
     /// KPAI's `IsItOccupied*` are boxes, not circles: a corner offset of

@@ -8,7 +8,8 @@ use super::spawning::{
     BuildDriven, EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext,
     spawn_unit_facing,
 };
-use crate::sim::SQUARE_SIZE;
+use crate::net::NetId;
+use crate::sim::{RngStream, SQUARE_SIZE, SimRng, SimTick};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::animation::{PieceIndex, UnitAnimator};
 use crate::units::components::{Faction, TeamId, UnitStats, UnitType};
@@ -366,6 +367,12 @@ fn piece_world_pos(
     None
 }
 
+/// [`production_system`]'s random stream (the factory exit scatter).
+pub struct FactoryExitRng;
+impl RngStream for FactoryExitRng {
+    const SALT: u64 = 0x5EED_FAC7;
+}
+
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn production_system(
     time: Res<Time>,
@@ -386,6 +393,7 @@ pub fn production_system(
             Option<&crate::units::components::Homebase>,
             Has<Emerging>,
             Has<crate::units::combat::Stunned>,
+            &NetId,
         ),
         Without<crate::units::combat::Dying>,
     >,
@@ -404,19 +412,17 @@ pub fn production_system(
     // completions are sparse (most ticks push nothing), but fresh Vecs on
     // every frame cost allocator churn for no gain.
     mut spawns: Local<Vec<PendingSpawn>>,
-    mut exit_rng: Local<u32>,
-    mut frame: Local<u32>,
+    mut exit_rng: ResMut<SimRng<FactoryExitRng>>,
+    tick: Res<SimTick>,
 ) {
-    if *exit_rng == 0 {
-        *exit_rng = 0x5EED_FAC7;
-    }
     let dt = time.delta_secs();
     spawns.clear();
-    *frame = frame.wrapping_add(1);
     // `(gs->frameNum & (UNIT_SLOWUPDATE_RATE >> 1)) == 0`: eight frames
     // on, eight off.
-    let bugger_off_frame = *frame & 8 == 0;
+    let bugger_off_frame = tick.frame() & 8 == 0;
 
+    // Unit-id order: spawned units draw their `NetId`s, and the exit
+    // dice roll, factory by factory (`sim`).
     for (
         factory_entity,
         mut producer,
@@ -430,7 +436,8 @@ pub fn production_system(
         homebase,
         emerging,
         stunned,
-    ) in &mut producers
+        _,
+    ) in producers.iter_mut().sort::<&NetId>()
     {
         // A factory still rising out of its construction site is not
         // finished yet — upstream only hands out orders on
@@ -1160,6 +1167,7 @@ mod tests {
         world.init_resource::<crate::units::assets::meshes::S3OModelCache>();
         world.init_resource::<crate::units::content::weapons::WeaponRegistry>();
         world.insert_resource(Time::<()>::default());
+        crate::sim::test_support::init(&mut world);
         world
     }
 

@@ -56,6 +56,14 @@ pub struct GameSetup {
     /// Sandbox: no win / lose check at all (the `bot` dev tool's match,
     /// which may have a single seat).
     pub sandbox: bool,
+    /// The match seed. Every random decision the simulation makes
+    /// derives from it: the AI's dice, Hex Farm's layout, the weapon
+    /// and movement random streams ([`crate::sim::SimRng`]). The host
+    /// picks it and every peer (or a replay) plays with the same one;
+    /// single player draws a fresh one when the setup is made
+    /// ([`random_seed`]). `begin_match` copies it into the match-scoped
+    /// [`crate::sim::MatchSeed`] the sim reads.
+    pub seed: u64,
 }
 
 impl Default for GameSetup {
@@ -78,6 +86,7 @@ impl Default for GameSetup {
             demo: false,
             showcase: None,
             sandbox: false,
+            seed: random_seed(),
         }
     }
 }
@@ -129,10 +138,6 @@ pub struct DevOptions {
     /// (`profile`).
     #[cfg(not(target_arch = "wasm32"))]
     pub profile: bool,
-    /// `KP_SIM_EXECUTOR=single|multi`: run `FixedUpdate` on that
-    /// executor (an A/B switch for the schedule overhead).
-    #[cfg(not(target_arch = "wasm32"))]
-    pub sim_executor: Option<String>,
     /// `KP_MSAA=0|2|4`: override the camera's MSAA sample count (A/B
     /// runs of the GPU cost).
     pub msaa: Option<u8>,
@@ -212,7 +217,6 @@ impl DevOptions {
                 // Zero, negative, inf or NaN would trip the clock's asserts.
                 .filter(|s| s.is_finite() && *s > 0.0),
             profile: var("KP_PROFILE").is_some_and(|v| v != "0"),
-            sim_executor: var("KP_SIM_EXECUTOR"),
             msaa: var("KP_MSAA")
                 .and_then(|n| n.parse().ok())
                 .filter(|n| matches!(n, 0 | 1 | 2 | 4)),
@@ -313,6 +317,7 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
         demo: true,
         showcase: None,
         sandbox: false,
+        seed: random_seed(),
     }
 }
 
@@ -331,6 +336,7 @@ pub fn showcase_setup(faction: Faction) -> GameSetup {
         demo: false,
         showcase: Some(faction),
         sandbox: false,
+        seed: random_seed(),
     }
 }
 
@@ -470,6 +476,7 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
         demo: false,
         showcase: None,
         sandbox: false,
+        seed: random_seed(),
     }
 }
 
@@ -518,35 +525,14 @@ pub fn random_weighted_map() -> String {
     "Marble_Madness_Map".to_string()
 }
 
-/// A fresh seed for per-match procedural content (Hex Farm's layout,
-/// which the original gadget re-rolls every game).
-pub fn match_seed() -> u64 {
-    // The headless harness pins the seed so a scenario replays.
-    #[cfg(test)]
-    if let Some(seed) = test_seed::get() {
-        return seed;
-    }
+/// A fresh match seed from launch entropy, for a [`GameSetup`] made on
+/// this machine (single player, the attract demo). Called when the
+/// setup is created, never by the sim: a networked match takes the
+/// host's seed, a replay the recorded one.
+pub fn random_seed() -> u64 {
     let hi = (clock_f64() * (1u64 << 32) as f64) as u64;
     let lo = (clock_f64() * (1u64 << 32) as f64) as u64;
     (hi << 32) | lo
-}
-
-/// Test builds: a fixed [`match_seed`] (the headless harness's seeded
-/// scenarios). Process-global, like the launch entropy it replaces.
-#[cfg(test)]
-pub mod test_seed {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    /// 0 = unset.
-    static SEED: AtomicU64 = AtomicU64::new(0);
-
-    pub fn set(seed: Option<u64>) {
-        SEED.store(seed.map_or(0, |s| s.max(1)), Ordering::SeqCst);
-    }
-
-    pub fn get() -> Option<u64> {
-        Some(SEED.load(Ordering::SeqCst)).filter(|&s| s != 0)
-    }
 }
 
 #[cfg(test)]

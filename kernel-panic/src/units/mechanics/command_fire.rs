@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
+use crate::net::NetId;
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::Dying;
 use crate::units::combat::{Armored, Attacker, DamageQueue, DelayedDamage, Hit, PendingDamage};
@@ -522,6 +523,7 @@ pub fn advance_pending_casts(
             &GlobalTransform,
             &PendingCommandFire,
             Has<MoveTarget>,
+            &NetId,
         ),
         Without<Dying>,
     >,
@@ -529,7 +531,9 @@ pub fn advance_pending_casts(
     mut commands: Commands,
 ) {
     let gravity = gravity.as_deref().copied().unwrap_or_default().0;
-    for (entity, unit, gtf, pending, moving) in &casters {
+    // Unit-id order: the casts resolve in the order of their events
+    // (`sim`).
+    for (entity, unit, gtf, pending, moving, _) in casters.iter().sort::<&NetId>() {
         match cast_reach(
             cast_limit(unit.0, &weapons),
             gtf.translation(),
@@ -834,6 +838,7 @@ pub fn tick_nx_casts(
             &UnitType,
             &TeamId,
             &Faction,
+            &NetId,
         ),
         // A paralyzed Pointer's script doesn't run its weapons.
         (Without<Dying>, Without<crate::units::combat::Stunned>),
@@ -851,7 +856,7 @@ pub fn tick_nx_casts(
     };
     let weapon_def = weapons.by_id(nx);
     let launch = crate::units::combat::AimLaunch::of(Some(weapon_def), pieces.map_gravity());
-    for (entity, mut cast, gtf, unit, team, faction) in &mut casters {
+    for (entity, mut cast, gtf, unit, team, faction, _) in casters.iter_mut().sort::<&NetId>() {
         let target = match *cast {
             NxCast::Recovering { left } => {
                 if left <= dt {
@@ -1288,6 +1293,7 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sim::test_support::InitSim;
 
     #[test]
     fn nx_flag_ability_matches_upstream() {
@@ -1727,6 +1733,7 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
@@ -1796,6 +1803,7 @@ mod tests {
 
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingExplosions>()
             .insert_resource(WeaponRegistry::default());
@@ -1860,6 +1868,7 @@ mod tests {
         let (weapons, sigterm) = sigterm_weapons();
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingExplosions>()
             .insert_resource(weapons);
@@ -1922,6 +1931,7 @@ mod tests {
     fn zone_app(weapons: WeaponRegistry) -> App {
         let mut app = App::new();
         app.init_resource::<Time>()
+            .init_sim()
             .init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<SpatialIndex>()

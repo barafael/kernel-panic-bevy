@@ -18,10 +18,11 @@
 //!   with [`MatchScopeAppExt::init_match_resource`] where it would call
 //!   `init_resource`; [`begin_match`] re-initialises every such resource
 //!   at the swap. No hand-kept reset list to forget an entry in.
-//! - **Seats and game state.** The match's [`ActiveMatch`] setup, the
-//!   [`LocalTeam`], [`AiDifficulty`] and [`GameState`] are set from the
-//!   prepared map's setup in [`begin_match`] — the old world is judged
-//!   against its own seats until it is gone.
+//! - **Seats, seed and game state.** The match's [`ActiveMatch`] setup,
+//!   its [`MatchSeed`], the [`LocalTeam`], [`AiSeats`], [`AiDifficulty`]
+//!   and [`GameState`] are set from the prepared map's setup in
+//!   [`begin_match`] — the old world is judged against its own seats
+//!   until it is gone.
 
 use std::any::TypeId;
 
@@ -32,6 +33,8 @@ use bevy::ecs::system::SystemIdMarker;
 use bevy::prelude::*;
 
 use crate::game_setup::{ActiveMatch, AiDifficulty, GameSetup, SPECTATOR_TEAM};
+use crate::sim::MatchSeed;
+use crate::units::ai::AiSeats;
 use crate::units::lifecycle::game_over::GameState;
 use crate::units::player::LocalTeam;
 
@@ -83,6 +86,9 @@ fn reset_resource<R: Resource + FromWorld>(world: &mut World) {
 /// the swap, after the old world's entities are gone (despawn hooks
 /// and observers may still have written to the old tallies).
 pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
+    // The seed first: the resets below seed the match's random streams
+    // (the AI's dice, `SimRng`) from it.
+    world.insert_resource(MatchSeed(setup.seed));
     let resets: Vec<ResetFn> = world
         .get_resource::<MatchResources>()
         .map(|r| r.0.iter().map(|(_, reset)| *reset).collect())
@@ -101,6 +107,9 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
         .find(|p| !p.ai)
         .map_or(SPECTATOR_TEAM, |p| p.team);
     world.insert_resource(LocalTeam(local_team));
+    // Which teams the AI plays comes from the seats, never from who is
+    // watching: every peer runs the same AI brains.
+    world.insert_resource(AiSeats::from_setup(setup));
     world.insert_resource(AiDifficulty(setup.difficulty));
     world.insert_resource(ActiveMatch(setup.clone()));
     // A decided previous match (Victory / Defeat freezes the gameplay
@@ -327,12 +336,19 @@ mod tests {
         }
     }
 
+    struct TestStream;
+    impl crate::sim::RngStream for TestStream {
+        const SALT: u64 = 7;
+    }
+
     fn lifecycle_app() -> App {
         use bevy::state::app::StatesPlugin;
         let mut app = App::new();
         app.add_plugins(StatesPlugin)
             .init_state::<GameState>()
             .init_match_resource::<Tally>()
+            .init_match_resource::<crate::sim::SimTick>()
+            .init_match_resource::<crate::sim::SimRng<TestStream>>()
             .insert_resource(LocalTeam(0))
             .insert_resource(AiDifficulty(2));
         app
@@ -361,12 +377,26 @@ mod tests {
             .set(GameState::Defeat);
         app.update();
         app.world_mut().resource_mut::<Tally>().0 = 99;
+        app.world_mut().resource_mut::<crate::sim::SimTick>().0 = 4000;
+        let setup = GameSetup {
+            seed: 0xfeed,
+            ..spectated_demo()
+        };
 
-        begin_match(app.world_mut(), &spectated_demo());
+        begin_match(app.world_mut(), &setup);
         app.update();
 
         let world = app.world();
         assert_eq!(world.resource::<Tally>().0, 5, "match resource reset");
+        // The match's clock restarts, its random streams roll from its
+        // seed, and the AI plays every seat, whoever watches.
+        assert_eq!(world.resource::<crate::sim::SimTick>().0, 0);
+        assert_eq!(world.resource::<MatchSeed>().0, 0xfeed);
+        assert_eq!(
+            **world.resource::<crate::sim::SimRng<TestStream>>(),
+            MatchSeed(0xfeed).stream(7)
+        );
+        assert_eq!(world.resource::<AiSeats>().0, vec![0, 1]);
         assert_eq!(world.resource::<LocalTeam>().0, SPECTATOR_TEAM);
         assert_eq!(world.resource::<AiDifficulty>().0, 4);
         assert!(world.resource::<ActiveMatch>().0.demo);

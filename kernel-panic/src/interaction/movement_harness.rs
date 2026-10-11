@@ -47,6 +47,7 @@ impl Harness {
     pub fn flat() -> Self {
         let mut world = World::new();
         world.init_resource::<Time>();
+        world.init_resource::<crate::sim::SimTick>();
         world.insert_resource(UnitRegistry::load());
         let registry = world.resource::<UnitRegistry>();
         let cap = registry.max_slope_ratio(UnitKind::Bit);
@@ -62,6 +63,8 @@ impl Harness {
         world.insert_resource(super::ground_move::PathSearchBudget(usize::MAX));
         world.init_resource::<super::ground_move::PathQueue>();
         world.init_resource::<super::ground_move::PendingImpulses>();
+        world.init_resource::<super::ground_move::TrapCheckRevision>();
+        world.init_resource::<crate::sim::SimRng<super::ground_move::ImpulseRng>>();
 
         let mut schedule = Schedule::default();
         schedule.add_systems(super::unit_motion_systems());
@@ -150,6 +153,7 @@ impl Harness {
         self.world
             .resource_mut::<Time>()
             .advance_by(Duration::from_secs_f64(DT));
+        self.world.resource_mut::<crate::sim::SimTick>().0 += 1;
         self.pre_schedule.run(&mut self.world);
         self.schedule.run(&mut self.world);
         self.tick += 1;

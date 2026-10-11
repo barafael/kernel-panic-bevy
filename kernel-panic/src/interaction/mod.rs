@@ -14,6 +14,7 @@ use bevy::ecs::system::ScheduleSystem;
 use bevy::gizmos::config::GizmoConfigStore;
 use bevy::prelude::*;
 
+use crate::map_loading::MatchScopeAppExt;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
@@ -129,6 +130,10 @@ impl Plugin for InteractionPlugin {
             crate::interaction::debug_movement::DebugMovementPlugin,
         ))
         .init_resource::<ground_move::PathQueue>()
+        // Sim state of the movers that must not outlive a match
+        // (`map_loading::match_scope`).
+        .init_match_resource::<ground_move::TrapCheckRevision>()
+        .init_match_resource::<crate::sim::SimRng<ground_move::ImpulseRng>>()
         .init_gizmo_group::<CommandLineGizmos>()
         .add_systems(Startup, configure_command_line_gizmos)
         // Unit motion is simulation: it runs on the fixed 30 Hz
