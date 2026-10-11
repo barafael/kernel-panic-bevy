@@ -34,7 +34,6 @@ pub struct MoveTarget(pub Vec3);
 pub(crate) fn ground_mover_components(
     kind: UnitKind,
     registry: &UnitRegistry,
-    entity: Entity,
     transform: &Transform,
 ) -> impl Bundle {
     GroundMover::new(
@@ -42,7 +41,7 @@ pub(crate) fn ground_mover_components(
         registry,
         &UnitStats::from_registry(kind, registry, 0.0, 0.0),
     )
-    .seeded(entity, transform)
+    .seeded(transform)
 }
 
 /// Marks an active attack-move order. While it is present AND the unit
@@ -767,6 +766,14 @@ pub fn orient_stationary_to_terrain(
 ) {
     for (mut transform, stats) in &mut q {
         if stats.can_fly || stats.speed > 0.0 {
+            continue;
+        }
+        // Already upright: leave it. `Changed<Transform>` also fires for
+        // the render interpolation's writes (`rendering::interpolation`),
+        // once per *frame*, and re-deriving an upright rotation from its
+        // own forward can land an ulp off — the pose then depended on
+        // the frame rate (`headless` determinism experiments).
+        if (transform.rotation * Vec3::Y).abs_diff_eq(Vec3::Y, 1e-6) {
             continue;
         }
         let forward = transform.forward().as_vec3();
@@ -1759,7 +1766,6 @@ mod cross_map_tests {
             world.entity_mut(unit).insert(ground_mover_components(
                 UnitKind::Bit,
                 &registry,
-                unit,
                 &transform,
             ));
 

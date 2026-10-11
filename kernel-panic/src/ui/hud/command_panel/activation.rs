@@ -21,14 +21,11 @@
 use bevy::prelude::*;
 
 use crate::interaction::ability::{Mode, OrderCursorModes};
-use crate::interaction::clear_orders;
 use crate::interaction::selection::Selected;
-use crate::units::combat::{ForcedTarget, SelfDestructCountdown};
+use crate::net::{FactoryOp, Issue, SimCommand};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 use crate::units::lifecycle::production::{Producer, factory_roster};
-use crate::units::mechanics::deploy::DeployEvent;
-use crate::units::mechanics::network_buffer::EnterEvent;
 use crate::units::mechanics::worm::AutoHold;
 
 use super::super::placement::PlacementMode;
@@ -79,18 +76,19 @@ pub(crate) fn count_multiplier(shift: bool, ctrl: bool) -> u32 {
     }
 }
 
-/// A factory build-option click on one factory (`CFactoryCAI`): left
-/// queues, right removes, Shift / Ctrl multiply, Alt works on the front.
-pub(crate) fn edit_queue(producer: &mut Producer, kind: UnitKind, msg: &ActivateCommand) {
-    let count = count_multiplier(msg.shift, msg.ctrl);
+/// A factory build-option click (`CFactoryCAI`): left queues, right
+/// removes, Shift / Ctrl multiply, Alt works on the front.
+pub(crate) fn factory_op(msg: &ActivateCommand) -> FactoryOp {
+    let count = count_multiplier(msg.shift, msg.ctrl) as u16;
     if msg.right {
-        producer.remove_kind(kind, count, msg.alt);
-    } else if msg.alt {
-        producer.enqueue_front(kind, count);
-    } else {
-        for _ in 0..count {
-            producer.enqueue(kind);
+        FactoryOp::Remove {
+            count,
+            oldest: msg.alt,
         }
+    } else if msg.alt {
+        FactoryOp::AddFront(count)
+    } else {
+        FactoryOp::Add(count)
     }
 }
 
@@ -149,11 +147,6 @@ pub(super) fn order_hotkeys(
     }
 }
 
-/// Stop: strip every order component off `entity`.
-fn stop_unit(commands: &mut Commands, entity: Entity) {
-    clear_orders(&mut commands.entity(entity)).remove::<SelfDestructCountdown>();
-}
-
 /// The armed command (`inCommand`), highlighted on its button: derived
 /// from the armed placement / cursor mode, so it ends with them (order
 /// committed, cancelled, builder deselected).
@@ -178,17 +171,8 @@ pub(super) fn disarm(modes: &mut OrderCursorModes, placement: &mut PlacementMode
     placement.kind = None;
 }
 
-type SelectedUnits<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static UnitType,
-        Option<&'static mut Producer>,
-        Option<&'static mut AutoHold>,
-    ),
-    With<Selected>,
->;
+type SelectedUnits<'w, 's> =
+    Query<'w, 's, (Entity, &'static UnitType, Has<Producer>, Has<AutoHold>), With<Selected>>;
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn apply_activations(
@@ -197,10 +181,8 @@ pub(super) fn apply_activations(
     mut page: ResMut<PanelPage>,
     mut modes: ResMut<OrderCursorModes>,
     mut placement: ResMut<PlacementMode>,
-    mut units: SelectedUnits,
-    mut deploy: MessageWriter<DeployEvent>,
-    mut enter: MessageWriter<EnterEvent>,
-    unit_registry: Option<Res<crate::units::content::unit_registry::UnitRegistry>>,
+    units: SelectedUnits,
+    mut net: Issue,
     mut commands: Commands,
 ) {
     for msg in msgs.read() {
@@ -239,9 +221,8 @@ pub(super) fn apply_activations(
 
         match msg.id {
             CmdId::Stop => {
-                for (entity, ..) in &units {
-                    stop_unit(&mut commands, entity);
-                }
+                let units = net.units(units.iter().map(|(e, ..)| e));
+                net.issue(SimCommand::Stop { units });
                 crate::audio::ack_order(&mut commands);
                 disarm(&mut modes, &mut placement);
             }
@@ -266,14 +247,22 @@ pub(super) fn apply_activations(
                 }
             }
             CmdId::Produce(kind) => {
-                for (_, ut, producer, _) in &mut units {
-                    if let Some(mut producer) = producer
-                        && factory_roster(ut.0).contains(&kind)
-                    {
-                        edit_queue(&mut producer, kind, msg);
-                        crate::audio::ack_order(&mut commands);
-                    }
+                let factories = net.units(
+                    units
+                        .iter()
+                        .filter(|(_, ut, producer, _)| {
+                            *producer && factory_roster(ut.0).contains(&kind)
+                        })
+                        .map(|(e, ..)| e),
+                );
+                if factories.list().is_some_and(|l| !l.is_empty()) {
+                    crate::audio::ack_order(&mut commands);
                 }
+                net.issue(SimCommand::Factory {
+                    factories,
+                    kind,
+                    op: factory_op(msg),
+                });
             }
             CmdId::Repeat | CmdId::AutoHold => {
                 // `newMode = params[0] + 1`, wrapping — from the shown
@@ -282,18 +271,22 @@ pub(super) fn apply_activations(
                     continue;
                 };
                 let on = (d.state + 1) % d.options.len().max(1) == 1;
-                for (_, _, producer, autohold) in &mut units {
-                    if msg.id == CmdId::Repeat
-                        && let Some(mut p) = producer
-                    {
-                        p.set_repeat(on);
-                    }
-                    if msg.id == CmdId::AutoHold
-                        && let Some(mut a) = autohold
-                    {
-                        a.0 = on;
-                    }
-                }
+                let repeat = msg.id == CmdId::Repeat;
+                let targets = net.units(
+                    units
+                        .iter()
+                        .filter(
+                            |(_, _, producer, autohold)| {
+                                if repeat { *producer } else { *autohold }
+                            },
+                        )
+                        .map(|(e, ..)| e),
+                );
+                net.issue(if repeat {
+                    SimCommand::SetRepeat { units: targets, on }
+                } else {
+                    SimCommand::SetAutoHold { units: targets, on }
+                });
             }
             CmdId::Deploy | CmdId::Undeploy => {
                 let from = if msg.id == CmdId::Deploy {
@@ -301,37 +294,34 @@ pub(super) fn apply_activations(
                 } else {
                     UnitKind::Exploit
                 };
-                for (entity, ut, ..) in &units {
-                    if ut.0 == from {
-                        deploy.write(DeployEvent { entity });
-                    }
-                }
+                let units = net.units(
+                    units
+                        .iter()
+                        .filter(|(_, ut, ..)| ut.0 == from)
+                        .map(|(e, ..)| e),
+                );
+                net.issue(SimCommand::Deploy { units });
             }
             CmdId::Enter => {
-                for (entity, ut, ..) in &units {
-                    if ut.0 == UnitKind::Packet {
-                        enter.write(EnterEvent { packet: entity });
-                    }
-                }
+                let units = net.units(
+                    units
+                        .iter()
+                        .filter(|(_, ut, ..)| ut.0 == UnitKind::Packet)
+                        .map(|(e, ..)| e),
+                );
+                net.issue(SimCommand::Enter { units });
             }
             CmdId::UnsetTarget => {
-                for (entity, ..) in &units {
-                    commands.entity(entity).remove::<ForcedTarget>();
-                }
+                let units = net.units(units.iter().map(|(e, ..)| e));
+                net.issue(SimCommand::UnsetTarget { units });
                 if modes.is(Mode::SetTarget) {
                     disarm(&mut modes, &mut placement);
                 }
             }
             CmdId::SelfDestruct => {
-                for (entity, unit, ..) in &units {
-                    // The unit's own FBI `SelfDestructCountdown`.
-                    commands
-                        .entity(entity)
-                        .insert(SelfDestructCountdown::ordered(
-                            unit.0,
-                            unit_registry.as_deref(),
-                        ));
-                }
+                // Each unit's own FBI `SelfDestructCountdown`.
+                let units = net.units(units.iter().map(|(e, ..)| e));
+                net.issue(SimCommand::SelfDestruct { units });
             }
             CmdId::PrevPage | CmdId::NextPage => {
                 let pages = panel.pages.len().max(1);
@@ -358,8 +348,7 @@ mod tests {
         world.init_resource::<OrderCursorModes>();
         world.init_resource::<PlacementMode>();
         world.init_resource::<Messages<ActivateCommand>>();
-        world.init_resource::<Messages<DeployEvent>>();
-        world.init_resource::<Messages<EnterEvent>>();
+        crate::net::init_test_world(&mut world);
         world
     }
 
@@ -370,6 +359,7 @@ mod tests {
     fn send(world: &mut World, msg: ActivateCommand) {
         world.write_message(msg);
         world.run_system_once(apply_activations).unwrap();
+        crate::net::apply_now(world);
         // A fresh one-shot system would re-read the old messages.
         world.resource_mut::<Messages<ActivateCommand>>().clear();
     }

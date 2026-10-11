@@ -96,8 +96,13 @@ impl Faction {
     }
 }
 
-/// What type of unit this is.
+/// What type of unit this is. Every unit gets a [`NetId`] with it
+/// (the unit id; numbered by its hook from the match's allocator, `0`
+/// in worlds without one).
+///
+/// [`NetId`]: crate::net::NetId
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Component)]
+#[require(crate::net::NetId)]
 pub struct UnitType(pub UnitKind);
 
 /// Current health.

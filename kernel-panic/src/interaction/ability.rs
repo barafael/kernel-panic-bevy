@@ -21,21 +21,17 @@
 use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
 
-use super::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
+use super::movement::QueuedCommand;
 use super::selection::{
-    OrderMarker, PendingMoveIndicators, PickRayCast, Selected, SelectionSet, apply_ordered_command,
-    ground_hit, unit_hit,
+    OrderMarker, PendingMoveIndicators, PickRayCast, Selected, SelectionSet, ground_hit, unit_hit,
 };
 use crate::interaction::cursor::{CursorKind, CursorRequest};
+use crate::net::{Issue, NetPos, Order, SimCommand};
 use crate::rendering::camera::RtsCamera;
 use crate::ui::hud::command_panel::commands::{CmdId, can_attack};
-use crate::units::combat::ForcedTarget;
 use crate::units::components::{TeamId, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::mechanics::command_fire::CommandFireEvent;
-use crate::units::mechanics::deploy::DeployEvent;
-use crate::units::mechanics::network_buffer::DispatchEvent;
 
 fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
@@ -169,55 +165,46 @@ pub(crate) fn ability_is_aimed(kind: UnitKind) -> bool {
 /// of the `D` ability.
 pub(crate) fn deploy_units(
     units: impl IntoIterator<Item = (Entity, UnitKind)>,
-    ev: &mut MessageWriter<DeployEvent>,
+    net: &mut Issue,
     commands: &mut Commands,
 ) {
     crate::audio::ack_order(commands);
-    for (entity, kind) in units {
-        if kind.deploy_pair().is_some() {
-            ev.write(DeployEvent { entity });
-        }
-    }
+    let units = net.units(
+        units
+            .into_iter()
+            .filter(|(_, kind)| kind.deploy_pair().is_some())
+            .map(|(e, _)| e),
+    );
+    net.issue(SimCommand::Deploy { units });
 }
 
 /// Cast the aimed half of the `D` ability at `target` for every unit in
-/// `units`: command-fire casters get a [`CommandFireEvent`] (range /
-/// approach handled by `process_command_fire`), teleporters dispatch.
+/// `units`: command-fire casters fire (range / approach handled by
+/// `process_command_fire`), teleporters dispatch.
 ///
 /// `alt_held` mirrors upstream `network_dispatch.lua`: the dispatch
 /// command stays active and re-fires every frame until the team's
-/// Packet Buffer is empty, instead of stopping after one 12-batch. With
-/// ALT we only insert the `AutoDispatch` marker — the first batch goes
-/// out on the next frame via `tick_auto_dispatch`, avoiding a
-/// double-fire that would drain up to 24 packets in frame 1.
+/// Packet Buffer is empty, instead of stopping after one 12-batch
+/// (`AutoDispatch`, see `net::apply`).
 pub(crate) fn cast_aimed_abilities(
     units: impl IntoIterator<Item = (Entity, UnitKind)>,
     target: Vec3,
     alt_held: bool,
-    command_fire: &mut MessageWriter<CommandFireEvent>,
-    dispatch: &mut MessageWriter<DispatchEvent>,
+    net: &mut Issue,
     commands: &mut Commands,
 ) {
     crate::audio::ack_order(commands);
-    for (entity, kind) in units {
-        if kind.has_command_fire_ability() {
-            command_fire.write(CommandFireEvent {
-                attacker: entity,
-                target,
-            });
-        } else if kind.is_teleporter() {
-            if alt_held {
-                commands
-                    .entity(entity)
-                    .insert(crate::units::mechanics::network_buffer::AutoDispatch { target });
-            } else {
-                dispatch.write(DispatchEvent {
-                    teleporter: entity,
-                    target,
-                });
-            }
-        }
-    }
+    let units = net.units(
+        units
+            .into_iter()
+            .filter(|(_, kind)| kind.has_command_fire_ability() || kind.is_teleporter())
+            .map(|(e, _)| e),
+    );
+    net.issue(SimCommand::Cast {
+        units,
+        target: NetPos::quantize(target),
+        auto: alt_held,
+    });
 }
 
 fn alt_held(keys: &ButtonInput<KeyCode>) -> bool {
@@ -260,7 +247,7 @@ fn consume_click(mouse: &mut ButtonInput<MouseButton>) {
 fn trigger_deploy_on_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    mut ev: MessageWriter<DeployEvent>,
+    mut net: Issue,
     mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::KeyD) {
@@ -271,7 +258,7 @@ fn trigger_deploy_on_hotkey(
     }
     deploy_units(
         selected_q.iter().map(|(e, u)| (e, u.0)),
-        &mut ev,
+        &mut net,
         &mut commands,
     );
 }
@@ -286,8 +273,7 @@ fn trigger_aimed_ability_on_hotkey(
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
-    mut command_fire: MessageWriter<CommandFireEvent>,
-    mut dispatch: MessageWriter<DispatchEvent>,
+    mut net: Issue,
     mut commands: Commands,
 ) {
     if !keys.just_pressed(KeyCode::KeyD) || ctrl_held(&keys) {
@@ -309,8 +295,7 @@ fn trigger_aimed_ability_on_hotkey(
         selected_q.iter().map(|(e, u)| (e, u.0)),
         target,
         alt_held(&keys),
-        &mut command_fire,
-        &mut dispatch,
+        &mut net,
         &mut commands,
     );
 }
@@ -328,8 +313,7 @@ fn trigger_ability_click(
     mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut command_fire: MessageWriter<CommandFireEvent>,
-    mut dispatch: MessageWriter<DispatchEvent>,
+    mut net: Issue,
     mut commands: Commands,
 ) {
     let Some(Mode::Ability(cmd)) = modes.mode else {
@@ -349,8 +333,7 @@ fn trigger_ability_click(
             .filter(|(_, k)| filter.is_none_or(|f| f(*k))),
         target,
         alt_held(&keys),
-        &mut command_fire,
-        &mut dispatch,
+        &mut net,
         &mut commands,
     );
     pending.markers.push((target, OrderMarker::Attack));
@@ -375,10 +358,9 @@ fn trigger_attack_ground_click(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut commands: Commands,
+    mut net: Issue,
 ) {
     let Some(target) = armed_ground_click(
         &modes,
@@ -390,19 +372,17 @@ fn trigger_attack_ground_click(
     ) else {
         return;
     };
-    let shift = shift_held(&keys);
-    for (entity, unit) in &selected_q {
-        if !can_attack(unit.0) {
-            continue;
-        }
-        apply_ordered_command(
-            entity,
-            QueuedCommand::AttackGround(target),
-            shift,
-            &orders,
-            &mut commands,
-        );
-    }
+    let units = net.units(
+        selected_q
+            .iter()
+            .filter(|(_, unit)| can_attack(unit.0))
+            .map(|(e, _)| e),
+    );
+    net.issue(SimCommand::Order {
+        units,
+        order: Order::AttackGround(NetPos::quantize(target)),
+        queue: shift_held(&keys),
+    });
     pending.markers.push((target, OrderMarker::Attack));
     modes.committed(&keys);
     consume_click(&mut mouse);
@@ -418,10 +398,9 @@ fn trigger_move_click(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut commands: Commands,
+    mut net: Issue,
     unit_registry: Res<UnitRegistry>,
 ) {
     let Some(target) = armed_ground_click(
@@ -434,19 +413,12 @@ fn trigger_move_click(
     ) else {
         return;
     };
-    let shift = shift_held(&keys);
-    for (entity, unit) in &selected_q {
-        if unit_registry.speed(unit.0) <= 0.0 {
-            continue;
-        }
-        apply_ordered_command(
-            entity,
-            QueuedCommand::Move(target),
-            shift,
-            &orders,
-            &mut commands,
-        );
-    }
+    let units = mobile(&selected_q, &unit_registry, &net);
+    net.issue(SimCommand::Order {
+        units,
+        order: Order::Move(NetPos::quantize(target)),
+        queue: shift_held(&keys),
+    });
     pending.markers.push((target, OrderMarker::Move));
     modes.committed(&keys);
     consume_click(&mut mouse);
@@ -472,7 +444,7 @@ fn trigger_set_target_click(
     target_gtf_q: Query<&GlobalTransform>,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut commands: Commands,
+    mut net: Issue,
     unit_registry: Res<UnitRegistry>,
 ) {
     if !modes.is(Mode::SetTarget) || !mouse.just_pressed(MouseButton::Left) {
@@ -492,11 +464,17 @@ fn trigger_set_target_click(
     if is_friendly(sel_team, t_team.0) {
         return;
     }
-    for (entity, unit, _) in &selected_q {
-        if unit_registry.weapon(unit.0).is_empty() || !unit_registry.can_attack(unit.0, t_kind.0) {
-            continue;
-        }
-        commands.entity(entity).insert(ForcedTarget(target));
+    let units = net.units(
+        selected_q
+            .iter()
+            .filter(|(_, unit, _)| {
+                !unit_registry.weapon(unit.0).is_empty()
+                    && unit_registry.can_attack(unit.0, t_kind.0)
+            })
+            .map(|(e, ..)| e),
+    );
+    if let Some(target) = net.id(target) {
+        net.issue(SimCommand::SetTarget { units, target });
     }
     if let Ok(t_gtf) = target_gtf_q.get(target) {
         pending
@@ -517,15 +495,13 @@ fn trigger_set_target_click(
 fn trigger_patrol_click(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType, &Transform), With<Selected>>,
-    queue_q: Query<(Option<&CommandQueue>, Option<&MoveTarget>)>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut commands: Commands,
+    mut net: Issue,
     unit_registry: Res<UnitRegistry>,
 ) {
     let Some(target) = armed_ground_click(
@@ -538,37 +514,31 @@ fn trigger_patrol_click(
     ) else {
         return;
     };
-    let shift = shift_held(&keys);
-
-    for (entity, unit, tf) in &selected_q {
-        if unit_registry.speed(unit.0) <= 0.0 {
-            continue;
-        }
-        let (queue, move_target) = queue_q.get(entity).unwrap_or_default();
-        let append = shift && orders.busy(entity);
-        for cmd in patrol_commands(
-            append,
-            queue.map_or(&[][..], |q| &q.commands),
-            move_target.map(|t| t.0),
-            tf.translation,
-            target,
-        ) {
-            apply_ordered_command(entity, cmd, append, &orders, &mut commands);
-        }
-        if !append {
-            // The route's second point: the active leg walks to the
-            // click, the queue holds the start and the click.
-            commands.entity(entity).insert(CommandQueue {
-                commands: vec![
-                    QueuedCommand::Patrol(tf.translation),
-                    QueuedCommand::Patrol(target),
-                ],
-            });
-        }
-    }
+    // The route (where it starts, Shift appending) is worked out from
+    // each unit's orders when the command is applied (`net::apply`).
+    let units = mobile(&selected_q, &unit_registry, &net);
+    net.issue(SimCommand::Order {
+        units,
+        order: Order::Patrol(NetPos::quantize(target)),
+        queue: shift_held(&keys),
+    });
     pending.markers.push((target, OrderMarker::Patrol));
     modes.committed(&keys);
     consume_click(&mut mouse);
+}
+
+/// The mobile units of the selection (moves, fights, patrols).
+fn mobile(
+    selected_q: &Query<(Entity, &UnitType), With<Selected>>,
+    unit_registry: &UnitRegistry,
+    net: &Issue,
+) -> crate::net::Units {
+    net.units(
+        selected_q
+            .iter()
+            .filter(|(_, unit)| unit_registry.speed(unit.0) > 0.0)
+            .map(|(e, _)| e),
+    )
 }
 
 /// The commands a patrol click to `target` gives one unit (Spring's
@@ -578,7 +548,7 @@ fn trigger_patrol_click(
 /// point pairs with where those orders end, the last queued position,
 /// else the active order's goal, else the unit itself, so the route
 /// has two ends to shuttle between.
-fn patrol_commands(
+pub(crate) fn patrol_commands(
     append: bool,
     queue: &[QueuedCommand],
     active_goal: Option<Vec3>,
@@ -612,10 +582,9 @@ fn trigger_attack_move_click(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut commands: Commands,
+    mut net: Issue,
     unit_registry: Res<UnitRegistry>,
 ) {
     let Some(target) = armed_ground_click(
@@ -628,19 +597,12 @@ fn trigger_attack_move_click(
     ) else {
         return;
     };
-    let shift = shift_held(&keys);
-    for (entity, unit) in &selected_q {
-        if unit_registry.speed(unit.0) <= 0.0 {
-            continue;
-        }
-        apply_ordered_command(
-            entity,
-            QueuedCommand::AttackMove(target),
-            shift,
-            &orders,
-            &mut commands,
-        );
-    }
+    let units = mobile(&selected_q, &unit_registry, &net);
+    net.issue(SimCommand::Order {
+        units,
+        order: Order::AttackMove(NetPos::quantize(target)),
+        queue: shift_held(&keys),
+    });
     pending.markers.push((target, OrderMarker::Attack));
     modes.committed(&keys);
     consume_click(&mut mouse);
@@ -664,10 +626,9 @@ fn trigger_guard_click(
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
     mut ray_cast: PickRayCast,
-    orders: Orders,
     mut modes: ResMut<OrderCursorModes>,
     mut pending: ResMut<PendingMoveIndicators>,
-    mut commands: Commands,
+    mut net: Issue,
     unit_registry: Res<UnitRegistry>,
 ) {
     if !modes.is(Mode::Guard) || !mouse.just_pressed(MouseButton::Left) {
@@ -690,19 +651,19 @@ fn trigger_guard_click(
     let pos = target_gtf_q
         .get(target)
         .map_or(Vec3::ZERO, |t| t.translation());
-    let shift = shift_held(&keys);
-    for (entity, unit, _) in &selected_q {
-        // A unit can't guard itself.
-        if entity == target || unit_registry.speed(unit.0) <= 0.0 {
-            continue;
-        }
-        apply_ordered_command(
-            entity,
-            QueuedCommand::Guard { target, pos },
-            shift,
-            &orders,
-            &mut commands,
-        );
+    // A unit can't guard itself (also checked when applied).
+    let units = net.units(
+        selected_q
+            .iter()
+            .filter(|(entity, unit, _)| *entity != target && unit_registry.speed(unit.0) > 0.0)
+            .map(|(e, ..)| e),
+    );
+    if let Some(target) = net.id(target) {
+        net.issue(SimCommand::Order {
+            units,
+            order: Order::Guard(target),
+            queue: shift_held(&keys),
+        });
     }
     pending.markers.push((pos, OrderMarker::Guard));
     modes.committed(&keys);

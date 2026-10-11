@@ -53,7 +53,8 @@ use super::{
 use crate::units::spatial::flat_dist_sq;
 use crate::{
     game_setup::AiDifficulty,
-    interaction::movement::{MovePath, OrderState, QueuedCommand},
+    interaction::movement::{MovePath, OrderState},
+    net::{CommandBus, FactoryOp, NetId, NetPos, Order, PointOrder, SimCommand, Units},
     rng::xorshift32,
     terrain::geovent::{GeoventSmoker, VentClaim},
     units::{
@@ -61,11 +62,8 @@ use crate::{
         content::definitions::UnitKind,
         lifecycle::spawning::Emerging,
         mechanics::{
-            command_fire::{
-                CommandFireCooldown, CommandFireEvent, NxCast, PendingCommandFire, Protected,
-            },
-            deploy::DeployEvent,
-            network_buffer::{AutoDispatch, DISPATCH_MAX, DispatchEvent, PacketBuffer},
+            command_fire::{CommandFireCooldown, NxCast, PendingCommandFire, Protected},
+            network_buffer::{AutoDispatch, DISPATCH_MAX, PacketBuffer},
         },
     },
 };
@@ -154,15 +152,35 @@ impl Default for AiTicker {
 }
 
 impl AiTicker {
+    /// A ticker rolling from `seed`. Lockstep peers must all use the
+    /// match's shared seed: the default draws a per-launch one
+    /// (`match_seed`), which would desync every AI decision.
+    #[cfg(test)]
+    pub(crate) fn with_seed(seed: u32) -> Self {
+        Self {
+            rng: seed.max(1),
+            ..Self::default()
+        }
+    }
+
     fn roll(&mut self) -> u32 {
         xorshift32(&mut self.rng)
     }
 }
 
 /// One unit's state captured at the top of an AI tick.
+/// The teams the AI plays, when the match says so explicitly. Without
+/// it every homebase team but the local one is AI — fine for a single
+/// local player, wrong on a networked peer (each machine would run the
+/// AI for every *other* human). A lobby must insert this from its seats.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct AiSeats(pub Vec<u8>);
+
 #[derive(Clone, Copy)]
 struct Snap {
     entity: Entity,
+    /// What the AI's commands name the unit by.
+    net: NetId,
     team: u8,
     kind: UnitKind,
     pos: Vec3,
@@ -223,15 +241,24 @@ type UnitQueryData = (
     Has<Protected>,
     // A cast in progress: not ready for another one.
     (Has<NxCast>, Has<PendingCommandFire>),
+    // The unit id: names it in the AI's commands, orders the snapshot.
+    &'static NetId,
 );
 
-/// Message writers the AI issues orders through — the same messages the
-/// player's `D` hotkey writes.
-#[derive(bevy::ecs::system::SystemParam)]
-pub struct AiOrders<'w> {
-    command_fire: MessageWriter<'w, CommandFireEvent>,
-    deploy: MessageWriter<'w, DeployEvent>,
-    dispatch: MessageWriter<'w, DispatchEvent>,
+/// Every AI order goes through the command bus as its team's player
+/// (`net`): the same path, and the same wire format, as a human's.
+type AiOrders<'w> = ResMut<'w, CommandBus>;
+
+/// Cast `caster`'s aimed ability (command fire, Dispatch) at `target`.
+fn cast(orders: &mut CommandBus, team: u8, caster: NetId, target: Vec3) {
+    orders.issue_as(
+        team,
+        SimCommand::Cast {
+            units: Units::of([caster]),
+            target: NetPos::quantize(target),
+            auto: false,
+        },
+    );
 }
 
 /// Main AI brain.
@@ -246,12 +273,11 @@ pub fn ai_brain(
     packet_buffer: Res<PacketBuffer>,
     spatial: Res<SpatialIndex>,
     units: Query<UnitQueryData, Without<Dying>>,
-    mut producers: Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
+    producers: Query<(&TeamId, &UnitType, &Producer, &NetId), Without<Dying>>,
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
-    unit_registry: Res<crate::units::content::unit_registry::UnitRegistry>,
+    ai_seats: Option<Res<AiSeats>>,
     mut orders: AiOrders,
-    mut commands: Commands,
 ) {
     ticker.accumulated += time.delta_secs();
     if ticker.accumulated < AI_TICK_INTERVAL {
@@ -262,7 +288,13 @@ pub fn ai_brain(
     let ticker: &mut AiTicker = &mut ticker;
     let s: &mut AiScratch = &mut scratch;
 
-    snapshot(s, &units, &datavents, local.0);
+    snapshot(
+        s,
+        &units,
+        &datavents,
+        local.0,
+        ai_seats.as_deref().map(|a| &a.0[..]),
+    );
     // Forget dispatch timers of dead teleporters.
     ticker.last_dispatch.retain(|e, _| units.contains(*e));
 
@@ -282,9 +314,18 @@ pub fn ai_brain(
         let force = s.force.get(&team).copied().unwrap_or(0);
         let buffer = packet_buffer.peek(team);
 
-        run_factories(team, s, ticker, &mut producers, &mut lack, force, buffer);
-        run_constructors(team, s, ticker, &mut lack, &mut commands);
-        let target = run_army(team, s, ticker, &spatial, force + buffer, &mut commands);
+        run_factories(
+            team,
+            s,
+            ticker,
+            &producers,
+            &mut lack,
+            force,
+            buffer,
+            &mut orders,
+        );
+        run_constructors(team, s, ticker, &mut lack, &mut orders);
+        let target = run_army(team, s, ticker, &spatial, force + buffer, &mut orders);
         run_network(
             team,
             s,
@@ -297,15 +338,7 @@ pub fn ai_brain(
             &mut orders,
         );
         run_specials(team, s, ticker, &spatial, &mut damage_log, now, &mut orders);
-        run_late_game(
-            team,
-            s,
-            ticker,
-            &suiciding,
-            &unit_registry,
-            now,
-            &mut commands,
-        );
+        run_late_game(team, s, ticker, &suiciding, now, &mut orders);
     }
     s.ai_teams = teams;
 }
@@ -320,9 +353,8 @@ fn run_late_game(
     s: &AiScratch,
     ticker: &mut AiTicker,
     suiciding: &Query<(), With<SelfDestructCountdown>>,
-    unit_registry: &crate::units::content::unit_registry::UnitRegistry,
     now: f32,
-    commands: &mut Commands,
+    orders: &mut CommandBus,
 ) {
     if s.counts.keys().any(|t| *t != team) {
         ticker.no_enemies_since.remove(&team);
@@ -332,14 +364,13 @@ fn run_late_game(
     if now - since <= 30.0 + (7 * team as u32 % 16) as f32 {
         return;
     }
-    for u in s.units.iter().filter(|u| u.team == team) {
-        if suiciding.contains(u.entity) {
-            continue;
-        }
-        commands
-            .entity(u.entity)
-            .try_insert(SelfDestructCountdown::ordered(u.kind, Some(unit_registry)));
-    }
+    let units = Units::of(
+        s.units
+            .iter()
+            .filter(|u| u.team == team && !suiciding.contains(u.entity))
+            .map(|u| u.net),
+    );
+    orders.issue_as(team, SimCommand::SelfDestruct { units });
 }
 
 /// Capture every live unit, per-team tallies, the AI team list, enemy
@@ -349,13 +380,21 @@ fn snapshot(
     units: &Query<UnitQueryData, Without<Dying>>,
     datavents: &Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     local_team: u8,
+    ai_seats: Option<&[u8]>,
 ) {
+    let is_ai = |team: u8| ai_seats.map_or(team != local_team, |seats| seats.contains(&team));
     s.units.clear();
     s.counts.clear();
     s.force.clear();
     s.ai_teams.clear();
     s.structures.clear();
     s.homes.clear();
+    // Canonical order (`NetId`, Spring's unit ids): the dice the AI
+    // rolls per unit, and every "first" it picks, must not follow the
+    // ECS's query order, which depends on archetype history the frame
+    // loop also shapes (`headless` determinism experiments).
+    let mut sorted: Vec<_> = units.iter().collect();
+    sorted.sort_unstable_by_key(|item| *item.12);
     for (
         e,
         team,
@@ -369,12 +408,14 @@ fn snapshot(
         auto_dispatch,
         protected,
         (nx_cast, pending_cast),
-    ) in units
+        net,
+    ) in sorted
     {
         let kind = ut.0;
         let casting = nx_cast || pending_cast;
         let snap = Snap {
             entity: e,
+            net: *net,
             team: team.0,
             kind,
             pos: gtf.translation(),
@@ -391,7 +432,7 @@ fn snapshot(
         // KPAI `forceSize`: one per unit of any kind, buildings included.
         *s.force.entry(team.0).or_default() += 1;
         let homebase = kind.is_homebase();
-        if homebase && team.0 != local_team && !s.ai_teams.contains(&team.0) {
+        if homebase && is_ai(team.0) && !s.ai_teams.contains(&team.0) {
             s.ai_teams.push(team.0);
         }
         if homebase {
@@ -418,23 +459,39 @@ fn snapshot(
             s.vents.push((entity, vent.pos));
         }
     }
+    // Vents are map features (no `NetId`): position order.
+    s.vents
+        .sort_by(|a, b| (a.1.x, a.1.z).partial_cmp(&(b.1.x, b.1.z)).unwrap());
 }
 
 /// Homebase mix (`OrderHomeBase`) and the minifac spam toggle
 /// (`OrderMiniFac`), both charged against the fairness budget.
+#[allow(clippy::too_many_arguments)]
 fn run_factories(
     team: u8,
     s: &AiScratch,
     ticker: &mut AiTicker,
-    producers: &mut Query<(&TeamId, &UnitType, &mut Producer), Without<Dying>>,
+    producers: &Query<(&TeamId, &UnitType, &Producer, &NetId), Without<Dying>>,
     lack: &mut Lack,
     force: u32,
     buffer: u32,
+    orders: &mut CommandBus,
 ) {
-    for (t, ut, mut producer) in producers.iter_mut() {
-        if t.0 != team {
-            continue;
-        }
+    // `NetId` order (see `snapshot`): each factory draws dice.
+    let mut own: Vec<_> = producers.iter().filter(|(t, ..)| t.0 == team).collect();
+    own.sort_unstable_by_key(|(.., net)| **net);
+    for (_, ut, producer, net) in own {
+        let factory = *net;
+        let order = |orders: &mut CommandBus, kind: UnitKind, n: u16| {
+            orders.issue_as(
+                team,
+                SimCommand::Factory {
+                    factories: Units::of([factory]),
+                    kind,
+                    op: FactoryOp::Add(n),
+                },
+            );
+        };
         if let Some(roster) = homebase_roster(ut.0) {
             if producer.queue().len() > HOMEBASE_REFILL_AT {
                 continue;
@@ -452,21 +509,19 @@ fn run_factories(
             match choose_homebase_order(constructors, force, buffer, roll, heavy_coin, batch, lack)
             {
                 HomebaseOrder::Constructor => {
-                    producer.enqueue(roster.constructor);
+                    order(orders, roster.constructor, 1);
                     lack.mediums -= 1;
                 }
                 HomebaseOrder::Heavy => {
-                    producer.enqueue(roster.heavy);
+                    order(orders, roster.heavy, 1);
                     lack.mediums -= 1;
                 }
                 HomebaseOrder::Arty => {
-                    producer.enqueue(roster.arty);
+                    order(orders, roster.arty, 1);
                     lack.mediums -= 1;
                 }
                 HomebaseOrder::Spam(n) => {
-                    for _ in 0..n {
-                        producer.enqueue(roster.spam);
-                    }
+                    order(orders, roster.spam, n as u16);
                     lack.spams -= n as i32;
                 }
                 HomebaseOrder::Nothing => {}
@@ -475,10 +530,21 @@ fn run_factories(
             // Fair KPAI turns repeat off on every minifac and re-orders
             // one spam at a time while `Lack.spams > 0`; toggling our
             // repeat flag on the budget is the same thing.
+            // (Sent only when it changes: a command per minifac per
+            // second would be pure bandwidth.)
             let want = lack.spams > 0;
-            producer.set_repeat(want);
-            if want && producer.queue().is_empty() {
-                producer.enqueue(spam);
+            let queue_empty = producer.queue().is_empty();
+            if producer.repeat() != want {
+                orders.issue_as(
+                    team,
+                    SimCommand::SetRepeat {
+                        units: Units::of([factory]),
+                        on: want,
+                    },
+                );
+            }
+            if want && queue_empty {
+                order(orders, spam, 1);
                 lack.spams -= 1;
             }
         }
@@ -502,7 +568,7 @@ fn run_constructors(
     s: &mut AiScratch,
     ticker: &mut AiTicker,
     lack: &mut Lack,
-    commands: &mut Commands,
+    orders: &mut CommandBus,
 ) {
     let mut owned_minifacs = s
         .units
@@ -519,10 +585,8 @@ fn run_constructors(
         // Don't start building from inside a base: step out of the
         // exit box (any team's homebase — enemy bases count too).
         if let Some(base) = occupied_by(&s.structures, ctor.pos, HOMEBASE_EXIT_HALF, true) {
-            crate::interaction::replace_order(
-                &mut commands.entity(ctor.entity),
-                QueuedCommand::Move(spread_around(base, &mut ticker.rng)),
-            );
+            let to = NetPos::quantize(spread_around(base, &mut ticker.rng));
+            orders.issue_as(team, SimCommand::order_one(ctor.net, Order::Move(to)));
             continue;
         }
         // Fair KPAI: with no building budget the constructor is spread
@@ -533,10 +597,8 @@ fn run_constructors(
                     flat_dist_sq(**a, ctor.pos).total_cmp(&flat_dist_sq(**b, ctor.pos))
                 })
             }) {
-                crate::interaction::replace_order(
-                    &mut commands.entity(ctor.entity),
-                    QueuedCommand::Move(spread_around(home, &mut ticker.rng)),
-                );
+                let to = NetPos::quantize(spread_around(home, &mut ticker.rng));
+                orders.issue_as(team, SimCommand::order_one(ctor.net, Order::Move(to)));
             }
             continue;
         }
@@ -551,7 +613,7 @@ fn run_constructors(
                 .map(|st| st.pos)
                 .min_by(|a, b| flat_dist_sq(*a, ctor.pos).total_cmp(&flat_dist_sq(*b, ctor.pos)))
             {
-                attack_move(ctor.entity, target, commands);
+                attack_move(team, ctor.net, target, orders);
             }
             continue;
         }
@@ -561,15 +623,20 @@ fn run_constructors(
         let Some(kind) = choose_building(ctor.kind, owned_minifacs, ticker.roll() % 3) else {
             continue;
         };
-        let (vent_entity, site) = s.vents.swap_remove(idx);
+        let (_, site) = s.vents.swap_remove(idx);
         s.vent_pos.swap_remove(idx);
-        crate::interaction::replace_order(
-            &mut commands.entity(ctor.entity),
-            QueuedCommand::BuildAt { kind, site },
+        // Applying the build claims the vent, so neither another
+        // constructor nor the player's placement ghost stacks on it
+        // (this tick's other constructors skip it via `s.vents`).
+        orders.issue_as(
+            team,
+            SimCommand::Build {
+                builders: Units::of([ctor.net]),
+                kind,
+                sites: crate::net::PosList::quantize([site]),
+                queue: false,
+            },
         );
-        // Claim now so neither another constructor this tick nor the
-        // player's placement ghost can stack on the same vent.
-        commands.entity(vent_entity).insert(VentClaim);
         lack.buildings -= 1;
         if kind.is_minifac() {
             owned_minifacs += 1;
@@ -625,7 +692,7 @@ fn run_army(
     ticker: &mut AiTicker,
     spatial: &SpatialIndex,
     force_plus_buffer: u32,
-    commands: &mut Commands,
+    orders: &mut CommandBus,
 ) -> Option<Vec3> {
     let homes = {
         s.team_homes.clear();
@@ -675,18 +742,23 @@ fn run_army(
         }
     };
     let home_movers = if push_home { &s.idle_home[..] } else { &[] };
+    let mut pushes = Vec::new();
     for (n, &i) in s.idle_field.iter().chain(home_movers).enumerate() {
         // Round-robin across the mission fronts (upstream dispatches
         // per-mission quotas; round-robin spreads a mixed army evenly).
-        attack_move(
-            s.units[i].entity,
+        pushes.push((
+            s.units[i].net,
             scatter(targets[n % targets.len()], &mut ticker.rng),
-            commands,
-        );
+        ));
         // Ordered now: later phases this tick (Bug deploy) must not
         // treat it as idle and undo the order.
         s.units[i].idle = false;
     }
+    // One command for the whole push: every unit its own scattered point.
+    orders.issue_as(
+        team,
+        SimCommand::per_unit(PointOrder::AttackMove, pushes, false),
+    );
     Some(targets[0])
 }
 
@@ -714,7 +786,7 @@ fn run_network(
     mut buffer: u32,
     lack: &Lack,
     target: Option<Vec3>,
-    orders: &mut AiOrders,
+    orders: &mut CommandBus,
 ) {
     let teleporters = || {
         s.units
@@ -731,10 +803,7 @@ fn run_network(
         else {
             continue;
         };
-        orders.dispatch.write(DispatchEvent {
-            teleporter: tp.entity,
-            target: attacker,
-        });
+        cast(orders, team, tp.net, attacker);
         ticker.last_dispatch.insert(tp.entity, now);
         // The drain commits the buffer; locally pretend DISPATCH_MAX
         // of it is gone so a second teleporter this tick stays quiet.
@@ -757,10 +826,7 @@ fn run_network(
         .filter(off_cooldown)
         .min_by(|a, b| flat_dist_sq(a.pos, target).total_cmp(&flat_dist_sq(b.pos, target)))
     {
-        orders.dispatch.write(DispatchEvent {
-            teleporter: tp.entity,
-            target,
-        });
+        cast(orders, team, tp.net, target);
         ticker.last_dispatch.insert(tp.entity, now);
     }
 }
@@ -773,7 +839,7 @@ fn run_specials(
     spatial: &SpatialIndex,
     damage_log: &mut TeamDamageLog,
     now: f32,
-    orders: &mut AiOrders,
+    orders: &mut CommandBus,
 ) {
     s.enemy_pos.clear();
     s.friend_pos.clear();
@@ -801,10 +867,7 @@ fn run_specials(
         && let Some(terminal) = ready(UnitKind::Terminal).next()
         && let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
     {
-        orders.command_fire.write(CommandFireEvent {
-            attacker: terminal.entity,
-            target: center,
-        });
+        cast(orders, team, terminal.net, center);
         ticker.last_sigterm.insert(team, now);
     }
 
@@ -812,10 +875,7 @@ fn run_specials(
     // spares friends, so no crowd check is needed.
     for obelisk in ready(UnitKind::Obelisk) {
         if let Some((pos, _)) = nearest_enemy(spatial, team, obelisk.pos, OBELISK_RANGE, |_| true) {
-            orders.command_fire.write(CommandFireEvent {
-                attacker: obelisk.entity,
-                target: pos,
-            });
+            cast(orders, team, obelisk.net, pos);
         }
     }
 
@@ -836,10 +896,7 @@ fn run_specials(
                 .any(|u| u.team == team && u.protected && flat_dist_sq(u.pos, pos) <= ally_r_sq),
         )
     {
-        orders.command_fire.write(CommandFireEvent {
-            attacker: firewall.entity,
-            target: pos,
-        });
+        cast(orders, team, firewall.net, pos);
         damage_log.forget(team);
     }
 
@@ -849,10 +906,7 @@ fn run_specials(
         && let Some(pointer) =
             ready(UnitKind::Pointer).find(|p| flat_dist_sq(p.pos, center) <= NX_RANGE * NX_RANGE)
     {
-        orders.command_fire.write(CommandFireEvent {
-            attacker: pointer.entity,
-            target: center,
-        });
+        cast(orders, team, pointer.net, center);
     }
 
     // Hacker: idle Bugs bombard from range, Exploits pack up when the
@@ -876,7 +930,12 @@ fn run_specials(
             _ => false,
         };
         if deploy {
-            orders.deploy.write(DeployEvent { entity: u.entity });
+            orders.issue_as(
+                team,
+                SimCommand::Deploy {
+                    units: Units::of([u.net]),
+                },
+            );
         }
     }
 }
@@ -972,7 +1031,7 @@ mod tests {
                 |units: Query<UnitQueryData, Without<Dying>>,
                  vents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>| {
                     let mut s = AiScratch::default();
-                    snapshot(&mut s, &units, &vents, 0);
+                    snapshot(&mut s, &units, &vents, 0, None);
                     s.units
                         .iter()
                         .map(|u| (u.entity, u.idle, u.ready))

@@ -11,6 +11,7 @@ use bevy::prelude::*;
 
 use super::core::{PickRayCast, Selected, SelectionSet, ground_hit, unit_hit};
 use crate::interaction::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
+use crate::net::{Issue, NetPos, Order, PointOrder, PosList, SimCommand};
 use crate::rendering::camera::RtsCamera;
 use crate::units::components::{TeamId, UnitStats, UnitType, is_friendly};
 use crate::units::content::definitions::UnitKind;
@@ -136,7 +137,6 @@ struct RightClickLookups<'w, 's> {
     unit_info_q: Query<'w, 's, &'static TeamId>,
     target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
-    orders: Orders<'w, 's>,
     queue_end_q: Query<'w, 's, (Option<&'static MoveTarget>, Option<&'static CommandQueue>)>,
 }
 
@@ -152,7 +152,7 @@ fn handle_right_click(
     selected_q: Query<(Entity, &Transform, &UnitType, &UnitStats), With<Selected>>,
     lookups: RightClickLookups,
     unit_registry: Res<UnitRegistry>,
-    mut commands: Commands,
+    mut net: Issue,
     mut drag_path: ResMut<RightDragPath>,
     mut pending: ResMut<PendingMoveIndicators>,
 ) {
@@ -164,7 +164,6 @@ fn handle_right_click(
         unit_info_q,
         target_gtf_q,
         target_type_q,
-        orders,
         queue_end_q,
     } = lookups;
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
@@ -243,37 +242,37 @@ fn handle_right_click(
                     .get(target_unit)
                     .map_or(drag_path.points[0], |t| t.translation());
                 let target_kind = target_type_q.get(target_unit).map(|ut| ut.0).ok();
-                for (entity, _, unit, _) in &selected_q {
-                    if !armed(unit.0)
-                        || target_kind.is_some_and(|k| !unit_registry.can_attack(unit.0, k))
-                    {
-                        continue;
-                    }
-                    apply_ordered_command(
-                        entity,
-                        QueuedCommand::AttackUnit {
-                            target: target_unit,
-                            pos: target_pos,
-                        },
-                        shift,
-                        &orders,
-                        &mut commands,
-                    );
+                let attackers: Vec<Entity> = selected_q
+                    .iter()
+                    .filter(|(_, _, unit, _)| {
+                        armed(unit.0)
+                            && !target_kind.is_some_and(|k| !unit_registry.can_attack(unit.0, k))
+                    })
+                    .map(|(e, ..)| e)
+                    .collect();
+                if let Some(target) = net.id(target_unit) {
+                    let units = net.units(attackers);
+                    net.issue(SimCommand::Order {
+                        units,
+                        order: Order::AttackUnit(target),
+                        queue: shift,
+                    });
                 }
                 pending.markers.push((target_pos, OrderMarker::Attack));
             } else if let Some(ground) = ground_hit(&windows, &camera_q, &mut ray_cast) {
-                for (entity, _, unit, _) in &selected_q {
-                    if !crate::ui::hud::command_panel::commands::can_attack(unit.0) {
-                        continue;
-                    }
-                    apply_ordered_command(
-                        entity,
-                        QueuedCommand::AttackGround(ground),
-                        shift,
-                        &orders,
-                        &mut commands,
-                    );
-                }
+                let units = net.units(
+                    selected_q
+                        .iter()
+                        .filter(|(_, _, unit, _)| {
+                            crate::ui::hud::command_panel::commands::can_attack(unit.0)
+                        })
+                        .map(|(e, ..)| e),
+                );
+                net.issue(SimCommand::Order {
+                    units,
+                    order: Order::AttackGround(NetPos::quantize(ground)),
+                    queue: shift,
+                });
                 pending.markers.push((ground, OrderMarker::Attack));
             }
             drag_path.points.clear();
@@ -291,7 +290,7 @@ fn handle_right_click(
                     .get(target_unit)
                     .map(|t| t.translation())
                     .unwrap_or(drag_path.points[0]);
-                let mut any_armed = false;
+                let mut attackers = Vec::new();
                 for (entity, _, unit, _) in &selected_q {
                     if unit_registry.weapon(unit.0).is_empty() {
                         continue;
@@ -306,19 +305,18 @@ fn handle_right_click(
                     {
                         continue;
                     }
-                    any_armed = true;
-                    // Shift queues the attack behind the current orders
-                    // (the chase retargets live when it is promoted).
-                    apply_ordered_command(
-                        entity,
-                        QueuedCommand::AttackUnit {
-                            target: target_unit,
-                            pos: target_pos,
-                        },
-                        shift,
-                        &orders,
-                        &mut commands,
-                    );
+                    attackers.push(entity);
+                }
+                let any_armed = !attackers.is_empty();
+                // Shift queues the attack behind the current orders
+                // (the chase retargets live when it is promoted).
+                if any_armed && let Some(target) = net.id(target_unit) {
+                    let units = net.units(attackers);
+                    net.issue(SimCommand::Order {
+                        units,
+                        order: Order::AttackUnit(target),
+                        queue: shift,
+                    });
                 }
                 if any_armed {
                     pending.markers.push((target_pos, OrderMarker::Attack));
@@ -332,39 +330,27 @@ fn handle_right_click(
             // widget passes single clicks straight to the engine). The
             // group spreads out by collision response and
             // `HandleUnitCollisionsAux`'s arrival rules.
+            // (`group_move_slots` hands every unit that very point, so
+            // the command carries just the one.)
             let target = drag_path.points[0];
-            let movers: Vec<(Entity, Vec3, f32)> = selected_q
-                .iter()
-                .map(|(e, tf, _, stats)| (e, tf.translation, stats.radius))
-                .collect();
-            for (entity, slot) in group_move_slots(&movers, target) {
-                apply_ordered_command(
-                    entity,
-                    QueuedCommand::Move(slot),
-                    shift,
-                    &orders,
-                    &mut commands,
-                );
-            }
+            let units = net.units(selected_q.iter().map(|(e, ..)| e));
+            net.issue(SimCommand::Order {
+                units,
+                order: Order::Move(NetPos::quantize(target)),
+                queue: shift,
+            });
             pending.markers.push((target, OrderMarker::Move));
         } else if let [(entity, _)] = units[..] {
             // A single unit follows the drawn path itself: one move per
             // `minPathSpacing` of line, queued behind the first
             // (CustomFormations2's `draggingPath`).
             let waypoints = path_waypoints(&drag_path.points, SINGLE_UNIT_PATH_SPACING);
-            if let Some((&first, rest)) = waypoints.split_first() {
-                apply_ordered_command(
-                    entity,
-                    QueuedCommand::Move(first),
-                    shift,
-                    &orders,
-                    &mut commands,
-                );
-                // Behind the first whatever `orders` said: it reads the
-                // world before this frame's commands land.
-                for &point in rest {
-                    queue_command(entity, QueuedCommand::Move(point), &mut commands);
-                }
+            if let Some(unit) = net.id(entity) {
+                net.issue(SimCommand::Path {
+                    unit,
+                    waypoints: PosList::quantize(waypoints.iter().copied()),
+                    queue: shift,
+                });
             }
             pending
                 .markers
@@ -391,15 +377,12 @@ fn handle_right_click(
                 .collect();
             let targets = sample_path_evenly(&drag_path.points, units.len());
             let assignment = assign_formation(&from, &targets);
-            for (i, (entity, _)) in units.iter().enumerate() {
-                apply_ordered_command(
-                    *entity,
-                    QueuedCommand::Move(targets[assignment[i]]),
-                    shift,
-                    &orders,
-                    &mut commands,
-                );
-            }
+            let pairs = units
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (entity, _))| Some((net.id(*entity)?, targets[assignment[i]])))
+                .collect();
+            net.issue(per_unit_moves(pairs, shift));
             pending
                 .markers
                 .extend(targets.into_iter().map(|t| (t, OrderMarker::Move)));
@@ -407,6 +390,12 @@ fn handle_right_click(
 
         drag_path.points.clear();
     }
+}
+
+/// A [`SimCommand::PerUnit`] move from (unit, target) pairs, sorted by
+/// id as the wire format wants.
+pub(crate) fn per_unit_moves(pairs: Vec<(crate::net::NetId, Vec3)>, queue: bool) -> SimCommand {
+    SimCommand::per_unit(PointOrder::Move, pairs, queue)
 }
 
 /// Give a unit a command: with `enqueue` (Shift) it goes behind
@@ -583,6 +572,9 @@ fn update_formation_preview(
 
 /// Group move to one point: every unit is sent to `target` itself
 /// (Spring's plain right-click), as `(unit, goal)`.
+// Only the movement harness calls it now: a plain right-click is an
+// `Order::Move` to the one point (`net`), which is what this returns.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn group_move_slots(units: &[(Entity, Vec3, f32)], target: Vec3) -> Vec<(Entity, Vec3)> {
     units.iter().map(|u| (u.0, target)).collect()
 }
@@ -808,6 +800,7 @@ mod tests {
         world.insert_resource(UnitRegistry::empty());
         world.init_resource::<RightDragPath>();
         world.init_resource::<PendingMoveIndicators>();
+        crate::net::init_test_world(&mut world);
 
         let mut window = Window::default();
         window.set_physical_cursor_position(Some(DVec2::new(50.0, 50.0)));
@@ -884,6 +877,7 @@ mod tests {
             .resource_mut::<ButtonInput<MouseButton>>()
             .press(MouseButton::Right);
         world.run_system_once(handle_right_click).unwrap();
+        crate::net::apply_now(&mut world);
 
         assert!(
             world.resource::<RightDragPath>().active,
@@ -895,6 +889,7 @@ mod tests {
             .resource_mut::<ButtonInput<MouseButton>>()
             .release(MouseButton::Right);
         world.run_system_once(handle_right_click).unwrap();
+        crate::net::apply_now(&mut world);
 
         let target = world
             .query_filtered::<&MoveTarget, With<UnitType>>()
@@ -985,6 +980,7 @@ mod tests {
                 .resource_mut::<ButtonInput<MouseButton>>()
                 .press(MouseButton::Right);
             world.run_system_once(handle_right_click).unwrap();
+            crate::net::apply_now(world);
             assert!(world.resource::<RightDragPath>().attack_from_press);
             world.resource_mut::<ButtonInput<MouseButton>>().clear();
             // The headless camera's identity projection maps the
@@ -992,6 +988,7 @@ mod tests {
             // 1-elmo enemy.
             set_cursor(world, 95.0);
             world.run_system_once(handle_right_click).unwrap();
+            crate::net::apply_now(world);
             if back_on_enemy {
                 set_cursor(world, 50.0);
             }
@@ -999,6 +996,7 @@ mod tests {
                 .resource_mut::<ButtonInput<MouseButton>>()
                 .release(MouseButton::Right);
             world.run_system_once(handle_right_click).unwrap();
+            crate::net::apply_now(world);
             world.resource_mut::<ButtonInput<MouseButton>>().clear();
         };
 

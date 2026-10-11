@@ -56,6 +56,12 @@ Estimates are focused-work rough guesses.
     and six determinism fixes, and X-commands' `NetId`. Unify `SimSerial` (X-sim)
     and `NetId` (X-commands) into one sim id assigned in spawn order, used for
     slow-update phases, RNG seeds, AI ordering and network references.
+    *Done:* both branches merged whole, so the command layer (all input and the
+    AI through `CommandBus`) is in too. `NetId` is the one unit id (required
+    component of `UnitType`, match-scoped allocator); it also keys the headless
+    state hash. Throwaway scaffolding dropped (netprobe, snapshot encoders); the
+    float probe stays in `net-experiments/`. Notes in `net-experiments/x-sim.md`
+    and `x-commands.md`.
 
 0.2 **Remove the remaining nondeterminism found by X-sim:**
     - the match seed comes from the match setup (host-chosen), never per-launch entropy;
@@ -101,9 +107,10 @@ Estimates are focused-work rough guesses.
 
 ### M1 — Lockstep core · ~1.5 weeks
 
-- Merge the command layer (`net::{SimCommand, CommandFrame, CommandBus}`, one
+- The command layer (`net::{SimCommand, CommandFrame, CommandBus}`, one
   apply system at the head of `FixedUpdate`, postcard with gap-coded ids and
-  1/8-elmo positions). Route the rest: dev tools, game speed/pause, resign.
+  1/8-elmo positions) is merged since M0.1. Route the rest: dev tools, game
+  speed/pause, resign.
 - Validate commands at apply time (ownership, unit alive, ally), as the original
   validated on the receiving clients.
 - **Seats and alliances.** 4v4 needs ally teams: `is_friendly` by alliance,

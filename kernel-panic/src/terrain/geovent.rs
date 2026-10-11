@@ -346,7 +346,9 @@ pub fn reconcile_vent_claims(
     vents: Query<(Entity, &GeoventSmoker, Option<&VentClaim>)>,
     pending: Query<&PendingBuild>,
     constructing: Query<&Constructing>,
-    buildings: Query<(&UnitType, &GlobalTransform)>,
+    // Roots: `Transform` is world space and the true sim pose
+    // (`GlobalTransform` is the last render frame's propagation).
+    buildings: Query<(&UnitType, &Transform)>,
     unit_registry: Res<UnitRegistry>,
     // Queued build orders (Shift-placed sites) keep their vents too.
     queues: Query<&crate::interaction::movement::CommandQueue>,
@@ -391,9 +393,9 @@ pub fn reconcile_vent_claims(
     }
     // …and a finished building near it does (c).
     let occupancy_sq = BUILDING_OCCUPANCY_RADIUS * BUILDING_OCCUPANCY_RADIUS;
-    for (ut, gtf) in &buildings {
+    for (ut, tf) in &buildings {
         if unit_registry.is_building(ut.0) {
-            grid.for_each_near(gtf.translation(), occupancy_sq, true, |i| claimed[i] = true);
+            grid.for_each_near(tf.translation, occupancy_sq, true, |i| claimed[i] = true);
         }
     }
     for ((vent_entity, _, claim), should_claim) in vents.iter().zip(claimed) {
@@ -597,15 +599,15 @@ mod tests {
         // above the vent: horizontal distance only.
         world.spawn((
             UnitType(UnitKind::Socket),
-            GlobalTransform::from_translation(Vec3::new(316.0, 80.0, 100.0)),
+            Transform::from_translation(Vec3::new(316.0, 80.0, 100.0)),
         ));
         world.spawn((
             UnitType(UnitKind::Socket),
-            GlobalTransform::from_translation(Vec3::new(716.5, 0.0, 100.0)),
+            Transform::from_translation(Vec3::new(716.5, 0.0, 100.0)),
         ));
         world.spawn((
             UnitType(UnitKind::Bit),
-            GlobalTransform::from_translation(Vec3::new(900.0, 0.0, 100.0)),
+            Transform::from_translation(Vec3::new(900.0, 0.0, 100.0)),
         ));
 
         world.run_system_once(reconcile_vent_claims).unwrap();

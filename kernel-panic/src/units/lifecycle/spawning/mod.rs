@@ -485,12 +485,7 @@ pub fn spawn_unit_facing(
     commands.entity(unit_entity).insert((
         crate::units::combat::IdleTimer(0.0),
         crate::units::combat::StunCharge(0.0),
-        crate::interaction::movement::ground_mover_components(
-            kind,
-            unit_registry,
-            unit_entity,
-            &transform,
-        ),
+        crate::interaction::movement::ground_mover_components(kind, unit_registry, &transform),
         crate::interaction::movement::GroundLift(ground_lift),
         // §1.8 first slice: cache a typed collision volume so
         // projectile / shield / per-shot-miss systems can do

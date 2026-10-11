@@ -710,7 +710,10 @@ pub fn hover_air_system(
     heightmap: Option<Res<Heightmap>>,
     smooth: Option<Res<SmoothGround>>,
     spawned: Query<(Entity, &UnitStats), Added<UnitStats>>,
-    uninit: Query<(&UnitType, &Transform, Has<Emerging>), (Without<HoverAir>, Without<Dying>)>,
+    uninit: Query<
+        (&UnitType, &Transform, Has<Emerging>, &crate::net::NetId),
+        (Without<HoverAir>, Without<Dying>),
+    >,
     mut awaiting_air: Local<Vec<Entity>>,
     mut q: Query<
         (
@@ -739,7 +742,7 @@ pub fn hover_air_system(
     // ground roster isn't rescanned every frame.
     awaiting_air.extend(spawned.iter().filter(|(_, s)| s.can_fly).map(|(e, _)| e));
     awaiting_air.retain(|&entity| {
-        let Ok((kind, tf, emerging)) = uninit.get(entity) else {
+        let Ok((kind, tf, emerging, net_id)) = uninit.get(entity) else {
             return false;
         };
         if emerging {
@@ -755,7 +758,9 @@ pub fn hover_air_system(
             params_for(&registry, kind.0),
             tf.translation,
             heading,
-            entity.to_bits() as u32,
+            // The unit id, never the `Entity` (whose index depends on
+            // every UI / FX entity a machine spawned).
+            net_id.0,
         );
         commands.entity(entity).insert(air);
         false

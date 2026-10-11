@@ -162,6 +162,9 @@ impl Plugin for MapEventsPlugin {
                 drain_eruption_queue.run_if(|q: Res<EruptionSpawnQueue>| !q.is_empty()),
             )
                 .chain()
+                // After the factories: every spawned unit draws the
+                // next `NetId`, so the spawners' order must be fixed.
+                .after(crate::units::lifecycle::spawning::emerge_system)
                 .in_set(GameplaySet::Produce),
         );
     }

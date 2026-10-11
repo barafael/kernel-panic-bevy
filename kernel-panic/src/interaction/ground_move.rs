@@ -575,6 +575,7 @@ pub enum Progress {
 /// Per-unit ground move state (`CGroundMoveType`'s members) plus the
 /// unit's `MoveDef` geometry.
 #[derive(Component, Clone, Debug)]
+#[component(on_add = crate::net::rephase_ground_mover)]
 pub struct GroundMover {
     // --- MoveDef / UnitDef (static) ---
     /// Footprint half-size in heightmap squares (`MoveDef::xsizeh`).
@@ -709,15 +710,17 @@ impl GroundMover {
     }
 
     /// Seed the dynamic state from the unit's spawn pose: heading from
-    /// the `Transform`'s facing, `oldPos`, and the `SlowUpdate` phase
-    /// from the entity index so units stagger.
-    pub fn seeded(mut self, entity: Entity, tf: &Transform) -> Self {
+    /// the `Transform`'s facing and `oldPos`. The `SlowUpdate` phase
+    /// (`frame`) comes from the unit's [`NetId`](crate::net::NetId), set
+    /// by the component hooks once both are on the entity
+    /// (`net::rephase_ground_mover`), so units stagger the same way on
+    /// every peer.
+    pub fn seeded(mut self, tf: &Transform) -> Self {
         let f = tf.forward().as_vec3();
         if f.xz().length_squared() > 1e-6 {
             self.heading = Heading::from_vector(f.x, f.z);
         }
         self.old_pos = tf.translation;
-        self.frame = entity.index_u32() % SLOW_UPDATE_RATE;
         self
     }
 

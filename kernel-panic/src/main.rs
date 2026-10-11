@@ -3,9 +3,12 @@ mod audio;
 #[cfg(not(target_arch = "wasm32"))]
 mod bot;
 mod game_setup;
+#[cfg(test)]
+mod headless;
 mod interaction;
 mod map_events;
 mod map_loading;
+mod net;
 mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 mod profile;
@@ -189,11 +192,29 @@ fn main() {
     )
     // Before the game plugins: the dev-tool plugins read it at build.
     .insert_resource(dev_options)
-    .insert_resource(render_settings)
-    .add_plugins((
+    .insert_resource(render_settings);
+    add_game(&mut app);
+    #[cfg(not(target_arch = "wasm32"))]
+    app.add_systems(
+        Update,
+        game_setup::dev_run_control.run_if(|d: Res<game_setup::DevOptions>| {
+            d.exit_after.is_some() || d.time_scale.is_some()
+        }),
+    )
+    .add_plugins((profile::ProfilePlugin, bot::BotPlugin));
+    app.run();
+}
+
+/// The game itself on top of Bevy's plugins: every game plugin, the app
+/// state and the menu-facing resources. Shared by `main` and the
+/// headless harness (`headless`), which runs it without a window or
+/// renderer. Expects `DevOptions` and `RenderSettings` inserted first.
+pub(crate) fn add_game(app: &mut App) {
+    app.add_plugins((
         RenderingPlugin,
         audio::GameAudioPlugin,
         InteractionPlugin,
+        net::CommandBusPlugin,
         UiPlugin,
         UnitsPlugin,
         TerrainPlugin,
@@ -205,13 +226,4 @@ fn main() {
     .init_resource::<game_setup::SkirmishConfig>()
     .insert_resource(game_setup::AiDifficulty(2))
     .add_message::<game_setup::RunGame>();
-    #[cfg(not(target_arch = "wasm32"))]
-    app.add_systems(
-        Update,
-        game_setup::dev_run_control.run_if(|d: Res<game_setup::DevOptions>| {
-            d.exit_after.is_some() || d.time_scale.is_some()
-        }),
-    )
-    .add_plugins((profile::ProfilePlugin, bot::BotPlugin));
-    app.run();
 }

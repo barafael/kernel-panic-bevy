@@ -3,7 +3,7 @@
 use bevy::math::ops;
 use bevy::prelude::*;
 
-use crate::interaction::movement::QueuedCommand;
+use crate::net::{CommandBus, NetId, NetPos, Order, SimCommand};
 use crate::rng::{next_f32, xorshift32};
 use crate::units::content::definitions::UnitKind;
 
@@ -141,12 +141,12 @@ pub fn spread_around(center: Vec3, rng: &mut u32) -> Vec3 {
 
 /// Issue a fight order (Spring `CMD.FIGHT`): walk to `target`, but stop
 /// and engage anything hostile in weapon range on the way. Goes through
-/// the player's replace path so the movement system treats AI and player
-/// orders identically.
-pub fn attack_move(entity: Entity, target: Vec3, commands: &mut Commands) {
-    crate::interaction::replace_order(
-        &mut commands.entity(entity),
-        QueuedCommand::AttackMove(target),
+/// the command bus like a player's order, so the sim treats AI and
+/// player orders identically.
+pub fn attack_move(team: u8, unit: NetId, target: Vec3, bus: &mut CommandBus) {
+    bus.issue_as(
+        team,
+        SimCommand::order_one(unit, Order::AttackMove(NetPos::quantize(target))),
     );
 }
 
