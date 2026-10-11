@@ -38,7 +38,7 @@ built.** What is known:
 | SIMD code paths (glam SSE2 vs NEON vs wasm simd128 vs scalar) | **Differ**: different summation order; measured glam slerp 48 %, `Vec3A::normalize` 29 % between targets, and `target-cpu=native` alone changes 20 % of slerp results | glam `scalar-math` feature (one code path everywhere); no `target-cpu`/`target-feature` flags for release builds. **Done (M0.3):** 0 differing bits, even with `target-cpu=native` |
 | NaN payload bits | nondeterministic on wasm | never hash or branch on NaN bits; assert no NaN in the state hash |
 | Denormals / FPU modes | Rust never sets flush-to-zero; a driver or library could on its thread | debug assertion of MXCSR at the start of each sim tick (x86_64) — **done (M0.3)**, plus FPCR on arm64 |
-| HashMap iteration (RandomState), query order, entity ids, wall clock, multithreaded executor | found and partly fixed in X-sim / X-commands (see M0) | ordered collections, canonical sorts, sim ids, tick counter, single-threaded sim executor |
+| HashMap iteration (RandomState), query order, entity ids, wall clock, multithreaded executor | found and partly fixed in X-sim / X-commands (see M0) | ordered collections, canonical sorts, sim ids, tick counter, single-threaded sim executor. **Done (M0.2):** `BTreeMap`s, `NetId`-order iteration, match tick and seed, single-threaded `FixedUpdate` |
 
 Web-to-web is already identical across hardware (same wasm, same bundled libm,
 strict IEEE in every engine). Native-to-native across operating systems and native-
@@ -77,6 +77,20 @@ Estimates are focused-work rough guesses.
       executor divergence at tick 7188;
     - `AutoHold::initial` depending on `LocalTeam`; anything else the harness finds
       when `LocalTeam` varies between peers.
+
+    **Done** — `net-experiments/m0-nondeterminism.md`: `GameSetup::seed` →
+    match-scoped `MatchSeed` (no per-launch entropy, `test_seed` gone);
+    `SimTick` match tick; every sim RNG a match-scoped `SimRng<Stream>` seeded
+    from the match seed, frame counters on `SimTick`; `BTreeMap`s; Hex Farm
+    ownership in the fixed tick; 0 ambiguous pairs; single-threaded `FixedUpdate`
+    always (`KP_SIM_EXECUTOR` removed); `AutoHold` and the AI's teams from the
+    seats (`AiSeats`). Also found by the rematch: ECS query order follows the
+    app's archetype history (earlier matches, the attract demo, per-peer UI
+    markers), so order-dependent sim systems iterate in `NetId` order and the
+    damage queue resolves canonically. Proof: 4v4 and 8-AI FFA identical for
+    18 000 ticks (uneven pacing, entity-id shift, local seat varied, selection
+    churn, two processes); rematch after a 4 000-tick combat warmup identical
+    (main: tick 1 561). Left for M1: local defeat stops the loser's sim.
 
 0.3 **Deterministic math.** Enable Bevy's `libm` feature and glam `scalar-math`;
     route every transcendental in sim code (kernel-panic sim modules,
