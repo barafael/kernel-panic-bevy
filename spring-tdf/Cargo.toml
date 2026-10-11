@@ -5,6 +5,9 @@ edition = "2024"
 description = "Parser for Spring RTS engine TDF (Tag Definition Format) files"
 
 [dependencies]
+# Deterministic transcendentals for runtime-computed weapon values
+# (workspace clippy.toml).
+libm = { workspace = true }
 better_default = { workspace = true }
 thiserror = { workspace = true }
 # The game bakes the parsed defs into its unit bundle (`units.kpu`).

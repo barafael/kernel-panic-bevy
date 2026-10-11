@@ -1,6 +1,7 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
 //! projectile arcs, despawn at end of life.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::batch::FxQuadBatches;
@@ -155,7 +156,7 @@ pub(super) fn tick_weapon_fx(
         // still reads as a smooth flash rather than a hard pop.
         let elapsed_frames = secs_to_frames((beam.max_lifetime - beam.lifetime).max(0.0));
         let intensity = if beam.decay < 1.0 {
-            beam.decay.powf(elapsed_frames)
+            ops::powf(beam.decay, elapsed_frames)
         } else {
             1.0
         };

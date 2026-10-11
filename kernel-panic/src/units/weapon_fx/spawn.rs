@@ -2,6 +2,7 @@
 //! event to the appropriate effect spawner (beam, burst, projectile, melee,
 //! plus the bonus nanoframe sparkle for build lasers).
 
+use crate::sim::sq;
 use bevy::prelude::*;
 
 use crate::units::content::weapons::WeaponId;
@@ -1166,7 +1167,7 @@ fn spawn_lightning_arc(
     let mut points = Vec::with_capacity(ARC_SEGMENTS + 1);
     for i in 0..=ARC_SEGMENTS {
         let t = i as f32 / ARC_SEGMENTS as f32;
-        let arch = 1.0 - (2.0 * t - 1.0).powi(2);
+        let arch = 1.0 - sq(2.0 * t - 1.0);
         // Same parabola for the jitter envelope — the gadget shakes
         // the strand most at mid-arc and pins both ends.
         let taper = arch;

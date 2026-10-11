@@ -22,6 +22,8 @@
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
 //! runtime never touches the raw TDF strings.
 
+use crate::sim::sq;
+use bevy::math::ops;
 use std::collections::HashMap;
 
 use bevy::ecs::system::SystemParam;
@@ -609,12 +611,12 @@ fn spawn_particle_system(
                 1.0
             } else {
                 // v(t) = v0 * drag^(t*fps) → per-sec scale = drag^fps
-                airdrag.powf(GAME_SPEED)
+                ops::powf(airdrag, GAME_SPEED)
             };
 
             let size_mod = props.size_mod.eval(&ctx_base);
             let size_mod_per_sec = if size_mod > 0.0 && size_mod != 1.0 {
-                size_mod.powf(GAME_SPEED)
+                ops::powf(size_mod, GAME_SPEED)
             } else {
                 1.0
             };
@@ -857,6 +859,12 @@ fn spawn_delayed(
 /// `Time<Fixed>::overstep_fraction()` — the same alpha
 /// `interpolate_sim_pose` uses for unit models, so particles glide at
 /// the render rate instead of juddering at 30 Hz.
+///
+/// Particles are presentation only (nothing in the sim reads them), so
+/// the two per-particle `powf`s per tick use the platform's fast `powf`
+/// instead of libm's (~5× slower on glibc); last-bit differences between
+/// clients are invisible here (workspace `clippy.toml`).
+#[allow(clippy::disallowed_methods)]
 pub(super) fn tick_ceg_particles(
     time: Res<Time>,
     fixed: Res<Time<Fixed>>,
@@ -955,7 +963,7 @@ const FLAME_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]
 /// `frontOffset·ilength` along it) and the two side quads (along
 /// `dir`).
 fn muzzle_flame_quads(f: &CegFlame, life: f32) -> ([Vec3; 4], [[Vec3; 4]; 2]) {
-    let igrowth = f.size_growth * (1.0 - (1.0 - life).powi(2));
+    let igrowth = f.size_growth * (1.0 - sq(1.0 - life));
     let isize = f.size * (igrowth + 1.0);
     let ilength = f.length * (igrowth + 1.0);
     let zdir = if f.dir.dot(Vec3::Y).abs() >= 0.99 {

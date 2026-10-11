@@ -837,7 +837,7 @@ fn unit_def_weapon_arc() {
     let defs = UnitDefs::from_tdf(&tdf);
     let bug = defs.get("bug").unwrap();
     assert_eq!(bug.weapon_main_dir1, [0.0, 0.0, 1.0]);
-    assert!((bug.max_angle_dif1_cos - 135f32.to_radians().cos()).abs() < 1e-6);
+    assert!((bug.max_angle_dif1_cos - libm::cosf(135f32.to_radians())).abs() < 1e-6);
     let bit = defs.get("bit").unwrap();
     assert_eq!(bit.weapon_main_dir1, [0.0, 0.0, 1.0]);
     assert!((bit.max_angle_dif1_cos + 1.0).abs() < 1e-6);

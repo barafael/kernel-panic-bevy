@@ -1,0 +1,39 @@
+[package]
+name = "m0-floatprobe"
+version = "0.1.0"
+edition = "2024"
+description = "Bit-exactness probe of the sim's float math across targets (M0.3)"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "floatprobe"
+path = "src/main.rs"
+
+# Scalar vs SIMD glam cost: `cargo run --release --bin glambench` and
+# again with `--no-default-features` (SSE2/NEON/simd128 glam).
+[[bin]]
+name = "glambench"
+path = "src/glambench.rs"
+
+[features]
+default = ["scalar"]
+# The game's configuration. Off = glam's SIMD paths, for the cost
+# comparison only (the probe's det: rows then differ across targets).
+scalar = ["glam/scalar-math"]
+
+# The same math configuration as the game (workspace Cargo.toml): glam
+# with `libm` + `scalar-math`, bevy_math with `libm` (`bevy::math::ops`),
+# and the `libm` crate for f64. Versions match the game's Cargo.lock.
+[dependencies]
+glam = { version = "=0.33.12", default-features = false, features = ["std", "libm"] }
+bevy_math = { version = "=0.20.0", default-features = false, features = ["std", "libm"] }
+libm = "=0.2.16"
+
+[profile.release]
+opt-level = 3
+
+# Standalone: not a member of the game's workspace.
+[workspace]

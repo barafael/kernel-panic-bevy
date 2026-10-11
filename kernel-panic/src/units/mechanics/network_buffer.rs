@@ -9,6 +9,7 @@
 //! Mirrors upstream `LuaRules/Gadgets/network_buffer.lua` (and the
 //! dispatch / enter companion gadgets).
 
+use bevy::math::ops;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -199,9 +200,9 @@ pub fn process_dispatch(
             let angle = (i as f32 / DISPATCH_MAX as f32) * std::f32::consts::TAU;
             let spawn_pos = origin
                 + Vec3::new(
-                    angle.cos() * DISPATCH_RING_RADIUS,
+                    ops::cos(angle) * DISPATCH_RING_RADIUS,
                     0.0,
-                    angle.sin() * DISPATCH_RING_RADIUS,
+                    ops::sin(angle) * DISPATCH_RING_RADIUS,
                 );
             let spawned = crate::units::lifecycle::spawning::spawn_unit(
                 UnitKind::Packet,

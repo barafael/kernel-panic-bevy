@@ -15,6 +15,7 @@
 //! Public items are re-exported below so external callers keep using
 //! `super::combat::{...}` unchanged.
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::assets::animation::{MuzzlePiece, PieceEmit, UnitAnimator};
@@ -1306,10 +1307,7 @@ pub(crate) fn aim_gates_pass(
                 .abs(),
             Err(_) => {
                 let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
-                forward_xz
-                    .dot(to_target_xz.normalize())
-                    .clamp(-1.0, 1.0)
-                    .acos()
+                ops::acos(forward_xz.dot(to_target_xz.normalize()).clamp(-1.0, 1.0))
             }
         };
         if error > AIM_HEADING_TOLERANCE {
@@ -2161,7 +2159,11 @@ mod tests {
                 let hit = pieces.hitscan_trace(Some(target), muzzle, Vec3::X, 250.0);
                 // 10° off: 200 elmos out the ray is 35 elmos beside the
                 // target's 16-elmo sphere.
-                let dir = Vec3::new(10f32.to_radians().cos(), 0.0, 10f32.to_radians().sin());
+                let dir = Vec3::new(
+                    ops::cos(10f32.to_radians()),
+                    0.0,
+                    ops::sin(10f32.to_radians()),
+                );
                 let miss = pieces.hitscan_trace(Some(target), muzzle, dir, 250.0);
                 (hit, miss)
             })

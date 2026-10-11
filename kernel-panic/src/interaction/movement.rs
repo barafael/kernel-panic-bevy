@@ -1,3 +1,5 @@
+use crate::sim::sq;
+use bevy::math::ops;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -712,7 +714,7 @@ pub fn rotate_toward_xz(from: Vec3, to: Vec3, max_turn: f32) -> Vec3 {
     }
     let to_n = to / to_len_sq.sqrt();
     let dot = from.dot(to_n).clamp(-1.0, 1.0);
-    let angle = dot.acos();
+    let angle = ops::acos(dot);
     if angle <= max_turn || angle < 1e-4 {
         return to_n;
     }
@@ -844,7 +846,7 @@ impl RepairTail {
         let points: Vec<[f32; 2]> = path.waypoints[from..].iter().map(|w| [w.x, w.z]).collect();
         let length: f32 = points
             .windows(2)
-            .map(|w| ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt())
+            .map(|w| (sq(w[1][0] - w[0][0]) + sq(w[1][1] - w[0][1])).sqrt())
             .sum();
         if !(path.reached_goal || path.repath_at.is_none() || length >= 512.0) {
             return None;
@@ -1219,8 +1221,8 @@ mod tilt_tests {
     fn downhill_normal() -> Vec3 {
         Vec3::new(
             0.0,
-            30.0_f32.to_radians().cos(),
-            30.0_f32.to_radians().sin(),
+            ops::cos(30.0_f32.to_radians()),
+            ops::sin(30.0_f32.to_radians()),
         )
     }
 
@@ -1792,7 +1794,7 @@ mod cross_map_tests {
                         .advance_by(Duration::from_millis(33));
                     world.run_system_once(movement_system).unwrap();
                     let pos = world.get::<Transform>(unit).unwrap().translation;
-                    let dxz = ((pos.x - target.x).powi(2) + (pos.z - target.z).powi(2)).sqrt();
+                    let dxz = (sq(pos.x - target.x) + sq(pos.z - target.z)).sqrt();
                     if dxz < 16.0 {
                         arrived_at = Some(tick);
                         break;
@@ -1821,7 +1823,7 @@ mod cross_map_tests {
                         let mp = world
                             .get::<MovePath>(unit)
                             .map(|p| (p.current, p.waypoints.len()));
-                        let dxz = ((pos.x - target.x).powi(2) + (pos.z - target.z).powi(2)).sqrt();
+                        let dxz = (sq(pos.x - target.x) + sq(pos.z - target.z)).sqrt();
                         println!(
                             "  {map_name} -> cell {tx},{tz} (dh={:+.0}): STUCK at ({:.0},{:.0}) dxz {:.0} y={:.1} order_alive={mt} path={mp:?}",
                             h_target - h_start,
@@ -1850,7 +1852,7 @@ mod cross_map_tests {
                         .advance_by(Duration::from_millis(33));
                     world.run_system_once(movement_system).unwrap();
                     let pos = world.get::<Transform>(unit).unwrap().translation;
-                    if ((pos.x - espawn.x).powi(2) + (pos.z - espawn.z).powi(2)).sqrt() < 20.0 {
+                    if (sq(pos.x - espawn.x) + sq(pos.z - espawn.z)).sqrt() < 20.0 {
                         arrived_at = Some(tick);
                         break;
                     }

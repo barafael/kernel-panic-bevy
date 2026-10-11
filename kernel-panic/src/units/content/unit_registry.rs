@@ -688,6 +688,7 @@ impl UnitRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::math::ops;
     use spring_tdf::UnitDef;
 
     fn registry_with(kind: UnitKind, raw_damage_modifier: f32) -> UnitRegistry {
@@ -763,7 +764,7 @@ mod tests {
     fn max_slope_ratio_uses_spring_encoding() {
         let reg = registry_with_slope(UnitKind::Bit, 20.0);
         let ratio = reg.max_slope_ratio(UnitKind::Bit);
-        let expected = 1.0 - 30.0_f32.to_radians().cos();
+        let expected = 1.0 - ops::cos(30.0_f32.to_radians());
         assert!(
             (ratio - expected).abs() < 1e-5,
             "got {ratio}, expected {expected}",
@@ -778,7 +779,7 @@ mod tests {
     #[test]
     fn max_slope_ratio_default_is_kp_class_default() {
         let reg = UnitRegistry::empty();
-        let expected = 1.0 - 54.0_f32.to_radians().cos();
+        let expected = 1.0 - ops::cos(54.0_f32.to_radians());
         let got = reg.max_slope_ratio(UnitKind::Bit);
         assert!(
             (got - expected).abs() < 1e-5,

@@ -39,6 +39,7 @@
 //! transports, `airStrafe` circling, attack pitch, crashing, first-person
 //! control, and `allowAircraftToHitGround` (KP's modrules disables it).
 
+use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::movement::{
@@ -680,7 +681,7 @@ fn step(flyers: &mut [Flyer], frame: u32, ground: &Ground) {
 pub fn attitude(heading: f32, bank: f32) -> Quat {
     let front = dir3_of(heading);
     let right = front.cross(Vec3::Y);
-    let up = (Vec3::Y * bank.cos() + right * bank.sin()).normalize();
+    let up = (Vec3::Y * ops::cos(bank) + right * ops::sin(bank)).normalize();
     Transform::default().looking_to(front, up).rotation
 }
 

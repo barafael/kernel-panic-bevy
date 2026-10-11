@@ -32,6 +32,7 @@ pub mod units;
 #[cfg(kani)]
 mod proofs;
 
+use crate::sim::sq;
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
@@ -992,7 +993,7 @@ fn apply_and_drain(
                 let mut nearest = 1.0f32;
                 for (tf, volume) in &fx.buildees {
                     let center = volume.center(tf);
-                    if center.distance_squared(start) > (BUILD_BEAM_RANGE + volume.radius).powi(2) {
+                    if center.distance_squared(start) > sq(BUILD_BEAM_RANGE + volume.radius) {
                         continue;
                     }
                     if let Some(t) = volume.ray_segment_hit(center, start, end)

@@ -11,6 +11,10 @@
 //!   Q/E — rotate
 //!   Space — trigger weapon fire demo
 
+// Standalone viewer, never part of a match: std math is fine here
+// (workspace clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 mod units;
 
 use std::path::PathBuf;

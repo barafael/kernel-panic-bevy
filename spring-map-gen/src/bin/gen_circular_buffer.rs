@@ -16,6 +16,10 @@
 //!
 //! [`CircularFlow`]: kernel_panic::map_events::CircularFlow
 
+// Offline map generator: its output is the committed `.sdz`, so the
+// std transcendentals here never run on a client (workspace clippy.toml).
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 
 use clap::Parser;

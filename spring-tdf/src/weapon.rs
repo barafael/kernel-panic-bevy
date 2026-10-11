@@ -299,7 +299,7 @@ impl WeaponDef {
         if self.spray_angle <= 0.0 {
             return 0.0;
         }
-        (self.spray_angle * std::f32::consts::PI / 0xafff as f32).sin()
+        libm::sinf(self.spray_angle * std::f32::consts::PI / 0xafff as f32)
     }
 
     /// How far a `LaserCannon` bolt flies before it fades without
@@ -510,7 +510,7 @@ impl WeaponDef {
         };
         let t = (dist / denom).clamp(0.0, 1.0);
         let base = if self.dyn_damage_inverted { t } else { 1.0 - t };
-        base.powf(self.dyn_damage_exp)
+        libm::powf(base, self.dyn_damage_exp)
     }
 }
 
