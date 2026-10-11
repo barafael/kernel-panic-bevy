@@ -1716,6 +1716,8 @@ fn credits_page(commands: &mut Commands, root: Entity, page_size: f32) {
 - Maintenance and silly mod options by zwzsg
 - Sounds by Noruas and Pendrokar
 - Voices by Eva and Panda
+- Music by Mister Beep, Lo-bat. and ParagonX9
+- C64/Amiga remixes by Radix, Dreamfish, Stalker, Warwick Gaetjens, Wire and Front 6
 - Maps by Boirunner, Runecrafter, zwzsg, TradeMark, KDR_11k and FireStorm
 - Some LUA interface upgrade based of jK and trepan code
 - The Touhou faction characters were inspired by ZUN's works

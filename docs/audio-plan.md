@@ -80,7 +80,12 @@ Bevy's asset paths are not (`Explosion5` in the TDF → `explosion5.ogg`,
 `SIGTERMhit` → `sigtermhit.ogg`). The tips clips go to
 `assets/sounds/tips/` when the tip dispenser lands.
 
-`kernel-panic/assets/music/*.ogg` — the player's own tracks, as upstream.
+`kernel-panic/assets/music/*.ogg` — the 72 tracks the KP 4.4 Windows
+installer shipped in `Music/KP/`, copied unmodified by
+`scripts/bake-music.sh` as `<artist-slug>--<title-slug>.ogg` (Bevy's web
+reader does not percent-encode paths), with `catalog.json` (display
+names, durations, sizes) and `credits.txt`. The folder is in Git LFS;
+the deploy workflow pulls it through a cache keyed on the object list.
 Native builds scan the folder at startup; `build.rs` bakes the list into
 `WEB_MUSIC_CATALOG` for the web build.
 
@@ -152,7 +157,14 @@ after the first menu click.
    (bank, queue, drain), Audio settings page, web shim.
 2. ✅ **Battle**: fire / hit / death / command-fire hooks.
 3. ✅ **Unit replies**: select, multi-select, ok, arrived, Firewall `built`.
-4. ✅ **Music**: the `music.lua` player over `assets/music/`.
+4. ✅ **Music**: the `music.lua` player over `assets/music/`, with the
+   original soundtrack in LFS and next-track prefetch (Bevy cannot
+   stream; on the web a track is fetched whole, so the next one loads
+   while the current plays).
+4b. ✅ **Web player**: `kernel-panic/web/music.html`, published as
+   `music.html` by Trunk's `copy-file` — the soundtrack streamed from
+   `assets/music/` through an `<audio>` element, a Sound-effects tab for
+   the 26 effects, and the credits.
 5. **Verify in the running game** (still open): a bot-driven match
    (`KP_BOT`, script in `target/kp-audio-bot/script.txt`) to see the
    bank load and effects fire without asset errors, and a listen on the

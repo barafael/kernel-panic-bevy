@@ -27,3 +27,27 @@ Credits:
 - Maps by Boirunner, Runecrafter, zwzsg, TradeMark, KDR_11k and FireStorm
 - Some LUA interface upgrade based of jK and trepan code
 - The touhou faction characters were inspired by ZUN's works
+
+========--------------------------------------------
+Music (from the Kernel Panic 4.4 installer, Music/KP/__Music_Credits__.txt,
+reproduced verbatim; the file carries no licence statement):
+--------
+
+Music by:
+
+ParagonX9
+http://paragonx9.newgrounds.com/audio/
+
+Lo-Bat.
+http://www.lo-bat.be/
+
+Mister Beep
+http://mister_beep.republika.pl/
+
+"Yoghurt Factory," by Radix
+"Rainy Summerdays," by Radix
+"Sanxion," composed by Rob Hubbard and arranged by Dreamfish
+"Believe in Yourself," composed by Emax and arranged by Stalker
+"Driller," composed by Matt Gray and arranged by Warwick Gaetjens
+"Puzzle Game 3," by Søren Gessele (a.k.a. Front 6)
+"Wings of Death," composed by Jochen Hippel and arranged by Wire

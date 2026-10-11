@@ -3700,6 +3700,7 @@ dependencies = [
  "postcard",
  "ruzstd",
  "serde",
+ "serde_json",
  "spring-map",
  "spring-pathfinding",
  "spring-tdf",

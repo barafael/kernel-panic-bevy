@@ -777,9 +777,13 @@ context. Most variants animate over their frames at a fixed rate
   arrival), the `MultiSelect` beep, the Firewall's `built`. Gain follows
   the engine's inverse-distance model from the camera with its
   height-based rolloff. Effects ship as Vorbis (`scripts/bake-sounds.sh`).
-- Music: like the upstream `music.lua` widget, a random `.ogg` from
-  `assets/music/` plays during a match, one after another; the original
-  shipped no tracks, so the folder starts empty.
+- Music: the 72-track soundtrack of the KP 4.4 installer ships in
+  `assets/music/` (Git LFS, `scripts/bake-music.sh`); like the upstream
+  `music.lua` widget a random track plays during a match, one after
+  another, the next one prefetched while the current plays. Credits on
+  the Credits page and in `original-game-license-info.txt`.
+- `music.html` on the Pages site: a standalone player for the soundtrack
+  and the 26 effects, with the credits.
 - Audio page (from Settings, also in the Esc overlay): master plus
   battle, unit-reply, interface and music knobs, all defaulting to 100 %
   like KP's installer settings, all persisted. See `docs/audio-plan.md`.

@@ -26,6 +26,7 @@
       touch-action: none;
     }
     /* Shown until the wasm module takes over the page. */
+    #boot a { color: #0ff; text-decoration: none; font-size: 13px; }
     #boot {
       position: absolute; inset: 0;
       display: flex; align-items: center; justify-content: center;
@@ -36,11 +37,13 @@
   </style>
 </head>
 <body>
-  <div id="boot">Loading…</div>
+  <div id="boot">Loading…<br><a href="music.html">soundtrack &amp; sounds</a></div>
 
   <link data-trunk rel="rust" href="kernel-panic/Cargo.toml" data-bin="kernel-panic"
         data-cargo-profile="wasm-release" data-wasm-opt="2" />
   <link data-trunk rel="copy-dir" href="kernel-panic/assets" />
+  <!-- The soundtrack & sound-effects player, a standalone page. -->
+  <link data-trunk rel="copy-file" href="kernel-panic/web/music.html" />
 
   <script>
     // Bevy takes over the page once it spawns a canvas; drop the boot notice.
