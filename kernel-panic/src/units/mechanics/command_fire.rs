@@ -1089,7 +1089,7 @@ pub fn tick_command_fire_cooldown(
 pub fn tick_area_denial(
     time: Res<Time>,
     mut zones: Query<(Entity, &mut AreaDenialZone)>,
-    units: Query<(Entity, &UnitType, &TeamId), Without<Dying>>,
+    units: Query<(Entity, &UnitType, &TeamId, &NetId), Without<Dying>>,
     spatial: Res<SpatialIndex>,
     weapons: Res<WeaponRegistry>,
     mut delayed: ResMut<DelayedDamage>,
@@ -1142,13 +1142,18 @@ pub fn tick_area_denial(
 /// minifac, else nobody.
 fn substitute_owner(
     team: u8,
-    units: &Query<(Entity, &UnitType, &TeamId), Without<Dying>>,
+    units: &Query<(Entity, &UnitType, &TeamId, &NetId), Without<Dying>>,
 ) -> Option<Entity> {
+    // Upstream picks `sel[math.random(1,#sel)]` among the team's
+    // homebases/minifacs; the port instead takes the lowest-NetId one so
+    // the choice is independent of ECS storage order (the shuffled-replay
+    // fuzz). Raw `units.iter()` order changes between storage layouts.
     let of_team = |pick: fn(UnitKind) -> bool| {
         units
             .iter()
-            .find(|(_, unit, t)| t.0 == team && pick(unit.0))
-            .map(|(entity, _, _)| entity)
+            .sort::<&NetId>()
+            .find(|(_, unit, t, _)| t.0 == team && pick(unit.0))
+            .map(|(entity, _, _, _)| entity)
     };
     of_team(UnitKind::is_homebase).or_else(|| of_team(UnitKind::is_minifac))
 }
