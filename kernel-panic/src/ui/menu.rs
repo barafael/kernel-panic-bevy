@@ -2699,7 +2699,7 @@ mod tests {
             "short labels keep the 80 % span"
         );
         let start = choices_start(12, glyph);
-        assert!(start >= CHOICES_MIN_START && start < 0.22, "{start}");
+        assert!((CHOICES_MIN_START..0.22).contains(&start), "{start}");
         let volume = choice_step(4, glyph, 6, start);
         assert!(start + volume * 6.0 <= CHOICES_END + 1e-6);
         assert!(volume > 0.1);
