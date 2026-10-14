@@ -17,7 +17,6 @@
 //! movement system runs in between, so the snapshot is live for both
 //! phases.
 
-use crate::sim::DetFloat;
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
@@ -27,6 +26,7 @@ use super::content::definitions::UnitKind;
 use super::lifecycle::spawning::Emerging;
 use super::mechanics::cloak::{Cloaked, DetectedBy, hidden_from};
 use crate::net::NetId;
+use crate::sim::DetFloat;
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)
@@ -302,6 +302,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<SpatialIndex>();
+        world.init_resource::<crate::units::teams::Alliances>();
         let registry = crate::units::content::unit_registry::UnitRegistry::empty();
         let unit = world
             .spawn((

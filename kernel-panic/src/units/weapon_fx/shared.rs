@@ -2,11 +2,11 @@
 //! visual marker components, the cached beam-material registry, and the
 //! TDF-colour normaliser.
 
-use crate::sim::DetFloat;
 use std::sync::Arc;
 
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::units::content::weapons::WeaponId;
 
 /// Describes a single attack for the visual system.

@@ -32,8 +32,7 @@ pub mod units;
 #[cfg(kani)]
 mod proofs;
 
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};

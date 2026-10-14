@@ -21,11 +21,10 @@
 //!
 //! [`step`]: MissileFlight::step
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
-use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
+use crate::sim::{DetFloat, GAME_SPEED, SHORT_ANGLE_TO_RAD};
 use crate::units::combat::aim::{cannon_launch_dir, weapon_gravity};
 
 /// `MAX_PROJECTILE_RANGE` — `distanceToTravel` for `fixedLauncher` /

@@ -1,8 +1,8 @@
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::{camera::Hdr, input::mouse::MouseWheel, prelude::*};
 
 use crate::rendering::settings::{MsaaSupport, RenderSettings};
+use crate::sim::DetFloat;
 
 /// Marker component for the main RTS camera.
 #[derive(Component)]

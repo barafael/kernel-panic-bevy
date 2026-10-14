@@ -16,13 +16,12 @@
 //!   teleporter's buffered packets.
 
 use crate::map_loading::MatchScopeAppExt;
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use crate::game_setup::AppState;
 use crate::interaction::selection::{Hovered, Selected};
-use crate::sim::GAME_SPEED;
+use crate::sim::{DetFloat, GAME_SPEED};
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;

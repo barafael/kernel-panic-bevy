@@ -29,9 +29,10 @@ use crate::interaction::cursor::{CursorKind, CursorRequest};
 use crate::net::{Issue, NetPos, Order, SimCommand};
 use crate::rendering::camera::RtsCamera;
 use crate::ui::hud::command_panel::commands::{CmdId, can_attack};
-use crate::units::components::{TeamId, UnitType, is_friendly};
+use crate::units::components::{TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::teams::Alliances;
 
 fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
     keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
@@ -446,6 +447,7 @@ fn trigger_set_target_click(
     mut pending: ResMut<PendingMoveIndicators>,
     mut net: Issue,
     unit_registry: Res<UnitRegistry>,
+    alliances: Res<Alliances>,
 ) {
     if !modes.is(Mode::SetTarget) || !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -461,7 +463,7 @@ fn trigger_set_target_click(
     let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0) else {
         return;
     };
-    if is_friendly(sel_team, t_team.0) {
+    if alliances.friendly(sel_team, t_team.0) {
         return;
     }
     let units = net.units(
@@ -630,6 +632,7 @@ fn trigger_guard_click(
     mut pending: ResMut<PendingMoveIndicators>,
     mut net: Issue,
     unit_registry: Res<UnitRegistry>,
+    alliances: Res<Alliances>,
 ) {
     if !modes.is(Mode::Guard) || !mouse.just_pressed(MouseButton::Left) {
         return;
@@ -644,7 +647,7 @@ fn trigger_guard_click(
     let Some(sel_team) = selected_q.iter().next().map(|(_, _, team)| team.0) else {
         return;
     };
-    if !is_friendly(sel_team, t_team.0) {
+    if !alliances.friendly(sel_team, t_team.0) {
         return;
     }
 

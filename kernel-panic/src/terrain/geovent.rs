@@ -23,9 +23,9 @@
 //! `Mesh3d` entity propagated and extracted per frame (a busy map runs
 //! several hundred at once).
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::{
     rendering::camera::RtsCamera,
     rng::{next_f32, random_unit_sphere, xorshift32},

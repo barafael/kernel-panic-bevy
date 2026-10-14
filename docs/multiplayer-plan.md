@@ -158,6 +158,28 @@ Estimates are focused-work rough guesses.
 - In-process multi-peer tests (several headless apps, simulated latency/loss) —
   the X-commands lockstep test grown to the full sim.
 
+**Sim rules (agent A) — done** (`net-experiments/m1-sim-rules.md`):
+- `f32`/`f64` `max`/`min`/`clamp` banned in `clippy.toml`; `spring-detmath`'s
+  `DetFloat` (compare-and-select, `-0 < +0`, NaN operand ignored) replaces all 378
+  call sites; glam's scalar `Vec*::max/min/clamp` are compare-and-select already.
+  New float-probe `det:` rows cover both, 0 bits differ locally.
+- Seats and alliances as upstream: seat `i` is owner `i` (`TeamId`, Spring's team:
+  units, unit cap, packet buffer, AI brain, command right), `PlayerSpec::ally_team`
+  is the allyteam; `units::teams::Alliances::friendly(a, b)` answers friend or foe
+  everywhere upstream asks `AreTeamsAllied` / `allyteam` (targeting, line of fire,
+  kamikaze, Firewall, area denial, cloak detection and shared vision, bugger-off,
+  avoidance, the AI). Fixed alliances. A dead owner's unit cap goes to its allies.
+  Outgunned's AI seats are one owner and one AI each now (upstream); new Team Game
+  grouping (AI allies) in the skirmish menu.
+- Shared victory/defeat per `game_over.lua`: an owner without a factory dies
+  (`TeamFates::kill_team`, also the hook for agent B's Resign); an ally team loses
+  when all its owners are dead; the end comes one census after.
+- The sim is never gated on the local outcome: `GameState` is the result panel only
+  (`announce_outcome`, `Update`); a dead player watches. The harness no longer
+  fakes `GameOverDismissed`.
+- `.kpreplay` format 2, `SIM_VERSION` 2; golden logs re-recorded plus a 2v2 with
+  mixed ally teams.
+
 ### M2 — Transport and lobby · ~1–1.5 weeks
 
 - Port cake-net (~500 lines: `Sequencer`, `TurnBuffer`, `HashLog`, `RoomId`,

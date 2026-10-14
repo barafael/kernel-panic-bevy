@@ -37,7 +37,6 @@
 //!
 //! [`advance_command_queue`]: crate::interaction::movement::advance_command_queue
 
-use crate::sim::DetFloat;
 use bevy::platform::collections::HashMap;
 
 use bevy::prelude::*;
@@ -46,7 +45,7 @@ use super::production::{BuggerOff, BuggerOffRequests, PendingFadeInstall};
 use super::spawning::{BuildDriven, EmergeStyle, Emerging, SpawnContext, spawn_unit_facing};
 use crate::interaction::movement::{MovePath, MoveTarget, QueuedCommand};
 use crate::net::NetId;
-use crate::sim::{Heading, SQUARE_SIZE};
+use crate::sim::{DetFloat, Heading, SQUARE_SIZE};
 use crate::units::combat::{Dying, Stunned};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -705,6 +704,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(registry());
         world.init_resource::<SpatialIndex>();
+        world.init_resource::<crate::units::teams::Alliances>();
         world.init_resource::<BuggerOffRequests>();
         world.init_resource::<TeamUnitCounts>();
         world.init_resource::<Assets<Mesh>>();

@@ -1,5 +1,4 @@
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::math::ops;
 use std::collections::HashMap;
 

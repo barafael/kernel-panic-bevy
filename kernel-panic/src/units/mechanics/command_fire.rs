@@ -22,13 +22,13 @@
 //! the scripts' `HitByWeaponId`, the idle-heal reset and infection all
 //! apply to them exactly as to weapon fire.
 
-use crate::sim::DetFloat;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::net::NetId;
+use crate::sim::DetFloat;
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::Dying;
 use crate::units::combat::{Armored, Attacker, DamageQueue, DelayedDamage, Hit, PendingDamage};
@@ -37,6 +37,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::{KnownWeapons, WeaponId, WeaponRegistry};
 use crate::units::spatial::{SpatialIndex, flat_dist_sq};
+use crate::units::teams::Alliances;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
 /// Filename of the SIGTERM bomber's S3O model (`signal.fbi:ObjectName`).
@@ -602,6 +603,7 @@ pub fn process_command_fire(
     gravity: Option<Res<crate::sim::MapGravity>>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut commands: Commands,
+    alliances: Res<Alliances>,
 ) {
     let gravity = gravity.as_deref().copied().unwrap_or_default().0;
     for event in events.read() {
@@ -643,7 +645,13 @@ pub fn process_command_fire(
         }
 
         if unit.0 == UnitKind::Firewall {
-            apply_firewall(event.target, team.0, &protect_targets, &mut commands);
+            apply_firewall(
+                event.target,
+                team.0,
+                &alliances,
+                &protect_targets,
+                &mut commands,
+            );
             // `network_reflectorshield.lua:99`: `PlaySoundFile("sounds/built.wav")`.
             if let Some(sounds) = sounds.as_deref_mut() {
                 sounds.play(
@@ -1029,15 +1037,18 @@ fn minelauncher_cost(byte: Entity, known: &KnownWeapons) -> Hit {
     }
 }
 
+/// network_reflectorshield.lua: every unit of the caster's ally team
+/// (`GetUnitAllyTeam(u) == ownTeam`) in the radius is protected.
 fn apply_firewall(
     center: Vec3,
     caster_team: u8,
+    alliances: &Alliances,
     targets: &Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
     commands: &mut Commands,
 ) {
     let radius_sq = FIREWALL_RADIUS * FIREWALL_RADIUS;
     for (entity, team, gtf) in targets.iter() {
-        if !crate::units::components::is_friendly(team.0, caster_team) {
+        if !alliances.friendly(team.0, caster_team) {
             continue;
         }
         if gtf.translation().distance_squared(center) > radius_sq {
@@ -1087,6 +1098,7 @@ pub fn tick_command_fire_cooldown(
 /// all apply. A zone whose owner died is handed to a homebase, else a
 /// minifac, of the owner's team (upstream picks one at random; the
 /// first found here), else credited to nobody.
+#[allow(clippy::too_many_arguments)]
 pub fn tick_area_denial(
     time: Res<Time>,
     mut zones: Query<(Entity, &mut AreaDenialZone)>,
@@ -1095,6 +1107,7 @@ pub fn tick_area_denial(
     weapons: Res<WeaponRegistry>,
     mut delayed: ResMut<DelayedDamage>,
     mut commands: Commands,
+    alliances: Res<Alliances>,
 ) {
     let dt = time.delta_secs();
     for (zone_entity, mut zone) in &mut zones {
@@ -1118,9 +1131,8 @@ pub fn tick_area_denial(
         let damage = params.dps * dt;
         let radius_sq = params.radius * params.radius;
         spatial.query_radius(center, params.radius, |candidate| {
-            if !params.damage_friendly
-                && crate::units::components::is_friendly(candidate.team, owner_team)
-            {
+            // areadenial.lua: `damageFriendly or not AreTeamsAllied`.
+            if !params.damage_friendly && alliances.friendly(candidate.team, owner_team) {
                 return;
             }
             // `GetUnitsInSphere`: the unit's position within the sphere.
@@ -1431,6 +1443,7 @@ mod tests {
             .init_resource::<MineSpawnQueue>()
             .init_resource::<PendingExplosions>()
             .init_resource::<DelayedDamage>()
+            .init_resource::<Alliances>()
             .insert_resource(UnitRegistry::for_test(defs))
             .insert_resource(WeaponRegistry::default());
         app
@@ -1941,6 +1954,7 @@ mod tests {
             .init_resource::<DamageQueue>()
             .init_resource::<DelayedDamage>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .insert_resource(UnitRegistry::empty())
             .insert_resource(weapons);

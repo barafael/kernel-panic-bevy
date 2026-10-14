@@ -39,7 +39,6 @@
 //!
 //! Not compiled for wasm (no disk).
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -57,7 +56,7 @@ use crate::interaction::movement::{
     movement_system,
 };
 use crate::rendering::camera::{RtsCamera, RtsCameraState};
-use crate::sim::GAME_SPEED;
+use crate::sim::{DetFloat, GAME_SPEED};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AttackTargetOrder, Dying};
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
@@ -188,13 +187,13 @@ fn bot_boot(
     }
     let mut players = vec![PlayerSpec {
         faction: Faction::System,
-        team: 0,
+        ally_team: 0,
         ai: false,
     }];
     if bot.enemy {
         players.push(PlayerSpec {
             faction: Faction::Hacker,
-            team: 1,
+            ally_team: 1,
             ai: true,
         });
     }

@@ -24,7 +24,6 @@
 //! own distance model, which would fight the engine's. Everything is
 //! mixed as mono at the engine's gain.
 
-use crate::sim::DetFloat;
 use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
 use bevy::prelude::*;
 
@@ -33,6 +32,7 @@ pub mod music;
 use crate::interaction::selection::Selected;
 use crate::rendering::camera::RtsCamera;
 use crate::rendering::settings::{RenderSettings, VolumeKnob};
+use crate::sim::DetFloat;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;

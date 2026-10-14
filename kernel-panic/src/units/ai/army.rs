@@ -1,11 +1,11 @@
 //! Army decisions: where to push, and the fight-order the push uses.
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::net::{CommandBus, NetId, NetPos, Order, SimCommand};
 use crate::rng::{next_f32, xorshift32};
+use crate::sim::DetFloat;
 use crate::units::content::definitions::UnitKind;
 
 /// Upstream `minifacLimit`: an enemy team with fewer small buildings

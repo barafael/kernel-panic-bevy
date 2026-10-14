@@ -1,5 +1,4 @@
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::math::ops;
 use std::collections::VecDeque;
 
@@ -795,6 +794,7 @@ pub fn apply_bugger_off(
     heightmap: Option<Res<Heightmap>>,
     mut commands: Commands,
     mut ordered: Local<Vec<Entity>>,
+    alliances: Res<crate::units::teams::Alliances>,
 ) {
     if requests.0.is_empty() {
         return;
@@ -810,7 +810,8 @@ pub fn apply_bugger_off(
             request.center,
             request.radius + BUGGER_OFF_SCAN_MARGIN,
             |other| {
-                if other.team == request.team
+                // `BuggerOffImpl`: allied units only, never enemies.
+                if alliances.friendly(other.team, request.team)
                     && Some(other.entity) != request.exclude
                     && !other.is_flying
                     && other.hp_positive
@@ -1159,6 +1160,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(registry());
         world.init_resource::<SpatialIndex>();
+        world.init_resource::<crate::units::teams::Alliances>();
         world.init_resource::<BuggerOffRequests>();
         world.init_resource::<super::super::bookkeeping::TeamUnitCounts>();
         world.init_resource::<super::super::bookkeeping::SmallBuildingCounts>();

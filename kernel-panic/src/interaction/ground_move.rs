@@ -25,8 +25,7 @@
 //! 5. `Update` — apply the collision push, `OwnerMoved` idle test; and
 //!    every 15th frame per unit `SlowUpdate` (repath / give up).
 
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::math::ops;
 use std::f32::consts::{PI, TAU};
 
@@ -1591,6 +1590,7 @@ pub fn movement_system(
     local_team: Option<Res<crate::units::player::LocalTeam>>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut rng_state: ResMut<SimRng<ImpulseRng>>,
+    alliances: Option<Res<crate::units::teams::Alliances>>,
 ) {
     let nav = nav_set.as_deref();
     let gravity = map_gravity.as_deref().copied().unwrap_or_default().0;
@@ -1646,9 +1646,11 @@ pub fn movement_system(
             flying: m.flying,
         });
     }
+    let no_alliances = crate::units::teams::Alliances::default();
     let avoid = AvoidanceView {
         entries: &avoidees,
         cells: &avoid_grid,
+        alliances: alliances.as_deref().unwrap_or(&no_alliances),
     };
     let map_max = heightmap.as_deref().map(|hm| {
         let (w, d) = hm.world_size();
@@ -2030,6 +2032,8 @@ pub struct AvoiderInfo {
 pub struct AvoidanceView<'a> {
     entries: &'a [Avoidee],
     cells: &'a HashMap<(i32, i32), Vec<usize>>,
+    /// Allied avoidees are pushed rather than avoided.
+    alliances: &'a crate::units::teams::Alliances,
 }
 
 /// `groundUnitCollisionAvoidanceUpdateRate` default (ModInfo.cpp:44).
@@ -2087,8 +2091,9 @@ pub fn obstacle_avoidance_dir(
                 if o.pos.distance_squared(me.pos) > avoidance_radius * avoidance_radius {
                     continue;
                 }
-                // Idle movable allies get pushed, not avoided.
-                if !o.moving && o.team == me.team {
+                // Idle movable allies get pushed, not avoided
+                // (`avoidee->allyteam == avoider->allyteam`).
+                if !o.moving && view.alliances.friendly(o.team, me.team) {
                     continue;
                 }
                 // `(avoider->pos + avoider->speed) - (avoidee->pos +

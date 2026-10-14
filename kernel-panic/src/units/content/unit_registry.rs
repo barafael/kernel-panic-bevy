@@ -4,13 +4,12 @@
 //! single [`UnitRegistry`] resource. Game systems
 //! resolve unit stats through this registry instead of hardcoded values.
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UNIT_KIND_COUNT, UnitKind};
 use super::moveinfo::MoveClassTable;
-use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
+use crate::sim::{DetFloat, GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// Spring engine `BuildTime` is in "build ticks" at 30 fps.
 /// The actual build duration depends on the factory's `WorkerTime`.

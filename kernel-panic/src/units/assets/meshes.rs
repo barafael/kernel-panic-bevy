@@ -1,4 +1,3 @@
-use crate::sim::DetFloat;
 use std::{collections::HashMap, sync::Arc};
 
 use bevy::{
@@ -7,6 +6,7 @@ use bevy::{
 };
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 
+use crate::sim::DetFloat;
 use crate::units::components::Faction;
 use crate::units::content::bundle::bundle;
 use crate::units::content::definitions::UnitKind;

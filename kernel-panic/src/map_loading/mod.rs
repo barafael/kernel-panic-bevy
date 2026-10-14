@@ -21,7 +21,6 @@
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
-use crate::sim::DetFloat;
 #[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,6 +29,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::{
     game_setup::{GameSetup, RunGame},
     interaction,

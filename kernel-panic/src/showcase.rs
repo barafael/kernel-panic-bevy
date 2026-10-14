@@ -19,10 +19,10 @@
 //! showcase is player-controllable. No AI enemies exist; game-over is
 //! gated off so the mode runs forever until the player quits.
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::{
     interaction::movement::{MoveTarget, QueuedCommand},
     terrain::geovent::{GeoventSmoker, VentClaim},

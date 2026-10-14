@@ -16,7 +16,6 @@
 //! [`MIN_FONT_PX`] and a frame wider than [`MAX_WIDTH_FRACTION`] of
 //! the window. Not compiled for wasm (no disk).
 
-use crate::sim::DetFloat;
 use std::fmt::Write as _;
 
 use bevy::prelude::*;
@@ -25,6 +24,7 @@ use bevy::ui::UiGlobalTransform;
 use super::menu::{MenuButton, MenuFrame, MenuPage};
 use super::save_screenshot;
 use crate::game_setup::DevOptions;
+use crate::sim::DetFloat;
 
 /// Default frames (at 30 per second) to let the demo world load before
 /// the first shot; paced by the clock, since a virtual display has no

@@ -23,8 +23,7 @@
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
 //! runtime never touches the raw TDF strings.
 
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::math::ops;
 use std::collections::HashMap;
 

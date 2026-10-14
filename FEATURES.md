@@ -56,12 +56,20 @@ read the resulting state.
   while it drifts upward, grows, and fades to nothing.
 - Three faction homebases (System=Kernel, Hacker=Hole, Network=
   Carrier) are possible. The skirmish menu picks your faction, the
-  enemy faction, the grouping (Duel = 1 AI, Outgunned = 2–5 allied AI
-  seats) and the difficulty. Seat *i* gets its side's homebase on the
-  map's *i*-th start position (upstream `game_spawn.lua`); seats past
-  the map's start positions are spread on a ring around the centre.
-- Friend-or-foe is by ally team only, so mirror matches (System vs
-  System) fight normally.
+  enemy faction, the grouping (Duel = 1 AI; Team Game = you and AI
+  allies against AI enemies, the sides' sizes rolled per difficulty
+  as upstream's `GenerateSkirmish` does, up to 4v4 or 3v5; Outgunned
+  = 2–5 allied AI seats) and the difficulty. Seat *i* gets its side's
+  homebase on the map's *i*-th start position (upstream
+  `game_spawn.lua`); seats past the map's start positions are spread
+  on a ring around the centre. A Team Game interleaves the sides over
+  the seats, as upstream did.
+- Every seat is its own player (Spring's *team*): its own units, unit
+  cap, packet buffer and, for an AI seat, its own AI brain. Seats on
+  one side form an ally team: friend-or-foe is by ally team only, so
+  mirror matches (System vs System) fight normally and allies never
+  shoot each other, but you only command your own units. Alliances
+  are fixed for the match.
 - The game loads one map at startup and never switches maps. To play
   a different map you have to close the game and reopen it.
 
@@ -280,7 +288,7 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 - Exploit's BugCannon (anti-swarm artillery) instead picks the
   *farthest* enemy (negative `proximityPriority`).
 - "Friendly" = same ally team; allies don't shoot each
-  other (team friend-or-foe; factions don't matter).
+  other (ally-team friend-or-foe; factions don't matter).
 - Most ground weapons don't chase flying targets — Flow can zip past
   them safely (`NoChaseCategory=VTOL`). The pointer is the exception —
   its projectile is homing (for air and ground units).
@@ -547,7 +555,8 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   player, rendered semi-transparent / faded so the player can tell
   they're cloaked vs. uncloaked.
 - Detector units (Assembler / Trojan / Gateway) reveal cloaked
-  enemies inside their detection range (FBI `RadarDistance` detector).
+  enemies inside their detection range (FBI `RadarDistance` detector)
+  to their whole ally team.
 
 ## 18. Mines & walls
 
@@ -675,33 +684,39 @@ moved back into the Buffer by entering a teleporter.
 
 ## 22. Game state
 
-- The player's team is `0` by default. Once a second, any team left
-  without a factory — homebase (Kernel / Hole / Carrier) or MiniFac
-  (Socket / Window / Port), unfinished ones included — is out: all its
-  remaining units die through the normal death path (upstream
-  `game_over.lua` gamemode 1 + `KillTeam`). Defeat = the player team
-  is out. Victory = every other team is out.
-- On defeat, a centered red `DEFEAT` headline (~120 pt) appears at
-  ~35 % from the top of the screen. On victory, the same layout but
-  green and `VICTORY`.
-- Once the game-over screen is shown, all gameplay systems stop
-  ticking (units, animations, AI, combat). The camera still works.
+- Once a second (sim frame `f % 30 == 25`), any player left without a
+  factory — homebase (Kernel / Hole / Carrier) or MiniFac (Socket /
+  Window / Port), unfinished ones included — is dead: all its
+  remaining units die through the normal death path, and its unit cap
+  goes to its surviving allies (upstream `game_over.lua` gamemode 1 +
+  `KillTeam`, `CTeamHandler::UpdateTeamUnitLimitsOnDeath`).
+- An ally team loses when all its players are dead; the match is
+  decided one census after a death leaves no two enemies alive, and
+  every player of the remaining ally team wins (shared victory).
+- When your player dies you watch from then on: "You lost!" with Keep
+  on watching / Go to Menu / Restart. If your allies go on to win, the
+  panel turns into "You won!". The game never pauses for the result:
+  the world keeps running behind the panel (as Spring keeps running
+  after `GameOver`), which lockstep multiplayer needs.
 - A sandbox map with no factories at all skips the game-over check
   entirely (no auto-defeat on the first frame); so do showcase mode
-  and the menu demo. After "Keep on playing", factoryless teams are
-  still wiped out but the result screen doesn't re-open.
+  and the bot's sandbox. The menu demo eliminates but shows no result.
+  After "Keep on playing", the result screen re-opens only if the
+  result changes.
 
 ## 23. AI opponent
 
 A port of upstream's Lua AI (`KPAI.lua`, in its "Fair KPAI" flavour).
 
-- Every non-player team that owns a homebase runs an AI brain that
-  ticks once per second. A team with several homebases (several AI
-  seats on one ally team) runs one brain driving all of them.
+- Every AI seat runs its own AI brain that ticks once per second,
+  allied with yours (a Team Game) or not. Allied AIs count each
+  other's units on their side of the fairness budget, never target
+  each other, and react to damage to any unit of their side (the
+  Firewall trigger), as upstream's KPAI does by ally team.
 - **Fairness**: each tick the AI works out how far ahead of its
   enemies it is allowed to be — a head start of 8 spam units, 2
   "medium" units (constructors, heavies, artillery) and 1 building,
-  plus every enemy unit of that kind, minus every one of its own. The
+  plus every enemy unit of that kind, minus every one of its side's. The
   menu difficulty widens the head start (Easy is exactly upstream's
   Fair KPAI). Once a budget is spent, that kind of production pauses.
 - **Homebase production** (upstream `OrderHomeBase`): whenever a

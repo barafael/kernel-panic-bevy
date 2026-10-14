@@ -2,8 +2,7 @@
 //! event to the appropriate effect spawner (beam, burst, projectile, melee,
 //! plus the bonus nanoframe sparkle for build lasers).
 
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::prelude::*;
 
 use crate::terrain::heightmap::Heightmap;

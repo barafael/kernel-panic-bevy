@@ -24,10 +24,10 @@
 //! `CSelectedUnitsHandler::GetAvailableCommands`: every non-build command
 //! in unit order (first occurrence wins), then every build command.
 
-use crate::sim::DetFloat;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
+use crate::sim::DetFloat;
 use crate::units::content::definitions::UnitKind;
 use crate::units::lifecycle::construction::buildings_for;
 use crate::units::lifecycle::production::factory_roster;

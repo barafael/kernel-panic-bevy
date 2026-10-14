@@ -1,7 +1,6 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
 //! projectile arcs, despawn at end of life.
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
@@ -12,17 +11,18 @@ use super::shared::{
     SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
 };
 use crate::rendering::camera::RtsCamera;
-use crate::sim::{GAME_SPEED, secs_to_frames};
+use crate::sim::{DetFloat, GAME_SPEED, secs_to_frames};
 use bevy::ecs::system::SystemParam;
 
 use super::ceg::{CegTrailCtx, spawn_ceg};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
-use crate::units::components::{UnitType, is_friendly};
+use crate::units::components::UnitType;
 #[cfg(test)]
 use crate::units::content::weapons::WeaponId;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::spatial::SpatialIndex;
+use crate::units::teams::Alliances;
 
 /// Upper bound on a guided projectile's life (seconds). Missiles end on
 /// the ground or a unit; this only catches one that leaves the map.
@@ -45,6 +45,8 @@ pub(super) fn projectile_orientation(dir: Vec3) -> Quat {
 pub(super) struct VolumeHitCtx<'w, 's> {
     target_q: Query<'w, 's, (&'static GlobalTransform, &'static CollisionVolume), With<UnitType>>,
     spatial: Res<'w, SpatialIndex>,
+    /// Who counts as friendly for `collidefriendly=0` weapons.
+    alliances: Res<'w, Alliances>,
     /// Terrain for guided projectiles' ground impacts.
     heightmap: Option<Res<'w, Heightmap>>,
 }
@@ -280,6 +282,7 @@ pub(super) fn tick_weapon_fx(
                 prev_lead_pos,
                 curr_lead_pos,
                 &volume_ctx.spatial,
+                &volume_ctx.alliances,
                 &volume_ctx.target_q,
             )
         {
@@ -530,6 +533,7 @@ pub(super) fn tick_weapon_fx(
                 seg_start,
                 seg_end,
                 &volume_ctx.spatial,
+                &volume_ctx.alliances,
                 &volume_ctx.target_q,
             )
         {
@@ -723,6 +727,7 @@ fn broad_phase_volume_hit(
     seg_start: Vec3,
     seg_end: Vec3,
     spatial: &SpatialIndex,
+    alliances: &Alliances,
     target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
 ) -> Option<(Entity, Vec3)> {
     // Conservative bound on any unit's collision-volume reach; chosen
@@ -742,7 +747,7 @@ fn broad_phase_volume_hit(
         if !collide_friendly
             && hit
                 .owner_team
-                .is_some_and(|team| is_friendly(entry.team, team))
+                .is_some_and(|team| alliances.friendly(entry.team, team))
         {
             return;
         }
@@ -958,6 +963,7 @@ mod tests {
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
@@ -1056,6 +1062,7 @@ mod tests {
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
@@ -1107,6 +1114,7 @@ mod tests {
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
@@ -1197,6 +1205,7 @@ mod tests {
             .init_resource::<PendingExplosions>()
             .insert_resource(weapons)
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
@@ -1357,6 +1366,7 @@ mod tests {
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
@@ -1480,6 +1490,7 @@ mod tests {
             .init_resource::<PendingExplosions>()
             .init_resource::<WeaponRegistry>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()

@@ -13,9 +13,10 @@ use super::core::{PickRayCast, Selected, SelectionSet, ground_hit, unit_hit};
 use crate::interaction::movement::{CommandQueue, MoveTarget, Orders, QueuedCommand};
 use crate::net::{Issue, NetPos, Order, PointOrder, PosList, SimCommand};
 use crate::rendering::camera::RtsCamera;
-use crate::units::components::{TeamId, UnitStats, UnitType, is_friendly};
+use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::teams::Alliances;
 
 pub(super) struct RightClickPlugin;
 
@@ -138,6 +139,7 @@ struct RightClickLookups<'w, 's> {
     target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
     queue_end_q: Query<'w, 's, (Option<&'static MoveTarget>, Option<&'static CommandQueue>)>,
+    alliances: Res<'w, Alliances>,
 }
 
 /// Right-click: single click moves all selected to one point — unless the
@@ -165,6 +167,7 @@ fn handle_right_click(
         target_gtf_q,
         target_type_q,
         queue_end_q,
+        alliances,
     } = lookups;
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
     // The enemy of the selection under the cursor (`GetDefaultCmd`'s
@@ -177,7 +180,7 @@ fn handle_right_click(
         unit_hit(&windows, &camera_q, ray_cast, &unit_root_q, &parent_q).filter(|&target| {
             unit_info_q
                 .get(target)
-                .is_ok_and(|t_team| !is_friendly(my_team.0, t_team.0))
+                .is_ok_and(|t_team| !alliances.friendly(my_team.0, t_team.0))
         })
     };
     let armed = |unit: UnitKind| !unit_registry.weapon(unit).is_empty();
@@ -800,6 +803,7 @@ mod tests {
         world.insert_resource(UnitRegistry::empty());
         world.init_resource::<RightDragPath>();
         world.init_resource::<PendingMoveIndicators>();
+        world.init_resource::<Alliances>();
         crate::net::init_test_world(&mut world);
 
         let mut window = Window::default();

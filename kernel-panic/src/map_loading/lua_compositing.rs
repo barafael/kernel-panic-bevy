@@ -25,8 +25,7 @@
 //! The live state (which polygons are up, animations, owners) is
 //! [`crate::map_events::hex_farm`]'s; this module is the drawing kit.
 
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::ops;

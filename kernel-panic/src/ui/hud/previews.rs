@@ -11,11 +11,11 @@
 //! HTTP fetch on web); a picture that fails to load falls back to a
 //! procedural faction-tinted shape so the menu never shows a blank slot.
 
-use crate::sim::DetFloat;
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::sim::DetFloat;
 use crate::units::components::Faction;
 use crate::units::content::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::units::content::unit_registry::UnitRegistry;

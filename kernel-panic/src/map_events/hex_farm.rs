@@ -27,8 +27,7 @@
 //!
 //! Everything is inert unless the map loader inserted [`HexFarmState`].
 
-use crate::sim::DetFloat;
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use std::collections::{HashMap, HashSet};
 
 use bevy::camera::primitives::Aabb;

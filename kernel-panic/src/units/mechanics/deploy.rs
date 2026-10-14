@@ -5,9 +5,9 @@
 //! the deploy/pack-up cycle via the `D` hotkey; health is transferred
 //! proportionally so a 50%-HP Bug becomes a 50%-HP Exploit.
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};

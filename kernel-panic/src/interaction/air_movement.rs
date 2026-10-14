@@ -39,7 +39,6 @@
 //! transports, `airStrafe` circling, attack pitch, crashing, first-person
 //! control, and `allowAircraftToHitGround` (KP's modrules disables it).
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
@@ -47,7 +46,7 @@ use super::movement::{
     CommandQueue, MovePath, MoveTarget, OrderState, QueuedCommand, end_move_leg,
 };
 use crate::rng::next_f32;
-use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
+use crate::sim::{DetFloat, GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
 use crate::terrain::heightmap::Heightmap;
 use crate::terrain::smooth_ground::SmoothGround;
 use crate::units::combat::{AimTarget, AttackGroundOrder, AttackTargetOrder, Dying, Stunned};

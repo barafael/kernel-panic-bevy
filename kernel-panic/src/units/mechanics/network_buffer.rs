@@ -9,13 +9,12 @@
 //! Mirrors upstream `LuaRules/Gadgets/network_buffer.lua` (and the
 //! dispatch / enter companion gadgets).
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
-use crate::sim::{GAME_SPEED, frames_to_secs};
+use crate::sim::{DetFloat, GAME_SPEED, frames_to_secs};
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;

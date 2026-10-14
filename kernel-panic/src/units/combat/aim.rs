@@ -11,12 +11,12 @@
 //!   declares an `aimer` piece: see the function docs for the upstream
 //!   conventions each branch reproduces.
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
 use super::{Dying, Stunned};
 use crate::interaction::movement::{AttackMoveActive, MovePath, MoveTarget};
+use crate::sim::DetFloat;
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
 

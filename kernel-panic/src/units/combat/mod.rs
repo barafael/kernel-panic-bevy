@@ -15,7 +15,6 @@
 //! Public items are re-exported below so external callers keep using
 //! `super::combat::{...}` unchanged.
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
@@ -33,8 +32,9 @@ use super::weapon_fx::{
     AttackEvent, DelayedHitInfo, ExplosionEvent, PendingAttacks, PendingExplosions,
 };
 use crate::net::NetId;
-use crate::sim::{RngStream, SimRng, SimTick, angle_delta, secs_to_frames};
+use crate::sim::{DetFloat, RngStream, SimRng, SimTick, angle_delta, secs_to_frames};
 use crate::terrain::heightmap::Heightmap;
+use crate::units::teams::Alliances;
 
 pub(crate) mod aim;
 mod collision_volume;
@@ -142,6 +142,7 @@ fn avoids_allies(weapon_def: &spring_tdf::WeaponDef) -> bool {
 pub(crate) fn free_line_of_fire(
     weapon_def: &spring_tdf::WeaponDef,
     spatial: &SpatialIndex,
+    alliances: &Alliances,
     owner: Entity,
     team: u8,
     from: Vec3,
@@ -162,7 +163,7 @@ pub(crate) fn free_line_of_fire(
         length * 0.5 + spatial.max_hit_radius() + if cone { length * spread + 1.0 } else { 0.0 };
     let mut blocked = false;
     spatial.query_radius(from.lerp(to, 0.5), reach, |unit| {
-        if blocked || unit.entity == owner || !super::components::is_friendly(unit.team, team) {
+        if blocked || unit.entity == owner || !alliances.friendly(unit.team, team) {
             return;
         }
         blocked = if cone {
@@ -765,9 +766,10 @@ pub fn combat_system(
     mut pieces: PieceLookup,
     target_pick: TargetCachePick,
     // Tupled: Bevy systems take at most 16 parameters.
-    (mut sounds, mut rng): (
+    (mut sounds, mut rng, alliances): (
         Option<ResMut<crate::audio::SoundQueue>>,
         ResMut<SimRng<TargetingRng>>,
+        Res<Alliances>,
     ),
     // `(rank, entity, aim pos)` scratch for the deferred LOS pick.
     mut los_candidates: Local<Vec<(TargetRank, Entity, Vec3)>>,
@@ -896,7 +898,15 @@ pub fn combat_system(
         // target, and before every shot (`UpdateFire`).
         let ally_check = avoids_allies(weapon_def);
         let lof_clear = |to: Vec3| {
-            free_line_of_fire(weapon_def, &spatial, entity, attacker_team.0, aim_from, to)
+            free_line_of_fire(
+                weapon_def,
+                &spatial,
+                &alliances,
+                entity,
+                attacker_team.0,
+                aim_from,
+                to,
+            )
         };
         // Pointer's homing missile is the only ground unit that
         // overrides upstream's `NoChaseCategory=VTOL` and tracks air.
@@ -1011,7 +1021,9 @@ pub fn combat_system(
                 {
                     return;
                 }
-                if candidate.team == attacker_team.0 {
+                // `CGameHelper::GenerateWeaponTargets` only weighs
+                // enemies: allied owners' units are never auto-targets.
+                if alliances.friendly(candidate.team, attacker_team.0) {
                     return;
                 }
                 // Undetected cloaked units (Worms, Logic Bombs) are
@@ -1418,6 +1430,7 @@ pub fn attack_ground_system(
     mut pending_attacks: ResMut<PendingAttacks>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
     mut rng: ResMut<SimRng<GroundFireRng>>,
+    alliances: Res<Alliances>,
 ) {
     let mut scratch_sounds = crate::audio::SoundQueue::default();
     let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
@@ -1543,7 +1556,9 @@ pub fn attack_ground_system(
         }
         // `TryTarget` → `HaveFreeLineOfFire` holds a ground shot too
         // while an ally is in the way of an `avoidfriendly=1` weapon.
-        if !free_line_of_fire(weapon_def, &spatial, entity, team.0, aim_from, order.pos) {
+        if !free_line_of_fire(
+            weapon_def, &spatial, &alliances, entity, team.0, aim_from, order.pos,
+        ) {
             continue;
         }
 
@@ -1803,7 +1818,8 @@ mod tests {
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
-            .init_resource::<SpatialIndex>();
+            .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>();
         app.insert_resource(bit_vs_socket_registry());
         let weapons = line_weapon_registry();
         let line = weapons.intern("Line").unwrap();
@@ -1852,7 +1868,8 @@ mod tests {
             .init_resource::<DamageQueue>()
             .init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
-            .init_resource::<SpatialIndex>();
+            .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>();
         app.insert_resource(bit_vs_socket_registry());
         let weapons = line_weapon_registry();
         let line = weapons.intern("Line").unwrap();
@@ -1961,6 +1978,7 @@ mod tests {
             .init_resource::<PendingAttacks>()
             .init_resource::<PendingExplosions>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .insert_resource(UnitRegistry::empty())
             .insert_resource(weapons);
         app
@@ -2562,14 +2580,31 @@ mod tests {
         let spatial = app.world().resource::<SpatialIndex>();
         let (from, to) = (Vec3::ZERO, Vec3::new(0.0, 0.0, 200.0));
         let avoid = bugshot(true);
-        assert!(free_line_of_fire(&avoid, spatial, owner, 0, from, to));
+        assert!(free_line_of_fire(
+            &avoid,
+            spatial,
+            &Alliances::default(),
+            owner,
+            0,
+            from,
+            to
+        ));
 
         ally_entry(&mut app, Vec3::new(8.0, 0.0, 100.0), 10.0); // grazed
         let spatial = app.world().resource::<SpatialIndex>();
-        assert!(!free_line_of_fire(&avoid, spatial, owner, 0, from, to));
+        assert!(!free_line_of_fire(
+            &avoid,
+            spatial,
+            &Alliances::default(),
+            owner,
+            0,
+            from,
+            to
+        ));
         assert!(free_line_of_fire(
             &bugshot(false),
             spatial,
+            &Alliances::default(),
             owner,
             0,
             from,
@@ -2580,7 +2615,15 @@ mod tests {
             avoid_friendly: true,
             ..Default::default()
         };
-        assert!(free_line_of_fire(&melee, spatial, owner, 0, from, to));
+        assert!(free_line_of_fire(
+            &melee,
+            spatial,
+            &Alliances::default(),
+            owner,
+            0,
+            from,
+            to
+        ));
         // A spraying weapon tests the widening cone instead: at 150
         // elmos, 1000 `sprayangle` units (sin ≈ 0.07) widen it to
         // ~11.5 elmos, reaching an ally whose sphere the ray misses.
@@ -2592,8 +2635,24 @@ mod tests {
         ally_entry(&mut app, Vec3::new(12.0, 0.0, 150.0), 2.0);
         let spatial = app.world().resource::<SpatialIndex>();
         let nobody = Entity::PLACEHOLDER;
-        assert!(free_line_of_fire(&avoid, spatial, nobody, 0, from, to));
-        assert!(!free_line_of_fire(&sprayed, spatial, nobody, 0, from, to));
+        assert!(free_line_of_fire(
+            &avoid,
+            spatial,
+            &Alliances::default(),
+            nobody,
+            0,
+            from,
+            to
+        ));
+        assert!(!free_line_of_fire(
+            &sprayed,
+            spatial,
+            &Alliances::default(),
+            nobody,
+            0,
+            from,
+            to
+        ));
     }
 
     /// Why: units with `avoidfriendly=1` weapons happily shot through

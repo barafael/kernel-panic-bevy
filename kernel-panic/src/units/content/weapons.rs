@@ -13,13 +13,12 @@
 //! `WeaponDef` that never makes it into damage resolution but is the
 //! identity used by the visual layer for builder rays.
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
 
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
-use crate::sim::frames_to_secs;
+use crate::sim::{DetFloat, frames_to_secs};
 
 /// Compact identifier for a weapon. `Copy` so it can be cloned freely
 /// in events and components without heap traffic.

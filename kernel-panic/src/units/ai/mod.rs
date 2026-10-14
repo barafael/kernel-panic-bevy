@@ -50,6 +50,7 @@ use super::{
     spatial::SpatialIndex,
 };
 use crate::units::spatial::flat_dist_sq;
+use crate::units::teams::Alliances;
 use crate::{
     game_setup::AiDifficulty,
     interaction::movement::{MovePath, OrderState},
@@ -171,25 +172,24 @@ impl AiTicker {
     }
 }
 
-/// The teams the AI plays, from the match's seats (`begin_match`):
-/// every team seated with AI players only (upstream `isAiTeam`). Never
-/// derived from the [`LocalTeam`](crate::units::player::LocalTeam):
-/// every peer runs the same AI brains, whoever is watching. Sorted.
+/// The owners the AI plays, from the match's seats (`begin_match`):
+/// every AI seat is an owner with a brain of its own (upstream runs one
+/// KPAI per team, `GetTeamLuaAI(t)`), allied or not with the human
+/// seats. Never derived from the
+/// [`LocalTeam`](crate::units::player::LocalTeam): every peer runs the
+/// same AI brains, whoever is watching. Sorted.
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AiSeats(pub Vec<u8>);
 
 impl AiSeats {
-    /// The AI teams of `setup`: a team with a human seat is the human's.
+    /// The AI owners of `setup` (seat `i` is owner `i`).
     pub fn from_setup(setup: &crate::game_setup::GameSetup) -> Self {
-        let mut teams: Vec<u8> = setup
-            .players
-            .iter()
-            .filter(|p| p.ai && !setup.players.iter().any(|h| !h.ai && h.team == p.team))
-            .map(|p| p.team)
-            .collect();
-        teams.sort_unstable();
-        teams.dedup();
-        Self(teams)
+        Self(
+            (0..setup.players.len())
+                .filter(|&i| setup.players[i].ai)
+                .map(|i| i as u8)
+                .collect(),
+        )
     }
 
     /// Does the AI play `team`?
@@ -245,6 +245,10 @@ pub struct AiScratch {
     enemy_structs: Vec<EnemyStructure>,
     /// Free-vent positions scratch for `run_constructors`.
     vent_pos: Vec<Vec3>,
+    /// The match's alliances, copied at the top of the tick: friend or
+    /// foe for every decision (upstream `td.allyTeam`,
+    /// `AreTeamsAllied`).
+    alliances: Alliances,
 }
 
 type UnitQueryData = (
@@ -302,6 +306,7 @@ pub fn ai_brain(
     datavents: Query<(Entity, &GeoventSmoker), Without<VentClaim>>,
     suiciding: Query<(), With<SelfDestructCountdown>>,
     ai_seats: Res<AiSeats>,
+    alliances: Res<Alliances>,
     mut orders: AiOrders,
 ) {
     ticker.accumulated += time.delta_secs();
@@ -312,6 +317,7 @@ pub fn ai_brain(
     let now = tick.secs();
     let ticker: &mut AiTicker = &mut ticker;
     let s: &mut AiScratch = &mut scratch;
+    s.alliances.clone_from(&alliances);
 
     snapshot(s, &units, &datavents, &ai_seats);
     // Forget dispatch timers of dead teleporters (the snapshot holds
@@ -322,16 +328,20 @@ pub fn ai_brain(
 
     let teams = std::mem::take(&mut s.ai_teams);
     for &team in &teams {
-        let own = s.counts.get(&team).copied().unwrap_or_default();
-        let enemy = s.counts.iter().filter(|(t, _)| **t != team).fold(
-            RoleCounts::default(),
-            |mut acc, (_, c)| {
-                acc.spams += c.spams;
-                acc.mediums += c.mediums;
-                acc.buildings += c.buildings;
-                acc
-            },
-        );
+        // `UpdateFairness`: every allied team's units (its own
+        // included) count against the head start, every enemy's for it.
+        let side = |allied: bool| {
+            s.counts
+                .iter()
+                .filter(|(t, _)| s.alliances.friendly(**t, team) == allied)
+                .fold(RoleCounts::default(), |mut acc, (_, c)| {
+                    acc.spams += c.spams;
+                    acc.mediums += c.mediums;
+                    acc.buildings += c.buildings;
+                    acc
+                })
+        };
+        let (own, enemy) = (side(true), side(false));
         let mut lack = Lack::compute(difficulty.fairness_slack(), own, enemy);
         let force = s.force.get(&team).copied().unwrap_or(0);
         let buffer = packet_buffer.peek(team);
@@ -365,8 +375,8 @@ pub fn ai_brain(
     s.ai_teams = teams;
 }
 
-/// Upstream `SuicideIfAlone`: when no enemy team owns a living unit
-/// anymore (someone else finished them, or they never started), the
+/// Upstream `SuicideIfAlone`: when no enemy team (one not allied,
+/// `AreTeamsAllied`) owns a living unit anymore (someone else finished them, or they never started), the
 /// AI razes itself after `30 + (7*team) % 16` seconds so a stale game
 /// still ends. Units already counting down keep their timer — a fresh
 /// insert every tick would reset the fuse and it would never fire.
@@ -378,7 +388,7 @@ fn run_late_game(
     now: f32,
     orders: &mut CommandBus,
 ) {
-    if s.counts.keys().any(|t| *t != team) {
+    if s.counts.keys().any(|t| !s.alliances.friendly(*t, team)) {
         ticker.no_enemies_since.remove(&team);
         return;
     }
@@ -630,7 +640,7 @@ fn run_constructors(
             if let Some(target) = s
                 .structures
                 .iter()
-                .filter(|st| st.team != team)
+                .filter(|st| !s.alliances.friendly(st.team, team))
                 .map(|st| st.pos)
                 .min_by(|a, b| flat_dist_sq(*a, ctor.pos).total_cmp(&flat_dist_sq(*b, ctor.pos)))
             {
@@ -665,10 +675,11 @@ fn run_constructors(
     }
 }
 
-/// Nearest living enemy of `team` within `radius` of `pos`, with its XZ
-/// distance.
+/// Nearest living enemy of `team` (not allied) within `radius` of
+/// `pos`, with its XZ distance.
 fn nearest_enemy(
     spatial: &SpatialIndex,
+    alliances: &Alliances,
     team: u8,
     pos: Vec3,
     radius: f32,
@@ -679,7 +690,11 @@ fn nearest_enemy(
     spatial.query_radius(pos, radius, |e| {
         // The AI must not see what its detectors can't: undetected
         // cloaked Worms / Logic Bombs are invisible to it too.
-        if e.team == team || !e.hp_positive || !e.targetable_by(team) || !filter(e.kind) {
+        if alliances.friendly(e.team, team)
+            || !e.hp_positive
+            || !e.targetable_by(team)
+            || !filter(e.kind)
+        {
             return;
         }
         let d = flat_dist_sq(e.pos, pos);
@@ -692,10 +707,16 @@ fn nearest_enemy(
 
 /// Enemies of `team` within `radius` of `pos` (same visibility rules
 /// as [`nearest_enemy`]), for the Firewall's crowd counts.
-fn count_enemies_within(spatial: &SpatialIndex, team: u8, pos: Vec3, radius: f32) -> usize {
+fn count_enemies_within(
+    spatial: &SpatialIndex,
+    alliances: &Alliances,
+    team: u8,
+    pos: Vec3,
+    radius: f32,
+) -> usize {
     let mut n = 0;
     spatial.query_radius(pos, radius, |e| {
-        if e.team != team && e.hp_positive && e.targetable_by(team) {
+        if !alliances.friendly(e.team, team) && e.hp_positive && e.targetable_by(team) {
             n += 1;
         }
     });
@@ -726,7 +747,10 @@ fn run_army(
     // Only enemy *units* count as a threat — an enemy minifac built
     // within 700 of the base must not pin the army at home forever.
     let threat = homes.iter().find_map(|h| {
-        nearest_enemy(spatial, team, *h, DEFEND_RADIUS, |k| !k.is_building()).map(|(p, _)| p)
+        nearest_enemy(spatial, &s.alliances, team, *h, DEFEND_RADIUS, |k| {
+            !k.is_building()
+        })
+        .map(|(p, _)| p)
     });
 
     s.idle_home.clear();
@@ -747,8 +771,12 @@ fn run_army(
         Some(threat) => (vec![threat], true),
         None => {
             s.enemy_structs.clear();
-            s.enemy_structs
-                .extend(s.structures.iter().copied().filter(|e| e.team != team));
+            s.enemy_structs.extend(
+                s.structures
+                    .iter()
+                    .copied()
+                    .filter(|e| !s.alliances.friendly(e.team, team)),
+            );
             let targets = pick_attack_targets(
                 home,
                 &s.enemy_structs,
@@ -819,9 +847,14 @@ fn run_network(
         if !should_counter_dispatch(buffer, lack.spams, since) {
             continue;
         }
-        let Some((attacker, _)) =
-            nearest_enemy(spatial, team, tp.pos, COUNTER_DISPATCH_RANGE, |_| true)
-        else {
+        let Some((attacker, _)) = nearest_enemy(
+            spatial,
+            &s.alliances,
+            team,
+            tp.pos,
+            COUNTER_DISPATCH_RANGE,
+            |_| true,
+        ) else {
             continue;
         };
         cast(orders, team, tp.net, attacker);
@@ -866,7 +899,7 @@ fn run_specials(
     s.friend_pos.clear();
     let ally_r_sq = FIREWALL_ALLY_RADIUS * FIREWALL_ALLY_RADIUS;
     for u in &s.units {
-        if u.team == team {
+        if s.alliances.friendly(u.team, team) {
             s.friend_pos.push(u.pos);
         } else {
             s.enemy_pos.push(u.pos);
@@ -895,7 +928,14 @@ fn run_specials(
     // Obelisk: Infection at the nearest enemy within 1500. The gas
     // spares friends, so no crowd check is needed.
     for obelisk in ready(UnitKind::Obelisk) {
-        if let Some((pos, _)) = nearest_enemy(spatial, team, obelisk.pos, OBELISK_RANGE, |_| true) {
+        if let Some((pos, _)) = nearest_enemy(
+            spatial,
+            &s.alliances,
+            team,
+            obelisk.pos,
+            OBELISK_RANGE,
+            |_| true,
+        ) {
             cast(orders, team, obelisk.net, pos);
         }
     }
@@ -907,14 +947,19 @@ fn run_specials(
         && let Some(firewall) = ready(UnitKind::Firewall).next()
         && firewall_should_cast(
             now - t,
-            count_enemies_within(spatial, team, pos, FIREWALL_ENEMY_RADIUS),
+            count_enemies_within(spatial, &s.alliances, team, pos, FIREWALL_ENEMY_RADIUS),
+            // Upstream counts its ally team (`GetUnitAllyTeam`).
             s.units
                 .iter()
-                .filter(|u| u.team == team && flat_dist_sq(u.pos, pos) <= ally_r_sq)
+                .filter(|u| {
+                    s.alliances.friendly(u.team, team) && flat_dist_sq(u.pos, pos) <= ally_r_sq
+                })
                 .count(),
-            s.units
-                .iter()
-                .any(|u| u.team == team && u.protected && flat_dist_sq(u.pos, pos) <= ally_r_sq),
+            s.units.iter().any(|u| {
+                s.alliances.friendly(u.team, team)
+                    && u.protected
+                    && flat_dist_sq(u.pos, pos) <= ally_r_sq
+            }),
         )
     {
         cast(orders, team, firewall.net, pos);
@@ -940,13 +985,21 @@ fn run_specials(
                 let on_building =
                     occupied_by(&s.structures, u.pos, specials::DEPLOY_CLEAR_HALF, false).is_some();
                 bug_should_deploy(
-                    nearest_enemy(spatial, team, u.pos, specials::DEPLOY_MAX, |_| true)
-                        .map(|(_, d)| d),
+                    nearest_enemy(
+                        spatial,
+                        &s.alliances,
+                        team,
+                        u.pos,
+                        specials::DEPLOY_MAX,
+                        |_| true,
+                    )
+                    .map(|(_, d)| d),
                     on_building,
                 )
             }
             UnitKind::Exploit if u.ready => exploit_should_undeploy(
-                nearest_enemy(spatial, team, u.pos, UNDEPLOY_MAX, |_| true).map(|(_, d)| d),
+                nearest_enemy(spatial, &s.alliances, team, u.pos, UNDEPLOY_MAX, |_| true)
+                    .map(|(_, d)| d),
             ),
             _ => false,
         };
@@ -961,9 +1014,9 @@ fn run_specials(
     }
 }
 
-/// Upstream KPAI_Fair's `UnitDamaged` hook: where each team was last
-/// hurt (`lastAllyDamage`), so the Firewall trigger (`run_specials`)
-/// can react. Fed by the damage pipeline itself
+/// Upstream KPAI_Fair's `UnitDamaged` hook: where each team's side (it
+/// or an ally) was last hurt (`lastAllyDamage`), so the Firewall
+/// trigger (`run_specials`) can react. Fed by the damage pipeline itself
 /// (`DamageResolver::deliver`) for every hit of at least half a point.
 #[derive(Resource, Default)]
 pub struct TeamDamageLog {
@@ -1072,9 +1125,9 @@ mod tests {
     fn ai_seats_come_from_the_setup() {
         use crate::game_setup::{GameSetup, PlayerSpec};
         use crate::units::components::Faction;
-        let seat = |team, ai| PlayerSpec {
+        let seat = |ally_team, ai| PlayerSpec {
             faction: Faction::System,
-            team,
+            ally_team,
             ai,
         };
         let setup = GameSetup {
@@ -1088,9 +1141,11 @@ mod tests {
             ],
             ..GameSetup::default()
         };
+        // Every AI seat is an owner of its own, an ally of a human or
+        // not (seat 4 shares ally team 2 with the human seat 5).
         let seats = AiSeats::from_setup(&setup);
-        assert_eq!(seats.0, vec![1, 3]);
-        assert!(seats.contains(3) && !seats.contains(0) && !seats.contains(2));
+        assert_eq!(seats.0, vec![0, 2, 3, 4]);
+        assert!(seats.contains(4) && !seats.contains(1) && !seats.contains(5));
     }
 
     /// KPAI's `IsItOccupied*` are boxes, not circles: a corner offset of
@@ -1118,11 +1173,22 @@ mod tests {
         index.insert_for_test(entry(2, 0, UnitKind::Socket, 200.0));
         index.insert_for_test(entry(3, 0, UnitKind::Bit, 500.0));
         index.insert_for_test(entry(4, 0, UnitKind::Bit, 900.0));
-        let (pos, d) = nearest_enemy(&index, 1, Vec3::ZERO, 700.0, |_| true).unwrap();
+        let (pos, d) = nearest_enemy(&index, &Alliances::default(), 1, Vec3::ZERO, 700.0, |_| {
+            true
+        })
+        .unwrap();
         assert_eq!(pos.x, 200.0);
         assert!((d - 200.0).abs() < 1e-3);
-        let (pos, _) = nearest_enemy(&index, 1, Vec3::ZERO, 700.0, |k| !k.is_building()).unwrap();
+        let (pos, _) = nearest_enemy(&index, &Alliances::default(), 1, Vec3::ZERO, 700.0, |k| {
+            !k.is_building()
+        })
+        .unwrap();
         assert_eq!(pos.x, 500.0);
-        assert!(nearest_enemy(&index, 1, Vec3::ZERO, 150.0, |_| true).is_none());
+        assert!(
+            nearest_enemy(&index, &Alliances::default(), 1, Vec3::ZERO, 150.0, |_| {
+                true
+            })
+            .is_none()
+        );
     }
 }

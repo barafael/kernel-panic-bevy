@@ -20,9 +20,9 @@
 //! [`OnsMode`] is the runtime toggle; [`attach_shields`] is gated on
 //! it and stays a no-op for the default sandbox game.
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;

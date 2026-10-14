@@ -2,11 +2,11 @@
 //! face the camera. Bars are child entities of the unit so they follow it
 //! automatically; we only need to update scale/color each frame.
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 use super::core::{Selected, SelectionSet};
 use crate::rendering::camera::RtsCamera;
+use crate::sim::DetFloat;
 use crate::units::components::{Health, UnitType, health_color};
 
 /// Translucent black backing color for the health bar's background

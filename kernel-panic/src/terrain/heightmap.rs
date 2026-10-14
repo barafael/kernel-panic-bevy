@@ -11,9 +11,9 @@
 //! so a unit crossing a slope sees a smooth Y instead of stair-stepping
 //! between heightmap cells.
 
-use crate::sim::DetFloat;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use spring_map::map_types::SQUARE_SIZE;
 
 /// Floor so short shots still sample meaningfully; cap so pathologically

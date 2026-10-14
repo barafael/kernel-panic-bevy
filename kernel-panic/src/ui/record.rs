@@ -14,7 +14,6 @@
 //! plays at game speed however slowly the capture runs. Not compiled
 //! for wasm (no disk, no processes).
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::io::Write;
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -29,6 +28,7 @@ use bevy::window::{MonitorSelection, PrimaryWindow, WindowMode};
 use crate::game_setup::{AppState, DevOptions, GameSetup, demo_setup};
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
+use crate::sim::DetFloat;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Homebase, UnitType};
 

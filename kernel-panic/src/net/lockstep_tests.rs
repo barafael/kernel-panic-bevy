@@ -167,6 +167,7 @@ fn peer(local: u8, delay: u32, entity_offset: usize, ai: bool) -> Peer {
             .init_resource::<crate::units::mechanics::network_buffer::PacketBuffer>();
         h.world
             .init_resource::<crate::units::spatial::SpatialIndex>();
+        h.world.init_resource::<crate::units::teams::Alliances>();
         h.pre_schedule
             .add_systems(ai::ai_brain.after(apply::apply_sim_commands));
     }

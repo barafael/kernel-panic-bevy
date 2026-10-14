@@ -144,6 +144,10 @@ The CI build matches the shipped web build: profile `wasm-release`, `wasm-bindge
 
 ### Golden logs (`kernel-panic/tests/golden/`)
 
+(Re-recorded in M1 with format 2 / `SIM_VERSION` 2 — per-seat owners, so the 4v4 is eight AI
+owners — plus `2v2_dual_core`, a 2v2 played to its end; current numbers in
+`m1-sim-rules.md` §7. The table below is the M0.4 state.)
+
 | log | setup | ticks | content |
 |---|---|---|---|
 | `4v4_speed_balls` | Speed_Balls_16_Way, 2 ally teams × 4 AI seats, difficulty 2, seed `0x5eed` (X-sim's scenario) | 18 000 | 84 B, no frames; 41 units at the end |
@@ -285,8 +289,9 @@ does.
 
 ## Open
 
-- **`f32::max`/`min` with signed zeros** differ between x86_64 and aarch64 (float probe `chk:`
-  row). Harmless while no sim value can be `-0.0` against `+0.0` in a `max`/`min` whose result's
+- ~~**`f32::max`/`min` with signed zeros**~~ — done in M1 (`m1-sim-rules.md` §1: banned,
+  `DetFloat` instead, new `det:` probe rows). Originally: they differ between x86_64 and aarch64
+  (float probe `chk:` row). Harmless while no sim value can be `-0.0` against `+0.0` in a `max`/`min` whose result's
   sign matters (a later division, `atan2`, or the hashed bits). The trails say it is not hit in
   these matches; a `clippy.toml` ban in sim code (in favour of a sign-canonical helper) would
   make it certain.

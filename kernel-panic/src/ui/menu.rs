@@ -22,7 +22,6 @@
 //! paused by the Esc menu, but the overlay is modal for the mouse: while
 //! it is open no press reaches the HUD or the world.
 
-use crate::sim::DetFloat;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::input::InputSystems;
@@ -41,6 +40,7 @@ use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use crate::rendering::settings::{MsaaSupport, RenderSettings, VolumeKnob, WINDOW_SIZES};
 use crate::rng::clock_f64;
+use crate::sim::DetFloat;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
@@ -754,8 +754,8 @@ fn handle_menu_actions(
             MenuAction::CycleEnemyFaction => {
                 config.enemy_faction = next_faction(config.enemy_faction);
             }
-            MenuAction::SetGrouping(g) => config.grouping = g,
-            MenuAction::SetDifficulty(d) => config.difficulty = d,
+            MenuAction::SetGrouping(g) => config.set_grouping(g),
+            MenuAction::SetDifficulty(d) => config.set_difficulty(d),
             MenuAction::PickMap(i) => {
                 config.map = Some(i);
                 **page = MenuPage::AdvancedSkirmish;
@@ -1771,10 +1771,11 @@ fn advanced_skirmish_page(
             .spawn(commands, root);
     }
 
-    // Grouping presets: left column. (Spectate / Team Game / Heroic are
-    // not implemented yet — see `Grouping`.)
+    // Grouping presets: left column, in the original's order. (Spectate
+    // and Heroic are not implemented yet — see `Grouping`.)
     for (i, (g, color)) in [
         (Grouping::Duel, MEDIUM_GREEN),
+        (Grouping::Team, HARD_YELLOW),
         (Grouping::Outgunned, EXTREME_ORANGE),
     ]
     .into_iter()
@@ -2300,12 +2301,15 @@ fn maintain_game_over(
     mut commands: Commands,
     existing_root: Query<Entity, With<GameOverPanel>>,
     windows: Query<&Window>,
-    mut last: Local<bool>,
+    mut last: Local<Option<(bool, GameState)>>,
 ) {
-    if *last == game_over_open.0 {
+    // Redrawn when the result changes under an open panel too: a
+    // fallen player's allies winning turns "You lost!" into "You won!".
+    let now = (game_over_open.0, *game_state.get());
+    if *last == Some(now) {
         return;
     }
-    *last = game_over_open.0;
+    *last = Some(now);
     for e in &existing_root {
         commands.entity(e).despawn();
     }

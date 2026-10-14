@@ -13,7 +13,6 @@
 //! - [`s3o_mount`] — the per-model [`PieceLayout`] `spawn_unit` mounts.
 //! - [`mod`](self) — [`spawn_unit`] + the top-level spawners.
 
-use crate::sim::DetFloat;
 use bevy::ecs::system::SystemParam;
 use bevy::math::ops;
 use bevy::prelude::*;
@@ -22,7 +21,7 @@ use crate::units::assets::animation::PieceIndex;
 use spring_map::smd_parser::MapInfo;
 
 use super::production::default_production;
-use crate::sim::Heading;
+use crate::sim::{DetFloat, Heading};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{
     S3OModelCache, piece_layout, selection_sphere, unit_material, unit_mid_y, unit_radius,
@@ -80,9 +79,10 @@ const HOMEBASE_EDGE_MARGIN: f32 = 100.0;
 /// Spawn one homebase per seat of the match, like upstream
 /// `game_spawn.lua`: seat `i` takes the map's `i`-th start position and
 /// gets its side's start unit (System → Kernel, Hacker → Hole,
-/// Network → Carrier) on the seat's ally team. Seats beyond the map's
-/// declared start positions fall back to a ring around the map centre.
-/// Returns each seat's faction, team and homebase position.
+/// Network → Carrier), owned by the seat's owner (`TeamId(i)`, Spring's
+/// team `i`; `units::teams`). Seats beyond the map's declared start
+/// positions fall back to a ring around the map centre. Returns each
+/// seat's faction, owner and homebase position.
 pub fn spawn_homebases(
     heightmap: &Heightmap,
     map_info: &MapInfo,
@@ -118,7 +118,7 @@ pub fn spawn_homebases(
     }
     let barycenter = positions.iter().sum::<Vec3>() / positions.len().max(1) as f32;
 
-    for (seat, &home_pos) in players.iter().zip(&positions) {
+    for ((seat, &home_pos), owner) in players.iter().zip(&positions).zip(0u8..) {
         let heading = exit_heading(
             home_pos,
             barycenter,
@@ -129,12 +129,12 @@ pub fn spawn_homebases(
         spawn_unit_facing(
             seat.faction.homebase(),
             seat.faction,
-            seat.team,
+            owner,
             home_pos,
             heading,
             ctx,
         );
-        bases.push((seat.faction, seat.team, home_pos));
+        bases.push((seat.faction, owner, home_pos));
     }
 
     info!("Spawned {} homebases", players.len());

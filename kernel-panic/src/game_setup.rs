@@ -13,8 +13,9 @@ use bevy::prelude::*;
 use crate::rng::clock_f64;
 use crate::units::components::Faction;
 
-/// Top-level app state: the menu system owns `Menu`; the simulation runs
-/// in `InGame` (where `GameState` Playing/Victory/Defeat applies).
+/// Top-level app state: the menu system owns `Menu`; the match runs in
+/// `InGame` (where the result panel's `GameState` applies; the sim also
+/// runs the attract demo behind the menu).
 #[derive(States, Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AppState {
     #[default]
@@ -22,13 +23,16 @@ pub enum AppState {
     InGame,
 }
 
-/// One seat in the match.
+/// One seat in the match. Seat `i` is owner `i` (Spring's *team*): its
+/// units carry `TeamId(i)`, it takes the map's `i`-th start position,
+/// and it holds its own unit cap, packet buffer and (for an AI seat)
+/// its own AI brain (`units::teams`).
 #[derive(Debug, Clone)]
 pub struct PlayerSpec {
     pub faction: Faction,
-    /// Ally team. Players sharing a team are friendly (the local player
-    /// is always team 0).
-    pub team: u8,
+    /// Ally team (Spring's *allyteam*): seats sharing one are friendly,
+    /// share cloak detection and sight, and win or lose together.
+    pub ally_team: u8,
     /// AI seats never run the local input path. A setup without any
     /// human seat is spectated (see [`SPECTATOR_TEAM`]).
     pub ai: bool,
@@ -39,7 +43,9 @@ pub struct PlayerSpec {
 pub struct GameSetup {
     /// Map file stem, resolved against the map catalog (`assets/maps/`).
     pub map: String,
-    /// Player 0 is the local player (team 0); the rest are AI seats.
+    /// The seats, in owner order. The first human seat is the local
+    /// player; the rest are AI seats (or, in a networked match, other
+    /// peers' seats).
     pub players: Vec<PlayerSpec>,
     /// 1 Easy … 4 Extreme. Drives the AI fairness slack (`AiDifficulty`
     /// mirrors it at match start); enemy count comes from the grouping.
@@ -73,12 +79,12 @@ impl Default for GameSetup {
             players: vec![
                 PlayerSpec {
                     faction: Faction::System,
-                    team: 0,
+                    ally_team: 0,
                     ai: false,
                 },
                 PlayerSpec {
                     faction: Faction::Hacker,
-                    team: 1,
+                    ally_team: 1,
                     ai: true,
                 },
             ],
@@ -91,9 +97,9 @@ impl Default for GameSetup {
     }
 }
 
-/// Local "team" when no seat is human (the menu's attract-mode demo):
-/// no unit ever carries it, so every seat is an opponent the AI drives
-/// and the player only watches.
+/// Local owner when no seat is human (the menu's attract-mode demo):
+/// no unit ever carries it and it has no seat, so the player only
+/// watches.
 pub const SPECTATOR_TEAM: u8 = u8::MAX;
 
 /// Developer hooks from environment variables, read once at startup
@@ -281,8 +287,9 @@ pub fn dev_run_control(
 }
 
 /// The main-menu attract-mode setup: a random all-AI skirmish on a
-/// weighted-random map — 2 to 4 seats of random factions, each on its
-/// own team, played by the AI while the player spectates. The menu's
+/// weighted-random map — 2 to 4 seats of random factions, each its own
+/// ally team (free-for-all), played by the AI while the player
+/// spectates. The menu's
 /// demo director restarts it with a fresh roll once it's decided.
 /// [`DevOptions`] can pin the factions and the map.
 pub fn demo_setup(dev: &DevOptions) -> GameSetup {
@@ -290,7 +297,7 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
     let mut players: Vec<PlayerSpec> = (0..seats)
         .map(|i| PlayerSpec {
             faction: Faction::ALL[(clock_f64() * 3.0) as usize % 3],
-            team: 1 + i,
+            ally_team: i,
             ai: true,
         })
         .collect();
@@ -300,7 +307,7 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
             .enumerate()
             .map(|(i, &faction)| PlayerSpec {
                 faction,
-                team: 1 + i as u8,
+                ally_team: i as u8,
                 ai: true,
             })
             .collect();
@@ -339,7 +346,7 @@ pub fn showcase_setup(faction: Faction) -> GameSetup {
         map: "Data_Cache_L1".to_string(),
         players: vec![PlayerSpec {
             faction,
-            team: 0,
+            ally_team: 0,
             ai: false,
         }],
         difficulty: 1,
@@ -358,6 +365,11 @@ pub struct SkirmishConfig {
     pub enemy_faction: Faction,
     pub grouping: Grouping,
     pub difficulty: u8,
+    /// The Team Game roster, rolled when the grouping or difficulty
+    /// changes ([`SkirmishConfig::set_grouping`]), so the description
+    /// line names the match Run! starts, as the original's page showed
+    /// the skirmish it had already generated.
+    pub team_roll: TeamRoll,
 }
 
 impl Default for SkirmishConfig {
@@ -368,18 +380,124 @@ impl Default for SkirmishConfig {
             enemy_faction: Faction::Hacker,
             grouping: Grouping::Duel,
             difficulty: 2,
+            team_roll: TeamRoll::roll(2, &mut clock_f64),
         }
     }
 }
 
-/// Battle shape presets from the original's advanced page. (Spectate and
-/// Heroic are not implemented in the remake yet — see the menu module.)
+impl SkirmishConfig {
+    pub fn set_grouping(&mut self, grouping: Grouping) {
+        self.grouping = grouping;
+        self.team_roll = TeamRoll::roll(self.difficulty, &mut clock_f64);
+    }
+
+    pub fn set_difficulty(&mut self, difficulty: u8) {
+        self.difficulty = difficulty;
+        self.team_roll = TeamRoll::roll(difficulty, &mut clock_f64);
+    }
+}
+
+/// Battle shape presets from the original's advanced page
+/// (`GenerateGame.lua`'s groupings 1–3; Spectate and Heroic are not
+/// implemented in the remake yet — see the menu module).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grouping {
     /// 1 human vs 1 AI.
     Duel,
-    /// 1 human vs N AI, N growing with difficulty.
+    /// The human and AI allies against AI enemies, sides of a size
+    /// rolled per difficulty ([`TeamRoll`]).
+    Team,
+    /// 1 human vs N AI, N growing with difficulty (upstream's
+    /// "Challenge").
     Outgunned,
+}
+
+/// Half the seats a map offers, upstream's `HalfMaxMapTeam`
+/// (`floor(MaxPlayers / 2)`). The remake rolls the roster before the
+/// map is read and seats beyond a map's start positions on a ring
+/// (`spawning::spawn_homebases`), so it takes the 4v4 the multiplayer
+/// plan supports: at most 8 seats.
+const HALF_MAX_TEAM: u8 = 4;
+
+/// A Team Game roster: `GenerateSkirmish`, grouping 2
+/// (`GenerateGame.lua:123-143` sizes, `:229-237` the player's seat,
+/// `:270-290` the sides).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TeamRoll {
+    /// Seats on the player's side, the player included.
+    pub allies: u8,
+    pub enemies: u8,
+    /// The player's seat (`PlayerTeamNum`).
+    pub player: u8,
+}
+
+impl TeamRoll {
+    /// Upstream's sizes per difficulty (`GenerateRandInt(a, b)` is
+    /// inclusive) and the player's seat: an even seat when the player's
+    /// side outnumbers the other, an odd one when outnumbered, so the
+    /// interleaved start positions of [`TeamRoll::enemy`] work out.
+    /// `rand` yields uniform [0, 1).
+    pub fn roll(difficulty: u8, rand: &mut impl FnMut() -> f64) -> Self {
+        let mut int = |lo: u8, hi: u8| {
+            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            lo + ((rand() * f64::from(hi - lo + 1)) as u8).min(hi - lo)
+        };
+        let half = HALF_MAX_TEAM;
+        let (allies, enemies) = match difficulty {
+            1 => {
+                let a = int(2, half);
+                (a, a - 1)
+            }
+            2 => {
+                let a = int(2, half);
+                (a, a)
+            }
+            3 => {
+                let a = int(2, half - 1);
+                (a, int(a + 1, half + 1))
+            }
+            _ => {
+                let e = int(3, half + 1);
+                (int(1, e - 2), e)
+            }
+        };
+        let mut player = int(0, allies + enemies - 1);
+        if allies > 1 {
+            if enemies < allies {
+                player = 2 * int(0, allies - 1);
+            }
+            if enemies > allies {
+                player = 1 + 2 * int(0, allies - 1);
+            }
+        }
+        Self {
+            allies,
+            enemies,
+            player,
+        }
+    }
+
+    pub fn seats(self) -> u8 {
+        self.allies + self.enemies
+    }
+
+    /// Is seat `p` on the other side? Upstream alternates the sides
+    /// over the seats (so over the start positions) and gives the
+    /// bigger side the trailing seats.
+    pub fn enemy(self, p: u8) -> bool {
+        let (allies, enemies) = (self.allies, self.enemies);
+        if allies <= 1 {
+            return p != self.player;
+        }
+        let mut enemy = !(p + self.player).is_multiple_of(2);
+        if enemies < allies && p > 2 * enemies {
+            enemy = false;
+        }
+        if allies < enemies && p > 2 * allies {
+            enemy = true;
+        }
+        enemy
+    }
 }
 
 impl Grouping {
@@ -387,6 +505,7 @@ impl Grouping {
     pub fn label(self) -> &'static str {
         match self {
             Grouping::Duel => "Duel",
+            Grouping::Team => "Team Game",
             Grouping::Outgunned => "Outgunned",
         }
     }
@@ -399,6 +518,10 @@ impl Grouping {
             (Grouping::Duel, 2) => "Standard Duel",
             (Grouping::Duel, 3) => "Experienced Duel",
             (Grouping::Duel, _) => "Veteran's Duel",
+            (Grouping::Team, 1) => "Easy Team Game",
+            (Grouping::Team, 2) => "Medium Team Game",
+            (Grouping::Team, 3) => "Hard Team Game",
+            (Grouping::Team, _) => "Very Hard Team Game",
             (Grouping::Outgunned, 1) => "Tough Challenge",
             (Grouping::Outgunned, 2) => "Difficult Challenge",
             (Grouping::Outgunned, 3) => "Insane Challenge",
@@ -406,11 +529,13 @@ impl Grouping {
         }
     }
 
-    /// AI enemy count for a given difficulty.
-    pub fn enemies(self, difficulty: u8) -> usize {
+    /// `(allies, enemies)`: seats on the player's side (the player
+    /// included) and on the other. Team Game's come from the `roll`.
+    pub fn sides(self, difficulty: u8, roll: TeamRoll) -> (usize, usize) {
         match self {
-            Grouping::Duel => 1,
-            Grouping::Outgunned => 1 + (difficulty as usize).min(4),
+            Grouping::Duel => (1, 1),
+            Grouping::Team => (roll.allies as usize, roll.enemies as usize),
+            Grouping::Outgunned => (1, 1 + (difficulty as usize).min(4)),
         }
     }
 }
@@ -434,9 +559,9 @@ impl AiDifficulty {
 }
 
 /// Set once the player dismisses the game-over panel ("Keep on
-/// playing"), so `check_game_over` doesn't immediately re-trigger while
-/// the victory condition still holds. Match-scoped: re-armed at every
-/// match swap.
+/// playing / watching"); cleared when a new outcome is announced
+/// (`game_over::announce_outcome`). UI only. Match-scoped: re-armed at
+/// every match swap.
 #[derive(Debug, Clone, Copy, Resource, Default)]
 pub struct GameOverDismissed(pub bool);
 
@@ -466,19 +591,32 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
             .unwrap_or_else(random_weighted_map),
         None => random_weighted_map(),
     };
-    let enemies = config.grouping.enemies(config.difficulty);
-    let mut players = vec![PlayerSpec {
-        faction: config.your_faction,
-        team: 0,
-        ai: false,
-    }];
-    for _ in 0..enemies {
-        players.push(PlayerSpec {
-            faction: config.enemy_faction,
-            team: 1,
-            ai: true,
-        });
-    }
+    let seat = |enemy: bool, ai: bool| PlayerSpec {
+        faction: if enemy {
+            config.enemy_faction
+        } else {
+            config.your_faction
+        },
+        ally_team: u8::from(enemy),
+        ai,
+    };
+    let players = match config.grouping {
+        // Upstream seats the sides interleaved, the player at its
+        // rolled seat; allies take the player's faction.
+        Grouping::Team => {
+            let roll = config.team_roll;
+            (0..roll.seats())
+                .map(|p| seat(roll.enemy(p), p != roll.player))
+                .collect()
+        }
+        // The player first, then one seat (one owner, one AI) per enemy.
+        Grouping::Duel | Grouping::Outgunned => {
+            let (_, enemies) = config.grouping.sides(config.difficulty, config.team_roll);
+            std::iter::once(seat(false, false))
+                .chain((0..enemies).map(|_| seat(true, true)))
+                .collect()
+        }
+    };
     GameSetup {
         map,
         players,
@@ -493,12 +631,18 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
 /// The live description line shown under the advanced page, in the
 /// original's `"<setup>: <allies>v<enemies> - <faction>"` format.
 pub fn describe_setup(config: &SkirmishConfig) -> String {
-    let enemies = config.grouping.enemies(config.difficulty);
+    let (allies, enemies) = config.grouping.sides(config.difficulty, config.team_roll);
+    let player = match config.grouping {
+        Grouping::Team => config.team_roll.player,
+        Grouping::Duel | Grouping::Outgunned => 0,
+    };
     format!(
-        "{}: 1v{} - Player is #0 in [0..{}] and {:?}",
+        "{}: {}v{} - Player is #{} in [0..{}] and {:?}",
         config.grouping.setup_name(config.difficulty),
+        allies,
         enemies,
-        enemies,
+        player,
+        allies + enemies - 1,
         config.your_faction,
     )
 }
@@ -572,8 +716,69 @@ mod tests {
         };
         let setup = build_setup(&config, &[]);
         assert!(!setup.players[0].ai);
-        assert_eq!(setup.players[0].team, 0);
-        assert!(setup.players[1..].iter().all(|p| p.ai && p.team == 1));
+        assert_eq!(setup.players[0].ally_team, 0);
+        assert!(setup.players[1..].iter().all(|p| p.ai && p.ally_team == 1));
+    }
+
+    /// Upstream's Team Game sizes per difficulty, with `HalfMaxMapTeam`
+    /// = 4, over the whole range of the dice.
+    #[test]
+    fn team_roll_sizes_follow_upstream() {
+        for difficulty in 1..=4 {
+            for step in 0..64 {
+                let mut k = 0u32;
+                let mut rand = || {
+                    k += 1;
+                    f64::from((step * 7 + k * 13) % 64) / 64.0
+                };
+                let r = TeamRoll::roll(difficulty, &mut rand);
+                let (a, e) = (r.allies, r.enemies);
+                match difficulty {
+                    1 => assert!((2..=4).contains(&a) && e == a - 1, "{r:?}"),
+                    2 => assert!((2..=4).contains(&a) && e == a, "{r:?}"),
+                    3 => assert!((2..=3).contains(&a) && (a + 1..=5).contains(&e), "{r:?}"),
+                    _ => assert!((3..=5).contains(&e) && (1..=e - 2).contains(&a), "{r:?}"),
+                }
+                assert!(r.player < r.seats());
+                assert!(r.seats() <= 8);
+                let enemies = (0..r.seats()).filter(|p| r.enemy(*p)).count() as u8;
+                assert_eq!(enemies, e, "{r:?}");
+                assert!(!r.enemy(r.player), "the player is on its own side: {r:?}");
+            }
+        }
+    }
+
+    /// A Team Game seats every side's owners in their own ally team:
+    /// the human plus AI allies on team 0, AI enemies on team 1.
+    #[test]
+    fn team_game_has_ai_allies() {
+        let config = SkirmishConfig {
+            grouping: Grouping::Team,
+            difficulty: 2,
+            team_roll: TeamRoll {
+                allies: 3,
+                enemies: 3,
+                player: 1,
+            },
+            ..default()
+        };
+        let setup = build_setup(&config, &[]);
+        let humans: Vec<usize> = (0..setup.players.len())
+            .filter(|i| !setup.players[*i].ai)
+            .collect();
+        assert_eq!(humans, vec![1]);
+        let sides: Vec<u8> = setup.players.iter().map(|p| p.ally_team).collect();
+        assert_eq!(sides, vec![1, 0, 1, 0, 1, 0]);
+        assert!(
+            setup
+                .players
+                .iter()
+                .all(|p| (p.ally_team == 0) == (p.faction == config.your_faction))
+        );
+        assert_eq!(
+            describe_setup(&config),
+            "Medium Team Game: 3v3 - Player is #1 in [0..5] and System"
+        );
     }
 
     #[test]

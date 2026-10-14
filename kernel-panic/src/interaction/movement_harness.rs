@@ -11,7 +11,6 @@
 //! `cargo test -p kernel-panic movement_harness -- --ignored --nocapture`.
 //! The non-ignored tests assert the behaviour Spring exhibits.
 
-use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::time::Duration;
 
@@ -19,6 +18,7 @@ use bevy::prelude::*;
 use spring_pathfinding::SpeedMap;
 
 use super::movement::{CommandQueue, MovePath, MoveTarget, NavBucket, NavGridSet, QueuedCommand};
+use crate::sim::DetFloat;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::components::{TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;

@@ -62,9 +62,7 @@ use bevy::render::settings::WgpuSettings;
 use bevy::time::TimeUpdateStrategy;
 use bevy::window::ExitCondition;
 
-use crate::game_setup::{
-    ActiveMatch, AppState, DevOptions, GameOverDismissed, GameSetup, PlayerSpec,
-};
+use crate::game_setup::{ActiveMatch, AppState, DevOptions, GameSetup, PlayerSpec};
 use crate::map_loading::MapCatalog;
 use crate::units::components::{Faction, Homebase};
 
@@ -98,8 +96,8 @@ pub struct Scenario {
 }
 
 impl Scenario {
-    /// `teams` ally teams of `per_team` AI seats each, factions cycling
-    /// System → Hacker → Network across the seats.
+    /// `teams` ally teams of `per_team` AI seats (owners) each, factions
+    /// cycling System → Hacker → Network across the seats.
     pub fn ai_match(map: &str, teams: u8, per_team: u8, seed: u64) -> Self {
         let mut seats = Vec::new();
         for t in 0..teams {
@@ -107,7 +105,7 @@ impl Scenario {
                 let i = (t * per_team + p) as usize;
                 seats.push(PlayerSpec {
                     faction: Faction::ALL[i % 3],
-                    team: t,
+                    ally_team: t,
                     ai: true,
                 });
             }
@@ -466,10 +464,8 @@ async fn enter_match(app: &mut App, scenario: &Scenario, rematch: bool) {
         );
         pause().await;
     }
-    // All seats are AI: the local "player" spectates, and a spectator
-    // owns no factory — keep the Defeat panel from freezing the sim
-    // (eliminations still run).
-    app.world_mut().insert_resource(GameOverDismissed(true));
+    // No Defeat / Victory to dismiss: the local outcome is UI only and
+    // never stops the sim (`game_over::announce_outcome`).
     app.world_mut().resource_mut::<TickTimer>().ticks.clear();
     app.insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
 }
