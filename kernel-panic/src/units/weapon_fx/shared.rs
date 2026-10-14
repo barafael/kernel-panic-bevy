@@ -2,6 +2,7 @@
 //! visual marker components, the cached beam-material registry, and the
 //! TDF-colour normaliser.
 
+use crate::sim::DetFloat;
 use std::sync::Arc;
 
 use bevy::prelude::*;
@@ -494,11 +495,11 @@ impl BeamMaterialCache {
         tile_count: u32,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        let emissive_scale = (intensity.max(0.5) * 4.0).clamp(1.0, 40.0);
+        let emissive_scale = (intensity.det_max(0.5) * 4.0).det_clamp(1.0, 40.0);
         let key = MaterialKey {
-            r: (color.red.clamp(0.0, 1.0) * 15.0).round() as u8,
-            g: (color.green.clamp(0.0, 1.0) * 15.0).round() as u8,
-            b: (color.blue.clamp(0.0, 1.0) * 15.0).round() as u8,
+            r: (color.red.det_clamp(0.0, 1.0) * 15.0).round() as u8,
+            g: (color.green.det_clamp(0.0, 1.0) * 15.0).round() as u8,
+            b: (color.blue.det_clamp(0.0, 1.0) * 15.0).round() as u8,
             additive,
             premultiplied: false,
             intensity: (emissive_scale * 2.0).round() as u8,

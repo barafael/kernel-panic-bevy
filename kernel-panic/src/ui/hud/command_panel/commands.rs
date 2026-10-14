@@ -24,6 +24,7 @@
 //! `CSelectedUnitsHandler::GetAvailableCommands`: every non-build command
 //! in unit order (first occurrence wins), then every build command.
 
+use crate::sim::DetFloat;
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -249,7 +250,7 @@ fn is_mobile(kind: UnitKind) -> bool {
 /// Upstream label while a SIGTERM / Firewall recharges:
 /// `math.ceil((readyFrame - now) / 32) .. "s"`.
 pub(crate) fn recharge_label(seconds: f32) -> String {
-    format!("{}s", seconds.ceil().max(1.0) as u32)
+    format!("{}s", seconds.ceil().det_max(1.0) as u32)
 }
 
 /// The keypad keys `kp_hotkeys.lua` binds to `buildunit_<minifac>`.

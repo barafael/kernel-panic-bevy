@@ -16,6 +16,7 @@
 //!   teleporter's buffered packets.
 
 use crate::map_loading::MatchScopeAppExt;
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -337,7 +338,7 @@ fn refresh_tooltip(
         (ut.0, health, packets)
     });
     let lines = tooltip_lines(&hover, selected, unit, &registry);
-    let font_size = (4.0 + window.height() / 100.0).max(8.0);
+    let font_size = (4.0 + window.height() / 100.0).det_max(8.0);
 
     // Same shape as the tree on screen: refresh the changed segments in
     // place (and the box width when the widest line changed).

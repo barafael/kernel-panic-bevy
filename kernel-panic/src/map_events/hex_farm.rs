@@ -27,6 +27,7 @@
 //!
 //! Everything is inert unless the map loader inserted [`HexFarmState`].
 
+use crate::sim::DetFloat;
 use crate::sim::sq;
 use std::collections::{HashMap, HashSet};
 
@@ -108,7 +109,7 @@ struct Anim {
 
 impl Anim {
     fn progress(&self, frame: f64) -> f32 {
-        let p = ((frame - self.first) / (self.last - self.first)).clamp(0.0, 1.0) as f32;
+        let p = ((frame - self.first) / (self.last - self.first)).det_clamp(0.0, 1.0) as f32;
         if self.direction < 0 { 1.0 - p } else { p }
     }
 }
@@ -460,7 +461,7 @@ fn hex_farm_sim(
                 corner,
             } => {
                 // `if firstframe>=lastframe then firstframe=lastframe-1`
-                let first = first_frame.min(last_frame - 1.0);
+                let first = first_frame.det_min(last_frame - 1.0);
                 let v = view.poly_mut(poly);
                 v.anim = Some(Anim {
                     first,
@@ -490,7 +491,7 @@ fn hex_farm_sim(
     if reshaped {
         *minimap_pending = true;
     }
-    *minimap_cooldown = (*minimap_cooldown - crate::sim::INV_GAME_SPEED).max(0.0);
+    *minimap_cooldown = (*minimap_cooldown - crate::sim::INV_GAME_SPEED).det_max(0.0);
     if *minimap_pending
         && *minimap_cooldown <= 0.0
         && let Some(mm) = minimap.as_deref_mut()
@@ -788,9 +789,9 @@ fn hex_farm_labels(
         };
         let center =
             corners.iter().map(|c| Vec3::from_array(*c)).sum::<Vec3>() / corners.len() as f32;
-        let v = (value as f32 * 2.5 / 255.0).clamp(0.0, 1.0);
+        let v = (value as f32 * 2.5 / 255.0).det_clamp(0.0, 1.0);
         color.set_if_neq(TextColor(if hidden {
-            Color::srgb(0.0, 1.0, (253.0 / 255.0 - v).max(0.0))
+            Color::srgb(0.0, 1.0, (253.0 / 255.0 - v).det_max(0.0))
         } else {
             Color::srgb(1.0, v, 0.0)
         }));

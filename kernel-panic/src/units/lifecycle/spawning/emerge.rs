@@ -4,6 +4,7 @@
 //! ticks it forward and removes the component when the animation
 //! completes.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 /// Marks a freshly-built unit that hasn't finished emerging from its
@@ -100,10 +101,10 @@ pub fn emerge_system(
     let dt = time.delta_secs();
     for (entity, mut transform, mut emerging, fade, has_move, queue, driven) in &mut q {
         if !driven {
-            emerging.remaining = (emerging.remaining - dt).max(0.0);
+            emerging.remaining = (emerging.remaining - dt).det_max(0.0);
         }
         // t goes 0 → 1 over the duration.
-        let t = (1.0 - emerging.remaining / emerging.total).clamp(0.0, 1.0);
+        let t = (1.0 - emerging.remaining / emerging.total).det_clamp(0.0, 1.0);
 
         match emerging.style {
             EmergeStyle::Rise => {

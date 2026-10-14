@@ -1,4 +1,5 @@
 use proptest::prelude::*;
+use spring_detmath::DetFloat;
 use spring_pathfinding::qtpfs::{NodeLayer, QtScratch, QtSearch};
 use spring_pathfinding::*;
 
@@ -49,8 +50,8 @@ proptest! {
         let map = SpeedMap::uniform(width, height, 1.0);
         let max_x = width as f32 * 8.0 - 1.0;
         let max_z = height as f32 * 8.0 - 1.0;
-        let src = [src_x.min(max_x), src_z.min(max_z)];
-        let dst = [dst_x.min(max_x), dst_z.min(max_z)];
+        let src = [src_x.det_min(max_x), src_z.det_min(max_z)];
+        let dst = [dst_x.det_min(max_x), dst_z.det_min(max_z)];
         let path = search(&map, src, dst).expect("open map is always pathable");
         prop_assert!(path.full);
         prop_assert_eq!(path.points.len(), 2);

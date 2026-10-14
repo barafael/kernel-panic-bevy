@@ -1,5 +1,6 @@
 //! Typed weapon definitions extracted from a parsed TDF tree.
 
+use spring_detmath::DetFloat;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -268,14 +269,14 @@ impl WeaponDef {
         if self.explosion_speed_raw > 0.0 {
             return self.explosion_speed_raw;
         }
-        let gd = (self.damage.default / 20.0).max(30.0);
+        let gd = (self.damage.default / 20.0).det_max(30.0);
         (8.0 + 2.5 * gd) / (9.0 + 0.7 * gd.sqrt()) * 0.5
     }
 
     /// `projectilespeed`: `weaponVelocity · INV_GAME_SPEED`, elmos per
     /// sim frame (`WeaponDef.cpp:76`, minimum 0.01 elmos/s).
     pub fn projectile_speed(&self) -> f32 {
-        self.weapon_velocity.max(0.01) * (1.0 / 30.0)
+        self.weapon_velocity.det_max(0.01) * (1.0 / 30.0)
     }
 
     /// The range the weapon actually fires at. A `LaserCannon` rounds
@@ -286,7 +287,7 @@ impl WeaponDef {
     pub fn effective_range(&self) -> f32 {
         if self.category() == WeaponCategory::LaserCannon && self.weapon_velocity > 0.0 {
             let speed = self.projectile_speed();
-            (self.range / speed).floor().max(1.0) * speed
+            (self.range / speed).floor().det_max(1.0) * speed
         } else {
             self.range
         }
@@ -310,7 +311,7 @@ impl WeaponDef {
         let speed = self.projectile_speed();
         let ttl_req = (dist / speed).ceil();
         let ttl_max = (self.range / speed).floor() - 1.0;
-        (ttl_req.min(ttl_max).max(0.0) + 1.0) * speed
+        (ttl_req.det_min(ttl_max).det_max(0.0) + 1.0) * speed
     }
 }
 
@@ -508,7 +509,7 @@ impl WeaponDef {
         } else {
             return 1.0;
         };
-        let t = (dist / denom).clamp(0.0, 1.0);
+        let t = (dist / denom).det_clamp(0.0, 1.0);
         let base = if self.dyn_damage_inverted { t } else { 1.0 - t };
         libm::powf(base, self.dyn_damage_exp)
     }

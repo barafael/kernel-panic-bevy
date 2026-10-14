@@ -21,6 +21,7 @@
 //! `match_stats`), `KP_NET_WARMUP` / `KP_NET_WARMUP_MAP` /
 //! `KP_NET_RESET_FIXED` (`rematch`).
 
+use crate::sim::DetFloat;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write as _;
 
@@ -712,7 +713,7 @@ fn pointer_only_fires_fully_open() {
     // reopens, engages again.
     order_move(&mut h, away);
     run(&mut h, 420, &mut timeline);
-    let moved = timeline.iter().map(|t| t.speed).fold(0.0, f32::max);
+    let moved = timeline.iter().map(|t| t.speed).fold(0.0, f32::det_max);
     // Phase 3: a one-elmo nudge (speed crosses 0.01 and drops back
     // within the Close delay).
     order_move(&mut h, nudge);

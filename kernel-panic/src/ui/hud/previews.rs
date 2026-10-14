@@ -11,6 +11,7 @@
 //! HTTP fetch on web); a picture that fails to load falls back to a
 //! procedural faction-tinted shape so the menu never shows a blank slot.
 
+use crate::sim::DetFloat;
 use bevy::asset::LoadState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -110,9 +111,9 @@ fn synthesise_placeholder(faction: Faction, is_building: bool) -> Image {
 
     const SIZE: u32 = 48;
     let [r, g, b] = faction.rgb_f32();
-    let r = (r.clamp(0.0, 1.0) * 255.0) as u8;
-    let g = (g.clamp(0.0, 1.0) * 255.0) as u8;
-    let b = (b.clamp(0.0, 1.0) * 255.0) as u8;
+    let r = (r.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let g = (g.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let b = (b.det_clamp(0.0, 1.0) * 255.0) as u8;
 
     let mut data = vec![0u8; (SIZE * SIZE * 4) as usize];
     let center = SIZE as f32 / 2.0;

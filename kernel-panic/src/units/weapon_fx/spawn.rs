@@ -2,6 +2,7 @@
 //! event to the appropriate effect spawner (beam, burst, projectile, melee,
 //! plus the bonus nanoframe sparkle for build lasers).
 
+use crate::sim::DetFloat;
 use crate::sim::sq;
 use bevy::prelude::*;
 
@@ -139,7 +140,7 @@ pub(super) fn spawn_weapon_visuals(
             // the cyan shockwave ring IS the visible attack. Replay
             // that CEG at the impact point; the generic melee flash is
             // only the fallback for registries without the splash.
-            let bite_dir = dir / length.max(1e-6);
+            let bite_dir = dir / length.det_max(1e-6);
             let splash_played = weapon_registry.is_worm_bite(event.weapon_id)
                 && spawn_ceg(
                     "corruption_worm_splash",
@@ -317,7 +318,7 @@ pub(super) fn spawn_weapon_visuals(
                     None,
                 );
             if !used_ceg {
-                let aoe = weapon.area_of_effect.max(4.0);
+                let aoe = weapon.area_of_effect.det_max(4.0);
                 spawn_impact_burst(
                     event.target_pos,
                     weapon.rgb_color,
@@ -386,7 +387,7 @@ pub(super) fn spawn_pending_explosions(
                 heightmap.as_deref(),
             );
         if !used_ceg {
-            let aoe = event.radius.max(4.0);
+            let aoe = event.radius.det_max(4.0);
             spawn_impact_burst(
                 event.pos,
                 event.rgb,
@@ -445,7 +446,7 @@ fn spawn_ground_flash(
     // Clamp so even mines / SIGTERM don't swallow the screen, but keep
     // beam pings (AoE=8) readable. Small ring radius feels snappier than
     // the full blast sphere.
-    let base_radius = (aoe * 0.5).clamp(4.0, 80.0);
+    let base_radius = (aoe * 0.5).det_clamp(4.0, 80.0);
     let life = 0.45;
 
     // `Circle` is XY by default; rotate to lie flat on XZ so it hugs the ground.
@@ -487,7 +488,7 @@ fn spawn_impact_burst(
     // Ground-hit weapons benefit from a bigger puff; single-target hit-scan
     // (AoE=8) gets a small blip, while Logic Bomb (AoE=512) bursts large.
     // Clamp so even the largest explosions stay readable.
-    let base_size = (aoe * 0.25).clamp(3.0, 24.0);
+    let base_size = (aoe * 0.25).det_clamp(3.0, 24.0);
     let life = 0.35;
 
     commands.spawn((
@@ -608,7 +609,7 @@ fn spawn_textured_beam(
     // MegaBeam down to a 12-unit stripe, which is why the impact
     // flare and core were reading as a unit hairline rather than the
     // fat upstream ribbon.
-    let thickness = weapon.thickness.max(1.0);
+    let thickness = weapon.thickness.det_max(1.0);
 
     // BeamLaser lifetime comes from `beamtime`/`beamttl`. Color decay is
     // a separate per-frame multiplier on the vertex colors (see
@@ -617,9 +618,9 @@ fn spawn_textured_beam(
     // shots still visibly flash.
     let lifetime = if is_beam_laser {
         let ttl_sec = frames_to_secs(weapon.beam_ttl);
-        weapon.beam_time.max(ttl_sec).max(0.08)
+        weapon.beam_time.det_max(ttl_sec).det_max(0.08)
     } else {
-        weapon.duration.max(0.08)
+        weapon.duration.det_max(0.08)
     };
 
     // Tile the texture along beam length so `arrow`'s `>>>>` or
@@ -710,14 +711,14 @@ fn spawn_textured_beam(
     // covers the outer and baked-colour textures (arrow cyan,
     // bytemegabeam magenta) come through intact. Lower ratios let the
     // outer halo peek around for a two-tone look.
-    let core_ratio = weapon.core_thickness.clamp(0.0, 1.0);
+    let core_ratio = weapon.core_thickness.det_clamp(0.0, 1.0);
     if core_ratio > 0.01 {
         let core_thickness = thickness * core_ratio;
         let core_color = weapon_core_color(weapon);
         let core_mat = cache.get_or_create_tiled(
             core_color,
             true,
-            weapon.intensity.max(1.0),
+            weapon.intensity.det_max(1.0),
             texture.map(|(handle, _)| handle),
             tile_count,
             materials,
@@ -776,21 +777,21 @@ fn spawn_laser_bolt(
     cache: &mut BeamMaterialCache,
 ) -> Entity {
     let delta = event.target_pos - event.attacker_pos;
-    let distance = delta.length().max(0.1);
+    let distance = delta.length().det_max(0.1);
     let direction = delta / distance;
 
     // Trust the authored thickness — see spawn_textured_beam.
-    let thickness = weapon.thickness.max(1.0);
+    let thickness = weapon.thickness.det_max(1.0);
 
     let speed = if weapon.weapon_velocity > 0.0 {
         weapon.weapon_velocity
     } else {
         256.0
     };
-    let duration = weapon.duration.max(0.05);
+    let duration = weapon.duration.det_max(0.05);
     // `max_length = duration * speed` per upstream, with a floor of
     // `thickness * 3` so very short ticks still read as a bolt.
-    let max_length = (speed * duration).max(thickness * 3.0);
+    let max_length = (speed * duration).det_max(thickness * 3.0);
 
     let (tex1, _) = beam_texture_names(weapon);
     let texture = beam_texture(&tex1, model_cache, images);
@@ -835,14 +836,14 @@ fn spawn_laser_bolt(
     // the outer pass, leaving the arrow texture's baked cyan intact.
     // For Byte's MegaBeam (corethickness=0.5) the outer magenta halo
     // surrounds a hot-white core.
-    let core_ratio = weapon.core_thickness.clamp(0.0, 1.0);
+    let core_ratio = weapon.core_thickness.det_clamp(0.0, 1.0);
     if core_ratio > 0.01 {
         let core_thickness = thickness * core_ratio;
         let core_color = weapon_core_color(weapon);
         let core_mat = cache.get_or_create_tiled(
             core_color,
             true,
-            weapon.intensity.max(1.0),
+            weapon.intensity.det_max(1.0),
             texture.map(|(handle, _)| handle),
             tile_count,
             materials,
@@ -972,13 +973,13 @@ fn spawn_projectile(
         } else {
             (
                 fx_meshes.unit_sphere(meshes),
-                (weapon.size * 0.4).clamp(1.5, 6.0),
+                (weapon.size * 0.4).det_clamp(1.5, 6.0),
             )
         }
     } else {
         (
             fx_meshes.unit_sphere(meshes),
-            (weapon.size * 0.4).clamp(1.5, 6.0),
+            (weapon.size * 0.4).det_clamp(1.5, 6.0),
         )
     };
 

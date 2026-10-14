@@ -21,6 +21,7 @@
 //! Indices are 0-based where the gadget's are 1-based; each function's
 //! doc cites the gadget function (and line) it ports.
 
+use spring_detmath::DetFloat;
 use std::f64::consts::PI;
 
 use crate::lua_layout::{HexBridge, HexFarmLayout, HexTower};
@@ -105,15 +106,15 @@ impl Bounds {
             ..Default::default()
         };
         for p in c {
-            b.xmin = b.xmin.min(p[0]);
-            b.xmax = b.xmax.max(p[0]);
-            b.zmin = b.zmin.min(p[1]);
-            b.zmax = b.zmax.max(p[1]);
+            b.xmin = b.xmin.det_min(p[0]);
+            b.xmax = b.xmax.det_max(p[0]);
+            b.zmin = b.zmin.det_min(p[1]);
+            b.zmax = b.zmax.det_max(p[1]);
         }
         b.xmin8 = 8.0 * (b.xmin / 8.0).floor();
         b.zmin8 = 8.0 * (b.zmin / 8.0).floor();
-        b.xmin16 = 8.0 + 16.0 * ((b.xmin - 8.0).max(0.0) / 16.0).floor();
-        b.zmin16 = 8.0 + 16.0 * ((b.zmin - 8.0).max(0.0) / 16.0).floor();
+        b.xmin16 = 8.0 + 16.0 * ((b.xmin - 8.0).det_max(0.0) / 16.0).floor();
+        b.zmin16 = 8.0 + 16.0 * ((b.zmin - 8.0).det_max(0.0) / 16.0).floor();
         b
     }
 }
@@ -128,8 +129,8 @@ pub fn is_inside_polygon(c: &[[f64; 2]], b: &Bounds, x: f64, z: f64) -> bool {
     let mut j = c.len() - 1;
     for i in 0..c.len() {
         let (ci, cj) = (c[i], c[j]);
-        if z >= ci[1].min(cj[1])
-            && z < ci[1].max(cj[1])
+        if z >= ci[1].det_min(cj[1])
+            && z < ci[1].det_max(cj[1])
             && x < (cj[0] - ci[0]) * (z - ci[1]) / (cj[1] - ci[1]) + ci[0]
         {
             inside = !inside;
@@ -370,7 +371,7 @@ impl HexFarm {
         let tower_radius = (192.5 + 576.0 * rng.random()).floor();
         let inter_length = 2.0 * tower_radius + (4.5 + 380.0 * rng.random()).floor();
         let rect_width =
-            (64.5 + (tower_radius - 64.0).max(0.0) * libm::pow(rng.random(), 0.4)).floor();
+            (64.5 + (tower_radius - 64.0).det_max(0.0) * libm::pow(rng.random(), 0.4)).floor();
         let mut bridge_angle = rng.range(-45, 60) as f64 * PI / 180.0;
         if (bridge_angle * 180.0 / PI).abs() < 1.9 {
             bridge_angle = 0.0;
@@ -379,10 +380,10 @@ impl HexFarm {
         let (cx, cz) = (setup.map_size_x / 2.0, setup.map_size_z / 2.0);
         let half_x = 16.0 * (map_dim_scale * setup.map_size_x / 32.0).ceil();
         let half_z = 16.0 * (map_dim_scale * setup.map_size_z / 32.0).ceil();
-        let height_diff = half_x.max(half_z)
+        let height_diff = half_x.det_max(half_z)
             * (1.0 - 2.0 * tower_radius / inter_length)
             * libm::tan(bridge_angle);
-        let pit_depth = 128.0 + tower_radius / cx.max(cz) * height_diff.abs();
+        let pit_depth = 128.0 + tower_radius / cx.det_max(cz) * height_diff.abs();
         let (center_height, edge_height) = if height_diff > 0.0 {
             let center = pit_depth + 512.0;
             (center, center + height_diff)
@@ -519,7 +520,7 @@ impl HexFarm {
     /// (rising or falling outwards with the rolled bridge slope).
     pub fn cone_height(&self, x: f64, z: f64) -> f64 {
         (sq(x - self.map_center_x) + sq(z - self.map_center_z)).sqrt()
-            / self.map_center_x.max(self.map_center_z)
+            / self.map_center_x.det_max(self.map_center_z)
             * (self.edge_height - self.center_height)
             + self.center_height
     }
@@ -554,11 +555,11 @@ impl HexFarm {
         let (dx1, dz1) = (il * libm::cos(la + PI / 6.0), il * libm::sin(la + PI / 6.0));
         let (dx2, dz2) = (il * libm::cos(la - PI / 6.0), il * libm::sin(la - PI / 6.0));
         let m0 = il * 2.0 * libm::cos(PI / 6.0);
-        let r0 = m0 * ((max_x - min_x).max(max_z - min_z) * 1.5 / m0).floor();
+        let r0 = m0 * ((max_x - min_x).det_max(max_z - min_z) * 1.5 / m0).floor();
         let x0 = cx - r0 * libm::cos(la);
         let z0 = cz - r0 * libm::sin(la);
-        let rms = sq((max_x - min_x).min(max_z - min_z) / 2.0 - self.tower_radius);
-        let limit = (2.0 * (max_x - min_x).max(max_z - min_z) / il).floor() as i64;
+        let rms = sq((max_x - min_x).det_min(max_z - min_z) / 2.0 - self.tower_radius);
+        let limit = (2.0 * (max_x - min_x).det_max(max_z - min_z) / il).floor() as i64;
         let com = match self.centered_on {
             CenteredOn::Hole => 0,
             CenteredOn::Tower => 2,
@@ -592,8 +593,8 @@ impl HexFarm {
         if poly.len() > 1 {
             let largest = poly
                 .iter()
-                .fold(0.0f64, |m, p| m.max(p[0].abs()).max(p[1].abs()));
-            let scale = self.map_dim_scale * (cx.max(cz) - self.tower_radius) / largest;
+                .fold(0.0f64, |m, p| m.det_max(p[0].abs()).det_max(p[1].abs()));
+            let scale = self.map_dim_scale * (cx.det_max(cz) - self.tower_radius) / largest;
             for p in &mut poly {
                 *p = [p[0] * scale + cx, p[1] * scale + cz];
             }
@@ -725,8 +726,8 @@ impl HexFarm {
                     };
                     let diff = (mean - dir)
                         .abs()
-                        .min((mean - dir - 2.0 * PI).abs())
-                        .min((mean - dir + 2.0 * PI).abs());
+                        .det_min((mean - dir - 2.0 * PI).abs())
+                        .det_min((mean - dir + 2.0 * PI).abs());
                     if diff < PI / 24.0 {
                         // `cb[1+(p+4)%6]` with the gadget's 1-based p.
                         hits.push((p + 5) % 6);
@@ -780,7 +781,7 @@ impl HexFarm {
                 let sd2 = team_hex[1..]
                     .iter()
                     .map(|&t| sq(self.hexes[t].x - x1) + sq(self.hexes[t].z - z1))
-                    .fold(f64::INFINITY, f64::min);
+                    .fold(f64::INFINITY, f64::det_min);
                 if sd2 > best_sd {
                     best_sd = sd2;
                     best = Some(h1);
@@ -1154,7 +1155,7 @@ impl HexFarm {
                 self.set_state(p, false, Some(0.0), 41.0 / self.bridge_pop_time);
                 let rect = &self.rects[r];
                 let span = if self.hexes[rect.hex1].hidden || self.hexes[rect.hex2].hidden {
-                    self.tower_pop_time.max(self.bridge_pop_time)
+                    self.tower_pop_time.det_max(self.bridge_pop_time)
                 } else {
                     self.bridge_pop_time
                 };
@@ -1317,7 +1318,7 @@ impl HexFarm {
                 ep.remove(k);
             }
         }
-        let top = 2 + (1.42 * xc.max(zc) / step).floor() as usize;
+        let top = 2 + (1.42 * xc.det_max(zc) / step).floor() as usize;
         let mut smp = vec![0.0; top + 1];
         for (k, out) in smp.iter_mut().enumerate() {
             let s = step * k as f64;
@@ -1479,12 +1480,12 @@ mod tests {
             let farm = HexFarm::generate(seed, setup(2 + (seed % 4) as usize));
             let step = 7.0;
             let p = farm.smooth_mesh_profile(step);
-            let void_floor = farm.center_height.min(farm.edge_height) - farm.pit_depth;
+            let void_floor = farm.center_height.det_min(farm.edge_height) - farm.pit_depth;
             let (lo, hi) = farm
                 .hexes
                 .iter()
                 .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), h| {
-                    (lo.min(h.y), hi.max(h.y))
+                    (lo.det_min(h.y), hi.det_max(h.y))
                 });
             for h in &farm.hexes {
                 let s = (sq(h.x - farm.map_center_x) + sq(h.z - farm.map_center_z)).sqrt();

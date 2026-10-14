@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# Target-independent float max / min / clamp (workspace clippy.toml).
+spring-detmath = { workspace = true }
 spring-tdf = { path = "../spring-tdf" }
 spring-map = { path = "../spring-map" }
 spring-unit-mesh = { path = "../spring-unit-mesh" }

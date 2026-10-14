@@ -9,6 +9,7 @@
 //! window. [`PanelConfig::icon_px`] converts to Bevy UI pixels (top-left
 //! origin).
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 /// The subset of the Spring control-panel config KP sets.
@@ -200,9 +201,9 @@ const FONT_HEIGHT_EM: f32 = 0.9;
 /// state buttons) — Spring scales every label to fill its button.
 pub(crate) fn fit_font_size(text: &str, icon: Vec2, text_border: Vec2, led_shrink: f32) -> f32 {
     let chars = text.chars().count().max(1) as f32;
-    let avail_w = (icon.x - 2.0 * text_border.x).max(1.0);
-    let avail_h = (icon.y - 2.0 * text_border.y - led_shrink).max(1.0);
-    (avail_w / (chars * FONT_ADVANCE_EM)).min(avail_h / FONT_HEIGHT_EM)
+    let avail_w = (icon.x - 2.0 * text_border.x).det_max(1.0);
+    let avail_h = (icon.y - 2.0 * text_border.y - led_shrink).det_max(1.0);
+    (avail_w / (chars * FONT_ADVANCE_EM)).det_min(avail_h / FONT_HEIGHT_EM)
 }
 
 #[cfg(test)]

@@ -16,6 +16,12 @@
 # an explicit fused multiply-add is the only way FMA rounding enters the
 # sim, and it is software-emulated (slow) on wasm32.
 #
+# `max` / `min` / `clamp` on floats are banned too: IEEE leaves the sign
+# of max(+0, -0) open and x86_64 and aarch64 answer differently (M0.4
+# float probe). Use `spring_detmath::DetFloat` (`det_max`, `det_min`,
+# `det_clamp`; re-exported as `crate::sim::DetFloat`). Integer max/min
+# and glam's scalar `Vec*::max/min/clamp` are fine.
+#
 # Render-only and offline-bake code may opt out with a targeted
 # `#[allow(clippy::disallowed_methods)]` and a comment saying why the
 # value never reaches the simulation.
@@ -47,6 +53,9 @@ disallowed-methods = [
     { path = "f32::atanh", reason = "platform libm, differs across targets: use bevy::math::ops (or libm)" },
     { path = "f32::powi", reason = "unspecified precision: multiply explicitly" },
     { path = "f32::mul_add", reason = "no fused multiply-add in the sim (clippy.toml)" },
+    { path = "f32::max", reason = "sign of max(+0, -0) differs across targets: use DetFloat::det_max (spring-detmath)" },
+    { path = "f32::min", reason = "sign of min(+0, -0) differs across targets: use DetFloat::det_min (spring-detmath)" },
+    { path = "f32::clamp", reason = "signed zeros differ across targets: use DetFloat::det_clamp (spring-detmath)" },
     { path = "f64::sin", reason = "platform libm, differs across targets: use libm" },
     { path = "f64::cos", reason = "platform libm, differs across targets: use libm" },
     { path = "f64::tan", reason = "platform libm, differs across targets: use libm" },
@@ -74,4 +83,7 @@ disallowed-methods = [
     { path = "f64::atanh", reason = "platform libm, differs across targets: use libm" },
     { path = "f64::powi", reason = "unspecified precision: multiply explicitly" },
     { path = "f64::mul_add", reason = "no fused multiply-add in the sim (clippy.toml)" },
+    { path = "f64::max", reason = "sign of max(+0, -0) differs across targets: use DetFloat::det_max (spring-detmath)" },
+    { path = "f64::min", reason = "sign of min(+0, -0) differs across targets: use DetFloat::det_min (spring-detmath)" },
+    { path = "f64::clamp", reason = "signed zeros differ across targets: use DetFloat::det_clamp (spring-detmath)" },
 ]

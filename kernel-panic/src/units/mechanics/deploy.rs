@@ -5,6 +5,7 @@
 //! the deploy/pack-up cycle via the `D` hotkey; health is transferred
 //! proportionally so a 50%-HP Bug becomes a 50%-HP Exploit.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 use crate::units::combat::Dying;
@@ -41,9 +42,9 @@ pub fn process_deploy(
 
         // HP carry-over: preserve the health fraction. A 1-HP Bug
         // deploys into a 1-HP-equivalent Exploit, not a pristine one.
-        let hp_fraction = health.fraction().clamp(0.01, 1.0);
+        let hp_fraction = health.fraction().det_clamp(0.01, 1.0);
         let new_max = ctx.unit_registry.max_health(target_kind);
-        let new_current = (new_max * hp_fraction).max(1.0);
+        let new_current = (new_max * hp_fraction).det_max(1.0);
 
         // The pair is spawned in its place; the source skips `Dying`,
         // but its counters' marker hooks run on the despawn itself.

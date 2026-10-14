@@ -2,6 +2,7 @@
 //! and the resolve-unit-under-cursor logic shared across the sub-module.
 
 use crate::map_loading::MatchScopeAppExt;
+use crate::sim::DetFloat;
 use bevy::ecs::system::SystemParam;
 use bevy::picking::mesh_picking::ray_cast::{MeshRayCast, MeshRayCastSettings, RayMeshHit};
 use bevy::prelude::*;
@@ -259,8 +260,8 @@ fn handle_selection(
         if distance > DRAG_THRESHOLD {
             drag_state.dragging = true;
 
-            let min_x = start.x.min(current.x);
-            let min_y = start.y.min(current.y);
+            let min_x = start.x.det_min(current.x);
+            let min_y = start.y.det_min(current.y);
             let width = (current.x - start.x).abs();
             let height = (current.y - start.y).abs();
 
@@ -321,8 +322,8 @@ fn handle_selection(
 
         if drag_state.dragging {
             if let (Some(start), Some(end)) = (drag_state.start, cursor_pos) {
-                let min_screen = Vec2::new(start.x.min(end.x), start.y.min(end.y));
-                let max_screen = Vec2::new(start.x.max(end.x), start.y.max(end.y));
+                let min_screen = Vec2::new(start.x.det_min(end.x), start.y.det_min(end.y));
+                let max_screen = Vec2::new(start.x.det_max(end.x), start.y.det_max(end.y));
 
                 if let Ok((camera, camera_transform)) = camera_q.single() {
                     for (entity, global_transform, team) in &unit_q {

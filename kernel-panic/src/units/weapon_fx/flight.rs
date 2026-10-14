@@ -21,6 +21,7 @@
 //!
 //! [`step`]: MissileFlight::step
 
+use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
@@ -84,8 +85,8 @@ impl MissileFlight {
     /// Returns the flight and the launch position.
     pub fn launch(l: Launch) -> (Self, Vec3) {
         let w = l.weapon;
-        let max_speed = (w.weapon_velocity / GAME_SPEED).max(0.01);
-        let start_speed = (w.start_velocity / GAME_SPEED).max(0.01);
+        let max_speed = (w.weapon_velocity / GAME_SPEED).det_max(0.01);
+        let start_speed = (w.start_velocity / GAME_SPEED).det_max(0.01);
         let to_target = l.target_pos - l.muzzle_pos;
         let target_dist = to_target.length();
         let mut dir = to_target.normalize_or(l.muzzle_dir);
@@ -96,10 +97,10 @@ impl MissileFlight {
         }
         // `ttl = ceil(max(targetDist, range) / projectileSpeed + 25·burnblow)`
         // (burnblow is not used by any KP missile).
-        let ttl = (target_dist.max(w.range) / max_speed).ceil() as i32;
+        let ttl = (target_dist.det_max(w.range) / max_speed).ceil() as i32;
         let (extra_height, extra_height_decay, extra_height_time) = if w.trajectory_height > 0.0 {
             let eh = target_dist * w.trajectory_height;
-            let time = (target_dist.max(max_speed) / max_speed) as i32;
+            let time = (target_dist.det_max(max_speed) / max_speed) as i32;
             let time = time.max(1);
             (eh, eh / time as f32, time)
         } else {
@@ -223,7 +224,7 @@ impl StarburstFlight {
     /// `fixedLauncher` (else straight up) from `muzzle + (0, 2, 0)`.
     pub fn launch(l: Launch) -> (Self, Vec3) {
         let w = l.weapon;
-        let max_speed = (w.weapon_velocity / GAME_SPEED).max(0.01);
+        let max_speed = (w.weapon_velocity / GAME_SPEED).det_max(0.01);
         let dir = if w.fixed_launcher {
             l.muzzle_dir.normalize_or(Vec3::Y)
         } else {
@@ -237,7 +238,7 @@ impl StarburstFlight {
             flight_time
         } else {
             // `min(3000, uptime + myrange / maxSpeed + 100)`
-            (uptime as f32 + w.range / max_speed + 100.0).min(3000.0) as i32
+            (uptime as f32 + w.range / max_speed + 100.0).det_min(3000.0) as i32
         };
         let distance_to_travel = if flight_time > 0 || w.fixed_launcher {
             MAX_PROJECTILE_RANGE
@@ -248,7 +249,7 @@ impl StarburstFlight {
         (
             Self {
                 dir,
-                speed: (w.start_velocity / GAME_SPEED).max(0.01),
+                speed: (w.start_velocity / GAME_SPEED).det_max(0.01),
                 max_speed,
                 acceleration: w.weapon_acceleration / (GAME_SPEED * GAME_SPEED),
                 turn_rate,
@@ -280,7 +281,7 @@ impl StarburstFlight {
 
         if self.uptime > 0 {
             // Stage 1: straight out along the launch dir, accelerating.
-            self.speed = (self.speed + self.acceleration).min(self.max_speed);
+            self.speed = (self.speed + self.acceleration).det_min(self.max_speed);
             return self.dir * self.speed;
         }
 
@@ -319,7 +320,7 @@ impl StarburstFlight {
                 e = (e - self.dir * e.dot(self.dir)).normalize_or_zero();
                 self.dir = (self.dir + e * self.tracking).normalize_or_zero();
             }
-            self.speed = (self.speed + self.acceleration).min(self.max_speed);
+            self.speed = (self.speed + self.acceleration).det_min(self.max_speed);
             let v = self.dir * self.speed;
             if self.distance_to_travel != MAX_PROJECTILE_RANGE {
                 self.distance_to_travel -= v.xz().length();
@@ -402,7 +403,7 @@ mod tests {
         let mut apex = pos.y;
         while f.ttl > 0 {
             let next = pos + f.step();
-            apex = apex.max(next.y);
+            apex = apex.det_max(next.y);
             if next.y <= ground_y {
                 let t = (pos.y - ground_y) / (pos.y - next.y);
                 return (pos.lerp(next, t), apex);
@@ -636,7 +637,7 @@ mod tests {
             // extraHeight pitch bias.
             assert!(prev.angle_between(f.dir) < ops::atan(gain) + 0.2);
             prev = f.dir;
-            max_y = max_y.max(pos.y);
+            max_y = max_y.det_max(pos.y);
             if pos.y <= 0.0 {
                 hit = true;
                 break;

@@ -20,6 +20,7 @@
 //! `CrushStrength` doesn't exceed it (`CMoveMath::CrushResistant`):
 //! HEAVY (300) drives through and crushes them, LIGHT/MEDIUM path round.
 
+use crate::sim::DetFloat;
 use std::collections::HashMap;
 
 use bevy::ecs::lifecycle::HookContext;
@@ -262,8 +263,8 @@ impl StructureLayer {
             return Vec::new();
         };
         let (fx, fz) = (
-            def.footprint_x.max(1.0) as i32,
-            def.footprint_z.max(1.0) as i32,
+            def.footprint_x.det_max(1.0) as i32,
+            def.footprint_z.det_max(1.0) as i32,
         );
         let (xsize, zsize) = (fx * 2, fz * 2);
         let x0 = ((pos.x - xsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;

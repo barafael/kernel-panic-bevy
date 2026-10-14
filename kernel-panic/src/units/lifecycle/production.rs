@@ -1,3 +1,4 @@
+use crate::sim::DetFloat;
 use crate::sim::sq;
 use bevy::math::ops;
 use std::collections::VecDeque;
@@ -105,7 +106,7 @@ impl Producer {
     pub fn progress_fraction(&self, registry: &UnitRegistry, factory: UnitKind) -> Option<f32> {
         self.current_build_time(registry, factory).map(|t| {
             if t > 0.0 {
-                (self.progress / t).clamp(0.0, 1.0)
+                (self.progress / t).det_clamp(0.0, 1.0)
             } else {
                 0.0
             }
@@ -479,7 +480,7 @@ pub fn production_system(
             match buildees.get(buildee) {
                 Ok((clock, _)) => {
                     producer.progress =
-                        (1.0 - clock.remaining / clock.total.max(f32::EPSILON)) * build_time;
+                        (1.0 - clock.remaining / clock.total.det_max(f32::EPSILON)) * build_time;
                 }
                 Err(_) => {
                     producer.unit_spawned = false;
@@ -669,7 +670,7 @@ pub fn production_system(
         {
             // In the buildee's own seconds at the current rate.
             clock.total = build_time / speed_mult;
-            clock.remaining = (build_time - producer.progress).max(0.0) / speed_mult;
+            clock.remaining = (build_time - producer.progress).det_max(0.0) / speed_mult;
             driven.unpowered = 0.0;
         }
 

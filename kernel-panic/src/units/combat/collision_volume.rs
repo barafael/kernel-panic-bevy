@@ -10,6 +10,7 @@
 //! above the unit's transform origin; [`CollisionVolume::center`] gives
 //! the world-space centre for a unit transform.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 /// Bounding sphere used for projectile-collision tests.
@@ -65,7 +66,7 @@ impl CollisionVolume {
         } else {
             t_unscaled / length_sq
         };
-        (t <= 1.0).then_some(t.max(0.0))
+        (t <= 1.0).then_some(t.det_max(0.0))
     }
 }
 

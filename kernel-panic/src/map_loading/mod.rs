@@ -21,6 +21,7 @@
 //! Terrain-material construction (mipmap pyramid + fallback) lives in
 //! [`mipmap`] so the orchestrator stays focused on sequencing.
 
+use crate::sim::DetFloat;
 #[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -814,8 +815,11 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     let texture_ms = t_texture.elapsed().as_secs_f64() * 1000.0;
 
     // Check actual height variance, not header values (gadgets may have modified the terrain).
-    let min_actual = heights.iter().cloned().fold(f32::INFINITY, f32::min);
-    let max_actual = heights.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_actual = heights.iter().cloned().fold(f32::INFINITY, f32::det_min);
+    let max_actual = heights
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::det_max);
     if (max_actual - min_actual) < 1.0 {
         warn!(
             "  Terrain is effectively flat (height range: {:.1})",
@@ -1130,7 +1134,7 @@ fn setup_camera(
     *map_bounds =
         MapBounds::from_map_extents(Vec3::new(0.0, 0.0, 0.0), Vec3::new(world_w, 0.0, world_d));
 
-    let map_extent = world_w.max(world_d);
+    let map_extent = world_w.det_max(world_d);
     if let Ok((mut cam_state, mut cam_transform)) = camera_query.single_mut() {
         let focus = Vec3::new(world_w / 2.0, center_height, world_d / 2.0);
         let distance = map_extent * 0.5;
@@ -1263,7 +1267,7 @@ fn apply_fog(
     let diagonal = (world_w * world_w + world_d * world_d).sqrt();
     // Cover the full map diagonal + a bit more so the far edge never fogs
     // completely. Floor at 4000 elmos for small maps.
-    let max_view_distance = (diagonal * 1.1).max(4000.0);
+    let max_view_distance = (diagonal * 1.1).det_max(4000.0);
 
     fog.color = Color::linear_rgb(color[0], color[1], color[2]);
     fog.falloff = FogFalloff::Linear {

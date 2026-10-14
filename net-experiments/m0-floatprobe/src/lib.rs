@@ -7,7 +7,11 @@
 //! Two groups:
 //! - `det:` the routes the game uses since M0.3 — `bevy::math::ops`
 //!   (libm), `libm` for f64, glam with `libm` + `scalar-math`, plain
-//!   IEEE arithmetic. These must agree on every target: 0 differing bits.
+//!   IEEE arithmetic, and since M1 the `spring_detmath::DetFloat`
+//!   max / min / clamp that replace `f32::max` & co. These must agree
+//!   on every target: 0 differing bits.
+//! - `chk:` known target differences (`f32::max` / `min` on signed
+//!   zeros differ on aarch64) that the sim must not use.
 //! - `std:` the std methods the workspace `clippy.toml` now bans, kept
 //!   as the control group (they call the platform's C math library on
 //!   native, Rust's bundled libm on wasm32, so they do differ).
@@ -20,6 +24,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use bevy_math::ops;
+use spring_detmath::DetFloat;
 use glam::{Affine3A, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec3A};
 
 /// Inputs per function.
@@ -252,7 +257,53 @@ pub const PROBES: &[(&str, Probe)] = &[
         let z = if i & 1 == 0 { -0.0f32 } else { 0.0 };
         b32(ops::atan2(z.max(-0.0), -1.0))
     }),
+    // ---- det: the sim's replacements for the chk: rows (M1) ----------
+    ("det: DetFloat f32 max/min/clamp", |i| {
+        let a = EDGE[(i & 7) as usize];
+        let b = EDGE[((i >> 3) & 7) as usize];
+        let x = inputs(i).u * 1e-30;
+        fold(&[
+            a.det_max(b),
+            a.det_min(b),
+            a.det_max(0.0),
+            a.det_min(0.0),
+            a.det_clamp(0.0, 1.0),
+            a.det_clamp(-1.0, -0.0),
+            x.det_max(-x),
+            x.det_clamp(-0.0, 0.0),
+        ])
+    }),
+    ("det: DetFloat f64 max/min/clamp", |i| {
+        let a = EDGE[(i & 7) as usize] as f64;
+        let b = EDGE[((i >> 3) & 7) as usize] as f64;
+        b64(a.det_max(b))
+            ^ b64(a.det_min(b)).rotate_left(13)
+            ^ b64(a.det_clamp(0.0, 1.0)).rotate_left(26)
+    }),
+    // glam's scalar `max`/`min`/`clamp` are compare-and-select, so the
+    // sim may keep using them.
+    ("det: glam Vec3/Vec3A max/min/clamp", |i| {
+        let e = |k: u32| EDGE[((i >> k) & 7) as usize];
+        let a = Vec3::new(e(0), e(3), e(6));
+        let b = Vec3::new(e(9), e(12), e(15));
+        let lo = Vec3::new(0.0, -0.0, -1.0);
+        let hi = Vec3::new(0.0, 0.0, 1.0);
+        let a4 = Vec3A::from(a);
+        let mut out = Vec::with_capacity(20);
+        out.extend(a.max(b).to_array());
+        out.extend(a.min(b).to_array());
+        out.extend(a.clamp(lo, hi).to_array());
+        out.extend(a4.max(Vec3A::from(b)).to_array());
+        out.extend(a4.min(Vec3A::from(b)).to_array());
+        out.push(a.max_element());
+        out.push(a.min_element());
+        fold(&out)
+    }),
 ];
+
+/// Signed zeros, a NaN and their neighbours, paired up by the max / min
+/// probes.
+const EDGE: [f32; 8] = [0.0, -0.0, 1e-30, -1e-30, f32::NAN, 1.0, -1.0, f32::MIN_POSITIVE];
 
 /// Number of probe functions (for the wasm runner).
 #[unsafe(no_mangle)]

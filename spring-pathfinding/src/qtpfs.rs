@@ -34,6 +34,7 @@
 //! yardmap squares (Kernel Panic has none) and path repair (the dead
 //! path is simply re-searched).
 
+use spring_detmath::DetFloat;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -281,7 +282,7 @@ impl NodeLayer {
                 let abs = if blocked {
                     0.0
                 } else {
-                    speed_map.speeds[i].clamp(0.0, MAX_SPEEDMOD)
+                    speed_map.speeds[i].det_clamp(0.0, MAX_SPEEDMOD)
                 };
                 let rel = abs / MAX_SPEEDMOD;
                 let v = (rel * 255.0) as u8;
@@ -690,8 +691,8 @@ impl NodeLayer {
                 .iter()
                 .filter(|n| n.xmin != u16::MAX && n.is_leaf())
                 .map(|n| n.move_cost)
-                .fold(f32::INFINITY, f32::min)
-                .max(1e-3)
+                .fold(f32::INFINITY, f32::det_min)
+                .det_max(1e-3)
         })
     }
 
@@ -908,7 +909,7 @@ impl QtSearch {
         target: [f32; 2],
     ) -> Result<QtSearch, QtPath> {
         let mid = [(src[0] + target[0]) * 0.5, (src[1] + target[1]) * 0.5];
-        let r = ((target[0] - src[0]).abs()).max((target[1] - src[1]).abs()) * 0.5;
+        let r = ((target[0] - src[0]).abs()).det_max((target[1] - src[1]).abs()) * 0.5;
         let bounds = Rect {
             x0: ((mid[0] - r) / SQUARE_SIZE).floor() as i32,
             z0: ((mid[1] - r) / SQUARE_SIZE).floor() as i32,
@@ -940,8 +941,8 @@ impl QtSearch {
     ) -> Result<QtSearch, QtPath> {
         let clamp = |p: [f32; 2]| {
             [
-                p[0].clamp(0.0, (layer.width as f32 - 1.0) * SQUARE_SIZE),
-                p[1].clamp(0.0, (layer.height as f32 - 1.0) * SQUARE_SIZE),
+                p[0].det_clamp(0.0, (layer.width as f32 - 1.0) * SQUARE_SIZE),
+                p[1].det_clamp(0.0, (layer.height as f32 - 1.0) * SQUARE_SIZE),
             ]
         };
         let (src, dst) = (clamp(src), clamp(dst));
@@ -1076,7 +1077,7 @@ impl QtSearch {
             * 0.5
             * SQUARE_SIZE;
         let max_dist = ((MAX_NODES_SEARCHED >> 1) as f32).sqrt() * 2.0 * avg_node_len;
-        let t = (dist(self.fwd.src_pt, self.fwd.tgt_pt) / max_dist).clamp(0.0, 1.0);
+        let t = (dist(self.fwd.src_pt, self.fwd.tgt_pt) / max_dist).det_clamp(0.0, 1.0);
         let limit =
             ((MAX_NODES_SEARCHED >> 1) as f32 * (1.0 - (t - 1.0) * (t - 1.0)).sqrt()) as usize;
         self.limit = limit.max(256);
@@ -1360,8 +1361,8 @@ fn nearest_point_on_node(node: &Node, net: [f32; 2], goal: [f32; 2]) -> [f32; 2]
         if a > b {
             std::mem::swap(&mut a, &mut b);
         }
-        t0 = t0.max(a);
-        t1 = t1.min(b);
+        t0 = t0.det_max(a);
+        t1 = t1.det_min(b);
         if t0 > t1 {
             return net;
         }
@@ -1488,10 +1489,10 @@ fn smooth_point(
         };
         let d0 = dot(norm(sub(e0, p0)), norm(sub(p2, e0)));
         let d1 = dot(norm(sub(e1, p0)), norm(sub(p2, e1)));
-        if dotp >= d0.max(d1) {
+        if dotp >= d0.det_max(d1) {
             return None;
         }
-        let pick = if d1 >= d0.max(dotp) { e1 } else { e0 };
+        let pick = if d1 >= d0.det_max(dotp) { e1 } else { e0 };
         return moved(pick);
     }
     None

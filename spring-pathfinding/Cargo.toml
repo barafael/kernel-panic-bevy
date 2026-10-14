@@ -5,6 +5,8 @@ edition = "2024"
 description = "QTPFS (Quad-Tree Path Finding System) for Spring RTS engine maps"
 
 [dependencies]
+# Target-independent float max / min / clamp (workspace clippy.toml).
+spring-detmath = { workspace = true }
 # Deterministic transcendentals for the sim (workspace clippy.toml).
 libm = { workspace = true }
 

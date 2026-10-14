@@ -23,6 +23,7 @@
 //! instead of sliding in from the old position — Spring's
 //! `preFrameTra` is likewise reset on teleports.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
@@ -107,7 +108,7 @@ pub fn record_sim_pose(mut q: Query<(&Transform, &mut SimPose)>) {
 
 /// `PostUpdate`: blend by how far the render clock is into the next tick.
 pub fn interpolate_sim_pose(fixed: Res<Time<Fixed>>, mut q: Query<(&mut Transform, &mut SimPose)>) {
-    let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
+    let alpha = fixed.overstep_fraction().det_clamp(0.0, 1.0);
     for (mut tf, mut pose) in &mut q {
         if pose.written != Some(*tf) {
             pose.snap(*tf);

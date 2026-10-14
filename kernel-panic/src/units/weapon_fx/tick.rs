@@ -1,6 +1,7 @@
 //! Per-frame tick of every live weapon visual: fade beams, animate
 //! projectile arcs, despawn at end of life.
 
+use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
@@ -112,7 +113,7 @@ pub(super) fn tick_weapon_fx(
             commands.entity(entity).despawn();
             continue;
         }
-        let fade = (arc.lifetime / arc.max_lifetime).clamp(0.0, 1.0);
+        let fade = (arc.lifetime / arc.max_lifetime).det_clamp(0.0, 1.0);
         let half = arc.width;
         let c = arc.tint.to_f32_array();
         let color = [c[0], c[1], c[2], c[3] * fade];
@@ -157,7 +158,7 @@ pub(super) fn tick_weapon_fx(
         // without authored decay (default 1.0) we keep the legacy
         // sqrt-thickness shrink so a single-frame `beamtime` weapon
         // still reads as a smooth flash rather than a hard pop.
-        let elapsed_frames = secs_to_frames((beam.max_lifetime - beam.lifetime).max(0.0));
+        let elapsed_frames = secs_to_frames((beam.max_lifetime - beam.lifetime).det_max(0.0));
         let intensity = if beam.decay < 1.0 {
             ops::powf(beam.decay, elapsed_frames)
         } else {
@@ -241,10 +242,10 @@ pub(super) fn tick_weapon_fx(
     // is the width axis; the quad spans `±dir1 * thickness` at lead
     // and tail. Despawns once both ends pass the target.
     for (entity, mut bolt) in &mut bolts {
-        let prev_lead_raw = (bolt.speed * bolt.elapsed).min(bolt.total_distance);
+        let prev_lead_raw = (bolt.speed * bolt.elapsed).det_min(bolt.total_distance);
         bolt.elapsed += dt;
         let lead_raw = bolt.speed * bolt.elapsed;
-        let lead_dist = lead_raw.min(bolt.total_distance);
+        let lead_dist = lead_raw.det_min(bolt.total_distance);
 
         // §1.8: sweep this frame's lead segment against (1) the
         // intended target, then (2) the broader spatial-index neighbours
@@ -314,12 +315,12 @@ pub(super) fn tick_weapon_fx(
         // A bolt that reaches the end of its `ttl` without touching
         // anything just fades (`CLaserProjectile::Update`): no
         // explosion, no damage.
-        let tail_raw = (lead_raw - bolt.max_length).max(0.0);
+        let tail_raw = (lead_raw - bolt.max_length).det_max(0.0);
         if tail_raw >= bolt.total_distance {
             commands.entity(entity).despawn();
             continue;
         }
-        let tail_dist = tail_raw.min(bolt.total_distance);
+        let tail_dist = tail_raw.det_min(bolt.total_distance);
         let lead_pos = bolt.origin + bolt.direction * lead_dist;
         let tail_pos = bolt.origin + bolt.direction * tail_dist;
         let mid = (lead_pos + tail_pos) * 0.5;
@@ -358,8 +359,8 @@ pub(super) fn tick_weapon_fx(
         // (xstart - xend)) so the arrow texture materialises at the
         // muzzle and stretches with the bolt. Standalone TGA turns
         // xstart=0, xend=1, so tail U = curDrawLen / maxLength.
-        let drawn_len = (lead_dist - tail_dist).max(0.0);
-        let grow = (drawn_len / bolt.max_length.max(1e-3)).clamp(0.0, 1.0);
+        let drawn_len = (lead_dist - tail_dist).det_max(0.0);
+        let grow = (drawn_len / bolt.max_length.det_max(1e-3)).det_clamp(0.0, 1.0);
         draw.batches.push_quad(
             &bolt.material,
             [
@@ -456,7 +457,7 @@ pub(super) fn tick_weapon_fx(
                 let prev_progress = proj.progress;
                 proj.progress += (proj.speed * dt) / total_dist;
                 let seg_start = proj.origin.lerp(proj.target, prev_progress);
-                let seg_end = proj.origin.lerp(proj.target, proj.progress.min(1.0));
+                let seg_end = proj.origin.lerp(proj.target, proj.progress.det_min(1.0));
                 (seg_start, seg_end, proj.progress >= 1.0, proj.target)
             }
             Flight::Missile(_) | Flight::Starburst(_) | Flight::Cannon(_) => {
@@ -501,7 +502,7 @@ pub(super) fn tick_weapon_fx(
                 // A projectile that never finds ground (off the map edge)
                 // still can't live forever.
                 let expired = burst || proj.elapsed > GUIDED_MAX_LIFETIME;
-                let impact = Vec3::new(new_pos.x, new_pos.y.max(ground), new_pos.z);
+                let impact = Vec3::new(new_pos.x, new_pos.y.det_max(ground), new_pos.z);
                 (prev, new_pos, hit_ground || expired, impact)
             }
         };
@@ -911,14 +912,14 @@ pub(super) fn tick_fading_trails(
 fn push_trail_quads(batches: &mut FxQuadBatches, trail: &ProjectileTrail, cam_pos: Vec3) {
     let mut prev: Option<(Vec3, Vec3, [f32; 4], f32)> = None;
     for (i, s) in trail.samples.iter().enumerate() {
-        let t = (s.age / SMOKE_TIME_FRAMES).clamp(0.0, 1.0);
+        let t = (s.age / SMOKE_TIME_FRAMES).det_clamp(0.0, 1.0);
         let dif = (s.pos - cam_pos).normalize_or(Vec3::NEG_Y);
         let odir = dif.cross(s.dir).normalize_or(Vec3::X);
         let size = 1.0 + t * SMOKE_SIZE;
         let fade = if s.hidden {
             0.0
         } else {
-            ((1.0 - t) * (0.7 + dif.dot(s.dir).abs())).clamp(0.0, 1.0)
+            ((1.0 - t) * (0.7 + dif.dot(s.dir).abs())).det_clamp(0.0, 1.0)
         };
         let c = SMOKE_COLOR * fade;
         let lo = s.pos - odir * size;
@@ -1592,7 +1593,7 @@ mod tests {
                 arrived = true;
                 break;
             };
-            max_y = max_y.max(read.translation.y);
+            max_y = max_y.det_max(read.translation.y);
         }
         assert!(arrived, "missile should come down on the target");
         assert!(max_y > 80.0, "trajectoryheight arc, got max_y={max_y}");
@@ -1791,7 +1792,7 @@ mod tests {
                 arrived = true;
                 break;
             };
-            max_y = max_y.max(read.translation.y);
+            max_y = max_y.det_max(read.translation.y);
             let model_fwd = read.rotation * Vec3::Z;
             let vel = app.world().get::<ProjectileVisual>(proj).unwrap().velocity;
             assert!(

@@ -23,6 +23,7 @@
 //! `Mesh3d` entity propagated and extracted per frame (a busy map runs
 //! several hundred at once).
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 use crate::{
@@ -502,7 +503,7 @@ pub fn tick_geovent_smoke(
 
         let elapsed = puff.max_lifetime - puff.lifetime;
         let size = puff.start_size + puff.size_expansion * elapsed;
-        let age_frac = (elapsed / puff.max_lifetime).clamp(0.0, 1.0);
+        let age_frac = (elapsed / puff.max_lifetime).det_clamp(0.0, 1.0);
 
         // Upstream draw fades alpha linearly as (1 - age). The fade is
         // baked into quad size instead (kept from the shared-material

@@ -13,6 +13,7 @@
 //! `WeaponDef` that never makes it into damage resolution but is the
 //! identity used by the visual layer for builder rays.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
@@ -84,7 +85,7 @@ impl DeathBlast {
         let def = weapons.by_id(weapon);
         Some(Self {
             weapon,
-            radius: def.area_of_effect.max(24.0),
+            radius: def.area_of_effect.det_max(24.0),
             rgb: Some(def.rgb_color).filter(|c| c[0] + c[1] + c[2] > 0.01),
             ceg_name: def.explosion_generator.clone(),
         })

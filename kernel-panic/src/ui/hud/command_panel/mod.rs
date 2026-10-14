@@ -24,6 +24,7 @@ pub(crate) mod commands;
 pub(crate) mod layout;
 
 use crate::map_loading::MatchScopeAppExt;
+use crate::sim::DetFloat;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -587,7 +588,7 @@ fn spawn_label(
         ))
         .with_child((
             Text::new(text),
-            TextFont::from_font_size(size.max(1.0)),
+            TextFont::from_font_size(size.det_max(1.0)),
             TextColor(color),
             TextLayout::new(Justify::Center, LineBreak::NoWrap),
         ));

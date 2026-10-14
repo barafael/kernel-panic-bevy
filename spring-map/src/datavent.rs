@@ -17,6 +17,7 @@
 //! agrees; the game reads it back and only computes facings itself for
 //! vents a map adds at runtime (Hex Farm).
 
+use spring_detmath::DetFloat;
 use spring_pathfinding::{SQUARE_SIZE, max_slope_from_degrees, slope_map};
 
 use crate::map_types::{Datavent, ParsedMap, TerrainTypes};
@@ -131,7 +132,7 @@ pub fn exit_facing(
             FACING_NORTH => from.1,
             _ => from.0,
         }
-        .max(0.0)
+        .det_max(0.0)
     };
     let turns_from_centre = |facing: u8| -> u8 {
         let d = (facing + 4 - toward_centre) % 4;

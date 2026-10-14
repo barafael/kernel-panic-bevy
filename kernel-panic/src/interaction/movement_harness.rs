@@ -11,6 +11,7 @@
 //! `cargo test -p kernel-panic movement_harness -- --ignored --nocapture`.
 //! The non-ignored tests assert the behaviour Spring exhibits.
 
+use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::time::Duration;
 
@@ -267,7 +268,7 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
         if t as f64 * DT >= 1.0 {
             for i in 0..n {
                 for j in i + 1..n {
-                    m.min_pair_dist = m.min_pair_dist.min(pos[i].xz().distance(pos[j].xz()));
+                    m.min_pair_dist = m.min_pair_dist.det_min(pos[i].xz().distance(pos[j].xz()));
                 }
             }
         }
@@ -294,13 +295,13 @@ pub(crate) fn run(h: &mut Harness, units: &[Entity], goals: &[Vec3], timeout_s: 
     let mut ratio = 0.0;
     for i in 0..n {
         let end = h.pos(units[i]);
-        let straight = start[i].xz().distance(end.xz()).max(1.0);
+        let straight = start[i].xz().distance(end.xz()).det_max(1.0);
         ratio += walked[i] / straight;
-        m.max_goal_miss = m.max_goal_miss.max(end.xz().distance(goals[i].xz()));
+        m.max_goal_miss = m.max_goal_miss.det_max(end.xz().distance(goals[i].xz()));
     }
     m.path_ratio = ratio / n as f32;
-    m.wiggle_per_s = flips as f32 / (moving_ticks as f32 * DT as f32).max(1e-3);
-    m.turn_deg_per_s = turned.to_degrees() / (moving_ticks as f32 * DT as f32).max(1e-3);
+    m.wiggle_per_s = flips as f32 / (moving_ticks as f32 * DT as f32).det_max(1e-3);
+    m.turn_deg_per_s = turned.to_degrees() / (moving_ticks as f32 * DT as f32).det_max(1e-3);
     m
 }
 
@@ -417,7 +418,7 @@ pub(crate) fn average(runs: &[Metrics]) -> Metrics {
         min_pair_dist: runs
             .iter()
             .map(|m| m.min_pair_dist)
-            .fold(f32::MAX, f32::min),
+            .fold(f32::MAX, f32::det_min),
         path_ratio: mean(&|m| m.path_ratio),
         wiggle_per_s: mean(&|m| m.wiggle_per_s),
         turn_deg_per_s: mean(&|m| m.turn_deg_per_s),

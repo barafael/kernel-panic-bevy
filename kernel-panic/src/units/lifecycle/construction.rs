@@ -37,6 +37,7 @@
 //!
 //! [`advance_command_queue`]: crate::interaction::movement::advance_command_queue
 
+use crate::sim::DetFloat;
 use bevy::platform::collections::HashMap;
 
 use bevy::prelude::*;
@@ -512,8 +513,8 @@ pub fn tick_construction(
                     // clock seconds.
                     let step = (ctx.unit_registry.worker_time(builder_kind.0) * dt
                         / raw_build_time)
-                        .min(clock.remaining / clock.total.max(f32::EPSILON));
-                    clock.remaining = (clock.remaining - step * clock.total).max(0.0);
+                        .det_min(clock.remaining / clock.total.det_max(f32::EPSILON));
+                    clock.remaining = (clock.remaining - step * clock.total).det_max(0.0);
                     // `AllowUnitBuildStep` for Hex Farm: this tick's
                     // share of the build, in `buildTime` points.
                     if let Some(inbox) = hex_farm.as_deref_mut() {
@@ -573,9 +574,10 @@ pub fn decay_nanoframes(
             continue;
         }
         let raw_build_time = registry.raw_build_time(kind.0);
-        let per_second =
-            crate::sim::GAME_SPEED / SLOW_UPDATE_RATE / (raw_build_time * DECAY_SPEED).max(0.001);
-        clock.remaining = (clock.remaining + per_second * dt * clock.total).min(clock.total);
+        let per_second = crate::sim::GAME_SPEED
+            / SLOW_UPDATE_RATE
+            / (raw_build_time * DECAY_SPEED).det_max(0.001);
+        clock.remaining = (clock.remaining + per_second * dt * clock.total).det_min(clock.total);
         if clock.remaining >= clock.total {
             commands.entity(entity).try_despawn();
         }

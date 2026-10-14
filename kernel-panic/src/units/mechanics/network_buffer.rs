@@ -9,6 +9,7 @@
 //! Mirrors upstream `LuaRules/Gadgets/network_buffer.lua` (and the
 //! dispatch / enter companion gadgets).
 
+use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::collections::BTreeMap;
 
@@ -309,7 +310,7 @@ pub fn tick_flow_speed(
         }
         let base = unit_registry.speed(UnitKind::Flow);
         let bonus = small_building_counts.get(team.0) as f32 * FLOW_BONUS_PER_BUILDING;
-        boost.0 = (base + bonus).min(FLOW_MAX_SPEED) - base;
+        boost.0 = (base + bonus).det_min(FLOW_MAX_SPEED) - base;
     }
 }
 

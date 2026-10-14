@@ -9,6 +9,7 @@ mod s3o_types;
 pub mod tga;
 
 pub use s3o_types::{S3OModel, S3OParseError, S3OPiece, S3OVertex};
+use spring_detmath::DetFloat;
 pub use tga::{TgaImage, TgaParseError, parse_tga};
 
 use std::io::Cursor;
@@ -97,7 +98,7 @@ pub fn parse_s3o(data: &[u8]) -> Result<S3OModel, S3OParseError> {
         header._radius
     };
     let height = if header._height <= 0.01 {
-        (maxs[1] - mins[1]).max(0.0)
+        (maxs[1] - mins[1]).det_max(0.0)
     } else {
         header._height
     };
@@ -152,8 +153,8 @@ fn compute_model_aabb(piece: &S3OPiece, parent_off: [f32; 3]) -> Option<([f32; 3
             acc = Some(match acc {
                 Some((mut mn, mut mx)) => {
                     for i in 0..3 {
-                        mn[i] = mn[i].min(cmn[i]);
-                        mx[i] = mx[i].max(cmx[i]);
+                        mn[i] = mn[i].det_min(cmn[i]);
+                        mx[i] = mx[i].det_max(cmx[i]);
                     }
                     (mn, mx)
                 }
@@ -217,8 +218,8 @@ fn piece_extents(vertices: &[S3OVertex]) -> ([f32; 3], [f32; 3]) {
     let mut mx = [f32::NEG_INFINITY; 3];
     for v in vertices {
         for i in 0..3 {
-            mn[i] = mn[i].min(v.position[i]);
-            mx[i] = mx[i].max(v.position[i]);
+            mn[i] = mn[i].det_min(v.position[i]);
+            mx[i] = mx[i].det_max(v.position[i]);
         }
     }
     (mn, mx)
@@ -811,10 +812,10 @@ mod tests {
         ];
         let mut min_y = f32::INFINITY;
         for v in &piece.vertices {
-            min_y = min_y.min(off[1] + v.position[1]);
+            min_y = min_y.det_min(off[1] + v.position[1]);
         }
         for c in &piece.children {
-            min_y = min_y.min(walk_min_y(c, off));
+            min_y = min_y.det_min(walk_min_y(c, off));
         }
         min_y
     }

@@ -25,6 +25,7 @@
 //! 5. `Update` — apply the collision push, `OwnerMoved` idle test; and
 //!    every 15th frame per unit `SlowUpdate` (repath / give up).
 
+use crate::sim::DetFloat;
 use crate::sim::sq;
 use bevy::math::ops;
 use std::f32::consts::{PI, TAU};
@@ -748,7 +749,7 @@ impl GroundMover {
         // Add the footprint radius if standing on the goal would overlap
         // blocked squares (else units jitter against it forever).
         self.extra_radius = if goal_blocked {
-            (self.owner_radius - goal_radius).max(0.0)
+            (self.owner_radius - goal_radius).det_max(0.0)
         } else {
             0.0
         };
@@ -816,7 +817,7 @@ impl GroundMover {
         let into_ground = if self.flying {
             Vec3::ZERO
         } else {
-            ground_normal * impulse.dot(ground_normal).min(0.0)
+            ground_normal * impulse.dot(ground_normal).det_min(0.0)
         };
         let impulse = impulse - into_ground;
         if impulse.length_squared() <= 0.01 {
@@ -890,8 +891,8 @@ impl GroundMover {
                 self.skidding = false;
             } else {
                 let speed_scale = v.length();
-                let rot_rem_time = (speed_scale / SKID_SPEED_REDUCTION).max(1.0);
-                v *= 1.0 - (SKID_SPEED_REDUCTION / speed_scale).min(1.0);
+                let rot_rem_time = (speed_scale / SKID_SPEED_REDUCTION).det_max(1.0);
+                v *= 1.0 - (SKID_SPEED_REDUCTION / speed_scale).det_min(1.0);
                 let rot_speed =
                     (self.skid_rot_speed + self.skid_rot_accel * (rot_rem_time - 1.0) + 0.5)
                         .floor();
@@ -975,13 +976,13 @@ impl FrameStats {
         Self {
             max_speed: speed / GAME_SPEED,
             // `accRate = max(0.01, maxAcc)` (GroundMoveType.cpp:518-519).
-            acc: stats.acc_rate.max(0.01),
-            dec: stats.dec_rate.max(0.01),
+            acc: stats.acc_rate.det_max(0.01),
+            dec: stats.dec_rate.det_max(0.01),
             // `UnitStats` keeps the FBI value as rad/s; back to units
             // per frame (the FBI values are integers, so `round` is exact).
             turn_rate: (stats.turn_rate / (SHORT_ANGLE_TO_RAD * GAME_SPEED))
                 .round()
-                .clamp(1.0, 32767.0),
+                .det_clamp(1.0, 32767.0),
         }
     }
 
@@ -1018,7 +1019,7 @@ pub fn drag_acceleration(velocity: Vec3, mass: f32, on_ground: bool, friction: f
     let ground = if on_ground { friction * mass } else { 0.0 };
     let per_axis = |v: f32| {
         let a = (v * v * air + v.abs() * ground) * -sign(v) / mass;
-        a.clamp(-v.abs(), v.abs())
+        a.det_clamp(-v.abs(), v.abs())
     };
     Vec3::new(
         per_axis(velocity.x),
@@ -1029,7 +1030,7 @@ pub fn drag_acceleration(velocity: Vec3, mass: f32, on_ground: bool, friction: f
 
 /// `AMoveType::BrakingDistance` (MoveType.h:80).
 pub fn braking_distance(speed: f32, rate: f32) -> f32 {
-    let time = speed / rate.max(0.001);
+    let time = speed / rate.det_max(0.001);
     0.5 * rate * time * time
 }
 
@@ -1039,9 +1040,9 @@ pub fn braking_distance(speed: f32, rate: f32) -> f32 {
 pub fn delta_speed(target: f32, current: f32, acc: f32, dec: f32) -> f32 {
     let diff = target - current;
     if diff < 0.0 {
-        -(-diff).min(dec)
+        -(-diff).det_min(dec)
     } else {
-        diff.min(acc)
+        diff.det_min(acc)
     }
 }
 
@@ -1065,9 +1066,9 @@ pub fn delta_heading(
     let lookahead = if braking { brake_dist * sign(cur) } else { 0.0 };
     let stop_heading = heading.wrapping_add(lookahead as i32 as i16);
     let cur_delta = wanted.wrapping_sub(stop_heading) as f32;
-    let step = sign(cur_delta) * cur_delta.abs().min(turn_accel);
+    let step = sign(cur_delta) * cur_delta.abs().det_min(turn_accel);
     let next = if braking { cur + step } else { step };
-    *turn_speed = next.clamp(-max_turn, max_turn);
+    *turn_speed = next.det_clamp(-max_turn, max_turn);
     *turn_speed as i32 as i16
 }
 
@@ -1113,7 +1114,7 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
             let max_turn = fs.turn_rate / SPRING_CIRCLE_DIVS as f32 * 360.0;
             let mut turn_mod_speed = fs.max_speed;
             if req_turn != 0.0 {
-                turn_mod_speed *= (max_turn / req_turn).clamp(0.1, 1.0);
+                turn_mod_speed *= (max_turn / req_turn).det_clamp(0.1, 1.0);
             }
             // `turnInPlace=1` (the FBI default) with
             // `turnInPlaceAngleLimit=0`: any remaining turn applies it.
@@ -1123,7 +1124,7 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
             if m.at_end_of_path {
                 // No waypoint left to cut to: slow to a turn circle
                 // through the goal so it is not orbited.
-                target = target.min(m.curr_wp_dist * PI / fs.frames_to_turn());
+                target = target.det_min(m.curr_wp_dist * PI / fs.frames_to_turn());
             }
         }
         if m.limit_speed_for_turning > 0 {
@@ -1131,20 +1132,20 @@ pub fn change_speed(m: &GroundMover, fs: &FrameStats, wanted_speed: f32, inp: &S
             // back to the waypoint without hitting it again.
             let offset = Heading::from_vector(m.waypoint_dir.x, m.waypoint_dir.y)
                 .wrapping_sub(m.heading) as f32;
-            let frames = (offset / fs.turn_rate).abs().max(1e-4);
-            max_speed_to_make_turn = (m.curr_wp_dist / frames * 0.95).max(0.01);
+            let frames = (offset / fs.turn_rate).abs().det_max(1e-4);
+            max_speed_to_make_turn = (m.curr_wp_dist / frames * 0.95).det_max(0.01);
         }
         // GroundMoveType.cpp:1397 — `wantedSpeed *= max(groundSpeedMod,
         // 1.0)`. With our 0..1 modifiers this is a no-op, exactly as the
         // engine's own NOTE explains ("raise wantedSpeed iff the
         // terrain-modifier is larger than 1"); kept verbatim so a future
         // >1 speed modifier behaves like Spring's.
-        let wanted = wanted_speed * inp.ground_speed_mod.max(1.0);
+        let wanted = wanted_speed * inp.ground_speed_mod.det_max(1.0);
         target *= inp.ground_speed_mod;
         if start_braking {
             target = 0.0;
         }
-        target = target.min(wanted).min(max_speed_to_make_turn);
+        target = target.det_min(wanted).det_min(max_speed_to_make_turn);
     } else {
         target = 0.0;
     }
@@ -1261,7 +1262,7 @@ pub fn update_pos(
         let along_z = facing % 2 == 1;
         let displacement = if along_z { moved.y } else { moved.x };
         let side = sign(displacement);
-        let amount = (displacement * side).min(speed) * side;
+        let amount = (displacement * side).det_min(speed) * side;
         let offset = if along_z {
             Vec2::new(0.0, amount)
         } else {
@@ -1425,11 +1426,11 @@ pub fn step_mover(
     // impulse along the facing) decays through rolling resistance.
     let base_speed = if m.current_speed > fs.max_speed {
         let drag = drag_acceleration(m.velocity, m.mass, true, ROLLING_RESISTANCE_COEFF);
-        fs.max_speed.max((m.velocity + drag).length())
+        fs.max_speed.det_max((m.velocity + drag).length())
     } else {
         m.current_speed
     };
-    let new_speed = (base_speed + delta).max(0.0);
+    let new_speed = (base_speed + delta).det_max(0.0);
     // `owner->frontdir * speed`: the heading tilted onto the ground,
     // so slopes shorten the horizontal step by the pitch's cosine.
     m.velocity = attitude(m.heading, up).mul_vec3(Vec3::NEG_Z) * new_speed;
@@ -1496,13 +1497,14 @@ fn set_next_waypoint(
             // can be steered at and passed without slowing — keep it.
             // The circle's DIAMETER is used so paths don't snake.
             let turn_radius =
-                (m.current_speed * fs.frames_to_turn() / TAU).max(m.current_speed * 1.05) * 2.0;
-            let waypoint_dot = m.waypoint_dir.dot(m.front()).clamp(-1.0, 1.0);
+                (m.current_speed * fs.frames_to_turn() / TAU).det_max(m.current_speed * 1.05) * 2.0;
+            let waypoint_dot = m.waypoint_dir.dot(m.front()).det_clamp(-1.0, 1.0);
             if m.curr_wp_dist > turn_radius {
                 return;
             }
             // Inside, but straight ahead and not reached within a frame.
-            if m.curr_wp_dist > SQUARE_SIZE.max(m.current_speed * 1.05) && waypoint_dot >= 0.995 {
+            if m.curr_wp_dist > SQUARE_SIZE.det_max(m.current_speed * 1.05) && waypoint_dot >= 0.995
+            {
                 return;
             }
         }
@@ -2067,7 +2069,7 @@ pub fn obstacle_avoidance_dir(
     let goal = m.goal.unwrap_or(me.pos);
     let right = m.right();
     let vel = m.velocity;
-    let avoidance_radius = m.current_speed.max(1.0) * (me.model_radius * 2.0);
+    let avoidance_radius = m.current_speed.det_max(1.0) * (me.model_radius * 2.0);
     let mut avoidance_vec = Vec2::ZERO;
 
     let (cx, cz) = cell_of(me.pos);
@@ -2102,7 +2104,7 @@ pub fn obstacle_avoidance_dir(
                 if front.dot(-(vector / dist)) < max_avoidee_cosine {
                     continue;
                 }
-                if dist_sq >= sq(m.current_speed.max(1.0) * GAME_SPEED + radius_sum) {
+                if dist_sq >= sq(m.current_speed.det_max(1.0) * GAME_SPEED + radius_sum) {
                     continue;
                 }
                 if dist_sq >= me.pos.distance_squared(goal) {
@@ -2112,11 +2114,11 @@ pub fn obstacle_avoidance_dir(
                 let avoidee_turn_sign = -sign(me.pos.dot(o.right) - o.pos.dot(o.right));
                 // Maximal when anti-parallel; both turn the same local
                 // way then.
-                let cos_angle = front.dot(o.front).clamp(-1.0, 1.0);
+                let cos_angle = front.dot(o.front).det_clamp(-1.0, 1.0);
                 let response = (1.0 - cos_angle) + 0.1;
-                let fall_off = 1.0 - (dist / (5.0 * radius_sum)).min(1.0);
+                let fall_off = 1.0 - (dist / (5.0 * radius_sum)).det_min(1.0);
                 if cos_angle < 0.0 {
-                    avoider_turn_sign = avoider_turn_sign.max(avoidee_turn_sign);
+                    avoider_turn_sign = avoider_turn_sign.det_max(avoidee_turn_sign);
                 }
                 avoidance_vec += right
                     * AVOIDER_DIR_WEIGHT
@@ -2173,7 +2175,8 @@ pub fn ground_speed_mod(
         // positive heading up the fall line.
         let dir_slope = -dir.dot(n2);
         // `· tt.kbotSpeed` (MoveMath.cpp:135): the square's terrain type.
-        1.0 / (1.0 + (slope * dir_slope).max(0.0) * nav.slope_mod(cap)) * nav.terrain_speed.at(p)
+        1.0 / (1.0 + (slope * dir_slope).det_max(0.0) * nav.slope_mod(cap))
+            * nav.terrain_speed.at(p)
     };
     let m = at(pos);
     if m == 0.0 {
@@ -2235,8 +2238,8 @@ pub fn attitude(heading: Heading, up: Vec3) -> Quat {
 /// and clamped to `[1024, 2048]` (32–45 elmos). Per-frame inputs,
 /// `turn_rate` in heading units.
 pub fn cancel_distance_sq(max_speed: f32, turn_rate: f32) -> f32 {
-    let turn_radius = max_speed * (SPRING_CIRCLE_DIVS as f32 / turn_rate.max(1.0)) / TAU;
-    sq(turn_radius + 2.0 * SQUARE_SIZE).clamp(1024.0, 2048.0)
+    let turn_radius = max_speed * (SPRING_CIRCLE_DIVS as f32 / turn_rate.det_max(1.0)) / TAU;
+    sq(turn_radius + 2.0 * SQUARE_SIZE).det_clamp(1024.0, 2048.0)
 }
 
 /// One ground unit, as the collision pass sees every other.
@@ -2325,18 +2328,18 @@ pub fn push_vector(
     // standing at different heights overlap less; the response itself
     // is applied in the plane (`sepDirection * XZVector`).
     let sep_distance = sep.length() + 0.1;
-    let pen = (radius_sum - sep_distance).max(1.0);
-    let response = (SQUARE_SIZE * 2.0).min(pen * 0.5);
+    let pen = (radius_sum - sep_distance).det_max(1.0);
+    let response = (SQUARE_SIZE * 2.0).det_min(pen * 0.5);
     let sep_dir = (sep / sep_distance).xz();
-    let v1 = speed1.max(1.0);
-    let v2 = speed2.max(1.0);
+    let v1 = speed1.det_max(1.0);
+    let v2 = speed2.det_max(1.0);
     let c1 = 1.0 + (1.0 - front1.dot(-sep_dir).abs()) * 5.0;
     let c2 = 1.0 + (1.0 - front2.dot(sep_dir).abs()) * 5.0;
     let s1 = m1 * v1 * c1;
     let s2 = m2 * v2 * c2;
     let q1 = s1 / (s1 + s2 + 1.0);
     let q2 = s2 / (s1 + s2 + 1.0);
-    let mass_scale = (1.0 - q1).clamp(0.01, 0.99) / rel1;
+    let mass_scale = (1.0 - q1).det_clamp(0.01, 0.99) / rel1;
     let slide_sign = sign(sep.xz().dot(right1));
     sep_dir * response * mass_scale + right1 * slide_sign * (1.0 / pen) * q2
 }
@@ -2443,7 +2446,7 @@ pub fn ground_collision_system(
         });
         if mobile {
             grid.mobile.entry(cell_of(pos)).or_default().push(idx);
-            max_mobile_radius = max_mobile_radius.max(radius);
+            max_mobile_radius = max_mobile_radius.det_max(radius);
         } else {
             let (x0, z0) = cell_of(pos - Vec2::splat(radius + STATIC_CELL_PAD));
             let (x1, z1) = cell_of(pos + Vec2::splat(radius + STATIC_CELL_PAD));
@@ -2788,7 +2791,7 @@ fn static_square_push(
             );
             let sv = pos - square;
             let sep = sv.length() + 0.1;
-            let pen = (sep - (m.collision_radius + SQUARE_RADIUS)).min(0.0);
+            let pen = (sep - (m.collision_radius + SQUARE_RADIUS)).det_min(0.0);
             // Ignore squares behind us (relative to the velocity).
             if sv.dot(vel) > 0.0 {
                 continue;
@@ -2806,7 +2809,7 @@ fn static_square_push(
     let avg_pen = pen_sum / count;
     let strafe_sign = -sign(avg_pos.dot(right) - pos.dot(right));
     let bounce_sign = sign(right.dot(bounce));
-    let scale = max_speed.min((-avg_pen * 0.5).max(0.1));
+    let scale = max_speed.det_min((-avg_pen * 0.5).det_max(0.1));
     right * strafe_sign * scale + right * bounce_sign * scale
 }
 
@@ -2904,7 +2907,7 @@ mod tests {
         let mut max_x = 0.0f32;
         for _ in 0..150 {
             h.step();
-            max_x = max_x.max(h.pos(e).x);
+            max_x = max_x.det_max(h.pos(e).x);
         }
         assert!(!h.has_order(e), "order finished");
         assert_eq!(mover_speed(&h, e), 0.0);
@@ -2933,7 +2936,7 @@ mod tests {
         let mut second_leg = false;
         for _ in 0..60 {
             h.step();
-            min_speed = min_speed.min(mover_speed(&h, e));
+            min_speed = min_speed.det_min(mover_speed(&h, e));
             if h.world.get::<MoveTarget>(e).is_some_and(|t| t.0.x == 800.0) {
                 second_leg = true;
                 break;
@@ -2980,7 +2983,7 @@ mod tests {
                 break;
             }
             frames_turning += 1;
-            min_speed = min_speed.min(m.current_speed);
+            min_speed = min_speed.det_min(m.current_speed);
         }
         // bit.fbi TurnRate=480 heading units/frame.
         assert_eq!(fs.turn_rate, 480.0);
@@ -3685,7 +3688,7 @@ mod tests {
         let mut min_d = f32::MAX;
         for _ in 0..400 {
             h.step();
-            min_d = min_d.min(h.pos(a).xz().distance(h.pos(b).xz()));
+            min_d = min_d.det_min(h.pos(a).xz().distance(h.pos(b).xz()));
         }
         assert!(!h.has_order(a) && !h.has_order(b), "both arrived");
         assert!(min_d > 20.0, "passed without overlapping: {min_d}");

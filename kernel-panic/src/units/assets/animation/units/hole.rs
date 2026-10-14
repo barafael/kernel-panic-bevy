@@ -14,6 +14,7 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
 use super::move_time;
+use crate::sim::DetFloat;
 
 const ARM_STEP: f32 = 16.0;
 const ARM_STEP_SPEED: f32 = 64.0;
@@ -84,7 +85,7 @@ impl HoleAnim {
                 let arm = -(i as f32) * ARM_STEP;
                 rig.move_to(p.nanoarm, Axis::X, arm, ARM_STEP_SPEED);
                 rig.move_to(p.nanomover, Axis::Z, 0.0, RETURN_SPEED);
-                move_time(rig, p.nanoarm, Axis::X, arm, ARM_STEP_SPEED).max(move_time(
+                move_time(rig, p.nanoarm, Axis::X, arm, ARM_STEP_SPEED).det_max(move_time(
                     rig,
                     p.nanomover,
                     Axis::Z,

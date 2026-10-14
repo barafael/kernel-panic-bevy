@@ -18,6 +18,7 @@
 //! additional [`PendingDamage`] at `burst_rate` intervals after the
 //! initial shot.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
@@ -747,7 +748,7 @@ impl DamagePass<'_, '_> {
             let scale = (weapon_def.impulse_factor
                 * falloff
                 * (weapon_def.damage.default + weapon_def.impulse_boost))
-                .clamp(-MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE);
+                .det_clamp(-MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE);
             // `volPos - expPos`; a direct hit's impact point is the
             // victim's own position here, where the engine's lies on the
             // collision surface facing the shooter: use the shot's
@@ -792,7 +793,7 @@ impl DamagePass<'_, '_> {
 
         // `damageAreaOfEffect = areaOfEffect · 0.5` (WeaponDef.cpp:71), at
         // least 1 (`CGameHelper::Explosion`).
-        let aoe = (weapon_def.area_of_effect * 0.5).max(1.0);
+        let aoe = (weapon_def.area_of_effect * 0.5).det_max(1.0);
         let edge_mult = weapon_def.edge_effectiveness;
         let no_self_damage = weapon_def.no_self_damage;
         // Collect first, then deliver — delivery borrows the victim

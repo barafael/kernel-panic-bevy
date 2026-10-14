@@ -7,6 +7,7 @@
 //! [`crate::interaction::movement::movement_system`] consults it via
 //! [`CircularFlow::step_multiplier`] every frame. Absent → no cost.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 #[derive(Resource, Clone, Debug)]
@@ -46,7 +47,7 @@ impl CircularFlow {
             Vec2::new(-r_n.y, r_n.x)
         };
         let alignment = tangent.dot(dir / dir.length());
-        (1.0 + alignment * self.strength).max(0.1)
+        (1.0 + alignment * self.strength).det_max(0.1)
     }
 }
 

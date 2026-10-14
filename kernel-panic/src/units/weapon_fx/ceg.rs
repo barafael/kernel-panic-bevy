@@ -23,6 +23,7 @@
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
 //! runtime never touches the raw TDF strings.
 
+use crate::sim::DetFloat;
 use crate::sim::sq;
 use bevy::math::ops;
 use std::collections::HashMap;
@@ -418,7 +419,7 @@ impl CegGroundFlash {
 
     /// `circleAlpha -= circleAlpha / ttl` per frame.
     fn ring_alpha(&self, age: f32) -> f32 {
-        (self.circle_alpha * (1.0 - age / self.ttl)).clamp(0.0, 1.0)
+        (self.circle_alpha * (1.0 - age / self.ttl)).det_clamp(0.0, 1.0)
     }
 
     /// `flashAge += 1 / ttl` per frame: `flashAlpha · age · 10` while
@@ -433,7 +434,7 @@ impl CegGroundFlash {
         } else {
             self.flash_alpha * (1.0 - i_age)
         };
-        alpha.clamp(0.0, 1.0)
+        alpha.det_clamp(0.0, 1.0)
     }
 }
 
@@ -578,7 +579,7 @@ fn spawn_particle_system(
                 ..Default::default()
             })
             .round()
-            .max(1.0) as u32;
+            .det_max(1.0) as u32;
 
         for particle_index in 0..n_particles {
             let ctx_base = EvalCtx {
@@ -593,7 +594,7 @@ fn spawn_particle_system(
                 rng,
                 ctx_base,
             )
-            .max(1.0);
+            .det_max(1.0);
             let life_secs = life_frames / GAME_SPEED;
 
             let size = eval_with_spread(
@@ -602,7 +603,7 @@ fn spawn_particle_system(
                 rng,
                 ctx_base,
             )
-            .max(0.1);
+            .det_max(0.1);
 
             let speed_per_frame = eval_with_spread(
                 &props.particle_speed,
@@ -717,7 +718,7 @@ fn spawn_flame(
         } else {
             spawn_dir
         };
-        let ttl = roll(&props.ttl).max(1.0);
+        let ttl = roll(&props.ttl).det_max(1.0);
         commands.spawn(CegFlame {
             pos: origin + pos,
             dir: dir.normalize_or(Vec3::Y),
@@ -803,7 +804,7 @@ fn spawn_spikes(
             length_growth,
             width: roll(&props.width, rng),
             alpha: roll(&props.alpha, rng),
-            alpha_decay: roll(&props.alpha_decay, rng).max(1e-3),
+            alpha_decay: roll(&props.alpha_decay, rng).det_max(1e-3),
             color,
             material: material.clone(),
         });
@@ -829,7 +830,7 @@ pub(super) fn tick_ceg_spikes(
         .unwrap_or(Vec3::Y * 1000.0);
     for (entity, mut spike) in &mut spikes {
         spike.length += spike.length_growth * frames;
-        spike.alpha = (spike.alpha - spike.alpha_decay * frames).max(0.0);
+        spike.alpha = (spike.alpha - spike.alpha_decay * frames).det_max(0.0);
         if spike.alpha <= 0.0 {
             commands.entity(entity).despawn();
             continue;
@@ -872,7 +873,7 @@ fn spawn_delayed(
             index: i,
             ..Default::default()
         };
-        let delay_frames = props.delay.eval(&ctx).max(0.0);
+        let delay_frames = props.delay.eval(&ctx).det_max(0.0);
         let delay_secs = delay_frames / GAME_SPEED;
         let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
         commands.spawn(CegDelayedSpawn {
@@ -1041,7 +1042,7 @@ pub(super) fn tick_ceg_flames(
             commands.entity(entity).despawn();
             continue;
         }
-        let life = 1.0 - (f.life_frames / f.max_life_frames).clamp(0.0, 1.0);
+        let life = 1.0 - (f.life_frames / f.max_life_frames).det_clamp(0.0, 1.0);
         let (front, sides) = muzzle_flame_quads(&f, life);
         if let Some(palette) = f.front {
             let palette = ceg_assets.palette_at(palette);
@@ -1538,8 +1539,8 @@ mod tests {
         for _ in 0..N {
             let v = eval_with_spread(&base, &spread, &mut rng, EvalCtx::default());
             assert!((100.0..=140.0).contains(&v), "out of range: {v}");
-            min = min.min(v);
-            max = max.max(v);
+            min = min.det_min(v);
+            max = max.det_max(v);
             sum += v;
         }
         let mean = sum / N as f32;

@@ -34,6 +34,12 @@ use std::ops::{Deref, DerefMut};
 use bevy::math::{Vec2, Vec3};
 use bevy::prelude::{FromWorld, ResMut, Resource, World};
 
+/// Float `det_max` / `det_min` / `det_clamp`: the sim's `max`, `min`
+/// and `clamp`, with one answer for `max(+0, -0)` on every target
+/// (`f32::max` gives x86_64's and aarch64's own; `clippy.toml` bans
+/// it). Signed zeros order `-0 < +0`, a NaN operand is ignored.
+pub use spring_detmath::DetFloat;
+
 /// Sim frames per second (`GAME_SPEED`). FBI/TDF speeds are elmos per
 /// frame, accelerations elmos per frame², reload/burst/TTL values frames.
 pub const GAME_SPEED: f32 = 30.0;
@@ -71,7 +77,7 @@ impl Default for MapGravity {
 impl MapGravity {
     /// From the map info's `gravity` (elmos/s², positive = down).
     pub fn from_map_info(gravity: f32) -> Self {
-        Self(-gravity.max(0.001) / (GAME_SPEED * GAME_SPEED))
+        Self(-gravity.det_max(0.001) / (GAME_SPEED * GAME_SPEED))
     }
 }
 
@@ -232,7 +238,7 @@ pub fn heading_of(v: Vec2) -> f32 {
 /// Shortest absolute angular distance between two angles, in `[0, π]`.
 pub fn angle_delta(a: f32, b: f32) -> f32 {
     let d = (a - b).rem_euclid(TAU);
-    d.min(TAU - d)
+    d.det_min(TAU - d)
 }
 
 /// The match's sim clock: fixed ticks since the match began, Spring's

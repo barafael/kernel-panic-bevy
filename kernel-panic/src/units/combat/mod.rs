@@ -15,6 +15,7 @@
 //! Public items are re-exported below so external callers keep using
 //! `super::combat::{...}` unchanged.
 
+use crate::sim::DetFloat;
 use bevy::math::ops;
 use bevy::prelude::*;
 
@@ -165,7 +166,7 @@ pub(crate) fn free_line_of_fire(
             return;
         }
         blocked = if cone {
-            let along = (unit.mid_pos() - from).dot(dir).clamp(0.0, length);
+            let along = (unit.mid_pos() - from).dot(dir).det_clamp(0.0, length);
             let cone_size = along * spread + 1.0;
             unit.surface_distance(from) <= cone_size
                 || unit.surface_distance(from + dir * along) <= cone_size
@@ -634,7 +635,7 @@ impl RngStream for GroundFireRng {
 /// `salvoDelay = int(burstRate * GAME_SPEED)` (`WeaponLoader.cpp:171`):
 /// whole sim frames between a salvo's shots.
 pub(crate) fn salvo_delay_frames(burst_rate: f32) -> u64 {
-    secs_to_frames(burst_rate).max(0.0) as u64
+    secs_to_frames(burst_rate).det_max(0.0) as u64
 }
 
 /// XZ-flatten and normalise a forward vector. Falls back to +Z
@@ -1327,7 +1328,11 @@ pub(crate) fn aim_gates_pass(
                 .abs(),
             Err(_) => {
                 let forward_xz = flat_forward(attacker_gtf.forward().as_vec3());
-                ops::acos(forward_xz.dot(to_target_xz.normalize()).clamp(-1.0, 1.0))
+                ops::acos(
+                    forward_xz
+                        .dot(to_target_xz.normalize())
+                        .det_clamp(-1.0, 1.0),
+                )
             }
         };
         if error > AIM_HEADING_TOLERANCE {

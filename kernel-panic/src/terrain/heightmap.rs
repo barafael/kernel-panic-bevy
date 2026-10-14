@@ -11,6 +11,7 @@
 //! so a unit crossing a slope sees a smooth Y instead of stair-stepping
 //! between heightmap cells.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 
 use spring_map::map_types::SQUARE_SIZE;
@@ -84,8 +85,8 @@ impl Heightmap {
         if self.width == 0 || self.height == 0 {
             return 0.0;
         }
-        let gx = (x / self.square_size).clamp(0.0, (self.width - 1) as f32);
-        let gz = (z / self.square_size).clamp(0.0, (self.height - 1) as f32);
+        let gx = (x / self.square_size).det_clamp(0.0, (self.width - 1) as f32);
+        let gz = (z / self.square_size).det_clamp(0.0, (self.height - 1) as f32);
 
         let x0 = (gx.floor() as usize).min(self.width.saturating_sub(2));
         let z0 = (gz.floor() as usize).min(self.height.saturating_sub(2));
@@ -178,7 +179,7 @@ impl Heightmap {
         } else {
             (sz - 1, 0.5 - dz)
         };
-        let (wx, wz) = (wx.clamp(0.0, 1.0), wz.clamp(0.0, 1.0));
+        let (wx, wz) = (wx.det_clamp(0.0, 1.0), wz.det_clamp(0.0, 1.0));
         let n = self.center_normal(sx, sz) * (1.0 - wx) * (1.0 - wz)
             + self.center_normal(sx2, sz) * wx * (1.0 - wz)
             + self.center_normal(sx, sz2) * (1.0 - wx) * wz
@@ -233,14 +234,14 @@ impl Heightmap {
         if !(center.is_finite() && footprint.is_finite()) {
             return max_slope;
         }
-        let nx = (footprint.x / step).clamp(0.0, 512.0) as i32;
-        let nz = (footprint.y / step).clamp(0.0, 512.0) as i32;
+        let nx = (footprint.x / step).det_clamp(0.0, 512.0) as i32;
+        let nz = (footprint.y / step).det_clamp(0.0, 512.0) as i32;
         for ix in 0..=nx {
             let x = center.x - half_x + ix as f32 * step;
             for iz in 0..=nz {
                 let z = center.z - half_z + iz as f32 * step;
                 let n = self.normal(x, z);
-                let slope = (1.0 - n.y.max(0.0)).max(0.0);
+                let slope = (1.0 - n.y.det_max(0.0)).det_max(0.0);
                 if slope > max_slope {
                     max_slope = slope;
                 }
@@ -267,7 +268,7 @@ impl Heightmap {
             if clearance < 0.0 {
                 let span = prev_clearance - clearance;
                 let frac = if span > 1e-6 {
-                    (prev_clearance / span).clamp(0.0, 1.0)
+                    (prev_clearance / span).det_clamp(0.0, 1.0)
                 } else {
                     1.0
                 };

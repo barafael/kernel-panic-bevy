@@ -33,6 +33,7 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
 use super::DeathFx;
+use crate::sim::DetFloat;
 
 /// connection.bos `move gp2 ... speed [90]`.
 const GP2_SPEED: f32 = 90.0;
@@ -77,7 +78,7 @@ impl UnitAnim for ConnectionAnim {
     }
 
     fn update(&mut self, _rig: &mut AnimRig, ctx: AnimCtx) {
-        self.lock_aim = (self.lock_aim - ctx.dt).max(0.0);
+        self.lock_aim = (self.lock_aim - ctx.dt).det_max(0.0);
         self.death.tick(ctx.dt);
     }
 

@@ -22,6 +22,7 @@
 //! the scripts' `HitByWeaponId`, the idle-heal reset and infection all
 //! apply to them exactly as to weapon fire.
 
+use crate::sim::DetFloat;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -1199,7 +1200,7 @@ pub fn tick_sigterm_signals(
             continue;
         }
 
-        let t = (signal.elapsed / total_time).clamp(0.0, 1.0);
+        let t = (signal.elapsed / total_time).det_clamp(0.0, 1.0);
         transform.translation = signal.start.lerp(release, t);
         if signal.total_distance > 1e-3 {
             transform.look_at(release, Vec3::Y);
@@ -1237,7 +1238,7 @@ pub fn tick_sigterm_bombs(
             } else {
                 1.0
             };
-            transform.translation = bomb.start.lerp(bomb.target, t.clamp(0.0, 1.0));
+            transform.translation = bomb.start.lerp(bomb.target, t.det_clamp(0.0, 1.0));
             continue;
         }
 

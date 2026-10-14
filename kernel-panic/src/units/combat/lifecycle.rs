@@ -8,6 +8,7 @@
 //! despawns once the death anim finishes; [`auto_heal`] regenerates
 //! idle units.
 
+use crate::sim::DetFloat;
 use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
@@ -151,7 +152,7 @@ pub fn auto_heal(
             if idle.0 > heal.threshold {
                 rate += heal.rate;
             }
-            health.current = (health.current + rate * dt).min(health.max);
+            health.current = (health.current + rate * dt).det_min(health.max);
         }
     }
 }
@@ -181,7 +182,7 @@ pub fn tick_stun(
     let decay_per_sec = 1.0 / STUN_CHARGE_DECAY;
     for mut charge in &mut charge_q {
         if charge.0 > 0.0 {
-            charge.0 = (charge.0 - charge.0 * decay_per_sec * dt).max(0.0);
+            charge.0 = (charge.0 - charge.0 * decay_per_sec * dt).det_max(0.0);
         }
     }
 }

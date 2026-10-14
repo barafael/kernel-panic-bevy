@@ -47,6 +47,7 @@
 //! rng=constant` degenerates to the literal value — the common case for
 //! CEGs that don't depend on spawn state.
 
+use spring_detmath::DetFloat;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -312,7 +313,7 @@ impl ColorMap {
             0 => [1.0, 1.0, 1.0, 1.0],
             1 => self.stops[0],
             n => {
-                let t = t.clamp(0.0, 1.0);
+                let t = t.det_clamp(0.0, 1.0);
                 let segs = n - 1;
                 let scaled = t * segs as f32;
                 let idx = (scaled as usize).min(segs - 1);
@@ -576,7 +577,7 @@ impl EffectLayer {
             // `psi.count = max(0, GetInt("count", 1))`
             // (`ExplosionGenerator.cpp:978`): absent → 1, an explicit
             // `count=0` disables the layer (network_flowtrail's Circle).
-            count: s.f32_or("count", 1.0).max(0.0) as u32,
+            count: s.f32_or("count", 1.0).det_max(0.0) as u32,
             properties,
         })
     }

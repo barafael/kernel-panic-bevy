@@ -13,6 +13,7 @@
 //! - [`s3o_mount`] — the per-model [`PieceLayout`] `spawn_unit` mounts.
 //! - [`mod`](self) — [`spawn_unit`] + the top-level spawners.
 
+use crate::sim::DetFloat;
 use bevy::ecs::system::SystemParam;
 use bevy::math::ops;
 use bevy::prelude::*;
@@ -92,7 +93,7 @@ pub fn spawn_homebases(
     let (world_w, world_d) = heightmap.world_size();
     let cx = world_w * 0.5;
     let cz = world_d * 0.5;
-    let radius = world_w.min(world_d) * 0.30;
+    let radius = world_w.det_min(world_d) * 0.30;
     let seats = players.len().max(1) as f32;
     let mut bases = Vec::with_capacity(players.len());
 
@@ -111,8 +112,8 @@ pub fn spawn_homebases(
                 let theta = std::f32::consts::TAU * i as f32 / seats;
                 (cx + radius * ops::cos(theta), cz + radius * ops::sin(theta))
             });
-        let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
-        let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
+        let fx = fx.det_clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
+        let fz = fz.det_clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
         positions.push(heightmap.place(fx, fz));
     }
     let barycenter = positions.iter().sum::<Vec3>() / positions.len().max(1) as f32;
@@ -254,7 +255,7 @@ pub fn exit_heading(
         } else {
             f32::INFINITY
         };
-        along_x.min(along_z).max(0.0)
+        along_x.det_min(along_z).det_max(0.0)
     };
 
     let scored: Vec<(Heading, usize)> = (0..4)
@@ -336,9 +337,9 @@ pub fn spawn_demo_squads(
             let a = heading + (i as f32 / (count - 1) as f32 - 0.5) * 2.1;
             let spot = |r: f32| {
                 let x = (base.x + r * ops::cos(a))
-                    .clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
+                    .det_clamp(HOMEBASE_EDGE_MARGIN, w - HOMEBASE_EDGE_MARGIN);
                 let z = (base.z + r * ops::sin(a))
-                    .clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
+                    .det_clamp(HOMEBASE_EDGE_MARGIN, d - HOMEBASE_EDGE_MARGIN);
                 heightmap.place(x, z)
             };
             let Some(mut pos) = [RING, RING * 0.65, RING * 0.4]
@@ -371,8 +372,8 @@ pub fn spawn_showcase_homebase(
         .first()
         .map(|sp| (sp.x, sp.z))
         .unwrap_or((world_w * 0.5, world_d * 0.5));
-    let fx = fx.clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
-    let fz = fz.clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
+    let fx = fx.det_clamp(HOMEBASE_EDGE_MARGIN, world_w - HOMEBASE_EDGE_MARGIN);
+    let fz = fz.det_clamp(HOMEBASE_EDGE_MARGIN, world_d - HOMEBASE_EDGE_MARGIN);
     let home_pos = heightmap.place(fx, fz);
 
     let heading = exit_heading(

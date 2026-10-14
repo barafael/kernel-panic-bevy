@@ -1,0 +1,8 @@
+[package]
+name = "spring-detmath"
+version = "0.1.0"
+edition = "2024"
+description = "Target-independent float max / min / clamp for the lockstep simulation"
+
+[lib]
+doctest = false

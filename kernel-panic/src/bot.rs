@@ -39,6 +39,7 @@
 //!
 //! Not compiled for wasm (no disk).
 
+use crate::sim::DetFloat;
 use bevy::math::ops;
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -327,7 +328,7 @@ fn bot_tick(
                     faction
                 };
                 let mut ids = Vec::new();
-                let cols = (count as f32).sqrt().ceil().max(1.0) as usize;
+                let cols = (count as f32).sqrt().ceil().det_max(1.0) as usize;
                 for i in 0..count {
                     let (cx, cz) = ((i % cols) as f32, (i / cols) as f32);
                     let pos = hm.place(x + cx * spacing, z + cz * spacing);
