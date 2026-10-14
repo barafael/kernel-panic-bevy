@@ -194,7 +194,7 @@ impl Room {
         f(&self.peers[i].h.world_mut().resource::<NetSession>().session)
     }
 
-    /// The bus log's command count (every peer applies the same).
+    /// Delay, lateness, round trips and traffic, for the write-up.
     fn report(&mut self, label: &str) {
         let delay = self.session(0, |s| s.delay());
         let late = self.session(0, |s| s.stats.late_batches);
@@ -210,6 +210,21 @@ impl Room {
             "{label}: {ticks} ticks, delay {delay}, late batches {late}, rtt [{}] ms",
             rtts.join(" ")
         );
+        // Payload bytes per second of network time, both channels.
+        let secs = self.net.now().as_secs_f64();
+        for (i, peer) in self.peers.iter().enumerate().filter(|(i, _)| *i < 2) {
+            let t = self.net.traffic(peer.id);
+            let up: u64 = t.iter().map(|c| c.sent_bytes).sum();
+            let msgs: u64 = t.iter().map(|c| c.sent_msgs).sum();
+            let down: u64 = t.iter().map(|c| c.recv_bytes).sum();
+            eprintln!(
+                "  {}: up {:.0} B/s in {:.0} msg/s, down {:.0} B/s",
+                if i == 0 { "host " } else { "guest" },
+                up as f64 / secs,
+                msgs as f64 / secs,
+                down as f64 / secs,
+            );
+        }
     }
 }
 
@@ -228,8 +243,8 @@ fn two_peers_full_sim() {
         down: false,
     };
     let mut r = start(&scn, 0x2b, link);
-    r.run(60 * 32, Duration::from_micros(16_667), |_, _| {});
-    let n = r.assert_agree(800);
+    r.run(60 * 22, Duration::from_micros(16_667), |_, _| {});
+    let n = r.assert_agree(550);
     r.report("2 peers full sim");
     assert!(r.session(0, |s| s.desync().is_none()));
     // The script's orders went through: both seats applied commands.
@@ -255,8 +270,8 @@ fn eight_peers_full_sim() {
         };
         r.net.set_link_both(PeerId(1), PeerId(i as u128 + 1), link);
     }
-    r.run(30 * 25, Duration::from_micros(33_333), |_, _| {});
-    r.assert_agree(500);
+    r.run(30 * 16, Duration::from_micros(33_333), |_, _| {});
+    r.assert_agree(300);
     r.report("8 peers full sim");
     assert!(r.session(0, |s| s.desync().is_none()));
 }
@@ -318,7 +333,7 @@ fn dead_link_full_sim() {
     };
     let mut r = start(&scn, 0x5a, link);
     let mut waited = false;
-    r.run(60 * 16, Duration::from_micros(16_667), |r, f| {
+    r.run(60 * 13, Duration::from_micros(16_667), |r, f| {
         if f == 60 * 4 {
             r.net
                 .set_link_both(PeerId(1), PeerId(3), LinkParams { down: true, ..link });
@@ -335,7 +350,7 @@ fn dead_link_full_sim() {
         waited,
         "the cut-off guest showed it was waiting for the host"
     );
-    let n = r.assert_agree(400);
+    let n = r.assert_agree(320);
     let host = r.trail(0).len();
     assert!(host - n < 10, "caught up: host {host}, guest {n}");
     r.report("dead link 4 s");

@@ -158,10 +158,24 @@ Estimates are focused-work rough guesses.
 - In-process multi-peer tests (several headless apps, simulated latency/loss) —
   the X-commands lockstep test grown to the full sim.
 
+**Runtime done** (`net-experiments/m1-runtime.md`): a `Transport` trait (reliable +
+unreliable channels, peer events; matchbox-shaped) with a deterministic simulated
+network (latency, jitter, loss, duplication, reordering, dead links); the host
+sequences every peer's numbered command batches into turns, sent unreliably with
+the last 5 repeated, gap fills on the reliable channel; the tick driver replaces
+Bevy's fixed loop and runs one turn per tick of game time (host = clock, guests
+catch up past a 2-turn backlog, ≤ 8 extra ticks a frame), single player being a
+solo host with delay 0 (golden trails unchanged); the input delay follows the
+measured lag (start 3, [1, 15] ticks, ≈ RTT/33 ms + 2), the same for the host;
+state hash every 30 frames, the host compares, every peer stops at the same tick
+and dumps. 2- and 8-peer full-sim tests (0–200 ms, 1–5 % loss, reordering, a dead
+link, a forced desync, peers leaving) agree on every tick. Speed/pause read from
+the sim (`GameSpeed`; to become B's `MatchControl` at the merge).
+
 ### M2 — Transport and lobby · ~1–1.5 weeks
 
-- Port cake-net (~500 lines: `Sequencer`, `TurnBuffer`, `HashLog`, `RoomId`,
-  envelope, zero-length guard) and its lobby pattern (host election = lowest
+- ~~Port cake-net's `Sequencer`, `TurnBuffer`, `HashLog`, envelope, zero-length
+  guard~~ (done in M1: `net::session`, `net::wire`). Port `RoomId` and its lobby pattern (host election = lowest
   PeerId, roster, `Start`; single player is a solo host on the same code path).
 - matchbox fork at rev `27b5e50` (Bevy 0.20, socket hardening), as cake/omdurman.
 - **Channels** (X-transport findings):

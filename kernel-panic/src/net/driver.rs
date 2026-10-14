@@ -99,7 +99,8 @@ impl Default for CatchUp {
 pub struct Pacer {
     pub acc: Duration,
     pub catch_up: CatchUp,
-    /// The guest has been waiting for a turn since.
+    /// Waiting since: for a turn (guest), for every guest to show up
+    /// (host, before the first tick).
     pub starved_since: Option<Duration>,
 }
 
@@ -148,6 +149,7 @@ pub fn drive_frame(
     if !s.started() {
         // The match clock starts once everyone is here.
         p.acc = Duration::ZERO;
+        p.starved_since.get_or_insert(now);
     } else if !s.halted() && !speed.paused {
         p.acc += delta.mul_f64(speed.factor.max(0.0) as f64);
     }
@@ -500,13 +502,10 @@ pub fn drive_fixed_main(world: &mut World) {
             }
         }
         let s = &net.session;
-        let waiting = if !s.started() {
-            Some((s.waiting_for(), now))
-        } else {
-            net.pacer
-                .starved_since
-                .map(|since| (s.waiting_for(), since))
-        };
+        let waiting = net
+            .pacer
+            .starved_since
+            .map(|since| (s.waiting_for(), since));
         let mut status = world.get_resource_or_insert_with(NetStatus::default);
         let dump = dumped.or(status.dump.take().filter(|_| s.desync().is_some()));
         *status = NetStatus {
