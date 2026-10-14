@@ -2,6 +2,7 @@ use bevy::math::ops;
 use bevy::{camera::Hdr, input::mouse::MouseWheel, prelude::*};
 
 use crate::rendering::settings::{MsaaSupport, RenderSettings};
+use crate::sim::DetFloat;
 
 /// Marker component for the main RTS camera.
 #[derive(Component)]
@@ -83,9 +84,13 @@ impl MapBounds {
         let extent = self.max - self.min;
         let margin = extent * self.margin_fraction;
         Vec3::new(
-            focus.x.clamp(self.min.x - margin.x, self.max.x + margin.x),
+            focus
+                .x
+                .det_clamp(self.min.x - margin.x, self.max.x + margin.x),
             focus.y, // Y (height) is not clamped — follows terrain
-            focus.z.clamp(self.min.z - margin.z, self.max.z + margin.z),
+            focus
+                .z
+                .det_clamp(self.min.z - margin.z, self.max.z + margin.z),
         )
     }
 }
@@ -215,7 +220,7 @@ pub(crate) fn intersect_ground_y(ray: Ray3d, plane_y: f32) -> Option<Vec3> {
     }
     // Cap near-horizon rays so a sliver of pitch doesn't put the anchor
     // a million units away.
-    Some(ray.origin + dir * t.min(50_000.0))
+    Some(ray.origin + dir * t.det_min(50_000.0))
 }
 
 fn cursor_world_on_plane(
@@ -274,7 +279,7 @@ pub fn camera_control(
     }
 
     if pan != Vec3::ZERO {
-        let speed = settings.pan_speed * (state.distance / 500.0).max(0.3);
+        let speed = settings.pan_speed * (state.distance / 500.0).det_max(0.3);
         state.focus += pan.normalize() * speed * delta_time;
     }
 
@@ -294,9 +299,9 @@ pub fn camera_control(
         zoom_ticks += event.y;
     }
     if zoom_ticks != 0.0 {
-        let factor = 1.0 - zoom_ticks.clamp(-5.0, 5.0) * 0.06;
+        let factor = 1.0 - zoom_ticks.det_clamp(-5.0, 5.0) * 0.06;
         state.distance =
-            (state.distance * factor).clamp(settings.min_distance, settings.max_distance);
+            (state.distance * factor).det_clamp(settings.min_distance, settings.max_distance);
     }
 
     // --- Middle-mouse: drag-pan, or alt+middle: orbit around cursor ---
@@ -351,7 +356,7 @@ pub fn camera_control(
             for motion in mouse_motion.read() {
                 state.yaw -= motion.delta.x * settings.rotate_speed_mouse;
                 state.pitch = (state.pitch + motion.delta.y * settings.rotate_speed_mouse)
-                    .clamp(settings.min_pitch, settings.max_pitch);
+                    .det_clamp(settings.min_pitch, settings.max_pitch);
             }
         }
         MiddleDrag::None => {
@@ -391,7 +396,7 @@ pub fn camera_smoothing(
         && state.smooth_yaw == state.yaw
         && state.smooth_pitch == state.pitch;
     if !settled {
-        let t = (settings.smoothing * time.delta_secs()).min(1.0);
+        let t = (settings.smoothing * time.delta_secs()).det_min(1.0);
         let s = state.as_mut();
         let focus = s.smooth_focus.lerp(s.focus, t);
         s.smooth_focus = if (focus - s.focus).abs().max_element() < SNAP_ELMOS {

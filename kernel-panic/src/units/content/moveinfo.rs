@@ -7,6 +7,8 @@
 //! kept as data; only the engine's legacy HAPFS pathfinder reads them,
 //! and Kernel Panic runs QTPFS.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -75,7 +77,7 @@ impl MoveClassTable {
             if name.is_empty() {
                 continue;
             }
-            let fx = section.f32("footprintx").max(1.0);
+            let fx = section.f32("footprintx").det_max(1.0);
             let fz = match section.f32("footprintz") {
                 z if z > 0.0 => z,
                 _ => fx,
@@ -98,7 +100,7 @@ impl MoveClassTable {
                 name,
                 MoveClassParams {
                     heat_produced: produced,
-                    heat_retention: retention.clamp(0.001, 1.0),
+                    heat_retention: retention.det_clamp(0.001, 1.0),
                 },
             );
         }

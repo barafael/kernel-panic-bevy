@@ -24,6 +24,7 @@ use bevy::ui::UiGlobalTransform;
 use super::menu::{MenuButton, MenuFrame, MenuPage};
 use super::save_screenshot;
 use crate::game_setup::DevOptions;
+use crate::sim::DetFloat;
 
 /// Default frames (at 30 per second) to let the demo world load before
 /// the first shot; paced by the clock, since a virtual display has no
@@ -226,8 +227,8 @@ fn audit(window: &Window, frames: &[Frame], parents: &Query<&ChildOf>) -> Vec<St
             {
                 continue;
             }
-            let dx = a.max.x.min(b.max.x) - a.min.x.max(b.min.x);
-            let dy = a.max.y.min(b.max.y) - a.min.y.max(b.min.y);
+            let dx = a.max.x.det_min(b.max.x) - a.min.x.det_max(b.min.x);
+            let dy = a.max.y.det_min(b.max.y) - a.min.y.det_max(b.min.y);
             if dx > OVERLAP_TOLERANCE && dy > OVERLAP_TOLERANCE {
                 issues.push(format!(
                     "overlap: \"{}\" and \"{}\" by {dx:.0}x{dy:.0}px",

@@ -28,6 +28,7 @@ use bevy::window::{MonitorSelection, PrimaryWindow, WindowMode};
 use crate::game_setup::{AppState, DevOptions, GameSetup, demo_setup};
 use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
+use crate::sim::DetFloat;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Homebase, UnitType};
 
@@ -334,11 +335,11 @@ fn farthest_points(pool: &[Vec3], k: usize) -> Vec<Vec3> {
             let da = picked
                 .iter()
                 .map(|p| p.distance_squared(*a))
-                .fold(f32::MAX, f32::min);
+                .fold(f32::MAX, f32::det_min);
             let db = picked
                 .iter()
                 .map(|p| p.distance_squared(*b))
-                .fold(f32::MAX, f32::min);
+                .fold(f32::MAX, f32::det_min);
             da.total_cmp(&db)
         });
         match far {
@@ -364,9 +365,11 @@ impl Glide {
         let to = path[self.target] - focus;
         let dist = to.length();
         let brake = (2.0 * GLIDE_ACCEL * dist).sqrt();
-        self.speed = (self.speed + GLIDE_ACCEL * dt).min(GLIDE_SPEED).min(brake);
+        self.speed = (self.speed + GLIDE_ACCEL * dt)
+            .det_min(GLIDE_SPEED)
+            .det_min(brake);
         let step = self.speed * dt;
-        if dist <= step.max(0.5) {
+        if dist <= step.det_max(0.5) {
             self.speed = 0.0;
             self.dwell = DWELL;
             path[self.target]

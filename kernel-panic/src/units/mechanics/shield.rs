@@ -22,6 +22,7 @@
 
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
@@ -108,7 +109,7 @@ pub fn regen_shields(time: Res<Time>, mut query: Query<&mut ShieldState>) {
         if let Some(current) = shield.current_power.as_mut()
             && *current < max
         {
-            *current = (*current + regen * dt).min(max);
+            *current = (*current + regen * dt).det_min(max);
         }
     }
 }
@@ -269,7 +270,7 @@ pub fn tick_shield_shells(
         let ratio = match (state.max_power, state.current_power) {
             // Infinite shield (upstream `shieldpower=0`): always full.
             (None, _) => 1.0,
-            (Some(max), Some(current)) if max > 0.0 => (current / max).clamp(0.0, 1.0),
+            (Some(max), Some(current)) if max > 0.0 => (current / max).det_clamp(0.0, 1.0),
             _ => 0.0,
         };
         let full = SHELL_COLOR_FULL.to_srgba();

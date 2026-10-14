@@ -19,10 +19,10 @@
 //!   `init_resource`; [`begin_match`] re-initialises every such resource
 //!   at the swap. No hand-kept reset list to forget an entry in.
 //! - **Seats, seed and game state.** The match's [`ActiveMatch`] setup,
-//!   its [`MatchSeed`], the [`LocalTeam`], [`AiSeats`], [`AiDifficulty`]
-//!   and [`GameState`] are set from the prepared map's setup in
-//!   [`begin_match`] — the old world is judged against its own seats
-//!   until it is gone.
+//!   its [`MatchSeed`], the [`LocalTeam`], [`Alliances`], [`AiSeats`],
+//!   [`AiDifficulty`] and the result panel's [`GameState`] are set from
+//!   the prepared map's setup in [`begin_match`] — the old world is
+//!   judged against its own seats until it is gone.
 
 use std::any::TypeId;
 
@@ -37,6 +37,7 @@ use crate::sim::MatchSeed;
 use crate::units::ai::AiSeats;
 use crate::units::lifecycle::game_over::GameState;
 use crate::units::player::LocalTeam;
+use crate::units::teams::Alliances;
 
 /// Marker for match content that has neither a `Transform` nor a UI
 /// `Node` — the batched effect particles drawn from plain data (CEG
@@ -97,24 +98,25 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
         reset(world);
     }
 
-    // The human seat's ally team drives input, the game-over check and
-    // the fog/cloak perspective; with no human seat (the menu's
-    // attract-mode demo) the local player spectates. The difficulty the
-    // menu picked drives the AI.
+    // The human seat (its owner: seat `i` is owner `i`) drives input,
+    // the result panel and the fog/cloak perspective; with no human
+    // seat (the menu's attract-mode demo) the local player spectates.
+    // The difficulty the menu picked drives the AI.
     let local_team = setup
         .players
         .iter()
-        .find(|p| !p.ai)
-        .map_or(SPECTATOR_TEAM, |p| p.team);
+        .position(|p| !p.ai)
+        .map_or(SPECTATOR_TEAM, |seat| seat as u8);
     world.insert_resource(LocalTeam(local_team));
-    // Which teams the AI plays comes from the seats, never from who is
-    // watching: every peer runs the same AI brains.
+    // Who is allied, and which owners the AI plays, come from the
+    // seats, never from who is watching: every peer runs the same
+    // alliances and AI brains.
+    world.insert_resource(Alliances::from_setup(setup));
     world.insert_resource(AiSeats::from_setup(setup));
     world.insert_resource(AiDifficulty(setup.difficulty));
     world.insert_resource(ActiveMatch(setup.clone()));
-    // A decided previous match (Victory / Defeat freezes the gameplay
-    // sets) must not leave the new one frozen under its panel. Applied
-    // by this frame's state transition, before the first sim tick.
+    // A decided previous match must not leave its result panel over
+    // the new one. Applied by this frame's state transition.
     if let Some(mut next) = world.get_resource_mut::<NextState<GameState>>() {
         next.set(GameState::Playing);
     }
@@ -367,8 +369,8 @@ mod tests {
     }
 
     /// The swap re-initialises every match-scoped resource, seats the
-    /// new match and lifts a decided match's frozen state before the
-    /// first tick of the new one.
+    /// new match and closes a decided match's result before the first
+    /// tick of the new one.
     #[test]
     fn begin_match_switches_match_state() {
         let mut app = lifecycle_app();
@@ -398,6 +400,10 @@ mod tests {
         );
         assert_eq!(world.resource::<AiSeats>().0, vec![0, 1]);
         assert_eq!(world.resource::<LocalTeam>().0, SPECTATOR_TEAM);
+        assert_eq!(
+            *world.resource::<Alliances>(),
+            Alliances::from_setup(&setup)
+        );
         assert_eq!(world.resource::<AiDifficulty>().0, 4);
         assert!(world.resource::<ActiveMatch>().0.demo);
         assert_eq!(

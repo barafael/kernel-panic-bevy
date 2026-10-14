@@ -15,6 +15,7 @@ use bevy::asset::LoadState;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::sim::DetFloat;
 use crate::units::components::Faction;
 use crate::units::content::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::units::content::unit_registry::UnitRegistry;
@@ -110,9 +111,9 @@ fn synthesise_placeholder(faction: Faction, is_building: bool) -> Image {
 
     const SIZE: u32 = 48;
     let [r, g, b] = faction.rgb_f32();
-    let r = (r.clamp(0.0, 1.0) * 255.0) as u8;
-    let g = (g.clamp(0.0, 1.0) * 255.0) as u8;
-    let b = (b.clamp(0.0, 1.0) * 255.0) as u8;
+    let r = (r.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let g = (g.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let b = (b.det_clamp(0.0, 1.0) * 255.0) as u8;
 
     let mut data = vec![0u8; (SIZE * SIZE * 4) as usize];
     let center = SIZE as f32 / 2.0;

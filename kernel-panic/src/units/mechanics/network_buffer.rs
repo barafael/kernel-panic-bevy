@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
-use crate::sim::{GAME_SPEED, frames_to_secs};
+use crate::sim::{DetFloat, GAME_SPEED, frames_to_secs};
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -309,7 +309,7 @@ pub fn tick_flow_speed(
         }
         let base = unit_registry.speed(UnitKind::Flow);
         let bonus = small_building_counts.get(team.0) as f32 * FLOW_BONUS_PER_BUILDING;
-        boost.0 = (base + bonus).min(FLOW_MAX_SPEED) - base;
+        boost.0 = (base + bonus).det_min(FLOW_MAX_SPEED) - base;
     }
 }
 

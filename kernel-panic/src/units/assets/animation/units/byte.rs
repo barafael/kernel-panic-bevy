@@ -19,6 +19,7 @@
 
 use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
 use super::{DeathFx, move_time, turn_time};
+use crate::sim::DetFloat;
 
 /// Close(): `sleep 3000` before folding after the last aim.
 const IDLE_CLOSE_DELAY: f32 = 3.0;
@@ -163,12 +164,12 @@ impl Sequencer {
             }
             FoldTimeline::Close => {
                 let aimer = turn_time(rig, p.aimer, Axis::X, 0.0, CLOSE_AIMER_SPEED)
-                    .max(turn_time(rig, p.aimer, Axis::Y, 0.0, CLOSE_AIMER_SPEED))
+                    .det_max(turn_time(rig, p.aimer, Axis::Y, 0.0, CLOSE_AIMER_SPEED))
                     + WAIT_LATENCY;
                 let blades =
                     aimer + move_time(rig, p.blade[0], Axis::Z, 0.0, BLADE_SPEED) + WAIT_LATENCY;
-                let rest =
-                    blades + (ROTOR_OPEN_DEG / CLOSE_ROTOR_SPEED).max(BASE_LIFT / CLOSE_BASE_SPEED);
+                let rest = blades
+                    + (ROTOR_OPEN_DEG / CLOSE_ROTOR_SPEED).det_max(BASE_LIFT / CLOSE_BASE_SPEED);
                 [aimer, blades, rest]
             }
         };

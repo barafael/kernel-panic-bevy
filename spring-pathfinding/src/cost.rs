@@ -5,6 +5,8 @@
 //! The grid resolution matches the Spring heightmap: one cell per `SQUARE_SIZE`
 //! (8 world units).
 
+use spring_detmath::DetFloat;
+
 pub const SQUARE_SIZE: f32 = 8.0;
 pub const NUM_SPEEDMOD_BINS: u8 = 10;
 
@@ -82,8 +84,8 @@ impl SpeedMap {
             .speeds
             .iter()
             .copied()
-            .fold(0.0f32, f32::max)
-            .max(0.001);
+            .fold(0.0f32, f32::det_max)
+            .det_max(0.001);
     }
 
     /// Build a speed map from a precomputed slope field
@@ -146,7 +148,7 @@ impl SpeedMap {
                     heights, hw, hh, x as usize, z as usize, max_slope, slope_mod,
                 ) * cell_mod(x, z);
                 lowered_max |= *cell >= old_max && speed < old_max;
-                self.max_speed = self.max_speed.max(speed);
+                self.max_speed = self.max_speed.det_max(speed);
                 *cell = speed;
             }
         }
@@ -253,7 +255,7 @@ fn block_slope(heights: &[f32], hw: usize, hh: usize, bx: usize, bz: usize) -> f
                 face_normal_y(bl - br, tr - br),
             ] {
                 sum += ny;
-                min = min.min(ny);
+                min = min.det_min(ny);
                 n += 1.0;
             }
         }
@@ -280,7 +282,7 @@ fn speed_from_slope(slope: f32, max_slope: f32, slope_mod: f32) -> f32 {
     if slope > max_slope {
         0.0 // impassable
     } else {
-        (1.0 / (1.0 + slope * slope_mod)).clamp(0.0, 1.0)
+        (1.0 / (1.0 + slope * slope_mod)).det_clamp(0.0, 1.0)
     }
 }
 
@@ -291,7 +293,7 @@ fn speed_from_slope(slope: f32, max_slope: f32, slope_mod: f32) -> f32 {
 /// slopes up to 54°, not 36°. Without that, the port rejects ramps
 /// the original game accepts.
 pub fn max_slope_from_degrees(degrees: f32) -> f32 {
-    let deg = degrees.clamp(0.0, 60.0) * 1.5;
+    let deg = degrees.det_clamp(0.0, 60.0) * 1.5;
     let rad = deg.to_radians();
     1.0 - libm::cosf(rad)
 }
@@ -490,7 +492,7 @@ mod update_region_tests {
         assert_eq!(map.speeds, full.speeds);
         assert_eq!(
             map.max_speed(),
-            full.speeds.iter().copied().fold(0.0, f32::max)
+            full.speeds.iter().copied().fold(0.0, f32::det_max)
         );
     }
 }

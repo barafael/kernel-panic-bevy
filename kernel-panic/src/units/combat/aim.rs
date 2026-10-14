@@ -16,6 +16,7 @@ use bevy::prelude::*;
 
 use super::{Dying, Stunned};
 use crate::interaction::movement::{AttackMoveActive, MovePath, MoveTarget};
+use crate::sim::DetFloat;
 use crate::units::assets::animation::{AnimCtx, UnitAnimator};
 use crate::units::components::UnitStats;
 
@@ -94,16 +95,16 @@ impl AimLaunch {
     /// `horizontal` elmos away and `up` elmos higher.
     fn pitch(self, horizontal: f32, up: f32) -> f32 {
         match self {
-            Self::Direct => ops::atan2(up, horizontal.max(1e-6)),
+            Self::Direct => ops::atan2(up, horizontal.det_max(1e-6)),
             Self::Missile { trajectory_height } => {
-                let dist = (horizontal * horizontal + up * up).sqrt().max(1e-6);
+                let dist = (horizontal * horizontal + up * up).sqrt().det_max(1e-6);
                 let dir = Vec3::new(horizontal / dist, up / dist + trajectory_height, 0.0)
                     .normalize_or(Vec3::Y);
-                ops::asin(dir.y.clamp(-1.0, 1.0))
+                ops::asin(dir.y.det_clamp(-1.0, 1.0))
             }
             Self::Cannon { speed, gravity } => {
                 let dir = cannon_wanted_dir(Vec3::new(horizontal, up, 0.0), speed, gravity);
-                ops::asin(dir.y.clamp(-1.0, 1.0))
+                ops::asin(dir.y.det_clamp(-1.0, 1.0))
             }
         }
     }
@@ -209,7 +210,7 @@ fn cannon_range_2d(range: f32, height_diff: f32, speed: f32, gravity: f32) -> f3
         }
         range_boost * (sq_speed_2d + speed_2d * root.sqrt()) / -gravity
     };
-    let range_boost = (range / calc(0.0, 1.0, -1.0)).clamp(0.0, 1.0);
+    let range_boost = (range / calc(0.0, 1.0, -1.0)).det_clamp(0.0, 1.0);
     let height_boost = if range_boost > 0.0 {
         (2.0 - range_boost) / range_boost.sqrt()
     } else {
@@ -261,7 +262,7 @@ pub fn weapon_range_2d(
         ),
         // `CStarburstLauncher::GetRange2D`.
         C::StarburstLauncher => range + ydiff,
-        _ => (range * range - ydiff * ydiff).max(0.0).sqrt(),
+        _ => (range * range - ydiff * ydiff).det_max(0.0).sqrt(),
     }
 }
 
@@ -285,8 +286,8 @@ pub fn in_weapon_range(
 /// `GenerateWeaponTargets`' `scanRadius`, taking the lowest point of the
 /// map as `max(0, minHeight)` = 0.
 pub fn weapon_scan_radius(weapon: &spring_tdf::WeaponDef, aim_from: Vec3, map_gravity: f32) -> f32 {
-    let lowest = weapon_range_2d(weapon, -aim_from.y.max(0.0), false, map_gravity);
-    weapon.effective_range().max(lowest)
+    let lowest = weapon_range_2d(weapon, -aim_from.y.det_max(0.0), false, map_gravity);
+    weapon.effective_range().det_max(lowest)
 }
 
 /// Max heading error (radians) at which a Deployable is allowed to fire.
@@ -546,7 +547,7 @@ pub fn aim_weapons_system(
             let wanted = crate::sim::Heading::from_vector(desired_forward.x, desired_forward.z);
             let delta = wanted.wrapping_sub(mover.heading) as f32;
             let max_units = max_turn / crate::sim::SHORT_ANGLE_TO_RAD;
-            let step = delta.clamp(-max_units, max_units) as i32 as i16;
+            let step = delta.det_clamp(-max_units, max_units) as i32 as i16;
             if step != 0 {
                 mover.heading = mover.heading.wrapping_add(step);
             }

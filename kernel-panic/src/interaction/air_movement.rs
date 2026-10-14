@@ -46,7 +46,7 @@ use super::movement::{
     CommandQueue, MovePath, MoveTarget, OrderState, QueuedCommand, end_move_leg,
 };
 use crate::rng::next_f32;
-use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
+use crate::sim::{DetFloat, GAME_SPEED, SLOW_UPDATE_RATE, SQUARE_SIZE, dir3_of, heading_of};
 use crate::terrain::heightmap::Heightmap;
 use crate::terrain::smooth_ground::SmoothGround;
 use crate::units::combat::{AimTarget, AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
@@ -166,7 +166,7 @@ impl HoverAir {
     /// `SetGoal(pos, distance)`.
     fn set_goal(&mut self, pos: Vec3, distance: f32) {
         self.goal = pos;
-        self.max_drift = distance.max(16.0);
+        self.max_drift = distance.det_max(16.0);
         self.wanted_height = self.org_wanted_height;
     }
 
@@ -223,7 +223,7 @@ impl HoverAir {
 
 /// Spring's `smoothstep(e0, e1, x)`.
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
-    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    let t = ((x - e0) / (e1 - e0)).det_clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
@@ -241,7 +241,7 @@ impl Ground<'_> {
 
     /// `CGround::GetHeightAboveWater`.
     fn real_aw(&self, x: f32, z: f32) -> f32 {
-        self.real(x, z).max(0.0)
+        self.real(x, z).det_max(0.0)
     }
 
     fn smooth(&self, x: f32, z: f32) -> f32 {
@@ -255,7 +255,7 @@ impl Ground<'_> {
     /// (either smooth index is the above-water variant).
     fn altitude_base(&self, smooth: bool, x: f32, z: f32) -> f32 {
         if smooth {
-            self.smooth(x, z).max(0.0)
+            self.smooth(x, z).det_max(0.0)
         } else {
             self.real_aw(x, z)
         }
@@ -265,7 +265,7 @@ impl Ground<'_> {
     /// `HAMTGetMaxGroundHeight` = max(smooth, real) when on the mesh.
     fn flying_base(&self, smooth: bool, x: f32, z: f32) -> f32 {
         if smooth {
-            self.smooth(x, z).max(self.real(x, z))
+            self.smooth(x, z).det_max(self.real(x, z))
         } else {
             self.real_aw(x, z)
         }
@@ -373,11 +373,11 @@ fn update_vertical_speed(
 
     air.speed.y = if (wh - cur_rel_height).abs() > 2.0 {
         if spd.y > ws {
-            ws.max(spd.y - p.acc_rate * 1.5)
+            ws.det_max(spd.y - p.acc_rate * 1.5)
         } else {
             // Accelerate upward faster if close to the ground.
             let up = if cur_rel_height < 20.0 { 2.0 } else { 0.7 };
-            ws.min(spd.y + p.acc_rate * up)
+            ws.det_min(spd.y + p.acc_rate * up)
         }
     } else {
         spd.y * 0.95
@@ -413,7 +413,7 @@ fn update_air_physics(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, V
     let bp = ground.altitude_base(smooth, brake_pos.x, brake_pos.z);
     // Sampling the ground a few braking distances ahead lets the
     // aircraft climb in time for cliffs.
-    let rel = f.pos.y - cp.max(bp);
+    let rel = f.pos.y - cp.det_max(bp);
     update_vertical_speed(f, others, rel, vertical_speed);
     f.pos += f.air.speed;
 }
@@ -492,7 +492,7 @@ fn update_flying(f: &mut Flyer, ground: &Ground, others: &[(Entity, Vec3, Vec3)]
         // `maxWantedSpeed` follows `maxSpeed` here: Kernel Panic's Flow
         // bonus (`network_flowspeed.lua`, COB `MAX_SPEED`) raised the
         // speed limit in the engines it was written for.
-        f.air.wanted_speed = goal_vec / goal_dist * goal_speed.min(f.orders.max_speed);
+        f.air.wanted_speed = goal_vec / goal_dist * goal_speed.det_min(f.orders.max_speed);
     } else if !f.orders.busy {
         f.air.execute_stop(pos);
     } else {
@@ -519,13 +519,13 @@ fn update_heading(air: &mut HoverAir) {
     let tau = std::f32::consts::TAU;
     let delta = (air.wanted_heading - air.heading + std::f32::consts::PI).rem_euclid(tau)
         - std::f32::consts::PI;
-    air.heading += delta.clamp(-air.params.turn_rate, air.params.turn_rate);
+    air.heading += delta.det_clamp(-air.params.turn_rate, air.params.turn_rate);
     air.heading = (air.heading + std::f32::consts::PI).rem_euclid(tau) - std::f32::consts::PI;
 }
 
 /// `UpdateBanking(noBanking)`: roll into the lateral acceleration.
 fn update_banking(air: &mut HoverAir, pos: Vec3, no_banking: bool) {
-    let bank_limit = ((air.goal - pos).xz().length_squared() * 0.15 * 0.15).min(1.0);
+    let bank_limit = ((air.goal - pos).xz().length_squared() * 0.15 * 0.15).det_min(1.0);
     let front = air.forward();
     let right = front.cross(Vec3::Y);
     let mut wanted_bank = 0.0;
@@ -536,9 +536,9 @@ fn update_banking(air: &mut HoverAir, pos: Vec3, no_banking: bool) {
         wanted_bank = bank_limit.sqrt();
     }
     if air.current_bank > wanted_bank {
-        air.current_bank -= (air.current_bank - wanted_bank).min(0.03);
+        air.current_bank -= (air.current_bank - wanted_bank).det_min(0.03);
     } else {
-        air.current_bank += (wanted_bank - air.current_bank).min(0.03);
+        air.current_bank += (wanted_bank - air.current_bank).det_min(0.03);
     }
 }
 
@@ -956,9 +956,9 @@ mod tests {
             step(&mut fl, frame, &ground);
             let f = &fl[0];
             if f.air.state != AircraftState::Takeoff {
-                min_clearance = min_clearance.min(f.pos.y - hm.sample(f.pos.x, f.pos.z));
+                min_clearance = min_clearance.det_min(f.pos.y - hm.sample(f.pos.x, f.pos.z));
             }
-            max_h_speed = max_h_speed.max(f.air.speed.xz().length());
+            max_h_speed = max_h_speed.det_max(f.air.speed.xz().length());
             if f.finished_leg {
                 fl[0].orders = orders(None);
                 fl[0].finished_leg = false;
@@ -1011,8 +1011,8 @@ mod tests {
             if frame > 400 {
                 let f = &fl[0];
                 let rel = f.pos.y - sg.get_height(f.pos.x, f.pos.z) - f.air.wanted_height;
-                lo = lo.min(rel);
-                hi = hi.max(rel);
+                lo = lo.det_min(rel);
+                hi = hi.det_max(rel);
             }
         }
         assert!(fl[0].air.speed.xz().length() < 1e-3);

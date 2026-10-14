@@ -36,21 +36,28 @@ use crate::units::components::Faction;
 
 /// File magic of a `.kpreplay`.
 pub const MAGIC: &[u8; 8] = b"kpreplay";
-/// Layout of the file itself; bumped whenever [`Replay`] changes shape.
-pub const FORMAT_VERSION: u16 = 1;
+/// Layout of the file itself; bumped whenever [`Replay`] changes shape
+/// or meaning. 2 (M1): seat `i` is owner `i` and [`Seat::ally_team`] its
+/// ally team, where 1 gave every seat of an ally team one shared owner.
+pub const FORMAT_VERSION: u16 = 2;
 /// Bumped by hand whenever the simulation changes on purpose in a way
 /// that changes outcomes (then the golden logs are re-recorded; see
 /// `net-experiments/m0-golden-replay.md`). The unit bundle and map
 /// hashes catch data changes on their own.
-pub const SIM_VERSION: u32 = 1;
+///
+/// 2 (M1): per-seat owners and ally teams, shared victory and defeat,
+/// the sim no longer stops for the local outcome, `DetFloat`
+/// max / min / clamp.
+pub const SIM_VERSION: u32 = 2;
 
-/// One seat of the match.
+/// One seat of the match: seat `i` is owner `i` (`TeamId(i)`,
+/// `units::teams`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Seat {
     /// Index into [`Faction::ALL`].
     pub faction: u8,
-    /// Ally team.
-    pub team: u8,
+    /// Ally team (Spring's allyteam).
+    pub ally_team: u8,
     pub ai: bool,
 }
 
@@ -92,7 +99,7 @@ impl MatchSetup {
                 .iter()
                 .map(|s| PlayerSpec {
                     faction: Faction::ALL[s.faction as usize % Faction::ALL.len()],
-                    team: s.team,
+                    ally_team: s.ally_team,
                     ai: s.ai,
                 })
                 .collect(),
@@ -179,7 +186,7 @@ pub enum ReplayError {
 impl Replay {
     /// A replay of the match `setup` played on `map_bytes` for `ticks`
     /// ticks, from the frames the [`CommandBus`] applied (its `log`):
-    /// every frame of a team without AI, i.e. a human player's.
+    /// every frame of an owner without AI, i.e. a human player's.
     pub fn record(
         setup: MatchSetup,
         map_bytes: &[u8],
@@ -482,12 +489,12 @@ mod tests {
             seats: vec![
                 Seat {
                     faction: 0,
-                    team: 0,
+                    ally_team: 0,
                     ai: false,
                 },
                 Seat {
                     faction: 1,
-                    team: 1,
+                    ally_team: 1,
                     ai: true,
                 },
             ],
@@ -502,7 +509,7 @@ mod tests {
                 units: Units::of([crate::net::NetId(3)]),
             }],
         };
-        // The AI's frame (team 1) is dropped, so is the empty one.
+        // The AI's frame (owner 1) is dropped, so is the empty one.
         let applied = vec![
             frame(9, 0),
             frame(4, 1),

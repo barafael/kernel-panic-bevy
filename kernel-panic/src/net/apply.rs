@@ -66,6 +66,7 @@ pub(crate) struct ApplyCtx<'w, 's> {
     deploy: Option<ResMut<'w, Messages<DeployEvent>>>,
     dispatch: Option<ResMut<'w, Messages<DispatchEvent>>>,
     enter: Option<ResMut<'w, Messages<EnterEvent>>>,
+    alliances: Option<Res<'w, crate::units::teams::Alliances>>,
 }
 
 /// Seal the commands issued since the last tick, then apply every frame
@@ -105,6 +106,16 @@ pub(crate) fn apply_sim_commands(world: &mut World, state: &mut SystemState<Appl
 }
 
 impl ApplyCtx<'_, '_> {
+    /// Friend or foe ([`Alliances::friendly`]); a bare world without
+    /// alliances counts an owner alone as its friend.
+    ///
+    /// [`Alliances::friendly`]: crate::units::teams::Alliances::friendly
+    fn friendly(&self, a: u8, b: u8) -> bool {
+        self.alliances
+            .as_ref()
+            .map_or(a == b, |al| al.friendly(a, b))
+    }
+
     /// The live units among `ids` that `player` may command, in id order.
     fn owned(&self, player: u8, ids: &[NetId]) -> Vec<(Entity, UnitKind)> {
         ids.iter()
@@ -220,7 +231,7 @@ impl ApplyCtx<'_, '_> {
                 let Some((t, _, t_team, t_kind)) = self.live(*target) else {
                     return;
                 };
-                if crate::units::components::is_friendly(player, t_team) {
+                if self.friendly(player, t_team) {
                     return;
                 }
                 for (e, kind) in self.owned(player, ids) {

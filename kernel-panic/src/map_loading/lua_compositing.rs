@@ -25,7 +25,7 @@
 //! The live state (which polygons are up, animations, owners) is
 //! [`crate::map_events::hex_farm`]'s; this module is the drawing kit.
 
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
 use bevy::math::ops;
@@ -336,7 +336,7 @@ pub fn atlas_material(
 pub fn team_colored_atlas(mut atlas: SkinAtlas) -> SkinAtlas {
     for px in atlas.pixels.as_chunks_mut::<4>().0 {
         let luma = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
-        let v = (luma * 3.0).min(255.0) as u8;
+        let v = (luma * 3.0).det_min(255.0) as u8;
         px[..3].fill(v);
     }
     atlas
@@ -363,7 +363,7 @@ pub fn minimap_pixels(farm: &HexFarm, size: usize) -> Vec<u8> {
         };
         chunk.copy_from_slice(&color);
     }
-    let r = (size as f64 * 64.0 / w).ceil().max(1.0) as i64;
+    let r = (size as f64 * 64.0 / w).ceil().det_max(1.0) as i64;
     for v in farm.datavents() {
         let (cx, cz) = (
             (v[0] / w * size as f64) as i64,

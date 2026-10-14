@@ -32,6 +32,7 @@ pub mod music;
 use crate::interaction::selection::Selected;
 use crate::rendering::camera::RtsCamera;
 use crate::rendering::settings::{RenderSettings, VolumeKnob};
+use crate::sim::DetFloat;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
@@ -288,9 +289,10 @@ const FULL_ROLLOFF_HEIGHT: f32 = 600.0;
 /// rises (`CSound::UpdateListenerReal`) so a zoomed-out player still
 /// hears the battle.
 pub fn spatial_gain(distance: f32, camera_height: f32) -> f32 {
-    let height_mod = (FULL_ROLLOFF_HEIGHT / camera_height.max(1.0)).min(1.0);
+    let height_mod = (FULL_ROLLOFF_HEIGHT / camera_height.det_max(1.0)).det_min(1.0);
     let rolloff = ROLLOFF_FACTOR * height_mod;
-    REFERENCE_DIST / (REFERENCE_DIST + rolloff * (distance.max(REFERENCE_DIST) - REFERENCE_DIST))
+    REFERENCE_DIST
+        / (REFERENCE_DIST + rolloff * (distance.det_max(REFERENCE_DIST) - REFERENCE_DIST))
 }
 
 /// Port tuning on top of the engine's falloff: OpenAL's inverse
@@ -359,7 +361,7 @@ fn play_queued_sounds(
         }
         let gain = match (request.pos, listener) {
             (Some(pos), Some(cam)) => {
-                (spatial_gain(pos.distance(cam), camera_height) * SPATIAL_BOOST).min(1.0)
+                (spatial_gain(pos.distance(cam), camera_height) * SPATIAL_BOOST).det_min(1.0)
             }
             _ => 1.0,
         };

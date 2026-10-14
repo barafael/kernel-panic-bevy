@@ -14,6 +14,7 @@ use bevy::prelude::*;
 
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
 use super::{IdleTimer, StunCharge};
+use crate::sim::DetFloat;
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -22,6 +23,7 @@ use crate::units::content::weapons::{DeathBlast, WeaponRegistry};
 use crate::units::lifecycle::bookkeeping::{IdleAutoHeal, Kamikaze};
 use crate::units::lifecycle::spawning::{BuildDriven, Emerging};
 use crate::units::spatial::SpatialIndex;
+use crate::units::teams::Alliances;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
 /// Marks a unit that has reached 0 HP and is playing its death animation.
@@ -151,7 +153,7 @@ pub fn auto_heal(
             if idle.0 > heal.threshold {
                 rate += heal.rate;
             }
-            health.current = (health.current + rate * dt).min(health.max);
+            health.current = (health.current + rate * dt).det_min(health.max);
         }
     }
 }
@@ -181,7 +183,7 @@ pub fn tick_stun(
     let decay_per_sec = 1.0 / STUN_CHARGE_DECAY;
     for mut charge in &mut charge_q {
         if charge.0 > 0.0 {
-            charge.0 = (charge.0 - charge.0 * decay_per_sec * dt).max(0.0);
+            charge.0 = (charge.0 - charge.0 * decay_per_sec * dt).det_max(0.0);
         }
     }
 }
@@ -199,6 +201,7 @@ pub fn tick_kamikaze(
     bombs: Query<(Entity, &Kamikaze, &TeamId, &GlobalTransform), Without<Dying>>,
     mut health_q: Query<&mut Health>,
     spatial: Res<SpatialIndex>,
+    alliances: Res<Alliances>,
 ) {
     for (entity, bomb, team, gtf) in &bombs {
         let trigger_radius = bomb.trigger_radius;
@@ -209,7 +212,8 @@ pub fn tick_kamikaze(
             if triggered || !candidate.hp_positive {
                 return;
             }
-            let enemy = candidate.team != team.0;
+            // `GetEnemyUnits(pos, kamikazeDist, allyteam)`.
+            let enemy = !alliances.friendly(candidate.team, team.0);
             if enemy && candidate.pos.distance_squared(self_pos) <= trigger_sq {
                 triggered = true;
             }
@@ -257,10 +261,15 @@ pub fn death_system(
     mut commands: Commands,
 ) {
     // Unit-id order: the death blasts and Virus spawns queue in it
-    // (`sim`).
-    for (entity, unit, health, faction, gtf, infected, being_built, _) in
-        query.iter().sort::<&crate::net::NetId>()
-    {
+    // (`sim`). Collected through the plain iterator and sorted after:
+    // `QueryIter::sort` evaluates the query's filter in a lens with the
+    // world's per-frame change ticks, not this system's, so
+    // `Changed<Health>` missed every unit zeroed after this system ran
+    // in an earlier frame (death blasts, the game-over sweep) and
+    // left it standing at 0 HP.
+    let mut changed: Vec<_> = query.iter().collect();
+    changed.sort_unstable_by_key(|item| *item.7);
+    for (entity, unit, health, faction, gtf, infected, being_built, _) in changed {
         if health.current <= 0.0 {
             // If the dying unit was infected, queue a Virus spawn for the
             // attacker's team at the death location (infection.lua's
@@ -587,6 +596,7 @@ mod tests {
             detected_by: 0,
         });
         world.insert_resource(spatial);
+        world.init_resource::<Alliances>();
 
         world.run_system_once(tick_kamikaze).unwrap();
         assert_eq!(world.get::<Health>(bomb).unwrap().current, 0.0);

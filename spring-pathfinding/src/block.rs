@@ -2,6 +2,7 @@
 //! engine's raw search and `CanSetNextWayPoint` corner cutting use.
 
 use crate::cost::{SQUARE_SIZE, SpeedMap};
+use spring_detmath::DetFloat;
 
 /// Per-cell blocking overlay on top of a [`SpeedMap`] — structures
 /// (QTPFS `NodeLayer::Update` closes every node whose mover-footprint
@@ -82,7 +83,7 @@ pub fn traverse_cells(a: [f32; 2], b: [f32; 2], mut visit: impl FnMut(i32, i32) 
     // loop forever.
     let max_steps = ((ex - cx).abs() + (ez - cz).abs()) as usize + 2;
     for _ in 0..max_steps {
-        let t_next = t_max_x.min(t_max_z);
+        let t_next = t_max_x.det_min(t_max_z);
         if t_next >= 1.0 {
             break;
         }

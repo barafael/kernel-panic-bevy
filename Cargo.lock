@@ -3703,6 +3703,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "serde_json",
+ "spring-detmath",
  "spring-map",
  "spring-pathfinding",
  "spring-tdf",
@@ -5499,6 +5500,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "spring-detmath"
+version = "0.1.0"
+
+[[package]]
 name = "spring-map"
 version = "0.1.0"
 dependencies = [
@@ -5513,6 +5518,7 @@ dependencies = [
  "ruzstd",
  "serde",
  "sevenz-rust",
+ "spring-detmath",
  "spring-pathfinding",
  "thiserror 2.0.20",
  "zip",
@@ -5540,6 +5546,7 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "proptest",
+ "spring-detmath",
 ]
 
 [[package]]
@@ -5550,6 +5557,7 @@ dependencies = [
  "libm",
  "proptest",
  "serde",
+ "spring-detmath",
  "thiserror 2.0.20",
 ]
 
@@ -5559,6 +5567,7 @@ version = "0.1.0"
 dependencies = [
  "binrw",
  "serde",
+ "spring-detmath",
  "thiserror 2.0.20",
 ]
 

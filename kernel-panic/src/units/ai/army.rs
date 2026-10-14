@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use crate::net::{CommandBus, NetId, NetPos, Order, SimCommand};
 use crate::rng::{next_f32, xorshift32};
+use crate::sim::DetFloat;
 use crate::units::content::definitions::UnitKind;
 
 /// Upstream `minifacLimit`: an enemy team with fewer small buildings
@@ -97,7 +98,7 @@ pub fn pick_attack_targets(
     };
     targets.push(first);
     let weight = |e: &EnemyStructure| {
-        (1.0 + 1.0 / from.distance(e.pos).max(1.0)) * (1.0 + force_plus_buffer as f32)
+        (1.0 + 1.0 / from.distance(e.pos).det_max(1.0)) * (1.0 + force_plus_buffer as f32)
     };
     while targets.len() < missions {
         let remaining: Vec<&EnemyStructure> = enemies

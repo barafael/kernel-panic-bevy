@@ -2,9 +2,10 @@
 //! (`kernel-panic/tests/golden/*.kpreplay`, `.github/workflows/determinism.yml`)
 //! and how they are recorded.
 //!
-//! Two long all-AI matches (a 4v4 and an 8-player FFA, 18 000 ticks =
-//! 10 game minutes each): the AI runs inside the sim, so these logs are
-//! setup and seed only. And one short match with three human seats, one
+//! Three long all-AI matches (a 4v4 and an 8-player FFA, 18 000 ticks =
+//! 10 game minutes each, and a 2v2 of mixed factions played to its end,
+//! 25 200 ticks): the AI runs inside the sim, so these logs are setup and
+//! seed only. And one short match with three human seats, one
 //! per faction, whose scripted commands go through every [`SimCommand`]
 //! kind (orders, per-unit and path moves, patrol, guard, builds, the
 //! factory queue, repeat, auto-hold, manual targets, deploy, enter,
@@ -47,13 +48,14 @@ pub struct Golden {
 
 /// Every golden log.
 pub fn all() -> Vec<Golden> {
-    let ai = |faction, team| Seat {
+    let ai = |faction, ally_team| Seat {
         faction,
-        team,
+        ally_team,
         ai: true,
     };
     vec![
-        // X-sim's reference scenario: 2 ally teams × 4 AI seats.
+        // X-sim's reference scenario: 2 ally teams × 4 AI seats (eight
+        // owners, eight AI brains).
         Golden {
             name: "4v4_speed_balls",
             setup: MatchSetup {
@@ -79,6 +81,23 @@ pub fn all() -> Vec<Golden> {
             ticks: 18_000,
             scripted: false,
         },
+        // Two ally teams of two AI owners each, factions mixed (System
+        // + Hacker against Network + System), played to its end
+        // (`headless::tests::shared_defeat_2v2`): owner 1 falls at tick
+        // 15 175 while its ally fights on, owner 0 at 24 745, ally team 1
+        // wins at 24 775.
+        Golden {
+            name: "2v2_dual_core",
+            setup: MatchSetup {
+                map: "Dual_Core".into(),
+                seats: (0..4).map(|i| ai(i % 3, i / 2)).collect(),
+                difficulty: 3,
+                seed: 0x2_0202,
+                sandbox: false,
+            },
+            ticks: 25_200,
+            scripted: false,
+        },
         // Three scripted human seats (System, Hacker, Network) and an
         // AI System.
         Golden {
@@ -88,17 +107,17 @@ pub fn all() -> Vec<Golden> {
                 seats: vec![
                     Seat {
                         faction: 0,
-                        team: 0,
+                        ally_team: 0,
                         ai: false,
                     },
                     Seat {
                         faction: 1,
-                        team: 1,
+                        ally_team: 1,
                         ai: false,
                     },
                     Seat {
                         faction: 2,
-                        team: 2,
+                        ally_team: 2,
                         ai: false,
                     },
                     ai(0, 3),
@@ -122,7 +141,13 @@ pub fn record(golden: &Golden) -> Result<(Replay, String), ReplayError> {
     let mut h = SimHarness::new_with(golden.setup.scenario(Some(map.file)), map.assets);
     h.world_mut().resource_mut::<HashLog>().enabled = true;
     h.world_mut().resource_mut::<CommandBus>().log = Some(Vec::new());
-    let local = golden.setup.seats.iter().find(|s| !s.ai).map(|s| s.team);
+    // The first human seat's owner (seat `i` is owner `i`).
+    let local = golden
+        .setup
+        .seats
+        .iter()
+        .position(|s| !s.ai)
+        .map(|seat| seat as u8);
     while h.tick < golden.ticks as u64 {
         if golden.scripted {
             let world = h.world_mut();
@@ -202,7 +227,7 @@ fn units(world: &mut World) -> Vec<Unit> {
     out
 }
 
-/// The scripted human players' commands for bus tick `tick`, per team.
+/// The scripted human players' commands for bus tick `tick`, per owner.
 /// Everything is chosen from the live state (unit ids, positions), so
 /// the script adapts to whatever the sim did; the log records the
 /// result.

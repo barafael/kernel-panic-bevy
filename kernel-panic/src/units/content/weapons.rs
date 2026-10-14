@@ -18,7 +18,7 @@ use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
 
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
-use crate::sim::frames_to_secs;
+use crate::sim::{DetFloat, frames_to_secs};
 
 /// Compact identifier for a weapon. `Copy` so it can be cloned freely
 /// in events and components without heap traffic.
@@ -84,7 +84,7 @@ impl DeathBlast {
         let def = weapons.by_id(weapon);
         Some(Self {
             weapon,
-            radius: def.area_of_effect.max(24.0),
+            radius: def.area_of_effect.det_max(24.0),
             rgb: Some(def.rgb_color).filter(|c| c[0] + c[1] + c[2] > 0.01),
             ceg_name: def.explosion_generator.clone(),
         })

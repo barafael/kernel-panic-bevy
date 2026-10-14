@@ -32,7 +32,7 @@ pub mod units;
 #[cfg(kani)]
 mod proofs;
 
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
@@ -1222,7 +1222,7 @@ pub fn decay_death_particles(
     let dt = time.delta_secs();
     for (entity, mut particle, mut transform) in &mut query {
         particle.lifetime += dt;
-        let t = (particle.lifetime / particle.max_lifetime).clamp(0.0, 1.0);
+        let t = (particle.lifetime / particle.max_lifetime).det_clamp(0.0, 1.0);
 
         if t >= 1.0 {
             commands.entity(entity).despawn();
@@ -1230,7 +1230,7 @@ pub fn decay_death_particles(
         }
 
         // Grow then shrink: peaks at t=0.8, collapses to zero by t=1.0.
-        let peak_scale = 2.0 + 20.0 * t.min(0.8) / 0.8;
+        let peak_scale = 2.0 + 20.0 * t.det_min(0.8) / 0.8;
         let tail = if t > 0.8 { (1.0 - t) / 0.2 } else { 1.0 };
         transform.scale = Vec3::splat(peak_scale * tail);
     }

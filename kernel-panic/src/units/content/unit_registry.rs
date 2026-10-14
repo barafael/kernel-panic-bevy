@@ -9,7 +9,7 @@ use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UNIT_KIND_COUNT, UnitKind};
 use super::moveinfo::MoveClassTable;
-use crate::sim::{GAME_SPEED, SHORT_ANGLE_TO_RAD};
+use crate::sim::{DetFloat, GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// Spring engine `BuildTime` is in "build ticks" at 30 fps.
 /// The actual build duration depends on the factory's `WorkerTime`.
@@ -390,20 +390,20 @@ impl UnitRegistry {
             }
         };
         crate::interaction::air_movement::HoverAirParams {
-            acc_rate: max_acc(Some(d)).max(0.01),
-            dec_rate: max_dec(Some(d)).max(0.01),
-            altitude_rate: d.vertical_speed.max(0.01),
+            acc_rate: max_acc(Some(d)).det_max(0.01),
+            dec_rate: max_dec(Some(d)).det_max(0.01),
+            altitude_rate: d.vertical_speed.det_max(0.01),
             // Non-negative and finite: `clamp(-rate, rate)` panics on
             // a negative or NaN bound.
             turn_rate: (d.turn_rate * SHORT_ANGLE_TO_RAD)
                 .abs()
-                .max(SHORT_ANGLE_TO_RAD),
+                .det_max(SHORT_ANGLE_TO_RAD),
             cruise_alt: d.cruise_alt,
             hover_factor: d.air_hover_factor,
             banking_allowed: d.banking_allowed,
             // `mass` defaults to the metal cost (flow.fbi comments its
             // `mass` out).
-            mass: d.build_cost_metal.max(1.0),
+            mass: d.build_cost_metal.det_max(1.0),
         }
     }
 
@@ -425,7 +425,7 @@ impl UnitRegistry {
     pub fn mass(&self, kind: UnitKind) -> f32 {
         self.def(kind)
             .map_or(1.0, |d| d.mass.unwrap_or(d.build_cost_metal))
-            .clamp(1.0, 1e6)
+            .det_clamp(1.0, 1e6)
     }
 
     /// Collision radius (elmos) in the plane — what unit-unit
@@ -446,9 +446,9 @@ impl UnitRegistry {
             return md.collision_radius;
         }
         self.def(kind).map_or(MIN_RADIUS, |d| {
-            let larger = d.footprint_x.max(d.footprint_z);
+            let larger = d.footprint_x.det_max(d.footprint_z);
             let per_unit = if d.can_fly { 4.0 } else { 8.0 };
-            (larger * per_unit).max(MIN_RADIUS)
+            (larger * per_unit).det_max(MIN_RADIUS)
         })
     }
 
@@ -461,8 +461,8 @@ impl UnitRegistry {
         const ELMOS_PER_FOOTPRINT_UNIT: f32 = 16.0;
         self.def(kind).map_or(Vec2::splat(32.0), |d| {
             Vec2::new(
-                d.footprint_x.max(1.0) * ELMOS_PER_FOOTPRINT_UNIT,
-                d.footprint_z.max(1.0) * ELMOS_PER_FOOTPRINT_UNIT,
+                d.footprint_x.det_max(1.0) * ELMOS_PER_FOOTPRINT_UNIT,
+                d.footprint_z.det_max(1.0) * ELMOS_PER_FOOTPRINT_UNIT,
             )
         })
     }
@@ -498,7 +498,7 @@ impl UnitRegistry {
             .map(|d| d.build_distance)
             .filter(|&d| d > 0.0)
             .unwrap_or(DEFAULT_BUILD_DISTANCE)
-            .max(MIN_BUILD_DISTANCE)
+            .det_max(MIN_BUILD_DISTANCE)
     }
 
     /// Bounding radius of the kind's s3o model (`UnitDef::

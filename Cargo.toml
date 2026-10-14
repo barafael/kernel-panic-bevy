@@ -8,6 +8,7 @@ members = [
     "spring-map-gen",
     "spring-unit-mesh",
     "spring-pathfinding",
+    "spring-detmath",
     "kernel-panic",
 ]
 # exclude = [
@@ -56,6 +57,8 @@ bevy = { version = "0.20", features = ["serialize", "libm"] }
 glam = { version = "0.33", default-features = false, features = ["std", "libm", "scalar-math"] }
 # Deterministic f64 math, and f32 functions `bevy::math::ops` lacks.
 libm = "0.2"
+# Target-independent float max / min / clamp (signed zeros; clippy.toml).
+spring-detmath = { path = "spring-detmath" }
 byteorder = "1.5"
 thiserror = "2"
 sevenz-rust = "0.6"

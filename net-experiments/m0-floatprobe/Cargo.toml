@@ -31,6 +31,8 @@ scalar = ["glam/scalar-math"]
 glam = { version = "=0.33.12", default-features = false, features = ["std", "libm"] }
 bevy_math = { version = "=0.20.0", default-features = false, features = ["std", "libm"] }
 libm = "=0.2.16"
+# The sim's max / min / clamp (M1): the `det: DetFloat` rows.
+spring-detmath = { path = "../../spring-detmath" }
 
 [profile.release]
 opt-level = 3

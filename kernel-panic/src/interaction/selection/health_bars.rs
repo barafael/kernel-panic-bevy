@@ -6,6 +6,7 @@ use bevy::prelude::*;
 
 use super::core::{Selected, SelectionSet};
 use crate::rendering::camera::RtsCamera;
+use crate::sim::DetFloat;
 use crate::units::components::{Health, UnitType, health_color};
 
 /// Translucent black backing color for the health bar's background
@@ -156,7 +157,7 @@ fn update_health_bars(
     };
 
     for (health, parent_gt, children) in &selected_units {
-        let frac = health.fraction().clamp(0.0, 1.0);
+        let frac = health.fraction().det_clamp(0.0, 1.0);
         let fg_material = &assets.fg_materials[palette_index(frac)];
 
         let bar_world_pos = parent_gt.translation() + Vec3::Y * HEALTH_BAR_Y_OFFSET;

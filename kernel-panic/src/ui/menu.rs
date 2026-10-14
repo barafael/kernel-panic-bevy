@@ -40,6 +40,7 @@ use crate::map_loading::MapCatalog;
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use crate::rendering::settings::{MsaaSupport, RenderSettings, VolumeKnob, WINDOW_SIZES};
 use crate::rng::clock_f64;
+use crate::sim::DetFloat;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
@@ -370,7 +371,7 @@ fn frame_padding(font_size: f32) -> UiRect {
 }
 
 fn frame_border_px(font_size: f32) -> f32 {
-    (font_size * 0.09).max(1.0)
+    (font_size * 0.09).det_max(1.0)
 }
 
 fn frame_border(font_size: f32) -> UiRect {
@@ -438,7 +439,7 @@ impl<'a> ButtonSpec<'a> {
         let (mut node, transform) = anchored(self.pos.0, self.pos.1, self.anchor);
         node.padding = frame_padding(font_size);
         node.border = if self.chosen {
-            UiRect::all(Val::Px((font_size * 0.18).max(2.0)))
+            UiRect::all(Val::Px((font_size * 0.18).det_max(2.0)))
         } else {
             frame_border(font_size)
         };
@@ -599,7 +600,7 @@ const MIN_FONT_PX: f32 = 11.5;
 
 /// `px`, or [`MIN_FONT_PX`] when the window is too small for it.
 fn readable(px: f32) -> f32 {
-    px.max(MIN_FONT_PX)
+    px.det_max(MIN_FONT_PX)
 }
 
 /// Window-height-derived font sizes. The original's ratios are `vsy/14`
@@ -753,8 +754,8 @@ fn handle_menu_actions(
             MenuAction::CycleEnemyFaction => {
                 config.enemy_faction = next_faction(config.enemy_faction);
             }
-            MenuAction::SetGrouping(g) => config.grouping = g,
-            MenuAction::SetDifficulty(d) => config.difficulty = d,
+            MenuAction::SetGrouping(g) => config.set_grouping(g),
+            MenuAction::SetDifficulty(d) => config.set_difficulty(d),
             MenuAction::PickMap(i) => {
                 config.map = Some(i);
                 **page = MenuPage::AdvancedSkirmish;
@@ -1578,7 +1579,7 @@ const CHOICES_MIN_START: f32 = 0.18;
 /// Where a page's choices start: past its longest label (`glyph` wide
 /// per character, plus the frame's padding and a gap).
 fn choices_start(longest_label: usize, glyph: f32) -> f32 {
-    (LABEL_X + (longest_label as f32 + 3.0) * glyph).max(CHOICES_MIN_START)
+    (LABEL_X + (longest_label as f32 + 3.0) * glyph).det_max(CHOICES_MIN_START)
 }
 
 /// Draw labelled rows of mutually exclusive choices, the current pick
@@ -1636,8 +1637,8 @@ fn choice_rows(
 /// at least 12 %, and never more than an even share of the span left
 /// before [`CHOICES_END`].
 fn choice_step(longest: usize, glyph: f32, count: usize, start: f32) -> f32 {
-    let natural = ((longest as f32 + 2.5) * glyph).max(0.12);
-    natural.min((CHOICES_END - start) / count.max(1) as f32)
+    let natural = ((longest as f32 + 2.5) * glyph).det_max(0.12);
+    natural.det_min((CHOICES_END - start) / count.max(1) as f32)
 }
 
 fn fps_text(fps: Option<f64>) -> String {
@@ -1770,10 +1771,11 @@ fn advanced_skirmish_page(
             .spawn(commands, root);
     }
 
-    // Grouping presets: left column. (Spectate / Team Game / Heroic are
-    // not implemented yet — see `Grouping`.)
+    // Grouping presets: left column, in the original's order. (Spectate
+    // and Heroic are not implemented yet — see `Grouping`.)
     for (i, (g, color)) in [
         (Grouping::Duel, MEDIUM_GREEN),
+        (Grouping::Team, HARD_YELLOW),
         (Grouping::Outgunned, EXTREME_ORANGE),
     ]
     .into_iter()
@@ -1854,7 +1856,7 @@ fn map_list_page(
 ) {
     let names = catalog.names();
     let longest = names.iter().map(|n| n.chars().count()).max().unwrap_or(1);
-    let list_size = list_size.min(0.45 * window_w / (0.6 * longest as f32 + 2.0));
+    let list_size = list_size.det_min(0.45 * window_w / (0.6 * longest as f32 + 2.0));
     LabelSpec::new(
         "Choose a map:",
         list_size * 28.0 / 24.0,
@@ -1878,7 +1880,7 @@ fn map_list_page(
     let rows = names.len().div_ceil(2).max(1);
     // The original steps 10% per row from y=85%; longer catalogs
     // squeeze to keep the last row clear of Back.
-    let step = (0.72 / rows as f32).min(0.1);
+    let step = (0.72 / rows as f32).det_min(0.1);
     for (i, name) in names.iter().enumerate() {
         let (col, row) = (i / rows, i % rows);
         let (x, anchor) = if col == 0 {
@@ -1981,7 +1983,7 @@ fn fitted_font(wanted: f32, text: &str, (width, height): (f32, f32)) -> f32 {
         .max(1) as f32;
     let by_width = width / (0.6 * longest + 1.2);
     let by_height = height / (1.2 * lines + 0.7);
-    wanted.min(by_width).min(by_height)
+    wanted.det_min(by_width).det_min(by_height)
 }
 
 /// The original's `PrintReadMe`: file name plate at the top centre, the
@@ -1999,7 +2001,7 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
     .spawn(commands, root);
 
     // The original prints 16 px lines at ~1080p; scale with the window.
-    let line_px = (window_h / 64.0).max(12.0);
+    let line_px = (window_h / 64.0).det_max(12.0);
     // Leave the top ~10% for the file name and the bottom ~10% for the
     // Down / Back row.
     let lines_per_screen = ((window_h * 0.78) / (line_px * 1.2)) as usize;
@@ -2299,12 +2301,15 @@ fn maintain_game_over(
     mut commands: Commands,
     existing_root: Query<Entity, With<GameOverPanel>>,
     windows: Query<&Window>,
-    mut last: Local<bool>,
+    mut last: Local<Option<(bool, GameState)>>,
 ) {
-    if *last == game_over_open.0 {
+    // Redrawn when the result changes under an open panel too: a
+    // fallen player's allies winning turns "You lost!" into "You won!".
+    let now = (game_over_open.0, *game_state.get());
+    if *last == Some(now) {
         return;
     }
-    *last = game_over_open.0;
+    *last = Some(now);
     for e in &existing_root {
         commands.entity(e).despawn();
     }
@@ -2552,7 +2557,7 @@ fn attract_camera(
         // itself runs the track with a smoothstep so the pass slows as
         // it enters and leaves the fight.
         pass.elapsed += dt;
-        let t = (pass.elapsed / PASS_SECONDS).clamp(0.0, 1.0);
+        let t = (pass.elapsed / PASS_SECONDS).det_clamp(0.0, 1.0);
         let eased = t * t * (3.0 - 2.0 * t);
         state.focus = pass.start.lerp(pass.end, eased);
         ride_terrain(&mut state.focus);

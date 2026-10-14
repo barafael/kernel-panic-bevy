@@ -40,6 +40,7 @@ use crate::units::lifecycle::bookkeeping::Detector;
 use crate::units::lifecycle::production::PendingFadeInstall;
 use crate::units::lifecycle::spawning::FadeMaterials;
 use crate::units::player::LocalTeam;
+use crate::units::teams::Alliances;
 
 /// Master switch for fog-of-war / cloak-hiding from the [`LocalTeam`]'s
 /// perspective. Defaults to off and nothing enables it yet, so the
@@ -57,10 +58,12 @@ pub struct FogEnabled(pub bool);
 #[require(DetectedBy)]
 pub struct Cloaked;
 
-/// Bitmask of the teams (bit `t` = `TeamId(t)`) that currently have a
-/// detector in range of this cloaked unit. Refreshed by
-/// [`update_cloak_detection`]; only meaningful while [`Cloaked`] is
-/// present. Teams ≥ 64 never detect (no map ships that many).
+/// Bitmask of the owners (bit `t` = `TeamId(t)`) that currently see
+/// this cloaked unit: a detector in range reveals it to its whole ally
+/// team (Spring keeps decloak coverage per allyteam), so every allied
+/// owner's bit is set. Refreshed by [`update_cloak_detection`]; only
+/// meaningful while [`Cloaked`] is present. Owners ≥ 64 never detect
+/// (no map ships that many).
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DetectedBy(pub u64);
 
@@ -137,10 +140,10 @@ impl Default for FogRefreshTimer {
 pub struct CloakDetectionTimer(f32);
 
 /// Recompute every cloaked unit's [`DetectedBy`] mask: bit `t` is set
-/// while any living team-`t` unit with FBI `RadarDistance > 0`
-/// (Assembler, Trojan, Gateway, Byte, Connection, Worm, … — tagged
-/// [`Detector`] by `bookkeeping::tag_unit_kinds`) is within that
-/// distance and `t` is hostile to the cloaked unit.
+/// while any living unit of owner `t` or of one of its allies with FBI
+/// `RadarDistance > 0` (Assembler, Trojan, Gateway, Byte, Connection,
+/// Worm, … — tagged [`Detector`] by `bookkeeping::tag_unit_kinds`) is
+/// within that distance and hostile to the cloaked unit.
 ///
 /// Runs for every team independently of [`FogEnabled`] — it feeds
 /// combat targeting, not just the player's rendering. Throttled to
@@ -153,6 +156,7 @@ pub fn update_cloak_detection(
     spatial: Res<crate::units::spatial::SpatialIndex>,
     detectors_q: Query<(&TeamId, &Detector, &GlobalTransform), Without<Dying>>,
     mut cloaked_q: Query<(Entity, &mut DetectedBy), With<Cloaked>>,
+    alliances: Res<Alliances>,
     // Retained across frames so the refresh tick doesn't reallocate;
     // cleared on every scan and only looked up (the OR is commutative).
     mut detected: Local<EntityHashMap<u64>>,
@@ -165,15 +169,16 @@ pub fn update_cloak_detection(
 
     // Invert the scan: instead of testing every cloaked unit against
     // every detector, radius-query the shared spatial index once per
-    // detector and OR its team bit into each hostile cloaked entry.
+    // detector and OR its ally team's bits into each hostile cloaked
+    // entry.
     detected.clear();
     for (team, detector, gtf) in &detectors_q {
         let radar = detector.radius;
         let dp = gtf.translation();
-        let bit = team_bit(team.0);
+        let bit = alliances.vision_mask(team.0);
         spatial.query_radius(dp, radar, |candidate| {
             if candidate.cloaked
-                && !crate::units::components::is_friendly(candidate.team, team.0)
+                && !alliances.friendly(candidate.team, team.0)
                 && candidate.pos.distance_squared(dp) <= radar * radar
             {
                 *detected.entry(candidate.entity).or_default() |= bit;
@@ -203,6 +208,7 @@ pub fn update_cloak_visibility(
     mut timer: ResMut<VisibilityRefreshTimer>,
     fog: Res<FogEnabled>,
     player: Res<LocalTeam>,
+    alliances: Res<Alliances>,
     mut cloaked_q: Query<(&TeamId, &DetectedBy, &mut Visibility), With<Cloaked>>,
 ) {
     timer.0 += time.delta_secs();
@@ -214,11 +220,12 @@ pub fn update_cloak_visibility(
     for (team, detected_by, mut vis) in &mut cloaked_q {
         // Sandbox mode (fog off): nothing hides, every cloaked unit
         // just stays visible.
-        let target = if !fog.0 || team.0 == player.0 || detected_by.contains(player.0) {
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
+        let target =
+            if !fog.0 || alliances.friendly(team.0, player.0) || detected_by.contains(player.0) {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
         if *vis != target {
             *vis = target;
         }
@@ -258,6 +265,7 @@ pub fn install_cloak_fade_materials(
     mut commands: Commands,
     fog: Res<FogEnabled>,
     player: Res<LocalTeam>,
+    alliances: Res<Alliances>,
     new_cloaked: Query<
         (Entity, &TeamId, &Children),
         (
@@ -272,7 +280,7 @@ pub fn install_cloak_fade_materials(
     for (entity, team, children) in &new_cloaked {
         // While fog is off, every team is "friendly" — fade them all so
         // the player can see at a glance which units are cloaked.
-        if fog.0 && team.0 != player.0 {
+        if fog.0 && !alliances.friendly(team.0, player.0) {
             continue;
         }
         let faded = model.fade(children, CLOAK_FADE_ALPHA, &mut commands);
@@ -321,6 +329,7 @@ pub fn update_fog_visibility(
     mut timer: ResMut<FogRefreshTimer>,
     fog: Res<FogEnabled>,
     player: Res<LocalTeam>,
+    alliances: Res<Alliances>,
     unit_registry: Res<UnitRegistry>,
     spatial: Res<crate::units::spatial::SpatialIndex>,
     viewers_q: Query<(&TeamId, &UnitType, &GlobalTransform), Without<Dying>>,
@@ -369,11 +378,13 @@ pub fn update_fog_visibility(
     in_sight.clear();
     viewers_q
         .iter()
-        .filter(|(team, _, _)| team.0 == player.0)
+        // Shared vision: every allied owner's units see for the player.
+        .filter(|(team, _, _)| alliances.friendly(team.0, player.0))
         .map(|(_, ut, gtf)| (gtf.translation(), unit_registry.sight_distance(ut.0)))
         .for_each(|(vp, sight)| {
             spatial.query_radius(vp, sight, |candidate| {
-                if candidate.team != player.0 && candidate.pos.distance_squared(vp) <= sight * sight
+                if !alliances.friendly(candidate.team, player.0)
+                    && candidate.pos.distance_squared(vp) <= sight * sight
                 {
                     in_sight.insert(candidate.entity);
                 }
@@ -383,7 +394,7 @@ pub fn update_fog_visibility(
     for (entity, team, _gtf, mut vis, was_spotted) in &mut targets_q {
         // Friendly units always visible to the player; their Spotted
         // marker stays in sync so the minimap shows them.
-        if team.0 == player.0 {
+        if alliances.friendly(team.0, player.0) {
             if *vis != Visibility::Visible {
                 *vis = Visibility::Visible;
             }
@@ -425,6 +436,7 @@ mod tests {
         world.init_resource::<Assets<StandardMaterial>>();
         world.insert_resource(FogEnabled(false));
         world.insert_resource(LocalTeam(0));
+        world.init_resource::<Alliances>();
         let shared = world
             .resource_mut::<Assets<StandardMaterial>>()
             .add(StandardMaterial::default());

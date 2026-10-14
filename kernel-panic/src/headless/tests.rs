@@ -26,6 +26,7 @@ use std::io::Write as _;
 
 use super::*;
 use crate::net::CommandBus;
+use crate::sim::DetFloat;
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name)
@@ -246,7 +247,7 @@ fn match_stats() {
     let scenario = scenario_from_env();
     let ticks: u64 = env("KP_NET_TICKS", 30 * 60 * 8);
     let players = scenario.seats.len();
-    let teams: HashSet<u8> = scenario.seats.iter().map(|s| s.team).collect();
+    let teams: HashSet<u8> = scenario.seats.iter().map(|s| s.ally_team).collect();
     eprintln!(
         "match_stats: {} seats ({} teams) on {}, {:?}, {} ticks ({:.1} game min)",
         players,
@@ -515,6 +516,232 @@ fn rematch() {
     }
 }
 
+/// How an all-AI alliance match ended ([`play_to_the_end`]).
+struct Ending {
+    /// Tick each owner died on.
+    deaths: BTreeMap<u8, u64>,
+    decided_at: u64,
+    winners: Vec<u8>,
+    /// The local player's (owner 0's) result panel at the end.
+    shown: crate::units::lifecycle::game_over::GameState,
+    hashes: Vec<TickHash>,
+}
+
+/// Play `scenario` until the match is decided (at most `max` ticks),
+/// watching as owner 0 (its result is UI only), then `after` more
+/// ticks. Asserts the upstream rules on the way: shared defeat, the
+/// end one census after the last death, the sim never stopping.
+fn play_to_the_end(scenario: Scenario, max: u64, after: u64) -> Ending {
+    use crate::units::lifecycle::bookkeeping::{MAX_UNITS_PER_TEAM, TeamUnitCounts};
+    use crate::units::lifecycle::game_over::GameState;
+    use crate::units::teams::{Alliances, TeamFates};
+
+    let mut h = SimHarness::new(scenario);
+    h.world_mut().resource_mut::<HashLog>().enabled = true;
+    h.world_mut()
+        .insert_resource(crate::units::player::LocalTeam(0));
+    let alliances = h.world_mut().resource::<Alliances>().clone();
+    let mut deaths: BTreeMap<u8, u64> = BTreeMap::new();
+    let mut decided: Option<(u64, Vec<u8>)> = None;
+    let mut shared_cap_seen = false;
+    let mut zero_seen: BTreeMap<Entity, u64> = BTreeMap::new();
+    while decided.is_none() || h.tick < decided.as_ref().unwrap().0 + after {
+        h.step();
+        assert!(h.tick <= max + after, "undecided after {max} ticks");
+        let tick = h.tick;
+        let world = h.world_mut();
+        assert_eq!(
+            world.resource::<crate::sim::SimTick>().0,
+            tick,
+            "the sim runs every tick, decided or not"
+        );
+        let fates = world.resource::<TeamFates>().clone();
+        for owner in fates.dead() {
+            deaths.entry(owner).or_insert(tick);
+        }
+        if decided.is_none()
+            && let Some(winners) = fates.winners()
+        {
+            decided = Some((tick, winners.to_vec()));
+        }
+        // Nothing stands at 0 HP: `death_system` takes every unit the
+        // tick after its HP drops (the game-over sweep included).
+        {
+            use crate::units::components::{Health, TeamId, UnitType};
+            let mut q = world.query_filtered::<(Entity, &TeamId, &UnitType, &Health), Without<crate::units::combat::Dying>>();
+            for (e, team, kind, hp) in q.iter(world) {
+                if hp.current <= 0.0 {
+                    let first = *zero_seen.entry(e).or_insert(tick);
+                    assert!(
+                        tick - first < 3,
+                        "owner {}'s {:?} at {} HP since tick {first}, now {tick}",
+                        team.0,
+                        kind.0,
+                        hp.current
+                    );
+                }
+            }
+        }
+        // A fallen owner's cap goes to its living allies.
+        let counts = world.resource::<TeamUnitCounts>();
+        for &dead in deaths.keys() {
+            assert_eq!(counts.limit(dead), 0, "owner {dead}'s cap after death");
+            shared_cap_seen |= alliances
+                .allies_of(dead)
+                .any(|a| !fates.is_dead(a) && counts.limit(a) > MAX_UNITS_PER_TEAM);
+        }
+        // Dead owners keep no units past their last census.
+        if tick.is_multiple_of(30) {
+            use crate::units::components::{Health, TeamId, UnitType};
+            let mut q = world.query_filtered::<(
+                &TeamId,
+                &UnitType,
+                Option<&Health>,
+                Has<crate::units::components::Faction>,
+                Has<GlobalTransform>,
+                Has<crate::net::NetId>,
+                Has<crate::units::lifecycle::spawning::BuildDriven>,
+            ), Without<crate::units::combat::Dying>>();
+            let alive: Vec<(u8, String)> = q
+                .iter(world)
+                .map(|(t, k, h, f, g, n, b)| {
+                    (
+                        t.0,
+                        format!(
+                            "{:?} hp {:?} f{f} g{g} n{n} b{b}",
+                            k.0,
+                            h.map(|h| h.current)
+                        ),
+                    )
+                })
+                .collect();
+            for (&owner, &died) in &deaths {
+                if tick > died + 60 {
+                    let left: Vec<&String> = alive
+                        .iter()
+                        .filter(|(o, _)| *o == owner)
+                        .map(|(_, k)| k)
+                        .collect();
+                    assert!(
+                        left.is_empty(),
+                        "dead owner {owner} (died {died}) still fields {left:?} at tick {tick}"
+                    );
+                }
+            }
+        }
+    }
+    let (decided_at, winners) = decided.unwrap();
+    // Shared defeat: one ally team wins; every owner of every other one
+    // is dead; the match ends at the census after the last death.
+    assert_eq!(winners.len(), 1, "one ally team wins: {winners:?}");
+    for owner in alliances.owners() {
+        if alliances.ally_team(owner) != Some(winners[0]) {
+            assert!(
+                deaths.get(&owner).is_some_and(|t| *t < decided_at),
+                "owner {owner} fell with its side"
+            );
+        }
+    }
+    assert!(
+        alliances
+            .owners()
+            .any(|o| alliances.ally_team(o) == Some(winners[0]) && !deaths.contains_key(&o)),
+        "a winner is alive"
+    );
+    let last_death = *deaths.values().max().unwrap();
+    assert_eq!(decided_at, last_death + 30, "decided one census later");
+    // Every owner that fell while its ally team fought on left its cap
+    // to an ally.
+    let early = deaths
+        .iter()
+        .any(|(o, &t)| t < last_death && alliances.allies_of(*o).any(|a| a != *o));
+    assert!(
+        !early || shared_cap_seen,
+        "an early death passed its unit cap on"
+    );
+    let shown = *h.world_mut().resource::<State<GameState>>().get();
+    let owner0_won = alliances.ally_team(0) == Some(winners[0]);
+    assert_eq!(
+        shown,
+        if owner0_won {
+            GameState::Victory
+        } else {
+            GameState::Defeat
+        }
+    );
+    let hashes = std::mem::take(&mut h.world_mut().resource_mut::<HashLog>().ticks);
+    // The world still changes after the first death and after the end.
+    let first_death = *deaths.values().min().unwrap() as usize;
+    let moved = |from: usize, to: usize| {
+        hashes[from.min(hashes.len() - 1)].sim != hashes[to.min(hashes.len() - 1)].sim
+    };
+    assert!(
+        moved(first_death, last_death as usize),
+        "the sim went on after the first death"
+    );
+    assert!(
+        moved(decided_at as usize, (decided_at + after) as usize - 1),
+        "and after the end"
+    );
+    Ending {
+        deaths,
+        decided_at,
+        winners,
+        shown,
+        hashes,
+    }
+}
+
+fn report_ending(name: &str, e: &Ending) {
+    eprintln!(
+        "{name}: decided at tick {} ({:.1} game min), ally team {:?} wins; deaths {:?}; owner 0 sees {:?}",
+        e.decided_at,
+        e.decided_at as f64 / 1800.0,
+        e.winners,
+        e.deaths,
+        e.shown,
+    );
+}
+
+/// A 2v2 of AI owners (two ally teams, factions mixed) played to its
+/// end: shared defeat, the dead's units gone, the sim running on after
+/// each death and after the end, the local result UI only. Then the
+/// same match again, ending on the same tick with the same trail.
+/// `KP_NET_MAP` / `KP_NET_SEED` / `KP_NET_TICKS` (the cap) vary it.
+#[test]
+#[ignore = "plays a 2v2 to its end; --ignored --release"]
+fn shared_defeat_2v2() {
+    let mut scenario = Scenario::ai_match(
+        &env("KP_NET_MAP", "Dual_Core".to_string()),
+        2,
+        2,
+        env("KP_NET_SEED", 0x2_0202_u64),
+    );
+    scenario.difficulty = env("KP_NET_DIFFICULTY", 3);
+    let max = env("KP_NET_TICKS", 30 * 60 * 40);
+    let a = play_to_the_end(scenario.clone(), max, 300);
+    report_ending("2v2", &a);
+    let b = play_to_the_end(scenario, max, 300);
+    assert_eq!(a.decided_at, b.decided_at);
+    assert_eq!(a.deaths, b.deaths);
+    assert_eq!(first_divergence(&a.hashes, &b.hashes, |h| h.sim), None);
+}
+
+/// The same for a 4v4 (eight AI owners in two ally teams).
+#[test]
+#[ignore = "plays a 4v4 to its end; --ignored --release"]
+fn shared_defeat_4v4() {
+    let mut scenario = Scenario::ai_match(
+        &env("KP_NET_MAP", "Speed_Balls_16_Way".to_string()),
+        2,
+        4,
+        env("KP_NET_SEED", 0x5eed_u64),
+    );
+    scenario.difficulty = env("KP_NET_DIFFICULTY", 2);
+    let a = play_to_the_end(scenario, env("KP_NET_TICKS", 30 * 60 * 60), 300);
+    report_ending("4v4", &a);
+}
+
 /// System pairs in `FixedUpdate` with conflicting data access and no
 /// ordering between them: their run order is up to the executor, so
 /// the single- and multi-threaded executors (and in principle two
@@ -712,7 +939,7 @@ fn pointer_only_fires_fully_open() {
     // reopens, engages again.
     order_move(&mut h, away);
     run(&mut h, 420, &mut timeline);
-    let moved = timeline.iter().map(|t| t.speed).fold(0.0, f32::max);
+    let moved = timeline.iter().map(|t| t.speed).fold(0.0, f32::det_max);
     // Phase 3: a one-elmo nudge (speed crosses 0.01 and drops back
     // within the Close delay).
     order_move(&mut h, nudge);

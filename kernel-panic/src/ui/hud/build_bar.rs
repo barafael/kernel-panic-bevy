@@ -23,6 +23,7 @@
 //! orders).
 
 use crate::map_loading::MatchScopeAppExt;
+use crate::sim::DetFloat;
 use bevy::input::InputSystems;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -123,7 +124,7 @@ enum Hit {
 
 /// `ViewResize`: icon size from the view width.
 fn icon_size(view: Vec2) -> Vec2 {
-    let x = (55.0 + (view.x - 800.0) / 38.0).floor().max(20.0);
+    let x = (55.0 + (view.x - 800.0) / 38.0).floor().det_max(20.0);
     Vec2::new(x, (x * 0.75).floor())
 }
 
@@ -131,7 +132,7 @@ fn icon_size(view: Vec2) -> Vec2 {
 /// `bar_align −1`).
 fn icon_pos(i: usize, n: usize, view: Vec2) -> Vec2 {
     let s = icon_size(view);
-    let left = (view.x - s.x * n as f32).max(0.0);
+    let left = (view.x - s.x * n as f32).det_max(0.0);
     Vec2::new(left + s.x * i as f32, 0.0)
 }
 
@@ -209,7 +210,7 @@ fn collect_bar(
                 kind,
                 building: None,
                 runs: Vec::new(),
-                recharge: Some((cooldown.map_or(0.0, |c| c.remaining.max(0.0)), total)),
+                recharge: Some((cooldown.map_or(0.0, |c| c.remaining.det_max(0.0)), total)),
             });
         } else if factory_roster(kind).len() > 1
             && let Some(p) = producer
@@ -356,7 +357,7 @@ const DARK_GREEN: Color = Color::srgb(0.0, 0.5, 0.0);
 
 /// A clockwise progress pie from 12 o'clock (`DrawBuildProgress`).
 fn pie(progress: f32) -> BackgroundGradient {
-    let a = progress.clamp(0.0, 1.0) * std::f32::consts::TAU;
+    let a = progress.det_clamp(0.0, 1.0) * std::f32::consts::TAU;
     let fill = Color::srgba(1.0, 1.0, 1.0, 0.5);
     BackgroundGradient::from(ConicGradient::new(
         UiPosition::CENTER,
@@ -377,7 +378,7 @@ impl BarEntry {
             return Some((p, (p * 360.0) as u32));
         }
         let (left, total) = self.recharge?;
-        (left > 0.0).then(|| (1.0 - left / total.max(1e-3), (left * 4.0) as u32))
+        (left > 0.0).then(|| (1.0 - left / total.det_max(1e-3), (left * 4.0) as u32))
     }
 
     /// Whole seconds left on a recharging Terminal / Firewall.

@@ -26,6 +26,7 @@ use super::content::definitions::UnitKind;
 use super::lifecycle::spawning::Emerging;
 use super::mechanics::cloak::{Cloaked, DetectedBy, hidden_from};
 use crate::net::NetId;
+use crate::sim::DetFloat;
 
 /// XZ cell width in elmos. Matches upstream Spring's `CQuadField` default
 /// and sits comfortably between the smallest weapon range (~80 elmo melee)
@@ -87,7 +88,7 @@ impl SpatialEntry {
     /// `CollisionVolume::GetPointSurfaceDistance`: distance from `point`
     /// to the sphere's surface, 0 inside it.
     pub fn surface_distance(&self, point: Vec3) -> f32 {
-        (self.mid_pos().distance(point) - self.hit_radius).max(0.0)
+        (self.mid_pos().distance(point) - self.hit_radius).det_max(0.0)
     }
 }
 
@@ -120,7 +121,7 @@ impl SpatialIndex {
 
     fn push(&mut self, entry: SpatialEntry) {
         let key = Self::cell(entry.pos.x, entry.pos.z);
-        self.max_hit_radius = self.max_hit_radius.max(entry.hit_radius);
+        self.max_hit_radius = self.max_hit_radius.det_max(entry.hit_radius);
         self.cells.entry(key).or_default().push(entry);
     }
 
@@ -143,7 +144,7 @@ impl SpatialIndex {
         // Bounded: an infinite radius (a definition file's `range=inf`)
         // would otherwise walk the whole i32 cell range.
         let radius = if radius.is_finite() {
-            radius.min(MAX_QUERY_RADIUS)
+            radius.det_min(MAX_QUERY_RADIUS)
         } else {
             MAX_QUERY_RADIUS
         };
@@ -301,6 +302,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
         world.init_resource::<SpatialIndex>();
+        world.init_resource::<crate::units::teams::Alliances>();
         let registry = crate::units::content::unit_registry::UnitRegistry::empty();
         let unit = world
             .spawn((

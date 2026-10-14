@@ -15,8 +15,9 @@ use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
 use crate::sim::INV_GAME_SPEED;
-use crate::units::components::{TeamId, UnitType, is_friendly};
+use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::teams::Alliances;
 
 pub struct CursorPlugin;
 
@@ -161,6 +162,7 @@ fn resolve_context_cursor(
     selected: Query<(&UnitType, &TeamId), With<Selected>>,
     hovered: Query<&TeamId, (With<Hovered>, With<UnitType>)>,
     unit_registry: Res<UnitRegistry>,
+    alliances: Res<Alliances>,
 ) {
     if selected.is_empty() {
         request.set(CursorKind::Normal, 0);
@@ -170,7 +172,7 @@ fn resolve_context_cursor(
     let mut has_mover = false;
     let mut has_weapon = false;
     let mut has_constructor = false;
-    // Track the first selected unit's team so we can ask `is_friendly`
+    // Track the first selected unit's owner so we can ask `friendly`
     // about the hovered unit — the cursor hint is resolved by comparing
     // the selection against what's under the cursor.
     let mut selection_team: Option<u8> = None;
@@ -189,7 +191,7 @@ fn resolve_context_cursor(
 
     match hovered.iter().next() {
         Some(hover_team) => {
-            let is_enemy = selection_team.is_some_and(|t| !is_friendly(t, hover_team.0));
+            let is_enemy = selection_team.is_some_and(|t| !alliances.friendly(t, hover_team.0));
             if is_enemy {
                 if has_weapon {
                     request.set(CursorKind::Attack, 0);

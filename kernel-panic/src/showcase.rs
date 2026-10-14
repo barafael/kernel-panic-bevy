@@ -22,6 +22,7 @@
 use bevy::math::ops;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
 use crate::{
     interaction::movement::{MoveTarget, QueuedCommand},
     terrain::geovent::{GeoventSmoker, VentClaim},
@@ -217,13 +218,13 @@ pub fn showcase_director(
         if d.sites.len() < needed {
             let missing = needed - d.sites.len();
             let (world_w, world_d) = hm.world_size();
-            let cx = home_pos.x.clamp(RING_RADIUS, world_w - RING_RADIUS);
-            let cz = home_pos.z.clamp(RING_RADIUS, world_d - RING_RADIUS);
+            let cx = home_pos.x.det_clamp(RING_RADIUS, world_w - RING_RADIUS);
+            let cz = home_pos.z.det_clamp(RING_RADIUS, world_d - RING_RADIUS);
             for i in 0..missing {
                 let angle = std::f32::consts::TAU * i as f32 / missing as f32;
                 let r = RING_RADIUS + (i as f32) * RING_SPACING;
-                let rx = (cx + r * ops::cos(angle)).clamp(0.0, world_w);
-                let rz = (cz + r * ops::sin(angle)).clamp(0.0, world_d);
+                let rx = (cx + r * ops::cos(angle)).det_clamp(0.0, world_w);
+                let rz = (cz + r * ops::sin(angle)).det_clamp(0.0, world_d);
                 d.sites.push(hm.place(rx, rz));
             }
         }

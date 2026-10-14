@@ -5,6 +5,7 @@
 //! is used by all legacy Spring maps including the Kernel Panic set.
 
 use crate::map_types::TerrainTypes;
+use spring_detmath::DetFloat;
 
 /// Parsed map metadata from an .smd file.
 #[derive(Debug, Clone, better_default::Default, serde::Serialize, serde::Deserialize)]
@@ -82,7 +83,7 @@ pub fn parse_terrain_types(text: &str) -> TerrainTypes {
             return;
         };
         let speeds = &mut types.move_speeds[index];
-        let speed = parse_f32(value).max(0.0);
+        let speed = parse_f32(value).det_max(0.0);
         match key {
             "tankmovespeed" => speeds.tank = speed,
             "kbotmovespeed" => speeds.kbot = speed,

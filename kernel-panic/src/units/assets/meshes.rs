@@ -6,6 +6,7 @@ use bevy::{
 };
 use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
 
+use crate::sim::DetFloat;
 use crate::units::components::Faction;
 use crate::units::content::bundle::bundle;
 use crate::units::content::definitions::UnitKind;
@@ -334,9 +335,9 @@ fn build_faction_texture(
 fn colorize_texture(tga: &TgaImage, faction: Faction) -> Vec<u8> {
     let color = faction.color();
     let linear = LinearRgba::from(color);
-    let fr = (linear.red.clamp(0.0, 1.0) * 255.0) as u8;
-    let fg = (linear.green.clamp(0.0, 1.0) * 255.0) as u8;
-    let fb = (linear.blue.clamp(0.0, 1.0) * 255.0) as u8;
+    let fr = (linear.red.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let fg = (linear.green.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let fb = (linear.blue.det_clamp(0.0, 1.0) * 255.0) as u8;
 
     let pixel_count = (tga.width * tga.height) as usize;
     let mut pixels = Vec::with_capacity(pixel_count * 4);

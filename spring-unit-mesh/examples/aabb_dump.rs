@@ -3,6 +3,7 @@
 //!   cargo run --release --example aabb_dump -- <objects3d-dir> <name.s3o> ...
 //! Set PIECES=1 to also print the per-piece tree with y extents.
 
+use spring_detmath::DetFloat;
 use spring_unit_mesh::{S3OPiece, parse_s3o};
 
 fn walk(piece: &S3OPiece, parent: [f32; 3], mins: &mut [f32; 3], maxs: &mut [f32; 3]) {
@@ -13,8 +14,8 @@ fn walk(piece: &S3OPiece, parent: [f32; 3], mins: &mut [f32; 3], maxs: &mut [f32
     ];
     for v in &piece.vertices {
         for a in 0..3 {
-            mins[a] = mins[a].min(v.position[a] + world[a]);
-            maxs[a] = maxs[a].max(v.position[a] + world[a]);
+            mins[a] = mins[a].det_min(v.position[a] + world[a]);
+            maxs[a] = maxs[a].det_max(v.position[a] + world[a]);
         }
     }
     for c in &piece.children {
@@ -31,8 +32,8 @@ fn dump_pieces(piece: &S3OPiece, parent: [f32; 3], depth: usize) {
     let (mut mins, mut maxs) = ([f32::MAX; 3], [f32::MIN; 3]);
     for v in &piece.vertices {
         for a in 0..3 {
-            mins[a] = mins[a].min(v.position[a] + world[a]);
-            maxs[a] = maxs[a].max(v.position[a] + world[a]);
+            mins[a] = mins[a].det_min(v.position[a] + world[a]);
+            maxs[a] = maxs[a].det_max(v.position[a] + world[a]);
         }
     }
     if piece.vertices.is_empty() {

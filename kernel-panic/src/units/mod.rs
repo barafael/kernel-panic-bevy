@@ -7,6 +7,7 @@ pub mod lifecycle;
 pub mod mechanics;
 pub mod player;
 pub mod spatial;
+pub mod teams;
 pub mod weapon_fx;
 
 use bevy::prelude::*;
@@ -70,12 +71,19 @@ impl Plugin for UnitsPlugin {
             // match swap.
             .init_match_resource::<crate::sim::SimTick>()
             .init_resource::<crate::sim::MatchSeed>()
+            // The local player's result panel: UI only, never gates
+            // the sim (`game_over::announce_outcome`).
             .init_state::<game_over::GameState>()
             .init_resource::<assets::meshes::S3OModelCache>()
             .insert_resource(player::LocalTeam(0))
             .init_match_resource::<ai::AiTicker>()
             // Set from the seats at every match swap (`begin_match`).
             .init_resource::<ai::AiSeats>()
+            .init_resource::<teams::Alliances>()
+            // Which owners are dead and the match result (sim), and the
+            // result last shown to the local player (UI).
+            .init_match_resource::<teams::TeamFates>()
+            .init_match_resource::<game_over::AnnouncedOutcome>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
             .init_resource::<shield::OnsMode>()
@@ -98,7 +106,6 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<cloak::CloakDetectionTimer>()
             .init_match_resource::<cloak::FogRefreshTimer>()
             .init_match_resource::<spatial::SpatialIndex>()
-            .init_match_resource::<game_over::GameOverClock>()
             .init_match_resource::<crate::game_setup::GameOverDismissed>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<deploy::DeployEvent>()
@@ -137,8 +144,7 @@ impl Plugin for UnitsPlugin {
                     // unordered pair runs in whatever order the
                     // executor picks (single- vs multi-threaded runs
                     // diverged; `headless` determinism experiments).
-                    .before(crate::interaction::movement::advance_command_queue)
-                    .run_if(in_state(game_over::GameState::Playing)),
+                    .before(crate::interaction::movement::advance_command_queue),
             )
             .configure_sets(
                 FixedUpdate,
@@ -149,9 +155,14 @@ impl Plugin for UnitsPlugin {
                     GameplaySet::Animate,
                     GameplaySet::Cleanup,
                 )
-                    .chain()
-                    .run_if(in_state(game_over::GameState::Playing)),
+                    // Never gated on the local player's outcome: a
+                    // defeated peer keeps simulating as a spectator
+                    // (lockstep), and single player keeps running
+                    // behind the result panel, as Spring does after
+                    // `GameOver`.
+                    .chain(),
             )
+            .add_systems(Update, game_over::announce_outcome)
             .add_systems(Startup, validate_registries)
             // Debug builds: the FPU is still in IEEE default mode. Then
             // the tick's frame number.

@@ -135,7 +135,11 @@ pub fn health_color(frac: f32) -> Color {
     }
 }
 
-/// Which team/player owns this unit.
+/// The unit's owner: Spring's *team* (`CUnit::team`), one per seat —
+/// seat `i` of the match setup owns `TeamId(i)`. Ownership (commands,
+/// unit cap, packet buffer, AI) compares owners; friend or foe asks
+/// [`Alliances::friendly`](crate::units::teams::Alliances::friendly),
+/// since allied seats are different owners (`units::teams`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Component)]
 pub struct TeamId(pub u8);
 
@@ -201,14 +205,6 @@ impl UnitStats {
             no_chase_vtol: registry.no_chase_vtol(kind),
         }
     }
-}
-
-/// Two units count as friendly when they share a team. `TeamId` is the
-/// ally team (upstream's allyteam): every seat the menu places on the
-/// same side shares it, so mirror matches (System vs System) fight and
-/// Outgunned's AI seats cooperate.
-pub fn is_friendly(unit_team: u8, other_team: u8) -> bool {
-    unit_team == other_team
 }
 
 /// Invisible child mesh used as a click target for unit selection.

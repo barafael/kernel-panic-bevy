@@ -1,4 +1,4 @@
-use crate::sim::sq;
+use crate::sim::{DetFloat, sq};
 use bevy::math::ops;
 use std::collections::HashMap;
 
@@ -345,10 +345,10 @@ impl NavGridSet {
     /// Does the segment `a → b` (world XZ) touch the square rectangle?
     pub fn segment_touches(bbox: [i32; 4], a: Vec2, b: Vec2) -> bool {
         let sq = |v: f32| (v / SQUARE_SIZE).floor() as i32;
-        sq(a.x.min(b.x)) <= bbox[2]
-            && sq(a.x.max(b.x)) >= bbox[0]
-            && sq(a.y.min(b.y)) <= bbox[3]
-            && sq(a.y.max(b.y)) >= bbox[1]
+        sq(a.x.det_min(b.x)) <= bbox[2]
+            && sq(a.x.det_max(b.x)) >= bbox[0]
+            && sq(a.y.det_min(b.y)) <= bbox[3]
+            && sq(a.y.det_max(b.y)) >= bbox[1]
     }
 
     /// Pick the tightest bucket whose cap ≥ `cap`. If none qualifies
@@ -444,7 +444,7 @@ impl NavGridSet {
             0.0
         };
         (s > 0.0).then(|| {
-            (1.0 / s - 1.0).max(0.0) / spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
+            (1.0 / s - 1.0).det_max(0.0) / spring_pathfinding::slope_mod_from_max_slope(b.max_slope)
         })
     }
 
@@ -712,7 +712,7 @@ pub fn rotate_toward_xz(from: Vec3, to: Vec3, max_turn: f32) -> Vec3 {
         return from;
     }
     let to_n = to / to_len_sq.sqrt();
-    let dot = from.dot(to_n).clamp(-1.0, 1.0);
+    let dot = from.dot(to_n).det_clamp(-1.0, 1.0);
     let angle = ops::acos(dot);
     if angle <= max_turn || angle < 1e-4 {
         return to_n;
@@ -1190,7 +1190,7 @@ fn walk_dashes(points: &[Vec3], heightmap: Option<&Heightmap>, mut emit: impl Fn
         while t < seg_len {
             let (entry_len, visible) = DASH_PATTERN[pattern_idx];
             let remaining = entry_len - cursor;
-            let advance = remaining.min(seg_len - t);
+            let advance = remaining.det_min(seg_len - t);
 
             if visible {
                 let a = sample_at_ground(start.x + step_x * t, start.z + step_z * t, heightmap);

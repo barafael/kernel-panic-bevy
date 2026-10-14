@@ -56,7 +56,7 @@ use crate::interaction::movement::{
     movement_system,
 };
 use crate::rendering::camera::{RtsCamera, RtsCameraState};
-use crate::sim::GAME_SPEED;
+use crate::sim::{DetFloat, GAME_SPEED};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{AttackTargetOrder, Dying};
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
@@ -187,13 +187,13 @@ fn bot_boot(
     }
     let mut players = vec![PlayerSpec {
         faction: Faction::System,
-        team: 0,
+        ally_team: 0,
         ai: false,
     }];
     if bot.enemy {
         players.push(PlayerSpec {
             faction: Faction::Hacker,
-            team: 1,
+            ally_team: 1,
             ai: true,
         });
     }
@@ -327,7 +327,7 @@ fn bot_tick(
                     faction
                 };
                 let mut ids = Vec::new();
-                let cols = (count as f32).sqrt().ceil().max(1.0) as usize;
+                let cols = (count as f32).sqrt().ceil().det_max(1.0) as usize;
                 for i in 0..count {
                     let (cx, cz) = ((i % cols) as f32, (i / cols) as f32);
                     let pos = hm.place(x + cx * spacing, z + cz * spacing);

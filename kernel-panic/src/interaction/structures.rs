@@ -29,7 +29,7 @@ use spring_pathfinding::BlockMask;
 
 use super::movement::NavGridSet;
 use crate::net::NetId;
-use crate::sim::SQUARE_SIZE;
+use crate::sim::{DetFloat, SQUARE_SIZE};
 use crate::units::combat::Dying;
 use crate::units::components::{UnitStats, UnitType};
 use crate::units::content::definitions::{ALL_UNIT_KINDS, UnitKind};
@@ -262,8 +262,8 @@ impl StructureLayer {
             return Vec::new();
         };
         let (fx, fz) = (
-            def.footprint_x.max(1.0) as i32,
-            def.footprint_z.max(1.0) as i32,
+            def.footprint_x.det_max(1.0) as i32,
+            def.footprint_z.det_max(1.0) as i32,
         );
         let (xsize, zsize) = (fx * 2, fz * 2);
         let x0 = ((pos.x - xsize as f32 * SQUARE_SIZE * 0.5) / SQUARE_SIZE).round() as i32;
@@ -430,7 +430,12 @@ pub fn update_structure_layer(
     // `CUnit::ForcedMove` unblocks, moves and re-blocks: a structure
     // that was moved (Hex Farm's fall sweep pushes buildings off a
     // sinking tower) blocks where it stands now, not where it spawned.
-    for (entity, _, kind, tf) in moved.iter().sort::<&NetId>() {
+    // Sorted after collecting: `QueryIter::sort` would evaluate
+    // `Changed<Transform>` with the world's per-frame ticks instead of
+    // this system's (see `combat::death_system`).
+    let mut moved: Vec<_> = moved.iter().collect();
+    moved.sort_unstable_by_key(|(_, id, ..)| **id);
+    for (entity, _, kind, tf) in moved {
         let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
         if layer
             .stamps

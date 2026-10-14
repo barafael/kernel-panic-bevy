@@ -22,7 +22,7 @@ use bevy::prelude::*;
 
 use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
 use crate::net::NetId;
-use crate::sim::{RngStream, SimRng, SimTick};
+use crate::sim::{DetFloat, RngStream, SimRng, SimTick};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -371,6 +371,7 @@ pub struct DamageResolver<'w, 's> {
     units: Res<'w, UnitRegistry>,
     impulses: ResMut<'w, crate::interaction::ground_move::PendingImpulses>,
     damage_log: Option<ResMut<'w, crate::units::ai::TeamDamageLog>>,
+    alliances: Option<Res<'w, crate::units::teams::Alliances>>,
     commands: Commands<'w, 's>,
 }
 
@@ -485,11 +486,21 @@ impl DamageResolver<'_, '_> {
                 attacker_team: attacker.team,
             });
         }
-        // KPAI_Fair `UnitDamaged`: remember where the team last bled.
+        // KPAI_Fair `UnitDamaged`: every AI team allied with the victim
+        // (`AreTeamsAllied(team, t)`, itself included) remembers where
+        // its side last bled (`lastAllyDamage`).
         if damage >= 0.5
             && let Some(log) = self.damage_log.as_deref_mut()
         {
-            log.record(team, self.tick.secs(), pos);
+            let now = self.tick.secs();
+            match self.alliances.as_deref() {
+                Some(alliances) if alliances.is_seated(team) => {
+                    for ally in alliances.allies_of(team) {
+                        log.record(ally, now, pos);
+                    }
+                }
+                _ => log.record(team, now, pos),
+            }
         }
     }
 
@@ -747,7 +758,7 @@ impl DamagePass<'_, '_> {
             let scale = (weapon_def.impulse_factor
                 * falloff
                 * (weapon_def.damage.default + weapon_def.impulse_boost))
-                .clamp(-MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE);
+                .det_clamp(-MAX_EXPLOSION_IMPULSE, MAX_EXPLOSION_IMPULSE);
             // `volPos - expPos`; a direct hit's impact point is the
             // victim's own position here, where the engine's lies on the
             // collision surface facing the shooter: use the shot's
@@ -792,7 +803,7 @@ impl DamagePass<'_, '_> {
 
         // `damageAreaOfEffect = areaOfEffect · 0.5` (WeaponDef.cpp:71), at
         // least 1 (`CGameHelper::Explosion`).
-        let aoe = (weapon_def.area_of_effect * 0.5).max(1.0);
+        let aoe = (weapon_def.area_of_effect * 0.5).det_max(1.0);
         let edge_mult = weapon_def.edge_effectiveness;
         let no_self_damage = weapon_def.no_self_damage;
         // Collect first, then deliver — delivery borrows the victim
@@ -1171,6 +1182,7 @@ mod tests {
             .init_sim()
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<crate::units::ai::TeamDamageLog>()
             .insert_resource(units)
             .insert_resource(weapons);
@@ -1291,6 +1303,7 @@ mod tests {
             .init_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_resource::<PendingAttacks>()
             .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>()
             .init_resource::<crate::units::weapon_fx::PendingExplosions>()
             .insert_resource(UnitRegistry::empty())
             .insert_resource(WeaponRegistry::default());

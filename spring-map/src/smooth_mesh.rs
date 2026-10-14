@@ -32,6 +32,7 @@
 //! [`SmoothHeightMesh::set_smooth_mesh`]: it writes the final mesh only,
 //! so a later dynamic update of that quad recomputes it from the terrain.
 
+use spring_detmath::DetFloat;
 use std::collections::VecDeque;
 
 /// `SmoothHeightMeshNamespace::SMOOTH_MESH_UPDATE_DELAY` (`GAME_SPEED`).
@@ -166,8 +167,8 @@ impl SmoothHeightMesh {
     /// to its extent (cells past the last one read as flat).
     pub fn get_height(&self, x: f32, z: f32) -> f32 {
         let (maxx, maxy) = (self.maxx, self.maxy);
-        let x = (x / self.fresolution).clamp(0.0, maxx as f32);
-        let y = (z / self.fresolution).clamp(0.0, maxy as f32);
+        let x = (x / self.fresolution).det_clamp(0.0, maxx as f32);
+        let y = (z / self.fresolution).det_clamp(0.0, maxy as f32);
         let sx = (x as usize).min(maxx - 1);
         let sy = (y as usize).min(maxy - 1);
         let dx = x - sx as f32;
@@ -186,7 +187,7 @@ impl SmoothHeightMesh {
 
     /// `SmoothHeightMesh::GetHeightAboveWater`.
     pub fn get_height_above_water(&self, x: f32, z: f32) -> f32 {
-        self.get_height(x, z).max(0.0)
+        self.get_height(x, z).det_max(0.0)
     }
 
     /// `SmoothHeightMesh::SetHeight`.
@@ -299,7 +300,7 @@ impl SmoothHeightMesh {
             for x in min[0]..=max[0] {
                 avg += -lv + rv;
                 let gh = self.ground(heights, x, y);
-                dst[x + y * line] = gh.max(avg * weight);
+                dst[x + y * line] = gh.det_max(avg * weight);
                 lv = at(li, y);
                 rv = at(ri, y);
                 li += 1;
@@ -334,7 +335,7 @@ impl SmoothHeightMesh {
             for y in min[1]..=max[1] {
                 avg += -lv + rv;
                 let gh = self.ground(heights, x, y);
-                dst[x + y * line] = gh.max(avg * weight);
+                dst[x + y * line] = gh.det_max(avg * weight);
                 lv = at(x, li);
                 rv = at(x, ri);
                 li += 1;
@@ -523,7 +524,7 @@ mod tests {
         let mut best = f32::NEG_INFINITY;
         for cy in y.saturating_sub(w)..=(y + w).min(m.maxy - 1) {
             for cx in x.saturating_sub(w)..=(x + w).min(m.maxx - 1) {
-                best = best.max(m.ground(hm, cx, cy));
+                best = best.det_max(m.ground(hm, cx, cy));
             }
         }
         best
@@ -567,7 +568,7 @@ mod tests {
                 let mut g = f32::NEG_INFINITY;
                 for cy in y.saturating_sub(r)..=(y + r).min(m.maxy - 1) {
                     for cx in x.saturating_sub(r)..=(x + r).min(m.maxx - 1) {
-                        g = g.max(m.ground(&hm, cx, cy));
+                        g = g.det_max(m.ground(&hm, cx, cy));
                     }
                 }
                 assert!(m.mesh[x + y * m.maxx] >= g - 1e-3, "({x},{y})");
@@ -588,12 +589,16 @@ mod tests {
     fn mesh_is_smooth() {
         let (hm, w, h) = terrain();
         let m = SmoothHeightMesh::new(&hm, w, h);
-        let lo = m.maxima_mesh.iter().cloned().fold(f32::INFINITY, f32::min);
+        let lo = m
+            .maxima_mesh
+            .iter()
+            .cloned()
+            .fold(f32::INFINITY, f32::det_min);
         let hi = m
             .maxima_mesh
             .iter()
             .cloned()
-            .fold(f32::NEG_INFINITY, f32::max);
+            .fold(f32::NEG_INFINITY, f32::det_max);
         let bound = (hi - lo) / (2 * m.blur_size() + 1) as f32 * 2.0 + 1e-2;
         let mut checked = 0;
         for y in 0..m.maxy {
@@ -623,7 +628,7 @@ mod tests {
                     let b = line[lo..=hi]
                         .iter()
                         .cloned()
-                        .fold(f32::NEG_INFINITY, f32::max);
+                        .fold(f32::NEG_INFINITY, f32::det_max);
                     assert_eq!(v, b, "w={w} i={i}");
                 });
             }
@@ -668,9 +673,9 @@ mod tests {
         for (i, (a, b)) in m.mesh.iter().zip(&full.mesh).enumerate() {
             let d = (a - b).abs();
             if seam(i / m.maxx) {
-                worst_seam = worst_seam.max(d);
+                worst_seam = worst_seam.det_max(d);
             } else {
-                worst = worst.max(d);
+                worst = worst.det_max(d);
             }
         }
         // Running sums drift a little over a 128-cell row vs a 32-cell quad.
