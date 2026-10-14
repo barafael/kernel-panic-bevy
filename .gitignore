@@ -12,3 +12,6 @@ trace-*.json
 
 # CI helper: the list of LFS objects the deploy workflow keys its cache on
 .lfs-objects
+
+# Lockstep desync dumps (`net::driver`)
+/desync-dumps

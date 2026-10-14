@@ -207,8 +207,18 @@ fn units(world: &mut World) -> Vec<Unit> {
 /// the script adapts to whatever the sim did; the log records the
 /// result.
 fn script(world: &mut World, tick: u32) -> Vec<(u8, Vec<SimCommand>)> {
-    const HUMANS: [u8; 3] = [0, 1, 2];
-    const ENEMY: u8 = 3;
+    script_for(world, tick, &[0, 1, 2], |_| 3)
+}
+
+/// [`script`] for the human `teams`, each attacking `enemy_of(team)`
+/// (the multi-peer lockstep tests play it on every peer for its own
+/// seat).
+pub(crate) fn script_for(
+    world: &mut World,
+    tick: u32,
+    teams: &[u8],
+    enemy_of: impl Fn(u8) -> u8,
+) -> Vec<(u8, Vec<SimCommand>)> {
     // The script acts on these ticks only (cheap elsewhere).
     const ACTS: [u32; 20] = [
         1, 450, 500, 510, 700, 760, 820, 880, 940, 1000, 1100, 1150, 1200, 1250, 1300, 1400, 1500,
@@ -225,10 +235,10 @@ fn script(world: &mut World, tick: u32) -> Vec<(u8, Vec<SimCommand>)> {
     vents.sort_by(|a, b| (a.x, a.z).partial_cmp(&(b.x, b.z)).unwrap());
     let bases: Vec<Unit> = all.iter().copied().filter(|u| u.homebase).collect();
     let center = bases.iter().map(|u| u.pos).sum::<Vec3>() / bases.len().max(1) as f32;
-    let enemy_base = bases.iter().find(|u| u.team == ENEMY).copied();
 
     let mut out = Vec::new();
-    for team in HUMANS {
+    for &team in teams {
+        let enemy_base = bases.iter().find(|u| u.team == enemy_of(team)).copied();
         let Some(home) = bases.iter().find(|u| u.team == team).copied() else {
             continue;
         };

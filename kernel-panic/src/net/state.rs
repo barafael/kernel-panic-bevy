@@ -1,6 +1,10 @@
-//! What the harness reads out of the sim each tick: a canonical state
-//! hash keyed by [`NetId`] (never by `Entity`, whose index differs
-//! between machines), an entity census, and readable per-unit dumps.
+//! What the headless harness and the lockstep desync check read out of
+//! the sim: a canonical state hash keyed by [`NetId`] (never by
+//! `Entity`, whose index differs between machines), an entity census,
+//! and readable per-unit dumps. The golden-replay trails are these
+//! hashes per tick; a networked peer reports one every
+//! [`super::session::HASH_INTERVAL`] frames and dumps
+//! [`describe`] when the host finds a mismatch.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -73,7 +77,9 @@ const SIM_CATEGORIES: &[&str] = &[
     "area_denial",
 ];
 
-/// Everything read from one tick.
+/// Everything read from one tick. (The desync check reads only the sim
+/// hash; the harness's measurements read the rest.)
+#[allow(dead_code)]
 pub struct Capture {
     /// Live units (anything with a `UnitType`).
     pub units: usize,
@@ -171,9 +177,28 @@ fn category_ids(world: &World) -> Vec<(ComponentId, &'static str, usize)> {
     out
 }
 
+/// [`category_ids`], kept until a component type is registered: the
+/// name scan is most of a hash's cost otherwise (`m1-runtime.md` §5).
+#[derive(Resource)]
+struct CategoryCache {
+    registered: usize,
+    ids: Vec<(ComponentId, &'static str, usize)>,
+}
+
 pub fn capture(world: &mut World) -> Capture {
     // --- census by archetype -------------------------------------------
-    let cats = category_ids(world);
+    let registered = world.components().len();
+    let cats = match world.get_resource::<CategoryCache>() {
+        Some(c) if c.registered == registered => c.ids.clone(),
+        _ => {
+            let ids = category_ids(world);
+            world.insert_resource(CategoryCache {
+                registered: world.components().len(),
+                ids: ids.clone(),
+            });
+            ids
+        }
+    };
     let mut census: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut projectile_entities: Vec<Entity> = Vec::new();
     let mut total_entities = 0;

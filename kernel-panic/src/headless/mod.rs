@@ -45,7 +45,8 @@ pub mod cli;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod golden;
 pub mod replay;
-pub mod state;
+/// The state hash moved to `net` (lockstep's desync check uses it too).
+pub use crate::net::state;
 #[cfg(test)]
 mod tests;
 #[cfg(all(feature = "replay", target_arch = "wasm32"))]
@@ -375,13 +376,19 @@ impl SimHarness {
     /// One render frame that advances the clock by `ticks` sim ticks
     /// (0 = a frame with no tick).
     pub fn frame(&mut self, ticks: u32) -> u32 {
+        self.frame_dt(TICK * ticks)
+    }
+
+    /// One frame `dt` long; the ticks it ran (the lockstep driver
+    /// decides how many: the clock, the turns in hand).
+    pub fn frame_dt(&mut self, dt: Duration) -> u32 {
         self.app
             .world_mut()
             .resource_mut::<TickTimer>()
             .ticks
             .clear();
         self.app
-            .insert_resource(TimeUpdateStrategy::ManualDuration(TICK * ticks));
+            .insert_resource(TimeUpdateStrategy::ManualDuration(dt));
         let t0 = Instant::now();
         self.app.update();
         self.last_frame = t0.elapsed();

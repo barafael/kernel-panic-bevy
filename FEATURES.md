@@ -800,4 +800,10 @@ context. Most variants animate over their frames at a fixed rate
 
 ## 28. Multiplayer / persistence
 
-- None — single-process, single-session, local only.
+- Lockstep runtime in place, no network yet (`docs/multiplayer-plan.md` M1,
+  `net-experiments/m1-runtime.md`): the fixed sim runs one host-sequenced turn
+  per tick (single player is a solo host, commands still apply on the next
+  tick), adaptive input delay, catch-up, state-hash desync check that stops the
+  match and writes `desync-dumps/`. Only the in-process simulated network
+  drives it so far (tests); the matchbox transport and the lobby are M2.
+- Golden replays (`--replay`, `--record-golden`, feature `replay`).
