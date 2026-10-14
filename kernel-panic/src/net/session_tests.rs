@@ -108,7 +108,7 @@ impl TickRunner for Fake {
                         "command {id} applied twice"
                     );
                 }
-                if let SimCommand::SetRepeat { on, .. } = c {
+                if let SimCommand::Pause { on } = c {
                     self.speed.paused = *on;
                 }
             }
@@ -556,10 +556,7 @@ fn pause_and_resume() {
         p.every = 0;
     }
     let mut t = 0;
-    let pause = |on| SimCommand::SetRepeat {
-        units: Units::of([NetId(1)]),
-        on,
-    };
+    let pause = |on| SimCommand::Pause { on };
     let mut paused_at = 0;
     r.run(8.0, |r| {
         t += 1;

@@ -83,6 +83,7 @@ impl Plugin for UnitsPlugin {
             // Which owners are dead and the match result (sim), and the
             // result last shown to the local player (UI).
             .init_match_resource::<teams::TeamFates>()
+            .init_match_resource::<SimRng<game_over::LeaveFuseRng>>()
             .init_match_resource::<game_over::AnnouncedOutcome>()
             .insert_resource(weapons::WeaponRegistry::load())
             .insert_resource(unit_registry::UnitRegistry::load())
@@ -265,6 +266,7 @@ impl Plugin for UnitsPlugin {
                         ),
                         combat::tick_stun,
                         combat::tick_self_destruct,
+                        game_over::detonate_fuses,
                         combat::auto_heal,
                         combat::death_system,
                         spawning::spawn_queued_viruses

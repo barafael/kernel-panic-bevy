@@ -24,7 +24,14 @@
 //!   normal death path, blast and all).
 //! - `cam <x> <z> [distance]` — snap the camera onto that ground point.
 //! - `shot <name>` — screenshot to `<dir>/<name>.png`.
-//! - `speed <factor>`, `pause`, `resume` — the game clock.
+//! - `speed <factor>`, `pause`, `resume` — the game clock (a paused
+//!   match runs no tick, so no `resume` is read until something
+//!   else unpauses: the Pause key).
+//! - `resign` — give up (the bot's owner leaves play: with an ally in
+//!   play its units wait for a take, else they blow up within 4 s).
+//! - `take <owner>` — the TAKE button: every remaining unit of `owner`,
+//!   an ally that has left play.
+//! - `god on|off` — command every team (on from the start).
 //! - `wait <frames>` — hold the following commands that many sim frames.
 //! - `dump` — write `state.txt` now; `every <frames>` — and that often.
 //! - `trace <sel> on|off` — per-frame CSV of each unit's movement state
@@ -36,6 +43,13 @@
 //!   that segment straight (`DoRawSearch`).
 //! - `ping <token>` — echo `ack <token>` to the log (a sync point).
 //! - `quit` — exit the game.
+//!
+//! Everything that changes the match goes through the command bus as
+//! the local player (team 0), like mouse input: orders as
+//! [`SimCommand`]s; spawn, kill, hp and commanding other teams as
+//! cheats ([`DevCommand`]: the bot's match has one human seat, so they
+//! are allowed). Commands apply on the tick they are read. A `spawn`
+//! holds the following lines one tick, until the new units exist.
 //!
 //! Not compiled for wasm (no disk).
 
@@ -52,17 +66,19 @@ use strum::VariantArray;
 use crate::game_setup::{AppState, DevOptions, GameSetup, PlayerSpec};
 use crate::interaction::ground_move::GroundMover;
 use crate::interaction::movement::{
-    CommandQueue, MovePath, MoveTarget, NavGridSet, QueuedCommand, ground_clamp_system,
-    movement_system,
+    CommandQueue, MovePath, MoveTarget, NavGridSet, ground_clamp_system, movement_system,
+};
+use crate::net::control::{DevSpawned, MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
+use crate::net::{
+    CommandBus, DevCommand, FactoryOp, IdList, NetId, NetPos, Order, SimCommand, Units,
 };
 use crate::rendering::camera::{RtsCamera, RtsCameraState};
 use crate::sim::{DetFloat, GAME_SPEED};
 use crate::terrain::heightmap::Heightmap;
-use crate::units::combat::{AttackTargetOrder, Dying};
+use crate::units::combat::Dying;
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
 
 /// Frames of menu before starting the skirmish (the map catalog must
 /// be scanned first).
@@ -100,12 +116,18 @@ impl Plugin for BotPlugin {
             dump_every: 0,
             traced: Vec::new(),
             last_spawned: None,
+            god: false,
         })
+        .init_resource::<DevSpawned>()
         .add_systems(Update, bot_boot)
         .add_systems(
             FixedUpdate,
             (
-                bot_tick.before(movement_system),
+                // Issues before the apply system: commands land on the
+                // tick they are read.
+                bot_tick
+                    .before(crate::net::SimCommandSet)
+                    .before(movement_system),
                 bot_trace.after(ground_clamp_system),
             )
                 .run_if(in_state(AppState::InGame)),
@@ -129,6 +151,8 @@ struct Bot {
     dump_every: u64,
     traced: Vec<Entity>,
     last_spawned: Option<Entity>,
+    /// God mode requested (once, at the first tick).
+    god: bool,
 }
 
 impl Bot {
@@ -259,6 +283,7 @@ fn parse_kind(name: &str) -> Option<UnitKind> {
 #[derive(bevy::ecs::query::QueryData)]
 struct UnitView {
     entity: Entity,
+    id: &'static NetId,
     kind: &'static UnitType,
     team: &'static TeamId,
     stats: &'static UnitStats,
@@ -275,23 +300,44 @@ fn f(s: Option<&str>) -> Option<f32> {
     s.and_then(|v| v.parse().ok())
 }
 
+/// The selection's units for a command.
+fn ids(targets: &[Entity], units: &Query<UnitView>) -> IdList {
+    IdList::new(
+        targets
+            .iter()
+            .filter_map(|e| units.get(*e).ok().map(|u| *u.id)),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn bot_tick(
     mut bot: ResMut<Bot>,
-    mut ctx: SpawnContext,
+    mut commands: Commands,
+    mut bus: ResMut<CommandBus>,
+    mut spawned: ResMut<DevSpawned>,
+    registry: Res<UnitRegistry>,
     heightmap: Option<Res<Heightmap>>,
     nav: Option<Res<NavGridSet>>,
     units: Query<UnitView>,
-    mut producers: Query<&mut crate::units::lifecycle::production::Producer>,
-    mut command_fire: MessageWriter<crate::units::mechanics::command_fire::CommandFireEvent>,
     mut camera: Query<&mut RtsCameraState, With<RtsCamera>>,
-    mut time: ResMut<Time<Virtual>>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Some(hm) = heightmap.as_deref() else {
         return;
     };
     bot.frame += 1;
+    if !bot.god {
+        // The bot commands every team (`team:1`, spawned enemies).
+        bus.issue(SimCommand::Dev(DevCommand::GodMode { on: true }));
+        bot.god = true;
+    }
+    // The units the last `spawn` made.
+    if !spawned.0.is_empty() {
+        let new: Vec<u32> = spawned.0.iter().map(|e| e.index_u32()).collect();
+        bot.last_spawned = spawned.0.last().copied();
+        spawned.0.clear();
+        bot.log(&format!("spawned: {new:?}"));
+    }
     bot.read_new_commands();
     if bot.dump_every > 0 && bot.frame.is_multiple_of(bot.dump_every) {
         dump_state(&bot, &units);
@@ -317,25 +363,16 @@ fn bot_tick(
                     bot.log(&format!("bad spawn: {line}"));
                     continue;
                 };
-                let faction = match team {
-                    0 => Faction::System,
-                    _ => kind.faction(),
-                };
-                let faction = if kind.faction() == Faction::System && team != 0 {
-                    Faction::System
-                } else {
-                    faction
-                };
-                let mut ids = Vec::new();
-                let cols = (count as f32).sqrt().ceil().det_max(1.0) as usize;
-                for i in 0..count {
-                    let (cx, cz) = ((i % cols) as f32, (i / cols) as f32);
-                    let pos = hm.place(x + cx * spacing, z + cz * spacing);
-                    let e = spawn_unit(kind, faction, team, pos, &mut ctx);
-                    ids.push(e.index_u32());
-                    bot.last_spawned = Some(e);
-                }
-                bot.log(&format!("spawned {kind:?} team {team} at {x},{z}: {ids:?}"));
+                bus.issue(SimCommand::Dev(DevCommand::Spawn {
+                    kind,
+                    team,
+                    at: NetPos::quantize(hm.place(x, z)),
+                    count: count.clamp(1, 100) as u16,
+                    spacing: spacing.det_clamp(0.0, 1000.0) as u16,
+                }));
+                bot.log(&format!("spawn {count}x {kind:?} team {team} at {x},{z}"));
+                // The units exist after this tick's apply.
+                bot.wait_until = bot.frame + 1;
             }
             "move" | "queue" | "attackmove" => {
                 let sel = it.next().unwrap_or("");
@@ -343,23 +380,18 @@ fn bot_tick(
                     bot.log(&format!("bad {cmd}: {line}"));
                     continue;
                 };
-                let pos = hm.place(x, z);
+                let pos = NetPos::quantize(hm.place(x, z));
                 let targets = select(sel, &bot, &units);
-                for e in &targets {
-                    let mut ec = ctx.commands.entity(*e);
-                    let order = if cmd == "attackmove" {
-                        QueuedCommand::AttackMove(pos)
+                bus.issue(SimCommand::Order {
+                    units: Units::List(ids(&targets, &units)),
+                    order: if cmd == "attackmove" {
+                        Order::AttackMove(pos)
                     } else {
-                        QueuedCommand::Move(pos)
-                    };
-                    if cmd == "queue" && units.get(*e).is_ok_and(|u| u.target.is_some()) {
-                        ec.entry::<CommandQueue>()
-                            .or_default()
-                            .and_modify(move |mut q: Mut<CommandQueue>| q.push(order));
-                    } else {
-                        crate::interaction::replace_order(&mut ec, order);
-                    }
-                }
+                        Order::Move(pos)
+                    },
+                    // Appends behind a busy unit's orders, else replaces.
+                    queue: cmd == "queue",
+                });
                 bot.log(&format!("{cmd} {} units -> {x},{z}", targets.len()));
             }
             "attack" => {
@@ -367,21 +399,22 @@ fn bot_tick(
                 let target = it
                     .next()
                     .and_then(|v| v.parse::<u32>().ok())
-                    .and_then(|id| units.iter().find(|u| u.entity.index_u32() == id))
-                    .map(|u| u.entity);
+                    .and_then(|id| units.iter().find(|u| u.entity.index_u32() == id));
                 let Some(target) = target else {
                     bot.log(&format!("bad attack: {line}"));
                     continue;
                 };
+                let (target_entity, target_id) = (target.entity, *target.id);
                 let targets = select(sel, &bot, &units);
-                for e in &targets {
-                    crate::interaction::clear_orders(&mut ctx.commands.entity(*e))
-                        .insert(AttackTargetOrder { target });
-                }
+                bus.issue(SimCommand::Order {
+                    units: Units::List(ids(&targets, &units)),
+                    order: Order::AttackUnit(target_id),
+                    queue: false,
+                });
                 bot.log(&format!(
                     "attack {} units -> {}",
                     targets.len(),
-                    target.index_u32()
+                    target_entity.index_u32()
                 ));
             }
             "build" => {
@@ -393,13 +426,11 @@ fn bot_tick(
                     continue;
                 };
                 let targets = select(sel, &bot, &units);
-                for e in &targets {
-                    if let Ok(mut producer) = producers.get_mut(*e) {
-                        for _ in 0..count {
-                            producer.enqueue(kind);
-                        }
-                    }
-                }
+                bus.issue(SimCommand::Factory {
+                    factories: Units::List(ids(&targets, &units)),
+                    kind,
+                    op: FactoryOp::Add(count.min(100) as u16),
+                });
                 bot.log(&format!(
                     "build {count}x {kind:?} at {} factories",
                     targets.len()
@@ -411,21 +442,20 @@ fn bot_tick(
                     bot.log(&format!("bad nx: {line}"));
                     continue;
                 };
-                let target = hm.place(x, z);
+                let target = NetPos::quantize(hm.place(x, z));
                 let targets = select(sel, &bot, &units);
-                for e in &targets {
-                    command_fire.write(crate::units::mechanics::command_fire::CommandFireEvent {
-                        attacker: *e,
-                        target,
-                    });
-                }
+                bus.issue(SimCommand::Cast {
+                    units: Units::List(ids(&targets, &units)),
+                    target,
+                    auto: false,
+                });
                 bot.log(&format!("nx {} units -> {x},{z}", targets.len()));
             }
             "stop" => {
                 let targets = select(it.next().unwrap_or(""), &bot, &units);
-                for e in &targets {
-                    crate::interaction::clear_orders(&mut ctx.commands.entity(*e));
-                }
+                bus.issue(SimCommand::Stop {
+                    units: Units::List(ids(&targets, &units)),
+                });
                 bot.log(&format!("stop {} units", targets.len()));
             }
             "hp" => {
@@ -435,21 +465,17 @@ fn bot_tick(
                     continue;
                 };
                 let targets = select(sel, &bot, &units);
-                for e in &targets {
-                    if let Some(max) = units.get(*e).ok().and_then(|u| u.health.map(|h| h.max)) {
-                        ctx.commands.entity(*e).try_insert(Health {
-                            current: value,
-                            max,
-                        });
-                    }
-                }
+                bus.issue(SimCommand::Dev(DevCommand::SetHealth {
+                    units: ids(&targets, &units),
+                    hp: value.det_max(0.0).round() as u32,
+                }));
                 bot.log(&format!("hp {value} on {} units", targets.len()));
             }
             "kill" => {
                 let targets = select(it.next().unwrap_or(""), &bot, &units);
-                for e in &targets {
-                    ctx.commands.entity(*e).try_insert(Dying { timer: 0.0 });
-                }
+                bus.issue(SimCommand::Dev(DevCommand::Kill {
+                    units: ids(&targets, &units),
+                }));
                 bot.log(&format!("kill {} units", targets.len()));
             }
             "cam" => {
@@ -468,18 +494,28 @@ fn bot_tick(
             "shot" => {
                 let name = it.next().unwrap_or("shot");
                 let path = bot.dir.join(format!("{name}.png"));
-                crate::ui::save_screenshot(&mut ctx.commands, path.clone());
+                crate::ui::save_screenshot(&mut commands, path.clone());
                 bot.log(&format!("shot {}", path.display()));
             }
             "speed" => {
                 if let Some(s) = f(it.next()).filter(|s| s.is_finite() && *s > 0.0) {
-                    time.set_relative_speed(s);
-                    let cap = Time::<Virtual>::default().max_delta().div_f32(s);
-                    time.set_max_delta(cap);
+                    let percent = ((s * 100.0).round() as u32)
+                        .clamp(MIN_SPEED_PERCENT.into(), MAX_SPEED_PERCENT.into());
+                    bus.issue(SimCommand::SetSpeed {
+                        percent: percent as u16,
+                    });
                 }
             }
-            "pause" => time.pause(),
-            "resume" => time.unpause(),
+            "pause" => bus.issue(SimCommand::Pause { on: true }),
+            "resume" => bus.issue(SimCommand::Pause { on: false }),
+            "resign" => bus.issue(SimCommand::Resign),
+            "take" => match it.next().and_then(|v| v.parse::<u8>().ok()) {
+                Some(from) => bus.issue(SimCommand::Take { from }),
+                None => bot.log(&format!("bad take: {line}")),
+            },
+            "god" => bus.issue(SimCommand::Dev(DevCommand::GodMode {
+                on: it.next() != Some("off"),
+            })),
             "dump" => dump_state(&bot, &units),
             "every" => {
                 bot.dump_every = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
@@ -559,7 +595,7 @@ fn bot_tick(
                     .unwrap_or(1)
                     .max(1);
                 let Some(nav) = nav.as_deref() else { continue };
-                let cap = ctx.unit_registry.max_slope_ratio(UnitKind::Bit);
+                let cap = registry.max_slope_ratio(UnitKind::Bit);
                 let Some(b) = nav.bucket(cap) else { continue };
                 let (sx0, sz0) = ((x0 / 8.0) as i32, (z0 / 8.0) as i32);
                 let (sx1, sz1) = ((x1 / 8.0) as i32, (z1 / 8.0) as i32);
@@ -591,7 +627,7 @@ fn bot_tick(
                 else {
                     continue;
                 };
-                let registry: &UnitRegistry = &ctx.unit_registry;
+                let registry: &UnitRegistry = &registry;
                 let cap = registry.max_slope_ratio(UnitKind::Bit);
                 let clear = nav.as_deref().is_none_or(|n| {
                     n.line_clear(cap, 1, 40.0, Vec2::new(x1, z1), Vec2::new(x2, z2))

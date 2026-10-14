@@ -180,8 +180,9 @@ plays on (`GameServer.cpp:719-760`); we stop.
 
 ### Game speed and pause
 
-The driver reads `GameSpeed { factor, paused }` (a match resource) after every tick; the
-speed / pause commands set it when they apply, so every peer changes pace at the same tick.
+The driver reads `GameSpeed { factor, paused }` from `MatchControl` (`speed()`, `paused`) after
+every tick; the speed / pause commands set it when they apply, so every peer changes pace at the
+same tick (`m1-commands.md` §2; `multipeer_tests::pause_and_speed_full_sim`).
 While paused no tick runs, but the driver still seals each frame, so commands reach the host;
 the host files them for the next tick and cuts it as soon as one of them resumes
 (`resumes_sim`), so the unpause applies on the very next tick and nothing else advances. See §6
@@ -276,7 +277,7 @@ redo on every call is now cached (`CategoryCache`). Writing the desync dump
   overstep, same render blend.
 - Local commands go seal → own sequencer → turn → bus (`CommandBus::routed`), applied on the
   next tick as before. Golden trails identical (39 000 ticks over three logs).
-- `GameSpeed::factor` scales the clock (1.0 until the speed command sets it); the dev tools'
+- `GameSpeed::factor` (`MatchControl::speed()`) scales the clock (1.0 until a `SetSpeed`); the dev tools'
   `Time<Virtual>` scaling and pause still work through the virtual delta.
 - No state hashing, no network, no history in single player.
 - `headless::state` moved to `net::state` (re-exported under the old path); `SimPose::sim` is no
@@ -295,7 +296,9 @@ redo on every call is now cached (`CategoryCache`). Writing the desync dump
   `drive_local_clock`, `local_clock_runs` and `CommandBus::seal_control` then go: single player
   is the solo host, whose driver seals everything each paused frame and cuts the resume turn at
   once (no "ticks between the resume and its tick"). Keep only one of the two ways of scaling
-  speed (the driver's multiplication), or speed would apply twice.
+  speed (the driver's multiplication), or speed would apply twice. **Done in B's merge** (B's
+  branch took this one in): `GameSpeed` is no longer a resource, `WorldRunner::speed` reads
+  `MatchControl`, `resumes_sim` is the unpause only; B's local clock is gone.
 - **Seats and defeat (agent A).** The driver never reads `GameState`; until A's change lands
   (local defeat no longer gates the gameplay chain), the harness's `GameOverDismissed(true)`
   stays, and so would a networked loser's sim freeze — a desync the hash check would catch.

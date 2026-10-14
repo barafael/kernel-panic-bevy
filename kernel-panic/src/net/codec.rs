@@ -65,6 +65,13 @@ impl IdList {
         &self.0
     }
 
+    /// The list exactly as given, sorted or not: what a malformed frame
+    /// decodes to (the command fuzz builds them).
+    #[cfg(any(test, all(feature = "replay", not(target_arch = "wasm32"))))]
+    pub(crate) fn raw(ids: Vec<NetId>) -> Self {
+        Self(ids)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -162,5 +169,116 @@ pub mod kind_index {
             .get(idx)
             .copied()
             .ok_or_else(|| serde::de::Error::custom("unit kind index out of range"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::{CommandFrame, DevCommand, SimCommand, Units};
+
+    /// A frame of player 3 at tick 18 000 (ten minutes in), as
+    /// `lockstep_tests::frame_sizes` measures them.
+    fn frame(commands: Vec<SimCommand>) -> usize {
+        CommandFrame {
+            tick: 18_000,
+            player: 3,
+            commands,
+        }
+        .encode()
+        .len()
+    }
+
+    /// The M1 commands' sizes (`net-experiments/m1-commands.md`):
+    /// match control costs a few bytes per frame on top of the 5 of an
+    /// empty one. `cargo test -p kernel-panic net::codec -- --nocapture`.
+    #[test]
+    fn m1_command_sizes() {
+        let ten: Vec<NetId> = (0..10).map(|i| NetId(2000 + i * 17)).collect();
+        let pos = NetPos::quantize(Vec3::new(3121.4, 87.2, 2650.9));
+        let rows = [
+            ("empty frame", frame(vec![]), 5),
+            (
+                "SetSpeed 150 %",
+                frame(vec![SimCommand::SetSpeed { percent: 150 }]),
+                8,
+            ),
+            (
+                "SetSpeed 2000 %",
+                frame(vec![SimCommand::SetSpeed { percent: 2000 }]),
+                8,
+            ),
+            ("Pause", frame(vec![SimCommand::Pause { on: true }]), 7),
+            ("Resign", frame(vec![SimCommand::Resign]), 6),
+            ("Take", frame(vec![SimCommand::Take { from: 2 }]), 7),
+            (
+                "Dev GodMode",
+                frame(vec![SimCommand::Dev(DevCommand::GodMode { on: true })]),
+                8,
+            ),
+            (
+                "Dev Spawn 10 Bits",
+                frame(vec![SimCommand::Dev(DevCommand::Spawn {
+                    kind: crate::units::content::definitions::UnitKind::Bit,
+                    team: 1,
+                    at: pos,
+                    count: 10,
+                    spacing: 24,
+                })]),
+                20,
+            ),
+            (
+                "Dev Kill 10 units",
+                frame(vec![SimCommand::Dev(DevCommand::Kill {
+                    units: IdList::new(ten.iter().copied()),
+                })]),
+                20,
+            ),
+            (
+                "Dev SetHealth 10 units",
+                frame(vec![SimCommand::Dev(DevCommand::SetHealth {
+                    units: IdList::new(ten.iter().copied()),
+                    hp: 250,
+                })]),
+                22,
+            ),
+            (
+                "Pause + SetSpeed + a 10-unit Stop",
+                frame(vec![
+                    SimCommand::Pause { on: false },
+                    SimCommand::SetSpeed { percent: 300 },
+                    SimCommand::Stop {
+                        units: Units::of(ten.iter().copied()),
+                    },
+                ]),
+                25,
+            ),
+        ];
+        println!("{:<40} {:>5}", "frame", "bytes");
+        for (name, size, at_most) in rows {
+            println!("{name:<40} {size:>5}");
+            assert!(size <= at_most, "{name}: {size} bytes > {at_most}");
+        }
+    }
+
+    /// New variants append to the enum: the M0 variants keep their
+    /// indices, so recorded replays still decode.
+    #[test]
+    fn m0_variant_indices_are_stable() {
+        // The `Cast` variant (index 13) encodes its index as one byte.
+        let bytes = postcard::to_allocvec(&SimCommand::Cast {
+            units: Units::Prev,
+            target: NetPos::default(),
+            auto: false,
+        })
+        .unwrap();
+        assert_eq!(bytes[0], 13);
+        let bytes = postcard::to_allocvec(&SimCommand::SetSpeed { percent: 100 }).unwrap();
+        assert_eq!(bytes[0], 14);
+        let bytes =
+            postcard::to_allocvec(&SimCommand::Dev(DevCommand::GodMode { on: true })).unwrap();
+        assert_eq!(bytes[0], 17);
+        let bytes = postcard::to_allocvec(&SimCommand::Take { from: 1 }).unwrap();
+        assert_eq!(bytes[0], 18);
     }
 }

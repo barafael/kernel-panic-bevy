@@ -529,8 +529,10 @@ struct Ending {
 
 /// Play `scenario` until the match is decided (at most `max` ticks),
 /// watching as owner 0 (its result is UI only), then `after` more
-/// ticks. Asserts the upstream rules on the way: shared defeat, the
-/// end one census after the last death, the sim never stopping.
+/// ticks. Asserts the rules on the way: shared defeat, a leaver's units
+/// taken by an AI ally or blown up within 4 s with its ally team, caps
+/// never changing, the end at the first census after the last
+/// explosion, the sim never stopping.
 fn play_to_the_end(scenario: Scenario, max: u64, after: u64) -> Ending {
     use crate::units::lifecycle::bookkeeping::{MAX_UNITS_PER_TEAM, TeamUnitCounts};
     use crate::units::lifecycle::game_over::GameState;
@@ -543,7 +545,6 @@ fn play_to_the_end(scenario: Scenario, max: u64, after: u64) -> Ending {
     let alliances = h.world_mut().resource::<Alliances>().clone();
     let mut deaths: BTreeMap<u8, u64> = BTreeMap::new();
     let mut decided: Option<(u64, Vec<u8>)> = None;
-    let mut shared_cap_seen = false;
     let mut zero_seen: BTreeMap<Entity, u64> = BTreeMap::new();
     while decided.is_none() || h.tick < decided.as_ref().unwrap().0 + after {
         h.step();
@@ -582,15 +583,14 @@ fn play_to_the_end(scenario: Scenario, max: u64, after: u64) -> Ending {
                 }
             }
         }
-        // A fallen owner's cap goes to its living allies.
+        // Caps never change (the user's rule, 2026-10-15).
         let counts = world.resource::<TeamUnitCounts>();
-        for &dead in deaths.keys() {
-            assert_eq!(counts.limit(dead), 0, "owner {dead}'s cap after death");
-            shared_cap_seen |= alliances
-                .allies_of(dead)
-                .any(|a| !fates.is_dead(a) && counts.limit(a) > MAX_UNITS_PER_TEAM);
+        for owner in alliances.owners() {
+            assert_eq!(counts.limit(owner), MAX_UNITS_PER_TEAM);
         }
-        // Dead owners keep no units past their last census.
+        // A leaver keeps no units for long: an AI ally takes them
+        // within a second or so, or they blow up within 4 s with the
+        // ally team (plus the death animation).
         if tick.is_multiple_of(30) {
             use crate::units::components::{Health, TeamId, UnitType};
             let mut q = world.query_filtered::<(
@@ -616,7 +616,7 @@ fn play_to_the_end(scenario: Scenario, max: u64, after: u64) -> Ending {
                 })
                 .collect();
             for (&owner, &died) in &deaths {
-                if tick > died + 60 {
+                if tick > died + 60 + u64::from(crate::units::lifecycle::game_over::FUSE_FRAMES) {
                     let left: Vec<&String> = alive
                         .iter()
                         .filter(|(o, _)| *o == owner)
@@ -649,15 +649,15 @@ fn play_to_the_end(scenario: Scenario, max: u64, after: u64) -> Ending {
         "a winner is alive"
     );
     let last_death = *deaths.values().max().unwrap();
-    assert_eq!(decided_at, last_death + 30, "decided one census later");
-    // Every owner that fell while its ally team fought on left its cap
-    // to an ally.
-    let early = deaths
-        .iter()
-        .any(|(o, &t)| t < last_death && alliances.allies_of(*o).any(|a| a != *o));
+    // The first census after the losers' last explosion: at least one
+    // census, at most the longest fuse plus a census later.
     assert!(
-        !early || shared_cap_seen,
-        "an early death passed its unit cap on"
+        decided_at >= last_death + 30
+            && decided_at
+                <= last_death
+                    + 30
+                    + 30 * (1 + u64::from(crate::units::lifecycle::game_over::FUSE_FRAMES) / 30),
+        "decided at {decided_at}, last owner out at {last_death}"
     );
     let shown = *h.world_mut().resource::<State<GameState>>().get();
     let owner0_won = alliances.ally_team(0) == Some(winners[0]);

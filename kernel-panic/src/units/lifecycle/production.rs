@@ -147,6 +147,22 @@ impl Producer {
         }
     }
 
+    /// Cancel every order and repeat (an owner left play: its factories
+    /// stand idle for an ally to take). A unit already rising out of the
+    /// pad finishes, as a right-click couldn't cancel it either.
+    pub fn cancel_all(&mut self) {
+        self.repeat = false;
+        let mut kinds: Vec<UnitKind> = Vec::new();
+        for &kind in &self.queue {
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        for kind in kinds {
+            self.remove_kind(kind, u32::MAX, false);
+        }
+    }
+
     /// Spring `CFactoryCAI` right-click: drop up to `count` queued `kind`
     /// orders, newest first — or oldest first with `from_front` (Alt).
     /// Cancelling the order in progress resets its build progress; one

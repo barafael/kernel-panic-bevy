@@ -6,13 +6,16 @@
 //!              [--dump-at <t1,t2…> --dump-dir <dir>] [--ignore-compat]
 //!              [--memory-assets] [--shuffle <every n ticks>]
 //! kernel-panic --record-golden [<name>…] [--out <dir>]
+//! kernel-panic --command-fuzz [--ticks <n>] [--seed <n>]
 //! ```
 //!
 //! `--replay` writes `<trail-dir>/<log stem>.trail` (default `trails/`)
 //! per log; `--dump-at` also writes readable unit dumps
 //! `<dump-dir>/<log stem>_<tick>.txt` for the bisect. `--record-golden`
 //! records the golden logs ([`super::golden`]), all or the named ones,
-//! into `--out` (default `kernel-panic/tests/golden`).
+//! into `--out` (default `kernel-panic/tests/golden`). `--command-fuzz`
+//! runs the command fuzz (`net::fuzz`, default 3000 ticks) and fails if
+//! it finds anything.
 
 use std::path::{Path, PathBuf};
 
@@ -26,6 +29,7 @@ pub fn run() -> Option<i32> {
     let result = match args.first().map(String::as_str) {
         Some("--replay") => replay_logs(&args[1..]),
         Some("--record-golden") => record_golden(&args[1..]),
+        Some("--command-fuzz") => command_fuzz(&args[1..]),
         _ => return None,
     };
     Some(match result {
@@ -135,6 +139,26 @@ fn replay_logs(args: &[String]) -> Result<(), String> {
         eprintln!("{}", replay::summary(&stem, &replay, &played));
         eprintln!("  trail: {}", out.display());
     }
+    Ok(())
+}
+
+fn command_fuzz(args: &[String]) -> Result<(), String> {
+    let (values, _, rest) = split_args(args, &["--ticks", "--seed"], &[])?;
+    if let Some(extra) = rest.first() {
+        return Err(format!("unexpected argument {extra}"));
+    }
+    let number = |flag: &str, default: u64| -> Result<u64, String> {
+        value(&values, flag).map_or(Ok(default), |v| {
+            let parsed = match v.strip_prefix("0x") {
+                Some(hex) => u64::from_str_radix(hex, 16),
+                None => v.parse(),
+            };
+            parsed.map_err(|e| format!("{flag} {v}: {e}"))
+        })
+    };
+    let ticks = number("--ticks", 3000)? as u32;
+    let report = crate::net::fuzz::check(ticks, number("--seed", 0xf022)?)?;
+    eprintln!("{report}");
     Ok(())
 }
 

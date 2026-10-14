@@ -288,11 +288,15 @@ pub fn death_system(
             // nanoframe, a factory product still on the pad) just goes,
             // as if reclaimed. A game-over `KillTeam` must not detonate
             // an eliminated team's half-built Logic Bomb.
+            // `try_insert` here and below: a unit can be gone by the
+            // time these commands apply (a buildee whose factory died in
+            // the same game-over sweep is despawned with it; found by
+            // the command fuzz, `net::fuzz`, through a resignation).
             if being_built {
                 commands
                     .entity(entity)
                     .remove::<Infected>()
-                    .insert(Dying { timer: 0.0 });
+                    .try_insert(Dying { timer: 0.0 });
                 continue;
             }
 
@@ -362,9 +366,12 @@ pub fn death_system(
                 });
             }
 
-            commands.entity(entity).remove::<Infected>().insert(Dying {
-                timer: DEATH_ANIM_TIMEOUT,
-            });
+            commands
+                .entity(entity)
+                .remove::<Infected>()
+                .try_insert(Dying {
+                    timer: DEATH_ANIM_TIMEOUT,
+                });
         }
     }
 }

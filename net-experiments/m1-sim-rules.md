@@ -112,6 +112,10 @@ Unchanged on purpose: selection, the command panel, tooltips and build bar act o
 
 ### Unit cap per owner, shared on death
 
+> **Superseded 2026-10-15** (the user's leaving rules, `m1-commands.md` §2): caps never change;
+> `TeamUnitCounts::team_died` and the per-owner limits are gone, and units taken from a leaver
+> count against the taker's cap and may exceed it.
+
 `TeamUnitCounts` counts per owner (it always did; owners are seats now) and holds per-owner
 limits: `CTeamHandler::UpdateTeamUnitLimitsOnDeath` (`TeamHandler.cpp:188-238`) — a dead owner's
 cap drops to 0 and each living ally's becomes `max * n / (n - 1)` (`n` living teams counting the
@@ -269,6 +273,23 @@ Query-order fuzz: all four logs replayed in full natively and again with `--shuf
 unit's and projectile's storage reshuffled every tick): every trail identical, every tick. CI's
 determinism matrix picks up `2v2_dual_core` by its glob.
 
+## 7b. Leaving play (2026-10-15, after A's merge)
+
+The user decided what leaving does, replacing this branch's "dead owner's units die at once":
+
+- One entry point, `TeamFates::leave(owner)` (was `kill_team`): resign, the census taking an
+  owner out (no factory), and later a drop.
+- With an ally still active the leaver's units stay, idle (orders and factory queues
+  cancelled), still its own and friendly; an active ally takes them all with `SimCommand::Take`
+  (the HUD's flashing TAKE button; an AI ally takes them itself).
+- When an ally team's last active owner leaves, every remaining unit of the ally team gets a
+  `LeaveFuse` of 0–120 ticks (`SimRng<LeaveFuseRng>`, `NetId` order) and blows up with its
+  regular death blast; the end waits for the census after the last explosion.
+- Unit caps never change.
+
+The unit tests of `game_over` follow these rules now (fuses instead of zeroed HP, no cap
+passing), and `shared_defeat_*` check them end to end. The golden logs are at `SIM_VERSION` 4.
+
 ## 8. For agents B and C
 
 - **B**: friend or foe in validation is `ApplyCtx::friendly(a, b)` (`net/apply.rs`), backed by
@@ -281,7 +302,8 @@ determinism matrix picks up `2v2_dual_core` by its glob.
 
 ## 9. Open
 
-- Spring's resign does not kill the team (§3); the plan's Resign does.
+- ~~Spring's resign does not kill the team (§3); the plan's Resign does.~~ Decided 2026-10-15
+  (§7b).
 - Team Game uses `HalfMaxMapTeam = 4` and one AI difficulty for every seat.
 - The local result panel's Restart button is single-player only (M2's lobby decides what a
   networked match offers).

@@ -12,8 +12,12 @@
 //! 2. Once the constructor has emerged and is idle, issues building orders
 //!    one at a time — every entry in `buildings_for(constructor.kind)` —
 //!    walking it to unclaimed datavents around the homebase.
-//! 3. Hacker: fires `DeployEvent` on the first fully-emerged Bug so the
-//!    exploit transition shows on screen.
+//! 3. Hacker: deploys the first fully-emerged Bug so the exploit
+//!    transition shows on screen.
+//!
+//! The director plays the local player: everything goes through the
+//! command bus as that player's commands (factory queue, build orders,
+//! deploy), applied at the next tick head like mouse input.
 //!
 //! Every unit is spawned on team 0 (the local player) so the whole
 //! showcase is player-controllable. No AI enemies exist; game-over is
@@ -24,7 +28,8 @@ use bevy::prelude::*;
 
 use crate::sim::DetFloat;
 use crate::{
-    interaction::movement::{MoveTarget, QueuedCommand},
+    interaction::movement::MoveTarget,
+    net::{CommandBus, FactoryOp, NetId, PosList, SimCommand, Units},
     terrain::geovent::{GeoventSmoker, VentClaim},
     terrain::heightmap::Heightmap,
     units::{
@@ -32,10 +37,9 @@ use crate::{
         content::definitions::UnitKind,
         lifecycle::{
             construction::{Constructing, PendingBuild, buildings_for},
-            production::{Producer, factory_roster},
+            production::factory_roster,
             spawning::Emerging,
         },
-        mechanics::deploy::DeployEvent,
     },
 };
 
@@ -103,14 +107,14 @@ pub fn showcase_director(
             &UnitType,
             &TeamId,
             &GlobalTransform,
-            &mut Producer,
+            &NetId,
             Option<&Homebase>,
         ),
         With<Homebase>,
     >,
     constructors: Query<
         (
-            Entity,
+            &NetId,
             &TeamId,
             &UnitType,
             Option<&MoveTarget>,
@@ -122,7 +126,7 @@ pub fn showcase_director(
     vents: Query<&GeoventSmoker, Without<VentClaim>>,
     bugs: Query<
         (
-            Entity,
+            &NetId,
             &UnitType,
             &TeamId,
             &GlobalTransform,
@@ -134,8 +138,7 @@ pub fn showcase_director(
             Without<crate::units::combat::Dying>,
         ),
     >,
-    mut deploy_writer: MessageWriter<DeployEvent>,
-    mut commands: Commands,
+    mut bus: ResMut<CommandBus>,
 ) {
     let hm = match heightmap {
         Some(h) => h,
@@ -175,14 +178,21 @@ pub fn showcase_director(
         let home_pos = d.home_pos.unwrap();
 
         // --- Enqueue roster ---
-        if let Ok((_, _, _, _, mut producer, _)) = homebases.get_mut(d.homebase.unwrap()) {
+        if let Ok((_, _, _, _, &home_id, _)) = homebases.get(d.homebase.unwrap()) {
+            let mut enqueue = |kind| {
+                bus.issue(SimCommand::Factory {
+                    factories: Units::of([home_id]),
+                    kind,
+                    op: FactoryOp::Add(1),
+                });
+            };
             for &kind in &d.roster {
-                producer.enqueue(kind);
+                enqueue(kind);
             }
             // Hacker: add one extra Bug after the roster so the second Bug
             // (which deploys first from the roster) leaves a Bug visible.
             if d.faction == Faction::Hacker && !d.extra_bug_enqueued {
-                producer.enqueue(UnitKind::Bug);
+                enqueue(UnitKind::Bug);
                 d.extra_bug_enqueued = true;
             }
         }
@@ -243,8 +253,8 @@ pub fn showcase_director(
     // ------------------------------------------------------------------
     if d.primed && d.build_index < d.builds.len() {
         let team0 = TeamId(0);
-        if let Some((entity, _team, _ut, _mt, _pb, _c)) =
-            constructors.iter().find(|(_entity, team, ut, mt, pb, c)| {
+        if let Some((&builder, _team, _ut, _mt, _pb, _c)) =
+            constructors.iter().find(|(_id, team, ut, mt, pb, c)| {
                 team.0 == team0.0
                     && ut.0 == d.faction.constructor()
                     && mt.is_none()
@@ -254,10 +264,12 @@ pub fn showcase_director(
         {
             let site = d.sites[d.build_index];
             let kind = d.builds[d.build_index];
-            crate::interaction::replace_order(
-                &mut commands.entity(entity),
-                QueuedCommand::BuildAt { kind, site },
-            );
+            bus.issue(SimCommand::Build {
+                builders: Units::of([builder]),
+                kind,
+                sites: PosList::quantize([site]),
+                queue: false,
+            });
             d.build_index += 1;
             info!(
                 "Showcase({:?}): builder → {:?} at ({:.0}, {:.0}, {:.0})",
@@ -278,7 +290,7 @@ pub fn showcase_director(
     if d.primed
         && d.faction == Faction::Hacker
         && !d.bug_deployed
-        && let Some((bug_entity, _ut, _team, bug_gtf, move_target)) = bugs
+        && let Some((&bug, _ut, _team, bug_gtf, move_target)) = bugs
             .iter()
             .find(|(_, ut, team, _, _)| team.0 == 0 && ut.0 == UnitKind::Bug)
         && let Some(home_pos) = d.home_pos
@@ -286,7 +298,9 @@ pub fn showcase_director(
         let dist = bug_gtf.translation().distance(home_pos);
         let clear_of_base = dist > DEPLOY_CLEAR_DISTANCE || move_target.is_none();
         if clear_of_base {
-            deploy_writer.write(DeployEvent { entity: bug_entity });
+            bus.issue(SimCommand::Deploy {
+                units: Units::of([bug]),
+            });
             d.bug_deployed = true;
             info!(
                 "Showcase(Hacker): deploying first Bug → Exploit (dist {dist:.0}, ordered: {}, bug at {:.0}/{:.0}, home at {:.0}/{:.0})",

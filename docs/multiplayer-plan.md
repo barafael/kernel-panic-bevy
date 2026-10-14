@@ -141,6 +141,40 @@ Estimates are focused-work rough guesses.
   speed/pause, resign.
 - Validate commands at apply time (ownership, unit alive, ally), as the original
   validated on the receiving clients.
+
+  **Done (B: commands)** — `net-experiments/m1-commands.md`: the KP_BOT dev tool,
+  the showcase director and the screenshot tool issue commands; new `SetSpeed`,
+  `Pause`, `Resign`, `Dev` (spawn / kill / health / god mode, single player only)
+  appended to `SimCommand`; Pause and Alt+= / Alt+- in game with a status line;
+  the tick driver reads speed and pause from `MatchControl` (every peer pauses,
+  resumes and speeds up on the same tick; `pause_and_speed_full_sim`).
+  Validation at apply time: seated and not resigned sender, live own units,
+  capabilities (`AllowedCommand`), points on the map, vent sites, canonical
+  lists and counts, cheats; alliance checks through `Alliances::friendly`
+  (`ApplyCtx::friendly`). A schedule-access audit fails on frame-loop writes to
+  sim state. Command fuzz (random and malformed frames from every seat; twice,
+  shuffled, with malformed: one trail) in `cargo test` and `determinism.yml`.
+  Integrates A and C; golden logs re-recorded at `SIM_VERSION` 3, then 4 with
+  the leaving rules below.
+
+  **Decision (user, 2026-10-15): leaving play.** "When the last player on a
+  team resigns or gets taken out, all remaining units explode over a duration
+  of 4 s, in a random fashion (each has a random ttl of 0–4 s). Same in 1v1.
+  If other players are active, then anybody can hit the flashing TAKE button
+  and the units are added to them. Unit cap stays untouched."
+  **Done** (`net-experiments/m1-commands.md` §2): resigning, being taken out
+  (no factory) and, later, dropping all go through `TeamFates::leave`. With an
+  ally still active the leaver's units stay, idle and friendly, and every
+  active ally sees a flashing TAKE button (`SimCommand::Take { from }`; the
+  first in turn order gets all of them, later ones are refused; an AI ally
+  takes at once when no human ally is left, after 10 s otherwise). The ally
+  team's last leaver fuses every remaining unit of the side (0–120 ticks from
+  a `SimRng` stream; the regular death blast); the match ends at the first
+  census after the last explosion. Caps never change (upstream's
+  `UpdateTeamUnitLimitsOnDeath` is gone; a taker may go over its cap). Resign
+  is in the Esc menu (with a confirmation) and KP_BOT (`take <owner>`).
+  Departs from upstream: Recoil only makes a resigner spectate and kills a
+  dead team's units at once.
 - **Seats and alliances.** 4v4 needs ally teams: `is_friendly` by alliance,
   shared victory/defeat, KP's FixedAllies. AI seats come from the match setup
   (`AiSeats`), not "every team except the local one".

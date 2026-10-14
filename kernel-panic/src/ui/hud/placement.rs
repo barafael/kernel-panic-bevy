@@ -701,6 +701,19 @@ mod tests {
                 rng: 0,
             })
             .id();
+        // The vents under the builder's own orders, claimed by them (a
+        // vent building's site must be a vent: `net::apply`).
+        for pos in [queued, Vec3::X] {
+            world.spawn((
+                GeoventSmoker {
+                    facing: 0,
+                    pos,
+                    emit_timer: 0.0,
+                    rng: 0,
+                },
+                VentClaim,
+            ));
+        }
         let builder = world
             .spawn((
                 UnitType(UnitKind::Assembler),

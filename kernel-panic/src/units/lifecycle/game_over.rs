@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 
 use crate::game_setup::{ActiveMatch, GameOverDismissed, GameSetup, SPECTATOR_TEAM};
-use crate::sim::SimTick;
+use crate::net::NetId;
+use crate::sim::{RngStream, SimRng, SimTick};
 use crate::units::combat::Dying;
 use crate::units::components::{Health, TeamId, UnitType};
-use crate::units::lifecycle::bookkeeping::TeamUnitCounts;
+use crate::units::lifecycle::production::Producer;
 use crate::units::player::LocalTeam;
 use crate::units::teams::{Alliances, TeamFates};
 
@@ -35,6 +36,45 @@ fn census_tick(tick: SimTick) -> bool {
     tick.frame() % CHECK_PERIOD == CHECK_PHASE
 }
 
+/// The longest fuse, in sim frames: once an ally team's last active
+/// owner has left, each of its units blows up at a random frame within
+/// the next 4 s (the user's rule, 2026-10-15).
+pub const FUSE_FRAMES: u32 = 120;
+
+/// A unit of an ally team that is out: it blows up (HP to zero, the
+/// regular death path with its `ExplodeAs` blast) on sim frame `at`
+/// ([`detonate_fuses`]).
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+#[component(storage = "SparseSet")]
+pub struct LeaveFuse {
+    pub at: u64,
+}
+
+/// The fuses' dice: 0..=[`FUSE_FRAMES`] per unit, in `NetId` order.
+pub struct LeaveFuseRng;
+
+impl RngStream for LeaveFuseRng {
+    const SALT: u64 = 0x1ea7_ef05;
+}
+
+/// A fuse burnt down: the unit dies.
+pub fn detonate_fuses(
+    tick: Res<SimTick>,
+    mut fused: Query<(&LeaveFuse, &mut Health), Without<Dying>>,
+) {
+    for (fuse, mut health) in &mut fused {
+        if tick.frame() >= fuse.at && health.current > 0.0 {
+            health.current = 0.0;
+        }
+    }
+}
+
+/// Is `owner` part of an ally team that is out — seated, and no owner
+/// of its ally team still active?
+fn ally_team_out(alliances: &Alliances, fates: &TeamFates, owner: u8) -> bool {
+    alliances.is_seated(owner) && alliances.allies_of(owner).all(|o| fates.is_dead(o))
+}
+
 /// The match result once no two living owners are enemies
 /// (`game_over.lua`: no pair `not AreTeamsAllied` left among the
 /// remaining teams → `GameOver(WinningAllies)`): the ally teams of the
@@ -59,42 +99,55 @@ fn decided(alliances: &Alliances, fates: &TeamFates) -> Option<Vec<u8>> {
 
 /// Upstream `game_over.lua`, gamemode 1 ("Kill all factories", KP's
 /// default; census `:76`, end check `:80-104`, kills `:106-113`), on
-/// the sim tick:
+/// the sim tick, with the user's rules for what leaving does
+/// (2026-10-15, `docs/multiplayer-plan.md`):
 ///
-/// - Every census frame (once a second), each living seated owner
+/// - Every census frame (once a second), each active seated owner
 ///   without a factory — homebase or MiniFac, nanoframes included
 ///   (`Spring.GetTeamUnitsByDefs` counts units still being built) — is
-///   killed (`Spring.KillTeam` → `CTeam::Died`, [`TeamFates::kill_team`]),
-///   in seat order, the one after each killed owner left for the next
-///   census as upstream's list walk does.
-/// - At the census after a death (`CheckForGameOver`), the match ends
-///   once no two living owners are enemies: the living owners' ally
-///   teams win ([`decided`]). An ally team loses when all its owners
-///   are dead: shared victory and defeat.
-/// - A dead owner's units are destroyed — HP to zero, so `death_system`
-///   runs the regular death path (Killed() animation, `ExplodeAs`), the
-///   same route self-destruct takes — on the tick it dies (a resign
-///   from the command apply at the head of the tick included) and again
-///   at every census for whatever it still spawns. Its unit cap goes to
-///   its living allies ([`TeamUnitCounts::team_died`]).
+///   taken out ([`TeamFates::leave`], `Spring.KillTeam`), in seat order,
+///   the one after each removed owner left for the next census as
+///   upstream's list walk does. A resign (the command apply) leaves
+///   through the same function.
+/// - **An owner leaves while an ally is still active:** its units stay,
+///   idle (orders and factory queues cancelled), still its own and
+///   friendly to the team, for an ally to take (`SimCommand::Take`).
+///   Upstream destroys a dead team's units; KP's original would have
+///   kept a resigned team's units fighting leaderless.
+/// - **The ally team's last active owner leaves** (resign, taken out, a
+///   1v1): every remaining unit of the ally team — the last leaver's and
+///   whatever earlier leavers' nobody took — gets a [`LeaveFuse`] of
+///   0..=[`FUSE_FRAMES`] frames from its own [`SimRng`] stream, in
+///   `NetId` order, and blows up with its regular death blast. Anything
+///   of that ally team that appears later is fused at the next census.
+/// - At the census after a leave (`CheckForGameOver`), the match ends
+///   once no two active owners are enemies ([`decided`]) **and** the
+///   losers' units are gone, so the end comes after the explosions. An
+///   ally team loses when all its owners have left: shared victory and
+///   defeat.
+/// - Unit caps never change (no `UpdateTeamUnitLimitsOnDeath`, see
+///   `TeamUnitCounts::limit`).
 ///
 /// The simulation never stops for an outcome: the local player's
 /// Victory / Defeat is presentation ([`announce_outcome`]). Owners
 /// without a seat in the running match ([`ActiveMatch`]; the map-event
-/// neutrals) are never counted or killed, as upstream exempts Gaia.
-/// Showcase and sandbox matches have no census; a match where no seat
-/// has a factory and nobody has died (test maps) is never judged. The
-/// menu's pending [`GameSetup`](crate::game_setup::GameSetup) is not
-/// consulted: the old world keeps running while the next map loads and
-/// is judged against its own seats.
-#[allow(clippy::too_many_arguments)]
+/// neutrals) are never counted or removed, as upstream exempts Gaia.
+/// Showcase and sandbox matches have no census (a resign still blows
+/// the resigner up); a match where no seat has a factory and nobody has
+/// left (test maps) is never judged. The menu's pending
+/// [`GameSetup`](crate::game_setup::GameSetup) is not consulted: the
+/// old world keeps running while the next map loads and is judged
+/// against its own seats.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn check_game_over(
     tick: Res<SimTick>,
     active: Option<Res<ActiveMatch>>,
     alliances: Res<Alliances>,
     mut fates: ResMut<TeamFates>,
-    mut unit_counts: ResMut<TeamUnitCounts>,
-    mut units: Query<(&TeamId, &UnitType, &mut Health), Without<Dying>>,
+    mut rng: ResMut<SimRng<LeaveFuseRng>>,
+    units: Query<(Entity, &NetId, &TeamId, &UnitType, Has<LeaveFuse>), Without<Dying>>,
+    mut producers: Query<&mut Producer>,
+    mut commands: Commands,
 ) {
     // No match in the world yet: nothing to judge.
     let Some(ActiveMatch(setup)) = active.as_deref() else {
@@ -102,17 +155,24 @@ pub fn check_game_over(
     };
     let census = census_tick(*tick) && judged(setup);
     if census {
-        if fates.take_check_end()
-            && let Some(winners) = decided(&alliances, &fates)
-        {
-            fates.decide(winners);
+        if fates.take_check_end() {
+            // The losers' fuses burn first: the end waits for the last
+            // explosion.
+            let blasting = units
+                .iter()
+                .any(|(_, _, team, ..)| ally_team_out(&alliances, &fates, team.0));
+            if blasting {
+                fates.check_end_again();
+            } else if let Some(winners) = decided(&alliances, &fates) {
+                fates.decide(winners);
+            }
         }
         let mut factories: BTreeMap<u8, u32> = alliances
             .owners()
             .filter(|o| !fates.is_dead(*o))
             .map(|o| (o, 0))
             .collect();
-        for (team, unit, _) in &units {
+        for (_, _, team, unit, _) in &units {
             if unit.0.is_factory()
                 && let Some(n) = factories.get_mut(&team.0)
             {
@@ -125,36 +185,49 @@ pub fn check_game_over(
         if real {
             // Upstream removes the dead team from `RemainingTeamList`
             // while `ipairs` walks it (`:107-110`), so the team after a
-            // killed one is not looked at until the next census.
+            // removed one is not looked at until the next census.
             let mut skip = false;
             for (&owner, &n) in &factories {
                 if std::mem::take(&mut skip) {
                     continue;
                 }
                 if n == 0 {
-                    fates.kill_team(owner);
+                    fates.leave(owner);
                     skip = true;
                 }
             }
         }
     }
 
-    // One `CTeam::Died` after the other, as the kills came: an ally
-    // killed later in the same pass was still alive for this one.
-    let doomed = fates.take_doomed();
-    for &owner in &doomed {
-        let living: Vec<u8> = alliances
-            .allies_of(owner)
-            .filter(|o| *o != owner && (!fates.is_dead(*o) || (*o > owner && doomed.contains(o))))
-            .collect();
-        unit_counts.team_died(owner, &living);
+    let left = fates.take_doomed();
+    for &owner in &left {
+        fates.note_left(owner, tick.frame());
     }
-    if doomed.is_empty() && !(census && fates.dead().next().is_some()) {
+    if left.is_empty() && !census {
         return;
     }
-    for (team, _, mut health) in &mut units {
-        if fates.is_dead(team.0) && health.current > 0.0 {
-            health.current = 0.0;
+    // In `NetId` order: the fuses draw dice per unit.
+    let mut mine: Vec<_> = units.iter().collect();
+    mine.sort_unstable_by_key(|(_, id, ..)| **id);
+    for (entity, _, team, _, fused) in mine {
+        let owner = team.0;
+        if ally_team_out(&alliances, &fates, owner) {
+            if !fused {
+                let delay = crate::rng::xorshift32(&mut rng) % (FUSE_FRAMES + 1);
+                commands.entity(entity).try_insert(LeaveFuse {
+                    at: tick.frame() + u64::from(delay),
+                });
+                // Nothing new comes off the pads meanwhile.
+                if let Ok(mut producer) = producers.get_mut(entity) {
+                    producer.cancel_all();
+                }
+            }
+        } else if left.contains(&owner) {
+            // An ally plays on: the leaver's units stand idle for it.
+            crate::interaction::clear_orders(&mut commands.entity(entity));
+            if let Ok(mut producer) = producers.get_mut(entity) {
+                producer.cancel_all();
+            }
         }
     }
 }
@@ -230,6 +303,7 @@ mod tests {
     use crate::game_setup::PlayerSpec;
     use crate::units::components::Faction;
     use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::bookkeeping::{MAX_UNITS_PER_TEAM, TeamUnitCounts};
     use bevy::ecs::system::RunSystemOnce;
     use bevy::state::app::StatesPlugin;
 
@@ -256,6 +330,7 @@ mod tests {
             .init_resource::<TeamFates>()
             .init_resource::<AnnouncedOutcome>()
             .init_resource::<TeamUnitCounts>()
+            .init_resource::<SimRng<LeaveFuseRng>>()
             .insert_resource(Alliances::from_setup(&setup))
             .insert_resource(ActiveMatch(setup))
             .insert_resource(SimTick(0))
@@ -277,8 +352,22 @@ mod tests {
         app.world_mut().run_system_once(announce_outcome).unwrap();
     }
 
-    fn hp(app: &App, e: Entity) -> f32 {
-        app.world().get::<Health>(e).unwrap().current
+    /// The fuse of a unit, if it has one.
+    fn fuse(app: &App, e: Entity) -> Option<u64> {
+        app.world().get::<LeaveFuse>(e).map(|f| f.at)
+    }
+
+    /// Every fuse burns down (the units die), as the sim would within
+    /// 4 s.
+    fn blow_up(app: &mut App) {
+        let w = app.world_mut();
+        let fused: Vec<Entity> = w
+            .query_filtered::<Entity, With<LeaveFuse>>()
+            .iter(w)
+            .collect();
+        for e in fused {
+            w.entity_mut(e).insert(Dying { timer: 1.0 });
+        }
     }
 
     fn fates(app: &App) -> &TeamFates {
@@ -292,34 +381,51 @@ mod tests {
         }
     }
 
-    /// An enemy that lost its last factory has every remaining unit
-    /// zeroed (KillTeam); the match is decided at the next census, and
-    /// the local player wins.
+    /// An enemy that lost its last factory, alone on its side, is out:
+    /// its units are fused to blow up within 4 s, and the match is
+    /// decided at the first census after the last one is gone.
     #[test]
-    fn factoryless_enemy_is_killed_and_local_wins() {
+    fn factoryless_enemy_blows_up_and_local_wins() {
         let mut app = world(seats(&[0, 1]));
         spawn(&mut app, UnitKind::Kernel, 0);
         let own_bit = spawn(&mut app, UnitKind::Bit, 0);
         let enemy_bug = spawn(&mut app, UnitKind::Bug, 1);
         let enemy_obelisk = spawn(&mut app, UnitKind::Obelisk, 1);
         run_census(&mut app);
-
-        assert_eq!(hp(&app, enemy_bug), 0.0);
-        assert_eq!(hp(&app, enemy_obelisk), 0.0);
-        assert_eq!(hp(&app, own_bit), 100.0);
+        let now = app.world().resource::<SimTick>().frame();
+        for e in [enemy_bug, enemy_obelisk] {
+            let at = fuse(&app, e).expect("fused");
+            assert!((now..=now + u64::from(FUSE_FRAMES)).contains(&at));
+        }
+        assert_eq!(fuse(&app, own_bit), None);
         assert!(fates(&app).is_dead(1));
-        // Upstream declares the end one census after the kill.
+        // Not before the losers' units are gone.
+        run_census(&mut app);
         assert_eq!(fates(&app).winners(), None);
         assert_eq!(pending_state(&app), None);
+        blow_up(&mut app);
         run_census(&mut app);
         assert_eq!(fates(&app).winners(), Some(&[0][..]));
         assert_eq!(pending_state(&app), Some(GameState::Victory));
     }
 
-    /// Two factoryless owners in a row: upstream's list walk skips the
-    /// one after a kill, so the second dies a census later.
+    /// A fuse goes off on its frame, not before.
     #[test]
-    fn adjacent_deaths_take_two_censuses() {
+    fn fuses_go_off_on_their_frame() {
+        let mut app = world(seats(&[0, 1]));
+        let bit = spawn(&mut app, UnitKind::Bit, 1);
+        app.world_mut().entity_mut(bit).insert(LeaveFuse { at: 40 });
+        for (frame, hp) in [(39, 100.0), (40, 0.0)] {
+            app.world_mut().resource_mut::<SimTick>().0 = frame;
+            app.world_mut().run_system_once(detonate_fuses).unwrap();
+            assert_eq!(app.world().get::<Health>(bit).unwrap().current, hp);
+        }
+    }
+
+    /// Two factoryless owners in a row: upstream's list walk skips the
+    /// one after a removal, so the second leaves a census later.
+    #[test]
+    fn adjacent_departures_take_two_censuses() {
         let mut app = world(seats(&[0, 1, 2]));
         spawn(&mut app, UnitKind::Kernel, 0);
         spawn(&mut app, UnitKind::Bug, 1);
@@ -330,7 +436,7 @@ mod tests {
         assert!(fates(&app).is_dead(2));
     }
 
-    /// A MiniFac alone keeps an owner alive — the homebase is not
+    /// A MiniFac alone keeps an owner in play — the homebase is not
     /// special in gamemode 1.
     #[test]
     fn minifac_keeps_team_alive() {
@@ -339,50 +445,55 @@ mod tests {
         spawn(&mut app, UnitKind::Window, 1);
         let bug = spawn(&mut app, UnitKind::Bug, 1);
         run_census(&mut app);
-        assert_eq!(hp(&app, bug), 100.0);
+        assert_eq!(fuse(&app, bug), None);
         assert_eq!(pending_state(&app), None);
     }
 
-    /// Losing the local owner's factories kills its army and shows
-    /// Defeat at once; the simulation is not involved.
+    /// Losing the local owner's factories in a duel fuses its army and
+    /// shows Defeat at once; the simulation is not involved.
     #[test]
     fn local_without_factory_is_defeat() {
         let mut app = world(seats(&[0, 1]));
         let own_bit = spawn(&mut app, UnitKind::Bit, 0);
         spawn(&mut app, UnitKind::Hole, 1);
         run_census(&mut app);
-        assert_eq!(hp(&app, own_bit), 0.0);
+        assert!(fuse(&app, own_bit).is_some());
         assert_eq!(pending_state(&app), Some(GameState::Defeat));
     }
 
-    /// 2v2: one owner of a side falling doesn't decide anything; its
-    /// ally fights on. When the second falls, the whole ally team has
-    /// lost: shared defeat, and the other side's owners share the win.
+    /// 2v2: one owner of a side out doesn't decide anything — its units
+    /// stay, idle, for its ally (no fuse) and its ally fights on. When
+    /// the second leaves, the whole ally team is out: everything left of
+    /// it, the first leaver's untaken units included, is fused; shared
+    /// defeat, the other side's owners share the win.
     #[test]
-    fn ally_team_loses_when_all_its_owners_are_dead() {
+    fn ally_team_loses_when_all_its_owners_have_left() {
         let mut app = world(seats(&[0, 0, 1, 1]));
-        // The local player (owner 0) has no factory: dead, watching.
+        // The local player (owner 0) has no factory: out, watching.
         let own = spawn(&mut app, UnitKind::Bit, 0);
         let kernel = spawn(&mut app, UnitKind::Kernel, 1);
         spawn(&mut app, UnitKind::Hole, 2);
         let enemy_ally = spawn(&mut app, UnitKind::Carrier, 3);
         run_census(&mut app);
-        assert_eq!(hp(&app, own), 0.0);
+        assert!(fates(&app).is_dead(0));
+        assert_eq!(fuse(&app, own), None, "left for owner 1 to take");
         assert_eq!(pending_state(&app), Some(GameState::Defeat));
         run_census(&mut app);
         assert_eq!(fates(&app).winners(), None, "owner 1 still fights");
-        assert_eq!(hp(&app, enemy_ally), 100.0);
+        assert_eq!(fuse(&app, enemy_ally), None);
 
         // Owner 1 falls too: ally team 0 is out, ally team 1 wins.
         app.world_mut().despawn(kernel);
         run_census(&mut app);
         assert!(fates(&app).is_dead(1));
+        assert!(fuse(&app, own).is_some(), "untaken units blow up too");
+        blow_up(&mut app);
         run_census(&mut app);
         assert_eq!(fates(&app).winners(), Some(&[1][..]));
         assert!(!fates(&app).is_dead(3), "allied owners win together");
     }
 
-    /// The dead player's allies winning later turns its Defeat into a
+    /// The fallen player's allies winning later turns its Defeat into a
     /// Victory, even after the panel was dismissed.
     #[test]
     fn fallen_player_shares_its_allies_victory() {
@@ -394,57 +505,66 @@ mod tests {
         assert!(fates(&app).is_dead(0) && fates(&app).is_dead(2));
         assert_eq!(pending_state(&app), Some(GameState::Defeat));
         app.world_mut().resource_mut::<GameOverDismissed>().0 = true;
+        blow_up(&mut app);
         run_census(&mut app);
         assert_eq!(fates(&app).winners(), Some(&[0][..]));
         assert_eq!(pending_state(&app), Some(GameState::Victory));
         assert!(!app.world().resource::<GameOverDismissed>().0);
     }
 
-    /// A resign (`kill_team` from the command apply) destroys the
-    /// owner's units on the same tick, off the census cadence, and
-    /// passes its unit cap to its living ally.
+    /// A resign (`leave` from the command apply) with an ally still in
+    /// play, off the census cadence: the units stay, idle, unfused; no
+    /// unit cap changes (the user's rule; upstream would share the cap
+    /// out, `UpdateTeamUnitLimitsOnDeath`).
     #[test]
-    fn killed_team_dies_on_the_tick() {
+    fn leaving_with_an_ally_keeps_units_and_caps() {
         let mut app = world(seats(&[0, 0, 1]));
         spawn(&mut app, UnitKind::Kernel, 0);
         let k1 = spawn(&mut app, UnitKind::Kernel, 1);
         spawn(&mut app, UnitKind::Hole, 2);
-        app.world_mut().resource_mut::<TeamFates>().kill_team(1);
+        app.world_mut().resource_mut::<TeamFates>().leave(1);
         app.world_mut().resource_mut::<SimTick>().0 = 3;
         app.world_mut().run_system_once(check_game_over).unwrap();
-        assert_eq!(hp(&app, k1), 0.0);
+        assert_eq!(fuse(&app, k1), None);
+        assert_eq!(app.world().get::<Health>(k1).unwrap().current, 100.0);
+        assert_eq!(fates(&app).left_at(1), Some(3));
         let counts = app.world().resource::<TeamUnitCounts>();
-        assert_eq!(counts.limit(1), 0);
-        assert_eq!(
-            counts.limit(0),
-            2 * crate::units::lifecycle::bookkeeping::MAX_UNITS_PER_TEAM
-        );
-        assert_eq!(
-            counts.limit(2),
-            crate::units::lifecycle::bookkeeping::MAX_UNITS_PER_TEAM
-        );
-    }
-
-    /// Two allies dying in one pass hand their caps on one after the
-    /// other (upstream 3 × 1000 → 2 × 1500 → 1 × 3000).
-    #[test]
-    fn caps_pass_on_death_by_death() {
-        use crate::units::lifecycle::bookkeeping::MAX_UNITS_PER_TEAM as MAX;
-        let mut app = world(seats(&[0, 0, 0, 1]));
-        for owner in 0..4 {
-            spawn(&mut app, UnitKind::Kernel, owner);
+        for owner in 0..3 {
+            assert_eq!(counts.limit(owner), MAX_UNITS_PER_TEAM);
         }
-        let mut fates = app.world_mut().resource_mut::<TeamFates>();
-        fates.kill_team(1);
-        fates.kill_team(0);
-        app.world_mut().run_system_once(check_game_over).unwrap();
-        let counts = app.world().resource::<TeamUnitCounts>();
-        assert_eq!((counts.limit(0), counts.limit(1)), (0, 0));
-        assert_eq!(counts.limit(2), 3 * MAX);
-        assert_eq!(counts.limit(3), MAX);
     }
 
-    /// No factory anywhere (sandbox / demo maps): nothing dies, no
+    /// The last active owner of an ally team resigns: every unit of the
+    /// team gets a fuse within 4 s, drawn per unit — not all the same.
+    #[test]
+    fn last_leaver_fuses_the_whole_ally_team() {
+        let mut app = world(seats(&[0, 0, 1]));
+        let mut ours = Vec::new();
+        for owner in [0, 1] {
+            ours.push(spawn(&mut app, UnitKind::Kernel, owner));
+            for _ in 0..10 {
+                ours.push(spawn(&mut app, UnitKind::Bit, owner));
+            }
+        }
+        let theirs = spawn(&mut app, UnitKind::Hole, 2);
+        let mut fates = app.world_mut().resource_mut::<TeamFates>();
+        fates.leave(1);
+        fates.leave(0);
+        app.world_mut().resource_mut::<SimTick>().0 = 7;
+        app.world_mut().run_system_once(check_game_over).unwrap();
+        let ats: Vec<u64> = ours
+            .iter()
+            .map(|e| fuse(&app, *e).expect("fused"))
+            .collect();
+        assert!(
+            ats.iter()
+                .all(|at| (7..=7 + u64::from(FUSE_FRAMES)).contains(at))
+        );
+        assert!(ats.iter().any(|at| *at != ats[0]), "random fuses");
+        assert_eq!(fuse(&app, theirs), None);
+    }
+
+    /// No factory anywhere (sandbox / demo maps): nobody leaves, no
     /// state flip.
     #[test]
     fn sandbox_without_factories_is_left_alone() {
@@ -452,7 +572,7 @@ mod tests {
         let bit = spawn(&mut app, UnitKind::Bit, 0);
         spawn(&mut app, UnitKind::Bug, 1);
         run_census(&mut app);
-        assert_eq!(hp(&app, bit), 100.0);
+        assert_eq!(fuse(&app, bit), None);
         assert_eq!(pending_state(&app), None);
     }
 
@@ -465,7 +585,7 @@ mod tests {
         spawn(&mut app, UnitKind::Hole, 1);
         let wall = spawn(&mut app, UnitKind::BadBlock, 99);
         run_census(&mut app);
-        assert_eq!(hp(&app, wall), 100.0);
+        assert_eq!(fuse(&app, wall), None);
         assert_eq!(pending_state(&app), None);
     }
 
@@ -478,15 +598,15 @@ mod tests {
         for frame in [1, 24, 26, 30, 54] {
             app.world_mut().resource_mut::<SimTick>().0 = frame;
             app.world_mut().run_system_once(check_game_over).unwrap();
-            assert_eq!(hp(&app, bug), 100.0, "frame {frame}");
+            assert_eq!(fuse(&app, bug), None, "frame {frame}");
         }
         app.world_mut().resource_mut::<SimTick>().0 = 55;
         app.world_mut().run_system_once(check_game_over).unwrap();
-        assert_eq!(hp(&app, bug), 0.0);
+        assert!(fuse(&app, bug).is_some());
     }
 
     /// After "Keep on playing" the panel stays closed, but a
-    /// factoryless owner is still wiped.
+    /// factoryless owner is still taken out.
     #[test]
     fn dismissed_keeps_eliminating_without_state_flip() {
         let mut app = world(seats(&[0, 1, 2]));
@@ -495,7 +615,7 @@ mod tests {
         let bug = spawn(&mut app, UnitKind::Bug, 2);
         app.world_mut().resource_mut::<GameOverDismissed>().0 = true;
         run_census(&mut app);
-        assert_eq!(hp(&app, bug), 0.0);
+        assert!(fuse(&app, bug).is_some());
         assert_eq!(pending_state(&app), None);
     }
 
@@ -531,8 +651,9 @@ mod tests {
         spawn(&mut app, UnitKind::Kernel, 0);
         let bug = spawn(&mut app, UnitKind::Bug, 1);
         run_census(&mut app);
+        assert!(fuse(&app, bug).is_some());
+        blow_up(&mut app);
         run_census(&mut app);
-        assert_eq!(hp(&app, bug), 0.0);
         assert_eq!(fates(&app).winners(), Some(&[0][..]));
         assert_eq!(pending_state(&app), None);
     }
@@ -545,7 +666,7 @@ mod tests {
         let bit = spawn(&mut app, UnitKind::Bit, 0);
         spawn(&mut app, UnitKind::Hole, 1);
         run_census(&mut app);
-        assert_eq!(hp(&app, bit), 100.0);
+        assert_eq!(fuse(&app, bit), None);
         assert_eq!(pending_state(&app), None);
     }
 }

@@ -158,10 +158,6 @@ pub const MAX_UNITS_PER_TEAM: u32 = 1000;
 #[derive(Resource, Default, Debug)]
 pub struct TeamUnitCounts {
     counts: BTreeMap<u8, u32>,
-    /// Per-owner `CTeam::maxUnits` where it is no longer
-    /// [`MAX_UNITS_PER_TEAM`]: changed only when an owner dies
-    /// ([`Self::team_died`]).
-    limits: BTreeMap<u8, u32>,
 }
 
 impl TeamUnitCounts {
@@ -169,12 +165,14 @@ impl TeamUnitCounts {
         self.counts.get(&team).copied().unwrap_or(0)
     }
 
-    /// The owner's unit ceiling (`CTeam::GetMaxUnits`).
-    pub fn limit(&self, team: u8) -> u32 {
-        self.limits
-            .get(&team)
-            .copied()
-            .unwrap_or(MAX_UNITS_PER_TEAM)
+    /// The owner's unit ceiling (`CTeam::GetMaxUnits`): the same for
+    /// every owner, all match long. Upstream shares a dead team's ceiling
+    /// out to its allies (`CTeamHandler::UpdateTeamUnitLimitsOnDeath`);
+    /// the user's rule (2026-10-15) leaves caps untouched — units taken
+    /// from a leaver count against the taker's cap and may exceed it,
+    /// which only stops its factories until it is back under.
+    pub fn limit(&self, _team: u8) -> u32 {
+        MAX_UNITS_PER_TEAM
     }
 
     /// `CTeam::AtUnitLimit`: a factory keeps its order but builds
@@ -183,24 +181,6 @@ impl TeamUnitCounts {
     /// `MaxUnits` is per team.
     pub fn at_limit(&self, team: u8) -> bool {
         self.get(team) >= self.limit(team)
-    }
-
-    /// `CTeamHandler::UpdateTeamUnitLimitsOnDeath`: the dead owner's
-    /// ceiling is shared out to the `living_allies` of its ally team
-    /// (each `max * n / (n - 1)` for `n` living teams counting the dead
-    /// one, integer division as upstream) and drops to zero — no
-    /// zombie production after death.
-    pub fn team_died(&mut self, dead: u8, living_allies: &[u8]) {
-        let dead_max = self.limit(dead);
-        self.limits.insert(dead, 0);
-        if dead_max == 0 || living_allies.is_empty() {
-            return;
-        }
-        let n = living_allies.len() as u32 + 1;
-        for &ally in living_allies {
-            let max = self.limit(ally);
-            self.limits.insert(ally, max * n / (n - 1));
-        }
     }
 }
 
@@ -258,6 +238,20 @@ pub fn track_added_units(
         commands
             .entity(entity)
             .try_insert(CountedUnit { team: team.0 });
+    }
+}
+
+/// A unit changes owner (`SimCommand::Take`): move it from the old
+/// owner's tallies to `owner`'s. Removing and re-adding the markers runs
+/// their hooks, so the counts follow in the same command flush.
+pub(crate) fn retally(ec: &mut EntityCommands, owner: u8, counted: bool, small_building: bool) {
+    if counted {
+        ec.remove::<CountedUnit>()
+            .insert(CountedUnit { team: owner });
+    }
+    if small_building {
+        ec.remove::<CountedSmallBuilding>()
+            .insert(CountedSmallBuilding { team: owner });
     }
 }
 

@@ -65,9 +65,9 @@ branch does with it.
 | 28 | `game_over.rs:155` `next_state.set(Victory/Defeat)` from `LocalTeam` | `GameState`, which **gates the whole gameplay chain** | L, but **desync hazard** | unchanged, see §5 |
 | 29 | `ui/menu.rs:697` KeepPlaying → `GameState::Playing` | resumes the local sim | L, but **desync hazard** | unchanged |
 | 30 | sim-internal order edits: `command_fire.rs:621/731/1468`, `construction.rs:1026`, `production.rs:825` (bugger-off), `ground_move.rs:2705` (crush) | orders and deaths decided by the sim | S | unchanged |
-| 31 | `bot.rs` (KP_BOT): spawn :330, move/queue :356, attack :374, build :395, nx :413, stop :423, kill :430, speed/pause :455/:460 | everything | D (cheats) | unchanged |
-| 32 | `showcase.rs:178/183/255/287`, `ui/game_shots.rs:161` | factory queues, orders, deploys | D | unchanged |
-| 33 | `game_setup.rs:244` `dev_run_control`, `record.rs:163`, `game_shots.rs:143` | `Time<Virtual>` speed | D; in MP, game speed and pause are P | unchanged |
+| 31 | `bot.rs` (KP_BOT): spawn :330, move/queue :356, attack :374, build :395, nx :413, stop :423, kill :430, speed/pause :455/:460 | everything | D (cheats) | unchanged; **M1**: commands, cheats as `Dev` (`m1-commands.md`) |
+| 32 | `showcase.rs:178/183/255/287`, `ui/game_shots.rs:161` | factory queues, orders, deploys | D | unchanged; **M1**: commands |
+| 33 | `game_setup.rs:244` `dev_run_control`, `record.rs:163`, `game_shots.rs:143` | `Time<Virtual>` speed | D; in MP, game speed and pause are P | unchanged; **M1**: `SetSpeed` / `Pause` commands for players, these stay local pacing |
 | 34 | `interaction/selection/core.rs:211` click/box select, `selection/groups.rs:51` control groups, `rendering/camera.rs:226` camera, `ability.rs` `OrderCursorModes`, `placement.rs` `PlacementMode`/ghosts, command-panel page, markers/tori, F3 debug overlay | UI state | L | unchanged (stays local) |
 
 Nothing in the tree is a cheat or god-mode hook besides `bot.rs`. There is no
@@ -194,6 +194,18 @@ AI (in-sim run, `lockstep_with_in_sim_ai`, reduced harness with no
 production or combat): one AI tick produced `[Factory, Order, Order,
 PerUnit(10-unit push)]` in a 94 B frame, and a later refill was a 10 B
 frame.
+
+M1's match-control and cheat commands (`net::codec::tests::m1_command_sizes`,
+`m1-commands.md` §6), same frame:
+
+| frame | postcard |
+|---|---:|
+| `Resign` | 6 |
+| `Pause` | 7 |
+| `SetSpeed` | 8 |
+| `Dev(GodMode)` | 8 |
+| `Dev(Spawn)` 10 units at a point | 19 |
+| `Dev(Kill)` / `Dev(SetHealth)` 10 units | 19 / 21 |
 
 ### Bandwidth per player (30 Hz ticks)
 Payload (measured sizes, estimated mix):

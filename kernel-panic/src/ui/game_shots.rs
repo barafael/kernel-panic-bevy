@@ -23,9 +23,9 @@ use super::save_screenshot;
 use crate::game_setup::{AppState, DevOptions, SkirmishConfig, build_setup};
 use crate::interaction::selection::Selected;
 use crate::map_loading::MapCatalog;
+use crate::net::{FactoryOp, Issue, NetId, SimCommand, Units};
 use crate::units::components::{Homebase, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
-use crate::units::lifecycle::production::Producer;
 use crate::units::lifecycle::spawning::Emerging;
 use crate::units::player::LocalTeam;
 
@@ -103,14 +103,15 @@ fn run_shots(
     catalog: Option<Res<MapCatalog>>,
     mut app_state: ResMut<NextState<AppState>>,
     local: Option<Res<LocalTeam>>,
-    mut units: Query<(
+    units: Query<(
         Entity,
         &UnitType,
         &TeamId,
         Has<Homebase>,
         Has<Emerging>,
-        Option<&mut Producer>,
+        &NetId,
     )>,
+    mut net: Issue,
     selected: Query<Entity, With<Selected>>,
     mut time: ResMut<Time<Virtual>>,
     mut activate: MessageWriter<ActivateCommand>,
@@ -148,18 +149,21 @@ fn run_shots(
                 return;
             }
             time.set_relative_speed(1.0);
-            for (e, _, t, home, _, producer) in &mut units {
+            for (e, _, t, home, _, &id) in &units {
                 if home && mine(t) {
                     commands.entity(e).insert(Selected);
-                    if let Some(mut p) = producer {
-                        for kind in [
-                            UnitKind::Assembler,
-                            UnitKind::Bit,
-                            UnitKind::Bit,
-                            UnitKind::Byte,
-                        ] {
-                            p.enqueue(kind);
-                        }
+                    // The build-bar clicks, as commands.
+                    for kind in [
+                        UnitKind::Assembler,
+                        UnitKind::Bit,
+                        UnitKind::Bit,
+                        UnitKind::Byte,
+                    ] {
+                        net.issue(SimCommand::Factory {
+                            factories: Units::of([id]),
+                            kind,
+                            op: FactoryOp::Add(1),
+                        });
                     }
                 }
             }

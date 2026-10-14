@@ -33,7 +33,7 @@
 //! [`PlayerSpec::ally_team`]: crate::game_setup::PlayerSpec::ally_team
 //! [`TeamId`]: crate::units::components::TeamId
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use bevy::prelude::*;
 
@@ -133,21 +133,30 @@ impl Alliances {
     }
 }
 
-/// What has become of the match's owners: Spring's `CTeam::isDead`, and
-/// the result once the match is decided (`CGame::GameEnd`'s winning
-/// ally teams). Sim state, match-scoped: every peer kills the same
-/// owners on the same tick, whoever is watching.
+/// What has become of the match's owners: who has left play (Spring's
+/// `CTeam::isDead`), when, and the result once the match is decided
+/// (`CGame::GameEnd`'s winning ally teams). Sim state, match-scoped:
+/// every peer sees the same owners leave on the same tick, whoever is
+/// watching.
 ///
-/// An owner dies through [`TeamFates::kill_team`] — the game-over
-/// census when it loses its last factory (`game_over.lua`'s
-/// `Spring.KillTeam`), or a resign — and stays dead. Its units are
-/// destroyed (`game_over::check_game_over`), its unit cap is shared out
-/// to its living allies (`CTeamHandler::UpdateTeamUnitLimitsOnDeath`),
-/// and a human owner's player watches from then on. The sim keeps
-/// running for everyone.
+/// An owner leaves play through [`TeamFates::leave`] — resigning, being
+/// taken out by the game-over census (no factory left, `game_over.lua`'s
+/// `Spring.KillTeam`), or (M2/M3) dropping — and never comes back. What
+/// happens to its units is the user's rule (2026-10-15,
+/// `docs/multiplayer-plan.md`), applied by `game_over::check_game_over`:
+/// while an ally of it is still active they stay, idle, for an ally to
+/// take (`SimCommand::Take`); once the last active owner of the ally
+/// team has left, every remaining unit of the ally team blows up within
+/// 4 s, and the ally team has lost. Unit caps never change (upstream
+/// shares a dead team's cap out, `UpdateTeamUnitLimitsOnDeath`; the
+/// user's rule doesn't). A human owner's player watches from then on.
+/// The sim keeps running for everyone.
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct TeamFates {
     dead: BTreeSet<u8>,
+    /// The sim frame each owner left play on (set by the game-over pass
+    /// of that tick).
+    left_at: BTreeMap<u8, u64>,
     /// Killed since the last pass of `check_game_over`: their units
     /// still have to be destroyed.
     doomed: BTreeSet<u8>,
@@ -159,12 +168,15 @@ pub struct TeamFates {
 }
 
 impl TeamFates {
-    /// `Spring.KillTeam` → `CTeam::Died`: `owner` is dead from now on.
-    /// Its remaining units are destroyed by the next pass of
+    /// `owner` leaves play — resign, taken out, or dropped: the one way
+    /// out (`Spring.KillTeam` → `CTeam::Died`), so every cause gets the
+    /// same rules. It is inactive ("dead") from now on; the next pass of
     /// `check_game_over` (this tick's, when called from the command
-    /// apply at the head of the tick), and the match checks for its end
-    /// at the next census. `false` when it already was dead.
-    pub fn kill_team(&mut self, owner: u8) -> bool {
+    /// apply at the head of the tick) leaves its units for its allies
+    /// or, if it was its ally team's last active owner, blows the ally
+    /// team's units up; the match checks for its end at the next
+    /// census. `false` when it already had left.
+    pub fn leave(&mut self, owner: u8) -> bool {
         if !self.dead.insert(owner) {
             return false;
         }
@@ -173,8 +185,19 @@ impl TeamFates {
         true
     }
 
+    /// Has `owner` left play (inactive)?
     pub fn is_dead(&self, owner: u8) -> bool {
         self.dead.contains(&owner)
+    }
+
+    /// The sim frame `owner` left play on, once the game-over pass has
+    /// seen it.
+    pub fn left_at(&self, owner: u8) -> Option<u64> {
+        self.left_at.get(&owner).copied()
+    }
+
+    pub(crate) fn note_left(&mut self, owner: u8, frame: u64) {
+        self.left_at.entry(owner).or_insert(frame);
     }
 
     /// The dead owners, sorted.
@@ -195,6 +218,11 @@ impl TeamFates {
     /// Upstream's `CheckForGameOver` flag, cleared.
     pub(crate) fn take_check_end(&mut self) -> bool {
         std::mem::take(&mut self.check_end)
+    }
+
+    /// Look again at the next census (the losers' units still burn).
+    pub(crate) fn check_end_again(&mut self) {
+        self.check_end = true;
     }
 
     pub(crate) fn decide(&mut self, winners: Vec<u8>) {
@@ -263,8 +291,8 @@ mod tests {
     #[test]
     fn a_team_dies_once() {
         let mut fates = TeamFates::default();
-        assert!(fates.kill_team(2));
-        assert!(!fates.kill_team(2));
+        assert!(fates.leave(2));
+        assert!(!fates.leave(2));
         assert!(fates.is_dead(2));
         assert_eq!(fates.take_doomed().into_iter().collect::<Vec<_>>(), vec![2]);
         assert!(fates.take_doomed().is_empty());

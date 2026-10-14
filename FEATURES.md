@@ -135,6 +135,17 @@ read the resulting state.
   Pressing an armed command's hotkey again disarms it; Escape or a
   right-click anywhere disarms whatever command is armed, and that
   right-click issues no order.
+- Resign from the Esc menu (asks once more). When a player leaves —
+  resigns or loses its last factory — and an ally still plays, its units
+  stay and every active ally sees a flashing TAKE button that hands them
+  all over (an AI ally takes them itself); when the last player of a side
+  leaves, all of the side's units blow up within 4 s, at random moments.
+  Unit caps never change.
+- Pause (the Pause key) and game speed (Alt+= / Alt+numpad+ faster,
+  Alt+- / Alt+numpad- slower, 0.1× to 20× in Spring's steps), as
+  Spring's default bindings; a line at the top of the screen says
+  "Paused" and the speed when it isn't 1×. Camera and menus stay live
+  while paused.
 - A `Stop` order halts the unit immediately and clears the queue.
 - On production, the builder unit sets a waypoint for the produced
   unit to move straight out of the factory.
@@ -821,4 +832,9 @@ context. Most variants animate over their frames at a fixed rate
   tick), adaptive input delay, catch-up, state-hash desync check that stops the
   match and writes `desync-dumps/`. Only the in-process simulated network
   drives it so far (tests); the matchbox transport and the lobby are M2.
-- Golden replays (`--replay`, `--record-golden`, feature `replay`).
+- Every input, the AI and the dev tools reach the simulation as commands
+  validated where they apply (ownership, capabilities, points on the map,
+  cheats only in single player; `net-experiments/m1-commands.md`); pause and
+  game speed are commands too, so every peer pauses and speeds up together.
+- Golden replays (`--replay`, `--record-golden`, feature `replay`) and a
+  command fuzz (`--command-fuzz`) in CI.

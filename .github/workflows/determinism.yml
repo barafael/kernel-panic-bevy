@@ -34,6 +34,8 @@ name: Determinism
 #   (net-experiments/m0-floatprobe), compared in the `compare` job (the
 #   `det:` rows must match; the `std:` rows show what the platform libms
 #   would have done).
+# - The command fuzz (`kernel-panic --command-fuzz`, linux-x86_64-gnu):
+#   net-experiments/m1-commands.md.
 # - Result and write-up: net-experiments/m0-golden-replay.md.
 
 on:
@@ -176,6 +178,14 @@ jobs:
         run: |
           target/${{ matrix.target }}/release/kernel-panic --replay "$GOLDEN_DIR"/*."$GOLDEN_EXT" \
             --trail-dir trails-shuffled --shuffle 1
+      # The command fuzz (`net::fuzz`): random and malformed command
+      # frames from every seat into a headless match, played twice,
+      # shuffled and with the malformed ones mixed in; all four trails
+      # must agree and every malformed command must be refused.
+      - name: Command fuzz
+        if: matrix.platform == 'linux-x86_64-gnu'
+        shell: bash
+        run: target/${{ matrix.target }}/release/kernel-panic --command-fuzz --ticks 3000
       - if: matrix.platform == 'linux-x86_64-gnu'
         uses: actions/upload-artifact@v7
         with:

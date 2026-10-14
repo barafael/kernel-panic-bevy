@@ -45,10 +45,18 @@ pub const FORMAT_VERSION: u16 = 2;
 /// `net-experiments/m0-golden-replay.md`). The unit bundle and map
 /// hashes catch data changes on their own.
 ///
-/// 2 (M1): per-seat owners and ally teams, shared victory and defeat,
-/// the sim no longer stops for the local outcome, `DetFloat`
+/// 2 (M1, A): per-seat owners and ally teams, shared victory and
+/// defeat, the sim no longer stops for the local outcome, `DetFloat`
 /// max / min / clamp.
-pub const SIM_VERSION: u32 = 2;
+/// 3 (M1, B on top): commands are validated when they apply
+/// (`net-experiments/m1-commands.md`): attacks need a weapon that can
+/// hit the target, points must lie on the map (the AI's scattered
+/// pushes near an edge lose those units' orders, as in Spring).
+/// 4 (2026-10-15, the user's leaving rules): a leaver's units wait for
+/// an ally's `Take` (an AI ally takes them itself) or, with the last
+/// active owner of the ally team gone, blow up within 4 s; unit caps
+/// never change.
+pub const SIM_VERSION: u32 = 4;
 
 /// One seat of the match: seat `i` is owner `i` (`TeamId(i)`,
 /// `units::teams`).

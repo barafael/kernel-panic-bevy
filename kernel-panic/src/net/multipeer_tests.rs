@@ -63,7 +63,7 @@ fn scenario(map: &str, humans: u8, ai: u8, seed: u64) -> Scenario {
     for (i, seat) in s.seats.iter_mut().enumerate() {
         *seat = PlayerSpec {
             faction: Faction::ALL[i % 3],
-            team: i as u8,
+            ally_team: i as u8,
             ai: i as u8 >= humans,
         };
     }
@@ -73,7 +73,10 @@ fn scenario(map: &str, humans: u8, ai: u8, seed: u64) -> Scenario {
 fn start(scn: &Scenario, seed: u64, link: LinkParams) -> Room {
     let net = SimNetwork::new(seed);
     net.set_default_link(link);
-    let teams: Vec<u8> = scn.seats.iter().filter(|s| !s.ai).map(|s| s.team).collect();
+    // Seat `i` is owner `i`.
+    let teams: Vec<u8> = (0..scn.seats.len() as u8)
+        .filter(|&i| !scn.seats[i as usize].ai)
+        .collect();
     let roster: BTreeMap<PeerId, Option<u8>> = teams
         .iter()
         .enumerate()
@@ -378,6 +381,113 @@ fn peers_leaving_full_sim() {
     let stopped = r.trail(1).len();
     r.run(30, Duration::from_micros(33_333), |_, _| {});
     assert_eq!(r.trail(1).len(), stopped, "no host, no clock");
+}
+
+/// Match control across peers: a guest pauses and later resumes, another
+/// doubles the game speed. Every peer stops at the same tick and stays
+/// there, resumes together, runs faster from the same tick, and the
+/// trails agree.
+#[test]
+fn pause_and_speed_full_sim() {
+    use super::{MatchControl, SimCommand};
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let scn = scenario("Marble_Madness_Map", 3, 1, 0x9a);
+    let mut r = start(&scn, 0x9a, LinkParams::latency_ms(40));
+    let issue = |r: &mut Room, peer: usize, cmd: SimCommand| {
+        r.peers[peer]
+            .h
+            .world_mut()
+            .resource_mut::<CommandBus>()
+            .issue(cmd);
+    };
+    let control = |r: &mut Room, peer: usize| {
+        r.peers[peer]
+            .h
+            .world_mut()
+            .resource::<MatchControl>()
+            .clone()
+    };
+    // Ticks of the host at frames 300 and 330 (paused), 420 and 480
+    // (1×), 600 and 660 (2×).
+    let mut at = BTreeMap::new();
+    r.run(30 * 24, Duration::from_micros(33_333), |r, f| {
+        match f {
+            200 => issue(r, 1, SimCommand::Pause { on: true }),
+            360 => issue(r, 1, SimCommand::Pause { on: false }),
+            500 => issue(r, 2, SimCommand::SetSpeed { percent: 200 }),
+            _ => {}
+        }
+        if [300, 330, 420, 480, 600, 660].contains(&f) {
+            at.insert(f, r.trail(0).len());
+        }
+        if f == 330 {
+            for i in 0..r.peers.len() {
+                let c = control(r, i);
+                assert!(c.paused, "peer {i} paused");
+                assert_eq!(c.paused_by, Some(1));
+            }
+        }
+        if f == 600 {
+            for i in 0..r.peers.len() {
+                assert!(!control(r, i).paused);
+                assert_eq!(control(r, i).speed_percent, 200, "peer {i} at 2×");
+            }
+        }
+    });
+    assert_eq!(at[&300], at[&330], "no tick while paused");
+    let normal = at[&480] - at[&420];
+    let fast = at[&660] - at[&600];
+    assert!((55..=65).contains(&normal), "1×: {normal} ticks in 2 s");
+    assert!((115..=125).contains(&fast), "2×: {fast} ticks in 2 s");
+    r.assert_agree(at[&660] - 10);
+    assert!(r.session(0, |s| s.desync().is_none()));
+}
+
+/// Two peers press TAKE on the same frame for their resigned ally's
+/// units: one gets all of them, the other's `Take` finds nothing, and
+/// every peer agrees on which (the host's turn order decides).
+#[test]
+fn take_race_full_sim() {
+    use super::SimCommand;
+    use crate::units::combat::Dying;
+    use crate::units::components::{TeamId, UnitType};
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // Three human allies against an AI.
+    let mut scn = scenario("Marble_Madness_Map", 3, 1, 0x7ace);
+    for (i, seat) in scn.seats.iter_mut().enumerate() {
+        seat.ally_team = u8::from(i == 3);
+    }
+    let mut r = start(&scn, 0x7ace, LinkParams::latency_ms(30));
+    let issue = |r: &mut Room, peer: usize, cmd: SimCommand| {
+        r.peers[peer]
+            .h
+            .world_mut()
+            .resource_mut::<CommandBus>()
+            .issue(cmd);
+    };
+    r.run(30 * 16, Duration::from_micros(33_333), |r, f| match f {
+        150 => issue(r, 2, SimCommand::Resign),
+        250 => {
+            issue(r, 0, SimCommand::Take { from: 2 });
+            issue(r, 1, SimCommand::Take { from: 2 });
+        }
+        _ => {}
+    });
+    r.assert_agree(400);
+    let owners = |r: &mut Room, peer: usize| {
+        let w = r.peers[peer].h.world_mut();
+        let mut q = w.query_filtered::<&TeamId, (With<UnitType>, Without<Dying>)>();
+        let mut n = [0u32; 4];
+        for t in q.iter(w) {
+            n[t.0 as usize] += 1;
+        }
+        n
+    };
+    let host = owners(&mut r, 0);
+    assert_eq!(host[2], 0, "all of owner 2's units were taken");
+    for peer in 1..3 {
+        assert_eq!(owners(&mut r, peer), host, "peer {peer} agrees");
+    }
 }
 
 /// Long and configurable.

@@ -30,8 +30,15 @@
 //! format and the measured frame sizes.
 
 pub(crate) mod apply;
+#[cfg(test)]
+mod audit;
 pub(crate) mod codec;
+pub(crate) mod control;
 pub mod driver;
+#[cfg(all(any(test, feature = "replay"), not(target_arch = "wasm32")))]
+pub(crate) mod fuzz;
+#[cfg(test)]
+mod leave_tests;
 #[cfg(test)]
 mod lockstep_tests;
 #[cfg(test)]
@@ -53,6 +60,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub use codec::{IdList, NetPos, PosList};
+pub use control::{DevCommand, MatchControl};
 pub use driver::LockstepPlugin;
 
 use crate::map_loading::MatchScopeAppExt;
@@ -298,6 +306,27 @@ pub enum SimCommand {
         target: NetPos,
         auto: bool,
     },
+    // M1. New variants go at the end: postcard encodes the variant
+    // index, and recorded replays must keep decoding.
+    /// Game speed in percent of real time (`NETMSG_USER_SPEED`); see
+    /// [`control`] for what the driver does with it.
+    SetSpeed {
+        percent: u16,
+    },
+    /// Pause / unpause everyone (`NETMSG_PAUSE`; [`control`]).
+    Pause {
+        on: bool,
+    },
+    /// The player gives up (`TEAMMSG_RESIGN`): their units
+    /// self-destruct, their later commands are refused.
+    Resign,
+    /// Dev tools and cheats, refused unless the match allows cheats.
+    Dev(DevCommand),
+    /// The TAKE button: every remaining unit of `from`, an allied owner
+    /// that has left play, becomes the sender's (2026-10-15).
+    Take {
+        from: u8,
+    },
 }
 
 impl SimCommand {
@@ -343,7 +372,13 @@ impl SimCommand {
             | Deploy { units }
             | Enter { units }
             | Cast { units, .. } => Some(units),
-            PerUnit { .. } | Path { .. } => None,
+            PerUnit { .. }
+            | Path { .. }
+            | SetSpeed { .. }
+            | Pause { .. }
+            | Resign
+            | Dev(_)
+            | Take { .. } => None,
         }
     }
 }
@@ -641,7 +676,8 @@ impl Plugin for CommandBusPlugin {
                 FixedUpdate,
                 SimCommandSet.before(crate::units::GameplaySet::Produce),
             )
-            .add_systems(FixedUpdate, apply::apply_sim_commands.in_set(SimCommandSet));
+            .add_systems(FixedUpdate, apply::apply_sim_commands.in_set(SimCommandSet))
+            .add_plugins(control::MatchControlPlugin);
     }
 }
 
@@ -651,6 +687,7 @@ pub(crate) fn init_test_world(world: &mut World) {
     world.init_resource::<NetIdAllocator>();
     world.init_resource::<NetIdIndex>();
     world.init_resource::<CommandBus>();
+    world.init_resource::<MatchControl>();
 }
 
 /// Seal and apply whatever was issued, right now (tests that drive an

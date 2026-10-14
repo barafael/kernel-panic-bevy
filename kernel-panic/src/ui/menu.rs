@@ -54,6 +54,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<EscMenuOpen>()
             .init_resource::<EscSettingsOpen>()
             .init_resource::<EscAudioOpen>()
+            .init_resource::<EscResignConfirm>()
             .init_resource::<GameOverOpen>()
             .init_resource::<ReadmeScroll>()
             .init_resource::<DemoDirector>()
@@ -145,6 +146,11 @@ pub(crate) struct EscSettingsOpen(pub(crate) bool);
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 pub(crate) struct EscAudioOpen(pub(crate) bool);
 
+/// The Esc overlay's Resign plate was clicked once: the next click
+/// resigns (Spring's quit box asks the same way).
+#[derive(Debug, Default, Deref, DerefMut, Resource)]
+pub(crate) struct EscResignConfirm(pub(crate) bool);
+
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct GameOverOpen(bool);
 
@@ -229,6 +235,9 @@ enum MenuAction {
     SetVolume(VolumeKnob, u8),
     /// Esc overlay: show / hide the Audio page inside Settings.
     EscAudio(bool),
+    /// Esc overlay: Resign — `false` asks, `true` (the second click)
+    /// resigns (`SimCommand::Resign`).
+    Resign(bool),
     /// The music cluster (main page, Esc overlay): previous / pause / next.
     Music(MusicControl),
 }
@@ -640,6 +649,7 @@ struct Overlays<'w> {
     esc_audio: ResMut<'w, EscAudioOpen>,
     game_over_open: ResMut<'w, GameOverOpen>,
     dismissed: ResMut<'w, GameOverDismissed>,
+    resign_confirm: ResMut<'w, EscResignConfirm>,
 }
 
 impl Overlays<'_> {
@@ -648,6 +658,7 @@ impl Overlays<'_> {
         *self.esc_settings = EscSettingsOpen(false);
         *self.esc_audio = EscAudioOpen(false);
         *self.game_over_open = GameOverOpen(false);
+        *self.resign_confirm = EscResignConfirm(false);
     }
 }
 
@@ -660,6 +671,7 @@ struct MenuFlow<'w> {
     run_game: MessageWriter<'w, RunGame>,
     exit: MessageWriter<'w, AppExit>,
     music: MessageWriter<'w, MusicControl>,
+    bus: Option<ResMut<'w, crate::net::CommandBus>>,
 }
 
 /// What a match (or the demo behind the menu) is built from: the map
@@ -735,6 +747,14 @@ fn handle_menu_actions(
                 *overlays.esc_open = EscMenuOpen(false);
                 *overlays.esc_settings = EscSettingsOpen(false);
                 *overlays.esc_audio = EscAudioOpen(false);
+                *overlays.resign_confirm = EscResignConfirm(false);
+            }
+            MenuAction::Resign(false) => *overlays.resign_confirm = EscResignConfirm(true),
+            MenuAction::Resign(true) => {
+                if let Some(bus) = flow.bus.as_mut() {
+                    bus.issue(crate::net::SimCommand::Resign);
+                }
+                overlays.close_all();
             }
             MenuAction::KeepPlaying => {
                 overlays.dismissed.0 = true;
@@ -2181,22 +2201,38 @@ fn close_all_overlays(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// What the Esc overlay was last drawn for: open, Settings, Audio,
+/// Resign asked, the render settings.
+type EscMenuDrawn = (bool, bool, bool, bool, RenderSettings);
+
+#[allow(clippy::too_many_arguments)]
 fn maintain_esc_menu(
     esc_open: Res<EscMenuOpen>,
     esc_settings: Res<EscSettingsOpen>,
     esc_audio: Res<EscAudioOpen>,
+    mut resign_confirm: ResMut<EscResignConfirm>,
     settings: SettingsView,
     music: Res<MusicPlayer>,
     music_catalog: Res<MusicCatalog>,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
-    mut last: Local<Option<(bool, bool, bool, RenderSettings)>>,
+    mut last: Local<Option<EscMenuDrawn>>,
 ) {
+    // A closed overlay forgets a half-done Resign.
+    if !esc_open.0 && resign_confirm.0 {
+        resign_confirm.0 = false;
+    }
     // Redrawn when the overlay opens or closes, when it switches to or
     // from its Settings page, and when a setting changed (its choice
     // rows show the current pick).
-    let now = (esc_open.0, esc_settings.0, esc_audio.0, *settings.render);
+    let now = (
+        esc_open.0,
+        esc_settings.0,
+        esc_audio.0,
+        resign_confirm.0,
+        *settings.render,
+    );
     if *last == Some(now) {
         return;
     }
@@ -2266,6 +2302,22 @@ fn maintain_esc_menu(
         (0.5, 0.32),
         Anchor::Ct,
         MenuAction::EscSettings(true),
+    )
+    .min_width(20.0)
+    .spawn(&mut commands, root);
+    // Resign (the quit box's): asks once, then resigns.
+    let (resign_text, resign) = if resign_confirm.0 {
+        ("Really resign?", MenuAction::Resign(true))
+    } else {
+        ("Resign", MenuAction::Resign(false))
+    };
+    ButtonSpec::new(
+        resign_text,
+        LOST_RED,
+        size * 0.6,
+        (0.5, 0.7),
+        Anchor::Cb,
+        resign,
     )
     .min_width(20.0)
     .spawn(&mut commands, root);

@@ -25,9 +25,11 @@
 //!   keeps going (Spring: `GetNetMessageProcessingTimeLimit`, :248).
 //!   With no turn in hand it waits: [`NetStatus::waiting`] says for
 //!   whom, and the session asks for a gap fill.
-//! - **Game speed and pause** come from the sim ([`GameSpeed`], set by
-//!   the speed / pause commands as they apply, so every peer changes
-//!   pace on the same tick).
+//! - **Game speed and pause** come from the sim: the `SetSpeed` /
+//!   `Pause` commands set [`MatchControl`](super::MatchControl) as they
+//!   apply, so every peer changes pace on the same tick ([`GameSpeed`]
+//!   is the driver's view of it). This is the one place game speed
+//!   scales the clock (`net::control`).
 //! - **Desync:** every peer stops at the tick the host names and writes
 //!   a state dump ([`DumpDir`]; the console and a download on the web).
 //!   The match stays paused (Spring plays on).
@@ -38,16 +40,21 @@ use bevy::app::{RunFixedMainLoop, RunFixedMainLoopSystems};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
 
+use crate::sim::DetFloat;
+
 use super::session::{Desync, Ended, HASH_INTERVAL, Session, SessionConfig, SessionEvent};
 use super::transport::{PeerId, Transport};
 use super::wire::Turn;
 use super::{CommandBus, CommandFrame, SimCommand};
 use crate::map_loading::MatchScopeAppExt;
 
-/// The sim's pace, as the speed / pause commands set it (they apply in
-/// the sim, so every peer reads the same value at the same tick). Only
-/// the driver reads it; it is not hashed.
-#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+/// The sim's pace as the driver sees it: [`MatchControl`]'s speed and
+/// pause, which the speed / pause commands set as they apply (so every
+/// peer reads the same value at the same tick). Not hashed: the sim
+/// never reads it.
+///
+/// [`MatchControl`]: super::MatchControl
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GameSpeed {
     /// Game seconds per real second (Spring's `userSpeedFactor`).
     pub factor: f32,
@@ -63,12 +70,11 @@ impl Default for GameSpeed {
     }
 }
 
-/// Whether a command, sequenced while the sim is paused, should be let
-/// through at once (the host cuts the next turn for it). Until the pause
-/// command exists every command does; then only the unpause should
-/// (`m1-runtime.md` §3, the shape agreed with the commands work).
-pub fn resumes_sim(_cmd: &SimCommand) -> bool {
-    true
+/// Whether a command, sequenced while the sim is paused, makes the host
+/// cut the next turn at once: the unpause (`m1-runtime.md` §3). Anything
+/// else ordered meanwhile waits in the schedule and rides along.
+pub fn resumes_sim(cmd: &SimCommand) -> bool {
+    matches!(cmd, SimCommand::Pause { on: false })
 }
 
 /// Catch-up limits of a guest that fell behind.
@@ -151,7 +157,7 @@ pub fn drive_frame(
         p.acc = Duration::ZERO;
         p.starved_since.get_or_insert(now);
     } else if !s.halted() && !speed.paused {
-        p.acc += delta.mul_f64(speed.factor.max(0.0) as f64);
+        p.acc += delta.mul_f64(speed.factor.det_max(0.0) as f64);
     }
     let t0 = p.catch_up.budget.map(|_| Instant::now());
     while !s.halted() {
@@ -335,9 +341,11 @@ fn local_player(world: &World) -> Option<u8> {
 impl TickRunner for WorldRunner<'_> {
     fn speed(&self) -> GameSpeed {
         self.world
-            .get_resource::<GameSpeed>()
-            .copied()
-            .unwrap_or_default()
+            .get_resource::<super::MatchControl>()
+            .map_or_else(GameSpeed::default, |c| GameSpeed {
+                factor: c.speed(),
+                paused: c.paused,
+            })
     }
 
     fn seal(&mut self, delay: u32) -> Vec<CommandFrame> {
@@ -587,7 +595,6 @@ pub struct LockstepPlugin;
 impl Plugin for LockstepPlugin {
     fn build(&self, app: &mut App) {
         app.init_match_resource::<NetSession>()
-            .init_match_resource::<GameSpeed>()
             .init_resource::<NetStatus>()
             // Bevy's own loop is off; ours runs in its place.
             .configure_sets(

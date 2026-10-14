@@ -307,6 +307,7 @@ pub fn ai_brain(
     suiciding: Query<(), With<SelfDestructCountdown>>,
     ai_seats: Res<AiSeats>,
     alliances: Res<Alliances>,
+    fates: Option<Res<crate::units::teams::TeamFates>>,
     mut orders: AiOrders,
 ) {
     ticker.accumulated += time.delta_secs();
@@ -326,8 +327,15 @@ pub fn ai_brain(
         .last_dispatch
         .retain(|id, _| s.units.binary_search_by_key(id, |u| u.net).is_ok());
 
+    let no_fates = crate::units::teams::TeamFates::default();
+    let fates = fates.as_deref().unwrap_or(&no_fates);
     let teams = std::mem::take(&mut s.ai_teams);
     for &team in &teams {
+        // An AI owner that has left play (taken out) plays no more.
+        if fates.is_dead(team) {
+            continue;
+        }
+        take_from_leavers(team, s, &ai_seats, &alliances, fates, &tick, &mut orders);
         // `UpdateFairness`: every allied team's units (its own
         // included) count against the head start, every enemy's for it.
         let side = |allied: bool| {
@@ -403,6 +411,42 @@ fn run_late_game(
             .map(|u| u.net),
     );
     orders.issue_as(team, SimCommand::SelfDestruct { units });
+}
+
+/// Seconds an AI waits before it takes a leaver's units while a human
+/// ally is still in play, so the human can press TAKE first.
+pub const TAKE_GRACE_SECS: f32 = 10.0;
+
+/// The TAKE button, for the AI (the user's rule, 2026-10-15): an allied
+/// owner has left play with units left. With no human ally in play the
+/// AI takes them at its next brain tick (≤ 1 s); with one, after
+/// [`TAKE_GRACE_SECS`], so the human may take them first. Several AI
+/// allies may ask on the same tick: the first in turn order (lowest
+/// owner) gets everything, the others' `Take` finds nothing left.
+fn take_from_leavers(
+    team: u8,
+    s: &AiScratch,
+    ai_seats: &AiSeats,
+    alliances: &Alliances,
+    fates: &crate::units::teams::TeamFates,
+    tick: &SimTick,
+    orders: &mut CommandBus,
+) {
+    let human_ally_in_play = alliances
+        .allies_of(team)
+        .any(|o| o != team && !ai_seats.contains(o) && !fates.is_dead(o));
+    for from in alliances.allies_of(team) {
+        if from == team || !fates.is_dead(from) || !s.counts.contains_key(&from) {
+            continue;
+        }
+        let Some(left) = fates.left_at(from) else {
+            continue;
+        };
+        let waited = tick.frame().saturating_sub(left) as f32 / crate::sim::GAME_SPEED;
+        if !human_ally_in_play || waited >= TAKE_GRACE_SECS {
+            orders.issue_as(team, SimCommand::Take { from });
+        }
+    }
 }
 
 /// Capture every live unit, per-team tallies, the AI team list, enemy
