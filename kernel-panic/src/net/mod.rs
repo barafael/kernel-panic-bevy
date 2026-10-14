@@ -17,14 +17,33 @@
 //!   (frames for the next tick, not broadcast: every lockstep peer runs
 //!   the AI itself). `broadcast_ai` turns it into an ordinary remote
 //!   player instead (host-run AI).
+//! - Lockstep (M1, `net-experiments/m1-runtime.md`): the tick driver
+//!   ([`driver`]) runs the fixed sim one turn at a time. Sealed local
+//!   frames leave through the outbox, the host ([`session`]) sequences
+//!   every peer's into turns, and only the turns come back into the bus
+//!   ([`CommandBus::deliver_turn`]) — for the host and in single player
+//!   too (a solo host with delay 0). [`transport`] is what a network
+//!   must provide; [`sim_net`] simulates one for the tests, matchbox
+//!   (M2) the real one.
 //!
 //! See `net-experiments/x-commands.md` for the inventory, the wire
 //! format and the measured frame sizes.
 
 pub(crate) mod apply;
 pub(crate) mod codec;
+pub mod driver;
 #[cfg(test)]
 mod lockstep_tests;
+#[cfg(test)]
+mod multipeer_tests;
+pub mod session;
+#[cfg(test)]
+mod session_tests;
+#[cfg(test)]
+pub mod sim_net;
+pub mod state;
+pub mod transport;
+pub mod wire;
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -34,6 +53,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub use codec::{IdList, NetPos, PosList};
+pub use driver::LockstepPlugin;
 
 use crate::map_loading::MatchScopeAppExt;
 use crate::units::content::definitions::UnitKind;
@@ -370,6 +390,11 @@ pub struct CommandBus {
     /// Keep our sealed frames (empty ones too) in [`Self::outbox`] for
     /// a transport. Off in single player, so nothing accumulates.
     pub capture_outbox: bool,
+    /// Lockstep: our sealed frames go to [`Self::outbox`] only and come
+    /// back through the turn stream ([`Self::deliver_turn`]); nothing
+    /// local is applied on its own. The tick driver sets it; a bare
+    /// world (unit tests) applies its frames directly.
+    pub routed: bool,
     /// Record every applied frame (replay / measurements).
     pub log: Option<Vec<CommandFrame>>,
     pub outbox: Vec<CommandFrame>,
@@ -382,6 +407,9 @@ pub struct CommandBus {
     last_applied: HashMap<u8, IdList>,
     /// Per remote player: the tick after the last frame delivered.
     received: HashMap<u8, u32>,
+    /// The tick the last seal ran for: the driver seals before running
+    /// a tick, so the apply system's own seal finds nothing left.
+    sealed: Option<u32>,
 }
 
 impl CommandBus {
@@ -438,21 +466,31 @@ impl CommandBus {
 
     /// Seal what was issued since the last tick into frames: the local
     /// player's for `tick + input_delay`, the AI's for `tick` (or like a
-    /// player's with `broadcast_ai`). Called by the apply system first
-    /// thing each tick, so the frames sealed for `tick` itself apply now.
+    /// player's with `broadcast_ai`). Called first thing each tick (by
+    /// the tick driver, else by the apply system), so the frames sealed
+    /// for `tick` itself apply now. Once per tick: a second call is a
+    /// no-op.
     pub fn seal(&mut self, local_player: Option<u8>) {
+        if self.sealed == Some(self.tick) {
+            return;
+        }
+        self.sealed = Some(self.tick);
         let staged = std::mem::take(&mut self.staged);
         if let Some(player) = local_player {
             let tick = self.tick + self.input_delay;
             let frame = self.seal_frame(tick, player, staged);
-            if self.capture_outbox {
-                self.outbox.push(frame.clone());
-            }
-            if !frame.commands.is_empty() {
-                self.pending
-                    .entry((frame.tick, frame.player))
-                    .or_default()
-                    .extend(frame.commands);
+            if self.routed {
+                self.outbox.push(frame);
+            } else {
+                if self.capture_outbox {
+                    self.outbox.push(frame.clone());
+                }
+                if !frame.commands.is_empty() {
+                    self.pending
+                        .entry((frame.tick, frame.player))
+                        .or_default()
+                        .extend(frame.commands);
+                }
             }
         }
         let mut by_player: BTreeMap<u8, Vec<SimCommand>> = BTreeMap::new();
@@ -473,6 +511,29 @@ impl CommandBus {
                 .entry((frame.tick, frame.player))
                 .or_default()
                 .extend(frame.commands);
+        }
+    }
+
+    /// [`Self::seal`] even if this tick was sealed already: the driver
+    /// seals once per tick, and again each frame while paused, when no
+    /// tick runs but the commands must still go out.
+    pub fn reseal(&mut self, local_player: Option<u8>) {
+        self.sealed = None;
+        self.seal(local_player);
+    }
+
+    /// The host's turn for the current tick arrived: its frames apply
+    /// now, after anything already pending for this tick (the AI's).
+    pub fn deliver_turn(&mut self, turn: &wire::Turn) {
+        debug_assert_eq!(turn.tick, self.tick, "turns apply in tick order");
+        for (player, commands) in &turn.frames {
+            if commands.is_empty() {
+                continue;
+            }
+            self.pending
+                .entry((turn.tick, *player))
+                .or_default()
+                .extend(commands.iter().cloned());
         }
     }
 

@@ -237,6 +237,7 @@ pub(crate) fn add_game(app: &mut App) {
         audio::GameAudioPlugin,
         InteractionPlugin,
         net::CommandBusPlugin,
+        net::LockstepPlugin,
         UiPlugin,
         UnitsPlugin,
         TerrainPlugin,
