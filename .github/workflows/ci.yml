@@ -2,7 +2,7 @@ name: CI
 
 # Basic Rust checks on every push, pull request and merge-queue entry:
 # rustfmt, clippy (warnings are errors), the workspace tests on Linux,
-# Windows and macOS, and the wasm32 check of the game. The cross-platform
+# Windows and macOS, and wasm32 clippy of the game. The cross-platform
 # determinism matrix (determinism.yml) hangs off the end.
 on:
   push:
@@ -84,17 +84,21 @@ jobs:
       - run: cargo test --workspace --locked
 
   wasm:
-    name: wasm32 check
+    name: wasm32 clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: cargo check --target wasm32-unknown-unknown -p kernel-panic --locked
+      # Clippy, not just check: wasm-only dead code (fields read only on
+      # native) and the sim's disallowed-methods hold on the web build too.
+      # `replay` adds the wasm golden-replay entry point determinism.yml runs.
+      - run: cargo clippy --target wasm32-unknown-unknown -p kernel-panic --features replay --locked -- -D warnings
 
   # Golden-replay hash trails on every platform (plan M0.4). A no-op until
   # golden logs exist; see the contract at the top of determinism.yml.

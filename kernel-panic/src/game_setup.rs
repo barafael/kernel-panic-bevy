@@ -184,6 +184,8 @@ pub struct DevOptions {
     /// `KP_NO_BINDLESS=1`: run the renderer without bindless materials
     /// (the wgpu binding-array features are left off), to tell a
     /// material-slot problem from a driver one when pieces flicker.
+    /// Native only: web picks its own backend and features.
+    #[cfg(not(target_arch = "wasm32"))]
     pub no_bindless: bool,
     /// `KP_NO_INDIRECT=1`: draw every mesh with a direct draw call
     /// (Bevy's `NoIndirectDrawing` on the camera) instead of the
