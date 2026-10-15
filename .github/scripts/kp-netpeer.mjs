@@ -19,6 +19,11 @@
 // (`net::matchbox_tests::browser_probe`); the other arguments but the
 // signaling URL, room and secs are ignored.
 //
+// KP_NETPEER_ICE: the browser's ICE servers (`KP_ICE` syntax, e.g.
+// `stun:127.0.0.1:3478`); unset or empty: matchbox's default, Google
+// STUN, whose binding requests may take ~40 s to time out where it is
+// unreachable (the test hands in a local STUN server).
+//
 // <runtime>: chromium | firefox | webkit (WebRTC needs a browser; Node
 // has none). Needs the `playwright` package resolvable from the working
 // directory (or NODE_PATH) and the browser installed
@@ -74,8 +79,10 @@ const base = `http://127.0.0.1:${server.address().port}`;
 // that a native webrtc-rs peer may not resolve in a CI container; show
 // the real addresses instead.
 const args = runtime === "chromium" ? ["--disable-features=WebRtcHideLocalIpsWithMdns"] : [];
-// KP_BROWSER_ARGS: more browser flags (space separated), e.g. logging.
-args.push(...(process.env.KP_BROWSER_ARGS ?? "").split(" ").filter((a) => a));
+// KP_BROWSER_ARGS: more browser flags, space separated or a JSON array
+// (for flags with spaces, e.g. `--host-resolver-rules=MAP a b`).
+const extra = (process.env.KP_BROWSER_ARGS ?? "").trim();
+args.push(...(extra.startsWith("[") ? JSON.parse(extra) : extra.split(" ").filter((a) => a)));
 // KP_BROWSER_PATH: a browser binary of the engine's kind instead of
 // Playwright's own download (e.g. a system Chromium).
 const executablePath = process.env.KP_BROWSER_PATH || undefined;
@@ -83,20 +90,30 @@ const browser = await engine.launch({ headless: true, args, executablePath });
 let trail;
 try {
   const page = await browser.newPage();
+  // A panic (a wasm trap in some callback) never settles the export's
+  // promise: end the run on the page error instead of waiting forever.
+  const failed = new Promise((_, reject) => {
+    page.on("pageerror", (e) => reject(new Error(`${runtime}: page error: ${e}`)));
+    page.on("crash", () => reject(new Error(`${runtime}: the page crashed`)));
+  });
+  failed.catch(() => {});
   page.on("console", (m) => console.error(`[${runtime}] ${m.text()}`));
-  page.on("pageerror", (e) => console.error(`[${runtime}] page error: ${e}`));
+  page.on("pageerror", (e) => console.error(`[${runtime}] page error: ${e.stack ?? e}`));
   await page.goto(`${base}/index.html`);
   const t0 = Date.now();
-  trail = await page.evaluate(
-    async ([signaling, room, map, humans, ai, seed, secs]) => {
+  const ice = process.env.KP_NETPEER_ICE ?? "";
+  const run = page.evaluate(
+    async ([signaling, ice, room, map, humans, ai, seed, secs]) => {
       const kp = await import("/kernel-panic.js");
       await kp.default({ module_or_path: "/kernel-panic_bg.wasm" });
-      if (map === "probe") return await kp.kp_net_probe(signaling, room, secs);
+      if (map === "probe") return await kp.kp_net_probe(signaling, ice, room, secs);
       const bytes = new Uint8Array(await (await fetch("/map.kpmap")).arrayBuffer());
-      return await kp.kp_net_peer(signaling, room, map, bytes, humans, ai, seed, secs);
+      return await kp.kp_net_peer(signaling, ice, room, map, bytes, humans, ai, seed, secs);
     },
-    [signaling, room, map, Number(humans), Number(ai), Number(seed), Number(secs)],
+    [signaling, ice, room, map, Number(humans), Number(ai), Number(seed), Number(secs)],
   );
+  run.catch(() => {}); // rejects again once the browser closes
+  trail = await Promise.race([run, failed]);
   const ticks = trail.split("\n").filter((l) => l).length;
   console.log(`  ${runtime}: ${ticks} ticks, ${((Date.now() - t0) / 1000).toFixed(1)} s wall`);
 } finally {

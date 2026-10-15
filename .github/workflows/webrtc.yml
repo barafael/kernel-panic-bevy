@@ -15,7 +15,11 @@ name: WebRTC
 #   builds it) in headless Chromium plays one peer, a native peer the
 #   other, through the local signaling server
 #   (`net::matchbox_tests::browser_peer`, `.github/scripts/kp-netpeer.mjs`).
-#   Cross-play: the browser's trail must equal the native one.
+#   Cross-play: the browser's trail must equal the native one. The
+#   browser's ICE server is a STUN server inside the test (Google's never
+#   answered here: every handshake waited ~40 s for it to time out), and
+#   the native peer rejoins the room if a handshake stalls
+#   (net-experiments/m3-ci-flakes.md).
 
 on:
   workflow_call:

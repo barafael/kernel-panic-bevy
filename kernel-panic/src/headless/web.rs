@@ -10,13 +10,14 @@
 //!   bytes for `ticks` ticks (0: the recording's length); resolves to
 //!   `[trail, summary, dumps]`, `dumps` being the readable unit state at
 //!   each tick of `dump_at` (for the bisect), `== tick <n>` headed;
-//! - `kp_net_peer(signaling, room, map_name, map, humans, ai, seed, secs)`:
-//!   play one peer of a networked match over WebRTC (`net::matchbox`)
-//!   for `secs` seconds once the room is full, the browser side of the
+//! - `kp_net_peer(signaling, ice, room, map_name, map, humans, ai, seed,
+//!   secs)`: play one peer of a networked match over WebRTC
+//!   (`net::matchbox`; `ice` in `KP_ICE` syntax, empty: the default
+//!   servers) for `secs` seconds once the room is full, the browser side of the
 //!   browser↔native test (`.github/scripts/kp-netpeer.mjs`,
 //!   `net::matchbox_tests::browser_peer`); resolves to the trail,
 //!   `<tick> <hash>` per line;
-//! - `kp_net_probe(signaling, room, secs)`: the browser end of the
+//! - `kp_net_probe(signaling, ice, room, secs)`: the browser end of the
 //!   transport probe (`net::matchbox_tests::browser_probe`): once one
 //!   other peer is in the room, a 64-byte packet numbered from 0 every
 //!   33 ms on the unreliable channel for `secs` seconds.
@@ -101,14 +102,27 @@ async fn sleep_ms(ms: i32) {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
+/// The ICE servers of `spec` ([`IceServer::parse_list`] syntax); empty:
+/// none given (matchbox's Google STUN in a browser).
+///
+/// [`IceServer::parse_list`]: crate::net::matchbox::IceServer::parse_list
+fn ice_servers(spec: &str) -> Result<Vec<crate::net::matchbox::IceServer>, JsError> {
+    if spec.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    crate::net::matchbox::IceServer::parse_list(spec).map_err(|e| JsError::new(&e))
+}
+
 /// One peer of the networked match [`netplay::scenario`]`(map_name,
 /// humans, ai, seed)` in room `room` of the signaling server
-/// `signaling`, played for `secs` seconds of wall time after everyone
-/// is in; resolves to its trail.
+/// `signaling`, with the ICE servers `ice` (see [`ice_servers`]), played
+/// for `secs` seconds of wall time after everyone is in; resolves to its
+/// trail.
 #[wasm_bindgen]
 #[allow(clippy::too_many_arguments)]
 pub async fn kp_net_peer(
     signaling: String,
+    ice: String,
     room: String,
     map_name: String,
     map: Vec<u8>,
@@ -130,7 +144,7 @@ pub async fn kp_net_peer(
     let h = SimHarness::start(scenario, input.assets).await;
     let cfg = NetConfig {
         signaling,
-        ice: Vec::new(),
+        ice: ice_servers(&ice)?,
     };
     let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
     let mut rv = netplay::Rendezvous::default();
@@ -173,7 +187,12 @@ pub async fn kp_net_peer(
 /// The browser end of `net::matchbox_tests::browser_probe`; resolves to
 /// how many packets it sent.
 #[wasm_bindgen]
-pub async fn kp_net_probe(signaling: String, room: String, secs: f64) -> Result<String, JsError> {
+pub async fn kp_net_probe(
+    signaling: String,
+    ice: String,
+    room: String,
+    secs: f64,
+) -> Result<String, JsError> {
     use crate::net::matchbox::{MatchboxTransport, NetConfig, RoomId};
     use crate::net::transport::{Channel, Transport};
     use bevy::platform::time::Instant;
@@ -183,7 +202,7 @@ pub async fn kp_net_probe(signaling: String, room: String, secs: f64) -> Result<
     let room: RoomId = room.parse()?;
     let cfg = NetConfig {
         signaling,
-        ice: Vec::new(),
+        ice: ice_servers(&ice)?,
     };
     let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
     let mut rv = netplay::Rendezvous::default();

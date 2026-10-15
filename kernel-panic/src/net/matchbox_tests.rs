@@ -162,6 +162,12 @@ impl Signaling {
         }
     }
 
+    /// How many peers are in a room (signaling, not WebRTC: connected to
+    /// the server, whether or not anyone has a data channel to them).
+    pub fn peers_in_rooms(&self) -> usize {
+        self.rooms.0.lock().unwrap().values().map(|r| r.len()).sum()
+    }
+
     /// Host candidates only: nothing leaves the machine.
     pub fn config(&self) -> NetConfig {
         NetConfig {
@@ -170,6 +176,148 @@ impl Signaling {
         }
     }
 }
+
+/// A STUN server on a free localhost UDP port that answers every binding
+/// request with the sender's address (RFC 5389 `XOR-MAPPED-ADDRESS`),
+/// for as long as it lives. For the browser peers: a browser always
+/// gets an ICE server from matchbox (Google STUN when the list is empty,
+/// [`super::matchbox::MatchboxTransport::open`]), and matchbox waits for
+/// ICE gathering to complete before it answers an offer. Where Google's
+/// STUN does not answer, gathering ends only when its requests time out
+/// (~10 s for Chromium with the packets dropped; ~40 s on GitHub's
+/// runners, where every passing run took 39.9 s to meet), and the whole
+/// handshake waits for that. This one answers at once, and the test no
+/// longer needs the internet.
+pub(super) struct Stun {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    /// `stun:127.0.0.1:<port>`.
+    pub url: String,
+}
+
+impl Stun {
+    pub fn start() -> Self {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind STUN");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let url = format!("stun:{}", socket.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 1500];
+            while !stopped.load(Ordering::Relaxed) {
+                let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                if let Some(reply) = stun_binding_response(&buf[..n], from) {
+                    let _ = socket.send_to(&reply, from);
+                }
+            }
+        });
+        Self { stop, url }
+    }
+}
+
+impl Drop for Stun {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The success response to a STUN binding request from `from`, or
+/// `None` for anything else.
+fn stun_binding_response(req: &[u8], from: std::net::SocketAddr) -> Option<Vec<u8>> {
+    const COOKIE: [u8; 4] = 0x2112_a442u32.to_be_bytes();
+    if req.len() < 20 || req[..2] != [0x00, 0x01] || req[4..8] != COOKIE {
+        return None;
+    }
+    let txid = &req[8..20];
+    let port = from.port() ^ 0x2112;
+    let (family, addr): (u8, Vec<u8>) = match from.ip() {
+        std::net::IpAddr::V4(ip) => (1, ip.octets().to_vec()),
+        std::net::IpAddr::V6(ip) => (2, ip.octets().to_vec()),
+    };
+    // XOR with the cookie, then (IPv6) the transaction id.
+    let key: Vec<u8> = COOKIE.iter().chain(txid).copied().collect();
+    let addr: Vec<u8> = addr.iter().zip(&key).map(|(a, k)| a ^ k).collect();
+    let mut attr = vec![0x00, 0x20, 0, (4 + addr.len()) as u8, 0, family];
+    attr.extend_from_slice(&port.to_be_bytes());
+    attr.extend_from_slice(&addr);
+    let mut out = vec![0x01, 0x01];
+    out.extend_from_slice(&(attr.len() as u16).to_be_bytes());
+    out.extend_from_slice(&COOKIE);
+    out.extend_from_slice(txid);
+    out.extend_from_slice(&attr);
+    Some(out)
+}
+
+/// The browser peer's ICE servers: `stun`, unless `KP_NETPEER_ICE` says
+/// otherwise (empty: matchbox's default, Google STUN).
+fn browser_ice(stun: &Stun) -> String {
+    std::env::var("KP_NETPEER_ICE").unwrap_or_else(|_| stun.url.clone())
+}
+
+/// Join `room` on `server` from this process and wait (at most `limit`)
+/// until `others` peers have open data channels to it; the transport and
+/// every id of the room. `child` is the browser runner: its early end
+/// fails the test at once.
+///
+/// matchbox never gives up on a handshake (no timeout, no retry), so a
+/// pair that once failed to connect would wait forever. Once everyone is
+/// in the room (the server's view), attempt `n` gives the handshake
+/// `n` × [`MEET_RETRY`] (growing, so a slow but working handshake gets
+/// through); then this side leaves the room and joins it again under a
+/// new id, which starts a fresh handshake with every other peer.
+fn meet_browser(
+    server: &Signaling,
+    room: &RoomId,
+    others: usize,
+    child: &mut std::process::Child,
+    limit: Duration,
+) -> (MatchboxTransport, Vec<PeerId>) {
+    let cfg = server.config();
+    let t0 = Instant::now();
+    for attempt in 1u32.. {
+        let mut t = MatchboxTransport::open(&cfg.room_url(room), &cfg);
+        let mut rv = Rendezvous::default();
+        let mut all_in: Option<Instant> = None;
+        loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                panic!("the browser runner ended early: {status}");
+            }
+            if let Some(ids) = rv.poll(&mut t, others) {
+                eprintln!(
+                    "browser peer connected after {:?} (attempt {attempt})",
+                    t0.elapsed()
+                );
+                return (t, ids);
+            }
+            assert!(
+                t0.elapsed() < limit,
+                "the browser peer: not connected within {limit:?} ({attempt} attempts)"
+            );
+            if server.peers_in_rooms() > others {
+                let since = *all_in.get_or_insert_with(Instant::now);
+                let patience = MEET_RETRY * attempt;
+                if since.elapsed() > patience {
+                    eprintln!(
+                        "attempt {attempt}: everyone in the room for {patience:?}, \
+                         no data channel: rejoining"
+                    );
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    unreachable!()
+}
+
+/// How long [`meet_browser`]'s first attempt waits for a handshake once
+/// everyone is in the room. With the local [`Stun`] it takes well under
+/// a second.
+const MEET_RETRY: Duration = Duration::from_secs(10);
 
 fn wait_for(what: &str, limit: Duration, mut done: impl FnMut() -> bool) -> Duration {
     let t0 = Instant::now();
@@ -782,9 +930,11 @@ fn browser_probe() {
     let root = crate::paths::project_root();
     let out = root.join("target").join(format!("netprobe-{runtime}.txt"));
     let server = Signaling::start();
+    let stun = Stun::start();
     let room = RoomId::random();
     let mut child = std::process::Command::new("node")
         .current_dir(&root)
+        .env("KP_NETPEER_ICE", browser_ice(&stun))
         .args([".github/scripts/kp-netpeer.mjs", &runtime, &pkg, "-"])
         .arg(&server.url)
         .arg(room.as_str())
@@ -793,12 +943,7 @@ fn browser_probe() {
         .arg(&out)
         .spawn()
         .expect("node");
-    let cfg = server.config();
-    let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
-    let mut rv = Rendezvous::default();
-    wait_for("the browser", Duration::from_secs(180), || {
-        rv.poll(&mut t, 1).is_some()
-    });
+    let (mut t, _) = meet_browser(&server, &room, 1, &mut child, Duration::from_secs(180));
     let mut got: Vec<(u64, Instant)> = Vec::new();
     let status = loop {
         t.poll_peers();
@@ -858,9 +1003,11 @@ fn browser_peer() {
 
     let mut h = Some(SimHarness::new(netplay::scenario(map, humans, ai, seed)));
     let server = Signaling::start();
+    let stun = Stun::start();
     let room = RoomId::random();
     let mut child = std::process::Command::new("node")
         .current_dir(&root)
+        .env("KP_NETPEER_ICE", browser_ice(&stun))
         .arg(".github/scripts/kp-netpeer.mjs")
         .arg(&runtime)
         .arg(&pkg)
@@ -875,21 +1022,9 @@ fn browser_peer() {
         .arg(&out)
         .spawn()
         .expect("node");
-    let cfg = server.config();
-    let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
+    let (t, ids) = meet_browser(&server, &room, 1, &mut child, Duration::from_secs(180));
     let stats = t.stats();
-    let mut rv = Rendezvous::default();
-    let mut ids = None;
-    let setup = wait_for("the browser peer", Duration::from_secs(180), || {
-        if let Ok(Some(status)) = child.try_wait() {
-            panic!("the browser runner ended early: {status}");
-        }
-        ids = rv.poll(&mut t, 1);
-        ids.is_some()
-    });
-    eprintln!("browser peer connected after {setup:?}");
     let me = t.local_id().unwrap();
-    let ids = ids.unwrap();
     let mut peer = NetPeer::join(h.take().unwrap(), me, &ids, humans, seed, Box::new(t));
     eprintln!(
         "native peer {me} is the {}",
