@@ -878,7 +878,7 @@ impl Lobby {
         Some(if self.reopens >= MAX_REOPENS || self.reopen.is_none() {
             format!("no connection to {who}: leave and join again, or try another network")
         } else {
-            format!("connecting to {who}…")
+            format!("connecting to {who}...")
         })
     }
 

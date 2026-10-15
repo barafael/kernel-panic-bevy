@@ -268,7 +268,7 @@ impl Replay {
             names.join(", ")
         };
         format!(
-            "{when}{} · {who} · {}:{:02}",
+            "{when}{} - {who} - {}:{:02}",
             self.setup.map.replace('_', " "),
             secs / 60,
             secs % 60

@@ -46,7 +46,7 @@ const OVERLAP_TOLERANCE: f32 = 1.0;
 /// A frame may sit on the window edge; beyond this it has left it.
 const EDGE_TOLERANCE: f32 = 0.5;
 
-const PAGES: [(MenuPage, &str); 12] = [
+const PAGES: [(MenuPage, &str); 13] = [
     (MenuPage::Main, "main"),
     (MenuPage::QuickSkirmish, "quick"),
     (MenuPage::AdvancedSkirmish, "advanced"),
@@ -56,6 +56,7 @@ const PAGES: [(MenuPage, &str); 12] = [
     (MenuPage::Readme, "readme"),
     (MenuPage::Settings, "settings"),
     (MenuPage::Audio, "audio"),
+    (MenuPage::Replays, "replays"),
     (MenuPage::Multiplayer, "multiplayer"),
     // The same page in a room of our own ([`room_setup`]): fresh, then
     // with all eight seats.

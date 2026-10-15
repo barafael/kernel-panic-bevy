@@ -59,6 +59,13 @@ fn field_text(lobby: &LobbyRoom, field: Field, text: &str) -> String {
     }
 }
 
+/// The last `chars` characters of `text` (the end of a line being
+/// typed stays in view).
+fn tail(text: &str, chars: usize) -> String {
+    let n = text.chars().count();
+    text.chars().skip(n.saturating_sub(chars.max(1))).collect()
+}
+
 /// Outside a room: create one, or type a code and join.
 fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom) {
     page_heading(commands, root, page_size, "Multiplayer");
@@ -275,7 +282,7 @@ fn room_view(
         let mine = me.is_some_and(|me| seat.who == Occupant::Human(me));
         let (text, color) = occupant_text(room, seat.who, me);
         let occupant_editable = host || mine || seat.who == Occupant::Open;
-        let wide = Some(window_w * 0.36);
+        let wide = Some(window_w * 0.3);
         if occupant_editable {
             cell_button(
                 commands,
@@ -291,7 +298,7 @@ fn room_view(
         }
         let faction = seat.faction();
         let fcolor = faction_color(faction);
-        let narrow = Some(window_w * 0.13);
+        let narrow = Some(window_w * 0.11);
         if host || mine {
             cell_button(
                 commands,
@@ -362,7 +369,9 @@ fn chat_panel(
     chat: &ChatLog,
 ) {
     let size = readable(page_size * 0.6);
-    let width = window_w * 0.21;
+    let width = window_w * 0.23;
+    // Characters of the (monospace) button text that fit the column.
+    let fits = ((width - size) / (size * 0.62)) as usize;
     let (mut node, transform) = anchored(0.975, SEAT_TOP, Anchor::Rt);
     node.flex_direction = FlexDirection::Column;
     node.row_gap = Val::Px(size * 0.25);
@@ -373,7 +382,7 @@ fn chat_panel(
     cell_button(
         commands,
         panel,
-        &format!("Name: {name}"),
+        &tail(&format!("Name: {name}"), fits),
         DESC_BLUE,
         size,
         Some(width),
@@ -404,14 +413,14 @@ fn chat_panel(
         .id();
     commands.entity(panel).add_child(said);
     let typing = if lobby.chat.is_empty() && lobby.field == Field::Main {
-        "Type to chat, Enter sends_".to_string()
+        "Type to chat_".to_string()
     } else {
         format!("Say: {}", field_text(lobby, Field::Main, &lobby.chat))
     };
     cell_button(
         commands,
         panel,
-        &typing,
+        &tail(&typing, fits),
         TEAL,
         size,
         Some(width),
