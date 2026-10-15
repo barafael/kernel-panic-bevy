@@ -329,6 +329,12 @@ in-process `SimNetwork` per room code); the page shows `Transport::failure`. A d
   a later optimisation.
 - Spectators (receive the turn stream, never send), replay files and a replay
   viewer.
+- **CI flakes after M2** (done, `net-experiments/m3-ci-flakes.md`): the WebKit golden
+  replay's panics/crashes are JavaScriptCore's concurrent BBQ tier-up corrupting
+  memory (pre-M2 builds too; gone with `JSC_useConcurrentJIT=false`, which the runner
+  now sets; Safari players may hit it — open); a panic or crashed page now fails the
+  run at once. The browser↔native test waited ~40 s per handshake for Google STUN;
+  it now brings its own STUN server and rejoins a stalled room.
 
 **Turn log (agent H) — done** (`net-experiments/m3-turn-log.md`): the host keeps
 every turn of the match. Seats belong to a `PlayerKey` (random; per browser tab in

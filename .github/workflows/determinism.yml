@@ -19,7 +19,10 @@ name: Determinism
 #   wasm-release + wasm-bindgen --target web + wasm-opt -O2, as Trunk
 #   ships it), built once (`wasm-build`) and run by
 #   .github/scripts/kp-replay.mjs in Node and, through Playwright, in
-#   headless Chromium, Firefox and WebKit.
+#   headless Chromium, Firefox and WebKit. WebKit runs without
+#   JavaScriptCore's concurrent JIT, whose BBQ tier-up corrupts the
+#   page's memory now and then (net-experiments/m3-ci-flakes.md). A
+#   panic or crashed page fails the run at once.
 # - Trail: one line per tick, `<tick> <sim hash> <positions> <health>
 #   <orders> <projectiles> <units> <projectile count> <NaNs>`, LF,
 #   `trails/<log stem>.trail`, uploaded as artifact `trail-<platform>`.
