@@ -31,7 +31,9 @@ fi
 NETEM="$1"
 shift
 # Build outside the namespace (no network in there).
-BIN=$(cargo test --locked -p kernel-panic --no-run "$@" 2>&1 \
+# `--color never`: CI sets CARGO_TERM_COLOR=always, whose escapes would
+# break the match below.
+BIN=$(cargo test --locked --color never -p kernel-panic --no-run "$@" 2>&1 \
   | sed -n 's/.*Executable unittests src\/main.rs (\(.*\))/\1/p')
 if [ ! -x "$BIN" ]; then
   echo "no test binary (cargo test --no-run $*)" >&2

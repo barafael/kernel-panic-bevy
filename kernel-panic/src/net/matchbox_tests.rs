@@ -309,10 +309,11 @@ fn signaling_loss_keeps_links() {
     std::thread::sleep(Duration::from_millis(100));
     server.stop();
     let mut events = Vec::new();
-    let mut heard = 0;
+    let (mut sent, mut heard) = (0, 0);
     let t0 = Instant::now();
     while t0.elapsed() < LEAVE_GRACE * 2 {
         b.send(ida, Channel::Unreliable, vec![1]);
+        sent += 1;
         events.extend(a.poll_peers());
         heard += a.receive(Channel::Unreliable).len();
         b.poll_peers();
@@ -320,7 +321,9 @@ fn signaling_loss_keeps_links() {
     }
     let quiet_since = Instant::now();
     assert_eq!(events, Vec::new(), "B kept talking: still in");
-    assert!(heard > 50, "{heard} messages");
+    // Against what was sent: a busy runner's 50 ms sleeps stretch (CI
+    // macOS managed 47 sends' worth in the 6 s).
+    assert!(heard * 2 > sent, "{heard} of {sent} messages");
     a.send(idb, Channel::Reliable, vec![2]);
     wait_for("reliable after the server", Duration::from_secs(2), || {
         b.poll_peers();
