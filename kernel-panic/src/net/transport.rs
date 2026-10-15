@@ -14,7 +14,7 @@
 //! anything larger, and 16 KiB is the cross-browser safe size (§5).
 //!
 //! Two implementations: [`super::sim_net`] (in-memory, simulated latency
-//! and loss, for tests) and matchbox (M2), whose API this mirrors —
+//! and loss, for tests) and [`super::matchbox`] (WebRTC), whose API this mirrors —
 //! `try_update_peers` for the peer events, `channel_mut(i).try_send` /
 //! `receive`. Sending is best effort and never blocks: a send to a peer
 //! that is gone, or that the network drops, is not an error the caller
@@ -45,7 +45,7 @@ pub enum Channel {
 }
 
 /// A change in who is connected. (Made by the transports: the simulated
-/// network in tests, matchbox in M2.)
+/// network in tests, matchbox.)
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerEvent {
@@ -74,4 +74,12 @@ pub trait Transport: Send + Sync + 'static {
 
     /// Everything that arrived on `channel` since the last call.
     fn receive(&mut self, channel: Channel) -> Vec<(PeerId, Vec<u8>)>;
+
+    /// The connection to the room is gone for good, and why (matchbox:
+    /// the signaling server could not be reached, or the socket closed).
+    /// Its peers were reported [`PeerEvent::Left`].
+    #[allow(dead_code)]
+    fn failure(&self) -> Option<String> {
+        None
+    }
 }
