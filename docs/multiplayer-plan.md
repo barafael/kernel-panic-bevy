@@ -259,6 +259,19 @@ the sim (B's `MatchControl`, merged).
 - Localhost matchbox tests with netem loss/latency (X-transport's `unshare -rn`
   setup) in CI-able form.
 
+**Lobby (agent E) — done** (`net-experiments/m2-lobby.md`): `net::lobby` on any
+`Transport`: host = lowest compatible `PeerId`, re-elected in the lobby (a new
+host takes the room over as last seen; every `Hello` carries it); the host's
+room (map, AI difficulty, ≤ 8 seats open / AI / peer with faction and ally
+team, members with ready flags and the host's verdict); `Start` carries the
+setup with the host's seed, the session roster and the `Compat` stamp (moved
+to `net::compat` with `SIM_VERSION`); a guest whose stamp differs refuses with
+the reason and leaves. Lobby packets start with a tag no session envelope has.
+Multiplayer page in the launch menu, `#room=` / `--room` / `KP_ROOM`. One call
+site to switch to matchbox: `lobby::connect` (an in-process `SimNetwork` room
+until then). A demo swap never takes a waiting `NextNetMatch`; a networked
+match's `LocalTeam` is the roster's seat from the swap on.
+
 ### M3 — Robustness · ~1.5–2 weeks
 
 - **Speed control** (Spring's LagProtection): peers report sim load once a second;

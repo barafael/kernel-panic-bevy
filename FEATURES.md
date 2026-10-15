@@ -838,3 +838,15 @@ context. Most variants animate over their frames at a fixed rate
   game speed are commands too, so every peer pauses and speeds up together.
 - Golden replays (`--replay`, `--record-golden`, feature `replay`) and a
   command fuzz (`--command-fuzz`) in CI.
+- Multiplayer page in the launch menu (`net::lobby`,
+  `net-experiments/m2-lobby.md`): create a room (a five-character code) or
+  type a code and join; the room lists every seat (occupant, faction, team),
+  the map and AI difficulty, who watches and who cannot play and why
+  (another game version, a missing or different map). The host (the lowest
+  peer id; the next one takes over if it leaves) edits seats, adds AIs,
+  picks the map; guests sit on open seats, pick their faction and get
+  ready; Start hands everyone the same setup and seed and the match loads
+  as usual, the local seat being yours. Launch into a room with
+  `#room=<code>` in the web page's URL, `--room <code>` or `KP_ROOM`
+  natively; `KP_NAME` sets the name shown. Until the matchbox transport is
+  merged a room only reaches games in the same process (tests).
