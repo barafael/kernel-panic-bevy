@@ -9,14 +9,21 @@
 //! - `kp_replay(log, map, ticks, dump_at)`: play `log` on the baked map
 //!   bytes for `ticks` ticks (0: the recording's length); resolves to
 //!   `[trail, summary, dumps]`, `dumps` being the readable unit state at
-//!   each tick of `dump_at` (for the bisect), `== tick <n>` headed.
+//!   each tick of `dump_at` (for the bisect), `== tick <n>` headed;
+//! - `kp_net_peer(signaling, room, map_name, map, humans, ai, seed, secs)`:
+//!   play one peer of a networked match over WebRTC (`net::matchbox`)
+//!   for `secs` seconds once the room is full, the browser side of the
+//!   browser↔native test (`.github/scripts/kp-netpeer.mjs`,
+//!   `net::matchbox_tests::browser_peer`); resolves to the trail,
+//!   `<tick> <hash>` per line.
 //!
-//! The same harness as native ([`super::replay::play`]), the map served
-//! from an in-memory asset source.
+//! The same harness as native ([`super::replay::play`],
+//! [`super::netplay`]), the map served from an in-memory asset source.
 
 use wasm_bindgen::prelude::*;
 
 use super::replay::{self, MapInput, PlayOptions, Replay};
+use super::{SimHarness, netplay};
 
 fn console_error(message: &str) {
     let global = js_sys::global();
@@ -75,4 +82,86 @@ pub async fn kp_replay(
     }
     out.push(&dumps.into());
     Ok(out)
+}
+
+/// Resolve after `ms` milliseconds (`setTimeout`).
+async fn sleep_ms(ms: i32) {
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into())
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+            .expect("no global setTimeout");
+        let _ = set_timeout.call2(&global, &resolve, &ms.into());
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+}
+
+/// One peer of the networked match [`netplay::scenario`]`(map_name,
+/// humans, ai, seed)` in room `room` of the signaling server
+/// `signaling`, played for `secs` seconds of wall time after everyone
+/// is in; resolves to its trail.
+#[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
+pub async fn kp_net_peer(
+    signaling: String,
+    room: String,
+    map_name: String,
+    map: Vec<u8>,
+    humans: u8,
+    ai: u8,
+    seed: u32,
+    secs: f64,
+) -> Result<String, JsError> {
+    use crate::net::matchbox::{MatchboxTransport, NetConfig, RoomId};
+    use crate::net::transport::Transport;
+    use bevy::platform::time::Instant;
+    use std::time::Duration;
+
+    install_panic_hook();
+    let room: RoomId = room.parse()?;
+    let input = MapInput::in_memory(&map_name, map);
+    let mut scenario = netplay::scenario(&map_name, humans, ai, seed as u64);
+    scenario.map_file = Some(input.file.clone());
+    let h = SimHarness::start(scenario, input.assets).await;
+    let cfg = NetConfig {
+        signaling,
+        ice: Vec::new(),
+    };
+    let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
+    let mut rv = netplay::Rendezvous::default();
+    let t0 = Instant::now();
+    let ids = loop {
+        if let Some(ids) = rv.poll(&mut t, humans as usize - 1) {
+            break ids;
+        }
+        if let Some(why) = t.failure() {
+            return Err(JsError::new(&why));
+        }
+        if t0.elapsed() > Duration::from_secs(120) {
+            return Err(JsError::new("the room never filled"));
+        }
+        sleep_ms(10).await;
+    };
+    let me = t.local_id().expect("an id once connected");
+    console_error(&format!(
+        "browser peer {me}: room of {} in {:?}",
+        ids.len(),
+        t0.elapsed()
+    ));
+    let mut peer = netplay::NetPeer::join(h, me, &ids, humans, seed as u64, Box::new(t));
+    let start = Instant::now();
+    let mut last = start;
+    while start.elapsed().as_secs_f64() < secs {
+        let now = Instant::now();
+        let dt = (now - last).min(Duration::from_millis(100));
+        last = now;
+        peer.frame(dt);
+        if peer.session(|s| s.ended().is_some()) {
+            break;
+        }
+        // WebRTC and the timers run on the event loop.
+        sleep_ms(4).await;
+    }
+    Ok(netplay::trail_text(&peer.trail()))
 }

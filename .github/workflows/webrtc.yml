@@ -1,0 +1,113 @@
+name: WebRTC
+
+# The lockstep session over real WebRTC (docs/multiplayer-plan.md M2,
+# net-experiments/m2-transport.md), beyond what `cargo test` covers
+# (the transport basics and the 2- and 8-peer localhost matches run in
+# ci.yml's test job):
+#
+# - netem: a 4-peer match (every peer a full headless game, one
+#   process, in-process signaling server) under emulated latency,
+#   jitter and loss on `lo` (`scripts/netem-matchbox.sh --sudo`; Ubuntu
+#   runners refuse the unprivileged `unshare -rn` the script uses
+#   locally). The trails must agree.
+# - browser: the wasm build (`--features replay`, as determinism.yml
+#   builds it) in headless Chromium plays one peer, a native peer the
+#   other, through the local signaling server
+#   (`net::matchbox_tests::browser_peer`, `.github/scripts/kp-netpeer.mjs`).
+#   Cross-play: the browser's trail must equal the native one.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_BACKTRACE: 1
+  PLAYWRIGHT_VERSION: 1.56.1
+  BINARYEN_VERSION: version_123
+
+jobs:
+  netem:
+    name: netem (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Wi-Fi-ish: RTT 40 ms, 0.5 % loss, jitter (reorders).
+          - label: rtt40-loss0.5
+            netem: delay 20ms 5ms loss 0.5%
+          # A bad continental link: RTT 100 ms, 2 % loss.
+          - label: rtt100-loss2
+            netem: delay 50ms 10ms loss 2%
+    runs-on: ubuntu-latest
+    env:
+      KP_NET_PEERS: 4
+      KP_NET_SECS: 40
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: webrtc-netem
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: ./.github/actions/bake-maps
+      - name: 4 peers under netem
+        run: scripts/netem-matchbox.sh --sudo "${{ matrix.netem }}"
+
+  browser:
+    name: browser <-> native
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/linux-deps
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: webrtc-browser
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - uses: ./.github/actions/bake-maps
+      # The CLI must match the wasm-bindgen crate in Cargo.lock exactly.
+      - name: Install wasm-bindgen and wasm-opt
+        shell: bash
+        run: |
+          v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+          echo "wasm-bindgen $v, binaryen $BINARYEN_VERSION"
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz --strip-components=1 -C "$HOME/.local/bin" "wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen"
+          curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_VERSION/binaryen-$BINARYEN_VERSION-x86_64-linux.tar.gz" \
+            | tar -xz -C "$HOME"
+          ln -sf "$HOME/binaryen-$BINARYEN_VERSION/bin/wasm-opt" "$HOME/.local/bin/wasm-opt"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Build the browser peer (wasm-release, wasm-bindgen, wasm-opt -O2)
+        shell: bash
+        run: |
+          cargo build --profile wasm-release --locked -p kernel-panic --features replay --target wasm32-unknown-unknown
+          wasm-bindgen --target web --no-typescript --out-dir pkg --out-name kernel-panic \
+            target/wasm32-unknown-unknown/wasm-release/kernel-panic.wasm
+          wasm-opt -O2 --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
+            --enable-mutable-globals --enable-multivalue --enable-reference-types \
+            pkg/kernel-panic_bg.wasm -o pkg/kernel-panic_bg.wasm
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Install Playwright and Chromium
+        shell: bash
+        run: |
+          npm install --no-save --no-audit --no-fund "playwright@$PLAYWRIGHT_VERSION"
+          npx playwright install --with-deps chromium
+      - name: Browser peer against a native peer
+        env:
+          KP_NETPEER_PKG: pkg
+          KP_NETPEER_RUNTIME: chromium
+          KP_NETPEER_SECS: 30
+        run: cargo test --locked -p kernel-panic net::matchbox_tests::browser_peer -- --ignored --exact --nocapture
