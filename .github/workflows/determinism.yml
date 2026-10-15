@@ -284,6 +284,9 @@ jobs:
         # IEEE engines); native-to-web is the cross-play risk this proves.
         runtime: [node, chromium, firefox, webkit]
     runs-on: ubuntu-latest
+    # A browser run takes 2-12 min; a hung one (WebKit once sat 4 h) would
+    # otherwise hold every later main run in the concurrency queue.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
