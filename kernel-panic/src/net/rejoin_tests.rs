@@ -516,7 +516,12 @@ mod full {
 
     fn net_session(h: &mut SimHarness, next: NextNetMatch, dumps: &std::path::Path) {
         let w = h.world_mut();
-        w.insert_resource(NetSession::from_next(next));
+        let mut net = NetSession::from_next(next);
+        // A fast machine whatever this one is: the host's speed control
+        // (`net::speed`) leaves the game at full speed (as
+        // `headless::netplay`).
+        net.pacer.cost = Some(Duration::from_millis(1));
+        w.insert_resource(net);
         w.insert_resource(DumpDir(dumps.to_path_buf()));
         w.resource_mut::<HashLog>().enabled = true;
     }

@@ -382,8 +382,28 @@ reload after Back to room) is the room's: the session ignores it and the room wa
 for the host ("away"). A `Bye` drops the seat at once (no rejoin grace; it resigned
 first). The replay is still kept: the session (and its log) lives until the next match
 swap. One version bump for all of M3: wire 3 (`Joined`, then `Bye`, `Chat`,
-`Away`), lobby 2 (`Hello::key`, `Running`, `Chat`); `SimCommand` 20 reserved for
-speed control.
+`Away`, and G's `Load`, `Loads`), lobby 2 (`Hello::key`, `Running`, `Chat`).
+
+**Speed (agent G) — done** (`net-experiments/m3-speed.md`): a tick costs 0.54 ms (4v4)
+and 1.26 ms (8-player FFA, ~220 units) natively on CI, 0.4–1.5 ms in Node, Chromium and
+WebKit. The "6× slower Firefox" is Playwright's patched Firefox build: Mozilla's Firefox
+(142.0.1, the same version, and 157) runs the module at V8's speed; nothing of ours to fix.
+Speed control as Spring's `LagProtection`: every peer measures the share of a core its sim
+needs at the current speed and reports it with its backlog once a second (`Msg::Load`); every
+2 s the host applies Spring's rule (`GameServer.cpp:881-967`) with the **maximum** load (Spring's
+`SpeedControl` 2, aim 75 %; Spring's default median would leave a slow 1v1 opponent behind for
+good) and sequences `SimCommand::InternalSpeed` (index 20) from the server seat 255; every peer
+applies it on the same tick (`MatchControl::internal_percent` paces the driver; `SetSpeed` as
+`UserSpeedChange`). CPU column and speed in the player list and the status line. Full-sim test:
+a guest able to run 2/3 of 1× slows the game to 50 % in ~10 s and stays ≤ 3 ticks behind; fast
+again, back to 1× in 12 s.
+
+**All of M3 merged (G + H + I):** `SimCommand::InternalSpeed` is index 20 (H's
+placeholder gone), `Returned` 21. The speed control counts neither late joiners while
+they catch up (they send no load until live, as Spring leaves a reconnecting player
+out, `GameServer.cpp:900-904`) nor hidden tabs (`Msg::Away`); replays play the
+recorded speed changes and report nothing. One version bump for all of M3:
+`SIM_VERSION` 6, wire 3, lobby 2, replay format 4.
 
 ### Later
 

@@ -905,3 +905,10 @@ context. Most variants animate over their frames at a fixed rate
   slow timers to once a second there), so a networked match goes on; the
   others' player lists say "tab hidden". A guest that stops getting any
   further for a minute is dropped.
+- Speed control (`net-experiments/m3-speed.md`, Spring's lag protection): every
+  player's machine reports how much of a core its simulation needs; when one
+  can't keep up, the host slows the whole game down until it can (every peer on
+  the same tick) and back up to the chosen speed once it recovers. The player
+  list shows each player's CPU load (red from 75 %, blinking for the one holding
+  the game down) and the reduced speed; the line at the top says "Speed 0.50x
+  (slowed from 1.0x: a player can't keep up)".

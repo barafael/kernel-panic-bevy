@@ -17,6 +17,8 @@
 //! | [`Msg::Bye`] — out of the match, back to the room (the connection stays) | guest → host, host → all | reliable |
 //! | [`Msg::Chat`] — a chat line (the host checks the sender and relays it) | guest → host → all | reliable |
 //! | [`Msg::Away`] — the sender's browser tab is hidden (or shown again) | guest → host → all | reliable |
+//! | [`Msg::Load`] — its sim load and how far behind it is (`net::speed`) | guest → host | unreliable, 1/s |
+//! | [`Msg::Loads`] — everyone's load, for the player list | host → all | unreliable, 1/s |
 //!
 //! Both unreliable streams repeat what the other side has not
 //! acknowledged, so a lost packet costs one packet interval, not a
@@ -30,7 +32,8 @@ use super::transport::{MAX_MESSAGE, PeerId};
 /// Bumped whenever a message changes shape. Peers with another version
 /// ignore each other's messages (the M2 handshake refuses them first).
 /// 2 (M2): [`Msg::Pings`]. 3 (M3): [`Msg::Joined`] (turn log),
-/// [`Msg::Bye`], [`Msg::Chat`], [`Msg::Away`] (rooms).
+/// [`Msg::Bye`], [`Msg::Chat`], [`Msg::Away`] (rooms), [`Msg::Load`],
+/// [`Msg::Loads`] (speed control).
 pub const WIRE_VERSION: u16 = 3;
 
 /// One player's commands of one turn, in issue order.
@@ -178,6 +181,20 @@ pub enum Msg {
     Away {
         peer: PeerId,
         away: bool,
+    },
+    /// The guest's sim load in permille of one core at the current game
+    /// speed, and the turns it holds without having applied them
+    /// (`net::speed`; Spring's `NETMSG_CPU_USAGE`).
+    Load {
+        permille: u16,
+        behind: u16,
+    },
+    /// Everyone's last [`Msg::Load`] (the host's own measured), in
+    /// roster order (`u16::MAX`: not known), for the player list
+    /// (Spring's `NETMSG_PLAYERINFO`).
+    Loads {
+        permille: Vec<u16>,
+        behind: Vec<u16>,
     },
 }
 

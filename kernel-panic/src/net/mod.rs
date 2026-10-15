@@ -63,6 +63,9 @@ pub mod session;
 mod session_tests;
 #[cfg(test)]
 pub mod sim_net;
+pub mod speed;
+#[cfg(test)]
+mod speed_tests;
 pub mod state;
 pub mod transport;
 pub mod web_tab;
@@ -354,11 +357,14 @@ pub enum SimCommand {
     /// guest's own is refused at sequencing.
     Dropped,
     // M3.
-    /// Index 20 belongs to the speed control (M3, `docs/multiplayer-plan.md`);
-    /// this stand-in keeps [`SimCommand::Returned`] at 21 until it lands.
-    /// Never issued; refused when applied.
-    #[doc(hidden)]
-    Reserved20,
+    /// The host's speed control (Spring's lag protection,
+    /// `NETMSG_INTERNAL_SPEED`; [`speed`]): the game runs at `percent`
+    /// of real time, at most the players' speed, while a player's
+    /// machine can't keep up. Only from [`speed::SERVER_PLAYER`], whose
+    /// frames carry nothing else.
+    InternalSpeed {
+        percent: u16,
+    },
     /// The player's peer came back after its seat was dropped
     /// (`net::rejoin`): the host puts it in the turn stream in that
     /// player's name, after the `Dropped`. The seat returns to play if
@@ -423,7 +429,7 @@ impl SimCommand {
             | Dev(_)
             | Take { .. }
             | Dropped
-            | Reserved20
+            | InternalSpeed { .. }
             | Returned => None,
         }
     }

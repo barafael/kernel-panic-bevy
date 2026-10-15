@@ -30,6 +30,10 @@
 //!   apply, so every peer changes pace on the same tick ([`GameSpeed`]
 //!   is the driver's view of it). This is the one place game speed
 //!   scales the clock (`net::control`).
+//! - **Speed control** (M3, `net::speed`): the driver times every tick
+//!   ([`LoadMeter`]) and hands the session this peer's load once a
+//!   second; on the host the session then runs Spring's lag protection
+//!   and may slow the game, as a command like the others.
 //! - **Desync:** every peer stops at the tick the host names and writes
 //!   a state dump ([`DumpDir`]; the console and a download on the web).
 //!   The match stays paused (Spring plays on).
@@ -65,6 +69,7 @@ use super::chat::{ChatLine, ChatLog};
 use super::session::{
     Desync, Ended, HASH_INTERVAL, PeerInfo, Session, SessionConfig, SessionEvent,
 };
+use super::speed::LoadMeter;
 use super::transport::{PeerId, Transport};
 use super::wire::Turn;
 use super::{CommandBus, CommandFrame, SimCommand};
@@ -78,8 +83,12 @@ use crate::map_loading::MatchScopeAppExt;
 /// [`MatchControl`]: super::MatchControl
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GameSpeed {
-    /// Game seconds per real second (Spring's `userSpeedFactor`).
+    /// Game seconds per real second the game runs at (Spring's
+    /// `speedFactor`: the players' speed, or less while the speed
+    /// control slows the game).
     pub factor: f32,
+    /// The players' speed (Spring's `wantedSpeedFactor`).
+    pub wanted: f32,
     pub paused: bool,
 }
 
@@ -87,9 +96,15 @@ impl Default for GameSpeed {
     fn default() -> Self {
         Self {
             factor: 1.0,
+            wanted: 1.0,
             paused: false,
         }
     }
+}
+
+/// A speed factor in percent, as `MatchControl` holds it.
+fn percent(factor: f32) -> u16 {
+    (factor * 100.0).round() as u16
 }
 
 /// Whether a command, sequenced while the sim is paused, makes the host
@@ -159,6 +174,14 @@ pub struct Pacer {
     pub rate: f32,
     /// The viewer paused a replay: no tick runs.
     pub hold: bool,
+    /// This peer's sim load (`net::speed`).
+    pub load: LoadMeter,
+    /// What a tick costs, instead of timing it: a machine of a given
+    /// speed in tests (`None`: measured). A frame then also runs only
+    /// as many ticks as fit in its length, as on a machine that slow.
+    pub cost: Option<Duration>,
+    /// With [`Self::cost`]: the frame time left for ticks.
+    pub capacity: Duration,
 }
 
 impl Default for Pacer {
@@ -170,6 +193,9 @@ impl Default for Pacer {
             fast_forward: false,
             rate: 1.0,
             hold: false,
+            load: LoadMeter::default(),
+            cost: None,
+            capacity: Duration::ZERO,
         }
     }
 }
@@ -183,6 +209,8 @@ pub struct FrameReport {
     pub extra: u32,
     /// The clock was due a tick and no turn was there.
     pub starved: bool,
+    /// The machine had no time for more ticks ([`Pacer::cost`]).
+    pub busy: bool,
 }
 
 /// The sim side of a frame, as [`drive_frame`] needs it: the game world
@@ -230,7 +258,16 @@ pub fn drive_frame(
         (p.catch_up.max_extra, p.catch_up.budget)
     };
     let t0 = budget.map(|_| Instant::now());
+    if let Some(cost) = p.cost {
+        // A frame is as long as its ticks at least: no more of them than
+        // fit, with nothing banked beyond one.
+        p.capacity = (p.capacity + delta).min(delta + cost);
+    }
     while !s.halted() && !p.hold {
+        if p.cost.is_some_and(|c| p.capacity < c) {
+            rep.busy = true;
+            break;
+        }
         let paused = r.speed().paused;
         if s.is_host() {
             if !s.started() {
@@ -246,7 +283,7 @@ pub fn drive_frame(
             } else {
                 break;
             }
-            run_one(s, r, now);
+            run_one(s, p, r, now);
             rep.paced += 1;
             continue;
         }
@@ -257,17 +294,17 @@ pub fn drive_frame(
         }
         if paused {
             // Only a turn the host cut to resume can be here.
-            run_one(s, r, now);
+            run_one(s, p, r, now);
             rep.paced += 1;
         } else if p.acc >= step {
             p.acc -= step;
-            run_one(s, r, now);
+            run_one(s, p, r, now);
             rep.paced += 1;
         } else if ready > p.catch_up.target_backlog
             && rep.extra < max_extra
             && budget.zip(t0).is_none_or(|(b, t0)| t0.elapsed() < b)
         {
-            run_one(s, r, now);
+            run_one(s, p, r, now);
             rep.extra += 1;
         } else {
             break;
@@ -280,10 +317,14 @@ pub fn drive_frame(
             s.submit(frame);
         }
     }
-    if rep.starved {
+    if rep.starved || rep.busy {
         // Bank no more than one tick, or a burst of arrivals would play
-        // back in fast-forward (cake's `Match::advance`).
+        // back in fast-forward (cake's `Match::advance`). A machine too
+        // slow for the clock loses the time, as Bevy's capped frame
+        // delta loses it.
         p.acc = p.acc.min(step);
+    }
+    if rep.starved {
         p.starved_since.get_or_insert(now);
     } else if rep.paced + rep.extra > 0 {
         p.starved_since = None;
@@ -298,6 +339,21 @@ pub fn drive_frame(
         p.fast_forward = false;
         info!("caught up with the match at tick {}", s.applied());
     }
+    if s.is_networked() && !s.halted() {
+        // Speed control (`net::speed`): this peer's load once a second;
+        // the host decides. Not while catching up with a match joined
+        // late: Spring leaves a reconnecting player out until it is
+        // nearly live (`GameServer.cpp:900-904`).
+        let speed = r.speed();
+        if let Some(cpu) = p.load.report(now, speed.factor)
+            && !p.fast_forward
+        {
+            s.report_load(now, cpu);
+        }
+        if !speed.paused {
+            s.protect_speed(now, percent(speed.factor), percent(speed.wanted));
+        }
+    }
     if s.halted()
         && let Some(d) = s.desync().filter(|d| !d.dumped).cloned()
     {
@@ -310,7 +366,7 @@ pub fn drive_frame(
     rep
 }
 
-fn run_one(s: &mut Session, r: &mut impl TickRunner, now: Duration) {
+fn run_one(s: &mut Session, p: &mut Pacer, r: &mut impl TickRunner, now: Duration) {
     for frame in r.seal(s.delay()) {
         s.submit(frame);
     }
@@ -320,12 +376,16 @@ fn run_one(s: &mut Session, r: &mut impl TickRunner, now: Duration) {
     let Some(turn) = s.pop() else {
         return;
     };
+    let t0 = p.cost.is_none().then(Instant::now);
     r.run(&turn);
     let frame = turn.tick + 1;
     if s.is_networked() && frame.is_multiple_of(HASH_INTERVAL) {
         let hash = r.hash();
         s.record_hash(frame, hash);
     }
+    let cost = p.cost.or(t0.map(|t| t.elapsed())).unwrap_or_default();
+    p.capacity = p.capacity.saturating_sub(cost);
+    p.load.tick(cost);
 }
 
 // --- the game side -----------------------------------------------------
@@ -572,6 +632,7 @@ impl TickRunner for WorldRunner<'_> {
             .get_resource::<super::MatchControl>()
             .map_or_else(GameSpeed::default, |c| GameSpeed {
                 factor: c.speed(),
+                wanted: c.wanted_speed(),
                 paused: c.paused,
             })
     }
@@ -815,7 +876,7 @@ pub fn drive_fixed_main(world: &mut World) {
             hold: net.pacer.hold,
             speed: world
                 .get_resource::<super::MatchControl>()
-                .map_or(100, |c| c.speed_percent),
+                .map_or(100, |c| c.internal_percent),
         });
         let mut status = world.get_resource_or_insert_with(NetStatus::default);
         let dump = dumped.or(status.dump.take().filter(|_| s.desync().is_some()));

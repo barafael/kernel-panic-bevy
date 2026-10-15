@@ -2,13 +2,15 @@
 //! [`NetStatus`] (never the sim):
 //!
 //! - **Player list**, top right: seat, ally / enemy / spectator, name,
-//!   round trip to the host — Spring's player roster
+//!   sim load, round trip to the host — Spring's player roster
 //!   (`Game/UI/PlayerRosterDrawer.cpp`: "Num, User name, CPU, Ping",
-//!   `A` / `E` / `S` prefixes, the ping coloured green → red between
-//!   250 and 1000 ms). Shown by default as Spring's (`ShowPlayerInfo`
-//!   1, `Game/Game.cpp:148`); [`TOGGLE_KEY`] hides and shows it (Spring
-//!   binds no key to its `info` action). The input delay in force heads
-//!   it.
+//!   `A` / `E` / `S` prefixes, the CPU coloured green → red up to 75 %
+//!   and blinking while the game is slowed down, the ping green → red
+//!   between 250 and 1000 ms). Shown by default as Spring's
+//!   (`ShowPlayerInfo` 1, `Game/Game.cpp:148`); [`TOGGLE_KEY`] hides and
+//!   shows it (Spring binds no key to its `info` action). The input
+//!   delay in force heads it, and the game speed while the host's speed
+//!   control holds it down (`net::speed`).
 //! - **Banner**, top left: a desync (and where the dump went), the end
 //!   of the match for this peer (the host left or was lost, the host
 //!   dropped us), leaving, a stall ("Waiting for …"), catching up with
@@ -200,11 +202,23 @@ fn toggle_player_list(keys: Res<ButtonInput<KeyCode>>, mut shown: ResMut<PlayerL
     }
 }
 
-/// One line of the player list.
+/// One line of the player list: coloured parts.
 #[derive(Clone, Debug, PartialEq)]
 struct Row {
-    text: String,
-    color: Color,
+    spans: Vec<(String, Color)>,
+}
+
+impl Row {
+    fn one(text: String, color: Color) -> Self {
+        Self {
+            spans: vec![(text, color)],
+        }
+    }
+
+    #[cfg(test)]
+    fn text(&self) -> String {
+        self.spans.iter().map(|(t, _)| t.as_str()).collect()
+    }
 }
 
 const HEAD: Color = Color::srgb(1.0, 1.0, 0.25);
@@ -222,8 +236,23 @@ fn ping_color(ms: u32) -> Color {
     )
 }
 
-/// What the list says: a heading with the input delay, then a row per
-/// peer in roster order.
+/// Spring's CPU colour (`PlayerRosterDrawer.cpp:90`): green at no
+/// load, red from 75 % (the speed control's aim), dimmed while it
+/// blinks (`slowing`: this player's load holds the game down).
+fn cpu_color(permille: u16, slowing: bool, blink: bool) -> Color {
+    let cpu = f32::from(permille) / 1000.0;
+    if slowing && blink {
+        return Color::srgb(0.5, 0.01, 0.01);
+    }
+    Color::srgb(
+        (cpu * 2.0 / 0.75).det_clamp(0.01, 1.0),
+        ((1.0 - cpu / 0.75) * 2.0).det_clamp(0.01, 1.0),
+        0.01,
+    )
+}
+
+/// What the list says: a heading with the input delay (and the game
+/// speed while slowed down), then a row per peer in roster order.
 fn player_rows(
     status: &NetStatus,
     names: &PeerNames,
@@ -231,14 +260,19 @@ fn player_rows(
     alliances: Option<&Alliances>,
     control: Option<&MatchControl>,
 ) -> Vec<Row> {
-    let mut rows = vec![Row {
-        text: format!(
-            "Players · delay {} ({} ms)",
-            status.delay,
-            status.delay * 1000 / 30
-        ),
-        color: HEAD,
-    }];
+    let mut head = format!(
+        "Players · delay {} ({} ms)",
+        status.delay,
+        status.delay * 1000 / 30
+    );
+    let slowed = control.filter(|c| c.slowed());
+    if let Some(c) = slowed {
+        head.push_str(&format!(" · speed {:.2}x", c.speed()));
+    }
+    let mut rows = vec![Row::one(head, HEAD)];
+    // Spring blinks the CPU of a loaded player while the game is slowed
+    // (`currentTime & 128`, every other second).
+    let blink = status.now.as_secs() % 2 == 1;
     let waiting: &[_] = status.waiting.as_ref().map_or(&[], |(who, _)| who);
     for p in &status.peers {
         let (seat, side) = match p.player {
@@ -275,9 +309,20 @@ fn player_rows(
             Some((false, true)) => "  resigned",
             _ => "",
         };
+        let color = if p.me && !p.gone { Color::WHITE } else { color };
+        let cpu = match p.load_permille.filter(|_| !p.gone) {
+            Some(l) => (
+                format!("{:>3}% ", (u32::from(l) + 5) / 10),
+                cpu_color(l, slowed.is_some() && p.player.is_some() && l > 750, blink),
+            ),
+            None => ("   … ".to_string(), GONE),
+        };
         rows.push(Row {
-            text: format!("{seat} {side:<2} {name:<16} {state}{note}"),
-            color: if p.me && !p.gone { Color::WHITE } else { color },
+            spans: vec![
+                (format!("{seat} {side:<2} {name:<16} "), color),
+                cpu,
+                (format!("{state}{note}"), color),
+            ],
         });
     }
     rows
@@ -332,14 +377,23 @@ fn show_player_list(
         ))
         .id();
     for row in rows {
-        commands.spawn((
-            Text::new(row.text),
-            TextFont::from_font_size(15.0),
-            TextColor(row.color),
-            TextLayout::new(Justify::Left, LineBreak::NoWrap),
-            Pickable::IGNORE,
-            ChildOf(root),
-        ));
+        commands
+            .spawn((
+                Text::default(),
+                TextFont::from_font_size(15.0),
+                TextLayout::new(Justify::Left, LineBreak::NoWrap),
+                Pickable::IGNORE,
+                ChildOf(root),
+            ))
+            .with_children(|line| {
+                for (text, color) in row.spans {
+                    line.spawn((
+                        TextSpan::new(text),
+                        TextFont::from_font_size(15.0),
+                        TextColor(color),
+                    ));
+                }
+            });
     }
 }
 
@@ -444,6 +498,8 @@ mod tests {
             ping_ms: ping,
             gone: false,
             away: false,
+            load_permille: ping.map(|_| n as u16 * 200),
+            behind: None,
         }
     }
 
@@ -462,8 +518,8 @@ mod tests {
         }
     }
 
-    /// Seat, side, name, ping; the host and spectators marked; the
-    /// player who left greyed out, a resigned one noted.
+    /// Seat, side, name, load, ping; the host and spectators marked;
+    /// the player who left greyed out, a resigned one noted.
     #[test]
     fn player_list_rows() {
         let mut st = status();
@@ -476,14 +532,26 @@ mod tests {
         control.resigned.insert(2);
         control.dropped.insert(2);
         let rows = player_rows(&st, &names, 1, Some(&al), Some(&control));
-        let text: Vec<&str> = rows.iter().map(|r| r.text.as_str()).collect();
+        let text: Vec<String> = rows.iter().map(Row::text).collect();
         assert_eq!(text[0], "Players · delay 4 (133 ms)");
-        assert_eq!(text[1], " 0 A  ada (host)       0 ms");
-        assert_eq!(text[2], " 1 A  peer-0002        84 ms");
-        assert_eq!(text[3], " 2 E  peer-0003        left  dropped");
-        assert_eq!(text[4], " - S  peer-0004        tab hidden");
-        assert_eq!(rows[3].color, GONE);
-        assert_eq!(rows[2].color, Color::WHITE, "this peer");
+        assert_eq!(text[1], " 0 A  ada (host)        20% 0 ms");
+        assert_eq!(text[2], " 1 A  peer-0002         40% 84 ms");
+        assert_eq!(text[3], " 2 E  peer-0003           … left  dropped");
+        assert_eq!(text[4], " - S  peer-0004           … tab hidden");
+        assert_eq!(rows[3].spans[0].1, GONE);
+        assert_eq!(rows[2].spans[0].1, Color::WHITE, "this peer");
+        // Slowed down for peer 2 (load 80 %): the speed heads the list,
+        // its CPU blinks.
+        control.speed_percent = 100;
+        control.internal_percent = 62;
+        st.peers[1].load_permille = Some(800);
+        st.now = Duration::from_secs(3);
+        let rows = player_rows(&st, &names, 1, Some(&al), Some(&control));
+        assert_eq!(rows[0].text(), "Players · delay 4 (133 ms) · speed 0.62x");
+        assert_eq!(
+            rows[2].spans[1],
+            (" 80% ".to_string(), Color::srgb(0.5, 0.01, 0.01))
+        );
     }
 
     /// Recent lines fade after [`CHAT_SHOW`]; with the line open, the

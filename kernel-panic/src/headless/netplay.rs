@@ -121,6 +121,9 @@ impl NetPeer {
                 budget: None,
                 ..CatchUp::default()
             },
+            // A fast machine whatever this one is: the host's speed
+            // control (`net::speed`) leaves the game at full speed.
+            cost: Some(Duration::from_millis(1)),
             ..Pacer::default()
         };
         let w = h.world_mut();
