@@ -74,6 +74,7 @@ pub fn setup(seed: u64) -> MatchSetup {
         difficulty: 2,
         seed,
         sandbox: false,
+        rules: Default::default(),
     }
 }
 
@@ -452,6 +453,7 @@ fn malformed(
         let mut commands = vec![chaos_command(d, v, team, tick, false)];
         if d.chance(20) {
             commands.push(SimCommand::Resign);
+            commands.push(SimCommand::Dropped);
         }
         counted += commands.len() as u64;
         frames.push(CommandFrame {

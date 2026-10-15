@@ -70,7 +70,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 pub use codec::{IdList, NetPos, PosList};
-pub use control::{DevCommand, MatchControl};
+pub use control::{DevCommand, MatchControl, MatchRules};
 pub use driver::LockstepPlugin;
 
 use crate::map_loading::MatchScopeAppExt;
@@ -337,6 +337,16 @@ pub enum SimCommand {
     Take {
         from: u8,
     },
+    // M2.
+    /// The player's peer left the match (disconnected or timed out):
+    /// the host puts it in the turn stream in that player's name, so
+    /// every peer applies the leave on the same tick. Then as
+    /// [`SimCommand::Resign`] (`TeamFates::leave`, the user's leaving
+    /// rules). Spring makes the dropped player inactive and leaves its
+    /// team standing (`CPlayerHandler::PlayerLeft`,
+    /// `Game/Players/PlayerHandler.cpp:66`). Only the host issues it: a
+    /// guest's own is refused at sequencing.
+    Dropped,
 }
 
 impl SimCommand {
@@ -388,7 +398,8 @@ impl SimCommand {
             | Pause { .. }
             | Resign
             | Dev(_)
-            | Take { .. } => None,
+            | Take { .. }
+            | Dropped => None,
         }
     }
 }

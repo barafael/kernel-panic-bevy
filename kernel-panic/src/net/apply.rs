@@ -92,10 +92,41 @@ pub const MAX_BUILD_SITES: usize = 256;
 pub const MAX_DEV_SPAWN: u16 = 100;
 
 /// Whether the match allows [`DevCommand`]s: at most one human seat
-/// (single player and the dev tools' sandbox). A bare world without a
-/// match (unit tests) allows them.
+/// (single player and the dev tools' sandbox), or the host's
+/// [`MatchRules::cheats`]. A bare world without a match (unit tests)
+/// allows them.
+///
+/// [`MatchRules::cheats`]: super::MatchRules::cheats
 pub(crate) fn cheats_allowed(active: Option<&ActiveMatch>) -> bool {
-    active.is_none_or(|m| m.0.players.iter().filter(|p| !p.ai).count() <= 1)
+    active.is_none_or(|m| m.0.rules.cheats || m.0.players.iter().filter(|p| !p.ai).count() <= 1)
+}
+
+/// The host's [`MatchRules`](super::MatchRules) for one command of
+/// `player`: pauses where the player may pause, speeds inside the
+/// range, cheats where the match allows them. The host asks before it
+/// sequences a command (`driver::host_admit`), every peer again when it
+/// applies ([`apply_sim_commands`]), so both refuse the same.
+pub(crate) fn rules_admit(
+    active: Option<&ActiveMatch>,
+    player: u8,
+    cmd: &SimCommand,
+) -> Result<(), Refusal> {
+    let rules = active.map(|m| m.0.rules).unwrap_or_default();
+    match cmd {
+        SimCommand::Pause { .. } if !rules.may_pause(player) => {
+            Err(Refusal::Rules("pausing is off"))
+        }
+        SimCommand::SetSpeed { percent } => {
+            let (lo, hi) = rules.speed_range();
+            if *percent < lo || *percent > hi {
+                Err(Refusal::Rules("speed outside the match's range"))
+            } else {
+                Ok(())
+            }
+        }
+        SimCommand::Dev(_) if !cheats_allowed(active) => Err(Refusal::NoCheats),
+        _ => Ok(()),
+    }
 }
 
 /// Why a command, or a part of it, was refused.
@@ -119,6 +150,9 @@ pub enum Refusal {
     /// A `Take` of units that can't be taken: from an enemy, from an
     /// owner still in play, or (lost the race) nothing left to take.
     NotTakeable(&'static str),
+    /// Against the host's [`MatchRules`](super::MatchRules): a pause
+    /// where pausing is off, a speed outside the match's range.
+    Rules(&'static str),
 }
 
 /// Command refusals (diagnostics and tests; the sim never reads it).
@@ -139,6 +173,8 @@ pub(crate) struct Rules<'w, 's> {
     heightmap: Option<Res<'w, Heightmap>>,
     refusals: Option<ResMut<'w, Refusals>>,
     fates: Option<ResMut<'w, crate::units::teams::TeamFates>>,
+    /// The Network's packet buffers (a `Take` moves the leaver's).
+    buffer: Option<ResMut<'w, crate::units::mechanics::network_buffer::PacketBuffer>>,
     all_vents: Query<'w, 's, &'static GeoventSmoker>,
     /// Every live unit with its tallies: what a `Take` moves.
     owned_units: Query<
@@ -307,9 +343,15 @@ pub(crate) fn apply_sim_commands(world: &mut World, state: &mut SystemState<Appl
             if let Err(why) = ctx
                 .rules
                 .admit_player(frame.player)
+                .and_then(|()| rules_admit(ctx.rules.active.as_deref(), frame.player, cmd))
                 .and_then(|()| ctx.check_shape(cmd, &ids))
             {
-                ctx.rules.refuse(frame.tick, frame.player, cmd, why);
+                // A drop for a player who already left (resigned, then
+                // disconnected: "Leave match") is the normal way out,
+                // not a refusal.
+                if !(matches!(cmd, SimCommand::Dropped) && why == Refusal::Inactive) {
+                    ctx.rules.refuse(frame.tick, frame.player, cmd, why);
+                }
                 continue;
             }
             if let SimCommand::Dev(DevCommand::Spawn {
@@ -398,9 +440,7 @@ impl ApplyCtx<'_, '_> {
                 return Err(Refusal::OffMap);
             }
             SimCommand::Dev(dev) => {
-                if !cheats_allowed(self.rules.active.as_deref()) {
-                    return Err(Refusal::NoCheats);
-                }
+                // (Cheats at all: `rules_admit`.)
                 match dev {
                     DevCommand::Spawn { count, at, .. } => {
                         if *count == 0 || *count > MAX_DEV_SPAWN {
@@ -681,6 +721,12 @@ impl ApplyCtx<'_, '_> {
                 }
             }
             SimCommand::Resign => self.resign(player),
+            SimCommand::Dropped => {
+                self.resign(player);
+                if let Some(c) = self.rules.control.as_mut() {
+                    c.dropped.insert(player);
+                }
+            }
             SimCommand::Take { from } => self.take(tick, player, cmd, *from),
             SimCommand::Dev(dev) => self.dev(dev),
         }
@@ -765,6 +811,17 @@ impl ApplyCtx<'_, '_> {
             let mut ec = self.commands.entity(e);
             ec.insert(TeamId(player));
             crate::units::lifecycle::bookkeeping::retally(&mut ec, player, counted, small);
+        }
+        // The packet buffer goes with the units: Spring's hand-over
+        // gives the team's resources along with its units
+        // (`CTeam::GiveEverythingTo`, `Sim/Misc/Team.cpp:216-233`), and
+        // the buffer is the Network's resource. KP's buffer gadget has no
+        // hand-over of its own (`network_buffer.lua` keeps `bufferSize`
+        // per team, no `UnitGiven` / `TeamDied`), so there the packets
+        // stayed with the dead team, out of anyone's reach.
+        if let Some(buffer) = self.rules.buffer.as_mut() {
+            let packets = buffer.take(from, u32::MAX);
+            buffer.add(player, packets);
         }
     }
 
@@ -965,6 +1022,7 @@ fn command_name(cmd: &SimCommand) -> &'static str {
         SimCommand::SetSpeed { .. } => "SetSpeed",
         SimCommand::Pause { .. } => "Pause",
         SimCommand::Resign => "Resign",
+        SimCommand::Dropped => "Dropped",
         SimCommand::Take { .. } => "Take",
         SimCommand::Dev(_) => "Dev",
     }
@@ -1377,6 +1435,119 @@ mod tests {
         let c = world.resource::<TeamUnitCounts>();
         assert_eq!(c.limit(0), MAX_UNITS_PER_TEAM);
         assert!(c.at_limit(0), "over the cap: its factories wait");
+    }
+
+    /// The host's `MatchRules`, checked where commands apply: pausing
+    /// off (the host's seat still may, as Spring's host), the speed
+    /// range, cheats for a match with several humans.
+    #[test]
+    fn match_rules_bound_pause_speed_and_cheats() {
+        use crate::net::MatchRules;
+        let mut world = world();
+        seats(&mut world, 2);
+        world.resource_mut::<ActiveMatch>().0.rules = MatchRules {
+            pausable: false,
+            min_speed: 50,
+            max_speed: 200,
+            cheats: false,
+            host: Some(0),
+        };
+        send(&mut world, 1, vec![SimCommand::Pause { on: true }]);
+        assert!(!world.resource::<MatchControl>().paused);
+        assert_eq!(
+            world.resource::<Refusals>().last.map(|l| l.2),
+            Some(Refusal::Rules("pausing is off"))
+        );
+        send(&mut world, 0, vec![SimCommand::Pause { on: true }]);
+        assert!(world.resource::<MatchControl>().paused, "the host may");
+        send(
+            &mut world,
+            1,
+            vec![
+                SimCommand::SetSpeed { percent: 300 },
+                SimCommand::SetSpeed { percent: 40 },
+                SimCommand::SetSpeed { percent: 200 },
+            ],
+        );
+        assert_eq!(world.resource::<MatchControl>().speed_percent, 200);
+        assert_eq!(refused(&world), 3);
+
+        let (theirs, b) = unit(&mut world, UnitKind::Bit, 1, 200.0);
+        let kill = SimCommand::Dev(DevCommand::Kill {
+            units: IdList::new([b]),
+        });
+        send(&mut world, 0, vec![kill.clone()]);
+        assert!(
+            world.get::<Dying>(theirs).is_none(),
+            "two humans: no cheats"
+        );
+        world.resource_mut::<ActiveMatch>().0.rules.cheats = true;
+        send(&mut world, 0, vec![kill]);
+        assert!(
+            world.get::<Dying>(theirs).is_some(),
+            "the host allowed them"
+        );
+        // The default rules are single player's: everything goes.
+        let solo = Some(&ActiveMatch(GameSetup::default()));
+        for cmd in [
+            SimCommand::Pause { on: true },
+            SimCommand::SetSpeed { percent: 10 },
+            SimCommand::SetSpeed { percent: 2000 },
+            SimCommand::Dev(DevCommand::GodMode { on: true }),
+        ] {
+            assert_eq!(rules_admit(solo, 0, &cmd), Ok(()), "{cmd:?}");
+        }
+    }
+
+    /// A peer that dropped out leaves play like a resignation, marked as
+    /// dropped; a drop after the player resigned ("Leave match") is no
+    /// refusal.
+    #[test]
+    fn dropped_players_leave_play() {
+        use crate::units::teams::TeamFates;
+        let mut world = world();
+        world.init_resource::<TeamFates>();
+        seats(&mut world, 3);
+        send(&mut world, 1, vec![SimCommand::Dropped]);
+        assert!(world.resource::<TeamFates>().is_dead(1));
+        let c = world.resource::<MatchControl>();
+        assert!(c.dropped.contains(&1) && c.resigned.contains(&1));
+        send(&mut world, 2, vec![SimCommand::Resign]);
+        send(&mut world, 2, vec![SimCommand::Dropped]);
+        assert!(!world.resource::<MatchControl>().dropped.contains(&2));
+        assert_eq!(refused(&world), 0);
+    }
+
+    /// A `Take` hands the leaver's packet buffer over with its units
+    /// (Spring's `GiveEverythingTo` gives the resources too).
+    #[test]
+    fn take_hands_over_the_packet_buffer() {
+        use crate::units::mechanics::network_buffer::PacketBuffer;
+        use crate::units::teams::{Alliances, TeamFates};
+        let mut world = world();
+        let setup = GameSetup {
+            players: [0, 0]
+                .into_iter()
+                .map(|ally_team| PlayerSpec {
+                    faction: Faction::Network,
+                    ally_team,
+                    ai: false,
+                })
+                .collect(),
+            ..default()
+        };
+        world.insert_resource(Alliances::from_setup(&setup));
+        world.insert_resource(ActiveMatch(setup));
+        world.init_resource::<TeamFates>();
+        let mut buffer = PacketBuffer::default();
+        buffer.add(0, 3);
+        buffer.add(1, 17);
+        world.insert_resource(buffer);
+        unit(&mut world, UnitKind::Bit, 1, 100.0);
+        world.resource_mut::<TeamFates>().leave(1);
+        send(&mut world, 0, vec![SimCommand::Take { from: 1 }]);
+        let b = world.resource::<PacketBuffer>();
+        assert_eq!((b.get(0), b.get(1)), (20, 0));
     }
 
     /// Speed and pause land in the match control.

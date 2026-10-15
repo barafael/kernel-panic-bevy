@@ -179,6 +179,39 @@ fn room_view(
             cell_label(commands, ai_row, name, color, size, None);
         }
     }
+    // The host's rules: who may pause, cheats for everyone.
+    let rules = room.rules;
+    let pause = if rules.pausable {
+        "Pause: all"
+    } else {
+        "Pause: host"
+    };
+    let cheats = if rules.cheats {
+        "Cheats: on"
+    } else {
+        "Cheats: off"
+    };
+    if host {
+        choice_button(
+            commands,
+            ai_row,
+            (pause, NAV_BLUE, size),
+            None,
+            LobbyAction::Pausable(!rules.pausable),
+            false,
+        );
+        choice_button(
+            commands,
+            ai_row,
+            (cheats, NAV_BLUE, size),
+            None,
+            LobbyAction::Cheats(!rules.cheats),
+            false,
+        );
+    } else {
+        cell_label(commands, ai_row, pause, TEXT_WHITE, size, None);
+        cell_label(commands, ai_row, cheats, TEXT_WHITE, size, None);
+    }
 
     // One row per seat.
     for (i, seat) in room.seats.iter().enumerate() {

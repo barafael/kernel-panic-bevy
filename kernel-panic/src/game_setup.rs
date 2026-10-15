@@ -10,6 +10,7 @@
 
 use bevy::prelude::*;
 
+pub use crate::net::MatchRules;
 use crate::rng::clock_f64;
 use crate::units::components::Faction;
 
@@ -70,6 +71,9 @@ pub struct GameSetup {
     /// ([`random_seed`]). `begin_match` copies it into the match-scoped
     /// [`crate::sim::MatchSeed`] the sim reads.
     pub seed: u64,
+    /// What the host allows: pausing, the speed range, cheats (the
+    /// lobby's options; the default is single player's).
+    pub rules: MatchRules,
 }
 
 impl Default for GameSetup {
@@ -93,6 +97,7 @@ impl Default for GameSetup {
             showcase: None,
             sandbox: false,
             seed: random_seed(),
+            rules: MatchRules::default(),
         }
     }
 }
@@ -337,6 +342,7 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
         showcase: None,
         sandbox: false,
         seed: random_seed(),
+        rules: MatchRules::default(),
     }
 }
 
@@ -356,6 +362,7 @@ pub fn showcase_setup(faction: Faction) -> GameSetup {
         showcase: Some(faction),
         sandbox: false,
         seed: random_seed(),
+        rules: MatchRules::default(),
     }
 }
 
@@ -627,6 +634,7 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
         showcase: None,
         sandbox: false,
         seed: random_seed(),
+        rules: MatchRules::default(),
     }
 }
 

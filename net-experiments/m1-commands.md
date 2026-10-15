@@ -375,11 +375,12 @@ gives the same trails.
 - **A** (merged): alliance checks are `Alliances::friendly`; leaving play is decided
   (2026-10-15) and implemented on top of A's `TeamFates`.
 - **C** (merged): the driver reads `MatchControl`; `resumes_sim` is the unpause only.
-- A leaver's Network packet buffer (per owner) is not handed over with a `Take`; the
-  packets are lost.
-- M2/M3: a dropped peer should call `TeamFates::leave` for its owner (the same path).
-- **M2**: a host-side policy (who may pause, the speed range, a lobby "cheats" option feeding
-  `cheats_allowed`).
+- ~~A leaver's Network packet buffer (per owner) is not handed over with a `Take`; the
+  packets are lost.~~ M2: handed over (`m2-networked-play.md` §3).
+- ~~M2/M3: a dropped peer should call `TeamFates::leave` for its owner (the same path).~~ M2:
+  `SimCommand::Dropped` (`m2-networked-play.md` §1).
+- ~~**M2**: a host-side policy (who may pause, the speed range, a lobby "cheats" option feeding
+  `cheats_allowed`).~~ M2: `MatchRules` (`m2-networked-play.md` §2).
 - The audit can't see `Commands`-based writes; a run-time check (sim components on `NetId`
   entities changed between ticks) would need an allowlist of its own (`Selected`, materials).
 - Validation doesn't re-check slopes or structure overlap at the site (the construction start

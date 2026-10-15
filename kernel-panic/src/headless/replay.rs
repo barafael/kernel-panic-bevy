@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{AssetRoot, Executor, HashLog, Scenario, SimHarness, TickHash};
 use crate::game_setup::PlayerSpec;
-use crate::net::{CommandBus, CommandFrame};
+use crate::net::{CommandBus, CommandFrame, MatchRules};
 use crate::units::components::Faction;
 
 /// File magic of a `.kpreplay`.
@@ -38,7 +38,8 @@ pub const MAGIC: &[u8; 8] = b"kpreplay";
 /// Layout of the file itself; bumped whenever [`Replay`] changes shape
 /// or meaning. 2 (M1): seat `i` is owner `i` and [`Seat::ally_team`] its
 /// ally team, where 1 gave every seat of an ally team one shared owner.
-pub const FORMAT_VERSION: u16 = 2;
+/// 3 (M2): the setup carries the host's [`MatchRules`].
+pub const FORMAT_VERSION: u16 = 3;
 /// The sim version and the compatibility stamp live with the lobby,
 /// which compares them before a networked match ([`crate::net::compat`]).
 pub use crate::net::compat::Compat;
@@ -66,6 +67,8 @@ pub struct MatchSetup {
     pub seed: u64,
     /// No win / lose check.
     pub sandbox: bool,
+    /// The host's rules (pause, speed range, cheats).
+    pub rules: MatchRules,
 }
 
 impl MatchSetup {
@@ -80,6 +83,7 @@ impl MatchSetup {
             showcase: None,
             sandbox: s.sandbox,
             seed: s.seed,
+            rules: s.rules,
         }
     }
 
@@ -100,6 +104,7 @@ impl MatchSetup {
             executor: Executor::Single,
             difficulty: self.difficulty,
             sandbox: self.sandbox,
+            rules: self.rules,
             map_file,
         }
     }
@@ -457,6 +462,7 @@ mod tests {
             difficulty: 2,
             seed: 7,
             sandbox: false,
+            rules: MatchRules::default(),
         };
         let frame = |tick, player| CommandFrame {
             tick,

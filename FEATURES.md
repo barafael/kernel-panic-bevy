@@ -140,12 +140,15 @@ read the resulting state.
   stay and every active ally sees a flashing TAKE button that hands them
   all over (an AI ally takes them itself); when the last player of a side
   leaves, all of the side's units blow up within 4 s, at random moments.
-  Unit caps never change.
+  Unit caps never change. Taking a Network player's units takes its packet
+  buffer too.
 - Pause (the Pause key) and game speed (Alt+= / Alt+numpad+ faster,
   Alt+- / Alt+numpad- slower, 0.1× to 20× in Spring's steps), as
   Spring's default bindings; a line at the top of the screen says
   "Paused" and the speed when it isn't 1×. Camera and menus stay live
-  while paused.
+  while paused. A networked match's host may switch pausing off (only the
+  host's player may pause then, as in Spring) and narrow the speed range;
+  the keys stop at its ends.
 - A `Stop` order halts the unit immediately and clears the queue.
 - On production, the builder unit sets a waypoint for the produced
   unit to move straight out of the factory.
@@ -837,15 +840,16 @@ context. Most variants animate over their frames at a fixed rate
   `KP_SIGNALING` natively), Google STUN by default, TURN configurable
   (`KP_ICE` / `--ice`), native and web peers in the same room. Tested with 2
   and 8 full-game peers over localhost WebRTC, under netem, and a browser peer
-  against a native one; the lobby that opens rooms is not in yet.
+  against a native one.
 - Every input, the AI and the dev tools reach the simulation as commands
   validated where they apply (ownership, capabilities, points on the map,
-  cheats only in single player; `net-experiments/m1-commands.md`); pause and
+  cheats only in single player or where the host allows them;
+  `net-experiments/m1-commands.md`); pause and
   game speed are commands too, so every peer pauses and speeds up together.
 - Golden replays (`--replay`, `--record-golden`, feature `replay`) and a
   command fuzz (`--command-fuzz`) in CI.
 - Multiplayer page in the launch menu (`net::lobby`,
-  `net-experiments/m2-lobby.md`): create a room (a five-character code) or
+  `net-experiments/m2-lobby.md`): create a room (a six-character code) or
   type a code and join; the room lists every seat (occupant, faction, team),
   the map and AI difficulty, who watches and who cannot play and why
   (another game version, a missing or different map). The host (the lowest
@@ -854,5 +858,15 @@ context. Most variants animate over their frames at a fixed rate
   ready; Start hands everyone the same setup and seed and the match loads
   as usual, the local seat being yours. Launch into a room with
   `#room=<code>` in the web page's URL, `--room <code>` or `KP_ROOM`
-  natively; `KP_NAME` sets the name shown. Until the matchbox transport is
-  merged a room only reaches games in the same process (tests).
+  natively; `KP_NAME` sets the name shown.
+- Networked play (`net-experiments/m2-networked-play.md`): a player who
+  disconnects, or whose connection is silent for a minute (30 s before the
+  first packet), leaves play on the same tick for everyone, as if resigned
+  (allies get TAKE); the host leaving or going silent ends the match for the
+  others with a message. The host's rules (pausing, speed range, cheats for
+  everyone) travel with the match setup and are enforced by the host and by
+  every peer. In a networked match the Esc menu offers "Leave match" instead
+  of Restart (resign, disconnect, back to the menu; the Menu buttons do the
+  same), the result panel has no Restart, a player list at the top right
+  shows seat, ally / enemy, name and ping (F9 hides it), and a banner says
+  who left, who it is waiting for, a desync, or why the match ended.

@@ -11,7 +11,8 @@
 //! | [`Msg::Resend`] / [`Msg::Fill`] — gap fills | guest ↔ host | reliable |
 //! | [`Msg::Hash`] — state hash every [`super::session::HASH_INTERVAL`] frames | guest → host | reliable |
 //! | [`Msg::Desync`] — mismatch found, where to stop | host → all | reliable |
-//! | [`Msg::Left`] — a guest left | host → all | reliable |
+//! | [`Msg::Left`] — a guest left (to the guest itself: it was dropped) | host → all | reliable |
+//! | [`Msg::Pings`] — every guest's round trip, for the player list | host → all | unreliable, 1/s |
 //!
 //! Both unreliable streams repeat what the other side has not
 //! acknowledged, so a lost packet costs one packet interval, not a
@@ -24,7 +25,8 @@ use super::transport::{MAX_MESSAGE, PeerId};
 
 /// Bumped whenever a message changes shape. Peers with another version
 /// ignore each other's messages (the M2 handshake refuses them first).
-pub const WIRE_VERSION: u16 = 1;
+/// 2 (M2): [`Msg::Pings`].
+pub const WIRE_VERSION: u16 = 2;
 
 /// One player's commands of one turn, in issue order.
 pub type PlayerCommands = (u8, Vec<SimCommand>);
@@ -134,9 +136,16 @@ pub enum Msg {
         stop_at: u32,
         peers: Vec<PeerId>,
     },
-    /// `peer` left the match.
+    /// `peer` left the match. Sent to `peer` itself when the host
+    /// dropped it (timed out).
     Left {
         peer: PeerId,
+    },
+    // M2. New variants go at the end.
+    /// The host's round trip to every peer of the roster, in roster
+    /// order, ms (the host: 0; `u16::MAX`: gone, or not measured yet).
+    Pings {
+        ms: Vec<u16>,
     },
 }
 

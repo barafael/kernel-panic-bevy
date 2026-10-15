@@ -49,8 +49,9 @@ use std::time::Duration;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::MatchRules;
 use super::compat::{Build, Compat};
-use super::driver::{CatchUp, NextNetMatch};
+use super::driver::{CatchUp, NextNetMatch, PeerNames};
 use super::session::{DelayBounds, SessionConfig};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use crate::game_setup::{AppState, GameSetup, PlayerSpec};
@@ -267,6 +268,9 @@ pub struct RoomState {
     /// AI difficulty, 1 Easy … 4 Extreme.
     pub difficulty: u8,
     pub seats: Vec<SeatSpec>,
+    /// Pausing, game speed and cheats (the host's to set; the `Start`
+    /// carries them in the setup).
+    pub rules: MatchRules,
     /// Everyone in the room, by id (the host included).
     pub members: Vec<Member>,
 }
@@ -291,6 +295,7 @@ impl RoomState {
                     who: Occupant::Open,
                 },
             ],
+            rules: MatchRules::default(),
             members: Vec::new(),
         }
     }
@@ -328,6 +333,7 @@ pub struct SetupWire {
     pub seats: Vec<(u8, u8, bool)>,
     pub difficulty: u8,
     pub seed: u64,
+    pub rules: MatchRules,
 }
 
 /// The networked part of `setup`: a match a lobby starts is never the
@@ -345,6 +351,7 @@ pub fn encode_setup(setup: &GameSetup) -> SetupWire {
             .collect(),
         difficulty: setup.difficulty,
         seed: setup.seed,
+        rules: setup.rules,
     }
 }
 
@@ -365,6 +372,7 @@ pub fn decode_setup(wire: &SetupWire) -> GameSetup {
         showcase: None,
         sandbox: false,
         seed: wire.seed,
+        rules: wire.rules,
     }
 }
 
@@ -1030,6 +1038,18 @@ impl Lobby {
         Ok(())
     }
 
+    /// Host: whether every player may pause (off: only the host).
+    pub fn set_pausable(&mut self, pausable: bool) -> Result<(), String> {
+        self.host_room()?.rules.pausable = pausable;
+        Ok(())
+    }
+
+    /// Host: cheats for everyone (off: only with a single human seat).
+    pub fn set_cheats(&mut self, cheats: bool) -> Result<(), String> {
+        self.host_room()?.rules.cheats = cheats;
+        Ok(())
+    }
+
     /// Host: the AI difficulty, 1 Easy … 4 Extreme.
     pub fn set_difficulty(&mut self, difficulty: u8) -> Result<(), String> {
         let room = self.host_room()?;
@@ -1127,6 +1147,7 @@ impl Lobby {
             showcase: None,
             sandbox: false,
             seed,
+            rules: room.rules,
         });
         let roster: Vec<(PeerId, Option<u8>)> = room
             .members
@@ -1190,6 +1211,10 @@ pub enum LobbyAction {
     /// Host: step the map through the catalog.
     Map(i32),
     Difficulty(u8),
+    /// Host: [`MatchRules::pausable`].
+    Pausable(bool),
+    /// Host: [`MatchRules::cheats`].
+    Cheats(bool),
 }
 
 /// Web: the map fetches the lobby's hashes wait for.
@@ -1369,6 +1394,8 @@ fn lobby_actions(
                 }
             }
             (LobbyAction::Difficulty(d), Some(l)) => l.set_difficulty(d),
+            (LobbyAction::Pausable(on), Some(l)) => l.set_pausable(on),
+            (LobbyAction::Cheats(on), Some(l)) => l.set_cheats(on),
         };
         lobby.notice = result.err();
     }
@@ -1398,6 +1425,12 @@ impl Launch<'_, '_> {
             start.session.roster.get(&start.session.me)
         );
         lobby.room = None;
+        // The player list's names: the room's, as this peer last saw it.
+        let names = l
+            .room()
+            .map(|r| r.members.iter().map(|m| (m.peer, m.name.clone())).collect())
+            .unwrap_or_default();
+        self.commands.insert_resource(PeerNames(names));
         self.commands.insert_resource(start.setup);
         self.commands.insert_resource(NextNetMatch {
             config: start.session,
@@ -1684,7 +1717,10 @@ mod tests {
             ally_team: 0,
             ai: true,
         });
+        setup.rules.pausable = false;
+        setup.rules.max_speed = 200;
         let back = decode_setup(&encode_setup(&setup));
+        assert_eq!(back.rules, setup.rules);
         assert_eq!(back.map, setup.map);
         assert_eq!(back.seed, setup.seed);
         assert_eq!(back.difficulty, setup.difficulty);
@@ -1734,6 +1770,12 @@ mod tests {
         n.lobby(b).add_seat().unwrap();
         n.lobby(b).ally_team(2).unwrap();
         n.lobby(b).set_difficulty(3).unwrap();
+        n.lobby(b).set_pausable(false).unwrap();
+        n.lobby(b).set_cheats(true).unwrap();
+        assert!(
+            n.lobby(a).set_cheats(false).is_err(),
+            "only the host sets the rules"
+        );
         n.run(3.0);
         // Carol sits on the new seat and picks her faction.
         n.lobby(c).occupant(2).unwrap();
@@ -1745,6 +1787,7 @@ mod tests {
         assert_eq!(room.seats[2].faction, 0, "2 + 1 wraps to System");
         assert_eq!(room.seats[2].ally_team, 1);
         assert_eq!(room.difficulty, 3);
+        assert!(!room.rules.pausable && room.rules.cheats);
         assert!(
             n.lobby(a).occupant(1).is_err(),
             "a guest edits no seat but its own"
@@ -1774,6 +1817,7 @@ mod tests {
             assert_eq!(s.setup.seed, 99);
             assert_eq!(s.setup.map, MAP);
             assert_eq!(s.setup.difficulty, 3);
+            assert_eq!(s.setup.rules, room.rules);
             assert_eq!(s.setup.players.len(), 3);
             assert!(s.setup.players.iter().all(|p| !p.ai));
             assert_eq!(s.session.roster, starts[0].1.session.roster);

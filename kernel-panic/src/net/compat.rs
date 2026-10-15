@@ -31,7 +31,13 @@ use super::state::Fnv;
 /// an ally's `Take` (an AI ally takes them itself) or, with the last
 /// active owner of the ally team gone, blow up within 4 s; unit caps
 /// never change.
-pub const SIM_VERSION: u32 = 4;
+/// 5 (M2): a `Take` hands over the leaver's packet buffer with its
+/// units; a peer dropping out leaves play ([`SimCommand::Dropped`]);
+/// pause, speed and cheats follow the setup's [`MatchRules`].
+///
+/// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
+/// [`MatchRules`]: crate::net::MatchRules
+pub const SIM_VERSION: u32 = 5;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.
