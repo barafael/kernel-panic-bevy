@@ -15,6 +15,12 @@
 // KP_DUMP_AT=<t1,t2…>: also write readable unit dumps at those ticks to
 // <out>.dumps (bisecting a divergence against the native --dump-at).
 //
+// KP_WEBKIT_CONCURRENT_JIT=1: WebKit with JavaScriptCore's concurrent
+// JIT (off by default here, see `runBrowser`).
+//
+// A panic, page error or crashed page ends the run with exit status 1
+// at once.
+//
 // Browsers need the `playwright` package resolvable from the working
 // directory (or NODE_PATH) and the browser installed
 // (`npx playwright install --with-deps <runtime>`).
@@ -89,13 +95,36 @@ async function runBrowser() {
     "/map.kpmap": resolve(mapsDir, `${map}.kpmap`),
   });
   const base = `http://127.0.0.1:${server.address().port}`;
-  const browser = await engine.launch({ headless: true });
+  // WebKit: JavaScriptCore compiles on the main thread. Its concurrent
+  // IPInt -> BBQ tier-up corrupts the replay's linear memory now and then
+  // (panics in bevy_ecs or dlmalloc, out-of-bounds traps, crashes, hangs;
+  // ~5 % of pages, gone with this or without BBQ, which is ~14x slower:
+  // net-experiments/m3-ci-flakes.md). Every tier still runs, at ~1.3x the
+  // wall time. KP_WEBKIT_CONCURRENT_JIT=1: JSC's default.
+  const env = { ...process.env };
+  if (runtime === "webkit" && process.env.KP_WEBKIT_CONCURRENT_JIT !== "1") {
+    env.JSC_useConcurrentJIT = "false";
+  }
+  const browser = await engine.launch({ headless: true, env });
   try {
     const page = await browser.newPage();
+    // A panic inside the replay (a Rust panic is a wasm trap, thrown from
+    // whatever callback was running: a timer, a promise reaction) never
+    // settles `kp_replay`'s promise, so `evaluate` would wait forever
+    // (CI sat 30 min to 4 h); the panic message, the page error or a
+    // crashed page ends the run at once instead.
+    const failed = new Promise((_, reject) => {
+      page.on("console", (m) => {
+        if (/^(panicked at|panic: )/.test(m.text())) reject(new Error(`${runtime}: the replay panicked`));
+      });
+      page.on("pageerror", (e) => reject(new Error(`${runtime}: page error: ${e}`)));
+      page.on("crash", () => reject(new Error(`${runtime}: the page crashed`)));
+    });
+    failed.catch(() => {});
     page.on("console", (m) => console.error(`[${runtime}] ${m.text()}`));
-    page.on("pageerror", (e) => console.error(`[${runtime}] page error: ${e}`));
+    page.on("pageerror", (e) => console.error(`[${runtime}] page error: ${e.stack ?? e}`));
     await page.goto(`${base}/index.html`);
-    return await page.evaluate(async ([ticks, dumpAt]) => {
+    const replay = page.evaluate(async ([ticks, dumpAt]) => {
       const kp = await import("/kernel-panic.js");
       await kp.default({ module_or_path: "/kernel-panic_bg.wasm" });
       const bytes = async (u) => new Uint8Array(await (await fetch(u)).arrayBuffer());
@@ -104,6 +133,8 @@ async function runBrowser() {
       const [trail, summary, dumps] = await kp.kp_replay(log, map, ticks, new Uint32Array(dumpAt));
       return { trail, summary, dumps, wall: (performance.now() - t0) / 1000, ua: navigator.userAgent };
     }, [ticks, Array.from(dumpAt)]);
+    replay.catch(() => {}); // rejects again once the browser closes
+    return await Promise.race([replay, failed]);
   } finally {
     await browser.close();
     server.close();
