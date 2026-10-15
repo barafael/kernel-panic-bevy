@@ -673,6 +673,10 @@ fn a_guest_that_leaves_is_dropped_on_one_tick() {
     let gone = r.peers.pop().unwrap();
     assert!(gone.sim.dropped.is_empty());
     let at = dropped_at(&r, 2);
+    eprintln!(
+        "guest gone at host tick ~{}: dropped at tick {at} on every peer",
+        gone.sim.tick
+    );
     // Sequenced at the host's clock when it noticed (± the delay).
     assert!((70..=90).contains(&at), "dropped at tick {at}");
     r.assert_agree(150);
@@ -779,6 +783,7 @@ fn leaving_sends_the_resignation_first() {
     });
     let leaver = &r.peers[2];
     assert_eq!(leaver.s.ended(), Some(Ended::Left));
+    eprintln!("leave: closed {waited:?} after asking (60 ms one way)");
     // About a round trip (120 ms), well under the grace.
     assert!(waited < ms(400), "closed after {waited:?}");
     let applied = r.peers[0].sim.applied.get(&7).copied().expect("sent first");

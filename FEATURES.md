@@ -140,12 +140,15 @@ read the resulting state.
   stay and every active ally sees a flashing TAKE button that hands them
   all over (an AI ally takes them itself); when the last player of a side
   leaves, all of the side's units blow up within 4 s, at random moments.
-  Unit caps never change.
+  Unit caps never change. Taking a Network player's units takes its packet
+  buffer too.
 - Pause (the Pause key) and game speed (Alt+= / Alt+numpad+ faster,
   Alt+- / Alt+numpad- slower, 0.1× to 20× in Spring's steps), as
   Spring's default bindings; a line at the top of the screen says
   "Paused" and the speed when it isn't 1×. Camera and menus stay live
-  while paused.
+  while paused. A networked match's host may switch pausing off (only the
+  host's player may pause then, as in Spring) and narrow the speed range;
+  the keys stop at its ends.
 - A `Stop` order halts the unit immediately and clears the queue.
 - On production, the builder unit sets a waypoint for the produced
   unit to move straight out of the factory.
@@ -834,7 +837,19 @@ context. Most variants animate over their frames at a fixed rate
   drives it so far (tests); the matchbox transport and the lobby are M2.
 - Every input, the AI and the dev tools reach the simulation as commands
   validated where they apply (ownership, capabilities, points on the map,
-  cheats only in single player; `net-experiments/m1-commands.md`); pause and
+  cheats only in single player or where the host allows them;
+  `net-experiments/m1-commands.md`); pause and
   game speed are commands too, so every peer pauses and speeds up together.
 - Golden replays (`--replay`, `--record-golden`, feature `replay`) and a
   command fuzz (`--command-fuzz`) in CI.
+- Networked play (`net-experiments/m2-networked-play.md`): a player who
+  disconnects, or whose connection is silent for a minute (30 s before the
+  first packet), leaves play on the same tick for everyone, as if resigned
+  (allies get TAKE); the host leaving or going silent ends the match for the
+  others with a message. The host's rules (pausing, speed range, cheats for
+  everyone) travel with the match setup and are enforced by the host and by
+  every peer. In a networked match the Esc menu offers "Leave match" instead
+  of Restart (resign, disconnect, back to the menu; the Menu buttons do the
+  same), the result panel has no Restart, a player list at the top right
+  shows seat, ally / enemy, name and ping (F9 hides it), and a banner says
+  who left, who it is waiting for, a desync, or why the match ended.

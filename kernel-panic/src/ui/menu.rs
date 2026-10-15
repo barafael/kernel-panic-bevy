@@ -6,7 +6,8 @@
 //! list, faction cycles, grouping, difficulty, live description line),
 //! map list, credits, scrollable readme, an in-game Esc overlay
 //! (Resume/Restart/Menu — the simulation keeps running behind it, like
-//! the original), and the game-over panel ("You won!"/"You lost!").
+//! the original; in a networked match Leave match instead of Restart),
+//! and the game-over panel ("You won!"/"You lost!").
 //!
 //! Visual language copied from the original: green-on-black terminal
 //! look, cyan `Kernel Panic!` title, blue navigation buttons, the
@@ -105,6 +106,7 @@ impl Plugin for MenuPlugin {
                         .after(maintain_esc_menu),
                     game_over_watch.run_if(in_state(AppState::InGame)),
                     maintain_game_over.run_if(in_state(AppState::InGame)),
+                    finish_leaving.run_if(in_state(AppState::InGame)),
                 ),
             );
     }
@@ -238,6 +240,9 @@ enum MenuAction {
     /// Esc overlay: Resign — `false` asks, `true` (the second click)
     /// resigns (`SimCommand::Resign`).
     Resign(bool),
+    /// Networked match: resign, disconnect, back to the menu
+    /// ([`NetLeave`]).
+    LeaveMatch,
     /// The music cluster (main page, Esc overlay): previous / pause / next.
     Music(MusicControl),
 }
@@ -674,6 +679,46 @@ struct MenuFlow<'w> {
     bus: Option<ResMut<'w, crate::net::CommandBus>>,
 }
 
+/// Leaving a networked match: what "Leave match" (and the menu, from a
+/// networked match) needs.
+#[derive(SystemParam)]
+struct NetLeave<'w> {
+    net: Option<ResMut<'w, crate::net::driver::NetSession>>,
+    local: Option<Res<'w, crate::units::player::LocalTeam>>,
+    control: Option<Res<'w, crate::net::MatchControl>>,
+    fates: Option<Res<'w, crate::units::teams::TeamFates>>,
+}
+
+impl NetLeave<'_> {
+    /// In a networked match that is still connected.
+    fn connected(&self) -> bool {
+        self.net
+            .as_ref()
+            .is_some_and(|n| n.session.is_networked() && !n.session.closed())
+    }
+
+    /// Resign (if still in play), then let the driver disconnect
+    /// (`NetSession::request_leave`); [`finish_leaving`] goes to the
+    /// menu once the transport is closed. Spring's quit box does the
+    /// same: resign, then leave (`Game/UI/QuitBox.cpp`).
+    fn leave(&mut self, bus: Option<&mut crate::net::CommandBus>) {
+        let active = self.local.as_ref().map(|l| l.0).filter(|&p| {
+            p != crate::game_setup::SPECTATOR_TEAM
+                && !self
+                    .control
+                    .as_ref()
+                    .is_some_and(|c| c.resigned.contains(&p))
+                && !self.fates.as_ref().is_some_and(|f| f.is_dead(p))
+        });
+        if let (Some(_), Some(bus)) = (active, bus) {
+            bus.issue(crate::net::SimCommand::Resign);
+        }
+        if let Some(net) = self.net.as_mut() {
+            net.request_leave();
+        }
+    }
+}
+
 /// What a match (or the demo behind the menu) is built from: the map
 /// catalog, the dev overrides and the setup currently loaded, if any.
 #[derive(SystemParam)]
@@ -696,6 +741,7 @@ fn handle_menu_actions(
     mut state: MenuState,
     mut overlays: Overlays,
     mut flow: MenuFlow,
+    mut net: NetLeave,
     world: MenuWorld,
     mut commands: Commands,
 ) {
@@ -734,7 +780,13 @@ fn handle_menu_actions(
                 flow.run_game.write(RunGame);
                 overlays.close_all();
             }
-            MenuAction::GoToMenu => {
+            // From a networked match the menu is leaving it: resign and
+            // disconnect first, `finish_leaving` comes back here.
+            MenuAction::GoToMenu | MenuAction::LeaveMatch if net.connected() => {
+                net.leave(flow.bus.as_deref_mut());
+                overlays.close_all();
+            }
+            MenuAction::GoToMenu | MenuAction::LeaveMatch => {
                 flow.app_state.set(AppState::Menu);
                 overlays.close_all();
                 **page = MenuPage::Main;
@@ -2200,10 +2252,56 @@ fn close_all_overlays(
     *game_over = GameOverOpen(false);
 }
 
+/// Leaving a networked match, second half: once the driver closed the
+/// transport, go to the menu (the same way as the Menu button).
+fn finish_leaving(
+    status: Option<Res<crate::net::driver::NetStatus>>,
+    mut actions: MessageWriter<MenuActionMessage>,
+    mut sent: Local<bool>,
+) {
+    let closed = status.is_some_and(|s| s.leaving && s.closed);
+    if closed && !*sent {
+        actions.write(MenuActionMessage {
+            action: MenuAction::GoToMenu,
+        });
+    }
+    *sent = closed;
+}
+
+/// Whether the running match is networked (the Esc overlay and the
+/// game-over panel offer Leave match, never Restart).
+fn networked(status: Option<&crate::net::driver::NetStatus>) -> bool {
+    status.is_some_and(|s| s.networked)
+}
+
+/// The Esc overlay's four big plates: (label, position, anchor, action).
+fn esc_plates(networked: bool) -> [(&'static str, (f32, f32), Anchor, MenuAction); 4] {
+    // On the web there is nothing to quit to: the fourth plate goes
+    // to the menu as well.
+    let (quit_text, quit) = if cfg!(target_arch = "wasm32") {
+        ("Menu", MenuAction::GoToMenu)
+    } else {
+        ("Quit", MenuAction::Quit)
+    };
+    // A networked match can't be restarted alone: its plate leaves
+    // (resign, disconnect, menu).
+    let second = if networked {
+        ("Leave match", MenuAction::LeaveMatch)
+    } else {
+        ("Restart", MenuAction::Restart)
+    };
+    [
+        ("Resume", (0.45, 0.505), Anchor::Rb, MenuAction::Resume),
+        (second.0, (0.55, 0.505), Anchor::Lb, second.1),
+        ("Menu", (0.45, 0.5), Anchor::Rt, MenuAction::GoToMenu),
+        (quit_text, (0.55, 0.5), Anchor::Lt, quit),
+    ]
+}
+
 #[allow(clippy::too_many_arguments)]
 /// What the Esc overlay was last drawn for: open, Settings, Audio,
-/// Resign asked, the render settings.
-type EscMenuDrawn = (bool, bool, bool, bool, RenderSettings);
+/// Resign asked, networked, the render settings.
+type EscMenuDrawn = (bool, bool, bool, bool, bool, RenderSettings);
 
 #[allow(clippy::too_many_arguments)]
 fn maintain_esc_menu(
@@ -2214,6 +2312,7 @@ fn maintain_esc_menu(
     settings: SettingsView,
     music: Res<MusicPlayer>,
     music_catalog: Res<MusicCatalog>,
+    net: Option<Res<crate::net::driver::NetStatus>>,
     mut commands: Commands,
     existing_root: Query<Entity, (With<MenuRoot>, Without<GameOverPanel>)>,
     windows: Query<&Window>,
@@ -2231,6 +2330,7 @@ fn maintain_esc_menu(
         esc_settings.0,
         esc_audio.0,
         resign_confirm.0,
+        networked(net.as_deref()),
         *settings.render,
     );
     if *last == Some(now) {
@@ -2275,22 +2375,10 @@ fn maintain_esc_menu(
     }
 
     // The original's `SaveLoadMenu`: four big plates meeting around the
-    // screen centre — Save/Load on top (here Resume/Restart; there is no
-    // save system), Menu/Restart below (here Menu/Quit) — plus a
-    // Settings plate underneath.
-    // On the web there is nothing to quit to: the fourth plate goes
-    // to the menu as well.
-    let (quit_text, quit) = if cfg!(target_arch = "wasm32") {
-        ("Menu", MenuAction::GoToMenu)
-    } else {
-        ("Quit", MenuAction::Quit)
-    };
-    for (text, pos, anchor, action) in [
-        ("Resume", (0.45, 0.505), Anchor::Rb, MenuAction::Resume),
-        ("Restart", (0.55, 0.505), Anchor::Lb, MenuAction::Restart),
-        ("Menu", (0.45, 0.5), Anchor::Rt, MenuAction::GoToMenu),
-        (quit_text, (0.55, 0.5), Anchor::Lt, quit),
-    ] {
+    // screen centre — Save/Load on top (here Resume/Restart, or Leave
+    // match when networked; there is no save system), Menu/Restart below
+    // (here Menu/Quit) — plus a Settings plate underneath.
+    for (text, pos, anchor, action) in esc_plates(networked(net.as_deref())) {
         ButtonSpec::new(text, BUTTON_GREEN, size, pos, anchor, action)
             .min_width(22.0)
             .spawn(&mut commands, root);
@@ -2350,14 +2438,16 @@ fn game_over_watch(
 fn maintain_game_over(
     game_over_open: Res<GameOverOpen>,
     game_state: Res<State<GameState>>,
+    net: Option<Res<crate::net::driver::NetStatus>>,
     mut commands: Commands,
     existing_root: Query<Entity, With<GameOverPanel>>,
     windows: Query<&Window>,
-    mut last: Local<Option<(bool, GameState)>>,
+    mut last: Local<Option<(bool, GameState, bool)>>,
 ) {
     // Redrawn when the result changes under an open panel too: a
     // fallen player's allies winning turns "You lost!" into "You won!".
-    let now = (game_over_open.0, *game_state.get());
+    let networked = networked(net.as_deref());
+    let now = (game_over_open.0, *game_state.get(), networked);
     if *last == Some(now) {
         return;
     }
@@ -2394,7 +2484,9 @@ fn maintain_game_over(
 
     // The original's `GameOverMenu`: result plate at y=70%, then
     // "Keep on playing/watching" ending at x=48% and "Go to Menu"
-    // starting at x=52% on the y=25% line; a loss adds Restart above.
+    // starting at x=52% on the y=25% line; a loss adds Restart above
+    // (not in a networked match: "Go to Menu" leaves it, closing the
+    // connection).
     LabelSpec::new(
         if won { "You won!" } else { "You lost!" },
         title_size,
@@ -2426,7 +2518,7 @@ fn maintain_game_over(
         MenuAction::GoToMenu,
     )
     .spawn(&mut commands, root);
-    if !won {
+    if !won && !networked {
         ButtonSpec::new(
             "Restart",
             BUTTON_GREEN,
@@ -2693,6 +2785,82 @@ pub fn boot_demo(
 mod tests {
     use super::*;
     use bevy::diagnostic::{Diagnostic, RegisterDiagnostic};
+
+    /// A networked match offers Leave match where single player has
+    /// Restart; the rest of the overlay is the same.
+    #[test]
+    fn networked_esc_overlay_leaves_instead_of_restarting() {
+        let labels = |net| esc_plates(net).map(|(text, _, _, action)| (text, action));
+        let solo = labels(false);
+        let net = labels(true);
+        assert_eq!(solo[1], ("Restart", MenuAction::Restart));
+        assert_eq!(net[1], ("Leave match", MenuAction::LeaveMatch));
+        assert!(!net.iter().any(|(_, a)| *a == MenuAction::Restart));
+        assert_eq!((solo[0], solo[2], solo[3]), (net[0], net[2], net[3]));
+    }
+
+    /// Leaving a networked match: Leave match resigns and asks the driver
+    /// to disconnect; once the transport is closed `finish_leaving` sends
+    /// the player to the menu, once.
+    #[test]
+    fn leave_match_resigns_then_goes_to_the_menu_once_closed() {
+        use crate::net::driver::{NetSession, NetStatus};
+        use crate::net::session::{DelayBounds, Session, SessionConfig};
+        use crate::net::sim_net::SimNetwork;
+        use crate::net::transport::PeerId;
+        use bevy::ecs::system::RunSystemOnce;
+
+        let net = SimNetwork::new(1);
+        let cfg = SessionConfig {
+            match_id: 1,
+            me: PeerId(2),
+            roster: [(PeerId(1), Some(0)), (PeerId(2), Some(1))].into(),
+            delay: DelayBounds::default(),
+        };
+        let mut world = World::new();
+        world.insert_resource(NetSession::new(Session::networked(
+            cfg,
+            Box::new(net.join(PeerId(2))),
+        )));
+        world.insert_resource(crate::units::player::LocalTeam(1));
+        world.init_resource::<crate::net::CommandBus>();
+        world.init_resource::<Messages<MenuActionMessage>>();
+        world
+            .run_system_once(
+                |mut net: NetLeave, mut bus: ResMut<crate::net::CommandBus>| {
+                    assert!(net.connected());
+                    net.leave(Some(&mut bus));
+                },
+            )
+            .unwrap();
+        // The resignation went into the bus for the driver to send.
+        let mut bus = world.resource_mut::<crate::net::CommandBus>();
+        bus.routed = true;
+        bus.seal(Some(1));
+        let sealed = std::mem::take(&mut bus.outbox);
+        assert_eq!(sealed[0].commands, vec![crate::net::SimCommand::Resign]);
+        assert!(world.resource::<NetSession>().leaving());
+
+        let mut status = NetStatus {
+            networked: true,
+            leaving: true,
+            ..Default::default()
+        };
+        world.insert_resource(status.clone());
+        let finish = world.register_system(finish_leaving);
+        world.run_system(finish).unwrap();
+        let sent = |w: &mut World| {
+            w.resource_mut::<Messages<MenuActionMessage>>()
+                .drain()
+                .count()
+        };
+        assert_eq!(sent(&mut world), 0, "still connected");
+        status.closed = true;
+        world.insert_resource(status);
+        world.run_system(finish).unwrap();
+        world.run_system(finish).unwrap();
+        assert_eq!(sent(&mut world), 1, "to the menu, once");
+    }
 
     /// The Esc overlay is modal: with it (or its Settings page) open,
     /// a press anywhere — no button under the cursor — is consumed

@@ -259,6 +259,27 @@ the sim (B's `MatchControl`, merged).
 - Localhost matchbox tests with netem loss/latency (X-transport's `unshare -rn`
   setup) in CI-able form.
 
+**Networked play (agent F) — done** (`net-experiments/m2-networked-play.md`):
+- Drops: a guest that disconnects or is silent past the timeout (30 s before its
+  first packet, Spring's `InitialNetworkTimeout`; 60 s after, the host's turn
+  history) is dropped by the host, which sequences `SimCommand::Dropped` (index 19)
+  in that seat's name after its last batch; every peer applies it on the same tick
+  as a resignation (`TeamFates::leave`). A timed-out guest is told (`Ended::Dropped`);
+  a guest that hears nothing from the host gives up (`Ended::HostLost`); the host
+  leaving still ends the match.
+- Host policy: `MatchRules { pausable, min/max speed, cheats, host }` in `GameSetup`
+  (default = single player); one check (`apply::rules_admit`) used by the host
+  before sequencing and by every peer at apply time; Spring's host-may-always-pause
+  exemption, the host's seat filled from the roster. Replay format 3.
+- `Take` hands the leaver's packet buffer over with its units (Spring's
+  `GiveEverythingTo` moves resources; KP's buffer gadget has no hand-over).
+  `SIM_VERSION` 5, goldens re-recorded.
+- UI: player list (seat, A/E/S, name, ping in Spring's colours; F9), banner
+  (desync, host left / lost, dropped, waiting, who left), Esc "Leave match"
+  (resign, wait for the host's ack ≤ 1.5 s, close the transport, menu), no Restart
+  in a networked match. The host broadcasts everyone's ping once a second
+  (`Msg::Pings`, wire version 2).
+
 ### M3 — Robustness · ~1.5–2 weeks
 
 - **Speed control** (Spring's LagProtection): peers report sim load once a second;

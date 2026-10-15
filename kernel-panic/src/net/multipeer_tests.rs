@@ -589,6 +589,7 @@ fn drops_full_sim() {
         seat.ally_team = u8::from(i >= 2);
     }
     let mut r = start(&scn, 0xd209, LinkParams::latency_ms(35));
+    let mut closed_at = 0;
     r.run(30 * 9, Duration::from_micros(33_333), |r, f| {
         if f == 60 {
             let w = r.peers[3].h.world_mut();
@@ -597,6 +598,7 @@ fn drops_full_sim() {
         }
         if r.peers[3].present && r.status(3).closed {
             r.peers[3].present = false;
+            closed_at = f;
         }
         if f == 120 {
             r.net.leave(PeerId(3));
@@ -614,6 +616,11 @@ fn drops_full_sim() {
     };
     let host = fates(&mut r, 0);
     assert!(host.0.is_some() && host.1.is_some(), "both left: {host:?}");
+    eprintln!(
+        "drops: Leave match asked at frame 60, closed at frame {closed_at}; \
+         seat 3 left play at tick {:?}, seat 2 (gone at frame 120) at tick {:?}",
+        host.1, host.0
+    );
     assert_eq!(fates(&mut r, 1), host, "on the same ticks");
     for peer in &mut r.peers[..2] {
         let w = peer.h.world_mut();
