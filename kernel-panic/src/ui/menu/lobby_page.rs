@@ -114,9 +114,15 @@ fn room_view(
     let host = l.is_host();
     let me = l.me();
     let size = readable(page_size * 0.75);
-    let Some(room) = l.room() else {
-        LabelSpec::new("Meeting the room…", page_size * 0.8, (0.5, 0.6), Anchor::Cc)
-            .spawn(commands, root);
+    let Some(room) = l.room().filter(|_| !l.joining()) else {
+        // A running match asked us in (`net::rejoin`): its map is
+        // being checked.
+        let text = if l.joining() {
+            "A match is running in this room: joining it…"
+        } else {
+            "Meeting the room…"
+        };
+        LabelSpec::new(text, page_size * 0.8, (0.5, 0.6), Anchor::Cc).spawn(commands, root);
         bottom(commands, root, size, l, lobby);
         return;
     };

@@ -870,3 +870,19 @@ context. Most variants animate over their frames at a fixed rate
   same), the result panel has no Restart, a player list at the top right
   shows seat, ally / enemy, name and ping (F9 hides it), and a banner says
   who left, who it is waiting for, a desync, or why the match ended.
+- Rejoining and watching (`net-experiments/m3-turn-log.md`): a player whose
+  connection broke or whose page reloaded opens the room again (the web page's
+  URL still holds it; natively Join with the same code) and gets its seat back:
+  the game replays the match so far at full speed ("Catching up…") and then
+  plays on. A disconnected seat waits 30 s for its player before the leaving
+  rules apply; after that it comes back only if its units are still its own
+  and its side is still in play, otherwise the player watches. Anyone else who
+  opens the room of a running match watches it (spectator), caught up the same
+  way.
+- Replays: every match (single player and networked; not the menu's demo or
+  showcases) is recorded. Natively the files go to `replays/` (the newest 100
+  kept); on the web the Replays page offers each match of the session as a
+  download and opens `.kpreplay` files. Main menu → Replays lists them; Play
+  watches one as a spectator, with a bar at the top showing the time and
+  speed: pause (Pause / Space), slower / faster (`-` / `+`, 0.25×–16×); Esc →
+  Restart plays it from the start.

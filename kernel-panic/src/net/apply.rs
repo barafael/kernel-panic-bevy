@@ -153,6 +153,9 @@ pub enum Refusal {
     /// Against the host's [`MatchRules`](super::MatchRules): a pause
     /// where pausing is off, a speed outside the match's range.
     Rules(&'static str),
+    /// A `Returned` for a seat that cannot come back: it did not drop,
+    /// its side is out, its units were taken, the match is decided.
+    NotReturnable(&'static str),
 }
 
 /// Command refusals (diagnostics and tests; the sim never reads it).
@@ -226,8 +229,8 @@ impl Rules<'_, '_> {
         on_map && vent_ok
     }
 
-    /// Whether `player` may send anything at all.
-    fn admit_player(&self, player: u8) -> Result<(), Refusal> {
+    /// Whether `player` has a seat in the match.
+    fn admit_seat(&self, player: u8) -> Result<(), Refusal> {
         if self
             .active
             .as_ref()
@@ -236,6 +239,12 @@ impl Rules<'_, '_> {
         {
             return Err(Refusal::Unseated);
         }
+        Ok(())
+    }
+
+    /// Whether `player` may send anything at all.
+    fn admit_player(&self, player: u8) -> Result<(), Refusal> {
+        self.admit_seat(player)?;
         if self
             .control
             .as_ref()
@@ -340,9 +349,14 @@ pub(crate) fn apply_sim_commands(world: &mut World, state: &mut SystemState<Appl
             };
             // Checked per command: a resignation mid-frame refuses the
             // rest of the frame.
-            if let Err(why) = ctx
-                .rules
-                .admit_player(frame.player)
+            // A returning player is out of play until its `Returned`
+            // applies: only its seat is checked here (`returned`).
+            let admitted = if matches!(cmd, SimCommand::Returned) {
+                ctx.rules.admit_seat(frame.player)
+            } else {
+                ctx.rules.admit_player(frame.player)
+            };
+            if let Err(why) = admitted
                 .and_then(|()| rules_admit(ctx.rules.active.as_deref(), frame.player, cmd))
                 .and_then(|()| ctx.check_shape(cmd, &ids))
             {
@@ -423,6 +437,7 @@ impl ApplyCtx<'_, '_> {
                     return Err(Refusal::Malformed("factory count"));
                 }
             }
+            SimCommand::Reserved20 => return Err(Refusal::Malformed("reserved command")),
             SimCommand::SetSpeed { percent }
                 if !(MIN_SPEED_PERCENT..=MAX_SPEED_PERCENT).contains(percent) =>
             {
@@ -728,6 +743,9 @@ impl ApplyCtx<'_, '_> {
                 }
             }
             SimCommand::Take { from } => self.take(tick, player, cmd, *from),
+            SimCommand::Returned => self.returned(tick, player, cmd),
+            // Refused by the shape check.
+            SimCommand::Reserved20 => {}
             SimCommand::Dev(dev) => self.dev(dev),
         }
     }
@@ -823,6 +841,71 @@ impl ApplyCtx<'_, '_> {
             let packets = buffer.take(from, u32::MAX);
             buffer.add(player, packets);
         }
+    }
+
+    /// A dropped player's peer is back (`SimCommand::Returned`,
+    /// `net::rejoin`; the host sequences it after the seat's `Dropped`).
+    /// The seat returns to play only if the drop changed nothing for
+    /// good: its side still has an active owner (else its units were
+    /// fused with the side's), it still owns units (nobody took them;
+    /// an AI ally takes them within a second when no human ally is
+    /// left), and the match is not decided. Then it is active again
+    /// ([`TeamFates::rejoin`]): no longer resigned, its idle units its
+    /// own to command, the TAKE offer gone. Otherwise the player
+    /// watches, as after a resignation.
+    ///
+    /// Spring keeps a dropped player's team standing and lets the
+    /// player reconnect to it (`CGameServer::BindConnection`,
+    /// `Net/GameServer.cpp:2875-3053`), reviving a dead team
+    /// (`CTeam::AddPlayer`, `Sim/Misc/Team.cpp:283`); here the user's
+    /// leaving rules have already acted on the drop, so only a seat
+    /// they left untouched comes back.
+    ///
+    /// [`TeamFates::rejoin`]: crate::units::teams::TeamFates::rejoin
+    fn returned(&mut self, tick: u32, player: u8, cmd: &SimCommand) {
+        let dropped = self
+            .rules
+            .control
+            .as_ref()
+            .is_some_and(|c| c.dropped.contains(&player));
+        let decided = self
+            .rules
+            .fates
+            .as_ref()
+            .is_some_and(|f| f.winners().is_some());
+        let side_in_play = match (self.alliances.as_deref(), self.rules.fates.as_deref()) {
+            (Some(a), Some(f)) => a.allies_of(player).any(|o| o != player && !f.is_dead(o)),
+            _ => true,
+        };
+        let owns = self
+            .rules
+            .owned_units
+            .iter()
+            .any(|(_, _, team, ..)| team.0 == player);
+        let why = if !dropped {
+            Some("did not drop")
+        } else if decided {
+            Some("the match is decided")
+        } else if !side_in_play {
+            Some("its side is out")
+        } else if !owns {
+            Some("its units were taken")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            self.rules
+                .refuse(tick, player, cmd, Refusal::NotReturnable(why));
+            return;
+        }
+        if let Some(c) = self.rules.control.as_mut() {
+            c.resigned.remove(&player);
+            c.dropped.remove(&player);
+        }
+        if let Some(fates) = self.rules.fates.as_mut() {
+            fates.rejoin(player);
+        }
+        info!("player {player} returned to play at tick {tick}");
     }
 
     /// The cheats other than `Spawn` (which needs the spawn machinery,
@@ -1023,6 +1106,8 @@ fn command_name(cmd: &SimCommand) -> &'static str {
         SimCommand::Pause { .. } => "Pause",
         SimCommand::Resign => "Resign",
         SimCommand::Dropped => "Dropped",
+        SimCommand::Reserved20 => "Reserved20",
+        SimCommand::Returned => "Returned",
         SimCommand::Take { .. } => "Take",
         SimCommand::Dev(_) => "Dev",
     }
@@ -1516,6 +1601,64 @@ mod tests {
         send(&mut world, 2, vec![SimCommand::Dropped]);
         assert!(!world.resource::<MatchControl>().dropped.contains(&2));
         assert_eq!(refused(&world), 0);
+    }
+
+    /// M3: a dropped player's `Returned` puts its seat back in play while
+    /// its ally plays on and its units are its own; not once they were
+    /// taken, nor for a seat that resigned or never left.
+    #[test]
+    fn returned_players_come_back_if_nothing_took_their_seat() {
+        use crate::units::teams::{Alliances, TeamFates};
+        let mut world = world();
+        // Owners 0, 1 allied against 2.
+        let setup = GameSetup {
+            players: [0, 0, 1]
+                .into_iter()
+                .map(|ally_team| PlayerSpec {
+                    faction: Faction::System,
+                    ally_team,
+                    ai: false,
+                })
+                .collect(),
+            ..default()
+        };
+        world.insert_resource(Alliances::from_setup(&setup));
+        world.insert_resource(ActiveMatch(setup));
+        world.init_resource::<TeamFates>();
+        for owner in 0..3 {
+            unit(&mut world, UnitKind::Bit, owner, f32::from(owner));
+        }
+        world.flush();
+        send(&mut world, 0, vec![SimCommand::Returned]);
+        assert_eq!(refused(&world), 1, "never left");
+        send(&mut world, 1, vec![SimCommand::Dropped]);
+        send(&mut world, 1, vec![SimCommand::Returned]);
+        assert_eq!(refused(&world), 1, "back");
+        assert!(!world.resource::<TeamFates>().is_dead(1));
+        let c = world.resource::<MatchControl>();
+        assert!(!c.dropped.contains(&1) && !c.resigned.contains(&1));
+        // Its orders count again.
+        let (_, id) = unit(&mut world, UnitKind::Bit, 1, 9.0);
+        world.flush();
+        send(
+            &mut world,
+            1,
+            vec![SimCommand::Stop {
+                units: Units::of([id]),
+            }],
+        );
+        assert_eq!(refused(&world), 1);
+        // Dropped again, and its units taken: it watches.
+        send(&mut world, 1, vec![SimCommand::Dropped]);
+        send(&mut world, 0, vec![SimCommand::Take { from: 1 }]);
+        world.flush();
+        send(&mut world, 1, vec![SimCommand::Returned]);
+        assert_eq!(refused(&world), 2, "its units were taken");
+        assert!(world.resource::<TeamFates>().is_dead(1));
+        // A resignation is for good.
+        send(&mut world, 2, vec![SimCommand::Resign]);
+        send(&mut world, 2, vec![SimCommand::Returned]);
+        assert_eq!(refused(&world), 3, "did not drop");
     }
 
     /// A `Take` hands the leaver's packet buffer over with its units

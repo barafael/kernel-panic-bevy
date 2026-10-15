@@ -454,6 +454,7 @@ fn malformed(
         if d.chance(20) {
             commands.push(SimCommand::Resign);
             commands.push(SimCommand::Dropped);
+            commands.push(SimCommand::Returned);
         }
         counted += commands.len() as u64;
         frames.push(CommandFrame {

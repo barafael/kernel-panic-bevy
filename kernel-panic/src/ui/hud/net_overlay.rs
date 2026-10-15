@@ -11,8 +11,9 @@
 //!   it.
 //! - **Banner**, top left: a desync (and where the dump went), the end
 //!   of the match for this peer (the host left or was lost, the host
-//!   dropped us), leaving, a stall ("Waiting for …"), and for a few
-//!   seconds who left or timed out.
+//!   dropped us), leaving, a stall ("Waiting for …"), catching up with
+//!   a match joined late, and for a few seconds who left, timed out,
+//!   came back or joined.
 
 use std::time::Duration;
 
@@ -229,6 +230,13 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         return Some("Leaving the match…".to_string());
     }
     let mut lines = Vec::new();
+    if let Some((tick, newest)) = status.catching_up {
+        lines.push(format!(
+            "Catching up with the match: {} / {} s",
+            tick / 30,
+            newest.max(tick) / 30
+        ));
+    }
     if let Some((who, since)) = &status.waiting {
         // Brief stalls are just jitter.
         if status.now.saturating_sub(*since) > Duration::from_millis(300) {
@@ -240,6 +248,8 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         lines.push(match n {
             Notice::Left(p) => format!("{} left the match.", names.name(*p)),
             Notice::TimedOut(p) => format!("{} timed out and was dropped.", names.name(*p)),
+            Notice::Returned(p) => format!("{} is back.", names.name(*p)),
+            Notice::Joined(p) => format!("{} joined the match.", names.name(*p)),
         });
     }
     (!lines.is_empty()).then(|| lines.join("\n"))

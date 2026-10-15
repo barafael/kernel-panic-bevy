@@ -114,6 +114,10 @@ const FRAME_LOOP_EXCLUSIVE: &[(&str, &str)] = &[
         "net::driver::drive_fixed_main",
         "the lockstep tick driver: runs the tick itself",
     ),
+    (
+        "net::replay_log::save_on_exit",
+        "reads the match to save its replay file as the game quits; writes only the session's \"kept\" flag",
+    ),
     ("run_main", "the main schedule"),
     ("handle_internal_asset_events", "asset server"),
     ("bevy_scene::", "scene spawning (no scenes in a match)"),

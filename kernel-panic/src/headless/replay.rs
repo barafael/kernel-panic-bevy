@@ -3,19 +3,21 @@
 //! A replay is what a lockstep match is made of: the match setup (map,
 //! seats, difficulty, seed), a compatibility stamp (sim version, unit
 //! bundle and map content hashes) and the command log, every human
-//! player's [`CommandFrame`]s by tick. The in-sim AI is part of the
+//! player's `CommandFrame`s by tick. The in-sim AI is part of the
 //! simulation, so an all-AI replay carries no frames at all.
 //!
-//! - **Recording** ([`Replay::record`]): from the [`CommandBus`] log of
+//! - **Recording** ([`Replay::record`]): from the `CommandBus` log of
 //!   applied frames, keeping the frames of the human seats (the AI's
-//!   are re-derived by the AI itself on replay).
+//!   are re-derived by the AI itself on replay). The game records every
+//!   match from its turns instead (`net::replay_log`).
 //! - **Playing** ([`play`]): the recorded setup through the headless
-//!   harness, each frame delivered to the bus ([`CommandBus::deliver`],
-//!   the lockstep transport's entry) right before the tick it is due
-//!   on, applied by the same `apply_sim_commands` as everything else.
-//!   Every tick's state hash goes into the trail ([`trail_text`]).
+//!   harness, the log played back as turns by a replay session
+//!   ([`Session::replay`], as the game's replay viewer plays a file),
+//!   one per tick, applied by the same `apply_sim_commands` as
+//!   everything else. Every tick's state hash goes into the trail
+//!   ([`trail_text`]).
 //!
-//! The file: [`MAGIC`], the format version as u16 LE, then the postcard
+//! The file: `MAGIC`, the format version as u16 LE, then the postcard
 //! encoding of [`Replay`]. A replay refuses to play against a different
 //! sim version, unit bundle or map ([`Compat`]); its trail would be
 //! meaningless.
@@ -26,67 +28,21 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
 
 use super::{AssetRoot, Executor, HashLog, Scenario, SimHarness, TickHash};
 use crate::game_setup::PlayerSpec;
-use crate::net::{CommandBus, CommandFrame, MatchRules};
+use crate::net::driver::{CatchUp, NetSession, Pacer};
+use crate::net::session::Session;
 use crate::units::components::Faction;
 
-/// File magic of a `.kpreplay`.
-pub const MAGIC: &[u8; 8] = b"kpreplay";
-/// Layout of the file itself; bumped whenever [`Replay`] changes shape
-/// or meaning. 2 (M1): seat `i` is owner `i` and [`Seat::ally_team`] its
-/// ally team, where 1 gave every seat of an ally team one shared owner.
-/// 3 (M2): the setup carries the host's [`MatchRules`].
-pub const FORMAT_VERSION: u16 = 3;
 /// The sim version and the compatibility stamp live with the lobby,
 /// which compares them before a networked match ([`crate::net::compat`]).
 pub use crate::net::compat::Compat;
-
-/// One seat of the match: seat `i` is owner `i` (`TeamId(i)`,
-/// `units::teams`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Seat {
-    /// Index into [`Faction::ALL`].
-    pub faction: u8,
-    /// Ally team (Spring's allyteam).
-    pub ally_team: u8,
-    pub ai: bool,
-}
-
-/// Everything that starts a match.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MatchSetup {
-    /// Map file stem (`assets/maps/<map>.kpmap`).
-    pub map: String,
-    pub seats: Vec<Seat>,
-    /// AI difficulty, 1 Easy … 4 Extreme.
-    pub difficulty: u8,
-    /// The match seed (AI dice, procedural map content).
-    pub seed: u64,
-    /// No win / lose check.
-    pub sandbox: bool,
-    /// The host's rules (pause, speed range, cheats).
-    pub rules: MatchRules,
-}
+/// The file format lives with the game, which records every match
+/// (`net::replay_log`); the golden logs are such files.
+pub use crate::net::replay_log::{MatchSetup, Replay, ReplayError, Seat};
 
 impl MatchSetup {
-    /// The game's form of this setup.
-    pub fn game_setup(&self) -> crate::game_setup::GameSetup {
-        let s = self.scenario(None);
-        crate::game_setup::GameSetup {
-            map: s.map,
-            players: s.seats,
-            difficulty: s.difficulty,
-            demo: false,
-            showcase: None,
-            sandbox: s.sandbox,
-            seed: s.seed,
-            rules: s.rules,
-        }
-    }
-
     /// The harness scenario for this setup, loading `map_file`.
     pub fn scenario(&self, map_file: Option<PathBuf>) -> Scenario {
         Scenario {
@@ -107,86 +63,6 @@ impl MatchSetup {
             rules: self.rules,
             map_file,
         }
-    }
-}
-
-/// A recorded match.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Replay {
-    pub setup: MatchSetup,
-    pub compat: Compat,
-    /// Ticks the recording ran: the default replay length.
-    pub ticks: u32,
-    /// The human seats' frames, by tick then player.
-    pub frames: Vec<CommandFrame>,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ReplayError {
-    #[error("not a .kpreplay file")]
-    Magic,
-    #[error("replay format version {0}, this build reads {FORMAT_VERSION}")]
-    Version(u16),
-    #[error("corrupt replay: {0}")]
-    Decode(#[from] postcard::Error),
-    #[error(
-        "replay recorded with sim version {}, unit bundle {:016x}, map {:016x}; \
-         this build has sim version {}, unit bundle {:016x}, map {:016x} — re-record it",
-        recorded.sim_version, recorded.units_hash, recorded.map_hash,
-        current.sim_version, current.units_hash, current.map_hash
-    )]
-    Compat { recorded: Compat, current: Compat },
-    #[error("command frame for tick {frame} found at tick {at}: the log is out of order")]
-    Order { frame: u32, at: u32 },
-    #[error("map {0}: {1}")]
-    Map(String, String),
-    #[error("{0}")]
-    Check(String),
-}
-
-impl Replay {
-    /// A replay of the match `setup` played on `map_bytes` for `ticks`
-    /// ticks, from the frames the [`CommandBus`] applied (its `log`):
-    /// every frame of an owner without AI, i.e. a human player's.
-    pub fn record(
-        setup: MatchSetup,
-        map_bytes: &[u8],
-        ticks: u32,
-        applied: impl IntoIterator<Item = CommandFrame>,
-    ) -> Self {
-        let ai = crate::units::ai::AiSeats::from_setup(&setup.game_setup());
-        let mut frames: Vec<CommandFrame> = applied
-            .into_iter()
-            .filter(|f| !ai.contains(f.player) && !f.commands.is_empty())
-            .collect();
-        frames.sort_by_key(|f| (f.tick, f.player));
-        Self {
-            setup,
-            compat: Compat::current(map_bytes),
-            ticks,
-            frames,
-        }
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        let mut out = MAGIC.to_vec();
-        out.extend(FORMAT_VERSION.to_le_bytes());
-        postcard::to_extend(self, out).expect("replays always serialize")
-    }
-
-    pub fn decode(bytes: &[u8]) -> Result<Self, ReplayError> {
-        let rest = bytes.strip_prefix(MAGIC).ok_or(ReplayError::Magic)?;
-        let (version, body) = rest.split_at_checked(2).ok_or(ReplayError::Magic)?;
-        let version = u16::from_le_bytes([version[0], version[1]]);
-        if version != FORMAT_VERSION {
-            return Err(ReplayError::Version(version));
-        }
-        Ok(postcard::from_bytes(body)?)
-    }
-
-    /// Commands in the log (all frames).
-    pub fn commands(&self) -> usize {
-        self.frames.iter().map(|f| f.commands.len()).sum()
     }
 }
 
@@ -285,21 +161,23 @@ pub async fn play(
         log.enabled = true;
         log.dump_at = options.dump_at.clone();
     }
-    let mut frames = replay.frames.iter().peekable();
+    if let Some(w) = replay.frames.windows(2).find(|w| w[1].tick < w[0].tick) {
+        return Err(ReplayError::Order {
+            frame: w[1].tick,
+            at: w[0].tick,
+        });
+    }
+    // The log as turns, one per tick (the clock below runs one tick a
+    // frame: no catch-up).
+    let mut net = NetSession::new(Session::replay(&replay.frames, ticks as u32));
+    net.pacer = Pacer {
+        catch_up: CatchUp::replay(),
+        ..Pacer::default()
+    };
+    h.world_mut().insert_resource(net);
     let mut shuffle_rng = 0x5eed_u32;
     let (mut sim_secs, mut frame_secs) = (0.0, 0.0);
     while h.tick < ticks {
-        let mut bus = h.world_mut().resource_mut::<CommandBus>();
-        let now = bus.tick;
-        while let Some(frame) = frames.next_if(|f| f.tick <= now) {
-            if frame.tick < now {
-                return Err(ReplayError::Order {
-                    frame: frame.tick,
-                    at: now,
-                });
-            }
-            bus.deliver(frame.clone());
-        }
         if options.shuffle_every > 0 && h.tick.is_multiple_of(options.shuffle_every as u64) {
             shuffle_storage(h.world_mut(), &mut shuffle_rng);
         }
@@ -442,7 +320,8 @@ pub fn summary(name: &str, replay: &Replay, played: &Played) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::net::{SimCommand, Units};
+    use crate::net::replay_log::MAGIC;
+    use crate::net::{CommandFrame, MatchRules, SimCommand, Units};
 
     fn sample() -> Replay {
         let setup = MatchSetup {

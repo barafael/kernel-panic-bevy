@@ -38,6 +38,13 @@
 //!   [`NextNetMatch`] and starts the match through the normal match
 //!   swap.
 //!
+//! - **A running match** (M3, [`super::rejoin`]): a newcomer's `Hello`
+//!   reaches the host's session, which answers [`LobbyMsg::Running`]: the
+//!   `Start` with the roster as it is now. Every `Hello` carries the
+//!   peer's [`PlayerKey`], so a player who comes back gets its seat
+//!   back; anyone else watches. The newcomer checks the stamp as at a
+//!   `Start` and joins late ([`MatchStart::join`]).
+//!
 //! Lobby and session traffic share the transport: every lobby message
 //! starts with [`LOBBY_TAG`] where a session [`super::wire::Envelope`] has its
 //! format version, so neither side mistakes the other's packets (a late
@@ -52,6 +59,7 @@ use serde::{Deserialize, Serialize};
 use super::MatchRules;
 use super::compat::{Build, Compat};
 use super::driver::{CatchUp, NextNetMatch, PeerNames};
+use super::rejoin::{Door, PlayerKey, Running};
 use super::session::{DelayBounds, SessionConfig};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use crate::game_setup::{AppState, GameSetup, PlayerSpec};
@@ -99,7 +107,8 @@ pub const LOBBY_TAG: u16 = 0x4b4c;
 
 /// Bumped whenever a lobby message changes shape. A peer with another
 /// one runs another build: it is listed, never seated.
-pub const LOBBY_VERSION: u16 = 1;
+/// 2 (M3): [`Hello::key`], [`LobbyMsg::Running`].
+pub const LOBBY_VERSION: u16 = 2;
 
 /// A peer's announcement of itself, to everyone, when it meets them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +118,9 @@ pub struct Hello {
     /// The newest room this peer knows (as host or guest): a host
     /// elected after it takes the room over from here.
     pub room: Option<RoomState>,
+    /// The player's [`PlayerKey`]: who it is across connections, so a
+    /// running match gives a returning player its seat back.
+    pub key: u64,
 }
 
 /// Whether a peer has a map, as its content hash ([`Compat::map_hash`]).
@@ -148,6 +160,10 @@ pub enum LobbyMsg {
     Room(RoomState),
     /// Host → all: the match begins.
     Start(StartMsg),
+    // M3.
+    /// Host of a running match → a peer that said hello: join it
+    /// ([`super::rejoin`]).
+    Running(Box<Running>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -393,6 +409,13 @@ pub struct StartMsg {
 pub struct MatchStart {
     pub setup: GameSetup,
     pub session: SessionConfig,
+    /// Joining a running match ([`LobbyMsg::Running`]): its host and the
+    /// peers that already left ([`super::session::Session::late`]).
+    pub join: Option<(PeerId, Vec<PeerId>)>,
+    /// Host: what lets late joiners in ([`super::session::Session::set_door`]).
+    pub door: Option<Door>,
+    /// Everyone's name, for the player list.
+    pub names: Vec<(PeerId, String)>,
 }
 
 impl MatchStart {
@@ -405,6 +428,18 @@ impl MatchStart {
                 roster: msg.roster.iter().copied().collect(),
                 delay: DelayBounds::default(),
             },
+            join: None,
+            door: None,
+            names: Vec::new(),
+        }
+    }
+
+    /// A late joiner's start: the match `running` describes.
+    fn late(running: &Running, me: PeerId) -> Self {
+        Self {
+            join: Some((running.host, running.gone.clone())),
+            names: running.names.clone(),
+            ..Self::of(&running.start, me)
         }
     }
 }
@@ -413,7 +448,7 @@ impl MatchStart {
 #[derive(Clone, Debug)]
 pub enum LobbyEvent {
     /// The match begins: take the transport ([`Lobby::into_transport`]).
-    Start(MatchStart),
+    Start(Box<MatchStart>),
     /// The room is over for this peer (refused, or left out of the
     /// match): why. Drop the lobby, which leaves the room.
     Closed(String),
@@ -428,6 +463,8 @@ struct PeerInfo {
     /// It speaks another lobby version.
     foreign: bool,
     status: Option<Status>,
+    /// Its [`Hello::key`].
+    key: PlayerKey,
 }
 
 impl PeerInfo {
@@ -440,7 +477,9 @@ impl PeerInfo {
     }
 }
 
-fn clean_name(name: &str) -> String {
+/// A name as rooms show it: no control characters, at most
+/// [`NAME_MAX`] characters, trimmed.
+pub(crate) fn clean_name(name: &str) -> String {
     name.chars()
         .filter(|c| !c.is_control())
         .take(NAME_MAX)
@@ -477,6 +516,11 @@ pub struct Lobby {
     dirty: bool,
     /// Why the connection to the room is gone ([`Transport::failure`]).
     failure: Option<String>,
+    /// Who this player is across connections ([`Hello::key`]).
+    key: PlayerKey,
+    /// A running match's host asked us in ([`LobbyMsg::Running`]); we
+    /// join once our hash of its map is in.
+    running: Option<Running>,
 }
 
 impl Lobby {
@@ -512,7 +556,16 @@ impl Lobby {
             events: Vec::new(),
             dirty: true,
             failure: None,
+            key: PlayerKey::random(),
+            running: None,
         }
+    }
+
+    /// Introduce ourselves as `key` (the game: [`PlayerKey::local`]; a
+    /// fresh lobby has a random one).
+    pub fn with_key(mut self, key: PlayerKey) -> Self {
+        self.key = key;
+        self
     }
 
     /// Hand the connection over (to the match's session).
@@ -570,10 +623,19 @@ impl Lobby {
             .collect()
     }
 
-    /// The map whose hash this peer still needs ([`Self::provide_map`]).
+    /// The map whose hash this peer still needs ([`Self::provide_map`]):
+    /// a running match's we were asked into, else the room's.
     pub fn map_needed(&self) -> Option<&str> {
-        let map = &self.room.as_ref()?.map;
+        let map = match &self.running {
+            Some(r) => &r.start.setup.map,
+            None => &self.room.as_ref()?.map,
+        };
         (!self.maps.contains_key(map)).then_some(map.as_str())
+    }
+
+    /// A running match asked us in and we are checking its map.
+    pub fn joining(&self) -> bool {
+        self.running.is_some()
     }
 
     /// Our hash of `map` (`have`), once read.
@@ -617,6 +679,7 @@ impl Lobby {
             name: self.name.clone(),
             build: self.build,
             room: self.room.clone(),
+            key: self.key.0,
         })
     }
 
@@ -671,6 +734,10 @@ impl Lobby {
                 return;
             }
         }
+        if self.running.is_some() {
+            self.join_running();
+            return;
+        }
         self.settled = self
             .connected
             .iter()
@@ -692,6 +759,7 @@ impl Lobby {
                 let info = self.peers.entry(from).or_default();
                 info.name = Some(clean_name(&h.name));
                 info.incompatible = mismatch;
+                info.key = PlayerKey(h.key);
                 if info.compatible()
                     && let Some(room) = h.room
                     && self.offered.as_ref().is_none_or(|o| room.rev > o.rev)
@@ -730,7 +798,70 @@ impl Lobby {
                     self.started(&start);
                 }
             }
+            // A match runs in this room (its peers' sessions never say
+            // hello): its host asks us in.
+            LobbyMsg::Running(running) => {
+                if running.host == from && self.running.is_none() {
+                    info!(
+                        "a match runs in this room ({} turns in): joining",
+                        running.newest
+                    );
+                    self.running = Some(*running);
+                    self.dirty = true;
+                }
+            }
             LobbyMsg::Sit { .. } | LobbyMsg::Stand | LobbyMsg::Faction { .. } => {}
+        }
+    }
+
+    /// The running match we were asked into, once our hash of its map is
+    /// in: join it late, or refuse with the reason (as at a `Start`).
+    fn join_running(&mut self) {
+        let Some(me) = self.me() else {
+            return;
+        };
+        let Some(running) = self.running.as_ref() else {
+            return;
+        };
+        if self.my_map(&running.start.setup.map) == MapHave::Pending {
+            return;
+        }
+        let Some(running) = self.running.take() else {
+            return;
+        };
+        self.done = true;
+        if !running.start.roster.iter().any(|(p, _)| *p == me) {
+            self.events.push(LobbyEvent::Closed(
+                "A match runs in this room, without you.".to_string(),
+            ));
+            return;
+        }
+        match self.refusal(&running.start) {
+            Some(why) => {
+                warn!("refused to join the running match: {why}");
+                self.events.push(LobbyEvent::Closed(why));
+            }
+            None => self
+                .events
+                .push(LobbyEvent::Start(Box::new(MatchStart::late(&running, me)))),
+        }
+    }
+
+    /// Why this peer cannot play the match `start` describes (another
+    /// build, another copy of the map), if it cannot.
+    fn refusal(&self, start: &StartMsg) -> Option<String> {
+        let map = &start.setup.map;
+        if let Some(why) = self.build.mismatch(&start.compat.build()) {
+            Some(format!("The host {why}."))
+        } else {
+            match self.my_map(map) {
+                MapHave::Hash(h) if h == start.compat.map_hash => None,
+                MapHave::Hash(_) => {
+                    Some(format!("Your copy of map {map} differs from the host's."))
+                }
+                MapHave::Missing => Some(format!("You don't have map {map}.")),
+                MapHave::Pending => Some(format!("Map {map} was not checked yet.")),
+            }
         }
     }
 
@@ -752,27 +883,14 @@ impl Lobby {
             self.events.push(LobbyEvent::Closed(why));
             return;
         }
-        let map = &start.setup.map;
-        let refusal = if let Some(why) = self.build.mismatch(&start.compat.build()) {
-            Some(format!("The host {why}."))
-        } else {
-            match self.my_map(map) {
-                MapHave::Hash(h) if h == start.compat.map_hash => None,
-                MapHave::Hash(_) => {
-                    Some(format!("Your copy of map {map} differs from the host's."))
-                }
-                MapHave::Missing => Some(format!("You don't have map {map}.")),
-                MapHave::Pending => Some(format!("Map {map} was not checked yet.")),
-            }
-        };
-        match refusal {
+        match self.refusal(start) {
             Some(why) => {
                 warn!("refused the match: {why}");
                 self.events.push(LobbyEvent::Closed(why));
             }
             None => self
                 .events
-                .push(LobbyEvent::Start(MatchStart::of(start, me))),
+                .push(LobbyEvent::Start(Box::new(MatchStart::of(start, me)))),
         }
     }
 
@@ -1169,7 +1287,33 @@ impl Lobby {
         };
         self.broadcast(LobbyMsg::Start(msg.clone()));
         self.done = true;
-        Ok(MatchStart::of(&msg, me))
+        // The door for late joiners: every player's key and name.
+        let keys = msg
+            .roster
+            .iter()
+            .map(|(p, _)| {
+                let key = if *p == me {
+                    self.key
+                } else {
+                    self.peers.get(p).map_or_else(PlayerKey::default, |i| i.key)
+                };
+                (*p, key)
+            })
+            .collect();
+        let names: BTreeMap<PeerId, String> = room
+            .members
+            .iter()
+            .map(|m| (m.peer, m.name.clone()))
+            .collect();
+        Ok(MatchStart {
+            door: Some(Door {
+                start: msg.clone(),
+                keys,
+                names: names.clone(),
+            }),
+            names: names.into_iter().collect(),
+            ..MatchStart::of(&msg, me)
+        })
     }
 }
 
@@ -1321,7 +1465,8 @@ fn enter(lobby: &mut LobbyRoom, room: RoomId, catalog: &crate::map_loading::MapC
         .unwrap_or_default();
     #[cfg(target_arch = "wasm32")]
     web::share_room(Some(&room));
-    lobby.lobby = Some(Lobby::new(connect(&room), &lobby.name, &default_map));
+    lobby.lobby =
+        Some(Lobby::new(connect(&room), &lobby.name, &default_map).with_key(PlayerKey::local()));
     lobby.room = Some(room);
     lobby.notice = None;
 }
@@ -1425,17 +1570,23 @@ impl Launch<'_, '_> {
             start.session.roster.get(&start.session.me)
         );
         lobby.room = None;
-        // The player list's names: the room's, as this peer last saw it.
-        let names = l
-            .room()
-            .map(|r| r.members.iter().map(|m| (m.peer, m.name.clone())).collect())
-            .unwrap_or_default();
+        // The player list's names: the start's (a running match's, or
+        // the host's room), else the room's as this peer last saw it.
+        let names = if start.names.is_empty() {
+            l.room()
+                .map(|r| r.members.iter().map(|m| (m.peer, m.name.clone())).collect())
+                .unwrap_or_default()
+        } else {
+            start.names.iter().cloned().collect()
+        };
         self.commands.insert_resource(PeerNames(names));
         self.commands.insert_resource(start.setup);
         self.commands.insert_resource(NextNetMatch {
             config: start.session,
             transport: l.into_transport(),
             catch_up: CatchUp::default(),
+            join: start.join,
+            door: start.door,
         });
         self.app_state.set(AppState::InGame);
         *self.page = crate::ui::menu::MenuPage::Main;
@@ -1468,7 +1619,7 @@ fn pump_lobby(
     for ev in l.take_events() {
         changed = true;
         match ev {
-            LobbyEvent::Start(start) => launch.start(room, start),
+            LobbyEvent::Start(start) => launch.start(room, *start),
             LobbyEvent::Closed(why) => {
                 room.lobby = None;
                 room.room = None;
@@ -1809,7 +1960,7 @@ mod tests {
             let Some(LobbyEvent::Start(s)) = evs.into_iter().next() else {
                 panic!("{p} got no start");
             };
-            starts.push((p, s));
+            starts.push((p, *s));
         }
         for (p, s) in &starts {
             assert_eq!(s.session.me, *p);
