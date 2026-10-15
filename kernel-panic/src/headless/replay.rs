@@ -28,7 +28,6 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::state::Fnv;
 use super::{AssetRoot, Executor, HashLog, Scenario, SimHarness, TickHash};
 use crate::game_setup::PlayerSpec;
 use crate::net::{CommandBus, CommandFrame};
@@ -40,23 +39,9 @@ pub const MAGIC: &[u8; 8] = b"kpreplay";
 /// or meaning. 2 (M1): seat `i` is owner `i` and [`Seat::ally_team`] its
 /// ally team, where 1 gave every seat of an ally team one shared owner.
 pub const FORMAT_VERSION: u16 = 2;
-/// Bumped by hand whenever the simulation changes on purpose in a way
-/// that changes outcomes (then the golden logs are re-recorded; see
-/// `net-experiments/m0-golden-replay.md`). The unit bundle and map
-/// hashes catch data changes on their own.
-///
-/// 2 (M1, A): per-seat owners and ally teams, shared victory and
-/// defeat, the sim no longer stops for the local outcome, `DetFloat`
-/// max / min / clamp.
-/// 3 (M1, B on top): commands are validated when they apply
-/// (`net-experiments/m1-commands.md`): attacks need a weapon that can
-/// hit the target, points must lie on the map (the AI's scattered
-/// pushes near an edge lose those units' orders, as in Spring).
-/// 4 (2026-10-15, the user's leaving rules): a leaver's units wait for
-/// an ally's `Take` (an AI ally takes them itself) or, with the last
-/// active owner of the ally team gone, blow up within 4 s; unit caps
-/// never change.
-pub const SIM_VERSION: u32 = 4;
+/// The sim version and the compatibility stamp live with the lobby,
+/// which compares them before a networked match ([`crate::net::compat`]).
+pub use crate::net::compat::Compat;
 
 /// One seat of the match: seat `i` is owner `i` (`TeamId(i)`,
 /// `units::teams`).
@@ -118,43 +103,6 @@ impl MatchSetup {
             map_file,
         }
     }
-}
-
-/// What a replay needs to be meaningful: the same sim code (as far as
-/// [`SIM_VERSION`] tells), the same unit data, the same map bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Compat {
-    pub sim_version: u32,
-    /// FNV-1a of the embedded `assets/units.kpu`.
-    pub units_hash: u64,
-    /// FNV-1a of the baked `.kpmap`.
-    pub map_hash: u64,
-}
-
-impl Compat {
-    /// This build's stamp for these map bytes.
-    pub fn current(map_bytes: &[u8]) -> Self {
-        Self {
-            sim_version: SIM_VERSION,
-            units_hash: fnv(crate::units::content::bundle::bundle_bytes()),
-            map_hash: fnv(map_bytes),
-        }
-    }
-
-    /// The one-number form (what a lobby would compare).
-    pub fn hash(&self) -> u64 {
-        let mut h = Fnv::default();
-        h.bytes(&self.sim_version.to_le_bytes());
-        h.bytes(&self.units_hash.to_le_bytes());
-        h.bytes(&self.map_hash.to_le_bytes());
-        h.finish()
-    }
-}
-
-fn fnv(bytes: &[u8]) -> u64 {
-    let mut h = Fnv::default();
-    h.bytes(bytes);
-    h.finish()
 }
 
 /// A recorded match.

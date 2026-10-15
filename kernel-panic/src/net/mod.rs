@@ -25,6 +25,9 @@
 //!   too (a solo host with delay 0). [`transport`] is what a network
 //!   must provide; [`sim_net`] simulates one for the tests,
 //!   [`matchbox`] (WebRTC, M2) is the real one.
+//! - The room (M2, `net-experiments/m2-lobby.md`): [`lobby`] seats the
+//!   players, checks every peer's build and map ([`compat`]) and starts
+//!   the networked match with one setup and seed for all.
 //!
 //! See `net-experiments/x-commands.md` for the inventory, the wire
 //! format and the measured frame sizes.
@@ -33,12 +36,16 @@ pub(crate) mod apply;
 #[cfg(test)]
 mod audit;
 pub(crate) mod codec;
+pub mod compat;
 pub(crate) mod control;
 pub mod driver;
 #[cfg(all(any(test, feature = "replay"), not(target_arch = "wasm32")))]
 pub(crate) mod fuzz;
 #[cfg(test)]
 mod leave_tests;
+pub mod lobby;
+#[cfg(test)]
+mod lobby_tests;
 #[cfg(test)]
 mod lockstep_tests;
 pub mod matchbox;

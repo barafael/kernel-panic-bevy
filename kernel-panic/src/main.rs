@@ -238,6 +238,7 @@ pub(crate) fn add_game(app: &mut App) {
         InteractionPlugin,
         net::CommandBusPlugin,
         net::LockstepPlugin,
+        net::lobby::LobbyPlugin,
         UiPlugin,
         UnitsPlugin,
         TerrainPlugin,

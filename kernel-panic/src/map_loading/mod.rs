@@ -62,8 +62,9 @@ pub use match_scope::{MatchEntity, MatchScopeAppExt};
 // server, and the deploy's map list is embedded at build time.
 #[cfg(target_arch = "wasm32")]
 mod bytes_asset;
+// The lobby hashes fetched maps too (`net::lobby`).
 #[cfg(target_arch = "wasm32")]
-use bytes_asset::BytesAsset;
+pub(crate) use bytes_asset::BytesAsset;
 #[cfg(target_arch = "wasm32")]
 include!(concat!(env!("OUT_DIR"), "/web_map_catalog.rs"));
 

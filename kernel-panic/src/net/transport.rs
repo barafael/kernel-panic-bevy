@@ -78,7 +78,6 @@ pub trait Transport: Send + Sync + 'static {
     /// The connection to the room is gone for good, and why (matchbox:
     /// the signaling server could not be reached, or the socket closed).
     /// Its peers were reported [`PeerEvent::Left`].
-    #[allow(dead_code)]
     fn failure(&self) -> Option<String> {
         None
     }
