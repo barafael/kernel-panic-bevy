@@ -3,7 +3,8 @@ name: CI
 # Basic Rust checks on every push, pull request and merge-queue entry:
 # rustfmt, clippy (warnings are errors), the workspace tests on Linux,
 # Windows and macOS, and wasm32 clippy of the game. The cross-platform
-# determinism matrix (determinism.yml) hangs off the end.
+# determinism matrix (determinism.yml) and the WebRTC jobs (webrtc.yml)
+# hang off the end.
 on:
   push:
     branches: ["**"]
@@ -105,3 +106,9 @@ jobs:
   determinism:
     name: determinism
     uses: ./.github/workflows/determinism.yml
+
+  # Lockstep over real WebRTC: under netem, and a browser peer against
+  # a native one (net-experiments/m2-transport.md).
+  webrtc:
+    name: webrtc
+    uses: ./.github/workflows/webrtc.yml

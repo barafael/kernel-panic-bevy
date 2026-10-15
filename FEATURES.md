@@ -830,8 +830,14 @@ context. Most variants animate over their frames at a fixed rate
   `net-experiments/m1-runtime.md`): the fixed sim runs one host-sequenced turn
   per tick (single player is a solo host, commands still apply on the next
   tick), adaptive input delay, catch-up, state-hash desync check that stops the
-  match and writes `desync-dumps/`. Only the in-process simulated network
-  drives it so far (tests); the matchbox transport and the lobby are M2.
+  match and writes `desync-dumps/`.
+- WebRTC transport (`net::matchbox`, M2, `net-experiments/m2-transport.md`):
+  rooms by code on the matchbox signaling server (`wss://omdurman-matchbox.fly.dev`,
+  rooms `kp-<code>`; `MATCHBOX_SERVER` at build time, `--signaling` /
+  `KP_SIGNALING` natively), Google STUN by default, TURN configurable
+  (`KP_ICE` / `--ice`), native and web peers in the same room. Tested with 2
+  and 8 full-game peers over localhost WebRTC, under netem, and a browser peer
+  against a native one; the lobby that opens rooms is not in yet.
 - Every input, the AI and the dev tools reach the simulation as commands
   validated where they apply (ownership, capabilities, points on the map,
   cheats only in single player; `net-experiments/m1-commands.md`); pause and

@@ -42,8 +42,8 @@
 
 #[cfg(all(feature = "replay", not(target_arch = "wasm32")))]
 pub mod cli;
-#[cfg(not(target_arch = "wasm32"))]
 pub mod golden;
+pub mod netplay;
 pub mod replay;
 /// The state hash moved to `net` (lockstep's desync check uses it too).
 pub use crate::net::state;

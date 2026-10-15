@@ -259,6 +259,22 @@ the sim (B's `MatchControl`, merged).
 - Localhost matchbox tests with netem loss/latency (X-transport's `unshare -rn`
   setup) in CI-able form.
 
+**Transport (agent D) — done** (`net-experiments/m2-transport.md`):
+`net::matchbox::open_room(&RoomId, &NetConfig) -> Box<dyn Transport>` over the fork
+(`branch = "main"`, locked at `27b5e50`), native and wasm. `RoomId`: 1–24 of `a-z0-9-_`,
+lower-cased, `random()` 6 unambiguous characters; rooms `kp-<code>`. `NetConfig`: signaling
+(default fly.io, `MATCHBOX_SERVER` at build time, `--signaling` / `KP_SIGNALING`) and ICE
+servers (Google STUN; `KP_ICE` / `--ice`, TURN with credentials; matchbox takes one
+`RTCIceServer`, so the URLs merge). Channel 0 reliable / 1 unreliable, `try_update_peers` only,
+the 16 KiB cap asserted, per-link token bucket (256 KiB/s) and bounded queues; a peer the
+fork reports disconnected leaves only after 3 s of silence (its signaling may drop while its
+data channels live on). `Transport::failure()` reports an unreachable server. Tests: 2- and
+8-peer full-sim matches over localhost WebRTC (in-process signaling server with
+`matchbox_server`'s race-free rooms), netem (`scripts/netem-matchbox.sh`, CI with `sudo tc`),
+and a wasm peer in headless Chromium against a native peer — identical trails (897 ticks).
+Finding: webrtc-rs's unreliable channel retransmits and stalls 100–300 ms on loss, which pins
+M1's max-based input delay at its 15-tick cap under any loss (M3).
+
 ### M3 — Robustness · ~1.5–2 weeks
 
 - **Speed control** (Spring's LagProtection): peers report sim load once a second;

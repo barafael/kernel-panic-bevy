@@ -28,6 +28,16 @@ strum = { version = "0.28.0", features = ["derive"] }
 serde = { workspace = true }
 postcard = { workspace = true }
 ruzstd = "0.8"
+# Multiplayer transport (`net::matchbox`, docs/multiplayer-plan.md M2):
+# WebRTC data channels through barafael's matchbox fork (Bevy 0.20, the
+# socket robustness fixes of johanhelsing/matchbox#558; the fork and
+# revision cake and omdurman use, pinned by Cargo.lock). Native peers
+# run webrtc-rs, the web build the browser's WebRTC; both meet in the
+# same rooms.
+matchbox_socket = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
+# matchbox's peer ids are UUIDs; `net::matchbox` maps them to and from
+# `PeerId(u128)`. Already in the tree through matchbox.
+uuid = "1"
 
 # `KP_BAKE_UNITS` encoder side: the bake reads the upstream checkout and
 # runs native only.
@@ -59,6 +69,13 @@ replay = []
 [dev-dependencies]
 # The music catalog test parses `assets/music/catalog.json`.
 serde_json = "1"
+# The real-WebRTC lockstep tests (`net::matchbox_tests`) run a signaling
+# server in process, with the room semantics of the deployed
+# `matchbox_server` (`net-experiments/m2-transport.md`).
+matchbox_signaling = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
+matchbox_protocol = { git = "https://github.com/barafael/matchbox.git", branch = "main", features = ["json"] }
+axum = { version = "0.8", default-features = false, features = ["ws"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(kani)'] }

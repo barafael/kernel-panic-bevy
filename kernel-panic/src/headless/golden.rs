@@ -23,12 +23,15 @@
 
 use bevy::prelude::*;
 
-use super::replay::{self, MapInput, MatchSetup, PlayOptions, Replay, ReplayError, Seat};
+use super::replay::{MatchSetup, Seat};
+// Recording (native only: it reads the map from this checkout).
+#[cfg(not(target_arch = "wasm32"))]
+use super::replay::{self, MapInput, PlayOptions, Replay, ReplayError};
+#[cfg(not(target_arch = "wasm32"))]
 use super::{HashLog, SimHarness};
-use crate::net::{
-    CommandBus, CommandFrame, FactoryOp, NetId, NetPos, Order, PointOrder, PosList, SimCommand,
-    Units,
-};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::net::{CommandBus, CommandFrame};
+use crate::net::{FactoryOp, NetId, NetPos, Order, PointOrder, PosList, SimCommand, Units};
 use crate::terrain::geovent::GeoventSmoker;
 use crate::units::combat::Dying;
 use crate::units::components::{Homebase, TeamId, UnitType};
@@ -135,6 +138,7 @@ pub fn all() -> Vec<Golden> {
 /// Record `golden` from a live match on this checkout's map, replay the
 /// result and check the two trails agree. Returns the replay and its
 /// trail.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn record(golden: &Golden) -> Result<(Replay, String), ReplayError> {
     let map = MapInput::checkout(&golden.setup.map)?;
     let map_bytes = map.bytes.clone();

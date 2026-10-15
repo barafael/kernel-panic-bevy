@@ -23,8 +23,8 @@
 //!   every peer's into turns, and only the turns come back into the bus
 //!   ([`CommandBus::deliver_turn`]) — for the host and in single player
 //!   too (a solo host with delay 0). [`transport`] is what a network
-//!   must provide; [`sim_net`] simulates one for the tests, matchbox
-//!   (M2) the real one.
+//!   must provide; [`sim_net`] simulates one for the tests,
+//!   [`matchbox`] (WebRTC, M2) is the real one.
 //!
 //! See `net-experiments/x-commands.md` for the inventory, the wire
 //! format and the measured frame sizes.
@@ -41,6 +41,9 @@ pub(crate) mod fuzz;
 mod leave_tests;
 #[cfg(test)]
 mod lockstep_tests;
+pub mod matchbox;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod matchbox_tests;
 #[cfg(test)]
 mod multipeer_tests;
 pub mod session;
