@@ -854,7 +854,7 @@ context. Most variants animate over their frames at a fixed rate
   the map and AI difficulty, who watches and who cannot play and why
   (another game version, a missing or different map). The host (the lowest
   peer id; the next one takes over if it leaves) edits seats, adds AIs,
-  picks the map; guests sit on open seats, pick their faction and get
+  picks the map, whether everyone or only the host may pause, and cheats; guests sit on open seats, pick their faction and get
   ready; Start hands everyone the same setup and seed and the match loads
   as usual, the local seat being yours. Launch into a room with
   `#room=<code>` in the web page's URL, `--room <code>` or `KP_ROOM`
