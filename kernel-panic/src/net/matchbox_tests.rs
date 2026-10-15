@@ -925,3 +925,107 @@ fn browser_peer() {
     );
     assert!(n >= (secs * 15) as usize, "only {n} ticks in common");
 }
+
+// --- the deployed signaling server ----------------------------------------------
+
+/// Two native peers on this machine through the deployed signaling
+/// server (`wss://omdurman-matchbox.fly.dev`, or `KP_SIGNALING`) and the
+/// default ICE servers (Google STUN): the server answers (it sleeps when
+/// idle; the first join wakes it), the peers meet and connect, both
+/// channels carry traffic, and a room forms over it (the lobby: host,
+/// seats, a chat line). `scripts/signaling-smoke.sh`; never in CI (it
+/// needs the internet and the server up).
+#[test]
+#[ignore = "talks to the deployed signaling server: scripts/signaling-smoke.sh"]
+fn deployed_signaling_smoke() {
+    use super::lobby::{Lobby, MapHave};
+
+    let mut cfg = NetConfig::default();
+    if let Ok(url) = std::env::var("KP_SIGNALING") {
+        cfg.signaling = url;
+    }
+    let room: RoomId = format!("smoke-{}", RoomId::random())
+        .parse()
+        .expect("a room code");
+    eprintln!("signaling {} room {room}", cfg.room_url(&room));
+    let t0 = Instant::now();
+    let mut a = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
+    let id_a = wait_for("the server's answer", Duration::from_secs(60), || {
+        assert_eq!(a.failure(), None, "the signaling server");
+        a.poll_peers();
+        a.local_id().is_some()
+    });
+    let mut b = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
+    let (mut a_sees, mut b_sees) = (Vec::new(), Vec::new());
+    let meet = wait_for("the peers to connect", Duration::from_secs(60), || {
+        a_sees.extend(a.poll_peers());
+        b_sees.extend(b.poll_peers());
+        !a_sees.is_empty() && !b_sees.is_empty()
+    });
+    let (ida, idb) = (a.local_id().unwrap(), b.local_id().unwrap());
+    assert_eq!(a_sees, vec![PeerEvent::Joined(idb)]);
+    assert_eq!(b_sees, vec![PeerEvent::Joined(ida)]);
+
+    // Round trips on the reliable channel; a burst on the unreliable one.
+    let mut rtts = Vec::new();
+    for i in 0..20u8 {
+        let sent = Instant::now();
+        a.send(idb, Channel::Reliable, vec![i; 64]);
+        let mut echoed = false;
+        wait_for("an echo", Duration::from_secs(10), || {
+            a.poll_peers();
+            b.poll_peers();
+            for (from, m) in b.receive(Channel::Reliable) {
+                b.send(from, Channel::Reliable, m);
+            }
+            echoed |= a.receive(Channel::Reliable).iter().any(|(_, m)| m[0] == i);
+            echoed
+        });
+        rtts.push(sent.elapsed().as_secs_f64() * 1000.0);
+    }
+    rtts.sort_by(f64::total_cmp);
+    for i in 0..100u8 {
+        b.send(ida, Channel::Unreliable, vec![i; 200]);
+    }
+    let mut got = 0;
+    let _ = wait_for("the unreliable burst", Duration::from_secs(5), || {
+        a.poll_peers();
+        b.poll_peers();
+        got += a.receive(Channel::Unreliable).len();
+        got >= 100
+    });
+
+    // A room over the same connections (already connected: as a match
+    // hands its connection back).
+    let map = "Marble_Madness_Map";
+    let mut la = Lobby::resume(Box::new(a), &[idb], "smoke-a", map, None);
+    let mut lb = Lobby::resume(Box::new(b), &[ida], "smoke-b", map, None);
+    for l in [&mut la, &mut lb] {
+        l.provide_map(map, MapHave::Hash(1));
+    }
+    let t1 = Instant::now();
+    let mut said = false;
+    let mut heard = Vec::new();
+    let formed = wait_for("the room", Duration::from_secs(20), || {
+        let now = t1.elapsed();
+        la.poll(now);
+        lb.poll(now);
+        heard.extend(la.take_chat());
+        let full = la.room().is_some_and(|r| r.members.len() == 2)
+            && lb.room().is_some_and(|r| r.members.len() == 2);
+        if full && !said {
+            said = true;
+            let guest = if la.is_host() { &mut lb } else { &mut la };
+            guest.say("smoke").unwrap();
+        }
+        full && heard.iter().any(|l| l.text == "smoke")
+    });
+    eprintln!(
+        "deployed signaling: server answered in {id_a:?}, peers connected {meet:?} later; \
+         reliable round trip p50 {:.1} / max {:.1} ms; unreliable {got}/100; \
+         room formed and a chat line went round in {formed:?}; {:?} in all",
+        rtts[rtts.len() / 2],
+        rtts[rtts.len() - 1],
+        t0.elapsed()
+    );
+}

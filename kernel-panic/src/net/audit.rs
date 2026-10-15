@@ -114,6 +114,10 @@ const FRAME_LOOP_EXCLUSIVE: &[(&str, &str)] = &[
         "net::driver::drive_fixed_main",
         "the lockstep tick driver: runs the tick itself",
     ),
+    (
+        "net::lobby::back_to_room",
+        "moves a match's connection into the lobby (`BackToRoom` → `LobbyRoom`)",
+    ),
     ("run_main", "the main schedule"),
     ("handle_internal_asset_events", "asset server"),
     ("bevy_scene::", "scene spawning (no scenes in a match)"),

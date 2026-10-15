@@ -35,6 +35,7 @@
 pub(crate) mod apply;
 #[cfg(test)]
 mod audit;
+pub mod chat;
 pub(crate) mod codec;
 pub mod compat;
 pub(crate) mod control;
@@ -60,6 +61,7 @@ mod session_tests;
 pub mod sim_net;
 pub mod state;
 pub mod transport;
+pub mod web_tab;
 pub mod wire;
 
 use std::collections::{BTreeMap, HashMap};

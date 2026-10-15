@@ -38,7 +38,11 @@
 //!   ([`seat_networked`]); **it ends for this peer** when the host
 //!   leaves, is lost or drops us, or when the player leaves
 //!   ([`NetSession::request_leave`]: the resignation goes out first,
-//!   then the transport closes). [`NetStatus`] tells the UI all of it.
+//!   then the transport closes — or, "Back to room", goes back to the
+//!   lobby as [`BackToRoom`]). [`NetStatus`] tells the UI all of it.
+//! - **Chat and hidden tabs** (M3): [`NetSession::say`] and the tab's
+//!   visibility ([`TabHidden`]) go to the session; the lines it relays
+//!   land in the [`ChatLog`].
 
 use std::time::Duration;
 
@@ -48,6 +52,7 @@ use bevy::prelude::*;
 
 use crate::sim::DetFloat;
 
+use super::chat::{ChatLine, ChatLog};
 use super::session::{
     Desync, Ended, HASH_INTERVAL, PeerInfo, Session, SessionConfig, SessionEvent,
 };
@@ -278,6 +283,8 @@ pub struct NetSession {
     seated: bool,
     /// "Leave match" was asked; when the driver first saw it.
     leave: Option<Option<Duration>>,
+    /// ... and the connection goes back to the room, not closed.
+    to_room: bool,
     /// Recent notices, oldest first.
     notices: Vec<(Duration, Notice)>,
 }
@@ -289,6 +296,7 @@ impl NetSession {
             pacer: Pacer::default(),
             seated: false,
             leave: None,
+            to_room: false,
             notices: Vec::new(),
         }
     }
@@ -303,12 +311,40 @@ impl NetSession {
         self.leave.get_or_insert(None);
     }
 
+    /// "Back to room": [`Self::request_leave`], but the transport goes
+    /// back to the room's lobby ([`BackToRoom`]) instead of closing; the
+    /// others see this peer leave the match ([`super::wire::Msg::Bye`])
+    /// and meet it again in the room.
+    pub fn request_back_to_room(&mut self) {
+        self.to_room = true;
+        self.request_leave();
+    }
+
+    /// Say `text` to the match ([`Session::say`]).
+    pub fn say(&mut self, text: &str) {
+        self.session.say(text);
+    }
+
     /// "Leave match" was asked.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn leaving(&self) -> bool {
         self.leave.is_some()
     }
 }
+
+/// The connection a match handed back to its room ("Back to room"):
+/// the lobby takes it from here (`net::lobby`), with the peers it is
+/// still connected to.
+#[derive(Resource)]
+pub struct BackToRoom {
+    pub transport: Box<dyn Transport>,
+    pub peers: Vec<PeerId>,
+}
+
+/// The browser tab is hidden (web: `visibilitychange`; never set
+/// natively). The driver tells the match ([`Session::set_away`]).
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TabHidden(pub bool);
 
 /// A peer came or went, for a few seconds on screen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -554,7 +590,17 @@ pub fn drive_fixed_main(world: &mut World) {
         );
         if let Some(since) = net.leave.as_mut() {
             let since = *since.get_or_insert(now);
-            leave_step(&mut net.session, &mut runner, now.saturating_sub(since));
+            let back = leave_step(
+                &mut net.session,
+                &mut runner,
+                now.saturating_sub(since),
+                net.to_room,
+            );
+            if let Some((transport, peers)) = back {
+                runner
+                    .world
+                    .insert_resource(BackToRoom { transport, peers });
+            }
         }
         let dumped = runner.dump.take();
         // The render blend: how far the clock is into the next tick.
@@ -565,8 +611,21 @@ pub fn drive_fixed_main(world: &mut World) {
         let virt = world.resource::<Time<Virtual>>().as_generic();
         *world.resource_mut::<Time>() = virt;
 
+        if let Some(hidden) = world.get_resource::<TabHidden>() {
+            net.session.set_away(hidden.0);
+        }
+        let names = world
+            .get_resource::<PeerNames>()
+            .cloned()
+            .unwrap_or_default();
+        let mut said = Vec::new();
         for ev in net.session.take_events() {
             match ev {
+                SessionEvent::Chat { from, text } => said.push(ChatLine {
+                    from,
+                    name: names.name(from),
+                    text,
+                }),
                 SessionEvent::Left(peer) => {
                     info!("{peer} left the match");
                     net.notices.push((now, Notice::Left(peer)));
@@ -581,6 +640,12 @@ pub fn drive_fixed_main(world: &mut World) {
                     "desync at frame {}: {:?} disagree with the host; stopping after tick {}",
                     d.frame, d.peers, d.stop_at
                 ),
+            }
+        }
+        if !said.is_empty() {
+            let mut log = world.get_resource_or_insert_with(ChatLog::default);
+            for line in said {
+                log.push(now, line);
             }
         }
         net.notices
@@ -642,10 +707,17 @@ fn seat_networked(world: &mut World, session: &mut Session) {
 /// One frame of "Leave match", `waited` after it was asked: send what
 /// the player issued (the resignation) even if no tick runs, then close
 /// once the host has it — at once for the host, or when the match is
-/// over anyway — or after [`LEAVE_GRACE`].
-pub(crate) fn leave_step(s: &mut Session, r: &mut impl TickRunner, waited: Duration) {
+/// over anyway — or after [`LEAVE_GRACE`]. With `to_room` the
+/// transport is handed back instead of closed ([`Session::hand_back`]):
+/// it and the peers it is connected to.
+pub(crate) fn leave_step(
+    s: &mut Session,
+    r: &mut impl TickRunner,
+    waited: Duration,
+    to_room: bool,
+) -> Option<(Box<dyn Transport>, Vec<PeerId>)> {
     if s.closed() {
-        return;
+        return None;
     }
     if !s.halted() {
         for frame in r.seal(s.delay()) {
@@ -653,8 +725,12 @@ pub(crate) fn leave_step(s: &mut Session, r: &mut impl TickRunner, waited: Durat
         }
     }
     if s.is_host() || s.ended().is_some() || s.unacked() == 0 || waited >= LEAVE_GRACE {
+        if to_room {
+            return s.hand_back();
+        }
         s.close();
     }
+    None
 }
 
 /// Runs the fixed sim through [`drive_fixed_main`] instead of Bevy's

@@ -776,7 +776,7 @@ fn leaving_sends_the_resignation_first() {
             let now = r.net.now();
             let p = &mut r.peers[2];
             p.s.poll(now);
-            super::driver::leave_step(&mut p.s, &mut p.sim, waited);
+            super::driver::leave_step(&mut p.s, &mut p.sim, waited, false);
             p.s.flush(now);
             waited += ms(1);
         }
@@ -791,5 +791,129 @@ fn leaving_sends_the_resignation_first() {
     assert!(
         at >= applied,
         "dropped at {at}, its last command at {applied}"
+    );
+}
+
+/// M3 "Back to room": a guest leaves the match but keeps its connection.
+/// Its `Bye` drops its seat on one tick everywhere, after its last
+/// command, as a disconnect would — at once, not after the timeout — and
+/// the transport comes back with the peers it is still connected to.
+/// Chat goes through the host to everyone in one order; a hidden tab
+/// shows on every player list. The host going back ends the match for
+/// the rest (`HostLeft`).
+#[test]
+fn back_to_room_chat_and_hidden_tabs() {
+    use super::session::SessionEvent;
+    use super::transport::Transport;
+
+    // Not an id the peers' own commands use (player × 10⁶ + n).
+    const LAST: u32 = 7_777_777;
+    let mut r = room(3, 31, LinkParams::latency_ms(30));
+    let mut t = 0;
+    let mut back: Option<(Box<dyn Transport>, Vec<PeerId>)> = None;
+    let mut waited = Duration::ZERO;
+    let mut asked_at = 0;
+    r.run(6.0, |r| {
+        t += 1;
+        if t == 1000 {
+            r.peers[1].s.say("hi");
+            r.peers[2].s.set_away(true);
+        }
+        if t == 1200 {
+            r.peers[0].s.say("  gl  ");
+            r.peers[1].s.say("\u{7}");
+        }
+        if t == 2000 {
+            r.peers[2].sim.issue(LAST);
+            r.peers[2].every = 0;
+            asked_at = r.peers[0].sim.tick;
+        }
+        if t >= 2000 && back.is_none() && !r.peers[2].s.closed() {
+            let now = r.net.now();
+            let p = &mut r.peers[2];
+            p.s.poll(now);
+            back = super::driver::leave_step(&mut p.s, &mut p.sim, waited, true);
+            p.s.flush(now);
+            waited += ms(1);
+        }
+    });
+    let (transport, peers) = back.expect("handed back");
+    assert_eq!(transport.local_id(), Some(PeerId(3)));
+    assert_eq!(peers, vec![PeerId(1), PeerId(2)], "still connected");
+    assert_eq!(r.peers[2].s.ended(), Some(Ended::Left));
+    let at = dropped_at(&r, 2);
+    let applied = r.peers[0].sim.applied[&LAST];
+    eprintln!("back to room: asked at host tick {asked_at}, last command {applied}, dropped {at}");
+    assert!(
+        at >= applied,
+        "dropped at {at}, its last command at {applied}"
+    );
+    assert!(at <= asked_at + 15, "the Bye drops it at once: {at}");
+    assert!(r.peers[1].s.peers()[2].gone);
+    // The leaver's trail is as long as its part of the match.
+    r.assert_agree(50);
+
+    // Chat: the same lines in the same order everywhere (the host's),
+    // empty ones dropped; the hidden tab on every list.
+    let said = |p: &mut Peer| -> Vec<(PeerId, String)> {
+        p.s.take_events()
+            .into_iter()
+            .filter_map(|e| match e {
+                SessionEvent::Chat { from, text } => Some((from, text)),
+                _ => None,
+            })
+            .collect()
+    };
+    let lines = vec![(PeerId(2), "hi".to_string()), (PeerId(1), "gl".to_string())];
+    for p in &mut r.peers {
+        assert_eq!(said(p), lines, "{}", p.id);
+    }
+    for p in &r.peers[..2] {
+        assert!(p.s.peers()[2].away, "{} sees the hidden tab", p.id);
+        assert!(!p.s.peers()[1].away);
+    }
+
+    // The host goes back too: the match is over for the guest.
+    let mut first = true;
+    r.run(1.0, |r| {
+        if first {
+            first = false;
+            assert!(r.peers[0].s.hand_back().is_some());
+        }
+    });
+    assert_eq!(r.peers[1].s.ended(), Some(Ended::HostLeft));
+}
+
+/// A guest that hears nothing from the host but keeps talking is not
+/// silent, yet can never catch up once it lacks more turns than the host
+/// keeps (a tab the browser throttled, `net::web_tab`): the host drops
+/// it then, instead of carrying it forever.
+#[test]
+fn a_guest_too_far_behind_is_dropped() {
+    let mut r = room(2, 37, LinkParams::latency_ms(20));
+    r.peers[1].every = 0;
+    let mut t = 0;
+    r.run(65.0, |r| {
+        t += 1;
+        if t == 1000 {
+            r.net.set_link(
+                PeerId(1),
+                PeerId(2),
+                LinkParams {
+                    down: true,
+                    ..LinkParams::latency_ms(20)
+                },
+            );
+        }
+    });
+    let host = &r.peers[0];
+    assert!(host.s.peers()[1].gone, "dropped");
+    let drops: Vec<(u32, u8)> = host.sim.dropped.clone();
+    eprintln!("too far behind: dropped {drops:?}");
+    assert_eq!(drops.len(), 1);
+    assert_eq!(drops[0].1, 1);
+    assert!(
+        drops[0].0 > 1800,
+        "not before the history ran out: {drops:?}"
     );
 }

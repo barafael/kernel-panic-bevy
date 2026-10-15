@@ -100,7 +100,9 @@ impl Plugin for MenuPlugin {
                         .run_if(in_state(AppState::Menu))
                         .before(crate::rendering::camera::camera_smoothing),
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
-                    lobby_page::type_room_code.run_if(in_state(AppState::Menu)),
+                    lobby_page::type_into_fields
+                        .run_if(in_state(AppState::Menu))
+                        .before(keyboard_menu_nav),
                     esc_toggle.run_if(in_state(AppState::InGame)),
                     maintain_esc_menu.run_if(in_state(AppState::InGame)),
                     // After the page builders: a freshly drawn Settings
@@ -246,9 +248,10 @@ enum MenuAction {
     /// Esc overlay: Resign — `false` asks, `true` (the second click)
     /// resigns (`SimCommand::Resign`).
     Resign(bool),
-    /// Networked match: resign, disconnect, back to the menu
-    /// ([`NetLeave`]).
-    LeaveMatch,
+    /// Networked match: resign, leave the match, back to its room with
+    /// the same connection ([`NetLeave::leave`], `to_room`). The menu
+    /// button leaves the room too.
+    BackToRoom,
     /// The music cluster (main page, Esc overlay): previous / pause / next.
     Music(MusicControl),
     /// The Multiplayer page: handed to the lobby (`net::lobby`).
@@ -643,6 +646,15 @@ struct MenuActionMessage {
     action: MenuAction,
 }
 
+/// Tests: press "Back to room" (the Esc overlay's plate in a networked
+/// match).
+#[cfg(test)]
+pub(crate) fn press_back_to_room(world: &mut World) {
+    world.write_message(MenuActionMessage {
+        action: MenuAction::BackToRoom,
+    });
+}
+
 /// What the menu pages show and the buttons edit: the current page,
 /// the skirmish setup, the readme scroll and the render settings.
 #[derive(SystemParam)]
@@ -696,6 +708,8 @@ struct NetLeave<'w> {
     local: Option<Res<'w, crate::units::player::LocalTeam>>,
     control: Option<Res<'w, crate::net::MatchControl>>,
     fates: Option<Res<'w, crate::units::teams::TeamFates>>,
+    /// The connection the match handed back ("Back to room").
+    back: Option<Res<'w, crate::net::driver::BackToRoom>>,
 }
 
 impl NetLeave<'_> {
@@ -707,10 +721,12 @@ impl NetLeave<'_> {
     }
 
     /// Resign (if still in play), then let the driver disconnect
-    /// (`NetSession::request_leave`); [`finish_leaving`] goes to the
-    /// menu once the transport is closed. Spring's quit box does the
-    /// same: resign, then leave (`Game/UI/QuitBox.cpp`).
-    fn leave(&mut self, bus: Option<&mut crate::net::CommandBus>) {
+    /// (`NetSession::request_leave`) or, `to_room`, hand the connection
+    /// back to the room (`NetSession::request_back_to_room`);
+    /// [`finish_leaving`] goes to the menu once the transport is closed.
+    /// Spring's quit box does the same: resign, then leave
+    /// (`Game/UI/QuitBox.cpp`).
+    fn leave(&mut self, bus: Option<&mut crate::net::CommandBus>, to_room: bool) {
         let active = self.local.as_ref().map(|l| l.0).filter(|&p| {
             p != crate::game_setup::SPECTATOR_TEAM
                 && !self
@@ -723,7 +739,11 @@ impl NetLeave<'_> {
             bus.issue(crate::net::SimCommand::Resign);
         }
         if let Some(net) = self.net.as_mut() {
-            net.request_leave();
+            if to_room {
+                net.request_back_to_room();
+            } else {
+                net.request_leave();
+            }
         }
     }
 }
@@ -791,14 +811,21 @@ fn handle_menu_actions(
             }
             // From a networked match the menu is leaving it: resign and
             // disconnect first, `finish_leaving` comes back here.
-            MenuAction::GoToMenu | MenuAction::LeaveMatch if net.connected() => {
-                net.leave(flow.bus.as_deref_mut());
+            MenuAction::GoToMenu | MenuAction::BackToRoom if net.connected() => {
+                let to_room = action == MenuAction::BackToRoom;
+                net.leave(flow.bus.as_deref_mut(), to_room);
                 overlays.close_all();
             }
-            MenuAction::GoToMenu | MenuAction::LeaveMatch => {
+            MenuAction::GoToMenu | MenuAction::BackToRoom => {
                 flow.app_state.set(AppState::Menu);
                 overlays.close_all();
-                **page = MenuPage::Main;
+                // A match that handed its connection back opens its
+                // room (`net::lobby` picks the connection up).
+                **page = if net.back.is_some() {
+                    MenuPage::Multiplayer
+                } else {
+                    MenuPage::Main
+                };
                 // Reload the attract-mode demo behind the menu (the real
                 // match's world is torn down by the RunGame handler).
                 commands.insert_resource(demo_setup(dev));
@@ -1147,6 +1174,8 @@ struct LaunchMenuInputs<'w> {
     music_catalog: Res<'w, MusicCatalog>,
     /// The Multiplayer page's room.
     lobby: Res<'w, crate::net::lobby::LobbyRoom>,
+    /// The room's chat, beside the seats.
+    chat: Res<'w, crate::net::chat::ChatLog>,
 }
 
 fn maintain_launch_menu(
@@ -1166,6 +1195,7 @@ fn maintain_launch_menu(
         music,
         music_catalog,
         lobby,
+        chat,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings, the
@@ -1174,7 +1204,7 @@ fn maintain_launch_menu(
         || settings.render.is_changed()
         || readme.is_changed()
         || demo.as_ref().is_some_and(|d| d.is_changed())
-        || (*page == MenuPage::Multiplayer && lobby.is_changed());
+        || (*page == MenuPage::Multiplayer && (lobby.is_changed() || chat.is_changed()));
     if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }
@@ -1226,9 +1256,13 @@ fn maintain_launch_menu(
             settings,
             MenuAction::Goto(MenuPage::Settings),
         ),
-        MenuPage::Multiplayer => {
-            lobby_page::multiplayer_page(&mut commands, root, (window.width(), page_size), lobby)
-        }
+        MenuPage::Multiplayer => lobby_page::multiplayer_page(
+            &mut commands,
+            root,
+            (window.width(), page_size),
+            lobby,
+            chat,
+        ),
     }
 }
 
@@ -2309,10 +2343,10 @@ fn esc_plates(networked: bool) -> [(&'static str, (f32, f32), Anchor, MenuAction
     } else {
         ("Quit", MenuAction::Quit)
     };
-    // A networked match can't be restarted alone: its plate leaves
-    // (resign, disconnect, menu).
+    // A networked match can't be restarted alone: its plate goes back
+    // to the room (resign, leave the match; Menu leaves the room too).
     let second = if networked {
-        ("Leave match", MenuAction::LeaveMatch)
+        ("Back to room", MenuAction::BackToRoom)
     } else {
         ("Restart", MenuAction::Restart)
     };
@@ -2552,6 +2586,18 @@ fn maintain_game_over(
             (0.5, 0.35),
             Anchor::Cc,
             MenuAction::Restart,
+        )
+        .spawn(&mut commands, root);
+    } else if networked {
+        // Where Restart sits in single player: the room the match came
+        // from, everyone's seats as they were.
+        ButtonSpec::new(
+            "Back to room",
+            BUTTON_GREEN,
+            menu_size,
+            (0.5, 0.35),
+            Anchor::Cc,
+            MenuAction::BackToRoom,
         )
         .spawn(&mut commands, root);
     }
@@ -2812,7 +2858,7 @@ mod tests {
     use super::*;
     use bevy::diagnostic::{Diagnostic, RegisterDiagnostic};
 
-    /// A networked match offers Leave match where single player has
+    /// A networked match offers Back to room where single player has
     /// Restart; the rest of the overlay is the same.
     #[test]
     fn networked_esc_overlay_leaves_instead_of_restarting() {
@@ -2820,7 +2866,7 @@ mod tests {
         let solo = labels(false);
         let net = labels(true);
         assert_eq!(solo[1], ("Restart", MenuAction::Restart));
-        assert_eq!(net[1], ("Leave match", MenuAction::LeaveMatch));
+        assert_eq!(net[1], ("Back to room", MenuAction::BackToRoom));
         assert!(!net.iter().any(|(_, a)| *a == MenuAction::Restart));
         assert_eq!((solo[0], solo[2], solo[3]), (net[0], net[2], net[3]));
     }
@@ -2855,7 +2901,7 @@ mod tests {
             .run_system_once(
                 |mut net: NetLeave, mut bus: ResMut<crate::net::CommandBus>| {
                     assert!(net.connected());
-                    net.leave(Some(&mut bus));
+                    net.leave(Some(&mut bus), false);
                 },
             )
             .unwrap();

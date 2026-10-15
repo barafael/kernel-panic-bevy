@@ -15,6 +15,10 @@
 //! overlap (neither inside the other), a font under
 //! [`MIN_FONT_PX`] and a frame wider than [`MAX_WIDTH_FRACTION`] of
 //! the window. Not compiled for wasm (no disk).
+//!
+//! The rooms it opens for the Multiplayer shots stay on this machine
+//! ([`OfflineRooms`]): a screenshot run never shows up on the public
+//! signaling server.
 
 use std::fmt::Write as _;
 
@@ -24,7 +28,7 @@ use bevy::ui::UiGlobalTransform;
 use super::menu::{MenuButton, MenuFrame, MenuPage};
 use super::save_screenshot;
 use crate::game_setup::DevOptions;
-use crate::net::lobby::LobbyAction;
+use crate::net::lobby::{LobbyAction, OfflineRooms};
 use crate::sim::DetFloat;
 
 /// Default frames (at 30 per second) to let the demo world load before
@@ -84,6 +88,7 @@ impl Plugin for MenuShotsPlugin {
             let _ = std::fs::create_dir_all(&dir);
             let _ = std::fs::write(dir.join("issues.txt"), "");
             app.insert_resource(ShotDir(dir, warmup))
+                .insert_resource(OfflineRooms)
                 // After UI layout, so the audit reads this frame's rects.
                 .add_systems(
                     PostUpdate,
