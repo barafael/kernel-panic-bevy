@@ -52,8 +52,8 @@ const MAGIC: &[u8; 8] = b"kpunit4\0";
 /// placeholder for a first bake (decoding it yields the empty bundle).
 static BUNDLE_BYTES: &[u8] = include_bytes!("../../../assets/units.kpu");
 
-/// The embedded bundle as committed (a replay stamps its hash).
-#[cfg(any(test, feature = "replay"))]
+/// The embedded bundle as committed (a replay and the lobby stamp
+/// its hash, `net::compat`).
 pub fn bundle_bytes() -> &'static [u8] {
     BUNDLE_BYTES
 }

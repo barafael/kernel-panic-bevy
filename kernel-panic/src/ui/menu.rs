@@ -4,7 +4,8 @@
 //! Pages: main menu (zigzag layout, alternating left/right anchors),
 //! quick skirmish (Easy/Medium/Hard/Very Hard), advanced skirmish (map
 //! list, faction cycles, grouping, difficulty, live description line),
-//! map list, credits, scrollable readme, an in-game Esc overlay
+//! map list, credits, scrollable readme, multiplayer (rooms and their
+//! seats, [`lobby_page`]), an in-game Esc overlay
 //! (Resume/Restart/Menu — the simulation keeps running behind it, like
 //! the original), and the game-over panel ("You won!"/"You lost!").
 //!
@@ -45,6 +46,8 @@ use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::AimTarget;
 use crate::units::components::{Faction, Homebase, TeamId, UnitType};
 use crate::units::lifecycle::game_over::GameState;
+
+mod lobby_page;
 
 pub struct MenuPlugin;
 
@@ -96,6 +99,7 @@ impl Plugin for MenuPlugin {
                         .run_if(in_state(AppState::Menu))
                         .before(crate::rendering::camera::camera_smoothing),
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
+                    lobby_page::type_room_code.run_if(in_state(AppState::Menu)),
                     esc_toggle.run_if(in_state(AppState::InGame)),
                     maintain_esc_menu.run_if(in_state(AppState::InGame)),
                     // After the page builders: a freshly drawn Settings
@@ -133,6 +137,8 @@ pub(crate) enum MenuPage {
     Settings,
     /// The volume knobs, reached from Settings.
     Audio,
+    /// Open or join a room, then the room itself (`net::lobby`).
+    Multiplayer,
 }
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
@@ -240,6 +246,8 @@ enum MenuAction {
     Resign(bool),
     /// The music cluster (main page, Esc overlay): previous / pause / next.
     Music(MusicControl),
+    /// The Multiplayer page: handed to the lobby (`net::lobby`).
+    Lobby(crate::net::lobby::LobbyAction),
 }
 
 // ---------------------------------------------------------------------------
@@ -672,6 +680,7 @@ struct MenuFlow<'w> {
     exit: MessageWriter<'w, AppExit>,
     music: MessageWriter<'w, MusicControl>,
     bus: Option<ResMut<'w, crate::net::CommandBus>>,
+    lobby: MessageWriter<'w, crate::net::lobby::LobbyAction>,
 }
 
 /// What a match (or the demo behind the menu) is built from: the map
@@ -823,6 +832,9 @@ fn handle_menu_actions(
             MenuAction::SetVolume(knob, v) => render.audio.set(knob, v),
             MenuAction::Music(control) => {
                 flow.music.write(control);
+            }
+            MenuAction::Lobby(action) => {
+                flow.lobby.write(action);
             }
         }
     }
@@ -1081,6 +1093,8 @@ struct LaunchMenuInputs<'w> {
     /// The music player; the main page's bottom-left cluster drives it.
     music: Res<'w, MusicPlayer>,
     music_catalog: Res<'w, MusicCatalog>,
+    /// The Multiplayer page's room.
+    lobby: Res<'w, crate::net::lobby::LobbyRoom>,
 }
 
 fn maintain_launch_menu(
@@ -1099,6 +1113,7 @@ fn maintain_launch_menu(
         demo,
         music,
         music_catalog,
+        lobby,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings, the
@@ -1106,7 +1121,8 @@ fn maintain_launch_menu(
     let stale = config.is_changed()
         || settings.render.is_changed()
         || readme.is_changed()
-        || demo.as_ref().is_some_and(|d| d.is_changed());
+        || demo.as_ref().is_some_and(|d| d.is_changed())
+        || (*page == MenuPage::Multiplayer && lobby.is_changed());
     if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }
@@ -1158,6 +1174,9 @@ fn maintain_launch_menu(
             settings,
             MenuAction::Goto(MenuPage::Settings),
         ),
+        MenuPage::Multiplayer => {
+            lobby_page::multiplayer_page(&mut commands, root, (window.width(), page_size), lobby)
+        }
     }
 }
 
@@ -1192,6 +1211,11 @@ fn main_menu_page(
             BUTTON_GREEN,
             MenuAction::Goto(MenuPage::QuickSkirmish),
         ),
+        (
+            "Multiplayer",
+            BUTTON_GREEN,
+            MenuAction::Goto(MenuPage::Multiplayer),
+        ),
         ("Showcase", EASY_CYAN, MenuAction::Goto(MenuPage::Showcase)),
         ("Credits", BUTTON_GREEN, MenuAction::Goto(MenuPage::Credits)),
         ("Readme", BUTTON_GREEN, MenuAction::Goto(MenuPage::Readme)),
@@ -1204,8 +1228,10 @@ fn main_menu_page(
     if !cfg!(target_arch = "wasm32") {
         entries.push(("Quit", BUTTON_GREEN, MenuAction::Quit));
     }
+    // 10 % apart, closer when eight plates must fit above y=10 %.
+    let step = (0.6 / (entries.len() - 1) as f32).det_min(0.1);
     for (i, (name, color, action)) in entries.into_iter().enumerate() {
-        let y = 0.7 - 0.1 * i as f32;
+        let y = 0.7 - step * i as f32;
         let (x, anchor) = if i % 2 == 0 {
             (0.46, Anchor::Rb)
         } else {

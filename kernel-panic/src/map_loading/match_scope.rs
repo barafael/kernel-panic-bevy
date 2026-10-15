@@ -33,6 +33,7 @@ use bevy::ecs::system::SystemIdMarker;
 use bevy::prelude::*;
 
 use crate::game_setup::{ActiveMatch, AiDifficulty, GameSetup, SPECTATOR_TEAM};
+use crate::net::driver::{NetSession, NextNetMatch};
 use crate::sim::MatchSeed;
 use crate::units::ai::AiSeats;
 use crate::units::lifecycle::game_over::GameState;
@@ -90,6 +91,14 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     // The seed first: the resets below seed the match's random streams
     // (the AI's dice, `SimRng`) from it.
     world.insert_resource(MatchSeed(setup.seed));
+    // A networked match the lobby started waits for its own swap: the
+    // attract demo's load, landing first, must not take it (the session
+    // resets below would).
+    let waiting = if setup.demo {
+        world.remove_resource::<NextNetMatch>()
+    } else {
+        None
+    };
     let resets: Vec<ResetFn> = world
         .get_resource::<MatchResources>()
         .map(|r| r.0.iter().map(|(_, reset)| *reset).collect())
@@ -97,16 +106,28 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     for reset in resets {
         reset(world);
     }
+    if let Some(next) = waiting {
+        world.insert_resource(next);
+    }
 
     // The human seat (its owner: seat `i` is owner `i`) drives input,
     // the result panel and the fog/cloak perspective; with no human
     // seat (the menu's attract-mode demo) the local player spectates.
-    // The difficulty the menu picked drives the AI.
-    let local_team = setup
-        .players
-        .iter()
-        .position(|p| !p.ai)
-        .map_or(SPECTATOR_TEAM, |seat| seat as u8);
+    // In a networked match it is the seat the session's roster gives
+    // this peer (a spectator has none). The difficulty the menu picked
+    // drives the AI.
+    let networked = world
+        .get_resource::<NetSession>()
+        .filter(|n| n.session.is_networked())
+        .map(|n| n.session.player());
+    let local_team = match networked {
+        Some(seat) => seat.unwrap_or(SPECTATOR_TEAM),
+        None => setup
+            .players
+            .iter()
+            .position(|p| !p.ai)
+            .map_or(SPECTATOR_TEAM, |seat| seat as u8),
+    };
     world.insert_resource(LocalTeam(local_team));
     // Who is allied, and which owners the AI plays, come from the
     // seats, never from who is watching: every peer runs the same

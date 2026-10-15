@@ -313,6 +313,14 @@ pub struct SimEndpoint {
     net: SimNetwork,
 }
 
+/// Dropping the connection leaves the room, as closing a matchbox
+/// socket does: the others see the peer leave.
+impl Drop for SimEndpoint {
+    fn drop(&mut self) {
+        self.net.leave(self.id);
+    }
+}
+
 impl Transport for SimEndpoint {
     fn local_id(&self) -> Option<PeerId> {
         Some(self.id)

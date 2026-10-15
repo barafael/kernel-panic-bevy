@@ -34,7 +34,7 @@ use crate::units::components::Faction;
 
 /// One full app at a time per test, and one test at a time: eight apps
 /// are a few GB.
-static SERIAL: Mutex<()> = Mutex::new(());
+pub(super) static SERIAL: Mutex<()> = Mutex::new(());
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)

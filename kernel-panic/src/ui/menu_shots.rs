@@ -24,6 +24,7 @@ use bevy::ui::UiGlobalTransform;
 use super::menu::{MenuButton, MenuFrame, MenuPage};
 use super::save_screenshot;
 use crate::game_setup::DevOptions;
+use crate::net::lobby::LobbyAction;
 use crate::sim::DetFloat;
 
 /// Default frames (at 30 per second) to let the demo world load before
@@ -41,7 +42,7 @@ const OVERLAP_TOLERANCE: f32 = 1.0;
 /// A frame may sit on the window edge; beyond this it has left it.
 const EDGE_TOLERANCE: f32 = 0.5;
 
-const PAGES: [(MenuPage, &str); 9] = [
+const PAGES: [(MenuPage, &str); 12] = [
     (MenuPage::Main, "main"),
     (MenuPage::QuickSkirmish, "quick"),
     (MenuPage::AdvancedSkirmish, "advanced"),
@@ -51,7 +52,25 @@ const PAGES: [(MenuPage, &str); 9] = [
     (MenuPage::Readme, "readme"),
     (MenuPage::Settings, "settings"),
     (MenuPage::Audio, "audio"),
+    (MenuPage::Multiplayer, "multiplayer"),
+    // The same page in a room of our own ([`room_setup`]): fresh, then
+    // with all eight seats.
+    (MenuPage::Multiplayer, "multiplayer-room"),
+    (MenuPage::Multiplayer, "multiplayer-full"),
 ];
+
+/// The lobby actions that set up a page's room before its shot.
+fn room_setup(name: &str) -> Vec<LobbyAction> {
+    match name {
+        "multiplayer-room" => vec![LobbyAction::Create],
+        "multiplayer-full" => {
+            let mut actions = vec![LobbyAction::AddSeat; 6];
+            actions.extend((1..8).map(LobbyAction::Occupant));
+            actions
+        }
+        _ => Vec::new(),
+    }
+}
 
 pub struct MenuShotsPlugin;
 
@@ -95,6 +114,7 @@ fn take_menu_shots(
     mut page: ResMut<MenuPage>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
+    mut lobby: MessageWriter<LobbyAction>,
     windows: Query<&Window>,
     nodes: Query<
         (Entity, &ComputedNode, &UiGlobalTransform, Option<&Children>),
@@ -120,6 +140,7 @@ fn take_menu_shots(
         Some((p, name)) => {
             if !half {
                 *page = *p;
+                lobby.write_batch(room_setup(name));
             } else {
                 save_screenshot(&mut commands, dir.0.join(format!("{name}.png")));
                 if let Ok(window) = windows.single() {
