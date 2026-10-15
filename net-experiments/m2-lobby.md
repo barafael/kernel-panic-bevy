@@ -172,11 +172,10 @@ Everything opens the room through one function:
 pub fn connect(room: &RoomId) -> Box<dyn Transport>
 ```
 
-Until the matchbox transport is merged it joins an in-process `SimNetwork` per
-room code (a process-wide registry, zero latency): two apps in one process meet
-(the full-app test), a game alone hosts a room nobody else can reach. The switch
-is `super::matchbox::open_room(room, &cfg)`; then `sim_net` can go back to
-`#[cfg(test)]` (its `allow(dead_code)` note says so). `SimEndpoint` now leaves the
+The game opens the room with `super::matchbox::open_room(room,
+&NetConfig::from_launch())` (merged by the coordinator); in tests it joins an
+in-process `SimNetwork` per room code (a process-wide registry, zero latency), so
+two apps in one test process meet (the full-app test). `sim_net` is test-only. `SimEndpoint` now leaves the
 network when dropped, as a closed matchbox socket does: leaving a room (Leave, a
 refusal, the lobby dropped) is a `PeerEvent::Left` for the others.
 
