@@ -571,3 +571,121 @@ fn hash_cost() {
     let lines = super::state::describe(h.world_mut()).len();
     eprintln!("desync dump: {:?} for {lines} lines", t1.elapsed());
 }
+
+/// M2 drops with the whole game: four humans and an AI (seats 0, 1 on
+/// one side, 2, 3 and the AI on the other). Peer 4 leaves the way the
+/// menu does it (resign, then the driver closes its transport); peer
+/// 3's connection just vanishes (a crash). The host sequences a
+/// `Dropped` for each seat; on both remaining peers both seats leave
+/// play on the same tick, only the crashed one counts as dropped (the
+/// other had resigned), and the trails agree.
+#[test]
+fn drops_full_sim() {
+    use super::SimCommand;
+    use crate::units::teams::TeamFates;
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut scn = scenario("Marble_Madness_Map", 4, 1, 0xd209);
+    for (i, seat) in scn.seats.iter_mut().enumerate() {
+        seat.ally_team = u8::from(i >= 2);
+    }
+    let mut r = start(&scn, 0xd209, LinkParams::latency_ms(35));
+    r.run(30 * 9, Duration::from_micros(33_333), |r, f| {
+        if f == 60 {
+            let w = r.peers[3].h.world_mut();
+            w.resource_mut::<CommandBus>().issue(SimCommand::Resign);
+            w.resource_mut::<NetSession>().request_leave();
+        }
+        if r.peers[3].present && r.status(3).closed {
+            r.peers[3].present = false;
+        }
+        if f == 120 {
+            r.net.leave(PeerId(3));
+            r.peers[2].present = false;
+        }
+    });
+    let leaver = r.status(3);
+    assert_eq!(leaver.ended, Some(Ended::Left));
+    assert!(!r.peers[3].present, "closed within the run");
+    r.assert_agree(200);
+    let fates = |r: &mut Room, i: usize| {
+        let w = r.peers[i].h.world_mut();
+        let f = w.resource::<TeamFates>();
+        (f.left_at(2), f.left_at(3))
+    };
+    let host = fates(&mut r, 0);
+    assert!(host.0.is_some() && host.1.is_some(), "both left: {host:?}");
+    assert_eq!(fates(&mut r, 1), host, "on the same ticks");
+    for peer in &mut r.peers[..2] {
+        let w = peer.h.world_mut();
+        let c = w.resource::<super::MatchControl>();
+        assert_eq!(c.dropped.iter().copied().collect::<Vec<_>>(), vec![2]);
+        assert_eq!(c.resigned.iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+    }
+    let st = r.status(1);
+    let gone: Vec<PeerId> = st.peers.iter().filter(|p| p.gone).map(|p| p.peer).collect();
+    assert_eq!(gone, vec![PeerId(3), PeerId(4)], "the player list knows");
+    r.report("drops");
+}
+
+/// The host's match rules across peers: pausing off (only the host may),
+/// speeds 50–200 %. The host's seat goes into the rules from the roster
+/// on every peer; a guest's pause and an out-of-range speed are refused
+/// by the host before they are sequenced; the host's pause holds
+/// everyone.
+#[test]
+fn host_rules_full_sim() {
+    use super::{MatchControl, MatchRules, SimCommand};
+    use crate::game_setup::ActiveMatch;
+    let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut scn = scenario("Marble_Madness_Map", 2, 1, 0x7e5);
+    scn.rules = MatchRules {
+        pausable: false,
+        min_speed: 50,
+        max_speed: 200,
+        ..MatchRules::default()
+    };
+    let mut r = start(&scn, 0x7e5, LinkParams::latency_ms(40));
+    let issue = |r: &mut Room, peer: usize, cmd: SimCommand| {
+        r.peers[peer]
+            .h
+            .world_mut()
+            .resource_mut::<CommandBus>()
+            .issue(cmd);
+    };
+    let control = |r: &mut Room, peer: usize| {
+        r.peers[peer]
+            .h
+            .world_mut()
+            .resource::<MatchControl>()
+            .clone()
+    };
+    r.run(30 * 8, Duration::from_micros(33_333), |r, f| match f {
+        40 => {
+            issue(r, 1, SimCommand::Pause { on: true });
+            issue(r, 1, SimCommand::SetSpeed { percent: 400 });
+            issue(r, 1, SimCommand::SetSpeed { percent: 150 });
+        }
+        100 => {
+            for i in 0..2 {
+                let c = control(r, i);
+                assert!(!c.paused, "peer {i}: a guest may not pause");
+                assert_eq!(c.speed_percent, 150, "peer {i}");
+            }
+            issue(r, 0, SimCommand::Pause { on: true });
+        }
+        160 => {
+            for i in 0..2 {
+                assert!(control(r, i).paused, "peer {i}: the host may");
+            }
+            issue(r, 0, SimCommand::Pause { on: false });
+        }
+        _ => {}
+    });
+    for peer in &mut r.peers[..2] {
+        let w = peer.h.world_mut();
+        assert_eq!(w.resource::<ActiveMatch>().0.rules.host, Some(0));
+        assert!(!w.resource::<MatchControl>().paused);
+    }
+    assert_eq!(r.session(0, |s| s.stats.refused), 2);
+    r.assert_agree(150);
+}

@@ -33,6 +33,12 @@
 //! - **Desync:** every peer stops at the tick the host names and writes
 //!   a state dump ([`DumpDir`]; the console and a download on the web).
 //!   The match stays paused (Spring plays on).
+//! - **A networked match starts** by making the roster's seat the local
+//!   team and handing the host the match rules' check
+//!   ([`seat_networked`]); **it ends for this peer** when the host
+//!   leaves, is lost or drops us, or when the player leaves
+//!   ([`NetSession::request_leave`]: the resignation goes out first,
+//!   then the transport closes). [`NetStatus`] tells the UI all of it.
 
 use std::time::Duration;
 
@@ -42,7 +48,9 @@ use bevy::prelude::*;
 
 use crate::sim::DetFloat;
 
-use super::session::{Desync, Ended, HASH_INTERVAL, Session, SessionConfig, SessionEvent};
+use super::session::{
+    Desync, Ended, HASH_INTERVAL, PeerInfo, Session, SessionConfig, SessionEvent,
+};
 use super::transport::{PeerId, Transport};
 use super::wire::Turn;
 use super::{CommandBus, CommandFrame, SimCommand};
@@ -253,6 +261,13 @@ fn run_one(s: &mut Session, r: &mut impl TickRunner, now: Duration) {
 
 // --- the game side -----------------------------------------------------
 
+/// How long "Leave match" waits for the host to acknowledge the
+/// resignation before it disconnects anyway.
+pub const LEAVE_GRACE: Duration = Duration::from_millis(1500);
+
+/// How long a notice ("X left the match") stays on screen.
+pub const NOTICE_SECS: Duration = Duration::from_secs(8);
+
 /// The match's lockstep state. Match-scoped: every match starts a fresh
 /// session — networked if a [`NextNetMatch`] is waiting, else solo.
 #[derive(Resource)]
@@ -261,6 +276,10 @@ pub struct NetSession {
     pub pacer: Pacer,
     /// The networked seat was made the local team.
     seated: bool,
+    /// "Leave match" was asked; when the driver first saw it.
+    leave: Option<Option<Duration>>,
+    /// Recent notices, oldest first.
+    notices: Vec<(Duration, Notice)>,
 }
 
 impl NetSession {
@@ -269,7 +288,46 @@ impl NetSession {
             session,
             pacer: Pacer::default(),
             seated: false,
+            leave: None,
+            notices: Vec::new(),
         }
+    }
+
+    /// Leave the match ("Leave match", or the menu from a networked
+    /// match): the caller issues the resignation first; the driver sends
+    /// it, waits until the host has it (at most [`LEAVE_GRACE`]) and
+    /// closes the transport ([`Session::close`]; [`NetStatus::closed`]
+    /// says when). The host and a peer whose match is over close at
+    /// once.
+    pub fn request_leave(&mut self) {
+        self.leave.get_or_insert(None);
+    }
+
+    /// "Leave match" was asked.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn leaving(&self) -> bool {
+        self.leave.is_some()
+    }
+}
+
+/// A peer came or went, for a few seconds on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Notice {
+    Left(PeerId),
+    TimedOut(PeerId),
+}
+
+/// Display names of the peers (the lobby fills it; the player list
+/// falls back to the short [`PeerId`] form).
+#[derive(Resource, Clone, Debug, Default)]
+pub struct PeerNames(pub std::collections::BTreeMap<PeerId, String>);
+
+impl PeerNames {
+    pub fn name(&self, peer: PeerId) -> String {
+        self.0
+            .get(&peer)
+            .cloned()
+            .unwrap_or_else(|| peer.to_string())
     }
 }
 
@@ -302,13 +360,17 @@ pub struct NextNetMatch {
 pub struct DumpDir(pub std::path::PathBuf);
 
 /// The lockstep state as the UI shows it. Rewritten every frame; never
-/// read by the sim. (The banner reads part of it; the rest is for the
-/// M2 lobby's network overlay and the tests.)
+/// read by the sim. (The HUD's network overlay, `ui::hud::net_overlay`,
+/// shows it: player list, banners, notices.)
 #[derive(Resource, Clone, Debug, Default)]
 #[allow(dead_code)]
 pub struct NetStatus {
     pub networked: bool,
     pub host: bool,
+    /// This peer.
+    pub me: PeerId,
+    /// Everyone in the match: seat, ping, gone.
+    pub peers: Vec<PeerInfo>,
     pub delay: u32,
     /// Stalled for a turn (guest) or for players to show up (host): who,
     /// and since when (the driver's clock).
@@ -317,6 +379,12 @@ pub struct NetStatus {
     /// Where this peer's desync dump went.
     pub dump: Option<String>,
     pub ended: Option<Ended>,
+    /// "Leave match" is under way.
+    pub leaving: bool,
+    /// The transport is closed: this peer is out of the match.
+    pub closed: bool,
+    /// Who came and went in the last [`NOTICE_SECS`].
+    pub notices: Vec<Notice>,
     pub last_frame: FrameReport,
     pub now: Duration,
 }
@@ -465,16 +533,10 @@ pub fn drive_fixed_main(world: &mut World) {
     let step = world.resource::<Time<Fixed>>().timestep();
     world.resource_scope(|world, mut net: Mut<NetSession>| {
         let net = &mut *net;
-        // A networked seat is the local team (the setup's first human
-        // seat otherwise).
         if !net.seated {
             net.seated = true;
             if net.session.is_networked() {
-                let team = net
-                    .session
-                    .player()
-                    .unwrap_or(crate::game_setup::SPECTATOR_TEAM);
-                world.insert_resource(crate::units::player::LocalTeam(team));
+                seat_networked(world, &mut net.session);
             }
         }
         let mut runner = WorldRunner {
@@ -490,6 +552,10 @@ pub fn drive_fixed_main(world: &mut World) {
             now,
             step,
         );
+        if let Some(since) = net.leave.as_mut() {
+            let since = *since.get_or_insert(now);
+            leave_step(&mut net.session, &mut runner, now.saturating_sub(since));
+        }
         let dumped = runner.dump.take();
         // The render blend: how far the clock is into the next tick.
         let mut fixed = world.resource_mut::<Time<Fixed>>();
@@ -501,14 +567,26 @@ pub fn drive_fixed_main(world: &mut World) {
 
         for ev in net.session.take_events() {
             match ev {
-                SessionEvent::Left(peer) => info!("{peer} left the match"),
+                SessionEvent::Left(peer) => {
+                    info!("{peer} left the match");
+                    net.notices.push((now, Notice::Left(peer)));
+                }
+                SessionEvent::TimedOut(peer) => {
+                    net.notices.push((now, Notice::TimedOut(peer)));
+                }
                 SessionEvent::HostLeft => warn!("the host left: the match is over"),
+                SessionEvent::HostLost => warn!("lost the connection to the host"),
+                SessionEvent::Dropped => warn!("the host dropped us from the match"),
                 SessionEvent::Desync(d) => error!(
                     "desync at frame {}: {:?} disagree with the host; stopping after tick {}",
                     d.frame, d.peers, d.stop_at
                 ),
             }
         }
+        net.notices
+            .retain(|(at, _)| now.saturating_sub(*at) < NOTICE_SECS);
+        let notices = net.notices.iter().map(|(_, n)| *n).collect();
+        let leaving = net.leave.is_some();
         let s = &net.session;
         let waiting = net
             .pacer
@@ -519,72 +597,63 @@ pub fn drive_fixed_main(world: &mut World) {
         *status = NetStatus {
             networked: s.is_networked(),
             host: s.is_host(),
+            me: s.me(),
+            peers: if s.is_networked() {
+                s.peers()
+            } else {
+                Vec::new()
+            },
             delay: s.delay(),
             waiting,
             desync: s.desync().cloned(),
             dump,
             ended: s.ended(),
+            leaving,
+            closed: s.closed(),
+            notices,
             last_frame: rep,
             now,
         };
     });
 }
 
-/// The banner: waiting, desync, match over. Out of the sim.
-#[derive(Component)]
-struct NetBanner;
-
-fn net_banner(
-    mut commands: Commands,
-    status: Option<Res<NetStatus>>,
-    mut banner: Query<(Entity, &mut Text), With<NetBanner>>,
-) {
-    let Some(status) = status.filter(|s| s.networked) else {
-        for (e, _) in &banner {
-            commands.entity(e).despawn();
-        }
+/// The first frame of a networked match: the roster's seat becomes the
+/// local team, the host's seat goes into the rules (unless the lobby set
+/// it; every peer has the same roster, so every peer fills in the same),
+/// and the host checks what it sequences against those rules.
+fn seat_networked(world: &mut World, session: &mut Session) {
+    let team = session
+        .player()
+        .unwrap_or(crate::game_setup::SPECTATOR_TEAM);
+    world.insert_resource(crate::units::player::LocalTeam(team));
+    let host = session.host_player();
+    let Some(mut active) = world.get_resource_mut::<crate::game_setup::ActiveMatch>() else {
         return;
     };
-    let message = if let Some(d) = &status.desync {
-        Some(format!(
-            "Desync at frame {} — the game is stopped.\nState dump: {}",
-            d.frame,
-            status.dump.as_deref().unwrap_or("pending")
-        ))
-    } else if status.ended == Some(Ended::HostLeft) {
-        Some("The host left — the match is over.".to_string())
-    } else {
-        status.waiting.as_ref().and_then(|(who, since)| {
-            // Brief stalls are just jitter.
-            (status.now.saturating_sub(*since) > Duration::from_millis(300)).then(|| {
-                let names: Vec<String> = who.iter().map(|p| p.to_string()).collect();
-                format!("Waiting for {}…", names.join(", "))
-            })
-        })
-    };
-    match (message, banner.single_mut()) {
-        (Some(m), Ok((_, mut text))) => {
-            if text.0 != m {
-                text.0 = m;
-            }
+    if active.0.rules.host.is_none() {
+        active.0.rules.host = host;
+    }
+    let active = crate::game_setup::ActiveMatch::clone(&active);
+    session.set_admit(Box::new(move |player, cmd| {
+        super::apply::rules_admit(Some(&active), player, cmd).map_err(|why| format!("{why:?}"))
+    }));
+}
+
+/// One frame of "Leave match", `waited` after it was asked: send what
+/// the player issued (the resignation) even if no tick runs, then close
+/// once the host has it — at once for the host, or when the match is
+/// over anyway — or after [`LEAVE_GRACE`].
+pub(crate) fn leave_step(s: &mut Session, r: &mut impl TickRunner, waited: Duration) {
+    if s.closed() {
+        return;
+    }
+    if !s.halted() {
+        for frame in r.seal(s.delay()) {
+            s.submit(frame);
         }
-        (Some(m), Err(_)) => {
-            commands.spawn((
-                NetBanner,
-                Text::new(m),
-                TextFont::from_font_size(22.0),
-                TextColor(Color::srgb(1.0, 0.85, 0.3)),
-                Node {
-                    position_type: PositionType::Absolute,
-                    top: Val::Px(72.0),
-                    left: Val::Px(16.0),
-                    ..default()
-                },
-                GlobalZIndex(50),
-            ));
-        }
-        (None, Ok((e, _))) => commands.entity(e).despawn(),
-        (None, Err(_)) => {}
+    }
+    if s.is_host() || s.ended().is_some() || s.unacked() == 0 || waited >= LEAVE_GRACE {
+        s.close();
     }
 }
 
@@ -606,8 +675,7 @@ impl Plugin for LockstepPlugin {
                 drive_fixed_main
                     .after(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                     .before(RunFixedMainLoopSystems::AfterFixedMainLoop),
-            )
-            .add_systems(Update, net_banner);
+            );
     }
 }
 

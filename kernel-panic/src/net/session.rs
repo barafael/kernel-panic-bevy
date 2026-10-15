@@ -34,6 +34,14 @@
 //! with its own, and on a mismatch tells everyone where to stop. Spring
 //! announces the error and plays on (`GameServer.cpp:719-760`); we stop
 //! and dump the state for the bisect.
+//!
+//! Peers leaving (M2, `net-experiments/m2-networked-play.md`): a guest
+//! the transport reports gone, or one silent past [`Timeouts`], is
+//! dropped by the host, which sequences a [`SimCommand::Dropped`] in its
+//! seat's name, so its leave applies on every peer at the same tick. The
+//! host leaving (or going silent) ends the match for the guests: no host
+//! migration yet. The host also refuses to sequence what the match rules
+//! forbid ([`Admit`]).
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -41,6 +49,7 @@ use std::time::Duration;
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use super::wire::{self, Batch, Echo, InputPacket, Msg, Turn, TurnPacket, TurnRun};
 use super::{CommandFrame, SimCommand};
+use crate::sim::DetFloat;
 
 /// Frames between state-hash reports (a second of game time).
 pub const HASH_INTERVAL: u32 = 30;
@@ -71,6 +80,55 @@ const HASH_KEEP: usize = 64;
 /// Turns in hand beyond which a guest counts as catching up (its
 /// normal backlog is the catch-up target, 2, plus a frame's ticks).
 const CATCHING_UP: u32 = 6;
+
+/// How often the host tells every guest everyone's round trip (for the
+/// player list; Spring relays each player's ping the same way,
+/// `NETMSG_PLAYERINFO`).
+const PING_EVERY: Duration = Duration::from_secs(1);
+
+/// When silence means a peer is gone (Spring: `CheckTimeout`,
+/// `System/Net/UDPConnection.cpp:767`; the host drops a guest,
+/// `Net/GameServer.cpp:1963`, a guest gives up on the host).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeouts {
+    /// Before the first packet arrived (Spring's
+    /// `InitialNetworkTimeout`, 30 s, `System/GlobalConfig.cpp:15`).
+    pub initial: Duration,
+    /// After that. Spring waits 120 s (`NetworkTimeout`); here the host
+    /// keeps a minute of turns ([`HISTORY`]) and a guest gone longer
+    /// can't catch up without rejoining (M3), so a minute.
+    pub running: Duration,
+}
+
+impl Default for Timeouts {
+    fn default() -> Self {
+        Self {
+            initial: Duration::from_secs(30),
+            running: Duration::from_secs(60),
+        }
+    }
+}
+
+/// The host's check of one command before it sequences it: the match
+/// rules (`net::apply::rules_admit`), set by the driver. `Err` names
+/// why it was refused.
+pub type Admit = Box<dyn Fn(u8, &SimCommand) -> Result<(), String> + Send + Sync>;
+
+/// One peer of the match as the player list shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerInfo {
+    pub peer: PeerId,
+    /// The seat it plays (`None`: spectator).
+    pub player: Option<u8>,
+    pub host: bool,
+    /// This peer.
+    pub me: bool,
+    /// Round trip to the host, ms (the host's own: 0; unknown yet:
+    /// `None`).
+    pub ping_ms: Option<u32>,
+    /// Left the match (disconnected, timed out).
+    pub gone: bool,
+}
 
 /// The bounds of the adaptive input delay, in ticks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +326,13 @@ pub struct Desync {
 pub enum Ended {
     /// No host migration (M1): without the host there is no clock.
     HostLeft,
+    /// Nothing from the host for [`Timeouts`] (Spring: "Lost connection
+    /// to the server").
+    HostLost,
+    /// The host dropped this peer (timed out on its side).
+    Dropped,
+    /// This peer left ([`Session::close`]).
+    Left,
 }
 
 /// Something worth telling the player about.
@@ -276,6 +341,12 @@ pub enum SessionEvent {
     Left(PeerId),
     Desync(Desync),
     HostLeft,
+    /// Host: a guest silent for too long was dropped.
+    TimedOut(PeerId),
+    /// Guest: no word from the host for too long.
+    HostLost,
+    /// Guest: the host dropped us.
+    Dropped,
 }
 
 /// The host's view of one guest.
@@ -284,6 +355,8 @@ struct GuestLink {
     player: Option<u8>,
     heard: bool,
     gone: bool,
+    /// When the last packet came (any message).
+    last_heard: Option<Duration>,
     /// The guest holds every turn before this.
     next_turn: u32,
     rtt: Rtt,
@@ -302,7 +375,6 @@ struct PlayerIn {
     last_target: u32,
 }
 
-#[derive(Debug)]
 struct Host {
     started: bool,
     links: BTreeMap<PeerId, GuestLink>,
@@ -319,6 +391,25 @@ struct Host {
     controller: DelayController,
     paused: bool,
     own_seq: u32,
+    /// The match rules' check ([`Admit`]); `None` admits everything.
+    admit: Option<Admit>,
+    /// Seats whose last peer left: their `Dropped` is sequenced.
+    dropped: std::collections::BTreeSet<u8>,
+    last_pings: Option<Duration>,
+    /// Commands the rules refused (copied into [`SessionStats`]).
+    refused: u64,
+}
+
+impl std::fmt::Debug for Host {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Host")
+            .field("started", &self.started)
+            .field("links", &self.links)
+            .field("next_cut", &self.next_cut)
+            .field("paused", &self.paused)
+            .field("dropped", &self.dropped)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -334,6 +425,12 @@ struct Guest {
     /// A gap first seen (tick, when), and the last resend request.
     gap_seen: Option<(u32, Duration)>,
     resend_at: Option<Duration>,
+    /// When the host was last heard from (any message).
+    last_heard: Option<Duration>,
+    /// Everyone's round trip to the host, as it last told us.
+    pings: BTreeMap<PeerId, u16>,
+    /// Peers the host said left.
+    gone: std::collections::BTreeSet<PeerId>,
 }
 
 #[derive(Debug)]
@@ -351,6 +448,9 @@ pub struct SessionStats {
     pub gap_fills: u64,
     /// Turns received again (redundancy and duplicates).
     pub dup_turns: u64,
+    /// Host: commands it refused to sequence (match rules, a guest's
+    /// `Dropped`).
+    pub refused: u64,
 }
 
 /// One peer's lockstep state for one match.
@@ -359,7 +459,13 @@ pub struct Session {
     me: PeerId,
     host: PeerId,
     roster: BTreeMap<PeerId, Option<u8>>,
+    /// Over a network (stays true once [`Self::close`] dropped the
+    /// transport).
+    networked: bool,
     transport: Option<Box<dyn Transport>>,
+    timeouts: Timeouts,
+    /// The first poll: where the initial timeouts count from.
+    opened: Option<Duration>,
     turns: TurnBuffer,
     delay: u32,
     role: Role,
@@ -396,7 +502,10 @@ impl Session {
             me: PeerId::default(),
             host: PeerId::default(),
             roster: BTreeMap::new(),
+            networked: false,
             transport: None,
+            timeouts: Timeouts::default(),
+            opened: None,
             turns: TurnBuffer::default(),
             delay: 0,
             role: Role::Host(Box::new(Host::new(bounds, true))),
@@ -441,7 +550,10 @@ impl Session {
             host,
             delay: cfg.delay.initial,
             roster: cfg.roster,
+            networked: true,
             transport: Some(transport),
+            timeouts: Timeouts::default(),
+            opened: None,
             turns: TurnBuffer::default(),
             role,
             desync: None,
@@ -453,7 +565,84 @@ impl Session {
     }
 
     pub fn is_networked(&self) -> bool {
-        self.transport.is_some()
+        self.networked
+    }
+
+    /// When silence counts as gone ([`Timeouts`]).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_timeouts(&mut self, timeouts: Timeouts) {
+        self.timeouts = timeouts;
+    }
+
+    /// Host: check every command before sequencing it ([`Admit`]).
+    pub fn set_admit(&mut self, admit: Admit) {
+        if let Role::Host(h) = &mut self.role {
+            h.admit = Some(admit);
+        }
+    }
+
+    /// Leave the match: the transport is dropped (closed; the others see
+    /// this peer leave), nothing runs any more. Idempotent.
+    pub fn close(&mut self) {
+        self.transport = None;
+        if self.networked && self.ended.is_none() {
+            self.ended = Some(Ended::Left);
+        }
+    }
+
+    /// The transport is gone ([`Self::close`]).
+    pub fn closed(&self) -> bool {
+        self.networked && self.transport.is_none()
+    }
+
+    /// Guest: command batches the host hasn't acknowledged yet (0 for
+    /// the host: it files its own at once).
+    pub fn unacked(&self) -> usize {
+        match &self.role {
+            Role::Host(_) => 0,
+            Role::Guest(g) => g.unacked.len(),
+        }
+    }
+
+    /// Everyone in the match, in roster order, for the player list.
+    pub fn peers(&self) -> Vec<PeerInfo> {
+        self.roster
+            .iter()
+            .map(|(&peer, &player)| {
+                let host = peer == self.host;
+                let me = peer == self.me;
+                let (ping_ms, gone) = match &self.role {
+                    Role::Host(h) => match h.links.get(&peer) {
+                        Some(l) => (l.rtt.srtt.map(|r| r as u32), l.gone),
+                        None => (Some(0), false),
+                    },
+                    Role::Guest(g) => {
+                        let ping = if host {
+                            Some(0)
+                        } else if me {
+                            g.rtt.srtt.map(|r| r as u32)
+                        } else {
+                            g.pings
+                                .get(&peer)
+                                .filter(|&&p| p != u16::MAX)
+                                .map(|&p| u32::from(p))
+                        };
+                        let gone = g.gone.contains(&peer)
+                            || (host
+                                && matches!(self.ended, Some(Ended::HostLeft | Ended::HostLost)));
+                        (ping, gone)
+                    }
+                };
+                PeerInfo {
+                    peer,
+                    player,
+                    host,
+                    me,
+                    ping_ms,
+                    gone,
+                }
+            })
+            .collect()
     }
 
     pub fn is_host(&self) -> bool {
@@ -468,6 +657,11 @@ impl Session {
     /// player, where the local seat decides, and for spectators).
     pub fn player(&self) -> Option<u8> {
         self.roster.get(&self.me).copied().flatten()
+    }
+
+    /// The host's seat (`None`: a spectating host, or single player).
+    pub fn host_player(&self) -> Option<u8> {
+        self.roster.get(&self.host).copied().flatten()
     }
 
     /// The input delay in force (the last applied turn's).
@@ -612,8 +806,10 @@ impl Session {
                         target: frame.tick,
                         commands: frame.commands,
                     },
+                    false,
                 );
                 self.stats.late_batches += late;
+                self.stats.refused = h.refused;
             }
             Role::Guest(g) => {
                 let seq = g.next_seq;
@@ -728,17 +924,18 @@ impl Session {
         }
     }
 
-    /// Take in everything that arrived.
+    /// Take in everything that arrived; notice who left or went silent.
     pub fn poll(&mut self, now: Duration) {
         let Some(t) = self.transport.as_mut() else {
             return;
         };
+        let opened = *self.opened.get_or_insert(now);
         let events = t.poll_peers();
         let mut inbox = t.receive(Channel::Reliable);
         inbox.extend(t.receive(Channel::Unreliable));
         for ev in events {
             if let PeerEvent::Left(peer) = ev {
-                self.peer_left(peer);
+                self.peer_left(peer, false);
             }
         }
         for (from, bytes) in inbox {
@@ -746,9 +943,49 @@ impl Session {
                 self.handle(from, msg, now);
             }
         }
+        self.check_timeouts(now, opened);
     }
 
-    fn peer_left(&mut self, peer: PeerId) {
+    /// Silence for longer than [`Timeouts`]: the host drops the guest
+    /// (and tells it, should it still be listening), a guest gives up on
+    /// the host. Spring: `CGameServer` kills a timed-out player's link
+    /// (`Net/GameServer.cpp:1963`).
+    fn check_timeouts(&mut self, now: Duration, opened: Duration) {
+        let t = self.timeouts;
+        let silent = |last: Option<Duration>| {
+            let (since, limit) = match last {
+                Some(at) => (at, t.running),
+                None => (opened, t.initial),
+            };
+            now.saturating_sub(since) > limit
+        };
+        match &self.role {
+            Role::Host(h) => {
+                let lost: Vec<PeerId> = h
+                    .links
+                    .iter()
+                    .filter(|(_, l)| !l.gone && silent(l.last_heard))
+                    .map(|(p, _)| *p)
+                    .collect();
+                for peer in lost {
+                    bevy::log::warn!("{peer} timed out: dropped");
+                    self.send(peer, Channel::Reliable, Msg::Left { peer });
+                    self.peer_left(peer, true);
+                }
+            }
+            Role::Guest(g) => {
+                if self.ended.is_none() && silent(g.last_heard) {
+                    bevy::log::warn!("no word from the host {}: giving up", g.host);
+                    self.ended = Some(Ended::HostLost);
+                    self.events.push(SessionEvent::HostLost);
+                }
+            }
+        }
+    }
+
+    /// `peer` is gone: the transport said so, or (`timed_out`) it was
+    /// silent too long.
+    fn peer_left(&mut self, peer: PeerId, timed_out: bool) {
         match &mut self.role {
             Role::Host(h) => {
                 let Some(link) = h.links.get_mut(&peer) else {
@@ -759,10 +996,28 @@ impl Session {
                 }
                 // Spring: the player goes inactive, its team and units
                 // stay (`CPlayerHandler::PlayerLeft`,
-                // `rts/Game/Players/PlayerHandler.cpp:66`).
+                // `rts/Game/Players/PlayerHandler.cpp:66`). Here its seat
+                // leaves play (the user's leaving rules): a `Dropped` in
+                // its name, after anything of its own already sequenced,
+                // applied by every peer on the same tick. (A seat has one
+                // peer: batches are numbered per seat.)
                 link.gone = true;
+                let seat = link.player;
                 h.started |= h.links.values().all(|l| l.heard || l.gone);
-                self.events.push(SessionEvent::Left(peer));
+                if let Some(seat) = seat
+                    && h.dropped.insert(seat)
+                {
+                    let input = h.inputs.entry(seat).or_default();
+                    let at = input.last_target.max(h.next_cut);
+                    input.last_target = at;
+                    h.scheduled
+                        .insert((at, seat, u32::MAX), vec![SimCommand::Dropped]);
+                }
+                self.events.push(if timed_out {
+                    SessionEvent::TimedOut(peer)
+                } else {
+                    SessionEvent::Left(peer)
+                });
                 for guest in self.guests() {
                     self.send(guest, Channel::Reliable, Msg::Left { peer });
                 }
@@ -796,6 +1051,7 @@ impl Session {
             Msg::Input(p) => {
                 let link = h.links.get_mut(&from).expect("checked above");
                 link.heard = true;
+                link.last_heard = Some(now);
                 link.next_turn = link.next_turn.max(p.next_turn);
                 link.stamp_in = Some((p.stamp, now));
                 if let Some(e) = p.echo {
@@ -817,12 +1073,21 @@ impl Session {
                 }
                 if let Some(player) = player {
                     for b in p.batches {
-                        self.stats.late_batches += h.accept(player, b);
+                        self.stats.late_batches += h.accept(player, b, true);
                     }
+                    self.stats.refused = h.refused;
                 }
             }
-            Msg::Resend { from: tick } => self.fill(from, tick),
+            Msg::Resend { from: tick } => {
+                if let Some(l) = h.links.get_mut(&from) {
+                    l.last_heard = Some(now);
+                }
+                self.fill(from, tick);
+            }
             Msg::Hash { frame, hash } => {
+                if let Some(l) = h.links.get_mut(&from) {
+                    l.last_heard = Some(now);
+                }
                 let own = h.hashes.get(&frame).copied();
                 let newest = h.hashes.last_key_value().map(|(f, _)| *f);
                 match own {
@@ -839,9 +1104,11 @@ impl Session {
     }
 
     fn handle_as_guest(&mut self, msg: Msg, now: Duration) {
+        let me = self.me;
         let Role::Guest(g) = &mut self.role else {
             return;
         };
+        g.last_heard = Some(now);
         match msg {
             Msg::Turns(p) => {
                 g.host_newest = g.host_newest.max(p.newest);
@@ -885,7 +1152,20 @@ impl Session {
                     self.desync = Some(d);
                 }
             }
-            Msg::Left { peer } => self.events.push(SessionEvent::Left(peer)),
+            Msg::Left { peer } if peer == me => {
+                // Dropped by the host (it timed us out): the match goes
+                // on without us.
+                if self.ended.is_none() {
+                    self.ended = Some(Ended::Dropped);
+                    self.events.push(SessionEvent::Dropped);
+                }
+            }
+            Msg::Left { peer } => {
+                if g.gone.insert(peer) {
+                    self.events.push(SessionEvent::Left(peer));
+                }
+            }
+            Msg::Pings { ms } => g.pings = self.roster.keys().copied().zip(ms).collect(),
             _ => {}
         }
     }
@@ -982,6 +1262,27 @@ impl Session {
                     link.last_send = Some(now);
                     out.push((peer, Channel::Unreliable, msg));
                 }
+                // Everyone's round trip, for the player lists (lossy is
+                // fine: the next one comes in a second).
+                if h.last_pings.is_none_or(|t| now >= t + PING_EVERY) {
+                    h.last_pings = Some(now);
+                    // In roster order (every peer has the same roster):
+                    // a few bytes, not a 16-byte id per peer.
+                    let ms: Vec<u16> = self
+                        .roster
+                        .keys()
+                        .map(|p| match h.links.get(p) {
+                            Some(l) if !l.gone => {
+                                l.rtt.srtt.map_or(u16::MAX, |r| r.det_min(65_000.0) as u16)
+                            }
+                            Some(_) => u16::MAX,
+                            None => 0,
+                        })
+                        .collect();
+                    for (&peer, _) in h.links.iter().filter(|(_, l)| !l.gone) {
+                        out.push((peer, Channel::Unreliable, Msg::Pings { ms: ms.clone() }));
+                    }
+                }
             }
             Role::Guest(g) => {
                 let fresh = !g.unacked.is_empty() || self.frame_tick != g.sent_through;
@@ -1049,15 +1350,38 @@ impl Host {
             controller: DelayController::new(bounds),
             paused: false,
             own_seq: 0,
+            admit: None,
+            dropped: Default::default(),
+            last_pings: None,
+            refused: 0,
         }
     }
 
     /// File `batch` from `player`: exactly once, in seq order, never in
     /// the past. Returns 1 if it came late.
-    fn accept(&mut self, player: u8, batch: Batch) -> u64 {
+    /// A guest's batch (`guest`) may not drop anyone: only the host
+    /// issues `Dropped`.
+    fn accept(&mut self, player: u8, mut batch: Batch, guest: bool) -> u64 {
         let input = self.inputs.entry(player).or_default();
         if batch.seq < input.next_seq || input.held.contains_key(&batch.seq) {
             return 0;
+        }
+        if guest {
+            let before = batch.commands.len();
+            batch.commands.retain(|c| !matches!(c, SimCommand::Dropped));
+            self.refused += (before - batch.commands.len()) as u64;
+        }
+        // The match rules: what they forbid is never sequenced (the
+        // batch keeps its number, so the guest's acks still line up).
+        if let Some(admit) = &self.admit {
+            batch.commands.retain(|cmd| match admit(player, cmd) {
+                Ok(()) => true,
+                Err(why) => {
+                    bevy::log::warn!("host: refused {cmd:?} from player {player}: {why}");
+                    self.refused += 1;
+                    false
+                }
+            });
         }
         input.held.insert(batch.seq, batch);
         let mut late = 0;
@@ -1120,18 +1444,22 @@ mod tests {
             target,
             commands: vec![stop()],
         };
-        assert_eq!(h.accept(1, b(1, 14)), 0, "held for seq 0");
+        assert_eq!(h.accept(1, b(1, 14), false), 0, "held for seq 0");
         assert!(h.scheduled.is_empty());
-        assert_eq!(h.accept(1, b(0, 8)), 1, "late: due at 8, cut is at 10");
-        assert_eq!(h.accept(1, b(0, 8)), 0, "duplicate");
+        assert_eq!(
+            h.accept(1, b(0, 8), false),
+            1,
+            "late: due at 8, cut is at 10"
+        );
+        assert_eq!(h.accept(1, b(0, 8), false), 0, "duplicate");
         let keys: Vec<_> = h.scheduled.keys().copied().collect();
         assert_eq!(keys, vec![(10, 1, 0), (14, 1, 1)]);
         // A lower target later (the delay dropped) keeps the order.
-        h.accept(1, b(2, 12));
+        h.accept(1, b(2, 12), false);
         assert!(h.scheduled.contains_key(&(14, 1, 2)));
         // Paused: due on the next tick, whatever the target.
         h.paused = true;
-        h.accept(2, b(0, 40));
+        h.accept(2, b(0, 40), false);
         assert!(h.scheduled.contains_key(&(10, 2, 0)));
     }
 

@@ -89,6 +89,8 @@ pub struct Scenario {
     pub difficulty: u8,
     /// No win / lose check ([`GameSetup::sandbox`]).
     pub sandbox: bool,
+    /// The host's rules ([`GameSetup::rules`]).
+    pub rules: crate::net::MatchRules,
     /// Pin the map catalog to exactly this entry (a `.kpmap` path in the
     /// catalog's form), so the match loads these bytes or nothing: never
     /// another archive of the same name, never the catalog's fallback
@@ -118,6 +120,7 @@ impl Scenario {
             executor: Executor::Single,
             difficulty: 2,
             sandbox: false,
+            rules: Default::default(),
             map_file: None,
         }
     }
@@ -424,6 +427,7 @@ pub fn apply_setup(world: &mut World, scenario: &Scenario) {
         showcase: None,
         sandbox: scenario.sandbox,
         seed: scenario.seed,
+        rules: scenario.rules,
     });
     if let Some(file) = &scenario.map_file {
         world.insert_resource(MapCatalog(vec![file.clone()]));

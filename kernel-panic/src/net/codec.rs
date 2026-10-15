@@ -280,5 +280,7 @@ mod tests {
         assert_eq!(bytes[0], 17);
         let bytes = postcard::to_allocvec(&SimCommand::Take { from: 1 }).unwrap();
         assert_eq!(bytes[0], 18);
+        let bytes = postcard::to_allocvec(&SimCommand::Dropped).unwrap();
+        assert_eq!(bytes, [19], "M2: one byte");
     }
 }

@@ -16,7 +16,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::driver::{CatchUp, FrameReport, GameSpeed, Pacer, TickRunner, drive_frame};
-use super::session::{DelayBounds, Desync, Ended, Session, SessionConfig};
+use super::session::{DelayBounds, Desync, Ended, Session, SessionConfig, Timeouts};
 use super::sim_net::{LinkParams, SimNetwork};
 use super::transport::PeerId;
 use super::wire::Turn;
@@ -46,6 +46,8 @@ struct Fake {
     /// Flip a state bit after this tick (a forced desync).
     perturb_after: Option<u32>,
     dumps: u32,
+    /// (tick, player) of every `Dropped` applied.
+    dropped: Vec<(u32, u8)>,
 }
 
 fn order(id: u32) -> SimCommand {
@@ -100,7 +102,7 @@ impl TickRunner for Fake {
         assert_eq!(turn.tick, self.tick, "turns in order");
         self.mix(&turn.tick.to_le_bytes());
         self.mix(&postcard::to_allocvec(&turn.frames).unwrap());
-        for (_, cmds) in &turn.frames {
+        for (player, cmds) in &turn.frames {
             for c in cmds {
                 if let Some(id) = id_of(c) {
                     assert!(
@@ -110,6 +112,9 @@ impl TickRunner for Fake {
                 }
                 if let SimCommand::Pause { on } = c {
                     self.speed.paused = *on;
+                }
+                if matches!(c, SimCommand::Dropped) {
+                    self.dropped.push((turn.tick, *player));
                 }
             }
         }
@@ -617,5 +622,169 @@ fn bandwidth_at_eight_players() {
     assert!(
         host_up < 60_000.0,
         "the host's upload stays small: {host_up}"
+    );
+}
+
+/// Every present peer applied `Dropped` for `player` exactly once, at
+/// the same tick; returns it.
+fn dropped_at(r: &Room, player: u8) -> u32 {
+    let ticks: Vec<Vec<u32>> = r
+        .peers
+        .iter()
+        .filter(|p| p.s.ended().is_none())
+        .map(|p| {
+            p.sim
+                .dropped
+                .iter()
+                .filter(|(_, pl)| *pl == player)
+                .map(|(t, _)| *t)
+                .collect()
+        })
+        .collect();
+    let first = &ticks[0];
+    assert_eq!(first.len(), 1, "dropped once: {ticks:?}");
+    assert!(ticks.iter().all(|t| t == first), "same tick: {ticks:?}");
+    first[0]
+}
+
+/// M2 drops: a guest disconnects mid-match. The host puts a `Dropped`
+/// in its name into the turn stream, after everything of its own, and
+/// every peer applies it on the same tick.
+#[test]
+fn a_guest_that_leaves_is_dropped_on_one_tick() {
+    let mut r = room(3, 21, LinkParams::latency_ms(30));
+    let mut t = 0;
+    r.run(6.0, |r| {
+        t += 1;
+        if t == 2400 {
+            // The player list: the host relays every guest's ping.
+            let list = r.peers[1].s.peers();
+            let pings: Vec<Option<u32>> = list.iter().map(|p| p.ping_ms).collect();
+            assert_eq!(pings[0], Some(0), "the host");
+            for p in &pings[1..] {
+                assert!(p.is_some_and(|ms| (50..=90).contains(&ms)), "{pings:?}");
+            }
+        }
+        if t == 2500 {
+            r.net.leave(PeerId(3));
+            r.peers[2].every = 0;
+        }
+    });
+    let gone = r.peers.pop().unwrap();
+    assert!(gone.sim.dropped.is_empty());
+    let at = dropped_at(&r, 2);
+    // Sequenced at the host's clock when it noticed (± the delay).
+    assert!((70..=90).contains(&at), "dropped at tick {at}");
+    r.assert_agree(150);
+    assert!(r.peers[1].s.peers()[2].gone, "the guest knows it left");
+}
+
+/// A guest whose packets stop reaching the host is dropped after the
+/// running timeout, and learns it when its link heals. A guest that
+/// hears nothing from the host gives up on it (`HostLost`).
+#[test]
+fn silence_times_peers_out() {
+    let link = LinkParams::latency_ms(25);
+    let mut r = room(3, 23, link);
+    let short = Timeouts {
+        initial: ms(3000),
+        running: ms(1500),
+    };
+    for p in &mut r.peers {
+        p.s.set_timeouts(short);
+    }
+    let (host, mute, deaf) = (PeerId(1), PeerId(2), PeerId(3));
+    let mut t = 0;
+    r.run(8.0, |r| {
+        t += 1;
+        if t == 2000 {
+            // Peer 2 hears the host, but the host never hears it; peer 3
+            // can talk, but never hears the host.
+            let down = LinkParams { down: true, ..link };
+            r.net.set_link(mute, host, down);
+            r.net.set_link(host, deaf, down);
+            r.peers[1].every = 0;
+        }
+    });
+    assert_eq!(r.peers[1].s.ended(), Some(Ended::Dropped), "told");
+    assert_eq!(r.peers[2].s.ended(), Some(Ended::HostLost));
+    let h = &r.peers[0];
+    assert_eq!(h.sim.dropped.len(), 1, "only the mute one");
+    assert_eq!(h.sim.dropped[0].1, 1);
+    assert_eq!(h.s.guests(), vec![deaf], "the deaf one still sends");
+    // Dropped ~1.5 s after its last packet (tick ~60 + 45).
+    assert!(
+        (95..=125).contains(&h.sim.dropped[0].0),
+        "{:?}",
+        h.sim.dropped
+    );
+}
+
+/// The host's match rules: what they refuse is never sequenced (the
+/// guest's batch still counts as received), and a guest can't send a
+/// `Dropped` of its own.
+#[test]
+fn the_host_refuses_what_the_rules_forbid() {
+    let mut r = room(2, 24, LinkParams::latency_ms(30));
+    for p in &mut r.peers {
+        p.every = 0;
+    }
+    r.peers[0].s.set_admit(Box::new(|player, cmd| match cmd {
+        SimCommand::Pause { .. } if player != 0 => Err("pausing is off".into()),
+        _ => Ok(()),
+    }));
+    let mut t = 0;
+    r.run(6.0, |r| {
+        t += 1;
+        if t == 1000 {
+            r.peers[1].sim.staged.push(SimCommand::Pause { on: true });
+            r.peers[1].sim.staged.push(SimCommand::Dropped);
+            r.peers[1].sim.issue(42);
+        }
+    });
+    r.assert_agree(150);
+    assert!(r.peers.iter().all(|p| !p.sim.speed.paused), "never paused");
+    assert!(r.peers.iter().all(|p| p.sim.dropped.is_empty()));
+    assert!(
+        r.peers[0].sim.applied.contains_key(&42),
+        "the rest went through"
+    );
+    assert_eq!(r.peers[0].s.stats.refused, 2);
+}
+
+/// "Leave match" on a guest: what it issued last (the resignation)
+/// reaches the host before the transport closes; the host then drops
+/// the seat after it.
+#[test]
+fn leaving_sends_the_resignation_first() {
+    let mut r = room(3, 25, LinkParams::latency_ms(60));
+    for p in &mut r.peers {
+        p.every = 0;
+    }
+    let mut t = 0;
+    let mut waited = Duration::ZERO;
+    r.run(5.0, |r| {
+        t += 1;
+        if t == 2000 {
+            r.peers[2].sim.issue(7);
+        }
+        if t >= 2000 && !r.peers[2].s.closed() {
+            let now = r.net.now();
+            let p = &mut r.peers[2];
+            p.s.poll(now);
+            super::driver::leave_step(&mut p.s, &mut p.sim, waited);
+            p.s.flush(now);
+            waited += ms(1);
+        }
+    });
+    let leaver = &r.peers[2];
+    assert_eq!(leaver.s.ended(), Some(Ended::Left));
+    // About a round trip (120 ms), well under the grace.
+    assert!(waited < ms(400), "closed after {waited:?}");
+    let applied = r.peers[0].sim.applied.get(&7).copied().expect("sent first");
+    let at = dropped_at(&r, 2);
+    assert!(
+        at >= applied,
+        "dropped at {at}, its last command at {applied}"
     );
 }

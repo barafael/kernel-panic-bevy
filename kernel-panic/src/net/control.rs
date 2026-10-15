@@ -50,14 +50,77 @@ pub const MIN_SPEED_PERCENT: u16 = 10;
 /// Fastest game speed, percent (Spring's default `MaxSpeed` 20).
 pub const MAX_SPEED_PERCENT: u16 = 2000;
 
+/// What the host allows in a match: the lobby's options, part of the
+/// match setup ([`GameSetup::rules`](crate::game_setup::GameSetup)) every
+/// peer agreed to. Enforced twice, by one function
+/// ([`super::apply::rules_admit`]): the host refuses to sequence what
+/// they forbid (Spring's server checks pause and speed requests the
+/// same way, `CGameServer::ProcessPacket`), and every peer refuses it
+/// again when it applies (a modified host can't sneak one in).
+///
+/// The default is single player's: anyone may pause, Spring's whole
+/// speed range, no cheats beyond the one-human rule
+/// ([`super::apply::cheats_allowed`]). Golden replays and the
+/// single-player game play by it unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MatchRules {
+    /// Players may pause (Spring's `GamePausable`, `/nopause`). Off,
+    /// only the host's own player may (Spring: "allow host to pause
+    /// even if nopause is set", `Net/GameServer.cpp:1078`).
+    pub pausable: bool,
+    /// The game speed range in percent (Spring's `MinSpeed` /
+    /// `MaxSpeed` mod options, `Game/GameSetup.cpp:636`). Spring's
+    /// server clamps a request into it (`CGameServer::UserSpeedChange`,
+    /// `Net/GameServer.cpp:3086`); here the keys stop at its ends and
+    /// a request outside it is refused.
+    pub min_speed: u16,
+    pub max_speed: u16,
+    /// Cheats for everyone, even with several human seats (Spring's
+    /// `/cheat`, which only the host may switch, `Net/GameServer.cpp:2477`).
+    /// Off, cheats still work with at most one human seat.
+    pub cheats: bool,
+    /// The host's seat, for `pausable`. A networked match fills it in
+    /// from the roster when its first frame runs (the roster is the
+    /// same on every peer), unless the lobby set it; `None` in single
+    /// player.
+    pub host: Option<u8>,
+}
+
+impl Default for MatchRules {
+    fn default() -> Self {
+        Self {
+            pausable: true,
+            min_speed: MIN_SPEED_PERCENT,
+            max_speed: MAX_SPEED_PERCENT,
+            cheats: false,
+            host: None,
+        }
+    }
+}
+
+impl MatchRules {
+    /// The speed range, sane whatever was set: within Spring's bounds,
+    /// never empty, 100 % allowed.
+    pub fn speed_range(&self) -> (u16, u16) {
+        let lo = self.min_speed.clamp(MIN_SPEED_PERCENT, 100);
+        let hi = self.max_speed.clamp(100, MAX_SPEED_PERCENT);
+        (lo, hi)
+    }
+
+    /// May `player` pause or unpause?
+    pub fn may_pause(&self, player: u8) -> bool {
+        self.pausable || self.host == Some(player)
+    }
+}
+
 /// Dev tools and cheats ([`SimCommand::Dev`]): Spring's cheat-only
 /// synced actions `/give`, `/destroy` and `/godmode`
 /// (`Game/SyncedGameCommands.cpp`, `cheatRequired`; refused while
 /// `gs->cheatEnabled` is off, `Game/IActionExecutor.h:111`). Here a
 /// match allows cheats when it has at most one human seat (single
-/// player, the dev tools' sandbox); the seats are part of the match
-/// setup every peer agreed to, so every peer decides alike. Units are
-/// any team's.
+/// player, the dev tools' sandbox) or its [`MatchRules::cheats`] says
+/// so; the setup is what every peer agreed to, so every peer decides
+/// alike. Units are any team's.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DevCommand {
     /// `count` units of `kind` for `team`, on a square grid from `at`,
@@ -98,6 +161,9 @@ pub struct MatchControl {
     /// Players who resigned: spectators from then on, whose commands
     /// are refused.
     pub resigned: BTreeSet<u8>,
+    /// Of those, the ones whose peer dropped out of the match
+    /// ([`SimCommand::Dropped`]; for the HUD).
+    pub dropped: BTreeSet<u8>,
     /// Cheat (`/godmode`): every player commands every team.
     pub god_mode: bool,
 }
@@ -109,6 +175,7 @@ impl Default for MatchControl {
             paused: false,
             paused_by: None,
             resigned: BTreeSet::new(),
+            dropped: BTreeSet::new(),
             god_mode: false,
         }
     }
@@ -161,16 +228,22 @@ impl Plugin for MatchControlPlugin {
 /// Pause and speed keys, Spring's default bindings
 /// (`Game/UI/KeyBindings.cpp:65`, `:104`): Pause toggles,
 /// Alt+= / Alt++ / Alt+numpad+ speed up, Alt+- / Alt+numpad- slow
-/// down.
+/// down. Within the match's [`MatchRules`]: no pause where the player
+/// may not, the speed steps stop at the range's ends (where Spring's
+/// server would clamp them).
 fn match_control_keys(
     keys: Res<ButtonInput<KeyCode>>,
     control: Option<Res<MatchControl>>,
+    active: Option<Res<crate::game_setup::ActiveMatch>>,
+    local: Option<Res<crate::units::player::LocalTeam>>,
     mut bus: ResMut<CommandBus>,
 ) {
     let Some(control) = control else {
         return;
     };
-    if keys.just_pressed(KeyCode::Pause) {
+    let rules = active.map(|m| m.0.rules).unwrap_or_default();
+    let player = local.map_or(0, |l| l.0);
+    if keys.just_pressed(KeyCode::Pause) && rules.may_pause(player) {
         bus.issue(SimCommand::Pause {
             on: !control.paused,
         });
@@ -178,10 +251,11 @@ fn match_control_keys(
     if !keys.any_pressed([KeyCode::AltLeft, KeyCode::AltRight]) {
         return;
     }
+    let (lo, hi) = rules.speed_range();
     let percent = if keys.any_just_pressed([KeyCode::Equal, KeyCode::NumpadAdd]) {
-        speed_up(control.speed_percent)
+        speed_up(control.speed_percent).min(hi)
     } else if keys.any_just_pressed([KeyCode::Minus, KeyCode::NumpadSubtract]) {
-        slow_down(control.speed_percent)
+        slow_down(control.speed_percent).max(lo)
     } else {
         return;
     };
