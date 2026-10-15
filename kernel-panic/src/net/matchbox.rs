@@ -19,9 +19,11 @@
 //!   server; [`PeerId`] is the same 128 bits as an integer, so the
 //!   lowest-id host election is the same on every peer.
 //! - **Channels.** matchbox channel 0 is [`Channel::Reliable`] (ordered,
-//!   retransmitted), channel 1 [`Channel::Unreliable`] (unordered, no
-//!   retransmission) — `net-experiments/x-transport.md` §4: both share
-//!   one SCTP association and its congestion window.
+//!   retransmitted), channel 1 [`Channel::Unreliable`] (unordered, at
+//!   most [`UNRELIABLE_RETRANSMITS`] sends) — `net-experiments/x-transport.md`
+//!   §4: both share one SCTP association and its congestion window. Native
+//!   peers need the patched `webrtc-data` (`vendor/webrtc-data`) for the
+//!   channel to be unordered at all (`m2-transport.md` §7).
 //! - **Size.** Nothing over [`MAX_MESSAGE`] (16 KiB) is ever handed to
 //!   matchbox (asserted): a message of exactly 64 KiB kills the whole
 //!   peer connection and a larger one vanishes while `try_send` says
@@ -104,6 +106,17 @@ pub const LEAVE_GRACE: Duration = Duration::from_secs(3);
 /// Tries to reach the signaling server, 3 s apart (fly.io wakes the
 /// stopped server in a few seconds).
 pub const SIGNALING_ATTEMPTS: u16 = 5;
+
+/// `max_retransmits` of the unreliable channel. Not 0: webrtc-rs counts
+/// the first send against the limit (`nsent >= max_retransmits`), so with
+/// 0 every chunk is abandoned the moment it is sent, and the next SACK's
+/// FORWARD-TSN tells the receiver to skip chunks still in flight; on a path
+/// that reorders, each one it overtakes is dropped on arrival (9–17 % of
+/// all packets at 0.5–2 % loss with 5–10 ms jitter, `m2-transport.md` §7).
+/// With 2, webrtc-rs sends a chunk at most twice (a browser three times):
+/// a lost packet comes again ~a round trip later, and since the channel is
+/// unordered it holds nothing up; one lost twice is given up.
+pub const UNRELIABLE_RETRANSMITS: u16 = 2;
 
 const RELIABLE: usize = 0;
 const UNRELIABLE: usize = 1;
@@ -507,7 +520,10 @@ impl MatchboxTransport {
         let mut builder = WebRtcSocketBuilder::new(room_url)
             .reconnect_attempts(Some(SIGNALING_ATTEMPTS))
             .add_channel(ChannelConfig::reliable())
-            .add_channel(ChannelConfig::unreliable());
+            .add_channel(ChannelConfig {
+                ordered: false,
+                max_retransmits: Some(UNRELIABLE_RETRANSMITS),
+            });
         // No servers: host candidates only. A browser refuses an ICE
         // server without URLs, so the web build keeps matchbox's default
         // (Google STUN) instead; host candidates still come first.

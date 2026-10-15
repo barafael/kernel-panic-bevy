@@ -11,6 +11,8 @@ members = [
     "spring-detmath",
     "kernel-panic",
 ]
+# Patched dependencies (`[patch.crates-io]` below) are not members.
+exclude = ["vendor/webrtc-data"]
 # exclude = [
 #     "spring-cob",  # RETIRED — see note below
 # ]
@@ -110,3 +112,12 @@ lto = false
 # Strip all debugging information from the binary to slightly reduce
 # file size.
 strip = "debuginfo"
+
+# webrtc-data 0.17.2 with one fix: negotiated data channels (matchbox
+# creates every channel negotiated) never committed their reliability
+# parameters, so matchbox's "unreliable" channel was ordered and fully
+# reliable on native peers — every lost packet held up everything behind
+# it for a fast retransmit (~100–200 ms) or the 1 s retransmission timeout
+# (`net-experiments/m2-transport.md` §7). `vendor/webrtc-data/README.md`.
+[patch.crates-io]
+webrtc-data = { path = "vendor/webrtc-data" }
