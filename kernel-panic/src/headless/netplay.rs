@@ -60,6 +60,11 @@ impl Rendezvous {
         self.present.len()
     }
 
+    /// Whether this peer sees `peer`.
+    pub fn sees(&self, peer: PeerId) -> bool {
+        self.present.contains(&peer)
+    }
+
     /// Take in `t`'s peer events; once this peer has its id and sees
     /// `others` other peers, every id of the room (this one included).
     /// Only peer events are read: whatever arrives meanwhile stays

@@ -408,31 +408,44 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
     let mut ts: Vec<MatchboxTransport> = (0..n)
         .map(|_| MatchboxTransport::open(&url, &cfg))
         .collect();
+    // Only the host's links carry the match (the lowest id sequences):
+    // the room is ready once the host sees every guest and every guest
+    // sees the host. A guest-guest pair of the full mesh may never connect
+    // under loss (about 3 rooms in 20 at 2-3 %, m2-transport.md); the
+    // session ignores those links. The lobby hands out the roster in the
+    // game; here every transport is in this process, so read the ids.
     let mut rv: Vec<Rendezvous> = (0..n).map(|_| Rendezvous::default()).collect();
-    let mut ids: Vec<Option<Vec<PeerId>>> = vec![None; n];
     let t0 = Instant::now();
-    while ids.iter().any(Option::is_none) {
+    let all: Vec<PeerId> = loop {
         for i in 0..n {
-            if ids[i].is_none() {
-                ids[i] = rv[i].poll(&mut ts[i], n - 1);
+            rv[i].poll(&mut ts[i], usize::MAX);
+        }
+        let ids: Option<Vec<PeerId>> = ts.iter().map(|t| t.local_id()).collect();
+        if let Some(mut all) = ids {
+            all.sort();
+            let host = all[0];
+            let h = ts.iter().position(|t| t.local_id() == Some(host)).unwrap();
+            let ready = (0..n).all(|i| {
+                let me = ts[i].local_id().unwrap();
+                if i == h {
+                    all.iter().all(|&p| p == me || rv[i].sees(p))
+                } else {
+                    rv[i].sees(host)
+                }
+            });
+            if ready {
+                break all;
             }
         }
         let seen: Vec<usize> = rv.iter().map(Rendezvous::seen).collect();
         assert!(
             t0.elapsed() < Duration::from_secs(60),
-            "room of {n} not complete in 60 s: each sees {seen:?} others"
+            "room of {n}: host links not up in 60 s; each sees {seen:?} others"
         );
         std::thread::sleep(Duration::from_millis(5));
-    }
+    };
     let setup = t0.elapsed();
-    let ids: Vec<Vec<PeerId>> = ids.into_iter().map(Option::unwrap).collect();
-    let mut all = ids[0].clone();
-    all.sort();
-    for v in &ids {
-        let mut v = v.clone();
-        v.sort();
-        assert_eq!(v, all, "every peer sees the same room");
-    }
+    let ids: Vec<Vec<PeerId>> = vec![all; n];
     eprintln!("room of {n} connected in {setup:?}");
     let stats = ts
         .iter()
