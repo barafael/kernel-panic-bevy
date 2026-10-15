@@ -330,6 +330,27 @@ in-process `SimNetwork` per room code); the page shows `Transport::failure`. A d
 - Spectators (receive the turn stream, never send), replay files and a replay
   viewer.
 
+**Rooms and browsers (agent I) — done** (`net-experiments/m3-rooms.md`):
+- Hidden tabs keep playing in Chromium and Firefox (measured: no animation frames,
+  timers 1/s, Chromium one a minute after 5 min unless WebRTC is open; a worker's
+  timer unthrottled): while hidden in a room or networked match, a worker wakes the
+  event loop every 33 ms, and a `bevy_winit` patch (`vendor/bevy_winit`) lets a hidden
+  page's wake-up run the update — 30 ticks/s in a hidden tab, none without the patch.
+  The others see "tab hidden" (`Msg::Away`); a guest more than the host's turn history
+  behind is dropped. Single player still stops when hidden. Safari untested.
+- Stuck rooms: a peer the room names but that was never reached for 10 s makes the
+  higher id of the pair reopen its connection (new id, seat kept via `Hello::was`;
+  3 tries, then the page says so). Host↔guest and guest↔guest.
+- Back to room after a match (Esc overlay, result panel): resign, `Msg::Bye` (the
+  leave, at once), the connection goes back to the lobby (`Lobby::resume`): same
+  code, same seats (kept for those still in the match), rematch.
+- Deployed signaling server smoke test (`scripts/signaling-smoke.sh`, ignored test):
+  two native peers connected in 0.25 s, room and chat in 0.5 s. Menu screenshots use a
+  `LoneTransport` (`OfflineRooms`). Release and deploy map bakes byte-identical (18
+  maps; the bake action prints SHA-256s). Rename on the Multiplayer page; chat in room
+  and match through the host (not synced, as Spring). Wire version 3, lobby version 2,
+  no sim change.
+
 ### Later
 
 TURN deployment, host migration, snapshot rejoin, reconnect polish (omdurman's

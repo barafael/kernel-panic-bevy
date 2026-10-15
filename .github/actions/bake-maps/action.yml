@@ -27,3 +27,7 @@ runs:
           "$bake" "$f"
         done
         ls -l kernel-panic/assets/maps/*.kpmap
+        # The bytes every peer hashes for the lobby's map check: release
+        # packages and the web deploy bake separately, and must agree
+        # (they do: net-experiments/m3-rooms.md §6). Compare the logs.
+        sha256sum kernel-panic/assets/maps/*.kpmap
