@@ -240,6 +240,7 @@ pub(crate) fn add_game(app: &mut App) {
         net::LockstepPlugin,
         net::lobby::LobbyPlugin,
         net::replay_log::ReplayLogPlugin,
+        net::web_tab::WebTabPlugin,
         UiPlugin,
         UnitsPlugin,
         TerrainPlugin,

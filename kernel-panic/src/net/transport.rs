@@ -82,3 +82,33 @@ pub trait Transport: Send + Sync + 'static {
         None
     }
 }
+
+/// A room nobody else can reach: an id of its own, no peers, every send
+/// dropped. The menu screenshots (`ui::menu_shots`) open their rooms
+/// here, so a dev tool never shows up in a real room on the public
+/// signaling server.
+pub struct LoneTransport {
+    id: PeerId,
+}
+
+impl LoneTransport {
+    pub fn new(id: PeerId) -> Self {
+        Self { id }
+    }
+}
+
+impl Transport for LoneTransport {
+    fn local_id(&self) -> Option<PeerId> {
+        Some(self.id)
+    }
+
+    fn poll_peers(&mut self) -> Vec<PeerEvent> {
+        Vec::new()
+    }
+
+    fn send(&mut self, _peer: PeerId, _channel: Channel, _bytes: Vec<u8>) {}
+
+    fn receive(&mut self, _channel: Channel) -> Vec<(PeerId, Vec<u8>)> {
+        Vec::new()
+    }
+}

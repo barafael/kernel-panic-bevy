@@ -346,10 +346,44 @@ its units are its own and the match is undecided — else the player watches (Sp
 reconnects a player to its team, `CGameServer::BindConnection`). Every match is
 recorded (`.kpreplay` format 4, + names): natively `replays/`, on the web a
 download; main menu → Replays plays one through a replay `Session` with pause and
-0.25–16× (a bar at the top; Esc → Restart starts over). `SIM_VERSION` 6, wire 3,
-lobby 2; goldens re-recorded. Tests: rejoin within the grace and after the drop, a
+0.25–16× (a bar at the top; Esc → Restart starts over). `SIM_VERSION` 6, replay
+format 4; goldens re-recorded. Tests: rejoin within the grace and after the drop, a
 watcher (protocol level), `rejoin_full_sim` (4 full apps: drop, return, watcher, all
 trails identical from tick 1, the host's recording replays to its trail).
+
+**Rooms and browsers (agent I) — done** (`net-experiments/m3-rooms.md`):
+- Hidden tabs keep playing in Chromium and Firefox (measured: no animation frames,
+  timers 1/s, Chromium one a minute after 5 min unless WebRTC is open; a worker's
+  timer unthrottled): while hidden in a room or networked match, a worker wakes the
+  event loop every 33 ms, and a `bevy_winit` patch (`vendor/bevy_winit`) lets a hidden
+  page's wake-up run the update — 30 ticks/s in a hidden tab, none without the patch.
+  The others see "tab hidden" (`Msg::Away`); a guest that still talks but lacks over
+  a minute of turns and has not got any further for a minute is dropped. Single
+  player still stops when hidden. Safari untested.
+- Stuck rooms: a peer the room names but that was never reached for 10 s makes the
+  higher id of the pair reopen its connection (new id, same `PlayerKey`, so the host
+  moves its seat; 3 tries, then the page says so). Host↔guest and guest↔guest.
+- Back to room after a match (Esc overlay, result panel): resign, `Msg::Bye` (the
+  leave, at once), the connection goes back to the lobby (`Lobby::resume`): same
+  code, same seats (kept for those still in the match), rematch.
+- Deployed signaling server smoke test (`scripts/signaling-smoke.sh`, ignored test):
+  two native peers connected in 0.25 s, room and chat in 0.5 s. Menu screenshots use a
+  `LoneTransport` (`OfflineRooms`). Release and deploy map bakes byte-identical (18
+  maps; the bake action prints SHA-256s). Rename on the Multiplayer page; chat in room
+  and match through the host (not synced, as Spring). No sim change.
+
+**Turn log + rooms merged (H + I):** one identity, the `PlayerKey` in the lobby
+`Hello` (the stuck-room reopen keeps its seat through it; I's interim `Hello::was` is
+gone). A `Hello` that reaches the host's session during a match is a knock only from a
+connection new to the match under a key that did not go back to the room: a seat's
+key gets its seat back, any other watches. A connection of the match (it pressed Back
+to room, `Msg::Bye`) or a key that went back to the room (`Door::in_room`, e.g. a
+reload after Back to room) is the room's: the session ignores it and the room waits
+for the host ("away"). A `Bye` drops the seat at once (no rejoin grace; it resigned
+first). The replay is still kept: the session (and its log) lives until the next match
+swap. One version bump for all of M3: wire 3 (`Joined`, then `Bye`, `Chat`,
+`Away`), lobby 2 (`Hello::key`, `Running`, `Chat`); `SimCommand` 20 reserved for
+speed control.
 
 ### Later
 

@@ -14,6 +14,9 @@
 //! | [`Msg::Left`] — a guest left (to the guest itself: it was dropped) | host → all | reliable |
 //! | [`Msg::Pings`] — every guest's round trip, for the player list | host → all | unreliable, 1/s |
 //! | [`Msg::Joined`] — a late joiner (rejoining player or spectator) is in | host → all | reliable |
+//! | [`Msg::Bye`] — out of the match, back to the room (the connection stays) | guest → host, host → all | reliable |
+//! | [`Msg::Chat`] — a chat line (the host checks the sender and relays it) | guest → host → all | reliable |
+//! | [`Msg::Away`] — the sender's browser tab is hidden (or shown again) | guest → host → all | reliable |
 //!
 //! Both unreliable streams repeat what the other side has not
 //! acknowledged, so a lost packet costs one packet interval, not a
@@ -26,7 +29,8 @@ use super::transport::{MAX_MESSAGE, PeerId};
 
 /// Bumped whenever a message changes shape. Peers with another version
 /// ignore each other's messages (the M2 handshake refuses them first).
-/// 2 (M2): [`Msg::Pings`]. 3 (M3): [`Msg::Joined`].
+/// 2 (M2): [`Msg::Pings`]. 3 (M3): [`Msg::Joined`] (turn log),
+/// [`Msg::Bye`], [`Msg::Chat`], [`Msg::Away`] (rooms).
 pub const WIRE_VERSION: u16 = 3;
 
 /// One player's commands of one turn, in issue order.
@@ -158,6 +162,22 @@ pub enum Msg {
         player: Option<u8>,
         replaces: Option<PeerId>,
         name: String,
+    },
+    /// The sender left the match but not the room ("Back to room"): its
+    /// connection stays for the lobby, so this is its leave. From the
+    /// host it ends the match, as the host leaving does.
+    Bye,
+    /// A chat line ([`super::chat`]): `from` is the sender, which the
+    /// host checks before it relays the line to everyone.
+    Chat {
+        from: PeerId,
+        text: String,
+    },
+    /// `peer`'s browser tab is hidden (`away`) or shown again; the host
+    /// checks the sender and relays it (the player list shows it).
+    Away {
+        peer: PeerId,
+        away: bool,
     },
 }
 

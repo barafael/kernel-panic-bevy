@@ -118,6 +118,10 @@ const FRAME_LOOP_EXCLUSIVE: &[(&str, &str)] = &[
         "net::replay_log::save_on_exit",
         "reads the match to save its replay file as the game quits; writes only the session's \"kept\" flag",
     ),
+    (
+        "net::lobby::back_to_room",
+        "moves a match's connection into the lobby (`BackToRoom` → `LobbyRoom`)",
+    ),
     ("run_main", "the main schedule"),
     ("handle_internal_asset_events", "asset server"),
     ("bevy_scene::", "scene spawning (no scenes in a match)"),

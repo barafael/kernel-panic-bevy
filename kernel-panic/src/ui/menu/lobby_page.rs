@@ -8,6 +8,11 @@
 //! not this player's to change are plain labels. Every row is one flex
 //! row of frames, so long names and map names never run into the next
 //! cell.
+//!
+//! Text fields (M3): the player's name (at the door and in the room),
+//! the room code (at the door) and the chat line (in the room, with the
+//! room's chat beside the seats). Keys go to the field last clicked
+//! ([`Field`]); Enter joins, renames or sends.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::Pickable;
@@ -22,7 +27,10 @@ use super::{
     TEXT_WHITE, VERY_HARD_RED, anchored, back_button, border, brighten, fill, frame_border,
     frame_padding, page_heading, readable, spawn_button_text,
 };
-use crate::net::lobby::{Check, Lobby, LobbyAction, LobbyRoom, Occupant, RoomId, RoomState};
+use crate::net::chat::{CHAT_MAX, ChatLog, type_into};
+use crate::net::lobby::{
+    Check, Field, Lobby, LobbyAction, LobbyRoom, NAME_MAX, Occupant, RoomId, RoomState,
+};
 use crate::units::components::Faction;
 
 /// The page: the door (create / join) outside a room, the room inside.
@@ -31,21 +39,36 @@ pub(super) fn multiplayer_page(
     root: Entity,
     (window_w, page_size): (f32, f32),
     lobby: &LobbyRoom,
+    chat: &ChatLog,
 ) {
     match (lobby.lobby.as_ref(), lobby.room.as_ref()) {
-        (Some(l), Some(room)) => room_view(commands, root, (window_w, page_size), lobby, l, room),
+        (Some(l), Some(room)) => {
+            room_view(commands, root, (window_w, page_size), lobby, l, room);
+            chat_panel(commands, root, (window_w, page_size), lobby, chat);
+        }
         _ => door(commands, root, page_size, lobby),
+    }
+}
+
+/// `text` as its field shows it: a cursor while it takes the keys.
+fn field_text(lobby: &LobbyRoom, field: Field, text: &str) -> String {
+    if lobby.field == field {
+        format!("{text}_")
+    } else {
+        text.to_string()
     }
 }
 
 /// Outside a room: create one, or type a code and join.
 fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom) {
     page_heading(commands, root, page_size, "Multiplayer");
-    LabelSpec::new(
-        &format!("You play as {}", lobby.name),
+    ButtonSpec::new(
+        &format!("Your name: {}", field_text(lobby, Field::Name, &lobby.name)),
+        DESC_BLUE,
         page_size * 0.7,
         (0.5, 0.75),
         Anchor::Cc,
+        MenuAction::Lobby(LobbyAction::Focus(Field::Name)),
     )
     .spawn(commands, root);
     ButtonSpec::new(
@@ -58,13 +81,15 @@ fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom
     )
     .min_width(24.0)
     .spawn(commands, root);
-    LabelSpec::new(
-        &format!("Room code: {}_", lobby.code),
+    ButtonSpec::new(
+        &format!("Room code: {}", field_text(lobby, Field::Main, &lobby.code)),
+        MAP_GREEN,
         page_size,
         (0.5, 0.5),
         Anchor::Cc,
+        MenuAction::Lobby(LobbyAction::Focus(Field::Main)),
     )
-    .frame(MAP_GREEN)
+    .min_width(24.0)
     .spawn(commands, root);
     ButtonSpec::new(
         "Join",
@@ -324,11 +349,83 @@ fn room_view(
     bottom(commands, root, size, l, lobby);
 }
 
+/// Chat lines shown beside the seats.
+const CHAT_LINES: usize = 8;
+
+/// The right-hand column of a room: our name (click to rename), the
+/// room's chat, the line being typed.
+fn chat_panel(
+    commands: &mut Commands,
+    root: Entity,
+    (window_w, page_size): (f32, f32),
+    lobby: &LobbyRoom,
+    chat: &ChatLog,
+) {
+    let size = readable(page_size * 0.6);
+    let width = window_w * 0.21;
+    let (mut node, transform) = anchored(0.975, SEAT_TOP, Anchor::Rt);
+    node.flex_direction = FlexDirection::Column;
+    node.row_gap = Val::Px(size * 0.25);
+    node.width = Val::Px(width);
+    let panel = commands.spawn((node, transform, Pickable::IGNORE)).id();
+    commands.entity(root).add_child(panel);
+    let name = field_text(lobby, Field::Name, &lobby.name);
+    cell_button(
+        commands,
+        panel,
+        &format!("Name: {name}"),
+        DESC_BLUE,
+        size,
+        Some(width),
+        LobbyAction::Focus(Field::Name),
+    );
+    let mut text = String::new();
+    for (_, line) in chat.last(CHAT_LINES) {
+        text.push_str(&format!("{}: {}\n", line.name, line.text));
+    }
+    if text.is_empty() {
+        text.push_str("No one has said anything yet.\n");
+    }
+    let said = commands
+        .spawn((
+            Text::new(text.trim_end()),
+            TextColor(TEXT_WHITE),
+            TextFont {
+                font_size: FontSize::Px(size * 0.85),
+                ..default()
+            },
+            TextLayout::new(Justify::Left, LineBreak::WordBoundary),
+            Node {
+                width: Val::Px(width),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .id();
+    commands.entity(panel).add_child(said);
+    let typing = if lobby.chat.is_empty() && lobby.field == Field::Main {
+        "Type to chat, Enter sends_".to_string()
+    } else {
+        format!("Say: {}", field_text(lobby, Field::Main, &lobby.chat))
+    };
+    cell_button(
+        commands,
+        panel,
+        &typing,
+        TEAL,
+        size,
+        Some(width),
+        LobbyAction::Focus(Field::Main),
+    );
+}
+
 /// Ready / Start and Leave, and the status line under them.
 fn bottom(commands: &mut Commands, root: Entity, size: f32, l: &Lobby, lobby: &LobbyRoom) {
     let r = row(commands, root, (0.5, 0.1), Anchor::Cc, size);
     let status = if let Some(why) = l.failure() {
         format!("No connection to the room: {why}")
+    } else if let Some(stuck) = &lobby.unreached {
+        capitalised(stuck.clone())
     } else if l.is_host() {
         // The seat count next to Start: the seat table may fill the
         // page's height, and a narrow window has no room beside it.
@@ -574,34 +671,74 @@ fn cell_label(
     commands.entity(row).add_child(e);
 }
 
-/// The room code field: typed while the Multiplayer page shows the door.
-pub(super) fn type_room_code(
+/// The page's text fields ([`Field`]): the room code (at the door) or
+/// the chat line (in a room), and the player's name. Enter joins, sends
+/// the line or keeps the name; Space and Enter on an empty field are the
+/// menu's (its keyboard navigation), and so are keys outside the page.
+pub(super) fn type_into_fields(
     page: Res<MenuPage>,
     mut keys: MessageReader<KeyboardInput>,
+    mut buttons: ResMut<ButtonInput<KeyCode>>,
     mut lobby: ResMut<LobbyRoom>,
+    mut actions: MessageWriter<LobbyAction>,
 ) {
-    if *page != MenuPage::Multiplayer || lobby.lobby.is_some() {
+    if *page != MenuPage::Multiplayer {
         keys.clear();
         return;
     }
+    let in_room = lobby.lobby.is_some();
     for key in keys.read() {
         if !key.state.is_pressed() {
             continue;
         }
-        match &key.logical_key {
-            Key::Character(s) => {
-                for c in s.chars() {
-                    if (c.is_ascii_alphanumeric() || c == '-' || c == '_')
-                        && lobby.code.chars().count() < RoomId::MAX_LEN
-                    {
-                        lobby.code.push(c.to_ascii_lowercase());
-                    }
-                }
+        let lobby = &mut *lobby;
+        let (text, max, accept): (&mut String, usize, fn(char) -> bool) =
+            match (lobby.field, in_room) {
+                (Field::Name, _) => (&mut lobby.name, NAME_MAX, |_| true),
+                (Field::Main, true) => (&mut lobby.chat, CHAT_MAX, |_| true),
+                (Field::Main, false) => (&mut lobby.code, RoomId::MAX_LEN, |c| {
+                    c.is_ascii_alphanumeric() || c == '-' || c == '_'
+                }),
+            };
+        // A space or Enter in an empty field is the menu's.
+        if text.is_empty() && matches!(key.logical_key, Key::Space | Key::Enter) {
+            continue;
+        }
+        let acted = type_into(text, key, max, accept);
+        if lobby.field == Field::Main && !in_room {
+            lobby.code = lobby.code.to_ascii_lowercase();
+        }
+        match key.logical_key {
+            Key::Space => {
+                buttons.clear_just_pressed(KeyCode::Space);
             }
-            Key::Backspace => {
-                lobby.code.pop();
+            Key::Enter => {
+                buttons.clear_just_pressed(KeyCode::Enter);
             }
             _ => {}
+        }
+        if acted != Some(Key::Enter) {
+            continue;
+        }
+        match (lobby.field, lobby.lobby.as_mut()) {
+            (Field::Name, Some(l)) => {
+                l.set_name(&lobby.name);
+                lobby.name = l.name().to_string();
+                lobby.field = Field::Main;
+            }
+            (Field::Name, None) => lobby.field = Field::Main,
+            (Field::Main, Some(l)) => {
+                let line = std::mem::take(&mut lobby.chat);
+                if let Some(name) = line.strip_prefix("/name ") {
+                    l.set_name(name);
+                    lobby.name = l.name().to_string();
+                } else if let Err(why) = l.say(&line) {
+                    lobby.notice = Some(why);
+                }
+            }
+            (Field::Main, None) => {
+                actions.write(LobbyAction::Join);
+            }
         }
     }
 }

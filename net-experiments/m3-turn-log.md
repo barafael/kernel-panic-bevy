@@ -148,3 +148,15 @@ page and the viewer are new; the main menu has one plate more (nine natively).
   fast-forwarding from the start or keeping snapshots.
 - **Spectator chat / player list in replays:** the viewer shows no player list (names are in the
   file's meta).
+
+## After the merge with rooms and browsers (I)
+
+- The Open item on Back to the room is settled: a hello from a connection of the match (it went
+  back to the room with `Msg::Bye`) or under a key that went back to the room (`Door::in_room`)
+  is not a knock: no `Running`, the player stays in the room. A `Bye` drops the seat at once,
+  without the rejoin grace. A newcomer opening a room whose match runs still watches it; a
+  decided match still answers until its host leaves it (open).
+- I's stuck-room reopen keeps its seat through the same `PlayerKey` (its `Hello::was` is gone).
+- One combined bump for M3 (none was published): wire version 3, lobby version 2 (I's
+  `Msg::Bye` / `Chat` / `Away` and `LobbyMsg::Chat` after this part's `Msg::Joined` and
+  `LobbyMsg::Running`). `SIM_VERSION` 6 and replay format 4 unchanged.

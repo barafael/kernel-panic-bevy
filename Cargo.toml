@@ -12,7 +12,7 @@ members = [
     "kernel-panic",
 ]
 # Patched dependencies (`[patch.crates-io]` below) are not members.
-exclude = ["vendor/webrtc-data"]
+exclude = ["vendor/webrtc-data", "vendor/bevy_winit"]
 # exclude = [
 #     "spring-cob",  # RETIRED — see note below
 # ]
@@ -119,5 +119,12 @@ strip = "debuginfo"
 # reliable on native peers — every lost packet held up everything behind
 # it for a fast retransmit (~100–200 ms) or the 1 s retransmission timeout
 # (`net-experiments/m2-transport.md` §7). `vendor/webrtc-data/README.md`.
+#
+# bevy_winit 0.20.0 with one fix: a hidden browser page counts as all
+# windows invisible, so a wake-up runs the app update there (Bevy updates
+# once per redraw, and a hidden page never gets one): a background tab
+# keeps its networked match running (`net::web_tab`,
+# `net-experiments/m3-rooms.md` §1). `vendor/bevy_winit/README.md`.
 [patch.crates-io]
 webrtc-data = { path = "vendor/webrtc-data" }
+bevy_winit = { path = "vendor/bevy_winit" }

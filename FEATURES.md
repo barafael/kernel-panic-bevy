@@ -865,9 +865,10 @@ context. Most variants animate over their frames at a fixed rate
   (allies get TAKE); the host leaving or going silent ends the match for the
   others with a message. The host's rules (pausing, speed range, cheats for
   everyone) travel with the match setup and are enforced by the host and by
-  every peer. In a networked match the Esc menu offers "Leave match" instead
-  of Restart (resign, disconnect, back to the menu; the Menu buttons do the
-  same), the result panel has no Restart, a player list at the top right
+  every peer. In a networked match the Esc menu offers "Back to room" instead
+  of Restart (resign, leave the match, back to its room; the Menu buttons
+  resign and leave the room too), the result panel has "Back to room" where
+  Restart was, a player list at the top right
   shows seat, ally / enemy, name and ping (F9 hides it), and a banner says
   who left, who it is waiting for, a desync, or why the match ended.
 - Rejoining and watching (`net-experiments/m3-turn-log.md`): a player whose
@@ -886,3 +887,21 @@ context. Most variants animate over their frames at a fixed rate
   watches one as a spectator, with a bar at the top showing the time and
   speed: pause (Pause / Space), slower / faster (`-` / `+`, 0.25×–16×); Esc →
   Restart plays it from the start.
+- Rooms that hold (`net-experiments/m3-rooms.md`): after a match "Back to
+  room" returns to the same room (same code, same seats; those still in
+  the match keep their seats until they are back) for a rematch. Going
+  back to the room leaves the match for good: the seat is dropped at once,
+  and that player stays in the room (it is not caught up into the match
+  like a rejoiner, even after a reload). A room where one peer never
+  reached another (the host, or anyone the room lists) reopens that peer's
+  connection after 10 s and gives it its seat back (seats follow the
+  player, not the connection); the page says whom it is still connecting
+  to. Rename yourself on the Multiplayer page (the name field, or
+  `/name <name>` in the chat). Text chat in the room (beside the seats)
+  and in the match (Enter opens the line, Enter sends, Esc drops it; not
+  part of the simulation).
+- Hidden browser tabs keep playing: a worker wakes the web build 30 times
+  a second while its tab is hidden (browsers stop animation frames and
+  slow timers to once a second there), so a networked match goes on; the
+  others' player lists say "tab hidden". A guest that stops getting any
+  further for a minute is dropped.

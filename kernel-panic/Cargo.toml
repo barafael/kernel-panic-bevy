@@ -51,7 +51,7 @@ zstd = "0.13"
 # Location / History: the room code in the URL fragment (`net::lobby`).
 # HtmlInputElement / FileList / File: the Replays page's "Open file…"
 # (`ui::menu::replays_page`).
-web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Blob", "Url", "HtmlAnchorElement", "Location", "History", "HtmlInputElement", "FileList", "File"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Blob", "BlobPropertyBag", "Url", "HtmlAnchorElement", "Location", "History", "HtmlInputElement", "FileList", "File", "Worker", "MessageEvent", "Event", "EventTarget"] }
 js-sys = "0.3"
 # The `replay` feature's `kp_replay` export and its event-loop yields
 # (`headless`). Both are already linked through Bevy on the web.

@@ -178,6 +178,7 @@ fn room(grace: Duration) -> Room {
                     start: start_msg(&roster),
                     keys: keys.clone(),
                     names: roster.keys().map(|p| (*p, format!("p{}", p.0))).collect(),
+                    in_room: Default::default(),
                 }),
             });
             net_session.session.set_timeouts(Timeouts {
@@ -419,6 +420,61 @@ fn the_turn_log_plays_back() {
     assert!(play.session.log().is_empty(), "a replay records nothing");
 }
 
+/// "Back to room" (agent I) is not a rejoin: a player that leaves the
+/// match for its room keeps its connection and says hello to the room
+/// while the host still plays. The host's session ignores that hello
+/// (no `Running`: the player stays in the room), drops the seat at once
+/// (no grace, no `Returned`), and ignores a reload under the same key
+/// too; a newcomer with another key still gets in to watch.
+#[test]
+fn back_in_the_room_is_not_a_knock() {
+    let mut r = room(Duration::from_secs(30));
+    r.run(3.0);
+    let key = r.keys[&PeerId(3)];
+    let (transport, connected) = r.peers[2].net.session.hand_back().expect("a transport");
+    r.peers[2].present = false;
+    let mut back = Lobby::resume(transport, &connected, "p3", MAP, None, key);
+    back.provide_map(MAP, MapHave::Hash(MAP_HASH));
+    // The same player's page reloads in the room: a new connection, the
+    // same key.
+    let mut reload = Lobby::new(Box::new(r.net.join(PeerId(50))), "p3", MAP).with_key(key);
+    reload.provide_map(MAP, MapHave::Hash(MAP_HASH));
+    for _ in 0..(4 * 60) {
+        r.net.advance(FRAME);
+        let now = r.net.now();
+        for l in [&mut back, &mut reload] {
+            l.poll(now);
+            assert!(l.take_events().is_empty(), "nothing asks it into the match");
+            assert!(!l.joining());
+        }
+        for p in r.peers.iter_mut().filter(|p| p.present) {
+            p.frame(now);
+        }
+    }
+    assert!(back.away(PeerId(1)), "the host is still in the match");
+    let leaves = r.peers[0].sim.leaves.clone();
+    assert_eq!(leaves.len(), 1, "dropped once, never returned: {leaves:?}");
+    assert_eq!((leaves[0].1, leaves[0].2), (2, false));
+    let dropped_after = leaves[0].0 - r.peers[2].sim.tick;
+    assert!(
+        dropped_after < 30,
+        "at once, not after the grace: {dropped_after} ticks"
+    );
+    assert!(
+        r.peers[0]
+            .net
+            .session
+            .peers()
+            .iter()
+            .all(|q| q.peer != PeerId(50)),
+        "the reload is not in the match"
+    );
+    let watcher = r.knock(PeerId(51), PlayerKey(0xbeef));
+    r.run(3.0);
+    assert_eq!(r.peers[watcher].net.session.player(), None);
+    r.assert_agree(150);
+}
+
 // --- the whole game ------------------------------------------------------
 
 mod full {
@@ -527,6 +583,7 @@ mod full {
                         .keys()
                         .map(|p| (*p, format!("player{}", p.0)))
                         .collect(),
+                    in_room: Default::default(),
                 });
                 let next = NextNetMatch {
                     config: SessionConfig {

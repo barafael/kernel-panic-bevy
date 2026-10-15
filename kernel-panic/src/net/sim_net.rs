@@ -106,6 +106,12 @@ struct Inner {
     /// Delivery time of the last reliable message per link (in order).
     reliable_tail: BTreeMap<(PeerId, PeerId), Duration>,
     traffic: BTreeMap<PeerId, [Traffic; 2]>,
+    /// Pairs that never connect ([`SimNetwork::sever`]), lower id first.
+    severed: std::collections::BTreeSet<(PeerId, PeerId)>,
+}
+
+fn pair(a: PeerId, b: PeerId) -> (PeerId, PeerId) {
+    (a.min(b), a.max(b))
 }
 
 impl Inner {
@@ -141,7 +147,10 @@ impl Inner {
     }
 
     fn send(&mut self, from: PeerId, to: PeerId, channel: Channel, bytes: Vec<u8>) {
-        if !self.peers.contains_key(&to) || !self.peers.contains_key(&from) {
+        if !self.peers.contains_key(&to)
+            || !self.peers.contains_key(&from)
+            || self.severed.contains(&pair(from, to))
+        {
             return;
         }
         let t = &mut self.traffic.entry(from).or_default()[channel as usize];
@@ -246,9 +255,16 @@ impl SimNetwork {
     /// learns about everyone.
     pub fn join(&self, id: PeerId) -> SimEndpoint {
         let mut net = self.inner();
-        let present: Vec<PeerId> = net.peers.keys().copied().collect();
-        for events in net.peers.values_mut() {
-            events.push(PeerEvent::Joined(id));
+        let present: Vec<PeerId> = net
+            .peers
+            .keys()
+            .copied()
+            .filter(|p| !net.severed.contains(&pair(*p, id)))
+            .collect();
+        for &p in &present {
+            if let Some(events) = net.peers.get_mut(&p) {
+                events.push(PeerEvent::Joined(id));
+            }
         }
         net.peers
             .insert(id, present.into_iter().map(PeerEvent::Joined).collect());
@@ -258,6 +274,13 @@ impl SimNetwork {
         }
     }
 
+    /// `a` and `b` never connect: neither sees the other join, nothing
+    /// passes between them — a pair whose WebRTC connection never came
+    /// up (`net-experiments/m2-transport.md` §6). Before they meet.
+    pub fn sever(&self, a: PeerId, b: PeerId) {
+        self.inner().severed.insert(pair(a, b));
+    }
+
     /// Disconnect `id`: the others see it leave, its traffic in flight
     /// is gone.
     pub fn leave(&self, id: PeerId) {
@@ -265,8 +288,11 @@ impl SimNetwork {
         if net.peers.remove(&id).is_none() {
             return;
         }
-        for events in net.peers.values_mut() {
-            events.push(PeerEvent::Left(id));
+        let severed = net.severed.clone();
+        for (p, events) in net.peers.iter_mut() {
+            if !severed.contains(&pair(*p, id)) {
+                events.push(PeerEvent::Left(id));
+            }
         }
         net.flight.retain(|_, p| p.from != id && p.to != id);
     }

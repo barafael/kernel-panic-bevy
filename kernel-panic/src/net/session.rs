@@ -53,6 +53,12 @@
 //! dropped only after [`Timeouts::rejoin`], so a reload can come back
 //! in time. Every peer keeps the turns it applied ([`Session::log`]),
 //! which is what a replay file holds; [`Session::replay`] plays one.
+//!
+//! M3 (`net-experiments/m3-rooms.md`): a peer may leave the match but
+//! keep its connection to the room ([`Session::hand_back`], "Back to
+//! room"): a [`Msg::Bye`] is its leave. Chat lines and hidden browser
+//! tabs ([`Session::say`], [`Session::set_away`]) go through the host
+//! like everything else, outside the sim.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -96,6 +102,19 @@ const CATCHING_UP: u32 = 6;
 /// player list; Spring relays each player's ping the same way,
 /// `NETMSG_PLAYERINFO`).
 const PING_EVERY: Duration = Duration::from_secs(1);
+
+/// How a peer left the match ([`Session`]'s `peer_left`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gone {
+    /// The transport reports it gone: it may come back within
+    /// [`Timeouts::rejoin`].
+    Closed,
+    /// Silent past [`Timeouts`]: dropped at once.
+    TimedOut,
+    /// It went back to the room ([`Msg::Bye`]): dropped at once, and its
+    /// key stays in the room ([`Door::in_room`]).
+    Bye,
+}
 
 /// When silence means a peer is gone (Spring: `CheckTimeout`,
 /// `System/Net/UDPConnection.cpp:767`; the host drops a guest,
@@ -149,6 +168,8 @@ pub struct PeerInfo {
     pub ping_ms: Option<u32>,
     /// Left the match (disconnected, timed out).
     pub gone: bool,
+    /// Its browser tab is hidden ([`Msg::Away`]).
+    pub away: bool,
 }
 
 /// The bounds of the adaptive input delay, in ticks.
@@ -392,7 +413,7 @@ pub enum Ended {
     HostLost,
     /// The host dropped this peer (timed out on its side).
     Dropped,
-    /// This peer left ([`Session::close`]).
+    /// This peer left ([`Session::close`], [`Session::hand_back`]).
     Left,
 }
 
@@ -416,6 +437,11 @@ pub enum SessionEvent {
         returned: bool,
         name: String,
     },
+    /// A chat line, as the host relayed it.
+    Chat {
+        from: PeerId,
+        text: String,
+    },
 }
 
 /// The host's view of one guest.
@@ -431,6 +457,8 @@ struct GuestLink {
     since: Option<Duration>,
     /// The guest holds every turn before this.
     next_turn: u32,
+    /// When `next_turn` last moved on ([`stalled`]).
+    advanced: Option<Duration>,
     rtt: Rtt,
     /// The guest's latest stamp and when it arrived.
     stamp_in: Option<(u32, Duration)>,
@@ -511,6 +539,26 @@ struct Guest {
     gone: std::collections::BTreeSet<PeerId>,
 }
 
+/// Turns a guest may lack before [`stalled`] looks at it: a minute. Less
+/// is a slow link or a short hiccup (a deaf guest gives up on the host
+/// by itself after [`Timeouts::running`]).
+const STALL_BEHIND: u32 = 1800;
+
+/// A guest that still talks but lacks more than [`STALL_BEHIND`] turns
+/// the host cut, and has not got any further for longer than `limit`
+/// (its downlink is dead, or its tab was frozen): the host drops it. A
+/// guest far behind but catching up (a late joiner replaying the log, a
+/// throttled tab) keeps advancing and stays
+/// (`net-experiments/m3-rooms.md`; the whole log is kept, so behind
+/// alone is never hopeless).
+fn stalled(l: &GuestLink, next_cut: u32, now: Duration, limit: Duration) -> bool {
+    l.heard
+        && next_cut.saturating_sub(l.next_turn) > STALL_BEHIND
+        && l.advanced
+            .or(l.since)
+            .is_some_and(|at| now.saturating_sub(at) > limit)
+}
+
 #[derive(Debug)]
 enum Role {
     Host(Box<Host>),
@@ -541,6 +589,11 @@ pub struct Session {
     /// transport).
     networked: bool,
     transport: Option<Box<dyn Transport>>,
+    /// Who the transport is connected to (the roster to begin with,
+    /// then its peer events): what [`Self::hand_back`] hands on.
+    connected: std::collections::BTreeSet<PeerId>,
+    /// Peers whose browser tab is hidden (this one included).
+    away: std::collections::BTreeSet<PeerId>,
     timeouts: Timeouts,
     /// The first poll: where the initial timeouts count from.
     opened: Option<Duration>,
@@ -588,6 +641,8 @@ impl Session {
             roster: BTreeMap::new(),
             networked: false,
             transport: None,
+            connected: Default::default(),
+            away: Default::default(),
             timeouts: Timeouts::default(),
             opened: None,
             turns: TurnBuffer::default(),
@@ -661,6 +716,12 @@ impl Session {
                 ..Default::default()
             }))
         };
+        let connected = cfg
+            .roster
+            .keys()
+            .copied()
+            .filter(|p| *p != cfg.me)
+            .collect();
         Self {
             match_id: cfg.match_id,
             me: cfg.me,
@@ -669,6 +730,8 @@ impl Session {
             roster: cfg.roster,
             networked: true,
             transport: Some(transport),
+            connected,
+            away: Default::default(),
             timeouts: Timeouts::default(),
             opened: None,
             turns: TurnBuffer::default(),
@@ -765,6 +828,89 @@ impl Session {
         }
     }
 
+    /// Leave the match but not the room ("Back to room"): tell the host
+    /// (a guest) or every guest (the host) with a [`Msg::Bye`] — the
+    /// leave the transport would report if it closed — and hand the
+    /// transport over, with the peers it is connected to, for the lobby.
+    /// `None` without one (single player, already closed).
+    pub fn hand_back(&mut self) -> Option<(Box<dyn Transport>, Vec<PeerId>)> {
+        self.transport.as_ref()?;
+        let to = match &self.role {
+            Role::Host(_) => self.guests(),
+            Role::Guest(g) => vec![g.host],
+        };
+        for peer in to {
+            self.send(peer, Channel::Reliable, Msg::Bye);
+        }
+        let transport = self.transport.take()?;
+        if self.ended.is_none() {
+            self.ended = Some(Ended::Left);
+        }
+        Some((transport, self.connected.iter().copied().collect()))
+    }
+
+    /// Say `text` to everyone in the match (the host relays it; see
+    /// [`super::chat`]). Nothing in single player.
+    pub fn say(&mut self, text: &str) {
+        let text = super::chat::clean(text);
+        if text.is_empty() || self.transport.is_none() {
+            return;
+        }
+        let me = self.me;
+        match &self.role {
+            Role::Host(_) => self.relay_chat(me, text),
+            Role::Guest(g) => {
+                let host = g.host;
+                self.send(host, Channel::Reliable, Msg::Chat { from: me, text });
+            }
+        }
+    }
+
+    /// Host: `text` from `from` to every guest and to ourselves.
+    fn relay_chat(&mut self, from: PeerId, text: String) {
+        for guest in self.guests() {
+            self.send(
+                guest,
+                Channel::Reliable,
+                Msg::Chat {
+                    from,
+                    text: text.clone(),
+                },
+            );
+        }
+        self.events.push(SessionEvent::Chat { from, text });
+    }
+
+    /// This peer's browser tab was hidden (`true`) or shown again: the
+    /// others see it in their player lists. Sent only when it changes.
+    pub fn set_away(&mut self, away: bool) {
+        let me = self.me;
+        if self.away.contains(&me) == away || !self.networked {
+            return;
+        }
+        self.mark_away(me, away);
+        let msg = Msg::Away { peer: me, away };
+        match &self.role {
+            Role::Host(_) => {
+                for guest in self.guests() {
+                    self.send(guest, Channel::Reliable, msg.clone());
+                }
+            }
+            Role::Guest(g) => {
+                let host = g.host;
+                self.send(host, Channel::Reliable, msg);
+            }
+        }
+    }
+
+    fn mark_away(&mut self, peer: PeerId, away: bool) {
+        if away {
+            self.away.insert(peer);
+        } else {
+            self.away.remove(&peer);
+        }
+    }
+
     /// The transport is gone ([`Self::close`]).
     pub fn closed(&self) -> bool {
         self.networked && self.transport.is_none()
@@ -815,6 +961,7 @@ impl Session {
                     me,
                     ping_ms,
                     gone,
+                    away: self.away.contains(&peer),
                 }
             })
             .collect()
@@ -1121,8 +1268,14 @@ impl Session {
         for ev in events {
             // A peer joining the room introduces itself with a lobby
             // `Hello` (below); its `Joined` says nothing yet.
-            if let PeerEvent::Left(peer) = ev {
-                self.peer_left(peer, false, now);
+            match ev {
+                PeerEvent::Joined(peer) => {
+                    self.connected.insert(peer);
+                }
+                PeerEvent::Left(peer) => {
+                    self.connected.remove(&peer);
+                    self.peer_left(peer, Gone::Closed, now);
+                }
             }
         }
         for (from, bytes) in inbox {
@@ -1159,10 +1312,18 @@ impl Session {
         let Some(mut door) = h.door.take() else {
             return;
         };
+        // Not a knock but the room's business (`rejoin`'s module doc): a
+        // connection the match has (back in the room after a `Bye`, or
+        // still to be told of its own start), or a player that went back
+        // to the room, reconnected.
+        let key = PlayerKey(hello.key);
+        if self.roster.contains_key(&from) || door.in_room.contains(&key) {
+            h.door = Some(door);
+            return;
+        }
         let mut out: Vec<(PeerId, Msg)> = Vec::new();
         let compatible = door.start.compat.build().mismatch(&hello.build).is_none();
-        if compatible && !self.roster.contains_key(&from) {
-            let key = PlayerKey(hello.key);
+        if compatible {
             let (seat, replaces) = door.seat_for(&self.roster, key, me);
             let name = lobby::clean_name(&hello.name);
             if let Some(old) = replaces {
@@ -1273,13 +1434,17 @@ impl Session {
                 let lost: Vec<PeerId> = h
                     .links
                     .iter()
-                    .filter(|(_, l)| !l.gone && silent(l.last_heard, l.since))
+                    .filter(|(_, l)| {
+                        !l.gone
+                            && (silent(l.last_heard, l.since)
+                                || stalled(l, h.next_cut, now, t.running))
+                    })
                     .map(|(p, _)| *p)
                     .collect();
                 for peer in lost {
                     bevy::log::warn!("{peer} timed out: dropped");
                     self.send(peer, Channel::Reliable, Msg::Left { peer });
-                    self.peer_left(peer, true, now);
+                    self.peer_left(peer, Gone::TimedOut, now);
                 }
             }
             Role::Guest(g) => {
@@ -1292,9 +1457,9 @@ impl Session {
         }
     }
 
-    /// `peer` is gone: the transport said so, or (`timed_out`) it was
-    /// silent too long.
-    fn peer_left(&mut self, peer: PeerId, timed_out: bool, now: Duration) {
+    /// `peer` is gone: the transport said so, it was silent too long, or
+    /// it went back to the room ([`Gone`]).
+    fn peer_left(&mut self, peer: PeerId, how: Gone, now: Duration) {
         let grace = self.timeouts.rejoin;
         match &mut self.role {
             Role::Host(h) => {
@@ -1311,18 +1476,25 @@ impl Session {
                 // its name, after anything of its own already sequenced,
                 // applied by every peer on the same tick. (A seat has one
                 // peer: batches are numbered per seat.) A disconnect gets
-                // `grace` to come back first ([`Timeouts::rejoin`]).
+                // `grace` to come back first ([`Timeouts::rejoin`]); a
+                // timeout had its minute, and "Back to room" is a choice.
                 link.gone = true;
                 let seat = link.player;
                 h.started |= h.links.values().all(|l| l.heard || l.gone);
+                if how == Gone::Bye
+                    && let Some(door) = h.door.as_mut()
+                    && let Some(&key) = door.keys.get(&peer)
+                {
+                    door.in_room.insert(key);
+                }
                 if let Some(seat) = seat {
-                    if timed_out || grace.is_zero() {
+                    if how != Gone::Closed || grace.is_zero() {
                         h.drop_seat(seat);
                     } else {
                         h.pending_drops.insert(seat, now + grace);
                     }
                 }
-                self.events.push(if timed_out {
+                self.events.push(if how == Gone::TimedOut {
                     SessionEvent::TimedOut(peer)
                 } else {
                     SessionEvent::Left(peer)
@@ -1361,6 +1533,9 @@ impl Session {
                 let link = h.links.get_mut(&from).expect("checked above");
                 link.heard = true;
                 link.last_heard = Some(now);
+                if p.next_turn > link.next_turn || link.advanced.is_none() {
+                    link.advanced = Some(now);
+                }
                 link.next_turn = link.next_turn.max(p.next_turn);
                 link.stamp_in = Some((p.stamp, now));
                 if let Some(e) = p.echo {
@@ -1406,6 +1581,21 @@ impl Session {
                     // Older than anything kept: unverifiable (Spring
                     // only warns, `GameServer.cpp:701-709`).
                     None => {}
+                }
+            }
+            Msg::Bye => self.peer_left(from, Gone::Bye, now),
+            // Spring drops a chat line that claims another sender
+            // (`GameServer.cpp:1150`).
+            Msg::Chat { from: said, text } if said == from => {
+                let text = super::chat::clean(&text);
+                if !text.is_empty() {
+                    self.relay_chat(from, text);
+                }
+            }
+            Msg::Away { peer, away } if peer == from => {
+                self.mark_away(from, away);
+                for guest in self.guests().into_iter().filter(|g| *g != from) {
+                    self.send(guest, Channel::Reliable, Msg::Away { peer, away });
                 }
             }
             _ => {}
@@ -1496,6 +1686,15 @@ impl Session {
                     });
                 }
             }
+            Msg::Bye => {
+                // The host went back to its room: no clock any more.
+                if self.ended.is_none() {
+                    self.ended = Some(Ended::HostLeft);
+                    self.events.push(SessionEvent::HostLeft);
+                }
+            }
+            Msg::Chat { from, text } => self.events.push(SessionEvent::Chat { from, text }),
+            Msg::Away { peer, away } => self.mark_away(peer, away),
             _ => {}
         }
     }

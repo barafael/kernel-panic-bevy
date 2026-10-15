@@ -20,6 +20,15 @@
 //!   `Net/GameServer.cpp:73`, `:2957-2966`). Every guest hears of
 //!   it ([`super::wire::Msg::Joined`]). The newcomer gets [`Running`]:
 //!   the `Start` it missed with the roster as it is now.
+//! - **Not a knock: back in the room** (`net-experiments/m3-rooms.md`).
+//!   A player that left with "Back to room" keeps its connection and
+//!   says hello to the room; the match's host may still be playing. A
+//!   hello from a connection the match already has (its roster), or
+//!   under the key of a player that went back to the room
+//!   ([`Door::in_room`]), is the room's business: the host's session
+//!   ignores it, and the room counts the host as away until it is back
+//!   too. Only a connection new to the match, under any other key, is let
+//!   in (a seat's key back on its seat, the rest watching).
 //! - **Catching up.** The newcomer starts the match like everyone else
 //!   (map, seed, seats from the `Start`) with a session that holds no
 //!   turn yet ([`super::session::Session::late`]); the host's whole turn
@@ -37,7 +46,7 @@
 //!   `Dropped`, and every peer decides alike: back in play if its side
 //!   is still in it and its units still its own, else it watches.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -116,6 +125,9 @@ pub struct Door {
     pub keys: BTreeMap<PeerId, PlayerKey>,
     /// Their names, for the newcomers' player lists.
     pub names: BTreeMap<PeerId, String>,
+    /// Keys of players that went back to the room ([`super::wire::Msg::Bye`]):
+    /// a hello under one of them is the room's, not a knock.
+    pub in_room: BTreeSet<PlayerKey>,
 }
 
 impl Door {
@@ -186,6 +198,7 @@ mod tests {
             ]
             .into(),
             names: BTreeMap::new(),
+            in_room: BTreeSet::new(),
         };
         assert_eq!(
             door.seat_for(&roster, PlayerKey(11), host),

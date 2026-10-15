@@ -49,6 +49,25 @@
 //! starts with [`LOBBY_TAG`] where a session [`super::wire::Envelope`] has its
 //! format version, so neither side mistakes the other's packets (a late
 //! `Status` reaching the host's running session is dropped there).
+//!
+//! M3 (`net-experiments/m3-rooms.md`):
+//!
+//! - **Stuck rooms.** Under loss a pair of peers may never connect
+//!   (`m2-transport.md` §6: 3 of ~20 four-peer rooms at 2–3 %). The
+//!   rooms the peers show each other name everyone the room has; a peer
+//!   that has not reached one of them within [`STUCK`] — the host or
+//!   another member, the higher id of the pair acts — reopens its
+//!   connection ([`Lobby::with_reopen`]): a new socket, a new id, a new
+//!   round of connections to everyone. Its `Hello` carries the same
+//!   [`PlayerKey`] under the new id, so the host gives it its seat back.
+//! - **Back to the room.** A match hands its connection back
+//!   ([`super::driver::BackToRoom`]); [`Lobby::resume`] picks up the
+//!   room as it was at the start, same code, same seats. Peers still in
+//!   the match keep their seats ("away") and answer once they are back:
+//!   a first `Hello` from a peer is always answered with ours.
+//! - **Names and chat.** [`Lobby::set_name`] says hello again under the
+//!   new name; [`Lobby::say`] sends a line through the host
+//!   ([`super::chat`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -57,6 +76,7 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::MatchRules;
+use super::chat::{self, ChatLine};
 use super::compat::{Build, Compat};
 use super::driver::{CatchUp, NextNetMatch, PeerNames};
 use super::rejoin::{Door, PlayerKey, Running};
@@ -75,6 +95,27 @@ pub use super::matchbox::RoomId;
 #[cfg(not(test))]
 pub fn connect(room: &RoomId) -> Box<dyn Transport> {
     super::matchbox::open_room(room, &super::matchbox::NetConfig::from_launch())
+}
+
+/// Rooms stay on this machine: [`enter`] opens a
+/// [`LoneTransport`](super::transport::LoneTransport) instead of
+/// [`connect`]ing. The menu screenshots set it (`ui::menu_shots`), so a
+/// dev tool never opens a real room on the public signaling server.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct OfflineRooms;
+
+/// The connection [`enter`] opens (and the lobby reopens): the room on
+/// the signaling server, or one nobody else can reach ([`OfflineRooms`]).
+fn connector(room: RoomId, offline: bool) -> Connector {
+    Box::new(move || {
+        if offline {
+            let id = (crate::game_setup::random_seed() as u128) << 64
+                | crate::game_setup::random_seed() as u128;
+            Box::new(super::transport::LoneTransport::new(PeerId(id)))
+        } else {
+            connect(&room)
+        }
+    })
 }
 
 /// Tests: an in-process [`SimNetwork`](super::sim_net::SimNetwork) per
@@ -107,7 +148,8 @@ pub const LOBBY_TAG: u16 = 0x4b4c;
 
 /// Bumped whenever a lobby message changes shape. A peer with another
 /// one runs another build: it is listed, never seated.
-/// 2 (M3): [`Hello::key`], [`LobbyMsg::Running`].
+/// 2 (M3): [`Hello::key`], [`LobbyMsg::Running`] (turn log),
+/// [`LobbyMsg::Chat`] (rooms).
 pub const LOBBY_VERSION: u16 = 2;
 
 /// A peer's announcement of itself, to everyone, when it meets them.
@@ -119,7 +161,8 @@ pub struct Hello {
     /// elected after it takes the room over from here.
     pub room: Option<RoomState>,
     /// The player's [`PlayerKey`]: who it is across connections, so a
-    /// running match gives a returning player its seat back.
+    /// running match gives a returning player its seat back, and a room
+    /// the seat of a peer that reopened its connection.
     pub key: u64,
 }
 
@@ -164,6 +207,12 @@ pub enum LobbyMsg {
     /// Host of a running match → a peer that said hello: join it
     /// ([`super::rejoin`]).
     Running(Box<Running>),
+    /// A chat line: guest → host with `from` = itself, host → all
+    /// (every line, its own included, in the host's order).
+    Chat {
+        from: PeerId,
+        text: String,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,12 +271,24 @@ pub fn decode(bytes: &[u8]) -> Decoded {
 pub const MAX_SEATS: usize = 8;
 
 /// Characters of a name shown.
-const NAME_MAX: usize = 20;
+pub const NAME_MAX: usize = 20;
 
 /// How long a peer waits for every connected peer's hello before it
 /// acts as host anyway (a peer that never answers is in a match, or
 /// broken).
 pub const SETTLE: Duration = Duration::from_secs(3);
+
+/// How long a peer the room names may stay unreached before the higher
+/// id of the pair reopens its connection. WebRTC connects in 0.5–4 s
+/// here (`m2-transport.md` §4, 8 peers at once); a pair that failed
+/// takes webrtc-rs ~30 s to give up on its own.
+pub const STUCK: Duration = Duration::from_secs(10);
+
+/// Reopens per room before the lobby gives up and says so.
+pub const MAX_REOPENS: u32 = 3;
+
+/// Opens (again) the connection to the room the lobby is in.
+pub type Connector = Box<dyn FnMut() -> Box<dyn Transport> + Send + Sync>;
 
 /// Who sits on a seat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +526,8 @@ struct PeerInfo {
     status: Option<Status>,
     /// Its [`Hello::key`].
     key: PlayerKey,
+    /// The room its latest `Hello` showed (who the room has).
+    room: Option<RoomState>,
 }
 
 impl PeerInfo {
@@ -521,6 +584,24 @@ pub struct Lobby {
     /// A running match's host asked us in ([`LobbyMsg::Running`]); we
     /// join once our hash of its map is in.
     running: Option<Running>,
+    /// Reopens the connection when the room is stuck.
+    reopen: Option<Connector>,
+    reopens: u32,
+    /// Our id before the last reopen (not missing: it is us).
+    was: Option<PeerId>,
+    /// When the connection was (re)opened (the first poll after).
+    opened_at: Option<Duration>,
+    /// Peers the room names that we have not reached, since when.
+    missing: BTreeMap<PeerId, Duration>,
+    /// Chat lines that arrived, for the owner ([`Self::take_chat`]).
+    said: Vec<ChatLine>,
+    /// Host: the seats opened because their peer left, by that peer: a
+    /// peer that reopened its connection (the same [`Hello::key`]) may
+    /// come back to it.
+    vacated: BTreeMap<PeerId, usize>,
+    /// Every [`Hello::key`] heard, by connection, kept after the peer
+    /// leaves (for [`Self::vacated`]).
+    keys: BTreeMap<PeerId, PlayerKey>,
 }
 
 impl Lobby {
@@ -558,6 +639,14 @@ impl Lobby {
             failure: None,
             key: PlayerKey::random(),
             running: None,
+            reopen: None,
+            reopens: 0,
+            was: None,
+            opened_at: None,
+            missing: BTreeMap::new(),
+            said: Vec::new(),
+            vacated: BTreeMap::new(),
+            keys: BTreeMap::new(),
         }
     }
 
@@ -566,6 +655,37 @@ impl Lobby {
     pub fn with_key(mut self, key: PlayerKey) -> Self {
         self.key = key;
         self
+    }
+
+    /// Reopen the connection through `open` when the room is stuck (see
+    /// the module doc).
+    pub fn with_reopen(mut self, open: Connector) -> Self {
+        self.reopen = Some(open);
+        self
+    }
+
+    /// Back in the room after a match: the match's `transport`, the
+    /// `peers` it is still connected to, the room as it was when the
+    /// match started. Everyone hears our hello again; those still in
+    /// the match ignore it and say hello themselves when they are back
+    /// (the host's session ignores a hello from a connection of its match:
+    /// see `Session::knock`). `key`: ours, as in the match.
+    pub fn resume(
+        transport: Box<dyn Transport>,
+        peers: &[PeerId],
+        name: &str,
+        default_map: &str,
+        room: Option<RoomState>,
+        key: PlayerKey,
+    ) -> Self {
+        let mut l = Self::new(transport, name, default_map).with_key(key);
+        l.room = room;
+        let hello = l.hello();
+        for &peer in peers {
+            l.connected.insert(peer);
+            l.send(peer, hello.clone());
+        }
+        l
     }
 
     /// Hand the connection over (to the match's session).
@@ -683,11 +803,119 @@ impl Lobby {
         })
     }
 
+    /// Our name in the room.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Go by `name` from now on: everyone hears our hello again.
+    pub fn set_name(&mut self, name: &str) {
+        let name = clean_name(name);
+        if name.is_empty() || name == self.name {
+            return;
+        }
+        self.name = name;
+        let hello = self.hello();
+        self.broadcast(hello);
+        self.dirty = true;
+    }
+
+    /// Say `text` to the room: through the host, which relays it to
+    /// everyone ([`super::chat`]).
+    pub fn say(&mut self, text: &str) -> Result<(), String> {
+        let text = chat::clean(text);
+        if text.is_empty() {
+            return Ok(());
+        }
+        let me = self.me().ok_or("not connected yet")?;
+        if self.is_host() {
+            self.relay_chat(me, text);
+        } else {
+            let host = self.host().ok_or("no host")?;
+            self.send(host, LobbyMsg::Chat { from: me, text });
+        }
+        Ok(())
+    }
+
+    /// Host: a line from `from` to everyone, and to us.
+    fn relay_chat(&mut self, from: PeerId, text: String) {
+        self.broadcast(LobbyMsg::Chat {
+            from,
+            text: text.clone(),
+        });
+        self.heard_chat(from, text);
+    }
+
+    fn heard_chat(&mut self, from: PeerId, text: String) {
+        let name = if Some(from) == self.me() {
+            self.name.clone()
+        } else {
+            self.display_name(from)
+        };
+        self.said.push(ChatLine { from, name, text });
+        self.dirty = true;
+    }
+
+    /// The chat lines that arrived since the last call.
+    pub fn take_chat(&mut self) -> Vec<ChatLine> {
+        std::mem::take(&mut self.said)
+    }
+
+    /// What the stuck-room check is doing, for the page: the peers the
+    /// room names that we have not reached (for a few seconds now), and
+    /// whether we gave up reopening.
+    pub fn unreached(&self, now: Duration) -> Option<String> {
+        let late: Vec<String> = self
+            .missing
+            .iter()
+            .filter(|(_, since)| now.saturating_sub(**since) >= SETTLE)
+            .map(|(p, _)| self.display_name(*p))
+            .collect();
+        if late.is_empty() {
+            return None;
+        }
+        let who = late.join(", ");
+        Some(if self.reopens >= MAX_REOPENS || self.reopen.is_none() {
+            format!("no connection to {who}: leave and join again, or try another network")
+        } else {
+            format!("connecting to {who}…")
+        })
+    }
+
+    /// `peer`'s name as the room (or a hello's room, or its own hello)
+    /// gives it.
+    fn display_name(&self, peer: PeerId) -> String {
+        self.room
+            .as_ref()
+            .and_then(|r| r.member(peer))
+            .map(|m| m.name.clone())
+            .or_else(|| self.peers.get(&peer).and_then(|i| i.name.clone()))
+            .or_else(|| {
+                self.peers
+                    .values()
+                    .filter_map(|i| i.room.as_ref())
+                    .find_map(|r| r.member(peer).map(|m| m.name.clone()))
+            })
+            .unwrap_or_else(|| peer.to_string())
+    }
+
+    /// How often this lobby reopened its connection.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn reopens(&self) -> u32 {
+        self.reopens
+    }
+
     /// Take in the network, (host) keep the room, send what changed.
     /// `now`: any monotonic clock (the [`SETTLE`] wait).
     pub fn poll(&mut self, now: Duration) {
         if self.done {
             return;
+        }
+        if self.opened_at.is_none() {
+            // A fresh connection (or a match's, handed back): the settle
+            // wait counts from here.
+            self.opened_at = Some(now);
+            self.last_join = now;
         }
         if self.failure.is_none() {
             self.failure = self.transport.failure();
@@ -750,6 +978,84 @@ impl Lobby {
         } else {
             self.send_status();
         }
+        self.check_stuck(now);
+    }
+
+    /// Everyone the newest room we know of names (its host and members):
+    /// ours, or one a connected peer showed us in its hello.
+    fn expected(&self) -> BTreeSet<PeerId> {
+        let newest = self
+            .connected
+            .iter()
+            .filter_map(|p| self.peers.get(p)?.room.as_ref())
+            .chain(self.room.as_ref())
+            .max_by_key(|r| r.rev);
+        newest.map_or_else(BTreeSet::new, |r| {
+            r.members.iter().map(|m| m.peer).chain([r.host]).collect()
+        })
+    }
+
+    /// The stuck-room check (module doc): note who the room names that
+    /// we have not reached; past [`STUCK`] for one with a lower id,
+    /// reopen.
+    fn check_stuck(&mut self, now: Duration) {
+        let Some(me) = self.me() else {
+            return;
+        };
+        let mut expected = self.expected();
+        expected.remove(&me);
+        if let Some(was) = self.was {
+            expected.remove(&was);
+        }
+        let unreached: BTreeSet<PeerId> = expected
+            .into_iter()
+            .filter(|p| !self.connected.contains(p))
+            .collect();
+        let before = self.missing.len();
+        self.missing.retain(|p, _| unreached.contains(p));
+        for p in unreached {
+            self.missing.entry(p).or_insert(now);
+        }
+        self.dirty |= self.missing.len() != before;
+        let stuck = self
+            .missing
+            .iter()
+            .filter(|(p, since)| **p < me && now.saturating_sub(**since) >= STUCK)
+            .map(|(p, _)| *p)
+            .next();
+        let fresh = self
+            .opened_at
+            .is_some_and(|t| now.saturating_sub(t) < STUCK);
+        if let Some(peer) = stuck
+            && !fresh
+            && self.reopens < MAX_REOPENS
+            && self.reopen.is_some()
+        {
+            info!("no connection to {peer} after {STUCK:?}: reopening the room");
+            self.reopen_now();
+        }
+    }
+
+    /// Drop the connection and open a new one (a new id; the others see
+    /// the old one leave). The room as we knew it goes along in our
+    /// hellos; the host gives our seat to the new id (the same
+    /// [`Hello::key`]).
+    pub fn reopen_now(&mut self) {
+        let Some(open) = self.reopen.as_mut() else {
+            return;
+        };
+        let old = self.transport.local_id();
+        self.transport = open();
+        self.was = old.or(self.was);
+        self.reopens += 1;
+        self.connected.clear();
+        self.peers.clear();
+        self.missing.clear();
+        self.sent = None;
+        self.sent_status = None;
+        self.settled = false;
+        self.opened_at = None;
+        self.dirty = true;
     }
 
     fn handle(&mut self, from: PeerId, msg: LobbyMsg) {
@@ -757,14 +1063,37 @@ impl Lobby {
             LobbyMsg::Hello(h) => {
                 let mismatch = self.build.mismatch(&h.build);
                 let info = self.peers.entry(from).or_default();
+                let first = !info.introduced();
                 info.name = Some(clean_name(&h.name));
                 info.incompatible = mismatch;
                 info.key = PlayerKey(h.key);
+                info.room = h.room.clone();
+                self.keys.insert(from, PlayerKey(h.key));
                 if info.compatible()
                     && let Some(room) = h.room
                     && self.offered.as_ref().is_none_or(|o| room.rev > o.rev)
                 {
                     self.offered = Some(room);
+                }
+                if first {
+                    // Our hello may have reached it while it was in a
+                    // match (dropped there): it hears ours again.
+                    let hello = self.hello();
+                    self.send(from, hello);
+                    if let Some(status) = self.sent_status.clone() {
+                        self.send(from, LobbyMsg::Status(status));
+                    }
+                }
+                if self.is_host()
+                    && let Some(room) = self.room.as_ref()
+                    && room.seat_of(from).is_none()
+                    && let Some(seat) = self.seat_of_key(PlayerKey(h.key), from)
+                    && let Some(room) = self.room.as_mut()
+                {
+                    // It reopened its connection (the same key, a new
+                    // id): its seat follows it, whether its old id is
+                    // still here or already gone.
+                    room.seats[seat].who = Occupant::Human(from);
                 }
                 self.dirty = true;
             }
@@ -810,7 +1139,21 @@ impl Lobby {
                     self.dirty = true;
                 }
             }
-            LobbyMsg::Sit { .. } | LobbyMsg::Stand | LobbyMsg::Faction { .. } => {}
+            // Spring drops a line that claims another sender
+            // (`GameServer.cpp:1150`).
+            LobbyMsg::Chat { from: said, text } if self.is_host() && said == from => {
+                let text = chat::clean(&text);
+                if !text.is_empty() {
+                    self.relay_chat(from, text);
+                }
+            }
+            LobbyMsg::Chat { from: said, text } if Some(from) == self.host() => {
+                self.heard_chat(said, chat::clean(&text));
+            }
+            LobbyMsg::Sit { .. }
+            | LobbyMsg::Stand
+            | LobbyMsg::Faction { .. }
+            | LobbyMsg::Chat { .. } => {}
         }
     }
 
@@ -932,21 +1275,32 @@ impl Lobby {
         for &peer in &self.connected {
             if self.peers.get(&peer).is_some_and(PeerInfo::introduced) {
                 members.push(self.judge(peer, &room.map));
+            } else if let Some(m) = room.member(peer) {
+                // Still connected but silent: in a match still (or just
+                // arriving). It stays a member, not ready.
+                members.push(Member {
+                    ready: false,
+                    check: Check::Pending,
+                    ..m.clone()
+                });
             }
         }
         members.sort_by_key(|m| m.peer);
         // Another build cannot sit; a missing or different map can be
-        // fixed (or the map changed), so it only blocks the start.
+        // fixed (or the map changed), so it only blocks the start. A
+        // connected member that has not said hello again is still in a
+        // match: its seat waits for it.
         let seatable: BTreeSet<PeerId> = members
             .iter()
             .map(|m| m.peer)
-            .filter(|p| self.may_sit(*p))
+            .filter(|p| self.may_sit(*p) || self.away(*p))
             .collect();
-        for seat in &mut room.seats {
+        for (i, seat) in room.seats.iter_mut().enumerate() {
             if let Occupant::Human(p) = seat.who
                 && !seatable.contains(&p)
             {
                 seat.who = Occupant::Open;
+                self.vacated.insert(p, i);
             }
         }
         // Newcomers take the first open seats.
@@ -973,6 +1327,37 @@ impl Lobby {
     /// May `peer` take a seat: us, or a compatible peer.
     fn may_sit(&self, peer: PeerId) -> bool {
         Some(peer) == self.me() || self.peers.get(&peer).is_some_and(PeerInfo::compatible)
+    }
+
+    /// Host: the seat a connection with `key` other than `from` held —
+    /// sits on, or had until its peer left ([`Self::vacated`], if still
+    /// open). Never the host's own seat; never for the "none" key.
+    fn seat_of_key(&self, key: PlayerKey, from: PeerId) -> Option<usize> {
+        if key == PlayerKey::default() {
+            return None;
+        }
+        let me = self.me();
+        let room = self.room.as_ref()?;
+        let old: Vec<PeerId> = self
+            .keys
+            .iter()
+            .filter(|(p, k)| **k == key && **p != from && Some(**p) != me)
+            .map(|(p, _)| *p)
+            .collect();
+        old.iter().find_map(|p| room.seat_of(*p)).or_else(|| {
+            old.iter().find_map(|p| {
+                self.vacated
+                    .get(p)
+                    .copied()
+                    .filter(|&s| room.seats.get(s).is_some_and(|s| s.who == Occupant::Open))
+            })
+        })
+    }
+
+    /// `peer` is connected but has not said hello (to this lobby): in a
+    /// match still, or just arriving.
+    pub fn away(&self, peer: PeerId) -> bool {
+        self.connected.contains(&peer) && self.peers.get(&peer).is_none_or(|i| !i.introduced())
     }
 
     /// Host: `peer` as a member of a room on `map`.
@@ -1220,6 +1605,9 @@ impl Lobby {
             if Some(p) == self.me() {
                 continue;
             }
+            if self.away(p) {
+                return Some(format!("waiting for {} to come back to the room", m.name));
+            }
             match &m.check {
                 Check::Refused(why) => return Some(format!("{} {why}", m.name)),
                 Check::Pending => return Some(format!("checking {}'s map…", m.name)),
@@ -1310,6 +1698,7 @@ impl Lobby {
                 start: msg.clone(),
                 keys,
                 names: names.clone(),
+                in_room: BTreeSet::new(),
             }),
             names: names.into_iter().collect(),
             ..MatchStart::of(&msg, me)
@@ -1331,8 +1720,27 @@ pub struct LobbyRoom {
     pub notice: Option<String>,
     /// Our name in rooms.
     pub name: String,
+    /// The text field keys go to on the Multiplayer page.
+    pub field: Field,
+    /// The chat line being typed in the room.
+    pub chat: String,
+    /// The stuck-room check's word, if any ([`Lobby::unreached`]).
+    pub unreached: Option<String>,
+    /// The room this game's last networked match came from, as it was
+    /// at the start: "Back to room" resumes it ([`Lobby::resume`]).
+    pub last: Option<(RoomId, Option<RoomState>)>,
     #[cfg(target_arch = "wasm32")]
     maps: MapHashes,
+}
+
+/// The Multiplayer page's text fields.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Field {
+    /// The room code (outside a room) or the chat line (in one).
+    #[default]
+    Main,
+    /// The player's name.
+    Name,
 }
 
 /// What the Multiplayer page asks of the lobby (via the menu's
@@ -1359,6 +1767,8 @@ pub enum LobbyAction {
     Pausable(bool),
     /// Host: [`MatchRules::cheats`].
     Cheats(bool),
+    /// Type into this field from now on.
+    Focus(Field),
 }
 
 /// Web: the map fetches the lobby's hashes wait for.
@@ -1373,13 +1783,14 @@ pub struct LobbyPlugin;
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LobbyRoom>()
+            .init_resource::<super::chat::ChatLog>()
             .add_message::<LobbyAction>()
             .add_systems(Startup, join_launch_room)
             // After `Update`: a `Start` applies its `GameSetup` after the
             // menu's demo director wrote any of its own this frame.
             .add_systems(
                 PostUpdate,
-                (lobby_actions, pump_lobby)
+                (lobby_actions, back_to_room, pump_lobby)
                     .chain()
                     .run_if(in_state(AppState::Menu)),
             )
@@ -1451,47 +1862,119 @@ fn leave_for_other_match(mut lobby: ResMut<LobbyRoom>) {
     }
 }
 
-fn enter(lobby: &mut LobbyRoom, room: RoomId, catalog: &crate::map_loading::MapCatalog) {
-    info!("entering room {room} as {}", lobby.name);
-    // The weighted pick of single player's random map, if this
-    // catalog has it.
+/// The map a room this game ends up hosting starts on: the weighted
+/// pick of single player's random map, if this catalog has it.
+fn default_map(catalog: &crate::map_loading::MapCatalog) -> String {
     let names = catalog.names();
     let pick = crate::game_setup::random_weighted_map();
-    let default_map = names
+    names
         .iter()
         .find(|n| **n == pick)
         .or(names.first())
         .cloned()
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn enter(
+    lobby: &mut LobbyRoom,
+    room: RoomId,
+    catalog: &crate::map_loading::MapCatalog,
+    offline: bool,
+) {
+    info!("entering room {room} as {}", lobby.name);
     #[cfg(target_arch = "wasm32")]
     web::share_room(Some(&room));
-    lobby.lobby =
-        Some(Lobby::new(connect(&room), &lobby.name, &default_map).with_key(PlayerKey::local()));
+    let mut open = connector(room.clone(), offline);
+    let l = Lobby::new(open(), &lobby.name, &default_map(catalog))
+        .with_key(PlayerKey::local())
+        .with_reopen(open);
+    lobby.lobby = Some(l);
     lobby.room = Some(room);
     lobby.notice = None;
+    lobby.field = Field::Main;
+}
+
+/// A match handed its connection back ("Back to room"): into the room
+/// it came from, as it was at the start ([`Lobby::resume`]). Without a
+/// room to go back to (not a lobby's match) the connection closes.
+fn back_to_room(world: &mut World) {
+    if !world.contains_resource::<super::driver::BackToRoom>() {
+        return;
+    }
+    let Some(map) = world
+        .get_resource::<crate::map_loading::MapCatalog>()
+        .map(default_map)
+    else {
+        return;
+    };
+    let Some(super::driver::BackToRoom { transport, peers }) =
+        world.remove_resource::<super::driver::BackToRoom>()
+    else {
+        return;
+    };
+    let offline = world.contains_resource::<OfflineRooms>();
+    let mut lobby = world.resource_mut::<LobbyRoom>();
+    let lobby = &mut *lobby;
+    let Some((room, state)) = lobby.last.clone() else {
+        return;
+    };
+    if lobby.lobby.is_some() {
+        return;
+    }
+    info!("back in room {room} with {} peers", peers.len());
+    #[cfg(target_arch = "wasm32")]
+    web::share_room(Some(&room));
+    let open = connector(room.clone(), offline);
+    let l = Lobby::resume(
+        transport,
+        &peers,
+        &lobby.name,
+        &map,
+        state,
+        PlayerKey::local(),
+    )
+    .with_reopen(open);
+    lobby.lobby = Some(l);
+    lobby.room = Some(room);
+    lobby.notice = None;
+    lobby.field = Field::Main;
 }
 
 fn lobby_actions(
     mut actions: MessageReader<LobbyAction>,
     mut lobby: ResMut<LobbyRoom>,
     catalog: Option<Res<crate::map_loading::MapCatalog>>,
+    offline: Option<Res<OfflineRooms>>,
     mut launch: Launch,
 ) {
     let Some(catalog) = catalog else {
         return;
     };
+    let offline = offline.is_some();
     for &action in actions.read() {
         let lobby = &mut *lobby;
         let result = match (action, lobby.lobby.as_mut()) {
+            (LobbyAction::Focus(field), l) => {
+                if lobby.field == Field::Name
+                    && field != Field::Name
+                    && let Some(l) = l
+                {
+                    // Clicking away keeps the name typed so far.
+                    l.set_name(&lobby.name);
+                    lobby.name = l.name().to_string();
+                }
+                lobby.field = field;
+                Ok(())
+            }
             (LobbyAction::Create, None) => {
                 let room = RoomId::random();
                 lobby.code = room.to_string();
-                enter(lobby, room, &catalog);
+                enter(lobby, room, &catalog, offline);
                 Ok(())
             }
             (LobbyAction::Join, None) => match lobby.code.parse::<RoomId>() {
                 Ok(room) => {
-                    enter(lobby, room, &catalog);
+                    enter(lobby, room, &catalog, offline);
                     Ok(())
                 }
                 Err(why) => Err(why.to_string()),
@@ -1500,6 +1983,7 @@ fn lobby_actions(
             (LobbyAction::Leave, _) => {
                 lobby.lobby = None;
                 lobby.room = None;
+                lobby.last = None;
                 #[cfg(target_arch = "wasm32")]
                 web::share_room(None);
                 Ok(())
@@ -1569,7 +2053,8 @@ impl Launch<'_, '_> {
             start.setup.players.len(),
             start.session.roster.get(&start.session.me)
         );
-        lobby.room = None;
+        // "Back to room" comes back to this room as it is now.
+        lobby.last = lobby.room.take().map(|code| (code, l.room().cloned()));
         // The player list's names: the start's (a running match's, or
         // the host's room), else the room's as this peer last saw it.
         let names = if start.names.is_empty() {
@@ -1595,6 +2080,7 @@ impl Launch<'_, '_> {
 
 fn pump_lobby(
     mut lobby: ResMut<LobbyRoom>,
+    mut chat_log: ResMut<super::chat::ChatLog>,
     time: Res<Time<Real>>,
     catalog: Option<Res<crate::map_loading::MapCatalog>>,
     #[cfg(target_arch = "wasm32")] server: Res<AssetServer>,
@@ -1616,6 +2102,14 @@ fn pump_lobby(
         }
     }
     let mut changed = l.take_dirty();
+    for line in l.take_chat() {
+        chat_log.push(time.elapsed(), line);
+    }
+    let unreached = l.unreached(time.elapsed());
+    if unreached != room.unreached {
+        room.unreached = unreached;
+        changed = true;
+    }
     for ev in l.take_events() {
         changed = true;
         match ev {
@@ -1765,6 +2259,9 @@ mod tests {
         net: SimNetwork,
         now: Duration,
         peers: BTreeMap<PeerId, Lobby>,
+        /// Connections in a match: drained like a session that drops
+        /// lobby traffic, with the room as it was at the start.
+        away: BTreeMap<PeerId, (Box<dyn Transport>, Option<RoomState>)>,
     }
 
     impl Net {
@@ -1780,6 +2277,7 @@ mod tests {
                 net,
                 now: Duration::ZERO,
                 peers: BTreeMap::new(),
+                away: BTreeMap::new(),
             }
         }
 
@@ -1809,6 +2307,11 @@ mod tests {
                 self.now += STEP;
                 for l in self.peers.values_mut() {
                     l.poll(self.now);
+                }
+                for (t, _) in self.away.values_mut() {
+                    t.poll_peers();
+                    t.receive(Channel::Reliable);
+                    t.receive(Channel::Unreliable);
                 }
             }
         }
@@ -2123,5 +2626,242 @@ mod tests {
             vec![g],
             "still waiting for the guest's session"
         );
+    }
+
+    impl Net {
+        /// [`Self::join`], with a connector that reopens the connection
+        /// under a fresh id (`id + 1000 × n`).
+        fn join_reopening(&mut self, id: u128, name: &str) -> PeerId {
+            let peer = self.join(id, name);
+            let net = self.net.clone();
+            let mut n = 0;
+            let l = self.peers.remove(&peer).unwrap();
+            let l = l.with_reopen(Box::new(move || {
+                n += 1;
+                Box::new(net.join(PeerId(id + 1000 * n)))
+            }));
+            self.peers.insert(peer, l);
+            peer
+        }
+
+        /// Everyone's view of the room agrees with `host`'s.
+        fn assert_one_room(&self, host: PeerId) {
+            let room = self.room(host);
+            for (id, l) in &self.peers {
+                assert_eq!(l.room(), Some(&room), "{id}'s room");
+            }
+        }
+    }
+
+    /// A pair that never connects (the host and a newcomer): the
+    /// newcomer learns from the others' hellos that the room has a host
+    /// it never reached, reopens its connection after [`STUCK`] and is
+    /// seated like any newcomer. Then a guest pair: the higher id
+    /// reopens, and the host gives it its seat back under the new id.
+    #[test]
+    fn a_stuck_room_reopens() {
+        let mut n = Net::new(5);
+        n.net.sever(PeerId(10), PeerId(30));
+        let a = n.join(10, "ann");
+        let b = n.join_reopening(20, "ben");
+        n.run(4.0);
+        n.lobby(a).add_seat().unwrap();
+        let c = n.join_reopening(30, "cat");
+        n.run(4.0);
+        assert_eq!(n.room(a).members.len(), 2, "ann never heard of cat");
+        assert_eq!(n.lobby(c).room(), None, "cat has no host");
+        let now = n.now;
+        let unreached = n.lobby(c).unreached(now);
+        assert!(
+            unreached.as_deref().is_some_and(|s| s.contains("ann")),
+            "{unreached:?}"
+        );
+        n.run(STUCK.as_secs_f32() + 2.0);
+        let c2 = n.lobby(c).me().unwrap();
+        assert_eq!(c2, PeerId(1030), "reopened");
+        assert_eq!(n.lobby(c).reopens(), 1);
+        n.run(3.0);
+        let room = n.room(a);
+        assert_eq!(room.members.len(), 3);
+        assert_eq!(room.seats[2].who, Occupant::Human(c2), "seated");
+        n.assert_one_room(a);
+        let now = n.now;
+        assert_eq!(n.lobby(c).unreached(now), None);
+
+        // Cat moves to a fourth seat, so its seat is not the first open
+        // one. Then ben and cat lose each other (cat's next id is 2030):
+        // cat, the higher id, reopens; its seat follows it (its old id is
+        // gone at once on this network, before the new one says hello).
+        n.lobby(a).add_seat().unwrap();
+        n.run(2.0);
+        n.lobby(c).occupant(3).unwrap();
+        n.run(2.0);
+        assert_eq!(n.room(a).seats[3].who, Occupant::Human(c2));
+        assert_eq!(n.room(a).seats[2].who, Occupant::Open);
+        n.net.sever(PeerId(20), PeerId(2030));
+        n.lobby(c).reopen_now();
+        n.run(STUCK.as_secs_f32() + 5.0);
+        let c3 = n.lobby(c).me().unwrap();
+        assert_eq!(c3, PeerId(3030), "reopened again: no link to ben");
+        assert_eq!(n.lobby(b).reopens(), 0, "ben has the lower id");
+        n.run(3.0);
+        let room = n.room(a);
+        assert_eq!(room.seats[3].who, Occupant::Human(c3), "the seat followed");
+        assert_eq!(room.seats[2].who, Occupant::Open);
+        assert_eq!(room.members.len(), 3, "the old ids are gone");
+        n.assert_one_room(a);
+    }
+
+    /// Names change in place; chat goes through the host to everyone in
+    /// one order, its own lines included; a line claiming another sender
+    /// is dropped (Spring's server does the same).
+    #[test]
+    fn names_and_chat() {
+        let mut n = Net::new(6);
+        let a = n.join(10, "ann");
+        let b = n.join(20, "ben");
+        let c = n.join(30, "cat");
+        n.run(4.0);
+        n.lobby(b).set_name("  benny\u{7} ");
+        n.run(2.0);
+        assert_eq!(n.room(c).member(b).unwrap().name, "benny");
+        n.lobby(b).say(" hi all ").unwrap();
+        // Past a lost message's retransmission (1 s), so the order is
+        // known.
+        n.run(2.5);
+        n.lobby(a).say("gl").unwrap();
+        // Cat claims to be ben.
+        n.lobby(c).send(
+            a,
+            LobbyMsg::Chat {
+                from: b,
+                text: "I resign".into(),
+            },
+        );
+        n.lobby(c).say("").unwrap();
+        n.run(3.0);
+        for id in [a, b, c] {
+            let said: Vec<(PeerId, String, String)> = n
+                .lobby(id)
+                .take_chat()
+                .into_iter()
+                .map(|l| (l.from, l.name, l.text))
+                .collect();
+            assert_eq!(
+                said,
+                vec![
+                    (b, "benny".into(), "hi all".into()),
+                    (a, "ann".into(), "gl".into())
+                ],
+                "{id}"
+            );
+        }
+    }
+
+    /// After a match: the connections come back to the room one by one
+    /// (`Lobby::resume`). The first back hosts its own view after the
+    /// settle wait, with the seats of those still in the match kept;
+    /// the room's lowest id takes over again when it is back; everyone
+    /// back, the room is the one the match started from.
+    #[test]
+    fn back_in_the_room_after_a_match() {
+        let mut n = Net::new(7);
+        let a = n.join(10, "ann");
+        let b = n.join(20, "ben");
+        let c = n.join(30, "cat");
+        n.run(4.0);
+        n.lobby(a).add_seat().unwrap();
+        n.lobby(a).set_map(MAP).unwrap();
+        n.run(2.0);
+        n.lobby(c).occupant(2).unwrap();
+        n.run(2.0);
+        assert_eq!(n.room(a).seats[2].who, Occupant::Human(c));
+        n.lobby(b).set_ready(true);
+        n.lobby(c).set_ready(true);
+        n.run(2.0);
+        let start_room = n.room(a);
+        assert_eq!(n.lobby(a).start_blocker(), None);
+        n.lobby(a).start(7, 99).unwrap();
+        n.run(1.0);
+        // Into the match: the transports leave the lobbies.
+        for id in [a, b, c] {
+            let l = n.peers.remove(&id).unwrap();
+            let room = l.room().cloned();
+            n.away.insert(id, (l.into_transport(), room));
+        }
+        n.run(2.0);
+        let back = |n: &mut Net, id| {
+            let (t, room) = n.away.remove(&id).unwrap();
+            let others: Vec<PeerId> = [a, b, c].into_iter().filter(|p| *p != id).collect();
+            let name = start_room.member(id).unwrap().name.clone();
+            let mut l = Lobby::resume(t, &others, &name, MAP, room, PlayerKey::random());
+            l.provide_map(MAP, MapHave::Hash(7));
+            n.peers.insert(id, l);
+        };
+        // Ben first: alone, it hosts its view once settled; the others'
+        // seats wait for them.
+        back(&mut n, b);
+        n.run(4.0);
+        assert!(n.lobby(b).is_host());
+        let room = n.room(b);
+        assert_eq!(room.seats, start_room.seats, "seats kept");
+        assert_eq!(room.map, MAP);
+        assert!(
+            n.lobby(b)
+                .start_blocker()
+                .is_some_and(|w| w.contains("come back")),
+            "{:?}",
+            n.lobby(b).start_blocker()
+        );
+        // Ann: the lowest id hosts again. Ben gets ready meanwhile.
+        back(&mut n, a);
+        n.lobby(b).set_ready(true);
+        n.run(4.0);
+        assert!(n.lobby(a).is_host() && !n.lobby(b).is_host());
+        assert_eq!(n.room(a).seats, start_room.seats);
+        assert!(
+            n.lobby(a)
+                .start_blocker()
+                .is_some_and(|w| w.contains("cat to come back")),
+            "{:?}",
+            n.lobby(a).start_blocker()
+        );
+        // Cat: all back, seats as they were, ready again before a start.
+        back(&mut n, c);
+        n.run(4.0);
+        let room = n.room(a);
+        assert_eq!(room.seats, start_room.seats);
+        assert_eq!(room.members.len(), 3);
+        n.assert_one_room(a);
+        assert!(
+            n.lobby(a)
+                .start_blocker()
+                .is_some_and(|w| w.contains("to be ready")),
+            "{:?}",
+            n.lobby(a).start_blocker()
+        );
+        n.lobby(c).set_ready(true);
+        n.run(2.0);
+        assert_eq!(n.lobby(a).start_blocker(), None, "a rematch can start");
+    }
+
+    /// The menu screenshots' rooms ([`OfflineRooms`]): a connection
+    /// nobody else reaches, whose lobby hosts a fresh room alone (and
+    /// reopens the same way).
+    #[test]
+    fn offline_rooms_stay_on_this_machine() {
+        let mut open = connector(RoomId::random(), true);
+        let mut l = Lobby::new(open(), "shots", MAP).with_reopen(open);
+        l.provide_map(MAP, MapHave::Hash(7));
+        for i in 0..5 {
+            l.poll(STEP * i);
+        }
+        assert!(l.is_host());
+        let room = l.room().expect("a room of its own");
+        assert_eq!(room.members.len(), 1);
+        assert_eq!(room.seats[0].who, Occupant::Human(l.me().unwrap()));
+        let before = l.me();
+        l.reopen_now();
+        assert_ne!(l.me(), before, "a new id, still alone");
     }
 }

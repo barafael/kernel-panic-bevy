@@ -14,15 +14,22 @@
 //!   dropped us), leaving, a stall ("Waiting for …"), catching up with
 //!   a match joined late, and for a few seconds who left, timed out,
 //!   came back or joined.
+//! - **Chat** (M3, `net::chat`), lower middle: the last lines for
+//!   [`CHAT_SHOW`]; Enter opens the line to type (Spring's chat input),
+//!   Enter sends it, Esc drops it. While it is open no key reaches the
+//!   game's hotkeys.
 
 use std::time::Duration;
 
+use bevy::input::InputSystems;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
 use crate::game_setup::{AppState, SPECTATOR_TEAM};
 use crate::net::MatchControl;
-use crate::net::driver::{NetStatus, Notice, PeerNames};
+use crate::net::chat::{CHAT_MAX, ChatInput, ChatLog, type_into};
+use crate::net::driver::{NetSession, NetStatus, Notice, PeerNames};
 use crate::net::session::Ended;
 use crate::sim::DetFloat;
 use crate::units::player::LocalTeam;
@@ -47,16 +54,143 @@ struct PlayerList;
 #[derive(Component)]
 struct NetBanner;
 
+#[derive(Component)]
+struct ChatBox;
+
+/// How long a chat line stays on screen (Spring's console keeps lines
+/// for a while too; with the line open, the last [`CHAT_ROWS`] show).
+pub const CHAT_SHOW: Duration = Duration::from_secs(20);
+
+/// Chat lines shown at most.
+const CHAT_ROWS: usize = 8;
+
 pub(super) struct NetOverlayPlugin;
 
 impl Plugin for NetOverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PlayerListShown>().add_systems(
-            Update,
-            (toggle_player_list, show_player_list, show_banner)
-                .chain()
-                .run_if(in_state(AppState::InGame)),
-        );
+        app.init_resource::<PlayerListShown>()
+            .init_resource::<ChatInput>()
+            .init_resource::<ChatLog>()
+            .add_systems(
+                PreUpdate,
+                ChatInput::swallow_keys
+                    .after(InputSystems)
+                    .run_if(in_state(AppState::InGame)),
+            )
+            .add_systems(
+                Update,
+                (
+                    toggle_player_list,
+                    show_player_list,
+                    show_banner,
+                    type_chat,
+                    show_chat,
+                )
+                    .chain()
+                    .run_if(in_state(AppState::InGame)),
+            )
+            .add_systems(OnExit(AppState::InGame), close_chat);
+    }
+}
+
+fn close_chat(mut input: ResMut<ChatInput>) {
+    *input = ChatInput::default();
+}
+
+/// Enter opens the chat line in a networked match; typed keys go into
+/// it, Enter sends it ([`NetSession::say`]), Esc drops it.
+fn type_chat(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut typed: MessageReader<KeyboardInput>,
+    mut input: ResMut<ChatInput>,
+    status: Option<Res<NetStatus>>,
+    mut net: Option<ResMut<NetSession>>,
+) {
+    let live = status.is_some_and(|s| s.networked && !s.closed);
+    if !live {
+        typed.clear();
+        if input.open {
+            *input = ChatInput::default();
+        }
+        return;
+    }
+    if !input.open {
+        typed.clear();
+        if keys.just_pressed(KeyCode::Enter) {
+            input.open = true;
+        }
+        return;
+    }
+    for key in typed.read() {
+        let input = &mut *input;
+        match type_into(&mut input.text, key, CHAT_MAX, |_| true) {
+            Some(Key::Enter) => {
+                if let Some(net) = net.as_mut() {
+                    net.say(&input.text);
+                }
+                *input = ChatInput::default();
+                return;
+            }
+            Some(Key::Escape) => {
+                *input = ChatInput::default();
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// What the chat box says: the recent lines (all of the last
+/// [`CHAT_ROWS`] while typing), then the line being typed.
+fn chat_text(log: &ChatLog, input: &ChatInput, now: Duration) -> Option<String> {
+    let mut lines: Vec<String> = log
+        .last(CHAT_ROWS)
+        .filter(|(at, _)| input.open || now.saturating_sub(*at) < CHAT_SHOW)
+        .map(|(_, l)| format!("{}: {}", l.name, l.text))
+        .collect();
+    if input.open {
+        lines.push(format!("Say: {}_", input.text));
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
+fn show_chat(
+    mut commands: Commands,
+    log: Res<ChatLog>,
+    input: Res<ChatInput>,
+    time: Res<Time<Real>>,
+    mut boxes: Query<(Entity, &mut Text), With<ChatBox>>,
+) {
+    let text = chat_text(&log, &input, time.elapsed());
+    match (text, boxes.single_mut()) {
+        (Some(t), Ok((_, mut text))) => {
+            if text.0 != t {
+                text.0 = t;
+            }
+        }
+        (Some(t), Err(_)) => {
+            commands.spawn((
+                ChatBox,
+                Text::new(t),
+                TextFont::from_font_size(17.0),
+                TextColor(Color::srgb(0.9, 0.95, 1.0)),
+                TextLayout::new(Justify::Left, LineBreak::WordBoundary),
+                Node {
+                    position_type: PositionType::Absolute,
+                    bottom: Val::Percent(24.0),
+                    left: Val::Percent(28.0),
+                    max_width: Val::Percent(44.0),
+                    padding: UiRect::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
+                GlobalZIndex(50),
+                Pickable::IGNORE,
+                DespawnOnExit(AppState::InGame),
+            ));
+        }
+        (None, Ok((e, _))) => commands.entity(e).despawn(),
+        (None, Err(_)) => {}
     }
 }
 
@@ -124,6 +258,10 @@ fn player_rows(
             .and_then(|s| control.map(|c| (c.dropped.contains(&s), c.resigned.contains(&s))));
         let (state, color) = if p.gone {
             ("left".to_string(), GONE)
+        } else if p.away {
+            // Its browser tab is hidden: it plays on (`net::web_tab`),
+            // but nobody is watching.
+            ("tab hidden".to_string(), WAITING)
         } else if waiting.contains(&p.peer) && !p.me {
             ("waiting".to_string(), WAITING)
         } else {
@@ -224,7 +362,7 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         Some(Ended::Left) | None => None,
     };
     if let Some(over) = over {
-        return Some(format!("{over}\nEsc: Leave match"));
+        return Some(format!("{over}\nEsc: Back to room"));
     }
     if status.leaving {
         return Some("Leaving the match…".to_string());
@@ -305,6 +443,7 @@ mod tests {
             me: n == 2,
             ping_ms: ping,
             gone: false,
+            away: false,
         }
     }
 
@@ -329,6 +468,7 @@ mod tests {
     fn player_list_rows() {
         let mut st = status();
         st.peers[2].gone = true;
+        st.peers[3].away = true;
         let mut names = PeerNames::default();
         names.0.insert(PeerId(1), "ada".into());
         let al = Alliances::from_seats([(0, 0), (1, 0), (2, 1)]);
@@ -341,9 +481,37 @@ mod tests {
         assert_eq!(text[1], " 0 A  ada (host)       0 ms");
         assert_eq!(text[2], " 1 A  peer-0002        84 ms");
         assert_eq!(text[3], " 2 E  peer-0003        left  dropped");
-        assert_eq!(text[4], " - S  peer-0004        …");
+        assert_eq!(text[4], " - S  peer-0004        tab hidden");
         assert_eq!(rows[3].color, GONE);
         assert_eq!(rows[2].color, Color::WHITE, "this peer");
+    }
+
+    /// Recent lines fade after [`CHAT_SHOW`]; with the line open, the
+    /// last ones show anyway, with the text being typed under them.
+    #[test]
+    fn chat_shows_recent_lines_and_the_open_line() {
+        use crate::net::chat::ChatLine;
+        let mut log = ChatLog::default();
+        let line = |text: &str| ChatLine {
+            from: PeerId(1),
+            name: "ada".into(),
+            text: text.into(),
+        };
+        log.push(Duration::from_secs(1), line("hi"));
+        log.push(Duration::from_secs(30), line("gg"));
+        let mut input = ChatInput::default();
+        let now = Duration::from_secs(35);
+        assert_eq!(chat_text(&log, &input, now).as_deref(), Some("ada: gg"));
+        input.open = true;
+        input.text = "wp".into();
+        assert_eq!(
+            chat_text(&log, &input, now).as_deref(),
+            Some("ada: hi\nada: gg\nSay: wp_")
+        );
+        assert_eq!(
+            chat_text(&log, &ChatInput::default(), Duration::from_secs(60)),
+            None
+        );
     }
 
     #[test]
@@ -369,7 +537,7 @@ mod tests {
         st.ended = Some(Ended::HostLeft);
         assert_eq!(
             banner_text(&st, &names).as_deref(),
-            Some("The host left — the match is over.\nEsc: Leave match")
+            Some("The host left — the match is over.\nEsc: Back to room")
         );
         st.networked = false;
         assert_eq!(banner_text(&st, &names), None);
