@@ -34,10 +34,14 @@ use super::state::Fnv;
 /// 5 (M2): a `Take` hands over the leaver's packet buffer with its
 /// units; a peer dropping out leaves play ([`SimCommand::Dropped`]);
 /// pause, speed and cheats follow the setup's [`MatchRules`].
+/// 6 (M3, G): the host's speed control ([`SimCommand::InternalSpeed`]
+/// from the server seat); a `SetSpeed` while slowed down takes effect
+/// as Spring's `UserSpeedChange`.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
+/// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 5;
+pub const SIM_VERSION: u32 = 6;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

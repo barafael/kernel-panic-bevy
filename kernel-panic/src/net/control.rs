@@ -21,6 +21,10 @@
 //!   the one place the speed scales the clock (`driver::drive_frame`);
 //!   `Time<Virtual>` stays at 1× (the dev tools' `KP_TIME_SCALE` and the
 //!   recorder still set it, which speeds up everything, UI included).
+//! - `InternalSpeed { percent }` (M3, `net::speed`): the host's speed
+//!   control holds the game below the players' speed while a player's
+//!   machine can't keep up (Spring's lag protection,
+//!   `NETMSG_INTERNAL_SPEED`); [`MatchControl::speed`] is that speed.
 //! - `Pause { on: true }` applies at the head of its tick; that tick
 //!   runs to the end, then **no further tick runs** on any peer. The
 //!   driver keeps sealing while paused; the host files what arrives on
@@ -151,8 +155,14 @@ pub struct DevSpawned(pub Vec<Entity>);
 /// `apply_sim_commands`, the same on every peer.
 #[derive(Resource, Debug, Clone, PartialEq, Eq)]
 pub struct MatchControl {
-    /// Game speed in percent of real time.
+    /// The game speed the players asked for, percent of real time
+    /// (Spring's `wantedSpeedFactor`).
     pub speed_percent: u16,
+    /// The speed the game runs at: [`Self::speed_percent`], or less
+    /// while the host's speed control slows the game for a player that
+    /// can't keep up ([`SimCommand::InternalSpeed`], `net::speed`;
+    /// Spring's `speedFactor`).
+    pub internal_percent: u16,
     /// No tick runs after the one that applied `Pause { on: true }`
     /// until one applies `Pause { on: false }`.
     pub paused: bool,
@@ -172,6 +182,7 @@ impl Default for MatchControl {
     fn default() -> Self {
         Self {
             speed_percent: 100,
+            internal_percent: 100,
             paused: false,
             paused_by: None,
             resigned: BTreeSet::new(),
@@ -182,9 +193,39 @@ impl Default for MatchControl {
 }
 
 impl MatchControl {
-    /// The wall-clock rate the driver paces ticks at (1.0 = 30 Hz).
+    /// The wall-clock rate the driver paces ticks at (1.0 = 30 Hz): the
+    /// internal speed.
     pub fn speed(&self) -> f32 {
+        f32::from(self.internal_percent) / 100.0
+    }
+
+    /// The players' speed, as [`Self::speed`].
+    pub fn wanted_speed(&self) -> f32 {
         f32::from(self.speed_percent) / 100.0
+    }
+
+    /// The speed control holds the game below the players' speed.
+    pub fn slowed(&self) -> bool {
+        self.internal_percent < self.speed_percent
+    }
+
+    /// A player's `SetSpeed` (Spring's `CGameServer::UserSpeedChange`,
+    /// `Net/GameServer.cpp:3084-3093`): the game takes the new speed at
+    /// once when it is lower than the one running, or when nothing
+    /// slows the game; otherwise the speed control raises it step by
+    /// step.
+    pub fn set_wanted(&mut self, percent: u16) {
+        if self.internal_percent > percent || self.internal_percent == self.speed_percent {
+            self.internal_percent = percent;
+        }
+        self.speed_percent = percent;
+    }
+
+    /// The host's speed control (`NETMSG_INTERNAL_SPEED`): never above
+    /// what the players asked for (Spring clamps it before sending,
+    /// `GameServer.cpp:950`; here every peer does so as it applies).
+    pub fn set_internal(&mut self, percent: u16) {
+        self.internal_percent = percent.clamp(MIN_SPEED_PERCENT, self.speed_percent);
     }
 }
 

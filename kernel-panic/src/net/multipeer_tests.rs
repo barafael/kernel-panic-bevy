@@ -40,25 +40,25 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-struct FullPeer {
-    id: PeerId,
+pub(super) struct FullPeer {
+    pub(super) id: PeerId,
     team: u8,
-    h: SimHarness,
+    pub(super) h: SimHarness,
     /// The last bus tick the script ran for.
     scripted: u32,
     /// Still in the match (a peer that left is no longer updated).
-    present: bool,
+    pub(super) present: bool,
 }
 
-struct Room {
-    net: SimNetwork,
-    peers: Vec<FullPeer>,
+pub(super) struct Room {
+    pub(super) net: SimNetwork,
+    pub(super) peers: Vec<FullPeer>,
     teams: Vec<u8>,
     dumps: std::path::PathBuf,
 }
 
 /// `humans` human seats (teams 0..), then `ai` AI seats, on `map`.
-fn scenario(map: &str, humans: u8, ai: u8, seed: u64) -> Scenario {
+pub(super) fn scenario(map: &str, humans: u8, ai: u8, seed: u64) -> Scenario {
     let mut s = Scenario::ai_match(map, humans + ai, 1, seed);
     for (i, seat) in s.seats.iter_mut().enumerate() {
         *seat = PlayerSpec {
@@ -70,7 +70,7 @@ fn scenario(map: &str, humans: u8, ai: u8, seed: u64) -> Scenario {
     s
 }
 
-fn start(scn: &Scenario, seed: u64, link: LinkParams) -> Room {
+pub(super) fn start(scn: &Scenario, seed: u64, link: LinkParams) -> Room {
     let net = SimNetwork::new(seed);
     net.set_default_link(link);
     // Seat `i` is owner `i`.
@@ -104,6 +104,9 @@ fn start(scn: &Scenario, seed: u64, link: LinkParams) -> Room {
                     budget: None,
                     ..CatchUp::default()
                 },
+                // A fast machine whatever this one is: the host's speed
+                // control (`net::speed`) leaves the game at full speed.
+                cost: Some(Duration::from_millis(1)),
                 ..Pacer::default()
             };
             let w = h.world_mut();
@@ -130,7 +133,7 @@ fn start(scn: &Scenario, seed: u64, link: LinkParams) -> Room {
 impl Room {
     /// Run `frames` frames of `dt` on every present peer (in order),
     /// each playing its seat's script; `each` sees the room first.
-    fn run(&mut self, frames: u32, dt: Duration, mut each: impl FnMut(&mut Room, u32)) {
+    pub(super) fn run(&mut self, frames: u32, dt: Duration, mut each: impl FnMut(&mut Room, u32)) {
         let n = self.teams.len() as u8;
         for f in 0..frames {
             self.net.advance(dt);
@@ -154,7 +157,7 @@ impl Room {
         }
     }
 
-    fn trail(&mut self, i: usize) -> Vec<u64> {
+    pub(super) fn trail(&mut self, i: usize) -> Vec<u64> {
         self.peers[i]
             .h
             .world_mut()
@@ -167,7 +170,7 @@ impl Room {
 
     /// Every present peer's trail equals the host's over the common
     /// prefix, and is at least `min` ticks long.
-    fn assert_agree(&mut self, min: usize) -> usize {
+    pub(super) fn assert_agree(&mut self, min: usize) -> usize {
         let host = self.trail(0);
         let mut shortest = host.len();
         for i in 1..self.peers.len() {
@@ -189,16 +192,16 @@ impl Room {
         shortest
     }
 
-    fn status(&mut self, i: usize) -> NetStatus {
+    pub(super) fn status(&mut self, i: usize) -> NetStatus {
         self.peers[i].h.world_mut().resource::<NetStatus>().clone()
     }
 
-    fn session<R>(&mut self, i: usize, f: impl FnOnce(&Session) -> R) -> R {
+    pub(super) fn session<R>(&mut self, i: usize, f: impl FnOnce(&Session) -> R) -> R {
         f(&self.peers[i].h.world_mut().resource::<NetSession>().session)
     }
 
     /// Delay, lateness, round trips and traffic, for the write-up.
-    fn report(&mut self, label: &str) {
+    pub(super) fn report(&mut self, label: &str) {
         let delay = self.session(0, |s| s.delay());
         let late = self.session(0, |s| s.stats.late_batches);
         let rtts: Vec<String> = (1..self.peers.len())

@@ -42,10 +42,16 @@
 //! host leaving (or going silent) ends the match for the guests: no host
 //! migration yet. The host also refuses to sequence what the match rules
 //! forbid ([`Admit`]).
+//!
+//! Speed control (M3, [`super::speed`]): every peer reports its sim load
+//! once a second ([`Session::report_load`]); the host slows the game for
+//! the slowest and speeds it back up ([`Session::protect_speed`]),
+//! sequencing [`SimCommand::InternalSpeed`] as the server.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
+use super::speed::{PeerLoad, SERVER_PLAYER, SpeedControl, SpeedPolicy};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use super::wire::{self, Batch, Echo, InputPacket, Msg, Turn, TurnPacket, TurnRun};
 use super::{CommandFrame, SimCommand};
@@ -128,6 +134,11 @@ pub struct PeerInfo {
     pub ping_ms: Option<u32>,
     /// Left the match (disconnected, timed out).
     pub gone: bool,
+    /// Its sim load, permille of one core at the game speed
+    /// ([`super::speed`]; unknown yet: `None`).
+    pub load_permille: Option<u16>,
+    /// Turns it held without having applied them, at its last report.
+    pub behind: Option<u16>,
 }
 
 /// The bounds of the adaptive input delay, in ticks.
@@ -415,6 +426,10 @@ struct Host {
     last_pings: Option<Duration>,
     /// Commands the rules refused (copied into [`SessionStats`]).
     refused: u64,
+    /// Everyone's load and Spring's lag protection over them.
+    speed: SpeedControl,
+    /// Numbers the speed control's commands in the schedule.
+    server_seq: u32,
 }
 
 impl std::fmt::Debug for Host {
@@ -448,6 +463,9 @@ struct Guest {
     pings: BTreeMap<PeerId, u16>,
     /// Peers the host said left.
     gone: std::collections::BTreeSet<PeerId>,
+    /// Everyone's load and backlog, as the host last told us (permille,
+    /// turns; `u16::MAX`: unknown).
+    loads: BTreeMap<PeerId, (u16, u16)>,
 }
 
 #[derive(Debug)]
@@ -497,6 +515,15 @@ pub struct Session {
 
 fn ms(t: Duration) -> u32 {
     t.as_millis() as u32
+}
+
+/// A load as [`Msg::Load`] carries it (`u16::MAX` stays "unknown").
+fn permille(cpu: f32) -> u16 {
+    (cpu * 1000.0).round().det_clamp(0.0, 65_000.0) as u16
+}
+
+fn clip(n: u32) -> u16 {
+    n.min(65_000) as u16
 }
 
 fn echo(stamp_in: Option<(u32, Duration)>, now: Duration) -> Option<Echo> {
@@ -628,6 +655,7 @@ impl Session {
             .map(|(&peer, &player)| {
                 let host = peer == self.host;
                 let me = peer == self.me;
+                let (load_permille, behind) = self.load_of(peer);
                 let (ping_ms, gone) = match &self.role {
                     Role::Host(h) => match h.links.get(&peer) {
                         Some(l) => (l.rtt.srtt.map(|r| r as u32), l.gone),
@@ -657,9 +685,99 @@ impl Session {
                     me,
                     ping_ms,
                     gone,
+                    load_permille,
+                    behind,
                 }
             })
             .collect()
+    }
+
+    /// `peer`'s last load report (permille) and backlog, if known.
+    fn load_of(&self, peer: PeerId) -> (Option<u16>, Option<u16>) {
+        let known = |v: u16| (v != u16::MAX).then_some(v);
+        match &self.role {
+            Role::Host(h) => h.speed.load(peer).map_or((None, None), |l| {
+                (Some(permille(l.cpu)), Some(clip(l.behind)))
+            }),
+            Role::Guest(g) => g
+                .loads
+                .get(&peer)
+                .map_or((None, None), |&(l, b)| (known(l), known(b))),
+        }
+    }
+
+    /// Host: which load sets the game speed ([`SpeedPolicy`]).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn set_speed_policy(&mut self, policy: SpeedPolicy) {
+        if let Role::Host(h) = &mut self.role {
+            h.speed.policy = policy;
+        }
+    }
+
+    /// This peer's sim load over the last second ([`super::speed`]):
+    /// the host keeps its own, a guest sends it with its backlog.
+    pub fn report_load(&mut self, now: Duration, cpu: f32) {
+        let behind = match &self.role {
+            Role::Host(_) => 0,
+            Role::Guest(g) => g
+                .host_newest
+                .map_or(0, |n| (n + 1).saturating_sub(self.turns.next())),
+        };
+        let me = self.me;
+        match &mut self.role {
+            Role::Host(h) => h.speed.report(
+                me,
+                PeerLoad {
+                    cpu,
+                    behind,
+                    at: now,
+                },
+            ),
+            Role::Guest(g) => {
+                let host = g.host;
+                self.send(
+                    host,
+                    Channel::Unreliable,
+                    Msg::Load {
+                        permille: permille(cpu),
+                        behind: clip(behind),
+                    },
+                );
+            }
+        }
+    }
+
+    /// Host, every frame: Spring's lag protection
+    /// ([`SpeedControl::update`]) over its own load and the seated
+    /// guests' (spectators don't count, `GameServer.cpp:902`), at the
+    /// game's `internal` and `wanted` speed in percent; a new speed goes
+    /// into the next turn as the server's [`SimCommand::InternalSpeed`].
+    /// Nothing while paused (`GameServer.cpp:929`) or before the start.
+    pub fn protect_speed(&mut self, now: Duration, internal: u16, wanted: u16) {
+        let me = self.me;
+        let Role::Host(h) = &mut self.role else {
+            return;
+        };
+        if !h.started || h.paused {
+            return;
+        }
+        let counted: Vec<PeerId> = std::iter::once(me)
+            .chain(
+                h.links
+                    .iter()
+                    .filter(|(_, l)| l.player.is_some() && !l.gone)
+                    .map(|(p, _)| *p),
+            )
+            .collect();
+        if let Some(percent) = h.speed.update(now, counted, internal, wanted) {
+            bevy::log::info!("speed control: game speed {internal} % -> {percent} %");
+            let seq = h.server_seq;
+            h.server_seq += 1;
+            h.scheduled.insert(
+                (h.next_cut, SERVER_PLAYER, seq),
+                vec![SimCommand::InternalSpeed { percent }],
+            );
+        }
     }
 
     pub fn is_host(&self) -> bool {
@@ -1101,6 +1219,17 @@ impl Session {
                 }
                 self.fill(from, tick);
             }
+            Msg::Load { permille, behind } => {
+                if let Some(l) = h.links.get_mut(&from) {
+                    l.last_heard = Some(now);
+                }
+                let load = PeerLoad {
+                    cpu: f32::from(permille) / 1000.0,
+                    behind: u32::from(behind),
+                    at: now,
+                };
+                h.speed.report(from, load);
+            }
             Msg::Hash { frame, hash } => {
                 if let Some(l) = h.links.get_mut(&from) {
                     l.last_heard = Some(now);
@@ -1183,6 +1312,14 @@ impl Session {
                 }
             }
             Msg::Pings { ms } => g.pings = self.roster.keys().copied().zip(ms).collect(),
+            Msg::Loads { permille, behind } => {
+                g.loads = self
+                    .roster
+                    .keys()
+                    .copied()
+                    .zip(permille.into_iter().zip(behind))
+                    .collect();
+            }
             _ => {}
         }
     }
@@ -1296,8 +1433,26 @@ impl Session {
                             None => 0,
                         })
                         .collect();
+                    // And everyone's load (`net::speed`).
+                    let (permille, behind): (Vec<u16>, Vec<u16>) = self
+                        .roster
+                        .keys()
+                        .map(|p| {
+                            h.speed.load(*p).map_or((u16::MAX, u16::MAX), |l| {
+                                (self::permille(l.cpu), clip(l.behind))
+                            })
+                        })
+                        .unzip();
                     for (&peer, _) in h.links.iter().filter(|(_, l)| !l.gone) {
                         out.push((peer, Channel::Unreliable, Msg::Pings { ms: ms.clone() }));
+                        out.push((
+                            peer,
+                            Channel::Unreliable,
+                            Msg::Loads {
+                                permille: permille.clone(),
+                                behind: behind.clone(),
+                            },
+                        ));
                     }
                 }
             }
@@ -1371,13 +1526,16 @@ impl Host {
             dropped: Default::default(),
             last_pings: None,
             refused: 0,
+            speed: SpeedControl::default(),
+            server_seq: 0,
         }
     }
 
     /// File `batch` from `player`: exactly once, in seq order, never in
     /// the past. Returns 1 if it came late.
-    /// A guest's batch (`guest`) may not drop anyone: only the host
-    /// issues `Dropped`.
+    /// A guest's batch (`guest`) may not drop anyone nor set the speed
+    /// control's speed: only the host issues `Dropped` and
+    /// `InternalSpeed`.
     fn accept(&mut self, player: u8, mut batch: Batch, guest: bool) -> u64 {
         let input = self.inputs.entry(player).or_default();
         if batch.seq < input.next_seq || input.held.contains_key(&batch.seq) {
@@ -1385,7 +1543,9 @@ impl Host {
         }
         if guest {
             let before = batch.commands.len();
-            batch.commands.retain(|c| !matches!(c, SimCommand::Dropped));
+            batch
+                .commands
+                .retain(|c| !matches!(c, SimCommand::Dropped | SimCommand::InternalSpeed { .. }));
             self.refused += (before - batch.commands.len()) as u64;
         }
         // The match rules: what they forbid is never sequenced (the

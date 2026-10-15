@@ -870,3 +870,10 @@ context. Most variants animate over their frames at a fixed rate
   same), the result panel has no Restart, a player list at the top right
   shows seat, ally / enemy, name and ping (F9 hides it), and a banner says
   who left, who it is waiting for, a desync, or why the match ended.
+- Speed control (`net-experiments/m3-speed.md`, Spring's lag protection): every
+  player's machine reports how much of a core its simulation needs; when one
+  can't keep up, the host slows the whole game down until it can (every peer on
+  the same tick) and back up to the chosen speed once it recovers. The player
+  list shows each player's CPU load (red from 75 %, blinking for the one holding
+  the game down) and the reduced speed; the line at the top says "Speed 0.50x
+  (slowed from 1.0x: a player can't keep up)".

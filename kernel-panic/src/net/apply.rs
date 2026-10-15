@@ -44,6 +44,9 @@
 //!   command.
 //! - **Cheats** ([`DevCommand`]) only where the match allows them
 //!   ([`cheats_allowed`]).
+//! - **The server** ([`SERVER_PLAYER`], the host's speed control,
+//!   `net::speed`) sends `InternalSpeed` and nothing else; nobody else
+//!   sends `InternalSpeed`.
 //!
 //! Every check reads only replicated state (the seats, the match
 //! control, sim components, the map), so all peers decide alike.
@@ -59,6 +62,7 @@ use bevy::ecs::system::{SystemParam, SystemState};
 use bevy::prelude::*;
 
 use super::control::{MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
+use super::speed::SERVER_PLAYER;
 use super::{
     CommandBus, DevCommand, FactoryOp, MatchControl, NetId, NetIdIndex, NetPos, Order, PointOrder,
     SimCommand,
@@ -103,7 +107,9 @@ pub(crate) fn cheats_allowed(active: Option<&ActiveMatch>) -> bool {
 
 /// The host's [`MatchRules`](super::MatchRules) for one command of
 /// `player`: pauses where the player may pause, speeds inside the
-/// range, cheats where the match allows them. The host asks before it
+/// range, cheats where the match allows them; the speed control's
+/// `InternalSpeed` from the server ([`SERVER_PLAYER`]) and nothing else
+/// from it. The host asks before it
 /// sequences a command (`driver::host_admit`), every peer again when it
 /// applies ([`apply_sim_commands`]), so both refuse the same.
 pub(crate) fn rules_admit(
@@ -111,6 +117,11 @@ pub(crate) fn rules_admit(
     player: u8,
     cmd: &SimCommand,
 ) -> Result<(), Refusal> {
+    // The host's speed control is the server's only command, and only
+    // it sends as the server (`net::speed`).
+    if (player == SERVER_PLAYER) != matches!(cmd, SimCommand::InternalSpeed { .. }) {
+        return Err(Refusal::ServerOnly);
+    }
     let rules = active.map(|m| m.0.rules).unwrap_or_default();
     match cmd {
         SimCommand::Pause { .. } if !rules.may_pause(player) => {
@@ -153,6 +164,9 @@ pub enum Refusal {
     /// Against the host's [`MatchRules`](super::MatchRules): a pause
     /// where pausing is off, a speed outside the match's range.
     Rules(&'static str),
+    /// `InternalSpeed` from a seat, or anything else from
+    /// [`SERVER_PLAYER`].
+    ServerOnly,
 }
 
 /// Command refusals (diagnostics and tests; the sim never reads it).
@@ -228,6 +242,10 @@ impl Rules<'_, '_> {
 
     /// Whether `player` may send anything at all.
     fn admit_player(&self, player: u8) -> Result<(), Refusal> {
+        // The host's own voice (speed control): no seat, never resigns.
+        if player == SERVER_PLAYER {
+            return Ok(());
+        }
         if self
             .active
             .as_ref()
@@ -423,7 +441,7 @@ impl ApplyCtx<'_, '_> {
                     return Err(Refusal::Malformed("factory count"));
                 }
             }
-            SimCommand::SetSpeed { percent }
+            SimCommand::SetSpeed { percent } | SimCommand::InternalSpeed { percent }
                 if !(MIN_SPEED_PERCENT..=MAX_SPEED_PERCENT).contains(percent) =>
             {
                 return Err(Refusal::Malformed("speed out of range"));
@@ -711,7 +729,12 @@ impl ApplyCtx<'_, '_> {
             }
             SimCommand::SetSpeed { percent } => {
                 if let Some(c) = self.rules.control.as_mut() {
-                    c.speed_percent = *percent;
+                    c.set_wanted(*percent);
+                }
+            }
+            SimCommand::InternalSpeed { percent } => {
+                if let Some(c) = self.rules.control.as_mut() {
+                    c.set_internal(*percent);
                 }
             }
             SimCommand::Pause { on } => {
@@ -1023,6 +1046,7 @@ fn command_name(cmd: &SimCommand) -> &'static str {
         SimCommand::Pause { .. } => "Pause",
         SimCommand::Resign => "Resign",
         SimCommand::Dropped => "Dropped",
+        SimCommand::InternalSpeed { .. } => "InternalSpeed",
         SimCommand::Take { .. } => "Take",
         SimCommand::Dev(_) => "Dev",
     }

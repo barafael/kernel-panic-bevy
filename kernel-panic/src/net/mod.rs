@@ -58,6 +58,9 @@ pub mod session;
 mod session_tests;
 #[cfg(test)]
 pub mod sim_net;
+pub mod speed;
+#[cfg(test)]
+mod speed_tests;
 pub mod state;
 pub mod transport;
 pub mod wire;
@@ -347,6 +350,15 @@ pub enum SimCommand {
     /// `Game/Players/PlayerHandler.cpp:66`). Only the host issues it: a
     /// guest's own is refused at sequencing.
     Dropped,
+    // M3.
+    /// The host's speed control (Spring's lag protection,
+    /// `NETMSG_INTERNAL_SPEED`; [`speed`]): the game runs at `percent`
+    /// of real time, at most the players' speed, while a player's
+    /// machine can't keep up. Only from [`speed::SERVER_PLAYER`], whose
+    /// frames carry nothing else.
+    InternalSpeed {
+        percent: u16,
+    },
 }
 
 impl SimCommand {
@@ -399,7 +411,8 @@ impl SimCommand {
             | Resign
             | Dev(_)
             | Take { .. }
-            | Dropped => None,
+            | Dropped
+            | InternalSpeed { .. } => None,
         }
     }
 }

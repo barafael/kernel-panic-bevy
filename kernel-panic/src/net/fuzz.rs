@@ -35,6 +35,7 @@ use strum::VariantArray;
 
 use super::apply::{MAX_BUILD_SITES, MAX_FACTORY_COUNT, Refusals};
 use super::control::{MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
+use super::speed::SERVER_PLAYER;
 use super::{
     CommandBus, CommandFrame, DevCommand, FactoryOp, IdList, MatchControl, NetId, NetPos, Order,
     PointOrder, PosList, SimCommand, Units,
@@ -53,7 +54,8 @@ pub const MAP: &str = "Marble_Madness_Map";
 /// Seats: humans 0 and 1, AI 2 and 3 ([`setup`]).
 const SEATED: [u8; 4] = [0, 1, 2, 3];
 const HUMANS: [u8; 2] = [0, 1];
-/// Senders without a seat (255 is the spectator's team).
+/// Senders without a seat (255 is the spectator's team, and the
+/// server's, which may send nothing but `InternalSpeed`).
 const UNSEATED: [u8; 4] = [4, 9, 200, 255];
 
 /// The fuzz match's setup.
@@ -382,6 +384,16 @@ fn chaos(d: &mut Dice, v: &View, tick: u32) -> Vec<CommandFrame> {
             commands,
         });
     }
+    // The host's speed control, now and then (`net::speed`).
+    if d.chance(2) {
+        frames.push(CommandFrame {
+            tick,
+            player: SERVER_PLAYER,
+            commands: vec![SimCommand::InternalSpeed {
+                percent: MIN_SPEED_PERCENT + d.below(91) as u16,
+            }],
+        });
+    }
     // A frame whose bytes were damaged in transit (or by a cheater) and
     // still decode: delivered as decoded, whatever tick and player it
     // now names.
@@ -471,7 +483,9 @@ fn malformed(
     let own: Vec<NetId> = v.own(player).iter().map(|u| u.id).collect();
     let mut commands = Vec::new();
     for _ in 0..1 + d.below(3) {
-        let (cmd, counts) = match d.below(13) {
+        let (cmd, counts) = match d.below(14) {
+            // Only the server sets the speed control's speed.
+            13 => (SimCommand::InternalSpeed { percent: 50 }, true),
             // Every other seat is an enemy here, and oneself is no ally
             // to take from.
             12 => (
