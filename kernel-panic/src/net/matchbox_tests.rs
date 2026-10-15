@@ -33,6 +33,7 @@ use matchbox_signaling::{
     WsStateMeta,
 };
 
+use super::driver::NetStatus;
 use super::matchbox::{
     LEAVE_GRACE, MatchboxTransport, NetConfig, RELIABLE_QUEUE_BYTES, RoomId, SEND_RATE,
     TransportStats,
@@ -317,6 +318,7 @@ fn signaling_loss_keeps_links() {
         b.poll_peers();
         std::thread::sleep(Duration::from_millis(50));
     }
+    let quiet_since = Instant::now();
     assert_eq!(events, Vec::new(), "B kept talking: still in");
     assert!(heard > 50, "{heard} messages");
     a.send(idb, Channel::Reliable, vec![2]);
@@ -325,9 +327,10 @@ fn signaling_loss_keeps_links() {
         !b.receive(Channel::Reliable).is_empty()
     });
     // B falls silent: gone after the grace period.
-    let silent = wait_for("leave", LEAVE_GRACE * 2, || {
+    wait_for("leave", LEAVE_GRACE * 2, || {
         a.poll_peers().contains(&PeerEvent::Left(idb))
     });
+    let silent = quiet_since.elapsed();
     eprintln!("silent link left after {silent:?}");
     assert!(silent >= LEAVE_GRACE - Duration::from_millis(200));
 }
@@ -364,6 +367,27 @@ struct RealRoom {
     stats: BTreeMap<PeerId, Arc<Mutex<TransportStats>>>,
     /// Wall time the match ran.
     played: Duration,
+    lag: LagStats,
+}
+
+/// How the lockstep pace went, for comparing delay rules.
+#[derive(Default)]
+struct LagStats {
+    /// The host's input delay, summed per round, and the most.
+    delay_sum: u64,
+    rounds: u64,
+    delay_max: u32,
+    /// Per guest: starved since (wall time).
+    starved_since: BTreeMap<PeerId, Instant>,
+    /// Guest stalls of 100 ms or more after the first second, and the
+    /// longest of them.
+    stalls: u32,
+    /// When the long ones ended (s into the match) and how long (ms).
+    stall_log: Vec<(f32, u32)>,
+    start: Option<Instant>,
+    longest: Duration,
+    /// Extra (catch-up) ticks, all guests.
+    extra: u64,
 }
 
 /// Load `humans` full games of the scenario, then open their transports
@@ -383,14 +407,21 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
         .collect();
     let mut rv: Vec<Rendezvous> = (0..n).map(|_| Rendezvous::default()).collect();
     let mut ids: Vec<Option<Vec<PeerId>>> = vec![None; n];
-    let setup = wait_for("room of {n}", Duration::from_secs(30), || {
+    let t0 = Instant::now();
+    while ids.iter().any(Option::is_none) {
         for i in 0..n {
             if ids[i].is_none() {
                 ids[i] = rv[i].poll(&mut ts[i], n - 1);
             }
         }
-        ids.iter().all(Option::is_some)
-    });
+        let seen: Vec<usize> = rv.iter().map(Rendezvous::seen).collect();
+        assert!(
+            t0.elapsed() < Duration::from_secs(60),
+            "room of {n} not complete in 60 s: each sees {seen:?} others"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let setup = t0.elapsed();
     let ids: Vec<Vec<PeerId>> = ids.into_iter().map(Option::unwrap).collect();
     let mut all = ids[0].clone();
     all.sort();
@@ -421,6 +452,7 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
         peers,
         stats,
         played: Duration::ZERO,
+        lag: LagStats::default(),
     }
 }
 
@@ -438,11 +470,42 @@ impl RealRoom {
             for p in &mut self.peers {
                 p.frame(dt);
             }
+            self.observe();
             if let Some(rest) = Duration::from_millis(8).checked_sub(now.elapsed()) {
                 std::thread::sleep(rest);
             }
         }
         self.played += t0.elapsed();
+    }
+
+    fn observe(&mut self) {
+        let lag = &mut self.lag;
+        let delay = self.peers[0].session(|s| s.delay());
+        lag.delay_sum += delay as u64;
+        lag.rounds += 1;
+        lag.delay_max = lag.delay_max.max(delay);
+        let now = Instant::now();
+        let at = (now - *lag.start.get_or_insert(now)).as_secs_f32();
+        // The first second is the start: the guests wait for the host's
+        // first turns, then catch up.
+        let started = at > 1.0;
+        for p in &mut self.peers[1..] {
+            let me = p.me;
+            let st = p.h.world_mut().resource::<NetStatus>().last_frame;
+            if started {
+                lag.extra += st.extra as u64;
+            }
+            if st.starved {
+                lag.starved_since.entry(me).or_insert(now);
+            } else if let Some(since) = lag.starved_since.remove(&me) {
+                let d = now - since;
+                if d >= Duration::from_millis(100) && started {
+                    lag.stalls += 1;
+                    lag.longest = lag.longest.max(d);
+                    lag.stall_log.push((at, d.as_millis() as u32));
+                }
+            }
+        }
     }
 
     /// Every peer's trail equals the host's over their common prefix,
@@ -486,6 +549,23 @@ impl RealRoom {
             ticks as f64 / secs,
             rtts.join(" ")
         );
+        let l = &self.lag;
+        eprintln!(
+            "  delay mean {:.1} max {}; guest stalls >= 100 ms: {}, longest {:.0} ms; catch-up ticks {}",
+            l.delay_sum as f64 / l.rounds.max(1) as f64,
+            l.delay_max,
+            l.stalls,
+            l.longest.as_secs_f64() * 1000.0,
+            l.extra
+        );
+        if !l.stall_log.is_empty() {
+            let log: Vec<String> = l
+                .stall_log
+                .iter()
+                .map(|(at, ms)| format!("{ms} ms at {at:.1} s"))
+                .collect();
+            eprintln!("  stalls: {}", log.join(", "));
+        }
         for peer in self.peers.iter().take(2) {
             let me = peer.me;
             let s = *self.stats[&me].lock().unwrap();
@@ -572,41 +652,175 @@ fn netem_probe() {
     });
     let (ida, idb) = (a.local_id().unwrap(), b.local_id().unwrap());
     let t0 = Instant::now();
-    let stamp = |t0: Instant| {
-        let mut m = vec![0u8; 64];
-        m[..8].copy_from_slice(&(t0.elapsed().as_micros() as u64).to_le_bytes());
-        m
-    };
-    let mut lat: Vec<u64> = Vec::new();
-    let mut sent = 0u64;
+    let us = |t0: Instant| t0.elapsed().as_micros() as u64;
+    // Per direction: send time by seq, arrivals as (seq, time).
+    let mut sent_at: [Vec<u64>; 2] = [Vec::new(), Vec::new()];
+    let mut arrived: [Vec<(u64, u64)>; 2] = [Vec::new(), Vec::new()];
     let mut next = t0;
     while t0.elapsed() < Duration::from_secs(secs) {
         if Instant::now() >= next {
-            a.send(idb, Channel::Unreliable, stamp(t0));
-            b.send(ida, Channel::Unreliable, stamp(t0));
-            sent += 2;
+            for (dir, (from, to)) in [(&mut a, idb), (&mut b, ida)].into_iter().enumerate() {
+                let seq = sent_at[dir].len() as u64;
+                sent_at[dir].push(us(t0));
+                let mut m = vec![0u8; 64];
+                m[..8].copy_from_slice(&seq.to_le_bytes());
+                from.send(to, Channel::Unreliable, m);
+            }
             next += Duration::from_millis(33);
         }
         a.poll_peers();
         b.poll_peers();
-        let now = t0.elapsed().as_micros() as u64;
-        for (_, m) in a
-            .receive(Channel::Unreliable)
-            .into_iter()
-            .chain(b.receive(Channel::Unreliable))
-        {
-            lat.push(now - u64::from_le_bytes(m[..8].try_into().unwrap()));
+        let now = us(t0);
+        for (dir, t) in [(0, &mut b), (1, &mut a)] {
+            for (_, m) in t.receive(Channel::Unreliable) {
+                arrived[dir].push((u64::from_le_bytes(m[..8].try_into().unwrap()), now));
+            }
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    lat.sort_unstable();
-    let q = |p: f64| lat[((lat.len() - 1) as f64 * p) as usize] as f64 / 1000.0;
+    // The last second is still in flight.
+    let cut = |sent: &[u64]| sent.iter().filter(|&&t| t + 1_000_000 < us(t0)).count();
+    let pct = |v: &mut Vec<u64>, p: f64| {
+        v.sort_unstable();
+        v.get(((v.len().max(1) - 1) as f64 * p) as usize)
+            .map_or(0.0, |x| *x as f64 / 1000.0)
+    };
+    let label = std::env::var("KP_NET_LABEL").unwrap_or_default();
+    let (mut lat, mut late_retx, mut eff) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut n_sent, mut missing, mut retx) = (0, 0, 0);
+    for dir in 0..2 {
+        let n = cut(&sent_at[dir]);
+        n_sent += n;
+        let mut first: Vec<Option<u64>> = vec![None; sent_at[dir].len()];
+        let mut newest = None::<u64>;
+        for &(seq, at) in &arrived[dir] {
+            let l = at - sent_at[dir][seq as usize];
+            if newest.is_some_and(|m| seq < m) {
+                // Overtaken by a later packet: the lost one, resent.
+                retx += 1;
+                late_retx.push(l);
+            } else {
+                lat.push(l);
+            }
+            newest = newest.max(Some(seq));
+            first[seq as usize].get_or_insert(at);
+        }
+        // What a stream that repeats unacknowledged content sees: seq k
+        // is known once any packet >= k is in.
+        let mut best = None::<u64>;
+        for k in (0..first.len()).rev() {
+            best = match (best, first[k]) {
+                (Some(x), Some(y)) => Some(x.min(y)),
+                (x, y) => x.or(y),
+            };
+            if k < n {
+                missing += usize::from(first[k].is_none());
+                if let Some(b) = best {
+                    eff.push(b - sent_at[dir][k]);
+                }
+            }
+        }
+    }
+    eprintln!(
+        "{label}: {n_sent} sent, {missing} never arrived, {retx} arrived after a later one \
+         (p50 {:.0} / max {:.0} ms)\n  in order: p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms\n  \
+         newest-known (with repetition): p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms",
+        pct(&mut late_retx, 0.5),
+        pct(&mut late_retx, 1.0),
+        pct(&mut lat, 0.5),
+        pct(&mut lat, 0.95),
+        pct(&mut lat, 0.99),
+        pct(&mut lat, 1.0),
+        pct(&mut eff, 0.5),
+        pct(&mut eff, 0.95),
+        pct(&mut eff, 0.99),
+        pct(&mut eff, 1.0),
+    );
+    // CI's guard against a channel that is reliable after all (each loss
+    // holding up everything behind it): the newest-known delay's p99
+    // within this many ms of its median.
+    if let Some(spread) = std::env::var("KP_NET_PROBE_SPREAD")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+    {
+        let (p50, p99) = (pct(&mut eff, 0.5), pct(&mut eff, 0.99));
+        assert!(
+            p99 - p50 <= spread,
+            "newest-known p99 {p99:.1} ms vs median {p50:.1} ms: packets wait for lost ones"
+        );
+        assert!(missing > 0 || retx > 0, "no loss seen: is netem on?");
+    }
+}
+
+/// What a browser's SCTP (Chromium: dcsctp) does to the unreliable
+/// channel: the browser (`kp_net_probe`) sends a numbered 64-byte packet
+/// every 33 ms, this process counts what arrives and how long the newest
+/// packet in hand goes stale. Run under netem:
+/// `KP_NETEM_TEST=net::matchbox_tests::browser_probe KP_NETPEER_PKG=… scripts/netem-matchbox.sh …`.
+#[test]
+#[ignore = "needs the wasm replay build and Playwright: KP_NETPEER_PKG=<pkg dir>"]
+fn browser_probe() {
+    let pkg = std::env::var("KP_NETPEER_PKG").expect("KP_NETPEER_PKG: the wasm pkg dir");
+    let runtime = std::env::var("KP_NETPEER_RUNTIME").unwrap_or_else(|_| "chromium".into());
+    let secs: u64 = env("KP_NET_SECS", 30);
+    let root = crate::paths::project_root();
+    let out = root.join("target").join(format!("netprobe-{runtime}.txt"));
+    let server = Signaling::start();
+    let room = RoomId::random();
+    let mut child = std::process::Command::new("node")
+        .current_dir(&root)
+        .args([".github/scripts/kp-netpeer.mjs", &runtime, &pkg, "-"])
+        .arg(&server.url)
+        .arg(room.as_str())
+        .args(["probe", "0", "0", "0"])
+        .arg(secs.to_string())
+        .arg(&out)
+        .spawn()
+        .expect("node");
+    let cfg = server.config();
+    let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
+    let mut rv = Rendezvous::default();
+    wait_for("the browser", Duration::from_secs(180), || {
+        rv.poll(&mut t, 1).is_some()
+    });
+    let mut got: Vec<(u64, Instant)> = Vec::new();
+    let status = loop {
+        t.poll_peers();
+        let now = Instant::now();
+        for (_, m) in t.receive(Channel::Unreliable) {
+            got.push((u64::from_le_bytes(m[..8].try_into().unwrap()), now));
+        }
+        if let Some(status) = child.try_wait().expect("node") {
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    assert!(status.success(), "the browser runner failed: {status}");
+    let newest = got.iter().map(|(s, _)| *s).max().unwrap_or(0);
+    let mut seen = vec![false; newest as usize + 1];
+    let (mut late, mut top, mut gaps) = (0, None::<u64>, Vec::new());
+    let mut last_new: Option<Instant> = None;
+    for &(seq, at) in &got {
+        seen[seq as usize] = true;
+        if top.is_some_and(|m| seq < m) {
+            late += 1;
+            continue;
+        }
+        if let Some(l) = last_new {
+            gaps.push((at - l).as_secs_f64() * 1000.0);
+        }
+        last_new = Some(at);
+        top = Some(seq);
+    }
+    gaps.sort_by(f64::total_cmp);
+    let q = |p: f64| gaps[((gaps.len() - 1) as f64 * p) as usize];
     let label = std::env::var("KP_NET_LABEL").unwrap_or_default();
     eprintln!(
-        "{label}: {} of {sent} arrived; one way p50 {:.1} / p95 {:.1} / p99 {:.1} / max {:.1} ms",
-        lat.len(),
+        "{label}: {runtime} sent {}, {} never arrived, {late} arrived after a later one; \
+         newest-in-hand gaps p50 {:.1} / p99 {:.1} / max {:.1} ms",
+        newest + 1,
+        seen.iter().filter(|s| !**s).count(),
         q(0.5),
-        q(0.95),
         q(0.99),
         q(1.0)
     );

@@ -15,6 +15,10 @@
 //   node kp-netpeer.mjs <runtime> <pkg dir> <maps dir> <signaling url> <room>
 //                       <map> <humans> <ai> <seed> <secs> <out.trail>
 //
+// <map> "probe": no match, the transport probe `kp_net_probe` instead
+// (`net::matchbox_tests::browser_probe`); the other arguments but the
+// signaling URL, room and secs are ignored.
+//
 // <runtime>: chromium | firefox | webkit (WebRTC needs a browser; Node
 // has none). Needs the `playwright` package resolvable from the working
 // directory (or NODE_PATH) and the browser installed
@@ -70,6 +74,8 @@ const base = `http://127.0.0.1:${server.address().port}`;
 // that a native webrtc-rs peer may not resolve in a CI container; show
 // the real addresses instead.
 const args = runtime === "chromium" ? ["--disable-features=WebRtcHideLocalIpsWithMdns"] : [];
+// KP_BROWSER_ARGS: more browser flags (space separated), e.g. logging.
+args.push(...(process.env.KP_BROWSER_ARGS ?? "").split(" ").filter((a) => a));
 // KP_BROWSER_PATH: a browser binary of the engine's kind instead of
 // Playwright's own download (e.g. a system Chromium).
 const executablePath = process.env.KP_BROWSER_PATH || undefined;
@@ -85,6 +91,7 @@ try {
     async ([signaling, room, map, humans, ai, seed, secs]) => {
       const kp = await import("/kernel-panic.js");
       await kp.default({ module_or_path: "/kernel-panic_bg.wasm" });
+      if (map === "probe") return await kp.kp_net_probe(signaling, room, secs);
       const bytes = new Uint8Array(await (await fetch("/map.kpmap")).arrayBuffer());
       return await kp.kp_net_peer(signaling, room, map, bytes, humans, ai, seed, secs);
     },

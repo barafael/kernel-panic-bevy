@@ -15,7 +15,11 @@
 //!   for `secs` seconds once the room is full, the browser side of the
 //!   browser↔native test (`.github/scripts/kp-netpeer.mjs`,
 //!   `net::matchbox_tests::browser_peer`); resolves to the trail,
-//!   `<tick> <hash>` per line.
+//!   `<tick> <hash>` per line;
+//! - `kp_net_probe(signaling, room, secs)`: the browser end of the
+//!   transport probe (`net::matchbox_tests::browser_probe`): once one
+//!   other peer is in the room, a 64-byte packet numbered from 0 every
+//!   33 ms on the unreliable channel for `secs` seconds.
 //!
 //! The same harness as native ([`super::replay::play`],
 //! [`super::netplay`]), the map served from an in-memory asset source.
@@ -164,4 +168,49 @@ pub async fn kp_net_peer(
         sleep_ms(4).await;
     }
     Ok(netplay::trail_text(&peer.trail()))
+}
+
+/// The browser end of `net::matchbox_tests::browser_probe`; resolves to
+/// how many packets it sent.
+#[wasm_bindgen]
+pub async fn kp_net_probe(signaling: String, room: String, secs: f64) -> Result<String, JsError> {
+    use crate::net::matchbox::{MatchboxTransport, NetConfig, RoomId};
+    use crate::net::transport::{Channel, Transport};
+    use bevy::platform::time::Instant;
+    use std::time::Duration;
+
+    install_panic_hook();
+    let room: RoomId = room.parse()?;
+    let cfg = NetConfig {
+        signaling,
+        ice: Vec::new(),
+    };
+    let mut t = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
+    let mut rv = netplay::Rendezvous::default();
+    let t0 = Instant::now();
+    let ids = loop {
+        if let Some(ids) = rv.poll(&mut t, 1) {
+            break ids;
+        }
+        if t0.elapsed() > Duration::from_secs(120) {
+            return Err(JsError::new("nobody came"));
+        }
+        sleep_ms(10).await;
+    };
+    let me = t.local_id().expect("an id once connected");
+    let peer = *ids.iter().find(|&&p| p != me).expect("the other peer");
+    let start = Instant::now();
+    let mut seq = 0u64;
+    while start.elapsed().as_secs_f64() < secs {
+        if start.elapsed() >= Duration::from_millis(33 * seq) {
+            let mut m = vec![0u8; 64];
+            m[..8].copy_from_slice(&seq.to_le_bytes());
+            t.send(peer, Channel::Unreliable, m);
+            seq += 1;
+        }
+        t.poll_peers();
+        t.receive(Channel::Unreliable);
+        sleep_ms(2).await;
+    }
+    Ok(format!("{seq} packets sent\n"))
 }

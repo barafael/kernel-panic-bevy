@@ -55,6 +55,11 @@ pub struct Rendezvous {
 }
 
 impl Rendezvous {
+    /// How many others this peer sees.
+    pub fn seen(&self) -> usize {
+        self.present.len()
+    }
+
     /// Take in `t`'s peer events; once this peer has its id and sees
     /// `others` other peers, every id of the room (this one included).
     /// Only peer events are read: whatever arrives meanwhile stays
