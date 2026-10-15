@@ -16,7 +16,7 @@ if [ "${1:-}" = "--no-build" ]; then BUILD=0; shift; fi
 SIZES=("$@")
 [ ${#SIZES[@]} -eq 0 ] && SIZES=(800x600 1280x720 1920x1080 2560x1440 3440x1440)
 if [ $BUILD = 1 ]; then cargo build -p kernel-panic || exit 1; fi
-BIN="${CARGO_TARGET_DIR:-target}/debug/kernel-panic"
+BIN="$(realpath "${CARGO_TARGET_DIR:-target}/debug/kernel-panic")"
 OUT=target/menu-layout
 mkdir -p "$OUT"
 FAIL=0
@@ -30,7 +30,7 @@ for size in "${SIZES[@]}"; do
   # that captured nothing is tried once more.
   for attempt in 1 2; do
     timeout 240 kwin_wayland --virtual --width "$w" --height "$h" --no-lockscreen --no-global-shortcuts \
-      --exit-with-session "env KP_WINDOW=$size KP_MENU_SHOTS=$PWD/$dir KP_MENU_SHOTS_WARMUP=${KP_MENU_SHOTS_WARMUP:-150} $PWD/$BIN" \
+      --exit-with-session "env KP_WINDOW=$size KP_MENU_SHOTS=$PWD/$dir KP_MENU_SHOTS_WARMUP=${KP_MENU_SHOTS_WARMUP:-150} $BIN" \
       > "$dir/stdout.txt" 2>&1
     code=$?
     pages=$(ls "$dir"/*.layout.txt 2>/dev/null | wc -l)

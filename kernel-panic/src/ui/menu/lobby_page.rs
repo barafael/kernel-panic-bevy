@@ -93,8 +93,8 @@ fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom
 
 /// Seat rows start here and step down this much (eight fit above the
 /// member list).
-const SEAT_TOP: f32 = 0.655;
-const SEAT_STEP: f32 = 0.054;
+/// Top edge of the seat table, just under the AI row.
+const SEAT_TOP: f32 = 0.685;
 
 /// Inside a room.
 fn room_view(
@@ -213,10 +213,26 @@ fn room_view(
         cell_label(commands, ai_row, cheats, TEXT_WHITE, size, None);
     }
 
-    // One row per seat.
+    // One row per seat, stacked by layout (rows are as tall as their
+    // text, whatever the window).
+    let (mut node, transform) = anchored(0.04, SEAT_TOP, Anchor::Lt);
+    node.flex_direction = FlexDirection::Column;
+    node.row_gap = Val::Px(size * 0.15);
+    let table = commands.spawn((node, transform, Pickable::IGNORE)).id();
+    commands.entity(root).add_child(table);
     for (i, seat) in room.seats.iter().enumerate() {
-        let y = SEAT_TOP - SEAT_STEP * i as f32;
-        let r = row(commands, root, (0.04, y), Anchor::Lc, size);
+        let r = commands
+            .spawn((
+                Node {
+                    flex_direction: FlexDirection::Row,
+                    align_items: AlignItems::Center,
+                    column_gap: Val::Px(size * 0.4),
+                    ..default()
+                },
+                Pickable::IGNORE,
+            ))
+            .id();
+        commands.entity(table).add_child(r);
         cell_label(
             commands,
             r,
@@ -273,28 +289,6 @@ fn room_view(
             cell_label(commands, r, &team, TEAL, size, narrow);
         }
     }
-    if host {
-        let r = row(commands, root, (0.96, SEAT_TOP), Anchor::Rc, size);
-        cell_button(
-            commands,
-            r,
-            "+ seat",
-            DESC_BLUE,
-            size,
-            None,
-            LobbyAction::AddSeat,
-        );
-        cell_button(
-            commands,
-            r,
-            "- seat",
-            DESC_BLUE,
-            size,
-            None,
-            LobbyAction::RemoveSeat,
-        );
-    }
-
     // Who else is here: spectators, and who cannot play and why.
     let mut lines = Vec::new();
     let spectators: Vec<&str> = room
@@ -330,6 +324,26 @@ fn bottom(commands: &mut Commands, root: Entity, size: f32, l: &Lobby, lobby: &L
     let status = if let Some(why) = l.failure() {
         format!("No connection to the room: {why}")
     } else if l.is_host() {
+        // The seat count next to Start: the seat table may fill the
+        // page's height, and a narrow window has no room beside it.
+        cell_button(
+            commands,
+            r,
+            "+ seat",
+            DESC_BLUE,
+            size,
+            None,
+            LobbyAction::AddSeat,
+        );
+        cell_button(
+            commands,
+            r,
+            "- seat",
+            DESC_BLUE,
+            size,
+            None,
+            LobbyAction::RemoveSeat,
+        );
         cell_button(
             commands,
             r,
