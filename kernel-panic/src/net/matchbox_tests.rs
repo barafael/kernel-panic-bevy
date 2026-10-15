@@ -562,8 +562,14 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
     // under loss (about 3 rooms in 20 at 2-3 %, m2-transport.md); the
     // session ignores those links. The lobby hands out the roster in the
     // game; here every transport is in this process, so read the ids.
+    // matchbox never retries a stalled handshake, so a host link still
+    // missing after attempt `k` × [`MEET_RETRY`] is started afresh: that
+    // guest leaves and joins again under a new id, as [`meet_browser`]
+    // does (the lobby's stuck-room recovery in the game).
     let mut rv: Vec<Rendezvous> = (0..n).map(|_| Rendezvous::default()).collect();
     let t0 = Instant::now();
+    let mut attempt = 1u32;
+    let mut since = Instant::now();
     let all: Vec<PeerId> = loop {
         for i in 0..n {
             rv[i].poll(&mut ts[i], usize::MAX);
@@ -584,11 +590,26 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
             if ready {
                 break all;
             }
+            if since.elapsed() > MEET_RETRY * attempt {
+                for i in (0..n).filter(|&i| i != h) {
+                    let me = ts[i].local_id().unwrap();
+                    if !(rv[i].sees(host) && rv[h].sees(me)) {
+                        eprintln!(
+                            "attempt {attempt}: no link between {me} and the host: rejoining"
+                        );
+                        ts[i] = MatchboxTransport::open(&url, &cfg);
+                        rv[i] = Rendezvous::default();
+                    }
+                }
+                attempt += 1;
+                since = Instant::now();
+            }
         }
         let seen: Vec<usize> = rv.iter().map(Rendezvous::seen).collect();
         assert!(
-            t0.elapsed() < Duration::from_secs(60),
-            "room of {n}: host links not up in 60 s; each sees {seen:?} others"
+            t0.elapsed() < Duration::from_secs(90),
+            "room of {n}: host links not up in 90 s ({attempt} attempts); \
+             each sees {seen:?} others"
         );
         std::thread::sleep(Duration::from_millis(5));
     };
