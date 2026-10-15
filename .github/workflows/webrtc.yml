@@ -9,7 +9,8 @@ name: WebRTC
 #   process, in-process signaling server) under emulated latency,
 #   jitter and loss on `lo` (`scripts/netem-matchbox.sh --sudo`; Ubuntu
 #   runners refuse the unprivileged `unshare -rn` the script uses
-#   locally). The trails must agree.
+#   locally). The trails must agree. Then the transport alone: lost
+#   packets must not hold up the ones behind them (`netem_probe`).
 # - browser: the wasm build (`--features replay`, as determinism.yml
 #   builds it) in headless Chromium plays one peer, a native peer the
 #   other, through the local signaling server
@@ -59,6 +60,14 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - uses: ./.github/actions/bake-maps
       - name: 4 peers under netem
+        run: scripts/netem-matchbox.sh --sudo "${{ matrix.netem }}"
+      # The unreliable channel must not wait for lost packets (the
+      # vendor/webrtc-data patch): the newest packet in hand stays within
+      # 60 ms of the median one-way delay at p99.
+      - name: Transport probe under netem
+        env:
+          KP_NETEM_TEST: net::matchbox_tests::netem_probe
+          KP_NET_PROBE_SPREAD: 60
         run: scripts/netem-matchbox.sh --sudo "${{ matrix.netem }}"
 
   browser:

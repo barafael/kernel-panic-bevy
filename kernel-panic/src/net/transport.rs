@@ -5,7 +5,7 @@
 //!   hashes, desync announcements, turn gap fills. Under loss it stalls
 //!   for a retransmission timeout (webrtc-rs SCTP: 1 s minimum), so
 //!   nothing the tick rate waits on travels here.
-//! - **Unreliable** (unordered, no retransmission): the turn stream and
+//! - **Unreliable** (unordered, may lose): the turn stream and
 //!   the guests' command batches, each packet repeating what the other
 //!   side has not acknowledged yet (`net-experiments/x-transport.md` §4).
 //!

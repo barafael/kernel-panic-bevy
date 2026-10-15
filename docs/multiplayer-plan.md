@@ -272,8 +272,13 @@ data channels live on). `Transport::failure()` reports an unreachable server. Te
 8-peer full-sim matches over localhost WebRTC (in-process signaling server with
 `matchbox_server`'s race-free rooms), netem (`scripts/netem-matchbox.sh`, CI with `sudo tc`),
 and a wasm peer in headless Chromium against a native peer — identical trails (897 ticks).
-Finding: webrtc-rs's unreliable channel retransmits and stalls 100–300 ms on loss, which pins
-M1's max-based input delay at its 15-tick cap under any loss (M3).
+Finding and fix: webrtc-rs never applied a negotiated data channel's reliability parameters,
+so matchbox's unreliable channel was reliable and ordered and stalled 100 ms–1 s behind every
+loss (input delay pinned at 15 ticks); patched in `vendor/webrtc-data` (`[patch.crates-io]`,
+upstream it). The channel uses `max_retransmits` 2 (with 0, webrtc-rs and Chromium abandon
+chunks still in flight and lose 10–37 % under jitter), and the input delay follows the 95th
+percentile of 4 s of needs instead of the 2-s maximum. At RTT 100 ms / 2 % loss: delay 6 instead
+of 14, guest stalls 0 instead of 60 in 40 s (`m2-transport.md` §7).
 
 **Lobby (agent E) — done** (`net-experiments/m2-lobby.md`): `net::lobby` on any
 `Transport`: host = lowest compatible `PeerId`, re-elected in the lobby (a new

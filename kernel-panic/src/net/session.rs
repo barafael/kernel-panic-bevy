@@ -240,10 +240,22 @@ impl Rtt {
 /// clock has meanwhile reached `next_cut`. `next_cut - tick` is the
 /// delay a command sealed at that moment needed to arrive in time: the
 /// round trip, the guest's turn backlog and this packet's jitter, all
-/// measured at once. The delay follows the worst need of the last
-/// [`Self::WINDOW`] plus one tick of margin, rising at once and falling
-/// one tick per [`Self::LOWER_HOLD`] of a lower target (hysteresis: a
-/// route that flaps does not drag the delay up and down).
+/// measured at once. The delay follows the typical need: the
+/// [`Self::QUANTILE`] of the needs of the last [`Self::WINDOW`] (every
+/// guest's samples pooled), plus one tick of margin, rising at once and
+/// falling one tick per [`Self::LOWER_HOLD`] of a lower target
+/// (hysteresis: a route that flaps does not drag the delay up and
+/// down).
+///
+/// Not the worst need: one packet held up by a loss (a WebRTC data
+/// channel repairs it in 100–300 ms, or a 1 s retransmission timeout)
+/// would set the delay for everyone for the whole window, and on a
+/// lossy link that is always. The rare command that misses its tick is
+/// filed into the next turn instead (a late batch, still applied on
+/// every peer alike); `net-experiments/m2-transport.md` §7 measured both
+/// rules. A guest that lags for good shows in its share of the samples
+/// (1/7 at 4v4, above the 5 % the quantile leaves out) within about a
+/// second.
 #[derive(Clone, Debug)]
 pub struct DelayController {
     bounds: DelayBounds,
@@ -253,9 +265,11 @@ pub struct DelayController {
 }
 
 impl DelayController {
-    const WINDOW: Duration = Duration::from_secs(2);
+    const WINDOW: Duration = Duration::from_secs(4);
     const LOWER_HOLD: Duration = Duration::from_secs(2);
     const MARGIN: u32 = 1;
+    /// Share of the window's needs the delay covers.
+    const QUANTILE: f64 = 0.95;
 
     pub fn new(bounds: DelayBounds) -> Self {
         Self {
@@ -279,10 +293,13 @@ impl DelayController {
         {
             self.samples.pop_front();
         }
-        let Some(worst) = self.samples.iter().map(|(_, n)| *n).max() else {
+        if self.samples.is_empty() {
             return self.delay;
-        };
-        let target = (worst + Self::MARGIN).clamp(self.bounds.min, self.bounds.max);
+        }
+        let mut needs: Vec<u32> = self.samples.iter().map(|(_, n)| *n).collect();
+        let k = ((needs.len() - 1) as f64 * Self::QUANTILE).ceil() as usize;
+        let (_, typical, _) = needs.select_nth_unstable(k);
+        let target = (*typical + Self::MARGIN).clamp(self.bounds.min, self.bounds.max);
         if target > self.delay {
             self.delay = target;
             self.below_since = None;
@@ -1465,19 +1482,60 @@ mod tests {
 
     #[test]
     fn the_delay_rises_at_once_and_falls_slowly() {
-        let s = Duration::from_secs;
+        let ms = Duration::from_millis;
         let mut c = DelayController::new(DelayBounds::default());
-        assert_eq!(c.update(s(0)), 3, "no samples: the initial delay");
-        c.sample(s(0), 6);
-        assert_eq!(c.update(s(0)), 7, "need + 1 margin, at once");
-        c.sample(s(1), 1);
-        assert_eq!(c.update(s(1)), 7, "the window still holds the 6");
-        for t in 3..=20 {
-            c.sample(s(t), 1);
-            c.update(s(t));
+        assert_eq!(c.update(ms(0)), 3, "no samples: the initial delay");
+        c.sample(ms(0), 6);
+        assert_eq!(c.update(ms(0)), 7, "need + 1 margin, at once");
+        // 30 samples a second of need 1: the window (4 s) still holds
+        // the 6s until they are a twentieth of it.
+        let mut t = 0;
+        for _ in 0..30 {
+            t += 33;
+            c.sample(ms(t), 1);
+        }
+        assert_eq!(c.update(ms(t)), 7, "6 is still above the 95th percentile");
+        while t < 20_000 {
+            t += 33;
+            c.sample(ms(t), 1);
+            c.update(ms(t));
         }
         assert_eq!(c.delay(), 2, "down one per hold, to need + 1");
-        c.sample(s(21), 40);
-        assert_eq!(c.update(s(21)), 15, "bounded");
+        for _ in 0..30 {
+            t += 33;
+            c.sample(ms(t), 40);
+        }
+        assert_eq!(c.update(ms(t)), 15, "bounded");
+    }
+
+    /// A rare spike (a packet held up by a repaired loss) leaves the
+    /// delay alone; a guest that lags all the time moves it, even as one
+    /// of seven.
+    #[test]
+    fn the_delay_follows_the_typical_need() {
+        let ms = Duration::from_millis;
+        let mut c = DelayController::new(DelayBounds::default());
+        let mut t = 0;
+        // Seven guests, 30 packets a second each, needing 3; one in 50
+        // packets 12 ticks late.
+        for i in 0..7 * 30 * 10u64 {
+            t = i * 33 / 7;
+            c.sample(ms(t), if i % 50 == 49 { 15 } else { 3 });
+            c.update(ms(t));
+        }
+        assert_eq!(c.delay(), 4, "the spikes are 2 %: need 3 + 1");
+        // Now guest 0 needs 9 on every packet.
+        let start = t;
+        let mut rose = None;
+        for i in 0..7 * 30 * 5u64 {
+            t = start + i * 33 / 7;
+            c.sample(ms(t), if i % 7 == 0 { 9 } else { 3 });
+            if c.update(ms(t)) == 10 && rose.is_none() {
+                rose = Some(t - start);
+            }
+        }
+        let rose = rose.expect("the lagging guest moved the delay");
+        assert!(rose < 1500, "within {rose} ms");
+        assert_eq!(c.delay(), 10);
     }
 }
