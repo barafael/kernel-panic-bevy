@@ -34,6 +34,7 @@ use bevy::prelude::*;
 
 use crate::game_setup::{ActiveMatch, AiDifficulty, GameSetup, SPECTATOR_TEAM};
 use crate::net::driver::{NetSession, NextNetMatch};
+use crate::net::replay_log::NextReplay;
 use crate::sim::MatchSeed;
 use crate::units::ai::AiSeats;
 use crate::units::lifecycle::game_over::GameState;
@@ -88,16 +89,22 @@ fn reset_resource<R: Resource + FromWorld>(world: &mut World) {
 /// the swap, after the old world's entities are gone (despawn hooks
 /// and observers may still have written to the old tallies).
 pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
+    // The match that ends keeps its replay (`net::replay_log`), from its
+    // session's turn log, before the resets below drop it.
+    crate::net::replay_log::finish_match(world);
     // The seed first: the resets below seed the match's random streams
     // (the AI's dice, `SimRng`) from it.
     world.insert_resource(MatchSeed(setup.seed));
-    // A networked match the lobby started waits for its own swap: the
-    // attract demo's load, landing first, must not take it (the session
-    // resets below would).
-    let waiting = if setup.demo {
-        world.remove_resource::<NextNetMatch>()
+    // A networked match the lobby started (or a replay the Replays page
+    // opened) waits for its own swap: the attract demo's load, landing
+    // first, must not take it (the session resets below would).
+    let (waiting, replay) = if setup.demo {
+        (
+            world.remove_resource::<NextNetMatch>(),
+            world.remove_resource::<NextReplay>(),
+        )
     } else {
-        None
+        (None, None)
     };
     let resets: Vec<ResetFn> = world
         .get_resource::<MatchResources>()
@@ -109,6 +116,9 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     if let Some(next) = waiting {
         world.insert_resource(next);
     }
+    if let Some(next) = replay {
+        world.insert_resource(next);
+    }
 
     // The human seat (its owner: seat `i` is owner `i`) drives input,
     // the result panel and the fog/cloak perspective; with no human
@@ -116,9 +126,10 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     // In a networked match it is the seat the session's roster gives
     // this peer (a spectator has none). The difficulty the menu picked
     // drives the AI.
+    // A replay's viewer watches.
     let networked = world
         .get_resource::<NetSession>()
-        .filter(|n| n.session.is_networked())
+        .filter(|n| n.session.is_networked() || n.session.is_replay())
         .map(|n| n.session.player());
     let local_team = match networked {
         Some(seat) => seat.unwrap_or(SPECTATOR_TEAM),

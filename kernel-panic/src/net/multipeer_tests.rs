@@ -589,6 +589,16 @@ fn drops_full_sim() {
         seat.ally_team = u8::from(i >= 2);
     }
     let mut r = start(&scn, 0xd209, LinkParams::latency_ms(35));
+    // The crash is dropped at once: no grace for a return (M3).
+    r.peers[0]
+        .h
+        .world_mut()
+        .resource_mut::<NetSession>()
+        .session
+        .set_timeouts(super::session::Timeouts {
+            rejoin: Duration::ZERO,
+            ..Default::default()
+        });
     let mut closed_at = 0;
     r.run(30 * 9, Duration::from_micros(33_333), |r, f| {
         if f == 60 {

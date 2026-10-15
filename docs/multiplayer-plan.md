@@ -330,6 +330,27 @@ in-process `SimNetwork` per room code); the page shows `Transport::failure`. A d
 - Spectators (receive the turn stream, never send), replay files and a replay
   viewer.
 
+**Turn log (agent H) — done** (`net-experiments/m3-turn-log.md`): the host keeps
+every turn of the match. Seats belong to a `PlayerKey` (random; per browser tab in
+`sessionStorage`, so a reload keeps it; per process natively, `KP_PLAYER_KEY`), sent
+in the lobby `Hello`. A newcomer's `Hello` reaches the running host's session, which
+answers `LobbyMsg::Running` (the `Start` with the roster as it is now): the seat's
+key gets the seat back (the old connection leaves the roster), any other watches;
+`Msg::Joined` tells the guests. The newcomer loads the match and replays the whole
+log, fetched by gap fills from tick 0, fast-forwarding (250 ms of ticks per drawn
+frame) until live. **Decision:** a disconnect is dropped after a 30 s grace
+(`Timeouts::rejoin`; a silence timeout drops at once): back within it, nothing is
+sequenced; after it, the host sequences `SimCommand::Returned` (index 21) after the
+`Dropped`, and every peer puts the seat back in play if its side is still in it,
+its units are its own and the match is undecided — else the player watches (Spring
+reconnects a player to its team, `CGameServer::BindConnection`). Every match is
+recorded (`.kpreplay` format 4, + names): natively `replays/`, on the web a
+download; main menu → Replays plays one through a replay `Session` with pause and
+0.25–16× (a bar at the top; Esc → Restart starts over). `SIM_VERSION` 6, wire 3,
+lobby 2; goldens re-recorded. Tests: rejoin within the grace and after the drop, a
+watcher (protocol level), `rejoin_full_sim` (4 full apps: drop, return, watcher, all
+trails identical from tick 1, the host's recording replays to its trail).
+
 ### Later
 
 TURN deployment, host migration, snapshot rejoin, reconnect polish (omdurman's

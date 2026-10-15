@@ -13,6 +13,7 @@
 //! | [`Msg::Desync`] — mismatch found, where to stop | host → all | reliable |
 //! | [`Msg::Left`] — a guest left (to the guest itself: it was dropped) | host → all | reliable |
 //! | [`Msg::Pings`] — every guest's round trip, for the player list | host → all | unreliable, 1/s |
+//! | [`Msg::Joined`] — a late joiner (rejoining player or spectator) is in | host → all | reliable |
 //!
 //! Both unreliable streams repeat what the other side has not
 //! acknowledged, so a lost packet costs one packet interval, not a
@@ -25,8 +26,8 @@ use super::transport::{MAX_MESSAGE, PeerId};
 
 /// Bumped whenever a message changes shape. Peers with another version
 /// ignore each other's messages (the M2 handshake refuses them first).
-/// 2 (M2): [`Msg::Pings`].
-pub const WIRE_VERSION: u16 = 2;
+/// 2 (M2): [`Msg::Pings`]. 3 (M3): [`Msg::Joined`].
+pub const WIRE_VERSION: u16 = 3;
 
 /// One player's commands of one turn, in issue order.
 pub type PlayerCommands = (u8, Vec<SimCommand>);
@@ -146,6 +147,17 @@ pub enum Msg {
     /// order, ms (the host: 0; `u16::MAX`: gone, or not measured yet).
     Pings {
         ms: Vec<u16>,
+    },
+    // M3.
+    /// `peer` joined the running match (`net::rejoin`): on `player`'s
+    /// seat (a returning player; `replaces` is its previous connection,
+    /// which leaves the roster) or watching (`None`). Every guest updates
+    /// its roster, so the [`Msg::Pings`] order stays the host's.
+    Joined {
+        peer: PeerId,
+        player: Option<u8>,
+        replaces: Option<PeerId>,
+        name: String,
     },
 }
 

@@ -49,6 +49,7 @@ use crate::units::components::{Faction, Homebase, TeamId, UnitType};
 use crate::units::lifecycle::game_over::GameState;
 
 mod lobby_page;
+mod replays_page;
 
 pub struct MenuPlugin;
 
@@ -64,6 +65,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<DemoDirector>()
             .init_resource::<AttractCamera>()
             .init_resource::<MenuFocus>()
+            .add_plugins(replays_page::ReplaysPagePlugin)
             // The Settings page's frame-rate readout.
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_message::<MenuActionMessage>()
@@ -141,6 +143,8 @@ pub(crate) enum MenuPage {
     Audio,
     /// Open or join a room, then the room itself (`net::lobby`).
     Multiplayer,
+    /// The recorded matches (`net::replay_log`).
+    Replays,
 }
 
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
@@ -253,6 +257,8 @@ enum MenuAction {
     Music(MusicControl),
     /// The Multiplayer page: handed to the lobby (`net::lobby`).
     Lobby(crate::net::lobby::LobbyAction),
+    /// The Replays page.
+    Replays(replays_page::ReplaysAction),
 }
 
 // ---------------------------------------------------------------------------
@@ -686,6 +692,7 @@ struct MenuFlow<'w> {
     music: MessageWriter<'w, MusicControl>,
     bus: Option<ResMut<'w, crate::net::CommandBus>>,
     lobby: MessageWriter<'w, crate::net::lobby::LobbyAction>,
+    replays: MessageWriter<'w, replays_page::ReplaysAction>,
 }
 
 /// Leaving a networked match: what "Leave match" (and the menu, from a
@@ -786,6 +793,13 @@ fn handle_menu_actions(
                 flow.app_state.set(AppState::InGame);
             }
             MenuAction::Restart => {
+                // A replay starts over (`net::replay_log`).
+                if let Some(view) = net.net.as_ref().and_then(|n| n.viewing.clone()) {
+                    commands.insert_resource(crate::net::replay_log::NextReplay {
+                        replay: view.replay,
+                        name: view.name,
+                    });
+                }
                 flow.run_game.write(RunGame);
                 overlays.close_all();
             }
@@ -887,6 +901,9 @@ fn handle_menu_actions(
             }
             MenuAction::Lobby(action) => {
                 flow.lobby.write(action);
+            }
+            MenuAction::Replays(action) => {
+                flow.replays.write(action);
             }
         }
     }
@@ -1147,6 +1164,8 @@ struct LaunchMenuInputs<'w> {
     music_catalog: Res<'w, MusicCatalog>,
     /// The Multiplayer page's room.
     lobby: Res<'w, crate::net::lobby::LobbyRoom>,
+    /// The Replays page's list.
+    shelf: Res<'w, replays_page::ReplayShelf>,
 }
 
 fn maintain_launch_menu(
@@ -1166,6 +1185,7 @@ fn maintain_launch_menu(
         music,
         music_catalog,
         lobby,
+        shelf,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings, the
@@ -1174,7 +1194,8 @@ fn maintain_launch_menu(
         || settings.render.is_changed()
         || readme.is_changed()
         || demo.as_ref().is_some_and(|d| d.is_changed())
-        || (*page == MenuPage::Multiplayer && lobby.is_changed());
+        || (*page == MenuPage::Multiplayer && lobby.is_changed())
+        || (*page == MenuPage::Replays && shelf.is_changed());
     if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
         return;
     }
@@ -1229,6 +1250,7 @@ fn maintain_launch_menu(
         MenuPage::Multiplayer => {
             lobby_page::multiplayer_page(&mut commands, root, (window.width(), page_size), lobby)
         }
+        MenuPage::Replays => replays_page::replays_page(&mut commands, root, page_size, shelf),
     }
 }
 
@@ -1268,6 +1290,7 @@ fn main_menu_page(
             BUTTON_GREEN,
             MenuAction::Goto(MenuPage::Multiplayer),
         ),
+        ("Replays", BUTTON_GREEN, MenuAction::Goto(MenuPage::Replays)),
         ("Showcase", EASY_CYAN, MenuAction::Goto(MenuPage::Showcase)),
         ("Credits", BUTTON_GREEN, MenuAction::Goto(MenuPage::Credits)),
         ("Readme", BUTTON_GREEN, MenuAction::Goto(MenuPage::Readme)),
@@ -1280,7 +1303,8 @@ fn main_menu_page(
     if !cfg!(target_arch = "wasm32") {
         entries.push(("Quit", BUTTON_GREEN, MenuAction::Quit));
     }
-    // 10 % apart, closer when eight plates must fit above y=10 %.
+    // 10 % apart, closer when eight or nine plates must fit above
+    // y=10 %.
     let step = (0.6 / (entries.len() - 1) as f32).det_min(0.1);
     for (i, (name, color, action)) in entries.into_iter().enumerate() {
         let y = 0.7 - step * i as f32;

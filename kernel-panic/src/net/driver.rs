@@ -39,6 +39,15 @@
 //!   leaves, is lost or drops us, or when the player leaves
 //!   ([`NetSession::request_leave`]: the resignation goes out first,
 //!   then the transport closes). [`NetStatus`] tells the UI all of it.
+//! - **Joining late** (M3, [`super::rejoin`]): a session that starts in
+//!   a running match fast-forwards ([`Pacer::fast_forward`]): as many
+//!   turns per frame as a quarter second of wall time allows, until it
+//!   holds no more than its normal backlog — the sim replays the match
+//!   headless-fast, a frame drawn every quarter second.
+//! - **Replays** ([`super::replay_log`]): a replay session plays one
+//!   turn per tick of the clock, never catching up; the viewer's own
+//!   pause and speed ([`Pacer::hold`], [`Pacer::rate`]) act on the
+//!   clock only, never on the sim.
 
 use std::time::Duration;
 
@@ -108,14 +117,56 @@ impl Default for CatchUp {
     }
 }
 
+impl CatchUp {
+    /// A replay holds every turn from the start: one per tick of the
+    /// clock, never more.
+    pub fn replay() -> Self {
+        Self {
+            target_backlog: usize::MAX,
+            max_extra: 0,
+            budget: None,
+        }
+    }
+}
+
+/// Wall time a fast-forwarding frame may spend on ticks: the screen
+/// still updates four times a second.
+pub const FAST_FORWARD_BUDGET: Duration = Duration::from_millis(250);
+
 /// The frame clock: game time not yet turned into ticks.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Pacer {
     pub acc: Duration,
     pub catch_up: CatchUp,
     /// Waiting since: for a turn (guest), for every guest to show up
     /// (host, before the first tick).
     pub starved_since: Option<Duration>,
+    /// Joining a running match: run the turns in hand as fast as
+    /// [`FAST_FORWARD_BUDGET`] allows (no limit when the catch-up has
+    /// no budget: tests), until no more than the normal backlog is
+    /// left. Spring's reconnecting client the same: it simulates the
+    /// frames it was sent as fast as it can, drawing at least
+    /// `MinDrawFPS` (2) frames a second (`CGame::GetNetMessageProcessingTimeLimit`,
+    /// `rts/Net/NetCommands.cpp:245-256`; `System/GlobalConfig.cpp:71-72`).
+    pub fast_forward: bool,
+    /// The viewer's speed of a replay (1.0: the recorded speed). Scales
+    /// the clock only: the recorded speed commands still apply.
+    pub rate: f32,
+    /// The viewer paused a replay: no tick runs.
+    pub hold: bool,
+}
+
+impl Default for Pacer {
+    fn default() -> Self {
+        Self {
+            acc: Duration::ZERO,
+            catch_up: CatchUp::default(),
+            starved_since: None,
+            fast_forward: false,
+            rate: 1.0,
+            hold: false,
+        }
+    }
 }
 
 /// What one frame did.
@@ -164,11 +215,17 @@ pub fn drive_frame(
         // The match clock starts once everyone is here.
         p.acc = Duration::ZERO;
         p.starved_since.get_or_insert(now);
-    } else if !s.halted() && !speed.paused {
-        p.acc += delta.mul_f64(speed.factor.det_max(0.0) as f64);
+    } else if !s.halted() && !speed.paused && !p.hold {
+        p.acc += delta.mul_f64(speed.factor.det_max(0.0) as f64 * p.rate.det_max(0.0) as f64);
     }
-    let t0 = p.catch_up.budget.map(|_| Instant::now());
-    while !s.halted() {
+    // Joining late: no cap on the extra ticks but wall time.
+    let (max_extra, budget) = if p.fast_forward {
+        (u32::MAX, p.catch_up.budget.map(|_| FAST_FORWARD_BUDGET))
+    } else {
+        (p.catch_up.max_extra, p.catch_up.budget)
+    };
+    let t0 = budget.map(|_| Instant::now());
+    while !s.halted() && !p.hold {
         let paused = r.speed().paused;
         if s.is_host() {
             if !s.started() {
@@ -202,11 +259,8 @@ pub fn drive_frame(
             run_one(s, r, now);
             rep.paced += 1;
         } else if ready > p.catch_up.target_backlog
-            && rep.extra < p.catch_up.max_extra
-            && p.catch_up
-                .budget
-                .zip(t0)
-                .is_none_or(|(b, t0)| t0.elapsed() < b)
+            && rep.extra < max_extra
+            && budget.zip(t0).is_none_or(|(b, t0)| t0.elapsed() < b)
         {
             run_one(s, r, now);
             rep.extra += 1;
@@ -228,6 +282,16 @@ pub fn drive_frame(
         p.starved_since.get_or_insert(now);
     } else if rep.paced + rep.extra > 0 {
         p.starved_since = None;
+    }
+    // Live once the turns in hand are the normal backlog, and the host
+    // has nothing newer.
+    if p.fast_forward
+        && s.ready() <= p.catch_up.target_backlog
+        && s.host_newest()
+            .is_some_and(|n| s.applied() + 1 + p.catch_up.target_backlog as u32 > n)
+    {
+        p.fast_forward = false;
+        info!("caught up with the match at tick {}", s.applied());
     }
     if s.halted()
         && let Some(d) = s.desync().filter(|d| !d.dumped).cloned()
@@ -280,6 +344,10 @@ pub struct NetSession {
     leave: Option<Option<Duration>>,
     /// Recent notices, oldest first.
     notices: Vec<(Duration, Notice)>,
+    /// The match's replay was kept (`replay_log::finish_match`).
+    pub replay_kept: bool,
+    /// Playing a replay: what the viewer shows about it.
+    pub viewing: Option<super::replay_log::ReplayView>,
 }
 
 impl NetSession {
@@ -290,7 +358,39 @@ impl NetSession {
             seated: false,
             leave: None,
             notices: Vec::new(),
+            replay_kept: false,
+            viewing: None,
         }
+    }
+
+    /// The session a lobby's [`NextNetMatch`] describes: a match from its
+    /// start, or (`join`) a running one, entered late; the host gets
+    /// the door for late joiners.
+    pub fn from_next(next: NextNetMatch) -> Self {
+        let session = match &next.join {
+            Some((host, gone)) => Session::late(next.config, *host, gone, next.transport),
+            None => Session::networked(next.config, next.transport),
+        };
+        let mut s = Self::new(session);
+        if let Some(door) = next.door {
+            s.session.set_door(door);
+        }
+        s.pacer.catch_up = next.catch_up;
+        s.pacer.fast_forward = next.join.is_some();
+        s
+    }
+
+    /// A replay played back ([`super::replay_log`]).
+    pub fn from_replay(next: super::replay_log::NextReplay) -> Self {
+        let r = next.replay;
+        let mut s = Self::new(Session::replay(&r.frames, r.ticks));
+        s.pacer.catch_up = CatchUp::replay();
+        s.viewing = Some(super::replay_log::ReplayView {
+            name: next.name,
+            map_hash: r.compat.map_hash,
+            replay: r,
+        });
+        s
     }
 
     /// Leave the match ("Leave match", or the menu from a networked
@@ -315,6 +415,10 @@ impl NetSession {
 pub enum Notice {
     Left(PeerId),
     TimedOut(PeerId),
+    /// Back on its seat.
+    Returned(PeerId),
+    /// Joined the running match to watch (or on a seat nobody had).
+    Joined(PeerId),
 }
 
 /// Display names of the peers (the lobby fills it; the player list
@@ -333,12 +437,11 @@ impl PeerNames {
 
 impl FromWorld for NetSession {
     fn from_world(world: &mut World) -> Self {
+        if let Some(next) = world.remove_resource::<super::replay_log::NextReplay>() {
+            return Self::from_replay(next);
+        }
         match world.remove_resource::<NextNetMatch>() {
-            Some(next) => {
-                let mut s = Self::new(Session::networked(next.config, next.transport));
-                s.pacer.catch_up = next.catch_up;
-                s
-            }
+            Some(next) => Self::from_next(next),
             None => Self::new(Session::solo()),
         }
     }
@@ -351,6 +454,11 @@ pub struct NextNetMatch {
     pub config: SessionConfig,
     pub transport: Box<dyn Transport>,
     pub catch_up: CatchUp,
+    /// M3: joining a running match ([`Session::late`]): its host and
+    /// the peers that already left.
+    pub join: Option<(PeerId, Vec<PeerId>)>,
+    /// M3, host: what lets late joiners in ([`Session::set_door`]).
+    pub door: Option<super::rejoin::Door>,
 }
 
 /// Where desync dumps go (native). Default: `desync-dumps/` in the
@@ -385,8 +493,24 @@ pub struct NetStatus {
     pub closed: bool,
     /// Who came and went in the last [`NOTICE_SECS`].
     pub notices: Vec<Notice>,
+    /// Joining late, still replaying the match: (ticks applied, the
+    /// host's newest).
+    pub catching_up: Option<(u32, u32)>,
+    /// Playing a replay.
+    pub replay: Option<ReplayStatus>,
     pub last_frame: FrameReport,
     pub now: Duration,
+}
+
+/// Where a replay is, for the viewer's bar.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayStatus {
+    pub tick: u32,
+    pub ticks: u32,
+    pub rate: f32,
+    pub hold: bool,
+    /// The recorded speed at this tick (percent).
+    pub speed: u16,
 }
 
 /// The game world as a [`TickRunner`].
@@ -581,6 +705,29 @@ pub fn drive_fixed_main(world: &mut World) {
                     "desync at frame {}: {:?} disagree with the host; stopping after tick {}",
                     d.frame, d.peers, d.stop_at
                 ),
+                SessionEvent::Joined {
+                    peer,
+                    player,
+                    returned,
+                    name,
+                } => {
+                    info!(
+                        "{peer} ({name}) joined the match{}",
+                        player.map_or(" to watch".to_string(), |s| format!(" on seat {s}"))
+                    );
+                    world
+                        .get_resource_or_insert_with(PeerNames::default)
+                        .0
+                        .insert(peer, name);
+                    net.notices.push((
+                        now,
+                        if returned {
+                            Notice::Returned(peer)
+                        } else {
+                            Notice::Joined(peer)
+                        },
+                    ));
+                }
             }
         }
         net.notices
@@ -592,6 +739,19 @@ pub fn drive_fixed_main(world: &mut World) {
             .pacer
             .starved_since
             .map(|since| (s.waiting_for(), since));
+        let catching_up = net
+            .pacer
+            .fast_forward
+            .then(|| (s.applied(), s.host_newest().map_or(0, |n| n + 1)));
+        let replay = s.replay_end().map(|ticks| ReplayStatus {
+            tick: s.applied(),
+            ticks,
+            rate: net.pacer.rate,
+            hold: net.pacer.hold,
+            speed: world
+                .get_resource::<super::MatchControl>()
+                .map_or(100, |c| c.speed_percent),
+        });
         let mut status = world.get_resource_or_insert_with(NetStatus::default);
         let dump = dumped.or(status.dump.take().filter(|_| s.desync().is_some()));
         *status = NetStatus {
@@ -611,6 +771,8 @@ pub fn drive_fixed_main(world: &mut World) {
             leaving,
             closed: s.closed(),
             notices,
+            catching_up,
+            replay,
             last_frame: rep,
             now,
         };

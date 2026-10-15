@@ -336,7 +336,11 @@ fn load_and_prepare(map_path: &Path, inputs: PrepareInputs) -> Option<PreparedMa
         "  decoded in {:.0}ms",
         decode_start.elapsed().as_secs_f64() * 1000.0
     );
-    Some(prepare_map(spring_map, inputs))
+    // The file's hash, as the lobby compares it (`lobby::read_map_hash`).
+    let map_hash = std::fs::read(map_path).map_or(0, |b| crate::net::compat::map_hash(&b));
+    let mut prepared = prepare_map(spring_map, inputs);
+    prepared.map_hash = map_hash;
+    Some(prepared)
 }
 
 /// Native: once the compute task has the prepared map, swap worlds —
@@ -402,7 +406,8 @@ fn poll_map_load(world: &mut World) {
         decode_start.elapsed().as_secs_f64() * 1000.0
     );
     let inputs = PrepareInputs::gather(setup, world.resource::<UnitRegistry>(), map_name);
-    let prepared = prepare_map(spring_map, inputs);
+    let mut prepared = prepare_map(spring_map, inputs);
+    prepared.map_hash = crate::net::compat::map_hash(&bytes);
     finish_map_load(world, prepared);
 }
 
@@ -418,6 +423,7 @@ fn finish_map_load(world: &mut World, prepared: PreparedMap) {
     // after the teardown, whose despawn hooks may still write to the
     // old match's tallies.
     match_scope::begin_match(world, &prepared.setup);
+    world.insert_resource(crate::net::replay_log::ActiveMapHash(prepared.map_hash));
     world.resource_mut::<ReadyMap>().0 = Some(prepared);
 }
 
@@ -679,6 +685,9 @@ impl PrepareInputs {
 struct PreparedMap {
     setup: GameSetup,
     map_name: String,
+    /// The content hash of the map file (`net::compat::map_hash`): the
+    /// match's replay stamp (`net::replay_log::ActiveMapHash`).
+    map_hash: u64,
     header: SmfHeader,
     features: Vec<MapFeature>,
     map_info: Option<MapInfo>,
@@ -955,6 +964,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
     PreparedMap {
         setup: inputs.setup,
         map_name: inputs.map_name,
+        map_hash: 0,
         header,
         features,
         map_info,
@@ -989,6 +999,7 @@ fn spawn_prepared_map(
     let PreparedMap {
         setup,
         map_name,
+        map_hash: _,
         header,
         features,
         map_info,

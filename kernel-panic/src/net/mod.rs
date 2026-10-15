@@ -53,6 +53,10 @@ pub mod matchbox;
 mod matchbox_tests;
 #[cfg(test)]
 mod multipeer_tests;
+pub mod rejoin;
+#[cfg(test)]
+mod rejoin_tests;
+pub mod replay_log;
 pub mod session;
 #[cfg(test)]
 mod session_tests;
@@ -347,6 +351,23 @@ pub enum SimCommand {
     /// `Game/Players/PlayerHandler.cpp:66`). Only the host issues it: a
     /// guest's own is refused at sequencing.
     Dropped,
+    // M3.
+    /// Index 20 belongs to the speed control (M3, `docs/multiplayer-plan.md`);
+    /// this stand-in keeps [`SimCommand::Returned`] at 21 until it lands.
+    /// Never issued; refused when applied.
+    #[doc(hidden)]
+    Reserved20,
+    /// The player's peer came back after its seat was dropped
+    /// (`net::rejoin`): the host puts it in the turn stream in that
+    /// player's name, after the `Dropped`. The seat returns to play if
+    /// nothing has happened to it meanwhile — its side still has an
+    /// active owner (so its units were not fused), nobody took its
+    /// units, the match is not decided; otherwise it is refused and the
+    /// player watches. Spring lets a dropped player reconnect to its
+    /// team (`CGameServer::BindConnection`, `Net/GameServer.cpp:2875`;
+    /// `CTeam::AddPlayer` revives the team, `Sim/Misc/Team.cpp:283`).
+    /// Only the host issues it: a guest's own is refused at sequencing.
+    Returned,
 }
 
 impl SimCommand {
@@ -399,7 +420,9 @@ impl SimCommand {
             | Resign
             | Dev(_)
             | Take { .. }
-            | Dropped => None,
+            | Dropped
+            | Reserved20
+            | Returned => None,
         }
     }
 }

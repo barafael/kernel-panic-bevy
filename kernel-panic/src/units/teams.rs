@@ -185,6 +185,19 @@ impl TeamFates {
         true
     }
 
+    /// `owner`, which left play by dropping out, is back
+    /// (`SimCommand::Returned`; the command apply checked that its side
+    /// is still in play and its units its own): active again, as if it
+    /// had never left. `false` if it had not left.
+    pub fn rejoin(&mut self, owner: u8) -> bool {
+        if !self.dead.remove(&owner) {
+            return false;
+        }
+        self.left_at.remove(&owner);
+        self.doomed.remove(&owner);
+        true
+    }
+
     /// Has `owner` left play (inactive)?
     pub fn is_dead(&self, owner: u8) -> bool {
         self.dead.contains(&owner)

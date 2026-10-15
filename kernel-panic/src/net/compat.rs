@@ -34,10 +34,13 @@ use super::state::Fnv;
 /// 5 (M2): a `Take` hands over the leaver's packet buffer with its
 /// units; a peer dropping out leaves play ([`SimCommand::Dropped`]);
 /// pause, speed and cheats follow the setup's [`MatchRules`].
+/// 6 (M3): a dropped player's seat returns to play
+/// ([`SimCommand::Returned`]).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
+/// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 5;
+pub const SIM_VERSION: u32 = 6;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

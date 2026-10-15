@@ -49,7 +49,9 @@ zstd = "0.13"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Blob / Url / HtmlAnchorElement: the desync dump download (`net::driver`).
 # Location / History: the room code in the URL fragment (`net::lobby`).
-web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Blob", "Url", "HtmlAnchorElement", "Location", "History"] }
+# HtmlInputElement / FileList / File: the Replays page's "Open file…"
+# (`ui::menu::replays_page`).
+web-sys = { version = "0.3", features = ["Window", "Storage", "Document", "Blob", "Url", "HtmlAnchorElement", "Location", "History", "HtmlInputElement", "FileList", "File"] }
 js-sys = "0.3"
 # The `replay` feature's `kp_replay` export and its event-loop yields
 # (`headless`). Both are already linked through Bevy on the web.

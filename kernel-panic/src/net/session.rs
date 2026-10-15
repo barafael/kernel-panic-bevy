@@ -42,12 +42,25 @@
 //! host leaving (or going silent) ends the match for the guests: no host
 //! migration yet. The host also refuses to sequence what the match rules
 //! forbid ([`Admit`]).
+//!
+//! The turn log (M3, `net-experiments/m3-turn-log.md`): the host keeps
+//! every turn of the match, so a player who dropped can come back and a
+//! newcomer can watch ([`super::rejoin`]): the host's [`Door`] answers
+//! a newcomer's lobby `Hello`, gives a returning player its seat back
+//! (by its [`PlayerKey`](super::rejoin::PlayerKey), not its connection)
+//! and the newcomer replays the whole log, fetched by gap fills, before
+//! it plays along ([`Session::late`]). A seat whose peer disconnected is
+//! dropped only after [`Timeouts::rejoin`], so a reload can come back
+//! in time. Every peer keeps the turns it applied ([`Session::log`]),
+//! which is what a replay file holds; [`Session::replay`] plays one.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
+use super::lobby::{self, LobbyMsg, StartMsg};
+use super::rejoin::{Door, PlayerKey, Running};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
-use super::wire::{self, Batch, Echo, InputPacket, Msg, Turn, TurnPacket, TurnRun};
+use super::wire::{self, Batch, Echo, InputPacket, Msg, PlayerCommands, Turn, TurnPacket, TurnRun};
 use super::{CommandFrame, SimCommand};
 use crate::sim::DetFloat;
 
@@ -62,12 +75,10 @@ pub const REDUNDANCY: usize = 5;
 /// not a lagging host, it is a wrong one (cake's `TURN_HORIZON`).
 const TURN_HORIZON: u32 = 3600;
 
-/// Turns the host keeps for gap fills: a minute. A guest that falls
-/// further behind can only rejoin (M3).
-const HISTORY: usize = 1800;
-
-/// Turns per gap fill request.
-const FILL_MAX: u32 = 900;
+/// Turns per gap fill request: a minute of the match. (The host keeps
+/// every turn, so a guest stalled for longer, or a late joiner replaying
+/// the match from its start, asks again for the next run.)
+const FILL_MAX: u32 = 1800;
 
 /// A link with nothing new still gets a packet this often (acks, round
 /// trip stamps).
@@ -94,10 +105,19 @@ pub struct Timeouts {
     /// Before the first packet arrived (Spring's
     /// `InitialNetworkTimeout`, 30 s, `System/GlobalConfig.cpp:15`).
     pub initial: Duration,
-    /// After that. Spring waits 120 s (`NetworkTimeout`); here the host
-    /// keeps a minute of turns ([`HISTORY`]) and a guest gone longer
-    /// can't catch up without rejoining (M3), so a minute.
+    /// After that. Spring waits 120 s (`NetworkTimeout`); here a
+    /// minute: a guest that silent is better off rejoining.
     pub running: Duration,
+    /// A seat whose peer disconnected (the transport said so) stays in
+    /// play this long before the host drops it, so a player whose page
+    /// reloaded or whose connection broke can come back to it
+    /// ([`super::rejoin`]) before the leaving rules act (in a 1v1 they
+    /// end the match). Meanwhile its units do what they were told, as a
+    /// Spring team without its player does for good
+    /// (`CPlayerHandler::PlayerLeft`, `Game/Players/PlayerHandler.cpp:66`).
+    /// A guest timed out by silence is dropped at once: it had
+    /// [`Self::running`] already.
+    pub rejoin: Duration,
 }
 
 impl Default for Timeouts {
@@ -105,6 +125,7 @@ impl Default for Timeouts {
         Self {
             initial: Duration::from_secs(30),
             running: Duration::from_secs(60),
+            rejoin: Duration::from_secs(30),
         }
     }
 }
@@ -166,22 +187,49 @@ pub struct SessionConfig {
 /// Turns received and not yet applied: applied strictly in tick order,
 /// duplicates dropped, early ones held until the gap fills (cake's
 /// `TurnBuffer`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TurnBuffer {
     next: u32,
     held: BTreeMap<u32, Turn>,
+    /// The first tick from `next` on not in hand.
+    through: u32,
+    /// Turns accepted ahead of `next` ([`TURN_HORIZON`]; a late joiner,
+    /// which fetches the whole match, and a replay take any).
+    horizon: u32,
+}
+
+impl Default for TurnBuffer {
+    fn default() -> Self {
+        Self {
+            next: 0,
+            held: BTreeMap::new(),
+            through: 0,
+            horizon: TURN_HORIZON,
+        }
+    }
 }
 
 impl TurnBuffer {
+    /// A buffer without a horizon: it holds a whole match.
+    pub fn unbounded() -> Self {
+        Self {
+            horizon: u32::MAX,
+            ..Self::default()
+        }
+    }
+
     /// Store a turn; `false` for one applied, held or past the horizon.
     pub fn push(&mut self, turn: Turn) -> bool {
         if turn.tick < self.next
-            || turn.tick >= self.next.saturating_add(TURN_HORIZON)
+            || turn.tick >= self.next.saturating_add(self.horizon)
             || self.held.contains_key(&turn.tick)
         {
             return false;
         }
         self.held.insert(turn.tick, turn);
+        while self.held.contains_key(&self.through) {
+            self.through += 1;
+        }
         true
     }
 
@@ -194,11 +242,7 @@ impl TurnBuffer {
 
     /// Turns applicable right now, in order.
     pub fn ready(&self) -> usize {
-        self.held
-            .keys()
-            .zip(self.next..)
-            .take_while(|(have, want)| **have == *want)
-            .count()
+        (self.through - self.next) as usize
     }
 
     /// The tick the next applied turn carries (= turns applied).
@@ -208,7 +252,7 @@ impl TurnBuffer {
 
     /// The first tick not in hand.
     pub fn have_through(&self) -> u32 {
-        self.next + self.ready() as u32
+        self.through
     }
 }
 
@@ -364,6 +408,14 @@ pub enum SessionEvent {
     HostLost,
     /// Guest: the host dropped us.
     Dropped,
+    /// Someone joined the running match: back on its seat (`returned`)
+    /// or a newcomer on a seat or watching.
+    Joined {
+        peer: PeerId,
+        player: Option<u8>,
+        returned: bool,
+        name: String,
+    },
 }
 
 /// The host's view of one guest.
@@ -374,6 +426,9 @@ struct GuestLink {
     gone: bool,
     /// When the last packet came (any message).
     last_heard: Option<Duration>,
+    /// When it joined the running match (a late joiner: its initial
+    /// timeout counts from here, not from the match's start).
+    since: Option<Duration>,
     /// The guest holds every turn before this.
     next_turn: u32,
     rtt: Rtt,
@@ -399,9 +454,9 @@ struct Host {
     /// (tick, player, seq) → commands.
     scheduled: BTreeMap<(u32, u8, u32), Vec<SimCommand>>,
     next_cut: u32,
-    /// The turns cut (networked only), oldest first, ending at
-    /// `next_cut - 1`.
-    history: VecDeque<Turn>,
+    /// Every turn cut (networked only), from tick 0 to `next_cut - 1`:
+    /// the match's turn log, for gap fills and late joiners.
+    history: Vec<Turn>,
     hashes: BTreeMap<u32, u64>,
     /// Guest hashes for frames the host hasn't hashed yet.
     early: Vec<(PeerId, u32, u64)>,
@@ -412,6 +467,11 @@ struct Host {
     admit: Option<Admit>,
     /// Seats whose last peer left: their `Dropped` is sequenced.
     dropped: std::collections::BTreeSet<u8>,
+    /// Seats whose peer disconnected, and when the grace for its return
+    /// ends ([`Timeouts::rejoin`]): then the `Dropped` is sequenced.
+    pending_drops: BTreeMap<u8, Duration>,
+    /// Lets late joiners in (`None`: nobody gets in; protocol tests).
+    door: Option<Door>,
     last_pings: Option<Duration>,
     /// Commands the rules refused (copied into [`SessionStats`]).
     refused: u64,
@@ -425,6 +485,7 @@ impl std::fmt::Debug for Host {
             .field("next_cut", &self.next_cut)
             .field("paused", &self.paused)
             .field("dropped", &self.dropped)
+            .field("pending_drops", &self.pending_drops)
             .finish_non_exhaustive()
     }
 }
@@ -492,6 +553,12 @@ pub struct Session {
     /// The tick of this frame's first seal (what [`InputPacket::tick`]
     /// reports).
     frame_tick: u32,
+    /// The commands of every turn applied here, in tick then player
+    /// order: the match's turn log as a replay file keeps it
+    /// ([`Self::log`]). Not kept while playing a replay.
+    log: Vec<CommandFrame>,
+    /// A replay ([`Self::replay`]): the ticks it has.
+    replay_end: Option<u32>,
     pub stats: SessionStats,
 }
 
@@ -530,8 +597,41 @@ impl Session {
             ended: None,
             events: Vec::new(),
             frame_tick: 0,
+            log: Vec::new(),
+            replay_end: None,
             stats: SessionStats::default(),
         }
+    }
+
+    /// A recorded match played back: every turn of `frames` (a replay
+    /// file's command log) in hand for `ticks` ticks, then it halts. A
+    /// guest of nobody: no transport, no hashing; the driver plays one
+    /// turn per tick of its clock. A recorded pause is followed by its
+    /// resume on the next turn (the pause took no turns), so a replay
+    /// never stops for it.
+    pub fn replay(frames: &[CommandFrame], ticks: u32) -> Self {
+        let mut turns: BTreeMap<u32, Vec<PlayerCommands>> = BTreeMap::new();
+        for f in frames.iter().filter(|f| f.tick < ticks) {
+            let frames = turns.entry(f.tick).or_default();
+            match frames.iter_mut().find(|(p, _)| *p == f.player) {
+                Some((_, list)) => list.extend(f.commands.iter().cloned()),
+                None => frames.push((f.player, f.commands.clone())),
+            }
+        }
+        let mut s = Self::solo();
+        s.role = Role::Guest(Box::default());
+        s.turns = TurnBuffer::unbounded();
+        for tick in 0..ticks {
+            let mut frames = turns.remove(&tick).unwrap_or_default();
+            frames.sort_by_key(|(p, _)| *p);
+            s.turns.push(Turn {
+                tick,
+                delay: 0,
+                frames,
+            });
+        }
+        s.replay_end = Some(ticks);
+        s
     }
 
     /// A networked match over `transport`.
@@ -577,12 +677,70 @@ impl Session {
             ended: None,
             events: Vec::new(),
             frame_tick: 0,
+            log: Vec::new(),
+            replay_end: None,
             stats: SessionStats::default(),
         }
     }
 
+    /// Joining a running match (M3, [`super::rejoin`]): a player back on
+    /// its seat or a newcomer watching, let in by `host` (the match's
+    /// host, whatever this peer's id), with `gone` already left. It
+    /// holds no turn yet: the whole log arrives as gap fills from tick
+    /// 0 (no horizon), and the driver runs it as fast as it can
+    /// ([`super::driver::Pacer::fast_forward`]) until it is live.
+    pub fn late(
+        cfg: SessionConfig,
+        host: PeerId,
+        gone: &[PeerId],
+        transport: Box<dyn Transport>,
+    ) -> Self {
+        let mut s = Self::networked(cfg, transport);
+        s.host = host;
+        s.role = Role::Guest(Box::new(Guest {
+            host,
+            gone: gone.iter().copied().collect(),
+            ..Default::default()
+        }));
+        s.turns = TurnBuffer::unbounded();
+        s
+    }
+
     pub fn is_networked(&self) -> bool {
         self.networked
+    }
+
+    /// Playing a replay ([`Self::replay`]).
+    pub fn is_replay(&self) -> bool {
+        self.replay_end.is_some()
+    }
+
+    /// The ticks a replay has.
+    pub fn replay_end(&self) -> Option<u32> {
+        self.replay_end
+    }
+
+    /// Host: let late joiners in ([`Door`]; the lobby hands it over with
+    /// the `Start`).
+    pub fn set_door(&mut self, door: Door) {
+        if let Role::Host(h) = &mut self.role {
+            h.door = Some(door);
+        }
+    }
+
+    /// The commands of every turn applied so far, by tick then player
+    /// (non-empty frames only): a replay's command log.
+    pub fn log(&self) -> &[CommandFrame] {
+        &self.log
+    }
+
+    /// The newest turn the host has cut, as far as this peer knows (how
+    /// far a late joiner still has to go).
+    pub fn host_newest(&self) -> Option<u32> {
+        match &self.role {
+            Role::Host(h) => h.next_cut.checked_sub(1),
+            Role::Guest(g) => g.host_newest,
+        }
     }
 
     /// When silence counts as gone ([`Timeouts`]).
@@ -765,22 +923,35 @@ impl Session {
         }
     }
 
-    /// No more ticks: the match ended, or a desync stop was reached.
+    /// No more ticks: the match ended, a desync stop was reached, or a
+    /// replay is over.
     pub fn halted(&self) -> bool {
         self.ended.is_some()
             || self
                 .desync
                 .as_ref()
                 .is_some_and(|d| self.turns.next() >= d.stop_at)
+            || self.replay_end.is_some_and(|e| self.turns.next() >= e)
     }
 
-    /// The next turn, if applicable now. Its delay becomes ours.
+    /// The next turn, if applicable now. Its delay becomes ours, its
+    /// commands go into the log.
     pub fn pop(&mut self) -> Option<Turn> {
         if self.ready() == 0 {
             return None;
         }
         let turn = self.turns.pop()?;
         self.delay = turn.delay as u32;
+        if self.replay_end.is_none() {
+            self.log
+                .extend(turn.frames.iter().filter(|(_, cmds)| !cmds.is_empty()).map(
+                    |(player, cmds)| CommandFrame {
+                        tick: turn.tick,
+                        player: *player,
+                        commands: cmds.clone(),
+                    },
+                ));
+        }
         Some(turn)
     }
 
@@ -869,10 +1040,7 @@ impl Session {
             frames,
         };
         if networked {
-            h.history.push_back(turn.clone());
-            while h.history.len() > HISTORY {
-                h.history.pop_front();
-            }
+            h.history.push(turn.clone());
         }
         self.turns.push(turn);
         Some(tick)
@@ -951,16 +1119,127 @@ impl Session {
         let mut inbox = t.receive(Channel::Reliable);
         inbox.extend(t.receive(Channel::Unreliable));
         for ev in events {
+            // A peer joining the room introduces itself with a lobby
+            // `Hello` (below); its `Joined` says nothing yet.
             if let PeerEvent::Left(peer) = ev {
-                self.peer_left(peer, false);
+                self.peer_left(peer, false, now);
             }
         }
         for (from, bytes) in inbox {
             if let Some(msg) = wire::decode(self.match_id, &bytes) {
                 self.handle(from, msg, now);
+            } else if self.is_host()
+                && let lobby::Decoded::Msg(LobbyMsg::Hello(hello)) = lobby::decode(&bytes)
+            {
+                self.knock(from, hello, now);
             }
         }
         self.check_timeouts(now, opened);
+    }
+
+    /// Host: `from` introduced itself in the room while the match runs
+    /// (a lobby `Hello`): let it in through the [`Door`] — back on the
+    /// seat its [`PlayerKey`] played, or watching — and answer with the
+    /// match ([`Running`]), which it joins as a late joiner
+    /// ([`Self::late`]). Spring's server likewise accepts a known name
+    /// back onto its player slot, killing a link still open under it,
+    /// and lets anyone else spectate (`CGameServer::BindConnection`,
+    /// `Net/GameServer.cpp:2875-3053`). Another build is answered too
+    /// (it refuses the match with the reason, as at a `Start`) but not
+    /// let in.
+    fn knock(&mut self, from: PeerId, hello: lobby::Hello, now: Duration) {
+        let me = self.me;
+        let Role::Host(h) = &mut self.role else {
+            return;
+        };
+        if from == me {
+            return;
+        }
+        // Out while the host's state changes; back at the end.
+        let Some(mut door) = h.door.take() else {
+            return;
+        };
+        let mut out: Vec<(PeerId, Msg)> = Vec::new();
+        let compatible = door.start.compat.build().mismatch(&hello.build).is_none();
+        if compatible && !self.roster.contains_key(&from) {
+            let key = PlayerKey(hello.key);
+            let (seat, replaces) = door.seat_for(&self.roster, key, me);
+            let name = lobby::clean_name(&hello.name);
+            if let Some(old) = replaces {
+                // Its previous connection: gone from the roster; told,
+                // should it still be listening (Spring: "terminating
+                // existing connection").
+                self.roster.remove(&old);
+                if h.links.remove(&old).is_some_and(|l| !l.gone) {
+                    out.push((old, Msg::Left { peer: old }));
+                }
+                door.forget(old);
+            }
+            self.roster.insert(from, seat);
+            door.keys.insert(from, key);
+            door.names.insert(from, name.clone());
+            h.links.insert(
+                from,
+                GuestLink {
+                    player: seat,
+                    since: Some(now),
+                    ..Default::default()
+                },
+            );
+            if let Some(seat) = seat {
+                h.rejoin_seat(seat);
+            }
+            bevy::log::info!(
+                "{from} ({name}) joined the match {}",
+                match (seat, replaces) {
+                    (Some(s), Some(_)) => format!("back on seat {s}"),
+                    (Some(s), None) => format!("on seat {s}"),
+                    _ => "to watch".to_string(),
+                }
+            );
+            self.events.push(SessionEvent::Joined {
+                peer: from,
+                player: seat,
+                returned: replaces.is_some(),
+                name: name.clone(),
+            });
+            for (&peer, _) in h.links.iter().filter(|(p, l)| !l.gone && **p != from) {
+                out.push((
+                    peer,
+                    Msg::Joined {
+                        peer: from,
+                        player: seat,
+                        replaces,
+                        name: name.clone(),
+                    },
+                ));
+            }
+        }
+        let running = Running {
+            start: StartMsg {
+                roster: self.roster.iter().map(|(p, s)| (*p, *s)).collect(),
+                ..door.start.clone()
+            },
+            host: me,
+            gone: h
+                .links
+                .iter()
+                .filter(|(_, l)| l.gone)
+                .map(|(p, _)| *p)
+                .collect(),
+            names: door.names.iter().map(|(p, n)| (*p, n.clone())).collect(),
+            newest: h.next_cut,
+        };
+        h.door = Some(door);
+        for (to, msg) in out {
+            self.send(to, Channel::Reliable, msg);
+        }
+        if let (Some(t), Some(bytes)) = (
+            self.transport.as_mut(),
+            lobby::encode(LobbyMsg::Running(Box::new(running))),
+        ) {
+            t.send(from, Channel::Reliable, bytes);
+        }
     }
 
     /// Silence for longer than [`Timeouts`]: the host drops the guest
@@ -969,29 +1248,42 @@ impl Session {
     /// (`Net/GameServer.cpp:1963`).
     fn check_timeouts(&mut self, now: Duration, opened: Duration) {
         let t = self.timeouts;
-        let silent = |last: Option<Duration>| {
+        let silent = |last: Option<Duration>, joined: Option<Duration>| {
             let (since, limit) = match last {
                 Some(at) => (at, t.running),
-                None => (opened, t.initial),
+                None => (joined.unwrap_or(opened), t.initial),
             };
             now.saturating_sub(since) > limit
         };
+        if let Role::Host(h) = &mut self.role {
+            // Seats whose peer did not come back in time leave play.
+            let due: Vec<u8> = h
+                .pending_drops
+                .iter()
+                .filter(|(_, at)| now >= **at)
+                .map(|(s, _)| *s)
+                .collect();
+            for seat in due {
+                bevy::log::info!("seat {seat}'s player did not come back: dropped");
+                h.drop_seat(seat);
+            }
+        }
         match &self.role {
             Role::Host(h) => {
                 let lost: Vec<PeerId> = h
                     .links
                     .iter()
-                    .filter(|(_, l)| !l.gone && silent(l.last_heard))
+                    .filter(|(_, l)| !l.gone && silent(l.last_heard, l.since))
                     .map(|(p, _)| *p)
                     .collect();
                 for peer in lost {
                     bevy::log::warn!("{peer} timed out: dropped");
                     self.send(peer, Channel::Reliable, Msg::Left { peer });
-                    self.peer_left(peer, true);
+                    self.peer_left(peer, true, now);
                 }
             }
             Role::Guest(g) => {
-                if self.ended.is_none() && silent(g.last_heard) {
+                if self.ended.is_none() && silent(g.last_heard, None) {
                     bevy::log::warn!("no word from the host {}: giving up", g.host);
                     self.ended = Some(Ended::HostLost);
                     self.events.push(SessionEvent::HostLost);
@@ -1002,7 +1294,8 @@ impl Session {
 
     /// `peer` is gone: the transport said so, or (`timed_out`) it was
     /// silent too long.
-    fn peer_left(&mut self, peer: PeerId, timed_out: bool) {
+    fn peer_left(&mut self, peer: PeerId, timed_out: bool, now: Duration) {
+        let grace = self.timeouts.rejoin;
         match &mut self.role {
             Role::Host(h) => {
                 let Some(link) = h.links.get_mut(&peer) else {
@@ -1017,18 +1310,17 @@ impl Session {
                 // leaves play (the user's leaving rules): a `Dropped` in
                 // its name, after anything of its own already sequenced,
                 // applied by every peer on the same tick. (A seat has one
-                // peer: batches are numbered per seat.)
+                // peer: batches are numbered per seat.) A disconnect gets
+                // `grace` to come back first ([`Timeouts::rejoin`]).
                 link.gone = true;
                 let seat = link.player;
                 h.started |= h.links.values().all(|l| l.heard || l.gone);
-                if let Some(seat) = seat
-                    && h.dropped.insert(seat)
-                {
-                    let input = h.inputs.entry(seat).or_default();
-                    let at = input.last_target.max(h.next_cut);
-                    input.last_target = at;
-                    h.scheduled
-                        .insert((at, seat, u32::MAX), vec![SimCommand::Dropped]);
+                if let Some(seat) = seat {
+                    if timed_out || grace.is_zero() {
+                        h.drop_seat(seat);
+                    } else {
+                        h.pending_drops.insert(seat, now + grace);
+                    }
                 }
                 self.events.push(if timed_out {
                     SessionEvent::TimedOut(peer)
@@ -1183,6 +1475,27 @@ impl Session {
                 }
             }
             Msg::Pings { ms } => g.pings = self.roster.keys().copied().zip(ms).collect(),
+            Msg::Joined {
+                peer,
+                player,
+                replaces,
+                name,
+            } => {
+                if let Some(old) = replaces {
+                    self.roster.remove(&old);
+                    g.gone.remove(&old);
+                    g.pings.remove(&old);
+                }
+                g.gone.remove(&peer);
+                if self.roster.insert(peer, player).is_none() {
+                    self.events.push(SessionEvent::Joined {
+                        peer,
+                        player,
+                        returned: replaces.is_some(),
+                        name,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -1193,22 +1506,22 @@ impl Session {
         let Role::Host(h) = &self.role else {
             return;
         };
-        let Some(base) = h.history.front().map(|t| t.tick) else {
+        let Some(base) = h.history.first().map(|t| t.tick) else {
             return;
         };
         if from < base {
             bevy::log::warn!("{to} needs turn {from}, the oldest kept is {base}");
         }
         let start = from.max(base);
-        let end = h.next_cut.min(start + FILL_MAX);
+        let end = h.next_cut.min(start.saturating_add(FILL_MAX));
         let turns: Vec<Turn> = (start..end)
             .map(|t| h.history[(t - base) as usize].clone())
             .collect();
         let mut chunks: Vec<TurnRun> = Vec::new();
         let mut rest = turns.as_slice();
         while !rest.is_empty() {
-            // Halve until it fits.
-            let mut n = rest.len().min(256);
+            // Halve until it fits (a quiet minute fits in one).
+            let mut n = rest.len().min(2048);
             loop {
                 let run = TurnRun::of(&rest[..n]);
                 let size = postcard::to_allocvec(&run).map_or(usize::MAX, |v| v.len());
@@ -1237,7 +1550,7 @@ impl Session {
         match &mut self.role {
             Role::Host(h) => {
                 let newest = h.next_cut.checked_sub(1);
-                let base = h.history.front().map_or(0, |t| t.tick);
+                let base = h.history.first().map_or(0, |t| t.tick);
                 for (&peer, link) in h.links.iter_mut().filter(|(_, l)| !l.gone) {
                     let ack = link
                         .player
@@ -1361,7 +1674,7 @@ impl Host {
             inputs: BTreeMap::new(),
             scheduled: BTreeMap::new(),
             next_cut: 0,
-            history: VecDeque::new(),
+            history: Vec::new(),
             hashes: BTreeMap::new(),
             early: Vec::new(),
             controller: DelayController::new(bounds),
@@ -1369,15 +1682,56 @@ impl Host {
             own_seq: 0,
             admit: None,
             dropped: Default::default(),
+            pending_drops: BTreeMap::new(),
+            door: None,
             last_pings: None,
             refused: 0,
         }
     }
 
+    /// `seat` leaves play: a `Dropped` in its name, after anything of
+    /// its own already sequenced (once).
+    fn drop_seat(&mut self, seat: u8) {
+        self.pending_drops.remove(&seat);
+        if self.dropped.insert(seat) {
+            let input = self.inputs.entry(seat).or_default();
+            let at = input.last_target.max(self.next_cut);
+            input.last_target = at;
+            self.scheduled
+                .insert((at, seat, u32::MAX), vec![SimCommand::Dropped]);
+        }
+    }
+
+    /// `seat` has a peer again (a returning player, [`Session::knock`]):
+    /// its batches count from 0 again (a new connection numbers anew;
+    /// what the old one sent and was not filed is dropped), a drop still
+    /// in its grace is off, and a drop already sequenced is followed by
+    /// a `Returned` in its name, which every peer applies alike
+    /// (`ApplyCtx::returned`: the seat comes back if nothing took it).
+    fn rejoin_seat(&mut self, seat: u8) {
+        self.pending_drops.remove(&seat);
+        let last_target = self.inputs.get(&seat).map_or(0, |i| i.last_target);
+        let mut input = PlayerIn {
+            last_target,
+            ..Default::default()
+        };
+        if self.dropped.remove(&seat) {
+            let mut at = last_target.max(self.next_cut);
+            // After its `Dropped`, should both fall on one tick.
+            if self.scheduled.contains_key(&(at, seat, u32::MAX)) {
+                at += 1;
+            }
+            input.last_target = at;
+            self.scheduled
+                .insert((at, seat, u32::MAX), vec![SimCommand::Returned]);
+        }
+        self.inputs.insert(seat, input);
+    }
+
     /// File `batch` from `player`: exactly once, in seq order, never in
     /// the past. Returns 1 if it came late.
-    /// A guest's batch (`guest`) may not drop anyone: only the host
-    /// issues `Dropped`.
+    /// A guest's batch (`guest`) may not drop anyone or bring anyone
+    /// back: only the host issues `Dropped` and `Returned`.
     fn accept(&mut self, player: u8, mut batch: Batch, guest: bool) -> u64 {
         let input = self.inputs.entry(player).or_default();
         if batch.seq < input.next_seq || input.held.contains_key(&batch.seq) {
@@ -1385,7 +1739,9 @@ impl Host {
         }
         if guest {
             let before = batch.commands.len();
-            batch.commands.retain(|c| !matches!(c, SimCommand::Dropped));
+            batch
+                .commands
+                .retain(|c| !matches!(c, SimCommand::Dropped | SimCommand::Returned));
             self.refused += (before - batch.commands.len()) as u64;
         }
         // The match rules: what they forbid is never sequenced (the

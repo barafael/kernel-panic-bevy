@@ -313,6 +313,9 @@ fn add_plugins(executor: Executor, assets: AssetRoot) -> App {
     app.init_asset::<bevy::audio::AudioSource>()
         .init_asset_loader::<bevy::audio::AudioLoader>();
     crate::add_game(&mut app);
+    // Matches the harness plays leave no replay files behind.
+    #[cfg(not(target_arch = "wasm32"))]
+    app.insert_resource(crate::net::replay_log::ReplayDir(None));
     app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO))
         .init_resource::<TickTimer>()
         .init_resource::<HashLog>()

@@ -15,3 +15,6 @@ trace-*.json
 
 # Lockstep desync dumps (`net::driver`)
 /desync-dumps
+
+# Recorded matches (`net::replay_log`)
+/replays

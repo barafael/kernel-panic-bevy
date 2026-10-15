@@ -653,6 +653,11 @@ fn dropped_at(r: &Room, player: u8) -> u32 {
 #[test]
 fn a_guest_that_leaves_is_dropped_on_one_tick() {
     let mut r = room(3, 21, LinkParams::latency_ms(30));
+    // No grace for a return (`Timeouts::rejoin`, M3): dropped at once.
+    r.peers[0].s.set_timeouts(Timeouts {
+        rejoin: Duration::ZERO,
+        ..Timeouts::default()
+    });
     let mut t = 0;
     r.run(6.0, |r| {
         t += 1;
@@ -693,6 +698,7 @@ fn silence_times_peers_out() {
     let short = Timeouts {
         initial: ms(3000),
         running: ms(1500),
+        ..Timeouts::default()
     };
     for p in &mut r.peers {
         p.s.set_timeouts(short);
@@ -765,6 +771,11 @@ fn leaving_sends_the_resignation_first() {
     for p in &mut r.peers {
         p.every = 0;
     }
+    // The drop at once, no grace for a return (M3).
+    r.peers[0].s.set_timeouts(Timeouts {
+        rejoin: Duration::ZERO,
+        ..Timeouts::default()
+    });
     let mut t = 0;
     let mut waited = Duration::ZERO;
     r.run(5.0, |r| {
