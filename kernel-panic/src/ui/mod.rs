@@ -64,3 +64,10 @@ pub(crate) fn save_screenshot(commands: &mut Commands, path: std::path::PathBuf)
         .spawn(Screenshot::primary_window())
         .observe(save_to_disk(path));
 }
+
+/// `m:ss` of `ticks` sim ticks of game time (the replay bar, the
+/// Replays page's lines).
+pub(crate) fn game_clock(ticks: u32) -> String {
+    let secs = ticks / crate::sim::SIMULATION_HZ as u32;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}

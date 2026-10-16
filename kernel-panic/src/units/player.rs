@@ -18,3 +18,11 @@ use bevy::prelude::*;
 /// `Alliances::ally_team(local)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Resource)]
 pub struct LocalTeam(pub u8);
+
+impl LocalTeam {
+    /// The seat the local player plays, `None` for a spectator
+    /// ([`SPECTATOR_TEAM`](crate::game_setup::SPECTATOR_TEAM)).
+    pub fn seat(self) -> Option<u8> {
+        (self.0 != crate::game_setup::SPECTATOR_TEAM).then_some(self.0)
+    }
+}

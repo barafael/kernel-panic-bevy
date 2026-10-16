@@ -14,12 +14,12 @@ use bevy::prelude::*;
 
 use crate::game_setup::AppState;
 use crate::net::driver::{NetSession, NetStatus, ReplayStatus};
+use crate::ui::game_clock;
+
+use super::widgets::{set_text, sync_single};
 
 /// The viewer's speeds.
 const RATES: [f32; 7] = [0.25, 0.5, 1.0, 2.0, 4.0, 8.0, 16.0];
-
-#[derive(Component)]
-struct ReplayBar;
 
 #[derive(Component)]
 struct ReplayReadout;
@@ -95,18 +95,12 @@ fn replay_keys(
     }
 }
 
-/// `m:ss` of `ticks` sim ticks.
-fn clock(ticks: u32) -> String {
-    let secs = ticks / crate::sim::SIMULATION_HZ as u32;
-    format!("{}:{:02}", secs / 60, secs % 60)
-}
-
 /// The bar's text.
 fn readout(name: &str, r: &ReplayStatus, other_map: bool) -> String {
     let mut text = format!(
         "Replay {name}   {} / {}   {}x",
-        clock(r.tick),
-        clock(r.ticks),
+        game_clock(r.tick),
+        game_clock(r.ticks),
         r.rate
     );
     if r.hold {
@@ -125,28 +119,25 @@ fn show_replay_bar(
     status: Option<Res<NetStatus>>,
     net: Option<Res<NetSession>>,
     map_hash: Option<Res<crate::net::replay_log::ActiveMapHash>>,
-    bar: Query<Entity, With<ReplayBar>>,
-    mut text: Query<&mut Text, With<ReplayReadout>>,
+    mut readout_text: Query<(&ChildOf, &mut Text), With<ReplayReadout>>,
 ) {
-    let view = net.as_ref().and_then(|n| n.viewing.clone());
-    let replay = status.and_then(|s| s.replay.clone());
-    let (Some(view), Some(r)) = (view, replay) else {
-        for e in &bar {
-            commands.entity(e).despawn();
-        }
-        return;
-    };
-    let other_map = map_hash.is_some_and(|h| h.0 != view.map_hash);
-    let line = readout(view.name.trim_end_matches(".kpreplay"), &r, other_map);
-    if let Ok(mut t) = text.single_mut() {
-        if t.0 != line {
-            t.0 = line;
-        }
-        return;
-    }
+    let view = net.as_deref().and_then(|n| n.viewing.as_ref());
+    let replay = status.as_deref().and_then(|s| s.replay.as_ref());
+    let line = view.zip(replay).map(|(view, r)| {
+        let other_map = map_hash.is_some_and(|h| h.0 != view.map_hash);
+        readout(view.name.trim_end_matches(".kpreplay"), r, other_map)
+    });
+    // The bar is the readout's parent.
+    let bar = readout_text
+        .single_mut()
+        .map(|(bar, text)| (bar.parent(), text));
+    sync_single(&mut commands, line, bar, set_text, spawn_bar);
+}
+
+/// The bar: the readout saying `line`, then the buttons.
+fn spawn_bar(commands: &mut Commands, line: String) {
     let root = commands
         .spawn((
-            ReplayBar,
             Node {
                 position_type: PositionType::Absolute,
                 top: Val::Px(36.0),

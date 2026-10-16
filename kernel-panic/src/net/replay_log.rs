@@ -247,7 +247,6 @@ impl Replay {
     /// One line about the match, for the Replays page: when, the map,
     /// the seats, how long.
     pub fn label(&self) -> String {
-        let secs = self.ticks / crate::sim::SIMULATION_HZ as u32;
         let when = match self.meta.saved_at {
             0 => String::new(),
             t => {
@@ -267,11 +266,10 @@ impl Replay {
         } else {
             names.join(", ")
         };
+        let clock = crate::ui::game_clock(self.ticks);
         format!(
-            "{when}{} - {who} - {}:{:02}",
-            self.setup.map.replace('_', " "),
-            secs / 60,
-            secs % 60
+            "{when}{} - {who} - {clock}",
+            self.setup.map.replace('_', " ")
         )
     }
 }

@@ -21,6 +21,7 @@
 //!   Enter sends it, Esc drops it. While it is open no key reaches the
 //!   game's hotkeys.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bevy::input::InputSystems;
@@ -28,7 +29,7 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
-use crate::game_setup::{AppState, SPECTATOR_TEAM};
+use crate::game_setup::AppState;
 use crate::net::MatchControl;
 use crate::net::chat::{CHAT_MAX, ChatInput, ChatLog, type_into};
 use crate::net::driver::{NetSession, NetStatus, Notice, PeerNames};
@@ -36,6 +37,8 @@ use crate::net::session::Ended;
 use crate::sim::DetFloat;
 use crate::units::player::LocalTeam;
 use crate::units::teams::Alliances;
+
+use super::widgets::{needs_rebuild, set_text, sync_single};
 
 /// Shows / hides the player list.
 pub const TOGGLE_KEY: KeyCode = KeyCode::F9;
@@ -52,6 +55,13 @@ impl Default for PlayerListShown {
 
 #[derive(Component)]
 struct PlayerList;
+
+/// A coloured part of the player list: part `part` of row `row`.
+#[derive(Component)]
+struct PlayerListSpan {
+    row: usize,
+    part: usize,
+}
 
 #[derive(Component)]
 struct NetBanner;
@@ -163,14 +173,12 @@ fn show_chat(
     time: Res<Time<Real>>,
     mut boxes: Query<(Entity, &mut Text), With<ChatBox>>,
 ) {
-    let text = chat_text(&log, &input, time.elapsed());
-    match (text, boxes.single_mut()) {
-        (Some(t), Ok((_, mut text))) => {
-            if text.0 != t {
-                text.0 = t;
-            }
-        }
-        (Some(t), Err(_)) => {
+    sync_single(
+        &mut commands,
+        chat_text(&log, &input, time.elapsed()),
+        boxes.single_mut(),
+        set_text,
+        |commands, t| {
             commands.spawn((
                 ChatBox,
                 Text::new(t),
@@ -190,10 +198,8 @@ fn show_chat(
                 Pickable::IGNORE,
                 DespawnOnExit(AppState::InGame),
             ));
-        }
-        (None, Ok((e, _))) => commands.entity(e).despawn(),
-        (None, Err(_)) => {}
-    }
+        },
+    );
 }
 
 fn toggle_player_list(keys: Res<ButtonInput<KeyCode>>, mut shown: ResMut<PlayerListShown>) {
@@ -202,8 +208,11 @@ fn toggle_player_list(keys: Res<ButtonInput<KeyCode>>, mut shown: ResMut<PlayerL
     }
 }
 
+/// The names before the driver has any (no networked match yet).
+static NO_NAMES: PeerNames = PeerNames(BTreeMap::new());
+
 /// One line of the player list: coloured parts.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 struct Row {
     spans: Vec<(String, Color)>,
 }
@@ -252,11 +261,12 @@ fn cpu_color(permille: u16, slowing: bool, blink: bool) -> Color {
 }
 
 /// What the list says: a heading with the input delay (and the game
-/// speed while slowed down), then a row per peer in roster order.
+/// speed while slowed down), then a row per peer in roster order, sides
+/// as `local` (the local seat, `None` spectating) sees them.
 fn player_rows(
     status: &NetStatus,
     names: &PeerNames,
-    local: u8,
+    local: Option<u8>,
     alliances: Option<&Alliances>,
     control: Option<&MatchControl>,
 ) -> Vec<Row> {
@@ -277,8 +287,8 @@ fn player_rows(
     for p in &status.peers {
         let (seat, side) = match p.player {
             Some(seat) => {
-                let ally = local != SPECTATOR_TEAM
-                    && alliances.map_or(seat == local, |a| a.friendly(seat, local));
+                let ally =
+                    local.is_some_and(|l| alliances.map_or(seat == l, |a| a.friendly(seat, l)));
                 (format!("{seat:>2}"), if ally { "A" } else { "E" })
             }
             None => (" -".to_string(), "S"),
@@ -338,25 +348,33 @@ fn show_player_list(
     alliances: Option<Res<Alliances>>,
     control: Option<Res<MatchControl>>,
     list: Query<Entity, With<PlayerList>>,
-    mut last: Local<Option<Vec<Row>>>,
+    mut spans: Query<(&PlayerListSpan, &mut TextSpan, &mut TextColor)>,
+    mut shape: Local<u64>,
 ) {
     let rows = match status.filter(|s| s.networked && shown.0) {
         Some(status) => player_rows(
             &status,
-            &names.map(|n| n.clone()).unwrap_or_default(),
-            local.map_or(SPECTATOR_TEAM, |l| l.0),
+            names.as_deref().unwrap_or(&NO_NAMES),
+            local.and_then(|l| l.seat()),
             alliances.as_deref(),
             control.as_deref(),
         ),
         None => Vec::new(),
     };
-    if last.as_ref() == Some(&rows) && (rows.is_empty() || !list.is_empty()) {
+    // The list is rebuilt when a row comes or goes (every peer's row has
+    // the same parts); text and colours change in place.
+    if !needs_rebuild(&mut commands, rows.len() as u64, &mut shape, &list) {
+        for (at, mut span, mut color) in &mut spans {
+            let Some((text, c)) = rows.get(at.row).and_then(|r| r.spans.get(at.part)) else {
+                continue;
+            };
+            if span.0 != *text {
+                span.0.clone_from(text);
+            }
+            color.set_if_neq(TextColor(*c));
+        }
         return;
     }
-    for e in &list {
-        commands.entity(e).despawn();
-    }
-    *last = Some(rows.clone());
     if rows.is_empty() {
         return;
     }
@@ -376,7 +394,7 @@ fn show_player_list(
             DespawnOnExit(AppState::InGame),
         ))
         .id();
-    for row in rows {
+    for (row, line) in rows.into_iter().enumerate() {
         commands
             .spawn((
                 Text::default(),
@@ -385,9 +403,10 @@ fn show_player_list(
                 Pickable::IGNORE,
                 ChildOf(root),
             ))
-            .with_children(|line| {
-                for (text, color) in row.spans {
-                    line.spawn((
+            .with_children(|parent| {
+                for (part, (text, color)) in line.spans.into_iter().enumerate() {
+                    parent.spawn((
+                        PlayerListSpan { row, part },
                         TextSpan::new(text),
                         TextFont::from_font_size(15.0),
                         TextColor(color),
@@ -453,15 +472,15 @@ fn show_banner(
     names: Option<Res<PeerNames>>,
     mut banner: Query<(Entity, &mut Text), With<NetBanner>>,
 ) {
-    let names = names.map(|n| n.clone()).unwrap_or_default();
-    let message = status.and_then(|s| banner_text(&s, &names));
-    match (message, banner.single_mut()) {
-        (Some(m), Ok((_, mut text))) => {
-            if text.0 != m {
-                text.0 = m;
-            }
-        }
-        (Some(m), Err(_)) => {
+    let message = status
+        .filter(|s| s.networked)
+        .and_then(|s| banner_text(&s, names.as_deref().unwrap_or(&NO_NAMES)));
+    sync_single(
+        &mut commands,
+        message,
+        banner.single_mut(),
+        set_text,
+        |commands, m| {
             commands.spawn((
                 NetBanner,
                 Text::new(m),
@@ -477,10 +496,8 @@ fn show_banner(
                 Pickable::IGNORE,
                 DespawnOnExit(AppState::InGame),
             ));
-        }
-        (None, Ok((e, _))) => commands.entity(e).despawn(),
-        (None, Err(_)) => {}
-    }
+        },
+    );
 }
 
 #[cfg(test)]
@@ -531,7 +548,7 @@ mod tests {
         let mut control = MatchControl::default();
         control.resigned.insert(2);
         control.dropped.insert(2);
-        let rows = player_rows(&st, &names, 1, Some(&al), Some(&control));
+        let rows = player_rows(&st, &names, Some(1), Some(&al), Some(&control));
         let text: Vec<String> = rows.iter().map(Row::text).collect();
         assert_eq!(text[0], "Players · delay 4 (133 ms)");
         assert_eq!(text[1], " 0 A  ada (host)        20% 0 ms");
@@ -546,7 +563,7 @@ mod tests {
         control.internal_percent = 62;
         st.peers[1].load_permille = Some(800);
         st.now = Duration::from_secs(3);
-        let rows = player_rows(&st, &names, 1, Some(&al), Some(&control));
+        let rows = player_rows(&st, &names, Some(1), Some(&al), Some(&control));
         assert_eq!(rows[0].text(), "Players · delay 4 (133 ms) · speed 0.62x");
         assert_eq!(
             rows[2].spans[1],

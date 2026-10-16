@@ -1,7 +1,8 @@
 //! Scaffolding shared by the immediate-mode HUD widgets (command panel,
 //! build bar, tooltip): they rebuild their node tree from scratch when a
 //! signature of what they show changes, under a zero-size root that
-//! lives as long as the match.
+//! lives as long as the match. The one-node overlays (banner, chat,
+//! TAKE, status lines) keep their node and update it ([`sync_single`]).
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -34,6 +35,32 @@ pub(super) fn needs_rebuild<M: Component>(
         commands.entity(e).despawn();
     }
     true
+}
+
+/// Keeps a widget of one node in step with `want` (`None` = show
+/// nothing): `node` is its query's `single_mut()`; the node is updated
+/// in place when it is there, spawned when it is missing and despawned
+/// when there is nothing to show.
+pub(super) fn sync_single<T, N, E>(
+    commands: &mut Commands,
+    want: Option<T>,
+    node: Result<(Entity, N), E>,
+    update: impl FnOnce(N, T),
+    spawn: impl FnOnce(&mut Commands, T),
+) {
+    match (want, node) {
+        (Some(t), Ok((_, n))) => update(n, t),
+        (Some(t), Err(_)) => spawn(commands, t),
+        (None, Ok((e, _))) => commands.entity(e).despawn(),
+        (None, Err(_)) => {}
+    }
+}
+
+/// `text` says `s` (change detection fires only when it changes).
+pub(super) fn set_text(mut text: Mut<Text>, s: String) {
+    if text.0 != s {
+        text.0 = s;
+    }
 }
 
 /// A zero-size root at the window's top-left corner for absolutely

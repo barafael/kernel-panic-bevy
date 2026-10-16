@@ -11,6 +11,8 @@ use bevy::prelude::*;
 use crate::game_setup::AppState;
 use crate::net::MatchControl;
 
+use super::widgets::{set_text, sync_single};
+
 /// The status line's text entity.
 #[derive(Component)]
 struct MatchStatus;
@@ -44,37 +46,32 @@ fn status_line(control: &MatchControl) -> String {
 fn show_match_status(
     mut commands: Commands,
     control: Option<Res<MatchControl>>,
-    mut line: Query<(&mut Text, &mut Visibility), With<MatchStatus>>,
+    mut line: Query<(Entity, &mut Text), With<MatchStatus>>,
 ) {
-    let text = control.map(|c| status_line(&c)).unwrap_or_default();
-    let visibility = if text.is_empty() {
-        Visibility::Hidden
-    } else {
-        Visibility::Inherited
-    };
-    if let Ok((mut shown, mut vis)) = line.single_mut() {
-        if shown.0 != text {
-            shown.0 = text;
-        }
-        vis.set_if_neq(visibility);
-        return;
-    }
-    commands.spawn((
-        MatchStatus,
-        Text::new(text),
-        TextFont::from_font_size(20.0),
-        TextColor(Color::srgb(1.0, 1.0, 0.4)),
-        TextLayout::new(Justify::Center, LineBreak::NoWrap),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            width: Val::Percent(100.0),
-            ..default()
+    let text = control.map(|c| status_line(&c)).filter(|t| !t.is_empty());
+    sync_single(
+        &mut commands,
+        text,
+        line.single_mut(),
+        set_text,
+        |commands, text| {
+            commands.spawn((
+                MatchStatus,
+                Text::new(text),
+                TextFont::from_font_size(20.0),
+                TextColor(Color::srgb(1.0, 1.0, 0.4)),
+                TextLayout::new(Justify::Center, LineBreak::NoWrap),
+                Node {
+                    position_type: PositionType::Absolute,
+                    top: Val::Px(8.0),
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Pickable::IGNORE,
+                DespawnOnExit(AppState::InGame),
+            ));
         },
-        visibility,
-        Pickable::IGNORE,
-        DespawnOnExit(AppState::InGame),
-    ));
+    );
 }
 
 #[cfg(test)]

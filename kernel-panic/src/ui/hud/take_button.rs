@@ -7,13 +7,15 @@
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 
-use crate::game_setup::{AppState, SPECTATOR_TEAM};
+use crate::game_setup::AppState;
 use crate::interaction::selection::Selected;
 use crate::net::{CommandBus, SimCommand};
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::player::LocalTeam;
 use crate::units::teams::{Alliances, TeamFates};
+
+use super::widgets::sync_single;
 
 /// The button.
 #[derive(Component)]
@@ -41,14 +43,17 @@ impl Plugin for TakeButtonPlugin {
 /// The allied owners whose units the local player may take: left play,
 /// units left; none while the local player is out or spectating.
 fn takeable(
-    local: u8,
+    local: LocalTeam,
     alliances: &Alliances,
     fates: &TeamFates,
     units: &Query<&TeamId, (With<UnitType>, Without<Dying>)>,
 ) -> Vec<u8> {
-    if local == SPECTATOR_TEAM || fates.is_dead(local) || !alliances.is_seated(local) {
+    let Some(local) = local
+        .seat()
+        .filter(|&l| !fates.is_dead(l) && alliances.is_seated(l))
+    else {
         return Vec::new();
-    }
+    };
     alliances
         .allies_of(local)
         .filter(|o| *o != local && fates.is_dead(*o))
@@ -66,11 +71,14 @@ fn show_take_button(
     mut button: Query<(Entity, &mut BackgroundColor), With<TakeButton>>,
 ) {
     let show = match (local, alliances, fates) {
-        (Some(l), Some(a), Some(f)) => !takeable(l.0, &a, &f, &units).is_empty(),
+        (Some(l), Some(a), Some(f)) => !takeable(*l, &a, &f, &units).is_empty(),
         _ => false,
     };
-    match (show, button.single_mut()) {
-        (true, Ok((_, mut bg))) => {
+    sync_single(
+        &mut commands,
+        show.then_some(()),
+        button.single_mut(),
+        |mut bg, ()| {
             // Flash: twice a second.
             let on = ((time.elapsed_secs() * 4.0) as u32).is_multiple_of(2);
             bg.0 = if on {
@@ -78,8 +86,8 @@ fn show_take_button(
             } else {
                 Color::srgb(0.35, 0.2, 0.0)
             };
-        }
-        (true, Err(_)) => {
+        },
+        |commands, ()| {
             commands
                 .spawn((
                     TakeButton,
@@ -100,10 +108,8 @@ fn show_take_button(
                     TextColor(Color::BLACK),
                     Pickable::IGNORE,
                 ));
-        }
-        (false, Ok((e, _))) => commands.entity(e).despawn(),
-        (false, Err(_)) => {}
-    }
+        },
+    );
 }
 
 /// A left click on the button takes every takeable owner's units; the
@@ -139,7 +145,7 @@ fn press_take_button(
     let (Some(local), Some(alliances), Some(fates)) = (local, alliances, fates) else {
         return;
     };
-    for from in takeable(local.0, &alliances, &fates, &units) {
+    for from in takeable(*local, &alliances, &fates, &units) {
         bus.issue(SimCommand::Take { from });
     }
 }
