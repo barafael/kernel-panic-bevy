@@ -672,7 +672,7 @@ pub struct Session {
     frame_tick: u32,
     /// The commands of every turn applied here, in tick then player
     /// order: the match's turn log as a replay file keeps it
-    /// ([`Self::log`]). Not kept while playing a replay.
+    /// ([`Self::take_log`]). Not kept while playing a replay.
     log: Vec<CommandFrame>,
     /// A replay ([`Self::replay`]): its log, played turn by turn.
     replay: Option<ReplayLog>,
@@ -844,8 +844,14 @@ impl Session {
 
     /// The commands of every turn applied so far, by tick then player
     /// (non-empty frames only): a replay's command log.
+    #[cfg(test)]
     pub fn log(&self) -> &[CommandFrame] {
         &self.log
+    }
+
+    /// The command log, taken out (the match is over).
+    pub fn take_log(&mut self) -> Vec<CommandFrame> {
+        std::mem::take(&mut self.log)
     }
 
     /// The newest turn the host has cut, as far as this peer knows (how
@@ -1073,14 +1079,12 @@ impl Session {
         // Nor does a hidden browser tab (`Msg::Away`): the browser may
         // starve it whatever the game does, and it is not watching.
         let away = &self.away;
-        let counted: Vec<PeerId> = std::iter::once(me)
-            .chain(
-                h.links
-                    .iter()
-                    .filter(|(p, l)| l.player.is_some() && !l.gone && !away.contains(p))
-                    .map(|(p, _)| *p),
-            )
-            .collect();
+        let counted = std::iter::once(me).chain(
+            h.links
+                .iter()
+                .filter(|(p, l)| l.player.is_some() && !l.gone && !away.contains(p))
+                .map(|(p, _)| *p),
+        );
         if let Some(percent) = h.speed.update(now, counted, internal, wanted) {
             bevy::log::info!("speed control: game speed {internal} % -> {percent} %");
             let seq = h.server_seq;

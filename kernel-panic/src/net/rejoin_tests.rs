@@ -819,7 +819,8 @@ mod full {
 
         // The host's recording plays back to its trail.
         let host_world = r.peers[0].h.world_mut();
-        let recorded = crate::net::replay_log::replay_of(host_world).expect("a replay");
+        let log = host_world.resource::<NetSession>().session.log().to_vec();
+        let recorded = crate::net::replay_log::replay_of(host_world, log).expect("a replay");
         assert!(recorded.meta.networked);
         assert_eq!(
             recorded.setup,
