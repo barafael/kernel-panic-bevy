@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use super::compat::{Build, Compat};
-use super::driver::{CatchUp, GameSpeed, NetSession, NextNetMatch, Pacer, TickRunner, drive_frame};
+use super::driver::{CatchUp, GameSpeed, NetSession, NextNetMatch, TickRunner, drive_frame};
 use super::lobby::{Lobby, LobbyEvent, MapHave, StartMsg};
 use super::rejoin::{Door, PlayerKey};
 use super::session::{Desync, Session, SessionConfig, Timeouts};
@@ -397,11 +397,7 @@ fn the_turn_log_plays_back() {
         let ours: Vec<&CommandFrame> = log.iter().filter(|f| f.tick < n).collect();
         assert_eq!(theirs, ours, "{}: the same log", p.id);
     }
-    let mut play = NetSession::new(Session::replay(&log, ticks));
-    play.pacer = Pacer {
-        catch_up: CatchUp::replay(),
-        ..Pacer::default()
-    };
+    let mut play = NetSession::replay(&log, ticks);
     let mut sim = Fake::default();
     let mut now = Duration::ZERO;
     while !play.session.halted() {
@@ -823,7 +819,8 @@ mod full {
 
         // The host's recording plays back to its trail.
         let host_world = r.peers[0].h.world_mut();
-        let recorded = crate::net::replay_log::replay_of(host_world).expect("a replay");
+        let log = host_world.resource::<NetSession>().session.log().to_vec();
+        let recorded = crate::net::replay_log::replay_of(host_world, log).expect("a replay");
         assert!(recorded.meta.networked);
         assert_eq!(
             recorded.setup,

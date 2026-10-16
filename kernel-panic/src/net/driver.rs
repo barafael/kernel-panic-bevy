@@ -355,11 +355,11 @@ pub fn drive_frame(
         }
     }
     if s.halted()
-        && let Some(d) = s.desync().filter(|d| !d.dumped).cloned()
+        && let Some(d) = s.desync().filter(|d| d.dump.is_none()).cloned()
     {
-        let _where = r.dump(s, &d);
+        let place = r.dump(s, &d);
         if let Some(d) = s.desync_mut() {
-            d.dumped = true;
+            d.dump = Some(place);
         }
     }
     s.flush(now);
@@ -448,11 +448,18 @@ impl NetSession {
         s
     }
 
+    /// A recorded match played back ([`Session::replay`]): one turn per
+    /// tick of the clock ([`CatchUp::replay`]).
+    pub fn replay(frames: &[CommandFrame], ticks: u32) -> Self {
+        let mut s = Self::new(Session::replay(frames, ticks));
+        s.pacer.catch_up = CatchUp::replay();
+        s
+    }
+
     /// A replay played back ([`super::replay_log`]).
     pub fn from_replay(next: super::replay_log::NextReplay) -> Self {
         let r = next.replay;
-        let mut s = Self::new(Session::replay(&r.frames, r.ticks));
-        s.pacer.catch_up = CatchUp::replay();
+        let mut s = Self::replay(&r.frames, r.ticks);
         s.viewing = Some(super::replay_log::ReplayView {
             name: next.name,
             map_hash: r.compat.map_hash,
@@ -567,26 +574,23 @@ pub struct DumpDir(pub std::path::PathBuf);
 /// read by the sim. (The HUD's network overlay, `ui::hud::net_overlay`,
 /// shows it: player list, banners, notices.)
 #[derive(Resource, Clone, Debug, Default)]
-#[allow(dead_code)]
 pub struct NetStatus {
     pub networked: bool,
-    pub host: bool,
-    /// This peer.
-    pub me: PeerId,
     /// Everyone in the match: seat, ping, gone.
     pub peers: Vec<PeerInfo>,
     pub delay: u32,
     /// Stalled for a turn (guest) or for players to show up (host): who,
     /// and since when (the driver's clock).
     pub waiting: Option<(Vec<PeerId>, Duration)>,
+    /// A desync, and where this peer's state dump went.
     pub desync: Option<Desync>,
-    /// Where this peer's desync dump went.
-    pub dump: Option<String>,
     pub ended: Option<Ended>,
     /// "Leave match" is under way.
     pub leaving: bool,
     /// The transport is closed: this peer is out of the match.
     pub closed: bool,
+    /// Still connected to a networked match ([`Session::connected`]).
+    pub connected: bool,
     /// Who came and went in the last [`NOTICE_SECS`].
     pub notices: Vec<Notice>,
     /// Joining late, still replaying the match: (ticks applied, the
@@ -594,6 +598,8 @@ pub struct NetStatus {
     pub catching_up: Option<(u32, u32)>,
     /// Playing a replay.
     pub replay: Option<ReplayStatus>,
+    /// (Read by the WebRTC tests.)
+    #[cfg_attr(not(test), allow(dead_code))]
     pub last_frame: FrameReport,
     pub now: Duration,
 }
@@ -613,12 +619,23 @@ pub struct ReplayStatus {
 struct WorldRunner<'w> {
     world: &'w mut World,
     step: Duration,
-    dump: Option<String>,
+}
+
+/// The local team a session decides: the roster's seat in a networked
+/// match (spectating without one), and a replay's viewer watches.
+/// `None` in single player, where the setup's human seat decides
+/// (`map_loading::match_scope::begin_match`).
+pub(crate) fn local_team(session: &Session) -> Option<u8> {
+    (session.is_networked() || session.is_replay()).then(|| {
+        session
+            .player()
+            .unwrap_or(crate::game_setup::SPECTATOR_TEAM)
+    })
 }
 
 /// The player whose input the bus seals: the local seat, nobody when
-/// spectating (`apply_sim_commands` decides the same way).
-fn local_player(world: &World) -> Option<u8> {
+/// spectating (`apply_sim_commands` too).
+pub(crate) fn local_player(world: &World) -> Option<u8> {
     world
         .get_resource::<crate::units::player::LocalTeam>()
         .map_or(Some(0), |t| {
@@ -692,7 +709,6 @@ impl TickRunner for WorldRunner<'_> {
         );
         let place = write_dump(self.world, &name, &text);
         error!("desync at frame {}: state dumped to {place}", d.frame);
-        self.dump = Some(place.clone());
         place
     }
 }
@@ -722,25 +738,7 @@ fn write_dump(_world: &World, name: &str, text: &str) -> String {
     for line in text.lines() {
         error!("{line}");
     }
-    let downloaded = (|| {
-        use wasm_bindgen::JsCast;
-        let parts = js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(text));
-        let blob = web_sys::Blob::new_with_str_sequence(&parts).ok()?;
-        let url = web_sys::Url::create_object_url_with_blob(&blob).ok()?;
-        let document = web_sys::window()?.document()?;
-        let a = document
-            .create_element("a")
-            .ok()?
-            .dyn_into::<web_sys::HtmlAnchorElement>()
-            .ok()?;
-        a.set_href(&url);
-        a.set_download(name);
-        a.click();
-        web_sys::Url::revoke_object_url(&url).ok()?;
-        Some(())
-    })()
-    .is_some();
-    if downloaded {
+    if super::replay_log::download(name, text.as_bytes()) {
         format!("the console and the download {name}")
     } else {
         "the console".into()
@@ -760,11 +758,7 @@ pub fn drive_fixed_main(world: &mut World) {
                 seat_networked(world, &mut net.session);
             }
         }
-        let mut runner = WorldRunner {
-            world,
-            step,
-            dump: None,
-        };
+        let mut runner = WorldRunner { world, step };
         let rep = drive_frame(
             &mut net.session,
             &mut net.pacer,
@@ -787,7 +781,6 @@ pub fn drive_fixed_main(world: &mut World) {
                     .insert_resource(BackToRoom { transport, peers });
             }
         }
-        let dumped = runner.dump.take();
         // The render blend: how far the clock is into the next tick.
         let mut fixed = world.resource_mut::<Time<Fixed>>();
         let over = fixed.overstep();
@@ -799,16 +792,14 @@ pub fn drive_fixed_main(world: &mut World) {
         if let Some(hidden) = world.get_resource::<TabHidden>() {
             net.session.set_away(hidden.0);
         }
-        let names = world
-            .get_resource::<PeerNames>()
-            .cloned()
-            .unwrap_or_default();
         let mut said = Vec::new();
         for ev in net.session.take_events() {
             match ev {
                 SessionEvent::Chat { from, text } => said.push(ChatLine {
                     from,
-                    name: names.name(from),
+                    name: world
+                        .get_resource::<PeerNames>()
+                        .map_or_else(|| from.to_string(), |n| n.name(from)),
                     text,
                 }),
                 SessionEvent::Left(peer) => {
@@ -879,11 +870,8 @@ pub fn drive_fixed_main(world: &mut World) {
                 .map_or(100, |c| c.internal_percent),
         });
         let mut status = world.get_resource_or_insert_with(NetStatus::default);
-        let dump = dumped.or(status.dump.take().filter(|_| s.desync().is_some()));
         *status = NetStatus {
             networked: s.is_networked(),
-            host: s.is_host(),
-            me: s.me(),
             peers: if s.is_networked() {
                 s.peers()
             } else {
@@ -892,10 +880,10 @@ pub fn drive_fixed_main(world: &mut World) {
             delay: s.delay(),
             waiting,
             desync: s.desync().cloned(),
-            dump,
             ended: s.ended(),
             leaving,
             closed: s.closed(),
+            connected: s.connected(),
             notices,
             catching_up,
             replay,
@@ -910,10 +898,9 @@ pub fn drive_fixed_main(world: &mut World) {
 /// it; every peer has the same roster, so every peer fills in the same),
 /// and the host checks what it sequences against those rules.
 fn seat_networked(world: &mut World, session: &mut Session) {
-    let team = session
-        .player()
-        .unwrap_or(crate::game_setup::SPECTATOR_TEAM);
-    world.insert_resource(crate::units::player::LocalTeam(team));
+    if let Some(team) = local_team(session) {
+        world.insert_resource(crate::units::player::LocalTeam(team));
+    }
     let host = session.host_player();
     let Some(mut active) = world.get_resource_mut::<crate::game_setup::ActiveMatch>() else {
         return;

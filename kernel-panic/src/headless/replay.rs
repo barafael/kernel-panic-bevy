@@ -12,7 +12,7 @@
 //!   match from its turns instead (`net::replay_log`).
 //! - **Playing** ([`play`]): the recorded setup through the headless
 //!   harness, the log played back as turns by a replay session
-//!   ([`Session::replay`], as the game's replay viewer plays a file),
+//!   ([`NetSession::replay`], as the game's replay viewer plays a file),
 //!   one per tick, applied by the same `apply_sim_commands` as
 //!   everything else. Every tick's state hash goes into the trail
 //!   ([`trail_text`]).
@@ -31,8 +31,7 @@ use bevy::prelude::*;
 
 use super::{AssetRoot, Executor, HashLog, Scenario, SimHarness, TickHash};
 use crate::game_setup::PlayerSpec;
-use crate::net::driver::{CatchUp, NetSession, Pacer};
-use crate::net::session::Session;
+use crate::net::driver::NetSession;
 
 /// The sim version and the compatibility stamp live with the lobby,
 /// which compares them before a networked match ([`crate::net::compat`]).
@@ -160,11 +159,7 @@ pub async fn play(
     }
     // The log as turns, one per tick (the clock below runs one tick a
     // frame: no catch-up).
-    let mut net = NetSession::new(Session::replay(&replay.frames, ticks as u32));
-    net.pacer = Pacer {
-        catch_up: CatchUp::replay(),
-        ..Pacer::default()
-    };
+    let net = NetSession::replay(&replay.frames, ticks as u32);
     h.world_mut().insert_resource(net);
     let mut shuffle_rng = 0x5eed_u32;
     let (mut sim_secs, mut frame_secs) = (0.0, 0.0);

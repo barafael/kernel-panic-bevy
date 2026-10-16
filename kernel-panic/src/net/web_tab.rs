@@ -22,8 +22,8 @@
 //! The other players are told ([`TabHidden`] → `Session::set_away`):
 //! their player list says "tab hidden". Should the browser stop the
 //! worker too (a frozen or discarded tab), the existing rules apply:
-//! a silent guest is dropped after the timeout, one that fell behind by
-//! more than the host's turn history is dropped too.
+//! a silent guest is dropped after the timeout, one far behind that
+//! stopped catching up is dropped too (`session::stalled`).
 
 use bevy::prelude::*;
 
@@ -169,9 +169,7 @@ mod web {
         mut last_applied: Local<u32>,
     ) {
         let wanted = lobby.is_some_and(|l| l.lobby.is_some())
-            || net
-                .as_ref()
-                .is_some_and(|n| n.session.is_networked() && !n.session.closed());
+            || net.as_ref().is_some_and(|n| n.session.connected());
         if wanted != WANTED.get() {
             WANTED.set(wanted);
             tell_worker();

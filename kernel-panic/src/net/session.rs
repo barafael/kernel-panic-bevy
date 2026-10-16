@@ -71,7 +71,7 @@ use std::time::Duration;
 use super::lobby::{self, LobbyMsg, StartMsg};
 use super::rejoin::{Door, PlayerKey, Running};
 use super::speed::{PeerLoad, SERVER_PLAYER, SpeedControl, SpeedPolicy};
-use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
+use super::transport::{Channel, PeerEvent, PeerId, Transport};
 use super::wire::{self, Batch, Echo, InputPacket, Msg, PlayerCommands, Turn, TurnPacket, TurnRun};
 use super::{CommandFrame, SimCommand};
 use crate::sim::DetFloat;
@@ -288,6 +288,44 @@ impl TurnBuffer {
     }
 }
 
+/// A replay's command log ([`Session::replay`]), made into turns one at
+/// a time as they are played.
+struct ReplayLog {
+    /// The frames before `end`, in tick order (a tick's in log order).
+    frames: std::iter::Peekable<std::vec::IntoIter<CommandFrame>>,
+    end: u32,
+}
+
+impl ReplayLog {
+    fn new(frames: &[CommandFrame], end: u32) -> Self {
+        let mut frames: Vec<CommandFrame> =
+            frames.iter().filter(|f| f.tick < end).cloned().collect();
+        frames.sort_by_key(|f| f.tick);
+        Self {
+            frames: frames.into_iter().peekable(),
+            end,
+        }
+    }
+
+    /// The turn of `tick` (the one after the last): its frames merged
+    /// per player, by player.
+    fn turn(&mut self, tick: u32) -> Turn {
+        let mut frames: Vec<PlayerCommands> = Vec::new();
+        while let Some(f) = self.frames.next_if(|f| f.tick == tick) {
+            match frames.iter_mut().find(|(p, _)| *p == f.player) {
+                Some((_, list)) => list.extend(f.commands),
+                None => frames.push((f.player, f.commands)),
+            }
+        }
+        frames.sort_by_key(|(p, _)| *p);
+        Turn {
+            tick,
+            delay: 0,
+            frames,
+        }
+    }
+}
+
 /// Round-trip estimate (RFC 6298's SRTT / RTTVAR), in ms.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rtt {
@@ -306,6 +344,16 @@ impl Rtt {
                 self.rttvar = 0.75 * self.rttvar + 0.25 * (s - ms).abs();
                 self.srtt = Some(0.875 * s + 0.125 * ms);
             }
+        }
+    }
+
+    /// The other side echoed our stamp (if it did), received `now`.
+    fn echo(&mut self, echo: Option<Echo>, now: Duration) {
+        if let Some(e) = echo {
+            let rtt = ms(now)
+                .wrapping_sub(e.stamp)
+                .saturating_sub(e.held_ms as u32);
+            self.sample(rtt as f32);
         }
     }
 }
@@ -410,8 +458,8 @@ pub struct Desync {
     pub stop_at: u32,
     /// The peers whose hash differed from the host's.
     pub peers: Vec<PeerId>,
-    /// This peer wrote its dump.
-    pub dumped: bool,
+    /// Where this peer's state dump went, once written (the driver).
+    pub dump: Option<String>,
 }
 
 /// Why a match ended for this peer.
@@ -512,8 +560,6 @@ struct Host {
     /// Lets late joiners in (`None`: nobody gets in; protocol tests).
     door: Option<Door>,
     last_pings: Option<Duration>,
-    /// Commands the rules refused (copied into [`SessionStats`]).
-    refused: u64,
     /// Everyone's load and Spring's lag protection over them.
     speed: SpeedControl,
     /// Numbers the speed control's commands in the schedule.
@@ -535,7 +581,6 @@ impl std::fmt::Debug for Host {
 
 #[derive(Debug, Default)]
 struct Guest {
-    host: PeerId,
     next_seq: u32,
     unacked: VecDeque<Batch>,
     host_newest: Option<u32>,
@@ -543,9 +588,10 @@ struct Guest {
     stamp_in: Option<(u32, Duration)>,
     last_send: Option<Duration>,
     sent_through: u32,
-    /// A gap first seen (tick, when), and the last resend request.
+    /// A gap first seen (tick, when), and the last resend request
+    /// (from which tick, when).
     gap_seen: Option<(u32, Duration)>,
-    resend_at: Option<Duration>,
+    resent: Option<(u32, Duration)>,
     /// When the host was last heard from (any message).
     last_heard: Option<Duration>,
     /// Everyone's round trip to the host, as it last told us.
@@ -609,7 +655,7 @@ pub struct Session {
     transport: Option<Box<dyn Transport>>,
     /// Who the transport is connected to (the roster to begin with,
     /// then its peer events): what [`Self::hand_back`] hands on.
-    connected: std::collections::BTreeSet<PeerId>,
+    connected_to: std::collections::BTreeSet<PeerId>,
     /// Peers whose browser tab is hidden (this one included).
     away: std::collections::BTreeSet<PeerId>,
     timeouts: Timeouts,
@@ -626,10 +672,10 @@ pub struct Session {
     frame_tick: u32,
     /// The commands of every turn applied here, in tick then player
     /// order: the match's turn log as a replay file keeps it
-    /// ([`Self::log`]). Not kept while playing a replay.
+    /// ([`Self::take_log`]). Not kept while playing a replay.
     log: Vec<CommandFrame>,
-    /// A replay ([`Self::replay`]): the ticks it has.
-    replay_end: Option<u32>,
+    /// A replay ([`Self::replay`]): its log, played turn by turn.
+    replay: Option<ReplayLog>,
     pub stats: SessionStats,
 }
 
@@ -654,13 +700,8 @@ fn echo(stamp_in: Option<(u32, Duration)>, now: Duration) -> Option<Echo> {
 }
 
 impl Session {
-    /// Single player: a host alone, delay 0, no transport.
-    pub fn solo() -> Self {
-        let bounds = DelayBounds {
-            initial: 0,
-            min: 0,
-            max: 0,
-        };
+    /// What every session starts with, playing `role`.
+    fn base(role: Role) -> Self {
         Self {
             match_id: 0,
             me: PeerId::default(),
@@ -668,21 +709,31 @@ impl Session {
             roster: BTreeMap::new(),
             networked: false,
             transport: None,
-            connected: Default::default(),
+            connected_to: Default::default(),
             away: Default::default(),
             timeouts: Timeouts::default(),
             opened: None,
             turns: TurnBuffer::default(),
             delay: 0,
-            role: Role::Host(Box::new(Host::new(bounds, true))),
+            role,
             desync: None,
             ended: None,
             events: Vec::new(),
             frame_tick: 0,
             log: Vec::new(),
-            replay_end: None,
+            replay: None,
             stats: SessionStats::default(),
         }
+    }
+
+    /// Single player: a host alone, delay 0, no transport.
+    pub fn solo() -> Self {
+        let bounds = DelayBounds {
+            initial: 0,
+            min: 0,
+            max: 0,
+        };
+        Self::base(Role::Host(Box::new(Host::new(bounds, true))))
     }
 
     /// A recorded match played back: every turn of `frames` (a replay
@@ -692,28 +743,10 @@ impl Session {
     /// resume on the next turn (the pause took no turns), so a replay
     /// never stops for it.
     pub fn replay(frames: &[CommandFrame], ticks: u32) -> Self {
-        let mut turns: BTreeMap<u32, Vec<PlayerCommands>> = BTreeMap::new();
-        for f in frames.iter().filter(|f| f.tick < ticks) {
-            let frames = turns.entry(f.tick).or_default();
-            match frames.iter_mut().find(|(p, _)| *p == f.player) {
-                Some((_, list)) => list.extend(f.commands.iter().cloned()),
-                None => frames.push((f.player, f.commands.clone())),
-            }
+        Self {
+            replay: Some(ReplayLog::new(frames, ticks)),
+            ..Self::base(Role::Guest(Box::default()))
         }
-        let mut s = Self::solo();
-        s.role = Role::Guest(Box::default());
-        s.turns = TurnBuffer::unbounded();
-        for tick in 0..ticks {
-            let mut frames = turns.remove(&tick).unwrap_or_default();
-            frames.sort_by_key(|(p, _)| *p);
-            s.turns.push(Turn {
-                tick,
-                delay: 0,
-                frames,
-            });
-        }
-        s.replay_end = Some(ticks);
-        s
     }
 
     /// A networked match over `transport`.
@@ -735,42 +768,12 @@ impl Session {
                     },
                 );
             }
-            h.started = h.links.is_empty();
+            h.check_started();
             Role::Host(Box::new(h))
         } else {
-            Role::Guest(Box::new(Guest {
-                host,
-                ..Default::default()
-            }))
+            Role::Guest(Box::default())
         };
-        let connected = cfg
-            .roster
-            .keys()
-            .copied()
-            .filter(|p| *p != cfg.me)
-            .collect();
-        Self {
-            match_id: cfg.match_id,
-            me: cfg.me,
-            host,
-            delay: cfg.delay.initial,
-            roster: cfg.roster,
-            networked: true,
-            transport: Some(transport),
-            connected,
-            away: Default::default(),
-            timeouts: Timeouts::default(),
-            opened: None,
-            turns: TurnBuffer::default(),
-            role,
-            desync: None,
-            ended: None,
-            events: Vec::new(),
-            frame_tick: 0,
-            log: Vec::new(),
-            replay_end: None,
-            stats: SessionStats::default(),
-        }
+        Self::over(cfg, host, role, transport)
     }
 
     /// Joining a running match (M3, [`super::rejoin`]): a player back on
@@ -785,15 +788,36 @@ impl Session {
         gone: &[PeerId],
         transport: Box<dyn Transport>,
     ) -> Self {
-        let mut s = Self::networked(cfg, transport);
-        s.host = host;
-        s.role = Role::Guest(Box::new(Guest {
-            host,
+        let role = Role::Guest(Box::new(Guest {
             gone: gone.iter().copied().collect(),
             ..Default::default()
         }));
-        s.turns = TurnBuffer::unbounded();
-        s
+        Self {
+            turns: TurnBuffer::unbounded(),
+            ..Self::over(cfg, host, role, transport)
+        }
+    }
+
+    /// The match `cfg` over `transport`, sequenced by `host`, this peer
+    /// playing `role`.
+    fn over(cfg: SessionConfig, host: PeerId, role: Role, transport: Box<dyn Transport>) -> Self {
+        let connected_to = cfg
+            .roster
+            .keys()
+            .copied()
+            .filter(|p| *p != cfg.me)
+            .collect();
+        Self {
+            match_id: cfg.match_id,
+            me: cfg.me,
+            host,
+            delay: cfg.delay.initial,
+            roster: cfg.roster,
+            networked: true,
+            transport: Some(transport),
+            connected_to,
+            ..Self::base(role)
+        }
     }
 
     pub fn is_networked(&self) -> bool {
@@ -802,12 +826,12 @@ impl Session {
 
     /// Playing a replay ([`Self::replay`]).
     pub fn is_replay(&self) -> bool {
-        self.replay_end.is_some()
+        self.replay.is_some()
     }
 
     /// The ticks a replay has.
     pub fn replay_end(&self) -> Option<u32> {
-        self.replay_end
+        self.replay.as_ref().map(|r| r.end)
     }
 
     /// Host: let late joiners in ([`Door`]; the lobby hands it over with
@@ -820,8 +844,14 @@ impl Session {
 
     /// The commands of every turn applied so far, by tick then player
     /// (non-empty frames only): a replay's command log.
+    #[cfg(test)]
     pub fn log(&self) -> &[CommandFrame] {
         &self.log
+    }
+
+    /// The command log, taken out (the match is over).
+    pub fn take_log(&mut self) -> Vec<CommandFrame> {
+        std::mem::take(&mut self.log)
     }
 
     /// The newest turn the host has cut, as far as this peer knows (how
@@ -862,18 +892,13 @@ impl Session {
     /// `None` without one (single player, already closed).
     pub fn hand_back(&mut self) -> Option<(Box<dyn Transport>, Vec<PeerId>)> {
         self.transport.as_ref()?;
-        let to = match &self.role {
-            Role::Host(_) => self.guests(),
-            Role::Guest(g) => vec![g.host],
-        };
-        for peer in to {
-            self.send(peer, Channel::Reliable, Msg::Bye);
-        }
+        let to = self.others();
+        self.send_to(&to, Channel::Reliable, Msg::Bye);
         let transport = self.transport.take()?;
         if self.ended.is_none() {
             self.ended = Some(Ended::Left);
         }
-        Some((transport, self.connected.iter().copied().collect()))
+        Some((transport, self.connected_to.iter().copied().collect()))
     }
 
     /// Say `text` to everyone in the match (the host relays it; see
@@ -886,25 +911,19 @@ impl Session {
         let me = self.me;
         match &self.role {
             Role::Host(_) => self.relay_chat(me, text),
-            Role::Guest(g) => {
-                let host = g.host;
-                self.send(host, Channel::Reliable, Msg::Chat { from: me, text });
-            }
+            Role::Guest(_) => self.send(self.host, Channel::Reliable, Msg::Chat { from: me, text }),
         }
     }
 
     /// Host: `text` from `from` to every guest and to ourselves.
     fn relay_chat(&mut self, from: PeerId, text: String) {
-        for guest in self.guests() {
-            self.send(
-                guest,
-                Channel::Reliable,
-                Msg::Chat {
-                    from,
-                    text: text.clone(),
-                },
-            );
-        }
+        self.broadcast(
+            Msg::Chat {
+                from,
+                text: text.clone(),
+            },
+            None,
+        );
         self.events.push(SessionEvent::Chat { from, text });
     }
 
@@ -916,18 +935,8 @@ impl Session {
             return;
         }
         self.mark_away(me, away);
-        let msg = Msg::Away { peer: me, away };
-        match &self.role {
-            Role::Host(_) => {
-                for guest in self.guests() {
-                    self.send(guest, Channel::Reliable, msg.clone());
-                }
-            }
-            Role::Guest(g) => {
-                let host = g.host;
-                self.send(host, Channel::Reliable, msg);
-            }
-        }
+        let to = self.others();
+        self.send_to(&to, Channel::Reliable, Msg::Away { peer: me, away });
     }
 
     fn mark_away(&mut self, peer: PeerId, away: bool) {
@@ -941,6 +950,12 @@ impl Session {
     /// The transport is gone ([`Self::close`]).
     pub fn closed(&self) -> bool {
         self.networked && self.transport.is_none()
+    }
+
+    /// In a networked match that is still connected (networked, not
+    /// [`Self::closed`]).
+    pub fn connected(&self) -> bool {
+        self.transport.is_some()
     }
 
     /// Guest: command batches the host hasn't acknowledged yet (0 for
@@ -1038,10 +1053,9 @@ impl Session {
                     at: now,
                 },
             ),
-            Role::Guest(g) => {
-                let host = g.host;
+            Role::Guest(_) => {
                 self.send(
-                    host,
+                    self.host,
                     Channel::Unreliable,
                     Msg::Load {
                         permille: permille(cpu),
@@ -1071,14 +1085,12 @@ impl Session {
         // Nor does a hidden browser tab (`Msg::Away`): the browser may
         // starve it whatever the game does, and it is not watching.
         let away = &self.away;
-        let counted: Vec<PeerId> = std::iter::once(me)
-            .chain(
-                h.links
-                    .iter()
-                    .filter(|(p, l)| l.player.is_some() && !l.gone && !away.contains(p))
-                    .map(|(p, _)| *p),
-            )
-            .collect();
+        let counted = std::iter::once(me).chain(
+            h.links
+                .iter()
+                .filter(|(p, l)| l.player.is_some() && !l.gone && !away.contains(p))
+                .map(|(p, _)| *p),
+        );
         if let Some(percent) = h.speed.update(now, counted, internal, wanted) {
             bevy::log::info!("speed control: game speed {internal} % -> {percent} %");
             let seq = h.server_seq;
@@ -1155,7 +1167,7 @@ impl Session {
                 .filter(|(_, l)| !l.heard && !l.gone)
                 .map(|(p, _)| *p)
                 .collect(),
-            Role::Guest(g) => vec![g.host],
+            Role::Guest(_) => vec![self.host],
         }
     }
 
@@ -1164,7 +1176,7 @@ impl Session {
     pub fn rtt(&self, peer: PeerId) -> Option<f32> {
         match &self.role {
             Role::Host(h) => h.links.get(&peer).and_then(|l| l.rtt.srtt),
-            Role::Guest(g) => (peer == g.host).then_some(g.rtt.srtt).flatten(),
+            Role::Guest(g) => (peer == self.host).then_some(g.rtt.srtt).flatten(),
         }
     }
 
@@ -1181,12 +1193,24 @@ impl Session {
         }
     }
 
+    /// Who this peer talks to: every connected guest (the host), the
+    /// host (a guest).
+    fn others(&self) -> Vec<PeerId> {
+        match &self.role {
+            Role::Host(_) => self.guests(),
+            Role::Guest(_) => vec![self.host],
+        }
+    }
+
     /// Turns applicable now: in hand, in order, and before a desync stop.
     pub fn ready(&self) -> usize {
         if self.ended.is_some() {
             return 0;
         }
-        let n = self.turns.ready();
+        let n = match &self.replay {
+            Some(r) => r.end.saturating_sub(self.turns.next()) as usize,
+            None => self.turns.ready(),
+        };
         match &self.desync {
             Some(d) => n.min(d.stop_at.saturating_sub(self.turns.next()) as usize),
             None => n,
@@ -1201,7 +1225,10 @@ impl Session {
                 .desync
                 .as_ref()
                 .is_some_and(|d| self.turns.next() >= d.stop_at)
-            || self.replay_end.is_some_and(|e| self.turns.next() >= e)
+            || self
+                .replay
+                .as_ref()
+                .is_some_and(|r| self.turns.next() >= r.end)
     }
 
     /// The next turn, if applicable now. Its delay becomes ours, its
@@ -1210,9 +1237,13 @@ impl Session {
         if self.ready() == 0 {
             return None;
         }
+        if let Some(r) = &mut self.replay {
+            let turn = r.turn(self.turns.next());
+            self.turns.push(turn);
+        }
         let turn = self.turns.pop()?;
         self.delay = turn.delay as u32;
-        if self.replay_end.is_none() {
+        if self.replay.is_none() {
             self.log
                 .extend(turn.frames.iter().filter(|(_, cmds)| !cmds.is_empty()).map(
                     |(player, cmds)| CommandFrame {
@@ -1257,7 +1288,7 @@ impl Session {
             Role::Host(h) => {
                 let seq = h.own_seq;
                 h.own_seq += 1;
-                let late = h.accept(
+                h.accept(
                     player,
                     Batch {
                         seq,
@@ -1265,9 +1296,8 @@ impl Session {
                         commands: frame.commands,
                     },
                     false,
+                    &mut self.stats,
                 );
-                self.stats.late_batches += late;
-                self.stats.refused = h.refused;
             }
             Role::Guest(g) => {
                 let seq = g.next_seq;
@@ -1338,10 +1368,7 @@ impl Session {
                     self.announce_desync(frame, applied, bad);
                 }
             }
-            Role::Guest(g) => {
-                let host = g.host;
-                self.send(host, Channel::Reliable, Msg::Hash { frame, hash });
-            }
+            Role::Guest(_) => self.send(self.host, Channel::Reliable, Msg::Hash { frame, hash }),
         }
     }
 
@@ -1355,28 +1382,52 @@ impl Session {
             frame,
             stop_at,
             peers: peers.clone(),
-            dumped: false,
+            dump: None,
         };
         self.events.push(SessionEvent::Desync(d.clone()));
         self.desync = Some(d);
-        for guest in self.guests() {
-            self.send(
-                guest,
-                Channel::Reliable,
-                Msg::Desync {
-                    frame,
-                    stop_at,
-                    peers: peers.clone(),
-                },
-            );
-        }
+        self.broadcast(
+            Msg::Desync {
+                frame,
+                stop_at,
+                peers,
+            },
+            None,
+        );
     }
 
     fn send(&mut self, to: PeerId, channel: Channel, msg: Msg) {
-        if let (Some(t), Some(bytes)) = (self.transport.as_mut(), wire::encode(self.match_id, msg))
-        {
-            t.send(to, channel, bytes);
+        self.send_to(&[to], channel, msg);
+    }
+
+    /// `msg` to each of `to`, encoded once.
+    fn send_to(&mut self, to: &[PeerId], channel: Channel, msg: Msg) {
+        if let Some(bytes) = wire::encode(self.match_id, msg) {
+            self.send_bytes(to, channel, bytes);
         }
+    }
+
+    /// An encoded message to each of `to`.
+    fn send_bytes(&mut self, to: &[PeerId], channel: Channel, bytes: Vec<u8>) {
+        let Some(t) = self.transport.as_mut() else {
+            return;
+        };
+        if let Some((last, rest)) = to.split_last() {
+            for &peer in rest {
+                t.send(peer, channel, bytes.clone());
+            }
+            t.send(*last, channel, bytes);
+        }
+    }
+
+    /// Host: `msg` to every connected guest but `except`, reliably.
+    fn broadcast(&mut self, msg: Msg, except: Option<PeerId>) {
+        let to: Vec<PeerId> = self
+            .guests()
+            .into_iter()
+            .filter(|g| Some(*g) != except)
+            .collect();
+        self.send_to(&to, Channel::Reliable, msg);
     }
 
     /// Take in everything that arrived; notice who left or went silent.
@@ -1393,10 +1444,10 @@ impl Session {
             // `Hello` (below); its `Joined` says nothing yet.
             match ev {
                 PeerEvent::Joined(peer) => {
-                    self.connected.insert(peer);
+                    self.connected_to.insert(peer);
                 }
                 PeerEvent::Left(peer) => {
-                    self.connected.remove(&peer);
+                    self.connected_to.remove(&peer);
                     self.peer_left(peer, Gone::Closed, now);
                 }
             }
@@ -1572,7 +1623,7 @@ impl Session {
             }
             Role::Guest(g) => {
                 if self.ended.is_none() && silent(g.last_heard, None) {
-                    bevy::log::warn!("no word from the host {}: giving up", g.host);
+                    bevy::log::warn!("no word from the host {}: giving up", self.host);
                     self.ended = Some(Ended::HostLost);
                     self.events.push(SessionEvent::HostLost);
                 }
@@ -1603,7 +1654,7 @@ impl Session {
                 // timeout had its minute, and "Back to room" is a choice.
                 link.gone = true;
                 let seat = link.player;
-                h.started |= h.links.values().all(|l| l.heard || l.gone);
+                h.check_started();
                 if how == Gone::Bye
                     && let Some(door) = h.door.as_mut()
                     && let Some(&key) = door.keys.get(&peer)
@@ -1622,12 +1673,10 @@ impl Session {
                 } else {
                     SessionEvent::Left(peer)
                 });
-                for guest in self.guests() {
-                    self.send(guest, Channel::Reliable, Msg::Left { peer });
-                }
+                self.broadcast(Msg::Left { peer }, None);
             }
-            Role::Guest(g) => {
-                if peer == g.host && self.ended.is_none() {
+            Role::Guest(_) => {
+                if peer == self.host && self.ended.is_none() {
                     self.ended = Some(Ended::HostLeft);
                     self.events.push(SessionEvent::HostLeft);
                 }
@@ -1648,27 +1697,21 @@ impl Session {
         let Role::Host(h) = &mut self.role else {
             return;
         };
-        if h.links.get(&from).is_none_or(|l| l.gone) {
+        let Some(link) = h.links.get_mut(&from).filter(|l| !l.gone) else {
             return;
-        }
+        };
+        link.last_heard = Some(now);
         match msg {
             Msg::Input(p) => {
-                let link = h.links.get_mut(&from).expect("checked above");
                 link.heard = true;
-                link.last_heard = Some(now);
                 if p.next_turn > link.next_turn || link.advanced.is_none() {
                     link.advanced = Some(now);
                 }
                 link.next_turn = link.next_turn.max(p.next_turn);
                 link.stamp_in = Some((p.stamp, now));
-                if let Some(e) = p.echo {
-                    let rtt = ms(now)
-                        .wrapping_sub(e.stamp)
-                        .saturating_sub(e.held_ms as u32);
-                    link.rtt.sample(rtt as f32);
-                }
+                link.rtt.echo(p.echo, now);
                 let player = link.player;
-                h.started |= h.links.values().all(|l| l.heard || l.gone);
+                h.check_started();
                 // A guest catching up after a stall (turns missing, or a
                 // pile of them in hand) is behind by far more than the
                 // network: its lag says nothing about the delay the rest
@@ -1680,21 +1723,12 @@ impl Session {
                 }
                 if let Some(player) = player {
                     for b in p.batches {
-                        self.stats.late_batches += h.accept(player, b, true);
+                        h.accept(player, b, true, &mut self.stats);
                     }
-                    self.stats.refused = h.refused;
                 }
             }
-            Msg::Resend { from: tick } => {
-                if let Some(l) = h.links.get_mut(&from) {
-                    l.last_heard = Some(now);
-                }
-                self.fill(from, tick);
-            }
+            Msg::Resend { from: tick } => self.fill(from, tick),
             Msg::Load { permille, behind } => {
-                if let Some(l) = h.links.get_mut(&from) {
-                    l.last_heard = Some(now);
-                }
                 let load = PeerLoad {
                     cpu: f32::from(permille) / 1000.0,
                     behind: u32::from(behind),
@@ -1703,9 +1737,6 @@ impl Session {
                 h.speed.report(from, load);
             }
             Msg::Hash { frame, hash } => {
-                if let Some(l) = h.links.get_mut(&from) {
-                    l.last_heard = Some(now);
-                }
                 let own = h.hashes.get(&frame).copied();
                 let newest = h.hashes.last_key_value().map(|(f, _)| *f);
                 match own {
@@ -1728,9 +1759,7 @@ impl Session {
             }
             Msg::Away { peer, away } if peer == from => {
                 self.mark_away(from, away);
-                for guest in self.guests().into_iter().filter(|g| *g != from) {
-                    self.send(guest, Channel::Reliable, Msg::Away { peer, away });
-                }
+                self.broadcast(Msg::Away { peer, away }, Some(from));
             }
             _ => {}
         }
@@ -1746,12 +1775,7 @@ impl Session {
             Msg::Turns(p) => {
                 g.host_newest = g.host_newest.max(p.newest);
                 g.stamp_in = Some((p.stamp, now));
-                if let Some(e) = p.echo {
-                    let rtt = ms(now)
-                        .wrapping_sub(e.stamp)
-                        .saturating_sub(e.held_ms as u32);
-                    g.rtt.sample(rtt as f32);
-                }
+                g.rtt.echo(p.echo, now);
                 while g.unacked.front().is_some_and(|b| b.seq < p.cmd_ack) {
                     g.unacked.pop_front();
                 }
@@ -1779,7 +1803,7 @@ impl Session {
                         frame,
                         stop_at,
                         peers,
-                        dumped: false,
+                        dump: None,
                     };
                     self.events.push(SessionEvent::Desync(d.clone()));
                     self.desync = Some(d);
@@ -1842,41 +1866,35 @@ impl Session {
     }
 
     /// Host: resend turns from `from` to a guest on the reliable channel,
-    /// in messages of at most [`MAX_MESSAGE`] bytes.
+    /// in messages of at most [`MAX_MESSAGE`](super::transport::MAX_MESSAGE) bytes.
     fn fill(&mut self, to: PeerId, from: u32) {
         let Role::Host(h) = &self.role else {
             return;
         };
-        let Some(base) = h.history.first().map(|t| t.tick) else {
-            return;
-        };
-        if from < base {
-            bevy::log::warn!("{to} needs turn {from}, the oldest kept is {base}");
-        }
-        let start = from.max(base);
-        let end = h.next_cut.min(start.saturating_add(FILL_MAX));
-        let turns: Vec<Turn> = (start..end)
-            .map(|t| h.history[(t - base) as usize].clone())
-            .collect();
-        let mut chunks: Vec<TurnRun> = Vec::new();
-        let mut rest = turns.as_slice();
-        while !rest.is_empty() {
-            // Halve until it fits (a quiet minute fits in one).
-            let mut n = rest.len().min(2048);
+        let end = h.next_cut.min(from.saturating_add(FILL_MAX)) as usize;
+        let mut start = from as usize;
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        while start < end {
+            // Halve until it fits (a quiet minute fits in one). A single
+            // turn too big for a message is not sent.
+            let mut n = end - start;
             loop {
-                let run = TurnRun::of(&rest[..n]);
-                let size = postcard::to_allocvec(&run).map_or(usize::MAX, |v| v.len());
-                if size + 32 <= MAX_MESSAGE || n == 1 {
-                    chunks.push(run);
-                    break;
+                let msg = Msg::Fill(TurnRun::of(&h.history[start..start + n]));
+                match wire::encode_if_fits(self.match_id, &msg) {
+                    Some(bytes) => chunks.push(bytes),
+                    None if n > 1 => {
+                        n /= 2;
+                        continue;
+                    }
+                    None => {}
                 }
-                n /= 2;
+                break;
             }
-            rest = &rest[n..];
+            start += n;
         }
         self.stats.gap_fills += 1;
-        for run in chunks {
-            self.send(to, Channel::Reliable, Msg::Fill(run));
+        for bytes in chunks {
+            self.send_bytes(&[to], Channel::Reliable, bytes);
         }
     }
 
@@ -1886,12 +1904,13 @@ impl Session {
         if self.transport.is_none() {
             return;
         }
-        let mut out: Vec<(PeerId, Channel, Msg)> = Vec::new();
+        let mut out: Vec<(PeerId, Channel, Vec<u8>)> = Vec::new();
         let have = self.turns.have_through();
+        let host = self.host;
+        let match_id = self.match_id;
         match &mut self.role {
             Role::Host(h) => {
                 let newest = h.next_cut.checked_sub(1);
-                let base = h.history.first().map_or(0, |t| t.tick);
                 for (&peer, link) in h.links.iter_mut().filter(|(_, l)| !l.gone) {
                     let ack = link
                         .player
@@ -1900,38 +1919,38 @@ impl Session {
                     if !fresh && link.last_send.is_some_and(|t| now < t + KEEPALIVE) {
                         continue;
                     }
-                    let mut turns: Vec<Turn> = match newest {
+                    // The newest few turns the guest lacks.
+                    let (mut from, end) = match newest {
                         Some(n) if link.next_turn <= n => {
                             let from = link
                                 .next_turn
-                                .max((n + 1).saturating_sub(REDUNDANCY as u32))
-                                .max(base);
-                            (from..=n)
-                                .map(|t| h.history[(t - base) as usize].clone())
-                                .collect()
+                                .max((n + 1).saturating_sub(REDUNDANCY as u32));
+                            (from as usize, n as usize + 1)
                         }
-                        _ => Vec::new(),
+                        _ => (0, 0),
                     };
                     // Oversized (a burst of commands): send the newest
                     // turns that fit; the rest come as gap fills.
-                    let msg = loop {
+                    let bytes = loop {
                         let msg = Msg::Turns(TurnPacket {
                             cmd_ack: ack,
                             newest,
                             stamp: ms(now),
                             echo: echo(link.stamp_in, now),
-                            run: TurnRun::of(&turns),
+                            run: TurnRun::of(&h.history[from..end]),
                         });
-                        let size = postcard::to_allocvec(&msg).map_or(usize::MAX, |v| v.len());
-                        if size + 16 <= MAX_MESSAGE || turns.is_empty() {
-                            break msg;
+                        match wire::encode_if_fits(match_id, &msg) {
+                            Some(bytes) => break Some(bytes),
+                            None if from < end => from += 1,
+                            None => break None,
                         }
-                        turns.remove(0);
                     };
                     link.sent_newest = newest;
                     link.sent_ack = ack;
                     link.last_send = Some(now);
-                    out.push((peer, Channel::Unreliable, msg));
+                    if let Some(bytes) = bytes {
+                        out.push((peer, Channel::Unreliable, bytes));
+                    }
                 }
                 // Everyone's round trip, for the player lists (lossy is
                 // fine: the next one comes in a second).
@@ -1960,16 +1979,12 @@ impl Session {
                             })
                         })
                         .unzip();
+                    let pings = wire::encode(match_id, Msg::Pings { ms });
+                    let loads = wire::encode(match_id, Msg::Loads { permille, behind });
                     for (&peer, _) in h.links.iter().filter(|(_, l)| !l.gone) {
-                        out.push((peer, Channel::Unreliable, Msg::Pings { ms: ms.clone() }));
-                        out.push((
-                            peer,
-                            Channel::Unreliable,
-                            Msg::Loads {
-                                permille: permille.clone(),
-                                behind: behind.clone(),
-                            },
-                        ));
+                        for bytes in [&pings, &loads].into_iter().flatten() {
+                            out.push((peer, Channel::Unreliable, bytes.clone()));
+                        }
                     }
                 }
             }
@@ -1977,7 +1992,7 @@ impl Session {
                 let fresh = !g.unacked.is_empty() || self.frame_tick != g.sent_through;
                 if fresh || g.last_send.is_none_or(|t| now >= t + KEEPALIVE) {
                     let mut n = g.unacked.len();
-                    let msg = loop {
+                    let bytes = loop {
                         let msg = Msg::Input(InputPacket {
                             next_turn: have,
                             tick: self.frame_tick,
@@ -1985,18 +2000,23 @@ impl Session {
                             echo: echo(g.stamp_in, now),
                             batches: g.unacked.iter().take(n).cloned().collect(),
                         });
-                        let size = postcard::to_allocvec(&msg).map_or(usize::MAX, |v| v.len());
-                        if size + 16 <= MAX_MESSAGE || n == 0 {
-                            break msg;
+                        match wire::encode_if_fits(match_id, &msg) {
+                            Some(bytes) => break Some(bytes),
+                            None if n > 0 => n /= 2,
+                            None => break None,
                         }
-                        n /= 2;
                     };
                     g.sent_through = self.frame_tick;
                     g.last_send = Some(now);
-                    out.push((g.host, Channel::Unreliable, msg));
+                    if let Some(bytes) = bytes {
+                        out.push((host, Channel::Unreliable, bytes));
+                    }
                 }
                 // A turn exists that we lack, and redundancy did not
                 // bring it: ask for a fill, again every two round trips.
+                // A fill that came in whole is followed by the request
+                // for the next at once (a late joiner fetches the match
+                // `FILL_MAX` turns at a time).
                 let gap = g.host_newest.is_some_and(|n| have <= n);
                 if !gap {
                     g.gap_seen = None;
@@ -2011,16 +2031,23 @@ impl Session {
                     };
                     let wait = Duration::from_millis(100) + rtt;
                     let again = (rtt * 2).max(Duration::from_millis(250));
-                    if now >= seen + wait && g.resend_at.is_none_or(|t| now >= t + again) {
-                        g.resend_at = Some(now);
+                    let filled = g
+                        .resent
+                        .is_some_and(|(from, _)| have >= from.saturating_add(FILL_MAX));
+                    if filled
+                        || (now >= seen + wait && g.resent.is_none_or(|(_, t)| now >= t + again))
+                    {
+                        g.resent = Some((have, now));
                         self.stats.gap_fills += 1;
-                        out.push((g.host, Channel::Reliable, Msg::Resend { from: have }));
+                        if let Some(bytes) = wire::encode(match_id, Msg::Resend { from: have }) {
+                            out.push((host, Channel::Reliable, bytes));
+                        }
                     }
                 }
             }
         }
-        for (to, channel, msg) in out {
-            self.send(to, channel, msg);
+        for (to, channel, bytes) in out {
+            self.send_bytes(&[to], channel, bytes);
         }
     }
 }
@@ -2044,7 +2071,6 @@ impl Host {
             pending_drops: BTreeMap::new(),
             door: None,
             last_pings: None,
-            refused: 0,
             speed: SpeedControl::default(),
             server_seq: 0,
         }
@@ -2089,15 +2115,22 @@ impl Host {
         self.inputs.insert(seat, input);
     }
 
+    /// The host has heard from every guest still in the match: its
+    /// clock runs.
+    fn check_started(&mut self) {
+        self.started |= self.links.values().all(|l| l.heard || l.gone);
+    }
+
     /// File `batch` from `player`: exactly once, in seq order, never in
-    /// the past. Returns 1 if it came late.
+    /// the past; late batches and refused commands are counted in
+    /// `stats`.
     /// A guest's batch (`guest`) may not drop anyone, bring anyone back
     /// or set the speed control's speed: only the host issues `Dropped`,
     /// `Returned` and `InternalSpeed`.
-    fn accept(&mut self, player: u8, mut batch: Batch, guest: bool) -> u64 {
+    fn accept(&mut self, player: u8, mut batch: Batch, guest: bool, stats: &mut SessionStats) {
         let input = self.inputs.entry(player).or_default();
         if batch.seq < input.next_seq || input.held.contains_key(&batch.seq) {
-            return 0;
+            return;
         }
         if guest {
             let before = batch.commands.len();
@@ -2107,7 +2140,7 @@ impl Host {
                     SimCommand::Dropped | SimCommand::Returned | SimCommand::InternalSpeed { .. }
                 )
             });
-            self.refused += (before - batch.commands.len()) as u64;
+            stats.refused += (before - batch.commands.len()) as u64;
         }
         // The match rules: what they forbid is never sequenced (the
         // batch keeps its number, so the guest's acks still line up).
@@ -2116,13 +2149,12 @@ impl Host {
                 Ok(()) => true,
                 Err(why) => {
                     bevy::log::warn!("host: refused {cmd:?} from player {player}: {why}");
-                    self.refused += 1;
+                    stats.refused += 1;
                     false
                 }
             });
         }
         input.held.insert(batch.seq, batch);
-        let mut late = 0;
         while let Some(b) = input.held.remove(&input.next_seq) {
             input.next_seq += 1;
             let floor = input.last_target.max(self.next_cut);
@@ -2131,11 +2163,10 @@ impl Host {
             } else {
                 b.target.max(floor)
             };
-            late += (b.target < self.next_cut) as u64;
+            stats.late_batches += (b.target < self.next_cut) as u64;
             input.last_target = at;
             self.scheduled.insert((at, player, b.seq), b.commands);
         }
-        late
     }
 }
 
@@ -2182,22 +2213,22 @@ mod tests {
             target,
             commands: vec![stop()],
         };
-        assert_eq!(h.accept(1, b(1, 14), false), 0, "held for seq 0");
+        let mut stats = SessionStats::default();
+        h.accept(1, b(1, 14), false, &mut stats);
+        assert_eq!(stats.late_batches, 0, "held for seq 0");
         assert!(h.scheduled.is_empty());
-        assert_eq!(
-            h.accept(1, b(0, 8), false),
-            1,
-            "late: due at 8, cut is at 10"
-        );
-        assert_eq!(h.accept(1, b(0, 8), false), 0, "duplicate");
+        h.accept(1, b(0, 8), false, &mut stats);
+        assert_eq!(stats.late_batches, 1, "late: due at 8, cut is at 10");
+        h.accept(1, b(0, 8), false, &mut stats);
+        assert_eq!(stats.late_batches, 1, "duplicate");
         let keys: Vec<_> = h.scheduled.keys().copied().collect();
         assert_eq!(keys, vec![(10, 1, 0), (14, 1, 1)]);
         // A lower target later (the delay dropped) keeps the order.
-        h.accept(1, b(2, 12), false);
+        h.accept(1, b(2, 12), false, &mut stats);
         assert!(h.scheduled.contains_key(&(14, 1, 2)));
         // Paused: due on the next tick, whatever the target.
         h.paused = true;
-        h.accept(2, b(0, 40), false);
+        h.accept(2, b(0, 40), false, &mut stats);
         assert!(h.scheduled.contains_key(&(10, 2, 0)));
     }
 

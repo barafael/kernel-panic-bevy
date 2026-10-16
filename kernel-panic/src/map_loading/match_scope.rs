@@ -127,18 +127,16 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     // this peer (a spectator has none). The difficulty the menu picked
     // drives the AI.
     // A replay's viewer watches.
-    let networked = world
+    let local_team = world
         .get_resource::<NetSession>()
-        .filter(|n| n.session.is_networked() || n.session.is_replay())
-        .map(|n| n.session.player());
-    let local_team = match networked {
-        Some(seat) => seat.unwrap_or(SPECTATOR_TEAM),
-        None => setup
-            .players
-            .iter()
-            .position(|p| !p.ai)
-            .map_or(SPECTATOR_TEAM, |seat| seat as u8),
-    };
+        .and_then(|n| crate::net::driver::local_team(&n.session))
+        .unwrap_or_else(|| {
+            setup
+                .players
+                .iter()
+                .position(|p| !p.ai)
+                .map_or(SPECTATOR_TEAM, |seat| seat as u8)
+        });
     world.insert_resource(LocalTeam(local_team));
     // Who is allied, and which owners the AI plays, come from the
     // seats, never from who is watching: every peer runs the same

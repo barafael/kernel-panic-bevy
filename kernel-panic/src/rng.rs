@@ -90,11 +90,15 @@ fn launch_entropy() -> u64 {
     }
 }
 
+/// SplitMix64's step: what its state advances by per draw.
+pub(crate) const SPLITMIX64_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+
 /// SplitMix64's finaliser: spreads a seed's entropy over all 64 bits
 /// (xorshift needs many rounds to diffuse a seed that differs in only
-/// a few low bits).
+/// a few low bits). A SplitMix64 stream is this of its state, which
+/// then advances by [`SPLITMIX64_GAMMA`].
 pub(crate) fn splitmix64(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = z.wrapping_add(SPLITMIX64_GAMMA);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
     z ^ (z >> 31)

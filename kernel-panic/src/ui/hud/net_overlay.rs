@@ -118,7 +118,7 @@ fn type_chat(
     status: Option<Res<NetStatus>>,
     mut net: Option<ResMut<NetSession>>,
 ) {
-    let live = status.is_some_and(|s| s.networked && !s.closed);
+    let live = status.is_some_and(|s| s.connected);
     if !live {
         typed.clear();
         if input.open {
@@ -425,7 +425,7 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         return Some(format!(
             "Desync at frame {} — the game is stopped.\nState dump: {}",
             d.frame,
-            status.dump.as_deref().unwrap_or("pending")
+            d.dump.as_deref().unwrap_or("pending")
         ));
     }
     let over = match status.ended {
@@ -523,7 +523,6 @@ mod tests {
     fn status() -> NetStatus {
         NetStatus {
             networked: true,
-            me: PeerId(2),
             delay: 4,
             peers: vec![
                 peer(1, Some(0), Some(0)),

@@ -117,11 +117,9 @@ fn pair(a: PeerId, b: PeerId) -> (PeerId, PeerId) {
 impl Inner {
     /// SplitMix64: the network's own stream.
     fn next_u64(&mut self) -> u64 {
-        self.rng = self.rng.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let mut z = self.rng;
-        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
+        let z = crate::rng::splitmix64(self.rng);
+        self.rng = self.rng.wrapping_add(crate::rng::SPLITMIX64_GAMMA);
+        z
     }
 
     fn chance(&mut self, p: f64) -> bool {

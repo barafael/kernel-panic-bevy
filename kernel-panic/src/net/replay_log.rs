@@ -317,10 +317,11 @@ pub struct ActiveMapHash(pub u64);
 /// The shortest match worth a replay file: a second.
 const MIN_TICKS: u32 = 30;
 
-/// The replay of the match in `world`, if it is one worth keeping: a
-/// real match (not the menu's demo, a showcase or the dev tools'
-/// sandbox), not itself a replay, at least [`MIN_TICKS`] long.
-pub fn replay_of(world: &World) -> Option<Replay> {
+/// The replay of the match in `world` with its session's command `log`,
+/// if it is one worth keeping: a real match (not the menu's demo, a
+/// showcase or the dev tools' sandbox), not itself a replay, at least
+/// [`MIN_TICKS`] long.
+pub fn replay_of(world: &World, log: Vec<CommandFrame>) -> Option<Replay> {
     let net = world.get_resource::<NetSession>()?;
     let session = &net.session;
     let setup = &world.get_resource::<ActiveMatch>()?.0;
@@ -353,7 +354,7 @@ pub fn replay_of(world: &World) -> Option<Replay> {
         MatchSetup::of(setup),
         Compat::of(Build::current(), map_hash),
         session.applied(),
-        session.log().to_vec(),
+        log,
         meta,
     ))
 }
@@ -368,10 +369,13 @@ pub fn finish_match(world: &mut World) {
     {
         return;
     }
-    if let Some(mut net) = world.get_resource_mut::<NetSession>() {
+    let Some(log) = world.get_resource_mut::<NetSession>().map(|mut net| {
         net.replay_kept = true;
-    }
-    let Some(replay) = replay_of(world) else {
+        net.session.take_log()
+    }) else {
+        return;
+    };
+    let Some(replay) = replay_of(world, log) else {
         return;
     };
     let name = file_name(&replay);
@@ -459,9 +463,10 @@ pub struct RecentReplays(pub Vec<(String, Vec<u8>)>);
 #[cfg(target_arch = "wasm32")]
 const RECENT_KEPT: usize = 10;
 
-/// Web: offer `bytes` as a download named `name`.
+/// Web: offer `bytes` as a download named `name`; `false` if the page
+/// would not.
 #[cfg(target_arch = "wasm32")]
-pub fn download(name: &str, bytes: &[u8]) {
+pub fn download(name: &str, bytes: &[u8]) -> bool {
     use wasm_bindgen::JsCast;
     let done = (|| {
         let array = js_sys::Uint8Array::from(bytes);
@@ -482,6 +487,7 @@ pub fn download(name: &str, bytes: &[u8]) {
     if done.is_none() {
         warn!("could not offer {name} for download");
     }
+    done.is_some()
 }
 
 // --- playing --------------------------------------------------------------
