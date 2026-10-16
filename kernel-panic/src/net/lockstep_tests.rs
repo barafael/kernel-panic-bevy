@@ -32,6 +32,29 @@ struct Peer {
     /// State hash after each applied tick.
     hashes: Vec<u64>,
     stalls: u32,
+    /// Per remote player: the tick after the last frame delivered.
+    received: std::collections::HashMap<u8, u32>,
+}
+
+impl Peer {
+    /// The lockstep gate: every `remote` player's frame for the next
+    /// tick has arrived (each sends one per tick, empty or not). The
+    /// first `input_delay` ticks need nobody: no command can be
+    /// scheduled that early.
+    fn ready(&self, remote: &[u8]) -> bool {
+        let bus = self.h.world.resource::<CommandBus>();
+        bus.tick < bus.input_delay
+            || remote
+                .iter()
+                .all(|p| self.received.get(p).is_some_and(|&next| next > bus.tick))
+    }
+
+    /// A frame arrived (a remote player's, or our own straight back).
+    fn deliver(&mut self, frame: CommandFrame) {
+        let next = self.received.entry(frame.player).or_default();
+        *next = (*next).max(frame.tick + 1);
+        self.h.world.resource_mut::<CommandBus>().deliver(frame);
+    }
 }
 
 fn fnv(hash: &mut u64, bytes: &[u8]) {
@@ -153,7 +176,9 @@ fn peer(local: u8, delay: u32, entity_offset: usize, ai: bool) -> Peer {
     {
         let mut bus = h.world.resource_mut::<CommandBus>();
         bus.input_delay = delay;
-        bus.capture_outbox = true;
+        // Our frames go out through the outbox, and come back to us
+        // like everyone else's.
+        bus.routed = true;
         bus.log = Some(Vec::new());
     }
     h.pre_schedule.add_systems(apply::apply_sim_commands);
@@ -177,6 +202,7 @@ fn peer(local: u8, delay: u32, entity_offset: usize, ai: bool) -> Peer {
         local,
         hashes: Vec::new(),
         stalls: 0,
+        received: Default::default(),
     }
 }
 
@@ -378,7 +404,7 @@ fn run(delay: u32, latency: usize, ticks: u32, ai: bool) -> Outcome {
                 .copied()
                 .filter(|&p| p != peer.local)
                 .collect();
-            if !peer.h.world.resource::<CommandBus>().ready(&remote) {
+            if !peer.ready(&remote) {
                 peer.stalls += 1;
                 continue;
             }
@@ -395,6 +421,7 @@ fn run(delay: u32, latency: usize, ticks: u32, ai: bool) -> Outcome {
             let outbox = std::mem::take(&mut peer.h.world.resource_mut::<CommandBus>().outbox);
             for frame in outbox {
                 let bytes = frame.encode();
+                peer.deliver(frame);
                 wire_bytes[i] += bytes.len();
                 wire_frames += 1;
                 for j in 0..locals.len() {
@@ -408,12 +435,7 @@ fn run(delay: u32, latency: usize, ticks: u32, ai: bool) -> Outcome {
         let delivered = !due.is_empty();
         wire = later;
         for (_, to, bytes) in due {
-            let frame = CommandFrame::decode(&bytes).unwrap();
-            peers[to]
-                .h
-                .world
-                .resource_mut::<CommandBus>()
-                .deliver(frame);
+            peers[to].deliver(CommandFrame::decode(&bytes).unwrap());
         }
         assert!(
             progressed || delivered || !wire.is_empty(),
@@ -624,7 +646,7 @@ fn frame_sizes() {
             ))),
             queue: true,
         });
-        bus.capture_outbox = true;
+        bus.routed = true;
         bus.seal(Some(3));
         bus.tick += 6;
         queued.append(&mut bus.outbox);

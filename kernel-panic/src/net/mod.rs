@@ -15,8 +15,7 @@
 //!   very tick they would have landed on before the bus existed.
 //! - The in-sim AI issues through the same bus as its team's player
 //!   (frames for the next tick, not broadcast: every lockstep peer runs
-//!   the AI itself). `broadcast_ai` turns it into an ordinary remote
-//!   player instead (host-run AI).
+//!   the AI itself).
 //! - Lockstep (M1, `net-experiments/m1-runtime.md`): the tick driver
 //!   ([`driver`]) runs the fixed sim one turn at a time. Sealed local
 //!   frames leave through the outbox, the host ([`session`]) sequences
@@ -444,9 +443,6 @@ pub struct CommandFrame {
     pub commands: Vec<SimCommand>,
 }
 
-// The transport half (encode / decode / deliver) has no caller in the
-// game yet: only the lockstep tests exercise it.
-#[cfg_attr(not(test), allow(dead_code))]
 impl CommandFrame {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_allocvec(self).expect("frames always serialize")
@@ -460,10 +456,12 @@ impl CommandFrame {
 /// The command pipeline of one match.
 ///
 /// Issue side (input systems, the AI): [`CommandBus::issue`] /
-/// [`CommandBus::issue_as`]. Transport side: drain
-/// [`CommandBus::outbox`] (our sealed frames) and [`CommandBus::deliver`]
-/// remote ones. Sim side: [`apply::apply_sim_commands`] seals what was
-/// issued, then applies every frame due this tick, ordered by player.
+/// [`CommandBus::issue_as`]. Lockstep side: the tick driver drains
+/// [`CommandBus::outbox`] (our sealed frames) and hands back the turns
+/// ([`CommandBus::deliver_turn`]); a recorded log comes in frame by
+/// frame ([`CommandBus::deliver`]). Sim side:
+/// [`apply::apply_sim_commands`] seals what was issued, then applies
+/// every frame due this tick, ordered by player.
 #[derive(Resource, Debug, Default)]
 pub struct CommandBus {
     /// The tick the next apply runs (== ticks applied this match).
@@ -471,12 +469,6 @@ pub struct CommandBus {
     /// Ticks between issuing a command and applying it. 0 in single
     /// player; a lockstep match needs it to cover the round trip.
     pub input_delay: u32,
-    /// Seal AI commands like a remote player's (input delay + outbox)
-    /// instead of applying them next tick unsent.
-    pub broadcast_ai: bool,
-    /// Keep our sealed frames (empty ones too) in [`Self::outbox`] for
-    /// a transport. Off in single player, so nothing accumulates.
-    pub capture_outbox: bool,
     /// Lockstep: our sealed frames go to [`Self::outbox`] only and come
     /// back through the turn stream ([`Self::deliver_turn`]); nothing
     /// local is applied on its own. The tick driver sets it; a bare
@@ -492,8 +484,6 @@ pub struct CommandBus {
     last_sent: HashMap<u8, IdList>,
     /// Apply side of `Units::Prev`, per player.
     last_applied: HashMap<u8, IdList>,
-    /// Per remote player: the tick after the last frame delivered.
-    received: HashMap<u8, u32>,
     /// The tick the last seal ran for: the driver seals before running
     /// a tick, so the apply system's own seal finds nothing left.
     sealed: Option<u32>,
@@ -515,10 +505,9 @@ impl CommandBus {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    /// A remote player's frame arrived. A frame for a tick already
-    /// simulated is a desync (lockstep stalls instead of letting that
-    /// happen); it is dropped with an error.
+    /// A frame from outside (a recorded log: the golden replays, the
+    /// command fuzz). A frame for a tick already simulated is dropped
+    /// with an error.
     pub fn deliver(&mut self, frame: CommandFrame) {
         if frame.tick < self.tick {
             error!(
@@ -527,8 +516,6 @@ impl CommandBus {
             );
             return;
         }
-        let next = self.received.entry(frame.player).or_default();
-        *next = (*next).max(frame.tick + 1);
         if frame.commands.is_empty() {
             return;
         }
@@ -538,22 +525,9 @@ impl CommandBus {
             .extend(frame.commands);
     }
 
-    /// Lockstep gate: every `remote` player's frame for the current tick
-    /// has arrived (each sends one per tick, empty or not), so the tick
-    /// may run. The first `input_delay` ticks need nobody: no command
-    /// can be scheduled that early. The fixed-step driver must not run
-    /// the sim while this is false (not wired into the game yet).
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn ready(&self, remote: &[u8]) -> bool {
-        self.tick < self.input_delay
-            || remote
-                .iter()
-                .all(|p| self.received.get(p).is_some_and(|&next| next > self.tick))
-    }
-
     /// Seal what was issued since the last tick into frames: the local
-    /// player's for `tick + input_delay`, the AI's for `tick` (or like a
-    /// player's with `broadcast_ai`). Called first thing each tick (by
+    /// player's for `tick + input_delay`, the AI's for `tick`. Called
+    /// first thing each tick (by
     /// the tick driver, else by the apply system), so the frames sealed
     /// for `tick` itself apply now. Once per tick: a second call is a
     /// no-op.
@@ -568,16 +542,11 @@ impl CommandBus {
             let frame = self.seal_frame(tick, player, staged);
             if self.routed {
                 self.outbox.push(frame);
-            } else {
-                if self.capture_outbox {
-                    self.outbox.push(frame.clone());
-                }
-                if !frame.commands.is_empty() {
-                    self.pending
-                        .entry((frame.tick, frame.player))
-                        .or_default()
-                        .extend(frame.commands);
-                }
+            } else if !frame.commands.is_empty() {
+                self.pending
+                    .entry((frame.tick, frame.player))
+                    .or_default()
+                    .extend(frame.commands);
             }
         }
         let mut by_player: BTreeMap<u8, Vec<SimCommand>> = BTreeMap::new();
@@ -585,15 +554,7 @@ impl CommandBus {
             by_player.entry(player).or_default().push(cmd);
         }
         for (player, cmds) in by_player {
-            let tick = if self.broadcast_ai {
-                self.tick + self.input_delay
-            } else {
-                self.tick
-            };
-            let frame = self.seal_frame(tick, player, cmds);
-            if self.broadcast_ai && self.capture_outbox {
-                self.outbox.push(frame.clone());
-            }
+            let frame = self.seal_frame(self.tick, player, cmds);
             self.pending
                 .entry((frame.tick, frame.player))
                 .or_default()
