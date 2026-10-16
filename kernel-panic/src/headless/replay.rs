@@ -33,7 +33,6 @@ use super::{AssetRoot, Executor, HashLog, Scenario, SimHarness, TickHash};
 use crate::game_setup::PlayerSpec;
 use crate::net::driver::{CatchUp, NetSession, Pacer};
 use crate::net::session::Session;
-use crate::units::components::Faction;
 
 /// The sim version and the compatibility stamp live with the lobby,
 /// which compares them before a networked match ([`crate::net::compat`]).
@@ -47,15 +46,7 @@ impl MatchSetup {
     pub fn scenario(&self, map_file: Option<PathBuf>) -> Scenario {
         Scenario {
             map: self.map.clone(),
-            seats: self
-                .seats
-                .iter()
-                .map(|s| PlayerSpec {
-                    faction: Faction::ALL[s.faction as usize % Faction::ALL.len()],
-                    ally_team: s.ally_team,
-                    ai: s.ai,
-                })
-                .collect(),
+            seats: self.seats.iter().map(PlayerSpec::from).collect(),
             seed: self.seed,
             executor: Executor::Single,
             difficulty: self.difficulty,
