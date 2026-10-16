@@ -41,18 +41,26 @@ fn console_error(message: &str) {
     }
 }
 
-/// Panics reach the runner's console instead of a bare `unreachable`.
-fn install_panic_hook() {
-    static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| {
-        std::panic::set_hook(Box::new(|info| console_error(&format!("panic: {info}"))));
-    });
+/// Panics reach the runner's console instead of a bare `unreachable`,
+/// and fail it: the wasm trap that follows lands in whatever callback
+/// was running (a timer, a promise reaction) and may never settle the
+/// export's promise, so the message is thrown again from a fresh
+/// `setTimeout`, an uncaught error (a page error in a browser, the end
+/// of the process in Node). Installed by `main`, which the module runs
+/// once at instantiation.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let message = format!("panic: {info}");
+        console_error(&message);
+        let rethrow =
+            js_sys::Function::new_with_args("m", "setTimeout(() => { throw new Error(m); })");
+        let _ = rethrow.call1(&JsValue::NULL, &message.into());
+    }));
 }
 
 /// The map stem `log` plays on.
 #[wasm_bindgen]
 pub fn kp_replay_map(log: &[u8]) -> Result<String, JsError> {
-    install_panic_hook();
     Ok(Replay::decode(log)?.setup.map)
 }
 
@@ -65,7 +73,6 @@ pub async fn kp_replay(
     ticks: u32,
     dump_at: Vec<u32>,
 ) -> Result<js_sys::Array, JsError> {
-    install_panic_hook();
     let replay = Replay::decode(&log)?;
     let input = MapInput::in_memory(&replay.setup.map, map);
     let options = PlayOptions {
@@ -87,19 +94,6 @@ pub async fn kp_replay(
     }
     out.push(&dumps.into());
     Ok(out)
-}
-
-/// Resolve after `ms` milliseconds (`setTimeout`).
-async fn sleep_ms(ms: i32) {
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        let global = js_sys::global();
-        let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into())
-            .ok()
-            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-            .expect("no global setTimeout");
-        let _ = set_timeout.call2(&global, &resolve, &ms.into());
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 /// The ICE servers of `spec` ([`IceServer::parse_list`] syntax); empty:
@@ -136,7 +130,6 @@ pub async fn kp_net_peer(
     use bevy::platform::time::Instant;
     use std::time::Duration;
 
-    install_panic_hook();
     let room: RoomId = room.parse()?;
     let input = MapInput::in_memory(&map_name, map);
     let mut scenario = netplay::scenario(&map_name, humans, ai, seed as u64);
@@ -159,7 +152,7 @@ pub async fn kp_net_peer(
         if t0.elapsed() > Duration::from_secs(120) {
             return Err(JsError::new("the room never filled"));
         }
-        sleep_ms(10).await;
+        super::sleep_ms(10).await;
     };
     let me = t.local_id().expect("an id once connected");
     console_error(&format!(
@@ -179,7 +172,7 @@ pub async fn kp_net_peer(
             break;
         }
         // WebRTC and the timers run on the event loop.
-        sleep_ms(4).await;
+        super::sleep_ms(4).await;
     }
     Ok(netplay::trail_text(&peer.trail()))
 }
@@ -198,7 +191,6 @@ pub async fn kp_net_probe(
     use bevy::platform::time::Instant;
     use std::time::Duration;
 
-    install_panic_hook();
     let room: RoomId = room.parse()?;
     let cfg = NetConfig {
         signaling,
@@ -214,7 +206,7 @@ pub async fn kp_net_probe(
         if t0.elapsed() > Duration::from_secs(120) {
             return Err(JsError::new("nobody came"));
         }
-        sleep_ms(10).await;
+        super::sleep_ms(10).await;
     };
     let me = t.local_id().expect("an id once connected");
     let peer = *ids.iter().find(|&&p| p != me).expect("the other peer");
@@ -229,7 +221,7 @@ pub async fn kp_net_probe(
         }
         t.poll_peers();
         t.receive(Channel::Unreliable);
-        sleep_ms(2).await;
+        super::sleep_ms(2).await;
     }
     Ok(format!("{seq} packets sent\n"))
 }

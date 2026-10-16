@@ -50,7 +50,7 @@ pub use crate::net::state;
 #[cfg(test)]
 mod tests;
 #[cfg(all(feature = "replay", target_arch = "wasm32"))]
-mod web;
+pub mod web;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -243,20 +243,24 @@ pub async fn pause() {
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::sleep(Duration::from_millis(2));
     #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsCast;
-        let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-            // `setTimeout` is a global in browsers and in Node alike
-            // (Node has no `window`).
-            let global = js_sys::global();
-            let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into())
-                .ok()
-                .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
-                .expect("no global setTimeout");
-            let _ = set_timeout.call2(&global, &resolve, &0.into());
-        });
-        let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
-    }
+    sleep_ms(0).await;
+}
+
+/// Resolve after `ms` milliseconds of the JS event loop (`setTimeout`).
+#[cfg(target_arch = "wasm32")]
+async fn sleep_ms(ms: i32) {
+    use wasm_bindgen::JsCast;
+    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+        // `setTimeout` is a global in browsers and in Node alike
+        // (Node has no `window`).
+        let global = js_sys::global();
+        let set_timeout = js_sys::Reflect::get(&global, &"setTimeout".into())
+            .ok()
+            .and_then(|f| f.dyn_into::<js_sys::Function>().ok())
+            .expect("no global setTimeout");
+        let _ = set_timeout.call2(&global, &resolve, &ms.into());
+    });
+    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
 /// The harness's plugin set, the same on every target: the whole game

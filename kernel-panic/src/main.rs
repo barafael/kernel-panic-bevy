@@ -45,6 +45,8 @@ fn main() {
     // The replay build of the wasm module runs no game: the golden-replay
     // runner calls its `kp_replay` export (`headless::web`).
     if cfg!(all(feature = "replay", target_arch = "wasm32")) {
+        #[cfg(all(feature = "replay", target_arch = "wasm32"))]
+        headless::web::install_panic_hook();
         return;
     }
     // `--replay <log>…` / `--record-golden`: the golden-replay matrix,
