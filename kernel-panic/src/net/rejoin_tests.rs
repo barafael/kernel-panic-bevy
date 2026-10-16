@@ -21,7 +21,7 @@ use super::compat::{Build, Compat};
 use super::driver::{CatchUp, NetSession, NextNetMatch, drive_frame};
 use super::lobby::{Lobby, LobbyEvent, MapHave, StartMsg};
 use super::rejoin::{Door, PlayerKey};
-use super::session::{Session, SessionConfig, Timeouts};
+use super::session::{SessionConfig, Timeouts};
 use super::sim_net::{LinkParams, SimNetwork};
 use super::test_support::{self, Fake};
 use super::transport::PeerId;
