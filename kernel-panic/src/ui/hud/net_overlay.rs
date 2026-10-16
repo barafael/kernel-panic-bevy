@@ -506,7 +506,6 @@ mod tests {
     fn status() -> NetStatus {
         NetStatus {
             networked: true,
-            me: PeerId(2),
             delay: 4,
             peers: vec![
                 peer(1, Some(0), Some(0)),

@@ -567,12 +567,8 @@ pub struct DumpDir(pub std::path::PathBuf);
 /// read by the sim. (The HUD's network overlay, `ui::hud::net_overlay`,
 /// shows it: player list, banners, notices.)
 #[derive(Resource, Clone, Debug, Default)]
-#[allow(dead_code)]
 pub struct NetStatus {
     pub networked: bool,
-    pub host: bool,
-    /// This peer.
-    pub me: PeerId,
     /// Everyone in the match: seat, ping, gone.
     pub peers: Vec<PeerInfo>,
     pub delay: u32,
@@ -593,6 +589,8 @@ pub struct NetStatus {
     pub catching_up: Option<(u32, u32)>,
     /// Playing a replay.
     pub replay: Option<ReplayStatus>,
+    /// (Read by the WebRTC tests.)
+    #[cfg_attr(not(test), allow(dead_code))]
     pub last_frame: FrameReport,
     pub now: Duration,
 }
@@ -873,8 +871,6 @@ pub fn drive_fixed_main(world: &mut World) {
         let mut status = world.get_resource_or_insert_with(NetStatus::default);
         *status = NetStatus {
             networked: s.is_networked(),
-            host: s.is_host(),
-            me: s.me(),
             peers: if s.is_networked() {
                 s.peers()
             } else {

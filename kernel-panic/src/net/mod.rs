@@ -455,6 +455,12 @@ pub struct CommandFrame {
     pub commands: Vec<SimCommand>,
 }
 
+// A frame on its own (not in a turn) is for recorded logs: the golden
+// replays and the command fuzz (native, `replay` feature) and the tests.
+#[cfg_attr(
+    not(any(test, all(feature = "replay", not(target_arch = "wasm32")))),
+    allow(dead_code)
+)]
 impl CommandFrame {
     pub fn encode(&self) -> Vec<u8> {
         postcard::to_allocvec(self).expect("frames always serialize")
@@ -520,6 +526,10 @@ impl CommandBus {
     /// A frame from outside (a recorded log: the golden replays, the
     /// command fuzz). A frame for a tick already simulated is dropped
     /// with an error.
+    #[cfg_attr(
+        not(any(test, all(feature = "replay", not(target_arch = "wasm32")))),
+        allow(dead_code)
+    )]
     pub fn deliver(&mut self, frame: CommandFrame) {
         if frame.tick < self.tick {
             error!(

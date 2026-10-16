@@ -46,7 +46,6 @@ pub enum Channel {
 
 /// A change in who is connected. (Made by the transports: the simulated
 /// network in tests, matchbox.)
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PeerEvent {
     Joined(PeerId),
@@ -59,7 +58,6 @@ pub const MAX_MESSAGE: usize = 16 * 1024;
 /// A connection to the room.
 pub trait Transport: Send + Sync + 'static {
     /// This peer's id (`None` until the signaling server assigned one).
-    #[allow(dead_code)]
     fn local_id(&self) -> Option<PeerId>;
 
     /// Peers that connected or disconnected since the last call

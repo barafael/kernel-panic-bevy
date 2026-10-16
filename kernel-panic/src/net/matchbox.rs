@@ -52,9 +52,6 @@
 //!
 //! Findings and measurements: `net-experiments/m2-transport.md`.
 
-// Until the lobby (M2) opens rooms, only the tests call into this.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::future::Future;
@@ -202,6 +199,7 @@ impl RoomId {
         )
     }
 
+    #[cfg(test)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -235,6 +233,7 @@ pub struct IceServer {
 }
 
 impl IceServer {
+    #[cfg(test)]
     pub fn stun(url: &str) -> Self {
         Self {
             urls: vec![url.to_string()],
@@ -552,6 +551,7 @@ impl MatchboxTransport {
 
     /// The traffic counters, shared (they keep counting while the
     /// session owns the transport).
+    #[cfg(test)]
     pub fn stats(&self) -> Arc<Mutex<TransportStats>> {
         self.stats.clone()
     }
