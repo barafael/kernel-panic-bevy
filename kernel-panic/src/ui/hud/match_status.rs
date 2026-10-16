@@ -40,7 +40,7 @@ fn status_line(control: &MatchControl) -> String {
     } else if control.speed_percent != 100 {
         parts.push(format!("Speed {:.1}x", control.speed()));
     }
-    parts.join("  ·  ")
+    parts.join("  |  ")
 }
 
 fn show_match_status(
@@ -85,7 +85,7 @@ mod tests {
         c.paused = true;
         assert_eq!(status_line(&c), "Paused");
         c.set_wanted(150);
-        assert_eq!(status_line(&c), "Paused  ·  Speed 1.5x");
+        assert_eq!(status_line(&c), "Paused  |  Speed 1.5x");
         c.paused = false;
         assert_eq!(status_line(&c), "Speed 1.5x");
         c.set_internal(62);

@@ -244,7 +244,7 @@ pub(super) fn replays_page(
     }
     if cfg!(target_arch = "wasm32") {
         ButtonSpec::new(
-            "Open file…",
+            "Open file...",
             EASY_CYAN,
             size,
             (0.3, 0.12),

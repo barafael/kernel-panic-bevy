@@ -271,13 +271,13 @@ fn player_rows(
     control: Option<&MatchControl>,
 ) -> Vec<Row> {
     let mut head = format!(
-        "Players · delay {} ({} ms)",
+        "Players - delay {} ({} ms)",
         status.delay,
         status.delay * 1000 / 30
     );
     let slowed = control.filter(|c| c.slowed());
     if let Some(c) = slowed {
-        head.push_str(&format!(" · speed {:.2}x", c.speed()));
+        head.push_str(&format!(" - speed {:.2}x", c.speed()));
     }
     let mut rows = vec![Row::one(head, HEAD)];
     // Spring blinks the CPU of a loaded player while the game is slowed
@@ -311,7 +311,7 @@ fn player_rows(
         } else {
             match p.ping_ms {
                 Some(ms) => (format!("{ms} ms"), ping_color(ms)),
-                None => ("…".to_string(), GONE),
+                None => ("...".to_string(), GONE),
             }
         };
         let note = match out {
@@ -325,7 +325,7 @@ fn player_rows(
                 format!("{:>3}% ", (u32::from(l) + 5) / 10),
                 cpu_color(l, slowed.is_some() && p.player.is_some() && l > 750, blink),
             ),
-            None => ("   … ".to_string(), GONE),
+            None => ("   ... ".to_string(), GONE),
         };
         rows.push(Row {
             spans: vec![
@@ -438,7 +438,7 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         return Some(format!("{over}\nEsc: Back to room"));
     }
     if status.leaving {
-        return Some("Leaving the match…".to_string());
+        return Some("Leaving the match...".to_string());
     }
     let mut lines = Vec::new();
     if let Some((tick, newest)) = status.catching_up {
@@ -452,7 +452,7 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         // Brief stalls are just jitter.
         if status.now.saturating_sub(*since) > Duration::from_millis(300) {
             let who: Vec<String> = who.iter().map(|p| names.name(*p)).collect();
-            lines.push(format!("Waiting for {}…", who.join(", ")));
+            lines.push(format!("Waiting for {}...", who.join(", ")));
         }
     }
     for n in &status.notices {
@@ -549,11 +549,11 @@ mod tests {
         control.dropped.insert(2);
         let rows = player_rows(&st, &names, Some(1), Some(&al), Some(&control));
         let text: Vec<String> = rows.iter().map(Row::text).collect();
-        assert_eq!(text[0], "Players · delay 4 (133 ms)");
+        assert_eq!(text[0], "Players - delay 4 (133 ms)");
         assert_eq!(text[1], " 0 A  ada (host)        20% 0 ms");
         assert_eq!(text[2], " 1 A  peer-0002         40% 84 ms");
-        assert_eq!(text[3], " 2 E  peer-0003           … left  dropped");
-        assert_eq!(text[4], " - S  peer-0004           … tab hidden");
+        assert_eq!(text[3], " 2 E  peer-0003           ... left  dropped");
+        assert_eq!(text[4], " - S  peer-0004           ... tab hidden");
         assert_eq!(rows[3].spans[0].1, GONE);
         assert_eq!(rows[2].spans[0].1, Color::WHITE, "this peer");
         // Slowed down for peer 2 (load 80 %): the speed heads the list,
@@ -563,7 +563,7 @@ mod tests {
         st.peers[1].load_permille = Some(800);
         st.now = Duration::from_secs(3);
         let rows = player_rows(&st, &names, Some(1), Some(&al), Some(&control));
-        assert_eq!(rows[0].text(), "Players · delay 4 (133 ms) · speed 0.62x");
+        assert_eq!(rows[0].text(), "Players - delay 4 (133 ms) - speed 0.62x");
         assert_eq!(
             rows[2].spans[1],
             (" 80% ".to_string(), Color::srgb(0.5, 0.01, 0.01))
@@ -616,7 +616,7 @@ mod tests {
         st.notices = vec![Notice::Left(PeerId(3))];
         assert_eq!(
             banner_text(&st, &names).as_deref(),
-            Some("Waiting for peer-0001…\npeer-0003 left the match.")
+            Some("Waiting for peer-0001...\npeer-0003 left the match.")
         );
         st.ended = Some(Ended::HostLeft);
         assert_eq!(

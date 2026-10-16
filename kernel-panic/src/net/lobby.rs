@@ -1698,10 +1698,10 @@ impl Lobby {
             return Err("only the host starts the match".into());
         };
         let Some(room) = self.room.as_ref() else {
-            return Err("setting up the room…".into());
+            return Err("setting up the room...".into());
         };
         if !self.settled {
-            return Err("waiting for everyone to say hello…".into());
+            return Err("waiting for everyone to say hello...".into());
         }
         let seated: Vec<&SeatSpec> = room
             .seats
@@ -1717,7 +1717,7 @@ impl Lobby {
         }
         let map_hash = match self.my_map(&room.map) {
             MapHave::Hash(h) => h,
-            MapHave::Pending => return Err(format!("reading map {}…", room.map)),
+            MapHave::Pending => return Err(format!("reading map {}...", room.map)),
             MapHave::Missing => return Err(format!("you have no map {}", room.map)),
         };
         for s in &seated {
@@ -1735,7 +1735,7 @@ impl Lobby {
             }
             match &m.check {
                 Check::Refused(why) => return Err(format!("{} {why}", m.name)),
-                Check::Pending => return Err(format!("checking {}'s map…", m.name)),
+                Check::Pending => return Err(format!("checking {}'s map...", m.name)),
                 Check::Ok if !m.ready => {
                     return Err(format!("waiting for {} to be ready", m.name));
                 }

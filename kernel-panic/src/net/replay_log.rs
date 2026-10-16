@@ -161,7 +161,7 @@ pub enum ReplayError {
     Decode(#[from] postcard::Error),
     #[error(
         "replay recorded with sim version {}, unit bundle {:016x}, map {:016x}; \
-         this build has sim version {}, unit bundle {:016x}, map {:016x} — re-record it",
+         this build has sim version {}, unit bundle {:016x}, map {:016x}: re-record it",
         recorded.sim_version, recorded.units_hash, recorded.map_hash,
         current.sim_version, current.units_hash, current.map_hash
     )]

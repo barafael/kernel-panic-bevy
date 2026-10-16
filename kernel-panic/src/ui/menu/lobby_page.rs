@@ -172,9 +172,9 @@ fn room_view(
         // A running match asked us in (`net::rejoin`): its map is
         // being checked.
         let text = if l.joining() {
-            "A match is running in this room: joining it…"
+            "A match is running in this room: joining it..."
         } else {
-            "Meeting the room…"
+            "Meeting the room..."
         };
         LabelSpec::new(text, page_size * 0.8, (0.5, 0.6), Anchor::Cc).spawn(commands, root);
         return;
@@ -424,7 +424,7 @@ fn bottom(commands: &mut Commands, root: Entity, size: f32, l: &Lobby, lobby: &L
     } else if l.room().is_some() {
         "Watching: sit on an open seat to play".to_string()
     } else {
-        "Waiting for the host…".to_string()
+        "Waiting for the host...".to_string()
     };
     button_cell("Leave", NAV_BLUE, size, LobbyAction::Leave).spawn(commands, r);
     let (text, color) = match &lobby.notice {
