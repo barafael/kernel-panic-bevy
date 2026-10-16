@@ -535,7 +535,6 @@ impl std::fmt::Debug for Host {
 
 #[derive(Debug, Default)]
 struct Guest {
-    host: PeerId,
     next_seq: u32,
     unacked: VecDeque<Batch>,
     host_newest: Option<u32>,
@@ -738,10 +737,7 @@ impl Session {
             h.started = h.links.is_empty();
             Role::Host(Box::new(h))
         } else {
-            Role::Guest(Box::new(Guest {
-                host,
-                ..Default::default()
-            }))
+            Role::Guest(Box::default())
         };
         let connected = cfg
             .roster
@@ -788,7 +784,6 @@ impl Session {
         let mut s = Self::networked(cfg, transport);
         s.host = host;
         s.role = Role::Guest(Box::new(Guest {
-            host,
             gone: gone.iter().copied().collect(),
             ..Default::default()
         }));
@@ -862,11 +857,7 @@ impl Session {
     /// `None` without one (single player, already closed).
     pub fn hand_back(&mut self) -> Option<(Box<dyn Transport>, Vec<PeerId>)> {
         self.transport.as_ref()?;
-        let to = match &self.role {
-            Role::Host(_) => self.guests(),
-            Role::Guest(g) => vec![g.host],
-        };
-        for peer in to {
+        for peer in self.others() {
             self.send(peer, Channel::Reliable, Msg::Bye);
         }
         let transport = self.transport.take()?;
@@ -886,10 +877,7 @@ impl Session {
         let me = self.me;
         match &self.role {
             Role::Host(_) => self.relay_chat(me, text),
-            Role::Guest(g) => {
-                let host = g.host;
-                self.send(host, Channel::Reliable, Msg::Chat { from: me, text });
-            }
+            Role::Guest(_) => self.send(self.host, Channel::Reliable, Msg::Chat { from: me, text }),
         }
     }
 
@@ -916,17 +904,8 @@ impl Session {
             return;
         }
         self.mark_away(me, away);
-        let msg = Msg::Away { peer: me, away };
-        match &self.role {
-            Role::Host(_) => {
-                for guest in self.guests() {
-                    self.send(guest, Channel::Reliable, msg.clone());
-                }
-            }
-            Role::Guest(g) => {
-                let host = g.host;
-                self.send(host, Channel::Reliable, msg);
-            }
+        for peer in self.others() {
+            self.send(peer, Channel::Reliable, Msg::Away { peer: me, away });
         }
     }
 
@@ -1038,10 +1017,9 @@ impl Session {
                     at: now,
                 },
             ),
-            Role::Guest(g) => {
-                let host = g.host;
+            Role::Guest(_) => {
                 self.send(
-                    host,
+                    self.host,
                     Channel::Unreliable,
                     Msg::Load {
                         permille: permille(cpu),
@@ -1155,7 +1133,7 @@ impl Session {
                 .filter(|(_, l)| !l.heard && !l.gone)
                 .map(|(p, _)| *p)
                 .collect(),
-            Role::Guest(g) => vec![g.host],
+            Role::Guest(_) => vec![self.host],
         }
     }
 
@@ -1164,7 +1142,7 @@ impl Session {
     pub fn rtt(&self, peer: PeerId) -> Option<f32> {
         match &self.role {
             Role::Host(h) => h.links.get(&peer).and_then(|l| l.rtt.srtt),
-            Role::Guest(g) => (peer == g.host).then_some(g.rtt.srtt).flatten(),
+            Role::Guest(g) => (peer == self.host).then_some(g.rtt.srtt).flatten(),
         }
     }
 
@@ -1178,6 +1156,15 @@ impl Session {
                 .map(|(p, _)| *p)
                 .collect(),
             Role::Guest(_) => Vec::new(),
+        }
+    }
+
+    /// Who this peer talks to: every connected guest (the host), the
+    /// host (a guest).
+    fn others(&self) -> Vec<PeerId> {
+        match &self.role {
+            Role::Host(_) => self.guests(),
+            Role::Guest(_) => vec![self.host],
         }
     }
 
@@ -1338,10 +1325,7 @@ impl Session {
                     self.announce_desync(frame, applied, bad);
                 }
             }
-            Role::Guest(g) => {
-                let host = g.host;
-                self.send(host, Channel::Reliable, Msg::Hash { frame, hash });
-            }
+            Role::Guest(_) => self.send(self.host, Channel::Reliable, Msg::Hash { frame, hash }),
         }
     }
 
@@ -1572,7 +1556,7 @@ impl Session {
             }
             Role::Guest(g) => {
                 if self.ended.is_none() && silent(g.last_heard, None) {
-                    bevy::log::warn!("no word from the host {}: giving up", g.host);
+                    bevy::log::warn!("no word from the host {}: giving up", self.host);
                     self.ended = Some(Ended::HostLost);
                     self.events.push(SessionEvent::HostLost);
                 }
@@ -1626,8 +1610,8 @@ impl Session {
                     self.send(guest, Channel::Reliable, Msg::Left { peer });
                 }
             }
-            Role::Guest(g) => {
-                if peer == g.host && self.ended.is_none() {
+            Role::Guest(_) => {
+                if peer == self.host && self.ended.is_none() {
                     self.ended = Some(Ended::HostLeft);
                     self.events.push(SessionEvent::HostLeft);
                 }
@@ -1888,6 +1872,7 @@ impl Session {
         }
         let mut out: Vec<(PeerId, Channel, Msg)> = Vec::new();
         let have = self.turns.have_through();
+        let host = self.host;
         match &mut self.role {
             Role::Host(h) => {
                 let newest = h.next_cut.checked_sub(1);
@@ -1993,7 +1978,7 @@ impl Session {
                     };
                     g.sent_through = self.frame_tick;
                     g.last_send = Some(now);
-                    out.push((g.host, Channel::Unreliable, msg));
+                    out.push((host, Channel::Unreliable, msg));
                 }
                 // A turn exists that we lack, and redundancy did not
                 // bring it: ask for a fill, again every two round trips.
@@ -2014,7 +1999,7 @@ impl Session {
                     if now >= seen + wait && g.resend_at.is_none_or(|t| now >= t + again) {
                         g.resend_at = Some(now);
                         self.stats.gap_fills += 1;
-                        out.push((g.host, Channel::Reliable, Msg::Resend { from: have }));
+                        out.push((host, Channel::Reliable, Msg::Resend { from: have }));
                     }
                 }
             }
