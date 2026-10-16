@@ -621,6 +621,18 @@ struct WorldRunner<'w> {
     step: Duration,
 }
 
+/// The local team a session decides: the roster's seat in a networked
+/// match (spectating without one), and a replay's viewer watches.
+/// `None` in single player, where the setup's human seat decides
+/// (`map_loading::match_scope::begin_match`).
+pub(crate) fn local_team(session: &Session) -> Option<u8> {
+    (session.is_networked() || session.is_replay()).then(|| {
+        session
+            .player()
+            .unwrap_or(crate::game_setup::SPECTATOR_TEAM)
+    })
+}
+
 /// The player whose input the bus seals: the local seat, nobody when
 /// spectating (`apply_sim_commands` too).
 pub(crate) fn local_player(world: &World) -> Option<u8> {
@@ -888,10 +900,9 @@ pub fn drive_fixed_main(world: &mut World) {
 /// it; every peer has the same roster, so every peer fills in the same),
 /// and the host checks what it sequences against those rules.
 fn seat_networked(world: &mut World, session: &mut Session) {
-    let team = session
-        .player()
-        .unwrap_or(crate::game_setup::SPECTATOR_TEAM);
-    world.insert_resource(crate::units::player::LocalTeam(team));
+    if let Some(team) = local_team(session) {
+        world.insert_resource(crate::units::player::LocalTeam(team));
+    }
     let host = session.host_player();
     let Some(mut active) = world.get_resource_mut::<crate::game_setup::ActiveMatch>() else {
         return;
