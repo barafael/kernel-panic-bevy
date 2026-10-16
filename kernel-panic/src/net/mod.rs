@@ -67,6 +67,8 @@ pub mod speed;
 #[cfg(test)]
 mod speed_tests;
 pub mod state;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod transport;
 pub mod web_tab;
 pub mod wire;

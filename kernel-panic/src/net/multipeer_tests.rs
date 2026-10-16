@@ -1,7 +1,7 @@
 //! Lockstep with the whole game: several headless apps in one process
 //! (the M0 harness, [`SimHarness`]), one per peer, each running the real
-//! tick driver over one [`SimNetwork`]. Every peer plays its own seat
-//! with the golden-replay command script ([`golden::script_for`]) and
+//! tick driver over one [`SimNetwork`] ([`NetPeer`]). Every peer plays
+//! its own seat with the golden-replay command script and
 //! the AI seats run in every sim; every peer's per-tick state hash trail
 //! must equal the host's.
 //!
@@ -23,14 +23,14 @@ use std::time::Duration;
 
 use bevy::prelude::*;
 
-use super::driver::{CatchUp, DumpDir, NetSession, NetStatus, Pacer};
-use super::session::{DelayBounds, Ended, Session, SessionConfig};
+use super::driver::{DumpDir, NetSession, NetStatus};
+use super::session::{Ended, Session};
 use super::sim_net::{LinkParams, SimNetwork};
+use super::test_support::{self, env};
 use super::transport::PeerId;
 use super::{CommandBus, NetId};
-use crate::game_setup::PlayerSpec;
-use crate::headless::{HashLog, Scenario, SimHarness, golden};
-use crate::units::components::Faction;
+use crate::headless::netplay::{NetPeer, scenario};
+use crate::headless::{HashLog, Scenario, SimHarness};
 
 /// One full app at a time per test, and one test at a time: eight apps
 /// are a few GB.
@@ -40,156 +40,69 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-pub(super) struct FullPeer {
-    pub(super) id: PeerId,
-    team: u8,
-    pub(super) h: SimHarness,
-    /// The last bus tick the script ran for.
-    scripted: u32,
-    /// Still in the match (a peer that left is no longer updated).
-    pub(super) present: bool,
-}
-
+/// The peers of one [`SimNetwork`], each a [`NetPeer`] (the host
+/// first).
 pub(super) struct Room {
     pub(super) net: SimNetwork,
-    pub(super) peers: Vec<FullPeer>,
-    teams: Vec<u8>,
+    pub(super) peers: Vec<NetPeer>,
     dumps: std::path::PathBuf,
 }
 
-/// `humans` human seats (teams 0..), then `ai` AI seats, on `map`.
-pub(super) fn scenario(map: &str, humans: u8, ai: u8, seed: u64) -> Scenario {
-    let mut s = Scenario::ai_match(map, humans + ai, 1, seed);
-    for (i, seat) in s.seats.iter_mut().enumerate() {
-        *seat = PlayerSpec {
-            faction: Faction::ALL[i % 3],
-            ally_team: i as u8,
-            ai: i as u8 >= humans,
-        };
-    }
-    s
-}
-
+/// One peer per human seat of `scn` (seat `i` played by `PeerId(i + 1)`,
+/// the host peer 1), on links `link`.
 pub(super) fn start(scn: &Scenario, seed: u64, link: LinkParams) -> Room {
     let net = SimNetwork::new(seed);
     net.set_default_link(link);
-    // Seat `i` is owner `i`.
-    let teams: Vec<u8> = (0..scn.seats.len() as u8)
-        .filter(|&i| !scn.seats[i as usize].ai)
-        .collect();
-    let roster: BTreeMap<PeerId, Option<u8>> = teams
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (PeerId(i as u128 + 1), Some(*t)))
-        .collect();
+    let humans = scn.seats.iter().take_while(|s| !s.ai).count() as u8;
+    assert!(
+        scn.seats[humans as usize..].iter().all(|s| s.ai),
+        "the human seats first"
+    );
+    let ids: Vec<PeerId> = (1..=humans).map(|i| PeerId(i as u128)).collect();
     let dumps = crate::paths::project_root()
         .join("target")
         .join(format!("mp-dumps-{seed:x}"));
     let _ = std::fs::remove_dir_all(&dumps);
-    let peers = teams
+    let peers = ids
         .iter()
-        .enumerate()
-        .map(|(i, &team)| {
-            let id = PeerId(i as u128 + 1);
-            let mut h = SimHarness::new(scn.clone());
-            let cfg = SessionConfig {
-                match_id: seed,
-                me: id,
-                roster: roster.clone(),
-                delay: DelayBounds::default(),
-            };
-            let mut ns = NetSession::new(Session::networked(cfg, Box::new(net.join(id))));
-            ns.pacer = Pacer {
-                catch_up: CatchUp {
-                    budget: None,
-                    ..CatchUp::default()
-                },
-                // A fast machine whatever this one is: the host's speed
-                // control (`net::speed`) leaves the game at full speed.
-                cost: Some(Duration::from_millis(1)),
-                ..Pacer::default()
-            };
-            let w = h.world_mut();
-            w.insert_resource(ns);
-            w.insert_resource(DumpDir(dumps.clone()));
-            w.resource_mut::<HashLog>().enabled = true;
-            FullPeer {
-                id,
-                team,
-                h,
-                scripted: 0,
-                present: true,
-            }
+        .map(|&id| {
+            let h = SimHarness::new(scn.clone());
+            let transport = Box::new(net.join(id));
+            let mut peer = NetPeer::join(h, id, &ids, humans, seed, transport);
+            peer.h.world_mut().insert_resource(DumpDir(dumps.clone()));
+            peer
         })
         .collect();
-    Room {
-        net,
-        peers,
-        teams,
-        dumps,
-    }
+    Room { net, peers, dumps }
 }
 
 impl Room {
     /// Run `frames` frames of `dt` on every present peer (in order),
     /// each playing its seat's script; `each` sees the room first.
     pub(super) fn run(&mut self, frames: u32, dt: Duration, mut each: impl FnMut(&mut Room, u32)) {
-        let n = self.teams.len() as u8;
         for f in 0..frames {
             self.net.advance(dt);
             each(self, f);
             for peer in self.peers.iter_mut().filter(|p| p.present) {
-                let team = peer.team;
-                let world = peer.h.world_mut();
-                let tick = world.resource::<CommandBus>().tick;
-                for t in peer.scripted + 1..=tick {
-                    let cmds = golden::script_for(world, t, &[team], |me| (me + 1) % n.max(2));
-                    let mut bus = world.resource_mut::<CommandBus>();
-                    for (_, list) in cmds {
-                        for cmd in list {
-                            bus.issue(cmd);
-                        }
-                    }
-                }
-                peer.scripted = peer.scripted.max(tick);
-                peer.h.frame_dt(dt);
+                peer.frame(dt);
             }
         }
     }
 
     pub(super) fn trail(&mut self, i: usize) -> Vec<u64> {
-        self.peers[i]
-            .h
-            .world_mut()
-            .resource::<HashLog>()
-            .ticks
-            .iter()
-            .map(|t| t.sim)
-            .collect()
+        self.peers[i].trail()
     }
 
     /// Every present peer's trail equals the host's over the common
     /// prefix, and is at least `min` ticks long.
     pub(super) fn assert_agree(&mut self, min: usize) -> usize {
-        let host = self.trail(0);
-        let mut shortest = host.len();
-        for i in 1..self.peers.len() {
-            if !self.peers[i].present {
-                continue;
-            }
-            let t = self.trail(i);
-            shortest = shortest.min(t.len());
-            let n = t.len().min(host.len());
-            if let Some(k) = (0..n).find(|&k| t[k] != host[k]) {
-                panic!(
-                    "{} diverges from the host at tick {}",
-                    self.peers[i].id,
-                    k + 1
-                );
-            }
-        }
-        assert!(shortest >= min, "only {shortest} ticks in common");
-        shortest
+        let (host, guests) = self.peers.split_first_mut().expect("a host");
+        let host = (host.me, host.trail());
+        let guests = guests.iter_mut().filter(|p| p.present);
+        test_support::assert_agree(
+            std::iter::once(host).chain(guests.map(|p| (p.me, p.trail()))),
+            min,
+        )
     }
 
     pub(super) fn status(&mut self, i: usize) -> NetStatus {
@@ -197,7 +110,7 @@ impl Room {
     }
 
     pub(super) fn session<R>(&mut self, i: usize, f: impl FnOnce(&Session) -> R) -> R {
-        f(&self.peers[i].h.world_mut().resource::<NetSession>().session)
+        self.peers[i].session(f)
     }
 
     /// Delay, lateness, round trips and traffic, for the write-up.
@@ -206,7 +119,7 @@ impl Room {
         let late = self.session(0, |s| s.stats.late_batches);
         let rtts: Vec<String> = (1..self.peers.len())
             .map(|i| {
-                let id = self.peers[i].id;
+                let id = self.peers[i].me;
                 let r = self.session(0, |s| s.rtt(id)).unwrap_or(0.0);
                 format!("{r:.0}")
             })
@@ -219,7 +132,7 @@ impl Room {
         // Payload bytes per second of network time, both channels.
         let secs = self.net.now().as_secs_f64();
         for (i, peer) in self.peers.iter().enumerate().filter(|(i, _)| *i < 2) {
-            let t = self.net.traffic(peer.id);
+            let t = self.net.traffic(peer.me);
             let up: u64 = t.iter().map(|c| c.sent_bytes).sum();
             let msgs: u64 = t.iter().map(|c| c.sent_msgs).sum();
             let down: u64 = t.iter().map(|c| c.recv_bytes).sum();
@@ -498,17 +411,11 @@ fn take_race_full_sim() {
 #[ignore = "long full-sim match; --ignored, env knobs in the module doc"]
 fn long_match() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let env = |k: &str, d: f64| {
-        std::env::var(k)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(d)
-    };
-    let peers = env("KP_MP_PEERS", 4.0) as u8;
-    let ticks = env("KP_MP_TICKS", 3000.0) as u32;
+    let peers: u8 = env("KP_MP_PEERS", 4);
+    let ticks: u32 = env("KP_MP_TICKS", 3000);
     let link = LinkParams {
-        latency: ms(env("KP_MP_LATENCY", 80.0) as u64),
-        jitter: ms(env("KP_MP_JITTER", 20.0) as u64),
+        latency: ms(env("KP_MP_LATENCY", 80)),
+        jitter: ms(env("KP_MP_JITTER", 20)),
         loss: env("KP_MP_LOSS", 0.02),
         duplicate: 0.01,
         reorder: 0.02,

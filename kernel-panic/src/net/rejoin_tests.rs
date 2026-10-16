@@ -16,95 +16,20 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use super::CommandFrame;
 use super::compat::{Build, Compat};
-use super::driver::{CatchUp, GameSpeed, NetSession, NextNetMatch, Pacer, TickRunner, drive_frame};
+use super::driver::{CatchUp, NetSession, NextNetMatch, Pacer, drive_frame};
 use super::lobby::{Lobby, LobbyEvent, MapHave, StartMsg};
 use super::rejoin::{Door, PlayerKey};
-use super::session::{Desync, Session, SessionConfig, Timeouts};
+use super::session::{Session, SessionConfig, Timeouts};
 use super::sim_net::{LinkParams, SimNetwork};
+use super::test_support::{self, Fake};
 use super::transport::PeerId;
-use super::wire::Turn;
-use super::{CommandFrame, NetId, SimCommand, Units};
 
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 const FRAME: Duration = Duration::from_micros(16_667);
 const MAP: &str = "stand-in";
 const MAP_HASH: u64 = 0x5eed;
-
-/// A stand-in sim (as `session_tests`): its state folds in every turn;
-/// it records the leaves and returns it applies.
-#[derive(Default)]
-struct Fake {
-    player: Option<u8>,
-    tick: u32,
-    state: u64,
-    trail: Vec<u64>,
-    staged: Vec<SimCommand>,
-    /// command id → tick applied
-    applied: BTreeMap<u32, u32>,
-    /// (tick, player, returned) of every `Dropped` / `Returned`.
-    leaves: Vec<(u32, u8, bool)>,
-}
-
-impl Fake {
-    fn mix(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.state ^= b as u64;
-            self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
-
-impl TickRunner for Fake {
-    fn speed(&self) -> GameSpeed {
-        GameSpeed::default()
-    }
-
-    fn seal(&mut self, delay: u32) -> Vec<CommandFrame> {
-        match self.player {
-            Some(player) if !self.staged.is_empty() => vec![CommandFrame {
-                tick: self.tick + delay,
-                player,
-                commands: std::mem::take(&mut self.staged),
-            }],
-            _ => {
-                self.staged.clear();
-                Vec::new()
-            }
-        }
-    }
-
-    fn run(&mut self, turn: &Turn) {
-        assert_eq!(turn.tick, self.tick, "turns in order");
-        self.mix(&turn.tick.to_le_bytes());
-        self.mix(&postcard::to_allocvec(&turn.frames).unwrap());
-        for (player, cmds) in &turn.frames {
-            for c in cmds {
-                match c {
-                    SimCommand::Stop {
-                        units: Units::List(l),
-                    } => {
-                        let id = l.ids()[0].0;
-                        assert!(self.applied.insert(id, turn.tick).is_none(), "{id} twice");
-                    }
-                    SimCommand::Dropped => self.leaves.push((turn.tick, *player, false)),
-                    SimCommand::Returned => self.leaves.push((turn.tick, *player, true)),
-                    _ => {}
-                }
-            }
-        }
-        self.tick += 1;
-        self.trail.push(self.state);
-    }
-
-    fn hash(&mut self) -> u64 {
-        self.state
-    }
-
-    fn dump(&mut self, _: &Session, _: &Desync) -> String {
-        panic!("no desync expected");
-    }
-}
 
 struct Peer {
     id: PeerId,
@@ -190,6 +115,7 @@ fn room(grace: Duration) -> Room {
                 net: net_session,
                 sim: Fake {
                     player: seat,
+                    strict: true,
                     ..Fake::default()
                 },
                 present: true,
@@ -217,9 +143,7 @@ impl Room {
                 {
                     p.issued += 1;
                     let id = (seat as u32 + 1) * 1_000_000 + p.id.0 as u32 * 10_000 + p.issued;
-                    p.sim.staged.push(SimCommand::Stop {
-                        units: Units::of([NetId(id)]),
-                    });
+                    p.sim.staged.push(test_support::order(id));
                 }
                 p.frame(now);
             }
@@ -260,6 +184,7 @@ impl Room {
                             net,
                             sim: Fake {
                                 player: seat,
+                                strict: true,
                                 ..Fake::default()
                             },
                             present: true,
@@ -277,15 +202,9 @@ impl Room {
     /// Every present peer's trail equals the host's over the common
     /// prefix and has at least `min` ticks.
     fn assert_agree(&self, min: usize) {
-        let host = &self.peers[0].sim.trail;
-        for p in self.peers.iter().filter(|p| p.present) {
-            let t = &p.sim.trail;
-            let n = t.len().min(host.len());
-            if let Some(k) = (0..n).find(|&k| t[k] != host[k]) {
-                panic!("{} diverges from the host at tick {k}", p.id);
-            }
-            assert!(t.len() >= min, "{}: only {} ticks", p.id, t.len());
-        }
+        let others = self.peers[1..].iter().filter(|p| p.present);
+        let trails = std::iter::once(&self.peers[0]).chain(others);
+        test_support::assert_agree(trails.map(|p| (p.id, &p.sim.trail)), min);
     }
 }
 
@@ -402,7 +321,10 @@ fn the_turn_log_plays_back() {
         catch_up: CatchUp::replay(),
         ..Pacer::default()
     };
-    let mut sim = Fake::default();
+    let mut sim = Fake {
+        strict: true,
+        ..Fake::default()
+    };
     let mut now = Duration::ZERO;
     while !play.session.halted() {
         now += FRAME;
