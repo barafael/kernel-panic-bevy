@@ -15,124 +15,17 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use super::driver::{CatchUp, FrameReport, GameSpeed, Pacer, TickRunner, drive_frame};
-use super::session::{DelayBounds, Desync, Ended, Session, SessionConfig, Timeouts};
+use super::SimCommand;
+use super::driver::{CatchUp, FrameReport, Pacer, drive_frame};
+use super::session::{DelayBounds, Ended, Session, SessionConfig, Timeouts};
 use super::sim_net::{LinkParams, SimNetwork};
+use super::test_support::{self, Fake};
 use super::transport::PeerId;
-use super::wire::Turn;
-use super::{CommandFrame, NetId, SimCommand, Units};
 
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 
 fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
-}
-
-/// A stand-in sim: its state folds in every applied turn, so any
-/// difference in the turn stream shows in the trail. `SetRepeat` doubles
-/// as pause (`on`) and resume.
-#[derive(Default)]
-struct Fake {
-    player: Option<u8>,
-    tick: u32,
-    state: u64,
-    trail: Vec<u64>,
-    staged: Vec<SimCommand>,
-    speed: GameSpeed,
-    /// (local tick at issue, command id)
-    issued: Vec<(u32, u32)>,
-    /// command id → tick applied
-    applied: BTreeMap<u32, u32>,
-    /// Flip a state bit after this tick (a forced desync).
-    perturb_after: Option<u32>,
-    dumps: u32,
-    /// (tick, player) of every `Dropped` applied.
-    dropped: Vec<(u32, u8)>,
-}
-
-fn order(id: u32) -> SimCommand {
-    SimCommand::Stop {
-        units: Units::of([NetId(id)]),
-    }
-}
-
-fn id_of(cmd: &SimCommand) -> Option<u32> {
-    match cmd {
-        SimCommand::Stop {
-            units: Units::List(l),
-        } => l.ids().first().map(|n| n.0),
-        _ => None,
-    }
-}
-
-impl Fake {
-    fn issue(&mut self, id: u32) {
-        self.issued.push((self.tick, id));
-        self.staged.push(order(id));
-    }
-
-    fn mix(&mut self, bytes: &[u8]) {
-        for &b in bytes {
-            self.state ^= b as u64;
-            self.state = self.state.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    }
-}
-
-impl TickRunner for Fake {
-    fn speed(&self) -> GameSpeed {
-        self.speed
-    }
-
-    fn seal(&mut self, delay: u32) -> Vec<CommandFrame> {
-        match self.player {
-            Some(player) if !self.staged.is_empty() => vec![CommandFrame {
-                tick: self.tick + delay,
-                player,
-                commands: std::mem::take(&mut self.staged),
-            }],
-            _ => {
-                self.staged.clear();
-                Vec::new()
-            }
-        }
-    }
-
-    fn run(&mut self, turn: &Turn) {
-        assert_eq!(turn.tick, self.tick, "turns in order");
-        self.mix(&turn.tick.to_le_bytes());
-        self.mix(&postcard::to_allocvec(&turn.frames).unwrap());
-        for (player, cmds) in &turn.frames {
-            for c in cmds {
-                if let Some(id) = id_of(c) {
-                    assert!(
-                        self.applied.insert(id, turn.tick).is_none(),
-                        "command {id} applied twice"
-                    );
-                }
-                if let SimCommand::Pause { on } = c {
-                    self.speed.paused = *on;
-                }
-                if matches!(c, SimCommand::Dropped) {
-                    self.dropped.push((turn.tick, *player));
-                }
-            }
-        }
-        self.tick += 1;
-        if self.perturb_after == Some(self.tick) {
-            self.state ^= 1;
-        }
-        self.trail.push(self.state);
-    }
-
-    fn hash(&mut self) -> u64 {
-        self.state
-    }
-
-    fn dump(&mut self, _session: &Session, _desync: &Desync) -> String {
-        self.dumps += 1;
-        "fake".into()
-    }
 }
 
 struct Peer {
@@ -238,21 +131,7 @@ impl Room {
     /// Every peer's trail agrees with the host's over the common prefix,
     /// and each ran at least `min_ticks`.
     fn assert_agree(&self, min_ticks: usize) {
-        let host = &self.peers[0].sim.trail;
-        for peer in &self.peers {
-            let t = &peer.sim.trail;
-            assert!(
-                t.len() >= min_ticks,
-                "{} ran only {} ticks (host {})",
-                peer.id,
-                t.len(),
-                host.len()
-            );
-            let n = t.len().min(host.len());
-            if let Some(i) = (0..n).find(|&i| t[i] != host[i]) {
-                panic!("{} diverges from the host at tick {i}", peer.id);
-            }
-        }
+        test_support::assert_agree(self.peers.iter().map(|p| (p.id, &p.sim.trail)), min_ticks);
     }
 
     /// Every command issued by a peer still present was applied, once,
@@ -634,10 +513,10 @@ fn dropped_at(r: &Room, player: u8) -> u32 {
         .filter(|p| p.s.ended().is_none())
         .map(|p| {
             p.sim
-                .dropped
-                .iter()
+                .dropped()
+                .into_iter()
                 .filter(|(_, pl)| *pl == player)
-                .map(|(t, _)| *t)
+                .map(|(t, _)| t)
                 .collect()
         })
         .collect();
@@ -676,7 +555,7 @@ fn a_guest_that_leaves_is_dropped_on_one_tick() {
         }
     });
     let gone = r.peers.pop().unwrap();
-    assert!(gone.sim.dropped.is_empty());
+    assert!(gone.sim.dropped().is_empty());
     let at = dropped_at(&r, 2);
     eprintln!(
         "guest gone at host tick ~{}: dropped at tick {at} on every peer",
@@ -719,15 +598,12 @@ fn silence_times_peers_out() {
     assert_eq!(r.peers[1].s.ended(), Some(Ended::Dropped), "told");
     assert_eq!(r.peers[2].s.ended(), Some(Ended::HostLost));
     let h = &r.peers[0];
-    assert_eq!(h.sim.dropped.len(), 1, "only the mute one");
-    assert_eq!(h.sim.dropped[0].1, 1);
+    let dropped = h.sim.dropped();
+    assert_eq!(dropped.len(), 1, "only the mute one");
+    assert_eq!(dropped[0].1, 1);
     assert_eq!(h.s.guests(), vec![deaf], "the deaf one still sends");
     // Dropped ~1.5 s after its last packet (tick ~60 + 45).
-    assert!(
-        (95..=125).contains(&h.sim.dropped[0].0),
-        "{:?}",
-        h.sim.dropped
-    );
+    assert!((95..=125).contains(&dropped[0].0), "{dropped:?}");
 }
 
 /// The host's match rules: what they refuse is never sequenced (the
@@ -754,7 +630,7 @@ fn the_host_refuses_what_the_rules_forbid() {
     });
     r.assert_agree(150);
     assert!(r.peers.iter().all(|p| !p.sim.speed.paused), "never paused");
-    assert!(r.peers.iter().all(|p| p.sim.dropped.is_empty()));
+    assert!(r.peers.iter().all(|p| p.sim.dropped().is_empty()));
     assert!(
         r.peers[0].sim.applied.contains_key(&42),
         "the rest went through"
@@ -919,7 +795,7 @@ fn a_guest_too_far_behind_is_dropped() {
     });
     let host = &r.peers[0];
     assert!(host.s.peers()[1].gone, "dropped");
-    let drops: Vec<(u32, u8)> = host.sim.dropped.clone();
+    let drops = host.sim.dropped();
     eprintln!("too far behind: dropped {drops:?}");
     assert_eq!(drops.len(), 1);
     assert_eq!(drops[0].1, 1);

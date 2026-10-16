@@ -26,14 +26,8 @@ use std::io::Write as _;
 
 use super::*;
 use crate::net::CommandBus;
+use crate::net::test_support::env;
 use crate::sim::DetFloat;
-
-fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
 
 fn scenario_from_env() -> Scenario {
     let map: String = env("KP_NET_MAP", "Speed_Balls_16_Way".to_string());

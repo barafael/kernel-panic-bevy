@@ -30,11 +30,11 @@ if [ "${1:-}" = --sudo ]; then
 fi
 NETEM="$1"
 shift
-# Build outside the namespace (no network in there).
-# `--color never`: CI sets CARGO_TERM_COLOR=always, whose escapes would
-# break the match below.
-BIN=$(cargo test --locked --color never -p kernel-panic --no-run "$@" 2>&1 \
-  | sed -n 's/.*Executable unittests src\/main.rs (\(.*\))/\1/p')
+# Build outside the namespace (no network in there); the binary is the
+# `executable` of the unit-test artifact of src/main.rs.
+BIN=$(cargo test --locked -p kernel-panic --no-run --message-format=json-render-diagnostics "$@" \
+  | jq -r 'select(.reason == "compiler-artifact" and .profile.test
+      and (.target.src_path | endswith("src/main.rs"))) | .executable // empty')
 if [ ! -x "$BIN" ]; then
   echo "no test binary (cargo test --no-run $*)" >&2
   exit 1

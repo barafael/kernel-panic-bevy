@@ -9,10 +9,11 @@
 
 use std::time::Duration;
 
-use super::multipeer_tests::{Room, SERIAL, scenario, start};
+use super::multipeer_tests::{Room, SERIAL, start};
 use super::sim_net::LinkParams;
 use super::speed::{SERVER_PLAYER, SpeedPolicy};
 use super::{CommandBus, MatchControl, SimCommand};
+use crate::headless::netplay::scenario;
 use crate::net::driver::{NetSession, NetStatus};
 
 const FRAME: Duration = Duration::from_micros(33_333);

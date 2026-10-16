@@ -25,14 +25,11 @@
 // unreachable (the test hands in a local STUN server).
 //
 // <runtime>: chromium | firefox | webkit (WebRTC needs a browser; Node
-// has none). Needs the `playwright` package resolvable from the working
-// directory (or NODE_PATH) and the browser installed
-// (`npx playwright install --with-deps <runtime>`, or KP_BROWSER_PATH).
+// has none). Playwright and the KP_BROWSER_* knobs as in kp-browser.mjs.
 
-import { readFile, writeFile, mkdir } from "node:fs/promises";
-import { createServer } from "node:http";
-import { dirname, extname, resolve } from "node:path";
-import { createRequire } from "node:module";
+import { writeFile, mkdir } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { guardPage, launch, serve } from "./kp-browser.mjs";
 
 const [runtime, pkgDir, mapsDir, signaling, room, map, humans, ai, seed, secs, outPath] =
   process.argv.slice(2);
@@ -42,31 +39,6 @@ if (!outPath) {
   );
   process.exit(2);
 }
-
-function serve(files) {
-  const types = { ".js": "text/javascript", ".wasm": "application/wasm", ".html": "text/html" };
-  const server = createServer(async (req, res) => {
-    const path = new URL(req.url, "http://x").pathname;
-    const file = files[path];
-    if (file === undefined) {
-      res.writeHead(404).end();
-      return;
-    }
-    try {
-      const body = file.startsWith("<!") ? file : await readFile(file);
-      res.writeHead(200, { "content-type": types[extname(path)] ?? "application/octet-stream" });
-      res.end(body);
-    } catch (e) {
-      res.writeHead(500).end(String(e));
-    }
-  });
-  return new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(server)));
-}
-
-const require = createRequire(resolve(process.cwd(), "noop.js"));
-const { chromium, firefox, webkit } = require("playwright");
-const engine = { chromium, firefox, webkit }[runtime];
-if (!engine) throw new Error(`unknown runtime ${runtime}`);
 
 const server = await serve({
   "/index.html": "<!doctype html><meta charset=utf-8><title>kp-netpeer</title>",
@@ -79,26 +51,11 @@ const base = `http://127.0.0.1:${server.address().port}`;
 // that a native webrtc-rs peer may not resolve in a CI container; show
 // the real addresses instead.
 const args = runtime === "chromium" ? ["--disable-features=WebRtcHideLocalIpsWithMdns"] : [];
-// KP_BROWSER_ARGS: more browser flags, space separated or a JSON array
-// (for flags with spaces, e.g. `--host-resolver-rules=MAP a b`).
-const extra = (process.env.KP_BROWSER_ARGS ?? "").trim();
-args.push(...(extra.startsWith("[") ? JSON.parse(extra) : extra.split(" ").filter((a) => a)));
-// KP_BROWSER_PATH: a browser binary of the engine's kind instead of
-// Playwright's own download (e.g. a system Chromium).
-const executablePath = process.env.KP_BROWSER_PATH || undefined;
-const browser = await engine.launch({ headless: true, args, executablePath });
+const browser = await launch(runtime, { args });
 let trail;
 try {
   const page = await browser.newPage();
-  // A panic (a wasm trap in some callback) never settles the export's
-  // promise: end the run on the page error instead of waiting forever.
-  const failed = new Promise((_, reject) => {
-    page.on("pageerror", (e) => reject(new Error(`${runtime}: page error: ${e}`)));
-    page.on("crash", () => reject(new Error(`${runtime}: the page crashed`)));
-  });
-  failed.catch(() => {});
-  page.on("console", (m) => console.error(`[${runtime}] ${m.text()}`));
-  page.on("pageerror", (e) => console.error(`[${runtime}] page error: ${e.stack ?? e}`));
+  const guarded = guardPage(page, runtime);
   await page.goto(`${base}/index.html`);
   const t0 = Date.now();
   const ice = process.env.KP_NETPEER_ICE ?? "";
@@ -112,8 +69,7 @@ try {
     },
     [signaling, ice, room, map, Number(humans), Number(ai), Number(seed), Number(secs)],
   );
-  run.catch(() => {}); // rejects again once the browser closes
-  trail = await Promise.race([run, failed]);
+  trail = await guarded(run);
   const ticks = trail.split("\n").filter((l) => l).length;
   console.log(`  ${runtime}: ${ticks} ticks, ${((Date.now() - t0) / 1000).toFixed(1)} s wall`);
 } finally {

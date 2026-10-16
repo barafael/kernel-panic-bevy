@@ -1,0 +1,53 @@
+name: Build the replay wasm package
+description: >
+  The `replay` build of kernel-panic for wasm32 (wasm-release profile),
+  bound with `wasm-bindgen --target web` and optimised with `wasm-opt -O2`
+  as Trunk does the shipped build: kernel-panic.js and
+  kernel-panic_bg.wasm in `out-dir`. Needs the wasm32-unknown-unknown
+  target installed.
+
+# Used by determinism.yml (the golden replays in Node and the browsers,
+# .github/scripts/kp-replay.mjs) and webrtc.yml (the browser peer,
+# .github/scripts/kp-netpeer.mjs).
+
+inputs:
+  out-dir:
+    description: Where the package goes.
+    default: pkg
+  binaryen-version:
+    description: The binaryen release whose wasm-opt runs.
+    default: version_123
+
+runs:
+  using: composite
+  steps:
+    # The CLI must match the wasm-bindgen crate in Cargo.lock exactly.
+    - name: Install wasm-bindgen and wasm-opt
+      shell: bash
+      env:
+        BINARYEN_VERSION: ${{ inputs.binaryen-version }}
+      run: |
+        v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
+        echo "wasm-bindgen $v, binaryen $BINARYEN_VERSION"
+        mkdir -p "$HOME/.local/bin"
+        curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" \
+          | tar -xz --strip-components=1 -C "$HOME/.local/bin" "wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen"
+        curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_VERSION/binaryen-$BINARYEN_VERSION-x86_64-linux.tar.gz" \
+          | tar -xz -C "$HOME"
+        ln -sf "$HOME/binaryen-$BINARYEN_VERSION/bin/wasm-opt" "$HOME/.local/bin/wasm-opt"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    - name: Build (wasm-release, wasm-bindgen, wasm-opt -O2)
+      shell: bash
+      env:
+        OUT: ${{ inputs.out-dir }}
+      run: |
+        cargo build --profile wasm-release --locked -p kernel-panic --features replay --target wasm32-unknown-unknown
+        wasm-bindgen --version
+        wasm-bindgen --target web --no-typescript --out-dir "$OUT" --out-name kernel-panic \
+          "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/wasm-release/kernel-panic.wasm"
+        # Trunk's data-wasm-opt="2" on the shipped build.
+        wasm-opt --version
+        wasm-opt -O2 --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
+          --enable-mutable-globals --enable-multivalue --enable-reference-types \
+          "$OUT/kernel-panic_bg.wasm" -o "$OUT/kernel-panic_bg.wasm"
+        ls -l "$OUT"

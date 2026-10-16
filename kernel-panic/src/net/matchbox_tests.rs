@@ -40,6 +40,7 @@ use super::matchbox::{
     TransportStats,
 };
 use super::multipeer_tests::SERIAL;
+use super::test_support::{self, env};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use crate::headless::SimHarness;
 use crate::headless::netplay::{self, NetPeer, Rendezvous};
@@ -701,21 +702,8 @@ impl RealRoom {
     /// Every peer's trail equals the host's over their common prefix,
     /// at least `min` ticks long; the prefix length.
     fn assert_agree(&mut self, min: usize) -> usize {
-        let host = self.peers[0].trail();
-        let mut shortest = host.len();
-        for i in 1..self.peers.len() {
-            let t = self.peers[i].trail();
-            shortest = shortest.min(t.len());
-            let n = t.len().min(host.len());
-            if let Some(k) = (0..n).find(|&k| t[k] != host[k]) {
-                panic!(
-                    "{} diverges from the host at tick {}",
-                    self.peers[i].me,
-                    k + 1
-                );
-            }
-        }
-        assert!(shortest >= min, "only {shortest} ticks in common");
+        let trails = self.peers.iter_mut().map(|p| (p.me, p.trail()));
+        let shortest = test_support::assert_agree(trails, min);
         assert!(self.peers[0].session(|s| s.desync().is_none()));
         shortest
     }
@@ -792,13 +780,6 @@ fn eight_peers_webrtc_full_sim() {
     r.run(Duration::from_secs(15));
     r.assert_agree(200);
     r.report("8 peers over WebRTC");
-}
-
-fn env<T: std::str::FromStr>(k: &str, d: T) -> T {
-    std::env::var(k)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(d)
 }
 
 /// A match under whatever the network does to it: run inside

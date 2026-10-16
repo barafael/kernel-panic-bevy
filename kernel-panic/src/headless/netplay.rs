@@ -91,6 +91,8 @@ pub struct NetPeer {
     pub me: PeerId,
     /// The seat this peer plays (`None`: spectating).
     pub team: Option<u8>,
+    /// Still in the match: the tests stop updating a peer that left.
+    pub present: bool,
     humans: u8,
     /// The last bus tick the script ran for.
     scripted: u32,
@@ -133,6 +135,7 @@ impl NetPeer {
             h,
             me,
             team,
+            present: true,
             humans,
             scripted: 0,
         }
