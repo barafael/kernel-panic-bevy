@@ -57,7 +57,6 @@ env:
   # comparison then covers the same prefix of the reference.
   BROWSER_TICKS: 0
   PLAYWRIGHT_VERSION: 1.56.1
-  BINARYEN_VERSION: version_123
 
 jobs:
   maps:
@@ -241,32 +240,10 @@ jobs:
         with:
           key: replay-wasm
           save-if: ${{ github.event_name != 'pull_request' }}
-      # The CLI must match the wasm-bindgen crate in Cargo.lock exactly.
-      - name: Install wasm-bindgen and wasm-opt
+      - uses: ./.github/actions/wasm-build
+      - name: Build the float probe (wasm32)
         shell: bash
         run: |
-          v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/"/, "", $3); print $3 }' Cargo.lock)
-          echo "wasm-bindgen $v, binaryen $BINARYEN_VERSION"
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSL --retry 3 "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$v/wasm-bindgen-$v-x86_64-unknown-linux-musl.tar.gz" \
-            | tar -xz --strip-components=1 -C "$HOME/.local/bin" "wasm-bindgen-$v-x86_64-unknown-linux-musl/wasm-bindgen"
-          curl -fsSL --retry 3 "https://github.com/WebAssembly/binaryen/releases/download/$BINARYEN_VERSION/binaryen-$BINARYEN_VERSION-x86_64-linux.tar.gz" \
-            | tar -xz -C "$HOME"
-          ln -sf "$HOME/binaryen-$BINARYEN_VERSION/bin/wasm-opt" "$HOME/.local/bin/wasm-opt"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: Build (wasm-release, wasm-bindgen, wasm-opt -O2)
-        shell: bash
-        run: |
-          cargo build --profile wasm-release --locked -p kernel-panic --features replay --target wasm32-unknown-unknown
-          wasm-bindgen --version
-          wasm-bindgen --target web --no-typescript --out-dir pkg --out-name kernel-panic \
-            target/wasm32-unknown-unknown/wasm-release/kernel-panic.wasm
-          # Trunk's data-wasm-opt="2" on the shipped build.
-          wasm-opt --version
-          wasm-opt -O2 --enable-bulk-memory --enable-sign-ext --enable-nontrapping-float-to-int \
-            --enable-mutable-globals --enable-multivalue --enable-reference-types \
-            pkg/kernel-panic_bg.wasm -o pkg/kernel-panic_bg.wasm
-          ls -l pkg
           # The float probe's wasm, for the Node job.
           cd net-experiments/m0-floatprobe
           cargo build --release --locked --lib --target wasm32-unknown-unknown
