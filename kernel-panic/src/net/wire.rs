@@ -207,15 +207,26 @@ pub struct Envelope {
     pub msg: Msg,
 }
 
-/// Encode `msg`. `None` if the result would be empty or larger than
-/// [`MAX_MESSAGE`] (the caller sends less).
-pub fn encode(match_id: u64, msg: Msg) -> Option<Vec<u8>> {
-    let env = Envelope {
+/// An [`Envelope`] around a borrowed message: the same bytes.
+#[derive(Serialize)]
+struct EnvelopeRef<'a> {
+    version: u16,
+    match_id: u64,
+    msg: &'a Msg,
+}
+
+fn to_bytes(match_id: u64, msg: &Msg) -> postcard::Result<Vec<u8>> {
+    postcard::to_allocvec(&EnvelopeRef {
         version: WIRE_VERSION,
         match_id,
         msg,
-    };
-    match postcard::to_allocvec(&env) {
+    })
+}
+
+/// Encode `msg`. `None` if the result would be empty or larger than
+/// [`MAX_MESSAGE`] (the caller sends less).
+pub fn encode(match_id: u64, msg: Msg) -> Option<Vec<u8>> {
+    match to_bytes(match_id, &msg) {
         Ok(v) if !v.is_empty() && v.len() <= MAX_MESSAGE => Some(v),
         Ok(v) => {
             bevy::log::debug!("{} byte message not sent", v.len());
@@ -226,6 +237,14 @@ pub fn encode(match_id: u64, msg: Msg) -> Option<Vec<u8>> {
             None
         }
     }
+}
+
+/// [`encode`] for a message that may be too big: `None` (quietly) over
+/// [`MAX_MESSAGE`], and the caller tries again with less.
+pub fn encode_if_fits(match_id: u64, msg: &Msg) -> Option<Vec<u8>> {
+    to_bytes(match_id, msg)
+        .ok()
+        .filter(|v| !v.is_empty() && v.len() <= MAX_MESSAGE)
 }
 
 /// Decode a message of this match and version.
@@ -270,6 +289,17 @@ mod tests {
             run: TurnRun::of(&turns),
         });
         let bytes = encode(5, msg.clone()).unwrap();
+        assert_eq!(encode_if_fits(5, &msg).as_ref(), Some(&bytes));
+        let env = Envelope {
+            version: WIRE_VERSION,
+            match_id: 5,
+            msg: msg.clone(),
+        };
+        assert_eq!(
+            postcard::to_allocvec(&env).unwrap(),
+            bytes,
+            "the envelope's bytes"
+        );
         // Five turns, one carrying an order: a few dozen bytes.
         assert!(bytes.len() < 48, "{} bytes", bytes.len());
         let Some(Msg::Turns(p)) = decode(5, &bytes) else {

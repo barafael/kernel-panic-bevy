@@ -71,7 +71,7 @@ use std::time::Duration;
 use super::lobby::{self, LobbyMsg, StartMsg};
 use super::rejoin::{Door, PlayerKey, Running};
 use super::speed::{PeerLoad, SERVER_PLAYER, SpeedControl, SpeedPolicy};
-use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
+use super::transport::{Channel, PeerEvent, PeerId, Transport};
 use super::wire::{self, Batch, Echo, InputPacket, Msg, PlayerCommands, Turn, TurnPacket, TurnRun};
 use super::{CommandFrame, SimCommand};
 use crate::sim::DetFloat;
@@ -857,9 +857,8 @@ impl Session {
     /// `None` without one (single player, already closed).
     pub fn hand_back(&mut self) -> Option<(Box<dyn Transport>, Vec<PeerId>)> {
         self.transport.as_ref()?;
-        for peer in self.others() {
-            self.send(peer, Channel::Reliable, Msg::Bye);
-        }
+        let to = self.others();
+        self.send_to(&to, Channel::Reliable, Msg::Bye);
         let transport = self.transport.take()?;
         if self.ended.is_none() {
             self.ended = Some(Ended::Left);
@@ -883,16 +882,13 @@ impl Session {
 
     /// Host: `text` from `from` to every guest and to ourselves.
     fn relay_chat(&mut self, from: PeerId, text: String) {
-        for guest in self.guests() {
-            self.send(
-                guest,
-                Channel::Reliable,
-                Msg::Chat {
-                    from,
-                    text: text.clone(),
-                },
-            );
-        }
+        self.broadcast(
+            Msg::Chat {
+                from,
+                text: text.clone(),
+            },
+            None,
+        );
         self.events.push(SessionEvent::Chat { from, text });
     }
 
@@ -904,9 +900,8 @@ impl Session {
             return;
         }
         self.mark_away(me, away);
-        for peer in self.others() {
-            self.send(peer, Channel::Reliable, Msg::Away { peer: me, away });
-        }
+        let to = self.others();
+        self.send_to(&to, Channel::Reliable, Msg::Away { peer: me, away });
     }
 
     fn mark_away(&mut self, peer: PeerId, away: bool) {
@@ -1343,24 +1338,48 @@ impl Session {
         };
         self.events.push(SessionEvent::Desync(d.clone()));
         self.desync = Some(d);
-        for guest in self.guests() {
-            self.send(
-                guest,
-                Channel::Reliable,
-                Msg::Desync {
-                    frame,
-                    stop_at,
-                    peers: peers.clone(),
-                },
-            );
-        }
+        self.broadcast(
+            Msg::Desync {
+                frame,
+                stop_at,
+                peers,
+            },
+            None,
+        );
     }
 
     fn send(&mut self, to: PeerId, channel: Channel, msg: Msg) {
-        if let (Some(t), Some(bytes)) = (self.transport.as_mut(), wire::encode(self.match_id, msg))
-        {
-            t.send(to, channel, bytes);
+        self.send_to(&[to], channel, msg);
+    }
+
+    /// `msg` to each of `to`, encoded once.
+    fn send_to(&mut self, to: &[PeerId], channel: Channel, msg: Msg) {
+        if let Some(bytes) = wire::encode(self.match_id, msg) {
+            self.send_bytes(to, channel, bytes);
         }
+    }
+
+    /// An encoded message to each of `to`.
+    fn send_bytes(&mut self, to: &[PeerId], channel: Channel, bytes: Vec<u8>) {
+        let Some(t) = self.transport.as_mut() else {
+            return;
+        };
+        if let Some((last, rest)) = to.split_last() {
+            for &peer in rest {
+                t.send(peer, channel, bytes.clone());
+            }
+            t.send(*last, channel, bytes);
+        }
+    }
+
+    /// Host: `msg` to every connected guest but `except`, reliably.
+    fn broadcast(&mut self, msg: Msg, except: Option<PeerId>) {
+        let to: Vec<PeerId> = self
+            .guests()
+            .into_iter()
+            .filter(|g| Some(*g) != except)
+            .collect();
+        self.send_to(&to, Channel::Reliable, msg);
     }
 
     /// Take in everything that arrived; notice who left or went silent.
@@ -1606,9 +1625,7 @@ impl Session {
                 } else {
                     SessionEvent::Left(peer)
                 });
-                for guest in self.guests() {
-                    self.send(guest, Channel::Reliable, Msg::Left { peer });
-                }
+                self.broadcast(Msg::Left { peer }, None);
             }
             Role::Guest(_) => {
                 if peer == self.host && self.ended.is_none() {
@@ -1712,9 +1729,7 @@ impl Session {
             }
             Msg::Away { peer, away } if peer == from => {
                 self.mark_away(from, away);
-                for guest in self.guests().into_iter().filter(|g| *g != from) {
-                    self.send(guest, Channel::Reliable, Msg::Away { peer, away });
-                }
+                self.broadcast(Msg::Away { peer, away }, Some(from));
             }
             _ => {}
         }
@@ -1826,41 +1841,35 @@ impl Session {
     }
 
     /// Host: resend turns from `from` to a guest on the reliable channel,
-    /// in messages of at most [`MAX_MESSAGE`] bytes.
+    /// in messages of at most [`MAX_MESSAGE`](super::transport::MAX_MESSAGE) bytes.
     fn fill(&mut self, to: PeerId, from: u32) {
         let Role::Host(h) = &self.role else {
             return;
         };
-        let Some(base) = h.history.first().map(|t| t.tick) else {
-            return;
-        };
-        if from < base {
-            bevy::log::warn!("{to} needs turn {from}, the oldest kept is {base}");
-        }
-        let start = from.max(base);
-        let end = h.next_cut.min(start.saturating_add(FILL_MAX));
-        let turns: Vec<Turn> = (start..end)
-            .map(|t| h.history[(t - base) as usize].clone())
-            .collect();
-        let mut chunks: Vec<TurnRun> = Vec::new();
-        let mut rest = turns.as_slice();
-        while !rest.is_empty() {
-            // Halve until it fits (a quiet minute fits in one).
-            let mut n = rest.len().min(2048);
+        let end = h.next_cut.min(from.saturating_add(FILL_MAX)) as usize;
+        let mut start = from as usize;
+        let mut chunks: Vec<Vec<u8>> = Vec::new();
+        while start < end {
+            // Halve until it fits (a quiet minute fits in one). A single
+            // turn too big for a message is not sent.
+            let mut n = end - start;
             loop {
-                let run = TurnRun::of(&rest[..n]);
-                let size = postcard::to_allocvec(&run).map_or(usize::MAX, |v| v.len());
-                if size + 32 <= MAX_MESSAGE || n == 1 {
-                    chunks.push(run);
-                    break;
+                let msg = Msg::Fill(TurnRun::of(&h.history[start..start + n]));
+                match wire::encode_if_fits(self.match_id, &msg) {
+                    Some(bytes) => chunks.push(bytes),
+                    None if n > 1 => {
+                        n /= 2;
+                        continue;
+                    }
+                    None => {}
                 }
-                n /= 2;
+                break;
             }
-            rest = &rest[n..];
+            start += n;
         }
         self.stats.gap_fills += 1;
-        for run in chunks {
-            self.send(to, Channel::Reliable, Msg::Fill(run));
+        for bytes in chunks {
+            self.send_bytes(&[to], Channel::Reliable, bytes);
         }
     }
 
@@ -1870,13 +1879,13 @@ impl Session {
         if self.transport.is_none() {
             return;
         }
-        let mut out: Vec<(PeerId, Channel, Msg)> = Vec::new();
+        let mut out: Vec<(PeerId, Channel, Vec<u8>)> = Vec::new();
         let have = self.turns.have_through();
         let host = self.host;
+        let match_id = self.match_id;
         match &mut self.role {
             Role::Host(h) => {
                 let newest = h.next_cut.checked_sub(1);
-                let base = h.history.first().map_or(0, |t| t.tick);
                 for (&peer, link) in h.links.iter_mut().filter(|(_, l)| !l.gone) {
                     let ack = link
                         .player
@@ -1885,38 +1894,38 @@ impl Session {
                     if !fresh && link.last_send.is_some_and(|t| now < t + KEEPALIVE) {
                         continue;
                     }
-                    let mut turns: Vec<Turn> = match newest {
+                    // The newest few turns the guest lacks.
+                    let (mut from, end) = match newest {
                         Some(n) if link.next_turn <= n => {
                             let from = link
                                 .next_turn
-                                .max((n + 1).saturating_sub(REDUNDANCY as u32))
-                                .max(base);
-                            (from..=n)
-                                .map(|t| h.history[(t - base) as usize].clone())
-                                .collect()
+                                .max((n + 1).saturating_sub(REDUNDANCY as u32));
+                            (from as usize, n as usize + 1)
                         }
-                        _ => Vec::new(),
+                        _ => (0, 0),
                     };
                     // Oversized (a burst of commands): send the newest
                     // turns that fit; the rest come as gap fills.
-                    let msg = loop {
+                    let bytes = loop {
                         let msg = Msg::Turns(TurnPacket {
                             cmd_ack: ack,
                             newest,
                             stamp: ms(now),
                             echo: echo(link.stamp_in, now),
-                            run: TurnRun::of(&turns),
+                            run: TurnRun::of(&h.history[from..end]),
                         });
-                        let size = postcard::to_allocvec(&msg).map_or(usize::MAX, |v| v.len());
-                        if size + 16 <= MAX_MESSAGE || turns.is_empty() {
-                            break msg;
+                        match wire::encode_if_fits(match_id, &msg) {
+                            Some(bytes) => break Some(bytes),
+                            None if from < end => from += 1,
+                            None => break None,
                         }
-                        turns.remove(0);
                     };
                     link.sent_newest = newest;
                     link.sent_ack = ack;
                     link.last_send = Some(now);
-                    out.push((peer, Channel::Unreliable, msg));
+                    if let Some(bytes) = bytes {
+                        out.push((peer, Channel::Unreliable, bytes));
+                    }
                 }
                 // Everyone's round trip, for the player lists (lossy is
                 // fine: the next one comes in a second).
@@ -1945,16 +1954,12 @@ impl Session {
                             })
                         })
                         .unzip();
+                    let pings = wire::encode(match_id, Msg::Pings { ms });
+                    let loads = wire::encode(match_id, Msg::Loads { permille, behind });
                     for (&peer, _) in h.links.iter().filter(|(_, l)| !l.gone) {
-                        out.push((peer, Channel::Unreliable, Msg::Pings { ms: ms.clone() }));
-                        out.push((
-                            peer,
-                            Channel::Unreliable,
-                            Msg::Loads {
-                                permille: permille.clone(),
-                                behind: behind.clone(),
-                            },
-                        ));
+                        for bytes in [&pings, &loads].into_iter().flatten() {
+                            out.push((peer, Channel::Unreliable, bytes.clone()));
+                        }
                     }
                 }
             }
@@ -1962,7 +1967,7 @@ impl Session {
                 let fresh = !g.unacked.is_empty() || self.frame_tick != g.sent_through;
                 if fresh || g.last_send.is_none_or(|t| now >= t + KEEPALIVE) {
                     let mut n = g.unacked.len();
-                    let msg = loop {
+                    let bytes = loop {
                         let msg = Msg::Input(InputPacket {
                             next_turn: have,
                             tick: self.frame_tick,
@@ -1970,15 +1975,17 @@ impl Session {
                             echo: echo(g.stamp_in, now),
                             batches: g.unacked.iter().take(n).cloned().collect(),
                         });
-                        let size = postcard::to_allocvec(&msg).map_or(usize::MAX, |v| v.len());
-                        if size + 16 <= MAX_MESSAGE || n == 0 {
-                            break msg;
+                        match wire::encode_if_fits(match_id, &msg) {
+                            Some(bytes) => break Some(bytes),
+                            None if n > 0 => n /= 2,
+                            None => break None,
                         }
-                        n /= 2;
                     };
                     g.sent_through = self.frame_tick;
                     g.last_send = Some(now);
-                    out.push((host, Channel::Unreliable, msg));
+                    if let Some(bytes) = bytes {
+                        out.push((host, Channel::Unreliable, bytes));
+                    }
                 }
                 // A turn exists that we lack, and redundancy did not
                 // bring it: ask for a fill, again every two round trips.
@@ -1999,13 +2006,15 @@ impl Session {
                     if now >= seen + wait && g.resend_at.is_none_or(|t| now >= t + again) {
                         g.resend_at = Some(now);
                         self.stats.gap_fills += 1;
-                        out.push((host, Channel::Reliable, Msg::Resend { from: have }));
+                        if let Some(bytes) = wire::encode(match_id, Msg::Resend { from: have }) {
+                            out.push((host, Channel::Reliable, bytes));
+                        }
                     }
                 }
             }
         }
-        for (to, channel, msg) in out {
-            self.send(to, channel, msg);
+        for (to, channel, bytes) in out {
+            self.send_bytes(&[to], channel, bytes);
         }
     }
 }
