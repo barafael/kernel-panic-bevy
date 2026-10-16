@@ -726,25 +726,7 @@ fn write_dump(_world: &World, name: &str, text: &str) -> String {
     for line in text.lines() {
         error!("{line}");
     }
-    let downloaded = (|| {
-        use wasm_bindgen::JsCast;
-        let parts = js_sys::Array::of1(&wasm_bindgen::JsValue::from_str(text));
-        let blob = web_sys::Blob::new_with_str_sequence(&parts).ok()?;
-        let url = web_sys::Url::create_object_url_with_blob(&blob).ok()?;
-        let document = web_sys::window()?.document()?;
-        let a = document
-            .create_element("a")
-            .ok()?
-            .dyn_into::<web_sys::HtmlAnchorElement>()
-            .ok()?;
-        a.set_href(&url);
-        a.set_download(name);
-        a.click();
-        web_sys::Url::revoke_object_url(&url).ok()?;
-        Some(())
-    })()
-    .is_some();
-    if downloaded {
+    if super::replay_log::download(name, text.as_bytes()) {
         format!("the console and the download {name}")
     } else {
         "the console".into()

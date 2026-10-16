@@ -464,9 +464,10 @@ pub struct RecentReplays(pub Vec<(String, Vec<u8>)>);
 #[cfg(target_arch = "wasm32")]
 const RECENT_KEPT: usize = 10;
 
-/// Web: offer `bytes` as a download named `name`.
+/// Web: offer `bytes` as a download named `name`; `false` if the page
+/// would not.
 #[cfg(target_arch = "wasm32")]
-pub fn download(name: &str, bytes: &[u8]) {
+pub fn download(name: &str, bytes: &[u8]) -> bool {
     use wasm_bindgen::JsCast;
     let done = (|| {
         let array = js_sys::Uint8Array::from(bytes);
@@ -487,6 +488,7 @@ pub fn download(name: &str, bytes: &[u8]) {
     if done.is_none() {
         warn!("could not offer {name} for download");
     }
+    done.is_some()
 }
 
 // --- playing --------------------------------------------------------------
