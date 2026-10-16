@@ -108,7 +108,7 @@ fn type_chat(
     status: Option<Res<NetStatus>>,
     mut net: Option<ResMut<NetSession>>,
 ) {
-    let live = status.is_some_and(|s| s.networked && !s.closed);
+    let live = status.is_some_and(|s| s.connected);
     if !live {
         typed.clear();
         if input.open {

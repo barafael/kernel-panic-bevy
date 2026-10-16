@@ -722,9 +722,7 @@ struct NetLeave<'w> {
 impl NetLeave<'_> {
     /// In a networked match that is still connected.
     fn connected(&self) -> bool {
-        self.net
-            .as_ref()
-            .is_some_and(|n| n.session.is_networked() && !n.session.closed())
+        self.net.as_ref().is_some_and(|n| n.session.connected())
     }
 
     /// Resign (if still in play), then let the driver disconnect

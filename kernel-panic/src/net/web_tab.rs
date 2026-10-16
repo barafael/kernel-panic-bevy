@@ -169,9 +169,7 @@ mod web {
         mut last_applied: Local<u32>,
     ) {
         let wanted = lobby.is_some_and(|l| l.lobby.is_some())
-            || net
-                .as_ref()
-                .is_some_and(|n| n.session.is_networked() && !n.session.closed());
+            || net.as_ref().is_some_and(|n| n.session.connected());
         if wanted != WANTED.get() {
             WANTED.set(wanted);
             tell_worker();

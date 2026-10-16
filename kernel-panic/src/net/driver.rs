@@ -589,6 +589,8 @@ pub struct NetStatus {
     pub leaving: bool,
     /// The transport is closed: this peer is out of the match.
     pub closed: bool,
+    /// Still connected to a networked match ([`Session::connected`]).
+    pub connected: bool,
     /// Who came and went in the last [`NOTICE_SECS`].
     pub notices: Vec<Notice>,
     /// Joining late, still replaying the match: (ticks applied, the
@@ -889,6 +891,7 @@ pub fn drive_fixed_main(world: &mut World) {
             ended: s.ended(),
             leaving,
             closed: s.closed(),
+            connected: s.connected(),
             notices,
             catching_up,
             replay,

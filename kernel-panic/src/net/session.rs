@@ -655,7 +655,7 @@ pub struct Session {
     transport: Option<Box<dyn Transport>>,
     /// Who the transport is connected to (the roster to begin with,
     /// then its peer events): what [`Self::hand_back`] hands on.
-    connected: std::collections::BTreeSet<PeerId>,
+    connected_to: std::collections::BTreeSet<PeerId>,
     /// Peers whose browser tab is hidden (this one included).
     away: std::collections::BTreeSet<PeerId>,
     timeouts: Timeouts,
@@ -709,7 +709,7 @@ impl Session {
             roster: BTreeMap::new(),
             networked: false,
             transport: None,
-            connected: Default::default(),
+            connected_to: Default::default(),
             away: Default::default(),
             timeouts: Timeouts::default(),
             opened: None,
@@ -801,7 +801,7 @@ impl Session {
     /// The match `cfg` over `transport`, sequenced by `host`, this peer
     /// playing `role`.
     fn over(cfg: SessionConfig, host: PeerId, role: Role, transport: Box<dyn Transport>) -> Self {
-        let connected = cfg
+        let connected_to = cfg
             .roster
             .keys()
             .copied()
@@ -815,7 +815,7 @@ impl Session {
             roster: cfg.roster,
             networked: true,
             transport: Some(transport),
-            connected,
+            connected_to,
             ..Self::base(role)
         }
     }
@@ -898,7 +898,7 @@ impl Session {
         if self.ended.is_none() {
             self.ended = Some(Ended::Left);
         }
-        Some((transport, self.connected.iter().copied().collect()))
+        Some((transport, self.connected_to.iter().copied().collect()))
     }
 
     /// Say `text` to everyone in the match (the host relays it; see
@@ -950,6 +950,12 @@ impl Session {
     /// The transport is gone ([`Self::close`]).
     pub fn closed(&self) -> bool {
         self.networked && self.transport.is_none()
+    }
+
+    /// In a networked match that is still connected (networked, not
+    /// [`Self::closed`]).
+    pub fn connected(&self) -> bool {
+        self.transport.is_some()
     }
 
     /// Guest: command batches the host hasn't acknowledged yet (0 for
@@ -1438,10 +1444,10 @@ impl Session {
             // `Hello` (below); its `Joined` says nothing yet.
             match ev {
                 PeerEvent::Joined(peer) => {
-                    self.connected.insert(peer);
+                    self.connected_to.insert(peer);
                 }
                 PeerEvent::Left(peer) => {
-                    self.connected.remove(&peer);
+                    self.connected_to.remove(&peer);
                     self.peer_left(peer, Gone::Closed, now);
                 }
             }
