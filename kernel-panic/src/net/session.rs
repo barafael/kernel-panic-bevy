@@ -588,9 +588,10 @@ struct Guest {
     stamp_in: Option<(u32, Duration)>,
     last_send: Option<Duration>,
     sent_through: u32,
-    /// A gap first seen (tick, when), and the last resend request.
+    /// A gap first seen (tick, when), and the last resend request
+    /// (from which tick, when).
     gap_seen: Option<(u32, Duration)>,
-    resend_at: Option<Duration>,
+    resent: Option<(u32, Duration)>,
     /// When the host was last heard from (any message).
     last_heard: Option<Duration>,
     /// Everyone's round trip to the host, as it last told us.
@@ -2003,6 +2004,9 @@ impl Session {
                 }
                 // A turn exists that we lack, and redundancy did not
                 // bring it: ask for a fill, again every two round trips.
+                // A fill that came in whole is followed by the request
+                // for the next at once (a late joiner fetches the match
+                // `FILL_MAX` turns at a time).
                 let gap = g.host_newest.is_some_and(|n| have <= n);
                 if !gap {
                     g.gap_seen = None;
@@ -2017,8 +2021,13 @@ impl Session {
                     };
                     let wait = Duration::from_millis(100) + rtt;
                     let again = (rtt * 2).max(Duration::from_millis(250));
-                    if now >= seen + wait && g.resend_at.is_none_or(|t| now >= t + again) {
-                        g.resend_at = Some(now);
+                    let filled = g
+                        .resent
+                        .is_some_and(|(from, _)| have >= from.saturating_add(FILL_MAX));
+                    if filled
+                        || (now >= seen + wait && g.resent.is_none_or(|(_, t)| now >= t + again))
+                    {
+                        g.resent = Some((have, now));
                         self.stats.gap_fills += 1;
                         if let Some(bytes) = wire::encode(match_id, Msg::Resend { from: have }) {
                             out.push((host, Channel::Reliable, bytes));
