@@ -34,6 +34,7 @@ use matchbox_signaling::{
 };
 
 use super::driver::NetStatus;
+use super::lobby::Retry;
 use super::matchbox::{
     LEAVE_GRACE, MatchboxTransport, NetConfig, RELIABLE_QUEUE_BYTES, RoomId, SEND_RATE,
     TransportStats,
@@ -263,12 +264,12 @@ fn browser_ice(stun: &Stun) -> String {
 /// every id of the room. `child` is the browser runner: its early end
 /// fails the test at once.
 ///
-/// matchbox never gives up on a handshake (no timeout, no retry), so a
-/// pair that once failed to connect would wait forever. Once everyone is
-/// in the room (the server's view), attempt `n` gives the handshake
-/// `n` × [`MEET_RETRY`] (growing, so a slow but working handshake gets
-/// through); then this side leaves the room and joins it again under a
-/// new id, which starts a fresh handshake with every other peer.
+/// matchbox never gives up on a handshake, so a pair that once failed to
+/// connect would wait forever. Once everyone is in the room (the
+/// server's view), attempt `n` gives the handshake `n` × [`MEET_RETRY`]
+/// ([`Retry::growing`]); then this side leaves the room and joins it
+/// again under a new id, which starts a fresh handshake with every other
+/// peer.
 fn meet_browser(
     server: &Signaling,
     room: &RoomId,
@@ -278,10 +279,12 @@ fn meet_browser(
 ) -> (MatchboxTransport, Vec<PeerId>) {
     let cfg = server.config();
     let t0 = Instant::now();
-    for attempt in 1u32.. {
+    let mut retry = Retry::growing(MEET_RETRY);
+    loop {
+        let attempt = retry.reopens() + 1;
         let mut t = MatchboxTransport::open(&cfg.room_url(room), &cfg);
         let mut rv = Rendezvous::default();
-        let mut all_in: Option<Instant> = None;
+        let mut all_in: Option<Duration> = None;
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 panic!("the browser runner ended early: {status}");
@@ -298,20 +301,20 @@ fn meet_browser(
                 "the browser peer: not connected within {limit:?} ({attempt} attempts)"
             );
             if server.peers_in_rooms() > others {
-                let since = *all_in.get_or_insert_with(Instant::now);
-                let patience = MEET_RETRY * attempt;
-                if since.elapsed() > patience {
+                let since = *all_in.get_or_insert_with(|| t0.elapsed());
+                if retry.due(since, t0.elapsed()) {
                     eprintln!(
-                        "attempt {attempt}: everyone in the room for {patience:?}, \
-                         no data channel: rejoining"
+                        "attempt {attempt}: everyone in the room for {:?}, \
+                         no data channel: rejoining",
+                        retry.patience()
                     );
+                    retry.reopened();
                     break;
                 }
             }
             std::thread::sleep(Duration::from_millis(5));
         }
     }
-    unreachable!()
 }
 
 /// How long [`meet_browser`]'s first attempt waits for a handshake once
@@ -565,11 +568,11 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
     // matchbox never retries a stalled handshake, so a host link still
     // missing after attempt `k` × [`MEET_RETRY`] is started afresh: that
     // guest leaves and joins again under a new id, as [`meet_browser`]
-    // does (the lobby's stuck-room recovery in the game).
+    // does (the lobby's stuck-room recovery in the game, [`Retry`]).
     let mut rv: Vec<Rendezvous> = (0..n).map(|_| Rendezvous::default()).collect();
     let t0 = Instant::now();
-    let mut attempt = 1u32;
-    let mut since = Instant::now();
+    let mut retry = Retry::growing(MEET_RETRY);
+    let mut since = Duration::ZERO;
     let all: Vec<PeerId> = loop {
         for i in 0..n {
             rv[i].poll(&mut ts[i], usize::MAX);
@@ -590,7 +593,8 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
             if ready {
                 break all;
             }
-            if since.elapsed() > MEET_RETRY * attempt {
+            if retry.due(since, t0.elapsed()) {
+                let attempt = retry.reopens() + 1;
                 for i in (0..n).filter(|&i| i != h) {
                     let me = ts[i].local_id().unwrap();
                     if !(rv[i].sees(host) && rv[h].sees(me)) {
@@ -601,15 +605,16 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
                         rv[i] = Rendezvous::default();
                     }
                 }
-                attempt += 1;
-                since = Instant::now();
+                retry.reopened();
+                since = t0.elapsed();
             }
         }
         let seen: Vec<usize> = rv.iter().map(Rendezvous::seen).collect();
         assert!(
             t0.elapsed() < Duration::from_secs(90),
-            "room of {n}: host links not up in 90 s ({attempt} attempts); \
-             each sees {seen:?} others"
+            "room of {n}: host links not up in 90 s ({} attempts); \
+             each sees {seen:?} others",
+            retry.reopens() + 1
         );
         std::thread::sleep(Duration::from_millis(5));
     };
