@@ -193,16 +193,16 @@ pub(super) fn replays_page(
         let y = 0.78 - 0.065 * (i - first) as f32;
         let label = shelf.labels.get(name).map_or(name.as_str(), String::as_str);
         LabelSpec::new(label, size, (0.08, y), Anchor::Lc).spawn(commands, root);
-        let play = ButtonSpec::new(
+        ButtonSpec::new(
             "Play",
             BUTTON_GREEN,
             size,
             (0.92, y),
             Anchor::Rc,
             MenuAction::Replays(ReplaysAction::Play(i as u16)),
-        );
+        )
+        .spawn(commands, root);
         if cfg!(target_arch = "wasm32") {
-            play.spawn(commands, root);
             ButtonSpec::new(
                 "Save",
                 TEAL,
@@ -212,8 +212,6 @@ pub(super) fn replays_page(
                 MenuAction::Replays(ReplaysAction::Save(i as u16)),
             )
             .spawn(commands, root);
-        } else {
-            play.spawn(commands, root);
         }
     }
     let pages = shelf.entries.len().div_ceil(PER_PAGE);

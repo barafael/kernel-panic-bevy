@@ -284,6 +284,24 @@ const LOST_RED: Color = Color::srgb(1.0, 0.2, 0.2);
 const README_UPDOWN: Color = Color::srgb(0.9, 0.6, 0.0);
 const TEXT_WHITE: Color = Color::srgb(1.0, 1.0, 1.0);
 
+/// The AI difficulties (`1 +` index) as the skirmish page and a room
+/// offer them.
+const DIFFICULTIES: [(&str, Color); 4] = [
+    ("Easy", EASY_CYAN),
+    ("Medium", MEDIUM_GREEN),
+    ("Hard", HARD_YELLOW),
+    ("Extreme", EXTREME_ORANGE),
+];
+
+/// A faction's colour (the showcase page, a room's seats).
+fn faction_color(faction: Faction) -> Color {
+    match faction {
+        Faction::System => EASY_CYAN,
+        Faction::Hacker => VERY_HARD_RED,
+        Faction::Network => DESC_BLUE,
+    }
+}
+
 /// The original renders fills at half the listed alpha; borders near
 /// full. We mirror that so colours read as tinted glass over black.
 fn fill(color: Color) -> BackgroundColor {
@@ -409,22 +427,78 @@ fn frame_border(font_size: f32) -> UiRect {
     UiRect::all(Val::Px(frame_border_px(font_size)))
 }
 
-/// A clickable frame at original coordinates (see [`anchored`]); clicks
-/// go to the central action router. Built with [`ButtonSpec::spawn`].
+/// Where a frame goes.
+#[derive(Clone, Copy)]
+enum Place {
+    /// At original coordinates (see [`anchored`]).
+    At((f32, f32), Anchor),
+    /// The next cell of a flex row or column (a room's seat table).
+    Flow,
+}
+
+/// The end of a label that stays in view when the label is wider than
+/// its cell (the rest is clipped); a label that fits stays centred.
+#[derive(Clone, Copy)]
+enum Keep {
+    Start,
+    /// A line being typed: its newest characters.
+    End,
+}
+
+/// The node of a frame at `place` around a label of `font_size`:
+/// padding, `min_width`, the label centred, or clipped to keep one end
+/// in view ([`Keep`]). A cell keeps its size in its row; only a clipped
+/// one gives way when the row is too narrow.
+fn frame_node(
+    place: Place,
+    font_size: f32,
+    min_width: Val,
+    clip: Option<Keep>,
+) -> (Node, UiTransform) {
+    let (mut node, transform) = match place {
+        Place::At((x, y), anchor) => anchored(x, y, anchor),
+        Place::Flow => (
+            Node {
+                flex_shrink: 0.0,
+                ..default()
+            },
+            UiTransform::default(),
+        ),
+    };
+    node.padding = frame_padding(font_size);
+    node.min_width = min_width;
+    node.justify_content = JustifyContent::Center;
+    if let Some(keep) = clip {
+        // The label's auto margins centre it while it fits; past that
+        // they are zero and the justification picks the end in view.
+        node.overflow = Overflow::clip();
+        node.flex_shrink = 1.0;
+        node.justify_content = match keep {
+            Keep::Start => JustifyContent::FlexStart,
+            Keep::End => JustifyContent::FlexEnd,
+        };
+    }
+    (node, transform)
+}
+
+/// A clickable frame at original coordinates (see [`anchored`]) or in
+/// a flex row ([`ButtonSpec::cell`]); clicks go to the central action
+/// router. Built with [`ButtonSpec::spawn`].
 struct ButtonSpec<'a> {
     label: &'a str,
     color: Color,
     font_size: f32,
-    pos: (f32, f32),
-    anchor: Anchor,
+    place: Place,
     action: MenuAction,
-    /// Minimum width in percent of the window, so a column of frames
-    /// lines up as even boxes instead of a ragged edge.
-    min_width: Option<f32>,
+    /// Minimum width (in percent of the window for a frame at original
+    /// coordinates), so a column of frames lines up as even boxes
+    /// instead of a ragged edge.
+    min_width: Val,
     /// The current pick of a choice group (grouping, difficulty): drawn
     /// brightened with a heavier border, so the page shows the
     /// configuration at a glance.
     chosen: bool,
+    clip: Option<Keep>,
 }
 
 impl<'a> ButtonSpec<'a> {
@@ -440,23 +514,45 @@ impl<'a> ButtonSpec<'a> {
             label,
             color,
             font_size,
-            pos,
-            anchor,
+            place: Place::At(pos, anchor),
             action,
-            min_width: None,
+            min_width: Val::Auto,
             chosen: false,
+            clip: None,
+        }
+    }
+
+    /// A button in a flex row or column.
+    fn cell(label: &'a str, color: Color, font_size: f32, action: MenuAction) -> Self {
+        Self {
+            place: Place::Flow,
+            ..Self::new(label, color, font_size, (0.0, 0.0), Anchor::Cc, action)
         }
     }
 
     fn min_width(self, pct: f32) -> Self {
         Self {
-            min_width: Some(pct),
+            min_width: Val::Percent(pct),
+            ..self
+        }
+    }
+
+    fn min_width_px(self, px: f32) -> Self {
+        Self {
+            min_width: Val::Px(px),
             ..self
         }
     }
 
     fn chosen(self, chosen: bool) -> Self {
         Self { chosen, ..self }
+    }
+
+    fn clip(self, keep: Keep) -> Self {
+        Self {
+            clip: Some(keep),
+            ..self
+        }
     }
 
     fn spawn(self, commands: &mut Commands, parent: Entity) -> Entity {
@@ -466,18 +562,13 @@ impl<'a> ButtonSpec<'a> {
         } else {
             self.color
         };
-        let text = spawn_button_text(commands, self.label, font_size);
-        let (mut node, transform) = anchored(self.pos.0, self.pos.1, self.anchor);
-        node.padding = frame_padding(font_size);
+        let text = spawn_frame_text(commands, self.label, font_size, Justify::Center, self.clip);
+        let (mut node, transform) = frame_node(self.place, font_size, self.min_width, self.clip);
         node.border = if self.chosen {
             UiRect::all(Val::Px((font_size * 0.18).det_max(2.0)))
         } else {
             frame_border(font_size)
         };
-        node.justify_content = JustifyContent::Center;
-        if let Some(pct) = self.min_width {
-            node.min_width = Val::Percent(pct);
-        }
         let entity = commands
             .spawn((
                 MenuButton {
@@ -497,7 +588,18 @@ impl<'a> ButtonSpec<'a> {
 }
 
 fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> Entity {
-    commands
+    spawn_frame_text(commands, label, font_size, Justify::Center, None)
+}
+
+/// A frame's label; `clip`: its frame clips it ([`frame_node`]).
+fn spawn_frame_text(
+    commands: &mut Commands,
+    label: &str,
+    font_size: f32,
+    justify: Justify,
+    clip: Option<Keep>,
+) -> Entity {
+    let text = commands
         .spawn((
             Text::new(label),
             TextColor(TEXT_WHITE),
@@ -508,10 +610,17 @@ fn spawn_button_text(commands: &mut Commands, label: &str, font_size: f32) -> En
             // Why no-wrap: an absolute node's available width is what's
             // left right of its `left` inset, so a right-anchored frame
             // near the edge would otherwise wrap its label.
-            TextLayout::new(Justify::Center, LineBreak::NoWrap),
+            TextLayout::new(justify, LineBreak::NoWrap),
             Pickable::IGNORE,
         ))
-        .id()
+        .id();
+    if clip.is_some() {
+        commands.entity(text).insert(Node {
+            margin: UiRect::horizontal(Val::Auto),
+            ..default()
+        });
+    }
+    text
 }
 
 /// A centred column of `min_width` 18 % buttons stepping down from
@@ -543,10 +652,11 @@ fn centre_column<'a>(
 struct LabelSpec<'a> {
     text: &'a str,
     font_size: f32,
-    pos: (f32, f32),
-    anchor: Anchor,
+    place: Place,
     frame: Option<Color>,
     justify: Justify,
+    min_width: Val,
+    clip: Option<Keep>,
 }
 
 impl<'a> LabelSpec<'a> {
@@ -554,10 +664,33 @@ impl<'a> LabelSpec<'a> {
         Self {
             text,
             font_size,
-            pos,
-            anchor,
+            place: Place::At(pos, anchor),
             frame: None,
             justify: Justify::Center,
+            min_width: Val::Auto,
+            clip: None,
+        }
+    }
+
+    /// A label in a flex row or column.
+    fn cell(text: &'a str, font_size: f32) -> Self {
+        Self {
+            place: Place::Flow,
+            ..Self::new(text, font_size, (0.0, 0.0), Anchor::Cc)
+        }
+    }
+
+    fn min_width_px(self, px: f32) -> Self {
+        Self {
+            min_width: Val::Px(px),
+            ..self
+        }
+    }
+
+    fn clip(self, keep: Keep) -> Self {
+        Self {
+            clip: Some(keep),
+            ..self
         }
     }
 
@@ -574,20 +707,8 @@ impl<'a> LabelSpec<'a> {
 
     fn spawn(self, commands: &mut Commands, parent: Entity) -> Entity {
         let font_size = readable(self.font_size);
-        let text = commands
-            .spawn((
-                Text::new(self.text),
-                TextColor(TEXT_WHITE),
-                TextFont {
-                    font_size: FontSize::Px(font_size),
-                    ..default()
-                },
-                TextLayout::new(self.justify, LineBreak::NoWrap),
-                Pickable::IGNORE,
-            ))
-            .id();
-        let (mut node, transform) = anchored(self.pos.0, self.pos.1, self.anchor);
-        node.padding = frame_padding(font_size);
+        let text = spawn_frame_text(commands, self.text, font_size, self.justify, self.clip);
+        let (mut node, transform) = frame_node(self.place, font_size, self.min_width, self.clip);
         if self.frame.is_some() {
             node.border = frame_border(font_size);
         }
@@ -734,12 +855,11 @@ impl NetLeave<'_> {
     /// Spring's quit box does the same: resign, then leave
     /// (`Game/UI/QuitBox.cpp`).
     fn leave(&mut self, bus: Option<&mut crate::net::CommandBus>, to_room: bool) {
-        let active = self.local.as_ref().map(|l| l.0).filter(|&p| {
-            p != crate::game_setup::SPECTATOR_TEAM
-                && !self
-                    .control
-                    .as_ref()
-                    .is_some_and(|c| c.resigned.contains(&p))
+        let active = self.local.as_ref().and_then(|l| l.seat()).filter(|&p| {
+            !self
+                .control
+                .as_ref()
+                .is_some_and(|c| c.resigned.contains(&p))
                 && !self.fates.as_ref().is_some_and(|f| f.is_dead(p))
         });
         if let (Some(_), Some(bus)) = (active, bus) {
@@ -1541,14 +1661,11 @@ fn showcase_page(commands: &mut Commands, root: Entity, page_size: f32) {
         root,
         page_size,
         [
-            ("System", EASY_CYAN, MenuAction::Showcase(Faction::System)),
-            (
-                "Hacker",
-                VERY_HARD_RED,
-                MenuAction::Showcase(Faction::Hacker),
-            ),
-            ("Network", DESC_BLUE, MenuAction::Showcase(Faction::Network)),
-        ],
+            ("System", Faction::System),
+            ("Hacker", Faction::Hacker),
+            ("Network", Faction::Network),
+        ]
+        .map(|(name, f)| (name, faction_color(f), MenuAction::Showcase(f))),
     );
     back_button(page_size, (0.5, 0.2), MenuPage::Main).spawn(commands, root);
 }
@@ -1951,15 +2068,7 @@ fn advanced_skirmish_page(
     }
 
     // Difficulty: right column.
-    for (i, (name, color)) in [
-        ("Easy", EASY_CYAN),
-        ("Medium", MEDIUM_GREEN),
-        ("Hard", HARD_YELLOW),
-        ("Extreme", EXTREME_ORANGE),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    for (i, (name, color)) in DIFFICULTIES.into_iter().enumerate() {
         let difficulty = 1 + i as u8;
         ButtonSpec::new(
             name,

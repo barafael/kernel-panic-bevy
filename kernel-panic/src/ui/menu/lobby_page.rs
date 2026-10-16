@@ -7,31 +7,34 @@
 //! stands up from its own) and picks its own faction. Cells that are
 //! not this player's to change are plain labels. Every row is one flex
 //! row of frames, so long names and map names never run into the next
-//! cell.
+//! cell; the seat table and the chat column share one row too, and an
+//! occupant too long for the table is clipped.
 //!
 //! Text fields (M3): the player's name (at the door and in the room),
 //! the room code (at the door) and the chat line (in the room, with the
 //! room's chat beside the seats). Keys go to the field last clicked
-//! ([`Field`]); Enter joins, renames or sends.
+//! ([`Field`]); Enter joins, renames or sends. Typing updates the
+//! field's label in place; the page is rebuilt when the room changes.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::text::FontSize;
 
-use crate::sim::DetFloat;
-
 use super::{
-    Anchor, BUTTON_GREEN, ButtonSpec, DESC_BLUE, EASY_CYAN, EXTREME_ORANGE, HARD_YELLOW, LabelSpec,
-    MAP_GREEN, MEDIUM_GREEN, MenuAction, MenuButton, MenuFrame, MenuPage, NAV_BLUE, TEAL,
-    TEXT_WHITE, VERY_HARD_RED, anchored, back_button, border, brighten, fill, frame_border,
-    frame_padding, page_heading, readable, spawn_button_text,
+    Anchor, BUTTON_GREEN, ButtonSpec, DESC_BLUE, DIFFICULTIES, EASY_CYAN, EXTREME_ORANGE,
+    HARD_YELLOW, Keep, LabelSpec, MAP_GREEN, MEDIUM_GREEN, MenuAction, MenuPage, NAV_BLUE, TEAL,
+    TEXT_WHITE, VERY_HARD_RED, anchored, back_button, faction_color, page_heading, readable,
 };
 use crate::net::chat::{CHAT_MAX, ChatLog, type_into};
 use crate::net::lobby::{
     Check, Field, Lobby, LobbyAction, LobbyRoom, NAME_MAX, Occupant, RoomId, RoomState,
 };
-use crate::units::components::Faction;
+
+/// The frame of a text field's button; its label follows the field
+/// as it is typed into ([`type_into_fields`]).
+#[derive(Component)]
+pub(super) struct FieldLabel(Field);
 
 /// The page: the door (create / join) outside a room, the room inside.
 pub(super) fn multiplayer_page(
@@ -43,8 +46,19 @@ pub(super) fn multiplayer_page(
 ) {
     match (lobby.lobby.as_ref(), lobby.room.as_ref()) {
         (Some(l), Some(room)) => {
-            room_view(commands, root, (window_w, page_size), lobby, l, room);
-            chat_panel(commands, root, (window_w, page_size), lobby, chat);
+            // The seat table and the chat column share a row from x=4 %
+            // to 97.5 %: the table takes what the column leaves.
+            let (mut node, transform) = anchored(0.04, SEAT_TOP, Anchor::Lt);
+            node.width = Val::Percent(93.5);
+            node.flex_direction = FlexDirection::Row;
+            node.align_items = AlignItems::FlexStart;
+            node.justify_content = JustifyContent::FlexEnd;
+            node.column_gap = Val::Px(readable(page_size * 0.75));
+            let columns = commands.spawn((node, transform, Pickable::IGNORE)).id();
+            commands.entity(root).add_child(columns);
+            room_view(commands, (root, columns), (window_w, page_size), l, room);
+            bottom(commands, root, readable(page_size * 0.75), l, lobby);
+            chat_panel(commands, columns, (window_w * 0.23, page_size), lobby, chat);
         }
         _ => door(commands, root, page_size, lobby),
     }
@@ -59,18 +73,25 @@ fn field_text(lobby: &LobbyRoom, field: Field, text: &str) -> String {
     }
 }
 
-/// The last `chars` characters of `text` (the end of a line being
-/// typed stays in view).
-fn tail(text: &str, chars: usize) -> String {
-    let n = text.chars().count();
-    text.chars().skip(n.saturating_sub(chars.max(1))).collect()
+/// What a text field's button says, at the door or in a room.
+fn field_label(lobby: &LobbyRoom, field: Field) -> String {
+    let in_room = lobby.lobby.is_some() && lobby.room.is_some();
+    match (field, in_room) {
+        (Field::Name, false) => format!("Your name: {}", field_text(lobby, field, &lobby.name)),
+        (Field::Main, false) => format!("Room code: {}", field_text(lobby, field, &lobby.code)),
+        (Field::Name, true) => format!("Name: {}", field_text(lobby, field, &lobby.name)),
+        (Field::Main, true) if lobby.chat.is_empty() && lobby.field == Field::Main => {
+            "Type to chat_".to_string()
+        }
+        (Field::Main, true) => format!("Say: {}", field_text(lobby, field, &lobby.chat)),
+    }
 }
 
 /// Outside a room: create one, or type a code and join.
 fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom) {
     page_heading(commands, root, page_size, "Multiplayer");
-    ButtonSpec::new(
-        &format!("Your name: {}", field_text(lobby, Field::Name, &lobby.name)),
+    let name = ButtonSpec::new(
+        &field_label(lobby, Field::Name),
         DESC_BLUE,
         page_size * 0.7,
         (0.5, 0.75),
@@ -78,6 +99,7 @@ fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom
         MenuAction::Lobby(LobbyAction::Focus(Field::Name)),
     )
     .spawn(commands, root);
+    commands.entity(name).insert(FieldLabel(Field::Name));
     ButtonSpec::new(
         "Create room",
         BUTTON_GREEN,
@@ -88,8 +110,8 @@ fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom
     )
     .min_width(24.0)
     .spawn(commands, root);
-    ButtonSpec::new(
-        &format!("Room code: {}", field_text(lobby, Field::Main, &lobby.code)),
+    let code = ButtonSpec::new(
+        &field_label(lobby, Field::Main),
         MAP_GREEN,
         page_size,
         (0.5, 0.5),
@@ -98,6 +120,7 @@ fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom
     )
     .min_width(24.0)
     .spawn(commands, root);
+    commands.entity(code).insert(FieldLabel(Field::Main));
     ButtonSpec::new(
         "Join",
         EASY_CYAN,
@@ -123,17 +146,16 @@ fn door(commands: &mut Commands, root: Entity, page_size: f32, lobby: &LobbyRoom
     back_button(page_size, (0.5, 0.15), MenuPage::Main).spawn(commands, root);
 }
 
-/// Seat rows start here and step down this much (eight fit above the
-/// member list).
-/// Top edge of the seat table, just under the AI row.
+/// Top edge of the seat table and the chat column, just under the AI
+/// row.
 const SEAT_TOP: f32 = 0.685;
 
-/// Inside a room.
+/// Inside a room: the map, AI and rules rows on `root`, the seat table
+/// first in `columns`.
 fn room_view(
     commands: &mut Commands,
-    root: Entity,
+    (root, columns): (Entity, Entity),
     (window_w, page_size): (f32, f32),
-    lobby: &LobbyRoom,
     l: &Lobby,
     code: &RoomId,
 ) {
@@ -155,66 +177,30 @@ fn room_view(
             "Meeting the room…"
         };
         LabelSpec::new(text, page_size * 0.8, (0.5, 0.6), Anchor::Cc).spawn(commands, root);
-        bottom(commands, root, size, l, lobby);
         return;
     };
 
     // Map and AI difficulty: the host's to change.
     let map_row = row(commands, root, (0.5, 0.8), Anchor::Cc, size);
     if host {
-        cell_button(
-            commands,
-            map_row,
-            "<",
-            MAP_GREEN,
-            size,
-            None,
-            LobbyAction::Map(-1),
-        );
+        button_cell("<", MAP_GREEN, size, LobbyAction::Map(-1)).spawn(commands, map_row);
     }
-    cell_label(
-        commands,
-        map_row,
-        &format!("Map: {}", room.map),
-        MAP_GREEN,
-        size,
-        None,
-    );
+    label_cell(&format!("Map: {}", room.map), MAP_GREEN, size).spawn(commands, map_row);
     if host {
-        cell_button(
-            commands,
-            map_row,
-            ">",
-            MAP_GREEN,
-            size,
-            None,
-            LobbyAction::Map(1),
-        );
+        button_cell(">", MAP_GREEN, size, LobbyAction::Map(1)).spawn(commands, map_row);
     }
     let ai_row = row(commands, root, (0.5, 0.72), Anchor::Cc, size);
-    cell_label(commands, ai_row, "AI:", TEXT_WHITE, size, None);
-    for (i, (name, color)) in [
-        ("Easy", EASY_CYAN),
-        ("Medium", MEDIUM_GREEN),
-        ("Hard", HARD_YELLOW),
-        ("Extreme", EXTREME_ORANGE),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    label_cell("AI:", TEXT_WHITE, size).spawn(commands, ai_row);
+    for (i, (name, color)) in DIFFICULTIES.into_iter().enumerate() {
         let d = 1 + i as u8;
         let chosen = room.difficulty == d;
         if host {
-            choice_button(
-                commands,
-                ai_row,
-                (name, color, size),
-                Some(window_w * 0.09),
-                LobbyAction::Difficulty(d),
-                chosen,
-            );
+            button_cell(name, color, size, LobbyAction::Difficulty(d))
+                .min_width_px(window_w * 0.09)
+                .chosen(chosen)
+                .spawn(commands, ai_row);
         } else if chosen {
-            cell_label(commands, ai_row, name, color, size, None);
+            label_cell(name, color, size).spawn(commands, ai_row);
         }
     }
     // The host's rules: who may pause, cheats for everyone.
@@ -230,34 +216,36 @@ fn room_view(
         "Cheats: off"
     };
     if host {
-        choice_button(
-            commands,
-            ai_row,
-            (pause, NAV_BLUE, size),
-            None,
+        button_cell(
+            pause,
+            NAV_BLUE,
+            size,
             LobbyAction::Pausable(!rules.pausable),
-            false,
-        );
-        choice_button(
-            commands,
-            ai_row,
-            (cheats, NAV_BLUE, size),
-            None,
-            LobbyAction::Cheats(!rules.cheats),
-            false,
-        );
+        )
+        .spawn(commands, ai_row);
+        button_cell(cheats, NAV_BLUE, size, LobbyAction::Cheats(!rules.cheats))
+            .spawn(commands, ai_row);
     } else {
-        cell_label(commands, ai_row, pause, TEXT_WHITE, size, None);
-        cell_label(commands, ai_row, cheats, TEXT_WHITE, size, None);
+        label_cell(pause, TEXT_WHITE, size).spawn(commands, ai_row);
+        label_cell(cheats, TEXT_WHITE, size).spawn(commands, ai_row);
     }
 
     // One row per seat, stacked by layout (rows are as tall as their
-    // text, whatever the window).
-    let (mut node, transform) = anchored(0.04, SEAT_TOP, Anchor::Lt);
-    node.flex_direction = FlexDirection::Column;
-    node.row_gap = Val::Px(size * 0.15);
-    let table = commands.spawn((node, transform, Pickable::IGNORE)).id();
-    commands.entity(root).add_child(table);
+    // text, whatever the window). The table may shrink below its
+    // rows' width: the occupant cell gives way.
+    let table = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(size * 0.15),
+                flex_grow: 1.0,
+                min_width: Val::Px(0.0),
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .id();
+    commands.entity(columns).add_child(table);
     for (i, seat) in room.seats.iter().enumerate() {
         let r = commands
             .spawn((
@@ -271,61 +259,39 @@ fn room_view(
             ))
             .id();
         commands.entity(table).add_child(r);
-        cell_label(
-            commands,
-            r,
-            &format!("Seat {}", i + 1),
-            TEXT_WHITE,
-            size,
-            Some(window_w * 0.08),
-        );
+        label_cell(&format!("Seat {}", i + 1), TEXT_WHITE, size)
+            .min_width_px(window_w * 0.08)
+            .spawn(commands, r);
         let mine = me.is_some_and(|me| seat.who == Occupant::Human(me));
         let (text, color) = occupant_text(room, seat.who, me);
-        let occupant_editable = host || mine || seat.who == Occupant::Open;
-        let wide = Some(window_w * 0.3);
-        if occupant_editable {
-            cell_button(
-                commands,
-                r,
-                &text,
-                color,
-                size,
-                wide,
-                LobbyAction::Occupant(i as u8),
-            );
+        let wide = window_w * 0.3;
+        if host || mine || seat.who == Occupant::Open {
+            button_cell(&text, color, size, LobbyAction::Occupant(i as u8))
+                .min_width_px(wide)
+                .clip(Keep::Start)
+                .spawn(commands, r);
         } else {
-            cell_label(commands, r, &text, color, size, wide);
+            label_cell(&text, color, size)
+                .min_width_px(wide)
+                .clip(Keep::Start)
+                .spawn(commands, r);
         }
         let faction = seat.faction();
-        let fcolor = faction_color(faction);
-        let narrow = Some(window_w * 0.11);
-        if host || mine {
-            cell_button(
-                commands,
-                r,
-                &format!("{faction:?}"),
-                fcolor,
-                size,
-                narrow,
-                LobbyAction::Faction(i as u8),
-            );
-        } else {
-            cell_label(commands, r, &format!("{faction:?}"), fcolor, size, narrow);
-        }
-        let team = format!("Team {}", seat.ally_team + 1);
-        if host {
-            cell_button(
-                commands,
-                r,
-                &team,
-                TEAL,
-                size,
-                narrow,
-                LobbyAction::AllyTeam(i as u8),
-            );
-        } else {
-            cell_label(commands, r, &team, TEAL, size, narrow);
-        }
+        let narrow = window_w * 0.11;
+        seat_cell(
+            commands,
+            r,
+            (&format!("{faction:?}"), faction_color(faction), size),
+            narrow,
+            (host || mine).then_some(LobbyAction::Faction(i as u8)),
+        );
+        seat_cell(
+            commands,
+            r,
+            (&format!("Team {}", seat.ally_team + 1), TEAL, size),
+            narrow,
+            host.then_some(LobbyAction::AllyTeam(i as u8)),
+        );
     }
     // Who else is here: spectators, and who cannot play and why.
     let mut lines = Vec::new();
@@ -353,41 +319,44 @@ fn room_view(
         LabelSpec::new(&lines.join("\n"), page_size * 0.6, (0.5, 0.17), Anchor::Cb)
             .spawn(commands, root);
     }
-    bottom(commands, root, size, l, lobby);
 }
 
 /// Chat lines shown beside the seats.
 const CHAT_LINES: usize = 8;
 
-/// The right-hand column of a room: our name (click to rename), the
-/// room's chat, the line being typed.
+/// The right-hand column of a room, `width` wide: our name (click to
+/// rename), the room's chat, the line being typed. The two fields keep
+/// the end of what is typed in view.
 fn chat_panel(
     commands: &mut Commands,
-    root: Entity,
-    (window_w, page_size): (f32, f32),
+    columns: Entity,
+    (width, page_size): (f32, f32),
     lobby: &LobbyRoom,
     chat: &ChatLog,
 ) {
     let size = readable(page_size * 0.6);
-    let width = window_w * 0.23;
-    // Characters of the (monospace) button text that fit the column.
-    let fits = ((width - size) / (size * 0.62)) as usize;
-    let (mut node, transform) = anchored(0.975, SEAT_TOP, Anchor::Rt);
-    node.flex_direction = FlexDirection::Column;
-    node.row_gap = Val::Px(size * 0.25);
-    node.width = Val::Px(width);
-    let panel = commands.spawn((node, transform, Pickable::IGNORE)).id();
-    commands.entity(root).add_child(panel);
-    let name = field_text(lobby, Field::Name, &lobby.name);
-    cell_button(
-        commands,
-        panel,
-        &tail(&format!("Name: {name}"), fits),
+    let panel = commands
+        .spawn((
+            Node {
+                flex_direction: FlexDirection::Column,
+                row_gap: Val::Px(size * 0.25),
+                width: Val::Px(width),
+                flex_shrink: 0.0,
+                ..default()
+            },
+            Pickable::IGNORE,
+        ))
+        .id();
+    commands.entity(columns).add_child(panel);
+    let name = button_cell(
+        &field_label(lobby, Field::Name),
         DESC_BLUE,
         size,
-        Some(width),
         LobbyAction::Focus(Field::Name),
-    );
+    )
+    .clip(Keep::End)
+    .spawn(commands, panel);
+    commands.entity(name).insert(FieldLabel(Field::Name));
     let mut text = String::new();
     for (_, line) in chat.last(CHAT_LINES) {
         text.push_str(&format!("{}: {}\n", line.name, line.text));
@@ -412,20 +381,15 @@ fn chat_panel(
         ))
         .id();
     commands.entity(panel).add_child(said);
-    let typing = if lobby.chat.is_empty() && lobby.field == Field::Main {
-        "Type to chat_".to_string()
-    } else {
-        format!("Say: {}", field_text(lobby, Field::Main, &lobby.chat))
-    };
-    cell_button(
-        commands,
-        panel,
-        &tail(&typing, fits),
+    let typing = button_cell(
+        &field_label(lobby, Field::Main),
         TEAL,
         size,
-        Some(width),
         LobbyAction::Focus(Field::Main),
-    );
+    )
+    .clip(Keep::End)
+    .spawn(commands, panel);
+    commands.entity(typing).insert(FieldLabel(Field::Main));
 }
 
 /// Ready / Start and Leave, and the status line under them.
@@ -438,46 +402,20 @@ fn bottom(commands: &mut Commands, root: Entity, size: f32, l: &Lobby, lobby: &L
     } else if l.is_host() {
         // The seat count next to Start: the seat table may fill the
         // page's height, and a narrow window has no room beside it.
-        cell_button(
-            commands,
-            r,
-            "+ seat",
-            DESC_BLUE,
-            size,
-            None,
-            LobbyAction::AddSeat,
-        );
-        cell_button(
-            commands,
-            r,
-            "- seat",
-            DESC_BLUE,
-            size,
-            None,
-            LobbyAction::RemoveSeat,
-        );
-        cell_button(
-            commands,
-            r,
-            "Start",
-            NAV_BLUE,
-            size,
-            None,
-            LobbyAction::Start,
-        );
+        button_cell("+ seat", DESC_BLUE, size, LobbyAction::AddSeat).spawn(commands, r);
+        button_cell("- seat", DESC_BLUE, size, LobbyAction::RemoveSeat).spawn(commands, r);
+        button_cell("Start", NAV_BLUE, size, LobbyAction::Start).spawn(commands, r);
         l.start_blocker()
             .map_or_else(|| "Everyone is ready: start!".to_string(), capitalised)
     } else if l.my_seat().is_some() {
         let ready = l.ready();
-        cell_button(
-            commands,
-            r,
+        button_cell(
             if ready { "Not ready" } else { "Ready" },
             if ready { EXTREME_ORANGE } else { MEDIUM_GREEN },
             size,
-            None,
             LobbyAction::Ready(!ready),
-        );
+        )
+        .spawn(commands, r);
         if ready {
             "Waiting for the host to start".to_string()
         } else {
@@ -488,15 +426,7 @@ fn bottom(commands: &mut Commands, root: Entity, size: f32, l: &Lobby, lobby: &L
     } else {
         "Waiting for the host…".to_string()
     };
-    cell_button(
-        commands,
-        r,
-        "Leave",
-        NAV_BLUE,
-        size,
-        None,
-        LobbyAction::Leave,
-    );
+    button_cell("Leave", NAV_BLUE, size, LobbyAction::Leave).spawn(commands, r);
     let (text, color) = match &lobby.notice {
         Some(n) => (capitalised(n.clone()), VERY_HARD_RED),
         None => (status, DESC_BLUE),
@@ -557,15 +487,6 @@ fn occupant_text(
     }
 }
 
-/// The faction colours of the showcase page.
-fn faction_color(faction: Faction) -> Color {
-    match faction {
-        Faction::System => EASY_CYAN,
-        Faction::Hacker => VERY_HARD_RED,
-        Faction::Network => DESC_BLUE,
-    }
-}
-
 /// A row of cells hung at `pos` (original coordinates, see
 /// [`anchored`]).
 fn row(
@@ -584,128 +505,71 @@ fn row(
     r
 }
 
-fn cell_node(size: f32, min_width: Option<f32>) -> Node {
-    Node {
-        padding: frame_padding(size),
-        border: frame_border(size),
-        justify_content: JustifyContent::Center,
-        min_width: min_width.map_or(Val::Auto, Val::Px),
-        ..default()
+/// A clickable cell handing `action` to the lobby.
+fn button_cell(label: &str, color: Color, size: f32, action: LobbyAction) -> ButtonSpec<'_> {
+    ButtonSpec::cell(label, color, size, MenuAction::Lobby(action))
+}
+
+/// A plain cell: a plate in `color`, bare text in [`TEXT_WHITE`].
+fn label_cell(label: &str, color: Color, size: f32) -> LabelSpec<'_> {
+    let cell = LabelSpec::cell(label, size);
+    if color == TEXT_WHITE {
+        cell
+    } else {
+        cell.frame(color)
     }
 }
 
-/// A clickable cell handing `action` to the lobby.
-fn cell_button(
-    commands: &mut Commands,
-    row: Entity,
-    label: &str,
-    color: Color,
-    size: f32,
-    min_width: Option<f32>,
-    action: LobbyAction,
-) {
-    choice_button(
-        commands,
-        row,
-        (label, color, size),
-        min_width,
-        action,
-        false,
-    );
-}
-
-/// [`cell_button`]; `chosen`: the current pick of a choice row, drawn
-/// as `ButtonSpec::chosen` draws it (brightened, heavier border).
-fn choice_button(
+/// A seat table cell at least `min_width` wide: a button while it is
+/// this player's to change (`action`), a plain cell otherwise.
+fn seat_cell(
     commands: &mut Commands,
     row: Entity,
     (label, color, size): (&str, Color, f32),
-    min_width: Option<f32>,
-    action: LobbyAction,
-    chosen: bool,
+    min_width: f32,
+    action: Option<LobbyAction>,
 ) {
-    let base = if chosen { brighten(color) } else { color };
-    let text = spawn_button_text(commands, label, size);
-    let mut node = cell_node(size, min_width);
-    if chosen {
-        node.border = UiRect::all(Val::Px((size * 0.18).det_max(2.0)));
-    }
-    let e = commands
-        .spawn((
-            MenuButton {
-                action: MenuAction::Lobby(action),
-                base,
-            },
-            node,
-            fill(base),
-            border(base),
-        ))
-        .add_child(text)
-        .id();
-    commands.entity(row).add_child(e);
-}
-
-/// A plain cell (a plate without a click).
-fn cell_label(
-    commands: &mut Commands,
-    row: Entity,
-    label: &str,
-    color: Color,
-    size: f32,
-    min_width: Option<f32>,
-) {
-    let text = commands
-        .spawn((
-            Text::new(label),
-            TextColor(TEXT_WHITE),
-            TextFont {
-                font_size: FontSize::Px(size),
-                ..default()
-            },
-            TextLayout::new(Justify::Center, LineBreak::NoWrap),
-            Pickable::IGNORE,
-        ))
-        .id();
-    let mut node = cell_node(size, min_width);
-    if color == TEXT_WHITE {
-        node.border = UiRect::ZERO;
-    }
-    let e = commands
-        .spawn((MenuFrame, node, Pickable::IGNORE))
-        .add_child(text)
-        .id();
-    if color != TEXT_WHITE {
-        commands.entity(e).insert((fill(color), border(color)));
-    }
-    commands.entity(row).add_child(e);
+    match action {
+        Some(action) => button_cell(label, color, size, action)
+            .min_width_px(min_width)
+            .spawn(commands, row),
+        None => label_cell(label, color, size)
+            .min_width_px(min_width)
+            .spawn(commands, row),
+    };
 }
 
 /// The page's text fields ([`Field`]): the room code (at the door) or
 /// the chat line (in a room), and the player's name. Enter joins, sends
 /// the line or keeps the name; Space and Enter on an empty field are the
 /// menu's (its keyboard navigation), and so are keys outside the page.
+/// Typing only relabels the field's button ([`FieldLabel`]); what Enter
+/// does rebuilds the page.
 pub(super) fn type_into_fields(
     page: Res<MenuPage>,
     mut keys: MessageReader<KeyboardInput>,
     mut buttons: ResMut<ButtonInput<KeyCode>>,
     mut lobby: ResMut<LobbyRoom>,
     mut actions: MessageWriter<LobbyAction>,
+    labels: Query<(&FieldLabel, &Children)>,
+    mut texts: Query<&mut Text>,
 ) {
     if *page != MenuPage::Multiplayer {
         keys.clear();
         return;
     }
     let in_room = lobby.lobby.is_some();
+    let mut typed = false;
     for key in keys.read() {
         if !key.state.is_pressed() {
             continue;
         }
-        let lobby = &mut *lobby;
+        let room = lobby.bypass_change_detection();
         let (text, max, accept): (&mut String, usize, fn(char) -> bool) =
-            match (lobby.field, in_room) {
-                (Field::Name, _) => (&mut lobby.name, NAME_MAX, |_| true),
-                (Field::Main, true) => (&mut lobby.chat, CHAT_MAX, |_| true),
-                (Field::Main, false) => (&mut lobby.code, RoomId::MAX_LEN, |c| {
+            match (room.field, in_room) {
+                (Field::Name, _) => (&mut room.name, NAME_MAX, |_| true),
+                (Field::Main, true) => (&mut room.chat, CHAT_MAX, |_| true),
+                (Field::Main, false) => (&mut room.code, RoomId::MAX_LEN, |c| {
                     c.is_ascii_alphanumeric() || c == '-' || c == '_'
                 }),
             };
@@ -714,8 +578,9 @@ pub(super) fn type_into_fields(
             continue;
         }
         let acted = type_into(text, key, max, accept);
-        if lobby.field == Field::Main && !in_room {
-            lobby.code = lobby.code.to_ascii_lowercase();
+        typed = true;
+        if room.field == Field::Main && !in_room {
+            room.code = room.code.to_ascii_lowercase();
         }
         match key.logical_key {
             Key::Space => {
@@ -729,6 +594,7 @@ pub(super) fn type_into_fields(
         if acted != Some(Key::Enter) {
             continue;
         }
+        let lobby = &mut *lobby;
         match (lobby.field, lobby.lobby.as_mut()) {
             (Field::Name, Some(l)) => {
                 l.set_name(&lobby.name);
@@ -747,6 +613,19 @@ pub(super) fn type_into_fields(
             }
             (Field::Main, None) => {
                 actions.write(LobbyAction::Join);
+            }
+        }
+    }
+    if !typed {
+        return;
+    }
+    for (field, children) in &labels {
+        let label = field_label(&lobby, field.0);
+        for child in children {
+            if let Ok(mut text) = texts.get_mut(*child)
+                && text.0 != label
+            {
+                text.0.clone_from(&label);
             }
         }
     }
