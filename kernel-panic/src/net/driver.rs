@@ -448,11 +448,18 @@ impl NetSession {
         s
     }
 
+    /// A recorded match played back ([`Session::replay`]): one turn per
+    /// tick of the clock ([`CatchUp::replay`]).
+    pub fn replay(frames: &[CommandFrame], ticks: u32) -> Self {
+        let mut s = Self::new(Session::replay(frames, ticks));
+        s.pacer.catch_up = CatchUp::replay();
+        s
+    }
+
     /// A replay played back ([`super::replay_log`]).
     pub fn from_replay(next: super::replay_log::NextReplay) -> Self {
         let r = next.replay;
-        let mut s = Self::new(Session::replay(&r.frames, r.ticks));
-        s.pacer.catch_up = CatchUp::replay();
+        let mut s = Self::replay(&r.frames, r.ticks);
         s.viewing = Some(super::replay_log::ReplayView {
             name: next.name,
             map_hash: r.compat.map_hash,

@@ -288,6 +288,44 @@ impl TurnBuffer {
     }
 }
 
+/// A replay's command log ([`Session::replay`]), made into turns one at
+/// a time as they are played.
+struct ReplayLog {
+    /// The frames before `end`, in tick order (a tick's in log order).
+    frames: std::iter::Peekable<std::vec::IntoIter<CommandFrame>>,
+    end: u32,
+}
+
+impl ReplayLog {
+    fn new(frames: &[CommandFrame], end: u32) -> Self {
+        let mut frames: Vec<CommandFrame> =
+            frames.iter().filter(|f| f.tick < end).cloned().collect();
+        frames.sort_by_key(|f| f.tick);
+        Self {
+            frames: frames.into_iter().peekable(),
+            end,
+        }
+    }
+
+    /// The turn of `tick` (the one after the last): its frames merged
+    /// per player, by player.
+    fn turn(&mut self, tick: u32) -> Turn {
+        let mut frames: Vec<PlayerCommands> = Vec::new();
+        while let Some(f) = self.frames.next_if(|f| f.tick == tick) {
+            match frames.iter_mut().find(|(p, _)| *p == f.player) {
+                Some((_, list)) => list.extend(f.commands),
+                None => frames.push((f.player, f.commands)),
+            }
+        }
+        frames.sort_by_key(|(p, _)| *p);
+        Turn {
+            tick,
+            delay: 0,
+            frames,
+        }
+    }
+}
+
 /// Round-trip estimate (RFC 6298's SRTT / RTTVAR), in ms.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rtt {
@@ -635,8 +673,8 @@ pub struct Session {
     /// order: the match's turn log as a replay file keeps it
     /// ([`Self::log`]). Not kept while playing a replay.
     log: Vec<CommandFrame>,
-    /// A replay ([`Self::replay`]): the ticks it has.
-    replay_end: Option<u32>,
+    /// A replay ([`Self::replay`]): its log, played turn by turn.
+    replay: Option<ReplayLog>,
     pub stats: SessionStats,
 }
 
@@ -661,13 +699,8 @@ fn echo(stamp_in: Option<(u32, Duration)>, now: Duration) -> Option<Echo> {
 }
 
 impl Session {
-    /// Single player: a host alone, delay 0, no transport.
-    pub fn solo() -> Self {
-        let bounds = DelayBounds {
-            initial: 0,
-            min: 0,
-            max: 0,
-        };
+    /// What every session starts with, playing `role`.
+    fn base(role: Role) -> Self {
         Self {
             match_id: 0,
             me: PeerId::default(),
@@ -681,15 +714,25 @@ impl Session {
             opened: None,
             turns: TurnBuffer::default(),
             delay: 0,
-            role: Role::Host(Box::new(Host::new(bounds, true))),
+            role,
             desync: None,
             ended: None,
             events: Vec::new(),
             frame_tick: 0,
             log: Vec::new(),
-            replay_end: None,
+            replay: None,
             stats: SessionStats::default(),
         }
+    }
+
+    /// Single player: a host alone, delay 0, no transport.
+    pub fn solo() -> Self {
+        let bounds = DelayBounds {
+            initial: 0,
+            min: 0,
+            max: 0,
+        };
+        Self::base(Role::Host(Box::new(Host::new(bounds, true))))
     }
 
     /// A recorded match played back: every turn of `frames` (a replay
@@ -699,28 +742,10 @@ impl Session {
     /// resume on the next turn (the pause took no turns), so a replay
     /// never stops for it.
     pub fn replay(frames: &[CommandFrame], ticks: u32) -> Self {
-        let mut turns: BTreeMap<u32, Vec<PlayerCommands>> = BTreeMap::new();
-        for f in frames.iter().filter(|f| f.tick < ticks) {
-            let frames = turns.entry(f.tick).or_default();
-            match frames.iter_mut().find(|(p, _)| *p == f.player) {
-                Some((_, list)) => list.extend(f.commands.iter().cloned()),
-                None => frames.push((f.player, f.commands.clone())),
-            }
+        Self {
+            replay: Some(ReplayLog::new(frames, ticks)),
+            ..Self::base(Role::Guest(Box::default()))
         }
-        let mut s = Self::solo();
-        s.role = Role::Guest(Box::default());
-        s.turns = TurnBuffer::unbounded();
-        for tick in 0..ticks {
-            let mut frames = turns.remove(&tick).unwrap_or_default();
-            frames.sort_by_key(|(p, _)| *p);
-            s.turns.push(Turn {
-                tick,
-                delay: 0,
-                frames,
-            });
-        }
-        s.replay_end = Some(ticks);
-        s
     }
 
     /// A networked match over `transport`.
@@ -747,6 +772,34 @@ impl Session {
         } else {
             Role::Guest(Box::default())
         };
+        Self::over(cfg, host, role, transport)
+    }
+
+    /// Joining a running match (M3, [`super::rejoin`]): a player back on
+    /// its seat or a newcomer watching, let in by `host` (the match's
+    /// host, whatever this peer's id), with `gone` already left. It
+    /// holds no turn yet: the whole log arrives as gap fills from tick
+    /// 0 (no horizon), and the driver runs it as fast as it can
+    /// ([`super::driver::Pacer::fast_forward`]) until it is live.
+    pub fn late(
+        cfg: SessionConfig,
+        host: PeerId,
+        gone: &[PeerId],
+        transport: Box<dyn Transport>,
+    ) -> Self {
+        let role = Role::Guest(Box::new(Guest {
+            gone: gone.iter().copied().collect(),
+            ..Default::default()
+        }));
+        Self {
+            turns: TurnBuffer::unbounded(),
+            ..Self::over(cfg, host, role, transport)
+        }
+    }
+
+    /// The match `cfg` over `transport`, sequenced by `host`, this peer
+    /// playing `role`.
+    fn over(cfg: SessionConfig, host: PeerId, role: Role, transport: Box<dyn Transport>) -> Self {
         let connected = cfg
             .roster
             .keys()
@@ -762,41 +815,8 @@ impl Session {
             networked: true,
             transport: Some(transport),
             connected,
-            away: Default::default(),
-            timeouts: Timeouts::default(),
-            opened: None,
-            turns: TurnBuffer::default(),
-            role,
-            desync: None,
-            ended: None,
-            events: Vec::new(),
-            frame_tick: 0,
-            log: Vec::new(),
-            replay_end: None,
-            stats: SessionStats::default(),
+            ..Self::base(role)
         }
-    }
-
-    /// Joining a running match (M3, [`super::rejoin`]): a player back on
-    /// its seat or a newcomer watching, let in by `host` (the match's
-    /// host, whatever this peer's id), with `gone` already left. It
-    /// holds no turn yet: the whole log arrives as gap fills from tick
-    /// 0 (no horizon), and the driver runs it as fast as it can
-    /// ([`super::driver::Pacer::fast_forward`]) until it is live.
-    pub fn late(
-        cfg: SessionConfig,
-        host: PeerId,
-        gone: &[PeerId],
-        transport: Box<dyn Transport>,
-    ) -> Self {
-        let mut s = Self::networked(cfg, transport);
-        s.host = host;
-        s.role = Role::Guest(Box::new(Guest {
-            gone: gone.iter().copied().collect(),
-            ..Default::default()
-        }));
-        s.turns = TurnBuffer::unbounded();
-        s
     }
 
     pub fn is_networked(&self) -> bool {
@@ -805,12 +825,12 @@ impl Session {
 
     /// Playing a replay ([`Self::replay`]).
     pub fn is_replay(&self) -> bool {
-        self.replay_end.is_some()
+        self.replay.is_some()
     }
 
     /// The ticks a replay has.
     pub fn replay_end(&self) -> Option<u32> {
-        self.replay_end
+        self.replay.as_ref().map(|r| r.end)
     }
 
     /// Host: let late joiners in ([`Door`]; the lobby hands it over with
@@ -1176,7 +1196,10 @@ impl Session {
         if self.ended.is_some() {
             return 0;
         }
-        let n = self.turns.ready();
+        let n = match &self.replay {
+            Some(r) => r.end.saturating_sub(self.turns.next()) as usize,
+            None => self.turns.ready(),
+        };
         match &self.desync {
             Some(d) => n.min(d.stop_at.saturating_sub(self.turns.next()) as usize),
             None => n,
@@ -1191,7 +1214,10 @@ impl Session {
                 .desync
                 .as_ref()
                 .is_some_and(|d| self.turns.next() >= d.stop_at)
-            || self.replay_end.is_some_and(|e| self.turns.next() >= e)
+            || self
+                .replay
+                .as_ref()
+                .is_some_and(|r| self.turns.next() >= r.end)
     }
 
     /// The next turn, if applicable now. Its delay becomes ours, its
@@ -1200,9 +1226,13 @@ impl Session {
         if self.ready() == 0 {
             return None;
         }
+        if let Some(r) = &mut self.replay {
+            let turn = r.turn(self.turns.next());
+            self.turns.push(turn);
+        }
         let turn = self.turns.pop()?;
         self.delay = turn.delay as u32;
-        if self.replay_end.is_none() {
+        if self.replay.is_none() {
             self.log
                 .extend(turn.frames.iter().filter(|(_, cmds)| !cmds.is_empty()).map(
                     |(player, cmds)| CommandFrame {
