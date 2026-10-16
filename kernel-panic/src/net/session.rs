@@ -308,6 +308,16 @@ impl Rtt {
             }
         }
     }
+
+    /// The other side echoed our stamp (if it did), received `now`.
+    fn echo(&mut self, echo: Option<Echo>, now: Duration) {
+        if let Some(e) = echo {
+            let rtt = ms(now)
+                .wrapping_sub(e.stamp)
+                .saturating_sub(e.held_ms as u32);
+            self.sample(rtt as f32);
+        }
+    }
 }
 
 /// The host's adaptive input delay.
@@ -512,8 +522,6 @@ struct Host {
     /// Lets late joiners in (`None`: nobody gets in; protocol tests).
     door: Option<Door>,
     last_pings: Option<Duration>,
-    /// Commands the rules refused (copied into [`SessionStats`]).
-    refused: u64,
     /// Everyone's load and Spring's lag protection over them.
     speed: SpeedControl,
     /// Numbers the speed control's commands in the schedule.
@@ -734,7 +742,7 @@ impl Session {
                     },
                 );
             }
-            h.started = h.links.is_empty();
+            h.check_started();
             Role::Host(Box::new(h))
         } else {
             Role::Guest(Box::default())
@@ -1239,7 +1247,7 @@ impl Session {
             Role::Host(h) => {
                 let seq = h.own_seq;
                 h.own_seq += 1;
-                let late = h.accept(
+                h.accept(
                     player,
                     Batch {
                         seq,
@@ -1247,9 +1255,8 @@ impl Session {
                         commands: frame.commands,
                     },
                     false,
+                    &mut self.stats,
                 );
-                self.stats.late_batches += late;
-                self.stats.refused = h.refused;
             }
             Role::Guest(g) => {
                 let seq = g.next_seq;
@@ -1606,7 +1613,7 @@ impl Session {
                 // timeout had its minute, and "Back to room" is a choice.
                 link.gone = true;
                 let seat = link.player;
-                h.started |= h.links.values().all(|l| l.heard || l.gone);
+                h.check_started();
                 if how == Gone::Bye
                     && let Some(door) = h.door.as_mut()
                     && let Some(&key) = door.keys.get(&peer)
@@ -1649,27 +1656,21 @@ impl Session {
         let Role::Host(h) = &mut self.role else {
             return;
         };
-        if h.links.get(&from).is_none_or(|l| l.gone) {
+        let Some(link) = h.links.get_mut(&from).filter(|l| !l.gone) else {
             return;
-        }
+        };
+        link.last_heard = Some(now);
         match msg {
             Msg::Input(p) => {
-                let link = h.links.get_mut(&from).expect("checked above");
                 link.heard = true;
-                link.last_heard = Some(now);
                 if p.next_turn > link.next_turn || link.advanced.is_none() {
                     link.advanced = Some(now);
                 }
                 link.next_turn = link.next_turn.max(p.next_turn);
                 link.stamp_in = Some((p.stamp, now));
-                if let Some(e) = p.echo {
-                    let rtt = ms(now)
-                        .wrapping_sub(e.stamp)
-                        .saturating_sub(e.held_ms as u32);
-                    link.rtt.sample(rtt as f32);
-                }
+                link.rtt.echo(p.echo, now);
                 let player = link.player;
-                h.started |= h.links.values().all(|l| l.heard || l.gone);
+                h.check_started();
                 // A guest catching up after a stall (turns missing, or a
                 // pile of them in hand) is behind by far more than the
                 // network: its lag says nothing about the delay the rest
@@ -1681,21 +1682,12 @@ impl Session {
                 }
                 if let Some(player) = player {
                     for b in p.batches {
-                        self.stats.late_batches += h.accept(player, b, true);
+                        h.accept(player, b, true, &mut self.stats);
                     }
-                    self.stats.refused = h.refused;
                 }
             }
-            Msg::Resend { from: tick } => {
-                if let Some(l) = h.links.get_mut(&from) {
-                    l.last_heard = Some(now);
-                }
-                self.fill(from, tick);
-            }
+            Msg::Resend { from: tick } => self.fill(from, tick),
             Msg::Load { permille, behind } => {
-                if let Some(l) = h.links.get_mut(&from) {
-                    l.last_heard = Some(now);
-                }
                 let load = PeerLoad {
                     cpu: f32::from(permille) / 1000.0,
                     behind: u32::from(behind),
@@ -1704,9 +1696,6 @@ impl Session {
                 h.speed.report(from, load);
             }
             Msg::Hash { frame, hash } => {
-                if let Some(l) = h.links.get_mut(&from) {
-                    l.last_heard = Some(now);
-                }
                 let own = h.hashes.get(&frame).copied();
                 let newest = h.hashes.last_key_value().map(|(f, _)| *f);
                 match own {
@@ -1745,12 +1734,7 @@ impl Session {
             Msg::Turns(p) => {
                 g.host_newest = g.host_newest.max(p.newest);
                 g.stamp_in = Some((p.stamp, now));
-                if let Some(e) = p.echo {
-                    let rtt = ms(now)
-                        .wrapping_sub(e.stamp)
-                        .saturating_sub(e.held_ms as u32);
-                    g.rtt.sample(rtt as f32);
-                }
+                g.rtt.echo(p.echo, now);
                 while g.unacked.front().is_some_and(|b| b.seq < p.cmd_ack) {
                     g.unacked.pop_front();
                 }
@@ -2038,7 +2022,6 @@ impl Host {
             pending_drops: BTreeMap::new(),
             door: None,
             last_pings: None,
-            refused: 0,
             speed: SpeedControl::default(),
             server_seq: 0,
         }
@@ -2083,15 +2066,22 @@ impl Host {
         self.inputs.insert(seat, input);
     }
 
+    /// The host has heard from every guest still in the match: its
+    /// clock runs.
+    fn check_started(&mut self) {
+        self.started |= self.links.values().all(|l| l.heard || l.gone);
+    }
+
     /// File `batch` from `player`: exactly once, in seq order, never in
-    /// the past. Returns 1 if it came late.
+    /// the past; late batches and refused commands are counted in
+    /// `stats`.
     /// A guest's batch (`guest`) may not drop anyone, bring anyone back
     /// or set the speed control's speed: only the host issues `Dropped`,
     /// `Returned` and `InternalSpeed`.
-    fn accept(&mut self, player: u8, mut batch: Batch, guest: bool) -> u64 {
+    fn accept(&mut self, player: u8, mut batch: Batch, guest: bool, stats: &mut SessionStats) {
         let input = self.inputs.entry(player).or_default();
         if batch.seq < input.next_seq || input.held.contains_key(&batch.seq) {
-            return 0;
+            return;
         }
         if guest {
             let before = batch.commands.len();
@@ -2101,7 +2091,7 @@ impl Host {
                     SimCommand::Dropped | SimCommand::Returned | SimCommand::InternalSpeed { .. }
                 )
             });
-            self.refused += (before - batch.commands.len()) as u64;
+            stats.refused += (before - batch.commands.len()) as u64;
         }
         // The match rules: what they forbid is never sequenced (the
         // batch keeps its number, so the guest's acks still line up).
@@ -2110,13 +2100,12 @@ impl Host {
                 Ok(()) => true,
                 Err(why) => {
                     bevy::log::warn!("host: refused {cmd:?} from player {player}: {why}");
-                    self.refused += 1;
+                    stats.refused += 1;
                     false
                 }
             });
         }
         input.held.insert(batch.seq, batch);
-        let mut late = 0;
         while let Some(b) = input.held.remove(&input.next_seq) {
             input.next_seq += 1;
             let floor = input.last_target.max(self.next_cut);
@@ -2125,11 +2114,10 @@ impl Host {
             } else {
                 b.target.max(floor)
             };
-            late += (b.target < self.next_cut) as u64;
+            stats.late_batches += (b.target < self.next_cut) as u64;
             input.last_target = at;
             self.scheduled.insert((at, player, b.seq), b.commands);
         }
-        late
     }
 }
 
@@ -2176,22 +2164,22 @@ mod tests {
             target,
             commands: vec![stop()],
         };
-        assert_eq!(h.accept(1, b(1, 14), false), 0, "held for seq 0");
+        let mut stats = SessionStats::default();
+        h.accept(1, b(1, 14), false, &mut stats);
+        assert_eq!(stats.late_batches, 0, "held for seq 0");
         assert!(h.scheduled.is_empty());
-        assert_eq!(
-            h.accept(1, b(0, 8), false),
-            1,
-            "late: due at 8, cut is at 10"
-        );
-        assert_eq!(h.accept(1, b(0, 8), false), 0, "duplicate");
+        h.accept(1, b(0, 8), false, &mut stats);
+        assert_eq!(stats.late_batches, 1, "late: due at 8, cut is at 10");
+        h.accept(1, b(0, 8), false, &mut stats);
+        assert_eq!(stats.late_batches, 1, "duplicate");
         let keys: Vec<_> = h.scheduled.keys().copied().collect();
         assert_eq!(keys, vec![(10, 1, 0), (14, 1, 1)]);
         // A lower target later (the delay dropped) keeps the order.
-        h.accept(1, b(2, 12), false);
+        h.accept(1, b(2, 12), false, &mut stats);
         assert!(h.scheduled.contains_key(&(14, 1, 2)));
         // Paused: due on the next tick, whatever the target.
         h.paused = true;
-        h.accept(2, b(0, 40), false);
+        h.accept(2, b(0, 40), false, &mut stats);
         assert!(h.scheduled.contains_key(&(10, 2, 0)));
     }
 
