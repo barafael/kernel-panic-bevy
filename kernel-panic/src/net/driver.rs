@@ -617,8 +617,8 @@ struct WorldRunner<'w> {
 }
 
 /// The player whose input the bus seals: the local seat, nobody when
-/// spectating (`apply_sim_commands` decides the same way).
-fn local_player(world: &World) -> Option<u8> {
+/// spectating (`apply_sim_commands` too).
+pub(crate) fn local_player(world: &World) -> Option<u8> {
     world
         .get_resource::<crate::units::player::LocalTeam>()
         .map_or(Some(0), |t| {

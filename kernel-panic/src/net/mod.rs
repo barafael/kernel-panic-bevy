@@ -377,33 +377,12 @@ pub enum SimCommand {
     Returned,
 }
 
-impl SimCommand {
-    /// A [`SimCommand::PerUnit`] from (unit, target) pairs, sorted by id
-    /// as the wire format wants.
-    pub fn per_unit(order: PointOrder, mut pairs: Vec<(NetId, Vec3)>, queue: bool) -> Self {
-        pairs.retain(|(id, _)| id.0 != 0);
-        pairs.sort_by_key(|(id, _)| *id);
-        pairs.dedup_by_key(|(id, _)| *id);
-        SimCommand::PerUnit {
-            order,
-            units: IdList::new(pairs.iter().map(|(id, _)| *id)),
-            targets: PosList::quantize(pairs.iter().map(|(_, p)| *p)),
-            queue,
-        }
-    }
-
-    /// One order for one unit (the AI's usual shape).
-    pub fn order_one(unit: NetId, order: Order) -> Self {
-        SimCommand::Order {
-            units: Units::of([unit]),
-            order,
-            queue: false,
-        }
-    }
-
-    fn units_mut(&mut self) -> Option<&mut Units> {
+/// The unit list a command orders (shared by [`SimCommand::units`] and
+/// [`SimCommand::units_mut`]).
+macro_rules! units_of {
+    ($cmd:expr) => {{
         use SimCommand::*;
-        match self {
+        match $cmd {
             Order { units, .. }
             | Stop { units }
             | Build {
@@ -431,6 +410,39 @@ impl SimCommand {
             | InternalSpeed { .. }
             | Returned => None,
         }
+    }};
+}
+
+impl SimCommand {
+    /// A [`SimCommand::PerUnit`] from (unit, target) pairs, sorted by id
+    /// as the wire format wants.
+    pub fn per_unit(order: PointOrder, mut pairs: Vec<(NetId, Vec3)>, queue: bool) -> Self {
+        pairs.retain(|(id, _)| id.0 != 0);
+        pairs.sort_by_key(|(id, _)| *id);
+        pairs.dedup_by_key(|(id, _)| *id);
+        SimCommand::PerUnit {
+            order,
+            units: IdList::new(pairs.iter().map(|(id, _)| *id)),
+            targets: PosList::quantize(pairs.iter().map(|(_, p)| *p)),
+            queue,
+        }
+    }
+
+    /// One order for one unit (the AI's usual shape).
+    pub fn order_one(unit: NetId, order: Order) -> Self {
+        SimCommand::Order {
+            units: Units::of([unit]),
+            order,
+            queue: false,
+        }
+    }
+
+    fn units(&self) -> Option<&Units> {
+        units_of!(self)
+    }
+
+    fn units_mut(&mut self) -> Option<&mut Units> {
+        units_of!(self)
     }
 }
 
@@ -641,13 +653,10 @@ fn is_empty(cmd: &SimCommand) -> bool {
         SimCommand::PerUnit { units, .. } => units.is_empty(),
         SimCommand::Path { waypoints, .. } => waypoints.0.is_empty(),
         SimCommand::Build { sites, .. } if sites.0.is_empty() => true,
-        other => {
-            let mut other = other.clone();
-            other
-                .units_mut()
-                .and_then(|u| u.list().map(IdList::is_empty))
-                .unwrap_or(false)
-        }
+        other => other
+            .units()
+            .and_then(|u| u.list().map(IdList::is_empty))
+            .unwrap_or(false),
     }
 }
 

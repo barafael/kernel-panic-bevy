@@ -374,8 +374,8 @@ fn chaos(d: &mut Dice, v: &View, tick: u32) -> Vec<CommandFrame> {
         // it names then never depends on the malformed stream.
         let mut listed = false;
         for _ in 0..n {
-            let mut cmd = chaos_command(d, v, team, tick, listed);
-            listed |= cmd.units_mut().is_some_and(|u| u.list().is_some());
+            let cmd = chaos_command(d, v, team, tick, listed);
+            listed |= cmd.units().is_some_and(|u| u.list().is_some());
             commands.push(cmd);
         }
         frames.push(CommandFrame {
@@ -412,11 +412,9 @@ fn chaos(d: &mut Dice, v: &View, tick: u32) -> Vec<CommandFrame> {
         // A `Units::Prev` the damage made up would name whatever list
         // came last, the malformed stream's included: left out.
         let names_prev = |f: &CommandFrame| {
-            f.commands.iter().any(|c| {
-                c.clone()
-                    .units_mut()
-                    .is_some_and(|u| matches!(u, Units::Prev))
-            })
+            f.commands
+                .iter()
+                .any(|c| c.units().is_some_and(|u| matches!(u, Units::Prev)))
         };
         if let Ok(mut f) = CommandFrame::decode(&bytes)
             && !names_prev(&f)

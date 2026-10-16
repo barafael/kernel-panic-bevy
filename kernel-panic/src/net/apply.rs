@@ -334,11 +334,7 @@ pub(crate) struct ApplyCtx<'w, 's> {
 /// Seal the commands issued since the last tick, then apply every frame
 /// due on this tick (by player, each in issue order).
 pub(crate) fn apply_sim_commands(world: &mut World, state: &mut SystemState<ApplyCtx>) {
-    let local = world
-        .get_resource::<crate::units::player::LocalTeam>()
-        .map_or(Some(0), |t| {
-            (t.0 != crate::game_setup::SPECTATOR_TEAM).then_some(t.0)
-        });
+    let local = super::driver::local_player(world);
     let Some(mut bus) = world.get_resource_mut::<CommandBus>() else {
         return;
     };
@@ -357,8 +353,7 @@ pub(crate) fn apply_sim_commands(world: &mut World, state: &mut SystemState<Appl
             // refused command would name another group).
             let ids = {
                 let mut bus = world.resource_mut::<CommandBus>();
-                let mut cmd = cmd.clone();
-                cmd.units_mut()
+                cmd.units()
                     .map(|u| bus.resolve_units(frame.player, u))
                     .unwrap_or_default()
             };
