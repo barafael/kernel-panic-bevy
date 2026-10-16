@@ -411,11 +411,115 @@ out, `GameServer.cpp:900-904`) nor hidden tabs (`Msg::Away`); replays play the
 recorded speed changes and report nothing. One version bump for all of M3:
 `SIM_VERSION` 6, wire 3, lobby 2, replay format 4.
 
+### M4 — Real players · ~1.5–2 weeks
+
+Goal: a tagged release that people play over the internet, native and web mixed, and
+a playtest across real networks. **No TURN relay yet** (decision 2026-10-16): the
+playtest's network reports decide whether one is needed.
+
+Three agents in parallel (K, L, M), then the merge, then the playtest and the tag.
+Versions: one combined bump at the merge (wire 4, lobby 3; `SIM_VERSION` only if a
+part changes the sim, which none should; no new `SimCommand` expected).
+
+**K — Host migration and seat keys.** Today the host leaving ends the match for
+everyone. Spring has no migration either (the server is the game,
+`GameServer.cpp:2737`), so this is our own design. Every peer already applies the
+same turns and keeps the whole log, so any survivor can carry on sequencing.
+- **Successor:** every survivor computes the same one from the match roster: the
+  lowest remaining `PeerId`, seated players before spectators. With no human seat
+  left, the match ends as it does now.
+- **Where the old host stopped:** each survivor tells the successor its last applied
+  turn and re-sends every batch it has not yet seen *applied*. Today a guest drops a
+  batch once it is acknowledged; check this, and keep batches until they appear in a
+  turn. The successor fetches the turns it lacks from whichever survivor has them
+  (gap fills in the guest → host direction, new). It resumes cutting at the highest
+  turn anyone holds, plus one. A batch that was acknowledged but never reached anyone
+  in a turn is re-sent, never lost; a batch already in a turn is never applied twice.
+- **The old host's seat** follows the M3 rule: a disconnect gets the 30 s rejoin
+  grace (`Timeouts::rejoin`), then `Dropped` (fuse or TAKE), then `Returned` if it
+  comes back. The server seat (`SERVER_PLAYER`, speed control), the delay controller,
+  the `Door` (rejoin, spectators) and replay recording move to the successor. The
+  speed control restarts at the current speed. A migrated match's log has no seam.
+- **Links:** so far only host links carried the match, and a guest↔guest pair could
+  stay unconnected (M2; M3's stuck-room reopen covers both directions now). A
+  survivor without a link to the successor rejoins through the M3 path (knock, catch
+  up from the new host's log). Measure under netem how often that happens.
+- **Seat keys:** every lobby `Hello` carries the `PlayerKey` in the clear, so any
+  peer could claim another player's seat (open since the H + I merge). Instead, the
+  room publishes a commitment per seat (a hash of the key), and the key itself goes
+  only to the host, on the host link. A successor checks claimants against the
+  commitments.
+- **Tests (full sim, identical trails on every survivor):**
+  - the host leaving at random ticks in rooms of 3–8
+  - batches in flight at that moment: no command lost, none applied twice
+  - the host leaving during a rejoiner's catch-up
+  - the successor leaving right after (cascade)
+  - the old host returning within the grace and after the drop
+  - a migration under netem (2 % loss)
+  - a stolen key is refused
+
+**L — Match rules, load and network report.**
+- **Finished matches:** a decided match admits no newcomers. Today the host answers
+  `Running` until it leaves (open since the H + I merge); the `Door` should say
+  "match over" instead.
+- **Speed policy as a lobby rule:** `MatchRules` gains max (the default) or median,
+  shown in the room.
+- **Draw time in the load:** G left this open. Check what Spring's reported CPU
+  usage covers and cite it. Then count frame time beyond the sim, so a peer that
+  draws slowly but simulates fast is waited for. Hidden tabs are already left out
+  (`Msg::Away`).
+- **Network report:** per link, the selected ICE candidate pair's types (host /
+  srflx / prflx / relay), RTT and loss: `getStats()` on the web, webrtc-rs stats
+  natively. Show it in the player list (F9) and the room, with a "Copy network
+  report" button (clipboard, natively and on the web).
+- **Plain failure text:** a pair that never connects (all reopen tries spent) says
+  what the report shows. For example, both sides offered only host and srflx
+  candidates and none of them worked: both are behind strict NATs, and only a relay
+  would connect them.
+
+**M — Release, web versions, WebKit.**
+- **Versioned web builds:** Pages follows `main`, so a released native build stops
+  matching the web build at the next `SIM_VERSION` bump. Each release tag keeps its
+  web build at `/<tag>/`, with `main` at the root. Pages takes one artifact per
+  deploy, so the deploy job must re-assemble the kept versions, e.g. from the
+  releases' web archives. A peer with another build is told which version the room
+  runs and where that version's web build is.
+- **Version shown:** the version string (tag, or `dev-<sha>`) appears in the menu and
+  is sent in the lobby `Hello`.
+- **Packages tested:** a dry run (`workflow_dispatch`), then a smoke job in
+  `release.yml` runs every packaged binary headless on its own OS (golden replay from
+  the package directory, assets found next to the binary). A broken package then
+  fails the release. Document the macOS quarantine step for unsigned builds.
+- **WebKit bug:**
+  - Find out whether real Safari hits it: GitHub's macOS runners have Safari and
+    `safaridriver`. If it runs there, add a `wasm-safari` row to `determinism.yml`.
+  - Reduce the repro to a standalone page and draft a bugs.webkit.org report. The
+    user files it.
+
+**Merge** (coordinator):
+- K, L, M, then the verification run, the menu layout check (new: version string,
+  network report, rules row) and the push.
+- A release candidate tag (`v0.1.0-rc1`) runs the release workflow for real.
+
+**Playtest** (user and coordinator, after the merge):
+1. Native and web on two different networks (home Wi-Fi and a phone's mobile data):
+   connect time and both network reports.
+2. A 2v2 with AIs for 20+ minutes, one player on a laptop on battery (speed control).
+3. A web player hides the tab for a minute, then reloads the page mid-match (rejoin).
+4. The host quits mid-match (migration), then comes back.
+5. Back to room, and a second match in the same room.
+6. Safari, if a Mac or iPhone is at hand.
+7. Every player's replay of the match plays to the end.
+
+The coordinator collects the network reports, the replays and any desync dumps into
+`net-experiments/m4-playtest.md`. That write-up records the TURN decision (needed or
+not, and where to host it). Then tag `v0.1.0`.
+
 ### Later
 
-TURN deployment, host migration, snapshot rejoin, reconnect polish (omdurman's
-findings: stable player keys, retransmit until echoed, uid dedup). Lockstep cannot
-prevent map hacks (every peer holds full state), as in the original.
+TURN deployment (after the M4 playtest), snapshot rejoin (replaying from tick 0 is
+~80 s natively for a 30-minute match, fine for now). Lockstep cannot prevent map
+hacks (every peer holds full state), as in the original.
 
 ## Experiment branches to harvest
 
