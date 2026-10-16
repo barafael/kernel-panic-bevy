@@ -317,7 +317,7 @@ fn forced_desync_full_sim() {
         assert_eq!(st.desync.as_ref().map(|x| x.stop_at), Some(d.stop_at));
         let ticks = r.trail(i).len() as u32;
         assert_eq!(ticks, d.stop_at, "peer {i} paused at the stop");
-        let dump = st.dump.expect("dumped");
+        let dump = st.desync.and_then(|d| d.dump).expect("dumped");
         let text = std::fs::read_to_string(&dump).expect("dump file");
         assert!(text.contains(&format!("frame {}", d.frame)));
         assert!(text.lines().count() > 20, "a per-unit dump");

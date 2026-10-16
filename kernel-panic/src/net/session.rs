@@ -410,8 +410,8 @@ pub struct Desync {
     pub stop_at: u32,
     /// The peers whose hash differed from the host's.
     pub peers: Vec<PeerId>,
-    /// This peer wrote its dump.
-    pub dumped: bool,
+    /// Where this peer's state dump went, once written (the driver).
+    pub dump: Option<String>,
 }
 
 /// Why a match ended for this peer.
@@ -1355,7 +1355,7 @@ impl Session {
             frame,
             stop_at,
             peers: peers.clone(),
-            dumped: false,
+            dump: None,
         };
         self.events.push(SessionEvent::Desync(d.clone()));
         self.desync = Some(d);
@@ -1779,7 +1779,7 @@ impl Session {
                         frame,
                         stop_at,
                         peers,
-                        dumped: false,
+                        dump: None,
                     };
                     self.events.push(SessionEvent::Desync(d.clone()));
                     self.desync = Some(d);

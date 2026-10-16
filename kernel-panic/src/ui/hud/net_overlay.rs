@@ -406,7 +406,7 @@ fn banner_text(status: &NetStatus, names: &PeerNames) -> Option<String> {
         return Some(format!(
             "Desync at frame {} — the game is stopped.\nState dump: {}",
             d.frame,
-            status.dump.as_deref().unwrap_or("pending")
+            d.dump.as_deref().unwrap_or("pending")
         ));
     }
     let over = match status.ended {

@@ -355,11 +355,11 @@ pub fn drive_frame(
         }
     }
     if s.halted()
-        && let Some(d) = s.desync().filter(|d| !d.dumped).cloned()
+        && let Some(d) = s.desync().filter(|d| d.dump.is_none()).cloned()
     {
-        let _where = r.dump(s, &d);
+        let place = r.dump(s, &d);
         if let Some(d) = s.desync_mut() {
-            d.dumped = true;
+            d.dump = Some(place);
         }
     }
     s.flush(now);
@@ -579,9 +579,8 @@ pub struct NetStatus {
     /// Stalled for a turn (guest) or for players to show up (host): who,
     /// and since when (the driver's clock).
     pub waiting: Option<(Vec<PeerId>, Duration)>,
+    /// A desync, and where this peer's state dump went.
     pub desync: Option<Desync>,
-    /// Where this peer's desync dump went.
-    pub dump: Option<String>,
     pub ended: Option<Ended>,
     /// "Leave match" is under way.
     pub leaving: bool,
@@ -613,7 +612,6 @@ pub struct ReplayStatus {
 struct WorldRunner<'w> {
     world: &'w mut World,
     step: Duration,
-    dump: Option<String>,
 }
 
 /// The player whose input the bus seals: the local seat, nobody when
@@ -692,7 +690,6 @@ impl TickRunner for WorldRunner<'_> {
         );
         let place = write_dump(self.world, &name, &text);
         error!("desync at frame {}: state dumped to {place}", d.frame);
-        self.dump = Some(place.clone());
         place
     }
 }
@@ -760,11 +757,7 @@ pub fn drive_fixed_main(world: &mut World) {
                 seat_networked(world, &mut net.session);
             }
         }
-        let mut runner = WorldRunner {
-            world,
-            step,
-            dump: None,
-        };
+        let mut runner = WorldRunner { world, step };
         let rep = drive_frame(
             &mut net.session,
             &mut net.pacer,
@@ -787,7 +780,6 @@ pub fn drive_fixed_main(world: &mut World) {
                     .insert_resource(BackToRoom { transport, peers });
             }
         }
-        let dumped = runner.dump.take();
         // The render blend: how far the clock is into the next tick.
         let mut fixed = world.resource_mut::<Time<Fixed>>();
         let over = fixed.overstep();
@@ -879,7 +871,6 @@ pub fn drive_fixed_main(world: &mut World) {
                 .map_or(100, |c| c.internal_percent),
         });
         let mut status = world.get_resource_or_insert_with(NetStatus::default);
-        let dump = dumped.or(status.dump.take().filter(|_| s.desync().is_some()));
         *status = NetStatus {
             networked: s.is_networked(),
             host: s.is_host(),
@@ -892,7 +883,6 @@ pub fn drive_fixed_main(world: &mut World) {
             delay: s.delay(),
             waiting,
             desync: s.desync().cloned(),
-            dump,
             ended: s.ended(),
             leaving,
             closed: s.closed(),
