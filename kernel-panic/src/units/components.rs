@@ -17,9 +17,16 @@ impl Faction {
     pub const ALL: [Faction; 3] = [Faction::System, Faction::Hacker, Faction::Network];
 
     /// Map a map-team-id to a faction, System → Hacker → Network, wrapping.
-    /// Used to seed homebase factions at map load.
+    /// Used to seed homebase factions at map load, and to read a seat's
+    /// faction index ([`Self::index`]).
     pub fn from_team_id(team: u8) -> Self {
         Self::ALL[team as usize % Self::ALL.len()]
+    }
+
+    /// This faction's place in [`Self::ALL`], as seats and replays store
+    /// it.
+    pub fn index(self) -> u8 {
+        self as u8
     }
 
     /// The faction whose homebase is `kind`, if it is one.
@@ -227,5 +234,8 @@ mod tests {
         assert_eq!(Faction::from_team_id(1), Faction::Hacker);
         assert_eq!(Faction::from_team_id(2), Faction::Network);
         assert_eq!(Faction::from_team_id(3), Faction::System);
+        for f in Faction::ALL {
+            assert_eq!(Faction::from_team_id(f.index()), f);
+        }
     }
 }

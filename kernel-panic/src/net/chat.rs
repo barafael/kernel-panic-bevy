@@ -28,12 +28,19 @@ pub const CHAT_MAX: usize = 127;
 /// Lines the log keeps.
 const LOG_KEEP: usize = 100;
 
-/// `text` as it may travel: no control characters, at most
-/// [`CHAT_MAX`] characters, trimmed. Empty: nothing to send.
+/// A chat line as it may travel ([`clean_to`] [`CHAT_MAX`]). Empty:
+/// nothing to send.
 pub fn clean(text: &str) -> String {
+    clean_to(text, CHAT_MAX)
+}
+
+/// `text` without control characters, at most `max` characters,
+/// trimmed: a chat line, a name in a room
+/// ([`super::lobby::clean_name`]).
+pub fn clean_to(text: &str, max: usize) -> String {
     text.chars()
         .filter(|c| !c.is_control())
-        .take(CHAT_MAX)
+        .take(max)
         .collect::<String>()
         .trim()
         .to_string()

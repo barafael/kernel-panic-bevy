@@ -58,6 +58,26 @@ pub struct Seat {
     pub ai: bool,
 }
 
+impl From<&PlayerSpec> for Seat {
+    fn from(p: &PlayerSpec) -> Self {
+        Self {
+            faction: p.faction.index(),
+            ally_team: p.ally_team,
+            ai: p.ai,
+        }
+    }
+}
+
+impl From<&Seat> for PlayerSpec {
+    fn from(s: &Seat) -> Self {
+        Self {
+            faction: Faction::from_team_id(s.faction),
+            ally_team: s.ally_team,
+            ai: s.ai,
+        }
+    }
+}
+
 /// Everything that starts a match.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatchSetup {
@@ -79,18 +99,7 @@ impl MatchSetup {
     pub fn of(setup: &GameSetup) -> Self {
         Self {
             map: setup.map.clone(),
-            seats: setup
-                .players
-                .iter()
-                .map(|p| Seat {
-                    faction: Faction::ALL
-                        .iter()
-                        .position(|f| *f == p.faction)
-                        .unwrap_or(0) as u8,
-                    ally_team: p.ally_team,
-                    ai: p.ai,
-                })
-                .collect(),
+            seats: setup.players.iter().map(Seat::from).collect(),
             difficulty: setup.difficulty,
             seed: setup.seed,
             sandbox: setup.sandbox,
@@ -102,15 +111,7 @@ impl MatchSetup {
     pub fn game_setup(&self) -> GameSetup {
         GameSetup {
             map: self.map.clone(),
-            players: self
-                .seats
-                .iter()
-                .map(|s| PlayerSpec {
-                    faction: Faction::ALL[s.faction as usize % Faction::ALL.len()],
-                    ally_team: s.ally_team,
-                    ai: s.ai,
-                })
-                .collect(),
+            players: self.seats.iter().map(PlayerSpec::from).collect(),
             difficulty: self.difficulty,
             demo: false,
             showcase: None,

@@ -1071,8 +1071,7 @@ fn step_catalog_index(current: Option<usize>, step: i32, len: usize) -> usize {
 
 /// Faction cycle order from the original: System → Hacker → Network.
 fn next_faction(f: Faction) -> Faction {
-    let i = Faction::ALL.iter().position(|&g| g == f).unwrap_or(0);
-    Faction::ALL[(i + 1) % Faction::ALL.len()]
+    Faction::from_team_id(f.index() + 1)
 }
 
 /// Read a `Val` percent, treating `Auto`/`Px` as 0. Used to order buttons

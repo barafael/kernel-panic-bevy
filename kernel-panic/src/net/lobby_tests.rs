@@ -6,8 +6,8 @@
 //! per-tick state hashes agree. Then both go back to the room (M3):
 //! same code, same seats, chat, ready for a rematch.
 //!
-//! The room is the in-process network `lobby::connect` opens in tests
-//! (the game opens matchbox); the protocol over a lossy network is
+//! The room is an in-process network ([`RoomConnector::sim`]; the game
+//! opens matchbox); the protocol over a lossy network is
 //! `lobby::tests`.
 
 use std::time::{Duration, Instant};
@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use super::driver::{NetSession, NetStatus};
-use super::lobby::{LobbyAction, LobbyRoom, Occupant};
+use super::lobby::{LobbyAction, LobbyRoom, Occupant, RoomConnector};
 use crate::game_setup::{ActiveMatch, AppState};
 use crate::headless::{Executor, HashLog, build_app};
 use crate::units::components::Homebase;
@@ -65,8 +65,10 @@ fn two_apps_meet_start_and_agree() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut apps = [build_app(Executor::Single), build_app(Executor::Single)];
+    let rooms = RoomConnector::sim();
     for app in &mut apps {
         app.insert_resource(TimeUpdateStrategy::ManualDuration(TICK));
+        app.insert_resource(rooms.clone());
         app.world_mut().resource_mut::<HashLog>().enabled = true;
         // Startup: the menu's attract demo starts loading.
         app.update();

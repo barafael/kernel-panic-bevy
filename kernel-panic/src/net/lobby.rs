@@ -70,6 +70,7 @@
 //!   ([`super::chat`]).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::prelude::*;
@@ -80,6 +81,7 @@ use super::chat::{self, ChatLine};
 use super::compat::{Build, Compat};
 use super::driver::{CatchUp, NextNetMatch, PeerNames};
 use super::rejoin::{Door, PlayerKey, Running};
+use super::replay_log::{MatchSetup, Seat};
 use super::session::{DelayBounds, SessionConfig};
 use super::transport::{Channel, MAX_MESSAGE, PeerEvent, PeerId, Transport};
 use crate::game_setup::{AppState, GameSetup, PlayerSpec};
@@ -89,54 +91,84 @@ use crate::units::components::Faction;
 
 pub use super::matchbox::RoomId;
 
-/// The one place the lobby opens a connection to a room: matchbox over
-/// WebRTC, through the launch's signaling server and ICE servers
+/// How the lobby opens (and reopens) its connection to a room: in the
+/// game matchbox over WebRTC, through the launch's signaling server and
+/// ICE servers
 /// ([`NetConfig::from_launch`](super::matchbox::NetConfig::from_launch)).
+/// The menu screenshots (`ui::menu_shots`) open rooms nobody else
+/// reaches ([`Self::offline`]), so a dev tool never shows up on the
+/// public signaling server; tests meet over a simulated network
+/// ([`Self::sim`]) or stay alone (the default under test).
+#[derive(Resource, Clone)]
+pub struct RoomConnector(Arc<OpenRoom>);
+
+type OpenRoom = dyn Fn(&RoomId) -> Box<dyn Transport> + Send + Sync;
+
 #[cfg(not(test))]
-pub fn connect(room: &RoomId) -> Box<dyn Transport> {
-    super::matchbox::open_room(room, &super::matchbox::NetConfig::from_launch())
+impl Default for RoomConnector {
+    fn default() -> Self {
+        Self::matchbox()
+    }
 }
 
-/// Rooms stay on this machine: [`enter`] opens a
-/// [`LoneTransport`](super::transport::LoneTransport) instead of
-/// [`connect`]ing. The menu screenshots set it (`ui::menu_shots`), so a
-/// dev tool never opens a real room on the public signaling server.
-#[derive(Resource, Clone, Copy, Debug, Default)]
-pub struct OfflineRooms;
-
-/// The connection [`enter`] opens (and the lobby reopens): the room on
-/// the signaling server, or one nobody else can reach ([`OfflineRooms`]).
-fn connector(room: RoomId, offline: bool) -> Connector {
-    Box::new(move || {
-        if offline {
-            let id = (crate::game_setup::random_seed() as u128) << 64
-                | crate::game_setup::random_seed() as u128;
-            Box::new(super::transport::LoneTransport::new(PeerId(id)))
-        } else {
-            connect(&room)
-        }
-    })
-}
-
-/// Tests: an in-process [`SimNetwork`](super::sim_net::SimNetwork) per
-/// room code (no latency), so two apps in one test process meet without
-/// a signaling server.
 #[cfg(test)]
-pub fn connect(room: &RoomId) -> Box<dyn Transport> {
-    use std::sync::Mutex;
+impl Default for RoomConnector {
+    fn default() -> Self {
+        Self::offline()
+    }
+}
 
-    use super::sim_net::SimNetwork;
+impl RoomConnector {
+    /// The room on the launch's signaling server.
+    #[cfg(not(test))]
+    pub fn matchbox() -> Self {
+        Self(Arc::new(|room| {
+            super::matchbox::open_room(room, &super::matchbox::NetConfig::from_launch())
+        }))
+    }
 
-    static ROOMS: Mutex<BTreeMap<String, SimNetwork>> = Mutex::new(BTreeMap::new());
-    let net = ROOMS
-        .lock()
-        .expect("room registry poisoned")
-        .entry(room.to_string())
-        .or_insert_with(|| SimNetwork::new(1))
-        .clone();
-    let id =
-        (crate::game_setup::random_seed() as u128) << 64 | crate::game_setup::random_seed() as u128;
-    Box::new(net.join(PeerId(id)))
+    /// A [`LoneTransport`](super::transport::LoneTransport) under a fresh
+    /// id: the lobby hosts a room of its own.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn offline() -> Self {
+        Self(Arc::new(|_| {
+            Box::new(super::transport::LoneTransport::new(random_peer()))
+        }))
+    }
+
+    /// Tests: an in-process [`SimNetwork`](super::sim_net::SimNetwork)
+    /// per room code (no latency), shared by every clone, so apps in one
+    /// test process meet without a signaling server.
+    #[cfg(test)]
+    pub fn sim() -> Self {
+        use std::sync::Mutex;
+
+        use super::sim_net::SimNetwork;
+
+        let rooms: Mutex<BTreeMap<String, SimNetwork>> = Mutex::default();
+        Self(Arc::new(move |room| {
+            let net = rooms
+                .lock()
+                .expect("room registry poisoned")
+                .entry(room.to_string())
+                .or_insert_with(|| SimNetwork::new(1))
+                .clone();
+            Box::new(net.join(random_peer()))
+        }))
+    }
+
+    /// Opens (again) the connection to `room`.
+    fn to(&self, room: RoomId) -> Connector {
+        let open = self.0.clone();
+        Box::new(move || open(&room))
+    }
+}
+
+/// A fresh random id.
+fn random_peer() -> PeerId {
+    PeerId(
+        (crate::game_setup::random_seed() as u128) << 64 | crate::game_setup::random_seed() as u128,
+    )
 }
 
 // --- the wire -----------------------------------------------------------
@@ -287,6 +319,76 @@ pub const STUCK: Duration = Duration::from_secs(10);
 /// Reopens per room before the lobby gives up and says so.
 pub const MAX_REOPENS: u32 = 3;
 
+/// When a stalled handshake is started afresh. matchbox never retries
+/// one (no timeout, no retry), so a link missing since some time is
+/// given up on: the waiting side reopens its connection under a new id,
+/// a new round of handshakes with everyone. The lobby's stuck-room
+/// check ([`Self::fixed`]: [`STUCK`], [`MAX_REOPENS`]) and the
+/// real-WebRTC tests' rendezvous ([`Self::growing`]) decide with it.
+#[derive(Clone, Copy, Debug)]
+pub struct Retry {
+    /// How long the first attempt waits.
+    patience: Duration,
+    /// Attempt `n` waits `n` × `patience` (a slow but working handshake
+    /// gets through).
+    growing: bool,
+    /// Reopens before giving up.
+    max: u32,
+    reopens: u32,
+}
+
+impl Retry {
+    /// Every attempt waits `patience`; at most `max` reopens.
+    pub const fn fixed(patience: Duration, max: u32) -> Self {
+        Self {
+            patience,
+            growing: false,
+            max,
+            reopens: 0,
+        }
+    }
+
+    /// Attempt `n` waits `n` × `patience`, as often as it takes.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const fn growing(patience: Duration) -> Self {
+        Self {
+            patience,
+            growing: true,
+            max: u32::MAX,
+            reopens: 0,
+        }
+    }
+
+    /// How long the current attempt waits.
+    pub fn patience(&self) -> Duration {
+        if self.growing {
+            self.patience * (self.reopens + 1)
+        } else {
+            self.patience
+        }
+    }
+
+    /// A link missing since `since` (any monotonic clock) is given up on
+    /// at `now`: reopen.
+    pub fn due(&self, since: Duration, now: Duration) -> bool {
+        !self.exhausted() && now.saturating_sub(since) >= self.patience()
+    }
+
+    /// The connection was reopened.
+    pub fn reopened(&mut self) {
+        self.reopens += 1;
+    }
+
+    pub fn reopens(&self) -> u32 {
+        self.reopens
+    }
+
+    /// No reopens left.
+    pub fn exhausted(&self) -> bool {
+        self.reopens >= self.max
+    }
+}
+
 /// Opens (again) the connection to the room the lobby is in.
 pub type Connector = Box<dyn FnMut() -> Box<dyn Transport> + Send + Sync>;
 
@@ -309,7 +411,7 @@ pub struct SeatSpec {
 
 impl SeatSpec {
     pub fn faction(&self) -> Faction {
-        Faction::ALL[self.faction as usize % Faction::ALL.len()]
+        Faction::from_team_id(self.faction)
     }
 }
 
@@ -390,24 +492,33 @@ impl RoomState {
 
     /// Equal but for the revision.
     fn same(&self, other: &RoomState) -> bool {
-        Self {
-            rev: 0,
-            ..self.clone()
-        } == Self {
-            rev: 0,
-            ..other.clone()
-        }
+        let Self {
+            rev: _,
+            host,
+            map,
+            difficulty,
+            seats,
+            rules,
+            members,
+        } = self;
+        *host == other.host
+            && *map == other.map
+            && *difficulty == other.difficulty
+            && *seats == other.seats
+            && *rules == other.rules
+            && *members == other.members
     }
 }
 
-/// The match setup as the `Start` carries it. Kept next to its two
-/// conversions ([`encode_setup`], [`decode_setup`]), the one place a new
-/// `GameSetup` field joins the handshake.
+/// The match setup as the `Start` carries it: a replay's
+/// ([`MatchSetup`]) without `sandbox`, so the two conversions
+/// ([`encode_setup`], [`decode_setup`]) are the replay's, the one place
+/// a new `GameSetup` field joins the handshake.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetupWire {
     pub map: String,
-    /// (faction index, ally team, AI) per seat, in owner order.
-    pub seats: Vec<(u8, u8, bool)>,
+    /// Per seat, in owner order.
+    pub seats: Vec<Seat>,
     pub difficulty: u8,
     pub seed: u64,
     pub rules: MatchRules,
@@ -416,41 +527,33 @@ pub struct SetupWire {
 /// The networked part of `setup`: a match a lobby starts is never the
 /// demo, a showcase or a sandbox.
 pub fn encode_setup(setup: &GameSetup) -> SetupWire {
+    let MatchSetup {
+        map,
+        seats,
+        difficulty,
+        seed,
+        sandbox: _,
+        rules,
+    } = MatchSetup::of(setup);
     SetupWire {
-        map: setup.map.clone(),
-        seats: setup
-            .players
-            .iter()
-            .map(|p| {
-                let faction = Faction::ALL.iter().position(|f| *f == p.faction);
-                (faction.unwrap_or(0) as u8, p.ally_team, p.ai)
-            })
-            .collect(),
-        difficulty: setup.difficulty,
-        seed: setup.seed,
-        rules: setup.rules,
+        map,
+        seats,
+        difficulty,
+        seed,
+        rules,
     }
 }
 
 pub fn decode_setup(wire: &SetupWire) -> GameSetup {
-    GameSetup {
+    MatchSetup {
         map: wire.map.clone(),
-        players: wire
-            .seats
-            .iter()
-            .map(|&(faction, ally_team, ai)| PlayerSpec {
-                faction: Faction::ALL[faction as usize % Faction::ALL.len()],
-                ally_team,
-                ai,
-            })
-            .collect(),
+        seats: wire.seats.clone(),
         difficulty: wire.difficulty,
-        demo: false,
-        showcase: None,
-        sandbox: false,
         seed: wire.seed,
+        sandbox: false,
         rules: wire.rules,
     }
+    .game_setup()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -524,8 +627,6 @@ struct PeerInfo {
     /// It speaks another lobby version.
     foreign: bool,
     status: Option<Status>,
-    /// Its [`Hello::key`].
-    key: PlayerKey,
     /// The room its latest `Hello` showed (who the room has).
     room: Option<RoomState>,
 }
@@ -543,12 +644,7 @@ impl PeerInfo {
 /// A name as rooms show it: no control characters, at most
 /// [`NAME_MAX`] characters, trimmed.
 pub(crate) fn clean_name(name: &str) -> String {
-    name.chars()
-        .filter(|c| !c.is_control())
-        .take(NAME_MAX)
-        .collect::<String>()
-        .trim()
-        .to_string()
+    chat::clean_to(name, NAME_MAX)
 }
 
 /// One peer's side of a room.
@@ -562,6 +658,10 @@ pub struct Lobby {
     room: Option<RoomState>,
     /// What we last broadcast as host.
     sent: Option<RoomState>,
+    /// Host: something the members depend on changed (a peer, a hello
+    /// or status, our name or maps, the room): [`Self::keep_room`]
+    /// judges them again.
+    rejudge: bool,
     /// The newest room a hello brought.
     offered: Option<RoomState>,
     /// The map a fresh room starts on.
@@ -586,7 +686,7 @@ pub struct Lobby {
     running: Option<Running>,
     /// Reopens the connection when the room is stuck.
     reopen: Option<Connector>,
-    reopens: u32,
+    retry: Retry,
     /// Our id before the last reopen (not missing: it is us).
     was: Option<PeerId>,
     /// When the connection was (re)opened (the first poll after).
@@ -626,6 +726,7 @@ impl Lobby {
             peers: BTreeMap::new(),
             room: None,
             sent: None,
+            rejudge: true,
             offered: None,
             default_map: default_map.to_string(),
             ready: false,
@@ -640,7 +741,7 @@ impl Lobby {
             key: PlayerKey::random(),
             running: None,
             reopen: None,
-            reopens: 0,
+            retry: Retry::fixed(STUCK, MAX_REOPENS),
             was: None,
             opened_at: None,
             missing: BTreeMap::new(),
@@ -763,6 +864,7 @@ impl Lobby {
         if self.maps.get(map) != Some(&have) {
             self.maps.insert(map.to_string(), have);
             self.dirty = true;
+            self.rejudge = true;
         }
     }
 
@@ -818,6 +920,7 @@ impl Lobby {
         let hello = self.hello();
         self.broadcast(hello);
         self.dirty = true;
+        self.rejudge = true;
     }
 
     /// Say `text` to the room: through the host, which relays it to
@@ -875,7 +978,7 @@ impl Lobby {
             return None;
         }
         let who = late.join(", ");
-        Some(if self.reopens >= MAX_REOPENS || self.reopen.is_none() {
+        Some(if self.retry.exhausted() || self.reopen.is_none() {
             format!("no connection to {who}: leave and join again, or try another network")
         } else {
             format!("connecting to {who}...")
@@ -902,7 +1005,7 @@ impl Lobby {
     /// How often this lobby reopened its connection.
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn reopens(&self) -> u32 {
-        self.reopens
+        self.retry.reopens()
     }
 
     /// Take in the network, (host) keep the room, send what changed.
@@ -939,6 +1042,7 @@ impl Lobby {
                 }
             }
             self.dirty = true;
+            self.rejudge = true;
         }
         // Lobby traffic is reliable; whatever came unreliably is an
         // earlier match's session talking.
@@ -954,6 +1058,7 @@ impl Lobby {
                     if !info.foreign {
                         info.foreign = true;
                         self.dirty = true;
+                        self.rejudge = true;
                     }
                 }
                 Decoded::Other => {}
@@ -1017,21 +1122,18 @@ impl Lobby {
             self.missing.entry(p).or_insert(now);
         }
         self.dirty |= self.missing.len() != before;
+        // Missing since it was, or since our connection opened.
+        let opened = self.opened_at.unwrap_or(now);
         let stuck = self
             .missing
             .iter()
-            .filter(|(p, since)| **p < me && now.saturating_sub(**since) >= STUCK)
-            .map(|(p, _)| *p)
-            .next();
-        let fresh = self
-            .opened_at
-            .is_some_and(|t| now.saturating_sub(t) < STUCK);
+            .find(|(p, since)| **p < me && self.retry.due((**since).max(opened), now))
+            .map(|(p, _)| *p);
         if let Some(peer) = stuck
-            && !fresh
-            && self.reopens < MAX_REOPENS
             && self.reopen.is_some()
         {
-            info!("no connection to {peer} after {STUCK:?}: reopening the room");
+            let after = self.retry.patience();
+            info!("no connection to {peer} after {after:?}: reopening the room");
             self.reopen_now();
         }
     }
@@ -1047,7 +1149,7 @@ impl Lobby {
         let old = self.transport.local_id();
         self.transport = open();
         self.was = old.or(self.was);
-        self.reopens += 1;
+        self.retry.reopened();
         self.connected.clear();
         self.peers.clear();
         self.missing.clear();
@@ -1056,6 +1158,7 @@ impl Lobby {
         self.settled = false;
         self.opened_at = None;
         self.dirty = true;
+        self.rejudge = true;
     }
 
     fn handle(&mut self, from: PeerId, msg: LobbyMsg) {
@@ -1066,7 +1169,6 @@ impl Lobby {
                 let first = !info.introduced();
                 info.name = Some(clean_name(&h.name));
                 info.incompatible = mismatch;
-                info.key = PlayerKey(h.key);
                 info.room = h.room.clone();
                 self.keys.insert(from, PlayerKey(h.key));
                 if info.compatible()
@@ -1096,10 +1198,12 @@ impl Lobby {
                     room.seats[seat].who = Occupant::Human(from);
                 }
                 self.dirty = true;
+                self.rejudge = true;
             }
             LobbyMsg::Status(s) => {
                 self.peers.entry(from).or_default().status = Some(s);
                 self.dirty = true;
+                self.rejudge = true;
             }
             LobbyMsg::Room(room) => {
                 if Some(from) != self.host() || self.is_host() {
@@ -1112,6 +1216,7 @@ impl Lobby {
                 self.room = Some(room);
                 self.sent = None;
                 self.dirty = true;
+                self.rejudge = true;
             }
             LobbyMsg::Sit { seat } if self.is_host() => self.sit(from, seat as usize),
             LobbyMsg::Stand if self.is_host() => self.stand(from),
@@ -1172,22 +1277,48 @@ impl Lobby {
         let Some(running) = self.running.take() else {
             return;
         };
-        self.done = true;
-        if !running.start.roster.iter().any(|(p, _)| *p == me) {
-            self.events.push(LobbyEvent::Closed(
-                "A match runs in this room, without you.".to_string(),
-            ));
+        self.accept_start(
+            &running.start,
+            "A match runs in this room, without you.".to_string(),
+            || MatchStart::late(&running, me),
+        );
+    }
+
+    /// Guest: the host's `Start`. Join the match if our stamp is the
+    /// host's, else refuse and leave.
+    fn started(&mut self, start: &StartMsg) {
+        let Some(me) = self.me() else {
             return;
-        }
-        match self.refusal(&running.start) {
-            Some(why) => {
-                warn!("refused to join the running match: {why}");
-                self.events.push(LobbyEvent::Closed(why));
-            }
-            None => self
-                .events
-                .push(LobbyEvent::Start(Box::new(MatchStart::late(&running, me)))),
-        }
+        };
+        let absent = match self.room.as_ref().and_then(|r| r.member(me)) {
+            Some(Member {
+                check: Check::Refused(why),
+                ..
+            }) => format!("The match started without you: you {why}."),
+            _ => "The match started without you.".to_string(),
+        };
+        self.accept_start(start, absent, || MatchStart::of(start, me));
+    }
+
+    /// The room is over for us: the match `start` describes begins
+    /// (`make` it), or we close with why not (`absent`: not in its
+    /// roster).
+    fn accept_start(
+        &mut self,
+        start: &StartMsg,
+        absent: String,
+        make: impl FnOnce() -> MatchStart,
+    ) {
+        self.done = true;
+        let event = if !start.roster.iter().any(|(p, _)| Some(*p) == self.me()) {
+            LobbyEvent::Closed(absent)
+        } else if let Some(why) = self.refusal(start) {
+            warn!("refused the match: {why}");
+            LobbyEvent::Closed(why)
+        } else {
+            LobbyEvent::Start(Box::new(make()))
+        };
+        self.events.push(event);
     }
 
     /// Why this peer cannot play the match `start` describes (another
@@ -1208,50 +1339,27 @@ impl Lobby {
         }
     }
 
-    /// Guest: the host's `Start`. Join the match if our stamp is the
-    /// host's, else refuse and leave.
-    fn started(&mut self, start: &StartMsg) {
-        let Some(me) = self.me() else {
-            return;
-        };
-        self.done = true;
-        if !start.roster.iter().any(|(p, _)| *p == me) {
-            let why = match self.room.as_ref().and_then(|r| r.member(me)) {
-                Some(Member {
-                    check: Check::Refused(why),
-                    ..
-                }) => format!("The match started without you: you {why}."),
-                _ => "The match started without you.".to_string(),
-            };
-            self.events.push(LobbyEvent::Closed(why));
-            return;
-        }
-        match self.refusal(start) {
-            Some(why) => {
-                warn!("refused the match: {why}");
-                self.events.push(LobbyEvent::Closed(why));
-            }
-            None => self
-                .events
-                .push(LobbyEvent::Start(Box::new(MatchStart::of(start, me)))),
-        }
-    }
-
     /// Guest: tell everyone our status when it changed.
     fn send_status(&mut self) {
-        let Some(map) = self.room.as_ref().map(|r| r.map.clone()) else {
+        let Some(room) = self.room.as_ref() else {
             return;
         };
-        let have = self.my_map(&map);
+        let have = self.my_map(&room.map);
+        let ready = self.ready && matches!(have, MapHave::Hash(_));
+        if self
+            .sent_status
+            .as_ref()
+            .is_some_and(|s| s.ready == ready && s.have == have && s.map == room.map)
+        {
+            return;
+        }
         let status = Status {
-            ready: self.ready && matches!(have, MapHave::Hash(_)),
-            map,
+            ready,
+            map: room.map.clone(),
             have,
         };
-        if self.sent_status.as_ref() != Some(&status) {
-            self.sent_status = Some(status.clone());
-            self.broadcast(LobbyMsg::Status(status));
-        }
+        self.sent_status = Some(status.clone());
+        self.broadcast(LobbyMsg::Status(status));
     }
 
     /// Host: bring the room up to date with who is here, and send it if
@@ -1260,6 +1368,7 @@ impl Lobby {
         let Some(me) = self.me() else {
             return;
         };
+        let rejudge = std::mem::take(&mut self.rejudge) || self.sent.is_none();
         let mut room = match self.room.take() {
             // Newly elected: take over the newest room anyone showed us.
             Some(r) if self.sent.is_some() => r,
@@ -1270,6 +1379,23 @@ impl Lobby {
                 .unwrap_or_else(|| RoomState::new(me, &self.default_map)),
         };
         room.host = me;
+        if rejudge {
+            self.judge_members(me, &mut room);
+        }
+        if self.sent.as_ref().is_none_or(|s| !s.same(&room)) {
+            room.rev = room.rev.max(self.sent.as_ref().map_or(0, |s| s.rev)) + 1;
+            self.sent = Some(room.clone());
+            self.dirty = true;
+            self.broadcast(LobbyMsg::Room(room.clone()));
+        }
+        self.room = Some(room);
+    }
+
+    /// Host: the members of `room` as they are now (who is here, their
+    /// names, readiness and checks), and what follows for the seats: a
+    /// seat whose player may no longer sit opens, a newcomer takes the
+    /// first open one.
+    fn judge_members(&mut self, me: PeerId, room: &mut RoomState) {
         let before: BTreeSet<PeerId> = room.members.iter().map(|m| m.peer).collect();
         let mut members = vec![self.judge(me, &room.map)];
         for &peer in &self.connected {
@@ -1314,14 +1440,6 @@ impl Lobby {
             }
         }
         room.members = members;
-        let changed = self.sent.as_ref().is_none_or(|s| !s.same(&room));
-        if changed {
-            room.rev = room.rev.max(self.sent.as_ref().map_or(0, |s| s.rev)) + 1;
-            self.sent = Some(room.clone());
-            self.dirty = true;
-            self.broadcast(LobbyMsg::Room(room.clone()));
-        }
-        self.room = Some(room);
     }
 
     /// May `peer` take a seat: us, or a compatible peer.
@@ -1564,19 +1682,26 @@ impl Lobby {
         if !self.is_host() {
             return Err("only the host changes the match".into());
         }
+        // A new map changes every member's check.
+        self.rejudge = true;
         self.room.as_mut().ok_or_else(|| "no room yet".into())
     }
 
     /// Host: why the match cannot start now (`None`: it can).
     pub fn start_blocker(&self) -> Option<String> {
-        if !self.is_host() {
-            return Some("only the host starts the match".into());
-        }
+        self.startable().err()
+    }
+
+    /// Host: the room, cleared to start, or why it cannot.
+    fn startable(&self) -> Result<Startable<'_>, String> {
+        let Some(me) = self.me().filter(|_| self.is_host()) else {
+            return Err("only the host starts the match".into());
+        };
         let Some(room) = self.room.as_ref() else {
-            return Some("setting up the room…".into());
+            return Err("setting up the room…".into());
         };
         if !self.settled {
-            return Some("waiting for everyone to say hello…".into());
+            return Err("waiting for everyone to say hello…".into());
         }
         let seated: Vec<&SeatSpec> = room
             .seats
@@ -1584,63 +1709,61 @@ impl Lobby {
             .filter(|s| s.who != Occupant::Open)
             .collect();
         if seated.len() < 2 {
-            return Some("seat at least two players or AIs".into());
+            return Err("seat at least two players or AIs".into());
         }
         let teams: BTreeSet<u8> = seated.iter().map(|s| s.ally_team).collect();
         if teams.len() < 2 {
-            return Some("put the seats on at least two teams".into());
+            return Err("put the seats on at least two teams".into());
         }
-        match self.my_map(&room.map) {
-            MapHave::Hash(_) => {}
-            MapHave::Pending => return Some(format!("reading map {}…", room.map)),
-            MapHave::Missing => return Some(format!("you have no map {}", room.map)),
-        }
+        let map_hash = match self.my_map(&room.map) {
+            MapHave::Hash(h) => h,
+            MapHave::Pending => return Err(format!("reading map {}…", room.map)),
+            MapHave::Missing => return Err(format!("you have no map {}", room.map)),
+        };
         for s in &seated {
             let Occupant::Human(p) = s.who else {
                 continue;
             };
             let Some(m) = room.member(p) else {
-                return Some("a seated player left".into());
+                return Err("a seated player left".into());
             };
-            if Some(p) == self.me() {
+            if p == me {
                 continue;
             }
             if self.away(p) {
-                return Some(format!("waiting for {} to come back to the room", m.name));
+                return Err(format!("waiting for {} to come back to the room", m.name));
             }
             match &m.check {
-                Check::Refused(why) => return Some(format!("{} {why}", m.name)),
-                Check::Pending => return Some(format!("checking {}'s map…", m.name)),
+                Check::Refused(why) => return Err(format!("{} {why}", m.name)),
+                Check::Pending => return Err(format!("checking {}'s map…", m.name)),
                 Check::Ok if !m.ready => {
-                    return Some(format!("waiting for {} to be ready", m.name));
+                    return Err(format!("waiting for {} to be ready", m.name));
                 }
                 Check::Ok => {}
             }
         }
-        None
+        Ok(Startable {
+            me,
+            room,
+            seated,
+            map_hash,
+        })
     }
 
     /// Host: start the match with `seed`, as `match_id`. Every member
     /// cleared to play gets the `Start`; the caller takes the transport
     /// ([`Self::into_transport`]).
     pub fn start(&mut self, seed: u64, match_id: u64) -> Result<MatchStart, String> {
-        if let Some(why) = self.start_blocker() {
-            return Err(why);
-        }
-        let me = self.me().ok_or("not connected yet")?;
-        let room = self.room.clone().ok_or("no room yet")?;
-        let MapHave::Hash(map_hash) = self.my_map(&room.map) else {
-            return Err("the map was not read yet".into());
-        };
+        let Startable {
+            me,
+            room,
+            seated,
+            map_hash,
+        } = self.startable()?;
         // Open seats drop out; seat `i` of the match is owner `i`.
-        let seats: Vec<&SeatSpec> = room
-            .seats
-            .iter()
-            .filter(|s| s.who != Occupant::Open)
-            .collect();
         let setup = encode_setup(&GameSetup {
             map: room.map.clone(),
-            players: seats
+            players: seated
                 .iter()
                 .map(|s| PlayerSpec {
                     faction: s.faction(),
@@ -1660,12 +1783,29 @@ impl Lobby {
             .iter()
             .filter(|m| m.peer == me || m.check == Check::Ok)
             .map(|m| {
-                let seat = seats
+                let seat = seated
                     .iter()
                     .position(|s| s.who == Occupant::Human(m.peer))
                     .map(|i| i as u8);
                 (m.peer, seat)
             })
+            .collect();
+        // The door for late joiners: every player's key and name.
+        let keys = roster
+            .iter()
+            .map(|&(p, _)| {
+                let key = if p == me {
+                    self.key
+                } else {
+                    self.keys.get(&p).copied().unwrap_or_default()
+                };
+                (p, key)
+            })
+            .collect();
+        let names: BTreeMap<PeerId, String> = room
+            .members
+            .iter()
+            .map(|m| (m.peer, m.name.clone()))
             .collect();
         let msg = StartMsg {
             match_id,
@@ -1675,24 +1815,6 @@ impl Lobby {
         };
         self.broadcast(LobbyMsg::Start(msg.clone()));
         self.done = true;
-        // The door for late joiners: every player's key and name.
-        let keys = msg
-            .roster
-            .iter()
-            .map(|(p, _)| {
-                let key = if *p == me {
-                    self.key
-                } else {
-                    self.peers.get(p).map_or_else(PlayerKey::default, |i| i.key)
-                };
-                (*p, key)
-            })
-            .collect();
-        let names: BTreeMap<PeerId, String> = room
-            .members
-            .iter()
-            .map(|m| (m.peer, m.name.clone()))
-            .collect();
         Ok(MatchStart {
             door: Some(Door {
                 start: msg.clone(),
@@ -1704,6 +1826,15 @@ impl Lobby {
             ..MatchStart::of(&msg, me)
         })
     }
+}
+
+/// A room cleared to start ([`Lobby::startable`]): us, the room, its
+/// seated seats (the match's owners, in order) and our hash of its map.
+struct Startable<'a> {
+    me: PeerId,
+    room: &'a RoomState,
+    seated: Vec<&'a SeatSpec>,
+    map_hash: u64,
 }
 
 // --- the game side ------------------------------------------------------
@@ -1731,6 +1862,26 @@ pub struct LobbyRoom {
     pub last: Option<(RoomId, Option<RoomState>)>,
     #[cfg(target_arch = "wasm32")]
     maps: MapHashes,
+}
+
+impl LobbyRoom {
+    /// In `room` from now on, through `lobby`.
+    fn open(&mut self, room: RoomId, lobby: Lobby) {
+        #[cfg(target_arch = "wasm32")]
+        web::share_room(Some(&room));
+        self.lobby = Some(lobby);
+        self.room = Some(room);
+        self.notice = None;
+        self.field = Field::Main;
+    }
+
+    /// Out of the room (dropping the lobby leaves it).
+    fn close(&mut self) {
+        self.lobby = None;
+        self.room = None;
+        #[cfg(target_arch = "wasm32")]
+        web::share_room(None);
+    }
 }
 
 /// The Multiplayer page's text fields.
@@ -1783,6 +1934,7 @@ pub struct LobbyPlugin;
 impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LobbyRoom>()
+            .init_resource::<RoomConnector>()
             .init_resource::<super::chat::ChatLog>()
             .add_message::<LobbyAction>()
             .add_systems(Startup, join_launch_room)
@@ -1855,10 +2007,7 @@ fn join_launch_room(
 fn leave_for_other_match(mut lobby: ResMut<LobbyRoom>) {
     if lobby.lobby.is_some() {
         info!("left room {:?} for another match", lobby.room);
-        lobby.lobby = None;
-        lobby.room = None;
-        #[cfg(target_arch = "wasm32")]
-        web::share_room(None);
+        lobby.close();
     }
 }
 
@@ -1879,19 +2028,14 @@ fn enter(
     lobby: &mut LobbyRoom,
     room: RoomId,
     catalog: &crate::map_loading::MapCatalog,
-    offline: bool,
+    connector: &RoomConnector,
 ) {
     info!("entering room {room} as {}", lobby.name);
-    #[cfg(target_arch = "wasm32")]
-    web::share_room(Some(&room));
-    let mut open = connector(room.clone(), offline);
+    let mut open = connector.to(room.clone());
     let l = Lobby::new(open(), &lobby.name, &default_map(catalog))
         .with_key(PlayerKey::local())
         .with_reopen(open);
-    lobby.lobby = Some(l);
-    lobby.room = Some(room);
-    lobby.notice = None;
-    lobby.field = Field::Main;
+    lobby.open(room, l);
 }
 
 /// A match handed its connection back ("Back to room"): into the room
@@ -1912,7 +2056,7 @@ fn back_to_room(world: &mut World) {
     else {
         return;
     };
-    let offline = world.contains_resource::<OfflineRooms>();
+    let connector = world.resource::<RoomConnector>().clone();
     let mut lobby = world.resource_mut::<LobbyRoom>();
     let lobby = &mut *lobby;
     let Some((room, state)) = lobby.last.clone() else {
@@ -1922,9 +2066,7 @@ fn back_to_room(world: &mut World) {
         return;
     }
     info!("back in room {room} with {} peers", peers.len());
-    #[cfg(target_arch = "wasm32")]
-    web::share_room(Some(&room));
-    let open = connector(room.clone(), offline);
+    let open = connector.to(room.clone());
     let l = Lobby::resume(
         transport,
         &peers,
@@ -1934,23 +2076,19 @@ fn back_to_room(world: &mut World) {
         PlayerKey::local(),
     )
     .with_reopen(open);
-    lobby.lobby = Some(l);
-    lobby.room = Some(room);
-    lobby.notice = None;
-    lobby.field = Field::Main;
+    lobby.open(room, l);
 }
 
 fn lobby_actions(
     mut actions: MessageReader<LobbyAction>,
     mut lobby: ResMut<LobbyRoom>,
     catalog: Option<Res<crate::map_loading::MapCatalog>>,
-    offline: Option<Res<OfflineRooms>>,
+    connector: Res<RoomConnector>,
     mut launch: Launch,
 ) {
     let Some(catalog) = catalog else {
         return;
     };
-    let offline = offline.is_some();
     for &action in actions.read() {
         let lobby = &mut *lobby;
         let result = match (action, lobby.lobby.as_mut()) {
@@ -1969,23 +2107,20 @@ fn lobby_actions(
             (LobbyAction::Create, None) => {
                 let room = RoomId::random();
                 lobby.code = room.to_string();
-                enter(lobby, room, &catalog, offline);
+                enter(lobby, room, &catalog, &connector);
                 Ok(())
             }
             (LobbyAction::Join, None) => match lobby.code.parse::<RoomId>() {
                 Ok(room) => {
-                    enter(lobby, room, &catalog, offline);
+                    enter(lobby, room, &catalog, &connector);
                     Ok(())
                 }
                 Err(why) => Err(why.to_string()),
             },
             (LobbyAction::Create | LobbyAction::Join, Some(_)) => Ok(()),
             (LobbyAction::Leave, _) => {
-                lobby.lobby = None;
-                lobby.room = None;
+                lobby.close();
                 lobby.last = None;
-                #[cfg(target_arch = "wasm32")]
-                web::share_room(None);
                 Ok(())
             }
             (_, None) => Ok(()),
@@ -2115,11 +2250,8 @@ fn pump_lobby(
         match ev {
             LobbyEvent::Start(start) => launch.start(room, *start),
             LobbyEvent::Closed(why) => {
-                room.lobby = None;
-                room.room = None;
+                room.close();
                 room.notice = Some(why);
-                #[cfg(target_arch = "wasm32")]
-                web::share_room(None);
             }
         }
     }
@@ -2128,14 +2260,21 @@ fn pump_lobby(
     }
 }
 
+/// The catalog file of `map` (a file stem).
+fn catalog_file<'a>(
+    catalog: &'a crate::map_loading::MapCatalog,
+    map: &str,
+) -> Option<&'a std::path::PathBuf> {
+    catalog
+        .0
+        .iter()
+        .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == map))
+}
+
 /// Native: the catalog file of `map`, hashed.
 #[cfg(not(target_arch = "wasm32"))]
 fn read_map_hash(catalog: &crate::map_loading::MapCatalog, map: &str) -> MapHave {
-    let path = catalog
-        .0
-        .iter()
-        .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == map));
-    match path.map(std::fs::read) {
+    match catalog_file(catalog, map).map(std::fs::read) {
         Some(Ok(bytes)) => MapHave::Hash(super::compat::map_hash(&bytes)),
         Some(Err(e)) => {
             warn!("cannot read map {map}: {e}");
@@ -2158,11 +2297,7 @@ impl MapHashes {
     ) -> Option<MapHave> {
         use bevy::asset::LoadState;
 
-        let Some(path) = catalog
-            .0
-            .iter()
-            .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy() == map))
-        else {
+        let Some(path) = catalog_file(catalog, map) else {
             return Some(MapHave::Missing);
         };
         let handle = self
@@ -2388,6 +2523,52 @@ mod tests {
                 .iter()
                 .map(|p| (p.faction, p.ally_team, p.ai))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// The `Start`'s setup in the shape it had before it shared the
+    /// replay's [`Seat`]: the bytes must not change (`LOBBY_VERSION`).
+    #[test]
+    fn setup_wire_bytes_are_the_tuple_encoding() {
+        #[derive(Serialize)]
+        struct TupleWire {
+            map: String,
+            seats: Vec<(u8, u8, bool)>,
+            difficulty: u8,
+            seed: u64,
+            rules: MatchRules,
+        }
+        let mut setup = crate::game_setup::GameSetup {
+            players: [Faction::Network, Faction::System, Faction::Hacker]
+                .into_iter()
+                .enumerate()
+                .map(|(i, faction)| PlayerSpec {
+                    faction,
+                    ally_team: i as u8 % 2,
+                    ai: i == 1,
+                })
+                .collect(),
+            seed: 0x0123_4567_89ab_cdef,
+            ..Default::default()
+        };
+        setup.rules.max_speed = 300;
+        let old = TupleWire {
+            map: setup.map.clone(),
+            seats: setup
+                .players
+                .iter()
+                .map(|p| {
+                    let faction = Faction::ALL.iter().position(|f| *f == p.faction);
+                    (faction.unwrap_or(0) as u8, p.ally_team, p.ai)
+                })
+                .collect(),
+            difficulty: setup.difficulty,
+            seed: setup.seed,
+            rules: setup.rules,
+        };
+        assert_eq!(
+            postcard::to_allocvec(&encode_setup(&setup)).unwrap(),
+            postcard::to_allocvec(&old).unwrap()
         );
     }
 
@@ -2845,12 +3026,12 @@ mod tests {
         assert_eq!(n.lobby(a).start_blocker(), None, "a rematch can start");
     }
 
-    /// The menu screenshots' rooms ([`OfflineRooms`]): a connection
-    /// nobody else reaches, whose lobby hosts a fresh room alone (and
-    /// reopens the same way).
+    /// The menu screenshots' rooms ([`RoomConnector::offline`]): a
+    /// connection nobody else reaches, whose lobby hosts a fresh room
+    /// alone (and reopens the same way).
     #[test]
     fn offline_rooms_stay_on_this_machine() {
-        let mut open = connector(RoomId::random(), true);
+        let mut open = RoomConnector::offline().to(RoomId::random());
         let mut l = Lobby::new(open(), "shots", MAP).with_reopen(open);
         l.provide_map(MAP, MapHave::Hash(7));
         for i in 0..5 {
