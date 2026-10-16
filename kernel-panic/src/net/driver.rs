@@ -792,16 +792,14 @@ pub fn drive_fixed_main(world: &mut World) {
         if let Some(hidden) = world.get_resource::<TabHidden>() {
             net.session.set_away(hidden.0);
         }
-        let names = world
-            .get_resource::<PeerNames>()
-            .cloned()
-            .unwrap_or_default();
         let mut said = Vec::new();
         for ev in net.session.take_events() {
             match ev {
                 SessionEvent::Chat { from, text } => said.push(ChatLine {
                     from,
-                    name: names.name(from),
+                    name: world
+                        .get_resource::<PeerNames>()
+                        .map_or_else(|| from.to_string(), |n| n.name(from)),
                     text,
                 }),
                 SessionEvent::Left(peer) => {
