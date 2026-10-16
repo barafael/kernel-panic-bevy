@@ -41,20 +41,23 @@ fn console_error(message: &str) {
     }
 }
 
-/// Panics reach the runner's console instead of a bare `unreachable`,
-/// and fail it: the wasm trap that follows lands in whatever callback
-/// was running (a timer, a promise reaction) and may never settle the
-/// export's promise, so the message is thrown again from a fresh
-/// `setTimeout`, an uncaught error (a page error in a browser, the end
-/// of the process in Node). Installed by `main`, which the module runs
-/// once at instantiation.
+/// Panics reach the runner's console (message and JS stack, as
+/// `console_error_panic_hook` prints them) instead of a bare
+/// `unreachable`, and fail it: the wasm trap that follows lands in
+/// whatever callback was running (a timer, a promise reaction) and may
+/// never settle the export's promise, so the message is thrown again
+/// from a fresh `setTimeout`, an uncaught error (a page error in a
+/// browser, the end of the process in Node). Installed by `main`, which
+/// the module runs once at instantiation; the harness leaves out Bevy's
+/// own hook, which would replace it (`PanicHandlerPlugin`, `add_plugins`).
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
-        let message = format!("panic: {info}");
-        console_error(&message);
-        let rethrow =
-            js_sys::Function::new_with_args("m", "setTimeout(() => { throw new Error(m); })");
-        let _ = rethrow.call1(&JsValue::NULL, &message.into());
+        let report = js_sys::Function::new_with_args(
+            "m",
+            "console.error(`${m}\\n\\nStack:\\n\\n${new Error().stack}`);
+             setTimeout(() => { throw new Error(m); });",
+        );
+        let _ = report.call1(&JsValue::NULL, &format!("panic: {info}").into());
     }));
 }
 

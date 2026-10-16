@@ -282,35 +282,38 @@ fn add_plugins(executor: Executor, assets: AssetRoot) -> App {
             AssetSourceBuilder::new(move || Box::new(MemoryAssetReader { root: dir.clone() })),
         );
     }
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<bevy::winit::WinitPlugin>()
-            .disable::<bevy::log::LogPlugin>()
-            .disable::<bevy::audio::AudioPlugin>()
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: ExitCondition::DontExit,
-                close_when_requested: false,
+    let plugins = DefaultPlugins
+        .build()
+        .disable::<bevy::winit::WinitPlugin>()
+        .disable::<bevy::log::LogPlugin>()
+        .disable::<bevy::audio::AudioPlugin>()
+        .set(WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
+            ..default()
+        })
+        .set(RenderPlugin {
+            render_creation: WgpuSettings {
+                backends: None,
                 ..default()
-            })
-            .set(RenderPlugin {
-                render_creation: WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(AssetPlugin {
-                file_path,
-                // No `.meta` lookups, as the web build.
-                meta_check: bevy::asset::AssetMetaCheck::Never,
-                ..default()
-            }),
-    )
-    .insert_resource(DevOptions::default())
-    .insert_resource(crate::rendering::settings::RenderSettings::default());
+            }
+            .into(),
+            ..default()
+        })
+        .set(AssetPlugin {
+            file_path,
+            // No `.meta` lookups, as the web build.
+            meta_check: bevy::asset::AssetMetaCheck::Never,
+            ..default()
+        });
+    // wasm: the replay build's panic hook (`web::install_panic_hook`)
+    // stays, Bevy's would replace it.
+    #[cfg(target_arch = "wasm32")]
+    let plugins = plugins.disable::<bevy::app::PanicHandlerPlugin>();
+    app.add_plugins(plugins)
+        .insert_resource(DevOptions::default())
+        .insert_resource(crate::rendering::settings::RenderSettings::default());
     // No audio output (and no music playing through the speakers during
     // a test), but the asset type and its loader the game's audio
     // module loads its sound bank and playlist through.
