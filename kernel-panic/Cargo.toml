@@ -27,7 +27,7 @@ strum = { version = "0.28.0", features = ["derive"] }
 # native and wasm alike.
 serde = { workspace = true }
 postcard = { workspace = true }
-ruzstd = "0.8"
+ruzstd = "0.9"
 # Multiplayer transport (`net::matchbox`, docs/multiplayer-plan.md M2):
 # WebRTC data channels through barafael's matchbox fork (Bevy 0.20, the
 # socket robustness fixes of johanhelsing/matchbox#558; the fork and
@@ -42,7 +42,7 @@ uuid = "1"
 # `KP_BAKE_UNITS` encoder side: the bake reads the upstream checkout and
 # runs native only.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-zstd = "0.13"
+zstd = "0.14"
 
 # Web: the render settings persist in `localStorage`; `Math.random()`
 # seeds the per-launch rolls (`rng::clock_f64`).

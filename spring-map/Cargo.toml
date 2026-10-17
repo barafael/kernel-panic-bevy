@@ -23,7 +23,7 @@ zip = { workspace = true }
 flate2 = "1"
 # kpmap v3: zstd frames. ruzstd is a pure-Rust decoder (wasm-safe); the
 # encoder side lives behind zstd on native bake targets only.
-ruzstd = "0.8"
+ruzstd = "0.9"
 binrw = "0.15.1"
 serde = { workspace = true }
 postcard = { workspace = true }
@@ -36,7 +36,7 @@ image = { workspace = true }
 sevenz-rust = { workspace = true }
 # kpmap v3 encoder (bake runs native only). The reader side uses ruzstd,
 # which is pure Rust and wasm-safe.
-zstd = "0.13"
+zstd = "0.14"
 
 [dev-dependencies]
 proptest = { workspace = true }

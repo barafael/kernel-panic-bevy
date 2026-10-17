@@ -71,7 +71,7 @@ spring-detmath = { path = "spring-detmath" }
 byteorder = "1.5"
 thiserror = "2"
 sevenz-rust = "0.6"
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }

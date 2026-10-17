@@ -141,7 +141,7 @@ fn extract_from_zip(path: &Path) -> Result<ExtractedMap, ArchiveError> {
 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
-        let name = entry.name().to_string();
+        let name = entry.name()?.into_owned();
         let lower = name.to_ascii_lowercase().replace('\\', "/");
         if lower.ends_with(".smf") && smf_data.is_none() {
             // No prealloc from the declared entry size (a claim from
