@@ -196,6 +196,11 @@ impl WeaponDefs {
     pub fn get(&self, name: &str) -> Option<&WeaponDef> {
         self.weapons.get(name)
     }
+
+    /// Merge another set of definitions into this one.
+    pub fn merge(&mut self, other: WeaponDefs) {
+        self.weapons.extend(other.weapons);
+    }
 }
 
 impl DamageMap {

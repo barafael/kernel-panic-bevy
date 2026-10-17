@@ -813,9 +813,9 @@ context. Most variants animate over their frames at a fixed rate
   `COMPUTER` unit replies (`select`, `commandgiven` on orders and on
   arrival), the `MultiSelect` beep, the Firewall's `built`. Gain follows
   the engine's inverse-distance model from the camera with its
-  height-based rolloff. Effects ship as Vorbis (`scripts/bake-sounds.sh`).
+  height-based rolloff. Effects ship as Vorbis (`assets/sounds/`).
 - Music: the 72-track soundtrack of the KP 4.4 installer ships in
-  `assets/music/` (Git LFS, `scripts/bake-music.sh`); like the upstream
+  `assets/music/` (Git LFS); like the upstream
   `music.lua` widget a random track plays during a match, one after
   another, the next one prefetched while the current plays. Credits on
   the Credits page and in `original-game-license-info.txt`.

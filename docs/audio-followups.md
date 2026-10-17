@@ -37,7 +37,7 @@ of the screen and, unless muted, plays the matching voice clip:
 
 ### Port
 
-1. **Assets**: `scripts/bake-sounds.sh` gains the tips: copy the 140
+1. **Assets**: copy the 140 tips clips from the upstream checkout: the 140
    `.ogg` (already Vorbis, 4.1 MB) to `kernel-panic/assets/sounds/tips/`
    as-is (names are digits, no renaming). Regular git, not LFS.
 2. **Data** (`kernel-panic/src/ui/hud/tips/catalog.rs`): the 94 tips as a

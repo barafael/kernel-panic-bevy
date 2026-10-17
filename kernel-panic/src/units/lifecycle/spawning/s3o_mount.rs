@@ -12,7 +12,7 @@
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use spring_unit_mesh::{S3OModel, S3OPiece};
+use crate::units::content::model::{S3OModel, S3OPiece};
 
 use crate::units::assets::animation::PieceEmit;
 

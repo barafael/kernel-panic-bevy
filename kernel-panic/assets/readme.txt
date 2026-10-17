@@ -79,7 +79,7 @@ Installation Notes
           x Speed_Balls_16_Way.sdz  ( 3729 KB)
           x DigitalDivide_PT2.sd7  ( 293 KB)
           x Spooler_Buffer_0.5_beta.sd7  ( 34 KB)
-          x Data_Cache_L1.sd7  ( 43 KB)
+          x Data_Cache_L1.sd7  ( 43Â KB)
           x Palladium_0.5_(beta).sd7  ( 179 KB)
           x Central_Hub.sd7  ( 229 KB)
           x Corrupted_Core.sd7  ( 181 KB)
@@ -1025,7 +1025,7 @@ KP 1.2 (C&E&ONS)
 
 KP:C alpha 7
 - No longer destroy ability to play KP 1.0
-- Hole now only autoturn 180°,
+- Hole now only autoturn 180Â°,
   because anyway yardmap doesn't turn
 - Fixed socket and window yardmap
 - Worms buildtime slightly lower

@@ -26,11 +26,10 @@ use std::path::{Path, PathBuf};
 
 /// Return the workspace root as resolved at startup.
 ///
-/// The returned path is guaranteed to contain at least one of the
-/// expected marker subdirectories (`kernel-panic/assets` or
-/// `upstream/Kernel-Panic`); otherwise the caller's operation will
-/// fail against the resolved path and the missing data is the real
-/// issue, not the resolution.
+/// The returned path is guaranteed to contain the marker subdirectory
+/// `kernel-panic/assets`; otherwise the caller's operation will fail
+/// against the resolved path and the missing data is the real issue,
+/// not the resolution.
 pub fn project_root() -> PathBuf {
     // `env!("CARGO_MANIFEST_DIR")` expands to the directory containing
     // the *binary crate's* Cargo.toml, i.e. `<workspace>/kernel-panic`.
@@ -66,10 +65,10 @@ pub fn project_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-/// `dir` looks like the workspace root when at least one of the
-/// well-known asset subdirectories is present.
+/// `dir` looks like the workspace root when the asset directory is
+/// present.
 fn looks_like_project_root(dir: &Path) -> bool {
-    dir.join("kernel-panic/assets").is_dir() || dir.join("upstream/Kernel-Panic").is_dir()
+    dir.join("kernel-panic/assets").is_dir()
 }
 
 /// Join `relative` onto [`project_root`] and return the absolute path.

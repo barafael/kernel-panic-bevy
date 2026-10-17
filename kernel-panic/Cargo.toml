@@ -8,7 +8,6 @@ edition = "2024"
 spring-detmath = { workspace = true }
 spring-tdf = { path = "../spring-tdf" }
 spring-map = { path = "../spring-map" }
-spring-unit-mesh = { path = "../spring-unit-mesh" }
 spring-pathfinding = { path = "../spring-pathfinding" }
 # `libm`: deterministic `bevy::math::ops` (see the workspace `glam` entry).
 bevy = { version = "0.20", features = ["debug", "custom_cursor", "libm"] }
@@ -24,7 +23,8 @@ thiserror = { workspace = true }
 strum = { version = "0.28.0", features = ["derive"] }
 # The embedded unit bundle (`assets/units.kpu`, see `units::content::bundle`):
 # postcard payload in a zstd frame, decoded by the pure-Rust ruzstd on
-# native and wasm alike.
+# native and wasm alike. The unit definitions are embedded as text
+# (`units::content::defs`) and parsed by spring-tdf at startup.
 serde = { workspace = true }
 postcard = { workspace = true }
 ruzstd = "0.9"
@@ -38,11 +38,6 @@ matchbox_socket = { git = "https://github.com/barafael/matchbox.git", branch = "
 # matchbox's peer ids are UUIDs; `net::matchbox` maps them to and from
 # `PeerId(u128)`. Already in the tree through matchbox.
 uuid = "1"
-
-# `KP_BAKE_UNITS` encoder side: the bake reads the upstream checkout and
-# runs native only.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-zstd = "0.14"
 
 # Web: the render settings persist in `localStorage`; `Math.random()`
 # seeds the per-launch rolls (`rng::clock_f64`).

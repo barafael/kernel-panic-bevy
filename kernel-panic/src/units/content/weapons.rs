@@ -157,9 +157,9 @@ impl WeaponRegistry {
         registry
     }
 
-    /// The registry of the baked `weapons/*.tdf` (the unit bundle).
+    /// The registry of the embedded `weapons/*.tdf` (`defs`).
     pub fn load() -> Self {
-        let registry = Self::from_defs(&super::bundle::bundle().weapons);
+        let registry = Self::from_defs(&super::defs::defs().weapons);
         info!(
             "Weapon registry: {} definitions total",
             registry.defs.len() - 1
@@ -167,7 +167,7 @@ impl WeaponRegistry {
         registry
     }
 
-    /// Build from parsed weapon TDFs (bundle-decoded or freshly parsed).
+    /// Build from parsed weapon TDFs.
     pub fn from_defs(defs: &WeaponDefs) -> Self {
         let mut registry = Self::with_seed();
         for (name, def) in &defs.weapons {

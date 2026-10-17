@@ -1,17 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
-use bevy::{
-    mesh::{Indices, PrimitiveTopology},
-    prelude::*,
-};
-use spring_unit_mesh::{S3OModel, S3OPiece, TgaImage};
-
 use crate::sim::DetFloat;
 use crate::units::components::Faction;
 use crate::units::content::bundle::bundle;
 use crate::units::content::definitions::UnitKind;
+use crate::units::content::model::{S3OModel, S3OPiece, TgaImage};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::PieceLayout;
+use bevy::{
+    mesh::{Indices, PrimitiveTopology},
+    prelude::*,
+};
 
 // ---------------------------------------------------------------------------
 // Caches

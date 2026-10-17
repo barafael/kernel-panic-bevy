@@ -148,15 +148,16 @@ pub struct UnitRegistry {
 }
 
 impl UnitRegistry {
-    /// The registry of the baked `units/*.fbi` + `MOVEINFO.TDF` (the
-    /// unit bundle).
+    /// The registry of the embedded `units/*.fbi` + `moveinfo.tdf`
+    /// (`defs`), with the model radii from the unit bundle.
     pub fn load() -> Self {
+        let defs = super::defs::defs();
         let bundle = super::bundle::bundle();
         info!(
             "Unit registry: {} definitions total",
-            bundle.units.units.len()
+            defs.units.units.len()
         );
-        let mut registry = Self::from_defs(bundle.units.clone(), bundle.move_classes.clone());
+        let mut registry = Self::from_defs(defs.units.clone(), defs.move_classes.clone());
         registry.model_radii = ALL_UNIT_KINDS
             .iter()
             .map(|&k| bundle.model(registry.model(k)).map_or(0.0, |m| m.radius))

@@ -5,7 +5,6 @@ resolver = "3"
 members = [
     "spring-tdf",
     "spring-map",
-    "spring-unit-mesh",
     "spring-pathfinding",
     "spring-detmath",
     "kernel-panic",

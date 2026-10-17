@@ -55,7 +55,7 @@ hit it, but see Open.
 ```rust
 struct Replay {
     setup: MatchSetup,   // map stem, seats (faction, ally team, AI?), difficulty, seed, sandbox
-    compat: Compat,      // SIM_VERSION, FNV-1a of the embedded units.kpu, FNV-1a of the baked .kpmap
+    compat: Compat,      // SIM_VERSION, FNV-1a of the embedded unit data, FNV-1a of the baked .kpmap
     ticks: u32,          // length of the recording, the default replay length
     frames: Vec<CommandFrame>, // the human seats' frames, by tick then player
 }
@@ -70,7 +70,7 @@ struct Replay {
   seats and the match-scoped seed), the map catalog pinned to the one `.kpmap` the compat stamp
   names. Before each tick, the frames due on it go into `CommandBus::deliver`, the entry point
   the lockstep transport will use, and the ordinary `apply_sim_commands` applies them.
-- **Compat**: a replay refuses to play if `SIM_VERSION`, the unit bundle or the map bytes
+- **Compat**: a replay refuses to play if `SIM_VERSION`, the unit data or the map bytes
   differ (`--ignore-compat` overrides it for bisecting). `SIM_VERSION` is bumped by hand when a
   sim change is meant to change outcomes.
 - **Seed**: the match seed is a field of the setup since M0.2 (`GameSetup::seed`); the replay
@@ -299,6 +299,6 @@ does.
 - **Re-recording**: any intended sim change changes the trails; re-record the logs (command in
   "Golden logs") and bump `replay::SIM_VERSION` when the change should invalidate old replays.
   The compare job only checks platforms against each other, so a stale log still passes; it
-  fails only when the map or unit bundle changed (the compat stamp).
+  fails only when the map or unit data changed (the compat stamp).
 - The `replay` feature compiles the whole harness into the game binary; the default build is
   unchanged (`headless` is `cfg(any(test, feature = "replay"))`).

@@ -654,9 +654,8 @@ so there was no reason to ship the simpler version first.
 
 ```text
 kernel-panic/          (binary — Bevy game app)
-spring-tdf/            (lib — TDF format parser: weapons, units/FBI, generic sections)
+spring-tdf/            (lib — TDF format parser: weapons, units/FBI, explosions, generic sections)
 spring-map/            (lib — .kpmap reader, Hex Farm, datavents, smooth mesh)
-spring-unit-mesh/      (lib — S3O model parser)
 spring-cob/            (lib — COB bytecode VM)
 spring-pathfinding/    (lib — QTPFS quad-tree pathfinding)
 ```

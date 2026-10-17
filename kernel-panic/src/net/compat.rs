@@ -50,7 +50,8 @@ pub const SIM_VERSION: u32 = 6;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Build {
     pub sim_version: u32,
-    /// FNV-1a of the embedded `assets/units.kpu`.
+    /// FNV-1a of the embedded unit data: `assets/units.kpu` followed by
+    /// every definition file of `assets/defs/` (`units::content::defs`).
     pub units_hash: u64,
 }
 
@@ -59,7 +60,14 @@ impl Build {
     pub fn current() -> Self {
         Self {
             sim_version: SIM_VERSION,
-            units_hash: fnv(crate::units::content::bundle::bundle_bytes()),
+            units_hash: {
+                let mut h = Fnv::default();
+                h.bytes(crate::units::content::bundle::bundle_bytes());
+                for text in crate::units::content::defs::texts() {
+                    h.bytes(text.as_bytes());
+                }
+                h.finish()
+            },
         }
     }
 

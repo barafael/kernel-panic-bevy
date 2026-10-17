@@ -218,9 +218,9 @@ pub(super) struct CegTrailCtx<'w, 's> {
 }
 
 impl CegRegistry {
-    /// The baked `gamedata/explosions/*.tdf` from the unit bundle.
+    /// The embedded `explosions/*.tdf` (`units::content::defs`).
     pub fn load() -> Self {
-        let registry = Self::from_defs(crate::units::content::bundle::bundle().explosions.clone());
+        let registry = Self::from_defs(crate::units::content::defs::defs().explosions.clone());
         info!(
             "CEG registry: {} explosion generators loaded",
             registry.defs.explosions.len()
@@ -228,7 +228,7 @@ impl CegRegistry {
         registry
     }
 
-    /// Wrap parsed explosion defs (bundle-decoded or freshly parsed).
+    /// Wrap parsed explosion defs.
     pub fn from_defs(defs: ExplosionDefs) -> Self {
         Self { defs }
     }

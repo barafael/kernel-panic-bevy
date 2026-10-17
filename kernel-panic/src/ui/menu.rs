@@ -2355,16 +2355,8 @@ fn readme_lines() -> Vec<String> {
     CACHE
         .get_or_init(|| {
             let path = crate::paths::assets_dir().join("readme.txt");
-            match std::fs::read(&path) {
-                Ok(bytes) => {
-                    // The upstream readme is ISO-8859-1, which
-                    // `read_to_string` rejects as invalid UTF-8. Latin-1
-                    // maps every byte 1:1 onto U+0000..=U+00FF, so decode
-                    // non-UTF-8 bytes by widening them — umlauts and
-                    // friends survive intact.
-                    let text = String::from_utf8(bytes).unwrap_or_else(|error| {
-                        error.into_bytes().into_iter().map(|b| b as char).collect()
-                    });
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
                     let mut out: Vec<String> = Vec::new();
                     for line in text.replace("\r\n", "\n").split('\n') {
                         let line = line.trim_end();

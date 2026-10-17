@@ -73,7 +73,7 @@ for `COMPUTER`, so the engine's other reply hooks are silent in KP.
 ### Assets
 
 `kernel-panic/assets/sounds/<lowercase name>.ogg` — the 26 originals
-re-encoded to Vorbis q4 by `scripts/bake-sounds.sh` (244 KB instead of
+re-encoded once to Vorbis q4 (244 KB instead of
 1.3 MB of PCM; Vorbis is Bevy's default decoder, so no `wav` feature).
 File names are lower-cased because Spring's VFS is case-insensitive but
 Bevy's asset paths are not (`Explosion5` in the TDF → `explosion5.ogg`,
@@ -81,8 +81,8 @@ Bevy's asset paths are not (`Explosion5` in the TDF → `explosion5.ogg`,
 `assets/sounds/tips/` when the tip dispenser lands.
 
 `kernel-panic/assets/music/*.ogg` — the 72 tracks the KP 4.4 Windows
-installer shipped in `Music/KP/`, copied unmodified by
-`scripts/bake-music.sh` as `<artist-slug>--<title-slug>.ogg` (Bevy's web
+installer shipped in `Music/KP/`, copied unmodified as
+`<artist-slug>--<title-slug>.ogg` (Bevy's web
 reader does not percent-encode paths), with `catalog.json` (display
 names, durations, sizes) and `credits.txt`. The folder is in Git LFS;
 the deploy workflow pulls it through a cache keyed on the object list.

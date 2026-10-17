@@ -250,7 +250,7 @@ the sim (B's `MatchControl`, merged).
   (only host links carry traffic; a failed guest↔guest link is harmless). It
   auto-stops when idle, so the first join may take a few seconds.
 - **Match start handshake:** map, seed, options, seats, and a compatibility hash
-  (sim version + `units.kpu` hash + map hash); mismatches are refused, as Spring
+  (sim version + unit data hash + map hash); mismatches are refused, as Spring
   refused mismatched versions and archives.
 - **TURN-ready, not deployed:** one `IceConfig` (list of `RtcIceServerConfig`:
   urls, username, credential) read from build-time env / a settings field and

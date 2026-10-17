@@ -5,8 +5,8 @@
 //! gap, and removes itself with "No music found! Copy some .ogg into
 //! /music/" when there are none. It runs only during a match (a LuaUI
 //! widget) and `StopSoundStream`s on shutdown. The KP 4.4 installer
-//! filled that folder with 72 tracks; `scripts/bake-music.sh` brings
-//! them into `kernel-panic/assets/music/` (Git LFS), renamed to
+//! filled that folder with 72 tracks; they were copied once into
+//! `kernel-panic/assets/music/` (Git LFS, README.md), renamed to
 //! `<artist-slug>--<title-slug>.ogg`, with `catalog.json` and
 //! `credits.txt` for the web player (`kernel-panic/web/music.html`).
 //!
@@ -145,7 +145,7 @@ impl MusicPlayer {
     }
 }
 
-/// `artist-slug--title-slug.ogg` (see `scripts/bake-music.sh`) → "Artist
+/// `artist-slug--title-slug.ogg` → "Artist
 /// Slug - Title Slug". A name without the `--` separator is shown as is,
 /// minus the extension.
 fn track_label(path: &str) -> String {
@@ -471,7 +471,7 @@ mod tests {
         }
     }
 
-    /// `catalog.json` (from `scripts/bake-music.sh`) describes exactly
+    /// `catalog.json` describes exactly
     /// the `.ogg` files in the folder, and they are real tracks, not LFS
     /// pointers. Skips when there is no catalog (an empty folder is a
     /// valid build).

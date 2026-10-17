@@ -1,4 +1,5 @@
-//! Upstream `gamedata/MOVEINFO.TDF` — movement-class pathing params.
+//! `assets/defs/moveinfo.tdf` (the original `MOVEINFO.TDF`) —
+//! movement-class pathing params.
 //!
 //! `FootprintX/Z` and `CrushStrength` define each class's `MoveDef` —
 //! the footprint every ground unit of the class collides and paths with
@@ -7,7 +8,6 @@
 //! kept as data; only the engine's legacy HAPFS pathfinder reads them,
 //! and Kernel Panic runs QTPFS.
 
-#[cfg(not(target_arch = "wasm32"))]
 use crate::sim::DetFloat;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -54,21 +54,19 @@ pub struct MoveClassTable {
 }
 
 impl MoveClassTable {
-    /// The baked `gamedata/MOVEINFO.TDF` from the unit bundle (the
-    /// registry takes it from the bundle directly; tests read it here).
+    /// The embedded `moveinfo.tdf` (the registry takes it from `defs`
+    /// directly; tests read it here).
     #[cfg(test)]
     pub fn load() -> Self {
-        super::bundle::bundle().move_classes.clone()
+        super::defs::defs().move_classes.clone()
     }
 
-    /// Number of classes in the table (the bake's report).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Number of classes in the table.
     pub fn len(&self) -> usize {
         self.defs.len()
     }
 
-    /// Parse a `MOVEINFO.TDF` tree (the bake side of `bundle`).
-    #[cfg(not(target_arch = "wasm32"))]
+    /// Parse a `MOVEINFO.TDF` tree.
     pub fn from_tdf(tdf: &spring_tdf::Tdf) -> Self {
         let mut classes = BTreeMap::new();
         let mut defs = BTreeMap::new();

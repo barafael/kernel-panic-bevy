@@ -44,9 +44,9 @@ jobs:
             | tar -xz -C ~/.cargo/bin
 
       # The maps are the committed `.kpmap` files (index.html's copy-dir
-      # ships them) and the unit data the committed `units.kpu`, embedded
-      # in the binary (unit-bundle.md) — the upstream submodules it is
-      # baked from are not checked out in CI.
+      # ships them); the unit data (`units.kpu`, `assets/defs/`) is
+      # embedded in the binary (unit-bundle.md). Nothing reads the
+      # upstream submodules.
       - name: Build
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
 

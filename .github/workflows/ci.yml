@@ -67,15 +67,6 @@ jobs:
       - uses: actions/checkout@v7
       - if: runner.os == 'Linux'
         uses: ./.github/actions/linux-deps
-      # Linux runs the tests that read upstream/ (the bundle-vs-checkout
-      # comparisons bundle_matches_upstream_checkout and
-      # registries_from_bundle_match_tdf_built, spring-tdf's real_files,
-      # spring-unit-mesh's S3O/TGA parsers) against the pinned submodule;
-      # elsewhere they skip themselves, which keeps that path tested too.
-      # Everything else (moveinfo, heat, CEG tests…) reads the embedded
-      # units.kpu and needs no upstream data.
-      - if: runner.os == 'Linux'
-        uses: ./.github/actions/upstream-data
       # The soundtrack (Git LFS) for the music-catalog test, on every OS.
       - uses: ./.github/actions/lfs-music
       - uses: dtolnay/rust-toolchain@stable

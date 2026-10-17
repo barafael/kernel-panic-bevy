@@ -9,8 +9,8 @@
 //! half:
 //!
 //! - [`SoundBank`] holds a handle per original effect under
-//!   `assets/sounds/` (Vorbis, baked from the `.wav`s by
-//!   `scripts/bake-sounds.sh`), keyed by the lower-cased TDF name.
+//!   `assets/sounds/` (Vorbis, converted once from the original
+//!   `.wav`s), keyed by the lower-cased TDF name.
 //! - The sim pushes [`SoundRequest`]s onto the [`SoundQueue`] resource
 //!   and never touches `bevy_audio`, so headless tests and the bot run
 //!   silent without registering anything (systems take the queue as
@@ -450,10 +450,10 @@ mod tests {
 
     #[test]
     fn every_bundled_weapon_sound_has_a_file() {
-        // Every `soundstart` / `soundhit` the bundled TDFs name must be
+        // Every `soundstart` / `soundhit` the weapon TDFs name must be
         // one of the originals we ship; anything else would be silent.
-        let bundle = crate::units::content::bundle::bundle();
-        for (name, def) in &bundle.weapons.weapons {
+        let defs = crate::units::content::defs::defs();
+        for (name, def) in &defs.weapons.weapons {
             for sound in [&def.sound_start, &def.sound_hit] {
                 if !sound.is_empty() {
                     assert!(
