@@ -266,7 +266,10 @@ fn load_sound_bank(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 /// Marker on the one-shot sound entities, to count the live sources.
+/// Match content: a sound still playing when the match ends goes with
+/// it (it has no `Transform` to mark it otherwise).
 #[derive(Component)]
+#[require(crate::map_loading::MatchEntity)]
 struct GameSound;
 
 /// `kp_settings.lua` sets `MaxSounds` to 96 (engine default 128).
