@@ -1,7 +1,8 @@
-//! Map loading: pick a map archive from `assets/maps/` and spawn its
+//! Map loading: pick a `.kpmap` from `assets/maps/` and spawn its
 //! terrain, atmosphere, fog, nav grid, minimap, and homebases.
 //!
-//! Exposes [`MapLoadingPlugin`]. The map catalog is discovered at
+//! Exposes [`MapLoadingPlugin`]. The map catalog is the list of `.kpmap`
+//! files build.rs found in `assets/maps` ([`MAP_CATALOG`]), set up at
 //! Startup; the world itself is (re)built on every entry into
 //! [`AppState::InGame`] and whenever the menu issues a [`RunGame`]
 //! (restart / demo reload), so one code path serves fresh games,
@@ -23,8 +24,6 @@
 
 #[cfg(target_arch = "wasm32")]
 use std::collections::HashMap;
-#[cfg(not(target_arch = "wasm32"))]
-use std::path::Path;
 use std::path::PathBuf;
 
 use bevy::prelude::*;
@@ -46,8 +45,8 @@ use crate::{
 };
 use spring_map::{
     hexfarm::HexFarm,
-    map_types::{Datavent, MapFeature, SmfHeader},
-    smd_parser::MapInfo,
+    map_info::MapInfo,
+    map_types::{Datavent, MapFeature, MapHeader},
 };
 
 // HexFarm Lua-composited towers/bridges (native and web: the data
@@ -59,14 +58,18 @@ mod mipmap;
 pub use match_scope::{MatchEntity, MatchScopeAppExt};
 
 // Web-only: maps arrive as fetched `.kpmap` bytes through the asset
-// server, and the deploy's map list is embedded at build time.
+// server.
 #[cfg(target_arch = "wasm32")]
 mod bytes_asset;
 // The lobby hashes fetched maps too (`net::lobby`).
 #[cfg(target_arch = "wasm32")]
 pub(crate) use bytes_asset::BytesAsset;
-#[cfg(target_arch = "wasm32")]
-include!(concat!(env!("OUT_DIR"), "/web_map_catalog.rs"));
+// `MAP_CATALOG`: the stems of the `.kpmap` files in `assets/maps`.
+include!(concat!(env!("OUT_DIR"), "/map_catalog.rs"));
+const _: () = assert!(
+    !MAP_CATALOG.is_empty(),
+    "no .kpmap in kernel-panic/assets/maps"
+);
 
 use mipmap::{build_terrain_image, dark_fallback_material, void_ground_material};
 
@@ -255,8 +258,8 @@ pub struct TerrainChunkMarker;
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 pub struct TerrainChunkCoord(pub usize, pub usize);
 
-/// All map archives available in `assets/maps/`, sorted. The menu's map
-/// list and random-map resolution read this.
+/// The `.kpmap` files of `assets/maps/`, sorted. The menu's map list and
+/// random-map resolution read this.
 #[derive(Resource, Clone)]
 pub struct MapCatalog(pub Vec<PathBuf>);
 
@@ -318,17 +321,24 @@ fn prepare_game_entry(world: &mut World) {
     }
 }
 
-/// Native: read the selected archive (baked `.kpmap` preferred) and
-/// prepare it. Runs on the compute pool; a failure is logged here and
-/// leaves the current world in place.
+/// Native: read and decode the selected `.kpmap` and prepare it. Runs
+/// on the compute pool; a failure is logged here and leaves the current
+/// world in place.
 #[cfg(not(target_arch = "wasm32"))]
-fn load_and_prepare(map_path: &Path, inputs: PrepareInputs) -> Option<PreparedMap> {
+fn load_and_prepare(map_path: &std::path::Path, inputs: PrepareInputs) -> Option<PreparedMap> {
     info!("Loading map: {}", inputs.map_name);
     let decode_start = bevy::platform::time::Instant::now();
-    let spring_map = match load_map_dispatch(map_path) {
+    let bytes = match std::fs::read(map_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            error!("Failed to read {}: {error}", map_path.display());
+            return None;
+        }
+    };
+    let spring_map = match spring_map::baked::read_baked_map(&bytes) {
         Ok(m) => m,
         Err(error) => {
-            error!("Failed to load {}: {error}", map_path.display());
+            error!("Failed to decode {}: {error}", map_path.display());
             return None;
         }
     };
@@ -336,10 +346,9 @@ fn load_and_prepare(map_path: &Path, inputs: PrepareInputs) -> Option<PreparedMa
         "  decoded in {:.0}ms",
         decode_start.elapsed().as_secs_f64() * 1000.0
     );
-    // The file's hash, as the lobby compares it (`lobby::read_map_hash`).
-    let map_hash = std::fs::read(map_path).map_or(0, |b| crate::net::compat::map_hash(&b));
     let mut prepared = prepare_map(spring_map, inputs);
-    prepared.map_hash = map_hash;
+    // The file's hash, as the lobby compares it (`lobby::read_map_hash`).
+    prepared.map_hash = crate::net::compat::map_hash(&bytes);
     Some(prepared)
 }
 
@@ -427,189 +436,86 @@ fn finish_map_load(world: &mut World, prepared: PreparedMap) {
     world.resource_mut::<ReadyMap>().0 = Some(prepared);
 }
 
-/// Discover the map archives in `assets/maps/` into the menu-facing
-/// catalog. A CLI map argument (direct file or name stem) pre-seeds the
-/// default `GameSetup` and auto-enters the game — preserving the old
-/// "launch straight into a map" behaviour for headless testing.
-///
-/// Web: no filesystem. The deploy workflow bakes `.kpmap` files into the
-/// artifact and [`WEB_MAP_CATALOG`] (see build.rs) lists them at compile
-/// time, so the catalog is just the embedded list.
+/// The catalog: every `.kpmap` of `assets/maps/`, as the asset path the
+/// loader reads it from (web: fetched through the asset server; native:
+/// read from the assets directory next to the binary). Native: a CLI
+/// map argument pre-seeds the `GameSetup` and auto-enters the game — the
+/// "launch straight into a map" path for headless testing
+/// ([`cli_setup`]).
 fn pick_map(mut commands: Commands) {
     #[cfg(target_arch = "wasm32")]
-    {
-        let paths: Vec<PathBuf> = WEB_MAP_CATALOG
-            .iter()
-            .map(|n| PathBuf::from(format!("maps/{n}.kpmap")))
-            .collect();
-        commands.insert_resource(MapCatalog(paths));
-        commands.insert_resource(crate::game_setup::GameSetup::default());
-    }
-
+    let map_path = |name: &str| PathBuf::from(format!("maps/{name}.kpmap"));
     #[cfg(not(target_arch = "wasm32"))]
-    {
-        let maps_dir = crate::paths::assets_dir().join("maps");
-        let mut maps: Vec<PathBuf> = std::fs::read_dir(&maps_dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| is_map_ext(p.as_path()))
-            .collect();
-        dedupe_prefer_baked(&mut maps);
-        maps.sort();
+    let maps_dir = crate::paths::assets_dir().join("maps");
+    #[cfg(not(target_arch = "wasm32"))]
+    let map_path = |name: &str| maps_dir.join(format!("{name}.kpmap"));
+    let maps: Vec<PathBuf> = MAP_CATALOG.iter().map(|n| map_path(n)).collect();
 
-        if maps.is_empty() {
-            panic!(
-                "No map files found in {}. Place .sd7/.sdz files there or pass one as a CLI arg.",
-                maps_dir.display()
-            );
-        }
+    #[cfg(target_arch = "wasm32")]
+    let (setup, auto_enter) = (crate::game_setup::GameSetup::default(), false);
+    #[cfg(not(target_arch = "wasm32"))]
+    let (setup, auto_enter) = cli_setup(&maps);
 
-        // CLI override: a direct usable map file, or a name stem matched
-        // against the catalog.
-        let cli_arg = std::env::args().nth(1);
-        let direct = cli_arg
-            .as_ref()
-            .map(PathBuf::from)
-            .filter(|p| p.is_file() && is_map_ext(p.as_path()));
-        let stem_pick = cli_arg.as_ref().and_then(|arg| {
-            let stem = PathBuf::from(arg)
-                .file_stem()
-                .map(|s| s.to_ascii_lowercase())
-                .unwrap_or_default();
-            maps.iter().position(|p| {
-                p.file_stem()
-                    .map(|s| s.to_ascii_lowercase() == stem)
-                    .unwrap_or(false)
-            })
-        });
-
-        let mut setup = crate::game_setup::GameSetup::default();
-        let mut auto_enter = false;
-        if let Some(path) = direct.or_else(|| stem_pick.map(|i| maps[i].clone())) {
-            setup.map = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            auto_enter = true;
-            info!("CLI map argument: {}", setup.map);
-        }
-
-        // Showcase override: `showcase:<System|Hacker|Network>` boots
-        // straight into that faction's showcase, bypassing the menu.
-        if let Some(faction) = cli_arg.as_ref().and_then(|arg| {
-            arg.strip_prefix("showcase:")
-                .and_then(|n| match n.to_ascii_lowercase().as_str() {
-                    "system" => Some(crate::units::components::Faction::System),
-                    "hacker" => Some(crate::units::components::Faction::Hacker),
-                    "network" => Some(crate::units::components::Faction::Network),
-                    _ => None,
-                })
-        }) {
-            setup = crate::game_setup::showcase_setup(faction);
-            auto_enter = true;
-            info!("CLI showcase argument: {:?}", faction);
-        }
-
-        commands.insert_resource(MapCatalog(maps));
-        commands.insert_resource(setup);
-        if auto_enter {
-            commands.insert_resource(NextState::Pending(crate::game_setup::AppState::InGame));
-        }
+    commands.insert_resource(MapCatalog(maps));
+    commands.insert_resource(setup);
+    if auto_enter {
+        commands.insert_resource(NextState::Pending(crate::game_setup::AppState::InGame));
     }
 }
 
+/// Native: the setup the command line asks for, and whether to skip the
+/// menu. A `.kpmap` file or a name stem matched against the catalog
+/// picks the map; `showcase:<System|Hacker|Network>` boots straight into
+/// that faction's showcase.
 #[cfg(not(target_arch = "wasm32"))]
-fn is_map_ext(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(str::to_ascii_lowercase)
-            .as_deref(),
-        Some("sd7") | Some("sdz") | Some("kpmap")
-    )
+fn cli_setup(maps: &[PathBuf]) -> (GameSetup, bool) {
+    let mut setup = GameSetup::default();
+    let mut auto_enter = false;
+    let cli_arg = std::env::args().nth(1);
+    let direct = cli_arg
+        .as_ref()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file() && is_kpmap(p));
+    let stem_pick = cli_arg.as_ref().and_then(|arg| {
+        let stem = PathBuf::from(arg)
+            .file_stem()
+            .map(|s| s.to_ascii_lowercase())
+            .unwrap_or_default();
+        maps.iter().position(|p| {
+            p.file_stem()
+                .map(|s| s.to_ascii_lowercase() == stem)
+                .unwrap_or(false)
+        })
+    });
+    if let Some(path) = direct.or_else(|| stem_pick.map(|i| maps[i].clone())) {
+        setup.map = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        auto_enter = true;
+        info!("CLI map argument: {}", setup.map);
+    }
+    if let Some(faction) = cli_arg.as_ref().and_then(|arg| {
+        arg.strip_prefix("showcase:")
+            .and_then(|n| match n.to_ascii_lowercase().as_str() {
+                "system" => Some(crate::units::components::Faction::System),
+                "hacker" => Some(crate::units::components::Faction::Hacker),
+                "network" => Some(crate::units::components::Faction::Network),
+                _ => None,
+            })
+    }) {
+        setup = crate::game_setup::showcase_setup(faction);
+        auto_enter = true;
+        info!("CLI showcase argument: {:?}", faction);
+    }
+    (setup, auto_enter)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn is_baked_ext(path: &Path) -> bool {
+fn is_kpmap(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("kpmap"))
-        .unwrap_or(false)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, thiserror::Error)]
-enum LoadMapError {
-    #[error(transparent)]
-    Source(#[from] spring_map::map_types::MapError),
-    #[error(transparent)]
-    Baked(#[from] spring_map::baked::BakedMapError),
-    #[error("I/O error reading {path}: {error}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        error: std::io::Error,
-    },
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn load_map_dispatch(path: &Path) -> Result<spring_map::SpringMap, LoadMapError> {
-    if is_baked_ext(path) {
-        let bytes = std::fs::read(path).map_err(|error| LoadMapError::Io {
-            path: path.to_path_buf(),
-            error,
-        })?;
-        match spring_map::baked::read_baked_map(&bytes) {
-            // A bake from an older format version is refused (it lacks
-            // later additions such as the terrain types); the source
-            // archive next to it, when there is one, is the real map.
-            Err(error @ spring_map::baked::BakedMapError::Outdated { .. }) => {
-                let Some(source) = ["sd7", "sdz"]
-                    .iter()
-                    .map(|ext| path.with_extension(ext))
-                    .find(|p| p.is_file())
-                else {
-                    return Err(error.into());
-                };
-                warn!(
-                    "{}: {error} — loading {} instead",
-                    path.display(),
-                    source.display()
-                );
-                Ok(spring_map::load_map(&source)?)
-            }
-            result => Ok(result?),
-        }
-    } else {
-        Ok(spring_map::load_map(path)?)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn dedupe_prefer_baked(maps: &mut Vec<PathBuf>) {
-    use std::collections::HashSet;
-    let baked_stems: HashSet<String> = maps
-        .iter()
-        .filter(|p| is_baked_ext(p))
-        .filter_map(|p| {
-            p.file_stem()
-                .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        })
-        .collect();
-    maps.retain(|p| {
-        if is_baked_ext(p) {
-            return true;
-        }
-        let Some(stem) = p
-            .file_stem()
-            .map(|s| s.to_string_lossy().to_ascii_lowercase())
-        else {
-            return true;
-        };
-        !baked_stems.contains(&stem)
-    });
+        .is_some_and(|e| e.eq_ignore_ascii_case("kpmap"))
 }
 
 /// What [`prepare_map`] needs from the ECS side, snapshotted when the
@@ -688,7 +594,7 @@ struct PreparedMap {
     /// The content hash of the map file (`net::compat::map_hash`): the
     /// match's replay stamp (`net::replay_log::ActiveMapHash`).
     map_hash: u64,
-    header: SmfHeader,
+    header: MapHeader,
     features: Vec<MapFeature>,
     map_info: Option<MapInfo>,
     /// A Lua-composited map (Hex Farm) is drawn entirely by its gadget
@@ -762,7 +668,7 @@ fn prepare_map(spring_map: spring_map::SpringMap, inputs: PrepareInputs) -> Prep
                 .start_positions
                 .iter()
                 .enumerate()
-                .map(|(team, p)| spring_map::smd_parser::StartPosition {
+                .map(|(team, p)| spring_map::map_info::StartPosition {
                     team: team as u32,
                     x: p[0] as f32,
                     z: p[1] as f32,
@@ -1108,7 +1014,7 @@ fn spawn_prepared_map(
     // default, as `MapInfo::default` carries it).
     let gravity = map_info
         .as_ref()
-        .map_or(spring_map::smd_parser::DEFAULT_GRAVITY, |info| info.gravity);
+        .map_or(spring_map::map_info::DEFAULT_GRAVITY, |info| info.gravity);
     ctx.commands
         .insert_resource(crate::sim::MapGravity::from_map_info(gravity));
     if let Some(map_info) = &map_info {
@@ -1132,7 +1038,7 @@ fn spawn_prepared_map(
 }
 
 fn setup_camera(
-    header: &SmfHeader,
+    header: &MapHeader,
     heightmap: &Heightmap,
     camera_query: &mut Query<(&mut RtsCameraState, &mut Transform), With<RtsCamera>>,
     map_bounds: &mut MapBounds,
@@ -1266,7 +1172,7 @@ fn apply_atmosphere(map_info: &MapInfo, commands: &mut Commands) {
 /// fraction of that end distance.
 fn apply_fog(
     map_info: &MapInfo,
-    header: &SmfHeader,
+    header: &MapHeader,
     fog_query: &mut Query<&mut DistanceFog, With<RtsCamera>>,
 ) {
     let Ok(mut fog) = fog_query.single_mut() else {
@@ -1286,42 +1192,4 @@ fn apply_fog(
         start: fog_start_frac * max_view_distance,
         end: max_view_distance,
     };
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod dispatch_tests {
-    use super::*;
-
-    /// A bake from an older format version is refused: the source
-    /// archive next to it loads instead, and without one the load
-    /// fails with the version error (never a map with neutral terrain).
-    #[test]
-    fn outdated_bake_falls_back_to_its_archive() {
-        let source = Path::new("assets/maps/Marble_Madness_Map.sd7");
-        let map = spring_map::load_map(source).expect("source map");
-        let mut bytes = spring_map::baked::write_baked_map(&map).unwrap();
-        bytes[6] = b'4'; // "kpmapv4\0"
-
-        let dir = std::env::temp_dir().join(format!("kp-dispatch-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let baked = dir.join("Marble_Madness_Map.kpmap");
-        std::fs::write(&baked, &bytes).unwrap();
-
-        let alone = load_map_dispatch(&baked);
-        assert!(
-            matches!(
-                alone,
-                Err(LoadMapError::Baked(
-                    spring_map::baked::BakedMapError::Outdated { found: 4 }
-                ))
-            ),
-            "no archive: the version error"
-        );
-
-        std::fs::copy(source, dir.join("Marble_Madness_Map.sd7")).unwrap();
-        let loaded = load_map_dispatch(&baked).expect("archive fallback");
-        assert_eq!(loaded.parsed.heights, map.parsed.heights);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

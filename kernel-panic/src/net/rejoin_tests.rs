@@ -750,10 +750,7 @@ mod full {
         );
         let full_trail = replay::trail_text(&host_world.resource::<HashLog>().ticks);
         let recorded = replay::Replay::decode(&recorded.encode()).unwrap();
-        let Ok(map) = MapInput::checkout(MAP) else {
-            eprintln!("no baked {MAP}: the replay round trip is skipped");
-            return;
-        };
+        let map = MapInput::checkout(MAP).expect("the shipped map");
         drop(r);
         let played =
             bevy::tasks::block_on(replay::play(&recorded, map, &PlayOptions::default())).unwrap();

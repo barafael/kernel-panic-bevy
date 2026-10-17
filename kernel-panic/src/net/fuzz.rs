@@ -24,9 +24,8 @@
 //!
 //! The match: two human seats (delivered like remote players) and two
 //! AI seats on Marble Madness. `cargo test -p kernel-panic net::fuzz`
-//! runs it when the map is baked (skips otherwise); CI runs it through
-//! the replay binary (`kernel-panic --command-fuzz`,
-//! `determinism.yml`), where the maps are baked.
+//! runs it; CI also runs it through the replay binary (`kernel-panic
+//! --command-fuzz`, `determinism.yml`).
 
 use bevy::prelude::*;
 
@@ -762,14 +761,10 @@ pub fn check(ticks: u32, seed: u64) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// The command fuzz ([`check`]), when the map is baked. Knobs:
-    /// `KP_FUZZ_TICKS` (default 600), `KP_FUZZ_SEED`.
+    /// The command fuzz ([`check`]). Knobs: `KP_FUZZ_TICKS` (default
+    /// 600), `KP_FUZZ_SEED`.
     #[test]
     fn command_fuzz() {
-        if MapInput::checkout(MAP).is_err() {
-            eprintln!("command_fuzz: {MAP}.kpmap not baked, skipped (CI: determinism.yml)");
-            return;
-        }
         let env = |k: &str, default: u64| {
             std::env::var(k)
                 .ok()

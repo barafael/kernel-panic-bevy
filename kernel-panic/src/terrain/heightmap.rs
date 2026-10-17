@@ -193,7 +193,7 @@ impl Heightmap {
     }
 
     /// World-space extent of the map in elmos (`mapx * SQUARE_SIZE`,
-    /// matching [`spring_map::map_types::SmfHeader::world_width`]).
+    /// matching [`spring_map::map_types::MapHeader::world_width`]).
     /// The height grid stores *vertex* columns/rows, so the extent is
     /// one square smaller than `grid_size() * square_size` — the extra
     /// vertex column has zero width.
@@ -425,7 +425,7 @@ mod tests {
 
     /// The world extent is one square smaller than the vertex grid:
     /// 5 vertex columns span 4 squares × 8 elmos = 32, matching
-    /// `SmfHeader::world_width` (`mapx * SQUARE_SIZE`).
+    /// `MapHeader::world_width` (`mapx * SQUARE_SIZE`).
     #[test]
     fn world_size_is_squares_times_square_size() {
         let hm = flat(0.0, 5, 5);

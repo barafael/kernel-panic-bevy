@@ -26,8 +26,8 @@ use crate::units::teams::TeamFates;
 const MAP: &str = "Marble_Madness_Map";
 
 /// Seats `(ally team, ai)` in seat order.
-fn scenario(seats: &[(u8, bool)], seed: u64) -> Option<Scenario> {
-    let map = MapInput::checkout(MAP).ok()?;
+fn scenario(seats: &[(u8, bool)], seed: u64) -> Scenario {
+    let map = MapInput::checkout(MAP).expect("the shipped map");
     let mut s = Scenario::ai_match(MAP, seats.len() as u8, 1, seed);
     s.seats = seats
         .iter()
@@ -39,17 +39,13 @@ fn scenario(seats: &[(u8, bool)], seed: u64) -> Option<Scenario> {
         })
         .collect();
     s.map_file = Some(map.file);
-    Some(s)
+    s
 }
 
-fn start(seats: &[(u8, bool)], seed: u64) -> Option<SimHarness> {
-    let Some(s) = scenario(seats, seed) else {
-        eprintln!("{MAP}.kpmap not baked: skipped");
-        return None;
-    };
-    let mut h = SimHarness::new(s);
+fn start(seats: &[(u8, bool)], seed: u64) -> SimHarness {
+    let mut h = SimHarness::new(scenario(seats, seed));
     h.world_mut().resource_mut::<HashLog>().enabled = true;
-    Some(h)
+    h
 }
 
 /// `cmd` from `player`, applied on the next tick (a remote frame).
@@ -115,9 +111,7 @@ fn steps(h: &mut SimHarness, n: u32) {
 /// after the last one, the AI winning.
 #[test]
 fn resign_alone_blows_up_and_ends() {
-    let Some(mut h) = start(&[(0, false), (1, true)], 0x1e1) else {
-        return;
-    };
+    let mut h = start(&[(0, false), (1, true)], 0x1e1);
     h.step();
     build_some(&mut h, 0);
     steps(&mut h, 400);
@@ -156,7 +150,7 @@ fn resign_alone_blows_up_and_ends() {
 #[test]
 fn take_from_a_resigned_ally() {
     let run = |shuffle: bool| {
-        let mut h = start(&[(0, false), (0, false), (1, true), (1, true)], 0x7a1)?;
+        let mut h = start(&[(0, false), (0, false), (1, true), (1, true)], 0x7a1);
         let mut rng = 0x5eed_u32;
         let mut step = |h: &mut SimHarness, n: u32| {
             for _ in 0..n {
@@ -213,12 +207,10 @@ fn take_from_a_resigned_ally() {
         assert_eq!(refusals(&mut h), r1 + 1, "nothing left to take");
         step(&mut h, 120);
         let ticks = h.world_mut().resource::<HashLog>().ticks.clone();
-        Some(trail_text(&ticks))
+        trail_text(&ticks)
     };
-    let Some(plain) = run(false) else {
-        return;
-    };
-    let shuffled = run(true).unwrap();
+    let plain = run(false);
+    let shuffled = run(true);
     assert_eq!(
         crate::headless::replay::first_difference(&plain, &shuffled),
         None,
@@ -230,9 +222,7 @@ fn take_from_a_resigned_ally() {
 /// next brain tick (no human ally left to press TAKE).
 #[test]
 fn ai_ally_takes() {
-    let Some(mut h) = start(&[(0, false), (0, true), (1, true)], 0xa1) else {
-        return;
-    };
+    let mut h = start(&[(0, false), (0, true), (1, true)], 0xa1);
     h.step();
     build_some(&mut h, 0);
     steps(&mut h, 400);
@@ -256,9 +246,7 @@ fn ai_ally_takes() {
 /// left of the side — the first leaver's untaken units too — blows up.
 #[test]
 fn last_ally_resigning_blows_up_everything() {
-    let Some(mut h) = start(&[(0, false), (0, false), (1, true)], 0x1a5) else {
-        return;
-    };
+    let mut h = start(&[(0, false), (0, false), (1, true)], 0x1a5);
     steps(&mut h, 300);
     send(&mut h, 1, SimCommand::Resign);
     steps(&mut h, 10);

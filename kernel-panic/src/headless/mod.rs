@@ -25,8 +25,7 @@
 //!
 //! The match is the normal skirmish path: a [`GameSetup`] (all AI
 //! seats, or a replay's seats), entered through `AppState::InGame`,
-//! loaded by `map_loading` from `assets/maps` (a baked `.kpmap` when
-//! present).
+//! loaded by `map_loading` from `assets/maps`.
 //!
 //! Test builds always have the harness; the `replay` feature compiles it
 //! into the game binary too, for the golden-replay matrix ([`replay`]):

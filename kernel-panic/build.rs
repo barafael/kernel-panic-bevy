@@ -1,23 +1,16 @@
-//! Embed the web map and music catalogs at compile time.
+//! Embed the map and music catalogs at compile time.
 //!
-//! Web builds have no filesystem, so `pick_map` can't scan
-//! `assets/maps/` at runtime. Instead we list every `.kpmap` present in
-//! the directory at build time — the deploy workflow bakes the maps
-//! before `trunk build`, so the embedded list always matches what got
-//! copied into the Pages artifact. Native builds ignore this and keep
-//! scanning the directory at runtime, where `.sd7`/`.sdz` sources work
-//! too. The music player (`audio::music`) gets the same treatment for
-//! the `.ogg` tracks the player drops into `assets/music/`.
+//! The web build has no filesystem to scan, and the native one ships
+//! the same fixed set of maps, so `map_loading::pick_map` takes the
+//! list of `.kpmap` files in `assets/maps/` from here on both. The
+//! music player (`audio::music`) gets the same treatment for the `.ogg`
+//! tracks in `assets/music/` (web only: native scans the folder, so a
+//! player can drop tracks in).
 
 use std::path::Path;
 
 fn main() {
-    catalog(
-        "assets/maps",
-        "kpmap",
-        "WEB_MAP_CATALOG",
-        "web_map_catalog.rs",
-    );
+    catalog("assets/maps", "kpmap", "MAP_CATALOG", "map_catalog.rs");
     catalog(
         "assets/music",
         "ogg",

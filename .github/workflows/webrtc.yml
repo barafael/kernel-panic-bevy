@@ -61,7 +61,6 @@ jobs:
         with:
           key: webrtc-netem
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: ./.github/actions/bake-maps
       - name: 4 peers under netem
         run: scripts/netem-matchbox.sh --sudo "${{ matrix.netem }}"
       # The unreliable channel must not wait for lost packets (the
@@ -86,7 +85,6 @@ jobs:
         with:
           key: webrtc-browser
           save-if: ${{ github.event_name != 'pull_request' }}
-      - uses: ./.github/actions/bake-maps
       - uses: ./.github/actions/wasm-build
       - uses: actions/setup-node@v7
         with:

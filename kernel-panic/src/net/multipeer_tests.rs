@@ -13,9 +13,6 @@
 //! KP_MP_PEERS=8 KP_MP_TICKS=6000 KP_MP_LATENCY=80 KP_MP_LOSS=0.03 \
 //!   cargo test --release -p kernel-panic net::multipeer_tests::long_match -- --ignored --nocapture
 //! ```
-//!
-//! Without baked `.kpmap`s the maps load from their `.sd7` archives
-//! (slower, same content).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;

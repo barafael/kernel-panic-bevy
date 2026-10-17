@@ -268,10 +268,7 @@ native rows are the release build (thin LTO); the wasm rows are the `wasm-releas
 ## Reproducing
 
 ```
-# bake the maps the logs use (or all: .github/actions/bake-maps)
-cargo build --release -p spring-map --bin bake-map
-target/release/bake-map kernel-panic/assets/maps/Speed_Balls_16_Way.sdz   # and Quad_Core.sd7, Marble_Madness_Map.sd7
-# native trails, and the query-order fuzz
+# native trails, and the query-order fuzz (the maps are the committed .kpmap files)
 cargo run --release -p kernel-panic --features replay -- --replay kernel-panic/tests/golden/*.kpreplay --trail-dir trails
 cargo run --release -p kernel-panic --features replay -- --replay kernel-panic/tests/golden/*.kpreplay --trail-dir trails-shuffled --shuffle 1
 # wasm in Node

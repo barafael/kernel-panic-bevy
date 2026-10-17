@@ -2,47 +2,29 @@
 name = "spring-map"
 version = "0.1.0"
 edition = "2024"
-description = "Parser for Spring RTS engine map files (.smf/.smt/.sd7)"
+description = "The game's .kpmap reader and the terrain code that runs on it"
 
 [dependencies]
 # Target-independent float max / min / clamp (workspace clippy.toml).
 spring-detmath = { workspace = true }
-# Datavent facings at bake time (`datavent`): the movers' slope limit
-# and the heightmap's slopes, the same code the game's nav grid uses.
+# Datavent facings (`datavent`): the movers' slope limit and the
+# heightmap's slopes, the same code the game's nav grid uses.
 spring-pathfinding = { path = "../spring-pathfinding" }
-# Deterministic transcendentals: the native `.sd7` load and the `.kpmap`
-# bake run the same terrain code, and both feed the sim (workspace
-# clippy.toml).
+# Deterministic transcendentals: the terrain code feeds the sim
+# (workspace clippy.toml).
 libm = { workspace = true }
 better_default = { workspace = true }
-byteorder = { workspace = true }
 thiserror = { workspace = true }
-zip = { workspace = true }
-# kpmap v2: deflate the postcard body (rust_backend/miniz_oxide is
-# wasm-safe).
-flate2 = "1"
-# kpmap v3: zstd frames. ruzstd is a pure-Rust decoder (wasm-safe); the
-# encoder side lives behind zstd on native bake targets only.
+# `.kpmap`: a zstd frame around a postcard payload. ruzstd is a pure-Rust
+# decoder (wasm-safe).
 ruzstd = "0.9"
-binrw = "0.15.1"
 serde = { workspace = true }
 postcard = { workspace = true }
-image = { workspace = true }
-
-# Source-archive support: `sevenz-rust` assumes native std fs and
-# doesn't build for wasm32 — on web the baked `.kpmap` reader is the
-# only load path (plan §8.1).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-sevenz-rust = { workspace = true }
-# kpmap v3 encoder (bake runs native only). The reader side uses ruzstd,
-# which is pure Rust and wasm-safe.
-zstd = "0.14"
 
 [dev-dependencies]
 proptest = { workspace = true }
-# kpmap_bench example: routes paths across real baked terrain to audit
-# the grid pathfinder against actual map cliffs.
-spring-pathfinding = { path = "../spring-pathfinding" }
+# The reader's round-trip tests encode what they decode.
+zstd = "0.14"
 
 [lib]
 doctest = false

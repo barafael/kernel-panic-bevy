@@ -1,3 +1,7 @@
+> **Status (2026-10-17):** superseded. The maps are committed `.kpmap` files
+> (plan.md §8.1) and the unit data the committed `units.kpu` (unit-bundle.md);
+> the web build loads both as-is. Kept as the research behind those choices.
+
 # Web / WASM Asset Pipeline Plan
 
 Goal: make a wasm build of kernel-panic possible by replacing legacy Spring-engine asset formats and runtime filesystem access with web-friendly formats served over HTTP.

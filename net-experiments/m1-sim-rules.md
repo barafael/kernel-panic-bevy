@@ -31,7 +31,7 @@ no measurable sim change.
 - `clippy.toml` bans `f32::{max, min, clamp}` and the `f64` versions (reason text names the
   replacement). All 378 call sites in the workspace were converted mechanically from clippy's
   JSON spans (`.max(` → `.det_max(`, `f32::max` paths → `f32::det_max`): the sim,
-  `spring-pathfinding`, `spring-map` (runtime and bake), `spring-tdf` (runtime weapon values),
+  `spring-pathfinding`, `spring-map`, `spring-tdf` (runtime weapon values),
   `spring-unit-mesh` (model bounds feed `hit_radius`), and the presentation code too — one rule
   everywhere, no opt-outs needed. Offline tools that already opted out of the transcendental
   bans (`spring-map-gen` binaries, the float probe) keep their file-level allow.

@@ -1,76 +1,43 @@
-//! Pre-baked map format.
+//! The `.kpmap` map format.
 //!
-//! A `.kpmap` file is the result of running `bake-map` on a Spring
-//! `.sd7` / `.sdz`: the archive is unpacked, Lua heightmap gadgets are
-//! applied, SMT tiles are decoded, and the final terrain + texture +
-//! metadata is serialized into a single deterministic blob. The game
-//! can then load it with no archive / Lua / image dependencies, which
-//! both cuts cold-start time and is a prerequisite for the WASM target
-//! (plan §8.1) — `sevenz-rust` and `mlua` don't compile to wasm32.
+//! Every shipped map is a `.kpmap`: the terrain, ground texture,
+//! metadata, terrain types, datavent facings and (Hex Farm) the Lua
+//! skin atlas in one deterministic blob, loaded with no archive, Lua or
+//! image dependencies on native and web alike. The files were converted
+//! once from the original Spring archives (the converter is in the git
+//! history, see README.md); the game and every lockstep peer read the
+//! same bytes, which the lobby and replays hash (`net::compat`).
 //!
 //! Format (all little-endian):
 //!
 //! ```text
-//! magic        : 8 bytes
-//!   kpmapv1\0  = body is the raw postcard payload
-//!   kpmapv2\0  = body is DEFLATE(postcard payload) — the raw payload
-//!                is dominated by solid-colour textures, so v2 shrinks
-//!                a 270 MB v1 blob to ~5 MB and is what ships over
-//!                HTTP for the web build
-//!   kpmapv3\0  = body is ZSTD(postcard payload). Measured on the
-//!                shipped maps, zstd beats the deflate stream by 35-94%
-//!                at decode-parity (the payloads are long solid-colour
-//!                texture runs that zstd's longer matches crush):
-//!                Data_Cache_L1 314→49 KB, Memory_Bank_v3 5.3→0.32 MB,
-//!                Hex_Farm_8 19.7→11.1 MB. Decode via ruzstd runs at
-//!                220-610 MB/s native — parity with miniz inflate.
-//!   kpmapv4\0  = ZSTD(postcard(BakedMap, Option<LuaCompositing>)):
-//!                v3's body followed by the Lua-composited map data
-//!                (Hex Farm's skin atlas) the runtime needs to draw
-//!                the gadget's towers and bridges. Postcard isn't
-//!                self-describing, so the extra trailing field needs
-//!                the version bump; v1-v3 bodies still decode as a bare
-//!                `BakedMap` with no compositing.
-//!   kpmapv6\0  = as v5, plus every geovent's factory facing in
-//!                `BakedMap::datavents` (`crate::datavent`).
-//!   kpmapv5\0  = ZSTD(postcard(BakedMap, Option<LuaCompositing>,
-//!                BakedTerrain)): v4's body followed by the SMF typemap
-//!                and the per-type move speeds (terrain types — fast
-//!                lanes, slow and closed zones on several shipped maps).
-//! body_len    : u32      = compressed body length in bytes
-//! body         : [u8; N]  = the zstd frame
+//! magic    : 8 bytes  "kpmapv6\0"
+//! body_len : u32      length of the zstd frame
+//! body     : ZSTD(postcard((BakedMap, Option<LuaCompositing>, BakedTerrain)))
 //! ```
 //!
-//! Only the current version is read: an older bake fails with
-//! [`BakedMapError::Outdated`] (it would load without the later
-//! additions — v5's terrain types — and silently play a different map),
-//! and a native loader with the source archive at hand loads that
-//! instead. Bakes are a cache of the archive: re-run `bake-map`.
-//! Bumping the version number means the reader rejects mismatched
-//! files instead of silently corrupting them.
+//! The payload is dominated by solid-colour textures, which zstd's long
+//! matches crush (Memory_Bank_v3's 268 MB texture is 0.3 MB on disk);
+//! ruzstd decodes at 220-610 MB/s. The version digit in the magic is
+//! part of the format: postcard is not self-describing, so a changed
+//! payload layout needs a new magic, and a file with another one is
+//! refused instead of mis-decoded.
 
-use std::io::{Read, Write};
+use std::io::Read;
 
 use serde::de::{Deserializer, Visitor};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::map_info::MapInfo;
 use crate::map_types::{
-    Datavent, GroundTexture, MapFeature, ParsedMap, SmfHeader, SmfParseError, TerrainTypes,
+    BadMapSize, Datavent, GroundTexture, MapFeature, MapHeader, ParsedMap, TerrainTypes,
 };
-use crate::smd_parser::MapInfo;
 use crate::{LuaCompositing, SpringMap};
 
-/// The magic every version shares, followed by its number and a NUL.
-const MAGIC_PREFIX: &[u8; 6] = b"kpmapv";
-/// The one version written and read: v5 zstd-encodes the postcard body
-/// (level 19 at bake time — bake is native and offline, so the
-/// slowest-but-smallest setting is free at load) and appends the Lua
-/// compositing data and the terrain types.
-pub const FORMAT_VERSION: u8 = 6;
 const MAGIC: &[u8; 8] = b"kpmapv6\0";
 
-/// v5's trailing terrain section.
+/// The trailing terrain section.
 #[derive(Serialize, Deserialize)]
 struct BakedTerrain {
     /// `map_x/2 × map_y/2` terrain-type bytes, or empty.
@@ -82,27 +49,27 @@ struct BakedTerrain {
 pub enum BakedMapError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("postcard encode error: {0}")]
-    PostcardEncode(postcard::Error),
     #[error("postcard decode error: {0}")]
     PostcardDecode(postcard::Error),
-    #[error("not a kpmap file (bad magic)")]
+    #[error("not a kpmap file (bad magic; this build reads {})", String::from_utf8_lossy(&MAGIC[..7]))]
     BadMagic,
-    #[error(
-        "kpmap format v{found} is outdated (this build reads v{FORMAT_VERSION}) — re-bake it with bake-map"
-    )]
-    Outdated { found: u8 },
     #[error("kpmap body truncated: declared {declared} bytes, file has {actual}")]
     Truncated { declared: usize, actual: usize },
     #[error("kpmap header truncated")]
     HeaderTruncated,
+    #[error(transparent)]
+    BadMapSize(#[from] BadMapSize),
+    #[error("heightmap has {actual} samples, the map size needs {expected}")]
+    HeightmapSize { expected: usize, actual: usize },
+    #[error("metalmap has {actual} bytes, the map size needs {expected}")]
+    MetalmapSize { expected: usize, actual: usize },
+    #[error("typemap has {actual} bytes, the map size needs {expected}")]
+    TypemapSize { expected: usize, actual: usize },
     #[error("ground texture pixel count mismatch: width*height*4 = {expected}, got {actual}")]
     TextureSizeMismatch { expected: usize, actual: usize },
 }
 
-/// On-disk payload. Versioned via the file's magic: a new field needs a
-/// version bump, so older files fail with the explicit `Outdated` error
-/// rather than mis-decoding.
+/// On-disk payload.
 #[derive(Serialize, Deserialize)]
 struct BakedMap<'a> {
     map_x: i32,
@@ -116,13 +83,11 @@ struct BakedMap<'a> {
     metalmap: Vec<u8>,
     features: Vec<MapFeature>,
     map_info: Option<MapInfo>,
-    /// Assembled ground texture. `None` if the source archive shipped no
-    /// `.smt`. Pixels are RGBA8, row-major. Stored raw — PNG / DXT
-    /// compression can come later when filesize matters (i.e. when we
-    /// actually ship over HTTP for the WASM build).
+    /// The ground texture, RGBA8 row-major. `None` for a Lua-drawn map
+    /// (Hex Farm), whose ground is hidden.
     #[serde(borrow)]
     ground_texture: Option<BakedTexture<'a>>,
-    /// v6: every geovent with its factory facing (`crate::datavent`).
+    /// Every geovent with its factory facing (`crate::datavent`).
     datavents: Vec<Datavent>,
 }
 
@@ -136,13 +101,13 @@ struct BakedTexture<'a> {
 
 /// A byte run borrowed from the decoded payload.
 ///
-/// Wire-identical to the `Vec<u8>` earlier bakes wrote (postcard encodes
-/// both as a varint length followed by the raw bytes), but decoded as a
-/// slice of the payload instead of an owned copy: `Vec<u8>` goes through
-/// serde's generic sequence path, one `visit_u8` per pixel byte — over a
-/// second for Memory_Bank_v3's 268 MB texture — and doubles the peak
-/// memory while the copy is made. The reader then moves the pixels out
-/// of the payload in place (see [`read_baked_map`]).
+/// Wire-identical to a `Vec<u8>` (postcard encodes both as a varint
+/// length followed by the raw bytes), but decoded as a slice of the
+/// payload instead of an owned copy: `Vec<u8>` goes through serde's
+/// generic sequence path, one `visit_u8` per pixel byte — over a second
+/// for Memory_Bank_v3's 268 MB texture — and doubles the peak memory
+/// while the copy is made. The reader then moves the pixels out of the
+/// payload in place (see [`read_baked_map`]).
 struct Bytes<'a>(&'a [u8]);
 
 impl Serialize for Bytes<'_> {
@@ -170,32 +135,13 @@ impl<'de: 'a, 'a> Deserialize<'de> for Bytes<'a> {
     }
 }
 
-/// Encode a zstd frame. The encoder (C zstd) only links on native —
-/// baking is a native-only job; wasm builds just need the reader.
-///
-/// The frame carries its decompressed size (`Frame_Content_Size`), so
-/// the reader can allocate the payload buffer exactly once instead of
-/// growing it by doubling — a quarter-gigabyte texture otherwise ends
-/// up in a half-gigabyte allocation.
-#[cfg(not(target_arch = "wasm32"))]
-fn encode_zstd(body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
-    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 19)?;
-    encoder.set_pledged_src_size(Some(body.len() as u64))?;
-    encoder.include_contentsize(true)?;
-    encoder.write_all(body)?;
-    Ok(encoder.finish()?)
-}
-
-/// wasm stub: `write_baked_map` is only called by the native bake bin.
-#[cfg(target_arch = "wasm32")]
-fn encode_zstd(_body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
-    Err(BakedMapError::Io(std::io::Error::other(
-        "kpmap baking requires the native target",
-    )))
-}
-
-/// Serialize `map` to the `.kpmap` wire format.
+/// Serialize `map` to the `.kpmap` wire format: the reader's round-trip
+/// tests. (The shipped files were written by the retired converter with
+/// this same encoding, zstd level 19.)
+#[cfg(test)]
 pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
+    use std::io::Write;
+
     let core = BakedMap {
         map_x: map.parsed.header.map_x,
         map_y: map.parsed.header.map_y,
@@ -212,59 +158,48 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
             pixels: Bytes(&g.pixels),
         }),
     };
-
-    // The core map, then the Lua compositing data, then the terrain
-    // types (a postcard tuple is the plain concatenation of its fields).
     let terrain = BakedTerrain {
         typemap: map.parsed.typemap.clone(),
         types: map.terrain_types.clone(),
     };
+    // A postcard tuple is the plain concatenation of its fields.
     let body = postcard::to_allocvec(&(core, &map.lua_compositing, terrain))
-        .map_err(BakedMapError::PostcardEncode)?;
+        .map_err(BakedMapError::PostcardDecode)?;
 
-    // Zstd the body at level 19. The payload is dominated by
-    // solid-colour textures and zeroed maps; zstd's longer matches and
-    // stronger entropy coding beat the v2 deflate stream by 35-94%.
-    let compressed = encode_zstd(&body)?;
+    // The frame carries its decompressed size (`Frame_Content_Size`), so
+    // the reader can allocate the payload buffer exactly once.
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 19)?;
+    encoder.set_pledged_src_size(Some(body.len() as u64))?;
+    encoder.include_contentsize(true)?;
+    encoder.write_all(&body)?;
+    let compressed = encoder.finish()?;
 
-    let body_len: u32 = compressed
-        .len()
-        .try_into()
-        .expect("deflated body exceeds u32::MAX");
-
+    let body_len: u32 = compressed.len().try_into().expect("body exceeds u32::MAX");
     let mut out = Vec::with_capacity(MAGIC.len() + 4 + compressed.len());
-    out.write_all(MAGIC)?;
-    out.write_all(&body_len.to_le_bytes())?;
-    out.write_all(&compressed)?;
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&body_len.to_le_bytes());
+    out.extend_from_slice(&compressed);
     Ok(out)
 }
 
 /// Largest buffer preallocated from a size claimed inside the file.
 const MAX_PREALLOC: usize = 512 << 20;
 
-/// Deserialize a `.kpmap` blob back into the same shape `load_map`
-/// returns for a `.sd7` — the rest of the engine doesn't need to know
-/// which path the data took. Only [`FORMAT_VERSION`] is accepted; an
-/// older bake is [`BakedMapError::Outdated`].
+/// Decode a `.kpmap`.
 ///
 /// The ground texture dominates the payload (a quarter gigabyte on the
 /// biggest maps), so it is never copied out: the pixels are shifted to
 /// the front of the payload buffer, which becomes the texture's own
 /// `Vec` — peak memory is one payload, not payload + copy. A
-/// Lua-composited map gets no ground texture at all: its SMT is hidden
-/// under `voidGround` and never drawn, so materializing it would only
-/// cost memory.
+/// Lua-composited map gets no ground texture at all: its ground is
+/// hidden under `voidGround` and never drawn, so materializing it would
+/// only cost memory.
 pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     let magic = bytes
         .get(..MAGIC.len())
         .ok_or(BakedMapError::HeaderTruncated)?;
     if magic != MAGIC.as_slice() {
-        return Err(match magic.strip_prefix(MAGIC_PREFIX.as_slice()) {
-            Some(&[digit @ b'1'..=b'9', 0]) => BakedMapError::Outdated {
-                found: digit - b'0',
-            },
-            _ => BakedMapError::BadMagic,
-        });
+        return Err(BakedMapError::BadMagic);
     }
 
     if bytes.len() < MAGIC.len() + 4 {
@@ -285,7 +220,7 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     let payload: Vec<u8> = {
         let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
             .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
-        // Exact when the bake pledged the size (0 otherwise: the buffer
+        // Exact when the frame pledges the size (0 otherwise: the buffer
         // grows as it is read). Capped: the frame header's pledge is a
         // claim from the file; anything larger grows as it is read.
         let content_size = (decoder.decoder.content_size() as usize).min(MAX_PREALLOC);
@@ -355,42 +290,28 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         _ => None,
     };
 
-    let header = SmfHeader::new_flat(map_x, map_y, min_height, max_height);
-    header
-        .validate_size()
-        .map_err(|e| BakedMapError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))?;
-    let expected_metal = header.metalmap_width() * header.metalmap_height();
-    if metalmap.len() != expected_metal {
-        return Err(BakedMapError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            SmfParseError::MetalmapTruncated {
-                expected: expected_metal,
-                actual: metalmap.len(),
-            }
-            .to_string(),
-        )));
+    let header = MapHeader::new(map_x, map_y, min_height, max_height);
+    header.validate_size()?;
+    let expected = header.metalmap_width() * header.metalmap_height();
+    if metalmap.len() != expected {
+        return Err(BakedMapError::MetalmapSize {
+            expected,
+            actual: metalmap.len(),
+        });
     }
-    let expected_heights = header.heightmap_len();
-    if heights.len() != expected_heights {
-        return Err(BakedMapError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            SmfParseError::HeightmapTruncated {
-                expected: expected_heights,
-                actual: heights.len(),
-            }
-            .to_string(),
-        )));
+    let expected = header.heightmap_len();
+    if heights.len() != expected {
+        return Err(BakedMapError::HeightmapSize {
+            expected,
+            actual: heights.len(),
+        });
     }
-
-    let expected_types = header.typemap_width() * header.typemap_height();
-    if !typemap.is_empty() && typemap.len() != expected_types {
-        return Err(BakedMapError::Io(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            SmfParseError::TypemapTruncated {
-                expected: expected_types,
-            }
-            .to_string(),
-        )));
+    let expected = header.typemap_width() * header.typemap_height();
+    if !typemap.is_empty() && typemap.len() != expected {
+        return Err(BakedMapError::TypemapSize {
+            expected,
+            actual: typemap.len(),
+        });
     }
 
     Ok(SpringMap {
@@ -405,10 +326,6 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
         map_info,
         terrain_types,
         datavents,
-        // No raw .smf bytes round-trip: the only consumer that ever
-        // looked at them was the SMT decoder, which already ran during
-        // bake. Anyone needing this in future would add it here.
-        smf_data: Vec::new(),
         lua_compositing,
     })
 }
@@ -416,11 +333,11 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map_types::{FeatureType, ParsedMap, SmfHeader};
-    use crate::smd_parser::{Atmosphere, Lighting, MapInfo, StartPosition};
+    use crate::map_info::{Atmosphere, Lighting, MapInfo, StartPosition};
+    use crate::map_types::{FeatureType, MapHeader, ParsedMap};
 
     fn sample_map() -> SpringMap {
-        let header = SmfHeader::new_flat(4, 4, 0.0, 100.0);
+        let header = MapHeader::new(4, 4, 0.0, 100.0);
         let heights = vec![42.0; header.heightmap_len()];
         let metalmap = vec![0u8; header.metalmap_width() * header.metalmap_height()];
         SpringMap {
@@ -465,9 +382,79 @@ mod tests {
                 types.move_speeds[3].kbot = 4.0;
                 types
             },
-            smf_data: Vec::new(),
             lua_compositing: None,
         }
+    }
+
+    /// Every shipped map decodes and is sane: heightmap, metalmap and
+    /// typemap sized to the header, finite features, a texture (or the
+    /// Lua skin), start positions inside the map.
+    #[test]
+    fn shipped_maps_load() {
+        let dir = crate::shipped_maps_dir();
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "kpmap") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let bytes = std::fs::read(&path).unwrap();
+            let map = read_baked_map(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let p = &map.parsed;
+            assert_eq!(p.heights.len(), p.header.heightmap_len(), "{name}");
+            assert_eq!(
+                p.metalmap.len(),
+                p.header.metalmap_width() * p.header.metalmap_height(),
+                "{name}"
+            );
+            assert_eq!(
+                p.typemap.len(),
+                p.header.typemap_width() * p.header.typemap_height(),
+                "{name}: typemap"
+            );
+            for f in &p.features {
+                assert!(
+                    f.x.is_finite() && f.y.is_finite() && f.z.is_finite(),
+                    "{name}"
+                );
+            }
+            match (&map.ground_texture, &map.lua_compositing) {
+                (Some(ground), None) => {
+                    assert_eq!(
+                        ground.pixels.len(),
+                        ground.width * ground.height * 4,
+                        "{name}"
+                    );
+                }
+                (None, Some(lua)) => {
+                    let atlas = &lua.atlas;
+                    assert_eq!(
+                        atlas.pixels.len(),
+                        (atlas.width * atlas.height * 4) as usize,
+                        "{name}: atlas"
+                    );
+                }
+                _ => panic!("{name}: neither a ground texture nor a Lua skin"),
+            }
+            let info = map
+                .map_info
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: no map info"));
+            assert!(info.start_positions.len() >= 2, "{name}");
+            let (w, d) = (p.header.world_width(), p.header.world_depth());
+            for sp in &info.start_positions {
+                assert!(
+                    (0.0..=w).contains(&sp.x) && (0.0..=d).contains(&sp.z),
+                    "{name}: start position team {} at ({}, {}) is outside {w}x{d}",
+                    sp.team,
+                    sp.x,
+                    sp.z
+                );
+            }
+            count += 1;
+        }
+        assert!(count >= 18, "expected the 18 shipped maps, found {count}");
     }
 
     #[test]
@@ -478,30 +465,18 @@ mod tests {
         assert_eq!(loaded.terrain_types, original.terrain_types);
     }
 
-    /// Older format versions are rejected by number, not mis-decoded
-    /// (a v4 body is a valid v5 prefix up to the missing terrain).
+    /// Another format version is refused by its magic, not mis-decoded.
     #[test]
-    fn rejects_outdated_versions() {
+    fn rejects_other_versions() {
         let bytes = write_baked_map(&sample_map()).unwrap();
-        for version in 1..FORMAT_VERSION {
-            let mut old = bytes.clone();
-            old[6] = b'0' + version;
+        for version in *b"157x" {
+            let mut other = bytes.clone();
+            other[6] = version;
             assert!(matches!(
-                read_baked_map(&old),
-                Err(BakedMapError::Outdated { found }) if found == version
+                read_baked_map(&other),
+                Err(BakedMapError::BadMagic)
             ));
         }
-        let error = BakedMapError::Outdated { found: 4 }.to_string();
-        assert!(
-            error.contains("v4") && error.contains("bake-map"),
-            "{error}"
-        );
-        let mut future = bytes.clone();
-        future[6] = b'x';
-        assert!(matches!(
-            read_baked_map(&future),
-            Err(BakedMapError::BadMagic)
-        ));
     }
 
     #[test]
@@ -538,11 +513,9 @@ mod tests {
             },
         });
         let loaded = read_baked_map(&write_baked_map(&original).unwrap()).unwrap();
-        let lua = loaded
-            .lua_compositing
-            .expect("the bake keeps the compositing");
+        let lua = loaded.lua_compositing.expect("the compositing round-trips");
         assert_eq!(lua.atlas.pixels, vec![1, 2, 3, 255]);
-        // The composited map's SMT is hidden under `voidGround`: not
+        // The composited map's ground is hidden under `voidGround`: not
         // materialized.
         assert!(loaded.ground_texture.is_none());
     }

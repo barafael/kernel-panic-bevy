@@ -18,7 +18,7 @@ use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::units::assets::animation::PieceIndex;
-use spring_map::smd_parser::MapInfo;
+use spring_map::map_info::MapInfo;
 
 use super::production::default_production;
 use crate::sim::{DetFloat, Heading};

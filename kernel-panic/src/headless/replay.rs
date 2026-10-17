@@ -70,16 +70,8 @@ impl MapInput {
     pub fn checkout(map: &str) -> Result<Self, ReplayError> {
         let file = crate::paths::from_project_root("kernel-panic/assets/maps")
             .join(format!("{map}.kpmap"));
-        let bytes = std::fs::read(&file).map_err(|e| {
-            ReplayError::Map(
-                map.to_string(),
-                format!(
-                    "{}: {e} (bake it: cargo run --release -p spring-map --bin bake-map -- \
-                     kernel-panic/assets/maps/{map}.sd7)",
-                    file.display()
-                ),
-            )
-        })?;
+        let bytes = std::fs::read(&file)
+            .map_err(|e| ReplayError::Map(map.to_string(), format!("{}: {e}", file.display())))?;
         Ok(Self {
             bytes,
             assets: AssetRoot::checkout(),
@@ -401,7 +393,7 @@ mod tests {
 
     /// The query-order fuzz on the golden logs: every replay again with
     /// the ECS storage order reshuffled every tick ([`shuffle_storage`])
-    /// must leave the same trail. Needs the baked maps; `KP_FUZZ_TICKS`
+    /// must leave the same trail. `KP_FUZZ_TICKS`
     /// (default 3000) per log, `KP_FUZZ_LOGS=a,b` to pick logs. CI runs
     /// the full-length version (`determinism.yml`, `--shuffle 1`).
     ///
@@ -409,7 +401,7 @@ mod tests {
     /// cargo test --release -p kernel-panic headless::replay::tests::query_order_fuzz -- --ignored --nocapture
     /// ```
     #[test]
-    #[ignore = "replays the golden logs on the baked maps; --ignored"]
+    #[ignore = "replays the golden logs; --ignored"]
     fn query_order_fuzz() {
         let ticks: u32 = std::env::var("KP_FUZZ_TICKS")
             .ok()

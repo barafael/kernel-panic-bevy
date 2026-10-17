@@ -5,7 +5,6 @@ resolver = "3"
 members = [
     "spring-tdf",
     "spring-map",
-    "spring-map-gen",
     "spring-unit-mesh",
     "spring-pathfinding",
     "spring-detmath",
@@ -41,10 +40,10 @@ exclude = ["vendor/webrtc-data", "vendor/bevy_winit"]
 # equivalence harnesses in `animation/proofs.rs`. Not a workspace
 # member; no dependents. Not scheduled for deletion.
 
-# `glam` is never imported by kernel-panic or spring-map-gen: they depend
-# on it only so Cargo's feature unification turns `libm` + `scalar-math`
-# on for Bevy's copy (see the `glam` entry below). cargo-shear can't see
-# that, so it must not report it as unused.
+# `glam` is never imported by kernel-panic: it depends on it only so
+# Cargo's feature unification turns `libm` + `scalar-math` on for Bevy's
+# copy (see the `glam` entry below). cargo-shear can't see that, so it
+# must not report it as unused.
 [workspace.metadata.cargo-shear]
 ignored = ["glam"]
 
@@ -68,14 +67,10 @@ glam = { version = "0.33", default-features = false, features = ["std", "libm", 
 libm = "0.2"
 # Target-independent float max / min / clamp (signed zeros; clippy.toml).
 spring-detmath = { path = "spring-detmath" }
-byteorder = "1.5"
 thiserror = "2"
-sevenz-rust = "0.6"
-zip = { version = "9", default-features = false, features = ["deflate"] }
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["use-std"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Bevy debug runs are ~5-10x slower than release because dependencies
 # (bevy, wgpu, glam) build with opt-level 0. Optimize all dependencies

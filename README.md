@@ -1,0 +1,46 @@
+# Kernel Panic (Rust / Bevy remake)
+
+A Rust and Bevy remake of [Kernel Panic](https://springrts.com/wiki/Kernel_Panic),
+the Spring RTS game about computers (`kernel-panic/kernel-panic.md` has its
+history). Playable natively and in the browser; lockstep multiplayer over
+WebRTC (`docs/multiplayer-plan.md`).
+
+```sh
+cargo run --release -p kernel-panic              # the game
+cargo run --release -p kernel-panic Central_Hub  # straight into a map
+cargo test --workspace                           # needs `git lfs pull` (the music)
+```
+
+## Assets
+
+The original game is frozen, so its content lives in this repository in
+the formats the game reads, with no conversion step anywhere:
+
+- `kernel-panic/assets/units.kpu`: every unit, weapon, explosion and move
+  class definition, every model and texture (`unit-bundle.md`). Embedded
+  in the binary.
+- `kernel-panic/assets/maps/*.kpmap`: the 18 maps (`spring-map/src/baked.rs`
+  documents the format). Native reads them from `assets/`, the web build
+  fetches them.
+- `kernel-panic/assets/{sounds,music,cursors,unitpics,bitmaps}`: the
+  sound effects, the soundtrack (Git LFS), the mouse cursors, the build
+  pictures and the tooltip background.
+
+Provenance and licences: `original-game-license-info.txt`.
+
+The maps were converted once from the original Spring `.sd7` / `.sdz`
+archives. The converter (`spring-map`'s `bake-map`), the Spring archive,
+SMF, SMT and SMD readers, the captured Lua gadget outputs, the
+`spring-map-gen` crate that generated Circular Buffer and Stack Overflow
+(and its `map-viewer`), and the CI bake step were all removed in the
+commit after `81f4e96`; that commit is the last with the tools and the
+source archives, should a map ever need regenerating:
+
+```sh
+git show 81f4e96:spring-map/src/bin/bake-map.rs
+git checkout 81f4e96 -- spring-map spring-map-gen kernel-panic/assets/maps
+```
+
+There is no editable sidecar for the baked data (start positions, terrain
+types, datavent facings all live inside the `.kpmap`); if one is ever
+needed, the reader is the place to add it.

@@ -509,17 +509,14 @@ settings page. Open: the tip dispenser voice-over (140 `.ogg` clips).
 
 ### 8.1 Pre-Bake Map Format — ✅ Done
 
-`.kpmap` is the runtime form: `cargo run -p spring-map --bin bake-map -- INPUT.sd7`
-produces a postcard-encoded blob (heightmap + metalmap + features + assembled
-ground texture as raw RGBA + .smd / mapinfo.lua resolved to `MapInfo`) that
+`.kpmap` is the only map form: a zstd-compressed postcard blob (heightmap +
+metalmap + features + ground texture as raw RGBA + .smd / mapinfo.lua resolved
+to `MapInfo` + terrain types + datavent facings + Hex Farm's skin atlas) that
 loads through `spring_map::baked::read_baked_map` with no archive / mlua /
-SMT-tile dependencies. The runtime now prefers a `.kpmap` over the source
-`.sd7` of the same stem — see `dedupe_prefer_baked` and `load_map_dispatch`.
-
-v4 (`kpmapv4\0`) appended `Option<LuaCompositing>` (Hex Farm's skin atlas),
-v5 (`kpmapv5\0`) the SMF typemap and terrain types. Only the current version
-loads: an older bake is refused with a "re-bake with bake-map" error, and the
-native loader falls back to the `.sd7` / `.sdz` next to it when there is one.
+SMT-tile dependencies. The 18 shipped maps are committed as `.kpmap`
+(2026-10-17); the converter (`bake-map`) and the Spring archive/SMF/SMT/SMD
+readers it ran on were removed with it — see README.md for where they are in
+the history. The original game is frozen, so nothing re-bakes.
 
 Hex Farm 8 no longer replays a captured gadget run: `spring_map::hexfarm`
 ports `HexFarm8.lua` (layout, start positions, heightmap/terrain writers,
@@ -551,12 +548,9 @@ format is the prerequisite that's now in place.
 
 ### 8.3 Compatibility Constraints
 
-- `sevenz-rust` won't compile to WASM — `.kpmap` sidesteps this entirely
-- `mlua` heightmap gadgets run at bake time, not runtime — `.kpmap` consumers
-  don't link mlua at all (still pulled by the source `.sd7` path; gated behind
-  `#[cfg(not(target_arch = "wasm32"))]` when WASM lands)
-- `spring-map` needs `#[cfg(not(target_arch = "wasm32"))]` on filesystem code
-  (deferred until 8.2)
+- Resolved by `.kpmap`: no archive extraction (`sevenz-rust`), no Lua and no
+  image decoding anywhere in the map path; `spring-map` builds for wasm32
+  without a single `cfg`.
 
 ---
 
@@ -661,7 +655,7 @@ so there was no reason to ship the simpler version first.
 ```text
 kernel-panic/          (binary — Bevy game app)
 spring-tdf/            (lib — TDF format parser: weapons, units/FBI, generic sections)
-spring-map/            (lib — SMF/SMT/SD7 map loader)
+spring-map/            (lib — .kpmap reader, Hex Farm, datavents, smooth mesh)
 spring-unit-mesh/      (lib — S3O model parser)
 spring-cob/            (lib — COB bytecode VM)
 spring-pathfinding/    (lib — QTPFS quad-tree pathfinding)

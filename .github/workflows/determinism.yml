@@ -11,8 +11,8 @@ name: Determinism
 # - Golden logs: kernel-panic/tests/golden/*.kpreplay (match setup, seed,
 #   compat stamp, command log; `headless::replay`). Re-record with
 #   `cargo run --release -p kernel-panic --features replay -- --record-golden`.
-# - Maps: baked once (`maps` job) and shared, as release.yml does; a
-#   replay refuses to run on map bytes other than the ones it recorded.
+# - Maps: the committed `.kpmap` files; a replay refuses to run on map
+#   bytes other than the ones it recorded.
 # - Native: the game binary built with `--features replay`, run as
 #   `kernel-panic --replay <logs> --trail-dir trails`.
 # - wasm32-unknown-unknown: the same build for the web (profile
@@ -59,8 +59,8 @@ env:
   PLAYWRIGHT_VERSION: 1.56.1
 
 jobs:
-  maps:
-    name: bake maps
+  golden:
+    name: find golden logs
     runs-on: ubuntu-latest
     outputs:
       found: ${{ steps.golden.outputs.found }}
@@ -74,26 +74,11 @@ jobs:
           logs=("$GOLDEN_DIR"/*."$GOLDEN_EXT")
           echo "found=$([ ${#logs[@]} -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "${#logs[@]} golden log(s) in $GOLDEN_DIR"
-      - if: steps.golden.outputs.found == 'true'
-        uses: dtolnay/rust-toolchain@stable
-      - if: steps.golden.outputs.found == 'true'
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: bake
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - if: steps.golden.outputs.found == 'true'
-        uses: ./.github/actions/bake-maps
-      - if: steps.golden.outputs.found == 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: kpmaps-determinism
-          path: kernel-panic/assets/maps/*.kpmap
-          if-no-files-found: error
 
   native:
     name: replay (${{ matrix.platform }})
-    needs: maps
-    if: needs.maps.outputs.found == 'true'
+    needs: golden
+    if: needs.golden.outputs.found == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -130,10 +115,6 @@ jobs:
       MUSL: ${{ matrix.target == 'x86_64-unknown-linux-musl' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: kpmaps-determinism
-          path: kernel-panic/assets/maps
       - if: runner.os == 'Linux' && env.MUSL != 'true'
         uses: ./.github/actions/linux-deps
       - if: env.MUSL != 'true'
@@ -228,8 +209,8 @@ jobs:
 
   wasm-build:
     name: build replay (wasm32)
-    needs: maps
-    if: needs.maps.outputs.found == 'true'
+    needs: golden
+    if: needs.golden.outputs.found == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -256,7 +237,7 @@ jobs:
 
   wasm:
     name: replay (wasm-${{ matrix.runtime }})
-    needs: [maps, wasm-build]
+    needs: [golden, wasm-build]
     strategy:
       fail-fast: false
       matrix:
@@ -269,10 +250,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: kpmaps-determinism
-          path: kernel-panic/assets/maps
       - uses: actions/download-artifact@v8
         with:
           name: kp-replay-wasm

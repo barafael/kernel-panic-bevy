@@ -1,8 +1,6 @@
 name: Deploy to GitHub Pages
 
 # Web build of the Bevy remake, deployed to GitHub Pages via trunk.
-# Source archives (.sd7/.sdz) can't be read on wasm (plan §8.1), so the
-# maps are baked to `.kpmap` first (.github/actions/bake-maps).
 on:
   push:
     branches: [main]
@@ -45,17 +43,10 @@ jobs:
           curl -LsSf https://github.com/trunk-rs/trunk/releases/latest/download/trunk-x86_64-unknown-linux-gnu.tar.gz \
             | tar -xz -C ~/.cargo/bin
 
-      # Web can't extract .sd7/.sdz archives (no sevenz on wasm), so bake
-      # every source map to .kpmap first (shared with release.yml). The
-      # kernel-panic build script embeds the resulting catalog at compile
-      # time, and index.html's copy-dir ships the .kpmap files.
-      #
-      # The unit data (FBIs, weapons, CEGs, models, textures) needs no
-      # step here: it is the committed `kernel-panic/assets/units.kpu`,
-      # embedded in the binary (see unit-bundle.md) — the upstream
-      # submodules it is baked from are not checked out in CI.
-      - uses: ./.github/actions/bake-maps
-
+      # The maps are the committed `.kpmap` files (index.html's copy-dir
+      # ships them) and the unit data the committed `units.kpu`, embedded
+      # in the binary (unit-bundle.md) — the upstream submodules it is
+      # baked from are not checked out in CI.
       - name: Build
         run: trunk build --release --public-url "/${{ github.event.repository.name }}/"
 

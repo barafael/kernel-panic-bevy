@@ -12,10 +12,10 @@
 //! centre rule. On most maps every facing is open and the rule decides;
 //! in a niche there is only one answer and the ground gives it.
 //!
-//! Computed once by `bake-map` from the heightmap and typemap and stored
-//! in the `.kpmap` ([`Datavent`]), so every build and every lockstep peer
-//! agrees; the game reads it back and only computes facings itself for
-//! vents a map adds at runtime (Hex Farm).
+//! Stored in every shipped `.kpmap` ([`Datavent`]), computed once from
+//! the heightmap and typemap by the retired converter, so every build
+//! and every lockstep peer agrees; the game reads it back and only
+//! computes facings itself for vents a map adds at runtime (Hex Farm).
 
 use spring_detmath::DetFloat;
 use spring_pathfinding::{SQUARE_SIZE, max_slope_from_degrees, slope_map};
