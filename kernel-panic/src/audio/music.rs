@@ -170,17 +170,38 @@ fn track_label(path: &str) -> String {
     }
 }
 
+/// The file starts with the Ogg capture pattern. A track that is still a
+/// Git LFS pointer (130 bytes of text) would otherwise reach the
+/// decoder, and `bevy_audio` panics on a source it cannot decode.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_ogg(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
+        && &magic == b"OggS"
+}
+
 fn scan_music(mut commands: Commands) {
     let mut tracks = Vec::new();
     #[cfg(not(target_arch = "wasm32"))]
     {
         let dir = crate::paths::assets_dir().join("music");
-        let mut names: Vec<String> = std::fs::read_dir(&dir)
+        let (oggs, pointers): (Vec<_>, Vec<_>) = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
             .flatten()
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ogg")))
+            .partition(|p| is_ogg(p));
+        if !pointers.is_empty() {
+            warn!(
+                "music: skipping {} file(s) in {} that are not Ogg streams (Git LFS pointers? run `git lfs pull`)",
+                pointers.len(),
+                dir.display()
+            );
+        }
+        let mut names: Vec<String> = oggs
+            .into_iter()
             .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
             .collect();
         names.sort();

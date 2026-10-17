@@ -11,12 +11,21 @@
 use std::path::{Path, PathBuf};
 
 fn main() {
-    catalog("assets/maps", "kpmap", "MAP_CATALOG", "map_catalog.rs");
+    catalog(
+        "assets/maps",
+        "kpmap",
+        "MAP_CATALOG",
+        "map_catalog.rs",
+        |_| true,
+    );
+    // Tracks still a Git LFS pointer stay out: the player would fetch
+    // the pointer and `bevy_audio` panics on what it cannot decode.
     catalog(
         "assets/music",
         "ogg",
         "WEB_MUSIC_CATALOG",
         "web_music_catalog.rs",
+        is_ogg,
     );
 
     let defs = [
@@ -36,10 +45,12 @@ fn main() {
 }
 
 /// Write `OUT_DIR/<out_file>` defining `const_name` as the sorted file
-/// stems of every `*.<ext>` in `dir` (relative to the crate root).
-fn catalog(dir: &str, ext: &str, const_name: &str, out_file: &str) {
+/// stems of every `*.<ext>` in `dir` (relative to the crate root) that
+/// `keep` accepts.
+fn catalog(dir: &str, ext: &str, const_name: &str, out_file: &str, keep: fn(&Path) -> bool) {
     let entries: Vec<String> = files(dir, ext)
         .iter()
+        .filter(|path| keep(path))
         .map(|path| literal(&stem(path)))
         .collect();
     write(
@@ -82,6 +93,14 @@ fn files(dir: &str, ext: &str) -> Vec<PathBuf> {
         .collect();
     files.sort();
     files
+}
+
+/// The file starts with the Ogg capture pattern (not an LFS pointer).
+fn is_ogg(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    std::fs::File::open(path).is_ok_and(|mut f| f.read_exact(&mut magic).is_ok())
+        && &magic == b"OggS"
 }
 
 fn stem(path: &Path) -> String {
