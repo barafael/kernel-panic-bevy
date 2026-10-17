@@ -41,6 +41,13 @@ exclude = ["vendor/webrtc-data", "vendor/bevy_winit"]
 # equivalence harnesses in `animation/proofs.rs`. Not a workspace
 # member; no dependents. Not scheduled for deletion.
 
+# `glam` is never imported by kernel-panic or spring-map-gen: they depend
+# on it only so Cargo's feature unification turns `libm` + `scalar-math`
+# on for Bevy's copy (see the `glam` entry below). cargo-shear can't see
+# that, so it must not report it as unused.
+[workspace.metadata.cargo-shear]
+ignored = ["glam"]
+
 [workspace.dependencies]
 better_default = "1"
 bevy = { version = "0.20", features = ["serialize", "libm"] }
