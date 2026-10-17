@@ -10,7 +10,8 @@ spring-tdf = { path = "../spring-tdf" }
 spring-map = { path = "../spring-map" }
 spring-pathfinding = { path = "../spring-pathfinding" }
 # `libm`: deterministic `bevy::math::ops` (see the workspace `glam` entry).
-bevy = { version = "0.20", features = ["debug", "custom_cursor", "libm"] }
+# Same fork and commit as the workspace `bevy` (see the root Cargo.toml).
+bevy = { git = "https://github.com/barafael/bevy", rev = "e1c1663ece0af5e866cdadb25dc4509bbe1baf15", features = ["debug", "custom_cursor", "libm"] }
 # Never imported: depending on glam turns its `libm` + `scalar-math`
 # features on for Bevy's copy (workspace Cargo.toml explains why).
 glam = { workspace = true }

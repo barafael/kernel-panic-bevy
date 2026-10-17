@@ -10,7 +10,7 @@ members = [
     "kernel-panic",
 ]
 # Patched dependencies (`[patch.crates-io]` below) are not members.
-exclude = ["vendor/webrtc-data", "vendor/bevy_winit"]
+exclude = ["vendor/webrtc-data"]
 # exclude = [
 #     "spring-cob",  # RETIRED — see note below
 # ]
@@ -48,7 +48,22 @@ ignored = ["glam"]
 
 [workspace.dependencies]
 better_default = "1"
-bevy = { version = "0.20", features = ["serialize", "libm"] }
+# Bevy main (0.20.0-dev) from the `kernel-panic` branch of
+# github.com/barafael/bevy, pinned by commit: bevyengine/bevy main at
+# 85503941e plus
+# - two open GPU-preprocessing fixes, bevyengine/bevy#25956 (a mesh whose
+#   material waited for a texture kept a stale bindless slot) and #26095
+#   (views kept last frame's bin-unpacking jobs): without them, map tiles
+#   and unit pieces coming into view drew pink, grey or in the wrong
+#   material for a while, most of all at match start;
+# - a `bevy_winit` fix: a hidden browser page counts as all windows
+#   invisible, so a wake-up runs the app update there (Bevy updates once
+#   per redraw, and a hidden page never gets one) — a background tab
+#   keeps its networked match running (`net::web_tab`,
+#   `net-experiments/m3-rooms.md` §1).
+# Back to a crates.io release once one carries all three.
+# `kernel-panic/Cargo.toml` pins the same commit.
+bevy = { git = "https://github.com/barafael/bevy", rev = "e1c1663ece0af5e866cdadb25dc4509bbe1baf15", features = ["serialize", "libm"] }
 # Deterministic math for lockstep multiplayer (docs/multiplayer-plan.md,
 # "Will different hardware compute the same results?"): every client must
 # compute bit-identical floats on Linux, Windows and macOS, x86_64 and
@@ -120,12 +135,5 @@ strip = "debuginfo"
 # reliable on native peers — every lost packet held up everything behind
 # it for a fast retransmit (~100–200 ms) or the 1 s retransmission timeout
 # (`net-experiments/m2-transport.md` §7). `vendor/webrtc-data/README.md`.
-#
-# bevy_winit 0.20.0 with one fix: a hidden browser page counts as all
-# windows invisible, so a wake-up runs the app update there (Bevy updates
-# once per redraw, and a hidden page never gets one): a background tab
-# keeps its networked match running (`net::web_tab`,
-# `net-experiments/m3-rooms.md` §1). `vendor/bevy_winit/README.md`.
 [patch.crates-io]
 webrtc-data = { path = "vendor/webrtc-data" }
-bevy_winit = { path = "vendor/bevy_winit" }
