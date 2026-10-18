@@ -361,7 +361,7 @@ trails identical from tick 1, the host's recording replays to its trail).
 - Hidden tabs keep playing in Chromium and Firefox (measured: no animation frames,
   timers 1/s, Chromium one a minute after 5 min unless WebRTC is open; a worker's
   timer unthrottled): while hidden in a room or networked match, a worker wakes the
-  event loop every 33 ms, and a `bevy_winit` patch (our Bevy fork) lets a hidden
+  event loop every 33 ms, and a `bevy_winit` patch (`vendor/bevy_winit`) lets a hidden
   page's wake-up run the update — 30 ticks/s in a hidden tab, none without the patch.
   The others see "tab hidden" (`Msg::Away`); a guest that still talks but lacks over
   a minute of turns and has not got any further for a minute is dropped. Single
