@@ -443,8 +443,11 @@ fn refresh_tooltip(
     let bg = bg
         .get_or_insert_with(|| asset_server.load("bitmaps/tooltipbg.png"))
         .clone();
-    // The box is as large as its text plus a margin (kp_tooltip's 1.2×
-    // background): no fixed size, so it grows with whatever it shows.
+    // The box is laid out around its text (no fixed size, so it grows
+    // with whatever it shows), with kp_tooltip's margins: half an em to
+    // the left and below. The background is kp_tooltip's 1.2× of that box,
+    // anchored at its bottom-left corner: the picture's visible panel
+    // sits inside a transparent margin.
     let root = commands
         .spawn((
             TooltipRoot,
@@ -454,17 +457,30 @@ fn refresh_tooltip(
                 bottom: Val::Px(0.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect {
-                    left: Val::Px(font_size * 0.6),
-                    right: Val::Px(font_size * 1.2),
-                    top: Val::Px(font_size * 0.6),
-                    bottom: Val::Px(font_size * 0.7),
+                    left: Val::Px(font_size * 0.5),
+                    right: Val::Px(font_size * 0.5),
+                    top: Val::Px(font_size * 0.5),
+                    bottom: Val::Px(font_size * 0.5),
                 },
                 ..default()
             },
-            ImageNode::new(bg).with_mode(NodeImageMode::Stretch),
             GlobalZIndex(-1),
         ))
         .id();
+    commands.spawn((
+        ChildOf(root),
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            bottom: Val::Px(0.0),
+            width: Val::Percent(120.0),
+            height: Val::Percent(120.0),
+            ..default()
+        },
+        ImageNode::new(bg).with_mode(NodeImageMode::Stretch),
+        ZIndex(-1),
+        Pickable::IGNORE,
+    ));
     let mut spans: Vec<Vec<Entity>> = Vec::with_capacity(lines.len());
     for (l, row) in lines.iter().zip(&rows) {
         let mut text = commands.spawn((

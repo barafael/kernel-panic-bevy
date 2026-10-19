@@ -9,8 +9,10 @@
 //!    (command panel with queue counts, build bar, tooltip box);
 //! 2. `<dir>/esc.png` and `<dir>/esc_settings.png` — the Esc overlay and
 //!    its Settings page over the running match;
-//! 3. `<dir>/constructor.png` — a freshly built Assembler selected;
-//! 4. `<dir>/constructor_placing.png` — the same with the Socket build
+//! 3. `<dir>/mixed_selection.png` — the Kernel and a freshly built
+//!    Assembler selected together (the tooltip's selected-type rows);
+//! 4. `<dir>/constructor.png` — the Assembler alone selected;
+//! 5. `<dir>/constructor_placing.png` — the same with the Socket build
 //!    command armed (active-button highlight, datavent highlight);
 //!
 //! and exits. Game time runs fast while waiting for the Assembler. Not
@@ -70,6 +72,7 @@ enum Step {
     EscShot,
     EscSettingsShot,
     WaitAssembler,
+    MixedShot,
     ConstructorShot,
     PlacingShot,
     Exit,
@@ -208,10 +211,28 @@ fn run_shots(
                     commands.entity(s).remove::<Selected>();
                 }
                 commands.entity(e).insert(Selected);
-                shots.go(Step::ConstructorShot);
+                for (home, _, t, is_home, ..) in &units {
+                    if is_home && mine(t) {
+                        commands.entity(home).insert(Selected);
+                    }
+                }
+                shots.go(Step::MixedShot);
             } else if shots.frame > ASSEMBLER_TIMEOUT {
                 warn!("KP_GAME_SHOTS: no Assembler appeared; exiting");
                 shots.go(Step::Exit);
+            }
+        }
+        Step::MixedShot => {
+            if shots.frame == SETTLE {
+                shots.shoot(&mut commands, "mixed_selection.png");
+            }
+            if shots.frame == SETTLE + 5 {
+                for (home, _, t, is_home, ..) in &units {
+                    if is_home && mine(t) {
+                        commands.entity(home).remove::<Selected>();
+                    }
+                }
+                shots.go(Step::ConstructorShot);
             }
         }
         Step::ConstructorShot => {
