@@ -7,10 +7,16 @@
 //!
 //! Other systems request a cursor by writing `CursorRequest`; the resolver
 //! picks the highest-priority entry and applies it to the primary window.
+//!
+//! The frames are drawn at [`CURSOR_SCALE`]× their size: once a frame has
+//! loaded, `scale_cursor_frames` makes a nearest-neighbour enlarged copy,
+//! and that copy is what the window shows.
 
 use std::collections::HashMap;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension};
 use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
@@ -18,6 +24,10 @@ use crate::sim::INV_GAME_SPEED;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::teams::Alliances;
+
+/// How much larger than the shipped PNGs the cursor is drawn: the
+/// original 26–39 px sprites were made for far lower resolutions.
+const CURSOR_SCALE: u16 = 2;
 
 pub struct CursorPlugin;
 
@@ -28,7 +38,12 @@ impl Plugin for CursorPlugin {
             .add_systems(Startup, load_cursor_frames)
             .add_systems(
                 Update,
-                (resolve_context_cursor, frame_advance, apply_cursor)
+                (
+                    resolve_context_cursor,
+                    frame_advance,
+                    scale_cursor_frames,
+                    apply_cursor,
+                )
                     .chain()
                     .in_set(CursorSet::Apply),
             )
@@ -92,7 +107,8 @@ impl CursorKind {
         }
     }
 
-    /// Pixel offset from the image's top-left that represents the click point.
+    /// Pixel offset from the image's top-left that represents the click
+    /// point, in the shipped image (before [`CURSOR_SCALE`]).
     /// `cursornormal` is a 26×26 arrow with its tip near (0, 0); the action
     /// cursors are 39×39 crosshair-style icons centred on their target.
     fn hotspot(self) -> (u16, u16) {
@@ -123,6 +139,8 @@ impl CursorKind {
 #[derive(Resource, Default)]
 struct CursorState {
     frames: HashMap<CursorKind, Vec<Handle<Image>>>,
+    /// The [`CURSOR_SCALE`]× copy of each frame, once it has loaded.
+    scaled: HashMap<CursorKind, Vec<Option<Handle<Image>>>>,
     /// Currently-displayed (kind, frame_index) so we can avoid reapplying.
     current: Option<(CursorKind, usize)>,
     /// Time accumulator for frame cycling.
@@ -223,8 +241,60 @@ fn load_cursor_frames(asset_server: Res<AssetServer>, mut state: ResMut<CursorSt
         let frames: Vec<Handle<Image>> = (0..kind.frame_count())
             .map(|i| asset_server.load(format!("cursors/{}_{:02}.png", kind.stem(), i)))
             .collect();
+        state.scaled.insert(kind, vec![None; frames.len()]);
         state.frames.insert(kind, frames);
     }
+}
+
+/// Make the [`CURSOR_SCALE`]× copy of every frame that has loaded.
+fn scale_cursor_frames(mut state: ResMut<CursorState>, mut images: ResMut<Assets<Image>>) {
+    let CursorState { frames, scaled, .. } = &mut *state;
+    for (kind, handles) in frames.iter() {
+        let Some(copies) = scaled.get_mut(kind) else {
+            continue;
+        };
+        for (handle, copy) in handles.iter().zip(copies.iter_mut()) {
+            if copy.is_some() {
+                continue;
+            }
+            if let Some(scaled_image) = images.get(handle).and_then(upscale) {
+                *copy = Some(images.add(scaled_image));
+            }
+        }
+    }
+}
+
+/// `image` enlarged [`CURSOR_SCALE`]× by repeating pixels: crisp, like
+/// the pixel-art original. `None` while it has no CPU-side pixels.
+fn upscale(image: &Image) -> Option<Image> {
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let data = image.data.as_ref()?;
+    let bpp = data.len().checked_div(w * h)?;
+    let s = CURSOR_SCALE as usize;
+    let mut out = Vec::with_capacity(data.len() * s * s);
+    for row in data.chunks_exact(w * bpp) {
+        let wide: Vec<u8> = row
+            .chunks_exact(bpp)
+            .flat_map(|px| std::iter::repeat_n(px, s).flatten().copied())
+            .collect();
+        for _ in 0..s {
+            out.extend_from_slice(&wide);
+        }
+    }
+    let mut scaled = Image::new(
+        Extent3d {
+            width: (w * s) as u32,
+            height: (h * s) as u32,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        out,
+        image.texture_descriptor.format,
+        // The window reads the pixels on the CPU.
+        RenderAssetUsages::MAIN_WORLD,
+    );
+    scaled.sampler = image.sampler.clone();
+    Some(scaled)
 }
 
 fn frame_advance(time: Res<Time>, mut state: ResMut<CursorState>) {
@@ -244,7 +314,7 @@ fn apply_cursor(
         .unwrap_or(CursorKind::Normal);
     // Only the frame count is needed to decide; the handle is cloned
     // once the cursor actually changes (most frames it doesn't).
-    let Some(frame_count) = state.frames.get(&kind).map(Vec::len) else {
+    let Some(frame_count) = state.scaled.get(&kind).map(Vec::len) else {
         return;
     };
     if frame_count == 0 {
@@ -263,17 +333,56 @@ fn apply_cursor(
     if state.current == Some((kind, frame)) {
         return;
     }
+    // Not scaled yet (still loading): keep the cursor as it is and try
+    // again next frame.
+    let Some(handle) = state.scaled[&kind][frame].clone() else {
+        return;
+    };
     state.current = Some((kind, frame));
 
     let (hx, hy) = kind.hotspot();
     commands
         .entity(*primary)
         .insert(CursorIcon::Custom(CustomCursor::Image(CustomCursorImage {
-            handle: state.frames[&kind][frame].clone(),
-            hotspot: (hx, hy),
+            handle,
+            hotspot: (hx * CURSOR_SCALE, hy * CURSOR_SCALE),
             flip_x: false,
             flip_y: false,
             rect: None,
             texture_atlas: None,
         })));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every pixel becomes a [`CURSOR_SCALE`]-square block.
+    #[test]
+    fn upscale_repeats_pixels() {
+        use bevy::render::render_resource::TextureFormat;
+        let px = |i: u8| [i, i, i, 255];
+        let data: Vec<u8> = [px(1), px(2), px(3), px(4)].concat();
+        let image = Image::new(
+            Extent3d {
+                width: 2,
+                height: 2,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::MAIN_WORLD,
+        );
+        let scaled = upscale(&image).unwrap();
+        let s = CURSOR_SCALE as u32;
+        assert_eq!((scaled.width(), scaled.height()), (2 * s, 2 * s));
+        let data = scaled.data.unwrap();
+        let at = |x: u32, y: u32| data[((y * 2 * s + x) * 4) as usize];
+        for y in 0..2 * s {
+            for x in 0..2 * s {
+                assert_eq!(at(x, y), 1 + (x / s) as u8 + 2 * (y / s) as u8);
+            }
+        }
+    }
 }
