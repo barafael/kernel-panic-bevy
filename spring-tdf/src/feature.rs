@@ -26,6 +26,13 @@ pub struct FeatureDef {
     pub health: f32,
     /// `indestructible` off.
     pub destructable: bool,
+    /// TDF `reclaimable` (default: `destructable`): a builder whose site
+    /// it stands on clears it away first (`CBuilderCAI::ReclaimFeature`);
+    /// one that isn't blocks the site.
+    pub clearable: bool,
+    /// TDF `reclaimTime`, else `max(1, (metal + energy) · 6)`: the build
+    /// power it takes to clear, in build-time units.
+    pub clear_time: f32,
     pub metal: f32,
     pub energy: f32,
     /// `mass`, else `metal·0.4 + health·0.1`, clamped to the engine's
@@ -48,6 +55,8 @@ impl FeatureDef {
         let footprint = |key: &str| s.f32_or(key, 1.0).det_max(1.0) as u32;
         let health = s.f32_or("health", s.f32("damage"));
         let metal = s.f32("metal");
+        let energy = s.f32("energy");
+        let destructable = !s.bool("indestructible");
         let mass = s
             .f32_or("mass", metal * 0.4 + health * 0.1)
             .det_clamp(MINIMUM_MASS, MAXIMUM_MASS);
@@ -60,9 +69,13 @@ impl FeatureDef {
             height: s.f32("height"),
             blocking: s.get("blocking").is_none_or(|v| v.trim() == "1"),
             health,
-            destructable: !s.bool("indestructible"),
+            destructable,
+            clearable: s
+                .get("reclaimable")
+                .map_or(destructable, |v| v.trim() == "1"),
+            clear_time: s.f32_or("reclaimtime", (metal + energy) * 6.0).det_max(1.0),
             metal,
-            energy: s.f32("energy"),
+            energy,
             mass,
             crush_resistance: s.f32_or("crushresistance", mass),
             feature_dead: s.string("featuredead").trim().to_ascii_lowercase(),
@@ -125,6 +138,8 @@ mod tests {
         assert!((bb.mass - 65.6).abs() < 1e-4);
         assert_eq!(bb.crush_resistance, bb.mass);
         assert!(bb.feature_dead.is_empty());
+        assert!(bb.clearable);
+        assert_eq!(bb.clear_time, 384.0);
     }
 
     /// Central Hub's `unusablesector.tdf`: an explicit `mass=500`, and

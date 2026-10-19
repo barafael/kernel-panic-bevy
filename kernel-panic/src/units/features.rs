@@ -64,6 +64,12 @@ impl Feature {
     }
 }
 
+/// How much of a feature builders have cleared away, 0 → 1
+/// (`CFeature::reclaimLeft` from the other end; `construction::
+/// clear_features`).
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct ClearProgress(pub f32);
+
 /// A mover crushed the feature this tick (`CFeature::Kill(…, crushed)`,
 /// `HandleFeatureCollisions`).
 #[derive(Component)]

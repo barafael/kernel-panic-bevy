@@ -36,9 +36,10 @@ pub struct WasBuilding {
     pub site: Vec3,
 }
 
-/// `CBuilder::UpdateBuild`: call the builder's `StartBuilding(heading,
-/// pitch)` when it has a nanoframe to work on (aiming its emitter at the
-/// site), and `StopBuilding()` when the build ends or is dropped.
+/// `CBuilder::UpdateBuild` / `UpdateReclaim`: call the builder's
+/// `StartBuilding(heading, pitch)` when it has a nanoframe to work on or
+/// a feature to clear off its site (aiming its emitter at it), and
+/// `StopBuilding()` when that ends or is dropped.
 #[allow(clippy::type_complexity)]
 pub fn trigger_build_scripts(
     mut query: Query<(
@@ -46,14 +47,18 @@ pub fn trigger_build_scripts(
         &mut UnitAnimator,
         &GlobalTransform,
         Option<&crate::units::lifecycle::construction::Constructing>,
+        Option<&crate::units::lifecycle::construction::ClearingFeature>,
         Option<&WasBuilding>,
     )>,
     mut commands: Commands,
 ) {
-    for (entity, mut animator, gtf, constructing, was) in &mut query {
+    for (entity, mut animator, gtf, constructing, clearing, was) in &mut query {
+        // Clearing a feature off the site works like building
+        // (`SetBuildStanceToward` the feature).
         let site = constructing
             .filter(|c| c.building.is_some())
-            .map(|c| c.site);
+            .map(|c| c.site)
+            .or(clearing.map(|c| c.at));
         match (site, was) {
             (Some(site), was) if was.is_none_or(|w| w.site != site) => {
                 let UnitAnimator { rig, driver, .. } = &mut *animator;

@@ -734,6 +734,9 @@ pub struct AnimFxOut<'w, 's> {
     /// A builder's current nanoframe (`Constructing::building`, upstream
     /// `curBuild`), where its [`FxEvent::BuildArc`] strand ends.
     pub constructing: Query<'w, 's, &'static crate::units::lifecycle::construction::Constructing>,
+    /// A builder clearing a feature off its site: the strand ends on the
+    /// feature (`network_arceffect.lua` draws it for that order too).
+    pub clearing: Query<'w, 's, &'static crate::units::lifecycle::construction::ClearingFeature>,
     pub commands: Commands<'w, 's>,
     pub meshes: ResMut<'w, Assets<Mesh>>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
@@ -1036,6 +1039,7 @@ fn apply_and_drain(
                     .and_then(|c| c.building)
                     .and_then(|b| fx.buildees.get(b).ok())
                     .map(|(gtf, _)| gtf.translation())
+                    .or_else(|| fx.clearing.get(entity).ok().map(|c| c.at))
                 else {
                     continue;
                 };

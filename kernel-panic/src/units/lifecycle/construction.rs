@@ -128,6 +128,21 @@ pub struct BuildSiteWait {
     step_aside: Option<Vec3>,
 }
 
+/// A builder clearing a feature off its build site before it builds
+/// (`CBuilderCAI::ReclaimFeature`; the build order stays). Set by
+/// [`start_construction`], worked by [`clear_features`].
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct ClearingFeature {
+    pub feature: Entity,
+    /// Where it stands: what the builder's emitter aims at.
+    pub at: Vec3,
+}
+
+/// Reach beyond a site's half-diagonal the feature scan covers: a 2×2
+/// feature's half-diagonal, with margin.
+const FEATURE_FOOTPRINT_REACH: f32 = 32.0;
+
 /// Whether two XZ footprints (centre, half extents) overlap. Touching
 /// edges don't count — Spring tests whole squares.
 pub(crate) fn footprints_overlap(a: Vec2, a_half: Vec2, b: Vec2, b_half: Vec2) -> bool {
@@ -251,6 +266,7 @@ pub fn start_construction(
     >,
     constructing_q: Query<&Constructing>,
     structures: Query<(&UnitType, &Transform), Without<Dying>>,
+    features: Query<&crate::units::features::Feature>,
     spatial: Res<SpatialIndex>,
     registry: Res<UnitRegistry>,
     mut bugger_off: ResMut<BuggerOffRequests>,
@@ -295,6 +311,48 @@ pub fn start_construction(
             // `AtUnitLimit`: wait in range, order kept, until a unit of
             // the team dies.
             commands.entity(entity).remove::<(MoveTarget, MovePath)>();
+            continue;
+        }
+
+        // `TestUnitBuildSquare` → a blocking feature on the footprint:
+        // the building it would turn into anyway (a Bad Block on a Bad
+        // Block) ends the order; a clearable one is cleared away first
+        // (`ReclaimFeature`, the order kept); any other blocks the site.
+        let mut feature_on_site = None;
+        spatial.query_radius(
+            pending.site,
+            half.length() + FEATURE_FOOTPRINT_REACH,
+            |other| {
+                if feature_on_site.is_some() || !other.feature {
+                    return;
+                }
+                let Ok(feature) = features.get(other.entity) else {
+                    return;
+                };
+                let feature_half = Vec2::new(
+                    feature.def.footprint_x as f32,
+                    feature.def.footprint_z as f32,
+                ) * SQUARE_SIZE;
+                if feature.def.blocking
+                    && footprints_overlap(site, half, other.pos.xz(), feature_half)
+                {
+                    feature_on_site = Some((other.entity, *feature, other.pos));
+                }
+            },
+        );
+        if let Some((feature_entity, feature, at)) = feature_on_site {
+            let mut ec = commands.entity(entity);
+            if registry.finished_feature(pending.kind) == Some(feature.def.name.as_str())
+                || !feature.def.clearable
+            {
+                ec.remove::<(PendingBuild, MoveTarget, MovePath, BuildSiteWait)>();
+            } else {
+                ec.insert(ClearingFeature {
+                    feature: feature_entity,
+                    at,
+                })
+                .remove::<(MoveTarget, MovePath, BuildSiteWait)>();
+            }
             continue;
         }
 
@@ -363,6 +421,65 @@ pub fn start_construction(
             building: None,
         })
         .remove::<(MoveTarget, MovePath, PendingBuild, BuildSiteWait)>();
+    }
+}
+
+/// Clear the features off build sites (`CBuilder::UpdateReclaim`):
+/// once its emitter is turned onto the feature (`INBUILDSTANCE`), a
+/// builder takes `WorkerTime / reclaimTime` of it per second, and the
+/// feature is gone when all of it is — no `featureDead` left
+/// (`DeleteFeature`), nothing gained (Kernel Panic has no metal). One
+/// builder works a feature per frame (`multiReclaim=0`), the first in
+/// id order. A builder whose build order went, or whose feature did,
+/// stops.
+#[allow(clippy::type_complexity)]
+pub fn clear_features(
+    time: Res<Time>,
+    builders: Query<
+        (
+            Entity,
+            &UnitType,
+            &ClearingFeature,
+            Has<PendingBuild>,
+            Option<&crate::units::assets::animation::UnitAnimator>,
+            &NetId,
+        ),
+        (Without<Dying>, Without<Stunned>),
+    >,
+    mut features: Query<(
+        &crate::units::features::Feature,
+        Option<&mut crate::units::features::ClearProgress>,
+    )>,
+    registry: Res<UnitRegistry>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    let mut worked: Vec<Entity> = Vec::new();
+    for (builder, kind, clearing, pending, animator, _) in builders.iter().sort::<&NetId>() {
+        let Ok((feature, progress)) = features.get_mut(clearing.feature) else {
+            commands.entity(builder).remove::<ClearingFeature>();
+            continue;
+        };
+        if !pending {
+            commands.entity(builder).remove::<ClearingFeature>();
+            continue;
+        }
+        if animator.and_then(|a| a.driver.in_build_stance()) == Some(false)
+            || worked.contains(&clearing.feature)
+        {
+            continue;
+        }
+        worked.push(clearing.feature);
+        let step = registry.worker_time(kind.0) * dt / feature.def.clear_time;
+        let cleared = progress.map_or(0.0, |p| p.0) + step;
+        if cleared >= 1.0 {
+            commands.entity(clearing.feature).despawn();
+            commands.entity(builder).remove::<ClearingFeature>();
+        } else {
+            commands
+                .entity(clearing.feature)
+                .insert(crate::units::features::ClearProgress(cleared));
+        }
     }
 }
 
@@ -683,6 +800,8 @@ mod tests {
                 build_time: 160.0,
                 footprint_x: 2.0,
                 footprint_z: 2.0,
+                is_feature: true,
+                corpse: "badblock".into(),
                 ..UnitDef::default()
             },
         );
@@ -1087,5 +1206,91 @@ mod tests {
         world.run_system_once(tick_construction).unwrap();
         assert_eq!(world.get::<Emerging>(frame).unwrap().remaining, 0.0);
         assert!(world.get::<Constructing>(builder).is_none());
+    }
+
+    /// A feature of `name` at `pos`, in the spatial index as features are.
+    fn feature(world: &mut World, name: &str, pos: Vec3) -> Entity {
+        let def = crate::units::content::defs::defs()
+            .features
+            .get(name)
+            .unwrap();
+        let entity = world
+            .spawn((
+                crate::units::features::Feature { def, owner: None },
+                Transform::from_translation(pos),
+            ))
+            .id();
+        world
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity,
+                pos,
+                hit_radius: 20.0,
+                mid_y: 8.0,
+                team: crate::units::features::FEATURE_TEAM,
+                kind: UnitKind::BadBlock,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+                feature: true,
+            });
+        entity
+    }
+
+    /// A builder whose site a feature stands on clears it away first,
+    /// its order kept: `WorkerTime=128` against a Bad Block's
+    /// `reclaimTime` 384 is 3 s. Then it builds there.
+    #[test]
+    fn a_feature_on_the_site_is_cleared_first() {
+        let mut world = world();
+        let site = Vec3::new(100.0, 0.0, 100.0);
+        let builder = assembler(&mut world, Vec3::new(150.0, 0.0, 100.0), site);
+        world.entity_mut(builder).insert((
+            NetId(1),
+            PendingBuild {
+                kind: UnitKind::Bit,
+                site,
+            },
+        ));
+        let block = feature(&mut world, "badblock", site + Vec3::new(12.0, 0.0, 0.0));
+        world.run_system_once(start_construction).unwrap();
+        assert_eq!(
+            world.get::<ClearingFeature>(builder).map(|c| c.feature),
+            Some(block)
+        );
+        assert!(world.get::<Constructing>(builder).is_none());
+
+        let mut frames = 0;
+        while world.get_entity(block).is_ok() {
+            advance(&mut world, 1.0 / 30.0);
+            world.run_system_once(start_construction).unwrap();
+            world.run_system_once(clear_features).unwrap();
+            frames += 1;
+            assert!(frames < 200, "never cleared");
+        }
+        assert_eq!(frames, 90);
+        assert!(world.get::<ClearingFeature>(builder).is_none());
+        world.run_system_once(start_construction).unwrap();
+        assert_eq!(
+            world.get::<Constructing>(builder).map(|c| c.kind),
+            Some(UnitKind::Bit)
+        );
+    }
+
+    /// A Bad Block ordered where a Bad Block feature already stands is
+    /// done (`bi.def->wreckName == f->def->name`): the order ends and the
+    /// feature stays.
+    #[test]
+    fn a_bad_block_on_a_bad_block_is_already_built() {
+        let mut world = world();
+        let site = Vec3::new(100.0, 0.0, 100.0);
+        let builder = assembler(&mut world, Vec3::new(150.0, 0.0, 100.0), site);
+        world.entity_mut(builder).insert(NetId(1));
+        let block = feature(&mut world, "badblock", site);
+        world.run_system_once(start_construction).unwrap();
+        assert!(world.get::<PendingBuild>(builder).is_none());
+        assert!(world.get::<ClearingFeature>(builder).is_none());
+        assert!(world.get_entity(block).is_ok());
     }
 }

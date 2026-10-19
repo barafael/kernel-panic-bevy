@@ -198,6 +198,7 @@ impl Plugin for UnitsPlugin {
                             construction::start_construction,
                             production::apply_bugger_off,
                             construction::tick_construction,
+                            construction::clear_features,
                             construction::decay_nanoframes,
                         )
                             .chain(),

@@ -468,11 +468,13 @@ fn plan_sites(
         .iter()
         .filter(|(u, _)| registry.is_building(u.0) || u.0.is_building())
         .map(|(u, tf)| (tf.translation.xz(), registry.footprint_elmos(u.0) * 0.5))
-        // Blocking map features too (`TestUnitBuildSquare`).
+        // A blocking feature the builder can't clear away (none ships):
+        // `TestUnitBuildSquare` lets a site over a clearable one be
+        // placed, and the builder clears it first.
         .chain(
             features
                 .iter()
-                .filter(|(f, _)| f.def.blocking)
+                .filter(|(f, _)| f.def.blocking && !f.def.clearable)
                 .map(|(f, tf)| {
                     let half = Vec2::new(f.def.footprint_x as f32, f.def.footprint_z as f32) * 8.0;
                     (tf.translation.xz(), half)

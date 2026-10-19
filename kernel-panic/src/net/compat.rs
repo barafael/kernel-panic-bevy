@@ -57,12 +57,14 @@ use super::state::Fnv;
 /// (`IsFeature`): no longer a unit of its team.
 /// 12 (2026-10-19): a feature in the way holds a straight shot
 /// (`avoidFeature`) and stops a beam; attack orders close in for a line.
+/// 13 (2026-10-20): a builder clears a feature off its build site before
+/// it builds; a Bad Block ordered onto a Bad Block is already built.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 12;
+pub const SIM_VERSION: u32 = 13;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.
