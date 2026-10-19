@@ -50,12 +50,15 @@ use super::state::Fnv;
 /// fires five MineLauncher bolts from its tubes, and a Logic Bomb
 /// appears where each one explodes; before, five mines appeared in a
 /// line at the clicked point.
+/// 10 (2026-10-19): the maps' own features stand (the Bad Blocks of
+/// Quad Core, Dual Core, Corrupted Core and DigitalDivide, Central Hub's
+/// unusable sectors): they block, take damage and can be crushed.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 9;
+pub const SIM_VERSION: u32 = 10;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

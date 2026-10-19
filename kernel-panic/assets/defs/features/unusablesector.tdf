@@ -1,0 +1,66 @@
+[unusablesector4]
+{
+	description=Unusable Sector;
+	object=unusablesector4.s3o;
+	featuredead=unusablesector3;
+	footprintx=2;
+	footprintz=2;
+	height=22;
+	blocking=1;
+	hitdensity=100;
+	metal=64;
+	damage=400;
+	reclaimable=1;
+	energy=0;
+	mass=500;
+}
+
+[unusablesector3]
+{
+	description=Unusable Sector;
+	object=unusablesector3.s3o;
+	featuredead=unusablesector2;
+	footprintx=2;
+	footprintz=2;
+	height=22;
+	blocking=1;
+	hitdensity=100;
+	metal=32;
+	damage=400;
+	reclaimable=1;
+	energy=0;
+	mass=500;
+}
+
+[unusablesector2]
+{
+	description=Unusable Sector;
+	object=unusablesector2.s3o;
+	featuredead=unusablesector1;
+	footprintx=2;
+	footprintz=2;
+	height=22;
+	blocking=1;
+	hitdensity=100;
+	metal=16;
+	damage=400;
+	reclaimable=1;
+	energy=0;
+	mass=500;
+}
+
+[unusablesector1]
+{
+	description=Unusable Sector;
+	object=unusablesector1.s3o;
+	footprintx=2;
+	footprintz=2;
+	height=22;
+	blocking=1;
+	hitdensity=100;
+	metal=8;
+	damage=400;
+	reclaimable=1;
+	energy=0;
+	mass=500;
+}

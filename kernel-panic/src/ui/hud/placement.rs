@@ -425,6 +425,7 @@ fn plan_sites(
     vents: Query<(&GeoventSmoker, Has<VentClaim>)>,
     own_orders: Query<(Option<&PendingBuild>, Option<&CommandQueue>), With<Selected>>,
     structures: Query<(&UnitType, &Transform), Without<Dying>>,
+    features: Query<(&crate::units::features::Feature, &Transform)>,
     heightmap: Option<Res<Heightmap>>,
     registry: Res<UnitRegistry>,
 ) {
@@ -467,6 +468,16 @@ fn plan_sites(
         .iter()
         .filter(|(u, _)| registry.is_building(u.0) || u.0.is_building())
         .map(|(u, tf)| (tf.translation.xz(), registry.footprint_elmos(u.0) * 0.5))
+        // Blocking map features too (`TestUnitBuildSquare`).
+        .chain(
+            features
+                .iter()
+                .filter(|(f, _)| f.def.blocking)
+                .map(|(f, tf)| {
+                    let half = Vec2::new(f.def.footprint_x as f32, f.def.footprint_z as f32) * 8.0;
+                    (tf.translation.xz(), half)
+                }),
+        )
         .collect();
     // Held — or let go this very frame: `ButtonInput` drops `pressed`
     // in `PreUpdate`, so the release frame, which commits the row, would

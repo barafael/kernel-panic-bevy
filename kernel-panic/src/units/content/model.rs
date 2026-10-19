@@ -70,6 +70,7 @@ pub struct S3OVertex {
 }
 
 /// A decoded texture.
+#[derive(Clone)]
 pub struct TgaImage {
     pub width: u32,
     pub height: u32,

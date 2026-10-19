@@ -19,6 +19,7 @@
 //! - [`WeaponDefs`] / [`WeaponDef`]: typed weapon definitions parsed from TDF
 
 mod explosion;
+mod feature;
 mod parse;
 mod unit;
 mod weapon;
@@ -28,6 +29,7 @@ pub use explosion::{
     EvalCtx, ExplosionDef, ExplosionDefs, FlameProperties, GroundFlash, ParticleProperties,
     SpawnerProperties, SpikeProperties,
 };
+pub use feature::{FeatureDef, FeatureDefs};
 pub use parse::{ParseError, Section, Tdf};
 pub use unit::{UnitDef, UnitDefs};
 pub use weapon::{DamageMap, WeaponCategory, WeaponDef, WeaponDefs};

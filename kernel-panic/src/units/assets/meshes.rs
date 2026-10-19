@@ -45,6 +45,8 @@ pub struct S3OModelCache {
     /// Bevy image handles for raw (un-tinted) beam / sfx textures.
     /// Populated lazily by [`load_beam_texture`].
     raw_bevy_images: HashMap<String, Option<Handle<Image>>>,
+    /// Map feature materials by texture name ([`feature_material`]).
+    feature_materials: HashMap<String, Handle<StandardMaterial>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +97,58 @@ pub fn unit_material(
     };
     cache.unit_materials.insert(key, handle.clone());
     handle
+}
+
+/// What a map feature shows where a unit shows its faction colour: map
+/// features belong to no team.
+const FEATURE_COLOR: Color = Color::WHITE;
+
+/// Material of a map feature drawing `texture` (named `name`, the cache
+/// key): coloured like a unit's model ([`unit_material`]) but with the
+/// neutral [`FEATURE_COLOR`] for a team colour. `texture` is only
+/// called the first time.
+pub fn feature_material(
+    name: &str,
+    texture: impl FnOnce(&mut S3OModelCache) -> Option<TgaImage>,
+    materials: &mut Assets<StandardMaterial>,
+    images: &mut Assets<Image>,
+    cache: &mut S3OModelCache,
+) -> Handle<StandardMaterial> {
+    if let Some(handle) = cache.feature_materials.get(name) {
+        return handle.clone();
+    }
+    let material = match texture(cache) {
+        Some(tga) => {
+            let pixels = colorize_texture(&tga, FEATURE_COLOR);
+            let mut image = create_rgba8_image(tga.width, tga.height, pixels);
+            image.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
+            StandardMaterial {
+                base_color_texture: Some(images.add(image)),
+                unlit: true,
+                ..default()
+            }
+        }
+        None => StandardMaterial {
+            base_color: FEATURE_COLOR,
+            unlit: true,
+            ..default()
+        },
+    };
+    let handle = materials.add(material);
+    cache
+        .feature_materials
+        .insert(name.to_string(), handle.clone());
+    handle
+}
+
+/// A bundle texture by file name (`badblock.tga`), decoded.
+pub fn bundle_texture(name: &str, cache: &mut S3OModelCache) -> Option<TgaImage> {
+    load_raw_tga_cached(name, cache).cloned()
+}
+
+/// The texture an s3o model draws with (`texture1`), by file name.
+pub fn model_texture_name(model: &str, cache: &mut S3OModelCache) -> Option<String> {
+    load_s3o_cached(model, cache).map(|m| m.texture1.clone())
 }
 
 /// Flattened piece layout (parents, offsets, shared piece meshes) of an
@@ -325,7 +379,7 @@ fn build_faction_texture(
     // Load the raw TGA; extract dimensions and build colored pixels in a free
     // function so the borrow on `cache` is released before we insert the result.
     let tga = load_raw_tga_cached(tex_name, cache)?;
-    let pixels = colorize_texture(tga, faction);
+    let pixels = colorize_texture(tga, faction.color());
     let (w, h) = (tga.width, tga.height);
 
     let mut image = create_rgba8_image(w, h, pixels);
@@ -340,10 +394,9 @@ fn build_faction_texture(
     Some(handle)
 }
 
-/// Apply faction color to a raw TGA texture using Spring's tex1 convention:
-/// RGB=black → 100% team color, alpha → brightness mask.
-fn colorize_texture(tga: &TgaImage, faction: Faction) -> Vec<u8> {
-    let color = faction.color();
+/// Apply a team `color` to a raw TGA texture using Spring's tex1
+/// convention: RGB=black → 100% team color, alpha → brightness mask.
+fn colorize_texture(tga: &TgaImage, color: Color) -> Vec<u8> {
     let linear = LinearRgba::from(color);
     let fr = (linear.red.det_clamp(0.0, 1.0) * 255.0) as u8;
     let fg = (linear.green.det_clamp(0.0, 1.0) * 255.0) as u8;

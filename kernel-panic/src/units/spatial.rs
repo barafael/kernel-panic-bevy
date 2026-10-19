@@ -70,14 +70,22 @@ pub struct SpatialEntry {
     /// [`DetectedBy`] team mask — which teams' detectors currently see
     /// this cloaked unit. Zero (and ignored) for uncloaked units.
     pub detected_by: u64,
+    /// A map feature ([`crate::units::features`]), not a unit: shots and
+    /// explosions hit it, but nothing targets it or reacts to it. Its
+    /// `team` is [`FEATURE_TEAM`](crate::units::features::FEATURE_TEAM)
+    /// and its `kind` the Bad Block's, whose `Default` armour class is
+    /// what a feature takes damage as (`CFeature::DoDamage`:
+    /// `damages.GetDefault()`).
+    pub feature: bool,
 }
 
 impl SpatialEntry {
-    /// Whether auto-targeting from `team` may pick this entry: a cloaked
-    /// unit is invisible to teams without a detector in range. See
+    /// Whether auto-targeting from `team` may pick this entry: never a
+    /// map feature, and a cloaked unit is invisible to teams without a
+    /// detector in range. See
     /// [`crate::units::mechanics::cloak::hidden_from`].
     pub fn targetable_by(&self, team: u8) -> bool {
-        !hidden_from(self.cloaked, self.detected_by, team)
+        !self.feature && !hidden_from(self.cloaked, self.detected_by, team)
     }
 
     /// World-space centre of the collision sphere (`unit->midPos`).
@@ -196,6 +204,13 @@ pub fn rebuild_spatial_index(
         // factory's pad-blocked check) until it is finished.
         (Without<Dying>, Without<Emerging>),
     >,
+    features: Query<(
+        Entity,
+        &crate::units::features::Feature,
+        &Transform,
+        &Health,
+        &NetId,
+    )>,
 ) {
     index.clear();
     // In unit-id order, not the ECS's (which follows the app's whole
@@ -216,6 +231,23 @@ pub fn rebuild_spatial_index(
             is_flying: stats.can_fly,
             cloaked,
             detected_by: detected_by.map_or(0, |d| d.0),
+            feature: false,
+        });
+    }
+    // After the units, also in id order.
+    for (entity, _, tf, health, _) in features.iter().sort::<&NetId>() {
+        index.push(SpatialEntry {
+            entity,
+            pos: tf.translation,
+            hit_radius: crate::units::features::Feature::HIT_RADIUS,
+            mid_y: crate::units::features::Feature::MID_Y,
+            team: crate::units::features::FEATURE_TEAM,
+            kind: UnitKind::BadBlock,
+            hp_positive: health.current > 0.0,
+            is_flying: false,
+            cloaked: false,
+            detected_by: 0,
+            feature: true,
         });
     }
 }
@@ -236,6 +268,7 @@ mod tests {
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            feature: false,
         }
     }
 

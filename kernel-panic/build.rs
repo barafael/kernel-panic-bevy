@@ -3,8 +3,8 @@
 //! The web build has no filesystem to scan, and the native one ships
 //! the same fixed set of files, so `map_loading::pick_map` takes the
 //! list of `.kpmap` files in `assets/maps/` from here on both, and
-//! `units::content::defs` the text of every unit, weapon and explosion
-//! definition in `assets/defs/`. The music player (`audio::music`) gets
+//! `units::content::defs` the text of every unit, weapon, explosion
+//! and feature definition in `assets/defs/`. The music player (`audio::music`) gets
 //! the same treatment for the `.ogg` tracks in `assets/music/` (web
 //! only: native scans the folder, so a player can drop tracks in).
 
@@ -32,6 +32,7 @@ fn main() {
         ("assets/defs/units", "fbi", "UNIT_FBIS"),
         ("assets/defs/weapons", "tdf", "WEAPON_TDFS"),
         ("assets/defs/explosions", "tdf", "EXPLOSION_TDFS"),
+        ("assets/defs/features", "tdf", "FEATURE_TDFS"),
     ]
     .into_iter()
     .map(|(dir, ext, const_name)| text_catalog(dir, ext, const_name))

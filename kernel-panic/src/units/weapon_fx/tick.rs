@@ -38,12 +38,16 @@ pub(super) fn projectile_orientation(dir: Vec3) -> Quat {
     Transform::IDENTITY.looking_to(-dir, up).rotation
 }
 
+/// What a shot can strike: a unit, or a map feature (`CProjectile`s
+/// collide with features as with units).
+type HitTarget = Or<(With<UnitType>, With<crate::units::features::Feature>)>;
+
 /// Grouped read-only inputs for the volumetric mid-flight collision
 /// pass: target volumes and the broad-phase spatial index. Bundled as a
 /// `SystemParam` so `tick_weapon_fx` stays under Bevy's 16-arg limit.
 #[derive(SystemParam)]
 pub(super) struct VolumeHitCtx<'w, 's> {
-    target_q: Query<'w, 's, (&'static GlobalTransform, &'static CollisionVolume), With<UnitType>>,
+    target_q: Query<'w, 's, (&'static GlobalTransform, &'static CollisionVolume), HitTarget>,
     spatial: Res<'w, SpatialIndex>,
     /// Who counts as friendly for `collidefriendly=0` weapons.
     alliances: Res<'w, Alliances>,
@@ -705,7 +709,7 @@ fn target_volume_hit(
     target: Option<Entity>,
     seg_start: Vec3,
     seg_end: Vec3,
-    target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
+    target_q: &Query<(&GlobalTransform, &CollisionVolume), HitTarget>,
 ) -> Option<Vec3> {
     let target = target?;
     let (tf, volume) = target_q.get(target).ok()?;
@@ -722,7 +726,7 @@ fn target_volume_hit(
 fn arrival_hit(
     target: Option<Entity>,
     impact_pos: Vec3,
-    target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
+    target_q: &Query<(&GlobalTransform, &CollisionVolume), HitTarget>,
 ) -> HitWho {
     let inside = target
         .and_then(|t| target_q.get(t).ok())
@@ -764,7 +768,7 @@ fn broad_phase_volume_hit(
     seg_end: Vec3,
     spatial: &SpatialIndex,
     alliances: &Alliances,
-    target_q: &Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>,
+    target_q: &Query<(&GlobalTransform, &CollisionVolume), HitTarget>,
 ) -> Option<(Entity, Vec3)> {
     // Conservative bound on any unit's collision-volume reach; chosen
     // to comfortably exceed every shipped S3O bounding sphere. Used
@@ -1343,6 +1347,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         }
 
@@ -1524,7 +1529,7 @@ mod tests {
         let (inside, beside, none) = app
             .world_mut()
             .run_system_once(
-                move |q: Query<(&GlobalTransform, &CollisionVolume), With<UnitType>>| {
+                move |q: Query<(&GlobalTransform, &CollisionVolume), HitTarget>| {
                     (
                         arrival_hit(Some(target), Vec3::new(104.0, 4.0, 0.0), &q),
                         arrival_hit(Some(target), Vec3::new(140.0, 0.0, 0.0), &q),
@@ -1929,6 +1934,7 @@ mod tests {
                     is_flying: false,
                     cloaked: false,
                     detected_by: 0,
+                    feature: false,
                 });
             e
         };

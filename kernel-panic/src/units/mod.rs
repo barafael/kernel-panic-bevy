@@ -3,6 +3,7 @@ pub mod assets;
 pub mod combat;
 pub mod components;
 pub mod content;
+pub mod features;
 pub mod lifecycle;
 pub mod mechanics;
 pub mod player;
@@ -293,7 +294,11 @@ impl Plugin for UnitsPlugin {
                     )
                         .chain()
                         .in_set(GameplaySet::Animate),
-                    combat::cleanup_dying.in_set(GameplaySet::Cleanup),
+                    // Before `cleanup_dying`: a feature destroyed this
+                    // tick leaves its `featureDead` first.
+                    (features::destroy_features, combat::cleanup_dying)
+                        .chain()
+                        .in_set(GameplaySet::Cleanup),
                 ),
             )
             .add_systems(

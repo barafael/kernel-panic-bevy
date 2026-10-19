@@ -1930,6 +1930,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         app.world_mut().run_system_once(combat_system).unwrap();
         (app, bit, enemy)
@@ -2002,6 +2003,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2052,6 +2054,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         let enemy_bit = app.world_mut().spawn_empty().id();
         app.world_mut()
@@ -2069,6 +2072,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2151,6 +2155,7 @@ mod tests {
                 is_flying: false,
                 cloaked,
                 detected_by,
+                feature: false,
             });
         enemy
     }
@@ -2565,6 +2570,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         e
     }
@@ -2713,6 +2719,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         ally
     }

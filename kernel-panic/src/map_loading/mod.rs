@@ -967,6 +967,21 @@ fn spawn_prepared_map(
         );
     }
 
+    // Before the homebases, as the engine loads the map's features
+    // before the game starts: they take the first ids of the match.
+    let placed = crate::units::features::spawn_map_features(
+        &features,
+        &heightmap,
+        &mut ctx.commands,
+        &mut ctx.meshes,
+        &mut ctx.materials,
+        &mut ctx.images,
+        &mut ctx.model_cache,
+    );
+    if placed > 0 {
+        info!("  {placed} map features");
+    }
+
     if let Some(map_info) = &map_info {
         apply_atmosphere(map_info, &mut ctx.commands);
         if void_ground {

@@ -1024,6 +1024,7 @@ mod tests {
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            feature: false,
         }
     }
 

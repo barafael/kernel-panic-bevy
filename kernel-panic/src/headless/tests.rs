@@ -1197,3 +1197,109 @@ fn byte_launches_a_forward_arc_of_logic_bombs() {
         "reloading"
     );
 }
+
+/// End to end on Dual Core: the map's 184 Bad Blocks stand where the
+/// map places them, block a LIGHT mover's squares but not a HEAVY's
+/// (which crushes them), are never picked as a target, and take the
+/// splash of a blast next to them like a unit.
+#[test]
+fn dual_core_places_its_bad_blocks() {
+    use crate::interaction::movement::NavGridSet;
+    use crate::sim::SQUARE_SIZE;
+    use crate::units::combat::{AimTarget, TargetCache};
+    use crate::units::components::{Faction, Health};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::features::Feature;
+    use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
+    use bevy::ecs::system::SystemState;
+
+    let mut scenario = Scenario::ai_match("Dual_Core", 2, 1, 7);
+    for seat in &mut scenario.seats {
+        seat.ai = false;
+    }
+    scenario.sandbox = true;
+    let mut h = SimHarness::new(scenario);
+    h.step();
+    h.step();
+
+    let world = h.world_mut();
+    let mut blocks: Vec<(Entity, Vec3)> = world
+        .query::<(Entity, &Feature, &Transform)>()
+        .iter(world)
+        .map(|(e, f, tf)| {
+            assert_eq!(f.def.name, "badblock");
+            (e, tf.translation)
+        })
+        .collect();
+    assert_eq!(blocks.len(), 184);
+    // The map's first one, (372, 372).
+    blocks.sort_by(|a, b| (a.1.z, a.1.x).partial_cmp(&(b.1.z, b.1.x)).unwrap());
+    let (block, at) = blocks[0];
+    assert_eq!(at.xz(), Vec2::new(372.0, 372.0));
+    let nav = world.resource::<NavGridSet>();
+    let (sx, sz) = ((at.x / SQUARE_SIZE) as i32, (at.z / SQUARE_SIZE) as i32);
+    assert!(nav.structures.square_blocked(sx, sz, false), "blocks LIGHT");
+    assert!(
+        !nav.structures.square_blocked(sx, sz, true),
+        "HEAVY crushes it"
+    );
+
+    // A Bit beside it sees no target in it.
+    let bit = {
+        let mut state: SystemState<SpawnContext> = SystemState::new(world);
+        let mut ctx = state.get_mut(world).expect("spawn context");
+        let bit = spawn_unit(
+            UnitKind::Bit,
+            Faction::System,
+            0,
+            at + Vec3::new(-60.0, 0.0, 0.0),
+            &mut ctx,
+        );
+        state.apply(world);
+        bit
+    };
+    for _ in 0..90 {
+        h.step();
+    }
+    let world = h.world_mut();
+    assert!(world.get::<AimTarget>(bit).is_none(), "aims at a feature");
+    assert!(
+        world
+            .get::<TargetCache>(bit)
+            .is_none_or(|c| c.target.is_none()),
+        "targets a feature"
+    );
+    assert_eq!(world.get::<Health>(block).unwrap().current, 400.0);
+
+    // A SIGTERM bomb going off 50 elmos away: its splash reaches it
+    // (`DoExplosionDamage` hits features like units).
+    {
+        let sigterm = world
+            .resource::<crate::units::content::weapons::WeaponRegistry>()
+            .known()
+            .sigterm
+            .expect("SigTerm");
+        world
+            .resource_mut::<crate::units::combat::DamageQueue>()
+            .push(crate::units::combat::PendingDamage {
+                target: None,
+                attacker: bit,
+                weapon: sigterm,
+                impact_pos: at + Vec3::new(0.0, 0.0, 50.0),
+                attacker_distance: 0.0,
+            });
+    }
+    h.step();
+    let world = h.world_mut();
+    let hp = world.get::<Health>(block).map(|h| h.current);
+    eprintln!("bad block after the blast: {hp:?}");
+    assert!(hp.is_none_or(|hp| hp < 400.0), "untouched by the blast");
+    // Whatever the blast took to 0 HP is gone the same tick, not left
+    // standing at 0.
+    assert!(
+        world
+            .query::<(&Feature, &Health)>()
+            .iter(world)
+            .all(|(_, h)| h.current > 0.0)
+    );
+}

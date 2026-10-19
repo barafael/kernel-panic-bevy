@@ -2381,6 +2381,10 @@ pub fn ground_collision_system(
         OrderState,
         &NetId,
     )>,
+    features: Query<
+        (Entity, &Transform, &crate::units::features::Feature, &NetId),
+        Without<UnitType>,
+    >,
     mut entries: Local<Vec<CollisionEntry>>,
     mut grid: Local<CollisionGrid>,
     mut candidates: Local<Vec<(i32, i32, usize)>>,
@@ -2459,6 +2463,45 @@ pub fn ground_collision_system(
                 for cx in x0..=x1 {
                     grid.fixed.entry((cx, cz)).or_default().push(idx);
                 }
+            }
+        }
+    }
+    // The map's features: static colliders after the units, in id order;
+    // the Bad Block's crushable (`HandleFeatureCollisions`).
+    let mut map_features: Vec<_> = features.iter().collect();
+    map_features.sort_unstable_by_key(|(.., id)| **id);
+    for (entity, tf, feature, _) in map_features {
+        if !feature.def.blocking {
+            continue;
+        }
+        let pos = tf.translation.xz();
+        let radius = feature.collision_radius();
+        let idx = entries.len();
+        entries.push(CollisionEntry {
+            entity,
+            pos,
+            pos3: tf.translation,
+            radius,
+            owner_radius: radius,
+            mobile: false,
+            crushable: feature.def.crush_resistance
+                <= crate::interaction::structures::BADBLOCK_CRUSH_RESISTANCE,
+            mass: feature.def.mass,
+            speed: 0.0,
+            front: Vec2::Y,
+            progress: Progress::Done,
+            has_commands: false,
+            curr_waypoint: None,
+            being_built: false,
+            skidding: false,
+            vel: Vec3::ZERO,
+            hit_radius: crate::units::features::Feature::HIT_RADIUS,
+        });
+        let (x0, z0) = cell_of(pos - Vec2::splat(radius + STATIC_CELL_PAD));
+        let (x1, z1) = cell_of(pos + Vec2::splat(radius + STATIC_CELL_PAD));
+        for cz in z0..=z1 {
+            for cx in x0..=x1 {
+                grid.fixed.entry((cx, cz)).or_default().push(idx);
             }
         }
     }
@@ -2746,6 +2789,14 @@ pub fn ground_collision_system(
     crushed.sort();
     crushed.dedup();
     for e in crushed {
+        if features.contains(e) {
+            // `CFeature::Kill(…, crushed)`: gone, leaving its
+            // `featureDead` (`destroy_features`).
+            commands
+                .entity(e)
+                .try_insert(crate::units::features::Crushed);
+            continue;
+        }
         // A crushed feature just vanishes (no unit death explosion).
         // `try_insert`: weapon damage may have killed and cleaned it
         // up in this same tick.

@@ -862,6 +862,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         advance(&mut world, 0.1);
         world.run_system_once(start_construction).unwrap();

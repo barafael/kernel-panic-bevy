@@ -19,6 +19,9 @@
 //! `FeatureDefHandler.cpp:146-149`) block only movers whose MOVEINFO
 //! `CrushStrength` doesn't exceed it (`CMoveMath::CrushResistant`):
 //! HEAVY (300) drives through and crushes them, LIGHT/MEDIUM path round.
+//! The map's own features ([`crate::units::features`]) stamp the same
+//! way: the Bad Block feature crushable, Central Hub's 500-mass sectors
+//! solid ([`StructureLayer::feature_stamp`]).
 
 use std::collections::HashMap;
 
@@ -34,6 +37,7 @@ use crate::units::combat::Dying;
 use crate::units::components::{UnitStats, UnitType};
 use crate::units::content::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::features::Feature;
 
 /// Crush resistance of a KP Bad Block once it turned into its feature:
 /// `defMass = metal·0.4 + health·0.1` with the feature's `metal=64`,
@@ -227,6 +231,37 @@ impl StructureLayer {
         }
     }
 
+    /// The stamp a map feature of `def` at `pos` leaves:
+    /// `CSolidObject::Block` over its footprint from `GetMapPosStatic`
+    /// (truncated and clamped to the map, not rounded like a unit's).
+    /// Only a `blocking` feature blocks. The layer knows two kinds of
+    /// square, crushable by the movers that crush a Bad Block or by
+    /// none: a feature no harder to crush than a Bad Block stamps
+    /// crushable, a harder one solid — which it is to every KP mover
+    /// when it is harder than the strongest `CrushStrength`, 300, as
+    /// Central Hub's sectors (`mass=500`) are.
+    fn feature_stamp(&self, def: &spring_tdf::FeatureDef, pos: Vec3) -> Stamp {
+        if !def.blocking {
+            return Stamp {
+                squares: Vec::new(),
+                crushable: false,
+            };
+        }
+        let (xsize, zsize) = (def.footprint_x as i32 * 2, def.footprint_z as i32 * 2);
+        let square = SQUARE_SIZE as i32;
+        let x0 = (pos.x as i32 / square - xsize / 2).clamp(0, self.width as i32 - xsize);
+        let z0 = (pos.z as i32 / square - zsize / 2).clamp(0, self.height as i32 - zsize);
+        let squares = (z0..z0 + zsize)
+            .flat_map(|z| (x0..x0 + xsize).map(move |x| (x, z)))
+            .filter(|&(x, z)| self.idx(x, z).is_some())
+            .map(|(x, z)| (x as u32, z as u32))
+            .collect();
+        Stamp {
+            squares,
+            crushable: def.crush_resistance <= BADBLOCK_CRUSH_RESISTANCE,
+        }
+    }
+
     /// `CSolidObject::Block`: stamp `entity` (once). Returns the squares
     /// whose masks changed.
     fn block(&mut self, entity: Entity, stamp: Stamp) -> Option<[i32; 4]> {
@@ -325,20 +360,22 @@ pub struct StructureStamped;
 impl StructureStamped {
     fn on_add(mut world: DeferredWorld, ctx: HookContext) {
         let entity = ctx.entity;
-        let (Some(kind), Some(tf)) = (
-            world.get::<UnitType>(entity),
-            world.get::<Transform>(entity),
-        ) else {
+        let Some(pos) = world.get::<Transform>(entity).map(|tf| tf.translation) else {
             return;
         };
-        let (kind, pos) = (kind.0, tf.translation);
         let (Some(registry), Some(nav)) = (
             world.get_resource::<UnitRegistry>(),
             world.get_resource::<NavGridSet>(),
         ) else {
             return;
         };
-        let stamp = nav.structures.stamp_of(registry, kind, pos);
+        let stamp = if let Some(feature) = world.get::<Feature>(entity) {
+            nav.structures.feature_stamp(feature.def, pos)
+        } else if let Some(kind) = world.get::<UnitType>(entity) {
+            nav.structures.stamp_of(registry, kind.0, pos)
+        } else {
+            return;
+        };
         let mut nav = world.resource_mut::<NavGridSet>();
         if let Some(bbox) = nav.structures.block(entity, stamp) {
             nav.bump(bbox);
@@ -383,6 +420,8 @@ pub fn update_structure_layer(
     )>,
     all: Query<(Entity, &NetId), With<UnitType>>,
     spawned: Query<(Entity, &NetId), Added<UnitType>>,
+    features: Query<(Entity, &NetId, &Feature, &Transform, Has<StructureStamped>)>,
+    new_features: Query<Entity, Added<Feature>>,
     moved: Query<
         (Entity, &NetId, &UnitType, &Transform),
         (Changed<Transform>, With<StructureStamped>),
@@ -422,6 +461,20 @@ pub fn update_structure_layer(
             // A layer rebuilt under a live, already-tagged structure:
             // its hook ran against the old layer, so stamp it here.
             let stamp = layer.stamp_of(&registry, kind.0, tf.translation);
+            changed = union(changed, layer.block(entity, stamp));
+        } else {
+            commands.entity(entity).try_insert(StructureStamped);
+        }
+    }
+    // The map's features, after the units (they never move).
+    let mut placed: Vec<_> = features
+        .iter()
+        .filter(|(entity, ..)| fresh || new_features.contains(*entity))
+        .collect();
+    placed.sort_unstable_by_key(|(_, id, ..)| **id);
+    for (entity, _, feature, tf, stamped) in placed {
+        if stamped {
+            let stamp = layer.feature_stamp(feature.def, tf.translation);
             changed = union(changed, layer.block(entity, stamp));
         } else {
             commands.entity(entity).try_insert(StructureStamped);
@@ -614,5 +667,63 @@ mod tests {
             }
         }
         assert!(crushed, "the Byte crushes the Bad Block");
+    }
+
+    /// A map feature blocks its footprint from `GetMapPosStatic`
+    /// (truncated, clamped to the map): Dual Core's first Bad Block at
+    /// (372, 372) the squares 44..48 both ways, crushable; Central Hub's
+    /// sectors solid; one at the map edge clamped onto the map.
+    #[test]
+    fn map_features_stamp_their_footprint() {
+        let features = &crate::units::content::defs::defs().features;
+        let mut layer = StructureLayer::default();
+        layer.ensure_size(64, 64);
+        let block = layer.feature_stamp(
+            features.get("badblock").unwrap(),
+            Vec3::new(372.0, 9.0, 372.0),
+        );
+        assert!(block.crushable);
+        let expected: Vec<(u32, u32)> = (44..48)
+            .flat_map(|z| (44..48).map(move |x| (x, z)))
+            .collect();
+        assert_eq!(block.squares, expected);
+
+        let sector = layer.feature_stamp(
+            features.get("unusablesector4").unwrap(),
+            Vec3::new(4.0, 0.0, 508.0),
+        );
+        assert!(
+            !sector.crushable,
+            "500 is past every KP mover's crush strength"
+        );
+        assert_eq!(sector.squares.first(), Some(&(0, 60)));
+        assert_eq!(sector.squares.last(), Some(&(3, 63)));
+    }
+
+    /// The layer's two kinds of square only hold while every feature is
+    /// either no harder to crush than a Bad Block or harder than every
+    /// mover can crush (`StructureLayer::feature_stamp`).
+    #[test]
+    fn feature_crush_resistances_fit_the_layer() {
+        let moveinfo = spring_tdf::Tdf::parse(crate::units::content::defs::MOVEINFO_TDF).unwrap();
+        let strongest = moveinfo
+            .sections
+            .iter()
+            .map(|s| s.f32("crushstrength"))
+            .fold(0.0, f32::det_max);
+        assert_eq!(strongest, 300.0);
+        for def in crate::units::content::defs::defs()
+            .features
+            .features
+            .values()
+        {
+            assert!(
+                def.crush_resistance <= BADBLOCK_CRUSH_RESISTANCE
+                    || def.crush_resistance > strongest,
+                "{}: {}",
+                def.name,
+                def.crush_resistance
+            );
+        }
     }
 }

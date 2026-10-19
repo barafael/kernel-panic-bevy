@@ -341,6 +341,7 @@ pub struct HitQueries<'w, 's> {
     shield: Query<'w, 's, &'static mut crate::units::mechanics::shield::ShieldState>,
     victim: Query<'w, 's, VictimData>,
     idle: Query<'w, 's, &'static mut IdleTimer>,
+    feature: Query<'w, 's, (), With<crate::units::features::Feature>>,
 }
 
 type VictimData = (
@@ -388,6 +389,15 @@ impl DamageResolver<'_, '_> {
         let Ok((unit, team, faction, gtf, protected, armored, open, stunned, dying)) =
             self.hits.victim.get(hit.target)
         else {
+            // A map feature (`CFeature::DoDamage`): no armour class, so
+            // the caller's default damage, no scripts or shields, and
+            // paralyzers do nothing. `destroy_features` takes it at 0.
+            if hit.paralyze_time.is_none()
+                && self.hits.feature.contains(hit.target)
+                && let Ok(mut health) = self.hits.health.get_mut(hit.target)
+            {
+                health.current -= hit.damage;
+            }
             return;
         };
         if dying {
@@ -1213,6 +1223,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         entity
     }

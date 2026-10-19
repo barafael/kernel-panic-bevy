@@ -209,7 +209,8 @@ pub fn tick_kamikaze(
         let self_pos = gtf.translation();
         let mut triggered = false;
         spatial.query_radius(self_pos, trigger_radius, |candidate| {
-            if triggered || !candidate.hp_positive {
+            // `GetEnemyUnits`: units, not map features.
+            if triggered || !candidate.hp_positive || candidate.feature {
                 return;
             }
             // `GetEnemyUnits(pos, kamikazeDist, allyteam)`.
@@ -601,6 +602,7 @@ mod tests {
             is_flying: false,
             cloaked: false,
             detected_by: 0,
+            feature: false,
         });
         world.insert_resource(spatial);
         world.init_resource::<Alliances>();

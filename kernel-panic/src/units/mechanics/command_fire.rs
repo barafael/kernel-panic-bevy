@@ -1251,6 +1251,10 @@ pub fn tick_area_denial(
         let damage = params.dps * dt;
         let radius_sq = params.radius * params.radius;
         spatial.query_radius(center, params.radius, |candidate| {
+            // `GetUnitsInSphere`: units, not map features.
+            if candidate.feature {
+                return;
+            }
             // areadenial.lua: `damageFriendly or not AreTeamsAllied`.
             if !params.damage_friendly && alliances.friendly(candidate.team, owner_team) {
                 return;
@@ -2312,6 +2316,7 @@ mod tests {
                 is_flying: false,
                 cloaked: false,
                 detected_by: 0,
+                feature: false,
             });
         entity
     }
