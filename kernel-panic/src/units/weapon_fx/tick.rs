@@ -459,9 +459,26 @@ pub(super) fn tick_weapon_fx(
             Flight::Direct => {
                 let prev_progress = proj.progress;
                 proj.progress += (proj.speed * dt) / total_dist;
-                let seg_start = proj.origin.lerp(proj.target, prev_progress);
-                let seg_end = proj.origin.lerp(proj.target, proj.progress.det_min(1.0));
-                (seg_start, seg_end, proj.progress >= 1.0, proj.target)
+                // Where it is drawn: on the chord, lifted by its lob.
+                let at = |t: f32| {
+                    let mut p = proj.origin.lerp(proj.target, t);
+                    if proj.arc_height > 0.0 {
+                        p.y += proj.arc_height * total_dist * 4.0 * t * (1.0 - t);
+                    }
+                    p
+                };
+                let seg_start = at(prev_progress);
+                let seg_end = at(proj.progress.det_min(1.0));
+                // `CheckGroundCollisions`: it bursts where it enters the
+                // terrain (a lob clears what its arc clears).
+                match volume_ctx
+                    .heightmap
+                    .as_deref()
+                    .and_then(|hm| hm.ground_hit(seg_start, seg_end))
+                {
+                    Some(ground) => (seg_start, ground, true, ground),
+                    None => (seg_start, seg_end, proj.progress >= 1.0, proj.target),
+                }
             }
             Flight::Missile(_) | Flight::Starburst(_) | Flight::Cannon(_) => {
                 let prev = transform.translation;

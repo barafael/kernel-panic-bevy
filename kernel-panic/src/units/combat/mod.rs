@@ -104,6 +104,27 @@ fn line_of_fire_clear(hm: &Heightmap, from: Vec3, to: Vec3, aoe_radius: f32) -> 
         .is_none_or(|hit| hit.distance_squared(to) <= aoe_radius * aoe_radius)
 }
 
+/// The ground half of `CWeapon::HaveFreeLineOfFire` for `weapon_def`:
+/// a straight-firing weapon (beam, laser, direct missile) can't shoot
+/// from `from` to `to` through the terrain. Spring decides this by
+/// weapon type and `avoidGround` (default on, never off in Kernel
+/// Panic), not by the TDF's `lineofsight`, which only picks the type.
+/// Arcing weapons (cannons, trajectory missiles, bombs, starbursts)
+/// aren't tested here.
+pub(crate) fn ground_line_of_fire(
+    weapon_def: &spring_tdf::WeaponDef,
+    hm: Option<&Heightmap>,
+    from: Vec3,
+    to: Vec3,
+) -> bool {
+    match hm {
+        Some(hm) if straight_line_of_fire(weapon_def) => {
+            line_of_fire_clear(hm, from, to, weapon_def.area_of_effect * 0.5)
+        }
+        _ => true,
+    }
+}
+
 /// Whether `weapon_def` takes the base `CWeapon::HaveFreeLineOfFire`
 /// (Weapon.cpp:1112) — a straight ray or cone to the target — and so
 /// honours `avoidfriendly` along that line. Melee weapons and bombers
@@ -336,9 +357,10 @@ impl PieceLookup<'_, '_> {
         muzzle.pos.y < hm.sample(muzzle.pos.x, muzzle.pos.z)
     }
 
-    /// `CBeamLaser::FireInternal` for a sprayed hitscan shot: trace the
-    /// scattered ray up to `range` against the target's collision sphere,
-    /// then the ground. Returns the unit struck (if any) and the impact.
+    /// `CBeamLaser::FireInternal` (and the lightning's trace): the ray
+    /// up to `range` stops at whichever comes first, the target's
+    /// collision sphere or the ground. Returns the unit struck (if any)
+    /// and the impact.
     fn hitscan_trace(
         &self,
         target: Option<Entity>,
@@ -347,18 +369,23 @@ impl PieceLookup<'_, '_> {
         range: f32,
     ) -> (Option<Entity>, Vec3) {
         let end = muzzle + dir * range;
+        let ground = self
+            .heightmap
+            .as_deref()
+            .and_then(|hm| hm.ground_hit(muzzle, end));
         if let Some((t, tf, stats)) =
             target.and_then(|t| self.target.get(t).ok().map(|(tf, s)| (t, tf, s)))
         {
             let volume = CollisionVolume::from_s3o(stats.hit_radius, stats.mid_y);
             if let Some(hit) = volume.ray_segment_hit(volume.center(tf), muzzle, end) {
-                return (Some(t), muzzle.lerp(end, hit));
+                let at = muzzle.lerp(end, hit);
+                let ground_first = ground
+                    .is_some_and(|g| g.distance_squared(muzzle) < at.distance_squared(muzzle));
+                if !ground_first {
+                    return (Some(t), at);
+                }
             }
         }
-        let ground = self
-            .heightmap
-            .as_deref()
-            .and_then(|hm| hm.ground_hit(muzzle, end));
         (None, ground.unwrap_or(end))
     }
 
@@ -581,11 +608,16 @@ pub(super) fn fire_salvo_shot(
             muzzle.pos + dir * aim_dist
         };
         if !shot.is_traveling {
-            // Hitscan lands now. A scattered beam (Packet's `sprayangle`)
-            // only hits the unit if its ray does; otherwise it strikes
-            // the ground and merely splashes.
+            // Hitscan lands now. A beam (`TraceRay`) only hits the unit
+            // if its ray does — a scattered one (Packet's `sprayangle`)
+            // can miss, and any one can meet a hill first — otherwise it
+            // strikes the ground and merely splashes.
             let mut struck = shot.target;
-            if spray > 0.0 {
+            let traced = matches!(
+                weapon_def.category(),
+                spring_tdf::WeaponCategory::BeamLaser | spring_tdf::WeaponCategory::LightningCannon
+            );
+            if spray > 0.0 || traced {
                 (struck, impact_pos) =
                     pieces.hitscan_trace(shot.target, muzzle.pos, dir, weapon_def.range);
             }
@@ -889,9 +921,9 @@ pub fn combat_system(
         // Why: `proximity_priority < 0` is upstream's anti-swarm
         // marker — Exploit's BugCannon prefers far targets.
         let prefer_distant = weapon_def.proximity_priority < 0.0;
-        // Ballistic shots clear ridges; only direct-fire enforces LOS.
-        let enforce_los =
-            weapon_def.line_of_sight && weapon_def.trajectory_height <= 0.0 && heightmap.is_some();
+        // Straight-firing weapons can't shoot through terrain; arcs
+        // clear ridges (`ground_line_of_fire`).
+        let enforce_los = straight_line_of_fire(weapon_def) && heightmap.is_some();
         // `avoidfriendly=1` (BugShot, DOS_Beam): no shot while an ally
         // stands in the line of fire — `TryTarget` → `HaveFreeLineOfFire`
         // runs for every candidate `AutoTarget` weighs, every user
@@ -907,6 +939,13 @@ pub fn combat_system(
                 aim_from,
                 to,
             )
+        };
+        // `TryTarget`'s `HaveFreeLineOfFire`, both halves: no terrain
+        // and (for `avoidfriendly`) no ally in the way. It runs for every
+        // user and kept target and before every shot, not only for fresh
+        // candidates.
+        let try_lof = |to: Vec3| {
+            ground_line_of_fire(weapon_def, heightmap.as_deref(), aim_from, to) && lof_clear(to)
         };
         // Pointer's homing missile is the only ground unit that
         // overrides upstream's `NoChaseCategory=VTOL` and tracks air.
@@ -932,7 +971,7 @@ pub fn combat_system(
         if let Ok(forced) = explicit.forced.get(entity) {
             match target_pick.visible_pos(forced.0, attacker_team.0) {
                 Some(t_pos) if in_range(t_pos) => {
-                    if lof_clear(t_pos) {
+                    if try_lof(t_pos) {
                         let rank = rank_of(attacker_pos.distance_squared(t_pos));
                         best = Some((forced.0, t_pos, rank, TargetSource::Explicit));
                     } else {
@@ -963,7 +1002,7 @@ pub fn combat_system(
             && let Some(t_pos) = target_pick.visible_pos(order.target, attacker_team.0)
             && in_range(t_pos)
         {
-            if lof_clear(t_pos) {
+            if try_lof(t_pos) {
                 let rank = rank_of(attacker_pos.distance_squared(t_pos));
                 best = Some((order.target, t_pos, rank, TargetSource::Explicit));
             } else {
@@ -984,8 +1023,12 @@ pub fn combat_system(
             match cache.target {
                 None => scan_due = false,
                 Some(target) => {
+                    // A kept target that has gone behind terrain (or an
+                    // ally) fails `TryTarget` and is replaced by a scan now
+                    // (`AllowWeaponAutoTarget`).
                     if let Some(pos) = target_pick.visible_pos(target, attacker_team.0)
                         && in_range(pos)
+                        && try_lof(pos)
                     {
                         let rank = rank_of(attacker_pos.distance_squared(pos));
                         best = Some((target, pos, rank, TargetSource::Cached));
@@ -1174,18 +1217,6 @@ pub fn combat_system(
         if pieces.muzzle_buried(entity, attacker_gtf) {
             continue;
         }
-        // `UpdateFire` → `TryTarget(.., preFire)`: an ally has stepped
-        // into the line of the kept auto-target (explicit and freshly
-        // scanned targets were tested this tick). Hold the shot and
-        // rescan now (`AllowWeaponAutoTarget`: a target failing
-        // `TryTarget` may be replaced).
-        if source == TargetSource::Cached && ally_check && !lof_clear(target_pos) {
-            if let Some(cache) = cache_slot.as_deref_mut() {
-                cache.rescan_frame = frame;
-            }
-            continue;
-        }
-
         commands.entity(entity).insert((
             AttackCooldown::after_reload(frame, weapon_def.reload_time),
             JustFired,
@@ -1517,6 +1548,27 @@ pub fn attack_ground_system(
             continue;
         }
 
+        // In range but the terrain is in the way: close in, as
+        // `CMobileCAI` keeps moving while `TryTarget` fails (an arcing
+        // weapon is never blocked here). In range with a clear line:
+        // stand and fire.
+        if !ground_line_of_fire(weapon_def, pieces.heightmap.as_deref(), aim_from, order.pos) {
+            let mobile = stats.is_some_and(|s| s.speed > 0.0);
+            if mobile && move_target.is_none_or(|t| t.0.distance(order.pos) > CHASE_REPATH_DISTANCE)
+            {
+                commands
+                    .entity(entity)
+                    .insert(crate::interaction::movement::MoveTarget(order.pos));
+            }
+            continue;
+        }
+        if move_target.is_some() {
+            commands.entity(entity).remove::<(
+                crate::interaction::movement::MoveTarget,
+                crate::interaction::movement::MovePath,
+            )>();
+        }
+
         // The reload is shared with `combat_system`: one weapon, one
         // `reloadStatus`.
         let frame = tick.frame();
@@ -1639,6 +1691,7 @@ pub fn attack_target_system(
     target_stats: Query<&UnitStats>,
     move_path_q: Query<&crate::interaction::movement::MovePath>,
     gravity: Option<Res<crate::sim::MapGravity>>,
+    heightmap: Option<Res<Heightmap>>,
     mut commands: Commands,
 ) {
     // The one read of the map's gravity here (ballistic weapon range).
@@ -1686,16 +1739,17 @@ pub fn attack_target_system(
         // to the target's aimPos — so the chase stops exactly where the
         // shooting can start.
         let target_mid = target_stats.get(order.target).map_or(0.0, |s| s.mid_y);
+        let aim_from = gtf.translation() + Vec3::Y * stats.mid_y;
+        let aim_at = target_pos + Vec3::Y * target_mid;
         let in_range = weapon_def.is_some_and(|w| {
-            w.range != 0.0
-                && aim::in_weapon_range(
-                    w,
-                    gtf.translation() + Vec3::Y * stats.mid_y,
-                    target_pos + Vec3::Y * target_mid,
-                    false,
-                    map_gravity,
-                )
+            w.range != 0.0 && aim::in_weapon_range(w, aim_from, aim_at, false, map_gravity)
         });
+        // In range with the terrain in the way (the same ground test
+        // `combat_system` fires on): keep closing in, as `CMobileCAI` does
+        // while `TryTarget` fails.
+        let blocked = in_range
+            && weapon_def
+                .is_some_and(|w| !ground_line_of_fire(w, heightmap.as_deref(), aim_from, aim_at));
 
         if stats.speed <= 0.0 && !in_range {
             // Immobile unit (armed building) can never close the gap —
@@ -1705,8 +1759,13 @@ pub fn attack_target_system(
             continue;
         }
 
-        if !in_range {
-            // Out of range: chase. Only repath when the current path's
+        if stats.speed <= 0.0 && blocked {
+            // An armed building can't walk around the hill: hold.
+            continue;
+        }
+
+        if !in_range || blocked {
+            // Out of range, or no line of fire yet: chase. Only repath when the current path's
             // endpoint lags the target beyond `CHASE_REPATH_DISTANCE` —
             // or when there is no path at all (fresh order / budget stall).
             if crate::interaction::movement::chase_path_stale(
@@ -1802,6 +1861,99 @@ mod tests {
             },
         );
         weapons
+    }
+
+    /// A Bit with a straight-firing bolt (an explicit `LaserCannon`, no
+    /// `lineofsight` flag) and an enemy 120 elmos away; `wall` puts a
+    /// 50-elmo ridge between them. Returns the app after one
+    /// `combat_system` tick and the two entities.
+    fn duel_over_terrain(wall: bool) -> (App, Entity, Entity) {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .init_sim()
+            .init_resource::<DamageQueue>()
+            .init_resource::<PendingAttacks>()
+            .init_resource::<PendingExplosions>()
+            .init_resource::<SpatialIndex>()
+            .init_resource::<crate::units::teams::Alliances>();
+        app.insert_resource(bit_vs_socket_registry());
+        let mut weapons = WeaponRegistry::default();
+        weapons.insert_for_test(
+            "Line",
+            spring_tdf::WeaponDef {
+                weapon_type: "LaserCannon".into(),
+                damage: spring_tdf::DamageMap {
+                    default: 80.0,
+                    ..Default::default()
+                },
+                range: 256.0,
+                reload_time: 0.5,
+                ..Default::default()
+            },
+        );
+        let line = weapons.intern("Line").unwrap();
+        app.insert_resource(weapons);
+        let (w, d) = (40, 8);
+        let mut heights = vec![0.0; w * d];
+        if wall {
+            for z in 0..d {
+                heights[z * w + 10] = 50.0;
+            }
+        }
+        app.insert_resource(Heightmap::from_raw(heights, w, d));
+
+        let bit = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Bit),
+                UnitStats {
+                    mid_y: 5.0,
+                    ..stats()
+                },
+                Faction::System,
+                TeamId(0),
+                GlobalTransform::from_xyz(20.0, 0.0, 28.0),
+                WeaponBinding(line),
+            ))
+            .id();
+        let enemy = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: enemy,
+                pos: Vec3::new(140.0, 0.0, 28.0),
+                hit_radius: 0.0,
+                mid_y: 5.0,
+                team: 1,
+                kind: UnitKind::Bit,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+            });
+        app.world_mut().run_system_once(combat_system).unwrap();
+        (app, bit, enemy)
+    }
+
+    /// `HaveFreeLineOfFire`'s ground ray: no target and no shot through a
+    /// ridge, whatever the TDF's `lineofsight`; over open ground the same
+    /// enemy is engaged.
+    #[test]
+    fn straight_weapons_dont_fire_through_terrain() {
+        let (app, bit, _) = duel_over_terrain(true);
+        assert!(
+            app.world()
+                .get::<TargetCache>(bit)
+                .is_none_or(|c| c.target.is_none())
+        );
+        assert!(app.world().resource::<PendingAttacks>().events.is_empty());
+
+        let (app, bit, enemy) = duel_over_terrain(false);
+        assert_eq!(
+            app.world().get::<TargetCache>(bit).unwrap().target,
+            Some(enemy)
+        );
+        assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
     }
 
     /// Upstream `BadTargetCategory1=FACTORY` (bit.fbi): a Socket is
@@ -2684,8 +2836,8 @@ mod tests {
         assert!(app.world().resource::<PendingAttacks>().events.is_empty());
     }
 
-    /// `UpdateFire`'s pre-fire `TryTarget`: an ally that walks into the
-    /// line of the kept target stops the next shot and forces a rescan.
+    /// `TryTarget` on the kept target: an ally that walks into its line
+    /// stops the next shot and forces a rescan.
     #[test]
     fn ally_stepping_into_the_line_holds_the_next_shot() {
         let mut weapons = WeaponRegistry::default();
@@ -2708,13 +2860,8 @@ mod tests {
             app.world().resource::<PendingAttacks>().events.is_empty(),
             "reloaded, but an ally is in the way"
         );
-        assert_eq!(
-            app.world().get::<TargetCache>(bug).unwrap().rescan_frame,
-            15
-        );
-        // The rescan finds nothing free and stands down.
-        advance_frames(&mut app, 1);
-        app.world_mut().run_system_once(combat_system).unwrap();
+        // The kept target failed `TryTarget`, so it was rescanned at
+        // once; the rescan finds nothing free and stands down.
         assert_eq!(cached_target(&app, bug), None);
     }
 

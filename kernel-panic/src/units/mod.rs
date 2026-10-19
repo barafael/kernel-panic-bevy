@@ -130,6 +130,7 @@ impl Plugin for UnitsPlugin {
             .register_required_components::<animation::DeathParticle, SimPose>()
             .register_required_components::<command_fire::SigTermSignal, SimPose>()
             .register_required_components::<command_fire::SigTermBomb, SimPose>()
+            .register_required_components::<command_fire::SigTermWreck, SimPose>()
             // A damage zone is plain data (no Transform): tag it match
             // content so the match teardown clears it
             // (`map_loading::match_scope`).
@@ -248,6 +249,7 @@ impl Plugin for UnitsPlugin {
                             command_fire::tick_area_denial,
                             command_fire::tick_sigterm_signals,
                             command_fire::tick_sigterm_bombs,
+                            command_fire::tick_sigterm_wrecks,
                             command_fire::tick_protection,
                             script_triggers::trigger_movement_scripts,
                             script_triggers::trigger_production_scripts,

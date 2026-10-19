@@ -18,7 +18,9 @@ use spring_map::map_types::SQUARE_SIZE;
 
 /// Floor so short shots still sample meaningfully; cap so pathologically
 /// long shots don't burn cycles on samples finer than the terrain resolution.
+#[cfg(test)]
 const MIN_LOS_SAMPLES: usize = 4;
+#[cfg(test)]
 const MAX_LOS_SAMPLES: usize = 64;
 
 /// World-space heightmap, queried by movement and combat for terrain Y and
@@ -250,32 +252,49 @@ impl Heightmap {
         max_slope
     }
 
-    /// Where the segment `from → to` first dips below the terrain, if it
-    /// does (`TraceRay::TraceRay` against the ground, interpolated
-    /// between samples). The endpoints themselves are skipped, as in
-    /// [`Self::has_line_of_sight`].
+    /// Where the segment `from → to` first meets the terrain, if it does
+    /// (`CGround::LineGroundCol`, which `TraceRay::TraceRay` uses for the
+    /// ground). Exact: between the points where the segment crosses a
+    /// square edge or a square's diagonal, the drawn surface under it is
+    /// one triangle's plane (the triangulation [`Self::sample`] uses), so
+    /// the height above ground is linear there and its first sign change
+    /// is found exactly. A segment starting underground hits nothing, as
+    /// in Spring (`LineGroundCol` returns 0, which callers read as clear).
     pub fn ground_hit(&self, from: Vec3, to: Vec3) -> Option<Vec3> {
+        if self.width < 2 || self.height < 2 || !(from.is_finite() && to.is_finite()) {
+            return None;
+        }
         let delta = to - from;
-        let horizontal = (delta.x * delta.x + delta.z * delta.z).sqrt();
-        let step_count = ((horizontal / self.square_size).ceil() as usize)
-            .clamp(MIN_LOS_SAMPLES, MAX_LOS_SAMPLES);
-        let mut prev_clearance = from.y - self.sample(from.x, from.z);
-        let mut prev_t = 0.0;
-        for i in 1..step_count {
-            let t = i as f32 / step_count as f32;
+        let clearance = |t: f32| {
             let p = from + delta * t;
-            let clearance = p.y - self.sample(p.x, p.z);
-            if clearance < 0.0 {
-                let span = prev_clearance - clearance;
-                let frac = if span > 1e-6 {
-                    (prev_clearance / span).det_clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                return Some(from + delta * (prev_t + (t - prev_t) * frac));
+            p.y - self.sample(p.x, p.z)
+        };
+        let start = clearance(0.0);
+        if start < 0.0 {
+            return None;
+        }
+        // The pieces' ends: where the grid coordinate x, z or x + z (the
+        // diagonals) passes an integer.
+        let gx = (from.x / self.square_size, delta.x / self.square_size);
+        let gz = (from.z / self.square_size, delta.z / self.square_size);
+        let mut ends: Vec<f32> = Vec::new();
+        for (g0, dg) in [gx, gz, (gx.0 + gz.0, gx.1 + gz.1)] {
+            push_integer_crossings(&mut ends, g0, dg);
+        }
+        ends.push(1.0);
+        ends.sort_by(f32::total_cmp);
+        let (mut prev_t, mut prev) = (0.0, start);
+        for t in ends {
+            if t <= prev_t {
+                continue;
             }
-            prev_clearance = clearance;
-            prev_t = t;
+            let here = clearance(t);
+            if here < 0.0 {
+                // `prev >= 0 > here`: the root of the linear piece.
+                let t = prev_t + (t - prev_t) * (prev / (prev - here));
+                return Some(from + delta * t);
+            }
+            (prev_t, prev) = (t, here);
         }
         None
     }
@@ -373,6 +392,30 @@ mod triangle_tests {
     }
 }
 
+/// The `t` in `(0, 1)` at which `g0 + dg · t` is an integer, in no
+/// particular order. Integer counts, not a float accumulator, so the
+/// values are exact and the loop bounded (at most [`MAX_GRID_CROSSINGS`]).
+fn push_integer_crossings(out: &mut Vec<f32>, g0: f32, dg: f32) {
+    if dg == 0.0 || !(g0.is_finite() && dg.is_finite()) {
+        return;
+    }
+    let g1 = g0 + dg;
+    let (lo, hi) = if dg > 0.0 { (g0, g1) } else { (g1, g0) };
+    let first = lo.floor() as i64 + 1;
+    let last = hi.ceil() as i64 - 1;
+    let count = (last - first + 1).clamp(0, MAX_GRID_CROSSINGS);
+    for k in 0..count {
+        let t = ((first + k) as f32 - g0) / dg;
+        if t > 0.0 && t < 1.0 {
+            out.push(t);
+        }
+    }
+}
+
+/// More grid lines than any segment on a map crosses: the biggest map is
+/// 1024 squares across (×3 line families is handled per family).
+const MAX_GRID_CROSSINGS: i64 = 4096;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +440,53 @@ mod tests {
         // Height 30 → −10 over 80 elmos: crosses 10 at x = 48.
         assert!((hit.x - 48.0).abs() < 2.0, "{hit}");
         assert!((hit.y - 10.0).abs() < 1.0, "{hit}");
+    }
+
+    /// A one-vertex-wide ridge (a 16-elmo wall) across a 1000-elmo shot:
+    /// the old 64-sample march stepped over it; the exact walk doesn't.
+    #[test]
+    fn ground_hit_catches_a_thin_wall_on_a_long_shot() {
+        let (w, d) = (160, 8);
+        let mut heights = vec![0.0; w * d];
+        for z in 0..d {
+            heights[z * w + 77] = 50.0;
+        }
+        let hm = Heightmap::from_raw(heights, w, d);
+        let from = Vec3::new(4.0, 20.0, 28.0);
+        let to = Vec3::new(1004.0, 20.0, 28.0);
+        let hit = hm.ground_hit(from, to).expect("the wall is in the way");
+        // The wall's slope rises from x = 76·8 = 608 to 616, 50 high: at
+        // height 20 it is crossed at 608 + 8·20/50.
+        assert!((hit.x - 611.2).abs() < 0.01, "{hit}");
+        assert!((hit.y - 20.0).abs() < 1e-3, "{hit}");
+        // Over the wall: clear.
+        let high = Vec3::new(0.0, 60.0, 0.0);
+        assert!(hm.ground_hit(from + high, to + high).is_none());
+        // Starting underground: nothing (Spring's `LineGroundCol` → 0).
+        assert!(hm.ground_hit(Vec3::new(612.0, 10.0, 28.0), to).is_none());
+    }
+
+    /// The hit lies on the surface the units stand on ([`Heightmap::sample`]),
+    /// on a sloped, uneven patch and a diagonal shot.
+    #[test]
+    fn ground_hit_lands_on_the_drawn_surface() {
+        let (w, d) = (32, 32);
+        let heights: Vec<f32> = (0..w * d)
+            .map(|i| ((i % w) as f32 * 3.0 + (i / w) as f32 * 7.0) % 23.0)
+            .collect();
+        let hm = Heightmap::from_raw(heights, w, d);
+        let from = Vec3::new(10.0, 40.0, 13.0);
+        let to = Vec3::new(230.0, -5.0, 190.0);
+        let hit = hm.ground_hit(from, to).expect("descends into the ground");
+        assert!((hit.y - hm.sample(hit.x, hit.z)).abs() < 1e-3, "{hit}");
+        // Nothing earlier along the segment is below the surface.
+        for i in 0..1000 {
+            let p = from.lerp(hit, i as f32 / 1000.0);
+            assert!(
+                p.y >= hm.sample(p.x, p.z) - 1e-3,
+                "{p} under ground before {hit}"
+            );
+        }
     }
 
     #[test]

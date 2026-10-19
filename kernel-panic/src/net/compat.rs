@@ -41,12 +41,17 @@ use super::state::Fnv;
 /// 7 (2026-10-19): a factory keeps the move, fight, patrol and guard
 /// orders it is given for the units it builds (`FactoryOrders`); before,
 /// a move reached it and did nothing, the rest were refused.
+/// 8 (2026-10-19): straight-firing weapons can't shoot through terrain
+/// (an exact ground test for every target and shot; beams stop at the
+/// ground; units close in on a target behind a hill); the SIGTERM
+/// Signal takes off and flies as an airplane and its bomb falls on a
+/// ballistic arc.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 7;
+pub const SIM_VERSION: u32 = 8;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

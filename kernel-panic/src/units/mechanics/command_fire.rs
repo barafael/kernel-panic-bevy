@@ -29,6 +29,7 @@ use bevy::prelude::*;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::net::NetId;
 use crate::sim::DetFloat;
+use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::Dying;
 use crate::units::combat::{Armored, Attacker, DamageQueue, DelayedDamage, Hit, PendingDamage};
@@ -211,49 +212,93 @@ pub const MINELAUNCHER_FAN_COUNT: usize = 5;
 /// front of the Byte at the clicked position.
 pub const MINELAUNCHER_FAN_RADIUS: f32 = 40.0;
 
-/// Terminal `SIGTERM` airstrike: a [`SigTermSignal`] flies to the
-/// target, then drops a [`SigTermBomb`] that gravity-falls and
-/// detonates. Why: matches upstream `airstrike.lua`'s two-stage
-/// strike. Neither stage carries a `UnitType`, which is what makes
-/// them untargetable — same effect as upstream's
-/// `Category=NUKE VTOL` + every ground unit's `NoChaseCategory=VTOL`.
+/// Terminal `SIGTERM` airstrike: a [`SigTermSignal`] takes off from
+/// the Terminal, flies to the target and drops a [`SigTermBomb`] that
+/// falls and detonates. Upstream (`airstrike.lua`) the Signal is a real
+/// airplane (`CStrafeAirMoveType`) given an attack order; here it is
+/// flown by the same rules with signal.fbi's numbers and the engine's
+/// airplane defaults, per 30 Hz sim frame. Neither stage carries a
+/// `UnitType`, which is what makes them untargetable — same effect as
+/// upstream's `Category=NUKE VTOL` + every ground unit's
+/// `NoChaseCategory=VTOL`.
 pub const SIGTERM_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
-/// Signal's cruise altitude. Matches signal.fbi `cruiseAlt=200`.
-pub const SIGTERM_SIGNAL_ALTITUDE: f32 = 200.0;
-/// Signal's ground speed. Matches signal.fbi `MaxVelocity=8` in elmos
-/// per sim-frame @ 30 Hz → 240 elmos/s. Fast enough that the flight
-/// reads as a jet blip, not a blimp.
-pub const SIGTERM_SIGNAL_SPEED: f32 = 240.0;
-/// Seconds of bomb free-fall from Signal's release altitude.
-/// Matches upstream's `myGravity=0.3` — `sqrt(2 * 200 / (0.3 * 30²))`
-/// works out to roughly 1.2 s from `cruiseAlt=200`.
-pub const SIGTERM_FALL_DURATION: f32 = 1.2;
-/// SIGTERM stage 1: bomber flying from `start` to over `target`.
-/// `tick_sigterm_signals` lerps along the cruise path, then spawns a
-/// [`SigTermBomb`] on arrival.
+/// The height the Signal holds above the ground: `CStrafeAirMoveType`'s
+/// `wantedHeight = cruiseAlt × 1.5` (signal.fbi `cruiseAlt=200`).
+pub const SIGTERM_CRUISE_HEIGHT: f32 = 300.0;
+/// Thrust, elmos/frame²: signal.fbi `Acceleration=2`.
+const SIGTERM_ACC: f32 = 2.0;
+/// Air drag per frame (`SetMaxSpeed`: `1 / (maxSpeed · 1.1 / accRate)
+/// − wingAngle² · wingDrag`, `MaxVelocity=8`): with the thrust above, a
+/// top speed of about 6.8 elmos/frame (205 elmos/s).
+const SIGTERM_DRAG: f32 = 1.0 / (8.0 * 1.1 / SIGTERM_ACC) - 0.08 * 0.08 * 0.07;
+/// The engine's airplane turn radius (`turnRadius` default 500 elmos):
+/// a turn at speed `v` is at most `v / 500` radians per frame.
+const SIGTERM_TURN_RADIUS: f32 = 500.0;
+/// While climbing out it swings toward the target at `maxRudder`
+/// (0.004) per elmo/frame of climb (`UpdateTakeOff`).
+const SIGTERM_TAKEOFF_RUDDER: f32 = 0.004;
+/// Most it banks into a turn, radians (`maxBank` default 0.8), and how
+/// fast the bank follows, radians per frame.
+const SIGTERM_MAX_BANK: f32 = 0.8;
+const SIGTERM_BANK_RATE: f32 = 0.04;
+/// Steepest climb or dive, radians (`maxPitch` default 0.45).
+const SIGTERM_MAX_PITCH: f32 = 0.45;
+/// It looks this many frames ahead for higher ground (`UpdateFlying`).
+const SIGTERM_LOOKAHEAD_FRAMES: f32 = 40.0;
+/// The bomb's gravity, elmos/frame² (`[SigTerm]` `myGravity=.3`).
+const SIGTERM_BOMB_GRAVITY: f32 = 0.3;
+/// The bomb's release window: `CBombDropper::TestRange` drops when the
+/// predicted landing point is within `salvoDelay · speed · 0.5` of the
+/// target (`burstrate=.6` → 18 frames).
+const SIGTERM_SALVO_FRAMES: f32 = 18.0;
+/// signal.bos `Create`: `call-script lua_Destroy()` after 120 s.
+const SIGTERM_MAX_FRAMES: u32 = 120 * 30;
+/// Gravity on the broken-up airframe (the engine's plane `myGravity`).
+const SIGTERM_WRECK_GRAVITY: f32 = 0.4;
+
+/// SIGTERM stage 1: the Signal in the air. `tick_sigterm_signals` flies
+/// it one sim frame at a time and drops a [`SigTermBomb`] once the bomb
+/// would land on the target.
 #[derive(Component, Debug, Clone)]
 pub struct SigTermSignal {
     pub target: Vec3,
-    pub start: Vec3,
-    /// Cruise-path length, divided by [`SIGTERM_SIGNAL_SPEED`] for flight time.
-    pub total_distance: f32,
-    pub elapsed: f32,
+    pub pos: Vec3,
+    /// Elmos per frame.
+    pub vel: Vec3,
+    /// Horizontal heading (unit XZ vector) and speed along it.
+    pub heading: Vec2,
+    pub speed: f32,
+    /// Roll into the current turn, radians (+ = right wing down).
+    pub bank: f32,
+    /// Climbing out of the Terminal (`UpdateTakeOff`), not flying yet.
+    pub taking_off: bool,
+    /// Flying on straight past a target too close to turn onto, to come
+    /// around for another pass.
+    pub extending: bool,
+    pub frames: u32,
     pub owner_team: u8,
     pub owner_faction: Faction,
 }
 
-/// A Terminal-spawned SIGTERM bomb falling toward [`target`]. Ticked
-/// by `tick_sigterm_bombs`: each frame lerps its transform toward the
-/// ground hit; when `time_to_detonate` hits zero, delivers the blast +
-/// denial zone and despawns the bomb entity.
+/// SIGTERM stage 2: the falling bomb, carrying the Signal's velocity
+/// under its own gravity (`CBombDropper::FireImpl`). Detonates where it
+/// enters the ground.
 #[derive(Component, Debug, Clone)]
 pub struct SigTermBomb {
-    pub target: Vec3,
-    pub start: Vec3,
-    pub time_to_detonate: f32,
-    pub total_fall: f32,
+    pub pos: Vec3,
+    /// Elmos per frame.
+    pub vel: Vec3,
     pub owner_team: u8,
     pub owner_faction: Faction,
+}
+
+/// The Signal after the drop: signal.bos `FireWeapon1` destroys it and
+/// its `Killed` lets the airframe fall apart (`explode … type FALL`). A
+/// visual only: it tumbles down and vanishes on the ground.
+#[derive(Component, Debug, Clone)]
+pub struct SigTermWreck {
+    pub vel: Vec3,
+    pub spin: Vec3,
 }
 
 /// Queued request to spawn a Logic Bomb, drained next frame by
@@ -700,43 +745,32 @@ pub fn process_command_fire(
         }
 
         if unit.0 == UnitKind::Terminal {
-            // Signal aircraft spawns at the Terminal's altitude + a
-            // climb-out offset so the takeoff reads instead of the
-            // Signal punching sideways through the roof. Flies in a
-            // straight line to cruise altitude directly over the
-            // target, then releases a bomb. No `UnitType` on either
-            // entity → not in the spatial index → not targetable.
+            // `airstrike.lua`: the Signal is created on the Terminal,
+            // facing the way the Terminal faces, and given an attack
+            // order on the point; it takes off from there. No `UnitType`
+            // on either stage → not in the spatial index → not
+            // targetable.
             let caster_pos = gtf.translation();
-            let start = Vec3::new(
-                caster_pos.x,
-                caster_pos.y + SIGTERM_SIGNAL_ALTITUDE,
-                caster_pos.z,
-            );
-            let release = Vec3::new(
-                event.target.x,
-                event.target.y + SIGTERM_SIGNAL_ALTITUDE,
-                event.target.z,
-            );
-            let distance = start.distance(release);
-
-            let (signal_mesh, signal_material) = visuals.signal(*faction);
-            let facing = if distance > 1e-3 {
-                Transform::from_translation(start).looking_at(release, Vec3::Y)
-            } else {
-                Transform::from_translation(start)
+            let facing = gtf.forward().xz().normalize_or(Vec2::NEG_Y);
+            let signal = SigTermSignal {
+                target: event.target,
+                pos: caster_pos,
+                vel: Vec3::ZERO,
+                heading: facing,
+                speed: 0.0,
+                bank: 0.0,
+                taking_off: true,
+                extending: false,
+                frames: 0,
+                owner_team: team.0,
+                owner_faction: *faction,
             };
+            let (signal_mesh, signal_material) = visuals.signal(*faction);
             commands.spawn((
-                SigTermSignal {
-                    target: event.target,
-                    start,
-                    total_distance: distance,
-                    elapsed: 0.0,
-                    owner_team: team.0,
-                    owner_faction: *faction,
-                },
+                Transform::from_translation(caster_pos).with_rotation(signal.orientation()),
+                signal,
                 Mesh3d(signal_mesh),
                 MeshMaterial3d(signal_material),
-                facing,
                 Visibility::default(),
             ));
             commands.entity(event.attacker).insert(CommandFireCooldown {
@@ -1173,95 +1207,279 @@ fn substitute_owner(
 
 /// Fly every in-flight Signal bomber. On arrival, drop a
 /// [`SigTermBomb`] at the release point and despawn the Signal.
+/// Model orientation along `dir`, rolled by `bank`: S3O models point
+/// their nose along +Z, Bevy's `looking_to` points −Z, hence the half
+/// turn.
+fn nose_along(dir: Vec3, bank: f32) -> Quat {
+    let Some(dir) = dir.try_normalize() else {
+        return Quat::IDENTITY;
+    };
+    // Straight up or down: keep the wings level to the side.
+    let up = if dir.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+    let look = Transform::IDENTITY.looking_to(dir, up).rotation;
+    Quat::from_axis_angle(dir, -bank) * look * Quat::from_rotation_y(std::f32::consts::PI)
+}
+
+/// Whole sim frames in `dt` (one per fixed tick).
+fn sim_frames(dt: f32) -> u32 {
+    (dt * crate::sim::GAME_SPEED).round().det_max(0.0) as u32
+}
+
+impl SigTermSignal {
+    /// Nose along the flight path, rolled into the turn; straight up
+    /// while it rises off the pad (signal.bos `Create`: the nose-up
+    /// launch pose).
+    fn orientation(&self) -> Quat {
+        let dir = if self.vel.length_squared() > 1e-6 {
+            self.vel
+        } else if self.taking_off {
+            Vec3::Y
+        } else {
+            Vec3::new(self.heading.x, 0.0, self.heading.y)
+        };
+        nose_along(dir, self.bank)
+    }
+
+    /// One sim frame of flight (`CStrafeAirMoveType::UpdateTakeOff` /
+    /// `UpdateFlying`, simplified to what a straight bombing run needs).
+    /// Returns the bomb once it should drop.
+    fn step(&mut self, ground: &impl Fn(Vec2) -> f32) -> Option<SigTermBomb> {
+        self.frames += 1;
+        let to_target = (self.target - self.pos).xz();
+        let want = to_target.normalize_or(self.heading);
+        // Signed angle from the heading to the target.
+        let turn_to = bevy::math::ops::atan2(self.heading.perp_dot(want), self.heading.dot(want));
+        let height = self.pos.y - ground(self.pos.xz());
+
+        let turn;
+        if self.taking_off {
+            // Straight up (the same thrust and drag), swinging toward the
+            // target as it climbs; forward thrust only once it is 40 %
+            // of the way up.
+            self.vel.y = (self.vel.y + SIGTERM_ACC) * (1.0 - SIGTERM_DRAG);
+            turn = turn_to.det_clamp(
+                -SIGTERM_TAKEOFF_RUDDER * self.vel.y,
+                SIGTERM_TAKEOFF_RUDDER * self.vel.y,
+            );
+            if height > SIGTERM_CRUISE_HEIGHT * 0.4 {
+                self.speed = (self.speed + SIGTERM_ACC) * (1.0 - SIGTERM_DRAG);
+            }
+            // Flying once high enough or fast enough (`UpdateTakeOff`:
+            // `wantedHeight`, or 0.8 of `maxSpeed`).
+            if height > SIGTERM_CRUISE_HEIGHT || self.speed >= 0.8 * 8.0 {
+                self.taking_off = false;
+            }
+        } else {
+            self.speed = (self.speed + SIGTERM_ACC) * (1.0 - SIGTERM_DRAG);
+            let max_turn = self.speed / SIGTERM_TURN_RADIUS;
+            // Turning toward a target too close to the side would only
+            // circle it: coming out of the turn the plane must still have
+            // a straight run of a bomb's forward travel to let go before
+            // the target. That run is the tangent from the turn circle's
+            // centre to the target; while it is too short (the target
+            // inside the circle or just past it) the plane flies on
+            // straight and comes around for another pass, like a bomber
+            // that has overshot. It turns back in only with a fifth more
+            // than it needs, so the tangent can't shrink below the run
+            // mid-turn and stop it again.
+            let side = if turn_to >= 0.0 { 1.0 } else { -1.0 };
+            let centre = self.pos.xz() + self.heading.perp() * side * SIGTERM_TURN_RADIUS;
+            let fall = (self.pos.y - ground(self.target.xz())).det_max(0.0);
+            let mut run = self.speed * (2.0 * fall / SIGTERM_BOMB_GRAVITY).sqrt();
+            if self.extending {
+                run *= 1.2;
+            }
+            self.extending = centre.distance_squared(self.target.xz())
+                < SIGTERM_TURN_RADIUS * SIGTERM_TURN_RADIUS + run * run;
+            turn = if self.extending {
+                0.0
+            } else {
+                turn_to.det_clamp(-max_turn, max_turn)
+            };
+            // Hold the cruise height over the higher of the ground below
+            // and the ground it reaches in 40 frames; climb and dive no
+            // steeper than `maxPitch`.
+            let ahead = self.pos.xz() + self.heading * self.speed * SIGTERM_LOOKAHEAD_FRAMES;
+            let floor = ground(self.pos.xz()).det_max(ground(ahead));
+            let max_climb = self.speed * bevy::math::ops::tan(SIGTERM_MAX_PITCH);
+            let want_vy =
+                ((floor + SIGTERM_CRUISE_HEIGHT - self.pos.y) * 0.1).det_clamp(-max_climb, max_climb);
+            self.vel.y += (want_vy - self.vel.y).det_clamp(-0.3, 0.3);
+        }
+        if turn != 0.0 {
+            let (sin, cos) = (bevy::math::ops::sin(turn), bevy::math::ops::cos(turn));
+            self.heading = Vec2::new(
+                self.heading.x * cos - self.heading.y * sin,
+                self.heading.x * sin + self.heading.y * cos,
+            )
+            .normalize_or(self.heading);
+        }
+        // Rolled into the turn in proportion to how hard it turns, once
+        // well clear of the ground (`GetAileronDeflection`: 0.6 of the
+        // wanted height).
+        let max_turn = (self.speed / SIGTERM_TURN_RADIUS).det_max(1e-6);
+        let want_bank = if height > SIGTERM_CRUISE_HEIGHT * 0.6 {
+            (turn / max_turn).det_clamp(-1.0, 1.0) * SIGTERM_MAX_BANK
+        } else {
+            0.0
+        };
+        self.bank += (want_bank - self.bank).det_clamp(-SIGTERM_BANK_RATE, SIGTERM_BANK_RATE);
+        self.vel = Vec3::new(self.heading.x * self.speed, self.vel.y, self.heading.y * self.speed);
+        self.pos += self.vel;
+        self.pos.y = self.pos.y.det_max(ground(self.pos.xz()));
+
+        // `CBombDropper::TestRange`: drop when a bomb let go now would
+        // land within `salvoDelay · speed · 0.5` of the target — or at
+        // the end of its 120 s (`Killed` still drops it).
+        let expired = self.frames >= SIGTERM_MAX_FRAMES;
+        if self.taking_off && !expired {
+            return None;
+        }
+        let fall = (self.pos.y - ground(self.target.xz())).det_max(0.0);
+        let fall_frames = (2.0 * fall / SIGTERM_BOMB_GRAVITY).sqrt();
+        let landing = self.pos.xz() + self.vel.xz() * fall_frames;
+        let drop_dist = SIGTERM_SALVO_FRAMES * self.speed * 0.5;
+        if !expired && landing.distance(self.target.xz()) > drop_dist {
+            return None;
+        }
+        // `FireImpl`: the bomb starts with the plane's velocity, nudged
+        // toward the target by at most one elmo per frame.
+        let nudge = if fall_frames > 0.0 {
+            ((self.target.xz() - landing) / fall_frames).clamp_length_max(1.0)
+        } else {
+            Vec2::ZERO
+        };
+        Some(SigTermBomb {
+            pos: self.pos - Vec3::Y * 6.0,
+            vel: self.vel + Vec3::new(nudge.x, 0.0, nudge.y),
+            owner_team: self.owner_team,
+            owner_faction: self.owner_faction,
+        })
+    }
+}
+
+/// The ground height under an XZ point (flat 0 without a heightmap).
+fn ground_at(hm: Option<&Heightmap>) -> impl Fn(Vec2) -> f32 + '_ {
+    move |p: Vec2| hm.map_or(0.0, |hm| hm.sample(p.x, p.y))
+}
+
+/// Fly every Signal; on the drop, spawn the bomb and break the Signal up
+/// into a falling wreck.
 #[allow(clippy::too_many_arguments)]
 pub fn tick_sigterm_signals(
     time: Res<Time>,
     mut signals: Query<(Entity, &mut SigTermSignal, &mut Transform)>,
+    heightmap: Option<Res<Heightmap>>,
     mut visuals: SigTermVisuals,
     mut commands: Commands,
 ) {
-    let dt = time.delta_secs();
+    let frames = sim_frames(time.delta_secs());
+    let ground = ground_at(heightmap.as_deref());
     for (entity, mut signal, mut transform) in &mut signals {
-        signal.elapsed += dt;
-        let total_time = if signal.total_distance > 1e-3 {
-            signal.total_distance / SIGTERM_SIGNAL_SPEED
-        } else {
-            0.0
-        };
-        let release = Vec3::new(signal.target.x, signal.start.y, signal.target.z);
-
-        if total_time <= 0.0 || signal.elapsed >= total_time {
-            // Arrived — drop the bomb from cruise altitude. Free-fall
-            // duration is canonical, not recalculated per altitude.
-            let (bomb_mesh, bomb_material) = visuals.bomb(signal.owner_faction);
-            commands.spawn((
-                SigTermBomb {
-                    target: signal.target,
-                    start: release,
-                    time_to_detonate: SIGTERM_FALL_DURATION,
-                    total_fall: SIGTERM_FALL_DURATION,
-                    owner_team: signal.owner_team,
-                    owner_faction: signal.owner_faction,
-                },
-                Mesh3d(bomb_mesh),
-                MeshMaterial3d(bomb_material),
-                Transform::from_translation(release),
-                Visibility::default(),
-            ));
-            commands.entity(entity).despawn();
-            continue;
+        let mut dropped = None;
+        for _ in 0..frames {
+            if let Some(bomb) = signal.step(&ground) {
+                dropped = Some(bomb);
+                break;
+            }
         }
+        transform.translation = signal.pos;
+        transform.rotation = signal.orientation();
+        let Some(bomb) = dropped else {
+            continue;
+        };
+        let (bomb_mesh, bomb_material) = visuals.bomb(signal.owner_faction);
+        commands.spawn((
+            Transform::from_translation(bomb.pos).with_rotation(nose_along(bomb.vel, 0.0)),
+            bomb,
+            Mesh3d(bomb_mesh),
+            MeshMaterial3d(bomb_material),
+            Visibility::default(),
+        ));
+        // The airframe tumbles down from where it let go.
+        commands
+            .entity(entity)
+            .remove::<SigTermSignal>()
+            .insert(SigTermWreck {
+                vel: signal.vel,
+                spin: Vec3::new(0.11, 0.03, 0.07),
+            });
+    }
+}
 
-        let t = (signal.elapsed / total_time).det_clamp(0.0, 1.0);
-        transform.translation = signal.start.lerp(release, t);
-        if signal.total_distance > 1e-3 {
-            transform.look_at(release, Vec3::Y);
+/// The broken-up Signal falls, tumbling, and vanishes on the ground.
+pub fn tick_sigterm_wrecks(
+    time: Res<Time>,
+    mut wrecks: Query<(Entity, &mut SigTermWreck, &mut Transform)>,
+    heightmap: Option<Res<Heightmap>>,
+    mut commands: Commands,
+) {
+    let frames = sim_frames(time.delta_secs());
+    let ground = ground_at(heightmap.as_deref());
+    for (entity, mut wreck, mut transform) in &mut wrecks {
+        for _ in 0..frames {
+            wreck.vel.y -= SIGTERM_WRECK_GRAVITY;
+            wreck.vel *= 0.99;
+            transform.translation += wreck.vel;
+            let spin = Quat::from_scaled_axis(wreck.spin);
+            transform.rotation = spin * transform.rotation;
+        }
+        if transform.translation.y <= ground(transform.translation.xz()) {
+            commands.entity(entity).despawn();
         }
     }
 }
 
 /// Fall + detonate every in-flight SIGTERM bomb.
 ///
-/// Each frame, lerps the bomb's transform from its spawn altitude
-/// toward the clicked ground target. When `time_to_detonate` drops
-/// below zero the `[SigTerm]` weapon explodes there — an ordinary
-/// [`PendingDamage`] explosion (450 elmo damage radius from
-/// `areaofeffect=900`, `edgeeffectiveness=.8`, the armour table), owned
-/// by nobody since the Signal destroyed itself on release — and leaves
-/// its [`AreaDenialZone`] tail behind; the bomb then despawns.
+/// Each frame the bomb falls under the `[SigTerm]` weapon's gravity,
+/// nose along its path. Where it enters the ground the weapon explodes
+/// — an ordinary [`PendingDamage`] explosion (450 elmo damage radius
+/// from `areaofeffect=900`, `edgeeffectiveness=.8`, the armour table),
+/// owned by nobody since the Signal destroyed itself on release — and
+/// leaves its [`AreaDenialZone`] tail behind; the bomb then despawns.
 pub fn tick_sigterm_bombs(
     time: Res<Time>,
     mut bombs: Query<(Entity, &mut SigTermBomb, &mut Transform)>,
+    heightmap: Option<Res<Heightmap>>,
     weapons: Res<WeaponRegistry>,
     mut damage_queue: ResMut<DamageQueue>,
     mut pending_explosions: ResMut<PendingExplosions>,
     mut commands: Commands,
 ) {
-    let dt = time.delta_secs();
+    let frames = sim_frames(time.delta_secs());
+    let hm = heightmap.as_deref();
+    let ground = ground_at(hm);
     let sigterm = weapons.known().sigterm;
     for (entity, mut bomb, mut transform) in &mut bombs {
-        bomb.time_to_detonate -= dt;
-
-        if bomb.time_to_detonate > 0.0 {
-            // Lerp start → target. `t=1` at detonation; the visual
-            // reaches the ground exactly when the blast fires.
-            let t = if bomb.total_fall > 0.0 {
-                1.0 - (bomb.time_to_detonate / bomb.total_fall)
-            } else {
-                1.0
-            };
-            transform.translation = bomb.start.lerp(bomb.target, t.det_clamp(0.0, 1.0));
-            continue;
+        let mut impact = None;
+        for _ in 0..frames {
+            let prev = bomb.pos;
+            bomb.vel.y -= SIGTERM_BOMB_GRAVITY;
+            let vel = bomb.vel;
+            bomb.pos += vel;
+            let floor = ground(bomb.pos.xz());
+            impact = hm
+                .and_then(|hm| hm.ground_hit(prev, bomb.pos))
+                .or((bomb.pos.y <= floor).then(|| Vec3::new(bomb.pos.x, floor, bomb.pos.z)));
+            if impact.is_some() {
+                break;
+            }
         }
+        transform.translation = bomb.pos;
+        transform.rotation = nose_along(bomb.vel, 0.0);
+        let Some(at) = impact else {
+            continue;
+        };
 
         if let Some(sigterm) = sigterm {
-            damage_queue.push(PendingDamage::unowned_explosion(sigterm, bomb.target));
+            damage_queue.push(PendingDamage::unowned_explosion(sigterm, at));
         }
         // The bomb detonates through upstream's
         // `explosiongenerator=custom:system_sigterm`
         // (retroweapons.tdf:597) — without this the blast is silent.
         pending_explosions.events.push(ExplosionEvent {
-            pos: bomb.target,
+            pos: at,
             rgb: bomb.owner_faction.rgb_f32(),
             radius: sigterm.map_or(0.0, |id| weapons.by_id(id).area_of_effect),
             ceg_name: "system_sigterm".to_string(),
@@ -1270,7 +1488,7 @@ pub fn tick_sigterm_bombs(
         // goes to `LastSignalTeam` and the first tick finds it an owner.
         commands.spawn(AreaDenialZone::new(
             DenialWeapon::SigTerm,
-            bomb.target,
+            at,
             None,
             bomb.owner_team,
             bomb.owner_faction,
@@ -1743,13 +1961,21 @@ mod tests {
         assert!(!other);
     }
 
-    /// A Signal flown to its release point hands off to a SigTermBomb
-    /// at the current altitude. Two-stage airstrike reproduced: the
-    /// Signal does the horizontal traversal, the bomb does the fall.
-    #[test]
-    fn sigterm_signal_drops_bomb_on_arrival() {
+    /// One sim frame of every SIGTERM stage.
+    fn sigterm_frame(app: &mut App) {
         use bevy::ecs::system::RunSystemOnce;
+        app.world_mut()
+            .resource_mut::<Time>()
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 30.0));
+        app.world_mut()
+            .run_system_once(tick_sigterm_signals)
+            .unwrap();
+        app.world_mut().run_system_once(tick_sigterm_bombs).unwrap();
+        app.world_mut().run_system_once(tick_sigterm_wrecks).unwrap();
+    }
 
+    fn sigterm_app() -> App {
+        let (weapons, _) = sigterm_weapons();
         let mut app = App::new();
         app.init_resource::<Time>()
             .init_sim()
@@ -1757,105 +1983,175 @@ mod tests {
             .init_resource::<Assets<StandardMaterial>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<S3OModelCache>()
-            .init_resource::<SigTermAssets>();
-
-        // Start 500 elmos east of the target at cruise altitude. At
-        // SIGTERM_SIGNAL_SPEED = 240 elmos/s, flight takes ~2.08 s.
-        let target = Vec3::ZERO;
-        let start = Vec3::new(500.0, SIGTERM_SIGNAL_ALTITUDE, 0.0);
-        let distance = start.distance(Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0));
-        app.world_mut().spawn((
-            SigTermSignal {
-                target,
-                start,
-                total_distance: distance,
-                elapsed: 0.0,
-                owner_team: 0,
-                owner_faction: Faction::System,
-            },
-            Transform::from_translation(start),
-        ));
-
-        // Advance past the full flight time. One tick of the system
-        // after arrival spawns the bomb + despawns the Signal.
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(2_500));
-        app.world_mut()
-            .run_system_once(tick_sigterm_signals)
-            .unwrap();
-
-        let signals_left = app
-            .world_mut()
-            .query::<&SigTermSignal>()
-            .iter(app.world())
-            .count();
-        assert_eq!(signals_left, 0, "signal must despawn after dropping bomb");
-
-        let bombs: Vec<SigTermBomb> = app
-            .world_mut()
-            .query::<&SigTermBomb>()
-            .iter(app.world())
-            .cloned()
-            .collect();
-        assert_eq!(bombs.len(), 1, "signal must spawn exactly one bomb");
-        let bomb = &bombs[0];
-        assert_eq!(bomb.target, target);
-        assert!(
-            (bomb.start.y - SIGTERM_SIGNAL_ALTITUDE).abs() < 1e-3,
-            "bomb should fall from cruise altitude, got {}",
-            bomb.start.y
-        );
-        assert!(
-            (bomb.start.x - target.x).abs() < 1e-3 && (bomb.start.z - target.z).abs() < 1e-3,
-            "bomb should release directly above the target, got {:?}",
-            bomb.start
-        );
-        assert_eq!(bomb.owner_team, 0);
-    }
-
-    /// A bomb spawned at altitude reaches ground just as its timer
-    /// hits zero. Verifies the lerp math doesn't overshoot or drift.
-    #[test]
-    fn sigterm_bomb_reaches_target_at_detonation() {
-        use bevy::ecs::system::RunSystemOnce;
-
-        let mut app = App::new();
-        app.init_resource::<Time>()
-            .init_sim()
+            .init_resource::<SigTermAssets>()
             .init_resource::<DamageQueue>()
             .init_resource::<PendingExplosions>()
-            .insert_resource(WeaponRegistry::default());
+            .insert_resource(weapons);
+        app
+    }
 
-        let target = Vec3::new(100.0, 0.0, 50.0);
-        let start = target + Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0);
+    /// The whole airstrike over flat ground: the Signal rises straight
+    /// off the Terminal (facing away from the target), turns toward it,
+    /// cruises at its wanted height, and lets the bomb go before the
+    /// target — which then lands on it.
+    #[test]
+    fn sigterm_takes_off_flies_and_bombs_the_target() {
+        let mut app = sigterm_app();
+        let target = Vec3::new(1600.0, 0.0, 400.0);
+        let signal = app
+            .world_mut()
+            .spawn((
+                SigTermSignal {
+                    target,
+                    pos: Vec3::ZERO,
+                    vel: Vec3::ZERO,
+                    // Facing away from the target.
+                    heading: Vec2::new(-1.0, 0.0),
+                    speed: 0.0,
+                    bank: 0.0,
+                    taking_off: true,
+                extending: false,
+                    frames: 0,
+                    owner_team: 0,
+                    owner_faction: Faction::System,
+                },
+                Transform::default(),
+            ))
+            .id();
+
+        // The first frames: straight up.
+        for _ in 0..10 {
+            sigterm_frame(&mut app);
+        }
+        let s = app.world().get::<SigTermSignal>(signal).unwrap().clone();
+        assert!(s.pos.y > 40.0, "rising: {}", s.pos);
+        assert!(s.pos.xz().length() < 1.0, "straight up: {}", s.pos);
+
+        let mut top = 0.0f32;
+        let mut released_at = None;
+        for frame in 0..40 * 30 {
+            if let Some(s) = app.world().get::<SigTermSignal>(signal) {
+                top = top.det_max(s.pos.y);
+                released_at = Some((frame, s.pos));
+            }
+            sigterm_frame(&mut app);
+            if !app.world().resource::<DamageQueue>().is_empty() {
+                break;
+            }
+        }
+        assert!(
+            (top - SIGTERM_CRUISE_HEIGHT).abs() < 40.0,
+            "cruises near {SIGTERM_CRUISE_HEIGHT}: topped out at {top}"
+        );
+        let (_, release) = released_at.unwrap();
+        let blasts: Vec<_> = app
+            .world()
+            .resource::<DamageQueue>()
+            .iter_snapshot_for_test()
+            .cloned()
+            .collect();
+        assert_eq!(blasts.len(), 1, "one bomb, one blast");
+        let hit = blasts[0].impact_pos;
+        assert!(
+            hit.xz().distance(target.xz()) < 80.0,
+            "lands on the target: {hit} vs {target}"
+        );
+        assert!(
+            release.xz().distance(target.xz()) > 150.0,
+            "let go well before the target, not above it: {release}"
+        );
+        // The airframe broke up when it let go, and fell away.
+        assert!(app.world().get::<SigTermSignal>(signal).is_none());
+    }
+
+    /// A target close beside, ahead of or behind the Terminal — inside
+    /// the Signal's turning circle — is bombed after one go-around, not
+    /// circled until the Signal expires.
+    #[test]
+    fn sigterm_comes_around_for_a_close_target() {
+        for (target, heading) in [
+            (Vec3::new(450.0, 0.0, 150.0), Vec2::Y),
+            (Vec3::new(450.0, 0.0, 150.0), Vec2::NEG_Y),
+            (Vec3::new(200.0, 0.0, 0.0), Vec2::X),
+            (Vec3::new(0.0, 0.0, 300.0), Vec2::NEG_Y),
+        ] {
+            let mut app = sigterm_app();
+            app.world_mut().spawn((
+                SigTermSignal {
+                    target,
+                    pos: Vec3::ZERO,
+                    vel: Vec3::ZERO,
+                    heading,
+                    speed: 0.0,
+                    bank: 0.0,
+                    taking_off: true,
+                extending: false,
+                    frames: 0,
+                    owner_team: 0,
+                    owner_faction: Faction::System,
+                },
+                Transform::default(),
+            ));
+            let mut frames = 0;
+            while app.world().resource::<DamageQueue>().is_empty() {
+                sigterm_frame(&mut app);
+                frames += 1;
+                assert!(frames < 30 * 30, "{target}: still circling");
+            }
+            let hit = app
+                .world()
+                .resource::<DamageQueue>()
+                .iter_snapshot_for_test()
+                .next()
+                .unwrap()
+                .impact_pos;
+            assert!(
+                hit.xz().distance(target.xz()) < 80.0,
+                "{target}: lands on the target: {hit}"
+            );
+        }
+    }
+
+    /// The bomb keeps the plane's speed and falls under `myGravity=.3`:
+    /// from 300 elmos up at 6.8 elmos/frame it lands about 45 frames and
+    /// 300 elmos later (Spring's `CBombDropper` arc), not straight down.
+    #[test]
+    fn sigterm_bomb_falls_on_a_forward_arc() {
+        let mut app = sigterm_app();
         let bomb = app
             .world_mut()
             .spawn((
                 SigTermBomb {
-                    target,
-                    start,
-                    time_to_detonate: SIGTERM_FALL_DURATION,
-                    total_fall: SIGTERM_FALL_DURATION,
+                    pos: Vec3::new(0.0, 300.0, 0.0),
+                    vel: Vec3::new(6.8, 0.0, 0.0),
                     owner_team: 0,
                     owner_faction: Faction::System,
                 },
-                Transform::from_translation(start),
+                Transform::default(),
             ))
             .id();
-
-        // Advance to roughly half the fall — bomb should be halfway.
-        app.world_mut()
-            .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(600));
-        app.world_mut().run_system_once(tick_sigterm_bombs).unwrap();
-        let pos = app.world().get::<Transform>(bomb).unwrap().translation;
-        let half_y = (start.y + target.y) * 0.5;
-        assert!(
-            (pos.y - half_y).abs() < 5.0,
-            "bomb at t=0.6s should be ~halfway: expected y≈{half_y}, got y={}",
-            pos.y
-        );
+        for _ in 0..20 {
+            sigterm_frame(&mut app);
+        }
+        // 20 frames: 136 elmos on, 63 down (0.3·20·21/2).
+        let pos = app.world().get::<SigTermBomb>(bomb).unwrap().pos;
+        assert!((pos.x - 136.0).abs() < 0.01, "{pos}");
+        assert!((pos.y - (300.0 - 63.0)).abs() < 0.01, "{pos}");
+        let mut frames = 20;
+        while app.world().get::<SigTermBomb>(bomb).is_some() {
+            sigterm_frame(&mut app);
+            frames += 1;
+            assert!(frames < 100);
+        }
+        assert!((44..=46).contains(&frames), "{frames} frames");
+        let hit = app
+            .world()
+            .resource::<DamageQueue>()
+            .iter_snapshot_for_test()
+            .next()
+            .unwrap()
+            .impact_pos;
+        assert!((hit.x - 306.0).abs() < 8.0 && hit.y.abs() < 1e-3, "{hit}");
     }
 
     fn sigterm_weapons() -> (WeaponRegistry, WeaponId) {
@@ -1893,12 +2189,11 @@ mod tests {
             .insert_resource(weapons);
 
         let target = Vec3::new(10.0, 0.0, 20.0);
+        // Falling straight onto the target, one frame from the ground.
         app.world_mut().spawn((
             SigTermBomb {
-                target,
-                start: target + Vec3::new(0.0, SIGTERM_SIGNAL_ALTITUDE, 0.0),
-                time_to_detonate: 0.0,
-                total_fall: SIGTERM_FALL_DURATION,
+                pos: target + Vec3::Y * 4.0,
+                vel: Vec3::new(0.0, -8.0, 0.0),
                 owner_team: 1,
                 owner_faction: Faction::System,
             },
@@ -1907,7 +2202,7 @@ mod tests {
 
         app.world_mut()
             .resource_mut::<Time>()
-            .advance_by(std::time::Duration::from_millis(20));
+            .advance_by(std::time::Duration::from_secs_f32(1.0 / 30.0));
         app.world_mut().run_system_once(tick_sigterm_bombs).unwrap();
 
         // Bomb is gone, zone is present.
