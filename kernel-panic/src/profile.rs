@@ -5,7 +5,8 @@
 //! (`FixedFirst` to `FixedLast`) with the real clock, and prints
 //! mean / p50 / p90 / p99 / max plus how many ticks the frames ran,
 //! so a change can be compared without a tracing build:
-//! `KP_PROFILE=1 KP_EXIT_AFTER=3000 KP_TIME_SCALE=4 KP_DEMO_MAP=… cargo run --release`.
+//! `KP_PROFILE=1 KP_EXIT_AFTER=3000 KP_TIME_SCALE=4 KP_DEMO_MAP=… cargo run --release`
+//! (`KP_LAUNCH_SEED=<n>` for the same demo every run, `rng::launch_entropy`).
 
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
@@ -27,7 +28,7 @@ impl Plugin for ProfilePlugin {
             // printed at exit: tells a fill-rate-bound frame from a
             // CPU-bound one.
             .add_plugins(bevy::render::diagnostic::RenderDiagnosticsPlugin)
-            .add_systems(First, (frame_start, census).chain())
+            .add_systems(First, (frame_start, count_asset_events, census).chain())
             .add_systems(FixedFirst, tick_start)
             .add_systems(FixedLast, tick_end)
             .add_systems(Last, report_on_exit);
@@ -48,6 +49,48 @@ struct Samples {
     census_at: Option<Instant>,
     /// Longest frame (µs) since the last census line.
     worst_since_census: u32,
+    /// GPU re-uploads since the last census line: assets added and
+    /// modified (`[images, meshes, materials]`), each one a
+    /// `prepare_assets` upload in the render world.
+    added: [u32; 3],
+    modified: [u32; 3],
+}
+
+/// Counts the asset events behind the render world's uploads.
+fn count_asset_events(
+    mut s: ResMut<Samples>,
+    mut images: MessageReader<AssetEvent<Image>>,
+    mut meshes: MessageReader<AssetEvent<Mesh>>,
+    mut materials: MessageReader<AssetEvent<StandardMaterial>>,
+) {
+    let mut tally = |i: usize, added: bool| {
+        if added {
+            s.added[i] += 1;
+        } else {
+            s.modified[i] += 1;
+        }
+    };
+    for ev in images.read() {
+        match ev {
+            AssetEvent::Added { .. } => tally(0, true),
+            AssetEvent::Modified { .. } => tally(0, false),
+            _ => {}
+        }
+    }
+    for ev in meshes.read() {
+        match ev {
+            AssetEvent::Added { .. } => tally(1, true),
+            AssetEvent::Modified { .. } => tally(1, false),
+            _ => {}
+        }
+    }
+    for ev in materials.read() {
+        match ev {
+            AssetEvent::Added { .. } => tally(2, true),
+            AssetEvent::Modified { .. } => tally(2, false),
+            _ => {}
+        }
+    }
 }
 
 fn frame_start(mut s: ResMut<Samples>) {
@@ -81,8 +124,14 @@ fn census(world: &mut World) {
     if !due {
         return;
     }
-    let worst =
-        std::mem::take(&mut world.resource_mut::<Samples>().worst_since_census) as f32 / 1000.0;
+    let (worst, added, modified) = {
+        let mut s = world.resource_mut::<Samples>();
+        (
+            std::mem::take(&mut s.worst_since_census) as f32 / 1000.0,
+            std::mem::take(&mut s.added),
+            std::mem::take(&mut s.modified),
+        )
+    };
     let entities = world.entities().len();
     let units = world
         .query::<&crate::units::components::UnitType>()
@@ -102,7 +151,7 @@ fn census(world: &mut World) {
         .events
         .len();
     println!(
-        "KP_PROFILE census worst_frame={worst:.1}ms entities={entities} units={units} dying={dying} death_bursts={deaths} pending_explosions={pending} {fx:?}"
+        "KP_PROFILE census worst_frame={worst:.1}ms entities={entities} units={units} dying={dying} death_bursts={deaths} pending_explosions={pending} {fx:?} added(img,mesh,mat)={added:?} modified={modified:?}"
     );
 }
 

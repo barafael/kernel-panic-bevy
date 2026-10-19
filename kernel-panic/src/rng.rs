@@ -72,10 +72,19 @@ pub fn clock_f64() -> f64 {
 /// Native: the wall clock plus the OS-random keys std seeds every
 /// `RandomState` with. Web: `Math.random()` and the wall clock
 /// (`std::time` panics on wasm32).
+///
+/// `KP_LAUNCH_SEED=<u64>` (native) fixes it instead, so a profiling run
+/// (`profile`) plays the same attract demo every launch.
 fn launch_entropy() -> u64 {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::hash::{BuildHasher, Hasher};
+        if let Some(seed) = std::env::var("KP_LAUNCH_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            return seed;
+        }
         let wall = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64);
