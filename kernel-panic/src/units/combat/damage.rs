@@ -592,11 +592,6 @@ impl DelayedDamage {
         });
         due
     }
-
-    #[cfg(test)]
-    pub fn iter_for_test(&self) -> impl Iterator<Item = &(u64, Hit)> {
-        self.0.iter()
-    }
 }
 
 /// [`tick_burst_fire`]'s random stream (`predictSpeedMod` re-rolls).

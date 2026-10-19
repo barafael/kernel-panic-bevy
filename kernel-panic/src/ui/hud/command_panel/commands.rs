@@ -407,7 +407,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
         UnitKind::Byte => out.push(
             CmdDesc::new(
                 CmdId::LaunchMines,
-                Targeted,
+                Icon,
                 "Launch Mines",
                 "Launches several mines in a forward arc,\nat the cost of 6000 hitpoints. 10s reload.",
                 "d",

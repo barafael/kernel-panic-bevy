@@ -46,12 +46,16 @@ use super::state::Fnv;
 /// ground; units close in on a target behind a hill); the SIGTERM
 /// Signal takes off and flies as an airplane and its bomb falls on a
 /// ballistic arc.
+/// 9 (2026-10-19): Launch Mines is untargeted: the Byte unfolds and
+/// fires five MineLauncher bolts from its tubes, and a Logic Bomb
+/// appears where each one explodes; before, five mines appeared in a
+/// line at the clicked point.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 8;
+pub const SIM_VERSION: u32 = 9;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

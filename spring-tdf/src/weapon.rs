@@ -389,16 +389,19 @@ impl WeaponDef {
     /// `LaserCannon` is NOT a projectile in this sense even though
     /// it travels — it renders as a flat stretched ribbon via
     /// [`crate::WeaponCategory::LaserCannon`], not a 3D model shell.
+    /// `ballistic=1` only matters through [`Self::category`] (a weapon
+    /// without a `weaponType` becomes a Cannon): with an explicit type
+    /// `weapondefs_post.lua` turns it into `gravityAffected`, which only
+    /// the DGun reads, so the MineLauncher's LaserCannon bolt flies
+    /// straight.
     pub fn is_projectile(&self) -> bool {
-        self.ballistic
-            || matches!(
-                self.category(),
-                WeaponCategory::MissileLauncher
-                    | WeaponCategory::StarburstLauncher
-                    | WeaponCategory::Cannon
-                    | WeaponCategory::AircraftBomb,
-            )
-            || !self.model.trim().trim_end_matches(';').is_empty()
+        matches!(
+            self.category(),
+            WeaponCategory::MissileLauncher
+                | WeaponCategory::StarburstLauncher
+                | WeaponCategory::Cannon
+                | WeaponCategory::AircraftBomb,
+        ) || !self.model.trim().trim_end_matches(';').is_empty()
     }
 
     /// True for weapons whose shot visibly travels across the map before
@@ -733,14 +736,15 @@ mod shim_tests {
     #[test]
     fn mine_launcher_honors_explicit_laser_cannon() {
         // MineLauncher: `WeaponType=LaserCannon; ballistic=1;`. The
-        // explicit weaponType keeps it a LaserCannon; ballistic makes
-        // `is_projectile()` true separately (gravity-affected bolt).
+        // explicit weaponType keeps it a LaserCannon, and `ballistic`
+        // becomes `gravityAffected`, which a LaserCannon ignores: a
+        // straight bolt, not a projectile.
         let w = parse(
             "[M]\n{\nweapontype=LaserCannon;\nballistic=1;\nmygravity=.4;\n}",
             "M",
         );
         assert_eq!(w.category(), WeaponCategory::LaserCannon);
-        assert!(w.is_projectile());
+        assert!(!w.is_projectile());
     }
 
     #[test]

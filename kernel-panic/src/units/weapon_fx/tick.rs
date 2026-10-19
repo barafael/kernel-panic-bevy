@@ -6,9 +6,9 @@ use bevy::prelude::*;
 
 use super::batch::FxQuadBatches;
 use super::shared::{
-    BeamVisual, DelayedHit, ExplosionEvent, FadingTrail, Flight, GroundFlash, ImpactBurst,
-    LaserBolt, LightningArc, PendingExplosions, ProjectileTrail, ProjectileVisual, SMOKE_COLOR,
-    SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
+    BeamVisual, BoltCegTrail, DelayedHit, ExplosionEvent, FadingTrail, Flight, GroundFlash,
+    ImpactBurst, LaserBolt, LightningArc, PendingExplosions, ProjectileTrail, ProjectileVisual,
+    SMOKE_COLOR, SMOKE_SIZE, SMOKE_TIME_FRAMES, TRAIL_SAMPLE_COUNT, TrailSample,
 };
 use crate::rendering::camera::RtsCamera;
 use crate::sim::{DetFloat, GAME_SPEED, secs_to_frames};
@@ -83,7 +83,7 @@ pub(super) fn tick_weapon_fx(
     mut arcs: Query<(Entity, &mut LightningArc)>,
     mut beams: Query<(Entity, &mut BeamVisual)>,
     mut projectiles: Query<(Entity, &mut ProjectileVisual, &mut Transform)>,
-    mut bolts: Query<(Entity, &mut LaserBolt)>,
+    mut bolts: Query<(Entity, &mut LaserBolt, Option<&mut BoltCegTrail>)>,
     mut impacts: Query<(Entity, &mut ImpactBurst, &mut Transform), Without<ProjectileVisual>>,
     mut flashes: Query<
         (Entity, &mut GroundFlash, &mut Transform),
@@ -243,7 +243,7 @@ pub(super) fn tick_weapon_fx(
     // corners — `dir1 = ((midpoint - cam) × beam_dir).normalize()`
     // is the width axis; the quad spans `±dir1 * thickness` at lead
     // and tail. Despawns once both ends pass the target.
-    for (entity, mut bolt) in &mut bolts {
+    for (entity, mut bolt, mut ceg_trail) in &mut bolts {
         let prev_lead_raw = (bolt.speed * bolt.elapsed).det_min(bolt.total_distance);
         bolt.elapsed += dt;
         let lead_raw = bolt.speed * bolt.elapsed;
@@ -258,6 +258,25 @@ pub(super) fn tick_weapon_fx(
         let curr_lead_pos = bolt.origin + bolt.direction * lead_dist;
         let hit_meta = delayed_hits.get(entity).ok();
         let target_entity = hit_meta.and_then(|h| h.target);
+        // `cegTag`: `CLaserProjectile::UpdateIntensity` emits it where the
+        // bolt is, before it moves, every frame until it hits something.
+        if hit_meta.is_some()
+            && let Some(trail) = ceg_trail.as_deref_mut()
+        {
+            spawn_ceg(
+                &weapon_registry.by_id(trail.weapon).ceg_tag,
+                prev_lead_pos,
+                bolt.direction,
+                &ceg_ctx.ceg_registry,
+                &mut trail.seed,
+                &mut commands,
+                &mut ceg_ctx.materials,
+                &mut ceg_ctx.images,
+                &mut ceg_ctx.model_cache,
+                &mut ceg_ctx.ceg_assets,
+                ceg_ctx.heightmap.as_deref(),
+            );
+        }
         if let Some(impact_pos) = target_volume_hit(
             target_entity,
             prev_lead_pos,
@@ -823,17 +842,38 @@ fn trigger_delayed_hit(
         impact_pos,
         attacker_distance: hit.attacker_distance,
     });
-    if let Some(super::shared::ImpactEffect::NxZone {
-        owner_team,
-        owner_faction,
-    }) = hit.on_impact
-    {
-        commands.spawn(crate::units::mechanics::command_fire::nx_zone(
-            impact_pos,
-            hit.attacker,
+    match hit.on_impact {
+        Some(super::shared::ImpactEffect::NxZone {
             owner_team,
             owner_faction,
-        ));
+        }) => {
+            commands.spawn(crate::units::mechanics::command_fire::nx_zone(
+                impact_pos,
+                hit.attacker,
+                owner_team,
+                owner_faction,
+            ));
+        }
+        Some(super::shared::ImpactEffect::LogicBomb {
+            owner_team,
+            owner_faction,
+        }) => {
+            // `gadget:Explosion` queues it; `GameFrame` creates it
+            // (`spawn_queued_mines`, which also enforces the cap).
+            let spawn = crate::units::mechanics::command_fire::MineSpawn {
+                position: impact_pos,
+                faction: owner_faction,
+                team: owner_team,
+            };
+            commands.queue(move |world: &mut World| {
+                if let Some(mut queue) = world
+                    .get_resource_mut::<crate::units::mechanics::command_fire::MineSpawnQueue>()
+                {
+                    queue.push(spawn);
+                }
+            });
+        }
+        None => {}
     }
     let weapon_def = weapon_registry.by_id(hit.weapon);
     // `CGameHelper::Explosion` plays `soundhit` where the shot lands.

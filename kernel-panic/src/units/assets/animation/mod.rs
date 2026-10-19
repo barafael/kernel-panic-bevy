@@ -548,10 +548,11 @@ pub struct AnimCtx {
     /// The unit currently has a live aim request (`AimTarget`).
     pub aim_active: bool,
     /// The unit is under an explicit attack order (attack-target /
-    /// attack-ground). Foldable units must treat this as a want-open
-    /// signal even when no enemy unit is auto-acquired to aim at (a
-    /// ground order may target empty terrain) — otherwise a click gate
-    /// on the fold state would deadlock against the missing AimTarget.
+    /// attack-ground), or a Byte is launching mines. Foldable units must
+    /// treat this as a want-open signal even when no enemy unit is
+    /// auto-acquired to aim at (a ground order may target empty terrain)
+    /// — otherwise a click gate on the fold state would deadlock against
+    /// the missing AimTarget.
     pub attack_ordering: bool,
     /// The unit is still emerging (has an `Emerging` component). Drivers
     /// must run their build-emerge pose only while this is set — past
@@ -763,6 +764,7 @@ pub struct AnimDrivers<'w, 's> {
             Option<&'static crate::units::combat::AttackTargetOrder>,
             Has<crate::interaction::movement::AttackMoveActive>,
             Option<&'static crate::units::combat::TargetCache>,
+            Has<crate::units::mechanics::command_fire::MineLaunch>,
         ),
     >,
 }
@@ -789,6 +791,7 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
         attack_target,
         attack_move,
         target_cache,
+        launching_mines,
     ) in &mut drivers.animators
     {
         // `BUILD_PERCENT_LEFT` is `int((1 - buildProgress) * 100)`:
@@ -814,7 +817,10 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
             producing: producer.is_some_and(|p| p.current_production().is_some()),
             building: producer.is_some_and(|p| p.building),
             aim_active: aim_target.is_some(),
-            attack_ordering: attack_ground.is_some() || attack_target.is_some(),
+            attack_ordering: attack_ground.is_some()
+                || attack_target.is_some()
+                // byte.bos `LaunchMines`: `start-script Open()` while folded.
+                || launching_mines,
             emerging: emerging.is_some(),
             target_xz_dist: None,
         };

@@ -353,6 +353,7 @@ pub(crate) mod test_support {
         world.init_resource::<SimRng<BurstRng>>();
         world.init_resource::<SimRng<FactoryExitRng>>();
         world.init_resource::<SimRng<ImpulseRng>>();
+        world.init_resource::<SimRng<crate::units::mechanics::command_fire::MineLaunchRng>>();
         crate::units::weapon_fx::init_test_rngs(world);
     }
 

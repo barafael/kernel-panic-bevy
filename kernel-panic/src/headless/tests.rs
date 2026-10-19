@@ -1082,3 +1082,118 @@ fn factory_orders_reach_built_units() {
         "the Bit came within {closest} elmos of the rally point"
     );
 }
+
+/// End to end: Launch Mines on a folded Byte. It unfolds, then fires a
+/// MineLauncher bolt from each of its five tubes; each explodes on the
+/// ground ahead and leaves a Logic Bomb there — five mines in a forward
+/// arc — and the Byte is 6000 HP lighter and reloading.
+#[test]
+fn byte_launches_a_forward_arc_of_logic_bombs() {
+    use crate::net::{CommandFrame, NetId, NetPos, SimCommand, Units};
+    use crate::terrain::heightmap::Heightmap;
+    use crate::units::components::{Faction, Health, TeamId, UnitType};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
+    use crate::units::mechanics::command_fire::CommandFireCooldown;
+    use bevy::ecs::system::SystemState;
+
+    let mut scenario = Scenario::ai_match("Speed_Balls_16_Way", 2, 1, 7);
+    for seat in &mut scenario.seats {
+        seat.ai = false;
+    }
+    scenario.sandbox = true;
+    let mut h = SimHarness::new(scenario);
+
+    let byte = {
+        let world = h.world_mut();
+        let kernel = world
+            .query_filtered::<(&Transform, &TeamId), With<Homebase>>()
+            .iter(world)
+            .find(|(_, team)| team.0 == 0)
+            .map(|(tf, _)| tf.translation)
+            .expect("team 0 homebase");
+        let (w, d) = world.resource::<Heightmap>().world_size();
+        let toward = (Vec3::new(w * 0.5, 0.0, d * 0.5) - kernel)
+            .with_y(0.0)
+            .normalize_or(Vec3::Z);
+        let at = world
+            .resource::<Heightmap>()
+            .place(kernel.x + toward.x * 300.0, kernel.z + toward.z * 300.0);
+        let mut state: SystemState<SpawnContext> = SystemState::new(world);
+        let mut ctx = state.get_mut(world).expect("spawn context");
+        let byte = spawn_unit(UnitKind::Byte, Faction::System, 0, at, &mut ctx);
+        state.apply(world);
+        byte
+    };
+    // Past the 6 s `ARMORED` after its build.
+    for _ in 0..7 * 30 {
+        h.step();
+    }
+    let (hp_before, byte_id) = {
+        let world = h.world_mut();
+        let hp = world.get::<Health>(byte).unwrap().current;
+        (hp, *world.get::<NetId>(byte).unwrap())
+    };
+    {
+        let world = h.world_mut();
+        let mut bus = world.resource_mut::<CommandBus>();
+        let tick = bus.tick;
+        bus.deliver(CommandFrame {
+            tick,
+            player: 0,
+            commands: vec![SimCommand::Cast {
+                units: Units::of([byte_id]),
+                target: NetPos::quantize(Vec3::ZERO),
+                auto: false,
+            }],
+        });
+    }
+    let mut mines = Vec::new();
+    let mut frames = 0;
+    while mines.len() < 5 && frames < 6 * 30 {
+        h.step();
+        frames += 1;
+        let world = h.world_mut();
+        mines = world
+            .query::<(&UnitType, &TeamId, &Transform)>()
+            .iter(world)
+            .filter(|(u, t, _)| u.0 == UnitKind::LogicBomb && t.0 == 0)
+            .map(|(_, _, tf)| tf.translation)
+            .collect::<Vec<_>>();
+    }
+    let world = h.world_mut();
+    let tf = *world.get::<Transform>(byte).unwrap();
+    let fwd = tf.forward().as_vec3().with_y(0.0).normalize();
+    // Signed angle off the Byte's heading and distance of each mine.
+    let fan: Vec<(f32, f32)> = mines
+        .iter()
+        .map(|m| {
+            let to = (*m - tf.translation).with_y(0.0);
+            let angle = fwd.angle_between(to.normalize()).to_degrees() * fwd.cross(to).y.signum();
+            (angle, to.length())
+        })
+        .collect();
+    eprintln!("after {frames} frames: {fan:?}");
+    assert_eq!(mines.len(), 5, "five Logic Bombs: {fan:?}");
+    // Unfolding (`sleep 500` checks) and ~2 s of flight at 200 elmos/s.
+    assert!(frames > 45, "fired before the Byte had unfolded: {frames}");
+    for &(angle, dist) in &fan {
+        assert!(angle.abs() < 25.0, "not in front of the Byte: {fan:?}");
+        assert!((250.0..500.0).contains(&dist), "not a short throw: {fan:?}");
+    }
+    let (lo, hi) = fan
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &(a, _)| {
+            (lo.det_min(a), hi.det_max(a))
+        });
+    assert!(hi - lo > 25.0, "not fanned out: {fan:?}");
+    let hp_after = world.get::<Health>(byte).unwrap().current;
+    assert!(
+        (hp_before - hp_after - 6000.0).abs() < 1.0,
+        "{hp_before} -> {hp_after}"
+    );
+    assert!(
+        world.get::<CommandFireCooldown>(byte).is_some(),
+        "reloading"
+    );
+}

@@ -99,6 +99,7 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<crate::interaction::ground_move::PendingImpulses>()
             .init_match_resource::<combat::VirusSpawnQueue>()
             .init_match_resource::<command_fire::MineSpawnQueue>()
+            .init_match_resource::<SimRng<command_fire::MineLaunchRng>>()
             .init_match_resource::<network_buffer::PacketBuffer>()
             .init_match_resource::<network_buffer::FlowSpeedTicker>()
             .init_match_resource::<bookkeeping::SmallBuildingCounts>()
@@ -245,6 +246,7 @@ impl Plugin for UnitsPlugin {
                             command_fire::advance_pending_casts,
                             command_fire::process_command_fire,
                             command_fire::tick_nx_casts,
+                            command_fire::tick_mine_launches,
                             command_fire::tick_command_fire_cooldown,
                             command_fire::tick_area_denial,
                             command_fire::tick_sigterm_signals,

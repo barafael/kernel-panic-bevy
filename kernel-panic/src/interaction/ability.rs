@@ -2,8 +2,9 @@
 //!
 //! Pressing `D` with a caster selected fires that unit's "ability" at
 //! the cursor — whatever the unit kind treats as its ability:
-//! - Pointer / Obelisk / Firewall / Byte / Terminal → command-fire weapon
+//! - Pointer / Obelisk / Firewall / Terminal → command-fire weapon
 //!   (NX Flag, Infection gas, etc.) routed through `CommandFireEvent`.
+//! - Byte → Launch Mines, at once and without a target ([`launch_mines`]).
 //! - Port / Connection → Dispatch packets (with ALT modifier for
 //!   "drain the buffer", mirroring upstream `network_dispatch.lua`).
 //! - Bug / Exploit → Deploy / Pack Up (the Bug ↔ Exploit morph).
@@ -156,10 +157,36 @@ fn update_mode_cursor(modes: Res<OrderCursorModes>, mut request: ResMut<CursorRe
 }
 
 /// Whether `kind`'s `D` ability is aimed at a map point: command-fire
-/// casters (NX Flag, Infection, Protect, Mine Launch, SIGTERM) and the
-/// packet teleporters (Dispatch). Bug / Exploit deploy needs no target.
+/// casters (NX Flag, Infection, Protect, SIGTERM) and the packet
+/// teleporters (Dispatch). Bug / Exploit deploy and the Byte's Launch
+/// Mines need no target.
 pub(crate) fn ability_is_aimed(kind: UnitKind) -> bool {
-    kind.has_command_fire_ability() || kind.is_teleporter()
+    (kind.has_command_fire_ability() && kind != UnitKind::Byte) || kind.is_teleporter()
+}
+
+/// Launch mines from every Byte in `units`. Upstream's Launch Mines is
+/// an instant command (`CMDTYPE.ICON`): the mines go where the launcher
+/// tubes point, so the cast's target is unused.
+pub(crate) fn launch_mines(
+    units: impl IntoIterator<Item = (Entity, UnitKind)>,
+    net: &mut Issue,
+    commands: &mut Commands,
+) {
+    let bytes: Vec<Entity> = units
+        .into_iter()
+        .filter(|(_, kind)| *kind == UnitKind::Byte)
+        .map(|(e, _)| e)
+        .collect();
+    if bytes.is_empty() {
+        return;
+    }
+    crate::audio::ack_order(commands);
+    let units = net.units(bytes);
+    net.issue(SimCommand::Cast {
+        units,
+        target: NetPos::quantize(Vec3::ZERO),
+        auto: false,
+    });
 }
 
 /// Deploy / pack up every Bug / Exploit in `units` — the untargeted half
@@ -198,7 +225,7 @@ pub(crate) fn cast_aimed_abilities(
     let units = net.units(
         units
             .into_iter()
-            .filter(|(_, kind)| kind.has_command_fire_ability() || kind.is_teleporter())
+            .filter(|(_, kind)| ability_is_aimed(*kind))
             .map(|(e, _)| e),
     );
     net.issue(SimCommand::Cast {
@@ -241,10 +268,10 @@ fn consume_click(mouse: &mut ButtonInput<MouseButton>) {
     mouse.clear_just_pressed(MouseButton::Left);
 }
 
-/// `D` deploys a selected Bug into an Exploit and packs an Exploit
-/// back into a Bug. Co-exists with command-fire / dispatch on the
-/// same key because the eligibility sets don't overlap — Bug/Exploit
-/// aren't casters, aren't teleporters.
+/// `D` deploys a selected Bug into an Exploit, packs an Exploit back
+/// into a Bug and launches a Byte's mines. Co-exists with the aimed
+/// command-fire / dispatch on the same key because the eligibility sets
+/// don't overlap.
 fn trigger_deploy_on_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     selected_q: Query<(Entity, &UnitType), With<Selected>>,
@@ -258,6 +285,11 @@ fn trigger_deploy_on_hotkey(
         return;
     }
     deploy_units(
+        selected_q.iter().map(|(e, u)| (e, u.0)),
+        &mut net,
+        &mut commands,
+    );
+    launch_mines(
         selected_q.iter().map(|(e, u)| (e, u.0)),
         &mut net,
         &mut commands,

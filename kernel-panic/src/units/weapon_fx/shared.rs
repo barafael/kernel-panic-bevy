@@ -76,6 +76,12 @@ pub enum ImpactEffect {
         owner_team: u8,
         owner_faction: crate::units::components::Faction,
     },
+    /// `Launcher.lua` on a MineLauncher explosion: a Logic Bomb of the
+    /// firing Byte's team where the shot exploded (cap permitting).
+    LogicBomb {
+        owner_team: u8,
+        owner_faction: crate::units::components::Faction,
+    },
 }
 
 /// Attached to every traveling-projectile / laser-bolt visual that
@@ -259,6 +265,18 @@ pub(super) struct LaserBolt {
     /// `Byte`'s `MegaBeam` (`texture2=bytelaser`) sets this in the KP
     /// roster.
     pub cap_material: Option<Handle<StandardMaterial>>,
+}
+
+/// A laser bolt's `cegTag` CEG, emitted at its head every sim frame
+/// until it hits (`CLaserProjectile::UpdateIntensity`: `GenExplosion(cegID,
+/// pos, …)` while `ttl > 0`) — the MineLauncher's `minelauncher`
+/// hexastars. On the outer bolt only, beside its [`DelayedHit`].
+#[derive(Component)]
+pub(super) struct BoltCegTrail {
+    /// The weapon whose `cegTag` it is.
+    pub weapon: WeaponId,
+    /// Per-bolt PRNG seed for `spawn_ceg`.
+    pub seed: u32,
 }
 
 /// A projectile traveling from origin to target.

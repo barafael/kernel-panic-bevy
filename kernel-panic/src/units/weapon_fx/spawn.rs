@@ -11,10 +11,10 @@ use crate::units::content::weapons::WeaponId;
 
 use super::ceg::{CegRegistry, CegRenderAssets, spawn_ceg};
 use super::shared::{
-    AttackEvent, BeamMaterialCache, BeamVisual, DelayedHit, Flight, GroundFlash, GroundFlashAssets,
-    ImpactBurst, ImpactBurstAssets, LaserBolt, LightningArc, PendingAttacks, PendingExplosions,
-    ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT, WeaponFxMeshes, tdf_color,
-    weapon_core_color, weapon_edge_color,
+    AttackEvent, BeamMaterialCache, BeamVisual, BoltCegTrail, DelayedHit, Flight, GroundFlash,
+    GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, LightningArc, PendingAttacks,
+    PendingExplosions, ProjectileTrail, ProjectileVisual, TRAIL_SAMPLE_COUNT, WeaponFxMeshes,
+    tdf_color, weapon_core_color, weapon_edge_color,
 };
 use crate::rng::{next_f32, next_signed};
 use crate::sim::{GAME_SPEED, frames_to_secs};
@@ -816,19 +816,27 @@ fn spawn_laser_bolt(
     // else either omits texture2 or sets it to `none`. Skipped when the
     // lookup fails so a typo in the TDF doesn't crash the game.
     let cap_material = bolt_cap_material(weapon, edge_color, materials, images, model_cache, cache);
-    let outer_entity = commands
-        .spawn(LaserBolt {
-            origin: event.attacker_pos,
-            direction,
-            total_distance: distance,
-            speed,
-            max_length,
-            thickness,
-            elapsed: 0.0,
-            material: outer_mat,
-            cap_material,
-        })
-        .id();
+    let mut outer = commands.spawn(LaserBolt {
+        origin: event.attacker_pos,
+        direction,
+        total_distance: distance,
+        speed,
+        max_length,
+        thickness,
+        elapsed: 0.0,
+        material: outer_mat,
+        cap_material,
+    });
+    // The authored per-frame `cegTag` CEG, emitted by `tick_weapon_fx`.
+    if !weapon.ceg_tag.is_empty() {
+        outer.insert(BoltCegTrail {
+            weapon: event.weapon_id,
+            seed: 0x9e3779b9u32
+                .wrapping_mul((event.attacker_pos.x * 131.0 + event.target_pos.z * 7.0).to_bits())
+                | 1,
+        });
+    }
+    let outer_entity = outer.id();
 
     // Core pass: `corethickness × white × texture`. For Bit's
     // `Line` (corethickness=1) the core is full width and fully covers

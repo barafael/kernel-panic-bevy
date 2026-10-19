@@ -232,9 +232,17 @@ pub(super) fn apply_activations(
             CmdId::Fight => arm(Mode::AttackMove),
             CmdId::Guard => arm(Mode::Guard),
             CmdId::SetTarget => arm(Mode::SetTarget),
+            // `CMDTYPE.ICON` upstream: the selected Bytes launch at once.
+            CmdId::LaunchMines => {
+                crate::interaction::ability::launch_mines(
+                    units.iter().map(|(e, ut, ..)| (e, ut.0)),
+                    &mut net,
+                    &mut commands,
+                );
+                disarm(&mut modes, &mut placement);
+            }
             CmdId::NxFlag
             | CmdId::Infection
-            | CmdId::LaunchMines
             | CmdId::Sigterm
             | CmdId::Firewall
             | CmdId::Dispatch => arm(Mode::Ability(msg.id)),

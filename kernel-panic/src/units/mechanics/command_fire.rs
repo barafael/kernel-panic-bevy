@@ -189,11 +189,14 @@ pub const FIREWALL_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// damage pipeline (`DamageResolver::deliver`) applies both.
 pub const FIREWALL_DAMAGE_TAKEN: f32 = 0.5;
 
-/// Byte `LaunchMines` ability (§3.5): suicide-cast that drops a fan of
-/// Logic Bombs at the cursor. Values from upstream
-/// `LuaRules/Gadgets/specialattack.lua`:
+/// Byte `LaunchMines` ability (§3.5): an instant command (`CMDTYPE.ICON`
+/// in upstream `LuaRules/Gadgets/specialattack.lua`) that fires five
+/// MineLauncher bolts from the Byte's launcher tubes; a Logic Bomb
+/// appears where each one explodes:
 /// > "Launches several mines in a forward arc, at the cost of 6000
 /// >  hitpoints. 10s reload."
+///
+/// byte.bos `LaunchMines`: `sleep 10000` before `cantLaunch` clears.
 pub const MINELAUNCHER_COOLDOWN: f32 = 10.0;
 /// byte.bos `HITPOINT_COST`, paid through `lua_Damage` →
 /// `Spring.AddUnitDamage(u, 6000, 0, -1, sigterm)` (LuaCOB.lua): a real
@@ -204,13 +207,20 @@ pub const MINELAUNCHER_HP_COST: f32 = 6000.0;
 /// can't instantly end it. Upstream lets the Byte suicide-cast; we
 /// keep a small buffer for ergonomics.
 pub const MINELAUNCHER_HP_FLOOR: f32 = 100.0;
-/// Number of Logic Bombs dropped per cast. Matches the loop count in
-/// upstream's `byte.bos LaunchMines` script (5 FIRE opcodes in series).
-pub const MINELAUNCHER_FAN_COUNT: usize = 5;
-/// Distance from the cast centre to the outermost mine in the fan.
-/// The whole fan spans roughly `2 × FAN_RADIUS` across, sitting in
-/// front of the Byte at the clicked position.
-pub const MINELAUNCHER_FAN_RADIUS: f32 = 40.0;
+/// byte.bos `LaunchMines`: `emit-sfx 2049` (weapon 2, the MineLauncher)
+/// from these pieces, in this order, while Logic Bombs are left under
+/// the cap. `Create()` points them 30° down and fans them -18/9/0/9/18°
+/// (launcher2 and launcher4 share 9°, as upstream).
+pub const MINELAUNCHER_TUBES: [&str; 5] = [
+    "launcher3",
+    "launcher2",
+    "launcher4",
+    "launcher1",
+    "launcher5",
+];
+/// byte.bos `LaunchMines` on a folded Byte: `start-script Open(); sleep
+/// 500;` and try again.
+const MINELAUNCHER_RETRY: f32 = 0.5;
 
 /// Terminal `SIGTERM` airstrike: a [`SigTermSignal`] takes off from
 /// the Terminal, flies to the target and drops a [`SigTermBomb`] that
@@ -301,6 +311,18 @@ pub struct SigTermWreck {
     pub spin: Vec3,
 }
 
+/// byte.bos `LaunchMines` in progress: the Byte unfolds (the animation
+/// treats it as a reason to open) and [`tick_mine_launches`] fires once
+/// it is open, checking every [`MINELAUNCHER_RETRY`] seconds like the
+/// script's `sleep 500` loop. A second cast restarts it (`signal
+/// SIG_MINE`); orders don't touch it.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[component(storage = "SparseSet")]
+pub struct MineLaunch {
+    /// Seconds until the next "is it open yet?" check.
+    pub retry_in: f32,
+}
+
 /// Queued request to spawn a Logic Bomb, drained next frame by
 /// [`spawning::spawn_queued_mines`]. Lives as a resource so the
 /// command-fire path doesn't have to carry the 7-argument
@@ -326,11 +348,6 @@ impl MineSpawnQueue {
 
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.0.len()
     }
 }
 
@@ -372,19 +389,19 @@ pub fn initial_cooldown(kind: UnitKind) -> Option<CommandFireCooldown> {
 /// only when the TDF registry is unavailable (tests / missing upstream
 /// data). Values are the TDF `range=` of each weapon.
 const NX_RANGE: f32 = 1400.0; // retroweapons.tdf [nx]
-const MINELAUNCHER_RANGE: f32 = 1100.0; // retroweapons.tdf [MineLauncher]
 const INFECTION_RANGE: f32 = 2000.0; // corruptionweapons.tdf [Infection]
 
 /// What bounds where `kind`'s ability may land.
 ///
-/// NX Flag, Infection and Mine Launch are real weapons upstream, so the
+/// NX Flag and Infection are real weapons upstream, so the
 /// engine only fires them at targets its `TestRange` accepts (the unit
 /// walks into range first if it can move) — for the Obelisk's ballistic
 /// Infection that reach depends on the height difference (about 1780
 /// elmos on level ground, not its `range=2000`). SIGTERM and Firewall
 /// are Lua `ICON_MAP` commands executed in `CommandFallback` without any
 /// distance check: the Signal bomber flies to the target, the Firewall
-/// shield lands wherever the player clicked.
+/// shield lands wherever the player clicked. Mine Launch is an instant
+/// command: the Byte fires where its tubes point, wherever it is.
 #[derive(Clone, Copy)]
 enum CastReachLimit<'a> {
     MapWide,
@@ -400,7 +417,6 @@ fn cast_limit(kind: UnitKind, weapons: &WeaponRegistry) -> CastReachLimit<'_> {
     let known = weapons.known();
     let (weapon, fallback) = match kind {
         UnitKind::Pointer => (known.nx, NX_RANGE),
-        UnitKind::Byte => (known.mine_launcher, MINELAUNCHER_RANGE),
         UnitKind::Obelisk => (known.infection, INFECTION_RANGE),
         _ => return CastReachLimit::MapWide,
     };
@@ -641,9 +657,8 @@ pub fn process_command_fire(
     protect_targets: Query<(Entity, &TeamId, &GlobalTransform), With<Health>>,
     health_q: Query<&Health>,
     live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
-    mut mine_spawns: ResMut<MineSpawnQueue>,
+    mine_spawns: Res<MineSpawnQueue>,
     mut pending_explosions: ResMut<PendingExplosions>,
-    mut delayed_damage: ResMut<DelayedDamage>,
     mut visuals: SigTermVisuals,
     gravity: Option<Res<crate::sim::MapGravity>>,
     mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
@@ -724,23 +739,13 @@ pub fn process_command_fire(
             if logic_bombs_at_cap(team.0, limit, &live_units, &mine_spawns) {
                 continue;
             }
-            let Ok(health) = health_q.get(event.attacker) else {
-                continue;
-            };
-            if !fire_minelauncher(
-                event.target,
-                gtf.translation(),
-                health,
-                *faction,
-                team.0,
-                &mut mine_spawns,
-            ) {
+            if !health_q.get(event.attacker).is_ok_and(can_pay_for_mines) {
                 continue;
             }
-            delayed_damage.push_now(minelauncher_cost(event.attacker, weapons.known()));
-            commands.entity(event.attacker).insert(CommandFireCooldown {
-                remaining: MINELAUNCHER_COOLDOWN,
-            });
+            // The target is not used: the mines go where the tubes point.
+            commands
+                .entity(event.attacker)
+                .insert(MineLaunch { retry_in: 0.0 });
             continue;
         }
 
@@ -993,6 +998,124 @@ pub fn tick_nx_casts(
     }
 }
 
+/// [`tick_mine_launches`]' random stream (the bolts' `sprayangle`).
+pub struct MineLaunchRng;
+impl crate::sim::RngStream for MineLaunchRng {
+    const SALT: u64 = 0x4D49_4E45;
+}
+
+/// byte.bos `LaunchMines` for every Byte with a [`MineLaunch`]: once the
+/// Byte is open, pay the 6000 HP ([`minelauncher_cost`]) and fire a
+/// MineLauncher bolt from each tube while Logic Bombs are left under the
+/// cap — straight along the tube (`emit-sfx` aims one elmo ahead of the
+/// piece), sprayed like `CLaserCannon::FireImpl`, flying its full range
+/// until it explodes on the ground or a unit, where `Launcher.lua` puts
+/// a Logic Bomb ([`ImpactEffect::LogicBomb`]). Then the 10 s reload
+/// starts. Still folded: check again in half a second, while the
+/// animation unfolds it. A Byte that can no longer pay gives up.
+///
+/// [`ImpactEffect::LogicBomb`]: crate::units::weapon_fx::ImpactEffect::LogicBomb
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn tick_mine_launches(
+    time: Res<Time>,
+    mut bytes: Query<
+        (
+            Entity,
+            &mut MineLaunch,
+            &GlobalTransform,
+            &TeamId,
+            &Faction,
+            &Health,
+            &NetId,
+        ),
+        (Without<Dying>, Without<crate::units::combat::Stunned>),
+    >,
+    weapons: Res<WeaponRegistry>,
+    unit_registry: Res<UnitRegistry>,
+    live_units: Query<(&UnitType, &TeamId), Without<Dying>>,
+    pieces: crate::units::combat::PieceLookup,
+    mut pending_attacks: ResMut<crate::units::weapon_fx::PendingAttacks>,
+    mut delayed_damage: ResMut<DelayedDamage>,
+    mut rng: ResMut<crate::sim::SimRng<MineLaunchRng>>,
+    mut sounds: Option<ResMut<crate::audio::SoundQueue>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    let Some(launcher) = weapons.known().mine_launcher else {
+        return;
+    };
+    let weapon_def = weapons.by_id(launcher);
+    let spray = weapon_def.spray_sin();
+    let travel = weapon_def.laser_travel(weapon_def.range);
+    let limit = unit_registry.team_limit(UnitKind::LogicBomb);
+    let counts =
+        crate::units::lifecycle::bookkeeping::team_kind_counts(UnitKind::LogicBomb, &live_units);
+    for (entity, mut launch, gtf, team, faction, health, _) in bytes.iter_mut().sort::<&NetId>() {
+        if launch.retry_in > dt {
+            launch.retry_in -= dt;
+            continue;
+        }
+        if !can_pay_for_mines(health) {
+            commands.entity(entity).remove::<MineLaunch>();
+            continue;
+        }
+        let Ok(animator) = pieces.animator.get(entity) else {
+            commands.entity(entity).remove::<MineLaunch>();
+            continue;
+        };
+        if animator.driver.is_open() == Some(false) {
+            launch.retry_in = MINELAUNCHER_RETRY;
+            continue;
+        }
+        let tubes: Vec<usize> = MINELAUNCHER_TUBES
+            .iter()
+            .filter_map(|name| animator.rig.piece(name))
+            .collect();
+        commands
+            .entity(entity)
+            .remove::<MineLaunch>()
+            .insert(CommandFireCooldown {
+                remaining: MINELAUNCHER_COOLDOWN,
+            });
+        delayed_damage.push_now(minelauncher_cost(entity, weapons.known()));
+        // `lua_GetLogicBombLeft`: `maxThisUnit - #GetTeamUnitsByDefs`.
+        let count = counts.get(&team.0).copied().unwrap_or(0);
+        let left = limit.map_or(usize::MAX, |l| l.saturating_sub(count) as usize);
+        for &tube in tubes.iter().take(left) {
+            let Some(muzzle) = pieces.piece_emit(entity, gtf, tube) else {
+                continue;
+            };
+            let mut dir = muzzle.dir;
+            if spray > 0.0 {
+                dir = (dir + crate::rng::random_unit_sphere(&mut rng) * spray).normalize_or(dir);
+            }
+            if let Some(sounds) = sounds.as_deref_mut() {
+                sounds.weapon_fired(weapon_def, muzzle.pos);
+            }
+            pending_attacks
+                .events
+                .push(crate::units::weapon_fx::AttackEvent {
+                    attacker_pos: muzzle.pos,
+                    target_pos: muzzle.pos + dir * travel,
+                    weapon_id: launcher,
+                    muzzle_ceg: None,
+                    delayed_hit: Some(crate::units::weapon_fx::DelayedHitInfo {
+                        target: None,
+                        attacker: entity,
+                        attacker_distance: travel,
+                        muzzle_dir: dir,
+                        launch_dir: None,
+                        on_impact: Some(crate::units::weapon_fx::ImpactEffect::LogicBomb {
+                            owner_team: team.0,
+                            owner_faction: *faction,
+                        }),
+                    }),
+                    arc_from: None,
+                });
+        }
+    }
+}
+
 /// Whether `team` has no room left under the Logic Bomb `UnitRestricted`
 /// cap `limit` ([`UnitRegistry::team_limit`]; `None` = uncapped),
 /// counting live mines plus mines already queued this frame.
@@ -1014,47 +1137,10 @@ fn logic_bombs_at_cap(
     live + queued >= limit
 }
 
-/// Queue a fan of Logic Bombs at `target`; the caller charges the HP
-/// cost ([`minelauncher_cost`]). Returns `false` (so the caller skips
-/// the cooldown stamp and the cost) when the cast is refused — not
-/// enough HP, or caster and target share a position so we can't derive
-/// a forward direction.
-fn fire_minelauncher(
-    target: Vec3,
-    caster_pos: Vec3,
-    caster_health: &Health,
-    faction: Faction,
-    team: u8,
-    mine_spawns: &mut MineSpawnQueue,
-) -> bool {
-    if caster_health.current < MINELAUNCHER_HP_COST + MINELAUNCHER_HP_FLOOR {
-        return false;
-    }
-
-    let to_target = target - caster_pos;
-    let horizontal_sq = to_target.x * to_target.x + to_target.z * to_target.z;
-    if horizontal_sq < 1.0 {
-        // Cast on self — no forward direction to align the fan with.
-        return false;
-    }
-    let horizontal = horizontal_sq.sqrt();
-    let forward = Vec3::new(to_target.x / horizontal, 0.0, to_target.z / horizontal);
-    // Right-hand perpendicular in XZ (Y is up, right-handed), so the
-    // fan spreads symmetrically across the line of fire.
-    let perp = Vec3::new(-forward.z, 0.0, forward.x);
-
-    let half = (MINELAUNCHER_FAN_COUNT - 1) as f32 * 0.5;
-    let step = MINELAUNCHER_FAN_RADIUS / half;
-    for i in 0..MINELAUNCHER_FAN_COUNT {
-        let offset = (i as f32 - half) * step;
-        mine_spawns.push(MineSpawn {
-            position: target + perp * offset,
-            faction,
-            team,
-        });
-    }
-
-    true
+/// byte.bos `LaunchMines`: `if((get LUA1)<(HITPOINT_COST)) return 0`,
+/// plus [`MINELAUNCHER_HP_FLOOR`].
+fn can_pay_for_mines(health: &Health) -> bool {
+    health.current >= MINELAUNCHER_HP_COST + MINELAUNCHER_HP_FLOOR
 }
 
 /// byte.bos `lua_Damage(HITPOINT_COST)` → LuaCOB.lua `Damage`:
@@ -1215,7 +1301,11 @@ fn nose_along(dir: Vec3, bank: f32) -> Quat {
         return Quat::IDENTITY;
     };
     // Straight up or down: keep the wings level to the side.
-    let up = if dir.y.abs() > 0.999 { Vec3::Z } else { Vec3::Y };
+    let up = if dir.y.abs() > 0.999 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
     let look = Transform::IDENTITY.looking_to(dir, up).rotation;
     Quat::from_axis_angle(dir, -bank) * look * Quat::from_rotation_y(std::f32::consts::PI)
 }
@@ -1302,8 +1392,8 @@ impl SigTermSignal {
             let ahead = self.pos.xz() + self.heading * self.speed * SIGTERM_LOOKAHEAD_FRAMES;
             let floor = ground(self.pos.xz()).det_max(ground(ahead));
             let max_climb = self.speed * bevy::math::ops::tan(SIGTERM_MAX_PITCH);
-            let want_vy =
-                ((floor + SIGTERM_CRUISE_HEIGHT - self.pos.y) * 0.1).det_clamp(-max_climb, max_climb);
+            let want_vy = ((floor + SIGTERM_CRUISE_HEIGHT - self.pos.y) * 0.1)
+                .det_clamp(-max_climb, max_climb);
             self.vel.y += (want_vy - self.vel.y).det_clamp(-0.3, 0.3);
         }
         if turn != 0.0 {
@@ -1324,7 +1414,11 @@ impl SigTermSignal {
             0.0
         };
         self.bank += (want_bank - self.bank).det_clamp(-SIGTERM_BANK_RATE, SIGTERM_BANK_RATE);
-        self.vel = Vec3::new(self.heading.x * self.speed, self.vel.y, self.heading.y * self.speed);
+        self.vel = Vec3::new(
+            self.heading.x * self.speed,
+            self.vel.y,
+            self.heading.y * self.speed,
+        );
         self.pos += self.vel;
         self.pos.y = self.pos.y.det_max(ground(self.pos.xz()));
 
@@ -1567,7 +1661,8 @@ mod tests {
 
     /// Weapon abilities are limited by their weapon's reach — the TDF
     /// `range=` as a fallback when the registry lacks the weapon — and
-    /// the two Lua abilities reach anywhere.
+    /// the two Lua abilities and the untargeted Launch Mines reach
+    /// anywhere.
     #[test]
     fn cast_reach_classifies_orders() {
         let empty = WeaponRegistry::default();
@@ -1585,15 +1680,8 @@ mod tests {
         assert_eq!(reach(UnitKind::Pointer, near, false), CastReach::Fire);
         assert_eq!(reach(UnitKind::Pointer, far, true), CastReach::Approach);
         assert_eq!(reach(UnitKind::Pointer, far, false), CastReach::Refuse);
-        assert_eq!(
-            reach(UnitKind::Byte, Vec3::X * 1050.0, false),
-            CastReach::Fire
-        );
-        assert_eq!(
-            reach(UnitKind::Byte, Vec3::X * 1150.0, false),
-            CastReach::Refuse
-        );
-        for kind in [UnitKind::Terminal, UnitKind::Firewall] {
+        // Launch Mines has no target to reach: the Byte fires in place.
+        for kind in [UnitKind::Terminal, UnitKind::Firewall, UnitKind::Byte] {
             assert_eq!(reach(kind, far * 10.0, false), CastReach::Fire);
         }
     }
@@ -1825,102 +1913,43 @@ mod tests {
         assert!(ability_for(UnitKind::Kernel).is_none());
     }
 
-    /// A healthy Byte enqueues exactly `MINELAUNCHER_FAN_COUNT` Logic
-    /// Bombs, centred on the clicked target.
+    /// Launch Mines takes no target: wherever the click (or `D`) was, a
+    /// Byte that can launch is marked to launch once it has unfolded —
+    /// the HP and the reload are only spent when the mines fly
+    /// ([`tick_mine_launches`]).
     #[test]
-    fn minelauncher_queues_fan() {
-        let health = Health::full(15_000.0);
-        let mut queue = MineSpawnQueue::default();
-        let target = Vec3::new(200.0, 0.0, 0.0);
-
-        let fired = fire_minelauncher(target, Vec3::ZERO, &health, Faction::System, 0, &mut queue);
-        assert!(fired);
-        assert_eq!(queue.len(), MINELAUNCHER_FAN_COUNT);
-
-        // All mines lie on the Z-axis line through `target` (perp to
-        // +X forward), so X equals target.x and Z is symmetric.
-        let mut zs: Vec<f32> = vec![];
-        for spawn in queue.drain() {
-            assert!((spawn.position.x - target.x).abs() < 1e-3);
-            zs.push(spawn.position.z);
-        }
-        let sum: f32 = zs.iter().sum();
-        assert!(sum.abs() < 1e-3, "fan is not centred on target: {zs:?}");
+    fn minelauncher_cast_marks_the_byte_to_launch() {
+        let mut app = cast_app(&[]);
+        let byte = spawn_caster(&mut app, UnitKind::Byte, Vec3::ZERO);
+        cast(&mut app, byte, Vec3::new(20_000.0, 0.0, -9_000.0));
+        assert_eq!(
+            app.world().get::<MineLaunch>(byte),
+            Some(&MineLaunch { retry_in: 0.0 })
+        );
+        assert!(app.world().get::<PendingCommandFire>(byte).is_none());
+        assert!(app.world().get::<CommandFireCooldown>(byte).is_none());
+        assert!(app.world().resource::<DelayedDamage>().is_empty());
     }
 
-    /// The cast's 6000 HP is an `AddUnitDamage` hit with the SIGTERM
-    /// weapon id and no attacker, queued for the damage pipeline; a
-    /// Byte still `ARMORED` from its build refuses to cast.
+    /// byte.bos `LaunchMines` returns at once while the Byte is still
+    /// `ARMORED` from its build, or can't pay the 6000 HP.
     #[test]
-    fn minelauncher_charges_its_hp_through_the_damage_pipeline() {
+    fn minelauncher_refuses_while_armored_or_low_on_hp() {
         let mut app = cast_app(&[]);
         let byte = spawn_caster(&mut app, UnitKind::Byte, Vec3::ZERO);
         app.world_mut()
             .entity_mut(byte)
             .insert(Armored { after_build: 6.0 });
-        cast(&mut app, byte, Vec3::new(300.0, 0.0, 0.0));
-        assert_eq!(app.world().resource::<MineSpawnQueue>().len(), 0);
-        assert!(app.world().resource::<DelayedDamage>().is_empty());
+        cast(&mut app, byte, Vec3::ZERO);
+        assert!(app.world().get::<MineLaunch>(byte).is_none());
 
         app.world_mut().entity_mut(byte).remove::<Armored>();
-        cast(&mut app, byte, Vec3::new(300.0, 0.0, 0.0));
-        assert_eq!(
-            app.world().resource::<MineSpawnQueue>().len(),
-            MINELAUNCHER_FAN_COUNT
-        );
-        let hits: Vec<_> = app
-            .world()
-            .resource::<DelayedDamage>()
-            .iter_for_test()
-            .map(|(_, hit)| hit.clone())
-            .collect();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].target, byte);
-        assert_eq!(hits[0].damage, MINELAUNCHER_HP_COST);
-        assert!(hits[0].attacker.is_none());
-        // The HP itself only drops when the pipeline delivers the hit.
-        assert_eq!(app.world().get::<Health>(byte).unwrap().current, 15_000.0);
-    }
-
-    /// Casting on your own position leaves no forward direction — the
-    /// fan can't be oriented so the cast is refused.
-    #[test]
-    fn minelauncher_refuses_self_cast() {
-        let health = Health::full(15_000.0);
-        let mut queue = MineSpawnQueue::default();
-
-        let fired = fire_minelauncher(
-            Vec3::ZERO,
-            Vec3::ZERO,
-            &health,
-            Faction::System,
-            0,
-            &mut queue,
-        );
-        assert!(!fired);
-        assert_eq!(queue.len(), 0);
-    }
-
-    /// A Byte without enough remaining HP to survive the cast refuses.
-    /// Prevents mis-clicks from one-shotting your own Byte.
-    #[test]
-    fn minelauncher_refuses_when_low_hp() {
-        let health = Health {
-            current: MINELAUNCHER_HP_COST - 1.0,
+        app.world_mut().entity_mut(byte).insert(Health {
+            current: MINELAUNCHER_HP_COST + MINELAUNCHER_HP_FLOOR - 1.0,
             max: 15_000.0,
-        };
-        let mut queue = MineSpawnQueue::default();
-
-        let fired = fire_minelauncher(
-            Vec3::new(200.0, 0.0, 0.0),
-            Vec3::ZERO,
-            &health,
-            Faction::System,
-            0,
-            &mut queue,
-        );
-        assert!(!fired);
-        assert_eq!(queue.len(), 0);
+        });
+        cast(&mut app, byte, Vec3::ZERO);
+        assert!(app.world().get::<MineLaunch>(byte).is_none());
     }
 
     /// Mines already on the map plus mines queued this frame count
@@ -1971,7 +2000,9 @@ mod tests {
             .run_system_once(tick_sigterm_signals)
             .unwrap();
         app.world_mut().run_system_once(tick_sigterm_bombs).unwrap();
-        app.world_mut().run_system_once(tick_sigterm_wrecks).unwrap();
+        app.world_mut()
+            .run_system_once(tick_sigterm_wrecks)
+            .unwrap();
     }
 
     fn sigterm_app() -> App {
@@ -2010,7 +2041,7 @@ mod tests {
                     speed: 0.0,
                     bank: 0.0,
                     taking_off: true,
-                extending: false,
+                    extending: false,
                     frames: 0,
                     owner_team: 0,
                     owner_faction: Faction::System,
@@ -2085,7 +2116,7 @@ mod tests {
                     speed: 0.0,
                     bank: 0.0,
                     taking_off: true,
-                extending: false,
+                    extending: false,
                     frames: 0,
                     owner_team: 0,
                     owner_faction: Faction::System,
