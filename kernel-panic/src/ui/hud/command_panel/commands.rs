@@ -311,8 +311,9 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
         out.push(d);
     }
 
-    // --- CMobileCAI ---
-    if is_mobile(kind) {
+    // --- CMobileCAI; a factory's (`CFactoryCAI`) take these as the
+    // orders for the units it builds ---
+    if is_mobile(kind) || kind.takes_rally_orders() {
         out.push(CmdDesc::new(
             CmdId::Move,
             Targeted,
@@ -518,8 +519,9 @@ mod tests {
         );
     }
 
-    /// The Kernel: Stop, the Repeat state button, then the build options
-    /// in `[CANBUILD]` order with their queue counts.
+    /// The Kernel: Stop, the Repeat state button, the orders it passes
+    /// to the units it builds, then the build options in `[CANBUILD]`
+    /// order with their queue counts.
     #[test]
     fn factory_lists_repeat_and_queue_counts() {
         let k = UnitCmdState {
@@ -534,6 +536,10 @@ mod tests {
             vec![
                 CmdId::Stop,
                 CmdId::Repeat,
+                CmdId::Move,
+                CmdId::Patrol,
+                CmdId::Fight,
+                CmdId::Guard,
                 CmdId::Produce(UnitKind::Bit),
                 CmdId::Produce(UnitKind::Pointer),
                 CmdId::Produce(UnitKind::Byte),
@@ -541,8 +547,8 @@ mod tests {
             ]
         );
         assert_eq!(cmds[1].label(), "Repeat on");
-        assert_eq!(cmds[4].count, Some(3));
-        assert_eq!(cmds[2].count, None);
+        assert_eq!(cmds[8].count, Some(3));
+        assert_eq!(cmds[6].count, None);
     }
 
     /// The Assembler lists its buildings (Logic Bomb greyed at the cap),
@@ -627,11 +633,11 @@ mod tests {
             vec![
                 CmdId::Stop,
                 CmdId::Repeat,
-                CmdId::Attack,
                 CmdId::Move,
                 CmdId::Patrol,
                 CmdId::Fight,
                 CmdId::Guard,
+                CmdId::Attack,
                 CmdId::NxFlag,
                 CmdId::Produce(UnitKind::Bit),
                 CmdId::Produce(UnitKind::Pointer),

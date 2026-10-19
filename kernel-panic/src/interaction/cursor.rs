@@ -195,7 +195,8 @@ fn resolve_context_cursor(
     // the selection against what's under the cursor.
     let mut selection_team: Option<u8> = None;
     for (ut, team) in &selected {
-        if unit_registry.speed(ut.0) > 0.0 {
+        // A factory takes moves for the units it builds.
+        if unit_registry.speed(ut.0) > 0.0 || ut.0.takes_rally_orders() {
             has_mover = true;
         }
         if !unit_registry.weapon(ut.0).is_empty() {

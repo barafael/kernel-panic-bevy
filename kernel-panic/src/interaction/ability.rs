@@ -529,7 +529,9 @@ fn trigger_patrol_click(
     consume_click(&mut mouse);
 }
 
-/// The mobile units of the selection (moves, fights, patrols).
+/// The units of the selection that take moves, fights and patrols: the
+/// mobile ones, and factories, which keep them for the units they build
+/// (`UnitKind::takes_rally_orders`).
 fn mobile(
     selected_q: &Query<(Entity, &UnitType), With<Selected>>,
     unit_registry: &UnitRegistry,
@@ -538,7 +540,7 @@ fn mobile(
     net.units(
         selected_q
             .iter()
-            .filter(|(_, unit)| unit_registry.speed(unit.0) > 0.0)
+            .filter(|(_, unit)| unit_registry.speed(unit.0) > 0.0 || unit.0.takes_rally_orders())
             .map(|(e, _)| e),
     )
 }
@@ -658,7 +660,10 @@ fn trigger_guard_click(
     let units = net.units(
         selected_q
             .iter()
-            .filter(|(entity, unit, _)| *entity != target && unit_registry.speed(unit.0) > 0.0)
+            .filter(|(entity, unit, _)| {
+                *entity != target
+                    && (unit_registry.speed(unit.0) > 0.0 || unit.0.takes_rally_orders())
+            })
             .map(|(e, ..)| e),
     );
     if let Some(target) = net.id(target) {

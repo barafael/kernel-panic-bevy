@@ -38,12 +38,15 @@ use super::state::Fnv;
 /// from the server seat; a `SetSpeed` while slowed down takes effect
 /// as Spring's `UserSpeedChange`); a dropped player's seat returns to
 /// play ([`SimCommand::Returned`]).
+/// 7 (2026-10-19): a factory keeps the move, fight, patrol and guard
+/// orders it is given for the units it builds (`FactoryOrders`); before,
+/// a move reached it and did nothing, the rest were refused.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 6;
+pub const SIM_VERSION: u32 = 7;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

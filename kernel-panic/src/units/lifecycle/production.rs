@@ -8,6 +8,7 @@ use super::spawning::{
     BuildDriven, EmergeStyle, Emerging, FactoryPieces, FadeMaterials, SpawnContext,
     spawn_unit_facing,
 };
+use crate::interaction::movement::QueuedCommand;
 use crate::net::NetId;
 use crate::sim::{RngStream, SQUARE_SIZE, SimRng, SimTick};
 use crate::terrain::heightmap::Heightmap;
@@ -22,6 +23,7 @@ use crate::units::spatial::{SpatialIndex, flat_dist_sq};
 /// The factory builds the front of its `queue`. When the queue is empty
 /// production is idle — nothing is built until the player enqueues something.
 #[derive(Component)]
+#[require(FactoryOrders)]
 pub struct Producer {
     /// Seconds accumulated toward the current unit.
     progress: f32,
@@ -52,6 +54,23 @@ pub struct Producer {
     /// from its spawn until the queue pops.
     buildee: Option<Entity>,
 }
+
+/// The orders a factory gives each unit it builds (Spring's
+/// `CFactoryCAI::newUnitCommands`): the move, fight, patrol and guard
+/// orders the factory itself was given (`net::apply`; only factories
+/// that [`UnitKind::takes_rally_orders`]). A new unit first leaves by
+/// the factory's front, then carries them out in order. A patrol is
+/// stored as its point; the unit patrols between where it left the
+/// factory and there.
+#[derive(Component, Default, Clone, Debug)]
+pub struct FactoryOrders {
+    pub commands: Vec<QueuedCommand>,
+}
+
+/// A unit's copy of its factory's [`FactoryOrders`], inserted with its
+/// `Emerging` and handed over when it has emerged (`emerge_system`).
+#[derive(Component, Clone, Debug)]
+pub struct NewUnitOrders(pub Vec<QueuedCommand>);
 
 impl Producer {
     pub fn new() -> Self {
@@ -430,6 +449,7 @@ pub fn production_system(
     mut spawns: Local<Vec<PendingSpawn>>,
     mut exit_rng: ResMut<SimRng<FactoryExitRng>>,
     tick: Res<SimTick>,
+    factory_orders: Query<&FactoryOrders>,
 ) {
     let dt = time.delta_secs();
     spawns.clear();
@@ -709,6 +729,17 @@ pub fn production_system(
             rally_then: exit.map(|(_, found)| found),
             style,
         });
+        // The factory's orders ride along until the unit has emerged
+        // (`CFactory::AssignBuildeeOrders`); a unit that doesn't leave
+        // the factory (no exit) takes none.
+        if exit.is_some()
+            && let Ok(orders) = factory_orders.get(factory)
+            && !orders.commands.is_empty()
+        {
+            ctx.commands
+                .entity(entity)
+                .insert(NewUnitOrders(orders.commands.clone()));
+        }
         if driven {
             ctx.commands.entity(entity).insert(BuildDriven::default());
             if let Ok((_, mut producer, ..)) = producers.get_mut(factory) {

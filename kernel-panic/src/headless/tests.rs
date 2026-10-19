@@ -991,3 +991,94 @@ fn pointer_only_fires_fully_open() {
         );
     }
 }
+
+/// End to end: a move order given to the Kernel is carried out by the
+/// Bit it builds next — it walks out of the factory's front, then to
+/// the rally point.
+#[test]
+fn factory_orders_reach_built_units() {
+    use crate::interaction::movement::{CommandQueue, MoveTarget, QueuedCommand};
+    use crate::net::{CommandFrame, FactoryOp, NetId, NetPos, Order, SimCommand, Units};
+    use crate::units::components::{TeamId, UnitType};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::spawning::Emerging;
+
+    let mut scenario = Scenario::ai_match("Central_Hub", 2, 1, 7);
+    scenario.seats[0].ai = false;
+    scenario.sandbox = true;
+    let mut h = SimHarness::new(scenario);
+    h.step();
+
+    let world = h.world_mut();
+    let homes: Vec<(Entity, NetId, u8, Vec3)> = world
+        .query_filtered::<(Entity, &NetId, &TeamId, &Transform), With<Homebase>>()
+        .iter(world)
+        .map(|(e, id, t, tf)| (e, *id, t.0, tf.translation))
+        .collect();
+    let (_, kernel, _, home) = *homes.iter().find(|h| h.2 == 0).unwrap();
+    let enemy = homes.iter().find(|h| h.2 != 0).unwrap().3;
+    let rally = NetPos::quantize(home + (enemy - home).normalize() * 300.0).to_vec3();
+    let mut bus = world.resource_mut::<CommandBus>();
+    let tick = bus.tick;
+    bus.deliver(CommandFrame {
+        tick,
+        player: 0,
+        commands: vec![
+            SimCommand::Order {
+                units: Units::of([kernel]),
+                order: Order::Move(NetPos::quantize(rally)),
+                queue: false,
+            },
+            SimCommand::Factory {
+                factories: Units::of([kernel]),
+                kind: UnitKind::Bit,
+                op: FactoryOp::Add(1),
+            },
+        ],
+    });
+
+    let bits = |world: &mut World| -> Vec<(Entity, Vec3, bool)> {
+        world
+            .query::<(Entity, &UnitType, &TeamId, &Transform, Has<Emerging>)>()
+            .iter(world)
+            .filter(|(_, ut, t, ..)| ut.0 == UnitKind::Bit && t.0 == 0)
+            .map(|(e, _, _, tf, emerging)| (e, tf.translation, emerging))
+            .collect()
+    };
+    // Built and out of the pad.
+    let mut bit = None;
+    for _ in 0..2400 {
+        h.step();
+        if let Some(&(e, _, false)) = bits(h.world_mut()).first() {
+            bit = Some(e);
+            break;
+        }
+    }
+    let bit = bit.expect("the Kernel builds the Bit");
+    let world = h.world_mut();
+    let queue: Vec<QueuedCommand> = world
+        .get::<CommandQueue>(bit)
+        .map_or(Vec::new(), |q| q.commands.clone());
+    assert!(
+        world.get::<MoveTarget>(bit).is_some(),
+        "it walks out of the factory first"
+    );
+    assert_eq!(
+        queue,
+        vec![QueuedCommand::Move(rally)],
+        "then to the rally point"
+    );
+
+    // And gets there.
+    let mut closest = f32::MAX;
+    for _ in 0..900 {
+        h.step();
+        let world = h.world_mut();
+        let pos = world.get::<Transform>(bit).unwrap().translation;
+        closest = closest.det_min(Vec2::new(pos.x - rally.x, pos.z - rally.z).length());
+    }
+    assert!(
+        closest < 40.0,
+        "the Bit came within {closest} elmos of the rally point"
+    );
+}

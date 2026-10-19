@@ -247,6 +247,15 @@ impl UnitKind {
         self.is_homebase() || self.is_minifac()
     }
 
+    /// Factories that take move, fight, patrol and guard orders, as the
+    /// orders for the units they build (Spring's `CFactoryCAI` new-unit
+    /// commands): `CanMove=1` with `MaxVelocity=0` in their FBIs. The
+    /// homebases, the Socket and the Window; the Port (`CanMove=0`)
+    /// builds no units.
+    pub fn takes_rally_orders(self) -> bool {
+        self.is_homebase() || matches!(self, UnitKind::Socket | UnitKind::Window)
+    }
+
     /// Mobile constructors that can erect secondary factories on
     /// datavents. Mirrors upstream KP's `SIDEDATA.TDF` builder list.
     pub fn is_constructor(self) -> bool {

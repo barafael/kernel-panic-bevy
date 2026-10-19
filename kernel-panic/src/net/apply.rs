@@ -81,7 +81,7 @@ use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::{
     Constructing, PendingBuild, QueuedBuild, buildings_for, queue_build,
 };
-use crate::units::lifecycle::production::{Producer, factory_roster};
+use crate::units::lifecycle::production::{FactoryOrders, Producer, factory_roster};
 use crate::units::mechanics::command_fire::CommandFireEvent;
 use crate::units::mechanics::deploy::DeployEvent;
 use crate::units::mechanics::network_buffer::{AutoDispatch, DispatchEvent, EnterEvent};
@@ -320,6 +320,8 @@ pub(crate) struct ApplyCtx<'w, 's> {
         ),
     >,
     producers: Query<'w, 's, &'static mut Producer>,
+    /// The orders factories give the units they build.
+    factory_orders: Query<'w, 's, &'static mut FactoryOrders>,
     autohold: Query<'w, 's, &'static mut AutoHold>,
     vents: Query<'w, 's, (Entity, &'static GeoventSmoker), Without<VentClaim>>,
     registry: Option<Res<'w, UnitRegistry>>,
@@ -563,6 +565,28 @@ impl ApplyCtx<'_, '_> {
         apply_ordered_command(e, cmd, queue, &self.orders, &mut self.commands);
     }
 
+    /// A factory that keeps move, fight, patrol and guard orders for the
+    /// units it builds ([`FactoryOrders`]).
+    fn takes_rally(&self, u: &Own) -> bool {
+        u.kind.takes_rally_orders() && self.factory_orders.contains(u.e)
+    }
+
+    /// Give factory `e` an order for its new units: it replaces their
+    /// orders, or with `queue` (Shift) goes behind them.
+    fn give_factory(&mut self, e: Entity, cmd: QueuedCommand, queue: bool) {
+        /// Plenty for any rally route; keeps a spammed Shift from
+        /// growing a factory's list without bound.
+        const MAX_FACTORY_ORDERS: usize = 64;
+        if let Ok(mut orders) = self.factory_orders.get_mut(e) {
+            if !queue {
+                orders.commands.clear();
+            }
+            if orders.commands.len() < MAX_FACTORY_ORDERS {
+                orders.commands.push(cmd);
+            }
+        }
+    }
+
     fn apply(&mut self, tick: u32, player: u8, cmd: &SimCommand, ids: &[NetId]) {
         match cmd {
             SimCommand::Order { order, queue, .. } => {
@@ -604,7 +628,8 @@ impl ApplyCtx<'_, '_> {
                 let Some(own) = self.owned_one(player, *unit) else {
                     return;
                 };
-                if !self.mobile(own.kind) {
+                let factory = self.takes_rally(&own);
+                if !self.mobile(own.kind) && !factory {
                     return;
                 }
                 let points: Vec<Vec3> = waypoints.points().collect();
@@ -617,6 +642,15 @@ impl ApplyCtx<'_, '_> {
                     self.rules.refuse(tick, player, cmd, Refusal::OffMap);
                 }
                 let mut points = on_map.into_iter();
+                if factory {
+                    if let Some(first) = points.next() {
+                        self.give_factory(own.e, QueuedCommand::Move(first), *queue);
+                    }
+                    for p in points {
+                        self.give_factory(own.e, QueuedCommand::Move(p), true);
+                    }
+                    return;
+                }
                 if let Some(first) = points.next() {
                     self.give(own.e, QueuedCommand::Move(first), *queue);
                 }
@@ -628,6 +662,9 @@ impl ApplyCtx<'_, '_> {
                 for own in self.owned(player, ids) {
                     crate::interaction::clear_orders(&mut self.commands.entity(own.e))
                         .remove::<SelfDestructCountdown>();
+                    if let Ok(mut orders) = self.factory_orders.get_mut(own.e) {
+                        orders.commands.clear();
+                    }
                 }
             }
             SimCommand::Build {
@@ -963,10 +1000,37 @@ impl ApplyCtx<'_, '_> {
     ) {
         // (A point off the map refused the command in `check_shape`.)
         let mut units = self.owned(player, ids);
+        // Factories keep move, fight, patrol and guard orders for the
+        // units they build (`CFactoryCAI`'s new-unit commands; KP's
+        // single right click is the engine's, so a plain move reaches
+        // them too). They take no attack orders.
+        let factories: Vec<Own> = units
+            .iter()
+            .copied()
+            .filter(|u| self.takes_rally(u))
+            .collect();
+        units.retain(|u| !self.takes_rally(u));
+        if !factories.is_empty() {
+            let factory_cmd = match order {
+                Order::Move(p) => Some(QueuedCommand::Move(p.to_vec3())),
+                Order::AttackMove(p) => Some(QueuedCommand::AttackMove(p.to_vec3())),
+                Order::Patrol(p) => Some(QueuedCommand::Patrol(p.to_vec3())),
+                Order::Guard(t) => self
+                    .live(t)
+                    .map(|(target, pos, ..)| QueuedCommand::Guard { target, pos }),
+                Order::AttackGround(_) | Order::AttackUnit(_) => None,
+            };
+            if let Some(cmd) = factory_cmd {
+                for f in &factories {
+                    let guards_itself =
+                        matches!(cmd, QueuedCommand::Guard { target, .. } if target == f.e);
+                    if !guards_itself {
+                        self.give_factory(f.e, cmd, queue);
+                    }
+                }
+            }
+        }
         let cmd = match order {
-            // A plain move goes to the whole selection, factories too
-            // (KP's single right click is the engine's, and Spring
-            // factories take `CMD_MOVE` as their rally order).
             Order::Move(p) => QueuedCommand::Move(p.to_vec3()),
             Order::AttackMove(p) => {
                 units.retain(|u| self.mobile(u.kind));
@@ -1724,5 +1788,108 @@ mod tests {
         assert_eq!(control.speed_percent, 250);
         assert!(control.paused);
         assert_eq!(control.paused_by, Some(1));
+    }
+
+    fn factory(world: &mut World, kind: UnitKind, x: f32) -> (Entity, NetId) {
+        let (e, id) = unit(world, kind, 0, x);
+        world.entity_mut(e).insert(Producer::new());
+        (e, id)
+    }
+
+    fn factory_orders(world: &World, e: Entity) -> Vec<QueuedCommand> {
+        world.get::<FactoryOrders>(e).unwrap().commands.clone()
+    }
+
+    fn order(units: Units, order: Order, queue: bool) -> SimCommand {
+        SimCommand::Order {
+            units,
+            order,
+            queue,
+        }
+    }
+
+    fn at(x: f32) -> NetPos {
+        NetPos::quantize(Vec3::new(x, 0.0, 100.0))
+    }
+
+    /// A move to a selection with a factory: the unit walks, the factory
+    /// keeps the move for the units it builds and doesn't move itself.
+    #[test]
+    fn a_factory_keeps_orders_for_its_units() {
+        let mut world = world();
+        let (kernel, k) = factory(&mut world, UnitKind::Kernel, 100.0);
+        let (bit, b) = unit(&mut world, UnitKind::Bit, 0, 200.0);
+        send(&mut world, 0, vec![move_to(Units::of([k, b]), 50.0)]);
+        assert!(world.get::<MoveTarget>(bit).is_some());
+        assert!(world.get::<MoveTarget>(kernel).is_none());
+        assert_eq!(
+            factory_orders(&world, kernel),
+            vec![QueuedCommand::Move(at(50.0).to_vec3())]
+        );
+    }
+
+    /// Shift appends, a plain order replaces; attacks aren't kept; a
+    /// factory doesn't guard itself; Stop clears the orders.
+    #[test]
+    fn factory_orders_queue_replace_and_stop() {
+        let mut world = world();
+        let (socket, s) = factory(&mut world, UnitKind::Socket, 100.0);
+        let (_, b) = unit(&mut world, UnitKind::Bit, 0, 200.0);
+        let units = || Units::of([s]);
+        send(
+            &mut world,
+            0,
+            vec![
+                order(units(), Order::Move(at(10.0)), false),
+                order(units(), Order::AttackMove(at(20.0)), true),
+                order(units(), Order::Patrol(at(30.0)), true),
+                order(units(), Order::Guard(b), true),
+                order(units(), Order::Guard(s), true),
+                order(units(), Order::AttackGround(at(40.0)), true),
+            ],
+        );
+        let kinds: Vec<&str> = factory_orders(&world, socket)
+            .iter()
+            .map(|c| match c {
+                QueuedCommand::Move(_) => "move",
+                QueuedCommand::AttackMove(_) => "fight",
+                QueuedCommand::Patrol(_) => "patrol",
+                QueuedCommand::Guard { .. } => "guard",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["move", "fight", "patrol", "guard"]);
+
+        send(
+            &mut world,
+            0,
+            vec![order(units(), Order::Move(at(60.0)), false)],
+        );
+        assert_eq!(
+            factory_orders(&world, socket),
+            vec![QueuedCommand::Move(at(60.0).to_vec3())]
+        );
+        send(&mut world, 0, vec![SimCommand::Stop { units: units() }]);
+        assert!(factory_orders(&world, socket).is_empty());
+    }
+
+    /// A drawn line for a factory: a move per point.
+    #[test]
+    fn a_factory_takes_a_drawn_path() {
+        let mut world = world();
+        let (hole, h) = factory(&mut world, UnitKind::Hole, 100.0);
+        send(
+            &mut world,
+            0,
+            vec![SimCommand::Path {
+                unit: h,
+                waypoints: PosList::quantize([10.0, 20.0, 30.0].map(|x| at(x).to_vec3())),
+                queue: false,
+            }],
+        );
+        assert_eq!(
+            factory_orders(&world, hole),
+            [10.0, 20.0, 30.0].map(|x| QueuedCommand::Move(at(x).to_vec3()))
+        );
     }
 }

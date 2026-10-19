@@ -125,7 +125,7 @@ impl MovePath {
 /// A queued command waiting to become the unit's active order.
 /// Consumed in FIFO order when the current order completes (see
 /// [`OrderState`] for what "the active order" is and how it ends).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum QueuedCommand {
     Move(Vec3),
     /// Walk to `site`, then erect a building of `kind` there. Issued by
@@ -1151,6 +1151,56 @@ pub fn draw_selected_command_lines(
 
     // Drop the dashes of units that are no longer selected or moving.
     cache.retain(|_, c| std::mem::take(&mut c.seen));
+}
+
+/// A selected factory's orders for the units it builds
+/// ([`FactoryOrders`](crate::units::lifecycle::production::FactoryOrders)):
+/// dashed segments from the factory through each order's point, in the
+/// same colors as a unit's queue, with a ring at each.
+pub fn draw_selected_factory_orders(
+    mut gizmos: Gizmos<CommandLineGizmos>,
+    factories: Query<
+        (
+            &Transform,
+            &crate::units::lifecycle::production::FactoryOrders,
+        ),
+        With<Selected>,
+    >,
+    targets: Query<&GlobalTransform>,
+    heightmap: Option<Res<Heightmap>>,
+) {
+    const MOVE_COLOR: Color = Color::srgb(0.2, 1.0, 0.3);
+    const PATROL_COLOR: Color = Color::srgb(0.4, 0.7, 1.0);
+    const FIGHT_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
+    const GUARD_COLOR: Color = Color::srgb(0.85, 0.95, 1.0);
+    const DISC_RADIUS: f32 = 6.0;
+    let hm = heightmap.as_deref();
+    for (transform, orders) in &factories {
+        let mut prev = sample_at_ground(transform.translation.x, transform.translation.z, hm);
+        for cmd in &orders.commands {
+            // A guard follows its target; the rest are points.
+            let pos = match cmd {
+                QueuedCommand::Guard { target, pos } => {
+                    targets.get(*target).map_or(*pos, |t| t.translation())
+                }
+                other => other.position(),
+            };
+            let color = match cmd {
+                QueuedCommand::Patrol(_) => PATROL_COLOR,
+                QueuedCommand::AttackMove(_)
+                | QueuedCommand::AttackUnit { .. }
+                | QueuedCommand::AttackGround(_) => FIGHT_COLOR,
+                QueuedCommand::Guard { .. } => GUARD_COLOR,
+                QueuedCommand::Move(_) | QueuedCommand::BuildAt { .. } => MOVE_COLOR,
+            };
+            let to = sample_at_ground(pos.x, pos.z, hm);
+            draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
+            gizmos
+                .circle(Isometry3d::new(to, GROUND_RING), DISC_RADIUS, color)
+                .resolution(RING_RESOLUTION);
+            prev = to;
+        }
+    }
 }
 
 /// Draw a polyline in world space as a repeating `-.-.` dash pattern,

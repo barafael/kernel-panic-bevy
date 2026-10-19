@@ -94,12 +94,15 @@ pub fn emerge_system(
         Has<crate::interaction::movement::MoveTarget>,
         Option<&crate::interaction::movement::CommandQueue>,
         Has<BuildDriven>,
+        Option<&crate::units::lifecycle::production::NewUnitOrders>,
     )>,
     piece_mats: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let dt = time.delta_secs();
-    for (entity, mut transform, mut emerging, fade, has_move, queue, driven) in &mut q {
+    for (entity, mut transform, mut emerging, fade, has_move, queue, driven, factory_orders) in
+        &mut q
+    {
         if !driven {
             emerging.remaining = (emerging.remaining - dt).det_max(0.0);
         }
@@ -144,11 +147,28 @@ pub fn emerge_system(
                 commands.entity(entity).remove::<FadeMaterials>();
             }
             let (rally, then) = (emerging.rally_point, emerging.rally_then);
-            commands.entity(entity).remove::<(Emerging, BuildDriven)>();
-            // `CFactory::AssignBuildeeOrders` only sends the unit to an
-            // empty spot when it has no orders of its own yet.
+            commands.entity(entity).remove::<(
+                Emerging,
+                BuildDriven,
+                crate::units::lifecycle::production::NewUnitOrders,
+            )>();
+            // `CFactory::AssignBuildeeOrders`: a unit with orders of its
+            // own keeps them; else it leaves by the factory's front and
+            // takes the factory's orders, or with none, goes to an empty
+            // spot.
             let has_orders = has_move || queue.is_some_and(|q| !q.commands.is_empty());
-            if let Some(target) = rally.filter(|_| !has_orders) {
+            if !has_orders
+                && let (Some(exit), Some(orders)) = (rally, factory_orders)
+                && !orders.0.is_empty()
+            {
+                commands
+                    .entity(entity)
+                    .insert(crate::interaction::movement::MoveTarget(exit))
+                    .remove::<crate::interaction::movement::MovePath>()
+                    .insert(crate::interaction::movement::CommandQueue {
+                        commands: orders_from_exit(exit, &orders.0),
+                    });
+            } else if let Some(target) = rally.filter(|_| !has_orders) {
                 let mut unit = commands.entity(entity);
                 unit.insert(crate::interaction::movement::MoveTarget(target))
                     .remove::<crate::interaction::movement::MovePath>();
@@ -159,5 +179,71 @@ pub fn emerge_system(
                 }
             }
         }
+    }
+}
+
+/// A new unit's queue from its factory's orders, for a unit that has
+/// just walked out to `exit`. A patrol point becomes a patrol route from
+/// where the orders before it end (`exit` for the first), as a patrol
+/// click queued behind them would (`ability::patrol_commands`).
+fn orders_from_exit(
+    exit: Vec3,
+    orders: &[crate::interaction::movement::QueuedCommand],
+) -> Vec<crate::interaction::movement::QueuedCommand> {
+    use crate::interaction::movement::QueuedCommand;
+    let mut queue: Vec<QueuedCommand> = Vec::with_capacity(orders.len() + 1);
+    for cmd in orders {
+        match *cmd {
+            QueuedCommand::Patrol(target) => {
+                let leg = crate::interaction::ability::patrol_commands(
+                    true,
+                    &queue,
+                    Some(exit),
+                    exit,
+                    target,
+                );
+                queue.extend(leg);
+            }
+            other => queue.push(other),
+        }
+    }
+    queue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interaction::movement::QueuedCommand;
+
+    /// Moves and fights pass through; the first patrol pairs with where
+    /// the orders before it end, a later one just adds its point.
+    #[test]
+    fn factory_orders_become_the_unit_queue() {
+        let exit = Vec3::new(10.0, 0.0, 10.0);
+        let a = Vec3::new(100.0, 0.0, 0.0);
+        let b = Vec3::new(0.0, 0.0, 100.0);
+        let c = Vec3::new(50.0, 0.0, 50.0);
+        assert_eq!(
+            orders_from_exit(exit, &[QueuedCommand::Patrol(a)]),
+            vec![QueuedCommand::Patrol(exit), QueuedCommand::Patrol(a)]
+        );
+        assert_eq!(
+            orders_from_exit(
+                exit,
+                &[
+                    QueuedCommand::Move(a),
+                    QueuedCommand::AttackMove(b),
+                    QueuedCommand::Patrol(c),
+                    QueuedCommand::Patrol(a),
+                ]
+            ),
+            vec![
+                QueuedCommand::Move(a),
+                QueuedCommand::AttackMove(b),
+                QueuedCommand::Patrol(b),
+                QueuedCommand::Patrol(c),
+                QueuedCommand::Patrol(a),
+            ]
+        );
     }
 }

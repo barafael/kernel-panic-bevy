@@ -18,8 +18,9 @@ use crate::map_loading::MatchScopeAppExt;
 use ability::AbilityHotkeyPlugin;
 use cursor::CursorPlugin;
 use movement::{
-    CommandLineGizmos, advance_command_queue, draw_selected_command_lines, ground_clamp_system,
-    ground_collision_system, guard_follow_system, movement_system, orient_stationary_to_terrain,
+    CommandLineGizmos, advance_command_queue, draw_selected_command_lines,
+    draw_selected_factory_orders, ground_clamp_system, ground_collision_system,
+    guard_follow_system, movement_system, orient_stationary_to_terrain,
 };
 use selection::SelectionPlugin;
 
@@ -161,7 +162,10 @@ impl Plugin for InteractionPlugin {
         // pure visuals. No ordering edge against `movement_system`
         // (that lives in `FixedUpdate` now); worst case the overlay
         // trails the moved units by one frame.
-        .add_systems(Update, draw_selected_command_lines);
+        .add_systems(
+            Update,
+            (draw_selected_command_lines, draw_selected_factory_orders),
+        );
     }
 }
 

@@ -658,8 +658,8 @@ mod tests {
     /// both events are consumed so nothing behind the panel sees them.
     #[test]
     fn click_activates_on_release() {
-        // Slot 2: Kernel → Stop, Repeat, Bit …
-        let mut world = world_with_window(Some(slot_centre(2)));
+        // Slot 6: Kernel → Stop, Repeat, Move, Patrol, Fight, Guard, Bit …
+        let mut world = world_with_window(Some(slot_centre(6)));
         offer_kernel(&mut world);
         world
             .resource_mut::<ButtonInput<MouseButton>>()
@@ -777,7 +777,8 @@ mod tests {
             ))
             .id();
         world.run_system_once(collect_commands).unwrap();
-        assert_eq!(world.resource::<PanelCommands>().list.len(), 6);
+        // Stop, Repeat, Move, Patrol, Fight, Guard, the four units.
+        assert_eq!(world.resource::<PanelCommands>().list.len(), 10);
         world.entity_mut(kernel).remove::<Selected>();
         world.run_system_once(collect_commands).unwrap();
         assert!(world.resource::<PanelCommands>().list.is_empty());
