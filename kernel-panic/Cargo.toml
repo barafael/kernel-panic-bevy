@@ -11,7 +11,7 @@ spring-map = { path = "../spring-map" }
 spring-pathfinding = { path = "../spring-pathfinding" }
 # `libm`: deterministic `bevy::math::ops` (see the workspace `glam` entry).
 # Same fork and commit as the workspace `bevy` (see the root Cargo.toml).
-bevy = { git = "https://github.com/barafael/bevy", rev = "c90529230fd472c504e499ce08e77040fd55ed54", features = ["debug", "custom_cursor", "libm"] }
+bevy = { git = "https://github.com/barafael/bevy", rev = "6fa5f28789f7c7eb9a4fff1d879aef6120df5bf6", features = ["debug", "custom_cursor", "libm"] }
 # Never imported: depending on glam turns its `libm` + `scalar-math`
 # features on for Bevy's copy (workspace Cargo.toml explains why).
 glam = { workspace = true }

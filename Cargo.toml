@@ -54,14 +54,19 @@ better_default = "1"
 #   `pipelines_are_loaded` didn't wait for the `unpack_bins` /
 #   `allocate_uniforms` pipelines #23662 added, so on the first frames
 #   after start-up meshes could be drawn with other meshes' materials;
+# - bevyengine/bevy#26090 (in main, after 0.20.0): `UninitBufferVec` sizes
+#   its entries by the shader's layout. With glam's `scalar-math` (on for
+#   determinism, see `glam` below) `MeshUniform` is 168 bytes in Rust and
+#   176 in WGSL, and a start-up with few meshes failed bind-group
+#   validation ("Binding size 168 … less than minimum 176", #26087);
 # - a `bevy_winit` fix: a hidden browser page counts as all windows
 #   invisible, so a wake-up runs the app update there (Bevy updates once
 #   per redraw, and a hidden page never gets one) — a background tab
 #   keeps its networked match running (`net::web_tab`,
 #   `net-experiments/m3-rooms.md` §1).
-# Back to a crates.io release once one carries both.
+# Back to a crates.io release once one carries all three.
 # `kernel-panic/Cargo.toml` pins the same commit.
-bevy = { git = "https://github.com/barafael/bevy", rev = "c90529230fd472c504e499ce08e77040fd55ed54", features = ["serialize", "libm"] }
+bevy = { git = "https://github.com/barafael/bevy", rev = "6fa5f28789f7c7eb9a4fff1d879aef6120df5bf6", features = ["serialize", "libm"] }
 # Deterministic math for lockstep multiplayer (docs/multiplayer-plan.md,
 # "Will different hardware compute the same results?"): every client must
 # compute bit-identical floats on Linux, Windows and macOS, x86_64 and
