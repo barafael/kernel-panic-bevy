@@ -294,9 +294,14 @@ impl Plugin for UnitsPlugin {
                     )
                         .chain()
                         .in_set(GameplaySet::Animate),
-                    // Before `cleanup_dying`: a feature destroyed this
-                    // tick leaves its `featureDead` first.
-                    (features::destroy_features, combat::cleanup_dying)
+                    // Last in the tick: a finished Bad Block turns into
+                    // its feature; a feature destroyed this tick leaves its
+                    // `featureDead` before `cleanup_dying`.
+                    (
+                        features::turn_into_features,
+                        features::destroy_features,
+                        combat::cleanup_dying,
+                    )
                         .chain()
                         .in_set(GameplaySet::Cleanup),
                 ),

@@ -973,10 +973,12 @@ fn spawn_prepared_map(
         &features,
         &heightmap,
         &mut ctx.commands,
-        &mut ctx.meshes,
-        &mut ctx.materials,
-        &mut ctx.images,
-        &mut ctx.model_cache,
+        &mut crate::units::features::FeatureDraw {
+            meshes: &mut ctx.meshes,
+            materials: &mut ctx.materials,
+            images: &mut ctx.images,
+            model_cache: &mut ctx.model_cache,
+        },
     );
     if placed > 0 {
         info!("  {placed} map features");

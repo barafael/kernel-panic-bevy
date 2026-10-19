@@ -531,10 +531,12 @@ impl UnitRegistry {
         self.def(kind).is_some_and(|d| d.init_cloaked)
     }
 
-    /// FBI `IsFeature`: the unit turns into a crushable feature (the Bad
-    /// Block wall).
-    pub fn is_feature(&self, kind: UnitKind) -> bool {
-        self.def(kind).is_some_and(|d| d.is_feature)
+    /// The feature `kind` turns into once built: its FBI `Corpse`, for an
+    /// `IsFeature=1` unit (the Bad Block; `CUnit::FinishedBuilding`).
+    pub fn finished_feature(&self, kind: UnitKind) -> Option<&str> {
+        self.def(kind)
+            .filter(|d| d.is_feature && !d.corpse.is_empty())
+            .map(|d| d.corpse.as_str())
     }
 
     /// Whether this unit is a building (cannot move or has zero velocity).

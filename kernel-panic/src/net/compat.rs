@@ -53,12 +53,14 @@ use super::state::Fnv;
 /// 10 (2026-10-19): the maps' own features stand (the Bad Blocks of
 /// Quad Core, Dual Core, Corrupted Core and DigitalDivide, Central Hub's
 /// unusable sectors): they block, take damage and can be crushed.
+/// 11 (2026-10-19): a finished Bad Block turns into its feature
+/// (`IsFeature`): no longer a unit of its team.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 10;
+pub const SIM_VERSION: u32 = 11;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

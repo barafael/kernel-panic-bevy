@@ -223,11 +223,13 @@ impl StructureLayer {
         Some([x0 - h, z0 - h, x1 + h, z1 + h])
     }
 
-    /// The stamp a structure of `kind` at `pos` would leave.
+    /// The stamp a structure of `kind` at `pos` would leave. Units are
+    /// never crushable (`crushable` defaults off): a Bad Block is only
+    /// once it has turned into its feature.
     fn stamp_of(&self, registry: &UnitRegistry, kind: UnitKind, pos: Vec3) -> Stamp {
         Stamp {
             squares: self.squares_of(registry, kind, pos),
-            crushable: registry.is_feature(kind),
+            crushable: false,
         }
     }
 
@@ -622,16 +624,33 @@ mod tests {
         assert!(h.world.resource::<NavGridSet>().revision > rev);
     }
 
+    /// A map or built Bad Block feature.
+    fn spawn_bad_block(h: &mut Harness, at: Vec3) -> Entity {
+        let def = crate::units::content::defs::defs()
+            .features
+            .get("badblock")
+            .unwrap();
+        h.world
+            .spawn((
+                Feature { def, owner: None },
+                NetId::default(),
+                crate::units::components::Health::full(def.health),
+                Transform::from_translation(at),
+            ))
+            .id()
+    }
+
     /// Bad Block (a crushable feature, resistance 65.6): HEAVY movers
     /// (Byte, CrushStrength 300) path straight through and crush it on
     /// contact; LIGHT (40) path round it and leave it standing.
     #[test]
     fn heavy_crushes_badblock_light_is_blocked() {
+        use crate::units::features::Crushed;
         let block_at = Vec3::new(804.0, 0.0, 604.0);
         let goal = Vec3::new(900.0, 0.0, 604.0);
 
         let mut h = Harness::flat();
-        let bb = h.spawn_structure(UnitKind::BadBlock, 1, block_at);
+        let bb = spawn_bad_block(&mut h, block_at);
         let bit = h.spawn(UnitKind::Bit, 0, Vec3::new(700.0, 0.0, 604.0));
         h.step();
         assert!(mask_at(&h, 1, false, block_at));
@@ -640,7 +659,7 @@ mod tests {
         for _ in 0..300 {
             h.step();
         }
-        assert!(h.world.get::<Dying>(bb).is_none(), "a Bit can't crush it");
+        assert!(h.world.get::<Crushed>(bb).is_none(), "a Bit can't crush it");
         assert!(
             h.pos(bit).xz().distance(goal.xz()) < 20.0,
             "went round it: {}",
@@ -648,7 +667,7 @@ mod tests {
         );
 
         let mut h = Harness::flat();
-        let bb = h.spawn_structure(UnitKind::BadBlock, 1, block_at);
+        let bb = spawn_bad_block(&mut h, block_at);
         let byte = h.spawn(UnitKind::Byte, 0, Vec3::new(700.0, 0.0, 604.0));
         h.step();
         h.world.entity_mut(byte).insert(MoveTarget(goal));
@@ -661,7 +680,7 @@ mod tests {
         let mut crushed = false;
         for _ in 0..300 {
             h.step();
-            if h.world.get_entity(bb).is_err() || h.world.get::<Dying>(bb).is_some() {
+            if h.world.get_entity(bb).is_err() || h.world.get::<Crushed>(bb).is_some() {
                 crushed = true;
                 break;
             }

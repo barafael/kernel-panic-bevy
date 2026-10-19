@@ -196,6 +196,9 @@ pub struct UnitDef {
     /// FBI `IsFeature`: the finished unit turns into a feature
     /// (`CUnit::FinishedBuilding`, `Unit.cpp:447`).
     pub is_feature: bool,
+    /// FBI `Corpse`, lower-cased: the feature the unit leaves (for an
+    /// `IsFeature` unit, what it turns into once built).
+    pub corpse: String,
 
     /// Indexed particle-effect tags from the unit's `[SFXTypes]` block.
     ///
@@ -327,6 +330,7 @@ impl UnitDef {
             upright: s.bool("upright"),
             yard_map: s.string("yardmap"),
             is_feature: s.bool("isfeature"),
+            corpse: s.string("corpse").trim().to_ascii_lowercase(),
             sfx_types: parse_sfx_types(s),
         }
     }

@@ -2416,7 +2416,7 @@ pub fn ground_collision_system(
     // Unit-id order, here and in the pass below: the snapshot index
     // breaks ties between colliders, and every unit's response sees the
     // positions the units before it reached (`sim`).
-    for (entity, kind, stats, tf, m, path, has_target, queue, dying, _, emerging, _, _) in
+    for (entity, _, stats, tf, m, path, has_target, queue, dying, _, emerging, _, _) in
         movers.iter().sort::<&NetId>()
     {
         if stats.can_fly || dying {
@@ -2441,7 +2441,8 @@ pub fn ground_collision_system(
             radius,
             owner_radius: m.owner_radius,
             mobile,
-            crushable: !mobile && registry.is_feature(kind.0),
+            // Units are never crushable; map features are (below).
+            crushable: false,
             mass: m.mass,
             speed: m.current_speed,
             front: m.front(),
@@ -2789,18 +2790,12 @@ pub fn ground_collision_system(
     crushed.sort();
     crushed.dedup();
     for e in crushed {
-        if features.contains(e) {
-            // `CFeature::Kill(…, crushed)`: gone, leaving its
-            // `featureDead` (`destroy_features`).
-            commands
-                .entity(e)
-                .try_insert(crate::units::features::Crushed);
-            continue;
-        }
-        // A crushed feature just vanishes (no unit death explosion).
-        // `try_insert`: weapon damage may have killed and cleaned it
-        // up in this same tick.
-        commands.entity(e).try_insert(Dying { timer: 0.0 });
+        // `CFeature::Kill(…, crushed)`: gone, leaving its `featureDead`
+        // (`destroy_features`). `try_insert`: weapon damage may have
+        // destroyed it in this same tick.
+        commands
+            .entity(e)
+            .try_insert(crate::units::features::Crushed);
     }
 }
 

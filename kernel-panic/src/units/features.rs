@@ -24,21 +24,31 @@ use crate::net::NetId;
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{
     S3OModelCache, bundle_texture, feature_material, load_s3o_mesh, model_texture_name,
+    unit_material,
 };
 use crate::units::combat::CollisionVolume;
+use crate::units::combat::Dying;
 use crate::units::components::Health;
+use crate::units::components::{Faction, UnitType};
+use crate::units::content::definitions::UnitKind;
 use crate::units::content::model::TgaImage;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::lifecycle::spawning::Emerging;
 
 /// The owner of every map feature: no seat's, so friendly to no one
 /// (`units::teams::Alliances`), like Spring's features of team -1.
 pub const FEATURE_TEAM: u8 = 255;
 
-/// A map feature of `def` (`badblock`, `unusablesector4` …). It has no
+/// A feature of `def` (`badblock`, `unusablesector4` …). It has no
 /// [`TeamId`](crate::units::components::TeamId), so no team query meets
 /// it; where an owner is needed it is [`FEATURE_TEAM`].
 #[derive(Component, Clone, Copy)]
 pub struct Feature {
     pub def: &'static FeatureDef,
+    /// The faction whose colour it wears: a built Bad Block keeps its
+    /// builder's (`CreateWreckage` passes the unit's team, which only
+    /// the drawing reads); a map feature has none.
+    pub owner: Option<Faction>,
 }
 
 impl Feature {
@@ -90,12 +100,31 @@ const MAP_FEATURE_MODELS: [(&str, &str, &[u8]); 4] = [
 const MAP_FEATURE_GEOMETRY: &str = "badblock.s3o";
 
 /// What [`spawn_feature`] draws with.
+pub struct FeatureDraw<'a> {
+    pub meshes: &'a mut Assets<Mesh>,
+    pub materials: &'a mut Assets<StandardMaterial>,
+    pub images: &'a mut Assets<Image>,
+    pub model_cache: &'a mut S3OModelCache,
+}
+
+/// [`FeatureDraw`] as system parameters.
 #[derive(bevy::ecs::system::SystemParam)]
 pub struct FeatureAssets<'w> {
-    pub meshes: ResMut<'w, Assets<Mesh>>,
-    pub materials: ResMut<'w, Assets<StandardMaterial>>,
-    pub images: ResMut<'w, Assets<Image>>,
-    pub model_cache: ResMut<'w, S3OModelCache>,
+    meshes: ResMut<'w, Assets<Mesh>>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
+    model_cache: ResMut<'w, S3OModelCache>,
+}
+
+impl FeatureAssets<'_> {
+    pub fn draw(&mut self) -> FeatureDraw<'_> {
+        FeatureDraw {
+            meshes: &mut self.meshes,
+            materials: &mut self.materials,
+            images: &mut self.images,
+            model_cache: &mut self.model_cache,
+        }
+    }
 }
 
 /// Spawn every feature of the map's list that has a definition (the
@@ -105,10 +134,7 @@ pub fn spawn_map_features(
     features: &[MapFeature],
     heightmap: &Heightmap,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    model_cache: &mut S3OModelCache,
+    draw: &mut FeatureDraw,
 ) -> usize {
     let defs = &crate::units::content::defs::defs().features;
     let mut spawned = 0;
@@ -122,23 +148,27 @@ pub fn spawn_map_features(
             continue;
         };
         let pos = heightmap.place(feature.x, feature.z);
-        spawn_feature(def, pos, commands, meshes, materials, images, model_cache);
+        spawn_feature(def, pos, None, commands, draw);
         spawned += 1;
     }
     spawned
 }
 
-/// One feature of `def` standing at `pos`.
+/// One feature of `def` standing at `pos`, in `owner`'s colours.
 pub fn spawn_feature(
     def: &'static FeatureDef,
     pos: Vec3,
+    owner: Option<Faction>,
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
-    images: &mut Assets<Image>,
-    model_cache: &mut S3OModelCache,
+    draw: &mut FeatureDraw,
 ) -> Entity {
-    let feature = Feature { def };
+    let FeatureDraw {
+        meshes,
+        materials,
+        images,
+        model_cache,
+    } = draw;
+    let feature = Feature { def, owner };
     let entity = commands
         .spawn((
             feature,
@@ -167,16 +197,27 @@ pub fn spawn_feature(
     let Some(mesh) = load_s3o_mesh(geometry, meshes, model_cache) else {
         return entity;
     };
-    let material = feature_material(
-        &texture,
-        |cache| match png {
-            Some(bytes) => decode_png(bytes),
-            None => bundle_texture(&texture, cache),
-        },
-        materials,
-        images,
-        model_cache,
-    );
+    let material = match (owner, png) {
+        // Its model's own texture in its owner's colours, as the unit was.
+        (Some(faction), None) => unit_material(
+            UnitKind::BadBlock,
+            faction,
+            materials,
+            images,
+            model_cache,
+            geometry,
+        ),
+        _ => feature_material(
+            &texture,
+            |cache| match png {
+                Some(bytes) => decode_png(bytes),
+                None => bundle_texture(&texture, cache),
+            },
+            materials,
+            images,
+            model_cache,
+        ),
+    };
     commands
         .entity(entity)
         .insert((Mesh3d(mesh), MeshMaterial3d(material)));
@@ -218,31 +259,48 @@ pub fn destroy_features(
         .filter(|(_, f, health, _, _, crushed)| {
             *crushed || (f.def.destructable && health.current <= 0.0)
         })
-        .map(|(entity, f, _, tf, id, _)| (*id, entity, f.def, tf.translation))
+        .map(|(entity, f, _, tf, id, _)| (*id, entity, *f, tf.translation))
         .collect();
     gone.sort_unstable_by_key(|(id, ..)| *id);
-    for (_, entity, def, pos) in gone {
+    for (_, entity, feature, pos) in gone {
         commands.entity(entity).despawn();
-        if let Some(wreck) = (!def.feature_dead.is_empty())
-            .then(|| defs.get(&def.feature_dead))
+        if let Some(wreck) = (!feature.def.feature_dead.is_empty())
+            .then(|| defs.get(&feature.def.feature_dead))
             .flatten()
         {
-            let FeatureAssets {
-                meshes,
-                materials,
-                images,
-                model_cache,
-            } = &mut assets;
-            spawn_feature(
-                wreck,
-                pos,
-                &mut commands,
-                meshes,
-                materials,
-                images,
-                model_cache,
-            );
+            spawn_feature(wreck, pos, feature.owner, &mut commands, &mut assets.draw());
         }
+    }
+}
+
+/// `CUnit::FinishedBuilding` of an `IsFeature=1` unit, the Bad Block:
+/// the finished unit is gone without a death blast (`KillUnit(…,
+/// reclaimed)`), and its `Corpse` feature stands in its place in its
+/// owner's colours. The engine runs it for a unit created complete too
+/// (`PostInit`), so a map event's Bad Blocks turn the same. In
+/// [`NetId`] order.
+#[allow(clippy::type_complexity)]
+pub fn turn_into_features(
+    units: Query<
+        (Entity, &UnitType, &Faction, &Transform, &NetId),
+        (Without<Emerging>, Without<Dying>),
+    >,
+    registry: Res<UnitRegistry>,
+    mut assets: FeatureAssets,
+    mut commands: Commands,
+) {
+    let defs = &crate::units::content::defs::defs().features;
+    let mut finished: Vec<_> = units
+        .iter()
+        .filter_map(|(entity, kind, faction, tf, id)| {
+            let def = defs.get(registry.finished_feature(kind.0)?)?;
+            Some((*id, entity, def, *faction, tf.translation))
+        })
+        .collect();
+    finished.sort_unstable_by_key(|(id, ..)| *id);
+    for (_, entity, def, faction, pos) in finished {
+        commands.entity(entity).despawn();
+        spawn_feature(def, pos, Some(faction), &mut commands, &mut assets.draw());
     }
 }
 
@@ -268,21 +326,7 @@ mod tests {
             .unwrap();
         app.world_mut()
             .run_system_once(move |mut commands: Commands, mut assets: FeatureAssets| {
-                let FeatureAssets {
-                    meshes,
-                    materials,
-                    images,
-                    model_cache,
-                } = &mut assets;
-                spawn_feature(
-                    def,
-                    pos,
-                    &mut commands,
-                    meshes,
-                    materials,
-                    images,
-                    model_cache,
-                )
+                spawn_feature(def, pos, None, &mut commands, &mut assets.draw())
             })
             .unwrap()
     }
@@ -347,5 +391,62 @@ mod tests {
         app.world_mut().entity_mut(block).insert(Crushed);
         app.world_mut().run_system_once(destroy_features).unwrap();
         assert!(features(&mut app).is_empty());
+    }
+
+    /// A finished Bad Block unit (built, or spawned complete) turns into
+    /// a `badblock` feature where it stood, in its builder's colours;
+    /// one still under construction stays a unit.
+    #[test]
+    fn a_finished_bad_block_turns_into_its_feature() {
+        let mut app = app();
+        app.insert_resource(UnitRegistry::load());
+        let at = Vec3::new(40.0, 3.0, 80.0);
+        let built = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::BadBlock),
+                Faction::Hacker,
+                Transform::from_translation(at),
+                NetId::default(),
+            ))
+            .id();
+        let framed = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::BadBlock),
+                Faction::System,
+                Transform::default(),
+                NetId::default(),
+                Emerging {
+                    target_y: 0.0,
+                    remaining: 1.0,
+                    total: 2.0,
+                    rally_point: None,
+                    rally_then: None,
+                    style: crate::units::lifecycle::spawning::EmergeStyle::Rise,
+                },
+            ))
+            .id();
+        // Any other finished unit stays one.
+        let socket = app
+            .world_mut()
+            .spawn((
+                UnitType(UnitKind::Socket),
+                Faction::System,
+                Transform::default(),
+                NetId::default(),
+            ))
+            .id();
+        app.world_mut().run_system_once(turn_into_features).unwrap();
+        assert!(app.world().get_entity(built).is_err());
+        assert!(app.world().get_entity(framed).is_ok());
+        assert!(app.world().get_entity(socket).is_ok());
+        let turned: Vec<_> = app
+            .world_mut()
+            .query::<(&Feature, &Transform, &Health)>()
+            .iter(app.world())
+            .map(|(f, tf, h)| (f.def.name.as_str(), f.owner, tf.translation, h.current))
+            .collect();
+        assert_eq!(turned, vec![("badblock", Some(Faction::Hacker), at, 400.0)]);
     }
 }
