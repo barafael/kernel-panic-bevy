@@ -483,8 +483,15 @@ pub struct GameAudioPlugin;
 
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
+        // The player system needs Bevy's `AudioOutput`; the headless
+        // harness runs without `AudioPlugin`, so there the effects only
+        // load (the asset type and loader) and nothing plays them.
+        if app.is_plugin_added::<bevy::audio::AudioPlugin>() {
+            app.add_audio_source::<Sfx>();
+        } else {
+            app.init_asset::<Sfx>();
+        }
         app.add_plugins(music::MusicPlugin)
-            .add_audio_source::<Sfx>()
             .init_asset_loader::<SfxLoader>()
             .init_resource::<SoundQueue>()
             .add_systems(Startup, load_sound_bank)
