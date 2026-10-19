@@ -126,7 +126,7 @@ pub(super) fn order_hotkeys(
         (KeyCode::KeyT, CmdId::SetTarget),
         (KeyCode::KeyX, CmdId::UnsetTarget),
         (KeyCode::KeyH, CmdId::AutoHold),
-        (KeyCode::KeyR, CmdId::Enter),
+        (KeyCode::KeyE, CmdId::Enter),
         (KeyCode::KeyU, CmdId::Undeploy),
         (KeyCode::Comma, CmdId::PrevPage),
         (KeyCode::Period, CmdId::NextPage),

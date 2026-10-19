@@ -200,8 +200,8 @@ pub enum MiddleDrag {
     None,
     /// Plain middle-drag: focus shifts so this world point stays under the cursor.
     Pan { anchor: Vec3 },
-    /// Alt+middle-drag: orbit. Focus was already snapped to the cursor's
-    /// world point on press, so the existing yaw/pitch update orbits it.
+    /// Alt+middle-drag: orbit around the point the view is looking at,
+    /// from where the view is (as while `R` is held).
     Rotate,
 }
 
@@ -246,10 +246,10 @@ pub fn camera_control(
     settings: Res<CameraSettings>,
     bounds: Res<MapBounds>,
     windows: Query<&Window>,
-    mut query: Query<(&Camera, &GlobalTransform, &mut RtsCameraState, &Transform), With<RtsCamera>>,
+    mut query: Query<(&Camera, &GlobalTransform, &mut RtsCameraState), With<RtsCamera>>,
     mut drag: Local<MiddleDrag>,
 ) {
-    let Ok((camera, cam_gxf, mut state, transform)) = query.single_mut() else {
+    let Ok((camera, cam_gxf, mut state)) = query.single_mut() else {
         return;
     };
     let Ok(window) = windows.single() else {
@@ -298,40 +298,27 @@ pub fn camera_control(
     }
     if zoom_ticks != 0.0 {
         let factor = 1.0 - zoom_ticks.det_clamp(-5.0, 5.0) * 0.06;
-        state.distance =
+        let distance =
             (state.distance * factor).det_clamp(settings.min_distance, settings.max_distance);
+        // Toward the cursor: the ground point under it stays under it.
+        // The view's direction doesn't change, so moving the focus toward
+        // that point by the distance's ratio keeps it on the same ray.
+        if let Some(target) = cursor_world_on_plane(camera, cam_gxf, window, state.focus.y) {
+            let ratio = distance / state.distance;
+            state.focus = bounds.clamp_focus(target + (state.focus - target) * ratio);
+        }
+        state.distance = distance;
     }
 
     // --- Middle-mouse: drag-pan, or alt+middle: orbit around cursor ---
     if mouse_buttons.just_pressed(MouseButton::Middle) {
         let alt_held = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
-        let plane_y = state.focus.y;
         if alt_held {
-            // Re-anchor focus onto the world point under the cursor without
-            // a visible jump: keep the eye fixed and recompute yaw/pitch/distance
-            // around the new pivot.
+            // Orbit the point the view already looks at: nothing moves
+            // until the mouse does (re-centring on the cursor's point made
+            // the view jump).
             *drag = MiddleDrag::Rotate;
-            if let Some(pivot) = cursor_world_on_plane(camera, cam_gxf, window, plane_y) {
-                let eye = transform.translation;
-                let offset = eye - pivot;
-                let horizontal = (offset.x * offset.x + offset.z * offset.z).sqrt();
-                let new_distance = offset.length();
-                let new_pitch = ops::atan2(offset.y, horizontal);
-                let new_yaw = ops::atan2(offset.x, offset.z);
-                if (settings.min_distance..=settings.max_distance).contains(&new_distance)
-                    && (settings.min_pitch..=settings.max_pitch).contains(&new_pitch)
-                {
-                    state.focus = pivot;
-                    state.distance = new_distance;
-                    state.yaw = new_yaw;
-                    state.pitch = new_pitch;
-                    state.smooth_focus = pivot;
-                    state.smooth_distance = new_distance;
-                    state.smooth_yaw = new_yaw;
-                    state.smooth_pitch = new_pitch;
-                }
-            }
-        } else if let Some(anchor) = cursor_world_on_plane(camera, cam_gxf, window, plane_y) {
+        } else if let Some(anchor) = cursor_world_on_plane(camera, cam_gxf, window, state.focus.y) {
             *drag = MiddleDrag::Pan { anchor };
         }
     }
@@ -350,14 +337,17 @@ pub fn camera_control(
             }
             mouse_motion.clear();
         }
-        MiddleDrag::Rotate => {
+        // Alt+middle-drag, or the mouse moving while `R` is held: orbit.
+        MiddleDrag::Rotate | MiddleDrag::None
+            if matches!(*drag, MiddleDrag::Rotate) || keys.pressed(KeyCode::KeyR) =>
+        {
             for motion in mouse_motion.read() {
                 state.yaw -= motion.delta.x * settings.rotate_speed_mouse;
                 state.pitch = (state.pitch + motion.delta.y * settings.rotate_speed_mouse)
                     .det_clamp(settings.min_pitch, settings.max_pitch);
             }
         }
-        MiddleDrag::None => {
+        MiddleDrag::Rotate | MiddleDrag::None => {
             mouse_motion.clear();
         }
     }

@@ -456,7 +456,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
             Icon,
             "Enter",
             "Return this Packet to the Buffer",
-            "r",
+            "e",
         )),
         _ => {}
     }
