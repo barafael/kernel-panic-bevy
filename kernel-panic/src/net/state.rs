@@ -16,6 +16,7 @@ use crate::net::NetId;
 use crate::rendering::interpolation::SimPose;
 use crate::units::combat::{AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
 use crate::units::components::{Health, TeamId, UnitType};
+use crate::units::features::Feature;
 use crate::units::lifecycle::construction::{Constructing, PendingBuild};
 use crate::units::lifecycle::production::Producer;
 use crate::units::lifecycle::spawning::Emerging;
@@ -88,7 +89,8 @@ pub struct Capture {
     /// Entity count per category ("other" for the rest).
     pub census: BTreeMap<&'static str, usize>,
     /// Hash of the sim state: units (pose, health, flags, orders,
-    /// queues), projectiles, and sim-entity counts.
+    /// queues), map features (position, health), projectiles, and
+    /// sim-entity counts.
     pub sim_hash: u64,
     /// Hash of the visual-only entity counts.
     pub fx_hash: u64,
@@ -316,6 +318,22 @@ pub fn capture(world: &mut World) -> Capture {
         order_recs.push(o);
     }
 
+    // --- map features ----------------------------------------------------
+    // With the units' positions and health: their ids share the counter.
+    // A kind of `u16::MAX` and the feature's name mark the record.
+    let mut fq = world.query::<(&NetId, &Feature, &Transform, &Health)>();
+    for (id, feature, tf, health) in fq.iter(world) {
+        let me = id.0.to_le_bytes();
+        let mut p = me.to_vec();
+        p.extend(u16::MAX.to_le_bytes());
+        p.extend(feature.def.name.as_bytes());
+        p.extend(bits.vec3(tf.translation));
+        pos_recs.push(p);
+        let mut h = me.to_vec();
+        h.extend(bits.f32(health.current));
+        hp_recs.push(h);
+    }
+
     // --- projectiles -----------------------------------------------------
     let projectiles = projectile_entities.len();
     let mut proj_recs: Vec<Vec<u8>> = Vec::new();
@@ -408,6 +426,13 @@ pub fn describe(world: &mut World) -> Vec<String> {
             },
         )
         .collect();
+    let mut fq = world.query::<(&NetId, &Feature, &Transform, &Health)>();
+    out.extend(fq.iter(world).map(|(id, feature, tf, health)| {
+        format!(
+            "#{:06} feature {} pos {:?} hp {}",
+            id.0, feature.def.name, tf.translation, health.current
+        )
+    }));
     // The movers' full state too (velocity, heading, path), one line
     // each, right after their unit's line once sorted.
     let mut mq = world.query::<(
