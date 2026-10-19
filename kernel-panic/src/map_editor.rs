@@ -13,7 +13,9 @@
 //! facing can be tried at once: build a Socket on the vent and watch its
 //! Bits leave. Every datavent shows an arrow along its facing. Hover a
 //! vent and press `V` to turn it clockwise (`Shift+V`: counter-
-//! clockwise); the change applies to the running match at once (to
+//! clockwise); datavents closer than half a building width form one
+//! site (Major Madness puts four in a 2×2 block per site) and turn
+//! together. The change applies to the running match at once (to
 //! buildings started after it). `Ctrl+S` writes the facings into the
 //! `.kpmap` ([`spring_map::baked::set_datavent_facings`]: only those
 //! bytes of the payload change).
@@ -42,6 +44,11 @@ const MENU_FRAMES: u32 = 60;
 /// How close (elmos, in XZ) the cursor must be to a vent's centre to
 /// hover it: a vent building is 4×4 squares, 32 elmos across.
 const HOVER_RADIUS: f32 = 20.0;
+
+/// Datavents closer than this (elmos, XZ) are one building site: a
+/// vent building is 32 elmos across, so it covers them all, and they
+/// get one facing.
+const SITE_RADIUS: f32 = 16.0;
 
 /// Length of a facing arrow, elmos: a little past the edge of a vent
 /// building, where the factory's units come out.
@@ -93,6 +100,14 @@ fn configure_gizmos(mut store: ResMut<GizmoConfigStore>) {
     config.depth_bias = -1.0;
 }
 
+/// Datavents one building covers ([`SITE_RADIUS`]), edited as one.
+struct Site {
+    /// Their indices in the file's datavent order.
+    members: Vec<usize>,
+    /// The mean of their positions.
+    center: Vec3,
+}
+
 /// One datavent of the map file, matched to its vent in the match.
 struct EditVent {
     /// The vent entity (`GeoventSmoker`), to apply a change live.
@@ -118,11 +133,13 @@ struct VentEditor {
     positions: Option<Vec<Vec2>>,
     /// `vents[i]` is datavent `i`, once matched to the match's vents.
     vents: Vec<EditVent>,
+    /// The building sites the datavents form.
+    sites: Vec<Site>,
     /// Matched (or given up on).
     attached: bool,
     /// Frames spent waiting for the match's vents.
     attach_frames: u32,
-    /// The hovered datavent's index.
+    /// The hovered site's index.
     hovered: Option<usize>,
     /// The last save or load problem, shown in the help panel.
     status: String,
@@ -140,6 +157,7 @@ impl VentEditor {
             saved: Vec::new(),
             positions: None,
             vents: Vec::new(),
+            sites: Vec::new(),
             attached: false,
             attach_frames: 0,
             hovered: None,
@@ -154,6 +172,53 @@ impl VentEditor {
             .filter(|(a, b)| a != b)
             .count()
     }
+
+    /// Site `i`'s facing (its datavents' majority; the first member's on
+    /// a tie) and whether they disagree.
+    fn site_facing(&self, i: usize) -> (u8, bool) {
+        let members = &self.sites[i].members;
+        let mut counts = [0usize; 4];
+        for &m in members {
+            counts[self.facings[m] as usize % 4] += 1;
+        }
+        let first = self.facings[members[0]];
+        let majority = (0..4u8)
+            .max_by_key(|&f| (counts[f as usize], f == first))
+            .unwrap_or(first);
+        (majority, counts.iter().filter(|&&n| n > 0).count() > 1)
+    }
+}
+
+/// Group datavents into sites: chains of datavents closer than
+/// [`SITE_RADIUS`]. Sites are in the order of their first datavent, so a
+/// map without clusters has site `i` = datavent `i`.
+fn group_sites(vents: &[EditVent]) -> Vec<Site> {
+    let mut site_of: Vec<Option<usize>> = vec![None; vents.len()];
+    let mut sites: Vec<Site> = Vec::new();
+    for start in 0..vents.len() {
+        if site_of[start].is_some() {
+            continue;
+        }
+        let id = sites.len();
+        site_of[start] = Some(id);
+        let mut members = vec![start];
+        let mut next = 0;
+        while next < members.len() {
+            let here = vents[members[next]].pos.xz();
+            next += 1;
+            for other in 0..vents.len() {
+                if site_of[other].is_none() && (vents[other].pos.xz() - here).length() < SITE_RADIUS
+                {
+                    site_of[other] = Some(id);
+                    members.push(other);
+                }
+            }
+        }
+        members.sort_unstable();
+        let center = members.iter().map(|&m| vents[m].pos).sum::<Vec3>() / members.len() as f32;
+        sites.push(Site { members, center });
+    }
+    sites
 }
 
 /// Start the sandbox match once the menu has scanned the map catalog.
@@ -279,18 +344,20 @@ fn attach(mut editor: ResMut<VentEditor>, smokers: Query<(Entity, &GeoventSmoker
             return;
         }
     };
+    editor.sites = group_sites(&vents);
     editor.vents = vents;
     editor.attached = true;
     editor.status.clear();
     info!(
-        "KP_MAP_EDIT: {} datavents on {}",
+        "KP_MAP_EDIT: {} datavents in {} sites on {}",
         editor.vents.len(),
+        editor.sites.len(),
         editor.map
     );
 }
 
-/// The datavent under the cursor: the ray meets each vent's ground
-/// plane within [`HOVER_RADIUS`] of its centre.
+/// The site under the cursor: the ray meets each site's ground plane
+/// within [`HOVER_RADIUS`] of its centre.
 fn hover(
     mut editor: ResMut<VentEditor>,
     windows: Query<&Window>,
@@ -303,13 +370,13 @@ fn hover(
     });
     editor.hovered = ray.and_then(|ray| {
         editor
-            .vents
+            .sites
             .iter()
             .enumerate()
-            .filter_map(|(i, vent)| {
-                let t = (vent.pos.y - ray.origin.y) / ray.direction.y;
+            .filter_map(|(i, site)| {
+                let t = (site.center.y - ray.origin.y) / ray.direction.y;
                 let hit = ray.origin + ray.direction * t;
-                let d = Vec2::new(hit.x - vent.pos.x, hit.z - vent.pos.z).length();
+                let d = (hit.xz() - site.center.xz()).length();
                 (t > 0.0 && d < HOVER_RADIUS).then_some((i, d))
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -317,8 +384,9 @@ fn hover(
     });
 }
 
-/// `V` turns the hovered datavent clockwise (seen from above), `Shift+V`
-/// counter-clockwise, and the match's vent with it.
+/// `V` turns the hovered site clockwise (seen from above), `Shift+V`
+/// counter-clockwise: every datavent of it, and the match's vents with
+/// them. A mixed site turns from its majority facing.
 fn edit(
     mut editor: ResMut<VentEditor>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -336,10 +404,12 @@ fn edit(
     } else {
         3
     };
-    let facing = (editor.facings[i] + step) % 4;
-    editor.facings[i] = facing;
-    if let Ok(mut smoker) = smokers.get_mut(editor.vents[i].smoker) {
-        smoker.facing = facing;
+    let facing = (editor.site_facing(i).0 + step) % 4;
+    for m in editor.sites[i].members.clone() {
+        editor.facings[m] = facing;
+        if let Ok(mut smoker) = smokers.get_mut(editor.vents[m].smoker) {
+            smoker.facing = facing;
+        }
     }
 }
 
@@ -380,19 +450,27 @@ fn save(mut editor: ResMut<VentEditor>, keys: Res<ButtonInput<KeyCode>>) {
     info!("KP_MAP_EDIT: {}", editor.status);
 }
 
-/// An arrow along each datavent's facing: yellow when hovered, orange
-/// when changed and not saved, cyan otherwise.
+/// An arrow along each site's facing: yellow when hovered, magenta when
+/// its datavents disagree, orange when changed and not saved, cyan
+/// otherwise.
 fn draw(editor: Res<VentEditor>, mut gizmos: Gizmos<VentEditorGizmos>) {
-    for (i, vent) in editor.vents.iter().enumerate() {
+    for (i, site) in editor.sites.iter().enumerate() {
+        let (facing, mixed) = editor.site_facing(i);
         let color = if editor.hovered == Some(i) {
             Color::srgb(1.0, 0.95, 0.2)
-        } else if editor.facings[i] != editor.saved[i] {
+        } else if mixed {
+            Color::srgb(1.0, 0.2, 0.9)
+        } else if site
+            .members
+            .iter()
+            .any(|&m| editor.facings[m] != editor.saved[m])
+        {
             Color::srgb(1.0, 0.5, 0.1)
         } else {
             Color::srgb(0.2, 0.9, 1.0)
         };
-        let (dx, dz) = facing_vector(editor.facings[i]);
-        let start = vent.pos + Vec3::Y * 4.0;
+        let (dx, dz) = facing_vector(facing);
+        let start = site.center + Vec3::Y * 4.0;
         let end = start + Vec3::new(dx, 0.0, dz) * ARROW_LENGTH;
         gizmos.arrow(start, end, color).with_tip_length(18.0);
         gizmos.circle(
@@ -413,15 +491,41 @@ fn help(
     mut panel: Query<&mut Text, With<EditorHelp>>,
 ) {
     let facing_name = |f: u8| ["south", "east", "north", "west"][f as usize % 4];
+    let count = if editor.sites.len() == editor.vents.len() {
+        format!("{} datavents", editor.vents.len())
+    } else {
+        format!(
+            "{} datavents in {} sites",
+            editor.vents.len(),
+            editor.sites.len()
+        )
+    };
     let mut text = format!(
-        "Datavent editor: {} ({} datavents)\n\
+        "Datavent editor: {} ({count})\n\
          Hover a vent: V turns it clockwise, Shift+V counter-clockwise\n\
          Ctrl+S saves into the map file",
         editor.map,
-        editor.vents.len()
     );
     if let Some(i) = editor.hovered {
-        text += &format!("\nvent {i}: faces {}", facing_name(editor.facings[i]));
+        let (facing, mixed) = editor.site_facing(i);
+        if mixed {
+            let split: Vec<String> = (0..4u8)
+                .filter_map(|f| {
+                    let n = editor.sites[i]
+                        .members
+                        .iter()
+                        .filter(|&&m| editor.facings[m] == f)
+                        .count();
+                    (n > 0).then(|| format!("{} {n}", facing_name(f)))
+                })
+                .collect();
+            text += &format!(
+                "\nsite {i}: mixed ({}); V sets all its datavents",
+                split.join(", ")
+            );
+        } else {
+            text += &format!("\nsite {i}: faces {}", facing_name(facing));
+        }
     }
     let unsaved = editor.unsaved();
     if unsaved > 0 {
@@ -532,6 +636,32 @@ mod tests {
         expected[3] = turned;
         assert_eq!(saved, expected);
         assert!(!path.with_extension("kpmap.tmp").exists());
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    /// Major Madness has four datavents per site: 32 sites, and turning
+    /// a mixed one sets all four to one facing.
+    #[test]
+    fn clustered_datavents_turn_as_one_site() {
+        let (mut world, path) = editor_world("Major_Madness3.0");
+        let editor = world.resource::<VentEditor>();
+        assert_eq!(editor.sites.len(), 32);
+        assert!(editor.sites.iter().all(|site| site.members.len() == 4));
+        let mixed = (0..editor.sites.len())
+            .find(|&i| editor.site_facing(i).1)
+            .expect("the converter left some sites mixed");
+        let (majority, _) = editor.site_facing(mixed);
+        world.resource_mut::<VentEditor>().hovered = Some(mixed);
+
+        press(&mut world, &[KeyCode::KeyV]);
+        world.run_system_once(edit).unwrap();
+        let editor = world.resource::<VentEditor>();
+        let turned = (majority + 3) % 4;
+        assert_eq!(editor.site_facing(mixed), (turned, false));
+        for &m in &editor.sites[mixed].members {
+            let smoker = editor.vents[m].smoker;
+            assert_eq!(world.get::<GeoventSmoker>(smoker).unwrap().facing, turned);
+        }
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
