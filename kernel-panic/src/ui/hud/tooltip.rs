@@ -2,20 +2,26 @@
 //! `kp_midknight_bg.lua`'s background), which replaces Spring's own
 //! tooltip console.
 //!
-//! The box always sits in the bottom-left corner and sizes itself to its
-//! text (`FontSize × (1 + widest line)` by `FontSize × (1 + lines)`,
-//! `FontSize = max(8, 4 + height / 100)`), over `bitmaps/tooltipbg.png`
-//! stretched to 1.2× that. What it says, in kp_tooltip's order:
+//! The box always sits in the bottom-left corner and grows with its
+//! text (laid out by the UI, `FontSize = max(8, 4 + height / 100)`),
+//! over `bitmaps/tooltipbg.png` stretched to fit. What it says, in
+//! kp_tooltip's order:
 //!
 //! - over a command button (control panel or build bar): the command's
 //!   tooltip, its action name in green, then `Hotkeys:` in orange;
 //! - over a build option: "N units selected", then the unit's name and
 //!   description, build time, health and speed;
-//! - otherwise: the selection count and the unit under the cursor (or
-//!   the last selected unit) — name, description, health, speed, and a
+//! - otherwise: the selection count; with several unit types selected,
+//!   a row per type (click one to keep just that type, right-click to
+//!   drop it from the selection); then the unit under the cursor (or the
+//!   last selected unit) — name, description, health, speed, and a
 //!   teleporter's buffered packets.
 
 use crate::map_loading::MatchScopeAppExt;
+use bevy::input::InputSystems;
+use bevy::picking::PickingSystems;
+// Picking's hover marker (the selection's unit hover is `Hovered`).
+use bevy::picking::hover::Hovered as PointerOver;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -29,19 +35,32 @@ use crate::units::mechanics::network_buffer::PacketBuffer;
 use crate::units::player::LocalTeam;
 
 use super::command_panel::commands::{CmdDesc, CmdId};
-use super::command_panel::layout::FONT_ADVANCE_EM;
 
 pub(super) struct TooltipPlugin;
 
 impl Plugin for TooltipPlugin {
     fn build(&self, app: &mut App) {
-        app.init_match_resource::<HoverTip>().add_systems(
-            Update,
-            refresh_tooltip
-                .run_if(in_state(AppState::InGame))
-                .after(super::command_panel::CommandPanelSet)
-                .after(crate::map_loading::GameWorldRebuild),
-        );
+        app.init_match_resource::<HoverTip>()
+            .init_match_resource::<RowPress>()
+            // Before every Update system, so a click on a type row is
+            // gone before selection and orders look at the mouse.
+            .add_systems(
+                PreUpdate,
+                type_row_clicks
+                    .after(InputSystems)
+                    .after(PickingSystems::Hover)
+                    .run_if(in_state(AppState::InGame)),
+            )
+            .add_systems(
+                Update,
+                (
+                    refresh_tooltip
+                        .run_if(in_state(AppState::InGame))
+                        .after(super::command_panel::CommandPanelSet)
+                        .after(crate::map_loading::GameWorldRebuild),
+                    highlight_type_rows,
+                ),
+            );
     }
 }
 
@@ -77,6 +96,10 @@ const SPEED_LABEL: Color = rgb(193, 255, 187);
 const SPEED_VALUE: Color = rgb(134, 255, 121);
 const BUFFER_LABEL: Color = rgb(255, 255, 128);
 const BUFFER_VALUE: Color = rgb(255, 255, 57);
+const TYPE_NAME: Color = rgb(255, 255, 255);
+const ROW_HINT: Color = rgb(150, 150, 150);
+/// Behind a type row under the cursor.
+const ROW_HOVER: Color = Color::srgba(1.0, 1.0, 1.0, 0.12);
 
 /// One tooltip line as coloured segments.
 type Line = Vec<(String, Color)>;
@@ -176,12 +199,31 @@ fn build_lines(kind: UnitKind, registry: &UnitRegistry) -> Vec<Line> {
     out
 }
 
+/// The tooltip's lines, and for each the unit type it is a row of (a
+/// clickable line of the selection's types), if any.
 fn tooltip_lines(
     hover: &HoverTip,
     selected: usize,
+    types: &[(UnitKind, usize)],
     unit: Option<(UnitKind, Option<&Health>, Option<u32>)>,
     registry: &UnitRegistry,
-) -> Vec<Line> {
+) -> (Vec<Line>, Vec<Option<UnitKind>>) {
+    let lines = tooltip_text(hover, selected, types, unit, registry);
+    let mut rows = vec![None; lines.0.len()];
+    for (i, kind) in lines.1 {
+        rows[i] = Some(kind);
+    }
+    (lines.0, rows)
+}
+
+/// [`tooltip_lines`]: the lines and the (line, type) of each type row.
+fn tooltip_text(
+    hover: &HoverTip,
+    selected: usize,
+    types: &[(UnitKind, usize)],
+    unit: Option<(UnitKind, Option<&Health>, Option<u32>)>,
+    registry: &UnitRegistry,
+) -> (Vec<Line>, Vec<(usize, UnitKind)>) {
     let cmd = hover.panel.clone().or_else(|| match &hover.bar {
         Some(BarTip::Command(d)) => Some(d.clone()),
         _ => None,
@@ -197,15 +239,32 @@ fn tooltip_lines(
                         (desc.hotkeys, HOTKEY_KEYS),
                     ]));
                 }
-                out
+                (out, Vec::new())
             }
-            _ => command_lines(&desc),
+            _ => (command_lines(&desc), Vec::new()),
         };
     }
     if let Some(BarTip::Text(t)) = &hover.bar {
-        return t.lines().map(|l| line(&[(l, Color::WHITE)])).collect();
+        return (
+            t.lines().map(|l| line(&[(l, Color::WHITE)])).collect(),
+            Vec::new(),
+        );
     }
     let mut out: Vec<Line> = selection_line(selected).into_iter().collect();
+    let mut rows = Vec::new();
+    if types.len() > 1 {
+        for &(kind, count) in types {
+            rows.push((out.len(), kind));
+            out.push(line(&[
+                (&format!("{count:>4} "), SEL_COUNT),
+                (registry.name(kind), TYPE_NAME),
+            ]));
+        }
+        out.push(line(&[(
+            "click: only this type, right-click: drop it",
+            ROW_HINT,
+        )]));
+    }
     if let Some((kind, health, packets)) = unit {
         let desc = registry
             .def(kind)
@@ -239,7 +298,7 @@ fn tooltip_lines(
             ]));
         }
     }
-    out
+    (out, rows)
 }
 
 #[derive(Component)]
@@ -255,29 +314,24 @@ struct TipTree {
     root: Entity,
     spans: Vec<Vec<Entity>>,
     lines: Vec<Line>,
+    /// The type each line is a row of (its [`TypeRow`]).
+    rows: Vec<Option<UnitKind>>,
     font_size: u32,
-    widest: usize,
 }
+
+/// A line of the selection's types: a click keeps only this type
+/// selected, a right-click drops it ([`type_row_clicks`]).
+#[derive(Component)]
+struct TypeRow(UnitKind);
+
+/// A press on a type row, run on the release over the same row.
+#[derive(Resource, Default)]
+struct RowPress(Option<(MouseButton, UnitKind)>);
 
 /// Same number of lines with the same number of segments each: the
 /// existing text entities can take the new lines' content in place.
 fn same_shape(a: &[Line], b: &[Line]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.len() == y.len())
-}
-
-/// Character count of the widest line.
-fn widest(lines: &[Line]) -> usize {
-    lines
-        .iter()
-        .map(|l| l.iter().map(|(t, _)| t.chars().count()).sum::<usize>())
-        .max()
-        .unwrap_or(0)
-}
-
-/// Box width for `widest` characters at `font_size` (before the 1.2×
-/// background stretch).
-fn box_width(font_size: f32, widest: usize) -> f32 {
-    font_size * (1.0 + widest as f32 * FONT_ADVANCE_EM)
 }
 
 type UnitInfo<'w, 's> = Query<
@@ -304,7 +358,7 @@ fn refresh_tooltip(
     local: Option<Res<LocalTeam>>,
     state: Option<Res<State<AppState>>>,
     asset_server: Res<AssetServer>,
-    mut roots: Query<(Entity, &mut Node), With<TooltipRoot>>,
+    roots: Query<Entity, With<TooltipRoot>>,
     mut spans: Query<(&mut TextSpan, &mut TextColor)>,
     mut tree: Local<Option<TipTree>>,
     mut bg: Local<Option<Handle<Image>>>,
@@ -314,13 +368,25 @@ fn refresh_tooltip(
         return;
     };
     if !in_game {
-        for (e, _) in &roots {
+        for e in &roots {
             commands.entity(e).despawn();
         }
         *tree = None;
         return;
     }
     let selected = units.iter().filter(|u| u.4).count();
+    // The selection's types, most numerous first.
+    let mut types: Vec<(UnitKind, usize)> = Vec::new();
+    for (_, ut, ..) in units.iter().filter(|u| u.4) {
+        match types.iter_mut().find(|(k, _)| *k == ut.0) {
+            Some((_, n)) => *n += 1,
+            None => types.push((ut.0, 1)),
+        }
+    }
+    types.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| registry.name(a.0).cmp(registry.name(b.0)))
+    });
     // The unit under the cursor, else the last selected one.
     let shown = units
         .iter()
@@ -336,15 +402,16 @@ fn refresh_tooltip(
             });
         (ut.0, health, packets)
     });
-    let lines = tooltip_lines(&hover, selected, unit, &registry);
+    let (lines, rows) = tooltip_lines(&hover, selected, &types, unit, &registry);
     let font_size = (4.0 + window.height() / 100.0).det_max(8.0);
 
-    // Same shape as the tree on screen: refresh the changed segments in
-    // place (and the box width when the widest line changed).
+    // Same shape as the tree on screen (and the same type rows): refresh
+    // the changed segments in place; the box grows with them by itself.
     if let Some(t) = tree.as_mut()
         && t.font_size == font_size as u32
         && roots.contains(t.root)
         && same_shape(&t.lines, &lines)
+        && t.rows == rows
     {
         if t.lines == lines {
             return;
@@ -365,27 +432,19 @@ fn refresh_tooltip(
                 }
             }
         }
-        let wide = widest(&lines);
-        if wide != t.widest
-            && let Ok((_, mut node)) = roots.get_mut(t.root)
-        {
-            node.width = Val::Px(box_width(font_size, wide) * 1.2);
-            t.widest = wide;
-        }
         t.lines = lines;
         return;
     }
 
-    for (e, _) in &roots {
+    for e in &roots {
         commands.entity(e).despawn();
     }
 
-    let wide = widest(&lines);
-    let w = box_width(font_size, wide);
-    let h = font_size * (1.0 + lines.len() as f32);
     let bg = bg
         .get_or_insert_with(|| asset_server.load("bitmaps/tooltipbg.png"))
         .clone();
+    // The box is as large as its text plus a margin (kp_tooltip's 1.2×
+    // background): no fixed size, so it grows with whatever it shows.
     let root = commands
         .spawn((
             TooltipRoot,
@@ -393,44 +452,43 @@ fn refresh_tooltip(
                 position_type: PositionType::Absolute,
                 left: Val::Px(0.0),
                 bottom: Val::Px(0.0),
-                width: Val::Px(w * 1.2),
-                height: Val::Px(h * 1.2),
+                flex_direction: FlexDirection::Column,
+                padding: UiRect {
+                    left: Val::Px(font_size * 0.6),
+                    right: Val::Px(font_size * 1.2),
+                    top: Val::Px(font_size * 0.6),
+                    bottom: Val::Px(font_size * 0.7),
+                },
                 ..default()
             },
-            ImageNode::new(bg),
+            ImageNode::new(bg).with_mode(NodeImageMode::Stretch),
             GlobalZIndex(-1),
         ))
         .id();
-    let column = commands
-        .spawn((
+    let mut spans: Vec<Vec<Entity>> = Vec::with_capacity(lines.len());
+    for (l, row) in lines.iter().zip(&rows) {
+        let mut text = commands.spawn((
             ChildOf(root),
+            Text::default(),
+            TextFont::from_font_size(font_size),
+            TextLayout::new(Justify::Left, LineBreak::NoWrap),
+            TextShadow {
+                offset: Vec2::splat(1.0),
+                color: Color::BLACK,
+            },
             Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(font_size / 2.0),
-                bottom: Val::Px(font_size * 0.5),
-                flex_direction: FlexDirection::Column,
+                min_height: Val::Px(font_size),
                 ..default()
             },
-        ))
-        .id();
-    let mut spans: Vec<Vec<Entity>> = Vec::with_capacity(lines.len());
-    for l in &lines {
-        let text = commands
-            .spawn((
-                ChildOf(column),
-                Text::default(),
-                TextFont::from_font_size(font_size),
-                TextLayout::new(Justify::Left, LineBreak::NoWrap),
-                TextShadow {
-                    offset: Vec2::splat(1.0),
-                    color: Color::BLACK,
-                },
-                Node {
-                    height: Val::Px(font_size),
-                    ..default()
-                },
-            ))
-            .id();
+        ));
+        if let Some(kind) = row {
+            text.insert((
+                TypeRow(*kind),
+                PointerOver::default(),
+                BackgroundColor(Color::NONE),
+            ));
+        }
+        let text = text.id();
         spans.push(
             l.iter()
                 .map(|(s, c)| {
@@ -450,9 +508,65 @@ fn refresh_tooltip(
         root,
         spans,
         lines,
+        rows,
         font_size: font_size as u32,
-        widest: wide,
     });
+}
+
+/// Clicks on the selection's type rows: a left click keeps only that
+/// type selected, a right click drops it from the selection. The press
+/// and the release are consumed (selection and orders never see them),
+/// and the action runs on a release over the row it was pressed on.
+fn type_row_clicks(
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    rows: Query<(&TypeRow, &PointerOver)>,
+    selected: Query<(Entity, &UnitType), With<Selected>>,
+    mut press: ResMut<RowPress>,
+    mut commands: Commands,
+) {
+    let under = rows
+        .iter()
+        .find(|(_, over)| over.get())
+        .map(|(row, _)| row.0);
+    for button in [MouseButton::Left, MouseButton::Right] {
+        if mouse.just_pressed(button)
+            && let Some(kind) = under
+        {
+            mouse.clear_just_pressed(button);
+            press.0 = Some((button, kind));
+        }
+        if mouse.just_released(button)
+            && let Some((pressed, kind)) = press.0
+            && pressed == button
+        {
+            mouse.clear_just_released(button);
+            press.0 = None;
+            if under != Some(kind) {
+                continue;
+            }
+            for (e, ut) in &selected {
+                // Left: keep only `kind`. Right: drop `kind`.
+                if (ut.0 == kind) == (button == MouseButton::Right) {
+                    commands.entity(e).remove::<Selected>();
+                }
+            }
+        }
+    }
+}
+
+/// Type rows whose hover changed.
+type RowHover<'w, 's> = Query<
+    'w,
+    's,
+    (&'static PointerOver, &'static mut BackgroundColor),
+    (With<TypeRow>, Changed<PointerOver>),
+>;
+
+/// A type row under the cursor gets a light backdrop.
+fn highlight_type_rows(mut rows: RowHover) {
+    for (over, mut bg) in &mut rows {
+        bg.0 = if over.get() { ROW_HOVER } else { Color::NONE };
+    }
 }
 
 #[cfg(test)]
@@ -514,17 +628,42 @@ mod tests {
             tooltip_lines(
                 &hover,
                 1,
+                &[(UnitKind::Bit, 1)],
                 Some((UnitKind::Bit, Some(&health), packets)),
                 &registry,
             )
+            .0
         };
         let full = at(100.0, None);
         let hurt = at(99.4, None);
         assert_ne!(full, hurt);
         assert!(same_shape(&full, &hurt));
         assert!(!same_shape(&full, &at(100.0, Some(3))));
-        assert_eq!(widest(&full), widest(&hurt));
-        assert!(widest(&at(7.0, None)) <= widest(&full));
+    }
+
+    /// Several selected types: a row each after the count, most
+    /// numerous first, then the hint; one type gets no rows.
+    #[test]
+    fn type_rows_for_a_mixed_selection() {
+        let registry = UnitRegistry::empty();
+        let hover = HoverTip::default();
+        let types = [(UnitKind::Bit, 12), (UnitKind::Byte, 3)];
+        let (lines, rows) = tooltip_lines(&hover, 15, &types, None, &registry);
+        assert_eq!(
+            text(&lines),
+            vec![
+                "15 units selected".to_string(),
+                format!("  12 {}", registry.name(UnitKind::Bit)),
+                format!("   3 {}", registry.name(UnitKind::Byte)),
+                "click: only this type, right-click: drop it".to_string(),
+            ]
+        );
+        assert_eq!(
+            rows,
+            vec![None, Some(UnitKind::Bit), Some(UnitKind::Byte), None]
+        );
+        let (_, rows) = tooltip_lines(&hover, 4, &[(UnitKind::Bit, 4)], None, &registry);
+        assert!(rows.iter().all(Option::is_none));
     }
 
     #[test]
