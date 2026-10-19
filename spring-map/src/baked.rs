@@ -6,7 +6,9 @@
 //! image dependencies on native and web alike. The files were converted
 //! once from the original Spring archives (the converter is in the git
 //! history, see README.md); the game and every lockstep peer read the
-//! same bytes, which the lobby and replays hash (`net::compat`).
+//! same bytes, which the lobby and replays hash (`net::compat`). The
+//! datavent facings can be edited in place ([`set_datavent_facings`],
+//! feature `write`; the game's `KP_MAP_EDIT` editor).
 //!
 //! Format (all little-endian):
 //!
@@ -67,6 +69,10 @@ pub enum BakedMapError {
     TypemapSize { expected: usize, actual: usize },
     #[error("ground texture pixel count mismatch: width*height*4 = {expected}, got {actual}")]
     TextureSizeMismatch { expected: usize, actual: usize },
+    #[error("{actual} datavent facings given, the map has {expected} datavents")]
+    DataventCount { expected: usize, actual: usize },
+    #[error("datavent facing {0} is not 0 (south), 1 (east), 2 (north) or 3 (west)")]
+    BadFacing(u8),
 }
 
 /// On-disk payload.
@@ -140,8 +146,6 @@ impl<'de: 'a, 'a> Deserialize<'de> for Bytes<'a> {
 /// this same encoding, zstd level 19.)
 #[cfg(test)]
 pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
-    use std::io::Write;
-
     let core = BakedMap {
         map_x: map.parsed.header.map_x,
         map_y: map.parsed.header.map_y,
@@ -165,13 +169,21 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
     // A postcard tuple is the plain concatenation of its fields.
     let body = postcard::to_allocvec(&(core, &map.lua_compositing, terrain))
         .map_err(BakedMapError::PostcardDecode)?;
+    encode_file(&body)
+}
+
+/// Wrap a postcard payload into the `.kpmap` container: magic, length,
+/// zstd frame (level 19, as the shipped files).
+#[cfg(any(test, feature = "write"))]
+fn encode_file(body: &[u8]) -> Result<Vec<u8>, BakedMapError> {
+    use std::io::Write;
 
     // The frame carries its decompressed size (`Frame_Content_Size`), so
     // the reader can allocate the payload buffer exactly once.
     let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 19)?;
     encoder.set_pledged_src_size(Some(body.len() as u64))?;
     encoder.include_contentsize(true)?;
-    encoder.write_all(&body)?;
+    encoder.write_all(body)?;
     let compressed = encoder.finish()?;
 
     let body_len: u32 = compressed.len().try_into().expect("body exceeds u32::MAX");
@@ -182,19 +194,44 @@ pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
     Ok(out)
 }
 
+/// Rewrite the datavent facings of a `.kpmap` file (the datavent editor):
+/// `facings[i]` replaces `datavents[i].facing`, in the file's order (the
+/// order [`read_baked_map`] returns them in). Everything else in the
+/// payload is decoded and re-encoded unchanged, so the new payload
+/// differs from the old one only in those bytes.
+#[cfg(any(test, feature = "write"))]
+pub fn set_datavent_facings(file: &[u8], facings: &[u8]) -> Result<Vec<u8>, BakedMapError> {
+    encode_file(&rewrite_facings(&decode_payload(file)?, facings)?)
+}
+
+/// [`set_datavent_facings`] on the decompressed payload.
+#[cfg(any(test, feature = "write"))]
+fn rewrite_facings(payload: &[u8], facings: &[u8]) -> Result<Vec<u8>, BakedMapError> {
+    let (mut baked, lua_compositing, terrain): (
+        BakedMap<'_>,
+        Option<LuaCompositing>,
+        BakedTerrain,
+    ) = postcard::from_bytes(payload).map_err(BakedMapError::PostcardDecode)?;
+    if facings.len() != baked.datavents.len() {
+        return Err(BakedMapError::DataventCount {
+            expected: baked.datavents.len(),
+            actual: facings.len(),
+        });
+    }
+    if let Some(&facing) = facings.iter().find(|&&f| f > 3) {
+        return Err(BakedMapError::BadFacing(facing));
+    }
+    for (vent, &facing) in baked.datavents.iter_mut().zip(facings) {
+        vent.facing = facing;
+    }
+    postcard::to_allocvec(&(baked, lua_compositing, terrain)).map_err(BakedMapError::PostcardDecode)
+}
+
 /// Largest buffer preallocated from a size claimed inside the file.
 const MAX_PREALLOC: usize = 512 << 20;
 
-/// Decode a `.kpmap`.
-///
-/// The ground texture dominates the payload (a quarter gigabyte on the
-/// biggest maps), so it is never copied out: the pixels are shifted to
-/// the front of the payload buffer, which becomes the texture's own
-/// `Vec` — peak memory is one payload, not payload + copy. A
-/// Lua-composited map gets no ground texture at all: its ground is
-/// hidden under `voidGround` and never drawn, so materializing it would
-/// only cost memory.
-pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
+/// Check the container and decompress the postcard payload.
+fn decode_payload(bytes: &[u8]) -> Result<Vec<u8>, BakedMapError> {
     let magic = bytes
         .get(..MAGIC.len())
         .ok_or(BakedMapError::HeaderTruncated)?;
@@ -217,18 +254,28 @@ pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
     }
     let stored = &body[..body_len];
 
-    let payload: Vec<u8> = {
-        let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
-            .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
-        // Exact when the frame pledges the size (0 otherwise: the buffer
-        // grows as it is read). Capped: the frame header's pledge is a
-        // claim from the file; anything larger grows as it is read.
-        let content_size = (decoder.decoder.content_size() as usize).min(MAX_PREALLOC);
-        let mut decoded = Vec::with_capacity(content_size);
-        decoder.read_to_end(&mut decoded)?;
-        decoded
-    };
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(stored)
+        .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
+    // Exact when the frame pledges the size (0 otherwise: the buffer
+    // grows as it is read). Capped: the frame header's pledge is a
+    // claim from the file; anything larger grows as it is read.
+    let content_size = (decoder.decoder.content_size() as usize).min(MAX_PREALLOC);
+    let mut payload = Vec::with_capacity(content_size);
+    decoder.read_to_end(&mut payload)?;
+    Ok(payload)
+}
 
+/// Decode a `.kpmap`.
+///
+/// The ground texture dominates the payload (a quarter gigabyte on the
+/// biggest maps), so it is never copied out: the pixels are shifted to
+/// the front of the payload buffer, which becomes the texture's own
+/// `Vec` — peak memory is one payload, not payload + copy. A
+/// Lua-composited map gets no ground texture at all: its ground is
+/// hidden under `voidGround` and never drawn, so materializing it would
+/// only cost memory.
+pub fn read_baked_map(bytes: &[u8]) -> Result<SpringMap, BakedMapError> {
+    let payload = decode_payload(bytes)?;
     let (baked, lua_compositing, terrain): (BakedMap<'_>, Option<LuaCompositing>, BakedTerrain) =
         postcard::from_bytes(&payload).map_err(BakedMapError::PostcardDecode)?;
     let BakedTerrain {
@@ -532,6 +579,73 @@ mod tests {
         assert_eq!((g.width, g.height), (2, 2));
         assert_eq!(g.pixels, pixels);
         assert_eq!(loaded.map_info.unwrap().gravity, 130.0);
+    }
+
+    /// Rewriting a shipped map with its own facings reproduces its
+    /// payload byte for byte: the editor changes nothing but the facings.
+    #[test]
+    fn set_datavent_facings_keeps_shipped_payloads() {
+        let dir = crate::shipped_maps_dir();
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "kpmap") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let bytes = std::fs::read(&path).unwrap();
+            let facings: Vec<u8> = read_baked_map(&bytes)
+                .unwrap()
+                .datavents
+                .iter()
+                .map(|v| v.facing)
+                .collect();
+            // The payload, not the file: zstd level 19 on all 18 maps
+            // would take a minute, and the container is covered by the
+            // round-trip tests.
+            let payload = decode_payload(&bytes).unwrap();
+            assert!(
+                rewrite_facings(&payload, &facings).unwrap() == payload,
+                "{name}: payload changed"
+            );
+            count += 1;
+        }
+        assert!(count >= 18, "expected the 18 shipped maps, found {count}");
+    }
+
+    #[test]
+    fn set_datavent_facings_changes_only_the_facings() {
+        let mut original = sample_map();
+        original.datavents.push(Datavent {
+            x: 300.0,
+            z: 50.0,
+            facing: 0,
+        });
+        let bytes = write_baked_map(&original).unwrap();
+        let loaded = read_baked_map(&set_datavent_facings(&bytes, &[3, 2]).unwrap()).unwrap();
+        let facings: Vec<u8> = loaded.datavents.iter().map(|v| v.facing).collect();
+        assert_eq!(facings, vec![3, 2]);
+        let positions: Vec<(f32, f32)> = loaded.datavents.iter().map(|v| (v.x, v.z)).collect();
+        assert_eq!(positions, vec![(100.0, 100.0), (300.0, 50.0)]);
+        assert_eq!(loaded.parsed.heights, original.parsed.heights);
+        assert_eq!(loaded.ground_texture.unwrap().pixels, vec![255; 16]);
+        assert_eq!(loaded.map_info.unwrap().gravity, 130.0);
+    }
+
+    #[test]
+    fn set_datavent_facings_rejects_bad_input() {
+        let bytes = write_baked_map(&sample_map()).unwrap();
+        assert!(matches!(
+            set_datavent_facings(&bytes, &[]),
+            Err(BakedMapError::DataventCount {
+                expected: 1,
+                actual: 0
+            })
+        ));
+        assert!(matches!(
+            set_datavent_facings(&bytes, &[4]),
+            Err(BakedMapError::BadFacing(4))
+        ));
     }
 
     #[test]

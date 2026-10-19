@@ -46,6 +46,21 @@ There is no editable sidecar for the baked data (start positions, terrain
 types, datavent facings all live inside the `.kpmap`); if one is ever
 needed, the reader is the place to add it.
 
+The datavent facings (which way a building on each vent faces, and so
+which way a Socket's or Window's units leave) can be edited in place:
+
+```sh
+KP_MAP_EDIT=Central_Hub cargo run -p kernel-panic
+```
+
+opens a sandbox match on the map with an arrow on every datavent. Hover
+a vent: `V` turns it clockwise, `Shift+V` counter-clockwise (the match
+takes the change at once, so a Socket built there shows it); `Ctrl+S`
+writes the facings into the `.kpmap` and changes nothing else in it
+(`kernel-panic/src/map_editor.rs`). An edited map has a new hash: the
+golden replays on it (Speed_Balls_16_Way, Quad_Core, Dual_Core,
+Marble_Madness_Map) must be re-recorded.
+
 The models and textures were likewise baked once from the
 `upstream/Kernel-Panic` and `upstream/RecoilEngine` submodules
 (`unit-bundle.md` has the pointer into history), and the sound effects

@@ -6,6 +6,8 @@ mod game_setup;
 #[cfg(any(test, feature = "replay"))]
 mod headless;
 mod interaction;
+#[cfg(not(target_arch = "wasm32"))]
+mod map_editor;
 mod map_events;
 mod map_loading;
 mod net;
@@ -214,7 +216,11 @@ fn main() {
             d.exit_after.is_some() || d.time_scale.is_some()
         }),
     )
-    .add_plugins((profile::ProfilePlugin, bot::BotPlugin));
+    .add_plugins((
+        profile::ProfilePlugin,
+        bot::BotPlugin,
+        map_editor::MapEditorPlugin,
+    ));
     app.run();
 }
 

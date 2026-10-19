@@ -40,6 +40,11 @@ matchbox_socket = { git = "https://github.com/barafael/matchbox.git", branch = "
 # `PeerId(u128)`. Already in the tree through matchbox.
 uuid = "1"
 
+# Native: the datavent editor (`map_editor`, `KP_MAP_EDIT`) writes
+# `.kpmap` files; the encoder binds the C zstd library, so not on the web.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+spring-map = { path = "../spring-map", features = ["write"] }
+
 # Web: the render settings persist in `localStorage`; `Math.random()`
 # seeds the per-launch rolls (`rng::clock_f64`).
 [target.'cfg(target_arch = "wasm32")'.dependencies]

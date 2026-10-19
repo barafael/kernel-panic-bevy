@@ -187,6 +187,11 @@ pub struct DevOptions {
     /// `KP_BOT_ENEMY=1`: seat an AI opponent in the bot's skirmish.
     #[cfg(not(target_arch = "wasm32"))]
     pub bot_enemy: bool,
+    /// `KP_MAP_EDIT=<stem>`: the datavent editor (`map_editor`) — a
+    /// sandbox match on that map where each datavent's factory facing
+    /// can be turned and saved back into its `.kpmap`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub map_edit: Option<String>,
     /// `KP_NO_BINDLESS=1`: run the renderer without bindless materials
     /// (the wgpu binding-array features are left off), to tell a
     /// material-slot problem from a driver one when pieces flicker.
@@ -252,6 +257,7 @@ impl DevOptions {
             record_seconds: var("KP_RECORD_SECONDS").and_then(|n| n.parse().ok()),
             bot: var("KP_BOT").map(Into::into),
             bot_map: var("KP_BOT_MAP"),
+            map_edit: var("KP_MAP_EDIT"),
             bot_enemy: var("KP_BOT_ENEMY").is_some_and(|v| v != "0"),
             no_bindless: var("KP_NO_BINDLESS").is_some_and(|v| v != "0"),
             no_indirect: var("KP_NO_INDIRECT").is_some_and(|v| v != "0"),
