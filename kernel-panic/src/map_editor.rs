@@ -647,9 +647,18 @@ mod tests {
         let editor = world.resource::<VentEditor>();
         assert_eq!(editor.sites.len(), 32);
         assert!(editor.sites.iter().all(|site| site.members.len() == 4));
-        let mixed = (0..editor.sites.len())
-            .find(|&i| editor.site_facing(i).1)
-            .expect("the converter left some sites mixed");
+        // Mix site 0 three to one, as the converter left ten of them.
+        let mixed = 0;
+        let members = editor.sites[mixed].members.clone();
+        {
+            let mut editor = world.resource_mut::<VentEditor>();
+            for &m in &members {
+                editor.facings[m] = 0;
+            }
+            editor.facings[members[0]] = 1;
+        }
+        let editor = world.resource::<VentEditor>();
+        assert_eq!(editor.site_facing(mixed), (0, true));
         let (majority, _) = editor.site_facing(mixed);
         world.resource_mut::<VentEditor>().hovered = Some(mixed);
 
