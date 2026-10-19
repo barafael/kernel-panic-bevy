@@ -265,6 +265,12 @@ fn scale_cursor_frames(mut state: ResMut<CursorState>, mut images: ResMut<Assets
             if copy.is_some() {
                 continue;
             }
+            // Drawn at its own size: the loaded image itself (a 1× copy
+            // of the arrow showed no cursor at all).
+            if kind.scale() == 1 {
+                *copy = Some(handle.clone());
+                continue;
+            }
             if let Some(scaled_image) = images
                 .get(handle)
                 .and_then(|image| upscale(image, kind.scale()))
