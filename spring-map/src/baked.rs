@@ -142,9 +142,10 @@ impl<'de: 'a, 'a> Deserialize<'de> for Bytes<'a> {
 }
 
 /// Serialize `map` to the `.kpmap` wire format: the reader's round-trip
-/// tests. (The shipped files were written by the retired converter with
-/// this same encoding, zstd level 19.)
-#[cfg(test)]
+/// tests and the map generators (`examples/`, feature `write`). (The
+/// converted files were written by the retired converter with this same
+/// encoding, zstd level 19.)
+#[cfg(any(test, feature = "write"))]
 pub fn write_baked_map(map: &SpringMap) -> Result<Vec<u8>, BakedMapError> {
     let core = BakedMap {
         map_x: map.parsed.header.map_x,

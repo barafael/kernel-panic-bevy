@@ -35,3 +35,8 @@ zstd = "0.14"
 
 [lib]
 doctest = false
+
+# Generates kernel-panic/assets/maps/deadlock_v1.kpmap.
+[[example]]
+name = "gen_deadlock"
+required-features = ["write"]

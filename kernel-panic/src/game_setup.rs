@@ -658,7 +658,8 @@ pub fn describe_setup(config: &SkirmishConfig) -> String {
 }
 
 /// Weighted-random map choice, weights lifted from the original
-/// launcher's `AddMap(Weight, …)` table (73 total).
+/// launcher's `AddMap(Weight, …)` table (73 total), plus the port's
+/// `deadlock_v1`.
 pub fn random_weighted_map() -> String {
     const WEIGHTS: &[(&str, u32)] = &[
         ("Marble_Madness_Map", 7),
@@ -677,6 +678,7 @@ pub fn random_weighted_map() -> String {
         ("Memory_Bank_v3", 4),
         ("pacman", 3),
         ("Palladium_0.5_(beta)", 3),
+        ("deadlock_v1", 3),
     ];
     let total: u32 = WEIGHTS.iter().map(|(_, w)| w).sum();
     let mut d = (total as f64 * clock_f64()) as u32;
@@ -818,6 +820,7 @@ mod tests {
             ("Memory_Bank_v3", 4),
             ("pacman", 3),
             ("Palladium_0.5_(beta)", 3),
+            ("deadlock_v1", 3),
         ];
         let valid: Vec<String> = names.iter().map(|(n, _)| n.to_string()).collect();
         for _ in 0..40 {

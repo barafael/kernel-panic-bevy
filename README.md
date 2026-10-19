@@ -20,7 +20,7 @@ the formats the game reads, with no conversion step anywhere:
   class definition, the original text files, parsed at startup.
 - `kernel-panic/assets/units.kpu`: every model and texture
   (`unit-bundle.md`). Both are embedded in the binary.
-- `kernel-panic/assets/maps/*.kpmap`: the 18 maps (`spring-map/src/baked.rs`
+- `kernel-panic/assets/maps/*.kpmap`: the 19 maps (`spring-map/src/baked.rs`
   documents the format). Native reads them from `assets/`, the web build
   fetches them.
 - `kernel-panic/assets/{sounds,music,cursors,unitpics,bitmaps}`: the
@@ -40,6 +40,13 @@ source archives, should a map ever need regenerating:
 ```sh
 git show 81f4e96:spring-map/src/bin/bake-map.rs
 git checkout 81f4e96 -- spring-map spring-map-gen kernel-panic/assets/maps
+```
+
+The exception is `deadlock_v1`, new to this port: its generator is
+`spring-map/examples/gen_deadlock.rs`, which writes the `.kpmap` in place:
+
+```sh
+cargo run -p spring-map --example gen_deadlock --features write --release
 ```
 
 There is no editable sidecar for the baked data (start positions, terrain
