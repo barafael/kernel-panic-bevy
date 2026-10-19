@@ -55,12 +55,14 @@ use super::state::Fnv;
 /// unusable sectors): they block, take damage and can be crushed.
 /// 11 (2026-10-19): a finished Bad Block turns into its feature
 /// (`IsFeature`): no longer a unit of its team.
+/// 12 (2026-10-19): a feature in the way holds a straight shot
+/// (`avoidFeature`) and stops a beam; attack orders close in for a line.
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 11;
+pub const SIM_VERSION: u32 = 12;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

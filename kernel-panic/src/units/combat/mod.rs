@@ -144,14 +144,32 @@ fn straight_line_of_fire(weapon_def: &spring_tdf::WeaponDef) -> bool {
 }
 
 /// Whether [`free_line_of_fire`] can ever refuse a shot of `weapon_def`.
-fn avoids_allies(weapon_def: &spring_tdf::WeaponDef) -> bool {
-    weapon_def.avoid_friendly && straight_line_of_fire(weapon_def)
+fn avoids_obstacles(weapon_def: &spring_tdf::WeaponDef) -> bool {
+    (weapon_def.avoid_friendly || weapon_def.avoid_feature) && straight_line_of_fire(weapon_def)
 }
 
-/// The friendly half of `CWeapon::HaveFreeLineOfFire`: an
-/// `avoidfriendly=1` weapon holds its fire while a unit of the shooter's
-/// own side (`team`; not the shooter itself) is in the way from `from`
-/// (the aim point) to `to` (the target's aim point). With no spread —
+/// Whether `entry` is in `weapon_def`'s way when it stands on the line
+/// (`avoidFlags`): a map feature for an `avoidFeature` weapon (every
+/// Kernel Panic weapon), a unit of the shooter's own side (`team`) for
+/// an `avoidfriendly=1` one.
+fn avoided(
+    weapon_def: &spring_tdf::WeaponDef,
+    alliances: &Alliances,
+    team: u8,
+    entry: &crate::units::spatial::SpatialEntry,
+) -> bool {
+    if entry.feature {
+        weapon_def.avoid_feature
+    } else {
+        weapon_def.avoid_friendly && alliances.friendly(entry.team, team)
+    }
+}
+
+/// The friendly and feature half of `CWeapon::HaveFreeLineOfFire`: a
+/// weapon holds its fire while something it avoids ([`avoided`]: a
+/// feature, or an ally for `avoidfriendly=1`; never the shooter itself)
+/// is in the way from `from` (the aim point) to `to` (the target's aim
+/// point). With no spread —
 /// every Kernel Panic `avoidfriendly` weapon — that is
 /// `TraceRay::TraceRay` against the allies' collision spheres
 /// (`avoidFlags | NOENEMIES | NOGROUND`); a spraying weapon tests
@@ -169,7 +187,7 @@ pub(crate) fn free_line_of_fire(
     from: Vec3,
     to: Vec3,
 ) -> bool {
-    if !avoids_allies(weapon_def) {
+    if !avoids_obstacles(weapon_def) {
         return true;
     }
     let ray = to - from;
@@ -184,7 +202,7 @@ pub(crate) fn free_line_of_fire(
         length * 0.5 + spatial.max_hit_radius() + if cone { length * spread + 1.0 } else { 0.0 };
     let mut blocked = false;
     spatial.query_radius(from.lerp(to, 0.5), reach, |unit| {
-        if blocked || unit.entity == owner || !alliances.friendly(unit.team, team) {
+        if blocked || unit.entity == owner || !avoided(weapon_def, alliances, team, unit) {
             return;
         }
         blocked = if cone {
@@ -327,6 +345,8 @@ pub struct PieceLookup<'w, 's> {
     pub target: Query<'w, 's, (&'static GlobalTransform, &'static UnitStats), With<UnitType>>,
     pub heightmap: Option<Res<'w, Heightmap>>,
     pub gravity: Option<Res<'w, crate::sim::MapGravity>>,
+    /// The map features a beam can meet ([`Self::hitscan_trace`]).
+    pub spatial: Option<Res<'w, SpatialIndex>>,
 }
 
 impl PieceLookup<'_, '_> {
@@ -369,24 +389,42 @@ impl PieceLookup<'_, '_> {
         range: f32,
     ) -> (Option<Entity>, Vec3) {
         let end = muzzle + dir * range;
-        let ground = self
+        // Whatever the ray meets first, as a fraction of it: the ground,
+        // the target, or a map feature (`collideFeature`, on for every
+        // Kernel Panic weapon).
+        let mut first: (Option<Entity>, f32) = (None, 1.0);
+        if let Some(g) = self
             .heightmap
             .as_deref()
-            .and_then(|hm| hm.ground_hit(muzzle, end));
+            .and_then(|hm| hm.ground_hit(muzzle, end))
+        {
+            first.1 = g.distance(muzzle) / range.det_max(1e-6);
+        }
         if let Some((t, tf, stats)) =
             target.and_then(|t| self.target.get(t).ok().map(|(tf, s)| (t, tf, s)))
         {
             let volume = CollisionVolume::from_s3o(stats.hit_radius, stats.mid_y);
-            if let Some(hit) = volume.ray_segment_hit(volume.center(tf), muzzle, end) {
-                let at = muzzle.lerp(end, hit);
-                let ground_first = ground
-                    .is_some_and(|g| g.distance_squared(muzzle) < at.distance_squared(muzzle));
-                if !ground_first {
-                    return (Some(t), at);
-                }
+            if let Some(hit) = volume.ray_segment_hit(volume.center(tf), muzzle, end)
+                && hit < first.1
+            {
+                first = (Some(t), hit);
             }
         }
-        (None, ground.unwrap_or(end))
+        if let Some(spatial) = self.spatial.as_deref() {
+            let reach = range * 0.5 + spatial.max_hit_radius();
+            spatial.query_radius(muzzle.lerp(end, 0.5), reach, |entry| {
+                if !entry.feature {
+                    return;
+                }
+                let volume = CollisionVolume::from_s3o(entry.hit_radius, entry.mid_y);
+                if let Some(hit) = volume.ray_segment_hit(entry.mid_pos(), muzzle, end)
+                    && hit < first.1
+                {
+                    first = (Some(entry.entity), hit);
+                }
+            });
+        }
+        (first.0, muzzle.lerp(end, first.1))
     }
 
     /// `CWeapon::GetUnitLeadTargetPos`: the target's `aimPos` (its model
@@ -928,7 +966,7 @@ pub fn combat_system(
         // stands in the line of fire — `TryTarget` → `HaveFreeLineOfFire`
         // runs for every candidate `AutoTarget` weighs, every user
         // target, and before every shot (`UpdateFire`).
-        let ally_check = avoids_allies(weapon_def);
+        let obstacle_check = avoids_obstacles(weapon_def);
         let lof_clear = |to: Vec3| {
             free_line_of_fire(
                 weapon_def,
@@ -940,8 +978,8 @@ pub fn combat_system(
                 to,
             )
         };
-        // `TryTarget`'s `HaveFreeLineOfFire`, both halves: no terrain
-        // and (for `avoidfriendly`) no ally in the way. It runs for every
+        // `TryTarget`'s `HaveFreeLineOfFire`, both halves: no terrain,
+        // no feature and (for `avoidfriendly`) no ally in the way. It runs for every
         // user and kept target and before every shot, not only for fresh
         // candidates.
         let try_lof = |to: Vec3| {
@@ -1040,13 +1078,13 @@ pub fn combat_system(
         let mut scanned = false;
         if best.is_none() && scan_due {
             scanned = true;
-            // Direct-fire and ally-avoiding weapons defer the line-of-
-            // fire tests: candidates passing the cheap filters are
-            // collected, ranked exactly as the inline pick below ranks
-            // them, and tested in that order — only the winner (and the
-            // blocked candidates ahead of it) pays for the terrain ray
-            // march and the ally trace, not the whole crowd.
-            let defer_lof = enforce_los || ally_check;
+            // Direct-fire weapons defer the line-of-fire tests:
+            // candidates passing the cheap filters are collected, ranked
+            // exactly as the inline pick below ranks them, and tested in
+            // that order — only the winner (and the blocked candidates
+            // ahead of it) pays for the terrain ray march and the
+            // feature / ally trace, not the whole crowd.
+            let defer_lof = enforce_los || obstacle_check;
             los_candidates.clear();
             let scan_radius = aim::weapon_scan_radius(weapon_def, aim_from, map_gravity);
             // `WeaponMainDir1` / `MaxAngleDif1` (`CWeapon::TestTarget` →
@@ -1548,11 +1586,15 @@ pub fn attack_ground_system(
             continue;
         }
 
-        // In range but the terrain is in the way: close in, as
-        // `CMobileCAI` keeps moving while `TryTarget` fails (an arcing
-        // weapon is never blocked here). In range with a clear line:
-        // stand and fire.
-        if !ground_line_of_fire(weapon_def, pieces.heightmap.as_deref(), aim_from, order.pos) {
+        // In range but the terrain, a feature or (`avoidfriendly`) an
+        // ally is in the way: close in, as `CMobileCAI` keeps moving
+        // while `TryTarget` fails (an arcing weapon is never blocked
+        // here). In range with a clear line: stand and fire.
+        if !ground_line_of_fire(weapon_def, pieces.heightmap.as_deref(), aim_from, order.pos)
+            || !free_line_of_fire(
+                weapon_def, &spatial, &alliances, entity, team.0, aim_from, order.pos,
+            )
+        {
             let mobile = stats.is_some_and(|s| s.speed > 0.0);
             if mobile && move_target.is_none_or(|t| t.0.distance(order.pos) > CHASE_REPATH_DISTANCE)
             {
@@ -1606,14 +1648,6 @@ pub fn attack_ground_system(
         {
             continue;
         }
-        // `TryTarget` → `HaveFreeLineOfFire` holds a ground shot too
-        // while an ally is in the way of an `avoidfriendly=1` weapon.
-        if !free_line_of_fire(
-            weapon_def, &spatial, &alliances, entity, team.0, aim_from, order.pos,
-        ) {
-            continue;
-        }
-
         // Fire.
         let is_traveling = weapon_def.is_traveling();
         commands.entity(entity).insert((
@@ -1684,6 +1718,7 @@ pub fn attack_target_system(
             Option<&UnitAnimator>,
             Option<&WeaponBinding>,
             Has<crate::interaction::movement::MoveTarget>,
+            &TeamId,
         ),
         Without<Dying>,
     >,
@@ -1692,12 +1727,24 @@ pub fn attack_target_system(
     move_path_q: Query<&crate::interaction::movement::MovePath>,
     gravity: Option<Res<crate::sim::MapGravity>>,
     heightmap: Option<Res<Heightmap>>,
+    spatial: Res<SpatialIndex>,
+    alliances: Res<Alliances>,
     mut commands: Commands,
 ) {
     // The one read of the map's gravity here (ballistic weapon range).
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
-    for (entity, unit_type, stats, gtf, order, deployable, animator, weapon_binding, has_move) in
-        &attackers
+    for (
+        entity,
+        unit_type,
+        stats,
+        gtf,
+        order,
+        deployable,
+        animator,
+        weapon_binding,
+        has_move,
+        team,
+    ) in &attackers
     {
         // Same deploy / opening gates as `attack_ground_system`.
         if deployable.is_some_and(|d| d.state != DeployState::Open) {
@@ -1744,12 +1791,14 @@ pub fn attack_target_system(
         let in_range = weapon_def.is_some_and(|w| {
             w.range != 0.0 && aim::in_weapon_range(w, aim_from, aim_at, false, map_gravity)
         });
-        // In range with the terrain in the way (the same ground test
-        // `combat_system` fires on): keep closing in, as `CMobileCAI` does
-        // while `TryTarget` fails.
+        // In range with the terrain, a feature or (`avoidfriendly`) an
+        // ally in the way (the tests `combat_system` fires on): keep
+        // closing in, as `CMobileCAI` does while `TryTarget` fails.
         let blocked = in_range
-            && weapon_def
-                .is_some_and(|w| !ground_line_of_fire(w, heightmap.as_deref(), aim_from, aim_at));
+            && weapon_def.is_some_and(|w| {
+                !ground_line_of_fire(w, heightmap.as_deref(), aim_from, aim_at)
+                    || !free_line_of_fire(w, &spatial, &alliances, entity, team.0, aim_from, aim_at)
+            });
 
         if stats.speed <= 0.0 && !in_range {
             // Immobile unit (armed building) can never close the gap —
@@ -2812,6 +2861,51 @@ mod tests {
             from,
             to
         ));
+    }
+
+    /// `avoidFeature` (on for every Kernel Panic weapon): a map feature
+    /// on the line holds the shot like an ally does for `avoidfriendly`
+    /// — whoever's side the shooter is on, since a feature is no one's.
+    #[test]
+    fn features_in_the_way_hold_fire() {
+        let mut app = combat_app(WeaponRegistry::default());
+        let block = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: block,
+                pos: Vec3::new(0.0, 0.0, 100.0),
+                hit_radius: 20.0,
+                mid_y: 8.0,
+                team: crate::units::features::FEATURE_TEAM,
+                kind: UnitKind::BadBlock,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+                feature: true,
+            });
+        let spatial = app.world().resource::<SpatialIndex>();
+        let (from, to) = (Vec3::new(0.0, 8.0, 0.0), Vec3::new(0.0, 8.0, 200.0));
+        let lof = |weapon: &spring_tdf::WeaponDef, team: u8, to: Vec3| {
+            free_line_of_fire(
+                weapon,
+                spatial,
+                &Alliances::default(),
+                Entity::PLACEHOLDER,
+                team,
+                from,
+                to,
+            )
+        };
+        let avoids = spring_tdf::WeaponDef {
+            avoid_feature: true,
+            ..bugshot(false)
+        };
+        assert!(!lof(&avoids, 0, to), "the Bad Block is in the way");
+        assert!(!lof(&avoids, 3, to), "for anyone");
+        assert!(lof(&avoids, 0, Vec3::new(0.0, 8.0, 60.0)), "short of it");
+        assert!(lof(&bugshot(false), 0, to), "`avoidFeature=0`");
     }
 
     /// Why: units with `avoidfriendly=1` weapons happily shot through

@@ -119,6 +119,9 @@ pub struct WeaponDef {
     pub line_of_sight: bool,
     pub collide_friendly: bool,
     pub avoid_friendly: bool,
+    /// `avoidFeature` (default on): hold fire while a feature is in the
+    /// way (`CWeapon::HaveFreeLineOfFire`).
+    pub avoid_feature: bool,
     pub no_self_damage: bool,
     pub command_fire: bool,
     pub smoke_trail: bool,
@@ -603,6 +606,7 @@ impl WeaponDef {
             line_of_sight: s.bool("lineofsight"),
             collide_friendly: s.bool("collidefriendly"),
             avoid_friendly: s.bool("avoidfriendly"),
+            avoid_feature: s.get("avoidfeature").is_none_or(|v| v.trim() == "1"),
             no_self_damage: s.bool("noselfdamage"),
             command_fire: s.bool("commandfire"),
             smoke_trail: s.bool("smoketrail"),
