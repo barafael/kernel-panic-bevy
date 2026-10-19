@@ -4326,6 +4326,7 @@ dependencies = [
  "matchbox_signaling",
  "matchbox_socket",
  "postcard",
+ "rodio",
  "ruzstd 0.9.1",
  "serde",
  "serde_json",

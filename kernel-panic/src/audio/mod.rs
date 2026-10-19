@@ -24,7 +24,7 @@
 //! own distance model, which would fight the engine's. Everything is
 //! mixed as mono at the engine's gain.
 
-use bevy::audio::{AudioPlayer, AudioSource, PlaybackSettings, Volume};
+use bevy::audio::{AddAudioSource, AudioPlayer, PlaybackSettings, Volume};
 use bevy::prelude::*;
 
 pub mod music;
@@ -242,14 +242,74 @@ pub fn has_reply_sounds(kind: UnitKind) -> bool {
     kind != UnitKind::Debug
 }
 
+/// One sound effect, decoded to PCM when it loads.
+///
+/// Bevy's `AudioSource` keeps the file bytes and builds a fresh rodio
+/// `Decoder` for every sound it starts — on the main thread, inside
+/// `play_queued_audio_system`: the Vorbis headers (codebooks included)
+/// parsed again and the first two packets decoded, 2–6 ms per sound,
+/// several sounds a frame in a battle. Decoded once in [`SfxLoader`] (an
+/// asset task), starting a sound is an `Arc` clone. The effects are
+/// short, so the PCM is a few MB for all of them; the music streams
+/// from its files as before.
+#[derive(Asset, TypePath)]
+pub struct Sfx(rodio::buffer::SamplesBuffer);
+
+impl bevy::audio::Decodable for Sfx {
+    type Decoder = rodio::buffer::SamplesBuffer;
+
+    fn decoder(&self) -> Self::Decoder {
+        self.0.clone()
+    }
+}
+
+/// Loads an `.ogg` as an [`Sfx`]. No extensions of its own: only loads
+/// typed as `Sfx` reach it, so `.ogg` still means `AudioSource` to
+/// everything else (the music).
+#[derive(Default, TypePath)]
+struct SfxLoader;
+
+impl bevy::asset::AssetLoader for SfxLoader {
+    type Asset = Sfx;
+    type Settings = ();
+    type Error = std::io::Error;
+
+    async fn load(
+        &self,
+        reader: &mut dyn bevy::asset::io::Reader,
+        _settings: &(),
+        _context: &mut bevy::asset::LoadContext<'_>,
+    ) -> Result<Sfx, Self::Error> {
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        decode_sfx(bytes)
+    }
+
+    fn extensions(&self) -> &[&str] {
+        &[]
+    }
+}
+
+/// The whole file as PCM, in its own channel count and rate.
+fn decode_sfx(bytes: Vec<u8>) -> std::io::Result<Sfx> {
+    use rodio::Source;
+    let decoder = rodio::Decoder::new(std::io::Cursor::new(bytes))
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let (channels, rate) = (decoder.channels(), decoder.sample_rate());
+    let samples: Vec<rodio::Sample> = decoder.collect();
+    Ok(Sfx(rodio::buffer::SamplesBuffer::new(
+        channels, rate, samples,
+    )))
+}
+
 /// Handles for every sound in [`SOUND_FILES`], indexed by [`SoundId`].
 #[derive(Resource)]
 pub struct SoundBank {
-    handles: Vec<Handle<AudioSource>>,
+    handles: Vec<Handle<Sfx>>,
 }
 
 impl SoundBank {
-    fn handle(&self, sound: SoundId) -> &Handle<AudioSource> {
+    fn handle(&self, sound: SoundId) -> &Handle<Sfx> {
         &self.handles[sound.0 as usize]
     }
 }
@@ -388,7 +448,7 @@ fn play_queued_sounds(
             );
         }
         commands.spawn((
-            AudioPlayer::new(bank.handle(request.sound).clone()),
+            AudioPlayer(bank.handle(request.sound).clone()),
             PlaybackSettings::DESPAWN.with_volume(Volume::Linear(volume)),
             GameSound,
         ));
@@ -424,6 +484,8 @@ pub struct GameAudioPlugin;
 impl Plugin for GameAudioPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(music::MusicPlugin)
+            .add_audio_source::<Sfx>()
+            .init_asset_loader::<SfxLoader>()
             .init_resource::<SoundQueue>()
             .add_systems(Startup, load_sound_bank)
             .add_systems(Update, selection_sounds)
@@ -436,6 +498,31 @@ impl Plugin for GameAudioPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every effect decodes whole at load, and playing it hands out the
+    /// same samples from the start each time.
+    #[test]
+    fn effects_decode_to_pcm_once() {
+        use rodio::Source;
+        let dir = crate::paths::assets_dir();
+        for i in 0..SOUND_FILES.len() {
+            let path = dir.join(SoundId(i as u8).asset_path());
+            let bytes = std::fs::read(&path).unwrap();
+            let sfx = decode_sfx(bytes.clone()).unwrap();
+            let reference = rodio::Decoder::new(std::io::Cursor::new(bytes)).unwrap();
+            let (channels, rate) = (reference.channels(), reference.sample_rate());
+            let expected: Vec<rodio::Sample> = reference.collect();
+            assert!(!expected.is_empty(), "{path:?} is silent");
+            for _ in 0..2 {
+                let decoder = bevy::audio::Decodable::decoder(&sfx);
+                assert_eq!(
+                    (decoder.channels(), decoder.sample_rate()),
+                    (channels, rate)
+                );
+                assert_eq!(decoder.collect::<Vec<_>>(), expected, "{path:?}");
+            }
+        }
+    }
 
     #[test]
     fn tdf_names_resolve_case_insensitively() {

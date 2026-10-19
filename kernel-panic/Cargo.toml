@@ -29,6 +29,11 @@ strum = { version = "0.28.0", features = ["derive"] }
 serde = { workspace = true }
 postcard = { workspace = true }
 ruzstd = "0.9"
+# The sound effects decode once, at load (`audio::Sfx`): Bevy's own
+# `AudioSource` re-parses the Vorbis headers on the main thread for every
+# sound it starts. The rodio Bevy already links (its `lewton` decoder on
+# through Bevy's `vorbis` feature), named for `Decoder` / `SamplesBuffer`.
+rodio = { version = "0.22", default-features = false }
 # Multiplayer transport (`net::matchbox`, docs/multiplayer-plan.md M2):
 # WebRTC data channels through barafael's matchbox fork (Bevy 0.20, the
 # socket robustness fixes of johanhelsing/matchbox#558; the fork and
