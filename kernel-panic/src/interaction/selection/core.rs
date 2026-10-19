@@ -43,7 +43,7 @@ impl Plugin for SelectionCorePlugin {
                 Update,
                 (
                     update_hover.in_set(SelectionSet::Hover),
-                    handle_selection.in_set(SelectionSet::Select),
+                    (handle_selection, select_same_type_on_screen).in_set(SelectionSet::Select),
                 ),
             );
     }
@@ -369,23 +369,10 @@ fn handle_selection(
                 && let Ok((camera, camera_transform)) = camera_q.single()
                 && let Some(window) = windows.single().ok()
             {
-                let win_size = Vec2::new(window.width(), window.height());
                 for (other, other_kind, other_team, gtf, vis) in &same_kind_q {
-                    if other_kind.0 != kind.0 || other_team.0 != team.0 {
-                        continue;
-                    }
-                    if matches!(*vis, Visibility::Hidden) {
-                        continue;
-                    }
-                    let Ok(screen_pos) =
-                        camera.world_to_viewport(camera_transform, gtf.translation())
-                    else {
-                        continue;
-                    };
-                    if screen_pos.x >= 0.0
-                        && screen_pos.x <= win_size.x
-                        && screen_pos.y >= 0.0
-                        && screen_pos.y <= win_size.y
+                    if other_kind.0 == kind.0
+                        && other_team.0 == team.0
+                        && on_screen(camera, camera_transform, window, gtf, vis)
                     {
                         commands.entity(other).insert(Selected);
                     }
@@ -401,6 +388,73 @@ fn handle_selection(
         drag_state.start = None;
         drag_state.dragging = false;
         drag_state.tracking = false;
+    }
+}
+
+/// A unit is visible and inside the window (the double-click and `Q`
+/// expansions).
+fn on_screen(
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+    window: &Window,
+    gtf: &GlobalTransform,
+    vis: &Visibility,
+) -> bool {
+    if matches!(*vis, Visibility::Hidden) {
+        return false;
+    }
+    camera
+        .world_to_viewport(camera_transform, gtf.translation())
+        .is_ok_and(|p| p.x >= 0.0 && p.x <= window.width() && p.y >= 0.0 && p.y <= window.height())
+}
+
+/// `Q`: select every own unit on screen whose type is in the selection
+/// (Spring's "select all of the same type in view"); with Shift, add
+/// them to the selection instead of replacing it.
+fn select_same_type_on_screen(
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    local: Res<crate::units::player::LocalTeam>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    units: Query<(Entity, &UnitType, &TeamId, &GlobalTransform, &Visibility)>,
+    mut commands: Commands,
+) {
+    if !keys.just_pressed(KeyCode::KeyQ)
+        || keys.any_pressed([
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+        ])
+    {
+        return;
+    }
+    let kinds: Vec<crate::units::content::definitions::UnitKind> =
+        selected_q.iter().map(|(_, ut)| ut.0).collect();
+    let (Ok((camera, camera_transform)), Ok(window)) = (camera_q.single(), windows.single()) else {
+        return;
+    };
+    if kinds.is_empty() {
+        return;
+    }
+    let add = keys.any_pressed([KeyCode::ShiftLeft, KeyCode::ShiftRight]);
+    let mut keep = Vec::new();
+    for (e, ut, team, gtf, vis) in &units {
+        if team.0 == local.0
+            && kinds.contains(&ut.0)
+            && on_screen(camera, camera_transform, window, gtf, vis)
+        {
+            keep.push(e);
+            commands.entity(e).insert(Selected);
+        }
+    }
+    if !add {
+        for (e, _) in &selected_q {
+            if !keep.contains(&e) {
+                commands.entity(e).remove::<Selected>();
+            }
+        }
     }
 }
 

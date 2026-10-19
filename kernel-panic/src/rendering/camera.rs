@@ -99,8 +99,6 @@ impl MapBounds {
 pub struct CameraSettings {
     #[default(800.0)]
     pub pan_speed: f32,
-    #[default(0.8)]
-    pub rotate_speed_keys: f32,
     #[default(0.003)]
     pub rotate_speed_mouse: f32,
     #[default(150.0)]
@@ -362,14 +360,6 @@ pub fn camera_control(
         MiddleDrag::None => {
             mouse_motion.clear();
         }
-    }
-
-    // --- Q/E rotate shortcuts ---
-    if keys.pressed(KeyCode::KeyQ) {
-        state.yaw += settings.rotate_speed_keys * delta_time;
-    }
-    if keys.pressed(KeyCode::KeyE) {
-        state.yaw -= settings.rotate_speed_keys * delta_time;
     }
 }
 
