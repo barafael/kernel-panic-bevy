@@ -266,7 +266,18 @@ pub fn load_beam_texture(
     {
         return Some((handle, dims.0, dims.1));
     }
-    let pixels = load_raw_tga_cached(tex_name, cache)?.pixels.clone();
+    let mut pixels = load_raw_tga_cached(tex_name, cache)?.pixels.clone();
+    // `CProjectileDrawer`'s particle pass blends `GL_ONE,
+    // GL_ONE_MINUS_SRC_ALPHA` but discards texels of alpha 0 (`alphaCtrl`
+    // `a > 0`): `whitecircle.tga` is white all over and only its alpha
+    // draws the circle. Black there does the same under premultiplied
+    // blending, and changes nothing where the colour is multiplied by
+    // the alpha anyway.
+    for texel in pixels.as_chunks_mut::<4>().0 {
+        if texel[3] == 0 {
+            texel[..3].fill(0);
+        }
+    }
     let mut image = create_rgba8_image(dims.0, dims.1, pixels);
     image.sampler = bevy::image::ImageSampler::Descriptor(bevy::image::ImageSamplerDescriptor {
         min_filter: bevy::image::ImageFilterMode::Linear,

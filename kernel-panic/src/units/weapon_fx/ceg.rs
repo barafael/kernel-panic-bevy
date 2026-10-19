@@ -55,11 +55,12 @@ pub(super) struct CegRenderAssets {
     /// Shared additive `laserend` material for [`CegSpike`] streaks
     /// (per-spike colour rides on vertex colours).
     pub spike_material: Option<Handle<StandardMaterial>>,
-    /// Texture → its white additive material. Particles and flames of
+    /// (Texture, premultiplied) → its white material ([`Self::texture_material`]).
+    /// Particles and flames of
     /// every colour map draw through the same one — the colour is a
     /// vertex attribute of the batch quad — so a fight's whole particle
     /// load is one draw call per texture in use.
-    materials_by_texture: HashMap<AssetId<Image>, Handle<StandardMaterial>>,
+    materials_by_texture: HashMap<(AssetId<Image>, bool), Handle<StandardMaterial>>,
     palettes: Vec<CegPalette>,
     /// The `[groundflash]` materials, minted on first use.
     ground_flash: Option<GroundFlashMaterials>,
@@ -92,29 +93,38 @@ impl CegPalette {
 }
 
 impl CegRenderAssets {
-    /// The additive, unlit material for `texture`, created on first use.
+    /// The unlit material for `texture`, created on first use.
     ///
     /// `base_color` stays white: upstream multiplies the texture by
-    /// `colorMap[life]` with no emissive boost — the colour IS the
-    /// brightness under additive (GL_ONE/GL_ONE) blending, where
-    /// brightness comes from stacking translucent particles. That
-    /// colour is the batch quad's vertex colour here, which
-    /// `StandardMaterial` multiplies into `base_color` the same way.
-    /// An emissive multiplier would over-saturate every particle after
-    /// tonemapping and turn the faint blue shot1 puff into a flashbang.
+    /// `colorMap[life]` with no emissive boost — that colour is the batch
+    /// quad's vertex colour here, which `StandardMaterial` multiplies
+    /// into `base_color` the same way. An emissive multiplier would
+    /// over-saturate every particle after tonemapping.
+    ///
+    /// Particles and flames blend like `CProjectileDrawer`'s particle
+    /// pass, `GL_ONE, GL_ONE_MINUS_SRC_ALPHA` (`premultiplied`): the
+    /// colour is added in full and the alpha only darkens what lies
+    /// behind, so a `colorMap` alpha of .1 (the MineLauncher's
+    /// hexastars) is a bright, nearly additive sprite. Ground flashes
+    /// use `GL_SRC_ALPHA, GL_ONE`, Bevy's `Add`.
     fn texture_material(
         &mut self,
         texture: &Handle<Image>,
+        premultiplied: bool,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
         self.materials_by_texture
-            .entry(texture.id())
+            .entry((texture.id(), premultiplied))
             .or_insert_with(|| {
                 materials.add(StandardMaterial {
                     base_color: Color::WHITE,
                     base_color_texture: Some(texture.clone()),
                     unlit: true,
-                    alpha_mode: AlphaMode::Add,
+                    alpha_mode: if premultiplied {
+                        AlphaMode::Premultiplied
+                    } else {
+                        AlphaMode::Add
+                    },
                     cull_mode: None,
                     ..default()
                 })
@@ -130,7 +140,7 @@ impl CegRenderAssets {
         color_map: &ColorMap,
         materials: &mut Assets<StandardMaterial>,
     ) -> usize {
-        let material = self.texture_material(texture, materials);
+        let material = self.texture_material(texture, true, materials);
         if let Some(i) = self
             .palettes
             .iter()
@@ -164,7 +174,7 @@ impl CegRenderAssets {
         let mut material = |alias: &str| {
             let file = CegRegistry::resolve_texture(alias)?;
             let (texture, _, _) = load_beam_texture(file, model_cache, images)?;
-            Some(self.texture_material(&texture, materials))
+            Some(self.texture_material(&texture, false, materials))
         };
         let ring = material("squarehollow")?;
         let flash = material("square")?;
@@ -276,6 +286,7 @@ const CEG_TEXTURES: &[(&str, &str)] = &[
     ("hexgrid", "hexgrid.tga"),
     ("hexgridhole", "hexgridhole.tga"),
     ("hexastar", "hexastar.tga"),
+    ("minelauncher", "hexastar.tga"),
     ("pointertrail", "pointershottrail.tga"),
     ("flowtrail", "flowtrail1.tga"),
     ("firetrail", "firetrail.tga"),
