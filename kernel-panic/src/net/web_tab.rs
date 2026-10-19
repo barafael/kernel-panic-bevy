@@ -14,7 +14,7 @@
 //! match; single player still stops in a hidden tab, as it always did
 //! — a worker posts every [`HIDDEN_FRAME_MS`] and
 //! each message wakes the event loop ([`EventLoopProxyWrapper`]); our
-//! `bevy_winit` patch (`vendor/bevy_winit`) lets a hidden page's wake
+//! `bevy_winit` patch (our Bevy fork, root `Cargo.toml`) lets a hidden page's wake
 //! run the app update — Bevy only updates on a redraw, which a hidden
 //! page never gets. The lockstep driver then runs its ticks as usual
 //! (by the clock), sends its packets, and the match goes on.

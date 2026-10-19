@@ -5,7 +5,7 @@ the lockstep core — a browser tab hidden mid-match, a room where a pair of pee
 connected, coming back to the room after a match, the deployed signaling server, the menu
 screenshots staying off it, the map bakes of release and deploy, names and chat. Code:
 `kernel-panic/src/net/` (`web_tab.rs`, `chat.rs`, `lobby.rs`, `session.rs`, `driver.rs`,
-`wire.rs`, `transport.rs`, `sim_net.rs`), `vendor/bevy_winit`, `ui/menu/lobby_page.rs`,
+`wire.rs`, `transport.rs`, `sim_net.rs`), `bevy_winit` (Bevy fork), `ui/menu/lobby_page.rs`,
 `ui/hud/net_overlay.rs`, `ui/menu.rs`, `ui/menu_shots.rs`, `scripts/signaling-smoke.sh`.
 
 ## Summary
@@ -93,7 +93,7 @@ window is invisible. A hidden tab therefore ran **no update at all**: no lockste
 packets, no lobby. A guest was dropped after the minute of silence (`Timeouts::running`), a
 hidden host stopped the match for everyone, the room went quiet.
 
-### What the game does now (`net::web_tab`, `vendor/bevy_winit`)
+### What the game does now (`net::web_tab`, the `bevy_winit` patch)
 
 - `visibilitychange` (an event: it reaches a hidden page at once) starts a dedicated worker
   posting every 33 ms, if the game is in a room or a networked match; each message wakes the
@@ -101,8 +101,8 @@ hidden host stopped the match for everyone, the room went quiet.
 - The `bevy_winit` patch counts a hidden document as "every window invisible", so a wake-up runs
   the update: Bevy's own rule for invisible native windows ("redraw calls will never succeed").
   A few lines in `WinitAppRunnerState::redraw_requested`; nothing changes while the page is
-  shown, or natively. Vendored like `webrtc-data` (`[patch.crates-io]`,
-  `vendor/bevy_winit/README.md`).
+  shown, or natively. First vendored like `webrtc-data`; now a commit on the
+  `kernel-panic-0.20` branch of github.com/barafael/bevy, which the root `Cargo.toml` pins.
 - The woken update is a normal frame: the driver runs the ticks the clock owes (one per wake at
   30 Hz), the session sends, the lobby polls, the frame renders (wasted: the browser composites
   nothing). Shown again, the worker rests and animation frames take over.
