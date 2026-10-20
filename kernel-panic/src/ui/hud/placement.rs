@@ -1213,6 +1213,80 @@ mod tests {
         assert!(sites[0].valid, "free flat ground is a valid Bad Block site");
     }
 
+    /// Shift-clicking two vents in turn, through the real frame (plan,
+    /// place, apply): the idle builder gets the first, the second is
+    /// queued behind it.
+    #[test]
+    fn shift_clicks_queue_one_build_after_another() {
+        let mut world = cursor_world();
+        let vents = [Vec3::new(0.0, 0.5, 0.0), Vec3::new(120.0, 0.5, 0.0)];
+        for pos in vents {
+            world.spawn(GeoventSmoker {
+                facing: 0,
+                pos,
+                emit_timer: 0.0,
+                rng: 0,
+            });
+        }
+        let builder = world
+            .spawn((
+                UnitType(UnitKind::Assembler),
+                Selected,
+                Transform::default(),
+            ))
+            .id();
+        world.resource_mut::<PlacementMode>().kind = Some(UnitKind::Socket);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::ShiftLeft);
+        let frame = |world: &mut World| {
+            world.run_system_once(disarm_without_builders).unwrap();
+            world.run_system_once(plan_sites).unwrap();
+            world.run_system_once(place_on_release).unwrap();
+            crate::net::apply_now(world);
+            world.flush();
+        };
+        let aim = |world: &mut World, at: Vec3| {
+            let mut q = world.query_filtered::<&mut GlobalTransform, With<RtsCamera>>();
+            *q.single_mut(world).unwrap() = GlobalTransform::from(
+                Transform::from_xyz(at.x, 100.0, 100.0)
+                    .looking_at(Vec3::new(at.x, 0.0, 0.0), Vec3::Y),
+            );
+        };
+        for &vent in &vents {
+            aim(&mut world, vent);
+            frame(&mut world);
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Left);
+            frame(&mut world);
+            let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
+            mouse.clear();
+            mouse.release(MouseButton::Left);
+            frame(&mut world);
+            world.resource_mut::<ButtonInput<MouseButton>>().clear();
+            frame(&mut world);
+        }
+        assert_eq!(
+            world.get::<PendingBuild>(builder).map(|p| p.site.xz()),
+            Some(vents[0].xz()),
+            "the first site is the running order"
+        );
+        let queue = world
+            .get::<CommandQueue>(builder)
+            .map(|q| q.commands.clone())
+            .unwrap_or_default();
+        assert!(
+            matches!(queue[..], [QueuedCommand::BuildAt { site, .. }] if site.xz() == vents[1].xz()),
+            "the second is queued: {queue:?}"
+        );
+        assert_eq!(
+            world.resource::<PlacementMode>().kind,
+            Some(UnitKind::Socket),
+            "still armed while Shift is held"
+        );
+    }
+
     /// #8 regression: the release frame commits the row, and on that
     /// frame `pressed()` is already false (`ButtonInput` updates in
     /// `PreUpdate`). The anchor must survive it, or Shift+drag rows, Alt

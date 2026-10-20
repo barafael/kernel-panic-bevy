@@ -1403,3 +1403,138 @@ fn match_statistics_follow_the_match() {
         stats.events
     );
 }
+
+/// End to end: a constructor given a build, then two Shift-queued ones
+/// (three separate placements, as the player clicks them) walks to and
+/// builds all three, in order.
+#[test]
+fn shift_queued_builds_are_built_in_order() {
+    use crate::net::{CommandFrame, FactoryOp, NetId, PosList, SimCommand, Units};
+    use crate::terrain::geovent::GeoventSmoker;
+    use crate::units::components::{TeamId, UnitType};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::construction::buildings_for;
+    use crate::units::lifecycle::spawning::Emerging;
+
+    // Two human seats: nobody attacks the constructor on its way.
+    let mut scenario = Scenario::ai_match("Central_Hub", 2, 1, 7);
+    for seat in &mut scenario.seats {
+        seat.ai = false;
+    }
+    scenario.sandbox = true;
+    let mut h = SimHarness::new(scenario);
+    h.step();
+
+    let world = h.world_mut();
+    let homes: Vec<(NetId, u8, Vec3)> = world
+        .query_filtered::<(&NetId, &TeamId, &Transform), With<Homebase>>()
+        .iter(world)
+        .map(|(id, t, tf)| (*id, t.0, tf.translation))
+        .collect();
+    let (kernel, _, home) = *homes.iter().find(|h| h.1 == 0).unwrap();
+    let enemy = homes.iter().find(|h| h.1 != 0).unwrap().2;
+    let mut bus = world.resource_mut::<CommandBus>();
+    let tick = bus.tick;
+    bus.deliver(CommandFrame {
+        tick,
+        player: 0,
+        commands: vec![SimCommand::Factory {
+            factories: Units::of([kernel]),
+            kind: UnitKind::Assembler,
+            op: FactoryOp::Add(1),
+        }],
+    });
+
+    let mut builder = None;
+    for _ in 0..2400 {
+        h.step();
+        let world = h.world_mut();
+        builder = world
+            .query::<(&NetId, &UnitType, &TeamId, Has<Emerging>)>()
+            .iter(world)
+            .find(|(_, ut, t, emerging)| ut.0 == UnitKind::Assembler && t.0 == 0 && !emerging)
+            .map(|(id, ..)| *id);
+        if builder.is_some() {
+            break;
+        }
+    }
+    let builder = builder.expect("the Kernel builds an Assembler");
+    let kind = buildings_for(UnitKind::Assembler)[0];
+
+    // A long build walk: the three vents nearest the middle of the map
+    // (half way to the enemy), well away from home.
+    let middle = (home + enemy) * 0.5;
+    let world = h.world_mut();
+    let mut vents: Vec<Vec3> = world
+        .query::<&GeoventSmoker>()
+        .iter(world)
+        .map(|v| v.pos)
+        .collect();
+    vents.sort_by(|a, b| {
+        a.distance_squared(middle)
+            .total_cmp(&b.distance_squared(middle))
+    });
+    let sites: Vec<Vec3> = vents.into_iter().take(3).collect();
+    assert!(sites.iter().all(|s| s.xz().distance(home.xz()) > 1000.0));
+    let order = |h: &mut SimHarness, site: Vec3, queue: bool| {
+        let mut bus = h.world_mut().resource_mut::<CommandBus>();
+        let tick = bus.tick;
+        bus.deliver(CommandFrame {
+            tick,
+            player: 0,
+            commands: vec![SimCommand::Build {
+                builders: Units::of([builder]),
+                kind,
+                sites: PosList::quantize([site]),
+                queue,
+            }],
+        });
+        h.step();
+    };
+    let building = |h: &mut SimHarness| {
+        use crate::units::lifecycle::construction::Constructing;
+        let world = h.world_mut();
+        world
+            .query_filtered::<&NetId, With<Constructing>>()
+            .iter(world)
+            .any(|id| *id == builder)
+    };
+    // The first build; the second queued on the walk there; the third
+    // once the first is going up.
+    order(&mut h, sites[0], false);
+    order(&mut h, sites[1], true);
+    for _ in 0..3000 {
+        if building(&mut h) {
+            break;
+        }
+        h.step();
+    }
+    assert!(building(&mut h), "the first site is reached");
+    order(&mut h, sites[2], true);
+
+    // The order the sites get a building of `kind`.
+    let mut started: Vec<usize> = Vec::new();
+    for _ in 0..9000 {
+        h.step();
+        let world = h.world_mut();
+        let at: Vec<Vec3> = world
+            .query::<(&UnitType, &TeamId, &Transform)>()
+            .iter(world)
+            .filter(|(ut, t, _)| ut.0 == kind && t.0 == 0)
+            .map(|(_, _, tf)| tf.translation)
+            .collect();
+        for (i, site) in sites.iter().enumerate() {
+            if !started.contains(&i) && at.iter().any(|p| p.xz().distance(site.xz()) < 24.0) {
+                started.push(i);
+            }
+        }
+        if started.len() == sites.len() {
+            break;
+        }
+    }
+    assert_eq!(
+        started,
+        vec![0, 1, 2],
+        "every queued site is built, in order"
+    );
+}

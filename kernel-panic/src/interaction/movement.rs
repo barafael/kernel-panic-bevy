@@ -981,11 +981,14 @@ pub fn draw_selected_command_lines(
             Option<&AttackTargetOrder>,
             Option<&GuardTarget>,
             Option<&ForcedTarget>,
+            Option<&crate::units::lifecycle::construction::PendingBuild>,
+            Option<&crate::units::lifecycle::construction::Constructing>,
         ),
         With<Selected>,
     >,
     targets: Query<&GlobalTransform>,
     heightmap: Option<Res<Heightmap>>,
+    registry: Option<Res<crate::units::content::unit_registry::UnitRegistry>>,
     mut cache: Local<HashMap<Entity, CachedDashes>>,
     mut points: Local<Vec<Vec3>>,
 ) {
@@ -1003,6 +1006,50 @@ pub fn draw_selected_command_lines(
         cache.clear();
     }
     let hm = heightmap.as_deref();
+    // Queued follow-ups: straight dashed segments between successive
+    // targets plus a ring at each (a build site also its footprint).
+    let draw_queue = |gizmos: &mut Gizmos<CommandLineGizmos>,
+                      outline: &mut dyn FnMut(&mut Gizmos<CommandLineGizmos>, UnitKind, Vec3),
+                      start: Vec3,
+                      queue: &CommandQueue| {
+        let mut prev = start;
+        for cmd in &queue.commands {
+            let pos = cmd.position();
+            let to = sample_at_ground(pos.x, pos.z, hm);
+            let color = match cmd {
+                QueuedCommand::Move(_) => MOVE_COLOR,
+                QueuedCommand::BuildAt { .. } => BUILD_COLOR,
+                QueuedCommand::Patrol(_) => PATROL_COLOR,
+                QueuedCommand::AttackMove(_) => FIGHT_COLOR,
+                QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
+                QueuedCommand::AttackGround(_) => FIGHT_COLOR,
+                QueuedCommand::Guard { .. } => GUARD_COLOR,
+            };
+            draw_dashed_polyline(gizmos, &[prev, to], color, hm);
+            gizmos
+                .circle(Isometry3d::new(to, GROUND_RING), DISC_RADIUS, color)
+                .resolution(RING_RESOLUTION);
+            if let QueuedCommand::BuildAt { kind, site } = *cmd {
+                outline(gizmos, kind, site);
+            }
+            prev = to;
+        }
+    };
+    // A build order's site: the building's footprint, outlined on the
+    // ground (Spring draws the queued buildings themselves).
+    let footprint = |kind: UnitKind| {
+        registry
+            .as_deref()
+            .map_or(Vec2::splat(32.0), |r| r.footprint_elmos(kind))
+    };
+    let mut outline = |gizmos: &mut Gizmos<CommandLineGizmos>, kind: UnitKind, site: Vec3| {
+        let h = footprint(kind) * 0.5;
+        let corners = [(-h.x, -h.y), (h.x, -h.y), (h.x, h.y), (-h.x, h.y)]
+            .map(|(dx, dz)| sample_at_ground(site.x + dx, site.z + dz, hm));
+        for k in 0..4 {
+            gizmos.line(corners[k], corners[(k + 1) % 4], BUILD_COLOR);
+        }
+    };
 
     for (
         entity,
@@ -1015,6 +1062,8 @@ pub fn draw_selected_command_lines(
         attack_target,
         guard,
         forced,
+        pending_build,
+        constructing,
     ) in &query
     {
         let unit_pt = sample_at_ground(transform.translation.x, transform.translation.z, hm);
@@ -1052,7 +1101,20 @@ pub fn draw_selected_command_lines(
                 .resolution(RING_RESOLUTION);
         }
 
+        if let Some(p) = pending_build {
+            outline(&mut gizmos, p.kind, p.site);
+        }
+        if let Some(c) = constructing {
+            outline(&mut gizmos, c.kind, c.site);
+        }
         let Some(current) = target else {
+            // No walk under way: a builder at work (or waiting at its
+            // site) still shows what it will do next, from where it is.
+            if let Some(queue) = queue {
+                let start =
+                    constructing.map_or(unit_pt, |c| sample_at_ground(c.site.x, c.site.z, hm));
+                draw_queue(&mut gizmos, &mut outline, start, queue);
+            }
             continue;
         };
 
@@ -1065,6 +1127,8 @@ pub fn draw_selected_command_lines(
         );
         let active_color = if patrolling {
             PATROL_COLOR
+        } else if pending_build.is_some() {
+            BUILD_COLOR
         } else if attack_move.is_some() || attack_ground.is_some() {
             FIGHT_COLOR
         } else if guard.is_some() {
@@ -1124,28 +1188,8 @@ pub fn draw_selected_command_lines(
             .circle(Isometry3d::new(end, GROUND_RING), DISC_RADIUS, active_color)
             .resolution(RING_RESOLUTION);
 
-        // Queued follow-ups: straight dashed segments between successive
-        // targets plus a ring at each.
         if let Some(queue) = queue {
-            let mut prev = end;
-            for cmd in &queue.commands {
-                let pos = cmd.position();
-                let to = sample_at_ground(pos.x, pos.z, hm);
-                let color = match cmd {
-                    QueuedCommand::Move(_) => MOVE_COLOR,
-                    QueuedCommand::BuildAt { .. } => BUILD_COLOR,
-                    QueuedCommand::Patrol(_) => PATROL_COLOR,
-                    QueuedCommand::AttackMove(_) => FIGHT_COLOR,
-                    QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
-                    QueuedCommand::AttackGround(_) => FIGHT_COLOR,
-                    QueuedCommand::Guard { .. } => GUARD_COLOR,
-                };
-                draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);
-                gizmos
-                    .circle(Isometry3d::new(to, GROUND_RING), DISC_RADIUS, color)
-                    .resolution(RING_RESOLUTION);
-                prev = to;
-            }
+            draw_queue(&mut gizmos, &mut outline, end, queue);
         }
     }
 
