@@ -7,12 +7,15 @@ use crate::units::spatial::flat_dist_sq;
 
 /// Cluster radius for "crowded" (upstream `GetUnitsInCylinder(..,300)`).
 pub const CROWD_RADIUS: f32 = 300.0;
-/// A spot is `crowdedarea` once more than this many units — of any
-/// team: the `,t)` team filter is commented out — stand within
-/// [`CROWD_RADIUS`] (`SelectForceFor`: `if es > 15`). It gates both the
-/// Terminal's SIGTERM and the Pointers' NX Flags (`DispatchArty(..,
-/// crowdedarea > 0)`).
-pub const CROWDED_ABOVE: usize = 15;
+/// A spot is worth an area ability (the Terminal's SIGTERM, the
+/// Pointers' NX Flags) once this many enemies stand within
+/// [`CROWD_RADIUS`]. Upstream waits for more than 15 units of any team
+/// (`SelectForceFor`: `if es > 15`, team filter commented out), which a
+/// small match rarely gathers: its Terminals sat out whole games.
+pub const CROWD_MIN_ENEMIES: usize = 6;
+/// … and no more than one of our own units there per this many
+/// enemies: SIGTERM and NX hurt friends too.
+pub const CROWD_ENEMIES_PER_FRIEND: usize = 2;
 /// Minimum spacing between one team's SIGTERMs (`lastNuke < f - 15*30`).
 pub const SIGTERM_INTERVAL: f32 = 15.0;
 /// NX Flag weapon range (`retroweapons.tdf [nx] range=1400`).
@@ -49,13 +52,14 @@ pub const UNDEPLOY_MIN: f32 = 500.0;
 
 /// Firewall (`CMD_FIREWALL`): the reflector drops over the spot where
 /// allies were last hit, once the fight there is worth shielding —
-/// ≥3 enemies within 500 and ≥7 allies within 300, none of them
-/// already `Protected`. Upstream expires `lastAllyDamage` with
+/// ≥3 enemies within 500 and ≥4 allies within 300 (upstream: 7, which a
+/// small match's skirmishes seldom reach), none of them already
+/// `Protected`. Upstream expires `lastAllyDamage` with
 /// `t > GetGameSeconds() + 6`, a comparison a past timestamp can never
 /// pass; we implement the evident intent (damage fresher than 6 s).
 pub const FIREWALL_FRESH: f32 = 6.0;
 pub const FIREWALL_ENEMY_MIN: usize = 3;
-pub const FIREWALL_ALLY_MIN: usize = 7;
+pub const FIREWALL_ALLY_MIN: usize = 4;
 pub const FIREWALL_ENEMY_RADIUS: f32 = 500.0;
 pub const FIREWALL_ALLY_RADIUS: f32 = 300.0;
 
@@ -75,16 +79,17 @@ pub fn firewall_should_cast(
 }
 
 /// Crowded-cluster pick for area abilities: the enemy position with the
-/// most units — enemies and our own alike — within `radius`, provided
-/// there are more than [`CROWDED_ABOVE`]. Returns the center and its
-/// unit count.
+/// most enemies within `radius`, provided there are at least
+/// [`CROWD_MIN_ENEMIES`] and at most one of our units per
+/// [`CROWD_ENEMIES_PER_FRIEND`] enemies there. Returns the center and
+/// its enemy count.
 ///
-/// Upstream fires at the chosen mission spot (an enemy-held one) once
-/// `es > 15`, counting every unit there with no regard for its own
-/// (KPAI.lua / KPAI_Fair.lua `SelectForceFor`); SIGTERM and NX hurt
-/// friends, and KPAI fires them anyway. Picking the densest enemy unit
-/// instead keeps the logic spot-free. Candidate centers are strided
-/// down to ~64 so the O(n²) count stays cheap at 1 Hz on large armies.
+/// Upstream fires at the chosen mission spot once more than 15 units of
+/// any team stand there (`SelectForceFor`), friends included and with
+/// no care for them; that gate is too high for a small match, and
+/// counting our own army as the crowd aimed SIGTERM at it. Candidate
+/// centers are strided down to ~64 so the O(n²) count stays cheap at
+/// 1 Hz on large armies.
 pub fn crowded_cluster(enemies: &[Vec3], friends: &[Vec3], radius: f32) -> Option<(Vec3, usize)> {
     let r_sq = radius * radius;
     let within =
@@ -94,10 +99,34 @@ pub fn crowded_cluster(enemies: &[Vec3], friends: &[Vec3], radius: f32) -> Optio
         .iter()
         .step_by(stride)
         .filter_map(|&c| {
-            let n = within(c, enemies) + within(c, friends);
-            (n > CROWDED_ABOVE).then_some((c, n))
+            let n = within(c, enemies);
+            let clear = within(c, friends) * CROWD_ENEMIES_PER_FRIEND <= n;
+            (n >= CROWD_MIN_ENEMIES && clear).then_some((c, n))
         })
         .max_by_key(|&(_, n)| n)
+}
+
+/// Where a ready Terminal drops SIGTERM when no crowd has gathered: on
+/// the enemy minifac or special (`targets`) with the most enemies round
+/// it, clear of our own units as [`crowded_cluster`] wants. A Terminal
+/// that waits for a crowd may wait all game; its recharge is 96 s, so
+/// hitting production in between is the better use.
+pub fn sigterm_fallback(targets: &[Vec3], enemies: &[Vec3], friends: &[Vec3]) -> Option<Vec3> {
+    let r_sq = CROWD_RADIUS * CROWD_RADIUS;
+    let within =
+        |c: Vec3, pts: &[Vec3]| pts.iter().filter(|p| flat_dist_sq(**p, c) <= r_sq).count();
+    targets
+        .iter()
+        .filter_map(|&c| {
+            let n = within(c, enemies).max(1);
+            (within(c, friends) * CROWD_ENEMIES_PER_FRIEND <= n).then_some((c, n))
+        })
+        // The first of equals, in the caller's (deterministic) order.
+        .fold(None, |best: Option<(Vec3, usize)>, (c, n)| match best {
+            Some((_, m)) if m >= n => best,
+            _ => Some((c, n)),
+        })
+        .map(|(c, _)| c)
 }
 
 /// Should a teleporter under attack counter-dispatch? (`UnitDamaged`
@@ -140,26 +169,42 @@ mod tests {
         assert_eq!(n, 20);
     }
 
-    /// `es > 15`: sixteen units make a crowd, fifteen don't.
+    /// Six enemies make a crowd, five don't.
     #[test]
-    fn crowded_cluster_needs_more_than_fifteen() {
-        assert!(crowded_cluster(&blob(Vec3::ZERO, 15), &[], CROWD_RADIUS).is_none());
-        assert!(crowded_cluster(&blob(Vec3::ZERO, 16), &[], CROWD_RADIUS).is_some());
+    fn crowded_cluster_needs_six_enemies() {
+        assert!(crowded_cluster(&blob(Vec3::ZERO, 5), &[], CROWD_RADIUS).is_none());
+        assert!(crowded_cluster(&blob(Vec3::ZERO, 6), &[], CROWD_RADIUS).is_some());
     }
 
-    /// Why: the port vetoed SIGTERM / NX on a blob tangled up with our
-    /// own units — an ally care KPAI doesn't have. Upstream counts every
-    /// unit at the spot (`GetUnitsInCylinder` without the team filter),
-    /// so our own attackers make the crowd too.
+    /// Why: upstream counted our own attackers as the crowd (16 units,
+    /// 10 of them ours) and SIGTERMed its own army. Only enemies make
+    /// the crowd, and a spot with more than one friend per two enemies
+    /// is spared.
     #[test]
-    fn crowded_cluster_counts_our_own_units_like_kpai() {
+    fn crowded_cluster_spares_our_own_units() {
         let enemies = blob(Vec3::ZERO, 6);
         let friends = blob(Vec3::new(10.0, 0.0, 10.0), 10);
-        let (_, n) = crowded_cluster(&enemies, &friends, CROWD_RADIUS).expect("16 units");
-        assert_eq!(n, 16);
-        assert!(crowded_cluster(&enemies, &friends[..9], CROWD_RADIUS).is_none());
+        assert!(crowded_cluster(&enemies, &friends, CROWD_RADIUS).is_none());
+        let (_, n) = crowded_cluster(&enemies, &friends[..3], CROWD_RADIUS).expect("6 enemies");
+        assert_eq!(n, 6);
         // No enemy, no spot to fire at.
         assert!(crowded_cluster(&[], &blob(Vec3::ZERO, 20), CROWD_RADIUS).is_none());
+    }
+
+    /// No crowd: SIGTERM the enemy building with the most enemies round
+    /// it, but not one our army stands at.
+    #[test]
+    fn sigterm_falls_back_on_enemy_production() {
+        let busy = Vec3::new(1000.0, 0.0, 0.0);
+        let quiet = Vec3::new(-1000.0, 0.0, 0.0);
+        let enemies = blob(busy, 3);
+        assert_eq!(sigterm_fallback(&[quiet, busy], &enemies, &[]), Some(busy));
+        let friends = blob(busy, 4);
+        assert_eq!(
+            sigterm_fallback(&[quiet, busy], &enemies, &friends),
+            Some(quiet)
+        );
+        assert_eq!(sigterm_fallback(&[], &enemies, &[]), None);
     }
 
     #[test]
@@ -176,11 +221,11 @@ mod tests {
     /// shielded.
     #[test]
     fn firewall_needs_a_fresh_worthwhile_fight() {
-        assert!(firewall_should_cast(1.0, 3, 7, false));
-        assert!(!firewall_should_cast(6.1, 3, 7, false));
-        assert!(!firewall_should_cast(1.0, 2, 7, false));
-        assert!(!firewall_should_cast(1.0, 3, 6, false));
-        assert!(!firewall_should_cast(1.0, 3, 7, true));
+        assert!(firewall_should_cast(1.0, 3, 4, false));
+        assert!(!firewall_should_cast(6.1, 3, 4, false));
+        assert!(!firewall_should_cast(1.0, 2, 4, false));
+        assert!(!firewall_should_cast(1.0, 3, 3, false));
+        assert!(!firewall_should_cast(1.0, 3, 4, true));
     }
 
     #[test]

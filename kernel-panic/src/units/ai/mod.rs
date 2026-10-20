@@ -6,8 +6,10 @@
 //! Each tick, per AI team:
 //!
 //! 1. **Fairness**: recompute Fair KPAI's `Lack` budget — how many more
-//!    spam / medium / building units the team may own than its enemies
-//!    ([`build_orders::Lack`]); [`AiDifficulty`] widens the head start.
+//!    spam / medium / building units the team may own than the
+//!    strongest enemy team ([`build_orders::Lack`]); [`AiDifficulty`]
+//!    widens the head start. Upstream pits whole sides against each
+//!    other, so allies' units used up a team's budget.
 //! 2. **Build**: refill each homebase with KPAI's `OrderHomeBase` mix
 //!    (constructor odds fall with every constructor owned; big armies
 //!    buy heavies/artillery; otherwise batches of spam). Minifacs
@@ -16,10 +18,12 @@
 //!    off while its spam budget is spent (`KPAI_Fair::OrderMiniFac`).
 //! 3. **Expand**: every idle constructor claims a free datavent
 //!    (`GetNiceGeo` sampling) and builds its minifac there, or — with
-//!    three minifacs owned — the faction special one time in three.
-//!    Constructors still inside a homebase's exit box, or idling with
-//!    the building budget spent, are spread on a ring around the base
-//!    instead of clogging its spawn.
+//!    four minifacs owned — the faction special one time in three, at
+//!    most one per three minifacs. Below four minifacs a team builds
+//!    production whatever its budget says. Constructors still inside a
+//!    homebase's exit box, or idling with the building budget spent,
+//!    are spread on a ring around the base instead of clogging its
+//!    spawn.
 //! 4. **Army**: if enemy units come within `DEFEND_RADIUS` of a
 //!    homebase, idle army units fight their way there; otherwise, once
 //!    `ARMY_THRESHOLD` units idle at home, the army attack-moves at
@@ -29,8 +33,9 @@
 //!    fronts, round-robin, like upstream's mission loop.
 //! 5. **Network**: teleporters counter-dispatch packets at nearby
 //!    attackers and dump a full buffer toward the push target.
-//! 6. **Specials**: SIGTERM the densest enemy cluster, Infection at the
-//!    nearest enemy, NX Flags on crowds, a Firewall over the last spot
+//! 6. **Specials**: SIGTERM the densest enemy cluster (else enemy
+//!    production), Infection at the nearest enemy, NX Flags on enemy
+//!    crowds clear of our own units, a Firewall over the last spot
 //!    allies took damage, and Bug ↔ Exploit deploys.
 //! 7. **Late game**: with no enemy team left alive, the AI razes
 //!    itself (`SuicideIfAlone`) so a stale game still ends.
@@ -336,20 +341,22 @@ pub fn ai_brain(
             continue;
         }
         take_from_leavers(team, s, &ai_seats, &alliances, fates, &tick, &mut orders);
-        // `UpdateFairness`: every allied team's units (its own
-        // included) count against the head start, every enemy's for it.
-        let side = |allied: bool| {
-            s.counts
-                .iter()
-                .filter(|(t, _)| s.alliances.friendly(**t, team) == allied)
-                .fold(RoleCounts::default(), |mut acc, (_, c)| {
-                    acc.spams += c.spams;
-                    acc.mediums += c.mediums;
-                    acc.buildings += c.buildings;
-                    acc
-                })
-        };
-        let (own, enemy) = (side(true), side(false));
+        // `UpdateFairness`, per team: upstream sums every allied team's
+        // units (its own included) against every enemy's, so an AI
+        // whose ally (a human, or another AI) builds plenty is left with
+        // nothing, and two AIs on a side hold each other to a handful of
+        // minifacs. Here a team measures itself against the strongest
+        // enemy team, role by role.
+        let own = s.counts.get(&team).copied().unwrap_or_default();
+        let enemy = s
+            .counts
+            .iter()
+            .filter(|(t, _)| !s.alliances.friendly(**t, team))
+            .fold(RoleCounts::default(), |acc, (_, c)| RoleCounts {
+                spams: acc.spams.max(c.spams),
+                mediums: acc.mediums.max(c.mediums),
+                buildings: acc.buildings.max(c.buildings),
+            });
         let mut lack = Lack::compute(difficulty.fairness_slack(), own, enemy);
         let force = s.force.get(&team).copied().unwrap_or(0);
         let buffer = packet_buffer.peek(team);
@@ -650,6 +657,11 @@ fn run_constructors(
         .iter()
         .filter(|u| u.team == team && u.kind.is_minifac())
         .count();
+    let mut owned_specials = s
+        .units
+        .iter()
+        .filter(|u| u.team == team && expansion::is_special(u.kind))
+        .count();
     s.vent_pos.clear();
     s.vent_pos.extend(s.vents.iter().map(|(_, p)| *p));
     for ctor in s
@@ -665,8 +677,10 @@ fn run_constructors(
             continue;
         }
         // Fair KPAI: with no building budget the constructor is spread
-        // around the homebase rather than sent to claim.
-        if lack.buildings <= 0 {
+        // around the homebase rather than sent to claim — unless the
+        // team is short of production, which it always may build.
+        let short_of_production = owned_minifacs < expansion::MIN_MINIFACS;
+        if lack.buildings <= 0 && !short_of_production {
             if let Some(&home) = s.homes.get(&team).and_then(|homes| {
                 homes.iter().min_by(|a, b| {
                     flat_dist_sq(**a, ctor.pos).total_cmp(&flat_dist_sq(**b, ctor.pos))
@@ -695,7 +709,14 @@ fn run_constructors(
         let Some(idx) = pick_datavent(ctor.pos, &s.vent_pos, &mut ticker.rng) else {
             break;
         };
-        let Some(kind) = choose_building(ctor.kind, owned_minifacs, ticker.roll() % 3) else {
+        // A team short of production builds production: no special
+        // roll (1 never picks one) until it has its minimum.
+        let roll3 = if short_of_production {
+            1
+        } else {
+            ticker.roll() % 3
+        };
+        let Some(kind) = choose_building(ctor.kind, owned_minifacs, owned_specials, roll3) else {
             continue;
         };
         let (_, site) = s.vents.swap_remove(idx);
@@ -715,6 +736,8 @@ fn run_constructors(
         lack.buildings -= 1;
         if kind.is_minifac() {
             owned_minifacs += 1;
+        } else {
+            owned_specials += 1;
         }
     }
 }
@@ -956,17 +979,28 @@ fn run_specials(
     };
 
     // Terminal: SIGTERM the most crowded enemy cluster, at most once per
-    // 15 s per team (`crowdedarea > 0 and td.lastNuke < f - 15*30`).
+    // 15 s per team (`crowdedarea > 0 and td.lastNuke < f - 15*30`);
+    // with no crowd, the enemy production it can hurt most.
     let sigterm_due = ticker
         .last_sigterm
         .get(&team)
         .is_none_or(|t| now - t >= SIGTERM_INTERVAL);
-    if sigterm_due
-        && let Some(terminal) = ready(UnitKind::Terminal).next()
-        && let Some((center, _)) = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
-    {
-        cast(orders, team, terminal.net, center);
-        ticker.last_sigterm.insert(team, now);
+    if sigterm_due && let Some(terminal) = ready(UnitKind::Terminal).next() {
+        let target = crowded_cluster(&s.enemy_pos, &s.friend_pos, CROWD_RADIUS)
+            .map(|(center, _)| center)
+            .or_else(|| {
+                let targets: Vec<Vec3> = s
+                    .structures
+                    .iter()
+                    .filter(|st| !st.homebase && !s.alliances.friendly(st.team, team))
+                    .map(|st| st.pos)
+                    .collect();
+                specials::sigterm_fallback(&targets, &s.enemy_pos, &s.friend_pos)
+            });
+        if let Some(center) = target {
+            cast(orders, team, terminal.net, center);
+            ticker.last_sigterm.insert(team, now);
+        }
     }
 
     // Obelisk: Infection at the nearest enemy within 1500. The gas

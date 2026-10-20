@@ -9,15 +9,35 @@ use crate::units::content::definitions::UnitKind;
 /// Minifacs owned before a constructor starts rolling for the faction
 /// special (`#ListOfMiniFacs >= 3` in `DispatchCon`).
 pub const SPECIAL_MIN_MINIFACS: usize = 3;
+/// At most one special per this many minifacs. Upstream's 1-in-3 roll
+/// alone drifts toward one special per two minifacs, and specials
+/// outlive the minifacs at the front, so the standing mix tilted to
+/// specials; production keeps the upper hand here.
+pub const MINIFACS_PER_SPECIAL: usize = 3;
+/// Below this many minifacs a team builds one whatever the fairness
+/// budget says (upstream's `minifacLimit = 4`, its "a team is still
+/// alive" line): without production nothing else matters.
+pub const MIN_MINIFACS: usize = 4;
+
+/// The faction special a constructor builds (terminal / obelisk /
+/// firewall).
+pub fn is_special(kind: UnitKind) -> bool {
+    matches!(
+        kind,
+        UnitKind::Terminal | UnitKind::Obelisk | UnitKind::Firewall
+    )
+}
 
 /// Upstream `DispatchCon` build choice: the constructor's minifac
 /// (assembler → socket, trojan → window, gateway → port), except that
 /// once the team owns [`SPECIAL_MIN_MINIFACS`] minifacs a 1-in-3 roll
 /// (`math.random(3) == 1`, here `roll3 == 0`) builds the faction
-/// special instead — terminal / obelisk / firewall.
+/// special instead — terminal / obelisk / firewall — while the team
+/// has fewer than one special per [`MINIFACS_PER_SPECIAL`] minifacs.
 pub fn choose_building(
     constructor: UnitKind,
     owned_minifacs: usize,
+    owned_specials: usize,
     roll3: u32,
 ) -> Option<UnitKind> {
     let (minifac, special) = match constructor {
@@ -26,7 +46,8 @@ pub fn choose_building(
         UnitKind::Gateway => (UnitKind::Port, UnitKind::Firewall),
         _ => return None,
     };
-    if owned_minifacs >= SPECIAL_MIN_MINIFACS && roll3.is_multiple_of(3) {
+    let room = (owned_specials + 1) * MINIFACS_PER_SPECIAL <= owned_minifacs;
+    if owned_minifacs >= SPECIAL_MIN_MINIFACS && room && roll3.is_multiple_of(3) {
         Some(special)
     } else {
         Some(minifac)
@@ -59,40 +80,55 @@ mod tests {
     fn minifac_until_three_owned() {
         for roll in 0..3 {
             assert_eq!(
-                choose_building(UnitKind::Assembler, 2, roll),
+                choose_building(UnitKind::Assembler, 2, 0, roll),
                 Some(UnitKind::Socket)
             );
         }
         assert_eq!(
-            choose_building(UnitKind::Trojan, 0, 0),
+            choose_building(UnitKind::Trojan, 0, 0, 0),
             Some(UnitKind::Window)
         );
-        assert_eq!(choose_building(UnitKind::Bit, 5, 0), None);
+        assert_eq!(choose_building(UnitKind::Bit, 5, 0, 0), None);
     }
 
     /// With ≥3 minifacs, one roll in three builds the special.
     #[test]
     fn special_one_in_three_after_three_minifacs() {
         assert_eq!(
-            choose_building(UnitKind::Assembler, 3, 0),
+            choose_building(UnitKind::Assembler, 3, 0, 0),
             Some(UnitKind::Terminal)
         );
         assert_eq!(
-            choose_building(UnitKind::Trojan, 4, 3),
+            choose_building(UnitKind::Trojan, 4, 0, 3),
             Some(UnitKind::Obelisk)
         );
         assert_eq!(
-            choose_building(UnitKind::Gateway, 3, 0),
+            choose_building(UnitKind::Gateway, 3, 0, 0),
             Some(UnitKind::Firewall)
         );
         assert_eq!(
-            choose_building(UnitKind::Gateway, 3, 1),
+            choose_building(UnitKind::Gateway, 3, 0, 1),
             Some(UnitKind::Port)
         );
         assert_eq!(
-            choose_building(UnitKind::Assembler, 3, 2),
+            choose_building(UnitKind::Assembler, 3, 0, 2),
             Some(UnitKind::Socket)
         );
+    }
+
+    /// One special per three minifacs at most: the second waits for
+    /// the sixth minifac.
+    #[test]
+    fn specials_stay_a_third_of_the_minifacs() {
+        assert_eq!(
+            choose_building(UnitKind::Assembler, 5, 1, 0),
+            Some(UnitKind::Socket)
+        );
+        assert_eq!(
+            choose_building(UnitKind::Assembler, 6, 1, 0),
+            Some(UnitKind::Terminal)
+        );
+        assert!(is_special(UnitKind::Obelisk) && !is_special(UnitKind::Window));
     }
 
     #[test]

@@ -232,6 +232,91 @@ fn command_name(cmd: &crate::net::SimCommand) -> String {
         .to_string()
 }
 
+/// What the AI builds and uses: each team's buildings by kind every two
+/// game minutes, then the build orders and ability commands it issued.
+#[test]
+#[ignore = "runs a long match; --ignored --release"]
+fn ai_census() {
+    use crate::net::SimCommand;
+    use crate::units::components::{TeamId, UnitType};
+    use crate::units::content::unit_registry::UnitRegistry;
+    let scenario = scenario_from_env();
+    let ticks: u64 = env("KP_NET_TICKS", 30 * 60 * 12);
+    eprintln!(
+        "ai_census on {}: {} seats",
+        scenario.map,
+        scenario.seats.len()
+    );
+    let mut h = SimHarness::new(scenario);
+    h.world_mut().resource_mut::<CommandBus>().log = Some(Vec::new());
+    let mut builds: BTreeMap<(u8, String), usize> = BTreeMap::new();
+    let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
+    while h.tick < ticks {
+        h.step();
+        let frames = h
+            .world_mut()
+            .resource_mut::<CommandBus>()
+            .log
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default();
+        let kind_of: HashMap<crate::net::NetId, String> = {
+            let world = h.world_mut();
+            let mut q = world.query::<(&crate::net::NetId, &UnitType)>();
+            q.iter(world)
+                .map(|(id, k)| (*id, format!("{:?}", k.0)))
+                .collect()
+        };
+        for frame in &frames {
+            for cmd in &frame.commands {
+                if let SimCommand::Cast { units, .. } = cmd {
+                    for id in units.list().map(|l| l.ids().to_vec()).unwrap_or_default() {
+                        let k = kind_of.get(&id).cloned().unwrap_or_default();
+                        *kinds.entry(format!("Cast by {k}")).or_default() += 1;
+                    }
+                }
+                if let SimCommand::Build { kind, .. } = cmd {
+                    *builds
+                        .entry((frame.player, format!("{kind:?}")))
+                        .or_default() += 1;
+                }
+                let name = match cmd {
+                    SimCommand::Order { order, .. } => format!(
+                        "Order::{}",
+                        format!("{order:?}")
+                            .split([' ', '{', '('])
+                            .next()
+                            .unwrap_or_default()
+                    ),
+                    other => command_name(other),
+                };
+                *kinds.entry(name).or_default() += 1;
+            }
+        }
+        if h.tick.is_multiple_of(30 * 120) {
+            let world = h.world_mut();
+            let mut q = world.query::<(&UnitType, &TeamId)>();
+            let all: Vec<_> = q.iter(world).map(|(k, t)| (k.0, t.0)).collect();
+            let registry = world.resource::<UnitRegistry>();
+            let mut per: BTreeMap<u8, BTreeMap<String, usize>> = BTreeMap::new();
+            for (kind, team) in all {
+                if registry.is_building(kind) || kind.is_constructor() {
+                    *per.entry(team)
+                        .or_default()
+                        .entry(format!("{kind:?}"))
+                        .or_default() += 1;
+                }
+            }
+            eprintln!("t={:>4.1} min", h.tick as f64 / 1800.0);
+            for (team, m) in per {
+                eprintln!("  team {team}: {m:?}");
+            }
+        }
+    }
+    eprintln!("build orders (team, kind): {builds:?}");
+    eprintln!("commands: {kinds:?}");
+}
+
 /// A long AI match: entity counts, the AI's command volume (the frames
 /// the command bus applies, sized as postcard `CommandFrame`s — what a
 /// host-run AI would send) and the sim cost per tick.
