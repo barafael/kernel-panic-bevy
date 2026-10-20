@@ -590,6 +590,12 @@ impl DelayedDamage {
         self.push(0, hit);
     }
 
+    /// [`Self::take_due`], for tests elsewhere that check what was queued.
+    #[cfg(test)]
+    pub fn take_due_for_test(&mut self, frame: u64) -> Vec<Hit> {
+        self.take_due(frame)
+    }
+
     fn take_due(&mut self, frame: u64) -> Vec<Hit> {
         let mut due = Vec::new();
         self.0.retain(|(at, hit)| {

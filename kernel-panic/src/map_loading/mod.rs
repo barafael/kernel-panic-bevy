@@ -1167,6 +1167,11 @@ fn configure_map_events(map_name: &str, heightmap: &Heightmap, commands: &mut Co
     // ring's lanes or blocks on a map without them).
     commands.remove_resource::<crate::map_events::LaneFlow>();
     commands.remove_resource::<crate::map_events::ShiftingTerrain>();
+    commands.remove_resource::<crate::map_events::WaterDamage>();
+    if let Some(water) = crate::map_events::WaterDamage::for_map(map_name) {
+        info!("  {map_name}: the water deals {} per slow update", water.0);
+        commands.insert_resource(water);
+    }
     if let Some(shifting) = crate::map_events::ShiftingTerrain::for_map(map_name, heightmap) {
         info!("  {map_name}: installing shifting terrain");
         commands.insert_resource(shifting);
