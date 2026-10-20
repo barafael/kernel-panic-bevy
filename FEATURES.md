@@ -785,7 +785,7 @@ A port of upstream's Lua AI (`KPAI.lua`, in its "Fair KPAI" flavour).
 
 The hardware cursor swaps between several variants depending on
 context. Most variants animate over their frames at a fixed rate
-(~30 fps), one variant is static.
+(10 fps, the engine's default frame length), one variant is static.
 
 | Variant | Frames | When shown |
 | --- | --- | --- |

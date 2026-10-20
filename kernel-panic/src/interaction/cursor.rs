@@ -21,7 +21,6 @@ use bevy::render::render_resource::{Extent3d, TextureDimension};
 use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
-use crate::sim::INV_GAME_SPEED;
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::teams::Alliances;
@@ -142,6 +141,9 @@ impl CursorKind {
     }
 }
 
+/// How long each frame of an animated cursor shows (seconds).
+const FRAME_SECONDS: f32 = 0.1;
+
 /// Per-cursor frame storage. Built once at startup.
 #[derive(Resource, Default)]
 struct CursorState {
@@ -241,10 +243,9 @@ fn resolve_context_cursor(
 }
 
 fn load_cursor_frames(asset_server: Res<AssetServer>, mut state: ResMut<CursorState>) {
-    // One cursor frame per sim frame, ~30 fps (FEATURES.md §25). Matches
-    // Spring's default; at 5 fps the Move/Attack sprites visibly stepped
-    // through frames.
-    state.timer = Timer::from_seconds(INV_GAME_SPEED, TimerMode::Repeating);
+    // `CMouseCursor::DEF_FRAME_LENGTH`: 0.1 s a frame. Kernel Panic ships
+    // no `anims/<cursor>.txt` spec files that would set other lengths.
+    state.timer = Timer::from_seconds(FRAME_SECONDS, TimerMode::Repeating);
     for &kind in CursorKind::all() {
         let frames: Vec<Handle<Image>> = (0..kind.frame_count())
             .map(|i| asset_server.load(format!("cursors/{}_{:02}.png", kind.stem(), i)))
