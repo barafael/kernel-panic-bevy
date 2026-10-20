@@ -40,3 +40,28 @@ doctest = false
 [[example]]
 name = "gen_deadlock"
 required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/token_ring_v1.kpmap.
+[[example]]
+name = "gen_token_ring"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/heap_fragmentation_v1.kpmap.
+[[example]]
+name = "gen_heap"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/three_way_handshake_v1.kpmap.
+[[example]]
+name = "gen_three_way"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/circular_buffer_{3,4,5,6}_v1.kpmap.
+[[example]]
+name = "gen_circular_buffer"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/pipeline_v1.kpmap.
+[[example]]
+name = "gen_pipeline"
+required-features = ["write"]

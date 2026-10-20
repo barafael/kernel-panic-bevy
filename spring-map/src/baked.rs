@@ -266,6 +266,50 @@ fn decode_payload(bytes: &[u8]) -> Result<Vec<u8>, BakedMapError> {
     Ok(payload)
 }
 
+/// The leading fields of the payload, up to the metadata: everything a
+/// caller needing only [`MapInfo`] has to read past (the texture, the
+/// bulk of the bigger maps, comes after it).
+#[derive(Deserialize)]
+struct InfoPrefix {
+    _map_x: i32,
+    _map_y: i32,
+    _min_height: f32,
+    _max_height: f32,
+    _heights: Vec<f32>,
+    _metalmap: Vec<u8>,
+    _features: Vec<MapFeature>,
+    map_info: Option<MapInfo>,
+}
+
+/// Read just a `.kpmap`'s metadata (start positions, description …),
+/// decompressing only as far as it: the build's map catalog reads every
+/// map's this way without unpacking a quarter-gigabyte texture.
+pub fn read_map_info(bytes: &[u8]) -> Result<Option<MapInfo>, BakedMapError> {
+    let magic = bytes
+        .get(..MAGIC.len())
+        .ok_or(BakedMapError::HeaderTruncated)?;
+    if magic != MAGIC.as_slice() {
+        return Err(BakedMapError::BadMagic);
+    }
+    let body = bytes
+        .get(MAGIC.len() + 4..)
+        .ok_or(BakedMapError::HeaderTruncated)?;
+    let mut decoder = ruzstd::decoding::StreamingDecoder::new(body)
+        .map_err(|e| BakedMapError::Io(std::io::Error::other(e.to_string())))?;
+    let mut payload = Vec::new();
+    let mut chunk = 1 << 20;
+    loop {
+        let read = (&mut decoder)
+            .take(chunk as u64)
+            .read_to_end(&mut payload)?;
+        match postcard::take_from_bytes::<InfoPrefix>(&payload) {
+            Ok((prefix, _)) => return Ok(prefix.map_info),
+            Err(postcard::Error::DeserializeUnexpectedEnd) if read > 0 => chunk *= 2,
+            Err(e) => return Err(BakedMapError::PostcardDecode(e)),
+        }
+    }
+}
+
 /// Decode a `.kpmap`.
 ///
 /// The ground texture dominates the payload (a quarter gigabyte on the
@@ -503,6 +547,24 @@ mod tests {
             count += 1;
         }
         assert!(count >= 18, "expected the 18 shipped maps, found {count}");
+    }
+
+    /// The metadata alone reads the same as the whole map's, for every
+    /// shipped map.
+    #[test]
+    fn read_map_info_matches_the_full_read() {
+        let dir = crate::shipped_maps_dir();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "kpmap") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            let info = read_map_info(&bytes).unwrap().expect("map info");
+            let full = read_baked_map(&bytes).unwrap().map_info.unwrap();
+            assert_eq!(info.description, full.description, "{}", path.display());
+            assert_eq!(info.start_positions.len(), full.start_positions.len());
+        }
     }
 
     #[test]

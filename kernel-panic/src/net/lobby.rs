@@ -2015,7 +2015,7 @@ fn leave_for_other_match(mut lobby: ResMut<LobbyRoom>) {
 /// pick of single player's random map, if this catalog has it.
 fn default_map(catalog: &crate::map_loading::MapCatalog) -> String {
     let names = catalog.names();
-    let pick = crate::game_setup::random_weighted_map();
+    let pick = crate::game_setup::random_weighted_map(2);
     names
         .iter()
         .find(|n| **n == pick)

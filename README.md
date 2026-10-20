@@ -20,7 +20,7 @@ the formats the game reads, with no conversion step anywhere:
   class definition, the original text files, parsed at startup.
 - `kernel-panic/assets/units.kpu`: every model and texture
   (`unit-bundle.md`). Both are embedded in the binary.
-- `kernel-panic/assets/maps/*.kpmap`: the 19 maps (`spring-map/src/baked.rs`
+- `kernel-panic/assets/maps/*.kpmap`: the 26 maps (`spring-map/src/baked.rs`
   documents the format). Native reads them from `assets/`, the web build
   fetches them.
 - `kernel-panic/assets/{sounds,music,cursors,unitpics,bitmaps}`: the
@@ -32,22 +32,32 @@ Provenance and licences: `original-game-license-info.txt`.
 The maps were converted once from the original Spring `.sd7` / `.sdz`
 archives. The converter (`spring-map`'s `bake-map`), the Spring archive,
 SMF, SMT and SMD readers, the captured Lua gadget outputs, the
-`spring-map-gen` crate that generated Circular Buffer and Stack Overflow
-(and its `map-viewer`), and the CI bake step were all removed in the
-commit after `81f4e96`; that commit is the last with the tools and the
-source archives, should a map ever need regenerating:
+`spring-map-gen` crate that generated Stack Overflow and the first
+Circular Buffer (and its `map-viewer`), and the CI bake step were all
+removed in the commit after `81f4e96`; that commit is the last with the
+tools and the source archives, should a map ever need regenerating:
 
 ```sh
 git show 81f4e96:spring-map/src/bin/bake-map.rs
 git checkout 81f4e96 -- spring-map spring-map-gen kernel-panic/assets/maps
 ```
 
-The exception is `deadlock_v1`, new to this port: its generator is
-`spring-map/examples/gen_deadlock.rs`, which writes the `.kpmap` in place:
+The port's own maps are generated, not converted: `deadlock_v1`,
+`token_ring_v1`, `heap_fragmentation_v1`, `three_way_handshake_v1`,
+`pipeline_v1` (layouts after Beyond All Reason maps) and
+`circular_buffer_{3,4,5,6}_v1`, drawn in the style of FireStorm's Dual
+Core / Quad Core / Data Cache L1 by `spring-map`'s `kpgen` module. Each
+has a script in `spring-map/examples/` that writes its `.kpmap` in place:
 
 ```sh
-cargo run -p spring-map --example gen_deadlock --features write --release
+cargo run -p spring-map --example gen_token_ring --features write --release
 ```
+
+Token Ring's firewalls and Heap Fragmentation's blocks rise and sink
+during play (`spring_map::shifting`, applied by the game's
+`map_events::shifting`); the Circular Buffers' lanes speed travel one
+way round the ring and slow the other (`spring_map::ring`,
+`map_events::lane_flow`).
 
 There is no editable sidecar for the baked data (start positions, terrain
 types, datavent facings all live inside the `.kpmap`); if one is ever

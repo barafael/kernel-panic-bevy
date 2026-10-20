@@ -2,7 +2,8 @@
 //!
 //! The web build has no filesystem to scan, and the native one ships
 //! the same fixed set of files, so `map_loading::pick_map` takes the
-//! list of `.kpmap` files in `assets/maps/` from here on both, and
+//! list of `.kpmap` files in `assets/maps/` from here on both (with each
+//! map's start count and intended players, for the random picks), and
 //! `units::content::defs` the text of every unit, weapon, explosion
 //! and feature definition in `assets/defs/`. The music player (`audio::music`) gets
 //! the same treatment for the `.ogg` tracks in `assets/music/` (web
@@ -18,6 +19,7 @@ fn main() {
         "map_catalog.rs",
         |_| true,
     );
+    map_meta();
     // Tracks still a Git LFS pointer stay out: the player would fetch
     // the pointer and `bevy_audio` panics on what it cannot decode.
     catalog(
@@ -58,6 +60,36 @@ fn catalog(dir: &str, ext: &str, const_name: &str, out_file: &str, keep: fn(&Pat
         out_file,
         format!(
             "#[allow(dead_code)]\npub const {const_name}: &[&str] = &[{}];\n",
+            entries.join(", ")
+        ),
+    );
+}
+
+/// `MAP_META`: per map, `(stem, start positions, (fewest, most)
+/// players)`, the players from the description where it names them,
+/// else two to the start count (four at most).
+fn map_meta() {
+    let entries: Vec<String> = files("assets/maps", "kpmap")
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path).expect("read map");
+            let info = spring_map::baked::read_map_info(&bytes)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .unwrap_or_default();
+            let starts = info.start_positions.len() as u32;
+            let (low, high) = info.intended_players().unwrap_or((2, starts.min(4)));
+            let high = high.min(starts).max(1);
+            format!(
+                "({}, {starts}, ({}, {high}))",
+                literal(&stem(path)),
+                low.min(high)
+            )
+        })
+        .collect();
+    write(
+        "map_meta.rs",
+        format!(
+            "#[allow(dead_code)]\npub const MAP_META: &[(&str, u32, (u32, u32))] = &[{}];\n",
             entries.join(", ")
         ),
     );

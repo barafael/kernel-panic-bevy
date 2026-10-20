@@ -70,6 +70,27 @@ const _: () = assert!(
     !MAP_CATALOG.is_empty(),
     "no .kpmap in kernel-panic/assets/maps"
 );
+// `MAP_META`: per map, its start count and the players it is for.
+include!(concat!(env!("OUT_DIR"), "/map_meta.rs"));
+
+/// What the build read from a shipped map: how many start positions it
+/// has and the player counts its description names (two to the start
+/// count, at most four, where it names none). The random map picks and
+/// the attract demo size their seats by it; on the web it is all there
+/// is to go by before a map is fetched.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MapMeta {
+    pub starts: u32,
+    pub players: (u32, u32),
+}
+
+/// The shipped map `name`'s [`MapMeta`].
+pub fn map_meta(name: &str) -> Option<MapMeta> {
+    MAP_META
+        .iter()
+        .find(|(stem, _, _)| stem.eq_ignore_ascii_case(name))
+        .map(|&(_, starts, players)| MapMeta { starts, players })
+}
 
 use mipmap::{build_terrain_image, dark_fallback_material, void_ground_material};
 
@@ -1124,13 +1145,18 @@ fn configure_map_events(
     commands: &mut Commands,
 ) {
     // Per-map: the previous map's schedule must not carry over (an
-    // eruption clock aimed at Stack_Overflow's starts, a swirl on a
-    // map without one). The state resource (clock + rng) goes with the
+    // eruption clock aimed at Stack_Overflow's starts, a ring's lanes
+    // or blocks on a map without them). The state resource (clock + rng) goes with the
     // config; spawns still queued for the old world are dropped with
     // the other match-scoped queues at the swap.
     commands.remove_resource::<crate::map_events::EruptionConfig>();
     commands.remove_resource::<crate::map_events::EruptionState>();
-    commands.remove_resource::<crate::map_events::CircularFlow>();
+    commands.remove_resource::<crate::map_events::LaneFlow>();
+    commands.remove_resource::<crate::map_events::ShiftingTerrain>();
+    if let Some(shifting) = crate::map_events::ShiftingTerrain::for_map(map_name, heightmap) {
+        info!("  {map_name}: installing shifting terrain");
+        commands.insert_resource(shifting);
+    }
     if map_name.eq_ignore_ascii_case("Stack_Overflow") {
         let starts: Vec<Vec3> = map_info
             .start_positions
@@ -1142,15 +1168,9 @@ fn configure_map_events(
         commands.insert_resource(crate::map_events::EruptionState::new(&config));
         commands.insert_resource(config);
     }
-    if map_name.eq_ignore_ascii_case("Circular_Buffer") {
-        let (w, d) = heightmap.world_size();
-        let center = Vec2::new(w * 0.5, d * 0.5);
-        info!("  Circular_Buffer detected — installing clockwise flow swirl");
-        commands.insert_resource(crate::map_events::CircularFlow {
-            center_xz: center,
-            strength: 0.6,
-            clockwise: true,
-        });
+    if let Some(flow) = crate::map_events::LaneFlow::for_map(map_name) {
+        info!("  {map_name}: installing the ring's fast lanes");
+        commands.insert_resource(flow);
     }
 }
 

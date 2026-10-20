@@ -1303,3 +1303,57 @@ fn dual_core_places_its_bad_blocks() {
             .all(|(_, h)| h.current > 0.0)
     );
 }
+
+/// Heap Fragmentation's opening allocation rises in the sim: within a
+/// dozen ticks every block of the first state stands its full height
+/// over the map's ground and the movers' nav grids have closed over it,
+/// while the free lane segments stay open.
+#[test]
+#[ignore = "loads a real map; --ignored"]
+fn shifting_terrain_rises_in_the_sim() {
+    use crate::terrain::heightmap::Heightmap;
+    use spring_map::shifting::{Shifting, heap};
+    let mut h = SimHarness::new(Scenario::ai_match(heap::MAP, 2, 1, 7));
+    let ground = h.world_mut().resource::<Heightmap>().heights().to_vec();
+    for _ in 0..12 {
+        h.step();
+    }
+    let rules = Shifting::for_map(heap::MAP).unwrap();
+    let world = h.world_mut();
+    let hm = world.resource::<Heightmap>();
+    let nav = world.resource::<crate::interaction::movement::NavGridSet>();
+    let (hw, _) = hm.grid_size();
+    let speeds = &nav.buckets[0].speed_map;
+    let mut raised = 0;
+    for (k, &up) in rules.states[0].iter().enumerate() {
+        let (x, z) = rules.blocks[k].rect.centre();
+        let i = (z as usize / 8) * hw + x as usize / 8;
+        let cell = (z as u32 / 8) * speeds.width + x as u32 / 8;
+        if up {
+            raised += 1;
+            assert_eq!(
+                hm.heights()[i],
+                ground[i] + heap::RISE,
+                "block {k} is not up"
+            );
+            // Its edge: the wall the movers can't climb.
+            let edge = rules.blocks[k].rect;
+            let (ex, ez) = (
+                edge.x0 as u32 * 4,
+                (edge.z0 as u32 * 4 + edge.z1 as u32 * 4) / 2,
+            );
+            assert_eq!(
+                speeds.speeds[(ez * speeds.width + ex) as usize],
+                0.0,
+                "block {k} wall is open"
+            );
+        } else {
+            assert_eq!(hm.heights()[i], ground[i], "block {k} moved");
+            assert!(
+                speeds.speeds[cell as usize] > 0.0,
+                "free block {k} is closed"
+            );
+        }
+    }
+    assert!(raised > 0);
+}

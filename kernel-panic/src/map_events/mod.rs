@@ -1,9 +1,11 @@
-//! Per-map scripted events. Currently hosts the **Stack Overflow**
-//! volcano eruption: every five minutes the central caldera spews bad
-//! blocks, cloaked logic bombs, viruses, ICMP packets, and faction
-//! nibbles into each enemy base.
+//! Per-map scripted events: Hex Farm's towers ([`hex_farm`]), the port's
+//! shifting terrain ([`shifting`]), the Circular Buffers' fast lanes
+//! ([`lane_flow`]), and here the **Stack Overflow** volcano eruption:
+//! every five minutes the central caldera spews bad blocks, cloaked
+//! logic bombs, viruses, ICMP packets, and faction nibbles into each
+//! enemy base.
 //!
-//! Activation is gated on a [`EruptionConfig`] resource that
+//! The eruption's activation is gated on a [`EruptionConfig`] resource that
 //! [`map_loading`](crate::map_loading) inserts only for matching maps.
 //! When the resource is absent, every system here short-circuits — no
 //! cost on other maps. The eruption clock runs in the fixed sim
@@ -13,9 +15,11 @@
 use bevy::math::ops;
 use bevy::prelude::*;
 
-pub mod circular_flow;
 pub mod hex_farm;
-pub use circular_flow::CircularFlow;
+pub mod lane_flow;
+pub mod shifting;
+pub use lane_flow::LaneFlow;
+pub use shifting::ShiftingTerrain;
 
 use crate::map_loading::MatchScopeAppExt;
 use crate::rng::{next_f32, next_signed, xorshift32};
@@ -152,7 +156,7 @@ pub struct MapEventsPlugin;
 
 impl Plugin for MapEventsPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(hex_farm::HexFarmPlugin);
+        app.add_plugins((hex_farm::HexFarmPlugin, shifting::ShiftingPlugin));
         app.init_match_resource::<EruptionSpawnQueue>().add_systems(
             FixedUpdate,
             (

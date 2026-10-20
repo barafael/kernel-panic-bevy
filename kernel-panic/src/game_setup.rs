@@ -79,7 +79,7 @@ pub struct GameSetup {
 impl Default for GameSetup {
     fn default() -> Self {
         Self {
-            map: random_weighted_map(),
+            map: random_weighted_map(2),
             players: vec![
                 PlayerSpec {
                     faction: Faction::System,
@@ -177,6 +177,10 @@ pub struct DevOptions {
     /// `KP_RECORD_SECONDS=<seconds>` of video.
     #[cfg(not(target_arch = "wasm32"))]
     pub record_seconds: Option<f32>,
+    /// `KP_RECORD_ATTRACT=1`: the recording's camera is the menu demo's
+    /// director (`ui::menu::attract`) instead of the recorder's own path.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub record_attract: bool,
     /// `KP_BOT=<dir>`: the file-driven bot (`bot`) — a skirmish played
     /// from `<dir>/cmd` without a mouse.
     #[cfg(not(target_arch = "wasm32"))]
@@ -255,6 +259,8 @@ impl DevOptions {
             record: var("KP_RECORD").map(Into::into),
             record_warmup: var("KP_RECORD_WARMUP").and_then(|n| n.parse().ok()),
             record_seconds: var("KP_RECORD_SECONDS").and_then(|n| n.parse().ok()),
+            #[cfg(not(target_arch = "wasm32"))]
+            record_attract: var("KP_RECORD_ATTRACT").is_some_and(|v| v == "1"),
             bot: var("KP_BOT").map(Into::into),
             bot_map: var("KP_BOT_MAP"),
             map_edit: var("KP_MAP_EDIT"),
@@ -294,13 +300,28 @@ pub fn dev_run_control(
 }
 
 /// The main-menu attract-mode setup: a random all-AI skirmish on a
-/// weighted-random map — 2 to 4 seats of random factions, each its own
-/// ally team (free-for-all), played by the AI while the player
-/// spectates. The menu's
+/// weighted-random map, seated as that map is meant to be played
+/// ([`demo_seats`]) with random factions, each its own ally team
+/// (free-for-all), played by the AI while the player spectates. The menu's
 /// demo director restarts it with a fresh roll once it's decided.
 /// [`DevOptions`] can pin the factions and the map.
 pub fn demo_setup(dev: &DevOptions) -> GameSetup {
-    let seats = 2 + (clock_f64() * 3.0) as u8;
+    let map = dev.demo_map.as_deref().map_or_else(
+        || random_weighted_map(2),
+        |list| {
+            // A comma list rotates: one map per demo restart.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let maps: Vec<&str> = list
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .collect();
+            let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            maps.get(i % maps.len().max(1))
+                .map_or_else(|| random_weighted_map(2), |m| m.to_string())
+        },
+    );
+    let seats = demo_seats(&map, clock_f64());
     let mut players: Vec<PlayerSpec> = (0..seats)
         .map(|i| PlayerSpec {
             faction: Faction::ALL[(clock_f64() * 3.0) as usize % 3],
@@ -319,21 +340,6 @@ pub fn demo_setup(dev: &DevOptions) -> GameSetup {
             })
             .collect();
     }
-    let map = dev
-        .demo_map
-        .as_deref()
-        .map_or_else(random_weighted_map, |list| {
-            // A comma list rotates: one map per demo restart.
-            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-            let maps: Vec<&str> = list
-                .split(',')
-                .map(str::trim)
-                .filter(|m| !m.is_empty())
-                .collect();
-            let i = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            maps.get(i % maps.len().max(1))
-                .map_or_else(random_weighted_map, |m| m.to_string())
-        });
     GameSetup {
         map,
         players,
@@ -593,13 +599,6 @@ pub struct RunGame;
 /// `map_names` is the map catalog, so `None` (random) can pick a weighted
 /// map without the menu knowing the list.
 pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
-    let map = match config.map {
-        Some(i) => map_names
-            .get(i)
-            .cloned()
-            .unwrap_or_else(random_weighted_map),
-        None => random_weighted_map(),
-    };
     let seat = |enemy: bool, ai: bool| PlayerSpec {
         faction: if enemy {
             config.enemy_faction
@@ -609,7 +608,7 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
         ally_team: u8::from(enemy),
         ai,
     };
-    let players = match config.grouping {
+    let players: Vec<PlayerSpec> = match config.grouping {
         // Upstream seats the sides interleaved, the player at its
         // rolled seat; allies take the player's faction.
         Grouping::Team => {
@@ -625,6 +624,11 @@ pub fn build_setup(config: &SkirmishConfig, map_names: &[String]) -> GameSetup {
                 .chain((0..enemies).map(|_| seat(true, true)))
                 .collect()
         }
+    };
+    let random = || random_weighted_map(players.len());
+    let map = match config.map {
+        Some(i) => map_names.get(i).cloned().unwrap_or_else(random),
+        None => random(),
     };
     GameSetup {
         map,
@@ -657,10 +661,26 @@ pub fn describe_setup(config: &SkirmishConfig) -> String {
     )
 }
 
+/// Most seats an attract demo fills (the menu runs it behind the UI).
+const DEMO_MAX_SEATS: u32 = 6;
+
+/// How many seats an attract demo on `map` fills, from the players the
+/// map is for (`map_meta`) — a Circular Buffer for n gets n, Three-Way
+/// Handshake three — at most [`DEMO_MAX_SEATS`]. `roll` in `0..1` picks
+/// within the range. A map the build doesn't know (a dev's own file)
+/// gets two to four.
+pub fn demo_seats(map: &str, roll: f64) -> u8 {
+    let (low, high) = crate::map_loading::map_meta(map).map_or((2, 4), |m| m.players);
+    let high = high.clamp(2, DEMO_MAX_SEATS);
+    let low = low.clamp(2, high);
+    let span = high - low + 1;
+    (low + ((roll * span as f64) as u32).min(span - 1)) as u8
+}
+
 /// Weighted-random map choice, weights lifted from the original
-/// launcher's `AddMap(Weight, …)` table (73 total), plus the port's
-/// `deadlock_v1`.
-pub fn random_weighted_map() -> String {
+/// launcher's `AddMap(Weight, …)` table (73 total), plus the port's own
+/// maps. Only maps with a start position for each of `seats` are drawn.
+pub fn random_weighted_map(seats: usize) -> String {
     const WEIGHTS: &[(&str, u32)] = &[
         ("Marble_Madness_Map", 7),
         ("Major_Madness3.0", 5),
@@ -679,16 +699,28 @@ pub fn random_weighted_map() -> String {
         ("pacman", 3),
         ("Palladium_0.5_(beta)", 3),
         ("deadlock_v1", 3),
+        ("token_ring_v1", 2),
+        ("heap_fragmentation_v1", 2),
+        ("three_way_handshake_v1", 2),
+        ("pipeline_v1", 2),
+        ("circular_buffer_3_v1", 1),
+        ("circular_buffer_4_v1", 1),
+        ("circular_buffer_5_v1", 1),
+        ("circular_buffer_6_v1", 1),
     ];
-    let total: u32 = WEIGHTS.iter().map(|(_, w)| w).sum();
+    let fits =
+        |name: &str| crate::map_loading::map_meta(name).is_none_or(|m| m.starts as usize >= seats);
+    let weights: Vec<(&str, u32)> = WEIGHTS.iter().copied().filter(|(n, _)| fits(n)).collect();
+    let total: u32 = weights.iter().map(|(_, w)| w).sum();
     let mut d = (total as f64 * clock_f64()) as u32;
-    for (name, w) in WEIGHTS {
-        if d < *w {
-            return (*name).to_string();
+    for (name, w) in weights {
+        if d < w {
+            return name.to_string();
         }
-        d -= *w;
+        d -= w;
     }
-    "Marble_Madness_Map".to_string()
+    // Nothing seats that many: the map with the most starts.
+    "Quad_Core".to_string()
 }
 
 /// A fresh match seed from launch entropy, for a [`GameSetup`] made on
@@ -821,10 +853,50 @@ mod tests {
             ("pacman", 3),
             ("Palladium_0.5_(beta)", 3),
             ("deadlock_v1", 3),
+            ("token_ring_v1", 2),
+            ("heap_fragmentation_v1", 2),
+            ("three_way_handshake_v1", 2),
+            ("pipeline_v1", 2),
+            ("circular_buffer_3_v1", 1),
+            ("circular_buffer_4_v1", 1),
+            ("circular_buffer_5_v1", 1),
+            ("circular_buffer_6_v1", 1),
         ];
         let valid: Vec<String> = names.iter().map(|(n, _)| n.to_string()).collect();
         for _ in 0..40 {
-            assert!(valid.contains(&random_weighted_map()));
+            assert!(valid.contains(&random_weighted_map(2)));
         }
+    }
+
+    /// A random map always has a start for every seat asked for.
+    #[test]
+    fn weighted_map_seats_everyone() {
+        for seats in 2..=8 {
+            for _ in 0..40 {
+                let map = random_weighted_map(seats);
+                let meta = crate::map_loading::map_meta(&map).expect("a shipped map");
+                assert!(meta.starts as usize >= seats, "{map} for {seats} seats");
+            }
+        }
+    }
+
+    /// The demo seats a map the way it is meant to be played, within its
+    /// starts and the demo's cap.
+    #[test]
+    fn demo_seats_follow_the_map() {
+        let all =
+            |map: &str| -> Vec<u8> { (0..20).map(|i| demo_seats(map, i as f64 / 20.0)).collect() };
+        assert!(all("circular_buffer_3_v1").iter().all(|&n| n == 3));
+        assert!(all("circular_buffer_6_v1").iter().all(|&n| n == 6));
+        assert!(all("three_way_handshake_v1").iter().all(|&n| n == 3));
+        let quad = all("Quad_Core");
+        assert!(quad.iter().all(|&n| (4..=6).contains(&n)), "{quad:?}");
+        assert!(quad.contains(&4) && quad.contains(&6));
+        let token = all("token_ring_v1");
+        assert!(
+            token.iter().all(|&n| (2..=4).contains(&n)) && token.contains(&2) && token.contains(&4)
+        );
+        assert!(all("no_such_map").iter().all(|&n| (2..=4).contains(&n)));
+        assert_eq!(demo_seats("Dual_Core", 0.9999), 6);
     }
 }

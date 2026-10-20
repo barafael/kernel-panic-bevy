@@ -16,6 +16,25 @@ pub struct MapInfo {
     pub lighting: Lighting,
 }
 
+impl MapInfo {
+    /// The player counts the map's description says it is for: the
+    /// number or range before the first "player" ("Intended for 2-6
+    /// players", "Intended for 3 players (up to 6)", "2-8 Player Map",
+    /// "Made for 3-9 players FFA"), if it says.
+    pub fn intended_players(&self) -> Option<(u32, u32)> {
+        let text = self.description.to_ascii_lowercase();
+        let before = text[..text.find("player")?].trim_end();
+        let token = before.rsplit(' ').next()?;
+        let mut bounds = token.split('-').map(str::parse::<u32>);
+        let low = bounds.next()?.ok()?;
+        let high = match bounds.next() {
+            Some(n) => n.ok()?,
+            None => low,
+        };
+        (low >= 1 && low <= high).then_some((low, high))
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct StartPosition {
     pub team: u32,
@@ -49,3 +68,39 @@ pub struct Lighting {
 
 /// The engine's gravity for a map that sets none (elmos/s²).
 pub const DEFAULT_GRAVITY: f32 = 130.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn players(description: &str) -> Option<(u32, u32)> {
+        MapInfo {
+            description: description.into(),
+            ..MapInfo::default()
+        }
+        .intended_players()
+    }
+
+    #[test]
+    fn intended_players_reads_the_descriptions() {
+        assert_eq!(
+            players("Dual Core. Map for Kernel Panic. Intended for 2-6 players. Made by FireStorm"),
+            Some((2, 6))
+        );
+        assert_eq!(
+            players("Three-Way Handshake v1. Intended for 3 players (up to 6)."),
+            Some((3, 3))
+        );
+        assert_eq!(
+            players("2-8 Player Map for the mod Kernel Panic. By Runecrafter"),
+            Some((2, 8))
+        );
+        assert_eq!(
+            players("Speed Balls 16 Way. Made for 3-9 players FFA. Use fusions!"),
+            Some((3, 9))
+        );
+        assert_eq!(players("Data Cache L1"), None);
+        assert_eq!(players("Play this map with the Kernel Panic mod."), None);
+        assert_eq!(players("multiplayer fun"), None);
+    }
+}

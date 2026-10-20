@@ -38,7 +38,7 @@ use super::movement::{
     nav_class, qt_path_outcome,
 };
 use super::structures::crushes_features;
-use crate::map_events::CircularFlow;
+use crate::map_events::LaneFlow;
 use crate::net::NetId;
 use crate::sim::{
     GAME_SPEED, Heading, RngStream, SHORT_ANGLE_TO_RAD, SLOW_UPDATE_RATE, SPRING_CIRCLE_DIVS,
@@ -1578,7 +1578,7 @@ pub fn movement_system(
     mut commands: Commands,
     nav_set: Option<Res<NavGridSet>>,
     heightmap: Option<Res<Heightmap>>,
-    circular_flow: Option<Res<CircularFlow>>,
+    lane_flow: Option<Res<LaneFlow>>,
     registry: Res<UnitRegistry>,
     budget: Option<Res<PathSearchBudget>>,
     map_gravity: Option<Res<crate::sim::MapGravity>>,
@@ -1943,7 +1943,7 @@ pub fn movement_system(
         // Animation gate: a driver holds its unit while a fold
         // choreography must finish first (Byte: fold-to-move).
         step *= u.animator.map_or(1.0, |a| a.rig.move_gate);
-        if let Some(flow) = circular_flow.as_deref() {
+        if let Some(flow) = lane_flow.as_deref() {
             step *= flow.step_multiplier(pos, Vec3::new(m.front().x, 0.0, m.front().y));
         }
         let mut new_pos = pos;

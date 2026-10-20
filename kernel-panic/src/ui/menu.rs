@@ -27,7 +27,6 @@
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::ecs::system::SystemParam;
 use bevy::input::InputSystems;
-use bevy::math::ops;
 use bevy::picking::Pickable;
 use bevy::prelude::*;
 use bevy::text::FontSize;
@@ -39,17 +38,16 @@ use crate::game_setup::{
     demo_setup, describe_setup, showcase_setup,
 };
 use crate::map_loading::MapCatalog;
-use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use crate::rendering::settings::{MsaaSupport, RenderSettings, VolumeKnob, WINDOW_SIZES};
-use crate::rng::clock_f64;
 use crate::sim::DetFloat;
-use crate::terrain::heightmap::Heightmap;
-use crate::units::combat::AimTarget;
-use crate::units::components::{Faction, Homebase, TeamId, UnitType};
+use crate::units::components::{Faction, Homebase, TeamId};
 use crate::units::lifecycle::game_over::GameState;
 
+mod attract;
 mod lobby_page;
 mod replays_page;
+
+use attract::{AttractCamera, attract_camera};
 
 pub struct MenuPlugin;
 
@@ -99,7 +97,7 @@ impl Plugin for MenuPlugin {
                             .and_then(resource_exists::<crate::game_setup::GameSetup>),
                     ),
                     attract_camera
-                        .run_if(in_state(AppState::Menu))
+                        .run_if(in_state(AppState::Menu).or_else(attract_recording))
                         .before(crate::rendering::camera::camera_smoothing),
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
                     lobby_page::type_into_fields
@@ -2787,173 +2785,17 @@ fn demo_director(
     }
 }
 
-/// The attract-mode camera: glides between points of interest — a unit
-/// that is currently aiming at something (a fight), else a homebase —
-/// while slowly orbiting, like a spectator director.
-#[derive(Resource, Default)]
-struct AttractCamera {
-    /// Seconds until the next point of interest is picked.
-    retarget_in: f32,
-    target: Option<Vec3>,
-    clock: f32,
-    /// A low fly-by in progress instead of the orbit.
-    pass: Option<LowPass>,
-    /// Battles shown since the last fly-by: every other one gets a pass.
-    fights_since_pass: u32,
-}
-
-/// A low, fast sweep across a battle: the focus travels `start → end`
-/// through the fight while the camera sits low behind it, looking along
-/// the direction of travel — a helicopter shot between the wide orbits.
-struct LowPass {
-    start: Vec3,
-    end: Vec3,
-    /// Camera yaw that looks along `start → end`.
-    yaw: f32,
-    elapsed: f32,
-}
-
-/// Seconds between points of interest.
-const ATTRACT_DWELL: f32 = 14.0;
-/// Max glide speed of the focus between points (elmos/s).
-const ATTRACT_GLIDE_SPEED: f32 = 260.0;
-/// Orbit speed (rad/s).
-const ATTRACT_ORBIT_SPEED: f32 = 0.06;
-/// Half-length of a fly-by's ground track (elmos) and its duration.
-const PASS_HALF_LENGTH: f32 = 480.0;
-const PASS_SECONDS: f32 = 9.0;
-/// Camera pitch and distance during a fly-by: ~20° above the ground
-/// plane, ~210 elmos up — low enough to skim the fight, high enough to
-/// clear Kernel Panic's terrain and towers.
-const PASS_PITCH: f32 = 0.34;
-const PASS_DISTANCE: f32 = 620.0;
-/// Minimum height of the attract camera's focus above the terrain it
-/// crosses. A glide or fly-by between fights at different altitudes
-/// must clear intervening ridges instead of tunnelling through them.
-const ATTRACT_GROUND_CLEARANCE: f32 = 12.0;
-
-#[allow(clippy::too_many_arguments)]
-fn attract_camera(
-    time: Res<Time>,
-    mut director: ResMut<AttractCamera>,
-    bounds: Res<MapBounds>,
-    heightmap: Option<Res<Heightmap>>,
-    fighters: Query<&GlobalTransform, (With<AimTarget>, With<UnitType>)>,
-    bases: Query<&GlobalTransform, With<Homebase>>,
-    mut cam: Query<&mut RtsCameraState, With<RtsCamera>>,
-    dev: Res<DevOptions>,
-) {
-    let Ok(mut state) = cam.single_mut() else {
-        return;
+/// `KP_RECORD_ATTRACT`: the recorder's spectated match is filmed by the
+/// attract director.
+fn attract_recording(dev: Res<DevOptions>, state: Res<State<AppState>>) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    let on = dev.record_attract && dev.record.is_some();
+    #[cfg(target_arch = "wasm32")]
+    let on = {
+        let _ = &dev;
+        false
     };
-    let dt = time.delta_secs();
-    director.clock += dt;
-    let zoom = dev.attract_distance.map_or(1.0, |d| d / 1250.0);
-    // Terrain floor for every focus write below. Fights sit at their
-    // ground height, and a straight glide or fly-by between fights at
-    // different altitudes would tunnel through an intervening ridge
-    // (Data_Cache_L1's mesas are ~1000 elmos tall) — minutes of solid
-    // rock on screen. Riding `terrain + clearance` sweeps the camera
-    // up and over instead; the camera smoothing eases the vertical.
-    let ride_terrain = |focus: &mut Vec3| {
-        if let Some(hm) = heightmap.as_deref() {
-            let floor = hm.sample(focus.x, focus.z) + ATTRACT_GROUND_CLEARANCE;
-            if focus.y < floor {
-                focus.y = floor;
-            }
-        }
-    };
-    // A freshly loaded map invalidates the old point of interest.
-    if bounds.is_changed() {
-        director.target = None;
-        director.retarget_in = 0.0;
-    }
-    director.retarget_in -= dt;
-    if director.retarget_in <= 0.0 || director.target.is_none() {
-        director.retarget_in = ATTRACT_DWELL;
-        director.pass = None;
-        let pick = |n: usize| ((clock_f64() * n as f64) as usize).min(n.saturating_sub(1));
-        let fighting: Vec<Vec3> = fighters.iter().map(|g| g.translation()).collect();
-        let homes: Vec<Vec3> = bases.iter().map(|g| g.translation()).collect();
-        director.target = if !fighting.is_empty() {
-            let target = fighting[pick(fighting.len())];
-            director.fights_since_pass += 1;
-            if director.fights_since_pass >= 2 {
-                director.fights_since_pass = 0;
-                director.pass = Some(LowPass::across(target, &bounds));
-                director.retarget_in = PASS_SECONDS;
-            }
-            Some(target)
-        } else if !homes.is_empty() {
-            Some(homes[pick(homes.len())])
-        } else {
-            Some((bounds.min + bounds.max) * 0.5)
-        };
-    }
-    if let Some(pass) = director.pass.as_mut() {
-        // The camera smoothing eases the swoop in and out; the focus
-        // itself runs the track with a smoothstep so the pass slows as
-        // it enters and leaves the fight.
-        pass.elapsed += dt;
-        let t = (pass.elapsed / PASS_SECONDS).det_clamp(0.0, 1.0);
-        let eased = t * t * (3.0 - 2.0 * t);
-        state.focus = pass.start.lerp(pass.end, eased);
-        ride_terrain(&mut state.focus);
-        // The eye trails the focus by the pass offset (same arithmetic
-        // as `compute_transform_from_state`); lift the focus until the
-        // eye clears the terrain it hangs over, too — a ridge behind
-        // the track would otherwise swallow the camera mid-pass.
-        if let Some(hm) = heightmap.as_deref() {
-            let horizontal = PASS_DISTANCE * zoom * ops::cos(PASS_PITCH);
-            let eye_y = state.focus.y + PASS_DISTANCE * zoom * ops::sin(PASS_PITCH);
-            let eye_x = state.focus.x + horizontal * ops::sin(pass.yaw);
-            let eye_z = state.focus.z + horizontal * ops::cos(pass.yaw);
-            let lift = hm.sample(eye_x, eye_z) + ATTRACT_GROUND_CLEARANCE - eye_y;
-            if lift > 0.0 {
-                state.focus.y += lift;
-            }
-        }
-        state.yaw = pass.yaw;
-        state.pitch = PASS_PITCH;
-        state.distance = PASS_DISTANCE * zoom;
-        return;
-    }
-    if let Some(target) = director.target {
-        let to = target - state.focus;
-        let step = ATTRACT_GLIDE_SPEED * dt;
-        state.focus = if to.length() <= step {
-            target
-        } else {
-            state.focus + to.normalize() * step
-        };
-        ride_terrain(&mut state.focus);
-    }
-    state.yaw += ATTRACT_ORBIT_SPEED * dt;
-    state.pitch = 0.62;
-    // Slow breathing zoom so the shot doesn't feel static.
-    state.distance = (1250.0 + 250.0 * ops::sin(director.clock * 0.07)) * zoom;
-}
-
-impl LowPass {
-    /// A pass through `target` along a random heading, kept inside the
-    /// map. The camera looks along the track from behind: with the
-    /// eye at `focus + (sin yaw, ·, cos yaw)`, the ground forward is
-    /// `(-sin yaw, -cos yaw)`, so `yaw = atan2(-d.x, -d.z)` for track
-    /// direction `d`.
-    fn across(target: Vec3, bounds: &MapBounds) -> Self {
-        let angle = clock_f64() as f32 * std::f32::consts::TAU;
-        let d = Vec3::new(ops::cos(angle), 0.0, ops::sin(angle));
-        let clamp = |p: Vec3| {
-            let xz = p.xz().clamp(bounds.min.xz(), bounds.max.xz());
-            Vec3::new(xz.x, p.y, xz.y)
-        };
-        Self {
-            start: clamp(target - d * PASS_HALF_LENGTH),
-            end: clamp(target + d * PASS_HALF_LENGTH),
-            yaw: ops::atan2(-d.x, -d.z),
-            elapsed: 0.0,
-        }
-    }
+    on && *state.get() == AppState::InGame
 }
 
 /// On first boot: once the map catalog exists, load the demo world

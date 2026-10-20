@@ -3,8 +3,9 @@
 //!
 //! Set `KP_RECORD=<file.mp4>` to enable (optionally `KP_DEMO_MAP=<map
 //! stem>`, `KP_RECORD_WARMUP=<game seconds>` (default 150) and
-//! `KP_RECORD_SECONDS=<video seconds>` (default 40); all read into
-//! [`DevOptions`] at startup). The tool goes borderless-fullscreen,
+//! `KP_RECORD_SECONDS=<video seconds>` (default 40), and
+//! `KP_RECORD_ATTRACT=1` to film the menu demo's camera director instead
+//! of the recorder's own path; all read into [`DevOptions`] at startup). The tool goes borderless-fullscreen,
 //! starts the attract-mode all-AI skirmish as a spectated match, plays
 //! the warmup at high speed so armies exist, then flies the camera
 //! through the fights and homebases while every frame is read back at
@@ -188,7 +189,9 @@ fn run_recorder(
             }
         }
         Step::Recording(i) => {
-            if let Ok(mut state) = cam.single_mut() {
+            if !dev.record_attract
+                && let Ok(mut state) = cam.single_mut()
+            {
                 let secs = i as f32 / FPS as f32;
                 let Recorder { path, glide, .. } = rec.as_mut();
                 state.focus = glide.advance(path, state.focus, dt);

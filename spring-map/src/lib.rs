@@ -8,12 +8,17 @@
 //! are in the git history (see README.md).
 
 pub mod baked;
+pub mod cells;
 pub mod datavent;
 pub mod hexfarm;
+#[cfg(feature = "write")]
+pub mod kpgen;
 pub mod lua_layout;
 pub mod lua_skin;
 pub mod map_info;
 pub mod map_types;
+pub mod ring;
+pub mod shifting;
 pub mod smooth_mesh;
 
 use lua_skin::SkinAtlas;
