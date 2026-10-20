@@ -11,6 +11,8 @@ mod map_editor;
 mod map_events;
 mod map_loading;
 mod net;
+// The web build has no disk: everything it reads is fetched or embedded.
+#[cfg(not(target_arch = "wasm32"))]
 mod paths;
 #[cfg(not(target_arch = "wasm32"))]
 mod profile;

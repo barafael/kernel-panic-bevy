@@ -1,3 +1,38 @@
+====================================================
+    Kernel Panic, the Rust / Bevy remake
+====================================================
+
+This is a remake of Kernel Panic 4.9 in Rust with the Bevy engine, by
+Rafael Bachmann. It plays the original game without the Spring engine:
+the same units, maps, sounds and music, running natively or in the
+browser.
+
+What it adds:
+  * Lockstep multiplayer over WebRTC: create a room under Multiplayer
+    and share its code; empty seats can be filled with AI.
+  * Every match is recorded and can be watched again under Replays.
+  * New maps in the style of FireStorm's Dual Core and Quad Core:
+    Deadlock, Token Ring, Heap Fragmentation, Three-Way Handshake,
+    Pipeline and Circular Buffer for 3 to 6 players. On Token Ring and
+    Heap Fragmentation parts of the ground rise and sink during play;
+    the Circular Buffers have fast lanes running round the ring.
+  * A showcase mode, which builds a faction's whole unit tree.
+
+The sections below are the original game's readme, kept as it was. The
+parts about installing Spring and Spring's chat commands describe the
+original and do not apply here.
+
+Source code: https://github.com/barafael/kernel-panic-bevy
+
+License:
+  The code is free software under the GNU General Public License,
+  version 3 or later; much of it is translated from the Spring engine
+  (GPL-2.0-or-later). The original game's content is public domain or
+  CC BY-SA, as listed further down. The new maps are CC BY-SA 4.0.
+  Nine maps and the music never had a stated licence: they are
+  included as they came with Kernel Panic 4.9, and their rights stay
+  with their authors. ASSETS-LICENSES.md has the full list.
+
 
 ====================================================
 		Kernel Panic 4.9

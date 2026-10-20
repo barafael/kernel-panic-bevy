@@ -2,6 +2,7 @@
 name = "spring-map"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "The game's .kpmap reader and the terrain code that runs on it"
 
 [dependencies]

@@ -2257,7 +2257,13 @@ fn credits_page(commands: &mut Commands, root: Entity, (window_w, page_size): (f
 - Some LUA interface upgrade based of jK and trepan code
 - The Touhou faction characters were inspired by ZUN's works
 - Many thanks to lurker, Quantum, and the rest of #lua crew
-- Reimplementation in Rust + Bevy, from the original Spring mod";
+- Remake in Rust + Bevy by Rafael Bachmann, porting the
+  Spring / Recoil engine code the game runs on
+- New maps after Beyond All Reason's Hooked (Raghna), Asteroid
+  Mines, Sinkhole Network, Desert Triad, Pillar of Doom, SpeedMetal
+- Code: GPL-3.0-or-later. New maps: CC BY-SA 4.0. Some maps and
+  the music: licence unknown, see ASSETS-LICENSES.md
+- Source: github.com/barafael/kernel-panic-bevy";
     const BLOCK_TOP: f32 = 0.80;
     const BACK_Y: f32 = 0.06;
     const GAP: f32 = 0.015;
@@ -2407,45 +2413,35 @@ fn readme_page(commands: &mut Commands, root: Entity, window_h: f32, scroll: usi
     .spawn(commands, root);
 }
 
-/// Readme content, cached; falls back to a friendly note if the asset is
-/// missing. CRLF is normalised and long runs of blank lines collapse to
-/// a single spacer, mirroring the original's parse.
+/// The readme, embedded so the web build (no disk) shows it too.
+const README: &str = include_str!("../../assets/readme.txt");
+
+/// Readme lines, cached. CRLF is normalised and long runs of blank
+/// lines collapse to a single spacer, mirroring the original's parse.
 fn readme_lines() -> Vec<String> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Vec<String>> = OnceLock::new();
     CACHE
         .get_or_init(|| {
-            let path = crate::paths::assets_dir().join("readme.txt");
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    let mut out: Vec<String> = Vec::new();
-                    for line in text.replace("\r\n", "\n").split('\n') {
-                        // The font has no tab glyph: expand to the next
-                        // multiple of four columns.
-                        let mut expanded = String::new();
-                        for c in line.trim_end().chars() {
-                            if c == '\t' {
-                                let pad = 4 - expanded.chars().count() % 4;
-                                expanded.extend(std::iter::repeat_n(' ', pad));
-                            } else {
-                                expanded.push(c);
-                            }
-                        }
-                        let line = expanded.as_str();
-                        if line.is_empty()
-                            && out.last().is_some_and(|last: &String| last.is_empty())
-                        {
-                            continue;
-                        }
-                        out.push(line.to_string());
+            let mut out: Vec<String> = Vec::new();
+            for line in README.replace("\r\n", "\n").split('\n') {
+                // The font has no tab glyph: expand to the next
+                // multiple of four columns.
+                let mut expanded = String::new();
+                for c in line.trim_end().chars() {
+                    if c == '\t' {
+                        let pad = 4 - expanded.chars().count() % 4;
+                        expanded.extend(std::iter::repeat_n(' ', pad));
+                    } else {
+                        expanded.push(c);
                     }
-                    out
                 }
-                Err(_) => vec![
-                    "File Kernel_Panic_readme.txt not found!".to_string(),
-                    "(expected at kernel-panic/assets/readme.txt)".to_string(),
-                ],
+                if expanded.is_empty() && out.last().is_some_and(String::is_empty) {
+                    continue;
+                }
+                out.push(expanded);
             }
+            out
         })
         .clone()
 }

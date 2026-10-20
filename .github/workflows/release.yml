@@ -20,7 +20,8 @@ name: Release
 #                             (`paths::assets_dir`)
 #     assets/                 maps (.kpmap), shaders, sounds, music,
 #                             cursors, bitmaps, unit pictures, readme.txt
-#     README.txt, original-game-license-info.txt
+#     README.txt, LICENSE, ASSETS-LICENSES.md, licenses/,
+#     original-game-license-info.txt
 #
 # The unit data (`assets/units.kpu`) is embedded in the binary and not
 # shipped separately.
@@ -128,7 +129,8 @@ jobs:
 
           cp -R kernel-panic/assets "$pkg/assets"
           rm -f "$pkg/assets/units.kpu"
-          cp original-game-license-info.txt "$pkg/"
+          cp original-game-license-info.txt LICENSE ASSETS-LICENSES.md "$pkg/"
+          cp -R licenses "$pkg/licenses"
           cat > "$pkg/README.txt" <<EOF
           Kernel Panic $VERSION (${{ matrix.platform }})
           Rust/Bevy remake of the Spring RTS game Kernel Panic.
@@ -137,6 +139,11 @@ jobs:
           Run kernel-panic (kernel-panic.exe on Windows). Keep the assets/
           directory next to it. Passing a map name starts that map directly,
           e.g.  kernel-panic Central_Hub
+
+          The game is free software under the GNU GPL, version 3 or later
+          (LICENSE); its source is at the address above. ASSETS-LICENSES.md
+          lists the content's licences, and the maps and music that have
+          none stated.
 
           macOS: the binary is not signed. If macOS refuses to open it, run
             xattr -dr com.apple.quarantine <this directory>

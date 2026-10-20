@@ -2,6 +2,7 @@
 name = "kernel-panic"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 
 [dependencies]
 # Target-independent float max / min / clamp (workspace clippy.toml).

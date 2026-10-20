@@ -2,6 +2,7 @@
 name = "spring-tdf"
 version = "0.1.0"
 edition = "2024"
+license.workspace = true
 description = "Parser for Spring RTS engine TDF (Tag Definition Format) files"
 
 [dependencies]

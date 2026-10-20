@@ -43,6 +43,11 @@ exclude = ["vendor/webrtc-data"]
 # Cargo's feature unification turns `libm` + `scalar-math` on for Bevy's
 # copy (see the `glam` entry below). cargo-shear can't see that, so it
 # must not report it as unused.
+[workspace.package]
+# The code ports the Spring/Recoil engine (GPL-2.0-or-later); assets
+# have their own terms (ASSETS-LICENSES.md).
+license = "GPL-3.0-or-later"
+
 [workspace.metadata.cargo-shear]
 ignored = ["glam"]
 

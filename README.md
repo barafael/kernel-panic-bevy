@@ -28,7 +28,10 @@ the formats the game reads, with no conversion step anywhere:
   (both Git LFS), the mouse cursors, the build pictures and the tooltip
   background.
 
-Provenance and licences: `original-game-license-info.txt`.
+Licences: the code is GPL-3.0-or-later (`LICENSE`), as much of it is
+translated from the Spring engine; the content's licences, and the maps
+and music that never had one, are listed in `ASSETS-LICENSES.md`. The
+original game's own notice is `original-game-license-info.txt`.
 
 The maps were converted once from the original Spring `.sd7` / `.sdz`
 archives. The converter (`spring-map`'s `bake-map`), the Spring archive,
