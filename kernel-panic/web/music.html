@@ -13,7 +13,9 @@
     assets/music/<file>.ogg through an <audio> element, so the browser
     streams with range requests. The Sound effects tab lists the 26
     originals in assets/sounds/ (kernel-panic/src/audio/mod.rs
-    SOUND_FILES); a test keeps that list in sync with this page.
+    SOUND_FILES), the Tips voice tab the voice-over lines in
+    assets/sounds/tips/ (kernel-panic/src/ui/hud/tips.rs TIP_VOICES);
+    tests keep both lists in sync with this page.
   -->
   <style>
     :root {
@@ -73,6 +75,14 @@
     button.fx .desc { display: block; color: var(--desc); font-size: 13px; white-space: normal; }
     button.fx .only { color: var(--dim); }
     button.fx.flash { border-color: var(--cyan); color: var(--cyan); box-shadow: 0 0 8px var(--cyan); }
+    h2.voice { margin: 16px 0 4px; font-size: 15px; color: var(--yellow); }
+    h2.voice:first-child { margin-top: 0; }
+    button.tip { display: grid; grid-template-columns: 3.5em 1fr; gap: 8px; width: 100%; text-align: left;
+      background: transparent; border: 1px solid transparent; color: var(--text); padding: 4px 8px; }
+    button.tip:hover { border-color: var(--line); }
+    button.tip .n { color: var(--dim); }
+    button.tip.flash { border-color: var(--cyan); color: var(--cyan); }
+    button.tip.broken { color: var(--red); }
     .credits p { white-space: pre-wrap; margin: 0 0 12px; }
     .credits h3 { color: var(--teal); margin: 16px 0 4px; font-size: 15px; }
     .credits .note { color: var(--dim); font-size: 13px; }
@@ -95,13 +105,14 @@
 <body>
 <main>
   <header>
-    <h1>Kernel Panic<small>soundtrack &amp; sounds</small></h1>
+    <h1>Kernel Panic<small>soundtrack, sounds &amp; tips</small></h1>
     <a class="back" href="./">&laquo; back to the game</a>
   </header>
 
   <nav role="tablist" aria-label="Sections">
     <button role="tab" id="tab-music" aria-controls="music" aria-selected="true">Music</button>
     <button role="tab" id="tab-sfx" aria-controls="sfx" aria-selected="false">Sound effects</button>
+    <button role="tab" id="tab-tips" aria-controls="tips" aria-selected="false">Tips voice</button>
     <button role="tab" id="tab-credits" aria-controls="credits" aria-selected="false">Credits</button>
   </nav>
 
@@ -112,13 +123,19 @@
     </div>
     <div id="tracks"><div class="empty">Loading the catalog…</div></div>
     <p class="credits note">Keys: <kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> seek ±5 s ·
-      <kbd>N</kbd>/<kbd>P</kbd> next/previous · <kbd>S</kbd> shuffle · <kbd>L</kbd> loop · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> tabs</p>
+      <kbd>N</kbd>/<kbd>P</kbd> next/previous · <kbd>S</kbd> shuffle · <kbd>L</kbd> loop · <kbd>1</kbd>–<kbd>4</kbd> tabs</p>
   </section>
 
   <section role="tabpanel" id="sfx" aria-labelledby="tab-sfx" hidden>
     <p class="credits note">The 26 effects the original ships, by Noruas and Pendrokar. Click to play; they overlap like in a battle.
       "Original only" marks sounds the port has no trigger for yet.</p>
     <div class="sfx" id="fxgrid"></div>
+  </section>
+
+  <section role="tabpanel" id="tips" aria-labelledby="tab-tips" hidden>
+    <p class="credits note">The voice-over of the automatic tip dispenser, by Eva and Panda: a System and a
+      Network voice (Hacker players hear the Network one). Click to play.</p>
+    <div id="tipsbox"></div>
   </section>
 
   <section role="tabpanel" id="credits" aria-labelledby="tab-credits" hidden>
@@ -148,6 +165,115 @@
   'use strict';
   var MUSIC = 'assets/music/';
   var SOUNDS = 'assets/sounds/';
+  var TIPS = SOUNDS + 'tips/';
+
+  // The tip voice lines (kernel-panic/src/ui/hud/tips.rs TIP_VOICES):
+  // 1xxx the System voice, 3xxx the Network voice, with the text the
+  // dispenser shows alongside.
+  var TIP_VOICES = [
+    [1012, "Use Mouse Wheel to zoom in and out"],
+    [1021, "Oops! Looks like you're dead."],
+    [1026, "Game is loading."],
+    [1031, "Select your Kernel and build some Assemblers"],
+    [1032, "Select your Kernel by left clicking it."],
+    [1033, "On the left is a \"BuildMenu.\" Left-Click the Assembler icon in it."],
+    [1034, "Build some Assemblers!"],
+    [1035, "Use your Kernel to make one Assembler"],
+    [1036, "Alternatively, you can command your Kernel with the build bar on the top right corner."],
+    [1037, "Select Assembler to make a Socket"],
+    [1038, "Build some Sockets!"],
+    [1039, "Use your Assembler to make a Socket"],
+    [1040, "These are no Sockets! These are Terminals!"],
+    [1041, "Nooooooo! Don't make a Terminal now!"],
+    [1042, "It is really not the time to make Terminals."],
+    [1043, "Make Sockets not Terminals"],
+    [1044, "The Terminal is a late game unit. What you need now is a Socket."],
+    [1051, "Expand! You never have enough Sockets!"],
+    [1052, "You need Assemblers to expand!"],
+    [1053, "Spaem more Bits!"],
+    [1054, "The build bar on the top right corner let you control your Kernel production anywhere, anytime, without having to select it"],
+    [1055, "Bits are your spam units: Light, fast, cheap, expandable."],
+    [1056, "Bits must be used in numbers to be effective."],
+    [1057, "Bytes are your heavy units: Slow, heavily armored, short ranged, expensive."],
+    [1058, "Bytes are best used against smaller enemies."],
+    [1059, "Pointers are your arty: Frail and expensive."],
+    [1060, "Never send Pointers to the frontline alone."],
+    [1061, "Assemblers are your constructors: Use them to raise new Sockets, not to fight."],
+    [1062, "Assemblers raison d'etre is to build, not to attack."],
+    [1063, "Assemblers are equipped with a radar to see cloacked units."],
+    [1064, "Every Socket gives a 20% boost to your Kernel buildspeed. (In addition to spawning Bits)"],
+    [1065, "You need in priority Sockets, not Terminals"],
+    [1066, "Terminals must be fired manually"],
+    [1071, "You cannot win by walling yourself in!"],
+    [1072, "The best defense is offense."],
+    [1073, "The Debugger sole purpose is to remove Bad Blocks and Logic Bombs."],
+    [1081, "Left click to select a unit Keep button down to drag a selection box"],
+    [1082, "Left click in empty area to deselect units."],
+    [1083, "Right click to issue default order Keep button down to move in formation"],
+    [1084, "Left click an action on the menu in the right Then left click in the terrain To give specific orders."],
+    [1085, "Many commands can be issued over a whole area By keeping button down and dragging a box or disc."],
+    [1086, "Use the SHIFT key to enqueue orders"],
+    [1108, "Bytes are more armored when closed."],
+    [1109, "Bytes' special ability is the mine-launcher: Cost quite a chunk of health, But mighty against swarms."],
+    [1116, "Pointers are artillery: Lightly armored and expensive, but with a powerful long ranged weapon."],
+    [1117, "Use Pointers to destroy buildings and heavy units from afar."],
+    [1118, "Pointers's weapon is guided: It will lock and home on moving target."],
+    [1119, "Do NOT let the enemy come close to your Pointers."],
+    [1125, "Terminal does reduced damage toward buildings. Best use it against large groups of light units."],
+    [3012, "Use Mouse Wheel to zoom in and out"],
+    [3021, "Oops! Looks like you're dead."],
+    [3026, "Game is loading."],
+    [3031, "Select your Carrier and build some Gateways"],
+    [3032, "Select your Carrier by left clicking it."],
+    [3033, "On the left is a \"BuildMenu.\" Left-Click the Gateway icon in it."],
+    [3034, "Build some Gateways!"],
+    [3035, "Use your Carrier to make one Gateway"],
+    [3036, "Alternatively, you can command your Carrier with the build bar on the top right corner."],
+    [3037, "Select Gateway to make a Port"],
+    [3038, "Build some Ports!"],
+    [3039, "Use your Gateway to make a Port"],
+    [3040, "These are no Ports! These are Firewalls!"],
+    [3041, "Nooooooo! Don't make a Firewall now!"],
+    [3042, "It is really not the time to make Firewalls."],
+    [3043, "Make Ports not Firewalls"],
+    [3044, "The Firewall is a late game unit. What you need now is a Port."],
+    [3051, "Expand! You never have enough Ports!"],
+    [3052, "You need Gateways to expand!"],
+    [3053, "Spaem more Packets!"],
+    [3054, "The build bar on the top right corner let you control your Carrier production anywhere, anytime, without having to select it"],
+    [3055, "Packets are your spam units: Light, fast, cheap, expandable."],
+    [3056, "Packets must be used in numbers to be effective."],
+    [3057, "Connections are your heavy units: Slow, heavily armored, short ranged, expensive."],
+    [3058, "Connections are best used against smaller enemies."],
+    [3059, "Flows are your arty: Frail and expensive."],
+    [3061, "Gateways are your constructors: Use them to raise new Ports, not to fight."],
+    [3062, "Gateways raison d'etre is to build, not to attack."],
+    [3063, "Gateways are equipped with a radar to see cloacked units."],
+    [3064, "Every Port gives a 20% boost to your Carrier buildspeed. (In addition to spawning Packets)"],
+    [3065, "You need in priority Ports, not Firewalls"],
+    [3066, "Firewalls must be fired manually"],
+    [3071, "You cannot win by walling yourself in!"],
+    [3072, "The best defense is offense."],
+    [3073, "The Debugger sole purpose is to remove Bad Blocks and Logic Bombs."],
+    [3081, "Left click to select a unit Keep button down to drag a selection box"],
+    [3082, "Left click in empty area to deselect units."],
+    [3083, "Right click to issue default order Keep button down to move in formation"],
+    [3084, "Left click an action on the menu in the right Then left click in the terrain To give specific orders."],
+    [3085, "Many commands can be issued over a whole area By keeping button down and dragging a box or disc."],
+    [3086, "Use the SHIFT key to enqueue orders"],
+    [3088, "Click that blue box to disable tips voice over"],
+    [3091, "Voice: ON"],
+    [3092, "Voice: OFF"],
+    [3104, "Ports don't directly spawn unit Instead they increase the \"Buffer\""],
+    [3105, "Use the Dispatch button to create packets from buffer."],
+    [3106, "The \"Buffer\" represent virtual units that can be materialised at every Port or Connection."],
+    [3107, "Packets can re-enter the buffer by right clicking any Port or Connection"],
+    [3114, "Connection act as teleport beacons: Use the dispatch button!"],
+    [3115, "Connection can draw packets from / refill buffer with packets, but do not generate any."],
+    [3123, "Flows are the only flying units in this game."],
+    [3124, "Flows get a speed increase with every Port"],
+    [3127, "The firewall casts a protection on your unit: - Halve the damage taken - Send that half back to attacker"]
+  ];
 
   // The 26 originals (kernel-panic/src/audio/mod.rs SOUND_FILES) and
   // what fires them: weapon TDF soundstart / soundhit, SOUND.TDF unit
@@ -203,7 +329,7 @@
     if (location.hash !== '#/' + id) history.replaceState(null, '', '#/' + id);
   }
   tabs.forEach(function (t) { t.addEventListener('click', function () { showTab(t.getAttribute('aria-controls')); }); });
-  var hash = (location.hash.match(/^#\/(music|sfx|credits)/) || [])[1];
+  var hash = (location.hash.match(/^#\/(music|sfx|tips|credits)/) || [])[1];
   if (hash) showTab(hash);
 
   // --- music list ---
@@ -343,7 +469,8 @@
       case 'l': case 'L': $('loop').click(); break;
       case '1': showTab('music'); break;
       case '2': showTab('sfx'); break;
-      case '3': showTab('credits'); break;
+      case '3': showTab('tips'); break;
+      case '4': showTab('credits'); break;
     }
   });
 
@@ -371,6 +498,28 @@
       var p = s.play(); if (p && p.catch) p.catch(function () { b.classList.remove('flash'); });
     });
     grid.appendChild(b);
+  });
+
+  // --- tips voice ---
+  var tipsBox = $('tipsbox'), voice = null;
+  TIP_VOICES.forEach(function (tip) {
+    var n = tip[0], name = n < 2000 ? 'System voice' : 'Network voice';
+    if (name !== voice) {
+      voice = name;
+      var h = document.createElement('h2'); h.className = 'voice'; h.textContent = name; tipsBox.appendChild(h);
+    }
+    var b = document.createElement('button'); b.className = 'tip'; b.title = TIPS + n + '.ogg';
+    b.innerHTML = '<span class="n"></span><span class="t"></span>';
+    b.querySelector('.n').textContent = n;
+    b.querySelector('.t').textContent = tip[1];
+    b.addEventListener('click', function () {
+      var s = new Audio(TIPS + n + '.ogg'); s.volume = state.volume;
+      b.classList.add('flash');
+      s.addEventListener('ended', function () { b.classList.remove('flash'); });
+      s.addEventListener('error', function () { b.classList.remove('flash'); b.classList.add('broken'); });
+      var p = s.play(); if (p && p.catch) p.catch(function () { b.classList.remove('flash'); });
+    });
+    tipsBox.appendChild(b);
   });
 
   // --- catalog + credits ---

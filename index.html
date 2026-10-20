@@ -29,7 +29,7 @@
     #boot a { color: #0ff; text-decoration: none; font-size: 13px; }
     #boot {
       position: absolute; inset: 0;
-      display: flex; align-items: center; justify-content: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
       color: #8a8a95;
       font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
       text-align: center;
@@ -37,7 +37,7 @@
   </style>
 </head>
 <body>
-  <div id="boot">Loading…<br><a href="music.html">soundtrack &amp; sounds</a></div>
+  <div id="boot"><span>Loading…</span><a href="music.html">soundtrack, sounds &amp; tips</a></div>
 
   <link data-trunk rel="rust" href="kernel-panic/Cargo.toml" data-bin="kernel-panic"
         data-cargo-profile="wasm-release" data-wasm-opt="2" />

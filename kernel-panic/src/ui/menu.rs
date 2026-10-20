@@ -243,6 +243,8 @@ enum MenuAction {
     SetVsync(bool),
     SetFullscreen(bool),
     SetWindowSize(u32, u32),
+    /// Show the automatic tip dispenser in a match.
+    SetTips(bool),
     /// One Audio page knob, in percent.
     SetVolume(VolumeKnob, u8),
     /// Esc overlay: show / hide the Audio page inside Settings.
@@ -1039,6 +1041,7 @@ fn handle_menu_actions(
                 render.fullscreen = false;
             }
             MenuAction::SetVolume(knob, v) => render.audio.set(knob, v),
+            MenuAction::SetTips(on) => render.tips = on,
             MenuAction::Music(control) => {
                 flow.music.write(control);
             }
@@ -1751,6 +1754,7 @@ fn settings_page(
                 HARD_YELLOW,
                 on_off(MenuAction::SetVsync, render.vsync),
             ),
+            ("Tips", TEAL, on_off(MenuAction::SetTips, render.tips)),
         ]
     } else {
         vec![
@@ -1767,6 +1771,7 @@ fn settings_page(
             ),
             ("Display", EXTREME_ORANGE, display),
             ("Window", MAP_GREEN, sizes),
+            ("Tips", TEAL, on_off(MenuAction::SetTips, render.tips)),
         ]
     };
     choice_rows(commands, root, window_width, page_size, rows);
@@ -1804,6 +1809,7 @@ fn audio_page(
         HARD_YELLOW,
         EXTREME_ORANGE,
         MAP_GREEN,
+        TEAL,
     ];
     let rows: Vec<(&str, Color, Vec<Choice>)> = VolumeKnob::ALL
         .iter()
@@ -1828,12 +1834,26 @@ fn audio_page(
         .min_width(12.0)
         .spawn(commands, root);
     LabelSpec::new(
-        "Master scales every channel;\nmusic plays the .ogg files in assets/music",
+        "Master scales every channel;\nclick the tip box in a match to mute the tips voice",
         page_size * 0.6,
         (0.5, 0.06),
         Anchor::Cc,
     )
     .spawn(commands, root);
+}
+
+/// Where [`choice_rows`] puts its first row, and the lowest its last
+/// row may sit (five rows at the natural spacing end there).
+const FIRST_ROW_Y: f32 = 0.72;
+const LAST_ROW_Y: f32 = 0.34;
+
+/// The gap between [`choice_rows`] rows: 9.5 %, squeezed to fit.
+fn row_spacing(rows: usize) -> f32 {
+    if rows <= 1 {
+        0.095
+    } else {
+        ((FIRST_ROW_Y - LAST_ROW_Y) / (rows - 1) as f32).det_min(0.095)
+    }
 }
 
 /// The choices of a [`choice_rows`] row run from [`choices_start`] to
@@ -1856,7 +1876,9 @@ fn choices_start(longest_label: usize, glyph: f32) -> f32 {
 /// row's longest choice, never wider than what fits before
 /// [`CHOICES_END`] (six volume steps on a wide window used to run off
 /// the screen, and a long label off the left edge of a small one);
-/// rows 9.5% apart down from y=72%. A monospace glyph is ~0.6 em
+/// rows 9.5% apart down from y=72%, closer when there are more than
+/// five, so the last stays at [`LAST_ROW_Y`] and the buttons under
+/// them keep their place. A monospace glyph is ~0.6 em
 /// wide, plus the frame's padding.
 fn choice_rows(
     commands: &mut Commands,
@@ -1873,8 +1895,9 @@ fn choice_rows(
         .max()
         .unwrap_or(0);
     let start = choices_start(longest_label, glyph);
+    let spacing = row_spacing(rows.len());
     for (i, (name, color, choices)) in rows.into_iter().enumerate() {
-        let y = 0.72 - 0.095 * i as f32;
+        let y = FIRST_ROW_Y - spacing * i as f32;
         let longest = choices
             .iter()
             .map(|(text, _, _)| text.chars().count())

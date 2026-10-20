@@ -2,3 +2,6 @@
 # lives in Git LFS: `git lfs pull` after cloning, or the files are 130-byte
 # pointers that the game cannot decode.
 kernel-panic/assets/music/*.ogg filter=lfs diff=lfs merge=lfs -text
+# The tips voice-over (kernel-panic/src/ui/hud/tips.rs TIP_VOICES), the
+# same way.
+kernel-panic/assets/sounds/tips/*.ogg filter=lfs diff=lfs merge=lfs -text

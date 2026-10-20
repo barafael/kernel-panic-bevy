@@ -34,12 +34,17 @@ pub struct RenderSettings {
     pub fullscreen: bool,
     pub window_size: (u32, u32),
     pub audio: AudioSettings,
+    /// The automatic tip dispenser at the bottom of the match view
+    /// (`kp_automatic_tip_dispenser.lua`, on by default upstream).
+    pub tips: bool,
 }
 
 /// One of the mixer volumes on the Audio page, matching Spring's
 /// `snd_volmaster` / `snd_volbattle` / `snd_volunitreply` / `snd_volui` /
 /// `snd_volmusic` (the General channel has no knob of its own in KP's
-/// settings widget and follows the master here).
+/// settings widget and follows the master here), plus the tips
+/// voice-over, which upstream plays on the General channel and toggles
+/// from its own box.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VolumeKnob {
     Master,
@@ -47,15 +52,17 @@ pub enum VolumeKnob {
     UnitReply,
     Interface,
     Music,
+    Voice,
 }
 
 impl VolumeKnob {
-    pub const ALL: [VolumeKnob; 5] = [
+    pub const ALL: [VolumeKnob; 6] = [
         VolumeKnob::Master,
         VolumeKnob::Battle,
         VolumeKnob::UnitReply,
         VolumeKnob::Interface,
         VolumeKnob::Music,
+        VolumeKnob::Voice,
     ];
 
     pub fn label(self) -> &'static str {
@@ -65,6 +72,7 @@ impl VolumeKnob {
             VolumeKnob::UnitReply => "Unit replies",
             VolumeKnob::Interface => "Interface",
             VolumeKnob::Music => "Music",
+            VolumeKnob::Voice => "Tips voice",
         }
     }
 
@@ -76,6 +84,7 @@ impl VolumeKnob {
             VolumeKnob::UnitReply => "vol_unitreply",
             VolumeKnob::Interface => "vol_ui",
             VolumeKnob::Music => "vol_music",
+            VolumeKnob::Voice => "vol_voice",
         }
     }
 }
@@ -91,6 +100,8 @@ pub struct AudioSettings {
     pub unit_reply: u8,
     pub interface: u8,
     pub music: u8,
+    /// The tips voice-over; 0 is upstream's "Voice: OFF".
+    pub voice: u8,
 }
 
 impl Default for AudioSettings {
@@ -101,6 +112,7 @@ impl Default for AudioSettings {
             unit_reply: 100,
             interface: 100,
             music: 100,
+            voice: 100,
         }
     }
 }
@@ -113,6 +125,7 @@ impl AudioSettings {
             VolumeKnob::UnitReply => self.unit_reply,
             VolumeKnob::Interface => self.interface,
             VolumeKnob::Music => self.music,
+            VolumeKnob::Voice => self.voice,
         }
     }
 
@@ -124,6 +137,7 @@ impl AudioSettings {
             VolumeKnob::UnitReply => self.unit_reply = percent,
             VolumeKnob::Interface => self.interface = percent,
             VolumeKnob::Music => self.music = percent,
+            VolumeKnob::Voice => self.voice = percent,
         }
     }
 
@@ -195,6 +209,7 @@ impl Default for RenderSettings {
             fullscreen: !cfg!(target_arch = "wasm32"),
             window_size: (1600, 900),
             audio: AudioSettings::default(),
+            tips: true,
         }
     }
 }
@@ -279,13 +294,14 @@ impl RenderSettings {
 
     fn to_text(self) -> String {
         let mut text = format!(
-            "msaa={}\nbloom={}\nvsync={}\nfullscreen={}\nwindow={}x{}\n",
+            "msaa={}\nbloom={}\nvsync={}\nfullscreen={}\nwindow={}x{}\ntips={}\n",
             self.msaa,
             self.bloom as u8,
             self.vsync as u8,
             self.fullscreen as u8,
             self.window_size.0,
             self.window_size.1,
+            self.tips as u8,
         );
         for knob in VolumeKnob::ALL {
             text.push_str(&format!("{}={}\n", knob.key(), self.audio.get(knob)));
@@ -314,6 +330,7 @@ impl RenderSettings {
                 "bloom" => s.bloom = value != "0",
                 "vsync" => s.vsync = value != "0",
                 "fullscreen" => s.fullscreen = value != "0",
+                "tips" => s.tips = value != "0",
                 "window" => {
                     if let Some((w, h)) = value.split_once('x')
                         && let (Ok(w), Ok(h)) = (w.parse::<u32>(), h.parse::<u32>())
@@ -480,7 +497,9 @@ mod tests {
                 unit_reply: 0,
                 interface: 100,
                 music: 20,
+                voice: 60,
             },
+            tips: false,
         };
         assert_eq!(RenderSettings::from_text(&s.to_text()), s);
     }

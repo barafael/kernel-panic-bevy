@@ -1,12 +1,14 @@
-name: Soundtrack (Git LFS)
+name: Soundtrack and tips voice (Git LFS)
 description: >
-  Fetch the soundtrack (`kernel-panic/assets/music/*.ogg`, ~74 MB, Git LFS)
+  Fetch the soundtrack (`kernel-panic/assets/music/*.ogg`, ~74 MB) and the
+  tips voice-over (`kernel-panic/assets/sounds/tips/*.ogg`, ~3 MB), Git LFS,
   through a cache keyed on the LFS object list, so LFS bandwidth is only
   spent when a track changes, and refuse to continue with pointer files.
 
 # Without this step the checkout holds 130-byte pointers: build.rs would
 # bake them into the web music catalog, packages would ship them, and
-# `audio::music::tests::music_catalog_matches_the_folder` fails loudly.
+# `audio::music::tests::music_catalog_matches_the_folder` (and the tips'
+# `every_voice_file_ships`) fail loudly.
 # One cache entry serves every OS (enableCrossOsArchive).
 
 runs:
@@ -20,7 +22,7 @@ runs:
         path: .git/lfs
         key: lfs-${{ hashFiles('.lfs-objects') }}
         enableCrossOsArchive: true
-    - name: Fetch music (LFS)
+    - name: Fetch music and tips voice (LFS)
       shell: bash
       run: |
         git lfs pull

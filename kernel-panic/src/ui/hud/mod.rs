@@ -1,7 +1,7 @@
 //! In-game HUD: the Spring-style command panel, Kernel Panic's build bar,
 //! the bottom-left tooltip box, building placement, the datavent
 //! highlight shown while placing, the pause / speed line, the TAKE
-//! button, in a networked match the player list and network banner,
+//! button, the automatic tip dispenser, in a networked match the player list and network banner,
 //! and the replay viewer's bar. [`widgets`] holds the scaffolding the
 //! immediate-mode widgets share.
 
@@ -14,6 +14,7 @@ pub(crate) mod placement;
 mod previews;
 mod replay_bar;
 mod take_button;
+mod tips;
 pub(crate) mod tooltip;
 mod widgets;
 
@@ -32,6 +33,7 @@ impl Plugin for HudPlugin {
             geo_highlight::GeoHighlightPlugin,
             match_status::MatchStatusPlugin,
             take_button::TakeButtonPlugin,
+            tips::TipsPlugin,
             net_overlay::NetOverlayPlugin,
             replay_bar::ReplayBarPlugin,
         ));

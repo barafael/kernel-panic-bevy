@@ -8,7 +8,7 @@ WebRTC (`docs/multiplayer-plan.md`).
 ```sh
 cargo run --release -p kernel-panic              # the game
 cargo run --release -p kernel-panic Central_Hub  # straight into a map
-cargo test --workspace                           # needs `git lfs pull` (the music)
+cargo test --workspace                           # needs `git lfs pull` (music, tips voice)
 ```
 
 ## Assets
@@ -24,8 +24,9 @@ the formats the game reads, with no conversion step anywhere:
   documents the format). Native reads them from `assets/`, the web build
   fetches them.
 - `kernel-panic/assets/{sounds,music,cursors,unitpics,bitmaps}`: the
-  sound effects, the soundtrack (Git LFS), the mouse cursors, the build
-  pictures and the tooltip background.
+  sound effects, the soundtrack and the tips voice-over (`sounds/tips`)
+  (both Git LFS), the mouse cursors, the build pictures and the tooltip
+  background.
 
 Provenance and licences: `original-game-license-info.txt`.
 
