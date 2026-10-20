@@ -21,6 +21,7 @@ use bevy::math::ops;
 use bevy::prelude::*;
 
 use crate::game_setup::DevOptions;
+use crate::map_events::hex_farm::{HexFarmState, HexFarmView};
 use crate::rendering::camera::{MapBounds, RtsCamera, RtsCameraState};
 use crate::rng::clock_f64;
 use crate::sim::DetFloat;
@@ -40,6 +41,8 @@ pub(super) enum Kind {
     Artillery,
     NewBuilding,
     Frontline,
+    /// A Hex Farm tower rising out of the void.
+    Rising,
     Roam,
 }
 
@@ -50,6 +53,7 @@ impl Kind {
             Kind::Fight => 11.0,
             Kind::Launch => 9.0,
             Kind::Frontline => 9.0,
+            Kind::Rising => 8.0,
             Kind::Artillery => 8.0,
             Kind::Roam => 7.0,
             Kind::NewBuilding => 6.0,
@@ -98,6 +102,8 @@ const ARTILLERY_WEIGHT: f32 = 1.5;
 const NEW_BUILDING_SCORE: f32 = 4.0;
 const FRONTLINE_SCORE: f32 = 8.0;
 const ROAM_SCORE: f32 = 1.5;
+/// A rising tower: as good as a mid-sized fight, and it cuts in.
+const RISING_SCORE: f32 = 14.0;
 /// Fights are clustered on a grid this coarse (elmos).
 const CLUSTER: f32 = 384.0;
 /// Within this of a homebase a shot scores less: ×0.3, a fight ×0.6.
@@ -111,11 +117,32 @@ const FRONTLINE_SAMPLE: usize = 48;
 /// Open-ground roam points tried per pick.
 const ROAM_POINTS: usize = 6;
 
+/// What the map offers besides its units: datavents to look at, towers
+/// rising (Hex Farm), and which ground is worth a roaming shot (not the
+/// void, on maps with one).
+pub(super) struct Scene<'a> {
+    pub vents: &'a [Vec3],
+    pub rising: &'a [Vec3],
+    pub open: &'a dyn Fn(Vec2) -> bool,
+}
+
+impl Scene<'_> {
+    /// No vents, nothing rising, all ground open.
+    pub const EMPTY: Scene<'static> = Scene {
+        vents: &[],
+        rising: &[],
+        open: &|_| true,
+    };
+}
+
+/// Open-ground roam points get this many tries to land off the void.
+const ROAM_TRIES: usize = 6;
+
 /// Score everything worth a shot. `current` is where the camera looks
 /// now; `rolls` supplies `0..1` randoms for the open-ground points.
 pub(super) fn interests(
     seen: &[Sighting],
-    vents: &[Vec3],
+    scene: &Scene,
     bounds: (Vec2, Vec2),
     current: Option<Vec3>,
     mut rolls: impl FnMut() -> f32,
@@ -223,9 +250,19 @@ pub(super) fn interests(
         }
     }
 
+    for &pos in scene.rising {
+        out.push(Interest {
+            pos,
+            kind: Kind::Rising,
+            score: RISING_SCORE,
+            follow: None,
+        });
+    }
+
     // The map itself: free datavents and open ground well inside it.
     let (min, max) = bounds;
     let inset = (max - min) * 0.15;
+    let vents = scene.vents;
     for &v in vents {
         out.push(Interest {
             pos: v,
@@ -235,7 +272,10 @@ pub(super) fn interests(
         });
     }
     for _ in 0..ROAM_POINTS {
-        let p = min + inset + (max - min - 2.0 * inset) * Vec2::new(rolls(), rolls());
+        let mut point = || min + inset + (max - min - 2.0 * inset) * Vec2::new(rolls(), rolls());
+        let Some(p) = (0..ROAM_TRIES).map(|_| point()).find(|&p| (scene.open)(p)) else {
+            continue;
+        };
         out.push(Interest {
             pos: Vec3::new(p.x, 0.0, p.y),
             kind: Kind::Roam,
@@ -291,6 +331,8 @@ pub(super) struct AttractCamera {
     yaw_rate_now: f32,
     pitch: f32,
     distance: f32,
+    /// The eased terrain floor under the focus.
+    floor: Option<f32>,
 }
 
 /// A low, fast sweep across a battle: the focus travels `start → end`
@@ -334,6 +376,23 @@ const PASS_DISTANCE: f32 = 620.0;
 /// crosses. A glide or fly-by between fights at different altitudes
 /// must clear intervening ridges instead of tunnelling through them.
 const GROUND_CLEARANCE: f32 = 12.0;
+/// The floor looks this far round the focus (elmos) for the highest
+/// ground, and eases toward it at these rates (per second): up fast,
+/// so a ridge is cleared in time, down slowly.
+const FLOOR_RADIUS: f32 = 192.0;
+const FLOOR_RISE: f32 = 3.0;
+const FLOOR_FALL: f32 = 0.8;
+
+/// The highest ground at `p` and at eight points `FLOOR_RADIUS` round it.
+fn ground_floor(hm: &Heightmap, p: Vec2) -> f32 {
+    (0..8)
+        .map(|k| {
+            let a = k as f32 * std::f32::consts::FRAC_PI_4;
+            p + FLOOR_RADIUS * Vec2::new(ops::cos(a), ops::sin(a))
+        })
+        .fold(hm.sample(p.x, p.y), |m, q| m.det_max(hm.sample(q.x, q.y)))
+}
+
 /// The focus stays this fraction of the map in from its edges.
 const EDGE_INSET: f32 = 0.06;
 
@@ -366,6 +425,7 @@ pub(super) fn attract_camera(
     units: Query<UnitView>,
     vents: Query<&GeoventSmoker>,
     registry: Option<Res<UnitRegistry>>,
+    (hex_farm, hex_view): (Option<Res<HexFarmState>>, Option<Res<HexFarmView>>),
     mut cam: Query<&mut RtsCameraState, With<RtsCamera>>,
     dev: Res<DevOptions>,
 ) {
@@ -373,6 +433,8 @@ pub(super) fn attract_camera(
         return;
     };
     let dt = time.delta_secs();
+    // Plain borrow: the fly-by and the floor are separate fields.
+    let director = &mut *director;
     director.clock += dt;
     let zoom = dev.attract_distance.map_or(1.0, |d| d / 1250.0);
     // Terrain floor for every focus write below. Fights sit at their
@@ -381,12 +443,25 @@ pub(super) fn attract_camera(
     // (Data_Cache_L1's mesas are ~1000 elmos tall) — minutes of solid
     // rock on screen. Riding `terrain + clearance` sweeps the camera
     // up and over instead; the camera smoothing eases the vertical.
-    let ride_terrain = |focus: &mut Vec3| {
-        if let Some(hm) = heightmap.as_deref() {
-            let floor = hm.sample(focus.x, focus.z) + GROUND_CLEARANCE;
-            if focus.y < floor {
-                focus.y = floor;
+    // The floor is the highest ground round the focus, eased: a point
+    // sample jumps by a tower's height each time the focus crosses a
+    // Hex Farm tower's edge (or a tower rises under it), and the camera
+    // bobbed up and down with it.
+    let ride_terrain = |focus: &mut Vec3, floor: &mut Option<f32>| {
+        let Some(hm) = heightmap.as_deref() else {
+            return;
+        };
+        let wanted = ground_floor(hm, focus.xz()) + GROUND_CLEARANCE;
+        let eased = match *floor {
+            Some(f) => {
+                let rate = if wanted > f { FLOOR_RISE } else { FLOOR_FALL };
+                f + (wanted - f) * (rate * dt).det_min(1.0)
             }
+            None => wanted,
+        };
+        *floor = Some(eased);
+        if focus.y < eased {
+            focus.y = eased;
         }
     };
     // A freshly loaded map invalidates the old shot.
@@ -394,6 +469,7 @@ pub(super) fn attract_camera(
         director.shot = None;
         director.pass = None;
         director.retarget_in = 0.0;
+        director.floor = None;
     }
     let (min, max) = (bounds.min.xz(), bounds.max.xz());
     let snapshot = || -> Vec<Sighting> {
@@ -429,6 +505,24 @@ pub(super) fn attract_camera(
             .collect()
     };
     let vent_points = || -> Vec<Vec3> { vents.iter().map(|v| v.pos).collect() };
+    // Hex Farm: towers rising out of the void are worth a shot, and the
+    // void itself (black) is not.
+    let rising_points = || -> Vec<Vec3> {
+        let (Some(state), Some(view)) = (hex_farm.as_deref(), hex_view.as_deref()) else {
+            return Vec::new();
+        };
+        view.rising_towers()
+            .map(|k| {
+                let h = &state.farm.hexes[k];
+                Vec3::new(h.x as f32, h.y as f32, h.z as f32)
+            })
+            .collect()
+    };
+    let open_ground = |p: Vec2| {
+        hex_farm
+            .as_deref()
+            .is_none_or(|s| !s.farm.is_void(p.x as f64, p.y as f64))
+    };
 
     director.retarget_in -= dt;
     director.check_in -= dt;
@@ -440,9 +534,16 @@ pub(super) fn attract_camera(
     if quiet && director.check_in <= 0.0 && director.pass.is_none() {
         director.check_in = CHECK_SECONDS;
         let seen = snapshot();
-        cut = interests(&seen, &[], (min, max), None, roll)
+        let rising = rising_points();
+        let scene = Scene {
+            rising: &rising,
+            ..Scene::EMPTY
+        };
+        cut = interests(&seen, &scene, (min, max), None, roll)
             .iter()
-            .any(|i| matches!(i.kind, Kind::Fight | Kind::Launch) && i.score >= CUT_SCORE);
+            .any(|i| {
+                matches!(i.kind, Kind::Fight | Kind::Launch | Kind::Rising) && i.score >= CUT_SCORE
+            });
     }
     // A followed bomber gone ends its shot.
     let lost = director
@@ -453,7 +554,13 @@ pub(super) fn attract_camera(
         director.pass = None;
         let seen = snapshot();
         let current = Some(state.focus);
-        let candidates = interests(&seen, &vent_points(), (min, max), current, roll);
+        let (vents, rising) = (vent_points(), rising_points());
+        let scene = Scene {
+            vents: &vents,
+            rising: &rising,
+            open: &open_ground,
+        };
+        let candidates = interests(&seen, &scene, (min, max), current, roll);
         let shot = pick_interest(&candidates, roll()).unwrap_or(Interest {
             pos: (bounds.min + bounds.max) * 0.5,
             kind: Kind::Roam,
@@ -489,7 +596,7 @@ pub(super) fn attract_camera(
         let t = (pass.elapsed / PASS_SECONDS).det_clamp(0.0, 1.0);
         let eased = t * t * (3.0 - 2.0 * t);
         state.focus = pass.start.lerp(pass.end, eased);
-        ride_terrain(&mut state.focus);
+        ride_terrain(&mut state.focus, &mut director.floor);
         // The eye trails the focus by the pass offset (same arithmetic
         // as `compute_transform_from_state`); lift the focus until the
         // eye clears the terrain it hangs over, too — a ridge behind
@@ -499,7 +606,7 @@ pub(super) fn attract_camera(
             let eye_y = state.focus.y + PASS_DISTANCE * zoom * ops::sin(PASS_PITCH);
             let eye_x = state.focus.x + horizontal * ops::sin(pass.yaw);
             let eye_z = state.focus.z + horizontal * ops::cos(pass.yaw);
-            let lift = hm.sample(eye_x, eye_z) + GROUND_CLEARANCE - eye_y;
+            let lift = ground_floor(hm, Vec2::new(eye_x, eye_z)) + GROUND_CLEARANCE - eye_y;
             if lift > 0.0 {
                 state.focus.y += lift;
             }
@@ -528,7 +635,7 @@ pub(super) fn attract_camera(
         let xz = state.focus.xz().clamp(min + inset, max - inset);
         state.focus.x = xz.x;
         state.focus.z = xz.y;
-        ride_terrain(&mut state.focus);
+        ride_terrain(&mut state.focus, &mut director.floor);
     }
     let ease = (EASE * dt).det_min(1.0);
     director.yaw_rate_now += (director.yaw_rate - director.yaw_rate_now) * ease;
@@ -601,7 +708,10 @@ mod tests {
         }
         let c = interests(
             &seen,
-            &[Vec3::new(1500.0, 0.0, 1500.0)],
+            &Scene {
+                vents: &[Vec3::new(1500.0, 0.0, 1500.0)],
+                ..Scene::EMPTY
+            },
             BOUNDS,
             None,
             || 0.5,
@@ -615,7 +725,7 @@ mod tests {
     fn a_launch_is_followed() {
         let mut seen = vec![at(2000.0, 2000.0, 0, Role::Launch)];
         seen[0].entity = Entity::from_raw_u32(7).unwrap();
-        let c = interests(&seen, &[], BOUNDS, None, || 0.5);
+        let c = interests(&seen, &Scene::EMPTY, BOUNDS, None, || 0.5);
         let top = best(&c);
         assert_eq!(top.kind, Kind::Launch);
         assert_eq!(top.follow, seen[0].entity.into());
@@ -628,7 +738,7 @@ mod tests {
             at(520.0, 500.0, 0, Role::NewBuilding),
             at(2500.0, 2500.0, 1, Role::NewBuilding),
         ];
-        let c = interests(&seen, &[], BOUNDS, None, || 0.5);
+        let c = interests(&seen, &Scene::EMPTY, BOUNDS, None, || 0.5);
         let score = |x: f32| {
             c.iter()
                 .find(|i| i.kind == Kind::NewBuilding && i.pos.x == x)
@@ -638,7 +748,7 @@ mod tests {
         assert!(score(520.0) < score(2500.0) * 0.5);
         let c = interests(
             &seen,
-            &[],
+            &Scene::EMPTY,
             BOUNDS,
             Some(Vec3::new(2500.0, 0.0, 2500.0)),
             || 0.5,
@@ -657,7 +767,7 @@ mod tests {
             at(3900.0, 3900.0, 1, Role::Homebase),
         ];
         let mut r = 0.0f32;
-        let c = interests(&seen, &[], BOUNDS, None, || {
+        let c = interests(&seen, &Scene::EMPTY, BOUNDS, None, || {
             r = (r + 0.37) % 1.0;
             r
         });
@@ -668,6 +778,32 @@ mod tests {
     }
 
     #[test]
+    fn rising_towers_are_shots_and_the_void_is_not() {
+        let rising = [Vec3::new(2000.0, 300.0, 2000.0)];
+        // Only the west half is ground; the east half is void.
+        let open = |p: Vec2| p.x < 2000.0;
+        let scene = Scene {
+            rising: &rising,
+            open: &open,
+            ..Scene::EMPTY
+        };
+        let mut r = 0.0f32;
+        let c = interests(&[], &scene, BOUNDS, None, || {
+            r = (r + 0.37) % 1.0;
+            r
+        });
+        let top = best(&c);
+        assert_eq!(top.kind, Kind::Rising);
+        assert!(top.score >= CUT_SCORE, "a rising tower cuts in");
+        let roam: Vec<_> = c.iter().filter(|i| i.kind == Kind::Roam).collect();
+        assert!(!roam.is_empty());
+        assert!(
+            roam.iter().all(|i| i.pos.x < 2000.0),
+            "no roaming over the void"
+        );
+    }
+
+    #[test]
     fn frontlines_sit_between_the_armies() {
         let seen = vec![
             at(1000.0, 2000.0, 0, Role::Mobile),
@@ -675,7 +811,7 @@ mod tests {
             at(2000.0, 2000.0, 1, Role::Mobile),
             at(2400.0, 2000.0, 1, Role::Mobile),
         ];
-        let c = interests(&seen, &[], BOUNDS, None, || 0.5);
+        let c = interests(&seen, &Scene::EMPTY, BOUNDS, None, || 0.5);
         let front = c.iter().find(|i| i.kind == Kind::Frontline).unwrap();
         assert!(front.pos.distance(Vec3::new(1500.0, 0.0, 2000.0)) < 1.0);
     }

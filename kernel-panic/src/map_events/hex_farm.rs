@@ -145,6 +145,18 @@ pub struct HexFarmView {
     finished: Vec<Entity>,
 }
 
+impl HexFarmView {
+    /// Towers rising out of the void right now (the demo camera's best
+    /// Hex Farm shots), by index into [`HexFarm::hexes`].
+    pub fn rising_towers(&self) -> impl Iterator<Item = usize> + '_ {
+        self.hexes
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.anim.is_some_and(|a| a.direction > 0))
+            .map(|(k, _)| k)
+    }
+}
+
 /// A finished big building within `TowerRadius` of tower `.0`: it took
 /// the tower on `UnitFinished`. Its removal is that building's
 /// `UnitDestroyed` — `Dying` drops it at the kill, a despawn without the
