@@ -46,6 +46,7 @@ use crate::units::lifecycle::game_over::GameState;
 mod attract;
 mod lobby_page;
 mod replays_page;
+mod stats_page;
 
 use attract::{AttractCamera, attract_camera};
 
@@ -59,6 +60,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<EscAudioOpen>()
             .init_resource::<EscResignConfirm>()
             .init_resource::<GameOverOpen>()
+            .init_resource::<stats_page::StatsView>()
             .init_resource::<ReadmeScroll>()
             .init_resource::<DemoDirector>()
             .init_resource::<AttractCamera>()
@@ -262,6 +264,8 @@ enum MenuAction {
     Lobby(crate::net::lobby::LobbyAction),
     /// The Replays page.
     Replays(replays_page::ReplaysAction),
+    /// The game-over panel's Statistics page.
+    Stats(stats_page::StatsAction),
 }
 
 // ---------------------------------------------------------------------------
@@ -802,10 +806,12 @@ struct Overlays<'w> {
     game_over_open: ResMut<'w, GameOverOpen>,
     dismissed: ResMut<'w, GameOverDismissed>,
     resign_confirm: ResMut<'w, EscResignConfirm>,
+    stats: ResMut<'w, stats_page::StatsView>,
 }
 
 impl Overlays<'_> {
     fn close_all(&mut self) {
+        self.stats.open = false;
         *self.esc_open = EscMenuOpen(false);
         *self.esc_settings = EscSettingsOpen(false);
         *self.esc_audio = EscAudioOpen(false);
@@ -1051,6 +1057,7 @@ fn handle_menu_actions(
             MenuAction::Replays(action) => {
                 flow.replays.write(action);
             }
+            MenuAction::Stats(action) => overlays.stats.apply(action),
         }
     }
 }
@@ -1218,7 +1225,11 @@ fn mouse_menu_input(
     )>,
     windows: Query<&Window>,
     mut mouse: ResMut<ButtonInput<MouseButton>>,
-    esc: (Res<EscMenuOpen>, Res<EscSettingsOpen>),
+    esc: (
+        Res<EscMenuOpen>,
+        Res<EscSettingsOpen>,
+        Option<Res<stats_page::StatsView>>,
+    ),
     mut focus: ResMut<MenuFocus>,
     mut hovered: Local<Option<Entity>>,
     mut colors: Query<(&MenuButton, &mut BorderColor, &mut BackgroundColor)>,
@@ -1232,7 +1243,7 @@ fn mouse_menu_input(
             }
         }
     };
-    let modal = esc.0.0 || esc.1.0;
+    let modal = esc.0.0 || esc.1.0 || esc.2.is_some_and(|v| v.open);
     let cursor = windows
         .single()
         .ok()
@@ -2409,7 +2420,13 @@ fn esc_toggle(
     mut esc_settings: ResMut<EscSettingsOpen>,
     mut esc_audio: ResMut<EscAudioOpen>,
     game_over_open: Res<GameOverOpen>,
+    mut stats: ResMut<stats_page::StatsView>,
 ) {
+    // Esc backs out of the Statistics page to the game-over panel.
+    if keys.just_pressed(KeyCode::Escape) && stats.open {
+        stats.open = false;
+        return;
+    }
     if keys.just_pressed(KeyCode::Escape) && !game_over_open.0 {
         if esc_audio.0 {
             esc_audio.0 = false;
@@ -2448,7 +2465,9 @@ fn close_all_overlays(
     mut esc_settings: ResMut<EscSettingsOpen>,
     mut esc_audio: ResMut<EscAudioOpen>,
     mut game_over: ResMut<GameOverOpen>,
+    mut stats: ResMut<stats_page::StatsView>,
 ) {
+    stats.open = false;
     *esc_open = EscMenuOpen(false);
     *esc_settings = EscSettingsOpen(false);
     *esc_audio = EscAudioOpen(false);
@@ -2620,6 +2639,18 @@ fn maintain_esc_menu(
 #[derive(Component)]
 struct GameOverPanel;
 
+/// The bot's `stats` command: the game-over panel, on its Statistics
+/// page (on `stat`, if given).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn show_stats(world: &mut World, stat: Option<crate::stats::Stat>) {
+    world.resource_mut::<GameOverOpen>().0 = true;
+    let mut view = world.resource_mut::<stats_page::StatsView>();
+    view.open = true;
+    if let Some(stat) = stat {
+        view.stat = stat;
+    }
+}
+
 fn game_over_watch(
     state: Res<State<GameState>>,
     mut last: Local<Option<GameState>>,
@@ -2638,19 +2669,47 @@ fn game_over_watch(
     }
 }
 
+/// What the game-over panel's Statistics page draws from.
+#[derive(SystemParam)]
+struct StatsInputs<'w> {
+    view: Res<'w, stats_page::StatsView>,
+    stats: Res<'w, crate::stats::MatchStats>,
+    local: Option<Res<'w, crate::units::player::LocalTeam>>,
+    images: ResMut<'w, Assets<Image>>,
+}
+
+/// The game-over panel's redraw key: open, the result, networked, and
+/// with the Statistics page up its view, the samples and the window.
+type GameOverDrawn = (
+    bool,
+    GameState,
+    bool,
+    Option<(stats_page::StatsView, usize, UVec2)>,
+);
+
+#[allow(clippy::too_many_arguments)]
 fn maintain_game_over(
     game_over_open: Res<GameOverOpen>,
     game_state: Res<State<GameState>>,
     net: Option<Res<crate::net::driver::NetStatus>>,
+    mut inputs: StatsInputs,
     mut commands: Commands,
     existing_root: Query<Entity, With<GameOverPanel>>,
     windows: Query<&Window>,
-    mut last: Local<Option<(bool, GameState, bool)>>,
+    mut last: Local<Option<GameOverDrawn>>,
 ) {
     // Redrawn when the result changes under an open panel too: a
     // fallen player's allies winning turns "You lost!" into "You won!".
     let networked = networked(net.as_deref());
-    let now = (game_over_open.0, *game_state.get(), networked);
+    let window = windows.single().ok();
+    let page = (game_over_open.0 && inputs.view.open).then(|| {
+        (
+            *inputs.view,
+            inputs.stats.ticks.len(),
+            window.map_or(UVec2::ZERO, |w| w.physical_size()),
+        )
+    });
+    let now = (game_over_open.0, *game_state.get(), networked, page);
     if *last == Some(now) {
         return;
     }
@@ -2661,7 +2720,7 @@ fn maintain_game_over(
     if !game_over_open.0 {
         return;
     }
-    let Ok(window) = windows.single() else {
+    let Some(window) = window else {
         return;
     };
     let (title_size, menu_size) = (window.height() / 14.0, window.height() / 28.0);
@@ -2684,6 +2743,18 @@ fn maintain_game_over(
             BackgroundColor(OVERLAY_GLASS),
         ))
         .id();
+
+    if page.is_some() {
+        let local = inputs.local.as_deref().and_then(|l| l.seat());
+        let StatsInputs {
+            view,
+            stats,
+            images,
+            ..
+        } = &mut inputs;
+        stats_page::stats_page(&mut commands, root, window, images, stats, view, local);
+        return;
+    }
 
     // The original's `GameOverMenu`: result plate at y=70%, then
     // "Keep on playing/watching" ending at x=48% and "Go to Menu"
@@ -2744,6 +2815,16 @@ fn maintain_game_over(
         )
         .spawn(&mut commands, root);
     }
+    // The match's graphs (`stats`), under the plates.
+    ButtonSpec::new(
+        "Statistics",
+        NAV_BLUE,
+        menu_size,
+        (0.5, 0.15),
+        Anchor::Cc,
+        MenuAction::Stats(stats_page::StatsAction::Open(true)),
+    )
+    .spawn(&mut commands, root);
 }
 
 // (no trailing helpers)

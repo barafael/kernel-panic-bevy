@@ -1357,3 +1357,49 @@ fn shifting_terrain_rises_in_the_sim() {
     }
     assert!(raised > 0);
 }
+
+/// The post-game statistics follow an AI match: a sample a second for
+/// every seat, the AI's orders as actions, production growing as the
+/// factories turn out units, the minifacs the constructors raise
+/// marked, and none of it in the sync hash's way.
+#[test]
+fn match_statistics_follow_the_match() {
+    use crate::stats::{MatchStats, SAMPLE_TICKS};
+
+    let mut h = SimHarness::new(Scenario::ai_match("Marble_Madness_Map", 2, 1, 11));
+    let ticks = 30 * 150;
+    while h.tick < ticks {
+        h.step();
+    }
+    let stats = h.world_mut().resource::<MatchStats>();
+    assert_eq!(stats.seats.len(), 2);
+    // The first tick's sample, then one every SAMPLE_TICKS.
+    assert_eq!(
+        stats.ticks.len(),
+        1 + ticks as usize / SAMPLE_TICKS as usize
+    );
+    for (i, seat) in stats.seats.iter().enumerate() {
+        assert_eq!(seat.units.len(), stats.ticks.len(), "seat {i}");
+        assert!(seat.units[0] >= 1.0, "seat {i} starts with its homebase");
+        let last = stats.ticks.len() - 1;
+        assert!(
+            seat.production[last] > 0.0,
+            "seat {i} produced something: {:?}",
+            seat.production
+        );
+        assert!(
+            seat.production.windows(2).all(|w| w[0] <= w[1]),
+            "seat {i}: production only grows"
+        );
+        assert!(seat.army_value[last] > 0.0, "seat {i} has an army");
+        assert!(
+            seat.apm.iter().any(|&a| a > 0.0),
+            "seat {i}: the AI's orders count as actions"
+        );
+    }
+    assert!(
+        stats.events.iter().any(|e| e.built),
+        "a minifac went up: {:?}",
+        stats.events
+    );
+}

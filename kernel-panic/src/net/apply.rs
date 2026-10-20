@@ -383,6 +383,11 @@ pub(crate) fn apply_sim_commands(world: &mut World, state: &mut SystemState<Appl
                 }
                 continue;
             }
+            // The post-game statistics' actions per minute: what every
+            // peer applied (`stats`; not sim state).
+            if let Some(mut stats) = world.get_resource_mut::<crate::stats::MatchStats>() {
+                stats.count_action(frame.player, cmd);
+            }
             if let SimCommand::Dev(DevCommand::Spawn {
                 kind,
                 team,

@@ -41,6 +41,8 @@
 //!   slope, speed, structure blocking).
 //! - `line <x1> <z1> <x2> <z2>` — log whether a LIGHT mover can drive
 //!   that segment straight (`DoRawSearch`).
+//! - `stats [army|units|production|apm]` — open the game-over panel on
+//!   its Statistics page (`stats`), on that stat.
 //! - `ping <token>` — echo `ack <token>` to the log (a sync point).
 //! - `quit` — exit the game.
 //!
@@ -634,6 +636,18 @@ fn bot_tick(
                     n.line_clear(cap, 1, 40.0, Vec2::new(x1, z1), Vec2::new(x2, z2))
                 });
                 bot.log(&format!("line {x1},{z1} -> {x2},{z2}: clear={clear}"));
+            }
+            "stats" => {
+                use crate::stats::Stat;
+                let stat = match it.next() {
+                    Some("units") => Some(Stat::Units),
+                    Some("production") => Some(Stat::Production),
+                    Some("apm") => Some(Stat::Apm),
+                    Some("army") => Some(Stat::ArmyValue),
+                    _ => None,
+                };
+                commands.queue(move |world: &mut World| crate::ui::menu::show_stats(world, stat));
+                bot.log(&format!("stats {stat:?}"));
             }
             "ping" => {
                 let token = it.next().unwrap_or("");

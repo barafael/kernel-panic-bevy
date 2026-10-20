@@ -18,6 +18,7 @@ mod rendering;
 mod rng;
 mod showcase;
 mod sim;
+mod stats;
 mod terrain;
 mod ui;
 mod units;
@@ -244,6 +245,7 @@ pub(crate) fn add_game(app: &mut App) {
         MapLoadingPlugin,
         MapEventsPlugin,
         ShowcasePlugin,
+        stats::MatchStatsPlugin,
     ))
     .init_state::<game_setup::AppState>()
     .init_resource::<game_setup::SkirmishConfig>()
