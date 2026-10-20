@@ -82,6 +82,8 @@ include!(concat!(env!("OUT_DIR"), "/map_meta.rs"));
 pub struct MapMeta {
     pub starts: u32,
     pub players: (u32, u32),
+    /// The map's own description (`mapinfo.lua`'s `description`).
+    pub description: &'static str,
 }
 
 /// A map's file stem as the menus show it: words split at underscores,
@@ -112,8 +114,12 @@ pub fn display_name(stem: &str) -> String {
 pub fn map_meta(name: &str) -> Option<MapMeta> {
     MAP_META
         .iter()
-        .find(|(stem, _, _)| stem.eq_ignore_ascii_case(name))
-        .map(|&(_, starts, players)| MapMeta { starts, players })
+        .find(|(stem, ..)| stem.eq_ignore_ascii_case(name))
+        .map(|&(_, starts, players, description)| MapMeta {
+            starts,
+            players,
+            description,
+        })
 }
 
 use mipmap::{build_terrain_image, dark_fallback_material, void_ground_material};

@@ -24,10 +24,12 @@ postcard = { workspace = true }
 # Encoder for `write` (the datavent editor). Native only: it binds the C
 # zstd library.
 zstd = { version = "0.14", optional = true }
+# The map selector previews (`examples/gen_previews.rs`).
+png = { version = "0.18", optional = true }
 
 [features]
 # `baked::set_datavent_facings`: rewrite a `.kpmap`'s datavent facings.
-write = ["dep:zstd"]
+write = ["dep:zstd", "dep:png"]
 
 [dev-dependencies]
 proptest = { workspace = true }
@@ -65,4 +67,9 @@ required-features = ["write"]
 # Generates kernel-panic/assets/maps/pipeline_v1.kpmap.
 [[example]]
 name = "gen_pipeline"
+required-features = ["write"]
+
+# Generates kernel-panic/assets/maps/previews/ (the map selector's previews).
+[[example]]
+name = "gen_previews"
 required-features = ["write"]

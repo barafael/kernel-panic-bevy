@@ -99,6 +99,11 @@ const FRAME_LOOP_WRITES: &[(&str, &str, &str)] = &[
     ),
     ("sync_ghosts", "transform::Transform", "placement ghosts"),
     (
+        "drive_turntable",
+        "transform::Transform",
+        "the map selector's preview mesh, on a render layer of its own, menu only",
+    ),
+    (
         "hex_farm_draw",
         "HexFarmView",
         "draw-only fields (animations, meshes); the tick's fields are `finished`, `released`, `owners`",

@@ -57,6 +57,15 @@ has a script in `spring-map/examples/` that writes its `.kpmap` in place:
 cargo run -p spring-map --example gen_token_ring --features write --release
 ```
 
+The map selector shows each map turning in 3D from a small preview,
+`kernel-panic/assets/maps/previews/<stem>.png` (colour, with the height
+in its alpha) plus a line of `previews/relief.txt`. Regenerate them after
+changing a map; the `previews_match_the_maps` test fails until you do:
+
+```sh
+cargo run -p spring-map --example gen_previews --features write --release
+```
+
 Token Ring's firewalls and Heap Fragmentation's blocks rise and sink
 during play (`spring_map::shifting`, applied by the game's
 `map_events::shifting`); the Circular Buffers' lanes speed travel one

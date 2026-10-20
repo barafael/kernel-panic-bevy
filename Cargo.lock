@@ -6705,6 +6705,7 @@ version = "0.1.0"
 dependencies = [
  "better_default",
  "libm",
+ "png",
  "postcard",
  "proptest",
  "ruzstd 0.9.1",

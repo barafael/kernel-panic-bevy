@@ -45,6 +45,7 @@ use crate::units::lifecycle::game_over::GameState;
 
 mod attract;
 mod lobby_page;
+mod map_preview;
 mod replays_page;
 mod stats_page;
 
@@ -66,6 +67,7 @@ impl Plugin for MenuPlugin {
             .init_resource::<AttractCamera>()
             .init_resource::<MenuFocus>()
             .add_plugins(replays_page::ReplaysPagePlugin)
+            .add_plugins(map_preview::MapPreviewPlugin)
             // The Settings page's frame-rate readout.
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             .add_message::<MenuActionMessage>()
@@ -102,6 +104,9 @@ impl Plugin for MenuPlugin {
                         .run_if(in_state(AppState::Menu).or_else(attract_recording))
                         .before(crate::rendering::camera::camera_smoothing),
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
+                    map_preview_info
+                        .run_if(in_state(AppState::Menu))
+                        .after(maintain_launch_menu),
                     lobby_page::type_into_fields
                         .run_if(in_state(AppState::Menu))
                         .before(keyboard_menu_nav),
@@ -1324,6 +1329,8 @@ struct LaunchMenuInputs<'w> {
     shelf: Res<'w, replays_page::ReplayShelf>,
     /// The room's chat, beside the seats.
     chat: Res<'w, crate::net::chat::ChatLog>,
+    /// The map selector's turntable.
+    preview: Res<'w, map_preview::MapPreview>,
 }
 
 fn maintain_launch_menu(
@@ -1345,6 +1352,7 @@ fn maintain_launch_menu(
         lobby,
         shelf,
         chat,
+        preview,
     } = &inputs;
     // A page redraws when it is entered, and when the configuration it
     // shows (the skirmish setup's choice rows, the render settings, the
@@ -1366,7 +1374,7 @@ fn maintain_launch_menu(
     let Ok(window) = windows.single() else {
         return;
     };
-    let (title_size, menu_size, page_size, list_size) = vsizes(window.height());
+    let (title_size, menu_size, page_size, _) = vsizes(window.height());
 
     let root = spawn_backdrop(&mut commands, MENU_GLASS);
     match *page {
@@ -1385,9 +1393,13 @@ fn maintain_launch_menu(
         MenuPage::AdvancedSkirmish => {
             advanced_skirmish_page(&mut commands, root, page_size, config, &catalog.names())
         }
-        MenuPage::MapList => {
-            map_list_page(&mut commands, root, (window.width(), list_size), catalog)
-        }
+        MenuPage::MapList => map_list_page(
+            &mut commands,
+            root,
+            (window.width(), window.height()),
+            catalog,
+            preview,
+        ),
         MenuPage::Showcase => showcase_page(&mut commands, root, page_size),
         MenuPage::Credits => credits_page(&mut commands, root, (window.width(), page_size)),
         MenuPage::Readme => readme_page(&mut commands, root, window.height(), readme.0),
@@ -2142,88 +2154,208 @@ fn advanced_skirmish_page(
     .spawn(commands, root);
 }
 
-/// The original's `ListMap`: two columns of map plates (`lc` at x=10%,
-/// `rc` at x=90%) under a "Choose a map:" heading, Back at the bottom
-/// — paired with the weighted-random pick like Run!/Back, since long
-/// map names reach into the centre column.
-/// Two columns of map plates, 40 % of the width each, alphabetical down
-/// the first column and on down the second, each name with the players
-/// the map is made for. The font shrinks until the longest entry fits
-/// its column and a plate fits its row with a gap to the next.
+/// The map selector: the maps down a sidebar on the left (two columns
+/// where the window is too short for one), the one under the pointer
+/// turning in the main area ([`map_preview`]) with its name, players,
+/// size and description beneath. Random map and Back close the sidebar.
 fn map_list_page(
     commands: &mut Commands,
     root: Entity,
-    (window_w, list_size): (f32, f32),
+    (window_w, window_h): (f32, f32),
     catalog: &MapCatalog,
+    preview: &map_preview::MapPreview,
 ) {
-    let window_h = list_size * 28.0;
+    const TOP: f32 = 0.88;
+    const BOTTOM: f32 = 0.15;
+    const MARGIN: f32 = 0.02;
     let mut entries: Vec<(usize, String)> = catalog
         .names()
         .iter()
         .enumerate()
-        .map(|(i, stem)| (i, map_list_entry(stem)))
+        .map(|(i, stem)| (i, crate::map_loading::display_name(stem)))
         .collect();
-    entries.sort_by_key(|(_, entry)| entry.to_lowercase());
+    entries.sort_by_key(|(_, name)| name.to_lowercase());
     let longest = entries
         .iter()
         .map(|(_, e)| e.chars().count())
         .max()
-        .unwrap_or(1);
-    let rows = entries.len().div_ceil(2).max(1);
-    // The original steps 10% per row from y=85%; longer catalogs
-    // squeeze to keep the last row clear of Back.
-    let step = (0.72 / rows as f32).det_min(0.1);
-    // A plate is 1.5 em plus its border; keep a fifth of the step free.
-    let by_row = 0.8 * step * window_h / 1.7;
-    let list_size = list_size
-        .det_min(0.4 * window_w / (0.6 * longest as f32 + 2.0))
-        .det_min(by_row);
-    let nav_size = (window_h / 28.0) * 28.0 / 24.0;
-    LabelSpec::new("Choose a map:", nav_size, (0.5, 0.95), Anchor::Cc)
-        .frame(NAV_BLUE)
+        .unwrap_or(1) as f32;
+    let gap = 0.01 * window_w;
+    // One column or two, whichever reads larger: a plate is 1.5 em plus
+    // its border (keep a fifth of each row free), and the sidebar keeps
+    // to `SIDEBAR` of the width so the turntable has the rest.
+    const SIDEBAR: f32 = 0.46;
+    let font_for = |columns: usize| {
+        let rows = entries.len().div_ceil(columns).max(1) as f32;
+        let by_rows = 0.8 * (TOP - BOTTOM) * window_h / rows / 1.7;
+        let column = (SIDEBAR * window_w - (columns - 1) as f32 * gap) / columns as f32;
+        let by_width = column / (0.6 * longest + 1.4);
+        (window_h / 28.0).det_min(by_rows).det_min(by_width)
+    };
+    let columns = if font_for(2) > font_for(1) { 2 } else { 1 };
+    let rows = entries.len().div_ceil(columns).max(1);
+    let font = readable(font_for(columns));
+    let column_w = (0.6 * longest + 1.4) * font;
+    let margin = MARGIN * window_w;
+    let sidebar_w = columns as f32 * column_w + (columns - 1) as f32 * gap;
+    let step = (TOP - BOTTOM) / rows as f32;
+
+    let nav = window_h / 24.0;
+    LabelSpec::new(
+        "Choose a map:",
+        nav,
+        ((margin + sidebar_w * 0.5) / window_w, 0.95),
+        Anchor::Cc,
+    )
+    .frame(NAV_BLUE)
+    .spawn(commands, root);
+    for (slot, (i, name)) in entries.iter().enumerate() {
+        let (col, row) = (slot / rows, slot % rows);
+        let left = margin + col as f32 * (column_w + gap);
+        ButtonSpec::new(
+            name,
+            BUTTON_GREEN,
+            font,
+            (left / window_w, TOP - step * (row as f32 + 0.5)),
+            Anchor::Lc,
+            MenuAction::PickMap(*i),
+        )
+        .min_width_px(column_w)
         .spawn(commands, root);
+    }
+    // Random map and Back share the sidebar's foot.
+    let foot = nav
+        .det_min(font * 1.5)
+        .det_min(sidebar_w / ((10.0 + 4.0) * 0.6 + 4.0));
     ButtonSpec::new(
         "Random map",
         TEAL,
-        nav_size,
-        (0.4, 0.05),
-        Anchor::Cc,
+        foot,
+        (MARGIN, 0.06),
+        Anchor::Lc,
         MenuAction::PickRandomMap,
     )
-    .min_width(16.0)
+    .spawn(commands, root);
+    ButtonSpec::new(
+        "Back",
+        NAV_BLUE,
+        foot,
+        ((margin + sidebar_w) / window_w, 0.06),
+        Anchor::Rc,
+        MenuAction::Goto(MenuPage::AdvancedSkirmish),
+    )
     .spawn(commands, root);
 
-    for (slot, (i, entry)) in entries.iter().enumerate() {
-        let (col, row) = (slot / rows, slot % rows);
-        let (x, anchor) = if col == 0 {
-            (0.05, Anchor::Lc)
-        } else {
-            (0.95, Anchor::Rc)
-        };
-        ButtonSpec::new(
-            entry,
-            BUTTON_GREEN,
-            list_size,
-            (x, 0.85 - step * row as f32),
-            anchor,
-            MenuAction::PickMap(*i),
-        )
-        .min_width(40.0)
-        .spawn(commands, root);
-    }
-    back_button(nav_size, (0.6, 0.05), MenuPage::AdvancedSkirmish)
-        .min_width(16.0)
-        .spawn(commands, root);
+    // The turntable, 16:10, as large as the main area allows.
+    let area_left = margin + sidebar_w + 2.0 * gap;
+    let area_w = window_w - area_left - margin;
+    let ratio = map_preview::TARGET_SIZE.x as f32 / map_preview::TARGET_SIZE.y as f32;
+    let image_w = area_w.det_min(0.68 * window_h * ratio);
+    let image_h = image_w / ratio;
+    let image_left = area_left + (area_w - image_w) * 0.5;
+    let image_top = 0.05 * window_h;
+    let border = frame_border_px(nav);
+    let image = commands
+        .spawn((
+            MenuFrame,
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(image_left),
+                top: Val::Px(image_top),
+                width: Val::Px(image_w),
+                height: Val::Px(image_h),
+                border: UiRect::all(Val::Px(border)),
+                ..default()
+            },
+            BorderColor::all(MAP_GREEN),
+            ImageNode::new(preview.target.clone()),
+        ))
+        .id();
+    commands.entity(root).add_child(image);
+    // What the turntable shows, kept current by `map_preview_info`.
+    let info_font = readable(nav * 0.6);
+    let info = commands
+        .spawn((
+            MenuFrame,
+            Pickable::IGNORE,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(image_left),
+                top: Val::Px(image_top + image_h + 0.02 * window_h),
+                width: Val::Px(image_w),
+                max_height: Val::Px(window_h - (image_top + image_h + 0.04 * window_h)),
+                overflow: Overflow::clip(),
+                ..default()
+            },
+        ))
+        .with_child((
+            MapPreviewInfo,
+            Text::new(map_preview_text(preview.map())),
+            TextColor(TEXT_WHITE),
+            TextFont {
+                font_size: FontSize::Px(info_font),
+                ..default()
+            },
+            TextLayout::new(Justify::Left, LineBreak::WordBoundary),
+            Pickable::IGNORE,
+        ))
+        .id();
+    commands.entity(root).add_child(info);
 }
 
-/// A map list plate: the map's name and the players it is made for
-/// (`Deadlock v1  2-4`).
-fn map_list_entry(stem: &str) -> String {
-    let name = crate::map_loading::display_name(stem);
-    match crate::map_loading::map_meta(stem).map(|m| m.players) {
-        Some((lo, hi)) if lo == hi => format!("{name}  {lo}"),
-        Some((lo, hi)) => format!("{name}  {lo}-{hi}"),
-        None => name,
+/// The text under the map selector's turntable.
+#[derive(Component)]
+struct MapPreviewInfo;
+
+/// Name, players, size (in Spring's 512-elmo map units) and description
+/// of the map `stem`.
+fn map_preview_text(stem: Option<&str>) -> String {
+    let Some(stem) = stem else {
+        return String::new();
+    };
+    let mut text = crate::map_loading::display_name(stem);
+    let meta = crate::map_loading::map_meta(stem);
+    let mut facts = Vec::new();
+    if let Some(m) = meta {
+        facts.push(match m.players {
+            (lo, hi) if lo == hi => format!("{lo} players"),
+            (lo, hi) => format!("{lo}-{hi} players"),
+        });
+    }
+    if let Some(r) = map_preview::relief(stem) {
+        facts.push(format!(
+            "size {}x{}",
+            (r.width / 512.0).round(),
+            (r.depth / 512.0).round()
+        ));
+    }
+    if !facts.is_empty() {
+        text += "\n";
+        text += &facts.join(", ");
+    }
+    if let Some(m) = meta
+        && !m.description.is_empty()
+    {
+        text += "\n";
+        text += m.description;
+    }
+    text
+}
+
+/// Keep the turntable's caption on the map it shows.
+fn map_preview_info(
+    preview: Res<map_preview::MapPreview>,
+    mut texts: Query<&mut Text, With<MapPreviewInfo>>,
+) {
+    if !preview.is_changed() {
+        return;
+    }
+    let wanted = map_preview_text(preview.map());
+    for mut text in &mut texts {
+        if text.0 != wanted {
+            text.0.clone_from(&wanted);
+        }
     }
 }
 

@@ -80,16 +80,17 @@ fn map_meta() {
             let (low, high) = info.intended_players().unwrap_or((2, starts.min(4)));
             let high = high.min(starts).max(1);
             format!(
-                "({}, {starts}, ({}, {high}))",
+                "({}, {starts}, ({}, {high}), {})",
                 literal(&stem(path)),
-                low.min(high)
+                low.min(high),
+                literal(info.description.trim())
             )
         })
         .collect();
     write(
         "map_meta.rs",
         format!(
-            "#[allow(dead_code)]\npub const MAP_META: &[(&str, u32, (u32, u32))] = &[{}];\n",
+            "#[allow(dead_code)]\npub const MAP_META: &[(&str, u32, (u32, u32), &str)] = &[{}];\n",
             entries.join(", ")
         ),
     );
