@@ -52,8 +52,8 @@ pub use aim::{
 pub use damage::Infected;
 pub use damage::{
     Armored, Attacker, BurstFire, BurstRng, DamageQueue, DelayedDamage, Hit, PendingDamage,
-    VirusSpawn, VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire,
-    tick_infections, update_armored,
+    VirusSpawnQueue, apply_damage, apply_death_blasts, tick_burst_fire, tick_infections,
+    update_armored,
 };
 pub use lifecycle::{
     Dying, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying, death_system, tick_kamikaze,

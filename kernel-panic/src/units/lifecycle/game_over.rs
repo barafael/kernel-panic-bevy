@@ -576,7 +576,7 @@ mod tests {
         assert_eq!(pending_state(&app), None);
     }
 
-    /// Units of an owner without a seat (map-event eruption neutrals)
+    /// Units of an owner without a seat (map-event neutrals)
     /// own no factory by design and must survive the census.
     #[test]
     fn unseated_neutral_team_is_not_eliminated() {

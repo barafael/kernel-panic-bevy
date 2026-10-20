@@ -217,7 +217,6 @@ impl Plugin for UnitsPlugin {
                         // add meshes / materials, and asset ids are
                         // handed out in the order they run.
                         .after(spawning::emerge_system)
-                        .after(crate::map_events::drain_eruption_queue)
                         .in_set(GameplaySet::Produce),
                     // Why: MuzzlePiece + AimScript must update before
                     // `combat_system` reads them. The Simulate set is

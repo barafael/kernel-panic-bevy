@@ -20,7 +20,7 @@ the formats the game reads, with no conversion step anywhere:
   class definition, the original text files, parsed at startup.
 - `kernel-panic/assets/units.kpu`: every model and texture
   (`unit-bundle.md`). Both are embedded in the binary.
-- `kernel-panic/assets/maps/*.kpmap`: the 26 maps (`spring-map/src/baked.rs`
+- `kernel-panic/assets/maps/*.kpmap`: the 25 maps (`spring-map/src/baked.rs`
   documents the format). Native reads them from `assets/`, the web build
   fetches them.
 - `kernel-panic/assets/{sounds,music,cursors,unitpics,bitmaps}`: the

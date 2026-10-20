@@ -25,9 +25,8 @@
 //! `fixedallies=0`, which only allowed the `/ally` chat command; the
 //! port has no such command.
 //!
-//! Units of an owner without a seat (the map-event eruption neutrals,
-//! `map_events::ERUPTION_TEAM`) are friendly to that owner alone, as
-//! they were before: Spring's Gaia allyteam.
+//! Units of an owner without a seat (map-event neutrals) are friendly
+//! to that owner alone, as they were before: Spring's Gaia allyteam.
 //!
 //! [`GameSetup`]: crate::game_setup::GameSetup
 //! [`PlayerSpec::ally_team`]: crate::game_setup::PlayerSpec::ally_team

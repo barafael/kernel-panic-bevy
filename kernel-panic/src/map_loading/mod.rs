@@ -1045,7 +1045,7 @@ fn spawn_prepared_map(
             ctx.commands
                 .remove_resource::<crate::showcase::ShowcaseDirector>();
         }
-        configure_map_events(&map_name, map_info, &heightmap, &mut ctx.commands);
+        configure_map_events(&map_name, &heightmap, &mut ctx.commands);
     }
     ctx.commands.insert_resource(nav_set);
     // The map's own gravity (a map without map info: the engine's
@@ -1138,35 +1138,14 @@ fn spawn_terrain(
 
 /// Insert any per-map [`map_events`](crate::map_events) resources whose
 /// activation key matches the loaded map's filename stem.
-fn configure_map_events(
-    map_name: &str,
-    map_info: &MapInfo,
-    heightmap: &Heightmap,
-    commands: &mut Commands,
-) {
-    // Per-map: the previous map's schedule must not carry over (an
-    // eruption clock aimed at Stack_Overflow's starts, a ring's lanes
-    // or blocks on a map without them). The state resource (clock + rng) goes with the
-    // config; spawns still queued for the old world are dropped with
-    // the other match-scoped queues at the swap.
-    commands.remove_resource::<crate::map_events::EruptionConfig>();
-    commands.remove_resource::<crate::map_events::EruptionState>();
+fn configure_map_events(map_name: &str, heightmap: &Heightmap, commands: &mut Commands) {
+    // Per-map: the previous map's events must not carry over (a
+    // ring's lanes or blocks on a map without them).
     commands.remove_resource::<crate::map_events::LaneFlow>();
     commands.remove_resource::<crate::map_events::ShiftingTerrain>();
     if let Some(shifting) = crate::map_events::ShiftingTerrain::for_map(map_name, heightmap) {
         info!("  {map_name}: installing shifting terrain");
         commands.insert_resource(shifting);
-    }
-    if map_name.eq_ignore_ascii_case("Stack_Overflow") {
-        let starts: Vec<Vec3> = map_info
-            .start_positions
-            .iter()
-            .map(|sp| heightmap.place(sp.x, sp.z))
-            .collect();
-        info!("  Stack_Overflow detected — installing eruption schedule");
-        let config = crate::map_events::EruptionConfig::stack_overflow(starts);
-        commands.insert_resource(crate::map_events::EruptionState::new(&config));
-        commands.insert_resource(config);
     }
     if let Some(flow) = crate::map_events::LaneFlow::for_map(map_name) {
         info!("  {map_name}: installing the ring's fast lanes");
