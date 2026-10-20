@@ -8,6 +8,7 @@ pub mod lifecycle;
 pub mod mechanics;
 pub mod player;
 pub mod spatial;
+pub mod team_colors;
 pub mod teams;
 pub mod weapon_fx;
 
@@ -81,6 +82,7 @@ impl Plugin for UnitsPlugin {
             // Set from the seats at every match swap (`begin_match`).
             .init_resource::<ai::AiSeats>()
             .init_resource::<teams::Alliances>()
+            .init_resource::<team_colors::TeamColors>()
             // Which owners are dead and the match result (sim), and the
             // result last shown to the local player (UI).
             .init_match_resource::<teams::TeamFates>()
@@ -291,6 +293,7 @@ impl Plugin for UnitsPlugin {
                         cloak::update_fog_visibility,
                         cloak::install_cloak_fade_materials,
                         cloak::restore_cloak_fade_materials,
+                        team_colors::recolor_taken_units,
                     )
                         .chain()
                         .in_set(GameplaySet::Animate),

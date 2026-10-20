@@ -19,8 +19,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::rendering::camera::{RtsCamera, intersect_ground_y};
-use crate::units::components::Faction;
 use crate::units::mechanics::cloak::Spotted;
+use crate::units::team_colors::UnitColor;
 
 use super::theme::PANEL_BORDER;
 
@@ -179,7 +179,7 @@ fn update_minimap(
     mut state: ResMut<MinimapState>,
     mut images: ResMut<Assets<Image>>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    unit_q: Query<(&Transform, &Faction), With<Spotted>>,
+    unit_q: Query<(&Transform, &UnitColor), With<Spotted>>,
     windows: Query<&Window>,
 ) {
     state.timer.tick(time.delta());
@@ -199,8 +199,8 @@ fn update_minimap(
     paints.clear();
 
     // Unit dots.
-    for (transform, faction) in &unit_q {
-        let (r, g, b) = faction_rgb(*faction);
+    for (transform, color) in &unit_q {
+        let (r, g, b) = color_rgb(color.0.color());
         let mx = ((transform.translation.x / state.world_width) * mm_w as f32) as i32;
         let mz = ((transform.translation.z / state.world_depth) * mm_h as f32) as i32;
 
@@ -316,8 +316,8 @@ fn draw_line(
     }
 }
 
-fn faction_rgb(faction: Faction) -> (u8, u8, u8) {
-    let srgba = Srgba::from(faction.color());
+fn color_rgb(color: Color) -> (u8, u8, u8) {
+    let srgba = Srgba::from(color);
     (
         (srgba.red * 255.0) as u8,
         (srgba.green * 255.0) as u8,

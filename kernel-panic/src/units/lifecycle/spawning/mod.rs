@@ -32,6 +32,7 @@ use crate::units::components::{
 };
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::team_colors::{TeamColors, UnitColor};
 
 mod emerge;
 mod s3o_mount;
@@ -55,6 +56,9 @@ pub struct SpawnContext<'w, 's> {
     pub model_cache: ResMut<'w, S3OModelCache>,
     pub unit_registry: Res<'w, UnitRegistry>,
     pub weapon_registry: Res<'w, crate::units::content::weapons::WeaponRegistry>,
+    /// The match's owner colours; absent in bare test worlds, where
+    /// every unit wears its faction's.
+    pub team_colors: Option<Res<'w, crate::units::team_colors::TeamColors>>,
 }
 
 /// Cached piece-index lookup for animated factories. Set once when a
@@ -433,7 +437,8 @@ pub fn spawn_unit_facing(
     let model_cache = &mut *ctx.model_cache;
     let unit_registry = &*ctx.unit_registry;
     let model_name = unit_registry.model(kind);
-    let material = unit_material(kind, faction, materials, images, model_cache, model_name);
+    let color = TeamColors::lookup(ctx.team_colors.as_deref(), team, faction);
+    let material = unit_material(kind, color, materials, images, model_cache, model_name);
     let radius = unit_radius(kind, model_cache, unit_registry);
     let mid_y = unit_mid_y(kind, model_cache, unit_registry);
     let selection_sphere = selection_sphere(radius, meshes, model_cache);
@@ -476,6 +481,7 @@ pub fn spawn_unit_facing(
             UnitType(kind),
             faction,
             TeamId(team),
+            UnitColor(color),
             Health::full(unit_registry.max_health(kind)),
             UnitStats::from_registry(kind, unit_registry, radius, mid_y),
             transform,

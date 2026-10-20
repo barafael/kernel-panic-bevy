@@ -1,12 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
 use crate::sim::DetFloat;
-use crate::units::components::Faction;
 use crate::units::content::bundle::bundle;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::model::{S3OModel, S3OPiece, TgaImage};
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::PieceLayout;
+use crate::units::team_colors::TeamColor;
 use bevy::{
     mesh::{Indices, PrimitiveTopology},
     prelude::*,
@@ -32,10 +32,10 @@ pub struct S3OModelCache {
     models: HashMap<String, Option<&'static S3OModel>>,
     /// Textures decoded from their bundle frames on first use.
     raw_textures: HashMap<String, Option<TgaImage>>,
-    colored_textures: HashMap<(String, Faction), Handle<Image>>,
-    /// Unit materials keyed by (tex1 filename, faction); the flat
+    colored_textures: HashMap<(String, TeamColor), Handle<Image>>,
+    /// Unit materials keyed by (tex1 filename, owner colour); the flat
     /// fallback for texture-less models uses an empty filename.
-    unit_materials: HashMap<(String, Faction), Handle<StandardMaterial>>,
+    unit_materials: HashMap<(String, TeamColor), Handle<StandardMaterial>>,
     /// Flattened piece layouts (with per-piece mesh handles) per model
     /// filename; `None` caches a missing / unparseable model.
     piece_layouts: HashMap<String, Option<Arc<PieceLayout>>>,
@@ -54,11 +54,11 @@ pub struct S3OModelCache {
 // ---------------------------------------------------------------------------
 
 /// Material for a unit — shared by every unit drawing the same tex1 in
-/// the same faction. Builds a faction-colored texture from the s3o
+/// the same owner colour. Builds a team-colored texture from the s3o
 /// model's tex1 alpha channel, falling back to a flat emissive material.
 ///
 /// Spring's s3o shader uses tex1's alpha as the detail pattern and RGB=black
-/// to mean "100% team color". We bake the faction color into the texture so
+/// to mean "100% team color". We bake the owner's color into the texture so
 /// that Bevy's standard unlit material renders it correctly.
 ///
 /// The returned handle is shared, so callers that want a per-unit
@@ -66,20 +66,20 @@ pub struct S3OModelCache {
 /// their own handle rather than `get_mut` this one.
 pub fn unit_material(
     _kind: UnitKind,
-    faction: Faction,
+    color: TeamColor,
     materials: &mut Assets<StandardMaterial>,
     images: &mut Assets<Image>,
     cache: &mut S3OModelCache,
     model_filename: &str,
 ) -> Handle<StandardMaterial> {
     let tex1_name = load_s3o_cached(model_filename, cache).map(|model| model.texture1.clone());
-    let key = (tex1_name.clone().unwrap_or_default(), faction);
+    let key = (tex1_name.clone().unwrap_or_default(), color);
     if let Some(handle) = cache.unit_materials.get(&key) {
         return handle.clone();
     }
 
     let handle = if let Some(tex1_name) = tex1_name
-        && let Some(handle) = build_faction_texture(&tex1_name, faction, images, cache)
+        && let Some(handle) = build_team_texture(&tex1_name, color, images, cache)
     {
         materials.add(StandardMaterial {
             base_color_texture: Some(handle),
@@ -87,7 +87,7 @@ pub fn unit_material(
             ..default()
         })
     } else {
-        let color = faction.color();
+        let color = color.color();
         materials.add(StandardMaterial {
             base_color: color,
             emissive: LinearRgba::from(color) * 4.0,
@@ -362,16 +362,16 @@ fn load_raw_tga_cached<'a>(tex_name: &str, cache: &'a mut S3OModelCache) -> Opti
 }
 
 // ---------------------------------------------------------------------------
-// Faction-colored texture building
+// Team-colored texture building
 // ---------------------------------------------------------------------------
 
-fn build_faction_texture(
+fn build_team_texture(
     tex_name: &str,
-    faction: Faction,
+    color: TeamColor,
     images: &mut Assets<Image>,
     cache: &mut S3OModelCache,
 ) -> Option<Handle<Image>> {
-    let key = (tex_name.to_string(), faction);
+    let key = (tex_name.to_string(), color);
     if let Some(handle) = cache.colored_textures.get(&key) {
         return Some(handle.clone());
     }
@@ -379,7 +379,7 @@ fn build_faction_texture(
     // Load the raw TGA; extract dimensions and build colored pixels in a free
     // function so the borrow on `cache` is released before we insert the result.
     let tga = load_raw_tga_cached(tex_name, cache)?;
-    let pixels = colorize_texture(tga, faction.color());
+    let pixels = colorize_texture(tga, color.color());
     let (w, h) = (tga.width, tga.height);
 
     let mut image = create_rgba8_image(w, h, pixels);
@@ -387,7 +387,7 @@ fn build_faction_texture(
     // only hands out the handle — so let the render world take the
     // buffer instead of keeping a 4 MB copy per (texture, faction).
     image.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
-    info!("Built faction texture: {tex_name} x {faction:?} ({w}x{h})");
+    info!("Built team texture: {tex_name} x {color:?} ({w}x{h})");
 
     let handle = images.add(image);
     cache.colored_textures.insert(key, handle.clone());

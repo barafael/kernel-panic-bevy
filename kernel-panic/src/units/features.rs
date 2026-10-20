@@ -34,6 +34,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::model::TgaImage;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::Emerging;
+use crate::units::team_colors::{TeamColor, UnitColor};
 
 /// The owner of every map feature: no seat's, so friendly to no one
 /// (`units::teams::Alliances`), like Spring's features of team -1.
@@ -45,10 +46,10 @@ pub const FEATURE_TEAM: u8 = 255;
 #[derive(Component, Clone, Copy)]
 pub struct Feature {
     pub def: &'static FeatureDef,
-    /// The faction whose colour it wears: a built Bad Block keeps its
+    /// The owner colour it wears: a built Bad Block keeps its
     /// builder's (`CreateWreckage` passes the unit's team, which only
     /// the drawing reads); a map feature has none.
-    pub owner: Option<Faction>,
+    pub owner: Option<TeamColor>,
 }
 
 impl Feature {
@@ -164,7 +165,7 @@ pub fn spawn_map_features(
 pub fn spawn_feature(
     def: &'static FeatureDef,
     pos: Vec3,
-    owner: Option<Faction>,
+    owner: Option<TeamColor>,
     commands: &mut Commands,
     draw: &mut FeatureDraw,
 ) -> Entity {
@@ -205,9 +206,9 @@ pub fn spawn_feature(
     };
     let material = match (owner, png) {
         // Its model's own texture in its owner's colours, as the unit was.
-        (Some(faction), None) => unit_material(
+        (Some(color), None) => unit_material(
             UnitKind::BadBlock,
-            faction,
+            color,
             materials,
             images,
             model_cache,
@@ -288,7 +289,14 @@ pub fn destroy_features(
 #[allow(clippy::type_complexity)]
 pub fn turn_into_features(
     units: Query<
-        (Entity, &UnitType, &Faction, &Transform, &NetId),
+        (
+            Entity,
+            &UnitType,
+            &Faction,
+            Option<&UnitColor>,
+            &Transform,
+            &NetId,
+        ),
         (Without<Emerging>, Without<Dying>),
     >,
     registry: Res<UnitRegistry>,
@@ -298,15 +306,16 @@ pub fn turn_into_features(
     let defs = &crate::units::content::defs::defs().features;
     let mut finished: Vec<_> = units
         .iter()
-        .filter_map(|(entity, kind, faction, tf, id)| {
+        .filter_map(|(entity, kind, faction, color, tf, id)| {
             let def = defs.get(registry.finished_feature(kind.0)?)?;
-            Some((*id, entity, def, *faction, tf.translation))
+            let color = color.map_or(TeamColor::of_faction(*faction), |c| c.0);
+            Some((*id, entity, def, color, tf.translation))
         })
         .collect();
     finished.sort_unstable_by_key(|(id, ..)| *id);
-    for (_, entity, def, faction, pos) in finished {
+    for (_, entity, def, color, pos) in finished {
         commands.entity(entity).despawn();
-        spawn_feature(def, pos, Some(faction), &mut commands, &mut assets.draw());
+        spawn_feature(def, pos, Some(color), &mut commands, &mut assets.draw());
     }
 }
 
@@ -315,6 +324,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+    use crate::units::team_colors::TeamColors;
 
     fn app() -> App {
         let mut app = App::new();
@@ -407,11 +417,14 @@ mod tests {
         let mut app = app();
         app.insert_resource(UnitRegistry::load());
         let at = Vec3::new(40.0, 3.0, 80.0);
+        // The second Hacker seat's colour: not the faction's own.
+        let color = TeamColors::from_factions([Faction::Hacker; 2]).of(1, Faction::Hacker);
         let built = app
             .world_mut()
             .spawn((
                 UnitType(UnitKind::BadBlock),
                 Faction::Hacker,
+                UnitColor(color),
                 Transform::from_translation(at),
                 NetId::default(),
             ))
@@ -453,6 +466,6 @@ mod tests {
             .iter(app.world())
             .map(|(f, tf, h)| (f.def.name.as_str(), f.owner, tf.translation, h.current))
             .collect();
-        assert_eq!(turned, vec![("badblock", Some(Faction::Hacker), at, 400.0)]);
+        assert_eq!(turned, vec![("badblock", Some(color), at, 400.0)]);
     }
 }

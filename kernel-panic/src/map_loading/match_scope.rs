@@ -39,6 +39,7 @@ use crate::sim::MatchSeed;
 use crate::units::ai::AiSeats;
 use crate::units::lifecycle::game_over::GameState;
 use crate::units::player::LocalTeam;
+use crate::units::team_colors::TeamColors;
 use crate::units::teams::Alliances;
 
 /// Marker for match content that has neither a `Transform` nor a UI
@@ -142,6 +143,7 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
     // seats, never from who is watching: every peer runs the same
     // alliances and AI brains.
     world.insert_resource(Alliances::from_setup(setup));
+    world.insert_resource(TeamColors::from_setup(setup));
     world.insert_resource(AiSeats::from_setup(setup));
     world.insert_resource(AiDifficulty(setup.difficulty));
     world.insert_resource(ActiveMatch(setup.clone()));

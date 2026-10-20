@@ -38,6 +38,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::{KnownWeapons, WeaponId, WeaponRegistry};
 use crate::units::spatial::{SpatialIndex, flat_dist_sq};
+use crate::units::team_colors::{TeamColor, TeamColors};
 use crate::units::teams::Alliances;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
@@ -57,15 +58,15 @@ const SIGTERM_BOMB_MODEL: &str = "sigterm.s3o";
 pub struct SigTermAssets {
     signal_mesh: Option<Handle<Mesh>>,
     bomb_mesh: Option<Handle<Mesh>>,
-    /// One material per faction (caster colour-tints the visual).
-    signal_material: HashMap<Faction, Handle<StandardMaterial>>,
-    bomb_material: HashMap<Faction, Handle<StandardMaterial>>,
+    /// One material per owner colour (caster colour-tints the visual).
+    signal_material: HashMap<TeamColor, Handle<StandardMaterial>>,
+    bomb_material: HashMap<TeamColor, Handle<StandardMaterial>>,
 }
 
 impl SigTermAssets {
     fn signal(
         &mut self,
-        faction: Faction,
+        color: TeamColor,
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
@@ -80,11 +81,11 @@ impl SigTermAssets {
             .clone();
         let material = self
             .signal_material
-            .entry(faction)
+            .entry(color)
             .or_insert_with(|| {
                 unit_material(
                     UnitKind::Signal,
-                    faction,
+                    color,
                     materials,
                     images,
                     model_cache,
@@ -97,7 +98,7 @@ impl SigTermAssets {
 
     fn bomb(
         &mut self,
-        faction: Faction,
+        color: TeamColor,
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
         images: &mut Assets<Image>,
@@ -110,16 +111,16 @@ impl SigTermAssets {
                     .unwrap_or_else(|| meshes.add(Sphere::new(14.0)))
             })
             .clone();
-        // Why: `unit_material` keys textures by faction, not by
-        // UnitKind — Signal is the right faction lookup for both
-        // stages of the strike.
+        // Why: `unit_material` keys textures by owner colour, not by
+        // UnitKind — Signal is the right lookup for both stages of the
+        // strike.
         let material = self
             .bomb_material
-            .entry(faction)
+            .entry(color)
             .or_insert_with(|| {
                 unit_material(
                     UnitKind::Signal,
-                    faction,
+                    color,
                     materials,
                     images,
                     model_cache,
@@ -140,29 +141,36 @@ pub struct SigTermVisuals<'w> {
     images: ResMut<'w, Assets<Image>>,
     model_cache: ResMut<'w, S3OModelCache>,
     assets: ResMut<'w, SigTermAssets>,
+    team_colors: Option<Res<'w, TeamColors>>,
 }
 
 impl SigTermVisuals<'_> {
-    fn signal(&mut self, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+    /// The Signal of `owner`'s caster of `faction`.
+    fn signal(&mut self, owner: u8, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
         let Self {
             meshes,
             materials,
             images,
             model_cache,
             assets,
+            team_colors,
         } = self;
-        assets.signal(faction, meshes, materials, images, model_cache)
+        let color = TeamColors::lookup(team_colors.as_deref(), owner, faction);
+        assets.signal(color, meshes, materials, images, model_cache)
     }
 
-    fn bomb(&mut self, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+    /// The bomb of `owner`'s caster of `faction`.
+    fn bomb(&mut self, owner: u8, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
         let Self {
             meshes,
             materials,
             images,
             model_cache,
             assets,
+            team_colors,
         } = self;
-        assets.bomb(faction, meshes, materials, images, model_cache)
+        let color = TeamColors::lookup(team_colors.as_deref(), owner, faction);
+        assets.bomb(color, meshes, materials, images, model_cache)
     }
 }
 
@@ -770,7 +778,7 @@ pub fn process_command_fire(
                 owner_team: team.0,
                 owner_faction: *faction,
             };
-            let (signal_mesh, signal_material) = visuals.signal(*faction);
+            let (signal_mesh, signal_material) = visuals.signal(team.0, *faction);
             commands.spawn((
                 Transform::from_translation(caster_pos).with_rotation(signal.orientation()),
                 signal,
@@ -1487,7 +1495,7 @@ pub fn tick_sigterm_signals(
         let Some(bomb) = dropped else {
             continue;
         };
-        let (bomb_mesh, bomb_material) = visuals.bomb(signal.owner_faction);
+        let (bomb_mesh, bomb_material) = visuals.bomb(signal.owner_team, signal.owner_faction);
         commands.spawn((
             Transform::from_translation(bomb.pos).with_rotation(nose_along(bomb.vel, 0.0)),
             bomb,

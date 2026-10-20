@@ -244,7 +244,7 @@ const CLOAK_FADE_ALPHA: f32 = 0.5;
 #[derive(Component)]
 pub struct CloakFadeMaterials {
     /// (piece_entity, original) — the shared material to put back.
-    overrides: Vec<(Entity, Handle<StandardMaterial>)>,
+    pub(crate) overrides: Vec<(Entity, Handle<StandardMaterial>)>,
 }
 
 /// Give friendly cloaked units a half-alpha clone of their model

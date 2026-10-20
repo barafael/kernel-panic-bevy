@@ -59,6 +59,11 @@ const FRAME_LOOP_WRITES: &[(&str, &str, &str)] = &[
     ("", "visibility::Visibility", "rendering"),
     (
         "",
+        "mesh_material::MeshMaterial3d<",
+        "which material a piece draws: the tick swaps them (fades, cloak, a taken unit's owner colour) but decides nothing by them",
+    ),
+    (
+        "",
         "meshes::S3OModelCache",
         "the model cache: the same models whoever loads them first",
     ),

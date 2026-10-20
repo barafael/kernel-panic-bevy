@@ -46,6 +46,7 @@ use crate::units::components::{Faction, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::construction::{PendingBuild, buildings_for, footprints_overlap};
+use crate::units::team_colors::{TeamColor, UnitColor};
 
 pub(super) struct PlacementPlugin;
 
@@ -512,7 +513,7 @@ fn sync_ghosts(
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
     registry: Res<UnitRegistry>,
-    selected_q: Query<&Faction, With<Selected>>,
+    selected_q: Query<&UnitColor, With<Selected>>,
     mut ghosts: Query<
         (
             &mut Transform,
@@ -535,7 +536,10 @@ fn sync_ghosts(
         return;
     };
     while state.ghosts.len() < state.sites.len() {
-        let faction = selected_q.iter().next().copied().unwrap_or(Faction::System);
+        let color = selected_q
+            .iter()
+            .next()
+            .map_or(TeamColor::of_faction(Faction::System), |c| c.0);
         let mut mesh = unit_mesh(kind, &mut meshes, &mut model_cache, &registry);
         if meshes.get(&mesh).is_none_or(|m| m.count_vertices() == 0) {
             // The Debug is a `nullobject.s3o`: nothing to draw, and
@@ -547,7 +551,7 @@ fn sync_ghosts(
         let model_name = registry.model(kind).to_string();
         let base = unit_material(
             kind,
-            faction,
+            color,
             &mut materials,
             &mut images,
             &mut model_cache,

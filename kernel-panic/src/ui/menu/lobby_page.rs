@@ -30,6 +30,7 @@ use crate::net::chat::{CHAT_MAX, ChatLog, type_into};
 use crate::net::lobby::{
     Check, Field, Lobby, LobbyAction, LobbyRoom, NAME_MAX, Occupant, RoomId, RoomState,
 };
+use crate::units::team_colors::TeamColors;
 
 /// The frame of a text field's button; its label follows the field
 /// as it is typed into ([`type_into_fields`]).
@@ -251,6 +252,11 @@ fn room_view(
         ))
         .id();
     commands.entity(columns).add_child(table);
+    // What each seat's units will wear: open seats drop out at the
+    // start, so the colours go to the occupied seats in order.
+    let occupied = room.seats.iter().filter(|s| s.who != Occupant::Open);
+    let colors = TeamColors::from_factions(occupied.map(|s| s.faction()));
+    let mut owner = 0u8;
     for (i, seat) in room.seats.iter().enumerate() {
         let r = commands
             .spawn((
@@ -267,6 +273,24 @@ fn room_view(
         label_cell(&format!("Seat {}", i + 1), TEXT_WHITE, size)
             .min_width_px(window_w * 0.08)
             .spawn(commands, r);
+        let swatch = (seat.who != Occupant::Open).then(|| {
+            owner += 1;
+            colors.of(owner - 1, seat.faction()).color()
+        });
+        let swatch = commands
+            .spawn((
+                Node {
+                    width: Val::Px(size * 0.7),
+                    height: Val::Px(size * 0.7),
+                    align_self: AlignSelf::Center,
+                    flex_shrink: 0.0,
+                    ..default()
+                },
+                BackgroundColor(swatch.unwrap_or(Color::NONE)),
+                Pickable::IGNORE,
+            ))
+            .id();
+        commands.entity(r).add_child(swatch);
         let mine = me.is_some_and(|me| seat.who == Occupant::Human(me));
         let (text, color) = occupant_text(room, seat.who, me);
         let wide = window_w * 0.3;

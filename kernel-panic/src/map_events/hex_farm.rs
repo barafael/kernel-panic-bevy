@@ -58,6 +58,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::lifecycle::spawning::Emerging;
 use crate::units::spatial::flat_dist_sq;
+use crate::units::team_colors::{TeamColor, UnitColor};
 
 /// Resolution of the footprint image the minimap is painted from.
 pub const MINIMAP_RES: usize = 400;
@@ -579,7 +580,10 @@ fn hex_farm_owners(
     state: Res<HexFarmState>,
     registry: Res<UnitRegistry>,
     spawned_finished: Query<Entity, (Added<UnitType>, Without<Emerging>)>,
-    live: Query<(Entity, &Transform, &UnitType, &Faction), (Without<Emerging>, Without<Dying>)>,
+    live: Query<
+        (Entity, &Transform, &UnitType, &Faction, Option<&UnitColor>),
+        (Without<Emerging>, Without<Dying>),
+    >,
     ids: Query<&NetId>,
     mut commands: Commands,
 ) {
@@ -614,14 +618,14 @@ fn hex_farm_owners(
 
     // `UnitFinished`: the finisher's team owns the tower.
     for e in finished {
-        let Ok((_, tf, kind, faction)) = live.get(e) else {
+        let Ok((_, tf, kind, faction, color)) = live.get(e) else {
             continue; // died before finishing
         };
         if !big(kind.0) {
             continue;
         }
         if let Some(n) = tower_of(tf.translation) {
-            owners[n] = faction.color().to_linear().to_f32_array();
+            owners[n] = tint(faction, color);
             commands.entity(e).try_insert(TowerClaim(n));
         }
     }
@@ -629,13 +633,13 @@ fn hex_farm_owners(
     // `UnitDestroyed`: the nearest remaining finished big building.
     for (n, dead) in released {
         let mut best: Option<(f32, Rgba)> = None;
-        for (e, otf, okind, faction) in &live {
+        for (e, otf, okind, faction, color) in &live {
             if e == dead || !big(okind.0) {
                 continue;
             }
             let d2 = flat_dist_sq(otf.translation, centre(n));
             if d2 <= r2 && best.is_none_or(|(b, _)| d2 < b) {
-                best = Some((d2, faction.color().to_linear().to_f32_array()));
+                best = Some((d2, tint(faction, color)));
             }
         }
         owners[n] = best.map_or(WHITE, |(_, c)| c);
@@ -645,6 +649,15 @@ fn hex_farm_owners(
         view.owners = owners;
         view.still_dirty = true;
     }
+}
+
+/// A tower's colour: its claimer's owner colour (`TeamColors[hex.owner]`).
+fn tint(faction: &Faction, color: Option<&UnitColor>) -> Rgba {
+    color
+        .map_or(TeamColor::of_faction(*faction), |c| c.0)
+        .color()
+        .to_linear()
+        .to_f32_array()
 }
 
 /// `UnitFinished` of a unit that was being built: its [`Emerging`] went

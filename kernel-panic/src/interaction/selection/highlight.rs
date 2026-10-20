@@ -3,9 +3,9 @@
 //! variant, stashing the original handle in `OriginalMaterial` so we can
 //! restore it when the highlight ends.
 //!
-//! Brightened variants are minted once per (source material, faction,
+//! Brightened variants are minted once per (source material, owner colour,
 //! factor) and reused: all pieces of a unit share one material and all
-//! units of a faction share a handful, so hovering across an army costs
+//! units of an owner share a handful, so hovering across an army costs
 //! a few asset adds in total instead of one per piece per state change.
 
 use std::collections::HashMap;
@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use super::core::{Hovered, Selected, SelectionSet};
-use crate::units::components::{Faction, UnitType};
+use crate::units::components::UnitType;
+use crate::units::team_colors::UnitColor;
 
 pub(super) struct HighlightPlugin;
 
@@ -32,21 +33,21 @@ const SELECTED_BRIGHTNESS: f32 = 2.5;
 /// Stores the unit's original (un-brightened) material handle so we can
 /// restore it when the unit is no longer hovered or selected.
 #[derive(Component)]
-struct OriginalMaterial(Handle<StandardMaterial>);
+pub(crate) struct OriginalMaterial(pub(crate) Handle<StandardMaterial>);
 
 /// Tracks the brightness factor currently baked into a unit's materials.
 /// The system skips re-applying when this matches the desired factor, so a
 /// steady selection doesn't touch materials every frame.
 #[derive(Component)]
-struct Highlighted(f32);
+pub(crate) struct Highlighted(f32);
 
-/// Brightened variants keyed by (source material, faction tint, factor
-/// bits). Sources are the shared faction materials, plus the per-unit
+/// Brightened variants keyed by (source material, owner tint, factor
+/// bits). Sources are the shared owner-coloured materials, plus the per-unit
 /// emerge-fade / cloak clones of units highlighted mid-fade; entries
 /// whose source asset is gone are pruned whenever a new one is added.
 #[derive(Resource, Default)]
 struct BrightMaterials(
-    HashMap<(AssetId<StandardMaterial>, Faction, u32), Handle<StandardMaterial>>,
+    HashMap<(AssetId<StandardMaterial>, UnitColor, u32), Handle<StandardMaterial>>,
 );
 
 /// Two epsilon for the `f32` factor comparison so we treat `HOVER_BRIGHTNESS`
@@ -59,10 +60,10 @@ const FACTOR_EPS: f32 = 0.01;
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 fn update_unit_highlight(
     hovered_q: Query<
-        (Entity, &Faction, Option<&Highlighted>),
+        (Entity, &UnitColor, Option<&Highlighted>),
         (With<Hovered>, Without<Selected>, With<UnitType>),
     >,
-    selected_q: Query<(Entity, &Faction, Option<&Highlighted>), (With<Selected>, With<UnitType>)>,
+    selected_q: Query<(Entity, &UnitColor, Option<&Highlighted>), (With<Selected>, With<UnitType>)>,
     unhighlighted_q: Query<
         Entity,
         (
@@ -86,7 +87,7 @@ fn update_unit_highlight(
 
     // Apply brightness only when the state actually changed — a steady
     // hover/selection must not re-insert materials every frame.
-    let pending: Vec<(Entity, Faction, f32)> = hovered_q
+    let pending: Vec<(Entity, UnitColor, f32)> = hovered_q
         .iter()
         .map(|(e, f, h)| (e, f, h, HOVER_BRIGHTNESS))
         .chain(
@@ -97,10 +98,10 @@ fn update_unit_highlight(
         .filter(|(_, _, current, factor)| needs_rebrighten(*current, *factor))
         .map(|(e, f, _, factor)| (e, *f, factor))
         .collect();
-    for (unit_entity, faction, factor) in pending {
+    for (unit_entity, owner, factor) in pending {
         brighten_unit(
             unit_entity,
-            &faction,
+            &owner,
             factor,
             &children_q,
             &mesh_mat_q,
@@ -121,7 +122,7 @@ fn needs_rebrighten(current: Option<&Highlighted>, desired: f32) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn brighten_unit(
     unit_entity: Entity,
-    faction: &Faction,
+    owner: &UnitColor,
     factor: f32,
     children_q: &Query<&Children>,
     mesh_mat_q: &Query<&MeshMaterial3d<StandardMaterial>>,
@@ -146,7 +147,7 @@ fn brighten_unit(
         apply_brightness(
             entity,
             &current_mat.0,
-            faction,
+            owner,
             factor,
             original_q,
             materials,
@@ -215,7 +216,7 @@ fn collect_original_descendants(
 fn apply_brightness(
     entity: Entity,
     current_handle: &Handle<StandardMaterial>,
-    faction: &Faction,
+    owner: &UnitColor,
     factor: f32,
     original_q: &Query<&OriginalMaterial>,
     materials: &mut Assets<StandardMaterial>,
@@ -223,7 +224,7 @@ fn apply_brightness(
     commands: &mut Commands,
 ) {
     // The source is whatever the piece wore before its first highlight —
-    // the shared faction material, or a per-unit fade/cloak clone if
+    // the shared owner-coloured material, or a per-unit fade/cloak clone if
     // the unit was highlighted mid-fade — and is what gets restored.
     let source_handle = if let Ok(orig) = original_q.get(entity) {
         orig.0.clone()
@@ -235,11 +236,11 @@ fn apply_brightness(
         h
     };
 
-    let key = (source_handle.id(), *faction, factor.to_bits());
+    let key = (source_handle.id(), *owner, factor.to_bits());
     let handle = if let Some(handle) = bright.0.get(&key) {
         handle.clone()
     } else {
-        let Some(variant) = brightened(materials.get(&source_handle), faction, factor) else {
+        let Some(variant) = brightened(materials.get(&source_handle), owner, factor) else {
             return;
         };
         let handle = materials.add(variant);
@@ -255,20 +256,20 @@ fn apply_brightness(
 /// The brightened variant of `source`, or `None` if the asset is gone.
 fn brightened(
     source: Option<&StandardMaterial>,
-    faction: &Faction,
+    owner: &UnitColor,
     factor: f32,
 ) -> Option<StandardMaterial> {
     let source = source?;
     // Unit materials are `unlit: true`, so the fragment shader only scales
     // `base_color_texture * base_color`. Blend the source `base_color`
-    // toward the faction tint so the brightening is faction-coloured
+    // toward the owner tint so the brightening is owner-coloured
     // without saturating away the texture's own hues, and scale overall
     // brightness by `factor`. Preserve alpha from the source so semi-
     // transparent materials (fade / cloak clones) don't turn into opaque
     // coloured blobs.
     let mut bright = source.clone();
     let src = LinearRgba::from(source.base_color);
-    let tint = LinearRgba::from(faction.color());
+    let tint = LinearRgba::from(owner.0.color());
     const TINT_MIX: f32 = 0.4;
     let mixed = LinearRgba {
         red: (src.red * (1.0 - TINT_MIX) + tint.red * TINT_MIX) * factor,

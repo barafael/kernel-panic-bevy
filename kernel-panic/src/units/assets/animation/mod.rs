@@ -38,6 +38,7 @@ use bevy::prelude::*;
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::components::Faction;
 use crate::units::content::definitions::UnitKind;
+use crate::units::team_colors::{TeamColor, UnitColor};
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
 pub use units::{driver_for, has_aim_weapon, piece_names};
@@ -756,7 +757,7 @@ pub struct AnimDrivers<'w, 's> {
         (
             Entity,
             &'static mut UnitAnimator,
-            &'static Faction,
+            (&'static Faction, Option<&'static UnitColor>),
             &'static GlobalTransform,
             Option<&'static MoveTarget>,
             Option<&'static MovePath>,
@@ -842,7 +843,9 @@ pub fn animation_system(time: Res<Time>, mut drivers: AnimDrivers, mut fx: AnimF
 
         tick_rig(rig, dt);
 
-        apply_and_drain(entity, rig, *faction, unit_gtf, &mut fx);
+        let (faction, color) = faction;
+        let color = color.map_or(TeamColor::of_faction(*faction), |c| c.0);
+        apply_and_drain(entity, rig, color, unit_gtf, &mut fx);
     }
 }
 
@@ -927,7 +930,7 @@ pub fn tick_rig(rig: &mut AnimRig, dt: f32) {
 fn apply_and_drain(
     entity: Entity,
     rig: &mut AnimRig,
-    faction: Faction,
+    color: TeamColor,
     unit_gtf: &GlobalTransform,
     fx: &mut AnimFxOut,
 ) {
@@ -968,7 +971,7 @@ fn apply_and_drain(
                 let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
                 spawn_death_particle(
                     piece_world_pos,
-                    faction,
+                    color,
                     &mut fx.death_assets,
                     &mut fx.commands,
                     &mut fx.meshes,
@@ -1028,7 +1031,7 @@ fn apply_and_drain(
             FxEvent::Emit { piece, kind } if in_range(piece) => {
                 let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
                 let up = unit_gtf.up().as_vec3();
-                dispatch_emit_sfx(kind, piece_world_pos, up, faction, &mut fx.explosions);
+                dispatch_emit_sfx(kind, piece_world_pos, up, color, &mut fx.explosions);
             }
             FxEvent::BuildArc { piece } if in_range(piece) => {
                 // `BuildArc(u, ud, team, piece)`: from the piece to the
@@ -1098,7 +1101,7 @@ pub fn sync_muzzle_pieces(
 // EmitSfx dispatch
 // ---------------------------------------------------------------------------
 
-/// Turn a typed [`SfxKind`] into a faction-coloured explosion event.
+/// Turn a typed [`SfxKind`] into a owner-coloured explosion event.
 ///
 /// The raw COB opcode → kind decoding lives in [`SfxKind`]; this is the
 /// rendering half. Sizes follow the old range-bucketing so the visual
@@ -1108,7 +1111,7 @@ fn dispatch_emit_sfx(
     kind: SfxKind,
     pos: Vec3,
     up: Vec3,
-    faction: Faction,
+    color: TeamColor,
     explosions: &mut PendingExplosions,
 ) {
     let (radius, intensity) = match kind {
@@ -1118,7 +1121,7 @@ fn dispatch_emit_sfx(
             explosions.events.push(ExplosionEvent {
                 pos,
                 up,
-                rgb: faction.rgb_f32(),
+                rgb: color.rgb_f32(),
                 radius: 8.0,
                 ceg_name: name.to_string(),
             });
@@ -1128,7 +1131,7 @@ fn dispatch_emit_sfx(
         SfxKind::BuildBeam => return,
     };
 
-    let base = faction.rgb_f32();
+    let base = color.rgb_f32();
     let rgb = [
         base[0] * intensity,
         base[1] * intensity,
@@ -1155,52 +1158,47 @@ pub struct DeathParticle {
     pub max_lifetime: f32,
 }
 
-/// Lazily-populated shared mesh and per-faction emissive materials for
+/// Lazily-populated shared mesh and per-owner-colour emissive materials for
 /// death particles. `spawn_death_particle` seeds the entry the first time
-/// it needs a given faction color; every subsequent particle re-uses the
+/// it needs a given owner color; every subsequent particle re-uses the
 /// same Handle. Mirrors the pattern used by `BuildSparkleAssets` /
 /// `ImpactBurstAssets`.
 #[derive(Resource, Default)]
 pub struct DeathParticleAssets {
     pub mesh: Option<Handle<Mesh>>,
-    pub system: Option<Handle<StandardMaterial>>,
-    pub hacker: Option<Handle<StandardMaterial>>,
-    pub network: Option<Handle<StandardMaterial>>,
+    pub by_color: std::collections::HashMap<TeamColor, Handle<StandardMaterial>>,
 }
 
 impl DeathParticleAssets {
     fn material_for(
         &mut self,
-        faction: Faction,
+        color: TeamColor,
         materials: &mut Assets<StandardMaterial>,
     ) -> Handle<StandardMaterial> {
-        let slot = match faction {
-            Faction::System => &mut self.system,
-            Faction::Hacker => &mut self.hacker,
-            Faction::Network => &mut self.network,
-        };
-        slot.get_or_insert_with(|| {
-            let color = LinearRgba::from(faction.color());
-            materials.add(StandardMaterial {
-                base_color: Color::from(color),
-                emissive: color * 6.0,
-                unlit: true,
-                alpha_mode: AlphaMode::Add,
-                ..default()
+        self.by_color
+            .entry(color)
+            .or_insert_with(|| {
+                let color = LinearRgba::from(color.color());
+                materials.add(StandardMaterial {
+                    base_color: Color::from(color),
+                    emissive: color * 6.0,
+                    unlit: true,
+                    alpha_mode: AlphaMode::Add,
+                    ..default()
+                })
             })
-        })
-        .clone()
+            .clone()
     }
 }
 
-/// Spawn a brief expanding, fading burst at `pos` in the unit's faction color.
+/// Spawn a brief expanding, fading burst at `pos` in the unit's owner color.
 ///
-/// Mesh and per-faction material are owned by [`DeathParticleAssets`] so
+/// Mesh and per-colour material are owned by [`DeathParticleAssets`] so
 /// every burst reuses the same Handle — an arena full of dying units
 /// doesn't each mint a fresh sphere and material asset.
 fn spawn_death_particle(
     pos: Vec3,
-    faction: Faction,
+    color: TeamColor,
     assets: &mut DeathParticleAssets,
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -1210,7 +1208,7 @@ fn spawn_death_particle(
         .mesh
         .get_or_insert_with(|| meshes.add(Sphere::new(1.0).mesh().ico(2).unwrap()))
         .clone();
-    let material = assets.material_for(faction, materials);
+    let material = assets.material_for(color, materials);
 
     commands.spawn((
         DeathParticle {

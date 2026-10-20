@@ -23,6 +23,7 @@ use crate::units::content::weapons::{DeathBlast, WeaponRegistry};
 use crate::units::lifecycle::bookkeeping::{IdleAutoHeal, Kamikaze};
 use crate::units::lifecycle::spawning::{BuildDriven, Emerging};
 use crate::units::spatial::SpatialIndex;
+use crate::units::team_colors::{TeamColor, UnitColor};
 use crate::units::teams::Alliances;
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
@@ -244,7 +245,7 @@ pub fn death_system(
             Entity,
             &UnitType,
             &Health,
-            &Faction,
+            (&Faction, Option<&UnitColor>),
             &GlobalTransform,
             Option<&Infected>,
             Has<BuildDriven>,
@@ -270,7 +271,8 @@ pub fn death_system(
     // left it standing at 0 HP.
     let mut changed: Vec<_> = query.iter().collect();
     changed.sort_unstable_by_key(|item| *item.7);
-    for (entity, unit, health, faction, gtf, infected, being_built, _) in changed {
+    for (entity, unit, health, (faction, color), gtf, infected, being_built, _) in changed {
+        let color = color.map_or(TeamColor::of_faction(*faction), |c| c.0);
         if health.current <= 0.0 {
             // If the dying unit was infected, queue a Virus spawn for the
             // attacker's team at the death location (infection.lua's
@@ -321,7 +323,7 @@ pub fn death_system(
             // the upstream CEG would render. Scaled by the ExplodeAs
             // weapon's `area_of_effect` and tinted with the weapon's
             // own `rgb_color` so Virus / Logic Bomb / RetroDeathBig each
-            // read differently. Fall back to faction colour for weapons
+            // read differently. Fall back to the owner's colour for weapons
             // without a configured colour so the ring still pops.
             //
             // The resolution is cached per kind (`WeaponRegistry::
@@ -353,18 +355,18 @@ pub fn death_system(
                 explosions.events.push(ExplosionEvent {
                     pos,
                     up,
-                    rgb: blast.rgb.unwrap_or_else(|| faction.rgb_f32()),
+                    rgb: blast.rgb.unwrap_or_else(|| color.rgb_f32()),
                     radius: blast.radius,
                     ceg_name: blast.ceg_name.clone(),
                 });
             } else {
-                // Even units without an ExplodeAs get a small faction-
+                // Even units without an ExplodeAs get a small owner-
                 // coloured pop — otherwise Bits and Packets vanish
                 // silently, which reads as a bug.
                 explosions.events.push(ExplosionEvent {
                     pos,
                     up,
-                    rgb: faction.rgb_f32(),
+                    rgb: color.rgb_f32(),
                     radius: 16.0,
                     ceg_name: String::new(),
                 });

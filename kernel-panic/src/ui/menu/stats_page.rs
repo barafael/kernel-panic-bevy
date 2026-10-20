@@ -20,24 +20,22 @@ use super::{Anchor, ButtonSpec, LabelSpec, MenuAction, NAV_BLUE, anchored};
 use crate::sim::DetFloat;
 use crate::stats::{MatchStats, SeatStats, Stat};
 
-/// Seat colours: distinct even when two seats play one faction.
-const SEAT_COLORS: [[u8; 3]; 8] = [
-    [60, 255, 90],
-    [255, 70, 70],
-    [80, 150, 255],
-    [255, 230, 50],
-    [255, 100, 255],
-    [80, 255, 255],
-    [255, 150, 50],
-    [220, 220, 220],
-];
-
-fn seat_rgb(seat: usize) -> [u8; 3] {
-    SEAT_COLORS[seat % SEAT_COLORS.len()]
+/// A seat's colour: its units' in the match
+/// ([`TeamColors`](crate::units::team_colors::TeamColors)), so a line
+/// reads as the army it counts, and two seats of one faction differ.
+fn seat_rgb(stats: &MatchStats, seat: usize) -> [u8; 3] {
+    use crate::units::components::Faction;
+    let factions = stats
+        .seats
+        .iter()
+        .map(|s| s.faction.unwrap_or(Faction::System));
+    let colors = crate::units::team_colors::TeamColors::from_factions(factions);
+    let c = Srgba::from(colors.of(seat as u8, Faction::System).color());
+    [c.red, c.green, c.blue].map(|v| (v.det_clamp(0.0, 1.0) * 255.0).round() as u8)
 }
 
-fn seat_color(seat: usize) -> Color {
-    let [r, g, b] = seat_rgb(seat);
+fn seat_color(stats: &MatchStats, seat: usize) -> Color {
+    let [r, g, b] = seat_rgb(stats, seat);
     Color::srgb_u8(r, g, b)
 }
 
@@ -250,7 +248,7 @@ fn draw_chart(
             continue;
         }
         let series = seat.series(view.stat);
-        let color = alpha(seat_rgb(i));
+        let color = alpha(seat_rgb(stats, i));
         let mut points = stats.ticks.iter().zip(series).map(|(&t, &v)| at(t, v));
         let Some(mut prev) = points.next() else {
             continue;
@@ -278,7 +276,7 @@ fn draw_chart(
         } else {
             (y - brush, false)
         };
-        canvas.marker(x, tip, size, up, alpha(seat_rgb(i)), [0, 0, 0, 255]);
+        canvas.marker(x, tip, size, up, alpha(seat_rgb(stats, i)), [0, 0, 0, 255]);
     }
     canvas
 }
@@ -349,9 +347,9 @@ pub(super) fn stats_page(
     commands.entity(root).add_child(row);
     for (i, seat) in stats.seats.iter().enumerate() {
         let color = if view.shown(i) {
-            seat_color(i)
+            seat_color(stats, i)
         } else {
-            seat_color(i).darker(0.5)
+            seat_color(stats, i).darker(0.5)
         };
         let text = seat_label(i, seat, local);
         ButtonSpec::cell(
@@ -506,6 +504,8 @@ mod tests {
         stats.ticks = vec![0, 30, 60];
         for v in [[0.0, 50.0, 100.0], [100.0, 50.0, 0.0]] {
             let mut seat = SeatStats::default();
+            // A mirror: the two lines still differ.
+            seat.faction = Some(crate::units::components::Faction::Network);
             seat.units = v.to_vec();
             stats.seats.push(seat);
         }
@@ -531,12 +531,12 @@ mod tests {
         };
         let c = draw_chart(&stats, &view, (101, 101), 100.0, 4, 1.0);
         // Seat 0 rises from the bottom-left, seat 1 falls from the top-left.
-        assert_eq!(pixel(&c, 1, 99), seat_rgb(0));
-        assert_eq!(pixel(&c, 1, 1), seat_rgb(1));
+        assert_eq!(pixel(&c, 1, 99), seat_rgb(&stats, 0));
+        assert_eq!(pixel(&c, 1, 1), seat_rgb(&stats, 1));
         // The Socket's arrowhead under seat 0's line mid-chart.
-        assert_eq!(pixel(&c, 50, 50 + 2 + 3), seat_rgb(0));
+        assert_eq!(pixel(&c, 50, 50 + 2 + 3), seat_rgb(&stats, 0));
         view.apply(StatsAction::Toggle(1));
         let c = draw_chart(&stats, &view, (101, 101), 100.0, 4, 1.0);
-        assert_ne!(pixel(&c, 1, 1), seat_rgb(1), "seat 1 hidden");
+        assert_ne!(pixel(&c, 1, 1), seat_rgb(&stats, 1), "seat 1 hidden");
     }
 }
