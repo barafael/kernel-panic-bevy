@@ -1217,6 +1217,7 @@ mod tests {
                 pos,
                 hit_radius: 0.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team,
                 kind,
                 hp_positive: true,

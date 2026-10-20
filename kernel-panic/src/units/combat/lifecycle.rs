@@ -328,6 +328,7 @@ pub fn death_system(
             // bind_units`, run at startup); a registry that was never
             // bound (tests) resolves it here, per death, as before.
             let pos = gtf.translation();
+            let up = gtf.up().as_vec3();
             let resolved;
             let blast: Option<&DeathBlast> = match weapon_registry.death_blast(unit.0) {
                 Some(cached) => cached,
@@ -351,6 +352,7 @@ pub fn death_system(
 
                 explosions.events.push(ExplosionEvent {
                     pos,
+                    up,
                     rgb: blast.rgb.unwrap_or_else(|| faction.rgb_f32()),
                     radius: blast.radius,
                     ceg_name: blast.ceg_name.clone(),
@@ -361,6 +363,7 @@ pub fn death_system(
                 // silently, which reads as a bug.
                 explosions.events.push(ExplosionEvent {
                     pos,
+                    up,
                     rgb: faction.rgb_f32(),
                     radius: 16.0,
                     ceg_name: String::new(),
@@ -567,6 +570,31 @@ mod tests {
         assert!(world.get::<Dying>(other).is_some());
     }
 
+    /// A unit dying tilted on a ramp bursts square to the ramp: its
+    /// explosion carries the unit's up vector, not world up.
+    #[test]
+    fn death_explosion_follows_the_unit_tilt() {
+        let mut world = resolve_world(UnitRegistry::empty(), WeaponRegistry::default());
+        let tilt = Quat::from_rotation_z(0.4);
+        let unit = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                Faction::System,
+                GlobalTransform::from(Transform::from_rotation(tilt)),
+                Health::full(100.0),
+            ))
+            .id();
+        world.get_mut::<Health>(unit).unwrap().current = 0.0;
+        run_resolve(&mut world);
+        let events = &world.resource::<PendingExplosions>().events;
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].up.abs_diff_eq(tilt * Vec3::Y, 1e-5),
+            "{}",
+            events[0].up
+        );
+    }
+
     /// Why: a triggered Logic Bomb queued its `logic_bomb` weapon itself
     /// and zeroed its HP, then `death_system` queued its `ExplodeAs`
     /// (also `logic_bomb`) — two blasts. Upstream `ForcedKillUnit` fires
@@ -596,6 +624,7 @@ mod tests {
             pos: Vec3::new(30.0, 0.0, 0.0),
             hit_radius: 8.0,
             mid_y: 0.0,
+            up: Vec3::Y,
             team: 1,
             kind: UnitKind::Bit,
             hp_positive: true,

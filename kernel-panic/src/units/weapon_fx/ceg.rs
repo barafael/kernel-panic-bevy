@@ -382,6 +382,8 @@ pub(super) struct CegDelayedSpawn {
     pub delay_secs: f32,
     pub pos: Vec3,
     pub dir: Vec3,
+    /// The spawning CEG's up vector, passed on to `target_ceg`.
+    pub up: Vec3,
     /// `Arc<str>` because one spawner fans out into `count` timers
     /// (`system_nx`: 240 per cast) — a refcount bump each, not a fresh
     /// `String` allocation each.
@@ -389,7 +391,8 @@ pub(super) struct CegDelayedSpawn {
 }
 
 /// One live `CStandardGroundFlash` (`Rendering/GroundFlash.cpp`): two
-/// additive quads flat on the ground at `pos` (ground height + 1). The
+/// additive quads on the ground at `pos` (ground height + 1), in the
+/// plane of the terrain under them (`CGroundFlash::CalcNormal`). The
 /// `groundring` square is `circleGrowth` (half-size) at birth and grows
 /// that much every frame while its alpha falls from `circleAlpha` to 0
 /// over `ttl`; the `groundflash` square stays `flashSize` and its alpha
@@ -398,6 +401,9 @@ pub(super) struct CegDelayedSpawn {
 #[derive(Component)]
 pub(super) struct CegGroundFlash {
     pub pos: Vec3,
+    /// The quads' axes in the ground plane: world X and Z tilted onto
+    /// the terrain ([`ground_axes`]).
+    pub axes: (Vec3, Vec3),
     pub flash_size: f32,
     pub flash_alpha: f32,
     pub circle_growth: f32,
@@ -409,9 +415,10 @@ pub(super) struct CegGroundFlash {
 }
 
 impl CegGroundFlash {
-    fn new(gf: &spring_tdf::GroundFlash, pos: Vec3) -> Self {
+    fn new(gf: &spring_tdf::GroundFlash, pos: Vec3, normal: Vec3) -> Self {
         Self {
             pos,
+            axes: ground_axes(normal),
             flash_size: gf.flash_size,
             flash_alpha: gf.flash_alpha,
             circle_growth: gf.circle_growth,
@@ -448,28 +455,56 @@ impl CegGroundFlash {
     }
 }
 
-/// A square of half-size `s` flat on the ground around `pos`, corners
+/// A square of half-size `s` around `pos` spanned by `axes`, corners
 /// in `push_quad`'s `[bl, br, tr, tl]` order.
-fn ground_square(pos: Vec3, s: f32) -> [Vec3; 4] {
+fn ground_square(pos: Vec3, (x, z): (Vec3, Vec3), s: f32) -> [Vec3; 4] {
     [
-        pos + Vec3::new(-s, 0.0, -s),
-        pos + Vec3::new(s, 0.0, -s),
-        pos + Vec3::new(s, 0.0, s),
-        pos + Vec3::new(-s, 0.0, s),
+        pos + (-x - z) * s,
+        pos + (x - z) * s,
+        pos + (x + z) * s,
+        pos + (-x + z) * s,
     ]
+}
+
+/// `CGroundFlash::CalcNormal`: the plane through the ground heights
+/// `quad_size` either side of `pos` along X and along Z, so a flash
+/// lies on a ramp rather than cutting into it.
+pub(super) fn ground_flash_normal(ground: &Heightmap, pos: Vec3, quad_size: f32) -> Vec3 {
+    let s = quad_size.det_max(1.0);
+    let at = |dx: f32, dz: f32| ground.place(pos.x + dx, pos.z + dz);
+    let (p0, p1, p2, p3) = (at(s, 0.0), at(-s, 0.0), at(0.0, s), at(0.0, -s));
+    // The engine's cross products, operands swapped: its come out
+    // pointing down, which it doesn't mind as it draws both faces.
+    let n0 = (p3 - p0).cross(p2 - p0).normalize_or(Vec3::Y);
+    let n1 = (p2 - p1).cross(p3 - p1).normalize_or(Vec3::Y);
+    (n0 + n1).normalize_or(Vec3::Y)
+}
+
+/// World X and Z turned onto the plane with `normal` (the engine's
+/// `side1 = normal × X`, `side2 = side1 × normal`, as `(side2, −side1)`
+/// so flat ground gives X and Z back).
+fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
+    let side1 = normal.cross(Vec3::X).normalize_or(Vec3::NEG_Z);
+    let side2 = side1.cross(normal).normalize_or(Vec3::X);
+    (side2, -side1)
 }
 
 // ─── Spawning ───────────────────────────────────────────────────────
 
 /// Spawn a CEG at `pos` with firing direction `dir`. Returns true iff
 /// the CEG name was found; a missing entry lets callers fall back to a
-/// synthesised burst. `ground` puts the `[groundflash]` on the terrain
-/// (`CGround::GetHeightReal`); without it the flash sits at `pos`.
+/// synthesised burst. `up` is the emitter's up vector: the CEG's
+/// literal vectors and offsets (`emitVector=0, 1, 0`, `pos=0, 1, 0`)
+/// are authored for an upright emitter and turn with it, so a unit
+/// dying on a ramp bursts square to the ramp. `ground` puts the
+/// `[groundflash]` on the terrain (`CGround::GetHeightReal`), in its
+/// plane; without it the flash lies flat at `pos`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_ceg(
     ceg_name: &str,
     pos: Vec3,
     dir: Vec3,
+    up: Vec3,
     registry: &CegRegistry,
     rng: &mut u32,
     commands: &mut Commands,
@@ -484,6 +519,8 @@ pub(super) fn spawn_ceg(
     };
 
     let dir = dir.normalize_or(Vec3::Y);
+    let up = up.normalize_or(Vec3::Y);
+    let frame = Quat::from_rotation_arc(Vec3::Y, up);
 
     for effect in &def.effects {
         match &effect.properties {
@@ -492,6 +529,7 @@ pub(super) fn spawn_ceg(
                 p,
                 pos,
                 dir,
+                frame,
                 rng,
                 commands,
                 materials,
@@ -504,6 +542,7 @@ pub(super) fn spawn_ceg(
                 f,
                 pos,
                 dir,
+                frame,
                 rng,
                 commands,
                 materials,
@@ -512,12 +551,13 @@ pub(super) fn spawn_ceg(
                 ceg_assets,
             ),
             EffectProperties::Spawner(s) => {
-                spawn_delayed(effect.count, s, pos, dir, commands);
+                spawn_delayed(effect.count, s, pos, dir, up, commands);
             }
             EffectProperties::Spike(sp) => spawn_spikes(
                 effect.count,
                 sp,
                 pos,
+                frame,
                 rng,
                 commands,
                 materials,
@@ -538,10 +578,16 @@ pub(super) fn spawn_ceg(
             .ground_flash_materials(materials, images, model_cache)
             .is_some()
     {
-        let ground_y = ground.map_or(pos.y, |h| h.sample(pos.x, pos.z));
+        let (ground_y, normal) = ground.map_or((pos.y, Vec3::Y), |h| {
+            (
+                h.sample(pos.x, pos.z),
+                ground_flash_normal(h, pos, gf.flash_size),
+            )
+        });
         commands.spawn(CegGroundFlash::new(
             gf,
             Vec3::new(pos.x, ground_y + 1.0, pos.z),
+            normal,
         ));
     }
     true
@@ -559,6 +605,7 @@ fn spawn_particle_system(
     props: &ParticleProperties,
     origin: Vec3,
     dir: Vec3,
+    frame: Quat,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -577,7 +624,7 @@ fn spawn_particle_system(
     let base_dir = match &props.emit_vector {
         EmitVector::Direction => dir,
         EmitVector::Literal(v) => {
-            Vec3::from_array(v.eval(&EvalCtx::default())).normalize_or(Vec3::Y)
+            frame * Vec3::from_array(v.eval(&EvalCtx::default())).normalize_or(Vec3::Y)
         }
     };
 
@@ -644,7 +691,7 @@ fn spawn_particle_system(
                 rand01: next_unit(rng),
                 ..ctx_base
             });
-            let particle_pos = origin + Vec3::new(pos_x, pos_y, pos_z);
+            let particle_pos = origin + frame * Vec3::new(pos_x, pos_y, pos_z);
 
             // `CSimpleParticleSystem::Update` adds `gravity` to the
             // per-frame speed every frame: elmos/frame², so ×30² for
@@ -692,6 +739,7 @@ fn spawn_flame(
     props: &FlameProperties,
     origin: Vec3,
     spawn_dir: Vec3,
+    frame: Quat,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -724,13 +772,13 @@ fn spawn_flame(
         // `dir = dir` (the explosion's own direction) parses to no
         // literal: fall back to the spawn direction.
         let dir = if authored.length_squared() > 1e-12 {
-            authored
+            frame * authored
         } else {
             spawn_dir
         };
         let ttl = roll(&props.ttl).det_max(1.0);
         commands.spawn(CegFlame {
-            pos: origin + pos,
+            pos: origin + frame * pos,
             dir: dir.normalize_or(Vec3::Y),
             size: roll(&props.size),
             length: roll(&props.length) * dir.length(),
@@ -752,6 +800,7 @@ fn spawn_spikes(
     count: u32,
     props: &spring_tdf::SpikeProperties,
     origin: Vec3,
+    frame: Quat,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -788,16 +837,18 @@ fn spawn_spikes(
                 rand01: next_unit(rng),
             })
         };
-        let raw_dir = Vec3::new(
-            roll(&props.dir.x, rng),
-            roll(&props.dir.y, rng),
-            roll(&props.dir.z, rng),
-        );
-        let offset = Vec3::new(
-            roll(&props.pos.x, rng),
-            roll(&props.pos.y, rng),
-            roll(&props.pos.z, rng),
-        );
+        let raw_dir = frame
+            * Vec3::new(
+                roll(&props.dir.x, rng),
+                roll(&props.dir.y, rng),
+                roll(&props.dir.z, rng),
+            );
+        let offset = frame
+            * Vec3::new(
+                roll(&props.pos.x, rng),
+                roll(&props.pos.y, rng),
+                roll(&props.pos.z, rng),
+            );
         let color = props.color.as_ref().map_or(Vec3::new(1.0, 0.8, 0.5), |c| {
             Vec3::new(roll(&c.x, rng), roll(&c.y, rng), roll(&c.z, rng))
         });
@@ -871,6 +922,7 @@ fn spawn_delayed(
     props: &SpawnerProperties,
     origin: Vec3,
     dir: Vec3,
+    up: Vec3,
     commands: &mut Commands,
 ) {
     if props.explosion_generator.is_empty() {
@@ -888,8 +940,9 @@ fn spawn_delayed(
         let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
         commands.spawn(CegDelayedSpawn {
             delay_secs,
-            pos: origin + pos_offset,
+            pos: origin + Quat::from_rotation_arc(Vec3::Y, up) * pos_offset,
             dir,
+            up,
             target_ceg: std::sync::Arc::clone(&target_ceg),
         });
     }
@@ -1095,12 +1148,12 @@ pub(super) fn tick_ceg_ground_flashes(
         let [r, g, b] = f.color;
         let ring_alpha = f.ring_alpha(age);
         if ring_alpha > 0.0 {
-            let corners = ground_square(f.pos, f.ring_half_size(age));
+            let corners = ground_square(f.pos, f.axes, f.ring_half_size(age));
             batches.push_flat_quad(&mats.ring, corners, [r, g, b, ring_alpha]);
         }
         let flash_alpha = f.flash_alpha(age);
         if flash_alpha > 0.0 {
-            let corners = ground_square(f.pos, f.flash_size);
+            let corners = ground_square(f.pos, f.axes, f.flash_size);
             batches.push_flat_quad(&mats.flash, corners, [r, g, b, flash_alpha]);
         }
     }
@@ -1143,6 +1196,7 @@ pub(super) fn tick_ceg_delayed_spawns(
             &timer.target_ceg,
             timer.pos,
             timer.dir,
+            timer.up,
             &registry,
             &mut rng,
             &mut commands,
@@ -1360,6 +1414,7 @@ mod tests {
                 color: [1.0; 3],
             },
             Vec3::new(100.0, 5.0, 200.0),
+            Vec3::Y,
         )
     }
 
@@ -1439,13 +1494,33 @@ mod tests {
 
     #[test]
     fn ground_square_lies_flat_around_pos() {
-        let [bl, br, tr, tl] = ground_square(Vec3::new(10.0, 1.0, 20.0), 6.4);
+        let [bl, br, tr, tl] = ground_square(Vec3::new(10.0, 1.0, 20.0), ground_axes(Vec3::Y), 6.4);
         for c in [bl, br, tr, tl] {
             assert_eq!(c.y, 1.0);
         }
         assert_eq!(bl, Vec3::new(3.6, 1.0, 13.6));
         assert_eq!(tr, Vec3::new(16.4, 1.0, 26.4));
         assert!((br.x - tl.x - 12.8).abs() < 1e-5);
+    }
+
+    /// On a ramp rising along X the flash's corners sit on the ramp:
+    /// each corner's height off the ground is the centre's, and the
+    /// square keeps its size.
+    #[test]
+    fn ground_flash_lies_on_a_ramp() {
+        let (w, h) = (65, 65);
+        let heights = (0..w * h).map(|i| (i % w) as f32 * 4.0).collect();
+        let ground = Heightmap::from_raw(heights, w, h);
+        let pos = ground.place(256.0, 256.0);
+        let normal = ground_flash_normal(&ground, pos, 48.0);
+        assert!(normal.x < -0.4 && normal.z.abs() < 1e-4, "{normal}");
+        let s = 40.0;
+        for c in ground_square(pos, ground_axes(normal), s) {
+            assert!((c.y - ground.sample(c.x, c.z)).abs() < 0.5, "{c}");
+        }
+        let [bl, br, _, tl] = ground_square(pos, ground_axes(normal), s);
+        assert!(((br - bl).length() - 2.0 * s).abs() < 1e-3);
+        assert!(((tl - bl).length() - 2.0 * s).abs() < 1e-3);
     }
 
     /// `system_nx`'s shockwave (`size=1 sizeGrowth=120 ttl=6`,

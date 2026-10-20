@@ -28,9 +28,10 @@ impl CollisionVolume {
         Self { radius, mid_y }
     }
 
-    /// World-space centre of the sphere for a unit at `tf`.
+    /// World-space centre of the sphere for a unit at `tf`, along its
+    /// up vector ([`crate::units::components::mid_pos`]).
     pub fn center(&self, tf: &GlobalTransform) -> Vec3 {
-        tf.translation() + Vec3::Y * self.mid_y
+        crate::units::components::mid_pos(tf, self.mid_y)
     }
 
     /// Mid-flight projectile collision. Returns the smallest `t` in

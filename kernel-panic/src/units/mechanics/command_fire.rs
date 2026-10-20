@@ -807,6 +807,7 @@ pub fn process_command_fire(
         if let Some(ceg) = ability.explosion_ceg {
             pending_explosions.events.push(ExplosionEvent {
                 pos: event.target,
+                up: Vec3::Y,
                 rgb: faction.rgb_f32(),
                 radius: ability.weapon.params().radius,
                 ceg_name: ceg.to_string(),
@@ -1578,6 +1579,7 @@ pub fn tick_sigterm_bombs(
         // (retroweapons.tdf:597) — without this the blast is silent.
         pending_explosions.events.push(ExplosionEvent {
             pos: at,
+            up: Vec3::Y,
             rgb: bomb.owner_faction.rgb_f32(),
             radius: sigterm.map_or(0.0, |id| weapons.by_id(id).area_of_effect),
             ceg_name: "system_sigterm".to_string(),
@@ -2310,6 +2312,7 @@ mod tests {
                 pos,
                 hit_radius: 0.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team,
                 kind,
                 hp_positive: true,

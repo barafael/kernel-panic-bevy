@@ -650,11 +650,12 @@ pub fn tick_construction(
         // mirrors the way a mobile constructor aims at a ghost before
         // committing. The build beams are the builder's own script's
         // (`emit-sfx 2048` from its emitter once `StartBuilding` has
-        // aimed it).
+        // aimed it). Only the yaw: a mobile builder on a ramp keeps its
+        // tilt to the slope (a building's up is straight up anyway).
         if let Some(forward) = forward_toward_site(gtf.translation(), constructing.site) {
-            transform.rotation = Transform::from_translation(transform.translation)
-                .looking_to(forward, Vec3::Y)
-                .rotation;
+            let up = transform.up().as_vec3();
+            let yaw = Transform::default().looking_to(forward, Vec3::Y).rotation;
+            transform.rotation = Quat::from_rotation_arc(Vec3::Y, up) * yaw;
         }
     }
 }
@@ -975,6 +976,7 @@ mod tests {
                 pos: site + Vec3::Z * 4.0,
                 hit_radius: 8.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team: 0,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -1227,6 +1229,7 @@ mod tests {
                 pos,
                 hit_radius: 20.0,
                 mid_y: 8.0,
+                up: Vec3::Y,
                 team: crate::units::features::FEATURE_TEAM,
                 kind: UnitKind::BadBlock,
                 hp_positive: true,

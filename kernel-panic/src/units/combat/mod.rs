@@ -302,7 +302,7 @@ impl TargetCachePick<'_, '_> {
         self.alive
             .get(target)
             .ok()
-            .map(|(gtf, stats)| gtf.translation() + Vec3::Y * stats.mid_y)
+            .map(|(gtf, stats)| stats.mid_pos(gtf))
     }
 }
 
@@ -439,7 +439,7 @@ impl PieceLookup<'_, '_> {
         predict_mult: f32,
     ) -> Option<Vec3> {
         let (tf, stats) = self.target.get(target).ok()?;
-        let aim_pos = tf.translation() + Vec3::Y * stats.mid_y;
+        let aim_pos = stats.mid_pos(tf);
         if !weapon_def.is_traveling() {
             return Some(aim_pos);
         }
@@ -931,6 +931,7 @@ pub fn combat_system(
                 });
                 pending_explosions.events.push(ExplosionEvent {
                     pos: ground,
+                    up: Vec3::Y,
                     rgb: def.rgb_color,
                     radius: def.area_of_effect,
                     ceg_name: def.explosion_generator.clone(),
@@ -951,7 +952,7 @@ pub fn combat_system(
         // `aimFromPos`: range, LOS and height difference are measured
         // from the weapon's aim point, which sits at the unit's
         // midpoint here (no `AimFromWeapon` piece lookup).
-        let aim_from = attacker_pos + Vec3::Y * stats.mid_y;
+        let aim_from = stats.mid_pos(attacker_gtf);
         let map_gravity = pieces.map_gravity();
         let in_range =
             |pos: Vec3| aim::in_weapon_range(weapon_def, aim_from, pos, false, map_gravity);
@@ -1564,7 +1565,7 @@ pub fn attack_ground_system(
 
         let attacker_pos = gtf.translation();
         let dist = attacker_pos.distance(order.pos);
-        let aim_from = attacker_pos + Vec3::Y * stats.map_or(0.0, |s| s.mid_y);
+        let aim_from = crate::units::components::mid_pos(gtf, stats.map_or(0.0, |s| s.mid_y));
 
         let map_gravity = pieces.map_gravity();
         if !aim::in_weapon_range(weapon_def, aim_from, order.pos, true, map_gravity) {
@@ -1786,8 +1787,8 @@ pub fn attack_target_system(
         // to the target's aimPos — so the chase stops exactly where the
         // shooting can start.
         let target_mid = target_stats.get(order.target).map_or(0.0, |s| s.mid_y);
-        let aim_from = gtf.translation() + Vec3::Y * stats.mid_y;
-        let aim_at = target_pos + Vec3::Y * target_mid;
+        let aim_from = stats.mid_pos(gtf);
+        let aim_at = crate::units::components::mid_pos(target_gtf, target_mid);
         let in_range = weapon_def.is_some_and(|w| {
             w.range != 0.0 && aim::in_weapon_range(w, aim_from, aim_at, false, map_gravity)
         });
@@ -1973,6 +1974,7 @@ mod tests {
                 pos: Vec3::new(140.0, 0.0, 28.0),
                 hit_radius: 0.0,
                 mid_y: 5.0,
+                up: Vec3::Y,
                 team: 1,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -2046,6 +2048,7 @@ mod tests {
                 pos: Vec3::new(100.0, 0.0, 0.0),
                 hit_radius: 0.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team: 1,
                 kind: UnitKind::Socket,
                 hp_positive: true,
@@ -2097,6 +2100,7 @@ mod tests {
                 pos: Vec3::new(100.0, 0.0, 0.0),
                 hit_radius: 0.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team: 1,
                 kind: UnitKind::Socket,
                 hp_positive: true,
@@ -2115,6 +2119,7 @@ mod tests {
                 pos: Vec3::new(200.0, 0.0, 0.0),
                 hit_radius: 0.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team: 1,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -2198,6 +2203,7 @@ mod tests {
                 pos,
                 hit_radius: 0.0,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team: 1,
                 kind: UnitKind::Worm,
                 hp_positive: true,
@@ -2613,6 +2619,7 @@ mod tests {
                 pos,
                 hit_radius: 10.0,
                 mid_y,
+                up: Vec3::Y,
                 team: 1,
                 kind,
                 hp_positive: true,
@@ -2762,6 +2769,7 @@ mod tests {
                 pos,
                 hit_radius,
                 mid_y: 0.0,
+                up: Vec3::Y,
                 team: 0,
                 kind: UnitKind::Bit,
                 hp_positive: true,
@@ -2877,6 +2885,7 @@ mod tests {
                 pos: Vec3::new(0.0, 0.0, 100.0),
                 hit_radius: 20.0,
                 mid_y: 8.0,
+                up: Vec3::Y,
                 team: crate::units::features::FEATURE_TEAM,
                 kind: UnitKind::BadBlock,
                 hp_positive: true,

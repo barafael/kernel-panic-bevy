@@ -57,8 +57,10 @@ pub struct SpatialEntry {
     /// distance to this sphere's surface.
     pub hit_radius: f32,
     /// Height of the collision sphere's centre above `pos` (model
-    /// midpoint, `unit->midPos`).
+    /// midpoint, `unit->midPos`), along `up`.
     pub mid_y: f32,
+    /// The unit's up vector: tilted to the slope for a ground unit.
+    pub up: Vec3,
     pub team: u8,
     pub kind: UnitKind,
     pub hp_positive: bool,
@@ -90,7 +92,7 @@ impl SpatialEntry {
 
     /// World-space centre of the collision sphere (`unit->midPos`).
     pub fn mid_pos(&self) -> Vec3 {
-        self.pos + Vec3::Y * self.mid_y
+        self.pos + self.up * self.mid_y
     }
 
     /// `CollisionVolume::GetPointSurfaceDistance`: distance from `point`
@@ -225,6 +227,7 @@ pub fn rebuild_spatial_index(
             pos: tf.translation,
             hit_radius: stats.hit_radius,
             mid_y: stats.mid_y,
+            up: tf.up().as_vec3(),
             team: team.0,
             kind: unit_type.0,
             hp_positive: health.current > 0.0,
@@ -241,6 +244,7 @@ pub fn rebuild_spatial_index(
             pos: tf.translation,
             hit_radius: crate::units::features::Feature::HIT_RADIUS,
             mid_y: crate::units::features::Feature::MID_Y,
+            up: Vec3::Y,
             team: crate::units::features::FEATURE_TEAM,
             kind: UnitKind::BadBlock,
             hp_positive: health.current > 0.0,
@@ -262,6 +266,7 @@ mod tests {
             pos,
             hit_radius: 0.0,
             mid_y: 0.0,
+            up: Vec3::Y,
             team: 0,
             kind: UnitKind::Bit,
             hp_positive: true,

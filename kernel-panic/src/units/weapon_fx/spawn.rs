@@ -9,7 +9,7 @@ use crate::terrain::heightmap::Heightmap;
 
 use crate::units::content::weapons::WeaponId;
 
-use super::ceg::{CegRegistry, CegRenderAssets, spawn_ceg};
+use super::ceg::{CegRegistry, CegRenderAssets, ground_flash_normal, spawn_ceg};
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BoltCegTrail, DelayedHit, Flight, GroundFlash,
     GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, LightningArc, PendingAttacks,
@@ -61,13 +61,13 @@ pub(super) fn spawn_weapon_visuals(
     mut images: ResMut<Assets<Image>>,
     mut model_cache: ResMut<S3OModelCache>,
     mut cache: ResMut<BeamMaterialCache>,
-    mut impact_assets: ResMut<ImpactBurstAssets>,
-    mut flash_assets: ResMut<GroundFlashAssets>,
+    (mut impact_assets, mut flash_assets): (ResMut<ImpactBurstAssets>, ResMut<GroundFlashAssets>),
     mut fx_meshes: ResMut<WeaponFxMeshes>,
     mut ceg_assets: ResMut<CegRenderAssets>,
     teams: Query<&TeamId>,
     gravity: Option<Res<crate::sim::MapGravity>>,
     mut rng: ResMut<SimRng<WeaponVisualRng>>,
+    heightmap: Option<Res<Heightmap>>,
 ) {
     // The one read of the map's gravity for every shell spawned here.
     let map_gravity = gravity.as_deref().copied().unwrap_or_default().0;
@@ -145,6 +145,7 @@ pub(super) fn spawn_weapon_visuals(
                     "corruption_worm_splash",
                     event.target_pos,
                     bite_dir,
+                    Vec3::Y,
                     &ceg_registry,
                     &mut rng,
                     &mut commands,
@@ -248,6 +249,7 @@ pub(super) fn spawn_weapon_visuals(
                 muzzle_ceg,
                 event.attacker_pos,
                 muzzle_dir,
+                Vec3::Y,
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
@@ -283,6 +285,7 @@ pub(super) fn spawn_weapon_visuals(
                 "oldskool_build",
                 event.target_pos,
                 Vec3::Y,
+                Vec3::Y,
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
@@ -307,6 +310,7 @@ pub(super) fn spawn_weapon_visuals(
                     &weapon.explosion_generator,
                     event.target_pos,
                     dir,
+                    Vec3::Y,
                     &ceg_registry,
                     &mut rng,
                     &mut commands,
@@ -337,6 +341,7 @@ pub(super) fn spawn_weapon_visuals(
                     &mut materials,
                     &mut cache,
                     &mut flash_assets,
+                    heightmap.as_deref(),
                 );
             }
         }
@@ -375,7 +380,8 @@ pub(super) fn spawn_pending_explosions(
             && spawn_ceg(
                 &event.ceg_name,
                 event.pos,
-                Vec3::Y,
+                event.up,
+                event.up,
                 &ceg_registry,
                 &mut rng,
                 &mut commands,
@@ -406,23 +412,24 @@ pub(super) fn spawn_pending_explosions(
                 &mut materials,
                 &mut cache,
                 &mut flash_assets,
+                heightmap.as_deref(),
             );
         }
     }
 }
 
-/// Flat horizontal emissive ring at `pos`. Radius animates from 0.25× to
-/// 1.5× `aoe` over the lifetime so the ring visibly "blooms" outward from
-/// the impact point before fading. Mesh is a shared unit-circle; the
-/// spawn-time scale carries the initial radius so the tick system only
-/// needs to grow `base_radius` — no material mutation per frame.
+/// Emissive ring on the ground under `pos`, in the terrain's plane.
+/// Radius animates from 0.25× to 1.5× `aoe` over the lifetime so the
+/// ring visibly "blooms" outward from the impact point before fading.
+/// Mesh is a shared unit-circle; the spawn-time scale carries the
+/// initial radius so the tick system only needs to grow `base_radius`
+/// — no material mutation per frame.
 ///
-/// The ground plane is approximated at `pos.y + 0.5` so the ring sits
-/// slightly above terrain without z-fighting. Units that explode mid-air
-/// (Flow, command-fire projectiles) still project their ring close to
-/// the blast center — good enough; a world-space ground snap would
-/// require a heightmap sample and isn't worth the dependency on this
-/// visual-only path.
+/// A blast within its ring's reach of the ground puts the ring on the
+/// terrain, tilted like the ceg ground flash; one higher up (Flow,
+/// command-fire shells bursting mid-air) or with no `ground` keeps a
+/// flat ring at the blast. Either way it sits half an elmo off the
+/// surface so it doesn't z-fight.
 #[allow(clippy::too_many_arguments)]
 fn spawn_ground_flash(
     pos: Vec3,
@@ -433,6 +440,7 @@ fn spawn_ground_flash(
     materials: &mut Assets<StandardMaterial>,
     cache: &mut BeamMaterialCache,
     flash_assets: &mut GroundFlashAssets,
+    ground: Option<&Heightmap>,
 ) {
     let mesh = flash_assets
         .mesh
@@ -447,9 +455,16 @@ fn spawn_ground_flash(
     // the full blast sphere.
     let base_radius = (aoe * 0.5).det_clamp(4.0, 80.0);
     let life = 0.45;
+    let reach = base_radius * 1.5;
 
-    // `Circle` is XY by default; rotate to lie flat on XZ so it hugs the ground.
-    let flat = Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2);
+    let (centre, normal) = match ground {
+        Some(h) if pos.y - h.sample(pos.x, pos.z) <= reach => {
+            (h.place(pos.x, pos.z), ground_flash_normal(h, pos, reach))
+        }
+        _ => (pos, Vec3::Y),
+    };
+    // `Circle` lies in XY, facing +Z: turn that face to the ground's.
+    let tilt = Quat::from_rotation_arc(Vec3::Z, normal);
 
     commands.spawn((
         GroundFlash {
@@ -459,8 +474,8 @@ fn spawn_ground_flash(
         },
         Mesh3d(mesh),
         MeshMaterial3d(material),
-        Transform::from_translation(pos + Vec3::Y * 0.5)
-            .with_rotation(flat)
+        Transform::from_translation(centre + normal * 0.5)
+            .with_rotation(tilt)
             .with_scale(Vec3::splat(base_radius * 0.25)),
     ));
 }

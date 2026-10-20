@@ -1027,7 +1027,8 @@ fn apply_and_drain(
             }
             FxEvent::Emit { piece, kind } if in_range(piece) => {
                 let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
-                dispatch_emit_sfx(kind, piece_world_pos, faction, &mut fx.explosions);
+                let up = unit_gtf.up().as_vec3();
+                dispatch_emit_sfx(kind, piece_world_pos, up, faction, &mut fx.explosions);
             }
             FxEvent::BuildArc { piece } if in_range(piece) => {
                 // `BuildArc(u, ud, team, piece)`: from the piece to the
@@ -1106,6 +1107,7 @@ pub fn sync_muzzle_pieces(
 fn dispatch_emit_sfx(
     kind: SfxKind,
     pos: Vec3,
+    up: Vec3,
     faction: Faction,
     explosions: &mut PendingExplosions,
 ) {
@@ -1115,6 +1117,7 @@ fn dispatch_emit_sfx(
         SfxKind::Ceg(name) => {
             explosions.events.push(ExplosionEvent {
                 pos,
+                up,
                 rgb: faction.rgb_f32(),
                 radius: 8.0,
                 ceg_name: name.to_string(),
@@ -1134,6 +1137,7 @@ fn dispatch_emit_sfx(
 
     explosions.events.push(ExplosionEvent {
         pos,
+        up,
         rgb,
         radius,
         ceg_name: String::new(),

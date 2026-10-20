@@ -172,6 +172,7 @@ pub struct UnitStats {
     /// `midpoint.y`): the collision sphere's centre (`unit->midPos`) and
     /// the point weapons aim at (`aimPos`). A Bit's ball is 16 above its
     /// feet; a sphere centred on the feet would be half underground.
+    /// Measured along the unit's up vector ([`mid_pos`]).
     pub mid_y: f32,
     /// Top speed in elmos/s (FBI `MaxVelocity` × 30).
     pub speed: f32,
@@ -190,7 +191,19 @@ pub struct UnitStats {
     pub no_chase_vtol: bool,
 }
 
+/// `unit->midPos` (`CSolidObject::GetObjectSpacePos(relMidPos)`): `mid_y`
+/// along the unit's own up vector, so a unit tilted on a ramp has its
+/// midpoint over its tilted body, not straight above its feet.
+pub fn mid_pos(gtf: &GlobalTransform, mid_y: f32) -> Vec3 {
+    gtf.translation() + gtf.up() * mid_y
+}
+
 impl UnitStats {
+    /// [`mid_pos`] for this unit's `mid_y`.
+    pub fn mid_pos(&self, gtf: &GlobalTransform) -> Vec3 {
+        mid_pos(gtf, self.mid_y)
+    }
+
     /// The per-kind stats `spawn_unit` caches, from the FBI registry.
     /// `hit_radius` and `mid_y` come from the S3O model, which the
     /// registry doesn't know.

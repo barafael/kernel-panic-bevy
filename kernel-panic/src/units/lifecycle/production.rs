@@ -1018,6 +1018,7 @@ mod tests {
             pos,
             hit_radius: 16.0,
             mid_y: 0.0,
+            up: Vec3::Y,
             team: 0,
             kind: UnitKind::Bit,
             hp_positive: true,

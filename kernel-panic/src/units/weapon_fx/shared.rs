@@ -133,8 +133,13 @@ pub struct BuildArcEvent {
 /// replay the authored emitters at the blast point. Empty string =
 /// no scripted CEG; the spawner falls back to a generic sphere +
 /// ground ring in that case.
+///
+/// `up` is the exploding unit's up vector (tilted to the slope for a
+/// ground unit, straight up for a building or a blast with no unit):
+/// the CEG bursts square to it.
 pub struct ExplosionEvent {
     pub pos: Vec3,
+    pub up: Vec3,
     pub rgb: [f32; 3],
     pub radius: f32,
     pub ceg_name: String,
