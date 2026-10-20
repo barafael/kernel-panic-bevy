@@ -1,6 +1,6 @@
 //! Generates `kernel-panic/assets/maps/token_ring_v1.kpmap`.
 //!
-//! After Beyond All Reason's Asteroid Mines: four platforms in a square,
+//! After Beyond All Reason's Asteroid Mines: four square platforms,
 //! joined in a ring by bridges over the void. Each bridge carries a bus
 //! lane and a firewall; once the opening is over, one firewall stands at
 //! a time and passes round the ring like the token
@@ -65,13 +65,8 @@ fn main() {
     for bridge in tr::bridges() {
         map.fill(bridge, Cell::Floor(NODE));
     }
-    let c = CELL as f32;
-    for &(x, z) in &tr::NODES {
-        map.fill_disc(
-            (x as f32 * c, z as f32 * c),
-            tr::NODE_RADIUS * c,
-            Cell::Floor(NODE),
-        );
+    for node in tr::nodes() {
+        map.fill(node, Cell::Floor(NODE));
     }
     let (mut plateau, mut ramps) = (
         PLATEAU,

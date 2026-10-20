@@ -2,7 +2,7 @@
 //!
 //! After Beyond All Reason's SpeedMetal: a long, thin map for two teams.
 //! A courtyard at each end opens into one corridor over the void that
-//! climbs in stages to a raised round arena in the middle; off the first
+//! climbs in stages to a raised, stepped arena in the middle; off the first
 //! stage, a cache pocket each side sits a step down. A bus lane (double
 //! speed) runs end to end. Mirror symmetric; the arena's two datavents
 //! are shared.
@@ -59,8 +59,8 @@ const RAMPS: [(Rect, usize, usize); 2] = [
 ];
 const POCKET: Rect = Rect::new(42, 8, 58, 16);
 const POCKET_RAMP: Rect = Rect::new(46, 16, 54, 22);
-/// Arena radius (cells) round the map's centre.
-const ARENA: f32 = 18.0;
+/// The arena round the map's centre: two blocks, stepping its corners.
+const ARENA: [Rect; 2] = [Rect::new(81, 18, 111, 46), Rect::new(86, 14, 106, 50)];
 const BUS: Rect = Rect::new(30, 31, 162, 33);
 /// West datavents at cell corners: the courtyard (the first four are
 /// starts), stage 1, the pocket.
@@ -104,9 +104,11 @@ fn main() {
             map.fill(r, Cell::Floor(level));
         }
     }
+    for rect in ARENA {
+        map.fill(rect, Cell::Floor(HIGH));
+    }
     let (w, d) = map.world();
     let centre = (w * 0.5, d * 0.5);
-    map.fill_disc(centre, ARENA * CELL as f32, Cell::Floor(HIGH));
     let ramps = RAMPS
         .iter()
         .map(|&(rect, low, high)| Ramp {

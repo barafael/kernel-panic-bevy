@@ -181,14 +181,19 @@ pub mod token_ring {
     pub const N: usize = 128;
     /// The four nodes' centres (cells), clockwise from the north-west.
     pub const NODES: [(usize, usize); 4] = [(32, 32), (96, 32), (96, 96), (32, 96)];
-    /// Node radius, cells.
-    pub const NODE_RADIUS: f32 = 19.0;
+    /// Half a node's side, cells: each node is a square block.
+    pub const NODE_HALF: usize = 17;
     /// The north bridge; the others are it turned.
     pub const BRIDGE: Rect = Rect::new(32, 27, 96, 37);
     /// The north bridge's firewall.
     pub const GATE: Rect = Rect::new(60, 27, 68, 37);
     /// How high a firewall stands.
     pub const RISE: f32 = 220.0;
+
+    /// The four nodes, clockwise from the north-west.
+    pub fn nodes() -> [Rect; 4] {
+        NODES.map(|(x, z)| Rect::new(x - NODE_HALF, z - NODE_HALF, x + NODE_HALF, z + NODE_HALF))
+    }
 
     /// The four bridges, clockwise from the north one.
     pub fn bridges() -> [Rect; 4] {

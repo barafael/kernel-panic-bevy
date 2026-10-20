@@ -46,7 +46,7 @@ fn levels() -> Vec<Level> {
 const POCKET_DEPTH: f32 = 560.0;
 const POCKET_HALF: f32 = 480.0;
 /// Room each passage keeps beside a corner pillar, the pillar's largest
-/// radius, and the room kept outside it where a sharp corner is trimmed.
+/// half-size, and the room kept outside it where a sharp corner is trimmed.
 const PASSAGE: f32 = 256.0;
 const PILLAR_MAX: f32 = 260.0;
 const OUTER_PASSAGE: f32 = 320.0;
@@ -81,12 +81,24 @@ fn generate(n: usize, dir: &str) {
     // A sharp corner's tip past the outer passage is dead ground: trim it.
     let mid_corner = mid / libm::cosf(half);
     let clip = mid_corner + pillar + OUTER_PASSAGE;
+    // Cut straight across each corner's bisector.
+    let corners: Vec<(f32, f32)> = (0..n)
+        .map(|k| {
+            let p = ring.corner(k, mid);
+            ((p.0 - c.0) / mid_corner, (p.1 - c.1) / mid_corner)
+        })
+        .collect();
     map.fill_where(Cell::Void, |x, z| {
         let (dx, dz) = (x - c.0, z - c.1);
-        (dx * dx + dz * dz).sqrt() > clip
+        corners.iter().any(|&(ux, uz)| dx * ux + dz * uz > clip)
     });
+    // Square pillars; their corners reach a little past `pillar`.
+    let half_side = pillar * 0.8;
     for k in 0..n {
-        map.fill_disc(ring.corner(k, mid), pillar, Cell::Floor(HIGH));
+        let p = ring.corner(k, mid);
+        map.fill_where(Cell::Floor(HIGH), |x, z| {
+            (x - p.0).abs() <= half_side && (z - p.1).abs() <= half_side
+        });
     }
     map.reset_rim();
     map.arrows = vec![None; cells * cells];

@@ -18,7 +18,7 @@
 //!   facings, and the metadata in the house style (gravity 50, the
 //!   FireStorm maps' dark sky and lighting).
 //!
-//! [`KpMap::check`] proves every datavent can be walked to; the map
+//! [`KpMap::check_reachable`] proves every datavent can be walked to; the map
 //! scripts in `examples/` add their own symmetry checks.
 
 use spring_detmath::DetFloat;
@@ -136,21 +136,6 @@ impl Ramp {
     }
 }
 
-/// A ramp whose height goes with the distance from a centre: `high` at
-/// `r_high` elmos out, `low` at `r_low` (either may be the inner one),
-/// clamped beyond. It keeps a rotated layout exact where a straight
-/// ramp can only follow the grid; the cells it covers are the caller's
-/// choice ([`KpMap::fill_where`] with [`Cell::Radial`]).
-#[derive(Clone, Copy, Debug)]
-pub struct RadialRamp {
-    pub centre: (f32, f32),
-    pub r_high: f32,
-    pub r_low: f32,
-    /// Level indices.
-    pub low: usize,
-    pub high: usize,
-}
-
 /// A directional lane cell: unit direction of travel and chevron colour.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct Arrow {
@@ -178,8 +163,6 @@ pub enum Cell {
     Floor(usize),
     /// The ramp with this index.
     Ramp(usize),
-    /// The radial ramp with this index.
-    Radial(usize),
 }
 
 /// A map being drawn.
@@ -192,7 +175,6 @@ pub struct KpMap {
     pub rim: usize,
     pub cells: Vec<Cell>,
     pub ramps: Vec<Ramp>,
-    pub radials: Vec<RadialRamp>,
     /// Bus lanes: terrain type 3, double speed.
     pub lanes: Vec<Rect>,
     /// Directional lanes, per cell (empty: none): the direction of
@@ -220,7 +202,6 @@ impl KpMap {
             rim,
             cells: vec![Cell::Floor(base); cw * cd],
             ramps: Vec::new(),
-            radials: Vec::new(),
             lanes: Vec::new(),
             arrows: Vec::new(),
             blocks: Vec::new(),
@@ -264,14 +245,6 @@ impl KpMap {
         }
     }
 
-    /// Every cell whose centre lies within `radius` elmos of `centre`.
-    pub fn fill_disc(&mut self, centre: (f32, f32), radius: f32, c: Cell) {
-        self.fill_where(c, |x, z| {
-            let (dx, dz) = (x - centre.0, z - centre.1);
-            dx * dx + dz * dz <= radius * radius
-        });
-    }
-
     /// Every cell whose centre (world elmos) passes `inside`.
     pub fn fill_where(&mut self, c: Cell, inside: impl Fn(f32, f32) -> bool) {
         for z in 0..self.cd {
@@ -282,13 +255,6 @@ impl KpMap {
                 }
             }
         }
-    }
-
-    /// Add a radial ramp; fill its cells with the returned
-    /// [`Cell::Radial`].
-    pub fn add_radial(&mut self, ramp: RadialRamp) -> Cell {
-        self.radials.push(ramp);
-        Cell::Radial(self.radials.len() - 1)
     }
 
     pub fn add_ramp(&mut self, ramp: Ramp) {
@@ -304,14 +270,6 @@ impl KpMap {
             Cell::Void => Some(VOID_HEIGHT),
             Cell::Floor(level) => Some(self.levels[level].height),
             Cell::Ramp(i) => Some(self.ramp_height(&self.ramps[i], x, z)),
-            Cell::Radial(i) => {
-                let r = &self.radials[i];
-                let (dx, dz) = (x - r.centre.0, z - r.centre.1);
-                let d = (dx * dx + dz * dz).sqrt();
-                let t = ((r.r_low - d) / (r.r_low - r.r_high)).det_clamp(0.0, 1.0);
-                let (low, high) = (self.levels[r.low].height, self.levels[r.high].height);
-                Some(low + (high - low) * t)
-            }
         }
     }
 
@@ -319,7 +277,6 @@ impl KpMap {
     fn ramp_levels(&self, cell: Cell) -> Option<(usize, usize)> {
         match cell {
             Cell::Ramp(i) => Some((self.ramps[i].low, self.ramps[i].high)),
-            Cell::Radial(i) => Some((self.radials[i].low, self.radials[i].high)),
             _ => None,
         }
     }
@@ -345,9 +302,7 @@ impl KpMap {
         match cell {
             Cell::Out | Cell::Void => self.levels[self.rim],
             Cell::Floor(level) => self.levels[level],
-            Cell::Ramp(_) | Cell::Radial(_) => {
-                self.levels[self.ramp_levels(cell).expect("a ramp").1]
-            }
+            Cell::Ramp(_) => self.levels[self.ramp_levels(cell).expect("a ramp").1],
         }
     }
 
@@ -457,7 +412,7 @@ impl KpMap {
                                     scale(fill, 0.3)
                                 }
                             }
-                            Cell::Ramp(_) | Cell::Radial(_) => {
+                            Cell::Ramp(_) => {
                                 let (low, _) = self.ramp_levels(cell).expect("a ramp");
                                 let low_fill = self.levels[low].fill;
                                 let hatch = (x + z) % CELL < 3 || (x + CELL - z % CELL) % CELL < 3;
@@ -698,38 +653,88 @@ fn draw_vent_icon(pixels: &mut [u8], tw: usize, vx: f32, vz: f32) {
     }
 }
 
-/// Squares a mover can reach from `from` (world elmos) on `heights`, by
-/// the movers' slope limit and the void.
-pub fn reachable(parsed: &ParsedMap, heights: &[f32], from: (f32, f32)) -> Vec<bool> {
+/// Per map square: can a mover stand on it (the movers' slope limit,
+/// not the void)?
+fn open_squares(parsed: &ParsedMap, heights: &[f32]) -> Vec<bool> {
     let (w, d) = (parsed.header.map_x as usize, parsed.header.map_y as usize);
     let slopes = slope_map(heights, (w + 1) as u32, (d + 1) as u32);
     let cap = max_slope_from_degrees(MOVER_MAX_SLOPE_DEGREES);
     let tw = parsed.header.typemap_width();
-    let open = |i: usize| {
-        let (x, z) = (i % w, i / w);
-        slopes[i] <= cap && parsed.typemap.get((z / 2) * tw + x / 2) != Some(&TYPE_VOID)
-    };
-    let mut seen = vec![false; w * d];
-    let start = (from.1 as usize / 8) * w + from.0 as usize / 8;
-    let mut stack = vec![start];
-    seen[start] = true;
-    while let Some(i) = stack.pop() {
-        let (x, z) = (i % w, i / w);
-        let next = [
-            (x.wrapping_sub(1), z),
-            (x + 1, z),
-            (x, z.wrapping_sub(1)),
-            (x, z + 1),
-        ];
-        for (nx, nz) in next {
-            if nx < w && nz < d {
-                let n = nz * w + nx;
-                if !seen[n] && open(n) {
-                    seen[n] = true;
-                    stack.push(n);
-                }
+    (0..w * d)
+        .map(|i| {
+            let (x, z) = (i % w, i / w);
+            slopes[i] <= cap && parsed.typemap.get((z / 2) * tw + x / 2) != Some(&TYPE_VOID)
+        })
+        .collect()
+}
+
+/// The map square holding world point `p`.
+fn square_at(parsed: &ParsedMap, p: (f32, f32)) -> usize {
+    (p.1 as usize / 8) * parsed.header.map_x as usize + p.0 as usize / 8
+}
+
+/// Squares a mover can reach from `from` (world elmos) on `heights`, by
+/// the movers' slope limit and the void.
+pub fn reachable(parsed: &ParsedMap, heights: &[f32], from: (f32, f32)) -> Vec<bool> {
+    walk_distances(parsed, heights, from)
+        .iter()
+        .map(|d| d.is_finite())
+        .collect()
+}
+
+/// Walking distance in elmos from `from` (world elmos) to every square
+/// on `heights` (infinite where it cannot be reached): eight neighbours,
+/// a diagonal step only where both squares beside it are open.
+pub fn walk_distances(parsed: &ParsedMap, heights: &[f32], from: (f32, f32)) -> Vec<f32> {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    let (w, d) = (parsed.header.map_x as usize, parsed.header.map_y as usize);
+    let open = open_squares(parsed, heights);
+    let mut dist = vec![f32::INFINITY; w * d];
+    let start = square_at(parsed, from);
+    dist[start] = 0.0;
+    // Distances in hundredths of an elmo, so the heap orders integers.
+    let mut heap = BinaryHeap::from([Reverse((0u64, start))]);
+    while let Some(Reverse((cost, i))) = heap.pop() {
+        if cost > (dist[i] * 100.0) as u64 {
+            continue;
+        }
+        let here = dist[i];
+        let (x, z) = (i as isize % w as isize, i as isize / w as isize);
+        let at = |x: isize, z: isize| {
+            (x >= 0 && z >= 0 && (x as usize) < w && (z as usize) < d)
+                .then(|| z as usize * w + x as usize)
+                .filter(|&n| open[n])
+        };
+        for (dx, dz) in [
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        ] {
+            let Some(n) = at(x + dx, z + dz) else {
+                continue;
+            };
+            let diagonal = dx != 0 && dz != 0;
+            if diagonal && (at(x + dx, z).is_none() || at(x, z + dz).is_none()) {
+                continue;
+            }
+            let step = if diagonal {
+                8.0 * core::f32::consts::SQRT_2
+            } else {
+                8.0
+            };
+            let next = here + step;
+            if next < dist[n] {
+                dist[n] = next;
+                heap.push(Reverse(((next * 100.0) as u64, n)));
             }
         }
     }
-    seen
+    dist
 }
