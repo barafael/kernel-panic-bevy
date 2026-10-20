@@ -5,7 +5,7 @@
 //! `tip` fires a `BuildLaser` beam every 60 ms. `StopBuilding()` undoes
 //! that in reverse (nozzle home at 8 elmos/s).
 
-use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, SHATTER, SfxKind, UnitAnim};
 use super::{DeathFx, move_time, turn_time};
 
 /// assembler.bos Create(): `spin body around y-axis speed <60>`
@@ -172,8 +172,8 @@ impl UnitAnim for AssemblerAnim {
         // Killed(): hide body/nozzle; explode body SHATTER, nozzle FALL.
         rig.hide(self.pieces.body);
         rig.hide(self.pieces.nozzle);
-        rig.explode(self.pieces.body, 4);
-        rig.explode(self.pieces.nozzle, 3);
+        rig.explode(self.pieces.body, SHATTER);
+        rig.explode(self.pieces.nozzle, FALL);
         self.death.start();
     }
 

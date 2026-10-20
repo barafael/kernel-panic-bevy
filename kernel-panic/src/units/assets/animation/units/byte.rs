@@ -17,7 +17,7 @@
 //! end of `Open()` and cleared only once `Close()` has brought the aimer
 //! back to rest, so the armour is off during that return.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
+use super::super::{AnimCtx, AnimRig, Axis, SHATTER, UnitAnim, deg2rad};
 use super::{DeathFx, move_time, turn_time};
 use crate::sim::DetFloat;
 
@@ -369,7 +369,7 @@ impl UnitAnim for ByteAnim {
         // Killed(): hide blade0..3, explode blade0..3 severity 1.
         for blade in self.pieces.blade {
             rig.hide(blade);
-            rig.explode(blade, 1);
+            rig.explode(blade, SHATTER);
         }
         self.death.start();
     }

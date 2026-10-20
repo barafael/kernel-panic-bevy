@@ -25,7 +25,7 @@
 //! `Create`), and the wings spin — the muzzles and, for the
 //! `fixedLauncher` missile, the launch directions sweep with them.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, SHATTER, UnitAnim, deg2rad};
 use super::DeathFx;
 
 /// `ResetAim()`'s `sleep 1000` before the base swings back to rest.
@@ -147,9 +147,9 @@ impl UnitAnim for FlowAnim {
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode monolith FALL + wings SHATTER; hide all 3.
-        rig.explode(self.pieces.monolith, 3);
-        rig.explode(self.pieces.wing1, 4);
-        rig.explode(self.pieces.wing2, 4);
+        rig.explode(self.pieces.monolith, FALL);
+        rig.explode(self.pieces.wing1, SHATTER);
+        rig.explode(self.pieces.wing2, SHATTER);
         rig.hide(self.pieces.monolith);
         rig.hide(self.pieces.wing1);
         rig.hide(self.pieces.wing2);

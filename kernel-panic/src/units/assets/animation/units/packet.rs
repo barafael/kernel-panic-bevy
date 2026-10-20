@@ -1,7 +1,7 @@
 //! packet.bos — the Network's main combat unit. A plain turret: yaw
 //! toward the heading fast, fire, die in shards.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, SHATTER, UnitAnim, deg2rad};
 use super::DeathFx;
 
 #[derive(Clone, Copy, Default)]
@@ -41,8 +41,8 @@ impl UnitAnim for PacketAnim {
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode body SHATTER + turret FALL; hide both.
-        rig.explode(self.pieces.body, 4);
-        rig.explode(self.pieces.turret, 3);
+        rig.explode(self.pieces.body, SHATTER);
+        rig.explode(self.pieces.turret, FALL);
         rig.hide(self.pieces.body);
         rig.hide(self.pieces.turret);
         self.death.start();

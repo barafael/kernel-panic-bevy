@@ -24,6 +24,7 @@
 //! rolled the wrong way) and double-negated Z spins (Trojan's ring spun
 //! backwards).
 
+pub mod debris;
 pub mod units;
 
 /// Kani model-checking harnesses proving equivalence with the retired
@@ -41,6 +42,7 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::team_colors::{TeamColor, UnitColor};
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
 
+pub use debris::{FALL, SHATTER};
 pub use units::{driver_for, has_aim_weapon, piece_names};
 
 /// Angle conversion for the degree-based driver helpers. `<n>` in a
@@ -236,10 +238,12 @@ pub enum FxEvent {
         piece: usize,
         kind: SfxKind,
     },
-    /// Piece detonation (`explode piece type ...`). Every explode class
-    /// renders the same burst, so the class isn't carried.
+    /// Piece detonation (`explode piece type <flags>`): the piece hides,
+    /// a heat flash pops, and the piece flies off whole or shatters
+    /// ([`debris`]).
     Explode {
         piece: usize,
+        flags: i32,
     },
     Show {
         piece: usize,
@@ -503,12 +507,11 @@ impl AnimRig {
         }
     }
 
-    /// `explode piece type <severity>`. `_severity` is the upstream
-    /// `FALL/SHATTER/...` class, taken so drivers transcribe the `.bos`
-    /// 1:1; every class currently renders the same burst.
-    pub fn explode(&mut self, piece: usize, _severity: i32) {
+    /// `explode piece type <flags>`: `flags` is the `.bos`'s
+    /// [`SHATTER`] / [`FALL`] / ... (`springdefs.h`).
+    pub fn explode(&mut self, piece: usize, flags: i32) {
         if self.live(piece) {
-            self.outbox.push(FxEvent::Explode { piece });
+            self.outbox.push(FxEvent::Explode { piece, flags });
         }
     }
 
@@ -743,6 +746,8 @@ pub struct AnimFxOut<'w, 's> {
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub death_assets: ResMut<'w, DeathParticleAssets>,
     pub explosions: ResMut<'w, PendingExplosions>,
+    /// Exploded pieces for [`debris::spawn_debris`] to throw.
+    pub debris: ResMut<'w, debris::PendingDebris>,
 }
 
 /// The driver-tick query plus its per-frame world inputs. Dying units are
@@ -964,10 +969,16 @@ fn apply_and_drain(
                     *vis = Visibility::Hidden;
                 }
             }
-            FxEvent::Explode { piece, .. } if in_range(piece) => {
+            FxEvent::Explode { piece, flags } if in_range(piece) => {
                 if let Ok((_, mut vis)) = fx.transforms.get_mut(rig.piece_entities[piece]) {
                     *vis = Visibility::Hidden;
                 }
+                fx.debris.0.push(debris::DebrisRequest {
+                    piece: rig.piece_entities[piece],
+                    index: piece,
+                    unit: entity,
+                    flags,
+                });
                 let piece_world_pos = piece_world_pos(fx, rig.piece_entities[piece], unit_gtf);
                 spawn_death_particle(
                     piece_world_pos,

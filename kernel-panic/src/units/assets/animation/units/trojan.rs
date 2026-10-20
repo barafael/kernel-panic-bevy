@@ -5,7 +5,7 @@
 //! `INBUILDSTANCE` and fires a `BuildLaser` from `center` every 60 ms;
 //! `StopBuilding()` levels it again.
 
-use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, SfxKind, UnitAnim};
 use super::{DeathFx, turn_time};
 
 /// trojan.bos Create(): `spin center around z-axis speed <-120>`
@@ -111,7 +111,7 @@ impl UnitAnim for TrojanAnim {
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode piece0..3 FALL, then hide them.
         for piece in self.pieces.piece {
-            rig.explode(piece, 3);
+            rig.explode(piece, FALL);
             rig.hide(piece);
         }
         self.death.start();

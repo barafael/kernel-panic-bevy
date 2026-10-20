@@ -118,6 +118,9 @@ impl Plugin for UnitsPlugin {
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<cloak::FogEnabled>()
             .init_resource::<animation::DeathParticleAssets>()
+            .init_resource::<animation::debris::ShatterCache>()
+            .init_match_resource::<animation::debris::PendingDebris>()
+            .init_match_resource::<SimRng<animation::debris::DebrisRng>>()
             .init_match_resource::<production::BuggerOffRequests>()
             // The sim's random streams, re-seeded from the match seed
             // at every swap (`sim::SimRng`).
@@ -132,6 +135,8 @@ impl Plugin for UnitsPlugin {
             .register_required_components::<components::UnitType, SimPose>()
             .register_required_components::<animation::PieceIndex, SimPose>()
             .register_required_components::<animation::DeathParticle, SimPose>()
+            .register_required_components::<animation::debris::Debris, SimPose>()
+            .register_required_components::<animation::debris::Shard, SimPose>()
             .register_required_components::<command_fire::SigTermSignal, SimPose>()
             .register_required_components::<command_fire::SigTermBomb, SimPose>()
             .register_required_components::<command_fire::SigTermWreck, SimPose>()
@@ -286,6 +291,8 @@ impl Plugin for UnitsPlugin {
                         .in_set(GameplaySet::Resolve),
                     (
                         animation::animation_system,
+                        animation::debris::spawn_debris,
+                        animation::debris::tick_debris,
                         animation::sync_muzzle_pieces,
                         combat::sync_byte_fold_state,
                         animation::decay_death_particles,

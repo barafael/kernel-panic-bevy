@@ -15,7 +15,7 @@
 //!
 //! Linear constant 65536: `[20]` = 20 elmos, `[10]` = 10.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, SHATTER, UnitAnim};
 use super::{DeathFx, move_time};
 use crate::units::combat::DeployState;
 
@@ -255,9 +255,9 @@ impl UnitAnim for PointerAnim {
         rig.hide(self.pieces.left);
         rig.hide(self.pieces.right);
         rig.hide(self.pieces.gun);
-        rig.explode(self.pieces.gun, 4);
-        rig.explode(self.pieces.left, 1);
-        rig.explode(self.pieces.right, 1);
+        rig.explode(self.pieces.gun, FALL);
+        rig.explode(self.pieces.left, SHATTER);
+        rig.explode(self.pieces.right, SHATTER);
         self.death.start();
     }
 

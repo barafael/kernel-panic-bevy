@@ -2,7 +2,7 @@
 //! wave while moving; aiming surfaces the head and yaws the body; a
 //! strike lashes every segment forward before retracting.
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, UnitAnim, deg2rad};
 use super::DeathFx;
 use crate::sim::angle_delta;
 
@@ -256,7 +256,7 @@ impl UnitAnim for WormAnim {
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode head + rings + end, all FALL.
         for segment in self.pieces.segments() {
-            rig.explode(segment, 3);
+            rig.explode(segment, FALL);
         }
         self.death.start();
     }

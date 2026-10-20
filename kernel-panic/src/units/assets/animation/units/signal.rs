@@ -2,7 +2,7 @@
 //! the base swings level ~2.5s after creation, then the four wings
 //! unfold. Dies scattering its wings and dropping any loaded bomb.
 
-use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, FALL, SfxKind, UnitAnim};
 use super::DeathFx;
 
 #[derive(Clone, Copy, Default)]
@@ -87,7 +87,7 @@ impl UnitAnim for SignalAnim {
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): wings FALL off; if loaded, drop the bomb.
         for wing in self.pieces.wing {
-            rig.explode(wing, 3);
+            rig.explode(wing, FALL);
             rig.hide(wing);
         }
         if self.loaded {

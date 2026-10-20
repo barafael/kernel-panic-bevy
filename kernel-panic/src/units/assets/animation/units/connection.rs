@@ -31,7 +31,7 @@
 //! above it, and is supplied for any aim target (upstream only slides
 //! for unit targets; on a ground order `gp2` keeps its last extension).
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim, deg2rad};
+use super::super::{AnimCtx, AnimRig, Axis, SHATTER, UnitAnim, deg2rad};
 use super::DeathFx;
 use crate::sim::DetFloat;
 
@@ -107,7 +107,7 @@ impl UnitAnim for ConnectionAnim {
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode body SHATTER; hide body.
-        rig.explode(self.pieces.body, 4);
+        rig.explode(self.pieces.body, SHATTER);
         rig.hide(self.pieces.body);
         self.death.start();
     }

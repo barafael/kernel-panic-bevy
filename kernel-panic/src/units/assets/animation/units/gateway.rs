@@ -3,7 +3,7 @@
 //! build sparks from each facing, and every other 250 ms step draws the
 //! white `lua_BuildArc` strand to the unit it is building.
 
-use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, SHATTER, SfxKind, UnitAnim};
 use super::DeathFx;
 
 /// BuildFX(): one compass step + emit burst per `sleep 250`.
@@ -98,7 +98,7 @@ impl UnitAnim for GatewayAnim {
 
     fn killed(&mut self, rig: &mut AnimRig, _ctx: AnimCtx) {
         // Killed(): explode body SHATTER; hide body.
-        rig.explode(self.pieces.body, 4);
+        rig.explode(self.pieces.body, SHATTER);
         rig.hide(self.pieces.body);
         self.death.start();
     }

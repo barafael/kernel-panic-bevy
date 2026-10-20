@@ -1,7 +1,7 @@
 //! bit.bos — the System swarm unit. A shell (`body`) that rolls around
 //! its x-axis while driving; the gun aims instantly (`turn ... now`).
 
-use super::super::{AnimCtx, AnimRig, Axis, UnitAnim};
+use super::super::{AnimCtx, AnimRig, Axis, SHATTER, UnitAnim};
 use super::DeathFx;
 
 #[derive(Clone, Copy, Default)]
@@ -83,7 +83,7 @@ impl UnitAnim for BitAnim {
         // Killed(): hide body/shell, explode body SHATTER
         rig.hide(self.pieces.body);
         rig.hide(self.pieces.shell);
-        rig.explode(self.pieces.body, 4);
+        rig.explode(self.pieces.body, SHATTER);
         self.death.start();
     }
 
