@@ -185,7 +185,12 @@ fn room_view(
     if host {
         button_cell("<", MAP_GREEN, size, LobbyAction::Map(-1)).spawn(commands, map_row);
     }
-    label_cell(&format!("Map: {}", room.map), MAP_GREEN, size).spawn(commands, map_row);
+    label_cell(
+        &format!("Map: {}", crate::map_loading::display_name(&room.map)),
+        MAP_GREEN,
+        size,
+    )
+    .spawn(commands, map_row);
     if host {
         button_cell(">", MAP_GREEN, size, LobbyAction::Map(1)).spawn(commands, map_row);
     }

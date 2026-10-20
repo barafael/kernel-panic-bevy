@@ -270,7 +270,7 @@ impl Replay {
         let clock = crate::ui::game_clock(self.ticks);
         format!(
             "{when}{} - {who} - {clock}",
-            self.setup.map.replace('_', " ")
+            crate::map_loading::display_name(&self.setup.map)
         )
     }
 }

@@ -10,7 +10,7 @@ use bevy::prelude::*;
 
 use super::{
     Anchor, BUTTON_GREEN, ButtonSpec, EASY_CYAN, LabelSpec, MenuAction, MenuPage, NAV_BLUE, TEAL,
-    VERY_HARD_RED, back_button, page_heading,
+    VERY_HARD_RED, back_button, page_heading, readable,
 };
 use crate::net::replay_log::{self, RecentReplays};
 
@@ -45,9 +45,9 @@ enum Source {
 pub(crate) struct ReplayShelf {
     /// Every replay known, newest first: its name and where it is.
     entries: Vec<(String, Source)>,
-    /// One line per replay seen (by name): its match, or why it can't
-    /// be read.
-    labels: BTreeMap<String, String>,
+    /// One line per replay seen (by name): its match, or when and where
+    /// it was played and why it can't be; and whether it plays.
+    labels: BTreeMap<String, (String, bool)>,
     page: usize,
     /// The last thing worth saying (a replay that would not open).
     notice: Option<String>,
@@ -106,10 +106,39 @@ fn refresh_shelf(page: Res<MenuPage>, recent: Res<RecentReplays>, mut shelf: Res
             continue;
         }
         let label = match read(&source, &recent).and_then(|b| replay_log::open(&b)) {
-            Ok(r) => r.label(),
-            Err(why) => format!("{name}: {why}"),
+            Ok(r) => (r.label(), true),
+            Err(why) => (
+                format!("{} - {}", file_label(&name), short_reason(&why)),
+                false,
+            ),
         };
         shelf.labels.insert(name, label);
+    }
+}
+
+/// When and where a replay was played, from its file name
+/// (`2026-10-19_14-57-49_Hex_Farm_8.kpreplay` → `2026-10-19 14:57  Hex
+/// Farm 8`), for one that can't be opened to say so itself.
+fn file_label(name: &str) -> String {
+    let stem = name.strip_suffix(".kpreplay").unwrap_or(name);
+    let mut parts = stem.splitn(3, '_');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(day), Some(time), Some(map)) if day.len() == 10 && time.len() == 8 => {
+            let hm = time.get(..5).unwrap_or(time).replace('-', ":");
+            format!("{day} {hm}  {}", crate::map_loading::display_name(map))
+        }
+        _ => stem.to_string(),
+    }
+}
+
+/// Why a replay won't play, in a few words.
+fn short_reason(why: &str) -> &'static str {
+    if why.contains("game version") {
+        "another game version"
+    } else if why.contains("unit data") {
+        "other unit data"
+    } else {
+        "unreadable"
     }
 }
 
@@ -175,7 +204,7 @@ fn replays_actions(
 pub(super) fn replays_page(
     commands: &mut Commands,
     root: Entity,
-    page_size: f32,
+    (window_w, page_size): (f32, f32),
     shelf: &ReplayShelf,
 ) {
     page_heading(commands, root, page_size, "Replays");
@@ -191,8 +220,18 @@ pub(super) fn replays_page(
     let first = shelf.page * PER_PAGE;
     for (i, (name, _)) in shelf.entries.iter().enumerate().skip(first).take(PER_PAGE) {
         let y = 0.78 - 0.065 * (i - first) as f32;
-        let label = shelf.labels.get(name).map_or(name.as_str(), String::as_str);
-        LabelSpec::new(label, size, (0.08, y), Anchor::Lc).spawn(commands, root);
+        let (label, playable) = shelf
+            .labels
+            .get(name)
+            .map_or((name.as_str(), false), |(l, ok)| (l.as_str(), *ok));
+        // The line ends short of the buttons: monospace glyphs are
+        // ~0.6 em wide, and Play (and Save) take the right fifth.
+        let room = ((0.72 * window_w) / (0.6 * readable(size))) as usize;
+        let label = clip_chars(label, room);
+        LabelSpec::new(&label, size, (0.08, y), Anchor::Lc).spawn(commands, root);
+        if !playable {
+            continue;
+        }
         ButtonSpec::new(
             "Play",
             BUTTON_GREEN,
@@ -323,5 +362,34 @@ mod web {
         for file in opened {
             recent.0.insert(0, file);
         }
+    }
+}
+
+/// `text` cut to `room` characters, ending in `...` when cut.
+fn clip_chars(text: &str, room: usize) -> String {
+    if text.chars().count() <= room {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(room.saturating_sub(3)).collect();
+    format!("{}...", kept.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_replays_say_when_where_and_why() {
+        assert_eq!(
+            file_label("2026-10-19_14-57-49_Hex_Farm_8.kpreplay"),
+            "2026-10-19 14:57  Hex Farm 8"
+        );
+        assert_eq!(file_label("odd.kpreplay"), "odd");
+        assert_eq!(
+            short_reason("The replay runs game version 7 (this one runs 13); update the game."),
+            "another game version"
+        );
+        assert_eq!(clip_chars("abcdefgh", 6), "abc...");
+        assert_eq!(clip_chars("abc", 6), "abc");
     }
 }

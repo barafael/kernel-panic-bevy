@@ -1413,7 +1413,9 @@ fn maintain_launch_menu(
             lobby,
             chat,
         ),
-        MenuPage::Replays => replays_page::replays_page(&mut commands, root, page_size, shelf),
+        MenuPage::Replays => {
+            replays_page::replays_page(&mut commands, root, (window.width(), page_size), shelf)
+        }
     }
 }
 
@@ -1520,7 +1522,11 @@ fn demo_map_cycler(commands: &mut Commands, root: Entity, font_size: f32, demo_m
     let prev = arrow(commands, "<", -1);
     let name = commands
         .spawn((
-            Text::new(demo_map.unwrap_or("")),
+            Text::new(
+                demo_map
+                    .map(crate::map_loading::display_name)
+                    .unwrap_or_default(),
+            ),
             TextColor(TEXT_WHITE),
             TextFont {
                 font_size: FontSize::Px(font_size),
@@ -2041,9 +2047,9 @@ fn advanced_skirmish_page(
     .min_width(24.0)
     .spawn(commands, root);
 
-    let map_name = match config.map {
-        Some(i) => map_names.get(i).map(String::as_str).unwrap_or("random"),
-        None => "random",
+    let map_name = match config.map.and_then(|i| map_names.get(i)) {
+        Some(stem) => crate::map_loading::display_name(stem),
+        None => "random".to_string(),
     };
     ButtonSpec::new(
         &format!("Map: {map_name}"),
@@ -2140,26 +2146,42 @@ fn advanced_skirmish_page(
 /// `rc` at x=90%) under a "Choose a map:" heading, Back at the bottom
 /// — paired with the weighted-random pick like Run!/Back, since long
 /// map names reach into the centre column.
-/// Two columns of map plates, 45 % of the width each: the list font
-/// shrinks until the longest name fits its column.
+/// Two columns of map plates, 40 % of the width each, alphabetical down
+/// the first column and on down the second, each name with the players
+/// the map is made for. The font shrinks until the longest entry fits
+/// its column and a plate fits its row with a gap to the next.
 fn map_list_page(
     commands: &mut Commands,
     root: Entity,
     (window_w, list_size): (f32, f32),
     catalog: &MapCatalog,
 ) {
-    let names = catalog.names();
-    let longest = names.iter().map(|n| n.chars().count()).max().unwrap_or(1);
-    let list_size = list_size.det_min(0.45 * window_w / (0.6 * longest as f32 + 2.0));
-    LabelSpec::new(
-        "Choose a map:",
-        list_size * 28.0 / 24.0,
-        (0.5, 0.95),
-        Anchor::Cc,
-    )
-    .frame(NAV_BLUE)
-    .spawn(commands, root);
-    let nav_size = list_size * 28.0 / 24.0;
+    let window_h = list_size * 28.0;
+    let mut entries: Vec<(usize, String)> = catalog
+        .names()
+        .iter()
+        .enumerate()
+        .map(|(i, stem)| (i, map_list_entry(stem)))
+        .collect();
+    entries.sort_by_key(|(_, entry)| entry.to_lowercase());
+    let longest = entries
+        .iter()
+        .map(|(_, e)| e.chars().count())
+        .max()
+        .unwrap_or(1);
+    let rows = entries.len().div_ceil(2).max(1);
+    // The original steps 10% per row from y=85%; longer catalogs
+    // squeeze to keep the last row clear of Back.
+    let step = (0.72 / rows as f32).det_min(0.1);
+    // A plate is 1.5 em plus its border; keep a fifth of the step free.
+    let by_row = 0.8 * step * window_h / 1.7;
+    let list_size = list_size
+        .det_min(0.4 * window_w / (0.6 * longest as f32 + 2.0))
+        .det_min(by_row);
+    let nav_size = (window_h / 28.0) * 28.0 / 24.0;
+    LabelSpec::new("Choose a map:", nav_size, (0.5, 0.95), Anchor::Cc)
+        .frame(NAV_BLUE)
+        .spawn(commands, root);
     ButtonSpec::new(
         "Random map",
         TEAL,
@@ -2171,24 +2193,20 @@ fn map_list_page(
     .min_width(16.0)
     .spawn(commands, root);
 
-    let rows = names.len().div_ceil(2).max(1);
-    // The original steps 10% per row from y=85%; longer catalogs
-    // squeeze to keep the last row clear of Back.
-    let step = (0.72 / rows as f32).det_min(0.1);
-    for (i, name) in names.iter().enumerate() {
-        let (col, row) = (i / rows, i % rows);
+    for (slot, (i, entry)) in entries.iter().enumerate() {
+        let (col, row) = (slot / rows, slot % rows);
         let (x, anchor) = if col == 0 {
             (0.05, Anchor::Lc)
         } else {
             (0.95, Anchor::Rc)
         };
         ButtonSpec::new(
-            name,
+            entry,
             BUTTON_GREEN,
             list_size,
             (x, 0.85 - step * row as f32),
             anchor,
-            MenuAction::PickMap(i),
+            MenuAction::PickMap(*i),
         )
         .min_width(40.0)
         .spawn(commands, root);
@@ -2196,6 +2214,17 @@ fn map_list_page(
     back_button(nav_size, (0.6, 0.05), MenuPage::AdvancedSkirmish)
         .min_width(16.0)
         .spawn(commands, root);
+}
+
+/// A map list plate: the map's name and the players it is made for
+/// (`Deadlock v1  2-4`).
+fn map_list_entry(stem: &str) -> String {
+    let name = crate::map_loading::display_name(stem);
+    match crate::map_loading::map_meta(stem).map(|m| m.players) {
+        Some((lo, hi)) if lo == hi => format!("{name}  {lo}"),
+        Some((lo, hi)) => format!("{name}  {lo}-{hi}"),
+        None => name,
+    }
 }
 
 /// The original's `Credits`: heading plate sitting on y=80%, the credit
@@ -2391,7 +2420,18 @@ fn readme_lines() -> Vec<String> {
                 Ok(text) => {
                     let mut out: Vec<String> = Vec::new();
                     for line in text.replace("\r\n", "\n").split('\n') {
-                        let line = line.trim_end();
+                        // The font has no tab glyph: expand to the next
+                        // multiple of four columns.
+                        let mut expanded = String::new();
+                        for c in line.trim_end().chars() {
+                            if c == '\t' {
+                                let pad = 4 - expanded.chars().count() % 4;
+                                expanded.extend(std::iter::repeat_n(' ', pad));
+                            } else {
+                                expanded.push(c);
+                            }
+                        }
+                        let line = expanded.as_str();
                         if line.is_empty()
                             && out.last().is_some_and(|last: &String| last.is_empty())
                         {

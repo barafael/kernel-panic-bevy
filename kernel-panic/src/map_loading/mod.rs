@@ -84,6 +84,30 @@ pub struct MapMeta {
     pub players: (u32, u32),
 }
 
+/// A map's file stem as the menus show it: words split at underscores,
+/// each all-lower-case word capitalised but a version (`v1`) kept:
+/// `circular_buffer_3_v1` → `Circular Buffer 3 v1`, `Data_Cache_L1` →
+/// `Data Cache L1`.
+pub fn display_name(stem: &str) -> String {
+    let version = |w: &str| {
+        w.strip_prefix('v')
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    };
+    stem.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_lowercase() && !version(w) => {
+                    c.to_uppercase().chain(chars).collect()
+                }
+                _ => w.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The shipped map `name`'s [`MapMeta`].
 pub fn map_meta(name: &str) -> Option<MapMeta> {
     MAP_META
@@ -1208,4 +1232,18 @@ fn apply_fog(
         start: fog_start_frac * max_view_distance,
         end: max_view_distance,
     };
+}
+
+#[cfg(test)]
+mod display_name_tests {
+    use super::display_name;
+
+    #[test]
+    fn stems_read_as_names() {
+        assert_eq!(display_name("circular_buffer_3_v1"), "Circular Buffer 3 v1");
+        assert_eq!(display_name("Data_Cache_L1"), "Data Cache L1");
+        assert_eq!(display_name("Palladium_0.5_(beta)"), "Palladium 0.5 (beta)");
+        assert_eq!(display_name("pacman"), "Pacman");
+        assert_eq!(display_name("DigitalDivide_PT2"), "DigitalDivide PT2");
+    }
 }
