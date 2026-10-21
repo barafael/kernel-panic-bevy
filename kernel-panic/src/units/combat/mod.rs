@@ -23,7 +23,7 @@ use super::components::{TeamId, UnitStats, UnitType};
 use super::content::cegs::CegKind;
 use super::content::definitions::UnitKind;
 use super::content::unit_registry::UnitRegistry;
-use super::content::weapons::{WeaponId, WeaponRegistry};
+use super::content::weapons::{WeaponKind, WeaponRegistry};
 use super::lifecycle::bookkeeping::NoAutoTarget;
 use super::lifecycle::script_triggers::JustFired;
 use super::mechanics::cloak::{Cloaked, DetectedBy};
@@ -530,7 +530,7 @@ impl PieceLookup<'_, '_> {
 pub struct SalvoShot {
     pub attacker: Entity,
     pub kind: UnitKind,
-    pub weapon: WeaponId,
+    pub weapon: WeaponKind,
     /// Unit target (`None` for attack-ground).
     pub target: Option<Entity>,
     /// Aim point when no unit target can be resolved: the attack-ground
@@ -627,7 +627,7 @@ pub(super) fn fire_salvo_shot(
             pending_attacks.events.push(AttackEvent {
                 attacker_pos: muzzle.pos,
                 target_pos: aim,
-                weapon_id: shot.weapon,
+                weapon: shot.weapon,
                 muzzle_ceg,
                 delayed_hit: Some(DelayedHitInfo {
                     target: shot.target,
@@ -677,7 +677,7 @@ pub(super) fn fire_salvo_shot(
         pending_attacks.events.push(AttackEvent {
             attacker_pos: muzzle.pos,
             target_pos: impact_pos,
-            weapon_id: shot.weapon,
+            weapon: shot.weapon,
             muzzle_ceg,
             delayed_hit: shot.is_traveling.then_some(DelayedHitInfo {
                 target: shot.target,
@@ -750,42 +750,32 @@ impl AttackCooldown {
     }
 }
 
-/// Per-attacker cached primary-weapon id. Inserted at spawn time once
-/// the unit's FBI weapon name has been interned by the
-/// [`WeaponRegistry`]; from there the per-frame combat hot path looks
-/// up the `WeaponDef` via a single `Vec` index instead of hashing the
-/// weapon's TDF name on every iteration. Units with no primary weapon
-/// (or whose only weapon is BuildLaser, filtered upstream by
-/// `unit_registry.weapon`) carry no binding — combat skips them via
-/// `Option<&WeaponBinding>`.
+/// Per-attacker cached primary weapon. Inserted at spawn time once the
+/// unit's FBI weapon name resolves to a [`WeaponKind`]; from there the
+/// per-frame combat hot path reads the `WeaponDef` from an array slot
+/// instead of hashing the weapon's TDF name on every iteration. Units
+/// with no primary weapon (or whose only weapon is BuildLaser, filtered
+/// upstream by `unit_registry.weapon`) carry no binding — combat skips
+/// them via `Option<&WeaponBinding>`.
 #[derive(Component, Copy, Clone, Debug)]
-pub struct WeaponBinding(pub WeaponId);
+pub struct WeaponBinding(pub WeaponKind);
 
-/// The attacker's primary weapon: the cached binding when present,
-/// else the registry name lookup for legacy paths (e.g. units that
-/// haven't been migrated to `WeaponBinding`) — behaviour stays
-/// identical for any unit class that bypasses `spawn_unit`. The
-/// `is_empty` short-circuit just skips hashing a name that is never
-/// registered.
+/// The attacker's primary weapon: the cached binding when present, else
+/// resolving the FBI name for legacy paths (e.g. units that haven't been
+/// migrated to `WeaponBinding`) — behaviour stays identical for any unit
+/// class that bypasses `spawn_unit`. Both halves agree: a name that is
+/// not a section yields `(None, None)`, so callers gate on either.
 fn resolve_weapon<'a>(
     binding: Option<&WeaponBinding>,
     unit_registry: &UnitRegistry,
     weapon_registry: &'a WeaponRegistry,
     unit_type: UnitKind,
-) -> (Option<WeaponId>, Option<&'a spring_tdf::WeaponDef>) {
+) -> (Option<WeaponKind>, Option<&'a spring_tdf::WeaponDef>) {
     if let Some(binding) = binding {
-        return (Some(binding.0), Some(weapon_registry.by_id(binding.0)));
+        return (Some(binding.0), Some(weapon_registry.by_kind(binding.0)));
     }
-    let name = unit_registry.weapon(unit_type);
-    // One `intern`, not `intern` + `get`: `get` interns internally, so
-    // pairing them lowercases the name twice per call. `by_id` is the
-    // same lookup `get` would have done after that intern.
-    let id = if name.is_empty() {
-        None
-    } else {
-        weapon_registry.intern(name)
-    };
-    (id, id.map(|id| weapon_registry.by_id(id)))
+    let kind = weapon_registry.find(unit_registry.weapon(unit_type));
+    (kind, kind.map(|kind| weapon_registry.by_kind(kind)))
 }
 
 /// Seconds since this unit last took damage (upstream `restTime`).
@@ -928,8 +918,8 @@ pub fn combat_system(
         // Resolve weapon stats via the cached binding when present
         // (see `resolve_weapon`). The display name is no longer needed
         // here — every consumer (damage queue, fx events, burst
-        // component) carries the id.
-        let (weapon_id, weapon_def) = resolve_weapon(
+        // component) carries the kind.
+        let (weapon, weapon_def) = resolve_weapon(
             weapon_binding,
             &unit_registry,
             &weapon_registry,
@@ -943,7 +933,7 @@ pub fn combat_system(
         // down — fires its single Minekiller shot into the ground at its
         // feet: the blast that clears Logic Bombs and Bad Blocks around.
         if unit_type.0 == UnitKind::Debug {
-            if !debug_blasted && let (Some(id), Some(def)) = (weapon_id, weapon_def) {
+            if !debug_blasted && let (Some(id), Some(def)) = (weapon, weapon_def) {
                 let ground = attacker_gtf.translation();
                 damage_queue.push(PendingDamage {
                     target: None,
@@ -1283,12 +1273,12 @@ pub fn combat_system(
             AttackCooldown::after_reload(frame, weapon_def.reload_time),
             JustFired,
         ));
-        if let Some(weapon_id) = weapon_id {
+        if let Some(weapon) = weapon {
             open_salvo(
                 SalvoShot {
                     attacker: entity,
                     kind: unit_type.0,
-                    weapon: weapon_id,
+                    weapon,
                     target: Some(target_entity),
                     aim_pos: target_pos,
                     // Hitscan lands now; traveling bolts defer via
@@ -1569,7 +1559,7 @@ pub fn attack_ground_system(
         {
             continue;
         }
-        let (weapon_id, weapon_def) = resolve_weapon(
+        let (weapon, weapon_def) = resolve_weapon(
             weapon_binding,
             &unit_registry,
             &weapon_registry,
@@ -1578,7 +1568,7 @@ pub fn attack_ground_system(
         let Some(weapon_def) = weapon_def else {
             continue;
         };
-        let weapon_id = weapon_id.expect("registered weapon is interned");
+        let weapon = weapon.expect("a def implies a kind");
         let range = weapon_def.effective_range();
         if range <= 0.0 {
             continue;
@@ -1685,7 +1675,7 @@ pub fn attack_ground_system(
             SalvoShot {
                 attacker: entity,
                 kind: unit_type.0,
-                weapon: weapon_id,
+                weapon,
                 target: None,
                 aim_pos: order.pos,
                 is_traveling,
@@ -1914,7 +1904,7 @@ mod tests {
     fn line_weapon_registry() -> WeaponRegistry {
         let mut weapons = WeaponRegistry::default();
         weapons.insert_for_test(
-            "Line",
+            WeaponKind::Line,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 80.0,
@@ -1944,7 +1934,7 @@ mod tests {
         app.insert_resource(bit_vs_socket_registry());
         let mut weapons = WeaponRegistry::default();
         weapons.insert_for_test(
-            "Line",
+            WeaponKind::Line,
             spring_tdf::WeaponDef {
                 weapon_type: "LaserCannon".into(),
                 damage: spring_tdf::DamageMap {
@@ -1956,7 +1946,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let line = weapons.intern("Line").unwrap();
+        let line = WeaponKind::Line;
         app.insert_resource(weapons);
         let (w, d) = (40, 8);
         let mut heights = vec![0.0; w * d];
@@ -2041,7 +2031,7 @@ mod tests {
             .init_resource::<crate::units::teams::Alliances>();
         app.insert_resource(bit_vs_socket_registry());
         let weapons = line_weapon_registry();
-        let line = weapons.intern("Line").unwrap();
+        let line = WeaponKind::Line;
         app.insert_resource(weapons);
 
         let bit = app
@@ -2093,7 +2083,7 @@ mod tests {
             .init_resource::<crate::units::teams::Alliances>();
         app.insert_resource(bit_vs_socket_registry());
         let weapons = line_weapon_registry();
-        let line = weapons.intern("Line").unwrap();
+        let line = WeaponKind::Line;
         app.insert_resource(weapons);
 
         let bit = app
@@ -2161,10 +2151,10 @@ mod tests {
     /// Worm vs Bit registry (no category restrictions — the upstream
     /// worm.fbi `OnlyTargetCategory1=EDIBLE` would need Bit's category
     /// too; the cloak rules under test don't depend on it).
-    fn worm_weapons() -> (WeaponRegistry, WeaponId, WeaponId) {
+    fn worm_weapons() -> (WeaponRegistry, WeaponKind, WeaponKind) {
         let mut weapons = WeaponRegistry::default();
         let bite = weapons.insert_for_test(
-            "Wormbite",
+            WeaponKind::Wormbite,
             spring_tdf::WeaponDef {
                 weapon_type: "Melee".into(),
                 damage: spring_tdf::DamageMap {
@@ -2178,7 +2168,7 @@ mod tests {
             },
         );
         let splash = weapons.insert_for_test(
-            "Wormsplash",
+            WeaponKind::Wormsplash,
             spring_tdf::WeaponDef {
                 weapon_type: "Melee".into(),
                 damage: spring_tdf::DamageMap {
@@ -2230,7 +2220,7 @@ mod tests {
         enemy
     }
 
-    fn spawn_bit_shooter(app: &mut App, line: WeaponId) -> Entity {
+    fn spawn_bit_shooter(app: &mut App, line: WeaponKind) -> Entity {
         app.world_mut()
             .spawn((
                 UnitType(UnitKind::Bit),
@@ -2249,11 +2239,7 @@ mod tests {
     fn undetected_cloaked_enemy_is_not_auto_targeted() {
         // --- Detected only by team 1 (its own side): ignored. ---
         let mut app = combat_app(line_weapon_registry());
-        let line = app
-            .world()
-            .resource::<WeaponRegistry>()
-            .intern("Line")
-            .unwrap();
+        let line = WeaponKind::Line;
         let bit = spawn_bit_shooter(&mut app, line);
         enemy_entry(&mut app, Vec3::new(100.0, 0.0, 0.0), true, 0b10);
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2529,7 +2515,7 @@ mod tests {
         let shot = SalvoShot {
             attacker: unit,
             kind: UnitKind::Flow,
-            weapon: WeaponId::BUILD_LASER,
+            weapon: WeaponKind::BuildLaser,
             target: None,
             aim_pos: target,
             is_traveling: true,
@@ -2548,7 +2534,7 @@ mod tests {
                     let mut sounds = crate::audio::SoundQueue::default();
                     fire_salvo_shot(
                         &shot,
-                        weapons.by_id(shot.weapon),
+                        weapons.by_kind(shot.weapon),
                         &GlobalTransform::from(unit_tf),
                         false,
                         &mut pieces,
@@ -2596,10 +2582,10 @@ mod tests {
 
     /// A traveling `LaserCannon` like the Bit's `Line`: 512 elmos/s,
     /// range 256 (exactly 15 bolt frames), 0.5 s reload (15 frames).
-    fn laser_registry() -> (WeaponRegistry, WeaponId) {
+    fn laser_registry() -> (WeaponRegistry, WeaponKind) {
         let mut weapons = WeaponRegistry::default();
         let id = weapons.insert_for_test(
-            "Laser",
+            WeaponKind::Line,
             spring_tdf::WeaponDef {
                 weapon_type: "LaserCannon".into(),
                 damage: spring_tdf::DamageMap {
@@ -2667,11 +2653,7 @@ mod tests {
         // --- Bad target (Socket for a Bit): switch after 15 frames. ---
         let mut app = combat_app(line_weapon_registry());
         app.insert_resource(bit_vs_socket_registry());
-        let line = app
-            .world()
-            .resource::<WeaponRegistry>()
-            .intern("Line")
-            .unwrap();
+        let line = WeaponKind::Line;
         let bit = spawn_bit_shooter(&mut app, line);
         let socket = live_enemy(&mut app, UnitKind::Socket, Vec3::new(100.0, 0.0, 0.0), 0.0);
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2690,11 +2672,7 @@ mod tests {
         let mut app = combat_app(line_weapon_registry());
         // (A registry without the Bit's FBI ranks every target "bad".)
         app.insert_resource(bit_vs_socket_registry());
-        let line = app
-            .world()
-            .resource::<WeaponRegistry>()
-            .intern("Line")
-            .unwrap();
+        let line = WeaponKind::Line;
         let bit = spawn_bit_shooter(&mut app, line);
         let far = live_enemy(&mut app, UnitKind::Bit, Vec3::new(200.0, 0.0, 0.0), 0.0);
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -2939,7 +2917,7 @@ mod tests {
     #[test]
     fn avoid_friendly_shooter_picks_a_target_it_can_hit_without_allies_in_the_way() {
         let mut weapons = WeaponRegistry::default();
-        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let shot = weapons.insert_for_test(WeaponKind::BugShot, bugshot(true));
         let mut app = combat_app(weapons);
         let bug = spawn_bit_shooter(&mut app, shot);
         let near = live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
@@ -2951,7 +2929,7 @@ mod tests {
 
         // Nothing free: no target, no shot.
         let mut weapons = WeaponRegistry::default();
-        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let shot = weapons.insert_for_test(WeaponKind::BugShot, bugshot(true));
         let mut app = combat_app(weapons);
         let bug = spawn_bit_shooter(&mut app, shot);
         live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
@@ -2966,7 +2944,7 @@ mod tests {
     #[test]
     fn ally_stepping_into_the_line_holds_the_next_shot() {
         let mut weapons = WeaponRegistry::default();
-        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let shot = weapons.insert_for_test(WeaponKind::BugShot, bugshot(true));
         let mut app = combat_app(weapons);
         // A good target, kept for the 65-frame retry window.
         app.insert_resource(bit_vs_socket_registry());
@@ -2996,7 +2974,7 @@ mod tests {
     #[test]
     fn screened_user_target_is_tracked_while_a_free_one_is_shot() {
         let mut weapons = WeaponRegistry::default();
-        let shot = weapons.insert_for_test("BugShot", bugshot(true));
+        let shot = weapons.insert_for_test(WeaponKind::BugShot, bugshot(true));
         let mut app = combat_app(weapons);
         let bug = spawn_bit_shooter(&mut app, shot);
         let ordered = live_enemy(&mut app, UnitKind::Bit, Vec3::new(100.0, 0.0, 0.0), 0.0);
@@ -3023,7 +3001,7 @@ mod tests {
     fn debug_blasts_once_when_built() {
         let mut weapons = WeaponRegistry::default();
         let minekiller = weapons.insert_for_test(
-            "Minekiller",
+            WeaponKind::Minekiller,
             spring_tdf::WeaponDef {
                 line_of_sight: true,
                 smoke_trail: true,
@@ -3148,7 +3126,7 @@ mod tests {
     fn cannon_shot_carries_the_sprayed_ballistic_launch() {
         let mut weapons = WeaponRegistry::default();
         let cannon = weapons.insert_for_test(
-            "BugCannon",
+            WeaponKind::BugCannon,
             spring_tdf::WeaponDef {
                 spray_angle: 600.0,
                 ..aim::tests::bug_cannon()

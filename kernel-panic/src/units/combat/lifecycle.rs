@@ -342,7 +342,7 @@ pub fn death_system(
             if let Some(blast) = blast {
                 // `DoExplosion` -> `Explosion`: the ExplodeAs weapon's `soundhit`.
                 if let Some(sounds) = sounds.as_deref_mut() {
-                    sounds.explosion(weapon_registry.by_id(blast.weapon), pos);
+                    sounds.explosion(weapon_registry.by_kind(blast.weapon), pos);
                 }
                 damage_queue.push(PendingDamage {
                     target: Some(entity),
@@ -422,6 +422,7 @@ mod tests {
     use super::*;
     use crate::units::assets::animation::{AnimRig, UnitAnim};
     use crate::units::content::definitions::UnitKind;
+    use crate::units::content::weapons::WeaponKind;
     use bevy::ecs::system::RunSystemOnce;
 
     /// A driver whose death choreography is still playing.
@@ -605,7 +606,8 @@ mod tests {
     fn kamikaze_detonates_once() {
         use crate::units::spatial::SpatialEntry;
         let weapons = WeaponRegistry::load();
-        let logic_bomb = weapons.known().logic_bomb.expect("logic_bomb weapon");
+        let logic_bomb = WeaponKind::LogicBomb;
+        assert!(weapons.is_present(logic_bomb), "logic_bomb weapon");
         let mut world = resolve_world(UnitRegistry::load(), weapons);
         let bomb = world
             .spawn((

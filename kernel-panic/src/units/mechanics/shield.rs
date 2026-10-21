@@ -26,7 +26,7 @@ use crate::sim::DetFloat;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
-use crate::units::content::weapons::WeaponRegistry;
+use crate::units::content::weapons::{WeaponKind, WeaponRegistry};
 
 /// A unit's shield HP pool. `current_power = None` means infinite
 /// (upstream `shieldpower=0`); otherwise the shield has a finite pool
@@ -59,15 +59,15 @@ impl ShieldState {
     }
 }
 
-/// Shield weapon name for a given unit kind. Returns `None` for units
-/// that don't carry a shield. Upstream wires `homebaseshieldgood` into
+/// Shield weapon for a given unit kind. Returns `None` for units that
+/// don't carry a shield. Upstream wires `homebaseshieldgood` into
 /// weapon slot 2 of kernel / hole / carrier (see carrier.fbi — the
 /// slot-1 BuildLaser exists only to keep Spring from reordering the
 /// slots), and `minifacshieldgood` into the small structures.
-pub fn shield_weapon_for(kind: UnitKind) -> Option<&'static str> {
+pub fn shield_weapon_for(kind: UnitKind) -> Option<WeaponKind> {
     match kind {
-        k if k.is_homebase() => Some("homebaseshieldgood"),
-        k if k.is_small_building() => Some("minifacshieldgood"),
+        k if k.is_homebase() => Some(WeaponKind::HomebaseShieldGood),
+        k if k.is_small_building() => Some(WeaponKind::MinifacShieldGood),
         _ => None,
     }
 }
@@ -309,24 +309,24 @@ mod tests {
     fn shield_weapon_mapping_matches_upstream() {
         assert_eq!(
             shield_weapon_for(UnitKind::Kernel),
-            Some("homebaseshieldgood")
+            Some(WeaponKind::HomebaseShieldGood)
         );
         assert_eq!(
             shield_weapon_for(UnitKind::Hole),
-            Some("homebaseshieldgood")
+            Some(WeaponKind::HomebaseShieldGood)
         );
         // carrier.fbi wires homebaseshieldgood into weapon slot 2.
         assert_eq!(
             shield_weapon_for(UnitKind::Carrier),
-            Some("homebaseshieldgood")
+            Some(WeaponKind::HomebaseShieldGood)
         );
         assert_eq!(
             shield_weapon_for(UnitKind::Socket),
-            Some("minifacshieldgood")
+            Some(WeaponKind::MinifacShieldGood)
         );
         assert_eq!(
             shield_weapon_for(UnitKind::Firewall),
-            Some("minifacshieldgood")
+            Some(WeaponKind::MinifacShieldGood)
         );
         // Connection (the mobile teleporter) has no shield in upstream.
         assert!(shield_weapon_for(UnitKind::Connection).is_none());
@@ -376,7 +376,7 @@ mod shell_tests {
             .init_resource::<OnsMode>();
         let mut weapons = WeaponRegistry::default();
         weapons.insert_for_test(
-            "homebaseshieldgood",
+            WeaponKind::HomebaseShieldGood,
             WeaponDef {
                 is_shield: true,
                 shield_radius: 128.0,

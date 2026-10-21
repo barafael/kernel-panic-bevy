@@ -25,7 +25,7 @@ use bevy::prelude::*;
 use crate::units::ai::AiSeats;
 use crate::units::combat::{AimTarget, DamageQueue, Dying, PendingDamage};
 use crate::units::components::{TeamId, UnitStats, UnitType};
-use crate::units::content::weapons::WeaponId;
+use crate::units::content::weapons::WeaponKind;
 use crate::units::mechanics::cloak::Cloaked;
 
 /// Upstream `ResetAim`: `sleep 2000`, then `move head to y-axis [-16]
@@ -62,9 +62,9 @@ pub struct Surfaced {
 }
 
 /// The weapon a Worm's bite detonates (FBI `Weapon2=Wormsplash`),
-/// interned at spawn so the fire path doesn't hash names per bite.
+/// resolved at spawn so the fire path doesn't hash names per bite.
 #[derive(Component, Clone, Copy, Debug)]
-pub struct WormSplash(pub WeaponId);
+pub struct WormSplash(pub WeaponKind);
 
 /// Give freshly spawned AutoHold-capable units their initial toggle
 /// state from their team (human vs AI).
@@ -145,7 +145,7 @@ pub fn tick_worm_surfacing(
 pub fn queue_wormsplash(
     damage_queue: &mut DamageQueue,
     attacker: Entity,
-    splash: WeaponId,
+    splash: WeaponKind,
     bite_pos: Vec3,
     tail_pos: Vec3,
 ) {

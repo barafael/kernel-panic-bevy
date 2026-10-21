@@ -504,24 +504,21 @@ pub fn spawn_unit_facing(
         crate::units::combat::CollisionVolume::from_s3o(radius, mid_y),
     ));
 
-    // Cache the weapon-id binding once so the per-frame combat hot
-    // path can read it directly without hashing strings against the
-    // weapon registry every tick. Units with no primary weapon (or
+    // Cache the weapon binding once so the per-frame combat hot path can
+    // read the def from an array slot instead of hashing strings against
+    // the weapon registry every tick. Units with no primary weapon (or
     // whose only weapon is BuildLaser, filtered by `unit_registry.weapon`)
     // get no binding — combat skips them via `Option<&WeaponBinding>`.
-    let weapon_name = unit_registry.weapon(kind);
-    if !weapon_name.is_empty()
-        && let Some(weapon_id) = ctx.weapon_registry.intern(weapon_name)
-    {
+    if let Some(weapon) = ctx.weapon_registry.find(unit_registry.weapon(kind)) {
         commands
             .entity(unit_entity)
-            .insert(crate::units::combat::WeaponBinding(weapon_id));
+            .insert(crate::units::combat::WeaponBinding(weapon));
     }
 
-    // Worm bites detonate Weapon2 (worm.bos `emit-sfx 4097`); cache its
-    // id like the primary binding so the fire path never hashes names.
+    // Worm bites detonate Weapon2 (worm.bos `emit-sfx 4097`); cache the
+    // kind like the primary binding so the fire path never hashes names.
     if kind.has_autohold()
-        && let Some(splash) = ctx.weapon_registry.intern(unit_registry.weapon2(kind))
+        && let Some(splash) = ctx.weapon_registry.find(unit_registry.weapon2(kind))
     {
         commands
             .entity(unit_entity)

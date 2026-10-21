@@ -1034,7 +1034,7 @@ fn apply_and_drain(
                     .push(crate::units::weapon_fx::AttackEvent {
                         attacker_pos: start,
                         target_pos: end,
-                        weapon_id: crate::units::content::weapons::WeaponId::BUILD_LASER,
+                        weapon: crate::units::content::weapons::WeaponKind::BuildLaser,
                         muzzle_ceg: None,
                         delayed_hit: None,
                         arc_from: None,

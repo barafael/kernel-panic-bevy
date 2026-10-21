@@ -10,7 +10,7 @@ use bevy::prelude::*;
 use crate::terrain::heightmap::Heightmap;
 
 use crate::units::content::cegs::CegKind;
-use crate::units::content::weapons::WeaponId;
+use crate::units::content::weapons::WeaponKind;
 
 use super::ceg::{CegRegistry, CegRenderAssets, ground_flash_normal, spawn_ceg};
 use super::shared::{
@@ -29,8 +29,8 @@ use crate::units::content::weapons::WeaponRegistry;
 /// True for `BuildLaser` (the upstream build-laser weapon name). The
 /// `BuildLaserNoEffect` variant intentionally suppresses the impact particles,
 /// so only the bare-name version triggers `BuildSparkle` spawn.
-fn is_build_laser(weapon_id: WeaponId) -> bool {
-    weapon_id == WeaponId::BUILD_LASER
+fn is_build_laser(weapon: WeaponKind) -> bool {
+    weapon == WeaponKind::BuildLaser
 }
 
 /// Radius (elmos) of the muzzle-flash burst at the firing unit. Small
@@ -87,9 +87,9 @@ pub(super) fn spawn_weapon_visuals(
         );
     }
     for event in pending.events.drain(..) {
-        // Ids are interned through this same registry at the combat
-        // side, so the lookup is infallible.
-        let weapon = weapon_registry.by_id(event.weapon_id);
+        // The combat side resolved this through the same registry before
+        // pushing, so the lookup is infallible.
+        let weapon = weapon_registry.by_kind(event.weapon);
 
         let dir = event.target_pos - event.attacker_pos;
         let length = dir.length();
@@ -117,7 +117,7 @@ pub(super) fn spawn_weapon_visuals(
         // with the gadget-drawn lightning arc (upstream
         // `network_arceffect.lua`): the TDF beam has `intensity=0`
         // (invisible by design) and `explosiongenerator=custom:none`.
-        let is_gauss_arc = weapon_registry.is_gauss_cannon(event.weapon_id);
+        let is_gauss_arc = weapon_registry.is_gauss_cannon(event.weapon);
 
         if is_gauss_arc {
             let tint = LinearRgba::rgb(
@@ -143,7 +143,7 @@ pub(super) fn spawn_weapon_visuals(
             // that CEG at the impact point; the generic melee flash is
             // only the fallback for registries without the splash.
             let bite_dir = dir / length.det_max(1e-6);
-            let splash_played = weapon_registry.is_worm_bite(event.weapon_id)
+            let splash_played = weapon_registry.is_worm_bite(event.weapon)
                 && spawn_ceg(
                     CegKind::CorruptionWormSplash,
                     event.target_pos,
@@ -229,7 +229,7 @@ pub(super) fn spawn_weapon_visuals(
                 target: delayed.target,
                 attacker: delayed.attacker,
                 owner_team: teams.get(delayed.attacker).ok().map(|t| t.0),
-                weapon: event.weapon_id,
+                weapon: event.weapon,
                 attacker_distance: delayed.attacker_distance,
                 on_impact: delayed.on_impact,
             });
@@ -243,7 +243,7 @@ pub(super) fn spawn_weapon_visuals(
         // gets nothing. The coloured sphere only stands in when the named
         // CEG is missing from the registry.
         if !is_melee
-            && !is_build_laser(event.weapon_id)
+            && !is_build_laser(event.weapon)
             && !is_gauss_arc
             && let Some(muzzle_ceg) = event.muzzle_ceg
         {
@@ -283,7 +283,7 @@ pub(super) fn spawn_weapon_visuals(
         // runner this was hand-rolled here — with drifted speed/spread
         // and hash "jitter" — which is exactly the divergence the
         // runtime exists to prevent.
-        if is_build_laser(event.weapon_id) {
+        if is_build_laser(event.weapon) {
             spawn_ceg(
                 CegKind::OldskoolBuild,
                 event.target_pos,
@@ -308,7 +308,7 @@ pub(super) fn spawn_weapon_visuals(
             // only when the CEG is missing or references a class we
             // don't yet support (CBitmapMuzzleFlame etc).
             let dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
-            let used_ceg = weapon_registry.ceg(event.weapon_id).is_some_and(|ceg| {
+            let used_ceg = weapon_registry.ceg(event.weapon).is_some_and(|ceg| {
                 spawn_ceg(
                     ceg,
                     event.target_pos,
@@ -872,7 +872,7 @@ fn spawn_laser_bolt(
     // The authored per-frame `cegTag` CEG, emitted by `tick_weapon_fx`.
     if !weapon.ceg_tag.is_empty() {
         outer.insert(BoltCegTrail {
-            weapon: event.weapon_id,
+            weapon: event.weapon,
             seed: 0x9e3779b9u32
                 .wrapping_mul((event.attacker_pos.x * 131.0 + event.target_pos.z * 7.0).to_bits())
                 | 1,
@@ -1052,7 +1052,7 @@ fn spawn_projectile(
         None
     };
     // The authored per-frame `cegTag` CEG, emitted by `tick_weapon_fx`.
-    let trail_ceg = (!weapon.ceg_tag.is_empty()).then_some(event.weapon_id);
+    let trail_ceg = (!weapon.ceg_tag.is_empty()).then_some(event.weapon);
 
     // Initial velocity for integrated flights (the tick takes over).
     let (velocity, speed) = match flight {
@@ -1354,7 +1354,7 @@ mod tests {
     fn gauss_cannon_spawns_arc_instead_of_beam() {
         let mut app = fx_app();
         let mut weapons = WeaponRegistry::default();
-        let gauss = weapons.insert_for_test("GaussCannon", beam_def());
+        let gauss = weapons.insert_for_test(WeaponKind::GaussCannon, beam_def());
         app.insert_resource(weapons);
 
         app.world_mut()
@@ -1363,7 +1363,7 @@ mod tests {
             .push(AttackEvent {
                 attacker_pos: Vec3::ZERO,
                 target_pos: Vec3::new(200.0, 0.0, 0.0),
-                weapon_id: gauss,
+                weapon: gauss,
                 muzzle_ceg: None,
                 delayed_hit: None,
                 arc_from: None,
@@ -1399,7 +1399,7 @@ mod tests {
         let mut app = fx_app();
         let mut weapons = WeaponRegistry::default();
         let bite = weapons.insert_for_test(
-            "Wormbite",
+            WeaponKind::Wormbite,
             spring_tdf::WeaponDef {
                 weapon_type: "Melee".into(),
                 ..Default::default()
@@ -1413,7 +1413,7 @@ mod tests {
             .push(AttackEvent {
                 attacker_pos: Vec3::ZERO,
                 target_pos: Vec3::new(60.0, 0.0, 0.0),
-                weapon_id: bite,
+                weapon: bite,
                 muzzle_ceg: None,
                 delayed_hit: None,
                 arc_from: None,
@@ -1481,7 +1481,7 @@ mod tests {
     fn regular_beam_laser_still_spawns_beam() {
         let mut app = fx_app();
         let mut weapons = WeaponRegistry::default();
-        let id = weapons.insert_for_test("PacketBeam", beam_def());
+        let id = weapons.insert_for_test(WeaponKind::PacketBeam, beam_def());
         app.insert_resource(weapons);
 
         app.world_mut()
@@ -1490,7 +1490,7 @@ mod tests {
             .push(AttackEvent {
                 attacker_pos: Vec3::ZERO,
                 target_pos: Vec3::new(100.0, 0.0, 0.0),
-                weapon_id: id,
+                weapon: id,
                 muzzle_ceg: None,
                 delayed_hit: None,
                 arc_from: None,

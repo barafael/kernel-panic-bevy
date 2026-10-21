@@ -26,7 +26,7 @@ use crate::sim::{DetFloat, RngStream, SimRng, SimTick};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::content::weapons::WeaponId;
+use crate::units::content::weapons::WeaponKind;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::lifecycle::script_triggers::JustFired;
 use crate::units::lifecycle::spawning::Emerging;
@@ -46,11 +46,11 @@ pub struct PendingDamage {
     /// Primary target. `None` for ground-targeted or pure-AoE hits.
     pub target: Option<Entity>,
     pub attacker: Entity,
-    /// Interned weapon id (see [`WeaponRegistry`]) — pushed by systems
-    /// that already resolved the weapon through the registry, so the
-    /// apply path never string-hashes. Display names come back out via
-    /// [`WeaponRegistry::name`].
-    pub weapon: WeaponId,
+    /// The weapon this hit is credited to — pushed by systems that
+    /// already resolved it through the registry, so the apply path never
+    /// string-hashes. Display names come back out via
+    /// [`WeaponKind::name`].
+    pub weapon: WeaponKind,
     pub impact_pos: Vec3,
     /// Distance from attacker to primary target at the moment the hit
     /// was queued. Used by dynamic-damage weapons (BugCannon) to scale
@@ -63,7 +63,7 @@ impl PendingDamage {
     /// — the SIGTERM bomb, whose Signal has already self-destructed
     /// (signal.bos `FireWeapon1` → `lua_Destroy`), so the engine
     /// credits the blast to nobody.
-    pub fn unowned_explosion(weapon: WeaponId, impact_pos: Vec3) -> Self {
+    pub fn unowned_explosion(weapon: WeaponKind, impact_pos: Vec3) -> Self {
         Self {
             target: None,
             attacker: Entity::PLACEHOLDER,
@@ -166,9 +166,6 @@ pub struct Infected {
     pub attacker_team: u8,
 }
 
-#[cfg(test)]
-use crate::units::content::weapons::weapon_infection_duration;
-
 /// Queued virus spawns from infected unit deaths.
 #[derive(Debug, Clone, Copy)]
 pub struct VirusSpawn {
@@ -206,11 +203,10 @@ impl VirusSpawnQueue {
 /// `is_sigterm`: `168` is the `id=` the `[SigTerm]` section of
 /// `retroweapons.tdf` declares. Current Recoil ignores that tag and
 /// passes its own load-order weapon-def id, so upstream these
-/// comparisons no longer match; the port keeps the authors' intent. The
-/// `[SigTerm]` id is resolved once at registry load
-/// (`WeaponRegistry::known().sigterm`) rather than compared by name per
-/// hit. (virus.bos also tests ids 234 and 538, which no Kernel Panic
-/// weapon declares, so they never applied and are not ported.)
+/// comparisons no longer match; the port keeps the authors' intent — a
+/// hit carries [`WeaponKind::SigTerm`] or it does not. (virus.bos also
+/// tests ids 234 and 538, which no Kernel Panic weapon declares, so they
+/// never applied and are not ported.)
 fn script_hit_multiplier(
     target_kind: UnitKind,
     is_sigterm: bool,
@@ -343,7 +339,7 @@ pub struct Hit {
     pub damage: f32,
     /// The weapon the engine reports to `UnitPreDamaged` / script /
     /// `UnitDamaged` (infection, the Byte's SIGTERM exception).
-    pub weapon: Option<WeaponId>,
+    pub weapon: Option<WeaponKind>,
     /// `paralyzeDamageTime` (seconds) for paralyzer weapons.
     pub paralyze_time: Option<f32>,
     pub impulse: Vec3,
@@ -385,7 +381,6 @@ pub struct DamageResolver<'w, 's> {
     ids: Query<'w, 's, &'static NetId>,
     delayed: ResMut<'w, DelayedDamage>,
     hits: HitQueries<'w, 's>,
-    weapons: Res<'w, WeaponRegistry>,
     units: Res<'w, UnitRegistry>,
     impulses: ResMut<'w, crate::interaction::ground_move::PendingImpulses>,
     damage_log: Option<ResMut<'w, crate::units::ai::TeamDamageLog>>,
@@ -473,7 +468,7 @@ impl DamageResolver<'_, '_> {
         }
 
         // Script `HitByWeaponId`: homebases vs SIGTERM, closed Bytes.
-        let is_sigterm = hit.weapon.is_some() && hit.weapon == self.weapons.known().sigterm;
+        let is_sigterm = hit.weapon == Some(WeaponKind::SigTerm);
         damage *= script_hit_multiplier(kind, is_sigterm, open, stunned);
 
         if damage > 0.0 {
@@ -502,7 +497,7 @@ impl DamageResolver<'_, '_> {
         // earlier command in the same flush (death cleanup, Bug/Exploit
         // morph), and a plain insert on a dead entity panics the app.
         if let Some(weapon) = hit.weapon
-            && let Some(duration) = self.weapons.infection_duration(weapon)
+            && let Some(duration) = weapon.infection_duration()
             && let Some(attacker) = hit.attacker
             && attacker.team != team
             && kind != UnitKind::Virus
@@ -674,7 +669,7 @@ pub fn tick_burst_fire(
         let last = burst.shots_remaining <= 1;
         super::fire_salvo_shot(
             &burst.shot,
-            weapon_registry.by_id(burst.shot.weapon),
+            weapon_registry.by_kind(burst.shot.weapon),
             gtf,
             last,
             &mut pieces,
@@ -749,9 +744,10 @@ impl DamagePass<'_, '_> {
     /// One `CGameHelper::Explosion` (or, for `Melee`, the single
     /// `DoDamage` of `CMeleeWeapon::FireImpl`).
     fn explode(&mut self, pending: PendingDamage, frame: u64) {
-        // Ids are interned through this same registry — infallible.
+        // Every queued weapon resolved through this same registry —
+        // infallible.
         let weapons = &*self.weapons;
-        let weapon_def = weapons.by_id(pending.weapon);
+        let weapon_def = weapons.by_kind(pending.weapon);
         // `CMeleeWeapon::FireImpl` damages its target unit and nothing
         // else: no explosion, no splash, no hit without a unit target.
         let melee = weapon_def.category() == spring_tdf::WeaponCategory::Melee;
@@ -970,18 +966,6 @@ mod tests {
     }
 
     #[test]
-    fn weapon_infection_durations_match_upstream_gadget() {
-        // Values from upstream LuaRules/Gadgets/infection.lua, converted
-        // from sim frames @ 30 fps to seconds.
-        assert_eq!(weapon_infection_duration("VirusBeam"), Some(3.0));
-        assert_eq!(weapon_infection_duration("VirusDeath"), Some(6.0));
-        assert!((weapon_infection_duration("Wormsplash").unwrap() - 6.666_667).abs() < 1e-3);
-        assert_eq!(weapon_infection_duration("Infection"), Some(1.0));
-        assert_eq!(weapon_infection_duration("BitShot"), None);
-        assert_eq!(weapon_infection_duration("Wormbite"), None);
-    }
-
-    #[test]
     fn splash_full_damage_at_center() {
         assert!((splash_falloff(0.0, 512.0, 0.0) - 1.0).abs() < 1e-5);
         assert!((splash_falloff(0.0, 100.0, 1.0) - 1.0).abs() < 1e-5);
@@ -1037,7 +1021,7 @@ mod tests {
                 shot: super::super::SalvoShot {
                     attacker,
                     kind: UnitKind::Byte,
-                    weapon: WeaponId::BUILD_LASER,
+                    weapon: WeaponKind::BuildLaser,
                     target: Some(target),
                     aim_pos: Vec3::ZERO,
                     is_traveling: false,
@@ -1072,7 +1056,7 @@ mod tests {
             shot: super::super::SalvoShot {
                 attacker,
                 kind,
-                weapon: WeaponId::BUILD_LASER,
+                weapon: WeaponKind::BuildLaser,
                 target,
                 aim_pos: Vec3::ZERO,
                 is_traveling: false,
@@ -1189,10 +1173,10 @@ mod tests {
         assert!(app.world().get::<BurstFire>(attacker).is_none());
     }
 
-    fn death_boom_weapon() -> (WeaponRegistry, WeaponId) {
+    fn death_boom_weapon() -> (WeaponRegistry, WeaponKind) {
         let mut weapons = WeaponRegistry::default();
         let id = weapons.insert_for_test(
-            "RegressionDeathBoom",
+            WeaponKind::RetroDeath,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 25.0,
@@ -1259,7 +1243,12 @@ mod tests {
         app.world().get::<Health>(entity).unwrap().current
     }
 
-    fn shot(target: Option<Entity>, attacker: Entity, weapon: WeaponId, at: Vec3) -> PendingDamage {
+    fn shot(
+        target: Option<Entity>,
+        attacker: Entity,
+        weapon: WeaponKind,
+        at: Vec3,
+    ) -> PendingDamage {
         PendingDamage {
             target,
             attacker,
@@ -1348,7 +1337,7 @@ mod tests {
             .push(PendingDamage {
                 target: Some(earlier),
                 attacker: earlier,
-                weapon: WeaponId::BUILD_LASER,
+                weapon: WeaponKind::BuildLaser,
                 impact_pos: Vec3::ZERO,
                 attacker_distance: 0.0,
             });
@@ -1374,7 +1363,7 @@ mod tests {
     fn wormsplash_splash_infects_enemy_victims() {
         let mut weapons = WeaponRegistry::default();
         let splash = weapons.insert_for_test(
-            "Wormsplash",
+            WeaponKind::Wormsplash,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 800.0,
@@ -1415,9 +1404,9 @@ mod tests {
         assert!(app.world().get::<Infected>(friend).is_none());
     }
 
-    fn flat_weapon(weapons: &mut WeaponRegistry, name: &str, damage: f32) -> WeaponId {
+    fn flat_weapon(weapons: &mut WeaponRegistry, kind: WeaponKind, damage: f32) -> WeaponKind {
         weapons.insert_for_test(
-            name,
+            kind,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: damage,
@@ -1435,7 +1424,7 @@ mod tests {
     fn firewall_halves_and_reflects_onto_the_attacker_next_frame() {
         use crate::units::mechanics::command_fire::Protected;
         let mut weapons = WeaponRegistry::default();
-        let gun = flat_weapon(&mut weapons, "Gun", 100.0);
+        let gun = flat_weapon(&mut weapons, WeaponKind::BugShot, 100.0);
         let mut app = damage_app(weapons, UnitRegistry::empty());
         let victim = unit(&mut app, UnitKind::Bit, 0, Vec3::ZERO, 1000.0);
         let shooter = unit(&mut app, UnitKind::Bit, 1, Vec3::X * 300.0, 1000.0);
@@ -1470,7 +1459,7 @@ mod tests {
         use crate::units::mechanics::command_fire::Protected;
         let mut weapons = WeaponRegistry::default();
         let stun = weapons.insert_for_test(
-            "Stun",
+            WeaponKind::DosBeam,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 100.0,
@@ -1481,7 +1470,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let gun = flat_weapon(&mut weapons, "Gun", 100.0);
+        let gun = flat_weapon(&mut weapons, WeaponKind::BugShot, 100.0);
         let mut app = damage_app(weapons, UnitRegistry::empty());
         let victim = unit(&mut app, UnitKind::Bit, 0, Vec3::ZERO, 1000.0);
         let enemy = unit(&mut app, UnitKind::Bit, 1, Vec3::X * 300.0, 1000.0);
@@ -1531,7 +1520,7 @@ mod tests {
             },
         );
         let mut weapons = WeaponRegistry::default();
-        let gun = flat_weapon(&mut weapons, "Gun", 100.0);
+        let gun = flat_weapon(&mut weapons, WeaponKind::BugShot, 100.0);
         let mut app = damage_app(weapons, UnitRegistry::for_test(defs));
         let shooter = unit(&mut app, UnitKind::Bit, 1, Vec3::X * 300.0, 1000.0);
         let finished = unit(&mut app, UnitKind::Socket, 0, Vec3::ZERO, 1000.0);
@@ -1608,7 +1597,7 @@ mod tests {
     fn melee_hits_only_its_target() {
         let mut weapons = WeaponRegistry::default();
         let bite = weapons.insert_for_test(
-            "Wormbite",
+            WeaponKind::Wormbite,
             spring_tdf::WeaponDef {
                 weapon_type: "Melee".into(),
                 damage: spring_tdf::DamageMap {
@@ -1651,7 +1640,7 @@ mod tests {
         use bevy::ecs::system::RunSystemOnce;
         let mut weapons = WeaponRegistry::default();
         let blast = weapons.insert_for_test(
-            "VirusDeath",
+            WeaponKind::VirusDeath,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 100.0,
@@ -1710,10 +1699,10 @@ mod tests {
         );
     }
 
-    fn sigterm_weapon(weapons: &mut WeaponRegistry) -> WeaponId {
+    fn sigterm_weapon(weapons: &mut WeaponRegistry) -> WeaponKind {
         // retroweapons.tdf [SigTerm].
         weapons.insert_for_test(
-            "SigTerm",
+            WeaponKind::SigTerm,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 10_000.0,
@@ -1763,7 +1752,7 @@ mod tests {
     fn orphaned_shell_splashes_everyone_without_infecting() {
         let mut weapons = WeaponRegistry::default();
         let shell = weapons.insert_for_test(
-            "VirusBeam",
+            WeaponKind::VirusBeam,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 100.0,
@@ -1800,7 +1789,7 @@ mod tests {
     fn avoid_friendly_splash_still_hits_allies_but_not_a_noselfdamage_shooter() {
         let mut weapons = WeaponRegistry::default();
         let beam = weapons.insert_for_test(
-            "DOS_Beam",
+            WeaponKind::DosBeam,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 100.0,
@@ -1835,7 +1824,7 @@ mod tests {
     #[test]
     fn landed_hits_feed_the_ai_damage_log() {
         let mut weapons = WeaponRegistry::default();
-        let gun = flat_weapon(&mut weapons, "Gun", 100.0);
+        let gun = flat_weapon(&mut weapons, WeaponKind::BugShot, 100.0);
         let mut app = damage_app(weapons, UnitRegistry::empty());
         let victim = unit(
             &mut app,

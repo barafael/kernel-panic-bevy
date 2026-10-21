@@ -1359,11 +1359,13 @@ fn dual_core_places_its_bad_blocks() {
     // A SIGTERM bomb going off 50 elmos away: its splash reaches it
     // (`DoExplosionDamage` hits features like units).
     {
-        let sigterm = world
-            .resource::<crate::units::content::weapons::WeaponRegistry>()
-            .known()
-            .sigterm
-            .expect("SigTerm");
+        assert!(
+            world
+                .resource::<crate::units::content::weapons::WeaponRegistry>()
+                .is_present(crate::units::content::weapons::WeaponKind::SigTerm),
+            "SigTerm in the TDFs"
+        );
+        let sigterm = crate::units::content::weapons::WeaponKind::SigTerm;
         world
             .resource_mut::<crate::units::combat::DamageQueue>()
             .push(crate::units::combat::PendingDamage {

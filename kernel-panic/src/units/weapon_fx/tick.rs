@@ -19,7 +19,7 @@ use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::{CollisionVolume, DamageQueue, PendingDamage};
 use crate::units::components::UnitType;
 #[cfg(test)]
-use crate::units::content::weapons::WeaponId;
+use crate::units::content::weapons::WeaponKind;
 use crate::units::content::weapons::WeaponRegistry;
 use crate::units::spatial::SpatialIndex;
 use crate::units::teams::Alliances;
@@ -332,7 +332,7 @@ pub(super) fn tick_weapon_fx(
         } else if let Some(hit) = hit_meta
             && let Some((hit_entity, impact_pos)) = volume_ctx.broad_phase(
                 hit,
-                weapon_registry.by_id(hit.weapon).collide_friendly,
+                weapon_registry.by_kind(hit.weapon).collide_friendly,
                 prev_lead_pos,
                 curr_lead_pos,
             )
@@ -562,7 +562,7 @@ pub(super) fn tick_weapon_fx(
         } else if let Some(hit) = hit_meta
             && let Some((hit_entity, impact_pos)) = volume_ctx.broad_phase(
                 hit,
-                weapon_registry.by_id(hit.weapon).collide_friendly,
+                weapon_registry.by_kind(hit.weapon).collide_friendly,
                 seg_start,
                 seg_end,
             )
@@ -856,7 +856,7 @@ fn trigger_delayed_hit(
         }
         None => {}
     }
-    let weapon_def = weapon_registry.by_id(hit.weapon);
+    let weapon_def = weapon_registry.by_kind(hit.weapon);
     // `CGameHelper::Explosion` plays `soundhit` where the shot lands.
     sounds.explosion(weapon_def, impact_pos);
     let (rgb, radius, ceg) = (
@@ -1047,7 +1047,7 @@ mod tests {
                     target: Some(target),
                     attacker,
                     owner_team: None,
-                    weapon: WeaponId::BUILD_LASER,
+                    weapon: WeaponKind::BuildLaser,
                     attacker_distance: 100.0,
                     on_impact: None,
                 },
@@ -1193,7 +1193,7 @@ mod tests {
                 target: Some(target),
                 attacker,
                 owner_team: None,
-                weapon: WeaponId::BUILD_LASER,
+                weapon: WeaponKind::BuildLaser,
                 attacker_distance: 100.0,
                 on_impact: None,
             },
@@ -1232,7 +1232,7 @@ mod tests {
 
         let mut weapons = WeaponRegistry::default();
         let weapon = weapons.insert_for_test(
-            "Bolt",
+            WeaponKind::Line,
             spring_tdf::WeaponDef {
                 collide_friendly,
                 ..Default::default()
@@ -1449,7 +1449,7 @@ mod tests {
                 target: Some(target),
                 attacker,
                 owner_team: None,
-                weapon: WeaponId::BUILD_LASER,
+                weapon: WeaponKind::BuildLaser,
                 attacker_distance: 100.0,
                 on_impact: None,
             },
@@ -1577,7 +1577,7 @@ mod tests {
                     target: None,
                     attacker: entity.unwrap_or(Entity::PLACEHOLDER),
                     owner_team: None,
-                    weapon: WeaponId::BUILD_LASER,
+                    weapon: WeaponKind::BuildLaser,
                     attacker_distance: target.distance(origin),
                     on_impact: None,
                 },
@@ -1936,7 +1936,7 @@ mod tests {
                 target: None,
                 attacker,
                 owner_team: Some(0),
-                weapon: WeaponId::BUILD_LASER,
+                weapon: WeaponKind::BuildLaser,
                 attacker_distance: 100.0,
                 on_impact: None,
             },

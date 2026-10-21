@@ -6,7 +6,7 @@ use bevy::prelude::*;
 
 use crate::sim::DetFloat;
 use crate::units::content::cegs::CegKind;
-use crate::units::content::weapons::WeaponId;
+use crate::units::content::weapons::WeaponKind;
 
 /// Describes a single attack for the visual system.
 ///
@@ -29,10 +29,10 @@ use crate::units::content::weapons::WeaponId;
 pub struct AttackEvent {
     pub attacker_pos: Vec3,
     pub target_pos: Vec3,
-    /// Interned weapon id — the combat side resolves it from the
+    /// The weapon that fired — the combat side resolves it from the
     /// `WeaponBinding` (or the unit's FBI weapon name) before pushing,
     /// so the fx side never string-matches the registry.
-    pub weapon_id: WeaponId,
+    pub weapon: WeaponKind,
     /// Resolved from the attacker's FBI `[SFXTypes]` entry when the shot
     /// is queued, so the fx side names it in a word. `None` covers both
     /// no SFX table and an entry that is not a CEG at all (`VOID`, and
@@ -101,7 +101,7 @@ pub(super) struct DelayedHit {
     /// `teamID`): the shot keeps its allegiance — and keeps passing
     /// through its own side — after the shooter dies.
     pub owner_team: Option<u8>,
-    pub weapon: WeaponId,
+    pub weapon: WeaponKind,
     pub attacker_distance: f32,
     pub on_impact: Option<ImpactEffect>,
 }
@@ -283,7 +283,7 @@ pub(super) struct LaserBolt {
 #[derive(Component)]
 pub(super) struct BoltCegTrail {
     /// The weapon whose `cegTag` it is.
-    pub weapon: WeaponId,
+    pub weapon: WeaponKind,
     /// Per-bolt PRNG seed for `spawn_ceg`.
     pub seed: u32,
 }
@@ -315,7 +315,7 @@ pub(super) struct ProjectileVisual {
     /// `network_flowtrail` spikes, BugCannon's `corruption_BCtrail`.
     /// Holds the weapon whose `cegTag` it is; the tick reads the name
     /// from the registry instead of carrying a copy.
-    pub trail_ceg: Option<WeaponId>,
+    pub trail_ceg: Option<WeaponKind>,
     /// Per-projectile PRNG seed so ticks can call `spawn_ceg` without a
     /// system `Local` (each projectile gets a stable-but-different roll).
     pub trail_seed: u32,

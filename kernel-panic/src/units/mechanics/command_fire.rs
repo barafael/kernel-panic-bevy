@@ -37,7 +37,7 @@ use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::cegs::CegKind;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
-use crate::units::content::weapons::{KnownWeapons, WeaponId, WeaponRegistry};
+use crate::units::content::weapons::{WeaponKind, WeaponRegistry};
 use crate::units::spatial::{SpatialIndex, flat_dist_sq};
 use crate::units::team_colors::{TeamColor, TeamColors};
 use crate::units::teams::Alliances;
@@ -219,7 +219,7 @@ pub const FIREWALL_DAMAGE_TAKEN: f32 = 0.5;
 pub const MINELAUNCHER_COOLDOWN: f32 = 10.0;
 /// byte.bos `HITPOINT_COST`, paid through `lua_Damage` →
 /// `Spring.AddUnitDamage(u, 6000, 0, -1, sigterm)` (LuaCOB.lua): a real
-/// hit with the SIGTERM weapon id, so the Firewall halves it and the
+/// hit credited to the SIGTERM bomb, so the Firewall halves it and the
 /// closed Byte's 30% rule does not.
 pub const MINELAUNCHER_HP_COST: f32 = 6000.0;
 /// Below this remaining HP the Byte refuses to cast so a mis-click
@@ -431,15 +431,14 @@ enum CastReachLimit<'a> {
 }
 
 fn cast_limit(kind: UnitKind, weapons: &WeaponRegistry) -> CastReachLimit<'_> {
-    // Ids resolved once at registry load (`KnownWeapons`) — this runs
-    // per pending caster per tick, so no name hashing here.
-    let known = weapons.known();
+    // A variant compare and an array read — this runs per pending caster
+    // per tick, so no name hashing here.
     let (weapon, fallback) = match kind {
-        UnitKind::Pointer => (known.nx, NX_RANGE),
-        UnitKind::Obelisk => (known.infection, INFECTION_RANGE),
+        UnitKind::Pointer => (WeaponKind::Nx, NX_RANGE),
+        UnitKind::Obelisk => (WeaponKind::Infection, INFECTION_RANGE),
         _ => return CastReachLimit::MapWide,
     };
-    match weapon.map(|id| weapons.by_id(id)) {
+    match weapons.get(weapon) {
         Some(def) if def.range > 0.0 => CastReachLimit::Weapon(def),
         _ => CastReachLimit::Fallback(fallback),
     }
@@ -506,14 +505,14 @@ impl DenialWeapon {
         }
     }
 
-    /// The weapon whose id the zone's `AddUnitDamage` reports (the
-    /// Infection gas infects through it; SIGTERM's bypasses a closed
-    /// Byte's armour and hits homebases for 10%).
-    fn weapon(self, known: &KnownWeapons) -> Option<WeaponId> {
+    /// The weapon the zone's `AddUnitDamage` reports (the Infection gas
+    /// infects through it; SIGTERM's bypasses a closed Byte's armour and
+    /// hits homebases for 10%).
+    fn weapon(self) -> WeaponKind {
         match self {
-            DenialWeapon::SigTerm => known.sigterm,
-            DenialWeapon::Nx => known.nx,
-            DenialWeapon::Infection => known.infection,
+            DenialWeapon::SigTerm => WeaponKind::SigTerm,
+            DenialWeapon::Nx => WeaponKind::Nx,
+            DenialWeapon::Infection => WeaponKind::Infection,
         }
     }
 }
@@ -832,11 +831,10 @@ pub fn process_command_fire(
                 ceg: Some(ceg),
             });
             // The blast is a `CGameHelper::Explosion` of the ability weapon.
-            if let (Some(sounds), Some(id)) = (
-                sounds.as_deref_mut(),
-                ability.weapon.weapon(weapons.known()),
-            ) {
-                sounds.explosion(weapons.by_id(id), event.target);
+            if let (Some(sounds), Some(def)) =
+                (sounds.as_deref_mut(), weapons.get(ability.weapon.weapon()))
+            {
+                sounds.explosion(def, event.target);
             }
         }
         commands.spawn(AreaDenialZone::new(
@@ -919,10 +917,10 @@ pub fn tick_nx_casts(
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    let Some(nx) = weapons.known().nx else {
+    let nx = WeaponKind::Nx;
+    let Some(weapon_def) = weapons.get(nx) else {
         return;
     };
-    let weapon_def = weapons.by_id(nx);
     let launch = crate::units::combat::AimLaunch::of(Some(weapon_def), pieces.map_gravity());
     for (entity, mut cast, gtf, unit, team, faction, _) in casters.iter_mut().sort::<&NetId>() {
         let target = match *cast {
@@ -982,7 +980,7 @@ pub fn tick_nx_casts(
             .push(crate::units::weapon_fx::AttackEvent {
                 attacker_pos: muzzle.pos,
                 target_pos: target,
-                weapon_id: nx,
+                weapon: nx,
                 muzzle_ceg,
                 delayed_hit: Some(crate::units::weapon_fx::DelayedHitInfo {
                     target: None,
@@ -998,7 +996,7 @@ pub fn tick_nx_casts(
                 arc_from: None,
             });
         if let Some(sounds) = sounds.as_deref_mut() {
-            sounds.weapon_fired(weapons.by_id(nx), muzzle.pos);
+            sounds.weapon_fired(weapon_def, muzzle.pos);
         }
         let Some(ability) = ability_for(unit.0) else {
             continue;
@@ -1061,10 +1059,10 @@ pub fn tick_mine_launches(
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
-    let Some(launcher) = weapons.known().mine_launcher else {
+    let launcher = WeaponKind::MineLauncher;
+    let Some(weapon_def) = weapons.get(launcher) else {
         return;
     };
-    let weapon_def = weapons.by_id(launcher);
     let spray = weapon_def.spray_sin();
     let travel = weapon_def.laser_travel(weapon_def.range);
     let limit = unit_registry.team_limit(UnitKind::LogicBomb);
@@ -1097,7 +1095,7 @@ pub fn tick_mine_launches(
             .insert(CommandFireCooldown {
                 remaining: MINELAUNCHER_COOLDOWN,
             });
-        delayed_damage.push_now(minelauncher_cost(entity, weapons.known()));
+        delayed_damage.push_now(minelauncher_cost(entity));
         // `lua_GetLogicBombLeft`: `maxThisUnit - #GetTeamUnitsByDefs`.
         let count = counts.get(&team.0).copied().unwrap_or(0);
         let left = limit.map_or(usize::MAX, |l| l.saturating_sub(count) as usize);
@@ -1117,7 +1115,7 @@ pub fn tick_mine_launches(
                 .push(crate::units::weapon_fx::AttackEvent {
                     attacker_pos: muzzle.pos,
                     target_pos: muzzle.pos + dir * travel,
-                    weapon_id: launcher,
+                    weapon: launcher,
                     muzzle_ceg: None,
                     delayed_hit: Some(crate::units::weapon_fx::DelayedHitInfo {
                         target: None,
@@ -1165,13 +1163,13 @@ fn can_pay_for_mines(health: &Health) -> bool {
 
 /// byte.bos `lua_Damage(HITPOINT_COST)` → LuaCOB.lua `Damage`:
 /// `Spring.AddUnitDamage(u, 6000, 0, -1, sigterm)` — no attacker, and
-/// the SIGTERM weapon id.
-fn minelauncher_cost(byte: Entity, known: &KnownWeapons) -> Hit {
+/// credited to the SIGTERM bomb.
+fn minelauncher_cost(byte: Entity) -> Hit {
     Hit {
         target: byte,
         attacker: None,
         damage: MINELAUNCHER_HP_COST,
-        weapon: known.sigterm,
+        weapon: Some(WeaponKind::SigTerm),
         paralyze_time: None,
         impulse: Vec3::ZERO,
     }
@@ -1244,7 +1242,6 @@ pub fn tick_area_denial(
     mut zones: Query<(Entity, &mut AreaDenialZone)>,
     units: Query<(Entity, &UnitType, &TeamId, &NetId), Without<Dying>>,
     spatial: Res<SpatialIndex>,
-    weapons: Res<WeaponRegistry>,
     mut delayed: ResMut<DelayedDamage>,
     mut commands: Commands,
     alliances: Res<Alliances>,
@@ -1267,7 +1264,7 @@ pub fn tick_area_denial(
             team: owner_team,
             faction: zone.owner_faction,
         });
-        let weapon = zone.weapon.weapon(weapons.known());
+        let weapon = Some(zone.weapon.weapon());
         let damage = params.dps * dt;
         let radius_sq = params.radius * params.radius;
         spatial.query_radius(center, params.radius, |candidate| {
@@ -1568,7 +1565,7 @@ pub fn tick_sigterm_bombs(
     let frames = sim_frames(time.delta_secs());
     let hm = heightmap.as_deref();
     let ground = ground_at(hm);
-    let sigterm = weapons.known().sigterm;
+    let sigterm = weapons.get(WeaponKind::SigTerm);
     for (entity, mut bomb, mut transform) in &mut bombs {
         let mut impact = None;
         for _ in 0..frames {
@@ -1590,8 +1587,8 @@ pub fn tick_sigterm_bombs(
             continue;
         };
 
-        if let Some(sigterm) = sigterm {
-            damage_queue.push(PendingDamage::unowned_explosion(sigterm, at));
+        if sigterm.is_some() {
+            damage_queue.push(PendingDamage::unowned_explosion(WeaponKind::SigTerm, at));
         }
         // The bomb detonates through upstream's
         // `explosiongenerator=custom:system_sigterm`
@@ -1600,7 +1597,7 @@ pub fn tick_sigterm_bombs(
             pos: at,
             up: Vec3::Y,
             rgb: bomb.owner_faction.rgb_f32(),
-            radius: sigterm.map_or(0.0, |id| weapons.by_id(id).area_of_effect),
+            radius: sigterm.map_or(0.0, |def| def.area_of_effect),
             ceg: Some(CegKind::SystemSigterm),
         });
         // `areadenial.lua` `Explosion`: the Signal is dead, so the zone
@@ -1664,10 +1661,7 @@ mod tests {
         assert_eq!(a.cooldown, 40.0);
         // Upstream infection.lua: `infector[WeaponDefNames["infection"].id]
         // = 30` frames @ 30 fps → 1 s infection window per DPS tick.
-        assert_eq!(
-            crate::units::content::weapons::weapon_infection_duration("Infection"),
-            Some(1.0)
-        );
+        assert_eq!(WeaponKind::Infection.infection_duration(), Some(1.0));
     }
 
     /// `areadenial.lua` `weaponInfo`, ttl in sim frames.
@@ -1725,7 +1719,7 @@ mod tests {
             .get("Infection")
             .cloned()
             .unwrap();
-        weapons.insert_for_test("Infection", def);
+        weapons.insert_for_test(WeaponKind::Infection, def);
         let reach = |x: f32| {
             cast_reach(
                 cast_limit(UnitKind::Obelisk, &weapons),
@@ -2210,10 +2204,10 @@ mod tests {
         assert!((hit.x - 306.0).abs() < 8.0 && hit.y.abs() < 1e-3, "{hit}");
     }
 
-    fn sigterm_weapons() -> (WeaponRegistry, WeaponId) {
+    fn sigterm_weapons() -> (WeaponRegistry, WeaponKind) {
         let mut weapons = WeaponRegistry::default();
         let id = weapons.insert_for_test(
-            "SigTerm",
+            WeaponKind::SigTerm,
             spring_tdf::WeaponDef {
                 damage: spring_tdf::DamageMap {
                     default: 10_000.0,
@@ -2353,7 +2347,7 @@ mod tests {
     fn denial_ticks_go_through_the_damage_pipeline() {
         use bevy::ecs::system::RunSystemOnce;
         let mut weapons = WeaponRegistry::default();
-        weapons.insert_for_test("Infection", spring_tdf::WeaponDef::default());
+        weapons.insert_for_test(WeaponKind::Infection, spring_tdf::WeaponDef::default());
         let mut app = zone_app(weapons);
         let obelisk = zone_unit(&mut app, UnitKind::Obelisk, 1, Vec3::X * 1000.0);
         let enemy = zone_unit(&mut app, UnitKind::Bit, 0, Vec3::X * 10.0);
