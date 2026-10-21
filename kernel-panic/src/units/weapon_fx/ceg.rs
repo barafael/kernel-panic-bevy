@@ -39,12 +39,26 @@ use crate::rng;
 use crate::sim::{GAME_SPEED, RngStream, SimRng};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
+use crate::units::content::cegs::{ALL_CEG_KINDS, CEG_KIND_COUNT, CegKind};
 
-/// Registry of every parsed CEG. Internally wraps
-/// [`spring_tdf::ExplosionDefs`] so parsing stays in one place.
-#[derive(Resource, Default)]
+/// Registry of every parsed CEG, indexed by [`CegKind`] rather than
+/// keyed by section name: [`Self::get`] is an array read, and the
+/// name→variant resolution happens once, at load.
+///
+/// Parsing stays in [`spring_tdf::ExplosionDefs`]; this resolves its
+/// sections into the dense table and drops the ones no [`CegKind`]
+/// names, which nothing but the load-time count ever read.
+#[derive(Resource)]
 pub struct CegRegistry {
-    defs: ExplosionDefs,
+    defs: Box<[Option<ExplosionDef>]>,
+}
+
+impl Default for CegRegistry {
+    fn default() -> Self {
+        Self {
+            defs: (0..CEG_KIND_COUNT).map(|_| None).collect(),
+        }
+    }
 }
 
 /// Render assets every CEG spawn shares: one additive material per
@@ -233,20 +247,43 @@ impl CegRegistry {
         let registry = Self::from_defs(crate::units::content::defs::defs().explosions.clone());
         info!(
             "CEG registry: {} explosion generators loaded",
-            registry.defs.explosions.len()
+            registry.defs.iter().flatten().count()
         );
+        registry.validate_bindings();
         registry
     }
 
-    /// Wrap parsed explosion defs.
+    /// Resolve parsed explosion sections into the per-[`CegKind`] table.
     pub fn from_defs(defs: ExplosionDefs) -> Self {
-        Self { defs }
+        let mut table: Box<[Option<ExplosionDef>]> = (0..CEG_KIND_COUNT).map(|_| None).collect();
+        for (name, def) in defs.explosions {
+            match CegKind::find(&name) {
+                Some(kind) => table[kind.index()] = Some(def),
+                // A section no variant names. Nothing ever iterated the
+                // old map, so dropping one only means it cannot fire.
+                None => debug!("CEG section '{name}' has no CegKind variant"),
+            }
+        }
+        Self { defs: table }
     }
 
-    /// Look up a CEG by section name. Accepts both the raw name and the
-    /// `custom:NAME` prefix the weapon TDFs use.
-    pub fn get(&self, name: &str) -> Option<&ExplosionDef> {
-        self.defs.get(name)
+    /// Warn for every [`CegKind`] the parsed TDFs leave undefined, the
+    /// way `UnitRegistry` reports a `UnitKind` with no FBI.
+    fn validate_bindings(&self) {
+        for &kind in ALL_CEG_KINDS {
+            if self.defs[kind.index()].is_none() {
+                warn!(
+                    "CEG '{}' (variant {kind:?}) not found in explosions/*.tdf",
+                    kind.name(),
+                );
+            }
+        }
+    }
+
+    /// The def behind `kind` — an array read, `None` when its section is
+    /// absent from the parsed TDFs.
+    pub fn get(&self, kind: CegKind) -> Option<&ExplosionDef> {
+        self.defs[kind.index()].as_ref()
     }
 
     /// Re-shape the texture name the CEG authored (e.g. `circle`) into
@@ -384,10 +421,10 @@ pub(super) struct CegDelayedSpawn {
     pub dir: Vec3,
     /// The spawning CEG's up vector, passed on to `target_ceg`.
     pub up: Vec3,
-    /// `Arc<str>` because one spawner fans out into `count` timers
-    /// (`system_nx`: 240 per cast) — a refcount bump each, not a fresh
-    /// `String` allocation each.
-    pub target_ceg: std::sync::Arc<str>,
+    /// Resolved once for the whole fan-out (`system_nx`: 240 timers per
+    /// cast) and then `Copy` into each, where this used to be one
+    /// `Arc<str>` the timers shared by refcount.
+    pub target_ceg: CegKind,
 }
 
 /// One live `CStandardGroundFlash` (`Rendering/GroundFlash.cpp`): two
@@ -491,9 +528,11 @@ fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
 
 // ─── Spawning ───────────────────────────────────────────────────────
 
-/// Spawn a CEG at `pos` with firing direction `dir`. Returns true iff
-/// the CEG name was found; a missing entry lets callers fall back to a
-/// synthesised burst. `up` is the emitter's up vector: the CEG's
+/// Spawn `ceg` at `pos` with firing direction `dir`. Returns true iff a
+/// def backs it; a [`CegKind`] the TDFs do not define lets callers fall
+/// back to a synthesised burst (a kind that resolves but authors nothing,
+/// [`CegKind::NoEffect`], returns true and so *suppresses* the fallback).
+/// `up` is the emitter's up vector: the CEG's
 /// literal vectors and offsets (`emitVector=0, 1, 0`, `pos=0, 1, 0`)
 /// are authored for an upright emitter and turn with it, so a unit
 /// dying on a ramp bursts square to the ramp. `ground` puts the
@@ -501,7 +540,7 @@ fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
 /// plane; without it the flash lies flat at `pos`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_ceg(
-    ceg_name: &str,
+    ceg: CegKind,
     pos: Vec3,
     dir: Vec3,
     up: Vec3,
@@ -514,7 +553,7 @@ pub(super) fn spawn_ceg(
     ceg_assets: &mut CegRenderAssets,
     ground: Option<&Heightmap>,
 ) -> bool {
-    let Some(def) = registry.get(ceg_name) else {
+    let Some(def) = registry.get(ceg) else {
         return false;
     };
 
@@ -941,13 +980,13 @@ fn spawn_delayed(
     up: Vec3,
     commands: &mut Commands,
 ) {
-    if props.explosion_generator.is_empty() {
+    // Parsed out of the TDF, so unlike a hard-coded CEG it has to be
+    // resolved: once per spawner effect, then `Copy` into each of the
+    // `count` timers. A name with no section behind it queues nothing,
+    // which is what the timers used to amount to once they fired.
+    let Some(target_ceg) = CegKind::find(&props.explosion_generator) else {
         return;
-    }
-    // Parsed out of the TDF, so unlike the scripted [`super::shared::CegName`]s
-    // there is no `&'static` form to borrow: one allocation per spawner
-    // effect, which the `count` timers then share by refcount.
-    let target_ceg: std::sync::Arc<str> = props.explosion_generator.as_str().into();
+    };
     // `system_nx` fans out 240 timers per cast — one command, not 240.
     let mut timers = Vec::with_capacity(count as usize);
     for i in 0..count {
@@ -963,7 +1002,7 @@ fn spawn_delayed(
             pos: origin + Quat::from_rotation_arc(Vec3::Y, up) * pos_offset,
             dir,
             up,
-            target_ceg: std::sync::Arc::clone(&target_ceg),
+            target_ceg,
         });
     }
     commands.spawn_batch(timers);
@@ -1217,7 +1256,7 @@ pub(super) fn tick_ceg_delayed_spawns(
         }
         commands.entity(entity).despawn();
         spawn_ceg(
-            &timer.target_ceg,
+            timer.target_ceg,
             timer.pos,
             timer.dir,
             timer.up,

@@ -3,6 +3,7 @@
 //! between the 40-second reloads.
 
 use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
+use crate::units::content::cegs::CegKind;
 
 /// obelisk.bos FireWeapon1(): `sleep 40000` reload.
 const RELOAD_SECS: f32 = 40.0;
@@ -84,7 +85,7 @@ impl UnitAnim for ObeliskAnim {
             self.charge_timer -= ctx.dt;
             if self.charge_timer <= 0.0 {
                 self.charge_timer = 0.05;
-                rig.emit(self.pieces.tip, SfxKind::Ceg("custom:corruption_charge"));
+                rig.emit(self.pieces.tip, SfxKind::Ceg(CegKind::CorruptionCharge));
             }
         }
     }

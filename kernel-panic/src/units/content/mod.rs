@@ -4,6 +4,7 @@
 //! unit bundle (`bundle`). Pure data; no systems.
 
 pub mod bundle;
+pub mod cegs;
 pub mod definitions;
 pub mod defs;
 pub mod model;

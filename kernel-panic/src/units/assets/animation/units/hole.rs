@@ -15,6 +15,7 @@
 use super::super::{AnimCtx, AnimRig, Axis, SfxKind, UnitAnim};
 use super::move_time;
 use crate::sim::DetFloat;
+use crate::units::content::cegs::CegKind;
 
 const ARM_STEP: f32 = 16.0;
 const ARM_STEP_SPEED: f32 = 64.0;
@@ -30,8 +31,9 @@ const EMIT_INTERVAL: f32 = 0.03;
 const PARK_ARM_SPEED: f32 = 64.0;
 const PARK_MOVER_SPEED: f32 = 100.0;
 const WAIT_LATENCY: f32 = 1.0 / 30.0;
-/// `explosiongenerator1` (hole.fbi): `emit-sfx 1025`.
-const CONST_CEG: &str = "custom:corruption_const";
+/// `explosiongenerator1` (hole.fbi): `emit-sfx 1025`, authored as
+/// `custom:corruption_const`.
+const CONST_CEG: CegKind = CegKind::CorruptionConst;
 
 #[derive(Clone, Copy, Default)]
 struct HolePieces {

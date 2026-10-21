@@ -38,6 +38,7 @@ use bevy::prelude::*;
 
 use crate::interaction::movement::{MovePath, MoveTarget};
 use crate::units::components::Faction;
+use crate::units::content::cegs::CegKind;
 use crate::units::content::definitions::UnitKind;
 use crate::units::team_colors::{TeamColor, UnitColor};
 use crate::units::weapon_fx::{ExplosionEvent, PendingExplosions};
@@ -282,9 +283,9 @@ pub enum SfxKind {
     /// → `CWeapon::Fire` toward `absPos + absDir`), a 256-elmo white
     /// beam that stops where it meets the ground.
     BuildBeam,
-    /// `SFX_CEG_BASE + n` — the unit's n-th `explosiongenerator`, by its
-    /// authored name (`custom:corruption_const`).
-    Ceg(&'static str),
+    /// `SFX_CEG_BASE + n` — one authored CEG, replayed at the piece
+    /// (`CegKind::CorruptionConst` is Hole's `custom:corruption_const`).
+    Ceg(CegKind),
 }
 
 /// `BuildLaser` range (`retroweapons.tdf [BuildLaser] range=256`).
@@ -1128,13 +1129,13 @@ fn dispatch_emit_sfx(
     let (radius, intensity) = match kind {
         SfxKind::FireFlash => (4.0, 0.8),
         SfxKind::Puff => (2.5, 0.6),
-        SfxKind::Ceg(name) => {
+        SfxKind::Ceg(ceg) => {
             explosions.events.push(ExplosionEvent {
                 pos,
                 up,
                 rgb: color.rgb_f32(),
                 radius: 8.0,
-                ceg_name: name.into(),
+                ceg: Some(ceg),
             });
             return;
         }
@@ -1154,7 +1155,7 @@ fn dispatch_emit_sfx(
         up,
         rgb,
         radius,
-        ceg_name: "".into(),
+        ceg: None,
     });
 }
 

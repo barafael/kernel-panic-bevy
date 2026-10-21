@@ -9,6 +9,7 @@ use bevy::prelude::*;
 
 use crate::terrain::heightmap::Heightmap;
 
+use crate::units::content::cegs::CegKind;
 use crate::units::content::weapons::WeaponId;
 
 use super::ceg::{CegRegistry, CegRenderAssets, ground_flash_normal, spawn_ceg};
@@ -144,7 +145,7 @@ pub(super) fn spawn_weapon_visuals(
             let bite_dir = dir / length.det_max(1e-6);
             let splash_played = weapon_registry.is_worm_bite(event.weapon_id)
                 && spawn_ceg(
-                    "corruption_worm_splash",
+                    CegKind::CorruptionWormSplash,
                     event.target_pos,
                     bite_dir,
                     Vec3::Y,
@@ -244,7 +245,7 @@ pub(super) fn spawn_weapon_visuals(
         if !is_melee
             && !is_build_laser(event.weapon_id)
             && !is_gauss_arc
-            && let Some(muzzle_ceg) = event.muzzle_ceg.as_deref()
+            && let Some(muzzle_ceg) = event.muzzle_ceg
         {
             let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
             let ceg_spawned = spawn_ceg(
@@ -284,7 +285,7 @@ pub(super) fn spawn_weapon_visuals(
         // runtime exists to prevent.
         if is_build_laser(event.weapon_id) {
             spawn_ceg(
-                "oldskool_build",
+                CegKind::OldskoolBuild,
                 event.target_pos,
                 Vec3::Y,
                 Vec3::Y,
@@ -307,9 +308,9 @@ pub(super) fn spawn_weapon_visuals(
             // only when the CEG is missing or references a class we
             // don't yet support (CBitmapMuzzleFlame etc).
             let dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
-            let used_ceg = !weapon.explosion_generator.is_empty()
-                && spawn_ceg(
-                    &weapon.explosion_generator,
+            let used_ceg = weapon_registry.ceg(event.weapon_id).is_some_and(|ceg| {
+                spawn_ceg(
+                    ceg,
                     event.target_pos,
                     dir,
                     Vec3::Y,
@@ -321,7 +322,8 @@ pub(super) fn spawn_weapon_visuals(
                     &mut model_cache,
                     &mut ceg_assets,
                     None,
-                );
+                )
+            });
             if !used_ceg {
                 let aoe = weapon.area_of_effect.det_max(4.0);
                 spawn_impact_burst(
@@ -373,14 +375,13 @@ pub(super) fn spawn_pending_explosions(
     heightmap: Option<Res<Heightmap>>,
 ) {
     for event in pending.events.drain(..) {
-        // Drive standalone explosions through the same CEG lookup: if
-        // the caller passed a named CEG (death `ExplodeAs`, mine kill,
-        // SIGTERM), replay its emitters; otherwise fall back to the
-        // synthesised burst so there's still feedback for unscripted
-        // detonations.
-        let used_ceg = !event.ceg_name.is_empty()
-            && spawn_ceg(
-                &event.ceg_name,
+        // Drive standalone explosions through the same CEG path: if the
+        // caller named one (death `ExplodeAs`, mine kill, SIGTERM),
+        // replay its emitters; otherwise fall back to the synthesised
+        // burst so there's still feedback for unscripted detonations.
+        let used_ceg = event.ceg.is_some_and(|ceg| {
+            spawn_ceg(
+                ceg,
                 event.pos,
                 event.up,
                 event.up,
@@ -392,7 +393,8 @@ pub(super) fn spawn_pending_explosions(
                 &mut model_cache,
                 &mut ceg_assets,
                 heightmap.as_deref(),
-            );
+            )
+        });
         if !used_ceg {
             let aoe = event.radius.det_max(4.0);
             spawn_impact_burst(

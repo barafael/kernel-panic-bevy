@@ -20,6 +20,7 @@ use bevy::prelude::*;
 
 use super::assets::animation::{MuzzlePiece, PieceEmit, UnitAnimator};
 use super::components::{TeamId, UnitStats, UnitType};
+use super::content::cegs::CegKind;
 use super::content::definitions::UnitKind;
 use super::content::unit_registry::UnitRegistry;
 use super::content::weapons::{WeaponId, WeaponRegistry};
@@ -578,9 +579,13 @@ pub(super) fn fire_salvo_shot(
     sounds: &mut crate::audio::SoundQueue,
     rng: &mut u32,
 ) {
+    // The attacker's authored muzzle CEG, resolved once per salvo rather
+    // than per projectile. An `[SFXTypes]` entry that is not a CEG (`VOID`,
+    // the two FBIs that name a weapon here) resolves to nothing and the fx
+    // side keeps its generic muzzle sphere.
     let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(shot.kind)
         .and_then(|index| unit_registry.sfx_type(shot.kind, index))
-        .map(std::sync::Arc::<str>::from);
+        .and_then(CegKind::find);
     let spray = weapon_def.spray_sin();
     // A LaserCannon bolt flies its ttl; a ballistic one (MineLauncher,
     // `ballistic=1`) is lobbed by the projectile path instead.
@@ -623,7 +628,7 @@ pub(super) fn fire_salvo_shot(
                 attacker_pos: muzzle.pos,
                 target_pos: aim,
                 weapon_id: shot.weapon,
-                muzzle_ceg: muzzle_ceg.clone(),
+                muzzle_ceg,
                 delayed_hit: Some(DelayedHitInfo {
                     target: shot.target,
                     attacker: shot.attacker,
@@ -673,7 +678,7 @@ pub(super) fn fire_salvo_shot(
             attacker_pos: muzzle.pos,
             target_pos: impact_pos,
             weapon_id: shot.weapon,
-            muzzle_ceg: muzzle_ceg.clone(),
+            muzzle_ceg,
             delayed_hit: shot.is_traveling.then_some(DelayedHitInfo {
                 target: shot.target,
                 attacker: shot.attacker,
@@ -952,7 +957,7 @@ pub fn combat_system(
                     up: Vec3::Y,
                     rgb: def.rgb_color,
                     radius: def.area_of_effect,
-                    ceg_name: weapon_registry.ceg_name(id).into(),
+                    ceg: weapon_registry.ceg(id),
                 });
                 commands.entity(entity).insert((DebugBlasted, JustFired));
             }
@@ -3074,7 +3079,7 @@ mod tests {
         assert_eq!(hits[0].weapon, minekiller);
         let explosions = &app.world().resource::<PendingExplosions>().events;
         assert_eq!(explosions.len(), 1);
-        assert_eq!(&*explosions[0].ceg_name, "mineclearer");
+        assert_eq!(explosions[0].ceg, Some(CegKind::Mineclearer));
         assert!(app.world().resource::<PendingAttacks>().events.is_empty());
         assert!(app.world().get::<AimTarget>(debug).is_none());
     }

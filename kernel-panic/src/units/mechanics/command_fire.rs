@@ -34,6 +34,7 @@ use crate::units::assets::meshes::{S3OModelCache, load_s3o_mesh, unit_material};
 use crate::units::combat::Dying;
 use crate::units::combat::{Armored, Attacker, DamageQueue, DelayedDamage, Hit, PendingDamage};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
+use crate::units::content::cegs::CegKind;
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::content::weapons::{KnownWeapons, WeaponId, WeaponRegistry};
@@ -828,7 +829,7 @@ pub fn process_command_fire(
                 up: Vec3::Y,
                 rgb: faction.rgb_f32(),
                 radius: ability.weapon.params().radius,
-                ceg_name: ceg.into(),
+                ceg: Some(ceg),
             });
             // The blast is a `CGameHelper::Explosion` of the ability weapon.
             if let (Some(sounds), Some(id)) = (
@@ -975,7 +976,7 @@ pub fn tick_nx_casts(
         let distance = muzzle.pos.distance(target);
         let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(unit.0)
             .and_then(|index| unit_registry.sfx_type(unit.0, index))
-            .map(std::sync::Arc::<str>::from);
+            .and_then(CegKind::find);
         pending_attacks
             .events
             .push(crate::units::weapon_fx::AttackEvent {
@@ -1600,7 +1601,7 @@ pub fn tick_sigterm_bombs(
             up: Vec3::Y,
             rgb: bomb.owner_faction.rgb_f32(),
             radius: sigterm.map_or(0.0, |id| weapons.by_id(id).area_of_effect),
-            ceg_name: "system_sigterm".into(),
+            ceg: Some(CegKind::SystemSigterm),
         });
         // `areadenial.lua` `Explosion`: the Signal is dead, so the zone
         // goes to `LastSignalTeam` and the first tick finds it an owner.
@@ -1625,7 +1626,7 @@ struct Ability {
     /// shell, replayed through [`PendingExplosions`] on cast. `None`
     /// where the weapon has no generator (Infection's gas has no CEG
     /// upstream).
-    explosion_ceg: Option<&'static str>,
+    explosion_ceg: Option<CegKind>,
 }
 
 fn ability_for(kind: UnitKind) -> Option<Ability> {
@@ -1633,7 +1634,7 @@ fn ability_for(kind: UnitKind) -> Option<Ability> {
         UnitKind::Pointer => Some(Ability {
             weapon: DenialWeapon::Nx,
             cooldown: 30.0,
-            explosion_ceg: Some("system_nx"),
+            explosion_ceg: Some(CegKind::SystemNx),
         }),
         UnitKind::Obelisk => Some(Ability {
             weapon: DenialWeapon::Infection,
@@ -2291,7 +2292,7 @@ mod tests {
         // explosion generator (retroweapons.tdf:597).
         let explosions = app.world().resource::<PendingExplosions>();
         assert_eq!(explosions.events.len(), 1, "detonation plays a CEG");
-        assert_eq!(&*explosions.events[0].ceg_name, "system_sigterm");
+        assert_eq!(explosions.events[0].ceg, Some(CegKind::SystemSigterm));
         assert_eq!(explosions.events[0].pos, target);
         assert_eq!(explosions.events[0].radius, 900.0);
     }

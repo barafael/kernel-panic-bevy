@@ -357,7 +357,7 @@ pub fn death_system(
                     up,
                     rgb: blast.rgb.unwrap_or_else(|| color.rgb_f32()),
                     radius: blast.radius,
-                    ceg_name: blast.ceg_name.clone().into(),
+                    ceg: blast.ceg,
                 });
             } else {
                 // Even units without an ExplodeAs get a small owner-
@@ -368,7 +368,7 @@ pub fn death_system(
                     up,
                     rgb: color.rgb_f32(),
                     radius: 16.0,
-                    ceg_name: "".into(),
+                    ceg: None,
                 });
             }
 

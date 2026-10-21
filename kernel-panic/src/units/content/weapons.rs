@@ -16,8 +16,8 @@
 use bevy::prelude::*;
 use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
-use std::sync::Arc;
 
+use super::cegs::CegKind;
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::sim::{DetFloat, frames_to_secs};
 
@@ -64,10 +64,10 @@ pub struct DeathBlast {
     /// The weapon's `rgb_color` when it configures one; `None` → the
     /// dying unit's faction colour.
     pub rgb: Option<[f32; 3]>,
-    /// The weapon's `explosiongenerator` (empty when unset) — the
-    /// registry's interned `Arc<str>`, cloned per death as a refcount
-    /// bump.
-    pub ceg_name: Arc<str>,
+    /// The weapon's `explosiongenerator` as a [`CegKind`], resolved once
+    /// when the blast was bound. `None` when the weapon authors no CEG
+    /// or names one the TDFs do not define.
+    pub ceg: Option<CegKind>,
 }
 
 impl DeathBlast {
@@ -89,7 +89,7 @@ impl DeathBlast {
             weapon,
             radius: def.area_of_effect.det_max(24.0),
             rgb: Some(def.rgb_color).filter(|c| c[0] + c[1] + c[2] > 0.01),
-            ceg_name: weapons.ceg_name(weapon),
+            ceg: weapons.ceg(weapon),
         })
     }
 }
@@ -106,11 +106,16 @@ pub struct WeaponRegistry {
     /// Parallel `defs[i]` → [`weapon_infection_duration`] of its name,
     /// resolved once so the damage path never string-matches.
     infection_secs: Vec<Option<f32>>,
-    /// Parallel `defs[i]` → the def's `explosion_generator`, interned
-    /// once per weapon so the per-shot / per-death explosion events
-    /// clone a refcount instead of a `String` (`DeathBlast`,
-    /// `ExplosionEvent`).
-    ceg_names: Vec<Arc<str>>,
+    /// Parallel `defs[i]` → the def's `explosion_generator` resolved to a
+    /// [`CegKind`], so the per-shot / per-death explosion events carry a
+    /// word rather than a name to look up (`DeathBlast`,
+    /// `ExplosionEvent`). `None` for the weapons that author no CEG and
+    /// for the one that names a section the TDFs do not define.
+    ceg_kinds: Vec<Option<CegKind>>,
+    /// Parallel `defs[i]` → `ceg_tag`, the CEG a traveling weapon replays
+    /// *every frame* of its flight. Resolved at insert for the same
+    /// reason, and more so: this one is read per projectile per tick.
+    ceg_tags: Vec<Option<CegKind>>,
     /// Weapons the fx path special-cases, resolved at insert.
     gauss_cannon: Option<WeaponId>,
     worm_bite: Option<WeaponId>,
@@ -149,7 +154,8 @@ impl WeaponRegistry {
             names: Vec::new(),
             index: HashMap::new(),
             infection_secs: Vec::new(),
-            ceg_names: Vec::new(),
+            ceg_kinds: Vec::new(),
+            ceg_tags: Vec::new(),
             gauss_cannon: None,
             worm_bite: None,
             known: KnownWeapons::default(),
@@ -187,20 +193,23 @@ impl WeaponRegistry {
 
     fn insert(&mut self, name: &str, def: WeaponDef) -> WeaponId {
         let key = name.to_ascii_lowercase();
-        // Intern the CEG name *before* `def` moves into `defs`, so both
-        // arms below write the pair from one value and cannot disagree
+        // Resolve both CEG references *before* `def` moves into `defs`, so
+        // both arms below write the pair from one value and cannot disagree
         // about where the name came from.
-        let ceg: Arc<str> = def.explosion_generator.as_str().into();
+        let ceg = CegKind::find(&def.explosion_generator);
+        let ceg_tag = CegKind::find(&def.ceg_tag);
         if let Some(&existing) = self.index.get(&key) {
             // Later TDF entries with the same name win — matches the
             // previous behaviour of `extend()` overwriting on key clash.
             self.defs[existing.0 as usize] = def;
-            self.ceg_names[existing.0 as usize] = ceg;
+            self.ceg_kinds[existing.0 as usize] = ceg;
+            self.ceg_tags[existing.0 as usize] = ceg_tag;
             return existing;
         }
         let id = WeaponId(self.defs.len() as u16);
         self.defs.push(def);
-        self.ceg_names.push(ceg);
+        self.ceg_kinds.push(ceg);
+        self.ceg_tags.push(ceg_tag);
         self.names.push(name.to_string());
         self.infection_secs.push(weapon_infection_duration(name));
         match key.as_str() {
@@ -218,15 +227,17 @@ impl WeaponRegistry {
         id
     }
 
-    /// `defs` is the spine; `names`, `infection_secs` and `ceg_names` are
-    /// index-parallel to it. `ceg_name` / `infection_duration` index
-    /// those directly, so a future field that pushes to one vector and
-    /// not the others is a panic (or a wrong CEG) in the damage path
-    /// rather than a compile error — catch it at construction instead.
+    /// `defs` is the spine; `names`, `infection_secs`, `ceg_kinds` and
+    /// `ceg_tags` are index-parallel to it. `ceg` / `ceg_tag` /
+    /// `infection_duration` index those directly, so a future field that
+    /// pushes to one vector and not the others is a panic (or a wrong
+    /// CEG) in the damage path rather than a compile error — catch it at
+    /// construction instead.
     fn assert_parallel(&self) {
         debug_assert_eq!(self.names.len(), self.defs.len());
         debug_assert_eq!(self.infection_secs.len(), self.defs.len());
-        debug_assert_eq!(self.ceg_names.len(), self.defs.len());
+        debug_assert_eq!(self.ceg_kinds.len(), self.defs.len());
+        debug_assert_eq!(self.ceg_tags.len(), self.defs.len());
     }
 
     /// Ids of the weapons the sim addresses by name (see [`KnownWeapons`]).
@@ -267,12 +278,17 @@ impl WeaponRegistry {
         &self.defs[id.0 as usize]
     }
 
-    /// The weapon's `explosion_generator` as the registry's interned
-    /// `Arc<str>` — a refcount bump per clone, for the per-shot /
-    /// per-death [`crate::units::weapon_fx::ExplosionEvent`]s. Empty
-    /// when the weapon authors no CEG.
-    pub fn ceg_name(&self, id: WeaponId) -> Arc<str> {
-        Arc::clone(&self.ceg_names[id.0 as usize])
+    /// The CEG behind `id`'s `explosion_generator` — the blast a shot or a
+    /// death replays. `None` means no scripted CEG, so the spawner falls
+    /// back to its generic burst.
+    pub fn ceg(&self, id: WeaponId) -> Option<CegKind> {
+        self.ceg_kinds[id.0 as usize]
+    }
+
+    /// The CEG behind `id`'s `ceg_tag` — what a traveling weapon replays
+    /// along its flight path. `None` when the weapon authors no tag.
+    pub fn ceg_tag(&self, id: WeaponId) -> Option<CegKind> {
+        self.ceg_tags[id.0 as usize]
     }
 
     /// [`weapon_infection_duration`] of the weapon behind `id`.

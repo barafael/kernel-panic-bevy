@@ -305,9 +305,10 @@ pub(super) fn tick_weapon_fx(
         // bolt is, before it moves, every frame until it hits something.
         if hit_meta.is_some()
             && let Some(trail) = ceg_trail.as_deref_mut()
+            && let Some(ceg) = weapon_registry.ceg_tag(trail.weapon)
         {
             spawn_ceg(
-                &weapon_registry.by_id(trail.weapon).ceg_tag,
+                ceg,
                 prev_lead_pos,
                 bolt.direction,
                 Vec3::Y,
@@ -612,10 +613,11 @@ pub(super) fn tick_weapon_fx(
         // every sim frame while the projectile has fuel.
         if let Some(weapon) = proj.trail_ceg
             && proj.flight.has_fuel()
+            && let Some(ceg) = weapon_registry.ceg_tag(weapon)
         {
             let dir = proj.velocity.normalize_or(Vec3::Y);
             spawn_ceg(
-                &weapon_registry.by_id(weapon).ceg_tag,
+                ceg,
                 pos,
                 dir,
                 Vec3::Y,
@@ -857,17 +859,17 @@ fn trigger_delayed_hit(
     let weapon_def = weapon_registry.by_id(hit.weapon);
     // `CGameHelper::Explosion` plays `soundhit` where the shot lands.
     sounds.explosion(weapon_def, impact_pos);
-    let (rgb, radius, ceg_name) = (
+    let (rgb, radius, ceg) = (
         weapon_def.rgb_color,
         weapon_def.area_of_effect,
-        weapon_registry.ceg_name(hit.weapon).into(),
+        weapon_registry.ceg(hit.weapon),
     );
     pending_explosions.events.push(ExplosionEvent {
         pos: impact_pos,
         up: Vec3::Y,
         rgb,
         radius,
-        ceg_name,
+        ceg,
     });
     commands.entity(entity).remove::<DelayedHit>();
 }

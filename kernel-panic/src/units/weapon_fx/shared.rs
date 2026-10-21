@@ -2,11 +2,10 @@
 //! visual marker components, the cached beam-material registry, and the
 //! TDF-colour normaliser.
 
-use std::sync::Arc;
-
 use bevy::prelude::*;
 
 use crate::sim::DetFloat;
+use crate::units::content::cegs::CegKind;
 use crate::units::content::weapons::WeaponId;
 
 /// Describes a single attack for the visual system.
@@ -34,9 +33,12 @@ pub struct AttackEvent {
     /// `WeaponBinding` (or the unit's FBI weapon name) before pushing,
     /// so the fx side never string-matches the registry.
     pub weapon_id: WeaponId,
-    /// Shared per salvo shot, so a multi-projectile shot clones a
-    /// refcount rather than the name.
-    pub muzzle_ceg: Option<Arc<str>>,
+    /// Resolved from the attacker's FBI `[SFXTypes]` entry when the shot
+    /// is queued, so the fx side names it in a word. `None` covers both
+    /// no SFX table and an entry that is not a CEG at all (`VOID`, and
+    /// the two FBIs that name a *weapon* here) — both used to resolve to
+    /// nothing at spawn time and take the same fallback.
+    pub muzzle_ceg: Option<CegKind>,
     pub delayed_hit: Option<DelayedHitInfo>,
     /// Where the GaussCannon's lightning arc starts, when that isn't
     /// the muzzle: `network_arceffect.lua` draws `BigArc` from the
@@ -128,78 +130,23 @@ pub struct BuildArcEvent {
 /// both the fireball sphere and the ground flash from it so a Bit pop
 /// looks smaller than a Terminal SIGTERM crater.
 ///
-/// `ceg_name` is the upstream `explosiongenerator=custom:...` value
-/// (without the `custom:` prefix) so the CEG particle system can
-/// replay the authored emitters at the blast point. Empty = no
-/// scripted CEG; the spawner falls back to a generic sphere + ground
-/// ring in that case. It rides one event per shot and per death, so it
-/// is a [`CegName`] — the registry interns one per weapon and the
-/// events clone the refcount (see [`WeaponRegistry::ceg_name`]).
+/// `ceg` is what to replay at the blast point: the weapon's
+/// `explosiongenerator` for a shot or a death, a hard-coded one for a
+/// scripted detonation. `None` is no scripted CEG — the spawner falls
+/// back to a generic sphere + ground ring. One event rides per shot and
+/// per death, which is the reason this is a [`CegKind`] rather than a
+/// name to look up.
 ///
 /// `up` is the exploding unit's up vector (tilted to the slope for a
 /// ground unit, straight up for a building or a blast with no unit):
 /// the CEG bursts square to it.
-/// The `explosiongenerator` name an [`ExplosionEvent`] replays, carried
-/// without allocating. Either a `&'static str` the binary hard-codes (a
-/// scripted ability's CEG, the SIGTERM bomb, a unit script's
-/// `SFX_CEG_BASE` emit) or the registry's interned `Arc<str>` (every
-/// shot and every death). Both arms clone in a single word, so no event
-/// path touches the allocator.
-///
-/// Derefs to `str`: the [`super::ceg::CegRegistry`] lookup is the only
-/// thing that reads it.
 #[derive(Clone, Debug)]
-pub enum CegName {
-    /// A name the code knows at compile time.
-    Static(&'static str),
-    /// A registry-interned name, or a parsed TDF string (a CEG
-    /// spawner's own `explosion_generator`).
-    Shared(Arc<str>),
-}
-
-impl Default for CegName {
-    /// No scripted CEG — the spawner falls back to its generic burst.
-    fn default() -> Self {
-        Self::Static("")
-    }
-}
-
-impl CegName {
-    /// The name to hand the CEG registry.
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Static(name) => name,
-            Self::Shared(name) => name,
-        }
-    }
-}
-
-impl From<&'static str> for CegName {
-    fn from(name: &'static str) -> Self {
-        Self::Static(name)
-    }
-}
-
-impl From<Arc<str>> for CegName {
-    fn from(name: Arc<str>) -> Self {
-        Self::Shared(name)
-    }
-}
-
-impl std::ops::Deref for CegName {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        self.as_str()
-    }
-}
-
 pub struct ExplosionEvent {
     pub pos: Vec3,
     pub up: Vec3,
     pub rgb: [f32; 3],
     pub radius: f32,
-    pub ceg_name: CegName,
+    pub ceg: Option<CegKind>,
 }
 
 /// Event buffer drained by [`spawn::spawn_pending_explosions`]. Separate
