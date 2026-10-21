@@ -111,12 +111,21 @@ largest UI surface we have.
 ## Order
 
 1 → 2 → 3 → 4 → 5 → 6, measuring with the census after 1–2.
-Each step lands with `cargo test --workspace` green (headless
-determinism included).
+Each step lands with the CI gates green, not just the suite — the
+first pass ran only `cargo check` + `cargo test` per step and landed
+with `fmt` and `clippy` red (see `review-perf-2026-10.md` §1):
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --target wasm32-unknown-unknown -p kernel-panic --features replay --locked -- -D warnings
+cargo test --workspace   # headless determinism included
+```
 
 ## Outcomes (implemented 2026-10)
 
-Done, each landed with `cargo check` clean and the suite green:
+Done, each landed with `cargo check` clean and the suite green (the
+gates above were added to the loop by the review follow-up):
 
 - **1.** `spawn_batch` in `spawn_particle_system` / `spawn_flame` /
   `spawn_spikes` / `spawn_delayed`; `despawn_all_where` in the
@@ -129,10 +138,16 @@ Done, each landed with `cargo check` clean and the suite green:
   `despawn_all_where::<&T, _>` is E0283.
 - **2.** `beam_texture_names` returns `(&str, &str)` borrowed from the
   def (an inner `fn`, not a closure — a closure can't express the
-  lifetime tie). `ExplosionEvent.ceg_name` and `DeathBlast.ceg_name`
-  are `Arc<str>`, interned per weapon in `WeaponRegistry::ceg_names`
-  (`ceg_name(id)` = refcount bump). `PendingExplosions` is not in the
-  sim hash, so the type change is hash-neutral.
+  lifetime tie). `DeathBlast.ceg_name` is an `Arc<str>` interned per
+  weapon in `WeaponRegistry::ceg_names` (`ceg_name(id)` = refcount
+  bump); `ExplosionEvent.ceg_name` is a `CegName`, which adds a
+  `&'static str` arm so the scripted detonations (ability casts, the
+  SIGTERM bomb, a script's `SFX_CEG_BASE` emit) borrow instead of
+  allocating per event — the registry path alone did not make the
+  "no allocation per shot or death" claim true. `tga_filename` spells
+  the un-aliased `{name}.tga` beam lookup into a stack buffer for the
+  same reason. `PendingExplosions` is not in the sim hash, so the type
+  changes are hash-neutral.
 - **3.** `DamageQueue` gained `take`/`recycle` — the two drain points
   ping-pong two `Vec` allocations per tick instead of `collect`ing;
   `DamagePass` gained a `splash_mapped` `Local` for the per-explosion
