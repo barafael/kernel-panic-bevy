@@ -35,9 +35,11 @@ pub struct AttackEvent {
     pub weapon: WeaponKind,
     /// Resolved from the attacker's FBI `[SFXTypes]` entry when the shot
     /// is queued, so the fx side names it in a word. `None` covers both
-    /// no SFX table and an entry that is not a CEG at all (`VOID`, and
-    /// the two FBIs that name a *weapon* here) — both used to resolve to
-    /// nothing at spawn time and take the same fallback.
+    /// no SFX table and an entry that is not a CEG at all, and draws
+    /// nothing — as upstream does for a name with no generator behind
+    /// it. (Before `CegKind`, an unresolvable name still reached the fx
+    /// side and fell back to the generic muzzle sphere; no shipped FBI
+    /// has one, so nothing visible changed.)
     pub muzzle_ceg: Option<CegKind>,
     pub delayed_hit: Option<DelayedHitInfo>,
     /// Where the GaussCannon's lightning arc starts, when that isn't

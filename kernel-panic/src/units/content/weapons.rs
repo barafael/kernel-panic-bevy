@@ -579,6 +579,10 @@ mod tests {
         for &kind in ALL_WEAPON_KINDS {
             assert!(registry.is_present(kind), "{} missing", kind.name());
         }
+        // Slot 0 is pre-filled by `default()`, so `is_present` cannot
+        // tell a loaded `[BuildLaser]` from the stub: check the authored
+        // `range=256` (retroweapons.tdf) as well.
+        assert_eq!(registry.by_kind(WeaponKind::BuildLaser).range, 256.0);
     }
 
     #[test]

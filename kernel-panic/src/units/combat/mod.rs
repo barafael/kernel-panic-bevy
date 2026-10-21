@@ -580,9 +580,9 @@ pub(super) fn fire_salvo_shot(
     rng: &mut u32,
 ) {
     // The attacker's authored muzzle CEG, resolved once per salvo rather
-    // than per projectile. An `[SFXTypes]` entry that is not a CEG (`VOID`,
-    // the two FBIs that name a weapon here) resolves to nothing and the fx
-    // side keeps its generic muzzle sphere.
+    // than per projectile. An `[SFXTypes]` entry that is not a CEG
+    // resolves to nothing, and nothing is drawn for it (see
+    // `AttackEvent::muzzle_ceg`).
     let muzzle_ceg = crate::units::assets::animation::fire_weapon_sfx(shot.kind)
         .and_then(|index| unit_registry.sfx_type(shot.kind, index))
         .and_then(CegKind::find);

@@ -1332,6 +1332,18 @@ fn next_signed(state: &mut u32) -> f32 {
 mod tests {
     use super::*;
 
+    /// `load()` only warns for a variant the TDFs leave undefined, and
+    /// `spawn_ceg` degrades to the generic burst for it; assert it here
+    /// so a renamed section is a test failure, as
+    /// `the_shipped_tdfs_define_every_variant` does for weapons.
+    #[test]
+    fn the_shipped_tdfs_define_every_ceg_kind() {
+        let registry = CegRegistry::load();
+        for &kind in ALL_CEG_KINDS {
+            assert!(registry.get(kind).is_some(), "{} missing", kind.name());
+        }
+    }
+
     #[test]
     fn resolve_texture_known_aliases() {
         assert_eq!(

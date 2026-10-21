@@ -446,3 +446,47 @@ Gates: fmt, both clippy jobs, and `cargo test --workspace` at 865 passed
 677 — one from the review fix, five for `CegKind`, seven for
 `WeaponKind`, less the infection test `damage.rs` no longer owns — so
 nothing was lost to the mechanical edits.
+
+## 7. Second pass (2026-10-21, all eight commits)
+
+A sceptical re-read of the whole branch against `main`, with the four
+gates re-run rather than taken from §5/§6. Everything in §2 held up;
+three things did not, and are fixed in the same commit as this section.
+
+- **The muzzle-flash claim in `2b8b1eb` was false.** The commit text
+  (and the `AttackEvent::muzzle_ceg` comment) said an `[SFXTypes]` entry
+  that is not a CEG "takes the same generic muzzle sphere it always
+  did". On `main` such a name reached `spawn_weapon_visuals` as
+  `Some("VOID")`, failed inside `spawn_ceg`, and the sphere was drawn.
+  With `Option<CegKind>` it resolves to `None` in combat and the whole
+  muzzle block is skipped — nothing is drawn, which is what upstream
+  does for a name with no generator. No shipped FBI has such an entry
+  (every `[SFXTypes]` value is `custom:` + a real section, and Bit /
+  Byte / Pointer, the only units with a fire-SFX index, name
+  `oldskool_shot1`/`oldskool_shot2`), so nothing visible changed. The
+  comments now say what the code does.
+- **CEGs had no presence test.** Weapons got
+  `the_shipped_tdfs_define_every_variant`; a renamed `explosions/*.tdf`
+  section was only a load-time `warn!` and a silent fallback to the
+  generic burst. `the_shipped_tdfs_define_every_ceg_kind` pins all 50.
+- **The weapon presence test could not see a missing `[BuildLaser]`**,
+  because `WeaponRegistry::default()` pre-fills slot 0 with a stub def.
+  It now also checks the authored `range=256`.
+
+Noted, not changed:
+
+- `CegKind::find` is wider than the `ExplosionDefs::get` it replaced
+  (that one was exact-case; `find` trims and falls back to
+  ignore-case). Every CEG reference in the weapon TDFs, explosion TDFs
+  and FBIs matches its section's case, so this is a widening with no
+  effect on shipped data, not a preservation.
+- `custom:sawfunc` is cited as shipped data; its only occurrence is
+  commented out, so the parser never sees it.
+- Two idiom-pass nits run slightly more work than before:
+  `reconcile_vent_claims` iterates the vents query a second time to
+  size `claimed`, and the command-line dash cache does a remove +
+  insert per selected unit per frame instead of a `get` on the cached
+  path. Both negligible.
+- The five local `worktree-agent-*` branches are each one commit that
+  is already in `main` (`git cherry` shows every one applied); their
+  worktrees are clean. They are 54 GB of `target/` and nothing else.
