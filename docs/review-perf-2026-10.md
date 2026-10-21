@@ -344,8 +344,8 @@ What each finding turned into. All four CI gates green, suite at
 | --- | --- |
 | §1.1 clippy | `beam_texture(tex2, …)` — the `&` dropped |
 | §1.2 fmt | `cargo fmt --all`; 14 diffs, all pure reflow, no semantic change |
-| §3.1 | `resolve_weapon` interns once and derives the def with `by_id` |
-| §3.2 | new `CegName` enum; `ExplosionEvent.ceg_name` is no longer `Arc<str>` |
+| §3.1 | `resolve_weapon` interns once and derives the def with `by_id` (since §6: resolves a `WeaponKind`) |
+| §3.2 | new `CegName` enum; `ExplosionEvent.ceg_name` is no longer `Arc<str>` (since §6: `CegKind`, `CegName` deleted) |
 | §3.3 | `tga_filename` spells `{name}.tga` into a stack buffer |
 | §3.4 | CEG name interned before the `def` move, `defs` pushed first, `assert_parallel` |
 | §3.5 | fmt + both clippy jobs added to the plan's per-step gate |
@@ -390,3 +390,59 @@ ignored wholesale: `.claude/scheduled_tasks.lock` is tracked and stays
 visible. The 54 GB under `.claude/worktrees/` is still on disk — moving
 or pruning those worktrees is a separate call, since they may hold
 unmerged work.
+
+## 6. Follow-up: the string registries (`2b8b1eb`, `f3a7496`)
+
+§3.2's `CegName` and §3.1's `intern`/`by_id` have since been superseded:
+CEGs and weapons are named by enum variants now.
+
+| Before | After |
+| --- | --- |
+| `CegName::{Static, Shared}` + `Arc<str>` CEG names | `CegKind` — 50 variants, `units/content/cegs.rs` |
+| `ExplosionEvent.ceg_name: CegName` | `ceg: Option<CegKind>` |
+| `AttackEvent.muzzle_ceg: Option<Arc<str>>` | `Option<CegKind>` |
+| `WeaponId(u16)` handed out by `intern()` | `WeaponKind` — 46 variants, one per TDF section |
+| `WeaponRegistry`: `Vec<WeaponDef>` + `names` + `index` + `infection_secs` + `KnownWeapons` | `Box<[Option<WeaponDef>]>` indexed by `kind.index()` |
+| `weapon_infection_duration(&str)` | `WeaponKind::infection_duration()` |
+
+Worth being honest about why: this is **not** a perf win. `WeaponId` was
+already a dense integer index; the move relocates the same index from
+runtime to compile time. What it buys is that an invented weapon or CEG
+is no longer representable, the registry loses four parallel side tables
+whose only job was making names cheap, and the pattern matches
+`UnitKind`, which was already `VariantArray` + array-indexed. The set is
+closed because the definitions are embedded at compile time and hashed
+into `net::compat`, so peers already have to agree on it.
+
+The invariants that keep behaviour identical:
+
+- `WeaponKind::BuildLaser` is variant 0, so the `BUILD_LASER == 0`
+  sentinel that gates the build-laser fx still holds; it is a real TDF
+  section, so a loaded registry carries the authored def there instead
+  of a placeholder.
+- `by_kind` stays infallible like `by_id` was. Callers that used to
+  degrade on an absent weapon (the SIGTERM credit, the area-denial cost,
+  the SIGTERM blast radius) ask `get`/`is_present` instead, so a bare
+  test registry behaves as before;
+  `the_shipped_tdfs_define_every_variant` pins that production has all
+  46.
+- `find(name)` is the one entry point for names that arrive from data
+  (FBI `Weapon1`/`Weapon2`/`ExplodeAs`, the shield and script paths) and
+  returns `None` for a variant these TDFs leave undefined — which is
+  what keeps `by_kind` from ever panicking on bad data. It stays
+  case-insensitive because the shipped FBIs need it: `counter.fbi` says
+  `minekiller`, `rock.fbi` says `rock`.
+- `CegKind::NoEffect` is the authored empty `[none]` section, which
+  suppresses the generic burst (GaussCannon depends on it); that is
+  distinct from `find` → `None`, which keeps the fallback.
+
+Neither enum crosses the wire — nothing in `net/wire.rs`, `net/codec.rs`
+or `net/replay_log.rs` names a weapon or a CEG, and the sim hash is
+FNV-1a over unit components keyed by `NetId` — so renumbering variants
+is netplay- and replay-safe.
+
+Gates: fmt, both clippy jobs, and `cargo test --workspace` at 865 passed
+/ 0 failed / 20 ignored. The crate holds 685 `#[test]` where `main` had
+677 — one from the review fix, five for `CegKind`, seven for
+`WeaponKind`, less the infection test `damage.rs` no longer owns — so
+nothing was lost to the mechanical edits.

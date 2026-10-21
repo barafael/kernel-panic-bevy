@@ -148,6 +148,10 @@ gates above were added to the loop by the review follow-up):
   the un-aliased `{name}.tga` beam lookup into a stack buffer for the
   same reason. `PendingExplosions` is not in the sim hash, so the type
   changes are hash-neutral.
+  *Superseded:* `2b8b1eb`/`f3a7496` name CEGs and weapons with
+  `CegKind`/`WeaponKind` variants, so `CegName`, the `Arc<str>`
+  interning and the string keys are all gone and the question no longer
+  arises per event — see `review-perf-2026-10.md` §6.
 - **3.** `DamageQueue` gained `take`/`recycle` — the two drain points
   ping-pong two `Vec` allocations per tick instead of `collect`ing;
   `DamagePass` gained a `splash_mapped` `Local` for the per-explosion
