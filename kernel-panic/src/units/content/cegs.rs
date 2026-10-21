@@ -198,11 +198,14 @@ impl CegKind {
     /// `custom:` prefix the engine's `explosiongenerator` values carry,
     /// in any case.
     ///
-    /// `None` for an empty name and for a name that is not a CEG at all,
-    /// both of which the map lookup also missed: the shipped data has
-    /// `custom:sawfunc` (a weapon's `explosiongenerator` with no section
-    /// behind it) and the FBI `[SFXTypes]` tables carry `VOID` plus two
-    /// *weapon* names. Callers treat `None` as "no scripted CEG".
+    /// `None` for an empty name and for a name that is not a CEG at all.
+    /// No shipped reference takes that path — the 61 `[SFXTypes]`
+    /// entries, 42 weapon `explosiongenerator=` values, 7 `cegTag=`
+    /// values and 3 spawner targets all name a section that exists — so
+    /// what reaches it is a name from a different vocabulary (a target
+    /// category, a weapon name) or data that is not shipped. Callers
+    /// treat `None` as "no scripted CEG" and fall back to the generic
+    /// burst, which is what the map lookup did.
     ///
     /// The exact hit is what every shipped reference takes — the names
     /// in `weapons/*.tdf`, `explosions/*.tdf` and the FBIs all match
@@ -268,10 +271,60 @@ mod tests {
 
     #[test]
     fn names_that_are_not_cegs_resolve_to_nothing() {
-        // All three appear in the shipped data and must keep falling
-        // back to the generic burst.
+        // None of the three is a CEG reference: `sawfunc` is commented
+        // out in `retroweapons.tdf`, `VOID` is an `OnlyTargetCategory*`
+        // value and `minekiller` a `[UNITINFO] Weapon1` value. They pin
+        // the contract a caller relies on — a name from another
+        // vocabulary resolves to `None` — which the shipped data itself
+        // never exercises.
         for reference in ["custom:sawfunc", "VOID", "minekiller"] {
             assert_eq!(CegKind::find(reference), None, "{reference}");
         }
+    }
+
+    /// The other half of that claim: `find`'s `None` path is documented
+    /// as unreachable for shipped data, so every CEG reference the
+    /// embedded files make has to name a section. `sfx_types` is sparse
+    /// (empty slots stand for missing indices), so empty entries are the
+    /// absence of a reference rather than a bad one.
+    #[test]
+    fn every_shipped_ceg_reference_resolves() {
+        use spring_tdf::EffectProperties;
+
+        let defs = crate::units::content::defs::defs();
+        let mut counts = [0; 3];
+
+        for def in defs.weapons.weapons.values() {
+            for reference in [&def.explosion_generator, &def.ceg_tag] {
+                if !reference.is_empty() {
+                    assert!(CegKind::find(reference).is_some(), "{reference}");
+                    counts[0] += 1;
+                }
+            }
+        }
+        for def in defs.units.units.values() {
+            for reference in &def.sfx_types {
+                if !reference.is_empty() {
+                    assert!(CegKind::find(reference).is_some(), "{reference}");
+                    counts[1] += 1;
+                }
+            }
+        }
+        for def in defs.explosions.explosions.values() {
+            for layer in &def.effects {
+                if let EffectProperties::Spawner(props) = &layer.properties
+                    && !props.explosion_generator.is_empty()
+                {
+                    let reference = &props.explosion_generator;
+                    assert!(CegKind::find(reference).is_some(), "{reference}");
+                    counts[2] += 1;
+                }
+            }
+        }
+        // Each kind has to have been walked: an empty loop would pass.
+        assert!(
+            counts[0] > 0 && counts[1] > 0 && counts[2] > 0,
+            "{counts:?}"
+        );
     }
 }
