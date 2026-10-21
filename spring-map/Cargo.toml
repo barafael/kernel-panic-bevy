@@ -24,15 +24,17 @@ postcard = { workspace = true }
 # Encoder for `write` (the datavent editor). Native only: it binds the C
 # zstd library.
 zstd = { version = "0.14", optional = true }
-# The map selector previews (`examples/gen_previews.rs`).
-png = { version = "0.18", optional = true }
 
 [features]
 # `baked::set_datavent_facings`: rewrite a `.kpmap`'s datavent facings.
-write = ["dep:zstd", "dep:png"]
+write = ["dep:zstd"]
 
 [dev-dependencies]
+# The map selector previews (`examples/gen_previews.rs`).
+png = { version = "0.18" }
+
 proptest = { workspace = true }
+
 # The reader's round-trip tests encode what they decode.
 zstd = "0.14"
 
