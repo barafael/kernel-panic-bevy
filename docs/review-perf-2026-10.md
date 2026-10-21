@@ -447,6 +447,10 @@ Gates: fmt, both clippy jobs, and `cargo test --workspace` at 865 passed
 `WeaponKind`, less the infection test `damage.rs` no longer owns — so
 nothing was lost to the mechanical edits.
 
+A follow-up sweep asked what else in the tree has this shape. The
+inventory, its rejections, and one defect in the doc comments added here
+are in `docs/enum-shaped-inventory.md`.
+
 ## 7. Second pass (2026-10-21, all eight commits)
 
 A sceptical re-read of the whole branch against `main`, with the four
