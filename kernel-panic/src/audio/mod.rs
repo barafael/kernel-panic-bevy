@@ -10,7 +10,7 @@
 //!
 //! - [`SoundBank`] holds a handle per original effect under
 //!   `assets/sounds/` (Vorbis, converted once from the original
-//!   `.wav`s), keyed by the lower-cased TDF name.
+//!   `.wav`s), one per [`SoundId`] variant in [`ALL_SOUND_IDS`] order.
 //! - The sim pushes [`SoundRequest`]s onto the [`SoundQueue`] resource
 //!   and never touches `bevy_audio`, so headless tests and the bot run
 //!   silent without registering anything (systems take the queue as
@@ -26,6 +26,7 @@
 
 use bevy::audio::{AddAudioSource, AudioPlayer, PlaybackSettings, Volume};
 use bevy::prelude::*;
+use strum::VariantArray;
 
 pub mod music;
 
@@ -37,99 +38,126 @@ use crate::terrain::heightmap::Heightmap;
 use crate::units::components::UnitType;
 use crate::units::content::definitions::UnitKind;
 
-/// Every effect the original ships (`upstream/Kernel-Panic/sounds/*.wav`),
-/// lower-cased: Spring's VFS is case-insensitive (`soundhit=Explosion5`,
-/// `SIGTERMhit`) but Bevy asset paths are not. The web build cannot list
-/// a directory, so the bank is this static list. [`SoundId`] indexes it.
-pub const SOUND_FILES: &[&str] = &[
-    "assemblerdeath",
-    "beep4",
-    "beep6",
-    "bitdeath",
-    "bitfire",
-    "bugartifire",
-    "bugartihit",
-    "built",
-    "button9",
-    "bytedeath",
-    "bytefire",
-    "bytehit",
-    "commandfailed",
-    "commandgiven",
-    "explosion5",
-    "flowfire",
-    "flowhit",
-    "netelectricarc",
-    "obeliskfire",
-    "obeliskhit",
-    "packetfire",
-    "pointerdeath",
-    "pointerfire",
-    "pointerhit",
-    "select",
-    "sigtermhit",
-];
+/// Every effect the original ships (`upstream/Kernel-Panic/sounds/*.wav`,
+/// converted once to Vorbis under `assets/sounds/`): one variant per
+/// file, whose [`SoundId::name`] is that file's lower-cased stem.
+///
+/// Spring's VFS is case-insensitive (`soundhit=Explosion5`, `SIGTERMhit`)
+/// and Bevy's asset paths are not, which is why the name is kept
+/// lower-cased rather than as-authored. The web build cannot list a
+/// directory, so this enum *is* the bank: a new effect is a variant plus
+/// an `.ogg`, and no lookup table has to hear about it.
+///
+/// Anything without its own note below is a `soundstart=` / `soundhit=`
+/// value in `weapons/*.tdf`, named for the weapon that fires it; the
+/// `…death` ones are the `soundhit` of a unit's self-destruct weapon.
+///
+/// Presentation-only: a `SoundId` is never sent, hashed or serialised, so
+/// the variant order is free. It is the alphabetical order of the file
+/// list this replaced, which the web player's Sound-effects tab
+/// (`web/music.html`) also lists them in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::VariantArray)]
+pub enum SoundId {
+    #[strum(serialize = "assemblerdeath")]
+    AssemblerDeath,
+    /// `sounds.lua` `IncomingChat` (`in3d=false`).
+    #[strum(serialize = "beep4")]
+    Beep4,
+    /// `sounds.lua` `MapPoint` (`rolloff=0`, `dopplerscale=0`).
+    #[strum(serialize = "beep6")]
+    Beep6,
+    #[strum(serialize = "bitdeath")]
+    BitDeath,
+    #[strum(serialize = "bitfire")]
+    BitFire,
+    #[strum(serialize = "bugartifire")]
+    BugArtiFire,
+    #[strum(serialize = "bugartihit")]
+    BugArtiHit,
+    /// `network_reflectorshield.lua:99`: the Firewall's build-complete.
+    #[strum(serialize = "built")]
+    Built,
+    /// `sounds.lua` `MultiSelect` (`in3d=false`).
+    #[strum(serialize = "button9")]
+    Button9,
+    #[strum(serialize = "bytedeath")]
+    ByteDeath,
+    #[strum(serialize = "bytefire")]
+    ByteFire,
+    #[strum(serialize = "bytehit")]
+    ByteHit,
+    /// `sounds.lua` `FailedCommand`.
+    #[strum(serialize = "commandfailed")]
+    CommandFailed,
+    /// `SOUND.TDF [COMPUTER] ok1=`, `arrived1=`.
+    #[strum(serialize = "commandgiven")]
+    CommandGiven,
+    #[strum(serialize = "explosion5")]
+    Explosion5,
+    #[strum(serialize = "flowfire")]
+    FlowFire,
+    #[strum(serialize = "flowhit")]
+    FlowHit,
+    /// `networkweapons.tdf:99`'s `soundstart`, the Arc's discharge.
+    #[strum(serialize = "netelectricarc")]
+    NetElectricArc,
+    #[strum(serialize = "obeliskfire")]
+    ObeliskFire,
+    #[strum(serialize = "obeliskhit")]
+    ObeliskHit,
+    #[strum(serialize = "packetfire")]
+    PacketFire,
+    #[strum(serialize = "pointerdeath")]
+    PointerDeath,
+    #[strum(serialize = "pointerfire")]
+    PointerFire,
+    #[strum(serialize = "pointerhit")]
+    PointerHit,
+    /// `SOUND.TDF [COMPUTER] select1=`.
+    #[strum(serialize = "select")]
+    Select,
+    /// `retroweapons.tdf:575`'s `soundhit`, SIGTERM's detonation.
+    #[strum(serialize = "sigtermhit")]
+    SigtermHit,
+}
 
-/// Index into [`SOUND_FILES`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct SoundId(u8);
+/// Every effect, in the order [`SoundBank`] loads its handles.
+pub const ALL_SOUND_IDS: &[SoundId] = SoundId::VARIANTS;
 
 impl SoundId {
-    /// `SOUND.TDF [COMPUTER] select1=select`.
-    pub const SELECT: SoundId = SoundId::named("select");
-    /// `SOUND.TDF [COMPUTER] ok1=commandgiven`, `arrived1=commandgiven`.
-    pub const COMMAND_GIVEN: SoundId = SoundId::named("commandgiven");
-    /// `sounds.lua` `MultiSelect` (`in3d=false`).
-    pub const MULTI_SELECT: SoundId = SoundId::named("button9");
-    /// `network_reflectorshield.lua`: the Firewall discharge.
-    pub const BUILT: SoundId = SoundId::named("built");
+    /// Position in [`ALL_SOUND_IDS`], which is [`SoundBank`]'s slot.
+    pub const fn index(self) -> usize {
+        self as usize
+    }
 
-    const fn named(name: &str) -> SoundId {
-        let mut i = 0;
-        while i < SOUND_FILES.len() {
-            if str_eq(SOUND_FILES[i], name) {
-                return SoundId(i as u8);
-            }
-            i += 1;
-        }
-        panic!("sound name not in SOUND_FILES");
+    /// The lower-cased file stem: `explosion5`, not `Explosion5`.
+    pub fn name(self) -> &'static str {
+        self.into()
     }
 
     /// Resolve a TDF sound name (`soundstart=` / `soundhit=` value) the
     /// way the engine's VFS does: case-insensitively, extension implied.
-    /// `None` for the empty string (the TDF default) or an unknown name.
-    pub fn from_name(name: &str) -> Option<SoundId> {
+    /// `None` for the empty string (the TDF default) or a name the
+    /// original never shipped a file for.
+    ///
+    /// A scan rather than a map, and deliberately so: the keys here are
+    /// lower-cased and the data is not (`soundhit=Explosion5`), so a
+    /// name-as-authored table would miss on every real lookup and a
+    /// lower-cased one would have to lowercase the query to hit it. This
+    /// runs at load, once per weapon def, never per shot.
+    pub fn from_name(name: &str) -> Option<Self> {
         if name.is_empty() {
             return None;
         }
-        SOUND_FILES
+        ALL_SOUND_IDS
             .iter()
-            .position(|file| file.eq_ignore_ascii_case(name))
-            .map(|i| SoundId(i as u8))
-    }
-
-    pub fn name(self) -> &'static str {
-        SOUND_FILES[self.0 as usize]
+            .copied()
+            .find(|sound| sound.name().eq_ignore_ascii_case(name))
     }
 
     fn asset_path(self) -> String {
         format!("sounds/{}.ogg", self.name())
     }
-}
-
-const fn str_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
 }
 
 /// The engine's mixer channels (`ISound.cpp:59`), each with its own
@@ -302,7 +330,7 @@ fn decode_sfx(bytes: Vec<u8>) -> std::io::Result<Sfx> {
     )))
 }
 
-/// Handles for every sound in [`SOUND_FILES`], indexed by [`SoundId`].
+/// Handles for every effect in [`ALL_SOUND_IDS`], indexed by [`SoundId`].
 #[derive(Resource)]
 pub struct SoundBank {
     handles: Vec<Handle<Sfx>>,
@@ -310,17 +338,18 @@ pub struct SoundBank {
 
 impl SoundBank {
     fn handle(&self, sound: SoundId) -> &Handle<Sfx> {
-        &self.handles[sound.0 as usize]
+        &self.handles[sound.index()]
     }
 }
 
 fn load_sound_bank(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let handles = (0..SOUND_FILES.len())
-        .map(|i| asset_server.load(SoundId(i as u8).asset_path()))
+    let handles = ALL_SOUND_IDS
+        .iter()
+        .map(|&sound| asset_server.load(sound.asset_path()))
         .collect();
     info!(
         "audio: loading {} original sound effects from assets/sounds",
-        SOUND_FILES.len()
+        ALL_SOUND_IDS.len()
     );
     commands.insert_resource(SoundBank { handles });
 }
@@ -389,7 +418,7 @@ fn play_queued_sounds(
         && has_reply_sounds(kind.0)
     {
         queue.play(
-            SoundId::COMMAND_GIVEN,
+            SoundId::CommandGiven,
             Channel::UnitReply,
             Some(gtf.translation()),
         );
@@ -469,10 +498,10 @@ fn selection_sounds(
         return;
     };
     if iter.next().is_some() {
-        queue.play(SoundId::MULTI_SELECT, Channel::UserInterface, None);
+        queue.play(SoundId::Button9, Channel::UserInterface, None);
     } else if has_reply_sounds(first_kind.0) {
         queue.play(
-            SoundId::SELECT,
+            SoundId::Select,
             Channel::UnitReply,
             Some(first_gtf.translation()),
         );
@@ -512,8 +541,8 @@ mod tests {
     fn effects_decode_to_pcm_once() {
         use rodio::Source;
         let dir = crate::paths::assets_dir();
-        for i in 0..SOUND_FILES.len() {
-            let path = dir.join(SoundId(i as u8).asset_path());
+        for sound in ALL_SOUND_IDS {
+            let path = dir.join(sound.asset_path());
             let bytes = std::fs::read(&path).unwrap();
             let sfx = decode_sfx(bytes.clone()).unwrap();
             let reference = rodio::Decoder::new(std::io::Cursor::new(bytes)).unwrap();
@@ -555,7 +584,7 @@ mod tests {
                 if !sound.is_empty() {
                     assert!(
                         SoundId::from_name(sound).is_some(),
-                        "weapon {name}: sound {sound:?} has no file in SOUND_FILES"
+                        "weapon {name}: sound {sound:?} has no file in assets/sounds"
                     );
                 }
             }
@@ -565,8 +594,8 @@ mod tests {
     #[test]
     fn sound_files_exist_on_disk() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/sounds");
-        for id in 0..SOUND_FILES.len() {
-            let path = dir.join(format!("{}.ogg", SoundId(id as u8).name()));
+        for sound in ALL_SOUND_IDS {
+            let path = dir.join(format!("{}.ogg", sound.name()));
             assert!(path.is_file(), "missing {}", path.display());
         }
     }
@@ -608,7 +637,7 @@ mod tests {
         assert_eq!(
             app.world().resource::<SoundQueue>().pending(),
             &[SoundRequest {
-                sound: SoundId::SELECT,
+                sound: SoundId::Select,
                 channel: Channel::UnitReply,
                 pos: Some(Vec3::new(10.0, 0.0, 0.0)),
             }]
@@ -626,7 +655,7 @@ mod tests {
         assert_eq!(
             app.world().resource::<SoundQueue>().pending(),
             &[SoundRequest {
-                sound: SoundId::MULTI_SELECT,
+                sound: SoundId::Button9,
                 channel: Channel::UserInterface,
                 pos: None,
             }]

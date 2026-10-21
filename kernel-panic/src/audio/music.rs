@@ -467,12 +467,13 @@ mod tests {
     }
 
     /// The web player's Sound-effects tab lists exactly the bank
-    /// (`SOUND_FILES`); both ways, so a typo on either side fails.
+    /// (`ALL_SOUND_IDS`); both ways, so a typo on either side fails.
     #[test]
     fn web_player_lists_every_sound_effect() {
         let html =
             std::fs::read_to_string(manifest().join("web/music.html")).expect("web/music.html");
-        for name in crate::audio::SOUND_FILES {
+        for sound in crate::audio::ALL_SOUND_IDS {
+            let name = sound.name();
             assert!(
                 html.contains(&format!("['{name}', ")),
                 "music.html does not list the effect {name:?}"
@@ -487,7 +488,7 @@ mod tests {
             };
             assert!(
                 crate::audio::SoundId::from_name(name).is_some(),
-                "music.html lists {name:?}, which is not in SOUND_FILES"
+                "music.html lists {name:?}, which is not a `SoundId`"
             );
         }
     }

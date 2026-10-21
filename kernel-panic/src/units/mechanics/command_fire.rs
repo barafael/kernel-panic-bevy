@@ -733,7 +733,7 @@ pub fn process_command_fire(
             // `network_reflectorshield.lua:99`: `PlaySoundFile("sounds/built.wav")`.
             if let Some(sounds) = sounds.as_deref_mut() {
                 sounds.play(
-                    crate::audio::SoundId::BUILT,
+                    crate::audio::SoundId::Built,
                     crate::audio::Channel::General,
                     None,
                 );

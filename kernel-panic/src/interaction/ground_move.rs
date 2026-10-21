@@ -1970,7 +1970,7 @@ pub fn movement_system(
                 && crate::audio::has_reply_sounds(u.kind.0)
             {
                 sounds.play(
-                    crate::audio::SoundId::COMMAND_GIVEN,
+                    crate::audio::SoundId::CommandGiven,
                     crate::audio::Channel::General,
                     Some(new_pos),
                 );
