@@ -642,18 +642,21 @@ fn hex_farm_owners(
         }
     }
 
-    // `UnitDestroyed`: the nearest remaining finished big building.
+    // `UnitDestroyed`: the nearest remaining finished big building
+    // (`min_by` keeps the first of equal distances, like the strict `<`
+    // it replaces).
     for (n, dead) in released {
-        let mut best: Option<(f32, Rgba)> = None;
-        for (e, otf, okind, faction, color) in &live {
-            if e == dead || !big(okind.0) {
-                continue;
-            }
-            let d2 = flat_dist_sq(otf.translation, centre(n));
-            if d2 <= r2 && best.is_none_or(|(b, _)| d2 < b) {
-                best = Some((d2, tint(faction, color)));
-            }
-        }
+        let best = live
+            .iter()
+            .filter(|(e, _, okind, _, _)| *e != dead && big(okind.0))
+            .map(|(_, otf, _, faction, color)| {
+                (
+                    flat_dist_sq(otf.translation, centre(n)),
+                    tint(faction, color),
+                )
+            })
+            .filter(|(d2, _)| *d2 <= r2)
+            .min_by(|a, b| a.0.total_cmp(&b.0));
         owners[n] = best.map_or(WHITE, |(_, c)| c);
     }
 

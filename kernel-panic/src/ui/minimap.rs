@@ -373,10 +373,8 @@ pub fn downsample_terrain(
             let src_y = (dst_y * src_h / dst_h).min(src_h - 1);
             let src_idx = (src_y * src_w + src_x) * 4;
             let dst_idx = (dst_y * dst_w + dst_x) * 4;
-            if src_idx + 3 < source.len() {
-                result[dst_idx] = source[src_idx];
-                result[dst_idx + 1] = source[src_idx + 1];
-                result[dst_idx + 2] = source[src_idx + 2];
+            if let Some(px) = source.get(src_idx..src_idx + 4) {
+                result[dst_idx..dst_idx + 4].copy_from_slice(px);
                 result[dst_idx + 3] = 255;
             }
         }

@@ -170,19 +170,11 @@ impl StructureLayer {
                 // Clamp so the window never hangs off the map edge.
                 let cx = x.clamp(h, (w - 1 - h).max(h));
                 let cz = z.clamp(h, (hgt - 1 - h).max(h));
-                let mut closed = false;
-                let mut dz = -h;
-                'outer: while dz <= h {
-                    let mut dx = -h;
-                    while dx <= h {
-                        if self.square_blocked(cx + dx, cz + dz, m.crushes) {
-                            closed = true;
-                            break 'outer;
-                        }
-                        dx += 2;
-                    }
-                    dz += 2;
-                }
+                let closed = (-h..=h).step_by(2).any(|dz| {
+                    (-h..=h)
+                        .step_by(2)
+                        .any(|dx| self.square_blocked(cx + dx, cz + dz, m.crushes))
+                });
                 m.mask.cells[(z * w + x) as usize] = closed;
             }
         }
@@ -311,21 +303,18 @@ impl StructureLayer {
             .filter(|c| !c.is_whitespace())
             .map(|c| c.to_ascii_lowercase())
             .collect();
-        let mut out = Vec::new();
-        for sz in 0..zsize {
-            for sx in 0..xsize {
+        (0..zsize)
+            .flat_map(|sz| (0..xsize).map(move |sx| (sx, sz)))
+            .filter(|&(sx, sz)| {
                 let c = chars
                     .get(((sx / 2) + (sz / 2) * fx) as usize)
                     .copied()
                     .unwrap_or('o');
-                let blocks = !matches!(c, 'y' | 'c' | 'e' | 'i' | 's' | 'b' | 'u');
-                let (x, z) = (x0 + sx, z0 + sz);
-                if blocks && self.idx(x, z).is_some() {
-                    out.push((x as u32, z as u32));
-                }
-            }
-        }
-        out
+                !matches!(c, 'y' | 'c' | 'e' | 'i' | 's' | 'b' | 'u')
+                    && self.idx(x0 + sx, z0 + sz).is_some()
+            })
+            .map(|(sx, sz)| ((x0 + sx) as u32, (z0 + sz) as u32))
+            .collect()
     }
 }
 

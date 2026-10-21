@@ -578,12 +578,11 @@ fn sync_ghosts(
             .id();
         state.ghosts.push(e);
     }
-    let sites = state.sites.clone();
     for (i, e) in state.ghosts.iter().enumerate() {
         let Ok((mut tf, mut vis, mat)) = ghosts.get_mut(*e) else {
             continue;
         };
-        match sites.get(i) {
+        match state.sites.get(i) {
             Some(site) => {
                 // Lift slightly so the mesh doesn't z-fight the ground.
                 tf.translation = site.pos + Vec3::Y * 0.5;

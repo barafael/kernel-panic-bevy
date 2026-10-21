@@ -58,8 +58,10 @@ pub fn build_chunk(
 
     let num_verts = local_w * local_h;
     let mut positions = Vec::with_capacity(num_verts);
-    let mut normals = Vec::with_capacity(num_verts);
     let mut uvs = Vec::with_capacity(num_verts);
+    // Zeroed: the quad loop below accumulates the adjacent face
+    // normals into each vertex, and the final pass normalises them.
+    let mut normals = vec![[0.0f32; 3]; num_verts];
 
     let origin_x = vx_start as f32 * sq_size;
     let origin_z = vz_start as f32 * sq_size;
@@ -75,12 +77,8 @@ pub fn build_chunk(
             let u = global_x as f32 / (hm_w - 1) as f32;
             let v = global_z as f32 / (hm_h - 1) as f32;
             uvs.push([u, v]);
-
-            normals.push([0.0, 1.0, 0.0]);
         }
     }
-
-    normals.fill([0.0, 0.0, 0.0]);
 
     let quads_w = local_w.saturating_sub(1);
     let quads_h = local_h.saturating_sub(1);

@@ -131,16 +131,13 @@ pub fn spawn_geovent_smokers(
 ) {
     ensure_assets(assets, materials, images);
 
-    let mut count = 0u32;
-
     for vent in datavents {
         let pos = heightmap.place(vent.x, vent.z);
         spawn_smoker_at(commands, pos, vent.facing);
-        count += 1;
     }
 
-    if count > 0 {
-        info!("  {count} geovents (animated)");
+    if !datavents.is_empty() {
+        info!("  {} geovents (animated)", datavents.len());
     }
 }
 
@@ -362,15 +359,14 @@ pub fn reconcile_vent_claims(
     // Index the vents once, then visit them from each site and
     // building: O(vents + sites + units) per tick, not their product
     // (a Hex Farm match runs hundreds of vents against every unit).
-    let mut grid = VentGrid::default();
-    let mut claimed: Vec<bool> = Vec::new();
-    for (i, (_, vent, _)) in vents.iter().enumerate() {
-        grid.insert(i, vent.pos);
-        claimed.push(false);
-    }
-    if claimed.is_empty() {
+    if vents.is_empty() {
         return;
     }
+    let mut grid = VentGrid::default();
+    for (i, (_, vent, _)) in vents.iter().enumerate() {
+        grid.insert(i, vent.pos);
+    }
+    let mut claimed = vec![false; vents.iter().count()];
     // A committed builder claims the vent its site coincides with
     // (a, b, b′ above)…
     let sites = pending

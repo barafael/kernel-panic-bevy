@@ -81,6 +81,29 @@ impl RibbonDrawCtx<'_, '_> {
     }
 }
 
+impl VolumeHitCtx<'_, '_> {
+    /// Sweep `hit`'s weapon against the spatial-index neighbours along
+    /// the segment `seg_start` → `seg_end` (see
+    /// [`broad_phase_volume_hit`]).
+    fn broad_phase(
+        &self,
+        hit: &DelayedHit,
+        collide_friendly: bool,
+        seg_start: Vec3,
+        seg_end: Vec3,
+    ) -> Option<(Entity, Vec3)> {
+        broad_phase_volume_hit(
+            hit,
+            collide_friendly,
+            seg_start,
+            seg_end,
+            &self.spatial,
+            &self.alliances,
+            &self.target_q,
+        )
+    }
+}
+
 #[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub(super) fn tick_weapon_fx(
     time: Res<Time>,
@@ -106,6 +129,25 @@ pub(super) fn tick_weapon_fx(
     let mut scratch_sounds = crate::audio::SoundQueue::default();
     let sounds = sounds.as_deref_mut().unwrap_or(&mut scratch_sounds);
     let dt = time.delta_secs();
+    // Every hit path ends in the same nine-argument call; the closure
+    // reborrows the sinks per call, and `commands` rides along as an
+    // argument because it is also used directly between calls.
+    let mut fire_hit = |entity: Entity,
+                        who: HitWho,
+                        impact_pos: Vec3,
+                        commands: &mut Commands| {
+        trigger_delayed_hit(
+            entity,
+            who,
+            impact_pos,
+            &delayed_hits,
+            &weapon_registry,
+            &mut damage_queue,
+            &mut pending_explosions,
+            sounds,
+            commands,
+        );
+    };
     // Every ribbon and the build-sparkle billboards need the camera's
     // world position; resolve it once per frame.
     let cam_pos = draw.cam_pos();
@@ -288,56 +330,23 @@ pub(super) fn tick_weapon_fx(
             curr_lead_pos,
             &volume_ctx.target_q,
         ) {
-            trigger_delayed_hit(
-                entity,
-                HitWho::Intended,
-                impact_pos,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                sounds,
-                &mut commands,
-            );
+            fire_hit(entity, HitWho::Intended, impact_pos, &mut commands);
         } else if let Some(hit) = hit_meta
-            && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
+            && let Some((hit_entity, impact_pos)) = volume_ctx.broad_phase(
                 hit,
                 weapon_registry.by_id(hit.weapon).collide_friendly,
                 prev_lead_pos,
                 curr_lead_pos,
-                &volume_ctx.spatial,
-                &volume_ctx.alliances,
-                &volume_ctx.target_q,
             )
         {
-            trigger_delayed_hit(
-                entity,
-                HitWho::Unit(hit_entity),
-                impact_pos,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                sounds,
-                &mut commands,
-            );
+            fire_hit(entity, HitWho::Unit(hit_entity), impact_pos, &mut commands);
         } else if hit_meta.is_some()
             && let Some(hm) = volume_ctx.heightmap.as_deref()
             && let Some(impact_pos) = hm.ground_hit(prev_lead_pos, curr_lead_pos)
         {
             // `CProjectileHandler::CheckGroundCollisions`: the bolt
             // explodes where it enters the terrain.
-            trigger_delayed_hit(
-                entity,
-                HitWho::Ground,
-                impact_pos,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                sounds,
-                &mut commands,
-            );
+            fire_hit(entity, HitWho::Ground, impact_pos, &mut commands);
         }
         // A bolt that reaches the end of its `ttl` without touching
         // anything just fades (`CLaserProjectile::Update`): no
@@ -445,15 +454,10 @@ pub(super) fn tick_weapon_fx(
         let hit_meta = delayed_hits.get(entity).ok();
         let target_entity = hit_meta.and_then(|h| h.target);
         if total_dist < 0.1 && proj.flight == Flight::Direct {
-            trigger_delayed_hit(
+            fire_hit(
                 entity,
                 arrival_hit(target_entity, proj.target, &volume_ctx.target_q),
                 proj.target,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                sounds,
                 &mut commands,
             );
             despawn_projectile(entity, proj, &mut commands);
@@ -555,53 +559,25 @@ pub(super) fn tick_weapon_fx(
         if let Some(impact_pos) =
             target_volume_hit(target_entity, seg_start, seg_end, &volume_ctx.target_q)
         {
-            trigger_delayed_hit(
-                entity,
-                HitWho::Intended,
-                impact_pos,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                sounds,
-                &mut commands,
-            );
+            fire_hit(entity, HitWho::Intended, impact_pos, &mut commands);
             intercepted = true;
         } else if let Some(hit) = hit_meta
-            && let Some((hit_entity, impact_pos)) = broad_phase_volume_hit(
+            && let Some((hit_entity, impact_pos)) = volume_ctx.broad_phase(
                 hit,
                 weapon_registry.by_id(hit.weapon).collide_friendly,
                 seg_start,
                 seg_end,
-                &volume_ctx.spatial,
-                &volume_ctx.alliances,
-                &volume_ctx.target_q,
             )
         {
-            trigger_delayed_hit(
-                entity,
-                HitWho::Unit(hit_entity),
-                impact_pos,
-                &delayed_hits,
-                &weapon_registry,
-                &mut damage_queue,
-                &mut pending_explosions,
-                sounds,
-                &mut commands,
-            );
+            fire_hit(entity, HitWho::Unit(hit_entity), impact_pos, &mut commands);
             intercepted = true;
         }
         if intercepted || arrived {
             if !intercepted {
-                trigger_delayed_hit(
+                fire_hit(
                     entity,
                     arrival_hit(target_entity, impact_pos, &volume_ctx.target_q),
                     impact_pos,
-                    &delayed_hits,
-                    &weapon_registry,
-                    &mut damage_queue,
-                    &mut pending_explosions,
-                    sounds,
                     &mut commands,
                 );
             }

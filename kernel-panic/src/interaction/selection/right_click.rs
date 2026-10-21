@@ -291,25 +291,20 @@ fn handle_right_click(
             if let Some(target_unit) = clicked_enemy {
                 let target_pos = target_gtf_q
                     .get(target_unit)
-                    .map(|t| t.translation())
-                    .unwrap_or(drag_path.points[0]);
-                let mut attackers = Vec::new();
-                for (entity, _, unit, _) in &selected_q {
-                    if unit_registry.weapon(unit.0).is_empty() {
-                        continue;
-                    }
-                    // Upstream `OnlyTargetCategory1` gates explicit
-                    // attack orders too — a DOS physically cannot
-                    // attack a building, so issuing one is refused and
-                    // the unit holds position rather than chasing.
-                    let target_kind = target_type_q.get(target_unit).map(|ut| ut.0);
-                    if let Ok(target_kind) = target_kind
-                        && !unit_registry.can_attack(unit.0, target_kind)
-                    {
-                        continue;
-                    }
-                    attackers.push(entity);
-                }
+                    .map_or(drag_path.points[0], |t| t.translation());
+                // Upstream `OnlyTargetCategory1` gates explicit attack
+                // orders too — a DOS physically cannot attack a
+                // building, so issuing one is refused and the unit
+                // holds position rather than chasing.
+                let target_kind = target_type_q.get(target_unit).map(|ut| ut.0).ok();
+                let attackers: Vec<Entity> = selected_q
+                    .iter()
+                    .filter(|(_, _, unit, _)| {
+                        armed(unit.0)
+                            && !target_kind.is_some_and(|k| !unit_registry.can_attack(unit.0, k))
+                    })
+                    .map(|(e, ..)| e)
+                    .collect();
                 let any_armed = !attackers.is_empty();
                 // Shift queues the attack behind the current orders
                 // (the chase retargets live when it is promoted).

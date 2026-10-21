@@ -1159,16 +1159,21 @@ fn keyboard_menu_nav(
 
         if nav_key {
             focus.mode = InputMode::Keyboard;
-            // Movement keys: Shift+Tab or Up/Left go back, Tab/Down/Right go on.
-            if keys.just_pressed(KeyCode::Tab) && shift {
+            // Movement keys: Shift+Tab or Up/Left go back, Tab/Down/Right
+            // go on. Tab wins over the arrows when both land in one frame.
+            let back = keys.just_pressed(KeyCode::ArrowUp)
+                || keys.just_pressed(KeyCode::ArrowLeft);
+            let forward = keys.just_pressed(KeyCode::ArrowDown)
+                || keys.just_pressed(KeyCode::ArrowRight);
+            if keys.just_pressed(KeyCode::Tab) {
+                idx = if shift {
+                    (idx + list.len() - 1) % list.len()
+                } else {
+                    (idx + 1) % list.len()
+                };
+            } else if back {
                 idx = (idx + list.len() - 1) % list.len();
-            } else if keys.just_pressed(KeyCode::Tab) {
-                idx = (idx + 1) % list.len();
-            } else if keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft) {
-                idx = (idx + list.len() - 1) % list.len();
-            } else if keys.just_pressed(KeyCode::ArrowDown)
-                || keys.just_pressed(KeyCode::ArrowRight)
-            {
+            } else if forward {
                 idx = (idx + 1) % list.len();
             }
         }
@@ -1264,18 +1269,13 @@ fn mouse_menu_input(
     let phys = cursor * window.scale_factor();
 
     // Find the topmost button under the cursor using the UI node's canonical
-    // hit test. Prefer the deepest node (larger stack index).
-    let mut hit: Option<Entity> = None;
-    let mut hit_stack = 0u32;
-    for (e, _b, cnode, stack, gtf) in &buttons {
-        if cnode.contains_point(*gtf, phys) {
-            let idx = stack.0;
-            if idx >= hit_stack {
-                hit_stack = idx;
-                hit = Some(e);
-            }
-        }
-    }
+    // hit test. Prefer the deepest node (larger stack index; `max_by_key`
+    // keeps the last of equal keys, like the old `>=` scan).
+    let hit = buttons
+        .iter()
+        .filter(|(_, _, cnode, _, gtf)| cnode.contains_point(**gtf, phys))
+        .max_by_key(|(_, _, _, stack, _)| stack.0)
+        .map(|(e, ..)| e);
 
     // If the hovered button changed, repaint the visual state.
     if *hovered != hit {
@@ -1770,39 +1770,24 @@ fn settings_page(
     ];
 
     // Web: the canvas is sized by the page, so no window rows.
-    let rows: Vec<(&str, Color, Vec<Choice>)> = if cfg!(target_arch = "wasm32") {
-        vec![
-            ("Antialiasing", EASY_CYAN, msaa),
-            (
-                "Bloom",
-                MEDIUM_GREEN,
-                on_off(MenuAction::SetBloom, render.bloom),
-            ),
-            (
-                "VSync",
-                HARD_YELLOW,
-                on_off(MenuAction::SetVsync, render.vsync),
-            ),
-            ("Tips", TEAL, on_off(MenuAction::SetTips, render.tips)),
-        ]
-    } else {
-        vec![
-            ("Antialiasing", EASY_CYAN, msaa),
-            (
-                "Bloom",
-                MEDIUM_GREEN,
-                on_off(MenuAction::SetBloom, render.bloom),
-            ),
-            (
-                "VSync",
-                HARD_YELLOW,
-                on_off(MenuAction::SetVsync, render.vsync),
-            ),
-            ("Display", EXTREME_ORANGE, display),
-            ("Window", MAP_GREEN, sizes),
-            ("Tips", TEAL, on_off(MenuAction::SetTips, render.tips)),
-        ]
-    };
+    let mut rows = vec![
+        ("Antialiasing", EASY_CYAN, msaa),
+        (
+            "Bloom",
+            MEDIUM_GREEN,
+            on_off(MenuAction::SetBloom, render.bloom),
+        ),
+        (
+            "VSync",
+            HARD_YELLOW,
+            on_off(MenuAction::SetVsync, render.vsync),
+        ),
+    ];
+    if !cfg!(target_arch = "wasm32") {
+        rows.push(("Display", EXTREME_ORANGE, display));
+        rows.push(("Window", MAP_GREEN, sizes));
+    }
+    rows.push(("Tips", TEAL, on_off(MenuAction::SetTips, render.tips)));
     choice_rows(commands, root, window_width, page_size, rows);
     ButtonSpec::new("Audio", TEAL, page_size, (0.5, 0.26), Anchor::Cc, audio)
         .min_width(12.0)

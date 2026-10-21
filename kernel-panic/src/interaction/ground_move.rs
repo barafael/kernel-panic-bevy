@@ -232,14 +232,18 @@ impl PathQueue {
         {
             self.layers.insert(key, (0, terrain.clone()));
         }
-        let changes = match self.layers.get(&key) {
-            Some((rev, _)) if *rev == nav.revision => return Some((key, speed_map, mask)),
-            Some((rev, _)) => nav.changes_since_each(*rev),
-            None => None,
+        let Some((rev, layer)) = self.layers.get_mut(&key) else {
+            // No terrain layer to seed from: label from scratch.
+            self.layers
+                .insert(key, (nav.revision, NodeLayer::new(speed_map, mask)));
+            self.stats.labellings += 1;
+            return Some((key, speed_map, mask));
         };
-        match changes {
+        if *rev == nav.revision {
+            return Some((key, speed_map, mask));
+        }
+        match nav.changes_since_each(*rev) {
             Some(changes) => {
-                let (rev, layer) = self.layers.get_mut(&key).expect("checked above");
                 layer.update(
                     speed_map,
                     mask,
@@ -257,16 +261,8 @@ impl PathQueue {
                 // The change ring no longer reaches back: compare every
                 // square and rebuild only the blocks that differ (the
                 // same tree as tesselating anew, for far less work).
-                match self.layers.get_mut(&key) {
-                    Some((rev, layer)) => {
-                        layer.refresh(speed_map, mask);
-                        *rev = nav.revision;
-                    }
-                    None => {
-                        self.layers
-                            .insert(key, (nav.revision, NodeLayer::new(speed_map, mask)));
-                    }
-                }
+                layer.refresh(speed_map, mask);
+                *rev = nav.revision;
                 self.stats.labellings += 1;
             }
         }
@@ -1242,15 +1238,13 @@ pub fn update_pos(
         let test = pos + off;
         (sq(test) != new_sq && map.square_open(test)).then_some(off)
     };
-    let mut result = None;
-    for n in 1..=SQUARE_SIZE as i32 {
-        let n = n as f32;
-        result = try_move(new_pos, right * n, 0.0).or_else(|| try_move(new_pos, -right * n, 0.0));
-        if result.is_some() {
-            break;
-        }
-    }
-    let Some(moved) = result else {
+    let Some(moved) = (1..=SQUARE_SIZE as i32)
+        .flat_map(|n| {
+            let n = n as f32;
+            try_move(new_pos, right * n, 0.0).or_else(|| try_move(new_pos, -right * n, 0.0))
+        })
+        .next()
+    else {
         return Vec2::ZERO;
     };
     let open_sq = sq(pos + moved);

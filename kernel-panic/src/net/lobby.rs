@@ -817,7 +817,7 @@ impl Lobby {
     }
 
     pub fn is_host(&self) -> bool {
-        self.me().is_some() && self.host() == self.me()
+        self.me().is_some_and(|me| self.host() == Some(me))
     }
 
     /// The room as this peer sees it (`None` until a host spoke).
@@ -1372,9 +1372,9 @@ impl Lobby {
         let mut room = match self.room.take() {
             // Newly elected: take over the newest room anyone showed us.
             Some(r) if self.sent.is_some() => r,
-            r => [r, self.offered.take()]
+            r => r
                 .into_iter()
-                .flatten()
+                .chain(self.offered.take())
                 .max_by_key(|r| r.rev)
                 .unwrap_or_else(|| RoomState::new(me, &self.default_map)),
         };
@@ -1493,12 +1493,11 @@ impl Lobby {
             name
         };
         let mine = self.my_map(map);
+        let status = info.and_then(|i| i.status.as_ref());
         let theirs = if me {
             Some(mine)
         } else {
-            info.and_then(|i| i.status.as_ref())
-                .filter(|s| s.map == map)
-                .map(|s| s.have)
+            status.filter(|s| s.map == map).map(|s| s.have)
         };
         let check = if let Some(why) = info.and_then(|i| i.incompatible.clone()) {
             Check::Refused(why)
@@ -1514,10 +1513,7 @@ impl Lobby {
                 _ => Check::Pending,
             }
         };
-        let ready = me
-            || info
-                .and_then(|i| i.status.as_ref())
-                .is_some_and(|s| s.ready && s.map == map);
+        let ready = me || status.is_some_and(|s| s.ready && s.map == map);
         Member {
             peer,
             name,

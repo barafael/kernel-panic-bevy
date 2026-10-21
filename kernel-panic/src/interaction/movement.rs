@@ -309,21 +309,12 @@ impl NavGridSet {
         if oldest > since + 1 {
             return None;
         }
-        let mut area: Option<[i32; 4]> = None;
-        for &(rev, b) in self.changes.iter().rev() {
-            if rev <= since {
-                break;
-            }
-            area = Some(area.map_or(b, |a| {
-                [
-                    a[0].min(b[0]),
-                    a[1].min(b[1]),
-                    a[2].max(b[2]),
-                    a[3].max(b[3]),
-                ]
-            }));
-        }
-        area
+        self.changes
+            .iter()
+            .rev()
+            .take_while(|&&(rev, _)| rev > since)
+            .map(|&(_, b)| b)
+            .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
     }
 
     /// The square rectangles changed by each revision after `since`,
@@ -1151,24 +1142,28 @@ pub fn draw_selected_command_lines(
                 remaining[0],
                 remaining[remaining.len() - 1],
             );
-            if !cache.get(&entity).is_some_and(|c| c.key == key) {
-                points.clear();
-                points.extend(remaining.iter().map(|wp| sample_at_ground(wp.x, wp.z, hm)));
-                let mut dashes = cache.remove(&entity).map_or_else(Vec::new, |c| c.dashes);
-                dashes.clear();
-                walk_dashes(&points, hm, |a, b| dashes.push((a, b)));
-                cache.insert(
-                    entity,
+            // Take the cached entry out once; rebuild it when the path
+            // moved, reusing the old dash buffer.
+            let mut c = match cache.remove(&entity) {
+                Some(c) if c.key == key => c,
+                old => {
+                    points.clear();
+                    points.extend(remaining.iter().map(|wp| sample_at_ground(wp.x, wp.z, hm)));
+                    let mut dashes = match old {
+                        Some(old) => old.dashes,
+                        None => Vec::new(),
+                    };
+                    dashes.clear();
+                    walk_dashes(&points, hm, |a, b| dashes.push((a, b)));
                     CachedDashes {
                         key,
                         first: points[0],
                         end: points[points.len() - 1],
                         dashes,
                         seen: false,
-                    },
-                );
-            }
-            let c = cache.get_mut(&entity).expect("inserted above");
+                    }
+                }
+            };
             c.seen = true;
             // Lead-in from the unit to its current waypoint: the only
             // part that moves with the unit, so it is walked live.
@@ -1176,7 +1171,9 @@ pub fn draw_selected_command_lines(
             for &(a, b) in &c.dashes {
                 gizmos.line(a, b, active_color);
             }
-            c.end
+            let end = c.end;
+            cache.insert(entity, c);
+            end
         } else {
             let to = sample_at_ground(current.0.x, current.0.z, hm);
             draw_dashed_polyline(&mut gizmos, &[unit_pt, to], active_color, hm);

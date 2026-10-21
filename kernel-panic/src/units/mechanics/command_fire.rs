@@ -64,6 +64,38 @@ pub struct SigTermAssets {
 }
 
 impl SigTermAssets {
+    /// The shared body of `signal`/`bomb`: the stage's mesh (loaded
+    /// once, with a primitive fallback) and its owner-coloured
+    /// material (one per colour, cached).
+    #[allow(clippy::too_many_arguments)]
+    fn stage(
+        mesh: &mut Option<Handle<Mesh>>,
+        materials_map: &mut HashMap<TeamColor, Handle<StandardMaterial>>,
+        model: &str,
+        fallback: impl FnOnce(&mut Assets<Mesh>) -> Handle<Mesh>,
+        color: TeamColor,
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        images: &mut Assets<Image>,
+        model_cache: &mut S3OModelCache,
+    ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
+        let mesh = mesh
+            .get_or_insert_with(|| {
+                load_s3o_mesh(model, meshes, model_cache).unwrap_or_else(|| fallback(meshes))
+            })
+            .clone();
+        // Why: `unit_material` keys textures by owner colour, not by
+        // UnitKind — Signal is the right lookup for both stages of the
+        // strike.
+        let material = materials_map
+            .entry(color)
+            .or_insert_with(|| {
+                unit_material(UnitKind::Signal, color, materials, images, model_cache, model)
+            })
+            .clone();
+        (mesh, material)
+    }
+
     fn signal(
         &mut self,
         color: TeamColor,
@@ -72,28 +104,17 @@ impl SigTermAssets {
         images: &mut Assets<Image>,
         model_cache: &mut S3OModelCache,
     ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
-        let mesh = self
-            .signal_mesh
-            .get_or_insert_with(|| {
-                load_s3o_mesh(SIGNAL_MODEL, meshes, model_cache)
-                    .unwrap_or_else(|| meshes.add(Cuboid::new(18.0, 6.0, 24.0)))
-            })
-            .clone();
-        let material = self
-            .signal_material
-            .entry(color)
-            .or_insert_with(|| {
-                unit_material(
-                    UnitKind::Signal,
-                    color,
-                    materials,
-                    images,
-                    model_cache,
-                    SIGNAL_MODEL,
-                )
-            })
-            .clone();
-        (mesh, material)
+        Self::stage(
+            &mut self.signal_mesh,
+            &mut self.signal_material,
+            SIGNAL_MODEL,
+            |m| m.add(Cuboid::new(18.0, 6.0, 24.0)),
+            color,
+            meshes,
+            materials,
+            images,
+            model_cache,
+        )
     }
 
     fn bomb(
@@ -104,31 +125,17 @@ impl SigTermAssets {
         images: &mut Assets<Image>,
         model_cache: &mut S3OModelCache,
     ) -> (Handle<Mesh>, Handle<StandardMaterial>) {
-        let mesh = self
-            .bomb_mesh
-            .get_or_insert_with(|| {
-                load_s3o_mesh(SIGTERM_BOMB_MODEL, meshes, model_cache)
-                    .unwrap_or_else(|| meshes.add(Sphere::new(14.0)))
-            })
-            .clone();
-        // Why: `unit_material` keys textures by owner colour, not by
-        // UnitKind — Signal is the right lookup for both stages of the
-        // strike.
-        let material = self
-            .bomb_material
-            .entry(color)
-            .or_insert_with(|| {
-                unit_material(
-                    UnitKind::Signal,
-                    color,
-                    materials,
-                    images,
-                    model_cache,
-                    SIGTERM_BOMB_MODEL,
-                )
-            })
-            .clone();
-        (mesh, material)
+        Self::stage(
+            &mut self.bomb_mesh,
+            &mut self.bomb_material,
+            SIGTERM_BOMB_MODEL,
+            |m| m.add(Sphere::new(14.0)),
+            color,
+            meshes,
+            materials,
+            images,
+            model_cache,
+        )
     }
 }
 
@@ -147,30 +154,26 @@ pub struct SigTermVisuals<'w> {
 impl SigTermVisuals<'_> {
     /// The Signal of `owner`'s caster of `faction`.
     fn signal(&mut self, owner: u8, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
-        let Self {
-            meshes,
-            materials,
-            images,
-            model_cache,
-            assets,
-            team_colors,
-        } = self;
-        let color = TeamColors::lookup(team_colors.as_deref(), owner, faction);
-        assets.signal(color, meshes, materials, images, model_cache)
+        let color = TeamColors::lookup(self.team_colors.as_deref(), owner, faction);
+        self.assets.signal(
+            color,
+            &mut self.meshes,
+            &mut self.materials,
+            &mut self.images,
+            &mut self.model_cache,
+        )
     }
 
     /// The bomb of `owner`'s caster of `faction`.
     fn bomb(&mut self, owner: u8, faction: Faction) -> (Handle<Mesh>, Handle<StandardMaterial>) {
-        let Self {
-            meshes,
-            materials,
-            images,
-            model_cache,
-            assets,
-            team_colors,
-        } = self;
-        let color = TeamColors::lookup(team_colors.as_deref(), owner, faction);
-        assets.bomb(color, meshes, materials, images, model_cache)
+        let color = TeamColors::lookup(self.team_colors.as_deref(), owner, faction);
+        self.assets.bomb(
+            color,
+            &mut self.meshes,
+            &mut self.materials,
+            &mut self.images,
+            &mut self.model_cache,
+        )
     }
 }
 

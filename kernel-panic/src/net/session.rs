@@ -880,8 +880,8 @@ impl Session {
     /// this peer leave), nothing runs any more. Idempotent.
     pub fn close(&mut self) {
         self.transport = None;
-        if self.networked && self.ended.is_none() {
-            self.ended = Some(Ended::Left);
+        if self.networked {
+            self.end(Ended::Left);
         }
     }
 
@@ -895,10 +895,23 @@ impl Session {
         let to = self.others();
         self.send_to(&to, Channel::Reliable, Msg::Bye);
         let transport = self.transport.take()?;
-        if self.ended.is_none() {
-            self.ended = Some(Ended::Left);
-        }
+        self.end(Ended::Left);
         Some((transport, self.connected_to.iter().copied().collect()))
+    }
+
+    /// The match ended for this peer: the first reason wins, and is
+    /// announced (`Left` is this peer's own choice; the UI knows).
+    fn end(&mut self, why: Ended) {
+        if self.ended.is_some() {
+            return;
+        }
+        self.ended = Some(why);
+        self.events.push(match why {
+            Ended::HostLeft => SessionEvent::HostLeft,
+            Ended::HostLost => SessionEvent::HostLost,
+            Ended::Dropped => SessionEvent::Dropped,
+            Ended::Left => return,
+        });
     }
 
     /// Say `text` to everyone in the match (the host relays it; see
@@ -1372,28 +1385,29 @@ impl Session {
         }
     }
 
-    /// Host: `peers` disagree with us at `frame`. Everyone stops at our
-    /// current tick (guests are behind the host, never ahead).
-    fn announce_desync(&mut self, frame: u32, stop_at: u32, peers: Vec<PeerId>) {
+    /// Record a desync and announce it: `false` if one was known
+    /// already (the first one wins; the halt point stays the first).
+    fn note_desync(&mut self, frame: u32, stop_at: u32, peers: Vec<PeerId>) -> bool {
         if self.desync.is_some() {
-            return;
+            return false;
         }
         let d = Desync {
             frame,
             stop_at,
-            peers: peers.clone(),
+            peers,
             dump: None,
         };
         self.events.push(SessionEvent::Desync(d.clone()));
         self.desync = Some(d);
-        self.broadcast(
-            Msg::Desync {
-                frame,
-                stop_at,
-                peers,
-            },
-            None,
-        );
+        true
+    }
+
+    /// Host: `peers` disagree with us at `frame`. Everyone stops at our
+    /// current tick (guests are behind the host, never ahead).
+    fn announce_desync(&mut self, frame: u32, stop_at: u32, peers: Vec<PeerId>) {
+        if self.note_desync(frame, stop_at, peers.clone()) {
+            self.broadcast(Msg::Desync { frame, stop_at, peers }, None);
+        }
     }
 
     fn send(&mut self, to: PeerId, channel: Channel, msg: Msg) {
@@ -1624,8 +1638,7 @@ impl Session {
             Role::Guest(g) => {
                 if self.ended.is_none() && silent(g.last_heard, None) {
                     bevy::log::warn!("no word from the host {}: giving up", self.host);
-                    self.ended = Some(Ended::HostLost);
-                    self.events.push(SessionEvent::HostLost);
+                    self.end(Ended::HostLost);
                 }
             }
         }
@@ -1676,9 +1689,8 @@ impl Session {
                 self.broadcast(Msg::Left { peer }, None);
             }
             Role::Guest(_) => {
-                if peer == self.host && self.ended.is_none() {
-                    self.ended = Some(Ended::HostLeft);
-                    self.events.push(SessionEvent::HostLeft);
+                if peer == self.host {
+                    self.end(Ended::HostLeft);
                 }
             }
         }
@@ -1798,24 +1810,12 @@ impl Session {
                 stop_at,
                 peers,
             } => {
-                if self.desync.is_none() {
-                    let d = Desync {
-                        frame,
-                        stop_at,
-                        peers,
-                        dump: None,
-                    };
-                    self.events.push(SessionEvent::Desync(d.clone()));
-                    self.desync = Some(d);
-                }
+                self.note_desync(frame, stop_at, peers);
             }
             Msg::Left { peer } if peer == me => {
                 // Dropped by the host (it timed us out): the match goes
                 // on without us.
-                if self.ended.is_none() {
-                    self.ended = Some(Ended::Dropped);
-                    self.events.push(SessionEvent::Dropped);
-                }
+                self.end(Ended::Dropped);
             }
             Msg::Left { peer } => {
                 if g.gone.insert(peer) {
@@ -1846,10 +1846,7 @@ impl Session {
             }
             Msg::Bye => {
                 // The host went back to its room: no clock any more.
-                if self.ended.is_none() {
-                    self.ended = Some(Ended::HostLeft);
-                    self.events.push(SessionEvent::HostLeft);
-                }
+                self.end(Ended::HostLeft);
             }
             Msg::Chat { from, text } => self.events.push(SessionEvent::Chat { from, text }),
             Msg::Away { peer, away } => self.mark_away(peer, away),
@@ -1982,7 +1979,7 @@ impl Session {
                     let pings = wire::encode(match_id, Msg::Pings { ms });
                     let loads = wire::encode(match_id, Msg::Loads { permille, behind });
                     for (&peer, _) in h.links.iter().filter(|(_, l)| !l.gone) {
-                        for bytes in [&pings, &loads].into_iter().flatten() {
+                        for bytes in pings.iter().chain(&loads) {
                             out.push((peer, Channel::Unreliable, bytes.clone()));
                         }
                     }

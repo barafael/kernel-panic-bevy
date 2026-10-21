@@ -756,6 +756,29 @@ impl AttackCooldown {
 #[derive(Component, Copy, Clone, Debug)]
 pub struct WeaponBinding(pub WeaponId);
 
+/// The attacker's primary weapon: the cached binding when present,
+/// else the registry name lookup for legacy paths (e.g. units that
+/// haven't been migrated to `WeaponBinding`) — behaviour stays
+/// identical for any unit class that bypasses `spawn_unit`. The
+/// `is_empty` short-circuit just skips hashing a name that is never
+/// registered.
+fn resolve_weapon<'a>(
+    binding: Option<&WeaponBinding>,
+    unit_registry: &UnitRegistry,
+    weapon_registry: &'a WeaponRegistry,
+    unit_type: UnitKind,
+) -> (Option<WeaponId>, Option<&'a spring_tdf::WeaponDef>) {
+    if let Some(binding) = binding {
+        return (Some(binding.0), Some(weapon_registry.by_id(binding.0)));
+    }
+    let name = unit_registry.weapon(unit_type);
+    if name.is_empty() {
+        (None, None)
+    } else {
+        (weapon_registry.intern(name), weapon_registry.get(name))
+    }
+}
+
 /// Seconds since this unit last took damage (upstream `restTime`).
 /// Once it exceeds the unit's FBI `IdleTime`, the `auto_heal` system
 /// regenerates HP at `IdleAutoHeal` per second. Only damage resets it
@@ -893,25 +916,12 @@ pub fn combat_system(
         // target when the state flips, but only fire while Open.
         let fire_blocked_by_deploy = deployable.is_some_and(|d| d.state != DeployState::Open);
 
-        // Resolve weapon stats via the cached binding when present.
-        // Falling back to the registry name lookup for legacy paths
-        // (e.g. units that haven't been migrated to `WeaponBinding`)
-        // keeps behaviour identical for any unit class that bypasses
-        // `spawn_unit` — known callers cover every armed unit today
-        // but the safety net is cheap.
-        // The display name is no longer needed here — every consumer
-        // (damage queue, fx events, burst component) carries the id.
-        let (weapon_id, weapon_def) = match weapon_binding {
-            Some(binding) => (Some(binding.0), Some(weapon_registry.by_id(binding.0))),
-            None => {
-                let name = unit_registry.weapon(unit_type.0);
-                if name.is_empty() {
-                    (None, None)
-                } else {
-                    (weapon_registry.intern(name), weapon_registry.get(name))
-                }
-            }
-        };
+        // Resolve weapon stats via the cached binding when present
+        // (see `resolve_weapon`). The display name is no longer needed
+        // here — every consumer (damage queue, fx events, burst
+        // component) carries the id.
+        let (weapon_id, weapon_def) =
+            resolve_weapon(weapon_binding, &unit_registry, &weapon_registry, unit_type.0);
 
         // mineblaster.bos: `AimWeapon1` returns 0 — the Debug never aims
         // or auto-fires (its `OnlyTargetCategory1=VOID` matches no unit
@@ -1546,14 +1556,8 @@ pub fn attack_ground_system(
         {
             continue;
         }
-        let (weapon_id, weapon_def) = match weapon_binding {
-            Some(binding) => (Some(binding.0), Some(weapon_registry.by_id(binding.0))),
-            None => {
-                let name = unit_registry.weapon(unit_type.0);
-                let def = weapon_registry.get(name);
-                (weapon_registry.intern(name), def)
-            }
-        };
+        let (weapon_id, weapon_def) =
+            resolve_weapon(weapon_binding, &unit_registry, &weapon_registry, unit_type.0);
         let Some(weapon_def) = weapon_def else {
             continue;
         };
@@ -1723,8 +1727,7 @@ pub fn attack_target_system(
         ),
         Without<Dying>,
     >,
-    target_q: Query<&GlobalTransform, Without<Dying>>,
-    target_stats: Query<&UnitStats>,
+    target_q: Query<(&GlobalTransform, Option<&UnitStats>), Without<Dying>>,
     move_path_q: Query<&crate::interaction::movement::MovePath>,
     gravity: Option<Res<crate::sim::MapGravity>>,
     heightmap: Option<Res<Heightmap>>,
@@ -1759,18 +1762,9 @@ pub fn attack_target_system(
         }
 
         // Resolve weapon range exactly like `combat_system`.
-        let weapon_def = match weapon_binding {
-            Some(binding) => Some(weapon_registry.by_id(binding.0)),
-            None => {
-                let name = unit_registry.weapon(unit_type.0);
-                if name.is_empty() {
-                    None
-                } else {
-                    weapon_registry.get(name)
-                }
-            }
-        };
-        let Ok(target_gtf) = target_q.get(order.target) else {
+        let (_, weapon_def) =
+            resolve_weapon(weapon_binding, &unit_registry, &weapon_registry, unit_type.0);
+        let Ok((target_gtf, target_stats)) = target_q.get(order.target) else {
             // Target died / despawned: stand down and clear movement.
             let mut ec = commands.entity(entity);
             ec.remove::<AttackTargetOrder>();
@@ -1786,7 +1780,7 @@ pub fn attack_target_system(
         // The same range test `combat_system` fires on — weapon aim point
         // to the target's aimPos — so the chase stops exactly where the
         // shooting can start.
-        let target_mid = target_stats.get(order.target).map_or(0.0, |s| s.mid_y);
+        let target_mid = target_stats.map_or(0.0, |s| s.mid_y);
         let aim_from = stats.mid_pos(gtf);
         let aim_at = crate::units::components::mid_pos(target_gtf, target_mid);
         let in_range = weapon_def.is_some_and(|w| {
