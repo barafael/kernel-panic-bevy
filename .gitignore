@@ -15,3 +15,14 @@ trace-*.json
 
 # Recorded matches (`net::replay_log`)
 /replays
+
+# Agent worktrees, each with its own `target/` — 54 GB of build output
+# sitting inside the working tree, never repo content.
+/.claude/worktrees/
+
+# Ad-hoc render comparisons dropped at the repo root (the `KP_RECORD`
+# fly-overs live in /recordings above)
+/*.mp4
+
+# Scratch notes
+/pending
