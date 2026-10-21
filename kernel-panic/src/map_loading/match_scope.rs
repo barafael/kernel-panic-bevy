@@ -165,9 +165,9 @@ pub(crate) fn despawn_match_entities(world: &mut World) {
     // at the match swap. Recursive like the old loop, and it tolerates
     // roots already gone with a despawned parent the same way the old
     // existence check did.
-    world.despawn_all_where::<Entity, Or<(With<Transform>, With<Node>, With<MatchEntity>)>>(
-        |e| !keep.contains(&e),
-    );
+    world.despawn_all_where::<Entity, Or<(With<Transform>, With<Node>, With<MatchEntity>)>>(|e| {
+        !keep.contains(&e)
+    });
 
     let strays = stray_game_entities(world, &keep);
     if !strays.is_empty() {

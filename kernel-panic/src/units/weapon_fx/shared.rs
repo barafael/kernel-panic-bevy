@@ -132,19 +132,74 @@ pub struct BuildArcEvent {
 /// (without the `custom:` prefix) so the CEG particle system can
 /// replay the authored emitters at the blast point. Empty = no
 /// scripted CEG; the spawner falls back to a generic sphere + ground
-/// ring in that case. `Arc<str>` because it rides one event per shot
-/// and per death: the registry interns one per weapon, the events
-/// clone the refcount (see [`WeaponRegistry::ceg_name`]).
+/// ring in that case. It rides one event per shot and per death, so it
+/// is a [`CegName`] — the registry interns one per weapon and the
+/// events clone the refcount (see [`WeaponRegistry::ceg_name`]).
 ///
 /// `up` is the exploding unit's up vector (tilted to the slope for a
 /// ground unit, straight up for a building or a blast with no unit):
 /// the CEG bursts square to it.
+/// The `explosiongenerator` name an [`ExplosionEvent`] replays, carried
+/// without allocating. Either a `&'static str` the binary hard-codes (a
+/// scripted ability's CEG, the SIGTERM bomb, a unit script's
+/// `SFX_CEG_BASE` emit) or the registry's interned `Arc<str>` (every
+/// shot and every death). Both arms clone in a single word, so no event
+/// path touches the allocator.
+///
+/// Derefs to `str`: the [`super::ceg::CegRegistry`] lookup is the only
+/// thing that reads it.
+#[derive(Clone, Debug)]
+pub enum CegName {
+    /// A name the code knows at compile time.
+    Static(&'static str),
+    /// A registry-interned name, or a parsed TDF string (a CEG
+    /// spawner's own `explosion_generator`).
+    Shared(Arc<str>),
+}
+
+impl Default for CegName {
+    /// No scripted CEG — the spawner falls back to its generic burst.
+    fn default() -> Self {
+        Self::Static("")
+    }
+}
+
+impl CegName {
+    /// The name to hand the CEG registry.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Static(name) => name,
+            Self::Shared(name) => name,
+        }
+    }
+}
+
+impl From<&'static str> for CegName {
+    fn from(name: &'static str) -> Self {
+        Self::Static(name)
+    }
+}
+
+impl From<Arc<str>> for CegName {
+    fn from(name: Arc<str>) -> Self {
+        Self::Shared(name)
+    }
+}
+
+impl std::ops::Deref for CegName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
 pub struct ExplosionEvent {
     pub pos: Vec3,
     pub up: Vec3,
     pub rgb: [f32; 3],
     pub radius: f32,
-    pub ceg_name: Arc<str>,
+    pub ceg_name: CegName,
 }
 
 /// Event buffer drained by [`spawn::spawn_pending_explosions`]. Separate

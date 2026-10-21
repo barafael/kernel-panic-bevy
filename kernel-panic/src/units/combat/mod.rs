@@ -772,11 +772,15 @@ fn resolve_weapon<'a>(
         return (Some(binding.0), Some(weapon_registry.by_id(binding.0)));
     }
     let name = unit_registry.weapon(unit_type);
-    if name.is_empty() {
-        (None, None)
+    // One `intern`, not `intern` + `get`: `get` interns internally, so
+    // pairing them lowercases the name twice per call. `by_id` is the
+    // same lookup `get` would have done after that intern.
+    let id = if name.is_empty() {
+        None
     } else {
-        (weapon_registry.intern(name), weapon_registry.get(name))
-    }
+        weapon_registry.intern(name)
+    };
+    (id, id.map(|id| weapon_registry.by_id(id)))
 }
 
 /// Seconds since this unit last took damage (upstream `restTime`).
@@ -920,8 +924,12 @@ pub fn combat_system(
         // (see `resolve_weapon`). The display name is no longer needed
         // here — every consumer (damage queue, fx events, burst
         // component) carries the id.
-        let (weapon_id, weapon_def) =
-            resolve_weapon(weapon_binding, &unit_registry, &weapon_registry, unit_type.0);
+        let (weapon_id, weapon_def) = resolve_weapon(
+            weapon_binding,
+            &unit_registry,
+            &weapon_registry,
+            unit_type.0,
+        );
 
         // mineblaster.bos: `AimWeapon1` returns 0 — the Debug never aims
         // or auto-fires (its `OnlyTargetCategory1=VOID` matches no unit
@@ -944,7 +952,7 @@ pub fn combat_system(
                     up: Vec3::Y,
                     rgb: def.rgb_color,
                     radius: def.area_of_effect,
-                    ceg_name: weapon_registry.ceg_name(id),
+                    ceg_name: weapon_registry.ceg_name(id).into(),
                 });
                 commands.entity(entity).insert((DebugBlasted, JustFired));
             }
@@ -1556,8 +1564,12 @@ pub fn attack_ground_system(
         {
             continue;
         }
-        let (weapon_id, weapon_def) =
-            resolve_weapon(weapon_binding, &unit_registry, &weapon_registry, unit_type.0);
+        let (weapon_id, weapon_def) = resolve_weapon(
+            weapon_binding,
+            &unit_registry,
+            &weapon_registry,
+            unit_type.0,
+        );
         let Some(weapon_def) = weapon_def else {
             continue;
         };
@@ -1762,8 +1774,12 @@ pub fn attack_target_system(
         }
 
         // Resolve weapon range exactly like `combat_system`.
-        let (_, weapon_def) =
-            resolve_weapon(weapon_binding, &unit_registry, &weapon_registry, unit_type.0);
+        let (_, weapon_def) = resolve_weapon(
+            weapon_binding,
+            &unit_registry,
+            &weapon_registry,
+            unit_type.0,
+        );
         let Ok((target_gtf, target_stats)) = target_q.get(order.target) else {
             // Target died / despawned: stand down and clear movement.
             let mut ec = commands.entity(entity);

@@ -2,6 +2,8 @@
 //! event to the appropriate effect spawner (beam, burst, projectile, melee,
 //! plus the bonus nanoframe sparkle for build lasers).
 
+use std::borrow::Cow;
+
 use crate::sim::{DetFloat, sq};
 use bevy::prelude::*;
 
@@ -529,9 +531,9 @@ fn spawn_impact_burst(
 /// the alias itself. We consult [`CegRegistry::resolve_texture`] first
 /// (which mirrors the same alias table) and fall back to a literal
 /// `{name}.tga` lookup for weapon textures that don't happen to be
-/// aliased. Only that fallback builds a filename; the aliased path
-/// (every KP core weapon) runs allocation-free, which matters because
-/// this is called for every shot.
+/// aliased. Only that fallback builds a filename, and [`tga_filename`]
+/// spells it into a stack buffer — both paths run allocation-free, which
+/// matters because this is called for every shot.
 fn beam_texture(
     tex1: &str,
     model_cache: &mut S3OModelCache,
@@ -542,10 +544,31 @@ fn beam_texture(
     }
     let (handle, w, h) = match CegRegistry::resolve_texture(tex1) {
         Some(filename) => load_beam_texture(filename, model_cache, images)?,
-        None => load_beam_texture(&format!("{tex1}.tga"), model_cache, images)?,
+        None => {
+            let mut buf = [0u8; 96];
+            load_beam_texture(&tga_filename(tex1, &mut buf), model_cache, images)?
+        }
     };
     let aspect = if h > 0 { w as f32 / h as f32 } else { 1.0 };
     Some((handle, aspect))
+}
+
+/// `{name}.tga` written into `buf`, falling back to a `String` only for a
+/// name too long for it. The un-aliased beam path needs a filename per
+/// shot, so the common case stays on the stack.
+fn tga_filename<'a>(name: &str, buf: &'a mut [u8]) -> Cow<'a, str> {
+    const SUFFIX: &[u8] = b".tga";
+    let end = name.len() + SUFFIX.len();
+    if end <= buf.len() {
+        buf[..name.len()].copy_from_slice(name.as_bytes());
+        buf[name.len()..end].copy_from_slice(SUFFIX);
+        // `name` is valid UTF-8 and the suffix is ASCII, so the splice
+        // at `name.len()` cannot split a code point.
+        if let Ok(spelled) = std::str::from_utf8(&buf[..end]) {
+            return Cow::Borrowed(spelled);
+        }
+    }
+    Cow::Owned(format!("{name}.tga"))
 }
 
 /// The beam atlas a weapon draws with: its authored `texture1`/`texture2`,
@@ -676,7 +699,7 @@ fn spawn_textured_beam(
                         model_cache: &mut S3OModelCache,
                         cache: &mut BeamMaterialCache|
      -> Option<Handle<StandardMaterial>> {
-        let (handle, _) = beam_texture(&tex2, model_cache, images)?;
+        let (handle, _) = beam_texture(tex2, model_cache, images)?;
         Some(cache.get_or_create_tiled(color, true, intensity, Some(handle), 0, materials))
     };
     let flare_material = |color: bevy::color::LinearRgba,
@@ -1259,25 +1282,35 @@ mod tests {
             weapon_type: "BeamLaser".into(),
             ..Default::default()
         };
-        assert_eq!(
-            beam_texture_names(&beam),
-            ("laserfalloff", "laserend")
-        );
+        assert_eq!(beam_texture_names(&beam), ("laserfalloff", "laserend"));
         let authored = spring_tdf::WeaponDef {
             texture1: "dosray".into(),
             texture2: "none".into(),
             ..beam
         };
-        assert_eq!(
-            beam_texture_names(&authored),
-            ("dosray", "")
-        );
+        assert_eq!(beam_texture_names(&authored), ("dosray", ""));
         let missile = spring_tdf::WeaponDef {
             weapon_type: "MissileLauncher".into(),
             ..Default::default()
         };
         assert_eq!(beam_texture_names(&missile), ("", ""));
     }
+
+    /// The un-aliased beam path spells `{name}.tga` into the caller's
+    /// buffer; only a name too long for it falls back to a `String`, and
+    /// both have to agree on the spelling.
+    #[test]
+    fn tga_filename_spells_the_extension_in_place() {
+        let mut buf = [0u8; 16];
+        assert_eq!(tga_filename("dosray", &mut buf), "dosray.tga");
+        // Exactly the buffer's size: still borrowed.
+        assert_eq!(tga_filename("abcdefghijkl", &mut buf), "abcdefghijkl.tga");
+        // One over: the `String` fallback, same result.
+        assert_eq!(tga_filename("abcdefghijklm", &mut buf), "abcdefghijklm.tga");
+        // Multi-byte code points survive the byte-level splice.
+        assert_eq!(tga_filename("stråle", &mut buf), "stråle.tga");
+    }
+
     use bevy::MinimalPlugins;
     use bevy::asset::AssetPlugin;
     use bevy::ecs::system::RunSystemOnce;

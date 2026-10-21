@@ -90,7 +90,14 @@ impl SigTermAssets {
         let material = materials_map
             .entry(color)
             .or_insert_with(|| {
-                unit_material(UnitKind::Signal, color, materials, images, model_cache, model)
+                unit_material(
+                    UnitKind::Signal,
+                    color,
+                    materials,
+                    images,
+                    model_cache,
+                    model,
+                )
             })
             .clone();
         (mesh, material)

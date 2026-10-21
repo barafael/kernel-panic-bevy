@@ -944,7 +944,9 @@ fn spawn_delayed(
     if props.explosion_generator.is_empty() {
         return;
     }
-    // One allocation per spawner effect; the `count` timers share it.
+    // Parsed out of the TDF, so unlike the scripted [`super::shared::CegName`]s
+    // there is no `&'static` form to borrow: one allocation per spawner
+    // effect, which the `count` timers then share by refcount.
     let target_ceg: std::sync::Arc<str> = props.explosion_generator.as_str().into();
     // `system_nx` fans out 240 timers per cast — one command, not 240.
     let mut timers = Vec::with_capacity(count as usize);

@@ -187,18 +187,20 @@ impl WeaponRegistry {
 
     fn insert(&mut self, name: &str, def: WeaponDef) -> WeaponId {
         let key = name.to_ascii_lowercase();
+        // Intern the CEG name *before* `def` moves into `defs`, so both
+        // arms below write the pair from one value and cannot disagree
+        // about where the name came from.
+        let ceg: Arc<str> = def.explosion_generator.as_str().into();
         if let Some(&existing) = self.index.get(&key) {
             // Later TDF entries with the same name win — matches the
             // previous behaviour of `extend()` overwriting on key clash.
             self.defs[existing.0 as usize] = def;
-            self.ceg_names[existing.0 as usize] =
-                self.defs[existing.0 as usize].explosion_generator.as_str().into();
+            self.ceg_names[existing.0 as usize] = ceg;
             return existing;
         }
         let id = WeaponId(self.defs.len() as u16);
-        self.ceg_names
-            .push(def.explosion_generator.as_str().into());
         self.defs.push(def);
+        self.ceg_names.push(ceg);
         self.names.push(name.to_string());
         self.infection_secs.push(weapon_infection_duration(name));
         match key.as_str() {
@@ -212,7 +214,19 @@ impl WeaponRegistry {
             _ => {}
         }
         self.index.insert(key, id);
+        self.assert_parallel();
         id
+    }
+
+    /// `defs` is the spine; `names`, `infection_secs` and `ceg_names` are
+    /// index-parallel to it. `ceg_name` / `infection_duration` index
+    /// those directly, so a future field that pushes to one vector and
+    /// not the others is a panic (or a wrong CEG) in the damage path
+    /// rather than a compile error — catch it at construction instead.
+    fn assert_parallel(&self) {
+        debug_assert_eq!(self.names.len(), self.defs.len());
+        debug_assert_eq!(self.infection_secs.len(), self.defs.len());
+        debug_assert_eq!(self.ceg_names.len(), self.defs.len());
     }
 
     /// Ids of the weapons the sim addresses by name (see [`KnownWeapons`]).

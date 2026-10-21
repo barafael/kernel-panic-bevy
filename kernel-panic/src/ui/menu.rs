@@ -1161,10 +1161,9 @@ fn keyboard_menu_nav(
             focus.mode = InputMode::Keyboard;
             // Movement keys: Shift+Tab or Up/Left go back, Tab/Down/Right
             // go on. Tab wins over the arrows when both land in one frame.
-            let back = keys.just_pressed(KeyCode::ArrowUp)
-                || keys.just_pressed(KeyCode::ArrowLeft);
-            let forward = keys.just_pressed(KeyCode::ArrowDown)
-                || keys.just_pressed(KeyCode::ArrowRight);
+            let back = keys.just_pressed(KeyCode::ArrowUp) || keys.just_pressed(KeyCode::ArrowLeft);
+            let forward =
+                keys.just_pressed(KeyCode::ArrowDown) || keys.just_pressed(KeyCode::ArrowRight);
             if keys.just_pressed(KeyCode::Tab) {
                 idx = if shift {
                     (idx + list.len() - 1) % list.len()

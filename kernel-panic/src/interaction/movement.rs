@@ -314,7 +314,14 @@ impl NavGridSet {
             .rev()
             .take_while(|&&(rev, _)| rev > since)
             .map(|&(_, b)| b)
-            .reduce(|a, b| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])])
+            .reduce(|a, b| {
+                [
+                    a[0].min(b[0]),
+                    a[1].min(b[1]),
+                    a[2].max(b[2]),
+                    a[3].max(b[3]),
+                ]
+            })
     }
 
     /// The square rectangles changed by each revision after `since`,

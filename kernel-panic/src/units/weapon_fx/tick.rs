@@ -132,10 +132,7 @@ pub(super) fn tick_weapon_fx(
     // Every hit path ends in the same nine-argument call; the closure
     // reborrows the sinks per call, and `commands` rides along as an
     // argument because it is also used directly between calls.
-    let mut fire_hit = |entity: Entity,
-                        who: HitWho,
-                        impact_pos: Vec3,
-                        commands: &mut Commands| {
+    let mut fire_hit = |entity: Entity, who: HitWho, impact_pos: Vec3, commands: &mut Commands| {
         trigger_delayed_hit(
             entity,
             who,
@@ -863,7 +860,7 @@ fn trigger_delayed_hit(
     let (rgb, radius, ceg_name) = (
         weapon_def.rgb_color,
         weapon_def.area_of_effect,
-        weapon_registry.ceg_name(hit.weapon),
+        weapon_registry.ceg_name(hit.weapon).into(),
     );
     pending_explosions.events.push(ExplosionEvent {
         pos: impact_pos,

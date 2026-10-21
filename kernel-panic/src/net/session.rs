@@ -1406,7 +1406,14 @@ impl Session {
     /// current tick (guests are behind the host, never ahead).
     fn announce_desync(&mut self, frame: u32, stop_at: u32, peers: Vec<PeerId>) {
         if self.note_desync(frame, stop_at, peers.clone()) {
-            self.broadcast(Msg::Desync { frame, stop_at, peers }, None);
+            self.broadcast(
+                Msg::Desync {
+                    frame,
+                    stop_at,
+                    peers,
+                },
+                None,
+            );
         }
     }
 

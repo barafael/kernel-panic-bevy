@@ -493,10 +493,7 @@ fn finish_map_load(world: &mut World, prepared: PreparedMap) {
 /// map argument pre-seeds the `GameSetup` and auto-enters the game — the
 /// "launch straight into a map" path for headless testing
 /// ([`cli_setup`]).
-fn pick_map(
-    mut commands: Commands,
-    mut app_state: ResMut<NextState<crate::game_setup::AppState>>,
-) {
+fn pick_map(mut commands: Commands, mut app_state: ResMut<NextState<crate::game_setup::AppState>>) {
     #[cfg(target_arch = "wasm32")]
     let map_path = |name: &str| PathBuf::from(format!("maps/{name}.kpmap"));
     #[cfg(not(target_arch = "wasm32"))]
