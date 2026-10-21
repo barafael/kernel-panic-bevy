@@ -223,6 +223,7 @@ mod tests {
     use super::*;
     use crate::units::content::definitions::ALL_UNIT_KINDS;
     use crate::units::content::defs::defs;
+    use crate::units::content::weapons::WeaponKind;
 
     /// The committed bundle decodes and has, for every unit kind, its
     /// model and that model's `texture1`; every weapon model and every
@@ -294,9 +295,11 @@ mod tests {
         for kind in ALL_UNIT_KINDS {
             let def = &defs.units.units[kind.unitname()];
             for weapon in [&def.weapon1, &def.weapon2, &def.explode_as] {
+                // A build laser is a constructor's tool rather than a
+                // weapon, so it is exempt here exactly as it is in
+                // `UnitRegistry::weapon`.
                 if weapon.is_empty()
-                    || weapon.eq_ignore_ascii_case("BuildLaser")
-                    || weapon.eq_ignore_ascii_case("BuildLaserNoEffect")
+                    || WeaponKind::find(weapon).is_some_and(|kind| kind.is_build_laser())
                 {
                     continue;
                 }

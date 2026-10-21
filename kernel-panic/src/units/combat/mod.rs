@@ -774,7 +774,9 @@ fn resolve_weapon<'a>(
     if let Some(binding) = binding {
         return (Some(binding.0), Some(weapon_registry.by_kind(binding.0)));
     }
-    let kind = weapon_registry.find(unit_registry.weapon(unit_type));
+    let kind = unit_registry
+        .weapon(unit_type)
+        .filter(|&kind| weapon_registry.is_present(kind));
     (kind, kind.map(|kind| weapon_registry.by_kind(kind)))
 }
 

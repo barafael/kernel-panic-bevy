@@ -247,6 +247,17 @@ impl WeaponKind {
         })
     }
 
+    /// The two build lasers. A constructor's `Weapon1` is how it builds,
+    /// not a weapon it fights with, so a unit whose only primary is one
+    /// of these is unarmed as far as targeting and firing go — what
+    /// upstream's `IsAttackCapable` asks. `BuildLaserNoEffect` is the
+    /// same weapon with the impact particles suppressed, which is why
+    /// both count here and why `weapon_fx/spawn.rs` tests the bare
+    /// variant alone when it decides whether to spark.
+    pub fn is_build_laser(self) -> bool {
+        matches!(self, Self::BuildLaser | Self::BuildLaserNoEffect)
+    }
+
     /// Per-weapon infection window in seconds, for the weapons that
     /// infect. Mirrors upstream `LuaRules/Gadgets/infection.lua`, which
     /// expresses the window in sim frames at 30 fps.
@@ -495,22 +506,26 @@ impl WeaponRegistry {
         unit_registry: &super::unit_registry::UnitRegistry,
     ) {
         for &kind in ALL_UNIT_KINDS {
-            let name = unit_registry.weapon(kind);
-            if name.is_empty() {
+            let Some(weapon) = unit_registry.weapon(kind) else {
                 continue;
-            }
-            match self.find(name) {
+            };
+            match self.get(weapon) {
                 None => {
                     warn!(
                         "Unit '{:?}' references weapon '{}' which is not in the TDF registry",
-                        kind, name,
+                        kind,
+                        weapon.name(),
                     );
                 }
-                Some(weapon) => {
-                    let def = self.by_kind(weapon);
+                Some(def) => {
                     info!(
                         "  {:?} → {} (reload={}s, burst={}, burstrate={}s, range={})",
-                        kind, name, def.reload_time, def.burst, def.burst_rate, def.range,
+                        kind,
+                        weapon.name(),
+                        def.reload_time,
+                        def.burst,
+                        def.burst_rate,
+                        def.range,
                     );
                 }
             }

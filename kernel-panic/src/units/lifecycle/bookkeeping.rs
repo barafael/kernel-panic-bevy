@@ -100,8 +100,9 @@ pub fn tag_unit_kinds(
         // Same resolution `combat_system` applies: `unit_registry.weapon`
         // already filters BuildLaser; a name missing from the TDFs
         // resolves to no weapon (range 0).
-        let auto_targets = weapon_registry
-            .find(unit_registry.weapon(kind))
+        let auto_targets = unit_registry
+            .weapon(kind)
+            .filter(|&weapon| weapon_registry.is_present(weapon))
             .map(|weapon| weapon_registry.by_kind(weapon))
             .is_some_and(|w| w.range != 0.0 && !w.command_fire);
         if !auto_targets {

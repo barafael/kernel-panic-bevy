@@ -183,7 +183,7 @@ fn handle_right_click(
                 .is_ok_and(|t_team| !alliances.friendly(my_team.0, t_team.0))
         })
     };
-    let armed = |unit: UnitKind| !unit_registry.weapon(unit).is_empty();
+    let armed = |unit: UnitKind| unit_registry.weapon(unit).is_some();
     if mouse.just_pressed(MouseButton::Right) {
         drag_path.points.clear();
         drag_path.active = true;
@@ -913,7 +913,10 @@ mod tests {
         defs.units.insert(
             "bit".into(),
             UnitDef {
-                weapon1: "BitGun".into(),
+                // What `bit.fbi` really says: `weapon()` resolves the
+                // name to a variant, so a made-up one would read as
+                // "unarmed" rather than "armed but unresolvable".
+                weapon1: "Line".into(),
                 ..UnitDef::default()
             },
         );

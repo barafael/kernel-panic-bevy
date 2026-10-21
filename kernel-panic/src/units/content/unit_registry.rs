@@ -9,6 +9,7 @@ use spring_tdf::{UnitDef, UnitDefs};
 
 use super::definitions::{ALL_UNIT_KINDS, UNIT_KIND_COUNT, UnitKind};
 use super::moveinfo::MoveClassTable;
+use super::weapons::WeaponKind;
 use crate::sim::{DetFloat, GAME_SPEED, SHORT_ANGLE_TO_RAD};
 
 /// Spring engine `BuildTime` is in "build ticks" at 30 fps.
@@ -655,24 +656,29 @@ impl UnitRegistry {
         })
     }
 
-    /// Primary weapon TDF section name, or `""` if unarmed / only has BuildLaser.
-    pub fn weapon(&self, kind: UnitKind) -> &str {
-        self.def(kind).map_or("", |d| {
-            let w = d.weapon1.as_str();
-            if w.eq_ignore_ascii_case("BuildLaser") || w.eq_ignore_ascii_case("BuildLaserNoEffect")
-            {
-                ""
-            } else {
-                w
-            }
-        })
+    /// Primary weapon (FBI `Weapon1`) as a variant, `None` when the unit
+    /// is unarmed.
+    ///
+    /// A constructor's build laser is how it builds rather than a weapon
+    /// it fights with, so a unit whose only `Weapon1` is one of the two
+    /// build lasers resolves to `None` — the same question upstream's
+    /// `IsAttackCapable` answers, and the reason the filter lives here
+    /// rather than at each of the eight callers.
+    ///
+    /// This resolves the *name*. Whether that weapon is present in the
+    /// loaded TDFs is the [`WeaponRegistry`](super::weapons::WeaponRegistry)'s
+    /// question (`is_present` / `get`), which this registry cannot ask.
+    pub fn weapon(&self, kind: UnitKind) -> Option<WeaponKind> {
+        self.def(kind)
+            .and_then(|d| WeaponKind::find(&d.weapon1))
+            .filter(|weapon| !weapon.is_build_laser())
     }
 
-    /// Secondary weapon (FBI `Weapon2`) TDF section name, or `""`.
-    /// Only script-detonated weapons use it today (worm.bos `FireWeapon1`
-    /// → `emit-sfx 4097` = Wormsplash).
-    pub fn weapon2(&self, kind: UnitKind) -> &str {
-        self.def(kind).map_or("", |d| d.weapon2.as_str())
+    /// Secondary weapon (FBI `Weapon2`) as a variant, `None` when the
+    /// unit has none. Only script-detonated weapons use it today
+    /// (worm.bos `FireWeapon1` → `emit-sfx 4097` = Wormsplash).
+    pub fn weapon2(&self, kind: UnitKind) -> Option<WeaponKind> {
+        self.def(kind).and_then(|d| WeaponKind::find(&d.weapon2))
     }
 
     fn validate_unit_bindings(&self) {
@@ -720,6 +726,49 @@ mod tests {
     fn missing_unit_defaults_to_one() {
         let reg = UnitRegistry::empty();
         assert_eq!(reg.armored_multiple(UnitKind::Bit), 1.0);
+    }
+
+    /// `weapon()` answers with a variant or with nothing, and the two
+    /// arms are the whole contract. A `Weapon1` that names no section is
+    /// the nothing arm: the interaction gates (`IsAttackCapable`) and
+    /// the sim's `WeaponBinding` then agree on "unarmed", where the
+    /// `&str` API said "armed" for any non-empty text while combat still
+    /// found no weapon for the unit.
+    #[test]
+    fn weapon_is_a_variant_or_nothing() {
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                weapon1: "Line".into(),
+                weapon2: "Wormsplash".into(),
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "socket".into(),
+            UnitDef {
+                weapon1: "BitGun".into(),
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "assembler".into(),
+            UnitDef {
+                // Lowercase on purpose: the FBI spellings drift, which
+                // is why `find` scans.
+                weapon1: "buildlaser".into(),
+                ..UnitDef::default()
+            },
+        );
+        let reg = UnitRegistry::for_test(defs);
+        assert_eq!(reg.weapon(UnitKind::Bit), Some(WeaponKind::Line));
+        assert_eq!(reg.weapon2(UnitKind::Bit), Some(WeaponKind::Wormsplash));
+        assert_eq!(reg.weapon(UnitKind::Socket), None);
+        // A constructor's build laser is its tool, not a weapon.
+        assert_eq!(reg.weapon(UnitKind::Assembler), None);
+        // And a unit with no FBI at all is unarmed, not a panic.
+        assert_eq!(reg.weapon(UnitKind::Kernel), None);
     }
 
     /// `SelfDestructCountdown=n` arms `2n + 1` slow updates of 15

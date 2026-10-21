@@ -554,7 +554,7 @@ impl ApplyCtx<'_, '_> {
     fn armed(&self, kind: UnitKind) -> bool {
         self.registry
             .as_ref()
-            .is_none_or(|r| !r.weapon(kind).is_empty())
+            .is_none_or(|r| r.weapon(kind).is_some())
     }
 
     /// Armed and able to hit `target` (`OnlyTargetCategory`).

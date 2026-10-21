@@ -26,10 +26,13 @@ use crate::units::assets::meshes::{S3OModelCache, load_beam_texture, load_s3o_me
 use crate::units::components::TeamId;
 use crate::units::content::weapons::WeaponRegistry;
 
-/// True for `BuildLaser` (the upstream build-laser weapon name). The
-/// `BuildLaserNoEffect` variant intentionally suppresses the impact particles,
-/// so only the bare-name version triggers `BuildSparkle` spawn.
-fn is_build_laser(weapon: WeaponKind) -> bool {
+/// Whether firing `weapon` drops a `BuildSparkle` at the target end.
+/// Only the bare `BuildLaser` does: `BuildLaserNoEffect` is the same
+/// weapon with its impact particles suppressed on purpose, so it sparks
+/// in neither place. [`WeaponKind::is_build_laser`] is the wider
+/// question — both variants — that the weapon filter and the targeting
+/// paths ask, which is why this one has its own name.
+fn spawns_build_sparkle(weapon: WeaponKind) -> bool {
     weapon == WeaponKind::BuildLaser
 }
 
@@ -243,7 +246,7 @@ pub(super) fn spawn_weapon_visuals(
         // gets nothing. The coloured sphere only stands in when the named
         // CEG is missing from the registry.
         if !is_melee
-            && !is_build_laser(event.weapon)
+            && !spawns_build_sparkle(event.weapon)
             && !is_gauss_arc
             && let Some(muzzle_ceg) = event.muzzle_ceg
         {
@@ -283,7 +286,7 @@ pub(super) fn spawn_weapon_visuals(
         // runner this was hand-rolled here — with drifted speed/spread
         // and hash "jitter" — which is exactly the divergence the
         // runtime exists to prevent.
-        if is_build_laser(event.weapon) {
+        if spawns_build_sparkle(event.weapon) {
             spawn_ceg(
                 CegKind::OldskoolBuild,
                 event.target_pos,

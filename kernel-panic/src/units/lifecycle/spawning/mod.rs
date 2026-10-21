@@ -509,7 +509,10 @@ pub fn spawn_unit_facing(
     // the weapon registry every tick. Units with no primary weapon (or
     // whose only weapon is BuildLaser, filtered by `unit_registry.weapon`)
     // get no binding — combat skips them via `Option<&WeaponBinding>`.
-    if let Some(weapon) = ctx.weapon_registry.find(unit_registry.weapon(kind)) {
+    if let Some(weapon) = unit_registry
+        .weapon(kind)
+        .filter(|&weapon| ctx.weapon_registry.is_present(weapon))
+    {
         commands
             .entity(unit_entity)
             .insert(crate::units::combat::WeaponBinding(weapon));
@@ -518,7 +521,9 @@ pub fn spawn_unit_facing(
     // Worm bites detonate Weapon2 (worm.bos `emit-sfx 4097`); cache the
     // kind like the primary binding so the fire path never hashes names.
     if kind.has_autohold()
-        && let Some(splash) = ctx.weapon_registry.find(unit_registry.weapon2(kind))
+        && let Some(splash) = unit_registry
+            .weapon2(kind)
+            .filter(|&splash| ctx.weapon_registry.is_present(splash))
     {
         commands
             .entity(unit_entity)

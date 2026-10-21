@@ -208,7 +208,7 @@ fn resolve_context_cursor(
         if unit_registry.speed(ut.0) > 0.0 || ut.0.takes_rally_orders() {
             has_mover = true;
         }
-        if !unit_registry.weapon(ut.0).is_empty() {
+        if unit_registry.weapon(ut.0).is_some() {
             has_weapon = true;
         }
         if ut.0.is_constructor() {

@@ -502,8 +502,7 @@ fn trigger_set_target_click(
         selected_q
             .iter()
             .filter(|(_, unit, _)| {
-                !unit_registry.weapon(unit.0).is_empty()
-                    && unit_registry.can_attack(unit.0, t_kind.0)
+                unit_registry.weapon(unit.0).is_some() && unit_registry.can_attack(unit.0, t_kind.0)
             })
             .map(|(e, ..)| e),
     );
