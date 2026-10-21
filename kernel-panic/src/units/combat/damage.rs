@@ -86,24 +86,41 @@ impl PendingDamage {
 /// (that was a real bug — kamikaze splash and every death-AoE were
 /// wiped before delivery).
 #[derive(Resource, Default)]
-pub struct DamageQueue(Vec<PendingDamage>);
+pub struct DamageQueue {
+    pending: Vec<PendingDamage>,
+    /// The buffer last handed back by [`Self::recycle`], so the drain
+    /// points ping-pong two allocations per tick instead of collecting
+    /// a fresh `Vec` each.
+    spare: Vec<PendingDamage>,
+}
 
 impl DamageQueue {
     pub fn push(&mut self, damage: PendingDamage) {
-        self.0.push(damage);
+        self.pending.push(damage);
     }
 
-    pub fn drain(&mut self) -> std::vec::Drain<'_, PendingDamage> {
-        self.0.drain(..)
+    /// Take the whole queue, leaving `spare`'s (empty) allocation in
+    /// its place. The drain points sort and process the returned buffer
+    /// in place and hand it back with [`Self::recycle`]; producers that
+    /// push during processing land in the fresh queue and survive — the
+    /// no-eager-clear rule above still holds.
+    pub fn take(&mut self) -> Vec<PendingDamage> {
+        std::mem::replace(&mut self.pending, std::mem::take(&mut self.spare))
+    }
+
+    /// Stash a fully processed buffer for the next [`Self::take`].
+    pub fn recycle(&mut self, mut used: Vec<PendingDamage>) {
+        used.clear();
+        self.spare = used;
     }
 
     pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
+        self.pending.is_empty()
     }
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.pending.len()
     }
 
     /// Borrow the pending damage slice for assertions. Test-only so the
@@ -111,7 +128,7 @@ impl DamageQueue {
     /// order.
     #[cfg(test)]
     pub fn iter_snapshot_for_test(&self) -> impl Iterator<Item = &PendingDamage> {
-        self.0.iter()
+        self.pending.iter()
     }
 }
 
@@ -696,6 +713,9 @@ pub struct DamagePass<'w, 's> {
     target_pos_q: Query<'w, 's, &'static GlobalTransform, With<UnitType>>,
     spatial: Res<'w, SpatialIndex>,
     splash_hits: Local<'s, Vec<SplashHit>>,
+    /// Second splash scratch buffer: mapping hits to `(Hit, due-frame)`
+    /// used to `collect` a fresh `Vec` per explosion.
+    splash_mapped: Local<'s, Vec<(Hit, Option<u64>)>>,
     hex_farm: Option<ResMut<'w, crate::map_events::hex_farm::HexFarmInbox>>,
 }
 
@@ -705,7 +725,7 @@ impl DamagePass<'_, '_> {
         self.resolver.deliver_due();
         let frame = self.resolver.tick.frame();
 
-        let mut pending: Vec<PendingDamage> = self.queue.drain().collect();
+        let mut pending = self.queue.take();
         // The queue fills in whatever order its producers ran — some
         // iterate projectiles or zones, which have no unit id. Resolve
         // it in a canonical order (`sim`): victims' health sums the
@@ -720,9 +740,10 @@ impl DamagePass<'_, '_> {
                 p.target.map_or(0, id),
             )
         });
-        for pending in pending {
+        for pending in pending.drain(..) {
             self.explode(pending, frame);
         }
+        self.queue.recycle(pending);
     }
 
     /// One `CGameHelper::Explosion` (or, for `Melee`, the single
@@ -856,15 +877,14 @@ impl DamagePass<'_, '_> {
             });
         // `DoExplosionDamage`: the front reaches far victims later.
         let exp_speed = weapon_def.explosion_speed();
-        let splash: Vec<(Hit, Option<u64>)> = splash_hits
-            .drain(..)
-            .map(|s| {
-                let later = (s.dist >= exp_speed * 4.0)
-                    .then(|| frame + ((s.dist / exp_speed) as u64).saturating_sub(3));
-                (hit(s.entity, s.damage, impulse_of(s.pos, s.falloff)), later)
-            })
-            .collect();
-        for (splash_hit, later) in splash {
+        let splash_mapped = &mut *self.splash_mapped;
+        splash_mapped.clear();
+        splash_mapped.extend(splash_hits.drain(..).map(|s| {
+            let later = (s.dist >= exp_speed * 4.0)
+                .then(|| frame + ((s.dist / exp_speed) as u64).saturating_sub(3));
+            (hit(s.entity, s.damage, impulse_of(s.pos, s.falloff)), later)
+        }));
+        for (splash_hit, later) in splash_mapped.drain(..) {
             match later {
                 Some(due) => self.resolver.delayed.push(due, splash_hit),
                 None => self.resolver.deliver(splash_hit),

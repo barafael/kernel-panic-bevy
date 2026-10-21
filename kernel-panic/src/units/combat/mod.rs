@@ -934,7 +934,7 @@ pub fn combat_system(
                     up: Vec3::Y,
                     rgb: def.rgb_color,
                     radius: def.area_of_effect,
-                    ceg_name: def.explosion_generator.clone(),
+                    ceg_name: weapon_registry.ceg_name(id),
                 });
                 commands.entity(entity).insert((DebugBlasted, JustFired));
             }
@@ -3064,7 +3064,7 @@ mod tests {
         assert_eq!(hits[0].weapon, minekiller);
         let explosions = &app.world().resource::<PendingExplosions>().events;
         assert_eq!(explosions.len(), 1);
-        assert_eq!(explosions[0].ceg_name, "mineclearer");
+        assert_eq!(&*explosions[0].ceg_name, "mineclearer");
         assert!(app.world().resource::<PendingAttacks>().events.is_empty());
         assert!(app.world().get::<AimTarget>(debug).is_none());
     }

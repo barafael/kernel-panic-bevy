@@ -818,7 +818,7 @@ pub fn process_command_fire(
                 up: Vec3::Y,
                 rgb: faction.rgb_f32(),
                 radius: ability.weapon.params().radius,
-                ceg_name: ceg.to_string(),
+                ceg_name: ceg.into(),
             });
             // The blast is a `CGameHelper::Explosion` of the ability weapon.
             if let (Some(sounds), Some(id)) = (
@@ -1590,7 +1590,7 @@ pub fn tick_sigterm_bombs(
             up: Vec3::Y,
             rgb: bomb.owner_faction.rgb_f32(),
             radius: sigterm.map_or(0.0, |id| weapons.by_id(id).area_of_effect),
-            ceg_name: "system_sigterm".to_string(),
+            ceg_name: "system_sigterm".into(),
         });
         // `areadenial.lua` `Explosion`: the Signal is dead, so the zone
         // goes to `LastSignalTeam` and the first tick finds it an owner.
@@ -2281,7 +2281,7 @@ mod tests {
         // explosion generator (retroweapons.tdf:597).
         let explosions = app.world().resource::<PendingExplosions>();
         assert_eq!(explosions.events.len(), 1, "detonation plays a CEG");
-        assert_eq!(explosions.events[0].ceg_name, "system_sigterm");
+        assert_eq!(&*explosions.events[0].ceg_name, "system_sigterm");
         assert_eq!(explosions.events[0].pos, target);
         assert_eq!(explosions.events[0].radius, 900.0);
     }

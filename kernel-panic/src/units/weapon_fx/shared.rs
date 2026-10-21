@@ -130,9 +130,11 @@ pub struct BuildArcEvent {
 ///
 /// `ceg_name` is the upstream `explosiongenerator=custom:...` value
 /// (without the `custom:` prefix) so the CEG particle system can
-/// replay the authored emitters at the blast point. Empty string =
-/// no scripted CEG; the spawner falls back to a generic sphere +
-/// ground ring in that case.
+/// replay the authored emitters at the blast point. Empty = no
+/// scripted CEG; the spawner falls back to a generic sphere + ground
+/// ring in that case. `Arc<str>` because it rides one event per shot
+/// and per death: the registry interns one per weapon, the events
+/// clone the refcount (see [`WeaponRegistry::ceg_name`]).
 ///
 /// `up` is the exploding unit's up vector (tilted to the slope for a
 /// ground unit, straight up for a building or a blast with no unit):
@@ -142,7 +144,7 @@ pub struct ExplosionEvent {
     pub up: Vec3,
     pub rgb: [f32; 3],
     pub radius: f32,
-    pub ceg_name: String,
+    pub ceg_name: Arc<str>,
 }
 
 /// Event buffer drained by [`spawn::spawn_pending_explosions`]. Separate

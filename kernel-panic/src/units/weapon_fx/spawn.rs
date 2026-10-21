@@ -552,18 +552,20 @@ fn beam_texture(
 /// or the engine's defaults for the category when the TDF leaves them
 /// empty (`ProjectileDrawer::LoadWeaponTextures`: `laserfalloff` body and
 /// `laserend` caps for every LaserCannon and BeamLaser). `none` stays
-/// empty.
-fn beam_texture_names(weapon: &spring_tdf::WeaponDef) -> (String, String) {
-    let defaulted = |authored: &str, default: &str| -> String {
+/// empty. Every result is either empty, a `&'static` default, or a
+/// trimmed slice of the def — borrowed, not allocated: this runs per
+/// beam/laser shot.
+fn beam_texture_names(weapon: &spring_tdf::WeaponDef) -> (&str, &str) {
+    fn defaulted<'a>(authored: &'a str, default: &'static str) -> &'a str {
         let t = authored.trim();
         if t.eq_ignore_ascii_case("none") {
-            String::new()
+            ""
         } else if t.is_empty() {
-            default.to_string()
+            default
         } else {
-            t.to_string()
+            t
         }
-    };
+    }
     let beam_type = matches!(
         weapon.category(),
         spring_tdf::WeaponCategory::LaserCannon | spring_tdf::WeaponCategory::BeamLaser
@@ -643,7 +645,7 @@ fn spawn_textured_beam(
     // on-screen glyph size in upstream footage at default zoom.
     const ARROW_TILE_LENGTH: f32 = 56.0;
     let (tex1, tex2) = beam_texture_names(weapon);
-    let texture = beam_texture(&tex1, model_cache, images);
+    let texture = beam_texture(tex1, model_cache, images);
     let has_texture = texture.is_some();
     // The engine's `laserfalloff` is a cross-beam gradient, constant
     // along the length: drawn once, not tiled like a glyph strip.
@@ -808,7 +810,7 @@ fn spawn_laser_bolt(
     let max_length = (speed * duration).det_max(thickness * 3.0);
 
     let (tex1, _) = beam_texture_names(weapon);
-    let texture = beam_texture(&tex1, model_cache, images);
+    let texture = beam_texture(tex1, model_cache, images);
     let has_texture = texture.is_some();
     let tile_count: u32 = if has_texture { 1 } else { 0 };
 
@@ -1081,7 +1083,7 @@ fn bolt_cap_material(
     if tex2.is_empty() {
         return None;
     }
-    let filename = CegRegistry::resolve_texture(&tex2)?;
+    let filename = CegRegistry::resolve_texture(tex2)?;
     let (handle, _, _) = load_beam_texture(filename, model_cache, images)?;
 
     // Keyed by the texture so different texture2 weapons don't collide.
@@ -1259,7 +1261,7 @@ mod tests {
         };
         assert_eq!(
             beam_texture_names(&beam),
-            ("laserfalloff".to_string(), "laserend".to_string())
+            ("laserfalloff", "laserend")
         );
         let authored = spring_tdf::WeaponDef {
             texture1: "dosray".into(),
@@ -1268,13 +1270,13 @@ mod tests {
         };
         assert_eq!(
             beam_texture_names(&authored),
-            ("dosray".to_string(), String::new())
+            ("dosray", "")
         );
         let missile = spring_tdf::WeaponDef {
             weapon_type: "MissileLauncher".into(),
             ..Default::default()
         };
-        assert_eq!(beam_texture_names(&missile), (String::new(), String::new()));
+        assert_eq!(beam_texture_names(&missile), ("", ""));
     }
     use bevy::MinimalPlugins;
     use bevy::asset::AssetPlugin;

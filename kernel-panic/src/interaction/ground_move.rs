@@ -2388,6 +2388,8 @@ pub fn ground_collision_system(
     mut entries: Local<Vec<CollisionEntry>>,
     mut grid: Local<CollisionGrid>,
     mut candidates: Local<Vec<(i32, i32, usize)>>,
+    mut crushed: Local<Vec<Entity>>,
+    mut knocked: Local<Vec<(Entity, Vec3)>>,
     mut seen: ResMut<TrapCheckRevision>,
 ) {
     let nav = nav_set.as_deref();
@@ -2506,10 +2508,11 @@ pub fn ground_collision_system(
             }
         }
     }
-    let mut crushed: Vec<Entity> = Vec::new();
-    // `CheckCollisionSkid` moves the units a skidding unit hits too;
-    // applied after the pass (position and velocity deltas).
-    let mut knocked: Vec<(Entity, Vec3)> = Vec::new();
+    // Scratch buffers (`Local`s above): the crush list is deduped and
+    // the skid list applied at the end of the pass, both empty again
+    // next tick.
+    crushed.clear();
+    knocked.clear();
 
     for (entity, kind, stats, mut tf, mut m, path, _, mut queue, dying, lift, emerging, order, _) in
         movers.iter_mut().sort::<&NetId>()
@@ -2779,7 +2782,7 @@ pub fn ground_collision_system(
             }
         }
     }
-    for (entity, impulse) in knocked {
+    for (entity, impulse) in knocked.drain(..) {
         if let Ok((_, _, _, mut tf, mut m, ..)) = movers.get_mut(entity) {
             // `collidee->Move(-impulse); SetVelocityAndSpeed(speed - impulse)`.
             tf.translation += impulse;
@@ -2789,7 +2792,7 @@ pub fn ground_collision_system(
     }
     crushed.sort();
     crushed.dedup();
-    for e in crushed {
+    for e in crushed.drain(..) {
         // `CFeature::Kill(…, crushed)`: gone, leaving its `featureDead`
         // (`destroy_features`). `try_insert`: weapon damage may have
         // destroyed it in this same tick.

@@ -16,6 +16,7 @@
 use bevy::prelude::*;
 use spring_tdf::{WeaponDef, WeaponDefs};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use super::definitions::{ALL_UNIT_KINDS, UnitKind};
 use crate::sim::{DetFloat, frames_to_secs};
@@ -63,8 +64,10 @@ pub struct DeathBlast {
     /// The weapon's `rgb_color` when it configures one; `None` → the
     /// dying unit's faction colour.
     pub rgb: Option<[f32; 3]>,
-    /// The weapon's `explosiongenerator` (empty when unset).
-    pub ceg_name: String,
+    /// The weapon's `explosiongenerator` (empty when unset) — the
+    /// registry's interned `Arc<str>`, cloned per death as a refcount
+    /// bump.
+    pub ceg_name: Arc<str>,
 }
 
 impl DeathBlast {
@@ -86,7 +89,7 @@ impl DeathBlast {
             weapon,
             radius: def.area_of_effect.det_max(24.0),
             rgb: Some(def.rgb_color).filter(|c| c[0] + c[1] + c[2] > 0.01),
-            ceg_name: def.explosion_generator.clone(),
+            ceg_name: weapons.ceg_name(weapon),
         })
     }
 }
@@ -103,6 +106,11 @@ pub struct WeaponRegistry {
     /// Parallel `defs[i]` → [`weapon_infection_duration`] of its name,
     /// resolved once so the damage path never string-matches.
     infection_secs: Vec<Option<f32>>,
+    /// Parallel `defs[i]` → the def's `explosion_generator`, interned
+    /// once per weapon so the per-shot / per-death explosion events
+    /// clone a refcount instead of a `String` (`DeathBlast`,
+    /// `ExplosionEvent`).
+    ceg_names: Vec<Arc<str>>,
     /// Weapons the fx path special-cases, resolved at insert.
     gauss_cannon: Option<WeaponId>,
     worm_bite: Option<WeaponId>,
@@ -141,6 +149,7 @@ impl WeaponRegistry {
             names: Vec::new(),
             index: HashMap::new(),
             infection_secs: Vec::new(),
+            ceg_names: Vec::new(),
             gauss_cannon: None,
             worm_bite: None,
             known: KnownWeapons::default(),
@@ -182,9 +191,13 @@ impl WeaponRegistry {
             // Later TDF entries with the same name win — matches the
             // previous behaviour of `extend()` overwriting on key clash.
             self.defs[existing.0 as usize] = def;
+            self.ceg_names[existing.0 as usize] =
+                self.defs[existing.0 as usize].explosion_generator.as_str().into();
             return existing;
         }
         let id = WeaponId(self.defs.len() as u16);
+        self.ceg_names
+            .push(def.explosion_generator.as_str().into());
         self.defs.push(def);
         self.names.push(name.to_string());
         self.infection_secs.push(weapon_infection_duration(name));
@@ -238,6 +251,14 @@ impl WeaponRegistry {
     /// Look up a weapon by id. Branchless `Vec` indexing.
     pub fn by_id(&self, id: WeaponId) -> &WeaponDef {
         &self.defs[id.0 as usize]
+    }
+
+    /// The weapon's `explosion_generator` as the registry's interned
+    /// `Arc<str>` — a refcount bump per clone, for the per-shot /
+    /// per-death [`crate::units::weapon_fx::ExplosionEvent`]s. Empty
+    /// when the weapon authors no CEG.
+    pub fn ceg_name(&self, id: WeaponId) -> Arc<str> {
+        Arc::clone(&self.ceg_names[id.0 as usize])
     }
 
     /// [`weapon_infection_duration`] of the weapon behind `id`.

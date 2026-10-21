@@ -159,16 +159,15 @@ pub(crate) fn begin_match(world: &mut World, setup: &GameSetup) {
 /// engine owns.
 pub(crate) fn despawn_match_entities(world: &mut World) {
     let keep = kept_entities(world);
-    let mut roots =
-        world.query_filtered::<Entity, Or<(With<Transform>, With<Node>, With<MatchEntity>)>>();
-    let doomed: Vec<Entity> = roots.iter(world).filter(|e| !keep.contains(e)).collect();
-    // `despawn` takes subtrees (and linked relationship targets) along;
-    // existence checks tolerate entities already gone with a parent.
-    for e in doomed {
-        if let Ok(entity) = world.get_entity_mut(e) {
-            entity.despawn();
-        }
-    }
+    // One bulk pass (0.20): a single deferred flush and one batched
+    // allocator free for the whole teardown, instead of a per-root
+    // recursive `despawn` (each with its own flush) — the visible hitch
+    // at the match swap. Recursive like the old loop, and it tolerates
+    // roots already gone with a despawned parent the same way the old
+    // existence check did.
+    world.despawn_all_where::<Entity, Or<(With<Transform>, With<Node>, With<MatchEntity>)>>(
+        |e| !keep.contains(&e),
+    );
 
     let strays = stray_game_entities(world, &keep);
     if !strays.is_empty() {

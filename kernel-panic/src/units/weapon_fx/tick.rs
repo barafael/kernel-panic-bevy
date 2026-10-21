@@ -887,7 +887,7 @@ fn trigger_delayed_hit(
     let (rgb, radius, ceg_name) = (
         weapon_def.rgb_color,
         weapon_def.area_of_effect,
-        weapon_def.explosion_generator.clone(),
+        weapon_registry.ceg_name(hit.weapon),
     );
     pending_explosions.events.push(ExplosionEvent {
         pos: impact_pos,

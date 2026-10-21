@@ -368,7 +368,7 @@ pub fn death_system(
                     up,
                     rgb: color.rgb_f32(),
                     radius: 16.0,
-                    ceg_name: String::new(),
+                    ceg_name: "".into(),
                 });
             }
 

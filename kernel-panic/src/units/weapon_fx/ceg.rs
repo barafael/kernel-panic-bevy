@@ -628,6 +628,14 @@ fn spawn_particle_system(
         }
     };
 
+    // One batched spawn instead of one command per particle: a SIGTERM
+    // death fans out ~320 of these, and the trail CEGs of every
+    // fuel-carrying cegTag projectile re-emit a burst per sim frame
+    // (`tick_projectiles`), so this is the app's highest spawn-rate
+    // loop. `spawn_batch` preserves order, so the RNG streams above and
+    // the query iteration order the sim hash sees are unchanged.
+    let mut particles = Vec::new();
+
     for fire_index in 0..count {
         let n_particles = props
             .num_particles
@@ -715,7 +723,7 @@ fn spawn_particle_system(
             };
             let size_growth_per_sec = props.size_growth.eval(&ctx_base) * GAME_SPEED;
 
-            commands.spawn(CegParticle {
+            particles.push(CegParticle {
                 pos: particle_pos,
                 prev_pos: particle_pos,
                 velocity,
@@ -731,6 +739,7 @@ fn spawn_particle_system(
             });
         }
     }
+    commands.spawn_batch(particles);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -758,6 +767,9 @@ fn spawn_flame(
         return;
     }
 
+    // Batched like [`spawn_particle_system`]: same per-item RNG rolls,
+    // one command for the whole burst.
+    let mut flames = Vec::with_capacity(count as usize);
     for _ in 0..count {
         // Every CEG expression is rolled per projectile, each `r` term
         // with its own random number.
@@ -777,7 +789,7 @@ fn spawn_flame(
             spawn_dir
         };
         let ttl = roll(&props.ttl).det_max(1.0);
-        commands.spawn(CegFlame {
+        flames.push(CegFlame {
             pos: origin + frame * pos,
             dir: dir.normalize_or(Vec3::Y),
             size: roll(&props.size),
@@ -790,6 +802,7 @@ fn spawn_flame(
             side,
         });
     }
+    commands.spawn_batch(flames);
 }
 
 /// `CExploSpikeProjectile` spawn + `Init`: every CEG expression is
@@ -829,6 +842,8 @@ fn spawn_spikes(
             m
         }
     };
+    // Batched like [`spawn_particle_system`].
+    let mut spikes = Vec::with_capacity(count as usize);
     for index in 0..count {
         let roll = |e: &CegExpr, rng: &mut u32| {
             e.eval(&EvalCtx {
@@ -858,7 +873,7 @@ fn spawn_spikes(
         } else {
             raw_dir
         };
-        commands.spawn(CegSpike {
+        spikes.push(CegSpike {
             pos: origin + offset,
             dir,
             length: roll(&props.length, rng),
@@ -870,13 +885,14 @@ fn spawn_spikes(
             material: material.clone(),
         });
     }
+    commands.spawn_batch(spikes);
 }
 
 /// Grow / fade [`CegSpike`]s one sim frame per tick and push their
 /// camera-facing quads (`CExploSpikeProjectile::Update` + `Draw`).
 pub(super) fn tick_ceg_spikes(
     time: Res<Time>,
-    mut spikes: Query<(Entity, &mut CegSpike)>,
+    mut spikes: Query<&mut CegSpike>,
     mut batches: ResMut<FxQuadBatches>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
     mut commands: Commands,
@@ -889,11 +905,10 @@ pub(super) fn tick_ceg_spikes(
         .single()
         .map(|gt| gt.translation())
         .unwrap_or(Vec3::Y * 1000.0);
-    for (entity, mut spike) in &mut spikes {
+    for mut spike in &mut spikes {
         spike.length += spike.length_growth * frames;
         spike.alpha = (spike.alpha - spike.alpha_decay * frames).det_max(0.0);
         if spike.alpha <= 0.0 {
-            commands.entity(entity).despawn();
             continue;
         }
         let dif = (spike.pos - cam_pos).normalize_or(Vec3::NEG_Y);
@@ -911,6 +926,7 @@ pub(super) fn tick_ceg_spikes(
             [c.x, c.y, c.z, 1.0],
         );
     }
+    commands.despawn_all_where::<&CegSpike, ()>(|s| s.alpha <= 0.0);
 }
 
 /// Queue `count` recursive spawns of `props.explosion_generator`, each
@@ -930,6 +946,8 @@ fn spawn_delayed(
     }
     // One allocation per spawner effect; the `count` timers share it.
     let target_ceg: std::sync::Arc<str> = props.explosion_generator.as_str().into();
+    // `system_nx` fans out 240 timers per cast — one command, not 240.
+    let mut timers = Vec::with_capacity(count as usize);
     for i in 0..count {
         let ctx = EvalCtx {
             index: i,
@@ -938,7 +956,7 @@ fn spawn_delayed(
         let delay_frames = props.delay.eval(&ctx).det_max(0.0);
         let delay_secs = delay_frames / GAME_SPEED;
         let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
-        commands.spawn(CegDelayedSpawn {
+        timers.push(CegDelayedSpawn {
             delay_secs,
             pos: origin + Quat::from_rotation_arc(Vec3::Y, up) * pos_offset,
             dir,
@@ -946,6 +964,7 @@ fn spawn_delayed(
             target_ceg: std::sync::Arc::clone(&target_ceg),
         });
     }
+    commands.spawn_batch(timers);
 }
 
 // ─── Tick ───────────────────────────────────────────────────────────
@@ -967,7 +986,7 @@ fn spawn_delayed(
 pub(super) fn tick_ceg_particles(
     time: Res<Time>,
     fixed: Res<Time<Fixed>>,
-    mut particles: Query<(Entity, &mut CegParticle)>,
+    mut particles: Query<&mut CegParticle>,
     ceg_assets: Res<CegRenderAssets>,
     mut batches: ResMut<FxQuadBatches>,
     camera_q: Query<&GlobalTransform, With<crate::rendering::camera::RtsCamera>>,
@@ -999,10 +1018,12 @@ pub(super) fn tick_ceg_particles(
     // Same render-clock alpha `interpolate_sim_pose` blends models by.
     let alpha = fixed.overstep_fraction().clamp(0.0, 1.0);
 
-    for (entity, mut p) in &mut particles {
+    // Dead particles are collected by one bulk-despawn command after
+    // the loop (0.20's batched despawn path) instead of one entity
+    // command each; the loop still skips drawing them this tick.
+    for mut p in &mut particles {
         p.life -= dt;
         if p.life <= 0.0 {
-            commands.entity(entity).despawn();
             continue;
         }
 
@@ -1047,6 +1068,7 @@ pub(super) fn tick_ceg_particles(
             palette.sample(frac),
         );
     }
+    commands.despawn_all_where::<&CegParticle, ()>(|p| p.life <= 0.0);
 }
 
 /// Corner UVs of a muzzle-flame quad in its corner order:
@@ -1089,7 +1111,7 @@ fn muzzle_flame_quads(f: &CegFlame, life: f32) -> ([Vec3; 4], [[Vec3; 4]; 2]) {
 /// advances by `dt * GAME_SPEED`.
 pub(super) fn tick_ceg_flames(
     time: Res<Time>,
-    mut flames: Query<(Entity, &mut CegFlame)>,
+    mut flames: Query<&mut CegFlame>,
     ceg_assets: Res<CegRenderAssets>,
     mut batches: ResMut<FxQuadBatches>,
     mut commands: Commands,
@@ -1099,10 +1121,9 @@ pub(super) fn tick_ceg_flames(
     }
     let dt_frames = time.delta_secs() * GAME_SPEED;
 
-    for (entity, mut f) in &mut flames {
+    for mut f in &mut flames {
         f.life_frames -= dt_frames;
         if f.life_frames <= 0.0 {
-            commands.entity(entity).despawn();
             continue;
         }
         let life = 1.0 - (f.life_frames / f.max_life_frames).det_clamp(0.0, 1.0);
@@ -1120,6 +1141,7 @@ pub(super) fn tick_ceg_flames(
             }
         }
     }
+    commands.despawn_all_where::<&CegFlame, ()>(|f| f.life_frames <= 0.0);
 }
 
 /// Age every [`CegGroundFlash`] and push its ring and flash quads for

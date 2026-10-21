@@ -1134,7 +1134,7 @@ fn dispatch_emit_sfx(
                 up,
                 rgb: color.rgb_f32(),
                 radius: 8.0,
-                ceg_name: name.to_string(),
+                ceg_name: name.into(),
             });
             return;
         }
@@ -1154,7 +1154,7 @@ fn dispatch_emit_sfx(
         up,
         rgb,
         radius,
-        ceg_name: String::new(),
+        ceg_name: "".into(),
     });
 }
 
