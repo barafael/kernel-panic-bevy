@@ -71,10 +71,24 @@
     // the game's audio backend (cpal) opens its context at startup, before
     // the first click, so it would stay silent. Remember each context and
     // resume them all on the first gesture.
+    //
+    // cpal also calls resume() itself when it opens the stream and never
+    // looks at the promise. Until the first gesture that promise stays
+    // pending, and if the context is closed first (Quit, a reload, leaving
+    // the page) the browser rejects it — Firefox: "Closed before resume
+    // completed" — as an uncaught error in the console. Give every
+    // resume() a handler so that race is settled quietly; callers that
+    // await the promise still see its outcome.
     (function () {
       var contexts = [];
       var Native = window.AudioContext || window.webkitAudioContext;
       if (!Native) return;
+      var resume = Native.prototype.resume;
+      Native.prototype.resume = function () {
+        var p = resume.apply(this, arguments);
+        if (p && typeof p.catch === 'function') p.catch(function () {});
+        return p;
+      };
       function Patched() {
         var ctx = new (Function.prototype.bind.apply(Native, [null].concat([].slice.call(arguments))))();
         contexts.push(ctx);
