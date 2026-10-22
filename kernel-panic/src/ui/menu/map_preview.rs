@@ -52,11 +52,16 @@ pub(super) struct MapPreview {
 
 impl FromWorld for MapPreview {
     fn from_world(world: &mut World) -> Self {
+        // An sRGB texture rendered into and sampled as such — not Bevy's
+        // `render_to_texture` pair of a Unorm texture with an sRGB view
+        // format: that needs wgpu's `VIEW_FORMATS` downlevel flag, which
+        // WebGL2 (Firefox) lacks, and the first frame then quit the whole
+        // app with a validation error.
         let image = Image::new_target_texture(
             TARGET_SIZE.x,
             TARGET_SIZE.y,
-            TextureFormat::Rgba8Unorm,
-            Some(TextureFormat::Rgba8UnormSrgb),
+            TextureFormat::Rgba8UnormSrgb,
+            None,
         );
         Self {
             target: world.resource_mut::<Assets<Image>>().add(image),
