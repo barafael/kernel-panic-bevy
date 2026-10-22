@@ -30,9 +30,9 @@ const LAYER: usize = 23;
 pub(super) const TARGET_SIZE: UVec2 = UVec2::new(2560, 1600);
 /// Turntable speed (rad/s).
 const SPIN: f32 = 0.25;
-/// Heights are drawn this much taller than they are, so a map's
-/// terraces read at a glance from above.
-const RELIEF: f32 = 2.0;
+/// Heights relative to true scale. Drawn true: the 2× that was meant to
+/// make terraces read from above made every map look spiky instead.
+const RELIEF: f32 = 1.0;
 /// One mesh vertex per this many preview texels.
 const STEP: usize = 2;
 
@@ -257,8 +257,8 @@ pub(super) fn relief(map: &str) -> Option<Relief> {
 }
 
 /// The preview as a terrain mesh: the longest side one unit long,
-/// centred on the origin, heights from the alpha ([`RELIEF`]× true
-/// scale), the colour shaded by a fixed light baked into the vertex
+/// centred on the origin, heights from the alpha at [`RELIEF`]× true
+/// scale, the colour shaded by a fixed light baked into the vertex
 /// colours (the material is unlit).
 fn terrain_mesh(image: &Image, relief: Relief) -> Option<Mesh> {
     let data = image.data.as_ref()?;
