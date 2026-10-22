@@ -312,6 +312,7 @@ pub(super) fn tick_weapon_fx(
                 prev_lead_pos,
                 bolt.direction,
                 Vec3::Y,
+                weapon_registry.by_kind(trail.weapon).damage.default,
                 &mut trail.seed,
                 &mut commands,
                 &mut ceg_ctx.materials,
@@ -620,6 +621,7 @@ pub(super) fn tick_weapon_fx(
                 pos,
                 dir,
                 Vec3::Y,
+                weapon_registry.by_kind(weapon).damage.default,
                 &mut proj.trail_seed,
                 &mut commands,
                 &mut ceg_ctx.materials,
@@ -868,6 +870,7 @@ fn trigger_delayed_hit(
         rgb,
         radius,
         ceg,
+        damage: weapon_def.damage.default,
     });
     commands.entity(entity).remove::<DelayedHit>();
 }

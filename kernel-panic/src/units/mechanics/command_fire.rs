@@ -829,6 +829,9 @@ pub fn process_command_fire(
                 rgb: faction.rgb_f32(),
                 radius: ability.weapon.params().radius,
                 ceg: Some(ceg),
+                damage: weapons
+                    .get(ability.weapon.weapon())
+                    .map_or(0.0, |def| def.damage.default),
             });
             // The blast is a `CGameHelper::Explosion` of the ability weapon.
             if let (Some(sounds), Some(def)) =
@@ -1599,6 +1602,7 @@ pub fn tick_sigterm_bombs(
             rgb: bomb.owner_faction.rgb_f32(),
             radius: sigterm.map_or(0.0, |def| def.area_of_effect),
             ceg: Some(CegKind::SystemSigterm),
+            damage: sigterm.map_or(0.0, |def| def.damage.default),
         });
         // `areadenial.lua` `Explosion`: the Signal is dead, so the zone
         // goes to `LastSignalTeam` and the first tick finds it an owner.

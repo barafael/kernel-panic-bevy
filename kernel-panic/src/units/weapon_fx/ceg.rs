@@ -313,6 +313,11 @@ pub(super) struct CegDelayedSpawn {
     /// cast) and then `Copy` into each, where this used to be one
     /// `Arc<str>` the timers shared by refcount.
     pub target_ceg: CegKind,
+    /// The child's `d` value: the spawner's `damage` expression
+    /// evaluated at this timer's index (`damage=0 i1` means the child
+    /// numbered *i* explodes with damage *i*), as upstream hands it to
+    /// `CCustomExplosionGenerator::Explosion`.
+    pub damage: f32,
 }
 
 /// One live `CStandardGroundFlash` (`Rendering/GroundFlash.cpp`): two
@@ -420,7 +425,9 @@ fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
 /// has a def, so this cannot fail and callers have no "no such CEG"
 /// fallback left to take: [`CegKind::NoEffect`] — the `[none]` section,
 /// which authors no layers — is how the data asks for nothing.
-/// `up` is the emitter's up vector: the CEG's
+/// `damage` is the exploding weapon's base damage, what `d`
+/// expressions evaluate against (§3.1); `up` is the emitter's up
+/// vector: the CEG's
 /// literal vectors and offsets (`emitVector=0, 1, 0`, `pos=0, 1, 0`)
 /// are authored for an upright emitter and turn with it, so a unit
 /// dying on a ramp bursts square to the ramp. `ground` puts the
@@ -432,6 +439,7 @@ pub(super) fn spawn_ceg(
     pos: Vec3,
     dir: Vec3,
     up: Vec3,
+    damage: f32,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -454,6 +462,7 @@ pub(super) fn spawn_ceg(
                 pos,
                 dir,
                 frame,
+                damage,
                 rng,
                 commands,
                 materials,
@@ -467,6 +476,7 @@ pub(super) fn spawn_ceg(
                 pos,
                 dir,
                 frame,
+                damage,
                 rng,
                 commands,
                 materials,
@@ -475,13 +485,14 @@ pub(super) fn spawn_ceg(
                 ceg_assets,
             ),
             EffectProperties::Spawner(s) => {
-                spawn_delayed(effect.count, s, pos, dir, up, commands);
+                spawn_delayed(effect.count, s, pos, dir, up, damage, commands);
             }
             EffectProperties::Spike(sp) => spawn_spikes(
                 effect.count,
                 sp,
                 pos,
                 frame,
+                damage,
                 rng,
                 commands,
                 materials,
@@ -526,6 +537,7 @@ fn spawn_particle_system(
     origin: Vec3,
     dir: Vec3,
     frame: Quat,
+    damage: f32,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -546,7 +558,12 @@ fn spawn_particle_system(
     let base_dir = match &props.emit_vector {
         EmitVector::Direction => dir,
         EmitVector::Literal(v) => {
-            frame * Vec3::from_array(v.eval(&EvalCtx::default())).normalize_or(Vec3::Y)
+            frame
+                * Vec3::from_array(v.eval(&EvalCtx {
+                    damage,
+                    ..Default::default()
+                }))
+                .normalize_or(Vec3::Y)
         }
     };
 
@@ -563,6 +580,7 @@ fn spawn_particle_system(
             .num_particles
             .eval(&EvalCtx {
                 index: fire_index,
+                damage,
                 ..Default::default()
             })
             .round()
@@ -571,7 +589,7 @@ fn spawn_particle_system(
         for particle_index in 0..n_particles {
             let ctx_base = EvalCtx {
                 index: fire_index * n_particles + particle_index,
-                damage: 0.0,
+                damage,
                 rand01: next_unit(rng),
             };
 
@@ -671,6 +689,7 @@ fn spawn_flame(
     origin: Vec3,
     spawn_dir: Vec3,
     frame: Quat,
+    damage: f32,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -697,6 +716,7 @@ fn spawn_flame(
         let mut roll = |e: &CegExpr| {
             e.eval(&EvalCtx {
                 rand01: next_unit(rng),
+                damage,
                 ..Default::default()
             })
         };
@@ -735,6 +755,7 @@ fn spawn_spikes(
     props: &SpikeProperties,
     origin: Vec3,
     frame: Quat,
+    damage: f32,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -768,7 +789,7 @@ fn spawn_spikes(
         let roll = |e: &CegExpr, rng: &mut u32| {
             e.eval(&EvalCtx {
                 index,
-                damage: 0.0,
+                damage,
                 rand01: next_unit(rng),
             })
         };
@@ -852,13 +873,17 @@ pub(super) fn tick_ceg_spikes(
 /// Queue `count` recursive spawns of `props.explosion_generator`, each
 /// with its own `delay`-derived countdown. Evaluated via the `iN`
 /// (per-spawn index) expression tokens so `delay=8 i8 count=240` fires
-/// at 8, 16, 24, … frames as upstream intends.
+/// at 8, 16, 24, … frames as upstream intends. The spawner's `damage`
+/// expression, evaluated at the same index, *is* the child's `d` value
+/// (`damage=0 i1` → child *i* explodes with damage *i*), which is how
+/// upstream's `CExpGenSpawner` hands damage to the child CEG (§3.1).
 fn spawn_delayed(
     count: u32,
     props: &SpawnerProperties,
     origin: Vec3,
     dir: Vec3,
     up: Vec3,
+    damage: f32,
     commands: &mut Commands,
 ) {
     // The child is a variant, so there is nothing to resolve here: the
@@ -870,6 +895,7 @@ fn spawn_delayed(
     for i in 0..count {
         let ctx = EvalCtx {
             index: i,
+            damage,
             ..Default::default()
         };
         let delay_frames = props.delay.eval(&ctx).det_max(0.0);
@@ -881,6 +907,7 @@ fn spawn_delayed(
             dir,
             up,
             target_ceg,
+            damage: props.damage.eval(&ctx),
         });
     }
     commands.spawn_batch(timers);
@@ -1137,6 +1164,7 @@ pub(super) fn tick_ceg_delayed_spawns(
             timer.pos,
             timer.dir,
             timer.up,
+            timer.damage,
             &mut rng,
             &mut commands,
             &mut materials,
@@ -1527,5 +1555,148 @@ mod tests {
         assert!((mean - 120.0).abs() < 2.0, "mean = {mean}, expected ~120");
         assert!(min < 102.0, "min = {min}, expected near 100");
         assert!(max > 138.0, "max = {max}, expected near 140");
+    }
+
+    /// `damage=0 i1` means the child numbered *i* explodes with damage
+    /// *i*: the spawner evaluates its own `damage` expression per index
+    /// and hands the result to the child as its `d` value (§3.1), so
+    /// the parent's damage never reaches a SIGTERM spawner's children.
+    #[test]
+    fn spawner_children_take_their_damage_from_the_index() {
+        let mut app = App::new();
+        let world = app.world_mut();
+        let layer = CegKind::SystemSigterm
+            .def()
+            .effects
+            .iter()
+            .find(|e| matches!(e.properties, EffectProperties::Spawner(_)))
+            .expect("system_sigterm opens with its spawner");
+        let EffectProperties::Spawner(props) = &layer.properties else {
+            unreachable!()
+        };
+        {
+            let mut commands = world.commands();
+            // A parent damage the expression ignores: if it leaked into
+            // the children instead of the index, none of these hold.
+            spawn_delayed(
+                layer.count,
+                props,
+                Vec3::ZERO,
+                Vec3::Y,
+                Vec3::Y,
+                500.0,
+                &mut commands,
+            );
+        }
+        world.flush();
+
+        let mut timers = world.query::<&CegDelayedSpawn>();
+        let spawned: Vec<(f32, f32)> = timers
+            .iter(world)
+            .map(|t| (t.delay_secs, t.damage))
+            .collect();
+        assert_eq!(spawned.len(), 20, "count=20 timers");
+        for (delay_secs, damage) in spawned {
+            // `delay=2 i3` puts child i at frame 2 + 3i, so the
+            // countdown identifies the index it was spawned with.
+            let index = (delay_secs * GAME_SPEED - 2.0) / 3.0;
+            assert!(
+                (damage - index).abs() < 1e-3,
+                "child at delay {delay_secs}s carries damage {damage}, expected its index {index}"
+            );
+        }
+    }
+
+    /// The `d` terms of `system_sigterm_fire` (§3.1): `gravity=0, -0.1
+    /// d0.01, 0` and `particleSpeed=12 d-.5` on the cloud, `particleLife
+    /// =110d-3` on the pillar. At damage 100 the cloud's gravity turns
+    /// upward (−0.1 + 1 per frame²) and its launch speed goes negative
+    /// (12 − 50 + r·5), and the pillar's life clamps to the 1-frame
+    /// floor; at damage 0 none of that happens.
+    #[test]
+    fn sigterm_fire_particles_evaluate_against_the_damage() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let fire = |damage: f32| -> Vec<(Vec3, f32, f32)> {
+            let mut app = App::new();
+            app.init_resource::<Assets<StandardMaterial>>()
+                .init_resource::<Assets<Image>>()
+                .init_resource::<CegRenderAssets>()
+                .init_resource::<S3OModelCache>();
+            app.world_mut()
+                .run_system_once(
+                    move |mut commands: Commands,
+                          mut materials: ResMut<Assets<StandardMaterial>>,
+                          mut images: ResMut<Assets<Image>>,
+                          mut model_cache: ResMut<S3OModelCache>,
+                          mut ceg_assets: ResMut<CegRenderAssets>| {
+                        let mut seed = 0x5197_7755;
+                        spawn_ceg(
+                            CegKind::SystemSigtermFire,
+                            Vec3::ZERO,
+                            Vec3::Y,
+                            Vec3::Y,
+                            damage,
+                            &mut seed,
+                            &mut commands,
+                            &mut materials,
+                            &mut images,
+                            &mut model_cache,
+                            &mut ceg_assets,
+                            None,
+                        );
+                    },
+                )
+                .unwrap();
+            let world = app.world_mut();
+            let mut particles = world.query::<&CegParticle>();
+            particles
+                .iter(world)
+                .map(|p| (p.gravity, p.velocity.length(), p.max_life))
+                .collect()
+        };
+
+        let at_100 = fire(100.0);
+        let (cloud, pillar): (Vec<_>, Vec<_>) = at_100
+            .into_iter()
+            .partition(|(gravity, ..)| gravity.y > 0.0);
+        assert_eq!(cloud.len(), 12, "numParticles=12 cloud squares");
+        assert_eq!(pillar.len(), 4, "count=4 pillar squares");
+        for (gravity, speed, _) in &cloud {
+            assert!(
+                (gravity.y - 0.9 * GAME_SPEED * GAME_SPEED).abs() < 1e-2,
+                "gravity = -0.1 + 100·0.01 per frame² → {gravity}"
+            );
+            // |12 − 50 + r·5| · 30 for r ∈ [0, 1).
+            assert!((990.0..=1140.0).contains(speed), "cloud speed {speed}");
+        }
+        for (gravity, _, max_life) in &pillar {
+            assert_eq!(*gravity, Vec3::ZERO, "pillar keeps gravity=0");
+            // 110 − 3·100 + r·48 < 0 → the det_max(1) frame floor.
+            assert!(
+                (max_life * GAME_SPEED - 1.0).abs() < 1e-3,
+                "pillar life clamps to 1 frame, got {max_life}s"
+            );
+        }
+
+        let at_0 = fire(0.0);
+        let (cloud, pillar): (Vec<_>, Vec<_>) =
+            at_0.into_iter().partition(|(gravity, ..)| gravity.y < 0.0);
+        assert_eq!(cloud.len(), 12);
+        assert_eq!(pillar.len(), 4);
+        for (gravity, speed, _) in &cloud {
+            assert!(
+                (gravity.y + 0.1 * GAME_SPEED * GAME_SPEED).abs() < 1e-2,
+                "damage 0 keeps the authored -0.1 per frame² → {gravity}"
+            );
+            assert!((360.0..=510.0).contains(speed), "cloud speed {speed}");
+        }
+        for (_, _, max_life) in &pillar {
+            let frames = max_life * GAME_SPEED;
+            assert!(
+                (110.0..158.0).contains(&frames),
+                "pillar life 110 + r·48 frames, got {frames}"
+            );
+        }
     }
 }

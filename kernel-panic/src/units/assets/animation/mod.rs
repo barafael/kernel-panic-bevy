@@ -1136,6 +1136,9 @@ fn dispatch_emit_sfx(
                 rgb: color.rgb_f32(),
                 radius: 8.0,
                 ceg: Some(ceg),
+                // A scripted `emit-sfx` has no weapon behind it, so its
+                // CEG's `d` expressions evaluate against 0 (§3.1).
+                damage: 0.0,
             });
             return;
         }
@@ -1156,6 +1159,7 @@ fn dispatch_emit_sfx(
         rgb,
         radius,
         ceg: None,
+        damage: 0.0,
     });
 }
 

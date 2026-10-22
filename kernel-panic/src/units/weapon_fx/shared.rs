@@ -142,6 +142,12 @@ pub struct BuildArcEvent {
 /// `up` is the exploding unit's up vector (tilted to the slope for a
 /// ground unit, straight up for a building or a blast with no unit):
 /// the CEG bursts square to it.
+///
+/// `damage` is the exploding weapon's base damage, the value upstream
+/// hands `CCustomExplosionGenerator::Explosion` and CEG `d` expressions
+/// evaluate against (`docs/ceg-in-source-plan.md` §3.1); a blast with
+/// no weapon behind it — a COB `emit-sfx`, the owner-coloured pop for a
+/// unit without an `ExplodeAs` — carries 0.
 #[derive(Clone, Debug)]
 pub struct ExplosionEvent {
     pub pos: Vec3,
@@ -149,6 +155,7 @@ pub struct ExplosionEvent {
     pub rgb: [f32; 3],
     pub radius: f32,
     pub ceg: Option<CegKind>,
+    pub damage: f32,
 }
 
 /// Event buffer drained by [`spawn::spawn_pending_explosions`]. Separate

@@ -358,6 +358,10 @@ pub fn death_system(
                     rgb: blast.rgb.unwrap_or_else(|| color.rgb_f32()),
                     radius: blast.radius,
                     ceg: blast.ceg,
+                    // The `ExplodeAs` weapon's base damage: upstream's
+                    // death explosion hands it to the CEG, so a bigger
+                    // bomb's `d` expressions read bigger (§3.1).
+                    damage: weapon_registry.by_kind(blast.weapon).damage.default,
                 });
             } else {
                 // Even units without an ExplodeAs get a small owner-
@@ -369,6 +373,7 @@ pub fn death_system(
                     rgb: color.rgb_f32(),
                     radius: 16.0,
                     ceg: None,
+                    damage: 0.0,
                 });
             }
 

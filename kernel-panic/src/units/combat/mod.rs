@@ -950,6 +950,7 @@ pub fn combat_system(
                     rgb: def.rgb_color,
                     radius: def.area_of_effect,
                     ceg: weapon_registry.ceg(id),
+                    damage: def.damage.default,
                 });
                 commands.entity(entity).insert((DebugBlasted, JustFired));
             }
