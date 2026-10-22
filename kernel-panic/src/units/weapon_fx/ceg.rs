@@ -39,6 +39,7 @@ use crate::rng;
 use crate::sim::{GAME_SPEED, RngStream, SimRng};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
+use crate::units::content::ceg_def::{CegTexture, resolve_texture as resolve_ceg_texture};
 use crate::units::content::cegs::{ALL_CEG_KINDS, CEG_KIND_COUNT, CegKind};
 
 /// Registry of every parsed CEG, indexed by [`CegKind`] rather than
@@ -288,54 +289,12 @@ impl CegRegistry {
 
     /// Re-shape the texture name the CEG authored (e.g. `circle`) into
     /// the on-disk filename via the same `RESOURCES.TDF` mapping the
-    /// weapon atlases use. The subset reproduced here covers every
-    /// texture referenced by CEGs KP actually ships; anything else
-    /// returns `None`.
+    /// weapon atlases use. The table is [`CegTexture`], and `none` or a
+    /// name it does not have resolves to nothing.
     pub fn resolve_texture(tex_name: &str) -> Option<&'static str> {
-        let name = tex_name.trim();
-        CEG_TEXTURES
-            .iter()
-            .find(|(alias, _)| alias.eq_ignore_ascii_case(name))
-            .map(|&(_, file)| file)
+        resolve_ceg_texture(tex_name).map(CegTexture::file)
     }
 }
-
-/// CEG texture alias → atlas file (`RESOURCES.TDF` subset). `none`
-/// and unknown aliases resolve to nothing.
-const CEG_TEXTURES: &[(&str, &str)] = &[
-    ("circle", "whitecircle.tga"),
-    ("hcircle", "hollowcircle.tga"),
-    ("square", "solidwhite.tga"),
-    ("squarehollow", "hollowsquare.tga"),
-    ("squaretrans", "transparentwhite.tga"),
-    ("hline", "horizontalline.tga"),
-    ("vline", "verticalline.tga"),
-    ("dosray", "dosray.tga"),
-    ("arrow", "arrow.tga"),
-    ("arrownoends", "arrownoends.tga"),
-    ("arrowflare", "arrowflare.tga"),
-    ("bytelaser", "bytemegabeam.tga"),
-    ("bytelasermid", "bytemegabeammid.tga"),
-    ("heart", "heart.tga"),
-    ("shockwave", "shockwave.tga"),
-    ("black", "black.tga"),
-    ("linkbeam", "linkbeam.tga"),
-    ("hexgrid", "hexgrid.tga"),
-    ("hexgridhole", "hexgridhole.tga"),
-    ("hexastar", "hexastar.tga"),
-    ("minelauncher", "hexastar.tga"),
-    ("pointertrail", "pointershottrail.tga"),
-    ("flowtrail", "flowtrail1.tga"),
-    ("firetrail", "firetrail.tga"),
-    ("sparkle", "sparkle.tga"),
-    ("bubbles", "bubbles.tga"),
-    ("lobedincantation", "lobedincantation.tga"),
-    // Engine default atlas (`ProjectileDrawer`): the beam body, its end
-    // caps (also `explspike` streaks) and the BeamLaser emitter flare.
-    ("laserfalloff", "laserfalloff.tga"),
-    ("laserend", "laserend.tga"),
-    ("flare", "flare.tga"),
-];
 
 // ─── Runtime components ─────────────────────────────────────────────
 

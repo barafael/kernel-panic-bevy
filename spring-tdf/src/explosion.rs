@@ -340,7 +340,7 @@ pub struct ExplosionDefs {
 }
 
 /// A single named explosion generator, composed of effect layers.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExplosionDef {
     /// The explosion name (e.g. "corruption_burst", "oldskool_shot1").
     pub id: String,
@@ -351,7 +351,7 @@ pub struct ExplosionDef {
 }
 
 /// One visual effect layer within an explosion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EffectLayer {
     /// Subsection name (e.g. "burst", "squarecloud", "tracers").
     pub name: String,
@@ -386,7 +386,7 @@ pub enum EffectClass {
 }
 
 /// Properties for a `CSimpleParticleSystem` effect.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ParticleProperties {
     pub texture: String,
     pub color_map: ColorMap,
@@ -410,7 +410,7 @@ pub struct ParticleProperties {
 }
 
 /// Properties for a `CBitmapMuzzleFlame` effect.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct FlameProperties {
     pub side_texture: String,
     pub front_texture: String,
@@ -427,7 +427,7 @@ pub struct FlameProperties {
 }
 
 /// Properties for a `CExpGenSpawner` (chains to another explosion).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SpawnerProperties {
     /// Name of the nested CEG, without the `custom:` prefix.
     pub explosion_generator: String,
@@ -441,7 +441,7 @@ pub struct SpawnerProperties {
 
 /// Properties for a `CExploSpikeProjectile` (`explspike`) effect —
 /// upstream `ExploSpikeProjectile.cpp`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SpikeProperties {
     pub length: CegExpr,
     pub width: CegExpr,
@@ -456,7 +456,7 @@ pub struct SpikeProperties {
 }
 
 /// Union of effect-specific properties.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EffectProperties {
     Particle(ParticleProperties),
     Flame(FlameProperties),
@@ -467,7 +467,7 @@ pub enum EffectProperties {
 }
 
 /// Ground flash effect (simple circle/ring on the terrain).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct GroundFlash {
     pub flash_size: f32,
     pub flash_alpha: f32,
