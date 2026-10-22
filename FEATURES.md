@@ -134,7 +134,8 @@ read the resulting state.
   Dispatch on a teleporter, Deploy / Pack Up on a Bug or Exploit).
   Pressing an armed command's hotkey again disarms it; Escape or a
   right-click anywhere disarms whatever command is armed, and that
-  right-click issues no order.
+  right-click issues no order. `Ctrl+A` selects every own living unit
+  (Spring's `select AllMap++_ClearSelection_SelectAll+`).
 - Resign from the Esc menu (asks once more). When a player leaves —
   resigns or loses its last factory — and an ally still plays, its units
   stay and every active ally sees a flashing TAKE button that hands them
@@ -798,7 +799,9 @@ context. Most variants animate over their frames at a fixed rate
 ## 26. Window & process
 
 - The game launches in borderless fullscreen on the primary monitor
-  at the desktop resolution.
+  at the desktop resolution. `F11` toggles borderless fullscreen /
+  windowed on native builds and the choice is saved with the other
+  settings; on the web the browser owns `F11`.
 - Alt-Tab returns to the desktop without crashing the game.
 - Closing the window (clicking the OS close affordance, Alt+F4)
   quits the game cleanly.

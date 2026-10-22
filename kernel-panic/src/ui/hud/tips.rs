@@ -39,6 +39,7 @@ use crate::interaction::selection::Selected;
 use crate::map_loading::MatchScopeAppExt;
 use crate::rendering::settings::{RenderSettings, VolumeKnob};
 use crate::sim::{DetFloat, SimTick};
+use crate::units::combat::Dying;
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::mechanics::network_buffer::PacketBuffer;
@@ -705,8 +706,10 @@ pub(crate) fn tips_list(c: &Census) -> Vec<Tip> {
             "Right click to issue default order\nKeep button down to move in formation",
             83,
         );
+        // The command panel sits on the left (`KP_CtrlPanel.txt`
+        // `x_pos 0`); upstream's text and its recording say "right".
         t.voiced(
-            "Left click an action on the menu in the right\nThen left click in the terrain\nTo give specific orders.",
+            "Left click an action on the menu on the left\nThen left click in the terrain\nTo give specific orders.",
             84,
         );
         t.voiced(
@@ -833,7 +836,7 @@ impl Plugin for TipsPlugin {
 /// widget hides for a spectator (replays, the attract demo).
 fn census(
     local: Option<&LocalTeam>,
-    units: &Query<(&UnitType, &TeamId, Has<Selected>)>,
+    units: &Query<(&UnitType, &TeamId, Has<Selected>), Without<Dying>>,
     tick: Option<&SimTick>,
     buffer: Option<&PacketBuffer>,
     setup: Option<&GameSetup>,
@@ -949,7 +952,9 @@ fn dispense_tips(
     mut dispenser: ResMut<TipDispenser>,
     settings: Res<RenderSettings>,
     local: Option<Res<LocalTeam>>,
-    units: Query<(&UnitType, &TeamId, Has<Selected>)>,
+    // Like the command panel and the TAKE button, a unit in its death
+    // animation is already gone to the census.
+    units: Query<(&UnitType, &TeamId, Has<Selected>), Without<Dying>>,
     tick: Option<Res<SimTick>>,
     buffer: Option<Res<PacketBuffer>>,
     setup: Option<Res<GameSetup>>,

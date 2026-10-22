@@ -43,7 +43,12 @@ impl Plugin for SelectionCorePlugin {
                 Update,
                 (
                     update_hover.in_set(SelectionSet::Hover),
-                    (handle_selection, select_same_type_on_screen).in_set(SelectionSet::Select),
+                    (
+                        handle_selection,
+                        select_same_type_on_screen,
+                        select_all_units,
+                    )
+                        .in_set(SelectionSet::Select),
                 ),
             );
     }
@@ -458,6 +463,46 @@ fn select_same_type_on_screen(
     }
 }
 
+/// `Ctrl+A`: select every own living unit on the map (Spring's default
+/// `bind Ctrl+a select AllMap++_ClearSelection_SelectAll+`), replacing
+/// the selection. Corpses are skipped (`Selected` is `AliveOnly`) and so
+/// are the Bad Blocks that became map features.
+#[allow(clippy::type_complexity)]
+fn select_all_units(
+    keys: Res<ButtonInput<KeyCode>>,
+    local: Res<crate::units::player::LocalTeam>,
+    selected_q: Query<Entity, With<Selected>>,
+    units: Query<
+        (Entity, &TeamId),
+        (
+            With<UnitType>,
+            Without<crate::units::combat::Dying>,
+            Without<crate::units::features::Feature>,
+        ),
+    >,
+    mut commands: Commands,
+) {
+    if !keys.just_pressed(KeyCode::KeyA)
+        || !keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+        || keys.any_pressed([
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+            KeyCode::ShiftLeft,
+            KeyCode::ShiftRight,
+        ])
+    {
+        return;
+    }
+    for e in &selected_q {
+        commands.entity(e).remove::<Selected>();
+    }
+    for (e, team) in &units {
+        if team.0 == local.0 {
+            commands.entity(e).insert(Selected);
+        }
+    }
+}
+
 pub(super) fn resolve_unit_hit(
     hits: &[(Entity, RayMeshHit)],
     unit_q: &Query<Entity, With<UnitType>>,
@@ -648,6 +693,61 @@ mod tests {
             }
         }
         world.run_system_once(handle_selection).unwrap();
+    }
+
+    /// `Ctrl+A` takes every own living unit and nothing else.
+    #[test]
+    fn ctrl_a_selects_every_own_living_unit() {
+        use crate::units::content::definitions::UnitKind;
+        let (mut world, bit) = selection_world();
+        let idle = world
+            .spawn((
+                UnitType(UnitKind::Byte),
+                TeamId(0),
+                GlobalTransform::default(),
+            ))
+            .id();
+        let dying = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                TeamId(0),
+                GlobalTransform::default(),
+                crate::units::combat::Dying { timer: 1.0 },
+            ))
+            .id();
+        let enemy = world
+            .spawn((
+                UnitType(UnitKind::Bit),
+                TeamId(1),
+                GlobalTransform::default(),
+                Selected,
+            ))
+            .id();
+        {
+            let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+            keys.press(KeyCode::ControlLeft);
+            keys.press(KeyCode::KeyA);
+        }
+        world.run_system_once(select_all_units).unwrap();
+        world.flush();
+        assert!(world.get::<Selected>(bit).is_some());
+        assert!(world.get::<Selected>(idle).is_some());
+        assert!(world.get::<Selected>(dying).is_none(), "corpses stay out");
+        assert!(
+            world.get::<Selected>(enemy).is_none(),
+            "the selection is replaced"
+        );
+        // A plain `A` (the Attack hotkey) is not it.
+        {
+            let mut keys = world.resource_mut::<ButtonInput<KeyCode>>();
+            keys.clear();
+            keys.release(KeyCode::ControlLeft);
+            keys.press(KeyCode::KeyA);
+        }
+        world.entity_mut(idle).remove::<Selected>();
+        world.run_system_once(select_all_units).unwrap();
+        world.flush();
+        assert!(world.get::<Selected>(idle).is_none());
     }
 
     /// A click consumed before selection (an order click, a command

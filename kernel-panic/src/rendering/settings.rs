@@ -234,6 +234,14 @@ impl RenderSettings {
         s
     }
 
+    /// F11 / the Settings page's Display row: windowed ↔ borderless
+    /// fullscreen. [`apply_render_settings`] pushes and saves it. (No
+    /// key on the web, where the browser owns F11.)
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn toggle_fullscreen(&mut self) {
+        self.fullscreen = !self.fullscreen;
+    }
+
     /// The camera's `Msaa`; an unsupported count (a saved file from
     /// another GPU, a dev override) falls back to off.
     pub fn msaa(&self, support: &MsaaSupport) -> Msaa {
@@ -351,6 +359,36 @@ impl RenderSettings {
             }
         }
         s
+    }
+}
+
+/// Spring's unmodified F11 opened the widget selector; here it flips
+/// the window mode. Native only: on the web the browser owns F11.
+#[cfg(not(target_arch = "wasm32"))]
+pub const FULLSCREEN_KEY: KeyCode = KeyCode::F11;
+
+/// F11 toggles borderless fullscreen / windowed, in the menu and in a
+/// match alike. Writes the resource only on the press, so change
+/// detection (and the save) fires once; the chat line's `swallow_keys`
+/// keeps the key from reaching here while typing.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn toggle_fullscreen_key(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut settings: ResMut<RenderSettings>,
+) {
+    if keys.just_pressed(FULLSCREEN_KEY)
+        && !keys.any_pressed([
+            KeyCode::ControlLeft,
+            KeyCode::ControlRight,
+            KeyCode::AltLeft,
+            KeyCode::AltRight,
+            KeyCode::ShiftLeft,
+            KeyCode::ShiftRight,
+            KeyCode::SuperLeft,
+            KeyCode::SuperRight,
+        ])
+    {
+        settings.toggle_fullscreen();
     }
 }
 
@@ -501,6 +539,30 @@ mod tests {
             },
             tips: false,
         };
+        assert_eq!(RenderSettings::from_text(&s.to_text()), s);
+    }
+
+    /// F11: the toggle flips the window mode, restores the windowed size
+    /// and survives the save.
+    #[test]
+    fn toggle_fullscreen_flips_window_mode() {
+        let mut s = RenderSettings {
+            fullscreen: true,
+            window_size: (1600, 900),
+            ..RenderSettings::default()
+        };
+        if !cfg!(target_arch = "wasm32") {
+            assert!(matches!(
+                s.window_mode(),
+                WindowMode::BorderlessFullscreen(_)
+            ));
+        }
+        s.toggle_fullscreen();
+        assert!(!s.fullscreen);
+        assert_eq!(s.window_mode(), WindowMode::Windowed);
+        if !cfg!(target_arch = "wasm32") {
+            assert_eq!(s.resolution().size(), Vec2::new(1600.0, 900.0));
+        }
         assert_eq!(RenderSettings::from_text(&s.to_text()), s);
     }
 

@@ -98,7 +98,7 @@ fn handle_unit_groups(
 }
 
 /// `1..=9` map to slots `0..=8`. `0` is intentionally unbound — Spring
-/// reserves it for "all units" via `Ctrl+A` (not implemented here).
+/// has no group 0; "all units" is `Ctrl+A` (`core::select_all_units`).
 fn digit_just_pressed(keys: &ButtonInput<KeyCode>) -> Option<(usize, u8)> {
     const DIGITS: [(KeyCode, u8); GROUP_COUNT] = [
         (KeyCode::Digit1, 1),
