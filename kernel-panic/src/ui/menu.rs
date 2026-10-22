@@ -1337,7 +1337,7 @@ fn maintain_launch_menu(
     mut commands: Commands,
     existing_root: Query<Entity, With<MenuRoot>>,
     windows: Query<&Window>,
-    mut last_page: Local<Option<MenuPage>>,
+    mut last_page: Local<Option<(MenuPage, UVec2)>>,
     inputs: LaunchMenuInputs,
 ) {
     let LaunchMenuInputs {
@@ -1353,26 +1353,29 @@ fn maintain_launch_menu(
         chat,
         preview,
     } = &inputs;
-    // A page redraws when it is entered, and when the configuration it
-    // shows (the skirmish setup's choice rows, the render settings, the
-    // readme scroll, the demo's map) changed under it.
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    // A page redraws when it is entered, when the window changed size
+    // (every size here is a share of its height), and when the
+    // configuration it shows (the skirmish setup's choice rows, the
+    // render settings, the readme scroll, the demo's map) changed under
+    // it.
+    let drawn = (*page, window.physical_size());
     let stale = config.is_changed()
         || settings.render.is_changed()
         || readme.is_changed()
         || demo.as_ref().is_some_and(|d| d.is_changed())
         || (*page == MenuPage::Multiplayer && (lobby.is_changed() || chat.is_changed()))
         || (*page == MenuPage::Replays && shelf.is_changed());
-    if last_page.is_some() && *last_page == Some(*page) && !existing_root.is_empty() && !stale {
+    if *last_page == Some(drawn) && !existing_root.is_empty() && !stale {
         return;
     }
-    *last_page = Some(*page);
+    *last_page = Some(drawn);
     for e in &existing_root {
         commands.entity(e).despawn();
     }
 
-    let Ok(window) = windows.single() else {
-        return;
-    };
     let (title_size, menu_size, page_size, _) = vsizes(window.height());
 
     let root = spawn_backdrop(&mut commands, MENU_GLASS);
@@ -2674,8 +2677,8 @@ fn esc_plates(networked: bool) -> [(&'static str, (f32, f32), Anchor, MenuAction
 
 #[allow(clippy::too_many_arguments)]
 /// What the Esc overlay was last drawn for: open, Settings, Audio,
-/// Resign asked, networked, the render settings.
-type EscMenuDrawn = (bool, bool, bool, bool, bool, RenderSettings);
+/// Resign asked, networked, the render settings, the window's size.
+type EscMenuDrawn = (bool, bool, bool, bool, bool, RenderSettings, UVec2);
 
 #[allow(clippy::too_many_arguments)]
 fn maintain_esc_menu(
@@ -2696,9 +2699,13 @@ fn maintain_esc_menu(
     if !esc_open.0 && resign_confirm.0 {
         resign_confirm.0 = false;
     }
+    let Ok(window) = windows.single() else {
+        return;
+    };
     // Redrawn when the overlay opens or closes, when it switches to or
-    // from its Settings page, and when a setting changed (its choice
-    // rows show the current pick).
+    // from its Settings page, when a setting changed (its choice rows
+    // show the current pick), and when the window changed size (its
+    // sizes are shares of the height).
     let now = (
         esc_open.0,
         esc_settings.0,
@@ -2706,6 +2713,7 @@ fn maintain_esc_menu(
         resign_confirm.0,
         networked(net.as_deref()),
         *settings.render,
+        window.physical_size(),
     );
     if *last == Some(now) {
         return;
@@ -2719,9 +2727,6 @@ fn maintain_esc_menu(
     if !esc_open.0 {
         return;
     }
-    let Ok(window) = windows.single() else {
-        return;
-    };
     let size = window.height() / 14.0;
     let root = spawn_backdrop(&mut commands, OVERLAY_GLASS);
 
@@ -2830,13 +2835,15 @@ struct StatsInputs<'w> {
     images: ResMut<'w, Assets<Image>>,
 }
 
-/// The game-over panel's redraw key: open, the result, networked, and
-/// with the Statistics page up its view, the samples and the window.
+/// The game-over panel's redraw key: open, the result, networked, the
+/// window's size, and with the Statistics page up its view and the
+/// samples.
 type GameOverDrawn = (
     bool,
     GameState,
     bool,
-    Option<(stats_page::StatsView, usize, UVec2)>,
+    UVec2,
+    Option<(stats_page::StatsView, usize)>,
 );
 
 #[allow(clippy::too_many_arguments)]
@@ -2854,14 +2861,15 @@ fn maintain_game_over(
     // fallen player's allies winning turns "You lost!" into "You won!".
     let networked = networked(net.as_deref());
     let window = windows.single().ok();
-    let page = (game_over_open.0 && inputs.view.open).then(|| {
-        (
-            *inputs.view,
-            inputs.stats.ticks.len(),
-            window.map_or(UVec2::ZERO, |w| w.physical_size()),
-        )
-    });
-    let now = (game_over_open.0, *game_state.get(), networked, page);
+    let page =
+        (game_over_open.0 && inputs.view.open).then(|| (*inputs.view, inputs.stats.ticks.len()));
+    let now = (
+        game_over_open.0,
+        *game_state.get(),
+        networked,
+        window.map_or(UVec2::ZERO, |w| w.physical_size()),
+        page,
+    );
     if *last == Some(now) {
         return;
     }
