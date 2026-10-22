@@ -277,7 +277,21 @@ pub fn in_weapon_range(
     ground_target: bool,
     map_gravity: f32,
 ) -> bool {
-    let reach = weapon_range_2d(weapon, target.y - aim_from.y, ground_target, map_gravity);
+    in_weapon_range_slack(weapon, aim_from, target, ground_target, map_gravity, 0.0)
+}
+
+/// [`in_weapon_range`] with `slack` elmos added to the reach: the chase's
+/// hold band for units that fold to move (see
+/// `combat::DEPLOY_HOLD_SLACK`). With `slack == 0` it is the fire test.
+pub fn in_weapon_range_slack(
+    weapon: &spring_tdf::WeaponDef,
+    aim_from: Vec3,
+    target: Vec3,
+    ground_target: bool,
+    map_gravity: f32,
+    slack: f32,
+) -> bool {
+    let reach = weapon_range_2d(weapon, target.y - aim_from.y, ground_target, map_gravity) + slack;
     aim_from.xz().distance_squared(target.xz()) <= reach * reach
 }
 

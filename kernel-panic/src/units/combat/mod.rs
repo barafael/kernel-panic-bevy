@@ -1541,27 +1541,6 @@ pub fn attack_ground_system(
         if nx_cast {
             continue;
         }
-        // Same deploy / opening gates as `combat_system`. Player-issued
-        // attack-ground orders MUST honour them too — otherwise the
-        // player can force-fire a Pointer that's still folding open or a
-        // byte whose blades haven't fanned yet, bypassing upstream's
-        // `AimWeapon1`-returns-0 contract. The gate probes the driver's
-        // fold state rather than AimScript.ready: a ground order on
-        // empty terrain never produces an AimTarget, so a ready gate
-        // would deadlock the shot behind an aim request that can't
-        // exist.
-        if deployable.is_some_and(|d| d.state != DeployState::Open) {
-            continue;
-        }
-        if pieces
-            .animator
-            .get(entity)
-            .ok()
-            .and_then(|a| a.driver.is_open())
-            .is_some_and(|open| !open)
-        {
-            continue;
-        }
         let (weapon, weapon_def) = resolve_weapon(
             weapon_binding,
             &unit_registry,
@@ -1624,6 +1603,28 @@ pub fn attack_ground_system(
                 crate::interaction::movement::MoveTarget,
                 crate::interaction::movement::MovePath,
             )>();
+        }
+
+        // Same deploy / opening gates as `combat_system`, on the shot
+        // only: the approach above runs while the unit is folded, as
+        // `CMobileCAI` does, but a player-issued attack-ground order must
+        // not force-fire a Pointer that is still folding open or a Byte
+        // whose blades haven't fanned yet, bypassing upstream's
+        // `AimWeapon1`-returns-0 contract. The gate probes the driver's
+        // fold state rather than AimScript.ready: a ground order on empty
+        // terrain never produces an AimTarget, so a ready gate would
+        // deadlock the shot behind an aim request that can't exist.
+        if deployable.is_some_and(|d| d.state != DeployState::Open) {
+            continue;
+        }
+        if pieces
+            .animator
+            .get(entity)
+            .ok()
+            .and_then(|a| a.driver.is_open())
+            .is_some_and(|open| !open)
+        {
+            continue;
         }
 
         // The reload is shared with `combat_system`: one weapon, one
@@ -1709,6 +1710,13 @@ pub fn attack_ground_system(
 /// per-frame pathfinding budget with identical repaths.
 pub const CHASE_REPATH_DISTANCE: f32 = 24.0;
 
+/// How far beyond its weapon's reach a holding unit that must unfold to
+/// fire (Pointer, Byte) lets a target drift before it folds up and gives
+/// chase again (elmos). Not upstream (which re-decides every 15-frame
+/// `SlowUpdate`); a small band so a target on the range line cannot make
+/// the unit fold and reopen (~1.75 s each) over and over.
+pub const DEPLOY_HOLD_SLACK: f32 = 24.0;
+
 /// Right-click attack order ([`AttackTargetOrder`]): chase `target` until
 /// inside weapon range, then hold and let [`combat_system`]'s auto-attack
 /// do the shooting.
@@ -1760,16 +1768,14 @@ pub fn attack_target_system(
         team,
     ) in &attackers
     {
-        // Same deploy / opening gates as `attack_ground_system`.
-        if deployable.is_some_and(|d| d.state != DeployState::Open) {
-            continue;
-        }
-        if animator
-            .and_then(|a| a.driver.is_open())
-            .is_some_and(|open| !open)
-        {
-            continue;
-        }
+        // No deploy / opening gate here: `CMobileCAI::ExecuteObjectAttack`
+        // chases and stops regardless of the script, and only the shot
+        // (`combat_system`'s `fire_blocked_by_deploy`, upstream's
+        // `AimWeapon1` returning 0 while folded) waits for the unit to be
+        // open. A Pointer folds two frames into any move, so gating the
+        // chase on `Open` left it driving blind to where the target used
+        // to be, never repathing and never stopping in range.
+        let folds = deployable.is_some() || animator.and_then(|a| a.driver.is_open()).is_some();
 
         // Resolve weapon range exactly like `combat_system`.
         let (_, weapon_def) = resolve_weapon(
@@ -1797,8 +1803,19 @@ pub fn attack_target_system(
         let target_mid = target_stats.map_or(0.0, |s| s.mid_y);
         let aim_from = stats.mid_pos(gtf);
         let aim_at = crate::units::components::mid_pos(target_gtf, target_mid);
+        // A folding unit that is already holding keeps holding until the
+        // target is `DEPLOY_HOLD_SLACK` beyond its reach: every restart
+        // of the chase costs it the fold and the ~1.75 s reopen, so a
+        // target wobbling on the range line must not thrash it. A moving
+        // one (or any other unit) stops exactly where the shot can fire.
+        let slack = if folds && !has_move {
+            DEPLOY_HOLD_SLACK
+        } else {
+            0.0
+        };
         let in_range = weapon_def.is_some_and(|w| {
-            w.range != 0.0 && aim::in_weapon_range(w, aim_from, aim_at, false, map_gravity)
+            w.range != 0.0
+                && aim::in_weapon_range_slack(w, aim_from, aim_at, false, map_gravity, slack)
         });
         // In range with the terrain, a feature or (`avoidfriendly`) an
         // ally in the way (the tests `combat_system` fires on): keep
@@ -3119,6 +3136,91 @@ mod tests {
         );
         app.world_mut().run_system_once(combat_system).unwrap();
         assert_eq!(app.world().resource::<PendingAttacks>().events.len(), 1);
+    }
+
+    /// A unit that folds to move (the Pointer's `Deployable`) is chased
+    /// and stopped like any other while closed — only its shot waits for
+    /// `Open` — and, once holding, it does not fold up again for a
+    /// target drifting less than `DEPLOY_HOLD_SLACK` past its reach.
+    #[test]
+    fn a_folded_unit_still_chases_and_stops_in_range() {
+        use crate::interaction::movement::MoveTarget;
+        let closed = || Deployable {
+            state: DeployState::Closed,
+        };
+
+        // Out of range and closed: the chase starts.
+        let (weapons, laser) = laser_registry();
+        let mut app = combat_app(weapons);
+        let target = live_enemy(&mut app, UnitKind::Byte, Vec3::new(400.0, 0.0, 0.0), 0.0);
+        let bit = spawn_bit_shooter(&mut app, laser);
+        app.world_mut()
+            .entity_mut(bit)
+            .insert((closed(), AttackTargetOrder { target }));
+        app.world_mut()
+            .run_system_once(attack_target_system)
+            .unwrap();
+        assert_eq!(
+            app.world().get::<MoveTarget>(bit).map(|t| t.0),
+            Some(Vec3::new(400.0, 0.0, 0.0)),
+            "closed and out of range: chase"
+        );
+
+        // In range, closed and moving: stop (the shot comes once open).
+        let (weapons, laser) = laser_registry();
+        let mut app = combat_app(weapons);
+        let target = live_enemy(&mut app, UnitKind::Byte, Vec3::new(230.0, 0.0, 0.0), 0.0);
+        let bit = spawn_bit_shooter(&mut app, laser);
+        app.world_mut().entity_mut(bit).insert((
+            closed(),
+            AttackTargetOrder { target },
+            MoveTarget(Vec3::new(230.0, 0.0, 0.0)),
+        ));
+        app.world_mut()
+            .run_system_once(attack_target_system)
+            .unwrap();
+        assert!(
+            app.world().get::<MoveTarget>(bit).is_none(),
+            "closed and in range: hold"
+        );
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert!(
+            app.world().resource::<PendingAttacks>().events.is_empty(),
+            "no shot while closed"
+        );
+
+        // Holding (no move) with the target 10 elmos past the 238.9 reach:
+        // inside the slack band, keep holding.
+        let (weapons, laser) = laser_registry();
+        let mut app = combat_app(weapons);
+        let target = live_enemy(&mut app, UnitKind::Byte, Vec3::new(249.0, 0.0, 0.0), 0.0);
+        let bit = spawn_bit_shooter(&mut app, laser);
+        app.world_mut()
+            .entity_mut(bit)
+            .insert((closed(), AttackTargetOrder { target }));
+        app.world_mut()
+            .run_system_once(attack_target_system)
+            .unwrap();
+        assert!(
+            app.world().get::<MoveTarget>(bit).is_none(),
+            "a drift inside the slack band does not restart the chase"
+        );
+
+        // The same drift for a unit that does not fold: chase at once.
+        let (weapons, laser) = laser_registry();
+        let mut app = combat_app(weapons);
+        let target = live_enemy(&mut app, UnitKind::Byte, Vec3::new(249.0, 0.0, 0.0), 0.0);
+        let bit = spawn_bit_shooter(&mut app, laser);
+        app.world_mut()
+            .entity_mut(bit)
+            .insert(AttackTargetOrder { target });
+        app.world_mut()
+            .run_system_once(attack_target_system)
+            .unwrap();
+        assert!(
+            app.world().get::<MoveTarget>(bit).is_some(),
+            "no slack for a unit that fires on the move"
+        );
     }
 
     /// `CCannon::FireImpl` on the fire side: the shell goes out toward

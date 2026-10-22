@@ -931,7 +931,7 @@ fn pointer_only_fires_fully_open() {
 
     // Next to team 0's Kernel, on its side of the map centre so the
     // ground between is the start area's.
-    let (pointer, target, nudge, away, far) = {
+    let (pointer, target, nudge, away, far, runner, runner_to) = {
         let world = h.world_mut();
         let kernel = world
             .query_filtered::<(&Transform, &TeamId), With<Homebase>>()
@@ -950,12 +950,18 @@ fn pointer_only_fires_fully_open() {
         let away = at(world, kernel + toward * 200.0 + side * 250.0);
         let nudge = at(world, kernel + toward * 200.0 + side * 251.0);
         let far = at(world, kernel + toward * 1100.0 + side * 250.0);
+        // Phase 5's runner: out of the Geometric's 1400 reach from
+        // `away` and wide of the first Byte's 512 MegaBeam, walking
+        // toward the Pointer's side while it closes in.
+        let p2 = at(world, kernel + toward * 1750.0 + side * 1100.0);
+        let runner_to = at(world, kernel + toward * 1050.0 + side * 1100.0);
         let mut state: SystemState<SpawnContext> = SystemState::new(world);
         let mut ctx = state.get_mut(world).expect("spawn context");
         let pointer = spawn_unit(UnitKind::Pointer, Faction::System, 0, p0, &mut ctx);
         let target = spawn_unit(UnitKind::Byte, Faction::System, 1, p1, &mut ctx);
+        let runner = spawn_unit(UnitKind::Byte, Faction::System, 1, p2, &mut ctx);
         state.apply(world);
-        (pointer, target, nudge, away, far)
+        (pointer, target, nudge, away, far, runner, runner_to)
     };
 
     let mut timeline: Vec<PointerTick> = Vec::new();
@@ -1037,6 +1043,32 @@ fn pointer_only_fires_fully_open() {
     }
     run(&mut h, 420, &mut timeline);
     let shots_total = timeline.iter().filter(|t| t.fired).count();
+    // Phase 5: an attack order on a target out of range that is itself
+    // walking away: the Pointer rolls after it folded (the chase keeps
+    // running while it is closed), stops once the runner is in reach,
+    // opens and fires — `CMobileCAI::ExecuteObjectAttack` with the
+    // script's `isOpen` gating only the shot.
+    {
+        let world = h.world_mut();
+        {
+            let mut commands = world.commands();
+            let mut ec = commands.entity(runner);
+            crate::interaction::replace_order(&mut ec, QueuedCommand::Move(runner_to));
+            let mut ec = commands.entity(pointer);
+            crate::interaction::clear_orders(&mut ec).insert(AttackTargetOrder { target: runner });
+        }
+        world.flush();
+    }
+    let chase_from = timeline.len();
+    run(&mut h, 1200, &mut timeline);
+    let shots_chase = timeline[chase_from..].iter().filter(|t| t.fired).count();
+    let runner_dist = {
+        let world = h.world_mut();
+        let mut q = world.query::<&Transform>();
+        let p = q.get(world, pointer).expect("pointer").translation;
+        let r = q.get(world, runner).expect("runner").translation;
+        p.distance(r)
+    };
 
     let dump = || {
         timeline
@@ -1060,6 +1092,11 @@ fn pointer_only_fires_fully_open() {
     assert!(
         shots_total > shots_idle,
         "no shot after moving:\n{}",
+        dump()
+    );
+    assert!(
+        shots_chase >= 1,
+        "no shot at the runner it had to chase (ends {runner_dist:.0} elmos off):\n{}",
         dump()
     );
     for t in &timeline {
