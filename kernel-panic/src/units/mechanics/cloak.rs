@@ -1,8 +1,11 @@
 //! Visibility: cloak + fog-of-war.
 //!
-//! Both systems are gated on [`FogEnabled`] (off by default: nothing
-//! turns fog on yet). When off, every unit stays `Visible` and gets
-//! `Spotted`.
+//! Both systems are gated on [`FogEnabled`], which
+//! [`sync_fog_enabled`] derives every tick: on for a seated player
+//! still in play, off for a spectator (a replay's viewer, the menu's
+//! attract demo) and for a player whose owner has left play — upstream's
+//! `CPlayer::StartSpectating` gives the defeated `spectatingFullView`.
+//! When off, every unit stays `Visible` and gets `Spotted`.
 //!
 //! Two compose-able visibility systems live here, both throttled to
 //! the same [`VISIBILITY_REFRESH_INTERVAL`] and both seen from the
@@ -40,15 +43,62 @@ use crate::units::lifecycle::bookkeeping::Detector;
 use crate::units::lifecycle::production::PendingFadeInstall;
 use crate::units::lifecycle::spawning::FadeMaterials;
 use crate::units::player::LocalTeam;
-use crate::units::teams::Alliances;
+use crate::units::teams::{Alliances, TeamFates};
 
 /// Master switch for fog-of-war / cloak-hiding from the [`LocalTeam`]'s
-/// perspective. Defaults to off and nothing enables it yet, so the
-/// visibility systems keep `Spotted` in sync but treat every team as
-/// friendly. Cloak *detection* (and the targeting rule it feeds) runs
-/// regardless.
+/// perspective, kept by [`sync_fog_enabled`]. Off, the visibility
+/// systems keep `Spotted` in sync but treat every team as friendly.
+/// Cloak *detection* (and the targeting rule it feeds) runs regardless.
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct FogEnabled(pub bool);
+
+/// Whether the local player sees through line of sight: seated and
+/// still in play. A spectator, a replay's viewer, the attract demo and a
+/// defeated or resigned owner see everything (`CPlayer::StartSpectating`
+/// sets `spectatingFullView`); a dropped owner who comes back
+/// (`TeamFates::rejoin`) is fogged again.
+pub fn fog_applies(local: LocalTeam, fates: &TeamFates) -> bool {
+    local.seat().is_some_and(|seat| !fates.is_dead(seat))
+}
+
+/// Keep [`FogEnabled`] at [`fog_applies`] (and off under `KP_NO_FOG`).
+/// Derived every tick rather than set once at match start: the
+/// networked seat arrives a frame after `begin_match`, and defeat and
+/// rejoin flip it mid-match. Written only on a change, so nothing
+/// downstream sees a changed resource every tick.
+pub fn sync_fog_enabled(
+    local: Res<LocalTeam>,
+    fates: Res<TeamFates>,
+    dev: Option<Res<crate::game_setup::DevOptions>>,
+    mut fog: ResMut<FogEnabled>,
+) {
+    let next = fog_applies(*local, &fates) && !dev.is_some_and(|d| d.no_fog);
+    if fog.0 != next {
+        fog.0 = next;
+    }
+}
+
+/// A hostile unit spawned (or cloaked) this tick starts hidden under
+/// fog instead of showing for the up-to-three ticks until the next
+/// visibility scan: a Bit stepping out of an unseen Socket, or a Logic
+/// Bomb laid in the dark, used to blink once. The scans take it from
+/// there (`Without<Cloaked>` / `With<Cloaked>` as they partition).
+#[allow(clippy::type_complexity)]
+pub fn hide_new_hostiles(
+    fog: Res<FogEnabled>,
+    local: Res<LocalTeam>,
+    alliances: Res<Alliances>,
+    mut fresh: Query<(&TeamId, &mut Visibility), Or<(Added<UnitType>, Added<Cloaked>)>>,
+) {
+    if !fog.0 {
+        return;
+    }
+    for (team, mut vis) in &mut fresh {
+        if !alliances.friendly(team.0, local.0) && *vis != Visibility::Hidden {
+            *vis = Visibility::Hidden;
+        }
+    }
+}
 
 /// Marker: this unit hides from enemies unless a detector is close.
 /// Logic Bombs carry it until they detonate; Worms drop it while
@@ -430,6 +480,120 @@ mod tests {
     use crate::units::assets::animation::PieceIndex;
     use crate::units::assets::model_fade::ModelRoot;
     use bevy::ecs::system::RunSystemOnce;
+
+    /// Fog is for a seated player in play: not a spectator, not an
+    /// owner who left, until it comes back.
+    #[test]
+    fn fog_applies_to_a_seated_player_in_play() {
+        let mut fates = TeamFates::default();
+        assert!(fog_applies(LocalTeam(1), &fates));
+        assert!(!fog_applies(
+            LocalTeam(crate::game_setup::SPECTATOR_TEAM),
+            &fates
+        ));
+        fates.leave(1);
+        assert!(!fog_applies(LocalTeam(1), &fates), "defeated: full view");
+        assert!(fog_applies(LocalTeam(0), &fates), "someone else left");
+        fates.rejoin(1);
+        assert!(fog_applies(LocalTeam(1), &fates));
+    }
+
+    /// Under fog a hostile unit is hidden the tick it appears; a friend
+    /// is not touched, and with fog off neither is.
+    #[test]
+    fn a_new_hostile_starts_hidden_under_fog() {
+        use crate::units::content::definitions::UnitKind;
+        let mut world = World::new();
+        world.insert_resource(FogEnabled(true));
+        world.insert_resource(LocalTeam(0));
+        world.insert_resource(Alliances::from_seats([(0, 0), (1, 1)]));
+        let enemy = world
+            .spawn((UnitType(UnitKind::Bit), TeamId(1), Visibility::default()))
+            .id();
+        let friend = world
+            .spawn((UnitType(UnitKind::Bit), TeamId(0), Visibility::default()))
+            .id();
+        world.run_system_once(hide_new_hostiles).unwrap();
+        assert_eq!(*world.get::<Visibility>(enemy).unwrap(), Visibility::Hidden);
+        assert_eq!(
+            *world.get::<Visibility>(friend).unwrap(),
+            Visibility::default()
+        );
+
+        let mut world = World::new();
+        world.insert_resource(FogEnabled(false));
+        world.insert_resource(LocalTeam(0));
+        world.insert_resource(Alliances::from_seats([(0, 0), (1, 1)]));
+        let enemy = world
+            .spawn((UnitType(UnitKind::Bit), TeamId(1), Visibility::default()))
+            .id();
+        world.run_system_once(hide_new_hostiles).unwrap();
+        assert_eq!(
+            *world.get::<Visibility>(enemy).unwrap(),
+            Visibility::default()
+        );
+    }
+
+    /// Fog on: an enemy beyond every friendly unit's `SightDistance` is
+    /// hidden and unspotted, one inside is visible and spotted, and a
+    /// friend is always both.
+    #[test]
+    fn fog_hides_what_no_friendly_unit_sees() {
+        use crate::units::content::definitions::UnitKind;
+        use crate::units::spatial::{SpatialEntry, SpatialIndex};
+        let mut world = World::new();
+        world.init_resource::<Time>();
+        world.insert_resource(FogRefreshTimer(VISIBILITY_REFRESH_INTERVAL));
+        world.insert_resource(FogEnabled(true));
+        world.insert_resource(LocalTeam(0));
+        world.insert_resource(Alliances::from_seats([(0, 0), (1, 1)]));
+        world.insert_resource(UnitRegistry::load());
+        let mut spatial = SpatialIndex::default();
+        let mut unit = |world: &mut World, kind, team, x: f32| {
+            let e = world
+                .spawn((
+                    UnitType(kind),
+                    TeamId(team),
+                    GlobalTransform::from_xyz(x, 0.0, 0.0),
+                    Visibility::default(),
+                ))
+                .id();
+            spatial.insert_for_test(SpatialEntry {
+                entity: e,
+                pos: Vec3::new(x, 0.0, 0.0),
+                hit_radius: 10.0,
+                mid_y: 0.0,
+                up: Vec3::Y,
+                team,
+                kind,
+                hp_positive: true,
+                is_flying: false,
+                cloaked: false,
+                detected_by: 0,
+                feature: false,
+            });
+            e
+        };
+        let kernel = unit(&mut world, UnitKind::Kernel, 0, 0.0);
+        let sight = world
+            .resource::<UnitRegistry>()
+            .sight_distance(UnitKind::Kernel);
+        assert!(sight > 0.0);
+        let near = unit(&mut world, UnitKind::Bit, 1, sight - 10.0);
+        let far = unit(&mut world, UnitKind::Bit, 1, sight + 100.0);
+        world.insert_resource(spatial);
+        world.run_system_once(update_fog_visibility).unwrap();
+        world.flush();
+        let state = |world: &World, e| {
+            (
+                *world.get::<Visibility>(e).unwrap(),
+                world.get::<Spotted>(e).is_some(),
+            )
+        };
+        assert_eq!(state(&world, kernel), (Visibility::Visible, true));
+        assert_eq!(state(&world, near), (Visibility::Visible, true));
+        assert_eq!(state(&world, far), (Visibility::Hidden, false));
+    }
 
     fn world_with_cloaked_unit() -> (World, Entity, Entity, Handle<StandardMaterial>) {
         let mut world = World::new();

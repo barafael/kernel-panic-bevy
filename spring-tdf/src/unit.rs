@@ -113,8 +113,14 @@ pub struct UnitDef {
     pub sight_distance: f32,
     /// Radar range (`RadarDistance=`).
     pub radar_distance: f32,
-    /// Seismic detection range.
+    /// Seismic detection range (`SeismicDistance=`): moving enemies
+    /// within it ping (the Worm's 1024).
     pub seismic_distance: f32,
+    /// `SeismicSignature=`, raw: how much a ping of this unit grows per
+    /// frame; `None` when absent. The engine default (`UnitDef.cpp:624`,
+    /// `sqrt(mass / 100)` for a unit with a MoveDef, else 0) needs the
+    /// move class, so the game's registry applies it.
+    pub seismic_signature: Option<f32>,
 
     // --- Categories ---
     /// Unit categories, space-separated (e.g. "FAST EDIBLE UNIT TARGET").
@@ -303,6 +309,9 @@ impl UnitDef {
             sight_distance: s.f32("sightdistance"),
             radar_distance: s.f32("radardistance"),
             seismic_distance: s.f32("seismicdistance"),
+            seismic_signature: s
+                .get("seismicsignature")
+                .and_then(|v| v.trim().parse().ok()),
 
             category: s.string("category"),
             no_chase_category: s.string("nochasecategory"),

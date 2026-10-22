@@ -392,10 +392,11 @@ impl CegExpr {
 
 /// The texture aliases behind the names a TDF or the code writes —
 /// upstream `RESOURCES.TDF`'s `kpsfx/` subset, the mapping the engine's
-/// `GetTexture` did. 34 of upstream's 47: every one the shipped CEGs
+/// `GetTexture` did. 35 of upstream's 47: every one the shipped CEGs
 /// (18), the weapon TDFs' `texture1` / `texture2` or a `meshes.rs` call
-/// reaches, plus `squaretrans`, `arrownoends` and `hexastar`, which
-/// upstream defines and the old table listed and nothing here names.
+/// reaches, the `[groundfx] seismic` cross, plus `squaretrans`,
+/// `arrownoends` and `hexastar`, which upstream defines and the old
+/// table listed and nothing here names.
 /// `gen_ceg_defs` panics rather than inventing a variant if a CEG names
 /// an alias this enum does not have.
 ///
@@ -494,6 +495,10 @@ pub enum CegTexture {
     LaserEnd,
     #[strum(serialize = "flare")]
     Flare,
+    /// `RESOURCES.TDF [groundfx] seismic`: the red cross a seismic ping
+    /// draws (`CSeismicGroundFlash`).
+    #[strum(serialize = "seismic")]
+    SeismicCross,
 }
 
 impl CegTexture {
@@ -542,6 +547,7 @@ impl CegTexture {
             Self::LaserFalloff => "laserfalloff.tga",
             Self::LaserEnd => "laserend.tga",
             Self::Flare => "flare.tga",
+            Self::SeismicCross => "seismiccross.tga",
         }
     }
 }

@@ -563,12 +563,12 @@ pub fn spawn_unit_facing(
     if kind.is_homebase() {
         commands.entity(unit_entity).insert(Homebase);
     }
-    // Why: visibility is now driven by `update_fog_visibility` from
-    // the [`crate::units::player::LocalTeam`] perspective. Friendlies get `Spotted` on the
-    // first fog tick (≤100 ms later); enemies stay un-spotted until
-    // a friendly observer enters sight. There's a sub-100 ms flash of
-    // a fresh enemy spawn before the next fog tick hides it — at the
-    // throttle cadence we use, indistinguishable from the spawn fade.
+    // Why: visibility is driven by `update_fog_visibility` from the
+    // [`crate::units::player::LocalTeam`] perspective. Friendlies get
+    // `Spotted` on the first fog tick (≤100 ms later); enemies stay
+    // un-spotted until a friendly observer enters sight, and
+    // `hide_new_hostiles` hides a fresh enemy the tick it appears so it
+    // does not flash before that scan.
     // Pointer is the only upstream unit whose Deployable cycle is
     // movement-gated ("drive closed, sit open"). Byte *does* have
     // `Open()` / `Close()` COB routines, but upstream's `byte.bos`

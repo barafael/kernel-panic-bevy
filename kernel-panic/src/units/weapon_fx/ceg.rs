@@ -74,6 +74,9 @@ pub(super) struct CegRenderAssets {
 pub(super) struct GroundFlashMaterials {
     pub ring: Handle<StandardMaterial>,
     pub flash: Handle<StandardMaterial>,
+    /// `[groundfx] seismic`: the cross of a seismic ping
+    /// (`super::seismic`), the one ground flash no CEG draws.
+    pub seismic: Handle<StandardMaterial>,
 }
 
 /// One (texture, `colorMap`) pair: the material its particles draw
@@ -160,6 +163,12 @@ impl CegRenderAssets {
         &self.palettes[index]
     }
 
+    /// The seismic cross's material, once [`Self::ground_flash_materials`]
+    /// has minted the set (`None` before that, and headless).
+    pub(super) fn seismic_material(&self) -> Option<&Handle<StandardMaterial>> {
+        self.ground_flash.as_ref().map(|m| &m.seismic)
+    }
+
     /// The ring and flash materials, loading their textures on first
     /// use; `None` when the bundle has no such textures (headless).
     fn ground_flash_materials(
@@ -177,7 +186,12 @@ impl CegRenderAssets {
         };
         let ring = material(CegTexture::SquareHollow)?;
         let flash = material(CegTexture::Square)?;
-        let found = GroundFlashMaterials { ring, flash };
+        let seismic = material(CegTexture::SeismicCross)?;
+        let found = GroundFlashMaterials {
+            ring,
+            flash,
+            seismic,
+        };
         self.ground_flash = Some(found.clone());
         Some(found)
     }
@@ -387,7 +401,7 @@ impl CegGroundFlash {
 
 /// A square of half-size `s` around `pos` spanned by `axes`, corners
 /// in `push_quad`'s `[bl, br, tr, tl]` order.
-fn ground_square(pos: Vec3, (x, z): (Vec3, Vec3), s: f32) -> [Vec3; 4] {
+pub(super) fn ground_square(pos: Vec3, (x, z): (Vec3, Vec3), s: f32) -> [Vec3; 4] {
     [
         pos + (-x - z) * s,
         pos + (x - z) * s,
@@ -413,7 +427,7 @@ pub(super) fn ground_flash_normal(ground: &Heightmap, pos: Vec3, quad_size: f32)
 /// World X and Z turned onto the plane with `normal` (the engine's
 /// `side1 = normal × X`, `side2 = side1 × normal`, as `(side2, −side1)`
 /// so flat ground gives X and Z back).
-fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
+pub(super) fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
     let side1 = normal.cross(Vec3::X).normalize_or(Vec3::NEG_Z);
     let side2 = side1.cross(normal).normalize_or(Vec3::X);
     (side2, -side1)
@@ -1432,6 +1446,7 @@ mod tests {
         world.resource_mut::<CegRenderAssets>().ground_flash = Some(GroundFlashMaterials {
             ring: ring.clone(),
             flash: flash.clone(),
+            seismic: flash.clone(),
         });
         let born = world.spawn(vbig_flash()).id();
         let mut mid = vbig_flash();

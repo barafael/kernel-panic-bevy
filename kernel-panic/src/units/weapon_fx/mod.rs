@@ -7,6 +7,7 @@
 pub(crate) mod batch;
 mod ceg;
 mod flight;
+pub mod seismic;
 mod shared;
 mod spawn;
 mod tick;
@@ -107,6 +108,7 @@ impl Plugin for WeaponFxPlugin {
             .register_required_components::<ceg::CegGroundFlash, MatchEntity>()
             .register_required_components::<ceg::CegSpike, MatchEntity>()
             .register_required_components::<ceg::CegDelayedSpawn, MatchEntity>()
+            .register_required_components::<seismic::SeismicPing, MatchEntity>()
             .add_systems(
                 FixedUpdate,
                 (
@@ -120,6 +122,7 @@ impl Plugin for WeaponFxPlugin {
                     ceg::tick_ceg_particles,
                     ceg::tick_ceg_flames,
                     ceg::tick_ceg_ground_flashes,
+                    seismic::tick_seismic_pings,
                     ceg::tick_ceg_spikes,
                     ceg::tick_ceg_delayed_spawns,
                     // Last: every ribbon has pushed its quads by now.

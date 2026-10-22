@@ -296,8 +296,12 @@ impl Plugin for UnitsPlugin {
                         animation::sync_muzzle_pieces,
                         combat::sync_byte_fold_state,
                         animation::decay_death_particles,
+                        cloak::sync_fog_enabled,
+                        cloak::hide_new_hostiles,
                         cloak::update_cloak_visibility,
                         cloak::update_fog_visibility,
+                        // Reads the line-of-sight verdict just written.
+                        weapon_fx::seismic::spawn_seismic_pings,
                         cloak::install_cloak_fade_materials,
                         cloak::restore_cloak_fade_materials,
                         team_colors::recolor_taken_units,

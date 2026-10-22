@@ -633,6 +633,42 @@ fn dyn_damage_multiplier_flat_when_exp_zero() {
 
 // ── Unit tests: UnitDef extraction ─────────────────────────────────
 
+/// `SeismicSignature` is kept raw (the engine default needs the move
+/// class) and `SeismicDistance` is a plain range.
+#[test]
+fn seismic_fields_parse_raw() {
+    let worm = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=worm;
+    SeismicDistance=1024;
+    SeismicSignature=0;
+}
+"#,
+    )
+    .unwrap();
+    let packet = Tdf::parse(
+        r#"
+[UNITINFO]
+{
+    Unitname=packet;
+    SeismicSignature=.5;
+}
+"#,
+    )
+    .unwrap();
+    let flow = Tdf::parse("[UNITINFO]\n{\n    Unitname=flow;\n}\n").unwrap();
+    let worm = UnitDefs::from_tdf(&worm).get("worm").cloned().unwrap();
+    assert_eq!(worm.seismic_distance, 1024.0);
+    assert_eq!(worm.seismic_signature, Some(0.0));
+    let packet = UnitDefs::from_tdf(&packet).get("packet").cloned().unwrap();
+    assert_eq!(packet.seismic_distance, 0.0);
+    assert_eq!(packet.seismic_signature, Some(0.5));
+    let flow = UnitDefs::from_tdf(&flow).get("flow").cloned().unwrap();
+    assert_eq!(flow.seismic_signature, None);
+}
+
 #[test]
 fn unit_def_from_fbi_basic() {
     let tdf = Tdf::parse(

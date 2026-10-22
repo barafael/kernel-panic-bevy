@@ -126,6 +126,14 @@ struct KindData {
     weapon: Option<WeaponKind>,
     /// See [`UnitRegistry::weapon2`].
     weapon2: Option<WeaponKind>,
+    /// See [`UnitRegistry::seismic_signature`].
+    seismic_signature: f32,
+}
+
+/// `UnitDef::mass` (`UnitDef.cpp:351`): FBI `Mass`, defaulting to the
+/// metal cost, clamped to `[1, 1e6]`.
+fn mass_of(d: &UnitDef) -> f32 {
+    d.mass.unwrap_or(d.build_cost_metal).det_clamp(1.0, 1e6)
 }
 
 /// The weapon a unit fights with, from its FBI (see
@@ -201,20 +209,35 @@ impl UnitRegistry {
             .collect();
         let kinds = defs
             .iter()
-            .map(|d| KindData {
-                move_def: d
+            .map(|d| {
+                let move_def = d
                     .as_ref()
                     .filter(|d| !d.can_fly && !d.movement_class.is_empty())
                     .and_then(|d| move_classes.def_for(&d.movement_class))
-                    .map(|class| MoveDefParams::from_class(&class)),
-                max_slope_ratio: spring_pathfinding::max_slope_from_degrees(
-                    d.as_ref()
-                        .map(|d| d.max_slope)
-                        .filter(|&deg| deg > 0.0)
-                        .unwrap_or(DEFAULT_MAX_SLOPE_DEGREES),
-                ),
-                weapon: d.as_ref().and_then(fighting_weapon),
-                weapon2: d.as_ref().and_then(|d| WeaponKind::find(&d.weapon2)),
+                    .map(|class| MoveDefParams::from_class(&class));
+                KindData {
+                    move_def,
+                    max_slope_ratio: spring_pathfinding::max_slope_from_degrees(
+                        d.as_ref()
+                            .map(|d| d.max_slope)
+                            .filter(|&deg| deg > 0.0)
+                            .unwrap_or(DEFAULT_MAX_SLOPE_DEGREES),
+                    ),
+                    weapon: d.as_ref().and_then(fighting_weapon),
+                    weapon2: d.as_ref().and_then(|d| WeaponKind::find(&d.weapon2)),
+                    // `UnitDef.cpp:624-633`: an unset signature is
+                    // `sqrt(mass / 100)` for a unit with a ground MoveDef
+                    // (every KP class is a KBot to the engine), else 0.
+                    // Every shipped KP mobile declares its own; the rule
+                    // is here for a def that does not.
+                    seismic_signature: d.as_ref().map_or(0.0, |d| {
+                        d.seismic_signature.unwrap_or(if move_def.is_some() {
+                            libm::sqrtf(mass_of(d) / 100.0)
+                        } else {
+                            0.0
+                        })
+                    }),
+                }
             })
             .collect();
         // `unrestricted`: the gate's answer for an attacker without an
@@ -445,9 +468,7 @@ impl UnitRegistry {
     /// `UnitDef::mass` (`UnitDef.cpp:351`): FBI `Mass`, defaulting to
     /// the metal cost, clamped to `[1, 1e6]`.
     pub fn mass(&self, kind: UnitKind) -> f32 {
-        self.def(kind)
-            .map_or(1.0, |d| d.mass.unwrap_or(d.build_cost_metal))
-            .det_clamp(1.0, 1e6)
+        self.def(kind).map_or(1.0, mass_of)
     }
 
     /// Collision radius (elmos) in the plane — what unit-unit
@@ -598,6 +619,22 @@ impl UnitRegistry {
         self.def(kind).map_or(0.0, |d| d.sight_distance)
     }
 
+    /// Seismic detector range in elmos (FBI `SeismicDistance`): a
+    /// hostile ground unit moving under an order inside it pings for
+    /// the detector's ally team (`CUnit::DoSeismicPing`). Only the Worm
+    /// (1024) has one; zero for everything else.
+    pub fn seismic_distance(&self, kind: UnitKind) -> f32 {
+        self.def(kind).map_or(0.0, |d| d.seismic_distance)
+    }
+
+    /// FBI `SeismicSignature` with the engine default applied: how far
+    /// (elmos per frame) the cross of this unit's seismic ping grows,
+    /// which is also its strength; zero never pings (the Worm itself,
+    /// the flyers, the buildings).
+    pub fn seismic_signature(&self, kind: UnitKind) -> f32 {
+        self.kind(kind).seismic_signature
+    }
+
     /// HP per second regenerated once a unit has been idle for `idle_time`
     /// (FBI `IdleAutoHeal`, engine default 10). Zero means the unit never
     /// idle-heals.
@@ -737,6 +774,77 @@ mod tests {
         };
         defs.units.insert(kind.unitname().to_string(), def);
         UnitRegistry::for_test(defs)
+    }
+
+    /// The shipped seismic data: only the Worm listens (1024), and the
+    /// signatures are the FBIs' — the Worm's own is 0, so a Worm never
+    /// pings another.
+    #[test]
+    fn seismic_data_is_the_fbis() {
+        let reg = UnitRegistry::load();
+        for kind in ALL_UNIT_KINDS {
+            let expected = if *kind == UnitKind::Worm { 1024.0 } else { 0.0 };
+            assert_eq!(reg.seismic_distance(*kind), expected, "{kind:?} range");
+        }
+        let signature = |k| reg.seismic_signature(k);
+        assert_eq!(signature(UnitKind::Worm), 0.0);
+        assert_eq!(signature(UnitKind::Packet), 0.5);
+        assert_eq!(signature(UnitKind::Virus), 0.5);
+        assert_eq!(signature(UnitKind::Bit), 1.0);
+        assert_eq!(signature(UnitKind::Bug), 1.0);
+        assert_eq!(signature(UnitKind::Dos), 2.0);
+        assert_eq!(signature(UnitKind::Pointer), 2.0);
+        assert_eq!(signature(UnitKind::Byte), 2.5);
+        assert_eq!(signature(UnitKind::Connection), 2.5);
+        assert_eq!(signature(UnitKind::Assembler), 3.0);
+        assert_eq!(signature(UnitKind::Trojan), 3.0);
+        assert_eq!(signature(UnitKind::Gateway), 3.0);
+        for still in [
+            UnitKind::Flow,
+            UnitKind::Socket,
+            UnitKind::Kernel,
+            UnitKind::LogicBomb,
+            UnitKind::Exploit,
+        ] {
+            assert_eq!(signature(still), 0.0, "{still:?}");
+        }
+    }
+
+    /// `UnitDef.cpp:624-633` for a def without a signature: a ground
+    /// mover gets `sqrt(mass / 100)`, a flyer or a building 0.
+    #[test]
+    fn seismic_signature_defaults_from_the_mass() {
+        let table = super::super::moveinfo::MoveClassTable::load();
+        let mut defs = UnitDefs::default();
+        defs.units.insert(
+            "bit".into(),
+            UnitDef {
+                movement_class: "LIGHT".into(),
+                build_cost_metal: 400.0,
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "flow".into(),
+            UnitDef {
+                movement_class: "LIGHT".into(),
+                can_fly: true,
+                mass: Some(900.0),
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "socket".into(),
+            UnitDef {
+                build_cost_metal: 400.0,
+                ..UnitDef::default()
+            },
+        );
+        let reg = UnitRegistry::from_defs(defs, table);
+        assert_eq!(reg.seismic_signature(UnitKind::Bit), 2.0);
+        assert_eq!(reg.seismic_signature(UnitKind::Flow), 0.0);
+        assert_eq!(reg.seismic_signature(UnitKind::Socket), 0.0);
+        assert_eq!(reg.seismic_signature(UnitKind::Worm), 0.0, "no def at all");
     }
 
     /// `DamageModifier` is read verbatim: the `0.000001` spawn

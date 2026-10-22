@@ -57,6 +57,14 @@ pub struct Detector {
     pub radius: f32,
 }
 
+/// FBI `SeismicDistance > 0`: a hostile ground unit moving under an
+/// order within `radius` pings for this unit's ally team
+/// (`weapon_fx::seismic`). The Worm, at 1024.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct SeismicDetector {
+    pub radius: f32,
+}
+
 /// The kind's primary weapon never auto-acquires: unarmed (no weapon,
 /// BuildLaser only, unregistered TDF, `range=0`) or command-fire (NX
 /// Flag, Infection, …). `combat_system` skips these instead of walking
@@ -96,6 +104,10 @@ pub fn tag_unit_kinds(
         let radar = unit_registry.radar_distance(kind);
         if radar > 0.0 {
             entity.insert(Detector { radius: radar });
+        }
+        let seismic = unit_registry.seismic_distance(kind);
+        if seismic > 0.0 {
+            entity.insert(SeismicDetector { radius: seismic });
         }
         // Same resolution `combat_system` applies: `unit_registry.weapon`
         // already applies `CanAttack` and drops the build lasers; a name

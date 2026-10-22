@@ -948,7 +948,9 @@ impl GroundMover {
         }
     }
 
-    fn is_slow_update(&self) -> bool {
+    /// This frame is one of the mover's `SlowUpdate`s (every 15, staggered
+    /// per unit) — the cadence of its seismic pings as well.
+    pub fn is_slow_update(&self) -> bool {
         self.frame.is_multiple_of(SLOW_UPDATE_RATE)
     }
 }

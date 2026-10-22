@@ -206,6 +206,9 @@ pub struct DevOptions {
     /// (Bevy's `NoIndirectDrawing` on the camera) instead of the
     /// GPU-driven indirect path; the other half of that bisect.
     pub no_indirect: bool,
+    /// `KP_NO_FOG=1`: a seated player sees the whole map (HUD
+    /// screenshots, profiling runs); see `cloak::sync_fog_enabled`.
+    pub no_fog: bool,
 }
 
 impl DevOptions {
@@ -267,6 +270,7 @@ impl DevOptions {
             bot_enemy: var("KP_BOT_ENEMY").is_some_and(|v| v != "0"),
             no_bindless: var("KP_NO_BINDLESS").is_some_and(|v| v != "0"),
             no_indirect: var("KP_NO_INDIRECT").is_some_and(|v| v != "0"),
+            no_fog: var("KP_NO_FOG").is_some_and(|v| v != "0"),
         }
     }
 }

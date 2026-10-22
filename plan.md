@@ -466,7 +466,13 @@ targeting quality.
 
 ---
 
-## 6. Fog of War — ✅ Implemented, gated off
+## 6. Fog of War — ✅ Implemented, on for seated players (2026-10-22)
+
+Status: `cloak::sync_fog_enabled` now derives `FogEnabled` every tick —
+on for a seated player still in play, off for spectators, replays, the
+attract demo and defeated owners — and `hide_new_hostiles` closes the
+spawn flash. The Worm's seismic pings (`weapon_fx::seismic`) ride on it.
+The notes below are the design as it was gated.
 
 `cloak::update_fog_visibility` + `update_cloak_visibility` implement
 active LoS from the [`PlayerTeam`]'s perspective: non-cloaked enemy

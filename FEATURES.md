@@ -772,15 +772,29 @@ A port of upstream's Lua AI (`KPAI.lua`, in its "Fair KPAI" flavour).
   600–1000 elmos away; Exploits pack back up when nothing is within
   1100 or an enemy closes inside 500.
 
-## 24. Fog of war (currently neutered)
+## 24. Fog of war
 
-- The fog system is wired up but every spawn marks the unit visible,
-  so in-game everything is always visible regardless of who controls
-  the team (`Spotted` blanket-applied at spawn).
-- When re-enabled: cloaked units stay hidden until a detector is in
-  range; non-cloaked enemy units stay hidden until any player-team
-  unit comes within their FBI `SightDistance`, then visible
-  permanently (memory-only "spotted-once" fog model).
+- Active line of sight from the seated player's side, units only
+  (the terrain is always lit): an enemy unit is drawn, picked, tooltipped
+  and shown on the minimap only while inside some allied unit's FBI
+  `SightDistance`; it goes dark again when every observer leaves
+  (`cloak::update_fog_visibility`, no memory). A hostile spawned out of
+  sight never flashes (`hide_new_hostiles`). Cloaked enemies follow
+  §17's detector rule instead.
+- Fog is on for a seated player still in play and off for a spectator,
+  a replay's viewer, the menu's attract demo and a player whose owner
+  resigned or was taken out (upstream's `spectatingFullView`); a dropped
+  owner who returns is fogged again. `KP_NO_FOG=1` lifts it for
+  screenshot and profiling runs. The AI never looks at it.
+- **Seismic pings** (`weapon_fx::seismic`): a hostile ground unit moving
+  under an order within a friendly Worm's `SeismicDistance` (1024, terrain
+  does not block) pings on each of its slow updates, twice a second: a red
+  cross on the ground up to 48 elmos off its true spot, growing by the
+  unit's FBI `SeismicSignature` per frame (Bit 1, Pointer 2, Byte 2.5,
+  constructors 3, Packets ½; the Worm itself 0, so Worms never give each
+  other away) for a second and fading over its second half. Shown only
+  for units the player cannot see; it reveals nothing to targeting, as
+  upstream (`CUnit::DoSeismicPing`, `CSeismicGroundFlash`).
 
 ## 25. Cursor sprites
 
