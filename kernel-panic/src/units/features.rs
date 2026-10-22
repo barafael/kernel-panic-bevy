@@ -63,6 +63,25 @@ impl Feature {
     pub fn collision_radius(&self) -> f32 {
         self.def.footprint_x.max(self.def.footprint_z) as f32 * 8.0
     }
+
+    /// Whether `point` lies on the footprint of this feature standing
+    /// at `at` (a click on it: the picking ray only knows units and
+    /// terrain, so a feature is found by where it stands).
+    pub fn covers(&self, at: Vec3, point: Vec3) -> bool {
+        (point.x - at.x).abs() <= self.def.footprint_x as f32 * 8.0
+            && (point.z - at.z).abs() <= self.def.footprint_z as f32 * 8.0
+    }
+}
+
+/// The clearable feature whose footprint `point` lies on, if any.
+pub fn clearable_feature_at<'a>(
+    point: Vec3,
+    features: impl IntoIterator<Item = (Entity, &'a Feature, &'a Transform)>,
+) -> Option<Entity> {
+    features
+        .into_iter()
+        .find(|(_, f, tf)| f.def.clearable && f.covers(tf.translation, point))
+        .map(|(e, ..)| e)
 }
 
 /// How much of a feature builders have cleared away, 0 → 1

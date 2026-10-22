@@ -139,6 +139,142 @@ pub struct ClearingFeature {
     pub at: Vec3,
 }
 
+/// A constructor's running clear order (`CBuilderCAI::ExecuteReclaim`
+/// on a feature or an area): [`start_clearing`] walks it into build
+/// range, hands the feature to [`ClearingFeature`] / [`clear_features`]
+/// and, for an area, picks the next feature once one is gone. Ends by
+/// removing itself (feature gone, area empty, walk failed).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+#[component(storage = "SparseSet")]
+pub enum ClearOrder {
+    Feature {
+        feature: Entity,
+    },
+    Area {
+        center: Vec3,
+        radius: f32,
+        /// The feature being worked, until it is gone.
+        current: Option<Entity>,
+    },
+}
+
+/// `CBuilderCAI::IsInBuildRange(obj->pos, obj->buildeeRadius)` for a
+/// feature: the builder's `BuildDistance` plus the feature's collision
+/// radius.
+pub fn clear_range(registry: &UnitRegistry, builder: UnitKind) -> f32 {
+    registry.build_distance(builder) + crate::units::features::Feature::HIT_RADIUS
+}
+
+/// `CBuilderCAI::FindReclaimTarget` for an area clear: the clearable,
+/// standing feature inside the circle nearest the builder, ties by id.
+/// `candidates` is a feature's (entity, position, id, clearable).
+pub fn nearest_clearable(
+    center: Vec3,
+    radius: f32,
+    builder: Vec3,
+    candidates: impl IntoIterator<Item = (Entity, Vec3, NetId, bool)>,
+) -> Option<Entity> {
+    candidates
+        .into_iter()
+        .filter(|(_, pos, _, clearable)| {
+            *clearable && flat_dist_sq(*pos, center) <= radius * radius
+        })
+        .min_by(|(_, a, ia, _), (_, b, ib, _)| {
+            flat_dist_sq(*a, builder)
+                .total_cmp(&flat_dist_sq(*b, builder))
+                .then(ia.cmp(ib))
+        })
+        .map(|(e, ..)| e)
+}
+
+/// Walk every constructor's [`ClearOrder`] (`CBuilderCAI::ExecuteReclaim`):
+/// resolve the feature (an area's nearest clearable one, re-picked when
+/// the worked one is gone), end the order when there is none, walk into
+/// [`clear_range`] of it (the goal refreshed only when it drifts past
+/// `CHASE_REPATH_DISTANCE`, as a chase), and in range stop and hand it
+/// to [`clear_features`] as a [`ClearingFeature`]. Builders go in id
+/// order; a stunned one does nothing.
+#[allow(clippy::type_complexity)]
+pub fn start_clearing(
+    mut builders: Query<
+        (
+            Entity,
+            &Transform,
+            &UnitType,
+            &mut ClearOrder,
+            Option<&ClearingFeature>,
+            Option<&MoveTarget>,
+            &NetId,
+        ),
+        (Without<Dying>, Without<Stunned>),
+    >,
+    features: Query<(&crate::units::features::Feature, &Transform, &NetId)>,
+    spatial: Res<SpatialIndex>,
+    registry: Res<UnitRegistry>,
+    mut commands: Commands,
+) {
+    for (builder, tf, kind, mut order, clearing, move_target, _) in
+        builders.iter_mut().sort::<&NetId>()
+    {
+        let here = tf.translation;
+        let target = match *order {
+            ClearOrder::Feature { feature } => features.contains(feature).then_some(feature),
+            ClearOrder::Area {
+                center,
+                radius,
+                current,
+            } => match current.filter(|f| features.contains(*f)) {
+                Some(f) => Some(f),
+                None => {
+                    let mut found = Vec::new();
+                    spatial.query_radius(center, radius, |e| {
+                        if e.feature
+                            && e.hp_positive
+                            && let Ok((feature, _, id)) = features.get(e.entity)
+                        {
+                            found.push((e.entity, e.pos, *id, feature.def.clearable));
+                        }
+                    });
+                    let next = nearest_clearable(center, radius, here, found);
+                    if let ClearOrder::Area { current, .. } = &mut *order {
+                        *current = next;
+                    }
+                    next
+                }
+            },
+        };
+        let Some(feature) = target else {
+            commands
+                .entity(builder)
+                .remove::<(ClearOrder, ClearingFeature, MoveTarget, MovePath)>();
+            continue;
+        };
+        let Ok((_, feature_tf, _)) = features.get(feature) else {
+            continue;
+        };
+        let at = feature_tf.translation;
+        let range = clear_range(&registry, kind.0);
+        if flat_dist_sq(here, at) > range * range {
+            if clearing.is_some() {
+                commands.entity(builder).remove::<ClearingFeature>();
+            }
+            let stale = move_target
+                .is_none_or(|t| t.0.distance(at) > crate::units::combat::CHASE_REPATH_DISTANCE);
+            if stale {
+                commands.entity(builder).insert(MoveTarget(at));
+            }
+            continue;
+        }
+        let mut ec = commands.entity(builder);
+        if move_target.is_some() {
+            ec.remove::<(MoveTarget, MovePath)>();
+        }
+        if clearing.is_none_or(|c| c.feature != feature) {
+            ec.insert(ClearingFeature { feature, at });
+        }
+    }
+}
+
 /// Reach beyond a site's half-diagonal the feature scan covers: a 2×2
 /// feature's half-diagonal, with margin.
 const FEATURE_FOOTPRINT_REACH: f32 = 32.0;
@@ -430,8 +566,8 @@ pub fn start_construction(
 /// feature is gone when all of it is — no `featureDead` left
 /// (`DeleteFeature`), nothing gained (Kernel Panic has no metal). One
 /// builder works a feature per frame (`multiReclaim=0`), the first in
-/// id order. A builder whose build order went, or whose feature did,
-/// stops.
+/// id order. A builder whose build or clear order went, or whose
+/// feature did, stops.
 #[allow(clippy::type_complexity)]
 pub fn clear_features(
     time: Res<Time>,
@@ -440,7 +576,7 @@ pub fn clear_features(
             Entity,
             &UnitType,
             &ClearingFeature,
-            Has<PendingBuild>,
+            (Has<PendingBuild>, Has<ClearOrder>),
             Option<&crate::units::assets::animation::UnitAnimator>,
             &NetId,
         ),
@@ -455,12 +591,14 @@ pub fn clear_features(
 ) {
     let dt = time.delta_secs();
     let mut worked: Vec<Entity> = Vec::new();
-    for (builder, kind, clearing, pending, animator, _) in builders.iter().sort::<&NetId>() {
+    for (builder, kind, clearing, (pending, ordered), animator, _) in
+        builders.iter().sort::<&NetId>()
+    {
         let Ok((feature, progress)) = features.get_mut(clearing.feature) else {
             commands.entity(builder).remove::<ClearingFeature>();
             continue;
         };
-        if !pending {
+        if !pending && !ordered {
             commands.entity(builder).remove::<ClearingFeature>();
             continue;
         }
@@ -1279,6 +1417,83 @@ mod tests {
             world.get::<Constructing>(builder).map(|c| c.kind),
             Some(UnitKind::Bit)
         );
+    }
+
+    /// `ExecuteReclaim` over an area: the builder walks to the nearest
+    /// clearable feature in the circle, clears it, goes on to the next,
+    /// and ends the order when none is left.
+    #[test]
+    fn an_area_clear_works_the_features_nearest_first() {
+        let mut world = world();
+        // 550 from the nearest feature: past the 384 + 20 reach.
+        let builder = assembler(&mut world, Vec3::new(-300.0, 0.0, 0.0), Vec3::ZERO);
+        world
+            .entity_mut(builder)
+            .remove::<(PendingBuild, MoveTarget)>()
+            .insert((
+                NetId(1),
+                ClearOrder::Area {
+                    center: Vec3::new(300.0, 0.0, 0.0),
+                    radius: 200.0,
+                    current: None,
+                },
+            ));
+        let near = feature(&mut world, "badblock", Vec3::new(250.0, 0.0, 0.0));
+        let far = feature(&mut world, "badblock", Vec3::new(450.0, 0.0, 0.0));
+        let outside = feature(&mut world, "badblock", Vec3::new(600.0, 0.0, 0.0));
+        for (e, id) in [(near, 2), (far, 3), (outside, 4)] {
+            world.entity_mut(e).insert(NetId(id));
+        }
+        let place = |world: &mut World, x: f32| {
+            world.get_mut::<Transform>(builder).unwrap().translation = Vec3::new(x, 0.0, 0.0);
+        };
+
+        world.run_system_once(start_clearing).unwrap();
+        assert_eq!(
+            world.get::<MoveTarget>(builder).map(|t| t.0),
+            Some(Vec3::new(250.0, 0.0, 0.0)),
+            "out of range: walk to the nearest"
+        );
+        assert!(world.get::<ClearingFeature>(builder).is_none());
+
+        // In range (384 + 20) of the near one only: stop and work it.
+        place(&mut world, 0.0);
+        world.run_system_once(start_clearing).unwrap();
+        assert!(world.get::<MoveTarget>(builder).is_none());
+        assert_eq!(
+            world.get::<ClearingFeature>(builder).map(|c| c.feature),
+            Some(near)
+        );
+        let mut frames = 0;
+        while world.get_entity(near).is_ok() {
+            advance(&mut world, 1.0 / 30.0);
+            world.run_system_once(start_clearing).unwrap();
+            world.run_system_once(clear_features).unwrap();
+            frames += 1;
+            assert!(frames < 200, "never cleared");
+        }
+        assert_eq!(frames, 90, "WorkerTime 128 against reclaimTime 384");
+
+        // The next one, which it also walks to; then nothing is left.
+        world.run_system_once(start_clearing).unwrap();
+        assert_eq!(
+            world.get::<MoveTarget>(builder).map(|t| t.0),
+            Some(Vec3::new(450.0, 0.0, 0.0))
+        );
+        place(&mut world, 300.0);
+        world.run_system_once(start_clearing).unwrap();
+        assert_eq!(
+            world.get::<ClearingFeature>(builder).map(|c| c.feature),
+            Some(far)
+        );
+        while world.get_entity(far).is_ok() {
+            advance(&mut world, 1.0 / 30.0);
+            world.run_system_once(start_clearing).unwrap();
+            world.run_system_once(clear_features).unwrap();
+        }
+        world.run_system_once(start_clearing).unwrap();
+        assert!(world.get::<ClearOrder>(builder).is_none(), "the order ends");
+        assert!(world.get_entity(outside).is_ok(), "outside the circle");
     }
 
     /// A Bad Block ordered where a Bad Block feature already stands is

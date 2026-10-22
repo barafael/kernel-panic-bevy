@@ -79,7 +79,7 @@ use bevy::ecs::world::DeferredWorld;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-pub use codec::{IdList, NetPos, PosList};
+pub use codec::{IdList, NetLen, NetPos, PosList};
 pub use control::{DevCommand, MatchControl, MatchRules};
 pub use driver::LockstepPlugin;
 
@@ -231,6 +231,41 @@ pub enum Order {
     AttackGround(NetPos),
     AttackUnit(NetId),
     Guard(NetId),
+    // New variants go at the end (postcard encodes the index).
+    /// Attack everything hostile in a circle (`CMD_ATTACK` with four
+    /// params, `newAttackMode`): expanded when applied into one
+    /// `AttackUnit` per target, nearest the group first
+    /// (`CSelectedUnitsHandlerAI::SelectAttackNet`).
+    AttackArea {
+        center: NetPos,
+        radius: NetLen,
+    },
+    /// A constructor clears one map feature away (`CMD_RECLAIM` on a
+    /// feature; Kernel Panic gains nothing from it). The id is the
+    /// feature's, from the same counter as the units'.
+    ClearFeature(NetId),
+    /// A constructor clears every clearable feature in a circle,
+    /// nearest first (`CMD_RECLAIM` with four params).
+    ClearArea {
+        center: NetPos,
+        radius: NetLen,
+    },
+    /// A Bug walks within range of the target, deploys into an Exploit
+    /// and, unless `deploy_only` (Alt), attacks it (`bug_bombard.lua`).
+    Bombard {
+        target: BombardTarget,
+        deploy_only: bool,
+    },
+    /// A Packet walks to the teleporter and re-enters the buffer there
+    /// (`network_enter.lua`'s `CMD_ENTER` on a unit).
+    Enter(NetId),
+}
+
+/// What a [`Order::Bombard`] is aimed at (`CMDTYPE_ICON_UNIT_OR_MAP`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BombardTarget {
+    Unit(NetId),
+    Ground(NetPos),
 }
 
 /// The order of a [`SimCommand::PerUnit`] batch.

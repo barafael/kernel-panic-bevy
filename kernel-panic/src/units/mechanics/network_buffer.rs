@@ -38,6 +38,63 @@ pub const SPAWN_STUN_SECONDS: f32 = frames_to_secs(180.0);
 /// Upstream `enterDist=150`.
 pub const ENTER_DISTANCE: f32 = 150.0;
 
+/// A Packet's running Enter order on a teleporter (`network_enter.lua`'s
+/// `CMD_ENTER` with a unit: walk within `enterDist * .75`, then enter).
+/// Ends with the entry, or when the teleporter is gone.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct EnterOrder {
+    pub target: Entity,
+}
+
+/// `network_enter.lua`'s approach: a Packet with an [`EnterOrder`] walks
+/// to its teleporter (the goal refreshed when it drifts) until within
+/// three quarters of [`ENTER_DISTANCE`], then stops and asks to enter,
+/// which [`process_enter`] grants to the nearest friendly teleporter
+/// in range — this one. A target that is gone ends the order; a
+/// stunned Packet waits.
+#[allow(clippy::type_complexity)]
+pub fn tick_enter_orders(
+    packets: Query<
+        (
+            Entity,
+            &Transform,
+            &EnterOrder,
+            Has<crate::interaction::movement::MoveTarget>,
+            Option<&crate::interaction::movement::MovePath>,
+            &crate::net::NetId,
+        ),
+        (Without<Dying>, Without<crate::units::combat::Stunned>),
+    >,
+    teleporters: Query<&Transform, Without<Dying>>,
+    mut enter: MessageWriter<EnterEvent>,
+    mut commands: Commands,
+) {
+    use crate::interaction::movement::{MovePath, MoveTarget, chase_path_stale};
+    let reach = ENTER_DISTANCE * 0.75;
+    for (packet, tf, order, has_move, path, _) in packets.iter().sort::<&crate::net::NetId>() {
+        let Ok(target_tf) = teleporters.get(order.target) else {
+            commands
+                .entity(packet)
+                .remove::<(EnterOrder, MoveTarget, MovePath)>();
+            continue;
+        };
+        let at = target_tf.translation;
+        if tf.translation.distance_squared(at) > reach * reach {
+            if chase_path_stale(path, at) {
+                commands.entity(packet).insert(MoveTarget(at));
+            }
+            continue;
+        }
+        let mut ec = commands.entity(packet);
+        ec.remove::<EnterOrder>();
+        if has_move || path.is_some() {
+            ec.remove::<(MoveTarget, MovePath)>();
+        }
+        enter.write(EnterEvent { packet });
+    }
+}
+
 /// Dispatch spawns Packets in a ring around the teleporter at this
 /// radius, matching the upstream offset pattern of ~48 elmos.
 pub const DISPATCH_RING_RADIUS: f32 = 48.0;
@@ -316,6 +373,51 @@ pub fn tick_flow_speed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// `network_enter.lua`: a Packet with an Enter order walks to its
+    /// teleporter until within three quarters of `enterDist`, then asks
+    /// to enter; a teleporter that is gone ends the order.
+    #[test]
+    fn an_enter_order_walks_in_then_enters() {
+        use crate::interaction::movement::MoveTarget;
+        let mut world = World::new();
+        world.init_resource::<Messages<EnterEvent>>();
+        let port = world
+            .spawn((
+                UnitType(UnitKind::Port),
+                Transform::from_xyz(500.0, 0.0, 0.0),
+            ))
+            .id();
+        let packet = world
+            .spawn((
+                UnitType(UnitKind::Packet),
+                crate::net::NetId(1),
+                Transform::IDENTITY,
+                EnterOrder { target: port },
+            ))
+            .id();
+        world.run_system_once(tick_enter_orders).unwrap();
+        assert_eq!(
+            world.get::<MoveTarget>(packet).map(|t| t.0),
+            Some(Vec3::new(500.0, 0.0, 0.0))
+        );
+        world.get_mut::<Transform>(packet).unwrap().translation = Vec3::new(420.0, 0.0, 0.0);
+        world.run_system_once(tick_enter_orders).unwrap();
+        assert!(world.get::<EnterOrder>(packet).is_none());
+        assert!(world.get::<MoveTarget>(packet).is_none());
+        let events: Vec<EnterEvent> = world
+            .resource_mut::<Messages<EnterEvent>>()
+            .drain()
+            .collect();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].packet, packet);
+
+        world.despawn(port);
+        world.entity_mut(packet).insert(EnterOrder { target: port });
+        world.run_system_once(tick_enter_orders).unwrap();
+        assert!(world.get::<EnterOrder>(packet).is_none());
+    }
 
     #[test]
     fn buffer_add_and_take_round_trip() {

@@ -22,6 +22,7 @@ use bevy::window::{CursorIcon, CustomCursor, CustomCursorImage, PrimaryWindow};
 
 use crate::interaction::selection::{Hovered, Selected};
 use crate::units::components::{TeamId, UnitType};
+use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::teams::Alliances;
 
@@ -187,7 +188,7 @@ impl CursorRequest {
 fn resolve_context_cursor(
     mut request: ResMut<CursorRequest>,
     selected: Query<(&UnitType, &TeamId), With<Selected>>,
-    hovered: Query<&TeamId, (With<Hovered>, With<UnitType>)>,
+    hovered: Query<(&TeamId, &UnitType), With<Hovered>>,
     unit_registry: Res<UnitRegistry>,
     alliances: Res<Alliances>,
 ) {
@@ -199,6 +200,7 @@ fn resolve_context_cursor(
     let mut has_mover = false;
     let mut has_weapon = false;
     let mut has_constructor = false;
+    let mut has_packet = false;
     // Track the first selected unit's owner so we can ask `friendly`
     // about the hovered unit — the cursor hint is resolved by comparing
     // the selection against what's under the cursor.
@@ -214,18 +216,26 @@ fn resolve_context_cursor(
         if ut.0.is_constructor() {
             has_constructor = true;
         }
+        if ut.0 == UnitKind::Packet {
+            has_packet = true;
+        }
         selection_team.get_or_insert(team.0);
     }
 
     match hovered.iter().next() {
-        Some(hover_team) => {
+        Some((hover_team, hover_kind)) => {
             let is_enemy = selection_team.is_some_and(|t| !alliances.friendly(t, hover_team.0));
+            // `network_enter.lua`'s `CMD_ENTER` cursor ("Load units").
+            let own_teleporter =
+                hover_kind.0.is_teleporter() && selection_team == Some(hover_team.0);
             if is_enemy {
                 if has_weapon {
                     request.set(CursorKind::Attack, 0);
                 } else {
                     request.set(CursorKind::Normal, 0);
                 }
+            } else if has_packet && own_teleporter {
+                request.set(CursorKind::Pickup, 0);
             } else if has_constructor {
                 request.set(CursorKind::Repair, 0);
             } else {

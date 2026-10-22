@@ -4,6 +4,7 @@
 //! postcard (varint integers, zigzag for signed), so a small delta costs
 //! one byte.
 
+use crate::sim::DetFloat;
 use bevy::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use strum::VariantArray;
@@ -44,6 +45,21 @@ impl NetPos {
 impl From<Vec3> for NetPos {
     fn from(v: Vec3) -> Self {
         Self::quantize(v)
+    }
+}
+
+/// A length (an area order's radius) quantized to [`POS_SCALE`], a
+/// varint on the wire.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct NetLen(pub u32);
+
+impl NetLen {
+    pub fn quantize(len: f32) -> Self {
+        Self((len.det_max(0.0) * POS_SCALE).round() as u32)
+    }
+
+    pub fn to_f32(self) -> f32 {
+        self.0 as f32 / POS_SCALE
     }
 }
 
@@ -286,5 +302,48 @@ mod tests {
         assert_eq!(bytes, [20, 62], "M3");
         let bytes = postcard::to_allocvec(&SimCommand::Returned).unwrap();
         assert_eq!(bytes, [21], "M3: one byte, after InternalSpeed (20)");
+    }
+
+    /// The `Order` variants appended for the area, clear, Bombard and
+    /// Enter orders keep the earlier ones' indices and take 6 to 10 in
+    /// this order.
+    #[test]
+    fn order_variant_indices_are_stable() {
+        use crate::net::{BombardTarget, Order};
+        let encode = |order: Order| {
+            postcard::to_allocvec(&SimCommand::Order {
+                units: Units::Prev,
+                order,
+                queue: false,
+            })
+            .unwrap()
+        };
+        // `Order` (index 0), `Units::Prev` (1), then the order's index.
+        assert_eq!(encode(Order::Guard(NetId(1)))[..3], [0, 1, 5]);
+        assert_eq!(
+            encode(Order::AttackArea {
+                center: NetPos::default(),
+                radius: NetLen(0),
+            })[..3],
+            [0, 1, 6]
+        );
+        assert_eq!(encode(Order::ClearFeature(NetId(1)))[..3], [0, 1, 7]);
+        assert_eq!(
+            encode(Order::ClearArea {
+                center: NetPos::default(),
+                radius: NetLen(0),
+            })[..3],
+            [0, 1, 8]
+        );
+        assert_eq!(
+            encode(Order::Bombard {
+                target: BombardTarget::Unit(NetId(1)),
+                deploy_only: false,
+            })[..3],
+            [0, 1, 9]
+        );
+        assert_eq!(encode(Order::Enter(NetId(1)))[..3], [0, 1, 10]);
+        assert_eq!(NetLen::quantize(400.0).to_f32(), 400.0);
+        assert_eq!(NetLen::quantize(-3.0), NetLen(0));
     }
 }

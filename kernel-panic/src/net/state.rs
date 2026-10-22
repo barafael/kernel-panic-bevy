@@ -17,10 +17,12 @@ use crate::rendering::interpolation::SimPose;
 use crate::units::combat::{AttackGroundOrder, AttackTargetOrder, Dying, Stunned};
 use crate::units::components::{Health, TeamId, UnitType};
 use crate::units::features::Feature;
-use crate::units::lifecycle::construction::{Constructing, PendingBuild};
+use crate::units::lifecycle::construction::{ClearOrder, Constructing, PendingBuild};
 use crate::units::lifecycle::production::Producer;
 use crate::units::lifecycle::spawning::Emerging;
 use crate::units::mechanics::cloak::Cloaked;
+use crate::units::mechanics::deploy::BombardOrder;
+use crate::units::mechanics::network_buffer::EnterOrder;
 
 /// FNV-1a, 64 bit: tiny, stable across processes and targets.
 #[derive(Clone, Copy)]
@@ -131,6 +133,11 @@ type UnitQ = (
         Option<&'static CommandQueue>,
         Option<&'static Producer>,
     ),
+    (
+        Option<&'static ClearOrder>,
+        Option<&'static BombardOrder>,
+        Option<&'static EnterOrder>,
+    ),
 );
 
 /// The quiet NaN every NaN hashes as. A NaN's payload and sign bits are
@@ -237,6 +244,7 @@ pub fn capture(world: &mut World) -> Capture {
         (_, id, ut, team, pose),
         (health, dying, emerging, cloaked, stunned),
         (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
+        (clear, bombard, entering),
     ) in q.iter(world)
     {
         units += 1;
@@ -316,6 +324,33 @@ pub fn capture(world: &mut World) -> Capture {
             for k in p.queue() {
                 o.extend((*k as u16).to_le_bytes());
             }
+        }
+        match clear {
+            Some(ClearOrder::Feature { feature }) => {
+                o.push(9);
+                o.extend(reference(*feature));
+            }
+            Some(ClearOrder::Area {
+                center,
+                radius,
+                current,
+            }) => {
+                o.push(10);
+                o.extend(bits.vec3(*center));
+                o.extend(bits.f32(*radius));
+                o.extend(current.map_or([0; 4], reference));
+            }
+            None => {}
+        }
+        if let Some(b) = bombard {
+            o.push(11);
+            o.extend(b.target.map_or([0; 4], reference));
+            o.extend(bits.vec3(b.pos));
+            o.push(b.deploy_only as u8);
+        }
+        if let Some(e) = entering {
+            o.push(12);
+            o.extend(reference(e.target));
         }
         order_recs.push(o);
     }
@@ -402,10 +437,11 @@ pub fn describe(world: &mut World) -> Vec<String> {
                 (e, id, ut, team, pose),
                 (health, dying, emerging, _, stunned),
                 (mt, fight, guard, attack, attack_ground, pending_build, constructing, queue, producer),
+                (clear, bombard, entering),
             )| {
                 let tf = pose.sim();
                 format!(
-                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} | {e:?}",
+                    "#{:06} {:?} t{} pos {:?} rot {:?} hp {:?} dying {} emerging {:?} stunned {} | mt {:?} fight {} guard {} attack {} ag {:?} pb {:?} cons {:?} queue {:?} prod {:?} clear {:?} bombard {:?} enter {:?} | {e:?}",
                     id.0,
                     ut.0,
                     team.0,
@@ -424,6 +460,9 @@ pub fn describe(world: &mut World) -> Vec<String> {
                     constructing.map(|c| (c.kind, c.site)),
                     queue.map(|q| q.commands.iter().map(|c| c.position()).collect::<Vec<_>>()),
                     producer.map(|p| (p.repeat(), p.queue().iter().copied().collect::<Vec<_>>())),
+                    clear,
+                    bombard.map(|b| (b.target, b.pos, b.deploy_only)),
+                    entering.map(|e| e.target),
                 )
             },
         )

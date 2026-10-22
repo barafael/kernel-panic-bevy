@@ -33,6 +33,7 @@ impl Plugin for RightClickPlugin {
                     spawn_move_indicator_visuals.after(handle_right_click),
                     update_formation_preview.after(handle_right_click),
                     decay_move_indicators,
+                    draw_area_rings,
                 )
                     .in_set(SelectionSet::RightClick),
             );
@@ -103,17 +104,74 @@ pub(crate) enum OrderMarker {
     Guard,
     /// Manual target designation (`T`).
     Target,
+    /// An area attack: the ring at the centre plus the disc's rim, in
+    /// elmos, for 1.5 s ([`AreaRing`]).
+    AttackArea(u16),
+    /// A constructor's Clear (one feature, or `Some` radius of them).
+    Clear(Option<u16>),
+    /// A Packet's Enter on a teleporter (`network_enter.lua`'s green).
+    Enter,
+    /// A Bug's Bombard (`bug_bombard.lua`'s draw colour).
+    Bombard,
 }
 
 impl OrderMarker {
-    fn color(self) -> Color {
+    pub(crate) fn color(self) -> Color {
         match self {
             OrderMarker::Move => Color::srgb(0.2, 1.0, 0.3),
-            OrderMarker::Attack => Color::srgb(1.0, 0.3, 0.25),
+            OrderMarker::Attack | OrderMarker::AttackArea(_) => Color::srgb(1.0, 0.3, 0.25),
             OrderMarker::Patrol => Color::srgb(0.4, 0.7, 1.0),
             OrderMarker::Guard => Color::srgb(0.85, 0.95, 1.0),
             OrderMarker::Target => Color::srgb(1.0, 0.65, 0.2),
+            OrderMarker::Clear(_) => Color::srgb(0.75, 0.75, 0.75),
+            OrderMarker::Enter => Color::srgb(0.5, 1.0, 0.5),
+            OrderMarker::Bombard => Color::srgb(1.0, 0.5, 0.5),
         }
+    }
+
+    /// The marker whose material this one draws with (an area's radius
+    /// is not a colour).
+    fn palette(self) -> Self {
+        match self {
+            OrderMarker::AttackArea(_) => OrderMarker::Attack,
+            OrderMarker::Clear(_) => OrderMarker::Clear(None),
+            other => other,
+        }
+    }
+
+    /// The disc an area order covered, if this marks one.
+    fn area_radius(self) -> Option<f32> {
+        match self {
+            OrderMarker::AttackArea(r) | OrderMarker::Clear(Some(r)) => Some(f32::from(r)),
+            _ => None,
+        }
+    }
+}
+
+/// The rim of an area order's disc, drawn with its [`MoveIndicator`]
+/// for the indicator's lifetime and fading with it.
+#[derive(Component)]
+pub struct AreaRing {
+    pub radius: f32,
+    pub color: Color,
+}
+
+/// Draw every [`AreaRing`] on the ground, fading out over its
+/// indicator's life.
+fn draw_area_rings(
+    rings: Query<(&Transform, &MoveIndicator, &AreaRing)>,
+    heightmap: Option<Res<crate::terrain::heightmap::Heightmap>>,
+    mut gizmos: Gizmos<crate::interaction::movement::CommandLineGizmos>,
+) {
+    for (tf, indicator, ring) in &rings {
+        let alpha = indicator.lifetime.fraction_remaining();
+        crate::interaction::movement::draw_ground_ring(
+            &mut gizmos,
+            tf.translation,
+            ring.radius,
+            ring.color.with_alpha(alpha),
+            heightmap.as_deref(),
+        );
     }
 }
 
@@ -138,7 +196,18 @@ struct RightClickLookups<'w, 's> {
     unit_info_q: Query<'w, 's, &'static TeamId>,
     target_gtf_q: Query<'w, 's, &'static GlobalTransform>,
     target_type_q: Query<'w, 's, &'static UnitType, Without<Selected>>,
+    /// Any unit's kind, selected or not (a Packet's own Port).
+    kind_q: Query<'w, 's, &'static UnitType>,
     queue_end_q: Query<'w, 's, (Option<&'static MoveTarget>, Option<&'static CommandQueue>)>,
+    features: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static crate::units::features::Feature,
+            &'static Transform,
+        ),
+    >,
     alliances: Res<'w, Alliances>,
 }
 
@@ -166,7 +235,9 @@ fn handle_right_click(
         unit_info_q,
         target_gtf_q,
         target_type_q,
+        kind_q,
         queue_end_q,
+        features,
         alliances,
     } = lookups;
     let cursor = windows.single().ok().and_then(|w| w.cursor_position());
@@ -283,9 +354,90 @@ fn handle_right_click(
         }
 
         if drag_path.points.len() == 1 {
-            // Single-point order. First check for a right-click ON a unit:
-            // an enemy under the cursor turns the order into an attack for
-            // every selected armed unit (unarmed units move as usual).
+            // Single-point order. The default command of the selection
+            // on what is under the cursor (`GetDefaultCmd`, KP's
+            // `kp_defaultcommands.lua`):
+            // - a Packet over one of its own teleporters enters it
+            //   (`CMD_ENTER`; only the Packets take it);
+            // - a constructor over a clearable feature clears it
+            //   (`CBuilderCAI::GetDefaultCmd` → `CMD_RECLAIM`; the rest of
+            //   the selection moves there);
+            // - an enemy turns the order into an attack for every armed
+            //   unit (unarmed units move as usual);
+            // - else a move.
+            let my_team = selected_q
+                .iter()
+                .next()
+                .and_then(|(e, ..)| unit_info_q.get(e).ok())
+                .map(|t| t.0);
+            let packets: Vec<Entity> = selected_q
+                .iter()
+                .filter(|(_, _, u, _)| u.0 == UnitKind::Packet)
+                .map(|(e, ..)| e)
+                .collect();
+            if !packets.is_empty()
+                && let Some(teleporter) =
+                    unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q).filter(
+                        |&t| {
+                            kind_q.get(t).is_ok_and(|k| k.0.is_teleporter())
+                                && unit_info_q.get(t).is_ok_and(|tt| Some(tt.0) == my_team)
+                        },
+                    )
+            {
+                if let Some(target) = net.id(teleporter) {
+                    let units = net.units(packets);
+                    net.issue(SimCommand::Order {
+                        units,
+                        order: Order::Enter(target),
+                        queue: shift,
+                    });
+                }
+                let pos = target_gtf_q
+                    .get(teleporter)
+                    .map_or(drag_path.points[0], |t| t.translation());
+                pending.markers.push((pos, OrderMarker::Enter));
+                drag_path.points.clear();
+                return;
+            }
+            let constructors: Vec<Entity> = selected_q
+                .iter()
+                .filter(|(_, _, u, _)| u.0.is_constructor())
+                .map(|(e, ..)| e)
+                .collect();
+            if !constructors.is_empty()
+                && let Some(feature) = crate::units::features::clearable_feature_at(
+                    drag_path.points[0],
+                    features.iter(),
+                )
+            {
+                if let Some(target) = net.id(feature) {
+                    let units = net.units(constructors.iter().copied());
+                    net.issue(SimCommand::Order {
+                        units,
+                        order: Order::ClearFeature(target),
+                        queue: shift,
+                    });
+                }
+                let others = net.units(
+                    selected_q
+                        .iter()
+                        .filter(|(e, ..)| !constructors.contains(e))
+                        .map(|(e, ..)| e),
+                );
+                if others.list().is_some_and(|l| !l.is_empty()) {
+                    net.issue(SimCommand::Order {
+                        units: others,
+                        order: Order::Move(NetPos::quantize(drag_path.points[0])),
+                        queue: shift,
+                    });
+                }
+                let pos = features
+                    .get(feature)
+                    .map_or(drag_path.points[0], |(_, _, tf)| tf.translation);
+                pending.markers.push((pos, OrderMarker::Clear(None)));
+                drag_path.points.clear();
+                return;
+            }
             let clicked_enemy = enemy_under_cursor(&mut ray_cast);
 
             if let Some(target_unit) = clicked_enemy {
@@ -456,7 +608,7 @@ fn spawn_move_indicator_visuals(
 
     for (target, marker) in pending.markers.drain(..) {
         let material = material_cache
-            .entry(marker)
+            .entry(marker.palette())
             .or_insert_with(|| {
                 let color = marker.color();
                 materials.add(StandardMaterial {
@@ -468,7 +620,7 @@ fn spawn_move_indicator_visuals(
                 })
             })
             .clone();
-        commands.spawn((
+        let mut indicator = commands.spawn((
             MoveIndicator {
                 lifetime: Timer::from_seconds(1.5, TimerMode::Once),
             },
@@ -477,6 +629,12 @@ fn spawn_move_indicator_visuals(
             Transform::from_translation(target + Vec3::Y * 1.0)
                 .with_rotation(Quat::from_rotation_x(std::f32::consts::FRAC_PI_2)),
         ));
+        if let Some(radius) = marker.area_radius() {
+            indicator.insert(AreaRing {
+                radius,
+                color: marker.color(),
+            });
+        }
     }
 }
 

@@ -63,12 +63,18 @@ use super::state::Fnv;
 /// (`map_events::water`); and, unversioned since 66fa258, a unit's
 /// midpoint (aim point, collision sphere) lies along its up vector and a
 /// mobile builder keeps its slope tilt while it builds.
+/// 15 (2026-10-22): five orders appended — area attack (expanded when
+/// applied as `SelectAttackNet`), a constructor's clear of one feature
+/// or an area (`ExecuteReclaim`), the Bug's Bombard (`bug_bombard.lua`)
+/// and a Packet's walk-and-enter — the Security Hole's AutoHold, which
+/// its Worms inherit, and a folded Pointer or Byte that chases and stops
+/// in range (only its shot waits for `Open`).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 14;
+pub const SIM_VERSION: u32 = 15;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

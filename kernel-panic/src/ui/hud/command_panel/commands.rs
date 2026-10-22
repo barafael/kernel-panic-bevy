@@ -15,10 +15,13 @@
 //! - `autohold.lua` inserts AutoHold right after the last state button.
 //!
 //! Only commands the remake implements are listed — Spring's Wait, the
-//! mobile units' Repeat, the builders' Repair / Reclaim, the factories'
-//! rally orders (Move / Patrol / Fight / Guard for new units) and the
-//! Bug's Bombard have no simulation behind them yet, and a dead button
-//! would lie to the player. Everything else keeps Spring's order.
+//! mobile units' Repeat, the builders' Repair and the factories' rally
+//! orders (Move / Patrol / Fight / Guard for new units) have no
+//! simulation behind them yet, and a dead button would lie to the
+//! player. The builders' Reclaim is here as Clear (Kernel Panic has no
+//! metal: it only clears a feature away) and the Bug's Bombard
+//! (`bug_bombard.lua`) comes before its Deploy, as the gadgets' tie on
+//! layer sorts by name. Everything else keeps Spring's order.
 //!
 //! [`available_commands`] merges a selection like
 //! `CSelectedUnitsHandler::GetAvailableCommands`: every non-build command
@@ -56,6 +59,11 @@ pub(crate) enum CmdId {
     Firewall,
     Dispatch,
     Enter,
+    /// The builders' `CMD_RECLAIM`: clear a map feature (a Bad Block)
+    /// away, one or every one in an area.
+    Clear,
+    /// `bug_bombard.lua`: walk within range, deploy, attack.
+    Bombard,
     /// Constructor build option (`CMDTYPE_ICON_BUILDING`): arms placement.
     Build(UnitKind),
     /// Factory build option (`CMDTYPE_ICON`): edits the build queue.
@@ -85,6 +93,7 @@ impl CmdId {
             CmdId::Sigterm => |k| k == UnitKind::Terminal,
             CmdId::Firewall => |k| k == UnitKind::Firewall,
             CmdId::Dispatch => |k: UnitKind| k.is_teleporter(),
+            CmdId::Bombard => |k| k == UnitKind::Bug,
             _ => return None,
         })
     }
@@ -344,6 +353,17 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
         ));
     }
 
+    // --- CBuilderCAI: Reclaim, as Clear ---
+    if kind.is_constructor() {
+        out.push(CmdDesc::new(
+            CmdId::Clear,
+            Targeted,
+            "Clear",
+            "Clear: Clear away a Bad Block, or every one in an area",
+            "e",
+        ));
+    }
+
     // --- Build options (CBuilderCAI / CFactoryCAI) ---
     if kind.is_constructor() {
         for &b in buildings_for(kind) {
@@ -390,13 +410,25 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
             "Attack: Attacks a unit or a position on the ground",
             "d",
         )),
-        UnitKind::Bug => out.push(CmdDesc::new(
-            CmdId::Deploy,
-            Icon,
-            "Deploy",
-            "Transform into artillery emplacement\nTip: The button is queuable, the hotkey is not.",
-            "d",
-        )),
+        UnitKind::Bug => {
+            // Upstream's `D` arms Bombard first (`kp_hotkeys.lua` binds
+            // `dgun` before `deploy`); here `D` stays the instant Deploy
+            // and Bombard is the button.
+            out.push(CmdDesc::new(
+                CmdId::Bombard,
+                Targeted,
+                "Bombard",
+                "Transform into artillery and attack target\nTip: hold alt to just deploy in range",
+                "",
+            ));
+            out.push(CmdDesc::new(
+                CmdId::Deploy,
+                Icon,
+                "Deploy",
+                "Transform into artillery emplacement\nTip: The button is queuable, the hotkey is not.",
+                "d",
+            ));
+        }
         UnitKind::Exploit => out.push(CmdDesc::new(
             CmdId::Undeploy,
             Icon,
@@ -566,6 +598,11 @@ mod tests {
                 CmdId::Guard
             ]
         );
+        assert_eq!(
+            cmds[5].id,
+            CmdId::Clear,
+            "Reclaim, as Clear, before the builds"
+        );
         let bomb = cmds
             .iter()
             .find(|c| c.id == CmdId::Build(UnitKind::LogicBomb))
@@ -587,6 +624,11 @@ mod tests {
             ids(&unit_commands(&worm, &[]))[..3],
             [CmdId::Stop, CmdId::Attack, CmdId::AutoHold]
         );
+        // The Bug: Bombard, then Deploy, after the orders.
+        let bug = ids(&unit_commands(&unit(UnitKind::Bug), &[]));
+        assert_eq!(bug[bug.len() - 2..], [CmdId::Bombard, CmdId::Deploy]);
+        // A Bit has no Clear.
+        assert!(!ids(&unit_commands(&unit(UnitKind::Bit), &[])).contains(&CmdId::Clear));
     }
 
     /// airstrike.lua strips Stop from the Terminal; while recharging the

@@ -1205,6 +1205,120 @@ fn factory_orders_reach_built_units() {
     );
 }
 
+/// End to end, `bug_bombard.lua`: a Bug ordered to Bombard an enemy out
+/// of range walks until within 1150 of it, deploys, and the Exploit it
+/// becomes takes up the attack and hits; with Alt it only deploys.
+#[test]
+fn bug_bombards_by_walking_in_and_deploying() {
+    use crate::net::{BombardTarget, CommandFrame, NetId, Order, SimCommand, Units};
+    use crate::terrain::heightmap::Heightmap;
+    use crate::units::combat::AttackTargetOrder;
+    use crate::units::components::{Faction, Health, TeamId, UnitType};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
+    use crate::units::mechanics::deploy::BOMBARD_RANGE;
+    use bevy::ecs::system::SystemState;
+
+    for deploy_only in [false, true] {
+        let mut scenario = Scenario::ai_match("Speed_Balls_16_Way", 2, 1, 7);
+        for seat in &mut scenario.seats {
+            seat.ai = false;
+        }
+        scenario.sandbox = true;
+        let mut h = SimHarness::new(scenario);
+        let (bug, byte) = {
+            let world = h.world_mut();
+            let kernel = world
+                .query_filtered::<(&Transform, &TeamId), With<Homebase>>()
+                .iter(world)
+                .find(|(_, team)| team.0 == 0)
+                .map(|(tf, _)| tf.translation)
+                .expect("team 0 homebase");
+            let (w, d) = world.resource::<Heightmap>().world_size();
+            let toward = (Vec3::new(w * 0.5, 0.0, d * 0.5) - kernel)
+                .with_y(0.0)
+                .normalize_or(Vec3::Z);
+            let at = |world: &World, p: Vec3| world.resource::<Heightmap>().place(p.x, p.z);
+            let p0 = at(world, kernel + toward * 300.0);
+            let p1 = at(world, kernel + toward * 1800.0);
+            let mut state: SystemState<SpawnContext> = SystemState::new(world);
+            let mut ctx = state.get_mut(world).expect("spawn context");
+            let bug = spawn_unit(UnitKind::Bug, Faction::Hacker, 0, p0, &mut ctx);
+            let byte = spawn_unit(UnitKind::Byte, Faction::System, 1, p1, &mut ctx);
+            state.apply(world);
+            (bug, byte)
+        };
+        // Past the spawn `ARMORED`.
+        for _ in 0..7 * 30 {
+            h.step();
+        }
+        let (bug_id, byte_id, hp_before) = {
+            let world = h.world_mut();
+            (
+                *world.get::<NetId>(bug).unwrap(),
+                *world.get::<NetId>(byte).unwrap(),
+                world.get::<Health>(byte).unwrap().current,
+            )
+        };
+        {
+            let world = h.world_mut();
+            let mut bus = world.resource_mut::<CommandBus>();
+            let tick = bus.tick;
+            bus.deliver(CommandFrame {
+                tick,
+                player: 0,
+                commands: vec![SimCommand::Order {
+                    units: Units::of([bug_id]),
+                    order: Order::Bombard {
+                        target: BombardTarget::Unit(byte_id),
+                        deploy_only,
+                    },
+                    queue: false,
+                }],
+            });
+        }
+        let mut exploit = None;
+        let mut frames = 0;
+        while exploit.is_none() && frames < 40 * 30 {
+            h.step();
+            frames += 1;
+            let world = h.world_mut();
+            exploit = world
+                .query::<(Entity, &UnitType, &TeamId)>()
+                .iter(world)
+                .find(|(_, u, t)| u.0 == UnitKind::Exploit && t.0 == 0)
+                .map(|(e, ..)| e);
+        }
+        let exploit = exploit.expect("the Bug deployed");
+        let world = h.world_mut();
+        let dist = world
+            .get::<Transform>(exploit)
+            .unwrap()
+            .translation
+            .distance(world.get::<Transform>(byte).unwrap().translation);
+        assert!(
+            dist <= BOMBARD_RANGE + 8.0,
+            "deployed {dist:.0} elmos from the target"
+        );
+        assert!(dist > 900.0, "it stopped once in range, not on top of it");
+        assert_eq!(
+            world.get::<AttackTargetOrder>(exploit).map(|o| o.target),
+            (!deploy_only).then_some(byte),
+            "deploy_only {deploy_only}"
+        );
+        // (With Alt the Exploit has no order, though its own targeting
+        // may still engage a Byte standing in its 1200 reach.)
+        if !deploy_only {
+            for _ in 0..10 * 30 {
+                h.step();
+            }
+            let world = h.world_mut();
+            let hp_after = world.get::<Health>(byte).unwrap().current;
+            assert!(hp_after < hp_before, "the Exploit took up the attack");
+        }
+    }
+}
+
 /// End to end: Launch Mines on a folded Byte. It unfolds, then fires a
 /// MineLauncher bolt from each of its five tubes; each explodes on the
 /// ground ahead and leaves a Logic Bomb there — five mines in a forward

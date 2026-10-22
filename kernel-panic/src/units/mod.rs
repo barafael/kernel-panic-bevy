@@ -190,12 +190,16 @@ impl Plugin for UnitsPlugin {
                         bookkeeping::track_added_units,
                         shield::attach_shields,
                         shield::regen_shields,
+                        // A Bombard that reaches its range deploys this
+                        // same tick.
+                        deploy::tick_bombard,
                         deploy::process_deploy,
                         network_buffer::tick_port_buffers,
                         network_buffer::tick_spawn_stun,
                         network_buffer::tick_flow_speed,
                         network_buffer::tick_auto_dispatch,
                         network_buffer::process_dispatch,
+                        network_buffer::tick_enter_orders,
                         network_buffer::process_enter,
                         production::production_system,
                         production::install_fade_materials,
@@ -205,6 +209,7 @@ impl Plugin for UnitsPlugin {
                             construction::start_construction,
                             production::apply_bugger_off,
                             construction::tick_construction,
+                            construction::start_clearing,
                             construction::clear_features,
                             construction::decay_nanoframes,
                         )

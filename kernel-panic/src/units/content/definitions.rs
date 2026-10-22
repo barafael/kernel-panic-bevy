@@ -296,11 +296,12 @@ impl UnitKind {
         }
     }
 
-    /// Units carrying the AutoHold toggle and the surface-to-bite cloak
-    /// cycle (upstream autohold.lua `autoholdDefs`; the Hole entry only
-    /// exists there to hand its state down to the Worms it builds).
+    /// Units carrying the AutoHold toggle (upstream autohold.lua
+    /// `autoholdDefs`): the Worm, whose surface-to-bite cloak cycle it
+    /// drives, and the Security Hole, whose setting the Worms it builds
+    /// inherit (`inherited = true`).
     pub fn has_autohold(self) -> bool {
-        matches!(self, UnitKind::Worm)
+        matches!(self, UnitKind::Worm | UnitKind::Hole)
     }
 
     /// Documented exception to `NoChaseCategory=VTOL`: units whose

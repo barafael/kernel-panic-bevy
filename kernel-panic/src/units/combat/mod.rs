@@ -85,6 +85,22 @@ pub struct AttackTargetOrder {
     pub target: Entity,
 }
 
+/// `CCommandAI::targetLostTimer`: an armed unit that cannot move keeps
+/// an attack order on a target out of its reach for
+/// [`TARGET_LOST_FRAMES`] before finishing it (`TARGET_LOST_TIMER` = 4
+/// slow updates), so a target that steps out for a moment — or a unit
+/// whose own pose is not propagated on its spawn tick, as an Exploit
+/// deployed by a Bombard — does not lose the order at once.
+#[derive(Component, Clone, Copy, Debug)]
+#[component(storage = "SparseSet")]
+pub struct TargetLost {
+    /// The sim frame the target went out of reach.
+    pub since: u64,
+}
+
+/// Four slow updates of 16 frames.
+pub const TARGET_LOST_FRAMES: u64 = 64;
+
 /// Manual target designation (`T` set-target / `X` unset, Spring's
 /// `CMD_SET_TARGET` / `CMD_UNSET_TARGET`).
 ///
@@ -1742,6 +1758,7 @@ pub fn attack_target_system(
             Option<&WeaponBinding>,
             Has<crate::interaction::movement::MoveTarget>,
             &TeamId,
+            Option<&TargetLost>,
         ),
         Without<Dying>,
     >,
@@ -1751,6 +1768,7 @@ pub fn attack_target_system(
     heightmap: Option<Res<Heightmap>>,
     spatial: Res<SpatialIndex>,
     alliances: Res<Alliances>,
+    tick: Res<SimTick>,
     mut commands: Commands,
 ) {
     // The one read of the map's gravity here (ballistic weapon range).
@@ -1766,6 +1784,7 @@ pub fn attack_target_system(
         weapon_binding,
         has_move,
         team,
+        lost,
     ) in &attackers
     {
         // No deploy / opening gate here: `CMobileCAI::ExecuteObjectAttack`
@@ -1827,11 +1846,25 @@ pub fn attack_target_system(
             });
 
         if stats.speed <= 0.0 && !in_range {
-            // Immobile unit (armed building) can never close the gap —
-            // drop the order instead of churning MoveTarget insert/remove
-            // against `movement_system` every frame.
-            commands.entity(entity).remove::<AttackTargetOrder>();
+            // Immobile unit (armed building) can never close the gap:
+            // hold the order for the target-lost timer, then drop it
+            // instead of churning MoveTarget insert/remove against
+            // `movement_system` every frame.
+            match lost {
+                Some(l) if tick.0.saturating_sub(l.since) >= TARGET_LOST_FRAMES => {
+                    commands
+                        .entity(entity)
+                        .remove::<(AttackTargetOrder, TargetLost)>();
+                }
+                Some(_) => {}
+                None => {
+                    commands.entity(entity).insert(TargetLost { since: tick.0 });
+                }
+            }
             continue;
+        }
+        if lost.is_some() {
+            commands.entity(entity).remove::<TargetLost>();
         }
 
         if stats.speed <= 0.0 && blocked {

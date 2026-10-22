@@ -448,6 +448,9 @@ pub fn production_system(
     // every frame cost allocator churn for no gain.
     mut spawns: Local<Vec<PendingSpawn>>,
     mut exit_rng: ResMut<SimRng<FactoryExitRng>>,
+    // The factory's AutoHold, handed to the units it builds
+    // (`autohold.lua`'s `inherited`: the Hole's Worms).
+    autoholds: Query<&crate::units::mechanics::worm::AutoHold>,
     tick: Res<SimTick>,
     factory_orders: Query<&FactoryOrders>,
 ) {
@@ -721,6 +724,13 @@ pub fn production_system(
         spawns.drain(..)
     {
         let entity = spawn_unit_facing(kind, faction, team, spawn_pos, heading, &mut ctx);
+        // Inserted before `init_autohold`'s `Without<AutoHold>` pass
+        // sees the unit, so the factory's state wins over the default.
+        if kind.has_autohold()
+            && let Ok(hold) = autoholds.get(factory)
+        {
+            ctx.commands.entity(entity).insert(*hold);
+        }
         ctx.commands.entity(entity).insert(Emerging {
             target_y: spawn_pos.y,
             remaining: emerge_duration,
@@ -1298,6 +1308,41 @@ mod tests {
             (remaining(&world) - (decayed - 0.2)).abs() < 1e-3,
             "resumes from the decayed progress"
         );
+    }
+
+    /// `autohold.lua`'s `inherited`: a Worm leaves its Security Hole
+    /// with the Hole's AutoHold setting.
+    #[test]
+    fn a_worm_inherits_the_holes_autohold() {
+        use crate::units::mechanics::worm::AutoHold;
+        for setting in [false, true] {
+            let mut world = world();
+            let registry = registry();
+            let mut producer = Producer::new();
+            producer.enqueue(UnitKind::Worm);
+            world.spawn((
+                producer,
+                UnitType(UnitKind::Hole),
+                Faction::Hacker,
+                TeamId(0),
+                Transform::from_xyz(500.0, 0.0, 500.0),
+                UnitStats::from_registry(UnitKind::Hole, &registry, 64.0, 0.0),
+                AutoHold(setting),
+            ));
+            for _ in 0..4 {
+                world
+                    .resource_mut::<Time>()
+                    .advance_by(Duration::from_secs_f64(1.0 / 30.0));
+                world.run_system_once(production_system).unwrap();
+            }
+            let worm = world
+                .query_filtered::<(Entity, &UnitType), With<Emerging>>()
+                .iter(&world)
+                .find(|(_, u)| u.0 == UnitKind::Worm)
+                .map(|(e, _)| e)
+                .expect("the Hole builds the Worm");
+            assert_eq!(world.get::<AutoHold>(worm), Some(&AutoHold(setting)));
+        }
     }
 
     /// A dead factory starts nothing from its corpse, and a dead

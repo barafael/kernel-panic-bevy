@@ -27,8 +27,10 @@ use super::selection::{
     OrderMarker, PendingMoveIndicators, PickRayCast, Selected, SelectionSet, ground_hit, unit_hit,
 };
 use crate::interaction::cursor::{CursorKind, CursorRequest};
-use crate::net::{Issue, NetPos, Order, SimCommand};
+use crate::net::{BombardTarget, Issue, NetLen, NetPos, Order, SimCommand};
 use crate::rendering::camera::RtsCamera;
+use crate::sim::DetFloat;
+use crate::terrain::heightmap::Heightmap;
 use crate::ui::hud::command_panel::commands::{CmdId, can_attack};
 use crate::units::components::{TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -44,29 +46,34 @@ pub struct AbilityHotkeyPlugin;
 impl Plugin for AbilityHotkeyPlugin {
     fn build(&self, app: &mut App) {
         // An armed order mode doesn't outlive its match.
-        app.init_match_resource::<OrderCursorModes>().add_systems(
-            Update,
-            (
-                trigger_aimed_ability_on_hotkey,
-                trigger_deploy_on_hotkey,
-                // The armed-mode click handlers run before selection and
-                // consume the press they commit, so the click never also
-                // reaches click-to-select (a plain order click used to
-                // deselect everything, a guard click select the guarded
-                // unit).
+        app.init_match_resource::<OrderCursorModes>()
+            .init_match_resource::<AreaDrag>()
+            .add_systems(
+                Update,
                 (
-                    trigger_ability_click,
-                    trigger_patrol_click,
-                    trigger_attack_ground_click,
-                    trigger_attack_move_click,
-                    trigger_guard_click,
-                    trigger_move_click,
-                    trigger_set_target_click,
-                )
-                    .before(SelectionSet::Select),
-                update_mode_cursor,
-            ),
-        );
+                    trigger_aimed_ability_on_hotkey,
+                    trigger_deploy_on_hotkey,
+                    // The armed-mode click handlers run before selection and
+                    // consume the press they commit, so the click never also
+                    // reaches click-to-select (a plain order click used to
+                    // deselect everything, a guard click select the guarded
+                    // unit).
+                    (
+                        trigger_bombard_click,
+                        trigger_ability_click,
+                        trigger_patrol_click,
+                        trigger_attack_press_release,
+                        trigger_clear_press_release,
+                        trigger_attack_move_click,
+                        trigger_guard_click,
+                        trigger_move_click,
+                        trigger_set_target_click,
+                    )
+                        .before(SelectionSet::Select),
+                    draw_area_drag_preview,
+                    update_mode_cursor,
+                ),
+            );
     }
 }
 
@@ -127,6 +134,9 @@ pub enum Mode {
     Guard,
     Move,
     SetTarget,
+    /// The constructors' Clear (`E` / button): a feature under the click,
+    /// or every one in a dragged disc.
+    Clear,
     /// Cast the aimed abilities of the units this panel command lists
     /// (NX Flag, SIGTERM, Dispatch …), like a Spring command goes only
     /// to units that list it.
@@ -140,12 +150,145 @@ impl Mode {
             Mode::Patrol => CursorKind::Patrol,
             Mode::Guard => CursorKind::Defend,
             Mode::Move => CursorKind::Move,
+            Mode::Clear => CursorKind::Reclamate,
+            // `bug_bombard.lua`: `cursor = "Capture"`.
+            Mode::Ability(CmdId::Bombard) => CursorKind::Capture,
             // Spring renders set-target with the attack crosshair too.
             Mode::AttackGround | Mode::AttackMove | Mode::SetTarget | Mode::Ability(_) => {
                 CursorKind::Attack
             }
         }
     }
+}
+
+/// `CMouseHandler::dragCircleCommandThreshold`: a press that travels
+/// farther than this on screen before its release is an area order.
+pub const AREA_DRAG_THRESHOLD_PX: f32 = 4.0;
+
+/// An Attack or Clear press in flight: where it landed, how far the
+/// cursor has gone since, and the disc it has drawn
+/// (`CGuiHandler::GetCommand`'s `CMDTYPE_ICON_UNIT_OR_AREA` case).
+#[derive(Resource, Default, Debug)]
+pub struct AreaDrag {
+    pub mode: Option<Mode>,
+    pub press_cursor: Vec2,
+    /// The ground under the press: the disc's centre.
+    pub center: Vec3,
+    /// The disc's radius, the ground distance to the cursor.
+    pub radius: f32,
+    /// The cursor left the press by more than [`AREA_DRAG_THRESHOLD_PX`].
+    pub is_area: bool,
+}
+
+/// What a press/drag/release in an area-capable mode came to.
+struct AreaRelease {
+    center: Vec3,
+    /// The disc, when the press was dragged; else a click.
+    area: Option<f32>,
+    /// The ground under the release (a click's target).
+    at: Vec3,
+}
+
+/// The press / drag / release of an area-capable armed mode, shared by
+/// Attack and Clear: the press is taken (and the disc started) while
+/// `mode` is armed, the disc follows the cursor, and the release
+/// commits — or is swallowed when the mode was disarmed meanwhile.
+/// `Some` on the committing release only.
+#[allow(clippy::too_many_arguments)]
+fn area_press_release(
+    mode: Mode,
+    mouse: &mut ButtonInput<MouseButton>,
+    modes: &OrderCursorModes,
+    drag: &mut AreaDrag,
+    windows: &Query<&Window>,
+    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    ray_cast: &mut PickRayCast,
+) -> Option<AreaRelease> {
+    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
+    if modes.is(mode) && mouse.just_pressed(MouseButton::Left) {
+        let center = ground_hit(windows, camera_q, ray_cast)?;
+        *drag = AreaDrag {
+            mode: Some(mode),
+            press_cursor: cursor.unwrap_or_default(),
+            center,
+            radius: 0.0,
+            is_area: false,
+        };
+        consume_click(mouse);
+        // A press and release inside one frame is a click.
+        if !mouse.just_released(MouseButton::Left) {
+            return None;
+        }
+    }
+    if drag.mode != Some(mode) {
+        return None;
+    }
+    if !modes.is(mode) {
+        // Disarmed mid-press (Escape, right-click): the release still
+        // belongs to the order, not to click-to-select.
+        if mouse.just_released(MouseButton::Left) {
+            mouse.clear_just_released(MouseButton::Left);
+            drag.mode = None;
+        }
+        return None;
+    }
+    if let Some(c) = cursor
+        && c.distance(drag.press_cursor) > AREA_DRAG_THRESHOLD_PX
+    {
+        drag.is_area = true;
+    }
+    let under = ground_hit(windows, camera_q, ray_cast);
+    if drag.is_area
+        && let Some(g) = under
+    {
+        drag.radius = g.xz().distance(drag.center.xz());
+    }
+    if !mouse.just_released(MouseButton::Left) {
+        return None;
+    }
+    mouse.clear_just_released(MouseButton::Left);
+    let done = std::mem::take(drag);
+    Some(AreaRelease {
+        center: done.center,
+        area: (done.is_area && done.radius > 0.0).then_some(done.radius),
+        at: under.unwrap_or(done.center),
+    })
+}
+
+/// The lookups an area-capable click handler needs, under Bevy's
+/// parameter cap.
+#[derive(bevy::ecs::system::SystemParam)]
+struct AreaClickLookups<'w, 's> {
+    windows: Query<'w, 's, &'static Window>,
+    camera_q: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<RtsCamera>>,
+    unit_root_q: Query<'w, 's, Entity, With<UnitType>>,
+    parent_q: Query<'w, 's, &'static ChildOf>,
+    unit_info_q: Query<'w, 's, (&'static TeamId, &'static UnitType, &'static GlobalTransform)>,
+    unit_registry: Res<'w, UnitRegistry>,
+    alliances: Res<'w, Alliances>,
+}
+
+/// While a disc is being dragged: its rim on the ground, in the order's
+/// colour (`CGuiHandler::DrawArea`).
+fn draw_area_drag_preview(
+    drag: Res<AreaDrag>,
+    heightmap: Option<Res<Heightmap>>,
+    mut gizmos: Gizmos<crate::interaction::movement::CommandLineGizmos>,
+) {
+    let Some(mode) = drag.mode.filter(|_| drag.is_area && drag.radius > 0.0) else {
+        return;
+    };
+    let color = match mode {
+        Mode::Clear => OrderMarker::Clear(None).color(),
+        _ => OrderMarker::Attack.color(),
+    };
+    crate::interaction::movement::draw_ground_ring(
+        &mut gizmos,
+        drag.center,
+        drag.radius,
+        color,
+        heightmap.as_deref(),
+    );
 }
 
 /// Force the armed mode's cursor glyph. The high priority beats the
@@ -352,7 +495,8 @@ fn trigger_ability_click(
     let Some(Mode::Ability(cmd)) = modes.mode else {
         return;
     };
-    if !mouse.just_pressed(MouseButton::Left) {
+    // Bombard is an order with a target of its own (`trigger_bombard_click`).
+    if cmd == CmdId::Bombard || !mouse.just_pressed(MouseButton::Left) {
         return;
     }
     let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
@@ -374,49 +518,239 @@ fn trigger_ability_click(
     consume_click(&mut mouse);
 }
 
-/// Ground-target click: while [`Mode::AttackGround`] is armed, the next
-/// left-click issues an attack-ground order to every selected unit that
-/// has the Attack command (armed, non-command-fire primary weapon:
-/// Spring sends a command only to units that list it, and a
-/// command-fire weapon such as the Obelisk's Infection never fires on
-/// an attack order). `attack_ground_system` moves the unit into weapon
-/// range if needed, then fires each reload cycle at the ground
-/// position. Shift queues it behind the current orders. Commits exit
-/// the mode (Shift stays in mode).
+/// Attack (`A` / button), `CMDTYPE_ICON_UNIT_OR_AREA` under KP's
+/// `newAttackMode`: the press is taken while the mode is armed; a
+/// release within [`AREA_DRAG_THRESHOLD_PX`] is a click — an enemy
+/// under it is attacked (`AttackUnit`), else the ground there
+/// (`AttackGround`; `attack_ground_system` moves the unit into range and
+/// fires each reload) — and a dragged release is an area attack on
+/// everything hostile in the disc (`AttackArea`, expanded when applied).
+/// Every selected unit with the Attack command takes it (an armed,
+/// non-command-fire primary weapon: a command only goes to units that
+/// list it). Shift queues and stays in mode.
 #[allow(clippy::too_many_arguments)]
-fn trigger_attack_ground_click(
+fn trigger_attack_press_release(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
+    lookups: AreaClickLookups,
     mut ray_cast: PickRayCast,
     mut modes: ResMut<OrderCursorModes>,
+    mut drag: ResMut<AreaDrag>,
     mut pending: ResMut<PendingMoveIndicators>,
     mut net: Issue,
 ) {
-    let Some(target) = armed_ground_click(
-        &modes,
-        &mouse,
+    let AreaClickLookups {
+        windows,
+        camera_q,
+        unit_root_q,
+        parent_q,
+        unit_info_q,
+        unit_registry,
+        alliances,
+    } = lookups;
+    let Some(release) = area_press_release(
         Mode::AttackGround,
+        &mut mouse,
+        &modes,
+        &mut drag,
         &windows,
         &camera_q,
         &mut ray_cast,
     ) else {
         return;
     };
+    let queue = shift_held(&keys);
+    let attackers = || {
+        selected_q
+            .iter()
+            .filter(|(_, unit, _)| can_attack(unit.0))
+            .map(|(e, ..)| e)
+    };
+    if let Some(radius) = release.area {
+        let units = net.units(attackers());
+        net.issue(SimCommand::Order {
+            units,
+            order: Order::AttackArea {
+                center: NetPos::quantize(release.center),
+                radius: NetLen::quantize(radius),
+            },
+            queue,
+        });
+        pending.markers.push((
+            release.center,
+            OrderMarker::AttackArea(radius.round().det_min(f32::from(u16::MAX)) as u16),
+        ));
+        modes.committed(&keys);
+        return;
+    }
+    // A click: the enemy under it, else the ground (`GetCommand`'s
+    // `unit && type != CMDTYPE_ICON_AREA` arm, enemies only here).
+    let sel_team = selected_q.iter().next().map(|(_, _, t)| t.0);
+    let enemy = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q)
+        .and_then(|t| unit_info_q.get(t).ok().map(|info| (t, info)))
+        .filter(|(_, (t_team, ..))| {
+            sel_team.is_some_and(|mine| !alliances.friendly(mine, t_team.0))
+        });
+    match enemy {
+        Some((target, (_, t_kind, t_gtf))) => {
+            let units = net.units(attackers().filter(|e| {
+                selected_q
+                    .get(*e)
+                    .is_ok_and(|(_, u, _)| unit_registry.can_attack(u.0, t_kind.0))
+            }));
+            if let Some(target) = net.id(target) {
+                net.issue(SimCommand::Order {
+                    units,
+                    order: Order::AttackUnit(target),
+                    queue,
+                });
+            }
+            pending
+                .markers
+                .push((t_gtf.translation(), OrderMarker::Attack));
+        }
+        None => {
+            let units = net.units(attackers());
+            net.issue(SimCommand::Order {
+                units,
+                order: Order::AttackGround(NetPos::quantize(release.at)),
+                queue,
+            });
+            pending.markers.push((release.at, OrderMarker::Attack));
+        }
+    }
+    modes.committed(&keys);
+}
+
+/// Clear (`E` / button on a constructor), the builders' area-capable
+/// `CMD_RECLAIM`: a click on a clearable feature clears that one, a
+/// dragged disc every one inside it, nearest first. A click on nothing
+/// clearable keeps the mode armed. Shift queues and stays in mode.
+#[allow(clippy::too_many_arguments)]
+fn trigger_clear_press_release(
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType), With<Selected>>,
+    features: Query<(Entity, &crate::units::features::Feature, &Transform)>,
+    windows: Query<&Window>,
+    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
+    mut ray_cast: PickRayCast,
+    mut modes: ResMut<OrderCursorModes>,
+    mut drag: ResMut<AreaDrag>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut net: Issue,
+) {
+    let Some(release) = area_press_release(
+        Mode::Clear,
+        &mut mouse,
+        &modes,
+        &mut drag,
+        &windows,
+        &camera_q,
+        &mut ray_cast,
+    ) else {
+        return;
+    };
+    let queue = shift_held(&keys);
+    let constructors = net.units(
+        selected_q
+            .iter()
+            .filter(|(_, unit)| unit.0.is_constructor())
+            .map(|(e, _)| e),
+    );
+    if let Some(radius) = release.area {
+        net.issue(SimCommand::Order {
+            units: constructors,
+            order: Order::ClearArea {
+                center: NetPos::quantize(release.center),
+                radius: NetLen::quantize(radius),
+            },
+            queue,
+        });
+        pending.markers.push((
+            release.center,
+            OrderMarker::Clear(Some(radius.round().det_min(f32::from(u16::MAX)) as u16)),
+        ));
+        modes.committed(&keys);
+        return;
+    }
+    let Some(feature) = crate::units::features::clearable_feature_at(release.at, features.iter())
+    else {
+        return;
+    };
+    if let Some(target) = net.id(feature) {
+        net.issue(SimCommand::Order {
+            units: constructors,
+            order: Order::ClearFeature(target),
+            queue,
+        });
+    }
+    let pos = features
+        .get(feature)
+        .map_or(release.at, |(_, _, tf)| tf.translation);
+    pending.markers.push((pos, OrderMarker::Clear(None)));
+    modes.committed(&keys);
+}
+
+/// Bombard (button on a Bug), `bug_bombard.lua`'s `CMDTYPE_ICON_UNIT_OR_MAP`:
+/// the next left-click on an enemy or the ground sends every selected
+/// Bug to walk within range, deploy and attack it; with Alt it only
+/// deploys there. Shift queues and stays in mode.
+#[allow(clippy::too_many_arguments)]
+fn trigger_bombard_click(
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    selected_q: Query<(Entity, &UnitType, &TeamId), With<Selected>>,
+    lookups: AreaClickLookups,
+    mut ray_cast: PickRayCast,
+    mut modes: ResMut<OrderCursorModes>,
+    mut pending: ResMut<PendingMoveIndicators>,
+    mut net: Issue,
+) {
+    if !modes.is(Mode::Ability(CmdId::Bombard)) || !mouse.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let AreaClickLookups {
+        windows,
+        camera_q,
+        unit_root_q,
+        parent_q,
+        unit_info_q,
+        alliances,
+        ..
+    } = lookups;
+    let sel_team = selected_q.iter().next().map(|(_, _, t)| t.0);
+    let enemy = unit_hit(&windows, &camera_q, &mut ray_cast, &unit_root_q, &parent_q)
+        .and_then(|t| unit_info_q.get(t).ok().map(|info| (t, info)))
+        .filter(|(_, (t_team, ..))| {
+            sel_team.is_some_and(|mine| !alliances.friendly(mine, t_team.0))
+        });
+    let (target, at) = match enemy {
+        Some((t, (_, _, gtf))) => match net.id(t) {
+            Some(id) => (BombardTarget::Unit(id), gtf.translation()),
+            None => return,
+        },
+        None => match ground_hit(&windows, &camera_q, &mut ray_cast) {
+            Some(p) => (BombardTarget::Ground(NetPos::quantize(p)), p),
+            None => return,
+        },
+    };
     let units = net.units(
         selected_q
             .iter()
-            .filter(|(_, unit)| can_attack(unit.0))
-            .map(|(e, _)| e),
+            .filter(|(_, unit, _)| unit.0 == UnitKind::Bug)
+            .map(|(e, ..)| e),
     );
     net.issue(SimCommand::Order {
         units,
-        order: Order::AttackGround(NetPos::quantize(target)),
+        order: Order::Bombard {
+            target,
+            deploy_only: alt_held(&keys),
+        },
         queue: shift_held(&keys),
     });
-    pending.markers.push((target, OrderMarker::Attack));
+    pending.markers.push((at, OrderMarker::Bombard));
     modes.committed(&keys);
     consume_click(&mut mouse);
 }

@@ -102,7 +102,12 @@ pub fn tick_worm_surfacing(
             Has<AimTarget>,
             Has<Cloaked>,
         ),
-        (With<AutoHold>, Without<Dying>),
+        // The Hole carries the toggle for its Worms' sake, not a cycle.
+        (
+            With<AutoHold>,
+            Without<Dying>,
+            Without<crate::units::components::Homebase>,
+        ),
     >,
 ) {
     let dt = time.delta_secs();

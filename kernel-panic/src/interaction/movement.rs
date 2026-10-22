@@ -168,15 +168,50 @@ pub enum QueuedCommand {
         target: Entity,
         pos: Vec3,
     },
+    /// A constructor walks into build range of the map feature and
+    /// clears it away (`CMD_RECLAIM` on a feature). `pos` is where it
+    /// stands, for drawing and the walk. Promotion inserts a
+    /// `construction::ClearOrder`, which steers itself.
+    ClearFeature {
+        feature: Entity,
+        pos: Vec3,
+    },
+    /// A constructor clears the clearable features inside the circle,
+    /// nearest first, and is done when none is left (`CMD_RECLAIM` with
+    /// four params, `CBuilderCAI::ExecuteReclaim`).
+    ClearArea {
+        center: Vec3,
+        radius: f32,
+    },
+    /// A Bug walks within `deploy::BOMBARD_RANGE` of the target, deploys
+    /// into an Exploit and, unless `deploy_only`, attacks it
+    /// (`bug_bombard.lua`). `pos` is the target's position at enqueue
+    /// time for drawing; the walk follows the unit itself.
+    Bombard {
+        target: Option<Entity>,
+        pos: Vec3,
+        deploy_only: bool,
+    },
+    /// A Packet walks to the teleporter `target` and re-enters the
+    /// buffer there (`network_enter.lua`). `pos` for drawing.
+    Enter {
+        target: Entity,
+        pos: Vec3,
+    },
 }
 
 impl QueuedCommand {
     pub fn position(&self) -> Vec3 {
         match self {
             QueuedCommand::Move(p) | QueuedCommand::Patrol(p) | QueuedCommand::AttackMove(p) => *p,
-            QueuedCommand::AttackUnit { pos, .. } | QueuedCommand::Guard { pos, .. } => *pos,
+            QueuedCommand::AttackUnit { pos, .. }
+            | QueuedCommand::Guard { pos, .. }
+            | QueuedCommand::ClearFeature { pos, .. }
+            | QueuedCommand::Bombard { pos, .. }
+            | QueuedCommand::Enter { pos, .. } => *pos,
             QueuedCommand::AttackGround(pos) => *pos,
             QueuedCommand::BuildAt { site, .. } => *site,
+            QueuedCommand::ClearArea { center, .. } => *center,
         }
     }
 }
@@ -499,6 +534,9 @@ pub struct OrderState {
     constructing: Has<crate::units::lifecycle::construction::Constructing>,
     pending_cast: Has<crate::units::mechanics::command_fire::PendingCommandFire>,
     nx_cast: Has<crate::units::mechanics::command_fire::NxCast>,
+    clearing: Has<crate::units::lifecycle::construction::ClearOrder>,
+    bombard: Has<crate::units::mechanics::deploy::BombardOrder>,
+    entering: Has<crate::units::mechanics::network_buffer::EnterOrder>,
 }
 
 impl OrderStateItem<'_, '_> {
@@ -520,11 +558,22 @@ impl OrderStateItem<'_, '_> {
             || self.constructing
             || self.pending_cast
             || self.nx_cast
+            || self.clearing
+            || self.bombard
+            || self.entering
     }
 
     /// The active order walks to a build site (`PendingBuild`).
     pub fn walking_to_build(&self) -> bool {
         self.pending_build
+    }
+
+    /// The active order walks to something it must reach to do its job
+    /// (a feature to clear, a Bombard target, a teleporter): a failed
+    /// walk ends it, as `CBuilderCAI::ReclaimObject` finishes on
+    /// `progressState == Failed`.
+    pub fn walking_to_reach(&self) -> bool {
+        self.clearing || self.bombard || self.entering
     }
 }
 
@@ -576,7 +625,11 @@ pub(crate) fn promote_next_command(
     match cmd {
         QueuedCommand::AttackUnit { .. }
         | QueuedCommand::AttackGround(_)
-        | QueuedCommand::Guard { .. } => None,
+        | QueuedCommand::Guard { .. }
+        | QueuedCommand::ClearFeature { .. }
+        | QueuedCommand::ClearArea { .. }
+        | QueuedCommand::Bombard { .. }
+        | QueuedCommand::Enter { .. } => None,
         c => Some(c.position()),
     }
 }
@@ -604,6 +657,14 @@ pub(crate) fn end_move_leg(
             ec.remove::<(
                 crate::units::lifecycle::construction::PendingBuild,
                 crate::units::lifecycle::construction::BuildSiteWait,
+            )>();
+        }
+        if failed && order.walking_to_reach() {
+            ec.remove::<(
+                crate::units::lifecycle::construction::ClearOrder,
+                crate::units::lifecycle::construction::ClearingFeature,
+                crate::units::mechanics::deploy::BombardOrder,
+                crate::units::mechanics::network_buffer::EnterOrder,
             )>();
         }
         return None;
@@ -919,13 +980,13 @@ pub(crate) fn qt_path_outcome(
 /// Drawn back-to-back they form a repeating `-.-.` run.
 const DASH_PATTERN: [(f32, bool); 4] = [(16.0, true), (6.0, false), (4.0, true), (6.0, false)];
 
-fn sample_at_ground(x: f32, z: f32, heightmap: Option<&Heightmap>) -> Vec3 {
+pub(crate) fn sample_at_ground(x: f32, z: f32, heightmap: Option<&Heightmap>) -> Vec3 {
     heightmap.map_or(Vec3::new(x, 0.0, z), |h| h.place(x, z)) + Vec3::Y * GIZMO_LIFT
 }
 
 /// Orientation that lays a gizmo circle flat on the ground:
 /// `Quat::from_rotation_arc(Vec3::Z, Vec3::Y)`, a −90° turn about X.
-const GROUND_RING: Quat = Quat::from_xyzw(
+pub(crate) const GROUND_RING: Quat = Quat::from_xyzw(
     -std::f32::consts::FRAC_1_SQRT_2,
     0.0,
     0.0,
@@ -934,7 +995,37 @@ const GROUND_RING: Quat = Quat::from_xyzw(
 
 /// Segments per order ring. A 6-elmo disc needs no more than this to
 /// read as round at any zoom; the default 32 costs 5× the lines.
-const RING_RESOLUTION: u32 = 12;
+pub(crate) const RING_RESOLUTION: u32 = 12;
+
+/// A terrain-hugging ring of `radius` about `center`: the area of an
+/// area order (upstream's `DrawArea` fan, drawn as its rim and spokes
+/// since gizmos fill nothing). Segments grow with the radius so a
+/// map-wide disc still reads as round.
+pub(crate) fn draw_ground_ring(
+    gizmos: &mut Gizmos<CommandLineGizmos>,
+    center: Vec3,
+    radius: f32,
+    color: Color,
+    heightmap: Option<&Heightmap>,
+) {
+    let segments = ((radius / 12.0) as u32).clamp(RING_RESOLUTION, 96);
+    let on_rim = |a: f32| {
+        sample_at_ground(
+            center.x + bevy::math::ops::cos(a) * radius,
+            center.z + bevy::math::ops::sin(a) * radius,
+            heightmap,
+        )
+    };
+    let rim: Vec<Vec3> = (0..=segments)
+        .map(|i| on_rim(i as f32 / segments as f32 * std::f32::consts::TAU))
+        .collect();
+    gizmos.linestrip(rim.iter().copied(), color);
+    let hub = sample_at_ground(center.x, center.z, heightmap);
+    let faint = color.with_alpha(0.25);
+    for i in 0..8 {
+        gizmos.line(hub, on_rim(i as f32 / 8.0 * std::f32::consts::TAU), faint);
+    }
+}
 
 /// One selected unit's dashed order line from its current waypoint on,
 /// kept between frames. Walking the dash pattern samples the heightmap
@@ -995,6 +1086,10 @@ pub fn draw_selected_command_lines(
     const PATROL_COLOR: Color = Color::srgb(0.4, 0.7, 1.0);
     const FIGHT_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
     const GUARD_COLOR: Color = Color::srgb(0.85, 0.95, 1.0);
+    /// A constructor's clear order: KP's `unit_healthbars.lua` reclaim grey.
+    const CLEAR_COLOR: Color = Color::srgb(0.75, 0.75, 0.75);
+    /// A Bug's Bombard: `bug_bombard.lua`'s `SetCustomCommandDrawData`.
+    const BOMBARD_COLOR: Color = Color::srgb(1.0, 0.5, 0.5);
     const TARGET_COLOR: Color = Color::srgb(1.0, 0.65, 0.2);
     const DISC_RADIUS: f32 = 6.0;
 
@@ -1015,13 +1110,15 @@ pub fn draw_selected_command_lines(
             let pos = cmd.position();
             let to = sample_at_ground(pos.x, pos.z, hm);
             let color = match cmd {
-                QueuedCommand::Move(_) => MOVE_COLOR,
+                QueuedCommand::Move(_) | QueuedCommand::Enter { .. } => MOVE_COLOR,
                 QueuedCommand::BuildAt { .. } => BUILD_COLOR,
                 QueuedCommand::Patrol(_) => PATROL_COLOR,
                 QueuedCommand::AttackMove(_) => FIGHT_COLOR,
                 QueuedCommand::AttackUnit { .. } => FIGHT_COLOR,
                 QueuedCommand::AttackGround(_) => FIGHT_COLOR,
                 QueuedCommand::Guard { .. } => GUARD_COLOR,
+                QueuedCommand::ClearFeature { .. } | QueuedCommand::ClearArea { .. } => CLEAR_COLOR,
+                QueuedCommand::Bombard { .. } => BOMBARD_COLOR,
             };
             draw_dashed_polyline(gizmos, &[prev, to], color, hm);
             gizmos
@@ -1221,6 +1318,10 @@ pub fn draw_selected_factory_orders(
     const PATROL_COLOR: Color = Color::srgb(0.4, 0.7, 1.0);
     const FIGHT_COLOR: Color = Color::srgb(1.0, 0.3, 0.25);
     const GUARD_COLOR: Color = Color::srgb(0.85, 0.95, 1.0);
+    /// A constructor's clear order: KP's `unit_healthbars.lua` reclaim grey.
+    const CLEAR_COLOR: Color = Color::srgb(0.75, 0.75, 0.75);
+    /// A Bug's Bombard: `bug_bombard.lua`'s `SetCustomCommandDrawData`.
+    const BOMBARD_COLOR: Color = Color::srgb(1.0, 0.5, 0.5);
     const DISC_RADIUS: f32 = 6.0;
     let hm = heightmap.as_deref();
     for (transform, orders) in &factories {
@@ -1239,7 +1340,11 @@ pub fn draw_selected_factory_orders(
                 | QueuedCommand::AttackUnit { .. }
                 | QueuedCommand::AttackGround(_) => FIGHT_COLOR,
                 QueuedCommand::Guard { .. } => GUARD_COLOR,
-                QueuedCommand::Move(_) | QueuedCommand::BuildAt { .. } => MOVE_COLOR,
+                QueuedCommand::Move(_)
+                | QueuedCommand::BuildAt { .. }
+                | QueuedCommand::Enter { .. } => MOVE_COLOR,
+                QueuedCommand::ClearFeature { .. } | QueuedCommand::ClearArea { .. } => CLEAR_COLOR,
+                QueuedCommand::Bombard { .. } => BOMBARD_COLOR,
             };
             let to = sample_at_ground(pos.x, pos.z, hm);
             draw_dashed_polyline(&mut gizmos, &[prev, to], color, hm);

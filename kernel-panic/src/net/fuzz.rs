@@ -36,8 +36,8 @@ use super::apply::{MAX_BUILD_SITES, MAX_FACTORY_COUNT, Refusals};
 use super::control::{MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
 use super::speed::SERVER_PLAYER;
 use super::{
-    CommandBus, CommandFrame, DevCommand, FactoryOp, IdList, MatchControl, NetId, NetPos, Order,
-    PointOrder, PosList, SimCommand, Units,
+    BombardTarget, CommandBus, CommandFrame, DevCommand, FactoryOp, IdList, MatchControl, NetId,
+    NetLen, NetPos, Order, PointOrder, PosList, SimCommand, Units,
 };
 use crate::headless::replay::{MapInput, MatchSetup, Seat, shuffle_storage, trail_text};
 use crate::headless::{HashLog, SimHarness};
@@ -268,13 +268,31 @@ fn chaos_command(d: &mut Dice, v: &View, team: u8, tick: u32, prev: bool) -> Sim
     match d.below(23) {
         0..=3 => SimCommand::Order {
             units,
-            order: match d.below(6) {
+            order: match d.below(11) {
                 0 => Order::Move(point(d)),
                 1 => Order::AttackMove(point(d)),
                 2 => Order::Patrol(point(d)),
                 3 => Order::AttackGround(point(d)),
                 4 => Order::AttackUnit(target(d)),
-                _ => Order::Guard(target(d)),
+                5 => Order::Guard(target(d)),
+                6 => Order::AttackArea {
+                    center: point(d),
+                    radius: NetLen(d.below(4000) as u32),
+                },
+                7 => Order::ClearFeature(target(d)),
+                8 => Order::ClearArea {
+                    center: point(d),
+                    radius: NetLen(d.below(4000) as u32),
+                },
+                9 => Order::Bombard {
+                    target: if d.chance(50) {
+                        BombardTarget::Unit(target(d))
+                    } else {
+                        BombardTarget::Ground(point(d))
+                    },
+                    deploy_only: d.chance(30),
+                },
+                _ => Order::Enter(target(d)),
             },
             queue: d.chance(40),
         },
@@ -493,11 +511,19 @@ fn malformed(
             0 => (
                 SimCommand::Order {
                     units: Units::of(own.iter().copied()),
-                    order: match d.below(4) {
+                    order: match d.below(6) {
                         0 => Order::Move(v.point(d, true)),
                         1 => Order::AttackMove(v.point(d, true)),
                         2 => Order::Patrol(v.point(d, true)),
-                        _ => Order::AttackGround(v.point(d, true)),
+                        3 => Order::AttackGround(v.point(d, true)),
+                        4 => Order::AttackArea {
+                            center: v.point(d, true),
+                            radius: NetLen::quantize(300.0 + d.below(900) as f32),
+                        },
+                        _ => Order::ClearArea {
+                            center: v.point(d, true),
+                            radius: NetLen::quantize(100.0 + d.below(400) as f32),
+                        },
                     },
                     queue: d.chance(50),
                 },

@@ -123,8 +123,9 @@ read the resulting state.
   what action is queued (hardware-cursor swap by order context).
 - Hotkeys (every one goes through the same command activation as a
   click on the matching command-panel button, §4): Stop=S, Attack=A,
-  Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm), Enter=R
-  (Packet), Undeploy=U (Exploit), `Ctrl+D` self-destruct with a
+  Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm and Security
+  Hole, whose Worms inherit it), Enter=E (Packet), Clear=E
+  (constructor), Undeploy=U (Exploit), `Ctrl+D` self-destruct with a
   5-second countdown (cancelled by `Stop`), set target=T and
   unset target=X (remake extras: no panel button, as in KP), `,` / `.`
   previous / next panel page, and keypad 2/4/6/8 arm the selected
@@ -197,9 +198,23 @@ read the resulting state.
     previous / next arrows (`,` / `.`). A new selection starts on its
     first page.
   - Not listed because the remake doesn't simulate them yet: Wait,
-    Repeat on mobile units, builder Repair / Reclaim, factory rally
-    orders, the Bug's Bombard. Fire state / Move state / Cloak are
-    hidden as in KP (`hide_commands.lua`).
+    Repeat on mobile units, builder Repair, factory rally orders. Fire
+    state / Move state / Cloak are hidden as in KP (`hide_commands.lua`).
+  - **Clear** (the builders' Reclaim; KP has no metal, so it only clears
+    a Bad Block away): `E` or the button on a constructor, then a click
+    on a feature or a dragged disc over several; the constructor walks
+    into build range of each, nearest first (`CBuilderCAI::
+    ExecuteReclaim`). A right-click on a clearable feature with a
+    constructor selected is the same order.
+  - **Bombard** (`bug_bombard.lua`, a Bug's button before Deploy): a
+    click on an enemy or the ground sends the Bugs to within 1150 elmos,
+    where they deploy and the Exploits attack the target; Alt deploys
+    only. The Exploit keeps the Bug's selection.
+  - **Area attack** (KP's `newAttackMode`): in Attack mode, holding the
+    button and dragging draws a disc; on release every hostile in it
+    the side can see becomes a queued attack, nearest the group first
+    (`SelectAttackNet`). A plain click on an enemy attacks it, on the
+    ground attacks the ground.
 - **Build bar** (KP's `kp_buildbar.lua`): a row of icons along the top
   edge, right-aligned — Terminals and Firewalls first, then the
   homebase. Icons are `55 + (width − 800) / 38` px wide, ¾ as tall,
@@ -808,7 +823,10 @@ context. Most variants animate over their frames at a fixed rate
 | **Move** | 10 | Hovering empty ground while a movable unit is selected |
 | **Attack** | 9 | Hovering an enemy unit while an armed unit is selected |
 | **Repair** | 9 | Hovering a friendly unit while a constructor is selected |
-| **Patrol**, **Defend**, **Reclamate**, **Revive**, **Capture**, **Pickup**, **Unload** | 8–20 | Reserved sprites for Spring orders not yet wired up |
+| **Reclamate** | 20 | Clear armed on a constructor |
+| **Capture** | 20 | Bombard armed on a Bug (`bug_bombard.lua`'s cursor) |
+| **Pickup** | 20 | Hovering one of its own teleporters while a Packet is selected (a right-click enters it) |
+| **Patrol**, **Defend**, **Revive**, **Unload** | 8–20 | Reserved sprites for Spring orders not yet wired up |
 
 ## 26. Window & process
 

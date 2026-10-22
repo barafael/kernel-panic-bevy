@@ -9,7 +9,8 @@
 //! per faction, whose scripted commands go through every [`SimCommand`]
 //! kind (orders, per-unit and path moves, patrol, guard, builds, the
 //! factory queue, repeat, auto-hold, manual targets, deploy, enter,
-//! casts, self-destruct) against an AI opponent. The first human seat
+//! casts, self-destruct, area attacks, Bombard, a walk-and-enter and a
+//! clear of an area of Bad Blocks) against an AI opponent. The first human seat
 //! is the local player and issues through [`CommandBus::issue`] (the
 //! input systems' path); the other two are delivered as remote frames.
 //!
@@ -29,9 +30,11 @@ use super::replay::{MatchSetup, Seat};
 use super::replay::{self, MapInput, PlayOptions, Replay, ReplayError};
 #[cfg(not(target_arch = "wasm32"))]
 use super::{HashLog, SimHarness};
+use crate::net::{
+    BombardTarget, FactoryOp, NetId, NetLen, NetPos, Order, PointOrder, PosList, SimCommand, Units,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::net::{CommandBus, CommandFrame};
-use crate::net::{FactoryOp, NetId, NetPos, Order, PointOrder, PosList, SimCommand, Units};
 use crate::terrain::geovent::GeoventSmoker;
 use crate::units::combat::Dying;
 use crate::units::components::{Homebase, TeamId, UnitType};
@@ -253,9 +256,9 @@ pub(crate) fn script_for(
     enemy_of: impl Fn(u8) -> u8,
 ) -> Vec<(u8, Vec<SimCommand>)> {
     // The script acts on these ticks only (cheap elsewhere).
-    const ACTS: [u32; 20] = [
-        1, 450, 500, 510, 700, 760, 820, 880, 940, 1000, 1100, 1150, 1200, 1250, 1300, 1400, 1500,
-        1600, 2200, 2400,
+    const ACTS: [u32; 26] = [
+        1, 450, 500, 510, 700, 760, 820, 880, 940, 1000, 1050, 1060, 1100, 1150, 1200, 1220, 1250,
+        1300, 1400, 1450, 1500, 1600, 2200, 2300, 2400, 2600,
     ];
     if !ACTS.contains(&tick) {
         return Vec::new();
@@ -440,6 +443,31 @@ pub(crate) fn script_for(
                     units: ids(&mobiles),
                 });
             }
+            1050 => {
+                // Bombard (Hacker's Bugs act; a no-op for the others).
+                if let Some(e) = enemy_base {
+                    cmds.push(SimCommand::Order {
+                        units: ids(&mobiles),
+                        order: Order::Bombard {
+                            target: BombardTarget::Unit(e.id),
+                            deploy_only: false,
+                        },
+                        queue: false,
+                    });
+                }
+            }
+            1060 => {
+                if let Some(e) = enemy_base {
+                    cmds.push(SimCommand::Order {
+                        units: ids(&mobiles),
+                        order: Order::Bombard {
+                            target: BombardTarget::Ground(p(e.pos + side * 80.0)),
+                            deploy_only: true,
+                        },
+                        queue: true,
+                    });
+                }
+            }
             1100 => {
                 if let Some(e) = enemy_base {
                     cmds.push(SimCommand::SetTarget {
@@ -460,6 +488,19 @@ pub(crate) fn script_for(
                     });
                 }
             }
+            1220 => {
+                // An area attack over the enemy base, behind the attack.
+                if let Some(e) = enemy_base {
+                    cmds.push(SimCommand::Order {
+                        units: ids(&mobiles),
+                        order: Order::AttackArea {
+                            center: p(e.pos),
+                            radius: NetLen::quantize(400.0),
+                        },
+                        queue: true,
+                    });
+                }
+            }
             1250 => {
                 if let (Some(e), Some(u)) = (enemy_base, mobiles.first()) {
                     cmds.push(SimCommand::Order {
@@ -475,6 +516,17 @@ pub(crate) fn script_for(
             1400 => cmds.push(SimCommand::Enter {
                 units: ids(&mobiles),
             }),
+            1450 => {
+                // Walk to a teleporter and enter it (Network's Packets
+                // and its Port; a no-op for the others).
+                if let Some(door) = own.iter().find(|u| u.kind.is_teleporter()) {
+                    cmds.push(SimCommand::Order {
+                        units: ids(&mobiles),
+                        order: Order::Enter(door.id),
+                        queue: false,
+                    });
+                }
+            }
             1500 => {
                 // Aimed abilities from everything this player owns
                 // (command fire, Dispatch); units without one ignore it.
@@ -504,6 +556,32 @@ pub(crate) fn script_for(
                 if let Some(u) = mobiles.first() {
                     cmds.push(SimCommand::SelfDestruct {
                         units: Units::of([u.id]),
+                    });
+                }
+            }
+            2300 => {
+                // Two Bad Blocks behind the base, to be cleared again.
+                if let Some(b) = builder_kind
+                    && buildings_for(b).contains(&UnitKind::BadBlock)
+                {
+                    let a = home.pos - side * 140.0;
+                    cmds.push(SimCommand::Build {
+                        builders: Units::of(builders.iter().copied()),
+                        kind: UnitKind::BadBlock,
+                        sites: PosList::quantize([a, a - side * 32.0]),
+                        queue: false,
+                    });
+                }
+            }
+            2600 => {
+                if !builders.is_empty() {
+                    cmds.push(SimCommand::Order {
+                        units: Units::of(builders.iter().copied()),
+                        order: Order::ClearArea {
+                            center: p(home.pos - side * 156.0),
+                            radius: NetLen::quantize(120.0),
+                        },
+                        queue: false,
                     });
                 }
             }

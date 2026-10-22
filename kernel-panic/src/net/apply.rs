@@ -92,6 +92,12 @@ use crate::units::mechanics::worm::AutoHold;
 pub const MAX_FACTORY_COUNT: u16 = 100;
 /// Most sites in one build command (a long Shift row is a few dozen).
 pub const MAX_BUILD_SITES: usize = 256;
+/// Most targets one area attack expands to (Spring has no cap; keeps a
+/// map-wide drag from queueing hundreds of attacks per unit).
+pub const MAX_AREA_TARGETS: usize = 64;
+/// Largest area-order radius in elmos (`CGuiHandler::GetCommand`'s
+/// `maxRadius`).
+pub const MAX_AREA_RADIUS: f32 = 100_000.0;
 /// Most units one `/give` spawns.
 pub const MAX_DEV_SPAWN: u16 = 100;
 
@@ -324,6 +330,12 @@ pub(crate) struct ApplyCtx<'w, 's> {
     factory_orders: Query<'w, 's, &'static mut FactoryOrders>,
     autohold: Query<'w, 's, &'static mut AutoHold>,
     vents: Query<'w, 's, (Entity, &'static GeoventSmoker), Without<VentClaim>>,
+    /// Last tick's spatial snapshot (area orders expand through it);
+    /// bare test worlds have none.
+    spatial: Option<Res<'w, crate::units::spatial::SpatialIndex>>,
+    net_ids: Query<'w, 's, &'static NetId>,
+    /// The standing map features (clear targets).
+    features: Query<'w, 's, (&'static crate::units::features::Feature, &'static Transform)>,
     registry: Option<Res<'w, UnitRegistry>>,
     command_fire: Option<ResMut<'w, Messages<CommandFireEvent>>>,
     deploy: Option<ResMut<'w, Messages<DeployEvent>>>,
@@ -465,13 +477,28 @@ impl ApplyCtx<'_, '_> {
             // One point for the whole command: off the map, all of it.
             SimCommand::Order {
                 order:
-                    Order::Move(p) | Order::AttackMove(p) | Order::Patrol(p) | Order::AttackGround(p),
+                    Order::Move(p)
+                    | Order::AttackMove(p)
+                    | Order::Patrol(p)
+                    | Order::AttackGround(p)
+                    | Order::AttackArea { center: p, .. }
+                    | Order::ClearArea { center: p, .. }
+                    | Order::Bombard {
+                        target: super::BombardTarget::Ground(p),
+                        ..
+                    },
                 ..
             }
             | SimCommand::Cast { target: p, .. }
                 if !self.rules.in_map(p.to_vec3()) =>
             {
                 return Err(Refusal::OffMap);
+            }
+            SimCommand::Order {
+                order: Order::AttackArea { radius, .. } | Order::ClearArea { radius, .. },
+                ..
+            } if radius.0 == 0 || radius.to_f32() > MAX_AREA_RADIUS => {
+                return Err(Refusal::Malformed("area radius"));
             }
             SimCommand::Dev(dev) => {
                 // (Cheats at all: `rules_admit`.)
@@ -741,7 +768,10 @@ impl ApplyCtx<'_, '_> {
                     if own.kind.deploy_pair().is_some()
                         && let Some(m) = self.deploy.as_mut()
                     {
-                        m.write(DeployEvent { entity: own.e });
+                        m.write(DeployEvent {
+                            entity: own.e,
+                            then: None,
+                        });
                     }
                 }
             }
@@ -1023,7 +1053,13 @@ impl ApplyCtx<'_, '_> {
                 Order::Guard(t) => self
                     .live(t)
                     .map(|(target, pos, ..)| QueuedCommand::Guard { target, pos }),
-                Order::AttackGround(_) | Order::AttackUnit(_) => None,
+                Order::AttackGround(_)
+                | Order::AttackUnit(_)
+                | Order::AttackArea { .. }
+                | Order::ClearFeature(_)
+                | Order::ClearArea { .. }
+                | Order::Bombard { .. }
+                | Order::Enter(_) => None,
             };
             if let Some(cmd) = factory_cmd {
                 for f in &factories {
@@ -1069,9 +1105,157 @@ impl ApplyCtx<'_, '_> {
                 self.patrol(&units, p.to_vec3(), queue);
                 return;
             }
+            Order::AttackArea { center, radius } => {
+                units.retain(|u| self.armed(u.kind));
+                self.attack_area(&units, center.to_vec3(), radius.to_f32(), queue);
+                return;
+            }
+            Order::ClearFeature(id) => {
+                // A feature already gone (latency) is no refusal.
+                let Some((feature, pos)) = self.feature(id) else {
+                    return;
+                };
+                units.retain(|u| u.kind.is_constructor());
+                QueuedCommand::ClearFeature { feature, pos }
+            }
+            Order::ClearArea { center, radius } => {
+                units.retain(|u| u.kind.is_constructor());
+                QueuedCommand::ClearArea {
+                    center: center.to_vec3(),
+                    radius: radius.to_f32(),
+                }
+            }
+            Order::Bombard {
+                target,
+                deploy_only,
+            } => {
+                let (target, pos) = match target {
+                    super::BombardTarget::Ground(p) => (None, p.to_vec3()),
+                    super::BombardTarget::Unit(t) => {
+                        let Some((target, pos, t_team, _)) = self.live(t) else {
+                            return;
+                        };
+                        let before = units.len();
+                        units.retain(|u| !self.friendly(u.team, t_team));
+                        if units.len() != before {
+                            self.rules.refuse(tick, player, sim_cmd, Refusal::Friendly);
+                        }
+                        (Some(target), pos)
+                    }
+                };
+                units.retain(|u| u.kind == UnitKind::Bug);
+                QueuedCommand::Bombard {
+                    target,
+                    pos,
+                    deploy_only,
+                }
+            }
+            Order::Enter(t) => {
+                let Some((target, pos, t_team, t_kind)) = self.live(t) else {
+                    return;
+                };
+                if !t_kind.is_teleporter() {
+                    return;
+                }
+                // `network_enter.lua`: the Packet's own team's teleporter.
+                units.retain(|u| u.kind == UnitKind::Packet && u.team == t_team);
+                QueuedCommand::Enter { target, pos }
+            }
         };
         for u in units {
             self.give(u.e, cmd, queue);
+        }
+    }
+
+    /// A standing, clearable map feature: a clear target.
+    fn feature(&self, id: NetId) -> Option<(Entity, Vec3)> {
+        let e = self.index.get(id)?;
+        let (feature, tf) = self.features.get(e).ok()?;
+        feature.def.clearable.then_some((e, tf.translation))
+    }
+
+    /// `CSelectedUnitsHandlerAI::SelectAttackNet` for the circle form:
+    /// every hostile unit in the circle that the issuing side can see,
+    /// nearest the group's centre first (with Shift, the centre of the
+    /// ends of their queues), becomes one attack per unit — the first
+    /// replacing its orders unless Shift, the rest queued behind.
+    fn attack_area(&mut self, units: &[Own], center: Vec3, radius: f32, queue: bool) {
+        let Some(spatial) = self.spatial.as_deref() else {
+            return;
+        };
+        if units.is_empty() {
+            return;
+        }
+        // The group's centre, or with Shift where its queues end
+        // (`LastQueuePosition`): the end of the queue, else the move
+        // target, else the unit.
+        let mid = units
+            .iter()
+            .map(|u| {
+                let own = self.pos(u.e);
+                if !queue {
+                    return own;
+                }
+                let (q, mt, ..) = self.queues.get(u.e).unwrap_or_default();
+                q.and_then(|q| q.commands.last().map(|c| c.position()))
+                    .or(mt.map(|t| t.0))
+                    .unwrap_or(own)
+            })
+            .sum::<Vec3>()
+            / units.len() as f32;
+        // Hidden from the issuers: a cloaked unit none of their teams
+        // has detected (`SelectCircleUnits` takes LOS / radar).
+        let hidden = |e: &crate::units::spatial::SpatialEntry| {
+            units.iter().all(|u| {
+                crate::units::mechanics::cloak::hidden_from(e.cloaked, e.detected_by, u.team)
+            })
+        };
+        let friendly_to_all = |team: u8| units.iter().all(|u| self.friendly(u.team, team));
+        let mut found: Vec<(f32, NetId, Entity, Vec3, UnitKind, u8)> = Vec::new();
+        spatial.query_radius(center, radius, |e| {
+            if e.feature
+                || !e.hp_positive
+                || crate::units::spatial::flat_dist_sq(e.pos, center) > radius * radius
+                || friendly_to_all(e.team)
+                || hidden(e)
+            {
+                return;
+            }
+            let Ok(id) = self.net_ids.get(e.entity) else {
+                return;
+            };
+            found.push((
+                crate::units::spatial::flat_dist_sq(e.pos, mid),
+                *id,
+                e.entity,
+                e.pos,
+                e.kind,
+                e.team,
+            ));
+        });
+        // Deterministic: distance, then the unit's id (the index is in
+        // id order already; the tie-break makes it explicit).
+        found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        found.truncate(MAX_AREA_TARGETS);
+        if found.is_empty() {
+            return;
+        }
+        for u in units {
+            let mut first = true;
+            for &(_, _, target, pos, kind, team) in &found {
+                if self.friendly(u.team, team) || !self.can_hit(u.kind, kind) {
+                    continue;
+                }
+                let cmd = QueuedCommand::AttackUnit { target, pos };
+                if first {
+                    self.give(u.e, cmd, queue);
+                } else {
+                    // Behind the one just given: `Orders::busy` cannot
+                    // see that deferred insert yet.
+                    queue_command(u.e, cmd, &mut self.commands);
+                }
+                first = false;
+            }
         }
     }
 
@@ -1507,6 +1691,286 @@ mod tests {
         send(&mut world, 0, vec![attack(enemy)]);
         assert!(world.get::<AttackTargetOrder>(bit).is_some());
         assert!(world.get::<AttackTargetOrder>(builder).is_none());
+    }
+
+    /// One spatial entry per unit, as the index would hold it.
+    fn index_unit(world: &mut World, e: Entity, cloaked: bool, feature: bool) {
+        let (team, kind, pos) = {
+            let team = world.get::<TeamId>(e).map_or(0, |t| t.0);
+            let kind = world.get::<UnitType>(e).map_or(UnitKind::BadBlock, |u| u.0);
+            let pos = world.get::<Transform>(e).unwrap().translation;
+            (team, kind, pos)
+        };
+        world
+            .get_resource_or_init::<crate::units::spatial::SpatialIndex>()
+            .insert_for_test(crate::units::spatial::SpatialEntry {
+                entity: e,
+                pos,
+                hit_radius: 10.0,
+                mid_y: 0.0,
+                up: Vec3::Y,
+                team,
+                kind,
+                hp_positive: true,
+                is_flying: false,
+                cloaked,
+                detected_by: 0,
+                feature,
+            });
+    }
+
+    fn attack_area(units: Units, x: f32, radius: f32, queue: bool) -> SimCommand {
+        SimCommand::Order {
+            units,
+            order: Order::AttackArea {
+                center: NetPos::quantize(Vec3::new(x, 0.0, 100.0)),
+                radius: crate::net::NetLen::quantize(radius),
+            },
+            queue,
+        }
+    }
+
+    fn queued(world: &World, e: Entity) -> Vec<QueuedCommand> {
+        world
+            .get::<CommandQueue>(e)
+            .map_or(Vec::new(), |q| q.commands.clone())
+    }
+
+    /// `SelectAttackNet`: an area attack becomes one attack per hostile
+    /// in the circle, nearest the group first, the first replacing the
+    /// orders and the rest queued; a friend, an undetected cloaked unit,
+    /// a feature and anything outside the circle are left out.
+    #[test]
+    fn area_attack_expands_to_sorted_targets() {
+        let mut world = world();
+        world.insert_resource(UnitRegistry::load());
+        let (bit, a) = unit(&mut world, UnitKind::Bit, 0, 100.0);
+        let (near, _) = unit(&mut world, UnitKind::Bit, 1, 300.0);
+        let (far, _) = unit(&mut world, UnitKind::Bit, 1, 500.0);
+        let (friend, _) = unit(&mut world, UnitKind::Bit, 0, 350.0);
+        let (ghost, _) = unit(&mut world, UnitKind::LogicBomb, 1, 320.0);
+        let (away, _) = unit(&mut world, UnitKind::Bit, 1, 2000.0);
+        let (block, _) = unit(&mut world, UnitKind::BadBlock, 1, 330.0);
+        for (e, cloaked, feature) in [
+            (bit, false, false),
+            (near, false, false),
+            (far, false, false),
+            (friend, false, false),
+            (ghost, true, false),
+            (away, false, false),
+            (block, false, true),
+        ] {
+            index_unit(&mut world, e, cloaked, feature);
+        }
+        send(
+            &mut world,
+            0,
+            vec![attack_area(Units::of([a]), 400.0, 300.0, false)],
+        );
+        assert_eq!(
+            world.get::<AttackTargetOrder>(bit).map(|o| o.target),
+            Some(near),
+            "the nearest first"
+        );
+        assert_eq!(
+            queued(&world, bit),
+            vec![QueuedCommand::AttackUnit {
+                target: far,
+                pos: Vec3::new(500.0, 0.0, 100.0),
+            }]
+        );
+        assert_eq!(refused(&world), 0);
+
+        // Shift: behind the current orders, sorted from where they end.
+        let mut world = self::tests::world();
+        world.insert_resource(UnitRegistry::load());
+        let (bit, a) = unit(&mut world, UnitKind::Bit, 0, 100.0);
+        let (near, _) = unit(&mut world, UnitKind::Bit, 1, 300.0);
+        let (far, _) = unit(&mut world, UnitKind::Bit, 1, 500.0);
+        for e in [bit, near, far] {
+            index_unit(&mut world, e, false, false);
+        }
+        world
+            .entity_mut(bit)
+            .insert(MoveTarget(Vec3::new(600.0, 0.0, 100.0)));
+        send(
+            &mut world,
+            0,
+            vec![attack_area(Units::of([a]), 400.0, 300.0, true)],
+        );
+        assert!(world.get::<MoveTarget>(bit).is_some(), "the move stays");
+        assert_eq!(
+            queued(&world, bit)
+                .iter()
+                .map(|c| match c {
+                    QueuedCommand::AttackUnit { target, .. } => *target,
+                    other => panic!("{other:?}"),
+                })
+                .collect::<Vec<_>>(),
+            vec![far, near],
+            "from the end of the queue, 500 is nearer than 300"
+        );
+    }
+
+    /// An area order needs a radius inside the map's measure.
+    #[test]
+    fn area_orders_refuse_a_bad_radius() {
+        let mut world = world();
+        let (bit, a) = unit(&mut world, UnitKind::Bit, 0, 100.0);
+        send(
+            &mut world,
+            0,
+            vec![attack_area(Units::of([a]), 400.0, 0.0, false)],
+        );
+        assert_eq!(refused(&world), 1);
+        send(
+            &mut world,
+            0,
+            vec![attack_area(
+                Units::of([a]),
+                400.0,
+                MAX_AREA_RADIUS * 2.0,
+                false,
+            )],
+        );
+        assert_eq!(refused(&world), 2);
+        assert!(world.get::<AttackTargetOrder>(bit).is_none());
+    }
+
+    /// A standing clearable feature, as the clear orders look it up.
+    fn block(world: &mut World, x: f32) -> (Entity, NetId) {
+        let def = crate::units::content::defs::defs()
+            .features
+            .get("badblock")
+            .unwrap();
+        let e = world
+            .spawn((
+                crate::units::features::Feature { def, owner: None },
+                NetId::default(),
+                Health::full(def.health),
+                Transform::from_xyz(x, 0.0, 100.0),
+            ))
+            .id();
+        (e, *world.get::<NetId>(e).unwrap())
+    }
+
+    /// Clear orders reach constructors only; a feature already gone is
+    /// no refusal, a radius of nothing is.
+    #[test]
+    fn clear_orders_go_to_constructors() {
+        use crate::units::lifecycle::construction::ClearOrder;
+        let mut world = world();
+        let (builder, a) = unit(&mut world, UnitKind::Assembler, 0, 100.0);
+        let (bit, b) = unit(&mut world, UnitKind::Bit, 0, 120.0);
+        let (block, id) = block(&mut world, 300.0);
+        let clear = SimCommand::Order {
+            units: Units::of([a, b]),
+            order: Order::ClearFeature(id),
+            queue: false,
+        };
+        send(&mut world, 0, vec![clear.clone()]);
+        assert_eq!(
+            world.get::<ClearOrder>(builder),
+            Some(&ClearOrder::Feature { feature: block })
+        );
+        assert!(world.get::<ClearOrder>(bit).is_none());
+        assert_eq!(refused(&world), 0);
+
+        world.entity_mut(builder).remove::<ClearOrder>();
+        world.despawn(block);
+        send(&mut world, 0, vec![clear]);
+        assert!(world.get::<ClearOrder>(builder).is_none());
+        assert_eq!(refused(&world), 0, "gone: latency, not a refusal");
+
+        let area = |radius: f32| SimCommand::Order {
+            units: Units::of([a, b]),
+            order: Order::ClearArea {
+                center: NetPos::quantize(Vec3::new(300.0, 0.0, 100.0)),
+                radius: crate::net::NetLen::quantize(radius),
+            },
+            queue: false,
+        };
+        send(&mut world, 0, vec![area(0.0)]);
+        assert_eq!(refused(&world), 1);
+        send(&mut world, 0, vec![area(200.0)]);
+        assert!(matches!(
+            world.get::<ClearOrder>(builder),
+            Some(ClearOrder::Area { current: None, .. })
+        ));
+        assert!(world.get::<ClearOrder>(bit).is_none());
+    }
+
+    /// Bombard reaches Bugs only, refuses a friendly target like an
+    /// attack, and takes a ground point.
+    #[test]
+    fn bombard_reaches_bugs_only() {
+        use crate::net::BombardTarget;
+        use crate::units::mechanics::deploy::BombardOrder;
+        let mut world = world();
+        let (bug, a) = unit(&mut world, UnitKind::Bug, 0, 100.0);
+        let (bit, b) = unit(&mut world, UnitKind::Bit, 0, 120.0);
+        let (enemy, e) = unit(&mut world, UnitKind::Bit, 1, 900.0);
+        let (_, own) = unit(&mut world, UnitKind::Byte, 0, 140.0);
+        let bombard = |target, deploy_only| SimCommand::Order {
+            units: Units::of([a, b]),
+            order: Order::Bombard {
+                target,
+                deploy_only,
+            },
+            queue: false,
+        };
+        send(
+            &mut world,
+            0,
+            vec![bombard(BombardTarget::Unit(own), false)],
+        );
+        assert!(world.get::<BombardOrder>(bug).is_none());
+        assert_eq!(refused(&world), 1);
+        send(&mut world, 0, vec![bombard(BombardTarget::Unit(e), false)]);
+        let order = world.get::<BombardOrder>(bug).expect("the Bug takes it");
+        assert_eq!(order.target, Some(enemy));
+        assert!(!order.deploy_only);
+        assert!(world.get::<BombardOrder>(bit).is_none());
+        let ground = NetPos::quantize(Vec3::new(700.0, 0.0, 100.0));
+        send(
+            &mut world,
+            0,
+            vec![bombard(BombardTarget::Ground(ground), true)],
+        );
+        let order = world.get::<BombardOrder>(bug).unwrap();
+        assert_eq!((order.target, order.pos), (None, ground.to_vec3()));
+        assert!(order.deploy_only);
+    }
+
+    /// An Enter order sends Packets to their own side's teleporter and
+    /// nobody anywhere else.
+    #[test]
+    fn enter_orders_walk_packets_to_their_own_teleporter() {
+        use crate::units::mechanics::network_buffer::EnterOrder;
+        let mut world = world();
+        let (packet, a) = unit(&mut world, UnitKind::Packet, 0, 100.0);
+        let (bit, b) = unit(&mut world, UnitKind::Bit, 0, 120.0);
+        let (port, mine) = unit(&mut world, UnitKind::Port, 0, 600.0);
+        let (_, theirs) = unit(&mut world, UnitKind::Port, 1, 700.0);
+        let enter = |target| SimCommand::Order {
+            units: Units::of([a, b]),
+            order: Order::Enter(target),
+            queue: false,
+        };
+        send(&mut world, 0, vec![enter(theirs)]);
+        assert!(world.get::<EnterOrder>(packet).is_none());
+        send(&mut world, 0, vec![enter(b)]);
+        assert!(
+            world.get::<EnterOrder>(packet).is_none(),
+            "a Bit is no door"
+        );
+        send(&mut world, 0, vec![enter(mine)]);
+        assert_eq!(
+            world.get::<EnterOrder>(packet).map(|o| o.target),
+            Some(port)
+        );
+        assert!(world.get::<EnterOrder>(bit).is_none());
+        assert_eq!(refused(&world), 0);
     }
 
     /// Cheats only in a match with at most one human; god mode lets the

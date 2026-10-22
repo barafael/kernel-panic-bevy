@@ -332,6 +332,19 @@ fn script(world: &mut World) -> Vec<(u32, u8, SimCommand)> {
             queue: true,
         },
     ));
+    // An area attack over the Bits, queued behind the fight above.
+    s.push((
+        95,
+        1,
+        SimCommand::Order {
+            units: Units::of(pointers[1..].iter().copied()),
+            order: Order::AttackArea {
+                center: p(900.0, 900.0),
+                radius: NetLen::quantize(400.0),
+            },
+            queue: true,
+        },
+    ));
     s.push((
         120,
         0,

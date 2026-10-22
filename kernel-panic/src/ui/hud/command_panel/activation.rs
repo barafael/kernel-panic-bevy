@@ -116,7 +116,9 @@ pub(super) fn order_hotkeys(
         }
         return;
     }
-    const BINDINGS: [(KeyCode, CmdId); 13] = [
+    // `E` is both Enter (Packets) and Clear (constructors), as Spring's
+    // `reclaim` and KP's `enter` share it; a selection offers one.
+    const BINDINGS: [(KeyCode, CmdId); 14] = [
         (KeyCode::KeyS, CmdId::Stop),
         (KeyCode::KeyA, CmdId::Attack),
         (KeyCode::KeyF, CmdId::Fight),
@@ -127,6 +129,7 @@ pub(super) fn order_hotkeys(
         (KeyCode::KeyX, CmdId::UnsetTarget),
         (KeyCode::KeyH, CmdId::AutoHold),
         (KeyCode::KeyE, CmdId::Enter),
+        (KeyCode::KeyE, CmdId::Clear),
         (KeyCode::KeyU, CmdId::Undeploy),
         (KeyCode::Comma, CmdId::PrevPage),
         (KeyCode::Period, CmdId::NextPage),
@@ -161,6 +164,7 @@ pub(crate) fn active_command(modes: &OrderCursorModes, placement: &PlacementMode
         Mode::Guard => CmdId::Guard,
         Mode::Move => CmdId::Move,
         Mode::SetTarget => CmdId::SetTarget,
+        Mode::Clear => CmdId::Clear,
         Mode::Ability(id) => id,
     })
 }
@@ -232,6 +236,7 @@ pub(super) fn apply_activations(
             CmdId::Fight => arm(Mode::AttackMove),
             CmdId::Guard => arm(Mode::Guard),
             CmdId::SetTarget => arm(Mode::SetTarget),
+            CmdId::Clear => arm(Mode::Clear),
             // `CMDTYPE.ICON` upstream: the selected Bytes launch at once.
             CmdId::LaunchMines => {
                 crate::interaction::ability::launch_mines(
@@ -245,7 +250,8 @@ pub(super) fn apply_activations(
             | CmdId::Infection
             | CmdId::Sigterm
             | CmdId::Firewall
-            | CmdId::Dispatch => arm(Mode::Ability(msg.id)),
+            | CmdId::Dispatch
+            | CmdId::Bombard => arm(Mode::Ability(msg.id)),
             CmdId::Build(kind) => {
                 if toggled_off {
                     disarm(&mut modes, &mut placement);

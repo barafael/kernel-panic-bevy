@@ -31,6 +31,7 @@ type ActiveOrder = (
     movement::MoveTarget,
     movement::AttackMoveActive,
     crate::units::combat::AttackTargetOrder,
+    crate::units::combat::TargetLost,
     crate::units::combat::AttackGroundOrder,
     movement::GuardTarget,
     crate::units::lifecycle::construction::PendingBuild,
@@ -40,6 +41,11 @@ type ActiveOrder = (
     crate::units::lifecycle::construction::BuildSiteWait,
     crate::units::mechanics::command_fire::PendingCommandFire,
     crate::units::mechanics::command_fire::NxCast,
+    crate::units::lifecycle::construction::ClearOrder,
+    // The clear order's running feature work (a stop drops it).
+    crate::units::lifecycle::construction::ClearingFeature,
+    crate::units::mechanics::deploy::BombardOrder,
+    crate::units::mechanics::network_buffer::EnterOrder,
 );
 
 /// Wipe the unit's orders: the active order, its path, the queue and a
@@ -108,6 +114,33 @@ pub(crate) fn install_command(ec: &mut EntityCommands, cmd: movement::QueuedComm
         }
         QueuedCommand::BuildAt { kind, site } => {
             ec.insert((MoveTarget(site), PendingBuild { kind, site }));
+        }
+        // These steer themselves too (`start_clearing`, `tick_bombard`,
+        // `tick_enter_orders` issue the walk).
+        QueuedCommand::ClearFeature { feature, .. } => {
+            ec.insert(crate::units::lifecycle::construction::ClearOrder::Feature { feature });
+        }
+        QueuedCommand::ClearArea { center, radius } => {
+            ec.insert(crate::units::lifecycle::construction::ClearOrder::Area {
+                center,
+                radius,
+                current: None,
+            });
+        }
+        QueuedCommand::Bombard {
+            target,
+            pos,
+            deploy_only,
+        } => {
+            ec.remove::<ForcedTarget>()
+                .insert(crate::units::mechanics::deploy::BombardOrder {
+                    target,
+                    pos,
+                    deploy_only,
+                });
+        }
+        QueuedCommand::Enter { target, .. } => {
+            ec.insert(crate::units::mechanics::network_buffer::EnterOrder { target });
         }
     }
 }
