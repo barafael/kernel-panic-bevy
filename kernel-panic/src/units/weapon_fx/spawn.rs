@@ -141,12 +141,18 @@ pub(super) fn spawn_weapon_visuals(
             // for every other melee weapon.
             let bite_dir = dir / length.det_max(1e-6);
             if weapon_registry.is_worm_bite(event.weapon) {
+                // The CEG is `[Wormsplash]`'s, so its `d` is that weapon's
+                // damage (800), not the bite's (3200). `get`, not
+                // `by_kind`: a test registry may hold the bite alone.
+                let splash_damage = weapon_registry
+                    .get(WeaponKind::Wormsplash)
+                    .map_or(0.0, |splash| splash.damage.default);
                 spawn_ceg(
                     CegKind::CorruptionWormSplash,
                     event.target_pos,
                     bite_dir,
                     Vec3::Y,
-                    weapon.damage.default,
+                    splash_damage,
                     &mut rng,
                     &mut commands,
                     &mut materials,
@@ -234,7 +240,7 @@ pub(super) fn spawn_weapon_visuals(
 
         // Muzzle flash: the CEG the unit's `FireWeapon1` emits from its
         // muzzle (`emit-sfx 1024+i`), resolved by combat into
-        // `event.muzzle_ceg` — Bit's cyan `arrowflare`, Byte/Pointer's
+        // `event.muzzle_ceg` — Bit's `oldskool_shot2`, Byte/Pointer's
         // soft-blue `oldskool_shot1`. Upstream has no automatic muzzle
         // flash, so a unit whose script emits nothing (Flow, Packet, …)
         // gets nothing: `muzzle_ceg` stays `None`, and every name an FBI
@@ -246,12 +252,15 @@ pub(super) fn spawn_weapon_visuals(
             && let Some(muzzle_ceg) = event.muzzle_ceg
         {
             let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
+            // A script's `emit-sfx` hands its CEG the unit's `cegDamage`
+            // (`CUnitScript::EmitSfx`), 0 unless a script sets it, as
+            // `dispatch_emit_sfx` already passes — not the weapon's.
             spawn_ceg(
                 muzzle_ceg,
                 event.attacker_pos,
                 muzzle_dir,
                 Vec3::Y,
-                weapon.damage.default,
+                0.0,
                 &mut rng,
                 &mut commands,
                 &mut materials,
@@ -309,30 +318,18 @@ pub(super) fn spawn_weapon_visuals(
                     None,
                 ),
                 // No `explosiongenerator` at all: synthesise the burst.
-                None => {
-                    let aoe = weapon.area_of_effect.det_max(4.0);
-                    spawn_impact_burst(
-                        event.target_pos,
-                        weapon.rgb_color,
-                        aoe,
-                        &mut commands,
-                        &mut meshes,
-                        &mut materials,
-                        &mut cache,
-                        &mut impact_assets,
-                    );
-                    spawn_ground_flash(
-                        event.target_pos,
-                        weapon.rgb_color,
-                        aoe,
-                        &mut commands,
-                        &mut meshes,
-                        &mut materials,
-                        &mut cache,
-                        &mut flash_assets,
-                        heightmap.as_deref(),
-                    );
-                }
+                None => spawn_generic_blast(
+                    event.target_pos,
+                    weapon.rgb_color,
+                    weapon.area_of_effect,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut impact_assets,
+                    &mut flash_assets,
+                    heightmap.as_deref(),
+                ),
             }
         }
     }
@@ -341,9 +338,9 @@ pub(super) fn spawn_weapon_visuals(
 /// Drain every [`PendingExplosions`] entry and spawn a matching
 /// burst + ground flash. No beam, no muzzle flash, no projectile — this
 /// path is for standalone detonations (unit-death `ExplodeAs`, kamikaze
-/// triggers, command-fire area blasts). Scaling matches the per-weapon
-/// impact so a Logic Bomb's death boom reads the same visual language
-/// as its in-flight hit.
+/// triggers, command-fire area blasts). Both fall back to the same
+/// [`spawn_generic_blast`], so a Logic Bomb's death boom reads the same
+/// visual language as its in-flight hit.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_pending_explosions(
     mut pending: ResMut<PendingExplosions>,
@@ -379,32 +376,62 @@ pub(super) fn spawn_pending_explosions(
                 &mut ceg_assets,
                 heightmap.as_deref(),
             ),
-            None => {
-                let aoe = event.radius.det_max(4.0);
-                spawn_impact_burst(
-                    event.pos,
-                    event.rgb,
-                    aoe,
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut cache,
-                    &mut impact_assets,
-                );
-                spawn_ground_flash(
-                    event.pos,
-                    event.rgb,
-                    aoe,
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut cache,
-                    &mut flash_assets,
-                    heightmap.as_deref(),
-                );
-            }
+            None => spawn_generic_blast(
+                event.pos,
+                event.rgb,
+                event.radius,
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                &mut cache,
+                &mut impact_assets,
+                &mut flash_assets,
+                heightmap.as_deref(),
+            ),
         }
     }
+}
+
+/// The burst a detonation with no `explosiongenerator` behind it gets:
+/// an owner-coloured impact burst and a ground ring, both `radius`
+/// wide with a 4-elmo floor so a point blast still reads. The one look
+/// for both the per-weapon impact and the standalone explosion, which
+/// is what lets a Logic Bomb's death boom read like its in-flight hit.
+#[allow(clippy::too_many_arguments)]
+fn spawn_generic_blast(
+    pos: Vec3,
+    rgb: [f32; 3],
+    radius: f32,
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut BeamMaterialCache,
+    impact_assets: &mut ImpactBurstAssets,
+    flash_assets: &mut GroundFlashAssets,
+    ground: Option<&Heightmap>,
+) {
+    let aoe = radius.det_max(4.0);
+    spawn_impact_burst(
+        pos,
+        rgb,
+        aoe,
+        commands,
+        meshes,
+        materials,
+        cache,
+        impact_assets,
+    );
+    spawn_ground_flash(
+        pos,
+        rgb,
+        aoe,
+        commands,
+        meshes,
+        materials,
+        cache,
+        flash_assets,
+        ground,
+    );
 }
 
 /// Emissive ring on the ground under `pos`, in the terrain's plane.

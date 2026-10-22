@@ -98,12 +98,11 @@ pub fn tag_unit_kinds(
             entity.insert(Detector { radius: radar });
         }
         // Same resolution `combat_system` applies: `unit_registry.weapon`
-        // already filters BuildLaser; a name missing from the TDFs
-        // resolves to no weapon (range 0).
+        // already applies `CanAttack` and drops the build lasers; a name
+        // missing from the TDFs resolves to no weapon (range 0).
         let auto_targets = unit_registry
             .weapon(kind)
-            .filter(|&weapon| weapon_registry.is_present(weapon))
-            .map(|weapon| weapon_registry.by_kind(weapon))
+            .and_then(|weapon| weapon_registry.get(weapon))
             .is_some_and(|w| w.range != 0.0 && !w.command_fire);
         if !auto_targets {
             entity.insert(NoAutoTarget);

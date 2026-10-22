@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[paper_fountain]` — 1 effect layer, no ground flash.
-/// Referenced by nothing in the shipped data.
+/// `[paper_fountain]`.
 pub static PAPER_FOUNTAIN: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "paper_drops",
@@ -47,8 +46,7 @@ pub static PAPER_FOUNTAIN: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[rock_fountain]` — 1 effect layer, no ground flash.
-/// Referenced by nothing in the shipped data.
+/// `[rock_fountain]`.
 pub static ROCK_FOUNTAIN: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "rock_drops",
@@ -85,8 +83,7 @@ pub static ROCK_FOUNTAIN: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[scissors_fountain]` — 1 effect layer, no ground flash.
-/// Referenced by nothing in the shipped data.
+/// `[scissors_fountain]`.
 pub static SCISSORS_FOUNTAIN: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "scissors_drops",

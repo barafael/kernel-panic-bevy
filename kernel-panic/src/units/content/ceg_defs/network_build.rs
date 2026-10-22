@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[network_build]` — 1 effect layer, no ground flash.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[network_build]`.
 pub static NETWORK_BUILD: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",
@@ -47,8 +46,7 @@ pub static NETWORK_BUILD: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[network_build1]` — 1 effect layer, no ground flash.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[network_build1]`.
 pub static NETWORK_BUILD1: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

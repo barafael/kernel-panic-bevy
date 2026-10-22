@@ -42,8 +42,8 @@ use crate::sim::{GAME_SPEED, RngStream, SimRng};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
 use crate::units::content::ceg_def::{
-    CegExpr, CegTexture, ColorMap, EffectProperties, EmitVector, EvalCtx, FlameProperties,
-    GroundFlash, ParticleProperties, SpawnerProperties, SpikeProperties,
+    CEG_VALUE_BUFFERS, CegBuffers, CegExpr, CegTexture, ColorMap, EffectProperties, EmitVector,
+    EvalCtx, FlameProperties, GroundFlash, ParticleProperties, SpawnerProperties, SpikeProperties,
 };
 use crate::units::content::cegs::CegKind;
 
@@ -425,8 +425,11 @@ fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
 /// has a def, so this cannot fail and callers have no "no such CEG"
 /// fallback left to take: [`CegKind::NoEffect`] — the `[none]` section,
 /// which authors no layers — is how the data asks for nothing.
-/// `damage` is the exploding weapon's base damage, what `d`
-/// expressions evaluate against (§3.1); `up` is the emitter's up
+/// `damage` is what `d` expressions evaluate against (§3.1): whatever
+/// upstream puts in `GenExplosion`'s damage slot, which is the weapon's
+/// base damage for an impact or a death, the projectile's remaining
+/// `ttl` for a `cegTag` trail, and the unit's `cegDamage` (0 unless a
+/// script sets it) for an `emit-sfx`. `up` is the emitter's up
 /// vector: the CEG's
 /// literal vectors and offsets (`emitVector=0, 1, 0`, `pos=0, 1, 0`)
 /// are authored for an upright emitter and turn with it, so a unit
@@ -485,7 +488,7 @@ pub(super) fn spawn_ceg(
                 ceg_assets,
             ),
             EffectProperties::Spawner(s) => {
-                spawn_delayed(effect.count, s, pos, dir, up, damage, commands);
+                spawn_delayed(effect.count, s, pos, up, damage, commands);
             }
             EffectProperties::Spike(sp) => spawn_spikes(
                 effect.count,
@@ -576,15 +579,19 @@ fn spawn_particle_system(
     let mut particles = Vec::new();
 
     for fire_index in 0..count {
-        let n_particles = props
-            .num_particles
-            .eval(&EvalCtx {
+        // `numParticles` rolls like any other property and is stored as
+        // an `int` (`OP_STOREI`): truncated, and zero is a legal answer
+        // — `[corruption_builder]`'s `0 r2` emits one particle half the
+        // time and none the other half. A literal (every other def)
+        // draws nothing, so their streams are what they were.
+        let n_particles = match props.num_particles.literal() {
+            Some(n) => n as u32,
+            None => props.num_particles.eval(&EvalCtx {
                 index: fire_index,
                 damage,
-                ..Default::default()
-            })
-            .round()
-            .det_max(1.0) as u32;
+                rand01: next_unit(rng),
+            }) as u32,
+        };
 
         for particle_index in 0..n_particles {
             let ctx_base = EvalCtx {
@@ -592,12 +599,18 @@ fn spawn_particle_system(
                 damage,
                 rand01: next_unit(rng),
             };
+            // One set of `y`/`x` value buffers per particle, shared by
+            // every expression below in the order they run — upstream's
+            // one code stream per spawned instance. The data crosses
+            // expressions only between the axes of `pos`.
+            let mut buffers: CegBuffers = [0.0; CEG_VALUE_BUFFERS];
 
             let life_frames = eval_with_spread(
                 &props.particle_life,
                 &props.particle_life_spread,
                 rng,
                 ctx_base,
+                &mut buffers,
             )
             .det_max(1.0);
             let life_secs = life_frames / GAME_SPEED;
@@ -607,6 +620,7 @@ fn spawn_particle_system(
                 &props.particle_size_spread,
                 rng,
                 ctx_base,
+                &mut buffers,
             )
             .det_max(0.1);
 
@@ -615,10 +629,17 @@ fn spawn_particle_system(
                 &props.particle_speed_spread,
                 rng,
                 ctx_base,
+                &mut buffers,
             );
             let speed_per_sec = speed_per_frame * GAME_SPEED;
 
-            let rot_deg = eval_with_spread(&props.emit_rot, &props.emit_rot_spread, rng, ctx_base);
+            let rot_deg = eval_with_spread(
+                &props.emit_rot,
+                &props.emit_rot_spread,
+                rng,
+                ctx_base,
+                &mut buffers,
+            );
             let rot_rad = rot_deg.to_radians();
             let perp = perpendicular_to(base_dir, next_signed(rng));
             let rotated_dir = Quat::from_axis_angle(perp, rot_rad) * base_dir;
@@ -626,28 +647,31 @@ fn spawn_particle_system(
 
             // Evaluate `pos` with a fresh rand per axis so `pos=-30 r60,
             // 1.0, -30 r60` samples the square uniformly instead of
-            // landing on the same corner every particle.
-            let pos_x = props.pos.x.eval(&EvalCtx {
-                rand01: next_unit(rng),
-                ..ctx_base
-            });
-            let pos_y = props.pos.y.eval(&EvalCtx {
-                rand01: next_unit(rng),
-                ..ctx_base
-            });
-            let pos_z = props.pos.z.eval(&EvalCtx {
-                rand01: next_unit(rng),
-                ..ctx_base
-            });
+            // landing on the same corner every particle — over the one
+            // buffer set, so `[touhou_buildFX]`'s `d1 y0 … x0, 0, … x0`
+            // reads in z the damage it parked in x.
+            let axis = |e: &CegExpr, rng: &mut u32, buffers: &mut CegBuffers| {
+                e.eval_in(
+                    &EvalCtx {
+                        rand01: next_unit(rng),
+                        ..ctx_base
+                    },
+                    buffers,
+                )
+            };
+            let pos_x = axis(&props.pos.x, rng, &mut buffers);
+            let pos_y = axis(&props.pos.y, rng, &mut buffers);
+            let pos_z = axis(&props.pos.z, rng, &mut buffers);
             let particle_pos = origin + frame * Vec3::new(pos_x, pos_y, pos_z);
 
             // `CSimpleParticleSystem::Update` adds `gravity` to the
             // per-frame speed every frame: elmos/frame², so ×30² for
             // elmos/s² (×30 alone left every CEG 30× too floaty).
-            let gravity_per_sec =
-                per_frame_accel_to_per_sec(Vec3::from_array(props.gravity.eval(&ctx_base)));
+            let gravity_per_sec = per_frame_accel_to_per_sec(Vec3::from_array(
+                props.gravity.eval_in(&ctx_base, &mut buffers),
+            ));
 
-            let airdrag = props.airdrag.eval(&ctx_base);
+            let airdrag = props.airdrag.eval_in(&ctx_base, &mut buffers);
             let airdrag_per_sec = if airdrag <= 0.0 || airdrag >= 1.0 {
                 1.0
             } else {
@@ -655,13 +679,14 @@ fn spawn_particle_system(
                 ops::powf(airdrag, GAME_SPEED)
             };
 
-            let size_mod = props.size_mod.eval(&ctx_base);
+            let size_mod = props.size_mod.eval_in(&ctx_base, &mut buffers);
             let size_mod_per_sec = if size_mod > 0.0 && size_mod != 1.0 {
                 ops::powf(size_mod, GAME_SPEED)
             } else {
                 1.0
             };
-            let size_growth_per_sec = props.size_growth.eval(&ctx_base) * GAME_SPEED;
+            let size_growth_per_sec =
+                props.size_growth.eval_in(&ctx_base, &mut buffers) * GAME_SPEED;
 
             particles.push(CegParticle {
                 pos: particle_pos,
@@ -712,13 +737,17 @@ fn spawn_flame(
     let mut flames = Vec::with_capacity(count as usize);
     for _ in 0..count {
         // Every CEG expression is rolled per projectile, each `r` term
-        // with its own random number.
+        // with its own random number, all over one set of value buffers.
+        let mut buffers: CegBuffers = [0.0; CEG_VALUE_BUFFERS];
         let mut roll = |e: &CegExpr| {
-            e.eval(&EvalCtx {
-                rand01: next_unit(rng),
-                damage,
-                ..Default::default()
-            })
+            e.eval_in(
+                &EvalCtx {
+                    rand01: next_unit(rng),
+                    damage,
+                    ..Default::default()
+                },
+                &mut buffers,
+            )
         };
         let pos = Vec3::new(roll(&props.pos.x), roll(&props.pos.y), roll(&props.pos.z));
         let authored = Vec3::new(roll(&props.dir.x), roll(&props.dir.y), roll(&props.dir.z));
@@ -786,12 +815,16 @@ fn spawn_spikes(
     // Batched like [`spawn_particle_system`].
     let mut spikes = Vec::with_capacity(count as usize);
     for index in 0..count {
-        let roll = |e: &CegExpr, rng: &mut u32| {
-            e.eval(&EvalCtx {
-                index,
-                damage,
-                rand01: next_unit(rng),
-            })
+        let mut buffers: CegBuffers = [0.0; CEG_VALUE_BUFFERS];
+        let mut roll = |e: &CegExpr, rng: &mut u32| {
+            e.eval_in(
+                &EvalCtx {
+                    index,
+                    damage,
+                    rand01: next_unit(rng),
+                },
+                &mut buffers,
+            )
         };
         let raw_dir = frame
             * Vec3::new(
@@ -881,7 +914,6 @@ fn spawn_delayed(
     count: u32,
     props: &SpawnerProperties,
     origin: Vec3,
-    dir: Vec3,
     up: Vec3,
     damage: f32,
     commands: &mut Commands,
@@ -892,22 +924,29 @@ fn spawn_delayed(
     let target_ceg = props.target;
     // `system_nx` fans out 240 timers per cast — one command, not 240.
     let mut timers = Vec::with_capacity(count as usize);
+    let frame = Quat::from_rotation_arc(Vec3::Y, up);
     for i in 0..count {
         let ctx = EvalCtx {
             index: i,
             damage,
             ..Default::default()
         };
-        let delay_frames = props.delay.eval(&ctx).det_max(0.0);
+        let mut buffers: CegBuffers = [0.0; CEG_VALUE_BUFFERS];
+        let delay_frames = props.delay.eval_in(&ctx, &mut buffers).det_max(0.0);
         let delay_secs = delay_frames / GAME_SPEED;
-        let pos_offset = Vec3::from_array(props.pos.eval(&ctx));
+        let pos_offset = Vec3::from_array(props.pos.eval_in(&ctx, &mut buffers));
+        // `CExpGenSpawner` fires the child with its *own* `dir`, the
+        // layer's `dir=` property (every shipped spawner says `0, 1, 0`),
+        // not the explosion's. A layer that authors none is the zero
+        // vector upstream too; `spawn_ceg` reads that as up.
+        let authored_dir = Vec3::from_array(props.dir.eval_in(&ctx, &mut buffers));
         timers.push(CegDelayedSpawn {
             delay_secs,
-            pos: origin + Quat::from_rotation_arc(Vec3::Y, up) * pos_offset,
-            dir,
+            pos: origin + frame * pos_offset,
+            dir: frame * authored_dir,
             up,
             target_ceg,
-            damage: props.damage.eval(&ctx),
+            damage: props.damage.eval_in(&ctx, &mut buffers),
         });
     }
     commands.spawn_batch(timers);
@@ -1194,7 +1233,13 @@ pub(super) fn tick_ceg_delayed_spawns(
 /// (mean 12) instead of 12–36 (mean 24) — the impact cloud dissolved
 /// twice as fast as authored. Fixed by matching upstream's one-sided
 /// range verbatim.
-fn eval_with_spread(base: &CegExpr, spread: &CegExpr, rng: &mut u32, mut ctx: EvalCtx) -> f32 {
+fn eval_with_spread(
+    base: &CegExpr,
+    spread: &CegExpr,
+    rng: &mut u32,
+    mut ctx: EvalCtx,
+    buffers: &mut CegBuffers,
+) -> f32 {
     // Fast path: most properties are folded literals — skip the RNG
     // draws and op loop entirely (the draws would only add 0).
     if let (Some(b), Some(s)) = (base.literal(), spread.literal())
@@ -1203,9 +1248,9 @@ fn eval_with_spread(base: &CegExpr, spread: &CegExpr, rng: &mut u32, mut ctx: Ev
         return b;
     }
     ctx.rand01 = next_unit(rng);
-    let b = base.eval(&ctx);
+    let b = base.eval_in(&ctx, buffers);
     ctx.rand01 = next_unit(rng);
-    let s = spread.eval(&ctx);
+    let s = spread.eval_in(&ctx, buffers);
     b + next_unit(rng) * s
 }
 
@@ -1524,7 +1569,13 @@ mod tests {
         let base = CegExpr::Lit(10.0);
         let spread = CegExpr::Lit(0.0);
         let mut rng = 1234u32;
-        let v = eval_with_spread(&base, &spread, &mut rng, EvalCtx::default());
+        let v = eval_with_spread(
+            &base,
+            &spread,
+            &mut rng,
+            EvalCtx::default(),
+            &mut [0.0; CEG_VALUE_BUFFERS],
+        );
         assert_eq!(v, 10.0);
     }
 
@@ -1543,7 +1594,13 @@ mod tests {
         let mut sum = 0.0;
         const N: usize = 4000;
         for _ in 0..N {
-            let v = eval_with_spread(&base, &spread, &mut rng, EvalCtx::default());
+            let v = eval_with_spread(
+                &base,
+                &spread,
+                &mut rng,
+                EvalCtx::default(),
+                &mut [0.0; CEG_VALUE_BUFFERS],
+            );
             assert!((100.0..=140.0).contains(&v), "out of range: {v}");
             min = min.det_min(v);
             max = max.det_max(v);
@@ -1582,7 +1639,6 @@ mod tests {
                 layer.count,
                 props,
                 Vec3::ZERO,
-                Vec3::Y,
                 Vec3::Y,
                 500.0,
                 &mut commands,

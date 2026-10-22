@@ -37,15 +37,16 @@
 //! | `rN`          | uniform random in `[0, N)` — added                         |
 //! | `iN`          | per-spawn index × N (repeat counter; `count=240` ticks it) |
 //! | `dN`          | damage × N — multiplied by the owning weapon's damage      |
-//! | `mN kN sN pN` | sawtooth / discrete / sine / pow — parsed, not evaluated   |
-//! | `xN yN aN qN` | integer stack ops — parsed, not evaluated                  |
+//! | `mN kN sN pN` | sawtooth / discrete / sine / pow                           |
+//! | `xN yN aN qN` | value-buffer ops                                           |
 //!
 //! Concatenated forms (`110d-3`, `12 d-.5`) are both legal: the parser
 //! splits at every opcode character or whitespace boundary.
 //!
-//! A [`CegExpr`] evaluated in an [`EvalCtx`] with `damage=0, index=0,
-//! rng=constant` degenerates to the literal value — the common case for
-//! CEGs that don't depend on spawn state.
+//! This crate parses the programs and keeps them as written. Running
+//! them is the game's business (`kernel-panic`'s `ceg_def`), which
+//! chooses the op set it models; the last two rows reach it as
+//! [`CegOp::Other`].
 
 use spring_detmath::DetFloat;
 use std::collections::BTreeMap;
@@ -65,74 +66,19 @@ pub struct CegExpr(pub Vec<CegOp>);
 pub enum CegOp {
     /// Literal add.
     Add(f32),
-    /// Uniform random in `[0, v)`. Evaluated via `EvalCtx::rand`.
+    /// Uniform random in `[0, v)`.
     Rand(f32),
     /// Per-spawn index × v — steps by `v` each particle of the burst.
     Index(f32),
     /// `damage × v` — weapon damage scales the contribution.
     Damage(f32),
-    /// Rarely-used ops preserved for round-trip but treated as no-ops at
-    /// eval time. The `char` is the opcode letter, `f32` its operand.
+    /// Every other opcode, kept as written (the `char` is the opcode
+    /// letter, the `f32` its operand) for the consumer to model or
+    /// refuse — the game models `y` and `x` and refuses the rest.
     Other(char, f32),
 }
 
-/// Context passed to [`CegExpr::eval`] to resolve the non-literal ops.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct EvalCtx {
-    /// Which particle of the burst is being spawned (0-based). Drives
-    /// [`CegOp::Index`].
-    pub index: u32,
-    /// Weapon damage scalar. Drives [`CegOp::Damage`].
-    pub damage: f32,
-    /// Uniform pseudo-random in `[0, 1)`. Drives [`CegOp::Rand`].
-    /// Callers regenerate per spawn via their own RNG.
-    pub rand01: f32,
-}
-
 impl CegExpr {
-    /// Evaluate this expression against `ctx`. An empty expression is
-    /// `0.0`, matching upstream's "empty accumulator" start state.
-    pub fn eval(&self, ctx: &EvalCtx) -> f32 {
-        let mut acc = 0.0;
-        for op in &self.0 {
-            match op {
-                CegOp::Add(v) => acc += v,
-                CegOp::Rand(v) => acc += ctx.rand01 * v,
-                CegOp::Index(v) => acc += ctx.index as f32 * v,
-                CegOp::Damage(v) => acc += ctx.damage * v,
-                CegOp::Other(_, _) => { /* silent no-op */ }
-            }
-        }
-        acc
-    }
-
-    /// The constant this expression always evaluates to, if it has no
-    /// `rand`/`index`/`damage` ops. Most CEG properties are exactly
-    /// this — a folded literal lets the per-particle eval collapse to a
-    /// field read on the hot spawn path.
-    pub fn literal(&self) -> Option<f32> {
-        if !self.is_literal() {
-            return None;
-        }
-        Some(
-            self.0
-                .iter()
-                .filter_map(|op| match op {
-                    CegOp::Add(v) => Some(*v),
-                    _ => None,
-                })
-                .sum(),
-        )
-    }
-
-    /// True if this expression reduces to a single literal (no
-    /// randomness, no per-spawn index, no damage dependency).
-    pub fn is_literal(&self) -> bool {
-        self.0
-            .iter()
-            .all(|op| matches!(op, CegOp::Add(_) | CegOp::Other(_, _)))
-    }
-
     /// Parse a CEG expression from its raw string. Invalid opcodes are
     /// silently skipped, matching Spring's parser which only logs a
     /// warning and continues (see `ParseExplosionCode`).
@@ -234,21 +180,6 @@ impl CegVec3 {
         let z = CegExpr::parse(parts.next().unwrap_or("").trim());
         Self { x, y, z }
     }
-
-    /// Evaluate all three axes with the same context.
-    pub fn eval(&self, ctx: &EvalCtx) -> [f32; 3] {
-        [self.x.eval(ctx), self.y.eval(ctx), self.z.eval(ctx)]
-    }
-
-    /// Constant-fold the three axes when all are literals; returns
-    /// `None` when any axis depends on spawn state.
-    pub fn as_literal(&self) -> Option<[f32; 3]> {
-        if self.x.is_literal() && self.y.is_literal() && self.z.is_literal() {
-            Some(self.eval(&EvalCtx::default()))
-        } else {
-            None
-        }
-    }
 }
 
 /// Emitter orientation: either a fixed axis or the keyword `dir` which
@@ -303,31 +234,6 @@ impl ColorMap {
             .map(|c| [c[0], c[1], c[2], c[3]])
             .collect();
         Self { stops }
-    }
-
-    /// Linearly interpolate at `t ∈ [0, 1]`. Stops are evenly spaced.
-    /// Empty → opaque white; single stop → that stop; clamps outside
-    /// the range rather than extrapolating.
-    pub fn sample(&self, t: f32) -> [f32; 4] {
-        match self.stops.len() {
-            0 => [1.0, 1.0, 1.0, 1.0],
-            1 => self.stops[0],
-            n => {
-                let t = t.det_clamp(0.0, 1.0);
-                let segs = n - 1;
-                let scaled = t * segs as f32;
-                let idx = (scaled as usize).min(segs - 1);
-                let local = scaled - idx as f32;
-                let a = self.stops[idx];
-                let b = self.stops[idx + 1];
-                [
-                    a[0] + (b[0] - a[0]) * local,
-                    a[1] + (b[1] - a[1]) * local,
-                    a[2] + (b[2] - a[2]) * local,
-                    a[3] + (b[3] - a[3]) * local,
-                ]
-            }
-        }
     }
 }
 
@@ -752,157 +658,76 @@ mod tests {
 
     // CegExpr -----------------------------------------------------------
 
+    use CegOp::{Add, Damage, Index, Other, Rand};
+
     #[test]
-    fn expr_empty_is_zero() {
-        assert_eq!(CegExpr::parse("").eval(&EvalCtx::default()), 0.0);
+    fn expr_empty_is_an_empty_program() {
+        assert_eq!(CegExpr::parse("").0, vec![]);
     }
 
     #[test]
     fn expr_literal_add() {
-        let e = CegExpr::parse("12.5");
-        assert!(e.is_literal());
-        assert_eq!(e.eval(&EvalCtx::default()), 12.5);
+        assert_eq!(CegExpr::parse("12.5").0, vec![Add(12.5)]);
     }
 
     #[test]
     fn expr_signed_literal() {
-        assert_eq!(CegExpr::parse("-0.1").eval(&EvalCtx::default()), -0.1);
-        assert_eq!(CegExpr::parse("+7").eval(&EvalCtx::default()), 7.0);
+        assert_eq!(CegExpr::parse("-0.1").0, vec![Add(-0.1)]);
+        assert_eq!(CegExpr::parse("+7").0, vec![Add(7.0)]);
     }
 
     #[test]
-    fn expr_rand_adds_uniform() {
-        // `-300 r600` with rand=0 → -300; with rand=1 → 300.
-        let e = CegExpr::parse("-300 r600");
+    fn expr_rand_token() {
+        // `-300 r600`: a literal and a uniform draw in `[0, 600)`.
         assert_eq!(
-            e.eval(&EvalCtx {
-                rand01: 0.0,
-                ..Default::default()
-            }),
-            -300.0
-        );
-        assert!(
-            (e.eval(&EvalCtx {
-                rand01: 1.0,
-                ..Default::default()
-            }) - 300.0)
-                .abs()
-                < 1e-3
-        );
-        assert!(!e.is_literal());
-    }
-
-    #[test]
-    fn expr_index_advances_per_spawn() {
-        // `delay=10 i10` → first spawn at 10, second at 20, third at 30.
-        let e = CegExpr::parse("10 i10");
-        assert_eq!(
-            e.eval(&EvalCtx {
-                index: 0,
-                ..Default::default()
-            }),
-            10.0
-        );
-        assert_eq!(
-            e.eval(&EvalCtx {
-                index: 1,
-                ..Default::default()
-            }),
-            20.0
-        );
-        assert_eq!(
-            e.eval(&EvalCtx {
-                index: 2,
-                ..Default::default()
-            }),
-            30.0
+            CegExpr::parse("-300 r600").0,
+            vec![Add(-300.0), Rand(600.0)]
         );
     }
 
     #[test]
-    fn expr_damage_multiplies() {
-        // `damage=0 i1` with damage=500 and index=3 → 0 + 3*1 = 3 (only
-        // the i-component scales per spawn; the d-component needs its
-        // own token).
-        let damage_expr = CegExpr::parse("0 i1");
-        assert_eq!(
-            damage_expr.eval(&EvalCtx {
-                damage: 500.0,
-                index: 3,
-                ..Default::default()
-            }),
-            3.0
-        );
-        // Standalone `d-3` with damage=10 → -30.
-        let d = CegExpr::parse("d-3");
-        assert_eq!(
-            d.eval(&EvalCtx {
-                damage: 10.0,
-                ..Default::default()
-            }),
-            -30.0
-        );
+    fn expr_index_token() {
+        // `delay=10 i10`: 10 plus 10 per spawn index.
+        assert_eq!(CegExpr::parse("10 i10").0, vec![Add(10.0), Index(10.0)]);
+    }
+
+    #[test]
+    fn expr_damage_token() {
+        // `damage=0 i1` steps by the spawn index, not the damage: the
+        // d-component needs its own token, as in a standalone `d-3`.
+        assert_eq!(CegExpr::parse("0 i1").0, vec![Add(0.0), Index(1.0)]);
+        assert_eq!(CegExpr::parse("d-3").0, vec![Damage(-3.0)]);
     }
 
     #[test]
     fn expr_concatenated_tokens_no_space() {
         // Upstream `particleLife=110d-3` — literal 110 followed by
         // damage-scaled -3 with no intervening whitespace.
-        let e = CegExpr::parse("110d-3");
-        assert_eq!(
-            e.eval(&EvalCtx {
-                damage: 0.0,
-                ..Default::default()
-            }),
-            110.0
-        );
-        assert_eq!(
-            e.eval(&EvalCtx {
-                damage: 10.0,
-                ..Default::default()
-            }),
-            80.0
-        );
+        assert_eq!(CegExpr::parse("110d-3").0, vec![Add(110.0), Damage(-3.0)]);
     }
 
     #[test]
     fn expr_space_separated_damage_token() {
         // Upstream `particleSpeed=12 d-.5` — literal 12 then damage×-0.5.
-        let e = CegExpr::parse("12 d-.5");
-        assert_eq!(
-            e.eval(&EvalCtx {
-                damage: 0.0,
-                ..Default::default()
-            }),
-            12.0
-        );
-        assert_eq!(
-            e.eval(&EvalCtx {
-                damage: 10.0,
-                ..Default::default()
-            }),
-            7.0
-        );
+        assert_eq!(CegExpr::parse("12 d-.5").0, vec![Add(12.0), Damage(-0.5)]);
     }
 
     #[test]
     fn expr_unknown_opcode_is_skipped_and_operand_reparses() {
         // `z5` has no opcode — upstream logs a warning and moves on
         // ONE character at a time. The `5` then parses as its own
-        // literal, so `42 z5` evaluates to 42 + 5 = 47. This mirrors
+        // literal, so `42 z5` is two adds. This mirrors
         // `CCustomExplosionGenerator::ParseExplosionCode` exactly.
-        let e = CegExpr::parse("42 z5");
-        assert_eq!(e.eval(&EvalCtx::default()), 47.0);
+        assert_eq!(CegExpr::parse("42 z5").0, vec![Add(42.0), Add(5.0)]);
     }
 
     #[test]
-    fn expr_other_opcodes_roundtrip_as_noop() {
-        // `s3 p2` — sine + pow — parsed and stored but not evaluated.
-        let e = CegExpr::parse("10 s3 p2");
-        assert_eq!(e.eval(&EvalCtx::default()), 10.0);
-        assert_eq!(e.0.len(), 3);
-        assert!(matches!(e.0[1], CegOp::Other('s', _)));
-        assert!(matches!(e.0[2], CegOp::Other('p', _)));
+    fn expr_other_opcodes_are_kept_as_written() {
+        // `s3 p2` — sine + pow — parsed and stored for the consumer.
+        assert_eq!(
+            CegExpr::parse("10 s3 p2").0,
+            vec![Add(10.0), Other('s', 3.0), Other('p', 2.0)]
+        );
     }
 
     // CegVec3 -----------------------------------------------------------
@@ -910,31 +735,17 @@ mod tests {
     #[test]
     fn vec3_splits_by_comma() {
         let v = CegVec3::parse("-30 r60, 1.0, -30 r60");
-        assert_eq!(
-            v.eval(&EvalCtx {
-                rand01: 0.5,
-                ..Default::default()
-            }),
-            [0.0, 1.0, 0.0]
-        );
+        assert_eq!(v.x.0, vec![Add(-30.0), Rand(60.0)]);
+        assert_eq!(v.y.0, vec![Add(1.0)]);
+        assert_eq!(v.z.0, vec![Add(-30.0), Rand(60.0)]);
     }
 
     #[test]
-    fn vec3_missing_axes_are_zero() {
+    fn vec3_missing_axes_are_empty_programs() {
         let v = CegVec3::parse("5");
-        assert_eq!(v.eval(&EvalCtx::default()), [5.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn vec3_all_literals_constant_folds() {
-        let v = CegVec3::parse("1, 2, 3");
-        assert_eq!(v.as_literal(), Some([1.0, 2.0, 3.0]));
-    }
-
-    #[test]
-    fn vec3_with_rand_does_not_constant_fold() {
-        let v = CegVec3::parse("-30 r60, 1.0, -30 r60");
-        assert!(v.as_literal().is_none());
+        assert_eq!(v.x.0, vec![Add(5.0)]);
+        assert_eq!(v.y, CegExpr::default());
+        assert_eq!(v.z, CegExpr::default());
     }
 
     // EmitVector --------------------------------------------------------
@@ -949,7 +760,11 @@ mod tests {
     #[test]
     fn emit_vector_literal_axis() {
         match EmitVector::parse("0, 1, 0") {
-            EmitVector::Literal(v) => assert_eq!(v.eval(&EvalCtx::default()), [0.0, 1.0, 0.0]),
+            EmitVector::Literal(v) => {
+                assert_eq!(v.x.0, vec![Add(0.0)]);
+                assert_eq!(v.y.0, vec![Add(1.0)]);
+                assert_eq!(v.z.0, vec![Add(0.0)]);
+            }
             EmitVector::Direction => panic!("should not be direction"),
         }
     }
@@ -962,16 +777,6 @@ mod tests {
         assert_eq!(cm.stops.len(), 4);
         rgba_close(cm.stops[0], [1.0, 1.0, 0.0, 0.3]);
         rgba_close(cm.stops[3], [0.0, 0.0, 0.0, 0.0]);
-    }
-
-    #[test]
-    fn colormap_sample_interpolates() {
-        let cm = ColorMap::parse("1 0 0 1  0 1 0 1  0 0 1 1");
-        rgba_close(cm.sample(0.0), [1.0, 0.0, 0.0, 1.0]);
-        rgba_close(cm.sample(0.5), [0.0, 1.0, 0.0, 1.0]);
-        rgba_close(cm.sample(1.0), [0.0, 0.0, 1.0, 1.0]);
-        // quarter-way through segment 0: red → green at t=0.5 of seg0.
-        rgba_close(cm.sample(0.25), [0.5, 0.5, 0.0, 1.0]);
     }
 
     #[test]
@@ -1047,8 +852,8 @@ mod tests {
         rgba_close(p.color_map.stops[0], [1.0, 1.0, 1.0, 0.1]);
         rgba_close(p.color_map.stops[1], [0.2, 0.2, 1.0, 0.1]);
         assert_eq!(p.emit_vector, EmitVector::Direction);
-        assert_eq!(p.particle_life.eval(&EvalCtx::default()), 12.0);
-        assert_eq!(p.airdrag.eval(&EvalCtx::default()), 1.0);
+        assert_eq!(p.particle_life.0, vec![Add(12.0)]);
+        assert_eq!(p.airdrag.0, vec![Add(1.0)]);
         assert!(!p.directional);
 
         let gf = def.ground_flash.as_ref().expect("groundflash present");
@@ -1094,20 +899,7 @@ mod tests {
         };
         assert_eq!(sp.explosion_generator, "system_nx_fire");
         // `delay=8 i8` → spawn N uses 8 + N*8 frames of delay.
-        assert_eq!(
-            sp.delay.eval(&EvalCtx {
-                index: 0,
-                ..Default::default()
-            }),
-            8.0
-        );
-        assert_eq!(
-            sp.delay.eval(&EvalCtx {
-                index: 5,
-                ..Default::default()
-            }),
-            48.0
-        );
+        assert_eq!(sp.delay.0, vec![Add(8.0), Index(8.0)]);
     }
 
     #[test]
@@ -1138,12 +930,10 @@ mod tests {
         let EffectProperties::Spawner(sp) = &def.effects[0].properties else {
             panic!();
         };
-        // `pos=0, 0 i23, 0` means y steps by 23 per spawn. At spawn 2 → y=46.
-        let p = sp.pos.eval(&EvalCtx {
-            index: 2,
-            ..Default::default()
-        });
-        assert_eq!(p, [0.0, 46.0, 0.0]);
+        // `pos=0, 0 i23, 0` means y steps by 23 per spawn.
+        assert_eq!(sp.pos.x.0, vec![Add(0.0)]);
+        assert_eq!(sp.pos.y.0, vec![Add(0.0), Index(23.0)]);
+        assert_eq!(sp.pos.z.0, vec![Add(0.0)]);
         assert!(sp.always_visible);
         assert_eq!(def.effects[0].count, 20);
     }
@@ -1182,8 +972,8 @@ mod tests {
         };
         assert_eq!(f.front_texture, "shockwave");
         assert_eq!(f.side_texture, "none");
-        assert_eq!(f.size_growth.eval(&EvalCtx::default()), 120.0);
-        assert_eq!(f.ttl.eval(&EvalCtx::default()), 6.0);
+        assert_eq!(f.size_growth.0, vec![Add(120.0)]);
+        assert_eq!(f.ttl.0, vec![Add(6.0)]);
         assert_eq!(f.color_map.stops.len(), 3);
     }
 }

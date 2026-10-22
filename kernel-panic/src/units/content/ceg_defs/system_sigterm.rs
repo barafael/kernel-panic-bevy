@@ -11,8 +11,7 @@ use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 use crate::units::content::cegs::CegKind;
 
-/// `[system_sigterm]` — 3 effect layers, no ground flash.
-/// Referenced by 1 weapon.
+/// `[system_sigterm]`.
 pub static SYSTEM_SIGTERM: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {
@@ -99,8 +98,7 @@ pub static SYSTEM_SIGTERM: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[system_sigterm_fire]` — 2 effect layers, no ground flash.
-/// Referenced by 1 spawner.
+/// `[system_sigterm_fire]`.
 pub static SYSTEM_SIGTERM_FIRE: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {

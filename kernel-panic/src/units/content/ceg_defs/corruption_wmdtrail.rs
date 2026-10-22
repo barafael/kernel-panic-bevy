@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[corruption_WMDtrail]` — 1 effect layer, no ground flash.
-/// Referenced by 1 weapon.
+/// `[corruption_WMDtrail]`.
 pub static CORRUPTION_WMDTRAIL: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

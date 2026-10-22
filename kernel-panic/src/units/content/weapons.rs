@@ -43,7 +43,9 @@ use crate::sim::{DetFloat, frames_to_secs};
     Ord,
     strum::IntoStaticStr,
     strum::VariantArray,
+    strum::EnumString,
 )]
+#[strum(ascii_case_insensitive)]
 pub enum WeaponKind {
     // Declared first so its discriminant is 0. That is the sentinel a
     // zeroed component holds and the value the visual layer uses for
@@ -231,20 +233,16 @@ impl WeaponKind {
     ///
     /// `None` for an empty name (an unarmed unit's `Weapon1`) and for a
     /// name with no section behind it. The exact hit covers every other
-    /// reference; the scan runs for those three and for nothing else in
-    /// the game. Neither arm allocates, which is the point: `intern` built
-    /// a lowercased `String` per call.
+    /// reference; the ignore-case match (`strum`'s `FromStr`) runs for
+    /// those three and for nothing else in the game. Neither arm
+    /// allocates, which is the point: `intern` built a lowercased
+    /// `String` per call.
     pub fn find(reference: &str) -> Option<Self> {
         let name = reference.trim();
-        if name.is_empty() {
-            return None;
-        }
-        WEAPON_BY_NAME.get(name).copied().or_else(|| {
-            ALL_WEAPON_KINDS
-                .iter()
-                .copied()
-                .find(|&k| k.name().eq_ignore_ascii_case(name))
-        })
+        WEAPON_BY_NAME
+            .get(name)
+            .copied()
+            .or_else(|| name.parse().ok())
     }
 
     /// The two build lasers. A constructor's `Weapon1` is how it builds,
@@ -287,6 +285,9 @@ pub struct DeathBlast {
     /// when the blast was bound. `None` when the weapon authors no CEG
     /// or names one the TDFs do not define.
     pub ceg: Option<CegKind>,
+    /// The weapon's base damage: what upstream's death explosion hands
+    /// the CEG, so a bigger bomb's `d` expressions read bigger (§3.1).
+    pub damage: f32,
 }
 
 impl DeathBlast {
@@ -306,6 +307,7 @@ impl DeathBlast {
             radius: def.area_of_effect.det_max(24.0),
             rgb: Some(def.rgb_color).filter(|c| c[0] + c[1] + c[2] > 0.01),
             ceg: weapons.ceg(weapon),
+            damage: def.damage.default,
         })
     }
 }
@@ -494,40 +496,53 @@ impl WeaponRegistry {
         kind
     }
 
-    /// Warn if any unit references a weapon name not in the registry.
-    /// Call after both registries are loaded (e.g. from a startup system).
-    /// Also logs each resolved (unit → weapon, reloadtime) binding at
-    /// info level so `reload_time` regressions are visible in the game
-    /// log — observed in-game fire rate should match these values within
-    /// one frame, otherwise something downstream (double-tick, AimTarget
-    /// gate, deploy state) is stealing shots.
+    /// Warn for every FBI `Weapon1` / `Weapon2` that names no
+    /// [`WeaponKind`] variant or a variant the TDFs leave undefined —
+    /// the one place both registries meet, and the only signal left for
+    /// a name that silently disarms its unit (`UnitRegistry::weapon`
+    /// answers `None` for both). Call after both registries are loaded
+    /// (e.g. from a startup system). Also logs each resolved
+    /// (unit → weapon, reloadtime) binding at info level so
+    /// `reload_time` regressions are visible in the game log — observed
+    /// in-game fire rate should match these values within one frame,
+    /// otherwise something downstream (double-tick, AimTarget gate,
+    /// deploy state) is stealing shots.
     pub fn validate_unit_weapon_bindings(
         &self,
         unit_registry: &super::unit_registry::UnitRegistry,
     ) {
         for &kind in ALL_UNIT_KINDS {
-            let Some(weapon) = unit_registry.weapon(kind) else {
-                continue;
-            };
-            match self.get(weapon) {
-                None => {
-                    warn!(
-                        "Unit '{:?}' references weapon '{}' which is not in the TDF registry",
-                        kind,
-                        weapon.name(),
-                    );
+            for (slot, name) in ["Weapon1", "Weapon2"]
+                .into_iter()
+                .zip(unit_registry.weapon_names(kind))
+            {
+                if name.is_empty() {
+                    continue;
                 }
-                Some(def) => {
-                    info!(
-                        "  {:?} → {} (reload={}s, burst={}, burstrate={}s, range={})",
-                        kind,
-                        weapon.name(),
-                        def.reload_time,
-                        def.burst,
-                        def.burst_rate,
-                        def.range,
-                    );
+                match WeaponKind::find(name) {
+                    None => warn!(
+                        "Unit '{kind:?}' {slot}='{name}' names no WeaponKind variant; \
+                         the unit goes unarmed"
+                    ),
+                    Some(weapon) if !self.is_present(weapon) => warn!(
+                        "Unit '{kind:?}' {slot}='{name}' ({weapon:?}) is not in the TDF \
+                         registry; the unit goes unarmed"
+                    ),
+                    Some(_) => {}
                 }
+            }
+            if let Some(weapon) = unit_registry.weapon(kind)
+                && let Some(def) = self.get(weapon)
+            {
+                info!(
+                    "  {:?} → {} (reload={}s, burst={}, burstrate={}s, range={})",
+                    kind,
+                    weapon.name(),
+                    def.reload_time,
+                    def.burst,
+                    def.burst_rate,
+                    def.range,
+                );
             }
         }
     }

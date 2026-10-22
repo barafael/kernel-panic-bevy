@@ -10,8 +10,7 @@ use crate::units::content::ceg_def::CegOp::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[network_flowtrail]` — 2 effect layers, no ground flash.
-/// Referenced by 1 weapon.
+/// `[network_flowtrail]`.
 pub static NETWORK_FLOWTRAIL: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {

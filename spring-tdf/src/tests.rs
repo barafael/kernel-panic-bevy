@@ -1015,14 +1015,13 @@ fn explosion_def_particle_system() {
 
     match &effect.properties {
         crate::EffectProperties::Particle(p) => {
-            use crate::EvalCtx;
-            let ctx = EvalCtx::default();
+            use crate::CegOp::Add;
             assert_eq!(p.texture, "circle");
-            assert_eq!(p.num_particles.eval(&ctx), 30.0);
-            assert_eq!(p.particle_life.eval(&ctx), 24.0);
-            assert_eq!(p.particle_speed.eval(&ctx), 5.0);
-            assert_eq!(p.particle_size.eval(&ctx), 4.0);
-            assert!((p.airdrag.eval(&ctx) - 0.98).abs() < 0.001);
+            assert_eq!(p.num_particles.0, vec![Add(30.0)]);
+            assert_eq!(p.particle_life.0, vec![Add(24.0)]);
+            assert_eq!(p.particle_speed.0, vec![Add(5.0)]);
+            assert_eq!(p.particle_size.0, vec![Add(4.0)]);
+            assert_eq!(p.airdrag.0, vec![Add(0.98)]);
             assert!(!p.directional);
         }
         _ => panic!("expected Particle properties"),
@@ -1095,18 +1094,17 @@ fn explosion_def_bitmap_flame() {
 
     match &effect.properties {
         crate::EffectProperties::Flame(f) => {
-            use crate::EvalCtx;
-            let ctx = EvalCtx::default();
+            use crate::CegOp::Add;
             assert_eq!(f.side_texture, "linkbeam");
             assert_eq!(f.front_texture, "none");
-            assert_eq!(f.size.eval(&ctx), 5.0);
-            assert_eq!(f.length.eval(&ctx), 356.0);
-            assert_eq!(f.ttl.eval(&ctx), 60.0);
+            assert_eq!(f.size.0, vec![Add(5.0)]);
+            assert_eq!(f.length.0, vec![Add(356.0)]);
+            assert_eq!(f.ttl.0, vec![Add(60.0)]);
             // `dir=dir` in a CBitmapMuzzleFlame only parses the tokens
             // literally — there's no `EmitVector` enum on this struct;
-            // the result is `[d, i, r]` all parsed as unknown opcodes
-            // and reduced to an empty expression (0.0). Verified below.
-            assert_eq!(f.dir.eval(&ctx), [0.0, 0.0, 0.0]);
+            // the result is `[d, i, r]` all parsed as opcodes without an
+            // operand and dropped, leaving an empty expression.
+            assert_eq!(f.dir, crate::CegVec3::default());
         }
         _ => panic!("expected Flame properties"),
     }
@@ -1146,26 +1144,13 @@ fn explosion_def_spawner() {
 
     match &effect.properties {
         crate::EffectProperties::Spawner(s) => {
-            use crate::EvalCtx;
+            use crate::CegOp::{Add, Index};
             // The parser strips the `custom:` prefix at storage time so
             // lookups through `ExplosionDefs::get(name)` work regardless
             // of whether callers pass the bare or prefixed form.
             assert_eq!(s.explosion_generator, "corruption_infection_smoke");
             // `delay=10 i10` → first spawn at 10, sixth at 60.
-            assert_eq!(
-                s.delay.eval(&EvalCtx {
-                    index: 0,
-                    ..Default::default()
-                }),
-                10.0
-            );
-            assert_eq!(
-                s.delay.eval(&EvalCtx {
-                    index: 5,
-                    ..Default::default()
-                }),
-                60.0
-            );
+            assert_eq!(s.delay.0, vec![Add(10.0), Index(10.0)]);
         }
         _ => panic!("expected Spawner properties"),
     }

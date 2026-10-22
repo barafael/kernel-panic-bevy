@@ -56,7 +56,18 @@ use crate::units::content::definitions::UnitKind;
 /// the variant order is free. It is the alphabetical order of the file
 /// list this replaced, which the web player's Sound-effects tab
 /// (`web/music.html`) also lists them in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+    strum::EnumString,
+)]
+#[strum(ascii_case_insensitive)]
 pub enum SoundId {
     #[strum(serialize = "assemblerdeath")]
     AssemblerDeath,
@@ -74,7 +85,9 @@ pub enum SoundId {
     BugArtiFire,
     #[strum(serialize = "bugartihit")]
     BugArtiHit,
-    /// `network_reflectorshield.lua:99`: the Firewall's build-complete.
+    /// `network_reflectorshield.lua:99`: the Firewall's discharge (its
+    /// `CMD_FIREWALL` cast) — the file is `built.wav`, but nothing in
+    /// the mod plays it on build completion.
     #[strum(serialize = "built")]
     Built,
     /// `sounds.lua` `MultiSelect` (`in3d=false`).
@@ -140,19 +153,15 @@ impl SoundId {
     /// `None` for the empty string (the TDF default) or a name the
     /// original never shipped a file for.
     ///
-    /// A scan rather than a map, and deliberately so: the keys here are
-    /// lower-cased and the data is not (`soundhit=Explosion5`), so a
-    /// name-as-authored table would miss on every real lookup and a
-    /// lower-cased one would have to lowercase the query to hit it. This
-    /// runs at load, once per weapon def, never per shot.
+    /// `strum`'s case-insensitive `FromStr`: a chain of 26 compares
+    /// rather than a map, because the names here are lower-cased and the
+    /// data is not (`soundhit=Explosion5`), so a name-as-authored table
+    /// would miss on every real lookup. [`SoundQueue::play_named`] runs
+    /// it per shot and per impact with the def's raw name; resolving the
+    /// two names once per weapon at load is the step that would retire
+    /// it, and it is cheap enough that nothing has asked for that yet.
     pub fn from_name(name: &str) -> Option<Self> {
-        if name.is_empty() {
-            return None;
-        }
-        ALL_SOUND_IDS
-            .iter()
-            .copied()
-            .find(|sound| sound.name().eq_ignore_ascii_case(name))
+        name.parse().ok()
     }
 
     fn asset_path(self) -> String {

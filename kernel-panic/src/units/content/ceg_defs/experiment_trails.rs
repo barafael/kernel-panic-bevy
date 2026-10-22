@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[experiment_trailM]` — 1 effect layer, no ground flash.
-/// Referenced by 1 weapon.
+/// `[experiment_trailM]`.
 pub static EXPERIMENT_TRAILM: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",
@@ -43,8 +42,7 @@ pub static EXPERIMENT_TRAILM: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[experiment_trailS]` — 1 effect layer, no ground flash.
-/// Referenced by 1 weapon.
+/// `[experiment_trailS]`.
 pub static EXPERIMENT_TRAILS: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

@@ -12,11 +12,11 @@ lower-cased names:
 ```text
 units/*.fbi        the 48 unit definitions
 weapons/*.tdf      the weapons, one file per faction
-explosions/*.tdf   the CEG explosion generators
+features/*.tdf     the map features
 moveinfo.tdf       MOVEINFO.TDF, the move classes
 ```
 
-`build.rs` lists them into `UNIT_FBIS`, `WEAPON_TDFS`, `EXPLOSION_TDFS`
+`build.rs` lists them into `UNIT_FBIS`, `WEAPON_TDFS`, `FEATURE_TDFS`
 and `MOVEINFO_TDF` with `include_str!`, and `units::content::defs`
 parses them with `spring-tdf` on first use (a few milliseconds). They
 are text, not part of the bundle, because the sim keeps porting engine
@@ -25,6 +25,14 @@ field on the typed def (`spring_tdf::{UnitDef, WeaponDef, …}`) and a
 line in its `from_section`, with nothing to re-bake. The files are
 parsed in name order, so where two define the same name the later file
 wins.
+
+`explosions/*.tdf` is deliberately not in that list: the CEG explosion
+generators are Rust source (`units::content::ceg_defs`, one `static`
+per `CegKind`), and the files stay on disk only as the input of the
+ignored `gen_ceg_defs` test that writes those statics and as the
+reference `every_source_def_matches_the_parsed_tdf` checks them
+against. To change a CEG, edit the TDF, rerun that generator and
+`cargo fmt`; a hand edit to the Rust alone fails the test.
 
 The test `defs::tests::every_def_file_parses` fails the build on a
 file that does not parse, and the audio and bundle tests check the

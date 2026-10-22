@@ -774,10 +774,10 @@ fn resolve_weapon<'a>(
     if let Some(binding) = binding {
         return (Some(binding.0), Some(weapon_registry.by_kind(binding.0)));
     }
-    let kind = unit_registry
+    unit_registry
         .weapon(unit_type)
-        .filter(|&kind| weapon_registry.is_present(kind));
-    (kind, kind.map(|kind| weapon_registry.by_kind(kind)))
+        .and_then(|kind| Some((kind, weapon_registry.get(kind)?)))
+        .unzip()
 }
 
 /// Seconds since this unit last took damage (upstream `restTime`).

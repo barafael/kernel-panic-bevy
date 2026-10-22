@@ -122,6 +122,24 @@ struct KindData {
     move_def: Option<MoveDefParams>,
     /// See [`UnitRegistry::max_slope_ratio`].
     max_slope_ratio: f32,
+    /// See [`UnitRegistry::weapon`].
+    weapon: Option<WeaponKind>,
+    /// See [`UnitRegistry::weapon2`].
+    weapon2: Option<WeaponKind>,
+}
+
+/// The weapon a unit fights with, from its FBI (see
+/// [`UnitRegistry::weapon`]): `Weapon1` as a variant, unless the unit
+/// says `CanAttack=0` — upstream's `UnitDef::CanAttack()`, the flag
+/// `IsAttackCapable` reads, which every constructor in the shipped data
+/// sets. The build-laser filter is the belt to that brace: the two build
+/// lasers are how a constructor builds, not weapons, and all four FBIs
+/// that name one are `CanAttack=0` as well.
+fn fighting_weapon(d: &UnitDef) -> Option<WeaponKind> {
+    if !d.can_attack {
+        return None;
+    }
+    WeaponKind::find(&d.weapon1).filter(|weapon| !weapon.is_build_laser())
 }
 
 /// All parsed unit definitions, accessible by `UnitKind`.
@@ -195,6 +213,8 @@ impl UnitRegistry {
                         .filter(|&deg| deg > 0.0)
                         .unwrap_or(DEFAULT_MAX_SLOPE_DEGREES),
                 ),
+                weapon: d.as_ref().and_then(fighting_weapon),
+                weapon2: d.as_ref().and_then(|d| WeaponKind::find(&d.weapon2)),
             })
             .collect();
         // `unrestricted`: the gate's answer for an attacker without an
@@ -656,29 +676,38 @@ impl UnitRegistry {
         })
     }
 
-    /// Primary weapon (FBI `Weapon1`) as a variant, `None` when the unit
-    /// is unarmed.
+    /// The weapon the unit fights with — FBI `Weapon1` as a variant —
+    /// or `None` when it is unarmed as far as targeting, firing and
+    /// attack orders go: no `Weapon1`, a `Weapon1` no variant names, or
+    /// `CanAttack=0`. That last is upstream's `IsAttackCapable` (it reads
+    /// `UnitDef::CanAttack()`), which is what keeps the Trojan from
+    /// firing its `BuildLightning` at passers-by, and the reason the rule
+    /// lives here rather than at each of the eight callers.
     ///
-    /// A constructor's build laser is how it builds rather than a weapon
-    /// it fights with, so a unit whose only `Weapon1` is one of the two
-    /// build lasers resolves to `None` — the same question upstream's
-    /// `IsAttackCapable` answers, and the reason the filter lives here
-    /// rather than at each of the eight callers.
-    ///
-    /// This resolves the *name*. Whether that weapon is present in the
-    /// loaded TDFs is the [`WeaponRegistry`](super::weapons::WeaponRegistry)'s
-    /// question (`is_present` / `get`), which this registry cannot ask.
+    /// Resolved once at load ([`fighting_weapon`]) because the context
+    /// cursor asks this for every selected unit every frame. Whether the
+    /// weapon is present in the loaded TDFs is the
+    /// [`WeaponRegistry`](super::weapons::WeaponRegistry)'s question
+    /// (`get`), which this registry cannot ask.
     pub fn weapon(&self, kind: UnitKind) -> Option<WeaponKind> {
-        self.def(kind)
-            .and_then(|d| WeaponKind::find(&d.weapon1))
-            .filter(|weapon| !weapon.is_build_laser())
+        self.kind(kind).weapon
     }
 
     /// Secondary weapon (FBI `Weapon2`) as a variant, `None` when the
     /// unit has none. Only script-detonated weapons use it today
-    /// (worm.bos `FireWeapon1` → `emit-sfx 4097` = Wormsplash).
+    /// (worm.bos `FireWeapon1` → `emit-sfx 4097` = Wormsplash), so it is
+    /// not gated on `CanAttack`.
     pub fn weapon2(&self, kind: UnitKind) -> Option<WeaponKind> {
-        self.def(kind).and_then(|d| WeaponKind::find(&d.weapon2))
+        self.kind(kind).weapon2
+    }
+
+    /// The FBI `Weapon1` / `Weapon2` names as written, for the start-up
+    /// diagnostic that says which of them resolve to nothing
+    /// (`WeaponRegistry::validate_unit_weapon_bindings`). Everything at
+    /// runtime goes through [`Self::weapon`] / [`Self::weapon2`].
+    pub fn weapon_names(&self, kind: UnitKind) -> [&str; 2] {
+        self.def(kind)
+            .map_or(["", ""], |d| [d.weapon1.as_str(), d.weapon2.as_str()])
     }
 
     fn validate_unit_bindings(&self) {
@@ -733,7 +762,10 @@ mod tests {
     /// the nothing arm: the interaction gates (`IsAttackCapable`) and
     /// the sim's `WeaponBinding` then agree on "unarmed", where the
     /// `&str` API said "armed" for any non-empty text while combat still
-    /// found no weapon for the unit.
+    /// found no weapon for the unit. So is `CanAttack=0`, whatever the
+    /// `Weapon1` says: the Trojan's `BuildLightning` is not a build
+    /// laser by name, and upstream never fires it because
+    /// `UnitDef::CanAttack()` is off.
     #[test]
     fn weapon_is_a_variant_or_nothing() {
         let mut defs = UnitDefs::default();
@@ -758,6 +790,24 @@ mod tests {
                 // Lowercase on purpose: the FBI spellings drift, which
                 // is why `find` scans.
                 weapon1: "buildlaser".into(),
+                can_attack: false,
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "trojan".into(),
+            UnitDef {
+                weapon1: "BuildLightning".into(),
+                can_attack: false,
+                ..UnitDef::default()
+            },
+        );
+        defs.units.insert(
+            "pointer".into(),
+            UnitDef {
+                // A build laser on a unit that *may* attack still is not
+                // a weapon: the two filters are independent.
+                weapon1: "BuildLaser".into(),
                 ..UnitDef::default()
             },
         );
@@ -767,8 +817,15 @@ mod tests {
         assert_eq!(reg.weapon(UnitKind::Socket), None);
         // A constructor's build laser is its tool, not a weapon.
         assert_eq!(reg.weapon(UnitKind::Assembler), None);
+        assert_eq!(reg.weapon(UnitKind::Pointer), None);
+        // `CanAttack=0` disarms a unit whose `Weapon1` is a real weapon.
+        assert_eq!(reg.weapon(UnitKind::Trojan), None);
+        // The names are still there for the start-up diagnostic.
+        assert_eq!(reg.weapon_names(UnitKind::Trojan), ["BuildLightning", ""]);
+        assert_eq!(reg.weapon_names(UnitKind::Socket), ["BitGun", ""]);
         // And a unit with no FBI at all is unarmed, not a panic.
         assert_eq!(reg.weapon(UnitKind::Kernel), None);
+        assert_eq!(reg.weapon_names(UnitKind::Kernel), ["", ""]);
     }
 
     /// `SelfDestructCountdown=n` arms `2n + 1` slow updates of 15

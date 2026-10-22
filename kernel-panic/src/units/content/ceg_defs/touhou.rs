@@ -10,8 +10,7 @@ use crate::units::content::ceg_def::CegOp::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[touhou_bubbletrail]` — 1 effect layer, no ground flash.
-/// Referenced by 1 weapon.
+/// `[touhou_bubbletrail]`.
 pub static TOUHOU_BUBBLETRAIL: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "bubblecloud",
@@ -44,8 +43,7 @@ pub static TOUHOU_BUBBLETRAIL: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[touhou_buildFX]` — 1 effect layer, no ground flash.
-/// Referenced by 3 `[SFXTypes]` entries.
+/// `[touhou_buildFX]`.
 pub static TOUHOU_BUILDFX: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "circle",
@@ -82,8 +80,7 @@ pub static TOUHOU_BUILDFX: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[touhou_bullet]` — 1 effect layer, no ground flash.
-/// Referenced by 2 weapons.
+/// `[touhou_bullet]`.
 pub static TOUHOU_BULLET: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "circle",
@@ -116,8 +113,7 @@ pub static TOUHOU_BULLET: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[touhou_incant]` — 1 effect layer, no ground flash.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[touhou_incant]`.
 pub static TOUHOU_INCANT: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "sevenlobed",
@@ -147,8 +143,7 @@ pub static TOUHOU_INCANT: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[touhou_spark]` — 1 effect layer, no ground flash.
-/// Referenced by 2 weapons.
+/// `[touhou_spark]`.
 pub static TOUHOU_SPARK: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "circle",

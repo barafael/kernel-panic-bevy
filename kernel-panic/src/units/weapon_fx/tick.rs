@@ -288,6 +288,7 @@ pub(super) fn tick_weapon_fx(
     // and tail. Despawns once both ends pass the target.
     for (entity, mut bolt, mut ceg_trail) in &mut bolts {
         let prev_lead_raw = (bolt.speed * bolt.elapsed).det_min(bolt.total_distance);
+        let frames_flown = (bolt.elapsed * GAME_SPEED).round();
         bolt.elapsed += dt;
         let lead_raw = bolt.speed * bolt.elapsed;
         let lead_dist = lead_raw.det_min(bolt.total_distance);
@@ -302,17 +303,22 @@ pub(super) fn tick_weapon_fx(
         let hit_meta = delayed_hits.get(entity).ok();
         let target_entity = hit_meta.and_then(|h| h.target);
         // `cegTag`: `CLaserProjectile::UpdateIntensity` emits it where the
-        // bolt is, before it moves, every frame until it hits something.
+        // bolt is, before it moves, every frame until it hits something,
+        // with the bolt's remaining `ttl` in the damage slot — not the
+        // weapon's damage.
         if hit_meta.is_some()
             && let Some(trail) = ceg_trail.as_deref_mut()
             && let Some(ceg) = weapon_registry.ceg_tag(trail.weapon)
         {
+            let ttl = weapon_registry
+                .by_kind(trail.weapon)
+                .laser_ttl(bolt.total_distance);
             spawn_ceg(
                 ceg,
                 prev_lead_pos,
                 bolt.direction,
                 Vec3::Y,
-                weapon_registry.by_kind(trail.weapon).damage.default,
+                (ttl - frames_flown).det_max(0.0),
                 &mut trail.seed,
                 &mut commands,
                 &mut ceg_ctx.materials,
@@ -609,8 +615,10 @@ pub(super) fn tick_weapon_fx(
             push_trail_quads(&mut draw.batches, trail, cam_pos);
         }
 
-        // `cegTag`: `explGenHandler.GenExplosion(cegID, pos, dir, …)`
-        // every sim frame while the projectile has fuel.
+        // `cegTag`: `explGenHandler.GenExplosion(cegID, pos, dir, ttl, …)`
+        // every sim frame while the projectile has fuel — the remaining
+        // `ttl` rides in the damage slot, so a trail authored as
+        // `particleSize=1 d0.1` shrinks as the projectile ages.
         if let Some(weapon) = proj.trail_ceg
             && proj.flight.has_fuel()
             && let Some(ceg) = weapon_registry.ceg_tag(weapon)
@@ -621,7 +629,7 @@ pub(super) fn tick_weapon_fx(
                 pos,
                 dir,
                 Vec3::Y,
-                weapon_registry.by_kind(weapon).damage.default,
+                proj.flight.fuel_frames() as f32,
                 &mut proj.trail_seed,
                 &mut commands,
                 &mut ceg_ctx.materials,

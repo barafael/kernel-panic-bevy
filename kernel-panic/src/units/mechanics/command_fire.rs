@@ -823,20 +823,17 @@ pub fn process_command_fire(
         // lands as fire-and-spread, not a silent debuff. Drained by
         // `spawn_pending_explosions` in the same tick chain.
         if let Some(ceg) = ability.explosion_ceg {
+            let def = weapons.get(ability.weapon.weapon());
             pending_explosions.events.push(ExplosionEvent {
                 pos: event.target,
                 up: Vec3::Y,
                 rgb: faction.rgb_f32(),
                 radius: ability.weapon.params().radius,
                 ceg: Some(ceg),
-                damage: weapons
-                    .get(ability.weapon.weapon())
-                    .map_or(0.0, |def| def.damage.default),
+                damage: def.map_or(0.0, |def| def.damage.default),
             });
             // The blast is a `CGameHelper::Explosion` of the ability weapon.
-            if let (Some(sounds), Some(def)) =
-                (sounds.as_deref_mut(), weapons.get(ability.weapon.weapon()))
-            {
+            if let (Some(sounds), Some(def)) = (sounds.as_deref_mut(), def) {
                 sounds.explosion(def, event.target);
             }
         }

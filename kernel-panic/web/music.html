@@ -13,7 +13,7 @@
     assets/music/<file>.ogg through an <audio> element, so the browser
     streams with range requests. The Sound effects tab lists the 26
     originals in assets/sounds/ (kernel-panic/src/audio/mod.rs
-    SOUND_FILES), the Tips voice tab the voice-over lines in
+    SoundId / ALL_SOUND_IDS), the Tips voice tab the voice-over lines in
     assets/sounds/tips/ (kernel-panic/src/ui/hud/tips.rs TIP_VOICES);
     tests keep both lists in sync with this page.
   -->
@@ -275,9 +275,10 @@
     [3127, "The firewall casts a protection on your unit: - Halve the damage taken - Send that half back to attacker"]
   ];
 
-  // The 26 originals (kernel-panic/src/audio/mod.rs SOUND_FILES) and
-  // what fires them: weapon TDF soundstart / soundhit, SOUND.TDF unit
-  // replies, sounds.lua GUI beeps, the Firewall gadget's built.wav.
+  // The 26 originals (kernel-panic/src/audio/mod.rs SoundId, in
+  // ALL_SOUND_IDS order) and what fires them: weapon TDF soundstart /
+  // soundhit, SOUND.TDF unit replies, sounds.lua GUI beeps, the
+  // Firewall gadget's built.wav (its discharge, not a build-complete).
   var EFFECTS = [
     ['bitfire', 'bit', 'Bit, Virus, Fairy and the R.P.S. hands fire (soundstart)'],
     ['bytefire', 'byte', "Byte's DOOM!!! beam fires"],

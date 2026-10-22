@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[network_shot]` — 2 effect layers, no ground flash.
-/// Referenced by 1 weapon.
+/// `[network_shot]`.
 pub static NETWORK_SHOT: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {

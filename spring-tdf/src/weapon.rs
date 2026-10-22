@@ -313,15 +313,24 @@ impl WeaponDef {
         libm::sinf(self.spray_angle * std::f32::consts::PI / 0xafff as f32)
     }
 
-    /// How far a `LaserCannon` bolt flies before it fades without
-    /// exploding (`CLaserCannon::FireImpl` + `CLaserProjectile::Update`):
+    /// How long a `LaserCannon` bolt fired at a target `dist` elmos away
+    /// lives (`CLaserCannon::FireImpl`):
     /// `ttl = min(ceil(dist / speed), floor(range / speed) - 1)` frames
-    /// of collision checks, covering `(ttl + 1) · speed` elmos.
-    pub fn laser_travel(&self, dist: f32) -> f32 {
+    /// of collision checks. It counts down one per frame, and the bolt's
+    /// `cegTag` trail reads the remainder as its `d` value
+    /// (`CLaserProjectile::UpdateIntensity`).
+    pub fn laser_ttl(&self, dist: f32) -> f32 {
         let speed = self.projectile_speed();
         let ttl_req = (dist / speed).ceil();
         let ttl_max = (self.range / speed).floor() - 1.0;
-        (ttl_req.det_min(ttl_max).det_max(0.0) + 1.0) * speed
+        ttl_req.det_min(ttl_max).det_max(0.0)
+    }
+
+    /// How far a `LaserCannon` bolt flies before it fades without
+    /// exploding (`CLaserCannon::FireImpl` + `CLaserProjectile::Update`):
+    /// [`Self::laser_ttl`] frames covering `(ttl + 1) · speed` elmos.
+    pub fn laser_travel(&self, dist: f32) -> f32 {
+        (self.laser_ttl(dist) + 1.0) * self.projectile_speed()
     }
 }
 

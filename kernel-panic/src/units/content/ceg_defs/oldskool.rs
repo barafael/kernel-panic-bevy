@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[oldskool]` — 2 effect layers, ground flash `ttl = 0`.
-/// Referenced by 1 weapon.
+/// `[oldskool]`.
 pub static OLDSKOOL: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {

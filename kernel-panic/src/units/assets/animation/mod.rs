@@ -167,7 +167,8 @@ pub fn muzzle_piece_names(kind: UnitKind) -> Option<&'static [&'static str]> {
 /// emits nothing there. Upstream has no automatic muzzle flash: the
 /// only muzzle effect is what the script emits.
 ///
-/// - bit.bos `emit-sfx 1025 from gunpoint` → 1 (arrowflare).
+/// - bit.bos `emit-sfx 1025 from gunpoint` → 1 (`oldskool_shot2`,
+///   bit.fbi's `explosiongenerator1`).
 /// - byte.bos `emit-sfx 1024 from bp0..bp3` → 0.
 /// - pointer.bos `emit-sfx 1024 from gunpoint` → 0.
 /// - flow.bos, packet.bos, connection.bos, dos.bos, … declare no

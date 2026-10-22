@@ -10,8 +10,7 @@ use crate::units::content::ceg_def::CegOp::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[corruption_builder]` — 1 effect layer, no ground flash.
-/// Referenced by 3 `[SFXTypes]` entries.
+/// `[corruption_builder]`.
 pub static CORRUPTION_BUILDER: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "circle",

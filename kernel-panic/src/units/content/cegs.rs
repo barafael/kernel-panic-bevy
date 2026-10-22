@@ -25,7 +25,18 @@ use strum::VariantArray;
 /// files sort in. The discriminant is only a dense index
 /// ([`CegKind::index`]), so renumbering is presentation-only: no
 /// `CegKind` crosses the wire or enters the sim hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::VariantArray)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+    strum::EnumString,
+)]
+#[strum(ascii_case_insensitive)]
 pub enum CegKind {
     /// BugCannon's ballistic trail.
     #[strum(serialize = "corruption_BCtrail")]
@@ -180,9 +191,10 @@ static CEG_BY_NAME: LazyLock<HashMap<&'static str, CegKind>> = LazyLock::new(|| 
 
 impl CegKind {
     /// Dense 0-based index in declaration order (== position in
-    /// [`ALL_CEG_KINDS`]): the slot a CEG takes in the arrays that hold a
-    /// `CegKind` (`WeaponRegistry`'s `ceg_kinds` and `ceg_tags`, the
-    /// census counts of `cegs::tests`).
+    /// [`ALL_CEG_KINDS`]): the slot a CEG takes in a table indexed by
+    /// `CegKind` — today only `gen_ceg_defs`'s owner table
+    /// (`ceg_def::tests`); the runtime reaches a def through
+    /// [`Self::def`] instead.
     pub const fn index(self) -> usize {
         self as usize
     }
@@ -208,19 +220,12 @@ impl CegKind {
     ///
     /// The exact hit is what every shipped reference takes — the names in
     /// `weapons/*.tdf` and the FBIs all match their section's case — so
-    /// the ignore-case scan only runs on a miss. Neither arm allocates.
+    /// the ignore-case match (`strum`'s `FromStr`) only runs on a miss.
+    /// Neither arm allocates.
     pub fn find(reference: &str) -> Option<Self> {
         let name = reference.trim();
         let name = name.strip_prefix("custom:").unwrap_or(name);
-        if name.is_empty() {
-            return None;
-        }
-        CEG_BY_NAME.get(name).copied().or_else(|| {
-            ALL_CEG_KINDS
-                .iter()
-                .copied()
-                .find(|&k| k.name().eq_ignore_ascii_case(name))
-        })
+        CEG_BY_NAME.get(name).copied().or_else(|| name.parse().ok())
     }
 
     /// The definition this variant was generated into: the `[name]`
@@ -228,74 +233,14 @@ impl CegKind {
     /// [`super::ceg_defs`].
     ///
     /// Total by construction, and that is the point: `gen_ceg_defs`
-    /// refuses to write a section no variant names, this match refuses to
-    /// compile without one for every variant, and so the spawn path needs
-    /// neither the `Option` a registry lookup returned nor the `bool` that
-    /// distinguished "no such CEG" from "a CEG with nothing in it"
+    /// refuses to write a section no variant names, the match it writes
+    /// into `ceg_defs/mod.rs` refuses to compile without one for every
+    /// variant, and so the spawn path needs neither the `Option` a
+    /// registry lookup returned nor the `bool` that distinguished "no
+    /// such CEG" from "a CEG with nothing in it"
     /// (`docs/ceg-in-source-plan.md` §0, §3.5).
     pub const fn def(self) -> &'static ExplosionDef {
-        match self {
-            Self::CorruptionBcTrail => &super::ceg_defs::corruption_bctrail::CORRUPTION_BCTRAIL,
-            Self::CorruptionBuilder => &super::ceg_defs::corruption_builder::CORRUPTION_BUILDER,
-            Self::CorruptionBuild => &super::ceg_defs::corruption_build::CORRUPTION_BUILD,
-            Self::CorruptionBurst => &super::ceg_defs::corruption_burst::CORRUPTION_BURST,
-            Self::CorruptionCharge => &super::ceg_defs::corruption_charge::CORRUPTION_CHARGE,
-            Self::CorruptionConst => &super::ceg_defs::corruption_const::CORRUPTION_CONST,
-            Self::CorruptionDust => &super::ceg_defs::corruption_dust::CORRUPTION_DUST,
-            Self::CorruptionInfection => {
-                &super::ceg_defs::corruption_infection::CORRUPTION_INFECTION
-            }
-            Self::CorruptionInfectionSmoke => {
-                &super::ceg_defs::corruption_infection::CORRUPTION_INFECTION_SMOKE
-            }
-            Self::CorruptionShot1 => &super::ceg_defs::corruption_shot1::CORRUPTION_SHOT1,
-            Self::CorruptionStun => &super::ceg_defs::corruption_stun::CORRUPTION_STUN,
-            Self::CorruptionTrojanRainbow => {
-                &super::ceg_defs::corruption_trojan_rainbow::CORRUPTION_TROJAN_RAINBOW
-            }
-            Self::CorruptionWmdTrail => &super::ceg_defs::corruption_wmdtrail::CORRUPTION_WMDTRAIL,
-            Self::CorruptionWormSplash => {
-                &super::ceg_defs::corruption_worm_splash::CORRUPTION_WORM_SPLASH
-            }
-            Self::CorruptionWormTrail => {
-                &super::ceg_defs::corruption_worm_trail::CORRUPTION_WORM_TRAIL
-            }
-            Self::ExperimentTrailM => &super::ceg_defs::experiment_trails::EXPERIMENT_TRAILM,
-            Self::ExperimentTrailS => &super::ceg_defs::experiment_trails::EXPERIMENT_TRAILS,
-            Self::Linkbeam => &super::ceg_defs::linkbeam::LINKBEAM,
-            Self::Mineclearer => &super::ceg_defs::mineclearer::MINECLEARER,
-            Self::Minelauncher => &super::ceg_defs::minelauncher::MINELAUNCHER,
-            Self::Mine => &super::ceg_defs::mine::MINE,
-            Self::NetworkBuild => &super::ceg_defs::network_build::NETWORK_BUILD,
-            Self::NetworkBuild1 => &super::ceg_defs::network_build::NETWORK_BUILD1,
-            Self::NetworkCharge => &super::ceg_defs::network_charge::NETWORK_CHARGE,
-            Self::NetworkDissolve => &super::ceg_defs::network_dissolve::NETWORK_DISSOLVE,
-            Self::NetworkSpawn => &super::ceg_defs::network_dissolve::NETWORK_SPAWN,
-            Self::NetworkFlowmissile => &super::ceg_defs::network_flowmissile::NETWORK_FLOWMISSILE,
-            Self::NetworkFlowtrail => &super::ceg_defs::network_flowtrail::NETWORK_FLOWTRAIL,
-            Self::NetworkShot => &super::ceg_defs::network_shot::NETWORK_SHOT,
-            Self::NoEffect => &super::ceg_defs::none::NONE,
-            Self::OldskoolBig => &super::ceg_defs::oldskool_big::OLDSKOOL_BIG,
-            Self::OldskoolBuild => &super::ceg_defs::oldskool_build::OLDSKOOL_BUILD,
-            Self::OldskoolDeath => &super::ceg_defs::oldskool_death::OLDSKOOL_DEATH,
-            Self::OldskoolImpact => &super::ceg_defs::oldskool_impact::OLDSKOOL_IMPACT,
-            Self::OldskoolShot1 => &super::ceg_defs::oldskool_shot1::OLDSKOOL_SHOT1,
-            Self::OldskoolShot2 => &super::ceg_defs::oldskool_shot2::OLDSKOOL_SHOT2,
-            Self::Oldskool => &super::ceg_defs::oldskool::OLDSKOOL,
-            Self::OldskoolVBig => &super::ceg_defs::oldskool_vbig::OLDSKOOL_VBIG,
-            Self::RockFountain => &super::ceg_defs::rps_fountains::ROCK_FOUNTAIN,
-            Self::PaperFountain => &super::ceg_defs::rps_fountains::PAPER_FOUNTAIN,
-            Self::ScissorsFountain => &super::ceg_defs::rps_fountains::SCISSORS_FOUNTAIN,
-            Self::SystemNx => &super::ceg_defs::system_nx::SYSTEM_NX,
-            Self::SystemNxFire => &super::ceg_defs::system_nx::SYSTEM_NX_FIRE,
-            Self::SystemSigterm => &super::ceg_defs::system_sigterm::SYSTEM_SIGTERM,
-            Self::SystemSigtermFire => &super::ceg_defs::system_sigterm::SYSTEM_SIGTERM_FIRE,
-            Self::TouhouBullet => &super::ceg_defs::touhou::TOUHOU_BULLET,
-            Self::TouhouSpark => &super::ceg_defs::touhou::TOUHOU_SPARK,
-            Self::TouhouBuildFx => &super::ceg_defs::touhou::TOUHOU_BUILDFX,
-            Self::TouhouIncant => &super::ceg_defs::touhou::TOUHOU_INCANT,
-            Self::TouhouBubbletrail => &super::ceg_defs::touhou::TOUHOU_BUBBLETRAIL,
-        }
+        super::ceg_defs::def(self)
     }
 }
 
@@ -364,16 +309,15 @@ mod tests {
     /// absence of a reference rather than a bad one.
     #[test]
     fn every_shipped_ceg_reference_resolves() {
-        use crate::units::content::ceg_def::EffectProperties;
-
         let defs = crate::units::content::defs::defs();
-        let mut counts = [0; 3];
+        let mut weapon_references = 0;
+        let mut sfx_references = 0;
 
         for def in defs.weapons.weapons.values() {
             for reference in [&def.explosion_generator, &def.ceg_tag] {
                 if !reference.is_empty() {
                     assert!(CegKind::find(reference).is_some(), "{reference}");
-                    counts[0] += 1;
+                    weapon_references += 1;
                 }
             }
         }
@@ -381,26 +325,15 @@ mod tests {
             for reference in &def.sfx_types {
                 if !reference.is_empty() {
                     assert!(CegKind::find(reference).is_some(), "{reference}");
-                    counts[1] += 1;
+                    sfx_references += 1;
                 }
             }
         }
-        for &kind in ALL_CEG_KINDS {
-            for layer in kind.def().effects {
-                // A spawner's target is a `CegKind` in the source form, so
-                // there is nothing left to resolve — `gen_ceg_defs` panics
-                // on a name it cannot name. Counting the layers is what
-                // keeps this walk honest.
-                if matches!(layer.properties, EffectProperties::Spawner(_)) {
-                    counts[2] += 1;
-                }
-            }
-        }
-        // Each kind has to have been walked: an empty loop would pass.
-        assert!(
-            counts[0] > 0 && counts[1] > 0 && counts[2] > 0,
-            "{counts:?}"
-        );
+        // A spawner's target is a `CegKind` in the source form, so there
+        // is nothing left to resolve there: `gen_ceg_defs` panics on a
+        // name it cannot name. Both walks here have to have found
+        // something, or an empty loop would pass.
+        assert!(weapon_references > 0 && sfx_references > 0);
     }
 
     /// The `static`s say what the TDFs say.
@@ -431,6 +364,16 @@ mod tests {
     #[test]
     fn every_source_def_matches_the_parsed_tdf() {
         let tdfs = crate::units::content::ceg_def::parsed_explosion_tdfs();
+        // Both directions. A `[section]` no variant names would be dead
+        // data with nothing to say so: the registry's debug line for it
+        // went with the registry, and the generator that would refuse it
+        // is `#[ignore]`.
+        for name in tdfs.explosions.keys() {
+            assert!(
+                CegKind::find(name).is_some(),
+                "[{name}] has no CegKind variant"
+            );
+        }
         for &kind in ALL_CEG_KINDS {
             let authored = tdfs
                 .explosions

@@ -7,8 +7,7 @@
 
 use crate::units::content::ceg_def::*;
 
-/// `[none]` — 0 effect layers, no ground flash.
-/// Referenced by 4 weapons.
+/// `[none]`.
 pub static NONE: ExplosionDef = ExplosionDef {
     effects: &[],
     ground_flash: None,

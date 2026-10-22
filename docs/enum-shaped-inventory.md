@@ -7,10 +7,16 @@ strum::VariantArray)]` enums. This document asks what else in the tree
 has that shape — a **closed set** of values written as a string or an
 integer — and answers it for every candidate found.
 
-Nothing here is implemented. §2 is a defect in the enum work that merged
-with PR #2. §3 is the shortlist. §4 is what was rejected and why, which is
-the useful half: most of the flagged sites should be left alone, and two
-of them were flagged on bad evidence.
+§2 is a defect in the enum work that merged with PR #2. §3 is the
+shortlist. §4 is what was rejected and why, which is the useful half:
+most of the flagged sites should be left alone, and two of them were
+flagged on bad evidence.
+
+**Status:** §2.1 (`2bc795e`), §3.1 (`db68fbe`) and §3.2 (`50e4482`)
+are implemented on the branch this document opened; the code they
+quote is as it stood at `65c434d`, before those commits. §2.2 and
+§3.3–3.5 are open. `explosions/*.tdf` has since left the embedded set
+(`ccb1207`, see `docs/ceg-in-source-plan.md`).
 
 **Verdict:** five candidates are genuinely enum-shaped. Two are clearly
 worth doing. One (`AiDifficulty`) is blocked on persistence, one
@@ -47,8 +53,9 @@ arguments that do survive:
 Two facts about the tree decide the rest:
 
 - **Compile-time closure.** `kernel-panic/build.rs:34-44` embeds
-  `assets/defs/{units/*.fbi, weapons/*.tdf, explosions/*.tdf,
-  features/*.tdf, moveinfo.tdf}` as `include_str!` text;
+  `assets/defs/{units/*.fbi, weapons/*.tdf, features/*.tdf,
+  moveinfo.tdf}` as `include_str!` text (`explosions/*.tdf` was in the
+  list until `ccb1207` made the CEGs source);
   `units/content/defs.rs:26` pulls it in with `include!`. A name from
   that data can only fail to resolve against non-shipped content, so a
   `find()`-style total lookup is safe — that is what makes `by_kind`
@@ -63,15 +70,15 @@ Summary of what survives:
 
 | # | Site | Shape | Justification | Blocked on |
 | --- | --- | --- | --- | --- |
-| 3.1 | `UnitRegistry::weapon() -> &str` | string | one predicate in three places; `""` means two things | nothing |
-| 3.2 | `SoundId(u8)` | int | `panic!` becomes a compile error; scan becomes a map hit | nothing |
+| 3.1 | `UnitRegistry::weapon() -> &str` | string | one predicate in three places; `""` means two things | done, `db68fbe` |
+| 3.2 | `SoundId(u8)` | int | `panic!` becomes a compile error; scan becomes a map hit | done, `50e4482` |
 | 3.3 | `AiDifficulty(u8)` {1..=4} | int | `clamp(1, 4)` proves the set; `_ =>` catch-alls | lobby wire + replay files |
 | 3.4 | `Facing` (`spring-map`) | int | 4 values, West via `_ =>`, `% 4` instead of exhaustiveness | `.kpmap` format |
 | 3.5 | census categories (`net/state.rs`) | string | `&[&str]` membership list + `"other"` sentinel | nothing |
 
 ## 2. Defects in the enum work that is already landed
 
-### 2.1 `CegKind::find`'s doc cites data that is not shipped
+### 2.1 `CegKind::find`'s doc cites data that is not shipped *(implemented, `2bc795e`)*
 
 `units/content/cegs.rs:201-205` justifies the `None` contract like this:
 
@@ -121,7 +128,7 @@ data does not support.
 
 ## 3. Worth doing
 
-### 3.1 `UnitRegistry::weapon()` still hands out a `&str`
+### 3.1 `UnitRegistry::weapon()` still hands out a `&str` *(implemented, `db68fbe`)*
 
 The refactor stopped at the unit→weapon boundary. `unit_registry.rs:659`
 is still:
@@ -172,7 +179,7 @@ and still does not apply. The argument is that the predicate is now
 expressible as a variant compare and currently is not. No wire, no hash,
 no determinism exposure.
 
-### 3.2 `SoundId(u8)` is the old `WeaponId`
+### 3.2 `SoundId(u8)` is the old `WeaponId` *(implemented, `50e4482`; the scan stayed a scan, see `SoundId::from_name`)*
 
 `audio/mod.rs:75` — `pub struct SoundId(u8)`, an index into the 26-entry
 static `SOUND_FILES` (`:44`), handed out by a case-insensitive linear

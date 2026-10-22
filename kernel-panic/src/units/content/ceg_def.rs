@@ -4,10 +4,8 @@
 //! `static` in [`super::ceg_defs`] and reached through [`CegKind::def`]:
 //! total, load-free, and typed all the way down. The registry, the
 //! `Option`, the `bool` and the start-up warning the TDF path needed to
-//! survive a section that does not exist go with it
-//! (`docs/ceg-in-source-plan.md` §0) — not in this commit: the runtime
-//! still evaluates the TDFs, which is what the `#[allow(dead_code)]` on
-//! this module in `mod.rs` is for.
+//! survive a section that does not exist went with it
+//! (`docs/ceg-in-source-plan.md` §0).
 //!
 //! ## Where the data comes from
 //!
@@ -39,7 +37,6 @@
 //! | a `[groundflash]` with `ttl = 0` | `ground_flash: None`, which is what is drawn (§3.4) |
 
 use crate::sim::DetFloat;
-use strum::VariantArray;
 
 use super::cegs::CegKind;
 
@@ -201,9 +198,15 @@ pub enum CegExpr {
 /// One operation of a [`CegExpr`]. The set is closed: it is the four
 /// opcodes the parser models plus the two it used to skip (§3.2), which
 /// is everything the shipped data uses. The remaining upstream opcodes
-/// (`a` add-buffer, `p`/`q` pow, `k` sawtooth, `s` discrete, `m` sine)
-/// are not in the data and are not modelled; a def that wants one adds
-/// the variant.
+/// (`ParseExplosionCode`, `ExplosionGenerator.cpp:878-888`) are not in
+/// the data and are not modelled; a def that wants one adds the variant:
+///
+/// - `m<N>` sawtooth: `val -= N · floor(val / N)`;
+/// - `k<N>` discrete: `val = N · floor(val / N)`;
+/// - `s<N>` sine: `val = N · sin(val)`;
+/// - `p<N>` pow: `val = val ^ N`;
+/// - `a<n>` add-buffer: `val += buffer[n]`;
+/// - `q<n>` pow-buffer: `val = val ^ buffer[n]`.
 #[derive(Debug, PartialEq)]
 pub enum CegOp {
     /// Literal add.
@@ -309,55 +312,79 @@ impl CegExpr {
 }
 
 impl CegVec3 {
-    /// Evaluate all three axes against the same context.
+    /// Evaluate all three axes against the same context, over buffers of
+    /// their own: a `y<n>` parked by `x` is visible to `z`.
     pub fn eval(&self, ctx: &EvalCtx) -> [f32; 3] {
-        [self.x.eval(ctx), self.y.eval(ctx), self.z.eval(ctx)]
+        self.eval_in(ctx, &mut [0.0; CEG_VALUE_BUFFERS])
+    }
+
+    /// Evaluate all three axes against the same context and the caller's
+    /// buffers, in `x`, `y`, `z` order.
+    pub fn eval_in(&self, ctx: &EvalCtx, buffers: &mut CegBuffers) -> [f32; 3] {
+        [
+            self.x.eval_in(ctx, buffers),
+            self.y.eval_in(ctx, buffers),
+            self.z.eval_in(ctx, buffers),
+        ]
     }
 }
 
-/// The buffer count [`CegExpr::eval`] keeps for `y`/`x`. The shipped
-/// data names only buffer 0 (`y0` / `x0`, `touhou.tdf:75`); the rest is
-/// room for a def that wants to hold a second value.
-const CEG_VALUE_BUFFERS: usize = 4;
+/// How many value buffers `y<n>` / `x<n>` can name: upstream's `float
+/// buffer[16]` in `ExecuteExplosionCode`. The shipped data names only
+/// buffer 0 (`y0` / `x0` in `[touhou_buildFX]`'s `pos`, `touhou.tdf:75`).
+/// `gen_ceg_defs` refuses an index past this, which is why
+/// [`CegExpr::eval_in`] indexes without a check, as upstream's executor
+/// does.
+pub const CEG_VALUE_BUFFERS: usize = 16;
+
+/// One spawned instance's value buffers: what `y<n>` parks and `x<n>`
+/// reads back. Upstream keeps one set per `ExecuteExplosionCode` call —
+/// one spawned instance, every property of it in one code stream — so
+/// a value parked by one property is visible to the next. The spawn
+/// path does the same by evaluating all of one instance's expressions
+/// with [`CegExpr::eval_in`] over one of these; the data relies on it
+/// only across the three axes of one `pos`.
+pub type CegBuffers = [f32; CEG_VALUE_BUFFERS];
 
 impl CegExpr {
-    /// Run the program. An empty one is `0.0`, upstream's "empty
-    /// accumulator" start state — which is why a def with nothing to say
-    /// is `Lit(0.0)` rather than an empty `Ops`.
+    /// Run the program over buffers of its own — for a value that stands
+    /// alone (a spawner's `delay`, a flame's `ttl`). An empty program is
+    /// `0.0`, upstream's "empty accumulator" start state — which is why
+    /// a def with nothing to say is `Lit(0.0)` rather than an empty
+    /// `Ops`.
+    pub fn eval(&self, ctx: &EvalCtx) -> f32 {
+        self.eval_in(ctx, &mut [0.0; CEG_VALUE_BUFFERS])
+    }
+
+    /// Run the program over the caller's buffers ([`CegBuffers`]).
     ///
     /// `Yank` / `MulBuf` follow upstream `ParseExplosionCode`: `y<n>`
     /// parks the accumulator in buffer *n* and starts over from zero,
     /// `x<n>` scales the accumulator by what is parked there. The parser
-    /// this replaced treated both as no-ops, so `touhou.tdf:75`'s bubble
-    /// trail is the one def whose shape changes (§3.2). An index past
-    /// [`CEG_VALUE_BUFFERS`] is ignored rather than wrapped into a slot
-    /// the def did not name.
-    pub fn eval(&self, ctx: &EvalCtx) -> f32 {
-        let Self::Ops(ops) = self else {
-            return self.literal().unwrap_or(0.0);
-        };
-        let mut acc = 0.0;
-        let mut buffers = [0.0; CEG_VALUE_BUFFERS];
-        for op in ops.iter() {
-            match *op {
-                CegOp::Add(v) => acc += v,
-                CegOp::Rand(v) => acc += ctx.rand01 * v,
-                CegOp::Index(v) => acc += ctx.index as f32 * v,
-                CegOp::Damage(v) => acc += ctx.damage * v,
-                CegOp::Yank(n) => {
-                    if let Some(slot) = buffers.get_mut(n as usize) {
-                        *slot = acc;
-                        acc = 0.0;
+    /// this replaced treated both as no-ops, so `[touhou_buildFX]`
+    /// (`touhou.tdf:75`, the Touhou builders' build sparkle) is the one
+    /// def whose shape changes (§3.2).
+    pub fn eval_in(&self, ctx: &EvalCtx, buffers: &mut CegBuffers) -> f32 {
+        match self {
+            Self::Lit(v) => *v,
+            Self::Ops(ops) => {
+                let mut acc = 0.0;
+                for op in ops.iter() {
+                    match *op {
+                        CegOp::Add(v) => acc += v,
+                        CegOp::Rand(v) => acc += ctx.rand01 * v,
+                        CegOp::Index(v) => acc += ctx.index as f32 * v,
+                        CegOp::Damage(v) => acc += ctx.damage * v,
+                        CegOp::Yank(n) => {
+                            buffers[n as usize] = acc;
+                            acc = 0.0;
+                        }
+                        CegOp::MulBuf(n) => acc *= buffers[n as usize],
                     }
                 }
-                CegOp::MulBuf(n) => {
-                    if let Some(slot) = buffers.get(n as usize) {
-                        acc *= *slot;
-                    }
-                }
+                acc
             }
         }
-        acc
     }
 }
 
@@ -375,7 +402,18 @@ impl CegExpr {
 /// `none` is deliberately not a variant. Upstream resolves it to
 /// `kpsfx/none.tga`, a blank bitmap; here it is `Option::None` on every
 /// field that has one, which is the same picture (§3.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::VariantArray)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::IntoStaticStr,
+    strum::VariantArray,
+    strum::EnumString,
+)]
+#[strum(ascii_case_insensitive)]
 pub enum CegTexture {
     #[strum(serialize = "circle")]
     Circle,
@@ -458,11 +496,6 @@ pub enum CegTexture {
     Flare,
 }
 
-/// Every alias, in declaration order — the list [`resolve_texture`]
-/// scans. `strum::VariantArray` gives it, so a new variant cannot be
-/// left out of the lookup.
-pub const ALL_CEG_TEXTURES: &[CegTexture] = CegTexture::VARIANTS;
-
 impl CegTexture {
     /// The alias as the TDF authors it.
     pub fn name(self) -> &'static str {
@@ -522,11 +555,7 @@ impl CegTexture {
 /// (`docs/ceg-in-source-plan.md` §2.4); the CEG data itself no longer
 /// comes through here.
 pub fn resolve_texture(name: &str) -> Option<CegTexture> {
-    let name = name.trim();
-    ALL_CEG_TEXTURES
-        .iter()
-        .copied()
-        .find(|tex| tex.name().eq_ignore_ascii_case(name))
+    name.trim().parse().ok()
 }
 
 /// The upstream explosion TDFs as `(file name, text)`, in name order.
@@ -575,7 +604,7 @@ pub(super) fn explosion_tdfs() -> Vec<(String, String)> {
 pub(super) fn parsed_explosion_tdfs() -> spring_tdf::ExplosionDefs {
     let mut all = spring_tdf::ExplosionDefs::default();
     for (name, text) in explosion_tdfs() {
-        let tdf = spring_tdf::Tdf::parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let tdf = super::defs::parse(&name, &text);
         all.merge(spring_tdf::ExplosionDefs::from_tdf(&tdf));
     }
     all
@@ -587,6 +616,7 @@ mod tests {
     use super::*;
     use crate::units::content::defs;
     use spring_tdf as parsed;
+    use strum::VariantArray;
 
     /// Every alias names a bitmap the unit bundle actually ships, so a
     /// typo in [`CegTexture::file`] fails here rather than turning a
@@ -598,7 +628,7 @@ mod tests {
     /// (`bundle.rs`), so that layer draws nothing until the bake does.
     #[test]
     fn every_ceg_texture_names_a_bundled_bitmap() {
-        for &texture in ALL_CEG_TEXTURES {
+        for &texture in CegTexture::VARIANTS {
             if texture == CegTexture::Bullet {
                 continue;
             }
@@ -610,40 +640,70 @@ mod tests {
         }
     }
 
-    /// The runtime samples the static map itself — `&'static` stops, no
-    /// allocation per particle — so [`ColorMap::sample`] is a copy of the
-    /// parser's. Pin the two against each other: a drift between them is
-    /// a CEG that colours differently than its `colorMap` says.
+    /// `sample` walks evenly spaced stops: the midpoint of a three-stop
+    /// map is its middle stop, a quarter of the way is halfway along the
+    /// first segment, and the ends clamp.
     #[test]
-    fn color_map_sample_matches_the_parsed_one() {
-        let cases: &[&[[f32; 4]]] = &[
-            &[],
-            &[[1.0, 0.5, 0.0, 1.0]],
-            &[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.25]],
-            &[
-                [1.0, 1.0, 1.0, 0.1],
-                [0.2, 0.2, 1.0, 0.1],
-                [0.0, 0.0, 0.0, 0.0],
-            ],
-            &[
-                [0.1, 0.2, 0.3, 0.4],
-                [0.5, 0.6, 0.7, 0.8],
-                [0.9, 0.8, 0.7, 0.6],
-                [0.5, 0.4, 0.3, 0.2],
-            ],
-        ];
-        for &stops in cases {
-            let parsed_map = parsed::ColorMap {
-                stops: stops.to_vec(),
-            };
-            for t in [-1.0, 0.0, 0.2, 0.5, 0.75, 1.0, 2.0] {
-                assert_eq!(
-                    ColorMap(stops).sample(t),
-                    parsed_map.sample(t),
-                    "{stops:?} at {t}"
-                );
+    fn color_map_sample_interpolates_between_evenly_spaced_stops() {
+        let map = ColorMap(&[
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ]);
+        let close = |got: [f32; 4], want: [f32; 4]| {
+            for i in 0..4 {
+                assert!((got[i] - want[i]).abs() < 1e-4, "{got:?} vs {want:?}");
             }
-        }
+        };
+        close(map.sample(0.0), [1.0, 0.0, 0.0, 1.0]);
+        close(map.sample(0.5), [0.0, 1.0, 0.0, 1.0]);
+        close(map.sample(1.0), [0.0, 0.0, 1.0, 1.0]);
+        close(map.sample(0.25), [0.5, 0.5, 0.0, 1.0]);
+        close(map.sample(-1.0), [1.0, 0.0, 0.0, 1.0]);
+        close(map.sample(2.0), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(ColorMap(&[]).sample(0.5), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            ColorMap(&[[0.1, 0.2, 0.3, 0.4]]).sample(0.5),
+            [0.1, 0.2, 0.3, 0.4]
+        );
+    }
+
+    /// `y<n>` parked by one expression is what `x<n>` of the next reads,
+    /// when both run over one [`CegBuffers`] — the `[touhou_buildFX]`
+    /// shape (`pos=d1 y0 -1 r2 x0, 0, -1 r2 x0`): at damage 10 and
+    /// `r = 0.5` the x axis is `(-1 + 1) · 10 = 0` and the z axis, which
+    /// never parks anything itself, reads the same 10 back.
+    #[test]
+    fn value_buffers_are_shared_across_one_instance() {
+        let x = CegExpr::Ops(&[
+            CegOp::Damage(1.0),
+            CegOp::Yank(0),
+            CegOp::Add(-1.0),
+            CegOp::Rand(2.0),
+            CegOp::MulBuf(0),
+        ]);
+        let z = CegExpr::Ops(&[CegOp::Add(-1.0), CegOp::Rand(2.0), CegOp::MulBuf(0)]);
+        let ctx = EvalCtx {
+            damage: 10.0,
+            rand01: 0.5,
+            ..Default::default()
+        };
+        let mut buffers = [0.0; CEG_VALUE_BUFFERS];
+        assert_eq!(x.eval_in(&ctx, &mut buffers), 0.0);
+        assert_eq!(z.eval_in(&ctx, &mut buffers), 0.0);
+        let ctx = EvalCtx { rand01: 1.0, ..ctx };
+        let mut buffers = [0.0; CEG_VALUE_BUFFERS];
+        assert_eq!(x.eval_in(&ctx, &mut buffers), 10.0);
+        assert_eq!(z.eval_in(&ctx, &mut buffers), 10.0);
+        // On its own, `z` multiplies by an empty buffer.
+        assert_eq!(z.eval(&ctx), 0.0);
+        // And the vector form shares across its axes.
+        let pos = CegVec3 {
+            x: CegExpr::Ops(&[CegOp::Damage(1.0), CegOp::Yank(0), CegOp::Add(1.0)]),
+            y: CegExpr::Lit(0.0),
+            z: CegExpr::Ops(&[CegOp::Add(0.5), CegOp::MulBuf(0)]),
+        };
+        assert_eq!(pos.eval(&ctx), [1.0, 0.0, 5.0]);
     }
 
     /// The alias table as the names reach it from a file: `circle` is
@@ -682,8 +742,11 @@ mod tests {
         assert_eq!(resolve_texture("nonsense"), None);
     }
 
-    /// Regenerate `src/units/content/ceg_defs/` from
-    /// `assets/defs/explosions/*.tdf`, then `cargo fmt --all`.
+    /// Regenerate `src/units/content/ceg_defs/` — the 38 modules and the
+    /// `mod.rs` that declares them and maps every [`CegKind`] to its
+    /// static — from `assets/defs/explosions/*.tdf`, then
+    /// `cargo fmt --all`. That is the whole procedure: a renamed or
+    /// added section lands in the match without a hand edit.
     ///
     /// This is the writer and nothing more. The proof that what it wrote
     /// says what the TDF says is
@@ -700,34 +763,29 @@ mod tests {
     fn gen_ceg_defs() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src/units/content/ceg_defs");
         std::fs::create_dir_all(dir).expect(dir);
-        let refs = references();
-        // Which file and static each variant ended up in, to print the
-        // `CegKind::def` match afterwards.
+        // Which module and static each variant ended up in, for the
+        // `def` match `mod.rs` carries.
         let mut owner: Vec<Option<(String, String)>> = vec![None; ALL_CEG_KINDS.len()];
         let mut stems = Vec::new();
-        let mut sections = 0;
 
         for (file, text) in explosion_tdfs() {
             let stem = file
                 .strip_suffix(".tdf")
                 .unwrap_or_else(|| panic!("{file}"))
                 .to_owned();
-            let tdf = parsed::Tdf::parse(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
+            let tdf = defs::parse(&file, &text);
             let mut body = String::new();
             for (name, def) in &parsed::ExplosionDefs::from_tdf(&tdf).explosions {
                 let kind = CegKind::find(name)
                     .unwrap_or_else(|| panic!("{file}: [{name}] is not a CegKind"));
                 let static_name = name.to_ascii_uppercase();
                 owner[kind.index()] = Some((stem.clone(), static_name.clone()));
-                sections += 1;
-                body.push_str(&section(name, def, kind, &refs));
+                body.push_str(&section(name, def));
             }
             assert!(!body.is_empty(), "{file} defines no CEG");
             std::fs::write(format!("{dir}/{stem}.rs"), module(&file, &body)).expect("write module");
             stems.push(stem);
         }
-
-        std::fs::write(format!("{dir}/mod.rs"), mod_file(&stems)).expect("write mod.rs");
 
         let orphans: Vec<&str> = ALL_CEG_KINDS
             .iter()
@@ -735,11 +793,8 @@ mod tests {
             .map(|&kind| kind.name())
             .collect();
         assert!(orphans.is_empty(), "no TDF file defines {orphans:?}");
-        println!("// {} sections in {} files\n", sections, stems.len());
-        for &kind in ALL_CEG_KINDS {
-            let (stem, name) = owner[kind.index()].as_ref().expect("checked above");
-            println!("            Self::{kind:?} => &super::ceg_defs::{stem}::{name},");
-        }
+        let owner: Vec<(String, String)> = owner.into_iter().flatten().collect();
+        std::fs::write(format!("{dir}/mod.rs"), mod_file(&stems, &owner)).expect("write mod.rs");
     }
 
     /// One module's whole file: a header saying where it came from, the
@@ -775,27 +830,39 @@ mod tests {
         src
     }
 
-    /// The generated modules, in catalog order.
-    fn mod_file(stems: &[String]) -> String {
+    /// The generated modules, in catalog order, and the match from each
+    /// variant to its static (`owner` is parallel to [`ALL_CEG_KINDS`]).
+    fn mod_file(stems: &[String], owner: &[(String, String)]) -> String {
         let mut src = String::from(
             "//! The CEG definitions, one module per\n\
              //! `assets/defs/explosions/*.tdf`, reached through\n\
-             //! [`CegKind::def`](super::cegs::CegKind::def).\n\
+             //! [`CegKind::def`](super::cegs::CegKind::def) and [`def`].\n\
              //!\n\
              //! Generated as a whole by the ignored `gen_ceg_defs` test in\n\
-             //! `super::ceg_def`; see one module's header for what that means.\n",
+             //! `super::ceg_def`; see one module's header for what that means.\n\n\
+             use super::ceg_def::ExplosionDef;\n\
+             use super::cegs::CegKind;\n\n",
         );
         for stem in stems {
             src.push_str(&format!("pub mod {stem};\n"));
         }
+        src.push_str(
+            "\n/// The static behind each variant. Written with the modules, so a\n\
+             /// renamed or added section lands here without a hand edit, and\n\
+             /// exhaustive, so a variant without one does not compile.\n\
+             pub const fn def(kind: CegKind) -> &'static ExplosionDef {\n\
+             \x20   match kind {\n",
+        );
+        for (kind, (stem, name)) in ALL_CEG_KINDS.iter().zip(owner) {
+            src.push_str(&format!("        CegKind::{kind:?} => &{stem}::{name},\n"));
+        }
+        src.push_str("    }\n}\n");
         src
     }
 
-    /// One `[name]` section: a doc line saying what it is and who calls
-    /// it, then the def.
-    fn section(name: &str, def: &parsed::ExplosionDef, kind: CegKind, refs: &References) -> String {
-        let mut out = format!("/// `[{name}]` — {}.\n", summary(def));
-        out.push_str(&format!("/// {}\n", refs.line(kind)));
+    /// One `[name]` section: its name, then the def.
+    fn section(name: &str, def: &parsed::ExplosionDef) -> String {
+        let mut out = format!("/// `[{name}]`.\n");
         out.push_str(&format!(
             "pub static {}: ExplosionDef = ExplosionDef {{\n",
             name.to_ascii_uppercase()
@@ -841,22 +908,6 @@ mod tests {
             }
         }
         out.push_str("};\n\n");
-        out
-    }
-
-    /// The doc line's first half: how big the def is, and whether its
-    /// ground flash is one the engine draws.
-    fn summary(def: &parsed::ExplosionDef) -> String {
-        let layers = def.effects.len();
-        let mut out = format!(
-            "{layers} effect {}",
-            if layers == 1 { "layer" } else { "layers" }
-        );
-        match &def.ground_flash {
-            None => out.push_str(", no ground flash"),
-            Some(gf) if gf.ttl > 0.0 => out.push_str(", ground flash live"),
-            Some(_) => out.push_str(", ground flash `ttl = 0`"),
-        }
         out
     }
 
@@ -1033,10 +1084,8 @@ mod tests {
     /// it computes, in the same order `eval` would — and the program
     /// itself otherwise.
     ///
-    /// `parsed::CegExpr::literal()` is not usable here: it counts the
-    /// opcodes the parser does not model as literal as well, so folding
-    /// with it would drop the `y0` / `x0` of `touhou.tdf:75` and leave
-    /// the first add standing alone.
+    /// The fold is this crate's, not the parser's: `spring_tdf` only
+    /// parses, and its `Other` ops (`y0` / `x0` here) have to stay ops.
     fn value(e: &parsed::CegExpr) -> String {
         match constant(e) {
             Some(v) => format!("Lit({})", lit(v)),
@@ -1099,68 +1148,5 @@ mod tests {
     /// `.0` an integer value needs to stay an `f32`.
     fn lit(v: f32) -> String {
         format!("{v:?}")
-    }
-
-    /// Who references each CEG, for the doc line on each static: the
-    /// census is what tells a reader whether a def is load-bearing.
-    struct References {
-        weapons: Vec<usize>,
-        sfx: Vec<usize>,
-        spawners: Vec<usize>,
-    }
-
-    impl References {
-        fn line(&self, kind: CegKind) -> String {
-            let i = kind.index();
-            let mut parts = Vec::new();
-            for (count, one, many) in [
-                (self.weapons[i], "weapon", "weapons"),
-                (self.sfx[i], "`[SFXTypes]` entry", "`[SFXTypes]` entries"),
-                (self.spawners[i], "spawner", "spawners"),
-            ] {
-                if count > 0 {
-                    parts.push(format!("{count} {}", if count == 1 { one } else { many }));
-                }
-            }
-            if parts.is_empty() {
-                "Referenced by nothing in the shipped data.".to_string()
-            } else {
-                format!("Referenced by {}.", parts.join(", "))
-            }
-        }
-    }
-
-    fn references() -> References {
-        let defs = defs::defs();
-        let zero = || vec![0; ALL_CEG_KINDS.len()];
-        let mut refs = References {
-            weapons: zero(),
-            sfx: zero(),
-            spawners: zero(),
-        };
-        for weapon in defs.weapons.weapons.values() {
-            let generator = CegKind::find(&weapon.explosion_generator);
-            let tag = CegKind::find(&weapon.ceg_tag).filter(|kind| Some(*kind) != generator);
-            for kind in generator.into_iter().chain(tag) {
-                refs.weapons[kind.index()] += 1;
-            }
-        }
-        for unit in defs.units.units.values() {
-            for reference in &unit.sfx_types {
-                if let Some(kind) = CegKind::find(reference) {
-                    refs.sfx[kind.index()] += 1;
-                }
-            }
-        }
-        for def in parsed_explosion_tdfs().explosions.values() {
-            for layer in &def.effects {
-                if let parsed::EffectProperties::Spawner(props) = &layer.properties
-                    && let Some(kind) = CegKind::find(&props.explosion_generator)
-                {
-                    refs.spawners[kind.index()] += 1;
-                }
-            }
-        }
-        refs
     }
 }

@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[mineclearer]` — 2 effect layers, ground flash `ttl = 0`.
-/// Referenced by 2 weapons.
+/// `[mineclearer]`.
 pub static MINECLEARER: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {

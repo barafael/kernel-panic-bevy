@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[corruption_shot1]` — 1 effect layer, no ground flash.
-/// Referenced by 7 weapons.
+/// `[corruption_shot1]`.
 pub static CORRUPTION_SHOT1: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "circle",

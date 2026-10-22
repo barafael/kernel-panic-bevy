@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[oldskool_build]` — 1 effect layer, ground flash `ttl = 0`.
-/// Referenced by 2 weapons, 2 `[SFXTypes]` entries.
+/// `[oldskool_build]`.
 pub static OLDSKOOL_BUILD: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

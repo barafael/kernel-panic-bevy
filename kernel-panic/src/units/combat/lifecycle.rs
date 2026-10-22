@@ -340,9 +340,10 @@ pub fn death_system(
                 }
             };
             if let Some(blast) = blast {
+                let def = weapon_registry.by_kind(blast.weapon);
                 // `DoExplosion` -> `Explosion`: the ExplodeAs weapon's `soundhit`.
                 if let Some(sounds) = sounds.as_deref_mut() {
-                    sounds.explosion(weapon_registry.by_kind(blast.weapon), pos);
+                    sounds.explosion(def, pos);
                 }
                 damage_queue.push(PendingDamage {
                     target: Some(entity),
@@ -358,10 +359,7 @@ pub fn death_system(
                     rgb: blast.rgb.unwrap_or_else(|| color.rgb_f32()),
                     radius: blast.radius,
                     ceg: blast.ceg,
-                    // The `ExplodeAs` weapon's base damage: upstream's
-                    // death explosion hands it to the CEG, so a bigger
-                    // bomb's `d` expressions read bigger (§3.1).
-                    damage: weapon_registry.by_kind(blast.weapon).damage.default,
+                    damage: blast.damage,
                 });
             } else {
                 // Even units without an ExplodeAs get a small owner-

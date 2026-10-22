@@ -12,8 +12,13 @@ can only become `[Option<CegKind>; N]` for the same reason.
 Follows `docs/review-perf-2026-10.md` §6 and §7 (the `CegKind` /
 `WeaponKind` refactor and its second pass) and
 `docs/enum-shaped-inventory.md` §2.1 (the `find` doc that cites
-non-shipped data). Nothing here is implemented. All line numbers are
-against `65c434d`.
+non-shipped data). All line numbers are against `65c434d`.
+
+**Status:** the CEG step is implemented — `009a8c2` wrote the 50 defs
+as source (§2, §5.1–5.2), `ccb1207` ran the runtime off them and
+deleted the registry (§4, §5.3), `568a777` threaded the weapon's
+damage through (§3.1). The weapons and units steps named in the first
+paragraph have not been started.
 
 ## 0. What the enum step left half-done
 
@@ -242,9 +247,10 @@ Both `EvalCtx` constructions in `ceg.rs` pass `damage: 0.0` (`:691`,
 passes the exploding weapon's damage (`CCustomExplosionGenerator::
 Explosion(…, damage, …)`). Two shipped lines depend on it:
 `system_sigterm.tdf:82` (`gravity=0, -0.1 d0.01, 0` — the SIGTERM
-cloud falls faster for a bigger bomb) and `touhou.tdf:75` (the bubble
-trail's spread scales with damage; with `d = 0` and `x0` a no-op the
-spread today is ±1 elmo plus nothing).
+cloud falls faster for a bigger bomb) and `touhou.tdf:75`
+(`[touhou_buildFX]`, the Touhou builders' build sparkle: its `pos`
+spread scales with damage; with `d = 0` and `x0` a no-op the spread
+today is ±1 elmo plus nothing).
 
 Decision for this plan: **thread damage through.** `ExplosionEvent`
 (`shared.rs:146`) does not carry it; add `damage: f32`, fill it from
@@ -262,11 +268,14 @@ sites turn out awkward; either way the def says what it does.
 implement. In source there is nothing to round-trip: the op set is
 whatever the six variants say. Upstream (`ExplosionGenerator.cpp`
 `ParseExplosionCode`): `y<n>` stores the accumulator in buffer *n* and
-resets it to zero, `x<n>` multiplies the accumulator by buffer *n*. One
-buffer slot, six lines in `eval`. The remaining upstream ops (`a`
-add-buffer, `p` pow, `q` pow-buffer, `k` sawtooth, `s` discrete, `m`
-sine) are not in the data and are not added; a future def that wants
-one adds the variant.
+resets it to zero, `x<n>` multiplies the accumulator by buffer *n*. The
+buffers are per spawned instance, shared by every property of it
+(upstream's `float buffer[16]` in `ExecuteExplosionCode`), which is how
+a `y0` in `pos`'s x axis reaches the `x0` in its z axis. The remaining
+upstream ops (`a` add-buffer, `p` pow, `q` pow-buffer, `m` sawtooth,
+`k` discrete, `s` sine — `ExplosionGenerator.cpp:878-888`) are not in
+the data and are not added; a future def that wants one adds the
+variant.
 
 ### 3.3 `texture=none` layers
 

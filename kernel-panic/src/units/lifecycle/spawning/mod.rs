@@ -506,9 +506,10 @@ pub fn spawn_unit_facing(
 
     // Cache the weapon binding once so the per-frame combat hot path can
     // read the def from an array slot instead of hashing strings against
-    // the weapon registry every tick. Units with no primary weapon (or
-    // whose only weapon is BuildLaser, filtered by `unit_registry.weapon`)
-    // get no binding — combat skips them via `Option<&WeaponBinding>`.
+    // the weapon registry every tick. Units with no fighting weapon
+    // (none, a build laser, or `CanAttack=0`, all folded into
+    // `unit_registry.weapon`) get no binding — combat skips them via
+    // `Option<&WeaponBinding>`.
     if let Some(weapon) = unit_registry
         .weapon(kind)
         .filter(|&weapon| ctx.weapon_registry.is_present(weapon))

@@ -10,8 +10,7 @@ use crate::units::content::ceg_def::CegOp::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[network_charge]` — 2 effect layers, no ground flash.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[network_charge]`.
 pub static NETWORK_CHARGE: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {

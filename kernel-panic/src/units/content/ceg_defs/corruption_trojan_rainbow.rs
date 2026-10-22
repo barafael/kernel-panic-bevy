@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[corruption_trojan_rainbow]` — 1 effect layer, no ground flash.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[corruption_trojan_rainbow]`.
 pub static CORRUPTION_TROJAN_RAINBOW: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "SomethingOrOther",

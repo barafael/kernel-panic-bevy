@@ -11,8 +11,7 @@ use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 use crate::units::content::cegs::CegKind;
 
-/// `[corruption_infection]` — 2 effect layers, no ground flash.
-/// Referenced by 1 weapon.
+/// `[corruption_infection]`.
 pub static CORRUPTION_INFECTION: ExplosionDef = ExplosionDef {
     effects: &[
         EffectLayer {
@@ -60,8 +59,7 @@ pub static CORRUPTION_INFECTION: ExplosionDef = ExplosionDef {
     ground_flash: None,
 };
 
-/// `[corruption_infection_smoke]` — 1 effect layer, no ground flash.
-/// Referenced by 1 spawner.
+/// `[corruption_infection_smoke]`.
 pub static CORRUPTION_INFECTION_SMOKE: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

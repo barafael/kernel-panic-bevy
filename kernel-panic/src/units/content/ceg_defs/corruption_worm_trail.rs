@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[corruption_worm_trail]` — 1 effect layer, no ground flash.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[corruption_worm_trail]`.
 pub static CORRUPTION_WORM_TRAIL: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "dirt",

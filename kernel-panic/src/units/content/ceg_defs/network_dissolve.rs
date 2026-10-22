@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[network_dissolve]` — 1 effect layer, ground flash live.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[network_dissolve]`.
 pub static NETWORK_DISSOLVE: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",
@@ -54,8 +53,7 @@ pub static NETWORK_DISSOLVE: ExplosionDef = ExplosionDef {
     }),
 };
 
-/// `[network_spawn]` — 1 effect layer, ground flash live.
-/// Referenced by 1 `[SFXTypes]` entry.
+/// `[network_spawn]`.
 pub static NETWORK_SPAWN: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

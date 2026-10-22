@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[mine]` — 1 effect layer, ground flash live.
-/// Referenced by 2 weapons.
+/// `[mine]`.
 pub static MINE: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "squarecloud",

@@ -93,7 +93,7 @@ fn parse_all() -> UnitDefinitions {
 
 /// The files are committed assets: one that does not parse is a bug
 /// in the checkout, not a runtime condition.
-fn parse(name: &str, text: &str) -> Tdf {
+pub(super) fn parse(name: &str, text: &str) -> Tdf {
     Tdf::parse(text).unwrap_or_else(|error| panic!("assets/defs: {name}: {error}"))
 }
 

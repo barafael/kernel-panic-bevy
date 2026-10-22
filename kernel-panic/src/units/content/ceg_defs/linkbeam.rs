@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[linkbeam]` — 1 effect layer, no ground flash.
-/// Referenced by 6 `[SFXTypes]` entries.
+/// `[linkbeam]`.
 pub static LINKBEAM: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "DoesThisEvenMatter",

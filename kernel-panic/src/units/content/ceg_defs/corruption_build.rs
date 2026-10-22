@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[corruption_build]` — 1 effect layer, no ground flash.
-/// Referenced by 3 `[SFXTypes]` entries.
+/// `[corruption_build]`.
 pub static CORRUPTION_BUILD: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "fog",

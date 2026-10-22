@@ -9,8 +9,7 @@ use crate::units::content::ceg_def::CegExpr::*;
 use crate::units::content::ceg_def::EffectProperties::*;
 use crate::units::content::ceg_def::*;
 
-/// `[oldskool_shot2]` — 1 effect layer, ground flash `ttl = 0`.
-/// Referenced by 11 `[SFXTypes]` entries.
+/// `[oldskool_shot2]`.
 pub static OLDSKOOL_SHOT2: ExplosionDef = ExplosionDef {
     effects: &[EffectLayer {
         name: "circle",

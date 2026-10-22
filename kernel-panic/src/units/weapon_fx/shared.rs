@@ -365,11 +365,20 @@ impl Flight {
     /// Whether the projectile still burns fuel (`ttl > 0`) — the window
     /// in which it emits its `cegTag`.
     pub fn has_fuel(&self) -> bool {
+        self.fuel_frames() > 0
+    }
+
+    /// Frames of fuel left (`ttl`): what upstream hands a `cegTag` trail
+    /// as its `d` value — `CMissileProjectile`, `CStarburstProjectile`
+    /// and `CExplosiveProjectile` all pass `ttl` in `GenExplosion`'s
+    /// damage slot. Zero for a [`Flight::Direct`] shot, which has no fuel
+    /// to count.
+    pub fn fuel_frames(&self) -> i32 {
         match self {
-            Flight::Missile(m) => m.ttl > 0,
-            Flight::Starburst(s) => s.ttl > 0,
-            Flight::Cannon(c) => c.ttl > 0,
-            Flight::Direct => false,
+            Flight::Missile(m) => m.ttl,
+            Flight::Starburst(s) => s.ttl,
+            Flight::Cannon(c) => c.ttl,
+            Flight::Direct => 0,
         }
     }
 }
