@@ -25,7 +25,9 @@ use crate::sim::DetFloat;
 /// The render layer only the preview camera and mesh are on.
 const LAYER: usize = 23;
 /// The preview image's size: 16:10, the page frames it at that ratio.
-pub(super) const TARGET_SIZE: UVec2 = UVec2::new(1280, 800);
+/// Twice the frame it is shown in on a 1440p page, so the turntable's
+/// terraces stay crisp when the page is scaled up.
+pub(super) const TARGET_SIZE: UVec2 = UVec2::new(2560, 1600);
 /// Turntable speed (rad/s).
 const SPIN: f32 = 0.25;
 /// Heights are drawn this much taller than they are, so a map's
