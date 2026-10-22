@@ -11,8 +11,8 @@
 //!
 //! ## Where the data comes from
 //!
-//! The 50 statics are *generated* from the embedded
-//! `explosions/*.tdf` — see the ignored `gen_ceg_defs` test below — and
+//! The 50 statics are *generated* from `assets/defs/explosions/*.tdf`
+//! — see the ignored `gen_ceg_defs` test below — and
 //! checked against them by
 //! [`cegs::tests::every_source_def_matches_the_parsed_tdf`](super::cegs::tests).
 //! One is how the text got written; the other is proof it says what the
@@ -38,6 +38,7 @@
 //! | `CegOp::Other('y' \| 'x', n)` | [`CegOp::Yank`] / [`CegOp::MulBuf`], which *evaluate* (§3.2) |
 //! | a `[groundflash]` with `ttl = 0` | `ground_flash: None`, which is what is drawn (§3.4) |
 
+use crate::sim::DetFloat;
 use strum::VariantArray;
 
 use super::cegs::CegKind;
@@ -250,8 +251,35 @@ pub enum EmitVector {
 
 /// `colorMap`: evenly-spaced RGBA stops, interpolated over the
 /// particle's life. Rows rather than the TDF's flat run of floats.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ColorMap(pub &'static [[f32; 4]]);
+
+impl ColorMap {
+    /// Linearly interpolate at `t`, the stops evenly spaced. Empty is
+    /// opaque white, one stop is that stop, and outside `[0, 1]` it
+    /// clamps rather than extrapolating — the same arithmetic the parsed
+    /// map ran, so a palette colours exactly what it used to.
+    pub fn sample(&self, t: f32) -> [f32; 4] {
+        match self.0.len() {
+            0 => [1.0, 1.0, 1.0, 1.0],
+            1 => self.0[0],
+            n => {
+                let t = t.det_clamp(0.0, 1.0);
+                let segs = n - 1;
+                let scaled = t * segs as f32;
+                let idx = (scaled as usize).min(segs - 1);
+                let local = scaled - idx as f32;
+                let (a, b) = (self.0[idx], self.0[idx + 1]);
+                [
+                    a[0] + (b[0] - a[0]) * local,
+                    a[1] + (b[1] - a[1]) * local,
+                    a[2] + (b[2] - a[2]) * local,
+                    a[3] + (b[3] - a[3]) * local,
+                ]
+            }
+        }
+    }
+}
 
 /// Every axis zero — the most common vector in the data by a distance.
 pub const ZERO: CegVec3 = CegVec3 {
@@ -501,9 +529,61 @@ pub fn resolve_texture(name: &str) -> Option<CegTexture> {
         .find(|tex| tex.name().eq_ignore_ascii_case(name))
 }
 
+/// The upstream explosion TDFs as `(file name, text)`, in name order.
+///
+/// Nothing at runtime reads these any more: every def the CEG runtime
+/// needs is a `static` in [`super::ceg_defs`], and `build.rs` no longer
+/// embeds the files, so they cost the binary nothing. They stay because
+/// they are what those statics were generated *from* and what
+/// [`cegs::tests::every_source_def_matches_the_parsed_tdf`](super::cegs::tests)
+/// still checks them against, so the test build reads them off disk the
+/// way `audio`'s tests read `assets/sounds`.
+#[cfg(test)]
+pub(super) fn explosion_tdfs() -> Vec<(String, String)> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/defs/explosions");
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+                .path()
+        })
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("tdf"))
+        })
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .unwrap_or_else(|| panic!("{}: no file name", path.display()))
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            (name, text)
+        })
+        .collect()
+}
+
+/// [`explosion_tdfs`] parsed and merged, which is what
+/// `defs::parse_all` did for the registry this replaced.
+#[cfg(test)]
+pub(super) fn parsed_explosion_tdfs() -> spring_tdf::ExplosionDefs {
+    let mut all = spring_tdf::ExplosionDefs::default();
+    for (name, text) in explosion_tdfs() {
+        let tdf = spring_tdf::Tdf::parse(&text).unwrap_or_else(|e| panic!("{name}: {e}"));
+        all.merge(spring_tdf::ExplosionDefs::from_tdf(&tdf));
+    }
+    all
+}
+
 #[cfg(test)]
 mod tests {
-    use super::super::cegs::{ALL_CEG_KINDS, CEG_KIND_COUNT};
+    use super::super::cegs::ALL_CEG_KINDS;
     use super::*;
     use crate::units::content::defs;
     use spring_tdf as parsed;
@@ -530,8 +610,80 @@ mod tests {
         }
     }
 
-    /// Regenerate `src/units/content/ceg_defs/` from the embedded
-    /// `explosions/*.tdf`, then `cargo fmt --all`.
+    /// The runtime samples the static map itself — `&'static` stops, no
+    /// allocation per particle — so [`ColorMap::sample`] is a copy of the
+    /// parser's. Pin the two against each other: a drift between them is
+    /// a CEG that colours differently than its `colorMap` says.
+    #[test]
+    fn color_map_sample_matches_the_parsed_one() {
+        let cases: &[&[[f32; 4]]] = &[
+            &[],
+            &[[1.0, 0.5, 0.0, 1.0]],
+            &[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.25]],
+            &[
+                [1.0, 1.0, 1.0, 0.1],
+                [0.2, 0.2, 1.0, 0.1],
+                [0.0, 0.0, 0.0, 0.0],
+            ],
+            &[
+                [0.1, 0.2, 0.3, 0.4],
+                [0.5, 0.6, 0.7, 0.8],
+                [0.9, 0.8, 0.7, 0.6],
+                [0.5, 0.4, 0.3, 0.2],
+            ],
+        ];
+        for &stops in cases {
+            let parsed_map = parsed::ColorMap {
+                stops: stops.to_vec(),
+            };
+            for t in [-1.0, 0.0, 0.2, 0.5, 0.75, 1.0, 2.0] {
+                assert_eq!(
+                    ColorMap(stops).sample(t),
+                    parsed_map.sample(t),
+                    "{stops:?} at {t}"
+                );
+            }
+        }
+    }
+
+    /// The alias table as the names reach it from a file: `circle` is
+    /// `whitecircle.tga`, and the file name is what `load_beam_texture`
+    /// and the bundle's texture table are keyed by.
+    #[test]
+    fn resolve_texture_maps_aliases_to_files() {
+        for (authored, want) in [
+            ("circle", CegTexture::Circle),
+            ("square", CegTexture::Square),
+            ("hline", CegTexture::HLine),
+            ("bytelaser", CegTexture::ByteLaser),
+            ("pointertrail", CegTexture::PointerTrail),
+            ("flowtrail", CegTexture::FlowTrail),
+        ] {
+            assert_eq!(resolve_texture(authored), Some(want));
+            assert_eq!(
+                resolve_texture(authored).map(CegTexture::file),
+                Some(want.file())
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_texture_ignores_case_and_padding() {
+        assert_eq!(resolve_texture("CIRCLE"), Some(CegTexture::Circle));
+        assert_eq!(resolve_texture("  square  "), Some(CegTexture::Square));
+    }
+
+    /// `none` is `None`, not a bitmap (§3.3), and so are the empty
+    /// string the TDFs default to and a name the table never had.
+    #[test]
+    fn resolve_texture_none_and_empty_skip() {
+        assert_eq!(resolve_texture("none"), None);
+        assert_eq!(resolve_texture(""), None);
+        assert_eq!(resolve_texture("nonsense"), None);
+    }
+
+    /// Regenerate `src/units/content/ceg_defs/` from
+    /// `assets/defs/explosions/*.tdf`, then `cargo fmt --all`.
     ///
     /// This is the writer and nothing more. The proof that what it wrote
     /// says what the TDF says is
@@ -551,25 +703,28 @@ mod tests {
         let refs = references();
         // Which file and static each variant ended up in, to print the
         // `CegKind::def` match afterwards.
-        let mut owner: Vec<Option<(&str, String)>> = vec![None; CEG_KIND_COUNT];
+        let mut owner: Vec<Option<(String, String)>> = vec![None; ALL_CEG_KINDS.len()];
         let mut stems = Vec::new();
         let mut sections = 0;
 
-        for (file, text) in defs::EXPLOSION_TDFS {
-            let stem = file.strip_suffix(".tdf").expect(file);
-            let tdf = parsed::Tdf::parse(text).unwrap_or_else(|e| panic!("{file}: {e}"));
+        for (file, text) in explosion_tdfs() {
+            let stem = file
+                .strip_suffix(".tdf")
+                .unwrap_or_else(|| panic!("{file}"))
+                .to_owned();
+            let tdf = parsed::Tdf::parse(&text).unwrap_or_else(|e| panic!("{file}: {e}"));
             let mut body = String::new();
             for (name, def) in &parsed::ExplosionDefs::from_tdf(&tdf).explosions {
                 let kind = CegKind::find(name)
                     .unwrap_or_else(|| panic!("{file}: [{name}] is not a CegKind"));
                 let static_name = name.to_ascii_uppercase();
-                owner[kind.index()] = Some((stem, static_name.clone()));
+                owner[kind.index()] = Some((stem.clone(), static_name.clone()));
                 sections += 1;
                 body.push_str(&section(name, def, kind, &refs));
             }
             assert!(!body.is_empty(), "{file} defines no CEG");
-            std::fs::write(format!("{dir}/{stem}.rs"), module(file, &body)).expect("write module");
-            stems.push(stem.to_string());
+            std::fs::write(format!("{dir}/{stem}.rs"), module(&file, &body)).expect("write module");
+            stems.push(stem);
         }
 
         std::fs::write(format!("{dir}/mod.rs"), mod_file(&stems)).expect("write mod.rs");
@@ -977,7 +1132,7 @@ mod tests {
 
     fn references() -> References {
         let defs = defs::defs();
-        let zero = || vec![0; CEG_KIND_COUNT];
+        let zero = || vec![0; ALL_CEG_KINDS.len()];
         let mut refs = References {
             weapons: zero(),
             sfx: zero(),
@@ -997,7 +1152,7 @@ mod tests {
                 }
             }
         }
-        for def in defs.explosions.explosions.values() {
+        for def in parsed_explosion_tdfs().explosions.values() {
             for layer in &def.effects {
                 if let parsed::EffectProperties::Spawner(props) = &layer.properties
                     && let Some(kind) = CegKind::find(&props.explosion_generator)

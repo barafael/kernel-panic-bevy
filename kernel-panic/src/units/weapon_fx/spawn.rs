@@ -9,10 +9,11 @@ use bevy::prelude::*;
 
 use crate::terrain::heightmap::Heightmap;
 
+use crate::units::content::ceg_def::resolve_texture;
 use crate::units::content::cegs::CegKind;
 use crate::units::content::weapons::WeaponKind;
 
-use super::ceg::{CegRegistry, CegRenderAssets, ground_flash_normal, spawn_ceg};
+use super::ceg::{CegRenderAssets, ground_flash_normal, spawn_ceg};
 use super::shared::{
     AttackEvent, BeamMaterialCache, BeamVisual, BoltCegTrail, DelayedHit, Flight, GroundFlash,
     GroundFlashAssets, ImpactBurst, ImpactBurstAssets, LaserBolt, LightningArc, PendingAttacks,
@@ -36,12 +37,6 @@ fn spawns_build_sparkle(weapon: WeaponKind) -> bool {
     weapon == WeaponKind::BuildLaser
 }
 
-/// Radius (elmos) of the muzzle-flash burst at the firing unit. Small
-/// enough that it reads as "that unit just shot" without obscuring the
-/// unit itself; the underlying [`ImpactBurst`] decays over its fixed
-/// lifetime so there's nothing to tune per weapon.
-const MUZZLE_FLASH_RADIUS: f32 = 6.0;
-
 /// [`spawn_weapon_visuals`]'s random stream (CEG rolls, arc jitter).
 /// Visual only, but match-scoped and seeded like the sim's streams, so
 /// a replay draws the same effects.
@@ -60,7 +55,6 @@ impl RngStream for ExplosionVisualRng {
 pub(super) fn spawn_weapon_visuals(
     mut pending: ResMut<PendingAttacks>,
     weapon_registry: Res<WeaponRegistry>,
-    ceg_registry: Res<CegRegistry>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -144,15 +138,14 @@ pub(super) fn spawn_weapon_visuals(
             // `explosiongenerator=custom:none` and no projectile, so
             // the cyan shockwave ring IS the visible attack. Replay
             // that CEG at the impact point; the generic melee flash is
-            // only the fallback for registries without the splash.
+            // for every other melee weapon.
             let bite_dir = dir / length.det_max(1e-6);
-            let splash_played = weapon_registry.is_worm_bite(event.weapon)
-                && spawn_ceg(
+            if weapon_registry.is_worm_bite(event.weapon) {
+                spawn_ceg(
                     CegKind::CorruptionWormSplash,
                     event.target_pos,
                     bite_dir,
                     Vec3::Y,
-                    &ceg_registry,
                     &mut rng,
                     &mut commands,
                     &mut materials,
@@ -161,7 +154,7 @@ pub(super) fn spawn_weapon_visuals(
                     &mut ceg_assets,
                     None,
                 );
-            if !splash_played {
+            } else {
                 spawn_melee_flash(
                     &event,
                     &mut commands,
@@ -243,20 +236,20 @@ pub(super) fn spawn_weapon_visuals(
         // `event.muzzle_ceg` — Bit's cyan `arrowflare`, Byte/Pointer's
         // soft-blue `oldskool_shot1`. Upstream has no automatic muzzle
         // flash, so a unit whose script emits nothing (Flow, Packet, …)
-        // gets nothing. The coloured sphere only stands in when the named
-        // CEG is missing from the registry.
+        // gets nothing: `muzzle_ceg` stays `None`, and every name an FBI
+        // does emit has a def behind it
+        // (`cegs::tests::every_shipped_ceg_reference_resolves`).
         if !is_melee
             && !spawns_build_sparkle(event.weapon)
             && !is_gauss_arc
             && let Some(muzzle_ceg) = event.muzzle_ceg
         {
             let muzzle_dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
-            let ceg_spawned = spawn_ceg(
+            spawn_ceg(
                 muzzle_ceg,
                 event.attacker_pos,
                 muzzle_dir,
                 Vec3::Y,
-                &ceg_registry,
                 &mut rng,
                 &mut commands,
                 &mut materials,
@@ -265,18 +258,6 @@ pub(super) fn spawn_weapon_visuals(
                 &mut ceg_assets,
                 None,
             );
-            if !ceg_spawned {
-                spawn_impact_burst(
-                    event.attacker_pos,
-                    weapon.rgb_color,
-                    MUZZLE_FLASH_RADIUS,
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut cache,
-                    &mut impact_assets,
-                );
-            }
         }
 
         // Build lasers also drop a short-lived "nanoframe pixel" sprite at
@@ -292,7 +273,6 @@ pub(super) fn spawn_weapon_visuals(
                 event.target_pos,
                 Vec3::Y,
                 Vec3::Y,
-                &ceg_registry,
                 &mut rng,
                 &mut commands,
                 &mut materials,
@@ -303,21 +283,19 @@ pub(super) fn spawn_weapon_visuals(
             );
         } else if !is_melee && !is_gauss_arc && event.delayed_hit.is_none() {
             // Upstream CEG is the source of truth for impact particles:
-            // the weapon's `explosiongenerator=custom:NAME` resolves to a
-            // CSimpleParticleSystem definition in `gamedata/explosions/`.
-            // Replay those particles faithfully — colormap, size growth,
-            // directional spread, lifetime all come from the authored
-            // script. Fall back to the synthesised burst + ground flash
-            // only when the CEG is missing or references a class we
-            // don't yet support (CBitmapMuzzleFlame etc).
+            // the weapon's `explosiongenerator=custom:NAME` names a
+            // section of `gamedata/explosions/` — a `static` in
+            // `units::content::ceg_defs` — and its colormap, size growth,
+            // directional spread and lifetime all come from that script.
             let dir = (event.target_pos - event.attacker_pos).normalize_or(Vec3::Y);
-            let used_ceg = weapon_registry.ceg(event.weapon).is_some_and(|ceg| {
-                spawn_ceg(
+            match weapon_registry.ceg(event.weapon) {
+                // `custom:none` lands here too, and spawns nothing on
+                // purpose: that is what the data asked for.
+                Some(ceg) => spawn_ceg(
                     ceg,
                     event.target_pos,
                     dir,
                     Vec3::Y,
-                    &ceg_registry,
                     &mut rng,
                     &mut commands,
                     &mut materials,
@@ -325,31 +303,32 @@ pub(super) fn spawn_weapon_visuals(
                     &mut model_cache,
                     &mut ceg_assets,
                     None,
-                )
-            });
-            if !used_ceg {
-                let aoe = weapon.area_of_effect.det_max(4.0);
-                spawn_impact_burst(
-                    event.target_pos,
-                    weapon.rgb_color,
-                    aoe,
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut cache,
-                    &mut impact_assets,
-                );
-                spawn_ground_flash(
-                    event.target_pos,
-                    weapon.rgb_color,
-                    aoe,
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    &mut cache,
-                    &mut flash_assets,
-                    heightmap.as_deref(),
-                );
+                ),
+                // No `explosiongenerator` at all: synthesise the burst.
+                None => {
+                    let aoe = weapon.area_of_effect.det_max(4.0);
+                    spawn_impact_burst(
+                        event.target_pos,
+                        weapon.rgb_color,
+                        aoe,
+                        &mut commands,
+                        &mut meshes,
+                        &mut materials,
+                        &mut cache,
+                        &mut impact_assets,
+                    );
+                    spawn_ground_flash(
+                        event.target_pos,
+                        weapon.rgb_color,
+                        aoe,
+                        &mut commands,
+                        &mut meshes,
+                        &mut materials,
+                        &mut cache,
+                        &mut flash_assets,
+                        heightmap.as_deref(),
+                    );
+                }
             }
         }
     }
@@ -373,7 +352,6 @@ pub(super) fn spawn_pending_explosions(
     mut impact_assets: ResMut<ImpactBurstAssets>,
     mut flash_assets: ResMut<GroundFlashAssets>,
     mut ceg_assets: ResMut<CegRenderAssets>,
-    ceg_registry: Res<CegRegistry>,
     mut rng: ResMut<SimRng<ExplosionVisualRng>>,
     heightmap: Option<Res<Heightmap>>,
 ) {
@@ -382,13 +360,12 @@ pub(super) fn spawn_pending_explosions(
         // caller named one (death `ExplodeAs`, mine kill, SIGTERM),
         // replay its emitters; otherwise fall back to the synthesised
         // burst so there's still feedback for unscripted detonations.
-        let used_ceg = event.ceg.is_some_and(|ceg| {
-            spawn_ceg(
+        match event.ceg {
+            Some(ceg) => spawn_ceg(
                 ceg,
                 event.pos,
                 event.up,
                 event.up,
-                &ceg_registry,
                 &mut rng,
                 &mut commands,
                 &mut materials,
@@ -396,31 +373,31 @@ pub(super) fn spawn_pending_explosions(
                 &mut model_cache,
                 &mut ceg_assets,
                 heightmap.as_deref(),
-            )
-        });
-        if !used_ceg {
-            let aoe = event.radius.det_max(4.0);
-            spawn_impact_burst(
-                event.pos,
-                event.rgb,
-                aoe,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut impact_assets,
-            );
-            spawn_ground_flash(
-                event.pos,
-                event.rgb,
-                aoe,
-                &mut commands,
-                &mut meshes,
-                &mut materials,
-                &mut cache,
-                &mut flash_assets,
-                heightmap.as_deref(),
-            );
+            ),
+            None => {
+                let aoe = event.radius.det_max(4.0);
+                spawn_impact_burst(
+                    event.pos,
+                    event.rgb,
+                    aoe,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut impact_assets,
+                );
+                spawn_ground_flash(
+                    event.pos,
+                    event.rgb,
+                    aoe,
+                    &mut commands,
+                    &mut meshes,
+                    &mut materials,
+                    &mut cache,
+                    &mut flash_assets,
+                    heightmap.as_deref(),
+                );
+            }
         }
     }
 }
@@ -533,12 +510,12 @@ fn spawn_impact_burst(
 ///
 /// Upstream `RESOURCES.TDF` declares atlas aliases — `bytelasermid`
 /// points at the on-disk `bytemegabeammid.tga`, not a file named after
-/// the alias itself. We consult [`CegRegistry::resolve_texture`] first
-/// (which mirrors the same alias table) and fall back to a literal
-/// `{name}.tga` lookup for weapon textures that don't happen to be
-/// aliased. Only that fallback builds a filename, and [`tga_filename`]
-/// spells it into a stack buffer — both paths run allocation-free, which
-/// matters because this is called for every shot.
+/// the alias itself. We consult [`resolve_texture`], the alias table,
+/// first and fall back to a literal `{name}.tga` lookup for weapon
+/// textures that don't happen to be aliased. Only that fallback builds a
+/// filename, and [`tga_filename`] spells it into a stack buffer — both
+/// paths run allocation-free, which matters because this is called for
+/// every shot.
 fn beam_texture(
     tex1: &str,
     model_cache: &mut S3OModelCache,
@@ -547,8 +524,8 @@ fn beam_texture(
     if tex1.is_empty() || tex1.eq_ignore_ascii_case("none") {
         return None;
     }
-    let (handle, w, h) = match CegRegistry::resolve_texture(tex1) {
-        Some(filename) => load_beam_texture(filename, model_cache, images)?,
+    let (handle, w, h) = match resolve_texture(tex1) {
+        Some(texture) => load_beam_texture(texture.file(), model_cache, images)?,
         None => {
             let mut buf = [0u8; 96];
             load_beam_texture(&tga_filename(tex1, &mut buf), model_cache, images)?
@@ -1111,8 +1088,8 @@ fn bolt_cap_material(
     if tex2.is_empty() {
         return None;
     }
-    let filename = CegRegistry::resolve_texture(tex2)?;
-    let (handle, _, _) = load_beam_texture(filename, model_cache, images)?;
+    let texture = resolve_texture(tex2)?;
+    let (handle, _, _) = load_beam_texture(texture.file(), model_cache, images)?;
 
     // Keyed by the texture so different texture2 weapons don't collide.
     Some(cache.get_or_create_tiled(
@@ -1141,8 +1118,8 @@ fn build_projectile_trail(
     cache: &mut BeamMaterialCache,
 ) -> ProjectileTrail {
     let texture = if !weapon.texture2.is_empty() && weapon.texture2 != "none" {
-        CegRegistry::resolve_texture(&weapon.texture2)
-            .and_then(|filename| load_beam_texture(filename, model_cache, images))
+        resolve_texture(&weapon.texture2)
+            .and_then(|tex| load_beam_texture(tex.file(), model_cache, images))
             .map(|(handle, _, _)| handle)
     } else {
         None
@@ -1336,7 +1313,6 @@ mod tests {
             .init_resource::<ImpactBurstAssets>()
             .init_resource::<GroundFlashAssets>()
             .init_resource::<WeaponFxMeshes>()
-            .insert_resource(CegRegistry::load())
             .init_sim();
         app
     }

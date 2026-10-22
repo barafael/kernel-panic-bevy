@@ -53,7 +53,6 @@ use crate::map_loading::{MatchEntity, MatchScopeAppExt};
 use crate::rendering::interpolation::SimPose;
 use crate::sim::SimRng;
 use batch::FxQuadBatches;
-pub(crate) use ceg::CegRegistry;
 use ceg::CegRenderAssets;
 use shared::{BeamMaterialCache, GroundFlashAssets, ImpactBurstAssets, WeaponFxMeshes};
 
@@ -89,7 +88,6 @@ impl Plugin for WeaponFxPlugin {
             .init_resource::<WeaponFxMeshes>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .insert_resource(CegRegistry::load())
             // Projectiles and the synthesised bursts move in the fixed
             // sim; draw them interpolated (`rendering::interpolation`).
             // Beams, bolts, arcs, spikes, trails and CEG particles /

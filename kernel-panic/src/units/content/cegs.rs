@@ -2,20 +2,19 @@
 //! `gamedata/explosions/*.tdf` sections the engine replays as particle
 //! systems, flames, spikes and ground flashes).
 //!
-//! Like [`UnitKind`], the set is closed: the sections are embedded at
-//! compile time (`super::defs`, `build.rs`) and `net::compat` hashes the
-//! embedded texts, so peers already have to agree on it. Carrying the
-//! section name on the variant instead of hashing it per lookup is what
-//! lets [`CegRegistry`](crate::units::weapon_fx::CegRegistry) be an array
-//! index rather than a map, and lets an explosion event name its CEG in
-//! a word.
+//! Like [`UnitKind`], the set is closed: every section is a `static` in
+//! [`super::ceg_defs`] behind [`CegKind::def`], so having a variant *is*
+//! having a definition — no table to load, no name to look up, no
+//! `Option` to unwrap. Carrying the section name on the variant instead
+//! of hashing it per lookup is what lets an explosion event name its CEG
+//! in a word.
 //!
 //! Names reach here from parsed data, always through [`CegKind::find`]:
-//! a weapon's `explosiongenerator=custom:…` and `cegTag=`, a CEG
-//! spawner's own `explosiongenerator`, a unit FBI's `[SFXTypes]` table.
-//! Those files are data, so a name that is not a variant stays possible
-//! at runtime — `find` returns `None` and the caller falls back to the
-//! generic burst, exactly as the map lookup did.
+//! a weapon's `explosiongenerator=custom:…` and `cegTag=`, a unit FBI's
+//! `[SFXTypes]` table. Those files are data, so a name that is not a
+//! variant stays possible at runtime — `find` returns `None` and the
+//! caller falls back to the generic burst. Inside a CEG def there are no
+//! names left to resolve: a spawner's target is a variant.
 
 use super::ceg_def::ExplosionDef;
 use std::collections::HashMap;
@@ -23,9 +22,9 @@ use std::sync::LazyLock;
 use strum::VariantArray;
 
 /// Every `explosions/*.tdf` section Kernel Panic ships, in the order the
-/// files sort in. The discriminant is the [`CegRegistry`] slot, so
-/// renumbering is presentation-only: no `CegKind` crosses the wire or
-/// enters the sim hash.
+/// files sort in. The discriminant is only a dense index
+/// ([`CegKind::index`]), so renumbering is presentation-only: no
+/// `CegKind` crosses the wire or enters the sim hash.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::IntoStaticStr, strum::VariantArray)]
 pub enum CegKind {
     /// BugCannon's ballistic trail.
@@ -170,9 +169,6 @@ pub enum CegKind {
 /// `strum::VariantArray` so a new variant needs no second edit.
 pub const ALL_CEG_KINDS: &[CegKind] = CegKind::VARIANTS;
 
-/// Number of `CegKind` variants: the length of the [`CegRegistry`] table.
-pub const CEG_KIND_COUNT: usize = ALL_CEG_KINDS.len();
-
 /// Section name → variant, keyed as-authored for the exact hit every
 /// shipped reference takes. [`CegKind::find`] falls back to a scan.
 static CEG_BY_NAME: LazyLock<HashMap<&'static str, CegKind>> = LazyLock::new(|| {
@@ -184,8 +180,9 @@ static CEG_BY_NAME: LazyLock<HashMap<&'static str, CegKind>> = LazyLock::new(|| 
 
 impl CegKind {
     /// Dense 0-based index in declaration order (== position in
-    /// [`ALL_CEG_KINDS`]), for the [`CegRegistry`](crate::units::weapon_fx::CegRegistry)'s
-    /// array lookup.
+    /// [`ALL_CEG_KINDS`]): the slot a CEG takes in the arrays that hold a
+    /// `CegKind` (`WeaponRegistry`'s `ceg_kinds` and `ceg_tags`, the
+    /// census counts of `cegs::tests`).
     pub const fn index(self) -> usize {
         self as usize
     }
@@ -201,17 +198,17 @@ impl CegKind {
     ///
     /// `None` for an empty name and for a name that is not a CEG at all.
     /// No shipped reference takes that path — the 61 `[SFXTypes]`
-    /// entries, 42 weapon `explosiongenerator=` values, 7 `cegTag=`
-    /// values and 3 spawner targets all name a section that exists — so
-    /// what reaches it is a name from a different vocabulary (a target
-    /// category, a weapon name) or data that is not shipped. Callers
-    /// treat `None` as "no scripted CEG" and fall back to the generic
-    /// burst, which is what the map lookup did.
+    /// entries, 42 weapon `explosiongenerator=` values and 7 `cegTag=`
+    /// values all name a section that exists — so what reaches it is a
+    /// name from a different vocabulary (a target category, a weapon
+    /// name) or data that is not shipped. Callers treat `None` as "no
+    /// scripted CEG" and fall back to the generic burst. A CEG spawner's
+    /// own target never comes through here: the source defs carry it as a
+    /// variant.
     ///
-    /// The exact hit is what every shipped reference takes — the names
-    /// in `weapons/*.tdf`, `explosions/*.tdf` and the FBIs all match
-    /// their section's case — so the ignore-case scan only runs on a
-    /// miss. Neither arm allocates.
+    /// The exact hit is what every shipped reference takes — the names in
+    /// `weapons/*.tdf` and the FBIs all match their section's case — so
+    /// the ignore-case scan only runs on a miss. Neither arm allocates.
     pub fn find(reference: &str) -> Option<Self> {
         let name = reference.trim();
         let name = name.strip_prefix("custom:").unwrap_or(name);
@@ -236,10 +233,6 @@ impl CegKind {
     /// neither the `Option` a registry lookup returned nor the `bool` that
     /// distinguished "no such CEG" from "a CEG with nothing in it"
     /// (`docs/ceg-in-source-plan.md` §0, §3.5).
-    ///
-    /// Not yet read — the CEG runtime still evaluates the parsed TDFs —
-    /// so the attribute goes with the registry, one commit later (§5.3).
-    #[allow(dead_code)]
     pub const fn def(self) -> &'static ExplosionDef {
         match self {
             Self::CorruptionBcTrail => &super::ceg_defs::corruption_bctrail::CORRUPTION_BCTRAIL,
@@ -325,7 +318,7 @@ mod tests {
 
     #[test]
     fn indices_are_dense_and_unique() {
-        let mut seen = [false; CEG_KIND_COUNT];
+        let mut seen = [false; ALL_CEG_KINDS.len()];
         for &kind in ALL_CEG_KINDS {
             let i = kind.index();
             assert!(!seen[i], "{kind:?} shares a slot");
@@ -371,7 +364,7 @@ mod tests {
     /// absence of a reference rather than a bad one.
     #[test]
     fn every_shipped_ceg_reference_resolves() {
-        use spring_tdf::EffectProperties;
+        use crate::units::content::ceg_def::EffectProperties;
 
         let defs = crate::units::content::defs::defs();
         let mut counts = [0; 3];
@@ -392,13 +385,13 @@ mod tests {
                 }
             }
         }
-        for def in defs.explosions.explosions.values() {
-            for layer in &def.effects {
-                if let EffectProperties::Spawner(props) = &layer.properties
-                    && !props.explosion_generator.is_empty()
-                {
-                    let reference = &props.explosion_generator;
-                    assert!(CegKind::find(reference).is_some(), "{reference}");
+        for &kind in ALL_CEG_KINDS {
+            for layer in kind.def().effects {
+                // A spawner's target is a `CegKind` in the source form, so
+                // there is nothing left to resolve — `gen_ceg_defs` panics
+                // on a name it cannot name. Counting the layers is what
+                // keeps this walk honest.
+                if matches!(layer.properties, EffectProperties::Spawner(_)) {
                     counts[2] += 1;
                 }
             }
@@ -410,15 +403,15 @@ mod tests {
         );
     }
 
-    /// The generated statics say what the TDFs say.
+    /// The `static`s say what the TDFs say.
     ///
     /// This, not the generator, is the gate on `ceg_defs`. A generator
     /// that put `particle_speed` in `particle_size` would happily
     /// regenerate the same wrong file forever, so the comparison runs
     /// the other way: each `static` is turned back into the owned tree
-    /// `spring_tdf` parsed from the embedded files, and the two trees
-    /// have to be equal. Nothing in here reads a generated file or calls
-    /// the generator.
+    /// `spring_tdf` parses from `assets/defs/explosions/`, and the two
+    /// trees have to be equal. Nothing in here reads a generated file or
+    /// calls the generator.
     ///
     /// The parsed side is normalised first, four times, each one a
     /// fidelity decision of §3 rather than a different def:
@@ -437,7 +430,7 @@ mod tests {
     /// stands.
     #[test]
     fn every_source_def_matches_the_parsed_tdf() {
-        let tdfs = &crate::units::content::defs::defs().explosions;
+        let tdfs = crate::units::content::ceg_def::parsed_explosion_tdfs();
         for &kind in ALL_CEG_KINDS {
             let authored = tdfs
                 .explosions

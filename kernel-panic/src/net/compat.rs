@@ -76,7 +76,11 @@ pub const SIM_VERSION: u32 = 14;
 pub struct Build {
     pub sim_version: u32,
     /// FNV-1a of the embedded unit data: `assets/units.kpu` followed by
-    /// every definition file of `assets/defs/` (`units::content::defs`).
+    /// every definition file of `assets/defs/` (`units::content::defs`) —
+    /// which no longer includes `assets/defs/explosions/`: the CEGs are
+    /// code now, and code is [`SIM_VERSION`]'s business, not the data
+    /// hash's. Peers may therefore disagree about CEGs, which is sound:
+    /// nothing a CEG spawns enters the sim hash (`net::state`).
     pub units_hash: u64,
 }
 

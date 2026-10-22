@@ -1,12 +1,12 @@
 //! Custom Explosion Generator (CEG) runtime.
 //!
-//! Parsing now lives in [`spring_tdf::ExplosionDefs`] (typed `CegExpr`,
-//! `ColorMap`, `EmitVector`, …). This module keeps only:
+//! The definitions are source: every [`CegKind`] has one
+//! [`crate::units::content::ceg_def::ExplosionDef`] behind it, a `static`
+//! in [`crate::units::content::ceg_defs`] reached through [`CegKind::def`].
+//! What is left here is only the machine that turns one into entities:
 //!
-//! - [`CegRegistry`]: the merged [`spring_tdf::ExplosionDefs`] of every
-//!   `gamedata/explosions/*.tdf` (from the unit bundle) plus atlas-alias
-//!   resolution (`circle` → `whitecircle.tga`).
-//! - [`spawn_ceg`]: walks an [`ExplosionDef`]'s effect layers and
+//! - [`spawn_ceg`]: walks an
+//!   [`crate::units::content::ceg_def::ExplosionDef`]'s effect layers and
 //!   instantiates the right runtime object for each class —
 //!   `CSimpleParticleSystem` becomes a batch of [`CegParticle`]s,
 //!   `CBitmapMuzzleFlame` becomes a [`CegFlame`] billboard,
@@ -19,6 +19,12 @@
 //!   in the shared [`FxQuadBatches`] mesh of their texture's material,
 //!   their colour (and alpha) on the vertices.
 //!
+//! A CEG's texture is a [`CegTexture`] variant, so the atlas alias
+//! (`circle` → `whitecircle.tga`) is one `file()` call rather than a
+//! table lookup;
+//! [`crate::units::content::ceg_def::resolve_texture`] still takes names
+//! for the weapon TDFs, whose `texture1=` / `texture2=` fields are text.
+//!
 //! All ambient "spread" math (`X rN`, `X iN`, `X dN`) is handled by
 //! [`CegExpr::eval`] with an [`EvalCtx`] populated per particle — the
 //! runtime never touches the raw TDF strings.
@@ -29,38 +35,17 @@ use std::collections::HashMap;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
-use spring_tdf::{
-    CegExpr, ColorMap, EffectProperties, EmitVector, EvalCtx, ExplosionDef, ExplosionDefs,
-    FlameProperties, ParticleProperties, SpawnerProperties,
-};
 
 use super::batch::FxQuadBatches;
 use crate::rng;
 use crate::sim::{GAME_SPEED, RngStream, SimRng};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::assets::meshes::{S3OModelCache, load_beam_texture};
-use crate::units::content::ceg_def::{CegTexture, resolve_texture as resolve_ceg_texture};
-use crate::units::content::cegs::{ALL_CEG_KINDS, CEG_KIND_COUNT, CegKind};
-
-/// Registry of every parsed CEG, indexed by [`CegKind`] rather than
-/// keyed by section name: [`Self::get`] is an array read, and the
-/// name→variant resolution happens once, at load.
-///
-/// Parsing stays in [`spring_tdf::ExplosionDefs`]; this resolves its
-/// sections into the dense table and drops the ones no [`CegKind`]
-/// names, which nothing but the load-time count ever read.
-#[derive(Resource)]
-pub struct CegRegistry {
-    defs: Box<[Option<ExplosionDef>]>,
-}
-
-impl Default for CegRegistry {
-    fn default() -> Self {
-        Self {
-            defs: (0..CEG_KIND_COUNT).map(|_| None).collect(),
-        }
-    }
-}
+use crate::units::content::ceg_def::{
+    CegExpr, CegTexture, ColorMap, EffectProperties, EmitVector, EvalCtx, FlameProperties,
+    GroundFlash, ParticleProperties, SpawnerProperties, SpikeProperties,
+};
+use crate::units::content::cegs::CegKind;
 
 /// Render assets every CEG spawn shares: one additive material per
 /// texture (particles, flames), the spike material, and the colour
@@ -165,7 +150,7 @@ impl CegRenderAssets {
         }
         self.palettes.push(CegPalette {
             material,
-            color_map: color_map.clone(),
+            color_map: *color_map,
         });
         self.palettes.len() - 1
     }
@@ -186,13 +171,12 @@ impl CegRenderAssets {
         if let Some(found) = &self.ground_flash {
             return Some(found.clone());
         }
-        let mut material = |alias: &str| {
-            let file = CegRegistry::resolve_texture(alias)?;
-            let (texture, _, _) = load_beam_texture(file, model_cache, images)?;
-            Some(self.texture_material(&texture, false, materials))
+        let mut material = |texture: CegTexture| {
+            let (handle, _, _) = load_beam_texture(texture.file(), model_cache, images)?;
+            Some(self.texture_material(&handle, false, materials))
         };
-        let ring = material("squarehollow")?;
-        let flash = material("square")?;
+        let ring = material(CegTexture::SquareHollow)?;
+        let flash = material(CegTexture::Square)?;
         let found = GroundFlashMaterials { ring, flash };
         self.ground_flash = Some(found.clone());
         Some(found)
@@ -233,67 +217,12 @@ fn push_billboard(
 /// `VolumeHitCtx` pattern in `tick.rs`.
 #[derive(SystemParam)]
 pub(super) struct CegTrailCtx<'w, 's> {
-    pub ceg_registry: Res<'w, CegRegistry>,
     pub materials: ResMut<'w, Assets<StandardMaterial>>,
     pub images: ResMut<'w, Assets<Image>>,
     pub model_cache: ResMut<'w, S3OModelCache>,
     pub ceg_assets: ResMut<'w, CegRenderAssets>,
     pub heightmap: Option<Res<'w, Heightmap>>,
     pub _marker: std::marker::PhantomData<&'s ()>,
-}
-
-impl CegRegistry {
-    /// The embedded `explosions/*.tdf` (`units::content::defs`).
-    pub fn load() -> Self {
-        let registry = Self::from_defs(crate::units::content::defs::defs().explosions.clone());
-        info!(
-            "CEG registry: {} explosion generators loaded",
-            registry.defs.iter().flatten().count()
-        );
-        registry.validate_bindings();
-        registry
-    }
-
-    /// Resolve parsed explosion sections into the per-[`CegKind`] table.
-    pub fn from_defs(defs: ExplosionDefs) -> Self {
-        let mut table: Box<[Option<ExplosionDef>]> = (0..CEG_KIND_COUNT).map(|_| None).collect();
-        for (name, def) in defs.explosions {
-            match CegKind::find(&name) {
-                Some(kind) => table[kind.index()] = Some(def),
-                // A section no variant names. Nothing ever iterated the
-                // old map, so dropping one only means it cannot fire.
-                None => debug!("CEG section '{name}' has no CegKind variant"),
-            }
-        }
-        Self { defs: table }
-    }
-
-    /// Warn for every [`CegKind`] the parsed TDFs leave undefined, the
-    /// way `UnitRegistry` reports a `UnitKind` with no FBI.
-    fn validate_bindings(&self) {
-        for &kind in ALL_CEG_KINDS {
-            if self.defs[kind.index()].is_none() {
-                warn!(
-                    "CEG '{}' (variant {kind:?}) not found in explosions/*.tdf",
-                    kind.name(),
-                );
-            }
-        }
-    }
-
-    /// The def behind `kind` — an array read, `None` when its section is
-    /// absent from the parsed TDFs.
-    pub fn get(&self, kind: CegKind) -> Option<&ExplosionDef> {
-        self.defs[kind.index()].as_ref()
-    }
-
-    /// Re-shape the texture name the CEG authored (e.g. `circle`) into
-    /// the on-disk filename via the same `RESOURCES.TDF` mapping the
-    /// weapon atlases use. The table is [`CegTexture`], and `none` or a
-    /// name it does not have resolves to nothing.
-    pub fn resolve_texture(tex_name: &str) -> Option<&'static str> {
-        resolve_ceg_texture(tex_name).map(CegTexture::file)
-    }
 }
 
 // ─── Runtime components ─────────────────────────────────────────────
@@ -411,7 +340,7 @@ pub(super) struct CegGroundFlash {
 }
 
 impl CegGroundFlash {
-    fn new(gf: &spring_tdf::GroundFlash, pos: Vec3, normal: Vec3) -> Self {
+    fn new(gf: &GroundFlash, pos: Vec3, normal: Vec3) -> Self {
         Self {
             pos,
             axes: ground_axes(normal),
@@ -487,10 +416,10 @@ fn ground_axes(normal: Vec3) -> (Vec3, Vec3) {
 
 // ─── Spawning ───────────────────────────────────────────────────────
 
-/// Spawn `ceg` at `pos` with firing direction `dir`. Returns true iff a
-/// def backs it; a [`CegKind`] the TDFs do not define lets callers fall
-/// back to a synthesised burst (a kind that resolves but authors nothing,
-/// [`CegKind::NoEffect`], returns true and so *suppresses* the fallback).
+/// Spawn `ceg` at `pos` with firing direction `dir`. Every [`CegKind`]
+/// has a def, so this cannot fail and callers have no "no such CEG"
+/// fallback left to take: [`CegKind::NoEffect`] — the `[none]` section,
+/// which authors no layers — is how the data asks for nothing.
 /// `up` is the emitter's up vector: the CEG's
 /// literal vectors and offsets (`emitVector=0, 1, 0`, `pos=0, 1, 0`)
 /// are authored for an upright emitter and turn with it, so a unit
@@ -503,7 +432,6 @@ pub(super) fn spawn_ceg(
     pos: Vec3,
     dir: Vec3,
     up: Vec3,
-    registry: &CegRegistry,
     rng: &mut u32,
     commands: &mut Commands,
     materials: &mut Assets<StandardMaterial>,
@@ -511,16 +439,14 @@ pub(super) fn spawn_ceg(
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
     ground: Option<&Heightmap>,
-) -> bool {
-    let Some(def) = registry.get(ceg) else {
-        return false;
-    };
+) {
+    let def = ceg.def();
 
     let dir = dir.normalize_or(Vec3::Y);
     let up = up.normalize_or(Vec3::Y);
     let frame = Quat::from_rotation_arc(Vec3::Y, up);
 
-    for effect in &def.effects {
+    for effect in def.effects {
         match &effect.properties {
             EffectProperties::Particle(p) => spawn_particle_system(
                 effect.count,
@@ -563,15 +489,12 @@ pub(super) fn spawn_ceg(
                 model_cache,
                 ceg_assets,
             ),
-            EffectProperties::Raw(_) => {
-                // Unsupported class (CStars, etc.) — silently skipped.
-            }
         }
     }
     // The `[groundflash]` section (`oldskool_vbig`, `oldskool_big`,
-    // `mine`, `network_dissolve` ship visible ones; the rest `ttl=0`).
+    // `mine`, `network_dissolve` ship the visible ones; a `ttl = 0`
+    // block is already `None`, §3.4).
     if let Some(gf) = &def.ground_flash
-        && gf.ttl > 0.0
         && ceg_assets
             .ground_flash_materials(materials, images, model_cache)
             .is_some()
@@ -588,7 +511,6 @@ pub(super) fn spawn_ceg(
             normal,
         ));
     }
-    true
 }
 
 /// An acceleration authored per sim frame² (CEG `gravity`, added to
@@ -611,10 +533,12 @@ fn spawn_particle_system(
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
 ) {
-    let Some(filename) = CegRegistry::resolve_texture(&props.texture) else {
+    // `Texture=none` (§3.3): the layer stays in the def for a reader
+    // comparing against upstream, and draws nothing, as before.
+    let Some(texture) = props.texture else {
         return;
     };
-    let Some((tex, _w, _h)) = load_beam_texture(filename, model_cache, images) else {
+    let Some((tex, _w, _h)) = load_beam_texture(texture.file(), model_cache, images) else {
         return;
     };
     let palette = ceg_assets.palette(&tex, &props.color_map, materials);
@@ -754,13 +678,12 @@ fn spawn_flame(
     model_cache: &mut S3OModelCache,
     ceg_assets: &mut CegRenderAssets,
 ) {
-    let mut palette_for = |tex_name: &str| {
-        let filename = CegRegistry::resolve_texture(tex_name)?;
-        let (tex, _w, _h) = load_beam_texture(filename, model_cache, images)?;
+    let mut palette_for = |texture: Option<CegTexture>| {
+        let (tex, _w, _h) = load_beam_texture(texture?.file(), model_cache, images)?;
         Some(ceg_assets.palette(&tex, &props.color_map, materials))
     };
-    let front = palette_for(&props.front_texture);
-    let side = palette_for(&props.side_texture);
+    let front = palette_for(props.front_texture);
+    let side = palette_for(props.side_texture);
     if front.is_none() && side.is_none() {
         return;
     }
@@ -809,7 +732,7 @@ fn spawn_flame(
 #[allow(clippy::too_many_arguments)]
 fn spawn_spikes(
     count: u32,
-    props: &spring_tdf::SpikeProperties,
+    props: &SpikeProperties,
     origin: Vec3,
     frame: Quat,
     rng: &mut u32,
@@ -825,8 +748,7 @@ fn spawn_spikes(
     let material = match &ceg_assets.spike_material {
         Some(m) => m.clone(),
         None => {
-            let texture = CegRegistry::resolve_texture("laserend")
-                .and_then(|f| load_beam_texture(f, model_cache, images))
+            let texture = load_beam_texture(CegTexture::LaserEnd.file(), model_cache, images)
                 .map(|(h, _, _)| h);
             let m = materials.add(StandardMaterial {
                 base_color: Color::WHITE,
@@ -939,13 +861,10 @@ fn spawn_delayed(
     up: Vec3,
     commands: &mut Commands,
 ) {
-    // Parsed out of the TDF, so unlike a hard-coded CEG it has to be
-    // resolved: once per spawner effect, then `Copy` into each of the
-    // `count` timers. A name with no section behind it queues nothing,
-    // which is what the timers used to amount to once they fired.
-    let Some(target_ceg) = CegKind::find(&props.explosion_generator) else {
-        return;
-    };
+    // The child is a variant, so there is nothing to resolve here: the
+    // generator refused to write a spawner whose `explosiongenerator` no
+    // [`CegKind`] names. `Copy` into each of the `count` timers.
+    let target_ceg = props.target;
     // `system_nx` fans out 240 timers per cast — one command, not 240.
     let mut timers = Vec::with_capacity(count as usize);
     for i in 0..count {
@@ -1194,7 +1113,6 @@ impl RngStream for DelayedCegRng {
 pub(super) fn tick_ceg_delayed_spawns(
     time: Res<Time>,
     mut timers: Query<(Entity, &mut CegDelayedSpawn)>,
-    registry: Res<CegRegistry>,
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -1219,7 +1137,6 @@ pub(super) fn tick_ceg_delayed_spawns(
             timer.pos,
             timer.dir,
             timer.up,
-            &registry,
             &mut rng,
             &mut commands,
             &mut materials,
@@ -1291,65 +1208,6 @@ fn next_signed(state: &mut u32) -> f32 {
 mod tests {
     use super::*;
 
-    /// `load()` only warns for a variant the TDFs leave undefined, and
-    /// `spawn_ceg` degrades to the generic burst for it; assert it here
-    /// so a renamed section is a test failure, as
-    /// `the_shipped_tdfs_define_every_variant` does for weapons.
-    #[test]
-    fn the_shipped_tdfs_define_every_ceg_kind() {
-        let registry = CegRegistry::load();
-        for &kind in ALL_CEG_KINDS {
-            assert!(registry.get(kind).is_some(), "{} missing", kind.name());
-        }
-    }
-
-    #[test]
-    fn resolve_texture_known_aliases() {
-        assert_eq!(
-            CegRegistry::resolve_texture("circle"),
-            Some("whitecircle.tga")
-        );
-        assert_eq!(
-            CegRegistry::resolve_texture("square"),
-            Some("solidwhite.tga")
-        );
-        assert_eq!(
-            CegRegistry::resolve_texture("hline"),
-            Some("horizontalline.tga")
-        );
-        assert_eq!(
-            CegRegistry::resolve_texture("bytelaser"),
-            Some("bytemegabeam.tga")
-        );
-        assert_eq!(
-            CegRegistry::resolve_texture("pointertrail"),
-            Some("pointershottrail.tga")
-        );
-        assert_eq!(
-            CegRegistry::resolve_texture("flowtrail"),
-            Some("flowtrail1.tga")
-        );
-    }
-
-    #[test]
-    fn resolve_texture_case_insensitive_and_trim() {
-        assert_eq!(
-            CegRegistry::resolve_texture("CIRCLE"),
-            Some("whitecircle.tga")
-        );
-        assert_eq!(
-            CegRegistry::resolve_texture("  square  "),
-            Some("solidwhite.tga")
-        );
-    }
-
-    #[test]
-    fn resolve_texture_none_and_empty_skip() {
-        assert_eq!(CegRegistry::resolve_texture("none"), None);
-        assert_eq!(CegRegistry::resolve_texture(""), None);
-        assert_eq!(CegRegistry::resolve_texture("nonsense"), None);
-    }
-
     /// Live particles and flames become one quad each in the batch of
     /// their texture's material, coloured by the colour map at their
     /// life fraction; a dead particle is despawned without a quad.
@@ -1365,7 +1223,7 @@ mod tests {
             .init_resource::<FxQuadBatches>();
 
         let texture = Handle::<Image>::default();
-        let red_to_blue = ColorMap::parse("1 0 0 1   0 0 1 0.5");
+        let red_to_blue = ColorMap(&[[1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 1.0, 0.5]]);
         let world = app.world_mut();
         let (palette, material) =
             world.resource_scope(|world, mut assets: Mut<CegRenderAssets>| {
@@ -1377,7 +1235,8 @@ mod tests {
                     assets.palette(&texture, &red_to_blue, &mut materials),
                     palette
                 );
-                let other = assets.palette(&texture, &ColorMap::parse("0 1 0 1"), &mut materials);
+                let other =
+                    assets.palette(&texture, &ColorMap(&[[0.0, 1.0, 0.0, 1.0]]), &mut materials);
                 assert_ne!(other, palette);
                 assert_eq!(
                     assets.palette_at(other).material,
@@ -1439,7 +1298,7 @@ mod tests {
     /// 6.4, ttl 64, both alphas 1) as `CGroundFlash.cpp` runs it.
     fn vbig_flash() -> CegGroundFlash {
         CegGroundFlash::new(
-            &spring_tdf::GroundFlash {
+            &GroundFlash {
                 flash_size: 96.0,
                 flash_alpha: 1.0,
                 circle_growth: 6.4,
@@ -1634,8 +1493,8 @@ mod tests {
 
     #[test]
     fn eval_with_spread_falls_back_when_spread_is_zero() {
-        let base = CegExpr::parse("10");
-        let spread = CegExpr::parse("0");
+        let base = CegExpr::Lit(10.0);
+        let spread = CegExpr::Lit(0.0);
         let mut rng = 1234u32;
         let v = eval_with_spread(&base, &spread, &mut rng, EvalCtx::default());
         assert_eq!(v, 10.0);
@@ -1648,8 +1507,8 @@ mod tests {
         // result in [100, 140). The old symmetric impl gave [80, 120]
         // instead, shaving 20% off the average and 40% off the upper
         // tail — the root of the "explosions are way too small" bug.
-        let base = CegExpr::parse("100");
-        let spread = CegExpr::parse("40");
+        let base = CegExpr::Lit(100.0);
+        let spread = CegExpr::Lit(40.0);
         let mut rng = 0xFEED_FACEu32;
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;

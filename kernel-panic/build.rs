@@ -4,8 +4,12 @@
 //! the same fixed set of files, so `map_loading::pick_map` takes the
 //! list of `.kpmap` files in `assets/maps/` from here on both (with each
 //! map's start count and intended players, for the random picks), and
-//! `units::content::defs` the text of every unit, weapon, explosion
-//! and feature definition in `assets/defs/`. The music player (`audio::music`) gets
+//! `units::content::defs` the text of every unit, weapon and feature
+//! definition in `assets/defs/`. `assets/defs/explosions/` is
+//! deliberately absent: those CEGs are source
+//! (`units::content::ceg_def`), and the files remain on disk only as
+//! that generator's input and the equivalence test's reference. The
+//! music player (`audio::music`) gets
 //! the same treatment for the `.ogg` tracks in `assets/music/` (web
 //! only: native scans the folder, so a player can drop tracks in).
 
@@ -33,7 +37,6 @@ fn main() {
     let defs = [
         ("assets/defs/units", "fbi", "UNIT_FBIS"),
         ("assets/defs/weapons", "tdf", "WEAPON_TDFS"),
-        ("assets/defs/explosions", "tdf", "EXPLOSION_TDFS"),
         ("assets/defs/features", "tdf", "FEATURE_TDFS"),
     ]
     .into_iter()

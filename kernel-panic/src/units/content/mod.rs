@@ -4,11 +4,6 @@
 //! unit bundle (`bundle`). Pure data; no systems.
 
 pub mod bundle;
-// The source CEG defs are written but not yet read: the runtime still
-// evaluates the TDF path (`weapon_fx::ceg`). This attribute is deleted
-// with the registry, one commit later (§5.3 of
-// `docs/ceg-in-source-plan.md`).
-#[allow(dead_code)]
 pub mod ceg_def;
 pub mod ceg_defs;
 pub mod cegs;

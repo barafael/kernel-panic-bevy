@@ -312,7 +312,6 @@ pub(super) fn tick_weapon_fx(
                 prev_lead_pos,
                 bolt.direction,
                 Vec3::Y,
-                &ceg_ctx.ceg_registry,
                 &mut trail.seed,
                 &mut commands,
                 &mut ceg_ctx.materials,
@@ -621,7 +620,6 @@ pub(super) fn tick_weapon_fx(
                 pos,
                 dir,
                 Vec3::Y,
-                &ceg_ctx.ceg_registry,
                 &mut proj.trail_seed,
                 &mut commands,
                 &mut ceg_ctx.materials,
@@ -984,7 +982,7 @@ fn push_trail_quads(batches: &mut FxQuadBatches, trail: &ProjectileTrail, cam_po
 
 #[cfg(test)]
 mod tests {
-    use super::super::ceg::{CegRegistry, CegRenderAssets};
+    use super::super::ceg::CegRenderAssets;
     use super::*;
     use crate::units::assets::meshes::S3OModelCache;
     use bevy::ecs::system::RunSystemOnce;
@@ -1008,8 +1006,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .init_resource::<S3OModelCache>()
-            .insert_resource(CegRegistry::load());
+            .init_resource::<S3OModelCache>();
 
         let attacker = app.world_mut().spawn_empty().id();
         // The target sits on the flight line, 100 elmos out, with a
@@ -1107,8 +1104,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .init_resource::<S3OModelCache>()
-            .insert_resource(CegRegistry::load());
+            .init_resource::<S3OModelCache>();
 
         app.world_mut().spawn((
             LaserBolt {
@@ -1159,8 +1155,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .init_resource::<S3OModelCache>()
-            .insert_resource(CegRegistry::load());
+            .init_resource::<S3OModelCache>();
 
         let attacker = app.world_mut().spawn_empty().id();
         let target = app
@@ -1250,8 +1245,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .init_resource::<S3OModelCache>()
-            .insert_resource(CegRegistry::load());
+            .init_resource::<S3OModelCache>();
 
         // Attacker on team 0 / System.
         let attacker = app.world_mut().spawn((TeamId(0), Faction::System)).id();
@@ -1413,8 +1407,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .init_resource::<S3OModelCache>()
-            .insert_resource(CegRegistry::load());
+            .init_resource::<S3OModelCache>();
 
         let attacker = app.world_mut().spawn_empty().id();
         // Target way off to the side — bolt path is along +Z so
@@ -1537,8 +1530,7 @@ mod tests {
             .init_resource::<Assets<Image>>()
             .init_resource::<CegRenderAssets>()
             .init_resource::<FxQuadBatches>()
-            .init_resource::<S3OModelCache>()
-            .insert_resource(CegRegistry::load());
+            .init_resource::<S3OModelCache>();
         app
     }
 
