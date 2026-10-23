@@ -1,8 +1,10 @@
 //! The Kernel Panic menu system, rebuilt after the original
 //! "Spring Direct Launch 2" widget (`kp_spring_direct_launch.lua`).
 //!
-//! Pages: main menu (zigzag layout, alternating left/right anchors),
-//! quick skirmish (Easy/Medium/Hard/Very Hard), advanced skirmish (map
+//! Pages: main menu (zigzag layout, alternating left/right anchors,
+//! its plates collapsible to their top-left corners by a corner
+//! `<` / `>` toggle), quick skirmish (Easy/Medium/Hard/Very Hard),
+//! advanced skirmish (map
 //! list, faction cycles, grouping, difficulty, live description line),
 //! map list, credits, scrollable readme, multiplayer (rooms and their
 //! seats, [`lobby_page`]), an in-game Esc overlay
@@ -56,6 +58,7 @@ pub struct MenuPlugin;
 impl Plugin for MenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MenuPage>()
+            .init_resource::<MenuButtonsVisible>()
             .init_resource::<EscMenuOpen>()
             .init_resource::<EscSettingsOpen>()
             .init_resource::<EscAudioOpen>()
@@ -104,6 +107,11 @@ impl Plugin for MenuPlugin {
                         .run_if(in_state(AppState::Menu).or_else(attract_recording))
                         .before(crate::rendering::camera::camera_smoothing),
                     maintain_launch_menu.run_if(in_state(AppState::Menu)),
+                    // The corner toggle animates the plates in place:
+                    // no page redraw.
+                    collapse_menu_buttons
+                        .run_if(in_state(AppState::Menu))
+                        .after(maintain_launch_menu),
                     map_preview_info
                         .run_if(in_state(AppState::Menu))
                         .after(maintain_launch_menu),
@@ -173,6 +181,18 @@ pub(crate) struct EscResignConfirm(pub(crate) bool);
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct GameOverOpen(bool);
 
+/// The main page's plates are shown: the corner `<` / `>` button
+/// collapses them onto their top-left corners and back. The map cycler
+/// and the music cluster are never affected.
+#[derive(Debug, Deref, DerefMut, Resource)]
+struct MenuButtonsVisible(bool);
+
+impl Default for MenuButtonsVisible {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
 #[derive(Debug, Default, Deref, DerefMut, Resource)]
 struct ReadmeScroll(usize);
 
@@ -222,6 +242,8 @@ pub(super) struct MenuButton {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum MenuAction {
     Goto(MenuPage),
+    /// Main page: collapse / expand the plates (the corner `<` / `>`).
+    ToggleMenuButtons,
     /// Quick skirmish with the given difficulty.
     QuickStart(u8),
     StartSkirmish,
@@ -792,13 +814,15 @@ pub(crate) fn press_back_to_room(world: &mut World) {
 }
 
 /// What the menu pages show and the buttons edit: the current page,
-/// the skirmish setup, the readme scroll and the render settings.
+/// the skirmish setup, the readme scroll, the render settings and the
+/// main page's plate collapse.
 #[derive(SystemParam)]
 struct MenuState<'w> {
     page: ResMut<'w, MenuPage>,
     config: ResMut<'w, SkirmishConfig>,
     readme_scroll: ResMut<'w, ReadmeScroll>,
     render: ResMut<'w, RenderSettings>,
+    visible: ResMut<'w, MenuButtonsVisible>,
 }
 
 /// The in-match overlays' open flags (Esc menu, its Settings page, the
@@ -916,6 +940,7 @@ fn handle_menu_actions(
         config,
         readme_scroll,
         render,
+        visible,
     } = &mut state;
     for msg in ev.read() {
         let action = msg.action;
@@ -928,6 +953,9 @@ fn handle_menu_actions(
                 }
                 **page = p;
             }
+            // Flips the flag only: [`collapse_menu_buttons`] animates
+            // the plates in place, the page is not redrawn.
+            MenuAction::ToggleMenuButtons => visible.0 = !visible.0,
             MenuAction::QuickStart(difficulty) => {
                 config.difficulty = difficulty;
                 config.grouping = Grouping::Duel;
@@ -1106,9 +1134,12 @@ fn val_percent(v: &Val) -> f32 {
 /// focus or the focused button is gone (buttons respawn on page
 /// changes), and the buttons are repainted only when the focus or the
 /// input mode changed — not every frame.
+///
+/// Fully collapsed main-page plates ([`MenuCollapse`]) are skipped:
+/// nothing to see, nothing to focus.
 fn keyboard_menu_nav(
     keys: Res<ButtonInput<KeyCode>>,
-    buttons: Query<(Entity, &MenuButton, &Node)>,
+    buttons: Query<(Entity, &MenuButton, &Node, Option<&MenuCollapse>)>,
     mut focus: ResMut<MenuFocus>,
     mut colors: Query<(Entity, &MenuButton, &mut BorderColor, &mut BackgroundColor)>,
     mut ev: MessageWriter<MenuActionMessage>,
@@ -1132,11 +1163,16 @@ fn keyboard_menu_nav(
         || keys.just_pressed(KeyCode::Space);
     let confirm = keys.just_pressed(KeyCode::Enter) || keys.just_pressed(KeyCode::Space);
 
-    let focus_live = focus.entity.is_some_and(|e| buttons.contains(e));
+    let focus_live = focus
+        .entity
+        .is_some_and(|e| buttons.get(e).is_ok_and(|(.., c)| !collapsed(c)));
     if nav_key || !focus_live {
         // Build the spatially-ordered list of buttons currently on screen.
         let mut list: Vec<(Entity, &MenuButton, f32, f32)> = Vec::new();
-        for (e, b, node) in &buttons {
+        for (e, b, node, collapse) in &buttons {
+            if collapsed(collapse) {
+                continue;
+            }
             let x = if let Val::Auto = node.left {
                 100.0 - val_percent(&node.right)
             } else {
@@ -1334,6 +1370,9 @@ struct LaunchMenuInputs<'w> {
 
 fn maintain_launch_menu(
     page: Res<MenuPage>,
+    // Read at draw time only: toggling it must not redraw the page
+    // (the plates animate in place instead).
+    visible: Res<MenuButtonsVisible>,
     mut commands: Commands,
     existing_root: Query<Entity, With<MenuRoot>>,
     windows: Query<&Window>,
@@ -1389,6 +1428,7 @@ fn maintain_launch_menu(
                 menu_size,
                 demo_map,
                 (music, music_catalog),
+                visible.0,
             )
         }
         MenuPage::QuickSkirmish => quick_skirmish_page(&mut commands, root, page_size),
@@ -1441,6 +1481,13 @@ fn maintain_launch_menu(
 /// menu, named in the bottom-right corner between small `<` / `>`
 /// buttons that cycle it through the catalog. The bottom-left corner
 /// holds the music cluster.
+///
+/// The top-left corner holds a `<` / `>` button that collapses the
+/// plates onto their top-left corners and back
+/// ([`MenuButtonsVisible`], [`collapse_menu_buttons`]); the cycler, the
+/// music cluster and the toggle itself never collapse.
+/// `buttons_visible` is the state the page is drawn in, so a redraw
+/// while collapsed stays collapsed.
 fn main_menu_page(
     commands: &mut Commands,
     root: Entity,
@@ -1448,10 +1495,24 @@ fn main_menu_page(
     menu_size: f32,
     demo_map: Option<&str>,
     music: (&MusicPlayer, &MusicCatalog),
+    buttons_visible: bool,
 ) {
     title(commands, root, title_size);
     demo_map_cycler(commands, root, menu_size * 0.5, demo_map);
     music_controls(commands, root, menu_size * 0.5, music.0, music.1);
+    // The corner toggle, same green plates as the entries, a quarter
+    // smaller so it stays out of the plates' way; its label points where
+    // a press takes the plates (collapse left, expand right).
+    let toggle = ButtonSpec::new(
+        if buttons_visible { "<" } else { ">" },
+        BUTTON_GREEN,
+        menu_size * 0.75,
+        (0.01, 0.99),
+        Anchor::Lt,
+        MenuAction::ToggleMenuButtons,
+    )
+    .spawn(commands, root);
+    commands.entity(toggle).insert(MenuToggleLabel);
     // No Quit on the web: a page has nothing to quit to.
     let mut entries: Vec<(&str, Color, MenuAction)> = vec![
         (
@@ -1492,7 +1553,95 @@ fn main_menu_page(
         } else {
             (0.54, Anchor::Lb)
         };
-        ButtonSpec::new(name, color, menu_size, (x, y), anchor, action).spawn(commands, root);
+        let button =
+            ButtonSpec::new(name, color, menu_size, (x, y), anchor, action).spawn(commands, root);
+        let (sx, sy) = anchor.shift();
+        let base = Vec2::new(sx, sy);
+        commands.entity(button).insert(MenuCollapse {
+            base,
+            t: if buttons_visible { 1.0 } else { 0.0 },
+        });
+        if !buttons_visible {
+            // Born collapsed: the animation system only writes while
+            // a plate moves, so the drawn state must be complete.
+            commands
+                .entity(button)
+                .insert(collapse_transform(base, 0.0));
+        }
+    }
+}
+
+/// A main-page plate the corner toggle collapses: the button's anchor
+/// shift in percent of its own size (which the collapse leans on) and
+/// its progress (`0` collapsed onto its top-left corner, `1` fully
+/// shown), driven by [`collapse_menu_buttons`].
+#[derive(Component)]
+struct MenuCollapse {
+    base: Vec2,
+    t: f32,
+}
+
+/// Whether a plate is fully collapsed out of sight.
+fn collapsed(collapse: Option<&MenuCollapse>) -> bool {
+    collapse.is_some_and(|c| c.t <= 0.0)
+}
+
+/// The main page's corner button; its `<` / `>` label follows
+/// [`MenuButtonsVisible`], written in place by [`collapse_menu_buttons`].
+#[derive(Component)]
+struct MenuToggleLabel;
+
+/// Seconds a full collapse / expand takes.
+const COLLAPSE_SECS: f32 = 0.25;
+
+/// The transform of a [`MenuCollapse`] plate at progress `t`: the
+/// rectangle scaled by `t` with its **top-left corner** pinned.
+/// `UiTransform` scales about the node's centre, so the anchor
+/// translation gains `-(1-t)` half sizes — as percentages of the node's
+/// own box, which is exactly what the corner needs, at any window size
+/// and scale factor.
+fn collapse_transform(base: Vec2, t: f32) -> UiTransform {
+    UiTransform {
+        translation: Val2::percent(base.x + (t - 1.0) * 50.0, base.y + (t - 1.0) * 50.0),
+        scale: Vec2::splat(t),
+        ..default()
+    }
+}
+
+/// Animate the main page's plates between shown and collapsed and keep
+/// the corner toggle's label current. Only writes while a plate is
+/// moving (or a label differs), so an idle menu does not re-run UI
+/// layout.
+fn collapse_menu_buttons(
+    time: Res<Time>,
+    visible: Res<MenuButtonsVisible>,
+    mut plates: Query<(&mut MenuCollapse, &mut UiTransform)>,
+    toggles: Query<&Children, With<MenuToggleLabel>>,
+    mut texts: Query<&mut Text>,
+) {
+    let wanted = if visible.0 { "<" } else { ">" };
+    for children in &toggles {
+        let mut texts = texts.iter_many_mut(children).matched();
+        while let Some(mut text) = texts.fetch_next() {
+            if text.0 != wanted {
+                text.0 = wanted.to_string();
+            }
+        }
+    }
+    let target = if visible.0 { 1.0 } else { 0.0 };
+    let step = time.delta_secs() / COLLAPSE_SECS;
+    for (mut plate, mut tf) in &mut plates {
+        if plate.t == target {
+            continue;
+        }
+        plate.t = if plate.t < target {
+            (plate.t + step).det_min(target)
+        } else {
+            (plate.t - step).det_max(target)
+        };
+        // Ease in and out of both ends.
+        let t = plate.t;
+        *tf = collapse_transform(plate.base, t * t * (3.0 - 2.0 * t));
     }
 }
 
@@ -3242,6 +3391,70 @@ mod tests {
     fn pause_label_shows_what_a_press_does() {
         assert_eq!(pause_label(false), "||");
         assert_eq!(pause_label(true), ">");
+    }
+
+    /// The collapse pins each plate's top-left corner while it shrinks:
+    /// the corner lands in the same spot at every progress.
+    #[test]
+    fn collapse_scales_about_the_top_left_corner() {
+        use bevy::text::{EmSize, RemSize};
+        let size = Vec2::new(240.0, 60.0);
+        let corner = |shift, t| {
+            collapse_transform(Vec2::new(shift, shift), t)
+                .compute_affine(1.0, size, Vec2::ZERO, EmSize(0.0), RemSize(0.0))
+                .transform_point2(-0.5 * size)
+        };
+        // A right-anchored plate (`rb`, -100 %) and a left-anchored one.
+        for shift in [-100.0, 0.0] {
+            let pinned = corner(shift, 1.0);
+            for t in [0.75, 0.5, 0.25, 0.0] {
+                assert_eq!(corner(shift, t), pinned, "shift {shift} at {t}");
+            }
+        }
+    }
+
+    /// The corner toggle collapses and expands the plates over
+    /// [`COLLAPSE_SECS`], and its label shows what a press does.
+    #[test]
+    fn collapse_toggle_animates_the_plates_and_the_label() {
+        let mut app = App::new();
+        app.init_resource::<Time>()
+            .insert_resource(MenuButtonsVisible(true))
+            .add_systems(Update, collapse_menu_buttons);
+        let text = app.world_mut().spawn(Text::new("<")).id();
+        app.world_mut().spawn(MenuToggleLabel).add_child(text);
+        let base = Vec2::new(-100.0, -100.0);
+        let plate = app
+            .world_mut()
+            .spawn((MenuCollapse { base, t: 1.0 }, UiTransform::default()))
+            .id();
+        let run = |app: &mut App| {
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_secs_f32(0.05));
+            app.update();
+        };
+        let frames = (COLLAPSE_SECS / 0.05) as u32 + 1;
+
+        app.world_mut().resource_mut::<MenuButtonsVisible>().0 = false;
+        for _ in 0..frames {
+            run(&mut app);
+        }
+        assert_eq!(app.world().get::<MenuCollapse>(plate).unwrap().t, 0.0);
+        let tf = *app.world().get::<UiTransform>(plate).unwrap();
+        assert_eq!(tf.scale, Vec2::ZERO);
+        assert_eq!(tf.translation, Val2::percent(-150.0, -150.0));
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, ">");
+
+        app.world_mut().resource_mut::<MenuButtonsVisible>().0 = true;
+        for _ in 0..frames {
+            run(&mut app);
+        }
+        assert_eq!(app.world().get::<MenuCollapse>(plate).unwrap().t, 1.0);
+        let tf = *app.world().get::<UiTransform>(plate).unwrap();
+        assert_eq!(tf.scale, Vec2::ONE);
+        assert_eq!(tf.translation, Val2::percent(-100.0, -100.0));
+        assert_eq!(app.world().get::<Text>(text).unwrap().0, "<");
     }
 
     /// The cluster's name text and pause label follow the player.
