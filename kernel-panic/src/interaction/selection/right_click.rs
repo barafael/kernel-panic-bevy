@@ -113,6 +113,8 @@ pub(crate) enum OrderMarker {
     Enter,
     /// A Bug's Bombard (`bug_bombard.lua`'s draw colour).
     Bombard,
+    /// A teleporter's Dispatch (`network_dispatch.lua`'s draw colour).
+    Dispatch,
 }
 
 impl OrderMarker {
@@ -126,6 +128,7 @@ impl OrderMarker {
             OrderMarker::Clear(_) => Color::srgb(0.75, 0.75, 0.75),
             OrderMarker::Enter => Color::srgb(0.5, 1.0, 0.5),
             OrderMarker::Bombard => Color::srgb(1.0, 0.5, 0.5),
+            OrderMarker::Dispatch => Color::srgb(0.5, 0.5, 1.0),
         }
     }
 
@@ -226,6 +229,7 @@ fn handle_right_click(
     mut net: Issue,
     mut drag_path: ResMut<RightDragPath>,
     mut pending: ResMut<PendingMoveIndicators>,
+    mut commands: Commands,
 ) {
     let RightClickLookups {
         windows,
@@ -303,6 +307,25 @@ fn handle_right_click(
         }
 
         let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+
+        // Only Ports selected: the default command is Dispatch
+        // (`kp_defaultcommands.lua`'s `portonly`), at the release point;
+        // with Alt until the buffer is empty.
+        if selected_q.iter().all(|(_, _, u, _)| u.0 == UnitKind::Port) {
+            let target = ground_hit(&windows, &camera_q, &mut ray_cast)
+                .unwrap_or(drag_path.points[drag_path.points.len() - 1]);
+            let alt = keys.pressed(KeyCode::AltLeft) || keys.pressed(KeyCode::AltRight);
+            crate::interaction::ability::cast_aimed_abilities(
+                selected_q.iter().map(|(e, _, u, _)| (e, u.0)),
+                target,
+                alt,
+                &mut net,
+                &mut commands,
+            );
+            pending.markers.push((target, OrderMarker::Dispatch));
+            drag_path.points.clear();
+            return;
+        }
 
         if attack_drag && drag_path.points.len() > 1 {
             // The remembered Attack resolves at the release
@@ -1010,6 +1033,53 @@ mod tests {
 
     /// Right-click on open ground moves the selection to the point
     /// under the cursor.
+    /// `kp_defaultcommands.lua`: with only Ports selected a right-click
+    /// dispatches to the point, with Alt until the buffer is empty.
+    #[test]
+    fn right_click_with_only_ports_dispatches() {
+        use crate::units::mechanics::network_buffer::DispatchOrder;
+        for alt in [false, true] {
+            let mut world = world_with_camera_and_terrain();
+            let port = world
+                .spawn((
+                    UnitType(UnitKind::Port),
+                    Selected,
+                    UnitStats {
+                        radius: 24.0,
+                        hit_radius: 30.0,
+                        mid_y: 0.0,
+                        speed: 0.0,
+                        acc_rate: 0.0,
+                        dec_rate: 0.0,
+                        turn_rate: 0.0,
+                        can_fly: false,
+                    },
+                    Transform::from_xyz(10.0, 0.0, 10.0),
+                ))
+                .id();
+            if alt {
+                world
+                    .resource_mut::<ButtonInput<KeyCode>>()
+                    .press(KeyCode::AltLeft);
+            }
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .press(MouseButton::Right);
+            world.run_system_once(handle_right_click).unwrap();
+            world.resource_mut::<ButtonInput<MouseButton>>().clear();
+            world
+                .resource_mut::<ButtonInput<MouseButton>>()
+                .release(MouseButton::Right);
+            world.run_system_once(handle_right_click).unwrap();
+            crate::net::apply_now(&mut world);
+
+            let order = *world.get::<DispatchOrder>(port).expect("dispatched");
+            assert!((order.target - Vec3::new(0.0, 0.5, 0.0)).length() < 1.0);
+            assert_eq!(order.until_empty, alt);
+            assert!(world.get::<MoveTarget>(port).is_none());
+        }
+    }
+
     #[test]
     fn world_right_click_moves_selection() {
         let mut world = world_with_camera_and_terrain();

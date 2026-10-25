@@ -179,6 +179,12 @@ pub struct PendingCursor {
 #[derive(Resource, Default)]
 pub struct CursorRequest(Option<PendingCursor>);
 
+/// The priority of the arrow over the HUD's buttons: above every order
+/// mode and placement (`CGuiHandler::SetCursorIcon` shows
+/// `cursornormal` over any input receiver but the minimap, before it
+/// looks at the armed command).
+pub const OVER_HUD: u8 = u8::MAX;
+
 impl CursorRequest {
     /// Set the cursor for this frame if the new priority is at least as high
     /// as the current one.
@@ -203,6 +209,12 @@ fn resolve_context_cursor(
 ) {
     if selected.is_empty() {
         request.set(CursorKind::Normal, 0);
+        return;
+    }
+    // Only Ports: right-click dispatches (`kp_defaultcommands.lua`), its
+    // "Unload units" cursor wherever the pointer is.
+    if selected.iter().all(|(ut, _)| ut.0 == UnitKind::Port) {
+        request.set(CursorKind::Unload, 0);
         return;
     }
 
@@ -393,6 +405,51 @@ fn apply_cursor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `kp_defaultcommands.lua`: with only Ports selected the default
+    /// command is Dispatch, whose cursor is "Unload units", over the
+    /// ground and over units alike; one other unit in the selection
+    /// and it is the usual context cursor.
+    #[test]
+    fn ports_alone_show_the_dispatch_cursor() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(UnitRegistry::load());
+        world.init_resource::<Alliances>();
+        world.init_resource::<CursorRequest>();
+        let shown = |world: &mut World| {
+            world.run_system_once(resolve_context_cursor).unwrap();
+            world
+                .resource_mut::<CursorRequest>()
+                .0
+                .take()
+                .map(|c| c.kind)
+        };
+        world.spawn((UnitType(UnitKind::Port), TeamId(0), Selected));
+        assert_eq!(shown(&mut world), Some(CursorKind::Unload));
+        world.spawn((UnitType(UnitKind::Bit), TeamId(1), Hovered));
+        assert_eq!(
+            shown(&mut world),
+            Some(CursorKind::Unload),
+            "over a unit too"
+        );
+        world.spawn((UnitType(UnitKind::Bit), TeamId(0), Selected));
+        assert_eq!(shown(&mut world), Some(CursorKind::Attack));
+    }
+
+    /// The armed gadget commands show their `cursor`.
+    #[test]
+    fn armed_abilities_show_kps_cursors() {
+        use crate::interaction::ability::Mode;
+        use crate::ui::hud::command_panel::commands::CmdId;
+        let cursor = |id| Mode::Ability(id).cursor();
+        assert_eq!(cursor(CmdId::Dispatch), CursorKind::Unload);
+        assert_eq!(cursor(CmdId::NxFlag), CursorKind::Capture);
+        assert_eq!(cursor(CmdId::Bombard), CursorKind::Capture);
+        assert_eq!(cursor(CmdId::Firewall), CursorKind::Defend);
+        assert_eq!(cursor(CmdId::Sigterm), CursorKind::Attack);
+        assert_eq!(cursor(CmdId::Infection), CursorKind::Attack);
+    }
 
     /// Every pixel becomes a `scale`-square block.
     #[test]

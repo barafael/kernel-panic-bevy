@@ -22,6 +22,7 @@
 //! right-click waypoint modes (the remake's factories have no rally
 //! orders).
 
+use crate::interaction::cursor::{CursorKind, CursorRequest, OVER_HUD};
 use crate::map_loading::MatchScopeAppExt;
 use crate::sim::DetFloat;
 use bevy::input::InputSystems;
@@ -256,11 +257,18 @@ fn bar_mouse_input(
     selected: Query<(Entity, &UnitType), With<Selected>>,
     mut out: MessageWriter<ActivateCommand>,
     mut commands: Commands,
+    cursor_request: Option<ResMut<CursorRequest>>,
 ) {
     let Some((view, cursor)) = view_and_cursor(&windows) else {
         return;
     };
     let hit = cursor.and_then(|c| hit_test(c, view, &state));
+    // The arrow over the bar (`IsAbove_` is true over its icons).
+    if hit.is_some()
+        && let Some(mut request) = cursor_request
+    {
+        request.set(CursorKind::Normal, OVER_HUD);
+    }
 
     // `IsAbove_`: hovering a homebase icon opens its options.
     if let Some(Hit::Icon(i)) = hit

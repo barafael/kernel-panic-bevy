@@ -1,23 +1,14 @@
-//! Ability hotkeys.
+//! Order modes and their map clicks.
 //!
-//! Pressing `D` with a caster selected fires that unit's "ability" at
-//! the cursor — whatever the unit kind treats as its ability:
-//! - Pointer / Obelisk / Firewall / Terminal → command-fire weapon
-//!   (NX Flag, Infection gas, etc.) routed through `CommandFireEvent`.
-//! - Byte → Launch Mines, at once and without a target ([`launch_mines`]).
-//! - Port / Connection → Dispatch packets (with ALT modifier for
-//!   "drain the buffer", mirroring upstream `network_dispatch.lua`).
-//! - Bug / Exploit → Deploy / Pack Up (the Bug ↔ Exploit morph).
-//!
-//! The other order hotkeys (Stop, Attack, Move, Fight, Patrol, Guard,
-//! Enter, self-destruct …) go through the command panel's single
-//! activation path (`ui::hud::command_panel::activation`), exactly like
-//! a click on the matching panel button. This module owns the sticky
-//! [`OrderCursorModes`] they arm and the map-click handlers that turn an
-//! armed mode into an order. The panel's ability buttons (NX Flag,
-//! SIGTERM, Dispatch …) arm [`Mode::Ability`] so the next
-//! ground click casts the aimed abilities, as `D` over that point would
-//! ([`deploy_units`] / [`cast_aimed_abilities`] are shared).
+//! Every order hotkey (Stop, Attack, Move, Fight, Patrol, Guard, Enter,
+//! self-destruct, and `D` for the abilities) goes through the command
+//! panel's single activation path (`ui::hud::command_panel::activation`),
+//! exactly like a click on the matching panel button. This module owns
+//! the sticky [`OrderCursorModes`] they arm and the map-click handlers
+//! that turn an armed mode into an order. The aimed abilities (NX Flag,
+//! Infection, SIGTERM, Firewall, Dispatch) arm [`Mode::Ability`], and
+//! the next ground click casts them there ([`cast_aimed_abilities`]);
+//! Launch Mines and Deploy run at once.
 
 use crate::map_loading::MatchScopeAppExt;
 use bevy::prelude::*;
@@ -37,10 +28,6 @@ use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
 use crate::units::teams::Alliances;
 
-fn ctrl_held(keys: &ButtonInput<KeyCode>) -> bool {
-    keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight)
-}
-
 pub struct AbilityHotkeyPlugin;
 
 impl Plugin for AbilityHotkeyPlugin {
@@ -51,8 +38,6 @@ impl Plugin for AbilityHotkeyPlugin {
             .add_systems(
                 Update,
                 (
-                    trigger_aimed_ability_on_hotkey,
-                    trigger_deploy_on_hotkey,
                     // The armed-mode click handlers run before selection and
                     // consume the press they commit, so the click never also
                     // reaches click-to-select (a plain order click used to
@@ -145,14 +130,21 @@ pub enum Mode {
 
 impl Mode {
     /// The glyph the armed mode forces.
-    fn cursor(self) -> CursorKind {
+    pub(crate) fn cursor(self) -> CursorKind {
         match self {
             Mode::Patrol => CursorKind::Patrol,
             Mode::Guard => CursorKind::Defend,
             Mode::Move => CursorKind::Move,
             Mode::Clear => CursorKind::Reclamate,
-            // `bug_bombard.lua`: `cursor = "Capture"`.
-            Mode::Ability(CmdId::Bombard) => CursorKind::Capture,
+            // The gadget commands' `cursor`: "Capture" for Bombard
+            // (`bug_bombard.lua`) and the NX Flag (`specialattack.lua`),
+            // "Unload units" for Dispatch (`network_dispatch.lua`),
+            // "Guard" for the Firewall (`network_reflectorshield.lua`);
+            // SIGTERM (`airstrike.lua`) and the Obelisk's Attack are
+            // "Attack".
+            Mode::Ability(CmdId::Bombard | CmdId::NxFlag) => CursorKind::Capture,
+            Mode::Ability(CmdId::Dispatch) => CursorKind::Unload,
+            Mode::Ability(CmdId::Firewall) => CursorKind::Defend,
             // Spring renders set-target with the attack crosshair too.
             Mode::AttackGround | Mode::AttackMove | Mode::SetTarget | Mode::Ability(_) => {
                 CursorKind::Attack
@@ -332,31 +324,14 @@ pub(crate) fn launch_mines(
     });
 }
 
-/// Deploy / pack up every Bug / Exploit in `units` — the untargeted half
-/// of the `D` ability.
-pub(crate) fn deploy_units(
-    units: impl IntoIterator<Item = (Entity, UnitKind)>,
-    net: &mut Issue,
-    commands: &mut Commands,
-) {
-    crate::audio::ack_order(commands);
-    let units = net.units(
-        units
-            .into_iter()
-            .filter(|(_, kind)| kind.deploy_pair().is_some())
-            .map(|(e, _)| e),
-    );
-    net.issue(SimCommand::Deploy { units });
-}
-
-/// Cast the aimed half of the `D` ability at `target` for every unit in
-/// `units`: command-fire casters fire (range / approach handled by
+/// Cast the aimed abilities at `target` for every unit in `units`:
+/// command-fire casters fire (range / approach handled by
 /// `process_command_fire`), teleporters dispatch.
 ///
 /// `alt_held` mirrors upstream `network_dispatch.lua`: the dispatch
-/// command stays active and re-fires every frame until the team's
-/// Packet Buffer is empty, instead of stopping after one 12-batch
-/// (`AutoDispatch`, see `net::apply`).
+/// order makes a pass on each of the teleporter's slow updates until
+/// the team's Packet Buffer is empty, instead of stopping after one
+/// (`DispatchOrder`, see `net::apply`).
 pub(crate) fn cast_aimed_abilities(
     units: impl IntoIterator<Item = (Entity, UnitKind)>,
     target: Vec3,
@@ -411,74 +386,9 @@ fn consume_click(mouse: &mut ButtonInput<MouseButton>) {
     mouse.clear_just_pressed(MouseButton::Left);
 }
 
-/// `D` deploys a selected Bug into an Exploit, packs an Exploit back
-/// into a Bug and launches a Byte's mines. Co-exists with the aimed
-/// command-fire / dispatch on the same key because the eligibility sets
-/// don't overlap.
-fn trigger_deploy_on_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    mut net: Issue,
-    mut commands: Commands,
-) {
-    if !keys.just_pressed(KeyCode::KeyD) {
-        return;
-    }
-    if ctrl_held(&keys) {
-        return;
-    }
-    deploy_units(
-        selected_q.iter().map(|(e, u)| (e, u.0)),
-        &mut net,
-        &mut commands,
-    );
-    launch_mines(
-        selected_q.iter().map(|(e, u)| (e, u.0)),
-        &mut net,
-        &mut commands,
-    );
-}
-
-/// `D` casts the selection's aimed abilities (command-fire, Dispatch)
-/// at the ground point under the cursor.
-#[allow(clippy::too_many_arguments)]
-fn trigger_aimed_ability_on_hotkey(
-    keys: Res<ButtonInput<KeyCode>>,
-    selected_q: Query<(Entity, &UnitType), With<Selected>>,
-    windows: Query<&Window>,
-    camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: PickRayCast,
-    mut modes: ResMut<OrderCursorModes>,
-    mut net: Issue,
-    mut commands: Commands,
-) {
-    if !keys.just_pressed(KeyCode::KeyD) || ctrl_held(&keys) {
-        return;
-    }
-    if !selected_q.iter().any(|(_, u)| ability_is_aimed(u.0)) {
-        return;
-    }
-    let Some(target) = ground_hit(&windows, &camera_q, &mut ray_cast) else {
-        return;
-    };
-    // Why: `D` consumes a click-to-cast the palette button armed — left
-    // armed, the next unrelated click would cast again (a second
-    // 12-packet Dispatch drains the buffer twice).
-    if matches!(modes.mode, Some(Mode::Ability(_))) {
-        modes.clear();
-    }
-    cast_aimed_abilities(
-        selected_q.iter().map(|(e, u)| (e, u.0)),
-        target,
-        alt_held(&keys),
-        &mut net,
-        &mut commands,
-    );
-}
-
-/// Click handler for [`Mode::Ability`]: the next left-click
-/// on the ground casts the selection's aimed abilities there — exactly
-/// what `D` would do with the cursor at that point. Shift stays armed.
+/// Click handler for [`Mode::Ability`] (its button, `D` or `A`): the
+/// next left-click on the ground casts the armed ability there for the
+/// selected units that have it. Shift stays armed.
 #[allow(clippy::too_many_arguments)]
 fn trigger_ability_click(
     mut mouse: ResMut<ButtonInput<MouseButton>>,
@@ -513,7 +423,12 @@ fn trigger_ability_click(
         &mut net,
         &mut commands,
     );
-    pending.markers.push((target, OrderMarker::Attack));
+    let marker = if cmd == CmdId::Dispatch {
+        OrderMarker::Dispatch
+    } else {
+        OrderMarker::Attack
+    };
+    pending.markers.push((target, marker));
     modes.committed(&keys);
     consume_click(&mut mouse);
 }

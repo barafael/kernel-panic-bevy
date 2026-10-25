@@ -408,7 +408,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
             Targeted,
             "Attack",
             "Attack: Attacks a unit or a position on the ground",
-            "d",
+            "a",
         )),
         UnitKind::Bug => {
             // Upstream's `D` arms Bombard first (`kp_hotkeys.lua` binds
@@ -434,7 +434,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
             Icon,
             "Undeploy",
             "Transform into bug",
-            "d u",
+            "u",
         )),
         UnitKind::Byte => out.push(
             CmdDesc::new(
@@ -452,7 +452,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
                 Targeted,
                 "SIGTERM",
                 "Send a signal that terminates anything in the target area.",
-                "d",
+                "a",
             )
             .with_pic(Texture::Pic("sigterm"));
             if let Some(r) = recharging {
@@ -468,7 +468,7 @@ pub(crate) fn unit_commands(unit: &UnitCmdState, capped: &[UnitKind]) -> Vec<Cmd
                 Targeted,
                 "Firewall",
                 "Protect all units in the target area with a firewall",
-                "d",
+                "a",
             );
             if let Some(r) = recharging {
                 d.name = recharge_label(r).into();

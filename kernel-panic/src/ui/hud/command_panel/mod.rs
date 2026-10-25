@@ -31,6 +31,7 @@ use bevy::window::PrimaryWindow;
 
 use crate::game_setup::AppState;
 use crate::interaction::ability::OrderCursorModes;
+use crate::interaction::cursor::{CursorKind, CursorRequest, OVER_HUD};
 use crate::interaction::selection::{Selected, SelectionSet};
 use crate::units::combat::Dying;
 use crate::units::components::{TeamId, UnitType};
@@ -184,6 +185,7 @@ fn panel_mouse_input(
     mut modes: ResMut<OrderCursorModes>,
     mut placement: ResMut<PlacementMode>,
     mut out: MessageWriter<ActivateCommand>,
+    cursor: Option<ResMut<CursorRequest>>,
 ) {
     let armed = modes.any_active() || placement.kind.is_some();
     if armed && keys.just_pressed(KeyCode::Escape) {
@@ -192,6 +194,13 @@ fn panel_mouse_input(
     }
 
     let slot = command_slot(&windows, &panel, page.0);
+    // The arrow over a button (`CGuiHandler::AboveGui`; KP's
+    // `selectThrough 1` counts the icons only, not the panel's gaps).
+    if slot.is_some()
+        && let Some(mut cursor) = cursor
+    {
+        cursor.set(CursorKind::Normal, OVER_HUD);
+    }
     for button in [MouseButton::Left, MouseButton::Right] {
         if mouse.just_pressed(button) {
             if let Some(slot) = slot {

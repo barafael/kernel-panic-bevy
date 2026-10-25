@@ -111,6 +111,9 @@ read the resulting state.
 - Right-click an enemy → units engage it (attack-move auto-target
   pickup). Units also keep the target unit selection and chase it, as
   long as it is in their field of view.
+- With only Ports selected, right-click dispatches Packets to the point
+  (Alt: until the buffer is empty) under the Unload cursor
+  (`kp_defaultcommands.lua`).
 - Shift + any command enqueues an additional command after the current
   one rather than replacing it (command queue).
 - A dashed line connects each selected unit to its current move
@@ -123,17 +126,21 @@ read the resulting state.
 - The hardware cursor changes shape based on what the cursor is over /
   what action is queued (hardware-cursor swap by order context).
 - Hotkeys (every one goes through the same command activation as a
-  click on the matching command-panel button, §4): Stop=S, Attack=A,
-  Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm and Security
+  click on the matching command-panel button, §4): Stop=S, Attack=A
+  (and, as `attack` commands, SIGTERM, Firewall and the Obelisk's
+  Attack), Move=M, Fight=F, Patrol=P, Guard=G, AutoHold=H (Worm and Security
   Hole, whose Worms inherit it), Enter=E (Packet), Clear=E
   (constructor), Undeploy=U (Exploit), `Ctrl+D` self-destruct with a
   5-second countdown (cancelled by `Stop`), set target=T and
   unset target=X (remake extras: no panel button, as in KP), `,` / `.`
   previous / next panel page, and keypad 2/4/6/8 arm the selected
   constructor's minifac (Socket / Window / Port, `kp_hotkeys.lua`).
-  `D` fires the context-sensitive ability at the cursor at once (NX
-  Flag / Infection / Protect / Mine Launch / SIGTERM on the caster,
-  Dispatch on a teleporter, Deploy / Pack Up on a Bug or Exploit).
+  `D` runs the first of NX Flag, Deploy, Launch Mines and Dispatch the
+  selection offers (`kp_hotkeys.lua` binds them in that order): NX Flag
+  and Dispatch arm, so the next map click aims them, as in Spring;
+  Deploy and Launch Mines go at once. A key runs the first enabled
+  command in the panel bound to its action
+  (`CGuiHandler::SetActiveCommand`).
   Pressing an armed command's hotkey again disarms it; Escape or a
   right-click anywhere disarms whatever command is armed, and that
   right-click issues no order. `Ctrl+A` selects every own living unit
@@ -566,12 +573,11 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 - A Bug can morph into an Exploit and back. The unit re-spawns in
   place as the new kind (mutual-morph pair, in-place re-spawn). An
   Exploit cannot move.
-- Hotkey: `D` (and `U` to undeploy). Also on the command panel as the
-  **Deploy** (Bug) / **Undeploy** (Exploit) button. The Bug ↔
-  Exploit selection never overlaps with the command-fire ability set
-  (Pointer / Obelisk / Firewall / Byte / Terminal) or the teleporter
-  set (Port / Connection), so `D` resolves unambiguously per
-  selection.
+- Hotkeys: `D` deploys (unless the selection has a Pointer, whose NX
+  Flag comes first), `U` undeploys. Also on the command panel as the
+  **Deploy** (Bug) / **Undeploy** (Exploit) button. Upstream's `D` on a
+  Bug arms Bombard (it carries `dgun`); here `D` stays Deploy and
+  Bombard is the button.
 
 ## 16. Infection chain
 
@@ -611,12 +617,14 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
 - **Debug** (mineblaster): one-shot weapon that only targets mines and
   walls (Minekiller weapon, `OnlyTargetCategory1=VOID`).
 
-## 19. Command-fire abilities (D hotkey)
+## 19. Command-fire abilities (D and A hotkeys)
 
-- `D` casts at the cursor at once; each ability also has its command
-  panel button (NX Flag, "Attack" on the Obelisk, Firewall, Launch
-  Mines, SIGTERM, Dispatch — §4), which arms it so the next map click
-  casts it for the selected units of that kind only.
+- Each ability has its command panel button (NX Flag, "Attack" on the
+  Obelisk, Firewall, Launch Mines, SIGTERM, Dispatch — §4), which arms
+  it so the next map click casts it for the selected units of that
+  kind only. `D` arms NX Flag and Dispatch and fires Launch Mines;
+  `A` arms SIGTERM, Firewall and the Obelisk's Attack (their gadgets'
+  `attack` action).
 - Weapon-backed abilities honour their weapon's TDF range: NX Flag
   1400, Infection 2000, Mine Launch 1100 elmos. A mobile caster
   (Pointer, Byte) ordered beyond range walks toward the target and
@@ -828,14 +836,16 @@ context. Most variants animate over their frames at a fixed rate
 
 | Variant | Frames | When shown |
 | --- | --- | --- |
-| **Normal** | 1 (static) | Default cursor over empty terrain or the HUD |
+| **Normal** | 1 (static) | Default cursor over empty terrain; over a command panel button or a build bar icon whatever is armed |
 | **Move** | 10 | Hovering empty ground while a movable unit is selected |
 | **Attack** | 9 | Hovering an enemy unit while an armed unit is selected |
 | **Repair** | 9 | Hovering a friendly unit while a constructor is selected |
 | **Reclamate** | 20 | Clear armed on a constructor |
-| **Capture** | 20 | Bombard armed on a Bug (`bug_bombard.lua`'s cursor) |
+| **Capture** | 20 | Bombard or the NX Flag armed (their gadgets' cursor) |
+| **Defend** | 20 | The Firewall armed (`network_reflectorshield.lua`'s "Guard") |
+| **Unload** | 8–20 | Dispatch armed, or only Ports selected (right-click dispatches) |
 | **Pickup** | 20 | Hovering one of its own teleporters while a Packet is selected (a right-click enters it) |
-| **Patrol**, **Defend**, **Revive**, **Unload** | 8–20 | Reserved sprites for Spring orders not yet wired up |
+| **Patrol**, **Revive** | 8–20 | Reserved sprites for Spring orders not yet wired up |
 
 ## 26. Window & process
 

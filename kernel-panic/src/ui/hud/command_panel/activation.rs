@@ -99,11 +99,53 @@ fn minifac_of(kind: UnitKind) -> Option<UnitKind> {
         .then(|| kind.faction().secondary_factory())
 }
 
-/// Order hotkeys → activations. `D` (cast at the cursor / deploy) stays
-/// in `interaction::ability`: it fires immediately rather than arming.
+/// The commands behind each action a key is bound to, actions in the
+/// order they are bound. `CGuiHandler::SetActiveCommand` tries them in
+/// turn and runs the first enabled command in the panel with that
+/// action. Spring binds `a` to `attack`, the action of Attack and of
+/// the gadget commands SIGTERM (`airstrike.lua`), Firewall
+/// (`network_reflectorshield.lua`) and the Obelisk's Attack;
+/// `kp_hotkeys.lua` binds `d` to `dgun` (NX Flag), `deploy`,
+/// `launchmines` and `dispatch`. Upstream's Bombard carries `dgun` too;
+/// here `D` on a Bug stays the instant Deploy and Bombard is the button.
+const KEY_ACTIONS: [(KeyCode, &[&[CmdId]]); 2] = [
+    (
+        KeyCode::KeyA,
+        &[&[
+            CmdId::Attack,
+            CmdId::Sigterm,
+            CmdId::Firewall,
+            CmdId::Infection,
+        ]],
+    ),
+    (
+        KeyCode::KeyD,
+        &[
+            &[CmdId::NxFlag],
+            &[CmdId::Deploy],
+            &[CmdId::LaunchMines],
+            &[CmdId::Dispatch],
+        ],
+    ),
+];
+
+/// The command `key` runs for the selection on `panel`
+/// ([`KEY_ACTIONS`]).
+fn key_command(panel: &PanelCommands, actions: &[&[CmdId]]) -> Option<CmdId> {
+    actions.iter().find_map(|ids| {
+        panel
+            .list
+            .iter()
+            .find(|d| !d.disabled && ids.contains(&d.id))
+            .map(|d| d.id)
+    })
+}
+
+/// Order hotkeys → activations.
 pub(super) fn order_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     selected: Query<&UnitType, With<Selected>>,
+    panel: Res<PanelCommands>,
     mut out: MessageWriter<ActivateCommand>,
 ) {
     let ctrl = keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]);
@@ -118,9 +160,8 @@ pub(super) fn order_hotkeys(
     }
     // `E` is both Enter (Packets) and Clear (constructors), as Spring's
     // `reclaim` and KP's `enter` share it; a selection offers one.
-    const BINDINGS: [(KeyCode, CmdId); 14] = [
+    const BINDINGS: [(KeyCode, CmdId); 13] = [
         (KeyCode::KeyS, CmdId::Stop),
-        (KeyCode::KeyA, CmdId::Attack),
         (KeyCode::KeyF, CmdId::Fight),
         (KeyCode::KeyG, CmdId::Guard),
         (KeyCode::KeyM, CmdId::Move),
@@ -136,6 +177,13 @@ pub(super) fn order_hotkeys(
     ];
     for (key, id) in BINDINGS {
         if keys.just_pressed(key) {
+            send(id);
+        }
+    }
+    for (key, actions) in KEY_ACTIONS {
+        if keys.just_pressed(key)
+            && let Some(id) = key_command(&panel, actions)
+        {
             send(id);
         }
     }
@@ -443,6 +491,82 @@ mod tests {
         assert_eq!(
             world.get::<Producer>(kernel).unwrap().current_production(),
             Some(UnitKind::Pointer)
+        );
+    }
+
+    /// The command a key runs for these units' panel.
+    fn key_runs(units: &[UnitKind], key: KeyCode) -> Option<CmdId> {
+        let mut world = world();
+        let states: Vec<UnitCmdState> = units
+            .iter()
+            .map(|&kind| UnitCmdState {
+                kind: Some(kind),
+                ..Default::default()
+            })
+            .collect();
+        offer(&mut world, &states);
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(key);
+        world.insert_resource(keys);
+        world.run_system_once(order_hotkeys).unwrap();
+        let sent: Vec<ActivateCommand> = world
+            .resource_mut::<Messages<ActivateCommand>>()
+            .drain()
+            .collect();
+        assert!(sent.len() <= 1, "{sent:?}");
+        sent.first().map(|m| m.id)
+    }
+
+    /// `SetActiveCommand` per bound action, in binding order: `A` is
+    /// `attack` (Attack, SIGTERM, Firewall, the Obelisk's Attack); `D`
+    /// is `dgun` (NX Flag), `deploy`, `launchmines`, then `dispatch`;
+    /// the first enabled command in the panel wins. An Exploit's
+    /// Undeploy is `U` only.
+    #[test]
+    fn keys_run_the_first_command_with_their_action() {
+        use UnitKind::*;
+        assert_eq!(key_runs(&[Terminal], KeyCode::KeyA), Some(CmdId::Sigterm));
+        assert_eq!(key_runs(&[Firewall], KeyCode::KeyA), Some(CmdId::Firewall));
+        assert_eq!(key_runs(&[Obelisk], KeyCode::KeyA), Some(CmdId::Infection));
+        assert_eq!(
+            key_runs(&[Bit, Terminal], KeyCode::KeyA),
+            Some(CmdId::Attack),
+            "Attack comes first in the panel"
+        );
+        assert_eq!(key_runs(&[Port], KeyCode::KeyD), Some(CmdId::Dispatch));
+        assert_eq!(key_runs(&[Pointer], KeyCode::KeyD), Some(CmdId::NxFlag));
+        assert_eq!(
+            key_runs(&[Port, Pointer], KeyCode::KeyD),
+            Some(CmdId::NxFlag),
+            "dgun is bound before dispatch"
+        );
+        assert_eq!(key_runs(&[Bug, Port], KeyCode::KeyD), Some(CmdId::Deploy));
+        assert_eq!(key_runs(&[Byte], KeyCode::KeyD), Some(CmdId::LaunchMines));
+        assert_eq!(key_runs(&[Exploit], KeyCode::KeyD), None);
+        assert_eq!(key_runs(&[Exploit], KeyCode::KeyU), Some(CmdId::Undeploy));
+    }
+
+    /// `D` arms Dispatch (a map command) instead of dispatching: the
+    /// click supplies the target.
+    #[test]
+    fn dispatch_from_a_key_arms() {
+        let mut world = world();
+        offer(
+            &mut world,
+            &[UnitCmdState {
+                kind: Some(UnitKind::Port),
+                ..Default::default()
+            }],
+        );
+        world.spawn((UnitType(UnitKind::Port), Selected));
+        send(
+            &mut world,
+            ActivateCommand::key(CmdId::Dispatch, &ButtonInput::default()),
+        );
+        assert!(
+            world
+                .resource::<OrderCursorModes>()
+                .is(Mode::Ability(CmdId::Dispatch))
         );
     }
 
