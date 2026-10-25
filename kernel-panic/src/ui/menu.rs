@@ -804,12 +804,19 @@ struct MenuActionMessage {
     action: MenuAction,
 }
 
-/// Tests: press "Back to room" (the Esc overlay's plate in a networked
-/// match).
-#[cfg(test)]
+/// Press "Back to room" (the Esc overlay's plate in a networked match):
+/// the tests, the bot's `room`.
 pub(crate) fn press_back_to_room(world: &mut World) {
     world.write_message(MenuActionMessage {
         action: MenuAction::BackToRoom,
+    });
+}
+
+/// Press "Menu" (the Esc overlay's): the bot's `menu`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn press_go_to_menu(world: &mut World) {
+    world.write_message(MenuActionMessage {
+        action: MenuAction::GoToMenu,
     });
 }
 

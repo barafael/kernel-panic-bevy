@@ -16,8 +16,8 @@
 //! Everything goes through [`LobbyAction`]s, as the page's clicks do
 //! (the map directly: the page only steps through the catalog). One
 //! step per [`STEP`], so a guest's request reaches the host and the
-//! room comes back before the next. The match starts once; back in the
-//! room afterwards, the page is the player's again.
+//! room comes back before the next. Back in the room after a match
+//! (the bot's `room`), a room full and ready again starts a rematch.
 //!
 //! Not compiled for wasm (no environment).
 //!
@@ -46,7 +46,6 @@ impl Plugin for AutopilotPlugin {
             map: var("KP_AUTO_MAP"),
             cheats: var("KP_AUTO_CHEATS").is_some_and(|v| v != "0"),
             step: Timer::new(STEP, TimerMode::Repeating),
-            started: false,
         })
         .add_systems(
             Update,
@@ -63,7 +62,6 @@ struct Autopilot {
     map: Option<String>,
     cheats: bool,
     step: Timer,
-    started: bool,
 }
 
 fn autopilot(
@@ -72,7 +70,7 @@ fn autopilot(
     mut lobby: ResMut<LobbyRoom>,
     mut actions: MessageWriter<LobbyAction>,
 ) {
-    if auto.started || !auto.step.tick(time.delta()).just_finished() {
+    if !auto.step.tick(time.delta()).just_finished() {
         return;
     }
     let Some(l) = lobby.lobby.as_mut() else {
@@ -124,7 +122,6 @@ fn autopilot(
         None => {
             info!("autopilot: starting with {seated} players on {}", room.map);
             actions.write(LobbyAction::Start);
-            auto.started = true;
         }
         Some(why) => debug!("autopilot: not yet: {why}"),
     }

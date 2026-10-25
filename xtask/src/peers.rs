@@ -29,13 +29,41 @@ pub struct Peers {
     stop: Arc<AtomicBool>,
     /// Log lines that fail a check: a desync, a panic.
     fatal: Arc<Mutex<Vec<String>>>,
+    verbose: bool,
+    /// `--rejoin`: a game that closes while another plays comes back.
+    rejoin: bool,
 }
 
 struct Peer {
     name: String,
     dir: PathBuf,
+    /// How it starts, every time.
+    command: Command,
+    log: Arc<Mutex<fs::File>>,
     child: Child,
     exited: Option<std::process::ExitStatus>,
+}
+
+impl Peer {
+    /// Start the game, its output going to its log.
+    fn start(
+        command: &mut Command,
+        name: &str,
+        log: &Arc<Mutex<fs::File>>,
+        fatal: &Arc<Mutex<Vec<String>>>,
+        verbose: bool,
+    ) -> Result<Child, String> {
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("{:?}: {e}", command.get_program()))?;
+        let out = child.stdout.take().expect("piped");
+        let err = child.stderr.take().expect("piped");
+        for stream in [Box::new(out) as Box<dyn Read + Send>, Box::new(err)] {
+            let (name, log, fatal) = (name.to_string(), log.clone(), fatal.clone());
+            std::thread::spawn(move || pump(&name, stream, &log, &fatal, verbose));
+        }
+        Ok(child)
+    }
 }
 
 impl Peers {
@@ -83,6 +111,8 @@ impl Peers {
                 .env("KP_SIGNALING", &server.url)
                 .env("KP_ICE", "none")
                 .env("KP_NAME", &name)
+                // The same player each launch: `--rejoin` gets the seat back.
+                .env("KP_PLAYER_KEY", format!("7e57b0c5{:08x}", i + 1))
                 .env("KP_BOT", dir.join("bot"))
                 .env("XDG_CONFIG_HOME", dir.join("config"))
                 .env("KP_WINDOW", format!("{}x{}", o.size.0, o.size.1))
@@ -104,23 +134,16 @@ impl Peers {
                 }
             }
             die_with_parent(&mut command);
-            let mut child = command
-                .spawn()
-                .map_err(|e| format!("{}: {e}", exe.display()))?;
             let log = fs::File::create(dir.join("game.log"))
                 .map_err(|e| format!("{}: {e}", dir.display()))?;
             let log = Arc::new(Mutex::new(log));
-            let out = child.stdout.take().expect("piped");
-            let err = child.stderr.take().expect("piped");
-            for stream in [Box::new(out) as Box<dyn Read + Send>, Box::new(err)] {
-                let (name, log, fatal, verbose) =
-                    (name.clone(), log.clone(), fatal.clone(), o.verbose);
-                std::thread::spawn(move || pump(&name, stream, &log, &fatal, verbose));
-            }
+            let child = Peer::start(&mut command, &name, &log, &fatal, o.verbose)?;
             println!("testbox: {name} started ({})", dir.display());
             peers.push(Peer {
                 name,
                 dir,
+                command,
+                log,
                 child,
                 exited: None,
             });
@@ -130,6 +153,8 @@ impl Peers {
             _server: server,
             stop,
             fatal,
+            verbose: o.verbose,
+            rejoin: o.rejoin,
         })
     }
 
@@ -142,7 +167,32 @@ impl Peers {
                 return;
             }
             self.reap();
+            if self.rejoin {
+                self.relaunch();
+            }
             std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// `--rejoin`: start the games that closed again, while another one
+    /// plays (the room is still there), with fresh bot commands.
+    fn relaunch(&mut self) {
+        if self.peers.iter().all(|p| p.exited.is_some()) {
+            return;
+        }
+        for p in self.peers.iter_mut().filter(|p| p.exited.is_some()) {
+            // The bot reads `cmd` from the start: the old commands go.
+            if let Err(why) = write(&p.dir.join("bot/cmd"), "") {
+                eprintln!("testbox: {why}");
+            }
+            match Peer::start(&mut p.command, &p.name, &p.log, &self.fatal, self.verbose) {
+                Ok(child) => {
+                    println!("testbox: {} rejoins", p.name);
+                    p.child = child;
+                    p.exited = None;
+                }
+                Err(why) => eprintln!("testbox: {} cannot rejoin: {why}", p.name),
+            }
         }
     }
 

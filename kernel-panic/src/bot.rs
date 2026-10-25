@@ -27,10 +27,16 @@
 //!   normal death path, blast and all).
 //! - `cam <x> <z> [distance]` — snap the camera onto that ground point.
 //! - `shot <name>` — screenshot to `<dir>/<name>.png`.
-//! - `speed <factor>`, `pause`, `resume` — the game clock. A paused
-//!   match runs no tick, so while it is paused the first `resume`
-//!   among the commands is taken out of turn (each frame, as the Pause
-//!   key is); the others wait for the ticks.
+//! - `speed <factor>`, `pause`, `resume` — the game clock.
+//! - `room` — "Back to room" (a networked match: resign, back to the
+//!   lobby with the same connection); `menu` — leave to the main menu.
+//!
+//! When no tick runs — a paused match, one that ended (the host left),
+//! the menu after `room` — the first `resume`, `quit`, `room` or `menu`
+//! among the commands is taken out of turn, as a key or button press
+//! would be (`room` and `menu` once the bot has played a match: before,
+//! their buttons are not on screen); the others wait for the ticks. The frame count starts over
+//! with each match the bot plays (the log's `team <n>` marks it).
 //! - `resign` — give up (the bot's owner leaves play: with an ally in
 //!   play its units wait for a take, else they blow up within 4 s).
 //! - `take <owner>` — the TAKE button: every remaining unit of `owner`,
@@ -88,10 +94,10 @@ use crate::rendering::camera::{RtsCamera, RtsCameraState};
 use crate::sim::{DetFloat, GAME_SPEED};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::Dying;
-use crate::units::player::LocalTeam;
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::player::LocalTeam;
 
 /// Frames of menu before starting the skirmish (the map catalog must
 /// be scanned first).
@@ -133,9 +139,12 @@ impl Plugin for BotPlugin {
             // Networked: the bot commands its own seat only.
             god: crate::net::lobby::launch_room().is_some(),
             team: 0,
+            seen_frame: 0,
+            stalled_for: 0,
+            played: false,
         })
         .init_resource::<DevSpawned>()
-        .add_systems(Update, (bot_boot, bot_paused.run_if(own_match)))
+        .add_systems(Update, (bot_boot, bot_stalled))
         .add_systems(
             FixedUpdate,
             (
@@ -180,6 +189,12 @@ struct Bot {
     god: bool,
     /// The local player's team (`LocalTeam`), as of this tick.
     team: u8,
+    /// `bot.frame` at the last `Update`, and how many `Update`s since
+    /// it moved: a stalled match ([`bot_stalled`]).
+    seen_frame: u64,
+    stalled_for: u32,
+    /// A tick of the bot's own match ran.
+    played: bool,
 }
 
 impl Bot {
@@ -357,11 +372,18 @@ fn bot_tick(
     mut camera: Query<&mut RtsCameraState, With<RtsCamera>>,
     mut exit: MessageWriter<AppExit>,
     local: Option<Res<LocalTeam>>,
+    active: Res<ActiveMatch>,
 ) {
     let Some(hm) = heightmap.as_deref() else {
         return;
     };
+    if active.is_changed() {
+        // A new match (a rematch from the room): count from its start.
+        bot.frame = 0;
+        bot.wait_until = 0;
+    }
     bot.frame += 1;
+    bot.played = true;
     bot.team = local.map_or(0, |t| t.0);
     if bot.frame == 1 {
         bot.log(&format!("team {}", bot.team));
@@ -699,30 +721,68 @@ fn bot_tick(
                 let token = it.next().unwrap_or("");
                 bot.log(&format!("ack {token}"));
             }
-            "quit" => {
-                bot.log("quit");
-                exit.write(AppExit::Success);
-            }
+            "quit" | "room" | "menu" => press(&bot, cmd, &mut commands, &mut exit),
             _ => bot.log(&format!("unknown command: {line}")),
         }
     }
 }
 
-/// While the match is paused (no tick runs `bot_tick`): the first
-/// `resume` among the commands unpauses, as the Pause key would.
-fn bot_paused(
+/// `Update`s without a tick before the bot counts its match as stalled
+/// (half a second at 60 fps; a paused match is at once).
+const STALLED: u32 = 30;
+
+/// When no tick runs `bot_tick` (paused, ended, in the menu): the first
+/// `resume`, `quit`, `room` or `menu` among the commands, out of turn.
+fn bot_stalled(
     mut bot: ResMut<Bot>,
     control: Option<Res<crate::net::MatchControl>>,
+    state: Res<State<AppState>>,
     mut bus: ResMut<CommandBus>,
+    mut commands: Commands,
+    mut exit: MessageWriter<AppExit>,
 ) {
-    if !control.is_some_and(|c| c.paused) {
+    if !bot.started {
+        return;
+    }
+    if bot.frame != bot.seen_frame {
+        bot.seen_frame = bot.frame;
+        bot.stalled_for = 0;
+    } else {
+        bot.stalled_for = bot.stalled_for.saturating_add(1);
+    }
+    let paused = *state.get() == AppState::InGame && control.is_some_and(|c| c.paused);
+    if !paused && bot.stalled_for < STALLED {
         return;
     }
     bot.read_new_commands();
-    if let Some(i) = bot.pending.iter().position(|l| l == "resume") {
-        bot.pending.remove(i);
+    let played = bot.played;
+    let Some(i) = bot.pending.iter().position(|l| match l.as_str() {
+        "resume" => paused,
+        "quit" => true,
+        "room" | "menu" => played,
+        _ => false,
+    }) else {
+        return;
+    };
+    let line = bot.pending.remove(i).expect("found above");
+    if line == "resume" {
         bus.issue(SimCommand::Pause { on: false });
         bot.log("resume");
+    } else {
+        press(&bot, &line, &mut commands, &mut exit);
+    }
+}
+
+/// `quit`, `room`, `menu`: what the window's close button and the Esc
+/// overlay's plates do.
+fn press(bot: &Bot, cmd: &str, commands: &mut Commands, exit: &mut MessageWriter<AppExit>) {
+    bot.log(cmd);
+    match cmd {
+        "quit" => {
+            exit.write(AppExit::Success);
+        }
+        "room" => commands.queue(crate::ui::menu::press_back_to_room),
+        _ => commands.queue(crate::ui::menu::press_go_to_menu),
     }
 }
 

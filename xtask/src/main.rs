@@ -37,6 +37,8 @@ OPTIONS (up, test):
     --room <code>         the room code [default: testbox]
     --size <W>x<H>        each window's size [default: 960x600]
     --manual              no autopilot: seat, ready and start by hand
+    --rejoin              up: a game that closes while another plays starts again as the
+                          same player (`send 2 quit` leaves, and it comes back)
     --sound               leave peer1's sound on (all games are muted otherwise)
     -v, --verbose         echo every log line, not only warnings, errors and the lobby's
     --secs <S>            test: how long the match must run [default: 30]
@@ -72,6 +74,7 @@ pub struct Opts {
     pub room: String,
     pub size: (u32, u32),
     pub manual: bool,
+    pub rejoin: bool,
     pub sound: bool,
     pub verbose: bool,
     pub secs: u64,
@@ -87,6 +90,7 @@ impl Opts {
             room: "testbox".into(),
             size: (960, 600),
             manual: false,
+            rejoin: false,
             sound: false,
             verbose: false,
             secs: 30,
@@ -111,6 +115,7 @@ impl Opts {
                         .ok_or("--size: <W>x<H>, at least 320x240")?;
                 }
                 "--manual" => o.manual = true,
+                "--rejoin" => o.rejoin = true,
                 "--sound" => o.sound = true,
                 "-v" | "--verbose" => o.verbose = true,
                 "--secs" => o.secs = value()?.parse().map_err(|_| "--secs: a number")?,
