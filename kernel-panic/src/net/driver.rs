@@ -564,8 +564,9 @@ pub struct NextNetMatch {
     pub door: Option<super::rejoin::Door>,
 }
 
-/// Where desync dumps go (native). Default: `desync-dumps/` in the
-/// project root (next to the executable in a release package).
+/// Where desync dumps go (native). Default: `KP_DUMP_DIR`, else
+/// `desync-dumps/` in the project root (next to the executable in a
+/// release package).
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Resource, Clone, Debug)]
 pub struct DumpDir(pub std::path::PathBuf);
@@ -718,6 +719,7 @@ fn write_dump(world: &World, name: &str, text: &str) -> String {
     let dir = world
         .get_resource::<DumpDir>()
         .map(|d| d.0.clone())
+        .or_else(|| std::env::var_os("KP_DUMP_DIR").map(Into::into))
         .unwrap_or_else(|| crate::paths::project_root().join("desync-dumps"));
     let path = dir.join(name);
     match std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, text)) {

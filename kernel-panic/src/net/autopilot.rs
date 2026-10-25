@@ -9,9 +9,10 @@
 //! match once that many players sit and nothing blocks the start
 //! ([`Lobby::start_blocker`]). Every game gets the variable: who hosts
 //! is only known once the room is up. The host also applies
-//! `KP_AUTO_MAP=<stem>` (the room's map) and `KP_AUTO_CHEATS=1` (cheats
+//! `KP_AUTO_MAP=<stem>` (the room's map), `KP_AUTO_CHEATS=1` (cheats
 //! on, so the bot's `spawn` / `kill` / `hp` work with several human
-//! seats).
+//! seats) and `KP_AUTO_AI=<n>` (`<n>` more seats, for AIs: the last open
+//! seats, so the players' stay first).
 //!
 //! Everything goes through [`LobbyAction`]s, as the page's clicks do
 //! (the map directly: the page only steps through the catalog). One
@@ -45,6 +46,7 @@ impl Plugin for AutopilotPlugin {
             players,
             map: var("KP_AUTO_MAP"),
             cheats: var("KP_AUTO_CHEATS").is_some_and(|v| v != "0"),
+            ai: var("KP_AUTO_AI").and_then(|n| n.parse().ok()).unwrap_or(0),
             step: Timer::new(STEP, TimerMode::Repeating),
         })
         .add_systems(
@@ -61,6 +63,8 @@ struct Autopilot {
     players: usize,
     map: Option<String>,
     cheats: bool,
+    /// AI seats the host adds.
+    ai: usize,
     step: Timer,
 }
 
@@ -106,16 +110,21 @@ fn autopilot(
         actions.write(LobbyAction::Cheats(true));
         return;
     }
-    if room.seats.len() < auto.players {
+    if room.seats.len() < auto.players + auto.ai {
         actions.write(LobbyAction::AddSeat);
         return;
     }
-    let seated = room
-        .seats
-        .iter()
-        .filter(|s| matches!(s.who, Occupant::Human(_)))
-        .count();
-    if seated < auto.players {
+    let count = |who: fn(&Occupant) -> bool| room.seats.iter().filter(|s| who(&s.who)).count();
+    let ais = count(|o| *o == Occupant::Ai);
+    if ais < auto.ai
+        && let Some(seat) = room.seats.iter().rposition(|s| s.who == Occupant::Open)
+    {
+        // The host's click on an open seat makes it an AI.
+        actions.write(LobbyAction::Occupant(seat as u8));
+        return;
+    }
+    let seated = count(|o| matches!(o, Occupant::Human(_)));
+    if seated < auto.players || ais < auto.ai {
         return;
     }
     match l.start_blocker() {

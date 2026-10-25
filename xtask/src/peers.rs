@@ -115,6 +115,8 @@ impl Peers {
                 .env("KP_PLAYER_KEY", format!("7e57b0c5{:08x}", i + 1))
                 .env("KP_BOT", dir.join("bot"))
                 .env("XDG_CONFIG_HOME", dir.join("config"))
+                .env("KP_REPLAY_DIR", dir.join("replays"))
+                .env("KP_DUMP_DIR", dir.join("desync-dumps"))
                 .env("KP_WINDOW", format!("{}x{}", o.size.0, o.size.1))
                 .env(
                     "KP_WINDOW_POS",
@@ -131,6 +133,9 @@ impl Peers {
                 }
                 if o.cheats {
                     command.env("KP_AUTO_CHEATS", "1");
+                }
+                if o.ai > 0 {
+                    command.env("KP_AUTO_AI", o.ai.to_string());
                 }
             }
             die_with_parent(&mut command);

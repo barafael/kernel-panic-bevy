@@ -404,10 +404,14 @@ fn file_name(replay: &Replay) -> String {
 }
 
 /// Where native replays go: `replays/` in the project root (next to the
-/// executable in a release package, as `desync-dumps/`).
+/// executable in a release package, as `desync-dumps/`), or
+/// `KP_REPLAY_DIR` (`cargo testbox` keeps each game's in its directory).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn replay_dir() -> std::path::PathBuf {
-    crate::paths::project_root().join("replays")
+    std::env::var_os("KP_REPLAY_DIR").map_or_else(
+        || crate::paths::project_root().join("replays"),
+        std::path::PathBuf::from,
+    )
 }
 
 /// Native: where [`finish_match`] saves (`None`: nowhere — the headless

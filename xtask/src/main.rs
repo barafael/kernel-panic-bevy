@@ -4,7 +4,8 @@
 //! over host candidates only. Nothing leaves the machine.
 //!
 //! Each game gets a directory `target/testbox/peer<n>/`: its log
-//! (`game.log`), its settings (`config/`, as `XDG_CONFIG_HOME`) and its
+//! (`game.log`), its settings (`config/`, as `XDG_CONFIG_HOME`), its
+//! replays (`replays/`) and desync dumps (`desync-dumps/`), and its
 //! file-driven bot (`bot/`, `KP_BOT`: `cmd` in, `log` and `state.txt`
 //! out; the command list is in `kernel-panic/src/bot.rs`). The lobby's
 //! autopilot (`KP_AUTO_START`, `kernel-panic/src/net/autopilot.rs`)
@@ -33,6 +34,7 @@ OPTIONS (up, test):
     -n, --peers <N>       games in the room [default: 2]
     --release             build and run the release profile
     --map <stem>          the room's map [default: the host's random pick; test: Data_Cache_L1]
+    --ai <N>              N AI seats besides the players [default: 0]
     --cheats              cheats on in the room (the bot's spawn, kill, hp)
     --room <code>         the room code [default: testbox]
     --size <W>x<H>        each window's size [default: 960x600]
@@ -71,6 +73,7 @@ pub struct Opts {
     pub release: bool,
     pub map: Option<String>,
     pub cheats: bool,
+    pub ai: usize,
     pub room: String,
     pub size: (u32, u32),
     pub manual: bool,
@@ -87,6 +90,7 @@ impl Opts {
             release: false,
             map: None,
             cheats: false,
+            ai: 0,
             room: "testbox".into(),
             size: (960, 600),
             manual: false,
@@ -105,6 +109,7 @@ impl Opts {
                 "--release" => o.release = true,
                 "--map" => o.map = Some(value()?.clone()),
                 "--cheats" => o.cheats = true,
+                "--ai" => o.ai = value()?.parse().map_err(|_| "--ai: a number")?,
                 "--room" => o.room = value()?.clone(),
                 "--size" => {
                     let v = value()?;
@@ -122,8 +127,8 @@ impl Opts {
                 _ => return Err(format!("unknown option {a:?}\n\n{USAGE}")),
             }
         }
-        if !(2..=8).contains(&o.peers) {
-            return Err("--peers: 2 to 8 (a match seats at most 8)".into());
+        if !(2..=8).contains(&o.peers) || o.peers + o.ai > 8 {
+            return Err("--peers 2 to 8, with --ai: a match seats at most 8".into());
         }
         Ok(o)
     }
