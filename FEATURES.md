@@ -103,8 +103,9 @@ read the resulting state.
   order does not clear the selection.
 - Hovered units brighten on hover (material-tint hover highlight); the
   highlight clears as soon as the cursor leaves the unit.
-- Selected units brighten more strongly to mark the selection
-  (material-tint selection highlight).
+- Selected units glow in their health colour, green through yellow to
+  red: the model drawn a second time over itself, additively (KP's
+  `gui_hilight_selectedunits.lua`; its 3 px outline is not drawn).
 - Right-click empty ground → units walk there (move order); right-drag
   draws a line the selection lines up along (formation move).
 - Right-click an enemy → units engage it (attack-move auto-target
@@ -712,7 +713,7 @@ moved back into the Buffer by entering a teleporter.
   face the camera, and shrink to nothing (camera-billboarded sprite
   particles, oldskool_build CEG approximation).
 - Faction colors are consistent across health bars, particles, and
-  unit highlights: System = green, Hacker = red, Network = blue.
+  the hover highlight: System = green, Hacker = red, Network = blue.
 
 ## 22. Game state
 
