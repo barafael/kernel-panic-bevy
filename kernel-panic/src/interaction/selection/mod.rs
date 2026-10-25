@@ -6,6 +6,7 @@ mod core;
 mod groups;
 mod health_bars;
 pub(crate) mod highlight;
+mod home;
 pub(crate) mod right_click;
 
 use bevy::prelude::*;
@@ -22,6 +23,7 @@ pub(crate) use self::right_click::{OrderMarker, PendingMoveIndicators};
 
 use self::core::SelectionCorePlugin;
 use self::groups::UnitGroupsPlugin;
+use self::home::HomeCameraPlugin;
 use health_bars::HealthBarsPlugin;
 use highlight::HighlightPlugin;
 use right_click::RightClickPlugin;
@@ -33,6 +35,7 @@ impl Plugin for SelectionPlugin {
         app.add_plugins((
             SelectionCorePlugin,
             UnitGroupsPlugin,
+            HomeCameraPlugin,
             RightClickPlugin,
             HighlightPlugin,
             HealthBarsPlugin,
