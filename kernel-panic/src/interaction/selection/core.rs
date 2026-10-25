@@ -526,7 +526,7 @@ pub(super) fn resolve_unit_hit(
     })
 }
 
-pub(super) fn cursor_ray(
+pub(crate) fn cursor_ray(
     windows: &Query<&Window>,
     camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
 ) -> Option<Ray3d> {
@@ -546,25 +546,6 @@ pub(crate) fn ground_hit(
 ) -> Option<Vec3> {
     let ray = cursor_ray(windows, camera_q)?;
     ray_cast.cast(ray).first().map(|(_, hit)| hit.point)
-}
-
-/// Like [`ground_hit`], but only meshes passing `filter` are considered.
-/// Used by the placement ghost, which must hit terrain only — an
-/// unfiltered cast would hit the ghost's own (translucent) mesh sitting
-/// exactly on the cursor ray, freezing the preview at its spawn point
-/// instead of following the cursor.
-pub(crate) fn ground_hit_filtered(
-    windows: &Query<&Window>,
-    camera_q: &Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    ray_cast: &mut MeshRayCast,
-    filter: impl Fn(Entity) -> bool,
-) -> Option<Vec3> {
-    let ray = cursor_ray(windows, camera_q)?;
-    let settings = MeshRayCastSettings::default().with_filter(&filter);
-    ray_cast
-        .cast_ray(ray, &settings)
-        .first()
-        .map(|(_, hit)| hit.point)
 }
 
 /// Cast a ray from the cursor and resolve the first *unit* it lands on

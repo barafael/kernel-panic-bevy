@@ -30,12 +30,10 @@
 //! building keeps the constructor selected.
 
 use crate::map_loading::MatchScopeAppExt;
-use bevy::picking::mesh_picking::ray_cast::MeshRayCast;
 use bevy::prelude::*;
 
 use crate::interaction::movement::{CommandQueue, QueuedCommand};
-use crate::interaction::selection::{Selected, ground_hit_filtered};
-use crate::map_loading::TerrainChunkMarker;
+use crate::interaction::selection::{Selected, cursor_ray};
 use crate::rendering::camera::RtsCamera;
 use crate::sim::SQUARE_SIZE;
 use crate::terrain::geovent::{GeoventSmoker, VentClaim};
@@ -421,8 +419,6 @@ fn plan_sites(
     keys: Res<ButtonInput<KeyCode>>,
     windows: Query<&Window>,
     camera_q: Query<(&Camera, &GlobalTransform), With<RtsCamera>>,
-    mut ray_cast: MeshRayCast,
-    terrain: Query<(), With<TerrainChunkMarker>>,
     vents: Query<(&GeoventSmoker, Has<VentClaim>)>,
     own_orders: Query<(Option<&PendingBuild>, Option<&CommandQueue>), With<Selected>>,
     structures: Query<(&UnitType, &Transform), Without<Dying>>,
@@ -438,10 +434,14 @@ fn plan_sites(
         state.need_shift = false;
         return;
     };
-    // Terrain-only cast: the ghosts hover on the cursor ray and an
-    // unfiltered cast would hit them and freeze the preview.
-    let terrain_only = |e: Entity| terrain.contains(e);
-    let Some(cursor) = ground_hit_filtered(&windows, &camera_q, &mut ray_cast, terrain_only) else {
+    // The cursor's ray against the heightmap, the surface the terrain
+    // meshes draw: terrain only (the ghosts hover on the cursor ray, and
+    // a cast that hit them froze the preview), and no mesh ray-cast over
+    // the chunks every frame a build is armed.
+    let cursor = cursor_ray(&windows, &camera_q)
+        .zip(heightmap.as_deref())
+        .and_then(|(ray, hm)| hm.ray_hit(ray));
+    let Some(cursor) = cursor else {
         state.sites.clear();
         return;
     };
@@ -1117,22 +1117,22 @@ mod tests {
         world.run_system_once(disarm_without_builders).unwrap();
         assert_eq!(world.resource::<PlacementMode>().kind, None);
     }
-    /// A headless camera over a flat terrain slab, the cursor in the
+    /// The middle of [`cursor_world`]'s map, where the cursor's ray
+    /// meets the ground.
+    const MID: Vec3 = Vec3::new(256.0, 0.0, 256.0);
+
+    /// A headless camera over a flat 512-elmo map, the cursor in the
     /// middle of a 100×100 viewport, looking down at 45° so the ray meets
-    /// the ground at the origin — and a ghost parked on that ray.
+    /// the ground at [`MID`] — and a ghost parked on that ray.
     fn cursor_world() -> World {
-        use bevy::camera::primitives::Aabb;
-        use bevy::camera::visibility::SetViewVisibility;
         use bevy::camera::{ComputedCameraValues, RenderTargetInfo, Viewport};
-        use bevy::math::{DVec2, Vec3A};
-        // `cast_ray` culls candidates with `par_iter`.
-        bevy::tasks::ComputeTaskPool::get_or_init(bevy::tasks::TaskPool::new);
+        use bevy::math::DVec2;
         let mut world = world();
-        world.init_resource::<Assets<Mesh>>();
         world.insert_resource(UnitRegistry::empty());
+        world.insert_resource(Heightmap::from_raw(vec![0.0; 65 * 65], 65, 65));
 
         // 100×100 viewport, cursor dead centre, camera looking down at
-        // 45° → the ray reaches the ground at the origin.
+        // 45° → the ray reaches the ground at `MID`.
         let mut window = Window::default();
         window.set_physical_cursor_position(Some(DVec2::new(50.0, 50.0)));
         world.spawn(window);
@@ -1156,40 +1156,15 @@ mod tests {
                 ..default()
             },
             GlobalTransform::from(
-                Transform::from_xyz(0.0, 100.0, 100.0).looking_at(Vec3::ZERO, Vec3::Y),
+                Transform::from_translation(MID + Vec3::new(0.0, 100.0, 100.0))
+                    .looking_at(MID, Vec3::Y),
             ),
         ));
-        let solid = |world: &mut World, size: Vec3, at: Vec3, terrain: bool| {
-            let mesh = world
-                .resource_mut::<Assets<Mesh>>()
-                .add(Mesh::from(Cuboid::from_size(size)));
-            let mut e = world.spawn((
-                Mesh3d(mesh),
-                Transform::from_translation(at),
-                GlobalTransform::from_translation(at),
-                InheritedVisibility::VISIBLE,
-                ViewVisibility::default(),
-                Aabb {
-                    center: Vec3A::ZERO,
-                    half_extents: Vec3A::from(size / 2.0),
-                },
-            ));
-            if terrain {
-                e.insert(TerrainChunkMarker);
-            } else {
-                e.insert(GhostMarker);
-            }
-            let id = e.id();
-            world.get_mut::<ViewVisibility>(id).unwrap().set_visible();
-        };
-        solid(&mut world, Vec3::new(400.0, 1.0, 400.0), Vec3::ZERO, true);
         // A ghost parked on the cursor ray halfway to the ground.
-        solid(
-            &mut world,
-            Vec3::splat(4.0),
-            Vec3::new(0.0, 50.0, 50.0),
-            false,
-        );
+        world.spawn((
+            GhostMarker,
+            Transform::from_translation(MID + Vec3::new(0.0, 50.0, 50.0)),
+        ));
         world
     }
 
@@ -1206,7 +1181,7 @@ mod tests {
         let sites = &world.resource::<PlacementState>().sites;
         assert_eq!(sites.len(), 1);
         assert!(
-            sites[0].pos.xz().length() < 1.0,
+            sites[0].pos.xz().distance(MID.xz()) < 1.0,
             "the site sits on the terrain under the cursor, not under the ghost: {sites:?}",
         );
         assert!(sites[0].valid, "free flat ground is a valid Bad Block site");
@@ -1218,7 +1193,10 @@ mod tests {
     #[test]
     fn shift_clicks_queue_one_build_after_another() {
         let mut world = cursor_world();
-        let vents = [Vec3::new(0.0, 0.5, 0.0), Vec3::new(120.0, 0.5, 0.0)];
+        let vents = [
+            MID + Vec3::new(0.0, 0.5, 0.0),
+            MID + Vec3::new(120.0, 0.5, 0.0),
+        ];
         for pos in vents {
             world.spawn(GeoventSmoker {
                 facing: 0,
@@ -1248,8 +1226,8 @@ mod tests {
         let aim = |world: &mut World, at: Vec3| {
             let mut q = world.query_filtered::<&mut GlobalTransform, With<RtsCamera>>();
             *q.single_mut(world).unwrap() = GlobalTransform::from(
-                Transform::from_xyz(at.x, 100.0, 100.0)
-                    .looking_at(Vec3::new(at.x, 0.0, 0.0), Vec3::Y),
+                Transform::from_xyz(at.x, 100.0, at.z + 100.0)
+                    .looking_at(Vec3::new(at.x, 0.0, at.z), Vec3::Y),
             );
         };
         for &vent in &vents {
@@ -1300,7 +1278,7 @@ mod tests {
         {
             let mut state = world.resource_mut::<PlacementState>();
             state.press_owned = true;
-            state.anchor = Some(Vec3::new(-96.0, 0.0, 0.0));
+            state.anchor = Some(MID - Vec3::new(96.0, 0.0, 0.0));
         }
         {
             let mut mouse = world.resource_mut::<ButtonInput<MouseButton>>();
