@@ -1,10 +1,12 @@
 //! In-game HUD: the Spring-style command panel, Kernel Panic's build bar,
 //! the bottom-left tooltip box, building placement, the datavent
-//! highlight shown while placing, the pause / speed line, the TAKE
+//! highlight shown while placing, the Network's buffer line, the pause /
+//! speed line, the TAKE
 //! button, the automatic tip dispenser, in a networked match the player list and network banner,
 //! and the replay viewer's bar. [`widgets`] holds the scaffolding the
 //! immediate-mode widgets share.
 
+mod buffer_line;
 mod build_bar;
 pub(crate) mod command_panel;
 mod geo_highlight;
@@ -28,6 +30,7 @@ impl Plugin for HudPlugin {
             previews::PreviewsPlugin,
             command_panel::CommandPanelPlugin,
             build_bar::BuildBarPlugin,
+            buffer_line::BufferLinePlugin,
             tooltip::TooltipPlugin,
             placement::PlacementPlugin,
             geo_highlight::GeoHighlightPlugin,

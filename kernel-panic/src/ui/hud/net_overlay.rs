@@ -1,7 +1,9 @@
 //! The network overlay of a networked match, from the driver's
 //! [`NetStatus`] (never the sim):
 //!
-//! - **Player list**, top right: seat, ally / enemy / spectator, name,
+//! - **Player list**, bottom right, where KP's AdvPlayersList sits
+//!   (`gui_advplayerslist.lua`: `bottomEdge = 0`, flush right; it turns
+//!   the engine's top-right list off): seat, ally / enemy / spectator, name,
 //!   sim load, round trip to the host — Spring's player roster
 //!   (`Game/UI/PlayerRosterDrawer.cpp`: "Num, User name, CPU, Ping",
 //!   `A` / `E` / `S` prefixes, the CPU coloured green → red up to 75 %
@@ -383,8 +385,8 @@ fn show_player_list(
             PlayerList,
             Node {
                 position_type: PositionType::Absolute,
-                top: Val::Px(40.0),
-                right: Val::Px(12.0),
+                bottom: Val::Px(0.0),
+                right: Val::Px(0.0),
                 flex_direction: FlexDirection::Column,
                 padding: UiRect::all(Val::Px(6.0)),
                 ..default()

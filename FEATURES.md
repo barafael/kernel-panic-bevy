@@ -247,11 +247,18 @@ read the resulting state.
   - otherwise: "One unit selected" / "N units selected" and the unit
     under the cursor (or the last selected unit): name, description,
     health, speed, and a friendly teleporter's buffered packets.
+- **Network buffer line** (`network_buffer.lua`'s `DrawScreen`): while
+  the team has buffered Packets or owns a Port, "Buffer fill state: N"
+  near the top, centred at three quarters of the width ("MAXED" in pink
+  once buffer and units reach the unit limit), and under it "Select a
+  Port or Connection and use the Dispatch command to use these
+  packets." Not for spectators.
 - **Top-left minimap**: shows the ground texture as a tiny overview,
   the camera viewport as an outlined rectangle (frustum outline), and
   dots for friendly and enemy units coloured by faction (green /
   red / blue). Gated on the fog-of-war `Spotted` marker — unspotted
-  enemies stay off the minimap too.
+  enemies stay off the minimap too. Drawn under the command panel,
+  whose top row reaches over it in a short window.
 
 ## 5. Movement
 
@@ -922,8 +929,9 @@ context. Most variants animate over their frames at a fixed rate
   every peer. In a networked match the Esc menu offers "Back to room" instead
   of Restart (resign, leave the match, back to its room; the Menu buttons
   resign and leave the room too), the result panel has "Back to room" where
-  Restart was, a player list at the top right
-  shows seat, ally / enemy, name and ping (F9 hides it), and a banner says
+  Restart was, a player list at the bottom right (where KP's
+  AdvPlayersList sits) shows seat, ally / enemy, name and ping (F9
+  hides it), and a banner says
   who left, who it is waiting for, a desync, or why the match ended.
 - Rejoining and watching (`net-experiments/m3-turn-log.md`): a player whose
   connection broke or whose page reloaded opens the room again (the web page's

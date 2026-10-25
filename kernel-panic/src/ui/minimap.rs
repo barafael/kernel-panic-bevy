@@ -143,6 +143,11 @@ pub fn setup_minimap(
         BorderColor::all(PANEL_BORDER),
         BackgroundColor(Color::BLACK),
         ImageNode::new(image_handle.clone()),
+        // Behind the HUD widgets (`hud_root`'s -1): where the command
+        // panel reaches up over it in a short window, the buttons are on
+        // top, as Spring draws its `CGuiHandler` (a FRONT input receiver)
+        // after the `CMiniMap` (BACK).
+        GlobalZIndex(-2),
     ));
 
     commands.insert_resource(MinimapState {
