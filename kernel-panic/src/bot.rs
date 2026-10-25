@@ -27,9 +27,10 @@
 //!   normal death path, blast and all).
 //! - `cam <x> <z> [distance]` — snap the camera onto that ground point.
 //! - `shot <name>` — screenshot to `<dir>/<name>.png`.
-//! - `speed <factor>`, `pause`, `resume` — the game clock (a paused
-//!   match runs no tick, so no `resume` is read until something
-//!   else unpauses: the Pause key).
+//! - `speed <factor>`, `pause`, `resume` — the game clock. A paused
+//!   match runs no tick, so while it is paused the first `resume`
+//!   among the commands is taken out of turn (each frame, as the Pause
+//!   key is); the others wait for the ticks.
 //! - `resign` — give up (the bot's owner leaves play: with an ally in
 //!   play its units wait for a take, else they blow up within 4 s).
 //! - `take <owner>` — the TAKE button: every remaining unit of `owner`,
@@ -134,7 +135,7 @@ impl Plugin for BotPlugin {
             team: 0,
         })
         .init_resource::<DevSpawned>()
-        .add_systems(Update, bot_boot)
+        .add_systems(Update, (bot_boot, bot_paused.run_if(own_match)))
         .add_systems(
             FixedUpdate,
             (
@@ -548,8 +549,14 @@ fn bot_tick(
                     });
                 }
             }
-            "pause" => bus.issue(SimCommand::Pause { on: true }),
-            "resume" => bus.issue(SimCommand::Pause { on: false }),
+            "pause" => {
+                bus.issue(SimCommand::Pause { on: true });
+                bot.log("pause");
+            }
+            "resume" => {
+                bus.issue(SimCommand::Pause { on: false });
+                bot.log("resume");
+            }
             "resign" => bus.issue(SimCommand::Resign),
             "take" => match it.next().and_then(|v| v.parse::<u8>().ok()) {
                 Some(from) => bus.issue(SimCommand::Take { from }),
@@ -698,6 +705,24 @@ fn bot_tick(
             }
             _ => bot.log(&format!("unknown command: {line}")),
         }
+    }
+}
+
+/// While the match is paused (no tick runs `bot_tick`): the first
+/// `resume` among the commands unpauses, as the Pause key would.
+fn bot_paused(
+    mut bot: ResMut<Bot>,
+    control: Option<Res<crate::net::MatchControl>>,
+    mut bus: ResMut<CommandBus>,
+) {
+    if !control.is_some_and(|c| c.paused) {
+        return;
+    }
+    bot.read_new_commands();
+    if let Some(i) = bot.pending.iter().position(|l| l == "resume") {
+        bot.pending.remove(i);
+        bus.issue(SimCommand::Pause { on: false });
+        bot.log("resume");
     }
 }
 

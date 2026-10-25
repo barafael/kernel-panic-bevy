@@ -103,6 +103,7 @@ impl Peers {
                     command.env("KP_AUTO_CHEATS", "1");
                 }
             }
+            die_with_parent(&mut command);
             let mut child = command
                 .spawn()
                 .map_err(|e| format!("{}: {e}", exe.display()))?;
@@ -255,6 +256,25 @@ impl Drop for Peers {
         }
     }
 }
+
+/// Linux: the game gets SIGTERM when the testbox dies, however it dies
+/// (`timeout`, a closed terminal), instead of playing on alone.
+#[cfg(target_os = "linux")]
+fn die_with_parent(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: prctl is async-signal-safe and touches no memory of ours.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn die_with_parent(_command: &mut Command) {}
 
 /// The game's binary, built for `release` or the dev profile.
 fn build(release: bool) -> Result<PathBuf, String> {

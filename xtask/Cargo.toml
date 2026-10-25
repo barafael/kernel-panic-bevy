@@ -8,3 +8,7 @@ publish = false
 [dependencies]
 kp-signaling = { path = "../kp-signaling" }
 ctrlc = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# PR_SET_PDEATHSIG: the games die with the testbox.
+libc = "0.2"
