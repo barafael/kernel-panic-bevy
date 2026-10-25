@@ -3,22 +3,27 @@
 //! Ports don't spawn Packets directly. Instead each finished Port adds
 //! one to a shared per-team counter every `PORT_TICK_INTERVAL`; the player
 //! dispatches stored packets from any teleporter (Port or Connection)
-//! by hotkey. Packets near a friendly teleporter can return to the
-//! buffer, giving Network players mobile spawn points.
+//! ([`DispatchOrder`]). Packets near a friendly teleporter can return to
+//! the buffer, giving Network players mobile spawn points.
 //!
 //! Mirrors upstream `LuaRules/Gadgets/network_buffer.lua` (and the
 //! dispatch / enter companion gadgets).
 
-use bevy::math::ops;
 use std::collections::BTreeMap;
 
 use bevy::prelude::*;
 
-use crate::sim::{DetFloat, GAME_SPEED, frames_to_secs};
+use crate::interaction::movement::{MoveTarget, NavGridSet};
+use crate::net::NetId;
+use crate::sim::{
+    DetFloat, GAME_SPEED, Heading, SQUARE_SIZE, SimTick, frames_to_secs, slow_update_due,
+};
 use crate::units::combat::{Armored, Dying};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
-use crate::units::lifecycle::spawning::Emerging;
+use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::lifecycle::bookkeeping::TeamUnitCounts;
+use crate::units::lifecycle::spawning::{Emerging, SpawnContext, spawn_unit_facing};
 
 /// Seconds between per-Port buffer increments. network_buffer.lua
 /// re-arms a Port `delayFrames=164` after each packet but only checks
@@ -29,6 +34,33 @@ const PORT_TICK_INTERVAL: f32 = frames_to_secs(168.0);
 /// Max packets that can spawn in a single Dispatch — matches upstream's
 /// 12-slot offset list.
 pub const DISPATCH_MAX: usize = 12;
+
+/// The spots of a dispatch pass, `network_dispatch.lua`'s `offsetList`:
+/// `(x, z)` in [`DISPATCH_SPOT_STEP`]s from the teleporter — a square
+/// ring on a 7×7 grid, clockwise from the north-west corner — and the
+/// facing (`0` south … `3` west) a Packet takes there, away from the
+/// teleporter.
+const DISPATCH_SPOTS: [(i8, i8, u8); DISPATCH_MAX] = [
+    (-3, -3, 2),
+    (-1, -3, 2),
+    (1, -3, 2),
+    (3, -3, 1),
+    (3, -1, 1),
+    (3, 1, 1),
+    (3, 3, 0),
+    (1, 3, 0),
+    (-1, 3, 0),
+    (-3, 3, 3),
+    (-3, 1, 3),
+    (-3, -1, 3),
+];
+
+/// Elmos per step of [`DISPATCH_SPOTS`] (`offsetList[…]*16`).
+const DISPATCH_SPOT_STEP: f32 = 16.0;
+
+/// network_buffer.lua clamps every team's buffer to the room under its
+/// unit limit on the frames it pays the Ports (`(t + 1) % 8`).
+const BUFFER_CAP_PERIOD: u64 = 8;
 
 /// Seconds a freshly-spawned Packet must wait before it can re-enter
 /// the buffer via the Enter command. Upstream `stunTime=180` frames.
@@ -103,10 +135,6 @@ pub fn tick_enter_orders(
     }
 }
 
-/// Dispatch spawns Packets in a ring around the teleporter at this
-/// radius, matching the upstream offset pattern of ~48 elmos.
-pub const DISPATCH_RING_RADIUS: f32 = 48.0;
-
 /// Shared across-team packet counters. A team's Ports tick into it;
 /// dispatch drains it; Packets re-entering top it back up.
 #[derive(Resource, Default)]
@@ -152,23 +180,19 @@ pub struct PacketSpawnStun {
     pub remaining: f32,
 }
 
-/// Event: dispatch packets from the given teleporter toward `target`.
-#[derive(Message, Debug, Clone, Copy)]
-pub struct DispatchEvent {
-    pub teleporter: Entity,
-    pub target: Vec3,
-}
-
-/// Marker on a teleporter that's mid-drain: an ALT-modified Dispatch
-/// keeps re-firing the 12-Packet batch every frame until the team's
-/// Packet Buffer is empty, mirroring upstream `network_dispatch.lua`'s
-/// `not opts.alt or bufferSize[team]==0` continuation rule. The
-/// component is removed as soon as the buffer reaches zero, the
-/// teleporter dies, or the player issues another order.
-#[derive(Component, Clone, Copy, Debug)]
+/// A teleporter's Dispatch order (`CMD_DISPATCH` in its queue). The
+/// gadget runs it from `CommandFallback`, which the engine calls on the
+/// unit's slow updates: each pass puts a buffered Packet on every free
+/// one of [`DISPATCH_SPOTS`] and sends it walking to `target`. The order
+/// ends after its first pass, or with Alt once the buffer is empty
+/// (`return true, not opts.alt or bufferSize[team]==0`), and goes with
+/// any order that replaces it (it is part of the unit's active order).
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
 #[component(storage = "SparseSet")]
-pub struct AutoDispatch {
+pub struct DispatchOrder {
     pub target: Vec3,
+    /// Alt: dispatch until the buffer is empty.
+    pub until_empty: bool,
 }
 
 /// Event: send the given Packet into the nearest friendly teleporter's
@@ -214,72 +238,87 @@ pub fn tick_spawn_stun(
     }
 }
 
-/// Each frame, re-issue a `DispatchEvent` for every teleporter still
-/// flagged `AutoDispatch`, then drop the marker if the team's Packet
-/// Buffer is empty. Mirrors the upstream `CommandFallback` continuation
-/// rule (`not opts.alt or bufferSize[team]==0`) — the dispatch order
-/// stays "active" until the buffer drains, peeling 12 Packets per
-/// frame off the top.
-pub fn tick_auto_dispatch(
-    auto_q: Query<(Entity, &TeamId, &AutoDispatch, &crate::net::NetId), Without<Dying>>,
-    buffer: Res<PacketBuffer>,
-    mut ev: MessageWriter<DispatchEvent>,
-    mut commands: Commands,
+/// network_buffer.lua's clamp, every [`BUFFER_CAP_PERIOD`] frames
+/// after the Ports are paid: a team's buffer never holds more Packets
+/// than its unit limit has room for (`math.min(bufferSize[team],
+/// MaxUnits - Spring.GetTeamUnitCount(team))`).
+pub fn cap_packet_buffers(
+    tick: Res<SimTick>,
+    counts: Res<TeamUnitCounts>,
+    mut buffer: ResMut<PacketBuffer>,
 ) {
-    // Unit-id order: teleporters of one team share its buffer, and the
-    // first dispatch takes what is there (`sim`).
-    for (entity, team, auto, _) in auto_q.iter().sort::<&crate::net::NetId>() {
-        if buffer.peek(team.0) == 0 {
-            commands.entity(entity).remove::<AutoDispatch>();
-            continue;
-        }
-        ev.write(DispatchEvent {
-            teleporter: entity,
-            target: auto.target,
-        });
+    if !(tick.frame() + 1).is_multiple_of(BUFFER_CAP_PERIOD) {
+        return;
+    }
+    for (team, packets) in &mut buffer.0 {
+        let room = counts.limit(*team).saturating_sub(counts.get(*team));
+        *packets = (*packets).min(room);
     }
 }
 
-/// Drain `DispatchEvent`s, consuming packets from the team
-/// buffer and requesting spawns from the teleporter's position. Each
-/// dispatched packet gets a MoveTarget toward the event's `target`.
-pub fn process_dispatch(
-    mut events: MessageReader<DispatchEvent>,
-    teleporters: Query<(&UnitType, &TeamId, &Faction, &Transform)>,
+/// Run the [`DispatchOrder`]s due a slow update this frame: one pass
+/// each (`CommandFallback`'s `while index < 12 and bufferSize[team] > 0`).
+/// A spot that is taken costs nothing; each free one gets a Packet,
+/// spawned facing out and sent to the order's target (the gadget's
+/// `CMD.MOVE`), spawn-stunned and briefly ARMORED (packet.bos
+/// `Spawned()`). Unit-id order: one team's teleporters share its buffer.
+#[allow(clippy::type_complexity)]
+pub fn tick_dispatch_orders(
+    tick: Res<SimTick>,
+    orders: Query<
+        (
+            Entity,
+            &NetId,
+            &UnitType,
+            &TeamId,
+            &Faction,
+            &Transform,
+            &DispatchOrder,
+        ),
+        Without<Dying>,
+    >,
+    ground_units: Query<(&UnitType, &Transform), Without<Dying>>,
+    nav: Option<Res<NavGridSet>>,
     mut buffer: ResMut<PacketBuffer>,
-    mut ctx: crate::units::lifecycle::spawning::SpawnContext,
+    mut ctx: SpawnContext,
 ) {
-    for event in events.read() {
-        let Ok((unit, team, faction, transform)) = teleporters.get(event.teleporter) else {
-            continue;
-        };
-        if !unit.0.is_teleporter() {
-            continue;
-        }
-
-        let available = buffer.take(team.0, DISPATCH_MAX as u32) as usize;
-        if available == 0 {
+    let frame = tick.frame();
+    let mut blockers = None;
+    for (entity, id, kind, team, faction, tf, order) in orders.iter().sort::<&NetId>() {
+        if !slow_update_due(frame, id.0) {
             continue;
         }
-
-        let origin = transform.translation;
-        for i in 0..available {
-            let angle = (i as f32 / DISPATCH_MAX as f32) * std::f32::consts::TAU;
-            let spawn_pos = origin
-                + Vec3::new(
-                    ops::cos(angle) * DISPATCH_RING_RADIUS,
-                    0.0,
-                    ops::sin(angle) * DISPATCH_RING_RADIUS,
-                );
-            let spawned = crate::units::lifecycle::spawning::spawn_unit(
+        if !kind.0.is_teleporter() {
+            ctx.commands.entity(entity).remove::<DispatchOrder>();
+            continue;
+        }
+        // The ground units' blocked squares, once a frame.
+        let blockers =
+            blockers.get_or_insert_with(|| ground_blockers(&ground_units, &ctx.unit_registry));
+        let slope_cap = ctx.unit_registry.max_slope_ratio(UnitKind::Packet);
+        let origin = tf.translation;
+        for &(dx, dz, facing) in &DISPATCH_SPOTS {
+            if buffer.peek(team.0) == 0 {
+                break;
+            }
+            let spot = Vec2::new(
+                origin.x + f32::from(dx) * DISPATCH_SPOT_STEP,
+                origin.z + f32::from(dz) * DISPATCH_SPOT_STEP,
+            );
+            if !dispatch_spot_free(spot, nav.as_deref(), slope_cap, blockers) {
+                continue;
+            }
+            buffer.take(team.0, 1);
+            let packet = spawn_unit_facing(
                 UnitKind::Packet,
                 *faction,
                 team.0,
-                spawn_pos,
+                Vec3::new(spot.x, origin.y, spot.y),
+                Heading::from_facing(facing),
                 &mut ctx,
             );
-            ctx.commands.entity(spawned).insert((
-                crate::interaction::movement::MoveTarget(event.target),
+            ctx.commands.entity(packet).insert((
+                MoveTarget(order.target),
                 PacketSpawnStun {
                     remaining: SPAWN_STUN_SECONDS,
                 },
@@ -288,7 +327,73 @@ pub fn process_dispatch(
                 },
             ));
         }
+        if !order.until_empty || buffer.peek(team.0) == 0 {
+            ctx.commands.entity(entity).remove::<DispatchOrder>();
+        }
     }
+}
+
+/// The heightmap squares each ground unit blocks, as half-open
+/// rectangles: its footprint (`xsize` × `zsize` squares, twice the FBI
+/// footprint) from `CSolidObject::GetMapPos`, `(int(pos + SQUARE_SIZE /
+/// 2) / SQUARE_SIZE) - size / 2`. Buildings are on the structure layer;
+/// Flows fly.
+fn ground_blockers(
+    units: &Query<(&UnitType, &Transform), Without<Dying>>,
+    registry: &UnitRegistry,
+) -> Vec<IRect> {
+    units
+        .iter()
+        .filter(|(kind, _)| registry.speed(kind.0) > 0.0 && kind.0 != UnitKind::Flow)
+        .map(|(kind, tf)| {
+            let size = (registry.footprint_elmos(kind.0) / SQUARE_SIZE).as_ivec2();
+            let corner = IVec2::new(
+                (tf.translation.x + SQUARE_SIZE / 2.0) as i32 / SQUARE_SIZE as i32,
+                (tf.translation.z + SQUARE_SIZE / 2.0) as i32 / SQUARE_SIZE as i32,
+            ) - size / 2;
+            IRect::from_corners(corner, corner + size)
+        })
+        .collect()
+}
+
+/// `network_dispatch.lua`'s test of a spot: nothing on the ground
+/// within 8 elmos (`GetGroundBlocked(tx-8, tz-8, tx+8, tz+8)`: no unit,
+/// structure or feature on those squares) and ground a Packet can stand
+/// on (`TestBuildOrder(packet) == 2`; `slope_cap` is the Packet's).
+fn dispatch_spot_free(
+    spot: Vec2,
+    nav: Option<&NavGridSet>,
+    slope_cap: f32,
+    blockers: &[IRect],
+) -> bool {
+    if spot.x < 0.0 || spot.y < 0.0 {
+        return false;
+    }
+    // The squares from `int((t-8) / 8)` to `int((t+8) / 8)`, half-open.
+    let half = SQUARE_SIZE;
+    let squares = IRect::new(
+        ((spot.x - half).det_max(0.0) / SQUARE_SIZE) as i32,
+        ((spot.y - half).det_max(0.0) / SQUARE_SIZE) as i32,
+        ((spot.x + half) / SQUARE_SIZE) as i32 + 1,
+        ((spot.y + half) / SQUARE_SIZE) as i32 + 1,
+    );
+    if blockers.iter().any(|b| !b.intersect(squares).is_empty()) {
+        return false;
+    }
+    let Some(nav) = nav else {
+        return true;
+    };
+    // No crush strength: a Bad Block blocks the spot as well.
+    let structure = (squares.min.y..squares.max.y)
+        .any(|z| (squares.min.x..squares.max.x).any(|x| nav.structure_square(x, z, 0.0)));
+    if structure {
+        return false;
+    }
+    nav.bucket(slope_cap).is_some_and(|b| {
+        b.speed_map
+            .get((spot.x / SQUARE_SIZE) as u32, (spot.y / SQUARE_SIZE) as u32)
+            > 0.0
+    })
 }
 
 /// Drain `EnterEvent`s — absorb Packets that are close to a
@@ -479,6 +584,64 @@ mod tests {
         assert_eq!(step(&mut app, 0.1), 1, "first packet on completion");
         assert_eq!(step(&mut app, 5.0), 1);
         assert_eq!(step(&mut app, 0.6), 2, "then every 5.6 s");
+    }
+
+    /// network_buffer.lua clamps each team's buffer to the room under its
+    /// unit limit, on its 8th frames only.
+    #[test]
+    fn the_buffer_never_outgrows_the_unit_limit() {
+        use crate::units::lifecycle::bookkeeping::{MAX_UNITS_PER_TEAM, track_added_units};
+        let mut world = World::new();
+        world.init_resource::<TeamUnitCounts>();
+        let mut buffer = PacketBuffer::default();
+        buffer.add(0, 50);
+        buffer.add(1, 50);
+        world.insert_resource(buffer);
+        for _ in 0..MAX_UNITS_PER_TEAM - 20 {
+            world.spawn((UnitType(UnitKind::Packet), TeamId(0)));
+        }
+        world.run_system_once(track_added_units).unwrap();
+        world.insert_resource(SimTick(5));
+        world.run_system_once(cap_packet_buffers).unwrap();
+        assert_eq!(
+            world.resource::<PacketBuffer>().get(0),
+            50,
+            "every 8th frame"
+        );
+        world.insert_resource(SimTick(7));
+        world.run_system_once(cap_packet_buffers).unwrap();
+        assert_eq!(world.resource::<PacketBuffer>().get(0), 20);
+        assert_eq!(world.resource::<PacketBuffer>().get(1), 50, "per team");
+    }
+
+    /// `GetGroundBlocked(tx-8, tz-8, tx+8, tz+8)`: a ground unit whose
+    /// footprint squares touch the spot's blocks it; off the map, or with
+    /// the unit a square further, the spot is free (no nav grid here).
+    #[test]
+    fn a_spot_is_taken_by_a_footprint_on_its_squares() {
+        // A 2×2 footprint from square (x, z) (a Packet at x = 100: 12).
+        let at = |x: i32, z: i32| IRect::from_corners(IVec2::new(x, z), IVec2::new(x + 2, z + 2));
+        // The spot (100, 100) covers squares 11..=13.
+        assert!(!dispatch_spot_free(
+            Vec2::splat(100.0),
+            None,
+            0.0,
+            &[at(12, 12)]
+        ));
+        assert!(!dispatch_spot_free(
+            Vec2::splat(100.0),
+            None,
+            0.0,
+            &[at(10, 10)]
+        ));
+        assert!(dispatch_spot_free(
+            Vec2::splat(100.0),
+            None,
+            0.0,
+            &[at(14, 12)]
+        ));
+        assert!(dispatch_spot_free(Vec2::splat(100.0), None, 0.0, &[]));
+        assert!(!dispatch_spot_free(Vec2::new(-4.0, 100.0), None, 0.0, &[]));
     }
 
     #[test]

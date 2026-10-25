@@ -77,12 +77,18 @@ use super::state::Fnv;
 /// update, kept when the stun lifts).
 /// 17 (2026-10-25): an AI with no enemy left razes itself only while it
 /// has more than one unit (upstream `SuicideIfAlone`).
+/// 18 (2026-10-26): Dispatch is `network_dispatch.lua`'s: an order run on
+/// the teleporter's slow updates, one pass over its 12 grid spots each
+/// (a taken spot skipped and paid nothing, the Packets facing out), with
+/// Alt a pass per slow update until the buffer is empty; it replaces the
+/// teleporter's orders. The buffer is clamped to the room under the unit
+/// limit every 8th frame (`network_buffer.lua`).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 17;
+pub const SIM_VERSION: u32 = 18;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

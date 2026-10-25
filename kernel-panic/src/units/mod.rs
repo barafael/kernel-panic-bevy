@@ -114,7 +114,6 @@ impl Plugin for UnitsPlugin {
             .init_match_resource::<crate::game_setup::GameOverDismissed>()
             .add_message::<command_fire::CommandFireEvent>()
             .add_message::<deploy::DeployEvent>()
-            .add_message::<network_buffer::DispatchEvent>()
             .add_message::<network_buffer::EnterEvent>()
             .init_resource::<cloak::FogEnabled>()
             .init_resource::<animation::DeathParticleAssets>()
@@ -194,11 +193,14 @@ impl Plugin for UnitsPlugin {
                         // same tick.
                         deploy::tick_bombard,
                         deploy::process_deploy,
-                        network_buffer::tick_port_buffers,
+                        (
+                            network_buffer::tick_port_buffers,
+                            network_buffer::cap_packet_buffers,
+                        )
+                            .chain(),
                         network_buffer::tick_spawn_stun,
                         network_buffer::tick_flow_speed,
-                        network_buffer::tick_auto_dispatch,
-                        network_buffer::process_dispatch,
+                        network_buffer::tick_dispatch_orders,
                         network_buffer::tick_enter_orders,
                         network_buffer::process_enter,
                         production::production_system,

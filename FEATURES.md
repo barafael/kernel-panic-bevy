@@ -530,13 +530,19 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   packet every 5.5 s) (`PacketBuffer` resource, per-Port timer). Means
   more Ports = more buffer increment.
 - The player can `Dispatch` packets from any teleporter (Port or
-  Connection); a ring of Packet units appears around the teleporter
-  and they each take a brief stun (~6 s) before they can re-enter
-  (Dispatch ability, spawn-stun).
-- A plain Dispatch sends one batch of up to 12 Packets, then ends.
-- An ALT-modified Dispatch keeps re-firing the batch (up to 12 per
-  frame) until the team's Packet Buffer is empty — drains the whole
-  Buffer in one ramp.
+  Connection); Packets appear on a square ring of 12 spots around the
+  teleporter, facing out, walk to the clicked point, and each takes a
+  brief stun (~6 s) before it can re-enter (Dispatch ability,
+  spawn-stun).
+- Dispatch is an order the teleporter runs on its slow update (every
+  15 frames, as `CommandFallback`): each pass puts a Packet on every
+  free spot of the 12; a spot a unit, building or Bad Block stands on
+  is skipped and costs nothing.
+- A plain Dispatch makes one pass, then ends.
+- An ALT-modified Dispatch makes a pass every slow update until the
+  team's Packet Buffer is empty: about 100 Packets in 4 s.
+- The buffer never holds more Packets than the team's unit limit has
+  room for (clamped every 8th frame).
 - Packets can `Enter` a friendly spawn point and top the buffer back
   up (Enter ability, `ENTER_DISTANCE` proximity check). This order
   can be enqueued.

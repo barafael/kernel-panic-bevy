@@ -505,6 +505,7 @@ const GIZMO_LIFT: f32 = 1.5;
 /// | [`GuardTarget`] | guard a unit |
 /// | `PendingBuild`, then `Constructing` | walk to a build site, then build |
 /// | `PendingCommandFire`, `NxCast` | walk into range of an ability cast, then cast |
+/// | `DispatchOrder` | a teleporter's Dispatch (it doesn't move) |
 ///
 /// The contract every order system follows (`CCommandAI::FinishCommand`):
 /// - An order **ends** when its system removes its component: the
@@ -537,12 +538,13 @@ pub struct OrderState {
     clearing: Has<crate::units::lifecycle::construction::ClearOrder>,
     bombard: Has<crate::units::mechanics::deploy::BombardOrder>,
     entering: Has<crate::units::mechanics::network_buffer::EnterOrder>,
+    dispatching: Has<crate::units::mechanics::network_buffer::DispatchOrder>,
 }
 
 impl OrderStateItem<'_, '_> {
     /// The unit is executing an order.
     pub fn active(&self) -> bool {
-        self.move_target || self.steers()
+        self.move_target || self.steers() || self.dispatching
     }
 
     /// The active order is one that steers the unit through a

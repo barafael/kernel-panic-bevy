@@ -1319,6 +1319,123 @@ fn bug_bombards_by_walking_in_and_deploying() {
     }
 }
 
+/// End to end: KP's Dispatch (`network_dispatch.lua`). A teleporter's
+/// order runs on its slow update: one pass over the 12 spots, a spot a
+/// unit stands on skipped without spending a Packet; with Alt a pass on
+/// every slow update (15 frames) until the buffer is empty.
+#[test]
+fn dispatch_passes_run_on_the_slow_update() {
+    use crate::net::{CommandFrame, NetId, NetPos, SimCommand, Units};
+    use crate::terrain::heightmap::Heightmap;
+    use crate::units::components::{Faction, TeamId, UnitType};
+    use crate::units::content::definitions::UnitKind;
+    use crate::units::lifecycle::spawning::{SpawnContext, spawn_unit};
+    use crate::units::mechanics::network_buffer::{DispatchOrder, PacketBuffer};
+    use bevy::ecs::system::SystemState;
+
+    let mut scenario = Scenario::ai_match("Quad_Core", 2, 1, 7);
+    for seat in &mut scenario.seats {
+        seat.ai = false;
+    }
+    scenario.sandbox = true;
+    let mut h = SimHarness::new(scenario);
+    let (connection, target) = {
+        let world = h.world_mut();
+        let base = world
+            .query_filtered::<(&Transform, &TeamId), With<Homebase>>()
+            .iter(world)
+            .find(|(_, team)| team.0 == 0)
+            .map(|(tf, _)| tf.translation)
+            .expect("team 0 homebase");
+        let (w, d) = world.resource::<Heightmap>().world_size();
+        let toward = (Vec3::new(w * 0.5, 0.0, d * 0.5) - base)
+            .with_y(0.0)
+            .normalize_or(Vec3::Z);
+        let at = |world: &World, p: Vec3| world.resource::<Heightmap>().place(p.x, p.z);
+        let spot = at(world, base + toward * 400.0);
+        let target = at(world, base + toward * 900.0);
+        // A Bit on the first spot (`offsetList` starts north-west).
+        let blocker = at(world, spot + Vec3::new(-48.0, 0.0, -48.0));
+        let mut state: SystemState<SpawnContext> = SystemState::new(world);
+        let mut ctx = state.get_mut(world).expect("spawn context");
+        let connection = spawn_unit(UnitKind::Connection, Faction::Network, 0, spot, &mut ctx);
+        spawn_unit(UnitKind::Bit, Faction::System, 0, blocker, &mut ctx);
+        state.apply(world);
+        (connection, target)
+    };
+    for _ in 0..30 {
+        h.step();
+    }
+    let id = *h.world_mut().get::<NetId>(connection).unwrap();
+    let packets = |h: &mut SimHarness| {
+        let world = h.world_mut();
+        world
+            .query::<&UnitType>()
+            .iter(world)
+            .filter(|u| u.0 == UnitKind::Packet)
+            .count()
+    };
+    let buffer = |h: &mut SimHarness| h.world_mut().resource::<PacketBuffer>().peek(0);
+    let dispatch = |h: &mut SimHarness, auto: bool| {
+        let world = h.world_mut();
+        let mut bus = world.resource_mut::<CommandBus>();
+        let tick = bus.tick;
+        bus.deliver(CommandFrame {
+            tick,
+            player: 0,
+            commands: vec![SimCommand::Cast {
+                units: Units::of([id]),
+                target: NetPos::quantize(target),
+                auto,
+            }],
+        });
+    };
+
+    // One pass: the 11 free spots, within a slow update of the order.
+    h.world_mut().resource_mut::<PacketBuffer>().add(0, 30);
+    dispatch(&mut h, false);
+    let mut frames = 0;
+    while buffer(&mut h) == 30 && frames < 20 {
+        h.step();
+        frames += 1;
+    }
+    assert!(
+        frames <= 16,
+        "the pass waits for the slow update ({frames} frames)"
+    );
+    assert_eq!(buffer(&mut h), 19, "11 spots free, the Bit's taken");
+    assert_eq!(packets(&mut h), 11);
+    assert!(h.world_mut().get::<DispatchOrder>(connection).is_none());
+
+    // Alt: a pass every 15 frames, until the buffer is empty.
+    for _ in 0..90 {
+        h.step();
+    }
+    h.world_mut().resource_mut::<PacketBuffer>().add(0, 21);
+    dispatch(&mut h, true);
+    let mut drops = Vec::new();
+    let mut last = buffer(&mut h);
+    for frame in 0..30 * 30 {
+        h.step();
+        let now = buffer(&mut h);
+        if now != last {
+            assert!(last - now <= 12, "one pass: at most 12");
+            drops.push(frame);
+            last = now;
+        }
+        if now == 0 {
+            break;
+        }
+    }
+    assert_eq!(last, 0, "drained");
+    assert!(drops.len() >= 4, "40 Packets take passes: {drops:?}");
+    assert!(
+        drops.windows(2).all(|w| (w[1] - w[0]) % 15 == 0),
+        "on the teleporter's slow updates: {drops:?}"
+    );
+    assert!(h.world_mut().get::<DispatchOrder>(connection).is_none());
+}
+
 /// End to end: Launch Mines on a folded Byte. It unfolds, then fires a
 /// MineLauncher bolt from each of its five tubes; each explodes on the
 /// ground ahead and leaves a Logic Bomb there — five mines in a forward

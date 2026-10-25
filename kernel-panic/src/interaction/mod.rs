@@ -44,8 +44,12 @@ type ActiveOrder = (
     crate::units::lifecycle::construction::ClearOrder,
     // The clear order's running feature work (a stop drops it).
     crate::units::lifecycle::construction::ClearingFeature,
-    crate::units::mechanics::deploy::BombardOrder,
-    crate::units::mechanics::network_buffer::EnterOrder,
+    // Nested: a bundle tuple holds at most 15.
+    (
+        crate::units::mechanics::deploy::BombardOrder,
+        crate::units::mechanics::network_buffer::EnterOrder,
+        crate::units::mechanics::network_buffer::DispatchOrder,
+    ),
 );
 
 /// Wipe the unit's orders: the active order, its path, the queue and a

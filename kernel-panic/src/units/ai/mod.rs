@@ -69,7 +69,7 @@ use crate::{
         lifecycle::spawning::Emerging,
         mechanics::{
             command_fire::{CommandFireCooldown, NxCast, PendingCommandFire, Protected},
-            network_buffer::{AutoDispatch, DISPATCH_MAX, PacketBuffer},
+            network_buffer::{DISPATCH_MAX, DispatchOrder, PacketBuffer},
         },
     },
 };
@@ -221,7 +221,8 @@ struct Snap {
     /// Finished, its command-fire ability off cooldown and not already
     /// being cast.
     ready: bool,
-    /// Still peeling packets off the team buffer (`AutoDispatch`).
+    /// A Dispatch order still pending or draining the buffer
+    /// ([`DispatchOrder`]).
     dispatching: bool,
     /// Under a Firewall reflector (`Protected`).
     protected: bool,
@@ -270,7 +271,7 @@ type UnitQueryData = (
     Option<&'static MovePath>,
     Has<Emerging>,
     Has<CommandFireCooldown>,
-    Has<AutoDispatch>,
+    Has<DispatchOrder>,
     Has<Protected>,
     // A cast in progress: not ready for another one.
     (Has<NxCast>, Has<PendingCommandFire>),
@@ -492,7 +493,7 @@ fn snapshot(
         mp,
         emerging,
         cooldown,
-        auto_dispatch,
+        dispatching,
         protected,
         (nx_cast, pending_cast),
         net,
@@ -509,7 +510,7 @@ fn snapshot(
             mobile: stats.speed > 0.0,
             idle: !emerging && mp.is_none() && !order.active(),
             ready: !emerging && !cooldown && !casting,
-            dispatching: auto_dispatch,
+            dispatching,
             protected,
         };
         s.units.push(snap);
@@ -891,12 +892,11 @@ fn run_army(
 /// dispatches ports toward the spot it is attacking, with no say from
 /// the fairness budget (only counter-dispatch consults `Lack`).
 ///
-/// One `DispatchEvent` is not a 12-packet pulse: it flags the
-/// teleporter `AutoDispatch`, and `tick_auto_dispatch` keeps peeling 12
-/// packets per frame off the team buffer until it drains (upstream's
-/// `not opts.alt` continuation rule). So the AI skips teleporters that
-/// are still draining, and its local `buffer` bookkeeping is only a
-/// conservative same-tick approximation — the resource is the truth.
+/// A cast is a `DispatchOrder` that runs on the teleporter's next slow
+/// update, one pass of up to 12 Packets (the AI never holds Alt). So
+/// the AI skips teleporters with an order still pending, and its local
+/// `buffer` bookkeeping is only a conservative same-tick approximation
+/// — the resource is the truth.
 #[allow(clippy::too_many_arguments)]
 fn run_network(
     team: u8,

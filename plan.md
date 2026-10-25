@@ -448,8 +448,8 @@ projectile physics.
   the nearest enemy minifac (a weak team's homebase once `force+buffer > 50`),
   split across `1 + (force+buffer)*2%` fronts like upstream's mission loop;
   units idling in the field reinforce straight away.
-- **Network**: dispatch is a sustained drain (`AutoDispatch` peels 12 packets a
-  frame until the buffer empties); the AI triggers it from the teleporter
+- **Network**: a dispatch is one pass of up to 12 packets on the teleporter's
+  slow update (`DispatchOrder`); the AI triggers it from the teleporter
   nearest the push target, and counter-dispatches at close attackers
   (buffer ≥ 3, `Lack.spams > 5`, 5 s cooldown).
 - **Specials**: SIGTERM the densest enemy cluster (15 s/team), Infection at the
@@ -743,8 +743,8 @@ Deviations / open:
   `Attack(entity)`, `AttackGround(pos)`, `Patrol(pos)`, `Guard(entity)`
   variants, consumed by the movement + combat systems. Attack-move
   (§Gameplay Bugs) and future patrol/guard live on this.
-- [ ] **Event hub** — `CommandFireEvent`, `MorphEvent`, `DispatchEvent`,
-  `EnterEvent`, etc. are ad-hoc Bevy Messages per concern. Spring runs
+- [ ] **Event hub** — `CommandFireEvent`, `MorphEvent`, `EnterEvent`,
+  etc. are ad-hoc Bevy Messages per concern. Spring runs
   every lifecycle change through `EventHandler` callins
   (`UnitCreated`, `UnitDamaged`, `UnitDestroyed`, `WeaponFired`, …) so
   new systems (fog-of-war, AI hooks, Lua gadgets, achievements) can

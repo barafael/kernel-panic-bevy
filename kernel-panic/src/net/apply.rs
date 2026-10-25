@@ -84,7 +84,7 @@ use crate::units::lifecycle::construction::{
 use crate::units::lifecycle::production::{FactoryOrders, Producer, factory_roster};
 use crate::units::mechanics::command_fire::CommandFireEvent;
 use crate::units::mechanics::deploy::DeployEvent;
-use crate::units::mechanics::network_buffer::{AutoDispatch, DispatchEvent, EnterEvent};
+use crate::units::mechanics::network_buffer::{DispatchOrder, EnterEvent};
 use crate::units::mechanics::worm::AutoHold;
 
 /// Most units one factory command may add or remove: the UI's largest
@@ -339,7 +339,6 @@ pub(crate) struct ApplyCtx<'w, 's> {
     registry: Option<Res<'w, UnitRegistry>>,
     command_fire: Option<ResMut<'w, Messages<CommandFireEvent>>>,
     deploy: Option<ResMut<'w, Messages<DeployEvent>>>,
-    dispatch: Option<ResMut<'w, Messages<DispatchEvent>>>,
     enter: Option<ResMut<'w, Messages<EnterEvent>>>,
     rules: Rules<'w, 's>,
     alliances: Option<Res<'w, crate::units::teams::Alliances>>,
@@ -795,16 +794,15 @@ impl ApplyCtx<'_, '_> {
                             });
                         }
                     } else if own.kind.is_teleporter() {
-                        // Alt: only the marker — the first batch goes
-                        // out next tick via `tick_auto_dispatch`.
-                        if *auto {
-                            self.commands.entity(own.e).insert(AutoDispatch { target });
-                        } else if let Some(m) = self.dispatch.as_mut() {
-                            m.write(DispatchEvent {
-                                teleporter: own.e,
+                        // `CMD_DISPATCH` replaces the unit's orders;
+                        // `tick_dispatch_orders` runs it on the
+                        // teleporter's slow updates.
+                        crate::interaction::clear_orders(&mut self.commands.entity(own.e)).insert(
+                            DispatchOrder {
                                 target,
-                            });
-                        }
+                                until_empty: *auto,
+                            },
+                        );
                     }
                 }
             }
