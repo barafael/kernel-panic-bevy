@@ -298,9 +298,8 @@ fn prefetch_selected_map(
 #[derive(Component, Default)]
 pub struct PersistentEntity;
 
-/// Marker on terrain chunk meshes. The placement ghost's cursor ray
-/// filters on this so it reads the ground plane only — never the ghost
-/// mesh itself, unit meshes under the cursor, or order-palette gizmos.
+/// Marker on terrain chunk meshes: the ground the pick ray
+/// (`PickRayCast`) tests, beside the units.
 #[derive(Component)]
 pub struct TerrainChunkMarker;
 
@@ -326,6 +325,12 @@ impl MapCatalog {
                     .unwrap_or_default()
             })
             .collect()
+    }
+
+    /// The name of map `i` ([`Self::names`] without the list).
+    pub fn name(&self, i: usize) -> Option<String> {
+        let stem = self.0.get(i)?.file_stem().unwrap_or_default();
+        Some(stem.to_string_lossy().into_owned())
     }
 }
 
