@@ -82,10 +82,7 @@ serde_json = "1"
 # The real-WebRTC lockstep tests (`net::matchbox_tests`) run a signaling
 # server in process, with the room semantics of the deployed
 # `matchbox_server` (`net-experiments/m2-transport.md`).
-matchbox_signaling = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
-matchbox_protocol = { git = "https://github.com/barafael/matchbox.git", branch = "main", features = ["json"] }
-axum = { version = "0.8", default-features = false, features = ["ws"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+kp-signaling = { path = "../kp-signaling" }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(kani)'] }

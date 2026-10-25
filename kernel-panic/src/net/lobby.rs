@@ -1943,6 +1943,8 @@ impl Plugin for LobbyPlugin {
                     .run_if(in_state(AppState::Menu)),
             )
             .add_systems(OnEnter(AppState::InGame), leave_for_other_match);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.add_plugins(super::autopilot::AutopilotPlugin);
     }
 }
 
@@ -1968,7 +1970,7 @@ fn player_name() -> String {
 
 /// The room the game was launched into: `#room=<code>` in the page's
 /// URL (web), `--room <code>` or `KP_ROOM` (native).
-fn launch_room() -> Option<String> {
+pub(crate) fn launch_room() -> Option<String> {
     #[cfg(target_arch = "wasm32")]
     {
         fragment_param(&web::read_fragment()?, "room")

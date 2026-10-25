@@ -53,6 +53,12 @@
 //! are allowed). Commands apply on the tick they are read. A `spawn`
 //! holds the following lines one tick, until the new units exist.
 //!
+//! Launched into a room (`--room` / `KP_ROOM`), the bot boots no
+//! skirmish and plays the networked match the lobby starts as this
+//! game's seat, with god mode off; `cargo testbox` (`xtask`) drives a
+//! bot in every game of the room. Spawns and other cheats then need the
+//! room's cheats on (`KP_AUTO_CHEATS=1`, `net::autopilot`).
+//!
 //! Not compiled for wasm (no disk).
 
 use bevy::math::ops;
@@ -109,7 +115,8 @@ impl Plugin for BotPlugin {
                 .clone()
                 .unwrap_or_else(|| "Data_Cache_L1".into()),
             enemy: dev.bot_enemy,
-            started: false,
+            // In a room the lobby starts the match.
+            started: crate::net::lobby::launch_room().is_some(),
             menu_frames: 0,
             frame: 0,
             cmd_offset: 0,
@@ -118,7 +125,8 @@ impl Plugin for BotPlugin {
             dump_every: 0,
             traced: Vec::new(),
             last_spawned: None,
-            god: false,
+            // Networked: the bot commands its own seat only.
+            god: crate::net::lobby::launch_room().is_some(),
         })
         .init_resource::<DevSpawned>()
         .add_systems(Update, bot_boot)

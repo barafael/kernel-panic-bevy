@@ -24,14 +24,7 @@ use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::Message;
-use bevy::tasks::futures_lite::StreamExt;
-use matchbox_protocol::{JsonPeerEvent, PeerRequest};
-use matchbox_signaling::common_logic::{SignalingChannel, parse_request, try_send};
-use matchbox_signaling::{
-    ClientRequestError, NoCallbacks, SignalingServerBuilder, SignalingState, SignalingTopology,
-    WsStateMeta,
-};
+use kp_signaling::Signaling;
 
 use super::driver::NetStatus;
 use super::lobby::Retry;
@@ -47,135 +40,11 @@ use crate::headless::netplay::{self, NetPeer, Rendezvous};
 
 // --- the signaling server ----------------------------------------------------
 
-/// Rooms by URL path, each a full mesh: who joins is introduced to
-/// everyone already there. `matchbox_server`'s semantics (the deployed
-/// server); `matchbox_signaling`'s own full-mesh topology reads the room
-/// and adds the newcomer under separate locks, so two peers joining at
-/// the same moment may never meet (`x-transport.md` §2). Here one lock
-/// covers both.
-#[derive(Clone, Debug, Default)]
-struct Rooms(Arc<Mutex<BTreeMap<String, BTreeMap<matchbox_protocol::PeerId, SignalingChannel>>>>);
-
-impl SignalingState for Rooms {}
-
-struct RoomMesh;
-
-fn text(event: JsonPeerEvent) -> Message {
-    Message::Text(event.to_string().into())
-}
-
-#[matchbox_socket::async_trait::async_trait]
-impl SignalingTopology<NoCallbacks, Rooms> for RoomMesh {
-    async fn state_machine(upgrade: WsStateMeta<NoCallbacks, Rooms>) {
-        let WsStateMeta {
-            room,
-            peer_id,
-            sender,
-            mut receiver,
-            state,
-            ..
-        } = upgrade;
-        {
-            let mut rooms = state.0.lock().unwrap();
-            let peers = rooms.entry(room.clone()).or_default();
-            for ch in peers.values() {
-                let _ = try_send(ch, text(JsonPeerEvent::NewPeer(peer_id)));
-            }
-            peers.insert(peer_id, sender);
-        }
-        while let Some(request) = receiver.next().await {
-            match parse_request(request) {
-                Ok(PeerRequest::Signal { receiver, data }) => {
-                    let to = state
-                        .0
-                        .lock()
-                        .unwrap()
-                        .get(&room)
-                        .and_then(|r| r.get(&receiver).cloned());
-                    if let Some(ch) = to {
-                        let event = JsonPeerEvent::Signal {
-                            sender: peer_id,
-                            data,
-                        };
-                        let _ = try_send(&ch, text(event));
-                    }
-                }
-                Ok(PeerRequest::KeepAlive) => {}
-                Err(ClientRequestError::Json(_) | ClientRequestError::UnsupportedType(_)) => {}
-                Err(_) => break,
-            }
-        }
-        let mut rooms = state.0.lock().unwrap();
-        if let Some(peers) = rooms.get_mut(&room) {
-            peers.remove(&peer_id);
-            for ch in peers.values() {
-                let _ = try_send(ch, text(JsonPeerEvent::PeerLeft(peer_id)));
-            }
-            if peers.is_empty() {
-                rooms.remove(&room);
-            }
-        }
-    }
-}
-
-/// A signaling server on a free localhost port, for as long as it lives.
-pub(super) struct Signaling {
-    rt: Option<tokio::runtime::Runtime>,
-    rooms: Rooms,
-    /// `ws://127.0.0.1:<port>`.
-    pub url: String,
-}
-
-impl Signaling {
-    pub fn start() -> Self {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        let rooms = Rooms::default();
-        let mut server =
-            SignalingServerBuilder::new((Ipv4Addr::LOCALHOST, 0), RoomMesh, rooms.clone()).build();
-        let addr = server.bind().expect("bind the signaling server");
-        rt.spawn(server.serve());
-        Self {
-            rt: Some(rt),
-            rooms,
-            url: format!("ws://{addr}"),
-        }
-    }
-
-    /// Tell everyone else that `peer` left, without it leaving: what the
-    /// others hear when its signaling websocket drops (a server restart
-    /// does not, it just goes quiet).
-    pub fn announce_left(&self, peer: PeerId) {
-        let id = matchbox_protocol::PeerId(uuid::Uuid::from_u128(peer.0));
-        for peers in self.rooms.0.lock().unwrap().values() {
-            for (_, ch) in peers.iter().filter(|(p, _)| **p != id) {
-                let _ = try_send(ch, text(JsonPeerEvent::PeerLeft(id)));
-            }
-        }
-    }
-
-    /// Shut the server down (its connections drop).
-    pub fn stop(&mut self) {
-        if let Some(rt) = self.rt.take() {
-            rt.shutdown_background();
-        }
-    }
-
-    /// How many peers are in a room (signaling, not WebRTC: connected to
-    /// the server, whether or not anyone has a data channel to them).
-    pub fn peers_in_rooms(&self) -> usize {
-        self.rooms.0.lock().unwrap().values().map(|r| r.len()).sum()
-    }
-
-    /// Host candidates only: nothing leaves the machine.
-    pub fn config(&self) -> NetConfig {
-        NetConfig {
-            signaling: self.url.clone(),
-            ice: Vec::new(),
-        }
+/// Host candidates only: nothing leaves the machine.
+fn config(server: &Signaling) -> NetConfig {
+    NetConfig {
+        signaling: server.url.clone(),
+        ice: Vec::new(),
     }
 }
 
@@ -278,7 +147,7 @@ fn meet_browser(
     child: &mut std::process::Child,
     limit: Duration,
 ) -> (MatchboxTransport, Vec<PeerId>) {
-    let cfg = server.config();
+    let cfg = config(server);
     let t0 = Instant::now();
     let mut retry = Retry::growing(MEET_RETRY);
     loop {
@@ -341,7 +210,7 @@ fn wait_for(what: &str, limit: Duration, mut done: impl FnMut() -> bool) -> Dura
 #[test]
 fn transport_basics() {
     let server = Signaling::start();
-    let cfg = server.config();
+    let cfg = config(&server);
     let room = RoomId::random();
     let mut a = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
     std::thread::sleep(Duration::from_millis(50));
@@ -443,7 +312,7 @@ fn transport_basics() {
 #[test]
 fn signaling_loss_keeps_links() {
     let mut server = Signaling::start();
-    let cfg = server.config();
+    let cfg = config(&server);
     let room = RoomId::random();
     let mut a = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
     std::thread::sleep(Duration::from_millis(50));
@@ -457,7 +326,7 @@ fn signaling_loss_keeps_links() {
     let (ida, idb) = (a.local_id().unwrap(), b.local_id().unwrap());
     // The server stops; then B is announced gone (a stand-in for its
     // websocket dropping) while it keeps talking.
-    server.announce_left(idb);
+    server.announce_left(uuid::Uuid::from_u128(idb.0));
     std::thread::sleep(Duration::from_millis(100));
     server.stop();
     let mut events = Vec::new();
@@ -554,7 +423,7 @@ fn real_match(map: &str, humans: u8, ai: u8, seed: u64) -> RealRoom {
     // silent.
     let hs: Vec<SimHarness> = (0..humans).map(|_| SimHarness::new(scn.clone())).collect();
     let server = Signaling::start();
-    let cfg = server.config();
+    let cfg = config(&server);
     let url = cfg.room_url(&RoomId::random());
     let n = humans as usize;
     let mut ts: Vec<MatchboxTransport> = (0..n)
@@ -810,7 +679,7 @@ fn netem_match() {
 fn netem_probe() {
     let secs: u64 = env("KP_NET_SECS", 30);
     let server = Signaling::start();
-    let cfg = server.config();
+    let cfg = config(&server);
     let room = RoomId::random();
     let mut a = MatchboxTransport::open(&cfg.room_url(&room), &cfg);
     std::thread::sleep(Duration::from_millis(50));

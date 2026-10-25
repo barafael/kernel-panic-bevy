@@ -1,0 +1,4 @@
+[alias]
+# Several games in one multiplayer room on this machine (xtask/src/main.rs):
+# nothing to install beyond cargo.
+testbox = "run --quiet -p xtask --"

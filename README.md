@@ -9,7 +9,14 @@ WebRTC (`docs/multiplayer-plan.md`).
 cargo run --release -p kernel-panic              # the game
 cargo run --release -p kernel-panic Central_Hub  # straight into a map
 cargo test --workspace                           # needs `git lfs pull` (music, tips voice)
+cargo testbox up -n 3                            # 3 games in one room on this machine
+cargo testbox test                               # check: they start a match, stay in lockstep
 ```
+
+`cargo testbox --help` has the rest (`xtask/src/main.rs`): the games meet
+through a signaling server in the xtask, the lobby's autopilot seats them and
+starts the match, and `cargo testbox send <peer|all> <command>` drives each
+game's bot (`kernel-panic/src/bot.rs`).
 
 ## Assets
 

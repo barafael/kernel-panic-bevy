@@ -158,6 +158,11 @@ pub struct DevOptions {
     /// borderless fullscreen (A/B runs of the fill-rate cost).
     #[cfg(not(target_arch = "wasm32"))]
     pub window: Option<(u32, u32)>,
+    /// `KP_WINDOW_POS=<x>,<y>`: put the window's top-left corner there
+    /// (`cargo testbox` tiles its games; window managers that place
+    /// windows themselves may ignore it).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub window_pos: Option<(i32, i32)>,
     /// `KP_SHOT_EVERY=<frames>` + `KP_SHOT_DIR=<dir>`: save a screenshot
     /// every N frames while running (watching a run without a screen).
     #[cfg(not(target_arch = "wasm32"))]
@@ -256,6 +261,10 @@ impl DevOptions {
                 })
                 // The window's resize floor: a 0x0 swapchain panics.
                 .filter(|&(w, h)| w >= 320 && h >= 240),
+            window_pos: var("KP_WINDOW_POS").and_then(|s| {
+                let (x, y) = s.split_once(',')?;
+                Some((x.trim().parse().ok()?, y.trim().parse().ok()?))
+            }),
             shot_every: var("KP_SHOT_EVERY").and_then(|n| n.parse().ok()),
             shot_dir: var("KP_SHOT_DIR").map(Into::into),
             attract_distance: var("KP_ATTRACT_DISTANCE").and_then(|n| n.parse().ok()),

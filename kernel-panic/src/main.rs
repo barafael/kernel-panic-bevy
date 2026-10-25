@@ -202,6 +202,12 @@ fn main() {
                         min_height: 240.0,
                         ..default()
                     },
+                    #[cfg(not(target_arch = "wasm32"))]
+                    position: dev_options
+                        .window_pos
+                        .map_or(WindowPosition::Automatic, |(x, y)| {
+                            WindowPosition::At(IVec2::new(x, y))
+                        }),
                     ..default()
                 }),
                 ..default()

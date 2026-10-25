@@ -1,0 +1,19 @@
+[package]
+name = "kp-signaling"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+description = "A matchbox signaling server on localhost: the WebRTC tests' and `cargo testbox`'s"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+matchbox_signaling = { git = "https://github.com/barafael/matchbox.git", branch = "main" }
+matchbox_protocol = { git = "https://github.com/barafael/matchbox.git", branch = "main", features = ["json"] }
+async-trait = "0.1"
+axum = { version = "0.8", default-features = false, features = ["ws"] }
+futures-lite = "2"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+uuid = "1"

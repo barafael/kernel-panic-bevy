@@ -8,6 +8,8 @@ members = [
     "spring-pathfinding",
     "spring-detmath",
     "kernel-panic",
+    "kp-signaling",
+    "xtask",
 ]
 # Patched dependencies (`[patch.crates-io]` below) are not members.
 exclude = ["vendor/webrtc-data"]
