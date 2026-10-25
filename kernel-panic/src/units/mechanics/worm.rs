@@ -145,8 +145,9 @@ pub fn tick_worm_surfacing(
 
 /// Queue the Wormsplash detonations for one bite: upstream `FireWeapon1`
 /// emits Weapon2 from both the telescoped `head` (the bite point) and
-/// the `end` tail segment (≈ the worm's own origin). Target-less AoE
-/// hits so `apply_damage` runs the splash + armor + infection path.
+/// the `end` tail segment (≈ the worm's own origin). Detonations, not
+/// melee fire, so `apply_damage` runs the splash + armor + infection
+/// path although Wormsplash is a `Melee` weapon.
 pub fn queue_wormsplash(
     damage_queue: &mut DamageQueue,
     attacker: Entity,
@@ -155,13 +156,7 @@ pub fn queue_wormsplash(
     tail_pos: Vec3,
 ) {
     for impact_pos in [bite_pos, tail_pos] {
-        damage_queue.push(PendingDamage {
-            target: None,
-            attacker,
-            weapon: splash,
-            impact_pos,
-            attacker_distance: 0.0,
-        });
+        damage_queue.push(PendingDamage::detonation(attacker, splash, impact_pos));
     }
 }
 
@@ -180,7 +175,6 @@ mod tests {
             dec_rate: 0.01,
             turn_rate: 3.0,
             can_fly: false,
-            no_chase_vtol: true,
         }
     }
 

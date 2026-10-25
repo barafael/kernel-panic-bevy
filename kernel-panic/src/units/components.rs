@@ -188,7 +188,6 @@ pub struct UnitStats {
     /// Turn speed in rad/s (FBI `TurnRate`); 0 means "snap".
     pub turn_rate: f32,
     pub can_fly: bool,
-    pub no_chase_vtol: bool,
 }
 
 /// `unit->midPos` (`CSolidObject::GetObjectSpacePos(relMidPos)`): `mid_y`
@@ -222,7 +221,6 @@ impl UnitStats {
             dec_rate: registry.dec_rate(kind),
             turn_rate: registry.turn_rate(kind),
             can_fly: registry.can_fly(kind),
-            no_chase_vtol: registry.no_chase_vtol(kind),
         }
     }
 }

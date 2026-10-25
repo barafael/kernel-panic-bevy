@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use bevy::prelude::*;
 
 use crate::sim::{DetFloat, GAME_SPEED, frames_to_secs};
-use crate::units::combat::Dying;
+use crate::units::combat::{Armored, Dying};
 use crate::units::components::{Faction, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::lifecycle::spawning::Emerging;
@@ -33,6 +33,14 @@ pub const DISPATCH_MAX: usize = 12;
 /// Seconds a freshly-spawned Packet must wait before it can re-enter
 /// the buffer via the Enter command. Upstream `stunTime=180` frames.
 pub const SPAWN_STUN_SECONDS: f32 = frames_to_secs(180.0);
+
+/// How long a dispatched Packet keeps its `ARMORED` spawn protection.
+/// network_dispatch.lua calls packet.bos `Spawned()` right after
+/// `Spring.CreateUnit`, and that clears the flag after `sleep 500`. COB
+/// time moves 33 ms a frame and a thread wakes once it is past its wake
+/// time, so the sleep is 16 frames. `Create()`'s own 5 s grace then
+/// clears a flag that is already down.
+const SPAWNED_ARMORED_SECONDS: f32 = frames_to_secs(16.0);
 
 /// Max distance (elmos) at which a Packet can enter a teleporter.
 /// Upstream `enterDist=150`.
@@ -274,6 +282,9 @@ pub fn process_dispatch(
                 crate::interaction::movement::MoveTarget(event.target),
                 PacketSpawnStun {
                     remaining: SPAWN_STUN_SECONDS,
+                },
+                Armored {
+                    after_build: SPAWNED_ARMORED_SECONDS,
                 },
             ));
         }

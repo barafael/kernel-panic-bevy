@@ -356,18 +356,6 @@ impl UnitRegistry {
         self.def(kind).is_some_and(|d| d.can_fly)
     }
 
-    /// Does this unit's `NoChaseCategory` contain `VTOL`? Most KP ground
-    /// units set this so they'll ignore Flows (and other flying units)
-    /// during auto-target selection. Upstream treats the field as a space-
-    /// separated token list, e.g. `NoChaseCategory=VTOL FACTORY`.
-    pub fn no_chase_vtol(&self, kind: UnitKind) -> bool {
-        self.def(kind).is_some_and(|d| {
-            d.no_chase_category
-                .split_ascii_whitespace()
-                .any(|tok| tok.eq_ignore_ascii_case("VTOL"))
-        })
-    }
-
     /// Auto-target gate for the primary weapon: upstream FBI
     /// `OnlyTargetCategory1` against the candidate's `Category` list.
     /// When non-empty, the weapon may only acquire candidates whose

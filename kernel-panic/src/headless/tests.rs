@@ -1525,6 +1525,7 @@ fn dual_core_places_its_bad_blocks() {
                 weapon: sigterm,
                 impact_pos: at + Vec3::new(0.0, 0.0, 50.0),
                 attacker_distance: 0.0,
+                detonated: false,
             });
     }
     h.step();

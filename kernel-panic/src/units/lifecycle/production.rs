@@ -1296,7 +1296,7 @@ mod tests {
         }
         assert!((remaining(&world) - (build_time - 0.6)).abs() < 1e-3);
 
-        world.entity_mut(factory).insert(Stunned { remaining: 5.0 });
+        world.entity_mut(factory).insert(Stunned);
         let before = remaining(&world);
         ticks(&mut world);
         assert!(remaining(&world) > before, "the buildee decays");

@@ -20,7 +20,7 @@
 
 use bevy::prelude::*;
 
-use super::{ByteOpen, Dying, IdleTimer, StunCharge, Stunned};
+use super::{ByteOpen, Dying, IdleTimer, PARALYZE_DECLINE, StunCharge, Stunned};
 use crate::net::NetId;
 use crate::sim::{DetFloat, RngStream, SimRng, SimTick};
 use crate::units::components::{Faction, Health, TeamId, UnitType};
@@ -56,6 +56,12 @@ pub struct PendingDamage {
     /// was queued. Used by dynamic-damage weapons (BugCannon) to scale
     /// the primary hit; zero is fine for single-range weapons.
     pub attacker_distance: f32,
+    /// A script `emit-sfx 4096+n` (`SFX_DETONATE_WEAPON`,
+    /// UnitScript.cpp:788): the weapon is detonated in place, a full
+    /// `CGameHelper::Explosion` with no struck unit whatever the weapon
+    /// type — so even the `Melee` Wormsplash splashes. See
+    /// [`Self::detonation`].
+    pub detonated: bool,
 }
 
 impl PendingDamage {
@@ -70,6 +76,21 @@ impl PendingDamage {
             weapon,
             impact_pos,
             attacker_distance: 0.0,
+            detonated: false,
+        }
+    }
+
+    /// `attacker`'s script detonating its `weapon` at `pos`
+    /// (`emit-sfx 4096+n`): worm.bos `FireWeapon1` blows Wormsplash up
+    /// at its head and tail.
+    pub fn detonation(attacker: Entity, weapon: WeaponKind, pos: Vec3) -> Self {
+        Self {
+            target: None,
+            attacker,
+            weapon,
+            impact_pos: pos,
+            attacker_distance: 0.0,
+            detonated: true,
         }
     }
 }
@@ -284,10 +305,13 @@ fn armored_script(kind: UnitKind) -> Option<ArmoredScript> {
 /// once the unit has been out of construction (no [`Emerging`]) for its
 /// script's grace period. Freshly created units that were never built
 /// (map start, Virus spawns) run the same choreography from their first
-/// frame, as `Spring.CreateUnit`-made units do upstream.
+/// frame, as `Spring.CreateUnit`-made units do upstream. A spawner that
+/// inserted its own [`Armored`] (a dispatched Packet's `Spawned()`
+/// script) keeps it.
+#[allow(clippy::type_complexity)]
 pub fn update_armored(
     time: Res<Time>,
-    added: Query<(Entity, &UnitType, Has<Emerging>), Added<UnitType>>,
+    added: Query<(Entity, &UnitType, Has<Emerging>, Has<Armored>), Added<UnitType>>,
     mut armored: Query<(Entity, &mut Armored), Without<Emerging>>,
     mut commands: Commands,
 ) {
@@ -301,8 +325,9 @@ pub fn update_armored(
             commands.entity(entity).try_remove::<Armored>();
         }
     }
-    for (entity, unit, being_built) in &added {
-        if let Some(script) = armored_script(unit.0)
+    for (entity, unit, being_built, already) in &added {
+        if !already
+            && let Some(script) = armored_script(unit.0)
             && (being_built || !script.only_if_built)
         {
             commands.entity(entity).try_insert(Armored {
@@ -473,14 +498,22 @@ impl DamageResolver<'_, '_> {
 
         if damage > 0.0 {
             if let Some(paralyze_time) = hit.paralyze_time {
+                // `ApplyDamage`'s paralyzer half (Unit.cpp:1265-1290,
+                // `paralyzeOnMaxHealth`): the hit is clamped so the meter
+                // tops out `paralyzetime` seconds of drain above max
+                // health, which is why a stun ends that long after the
+                // last hit. Reaching max health stuns. The clamped hit is
+                // what `UnitDamaged` sees (`baseDamage` is in-out), so a
+                // full meter reports 0 to KPAI below.
                 if let Ok(max_hp) = self.hits.health.get(hit.target).map(|h| h.max)
                     && let Ok(mut charge) = self.hits.stun.get_mut(hit.target)
                 {
+                    let room = (max_hp + max_hp * PARALYZE_DECLINE * paralyze_time - charge.0)
+                        .det_max(0.0);
+                    damage = damage.det_clamp(0.0, room);
                     charge.0 += damage;
                     if charge.0 >= max_hp {
-                        self.commands.entity(hit.target).try_insert(Stunned {
-                            remaining: paralyze_time,
-                        });
+                        self.commands.entity(hit.target).try_insert(Stunned);
                     }
                 }
             } else if let Ok(mut health) = self.hits.health.get_mut(hit.target) {
@@ -741,7 +774,7 @@ impl DamagePass<'_, '_> {
         self.queue.recycle(pending);
     }
 
-    /// One `CGameHelper::Explosion` (or, for `Melee`, the single
+    /// One `CGameHelper::Explosion` (or, for `Melee` fire, the single
     /// `DoDamage` of `CMeleeWeapon::FireImpl`).
     fn explode(&mut self, pending: PendingDamage, frame: u64) {
         // Every queued weapon resolved through this same registry —
@@ -750,7 +783,9 @@ impl DamagePass<'_, '_> {
         let weapon_def = weapons.by_kind(pending.weapon);
         // `CMeleeWeapon::FireImpl` damages its target unit and nothing
         // else: no explosion, no splash, no hit without a unit target.
-        let melee = weapon_def.category() == spring_tdf::WeaponCategory::Melee;
+        // A script detonation of the same def is an explosion anyway.
+        let melee =
+            !pending.detonated && weapon_def.category() == spring_tdf::WeaponCategory::Melee;
         // Every other impact is an engine `Explosion` event; Hex Farm's
         // gadget watches them all to damage the ground.
         if !melee && let Some(inbox) = self.hex_farm.as_deref_mut() {
@@ -1255,6 +1290,7 @@ mod tests {
             weapon,
             impact_pos: at,
             attacker_distance: 0.0,
+            detonated: false,
         }
     }
 
@@ -1340,6 +1376,7 @@ mod tests {
                 weapon: WeaponKind::BuildLaser,
                 impact_pos: Vec3::ZERO,
                 attacker_distance: 0.0,
+                detonated: false,
             });
 
         app.world_mut().run_system_once(combat_system).unwrap();
@@ -1358,13 +1395,16 @@ mod tests {
     /// that is what turns Worm kills into Viruses. The Worm's allies in
     /// the blast take the damage too (`DoExplosionDamage` has no team
     /// filter; `avoidfriendly=1` only governs firing) but are never
-    /// infected (`unitTeam ~= attackerTeam`).
+    /// infected (`unitTeam ~= attackerTeam`). Wormsplash is a `Melee`
+    /// weapon, as in `corruptionweapons.tdf`: `SFX_DETONATE_WEAPON`
+    /// explodes it all the same, which the melee rule once swallowed.
     #[test]
     fn wormsplash_splash_infects_enemy_victims() {
         let mut weapons = WeaponRegistry::default();
         let splash = weapons.insert_for_test(
             WeaponKind::Wormsplash,
             spring_tdf::WeaponDef {
+                weapon_type: "Melee".into(),
                 damage: spring_tdf::DamageMap {
                     default: 800.0,
                     ..Default::default()
@@ -1386,7 +1426,7 @@ mod tests {
         let friend = unit(&mut app, UnitKind::Bit, 1, Vec3::X * -50.0, 1000.0);
         app.world_mut()
             .resource_mut::<DamageQueue>()
-            .push(shot(None, worm, splash, Vec3::ZERO));
+            .push(PendingDamage::detonation(worm, splash, Vec3::ZERO));
 
         run_damage(&mut app);
 
@@ -1449,6 +1489,64 @@ mod tests {
         run_damage(&mut app);
         assert!((hp(&app, shooter) - 950.0).abs() < 1e-3);
         assert!(app.world().resource::<DelayedDamage>().is_empty());
+    }
+
+    /// `ApplyDamage`'s paralyzer half: a 1000-HP unit hit by 400-damage
+    /// DOS beams (`paralyzetime=5`) is stunned on the third, which is
+    /// clamped so the meter stops at `1000 + 1000/40 · 5`; further hits
+    /// add nothing. A unit just out of a stun, its meter still near max
+    /// health, is stunned again by a single hit.
+    #[test]
+    fn paralyzer_meter_stuns_at_max_health_and_caps() {
+        let mut weapons = WeaponRegistry::default();
+        let dos = weapons.insert_for_test(
+            WeaponKind::DosBeam,
+            spring_tdf::WeaponDef {
+                damage: spring_tdf::DamageMap {
+                    default: 400.0,
+                    ..Default::default()
+                },
+                paralyzer: true,
+                paralyze_time: 5.0,
+                ..Default::default()
+            },
+        );
+        let mut app = damage_app(weapons, UnitRegistry::empty());
+        let dos_unit = unit(&mut app, UnitKind::Dos, 1, Vec3::X * 300.0, 600.0);
+        let victim = unit(&mut app, UnitKind::Bit, 0, Vec3::ZERO, 1000.0);
+        let recovered = unit(&mut app, UnitKind::Bit, 0, Vec3::Z * 300.0, 1000.0);
+        app.world_mut().get_mut::<StunCharge>(recovered).unwrap().0 = 990.0;
+        let charge = |app: &App, e: Entity| app.world().get::<StunCharge>(e).unwrap().0;
+        let fire = |app: &mut App, at: Entity| {
+            app.world_mut().resource_mut::<DamageQueue>().push(shot(
+                Some(at),
+                dos_unit,
+                dos,
+                Vec3::ZERO,
+            ));
+            run_damage(app);
+        };
+
+        fire(&mut app, victim);
+        fire(&mut app, victim);
+        assert!((charge(&app, victim) - 800.0).abs() < 1e-3);
+        assert!(app.world().get::<Stunned>(victim).is_none());
+        fire(&mut app, victim);
+        assert!(
+            (charge(&app, victim) - 1125.0).abs() < 1e-3,
+            "clamped to the cap"
+        );
+        assert!(app.world().get::<Stunned>(victim).is_some());
+        fire(&mut app, victim);
+        assert!((charge(&app, victim) - 1125.0).abs() < 1e-3, "no room left");
+        assert!(
+            (hp(&app, victim) - 1000.0).abs() < 1e-3,
+            "paralyzers spare health"
+        );
+
+        fire(&mut app, recovered);
+        assert!((charge(&app, recovered) - 1125.0).abs() < 1e-3);
+        assert!(app.world().get::<Stunned>(recovered).is_some());
     }
 
     /// The Firewall ignores paralyzer damage (`not para`), and never
@@ -1544,7 +1642,9 @@ mod tests {
     /// The `ARMORED` choreography: raised on a new unit whose script
     /// sets it, held while it is being built, then dropped after the
     /// script's grace; a Bug that was never built (Exploit pack-up) is
-    /// never armored, kinds whose script ignores the flag neither.
+    /// never armored, kinds whose script ignores the flag neither. A
+    /// dispatched Packet keeps the short grace its spawner gave it
+    /// (packet.bos `Spawned()`), not `Create()`'s 5 s.
     #[test]
     fn armored_flag_follows_the_scripts() {
         let mut app = App::new();
@@ -1566,6 +1666,10 @@ mod tests {
             .id();
         let packed_bug = app.world_mut().spawn(UnitType(UnitKind::Bug)).id();
         let kernel = app.world_mut().spawn(UnitType(UnitKind::Kernel)).id();
+        let dispatched = app
+            .world_mut()
+            .spawn((UnitType(UnitKind::Packet), Armored { after_build: 0.5 }))
+            .id();
         // One registered system, so `Added` is judged against its last run.
         let system = app.world_mut().register_system(update_armored);
         app.world_mut().run_system(system).unwrap();
@@ -1576,6 +1680,13 @@ mod tests {
         assert!(app.world().get::<Armored>(built_bug).is_some());
         assert!(app.world().get::<Armored>(packed_bug).is_none());
         assert!(app.world().get::<Armored>(kernel).is_none());
+        assert_eq!(
+            app.world()
+                .get::<Armored>(dispatched)
+                .map(|a| a.after_build),
+            Some(0.5),
+            "the spawner's grace stands"
+        );
 
         // 3 s later the Bit's 2.5 s grace is over; the Bug is still
         // under construction, so its grace hasn't started.
@@ -1584,6 +1695,7 @@ mod tests {
             .advance_by(std::time::Duration::from_secs(3));
         app.world_mut().run_system(system).unwrap();
         assert!(app.world().get::<Armored>(bit).is_none());
+        assert!(app.world().get::<Armored>(dispatched).is_none());
         assert_eq!(
             app.world().get::<Armored>(built_bug).map(|a| a.after_build),
             Some(3.0)

@@ -57,8 +57,8 @@ pub use damage::{
     update_armored,
 };
 pub use lifecycle::{
-    Dying, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying, death_system, tick_kamikaze,
-    tick_self_destruct, tick_stun,
+    Dying, PARALYZE_DECLINE, SelfDestructCountdown, Stunned, auto_heal, cleanup_dying,
+    death_system, tick_kamikaze, tick_self_destruct, tick_stun,
 };
 
 /// Player-issued order to fire the unit's weapon at a fixed ground position.
@@ -686,6 +686,7 @@ pub(super) fn fire_salvo_shot(
                 weapon: shot.weapon,
                 impact_pos,
                 attacker_distance: aim_dist,
+                detonated: false,
             });
             // Hitscan explodes at fire time (`CGameHelper::Explosion`).
             sounds.explosion(weapon_def, impact_pos);
@@ -803,11 +804,12 @@ fn resolve_weapon<'a>(
 #[derive(Component, Default)]
 pub struct IdleTimer(pub f32);
 
-/// Accumulated paralyzer damage from weapons with `paralyzer=1`. Charge
-/// bleeds off over `STUN_CHARGE_DECAY` once the unit stops getting hit;
-/// when it crosses `max_health` the unit gains a `Stunned` marker for
-/// the weapon's `paralyzetime` seconds. The charge is cleared when
-/// `Stunned` is removed.
+/// The stun meter, `paralyzeDamage`: accumulated damage from weapons
+/// with `paralyzer=1`. Reaching max health stuns ([`Stunned`]); each hit
+/// is clamped so the meter tops out `paralyzetime` seconds of drain above
+/// max health (`DamageResolver::deliver`), and [`tick_stun`] drains it
+/// at 1/40 of max health a second and lifts the stun once it is back at
+/// max health.
 #[derive(Component, Default)]
 pub struct StunCharge(pub f32);
 
@@ -959,6 +961,7 @@ pub fn combat_system(
                     weapon: id,
                     impact_pos: ground,
                     attacker_distance: 0.0,
+                    detonated: false,
                 });
                 pending_explosions.events.push(ExplosionEvent {
                     pos: ground,
@@ -1018,10 +1021,6 @@ pub fn combat_system(
         let try_lof = |to: Vec3| {
             ground_line_of_fire(weapon_def, heightmap.as_deref(), aim_from, to) && lof_clear(to)
         };
-        // Pointer's homing missile is the only ground unit that
-        // overrides upstream's `NoChaseCategory=VTOL` and tracks air.
-        let skip_flying = stats.no_chase_vtol && !unit_type.0.homing_targets_air();
-
         // `(entity, aim position, rank, source)`: lower rank wins.
         let mut best: Option<(Entity, Vec3, TargetRank, TargetSource)> = None;
         let rank_of = |dist_sq: f32| TargetRank {
@@ -1143,9 +1142,6 @@ pub fn combat_system(
                 // Undetected cloaked units (Worms, Logic Bombs) are
                 // invisible to this team's weapons.
                 if !candidate.targetable_by(attacker_team.0) {
-                    return;
-                }
-                if skip_flying && candidate.is_flying {
                     return;
                 }
                 // Upstream `OnlyTargetCategory1`: the Dos beam only ever
@@ -1924,7 +1920,6 @@ mod tests {
             dec_rate: 0.067,
             turn_rate: 3.0,
             can_fly: false,
-            no_chase_vtol: true,
         }
     }
 
@@ -2286,6 +2281,38 @@ mod tests {
             .id()
     }
 
+    /// `NoChaseCategory=VTOL` (every armed ground unit but the DoS) only
+    /// keeps the CAI from *chasing* flyers (`CMobileCAI::IsValidTarget`,
+    /// MobileCAI.cpp:583); a weapon's own auto-target has no such filter,
+    /// so a Bit shoots a Flow passing through its range.
+    #[test]
+    fn ground_weapons_auto_target_flyers_in_range() {
+        let mut app = combat_app(line_weapon_registry());
+        let bit = spawn_bit_shooter(&mut app, WeaponKind::Line);
+        let flow = app.world_mut().spawn_empty().id();
+        app.world_mut()
+            .resource_mut::<SpatialIndex>()
+            .insert_for_test(SpatialEntry {
+                entity: flow,
+                pos: Vec3::new(100.0, 60.0, 0.0),
+                hit_radius: 0.0,
+                mid_y: 0.0,
+                up: Vec3::Y,
+                team: 1,
+                kind: UnitKind::Flow,
+                hp_positive: true,
+                is_flying: true,
+                cloaked: false,
+                detected_by: 0,
+                feature: false,
+            });
+        app.world_mut().run_system_once(combat_system).unwrap();
+        assert_eq!(
+            app.world().get::<TargetCache>(bit).unwrap().target,
+            Some(flow)
+        );
+    }
+
     /// A cloaked enemy is invisible to auto-targeting until the
     /// shooter's team has a detector on it (`DetectedBy` bit set).
     #[test]
@@ -2402,7 +2429,8 @@ mod tests {
 
     /// A surfaced worm's bite queues the Wormbite hit plus two target-
     /// less Wormsplash detonations (worm.bos `emit-sfx 4097 from head`
-    /// and `from end`) so `apply_damage` runs AoE + infection for them.
+    /// and `from end`) so `apply_damage` runs AoE + infection for them
+    /// — explosions, though the def is `Melee` like the bite.
     #[test]
     fn worm_bite_queues_wormsplash_aoe() {
         let (weapons, bite, splash) = worm_weapons();
@@ -2428,12 +2456,13 @@ mod tests {
         assert_eq!(hits.len(), 3);
         assert_eq!(hits[0].weapon, bite);
         assert_eq!(hits[0].target, Some(enemy));
+        assert!(!hits[0].detonated, "the bite itself is melee fire");
         let splashes: Vec<_> = hits.iter().filter(|h| h.weapon == splash).collect();
         assert_eq!(splashes.len(), 2);
         assert!(
             splashes
                 .iter()
-                .all(|h| h.target.is_none() && h.attacker == worm)
+                .all(|h| h.target.is_none() && h.attacker == worm && h.detonated)
         );
         assert!(
             splashes
@@ -3127,9 +3156,7 @@ mod tests {
                 pos: Vec3::new(100.0, 0.0, 0.0),
             });
             if stunned {
-                app.world_mut()
-                    .entity_mut(bit)
-                    .insert(Stunned { remaining: 2.0 });
+                app.world_mut().entity_mut(bit).insert(Stunned);
             }
             app.world_mut()
                 .run_system_once(attack_ground_system)

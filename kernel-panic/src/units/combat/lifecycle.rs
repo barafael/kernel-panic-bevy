@@ -1,8 +1,8 @@
 //! Unit lifecycle: stun, kamikaze trigger, death detection/teardown,
 //! auto-heal.
 //!
-//! Each system reacts to a different terminal state: [`tick_stun`] decays
-//! the [`Stunned`] marker + [`StunCharge`] pool; [`tick_kamikaze`] kills
+//! Each system reacts to a different terminal state: [`tick_stun`] drains
+//! the [`StunCharge`] meter and lifts [`Stunned`]; [`tick_kamikaze`] kills
 //! proximity bombs; [`death_system`] watches for zero-HP units, fires
 //! their death explosion and promotes them to [`Dying`]; [`cleanup_dying`]
 //! despawns once the death anim finishes; [`auto_heal`] regenerates
@@ -14,7 +14,8 @@ use bevy::prelude::*;
 
 use super::damage::{DamageQueue, Infected, PendingDamage, VirusSpawn, VirusSpawnQueue};
 use super::{IdleTimer, StunCharge};
-use crate::sim::DetFloat;
+use crate::net::NetId;
+use crate::sim::{DetFloat, INV_GAME_SPEED, SLOW_UPDATE_RATE, SimTick, slow_update_due};
 use crate::units::assets::animation::UnitAnimator;
 use crate::units::components::{Faction, Health, TeamId, UnitType};
 use crate::units::content::definitions::UnitKind;
@@ -102,17 +103,17 @@ impl SelfDestructCountdown {
 /// `selfDestructCountdown=5` armed as `2·5 + 1` slow updates.
 pub const SELF_DESTRUCT_DELAY: f32 = 5.5;
 
-/// Marks a unit as paralyzed: the combat and movement systems treat it
-/// as inert until `remaining` elapses.
+/// Marks a paralyzed unit (`IsStunned`): the combat and movement systems
+/// treat it as inert until [`tick_stun`] finds its [`StunCharge`] back
+/// at or under its max health.
 #[derive(Component)]
 #[component(storage = "SparseSet")]
-pub struct Stunned {
-    pub remaining: f32,
-}
+pub struct Stunned;
 
-/// How many seconds it takes for accumulated stun charge to fully
-/// dissipate if no further paralyzer damage lands.
-const STUN_CHARGE_DECAY: f32 = 4.0;
+/// `empDeclineRate`, `1 / paralyzeDeclineRate` (modrules `[PARALYZE]`,
+/// which Kernel Panic leaves at the engine's 40): the share of max
+/// health the stun meter drains per second.
+pub const PARALYZE_DECLINE: f32 = 1.0 / 40.0;
 
 /// Regenerate HP: FBI `AutoHeal` always, `IdleAutoHeal` once the unit
 /// has rested past its `IdleTime` (`CUnit::SlowUpdate`:
@@ -159,32 +160,39 @@ pub fn auto_heal(
     }
 }
 
-/// Tick the `Stunned` timer. When it expires, remove the marker
-/// and zero out accumulated stun charge so the unit isn't re-stunned on
-/// the next DOS hit.
+/// `CUnit::SlowUpdate`'s paralysis half (Unit.cpp:991-1012), on each
+/// unit's slow update: the meter drains `maxHealth · 15/30 · 1/40`
+/// (never below zero), stunned or not, then a stunned unit whose meter
+/// is back at or under its max health recovers. The meter is not reset,
+/// so a unit just out of a stun sits at its threshold and the next
+/// paralyzer hit stuns it again (`paralyzeOnMaxHealth`, the engine's
+/// default and Kernel Panic's).
+#[allow(clippy::type_complexity)]
 pub fn tick_stun(
-    time: Res<Time>,
-    mut stunned_q: Query<(Entity, &mut Stunned, Option<&mut StunCharge>), With<Stunned>>,
-    mut charge_q: Query<&mut StunCharge, Without<Stunned>>,
+    tick: Res<SimTick>,
+    mut units: Query<
+        (
+            Entity,
+            Option<&NetId>,
+            &Health,
+            &mut StunCharge,
+            Has<Stunned>,
+        ),
+        Without<Dying>,
+    >,
     mut commands: Commands,
 ) {
-    let dt = time.delta_secs();
-    for (entity, mut stun, charge) in &mut stunned_q {
-        stun.remaining -= dt;
-        if stun.remaining <= 0.0 {
-            commands.entity(entity).remove::<Stunned>();
-            if let Some(mut charge) = charge {
-                charge.0 = 0.0;
-            }
+    let frame = tick.frame();
+    for (entity, id, health, mut charge, stunned) in &mut units {
+        if !slow_update_due(frame, id.map_or(0, |id| id.0)) {
+            continue;
         }
-    }
-
-    // Decay stun charge on unstunned units so a few scattered DOS pings
-    // don't add up to a lockdown hours later.
-    let decay_per_sec = 1.0 / STUN_CHARGE_DECAY;
-    for mut charge in &mut charge_q {
         if charge.0 > 0.0 {
-            charge.0 = (charge.0 - charge.0 * decay_per_sec * dt).det_max(0.0);
+            let drain = health.max * (SLOW_UPDATE_RATE as f32 * INV_GAME_SPEED) * PARALYZE_DECLINE;
+            charge.0 = (charge.0 - drain).det_max(0.0);
+        }
+        if stunned && charge.0 <= health.max {
+            commands.entity(entity).remove::<Stunned>();
         }
     }
 }
@@ -351,6 +359,7 @@ pub fn death_system(
                     weapon: blast.weapon,
                     impact_pos: pos,
                     attacker_distance: 0.0,
+                    detonated: false,
                 });
 
                 explosions.events.push(ExplosionEvent {
@@ -705,6 +714,47 @@ mod tests {
             .id()
     }
 
+    /// `SlowUpdate`'s paralysis half: a capped meter (1125 on a 1000-HP
+    /// unit) drains 1000/80 per slow update, so the stun lifts on the
+    /// tenth: ten slow updates, the weapon's 5 s. The meter is not reset;
+    /// it drains on to zero and stays there.
+    #[test]
+    fn stun_drains_each_slow_update_and_lifts_at_max_health() {
+        let mut world = World::new();
+        world.init_resource::<SimTick>();
+        let unit = world
+            .spawn((
+                Health::full(1000.0),
+                StunCharge(1125.0),
+                Stunned,
+                crate::net::NetId(0),
+            ))
+            .id();
+        let run_to = |world: &mut World, last: u64| {
+            while world.resource::<SimTick>().0 <= last {
+                world.run_system_once(tick_stun).unwrap();
+                world.resource_mut::<SimTick>().0 += 1;
+            }
+        };
+        let charge = |world: &World| world.get::<StunCharge>(unit).unwrap().0;
+
+        // Id 0 updates on frames 0, 15, 30, ...: nine drains by frame 120.
+        run_to(&mut world, 120);
+        assert!((charge(&world) - 1012.5).abs() < 1e-3);
+        assert!(world.get::<Stunned>(unit).is_some());
+        run_to(&mut world, 134);
+        assert!(
+            world.get::<Stunned>(unit).is_some(),
+            "no drain between slow updates"
+        );
+        run_to(&mut world, 135);
+        assert!((charge(&world) - 1000.0).abs() < 1e-3, "not reset");
+        assert!(world.get::<Stunned>(unit).is_none());
+
+        run_to(&mut world, 135 + 81 * 15);
+        assert_eq!(charge(&world), 0.0);
+    }
+
     /// Why: `auto_heal` restarted the rest clock on every move order,
     /// path or aim target, so a moving Flow or a marching Bit never
     /// idle-healed. Upstream `restTime` ticks every frame and only
@@ -724,7 +774,7 @@ mod tests {
         ));
         let fresh = healer(&mut world, 50.0, 0.0);
         let stunned = healer(&mut world, 50.0, 25.0);
-        world.entity_mut(stunned).insert(Stunned { remaining: 5.0 });
+        world.entity_mut(stunned).insert(Stunned);
         world.run_system_once(auto_heal).unwrap();
 
         assert!((world.get::<Health>(marching).unwrap().current - 51.0).abs() < 1e-3);

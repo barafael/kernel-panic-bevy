@@ -1632,7 +1632,7 @@ mod tests {
         let unit = world
             .spawn((
                 queue_of(&[QueuedCommand::Move(next)]),
-                crate::units::combat::Stunned { remaining: 1.0 },
+                crate::units::combat::Stunned,
             ))
             .id();
         advance(&mut world);
@@ -1960,7 +1960,6 @@ mod cross_map_tests {
                         dec_rate: 0.067,
                         turn_rate: 6.0,
                         can_fly: false,
-                        no_chase_vtol: true,
                     },
                     TeamId(0),
                     transform,

@@ -354,7 +354,7 @@ mod tests {
                 });
             }),
             ("stunned", |w, worm| {
-                w.entity_mut(worm).insert(Stunned { remaining: 1.0 });
+                w.entity_mut(worm).insert(Stunned);
             }),
             ("dying", |w, worm| {
                 w.entity_mut(worm).insert(Dying { timer: 1.0 });

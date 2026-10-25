@@ -1086,7 +1086,6 @@ mod tests {
                     dec_rate: 0.03,
                     turn_rate: 3.0,
                     can_fly: true,
-                    no_chase_vtol: false,
                 },
                 Transform::from_xyz(200.0, 100.0, 100.0),
                 MoveTarget(first),

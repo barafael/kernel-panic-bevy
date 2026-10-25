@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use crate::interaction::movement::GroundLift;
 use crate::net::NetId;
-use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SimTick};
+use crate::sim::{GAME_SPEED, SLOW_UPDATE_RATE, SimTick, slow_update_due};
 use crate::units::combat::{DelayedDamage, Dying, Hit};
 use crate::units::components::Health;
 
@@ -47,12 +47,6 @@ impl WaterDamage {
 /// base, stands in the water.
 fn in_water(root_y: f32, lift: f32) -> bool {
     root_y - lift <= WATER_LEVEL
-}
-
-/// Each unit's `SlowUpdate` falls on the frames where `frame + id` is a
-/// multiple of the rate: the stagger by unit id the ground movers use.
-fn slow_update_due(frame: u64, id: u32) -> bool {
-    (frame + u64::from(id)).is_multiple_of(u64::from(SLOW_UPDATE_RATE))
 }
 
 /// What the water reads of a unit: who, and how high its base is.

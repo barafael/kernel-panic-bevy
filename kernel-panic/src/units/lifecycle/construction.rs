@@ -1214,7 +1214,7 @@ mod tests {
         assert!((remaining(&world) - (total - 0.6)).abs() < 1e-3);
 
         // Stunned: no build power, and past the 0.1 s grace it decays.
-        world.entity_mut(builder).insert(Stunned { remaining: 5.0 });
+        world.entity_mut(builder).insert(Stunned);
         let before = remaining(&world);
         ticks(&mut world);
         assert!(

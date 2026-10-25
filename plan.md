@@ -50,8 +50,10 @@ NX Flag, Obelisk's Infection gas, and Bug's FakeBugCannon will re-enter combat v
 ### 1.5 DOS Paralyze / Stun — ✅ DONE
 
 Paralyzer weapons (DOS_Beam) accumulate on `StunCharge` instead of dealing HP damage;
-when charge ≥ max_health, the unit is `Stunned` for `paralyzetime` seconds. Stunned
-units skip combat and movement. Charge decays exponentially between hits. Bits fall
+when charge ≥ max_health, the unit is `Stunned`. Each hit is clamped so the meter tops
+out `paralyzetime` seconds of drain above max_health; it drains at max_health/40 a
+second on each slow update, and the stun lifts once it is back at max_health (the
+engine's `paralyzeOnMaxHealth` model). Stunned units skip combat and movement. Bits fall
 over in one hit; Bytes need many hits. Stunned Bytes lose their closed-state armor
 bonus (forced open) — see §1.6.
 

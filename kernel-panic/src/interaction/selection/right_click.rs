@@ -1025,7 +1025,6 @@ mod tests {
                 dec_rate: 0.067,
                 turn_rate: 3.0,
                 can_fly: false,
-                no_chase_vtol: true,
             },
             Transform::from_xyz(10.0, 0.0, 10.0),
         ));
@@ -1111,7 +1110,6 @@ mod tests {
             dec_rate: 0.067,
             turn_rate: 3.0,
             can_fly: false,
-            no_chase_vtol: true,
         };
         let mine: Vec<Entity> = (0..2)
             .map(|i| {

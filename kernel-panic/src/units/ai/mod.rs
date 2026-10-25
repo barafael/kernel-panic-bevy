@@ -1165,7 +1165,6 @@ mod tests {
                         dec_rate: 0.1,
                         turn_rate: 1.0,
                         can_fly: false,
-                        no_chase_vtol: true,
                     },
                 ))
                 .id()

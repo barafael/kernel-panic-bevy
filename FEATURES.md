@@ -319,9 +319,9 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   *farthest* enemy (negative `proximityPriority`).
 - "Friendly" = same ally team; allies don't shoot each
   other (ally-team friend-or-foe; factions don't matter).
-- Most ground weapons don't chase flying targets — Flow can zip past
-  them safely (`NoChaseCategory=VTOL`). The pointer is the exception —
-  its projectile is homing (for air and ground units).
+- Ground weapons shoot flying units (Flows) that come into range like
+  anything else. `NoChaseCategory=VTOL` only stops a ground unit from
+  *chasing* a flyer; it doesn't change what the weapons may target.
 - Debug (mineblaster) only shoots mines and walls
   (`OnlyTargetCategory1=VOID` filter).
 - Direct-fire weapons need clear line of sight over the terrain; if a
@@ -392,11 +392,13 @@ modrules (QTPFS, `allowUnitCollisionOverlap=1`,
   and reflects the rest back at the attacker (Firewall protection +
   damage reflection).
 - DOS paralysis: paralyzer hits don't deplete HP — they fill a stun
-  meter. When the meter passes max-HP the target freezes and stops
-  firing for `paralyzeTime`. The meter bleeds off when the target
-  stops getting hit, so a few stray DOS pings won't add up to a
-  lockdown later (`paralyzer=1` weapons, `StunCharge` accumulator,
-  exponential decay).
+  meter. When the meter reaches max-HP the target freezes and stops
+  firing. Each hit is capped so the meter tops out `paralyzeTime`
+  (5 s) of drain above max-HP; it drains at 1/40 of max-HP a second,
+  stunned or not, so a stun ends `paralyzeTime` after the last hit.
+  The meter isn't reset when the stun lifts: a DOS that keeps firing
+  keeps its target locked (`paralyzer=1` weapons, `StunCharge`, the
+  engine's `paralyzeOnMaxHealth` model).
 - Bits fall over from one DOS hit; Bytes need many.
 - A unit that hasn't been hurt for long enough starts regenerating HP,
   moving and shooting or not; only incoming damage resets the timer

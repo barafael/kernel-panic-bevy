@@ -69,12 +69,18 @@ use super::state::Fnv;
 /// and a Packet's walk-and-enter — the Security Hole's AutoHold, which
 /// its Worms inherit, and a folded Pointer or Byte that chases and stops
 /// in range (only its shot waits for `Open`).
+/// 16 (2026-10-25, the parity audit): a Worm's bite detonates its
+/// Wormsplash (the 800 splash and the infection); ground weapons shoot
+/// Flows in range (`NoChaseCategory` only stops chasing); a dispatched
+/// Packet's spawn protection lasts 16 frames, not 5 s; the stun meter is
+/// the engine's (capped at `paralyzetime` of drain, drained every slow
+/// update, kept when the stun lifts).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 15;
+pub const SIM_VERSION: u32 = 16;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.

@@ -304,15 +304,6 @@ impl UnitKind {
         matches!(self, UnitKind::Worm | UnitKind::Hole)
     }
 
-    /// Documented exception to `NoChaseCategory=VTOL`: units whose
-    /// projectile homes on air targets despite the FBI filter.
-    /// FEATURES.md §12 calls this out specifically for the Pointer —
-    /// its `octashot.s3o` round tracks ground *and* air (Flows). Every
-    /// other ground unit still respects `NoChaseCategory=VTOL`.
-    pub fn homing_targets_air(self) -> bool {
-        matches!(self, UnitKind::Pointer)
-    }
-
     /// Any directly-buildable mobile combat unit (excludes constructors,
     /// Viruses spawned dynamically, LogicBombs, and support like Terminal).
     pub fn is_combat_unit(self) -> bool {
@@ -487,34 +478,6 @@ mod tests {
         assert!(UnitKind::Gateway.is_constructor());
         assert!(!UnitKind::Bit.is_constructor());
         assert!(!UnitKind::Kernel.is_constructor());
-    }
-
-    /// Only the Pointer's `octashot.s3o` homes on air targets
-    /// (FEATURES.md §12). Every other ground unit respects its FBI
-    /// `NoChaseCategory=VTOL` filter. The combat system AND-combines
-    /// `no_chase_vtol` with `!homing_targets_air` to decide whether to
-    /// skip flying candidates, so widening this list without
-    /// intending to would let any unit tag Flows.
-    #[test]
-    fn only_pointer_homes_on_air_targets() {
-        assert!(UnitKind::Pointer.homing_targets_air());
-        for kind in [
-            UnitKind::Bit,
-            UnitKind::Byte,
-            UnitKind::Bug,
-            UnitKind::Exploit,
-            UnitKind::Dos,
-            UnitKind::Packet,
-            UnitKind::Flow,
-            UnitKind::Worm,
-            UnitKind::Terminal,
-            UnitKind::Obelisk,
-        ] {
-            assert!(
-                !kind.homing_targets_air(),
-                "{kind:?} should not bypass NoChaseCategory=VTOL",
-            );
-        }
     }
 
     #[test]

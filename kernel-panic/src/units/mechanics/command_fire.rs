@@ -248,8 +248,8 @@ const MINELAUNCHER_RETRY: f32 = 0.5;
 /// flown by the same rules with signal.fbi's numbers and the engine's
 /// airplane defaults, per 30 Hz sim frame. Neither stage carries a
 /// `UnitType`, which is what makes them untargetable — same effect as
-/// upstream's `Category=NUKE VTOL` + every ground unit's
-/// `NoChaseCategory=VTOL`.
+/// upstream's signal.fbi `Category=NUKE VTOL`, which no weapon's
+/// `OnlyTargetCategory` (`TARGET`, the DoS's `UNIT`) matches.
 pub const SIGTERM_COOLDOWN: f32 = LUA_ABILITY_RELOAD;
 /// The height the Signal holds above the ground: `CStrafeAirMoveType`'s
 /// `wantedHeight = cruiseAlt × 1.5` (signal.fbi `cruiseAlt=200`).

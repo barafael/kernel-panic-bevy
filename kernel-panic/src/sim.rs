@@ -54,6 +54,13 @@ pub const SIMULATION_HZ: f64 = GAME_SPEED as f64;
 /// unit's `SlowUpdate`s.
 pub const SLOW_UPDATE_RATE: u32 = 15;
 
+/// Whether unit `id`'s `SlowUpdate` falls on `frame`: units stagger by
+/// id, on the frames where `frame + id` is a multiple of
+/// [`SLOW_UPDATE_RATE`], as the ground movers do.
+pub fn slow_update_due(frame: u64, id: u32) -> bool {
+    (frame + u64::from(id)).is_multiple_of(u64::from(SLOW_UPDATE_RATE))
+}
+
 /// Gravity per frame² (negative = down) of the usual Kernel Panic map,
 /// `gravity=50` (`mapInfo->map.gravity = -50 / GAME_SPEED²`). Not every
 /// shipped map uses it (Speed Balls 40, Major Madness and pacman 100,
