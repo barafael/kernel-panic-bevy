@@ -43,8 +43,10 @@ pub struct MusicCatalog {
     pub tracks: Vec<String>,
 }
 
-/// The one playing track entity.
+/// The one playing track entity. It plays on across the match swap,
+/// so the teardown spares it.
 #[derive(Component)]
+#[require(crate::map_loading::PersistentEntity)]
 struct MusicTrack;
 
 /// `music.lua` waits for the stream to end and then more than two

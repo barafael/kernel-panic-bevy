@@ -291,10 +291,11 @@ fn prefetch_selected_map(
     info!("Prefetching {}", setup.map);
 }
 
-/// Marker for UI that survives the match teardown: the launch menu, Esc
+/// Marker for what survives the match teardown: the launch menu, Esc
 /// overlay, and game-over panel all carry it so the swap spares their
-/// whole tree while clearing the match (see [`match_scope`]).
-#[derive(Component)]
+/// whole tree while clearing the match (see [`match_scope`]), and so
+/// does the playing music track (`audio::music`).
+#[derive(Component, Default)]
 pub struct PersistentEntity;
 
 /// Marker on terrain chunk meshes. The placement ghost's cursor ray
