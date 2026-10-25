@@ -394,7 +394,9 @@ pub fn ai_brain(
 /// `AreTeamsAllied`) owns a living unit anymore (someone else finished them, or they never started), the
 /// AI razes itself after `30 + (7*team) % 16` seconds so a stale game
 /// still ends. Units already counting down keep their timer — a fresh
-/// insert every tick would reset the fuse and it would never fire.
+/// insert every tick would reset the fuse and it would never fire. An AI
+/// down to its last unit does nothing at all, not even keep the clock
+/// (upstream's `GetTeamUnitCount(t) > 1`): a lone homebase stands.
 fn run_late_game(
     team: u8,
     s: &AiScratch,
@@ -403,6 +405,9 @@ fn run_late_game(
     now: f32,
     orders: &mut CommandBus,
 ) {
+    if s.force.get(&team).is_none_or(|&n| n <= 1) {
+        return;
+    }
     if s.counts.keys().any(|t| !s.alliances.friendly(*t, team)) {
         ticker.no_enemies_since.remove(&team);
         return;

@@ -75,12 +75,14 @@ use super::state::Fnv;
 /// Packet's spawn protection lasts 16 frames, not 5 s; the stun meter is
 /// the engine's (capped at `paralyzetime` of drain, drained every slow
 /// update, kept when the stun lifts).
+/// 17 (2026-10-25): an AI with no enemy left razes itself only while it
+/// has more than one unit (upstream `SuicideIfAlone`).
 ///
 /// [`SimCommand::Dropped`]: crate::net::SimCommand::Dropped
 /// [`SimCommand::Returned`]: crate::net::SimCommand::Returned
 /// [`SimCommand::InternalSpeed`]: crate::net::SimCommand::InternalSpeed
 /// [`MatchRules`]: crate::net::MatchRules
-pub const SIM_VERSION: u32 = 16;
+pub const SIM_VERSION: u32 = 17;
 
 /// The map-independent half of [`Compat`]: what a peer announces when
 /// it joins a room, before any map is chosen.
