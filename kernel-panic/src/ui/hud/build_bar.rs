@@ -462,7 +462,9 @@ fn render_bar(
     let sig = if state.entries.is_empty() {
         0
     } else {
-        structure_signature(&state, view, hit, mouse_down)
+        // The press only shows as the wash of a hovered icon: a click
+        // anywhere else leaves the bar as it is.
+        structure_signature(&state, view, hit, hit.is_some() && mouse_down)
     };
     if !needs_rebuild(&mut commands, sig, &mut last, &roots) {
         // Same layout: advance the pies and countdowns in place.

@@ -334,7 +334,9 @@ fn same_shape(a: &[Line], b: &[Line]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.len() == y.len())
 }
 
-type UnitInfo<'w, 's> = Query<
+/// The units the tooltip may describe: the selected or the hovered ones
+/// (`F`), never a pass over every unit.
+type UnitInfo<'w, 's, F> = Query<
     'w,
     's,
     (
@@ -342,9 +344,8 @@ type UnitInfo<'w, 's> = Query<
         &'static UnitType,
         Option<&'static Health>,
         Option<&'static TeamId>,
-        Has<Selected>,
-        Has<Hovered>,
     ),
+    F,
 >;
 
 #[allow(clippy::too_many_arguments)]
@@ -352,7 +353,8 @@ fn refresh_tooltip(
     mut commands: Commands,
     windows: Query<&Window, With<PrimaryWindow>>,
     hover: Res<HoverTip>,
-    units: UnitInfo,
+    selection: UnitInfo<With<Selected>>,
+    hovered: UnitInfo<With<Hovered>>,
     registry: Res<UnitRegistry>,
     buffer: Option<Res<PacketBuffer>>,
     local: Option<Res<LocalTeam>>,
@@ -374,10 +376,10 @@ fn refresh_tooltip(
         *tree = None;
         return;
     }
-    let selected = units.iter().filter(|u| u.4).count();
+    let selected = selection.iter().count();
     // The selection's types, most numerous first.
     let mut types: Vec<(UnitKind, usize)> = Vec::new();
-    for (_, ut, ..) in units.iter().filter(|u| u.4) {
+    for (_, ut, ..) in &selection {
         match types.iter_mut().find(|(k, _)| *k == ut.0) {
             Some((_, n)) => *n += 1,
             None => types.push((ut.0, 1)),
@@ -388,12 +390,12 @@ fn refresh_tooltip(
             .then_with(|| registry.name(a.0).cmp(registry.name(b.0)))
     });
     // The unit under the cursor, else the last selected one.
-    let shown = units
+    let shown = hovered
         .iter()
-        .find(|u| u.5)
-        .or_else(|| units.iter().filter(|u| u.4).max_by_key(|u| u.0));
+        .next()
+        .or_else(|| selection.iter().max_by_key(|u| u.0));
     let local_team = local.map(|l| l.0);
-    let unit = shown.map(|(_, ut, health, team, ..)| {
+    let unit = shown.map(|(_, ut, health, team)| {
         let packets =
             (ut.0.is_teleporter() && team.is_some_and(|t| Some(t.0) == local_team)).then(|| {
                 buffer
