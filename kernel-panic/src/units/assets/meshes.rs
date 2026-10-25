@@ -57,9 +57,9 @@ pub struct S3OModelCache {
 /// the same owner colour. Builds a team-colored texture from the s3o
 /// model's tex1 alpha channel, falling back to a flat emissive material.
 ///
-/// Spring's s3o shader uses tex1's alpha as the detail pattern and RGB=black
-/// to mean "100% team color". We bake the owner's color into the texture so
-/// that Bevy's standard unlit material renders it correctly.
+/// Spring's model shader mixes the team colour into tex1 by tex1's alpha
+/// ([`colorize_texture`]). We bake that mix for the owner's colour into
+/// the texture so that Bevy's standard unlit material renders it.
 ///
 /// The returned handle is shared, so callers that want a per-unit
 /// variant (emerge fade, cloak, highlight) must clone the asset into
@@ -394,39 +394,29 @@ fn build_team_texture(
     Some(handle)
 }
 
-/// Apply a team `color` to a raw TGA texture using Spring's tex1
-/// convention: RGB=black → 100% team color, alpha → brightness mask.
+/// Bake a team `color` into a raw TGA texture by the model shader's rule
+/// (`ModelFragProgGL4.glsl:101`, `mix(tex1.rgb, teamColor, tex1.a)`):
+/// tex1's alpha is the share of team colour, and its RGB shows through
+/// the rest. A black, alpha-0 texel stays black, and the Bad Block's
+/// red and yellow (alpha 0 all over) show as they are. Always opaque:
+/// tex1's alpha is only that weight.
 fn colorize_texture(tga: &TgaImage, color: Color) -> Vec<u8> {
     let linear = LinearRgba::from(color);
-    let fr = (linear.red.det_clamp(0.0, 1.0) * 255.0) as u8;
-    let fg = (linear.green.det_clamp(0.0, 1.0) * 255.0) as u8;
-    let fb = (linear.blue.det_clamp(0.0, 1.0) * 255.0) as u8;
+    let team = [linear.red, linear.green, linear.blue]
+        .map(|c| u16::from((c.det_clamp(0.0, 1.0) * 255.0) as u8));
 
     let pixel_count = (tga.width * tga.height) as usize;
     let mut pixels = Vec::with_capacity(pixel_count * 4);
 
     for chunk in tga.pixels.as_chunks::<4>().0 {
-        let (src_r, src_g, src_b) = (chunk[0], chunk[1], chunk[2]);
-        let alpha = chunk[3] as u16;
-
-        let brightness = src_r.max(src_g).max(src_b);
-        let (base_r, base_g, base_b) = if brightness == 0 {
-            (fr, fg, fb)
-        } else {
-            let t = brightness as u16;
-            (
-                ((fr as u16 * (255 - t) + src_r as u16 * t) / 255) as u8,
-                ((fg as u16 * (255 - t) + src_g as u16 * t) / 255) as u8,
-                ((fb as u16 * (255 - t) + src_b as u16 * t) / 255) as u8,
-            )
-        };
-
-        // alpha=0 → dim (~10% base), alpha=255 → full brightness. Always opaque.
-        let scale = 25 + (alpha * 230 / 255);
-        let r = (base_r as u16 * scale / 255) as u8;
-        let g = (base_g as u16 * scale / 255) as u8;
-        let b = (base_b as u16 * scale / 255) as u8;
-        pixels.extend_from_slice(&[r, g, b, 255]);
+        let a = u16::from(chunk[3]);
+        let mix = |src: u8, team: u16| ((u16::from(src) * (255 - a) + team * a + 127) / 255) as u8;
+        pixels.extend_from_slice(&[
+            mix(chunk[0], team[0]),
+            mix(chunk[1], team[1]),
+            mix(chunk[2], team[2]),
+            255,
+        ]);
     }
 
     pixels
@@ -529,5 +519,33 @@ fn collect_piece(
 
     for child in &piece.children {
         collect_piece(child, world_offset, scale, positions, normals, uvs, indices);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `mix(tex1.rgb, team, tex1.a)`: alpha 0 shows the texture's own
+    /// colour (the Bad Block's red) and keeps black black, alpha 255 is
+    /// all team colour, and the bake is opaque.
+    #[test]
+    fn team_colour_mixes_in_by_alpha() {
+        let tga = TgaImage {
+            width: 4,
+            height: 1,
+            #[rustfmt::skip]
+            pixels: vec![
+                200, 0, 0, 0,
+                0, 0, 0, 0,
+                0, 0, 0, 255,
+                200, 100, 0, 128,
+            ],
+        };
+        let out = colorize_texture(&tga, Color::linear_rgb(0.0, 0.0, 1.0));
+        assert_eq!(out[0..4], [200, 0, 0, 255]);
+        assert_eq!(out[4..8], [0, 0, 0, 255]);
+        assert_eq!(out[8..12], [0, 0, 255, 255]);
+        assert_eq!(out[12..16], [100, 50, 128, 255], "half and half");
     }
 }
