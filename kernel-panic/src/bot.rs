@@ -9,8 +9,11 @@
 //!
 //! Units are addressed by their entity index (`id` in dumps). A
 //! selector is `all` (every mobile unit), `<id>[,<id>…]`, `kind:<name>`
-//! (FBI unitname, e.g. `kind:bit`), `team:<n>`, or `last` (the most
-//! recently spawned unit).
+//! (FBI unitname, e.g. `kind:bit`), `team:<n>`, `mine` (the local
+//! player's mobile units), or `last` (the most recently spawned unit).
+//! Where a command takes a team, `me` is the local player's: in a
+//! networked match the seat is the lobby's to give (the host sits
+//! first), and the log says which at the first tick (`team <n>`).
 //!
 //! Commands (one per line, `#` comments):
 //! - `spawn <kind> <team> <x> <z> [count [spacing]]` — spawn units of
@@ -71,7 +74,7 @@ use std::path::PathBuf;
 use bevy::prelude::*;
 use strum::VariantArray;
 
-use crate::game_setup::{AppState, DevOptions, GameSetup, PlayerSpec};
+use crate::game_setup::{ActiveMatch, AppState, DevOptions, GameSetup, PlayerSpec};
 use crate::interaction::ground_move::GroundMover;
 use crate::interaction::movement::{
     CommandQueue, MovePath, MoveTarget, NavGridSet, ground_clamp_system, movement_system,
@@ -84,6 +87,7 @@ use crate::rendering::camera::{RtsCamera, RtsCameraState};
 use crate::sim::{DetFloat, GAME_SPEED};
 use crate::terrain::heightmap::Heightmap;
 use crate::units::combat::Dying;
+use crate::units::player::LocalTeam;
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
@@ -127,6 +131,7 @@ impl Plugin for BotPlugin {
             last_spawned: None,
             // Networked: the bot commands its own seat only.
             god: crate::net::lobby::launch_room().is_some(),
+            team: 0,
         })
         .init_resource::<DevSpawned>()
         .add_systems(Update, bot_boot)
@@ -140,9 +145,18 @@ impl Plugin for BotPlugin {
                     .before(movement_system),
                 bot_trace.after(ground_clamp_system),
             )
-                .run_if(in_state(AppState::InGame)),
+                .run_if(in_state(AppState::InGame))
+                .run_if(own_match),
         );
     }
+}
+
+/// The bot's match is the running one. `InGame` comes first: the menu's
+/// demo world keeps running until the new map is swapped in
+/// (`ActiveMatch`), and the bot must neither count its ticks nor send
+/// it commands.
+fn own_match(active: Option<Res<ActiveMatch>>) -> bool {
+    active.is_some_and(|m| !m.0.demo)
 }
 
 #[derive(Resource)]
@@ -163,6 +177,8 @@ struct Bot {
     last_spawned: Option<Entity>,
     /// God mode requested (once, at the first tick).
     god: bool,
+    /// The local player's team (`LocalTeam`), as of this tick.
+    team: u8,
 }
 
 impl Bot {
@@ -249,7 +265,14 @@ fn bot_boot(
 /// What a selector resolves to.
 fn select(sel: &str, bot: &Bot, units: &Query<UnitView>) -> Vec<Entity> {
     let mut out = Vec::new();
-    if sel == "all" {
+    if sel == "mine" {
+        out.extend(
+            units
+                .iter()
+                .filter(|u| u.team.0 == bot.team && u.stats.speed > 0.0)
+                .map(|u| u.entity),
+        );
+    } else if sel == "all" {
         out.extend(
             units
                 .iter()
@@ -332,11 +355,16 @@ fn bot_tick(
     units: Query<UnitView>,
     mut camera: Query<&mut RtsCameraState, With<RtsCamera>>,
     mut exit: MessageWriter<AppExit>,
+    local: Option<Res<LocalTeam>>,
 ) {
     let Some(hm) = heightmap.as_deref() else {
         return;
     };
     bot.frame += 1;
+    bot.team = local.map_or(0, |t| t.0);
+    if bot.frame == 1 {
+        bot.log(&format!("team {}", bot.team));
+    }
     if !bot.god {
         // The bot commands every team (`team:1`, spawned enemies).
         bus.issue(SimCommand::Dev(DevCommand::GodMode { on: true }));
@@ -366,7 +394,10 @@ fn bot_tick(
             }
             "spawn" => {
                 let kind = it.next().and_then(parse_kind);
-                let team = it.next().and_then(|v| v.parse::<u8>().ok());
+                let team = it.next().and_then(|v| match v {
+                    "me" => Some(bot.team),
+                    v => v.parse::<u8>().ok(),
+                });
                 let (x, z) = (f(it.next()), f(it.next()));
                 let count = it.next().and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
                 let spacing = f(it.next()).unwrap_or(24.0);

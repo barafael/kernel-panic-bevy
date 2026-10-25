@@ -197,6 +197,18 @@ impl Peers {
         }
     }
 
+    /// The team each bot logged at its first tick (`team <n>`).
+    pub fn teams(&self) -> Vec<Option<u8>> {
+        self.peers
+            .iter()
+            .map(|p| {
+                let log = fs::read_to_string(p.dir.join("bot/log")).ok()?;
+                log.lines()
+                    .find_map(|l| l.split_once("] team ")?.1.parse().ok())
+            })
+            .collect()
+    }
+
     /// Every game running for `span`, without a fatal line.
     pub fn watch(&mut self, span: Duration) -> Result<(), String> {
         let t0 = Instant::now();

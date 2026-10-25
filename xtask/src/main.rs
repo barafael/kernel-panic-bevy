@@ -176,7 +176,10 @@ fn check(o: &Opts, peers: &mut Peers) -> Result<(), String> {
     // A debug build's first frames, the room and the map's load.
     let start = Duration::from_secs(if o.release { 90 } else { 240 });
     let frames = peers.wait_ack("started", start)?;
-    println!("testbox: every game is in the match (bot frames {frames:?})");
+    println!(
+        "testbox: every game is in the match (bot frames {frames:?}, teams {:?})",
+        peers.teams()
+    );
     peers.watch(Duration::from_secs(o.secs))?;
     peers.send_all("ping done");
     let frames = peers.wait_ack("done", Duration::from_secs(30))?;
