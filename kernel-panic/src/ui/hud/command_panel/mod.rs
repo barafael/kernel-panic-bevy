@@ -125,6 +125,24 @@ impl PanelCommands {
     }
 }
 
+/// The bot's `button`: the centre of the shown page's button labelled
+/// `name` (any case), in logical pixels of a `view`-sized window.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn button_centre(
+    panel: &PanelCommands,
+    page: usize,
+    name: &str,
+    view: Vec2,
+) -> Option<Vec2> {
+    let slot = panel.pages.get(page)?.iter().position(|s| match s {
+        Some(SlotCmd::Command(i)) => panel.list.get(*i).is_some_and(|d| {
+            d.name.eq_ignore_ascii_case(name) || d.label().eq_ignore_ascii_case(name)
+        }),
+        _ => false,
+    })?;
+    Some(KP_CTRL_PANEL.icon_px(slot, view).center())
+}
+
 /// `activePage`.
 #[derive(Resource, Default)]
 pub(crate) struct PanelPage(pub usize);

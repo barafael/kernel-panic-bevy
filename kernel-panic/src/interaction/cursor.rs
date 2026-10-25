@@ -147,7 +147,7 @@ const FRAME_SECONDS: f32 = 0.1;
 
 /// Per-cursor frame storage. Built once at startup.
 #[derive(Resource, Default)]
-struct CursorState {
+pub(crate) struct CursorState {
     frames: HashMap<CursorKind, Vec<Handle<Image>>>,
     /// The [`CursorKind::scale`]× copy of each frame, once it has loaded.
     scaled: HashMap<CursorKind, Vec<Option<Handle<Image>>>>,
@@ -155,6 +155,15 @@ struct CursorState {
     current: Option<(CursorKind, usize)>,
     /// Time accumulator for frame cycling.
     timer: Timer,
+}
+
+impl CursorState {
+    /// The cursor the window shows (the bot's `ui` logs it: a screenshot
+    /// has no cursor).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn shown(&self) -> Option<CursorKind> {
+        self.current.map(|(kind, _)| kind)
+    }
 }
 
 /// One slot in [`CursorRequest`].

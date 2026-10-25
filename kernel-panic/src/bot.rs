@@ -10,7 +10,8 @@
 //! Units are addressed by their entity index (`id` in dumps). A
 //! selector is `all` (every mobile unit), `<id>[,<id>…]`, `kind:<name>`
 //! (FBI unitname, e.g. `kind:bit`), `team:<n>`, `mine` (the local
-//! player's mobile units), or `last` (the most recently spawned unit).
+//! player's mobile units), `mine:<name>` (the local player's units of
+//! that kind, buildings too), or `last` (the most recently spawned unit).
 //! Where a command takes a team, `me` is the local player's: in a
 //! networked match the seat is the lobby's to give (the host sits
 //! first), and the log says which at the first tick (`team <n>`).
@@ -27,6 +28,32 @@
 //!   normal death path, blast and all).
 //! - `cam <x> <z> [distance]` — snap the camera onto that ground point.
 //! - `shot <name>` — screenshot to `<dir>/<name>.png`.
+//! - `build <sel> <kind> [count]` — queue `count` (default 1) of `kind`
+//!   at the factories; `nx <sel> <x> <z>` — cast the selection's aimed
+//!   abilities at that point.
+//! - `dispatch <sel> <x> <z> [alt]` — the Ports and Connections dispatch
+//!   Packets towards that point (`alt`: until the buffer is empty);
+//!   `enter <sel> [<id>]` — the Packets walk into teleporter `<id>`, or
+//!   without one enter the nearest in reach (the E key's order).
+//! - `select <sel>` — the player's selection becomes these units (the
+//!   command panel, highlights and bars follow it).
+//! - The player's mouse and keyboard, for the HUD: `mouse <sx> <sy>`
+//!   puts the cursor at that window position (logical pixels from the
+//!   top left), `point <x> <z>` over that ground point (`point <id>`:
+//!   over that unit) and `button <name>` on the command panel's button
+//!   of that name; `click
+//!   [left|right|middle]` presses and releases there, `press` /
+//!   `release <button>` do one half (a drag: `wait` after the press,
+//!   move, `wait`, release); `key <key>` taps a key (`d`, `e`, `esc`,
+//!   `1`, `f1`…), `hold` / `unhold <key>` keeps one down (`alt`,
+//!   `shift`, `ctrl`). Each press and release takes a frame of its own,
+//!   as a player's would, and the commands after them wait until the
+//!   HUD has seen them (whatever the game speed).
+//! - `ui` — log what the player sees: the cursor (a screenshot has
+//!   none), the armed order, the selection, the command panel's page
+//!   and the packet buffer.
+//! - `vents <x> <z> [count]` — log the datavents nearest that point
+//!   (default 8), and which are taken.
 //! - `speed <factor>`, `pause`, `resume` — the game clock.
 //! - `room` — "Back to room" (a networked match: resign, back to the
 //!   lobby with the same connection); `menu` — leave to the main menu.
@@ -78,25 +105,34 @@ use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
 
+use bevy::ecs::system::SystemParam;
+use bevy::input::InputSystems;
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use strum::VariantArray;
 
 use crate::game_setup::{ActiveMatch, AppState, DevOptions, GameSetup, PlayerSpec};
+use crate::interaction::ability::OrderCursorModes;
+use crate::interaction::cursor::CursorState;
 use crate::interaction::ground_move::GroundMover;
 use crate::interaction::movement::{
     CommandQueue, MovePath, MoveTarget, NavGridSet, ground_clamp_system, movement_system,
 };
+use crate::interaction::selection::Selected;
 use crate::net::control::{DevSpawned, MAX_SPEED_PERCENT, MIN_SPEED_PERCENT};
 use crate::net::{
     CommandBus, DevCommand, FactoryOp, IdList, NetId, NetPos, Order, SimCommand, Units,
 };
 use crate::rendering::camera::{RtsCamera, RtsCameraState};
 use crate::sim::{DetFloat, GAME_SPEED};
+use crate::terrain::geovent::{GeoventSmoker, VentClaim};
 use crate::terrain::heightmap::Heightmap;
+use crate::ui::hud::command_panel::{PanelCommands, PanelPage, button_centre};
 use crate::units::combat::Dying;
 use crate::units::components::{Faction, Health, TeamId, UnitStats, UnitType};
 use crate::units::content::definitions::UnitKind;
 use crate::units::content::unit_registry::UnitRegistry;
+use crate::units::mechanics::network_buffer::PacketBuffer;
 use crate::units::player::LocalTeam;
 
 /// Frames of menu before starting the skirmish (the map catalog must
@@ -144,7 +180,11 @@ impl Plugin for BotPlugin {
             played: false,
         })
         .init_resource::<DevSpawned>()
+        .init_resource::<BotInput>()
         .add_systems(Update, (bot_boot, bot_stalled))
+        // After the window's own input: the HUD reads the bot's presses
+        // as it reads a player's, this frame.
+        .add_systems(PreUpdate, bot_input.after(InputSystems))
         .add_systems(
             FixedUpdate,
             (
@@ -297,6 +337,15 @@ fn select(sel: &str, bot: &Bot, units: &Query<UnitView>) -> Vec<Entity> {
         );
     } else if sel == "last" {
         out.extend(bot.last_spawned);
+    } else if let Some(kind) = sel.strip_prefix("mine:") {
+        if let Some(kind) = parse_kind(kind) {
+            out.extend(
+                units
+                    .iter()
+                    .filter(|u| u.team.0 == bot.team && u.kind.0 == kind)
+                    .map(|u| u.entity),
+            );
+        }
     } else if let Some(kind) = sel.strip_prefix("kind:") {
         if let Some(kind) = parse_kind(kind) {
             out.extend(units.iter().filter(|u| u.kind.0 == kind).map(|u| u.entity));
@@ -373,6 +422,7 @@ fn bot_tick(
     mut exit: MessageWriter<AppExit>,
     local: Option<Res<LocalTeam>>,
     active: Res<ActiveMatch>,
+    mut ui: BotUi,
 ) {
     let Some(hm) = heightmap.as_deref() else {
         return;
@@ -404,7 +454,7 @@ fn bot_tick(
     if bot.dump_every > 0 && bot.frame.is_multiple_of(bot.dump_every) {
         dump_state(&bot, &units);
     }
-    while bot.frame >= bot.wait_until {
+    while bot.frame >= bot.wait_until && ui.input.settled() {
         let Some(line) = bot.pending.pop_front() else {
             break;
         };
@@ -516,6 +566,165 @@ fn bot_tick(
                 });
                 bot.log(&format!("nx {} units -> {x},{z}", targets.len()));
             }
+            "dispatch" => {
+                let sel = it.next().unwrap_or("");
+                let (Some(x), Some(z)) = (f(it.next()), f(it.next())) else {
+                    bot.log(&format!("bad dispatch: {line}"));
+                    continue;
+                };
+                let auto = it.next() == Some("alt");
+                let targets = select(sel, &bot, &units);
+                bus.issue(SimCommand::Cast {
+                    units: Units::List(ids(&targets, &units)),
+                    target: NetPos::quantize(hm.place(x, z)),
+                    auto,
+                });
+                bot.log(&format!(
+                    "dispatch from {} teleporters -> {x},{z}{}",
+                    targets.len(),
+                    if auto { " (alt)" } else { "" }
+                ));
+            }
+            "enter" => {
+                let targets = select(it.next().unwrap_or(""), &bot, &units);
+                let units_list = Units::List(ids(&targets, &units));
+                let teleporter = it
+                    .next()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .and_then(|id| units.iter().find(|u| u.entity.index_u32() == id));
+                match teleporter {
+                    Some(t) => {
+                        bus.issue(SimCommand::Order {
+                            units: units_list,
+                            order: Order::Enter(*t.id),
+                            queue: false,
+                        });
+                        bot.log(&format!(
+                            "enter {} units -> {}",
+                            targets.len(),
+                            t.entity.index_u32()
+                        ));
+                    }
+                    None => {
+                        bus.issue(SimCommand::Enter { units: units_list });
+                        bot.log(&format!("enter {} units (nearest)", targets.len()));
+                    }
+                }
+            }
+            "select" => {
+                let targets = select(it.next().unwrap_or(""), &bot, &units);
+                for e in &ui.selected {
+                    if !targets.contains(&e) {
+                        commands.entity(e).remove::<Selected>();
+                    }
+                }
+                for &e in &targets {
+                    commands.entity(e).insert(Selected);
+                }
+                bot.log(&format!("select {} units", targets.len()));
+            }
+            "mouse" => match (f(it.next()), f(it.next())) {
+                (Some(x), Some(y)) => ui.input.steps.push_back(InputStep::Cursor(Vec2::new(x, y))),
+                _ => bot.log(&format!("bad mouse: {line}")),
+            },
+            "point" => {
+                let (a, b) = (it.next(), f(it.next()));
+                // `point <id>`: where that unit stands now.
+                let unit = b
+                    .is_none()
+                    .then(|| a.and_then(|v| v.parse::<u32>().ok()))
+                    .flatten()
+                    .and_then(|id| units.iter().find(|u| u.entity.index_u32() == id));
+                let (x, z) = match (unit, f(a), b) {
+                    (Some(u), ..) => (u.transform.translation.x, u.transform.translation.z),
+                    (None, Some(x), Some(z)) => (x, z),
+                    _ => {
+                        bot.log(&format!("bad point: {line}"));
+                        continue;
+                    }
+                };
+                let at = ui
+                    .view
+                    .single()
+                    .ok()
+                    .and_then(|(cam, tf)| cam.world_to_viewport(tf, hm.place(x, z)).ok());
+                match at {
+                    Some(at) => {
+                        ui.input.steps.push_back(InputStep::Cursor(at));
+                        bot.log(&format!("point {x},{z}: cursor at {:.0},{:.0}", at.x, at.y));
+                    }
+                    None => bot.log(&format!("point {x},{z}: not on screen")),
+                }
+            }
+            "button" => {
+                let name = it.collect::<Vec<_>>().join(" ");
+                let view = ui.windows.single().map(|w| w.size()).ok();
+                let at = ui.panel.as_deref().zip(view).and_then(|(panel, view)| {
+                    button_centre(panel, ui.page.as_ref().map_or(0, |p| p.0), &name, view)
+                });
+                match at {
+                    Some(at) => {
+                        ui.input.steps.push_back(InputStep::Cursor(at));
+                        bot.log(&format!("button {name}: cursor at {:.0},{:.0}", at.x, at.y));
+                    }
+                    None => bot.log(&format!("button {name}: not on the panel ({})", ui.line())),
+                }
+            }
+            "click" | "press" | "release" => {
+                let Some(button) = parse_button(it.next()) else {
+                    bot.log(&format!("bad {cmd}: {line}"));
+                    continue;
+                };
+                if cmd != "release" {
+                    ui.input.steps.push_back(InputStep::Mouse(button, true));
+                }
+                if cmd != "press" {
+                    ui.input.steps.push_back(InputStep::Mouse(button, false));
+                }
+            }
+            "key" | "hold" | "unhold" => {
+                let Some(key) = it.next().and_then(parse_key) else {
+                    bot.log(&format!("bad {cmd}: {line}"));
+                    continue;
+                };
+                if cmd != "unhold" {
+                    ui.input.steps.push_back(InputStep::Key(key, true));
+                }
+                if cmd != "hold" {
+                    ui.input.steps.push_back(InputStep::Key(key, false));
+                }
+            }
+            "vents" => {
+                let (Some(x), Some(z)) = (f(it.next()), f(it.next())) else {
+                    bot.log(&format!("bad vents: {line}"));
+                    continue;
+                };
+                let count = it.next().and_then(|v| v.parse().ok()).unwrap_or(8);
+                let mut vents: Vec<_> = ui
+                    .vents
+                    .iter()
+                    .map(|(v, taken)| (v.pos.xz().distance(Vec2::new(x, z)), v.pos, taken))
+                    .collect();
+                vents.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let mut s = format!("vents near {x},{z}:");
+                for (d, pos, taken) in vents.into_iter().take(count) {
+                    let _ = write!(
+                        s,
+                        " ({:.0},{:.0} d={d:.0}{})",
+                        pos.x,
+                        pos.z,
+                        if taken { " taken" } else { "" }
+                    );
+                }
+                bot.log(&s);
+            }
+            "ui" => {
+                let mut s = ui.line();
+                if let Some(buffer) = ui.buffer.as_deref() {
+                    let _ = write!(s, "; buffer {}", buffer.peek(bot.team));
+                }
+                bot.log(&format!("ui: {s}"));
+            }
             "stop" => {
                 let targets = select(it.next().unwrap_or(""), &bot, &units);
                 bus.issue(SimCommand::Stop {
@@ -569,6 +778,7 @@ fn bot_tick(
                     bus.issue(SimCommand::SetSpeed {
                         percent: percent as u16,
                     });
+                    bot.log(&format!("speed {percent}%"));
                 }
             }
             "pause" => {
@@ -725,6 +935,151 @@ fn bot_tick(
             _ => bot.log(&format!("unknown command: {line}")),
         }
     }
+}
+
+/// The player's side the bot reads and works: the selection, the
+/// cursor, the HUD.
+#[derive(SystemParam)]
+struct BotUi<'w, 's> {
+    input: ResMut<'w, BotInput>,
+    selected: Query<'w, 's, Entity, With<Selected>>,
+    view: Query<'w, 's, (&'static Camera, &'static GlobalTransform), With<RtsCamera>>,
+    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    panel: Option<Res<'w, PanelCommands>>,
+    page: Option<Res<'w, PanelPage>>,
+    cursor: Option<Res<'w, CursorState>>,
+    modes: Option<Res<'w, OrderCursorModes>>,
+    buffer: Option<Res<'w, PacketBuffer>>,
+    vents: Query<'w, 's, (&'static GeoventSmoker, Has<VentClaim>)>,
+}
+
+impl BotUi<'_, '_> {
+    /// The cursor, the armed order, the selection and the command
+    /// panel's page, as the player sees them.
+    fn line(&self) -> String {
+        let mut s = format!(
+            "cursor {:?}, armed {:?}, {} selected",
+            self.cursor.as_deref().and_then(CursorState::shown),
+            self.modes.as_deref().and_then(|m| m.mode),
+            self.selected.iter().count(),
+        );
+        if let Some(panel) = self.panel.as_deref() {
+            let page = self.page.as_ref().map_or(0, |p| p.0);
+            let _ = write!(s, ", panel page {}/{}:", page + 1, panel.pages.len());
+            for d in &panel.list {
+                let _ = write!(
+                    s,
+                    " [{}{}]",
+                    d.label(),
+                    if d.disabled { " (disabled)" } else { "" }
+                );
+            }
+        }
+        s
+    }
+}
+
+/// The player's mouse and keyboard as the bot works them, applied by
+/// [`bot_input`].
+#[derive(Resource, Default)]
+struct BotInput {
+    steps: VecDeque<InputStep>,
+    /// Frames until the HUD has run on the last step applied.
+    settling: u8,
+}
+
+impl BotInput {
+    /// Every step applied, and the HUD has seen the last one.
+    fn settled(&self) -> bool {
+        self.steps.is_empty() && self.settling == 0
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum InputStep {
+    /// The cursor to this window position (logical pixels).
+    Cursor(Vec2),
+    Mouse(MouseButton, bool),
+    Key(KeyCode, bool),
+}
+
+/// The bot's input steps, after the window's: cursor moves at once, then
+/// at most one press or release a frame, so the HUD sees each as a
+/// `just_pressed` / `just_released`. The cursor stays where the bot
+/// put it until the real one moves over the window.
+fn bot_input(
+    mut input: ResMut<BotInput>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut mouse: ResMut<ButtonInput<MouseButton>>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+) {
+    input.settling = input.settling.saturating_sub(1);
+    while let Some(step) = input.steps.pop_front() {
+        // This frame's `Update` reads it; the bot goes on after the next.
+        input.settling = 2;
+        match step {
+            InputStep::Cursor(at) => {
+                if let Ok(mut window) = windows.single_mut() {
+                    window.set_cursor_position(Some(at));
+                }
+                continue;
+            }
+            InputStep::Mouse(button, true) => mouse.press(button),
+            InputStep::Mouse(button, false) => mouse.release(button),
+            InputStep::Key(key, true) => keys.press(key),
+            InputStep::Key(key, false) => keys.release(key),
+        }
+        break;
+    }
+}
+
+fn parse_button(name: Option<&str>) -> Option<MouseButton> {
+    match name.unwrap_or("left") {
+        "left" => Some(MouseButton::Left),
+        "right" => Some(MouseButton::Right),
+        "middle" => Some(MouseButton::Middle),
+        _ => None,
+    }
+}
+
+/// A key by name: a letter or digit, `f1`…`f12`, or `esc`, `enter`,
+/// `space`, `tab`, `shift`, `ctrl`, `alt`, `backspace`, `delete`, `up`,
+/// `down`, `left`, `right`.
+fn parse_key(name: &str) -> Option<KeyCode> {
+    use KeyCode::*;
+    const LETTERS: [KeyCode; 26] = [
+        KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO,
+        KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ,
+    ];
+    const DIGITS: [KeyCode; 10] = [
+        Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
+    ];
+    const FKEYS: [KeyCode; 12] = [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12];
+    let name = name.to_ascii_lowercase();
+    Some(match name.as_str() {
+        "esc" | "escape" => Escape,
+        "enter" | "return" => Enter,
+        "space" => Space,
+        "tab" => Tab,
+        "shift" => ShiftLeft,
+        "ctrl" | "control" => ControlLeft,
+        "alt" => AltLeft,
+        "backspace" => Backspace,
+        "delete" => Delete,
+        "up" => ArrowUp,
+        "down" => ArrowDown,
+        "left" => ArrowLeft,
+        "right" => ArrowRight,
+        _ => match name.as_bytes() {
+            [c @ b'a'..=b'z'] => LETTERS[usize::from(c - b'a')],
+            [c @ b'0'..=b'9'] => DIGITS[usize::from(c - b'0')],
+            [b'f', n @ ..] => {
+                let n: usize = std::str::from_utf8(n).ok()?.parse().ok()?;
+                *FKEYS.get(n.checked_sub(1)?)?
+            }
+            _ => return None,
+        },
+    })
 }
 
 /// `Update`s without a tick before the bot counts its match as stalled
