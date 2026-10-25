@@ -393,6 +393,42 @@ fn ground_floor(hm: &Heightmap, p: Vec2) -> f32 {
         .fold(hm.sample(p.x, p.y), |m, q| m.det_max(hm.sample(q.x, q.y)))
 }
 
+/// The steepest the orbit tilts (rad above the ground plane) to look
+/// over a wall between the eye and the shot, the step it tilts by, and
+/// how fast it rises to that (per second; it settles back at [`EASE`]).
+const PITCH_MAX: f32 = 1.3;
+const PITCH_STEP: f32 = 0.05;
+const PITCH_RISE: f32 = 2.5;
+/// Points along the line from the shot to the eye that must clear the
+/// terrain.
+const SIGHT_SAMPLES: usize = 24;
+
+/// The shallowest pitch from `pitch` up to [`PITCH_MAX`] whose line of
+/// sight, from an eye `distance` away at `yaw` down to `focus`, clears
+/// the terrain. The generated maps' lanes run between walls taller than
+/// the eye stands over most shots (Circular Buffer's ring, Deadlock's
+/// corridors): at the shot's own pitch the camera showed the side of a
+/// wall instead of the fight behind it.
+fn clear_pitch(hm: &Heightmap, focus: Vec3, yaw: f32, distance: f32, pitch: f32) -> f32 {
+    let blocked = |p: f32| {
+        let horizontal = distance * ops::cos(p);
+        let eye = Vec3::new(
+            horizontal * ops::sin(yaw),
+            distance * ops::sin(p),
+            horizontal * ops::cos(yaw),
+        );
+        (1..=SIGHT_SAMPLES).any(|k| {
+            let q = focus + eye * (k as f32 / SIGHT_SAMPLES as f32);
+            hm.sample(q.x, q.z) + GROUND_CLEARANCE > q.y
+        })
+    };
+    let mut p = pitch;
+    while p < PITCH_MAX && blocked(p) {
+        p = (p + PITCH_STEP).det_min(PITCH_MAX);
+    }
+    p
+}
+
 /// The focus stays this fraction of the map in from its edges.
 const EDGE_INSET: f32 = 0.06;
 
@@ -641,8 +677,19 @@ pub(super) fn attract_camera(
     director.yaw_rate_now += (director.yaw_rate - director.yaw_rate_now) * ease;
     state.yaw += director.yaw_rate_now * dt;
     // A slight sway on top of the shot's pitch, so a long hold breathes.
-    let pitch = director.pitch + 0.03 * ops::sin(director.clock * 0.4);
-    state.pitch += (pitch - state.pitch) * ease;
+    let mut pitch = director.pitch + 0.03 * ops::sin(director.clock * 0.4);
+    let mut pitch_ease = ease;
+    if let Some(hm) = heightmap.as_deref() {
+        // Over a wall in the way, tilting up quickly.
+        let clear = clear_pitch(hm, state.focus, state.yaw, state.distance, pitch);
+        if clear > pitch {
+            pitch = clear;
+            if clear > state.pitch {
+                pitch_ease = (PITCH_RISE * dt).det_min(1.0);
+            }
+        }
+    }
+    state.pitch += (pitch - state.pitch) * pitch_ease;
     state.distance += (director.distance * zoom - state.distance) * ease;
 }
 
@@ -682,6 +729,30 @@ mod tests {
     }
 
     const BOUNDS: (Vec2, Vec2) = (Vec2::ZERO, Vec2::splat(4096.0));
+
+    #[test]
+    fn the_orbit_tilts_to_look_over_a_wall() {
+        // 1024 elmos square, flat at 0 but for a 400-tall wall along
+        // z = 640..704, between a shot at z = 300 and an eye looking
+        // from +z (yaw 0).
+        let n = 129;
+        let heights = (0..n * n)
+            .map(|i| {
+                if (80..=88).contains(&(i / n)) {
+                    400.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let hm = Heightmap::from_raw(heights, n, n);
+        let focus = Vec3::new(512.0, GROUND_CLEARANCE, 300.0);
+        let tilted = clear_pitch(&hm, focus, 0.0, 1000.0, 0.45);
+        assert!(tilted > 0.45 && tilted < PITCH_MAX, "{tilted}");
+        // From the other side nothing is in the way.
+        let pi = std::f32::consts::PI;
+        assert_eq!(clear_pitch(&hm, focus, pi, 1000.0, 0.45), 0.45);
+    }
 
     fn best(candidates: &[Interest]) -> Interest {
         *candidates
